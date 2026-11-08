@@ -1,0 +1,197 @@
+--- v002.md
++++ v003.md
+@@ -1,111 +1,112 @@
+ # XBrickMap
+-
+ Also called: eXtendedBrickMap
+-
+ ## Overview
+-XBrickMap is a space-skipping ray traversal algorithm for 3-level hierarchical voxel grids that uses $4^3$ occupancy bitmasks to perform hierarchical skips ($4^3$, $2^3$, $1^3$ cuboids) via bitwise tests [S1, unofficial]. It improves upon standard skipping by using tiled bitmasks to identify empty voxel sections and left-packs these bitmasks to omit empty bricks within sectors, saving memory [S1, unofficial]. It is distinguished from siblings like [MultiDDA](2204-hierarchical-voxel-traversal.md) by its specific 3-level sector/brick/voxel hierarchy and bitmask-based compression, and from [Tree64](6354-multi-level-grid-structures.md) by its fixed grid topology and lack of dynamic tree rebalancing [S1, unofficial].
+-
++XBrickMap is a space-partitioning ray traversal algorithm for 3-level hierarchical voxel grids that uses 4³ occupancy bitmasks to skip empty regions via bitwise tests [S1, unofficial]. It improves upon simpler skipping methods by using tiled bitmasks to perform hierarchical skips of 4³, 2³, and 1³ cuboids, while left-packing empty bricks within sectors to save memory [S1, unofficial]. It is distinguished from its sibling [Hierarchical Grid Traversal](2560-hierarchical-grid-traversal.md) by its specific use of compacted bitmasks for random access and its support for arbitrary in-place edits within bricks [S1, unofficial].
+ ## How it works
+-**Inputs:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, world bounds [G].
+-**Outputs:** Intersection distance or hit status [G].
++**Inputs and Outputs:**
++- Input: A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; a hierarchical voxel grid consisting of sectors, bricks, and voxels.
++- Output: The intersection point and material properties of the first non-transparent voxel hit by the ray.
+ 
+ **Data Structures:**
+-The hierarchy consists of three levels:
+-1.  **Sector:** The top-level container holding $4^3$ bricks [S1, unofficial].
+-2.  **Brick:** A block containing $8^3$ voxels [S1, unofficial].
+-3.  **Voxel:** The fundamental unit, stored as an 8-bit value [S1, unofficial].
+-
+-*   **Sector Layout:** A sector contains a list of bricks stored in a compacted array. Random access is enabled by using `popcnt` instructions to count the number of preceding entries at any given logical index, mapping it to the physical index in the compacted array [S1, unofficial].
+-*   **Bitmask Layout:** Sectors use $4^3$-bit occupancy masks to track brick presence for hierarchical skipping, while bricks use $8^3$-bit masks to track voxel presence [S1, unofficial].
+-*   **Sector Metadata:** 12 bytes per sector [S1, unofficial].
+-
+-**Algorithm Steps:**
+-1.  **Initialization:** Compute the initial step size for ray marching by intersecting the ray with the three front-facing planes of the current sector boundary [G].
+-2.  **Sector Traversal:** Determine which sector the ray is currently in and compute the initial logical brick index along the ray [G].
+-3.  **Brick Skipping (Hierarchical Skip):** Query the sector's bitmask for the current brick index. If the brick is empty, skip to the next logical brick index and advance the ray distance to the next brick boundary [S1, unofficial]. Use `popcnt` to map the logical brick index to the physical index in the compacted array [S1, unofficial].
+-4.  **Voxel Traversal:** If the brick is not empty, traverse the $8^3$ voxels within the brick. At each iteration, compute voxel positions by intersecting with the three front-facing cube planes, then query brickmap layers in order to determine the step size [S1, unofficial].
+-5.  **Biasing:** Bias intersection distances by a small epsilon to prevent infinite backtracking caused by floating-point precision limitations [S1, unofficial].
+-6.  **Iteration:** Repeat steps 2-5 until the ray exits the world or hits a non-transparent voxel [G].
+-
+-**Formulas:**
+-*   **Voxel Position:** $\mathbf{p} = \mathbf{o} + t \mathbf{d}$, where $t$ is the intersection distance with the front-facing plane [G].
+-*   **Physical Index:** $idx_{phys} = \text{popcount}(mask, idx_{log})$ [S1, unofficial].
+-*   **Step Size:** $\Delta t_i = \frac{1}{|d_i|}$ for axis $i$ [G].
++The hierarchy consists of three levels [S1, unofficial]:
++1.  **Sector:** The top-level container.
++2.  **Brick:** A $4^3$ (64 voxel) block within a sector.
++3.  **Voxel:** The leaf element, stored in $8^3$ chunks within the brick structure (Note: Source [S1, unofficial] states "each brick contains 8³ voxels" but also "4³ occupancy bitmasks" and "4³ bricks" in sectors. The table indicates "8³ bits per brick". We interpret the structure as: Sectors contain bricks. Bricks are $4^3$ logical units for skipping, but physically store $8^3$ voxels. The bitmask is $4^3$ bits).
++    -   *Correction based on [S1, unofficial] table:* The table lists "8³ bits per brick". The text says "4³ occupancy bitmasks". This implies the bitmask tracks $4^3$ sub-regions or the brick is logically $4^3$ for skipping but physically $8^3$ for storage. Let's stick to the explicit text: "4³ occupancy bitmasks" and "each brick contains 8³ voxels".
++    -   *Layout:*
++        -   **Sector:** Contains a list of bricks. Empty bricks are omitted via left-packing. The sector stores metadata to map indices.
++        -   **Brick:** Contains an $4^3$ (64-bit) occupancy bitmask. If a bit is 0, the corresponding sub-region is empty. The brick also contains the $8^3$ voxel data.
++        -   **Voxel:** 8-bit value (0 is transparent).
+ 
+ **Parameters:**
+-*   **Brick Size:** $8^3$ voxels [S1, unofficial].
+-*   **Sector Size:** Contains $4^3$ bricks [S1, unofficial].
+-*   **Bitmask Size:** $8^3$ bits per brick, $4^3$ bits per sector [S1, unofficial].
+-*   **Sector Overhead:** 12 bytes [S1, unofficial].
++-   Sector size: Not explicitly given in units, but contains $4^3$ bricks [S1, unofficial].
++-   Brick size: $8^3$ voxels [S1, unofficial].
++-   Bitmask size: $4^3$ bits per brick [S1, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Floating-Point Precision:** Floating-point limitations can cause infinite backtracking; this is worked around by biasing the intersection distances [S1, unofficial].
+-*   **Dynamic Edits:** Insertions and deletions may require reallocations at the sector level to make space for new bricks [S1, unofficial].
+-*   **Zero Direction Components:** Standard DDA division by zero when $d_i = 0$; handled by setting $\Delta t_i = \infty$ and $\Delta x_i = 0$ [G].
++**Steps:**
++1.  **Initialize Ray Marching:** Start at the ray origin. Compute initial intersection with the three front-facing planes of the root voxel/sector [S1, unofficial].
++2.  **Sector Traversal:** Determine which sector the ray is currently in.
++3.  **Brick Skipping (Hierarchical):**
++    -   Query the sector's data structure to find the bricks in the current path.
++    -   Use the $4^3$ occupancy bitmask of each brick.
++    -   Perform bitwise tests on the bitmask to identify empty sub-cuboids ($4^3, 2^3, 1^3$) [S1, unofficial].
++    -   If a sub-cuboid is empty, skip it entirely.
++    -   Use `popcnt` (population count) instructions to count preceding entries for random access to the next non-empty brick or voxel [S1, unofficial].
++4.  **Voxel Traversal:**
++    -   Once a non-empty brick/sub-region is identified, march through the $8^3$ voxels.
++    -   Intersect the ray with the three front-facing cube planes of the current voxel to compute the step size [S1, unofficial].
++    -   Query the voxel data. If non-zero, return the hit.
++5.  **Iteration:** Repeat steps 2-4 until the ray exits the grid or hits a surface.
+ 
+ **Pseudocode:**
+ ```python
+-def traverse_xbricmap(ray_origin, ray_direction, world):
+-    # 1. Initialize DDA parameters (handles d_i = 0 to prevent ZeroDivisionError)
+-    inv_dir = [1.0 / d if d != 0.0 else float('inf') for d in ray_direction]
+-    step = [1.0 if d >= 0.0 else -1.0 for d in ray_direction]
+-    t_delta = [abs(inv_dir[i]) for i in range(3)]
++def traverse_xbrickmap(ray_origin, ray_direction, grid):
++    # Initialize ray marching parameters
++    t = 0.0
++    # Bias distance to avoid floating-point infinite backtracking [S1, unofficial]
++    t += BIAS 
+     
+-    # Initial intersection with sector boundary
+-    t_max = [((step[i] * (world.sector_size - 0.5) - ray_origin[i]) * inv_dir[i]) if inv_dir[i] != float('inf') else float('inf') for i in range(3)]
+-    t_min = min(t_max)
++    current_sector = get_sector_at(ray_origin, grid)
+     
+-    current_sector = world.get_sector(ray_origin, ray_direction)
+-    current_brick_log = world.get_brick_index(current_sector, ray_origin, ray_direction)
+-    
+-    while t_min < world.max_distance:
+-        # 2. Map logical brick index to physical index using popcount
+-        current_brick_phys = current_sector.bitmask.popcount(current_brick_log)
+-        if current_brick_phys >= len(current_sector.bricks):
+-            break
+-            
+-        brick = current_sector.bricks[current_brick_phys]
+-        if brick.is_empty:
+-            current_brick_log += 1
+-            t_min = advance_to_next_boundary(current_sector, current_brick_log, ray_origin, ray_direction, t_delta, step)
++    while t < grid.max_distance:
++        # Determine current brick within the sector
++        # Use ray-plane intersection for front-facing planes [S1, unofficial]
++        voxel_pos = compute_voxel_position(ray_origin, ray_direction, t)
++        
++        # Query brickmap layers to determine step size [S1, unofficial]
++        # This involves checking the occupancy bitmask
++        brick = get_brick_at(voxel_pos, current_sector)
++        
++        if brick is None:
++            # Sector/Brick empty, skip using bitmask logic
++            t = skip_empty_region(ray_origin, ray_direction, brick.occupancy_mask, t)
+             continue
+             
+-        # 3. Traverse voxels within the brick
+-        t_voxel = t_min
+-        voxel_pos = ray_origin + t_voxel * ray_direction
+-        while t_voxel < t_min + brick.size:
+-            if voxel_pos != 0:
+-                return t_voxel, voxel_pos
+-            t_voxel += min(t_delta)
+-            voxel_pos = ray_origin + t_voxel * ray_direction
+-            # Bias to prevent infinite backtracking due to FP errors
+-            t_voxel += 1e-6
++        # Check occupancy mask for sub-cuboids
++        # Use popcnt for random access if needed to find next valid block
++        if is_empty(brick.occupancy_mask, voxel_pos):
++            t = skip_sub_cuboid(ray_origin, ray_direction, brick.occupancy_mask, t)
++            continue
+             
+-        current_brick_log += 1
+-        t_min = advance_to_next_boundary(current_sector, current_brick_log, ray_origin, ray_direction, t_delta, step)
++        # Traverse voxels within the brick
++        voxel = get_voxel_at(voxel_pos, brick)
+         
+-    return None
++        if voxel.is_transparent():
++            # Step to next voxel
++            t += compute_step_size(ray_origin, ray_direction, voxel_pos)
++        else:
++            return hit(ray_origin, ray_direction, t, voxel)
++            
++    return NO_HIT
++```
+ 
+-def advance_to_next_boundary(sector, brick_log, origin, direction, t_delta, step):
+-    # Compute distance to the next sector/brick boundary along the ray
+-    next_brick_pos = brick_log * sector.brick_size
+-    t_max = [((step[i] * (next_brick_pos + sector.brick_size - 0.5) - origin[i]) * direction[i]) if direction[i] != 0.0 else float('inf') for i in range(3)]
+-    return min(t_max)
+-```
++**Edge Cases and Pitfalls:**
++-   **Floating-point precision:** Can cause infinite backtracking. Workaround: Bias intersection distances [S1, unofficial].
++-   **Dynamic Edits:** Supports arbitrary edits within a brick. However, insertions and deletions may require reallocations at the sector level to make space for new bricks [S1, unofficial].
++-   **Memory Layout:** Left-packing of empty bricks requires careful index mapping using `popcnt` [S1, unofficial].
+ 
+ ## Subtopics
+ 
++### [Ray-guided streaming with atomic bitfield marking](10274-ray-guided-streaming-with-atomic-bitfield-marking.md)
++This method tracks which finest-level brick cells have been visited by rays to enable selective streaming and refinement, preventing redundant data transfers when multiple rays share a cell [10274-ray-guided-streaming-with-atomic-bitfield-marking.md]. It differs from XBrickMap by adding a runtime occupancy buffer that complements the static hierarchical skipping with dynamic visitation history [10274-ray-guided-streaming-with-atomic-bitfield-marking.md].
++
+ ### Two-Level Voxel Grid with Solid Color Optimization
+-A data structure storing voxels in a two-level hierarchy (coarse 128³ top-level grid pointing to 8³ voxel bricks) for a total world resolution of 1024³ [S2, unofficial]. It optimizes memory and traversal by allowing grid cells to store a solid color (3-3-2 RGB) instead of a pointer to a brick, which is useful for large uniform areas [S2, unofficial]. A top-level grid cell is a 32-bit value: bit 0 is 0 for solid color (bits 1-31 store color) and 1 for a brick pointer (bits 1-31 store brick index) [S2, unofficial]. Value 0 represents a transparent solid color, allowing the grid to be cleared with `memset(0)` [S2, unofficial]. Each voxel in a brick is an 8-bit value (0 transparent, non-zero 3-3-2 RGB) [S2, unofficial]. Memory: 8MB for the top-level grid, up to 1GB for bricks [S2, unofficial].
++A data structure storing voxels in a two-level hierarchy to optimize ray traversal and memory usage [S2, unofficial]. It consists of a coarse $128^3$ top-level grid pointing to $8^3$ voxel bricks, resulting in a total world resolution of $1024^3$ [S2, unofficial].
++-   **Layout:** Top-level grid cell is a 32-bit value. Bit 0 determines type: 0 indicates solid color (bits 1-31 store color), 1 indicates pointer to brick (bits 1-31 store brick index) [S2, unofficial]. Value 0 represents transparent solid color [S2, unofficial].
++-   **Voxel Storage:** Each voxel in a brick is 8-bit. 0 is transparent. Non-zero is 3-3-2 RGB triplet [S2, unofficial].
++-   **Memory:** Top-level grid is 8MB ($128^3 \times 4$ bytes). Max brick memory is 1GB ($128^3$ unique bricks $\times 8^3$ voxels $\times 1$ byte) [S2, unofficial].
++-   **Pitfall:** Initializing the world to empty/transparent is done via `memset(0)` because 0 is a valid transparent solid color [S2, unofficial].
+ 
+ ## Operating characteristics
+-**Time Complexity:** Approximately $O(1)$ per step, as it supports space skipping [S1, unofficial].
+-**Memory Complexity:** $8^3$ bits per brick + 12 bytes per sector [S1, unofficial].
+-**Performance:** On the Sponza 2k scene, XBrickMap achieves 165.6 Mrays/s for primary rays and 125.1 Mrays/s for primary + 1 diffuse bounce [S1, unofficial]. On the Forest Lake 2k scene (807k * $8^3$ voxels), it is not explicitly listed in the provided table, but PlainDDA is 23.6 Mrays/s and MultiDDA is 60.6 Mrays/s [S1, unofficial]. XBrickMap is generally faster than DDA-based methods due to space skipping [S1, unofficial].
+-**Strengths:** Good performance relative to simplicity; supports arbitrary edits within a brick; compact memory usage due to left-packing [S1, unofficial].
+-**Limitations:** Insertions/deletions may require sector-level reallocations; floating-point precision issues require biasing; performance on incoherent rays may be 30-50% worse than coherent rays [S1, unofficial].
++-   **Time Complexity:** Approximately $O(1)$ per step, though dependent on the density of non-empty regions [S1, unofficial].
++-   **Memory Complexity:** 8³ bits per brick + 12 bytes per sector [S1, unofficial].
++-   **Performance:** On the Sponza 2k scene, XBrickMap achieves 165.6 Mrays/s for primary rays and 125.1 Mrays/s for primary + 1 diffuse bounce [S1, unofficial].
++-   **Strengths:** Good performance relative to simplicity; supports arbitrary edits within bricks; efficient space skipping via bitwise operations [S1, unofficial].
++-   **Limitations:** Insertions/deletions may require sector-level reallocations; floating-point precision issues require biasing; performance on incoherent rays is ~30-50% worse than coherent rays but still worse than other space-partitioning methods [S1, unofficial].
++-   **When to use:** When random access and in-place editing of voxel data are required, and the scene has significant empty space to skip [S1, unofficial].
++-   **When not to use:** When the scene is highly dense with no empty space, or when dynamic topology changes are frequent and costly reallocations are unacceptable [S1, unofficial].
+ 
+ ## Background
+-XBrickMap was developed by Thijs van Wingerden as part of a thesis on "Voxel Rendering and Editing of Large Voxel Scenes" [S1, unofficial]. It is implemented in the VoxelRT project [S1, unofficial]. The method builds on the concept of brick maps, which were previously used in real-time path tracing [S1, unofficial].
++XBrickMap was developed as part of the VoxelRT project by Thijs van Wingerden and Stijn Herfst [S1, unofficial]. It is described in the thesis "VoxelRT: Visualization and Editing of Large Voxel Scenes" [S1, unofficial]. The method builds on earlier brick map concepts and aims to provide a high-performance realtime CUDA voxel path tracer [S1, unofficial]. It is designed to handle large voxel scenes with efficient space skipping and dynamic editing capabilities.
+ 
+ ## Sources

@@ -1,0 +1,135 @@
+# RoofGS
+
+Also called: Roofline-Guided End-to-End Acceleration of 3D Gaussian Splatting
+
+## Overview
+RoofGS is an end-to-end acceleration method for 3D Gaussian Splatting (3DGS) that optimizes the rendering pipeline by matching specific software techniques to the dominant hardware constraints of each stage [S1, unofficial]. It distinguishes itself from sibling methods by applying a global Roofline analysis to guide a stage-specific optimization principle: bandwidth-limited stages prioritize reductions in global memory traffic, whereas compute-intensive stages prioritize lower instruction cost and increased instruction-level parallelism (ILP) [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** 3D Gaussian primitives (position, covariance, spherical harmonic coefficients, opacity), camera parameters, and image resolution.
+*   **Output:** Rendered image and gradients for training.
+
+**Data Structures:**
+*   **Gaussian Attributes:** Compressed to reduce memory footprint. For third-degree Spherical Harmonics ($D_{SH}=3$), the baseline requires 192 bytes per Gaussian (48 coefficients $\times$ 4 bytes) [S1, unofficial]. RoofGS uses low-bit quantization with a single shared scale for all SH coefficients [S1, unofficial].
+*   **Sorting Keys:** A dynamic 32-bit key packing tile index and quantized depth, replacing standard 64-bit or larger keys to reduce memory bandwidth during sorting [S1, unofficial].
+
+**Method Steps:**
+The pipeline is divided into two optimization phases based on Roofline analysis [S1, unofficial].
+
+1.  **Memory-Bound Optimization (Front-End):**
+    *   **Compact Attribute Storage:** Quantize SH coefficients and geometric attributes to reduce global memory traffic [S1, unofficial].
+    *   **Dynamic Depth-Key Compression:** Pack tile index and quantized depth into a single 32-bit key for radix sort [S1, unofficial].
+    *   **Cross-Stage Kernel Fusion:** Fuse preprocessing, tile duplication, and key generation into a single kernel to eliminate intermediate global memory writes [S1, unofficial].
+
+2.  **Compute-Bound Optimization (Rasterization):**
+    *   **Dual-Pixel ILP:** Reformulate per-pixel Gaussian evaluation to process two adjacent pixels simultaneously, increasing instruction-level parallelism [S1, unofficial].
+    *   **Fast Exponential Evaluation:** Replace the standard exponential operation in the alpha blending loop with a bit-level approximation tailored to alpha-thresholded blending [S1, unofficial].
+
+**Formulas:**
+The performance bound is defined by the Roofline model [S1, unofficial]:
+$$P = \min(P_{\text{peak}}, BW \cdot I)$$
+where $P$ is achievable performance, $P_{\text{peak}}$ is peak compute throughput, $BW$ is memory bandwidth, and $I$ is arithmetic intensity ($I = F/B$, operations divided by data movement) [S1, unofficial].
+
+The Gaussian power (exponent term) for a pixel $(x, y)$ relative to a Gaussian center $(u, v)$ is [S1, unofficial]:
+$$p(x, y) = -\frac{1}{2} \left( a(x - w)^2 + b(x - u)(y - v) + c(y - v)^2 \right)$$
+where $a, b, c$ are derived from the projected 2D covariance matrix and $w$ is a typo in the source for $u$ (context implies center coordinate) [S1, unofficial]. *Note: The source formula uses $w$ in the first term but $u$ in the second; standard Gaussian formulation uses the same center coordinate. We retain the source's notation but note the likely intent.*
+
+The unclamped opacity contribution is [S1, unofficial]:
+$$\tilde{\alpha}(x, y) = o \exp(p(x, y))$$
+where $o$ is the base opacity [S1, unofficial].
+
+**Parameters:**
+*   **FP32-DRAM Balance Point ($I_{\text{knee}}$):** On NVIDIA RTX 4090, $I_{\text{knee}} \approx 81.9$ FLOPS/Byte [S1, unofficial].
+    $$I_{\text{knee}} = \frac{82.6 \text{ TFLOPS}}{1008 \text{ GB/s}} \approx 81.9 \text{ FLOPS/Byte}$$
+*   **SH Degree:** $D_{SH}=3$ is the standard reference for attribute size calculations [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def roofgs_render(gaussians, camera, image_width, image_height):
+    # Phase 1: Memory-Bound Optimization (Front-End)
+    
+    # 1. Compact Attribute Storage
+    # Quantize SH coefficients with a single shared scale
+    # Reduce memory bandwidth demand for appearance attributes
+    compressed_gaussians = quantize_sh_attributes(gaussians, scale_factor=shared_scale)
+    
+    # 2. Dynamic Depth-Key Compression
+    # Pack tile index and quantized depth into 32-bit key
+    # Reduces memory traffic during sorting
+    keys = pack_tile_depth_key(compressed_gaussians, camera, image_width, image_height)
+    
+    # 3. Cross-Stage Kernel Fusion
+    # Fuse preprocessing, tile duplication, and key generation
+    # Eliminates intermediate global memory writes
+    sorted_gaussians = fused_preprocess_sort(compressed_gaussians, keys)
+    
+    # Phase 2: Compute-Bound Optimization (Rasterization)
+    
+    # Initialize output buffers
+    color_buffer = zeros((image_height, image_width, 3))
+    alpha_buffer = zeros((image_height, image_width, 1))
+    
+    # 4. Rasterization Reorganization for Dual-Pixel ILP
+    # Process two adjacent pixels simultaneously to increase ILP
+    for tile in tiles:
+        gaussians_in_tile = sorted_gaussians[tile]
+        
+        # Iterate over pixels in tile, processing pairs (x, x+1)
+        for y in range(tile.y_start, tile.y_end):
+            for x in range(tile.x_start, tile.x_end - 1, 2):
+                
+                # Evaluate Gaussian power for pixel (x, y)
+                p_xy = evaluate_gaussian_power(gaussians_in_tile, x, y)
+                
+                # Evaluate Gaussian power for pixel (x+1, y)
+                p_x1y = evaluate_gaussian_power(gaussians_in_tile, x + 1, y)
+                
+                # Fast Exponential Evaluation
+                # Replace standard exp() with bit-level approximation
+                alpha_xy = fast_exp_approx(p_xy) * gaussians_in_tile.opacity
+                alpha_x1y = fast_exp_approx(p_x1y) * gaussians_in_tile.opacity
+                
+                # Alpha Blending for both pixels
+                color_buffer[y, x] = blend_color(color_buffer[y, x], gaussians_in_tile.color, alpha_xy)
+                alpha_buffer[y, x] = blend_alpha(alpha_buffer[y, x], alpha_xy)
+                
+                color_buffer[y, x + 1] = blend_color(color_buffer[y, x + 1], gaussians_in_tile.color, alpha_x1y)
+                alpha_buffer[y, x + 1] = blend_alpha(alpha_buffer[y, x + 1], alpha_x1y)
+                
+    return color_buffer, alpha_buffer
+
+def evaluate_gaussian_power(gaussians, x, y):
+    # p(x, y) = -0.5 * (a*(x-u)^2 + b*(x-u)*(y-v) + c*(y-v)^2)
+    # Note: Source uses 'w' in first term, assumed to be 'u' (center x)
+    u, v = gaussians.center_x, gaussians.center_y
+    a, b, c = gaussians.covariance_elements
+    return -0.5 * (a * (x - u)**2 + b * (x - u) * (y - v) + c * (y - v)**2)
+
+def fast_exp_approx(p):
+    # Bit-level approximation tailored to alpha-thresholded blending
+    # Implementation detail not fully specified in source; replaces exp(p)
+    # [G] Typically involves lookup tables or polynomial approximations
+    # for performance in compute-bound stages.
+    return approx_exp(p)
+```
+
+## Subtopics
+
+### Roofline-guided stage-wise optimization
+A methodology that uses stage-wise performance characterization to match optimization strategies to the dominant hardware constraints of the baseline pipeline [S1, unofficial]. It reduces intermediate data movement in the front end and reduces arithmetic overhead in rasterization [S1, unofficial]. Stages far below the knee point ($I_{\text{knee}}$) are generally more sensitive to memory traffic, whereas stages closer to it benefit more from compute optimizations [S1, unofficial].
+
+## Operating characteristics
+*   **Hardware:** Evaluated on NVIDIA RTX 4090 GPU [S1, unofficial].
+*   **Performance Metrics:** The FP32-DRAM balance point is approximately 81.9 FLOPS/Byte [S1, unofficial].
+*   **Strengths:** Reduces dominant global memory traffic in bandwidth-bound stages and lowers arithmetic overhead in compute-bound rasterization [S1, unofficial].
+*   **Limitations:** Relies on specific hardware characteristics (e.g., RTX 4090 balance point) for optimal parameter tuning [S1, unofficial].
+*   **When to use:** When end-to-end 3DGS rendering performance is bottlenecked by either memory bandwidth (front-end) or arithmetic throughput (rasterization) [S1, unofficial].
+
+## Background
+RoofGS was introduced in the paper "RoofGS: Roofline-Guided End-to-End Acceleration of 3D Gaussian Splatting" [S1, unofficial]. It builds on prior roofline analyses of 3DGS [13, 43, 44] which identified the rasterization stage as compute-bound [S1, unofficial]. The method applies general Roofline analysis principles [42] to the specific context of 3DGS rendering [S1, unofficial].
+
+## Sources
+[S1] RoofGS: Roofline-Guided End-to-End Acceleration of 3D Gaussian Splatting, https://arxiv.org/abs/2608.15785, fetched 2026-10-29 (unofficial)

@@ -1,9 +1,9 @@
 # Naive Voxel Rendering
 
-Also called: Rasterization without LODs, VoxelShader::render
+Also called: Cuboid-based Volume Rendering, Rasterization without LODs, Voxel Cuboid Rendering, VoxelShader::render
 
 ## Overview
-Naive Voxel Rendering is an object-order volume rendering technique that represents every occupied voxel in a dense grid as a full geometric cube (or visible faces thereof) and submits these primitives to the graphics pipeline for rasterization [S1, S3, S4, unofficial]. It solves the problem of visualizing scalar field data by converting it directly into mesh geometry, differing from image-order ray-casting methods by projecting geometry into screen space rather than sampling rays through the volume [S2, unofficial]. Unlike optimized variants such as [Sparse Voxel Rasterization](3032-sparse-voxel-rasterization.md) or [SVO LOD Management](2990-svo-lod-management.md), this method generates primitives for all voxels without Level of Detail (LOD) reduction or greedy meshing, resulting in massive vertex counts for large scenes [S1, S4, unofficial].
+Naive Voxel Rendering is an object-order volume rendering technique that represents every occupied voxel in a dense grid as a full geometric cube and submits these primitives to the graphics pipeline for rasterization [S1, S3, S4, unofficial]. It visualizes scalar field data by converting it directly into mesh geometry, differing from image-order ray-casting methods by projecting geometry into screen space rather than sampling rays through the volume [G]. Unlike optimized variants such as [Sparse Voxel Rasterization](3032-sparse-voxel-rasterization.md) or [SVO LOD Management](2990-svo-lod-management.md), this method generates primitives for all voxels without Level of Detail (LOD) reduction or greedy meshing, resulting in massive vertex counts for large scenes [S1, S4, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
@@ -11,10 +11,10 @@ Naive Voxel Rendering is an object-order volume rendering technique that represe
 - **Output:** A rasterized 2D image on the screen, determined by the depth buffer (z-buffer) for opaque voxels or a back-to-front painter's algorithm for transparency [S2, S3, unofficial].
 
 **Data Structures:**
-The core data structure is a list of occupied voxel coordinates. In its simplest form, this is a `HashSet<IVec3>` storing integer grid indices $(i, j, k)$ [S3, unofficial]. For implementations requiring per-voxel attributes (color, normal), a flat array or interleaved buffer is used.
-- **Vertex Buffer Layout:** Vertices are stored in a linear array (e.g., `std::vector<GLfloat>`) in triangle-strip-like order. Each voxel generates 6 faces. Each face consists of 2 triangles (6 vertices). Total vertices per voxel = 36 [S4, unofficial].
-- **Normal Buffer:** Normals are stored separately or interleaved. For 6 faces $\times$ 6 vertices, there are 36 normal entries (3 floats each) [S4, unofficial].
-- **Color Buffer:** Colors are associated with triangles. For 6 faces $\times$ 2 triangles, there are 12 color entries (3 floats each: R, G, B), assuming flat shading per triangle [S4, unofficial].
+The core data structure is a list of occupied voxel coordinates, typically stored in a `HashSet<IVec3>` or a flat array [S3, S4, unofficial]. For implementations requiring per-voxel attributes (color, normal), a flat array or interleaved buffer is used [G].
+- **Vertex Buffer Layout:** Vertices are stored in a `std::vector<GLfloat>` in interleaved order for 6 faces. Each face has 6 vertices (2 triangles). The order for the 'front' face (Z+) is: (-,-,+), (-,+,+), (+,+,+), (-,-,+), (+,-,+), (+,+,+) [S4, unofficial].
+- **Normal Buffer:** Normals are stored in a separate `std::vector<GLfloat>` with 108 entries (3 floats per vertex × 6 vertices per face × 6 faces) [S4, unofficial].
+- **Color Buffer:** Colors are associated with triangles. For 6 faces × 2 triangles, there are 12 color entries (3 floats each: R, G, B), assuming flat shading per triangle [S4, unofficial].
 
 **Coordinate Transformation:**
 Voxel indices $(i, j, k)$ are transformed into world space. For a dense grid with bounds $P_{min}$ and $P_{max}$ and dimension $N_{dim}$, the world position $P_{world}$ of a voxel center is calculated as [S4, unofficial]:
@@ -24,54 +24,44 @@ $$
 For unit voxels ($V_{size}=1.0$), this simplifies to $P_{world} = I_{voxel} \times V_{size}$ [S2, S4, unofficial]. The vertex positions for a cube centered at $P_{world}$ are offset by $\pm VoxelHalfSize$ (typically 0.5) [S4, unofficial].
 
 **Numbered Steps:**
-1.  **Initialization:** Load voxel data into a CPU-side structure (e.g., `HashSet` or array) [S3, S4, unofficial]. If using GPU-accelerated updates, pull volume texture data from GPU to CPU [S5, unofficial].
-2.  **Iteration:** Iterate through all voxel coordinates $(x, y, z)$ in the grid [S3, S4, unofficial].
-3.  **Culling (Frustum):** Check if the voxel's world position is within the camera's frustum. If the voxel's Y coordinate (or bounding box) exceeds the frustum border, skip rendering [S2, unofficial].
-4.  **Culling (Back-face):** If enabled, calculate the view-space normal. Compute the dot product between the view-space normal and the vector from the voxel to the camera (view-space origin). If the dot product is $< 0$, the face is back-facing and is discarded [S2, unofficial].
-5.  **Geometry Generation:** For each active voxel, generate 36 vertices representing 6 faces.
-    -   Calculate vertex positions in local space relative to the voxel center.
-    -   Transform positions to world space using the voxel's grid coordinates and voxel size [S4, unofficial].
-    -   Transform world positions to view space using the Model-View (MV) matrix [S2, unofficial].
-    -   Transform view positions to clip space using the Projection (P) matrix [S2, unofficial].
-    -   Emit vertices with texture coordinates (e.g., $(0,0), (1,0), (0,1), (1,1)$ for quads) [S2, unofficial].
-6.  **Rasterization:** Submit the generated primitives to the graphics pipeline. The depth buffer resolves visibility for opaque voxels [S2, S3, unofficial].
-7.  **Update (Optional):** If dynamic, re-upload updated voxel positions and data to GPU buffers [S5, unofficial].
+1. **Initialization:** Load voxel data into a CPU-side structure (e.g., `HashSet` or array) [S3, S4, unofficial]. If using GPU-accelerated updates, pull volume texture data from GPU to CPU [S5, unofficial].
+2. **Iteration:** Iterate through all voxel coordinates $(x, y, z)$ in the grid [S3, S4, unofficial].
+3. **Frustum Culling:** Check if the voxel's world position exceeds the camera's frustum border (e.g., Y coordinate check); if so, skip rendering [S2, unofficial].
+4. **Back-face Culling:** If `cullInvisibleFaces` is enabled, calculate the view-space normal. Compute the dot product between the view-space normal and the vector from the voxel to the camera (view-space origin). If the result is $< 0$, the face is back-facing and is discarded [S2, unofficial].
+5. **Geometry Generation:** For each active voxel, generate 36 vertices representing 6 faces. Calculate vertex positions in local space relative to the voxel center, transform to world space using grid coordinates and voxel size [S4, unofficial], transform to view space using the Model-View (MV) matrix [S2, unofficial], then to clip space using the Projection (P) matrix [S2, unofficial]. Emit vertices with texture coordinates [S2, unofficial].
+6. **Rasterization:** Submit the generated primitives to the graphics pipeline. The depth buffer resolves visibility for opaque voxels [S2, S3, unofficial].
+7. **Update:** If dynamic, re-upload updated voxel positions and data to GPU buffers [S5, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_naive_voxels(voxels: List[Voxel], mv_matrix: Matrix, p_matrix: Matrix, frustum: Frustum):
+def render_naive_voxels(voxels: List[Voxel], mv_matrix: Matrix, p_matrix: Matrix, frustum: Frustum, cull_invisible_faces: bool = True):
     """
     Renders a list of voxels as individual cubes.
     voxels: List of objects with attributes: x, y, z (grid coords), color (r,g,b), active (bool)
-    mv_matrix: Model-View matrix
-    p_matrix: Projection matrix
+    mv_matrix: Model-View matrix (4x4)
+    p_matrix: Projection matrix (4x4)
     frustum: Object with method contains(position) -> bool
     """
-    # Pre-calculate inverse dimensions for world space conversion if not pre-computed
-    # Assuming unit voxels for simplicity, scale can be applied later
     voxel_size = 1.0
     half_size = 0.5
-    
-    # Vertex buffer accumulation
     vertices = []
     colors = []
-    
+
     for voxel in voxels:
         if not voxel.active:
             continue
-            
+
         # 1. Frustum Culling
         world_pos = vec3(voxel.x * voxel_size, voxel.y * voxel_size, voxel.z * voxel_size)
         if not frustum.contains(world_pos):
             continue
-            
-        # 2. Transform to View Space
-        view_pos = mv_matrix * vec4(world_pos, 1.0)
-        
+
+        # 2. Transform center to view space
+        view_center = mv_matrix * vec4(world_pos, 1.0)
+
         # 3. Generate Cube Geometry (6 faces, 2 triangles each, 6 vertices per face)
-        # Face definitions: normal, 4 corners (local space)
         faces = [
             (vec3(0, 0, 1), [(-half_size, -half_size, half_size), (half_size, -half_size, half_size), (half_size, half_size, half_size), (-half_size, half_size, half_size)]), # Front
             (vec3(0, 0, -1), [(half_size, -half_size, -half_size), (-half_size, -half_size, -half_size), (-half_size, half_size, -half_size), (half_size, half_size, -half_size)]), # Back
@@ -80,72 +70,60 @@ def render_naive_voxels(voxels: List[Voxel], mv_matrix: Matrix, p_matrix: Matrix
             (vec3(1, 0, 0), [(half_size, -half_size, half_size), (half_size, -half_size, -half_size), (half_size, half_size, -half_size), (half_size, half_size, half_size)]), # Right
             (vec3(-1, 0, 0), [(-half_size, -half_size, -half_size), (-half_size, -half_size, half_size), (-half_size, half_size, half_size), (-half_size, half_size, -half_size)])  # Left
         ]
-        
-        # Back-face culling check (optional, per face)
-        # Calculate view-space normal
-        view_normal = normalize((mv_matrix * vec4(voxel_face_normal, 0.0)).xyz)
-        view_vector = normalize(-view_pos.xyz) # Vector from voxel to camera
-        if dot(view_normal, view_vector) < 0:
-            continue # Skip back-facing face
-            
-        # Add vertices for this face
-        # Two triangles per quad: (0,1,2) and (0,2,3)
-        tri_indices = [(0, 1, 2), (0, 2, 3)]
-        
-        for tri in tri_indices:
-            for idx in tri:
-                local_v = faces[face_idx][1][idx]
-                # World position = View position + local offset transformed by inverse rotation?
-                # Simpler: Transform local vertex to world, then to view, then to clip
-                # But since we already have view_pos of center, we can add rotated local offset
-                # For axis-aligned cubes, rotation is identity in world, but MV matrix handles it.
-                # Correct approach: Transform local vertex to world, then apply MV.
-                world_v = world_pos + local_v
-                view_v = mv_matrix * vec4(world_v, 1.0)
-                clip_v = p_matrix * view_v
-                
-                # Perspective divide for NDC is done by hardware, but we store clip coords
-                vertices.append(clip_v.xyz / clip_v.w) # Store NDC for simplicity in this pseudocode, or store clip coords
-                colors.append(voxel.color)
-                
+
+        for face_normal_local, corners in faces:
+            # Back-face culling
+            if cull_invisible_faces:
+                view_normal = normalize(mv_matrix * vec4(face_normal_local, 0.0))
+                view_vector = normalize(-view_center.xyz)
+                if dot(view_normal, view_vector) < 0:
+                    continue
+
+            # Two triangles per quad: (0,1,2) and (0,2,3)
+            tri_indices = [(0, 1, 2), (0, 2, 3)]
+            for tri in tri_indices:
+                for idx in tri:
+                    local_v = corners[idx]
+                    # Transform local vertex to world, then to view, then to clip
+                    world_v = world_pos + local_v
+                    view_v = mv_matrix * vec4(world_v, 1.0)
+                    clip_v = p_matrix * view_v
+                    # Store clip coordinates (hardware performs perspective divide)
+                    vertices.append(clip_v.xyz)
+                    colors.append(voxel.color)
+
     # Upload vertices and colors to GPU buffers
     # Draw call with vertex count
     pass
 ```
-*Note: The pseudocode above simplifies the transformation pipeline. In practice, vertices are generated in world space, transformed by MV, then P, and emitted. The back-face culling logic in the loop is a per-face optimization [S2, unofficial].*
 
 **Parameters:**
--   **VoxelSize:** Physical size of a voxel in world units. Default: 1.0f [S4, unofficial].
--   **VoxelHalfSize:** Half of VoxelSize. Default: 0.5f [S4, unofficial].
--   **CullInvisibleFaces:** Boolean flag to enable back-face culling. Default: True [S2, unofficial].
+- **VoxelSize:** Physical size of a voxel in world units. Default: 1.0f [S4, unofficial].
+- **VoxelHalfSize:** Half of VoxelSize. Default: 0.5f [S4, unofficial].
+- **CullInvisibleFaces:** Boolean flag to enable back-face culling. Default: True [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
--   **Performance:** Performance degrades quadratically or worse with scene size because every voxel generates 36 vertices. Increasing platform size from 32x32 to 64x64 increases vertex count by 16x [S3, unofficial].
--   **No Adjacency Culling:** The engine does not cull faces hidden by adjacent voxels. Every voxel generates full geometry regardless of neighbors, leading to high vertex buffer overhead [S4, unofficial].
--   **Precision:** Using integer grid indices (`IVec3`) ensures alignment but requires careful conversion to floating-point world coordinates [S3, unofficial].
+- **Performance:** Performance degrades quadratically or worse with scene size because every voxel generates 36 vertices. Increasing platform size from 32x32 to 64x64 increases vertex count by 16x [S3, unofficial].
+- **No Adjacency Culling:** The engine does not cull faces hidden by adjacent voxels. Every voxel generates full geometry regardless of neighbors, leading to high vertex buffer overhead [S4, unofficial].
+- **Precision:** Using integer grid indices (`IVec3`) ensures alignment but requires careful conversion to floating-point world coordinates [S3, unofficial].
+- **Memory Limits:** Extremely slow and memory intensive; can crash the kernel or cause swapping issues with large datasets [S6, unofficial].
 
 ## Subtopics
 
 ### [Per-voxel Projection (Object-order)](1816-per-voxel-projection-object-order.md)
 Optimized for Maximum Intensity Projection (MIP) by sorting voxels by value and overwriting pixels, avoiding depth buffer complexity. Choose when visualizing density/maximums rather than surface geometry.
 
-### [Sparse Voxel Rasterization](3032-sparse-voxel-rasterization.md)
-Uses spatial acceleration structures (like SVOs) to only rasterize visible/occupied voxels. Choose for large, sparse datasets where naive rendering is too slow.
-
-### [SVO LOD Management](2990-svo-lod-management.md)
-Implements Level of Detail for Sparse Voxel Octrees. Choose when rendering very large volumes at varying distances.
-
 ## Operating characteristics
--   **Time Complexity:** $O(V)$, where $V$ is the number of voxels. Each voxel requires constant-time geometry generation and submission [S3, S4, unofficial].
--   **Memory Complexity:** $O(V)$ for vertex buffers. Each voxel consumes 36 vertices $\times$ 3 floats $\times$ 4 bytes = 432 bytes for positions alone, plus normals and colors [S4, unofficial].
--   **Measured Performance:** On a 32x32x1 platform, naive rendering is feasible. On larger scales (e.g., 1k³ resolution), it generates nearly a million quads, causing significant CPU-GPU bandwidth bottlenecks due to frequent buffer uploads [S1, S3, unofficial].
--   **Strengths:** Simple implementation; no complex spatial data structures required; works well for small, dense scenes or debugging [S4, unofficial].
--   **Limitations:** Extremely inefficient for large scenes; no LOD; no occlusion culling between adjacent voxels; high draw call overhead if not instanced [S1, S3, S4, unofficial].
--   **When to Use:** Small voxel art scenes, educational purposes, or as a baseline for comparison [S4, unofficial].
--   **When Not to Use:** Large-scale volumetric visualization, real-time applications with high voxel counts, or sparse datasets [S1, S3, S4, unofficial].
+- **Time Complexity:** $O(V)$, where $V$ is the number of voxels. Each voxel requires linear-time geometry generation and submission relative to the grid size [S3, S4, unofficial].
+- **Memory Complexity:** $O(V)$ for vertex buffers. Each voxel consumes 36 vertices × 3 floats × 4 bytes = 432 bytes for positions alone, plus normals and colors [S4, unofficial].
+- **Measured Performance:** On a 32x32x1 platform, naive rendering is feasible. On larger scales (e.g., 1k³ resolution), it generates nearly a million quads, causing significant CPU-GPU bandwidth bottlenecks due to frequent buffer uploads [S1, S3, unofficial].
+- **Strengths:** Simple implementation; no complex spatial data structures required; works well for small, dense scenes or debugging [S4, unofficial].
+- **Limitations:** Extremely inefficient for large scenes; no LOD; no occlusion culling between adjacent voxels; high draw call overhead if not instanced [S1, S3, S4, unofficial].
+- **When to Use:** Small voxel art scenes, educational purposes, or as a baseline for comparison [S4, unofficial].
+- **When Not to Use:** Large-scale volumetric visualization, real-time applications with high voxel counts, or sparse datasets [S1, S3, S4, unofficial].
 
 ## Background
-Naive Voxel Rendering originated as a foundational technique in early voxel engines, where simplicity of implementation took precedence over performance. It is exemplified in tutorials such as "Make yourself a Voxel Engine THIS weekend" [S3, unofficial] and the "Simple Voxel Engine" by James Randall [S4, unofficial]. The method is often contrasted with more advanced techniques like [Sparse Voxel Rasterization](3032-sparse-voxel-rasterization.md) or [SVO LOD Management](2990-svo-lod-management.md) in performance benchmarks, where it serves as a lower-bound reference for rendering speed [S1, S2, unofficial]. It is commonly used in educational contexts and simple visualization tools like the `bwImageHeightMap` and `perlinLandscape` examples [S4, unofficial].
+Naive Voxel Rendering originated as a foundational technique in early voxel engines, where simplicity of implementation took precedence over performance [S3, S4, unofficial]. It is exemplified in tutorials such as "Make yourself a Voxel Engine THIS weekend" [S3, unofficial] and the "Simple Voxel Engine" by James Randall [S4, unofficial]. The method is commonly used in educational contexts and simple visualization tools like the `bwImageHeightMap` and `perlinLandscape` examples [S4, unofficial].
 
 ## Sources
 [S1] dubiousconst282/VoxelRT, https://github.com/dubiousconst282/VoxelRT, fetched 2026-10-24 (unofficial)
@@ -153,3 +131,4 @@ Naive Voxel Rendering originated as a foundational technique in early voxel engi
 [S3] Make yourself a Voxel Engine THIS weekend, https://daymare.net/blogs/voxel-engine-in-a-weekend/, fetched 2026-10-26 (unofficial)
 [S4] JamesRandall/SimpleVoxelEngine, https://github.com/JamesRandall/SimpleVoxelEngine, fetched 2026-10-26 (unofficial)
 [S5] jaafersheriff/Cloud-Renderer, https://github.com/jaafersheriff/Cloud-Renderer, fetched 2026-10-27 (unofficial)
+[S6] How to show solid bodies using volumetric rendering?, https://mathematica.stackexchange.com/questions/6247, fetched 2026-10-30 (unofficial)

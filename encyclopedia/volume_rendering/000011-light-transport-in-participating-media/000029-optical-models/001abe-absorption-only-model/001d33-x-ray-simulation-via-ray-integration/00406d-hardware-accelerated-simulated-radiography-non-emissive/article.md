@@ -1,0 +1,170 @@
+# Hardware-Accelerated Simulated Radiography (Non-Emissive)
+
+Also called: Hexahedral/Tetrahedral decomposition radiography, Layer-rendering algorithm, P-buffer accumulation, Unsorted Layer-Rendering Algorithm
+
+## Overview
+A GPU-based volume rendering technique for non-emissive objects that simulates X-ray radiography by accumulating attenuation coefficients in a floating-point off-screen P-buffer (accumulation buffer) [S1, unofficial]. It renders geometric cells (hexahedra or tetrahedra) as separate layers, using hardware-accelerated rasterization to compute the integral of attenuation along viewing rays [S1, unofficial]. Unlike sorted front-to-back methods, this algorithm handles unsorted, overlapping geometry by iteratively rendering non-overlapping subsets of cells, minimizing expensive P-buffer-to-texture synchronization copies [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   A volume decomposition into geometric cells (primarily hexahedra, subdivided into tetrahedra if necessary) [S1, unofficial].
+*   Material properties for each cell, including density $\rho$ and elemental composition [S1, unofficial].
+*   X-ray source spectrum, discretized into $N$ energy bands (typically $N=4$) [S1, unofficial].
+*   Target image resolution (e.g., $512 \times 512$) [S1, unofficial].
+
+**Outputs:**
+*   An attenuation image or simulated X-ray intensity image [S1, unofficial].
+
+**Data Structures:**
+*   **Attenuation Table:** Precomputed lookup table mapping material mixtures and energy bands to extinction coefficients $\kappa_\nu$ [S1, unofficial].
+*   **Cell List:** A logically circular list of pointers to all cells, sorted or traversed in a specific order [S1, unofficial].
+*   **Bounding Boxes:** For each cell, the 2D image-plane bounding box of its projection [S1, unofficial].
+*   **P-buffer:** A floating-point off-screen framebuffer (texture) used to accumulate attenuation values. It has $N$ channels (e.g., RGBA) to store attenuation for $N$ energy bands in parallel [S1, unofficial].
+*   **Test Buffer:** A 1-bit per pixel buffer (represented in multi-bit words aligned per scan line) used to track which pixels have been covered by cells rendered in the current pass [S1, unofficial].
+*   **Current Texture:** A texture holding the accumulated attenuation from previous passes, used as input for interpolation [S1, unofficial].
+
+**Formulas:**
+The attenuation for a cell is computed based on the extinction coefficient and the path length through the cell [S1, unofficial]:
+$$ A = K_\nu \cdot t $$
+where $K_\nu$ is the extinction coefficient for energy band $\nu$, and $t$ is the thickness of the cell along the viewing ray [S1, unofficial].
+
+The extinction coefficient $K_\nu$ is defined as [S1, unofficial]:
+$$ K_\nu = \kappa \rho $$
+where $\kappa$ is the opacity in $\text{cm}^2/\text{g}$ and $\rho$ is the density of the material [S1, unofficial].
+
+The final X-ray intensity $I$ is derived from the total accumulated attenuation $A_{total}$ (sum of $A$ across all cells and bands) [S1, unofficial]:
+$$ I = e^{-A_{total}} $$
+This exponential is applied during the final copy to the output buffer [S1, unofficial].
+
+**Parameters:**
+*   **Number of energy bands:** 4 (mapped to RGBA channels) [S1, unofficial].
+*   **Resolution:** Typically $512 \times 512$ or similar [S1, unofficial].
+*   **Threshold for pass termination:** A fixed number of skipped cells due to overlap [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Preprocessing:**
+    *   Read in volume data and compute the attenuation table for the specified energy bands and materials [S1, unofficial].
+    *   For each cell, compute its 2D image-plane bounding box [S1, unofficial].
+    *   If a hexahedron cannot be projected as a whole (e.g., due to non-convexity or self-intersection), subdivide it into five tetrahedra [S1, unofficial].
+    *   Form a logically circular list of pointers to all cells [S1, unofficial].
+
+2.  **Initialization:**
+    *   Initialize the P-buffer to zero [G].
+    *   Initialize the Current Texture with the P-buffer data [G].
+
+3.  **Iterative Rendering Passes:**
+    *   **Traversal Order:** Traverse the cell list in jumps of a size relatively prime to the list's length to ensure every cell is touched once before repetition and adjacent cells are not touched consecutively [S1, unofficial].
+    *   **Overlap Test:** For each cell in the traversal:
+        *   Clear the 1-bit Test Buffer at the start of the pass (or maintain it across the pass) [S1, unofficial].
+        *   Scan-convert the cell's bounding box into the Test Buffer format [S1, unofficial].
+        *   The pattern along a scan line consists of a left partly filled word (from a lookup table), zero or more full words, and a right partly filled word (from a lookup table) [S1, unofficial].
+        *   Test the words involved in the bounding box against the Test Buffer using bitwise logical ANDs [S1, unofficial].
+        *   If any result is non-zero, there is overlap with a cell already rendered in the current pass; skip this cell [S1, unofficial].
+        *   If no overlap, use bitwise logical ORs to set the bits for the bounding box in the Test Buffer, mark the cell as completed in the list, and proceed to render [S1, unofficial].
+    *   **Rendering:**
+        *   Compute the attenuation for the current cell in software using geometry and $K_\nu \cdot t$ [S1, unofficial].
+        *   Interpolate the accumulated attenuation for the current cell from the Current Texture using hardware vertex data interpolation [S1, unofficial].
+        *   Write the floating-point sum (accumulated attenuation) to the P-buffer [S1, unofficial].
+    *   **Pass Termination:**
+        *   If a threshold number of cells are skipped due to overlap, terminate the current pass [S1, unofficial].
+        *   Copy the smallest rectangle in the P-buffer containing all rendered bounding boxes into the Current Texture [S1, unofficial].
+        *   Start the next pass.
+
+4.  **Final Output:**
+    *   When no cells are left (all cells rendered), copy the P-buffer (which contains the sum of all passes) to the output buffer [S1, unofficial].
+    *   If an X-ray image is desired, compute the negative exponential $e^{-A_{total}}$ during this final copy [S1, unofficial].
+    *   Draw the texture to the screen [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hardware_accelerated_radiography(cells, energy_bands, resolution):
+    # Preprocessing
+    attenuation_table = compute_attenuation_table(cells, energy_bands)
+    cell_list = form_circular_list(cells)
+    list_length = len(cell_list)
+    jump_size = find_relatively_prime_number(list_length)
+    
+    # Initialize buffers
+    p_buffer = create_floating_point_buffer(resolution, channels=len(energy_bands))
+    current_texture = copy_to_texture(p_buffer)
+    
+    # Iterative passes
+    while not all_cells_rendered(cell_list):
+        test_buffer = create_1bit_buffer(resolution)
+        skipped_count = 0
+        threshold = 100 # Example threshold
+        
+        # Traverse with jump
+        for i in range(0, list_length, jump_size):
+            cell = cell_list[i % list_length]
+            
+            # Skip if already rendered in this pass
+            if cell.rendered_in_current_pass:
+                continue
+                
+            # Overlap test
+            bbox = cell.get_image_plane_bounding_box()
+            if check_overlap(test_buffer, bbox):
+                skipped_count += 1
+                continue
+            
+            # Render cell
+            # 1. Compute attenuation for this cell
+            attenuation = compute_cell_attenuation(cell, attenuation_table)
+            
+            # 2. Interpolate accumulated attenuation from current texture
+            # Hardware interpolation of vertex data
+            accumulated = interpolate_texture(current_texture, cell.vertices)
+            
+            # 3. Write sum to P-buffer
+            write_to_p_buffer(p_buffer, cell, accumulated + attenuation)
+            
+            # 4. Mark as rendered in this pass
+            cell.rendered_in_current_pass = True
+            set_bits_in_test_buffer(test_buffer, bbox)
+            
+            if skipped_count > threshold:
+                break
+        
+        # Copy P-buffer to texture for next pass
+        # Copy smallest rectangle containing rendered bounding boxes
+        rendered_rect = get_rendered_rect(p_buffer)
+        current_texture = copy_rect_to_texture(p_buffer, rendered_rect)
+        
+        # Reset rendered flags for next pass
+        reset_rendered_flags(cell_list)
+        
+    # Final output
+    if output_type == 'xray':
+        output_buffer = apply_exponential(p_buffer)
+    else:
+        output_buffer = p_buffer
+        
+    draw_texture(output_buffer)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Read-before-write artifacts:** If the same framebuffer object is used for reading and writing, texture data may be used before it has been written out [S1, unofficial]. This is handled by drawing a dummy textured square (e.g., $120 \times 120$ pixels) to flush the pipeline [S1, unofficial].
+*   **Subdivision:** Subdividing hexahedra into tetrahedra increases depth complexity, requiring more passes [S1, unofficial].
+*   **Bounding Box vs. Actual Projection:** Scanning the actual projection of the cell instead of its bounding box was tested but rejected because the extra cost of stepping along the edges balanced the speed-up from fewer layers, resulting in no net gain [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The method is bottlenecked by overlap determination and texture copying [S1, unofficial]. The number of passes is related to the depth complexity of the volume decomposition [S1, unofficial].
+*   **Memory Complexity:** Requires storage for the P-buffer, Current Texture, Test Buffer, and attenuation table [S1, unofficial].
+*   **Measured Performance:** On a dual processor 860 MHz Pentium4 Xeon PC with an nVidia 6800 GT graphics card, rendering 141,960 hexahedral cells (with some subdivided) at $512 \times 512$ resolution took 2.2 seconds for preprocessing and 35 seconds for rendering and copying [S1, unofficial]. Using the same framebuffer object for read/write reduced rendering time to 7.4 seconds [S1, unofficial].
+*   **Strengths:** Hardware-accelerated rasterization; parallel accumulation of multiple energy bands; handles unsorted, overlapping geometry without sorting [S1, unofficial].
+*   **Limitations:** Bottlenecked by overlap determination and texture copying; requires multiple passes for complex scenes; subdivision increases depth complexity [S1, unofficial].
+*   **When to use:** When simulating X-ray radiography for non-emissive volumes with complex, overlapping geometry on hardware that supports floating-point framebuffers and efficient rasterization [S1, unofficial].
+*   **When not to use:** When real-time performance is critical and the scene has high depth complexity; when emission is present (requires different model) [S1, unofficial].
+
+## Background
+*   **Origin:** Developed for simulating X-ray radiography in high-energy density physics experiments, such as hohlraum and capsule simulations [S1, unofficial].
+*   **History:** Validated against software raytrace packages used by scientists for simulation [S1, unofficial]. The method uses EPDL database for atomic cross-sections [S1, unofficial].
+*   **Usage:** Used in scientific visualization for absorption-only radiographs of complex geometries [S1, unofficial].
+
+## Sources
+[S1] Hardware-Accelerated Simulated Radiography, https://digital.library.unt.edu/ark:/67531/metadc876978/?q=front-to-back compositing, fetched 2026-10-29 (unofficial)

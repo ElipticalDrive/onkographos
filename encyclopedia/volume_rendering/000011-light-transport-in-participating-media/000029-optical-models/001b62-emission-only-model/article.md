@@ -3,24 +3,24 @@
 Also called: Direct Volume Rendering (Emission Model), Emission Model, Glow Only Model, Glow model, Glowing transparent gas
 
 ## Overview
-The Emission-only Model renders a participating medium that adds light to the view ray via emission but neglects absorption and scattering [S1, S3, S4, unofficial][S5]. It solves for the accumulated glow intensity of a luminous medium, such as a hot tenuous gas or fluorescent stains, where the material is effectively transparent to its own light [S1, S3, unofficial]. Unlike the [Absorption-only model](839-absorption-only-model.md) which attenuates background light, or the [Emission-Absorption Model](927-emission-absorption-model.md) which accounts for occlusion and depth ordering, the emission-only model is order-independent and assumes the contribution of each emitting particle is independent of others [S4, S14, unofficial].
+The Emission-only Model renders a participating medium that adds light to the view ray via emission but neglects absorption and scattering [S1, S3, S4, unofficial][S5, unofficial]. It solves for the accumulated glow intensity of a luminous medium, such as a hot tenuous gas or fluorescent stains, where the material is effectively transparent to its own light [S1, S3, unofficial]. Unlike the [Absorption-only model](839-absorption-only-model.md) which attenuates background light, or the [Emission-Absorption Model](927-emission-absorption-model.md) which accounts for occlusion and depth ordering, the emission-only model is order-independent and assumes the contribution of each emitting particle is independent of others [S6, unofficial].
 
 ## How it works
 **Inputs and Outputs**
-*   **Input:** A 3D scalar field $f(\mathbf{x})$ representing density or source strength; a viewing ray defined by origin $\mathbf{o}$ and direction $\boldsymbol{\omega}$; an initial intensity $I_0$ (typically background radiance).
-*   **Output:** Final radiance $I(D)$ at distance $D$ along the ray.
+*   **Input:** A 3D scalar field $f(\mathbf{x})$ representing density or source strength; a viewing ray defined by origin $\mathbf{o}$ and direction $\boldsymbol{\omega}$; an initial intensity $I_0$ (typically background radiance) [S1, S3, unofficial].
+*   **Output:** Final radiance $I(D)$ at distance $D$ along the ray [S1, S3, unofficial].
 
 **Data Structures**
-*   **Scalar Field:** A 3D grid or texture storing values $f(\mathbf{x})$.
-*   **Transfer Function:** A mapping $g(f)$ that converts scalar values to emission intensity per unit length.
+*   **Scalar Field:** A 3D grid or texture storing values $f(\mathbf{x})$ [S3, unofficial].
+*   **Transfer Function:** A mapping $g(f)$ that converts scalar values to emission intensity per unit length [S3, unofficial].
 
 **Steps**
-1.  **Interpolate:** For a sample point $\mathbf{p}$ on the ray, interpolate the scalar field value $f(\mathbf{p})$.
-2.  **Map to Source:** Compute the source term $g(s)$ using the transfer function applied to the scalar value: $g(s) = g(f(\mathbf{p}))$. In many implementations, $g$ is proportional to $f$ [S1, S3, unofficial].
-3.  **Integrate:** Accumulate the source term along the ray from the near clipping plane ($s=0$) to the far clipping plane ($s=D$).
+1.  **Interpolate:** For a sample point $\mathbf{p}$ on the ray, interpolate the scalar field value $f(\mathbf{p})$ [S1, unofficial].
+2.  **Map to Source:** Compute the source term $g(s)$ using the transfer function applied to the scalar value: $g(s) = g(f(\mathbf{p}))$ [S1, unofficial]. In many implementations, $g$ is proportional to $f$ [S1, S3, unofficial].
+3.  **Integrate:** Accumulate the source term along the ray from the near clipping plane ($s=0$) to the far clipping plane ($s=D$) [S1, S3, unofficial].
 
 **Formulas**
-The change in radiance $I$ over a differential path length $ds$ is governed by the source term $g(s)$ [S1, S3, unofficial][S5]:
+The change in radiance $I$ over a differential path length $ds$ is governed by the source term $g(s)$ [S1, S3, unofficial][S5, unofficial]:
 
 $$
 \frac{dI}{ds} = g(s)
@@ -32,15 +32,15 @@ $$
 I(s) = I_0 + \int_0^s g(t) \, dt
 $$
 
-where $I_0$ is the initial intensity at the start of the ray [S1, S3, unofficial][S5].
+where $I_0$ is the initial intensity at the start of the ray [S1, S3, unofficial][S5, unofficial].
 
-In terms of physical parameters, if the medium consists of perfectly glowing diffuse particles with intensity $C$ per unit projected area and number density $\rho$, the source term is defined as [S1, unofficial][S5]:
+In terms of physical parameters, if the medium consists of perfectly glowing diffuse particles with intensity $C$ per unit projected area and number density $\rho$, the source term is defined as [S1, unofficial][S7]:
 
 $$
 g(s) = C(s) \tau(s)
 $$
 
-where $\tau(s)$ acts as a density proxy for emission (often $\tau(s) = \rho(s) A$, with $A$ being the average projected area of particles) [S1, unofficial][S5]. Thus:
+where $\tau(s)$ acts as a density proxy for emission (often $\tau(s) = \rho(s) A$, with $A$ being the average projected area of particles) [S1, unofficial][S7]. Thus:
 
 $$
 I(s) = I_0 + \int_0^s C(t) \tau(t) \, dt
@@ -52,14 +52,14 @@ $$
 
 **Pitfalls and Edge Cases**
 *   **Unbounded Intensity:** Because there is no attenuation term, the integral has no upper bound. Accumulated intensity can easily exceed the representable range of the output device (clipping) [S1, S3, unofficial]. The constant $C$ must be set small enough to avoid saturation at the center of dense regions [S1, unofficial].
-*   **Order Independence:** Like Maximum Intensity Projection (MIP), the result is commutative. Swapping parts of the ray does not change the final result, making it impossible to distinguish depth order between features [S4, unofficial].
+*   **Order Independence:** Like Maximum Intensity Projection (MIP), the result is commutative. Swapping parts of the ray does not change the final result, making it impossible to distinguish depth order between features [S4, S6, unofficial].
 *   **No Occlusion:** Features in the "back" of the volume contribute equally to the "front," potentially overwhelming foreground details [S4, unofficial].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_emission_only(ray_origin, ray_direction, scalar_field, transfer_function, near, far):
+def render_emission_only(ray_origin, ray_direction, scalar_field, transfer_function, near, far, dt):
     """
     Renders a volume using the emission-only model.
     
@@ -70,6 +70,7 @@ def render_emission_only(ray_origin, ray_direction, scalar_field, transfer_funct
         transfer_function: Function g(f) mapping scalar to emission intensity.
         near: float, start distance along ray.
         far: float, end distance along ray.
+        dt: float, fixed integration step length ds.
         
     Returns:
         float, final intensity I(D).
@@ -77,10 +78,7 @@ def render_emission_only(ray_origin, ray_direction, scalar_field, transfer_funct
     # Initial intensity (e.g., background color or 0)
     I = 0.0
     
-    # Step size for ray marching
-    dt = 0.01 
-    
-    # Iterate along the ray
+    # Iterate along the ray from near to far
     s = near
     while s < far:
         # 1. Interpolate scalar field
@@ -106,19 +104,18 @@ def render_emission_only(ray_origin, ray_direction, scalar_field, transfer_funct
 Adds attenuation to the emission model. Choose this when depth ordering and occlusion are required, such as for smoke, clouds, or opaque surfaces in NeRFs. It solves the unbounded intensity problem of the emission-only model by introducing an exponential decay term.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$, where $N$ is the number of samples along the ray. Identical to other ray-marching methods.
-*   **Memory Complexity:** $O(1)$ per ray, excluding the storage of the scalar field.
+*   **Time Complexity:** $O(N)$, where $N$ is the number of samples along the ray [G].
+*   **Memory Complexity:** $O(1)$ per ray, excluding the storage of the scalar field [G].
 *   **Strengths:** Computationally simple; order-independent; suitable for simulating glowing phenomena like flames, fluorescent stains, or tenuous gases where self-occlusion is negligible [S1, S3, S4, unofficial].
-*   **Limitations:** Cannot represent opaque or semi-opaque objects correctly; prone to intensity overflow/clipping; lacks depth cues [S1, S4, unofficial].
+*   **Limitations:** Prone to intensity overflow/clipping due to unbounded accumulation; lacks depth cues and occlusion [S1, S4, unofficial].
 *   **When to use:** Visualization of transparent luminous media, neutron emission, or when a "glow" effect is desired without physical accuracy regarding occlusion [S1, S3, unofficial].
-*   **When not to use:** When realistic lighting, shadows, or depth perception is required [S1, S4, unofficial].
 
 ## Background
-The emission-only model is a foundational concept in direct volume rendering, derived from the radiative transfer equation by neglecting extinction terms [S1, unofficial][S5]. It was formalized in the context of optical models for direct volume rendering by Max (1995), who described it as the limit where particle size or number density approaches zero while emission compensates, resulting in a transparent glowing medium [S1, unofficial]. It is closely related to Maximum Intensity Projection (MIP) in its order-independence [S4, unofficial]. The model is historically used for visualizing neutron transport and fluorescent micrographs [S1, S3, unofficial].
+The emission-only model is a foundational concept in direct volume rendering, derived from the radiative transfer equation by neglecting extinction terms [S1, S5, unofficial]. It was formalized in the context of optical models for direct volume rendering by Max (1995), who described it as the limit where particle size or number density approaches zero while emission compensates, resulting in a transparent glowing medium [S1, unofficial]. It is closely related to Maximum Intensity Projection (MIP) in its order-independence [S4, S6, unofficial]. The model is historically used for visualizing neutron transport and fluorescent micrographs [S1, S3, unofficial].
 
 ## Sources
 [S1] Optical Models for Direct Volume Rendering, https://courses.cs.duke.edu/spring03/cps296.8/papers/max95opticalModelsForDirectVolumeRendering.pdf, fetched 2026-10-26 (unofficial)
 [S2] Volume Rendering, https://leeyngdo.github.io/blog/computer-graphics/2024-03-28-volume-rendering/, fetched 2026-10-27 (unofficial)
 [S3] Mathematical models for volume rendering and neutron transport, https://digital.library.unt.edu/ark:/67531/metadc1274949/?q=volume rendering equation, fetched 2026-10-28 (unofficial)
 [S4] Direct Volume Rendering, https://cscheid.net/writing/data_visualization/direct_volume_rendering/, fetched 2026-10-29 (unofficial)
-[S5] Direct_Volume_Rendering.md, https://github.com/pyvista/pyvista/files/9562449/Direct_Volume_Rendering.md, fetched 2026-10-29
+[S5] Direct_Volume_Rendering.md, https://github.com/pyvista/pyvista/files/9562449/Direct_Volume_Rendering.md, fetched 2026-10-29 (unofficial)

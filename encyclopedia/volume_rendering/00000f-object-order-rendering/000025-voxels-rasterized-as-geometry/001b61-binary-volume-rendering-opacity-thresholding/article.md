@@ -3,40 +3,40 @@
 Also called: Opacity Thresholding, Threshold projection, Threshold (Surface) Rendering
 
 ## Overview
-Binary volume rendering is a technique where voxels are classified as either completely opaque or completely transparent based on whether their scalar density exceeds a specific threshold [S1, S3, unofficial]. This reduces the rendering problem to projecting opaque geometric primitives (cubes or their front faces) onto the image plane, effectively visualizing the iso-surface corresponding to the threshold interface [S1, S3, unofficial]. Unlike direct volume rendering methods that integrate optical properties along rays, this approach treats the volume as a collection of discrete opaque objects, relying on standard rasterization visibility techniques such as the z-buffer or a back-to-front painter's algorithm [S2, S3, unofficial]. It is primarily used for isolating highly opaque structures, such as bone in medical imaging, where a clear surface boundary is desired [S2, S3, unofficial].
+Binary volume rendering is a technique where voxels are classified as either completely opaque or completely transparent based on whether their scalar density exceeds a specific threshold [S1, unofficial][S3, unofficial]. This reduces the rendering problem to projecting opaque geometric primitives (cubes or their front faces) onto the image plane, effectively visualizing the iso-surface corresponding to the threshold interface [S1, unofficial][S3, unofficial]. Unlike direct volume rendering methods that integrate optical properties along rays, this approach treats the volume as a collection of discrete opaque objects, relying on standard rasterization visibility techniques such as the z-buffer or a back-to-front painter's algorithm [S2, unofficial][S3, unofficial]. It is primarily used for isolating highly opaque structures, such as bone in medical imaging, where a clear surface boundary is desired [S2, unofficial][S3, unofficial].
 
 ## How it works
 
 ### Inputs and Outputs
-*   **Input:** A scalar density field $f(x, y, z)$ sampled on a cubic lattice of voxels. A threshold value $K$ defining the boundary between transparent and opaque regions.
-*   **Output:** A 2D image where pixels represent the visible surface of the opaque volume, potentially with shading information.
+*   **Input:** A scalar density field $f(x, y, z)$ sampled on a cubic lattice of voxels [S3, unofficial]. A threshold value $K$ defining the boundary between transparent and opaque regions [S2, unofficial].
+*   **Output:** A 2D image where pixels represent the visible surface of the opaque volume, potentially with shading information [S2, unofficial][S3, unofficial].
 
 ### Data Structures
-The method operates on a 3D grid of voxel values.
-*   **Voxel Grid:** A 3D array where each element stores the scalar density $f_{ijk}$.
-*   **Surface Voxels (Optional Optimization):** A list or mask identifying voxels that are on the boundary of the opaque region. A voxel is considered a surface voxel if it is opaque ($f_{ijk} > K$) and has at least one neighbor that is transparent ($f_{neighbor} \le K$) [S3, unofficial]. Interior voxels (opaque voxels surrounded entirely by other opaque voxels) are guaranteed to be hidden and can be skipped [S2, S3, unofficial].
+The method operates on a 3D grid of voxel values [S3, unofficial].
+*   **Voxel Grid:** A 3D array where each element stores the scalar density $f_{ijk}$ [S3, unofficial].
+*   **Surface Voxels (Optional Optimization):** A list or mask identifying voxels that are on the boundary of the opaque region [S2, unofficial]. A voxel is considered a surface voxel if it is opaque ($f_{ijk} > K$) and has at least one neighbor that is transparent ($f_{neighbor} \le K$) [G]. Interior voxels (opaque voxels surrounded entirely by other opaque voxels) are guaranteed to be hidden and can be skipped [S2, unofficial][S3, unofficial].
 
 ### Steps
-1.  **Thresholding:** For each voxel in the grid, determine its opacity status.
-    *   If $f_{ijk} > K$, the voxel is opaque.
-    *   If $f_{ijk} \le K$, the voxel is transparent.
-2.  **Surface Identification (Optional):** Identify the set of surface voxels. These are the opaque voxels that form the boundary of the opaque volume. Interior opaque voxels are excluded from rendering [S2, S3, unofficial].
-3.  **Primitive Generation:** For each opaque voxel (or surface voxel), generate geometric primitives. The simplest representation is a cube centered at the voxel position. To optimize, only the front-facing faces of the cubes need to be generated, or the entire cube can be projected if the visibility algorithm handles occlusion [S2, S3, unofficial].
-4.  **Projection and Rasterization:** Project the generated primitives onto the image plane.
-    *   **Coordinate Transformation:** Transform voxel indices $(i, j, k)$ to world space. For a dense grid with bounds $P_{min}$ and $P_{max}$ and dimension $N_{dim}$, the world position $P_{world}$ of a voxel center is calculated as:
+1.  **Thresholding:** For each voxel in the grid, determine its opacity status [S3, unofficial].
+    *   If $f_{ijk} > K$, the voxel is opaque [S3, unofficial].
+    *   If $f_{ijk} \le K$, the voxel is transparent [S3, unofficial].
+2.  **Surface Identification (Optional):** Identify the set of surface voxels [S2, unofficial]. These are the opaque voxels that form the boundary of the opaque volume [G]. Interior opaque voxels are excluded from rendering [S2, unofficial][S3, unofficial].
+3.  **Primitive Generation:** For each opaque voxel (or surface voxel), generate geometric primitives [S2, unofficial][S3, unofficial]. The simplest representation is a cube centered at the voxel position [G]. To optimize, only the front-facing faces of the cubes need to be generated, or the entire cube can be projected if the visibility algorithm handles occlusion [S2, unofficial][S3, unofficial].
+4.  **Projection and Rasterization:** Project the generated primitives onto the image plane [S3, unofficial].
+    *   **Coordinate Transformation:** Transform voxel indices $(i, j, k)$ to world space [G]. For a dense grid with bounds $P_{min}$ and $P_{max}$ and dimension $N_{dim}$, the world position $P_{world}$ of a voxel center is calculated as:
         $$
         P_{world} = P_{min} + \frac{I_{voxel}}{N_{dim}} \times (P_{max} - P_{min})
         $$
-        For unit voxels, this simplifies to $P_{world} = I_{voxel} \times V_{size}$, where $V_{size}$ is the voxel dimension [S4, unofficial].
-    *   **Visibility Determination:** Use a z-buffer or a back-to-front painter's algorithm to determine which voxels are visible.
-        *   **Z-buffer:** Project all opaque cubes. The depth buffer automatically handles occlusion, keeping only the closest surface at each pixel [S2, S3, unofficial].
-        *   **Painter's Algorithm:** Sort opaque voxels from back to front (farthest to nearest relative to the camera) and render them in that order. This requires explicit sorting or ordered traversal [S2, S3, unofficial].
-5.  **Shading (Optional):** Apply shading to the visible surfaces to enhance depth perception.
-    *   **Simple Shading:** Use the z-buffer depth value at each pixel to shade distant pixels darker [S2, S3, unofficial].
-    *   **Normal Estimation:** Estimate surface normals for realistic lighting. Methods include:
-        *   Estimating the slope of the projected surface using z-buffer values at neighboring pixels [S2, S3, unofficial].
-        *   Estimating normals before projection based on the orientation of the cube face and its neighbors in the boundary of the opaque volume [S2, S3, unofficial].
-        *   Determining normals from the gradient of $f(x)$ estimated by finite differences at neighboring voxels [S2, S3, unofficial].
+        For unit voxels, this simplifies to $P_{world} = I_{voxel} \times V_{size}$, where $V_{size}$ is the voxel dimension [G].
+    *   **Visibility Determination:** Use a z-buffer or a back-to-front painter's algorithm to determine which voxels are visible [S3, unofficial].
+        *   **Z-buffer:** Project all opaque cubes [S2, unofficial]. The depth buffer automatically handles occlusion, keeping only the closest surface at each pixel [G].
+        *   **Painter's Algorithm:** Sort opaque voxels from back to front (farthest to nearest relative to the camera) and render them in that order [S3, unofficial].
+5.  **Shading (Optional):** Apply shading to the visible surfaces to enhance depth perception [S2, unofficial][S3, unofficial].
+    *   **Simple Shading:** Use the z-buffer depth value at each pixel to shade distant pixels darker [S2, unofficial][S3, unofficial].
+    *   **Normal Estimation:** Estimate surface normals for realistic lighting [S2, unofficial][S3, unofficial]. Methods include:
+        *   Estimating the slope of the projected surface using z-buffer values at neighboring pixels [S2, unofficial][S3, unofficial].
+        *   Estimating normals before projection based on the orientation of the cube face and its neighbors in the boundary of the opaque volume [S2, unofficial][S3, unofficial].
+        *   Determining normals from the gradient of $f(x)$ estimated by finite differences at neighboring voxels [S2, unofficial][S3, unofficial].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -47,40 +47,32 @@ def binary_volume_rendering(volume, threshold, camera_matrix, image_width, image
     Renders a binary volume using opacity thresholding.
     
     Args:
-        volume: 3D array of scalar densities.
+        volume: 3D list of scalar densities.
         threshold: Scalar value K. Voxels > K are opaque.
-        camera_matrix: MVP matrix for projection.
+        camera_matrix: 4x4 MVP matrix for projection.
         image_width, image_height: Dimensions of the output image.
         
     Returns:
-        image: 2D array of rendered colors.
-        depth_buffer: 2D array of depth values.
+        image: 2D list of rendered colors.
+        depth_buffer: 2D list of depth values.
     """
-    # Initialize depth buffer with infinity
-    depth_buffer = np.full((image_height, image_width), np.inf)
-    image = np.zeros((image_height, image_width, 3))
+    INF = float('inf')
+    depth_buffer = [[INF] * image_width for _ in range(image_height)]
+    image = [[(0.0, 0.0, 0.0)] * image_width for _ in range(image_height)]
     
-    # Get volume dimensions
-    dim_x, dim_y, dim_z = volume.shape
+    dim_x, dim_y, dim_z = len(volume), len(volume[0]), len(volume[0][0])
     
-    # Identify surface voxels to optimize rendering
-    # A voxel is a surface voxel if it is opaque and has at least one transparent neighbor
+    # Identify surface voxels to optimize rendering [G]
     surface_voxels = []
     for i in range(dim_x):
         for j in range(dim_y):
             for k in range(dim_z):
-                if volume[i, j, k] > threshold:
-                    # Check neighbors
+                if volume[i][j][k] > threshold:
                     is_surface = False
-                    neighbors = [
-                        (i+1, j, k), (i-1, j, k),
-                        (i, j+1, k), (i, j-1, k),
-                        (i, j, k+1), (i, j, k-1)
-                    ]
-                    for ni, nj, nk in neighbors:
-                        # Handle boundary conditions: out-of-bounds neighbors are transparent
+                    for di, dj, dk in [(-1,0,0),(1,0,0),(0,-1,0),(0,1,0),(0,0,-1),(0,0,1)]:
+                        ni, nj, nk = i+di, j+dj, k+dk
                         if 0 <= ni < dim_x and 0 <= nj < dim_y and 0 <= nk < dim_z:
-                            if volume[ni, nj, nk] <= threshold:
+                            if volume[ni][nj][nk] <= threshold:
                                 is_surface = True
                                 break
                         else:
@@ -89,90 +81,61 @@ def binary_volume_rendering(volume, threshold, camera_matrix, image_width, image
                     if is_surface:
                         surface_voxels.append((i, j, k))
     
-    # Project each surface voxel
+    # Project each surface voxel [S2, unofficial][S3, unofficial]
     for (i, j, k) in surface_voxels:
-        # Calculate voxel center in world space
-        # Assuming unit voxels for simplicity, scale as needed
-        voxel_center = np.array([i, j, k])
+        # Calculate voxel center in world space (unit voxels) [G]
+        voxel_center = [float(i), float(j), float(k)]
         
-        # Generate cube vertices (8 corners)
-        # This is a simplified representation; in practice, only front faces might be generated
-        vertices = get_cube_vertices(voxel_center, size=1.0)
+        # Transform center to clip space
+        center_homogeneous = voxel_center + [1.0]
+        center_clip = [sum(camera_matrix[r][c] * center_homogeneous[c] for c in range(4)) for r in range(4)]
         
-        # Transform vertices to clip space
-        clip_vertices = []
-        for v in vertices:
-            v_homogeneous = np.append(v, 1.0)
-            v_clip = camera_matrix @ v_homogeneous
-            clip_vertices.append(v_clip)
+        if center_clip[3] != 0:
+            center_ndc = [center_clip[0]/center_clip[3], center_clip[1]/center_clip[3], center_clip[2]/center_clip[3]]
             
-        # Rasterize the cube (or its front faces)
-        # For simplicity, we project the center and use a bounding box or 
-        # a simple triangle fan for the visible face. 
-        # A robust implementation would use a standard triangle rasterizer.
-        
-        # Determine the visible face based on camera direction
-        # For this pseudocode, we assume a simple projection of the voxel center
-        # and update the depth buffer if it's closer than the current value.
-        # This is a simplification; actual implementation requires face culling and rasterization.
-        
-        # Project center to screen
-        center_homogeneous = np.append(voxel_center, 1.0)
-        center_clip = camera_matrix @ center_homogeneous
-        center_ndc = center_clip[:3] / center_clip[3]
-        
-        if -1 <= center_ndc[0] <= 1 and -1 <= center_ndc[1] <= 1 and 0 <= center_ndc[2] <= 1:
-            screen_x = int((center_ndc[0] + 1) * 0.5 * image_width)
-            screen_y = int((1 - (center_ndc[1] + 1) * 0.5) * image_height)
-            
-            depth = center_ndc[2] * center_clip[3] # Depth in view space
-            
-            if depth < depth_buffer[screen_y, screen_x]:
-                depth_buffer[screen_y, screen_x] = depth
-                # Apply simple shading based on depth
-                intensity = 1.0 - depth / max_depth # Normalize depth
-                image[screen_y, screen_x] = [intensity, intensity, intensity]
+            if -1 <= center_ndc[0] <= 1 and -1 <= center_ndc[1] <= 1 and 0 <= center_ndc[2] <= 1:
+                screen_x = int((center_ndc[0] + 1) * 0.5 * image_width)
+                screen_y = int((1 - (center_ndc[1] + 1) * 0.5) * image_height)
                 
+                depth = center_clip[2] 
+                
+                if 0 <= screen_x < image_width and 0 <= screen_y < image_height:
+                    if depth < depth_buffer[screen_y][screen_x]:
+                        depth_buffer[screen_y][screen_x] = depth
+                        # Apply simple shading based on depth [S2, unofficial][S3, unofficial]
+                        max_depth = 100.0 # Typical scene depth range [G]
+                        intensity = max(0.0, 1.0 - depth / max_depth)
+                        image[screen_y][screen_x] = (intensity, intensity, intensity)
+                        
     return image, depth_buffer
-
-def get_cube_vertices(center, size):
-    """Returns 8 vertices of a cube centered at 'center' with given 'size'."""
-    half = size / 2.0
-    x, y, z = center
-    return [
-        [x-half, y-half, z-half], [x+half, y-half, z-half],
-        [x+half, y+half, z-half], [x-half, y+half, z-half],
-        [x-half, y-half, z+half], [x+half, y-half, z+half],
-        [x+half, y+half, z+half], [x-half, y+half, z+half]
-    ]
 ```
 
 ### Parameters
-*   **Threshold ($K$):** The scalar value separating opaque and transparent regions. Typical values depend on the data range (e.g., Hounsfield units in CT scans).
-*   **Voxel Size:** The physical size of each voxel, used for coordinate transformation.
+*   **Threshold ($K$):** The scalar value separating opaque and transparent regions [S2, unofficial]. Typical values depend on the data range (e.g., Hounsfield units in CT scans) [S2, unofficial].
+*   **Voxel Size:** The physical size of each voxel, used for coordinate transformation [G].
+*   **Maximum Depth:** The maximum distance from the camera to the far clipping plane, used for depth normalization in shading [G].
 
 ### Edge Cases and Pitfalls
-*   **Interior Voxels:** Rendering interior opaque voxels is unnecessary and wasteful. Identifying surface voxels is a critical optimization [S2, S3, unofficial].
-*   **Shading Accuracy:** Simple z-buffer shading provides limited depth cues. Normal estimation methods vary in accuracy and computational cost [S2, S3, unofficial].
+*   **Interior Voxels:** Rendering interior opaque voxels is unnecessary and wasteful. Identifying surface voxels is a critical optimization [S2, unofficial][S3, unofficial].
+*   **Shading Accuracy:** Simple z-buffer shading provides limited depth cues. Normal estimation methods vary in accuracy and computational cost [S2, unofficial][S3, unofficial].
 *   **Aliasing:** Rasterizing cubes can lead to aliasing artifacts. Anti-aliasing techniques may be required [G].
-*   **Boundary Conditions:** Neighbors outside the volume bounds are considered transparent, ensuring the surface is correctly identified at the edges of the data [S3, unofficial].
 
 ## Subtopics
 
 ### Upson and Keeler Algorithm
-The first object-order algorithm reported in literature, this method processes all voxels in front-to-back order and accumulates values for pixels iteratively, specifically aimed at binary volumes [S4, unofficial]. It projects only voxels with a value of one onto the screen. The data is traversed plane by plane, and row by row inside each plane, ensuring the first processed voxel is farther away from the image plane [S4, unofficial]. For arbitrary orientations, axes are traversed in increasing or decreasing order as needed. The ordered traversal is implemented with three nested loops indexing x, y, and z directions respectively [S4, unofficial]. This implementation supports axis-parallel clipping planes by limiting traversal to a smaller rectangular region via modified bounds [S4, unofficial]. A depth image is generated by overwriting pixel values with the distance of the given voxel from the image plane whenever a voxel is projected [S4, unofficial].
+The first object-order algorithm reported in literature, this method processes all voxels in front-to-back order and accumulates values for pixels iteratively, specifically aimed at binary volumes [S4, unofficial]. It projects only voxels with a value of one onto the screen [S4, unofficial]. The data is traversed plane by plane, and row by row inside each plane, ensuring the first processed voxel is farther away from the image plane [S4, unofficial]. For arbitrary orientations, axes are traversed in increasing or decreasing order as needed [S4, unofficial]. The ordered traversal is implemented with three nested loops indexing x, y, and z directions respectively [S4, unofficial]. This implementation supports axis-parallel clipping planes by limiting traversal to a smaller rectangular region via modified bounds [S4, unofficial]. A depth image is generated by overwriting pixel values with the distance of the given voxel from the image plane whenever a voxel is projected [S4, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, if all voxels are processed. With surface voxel optimization, it is $O(S)$ where $S$ is the number of surface voxels. Rasterization cost depends on the number of visible faces.
-*   **Memory Complexity:** $O(N)$ for the volume data. Additional memory for the depth buffer and image.
-*   **Performance:** Fast for sparse volumes or when a high threshold isolates a small surface. Performance degrades if the threshold results in a large number of visible voxels.
-*   **Strengths:** Simple to implement; leverages standard graphics hardware; effective for isolating distinct structures like bone [S2, S3, unofficial].
-*   **Limitations:** No transparency or internal structure visualization; sensitive to threshold selection; aliasing artifacts from cube rasterization [S2, S3, unofficial].
-*   **When to Use:** Visualizing opaque structures where surface detail is paramount, such as bone in medical imaging [S2, S3, unofficial].
+*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, if all voxels are processed. With surface voxel optimization, it is $O(S)$ where $S$ is the number of surface voxels. Rasterization cost depends on the number of visible faces [G].
+*   **Memory Complexity:** $O(N)$ for the volume data. Additional memory for the depth buffer and image [G].
+*   **Performance:** Fast for sparse volumes or when a high threshold isolates a small surface. Performance degrades if the threshold results in a large number of visible voxels [G].
+*   **Strengths:** Simple to implement; leverages standard graphics hardware; effective for isolating distinct structures like bone [S2, unofficial][S3, unofficial].
+*   **Limitations:** No transparency or internal structure visualization; sensitive to threshold selection; aliasing artifacts from cube rasterization [S2, unofficial][S3, unofficial].
+*   **When to Use:** Visualizing opaque structures where surface detail is paramount, such as bone in medical imaging [S2, unofficial][S3, unofficial].
 *   **When Not to Use:** When internal density variations or transparency effects are important [S2, unofficial].
 
 ## Background
-Binary volume rendering, also known as threshold rendering, was one of the earliest techniques for visualizing volumetric data. It maps scalar values to extinction coefficients, where values above a threshold are assigned infinite extinction (opaque) and others zero (transparent) [S2, unofficial]. This approach was widely used in early medical visualization for rendering bone and other highly opaque tissues [S2, S3, unofficial]. The Upson and Keeler algorithm, reported in the literature, was a pioneering object-order method for binary volumes, establishing the foundation for ordered traversal techniques [S4, unofficial].
+Binary volume rendering, also known as threshold rendering, was one of the earliest techniques for visualizing volumetric data [S2, unofficial]. It maps scalar values to extinction coefficients, where values above a threshold are assigned infinite extinction (opaque) and others zero (transparent) [S2, unofficial]. This approach was widely used in early medical visualization for rendering bone and other highly opaque tissues [S2, unofficial][S3, unofficial]. The Upson and Keeler algorithm, reported in the literature, was a pioneering object-order method for binary volumes, establishing the foundation for ordered traversal techniques [S4, unofficial].
 
 ## Sources
 [S1] Volumetric rendering of medical data : applications to stereotactic neurosurgery planning, https://doi.org/10.82308/10070, fetched 2026-10-26 (unofficial)

@@ -1,496 +1,206 @@
-224
-JOURNAL OF ELECTRONIC SCIENCE AND TECHNOLOGY, VOL. 16, NO. 3, SEPTEMBER 2018
-Digital Object Identifier:10.11989/JEST.1674-862X.71013102
-Adaptive Algorithm for Accelerating
-Isosurface Rendering on GPU
-Direct
-Sergey Belyaev | Pavel Smirnov | Vladislav Shubnikov | Natalia Smirnova*
-Abstract—Direct isosurface volume rendering is the most prominent modern method for medical data visualization.
-It is based on finding intersection points between the rays corresponding to pixels on the screen and isosurface. This
-article describes a two-pass algorithm for accelerating the method on the graphic processing unit (GPU). On the first
-pass, the intersections with the isosurface are found only for a small number of rays, which is done by rendering into
-a lower-resolution texture. On the second pass, the obtained information is used to efficiently calculate the
-intersection points of all the other. The number of rays to use during the first pass is determined by using an adaptive
-algorithm, which runs on the central processing unit (CPU) in parallel with the second pass of the rendering. The
-proposed approach allows to significantly speed up isosurface visualization without quality loss. Experiments show
-acceleration up to 10 times in comparison with a common ray casting method implemented on GPU. To the authors’
-knowledge, this is the fastest approach for ray casting which does not require any preprocessing and could be run on
-common GPUs.
+# Adaptive Algorithm for Accelerating Direct Isosurface Rendering on GPU
+
+Sergey Belyaev | Pavel Smirnov | Vladislav Shubnikov | Natalia Smirnova\*
+
+Abstract—Direct isosurface volume rendering is the most prominent modern method for medical data visualization. It is based on finding intersection points between the rays corresponding to pixels on the screen and isosurface. This article describes a two-pass algorithm for accelerating the method on the graphic processing unit (GPU). On the first pass, the intersections with the isosurface are found only for a small number of rays, which is done by rendering into a lower-resolution texture. On the second pass, the obtained information is used to efficiently calculate the intersection points of all the other. The number of rays to use during the first pass is determined by using an adaptive algorithm, which runs on the central processing unit (CPU) in parallel with the second pass of the rendering. The proposed approach allows to significantly speed up isosurface visualization without quality loss. Experiments show acceleration up to 10 times in comparison with a common ray casting method implemented on GPU. To the authors' knowledge, this is the fastest approach for ray casting which does not require any preprocessing and could be run on common GPUs.
+
 Index Terms—Adaptive algorithms, isosurface rendering, ray casting, volume visualization.
-1. Introduction
-Volume rendering techniques are important for medical data visualization. They provide a crucial means
-for performing visual analysis of a patient’s anatomy for diagnosis, preoperative planning, and surgical
-training. Direct methods do not require intermediate representation generating. They include direct volume
-rendering and direct isosurface rendering. The first method evaluates the volume integral for all pixels of the
-final image; this method is very convenient for exploring 3-dimensional (3D) data sets. The second one
-visualizes an isosurface level selected by the user. It requires less computational power, since to visualize the
-isosurface, one only needs to find intersection points of the rays with it. This method is based on the algorithm
-called raycasting. Under this algorithm, the intersection is found by moving through the data set along a ray
-passing through a given pixel with some step length until a value exceeding the isosurface level is found.
-*Corresponding author
+
+## 1. Introduction
+
+Volume rendering techniques are important for medical data visualization. They provide a crucial means for performing visual analysis of a patient's anatomy for diagnosis, preoperative planning, and surgical training. Direct methods do not require intermediate representation generating. They include direct volume rendering and direct isosurface rendering. The first method evaluates the volume integral for all pixels of the final image; this method is very convenient for exploring 3-dimensional (3D) data sets. The second one visualizes an isosurface level selected by the user. It requires less computational power, since to visualize the isosurface, one only needs to find intersection points of the rays with it. This method is based on the algorithm called raycasting. Under this algorithm, the intersection is found by moving through the data set along a ray passing through a given pixel with some step length until a value exceeding the isosurface level is found.
+
+\*Corresponding author
+
 Manuscript received 2017-10-13; revised 2017-11-21.
-S. Belyaev, P. Smirnov, V. Shubnikov, and N. Smirnova are with the Department of Applied Mathematics, Institute of Applied
-Mathematics and Mechanics, Peter the Great St. Petersburg Polytechnic University, St. Petersburg 195251, and also with EPAM
-Systems Inc., Newtown PA 18940 (e-mail: bel_s_u@mail.ru; psmirnov@spbstu.ru; vladislav_shubnikov@epam.com;
-natalia_smirnova@epam.com).
+
+S. Belyaev, P. Smirnov, V. Shubnikov, and N. Smirnova are with the Department of Applied Mathematics, Institute of Applied Mathematics and Mechanics, Peter the Great St. Petersburg Polytechnic University, St. Petersburg 195251, and also with EPAM Systems Inc., Newtown PA 18940 (e-mail: bel\_s\_u@mail.ru; psmirnov@spbstu.ru; vladislav\_shubnikov@epam.com; natalia\_smirnova@epam.com).
+
 Color versions of one or more of the figures in this paper are available online at http://www.journal.uestc.edu.cn.
-Publishing editor: Yu-Lian He
-BELYAEV et al.: Adaptive Algorithm for Accelerating Direct Isosurface Rendering on GPU
-225
-Raycasting is usually accelerated using preprocessing, wherein auxiliary data structures are constructed for
-culling the empty blocks, shortening the distance traveled along rays, or varying the step length along the rays,
-during runtime. The proposed method, on the other hand, does not require preprocessing. It constructs the
-necessary auxiliary data on the first step of the rendering process for every frame. The less pixels the first step
-involves, the faster it is; however, if too few pixels are used, artifacts begin to appear. To find out the minimum
-required number of pixels needed to prevent the formation of artifacts, an adaptive algorithm is used that runs on
-the central processing unit (CPU) in parallel with the second step of the rendering process.
-2. Related Works
-There are two approaches for visualizing 3D arrays. Some of them involve rasterizing the polygons obtained
-from the array, e.g. marching cubes[1]. A detailed overview and comparison of those algorithms were presented
-in [2]. The advantage of this approach is that polygonal models can be rendered very quickly. The disadvantage,
-however, is that the raw data has to be preprocessed before visualizing. This can be a problem if the transfer
-function changes or the raw data is to be plotted dynamically. Although there were works[3],[4] dedicated to fast
-triangulation on the graphic processing unit (GPU), the other approach—direct isosurface or volume
-rendering—is preferred in those cases.
-The most flexible and popular method for direct isosurface rendering is raycasting, which is also used in direct
-volume rendering. GPU-based raycasting was presented in [5]. It made use of the cube proxy geometry (the
-dataset’s bounding box) to determine the start and the end points of the ray. This method does not require
-preprocessing and can be used to visualize raw data directly. Unfortunately, it is very slow. For every pixel, it
-requires finding the intersection of the ray and isosurface by tracing the ray from start to end. A significant
-amount of time is wasted on processing rays that do not intersect the isosurface at all. In order to accelerate
-the finding of intersections and cull the rays that do not intersect the isosurface, most authors fall back on
-preprocessing.
-In [6], the isosurface was covered in a set of cuboids during preprocessing, which allowed one to cull the
-empty blocks during runtime and to reduce the ray’s length. In [7], these blocks were assembled into an octree
-structure. In [8], a min-max octree structure was introduced. Other variants of octree structures were examined in
-[7], [9] to [16]. An alternative structure that serves the same purpose is the kd-tree[17]-[19].
-Recently, a lot of effort has been spent on reducing the preprocessing time by making use of new GPU
-functions[15]-[23]. These works use a histogram pyramid structure, an analog of the mipmap structure. A histogram
-pyramid lets one convert a 3D volume into a point cloud entirely on the graphics hardware[24]. The algorithm
-reduces a highly sparse matrix with N elements to a list of its M active entries in O(N+Mlog N) steps. It should be
-noted that this structure is also used to optimize triangulation on GPU[3]. The method that was presented in [25] is
-the peak-finding method, which accelerates direct volumetric rendering by determining the isosurfaces in
-advance. In this case, it is desirable to not only determine the ray’s starting point, but also all the points where
-it intersects the isosurface. Of the works examined above, this can be done with the methods from [22] and
-[23]. Other approaches to solving this problem were examined in [21] and [26]. In [21], the approach presented is
-the pre-integration approach[27],[28], in which it is the isosurfaces, and not the calculated integrals, that are saved. In
-[26], a triangular net is built during preprocessing, and is later rendered into an A-buffer[29]. The lists in the A-buffer
-were sorted by the distance to the viewer. Various implementations of the A-buffer on GPU using the K- and Gbuffers can be found in [30].
-226
-JOURNAL OF ELECTRONIC SCIENCE AND TECHNOLOGY, VOL. 16, NO. 3, SEPTEMBER 2018
-Some of the methods listed above can be used efficiently for visualizing large amounts of data that does not fit
-fully into the GPU memory. An overview of processing big data sets can be found in [31]. The presented algorithm
-is independent of the input size.
-Another class of problems that use direct isosurface raycasting is multifield data visualization. Such data is very
-common in medicine, for instance that in [32]. From the viewpoint of raycasting, they are special in the regard that
-several isosurfaces need to be handled simultaneously. In [33], where fiber surfaces were visualized, triangular
-nets constructed during preprocessing were used for this purpose.
-Works dedicated to the acceleration of raycasting without using preprocessing data include [25], [34], and [35].
-They used occlusion frustums as proxy geometry, obtained from a previously rendered frame. Unfortunately, this
-approach can handle only coherent changes in view parameters, and is unusable for cases where the transfer
-function changes rapidly or the input data changes completely. It also performs poorly on multifield data
-visualization, as it only registers the first intersection of a ray and an isosurface.
-An alternative approach to increasing the frame rate regardless of whether preprocessing is done was
-presented in [36] to [40]. They attempted to keep up the required frame rate by worsening the quality of the
-resulting image to the least extent possible. To do that, [36], [37], and [40] used analytical performance modeling
-(regression, genetic algorithms, and performance skeletons), whereas [38], [39], and [41] used machine learning
-approaches.
-3. Algorithm Description
-The work in [5] outlines the idea of using a bounding box that bounds the given volume to determine the start
-and end points of rays. In Fig. 1, these rays are denoted with ri, and their start and end points are denoted with fi
-and li, respectively.
-The runtime of the raycasting algorithm depends on the step length along the rays and the number of rays. The
-main idea of the proposed algorithm is to reduce the number of rays. In accordance with it, the ray-isosurface
-intersections are found for a smaller number of rays and then obtained information is used to predict where the
-remaining rays will intersect the isosurface.
-The idea is implemented using a two-pass algorithm. On the first pass, the rendering is done into an auxiliary
-texture T, which has a resolution n times lower than the screen in both directions.
-The proposed algorithm is described in details as below. To simplify the explanation, let us examine the case of a
-1-dimensional texture, letting n=2 without loss of generality, where n is the ratio between resulting image size and the
-size of the auxiliary texture T. Fig. 2 depicts the various ways that two neighboring texels’ depths may be related.
-l0
-r0
-r1
-l1
-l2
-f0
-r2
-l3
-r3
-f1
-l4
-f2
-f3
-r4
-f4
-Fig. 1. Raycasting: The volume is sampled at regular intervals between the starting (f0 to f4) and ending (l0 to l4) points
-obtained via rasterization.
-BELYAEV et al.: Adaptive Algorithm for Accelerating Direct Isosurface Rendering on GPU
-p
-p
-d
-d1
-p
-p
-d1
-d1
-d2
-d1
-d
-(a)
-p
-d
-d2
-z
-z
-227
-z
-(b)
-z
-(c)
-z
-(d)
-(e)
-Fig. 2. Isosurface sampling: (a) concave, (b) convex, (c) object outline with no intersection, (d) intersected object outline,
-and (e) no isosurface.
-The z-axis begins at the points where the rays enter the bounding box. In Fig. 1, these are denoted with fi. In
-Fig. 2, the z-values for the texels (in T) on the isosurface are shown with squares, and those for the pixels on the
-screen are shown with circles. The pixel currently being handled is denoted with p. Then by examining the z-values
-for T, the algorithm calculates the raytracing starting point in such a way that it is as close as possible to the
-isosurface. It is clear that in the case shown in Fig. 2 (a), where the isosurface is concave, one may start the
-raytracing for p at z=min(d1, d2).
-p
-However, if the isosurface is convex (Fig. 2 (b)),
-movement along the ray from that point in the same
-d
-p
-d
-direction results in missing the isosurface entirely. Thus,
-d
-d
-before starting to trace the ray, the direction of
-movement should be chosen, as shown in Fig. 3. The
-choice is done by evaluating the transfer function at p. If
-the value is below the threshold, then movement
+
+Raycasting is usually accelerated using preprocessing, wherein auxiliary data structures are constructed for culling the empty blocks, shortening the distance traveled along rays, or varying the step length along the rays, during runtime. The proposed method, on the other hand, does not require preprocessing. It constructs the necessary auxiliary data on the first step of the rendering process for every frame. The less pixels the first step involves, the faster it is; however, if too few pixels are used, artifacts begin to appear. To find out the minimum required number of pixels needed to prevent the formation of artifacts, an adaptive algorithm is used that runs on the central processing unit (CPU) in parallel with the second step of the rendering process.
+
+## 2. Related Works
+
+There are two approaches for visualizing 3D arrays. Some of them involve rasterizing the polygons obtained from the array, e.g. marching cubes[1] . A detailed overview and comparison of those algorithms were presented in [2]. The advantage of this approach is that polygonal models can be rendered very quickly. The disadvantage, however, is that the raw data has to be preprocessed before visualizing. This can be a problem if the transfer function changes or the raw data is to be plotted dynamically. Although there were works[3],[4] dedicated to fast triangulation on the graphic processing unit (GPU), the other approach—direct isosurface or volume rendering—is preferred in those cases.
+
+The most flexible and popular method for direct isosurface rendering is raycasting, which is also used in direct volume rendering. GPU-based raycasting was presented in [5]. It made use of the cube proxy geometry (the dataset's bounding box) to determine the start and the end points of the ray. This method does not require preprocessing and can be used to visualize raw data directly. Unfortunately, it is very slow. For every pixel, it requires finding the intersection of the ray and isosurface by tracing the ray from start to end. A significant amount of time is wasted on processing rays that do not intersect the isosurface at all. In order to accelerate the finding of intersections and cull the rays that do not intersect the isosurface, most authors fall back on preprocessing.
+
+In [6], the isosurface was covered in a set of cuboids during preprocessing, which allowed one to cull the empty blocks during runtime and to reduce the ray's length. In [7], these blocks were assembled into an octree structure. In [8], a min-max octree structure was introduced. Other variants of octree structures were examined in [7], [9] to [16]. An alternative structure that serves the same purpose is the kd-tree[17]-[19] .
+
+Recently, a lot of effort has been spent on reducing the preprocessing time by making use of new GPU functions[15]-[23] . These works use a histogram pyramid structure, an analog of the mipmap structure. A histogram pyramid lets one convert a 3D volume into a point cloud entirely on the graphics hardware[24] . The algorithm reduces a highly sparse matrix with N elements to a list of its M active entries in O(N+M*log *N) steps. It should be noted that this structure is also used to optimize triangulation on GPU[3] . The method that was presented in [25] is the peak-finding method, which accelerates direct volumetric rendering by determining the isosurfaces in advance. In this case, it is desirable to not only determine the ray's starting point, but also all the points where it intersects the isosurface. Of the works examined above, this can be done with the methods from [22] and [23]. Other approaches to solving this problem were examined in [21] and [26]. In [21], the approach presented is the pre-integration approach[27],[28] , in which it is the isosurfaces, and not the calculated integrals, that are saved. In [26], a triangular net is built during preprocessing, and is later rendered into an A-buffer[29] . The lists in the A-buffer were sorted by the distance to the viewer. Various implementations of the A-buffer on GPU using the K- and Gbuffers can be found in [30].
+
+Some of the methods listed above can be used efficiently for visualizing large amounts of data that does not fit fully into the GPU memory. An overview of processing big data sets can be found in [31]. The presented algorithm is independent of the input size.
+
+Another class of problems that use direct isosurface raycasting is multifield data visualization. Such data is very common in medicine, for instance that in [32]. From the viewpoint of raycasting, they are special in the regard that several isosurfaces need to be handled simultaneously. In [33], where fiber surfaces were visualized, triangular nets constructed during preprocessing were used for this purpose.
+
+Works dedicated to the acceleration of raycasting without using preprocessing data include [25], [34], and [35]. They used occlusion frustums as proxy geometry, obtained from a previously rendered frame. Unfortunately, this approach can handle only coherent changes in view parameters, and is unusable for cases where the transfer function changes rapidly or the input data changes completely. It also performs poorly on multifield data visualization, as it only registers the first intersection of a ray and an isosurface.
+
+An alternative approach to increasing the frame rate regardless of whether preprocessing is done was presented in [36] to [40]. They attempted to keep up the required frame rate by worsening the quality of the resulting image to the least extent possible. To do that, [36], [37], and [40] used analytical performance modeling (regression, genetic algorithms, and performance skeletons), whereas [38], [39], and [41] used machine learning approaches.
+
+## 3. Algorithm Description
+
+The work in [5] outlines the idea of using a bounding box that bounds the given volume to determine the start and end points of rays. In Fig. 1, these rays are denoted with ri , and their start and end points are denoted with fi and l i , respectively.
+
+The runtime of the raycasting algorithm depends on the step length along the rays and the number of rays. The main idea of the proposed algorithm is to reduce the number of rays. In accordance with it, the ray-isosurface intersections are found for a smaller number of rays and then obtained information is used to predict where the remaining rays will intersect the isosurface.
+
+The idea is implemented using a two-pass algorithm. On the first pass, the rendering is done into an auxiliary texture T, which has a resolution n times lower than the screen in both directions.
+
+The proposed algorithm is described in details as below. To simplify the explanation, let us examine the case of a 1-dimensional texture, letting n=2 without loss of generality, where n is the ratio between resulting image size and the size of the auxiliary texture T. Fig. 2 depicts the various ways that two neighboring texels' depths may be related.
+
+
+
+Fig. 1. Raycasting: The volume is sampled at regular intervals between the starting (*f*0 to *f*4 ) and ending (*l*0 to *l*4 ) points obtained via rasterization.
+
+The z-axis begins at the points where the rays enter the bounding box. In Fig. 1, these are denoted with fi . In Fig. 2, the z-values for the texels (in T) on the isosurface are shown with squares, and those for the pixels on the screen are shown with circles. The pixel currently being handled is denoted with p. Then by examining the z-values for T, the algorithm calculates the raytracing starting point in such a way that it is as close as possible to the isosurface. It is clear that in the case shown in Fig.  2  \(a), where the isosurface is concave, one may start the raytracing for p at z=min(*d*1 , *d*2 ).
+
+However, if the isosurface is convex (Fig.  2  \(b)), movement along the ray from that point in the same direction results in missing the isosurface entirely. Thus, before starting to trace the ray, the direction of movement should be chosen, as shown in Fig. 3. The choice is done by evaluating the transfer function at p. If the value is below the threshold, then movement direction coincides with the ray direction; if it is above the threshold, the opposite direction is used.
+
+The cases shown in Figs. 2 \(c) and \(d\) happen on the outlines of objects. In Fig. 4, the pixels where these cases happened are shown in red and white. The number of raytracing steps done for these pixels may be very big if they do not intersect the isosurface. This is especially relevant for red pixels, which lie at the boundary between the object and the background. Fortunately, there are very few such pixels.
+
+In the case shown in Fig. 2 \(e), the pixel may be culled, as the texels surrounding it show that there is no intersection with the isosurface. Raycasting is not done for these pixels. The culled pixels are shown in blue inFig. 4.
+
+The lower the resolution of the auxiliary texture, the larger the red and white regions. Handling these pixels takes a lot of time, so at some point increasing n leads to a decrease in performance. Experiments have shown that from the viewpoint of the algorithm's
+
+
+
+Fig. 2. Isosurface sampling: (a) concave, (b) convex, (c) object outline with no intersection, (d) intersected object outline, and (e) no isosurface.
+
+
+
+
+
 Fig. 3. Choosing the tracing direction.
-direction coincides with the ray direction; if it is above
-the threshold, the opposite direction is used.
-The cases shown in Figs. 2 (c) and (d) happen on
-the outlines of objects. In Fig. 4, the pixels where these
-cases happened are shown in red and white. The
-number of raytracing steps done for these pixels may
-be very big if they do not intersect the isosurface. This
-is especially relevant for red pixels, which lie at the
-boundary between the object and the background.
-Fortunately, there are very few such pixels.
-In the case shown in Fig. 2 (e), the pixel may be
-culled, as the texels surrounding it show that there is no
-intersection with the isosurface. Raycasting is not done
-for these pixels. The culled pixels are shown in blue in Fig. 4.
-The lower the resolution of the auxiliary texture, the
-larger the red and white regions. Handling these pixels
-takes a lot of time, so at some point increasing n leads
-to a decrease in performance. Experiments have
-shown that from the viewpoint of the algorithm’s
-Fig. 4. Colored points show pixels where the ray might not
-intersect the current isosurface. In this case, the ray may
-either intersect the next isosurface (white), or there might
-be no intersection at all (red).
-228
-JOURNAL OF ELECTRONIC SCIENCE AND TECHNOLOGY, VOL. 16, NO. 3, SEPTEMBER 2018
-runtime, the optimal value for n is around 5. However, for scenes containing fine detail or surfaces with large
-curvature, the value of n should be lower than the optimal resolution to prevent any artifacts.
-Fig. 5 shows the results of visualizing the isosurface for different threshold values of the transfer function. Some
-small isolated details can be noticed in Fig. 5 (b) and examined more closely in Figs. 5 (c) and (d). The size of
-auxiliary texture should be chosen carefully to prevent such pixels from being lost.
-Fig. 6 shows the results of the raycasting algorithm for different values of n. Particularly, Figs. 6 (e) to (g)
-highlight the data lost due to choosing auxiliary textures of various resolutions. For n=10, the artifacts are
-significant, whereas for n=2 there are almost none.
-Since the image of the model changes significantly depending on the view point and visualization parameters,
-and the goal is to maximize the performance without sacrificing quality, the optimal resolution for texture T must be
-chosen for each frame separately. A presented adaptive algorithm chooses the resolution using information from
-(c)
-(a)
-(b)
-(d)
-Fig. 5. Results of visualizing the same volumetric data with different threshold values for the transfer function: (a) smooth
-isosurface for a low threshold value and (b) spiky isosurface for a higher threshold; enlarged isolated small details: (c)
-“tooth” and (d) “lone” texels.
-(a)
-(b)
-(c)
-(d)
-(e)
-(f)
-(g)
-Fig. 6. Results for different values of n: (a) full-sized auxiliary texture for n=1; reduced auxiliary texture: (b) n=2, (c) n=5,
-and (d) n=10; the difference between the results for n=1 and the respective higher values of n: (e) n=2, (f) n=5, and (g)
-n=10.
-BELYAEV et al.: Adaptive Algorithm for Accelerating Direct Isosurface Rendering on GPU
-the texture T at frame i to automatically select the best
-value of n for frame i+1. The diagram in Fig. 7 shows
-the algorithm workflow for one frame.
-The auxiliary texture is analyzed by counting the
-number of lone and tooth texels. A lone texel is the one
-that contains the isosurface, but its neighboring texels
-do not; a tooth texel is the one that contains the
-isosurface and has only one neighbor that also contains
-the isosurface. Fig. 8 shows the examples of lone and
-tooth texels.
-The image is analyzed as follows: The ratio,
-denoted with S, of the number of lone and tooth texels
-to the total number of texels in T is calculated. Then the
-n-value for the auxiliary texture on the next frame can
-be determined by using
-8
-Smin 6 Si 6 Smax
-< ni ;
-n i +1= n i ¡ 1; Smax < Si
-(1)
-:
-n i + 1; Si < Smax
-where n 2 [2; 5] , Smax is chosen by the user as a
-quality parameter, and Smin=Smax/2 is set. The range
-of n-values is determined experimentally.
-To increase performance, the auxiliary texture
-analysis is done on CPU in parallel with the second
-step of the rendering process. The time taken to
-construct one frame is thus increased only by the time
-taken to load the auxiliary texture data from the GPU
-Visualize
-229
-Resulting
-image
-Select n
-for next frame
-Frame i
-GPU
-CPU
-First pass:
-Rendering T
-Copy
-Texture T
-Texture T
-Second pass:
-Ray casting
-T analysis
-Visualize Resulting
-image
-Select n
-for next frame
-Frame i+1
-GPU
-CPU
-First pass:
-Rendering T
+
+
+
+Fig. 4. Colored points show pixels where the ray might not intersect the current isosurface. In this case, the ray may either intersect the next isosurface (white), or there might be no intersection at all (red).
+
+runtime, the optimal value for n is around 5. However, for scenes containing fine detail or surfaces with large curvature, the value of n should be lower than the optimal resolution to prevent any artifacts.
+
+Fig. 5 shows the results of visualizing the isosurface for different threshold values of the transfer function. Some small isolated details can be noticed in Fig. 5 \(b) and examined more closely in Figs. 5 \(c) and \(d\). The size of auxiliary texture should be chosen carefully to prevent such pixels from being lost.
+
+Fig. 6 shows the results of the raycasting algorithm for different values of n. Particularly, Figs. 6 \(e) to \(g\) highlight the data lost due to choosing auxiliary textures of various resolutions. For n=10, the artifacts are significant, whereas for n=2 there are almost none.
+
+Since the image of the model changes significantly depending on the view point and visualization parameters, and the goal is to maximize the performance without sacrificing quality, the optimal resolution for texture T must be chosen for each frame separately. A presented adaptive algorithm chooses the resolution using information from
+
+
+
+Fig. 5. Results of visualizing the same volumetric data with different threshold values for the transfer function: (a) smooth isosurface for a low threshold value and (b) spiky isosurface for a higher threshold; enlarged isolated small details: (c) "tooth" and (d) "lone" texels.
+
+
+
+Fig. 6. Results for different values of n: (a) full-sized auxiliary texture for n=1; reduced auxiliary texture: (b) n=2, (c) n=5, and (d) n=10; the difference between the results for n=1 and the respective higher values of n: (e) n=2, (f) n=5, and (g) n=10.
+
+the texture T at frame i to automatically select the best value of n for frame i+1. The diagram in Fig. 7 shows the algorithm workflow for one frame.
+
+The auxiliary texture is analyzed by counting the number of lone and tooth texels. A lone texel is the one that contains the isosurface, but its neighboring texels do not; a tooth texel is the one that contains the isosurface and has only one neighbor that also contains the isosurface. Fig. 8 shows the examples of lone and tooth texels.
+
+The image is analyzed as follows: The ratio, denoted with S, of the number of lone and tooth texels to the total number of texels in T is calculated. Then the n-value for the auxiliary texture on the next frame can be determined by using
+
+$$n_{i+1} = \begin{cases} n_i, & S_{\min} \leq S_i \leq S_{\max} \\ n_i - 1, & S_{\max} < S_i \\ n_i + 1, & S_i < S_{\max} \end{cases} \quad (1)$$
+
+where n 2 [2*;* 5], S*max is chosen by the user as a quality parameter, and *S*min=*S*max/2 is set. The range of *n-values is determined experimentally.
+
+To increase performance, the auxiliary texture analysis is done on CPU in parallel with the second step of the rendering process. The time taken to construct one frame is thus increased only by the time taken to load the auxiliary texture data from the GPU memory to that of CPU.
+
+#### 4. Experiments
+
+To determine which n-value leads to the best performance, the presented algorithm was tested with different sparse and dense data sets. Fig. 9 demonstrates the used models. The results of experiments are listed in Table 1, where the factors of raycasting acceleration are presented as a function of n for each model.
+
+As can be seen from the table, the best performance is achieved when the n-value is close to 5. The average value of the acceleration factor over all the models is approximately equal to 8, but it is different for every model—those with less contour lines and more empty blocks get accelerated more.
+
+## 5. Conclusion and Future Work
+
+A approach for accelerating volume raycasting was presented. It used an auxiliary low-resolution texture, worked for any number of isosurfaces, and did not require preprocessing. The condition for the absence of any artifacts has been determined. As experiments shown, the algorithm accelerated the raycasting process by a factor of 8 on average (depending on the scene) if the ratio of the resolutions of the screen and auxiliary texture was close to 3. Presented adaptive algorithm changes the ratio at every frame.
+
+
+
 Fig. 7. Diagram of the adaptive algorithm.
-memory to that of CPU.
-4. Experiments
-To determine which n-value leads to the best performance, the presented algorithm was tested with different
-sparse and dense data sets. Fig. 9 demonstrates the used models. The results of experiments are listed in Table 1,
-where the factors of raycasting acceleration are presented as a function of n for each model.
-As can be seen from the table, the best performance is achieved when the n-value is close to 5. The average
-value of the acceleration factor over all the models is approximately equal to 8, but it is different for every
-model—those with less contour lines and more empty blocks get accelerated more.
-5. Conclusion and Future Work
-A approach for accelerating volume raycasting was presented. It used an auxiliary low-resolution texture,
-worked for any number of isosurfaces, and did not require preprocessing. The condition for the absence of any
-artifacts has been determined. As experiments shown, the algorithm accelerated the raycasting process by a factor
-of 8 on average (depending on the scene) if the ratio of the resolutions of the screen and auxiliary texture was
-close to 3. Presented adaptive algorithm changes the ratio at every frame.
-230
-JOURNAL OF ELECTRONIC SCIENCE AND TECHNOLOGY, VOL. 16, NO. 3, SEPTEMBER 2018
-(a)
-(b)
-Fig. 8. Particular cases where the texture resolution is important: (a) “lone” and (b) “tooth” texels.
-(a)
-(b)
-(c)
-(d)
-(e)
-(f)
-(g)
-(h)
-(i)
-Fig. 9. Models the algorithm was tested on: (a) head, (b) transparent head, (c) skull, (d) brain, (e) transparent brain, (f)
-electron density (near), (g) electron density (far), (h) chest, and (i) blood vessels.
+
 Table 1: Relationship between n and the raycasting acceleration factor
-Model
-n=2
-n=3
-n=4
-n=5
-n=6
-Head
-Transparent head
-Skull
-Brain
-Transparent brain
-Electron density (near)
-Electron density (far)
-Chest
-Blood vessels
-3.4
-3.2
-3.3
-3.1
-3.5
-3.0
-3.3
-3.3
-3.0
-7.7
-7.5
-7.2
-7.0
-7.9
-6.6
-7.4
-7.3
-5.9
-10.6
-10.1
-9.7
-9.6
-8.5
-8.2
-7.8
-7.1
-7.4
-11.4
-10.0
-9.6
-9.7
-9.4
-8.3
-7.5
-7.6
-6.3
-10.2
-9.4
-8.7
-9.1
-8.9
-7.8
-6.9
-7.5
-6.0
-BELYAEV et al.: Adaptive Algorithm for Accelerating Direct Isosurface Rendering on GPU
-231
-It should be noted that acceleration by a similar factor can be achieved by using preprocessing-based methods
-(for example, the one in [23]). Authors do not contrapose the proposed algorithm to other methods; in fact, if a
-situation allows preprocessing, the proposed approach may be used as an additional means of increasing the
-overall productivity.
+
+| Model                   | n =2 | n =3 | n =4 | n =5 | n =6 |
+|-------------------------|------|------|------|------|------|
+| Head                    | 3.4  | 7.7  | 10.6 | 11.4 | 10.2 |
+| Transparent head        | 3.2  | 7.5  | 10.1 | 10.0 | 9.4  |
+| Skull                   | 3.3  | 7.2  | 9.7  | 9.6  | 8.7  |
+| Brain                   | 3.1  | 7.0  | 9.6  | 9.7  | 9.1  |
+| Transparent brain       | 3.5  | 7.9  | 8.5  | 9.4  | 8.9  |
+| Electron density (near) | 3.0  | 6.6  | 8.2  | 8.3  | 7.8  |
+| Electron density (far)  | 3.3  | 7.4  | 7.8  | 7.5  | 6.9  |
+| Chest                   | 3.3  | 7.3  | 7.1  | 7.6  | 7.5  |
+| Blood vessels           | 3.0  | 5.9  | 7.4  | 6.3  | 6.0  |
+
+
+
+Fig. 8. Particular cases where the texture resolution is important: (a) "lone" and (b) "tooth" texels.
+
+
+
+
+
+Fig. 9. Models the algorithm was tested on: (a) head, (b) transparent head, (c) skull, (d) brain, (e) transparent brain, (f) electron density (near), (g) electron density (far), (h) chest, and (i) blood vessels.
+
+It should be noted that acceleration by a similar factor can be achieved by using preprocessing-based methods (for example, the one in [23]). Authors do not contrapose the proposed algorithm to other methods; in fact, if a situation allows preprocessing, the proposed approach may be used as an additional means of increasing the overall productivity.
+
 In future work, authors will examine methods that allow to avoid productivity regression for large n-values.
-References
-[1]
-W. E. Lorensen and H. E. Cline, “Marching cubes: A high resolution 3D surface construction algorithm,” in Proc. of
-the 14th Annual Conf. on Computer Graphics and Interactive Techniques, 1987, pp. 163-169.
-[2] B. R. de Araújo, D. S. Lopes, P. Jepp, J. A. Jorge, and B. Wyvill, “A survey on implicit surface polygonization,” ACM
-Computing Surveys, vol. 47, no. 4, pp. 60:1-39, 2015.
-[3] C. Dyken, G. Ziegler, C. Theobalt, and H. P. Seidel, “High-speed marching cubes using histopyramids,” Computer
-Graphics Forum, vol. 27, no. 8, pp. 2028-2039, 2008.
-[4] L. Xing, C.-C. Wang, and K.-C. Hui, “Coherent spherical range-search for dynamic points on GPUs,” ComputerAided Design, vol. 86, no. C, pp. 12-25, 2017.
-[5] J. Kruger and R. Westermann, “Acceleration techniques for GPU-based volume rendering,” in Proc. of the 14th IEEE
-Visualization, 2003, pp. 287-292.
-[6] M. Hadwiger, C. Sigg, H. Scharsach, K. Bühler, and M. Gross, “Real-time ray-casting and advanced shading of
-discrete isosurfaces,” Computer Graphics Forum, vol. 24, no. 3, pp. 303-312, 2005.
-[7] E. Gobbetti, F. Marton, and J. A. I. Guitian, “A single-pass GPU ray casting framework for interactive out-of-core
-rendering of massive volumetric datasets,” The Visual Computer, vol. 24, no. 7, pp. 797-806, 2008.
-[8] W. Hong, F. Qiu, and A. Kaufman, “GPU-based object-order ray-casting for large datasets,” in Proc. of the 4th Intl.
-Workshop on Volume Graphics, 2005, pp. 177-240.
-[9] F. Dong, M. Krokos, and G. Clapworthy, “Fast volume rendering and data classification using multiresolution in minmax octrees,” Computer Graphics Forum, vol. 19, no. 3, pp. 359-368, 2000.
-[10] J. Wilhelms and A. V. Gelder, “Octrees for faster isosurface generation,” ACM Trans. on Graphics, vol. 11, no. 3, pp.
-201-227, 1992.
-[11] P. Ljung, C. Lundstrom, A. Ynnerman, and K. Museth, “Transfer function based adaptive decompression for volume
-rendering of large medical data sets,” in Proc. of IEEE Symposium on Volume Visualization and Graphics, 2004, pp.
-25-32.
-[12] B. Liu, G. J. Clapworthy, F. Dong, and E. C. Prakash, “Octree rasterization: Accelerating high-quality out-of-core
-GPU volume rendering,” IEEE Trans. on Visualization & Computer Graphics, vol. 19, no. 10, pp. 1732-1745, 2013.
-[13] M. Hadwiger, P. Ljung, C. R. Salama, and T. Ropinski, “Advanced illumination techniques for GPU volume
-raycasting,” in Proc. of ACM Siggraph Asia 2008 Courses, 2008, pp. 1-166.
-[14] B. T. Stander and J. C. Hart, “A lipschitz method for accelerated volume rendering,” in Proc. of the 1994 Symposium
-on Volume Visualization, 1994, pp. 107-114.
-[15] A. Knoll, I. Wald, S. Parker, and C. Hansen, “Interactive isosurface ray tracing of large octree volumes,” in Proc. of
-IEEE Symposium on Interactive Ray Tracing, 2006, pp. 115-124.
-[16] T. Sharp, “Space skipping for multi-dimensional image rendering,” U.S. Patent 9 177 416, September 22, 2011.
-[17] I. Wald, H. Friedrich, G. Marmitt, P. Slusallek, and H. P. Seidel, “Faster isosurface ray tracing using implicit KDtrees,” IEEE Trans. on Visualization and Computer Graphics, vol. 11, no. 5, pp. 562-572, 2005.
-[18] H. Friedrich, I. Wald, J. Guenther, G. Marmitt, and P. Slusallek, “Interactive iso-surface ray tracing of massive
-volumetric data sets,” in Proc. of Eurographics Symposium on Parallel Graphics and Visualization, 2007, pp. 109116.
-[19] V. Vidal, X. Mei, and P. Decaudin, “Simple empty-space removal for interactive volume rendering,” Journal of
-Graphics Tools, vol. 13, no. 2, pp. 21-36, 2008.
-[20] D. M. Hughes and I. S. Lim, “KD-jump: A path-preserving stackless traversal for faster isosurface raytracing on
-GPUs,” IEEE Trans. on Visualization and Computer Graphics, vol. 15, no. 6, pp. 1555-1562, 2009.
-[21] A. Knoll, Y. Hijazi, R. Westerteiger, M. Schott, C. Hansen, and H. Hagen, “Volume ray casting with peak finding and
-differential sampling,” IEEE Trans. on Visualization and Computer Graphics, vol. 15, no. 6, pp. 1571-1578, 2009.
-[22] B. Liu, G. J. Clapworthy, and F. Dong, “Multi-layer depth peeling by single-pass rasterisation for faster isosurface
-raytracing on GPUs,” in Proc. of the 12th Eurographics/IEEE-VGTC Conf. on Visualization, 2010, pp. 1231-1240.
-232
-JOURNAL OF ELECTRONIC SCIENCE AND TECHNOLOGY, VOL. 16, NO. 3, SEPTEMBER 2018
-[23] B. Liu, G. J. Clapworthy, and F. Dong, “Isobas: A binary accelerating structure for fast isosurface rendering on
-GPUs,” Computers & Graphics, vol. 48, pp. 60-70, 2015, DOI: 10.1016/j.cag.2015.02.002
-[24] G. Ziegler, A. Tevs, C. Theobalt, and H.-P. Seidel, “On-the-fly point clouds through histogram pyramids,” in Proc. of
-the 11th Intl. Fall Workshop on Vision, Modeling and Visualization, 2006, pp. 137-144.
-[25] J. Mensmann, T. Ropinski, and K. Hinrichs, “Accelerating volume raycasting using occlusion frustums,” in Proc. of
-the 5th Eurographics/IEEE-VGTC Conf. on Point-Based Graphics, 2008, pp. 147-154.
-[26] S. Lindholm, D. Jönsson, H. Knutsson, and A. Ynnerman, “Towards data centric sampling for volume rendering,” in
-Proc. of SIGRAD, 2013, pp. 55-60.
-[27] K. Engel, M. Kraus, and T. Ertl, “High-quality pre-integrated volume rendering using hardware-accelerated pixel
-shading,” in Proc. of the ACM SIGGRAPH/Eurographics Workshop on Graphics Hardware, 2001, pp. 9-16.
-[28] E. B. Lum, B. Wilson, and K.-L. Ma, “High-quality lighting and efficient pre-integration for volume rendering,” in Proc.
-of the 6th Joint Eurographics-IEEE TCVG Conf. on Visualization, 2004, pp. 25-34.
-[29] L. Carpenter, “The A-buffer, an antialiased hidden surface method,” in Proc. of the 11th Annual Conf. on Computer
-Graphics and Interactive Techniques, 1984, pp. 103-108.
-[30] M. McGuire and M. Mara, “A phenomenological scattering model for order-independent transparency,” in Proc. of the
-20th ACM Symposium on Interactive 3D Graphics and Games, 2016, pp. 149-158.
-[31] J. Beyer, M. Hadwiger, and H. Pfister, “A survey of GPU-based large-scale volume visualization,” in EuroVis-STARs,
-R. Borgo, R. Maciejewski, and I. Viola, Eds. Geneve: The Eurographics Association, 2014.
-[32] B. Preim and C. P. Botha, Visual Computing for Medicine: Theory, Algorithms, and Applications, 2nd ed. San
-Francisco: Morgan Kaufmann Publishers Inc., 2013.
-[33] K. Wu, A. Knoll, B. J. Isaac, H. Carr, and V. Pascucci, “Direct multifield volume ray casting of fiber surfaces,” IEEE
-Trans. on Visualization and Computer Graphics, vol. 23, no. 1, pp. 941-949, 2017.
-[34] T. Klein, M. Strengert, S. Stegmaier, and T. Ertl, “Exploiting frame-to-frame coherence for accelerating high-quality
-volume raycasting on graphics hardware,” in Proc. of VIS 05. IEEE Visualization, 2005, pp. 223-230.
-[35] S. Grau and D. Tost, “Frame-to-frame coherent GPU ray-casting for time-varying volume data,” in Proc. of the
-Vision, Modeling, and Visualization Conf., 2007, pp. 61-70.
-[36] Optimize Hardware Rendering for Frame Rate or Quality, Autodesk Inc., 2014.
-[37] C. Woolley, D. Luebke, B. Watson, and A. Dayal, “Interruptible rendering,” in Proc. of the 2003 Symposium on
-Interactive 3D Graphics, 2003, pp. 143-151.
-[38] G. Wong and J. Wang, Real-Time Rendering: Computer Graphics with Control Engineering, Boca Raton: CRC
-Press, 2013.
-[39] A. Kratz, J. Reininghaus, M. Hadwiger, and I. Hotz. (February 2011). Adaptive screen-space sampling for volume
-ray-casting. Konrad-Zuse-Zentrum fr Informationstechnik Berlin. [Online]. Available: https://www.zib.de/hotz/
-publications/paper/kratz_techReport1104.pdf
-[40] S. Frey, F. Sadlo, K.-L. Ma, and T. Ertl, “Interactive progressive visualization with space-time error control,” IEEE
-Trans. on Visualization and Computer Graphics, vol. 20, no. 12, pp. 2397-2406, 2014.
-[41] V. Bruder, S. Frey, and T. Ertl, “Real-time performance prediction and tuning for interactive volume raycasting,” in
-Proc. of SIGGRAPH ASIA 2016 Symposium on Visualization, 2016, pp. 7:1-8.
-Sergey Belyaev received his Ph.D. degree from Leningrad Polytechnic Institute, St. Petersburg in
-1983. He has 35 years of teaching, scientific research, and software engineering experience. Now
-he is an associate professor with the Department of Applied Mathematics, Peter the Great St.
-Petersburg Polytechnic University, St. Petersburg. He is also working as a senior project manager
-with EPAM Systems Inc. His main research interest is real-time computer graphics algorithms.
-BELYAEV et al.: Adaptive Algorithm for Accelerating Direct Isosurface Rendering on GPU
-233
-Pavel Smirnov received his B.S. and M.S. degrees in applied mathematics and informatics from St.
-Petersburg State Technical University, St. Petersburg in 2000 and 2002, respectively. He received
-his Ph.D. degree in mathematical modelling, numerical methods, and software systems from Peter
-the Great St. Petersburg Polytechnic University in 2014. Since 2005, he has been an assistant
-professor and then an associate professor with the Department of Applied Mathematics, Peter the
-Great St. Petersburg Polytechnic University. He is also working as a chief software engineer with
-EPAM Systems Inc. His research interests include computer graphics algorithms and robust
-methods of mathematical statistics.
-Vladislav Shubnikov received his M.S. degree in applied mathematics from St. Petersburg State
-Technical University in 1995. He received his Ph.D. degree from the Bonch-Bruevich St. Petersburg
-State University of Telecommunications, St. Petersburg in 2002. Since 1995, he has been an
-assistant professor and then an associate professor with the Department of Applied Mathematics,
-Peter the Great St. Petersburg Polytechnic University. He is also working as a senior software
-engineer with EPAM Systems Inc. His research interests include image processing, pattern
-recognition, machine learning, 3D reconstruction, and predictive models.
-Natalia Smirnova received her B.S. and M.S. degrees in applied mathematics and informatics from
-the Department of Applied Mathematics, Institute of Applied Mathematics and Mechanics, Peter the
-Great St. Petersburg Polytechnic University in 2003 and 2005, respectively. Since 2006, she has
-been an assistant professor and then a senior lecturer with the Department of Applied Mathematics,
-Peter the Great St. Petersburg Polytechnic University. She is also working as a senior software
-engineer with EPAM Systems Inc. Her main research interest is real-time computer graphics
-algorithms.
+
+#### References
+
+- W. E. Lorensen and H. E. Cline, "Marching cubes: A high resolution 3D surface construction algorithm," in Proc. of the 14th Annual Conf. on Computer Graphics and Interactive Techniques, 1987, pp. 163-169. [1]
+- B. R. de Araújo, D. S. Lopes, P. Jepp, J. A. Jorge, and B. Wyvill, "A survey on implicit surface polygonization," ACM Computing Surveys, vol. 47, no. 4, pp. 60:1-39, 2015. [2]
+- C. Dyken, G. Ziegler, C. Theobalt, and H. P. Seidel, "High-speed marching cubes using histopyramids," Computer Graphics Forum, vol. 27, no. 8, pp. 2028-2039, 2008. [3]
+- L. Xing, C.-C. Wang, and K.-C. Hui, "Coherent spherical range-search for dynamic points on GPUs," Computer-Aided Design, vol. 86, no. C, pp. 12-25, 2017. [4]
+- J. Kruger and R. Westermann, "Acceleration techniques for GPU-based volume rendering," in Proc. of the 14th IEEE Visualization, 2003, pp. 287-292. [5]
+- M. Hadwiger, C. Sigg, H. Scharsach, K. Bühler, and M. Gross, "Real-time ray-casting and advanced shading of discrete isosurfaces," Computer Graphics Forum, vol. 24, no. 3, pp. 303-312, 2005. [6]
+- E. Gobbetti, F. Marton, and J. A. I. Guitian, "A single-pass GPU ray casting framework for interactive out-of-core rendering of massive volumetric datasets," The Visual Computer, vol. 24, no. 7, pp. 797-806, 2008. [7]
+- W. Hong, F. Qiu, and A. Kaufman, "GPU-based object-order ray-casting for large datasets," in Proc. of the 4th Intl. Workshop on Volume Graphics, 2005, pp. 177-240. [8]
+- F. Dong, M. Krokos, and G. Clapworthy, "Fast volume rendering and data classification using multiresolution in minmax octrees," Computer Graphics Forum, vol. 19, no. 3, pp. 359-368, 2000. [9]
+- J. Wilhelms and A. V. Gelder, "Octrees for faster isosurface generation," ACM Trans. on Graphics, vol. 11, no. 3, pp. 201-227, 1992. [10]
+- P. Ljung, C. Lundstrom, A. Ynnerman, and K. Museth, "Transfer function based adaptive decompression for volume rendering of large medical data sets," in Proc. of IEEE Symposium on Volume Visualization and Graphics, 2004, pp. 25-32. [11]
+- B. Liu, G. J. Clapworthy, F. Dong, and E. C. Prakash, "Octree rasterization: Accelerating high-quality out-of-core GPU volume rendering," IEEE Trans. on Visualization & Computer Graphics, vol. 19, no. 10, pp. 1732-1745, 2013. [12]
+- M. Hadwiger, P. Ljung, C. R. Salama, and T. Ropinski, "Advanced illumination techniques for GPU volume raycasting," in Proc. of ACM Siggraph Asia 2008 Courses, 2008, pp. 1-166. [13]
+- B. T. Stander and J. C. Hart, "A lipschitz method for accelerated volume rendering," in Proc. of the 1994 Symposium on Volume Visualization, 1994, pp. 107-114. [14]
+- A. Knoll, I. Wald, S. Parker, and C. Hansen, "Interactive isosurface ray tracing of large octree volumes," in Proc. of IEEE Symposium on Interactive Ray Tracing, 2006, pp. 115-124. [15] [16] T. Sharp, "Space skipping for multi-dimensional image rendering," U.S. Patent 9 177 416, September 22, 2011.
+- I. Wald, H. Friedrich, G. Marmitt, P. Slusallek, and H. P. Seidel, "Faster isosurface ray tracing using implicit KDtrees," IEEE Trans. on Visualization and Computer Graphics, vol. 11, no. 5, pp. 562-572, 2005. [17]
+  - H. Friedrich, I. Wald, J. Guenther, G. Marmitt, and P. Slusallek, "Interactive iso-surface ray tracing of massive volumetric data sets," in Proc. of Eurographics Symposium on Parallel Graphics and Visualization, 2007, pp. 109-
+- 116. [18]
+- V. Vidal, X. Mei, and P. Decaudin, "Simple empty-space removal for interactive volume rendering," Journal of Graphics Tools, vol. 13, no. 2, pp. 21-36, 2008. [19]
+- D. M. Hughes and I. S. Lim, "KD-jump: A path-preserving stackless traversal for faster isosurface raytracing on GPUs," IEEE Trans. on Visualization and Computer Graphics, vol. 15, no. 6, pp. 1555-1562, 2009. [20]
+- A. Knoll, Y. Hijazi, R. Westerteiger, M. Schott, C. Hansen, and H. Hagen, "Volume ray casting with peak finding and differential sampling," IEEE Trans. on Visualization and Computer Graphics, vol. 15, no. 6, pp. 1571-1578, 2009. [21]
+- B. Liu, G. J. Clapworthy, and F. Dong, "Multi-layer depth peeling by single-pass rasterisation for faster isosurface raytracing on GPUs," in Proc. of the 12th Eurographics/IEEE-VGTC Conf. on Visualization, 2010, pp. 1231-1240. [22]
+
+- B. Liu, G. J. Clapworthy, and F. Dong, "Isobas: A binary accelerating structure for fast isosurface rendering on GPUs," Computers & Graphics, vol. 48, pp. 60-70, 2015, DOI: [10.1016/j.cag.2015.02.002](http://dx.doi.org/10.1016/j.cag.2015.02.002) [23]
+- G. Ziegler, A. Tevs, C. Theobalt, and H.-P. Seidel, "On-the-fly point clouds through histogram pyramids," in Proc. of the 11th Intl. Fall Workshop on Vision, Modeling and Visualization, 2006, pp. 137-144. [24]
+- J. Mensmann, T. Ropinski, and K. Hinrichs, "Accelerating volume raycasting using occlusion frustums," in Proc. of the 5th Eurographics/IEEE-VGTC Conf. on Point-Based Graphics, 2008, pp. 147-154. [25]
+- S. Lindholm, D. Jönsson, H. Knutsson, and A. Ynnerman, "Towards data centric sampling for volume rendering," in Proc. of SIGRAD, 2013, pp. 55-60. [26]
+- K. Engel, M. Kraus, and T. Ertl, "High-quality pre-integrated volume rendering using hardware-accelerated pixel shading," in Proc. of the ACM SIGGRAPH/Eurographics Workshop on Graphics Hardware, 2001, pp. 9-16. [27]
+- E. B. Lum, B. Wilson, and K.-L. Ma, "High-quality lighting and efficient pre-integration for volume rendering," in Proc. of the 6th Joint Eurographics-IEEE TCVG Conf. on Visualization, 2004, pp. 25-34. [28]
+- L. Carpenter, "The A-buffer, an antialiased hidden surface method," in Proc. of the 11th Annual Conf. on Computer Graphics and Interactive Techniques, 1984, pp. 103-108. [29]
+- M. McGuire and M. Mara, "A phenomenological scattering model for order-independent transparency," in Proc. of the 20th ACM Symposium on Interactive 3D Graphics and Games, 2016, pp. 149-158. [30]
+  - J. Beyer, M. Hadwiger, and H. Pfister, "A survey of GPU-based large-scale volume visualization," in EuroVis-STARs,
+- R. Borgo, R. Maciejewski, and I. Viola, Eds. Geneve: The Eurographics Association, 2014. [31]
+- B. Preim and C. P. Botha, Visual Computing for Medicine: Theory, Algorithms, and Applications, 2nd ed. San Francisco: Morgan Kaufmann Publishers Inc., 2013. [32]
+- K. Wu, A. Knoll, B. J. Isaac, H. Carr, and V. Pascucci, "Direct multifield volume ray casting of fiber surfaces," IEEE Trans. on Visualization and Computer Graphics, vol. 23, no. 1, pp. 941-949, 2017. [33]
+- T. Klein, M. Strengert, S. Stegmaier, and T. Ertl, "Exploiting frame-to-frame coherence for accelerating high-quality volume raycasting on graphics hardware," in Proc. of VIS 05. IEEE Visualization, 2005, pp. 223-230. [34]
+- S. Grau and D. Tost, "Frame-to-frame coherent GPU ray-casting for time-varying volume data," in Proc. of the Vision, Modeling, and Visualization Conf., 2007, pp. 61-70. [35] [36] Optimize Hardware Rendering for Frame Rate or Quality, Autodesk Inc., 2014.
+- C. Woolley, D. Luebke, B. Watson, and A. Dayal, "Interruptible rendering," in Proc. of t[he](https://www.zib.de/hotz/publications/paper/kratz_techReport1104.pdf) [2003](https://www.zib.de/hotz/publications/paper/kratz_techReport1104.pdf) [Symposium](https://www.zib.de/hotz/publications/paper/kratz_techReport1104.pdf) [on](https://www.zib.de/hotz/publications/paper/kratz_techReport1104.pdf) [Interactive 3D Graphics](https://www.zib.de/hotz/publications/paper/kratz_techReport1104.pdf), 2003, pp. 143-151. [37]
+- G. Wong and J. Wang, Real-Time Rendering: Computer Graphics with Control Engineering, Boca Raton: CRC Press, 2013. [38]
+- A. Kratz, J. Reininghaus, M. Hadwiger, and I. Hotz. (February 2011). Adaptive screen-space sampling for volume ray-casting. Konrad-Zuse-Zentrum fr Informationstechnik Berlin. [Online]. Available: [https://www.zib.de/hotz/](https://www.zib.de/hotz/publications/paper/kratz_techReport1104.pdf) [publications/paper/kratz\\_techReport1104.pdf](https://www.zib.de/hotz/publications/paper/kratz_techReport1104.pdf) [39]
+- S. Frey, F. Sadlo, K.-L. Ma, and T. Ertl, "Interactive progressive visualization with space-time error control," IEEE Trans. on Visualization and Computer Graphics, vol. 20, no. 12, pp. 2397-2406, 2014. [40]
+- V. Bruder, S. Frey, and T. Ertl, "Real-time performance prediction and tuning for interactive volume raycasting," in Proc. of SIGGRAPH ASIA 2016 Symposium on Visualization, 2016, pp. 7:1-8. [41]
+
+Sergey Belyaev received his Ph.D. degree from Leningrad Polytechnic Institute, St. Petersburg in 1983. He has 35 years of teaching, scientific research, and software engineering experience. Now he is an associate professor with the Department of Applied Mathematics, Peter the Great St. Petersburg Polytechnic University, St. Petersburg. He is also working as a senior project manager with EPAM Systems Inc. His main research interest is real-time computer graphics algorithms.
+
+
+
+Pavel Smirnov received his B.S. and M.S. degrees in applied mathematics and informatics from St. Petersburg State Technical University, St. Petersburg in 2000 and 2002, respectively. He received his Ph.D. degree in mathematical modelling, numerical methods, and software systems from Peter the Great St. Petersburg Polytechnic University in 2014. Since 2005, he has been an assistant professor and then an associate professor with the Department of Applied Mathematics, Peter the Great St. Petersburg Polytechnic University. He is also working as a chief software engineer with EPAM Systems Inc. His research interests include computer graphics algorithms and robust methods of mathematical statistics.
+
+
+
+Vladislav Shubnikov received his M.S. degree in applied mathematics from St. Petersburg State Technical University in 1995. He received his Ph.D. degree from the Bonch-Bruevich St. Petersburg State University of Telecommunications, St. Petersburg in 2002. Since 1995, he has been an assistant professor and then an associate professor with the Department of Applied Mathematics, Peter the Great St. Petersburg Polytechnic University. He is also working as a senior software engineer with EPAM Systems Inc. His research interests include image processing, pattern recognition, machine learning, 3D reconstruction, and predictive models.
+
+
+
+Natalia Smirnova received her B.S. and M.S. degrees in applied mathematics and informatics from the Department of Applied Mathematics, Institute of Applied Mathematics and Mechanics, Peter the Great St. Petersburg Polytechnic University in 2003 and 2005, respectively. Since 2006, she has been an assistant professor and then a senior lecturer with the Department of Applied Mathematics, Peter the Great St. Petersburg Polytechnic University. She is also working as a senior software engineer with EPAM Systems Inc. Her main research interest is real-time computer graphics algorithms.

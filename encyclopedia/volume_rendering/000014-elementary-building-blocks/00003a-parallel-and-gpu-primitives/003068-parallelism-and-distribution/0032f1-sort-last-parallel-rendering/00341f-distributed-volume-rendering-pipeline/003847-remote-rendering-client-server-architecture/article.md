@@ -1,0 +1,112 @@
+# Remote Rendering Client/Server Architecture
+
+Also called: I/O subsystem, Remote client, Remote server
+
+## Overview
+A software architecture where remote clients establish network connections to remote servers that own renderers, enabling distributed rendering, compositing, and display [S1, unofficial]. It decouples the user interface and interaction logic from the heavy computational volume rendering tasks, allowing the rendering engine to run on separate hardware [S2, unofficial]. This approach facilitates sort-last parallel rendering on distributed memory systems and heterogeneous HPC clusters by allowing multiple server nodes to render partial views or bricks which are then composited [S1, unofficial]. It sets itself apart from local rendering by introducing a network transport layer that can be specialized for different hardware topologies (e.g., shared memory vs. InfiniBand) [S1, unofficial].
+
+## How it works
+The architecture relies on a separation of concerns between a **Remote Client** (which may be a display client or an image viewer) and a **Remote Server** (which owns the actual renderer instance).
+
+**Inputs and Outputs:**
+*   **Input:** User interaction events (viewpoint changes, transparency adjustments) at the client; volume dataset metadata and location at the server.
+*   **Output:** Rendered 2D images sent from server to client for display.
+
+**Data Structures:**
+*   **Remote Client:** An abstract base class responsible for establishing and maintaining a network connection to a remote server [S1, unofficial]. It handles the serialization of events and deserialization of image data.
+*   **Remote Server:** An object that owns exactly one renderer instance [S1, unofficial]. It listens for incoming connections and events.
+*   **I/O Subsystem:** A replaceable component within the client/server pair that handles the actual data transmission. It can be specialized to use TCP/IP, InfiniBand, or shared memory [S1, unofficial].
+
+**Steps:**
+1.  **Initialization:** The Remote Client establishes a network connection to the Remote Server [S1, unofficial].
+2.  **Event Dispatch:** When the user modifies visualization parameters (e.g., viewpoint, transfer function), the Remote Client serializes these changes into an update-request message [S2, unofficial].
+3.  **Transmission:** The I/O subsystem sends the message to the Remote Server over the configured protocol [S1, unofficial].
+4.  **Rendering:** The Remote Server receives the message. Depending on the variant, it may either:
+    *   Immediately trigger a new render pass [S1, unofficial].
+    *   Buffer the message and process the youngest received message only after the current image pair is completed (asynchronous update) [S2, unofficial].
+5.  **Image Transfer:** The Remote Server renders the volume and sends the resulting image data back to the Remote Client [S1, unofficial].
+6.  **Display:** The Remote Client receives the image and displays it on the screen, potentially using OpenGL for rendering the 2D image [S1, unofficial].
+
+**Formulas and Parameters:**
+*   **Communication Protocol:** Configurable. Supports TCP/IP, InfiniBand, or shared memory [S1, unofficial].
+*   **Latency Optimization:** Shared memory implementation is used when the remote client and server processes run on the same physical machine to avoid network protocol latency [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class RemoteClient:
+    def __init__(self, server_address, protocol):
+        self.io_subsystem = IOSubsystem(server_address, protocol)
+        self.renderer_owned = False # Client does not own renderer
+
+    def send_event(self, event_data):
+        """Serialize and send user interaction events to the server."""
+        self.io_subsystem.send(event_data)
+
+    def receive_image(self):
+        """Deserialize and return the rendered image from the server."""
+        return self.io_subsystem.receive()
+
+class RemoteServer:
+    def __init__(self, renderer):
+        self.renderer = renderer
+        self.io_subsystem = IOSubsystem() # Listens for connections
+
+    def process_event(self, event_data):
+        """Handle incoming events and trigger rendering."""
+        # Apply event to renderer state
+        self.renderer.apply_parameters(event_data)
+        
+        # Render the volume
+        image = self.renderer.render()
+        
+        # Send image back to client
+        self.io_subsystem.send(image)
+
+class IOSubsystem:
+    def __init__(self, address=None, protocol="tcp"):
+        self.protocol = protocol
+        if protocol == "shared_memory":
+            # Initialize shared memory segment
+            self.buffer = SharedMemoryBuffer()
+        elif protocol == "tcp":
+            self.socket = TCPConnection(address)
+        # Note: InfiniBand implementation details are not given in sources [G]
+
+    def send(self, data):
+        if self.protocol == "shared_memory":
+            self.buffer.write(data)
+        elif self.protocol == "tcp":
+            self.socket.send(data)
+        # Note: UDP implementation details for specific variants are in Subtopics [G]
+
+    def receive(self):
+        if self.protocol == "shared_memory":
+            return self.buffer.read()
+        elif self.protocol == "tcp":
+            return self.socket.recv()
+```
+
+## Subtopics
+
+### Asynchronous UDP Client-Server Volume Rendering
+A distributed rendering architecture where volume rendering is performed on a separate server PC and images are transferred via UDP/IP to a client [S2, unofficial]. It is chosen when low network latency and high throughput are required, and the continuous stream of images allows for idempotent updates, making the unreliability of UDP acceptable [S2, unofficial]. It differs from standard TCP-based client-server models by ignoring incoming packets during active rendering and processing only the youngest message after an image pair is completed, reducing latency compared to request/acknowledge cycles [S2, unofficial].
+
+### GPU Cluster Sort-last Rendering with MPI
+A variant where a thin client communicates via TCP/IP as an image viewer handling user input, while server nodes communicate and synchronize using Message Passing Interface (MPI) [S3, unofficial]. It is chosen for GPU clusters where nodes have hardware accelerators and require coordinated parallel rendering [S3, unofficial]. It differs from the basic client-server model by introducing MPI for inter-server synchronization and compositing, allowing partial images to be sent to the client either gathered and composited or directly without compositing, with optional compression [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Rendering time is dominated by the volume rendering algorithm on the server. Network latency adds overhead to event propagation and image transfer. Asynchronous UDP variants reduce latency by avoiding handshake delays [S2, unofficial].
+*   **Memory Complexity:** Requires memory for the volume dataset on the server side. Client memory is limited to storing the current image frame and UI state [S1, unofficial].
+*   **Strengths:** Enables distributed rendering on heterogeneous HPC clusters; decouples interaction from rendering; flexible communication layer (shared memory, TCP, InfiniBand) [S1, unofficial].
+*   **Limitations:** Network bandwidth can become a bottleneck for high-resolution images; asynchronous UDP may drop packets (though mitigated by continuous updates) [S2, unofficial].
+*   **When to use:** When rendering resources are distributed across multiple machines or when the user interface must remain responsive during heavy rendering tasks [S1, unofficial][S2, unofficial].
+
+## Background
+The architecture originated from the need to distribute volume rendering tasks on High-Performance Computing (HPC) systems. It was formalized in a software architecture for distributed volume rendering that utilizes an abstract base class for remote clients and servers, allowing for generalization of renderer components [S1, unofficial]. The asynchronous UDP variant was developed for virtual environments to ensure that rendering delays did not impair interaction mechanisms, leveraging the connectionless nature of UDP for low latency [S2, unofficial]. GPU cluster variants emerged with the advent of GPU-accelerated rendering, utilizing MPI for synchronization among server nodes [S3, unofficial].
+
+## Sources
+[S1] A SOFTWARE ARCHITECTURE FOR DISTRIBUTED VOLUME RENDERING ON ... - Actapress, https://actapress.com/Abstract.aspx?paperId=454770, fetched 2026-10-27 (unofficial)
+[S2] Distributed Software-Based Volume Visualization in a Virtual Environment, https://doi.org/10.2312/egve/ipt_egve2005/129-140, fetched 2026-10-26 (unofficial)
+[S3] Volume Visualization and Compositing on Large-Scale Displays Using Handheld Touchscreen Interaction, https://doi.org/10.25781/kaust-d5m7l, fetched 2026-10-26 (unofficial)

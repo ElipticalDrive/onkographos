@@ -2,52 +2,48 @@
 Also called: Fuzzy Metaballs rendering, Sort-free Gaussian rendering
 
 ## Overview
-Weighted Blending is a sort-free ray-marching technique for 3D Gaussians that computes the intersection of a ray with each Gaussian independently and combines these intersections via a weighted average of their depths [S1, unofficial]. Unlike NeRF-style methods that sort intersections by depth and use closer Gaussians to attenuate further ones, this method blends all intersections simultaneously, avoiding the computational cost and complexity of sorting [S1, unofficial]. It builds on [Ray-marching on 3D Gaussians](1036-ray-marching-on-3d-gaussians.md) by providing a specific heuristic for combining ray-Gaussian intersections without explicit ordering.
+Weighted Blending is a sort-free ray-marching technique for 3D Gaussians that computes the intersection of a ray with each Gaussian independently and combines these intersections via a weighted average of their depths [S1, unofficial]. Unlike NeRF-style methods that sort intersections by depth and use closer Gaussians to attenuate further ones, this method blends all intersections simultaneously, avoiding the computational cost and complexity of sorting [S1, unofficial]. It builds on [Ray-marching on 3D Gaussians](1036-ray-marching-on-3d-gaussians.md) by providing a specific heuristic for combining ray-Gaussian intersections without explicit ordering [S1, unofficial].
 
 ## How it works
-**Inputs:** A ray defined by origin $\vec{o}$ and direction $\vec{v}$, and a set of $N$ 3D Gaussians. Each Gaussian $i$ is defined by its mean $\mu_i \in \mathbb{R}^3$, inverse covariance matrix $\Sigma_i^{-1}$, and weight $\lambda_i \ge 0$ (where $\sum_i \lambda_i = 1$ in the original formulation) [S1, unofficial].
+**Inputs:** A ray defined by origin $\vec{o}$ and direction $\vec{v}$, and a set of $N$ 3D Gaussians [G]. Each Gaussian $i$ is defined by its mean $\mu_i \in \mathbb{R}^3$, inverse covariance matrix $\Sigma_i^{-1}$, and weight $\lambda_i \ge 0$ (where $\sum_i \lambda_i = 1$ in the original formulation) [S1, unofficial].
 
 **Outputs:** A final intersection depth $t_f$, and optionally the accumulated opacity $\alpha$, color, or normal at that depth [S1, unofficial].
 
 **Data Structures:**
-*   **Gaussian:** Stores $\mu_i$ (3 floats), $\Sigma_i^{-1}$ (9 floats, symmetric), $\lambda_i$ (1 float), and potentially color/SH coefficients.
-*   **Ray:** Origin $\vec{o}$ (3 floats), Direction $\vec{v}$ (3 floats, normalized).
-*   **Per-Gaussian Intersection Data:** For each Gaussian $i$, compute and store:
-    *   $t_i$: Intersection depth along the ray.
-    *   $d_i$: Unnormalized log distance (density log).
-    *   $w_i$: Weight for blending.
-    *   $\delta_i$: Unnormalized Gaussian density.
+*   **Gaussian:** Stores $\mu_i$ (3 floats), $\Sigma_i^{-1}$ (9 floats, symmetric), $\lambda_i$ (1 float), and potentially color/SH coefficients [S1, unofficial].
+*   **Ray:** Origin $\vec{o}$ (3 floats), Direction $\vec{v}$ (3 floats, normalized) [G].
+*   **Per-Gaussian Intersection Data:** For each Gaussian $i$, compute and store: $t_i$ (intersection depth), $d_i$ (unnormalized log distance), $w_i$ (weight), and $\delta_i$ (unnormalized density) [S1, unofficial].
 
 **Steps:**
 
 1.  **Compute Intersection Depth ($t_i$):**
     For each Gaussian $i$, calculate the intersection point parameter $t_i$ using the linear approach (point of maximum likelihood) [S1, unofficial]:
     $$ t_i = \frac{\mu_i^T \Sigma_i^{-1} \vec{v}}{\vec{v}^T \Sigma_i^{-1} \vec{v}} $$
-    Note: This assumes the ray origin is at the camera center or the formula is adjusted for ray origin $\vec{o}$. The source uses $\vec{v}$ as the ray direction vector in the numerator/denominator context implying a ray from origin or a specific linearization. Standard ray equation is $\vec{p}(t) = \vec{o} + t\vec{v}$. The source formula $t_i = (\mu_i^T \Sigma_i^{-1} \vec{v}) / (\vec{v}^T \Sigma_i^{-1} \vec{v})$ appears to assume $\vec{o}=0$ or defines $t$ relative to the projection of $\mu$ onto $\vec{v}$ in the metric defined by $\Sigma^{-1}$. For a general ray $\vec{o} + t\vec{v}$, the intersection maximizing the Gaussian density along the ray is found by solving $\nabla_t P(\vec{o}+t\vec{v}) = 0$. The source explicitly states this linear approach [S1, unofficial].
+    This formula assumes the ray origin is at the camera center or uses a specific linearization relative to the projection of $\mu$ onto $\vec{v}$ in the metric defined by $\Sigma^{-1}$ [S1, unofficial]. The standard ray equation is $\vec{p}(t) = \vec{o} + t\vec{v}$ [G]. For a general ray, the intersection maximizing Gaussian density is found by solving $\nabla_t P(\vec{o}+t\vec{v}) = 0$ [G]. The source explicitly states this linear approach [S1, unofficial].
 
 2.  **Compute Unnormalized Log Distance ($d_i$):**
     Calculate the unnormalized log distance for Gaussian $i$ at the intersection point $\vec{p}_i = \vec{o} + t_i \vec{v}$ [S1, unofficial]:
     $$ d_i = -\frac{1}{2} \left[ (\vec{p}_i - \mu_i)^T \Sigma_i^{-1} (\vec{p}_i - \mu_i) \right] + \log(\lambda_i) $$
-    If $\lambda_i = 0$, $d_i = -\infty$.
+    If $\lambda_i = 0$, $d_i = -\infty$ [G].
 
 3.  **Compute Unnormalized Density ($\delta_i$):**
     $$ \delta_i = \exp(d_i) $$
+    This represents the unnormalized Gaussian density [S1, unofficial].
 
 4.  **Compute Weights ($w_i$):**
-    The weights depend on the variant used (see Subtopics). For the original model:
+    The weights depend on the variant used (see Subtopics) [S1, unofficial]. For the original model:
     $$ w_i = \exp \left( \beta_1 d_i \sigma \left( \frac{\beta_3}{\eta} t_i \right) - \frac{\beta_2}{\eta} t_i \right) $$
-    where $\sigma(x) = \frac{1}{1+e^{-x}}$ is the sigmoid function [S1, unofficial].
+    where $\sigma(x) = \frac{1}{1+e^{-x}}$ is the sigmoid function [G].
 
 5.  **Compute Final Intersection Depth ($t_f$):**
     Blend the intersection depths using the computed weights [S1, unofficial]:
     $$ t_f = \frac{\sum_i w_i t_i}{\sum_i w_i} $$
-    This same weighted average structure can be applied to other properties like color $\vec{c}_i$ or normal $\vec{n}_i$:
-    $$ \vec{c}_f = \frac{\sum_i w_i \vec{c}_i}{\sum_i w_i}, \quad \vec{n}_f = \frac{\sum_i w_i \vec{n}_i}{\sum_i w_i} $$
+    This same weighted average structure can be applied to other properties like color $\vec{c}_i$ or normal $\vec{n}_i$ [S1, unofficial].
 
 6.  **Compute Opacity ($\alpha$):**
     The final opacity is computed from the sum of unnormalized densities [S1, unofficial]:
     $$ \alpha = \sigma \left( \beta_4 \sum_i \delta_i + \beta_5 \right) $$
-    (For the simplified model, see Subtopics).
+    (For the simplified model, see Subtopics) [S1, unofficial].
 
 **Parameters:**
 *   $\beta_1, \beta_2, \beta_3, \beta_4, \beta_5$: Hyperparameters controlling the weight and transparency functions [S1, unofficial].
@@ -57,7 +53,7 @@ Weighted Blending is a sort-free ray-marching technique for 3D Gaussians that co
 **Edge Cases and Pitfalls:**
 *   **Division by Zero:** If $\sum_i w_i = 0$ (e.g., all Gaussians are far away or have $\lambda_i=0$), $t_f$ is undefined. A guard should return a default depth or handle the empty case [G].
 *   **Precision:** Computing $\exp(d_i)$ can lead to overflow or underflow if $d_i$ is large positive or large negative. Clamping or using log-space arithmetic is recommended [G].
-*   **Behind Camera:** Intersections with $t_i < 0$ (behind the camera) may contribute in the original model via the sigmoid term. In practice, these are often ignored or handled by the $\beta_3$ term [S1, unofficial].
+*   **Behind Camera:** Intersections with $t_i < 0$ (behind the camera) may contribute in the original model via the sigmoid term [S1, unofficial]. In practice, these are often ignored or handled by the $\beta_3$ term [S1, unofficial].
 
 ## Subtopics
 

@@ -1,0 +1,169 @@
+# Inverse Multiquadric Splatting
+
+Also called: 3DIQS, Inverse Multiquadric
+
+## Overview
+Inverse Multiquadric Splatting is a radiance-field optimization technique that replaces the standard Gaussian radial basis function with an inverse multiquadric function to alter the decay profile of splats during rasterization [S1]. It differs from standard 3D Gaussian Splatting by using a slower-decaying tail, which requires a specific correction factor for the covariance matrix to maintain visual fidelity [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** 3D Gaussian parameters (mean $\mu$, covariance $\Sigma$, opacity $w$), camera projection matrices, and screen-space tile boundaries.
+*   **Output:** Screen-space alpha values $\alpha$ and gradients $\frac{\partial L}{\partial \mu}, \frac{\partial L}{\partial \Sigma}, \frac{\partial L}{\partial w}$ for backpropagation.
+
+**Data Structures:**
+The method operates on the 2D conic matrix (inverse covariance) $\Sigma'_{2 \times 2}^{-1}$ projected from 3D, represented by components $(a, b, c, w)$ where the matrix is $\begin{pmatrix} a & b \\ b & c \end{pmatrix}$ and $w$ is the opacity. The 2D mean offset is $d = (d.x, d.y) = (x - \mu'_x, y - \mu'_y)$.
+
+**Parameters:**
+*   `correctionFactor`: A scalar multiplier applied to the 3D covariance matrix $\Sigma$ and the 2D covariance matrix $\Sigma'_{2 \times 2}$ during forward and backward passes. Value: $1.38$ [S1].
+*   `ellipse_limit`: The upper bound for the ellipse quadratic form. Value: $9.0$ [S1].
+*   `alpha_max`: The maximum opacity value. Value: $0.99$ [S1].
+
+**Steps:**
+
+1.  **Covariance Correction:** Multiply the 3D covariance matrix $\Sigma$ by `correctionFactor` ($1.38$) before projection [S1].
+2.  **Projection:** Project the 3D Gaussian to 2D screen space to obtain the 2D mean $\mu'$ and the 2D conic matrix components $(a, b, c)$ and opacity $w$. Let $\Sigma'_{2 \times 2}^{-1} = \begin{pmatrix} a & b \\ b & c \end{pmatrix}$ [S1].
+3.  **Ellipse Calculation:** Compute the quadratic form (ellipse value) for the current pixel at offset $d = (d.x, d.y)$ from the 2D mean:
+    $$ \text{ellipse} = a \cdot d.x^2 + c \cdot d.y^2 + 2 \cdot b \cdot d.x \cdot d.y $$
+    [S1]
+4.  **Boundary Checks:**
+    *   If $\text{ellipse} \le 0$, skip the splat (continue) [S1].
+    *   If $\text{ellipse} \ge 9.0$, skip the splat (continue) [S1].
+5.  **Weight Calculation:** Compute the inverse multiquadric weight $w_{IQF}$ (denoted as $G$ in gradients):
+    $$ G = \frac{1}{\text{ellipse} + 1} $$
+    [S1]
+    *Note: The general 3D inverse multiquadric function is defined as $\frac{1}{\frac{1}{\xi}(d_M)^2 + 1}$ [S1]. In the 2D rasterization implementation, this simplifies to the form above where the parameter $\xi$ is effectively absorbed or normalized to 1 in the denominator term relative to the ellipse calculation [S1].*
+6.  **Alpha Computation:** Calculate the final alpha value:
+    $$ \alpha = \min(0.99, w \cdot G) $$
+    [S1]
+
+**Pseudocode (Forward Pass):**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def inverse_multiquadric_forward(con_o, d, correction_factor=1.38, ellipse_limit=9.0, alpha_max=0.99):
+    """
+    con_o: Tuple (a, b, c, w) representing the 2D conic matrix and opacity.
+    d: Tuple (dx, dy) representing the offset from the 2D mean.
+    """
+    a, b, c, w = con_o
+    dx, dy = d
+    
+    # Calculate ellipse quadratic form
+    ellipse = a * dx * dx + c * dy * dy + 2.0 * b * dx * dy
+    
+    # Boundary checks
+    if ellipse <= 0.0:
+        return None, None
+    if ellipse >= ellipse_limit:
+        return None, None
+        
+    # Calculate inverse quadric weight G
+    G = 1.0 / (ellipse + 1.0)
+    
+    # Calculate alpha
+    alpha = min(alpha_max, w * G)
+    
+    return alpha, G
+
+def inverse_multiquadric_backward(alpha_grad, con_o, d, G, correction_factor=1.38):
+    """
+    alpha_grad: Gradient of loss w.r.t alpha (dL/d_alpha).
+    con_o: Tuple (a, b, c, w).
+    d: Tuple (dx, dy).
+    G: The computed G value from forward pass.
+    """
+    a, b, c, w = con_o
+    dx, dy = d
+    
+    # Gradient w.r.t G
+    dL_dG = w * alpha_grad
+    
+    # Gradient of G w.r.t ellipse components
+    # dG/d_ellipse = -1 / (ellipse + 1)^2
+    # We need dG/dx and dG/dy via chain rule through ellipse
+    # ellipse = a*dx^2 + c*dy^2 + 2*b*dx*dy
+    # d(ellipse)/d(dx) = 2*a*dx + 2*b*dy
+    # d(ellipse)/d(dy) = 2*c*dy + 2*b*dx
+    
+    # However, the source code computes gradients w.r.t mean and conic directly.
+    # Let's follow the source's gradient derivation for dG_ddelx and dG_ddely
+    # which seem to correspond to gradients w.r.t the mean components if dx, dy are treated as variables?
+    # Actually, in rasterization, dx, dy are fixed pixel coordinates. 
+    # The gradients are w.r.t the Gaussian parameters (mean and conic).
+    # The source code updates dL_dmean2D and dL_dconic2D.
+    
+    # From source:
+    # dG_ddelx = ellipsepow * (dx * con_o.x + dy * con_o.y)
+    # dG_ddely = ellipsepow * (dx * con_o.y + dy * con_o.z)
+    # Here con_o.x=a, con_o.y=b, con_o.z=c.
+    # And ddelx_dx, ddely_dy are likely partials of dx, dy w.r.t mean?
+    # dx = x_pixel - mu_x => d(dx)/d(mu_x) = -1
+    # dy = y_pixel - mu_y => d(dy)/d(mu_y) = -1
+    
+    ellipse_plus_1 = ellipse + 1.0
+    ellipsepow = -2.0 * dL_dG / (ellipse_plus_1 * ellipse_plus_1)
+    
+    # Gradients w.r.t mean (assuming dx, dy depend on mean)
+    # dL/d_mu_x = dL/dG * dG/d_dx * d_dx/d_mu_x
+    # dG/d_dx = dG/d_ellipse * d(ellipse)/d_dx
+    # d(ellipse)/d_dx = 2*a*dx + 2*b*dy
+    # dG/d_ellipse = -1 / (ellipse+1)^2
+    # So dL/d_mu_x = dL_dG * (-1/(ellipse+1)^2) * (2*a*dx + 2*b*dy) * (-1)
+    
+    # The source code uses a simplified form:
+    # dG_ddelx = ellipsepow * (dx * a + dy * b)
+    # Note: ellipsepow in source is -dL_dG * 2 / (ellipse+1)^2
+    # So dG_ddelx = (-dL_dG * 2 / (ellipse+1)^2) * (dx*a + dy*b)
+    # This matches dL/d_mu_x if we account for the -1 from d_dx/d_mu_x?
+    # Let's stick to the source's explicit gradient updates.
+    
+    half_ellipsepow = 0.5 * ellipsepow
+    
+    # Update gradients w.r.t 2D mean
+    # Source: atomicAdd(&dL_dmean2D[global_id].x, dG_ddelx * ddelx_dx)
+    # Assuming ddelx_dx = -1 and ddely_dy = -1
+    dL_dmean_x = ellipsepow * (dx * a + dy * b)
+    dL_dmean_y = ellipsepow * (dx * b + dy * c)
+    
+    # Update gradients w.r.t 2D conic matrix (a, b, c)
+    # Source: atomicAdd(&dL_dconic2D[global_id].x, halfellipsepow * dx * dx)
+    # dL/da = dL_dG * dG/da
+    # dG/da = dG/d_ellipse * d(ellipse)/da = (-1/(ellipse+1)^2) * dx^2
+    # dL/da = dL_dG * (-1/(ellipse+1)^2) * dx^2
+    # Source halfellipsepow = -dL_dG * 2 / (ellipse+1)^2 * 0.5 = -dL_dG / (ellipse+1)^2
+    # So dL/da = halfellipsepow * dx^2. Matches.
+    
+    dL_da = half_ellipsepow * dx * dx
+    dL_db = half_ellipsepow * dx * dy
+    dL_dc = half_ellipsepow * dy * dy
+    
+    return {
+        'dL_dmean_x': dL_dmean_x,
+        'dL_dmean_y': dL_dmean_y,
+        'dL_da': dL_da,
+        'dL_db': dL_db,
+        'dL_dc': dL_dc
+    }
+```
+
+**Backward Pass Details:**
+The gradient of the loss $L$ with respect to the inverse quadric term $G$ is $dL_dG = w \cdot \frac{\partial L}{\partial \alpha}$ [S1].
+The gradient of $G$ with respect to the ellipse components (used to derive gradients w.r.t mean and conic) is computed as:
+$$ \frac{\partial L}{\partial \delta x} = dL_dG \cdot \frac{-2}{(\text{ellipse} + 1)^2} \cdot (d.x \cdot a + d.y \cdot b) $$
+$$ \frac{\partial L}{\partial \delta y} = dL_dG \cdot \frac{-2}{(\text{ellipse} + 1)^2} \cdot (d.x \cdot b + d.y \cdot c) $$
+[S1]
+These are accumulated into the gradients for the 2D mean and the 2D conic matrix entries $(a, b, c)$ using atomic adds [S1]. The correction factor $1.38$ is also applied to the gradients of the 2D covariance matrix entries during the backward pass to maintain consistency with the forward correction [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Same as standard Gaussian splatting rasterization, $O(N)$ per pixel where $N$ is the number of overlapping splats, with a constant overhead for the inverse quadric calculation.
+*   **Memory Complexity:** Same as standard Gaussian splatting.
+*   **Strengths:** The inverse multiquadric function has a heavier tail than the Gaussian, which can help in representing scenes with long-range dependencies or specific anisotropic structures without requiring as many splats [S1].
+*   **Limitations:** Requires a specific correction factor ($1.38$) to avoid over-blurring or under-blurring compared to the Gaussian baseline [S1]. The hard cutoff at $\text{ellipse} \ge 9$ may introduce artifacts if not handled carefully in the gradient flow, though the source implements it as a simple skip [S1].
+*   **When to use:** When the standard Gaussian decay is insufficient for the specific geometry or lighting characteristics of the scene, or when experimenting with different radial basis functions for differentiable rendering [S1].
+
+## Background
+Inverse Multiquadric Splatting was introduced in the DARB-Splatting paper, which generalizes splatting using decaying anisotropic radial basis functions [S1]. The method modifies the CUDA rasterizer's forward and backward propagation to support this specific RBF [S1].
+
+## Sources
+[S1] DARB-Splatting: Generalizing Splatting with Decaying Anisotropic Radial Basis Functions, https://doi.org/10.1109/WACV61042.2026.00438, fetched 2026-10-30

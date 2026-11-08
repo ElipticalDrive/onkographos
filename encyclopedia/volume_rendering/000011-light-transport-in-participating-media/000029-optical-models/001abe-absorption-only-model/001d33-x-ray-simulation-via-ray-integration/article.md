@@ -3,105 +3,99 @@
 Also called: CT projection rendering, Digitally Reconstructed Radiograph, Simulated radiography
 
 ## Overview
-X-ray simulation via ray integration generates a simulated radiograph (Digitally Reconstructed Radiograph, DR) by integrating attenuation along viewing rays through a volume, accounting for density between the source and film plane [S2, unofficial]. It differs from standard direct volume rendering by using the Beer-Lambert law on actual Hounsfield Unit (HU) values rather than arbitrary transfer functions for opacity, producing a single-energy, projection-style image without scatter or beam hardening [S1, unofficial].
+X-ray simulation via ray integration generates a Digitally Reconstructed Radiograph (DR) by integrating the linear attenuation coefficient along viewing rays from a source to a film plane, producing an X-ray-like projection image [S2, unofficial]. Unlike standard direct volume rendering which uses transfer functions to map scalar values to opacity for compositing, this method assumes a single energy level with no scatter, no beam hardening, and no detector response, relying strictly on the Beer-Lambert law to simulate physical attenuation [S1, unofficial]. It is distinguished from its siblings by using actual Hounsfield Unit (HU) values directly in the attenuation calculation rather than arbitrary opacity mappings [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A 3D volume where voxel values $f$ represent X-ray absorption density (Hounsfield Units) reconstructed by Computed Tomography [S2, unofficial].
-- Input: Camera parameters defining the ray origin (source) and direction.
-- Input: Exposure control $E$, which scales the final intensity [S1, unofficial].
-- Output: A 2D image representing the simulated X-ray projection.
+*   **Input:** A volume dataset where the scalar field $f$ represents X-ray absorption density reconstructed by Computed Tomography (i.e., Hounsfield Units) [S2, unofficial].
+*   **Input:** Camera parameters defining the source position $s=0$ and the film plane orientation.
+*   **Input:** Exposure control, which acts as a combined multiplier for tube output and detector gain [S1, unofficial].
+*   **Output:** A 2D simulated radiograph image.
 
 **Data Structures:**
-- Volume: 3D grid of scalar values (HU).
-- Ray: Defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
-- Step size: Uniform physical step size in millimeters, $u_{mm}$ [S1, unofficial].
-
-**Parameters:**
-- $\mu_{water}$: Linear attenuation coefficient of water at ~70 keV, $0.0193 \, \text{mm}^{-1}$ [S1, unofficial].
-- $E$: Exposure control (dimensionless scaling factor for tube output and detector gain) [S1, unofficial].
+*   **Volume:** A 3D grid of floating-point values representing HU.
+*   **Ray:** Defined by origin (source) and direction vector.
+*   **Step Size:** A uniform constant `uMmPerLangkah` representing the integration step size in millimeters [S1, unofficial].
 
 **Formulas:**
-1.  **Linear Attenuation Coefficient:** Convert HU to linear attenuation coefficient $\mu$ using the definition of the Hounsfield scale [S1, unofficial]:
+1.  **Linear Attenuation Coefficient ($\mu$):**
+    Derived from the Hounsfield scale definition:
     $$ \mu = \mu_{water} \times \left(1 + \frac{HU}{1000}\right) $$
-2.  **Ray Integration:** Integrate $\mu$ along the ray path $l$ from source to detector:
-    $$ A = \int \mu \, dl \approx \sum_{i} \mu_i \cdot u_{mm} $$
-    where $u_{mm}$ is the step size in millimeters [S1, unofficial].
-3.  **Intensity Calculation:** Apply the Beer-Lambert law to determine transmitted intensity $I$, scaled by exposure $E$ [S1, unofficial]:
-    $$ I = E \cdot I_0 \cdot e^{-A} $$
-    where $I_0$ is the initial intensity (typically normalized to 1 or max value).
+    Where $\mu_{water} = 0.0193 \, \text{mm}^{-1}$ at approximately 70 keV [S1, unofficial].
 
-**Steps:**
-1.  For each pixel in the output image, cast a ray from the X-ray source through the volume.
-2.  Sample the volume along the ray at uniform intervals.
-3.  For each sample, retrieve the Hounsfield Unit value $HU$.
-4.  Compute the linear attenuation coefficient $\mu$ for the sample using $\mu = \mu_{water} \times (1 + HU/1000)$ [S1, unofficial].
-5.  Accumulate the optical depth $A$ by summing $\mu \times u_{mm}$ for all steps along the ray [S1, unofficial].
-6.  Compute the final pixel intensity $I = E \cdot e^{-A}$ (assuming $I_0=1$) [S1, unofficial].
+2.  **Attenuation Integral:**
+    The optical depth $\tau$ along a ray is the integral of $\mu$ over the path length $l$:
+    $$ \tau = \int_{0}^{L} \mu(\mathbf{r}(l)) \, dl \approx \sum_{i} \mu_i \cdot \Delta l $$
+    Where $\Delta l$ is the step size in millimeters (`uMmPerLangkah`) [S1, unofficial].
 
-**Pitfalls:**
-- The integral must explicitly use the millimeter step size ($u_{mm}$). Omitting the multiplication by $u_{mm}$ breaks the physics, as the exponent becomes dimensionless but incorrect, leading to wrong attenuation values [S1, unofficial].
-- Threshold controls and opacity-per-step sliders are irrelevant and should be hidden, as they are volume-compositing factors not used in attenuation-based radiograph mode [S1, unofficial].
-- The method assumes single energy, no scatter, no beam hardening, and no detector response [S1, unofficial].
-- Exposure is a control for tube output and detector gain, NOT a dose in milligrays; no dose is computed [S1, unofficial].
+3.  **Image Intensity ($I$):**
+    Using the Beer-Lambert law:
+    $$ I = I_0 \cdot \text{Exposure} \cdot \exp(-\tau) $$
+    Where $I_0$ is the initial intensity (often normalized to 1) and Exposure is the scalar control [S1, unofficial].
+
+**Parameters:**
+*   **$\mu_{water}$:** $0.0193 \, \text{mm}^{-1}$ [S1, unofficial].
+*   **Exposure:** A scalar multiplier. It is NOT a dose in milligrays; no dose is computed [S1, unofficial].
+*   **Step Size:** Must be in millimeters. The multiplication by `uMmPerLangkah` is critical; removing it breaks the physics even if the uniform variable exists [S1, unofficial].
+
+**Pitfalls and Edge Cases:**
+*   **Step Size Integration:** The integral must explicitly multiply the attenuation coefficient by the millimeter step size. A common implementation error is declaring the step size uniform but failing to use it in the summation, which causes incorrect attenuation values [S1, unofficial].
+*   **Irrelevant Controls:** Threshold controls and opacity-per-step sliders are irrelevant and should be hidden. Thresholds do not apply to attenuation-based calculation, and opacity-per-step is a volume-compositing factor not used in this single-pass integration [S1, unofficial].
+*   **Physical Assumptions:** The method assumes single energy. It does not account for scatter, beam hardening, or detector response characteristics [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def simulate_xray(volume, camera, exposure, mu_water=0.0193):
+def simulate_xray_projection(volume, camera, exposure, mu_water=0.0193, step_size_mm=1.0):
     """
-    Simulate an X-ray projection (DR) from a CT volume.
+    Simulates a radiograph by integrating attenuation along rays.
     
     Args:
         volume: 3D array of Hounsfield Units (HU).
-        camera: Object with method get_ray(u, v) returning (origin, direction).
-        exposure: Float, scaling factor for intensity.
-        mu_water: Float, attenuation coefficient of water in mm^-1.
+        camera: Object with 'ray_for_pixel(u, v)' method returning (origin, direction).
+        exposure: Scalar multiplier for tube output and detector gain.
+        mu_water: Linear attenuation coefficient of water in mm^-1.
+        step_size_mm: Integration step size in millimeters.
         
     Returns:
         2D image array.
     """
-    height, width = camera.resolution
+    height, width = camera.image_size
     image = zeros((height, width))
-    
-    # Step size in millimeters. Assumed uniform and known from volume spacing.
-    # In a real implementation, this would be derived from the volume's physical spacing.
-    # Here we assume a uniform step size u_mm is available or passed.
-    u_mm = volume.spacing_x # Assuming isotropic or using x-spacing as representative
     
     for y in range(height):
         for x in range(width):
-            origin, direction = camera.get_ray(x, y)
+            origin, direction = camera.ray_for_pixel(x, y)
             
-            # Ray marching parameters
-            t_min = 0.0
-            t_max = camera.far_plane # Or distance to exit volume
+            # Initialize Beer-Lambert integral
+            integral_mu_dl = 0.0
             
-            # Simple ray-box intersection or fixed range for demonstration
-            # In practice, clip ray to volume bounds
-            t_start, t_end = clip_ray_to_volume(origin, direction, volume.bounds)
-            
-            optical_depth = 0.0
-            t = t_start
-            while t < t_end:
-                # Sample volume at current position
-                pos = origin + direction * t
-                hu = sample_volume(volume, pos)
+            # Traverse the volume along the ray
+            # Note: Implementation of ray marching bounds depends on volume geometry.
+            # This loop assumes a simple bounding box intersection or pre-computed ray steps.
+            for step in range(num_steps):
+                point = origin + direction * (step * step_size_mm)
                 
-                # Convert HU to linear attenuation coefficient
+                # Check if point is inside volume bounds
+                if not volume.contains(point):
+                    break
+                
+                # Sample HU value at current point
+                hu = volume.sample(point)
+                
+                # Calculate linear attenuation coefficient from HU
+                # mu = mu_water * (1 + HU / 1000)
                 mu = mu_water * (1.0 + hu / 1000.0)
                 
-                # Accumulate optical depth with physical step size
-                optical_depth += mu * u_mm
-                
-                # Advance ray by physical step size
-                t += u_mm
+                # Accumulate integral: sum(mu * dl)
+                # Critical: Must multiply by step_size_mm
+                integral_mu_dl += mu * step_size_mm
             
-            # Apply Beer-Lambert law and exposure
-            # I = I0 * exp(-optical_depth) * exposure
+            # Apply Beer-Lambert law
+            # I = I0 * Exposure * exp(-integral)
             # Assuming I0 = 1.0
-            intensity = exposure * exp(-optical_depth)
+            intensity = exposure * exp(-integral_mu_dl)
             
             image[y, x] = intensity
             
@@ -110,25 +104,20 @@ def simulate_xray(volume, camera, exposure, mu_water=0.0193):
 
 ## Subtopics
 
-### Prism Model
-- **What it is:** A sibling optical model for volume rendering.
-- **Difference:** Uses a different geometric approximation for light transport compared to the absorption-only ray integration.
-- **When to choose:** When simulating different scattering or geometric properties than simple absorption.
-- **Link:** [Prism Model](3153-prism-model.md)
+### [Hardware-Accelerated Simulated Radiography (Non-Emissive)](10237-hardware-accelerated-simulated-radiography-non-emissive.md)
+A GPU-based technique that renders geometric cells (hexahedra or tetrahedra) as separate layers using hardware rasterization to accumulate attenuation in a P-buffer. It handles unsorted, overlapping geometry by iteratively rendering non-overlapping subsets, minimizing expensive synchronization copies compared to sorted front-to-back methods.
 
 ## Operating characteristics
-- **Time Complexity:** $O(N \cdot R)$, where $N$ is the number of pixels and $R$ is the number of samples per ray. Linear with respect to resolution and ray length.
-- **Memory Complexity:** $O(V)$, where $V$ is the volume size, for storing the CT data.
-- **Performance:** Measured on a synthetic 700 HU sphere at 390x844 resolution. Exposure scaling is monotonic (e.g., x0.4, x1, x3) as required by the exponential function [S1, unofficial].
-- **Strengths:** Physically based on HU values; fast for single-energy projection; no need for complex transfer functions.
-- **Limitations:** Single energy assumption; no scatter, beam hardening, or detector response modeling; not suitable for multi-energy or spectral CT simulation [S1, unofficial].
-- **When to use:** Generating simulated radiographs from CT data for visualization or comparison with real X-rays.
-- **When not to use:** When scatter, beam hardening, or multi-energy effects are significant.
+*   **Time Complexity:** $O(N \cdot R)$, where $N$ is the number of pixels and $R$ is the number of steps per ray (or number of cells intersected in hardware-accelerated variants).
+*   **Memory Complexity:** $O(V)$ for the volume data, plus $O(P)$ for the output image, where $V$ is volume size and $P$ is pixel count.
+*   **Performance:** Measured on a synthetic 700 HU sphere at 390x844 resolution, the method produces monotonic intensity changes with exposure (e.g., exposure x0.4 yields mean 7.7, x1 yields 14.6, x3 yields 22.2) [S1, unofficial].
+*   **Strengths:** Physically accurate projection based on actual HU values; simple implementation; no need for complex transfer function tuning [S1, unofficial].
+*   **Limitations:** Assumes single energy; ignores scatter and beam hardening; does not model detector response [S1, unofficial].
+*   **When to use:** When generating standard X-ray projections from CT data for comparison with real radiographs or for basic visualization.
+*   **When not to use:** When high-fidelity spectral effects, scatter, or detector physics are required [S1, unofficial].
 
 ## Background
-- **Origin:** The method is based on the Beer-Lambert law and the definition of Hounsfield Units in Computed Tomography [S1, S2, unofficial].
-- **History:** Digitally Reconstructed Radiographs (DR) have been used in medical imaging to simulate X-ray projections from 3D CT data [S2, unofficial].
-- **Usage:** Used in medical imaging for treatment planning, visualization, and education [S1, S2, unofficial].
+The method originates from the application of optical models for direct volume rendering, specifically the absorption-only model where the transfer function is set to the identity function for X-ray absorption density [S2, unofficial]. It leverages the definition of the Hounsfield scale to derive linear attenuation coefficients, allowing for the simulation of X-ray images from arbitrary directions [S2, unofficial]. The specific implementation details, including the use of `mu_water = 0.0193 /mm` at ~70 keV and the handling of exposure as a combined tube/detector gain factor, are documented in recent software development efforts for DICOM volume rendering [S1, unofficial].
 
 ## Sources
 [S1] feat(body-exposure): render a DICOM series in 3D, not a description of one, https://github.com/rizkyazhar486/Panacea/pull/1585, fetched 2026-10-26 (unofficial)

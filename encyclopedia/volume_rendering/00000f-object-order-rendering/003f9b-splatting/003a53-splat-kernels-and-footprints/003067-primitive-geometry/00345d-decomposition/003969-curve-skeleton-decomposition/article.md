@@ -1,0 +1,134 @@
+# Curve-Skeleton Decomposition
+
+Also called: Centerline, Centerline decomposition, Curve-skeleton, Skeleton-based block decomposition
+
+## Overview
+Curve-Skeleton Decomposition is a proxy geometry technique that represents a volumetric object as a 1D line-like structure (skeleton or centerline) to enable bend, move, re-pose, and sweep transformations [S1, book]. It solves the problem of interactive manipulation of volumetric data by decomposing the volume into bounding cuboids along the skeleton, allowing independent transformation and rendering of segments [S1, book]. Unlike direct volume deformation, this method separates the geometric abstraction from the rendering, enabling fast, minimum-geometric-processing manipulation [S1, book].
+
+## How it works
+**Inputs:**
+- Volumetric dataset $V$.
+- Extracted curve-skeleton $S$ (a sequence of points/segments).
+- Joint locations on $S$ defining bending regions.
+- Transfer function for color/opacity mapping.
+
+**Outputs:**
+- Volume-rendered image of the deformed volume.
+
+**Data Structures:**
+1. **Skeleton $S$**: A sequence of vertices $v_i$ and edges connecting them.
+2. **Distance Field $D$**: Computed from $V$, storing the distance from each voxel to the nearest surface or boundary. Used to determine cuboid widths [S1, book].
+3. **Bounding Cuboids**: For each skeletal segment between joints, a cuboid is defined. The width of the cuboid is derived from $D$ [S1, book].
+4. **Sliced Polygons**: Planar slices of each cuboid, texture-mapped to the original volume data.
+5. **Depth Index**: A data structure indexing polygons by their depth coordinate for sorting [S1, book].
+
+**Steps:**
+1. **Skeleton Extraction**: Extract the curve-skeleton from the volumetric object using standard skeletonization methods [S1, book].
+2. **Joint Selection**: Choose joints on the skeleton to define areas where bending or transformation will occur [S1, book].
+3. **Cuboid Definition**: For each skeletal segment between joints, define a bounding cuboid. Determine the width of each cuboid using the distance field $D$ computed on the volume [S1, book].
+4. **Transformation**: Apply the desired transformation (bend, move, re-pose) to the cuboids about the selected joints [S1, book].
+5. **Slicing**: Slice each transformed cuboid along the viewport plane to generate polygons [S1, book].
+6. **Texture Mapping**: Map each slice back to the original volume texture to determine the appropriate color and opacity values [S1, book].
+7. **Joint Interpolation**: Interpolate between the end planes of adjoining bounding boxes to cover the joint area with a stretched volume, ensuring continuity [S1, book].
+8. **Sorting**: Sort the sliced polygons along the view direction from back to front. This is achieved using a two-pass rendering algorithm with a data structure that indexes polygons by their depth coordinate [S1, book].
+9. **Compositing**: Composite the texture-mapped polygons back-to-front to volume render the deformed volume [S1, book].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def curve_skeleton_decomposition(volume, skeleton, joints, transfer_function):
+    """
+    volume: 3D array of voxel values
+    skeleton: list of points defining the 1D curve
+    joints: indices in skeleton where bending occurs
+    transfer_function: function mapping voxel value to (color, opacity)
+    """
+    # Step 1: Compute distance field from volume
+    distance_field = compute_distance_field(volume)
+    
+    # Step 2: Define bounding cuboids for each segment between joints
+    cuboids = []
+    for i in range(len(joints) - 1):
+        start_joint = joints[i]
+        end_joint = joints[i+1]
+        segment = skeleton[start_joint:end_joint+1]
+        
+        # Determine width from distance field
+        # Average distance along the segment
+        avg_width = compute_avg_width(segment, distance_field)
+        
+        # Create bounding cuboid around the segment
+        cuboid = create_cuboid(segment, avg_width)
+        cuboids.append(cuboid)
+        
+    # Step 3: Apply transformations about joints
+    # (Assuming transformation T is provided or computed)
+    transformed_cuboids = []
+    for i, cuboid in enumerate(cuboids):
+        # Transform about the joint at the start of the segment
+        joint_idx = joints[i]
+        joint_pos = skeleton[joint_idx]
+        transformed_cuboid = transform_about_joint(cuboid, joint_pos, transformation)
+        transformed_cuboids.append(transformed_cuboid)
+        
+    # Step 4: Slice each cuboid along the viewport
+    sliced_polygons = []
+    for cuboid in transformed_cuboids:
+        slices = slice_cuboid(cuboid, viewport_plane)
+        for slice in slices:
+            # Map slice to original texture
+            mapped_slice = map_to_texture(slice, volume, transfer_function)
+            sliced_polygons.append(mapped_slice)
+            
+    # Step 5: Interpolate at joints
+    # Interpolate between end planes of adjoining bounding boxes
+    joint_polygons = interpolate_joints(transformed_cuboids, transfer_function)
+    sliced_polygons.extend(joint_polygons)
+    
+    # Step 6: Sort polygons by depth (back-to-front)
+    # Using a two-pass algorithm with depth indexing
+    sorted_polygons = sort_by_depth(sliced_polygons)
+    
+    # Step 7: Composite back-to-front
+    image = composite_back_to_front(sorted_polygons)
+    
+    return image
+```
+
+**Parameters:**
+- **Joint Density**: Determines the granularity of bending. Not given in the sources.
+- **Cuboid Width**: Derived from the distance field. Not given in the sources.
+- **Slice Resolution**: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- If the volume is rotated, the underlying geometry must be re-sliced and composited [S1, book].
+- Precision issues may arise in joint interpolation if the distance field is noisy [G].
+- Degenerate skeletons (e.g., single point) require special handling [G].
+
+## Subtopics
+
+### Skeleton Extraction
+The process of deriving the 1D curve from the volume. Sets apart by focusing on topological preservation. Choose when topology is critical. [Link](7254-decomposition.md)
+
+### Joint Selection
+Defining bending regions. Sets apart by allowing localized deformation. Choose when specific parts need independent manipulation. [Link](7254-decomposition.md)
+
+### Cuboid Definition
+Creating bounding volumes. Sets apart by using distance fields for width. Choose when accurate volume representation is needed. [Link](7254-decomposition.md)
+
+## Operating characteristics
+- **Time Complexity**: Depends on the number of cuboids and slices. Sorting is $O(N \log N)$ where $N$ is the number of polygons [S1, book].
+- **Memory Complexity**: Proportional to the number of cuboids and slices [S1, book].
+- **Measured Performance**: Requires minimum geometric processing, making it very fast [S1, book].
+- **Scaling**: Scales with the complexity of the skeleton and the number of joints [S1, book].
+- **Strengths**: Fast, supports interactive manipulation, enables selective rendering and sweeps [S1, book].
+- **Limitations**: Requires re-slicing on rotation, may lose fine details if cuboids are too large [S1, book].
+- **When to Use**: Virtual colonoscopy, navigation along paths, selective rendering [S1, book].
+- **When Not to Use**: When high-fidelity detail is required without decomposition [G].
+
+## Background
+Curve-Skeleton Decomposition was introduced in the context of illustrative focus+context approaches in interactive volume visualization [S1, book]. It builds on the concept of using skeletons as shape abstractions for motion capture and manipulation [S1, book]. The method is commonly used in medical illustration and virtual colonoscopy [S1, book].
+
+## Sources
+[S1] Illustrative Focus+Context Approaches in Interactive Volume Visualization, https://doi.org/10.4230/dfu.sciviz.2010.136, fetched 2026-10-26 (book)

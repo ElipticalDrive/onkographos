@@ -35,10 +35,11 @@ This method converts arbitrary 3D triangular surface meshes into uniform voxel r
     Calculate the side length of the largest dimension:
     $$ s_{\text{max}} = \max(\mathbf{p}_{\max}.x - \mathbf{p}_{\min}.x, \mathbf{p}_{\max}.y - \mathbf{p}_{\min}.y, \mathbf{p}_{\max}.z - \mathbf{p}_{\min}.z) $$
     Center the box at the mesh centroid $\mathbf{c} = \frac{\mathbf{p}_{\min} + \mathbf{p}_{\max}}{2}$ [S1, unofficial].
-    Expand to a cube with a 1% margin:
+    Expand to a cube with a 1% margin to ensure isotropic voxels:
     $$ s_{\text{root}} = s_{\text{max}} \times 1.01 $$
     The root AABB is defined by:
     $$ \text{root.min} = \mathbf{c} - \frac{s_{\text{root}}}{2}, \quad \text{root.max} = \mathbf{c} + \frac{s_{\text{root}}}{2} $$
+    The edge length of each resulting voxel is calculated as $s_{\text{voxel}} = s_{\text{root}} / 2^{d_{\max}}$ [S1, unofficial].
 
 2.  **Recursive Octree Construction (`buildOctree`):**
     Function signature: `buildOctree(node, triangles, maxDepth, currentDepth, stats)` [S1, unofficial].
@@ -46,7 +47,7 @@ This method converts arbitrary 3D triangular surface meshes into uniform voxel r
     *   **Pruning Check:** Filter `triangles` to find those intersecting `node.bounds`. Use the 13-axis SAT test (see below). Let this list be `intersecting` [S1, unofficial].
     *   If `intersecting` is empty:
         *   Mark `node` as pruned.
-        *   Increment `stats.prunedPerDepth[currentDepth]`.
+        *   Increment `stats.prunedPerDepth[currentDepth]` [S1, unofficial].
         *   Return.
     *   If `currentDepth == maxDepth`:
         *   Mark `node.isLeaf = true`.
@@ -62,7 +63,7 @@ This method converts arbitrary 3D triangular surface meshes into uniform voxel r
                 *   $\text{child.min}.a = c.a$ [S1, unofficial].
             *   Else:
                 *   $\text{child.min}.a = \text{node.bounds.min}.a$ [S1, unofficial].
-            *   $\text{child.max}.a = \text{node.bounds.max}.a - (\text{child.min}.a - \text{node.bounds.min}.a)$ (or symmetrically derived from center) [S1, unofficial].
+            *   $\text{child.max}.a$ is the inverse: if bit is set, use `node.bounds.max.a`, otherwise use `c.a` [S1, unofficial].
         *   For each child $i$:
             *   Test if any triangle in `intersecting` intersects `child.bounds` using SAT [S1, unofficial].
             *   If no intersection:
@@ -90,7 +91,7 @@ To determine if a triangle intersects an AABB, test overlap along 13 separating 
     *   Triangle edges: $\mathbf{e}_0 = \mathbf{v}_1 - \mathbf{v}_0$, $\mathbf{e}_1 = \mathbf{v}_2 - \mathbf{v}_1$, $\mathbf{e}_2 = \mathbf{v}_0 - \mathbf{v}_2$ [S1, unofficial].
     *   Axes: $\mathbf{e}_k \times \mathbf{u}_j$ for $k \in \{0,1,2\}, j \in \{0,1,2\}$ [S1, unofficial].
     
-    For each axis $\mathbf{L}$, project both the triangle vertices and the AABB corners onto $\mathbf{L}$. If the intervals do not overlap, the triangle and box do not intersect [S1, unofficial].
+    For each axis $\mathbf{L}$, project both the triangle vertices and the AABB corners onto $\mathbf{L}$ [S1, unofficial]. If the intervals do not overlap, the triangle and box do not intersect [S1, unofficial].
 
 **Pseudocode:**
 
@@ -108,8 +109,6 @@ class Vec3:
         return Vec3(self.x - other.x, self.y - other.y, self.z - other.z)
     def __add__(self, other):
         return Vec3(self.x + other.x, self.y + other.y, self.z + other.z)
-    def __mul__(self, scalar):
-        return Vec3(self.x * scalar, self.y * scalar, self.z * scalar)
     def dot(self, other):
         return self.x * other.x + self.y * other.y + self.z * other.z
     def cross(self, other):
@@ -154,19 +153,13 @@ def project_interval(vertices, axis):
     return min_p, max_p
 
 def sat_test(triangle, aabb):
-    # 1. Box Face Normals
     box_axes = [Vec3(1,0,0), Vec3(0,1,0), Vec3(0,0,1)]
-    
-    # 2. Triangle Normal: n = (v1 - v0) x (v2 - v0)
     e0 = triangle.v1 - triangle.v0
     e1 = triangle.v2 - triangle.v0
     tri_normal = e0.cross(e1)
-    
-    # 3. Edge Cross Products: e_k x u_j
     tri_edges = [e0, triangle.v2 - triangle.v1, triangle.v0 - triangle.v2]
     axes = box_axes + [tri_normal] + [e.cross(b) for e in tri_edges for b in box_axes]
     
-    # Normalize axes for projection
     normalized_axes = []
     for ax in axes:
         l = math.sqrt(ax.x**2 + ax.y**2 + ax.z**2)
@@ -176,8 +169,6 @@ def sat_test(triangle, aabb):
             normalized_axes.append(ax)
             
     tri_verts = [triangle.v0, triangle.v1, triangle.v2]
-    
-    # AABB corners
     corners = [
         aabb.min,
         Vec3(aabb.max.x, aabb.min.y, aabb.min.z),
@@ -192,17 +183,14 @@ def sat_test(triangle, aabb):
     for axis in normalized_axes:
         t_min, t_max = project_interval(tri_verts, axis)
         a_min, a_max = project_interval(corners, axis)
-        
         if t_max < a_min or a_max < t_min:
-            return False # Separating axis found
-    return True # No separating axis found, intersection
+            return False
+    return True
 
 def build_octree(node, triangles, max_depth, current_depth, stats):
-    # Filter triangles
     intersecting = [t for t in triangles if sat_test(t, node.bounds)]
     
     if not intersecting:
-        # Pruned
         stats['prunedPerDepth'][current_depth] = stats['prunedPerDepth'].get(current_depth, 0) + 1
         return
     
@@ -215,8 +203,6 @@ def build_octree(node, triangles, max_depth, current_depth, stats):
     center = node.bounds.center()
     
     for i in range(8):
-        # Calculate child bounds using bitwise operations on index
-        # Bit 0 -> x, Bit 1 -> y, Bit 2 -> z
         child_min = Vec3(
             center.x if (i & 1) else node.bounds.min.x,
             center.y if (i & 2) else node.bounds.min.y,
@@ -230,7 +216,6 @@ def build_octree(node, triangles, max_depth, current_depth, stats):
         
         child_bounds = AABB(child_min, child_max)
         
-        # Check intersection with any triangle in intersecting list
         has_geom = False
         for t in intersecting:
             if sat_test(t, child_bounds):
@@ -261,7 +246,6 @@ def generate_voxel_mesh(voxels):
         x0, y0, z0 = v.min.x, v.min.y, v.min.z
         x1, y1, z1 = v.max.x, v.max.y, v.max.z
         
-        # 8 vertices
         verts = [
             Vec3(x0, y0, z0), Vec3(x1, y0, z0), Vec3(x1, y1, z0), Vec3(x0, y1, z0),
             Vec3(x0, y0, z1), Vec3(x1, y0, z1), Vec3(x1, y1, z1), Vec3(x0, y1, z1)
@@ -269,14 +253,13 @@ def generate_voxel_mesh(voxels):
         base_idx = len(mesh_vertices)
         mesh_vertices.extend(verts)
         
-        # 12 faces (2 per side) with outward-facing normals
         faces = [
-            [0, 1, 2], [0, 2, 3], # Front (z0)
-            [4, 6, 5], [4, 7, 6], # Back (z1)
-            [0, 4, 7], [0, 7, 3], # Left (x0)
-            [1, 5, 6], [1, 6, 2], # Right (x1)
-            [3, 7, 6], [3, 6, 2], # Top (y1)
-            [0, 5, 4], [0, 1, 5]  # Bottom (y0)
+            [0, 1, 2], [0, 2, 3],
+            [4, 6, 5], [4, 7, 6],
+            [0, 4, 7], [0, 7, 3],
+            [1, 5, 6], [1, 6, 2],
+            [3, 7, 6], [3, 6, 2],
+            [0, 5, 4], [0, 1, 5]
         ]
         
         for f in faces:
@@ -285,7 +268,6 @@ def generate_voxel_mesh(voxels):
     return mesh_vertices, mesh_faces
 
 def voxelize(mesh_vertices, mesh_faces, max_depth):
-    # 1. Compute Root AABB
     p_min = Vec3(float('inf'), float('inf'), float('inf'))
     p_max = Vec3(float('-inf'), float('-inf'), float('-inf'))
     
@@ -307,7 +289,6 @@ def voxelize(mesh_vertices, mesh_faces, max_depth):
     root_bounds = AABB(root_min, root_max)
     root_node = OctreeNode(root_bounds, 0)
     
-    # Create triangles
     triangles = []
     for i in range(0, len(mesh_faces), 3):
         v0 = mesh_vertices[mesh_faces[i]]
@@ -315,27 +296,24 @@ def voxelize(mesh_vertices, mesh_faces, max_depth):
         v2 = mesh_vertices[mesh_faces[i+2]]
         triangles.append(Triangle(v0, v1, v2))
         
-    # 2. Build Octree
     stats = {'nodesPerDepth': {}, 'prunedPerDepth': {}, 'totalVoxels': 0}
     build_octree(root_node, triangles, max_depth, 0, stats)
     
-    # 3. Collect Voxels
     voxels = []
     collect_voxels(root_node, voxels)
     
-    # 4. Generate Mesh
     return generate_voxel_mesh(voxels)
 ```
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the spatial distribution of geometry and `maxDepth`. In the worst case (dense geometry), it is proportional to the number of leaf nodes. Pruning significantly reduces this for sparse models [S1, unofficial].
-*   **Memory Complexity:** Proportional to the number of octree nodes created. Pruned nodes do not allocate child pointers [S1, unofficial].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
 *   **Performance:** On the 'cow' model (4583 vertices, 5804 faces) at depth 5, the method produced 1303 voxels, 10424 vertices, and 15636 faces, executing in 24.32 ms [S1, unofficial].
 *   **Strengths:** Exact geometric intersection avoids rasterization gaps. Recursive structure adapts to geometry density [S1, unofficial].
 *   **Limitations:** Requires `maxDepth` tuning for resolution. SAT test is computationally expensive per triangle per node compared to simple bounding box overlap [S1, unofficial].
 
 ## Background
-This method is described in the project "3D-Object-Surface-Voxelizer" by Joji0 [S1, unofficial]. It utilizes a C++17 engine with SFML for visualization. The approach is categorized as "Divide-and-Conquer Spatial Partitioning" [S1, unofficial].
+This method is described in the project "3D-Object-Surface-Voxelizer" by Joji0 [S1, unofficial]. It utilizes a C++17 engine with SFML for visualization [S1, unofficial]. The approach is categorized as "Divide-and-Conquer Spatial Partitioning" [S1, unofficial].
 
 ## Sources
 [S1] Joji0/3D-Object-Surface-Voxelizer, https://github.com/Joji0/3D-Object-Surface-Voxelizer, fetched 2026-10-27 (unofficial)

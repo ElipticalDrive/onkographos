@@ -1,0 +1,166 @@
+# Depth-dependent scaling in Triangle Splatting
+
+Also called: Triangle Splatting influence function scaling invariance
+
+## Overview
+This property ensures that the spatial influence of a triangle splat remains consistent regardless of its depth or projected scale, allowing a single smoothness parameter $\sigma$ to be used for all triangles in the scene. It distinguishes Triangle Splatting from methods like 3D Gaussian Splatting, which require complex depth-dependent covariance adjustments to maintain consistent visual appearance across different distances [S1].
+
+## How it works
+The method relies on the scaling invariance of the Triangle Splatting window function. By normalizing the signed distance field $\phi(\mathbf{p})$ by its minimum value within the triangle, the influence function becomes invariant to uniform in-plane scaling (projection). This allows the use of a single exponent $\sigma$ for all depths.
+
+### Inputs and Outputs
+*   **Input**: A pixel coordinate $\mathbf{p}$ in screen space; the triangle's signed distance field values $\phi(\mathbf{p})$ and $\min \phi$.
+*   **Output**: The influence value $I(\mathbf{p}) \in [0, 1]$.
+
+### Data Structures
+The signed distance field $\phi(\mathbf{p})$ is computed as the maximum of the signed distances to the three edges of the triangle. Let $d_i(\mathbf{p})$ be the signed distance from $\mathbf{p}$ to the $i$-th edge (positive inside, negative outside).
+$$ \phi(\mathbf{p}) = \max_{i=1,2,3} d_i(\mathbf{p}) $$
+Note: While related works use LogSumExp to approximate this max, Triangle Splatting uses the actual max function to avoid shape degradation for small triangles [S1].
+
+$\min \phi$ is the minimum value of $\phi(\mathbf{p})$ over the interior of the triangle, which occurs at the incenter.
+
+### Steps
+1.  **Compute Signed Distances**: For a query pixel $\mathbf{p}$, calculate the signed distance $d_i(\mathbf{p})$ to each of the three triangle edges.
+2.  **Compute SDF**: Calculate $\phi(\mathbf{p}) = \max(d_1(\mathbf{p}), d_2(\mathbf{p}), d_3(\mathbf{p}))$.
+3.  **Determine Minimum SDF**: Identify $\min \phi$, the most negative value of $\phi$ within the triangle (at the incenter). This value is constant for the triangle.
+4.  **Normalize**: Compute the ratio $r(\mathbf{p}) = \frac{\phi(\mathbf{p})}{\min \phi}$.
+    *   Inside the triangle, $\phi(\mathbf{p}) \le 0$ and $\min \phi < 0$, so $r(\mathbf{p}) \ge 0$.
+    *   At the incenter, $\phi(\mathbf{p}) = \min \phi$, so $r(\mathbf{p}) = 1$.
+    *   At the boundary, $\phi(\mathbf{p}) = 0$, so $r(\mathbf{p}) = 0$.
+    *   Outside the triangle, $\phi(\mathbf{p}) > 0$, so $r(\mathbf{p}) < 0$.
+5.  **Apply ReLU and Exponent**: Compute the influence:
+    $$ I(\mathbf{p}) = \text{ReLU}\left( \frac{\phi(\mathbf{p})}{\min \phi} \right)^\sigma $$
+    where $\text{ReLU}(x) = \max(0, x)$.
+
+### Formula
+The influence function is defined as:
+$$ I(\mathbf{p}) = \begin{cases} \left( \frac{\phi(\mathbf{p})}{\min \phi} \right)^\sigma & \text{if } \phi(\mathbf{p}) \le 0 \\ 0 & \text{if } \phi(\mathbf{p}) > 0 \end{cases} $$
+
+**Scaling Invariance Proof**:
+If the triangle is projected and scaled by a factor $a > 0$, the vertex coordinates and pixel coordinates transform as $\mathbf{v}_i \to a\mathbf{v}_i$ and $\mathbf{p} \to a\mathbf{p}$. The signed distance to each edge scales linearly: $d'_i(\mathbf{p}') = a d_i(\mathbf{p})$. Consequently:
+$$ \phi'(\mathbf{p}') = \max_i d'_i(\mathbf{p}') = a \max_i d_i(\mathbf{p}) = a \phi(\mathbf{p}) $$
+$$ \min \phi' = a \min \phi $$
+The ratio remains constant:
+$$ \frac{\phi'(\mathbf{p}')}{\min \phi'} = \frac{a \phi(\mathbf{p})}{a \min \phi} = \frac{\phi(\mathbf{p})}{\min \phi} $$
+Thus, $I'(\mathbf{p}') = I(\mathbf{p})$ [S1].
+
+### Parameters
+*   **$\sigma$ (sigma)**: A scalar parameter $\sigma > 0$ controlling the smoothness of the window function.
+    *   $\sigma \to 0$: The function converges to the hard triangle shape (1 inside, 0 outside).
+    *   $\sigma \to \infty$: The function converges to a delta function at the incenter.
+    *   Typical values: Not specified in sources, but must be $>0$ [S1].
+
+### Edge Cases and Pitfalls
+*   **Small Triangles**: Using LogSumExp to approximate the max in the SDF definition causes poor shape for small triangles, where only one vertex influences the shape. The actual max function must be used [S1].
+*   **Boundary Precision**: The function is exactly 0 at the boundary and outside. Care must be taken with floating-point precision near the boundary to avoid artifacts.
+*   **Incenter Calculation**: $\min \phi$ is the value at the incenter. For implementation, this can be precomputed per triangle or approximated.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_triangle_influence(p, triangle_vertices, sigma):
+    """
+    Computes the influence I(p) for a pixel p given a triangle.
+    
+    Args:
+        p: (x, y) pixel coordinate.
+        triangle_vertices: List of 3 (x, y) vertices.
+        sigma: Smoothness parameter > 0.
+        
+    Returns:
+        Influence value in [0, 1].
+    """
+    # Step 1: Compute signed distances to edges
+    # Edge i is from vertex i to vertex (i+1)%3
+    distances = []
+    for i in range(3):
+        v1 = triangle_vertices[i]
+        v2 = triangle_vertices[(i + 1) % 3]
+        # Vector from v1 to v2
+        edge_vec = (v2[0] - v1[0], v2[1] - v1[1])
+        # Vector from v1 to p
+        point_vec = (p[0] - v1[0], p[1] - v1[1])
+        # Normal vector (perpendicular to edge, pointing inward for CCW winding)
+        # For a triangle with vertices v1, v2, v3, the inward normal for edge v1-v2
+        # is proportional to (-dy, dx) if winding is CCW.
+        # We assume standard CCW winding.
+        normal = (-edge_vec[1], edge_vec[0])
+        # Signed distance is dot product of point_vec and normalized normal
+        # But we need the actual distance, so divide by length of edge
+        edge_len = sqrt(edge_vec[0]**2 + edge_vec[1]**2)
+        if edge_len == 0:
+            distances.append(0.0)
+            continue
+        signed_dist = (point_vec[0] * normal[0] + point_vec[1] * normal[1]) / edge_len
+        distances.append(signed_dist)
+    
+    # Step 2: Compute SDF phi(p) = max(d_i)
+    phi_p = max(distances)
+    
+    # Step 3: Determine min phi (at incenter)
+    # This is a property of the triangle, precomputed or approximated.
+    # For a triangle, the incenter is the point where distances to all edges are equal.
+    # The value min_phi is the negative of the inradius.
+    # Inradius r = Area / s, where s is semi-perimeter.
+    # phi(incenter) = -r.
+    # However, the source defines min_phi as the minimum value of phi(p) inside the triangle.
+    # Since phi(p) = max(d_i), and at incenter d1=d2=d3=r, phi(incenter) = r?
+    # Wait, source says: "phi(p) is negative inside the triangle".
+    # Let's re-read carefully: "phi(p) is negative inside the triangle... ratio phi(p)/phi(s) is positive".
+    # If d_i is positive inside, then phi(p) = max(d_i) is positive inside.
+    # But source says: "phi(p) is negative inside the triangle".
+    # This implies the signed distance is defined as negative inside.
+    # Let's adjust: d_i is negative inside.
+    # Then phi(p) = max(d_i) is negative inside (closest to 0 at boundary).
+    # min_phi is the most negative value, i.e., at the incenter.
+    
+    # Recalculate distances with negative sign for inside
+    distances_neg = [-d for d in distances]
+    phi_p = max(distances_neg)
+    
+    # Compute min_phi (inradius, negative)
+    # Area of triangle
+    x1, y1 = triangle_vertices[0]
+    x2, y2 = triangle_vertices[1]
+    x3, y3 = triangle_vertices[2]
+    area = 0.5 * abs(x1*(y2-y3) + x2*(y3-y1) + x3*(y1-y2))
+    # Side lengths
+    a = sqrt((x2-x1)**2 + (y2-y1)**2)
+    b = sqrt((x3-x2)**2 + (y3-y2)**2)
+    c = sqrt((x1-x3)**2 + (y1-y3)**2)
+    s = (a + b + c) / 2
+    inradius = area / s
+    min_phi = -inradius
+    
+    # Step 4: Normalize
+    # Avoid division by zero if triangle is degenerate
+    if min_phi == 0:
+        return 0.0
+        
+    ratio = phi_p / min_phi
+    
+    # Step 5: Apply ReLU and Exponent
+    if ratio <= 0:
+        return 0.0
+    else:
+        return ratio ** sigma
+```
+
+## Subtopics
+
+### Triangle Window Function
+The Triangle Window Function is the specific implementation of the influence function $I(\mathbf{p})$ described above. It ensures maximum value (1) at the incenter, zero at the boundary, and zero outside. It solves the problem of defining a smooth, compact support for triangle splatting that converges to the triangle shape ($\sigma \to 0$) or a delta function ($\sigma \to \infty$) based on the parameter $\sigma$. Unlike sigmoid-based window functions ($I = \text{sigmoid}(-\sigma^{-1} \phi(\mathbf{p}))$) which fail to have max=1 and have support larger than the triangle, this formulation ensures tight support and correct maximum [S1].
+
+## Operating characteristics
+*   **Time Complexity**: Computing the influence for a pixel involves constant-time operations (3 edge distance calculations, max, division, power).
+*   **Memory Complexity**: Requires storing the triangle vertices and precomputed $\min \phi$ (inradius) per triangle.
+*   **Strengths**: Depth-independent scaling allows a single $\sigma$ parameter for all triangles, simplifying optimization and rendering. Tight support reduces unnecessary computation outside the triangle.
+*   **Limitations**: The actual max function for SDF is not smooth everywhere, which may affect gradient-based optimization in some contexts, though it is preferred for shape accuracy [S1].
+*   **When to use**: When rendering triangle-based representations where consistent appearance across depths is required without per-triangle depth scaling parameters.
+
+## Background
+This property is a key component of Triangle Splatting, a method for real-time radiance field rendering. It addresses the limitations of 3D Gaussian Splatting, which requires complex depth-dependent covariance adjustments. The scaling invariance allows for simpler parameterization and efficient rendering [S1].
+
+## Sources
+[S1] Triangle Splatting for Real-Time Radiance Field Rendering, https://doi.org/10.1109/3DV69130.2026.00123, fetched 2026-10-27

@@ -1,0 +1,118 @@
+# Graph Construction for Multi-material Segmentation
+
+Also called: Graph-based Segmentation, Min-Cut Segmentation for Volumes
+
+## Overview
+Graph Construction for Multi-material Segmentation defines the graph topology and edge weights required to perform a binary min-cut classification step within a larger multi-material segmentation pipeline. It solves the problem of assigning unclassified "doubt" voxels to specific materials by isolating one target material against all others in a single iteration. It differs from direct multi-way partitioning by reducing the problem to a binary source-sink cut, which is computationally tractable, whereas direct multi-way graph partitioning is NP-hard [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A set of doubt voxels $X$, a set of closure voxels $\{C_j\}$ for all materials $j \in M$, and the current target material $i$ to be classified.
+*   **Output:** A weighted undirected graph $G = (V, E)$ ready for min-cut optimization.
+
+**Data Structures**
+The graph $G$ consists of nodes $V$ and edges $E$.
+1.  **Nodes $V$**:
+    *   Doubt voxels $X$: Voxels not yet assigned to a material, typically located at boundaries.
+    *   Closure voxels $\{C_j\}$: For each material $j$, $C_j$ is the set of voxels in the restricted region $R_j$ that are 6-connected to at least one doubt voxel.
+    *   Two terminal nodes: Source $s$ and Sink $t$.
+2.  **Edges $E$**:
+    *   Edges from source to closure voxels of the target material: $E_s$.
+    *   Edges from sink to closure voxels of all other materials: $E_t$.
+    *   Edges between 6-connected doubt and closure voxels: $E_{dc}$.
+
+**Step-by-Step Construction**
+1.  **Identify Doubt Voxels ($X$):** These are voxels that could not be classified using restricted region growing, usually located at boundary areas between different materials [S1].
+2.  **Define Closure Voxels ($C_i$):** For the target material $i$, define the closure voxels $C_i$ as:
+    $$ C_i = \{ p \in R_i \mid \exists (p, q) \in N, q \in X \} $$
+    where $R_i$ is the restricted region for material $i$, and $N$ represents the 6-neighborhood connectivity [S1].
+3.  **Define Other Closure Voxels ($\bar{C}$):** Let $\bar{M}$ be the set of all materials except $i$. Define $\bar{C}$ as the union of closure voxels for all materials in $\bar{M}$:
+    $$ \bar{C} = \bigcup_{j \in \bar{M}} C_j $$
+4.  **Construct Node Set $V$:**
+    $$ V = X \cup \{C_i\} \cup \bar{C} \cup \{s, t\} $$
+    Here, $s$ represents material $i$, and $t$ represents the collection of all other materials $\bar{M}$ [S1].
+5.  **Define Edges $E$:**
+    *   **Source Edges ($E_s$):** Connect source $s$ to all closure voxels in $C_i$:
+        $$ E_s = \{ (p, s) \mid p \in C_i \} $$
+    *   **Sink Edges ($E_t$):** Connect sink $t$ to all closure voxels in $\bar{C}$:
+        $$ E_t = \{ (p, t) \mid p \in \bar{C} \} $$
+    *   **Internal Edges ($E_{dc}$):** Connect 6-connected pairs of nodes where at least one is a doubt or closure voxel:
+        $$ E_{dc} = \{ (p, q) \mid p, q \in V, p \text{ and } q \text{ are 6-connected} \} $$
+6.  **Assign Edge Weights:**
+    *   Weights for edges in $E_s$ and $E_t$ are set to infinity ($\infty$). This acts as a hard constraint, ensuring that closure voxels are never cut from their corresponding terminals [S1].
+    *   Weights for edges in $E_{dc}$ are determined by the data-dependent cost function (e.g., intensity difference) to minimize the cut energy $E = \sum_{p \in S, q \in T} w(p, q)$ [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def build_graph(doubt_voxels X, closure_voxels_map C_map, target_material i, all_materials M):
+    # 1. Identify closure voxels for the target material
+    # C_i = { p in R_i | exists neighbor q in X }
+    # Note: R_i is the restricted region for material i.
+    # In practice, this is pre-computed or derived from the region growing step.
+    C_i = get_closure_voxels(C_map, i, X)
+    
+    # 2. Identify closure voxels for all other materials
+    M_bar = M - {i}
+    C_bar = set()
+    for mat in M_bar:
+        C_bar = C_bar union get_closure_voxels(C_map, mat, X)
+        
+    # 3. Define Nodes
+    nodes = X union C_i union C_bar
+    source = 's'
+    sink = 't'
+    nodes.add(source)
+    nodes.add(sink)
+    
+    # 4. Define Edges and Weights
+    edges = []
+    
+    # Edges from source to target closure voxels (Infinity weight)
+    for p in C_i:
+        edges.append((source, p, float('inf')))
+        
+    # Edges from sink to other closure voxels (Infinity weight)
+    for p in C_bar:
+        edges.append((p, sink, float('inf')))
+        
+    # Edges between 6-connected nodes in V
+    # This includes connections between doubt voxels, closure voxels, 
+    # and between doubt and closure voxels.
+    for p in nodes:
+        if p in [source, sink]:
+            continue
+        for q in get_6_neighbors(p):
+            if q in nodes and q > p: # Avoid duplicates and self-loops
+                # Weight is data-dependent, e.g., based on intensity gradient
+                w = compute_data_weight(p, q)
+                edges.append((p, q, w))
+                
+    return Graph(nodes, edges)
+```
+
+**Parameters**
+*   **Edge Weights ($E_s, E_t$):** Infinity. This is a critical parameter to enforce hard constraints [S1].
+*   **Connectivity:** 6-connected neighborhood is used for defining closure voxels and internal edges [S1].
+
+**Edge Cases and Pitfalls**
+*   **Disconnected Regions:** The restricted region $R_i$ can be disconnected. The graph construction handles this by including all closure voxels from all disconnected components of $R_i$ [S1].
+*   **Precision:** Using infinity for hard constraints requires the min-cut algorithm to handle large numbers or symbolic infinity without overflow or precision loss [S1].
+
+## Subtopics
+
+### [Sequential Graph-cut Segmentation](8314-sequential-graph-cut-segmentation.md)
+A multi-material classification method that decomposes an $n$-material segmentation problem into $n-1$ binary Graph-cut iterations. It solves the NP-hardness of direct multi-way graph partitioning by classifying materials one by one, starting from the lowest CT value. This approach ensures that boundaries are consistent with isovalue thresholds and prevents the misclassification of lower-density materials at interfaces with higher-density materials. It builds on [Graph Construction for Multi-material Segmentation](8290-graph-construction-for-multi-material-segmentation.md) by defining the specific iterative strategy and terminal node assignments.
+
+## Operating characteristics
+*   **Complexity:** The pre-processing step (restricted region growing) has $O(s \cdot n)$ complexity, where $s$ is the number of voxels and $n$ is the number of materials [S1]. The graph construction itself is linear with respect to the number of doubt and closure voxels. The subsequent min-cut operation is polynomial in the size of the graph, which is significantly smaller than the full volume because only doubt and closure voxels are included [S1].
+*   **Performance:** This approach drastically reduces the size of the graph fed into the expensive Graph-cut algorithm, making it computationally efficient compared to applying Graph-cut to the entire volume [S1].
+*   **Strengths:** Ensures correct geometrical shapes of segmented parts because the cut is forced to pass only through doubt voxels at the boundary area of material $i$ [S1].
+*   **Limitations:** It is a binary method; it cannot directly segment more than two subgraphs in polynomial time, necessitating the sequential approach for multi-material problems [S1].
+
+## Background
+The method originates from the extraction of isosurfaces from multi-material CT volumetric data of mechanical parts. It addresses the limitation that Graph-cut is inherently a binary method and cannot perform multiple cuts to generate more than two subgraphs in polynomial time, as cutting a graph into more than two subgraphs is NP-hard [Dahlhaus et al. 1992, cited in S1]. The approach was developed to efficiently segment mechanical parts with multiple materials by combining fast restricted region growing with precise Graph-cut boundary classification [S1].
+
+## Sources
+[S1] Extraction of isosurfaces from multi-material CT volumetric data of mechanical parts, https://doi.org/10.1145/1364901.1364931, fetched 2026-11-01

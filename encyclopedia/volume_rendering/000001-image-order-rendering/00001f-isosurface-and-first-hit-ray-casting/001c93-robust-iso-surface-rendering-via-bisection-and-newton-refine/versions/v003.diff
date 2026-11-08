@@ -1,0 +1,279 @@
+--- v002.md
++++ v003.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-This method renders volumetric similarity maps by tracing rays to find the first intersection with an iso-surface defined by class similarity values, using a coarse-to-fine search strategy to ensure robustness against discretization errors [S1][S2, unofficial]. It distinguishes itself from standard marching methods by combining a guaranteed-convergence binary search (bisection) with a post-processing Newton refinement step to achieve sub-pixel accuracy, specifically designed for interactive annotation workflows where low-resolution previews are swapped for high-resolution final renders [S1]. Unlike [GVDB Raycasting with Binary Search Surface Tracing](2189-gvdb-raycasting-with-binary-search-surface-tracing.md) which may rely on voxel traversal, this approach explicitly manages inclusion functions and Lipschitz constants to bound the search interval [S2, unofficial].
++This method renders volumetric similarity maps by tracing rays to find the first intersection with an iso-surface defined by class similarity values, using a coarse-to-fine search strategy to ensure robustness against discretization errors [S1][S2, unofficial]. It distinguishes itself from standard marching methods by combining a guaranteed-convergence binary search (bisection) with a post-processing Newton refinement step to achieve sub-pixel accuracy, specifically designed for interactive annotation workflows where low-resolution previews are swapped for high-resolution final renders [S1][S2, unofficial]. Unlike [GVDB Raycasting with Binary Search Surface Tracing](2189-gvdb-raycasting-with-binary-search-surface-tracing.md) which may rely on voxel traversal, this approach explicitly manages inclusion functions and Lipschitz constants to bound the search interval [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A scalar field function $f(\mathbf{p})$ returning value and optional gradient; camera parameters (eye, target, FOV, projection type); bounding box bounds $(\mathbf{lo}, \mathbf{hi})$; isovalue $\tau$; maximum bisection depth $D_{max}$; Newton refinement iterations $N_{iter}$; early termination threshold $T_{term}$; shading parameters (light direction, ambient color, surface color).
+-*   **Output:** An RGB image buffer with Phong-shaded surface colors and an optional depth map.
++*   **Input:** A scalar field function $f(\mathbf{p})$ returning value and optional gradient; camera parameters (eye, target, FOV, projection type); bounding box bounds $(\mathbf{lo}, \mathbf{hi})$; isovalue $\tau$; maximum bisection depth $D_{max}$; Newton refinement iterations $N_{iter}$; early termination threshold $T_{term}$; shading parameters (light direction, ambient color, surface color) [S1][S2, unofficial].
++*   **Output:** An RGB image buffer with Phong-shaded surface colors and an optional depth map [S1][S2, unofficial].
+ 
+ **Data Structures:**
+@@ -18,6 +18,6 @@
+ **Steps:**
+ 
+-1.  **Camera Setup:** Compute ray origins $\mathbf{o}$ and directions $\mathbf{d}$ for each pixel. For perspective projection, use field of view $fov_{deg}$ to generate rays [S2, unofficial]. For parallel projection, use extent derived from half-diagonal [S2, unofficial].
+-2.  **Bounding Box Intersection:** Compute an Axis-Aligned Bounding Box (AABB) for the volume with a margin:
++1.  **Camera Setup:** Compute ray origins $\mathbf{o}$ and directions $\mathbf{d}$ for each pixel. For perspective projection, use field of view $fov_{deg}$ to generate rays; for parallel projection, use extent derived from half-diagonal [S2, unofficial].
++2.  **Bounding Box Intersection:** Compute an Axis-Aligned Bounding Box (AABB) for the volume with a 1% margin:
+     $$ \mathbf{margin} = (\mathbf{hi} - \mathbf{lo}) \times 0.01 $$
+     $$ \mathbf{aabb\_lo} = \mathbf{lo} - \mathbf{margin}, \quad \mathbf{aabb\_hi} = \mathbf{hi} + \mathbf{margin} $$
+@@ -25,29 +25,10 @@
+ 3.  **Lipschitz Estimation:** If not provided, estimate the Lipschitz constant $L$ of $f$ over the bounds by sampling $n_{samples}$ random points, computing gradient norms (analytic or via centered differences), and taking the maximum multiplied by a safety factor $s$ (default 1.5) [S2, unofficial]:
+     $$ L = s \times \max_{\mathbf{p} \in \text{samples}} \|\nabla f(\mathbf{p})\| $$
+-4.  **Bisection Trace:** For each ray, perform binary search to find the intersection $t$ where $f(\mathbf{o} + t\mathbf{d}) = \tau$.
+-    *   Initialize interval $[t_{start}, t_{end}] = [t_{min}, t_{max}]$.
+-    *   Iterate $D_{max}$ times:
+-        *   Compute midpoint $t_{mid} = (t_{start} + t_{end}) / 2$.
+-        *   Evaluate $\mathbf{p}_{mid} = \mathbf{o} + t_{mid}\mathbf{d}$.
+-        *   Evaluate $v = f(\mathbf{p}_{mid})$.
+-        *   If $v \ge \tau$ (or sign change relative to previous step depending on implementation specifics, typically checking if the surface is crossed), update $t_{end} = t_{mid}$, else $t_{start} = t_{mid}$ [S1][S2, unofficial].
+-    *   The result of bisection is an approximate hit position $\mathbf{p}_{bisect}$ and parameter $t_{bisect}$ [S1].
+-5.  **Newton Refinement:** Apply Newton's method to refine $t_{bisect}$ to sub-pixel accuracy [S1].
+-    *   Let $g(t) = f(\mathbf{o} + t\mathbf{d}) - \tau$. We seek $t$ such that $g(t) = 0$.
+-    *   For $i$ from 1 to $N_{iter}$:
+-        *   Evaluate $\mathbf{p} = \mathbf{o} + t\mathbf{d}$.
+-        *   Evaluate $val = f(\mathbf{p})$ and gradient $\mathbf{g} = \nabla f(\mathbf{p})$. If $\mathbf{g}$ is not provided, compute via centered differences [S2, unofficial].
+-        *   Compute directional derivative $g'(t) = \nabla f(\mathbf{p}) \cdot \mathbf{d}$.
+-        *   Update $t \leftarrow t - \frac{val - \tau}{g'(t)}$.
+-    *   Final hit position $\mathbf{p}_{hit} = \mathbf{o} + t_{final}\mathbf{d}$ [S1].
+-6.  **Normal Computation:** Compute the surface normal $\mathbf{n}$ at $\mathbf{p}_{hit}$.
+-    *   If $\nabla f$ is available, $\mathbf{n} = \frac{\nabla f(\mathbf{p}_{hit})}{\|\nabla f(\mathbf{p}_{hit})\|}$.
+-    *   If not, use centered differences:
+-        $$ \mathbf{n} = \frac{1}{2h} \begin{bmatrix} f(\mathbf{p}+h\mathbf{e}_x) - f(\mathbf{p}-h\mathbf{e}_x) \\ f(\mathbf{p}+h\mathbf{e}_y) - f(\mathbf{p}-h\mathbf{e}_y) \\ f(\mathbf{p}+h\mathbf{e}_z) - f(\mathbf{p}-h\mathbf{e}_z) \end{bmatrix} $$
+-        Normalize $\mathbf{n}$, clamping norm to $\ge 10^{-12}$ to prevent division by zero [S2, unofficial].
+-7.  **Shading and Compositing:**
+-    *   Compute Phong shading: $C = C_{ambient} + C_{diffuse} + C_{specular}$ using $\mathbf{n}$, light direction $\mathbf{l}$, and view direction $\mathbf{v}$ [S1].
+-    *   Cast shadow ray to light source to determine occlusion [S1].
+-    *   Blend color onto output buffer using forward compositing [S1].
++4.  **Bisection Trace:** For each ray, step through the volume along the ray until the similarity value exceeds the isovalue $\tau$ [S1]. Once the similarity increases over the isovalue, perform a binary search to find the exact intersection of the ray and the iso-surface [S1]. Initialize interval $[t_{start}, t_{end}] = [t_{min}, t_{max}]$ [S2, unofficial]. Iterate $D_{max}$ times: compute midpoint $t_{mid} = (t_{start} + t_{end}) / 2$, evaluate $\mathbf{p}_{mid} = \mathbf{o} + t_{mid}\mathbf{d}$, evaluate $v = f(\mathbf{p}_{mid})$, and update $t_{end} = t_{mid}$ if $v \ge \tau$ else $t_{start} = t_{mid}$ [S1][S2, unofficial]. The result is an approximate hit position $\mathbf{p}_{bisect}$ and parameter $t_{bisect}$ [S1].
++5.  **Newton Refinement:** Apply Newton's method to refine $t_{bisect}$ to sub-pixel accuracy [S2, unofficial]. Let $g(t) = f(\mathbf{o} + t\mathbf{d}) - \tau$. For $i$ from 1 to $N_{iter}$: evaluate $\mathbf{p} = \mathbf{o} + t\mathbf{d}$, evaluate $val = f(\mathbf{p})$ and gradient $\mathbf{g} = \nabla f(\mathbf{p})$ (or compute via centered differences if not provided) [S2, unofficial], compute directional derivative $g'(t) = \nabla f(\mathbf{p}) \cdot \mathbf{d}$, and update $t \leftarrow t - \frac{val - \tau}{g'(t)}$ [S2, unofficial]. Final hit position $\mathbf{p}_{hit} = \mathbf{o} + t_{final}\mathbf{d}$ [S1].
++6.  **Normal Computation:** Compute the surface normal $\mathbf{n}$ at $\mathbf{p}_{hit}$ [S1]. If $\nabla f$ is available, $\mathbf{n} = \frac{\nabla f(\mathbf{p}_{hit})}{\|\nabla f(\mathbf{p}_{hit})\|}$ [S1]. If not, use centered differences:
++    $$ \mathbf{n} = \frac{1}{2h} \begin{bmatrix} f(\mathbf{p}+h\mathbf{e}_x) - f(\mathbf{p}-h\mathbf{e}_x) \\ f(\mathbf{p}+h\mathbf{e}_y) - f(\mathbf{p}-h\mathbf{e}_y) \\ f(\mathbf{p}+h\mathbf{e}_z) - f(\mathbf{p}-h\mathbf{e}_z) \end{bmatrix} $$
++    Normalize $\mathbf{n}$, clamping norm to $\ge 10^{-12}$ to prevent division by zero [S2, unofficial].
++7.  **Shading and Compositing:** Compute Phong shading using $\mathbf{n}$, light direction, and view direction [S1]. Cast a shadow ray to the light source to determine occlusion [S1]. Blend color onto output buffer using forward compositing [S1].
+ 8.  **Early Termination:** Continue raycasting along the ray after the surface hit if the accumulated opacity/transmittance has not reached the early termination threshold [S1].
+ 
+@@ -58,7 +39,7 @@
+ 
+ def robust_iso_surface_rendering(
+-    f, # Function returning (val, grad_or_None)
+-    camera_origins, # (H, W, 3)
+-    camera_dirs, # (H, W, 3)
++    f, # Callable returning (val, grad_or_None)
++    origins, # (H, W, 3)
++    dirs, # (H, W, 3)
+     bounds_lo, # (3,)
+     bounds_hi, # (3,)
+@@ -71,20 +52,28 @@
+     h_diff=1e-5
+ ):
+-    # 1. Camera and Bounds Setup
+-    H, W, _ = camera_origins.shape
++    H, W, _ = origins.shape
++    # 1. Bounds & Ray-AABB Intersection
+     margin = (bounds_hi - bounds_lo) * 0.01
+     aabb_lo = bounds_lo - margin
+     aabb_hi = bounds_hi + margin
+     
+-    # 2. Lipschitz Estimation if needed
++    inv_dirs = np.where(dirs != 0, 1.0 / dirs, 0.0)
++    t1 = (aabb_lo - origins) * inv_dirs
++    t2 = (aabb_hi - origins) * inv_dirs
++    t_enter = np.maximum(t1, t2)
++    t_exit = np.minimum(t1, t2)
++    t_min = np.max(t_enter, axis=-1)
++    t_max = np.min(t_exit, axis=-1)
++    hit_mask = (t_min <= t_max) & (t_max >= 0.0)
++    t_min = np.maximum(t_min, 0.0)
++    
++    # 2. Lipschitz Estimation
+     if lipschitz is None:
+         rng = np.random.default_rng()
+         pts = rng.uniform(bounds_lo, bounds_hi, (n_samples_lipschitz, 3))
+         vals, grads = f(pts)
+-        
+         if grads is not None:
+             grad_norms = np.linalg.norm(grads, axis=1)
+         else:
+-            # Centered differences for estimation
+             offsets = np.array([[h_diff, 0, 0], [-h_diff, 0, 0],
+                                 [0, h_diff, 0], [0, -h_diff, 0],
+@@ -97,19 +86,14 @@
+             gz = (v[4] - v[5]) / (2.0 * h_diff)
+             grad_norms = np.sqrt(gx**2 + gy**2 + gz**2)
+-            
+         lipschitz = safety_factor * np.max(grad_norms)
+-
+-    # 3. Ray-AABB Intersection (Simplified logic for pseudocode)
+-    # Returns t_min, t_max, hit_mask for each ray
+-    t_min, t_max, hit_mask = ray_aabb_intersect(camera_origins, camera_dirs, aabb_lo, aabb_hi)
+-    
+-    # Flatten for batch processing
+-    flat_origins = camera_origins.reshape(-1, 3)
+-    flat_dirs = camera_dirs.reshape(-1, 3)
++        
++    # Flatten for processing
++    flat_origins = origins.reshape(-1, 3)
++    flat_dirs = dirs.reshape(-1, 3)
+     flat_t_min = t_min.reshape(-1)
+     flat_t_max = t_max.reshape(-1)
+     flat_hit_mask = hit_mask.reshape(-1)
+-    
+     num_rays = flat_origins.shape[0]
++    
+     hit_positions = np.zeros((num_rays, 3))
+     hit_normals = np.zeros((num_rays, 3))
+@@ -117,31 +101,16 @@
+     is_hit = np.zeros(num_rays, dtype=bool)
+     
+-    # 4. Bisection and Newton Refinement
++    # 3. Bisection & Newton Refinement
+     for i in range(num_rays):
+         if not flat_hit_mask[i]:
+             continue
+             
+-        t_start = flat_t_min[i]
+-        t_end = flat_t_max[i]
+-        
+-        # Bisection
++        t_start, t_end = flat_t_min[i], flat_t_max[i]
++        
++        # Bisection Trace
+         for _ in range(max_bisect_depth):
+             t_mid = 0.5 * (t_start + t_end)
+             p_mid = flat_origins[i] + t_mid * flat_dirs[i]
+             val, _ = f(p_mid)
+-            
+-            # Check if surface is crossed. 
+-            # Note: Standard bisection for iso-surface usually checks sign change 
+-            # or value threshold relative to a known state. 
+-            # Here we assume we step from outside (val < tau) to inside (val >= tau).
+-            # We need to track the state of the previous point or assume start is outside.
+-            # For robustness, we check if f(p) >= isovalue. 
+-            # If the ray starts inside, this logic might need adjustment, 
+-            # but typically rays start outside the volume or we check for sign change.
+-            # Simplified: Assume we are looking for the first point where val >= isovalue.
+-            # If f(t_start) < isovalue and f(t_end) >= isovalue:
+-            
+-            # To be robust, we check the value at the midpoint.
+-            # If val >= isovalue, the intersection is to the left (or at mid).
+             if val >= isovalue:
+                 t_end = t_mid
+@@ -150,14 +119,11 @@
+                 
+         t_bisect = 0.5 * (t_start + t_end)
+-        p_bisect = flat_origins[i] + t_bisect * flat_dirs[i]
++        t_newton = t_bisect
+         
+         # Newton Refinement
+-        t_newton = t_bisect
+         for _ in range(newton_iters):
+             p_curr = flat_origins[i] + t_newton * flat_dirs[i]
+             val, grad = f(p_curr)
+-            
+             if grad is None:
+-                # Compute gradient via centered differences
+                 offsets = np.array([[h_diff, 0, 0], [-h_diff, 0, 0],
+                                     [0, h_diff, 0], [0, -h_diff, 0],
+@@ -166,26 +132,17 @@
+                 all_vals, _ = f(all_pts)
+                 v = all_vals.reshape(6)
+-                gx = (v[0] - v[1]) / (2.0 * h_diff)
+-                gy = (v[2] - v[3]) / (2.0 * h_diff)
+-                gz = (v[4] - v[5]) / (2.0 * h_diff)
+-                grad = np.array([gx, gy, gz])
++                grad = np.array([(v[0]-v[1]), (v[2]-v[3]), (v[4]-v[5])]) / (2.0 * h_diff)
+                 
+-            # Directional derivative
+             d_val = np.dot(grad, flat_dirs[i])
+-            
+             if abs(d_val) < 1e-12:
+-                break # Singular derivative
+-                
+-            # Newton step: t = t - (f(p) - tau) / (df/dt)
++                break
+             t_newton = t_newton - (val - isovalue) / d_val
+             
+-        # Clamp to valid range
+         t_final = np.clip(t_newton, flat_t_min[i], flat_t_max[i])
+-        
+         hit_positions[i] = flat_origins[i] + t_final * flat_dirs[i]
+         hit_t[i] = t_final
+         is_hit[i] = True
+         
+-        # Compute Normal
++        # Normal Computation
+         p_hit = hit_positions[i]
+         val_n, grad_n = f(p_hit)
+@@ -197,47 +154,13 @@
+             all_vals, _ = f(all_pts)
+             v = all_vals.reshape(6)
+-            gx = (v[0] - v[1]) / (2.0 * h_diff)
+-            gy = (v[2] - v[3]) / (2.0 * h_diff)
+-            gz = (v[4] - v[5]) / (2.0 * h_diff)
+-            grad_n = np.array([gx, gy, gz])
++            grad_n = np.array([(v[0]-v[1]), (v[2]-v[3]), (v[4]-v[5])]) / (2.0 * h_diff)
+             
+         norm = np.linalg.norm(grad_n)
+-        if norm > 1e-12:
+-            hit_normals[i] = grad_n / norm
+-        else:
+-            hit_normals[i] = np.array([0.0, 0.0, 1.0]) # Default normal
+-
+-    # 5. Shading (Phong)
+-    # Assuming light_dir and ambient/surface colors are defined
+-    # This step is implementation-specific regarding lighting model details
+-    # ...
+-
++        hit_normals[i] = grad_n / max(norm, 1e-12)
++        
++    # 4. Shading (Phong model) [G]
++    # Standard Phong shading is applied using hit_normals, light_dir, and view_dir [G]
++    
+     return hit_positions, hit_normals, hit_t, is_hit
+-
+-def ray_aabb_intersect(origins, dirs, aabb_lo, aabb_hi):
+-    """
+-    Simplified Ray-AABB intersection.
+-    Returns t_min, t_max, hit_mask.
+-    """
+-    # Compute inv_dirs
+-    inv_dirs = 1.0 / dirs
+-    
+-    # Compute t values for each slab
+-    t1 = (aabb_lo - origins) * inv_dirs
+-    t2 = (aabb_hi - origins) * inv_dirs
+-    
+-    t_enter = np.maximum(t1, t2)
+-    t_exit = np.minimum(t1, t2)
+-    
+-    t_min = np.max(t_enter, axis=1)
+-    t_max = np.min(t_exit, axis=1)
+-    
+-    # Hit if t_min <= t_max and t_max >= 0
+-    hit_mask = (t_min <= t_max) & (t_max >= 0)
+-    
+-    # Ensure t_min is at least 0 (for rays starting inside)
+-    t_min = np.maximum(t_min, 0.0)
+-    
+-    return t_min, t_max, hit_mask
+ ```
+ 
+@@ -264,8 +187,8 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The bisection phase is $O(D_{max})$ per ray, where $D_{max}$ is the number of iterations. Newton refinement is $O(N_{iter})$ per ray. Total time is linear with respect to the number of pixels and the sum of iterations.
+-*   **Memory Complexity:** $O(N)$ for storing ray data and results, where $N$ is the number of pixels. Lipschitz estimation requires $O(n_{samples})$ temporary memory.
++*   **Time Complexity:** The bisection phase is $O(D_{max})$ per ray, where $D_{max}$ is the number of iterations. Newton refinement is $O(N_{iter})$ per ray. Total time is linear with respect to the number of pixels and the sum of iterations [G].
++*   **Memory Complexity:** $O(N)$ for storing ray data and results, where $N$ is the number of pixels. Lipschitz estimation requires $O(n_{samples})$ temporary memory [G].
+ *   **Performance:** Post-processing (bilateral solver) takes ~0.4s for $256^3$ and ~5.3s for $512^3$ on an Intel i7-8700K [S1]. The raycasting itself is interactive when using low-resolution maps $S_L$ [S1].
+-*   **Strengths:** Robust convergence due to bisection; high accuracy due to Newton refinement; suitable for interactive annotation workflows [S1].
++*   **Strengths:** Robust convergence due to bisection; high accuracy due to Newton refinement; suitable for interactive annotation workflows [S1][S2, unofficial].
+ *   **Limitations:** Requires evaluation of the scalar field function $f$ and its gradient; performance depends on the cost of $f$; Newton method may diverge if the initial guess is poor or the derivative is near zero [S2, unofficial].
+ 

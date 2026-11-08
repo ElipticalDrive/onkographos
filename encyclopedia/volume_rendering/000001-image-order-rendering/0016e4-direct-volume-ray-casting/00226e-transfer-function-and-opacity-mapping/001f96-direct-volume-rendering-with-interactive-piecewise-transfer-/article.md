@@ -21,7 +21,7 @@ This method is a CPU-based direct volume rendering technique that maps scalar vo
 
 **Steps:**
 
-1.  **Normalization:** Normalize the input volume `vol` to the 8-bit integer range $[0, 255]$.
+1.  **Normalization:** Normalize the input volume `vol` to the 8-bit integer range $[0, 255]$ [S1, unofficial].
     $$ v_{\text{norm}} = \text{round}\left( 255 \cdot \frac{v - v_{\min}}{v_{\max} - v_{\min} + 10^{-15}} \right) $$
     where $v_{\min} = \min(\text{vol})$ and $v_{\max} = \max(\text{vol})$ [S1, unofficial]. The epsilon $10^{-15}$ prevents division by zero if the volume has constant values [S1, unofficial].
 
@@ -148,11 +148,12 @@ def render_volume(vol, l1, l2, l3, l4, alpha1, alpha2, alpha3, alpha4, alpha5):
 *   `stepsize`: The distance between sample points along the ray. Passed as `argv[5]` in the parallel implementation [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Division by Zero:** Normalization uses $v_{\max} - v_{\min} + 10^{-15}$ to prevent division by zero if the volume has constant values [S1, unofficial].
-*   **Threshold Ordering:** The transfer function logic assumes $l_1 < l_2 < l_3 < l_4$. Violating this order breaks the piecewise logic [S1, unofficial].
-*   **Shape Clarification:** The source code initializes `ps` as `np.zeros([dim[1], dim[2], dim[3]])`. Since `dim[1]` equals $4$ (the RGBA channel count), `ps` correctly has shape $(4, H, W)$, avoiding the alleged mismatch [S1, unofficial].
-*   **Alpha Inversion:** The final alpha channel is inverted ($1 - A$). This is non-standard for direct volume rendering, which typically outputs accumulated opacity. This may indicate the output is intended to represent transparency or background visibility [S1, unofficial].
-*   **Slice-Based Compositing:** The method composites strictly along the volume's depth axis (slices), not arbitrary rays. Testing with arbitrary ray origins and directions will not match this implementation [S1, unofficial].
+*   **Normalization:** Normalize the input volume `vol` to the 8-bit integer range $[0, 255]$ [S1, unofficial].
+*   **Threshold Ordering:** The transfer function logic assumes $l_1 < l_2 < l_3 < l_4$ [S1, unofficial].
+*   **Shape Clarification:** The source code initializes `ps` as `np.zeros([dim[1], dim[2], dim[3]])` [S1, unofficial].
+*   **Alpha Inversion:** The final alpha channel is inverted ($1 - A$) [S1, unofficial].
+*   This is non-standard for direct volume rendering, which typically outputs accumulated opacity [G].
+*   **Slice-Based Compositing:** The method composites strictly along the volume's depth axis (slices), not arbitrary rays [S1, unofficial].
 
 ## Operating characteristics
 *   **Time Complexity:** $O(D \cdot H \cdot W)$ for transfer function application and $O(D \cdot H \cdot W)$ for compositing, where $D, H, W$ are volume dimensions [S1, unofficial].

@@ -1,9 +1,9 @@
 # Homogeneous Medium Transmittance
 
-Also called: Beer's Law, Beer's Law Transmittance, Beer-Lambert Law, Beer-Lambert Transmittance, Beer-Lambert voxel absorption, Ray Transmittance Accumulation
+Also called: Beer's Law, Beer-Lambert Law, Beer's Law Transmittance, Beer-Lambert Transmittance
 
 ## Overview
-Homogeneous Medium Transmittance computes the fraction of radiance surviving transmission through a participating medium with a constant extinction coefficient [S1, S5, S6, unofficial]. It solves the problem of light attenuation in uniform volumes by applying the Beer-Lambert law, which models the exponential decay of intensity due to absorption and out-scattering [S2, S6, unofficial]. It sets itself apart from [Heterogeneous Medium Transmittance — Beer's Law](4793-heterogeneous-medium-transmittance-beer-s-law.md) by assuming a spatially constant extinction coefficient, and from [Exponential Fog (Beer-Lambert)](3968-exponential-fog-beer-lambert.md) by serving as the fundamental physical primitive rather than a specific depth-cueing application [S1, S2, S3, unofficial].
+Homogeneous Medium Transmittance computes the fraction of radiance surviving transmission through a participating medium with a constant extinction coefficient [S1, S5, S6, unofficial]. It solves the problem of light attenuation in uniform volumes by applying the Beer-Lambert law, which models the exponential decay of intensity due to absorption and out-scattering [S2, S6, unofficial]. It sets itself apart from [Heterogeneous Medium Transmittance — Beer's Law](4793-heterogeneous-medium-transmittance-beer-s-law.md) by assuming a constant extinction coefficient, and from [Exponential Fog (Beer-Lambert)](3968-exponential-fog-beer-lambert.md) by providing the underlying physical primitive for depth-cueing [S2, S3, unofficial].
 
 ## How it works
 **Inputs:**
@@ -16,7 +16,7 @@ Homogeneous Medium Transmittance computes the fraction of radiance surviving tra
 *   $L_o$: Outgoing radiance, $L_o = T \cdot L_i$ [S2, S8, unofficial].
 
 **Data Structures:**
-No complex data structures are required for the core calculation. The method operates on scalar values. In ray-marching implementations, it is applied iteratively per step [S6, unofficial].
+No complex data structures are required for the core calculation [G]. The method operates on scalar values. In ray-marching implementations, it is applied iteratively per step [S6, unofficial].
 
 **Steps:**
 1.  **Calculate Optical Depth:** For a homogeneous medium, the optical depth $\tau$ is the product of the extinction coefficient and the distance [S2, S5, unofficial]:
@@ -27,7 +27,7 @@ No complex data structures are required for the core calculation. The method ope
     $$ L_o = T \cdot L_i $$
 
 **Pseudocode:**
-The following function computes transmittance for a single segment. In a ray-marching loop, this is called repeatedly, accumulating transmittance [S6, unofficial].
+The following function computes transmittance for a single segment [G]. In a ray-marching loop, this is called repeatedly, accumulating transmittance [S6, unofficial].
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
@@ -83,9 +83,9 @@ def accumulate_transmittance(steps: list, extinction_coefficient: float) -> floa
 *   $d$: Step size or total distance. In ray marching, this is often a fixed `MARCH_SIZE` [S6, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** For large optical depths, $e^{-\tau}$ underflows to 0. This is physically correct (complete opacity) but can cause numerical instability if not handled in accumulation loops [S6, unofficial].
-*   **Zero Distance:** If $d=0$, transmittance is 1.0. The pseudocode handles this explicitly [G].
-*   **Lighting Interaction:** Using only Beer's Law without a proper lighting model (e.g., in-scattering) results in a "white blob" appearance because the volume does not interact directionally with light sources [S6, unofficial].
+*   **Precision:** For large optical depths, $e^{-\tau}$ underflows to 0. This is physically correct (complete opacity) [S6, unofficial].
+*   **Zero Distance:** If $d=0$, transmittance is 1.0 [G].
+*   **Lighting Interaction:** Using only Beer's Law without a proper lighting model results in a "white blob" appearance because the volume does not interact directionally with light sources [S6, unofficial].
 
 ## Subtopics
 
@@ -99,40 +99,39 @@ def accumulate_transmittance(steps: list, extinction_coefficient: float) -> floa
 [4793-heterogeneous-medium-transmittance-beer-s-law.md]: Generalizes the homogeneous case by integrating the spatially varying extinction coefficient $\sigma_t(s)$ along the ray to compute optical depth $\tau = \int \sigma_t(s) ds$. It serves as the foundation for the homogeneous model but handles density gradients.
 
 ### Sun Transmittance Marching
-A raymarching technique that calculates the transmittance of sunlight to a specific sample point by integrating light density along a ray directed toward the sun [S9, unofficial]. It uses a simplified Beer-Lambert equation where the optical depth is accumulated by sampling a 3D noise texture (representing cloud density) along the sun direction [S9, unofficial].
-*   **Steps:** Initialize `lightDensity` to 0. Loop from 0 to `stepLimit`. Update `rayPosition` by adding `_SunDirection * stepSize`. Normalize position to UVW space. If inside the volume bounds, accumulate `lightDensity` by adding the red channel of the noise texture (sampled at `rayPosition * _CloudScale`) multiplied by `stepSize` [S9, unofficial].
-*   **Formula:** Transmittance = $\exp(-\text{lightDensity} \cdot \text{_AbsorptionCoefficient})$ [S9, unofficial].
-*   **Parameters:** `stepSize` = 20.0, `stepLimit` = 200 [S9, unofficial].
+A raymarching technique that calculates the transmittance of sunlight to a specific sample point by integrating light density along a ray directed toward the sun, using a simplified Beer-Lambert equation [S10, unofficial]. It uses a simplified Beer-Lambert equation where the optical depth is accumulated by sampling a 3D noise texture (representing cloud density) along the sun direction [S10, unofficial].
+*   **Steps:** Initialize `lightDensity` to 0. Loop from 0 to `stepLimit`. Update `rayPosition` by adding `_SunDirection * stepSize` [S10, unofficial]. Normalize position to UVW space. If inside the volume bounds, accumulate `lightDensity` by adding the red channel of the noise texture (sampled at `rayPosition * _CloudScale`) multiplied by `stepSize` [S10, unofficial].
+*   **Formula:** Transmittance = $\exp(-\text{lightDensity} \cdot \text{_AbsorptionCoefficient})$ [S10, unofficial].
+*   **Parameters:** `stepSize` = 20.0, `stepLimit` = 200 [S10, unofficial].
 
 ### Absorption Adjustment
 In slice-based rendering (e.g., smoke visualization), the absorption parameter $\alpha$ must be adjusted for view directions not aligned with the axis orthogonal to the viewing planes [S4, unofficial]. The absorption coefficient is also adjusted when the distance between adjacent smoke planes changes or viewing planes are skipped [S4, unofficial].
 *   **Performance:** Correcting $\alpha$ for non-axis-aligned views requires significant computation; e.g., 10 million exponential operations per second are needed for 10 fps at 100x100x100 grid resolution [S4, unofficial].
 
 ### Beer-Lambert Extinction with Powder Sugar Effect
-An empirical correction for standard Beer-Lambert attenuation to prevent unrealistic darkening of cloud centers, accounting for intense forward multiple-scattering near boundaries [S10, unofficial].
+An empirical correction for standard Beer-Lambert attenuation to prevent unrealistic darkening of cloud centers, accounting for intense forward multiple-scattering near boundaries [S11, unofficial].
 *   **Formula:**
-    $$ T_{\text{powder}}(\tau) = \max(1.0 - \exp(-2 \tau), 0.05) $$
-    $$ T_{\text{effective}}(\tau) = \exp(-\tau) \cdot T_{\text{powder}}(\tau) $$
-    Where $\tau$ is the optical depth [S10, unofficial].
-*   **Parameters:** `powderFactor` defaults to 1.0 [S10, unofficial].
+    $$ T_{\text{powder}}(\tau) = \exp(-\tau) \cdot \max(1.0 - \exp(-2 \tau \cdot \text{powderFactor}), 0.05) $$
+    Where $\tau$ is the optical depth and `powderFactor` is a material parameter [S11, unofficial].
+*   **Parameters:** `powderFactor` defaults to 1.0 [S11, unofficial].
 
 ### Maximum-Value Projection Shading Handling
-In maximum-value projections, shading effects are turned off except for transmission to allow polygons to show through semitransparent parts of a cell [S11, unofficial].
-*   **Steps:** When casting a transmission ray from a maximum-value intersection, turn the cell 'off' to prevent recursive intersection calculations within the same object. Once the ray intersects the target polygon, turn the cell 'on' again for correct shadowing/reflection [S11, unofficial].
-*   **Formula:** Transmission coefficient = $1 - O_1$, where $O_1$ is the opacity of the maximum value [S11, unofficial].
-*   **Parameters:** Index of refraction is set to 1 [S11, unofficial].
+In maximum-value projections, shading effects are turned off except for transmission to allow polygons to show through semitransparent parts of a cell [S12, unofficial].
+*   **Steps:** When casting a transmission ray from a maximum-value intersection, turn the cell 'off' to prevent recursive intersection calculations within the same object. Once the ray intersects the target polygon, turn the cell 'on' again for correct shadowing/reflection [S12, unofficial].
+*   **Formula:** Transmission coefficient = $1 - O_1$, where $O_1$ is the opacity of the maximum value [S12, unofficial].
+*   **Parameters:** Index of refraction is set to 1 [S12, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ for a single segment calculation. In ray marching, $O(N)$ where $N$ is the number of steps, though early termination can reduce this [S6, unofficial].
+*   **Time Complexity:** $O(1)$ for a single segment calculation [G]. In ray marching, $O(N)$ where $N$ is the number of steps, though early termination can reduce this [S6, unofficial].
 *   **Memory Complexity:** $O(1)$ auxiliary space [G].
 *   **Performance:** The calculation involves a single exponential function and a multiplication. On modern hardware, this is extremely fast, but large volumes with many steps (e.g., 100x100x100 grids) can require millions of exponential operations per frame if not optimized [S4, unofficial].
 *   **Strengths:** Physically accurate for uniform media; computationally inexpensive; simple to implement [S2, S6, unofficial].
-*   **Limitations:** Cannot handle spatially varying density (requires heterogeneous model); does not account for in-scattering (requires full RTE or single scattering model); can produce "white blob" artifacts if used without a lighting model [S6, unofficial].
-*   **When to use:** Uniform fog, smoke, or clouds where density is constant; as a building block for more complex models [S2, S6, unofficial].
+*   **Limitations:** Cannot handle spatially varying density (requires heterogeneous model); does not account for in-scattering (requires full RTE or single scattering model); using only Beer's Law without a proper lighting model results in a "white blob" appearance because the cloud does not interact with light directionally [S6, unofficial].
+*   **When to use:** Suitable for uniform fog, smoke, or clouds where density is constant; serves as a building block for more complex models [S2, S6, unofficial].
 *   **When not to use:** Heterogeneous media, scenes requiring in-scattering effects, or when artistic control over non-exponential decay is needed [S1, S2, S3, unofficial].
 
 ## Background
-The method is based on the Beer-Lambert law, a fundamental physical principle describing light attenuation in media [S2, S7, unofficial]. It was originally formulated in chemistry and optics and has been adapted for computer graphics as the standard model for homogeneous participating media [S2, S4, unofficial]. It is widely used in real-time rendering for fog, clouds, and smoke visualization [S6, S9, unofficial]. The formulation as a solution to the first-order homogeneous linear ODE for radiance change is standard in volume rendering literature [S2, unofficial].
+The method is based on the Beer-Lambert law, a fundamental physical principle describing light attenuation in media [S2, S7, unofficial]. Originally formulated in chemistry and optics, it has been adapted for computer graphics as the standard model for homogeneous participating media [S2, S4, unofficial]. The formulation as a solution to the first-order homogeneous linear ODE for radiance change is standard in volume rendering literature [S2, unofficial].
 
 ## Sources
 [S1] NiekMSoftware/bad-apple-voxel-raytracer, https://github.com/NiekMSoftware/bad-apple-voxel-raytracer, fetched 2026-10-24 (unofficial)
@@ -146,3 +145,5 @@ The method is based on the Beer-Lambert law, a fundamental physical principle de
 [S9] ldarnbr/volumetric-cloud-renderer, https://github.com/ldarnbr/volumetric-cloud-renderer, fetched 2026-10-27 (unofficial)
 [S10] nff747/volumetric-clouds-wgsl, https://github.com/nff747/volumetric-clouds-wgsl, fetched 2026-10-27 (unofficial)
 [S11] Volumetric Ray Tracing, https://www.cs.drexel.edu/~david/Classes/Papers/p11-sobierajski.pdf, fetched 2026-10-28 (unofficial)
+[S12] Volumetric Ray Tracing, https://www.cs.drexel.edu/~david/Classes/Papers/p11-sobierajski.pdf, fetched 2026-10-28 (unofficial)
+[S13] Lighting And Transmittance, https://sergeneren.com/2019/04/26/lighting-and-transmittance/, fetched 2026-10-30 (unofficial)

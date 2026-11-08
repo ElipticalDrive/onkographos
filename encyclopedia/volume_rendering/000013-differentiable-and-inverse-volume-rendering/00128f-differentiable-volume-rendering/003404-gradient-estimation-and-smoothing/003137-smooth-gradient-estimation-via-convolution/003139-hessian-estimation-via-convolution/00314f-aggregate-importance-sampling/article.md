@@ -1,0 +1,106 @@
+# Aggregate Importance Sampling
+
+Also called: AIS
+
+## Overview
+Aggregate Importance Sampling (AIS) is a variance reduction technique for estimating differential quantities (such as gradients and Hessians) in differentiable volume rendering by reducing the number of required function evaluations. It solves the trade-off between computational cost and estimator variance by sampling from a mixture distribution formed by the average of all convolution kernels, rather than sampling each kernel individually. Unlike non-aggregate importance sampling, which requires $O(n^2)$ evaluations for a Hessian, AIS achieves this with a single function evaluation per iteration, albeit with slightly higher variance than the optimal per-element estimator [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A scalar field function $f(\mathbf{x})$ (e.g., density or transmittance), the differential operator order $n$ (dimensionality of the space), and the specific differential quantity to estimate (e.g., Hessian elements).
+*   **Output:** An unbiased estimator for the differential quantity (e.g., the Hessian matrix) computed with one function evaluation.
+
+**Data Structures:**
+*   **Kernel Mixture:** A weighted sum of individual convolution kernels $K_i$ corresponding to each element of the differential representation. For a Hessian in $n$ dimensions, there are $n^2$ elements. The aggregate kernel $K_{agg}$ is defined as the average:
+    $$ K_{agg}(\mathbf{x}) = \frac{1}{n^2} \sum_{i=1}^{n^2} K_i(\mathbf{x}) $$
+*   **Sampling Distribution:** The probability density function (PDF) $p(\mathbf{x})$ used for sampling is proportional to the absolute value of the aggregate kernel $|K_{agg}(\mathbf{x})|$ (or a normalized variant thereof), allowing efficient sampling from the mixture.
+
+**Steps:**
+1.  **Select Element:** Randomly select one element index $k$ from the set of all $n^2$ elements of the differential representation (e.g., a specific entry in the Hessian matrix) with uniform probability $1/n^2$.
+2.  **Sample Position:** Draw a sample position $\mathbf{x}$ from the aggregate sampling distribution $p(\mathbf{x})$ derived from $K_{agg}$.
+3.  **Evaluate Function:** Compute the function value $f(\mathbf{x})$ exactly once.
+4.  **Compute All Elements:** Using the single function value $f(\mathbf{x})$, compute the convolution contribution for *all* $n^2$ elements. For each element $j$, weight the value $f(\mathbf{x})$ by its specific kernel value $K_j(\mathbf{x})$.
+5.  **Estimate:** The estimator for the selected element $k$ is scaled by the inverse of the selection probability and the sampling PDF to maintain unbiasedness. The estimators for the other elements are computed similarly but are discarded or used in subsequent iterations if the method is iterative.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def aggregate_importance_sampling(f, n, num_samples):
+    """
+    Estimate differential quantity (e.g., Hessian) using AIS.
+    f: callable, the scalar field function.
+    n: int, dimensionality of the space.
+    num_samples: int, number of Monte Carlo iterations.
+    """
+    n2 = n * n
+    # Precompute kernels or have access to K_j(x) for all j
+    # Assume sample_from_aggregate() draws x from p(x) proportional to |sum(K_j)|
+    
+    estimator = zeros((n, n))
+    
+    for _ in range(num_samples):
+        # Step 1: Randomly decide which element to choose
+        k_i, k_j = random.randint(0, n-1), random.randint(0, n-1)
+        
+        # Step 2: Sample position from aggregate distribution
+        x = sample_from_aggregate_distribution(n, n2)
+        
+        # Step 3: Single function evaluation
+        val = f(x)
+        
+        # Step 4: Compute convolution sample for all n^2 elements
+        # Note: In practice, one might compute the full gradient/Hessian 
+        # contribution for this sample point to reuse, but AIS specifically 
+        # targets the selection of ONE element per call to reduce variance 
+        # relative to uniform, while keeping cost O(1).
+        
+        # Calculate weights for all elements at this position
+        weights = [K_j(x) for j in range(n2)]
+        
+        # The contribution of this sample to the estimator for element k
+        # The PDF p(x) is the mixture PDF.
+        # The probability of selecting element k is 1/n^2.
+        # The estimator for element k is: val * K_k(x) / (p(x) * (1/n^2))
+        
+        p_x = aggregate_pdf(x, n, n2)
+        weight_k = weights[k_i * n + k_j]
+        
+        # Accumulate for the selected element
+        # Note: To get the full matrix, one would typically accumulate 
+        # contributions for all elements if the cost of computing all 
+        # weights is low, but the core AIS claim is O(1) function calls.
+        # If we only estimate the selected element:
+        estimator[k_i, k_j] += val * weight_k / (p_x * (1.0 / n2))
+        
+    # Normalize by number of samples
+    estimator /= num_samples
+    return estimator
+```
+
+**Parameters:**
+*   **Number of Samples:** Determined by desired variance reduction. Convergence is linear in a log-log plot [S1].
+*   **Kernel Width:** Standard parameters for the underlying convolution kernels (e.g., Gaussian width) apply.
+
+**Edge Cases and Pitfalls:**
+*   **Variance Increase:** AIS increases variance compared to optimal non-aggregate importance sampling because the average kernel $K_{agg}$ is not identical to the individual kernels $K_i$. However, they share properties, such as being zero at position 0 [S1].
+*   **Sampling Efficiency:** The aggregate PDF must be efficiently samplable. If the mixture distribution is complex, sampling overhead may negate the gains from reduced function evaluations.
+
+## Subtopics
+
+### Variance Analysis
+Variance analysis shows that all estimators (optimal, aggregate, uniform) converge linearly in a log-log plot. The optimal estimator has the lowest variance but requires evaluating quadratically many elements ($n^2$) for Hessians. Aggregate sampling performs slightly worse than the optimal estimator but significantly better than uniform sampling [S1].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ function evaluations per iteration for all differential quantities (Gradient, Hessian, HVP), compared to $O(n)$ or $O(n^2)$ for non-aggregate importance sampling [S1].
+*   **Memory Complexity:** Requires storing or computing weights for all $n^2$ elements if the full differential quantity is reconstructed from a single sample, or just the selected element if partial.
+*   **Strengths:** Drastically reduces the number of expensive function evaluations (rendering calls) required for higher-order derivatives.
+*   **Limitations:** Higher variance than optimal per-element importance sampling. The variance increase is due to the mismatch between the aggregate kernel and individual kernels [S1].
+*   **When to Use:** When function evaluations are prohibitively expensive (e.g., complex volume rendering) and a slight increase in estimator variance is acceptable for a massive reduction in computational cost.
+*   **When Not to Use:** When the lowest possible variance is required and computational resources allow for $O(n^2)$ evaluations (optimal IS).
+
+## Background
+Aggregate Importance Sampling was introduced in the context of stochastic gradient estimation for higher-order differentiable rendering. It addresses the challenge of estimating second-order derivatives (Hessians) in optimization problems involving differentiable volume rendering, where the number of dimensions $n$ can be large, making standard finite difference or per-element importance sampling computationally infeasible. The method leverages the similarity between convolution kernels to form a mixture distribution, akin to Multiple Importance Sampling (MIS) with the balance heuristic [S1].
+
+## Sources
+[S1] Stochastic Gradient Estimation for Higher-Order Differentiable Rendering, https://doi.org/10.1109/iccv51701.2025.02618, fetched 2026-10-29

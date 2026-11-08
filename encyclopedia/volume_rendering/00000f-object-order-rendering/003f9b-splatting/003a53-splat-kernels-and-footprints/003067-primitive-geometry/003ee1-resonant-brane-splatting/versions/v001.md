@@ -1,0 +1,96 @@
+# Resonant Brane Splatting
+
+Also called: Brane, Brane Primitive, Brane Splatting, Resonant Brane
+
+## Overview
+Resonant Brane Splatting (RBS) is a feedforward Arbitrary-Scale Super-Resolution (ASR) framework that replaces standard flat, single-color 2D Gaussians with 'Branes' [S1, unofficial]. Branes are expressive primitives that emit spatially varying colors by augmenting a Gaussian envelope with internal Gaussian-Hermite modes, allowing a single primitive to model local contrast, sharp edges, and complex textures without requiring dense overlapping splats [S1, unofficial]. Unlike standard splatting where color is constant over the footprint, RBS assigns an RGB-valued coefficient to each Hermite mode, making the emitted color vary spatially within the primitive footprint [S1, unofficial]. This differs from 2DGH [54], which uses Gaussian-Hermite functions to modulate the spatial opacity/support profile while keeping color as a separate constant splat attribute [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Low-resolution image $I_{LR} \in \mathbb{R}^{H \times W \times 3}$ and a continuous target scale factor $s \in \mathbb{R}^+$ [S1, unofficial].
+*   **Output:** Super-resolved image $I_{SR} \in \mathbb{R}^{H_{SR} \times W_{SR} \times 3}$, where $H_{SR} = \lfloor Hs \rfloor$ and $W_{SR} = \lfloor Ws \rfloor$ [S1, unofficial].
+
+**Data Structures:**
+Each Brane primitive $k$ is defined by a state vector $\Phi_k$ predicted from a feature vector $f_k$ [S1, unofficial]. The layout is:
+$$ \Phi_k = [\Delta x_k, \Delta y_k, \sigma_{x,k}, \sigma_{y,k}, \rho_k, \alpha_k, \mathbf{C}_{0,0,k}, \dots, \mathbf{C}_{N,M,k}] $$
+Fields:
+*   $\Delta x_k, \Delta y_k$: Anchoring offsets (float) [S1, unofficial].
+*   $\sigma_{x,k}, \sigma_{y,k}$: Scale parameters (float) [S1, unofficial].
+*   $\rho_k$: Rotation angle (float) [S1, unofficial].
+*   $\alpha_k$: Opacity (float) [S1, unofficial].
+*   $\mathbf{C}_{n,m,k} \in \mathbb{R}^3$: Color coefficients for each mode $(n,m)$ (float) [S1, unofficial].
+
+**Parameters:**
+*   $N, M$: Maximum degrees of Gaussian-Hermite modes in x and y directions. Typical value: $N = M = 3$ [S1, unofficial].
+*   $u$: Upsampling factor determining the number of generated primitives ($K = uH \times uW$). Tested values: $\{1, 2, 4\}$ [S1, unofficial].
+*   $d_{max}$: Bounding box fraction in normalized space used for culling candidate Branes [S1, unofficial].
+*   $R_{max}$: Canonical space boundary radius for culling, defined as $\sqrt{2n_{max} + 1}$ where $n_{max} = \max(N, M)$ [S1, unofficial].
+
+**Steps:**
+
+1.  **Feature Extraction and Upsampling:**
+    A neural backbone extracts a dense feature map $\hat{F} \in \mathbb{R}^{\hat{H} \times \hat{W} \times C}$ from the low-resolution input [S1, unofficial]. This map is optionally upsampled by factor $u$ to $F \in \mathbb{R}^{H' \times W' \times C}$, where $H' = u\hat{H}$ and $W' = u\hat{W}$ [S1, unofficial]. Let $K = H'W'$ be the number of primitives [S1, unofficial].
+
+2.  **Brane Parameter Prediction:**
+    For each feature vector $f_k$ in $F$, an MLP head predicts the full Brane state $\Phi_k$ [S1, unofficial].
+    *   **Anchoring:** The $k$-th Brane is initially anchored at the center of its feature grid cell:
+        $$ (x_k^{\text{ref}}, y_k^{\text{ref}}) = \left( \frac{j + 0.5}{W'}, \frac{i + 0.5}{H'} \right) $$
+        An MLP head predicts continuous offsets $(\Delta x_k, \Delta y_k) = \text{MLP}_{\theta_1}(f_k)$ [S1, unofficial]. The final center coordinates are:
+        $$ x_k = x_k^{\text{ref}} + \frac{\Delta x_k}{W'}, \quad y_k = y_k^{\text{ref}} + \frac{\Delta y_k}{H'} $$
+    *   **Footprint and Opacity:**
+        $$ (\sigma_{x,k}, \sigma_{y,k}) = \text{sigmoid}(\text{MLP}_{\theta_3}(f_k)) $$
+        $$ \rho_k = \pi \tanh(\text{MLP}_{\theta_4}(f_k)) $$
+        $$ \alpha_k = \text{sigmoid}(\text{MLP}_{\theta_5}(f_k)) $$
+    *   **Mode Colors:**
+        Given maximum degrees $N$ and $M$, each Brane has $L = (N + 1)(M + 1)$ modes [S1, unofficial]. A dedicated head predicts raw mode colors:
+        $$ \tilde{\mathbf{C}}_k = \text{MLP}_{\theta_2}(f_k) \in \mathbb{R}^{3L} $$
+        Reshape into $L$ coefficients $\tilde{\mathbf{c}}_k^{n,m} \in \mathbb{R}^3$. Constrain base color to positive range and residuals to signed values:
+        $$ \mathbf{c}_k^{n,m} = \begin{cases} \text{sigmoid}(\tilde{\mathbf{c}}_k^{n,m}), & n=0, m=0 \\ \tanh(\tilde{\mathbf{c}}_k^{n,m}), & \text{otherwise} \end{cases} $$
+
+3.  **Rasterization and Blending:**
+    For each target pixel $(u, v)$ in the output image:
+    *   Project to normalized coordinates:
+        $$ (u_{\text{norm}}, v_{\text{norm}}) = \left( \frac{u + 0.5}{W_{SR}}, \frac{v + 0.5}{H_{SR}} \right) $$
+    *   Compute displacement from Brane center:
+        $$ (\delta x_k, \delta y_k) = (u_{\text{norm}} - x_k, v_{\text{norm}} - y_k) $$
+    *   Map to local canonical coordinates via inverse rotation and scaling:
+        $$ \begin{pmatrix} x'_k \\ y'_k \end{pmatrix} = \begin{pmatrix} \frac{1}{\sigma_{x,k}} & 0 \\ 0 & \sigma_{y,k} \end{pmatrix} \begin{pmatrix} \cos \rho_k & \sin \rho_k \\ -\sin \rho_k & \cos \rho_k \end{pmatrix} \begin{pmatrix} \delta x_k \\ \delta y_k \end{pmatrix} $$
+    *   **Culling:**
+        *   Check if $|\delta x_k| < d_{max}$ and $|\delta y_k| < d_{max}$. If not, skip [S1, unofficial].
+        *   Check if $x'_k^2 + y'_k^2 > R_{max}^2$. If so, skip [S1, unofficial].
+    *   **Emission:**
+        Evaluate the Brane emission function:
+        $$ \mathcal{B}_k(x'_k, y'_k) = \alpha_k E(x'_k, y'_k) \sum_{n=0}^N \sum_{m=0}^M \mathbf{c}_{n,m,k} \bar{H}_n(x'_k) \bar{H}_m(y'_k) $$
+        where $E(x, y) = \exp\left(-\frac{x^2 + y^2}{2}\right)$ is the Gaussian spatial envelope [S1, unofficial].
+        The normalized Hermite polynomial is $\bar{H}_n(z) = \frac{1}{\sqrt{2^n n!}} H_n(z)$, where $H_n(z)$ are physicist's Hermite polynomials defined recursively: $H_0(z) = 1$, $H_1(z) = 2z$, and $H_n(z) = 2z H_{n-1}(z) - 2(n-1) H_{n-2}(z)$ for $n > 1$ [S1, unofficial].
+    *   **Accumulation:**
+        $$ \mathbf{C}(u, v) = \sum_{k=1}^K \mathcal{B}_k(x'_k, y'_k) $$
+
+**Pitfalls:**
+*   **Numerical Instability:** Higher-order Hermite polynomials $H_n(z)$ grow rapidly with degree $n$. Using normalized Hermite polynomials $\bar{H}_n(z)$ removes the dominant degree-dependent growth [S1, unofficial].
+*   **Aliasing:** Training strictly on scales $s \in U(1, 4)$ fails to suppress oscillations when generalizing to smooth regions at higher scales, causing aliasing artifacts due to over-expressing modes [S1, unofficial].
+
+## Subtopics
+
+### Adaptive Mode Culling
+A rasterization optimization that skips the evaluation of Hermite basis functions and color accumulation for Branes whose high-order mode coefficients are negligible, thereby reducing computational load without affecting visual quality [S1, unofficial]. For each Brane being rasterized, iterate through its predicted Hermite coefficients $(c_{n,m,k})$. Check if the magnitude of the RGB coefficients for a specific mode $(n, m)$ is less than the threshold $10^{-4}$ [S1, unofficial]. If the condition is true, skip the Hermite polynomial evaluation and the accumulation of color for that mode [S1, unofficial]. This exploits the sparsity induced by fine-tuning or sparsity loss, where unneeded coefficients are driven to zero [S1, unofficial].
+
+### Sparsity Loss (Resonant Brane Splatting)
+An explicit regularization term added to the training objective to enforce sparsity in the Hermite mode coefficients, preventing excessive vibration (aliasing) in smooth regions [S1, unofficial]. During training, compute the L1 norm of all Hermite coefficients where the sum of indices $n+m$ is greater than 0 [S1, unofficial]. The loss is:
+$$ L_{\text{sparse}} = \lambda_{\text{sparse}} \cdot \frac{1}{K} \cdot \sum_{k=1}^{K} \sum_{n+m>0} \|\mathbf{c}_{n,m,k}\|_1 $$
+where $\lambda_{\text{sparse}}$ is the weight, $K$ is the number of channels (RGB), and $\mathbf{c}_{n,m,k}$ are the Hermite coefficients for mode $(n,m)$ in channel $k$ [S1, unofficial]. A tuned value of $\lambda_{\text{sparse}} = 0.0005$ yields results virtually identical to fine-tuning, while an aggressive value of $0.1$ stifles details [S1, unofficial]. This explicitly enforces energy awareness that is otherwise achieved implicitly through fine-tuning on a wider scale distribution $s \in U(1, 8)$ [S1, unofficial].
+
+### Resonant Brane Splatting Regularization via Fine-Tuning
+A training strategy to mitigate aliasing artifacts in smooth regions at large scales by fine-tuning the model on a wider range of scales, allowing it to naturally dampen high-order coefficients [S1, unofficial]. Fine-tune the model using a scale distribution $s \in U(1, 8)$ instead of the initial training range [S1, unofficial]. The model learns to dampen coefficients $\mathbf{c}_{n,m}$ to 0 for $n+m > 0$ in flat/smooth areas, recovering performance [S1, unofficial]. This achieves the same 'energy awareness' as explicit sparsity loss but implicitly through exposure to smoother targets [S1, unofficial].
+
+## Operating characteristics
+*   **Complexity:** Naive evaluation requires $O(K H_{SR} W_{SR})$ operations [S1, unofficial]. Optimized via CUDA rasterizer with dual culling [S1, unofficial].
+*   **Performance:** Rmax culling accelerates rendering up to 65% without quality loss, proving Branes resolve complexity without dense overlap [S1, unofficial].
+*   **Strengths:** Reduces rendering overhead by modeling high frequencies internally, reducing overlap. Far fewer primitives need to overlap to reconstruct a given target pixel compared to standard Gaussians [S1, unofficial].
+*   **Limitations:** Predicting excessive modes (e.g., $N=M=7$) in a single pass hampers generalization and causes smooth-region artifacts if not regularized [S1, unofficial].
+
+## Background
+Resonant Brane Splatting (RBS) is a feedforward Arbitrary-Scale Super-Resolution (ASR) framework introduced to address the bottlenecks of rasterization in splatting-based ASR methods [S1, unofficial]. It builds on the expressive Gaussian-Hermite primitive but differs in how appearance is represented [S1, unofficial]. It is used in ASR, compared against implicit (Meta-SR, LIIF) and explicit (GaussianSR, GSASR) methods [S1, unofficial].
+
+## Sources
+[S1] Resonant Brane Splatting for Arbitrary-Scale Super-Resolution, https://doi.org/10.48550/arXiv.2606.29453, fetched 2026-10-30 (unofficial)

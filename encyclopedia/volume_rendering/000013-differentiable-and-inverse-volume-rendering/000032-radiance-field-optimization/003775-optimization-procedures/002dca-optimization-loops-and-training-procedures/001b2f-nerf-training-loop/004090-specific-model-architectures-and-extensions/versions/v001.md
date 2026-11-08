@@ -1,0 +1,31 @@
+# Specific Model Architectures and Extensions
+
+
+## Overview
+This family comprises architectural modifications and training extensions applied to the NeRF training loop to address specific scene characteristics, such as unbounded environments, partial defocus blur, or large-scale drone-captured imagery. It differs from the general [NeRF Training Loop](970-nerf-training-loop.md) by integrating specialized sampling strategies, preprocessing pipelines, and spatial partitioning schemes rather than altering the core optimization algorithm itself.
+
+## Shared principles
+The methods in this family share the goal of improving reconstruction quality or efficiency under specific constraints without changing the fundamental volume rendering equation. They typically involve:
+1.  **Specialized Input Processing:** Preprocessing input images or rays to handle non-ideal conditions (e.g., blur, exposure variation) before or during training.
+2.  **Spatial Partitioning:** Dividing the scene into manageable sub-volumes or using contract mappings to handle infinite extents.
+3.  **Auxiliary Networks:** Using proposal networks or diffusion priors to guide sampling or constrain unobserved geometry.
+
+## Subtopics
+
+### [Mip-NeRF 360](3306-mip-nerf-360.md)
+Extends NeRF to unbounded, 360-degree scenes by combining a contract mapping for infinite space, cone-casting for anti-aliasing, and online distillation via a proposal network. See [Mip-NeRF 360](3306-mip-nerf-360.md).
+
+### [NeRF-FF](8669-nerf-ff.md)
+A preprocessing strategy that mitigates quality degradation from out-of-focus regions by estimating binary masks of in-focus areas using focus frustums, compatible with runtime-optimized variants. See [NeRF-FF](8669-nerf-ff.md).
+
+### [Drone-NeRF](8972-drone-nerf.md)
+Addresses large-scale drone imagery by partitioning the scene into sub-bounding boxes trained in parallel, handling exposure variations via appearance embeddings and mitigating shadow artifacts through expanded bounding box projection. See [Drone-NeRF](8972-drone-nerf.md).
+
+### ReconFusion
+Uses a diffusion prior to constrain unobserved views during 3D reconstruction [S1, unofficial].
+
+## Background
+The need for specific extensions arises from the limitations of standard NeRF in handling unbounded scenes, defocus blur, and large-scale data. Mip-NeRF 360 addresses the multi-scale and unbounded nature of 360-degree imagery [S2]. NeRF-FF and Drone-NeRF address specific data quality and scale issues found in real-world captures [S1, unofficial]. ReconFusion introduces generative priors for sparse view reconstruction [S1, unofficial].
+
+## Sources
+[S1] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)

@@ -1,0 +1,158 @@
+# Flattened Ray Generation for Training
+
+Also called: Ray Generation for Training Views
+
+## Overview
+Flattened Ray Generation for Training is a data preparation method that converts a set of 2D training images into a single, contiguous 1D tensor of 3D rays and corresponding color values. It solves the problem of efficient mini-batch sampling for neural volume rendering by pre-computing all ray origins, directions, and view directions for every pixel in every training image, then stacking them into a flat array. This allows the training loop to sample random indices from a single large tensor rather than managing a list of image-specific ray batches. It differs from [Camera Ray Generation](7456-camera-ray-generation.md) by aggregating all views into a unified flat structure suitable for stochastic gradient descent, and from [Sample Streaming Payload Ray Computation](1509-sample-streaming-payload-ray-computation.md) by pre-computing all rays in memory rather than computing them on-the-fly per batch.
+
+## How it works
+The method consists of two main phases: ray computation per view and flattening/aggregation.
+
+**Inputs:**
+- `rgb_tr`: List of training images (tensors or arrays) with shape `[H, W, 3]` or `[3, H, W]`.
+- `train_poses`: List of camera-to-world transformation matrices ($c2w$), shape `[N, 4, 4]`.
+- `K`: Intrinsic camera matrix, shape `[3, 3]`.
+- `H, W`: Height and width of the images.
+- `ndc`: Boolean flag for Normalized Device Coordinates conversion.
+- `inverse_y`, `flip_x`, `flip_y`: Boolean flags for coordinate system adjustments.
+- `DEVICE`: Target device (e.g., `torch.device('cuda')`).
+
+**Outputs:**
+- `rgb_tr_flat`: Flattened RGB values, shape `[N_total_pixels, 3]`.
+- `rays_o_tr`: Flattened ray origins, shape `[N_total_pixels, 3]`.
+- `rays_d_tr`: Flattened ray directions, shape `[N_total_pixels, 3]`.
+- `viewdirs_tr`: Flattened view directions, shape `[N_total_pixels, 3]`.
+
+**Data Structures:**
+- `rays_o_tr`, `rays_d_tr`, `viewdirs_tr`, `rgb_tr`: 2D tensors of dtype `float32`.
+- `N_total_pixels`: Sum of $H \times W$ for all training images.
+
+**Steps:**
+
+1. **Calculate Total Pixels:**
+   Compute $N = \sum_{i=0}^{M-1} (H_i \times W_i)$, where $M$ is the number of training images.
+
+2. **Initialize Output Tensors:**
+   Allocate tensors `rgb_tr`, `rays_o_tr`, `rays_d_tr`, `viewdirs_tr` on `DEVICE` with shape `[N, 3]`.
+
+3. **Iterate and Compute Rays:**
+   Initialize a counter `top = 0`. For each training image $i$ from $0$ to $M-1$:
+   a. Let $img$ be the $i$-th image, $c2w$ be the $i$-th pose.
+   b. Call `get_rays_of_a_view(H, W, K, c2w, ndc, inverse_y, flip_x, flip_y)` to obtain:
+      - `rays_o`: Ray origins, shape `[H, W, 3]`.
+      - `rays_d`: Ray directions, shape `[H, W, 3]`.
+      - `viewdirs`: View directions, shape `[H, W, 3]`.
+   c. Flatten these tensors to shape `[H*W, 3]`.
+   d. Copy the flattened data into the output tensors starting at index `top`:
+      $$
+      \begin{aligned}
+      \text{rgb\_tr}[top : top+n] &= \text{img.flatten}(0,1) \\
+      \text{rays\_o\_tr}[top : top+n] &= \text{rays\_o.flatten}(0,1) \\
+      \text{rays\_d\_tr}[top : top+n] &= \text{rays\_d.flatten}(0,1) \\
+      \text{viewdirs\_tr}[top : top+n] &= \text{viewdirs.flatten}(0,1)
+      \end{aligned}
+      $$
+      where $n = H \times W$.
+   e. Update `top += n`.
+
+4. **Device Transfer:**
+   Ensure all tensors are on the target `DEVICE`.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def get_training_rays_flatten(rgb_tr, train_poses, K, H, W, ndc=False, 
+                              inverse_y=False, flip_x=False, flip_y=False, 
+                              DEVICE='cuda'):
+    """
+    Flattens ray generation for all training views into single tensors.
+    
+    Args:
+        rgb_tr: List of images, each shape (H, W, 3) or (3, H, W).
+        train_poses: List of c2w matrices, shape (4, 4).
+        K: Intrinsic matrix, shape (3, 3).
+        H, W: Image dimensions.
+        ndc: Use NDC coordinates.
+        inverse_y, flip_x, flip_y: Coordinate adjustments.
+        DEVICE: Target device.
+        
+    Returns:
+        rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr: Tensors of shape (N, 3).
+    """
+    # Step 1: Calculate total number of pixels
+    N = 0
+    for img in rgb_tr:
+        # Handle both (H, W, 3) and (3, H, W) formats
+        if img.shape[0] == 3:
+            h, w = img.shape[1], img.shape[2]
+        else:
+            h, w = img.shape[0], img.shape[1]
+        N += h * w
+        
+    # Step 2: Initialize output tensors
+    rgb_tr_flat = torch.zeros((N, 3), dtype=torch.float32, device=DEVICE)
+    rays_o_tr = torch.zeros((N, 3), dtype=torch.float32, device=DEVICE)
+    rays_d_tr = torch.zeros((N, 3), dtype=torch.float32, device=DEVICE)
+    viewdirs_tr = torch.zeros((N, 3), dtype=torch.float32, device=DEVICE)
+    
+    top = 0
+    
+    # Step 3: Iterate and compute
+    for i, (img, c2w) in enumerate(zip(rgb_tr, train_poses)):
+        # Ensure image is on CPU for processing if needed, then move to device
+        # Assuming get_rays_of_a_view returns tensors on CPU or specified device
+        # Note: In practice, this function is often implemented in the same module
+        rays_o, rays_d, viewdirs = get_rays_of_a_view(
+            H, W, K, c2w, ndc, inverse_y, flip_x, flip_y
+        )
+        
+        # Flatten to (H*W, 3)
+        # Handle image format: if (3, H, W), permute to (H, W, 3)
+        if img.shape[0] == 3:
+            img_flat = img.permute(1, 2, 0).flatten(0, 1)
+        else:
+            img_flat = img.flatten(0, 1)
+            
+        n = H * W
+        
+        # Copy to output tensors
+        rgb_tr_flat[top:top+n] = img_flat.to(DEVICE)
+        rays_o_tr[top:top+n] = rays_o.flatten(0, 1).to(DEVICE)
+        rays_d_tr[top:top+n] = rays_d.flatten(0, 1).to(DEVICE)
+        viewdirs_tr[top:top+n] = viewdirs.flatten(0, 1).to(DEVICE)
+        
+        top += n
+        
+    return rgb_tr_flat, rays_o_tr, rays_d_tr, viewdirs_tr
+```
+
+**Edge Cases and Pitfalls:**
+- **Memory Exhaustion:** Precomputing all rays for high-resolution datasets can exhaust CPU RAM or GPU memory if not managed carefully. The method assumes `H` and `W` are manageable (e.g., default 800x800) [S2, unofficial].
+- **Coordinate System Mismatches:** Incorrect application of `inverse_y`, `flip_x`, or `flip_y` can lead to inverted or rotated rays, causing rendering artifacts.
+- **Device Consistency:** Ensure all tensors are on the same device before training. Mismatched devices will cause runtime errors.
+
+## Subtopics
+
+### Precomputed Ray Buffering
+A variant that stores rays along with near/far plane distances and RGB values in a single concatenated tensor per image before final aggregation. It computes rays via `get_rays(directions, c2w)` and concatenates `rays_o`, `rays_d`, `near`, and `far` into a tensor of shape `(h*w, 8)`. This is appended to `self.all_rays` and `self.all_rgbs`. After processing all images, these lists are concatenated into final tensors of shape `((N_images-1)*h*w, 8)` and `((N_images-1)*h*w, 3)`. The layout of `self.all_rays` is `(B, 8)` with dtype `torch.float32`: columns 0-2 are ray origin, 3-5 are ray direction, 6 is near plane distance, and 7 is far plane distance. `self.all_rgbs` is `(B, 3)` with normalized RGB values in `[0, 1]`. A key pitfall is that precomputing all rays for high-resolution datasets can exhaust CPU RAM. The code assumes `img_wh` is manageable (default 800x800). Validation and test splits bypass this buffer, computing rays on-the-fly per image to save memory [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$, where $N$ is the total number of pixels across all training images. The cost is dominated by the ray computation per pixel and the flattening operation.
+- **Memory Complexity:** $O(N \times D)$, where $D$ is the number of attributes per pixel (e.g., 3 for RGB, 3 for origin, 3 for direction, 3 for view direction = 12 floats per pixel). For high-resolution images, this can be substantial.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Scales linearly with the number of training images and resolution. Memory usage is the primary bottleneck.
+- **Strengths:** Enables efficient random sampling during training without repeated ray computation. Simplifies batch handling in the training loop.
+- **Limitations:** High memory consumption for large datasets. Not suitable for very high-resolution images without chunking or on-the-fly computation.
+- **When to use:** When training on a fixed set of moderate-resolution images and memory is sufficient.
+- **When not to use:** When dealing with very high-resolution images or limited memory; consider on-the-fly ray generation instead.
+
+## Background
+Flattened Ray Generation for Training is a common practice in neural radiance field (NeRF) implementations, particularly in PyTorch-based frameworks. It originates from the need to efficiently sample rays for stochastic gradient descent in volume rendering. The method is widely used in projects like [UnboundedNeRFPytorch](https://github.com/sjtuytc/UnboundedNeRFPytorch) and [nerf_pl](https://github.com/kwea123/nerf_pl).
+
+## Sources
+[S1] sjtuytc/UnboundedNeRFPytorch, https://github.com/sjtuytc/UnboundedNeRFPytorch, fetched 2026-10-26 (unofficial)
+[S2] kwea123/nerf_pl, https://github.com/kwea123/nerf_pl, fetched 2026-10-26 (unofficial)
