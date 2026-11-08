@@ -3,197 +3,55 @@
 Also called: Boundary Path Integral Estimation via Edge Sampling, Differential Spherical Integral / Edge Sampling, LADL18, Li et al, Monte Carlo edge sampling, Stochastic Monte Carlo Gradient Estimation
 
 ## Overview
-Differential Edge Sampling is a method for computing the gradient of the rendering equation with respect to scene parameters (geometry, camera, lights) by explicitly sampling visibility discontinuities at geometric boundaries [S1, S3, unofficial]. It solves the problem of high-variance gradient estimation in scenes with sharp silhouettes and occlusions, which standard area sampling with automatic differentiation fails to capture efficiently [S1, unofficial]. Unlike its sibling [Differential Vertex Sampling with MIS](6338-differential-vertex-sampling-with-mis.md), which focuses on vertex-based perturbations, Differential Edge Sampling decomposes the derivative into an interior integral (estimated via auto-diff) and a boundary integral (estimated by sampling edges) [S3, unofficial]. It is distinguished from earlier projective-sampling methods by its bidirectional seed ray generation, incorporating rays emitted directly from emitters to handle small-area lights effectively [S2].
+Differential Edge Sampling is a method for computing the gradient of physically-based rendered images with respect to arbitrary scene parameters (camera, lights, materials, geometry) by explicitly sampling visibility discontinuities [S1, S2, unofficial]. It solves the problem that standard Monte Carlo estimators fail to capture derivatives at boundaries where visibility changes abruptly, such as object silhouettes and occlusion edges [S1, unofficial]. Unlike its sibling [Differential Vertex Sampling with MIS](6338-differential-vertex-sampling-with-mis.md), which focuses on vertex-based contributions, this method decomposes the rendering derivative into a smooth interior integral (estimated via automatic differentiation) and a boundary integral (estimated by sampling triangle edges) [S1, S2, unofficial].
 
 ## How it works
-**Inputs:** Scene geometry (triangle meshes), material properties, emitter definitions, camera parameters, and differentiating parameters $\pi$ (e.g., vertex positions).
-**Outputs:** The rendered image value $I$ and its gradient $\frac{\partial I}{\partial \pi}$.
+The method computes the gradient of the pixel filter’s integral by splitting the integrand into smooth and discontinuous regions [S1, unofficial].
+
+**Inputs and Outputs:**
+- **Inputs:** Scene geometry (triangle meshes), material properties, light sources, camera parameters, scene parameters $\theta$ to differentiate with respect to.
+- **Outputs:** Rendered image value and its gradient $\nabla_\theta I$.
 
 **Data Structures:**
-*   **Guiding Structure:** A data structure storing contributions from projected seed rays. It maps boundary sample space coordinates (edge index, direction) to accumulated integrand values. The specific internal layout (e.g., hash map vs. grid) is not specified in the sources, but it supports importance sampling of path segments [S2].
-*   **Seed Rays:** Defined by origin $\mathbf{o}$ and direction $\boldsymbol{\omega}$.
+- **Mesh Representation:** Triangle meshes where discontinuities are identified at triangle edges [S2, unofficial].
+- **Edge Hierarchy:** A spatial hierarchy (e.g., bounding volume hierarchy) used to efficiently reject interior edges and find silhouette edges for secondary boundaries [S2, unofficial].
 
-**Numbered Steps:**
+**Steps:**
+1. **Decomposition:** Split the rendering integral into smooth parts and discontinuous parts [S1, unofficial].
+2. **Smooth Region Estimation:** For smooth parts of the integrand, employ traditional area sampling combined with automatic differentiation to estimate the gradient [S1, unofficial].
+3. **Discontinuous Region Estimation (Edge Sampling):** For discontinuous parts, explicitly sample edges to estimate the boundary integral contribution [S1, S2, unofficial].
+   - **Primary Boundaries:** For boundaries directly observed by the detector (camera), project and clip all meshes into screen space and sample from the visible edges [S2, unofficial].
+   - **Secondary Boundaries:** For boundaries occurring at light bounces, the silhouette depends on the shading point. Use an importance sampling scheme with a hierarchy to quickly reject interior edges and find the relevant silhouette, avoiding per-bounce projection [S2, unofficial].
+4. **Combination:** Combine the gradient estimates from smooth and discontinuous regions [S1, unofficial].
 
-1.  **Decomposition:** Split the rendering integral into smooth regions and discontinuous regions (boundaries) [S1, unofficial].
-    *   Smooth regions: Estimated using traditional area sampling with automatic differentiation [S1, unofficial].
-    *   Discontinuous regions: Estimated using the boundary integral formulation [S3, unofficial].
-
-2.  **Boundary Integral Formulation:** The gradient with respect to parameter $\pi$ is given by the local formulation of the boundary integral [S2]:
-    $$
-    \frac{\partial I}{\partial \pi} = \int_{\partial \mathcal{A}} \int_{S^2} L_i(\mathbf{x}_b, \boldsymbol{\omega}) W_i(\mathbf{x}_b, \boldsymbol{\omega}) \sin \phi \left(\frac{\partial \pi \mathbf{x}_b}{\partial \pi} \cdot \mathbf{n}_b\right) d\boldsymbol{\omega} dl(\mathbf{x}_b) + \int_{\mathcal{A}} \int_{S^1} L_i(\mathbf{x}_b, \phi) W_i(\mathbf{x}_b, \phi) \kappa(\phi) \left(\frac{\partial \pi \mathbf{x}_b}{\partial \pi} \cdot \mathbf{n}_b\right) d\phi dA(\mathbf{x}_b)
-    $$
-    Where:
-    *   $\mathcal{A}$ is the area of the differentiating geometry.
-    *   $\partial \mathcal{A}$ is the boundary (edges) of the geometry.
-    *   $\mathbf{x}_b$ is a point on the boundary.
-    *   $\mathbf{n}_b$ is the normal at $\mathbf{x}_b$.
-    *   $L_i$ is the incoming radiance.
-    *   $W_i$ is the weight function.
-    *   $\phi$ is the angle.
-    *   $\kappa(\phi)$ is a kernel function.
-    *   $\frac{\partial \pi \mathbf{x}_b}{\partial \pi}$ is the derivative of the boundary point position with respect to the parameter.
-
-3.  **Seed Ray Generation (Bidirectional):** Generate seed rays from two sources to initialize the guiding structure [S2]:
-    *   **Sensor Rays (70%):** Spawned from the sensor. These rays must directly hit the background plane without intersecting other geometries as the first segment [S2].
-    *   **Emitter Rays (30%):** Generated by connecting points on emitters to points on the differentiating geometry [S2].
-        *   Assign rays to emitters based on intensity and distance to the differentiating shape [S2].
-        *   Sample a triangle on the emitter proportional to its area, then uniformly sample a point within it as the origin [S2].
-        *   Sample a triangle on the differentiating geometry based on area, then uniformly sample a point within it as the endpoint [S2].
-        *   The ray direction is from the emitter point to the geometry point [S2].
-
-4.  **Projection:** Project the seed rays onto geometric boundaries to initialize the guiding structure [S2].
-    *   For sensor rays: If they hit the background plane, reflect them. The reflected ray affects the geometry being differentiated as the second segment [S2].
-    *   Project rays onto geometric boundaries using JUMP and WALK strategies for triangular meshes, ensuring tangency [S2].
-    *   Origins remain fixed; directions are determined by projection results [S2].
-    *   Filter contributions: Only projected rays that intersect the scene emitter (for small-area lights) or contribute to the boundary integral are kept [S2].
-
-5.  **Guiding Structure Initialization:** Compute the locations of the projected rays within the guiding structure and evaluate their contributions using the integrand from Step 2 to accumulate values [S2].
-
-6.  **Importance Sampling:** Perform importance sampling of path segments from the initialized guiding structure [S2].
-    *   Complete the segments into full paths.
-    *   Evaluate their contributions to the boundary integral [S2].
-
-7.  **Combination:** Combine the gradient estimates from the smooth regions (auto-diff) and the boundary regions (edge sampling) [S1, S3, unofficial].
-
-**Pseudocode:**
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def compute_gradient(scene, params, num_samples):
-    """
-    Computes the gradient of the rendered image with respect to params.
-    scene: Contains geometry, emitters, camera.
-    params: Differentiable parameters (e.g., vertex positions).
-    num_samples: Total number of samples to draw.
-    """
-    gradient_interior = 0.0
-    gradient_boundary = 0.0
-    
-    # Step 1: Smooth regions via Auto-Diff
-    # Render the image using standard path tracing with AD enabled for params
-    # This captures the interior integral contribution
-    image, grad_interior = render_with_autodiff(scene, params)
-    gradient_interior = grad_interior
-    
-    # Step 2: Boundary regions via Edge Sampling
-    # Split samples: 70% sensor, 30% emitter
-    num_sensor_samples = int(num_samples * 0.7)
-    num_emitter_samples = num_samples - num_sensor_samples
-    
-    guiding_structure = initialize_guiding_structure()
-    
-    # Generate Sensor Seed Rays
-    for i in range(num_sensor_samples):
-        ray = spawn_sensor_ray(scene.camera)
-        # Check if ray hits background plane without intersecting other geometry
-        if ray.hits_background_plane(scene.geometry):
-            # Reflect ray to affect differentiating geometry
-            reflected_ray = reflect_ray(ray, scene.background_plane)
-            # Project reflected ray onto geometric boundaries
-            projected_ray = project_onto_boundary(reflected_ray, scene.geometry, method="JUMP_WALK")
-            if projected_ray is not None:
-                # Evaluate contribution and add to guiding structure
-                contribution = evaluate_boundary_integrand(projected_ray, scene, params)
-                guiding_structure.add(projected_ray, contribution)
-    
-    # Generate Emitter Seed Rays
-    # Assign rays to emitters based on intensity and distance
-    emitter_assignments = assign_rays_to_emitters(emitters=scene.emitters, 
-                                                  target_geometry=scene.differentiating_geometry,
-                                                  num_rays=num_emitter_samples)
-    
-    for emitter, count in emitter_assignments.items():
-        for j in range(count):
-            # Sample point on emitter triangle
-            emitter_triangle = sample_triangle_by_area(emitter.triangles)
-            origin = sample_uniform_point_in_triangle(emitter_triangle)
-            
-            # Sample point on differentiating geometry triangle
-            target_triangle = sample_triangle_by_area(scene.differentiating_geometry.triangles)
-            target_point = sample_uniform_point_in_triangle(target_triangle)
-            
-            # Create seed ray
-            direction = normalize(target_point - origin)
-            seed_ray = Ray(origin, direction)
-            
-            # Project seed ray onto geometric boundaries
-            projected_ray = project_onto_boundary(seed_ray, scene.geometry, method="JUMP_WALK")
-            if projected_ray is not None:
-                # Evaluate contribution
-                contribution = evaluate_boundary_integrand(projected_ray, scene, params)
-                guiding_structure.add(projected_ray, contribution)
-    
-    # Step 3: Importance Sampling from Guiding Structure
-    # Sample path segments from the guiding structure
-    num_boundary_samples = guiding_structure.size()
-    for k in range(num_boundary_samples):
-        segment = guiding_structure.sample_segment()
-        # Complete the segment into a full path
-        full_path = complete_path(segment, scene)
-        # Evaluate contribution to boundary integral
-        boundary_contribution = evaluate_full_path_contribution(full_path, scene, params)
-        gradient_boundary += boundary_contribution
-    
-    # Normalize by number of samples
-    gradient_boundary /= num_samples
-    
-    return gradient_interior + gradient_boundary
-
-def project_onto_boundary(ray, geometry, method):
-    """
-    Projects a ray onto geometric boundaries using JUMP and WALK strategies.
-    Returns the projected ray or None if no valid projection.
-    """
-    # Implementation details of JUMP and WALK are not fully specified in sources.
-    # General approach: Find intersection with mesh edges.
-    # Ensure tangency.
-    # Origins remain fixed.
-    pass
-
-def evaluate_boundary_integrand(projected_ray, scene, params):
-    """
-    Evaluates the integrand from Eq. 8 for a projected ray.
-    """
-    # L_i, W_i, sin(phi), dL/dpi * n_b
-    pass
-```
+**Formulas:**
+The rendering equation derivative is decomposed. For mesh scenes, discontinuities occur at triangle edges [S2, unofficial]. If shading is smooth, the focus narrows to silhouette edges [S2, unofficial]. The complete equation for differentiating the radiative transfer equation (extended by Zhang et al. for volumes) involves derivatives of the transport operator $K_T$, collision operator $K_C$, and source term $Q$ [S2, unofficial]. Due to complexity, the specific formula is referenced as Eq. 32 in the original paper [S2, unofficial].
 
 **Parameters:**
-*   **Ray Split Ratio:** 30% of seed rays are emitted by emitters, 70% are spawned from the sensor [S2].
-*   **Inverse Rendering Remeshing Interval:** Geometry is intermittently remeshed every 20 iterations [S2].
-*   **Inverse Rendering Sample Doubling Interval:** The number of samples per pixel is doubled every 200 iterations [S2].
+- **Sampling Strategy:** Importance sampling for secondary boundaries using a hierarchy [S2, unofficial].
+- **Assumptions:** Meshes do not have interpenetration, no point light sources, no perfectly specular surfaces, and the scene is static [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Mesh Interpenetration:** The method assumes meshes do not have interpenetration [S1, unofficial].
-*   **Point Lights:** The method assumes there are no point light sources (though it handles small-area lights better than previous methods) [S1, unofficial].
-*   **Specular Surfaces:** The method assumes no perfectly specular surfaces [S1, unofficial].
-*   **Static Scene:** The scene is assumed to be static [S1, unofficial].
-*   **Parameterization Break:** The 1D edge parameterization breaks the continuous connectivity of silhouette edges, causing sparse and high-frequency features in the guiding structure [S2].
-*   **Secondary Boundaries:** For secondary boundaries (light bounces), per-bounce projection is inefficient. An importance sampling scheme with a hierarchy is used to quickly reject interior edges and find the silhouette [S3, unofficial].
-
-## Subtopics
-
-### Bidirectional Projective Sampling
-An augmentation of the base method that generates seed rays from both sensors and emitters to improve coverage for small-area lights [S2]. [Bidirectional Projective Sampling](link-to-bidirectional-article.md) (Note: Link placeholder as specific sibling article name not provided in prompt tree, but concept is distinct).
-
-### Volumetric Extension
-Zhang et al. extended edge sampling to participating media by differentiating the radiative transfer equation ($L_o = K_T K_C L_i + Q$) [S3, unofficial]. [Volumetric Edge Sampling](link-to-volumetric-article.md).
+- **Interpenetration:** The method assumes meshes do not interpenetrate [S1, unofficial].
+- **Light Sources:** Point light sources are not supported [S1, unofficial].
+- **Specular Surfaces:** Perfectly specular surfaces are not supported [S1, unofficial].
+- **Dynamic Scenes:** The scene must be static [S1, unofficial].
+- **Variance:** Large variance in estimated gradients due to the difficulty of finding all object edges and sampling them [S1, unofficial].
+- **Performance:** Rendering speed is slow [S1, unofficial].
+- **Secondary Boundaries:** Inefficient to project for every light bounce due to shading-point-dependent silhouettes [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** High. Finding all object edges and sampling them requires many samples, leading to slow rendering speeds [S1, unofficial].
-*   **Memory Complexity:** Depends on the guiding structure size, which scales with the number of projected rays and boundary interactions [S2].
-*   **Variance:** Estimated gradients have large variance due to the challenging task of sampling discontinuities [S1, unofficial]. However, the bidirectional variant achieves lower variance gradients compared to previous projective-sampling-based methods [S2].
-*   **Strengths:** First method to compute derivatives of scalar functions over physically-based rendered images with respect to arbitrary input parameters using stochastic Monte Carlo ray tracing [S1, unofficial]. Effectively handles small-area lights when combined with bidirectional sampling [S2].
-*   **Limitations:** Slow rendering speed. High variance. Assumes static scenes, no interpenetration, no point lights, no perfect speculars [S1, unofficial].
-*   **When to use:** When accurate gradients are needed for geometry reconstruction or inverse rendering involving small-area lights, and computational cost is secondary to accuracy [S2].
-*   **When not to use:** For real-time applications or scenes with complex specular interactions or dynamic geometry [S1, unofficial].
+- **Time Complexity:** Slow rendering speed due to the computational cost of finding all object edges and sampling them [S1, unofficial].
+- **Memory Complexity:** Requires storage for mesh geometry and edge hierarchies [S2, unofficial].
+- **Variance:** Large variance in estimated gradients [S1, unofficial].
+- **Strengths:** First method to achieve unbiased differentiation of the rendering equation for mesh scenes by explicitly handling discontinuities [S2, unofficial].
+- **Limitations:** Limited to static scenes, no point lights, no perfect speculars, and high computational cost [S1, unofficial].
+- **When to Use:** When unbiased gradients with respect to geometry and camera parameters are required for mesh-based scenes, and computational resources allow for high-variance, low-speed estimation.
+- **When Not to Use:** For dynamic scenes, scenes with point lights or perfect speculars, or when real-time performance is required.
 
 ## Background
-Differential Edge Sampling was introduced by Li et al. in 2018 (LADL18) [S1, S3, unofficial]. It was the first work to compute derivatives of scalar functions over physically-based rendered images with respect to arbitrary input parameters (camera, lights, materials, geometry) using a stochastic Monte Carlo ray tracing approach [S1, unofficial]. The method decomposes the derivative into an interior integral (estimated via auto-diff) and a boundary integral (estimated by explicitly sampling visibility discontinuities) [S3, unofficial]. It was later extended by Zhang et al. to support participating media by differentiating the radiative transfer equation [S3, unofficial]. The method is implemented on the cuda_ad_rgb backend from Mitsuba 3 using the Dr. Jit framework for AD and GPU kernel compilation [S2]. Experiments were conducted on an NVIDIA RTX 3090 graphics card using OptiX for intersection queries [S2].
+Differential Edge Sampling was introduced by Li et al. in 2018 [LADL18] as the first work to compute derivatives of scalar functions over physically-based rendered images with respect to arbitrary input parameters using a stochastic Monte Carlo ray tracing approach [S1, unofficial]. It achieved unbiased differentiation of the rendering equation [Kaj86] by directly sampling boundary discontinuities [S2, unofficial]. Zhang et al. [ZWZ* 19] later extended this method to support participating media by differentiating the radiative transfer equation [S2, unofficial]. This work laid the foundation for path-space differentiable rendering (PSDR) [S2, unofficial].
 
 ## Sources
 [S1] Differentiable Rendering: A Survey, https://doi.org/10.48550/arxiv.2006.12057, fetched 2026-10-26 (unofficial)
-[S2] Bidirectional projective sampling for physics-based differentiable rendering, https://doi.org/10.1016/j.vrih.2025.05.001, fetched 2026-10-27
-[S3] A Survey on Physics-based Differentiable Rendering - arXiv.org, https://arxiv.org/pdf/2504.01402, fetched 2026-10-29 (unofficial)
+[S2] A Survey on Physics-based Differentiable Rendering - arXiv.org, https://arxiv.org/pdf/2504.01402, fetched 2026-10-29 (unofficial)

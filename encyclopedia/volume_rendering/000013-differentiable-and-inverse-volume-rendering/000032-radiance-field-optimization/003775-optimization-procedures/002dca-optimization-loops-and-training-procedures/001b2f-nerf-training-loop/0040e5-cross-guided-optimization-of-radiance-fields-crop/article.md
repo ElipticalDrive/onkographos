@@ -1,0 +1,133 @@
+# Cross-Guided Optimization of Radiance Fields (CROP)
+
+Also called: Cross-guided optimization
+
+## Overview
+Cross-Guided Optimization of Radiance Fields (CROP) is a framework that performs multi-view image super-resolution (MVSR) on training-view images during the radiance field optimization process to improve high-resolution novel view synthesis (HRNVS) [S1, unofficial]. It fuses single-image super-resolution (SISR) features with voxel-based uncertainty fields to ensure multi-view consistency and high-frequency details [S1, unofficial]. Unlike methods that rely solely on the spectral characteristics of coordinate-based networks for upscaling, CROP explicitly bridges 2D SISR and 5D radiance fields by iteratively refining input images based on rendering errors [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** $K$ low-resolution training-view images $\{I_i^{gt}\}_{i=1}^K$, camera poses, and a pre-trained SISR backbone network.
+*   **Outputs:** Optimized radiance field parameters and high-resolution novel views.
+*   **Intermediate Data:** Updated training images $\{I_i^l\}_{i=1}^K$ at iteration $l$, rendered train-view RGBs $\{S_i^{tv}\}_{i=1}^K$, voxel-based uncertainty field $V^{(unc)}$, and uncertainty maps $\{U_i\}_{i=1}^K$.
+
+**Data Structures:**
+*   **Voxel-based Uncertainty Field $V^{(unc)}$:** A 4D tensor with shape $1 \times N_x \times N_y \times N_z$, representing uncertainty values for each voxel in the 3D grid [S1, unofficial].
+*   **Radiance Field:** A Multi-Layer Perceptron (MLP) mapping 5D coordinates $(x, y, z, \theta, \phi)$ to density $\sigma$ and color $c$ [S1, unofficial].
+
+**Parameters:**
+*   $N$: Total number of points sampled along each ray for volume rendering [S1, unofficial].
+*   $K$: Number of train-view images [S1, unofficial].
+*   $l$: The update step index for the SR images [S1, unofficial].
+
+**Formulas:**
+1.  **Volume Rendering:** For a ray $r$, the rendered color $\hat{C}(r)$ is:
+    $$ \hat{C}(r) = \sum_{i=1}^{N} T_i \alpha_i c_i = \sum_{i=1}^{N} T_i (1 - e^{-\sigma_i \delta_i}) c_i $$
+    where $T_i = \prod_{j=1}^{i-1} e^{-\sigma_j \delta_j}$ is the accumulated transmittance, $\sigma_i$ is density, $c_i$ is color, and $\delta_i$ is the distance between points [S1, unofficial].
+
+2.  **Photometric Loss:**
+    $$ L_{photo} = \frac{1}{|R|} \sum_{r \in R} \| C(r) - \hat{C}(r) \|_2^2 $$
+    where $C(r)$ is the ground truth color and $R$ is the set of rays [S1, unofficial].
+
+3.  **Point-wise Error:** For a sampled point $p_{ij}^{tv}$ on ray $r_i^{tv}$:
+    $$ e_{ij}^{tv} = T_{ij} \alpha_{ij} \| c_{ij} - \hat{c}_{ij} \|_1 $$
+    where $c_{ij}$ is the rendered RGB value from $S_i^{tv}$ and $\hat{c}_{ij}$ is the RGB value from the current SR image $I_i^l$ [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Initialization:** Initialize the SR image for view $i$ at update step $l=0$, denoted as $I_i^{l=0}$, by passing the ground truth input $I_i^{gt}$ through the SISR backbone network [S1, unofficial].
+2.  **Radiance Field Optimization:** Optimize the radiance field using the current set of train-view images $\{I_i^l\}_{i=1}^K$. Render the train-view RGB images $\{S_i^{tv}\}_{i=1}^K$ using the volume rendering equation [S1, unofficial].
+3.  **Uncertainty Field Generation:** Calculate the integrated error of pixels rendered from rays passing through 3D points to generate the voxel-based uncertainty field $V^{(unc)}$. High integrated error implies high uncertainty in the sampled RGB values [S1, unofficial].
+    *   For a specific grid $v_i$ inside $V^{(unc)}$, identify a set of sampled ray points $P_i^{tv}$ inside the neighborhood voxels of $v_i$.
+    *   Let $R_i^{tv}$ be the corresponding rays.
+    *   Compute the error $e_{ij}^{tv}$ for each point $p_{ij}^{tv} \in P_i^{tv}$ using the formula above.
+    *   Aggregate these errors into $V^{(unc)}$ [S1, unofficial].
+4.  **Uncertainty Map Generation:** Generate an uncertainty map $U_i$ for each view $i$ by aggregating voxel-based uncertainty from the neighborhood voxels of sampled ray points $P_i^{tv}$ corresponding to rays $R_i^{tv}$ [S1, unofficial].
+5.  **SR Update:** Generate the updated SR image $I_i^{l+1}$ using the SR Update Module (SUM). The SUM fuses the feature map $F_i^{SISR}$ obtained from the SISR network, the rendered train-view RGBs $S_i^{tv}$, and the uncertainty map $U_i$ [S1, unofficial].
+6.  **Iteration:** Continue optimizing the radiance fields using the updated SR images $\{I_i^{l+1}\}_{i=1}^K$. Repeat steps 3-6 iteratively [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def crop_optimization(K, N, max_iterations):
+    # Initialization
+    # I_gt is list of K low-res images
+    I_sr = [sisr_backbone(img) for img in I_gt]
+    
+    nerf_model = initialize_nerf()
+    
+    for l in range(max_iterations):
+        # Step 2: Optimize Radiance Fields
+        # Use current SR images I_sr as training targets
+        train_nerf(nerf_model, I_sr, K, N)
+        
+        # Render train-view RGBs
+        S_tv = []
+        for i in range(K):
+            rendered_rgb = render_ray_marching(nerf_model, camera_poses[i], N)
+            S_tv.append(rendered_rgb)
+            
+        # Step 3: Generate Voxel-based Uncertainty Field
+        # Initialize V_unc as zero tensor of shape (1, Nx, Ny, Nz)
+        V_unc = zeros((1, Nx, Ny, Nz))
+        
+        for i in range(K):
+            rays = get_rays(camera_poses[i])
+            for r in rays:
+                points = sample_points(r, N)
+                for j, p in enumerate(points):
+                    # Get rendered color from S_tv[i] and SR color from I_sr[i]
+                    c_rendered = get_pixel_color(S_tv[i], r, p)
+                    c_sr = get_pixel_color(I_sr[i], r, p)
+                    
+                    # Calculate transmittance and alpha for this point
+                    sigma, alpha = nerf_model.get_density_alpha(p)
+                    delta = get_distance(points[j-1], p) if j > 0 else 0
+                    T = calculate_transmittance(points[:j], sigma, delta)
+                    
+                    # Calculate point-wise error
+                    error = T * alpha * l1_norm(c_rendered - c_sr)
+                    
+                    # Aggregate error into voxel grid
+                    voxel_idx = get_voxel_index(p)
+                    V_unc[voxel_idx] += error
+                    
+        # Step 4: Generate Uncertainty Maps
+        U_maps = []
+        for i in range(K):
+            # Aggregate voxel uncertainty from neighborhood voxels of sampled ray points
+            uncertainty_map = aggregate_voxel_uncertainty(V_unc, camera_poses[i], N)
+            U_maps.append(uncertainty_map)
+            
+        # Step 5: Update SR Images
+        I_sr_new = []
+        for i in range(K):
+            # Get SISR features
+            F_sisr = sisr_backbone.get_features(I_gt[i])
+            
+            # Update using SUM: fuses F_sisr, S_tv[i], and U_maps[i]
+            I_sr_new.append(sr_update_module(F_sisr, S_tv[i], U_maps[i]))
+            
+        I_sr = I_sr_new
+        
+    return nerf_model
+```
+
+**Edge Cases and Pitfalls:**
+*   SISR is an ill-posed problem where multiple solutions exist, potentially producing blurry images or lacking multi-view consistency when images are processed separately [S1, unofficial].
+*   Radiance fields rely heavily on the spectral characteristics of coordinate-based networks, limiting their ability to perform super-resolution and synthesize high-frequency details independently [S1, unofficial].
+*   The uncertainty field generation assumes that high integrated error correlates with high uncertainty; this inference may fail if the radiance field is poorly optimized or if the scene has complex lighting not captured by the photometric loss [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The method adds significant computational overhead due to the iterative generation of uncertainty fields and the SR update module at each optimization step. The complexity is dominated by the ray marching for uncertainty calculation and the SISR network inference [S1, unofficial].
+*   **Memory Complexity:** Requires storing the voxel-based uncertainty field $V^{(unc)}$ of size $1 \times N_x \times N_y \times N_z$ in addition to standard NeRF parameters [S1, unofficial].
+*   **Strengths:** Improves high-resolution novel view synthesis performance by injecting high-frequency details from SISR while maintaining multi-view consistency through radiance field guidance [S1, unofficial].
+*   **Limitations:** Computationally expensive due to the cross-guided iterative process. Performance is dependent on the quality of the pre-trained SISR backbone [S1, unofficial].
+*   **When to use:** When high-resolution novel view synthesis is required and the input training images are low-resolution, and multi-view consistency is critical [S1, unofficial].
+*   **When not to use:** When computational resources are limited or when input images are already high-resolution [S1, unofficial].
+
+## Background
+Cross-Guided Optimization of Radiance Fields was proposed by Yoon et al. in 2023 [S1, unofficial]. It addresses the limitation of Neural Radiance Fields (NeRF) in synthesizing high-resolution images by leveraging the strengths of Single-Image Super-Resolution (SISR) [S1, unofficial]. The method builds on the observation that while NeRF can render at arbitrary resolution, it struggles with high-frequency details due to the spectral bias of coordinate-based networks [S1, unofficial]. By integrating multi-view image super-resolution (MVSR) into the training loop, CROP ensures that the training data for the radiance field is both high-resolution and consistent across views [S1, unofficial].
+
+## Sources
+[S1] Cross-Guided Optimization of Radiance Fields With Multi ..., https://openaccess.thecvf.com/content/CVPR2023/papers/Yoon_Cross-Guided_Optimization_of_Radiance_Fields_With_Multi-View_Image_Super-Resolution_for_CVPR_2023_paper.pdf, fetched 2026-10-28 (unofficial)

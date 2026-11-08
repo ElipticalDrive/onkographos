@@ -1,0 +1,141 @@
+# Low Discrepancy View Sampling
+
+Also called: Van der Corput view sampling
+
+## Overview
+Low Discrepancy View Sampling is an acquisition strategy for dynamic CT that distributes projection angles uniformly over time using a low discrepancy sequence [S1, unofficial]. It ensures all $N_p$ projection angles are unique to maximize information extraction from each additional projection, while decomposing into linear scan rounds compatible with hardware constraints [S1, unofficial]. Unlike [Random C-Arm View Sampling](2596-random-c-arm-view-sampling.md) which generates random views, or interlaced view sampling where the sequence of angles repeats from frame to frame, this method ensures static parts benefit from additional information as frames increase [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- **Inputs**:
+  - $N_p$: Total number of projections.
+  - $N_{\min}$: Minimum number of projections per round supported by the CT hardware.
+  - $N_r$: Number of rounds (derived from $N_p$ and $N_{\min}$).
+- **Outputs**:
+  - A sequence of angles $\theta_{k,i}$ for each projection $k$ in each round $i$.
+
+**Data Structures**
+- No complex data structures are required. The algorithm computes angles on the fly or stores them in a flat list/array of size $N_p$.
+
+**Steps**
+1. **Determine Round Parameters**:
+   - Calculate the number of rounds $N_r$. The sources imply $N_r = \lceil N_p / N_{\min} \rceil$ or similar, but explicitly state $N_p$ projections are divided into $N_r$ rounds where each round consists of $N_{\min}$ projections [S1, unofficial]. Note: If $N_p$ is not a multiple of $N_{\min}$, the last round may have fewer projections.
+   - Calculate the angular spacing within a round: $\Delta \theta = 2\pi / N_{\min}$ [S1, unofficial].
+
+2. **Compute Starting Angles for Each Round**:
+   - For each round index $i$ (where $i = 0, 1, \dots, N_r-1$):
+     - Compute the base-2 Van der Corput sequence value $h_2(i)$ [S1, unofficial].
+     - Compute the starting angle for round $i$: $\theta_{0,i} = h_2(i) \cdot \Delta \theta$ [S1, unofficial].
+
+3. **Compute Projection Angles**:
+   - For each round $i$:
+     - For each projection index $k$ within the round (where $k = 0, 1, \dots, N_{\min}-1$, or fewer for the last round if $N_p$ is not a multiple of $N_{\min}$):
+       - Compute the angle: $\theta_{k,i} = \theta_{0,i} + k \cdot \Delta \theta$ [S1, unofficial].
+
+**Formulas**
+- **Base-2 Van der Corput Sequence**:
+  $$h_2(i) = \sum_{j=0}^{\infty} \frac{a_j}{2^{j+1}}$$
+  where $i = \sum_{j=0}^{\infty} a_j \cdot 2^j$ and $(a_j)$ is the binary representation of $i$ [S1, unofficial].
+  - $h_2(i)$ is always in the interval $[0, 1)$ [S1, unofficial].
+
+- **Starting Angle for Round $i$**:
+  $$\theta_{0,i} = h_2(i) \cdot \frac{2\pi}{N_{\min}}$$ [S1, unofficial].
+
+- **Angle of $k$-th Projection in Round $i$**:
+  $$\theta_{k,i} = \theta_{0,i} + k \cdot \frac{2\pi}{N_{\min}}$$ [S1, unofficial].
+
+**Parameters**
+- $N_{\min}$: Minimum number of projections per round supported by the CT hardware. Typical value: 10 [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def low_discrepancy_view_sampling(Np, Nmin):
+    """
+    Generate projection angles using Low Discrepancy View Sampling.
+    
+    Args:
+        Np (int): Total number of projections.
+        Nmin (int): Minimum number of projections per round.
+        
+    Returns:
+        list of float: List of angles in radians for each projection.
+    """
+    angles = []
+    
+    # Calculate number of rounds
+    # Note: The last round may have fewer than Nmin projections
+    Nr = (Np + Nmin - 1) // Nmin  # Ceiling division
+    
+    for i in range(Nr):
+        # Calculate number of projections in this round
+        # For the last round, it might be less than Nmin
+        k_max = min(Nmin, Np - i * Nmin)
+        
+        # Compute Van der Corput sequence value for round index i
+        h2_i = van_der_corput(i)
+        
+        # Compute starting angle for this round
+        delta_theta = 2 * math.pi / Nmin
+        theta_0_i = h2_i * delta_theta
+        
+        # Compute angles for each projection in this round
+        for k in range(k_max):
+            theta_k_i = theta_0_i + k * delta_theta
+            angles.append(theta_k_i)
+            
+    return angles
+
+def van_der_corput(n):
+    """
+    Compute the base-2 Van der Corput sequence value for index n.
+    
+    Args:
+        n (int): Index.
+        
+    Returns:
+        float: Value in [0, 1).
+    """
+    result = 0.0
+    fraction = 0.5
+    while n > 0:
+        # Get the least significant bit
+        if n & 1:
+            result += fraction
+        # Shift n to the right
+        n >>= 1
+        # Halve the fraction for the next bit
+        fraction /= 2.0
+    return result
+```
+
+**Edge Cases and Pitfalls**
+- **Non-multiple of $N_{\min}$**: If $N_p$ is not a multiple of $N_{\min}$, the last round will have fewer than $N_{\min}$ projections. The formula for $\theta_{k,i}$ still applies, but $k$ only goes up to the remaining number of projections [S1, unofficial].
+- **Precision**: The Van der Corput sequence computation should use sufficient floating-point precision to avoid errors for large $i$ [G].
+- **Hardware Constraints**: The strategy must respect the hardware's minimum number of projections per round ($N_{\min}$) [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: $O(N_p)$ to generate all angles. The Van der Corput sequence computation for each round is $O(\log i)$, which is negligible compared to $N_p$.
+- **Memory Complexity**: $O(N_p)$ to store the angles, or $O(1)$ if generated on the fly.
+- **Strengths**:
+  - Ensures all $N_p$ projection angles are unique, maximizing information extraction [S1, unofficial].
+  - Uniformly covers all directions over time [S1, unofficial].
+  - Compatible with hardware constraints that require linear scan rounds [S1, unofficial].
+- **Limitations**:
+  - Requires hardware support for linear scan rounds [S1, unofficial].
+  - Reconstruction quality may suffer if the number of projections per frame is small in dynamic scenarios, although this is mitigated by the uniqueness of angles [S1, unofficial].
+- **When to Use**:
+  - Dynamic CT where uniform angular distribution over time is critical.
+  - Hardware that supports linear scan rounds with a minimum number of projections per round.
+- **When Not to Use**:
+  - Static targets where simple linear scan rounds are sufficient.
+  - Hardware that does not support linear scan rounds or requires interlaced view sampling [S1, unofficial].
+
+## Background
+- **Origin**: Proposed in the context of space-time tomographic reconstruction of deforming objects [S1, unofficial].
+- **History**: Developed as an alternative to interlaced view sampling by Mohan et al. [80] to address the limitation that interlaced sampling repeats angles, preventing static parts from benefiting from additional information [S1, unofficial].
+- **Usage**: Used in dynamic CT acquisition strategies [S1, unofficial].
+
+## Sources
+[S1] Space-Time Tomographic Reconstruction of Deforming Objects, https://vccimaging.org/Publications/Zang2020Thesis/Zang2020Thesis.pdf, fetched 2026-10-30 (unofficial)

@@ -3,7 +3,7 @@
 Also called: Naive Tetrahedral Marching Tetrahedra, Pairwise Intersection Method, Tetrahedral Marching Tetrahedra (Naive/Brute-Force Variant)
 
 ## Overview
-Naive Tetrahedral Surfacing is an isosurface extraction method that processes each tetrahedron independently to generate a collection of individual, unconnected polygons [S1, unofficial]. It differs from standard Marching Tetrahedra by iterating through all pairs of sample points to find intersections with an isosurface, rather than using the standard 14-case lookup table based on vertex signs [S1, unofficial]. This approach builds on [Naive Isosurface Extraction](4328-naive-isosurface-extraction.md) by operating on the tetrahedral subgrid structure.
+Naive Tetrahedral Surfacing is an isosurface extraction method that processes each tetrahedron independently to generate a collection of individual, unconnected polygons [S1, unofficial]. It differs from standard Marching Tetrahedra by iterating through all pairs of sample points to find intersections with an isosurface, rather than using the standard 14-case lookup table based on vertex signs [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
@@ -21,13 +21,11 @@ Naive Tetrahedral Surfacing is an isosurface extraction method that processes ea
 - `vertices`: An output list of `Vector3` objects storing the calculated intersection points.
 
 **Steps:**
-1. Evaluate the scalar function at all four sample points (vertices) of the tetrahedron to obtain `surf_vals`.
-2. Partition the sample points and their values into two lists:
-   - `less_than_iso` and `less_val` for points where `value < iso_val`.
-   - `more_than_iso` and `more_val` for points where `value >= iso_val`.
-3. Iterate through every point `v1` in `less_than_iso` and every point `v2` in `more_than_iso` to form candidate edges.
-4. For each pair `(v1, v2)`, calculate the intersection vertex `new_vertex` using linear interpolation.
-5. Add `new_vertex` to the output `vertices` list. If the index `i` of the `more_than_iso` point is even, push to front; otherwise, push to back. [G] This ordering logic is specific to the implementation's output format and does not guarantee consistent triangle winding or connectivity without further processing.
+1. Evaluate the scalar function at all sample points (vertices) of the tetrahedron to obtain `surf_vals` [S1, unofficial].
+2. Partition the sample points and their values into two lists: `less_than_iso` and `less_val` for points where `value < iso_val`, and `more_than_iso` and `more_val` for points where `value >= iso_val` [S1, unofficial].
+3. Iterate through every point `v1` in `less_than_iso` and every point `v2` in `more_than_iso` to form candidate edges [S1, unofficial].
+4. For each pair `(v1, v2)`, calculate the intersection vertex `new_vertex` using linear interpolation [S1, unofficial].
+5. Add `new_vertex` to the output `vertices` list. If the index `i` of the `more_than_iso` point is even, push to front; otherwise, push to back [S1, unofficial]. This ordering logic is specific to this implementation's output format and does not guarantee consistent triangle winding or connectivity without further processing [S1, unofficial].
 
 **Formula:**
 The intersection vertex is calculated as:
@@ -85,7 +83,7 @@ def naive_tetrahedral_surfacing(samp_pts: List[Vector3], surf_vals: List[float],
             val2 = more_val[j]
             
             diff_tot = abs(val1 - val2)
-            # Avoid division by zero if values are identical (though unlikely if partitioned correctly)
+            # Guard against division by zero if values are identical [G]
             if diff_tot == 0:
                 continue
                 
@@ -96,6 +94,7 @@ def naive_tetrahedral_surfacing(samp_pts: List[Vector3], surf_vals: List[float],
             new_vertex = (v1 * diff_2 + v2 * diff_1) / diff_tot
             
             # Step 5: Add to output with specific ordering
+            # If the index of the more_than_iso point is even, push to front; otherwise, push to back [S1, unofficial]
             if j % 2 == 0:
                 vertices.insert(0, new_vertex)
             else:
@@ -105,15 +104,15 @@ def naive_tetrahedral_surfacing(samp_pts: List[Vector3], surf_vals: List[float],
 ```
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per tetrahedron, but with a higher constant factor than standard MT. In the worst case (2 less, 2 more vertices), it performs 4 intersection calculations instead of 2.
-- **Memory Complexity:** $O(1)$ auxiliary space per tetrahedron for storing partitioned lists.
-- **Strengths:** Simple to implement; does not require a complex case lookup table.
+- **Time Complexity:** $O(1)$ per tetrahedron, but with a higher constant factor than standard MT [S1, unofficial]. In the worst case (2 less, 2 more vertices), it performs 4 intersection calculations instead of 2 [S1, unofficial].
+- **Memory Complexity:** $O(1)$ auxiliary space per tetrahedron for storing partitioned lists [S1, unofficial].
+- **Strengths:** Simple to implement; does not require a complex case lookup table [S1, unofficial].
 - **Limitations:** Generates redundant vertices; does not produce connected polygons directly; computationally inefficient for certain configurations; lacks topological consistency guarantees [S1, unofficial].
-- **When to use:** When simplicity of implementation is prioritized over performance and connectivity, or for educational purposes.
-- **When not to use:** When high performance, mesh connectivity, or topological correctness is required.
+- **When to use:** When simplicity of implementation is prioritized over performance and connectivity, or for educational purposes [S1, unofficial].
+- **When not to use:** When high performance, mesh connectivity, or topological correctness is required [S1, unofficial].
 
 ## Background
-Naive Tetrahedral Surfacing is an unofficial method described in a GitHub repository [S1, unofficial]. It represents a brute-force variant of the Marching Tetrahedra algorithm, abandoning the standard case-based approach in favor of pairwise edge intersection. The specific implementation details, including the epsilon value and vertex ordering logic, are derived from this source.
+Naive Tetrahedral Surfacing is an unofficial method described in a GitHub repository [S1, unofficial]. It represents a brute-force variant of the Marching Tetrahedra algorithm, abandoning the standard case-based approach in favor of pairwise edge intersection [S1, unofficial]. The specific implementation details, including the epsilon value and vertex ordering logic, are derived from this source [S1, unofficial].
 
 ## Sources
-[S1] surfacing-tetrahedral, https://github.com/ajinkyajayawant/surfacing-tetrahedral, fetched 2026-10-27 (unofficial)
+[S1] ajinkyajayawant/surfacing-tetrahedral, https://github.com/ajinkyajayawant/surfacing-tetrahedral, fetched 2026-10-27 (unofficial)

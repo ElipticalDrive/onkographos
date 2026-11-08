@@ -3,7 +3,7 @@
 Also called: Analytical Triangle FT, Closed-Form Triangle Fourier Transform and Gradients, Triangle FT
 
 ## Overview
-This method computes the exact Fourier Transform $\hat{u}_\mathcal{T}$ and its spatial gradients for a single triangle $\mathcal{T}$ defined by vertices $(\mathbf{v}_1, \mathbf{v}_2, \mathbf{v}_3)$ [S1, unofficial]. It provides analytic derivatives of the basis reconstruction function, avoiding additional samples or ray traversals [G].
+This method computes the exact Fourier Transform $\hat{u}_\mathcal{T}$ and its spatial gradients for a single triangle $\mathcal{T}$ defined by vertices $(\mathbf{v}_1, \mathbf{v}_2, \mathbf{v}_3)$ [S1, unofficial]. It provides analytic derivatives of the basis reconstruction function, avoiding additional samples or ray traversals [G]. It differs from sibling methods like [Analytic Gradient Computation via Box-Spline Derivatives](3199-analytic-gradient-computation-via-box-spline-derivatives.md) by operating directly on mesh geometry rather than grid-based basis functions [S1, unofficial].
 
 ## How it works
 **Inputs:** Triangle vertices $\mathbf{v}_1, \mathbf{v}_2, \mathbf{v}_3 \in \mathbb{R}^3$; frequency vector $\boldsymbol{\xi} \in \mathbb{R}^3$ [S1, unofficial].
@@ -75,7 +75,7 @@ def triangle_ft_and_gradients(v1, v2, v3, xi):
     A_vec = np.cross(e[2], e[0]) # e3 x e1
     A_T = np.linalg.norm(A_vec) / 2.0
     if A_T < 1e-12:
-        return 0.0, np.zeros(3), np.zeros(3), np.zeros(3) # Degenerate triangle
+        return 0.0, np.zeros(3), np.zeros(3), np.zeros(3) # Degenerate triangle [G]
     N_T = A_vec / (2.0 * A_T)
     
     # 4. Outward Normals
@@ -100,7 +100,7 @@ def triangle_ft_and_gradients(v1, v2, v3, xi):
         exp_term = np.exp(-1j * dot_v_p)
         
         # Handle singularities with limits from source (Eq 12a, 12b)
-        # Not given in the sources for the exact implementation logic, so we use safe division.
+        # Source provides limits for t->u cases but not full algorithmic logic [S1, unofficial].
         term1 = exp_term / (dot_e_p ** 3) if abs(dot_e_p) > 1e-12 else 0.0
         term2 = -exp_term / (dot_e_p * (dot_e_p_plus ** 2)) if (abs(dot_e_p) > 1e-12 and abs(dot_e_p_plus) > 1e-12) else 0.0
         term3 = -1j * exp_term / (dot_e_p_minus * dot_e_p_plus) if (abs(dot_e_p_minus) > 1e-12 and abs(dot_e_p_plus) > 1e-12) else 0.0
@@ -139,11 +139,11 @@ def triangle_ft_and_gradients(v1, v2, v3, xi):
 ## Subtopics
 
 ### GPU Parallelized Mesh FT
-A custom CUDA implementation for forward and backward passes of the mesh FT to leverage GPU parallelization [S1, unofficial]. It achieves a $\approx 10^3$ speedup on an NVIDIA V100 GPU compared to a vectorized CPU implementation [S1, unofficial]. The forward pass complexity is $O(N \cdot n_t)$, where $N$ is the number of voxels and $n_t$ is the number of triangles. The gradient complexity is $O(N \cdot n_v)$, where $n_v$ is the number of vertices [S1, unofficial].
+A custom CUDA implementation for forward and backward passes of the mesh FT to leverage GPU parallelization [S1, unofficial]. It achieves a $\approx 10^3$ speedup on an NVIDIA V100 GPU compared to a vectorized CPU implementation [S1, unofficial]. The forward pass complexity is $O(N \cdot n_t)$, where $N$ is the number of voxels and $n_t$ is the number of triangles [S1, unofficial]. The gradient complexity is $O(N \cdot n_v)$, where $n_v$ is the number of vertices [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Forward pass is $O(N \cdot n_t)$, where $N$ is the number of voxels and $n_t$ is the number of triangles. Gradient computation is $O(N \cdot n_v)$, where $n_v$ is the number of vertices [S1, unofficial].
-- **Memory Complexity:** Not given in the sources.
+- **Time Complexity:** Forward pass is $O(N \cdot n_t)$, where $N$ is the number of voxels and $n_t$ is the number of triangles [S1, unofficial]. Gradient computation is $O(N \cdot n_v)$, where $n_v$ is the number of vertices [S1, unofficial].
+- **Memory Complexity:** Not given in the sources [S1, unofficial].
 - **Measured Performance:** On an NVIDIA V100 GPU, the CUDA implementation achieves a $\approx 10^3$ speedup compared to a vectorized CPU implementation [S1, unofficial]. For a $500^3$ image (125 million voxels) and a mesh with $10^3-10^4$ triangles, the computation is feasible with GPU acceleration but prohibitive on CPU [S1, unofficial].
 - **Scaling:** The forward pass scales linearly with the number of triangles for a fixed image size [S1, unofficial].
 - **Strengths:** Enables differentiable rendering for 3D fluorescence microscopy; allows for large box sizes before overflow with GPU implementation [S1, unofficial].
@@ -152,7 +152,7 @@ A custom CUDA implementation for forward and backward passes of the mesh FT to l
 - **When not to use:** When computational resources are limited to CPU and the scene is very large; when high precision near singularities is not critical and approximate methods suffice [S1, unofficial].
 
 ## Background
-Originated in the paper "Differentiable Rendering for 3D Fluorescence Microscopy" [S1, unofficial]. The method addresses the high computational cost of spectral methods in 3D, which was previously a limitation preventing their widespread use. The authors introduced GPU parallelization and narrow-band approximation to make the computation feasible for large images [S1, unofficial].
+Originated in the paper "Differentiable Rendering for 3D Fluorescence Microscopy" [S1, unofficial]. The method addresses the high computational cost of spectral methods in 3D, which was previously a limitation preventing their widespread use [S1, unofficial]. The authors introduced GPU parallelization and narrow-band approximation to make the computation feasible for large images [S1, unofficial].
 
 ## Sources
 [S1] Differentiable Rendering for 3D Fluorescence Microscopy, https://doi.org/10.48550/arxiv.2303.10440, fetched 2026-10-27 (unofficial)

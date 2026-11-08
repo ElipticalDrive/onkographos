@@ -3,73 +3,97 @@
 Also called: Field Function Evaluation, Implicit Function Evaluation
 
 ## Overview
-Implicit Surface Field Function Evaluation computes the scalar value $d = f(x,y,z)$ for a query point in 3D space [S1, unofficial]. It maps coordinates to a signed distance or density, where $d < 0$ indicates the interior, $d > 0$ the exterior, and $d = 0$ the surface contour [S1, unofficial].
+Implicit Surface Field Function Evaluation computes the scalar value $d = f(\mathbf{x})$ for an implicit surface at query points $\mathbf{x}$, where $d$ represents the signed distance or density. It solves the problem of determining whether a point lies inside, outside, or on the contour of a volume, which is fundamental for ray marching and isosurface extraction. It differs from [Batched SDF Inference](2329-batched-sdf-inference.md) by operating on arbitrary single points rather than fixed neural network batches, and from [DeepSDF Neural Network](3051-deepsdf-neural-network.md) by using explicit analytical or grid-based storage rather than learned latent codes.
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Query point $(x_0, y_0, z_0)$ in world space [S1, unofficial].
-*   **Input:** Transformation matrix $T$ applied to the implicit surface [S1, unofficial].
-*   **Input:** Primitive parameters (e.g., radius $R$) [S1, unofficial].
-*   **Output:** Scalar value $d$ representing signed distance/density [S1, unofficial].
+- Input: Query point coordinates $(x_0, y_0, z_0)$, step size $dz$, number of points $num\_points$.
+- Output: Array of scalar density/distance values $densities$.
 
 **Data Structures:**
-*   **Primitive State:** Stored fields such as `_radius` for spheres [S1, unofficial].
-*   **Inverse Transformation:** The implementation applies $T^{-1}$ to query points before evaluation [S1, unofficial].
+- `Isosurface`: Interface class containing the field function implementation.
+- `densities`: Array of floats of size $num\_points$.
 
 **Steps:**
-1.  **Inverse Transformation:** Transform $(x_0, y_0, z_0)$ by $T^{-1}$ to obtain local coordinates $(x_t, y_t, z_t)$ [S1, unofficial]. If $T$ is the identity matrix, $(x_t, y_t, z_t) = (x_0, y_0, z_0)$ [S1, unofficial]. For example, a sphere translated by $(-5, 0, 0)$ uses an inverse translation of $(+5, 0, 0)$, so evaluating at $(0,0,0)$ correctly returns the interior sign [S1, unofficial].
-2.  **Distance Calculation:** Evaluate the analytic function $f$ using $(x_t, y_t, z_t)$ and primitive parameters [S1, unofficial].
-3.  **Return Value:** Return the computed scalar $d$ [S1, unofficial].
+1. If the implicit surface has an associated transformation matrix $T$, compute the inverse transformation $T^{-1}$.
+2. Transform the query point $\mathbf{x}_{world} = (x_0, y_0, z_0)$ by $T^{-1}$ to obtain the local coordinate $\mathbf{x}_{local} = (x_t, y_t, z_t)$. If no transformation is applied, $T^{-1}$ is the identity, so $\mathbf{x}_{local} = \mathbf{x}_{world}$.
+3. Evaluate the primitive field function $f(\mathbf{x}_{local})$ to get the signed distance $d$.
+4. Store $d$ in the output array.
+5. Increment the query point along the +z axis: $z_0 \leftarrow z_0 + dz$.
+6. Repeat steps 2-5 for $num\_points$.
 
 **Formulas:**
-For a sphere of radius $R$ centered at the origin in local space:
-$$ f(x_t, y_t, z_t) = x_t^2 + y_t^2 + z_t^2 - R^2 $$
-where:
-*   $x_t, y_t, z_t$ are the transformed query coordinates [S1, unofficial].
-*   $R$ is the radius [S1, unofficial].
-*   $d = 0$ on the contour (distance $R$ from center) [S1, unofficial].
-*   $d > 0$ outside (distance $> R$) [S1, unofficial].
-*   $d < 0$ inside (distance $< R$) [S1, unofficial].
+For a sphere of radius $R$ centered at the origin:
+$$ f(x,y,z) = x^2 + y^2 + z^2 - R^2 $$
+- $d < 0$: Point is inside the volume.
+- $d > 0$: Point is outside the volume.
+- $d = 0$: Point is on the contour.
+
+**Parameters:**
+- $dz$: Delta step size along the +z axis for batch evaluation.
+- $num\_points$: Number of points to evaluate in the batch.
 
 **Pseudocode:**
-The following Python-like pseudocode implements batch evaluation along the +z axis, as described in the source [S1, unofficial].
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def evaluate_field(x0, y0, z0, dz, num_points, radius, transform_inverse):
-    """Batch evaluation of field function along the +z axis [S1, unofficial]."""
+def evaluate_field_function(x0, y0, z0, dz, num_points, radius, inverse_transform_matrix):
+    """
+    Evaluates the implicit field function for a sphere along the +z axis.
+    
+    Args:
+        x0, y0, z0: Starting coordinates of the query point.
+        dz: Step size along the z-axis.
+        num_points: Number of points to evaluate.
+        radius: Radius of the sphere.
+        inverse_transform_matrix: 4x4 matrix representing T^-1.
+        
+    Returns:
+        densities: List of float values representing the field function output.
+    """
     densities = []
-    for _ in range(num_points):
-        # Applies T^-1 to (x, y, z); standard 4x4 matrix-vector multiplication [G]
-        xt, yt, zt = transform_inverse(x0, y0, z0)
-        # Evaluate sphere field function
-        d = (xt * xt + yt * yt + zt * zt) - (radius * radius)
+    sqr_rad = radius * radius
+    
+    for i in range(num_points):
+        # Step 1: Transform query point to local space
+        # Assuming inverse_transform_matrix is a 4x4 matrix
+        # Homogeneous coordinate transformation
+        x_local = inverse_transform_matrix[0][0] * x0 + inverse_transform_matrix[0][1] * y0 + inverse_transform_matrix[0][2] * z0 + inverse_transform_matrix[0][3]
+        y_local = inverse_transform_matrix[1][0] * x0 + inverse_transform_matrix[1][1] * y0 + inverse_transform_matrix[1][2] * z0 + inverse_transform_matrix[1][3]
+        z_local = inverse_transform_matrix[2][0] * x0 + inverse_transform_matrix[2][1] * y0 + inverse_transform_matrix[2][2] * z0 + inverse_transform_matrix[2][3]
+        
+        # Step 2: Evaluate sphere field function
+        sqr_dist = x_local * x_local + y_local * y_local + z_local * z_local
+        d = sqr_dist - sqr_rad
+        
+        # Step 3: Store result
         densities.append(d)
-        # Advance to next point along +z axis
-        z0 += dz
+        
+        # Step 4: Increment z for next point
+        z0 = z0 + dz
+        
     return densities
 ```
 
-**Parameters:**
-*   `dz`: Delta step size along the +z axis for batch evaluation [S1, unofficial].
-*   `num_points`: Number of points to evaluate in the batch [S1, unofficial].
-
 **Edge Cases and Pitfalls:**
-*   **Bounding Box:** Determining the bounding box for the implicit surface is non-trivial and must be computed separately (e.g., in the constructor) to optimize culling [S1, unofficial].
+- Precision: Floating-point errors may cause $d$ to be slightly non-zero for points exactly on the contour.
+- Boundaries: The bounding box of the implicit surface must be computed and reported to optimize culling, as it is not always trivial to derive from the field function alone [S1, unofficial].
 
 ## Subtopics
 
 ### [SDF Evaluation Implementation](1658-sdf-evaluation-implementation.md)
-Provides the concrete runtime interface and software architecture for querying SDF values, focusing on batching and numerical stability rather than the mathematical definition.
+Implements runtime evaluation of an SDF defined on a 3D voxel grid, supporting configurable interpolation orders. Choose this when using grid-based storage rather than analytical primitives.
 
 ## Operating characteristics
-*   **Strengths:** Compact representation; precise contours; no discretization artifacts inherent to voxel grids [S1, unofficial].
-*   **Limitations:** Bounding box computation can be difficult for complex implicit functions [S1, unofficial].
-*   **Time and Memory Complexity:** Not given in the sources.
+- Time Complexity: $O(num\_points)$ per evaluation, assuming constant-time primitive evaluation.
+- Memory Complexity: $O(1)$ auxiliary space for analytical primitives; $O(V)$ for grid-based implementations where $V$ is the number of voxels.
+- Strengths: Compact and precise representation of volumes; efficient for simple primitives.
+- Limitations: Difficult to determine bounding boxes for complex implicit functions; limited to specific geometric shapes or grid-based approximations.
+- When to use: Simple analytical shapes or pre-computed voxel grids.
+- When not to use: Complex, non-analytical surfaces requiring neural network inference or high-resolution grid storage.
 
 ## Background
-The implementation details and examples (such as the sphere function and batch evaluation interface) are derived from tutorials on contouring algorithms like Marching Cubes and Dual Contouring [S1, unofficial].
+Implicit surfaces were introduced as a compact and precise way to describe volumes in 3D space, avoiding the need for explicit polygonal approximations. The concept is foundational for contouring algorithms like Marching Cubes and Dual Contouring. The specific implementation details described here, including the `Isosurface` interface and batch evaluation along the +z axis, are documented in an unofficial source by Zukkers [S1, unofficial].
 
 ## Sources
 [S1] Implicit Surfaces, http://www.oocities.org/tzukkers/isosurf/isosurfaces.html, fetched 2026-10-30 (unofficial)

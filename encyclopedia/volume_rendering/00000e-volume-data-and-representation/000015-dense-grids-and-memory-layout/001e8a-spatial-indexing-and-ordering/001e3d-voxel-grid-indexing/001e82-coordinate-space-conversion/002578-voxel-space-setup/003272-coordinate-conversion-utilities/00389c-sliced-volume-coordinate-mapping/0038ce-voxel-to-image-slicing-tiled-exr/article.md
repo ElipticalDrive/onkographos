@@ -1,0 +1,120 @@
+# Voxel-to-Image Slicing (Tiled EXR)
+
+Also called: Raw byte to tiled EXR, Smoke2EXR conversion
+
+## Overview
+Voxel-to-Image Slicing is a technique for rendering 3D voxel data in raster-based renderers (specifically Cycles) by converting raw volumetric data into a 2D tiled EXR image. Each tile in the image represents a 2D slice of the volume along the Z-axis, allowing the renderer to access 3D data via 2D texture sampling. It differs from standard 3D texture sampling by flattening the volume into a 2D grid of slices, which requires specific coordinate mapping logic to resolve 3D coordinates to 2D image pixels.
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** Raw byte buffer of size $N = \text{res}_x \times \text{res}_y \times \text{res}_z$, containing density values (typically 8-bit unsigned integers).
+- **Parameters:** Resolution $(\text{res}_x, \text{res}_y, \text{res}_z)$ and boolean `multiRow`.
+- **Output:** A tiled EXR image with dimensions calculated based on the tile layout.
+
+**Data Structures:**
+- **Pixel Array:** A 1D array of size $\text{width} \times \text{height}$, where each element is a 4-component float vector $[R, G, B, A]$. Initialized to $[0.0, 0.0, 0.0, 0.0]$.
+- **Image Dimensions:**
+  - $\text{numColumns} = \lceil \sqrt{\text{res}_z} \rceil$ if `multiRow` is true; otherwise $\text{numColumns} = \text{res}_z$.
+  - $\text{numRows} = \lceil \text{res}_z / \text{numColumns} \rceil$ if `multiRow` is true; otherwise $\text{numRows} = 1$.
+  - $\text{width} = (\text{res}_x + 1) \times \text{numColumns}$.
+  - $\text{height} = (\text{res}_y + 1) \times \text{numRows}$ if $\text{numRows} > 1$; otherwise $\text{height} = \text{res}_y$.
+
+**Steps:**
+1. Read the raw byte buffer of size $\text{res}_x \times \text{res}_y \times \text{res}_z$.
+2. Calculate tile grid dimensions ($\text{numColumns}, \text{numRows}$) based on `multiRow`.
+3. Create the image with calculated width and height, setting `is_data=True`.
+4. Initialize the pixel array with zeros.
+5. Iterate through each Z-slice $z$ from $0$ to $\text{res}_z - 1$:
+   a. Calculate tile position:
+      $$ \text{tileNoX} = z \pmod{\text{numColumns}} $$
+      $$ \text{tileNoY} = \lfloor (z - \text{tileNoX}) / \text{numColumns} \rfloor $$
+   b. Calculate the byte offset in the pixel array for the top-left of the tile:
+      $$ \text{tileOffset} = \text{tileNoX} \times (\text{res}_x + 1) + \text{tileNoY} \times \text{width} \times (\text{res}_y + 1) $$
+   c. Iterate through each $x$ from $0$ to $\text{res}_x - 1$ and $y$ from $0$ to $\text{res}_y - 1$:
+      i. Calculate the linear index in the raw buffer:
+         $$ p = x + y \times \text{res}_x + z \times \text{res}_x \times \text{res}_y $$
+      ii. Read the value $v$ from the buffer at index $p$. If the buffer is 8-bit unsigned int, convert to float: $v_{float} = v / 255.0$.
+      iii. Assign the value to the pixel array:
+         $$ \text{pixels}[\text{tileOffset} + x + y \times \text{width}] = [v_{float}, v_{float}, v_{float}, 0.0] $$
+      *(Note: The source code assigns the same value to R, G, and B channels. Alpha is set to 0.0.)*
+6. Save the image as an EXR file.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def convert_rawbytes_to_tiled_exr(raw_data, res_x, res_y, res_z, multi_row=True):
+    """
+    Convert raw voxel bytes to a tiled EXR image structure.
+    raw_data: bytes object of size res_x * res_y * res_z
+    """
+    # 1. Calculate tile layout
+    if multi_row:
+        num_columns = math.ceil(math.sqrt(res_z))
+        num_rows = math.ceil(res_z / num_columns)
+    else:
+        num_columns = res_z
+        num_rows = 1
+
+    # 2. Calculate image dimensions
+    width = (res_x + 1) * num_columns
+    if num_rows > 1:
+        height = (res_y + 1) * num_rows
+    else:
+        height = res_y
+
+    # 3. Initialize pixel array
+    # Each pixel is [R, G, B, A]
+    pixels = [[0.0, 0.0, 0.0, 0.0] for _ in range(width * height)]
+
+    # 4. Process slices
+    for z in range(res_z):
+        # Calculate tile position
+        tile_no_x = z % num_columns
+        tile_no_y = (z - tile_no_x) // num_columns
+        
+        # Calculate offset in the 1D pixel array
+        # The tile starts at (tile_no_x * (res_x + 1), tile_no_y * (res_y + 1))
+        # In 1D array: row * width + col
+        tile_offset = tile_no_y * width * (res_y + 1) + tile_no_x * (res_x + 1)
+
+        # Process each pixel in the slice
+        for y in range(res_y):
+            for x in range(res_x):
+                # Linear index in raw data (row-major)
+                p = x + y * res_x + z * res_x * res_y
+                
+                # Read value (assuming 8-bit unsigned int)
+                val = raw_data[p]
+                val_float = val / 255.0
+                
+                # Assign to pixel array
+                # Pixel index = tile_offset + local_x + local_y * width
+                pixel_idx = tile_offset + x + y * width
+                pixels[pixel_idx] = [val_float, val_float, val_float, 0.0]
+
+    return pixels, width, height
+```
+
+**Parameters:**
+- `multiRow`: Boolean. If true, splits slices into a 2D grid of tiles to reduce coordinate inaccuracies for large slice counts. Default is true.
+
+**Edge Cases and Pitfalls:**
+- **Memory Usage:** Large voxel datasets cause high memory usage. A 361x433x361 volume required 8GB RAM and took 5-10 minutes to process [S1, unofficial].
+- **Coordinate Inaccuracy:** Single-row tile layouts cause inaccuracies as the number of slices grows large. Multi-row layout drastically reduces this issue [S1, unofficial].
+- **Precision:** The example assumes 8-bit unsigned int input. If the input format differs, the conversion $v/255.0$ must be adjusted.
+
+## Operating characteristics
+- **Time Complexity:** $O(\text{res}_x \times \text{res}_y \times \text{res}_z)$ for the conversion process.
+- **Memory Complexity:** $O(\text{width} \times \text{height})$ for the pixel array.
+- **Performance:** For a 361x433x361 volume, the conversion took 5-10 minutes on the reference hardware [S1, unofficial].
+- **Strengths:** Allows 3D volume data to be used in 2D texture nodes; simple to implement in Python.
+- **Limitations:** High memory consumption for large volumes; single-row layout suffers from precision issues; not suitable for real-time rendering due to conversion overhead.
+
+## Background
+This method was developed for use in Blender's Cycles renderer to allow raw volumetric data (such as from MRI scans or smoke simulations) to be visualized. It was adapted from a Smoke2EXR add-on to handle general voxel data. The technique addresses the limitation that images are inherently 2-dimensional, requiring a mapping strategy to represent 3D volumes.
+
+## Sources
+[S1] Voxel data in Cycles, https://blender.stackexchange.com/questions/14995, fetched 2026-10-30 (unofficial)

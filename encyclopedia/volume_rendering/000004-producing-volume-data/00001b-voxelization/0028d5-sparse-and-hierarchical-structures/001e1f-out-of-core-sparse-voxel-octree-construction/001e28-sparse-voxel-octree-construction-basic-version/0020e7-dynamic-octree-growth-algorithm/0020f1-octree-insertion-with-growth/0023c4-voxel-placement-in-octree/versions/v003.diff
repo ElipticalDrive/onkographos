@@ -1,0 +1,301 @@
+--- v002.md
++++ v003.md
+@@ -4,170 +4,166 @@
+ 
+ ## Overview
+-Voxel Placement in Octree inserts a colored voxel into a Sparse Voxel Octree (SVO) at a specific 3D coordinate [S1, unofficial]. It handles recursive descent through the tree hierarchy, creating intermediate nodes as necessary, and marks the target leaf node with the voxel's color [S1, unofficial]. It is distinguished from sibling methods by its explicit handling of the collapse/expand state of internal nodes, ensuring that previously collapsed uniform regions can be correctly subdivided when new non-uniform data is inserted [S1, unofficial].
++Voxel Placement in Octree is the fundamental recursive operation that inserts a colored voxel into a Sparse Voxel Octree (SVO) at a specific 3D coordinate, handling tree depth limits and node expansion [S1, unofficial]. It solves the problem of dynamically maintaining a hierarchical spatial index where internal nodes may be collapsed (merged into uniform leaves) and must be correctly expanded before further descent [S1, unofficial]. It is distinct from its siblings: [Octree Insertion with Growth](2387-octree-insertion-with-growth.md) provides the broader context of boundary handling and tree growth, while [Dynamic Sparse Voxel Octree with Morton Codes](4099-dynamic-sparse-voxel-octree-with-morton-codes.md) focuses on linearization and cache efficiency rather than the raw recursive insertion logic [S1, S2, unofficial].
+ 
+ ## How it works
++**Inputs:**
++*   `node`: The current octree node (internal or leaf).
++*   `nx, ny, nz`: The world coordinates of the current node's center or origin (depending on implementation convention; S1 uses node center/origin for comparison).
++*   `size`: The side length of the current node's bounding box.
++*   `depth`: The current depth in the octree (0 is root).
++*   `x, y, z`: The target world coordinates of the voxel to insert.
++*   `color`: The color/value of the voxel.
++*   `maxDepth`: The maximum allowed depth of the octree.
+ 
+-### Inputs and Outputs
+-*   **Inputs**:
+-    *   `node`: The current octree node (initially the root) [S1, unofficial].
+-    *   `nx, ny, nz`: The 3D coordinates of the center of the current node's bounding box [S1, unofficial].
+-    *   `size`: The side length of the current node's bounding box [S1, unofficial].
+-    *   `depth`: The current recursion depth (0 for root) [S1, unofficial].
+-    *   `x, y, z`: The 3D coordinates of the voxel to be placed [S1, unofficial].
+-    *   `color`: The color or density value of the voxel [S1, unofficial].
+-    *   `maxDepth`: The maximum allowed depth of the octree [S1, unofficial].
+-*   **Outputs**:
+-    *   Modifies the octree structure in place: creates child nodes if they do not exist, sets `isLeaf` flags, and assigns `color` to the target leaf [S1, unofficial].
+-    *   Returns `void` or a boolean indicating success/bounds status [S2, unofficial].
++**Outputs:**
++*   The octree is modified in place: nodes are created, expanded, or marked as leaves.
++*   The target voxel is stored at the leaf node corresponding to the deepest level (`maxDepth`) or the deepest available level if the tree was previously collapsed.
+ 
+-### Data Structures
+-The implementation relies on an `OctreeNode` structure [S1, unofficial]. While exact memory layouts vary by language, the logical fields required are:
+-*   `isLeaf`: Boolean flag indicating if the node is a leaf [S1, unofficial].
+-*   `color`: The value stored in the voxel [S1, unofficial].
+-*   `children`: An array or pointer to 8 child nodes (indexed 0-7) [S1, unofficial]. If `isLeaf` is true or the node is collapsed, this may be `null` or `None` [S1, unofficial].
+-*   `position`: The 3D center coordinates of the node [S1, unofficial].
+-*   `size`: The side length of the node [S1, unofficial].
++**Data Structures:**
++*   `OctreeNode`:
++    *   `isLeaf` (bool): True if this node represents a single voxel or a uniform block.
++    *   `color` (float[4] or similar): The color/value. Null or undefined if not a leaf or if empty (though S1 notes `null` color is problematic for deletion [S1, unofficial]).
++    *   `children` (array[8] of OctreeNode or null): Pointers to the 8 child nodes. Null if `isLeaf` is true or if the node is collapsed.
++    *   `position` (vec3): World position of the node center [S2, unofficial].
++    *   `size` (float): Side length of the node [S2, unofficial].
+ 
+-### Numbered Steps
+-1.  **Base Case (Max Depth)**: If `depth` equals `maxDepth`, the current node is the target leaf [S1, unofficial]. Set `node.isLeaf = true`, set `node.color = color`, set `node.children = null`, and return [S1, unofficial].
+-2.  **Boundary Check**: If the voxel position `(x, y, z)` is outside the current node's bounding box defined by `(nx, ny, nz)` and `size`, return immediately or return `false` [S2, unofficial].
+-3.  **Collapse/Expand Check**: If `depth < maxDepth` and `node.isLeaf` is true (indicating a previously collapsed node), the node must be expanded [S1, unofficial]. Create 8 new child nodes, initialize each as a leaf with `isLeaf = true`, assign each child the `node.color` to propagate the uniform value, set `node.isLeaf = false`, and set `node.children` to the array of new children [S1, unofficial].
+-4.  **Calculate Child Index**: Determine which of the 8 octants contains the voxel [S1, unofficial]. Calculate `half = size / 2` [S1, unofficial]. Determine bit flags based on the voxel's position relative to the node's center: `ix = 1` if `x >= nx + half`, else `0`; `iy = 1` if `y >= ny + half`, else `0`; `iz = 1` if `z >= nz + half`, else `0` [S1, S2, unofficial]. Compute `childIdx = ix + (iy << 1) + (iz << 2)` [S1, S2, unofficial].
+-5.  **Create Child if Missing**: If `node.children[childIdx]` does not exist, create a new `OctreeNode` [S1, unofficial]. Set its position to `(nx + ix*half, ny + iy*half, nz + iz*half)` and its size to `half` [S1, unofficial]. Assign it to `node.children[childIdx]` [S1, unofficial].
+-6.  **Recurse**: Call `placeVoxel` (or `_set`) on `node.children[childIdx]` with `depth + 1` [S2, unofficial].
++**Numbered Steps:**
++1.  **Base Case (Leaf Creation):** If `depth` equals `maxDepth`:
++    *   Set `node.isLeaf = true`.
++    *   Set `node.color = color`.
++    *   Set `node.children = null`.
++    *   Return.
++2.  **Collapse/Expansion Check (Pitfall Handling):** If `node.isLeaf` is true (indicating a previously collapsed node) and `depth < maxDepth`:
++    *   Expand the node: Create 8 new child nodes.
++    *   Initialize each child as a leaf with `isLeaf = true` and `color` equal to the parent's current `color`.
++    *   Set `node.children` to the array of these 8 new nodes.
++    *   Set `node.isLeaf = false`.
++    *   [G] Ensure child positions and sizes are calculated correctly based on `node.position` and `size/2`.
++3.  **Calculate Subdivision:**
++    *   Calculate `half = size / 2`.
++    *   Determine the child index `ix, iy, iz` by comparing the target coordinates `(x, y, z)` with the node's boundaries.
++        *   Using the convention from [S1, unofficial]: `ix = 1` if `x >= nx + half` else `0`. (Note: S1 uses `nx, ny, nz` as the node's reference point, likely the minimum corner or center depending on specific implementation, but the comparison `x < nx + half` implies `nx` is the minimum corner).
++        *   `iy = 1` if `y >= ny + half` else `0`.
++        *   `iz = 1` if `z >= nz + half` else `0`.
++    *   Compute `childIdx = ix + (iy << 1) + (iz << 2)`.
++4.  **Child Creation:**
++    *   If `node.children[childIdx]` does not exist (is null):
++        *   Create a new `OctreeNode`.
++        *   Set its `position` to `node.position + offset` (where offset is determined by `ix, iy, iz` and `half`).
++        *   Set its `size` to `half`.
++        *   Assign it to `node.children[childIdx]`.
++5.  **Recursive Descent:**
++    *   Recursively call `placeVoxel` (or `_set`) on `node.children[childIdx]` with `depth + 1`.
+ 
+-### Formulas
+-*   **Child Index**:
+-    $$ \text{childIdx} = i_x + 2 \cdot i_y + 4 \cdot i_z $$
+-    Where $i_x, i_y, i_z \in \{0, 1\}$ are determined by:
+-    $$ i_x = \begin{cases} 1 & \text{if } x \ge n_x + \frac{s}{2} \\ 0 & \text{otherwise} \end{cases} $$
+-    (Analogous for $i_y, i_z$ with $n_y, n_z, y, z$) [S1, S2, unofficial].
+-*   **Half Size**:
+-    $$ h = \frac{s}{2} $$ [S1, unofficial].
+-
+-### Pseudocode
++**Pseudocode:**
+ ```python
+-class OctreeNode:
+-    def __init__(self):
+-        self.isLeaf = False
+-        self.color = None
+-        self.children = None
+-        self.position = (0.0, 0.0, 0.0)
+-        self.size = 0.0
+-
+-def placeVoxel(node, nx, ny, nz, size, depth, maxDepth, x, y, z, color):
+-    # 1. Base Case: Reached maximum depth
+-    if depth == maxDepth:
+-        node.isLeaf = True
++def place_voxel(node, node_min_x, node_min_y, node_min_z, node_size, depth, target_x, target_y, target_z, color, max_depth):
++    # Step 1: Base Case
++    if depth == max_depth:
++        node.is_leaf = True
+         node.color = color
+         node.children = None
+         return
+ 
+-    # 2. Boundary Check: Position outside current node bounds
+-    half = size / 2
+-    if not (nx - half <= x <= nx + half and
+-            ny - half <= y <= ny + half and
+-            nz - half <= z <= nz + half):
+-        return False
+-
+-    # 3. Collapse/Expand Check: If node is currently a leaf but we need to go deeper
+-    if node.isLeaf:
+-        node.isLeaf = False
++    # Step 2: Handle Collapsed Node (Expansion)
++    # If the node is marked as a leaf but we are not at max depth,
++    # it means it was previously collapsed. We must expand it.
++    if node.is_leaf:
++        # Expand into 8 children
++        half_size = node_size / 2.0
+         node.children = [None] * 8
++        node.is_leaf = False
++        
++        # Initialize all 8 children as leaves with the parent's color
+         for i in range(8):
+             child = OctreeNode()
+-            child.isLeaf = True
++            child.is_leaf = True
+             child.color = node.color
++            
++            # Calculate child position and size
++            # Determine offset based on index i
+             ix = i & 1
+             iy = (i >> 1) & 1
+             iz = (i >> 2) & 1
+-            child.position = (nx + (2*ix - 1)*half, 
+-                              ny + (2*iy - 1)*half, 
+-                              nz + (2*iz - 1)*half)
+-            child.size = half
++            
++            child.position = [
++                node_min_x + ix * half_size,
++                node_min_y + iy * half_size,
++                node_min_z + iz * half_size
++            ]
++            child.size = half_size
++            
+             node.children[i] = child
+ 
+-    # 4. Calculate Child Index
+-    ix = 1 if x >= nx + half else 0
+-    iy = 1 if y >= ny + half else 0
+-    iz = 1 if z >= nz + half else 0
+-    childIdx = ix + (iy << 1) + (iz << 2)
++    # Step 3: Calculate Child Index
++    half_size = node_size / 2.0
++    
++    # Determine which octant the target falls into
++    # Assuming node_min_x/y/z is the minimum corner of the current node
++    ix = 1 if target_x >= node_min_x + half_size else 0
++    iy = 1 if target_y >= node_min_y + half_size else 0
++    iz = 1 if target_z >= node_min_z + half_size else 0
++    
++    child_idx = ix + (iy << 1) + (iz << 2)
++    
++    # Step 4: Create Child if Necessary
++    if node.children[child_idx] is None:
++        child = OctreeNode()
++        child.position = [
++            node_min_x + ix * half_size,
++            node_min_y + iy * half_size,
++            node_min_z + iz * half_size
++        ]
++        child.size = half_size
++        node.children[child_idx] = child
+ 
+-    # 5. Create Child if Missing
+-    if node.children[childIdx] is None:
+-        child = OctreeNode()
+-        child.position = (nx + (2*ix - 1)*half, 
+-                          ny + (2*iy - 1)*half, 
+-                          nz + (2*iz - 1)*half)
+-        child.size = half
+-        node.children[childIdx] = child
+-
+-    # 6. Recurse
+-    placeVoxel(node.children[childIdx],
+-               node.children[childIdx].position[0],
+-               node.children[childIdx].position[1],
+-               node.children[childIdx].position[2],
+-               node.children[childIdx].size,
+-               depth + 1,
+-               maxDepth,
+-               x, y, z, color)
+-    return True
++    # Step 5: Recurse
++    place_voxel(
++        node.children[child_idx],
++        node.children[child_idx].position[0],
++        node.children[child_idx].position[1],
++        node.children[child_idx].position[2],
++        node.children[child_idx].size,
++        depth + 1,
++        target_x,
++        target_y,
++        target_z,
++        color,
++        max_depth
++    )
+ ```
+ 
+-### Parameters
+-*   `maxDepth`: The maximum recursion depth. Not given in the sources.
+-*   `color`: The data value. Not given in the sources.
++**Parameters:**
++*   `maxDepth`: Typically determined by the desired voxel resolution relative to the world bounds. Not given in the sources.
+ 
+-### Edge Cases and Pitfalls
+-*   **Collapsed Node Access**: If a `collapse()` operation previously set `children = null` on an internal node (at `depth < maxDepth`), a subsequent `set()` will throw an error when accessing `node.children[childIdx]` [S1, unofficial]. The implementation must check `node.isLeaf` or `!node.children` before descending and expand the node if necessary [S1, unofficial].
+-*   **Null Color Removal**: Using `set(x, y, z, null)` to remove voxels leaves leaf nodes with `color = null`, which prevents effective pruning/collapsing and can permanently "materialize" empty regions [S1, unofficial]. A dedicated `delete(x, y, z)` function is recommended to remove nodes and prune upward when a branch becomes entirely empty [S1, unofficial].
+-*   **Out of Bounds**: If the voxel position is outside the current node's bounding box, the function should return early to avoid infinite recursion or invalid memory access [S2, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Collapsed Node Access:** If a `collapse()` operation previously set `children = null` on an internal node at `depth < maxDepth`, a subsequent `set()` will throw an error when accessing `node.children[childIdx]` because `node.children` is null [S1, unofficial]. The implementation must check `node.isLeaf` (or `!node.children`) before descending and expand the node into 8 children initialized as leaves with the prior uniform color [S1, unofficial].
++*   **Deletion via Null Color:** Using `set(x, y, z, null)` to remove voxels leaves leaf nodes with `color = null`, which prevents effective pruning/collapsing and can permanently "materialize" empty regions [S1, unofficial]. A dedicated `delete(x, y, z)` function is required to remove nodes and prune upward when a branch becomes entirely empty [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### Octree-based Mesh Voxelization
+-*   **What it is**: A method that converts a triangle mesh into a voxel grid using an octree structure.
+-*   **Difference**: Focuses on rasterizing geometry into voxels rather than inserting individual voxels into a sparse structure.
+-*   **When to choose**: When starting from a mesh model.
+-*   **Link**: [Octree-based Mesh Voxelization](3071-octree-based-mesh-voxelization.md)
++### [OpenVDB Sparse Tree Allocation on Voxel Activation](10331-openvdb-sparse-tree-allocation-on-voxel-activation.md)
++This method describes the memory allocation and node initialization behavior of the OpenVDB sparse tree when a new voxel is activated at a specific coordinate [10331-openvdb-sparse-tree-allocation-on-voxel-activation.md]. It solves the problem of understanding why activating a single sparse voxel can result in a disproportionately large memory footprint due to the bulk initialization of sibling tiles along the path to the leaf [10331-openvdb-sparse-tree-allocation-on-voxel-activation.md]. It is distinct from standard dense voxelization because it allocates full tile structures for inactive siblings at every level of the octree hierarchy, rather than leaving them as null pointers or compact bitfields [10331-openvdb-sparse-tree-allocation-on-voxel-activation.md].
+ 
+-### Dynamic Sparse Voxel Octree with Morton Codes
+-*   **What it is**: An SVO implementation that uses Morton codes (Z-order curves) for efficient spatial indexing and traversal.
+-*   **Difference**: Uses linearized indices for memory layout and traversal, whereas this method uses explicit tree pointers.
+-*   **When to choose**: When memory locality and cache efficiency are critical, or for out-of-core storage.
+-*   **Link**: [Dynamic Sparse Voxel Octree with Morton Codes](4099-dynamic-sparse-voxel-octree-with-morton-codes.md)
++### Voxel Octree Construction from Edge Data
++This variant constructs voxels in three steps for the X-, Y-, and Z-axes based on edge data [S3]. It decomposes the edge's starting grid point index `i` into local grid coordinates `x, y, z` using grid resolution `n` [S3]. The coordinates are calculated as:
++$$x = i \pmod{(n+1)}$$
++$$y = \lfloor (i \pmod{n+1})^2 \rfloor \div (n+1) \rfloor$$
++$$z = \lfloor i \div (n+1)^2 \rfloor$$
++(Note: The source contains a likely typo in the y-formula regarding the square and floor placement, but quotes the source exactly) [S3]. After translating coordinates to world positions, the method adds offsets to identify voxel positions and retrieves or creates voxels if they exist within the grid bounds [S3]. A pitfall is that if adjusted coordinates lie outside the bounds of the material grid, no voxel exists for that offset [S3].
+ 
+ ## Operating characteristics
+-
+-### Time and Memory Complexity
+-*   **Time**: Not given in the sources.
+-*   **Memory**: Not given in the sources.
+-
+-### Measured Performance
+-*   Not given in the sources.
+-
+-### Scaling
+-*   Not given in the sources.
+-
+-### Strengths and Limitations
+-*   **Strengths**: Not given in the sources.
+-*   **Limitations**: Not given in the sources.
+-
+-### When to Use
+-*   Not given in the sources.
++*   **Time Complexity:** $O(D)$ where $D$ is the depth of the octree, as the algorithm traverses one path from root to leaf.
++*   **Memory Complexity:** Depends on the number of active voxels and the depth. In the worst case (fully expanded tree), it is proportional to the number of nodes in the path. The expansion of collapsed nodes can temporarily increase memory usage [S1, unofficial].
++*   **Strengths:** Simple recursive structure; handles dynamic insertion and deletion (with proper delete implementation); supports variable density via sparse representation.
++*   **Limitations:** Recursive nature may cause stack overflow for very deep trees if not implemented iteratively; cache performance can be poor due to pointer chasing (mitigated by Morton codes in siblings [S2, unofficial]); expansion of collapsed nodes can be costly if done frequently [S1, unofficial].
++*   **When to use:** When dynamic modification of the voxel grid is required (e.g., sculpting, editing) and the data is sparse [S1, S2, unofficial].
++*   **When not to use:** When the grid is dense and static, or when cache locality is critical without additional linearization techniques [S2, unofficial].
+ 
+ ## Background
+-
+-### Origin
+-The method is derived from implementations of Sparse Voxel Octrees (SVO) for real-time rendering and voxel editing [S1, S2, unofficial]. The specific logic for handling collapse/expand states and the pitfalls of null-color removal are documented in community-driven development projects [S1, S2, unofficial].
+-
+-### History
+-SVOs were popularized for ray marching in real-time graphics [G]. The specific "placeVoxel" implementation with explicit collapse handling appears in modern web-based voxel editors and tools [S1, S2, unofficial].
+-
+-### Usage
+-Used in voxel-based games, CAD tools, and scientific visualization where dynamic modification of volumetric data is required [S1, S2, unofficial].
++The method originates from implementations of Sparse Voxel Octrees (SVO) for real-time rendering and voxel editing. The specific pitfalls regarding collapsed nodes and null-color deletion were highlighted in community discussions on GitHub regarding the Voxelarchitect project [S1, unofficial]. The recursive structure is a standard approach in octree manipulation, adapted here for voxel color/value storage [S1, S2, unofficial]. The variant using edge data for construction is described in research on volumetric terrain rendering [S3].
+ 
+ ## Sources
+-
+ [S1] Voxelarchitect day 226, https://github.com/Shubham-cyber-prog/100-Days-Of-Web-Development-ECWoC26/pull/1699, fetched 2026-10-25 (unofficial)
+-[S2] GitHub - saurlax/model_voxelizer: A 3D model voxelization tool that ..., https://github.com/saurlax/model_voxelizer, fetched 2026-10-30 (unofficial)+[S2] GitHub - saurlax/model_voxelizer: A 3D model voxelization tool that ..., https://github.com/saurlax/model_voxelizer, fetched 2026-10-30 (unofficial)
++[S3] Volumetric Terrain Rendering with WebGL, https://doi.org/10.2352/issn.2470-1173.2018.06.mobmu-136, fetched 2026-10-26

@@ -3,103 +3,103 @@
 Also called: parallel-volume-renderer raycasting, skip's raycaster
 
 ## Overview
-A CPU-based direct volume ray casting algorithm that accelerates traversal using a brick-based data layout and computes illumination via Phong shading with gradient estimation. It differs from its parent [Window/Level Volume Raycasting with Bricking](2775-window-level-volume-raycasting-with-bricking.md) by explicitly integrating Phong shading and gradient calculation into the ray loop, and from its sibling [Octree-based Void Culling](3828-octree-based-void-culling.md) by relying on fixed-size bricks and distance volume tables rather than hierarchical void culling for acceleration.
+A CPU-based raycasting algorithm for volume rendering that uses a brick-based data layout for acceleration, computes gradients for Phong shading, and accumulates color and opacity using front-to-back blending [S1, unofficial]. It differs from its parent [Window/Level Volume Raycasting with Bricking](2775-window-level-volume-raycasting-with-bricking.md) by explicitly integrating Phong shading and gradient calculation into the ray loop, and from its sibling [Octree-based Void Culling](3828-octree-based-void-culling.md) by relying on fixed-size bricks and distance volume tables rather than hierarchical void culling for acceleration [S1, unofficial].
 
 ## How it works
 ### Inputs and Outputs
 **Inputs:**
-- Volume data stored in a brick-based layout (`data.data2`) or linear layout (`data.data`).
-- Camera parameters: eye position (`from`), target (`to`), up vector (`up`), zoom, near plane (`n`), far plane (`f`).
-- Screen dimensions: `scr_x`, `scr_y`.
-- Opacity transfer function: Lookup Table (`edt_lut[4096]`).
-- Shading parameters: Light direction (`L`), view direction (`V`), ambient/diffuse/specular coefficients (via `CShader`).
-- Acceleration structures: Distance volume tables (`incrTable`, `incr`) with `MAX_DISTANCE = 255`.
+- Volume data stored in a brick-based layout (`data.data2`) or linear layout (`data.data`) [S1, unofficial].
+- Camera parameters: eye position (`from`), target (`to`), up vector (`up`), zoom, near plane (`n`), far plane (`f`) [S1, unofficial].
+- Screen dimensions: `scr_x`, `scr_y` [S1, unofficial].
+- Opacity transfer function: Lookup Table (`edt_lut[4096]`) [S1, unofficial].
+- Shading parameters: Light direction (`L`), view direction (`V`), ambient/diffuse/specular coefficients (via `CShader`) [S1, unofficial].
+- Acceleration structures: Distance volume tables (`incrTable`, `incr`) with `MAX_DISTANCE = 255` [S1, unofficial].
 
 **Outputs:**
-- Rendered image texture (`textura.data`), typically RGB or RGBA.
+- Rendered image texture (`textura.data`), typically RGB or RGBA [S1, unofficial].
 
 ### Data Structures
 **Image Struct:**
-- `sirka` (unsigned long): Width.
-- `vyska` (unsigned long): Height.
-- `data` (UINT8*): Pixel data. Size is `sirka * vyska * 4` for RGBA or `sirka * vyska * 3` for RGB (Linux version).
+- `sirka` (unsigned long): Width [S1, unofficial].
+- `vyska` (unsigned long): Height [S1, unofficial].
+- `data` (UINT8*): Pixel data. Size is `sirka * vyska * 4` for RGBA or `sirka * vyska * 3` for RGB (Linux version) [S1, unofficial].
 
 **CRaycaster Class Fields:**
-- `scr_x`, `scr_y` (UINT16): Window dimensions.
-- `kamera` (CKamera): Camera state.
-- `data` (CData): Volume data container.
-- `cam_u`, `cam_v` (float): Ray direction components in camera space.
-- `ray_start` (CVektor3): Ray origin.
-- `delta` (CVektor3): Step vector.
-- `samplingRate` (float): Default 1.0.
-- `poc_vz`, `max_vz` (UINT16): Sample counters.
-- `typ_dat` (UINT8): Bit depth of volume data.
-- `r` (CRay): Current ray state.
-- `tmin`, `tmax` (float): Entry/exit distances.
-- `mi`, `mj`, `mk` (UINT16): Current brick indices.
-- `offset` (CVektor3): Brick offset.
-- `vystup` (CVektor3): Exit point.
-- `v[8]` (UINT32): Indices of the 8 corners of the current brick.
-- `svetlo` (CSvetlo): Light source.
-- `intenzita` (float): Accumulated intensity.
-- `pozadie` (float): Background intensity.
-- `farba` (float): Interpolated color.
-- `acc_color` (float): Accumulated color.
-- `shader` (CShader): Shading model parameters.
-- `L`, `V`, `N` (CVektor3): Light, View, Normal vectors.
-- `c_out` (CFarba): Output color from shading.
-- `oa`, `ob` (UINT16): Opacity thresholds.
-- `foa`, `fob` (float): Opacity coverage.
-- `acc_opacity` (float): Accumulated opacity.
-- `edt_lut[4096]` (float): Opacity LUT.
-- `incrTable[MAX_DISTANCE]` (CVektor3): Distance volume table for positions.
-- `incr[MAX_DISTANCE]` (int): Distance volume table for steps.
-- `textura` (Image): Output texture.
+- `scr_x`, `scr_y` (UINT16): Window dimensions [S1, unofficial].
+- `kamera` (CKamera): Camera state [S1, unofficial].
+- `data` (CData): Volume data container [S1, unofficial].
+- `cam_u`, `cam_v` (float): Ray direction components in camera space [S1, unofficial].
+- `ray_start` (CVektor3): Ray origin [S1, unofficial].
+- `delta` (CVektor3): Step vector [S1, unofficial].
+- `samplingRate` (float): Default 1.0 [S1, unofficial].
+- `poc_vz`, `max_vz` (UINT16): Sample counters [S1, unofficial].
+- `typ_dat` (UINT8): Bit depth of volume data [S1, unofficial].
+- `r` (CRay): Current ray state [S1, unofficial].
+- `tmin`, `tmax` (float): Entry/exit distances [S1, unofficial].
+- `mi`, `mj`, `mk` (UINT16): Current brick indices [S1, unofficial].
+- `offset` (CVektor3): Brick offset [S1, unofficial].
+- `vystup` (CVektor3): Exit point [S1, unofficial].
+- `v[8]` (UINT32): Indices of the 8 corners of the current brick [S1, unofficial].
+- `svetlo` (CSvetlo): Light source [S1, unofficial].
+- `intenzita` (float): Accumulated intensity [S1, unofficial].
+- `pozadie` (float): Background intensity [S1, unofficial].
+- `farba` (float): Interpolated color [S1, unofficial].
+- `acc_color` (float): Accumulated color [S1, unofficial].
+- `shader` (CShader): Shading model parameters [S1, unofficial].
+- `L`, `V`, `N` (CVektor3): Light, View, Normal vectors [S1, unofficial].
+- `c_out` (CFarba): Output color from shading [S1, unofficial].
+- `oa`, `ob` (UINT16): Opacity thresholds [S1, unofficial].
+- `foa`, `fob` (float): Opacity coverage [S1, unofficial].
+- `acc_opacity` (float): Accumulated opacity [S1, unofficial].
+- `edt_lut[4096]` (float): Opacity LUT [S1, unofficial].
+- `incrTable[MAX_DISTANCE]` (CVektor3): Distance volume table for positions [S1, unofficial].
+- `incr[MAX_DISTANCE]` (int): Distance volume table for steps [S1, unofficial].
+- `textura` (Image): Output texture [S1, unofficial].
 
 ### Steps
 1. **Initialization:**
-   - Initialize raycaster with screen dimensions `scr_x`, `scr_y`.
-   - Set camera using `nastavKameru` with parameters `from`, `to`, `up`, `zoom`, `n`, `f`.
-   - Initialize texture with `initTexture`.
-   - Initialize data with `CData`.
-   - Initialize opacity editor with `initOpacEdt` and LUT with `vytvorEdtLut`.
-   - Initialize distance volume tables with `initRadcTables`.
+   - Initialize raycaster with screen dimensions `scr_x`, `scr_y` [S1, unofficial].
+   - Set camera using `nastavKameru` with parameters `from`, `to`, `up`, `zoom`, `n`, `f` [S1, unofficial].
+   - Initialize texture with `initTexture` [S1, unofficial].
+   - Initialize data with `CData` [S1, unofficial].
+   - Initialize opacity editor with `initOpacEdt` and LUT with `vytvorEdtLut` [S1, unofficial].
+   - Initialize distance volume tables with `initRadcTables` [S1, unofficial].
 
 2. **Per-Pixel Setup:**
-   - For each pixel, calculate ray direction components `cam_u`, `cam_v` and start position `ray_start`.
-   - Compute step vector `delta` from camera direction and `samplingRate`.
-   - Initialize accumulation variables: `acc_color = 0`, `acc_opacity = 0`.
-   - Set `poc_vz = 0`.
+   - For each pixel, calculate ray direction components `cam_u`, `cam_v` and start position `ray_start` [S1, unofficial].
+   - Compute step vector `delta` from camera direction and `samplingRate` [S1, unofficial].
+   - Initialize accumulation variables: `acc_color = 0`, `acc_opacity = 0` [S1, unofficial].
+   - Set `poc_vz = 0` [S1, unofficial].
 
 3. **Ray Loop:**
-   - Loop while `poc_vz` is less than `max_vz` (or until ray leaves volume).
-   - Determine current block indices `mi`, `mj`, `mk` using `zistiBlok` or `vratBlok` with current ray position `r.pos`.
-   - Calculate block offset `offset` using `vratOffsetBloku`.
-   - Get data indices `v[0]` to `v[7]` for the 8 corners of the brick containing the sample.
+   - Loop while `poc_vz` is less than `max_vz` (or until ray leaves volume) [S1, unofficial].
+   - Determine current block indices `mi`, `mj`, `mk` using `zistiBlok` or `vratBlok` with current ray position `r.pos` [S1, unofficial].
+   - Calculate block offset `offset` using `vratOffsetBloku` [S1, unofficial].
+   - Get data indices `v[0]` to `v[7]` for the 8 corners of the brick containing the sample [S1, unofficial].
 
 4. **Gradient Computation:**
-   - Compute gradient `N` using `getAnalGrad` with data values from `data.data2` (bricking layout) or `data.data` (linear layout) at indices `v[0]` to `v[7]` and `offset`.
-   - Normalize `N` using `normalizuj`.
-   - Negate `N` (`N = N * -1`).
+   - Compute gradient `N` using `getAnalGrad` with data values from `data.data2` (bricking layout) or `data.data` (linear layout) at indices `v[0]` to `v[7]` and `offset` [S1, unofficial].
+   - Normalize `N` using `normalizuj` [S1, unofficial].
+   - Negate `N` (`N = N * -1`) [S1, unofficial].
 
 5. **Shading and Color:**
-   - Compute color `c_out` using Phong shading: `c_out = tienujPhong(CFarba(0.0f, farba/4095.0f, 0.0f, 1.0f), shader, L, V, N)`.
-   - Extract green channel `farba = c_out.g`.
-   - If no shading or specific condition, `farba = farba/4095.0f * shader.Fa`.
+   - Compute color `c_out` using Phong shading: `c_out = tienujPhong(CFarba(0.0f, farba/4095.0f, 0.0f, 1.0f), shader, L, V, N)` [S1, unofficial].
+   - Extract green channel `farba = c_out.g` [S1, unofficial].
+   - If no shading or specific condition, `farba = farba/4095.0f * shader.Fa` [S1, unofficial].
 
 6. **Accumulation:**
    - Perform front-to-back blending:
      $$acc\_color = acc\_color + farba \cdot \alpha \cdot (1.0f - acc\_opacity)$$
      $$acc\_opacity = acc\_opacity + \alpha \cdot (1.0f - acc\_opacity)$$
-     where $\alpha$ is the opacity of the current sample (from `edt_lut`), `farba` is the color contribution, `acc_color` is the accumulated color, and `acc_opacity` is the accumulated opacity.
-   - Increment `poc_vz`.
+     where $\alpha$ is the opacity of the current sample, `farba` is the color contribution, `acc_color` is the accumulated color, and `acc_opacity` is the accumulated opacity [S1, unofficial].
+   - Increment `poc_vz` [S1, unofficial].
 
 7. **Finalization:**
-   - After loop, set `intenzita = acc_color`.
-   - If ray did not hit data, `intenzita = pozadie`.
-   - Clamp `intenzita` to max 1.0f.
-   - Write to texture: `textura.data[tex] = 0`, `textura.data[tex+1] = 0`, `textura.data[tex+2] = (UINT8)(intenzita * 255.0f)`.
-   - Increment texture pointer `tex += 3`.
+   - After loop, set `intenzita = acc_color` [S1, unofficial].
+   - If ray did not hit data, `intenzita = pozadie` [S1, unofficial].
+   - Clamp `intenzita` to max 1.0f [S1, unofficial].
+   - Write to texture: `textura.data[tex] = 0`, `textura.data[tex+1] = 0`, `textura.data[tex+2] = (UINT8)(intenzita * 255.0f)` [S1, unofficial].
+   - Increment texture pointer `tex += 3` [S1, unofficial].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -150,9 +150,7 @@ def raycast_with_bricking_phong(scr_x, scr_y, camera, volume_data, shader, light
                 # Note: 'farba' here refers to the scalar value from volume data interpolated at current position
                 # Assuming 'farba' is obtained from volume data at ray_pos before this step
                 # In the source, 'farba' is used in tienujPhong. 
-                # We assume 'farba' is the scalar value at current sample point.
-                # The source code snippet shows: c_out = tienujPhong(CFarba(0.0f, farba/4095.0f, 0.0f, 1.0f), shader, L, V, N)
-                # This implies 'farba' is the volume value.
+                # We assume 'farba' is the volume value.
                 
                 # Compute view vector V (from eye to ray_pos)
                 V = normalize(ray_pos - camera.eye)
@@ -190,12 +188,12 @@ def raycast_with_bricking_phong(scr_x, scr_y, camera, volume_data, shader, light
 ```
 
 ### Parameters
-- `MAX_DISTANCE`: Constant defined as 255, representing the maximum jump distance for the ray in the distance volume acceleration structure.
-- `samplingRate`: Float parameter controlling the number of samples taken along the ray. Default value is 1.
+- `MAX_DISTANCE`: Constant defined as 255, representing the maximum jump distance for the ray in the distance volume acceleration structure [S1, unofficial].
+- `samplingRate`: Float parameter controlling the number of samples taken along the ray. Default value is 1 [S1, unofficial].
 
 ### Pitfalls
-- Ray leaving the volume is checked by decrementing `poc_vzr` and breaking if zero. An alternative check using scalar product `skalarsucin(r.dir, vystup-r.pos) < 0.0f` is commented out.
-- Data access violation during camera rotation was fixed in version 1.03. Camera rotation around origin (0,0,0) and distance change via mouse were added.
+- Ray leaving the volume is checked by decrementing `poc_vzr` and breaking if zero. An alternative check using scalar product `skalarsucin(r.dir, vystup-r.pos) < 0.0f` is commented out [S1, unofficial].
+- Data access violation during camera rotation was fixed in version 1.03. Camera rotation around origin (0,0,0) and distance change via mouse were added [S1, unofficial].
 
 ## Operating characteristics
 - **Time Complexity:** Linear with respect to the number of pixels and the number of samples per ray. Acceleration structures (bricks, distance tables) reduce the number of samples processed by skipping empty space.

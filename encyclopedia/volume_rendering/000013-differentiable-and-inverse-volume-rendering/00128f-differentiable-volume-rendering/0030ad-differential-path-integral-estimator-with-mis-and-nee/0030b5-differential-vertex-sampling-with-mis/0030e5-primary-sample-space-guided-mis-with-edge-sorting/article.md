@@ -1,306 +1,204 @@
 # Primary-Sample-Space Guided MIS with Edge Sorting
 
-Also called: Boundary Path Integral Estimation, Primary-Sample-Space Guiding with Multiple Importance Sampling and Edge Sorting, Guided boundary integral estimation, MIS with light and direction sampling, Variance-aware Differentiable Rendering with MIS and Edge Sorting
+Also called: Boundary Path Integral Estimation, Primary-Sample-Space Guiding with Multiple Importance Sampling and Edge Sorting, Guided boundary integral estimation, MIS with light and direction sampling, Primary-Sample-Space Guiding with Multiple Importance Sampling, Variance-aware Differentiable Rendering, Variance-aware Differentiable Rendering with MIS and Edge Sorting
 
 ## Overview
-This method efficiently estimates the boundary component of the gradient integral in differentiable rendering by combining Multiple Importance Sampling (MIS) with primary-sample-space guiding [S1][S2, unofficial]. It addresses the challenge of sampling boundary segments $(x_B, \omega_B)$ in complex illumination and occlusion scenarios where standard light-source sampling fails [S1][S2, unofficial]. Unlike parent methods that may use simple guiding or single sampling strategies, this approach guides two separate 3D primary sample spaces (one for light sampling, one for direction sampling) and combines them via MIS, while using edge sorting to reduce discontinuities in the mapping from primary samples to geometry [S1][S2, unofficial].
+This method estimates the boundary component of the gradient integral in differentiable rendering by combining multiple importance sampling (MIS) with primary-sample-space guiding [S2, unofficial]. It addresses the high variance in gradient estimates caused by occlusion and complex illumination, which makes standard light sampling ineffective for boundary segments [S2, unofficial]. Unlike its parent method, [Differential Vertex Sampling with MIS](6338-differential-vertex-sampling-with-mis.md), which uses MIS to combine differential vertex sampling with standard BRDF sampling, this method uses MIS to combine two distinct strategies for sampling the boundary segment's direction: light sampling and direct direction sampling [S2, unofficial]. It sets itself apart from baseline methods like [Zhang et al. (2020)](6338-differential-vertex-sampling-with-mis.md) by producing significantly cleaner gradient estimates at equal time and sample counts, particularly around shadow boundaries [S2, unofficial].
 
 ## How it works
-
-### Inputs and Outputs
-**Inputs:**
-*   Scene geometry $M(\theta)$ defined by parameters $\theta$.
-*   Light sources and detector configuration.
-*   Target functions $\tilde{F}_{\text{light}}$ and $\tilde{F}_{\text{dir}}$ derived from the boundary integrand [S1][S2, unofficial].
-*   Approximations of source and detector contributions $\tilde{h}^S$ and $\tilde{h}^D$ (e.g., via photon mapping) [S1].
-
-**Outputs:**
-*   Unbiased estimators for the boundary integral gradient component [S1][S2, unofficial].
-*   Probability densities $p_{\text{light}}$ and $p_{\text{dir}}$ for sampling [S1][S2, unofficial].
+**Inputs:** A polygonal mesh $M$, a camera, a light environment, and target functions $\tilde{F}_{\text{light}}$ and $\tilde{F}_{\text{dir}}$ derived from the boundary integral formulation [S2, unofficial].
+**Outputs:** Unbiased estimators for the boundary integral component of the gradient [S2, unofficial].
 
 ### Data Structures
-1.  **Edge Chains:** A list of chains, where each chain is an ordered list of mesh edges $(v_i, v_{i+1})$. Each chain corresponds to a continuous interval in the primary sample space $u_1$ [S1][S2, unofficial].
-2.  **Kd-Trees:** For each edge chain (interval $[a, b)$), a Kd-tree partitions the subspace $[a, b) \times [0, 1)^2$ of the primary sample space [S1].
-    *   **Node Layout:** Each node $r$ stores an axis-aligned bounding box (aabb) in the primary sample space and a trilinear fit coefficient vector for $\tilde{F}$ [S1].
-    *   **Leaf Nodes:** Store the integrated probability mass of the trilinear fit over their aabb [S1].
-3.  **Global Leaf List:** A flat list of all leaf nodes from all Kd-trees, used for discrete distribution sampling [S1].
-4.  **Normalization Constants:** $c_{\text{light}}$ and $c_{\text{dir}}$, computed as the sum of probability masses of all leaf nodes in their respective Kd-trees [S1][S2, unofficial].
+1.  **Kd-trees:** Two Kd-trees are built during preprocessing, one for $\tilde{F}_{\text{light}}$ and one for $\tilde{F}_{\text{dir}}$. Each leaf node stores a probability mass [S1].
+2.  **Edge Chains:** A list of chains, where each chain is a sequence of mesh edges constructed via edge sorting [S2, unofficial].
 
-### Preprocessing Steps
-1.  **Edge Sorting:**
-    *   Construct chains of mesh edges to ensure continuity of $x_B(u_1)$ [S2, unofficial].
-    *   Start with an arbitrary edge $(v_0, v_1)$. Initialize chain with this edge. Set $v_{\text{prev}} = v_0, v_{\text{cur}} = v_1$ [S2, unofficial].
+### Preprocessing
+1.  **Edge Sorting:** To reduce discontinuities in the mapping from primary samples to mesh edges, build chains of mesh edges [S2, unofficial].
+    *   Start with an arbitrary edge $(v_0, v_1)$.
+    *   Initialize chain with this edge. Set $v_{\text{prev}} = v_0, v_{\text{cur}} = v_1$.
     *   While $v_{\text{cur}}$ has unused edges:
-        *   Select an unused edge $(v_{\text{cur}}, v_{\text{next}})$ such that the direction of $(v_{\text{cur}}, v_{\text{next}})$ is closest to the direction of $(v_{\text{prev}}, v_{\text{cur}})$ [S2, unofficial].
-        *   Append $(v_{\text{cur}}, v_{\text{next}})$ to the chain.
+        *   Select an unused edge $(v_{\text{cur}}, v_{\text{next}})$ such that the direction of $(v_{\text{cur}}, v_{\text{next}})$ is closest to $(v_{\text{prev}}, v_{\text{cur}})$ [S2, unofficial].
+        *   Append $(v_{\text{cur}}, v_{\text{next}})$ to chain.
         *   Update $v_{\text{prev}} = v_{\text{cur}}, v_{\text{cur}} = v_{\text{next}}$ [S2, unofficial].
-    *   Repeat for all edges to form complete chains [S2, unofficial].
-2.  **Pre-partitioning:**
-    *   Partition the first dimension of the primary sample space $[0, 1)$ into intervals, where each interval corresponds to one edge chain. This ensures $x_B(u_1)$ is continuous within each interval [S1].
-3.  **Kd-Tree Construction:**
-    *   For each interval $[a, b)$ corresponding to a chain, build a Kd-tree for the subspace $[a, b) \times [0, 1)^2$ [S1].
-    *   Use `BuildTree` (see pseudocode) to recursively subdivide nodes based on fitting error of $\tilde{F}$ [S1].
-    *   Maintain a global list of all leaf nodes [S1].
-    *   Compute normalization constants $c_{\text{light}}$ and $c_{\text{dir}}$ by summing the probability masses of all leaf nodes in their respective trees [S1][S2, unofficial].
+    *   Repeat for all edges to form a set of chains [S2, unofficial].
+2.  **Guiding:** Apply primary-sample-space guiding to $\tilde{F}_{\text{light}}$ and $\tilde{F}_{\text{dir}}$ to build the Kd-trees [S2, unofficial].
+3.  **Normalization:** Compute normalization constants $c_{\text{light}}$ and $c_{\text{dir}}$ by summing the probability masses stored in all leaf nodes of the respective Kd-trees [S1].
 
-### Render Time Steps
-1.  **Draw Samples:**
-    *   Draw two sets of primary samples:
-        *   $(u_1^{\text{light}}, \mathbf{u}_2^{\text{light}})$ using density $p_{\text{light}}$ [S1][S2, unofficial].
-        *   $(u_1^{\text{dir}}, \mathbf{u}_2^{\text{dir}})$ using density $p_{\text{dir}}$ [S1][S2, unofficial].
-2.  **Evaluate Target Functions:**
-    *   Compute $\tilde{F}_{\text{light}}(u_1^{\text{light}}, \mathbf{u}_2^{\text{light}})$ and $\tilde{F}_{\text{dir}}(u_1^{\text{dir}}, \mathbf{u}_2^{\text{dir}})$ [S1][S2, unofficial].
-    *   These are calculated in $O(1)$ time using the trilinear fits from the selected Kd-tree nodes [S1][S2, unofficial].
-3.  **Compute Estimators:**
-    *   Compute two unbiased estimators:
-        $$ E_{\text{light}} = \frac{\tilde{F}_{\text{light}}(u_1^{\text{light}}, \mathbf{u}_2^{\text{light}})}{p_{\text{light}}(u_1^{\text{light}}, \mathbf{u}_2^{\text{light}})} $$
-        $$ E_{\text{dir}} = \frac{\tilde{F}_{\text{dir}}(u_1^{\text{dir}}, \mathbf{u}_2^{\text{dir}})}{p_{\text{dir}}(u_1^{\text{dir}}, \mathbf{u}_2^{\text{dir}})} $$
-        [S1][S2, unofficial]
-4.  **Weight with MIS:**
-    *   Rewrite densities with respect to $x_B$ and $\omega_B$ using Jacobians $J_{\text{light}}^B$ and $J_{\text{dir}}^B$:
-        $$ \hat{p}_{\text{light}}(u_1, \mathbf{u}_2) := \frac{p_{\text{light}}(u_1, \mathbf{u}_2)}{J_{\text{light}}^B(u_1, \mathbf{u}_2)} $$
-        $$ \hat{p}_{\text{dir}}(u_1, \mathbf{u}_2) := \frac{p_{\text{dir}}(u_1, \mathbf{u}_2)}{J_{\text{dir}}^B(u_1, \mathbf{u}_2)} $$
-        [S1][S2, unofficial]
-    *   Apply the balance heuristic to weight the contributions:
-        $$ w_{\text{light}} = \frac{\hat{p}_{\text{light}}(\mathbf{u}^{\text{light}})}{\hat{p}_{\text{light}}(\mathbf{u}^{\text{light}}) + \hat{p}_{\text{dir}}(\mathbf{u}^{\text{light}})} $$
-        $$ w_{\text{dir}} = \frac{\hat{p}_{\text{dir}}(\mathbf{u}^{\text{dir}})}{\hat{p}_{\text{light}}(\mathbf{u}^{\text{dir}}) + \hat{p}_{\text{dir}}(\mathbf{u}^{\text{dir}})} $$
-        [S1][S2, unofficial]
-    *   Final estimator: $w_{\text{light}} E_{\text{light}} + w_{\text{dir}} E_{\text{dir}}$ [S1][S2, unofficial].
+### Render Time
+1.  **Target Functions:** Calculate the target functions for light and direction sampling [S2, unofficial]:
+    $$ \tilde{F}_{\text{light}}(\mathbf{u}_1, \mathbf{u}_2) = \left| \hat{f}^B(\mathbf{p}_0^S, \mathbf{p}_0^D) \right|_{\text{light}}(\mathbf{u}_1, \mathbf{u}_2) \hat{h}^S(\mathbf{p}_0^S, \mathbf{p}_0^D) \hat{h}^D(\mathbf{p}_0^S, \mathbf{p}_0^D) $$
+    $$ \tilde{F}_{\text{dir}}(u_1, \mathbf{u}_2) = \left| \tilde{F}^B(\mathbf{p}_0^D, \mathbf{p}_0^D) \right| F_{\text{dir}}^B(u_1, \mathbf{u}_2) \tilde{h}^S(\mathbf{p}_0^D, \mathbf{p}_0^D) \tilde{h}^D(\mathbf{p}_0^D, \mathbf{p}_0^D) $$
+    where $\mathbf{p}_0^S$ and $\mathbf{p}_0^D$ are determined by the boundary segment direction $\omega_B$ [S2, unofficial]. Note that $\mathbf{p}_0^S$ and $\mathbf{p}_0^D$ take different values in these equations for the same primary sample $(u_1, \mathbf{u}_2)$ because they are determined by different $\omega_B$ mappings [S2, unofficial].
+2.  **Sampling:** Draw two sets of primary samples:
+    *   $(u_1^{\text{light}}, \mathbf{u}_2^{\text{light}})$ from density $p_{\text{light}}$ (guided by $\tilde{F}_{\text{light}}$) [S2, unofficial].
+    *   $(u_1^{\text{dir}}, \mathbf{u}_2^{\text{dir}})$ from density $p_{\text{dir}}$ (guided by $\tilde{F}_{\text{dir}}$) [S2, unofficial].
+3.  **Estimators:** Compute two unbiased estimators of the boundary integral [S2, unofficial]:
+    $$ E_{\text{light}} = \frac{\tilde{F}_{\text{light}}(u_1^{\text{light}}, \mathbf{u}_2^{\text{light}})}{p_{\text{light}}(u_1^{\text{light}}, \mathbf{u}_2^{\text{light}})} $$
+    $$ E_{\text{dir}} = \frac{\tilde{F}_{\text{dir}}(u_1^{\text{dir}}, \mathbf{u}_2^{\text{dir}})}{p_{\text{dir}}(u_1^{\text{dir}}, \mathbf{u}_2^{\text{dir}})} $$
+4.  **Rewritten Densities:** Rewrite the probability densities with respect to $x_B$ and $\omega_B$ using Jacobians $J_{\text{light}}^B$ and $J_{\text{dir}}^B$ [S2, unofficial]:
+    $$ \hat{p}_{\text{light}}(u_1, \mathbf{u}_2) := \frac{p_{\text{light}}(u_1, \mathbf{u}_2)}{J_{\text{light}}^B(u_1, \mathbf{u}_2)} $$
+    $$ \hat{p}_{\text{dir}}(u_1, \mathbf{u}_2) := \frac{p_{\text{dir}}(u_1, \mathbf{u}_2)}{J_{\text{dir}}^B(u_1, \mathbf{u}_2)} $$
+5.  **Approximation:** Approximate the rewritten densities using the target functions and normalization constants [S1]:
+    $$ \hat{p}_{\text{light}}(u_1, \mathbf{u}_2) \approx \frac{\tilde{F}_{\text{light}}(u_1, \mathbf{u}_2)}{c_{\text{light}} J_{\text{light}}^B(u_1, \mathbf{u}_2)} $$
+    $$ \hat{p}_{\text{dir}}(u_1, \mathbf{u}_2) \approx \frac{\tilde{F}_{\text{dir}}(u_1, \mathbf{u}_2)}{c_{\text{dir}} J_{\text{dir}}^B(u_1, \mathbf{u}_2)} $$
+    This approximation allows $O(1)$ calculation of the densities [S1].
+6.  **MIS Weighting:** Apply the balance heuristic to weight the contributions [S2, unofficial]:
+    $$ w_{\text{light}} = \frac{\hat{p}_{\text{light}}(\mathbf{u}^{\text{light}})}{\hat{p}_{\text{light}}(\mathbf{u}^{\text{light}}) + \hat{p}_{\text{dir}}(\mathbf{u}^{\text{light}})} $$
+    $$ w_{\text{dir}} = \frac{\hat{p}_{\text{dir}}(\mathbf{u}^{\text{dir}})}{\hat{p}_{\text{light}}(\mathbf{u}^{\text{dir}}) + \hat{p}_{\text{dir}}(\mathbf{u}^{\text{dir}})} $$
+    The final estimator is $w_{\text{light}} E_{\text{light}} + w_{\text{dir}} E_{\text{dir}}$ [S2, unofficial].
 
 ### Pseudocode
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Preprocessing Phase
-
-def build_edge_chains(mesh):
-    """
-    Constructs chains of mesh edges to ensure continuity of x_B(u_1).
-    Returns a list of chains, where each chain is a list of edges (v_prev, v_cur).
-    """
+def preprocess(mesh, F_light_func, F_dir_func):
+    # Edge Sorting
     chains = []
-    unused_edges = set(mesh.edges)
-    
+    unused_edges = get_all_edges(mesh)
     while unused_edges:
-        # Start with an arbitrary unused edge
-        v0, v1 = unused_edges.pop()
-        chain = [(v0, v1)]
-        v_prev, v_cur = v0, v1
-        
-        while True:
-            # Find unused edges connected to v_cur
-            neighbors = [e for e in unused_edges if e[0] == v_cur or e[1] == v_cur]
-            if not neighbors:
-                break
-            
-            # Select neighbor v_next such that direction (v_cur, v_next) is closest to (v_prev, v_cur)
-            dir_prev = normalize(v_cur - v_prev)
-            best_v_next = None
-            best_dot = -1.0
-            best_edge = None
-            
-            for e in neighbors:
-                if e[0] == v_cur:
-                    v_next = e[1]
-                else:
-                    v_next = e[0]
-                
-                dir_next = normalize(v_next - v_cur)
-                dot = dot_product(dir_prev, dir_next)
-                
-                if dot > best_dot:
-                    best_dot = dot
-                    best_v_next = v_next
-                    best_edge = e
-            
-            # Append to chain and remove from unused
-            chain.append((v_cur, best_v_next))
-            unused_edges.remove(best_edge)
-            v_prev, v_cur = v_cur, best_v_next
-            
+        start_edge = unused_edges.pop()
+        chain = [start_edge]
+        v_prev, v_cur = start_edge
+        while v_cur has unused edges:
+            # Select unused edge (v_cur, v_next) closest in direction to (v_prev, v_cur)
+            candidates = get_unused_edges_from(v_cur)
+            v_next = argmin(lambda e: angle_between(e.direction, chain[-1].direction), candidates)
+            edge = (v_cur, v_next)
+            chain.append(edge)
+            unused_edges.remove(edge)
+            v_prev, v_cur = v_cur, v_next
         chains.append(chain)
-        
-    return chains
+    
+    # Build Kd-trees and compute normalization constants
+    kd_light = build_kd_tree(F_light_func, chains)
+    kd_dir = build_kd_tree(F_dir_func, chains)
+    c_light = sum(kd_light.leaf_nodes)
+    c_dir = sum(kd_dir.leaf_nodes)
+    return kd_light, kd_dir, c_light, c_dir
 
-def build_kd_tree(aabb, epsilon, samples_per_fit=32):
-    """
-    Recursively builds a Kd-tree to approximate F_tilde within aabb.
-    Returns a node structure.
-    """
-    # Compute first-order (trilinear) fit of F_tilde within aabb
-    # using samples_per_fit random samples drawn from aabb
-    fit, err = compute_trilinear_fit(aabb, samples_per_fit)
+def render(kd_light, kd_dir, c_light, c_dir, mesh, camera, light_env):
+    # Sample from guided densities
+    u1_light, u2_light = sample_from_kd(kd_light)
+    u1_dir, u2_dir = sample_from_kd(kd_dir)
     
-    if err <= epsilon:
-        # Leaf node
-        mass = integrate_trilinear_fit(fit, aabb)
-        return LeafNode(aabb, fit, mass)
-    else:
-        # Internal node: split along axis with max fitting error
-        best_axis = argmax([x, y, z], lambda ax: compute_split_error(aabb, ax, samples_per_fit))
-        aabb_1, aabb_2 = split_aabb(aabb, best_axis)
-        
-        child_1 = build_kd_tree(aabb_1, epsilon, samples_per_fit)
-        child_2 = build_kd_tree(aabb_2, epsilon, samples_per_fit)
-        
-        return InternalNode(aabb, fit, child_1, child_2)
-
-def preprocess(mesh, epsilon, samples_per_fit=32):
-    """
-    Main preprocessing function.
-    Returns: chains, kd_trees_light, kd_trees_dir, c_light, c_dir, global_leaf_list
-    """
-    chains = build_edge_chains(mesh)
+    # Calculate target functions
+    # Note: p0_S and p0_D depend on omega_B, which differs for light/dir sampling
+    omega_B_light = get_direction_from_light(u1_light, u2_light, mesh, light_env)
+    omega_B_dir = get_direction_from_dir(u1_dir, u2_dir, mesh)
     
-    global_leaf_list = []
-    kd_trees_light = []
-    kd_trees_dir = []
+    p0_S_light, p0_D_light = get_boundary_points(omega_B_light, mesh)
+    p0_S_dir, p0_D_dir = get_boundary_points(omega_B_dir, mesh)
     
-    for chain in chains:
-        # Determine interval [a, b) for this chain in u_1 space
-        a, b = get_interval_for_chain(chain)
-        
-        # Build Kd-tree for light sampling
-        aabb_full = [a, 0, 0, b, 1, 1] # [u1_min, u2_min, u3_min, u1_max, u2_max, u3_max]
-        tree_light = build_kd_tree(aabb_full, epsilon, samples_per_fit)
-        kd_trees_light.append(tree_light)
-        
-        # Build Kd-tree for direction sampling
-        tree_dir = build_kd_tree(aabb_full, epsilon, samples_per_fit)
-        kd_trees_dir.append(tree_dir)
-        
-        # Collect leaves
-        collect_leaves(tree_light, global_leaf_list)
-        collect_leaves(tree_dir, global_leaf_list)
-        
-    # Compute normalization constants
-    c_light = sum(leaf.mass for leaf in global_leaf_list if leaf.tree_type == 'light')
-    c_dir = sum(leaf.mass for leaf in global_leaf_list if leaf.tree_type == 'dir')
+    F_light = abs(F_hat_B(p0_S_light, p0_D_light)) * h_hat_S(p0_S_light, p0_D_light) * h_hat_D(p0_S_light, p0_D_light)
+    F_dir = abs(F_tilde_B(p0_D_dir, p0_D_dir)) * F_dir_B(u1_dir, u2_dir) * h_tilde_S(p0_D_dir, p0_D_dir) * h_tilde_D(p0_D_dir, p0_D_dir)
     
-    return chains, kd_trees_light, kd_trees_dir, c_light, c_dir, global_leaf_list
-
-# Render Time Phase
-
-def sample_boundary_segment(chains, kd_trees_light, kd_trees_dir, c_light, c_dir, global_leaf_list):
-    """
-    Draws samples and computes the MIS estimator.
-    """
-    # 1. Sample from Light Strategy
-    # Select a leaf node from global_leaf_list (light trees) with probability proportional to mass
-    leaf_light = select_leaf_with_replacement(global_leaf_list_light, lambda l: l.mass)
+    # Compute estimators
+    p_light = evaluate_kd(kd_light, u1_light, u2_light)
+    p_dir = evaluate_kd(kd_dir, u1_dir, u2_dir)
     
-    # Draw primary samples (u1_light, u2_light) using inversion method based on leaf_light's fit
-    u1_light, u2_light = sample_from_trilinear_fit(leaf_light.fit, leaf_light.aabb)
+    E_light = F_light / p_light
+    E_dir = F_dir / p_dir
     
-    # Compute target function F_tilde_light
-    # p0S and p0D are determined by x_B(u1_light) and w_B(u2_light)
-    x_B_light = map_u1_to_xB(u1_light, chains)
-    w_B_light = map_u2_to_wB(u2_light, 'light')
-    p0S_light, p0D_light = compute_path_vertices(x_B_light, w_B_light)
+    # Compute Jacobians and approximate densities
+    J_light = compute_jacobian_light(u1_light, u2_light, omega_B_light)
+    J_dir = compute_jacobian_dir(u1_dir, u2_dir, omega_B_dir)
     
-    F_tilde_light = compute_F_tilde_light(p0S_light, p0D_light, x_B_light, w_B_light)
+    p_hat_light = F_light / (c_light * J_light)
+    p_hat_dir = F_dir / (c_dir * J_dir)
     
-    # Compute density p_light(u1_light, u2_light)
-    # Approximate using F_tilde_light and normalization constant
-    J_light = compute_jacobian_light(u1_light, u2_light)
-    p_light = F_tilde_light / (c_light * J_light)
+    # MIS weights
+    w_light = p_hat_light / (p_hat_light + p_hat_light) # Note: Source uses p_hat_light for both samples in weight calculation for light sample? 
+    # Correction based on Eq 3.16: weight for light sample uses p_hat_light(u_light) and p_hat_dir(u_light)
+    # However, u_light and u_dir are different samples. The balance heuristic typically uses the PDFs evaluated at the *current* sample.
+    # Eq 3.16 shows: w_light = p_hat_light(u_light) / (p_hat_light(u_light) + p_hat_dir(u_light))
+    # This implies we evaluate p_hat_dir at u_light? Or is it a typo in source?
+    # Source text: "weight for light sample is p_hat_light(u_light) / (p_hat_light(u_light) + p_hat_dir(u_light))"
+    # This suggests evaluating the *other* PDF at the *current* sample's coordinates.
     
-    # 2. Sample from Direction Strategy
-    leaf_dir = select_leaf_with_replacement(global_leaf_list_dir, lambda l: l.mass)
-    u1_dir, u2_dir = sample_from_trilinear_fit(leaf_dir.fit, leaf_dir.aabb)
+    w_light = p_hat_light / (p_hat_light + (F_light / (c_dir * J_light))) # Approximating p_hat_dir at u_light using F_light? 
+    # Actually, Eq 3.17 says p_hat approx F / (c * J). 
+    # So p_hat_dir(u_light) approx F_light(u_light) / (c_dir * J_dir(u_light))? 
+    # But F_dir is defined for direction sampling. 
+    # Let's stick to the explicit formula in Eq 3.16 and 3.17.
     
-    x_B_dir = map_u1_to_xB(u1_dir, chains)
-    w_B_dir = map_u2_to_wB(u2_dir, 'dir')
-    p0S_dir, p0D_dir = compute_path_vertices(x_B_dir, w_B_dir)
+    # Re-reading Eq 3.16:
+    # w_light = p_hat_light(u_light) / (p_hat_light(u_light) + p_hat_dir(u_light))
+    # w_dir = p_hat_dir(u_dir) / (p_hat_light(u_dir) + p_hat_dir(u_dir))
     
-    F_tilde_dir = compute_F_tilde_dir(p0S_dir, p0D_dir, x_B_dir, w_B_dir)
+    # We need p_hat_dir(u_light). Using approximation:
+    p_hat_dir_at_light = F_light / (c_dir * J_light) # Assuming F_light is the target for the domain? 
+    # Wait, F_light and F_dir are different functions. 
+    # The source says: "p_hat_light(u) approx F_light(u) / (c_light J_light(u))"
+    # It does not explicitly say how to evaluate p_hat_dir at u_light. 
+    # However, in MIS, you evaluate all PDFs at the current sample.
+    # So we need p_hat_dir(u_light). 
+    # The source approximation Eq 3.17 is specific to the target function.
+    # If we are at u_light, we are in the domain of light sampling.
+    # Does p_hat_dir(u_light) make sense? Yes, it's the density of the dir sampler evaluated at the light sample.
+    # But F_dir(u_light) might be 0 or undefined if u_light is not a valid dir sample?
+    # The source notes: "p_hat_light and p_hat_dir are approximately proportional to F_light and F_dir".
+    # So p_hat_dir(u) approx F_dir(u) / (c_dir J_dir(u)).
+    # But u_light is drawn from p_light. 
+    # Let's assume we evaluate F_dir at u_light.
     
-    J_dir = compute_jacobian_dir(u1_dir, u2_dir)
-    p_dir = F_tilde_dir / (c_dir * J_dir)
+    p_hat_dir_at_light = F_dir(u_light, u2_light) / (c_dir * J_dir(u_light, u2_light)) # J_dir might be different?
+    # The source Eq 3.15 defines J_light and J_dir.
+    # Eq 3.17 approximates p_hat_light using F_light and J_light.
+    # It approximates p_hat_dir using F_dir and J_dir.
+    # So to get p_hat_dir(u_light), we use F_dir(u_light) and J_dir(u_light).
     
-    # 3. Compute Estimators
-    E_light = F_tilde_light / p_light
-    E_dir = F_tilde_dir / p_dir
+    # However, F_dir is defined in Eq 3.13. It depends on omega_B_dir.
+    # omega_B_dir is determined by u2_dir.
+    # But here we are at u_light.
+    # This implies we need to map u_light to a direction to evaluate F_dir?
+    # Or does F_dir depend only on u1, u2?
+    # Eq 3.13: F_dir(u1, u2) = ... F_dir_B(u1, u2) ...
+    # It seems F_dir is a function of u1, u2.
     
-    # 4. Weight with MIS
-    # Rewrite densities with respect to x_B and w_B
-    p_hat_light = p_light / J_light
-    p_hat_dir = p_dir / J_dir
+    # Let's implement the approximation as stated.
     
-    w_light = p_hat_light / (p_hat_light + p_hat_dir) # Note: p_hat_dir evaluated at u_light? 
-    # The source says: weight for light sample is p_hat_light(u_light) / (p_hat_light(u_light) + p_hat_dir(u_light))
-    # However, p_hat_dir is defined for the direction sampling strategy. 
-    # The balance heuristic typically uses the density of the *other* strategy evaluated at the *current* sample.
-    # So for E_light, we need p_hat_dir(u_light).
-    # But p_hat_dir was generated from u_dir. 
-    # The source [S1] Eq 3.16 says:
-    # weight for light sample is p_hat_light(u_light) / (p_hat_light(u_light) + p_hat_dir(u_light))
-    # This implies we must evaluate p_hat_dir at u_light.
+    p_hat_dir_at_light = F_dir(u1_light, u2_light) / (c_dir * J_dir(u1_light, u2_light))
+    p_hat_light_at_dir = F_light(u1_dir, u2_dir) / (c_light * J_light(u1_dir, u2_dir))
     
-    # Evaluate p_hat_dir at u_light
-    # We need to find the leaf for u_light in the dir tree and get its fit
-    leaf_dir_for_u_light = find_leaf_for_sample(u1_dir, u2_dir, kd_trees_dir) # This is wrong, u_light is different
-    # Correct: Find leaf in dir tree corresponding to u_light
-    leaf_dir_at_u_light = find_leaf_for_sample(u1_light, u2_light, kd_trees_dir)
-    F_tilde_dir_at_u_light = evaluate_trilinear_fit(leaf_dir_at_u_light.fit, u1_light, u2_light)
-    J_dir_at_u_light = compute_jacobian_dir(u1_light, u2_light)
-    p_hat_dir_at_u_light = F_tilde_dir_at_u_light / (c_dir * J_dir_at_u_light)
-    
-    w_light = p_hat_light / (p_hat_light + p_hat_dir_at_u_light)
-    
-    # Similarly for E_dir
-    leaf_light_at_u_dir = find_leaf_for_sample(u1_dir, u2_dir, kd_trees_light)
-    F_tilde_light_at_u_dir = evaluate_trilinear_fit(leaf_light_at_u_dir.fit, u1_dir, u2_dir)
-    J_light_at_u_dir = compute_jacobian_light(u1_dir, u2_dir)
-    p_hat_light_at_u_dir = F_tilde_light_at_u_dir / (c_light * J_light_at_u_dir)
-    
-    w_dir = p_hat_dir / (p_hat_light_at_u_dir + p_hat_dir)
+    w_light = p_hat_light / (p_hat_light + p_hat_dir_at_light)
+    w_dir = p_hat_dir / (p_hat_light_at_dir + p_hat_dir)
     
     return w_light * E_light + w_dir * E_dir
 ```
 
 ### Parameters
-*   **Fitting Samples:** Number of samples for computing (tri)linear fits of $\tilde{F}$. Typically 32 [S1].
-*   **Error Threshold ($\epsilon$):** Predetermined threshold for Kd-tree subdivision [S1].
-*   **Normalization Constants ($c_{\text{light}}, c_{\text{dir}}$):** Obtained by summing probability masses of all leaf nodes [S1][S2, unofficial].
+*   $c_{\text{light}}, c_{\text{dir}}$: Normalization constants from Kd-tree leaf sums [S1].
+*   Hardware: AMD Ryzen Threadripper Pro 3975WX CPU, Nvidia RTX Titan [S2, unofficial].
 
 ### Edge Cases and Pitfalls
-*   **Occlusion:** Light sampling can produce invalid directions $\omega_B$ if the sampled point on the light source is occluded, causing the boundary segment to penetrate the object [S1][S2, unofficial]. Direction sampling avoids this but may have higher variance near shadow boundaries [S2, unofficial].
-*   **Discontinuities:** Highly discontinuous target functions cause Kd-trees to require large depths, degrading performance. This is primarily caused by discontinuities in $x_B(u_1)$ [S2, unofficial]. Edge sorting mitigates this [S2, unofficial].
-*   **Rough Dielectrics:** Warped-area sampling (WAS) implementation does not support rough dielectric BSDF, requiring diffuse objects for certain evaluations [S2, unofficial]. This method does not have this limitation [S2, unofficial].
-*   **Participating Media:** The method currently supports surface-only light transport. It does not support participating media, where the primary sample space dimensionality increases from 3 to 5 [S2, unofficial].
+*   **Occlusion:** Light sampling can be ineffective for complex illumination (e.g., image-based lighting) because the sampled direction $\omega_B$ may be invalid due to occlusion, causing the boundary segment to penetrate the object [S2, unofficial].
+*   **Discontinuities:** Highly discontinuous target functions cause Kd-trees to require large depths, degrading performance. This is mostly caused by discontinuities of $x_B$ as a function of $u_1$ [S2, unofficial]. Edge sorting mitigates this [S2, unofficial].
+*   **Rough Dielectrics:** Warped-area sampling implementation does not support rough dielectric BSDF, requiring diffuse objects for certain evaluations [S2, unofficial].
+*   **Shadow Boundaries:** Direction sampling results in cleaner overall results but estimated gradients around shadow boundaries become slightly worse [S2, unofficial]. MIS combines both to handle this [S2, unofficial].
+*   **Participating Media:** The technique focuses on surface-only light transport and does not currently support participating media, where the primary-sample space dimensionality increases from three to five [S2, unofficial].
 
 ## Operating characteristics
-
-### Time and Memory Complexity
-*   **Preprocessing:** Building Kd-trees depends on the complexity of $\tilde{F}$ and the error threshold. Memory usage is proportional to the number of leaf nodes. Reported guiding memory ranges from 80 KB to 4 MB depending on scene complexity [S2, unofficial].
-*   **Render Time:** Evaluating $\tilde{F}$ is $O(1)$ [S1]. Sampling involves selecting a leaf node and inverting the fit, also $O(1)$ [S1].
-*   **Performance:** On an AMD Ryzen Threadripper Pro 3975WX CPU and Nvidia RTX Titan, guiding times range from 0.33 s to 1.79 s, and render times from 0.72 s to 17.55 s for various scenes (e.g., Dodoco, Jumpy Dumpty, Klee) [S2, unofficial].
-
-### Strengths and Limitations
-*   **Strengths:** Produces significantly cleaner gradient estimates than Zhang et al.'s method at equal time and sample counts [S2, unofficial]. Faster and lower noise than Warped-Area Sampling (WAS) at equal sample counts [S2, unofficial]. Handles complex illumination and occlusion better than single-strategy methods [S1][S2, unofficial].
-*   **Limitations:** Does not support participating media [S2, unofficial]. Performance degrades if edge sorting is not applied to highly discontinuous meshes [S2, unofficial].
-
-### When to Use
-*   Use for differentiable rendering and inverse-rendering problems involving surface-only light transport [S2, unofficial].
-*   Particularly effective when remeshing can be applied to make input meshes field-aligned, improving edge sorting [S2, unofficial].
-*   Use when high-quality gradient estimates are needed for geometry optimization [S2, unofficial].
+*   **Time Complexity:** $\tilde{F}_{\text{light}}$ and $\tilde{F}_{\text{dir}}$ can be calculated in $O(1)$ time in the approximation equation [S1].
+*   **Memory Complexity:** Guiding memory ranges from 80 KB to 4 MB depending on scene complexity [S2, unofficial].
+*   **Performance:**
+    *   **Dodoco:** 70 target images, 450,000 parameters, batch size 2, 3000 iterations. Guiding memory 4 MB, guiding time 1.34 s, render time 2.59 s, postproc time 0.310 s [S2, unofficial].
+    *   **Jumpy Dumpty:** 140 target images, 60,000 parameters, batch size 2, 520 iterations. Guiding memory 2 MB, guiding time 0.61 s, render time 1.11 s, postproc time 0.016 s [S2, unofficial].
+    *   **Klee:** 40 target images, 60,000 parameters, batch size 1, 200 iterations. Guiding memory 2 MB, guiding time 0.33 s, render time 0.82 s, postproc time 0.016 s [S2, unofficial].
+    *   **Kirby:** 35 target images, 15,000 parameters, batch size 1, 400 iterations. Guiding memory 80 KB, guiding time 0.91 s, render time 3.67 s, postproc time 0.017 s [S2, unofficial].
+    *   **Bunny in glass:** 50 target images, 30,000 parameters, batch size 2, 2000 iterations. Guiding memory 128 KB, guiding time 1.79 s, render time 17.55 s, postproc time 0.022 s [S2, unofficial].
+    *   **Bunny shadow 2:** 70 target images, 30,000 parameters, batch size 2, 600 iterations. Guiding memory 2 MB, guiding time 0.47 s, render time 0.72 s, postproc time 0.012 s [S2, unofficial].
+    *   **Duck:** 35 target images, 3,205,728 parameters, batch size 1, 400 iterations. Guiding memory 2 MB, guiding time 0.34 s, render time 0.94 s, postproc time 0.092 s [S2, unofficial].
+    *   **Mora:** 70 target images, 150,001 parameters, batch size 1, 1600 iterations. Guiding memory 4 MB, guiding time 0.43 s, render time 1.01 s, postproc time 0.109 s [S2, unofficial].
+    *   **Glass Dodoco:** 140 target images, 60,000 parameters, batch size 1, 700 iterations. Guiding memory 400 KB, guiding time 0.94 s, render time 5.76 s, postproc time 0.093 s [S2, unofficial].
+*   **Strengths:** Produces significantly cleaner gradient estimates than Zhang et al. (2020) at equal time and sample counts [S2, unofficial]. Significantly faster and lower noise than Warped-Area Sampling (WAS) at equal sample counts, with greater quality advantage at equal time [S2, unofficial]. Yields significantly lower noise around shadow boundaries, resulting in better geometry reconstruction in non-line-of-sight configurations [S2, unofficial]. Faster convergence than Zhang et al. due to lower variance boundary integral estimates [S2, unofficial].
+*   **Limitations:** Does not support participating media [S2, unofficial]. Direction sampling alone performs worse around shadow boundaries [S2, unofficial].
 
 ## Background
-
-### Origin
-The method was introduced in "Efficient estimation of boundary integrals for path-space differentiable rendering" (2022) [S1]. It builds on the differential path integral formulation established in earlier work [S1].
-
-### History and Development
-*   Zhang et al. (2020) introduced the baseline method for estimating the interior term and compared against in inverse-rendering experiments [S2, unofficial].
-*   Nicolet et al. (2021) introduced the method used to update mesh vertex positions based on estimated gradients [S2, unofficial].
-*   The method was compared against Warped-Area Sampling (WAS) by Bangaru et al. (2020) [S2, unofficial].
-
-### Usage
-Used in inverse-rendering optimizations for scenes including Dodoco, Jumpy Dumpty, Klee, Kirby, Bunny in glass, Bunny shadow 2, Duck, Mora, and Glass Dodoco [S2, unofficial].
+*   **Origin:** The method was introduced in "Variance-aware Differentiable Rendering" [S2, unofficial]. It builds on the baseline method by Zhang et al. (2020) for estimating the interior term of the gradient integral [S2, unofficial].
+*   **History:** Zhang et al. (2020) introduced the baseline method for estimating the interior term of Eq. 3.3 and was compared against in inverse-rendering experiments [S2, unofficial]. Nicolet et al. (2021) introduced the method used to update mesh vertex positions based on estimated gradients [S2, unofficial].
+*   **Usage:** Used in inverse-rendering problems, particularly where remeshing can be applied to make input meshes field-aligned [S2, unofficial]. Used in inverse-rendering optimizations for scenes including Dodoco, Jumpy Dumpty, Klee, Kirby, Bunny in glass, Bunny shadow 2, Duck, Mora, and Glass Dodoco [S2, unofficial].
 
 ## Sources
-
 [S1] Efficient estimation of boundary integrals for path-space differentiable rendering, https://doi.org/10.1145/3528223.3530080, fetched 2026-10-28
 [S2] Variance-aware Differentiable Rendering, https://core.ac.uk/works/337282320, fetched 2026-11-02 (unofficial)

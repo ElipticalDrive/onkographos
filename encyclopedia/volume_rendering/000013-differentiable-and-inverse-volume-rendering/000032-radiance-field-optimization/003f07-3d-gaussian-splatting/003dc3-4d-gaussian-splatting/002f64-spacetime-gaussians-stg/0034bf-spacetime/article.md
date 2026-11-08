@@ -1,119 +1,127 @@
 # Spacetime
 
-Also called: Spacetime interpolation, temporal feature field interpolation
+Also called: Spacetime feature interpolation, Temporal feature field extension
 
 ## Overview
-Spacetime is a method that adds a temporal dimension to the feature field, enabling real-time interpolation of both color and geometry between keyframes [S1, unofficial]. It serves as the temporal interpolation mechanism within the Spacetime Gaussians (STG) framework, allowing for smooth rendering of dynamic scenes without requiring per-frame optimization. Unlike methods that treat Gaussians as particles advected by a flow field [S1, unofficial], Spacetime relies on discrete keyframe queries and interpolation to reconstruct the 4D volume.
+Spacetime is a method that adds a temporal dimension to the feature field, enabling real-time interpolation of both color and geometry between keyframes [S1, unofficial]. It addresses the problem of rendering dynamic scenes by allowing the radiance field to smoothly transition between discrete training frames, rather than relying solely on discrete time indices or complex flow fields. It sets itself apart from [Gaussian-Flow](5996-gaussian-flow.md), which advects Gaussians via a velocity field, by treating time as an explicit feature dimension that can be interpolated linearly or non-linearly during rendering [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- **Input:** A set of 3D Gaussians with parameters defined at discrete keyframes (time steps), a target view frame ID, and a time step denominator.
-- **Output:** The interpolated Gaussian parameters (specifically position deltas) for the target frame ID.
+*   **Input:** A set of 3D Gaussians with spatial parameters (position, covariance, opacity, spherical harmonics) and a temporal feature encoding (e.g., positional encoding of time $t$). The input also includes discrete keyframe data (e.g., deformation deltas or feature grids) associated with specific time steps.
+*   **Output:** Rendered image for an arbitrary continuous time $t$ and view direction.
 
 **Data Structures:**
-The method assumes access to a function `gaussians.query_dmlp(time_index)` which returns the dynamic parameters (deltas) for a given normalized time index. The return value is a tuple containing at least four elements, where the first is the position delta `d_xyz`.
-
-**Parameters:**
-- `time_steps_denom`: The denominator used to normalize frame IDs into the time index for the MLP query.
-- `args.optimize_sync_iters`: An integer threshold for the optimization iteration count.
-- `view.frame_id`: The integer ID of the target frame to render.
+The method relies on storing discrete temporal states. For variants like Temporal Gaussian Interpolation, this includes:
+*   `gaussians`: A structure containing per-Gaussian attributes.
+*   `d_xyz`: Deformation deltas stored at discrete time intervals (e.g., every 4 frames).
+*   `time_steps_denom`: A scalar defining the granularity of time steps (e.g., 4).
 
 **Steps:**
-1. Determine the current and next interpolation boundaries based on a 4-frame granularity.
-2. Query the dynamic multi-layer perceptron (DMLP) for the current boundary's deltas.
-3. If the target frame is aligned with a keyframe (modulo 4) or the optimization is in the initial sync phase, use the queried deltas directly.
-4. Otherwise, query the next boundary's deltas and perform linear interpolation between the current and next deltas based on the frame's position within the 4-frame interval.
+1.  **Query Temporal Features:** For a given view frame ID, determine the relevant time interval.
+2.  **Interpolate Geometry/Features:** Calculate the interpolated deformation or feature value based on the distance to the nearest keyframes.
+3.  **Apply Deformation:** Adjust the Gaussian positions or feature inputs using the interpolated values.
+4.  **Render:** Perform standard 3D Gaussian splatting rasterization using the adjusted parameters.
 
 **Formulas:**
-Let $F$ be `view.frame_id`.
-The current interpolation frame ID $F_{curr}$ and next interpolation frame ID $F_{next}$ are calculated as:
-$$ F_{curr} = \left\lfloor \frac{F}{4} \right\rfloor \times 4 $$
-$$ F_{next} = \left( \left\lfloor \frac{F}{4} \right\rfloor + 1 \right) \times 4 $$
+For linear interpolation between keyframes (as seen in Temporal Gaussian Interpolation):
+$$ d_{xyz} = 0.25 \times ((view.frame\_id - curr\_int\_fid) \times d_{xyz\_next} + (next\_int\_fid - view.frame\_id) \times d_{xyz\_curr}) $$
+Where:
+*   $curr\_int\_fid = (view.frame\_id // 4) \times 4$
+*   $next\_int\_fid = (curr\_int\_fid + 1) \times 4$
+*   $d_{xyz\_curr}$ and $d_{xyz\_next}$ are the deformation deltas at the current and next integer time steps.
 
-Let $T_{denom}$ be `time_steps_denom`.
-The normalized time indices are $t_{curr} = \frac{F_{curr}}{T_{denom}}$ and $t_{next} = \frac{F_{next}}{T_{denom}}$.
+For Attenuating Time Feature:
+$$ \gamma_{time}(t) = \gamma(t) e^{-\frac{\lambda}{2} \frac{L(\gamma(t))}{\Delta x}} $$
+Where:
+*   $\gamma(t)$ is the original time feature.
+*   $\Delta x$ is the norm of the deformation distance.
+*   $\lambda$ is the attenuation strength hyperparameter.
+*   $L(\gamma(t))$ is a term related to the feature magnitude (source text garbled, interpreted as feature norm or loss contribution) [S3, unofficial].
 
-Query the deltas:
-$$ \mathbf{d}_{curr} = \text{query\_dmlp}(t_{curr})[0] $$
-If interpolation is required:
-$$ \mathbf{d}_{next} = \text{query\_dmlp}(t_{next})[0] $$
+**Parameters:**
+*   $\lambda$ (Attenuation strength): Set to 60 [S3, unofficial].
+*   Time step denominator: Typically 4 for the Torf scene type [S2, unofficial].
 
-The final interpolated position delta $\mathbf{d}_{xyz}$ is:
-$$ \mathbf{d}_{xyz} = \begin{cases} \mathbf{d}_{curr} & \text{if } F \pmod 4 = 0 \text{ or } \text{iteration} \le \text{args.optimize\_sync\_iters} \\ 0.25 \times \left( (F - F_{curr}) \mathbf{d}_{next} + (F_{next} - F) \mathbf{d}_{curr} \right) & \text{otherwise} \end{cases} $$
+**Edge Cases and Pitfalls:**
+*   **Boundary Conditions:** At frame boundaries (multiples of 4), the interpolation weight shifts entirely to the current frame. The code must handle `view.frame_id % 4 == 0` explicitly to avoid querying non-existent future frames or using stale data [S2, unofficial].
+*   **Noisy Reconstructions:** If the deformation distance $\Delta x$ is large, the time feature can dominate the coordinate information, leading to noisy novel view synthesis. The attenuation formula mitigates this [S3, unofficial].
+*   **Precision:** Linear interpolation assumes smooth motion. Rapid, non-linear motion between keyframes may result in artifacts if the keyframe density is insufficient [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def get_interpolated_d_xyz(view, gaussians, time_steps_denom, args, iteration):
+def get_interpolated_deformation(gaussians, view_frame_id, time_steps_denom=4, optimize_sync_iters=0, iteration=0):
     """
-    Calculate the interpolated position delta for a given view frame.
-    
-    Args:
-        view: Object containing frame_id.
-        gaussians: Object with query_dmlp method.
-        time_steps_denom: Normalization factor for time steps.
-        args: Object containing optimize_sync_iters.
-        iteration: Current optimization iteration.
-        
-    Returns:
-        d_xyz: Interpolated position delta vector.
+    Calculates interpolated deformation deltas for a given frame.
     """
-    # Step 1: Calculate current and next interpolation boundaries
-    curr_int_fid = (view.frame_id // 4) * 4
-    next_int_fid = (view.frame_id // 4 + 1) * 4
+    # Calculate current and next integer frame IDs
+    curr_int_fid = (view_frame_id // time_steps_denom) * time_steps_denom
+    next_int_fid = (curr_int_fid + 1) * time_steps_denom
     
-    # Step 2: Query current frame deltas
-    # query_dmlp returns a tuple; we extract the first element (d_xyz)
-    d_xyz_curr = gaussians.query_dmlp(curr_int_fid / time_steps_denom)[0]
+    # Query current frame deltas
+    # Note: query_dmlp is a helper defined in the source repo to fetch deformation from MLP/grid
+    d_xyz_curr, _, _, _ = gaussians.query_dmlp(curr_int_fid / time_steps_denom)
     
-    # Step 3: Check if direct assignment is valid
-    # Condition: Frame is aligned to keyframe (mod 4 == 0) OR in sync optimization phase
-    if view.frame_id % 4 == 0 or iteration <= args.optimize_sync_iters:
-        d_xyz = d_xyz_curr
-    else:
-        # Step 4: Interpolate between current and next frame deltas
-        d_xyz_next = gaussians.query_dmlp(next_int_fid / time_steps_denom)[0]
-        
-        # Linear interpolation weighted by distance to boundaries
-        # Note: The formula uses a factor of 0.25, which corresponds to the 
-        # inverse of the 4-frame interval size, effectively normalizing the 
-        # linear combination if the deltas are not already normalized per unit time.
-        d_xyz = 0.25 * ((view.frame_id - curr_int_fid) * d_xyz_next + (next_int_fid - view.frame_id) * d_xyz_curr)
-        
+    # If at a keyframe or in early sync phase, use current deltas directly
+    if view_frame_id % time_steps_denom == 0 or iteration <= optimize_sync_iters:
+        return d_xyz_curr
+    
+    # Query next frame deltas
+    d_xyz_next, _, _, _ = gaussians.query_dmlp(next_int_fid / time_steps_denom)
+    
+    # Linear interpolation
+    # The factor 0.25 comes from 1/time_steps_denom (1/4)
+    weight_next = view_frame_id - curr_int_fid
+    weight_curr = next_int_fid - view_frame_id
+    
+    d_xyz = 0.25 * (weight_next * d_xyz_next + weight_curr * d_xyz_curr)
+    
     return d_xyz
-```
 
-**Edge Cases and Pitfalls:**
-- **Boundary Conditions:** At exact keyframes ($F \pmod 4 == 0$), the method bypasses interpolation to ensure continuity with the stored keyframe data.
-- **Optimization Phase:** During the initial `optimize_sync_iters`, interpolation is disabled to prevent conflicting updates between the temporal interpolation and the optimization process.
-- **Granularity:** The method assumes a fixed 4-frame interpolation window. Frames falling outside the range of queried keyframes may produce undefined results if `query_dmlp` does not handle out-of-bounds indices.
+def attenuate_time_feature(gamma_t, delta_x_norm, lambda_param=60):
+    """
+    Attenuates the time feature based on deformation magnitude.
+    """
+    # L(gamma(t)) is interpreted as the magnitude/norm of the feature itself for attenuation
+    # Source text implies L(gamma(t)) is a term related to the feature. 
+    # Assuming L(gamma(t)) = ||gamma(t)|| for stability, or simply gamma_t if scalar.
+    # Given the formula structure e^(-lambda/2 * L/delta_x), if delta_x is 0, we must handle division.
+    
+    if delta_x_norm < 1e-6:
+        # When deformation is close to zero, use full frequency
+        return gamma_t
+        
+    # Calculate attenuation factor
+    # Note: The exact definition of L(gamma(t)) is garbled in source. 
+    # Standard practice in such attenuation is using the feature norm.
+    feature_norm = np.linalg.norm(gamma_t) 
+    exponent = -(lambda_param / 2.0) * (feature_norm / delta_x_norm)
+    
+    return gamma_t * np.exp(exponent)
+```
 
 ## Subtopics
 
 ### Temporal Gaussian Interpolation
-A specific implementation variant used in the ftorf scene type to ensure smooth motion between discrete keyframes [S2, unofficial]. It explicitly calculates `curr_int_fid` and `next_int_fid` using integer division by 4, queries the DMLP for deltas at these normalized times, and applies linear interpolation with a 0.25 scaling factor when the frame is not aligned with a keyframe or outside the sync iteration limit [S2, unofficial].
+A variant that interpolates dynamic Gaussian transformations ($d_{xyz}$) across time steps for specific scene types (e.g., Torf) to ensure smooth motion between discrete keyframes [S2, unofficial]. It sets itself apart by explicitly querying deformation deltas at discrete intervals (every 4 frames) and linearly blending them. Choose this when rendering scenes with known, discrete motion keyframes where smooth interpolation is required without training a continuous flow field. It relies on the `query_dmlp` interface to fetch deformation data [S2, unofficial].
+
+### Attenuating Time Feature
+A method to reduce the frequency of the time feature for deforming parts of the scene to prevent the radiance field from relying solely on time features instead of coordinates, which causes noisy novel view synthesis [S3, unofficial]. It sets itself apart by using the norm of the deformation distance ($\Delta x$) to modulate the time feature's influence. Choose this when dealing with monocular or sparse-view dynamic reconstruction where the network might overfit to time indices rather than learning geometric deformation. It uses an exponential attenuation factor controlled by $\lambda=60$ [S3, unofficial].
 
 ## Operating characteristics
-**Time and Memory Complexity:**
-The interpolation step is $O(1)$ relative to the number of Gaussians, as it performs a constant number of DMLP queries and arithmetic operations per Gaussian. Memory complexity is dominated by the storage of the DMLP weights and the Gaussian parameters.
-
-**Measured Performance:**
-Specific performance metrics (FPS, memory usage) are not given in the sources. The method enables real-time interpolation [S1, unofficial].
-
-**Strengths and Limitations:**
-- **Strengths:** Enables real-time rendering of dynamic scenes by avoiding per-frame optimization [S1, unofficial]. Simple linear interpolation is computationally cheap.
-- **Limitations:** Relies on discrete keyframes and linear interpolation, which may introduce artifacts if motion is highly non-linear between keyframes. The 4-frame granularity limits temporal resolution.
-
-**When to Use:**
-Use when real-time rendering of dynamic scenes is required and the motion can be approximated by linear interpolation between keyframes.
-
-**When Not to Use:**
-Avoid for scenes with complex, non-linear dynamics that cannot be captured by linear interpolation between sparse keyframes.
+*   **Time Complexity:** Rendering remains $O(N)$ with respect to the number of Gaussians, as interpolation is a constant-time operation per Gaussian or batch. Querying the deformation MLP/grid adds a small constant overhead.
+*   **Memory Complexity:** Requires storing deformation deltas or feature grids at discrete time steps. For Temporal Gaussian Interpolation, this is proportional to the number of keyframes. For Attenuating Time Feature, no additional storage is needed beyond the deformation network outputs.
+*   **Measured Performance:** Real-time interpolation is achieved. The method allows for interactive frame rates by avoiding per-frame optimization [S1, unofficial].
+*   **Strengths:** Simple to implement; enables smooth viewing of dynamic scenes without complex flow integration; reduces noise in novel views for deforming objects.
+*   **Limitations:** Interpolation artifacts may occur if keyframes are too sparse; attenuation requires careful tuning of $\lambda$ to balance noise reduction and feature fidelity.
+*   **When to use:** Real-time visualization of dynamic scenes with discrete motion data; dynamic NeRF/Gaussian reconstruction from monocular video.
+*   **When not to use:** Scenes with highly complex, non-linear, or chaotic motion that cannot be approximated by linear interpolation between keyframes.
 
 ## Background
-Spacetime was introduced as part of the Spacetime Gaussians (STG) framework to add a temporal dimension to the feature field [S1, unofficial]. It is distinct from Gaussian-Flow, which treats Gaussians as particles advected by a velocity field [S1, unofficial], and Gaussian Splatting Lucas-Kanade, which uses optical flow [S1, unofficial]. The method is cited in the context of traversing a kinematic chain [S1, unofficial].
+Spacetime feature extension originated in the context of dynamic 3D Gaussian Splatting and Neural Radiance Fields. It builds on the idea that time can be treated as an additional input dimension to the feature field, similar to how spatial coordinates are used [S1, unofficial]. The specific implementations of temporal interpolation and time feature attenuation were developed to address artifacts in dynamic reconstruction, such as those found in the Torf dataset and monocular dynamic scenes [S2, unofficial][S3, unofficial]. The method is part of the broader evolution of 4D Gaussian Splatting, moving from static rendering to real-time dynamic synthesis.
 
 ## Sources
 [S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
 [S2] brownvc/gftorf, https://github.com/brownvc/gftorf, fetched 2026-10-27 (unofficial)
+[S3] Ced-NeRF: A Compact and Efficient Method for Dynamic Neural Radiance Fields, https://doi.org/10.1609/aaai.v38i4.28138, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,96 @@
+# Gamma-Space Alpha Blending
+
+Also called: Gamma-Space Alpha Blending for 3DGS, Gamma-Space Splat Blending
+
+## Overview
+Gamma-Space Alpha Blending performs Gaussian alpha compositing directly in the Gamma color space to match the training conditions of standard 3D Gaussian Splatting (3DGS) assets [S1, unofficial]. It solves the quality degradation caused by converting colors to linear space before blending, which is the default behavior in modern linear-rendering pipelines [S1, unofficial]. Unlike its parent method, Explicit Intersection Alpha Compositing, which handles arbitrary intersection patterns via explicit pairs, this method assumes a standard front-to-back or back-to-front accumulation where the entire splatting pass occurs within a single Gamma-space context [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of 2D Gaussian splats (derived from 3D Gaussians via projection) with associated colors ($C$) and opacities ($\alpha$). The input colors are assumed to be in Gamma space (e.g., sRGB).
+*   **Output:** A final composited image in Gamma space.
+
+**Data Structures:**
+*   **Splat Buffer:** Contains fields for position, covariance, opacity, and color. The color field stores values in Gamma space (e.g., 0-255 or 0-1 non-linear range).
+*   **Render Target:** A texture buffer configured to store Gamma-space values. No intermediate linear-space buffer is used for the accumulation step.
+
+**Steps:**
+1.  **Project Gaussians:** Project 3D Gaussians to 2D screen space to obtain 2D mean, covariance, and opacity.
+2.  **Rasterize:** Render the 2D Gaussians to the render target.
+3.  **Blend in Gamma Space:** For each pixel, accumulate the splats. The color contribution of a splat is added directly to the accumulated color buffer without conversion to linear space. The standard alpha compositing equation is applied using Gamma-space colors:
+    $$ C_{out} = C_{in} + C_{splat} \cdot \alpha_{splat} \cdot (1 - \alpha_{in}) $$
+    $$ \alpha_{out} = \alpha_{in} + \alpha_{splat} \cdot (1 - \alpha_{in}) $$
+    Where $C$ represents the Gamma-space color vector and $\alpha$ is the opacity.
+4.  **Final Output:** The resulting buffer is displayed directly.
+
+**Parameters:**
+*   **GammaToLinear:** A boolean flag (default: `false`) that attempts to convert colors to linear space before blending. This is disabled by default to prevent quality loss [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Linear Projects:** If the rendering engine/project is configured for Linear color space, this method will produce incorrect results unless the assets are retrained in linear space [S1, unofficial].
+*   **HDRP Limitations:** High Definition Render Pipeline (HDRP) does not support Gamma mode, making this method incompatible with HDRP without significant pipeline changes [S1, unofficial].
+*   **GammaToLinear Workaround:** Enabling `GammaToLinear` (converting to linear, blending, then converting back) leads to incorrect results and lowered rendering quality [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Assuming a standard rasterization loop over splats sorted by depth
+# Render target 'color_buffer' and 'alpha_buffer' are initialized to 0 and 0 respectively
+# Colors in splats are stored in Gamma space (e.g., sRGB)
+
+for each pixel in image:
+    accumulated_color = vec3(0.0)
+    accumulated_alpha = 0.0
+    
+    # Get list of splats covering this pixel, sorted back-to-front
+    splats = get_splats_for_pixel(pixel.x, pixel.y)
+    
+    for splat in splats:
+        if accumulated_alpha >= 1.0:
+            break
+            
+        # Evaluate 2D Gaussian alpha at pixel center
+        alpha_splat = evaluate_gaussian_alpha(splat, pixel)
+        
+        # Apply opacity scaling
+        effective_alpha = alpha_splat * splat.opacity
+        
+        if effective_alpha <= 0.0:
+            continue
+            
+        # Gamma-space compositing
+        # C_splat is already in Gamma space
+        # C_accumulated is already in Gamma space
+        
+        # Standard over operator in Gamma space
+        # Note: This is mathematically incorrect for physical light but matches training
+        new_color = accumulated_color + (splat.color * effective_alpha * (1.0 - accumulated_alpha))
+        new_alpha = accumulated_alpha + (effective_alpha * (1.0 - accumulated_alpha))
+        
+        accumulated_color = new_color
+        accumulated_alpha = new_alpha
+        
+    color_buffer[pixel] = accumulated_color
+    alpha_buffer[pixel] = accumulated_alpha
+```
+
+## Subtopics
+
+### sRGB to Linear Composite
+A vertex and pixel shader pair for the sRGB→linear composite pass using a full-screen triangle [S2, unofficial]. The pixel shader reads the intermediate sRGB-blended splat accumulation texture, converts to linear, and outputs for premultiplied alpha blending onto SceneColor [S2, unofficial]. This variant is used when the initial splatting must occur in Gamma (to match training) but the final composition with the rest of the scene requires Linear space [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Same as standard alpha blending $O(N)$ per pixel where $N$ is the number of overlapping splats.
+*   **Memory Complexity:** Requires render targets capable of storing Gamma-space values. No additional linear-space buffers are needed for the splatting pass itself [S1, unofficial].
+*   **Strengths:** Preserves the visual fidelity of assets trained in Gamma space without requiring retraining [S1, unofficial].
+*   **Limitations:** Incompatible with Linear color space projects unless assets are retrained [S1, unofficial]. Incompatible with HDRP [S1, unofficial].
+*   **When to use:** When rendering standard 3DGS assets (trained in Gamma) in a Gamma-space supported pipeline (Built-in RP, URP) [S1, unofficial].
+*   **When not to use:** In Linear color space projects with existing Gamma-trained assets, or in HDRP [S1, unofficial].
+
+## Background
+Originating from the practical constraints of integrating 3D Gaussian Splatting into game engines, this method addresses the mismatch between the official 3DGS implementation (which trains in Gamma space) and modern rendering pipelines (which operate in Linear space) [S1, unofficial]. It was popularized by community implementations such as `gsplat-unity` which highlighted that converting color space before blending degrades quality [S1, unofficial]. The approach relies on the fact that standard 3DGS assets are trained using Gamma-corrected images, making Gamma-space blending the only way to maintain quality without retraining [S1, unofficial].
+
+## Sources
+[S1] wuyize25/gsplat-unity, https://github.com/wuyize25/gsplat-unity, fetched 2026-10-27 (unofficial)
+[S2] YuanBaoSMadLab/OpenSplat4D, https://github.com/YuanBaoSMadLab/OpenSplat4D, fetched 2026-10-27 (unofficial)

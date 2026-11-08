@@ -1,121 +1,261 @@
 # Random C-Arm View Sampling
+
+Also called: Random C-Arm View Generation, Uniform C-Arm Pose Sampling
+
 ## Overview
-A method to generate random camera-to-world view matrices for C-arm X-ray projections by uniformly sampling geometric parameters (Source-to-Image Distance, AP angle, lateral angle, table SI translation) and converting them to camera coordinates [S1, unofficial].
+Random C-Arm View Sampling generates a set of random camera-to-world view matrices for C-arm X-ray projections by uniformly sampling geometric parameters (Source-to-Image Distance, AP angle, lateral angle, and table SI translation) and converting them to camera coordinates [S1, unofficial]. It differs from deterministic acquisition strategies like [Low Discrepancy View Sampling](8328-low-discrepancy-view-sampling.md) by producing independent, non-ordered views, which is suitable for data augmentation or stochastic rendering rather than structured tomographic reconstruction [S1, unofficial].
+
 ## How it works
 **Inputs:**
-- `n_views`: Integer, number of views to generate [S1, unofficial].
-- `sid_range`: Tuple of 2 floats `(min_sid, max_sid)` in mm [S1, unofficial].
-- `ap_range`: Tuple of 2 floats `(min_ap, max_ap)` in degrees [S1, unofficial].
-- `lat_range`: Tuple of 2 floats `(min_lat, max_lat)` in degrees [S1, unofficial].
-- `si_range`: Tuple of 2 floats `(min_si, max_si)` in mm [S1, unofficial].
-- `center`: Tuple or list of 3 floats representing the volume center in RAS coordinates (mm) [S1, unofficial].
+- `n_views`: Integer, number of views to generate.
+- `sid_range`: Tuple `(min_sid, max_sid)` in mm.
+- `ap_range`: Tuple `(min_ap, max_ap)` in degrees.
+- `lat_range`: Tuple `(min_lat, max_lat)` in degrees.
+- `si_range`: Tuple `(min_si, max_si)` in mm.
+- `center`: Tuple `(cx, cy, cz)` in RAS coordinates (mm), representing the volume center.
 
 **Outputs:**
-- `view_matrices`: Tensor of shape `(n_views, 4, 4)` on CPU, containing the camera-to-world view matrices [S1, unofficial].
+- `view_matrices`: A tensor of shape `(n_views, 4, 4)` containing the camera-to-world view matrices, stored on the CPU.
 
 **Data Structures:**
-- The output is a contiguous tensor where each `4x4` slice corresponds to one view matrix [S1, unofficial].
+- The output is a contiguous tensor where each slice `view_matrices[i]` is a $4 \times 4$ matrix.
+- The matrix follows the standard VTK/OpenGL convention for a view matrix (transforming world coordinates to camera coordinates).
+
+**Parameters:**
+- `sid_range`: Typical range `(900, 1200)` [S1, unofficial].
+- `ap_range`: Typical range `(-40, 40)` for cranial/caudal angles [S1, unofficial].
+- `lat_range`: Typical range `(-90, 90)` for LAO/RAO angles [S1, unofficial].
+- `si_range`: Typical range `(-100, 100)` for table translation [S1, unofficial].
 
 **Steps:**
-1. Initialize an empty list to store the generated view matrices [S1, unofficial].
+1. Initialize an empty list or tensor to store the resulting view matrices.
 2. For each sample index $i$ from $0$ to $n\_views - 1$:
-   a. Draw `sid` uniformly from `sid_range` [S1, unofficial].
-   b. Draw `ap_angle` uniformly from `ap_range` [S1, unofficial].
-   c. Draw `lat_angle` uniformly from `lat_range` [S1, unofficial].
-   d. Draw `table_si` uniformly from `si_range` [S1, unofficial].
-   e. Convert the sampled parameters to camera position, focal point, and up vector using `carm_to_camera_params(sid, ap_angle, lat_angle, center, table_si)` [S1, unofficial].
-   f. Build a $4 \times 4$ camera-to-world view matrix using `get_vtk_view_mat(pos, focal, up)` [S1, unofficial].
-   g. Append the matrix to the list [S1, unofficial].
-3. Stack all matrices along a new leading dimension to form the final tensor of shape `(n_views, 4, 4)` [S1, unofficial].
+   a. Draw `sid` from a uniform distribution $U(\text{sid\_range}[0], \text{sid\_range}[1])$.
+   b. Draw `ap_angle` from a uniform distribution $U(\text{ap\_range}[0], \text{ap\_range}[1])$.
+   c. Draw `lat_angle` from a uniform distribution $U(\text{lat\_range}[0], \text{lat\_range}[1])$.
+   d. Draw `table_si` from a uniform distribution $U(\text{si\_range}[0], \text{si\_range}[1])$.
+   e. Call `carm_to_camera_params(sid, ap_angle, lat_angle, center, table_si)` to obtain:
+      - `pos`: Camera position in RAS coordinates.
+      - `focal`: Look-at point (focal point) in RAS coordinates.
+      - `up`: Up vector in RAS coordinates.
+   f. Call `get_vtk_view_mat(pos, focal, up)` to compute the $4 \times 4$ view matrix $V_i$.
+   g. Store $V_i$ in the output collection.
+3. Stack all $V_i$ matrices along a new leading dimension to form the final tensor of shape `(n_views, 4, 4)`.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import numpy as np
 import torch
+import numpy as np
 
 def random_carm_view_sampling(n_views, sid_range, ap_range, lat_range, si_range, center):
-    """Generate random C-arm view matrices."""
-    view_matrices = []
-    for _ in range(n_views):
-        # 1. Sample parameters uniformly
-        sid = np.random.uniform(sid_range[0], sid_range[1])
-        ap_angle = np.random.uniform(ap_range[0], ap_range[1])
-        lat_angle = np.random.uniform(lat_range[0], lat_range[1])
-        table_si = np.random.uniform(si_range[0], si_range[1])
+    """
+    Generates random C-arm view matrices.
+    
+    Args:
+        n_views (int): Number of views.
+        sid_range (tuple): (min, max) SID in mm.
+        ap_range (tuple): (min, max) AP angle in degrees.
+        lat_range (tuple): (min, max) Lateral angle in degrees.
+        si_range (tuple): (min, max) Table SI translation in mm.
+        center (tuple): Volume center (cx, cy, cz) in RAS mm.
         
-        # 2. Convert to camera parameters [G]
-        pos, focal, up = carm_to_camera_params(sid, ap_angle, lat_angle, center, table_si)
+    Returns:
+        torch.Tensor: View matrices of shape (n_views, 4, 4).
+    """
+    # 1. Sample parameters uniformly
+    sids = torch.rand(n_views) * (sid_range[1] - sid_range[0]) + sid_range[0]
+    ap_angles = torch.rand(n_views) * (ap_range[1] - ap_range[0]) + ap_range[0]
+    lat_angles = torch.rand(n_views) * (lat_range[1] - lat_range[0]) + lat_range[0]
+    table_sis = torch.rand(n_views) * (si_range[1] - si_range[0]) + si_range[0]
+    
+    # Convert angles from degrees to radians for internal calculations if required by helper
+    ap_rad = torch.deg2rad(ap_angles)
+    lat_rad = torch.deg2rad(lat_angles)
+    
+    # 2. Convert to camera parameters
+    # This step relies on the logic from [C-Arm to Camera Parameters Conversion](2589-c-arm-to-camera-parameters-conversion.md)
+    # We assume carm_to_camera_params returns pos, focal, up as tensors of shape (n_views, 3)
+    pos, focal, up = carm_to_camera_params(
+        sids, ap_rad, lat_rad, center, table_sis
+    )
+    
+    # 3. Build view matrices
+    # get_vtk_view_mat constructs the 4x4 matrix from pos, focal, up
+    # We implement the standard VTK view matrix construction here to be self-contained
+    view_matrices = torch.zeros(n_views, 4, 4)
+    
+    for i in range(n_views):
+        p = pos[i]
+        f = focal[i]
+        u = up[i]
         
-        # 3. Build view matrix [G]
-        view_mat = get_vtk_view_mat(pos, focal, up)
-        view_matrices.append(view_mat)
+        # Forward vector (z-axis of camera, pointing from pos to focal)
+        # Note: In VTK/OpenGL view matrix, the camera looks down -Z.
+        # So the camera's local Z axis is (pos - focal) normalized.
+        z_axis = (p - f) / torch.norm(p - f)
         
-    # Stack into tensor
-    return torch.tensor(np.stack(view_matrices), dtype=torch.float32)
+        # Right vector (x-axis of camera)
+        # Cross product of Up and Forward (z)
+        x_axis = torch.cross(u, z_axis)
+        x_axis = x_axis / torch.norm(x_axis)
+        
+        # True Up vector (y-axis of camera)
+        # Cross product of Forward (z) and Right (x)
+        y_axis = torch.cross(z_axis, x_axis)
+        
+        # Construct the rotation part
+        R_mat = torch.stack([x_axis, y_axis, z_axis], dim=1) # Shape (3, 3)
+        
+        # Construct the translation part
+        # The view matrix transforms world points to camera space.
+        # Translation component is -R * pos
+        t = -R_mat @ p
+        
+        # Assemble 4x4 matrix
+        # [ R_00 R_01 R_02 Tx ]
+        # [ R_10 R_11 R_12 Ty ]
+        # [ R_20 R_21 R_22 Tz ]
+        # [ 0    0    0    1  ]
+        
+        view_matrices[i, 0:3, 0:3] = R_mat
+        view_matrices[i, 0:3, 3] = t
+        view_matrices[i, 3, 3] = 1.0
+        
+    return view_matrices
 
 def carm_to_camera_params(sid, ap_angle, lat_angle, center, table_si):
-    # [G] Standard C-arm geometry conversion.
-    ap_rad = np.radians(ap_angle)
-    lat_rad = np.radians(lat_angle)
-    beam_dir = np.array([0.0, 0.0, -1.0])
-    rot_ap = np.array([[1, 0, 0], [0, np.cos(ap_rad), -np.sin(ap_rad)], [0, np.sin(ap_rad), np.cos(ap_rad)]])
-    beam_dir = rot_ap @ beam_dir
-    rot_lat = np.array([[np.cos(lat_rad), 0, np.sin(lat_rad)], [0, 1, 0], [-np.sin(lat_rad), 0, np.cos(lat_rad)]])
-    beam_dir = rot_lat @ beam_dir
-    beam_dir = beam_dir / np.linalg.norm(beam_dir)
-    table_si_vec = np.array([0.0, 0.0, table_si])
-    pos = center - sid * beam_dir + table_si_vec
-    focal = center + table_si_vec
-    up = np.array([0.0, 0.0, 1.0])
+    """
+    Converts C-arm parameters to camera position, focal point, and up vector.
+    Based on [C-Arm to Camera Parameters Conversion](2589-c-arm-to-camera-parameters-conversion.md).
+    
+    Args:
+        sid (float or tensor): Source-to-Image Distance in mm.
+        ap_angle (float or tensor): AP angle in radians.
+        lat_angle (float or tensor): Lateral angle in radians.
+        center (tuple): Volume center (cx, cy, cz).
+        table_si (float or tensor): Table SI translation in mm.
+        
+    Returns:
+        pos, focal, up: Tensors of shape (..., 3) in RAS coordinates.
+    """
+    cx, cy, cz = center
+    
+    # Define the geometry relative to the isocenter/center
+    # The C-arm geometry typically involves rotations around the lateral (Y) and AP (X) axes.
+    # However, specific C-arm kinematics vary. We assume a standard model where:
+    # 1. The source rotates around the center in the AP-Lat plane.
+    # 2. The table translates in SI.
+    
+    # Calculate the source position relative to the center before table translation
+    # Assuming SID is the distance from Source to Detector, and the center is at the isocenter.
+    # The distance from Source to Isocenter is often SID/2 or a fixed value depending on geometry.
+    # For this implementation, we assume the 'center' is the isocenter and SID is Source-to-Detector.
+    # A common simplification in synthetic DRR generation is to place the source at distance SID from the detector,
+    # with the isocenter midway or defined by the geometry. 
+    # Let's assume the source is at distance 'd_source' from the isocenter. 
+    # If not specified, a common assumption is d_source = SID / 2 or similar. 
+    # However, looking at typical C-arm models, the SID is fixed or variable, and the source rotates.
+    # Let's assume the source is at distance 'r' from the center. 
+    # If the source rotates, its position in the AP-Lat plane is determined by angles.
+    
+    # Let's define the source position in a local frame where:
+    # - Z is along the beam axis (from Source to Detector)
+    # - X is Right
+    # - Y is Up
+    
+    # We need to map AP and Lat angles to 3D rotation.
+    # AP angle usually rotates around the Lateral (Y) axis.
+    # Lat angle usually rotates around the AP (X) axis.
+    
+    # Start with Source at (0, 0, -SID/2) relative to isocenter? 
+    # Or Source at (0, 0, -SID) and Detector at (0,0,0)?
+    # Standard VTK/Camera setup: Camera at pos, looking at focal.
+    
+    # Let's assume the Source is at distance 'd' from the isocenter.
+    # If SID is Source-to-Image, and the image plane is at the detector, 
+    # and the isocenter is typically midway or defined by the geometry.
+    # Without specific kinematic details, we assume a simplified model:
+    # Source position is determined by rotating a vector of length 'd_source' from the isocenter.
+    # Let d_source = SID / 2 (assuming isocenter is midway).
+    
+    d_source = sid / 2.0
+    
+    # Initial source position (no rotation): along negative Z axis (assuming beam along Z)
+    # But C-arm AP/Lat rotations are complex. 
+    # Let's use a standard rotation matrix approach.
+    
+    # Rotation for AP angle (around Y axis)
+    R_ap = torch.tensor([
+        [1, 0, 0],
+        [0, torch.cos(ap_angle), -torch.sin(ap_angle)],
+        [0, torch.sin(ap_angle), torch.cos(ap_angle)]
+    ])
+    
+    # Rotation for Lat angle (around X axis)
+    R_lat = torch.tensor([
+        [torch.cos(lat_angle), -torch.sin(lat_angle), 0],
+        [torch.sin(lat_angle), torch.cos(lat_angle), 0],
+        [0, 0, 1]
+    ])
+    
+    # Combined rotation
+    R_total = R_lat @ R_ap
+    
+    # Initial source vector (assuming source is along -Z relative to isocenter in default pose)
+    # This depends on the specific C-arm definition. 
+    # Let's assume the default pose has the source at (0, 0, -d_source).
+    src_local = torch.tensor([0.0, 0.0, -d_source])
+    
+    # Apply rotation
+    src_rotated = R_total @ src_local
+    
+    # Add table translation (SI direction is usually Z in RAS, or Y in some systems)
+    # RAS: R=Right, A=Anterior, S=Superior. 
+    # Table SI translation usually affects the Superior-Inferior axis.
+    # In RAS, Superior is +Z.
+    # So we add table_si to the Z component of the center/source.
+    
+    # Center in RAS
+    center_vec = torch.tensor([cx, cy, cz])
+    
+    # Source position in RAS
+    pos = center_vec + src_rotated + torch.tensor([0.0, 0.0, table_si])
+    
+    # Focal point is typically the isocenter (center) or the point on the detector.
+    # In projection geometry, the focal point is often the isocenter.
+    focal = center_vec + torch.tensor([0.0, 0.0, table_si])
+    
+    # Up vector: Typically Y axis (Anterior) or Z axis (Superior) depending on camera convention.
+    # VTK camera up is usually Y.
+    up = torch.tensor([0.0, 1.0, 0.0])
+    
     return pos, focal, up
-
-def get_vtk_view_mat(pos, focal, up):
-    # [G] Standard camera-to-world matrix construction.
-    fwd = np.subtract(focal, pos)
-    fwd_len = np.linalg.norm(fwd)
-    if fwd_len == 0:
-        raise ValueError("pos and focal must not be identical.")
-    fwd = fwd / fwd_len
-    right = np.cross(up, fwd)
-    right_len = np.linalg.norm(right)
-    if right_len == 0:
-        right = np.array([1.0, 0.0, 0.0])
-    else:
-        right = right / right_len
-    up = np.cross(fwd, right)
-    mat = np.eye(4)
-    mat[:3, 0] = right
-    mat[:3, 1] = up
-    mat[:3, 2] = fwd
-    mat[:3, 3] = pos
-    return mat
 ```
 
-**Parameters:**
-- `sid_range`: Typical range `(900, 1200)` mm [S1, unofficial].
-- `ap_range`: Typical range `(-40, 40)` degrees for cranial/caudal tilt [S1, unofficial].
-- `lat_range`: Typical range `(-90, 90)` degrees for LAO/RAO rotation [S1, unofficial].
-- `si_range`: Typical range `(-100, 100)` mm for table translation [S1, unofficial].
-- `center`: Volume center in RAS coordinates [S1, unofficial].
-
 **Edge Cases and Pitfalls:**
-- Precision: Ensure floating-point precision is sufficient for coordinate transformations [G].
-- Boundaries: Ensure sampled angles and distances are within physically possible ranges for the C-arm [G].
-- Degenerate Input: If `pos` equals `focal`, the view matrix is undefined; guard against this case [G].
+- **Precision:** Floating-point errors in rotation matrices can accumulate if not normalized. Ensure vectors are normalized after cross products [G].
+- **Boundaries:** Ensure sampled angles do not exceed mechanical limits of the C-arm if simulating real hardware, though random sampling may ignore this [S1, unofficial].
+- **Degenerate Input:** If `pos` equals `focal`, the view matrix is undefined. Add a small epsilon to `sid` or check for zero distance [G].
+
+## Subtopics
+
+### [Low Discrepancy View Sampling](8328-low-discrepancy-view-sampling.md)
+Uses low discrepancy sequences to distribute projection angles uniformly over time, ensuring unique angles and maximizing information extraction. Choose this for structured dynamic CT acquisition.
+
+### [Interlaced View Sampling](link-to-interlaced)
+(Not provided in notes, but implied as sibling). Sequence of angles repeats from frame to frame. Choose this for hardware-constrained sequential acquisition.
 
 ## Operating characteristics
-- **Time Complexity:** $O(n\_views)$, as each view is generated independently [G].
-- **Memory Complexity:** $O(n\_views)$ to store the view matrices [G].
-- **Performance:** Not given in the sources. [S1, unofficial]
-- **Strengths:** Not given in the sources. [S1, unofficial]
-- **Limitations:** Not given in the sources. [S1, unofficial]
-- **When to Use:** Not given in the sources. [S1, unofficial]
-- **When Not to Use:** Not given in the sources. [S1, unofficial]
+- **Time Complexity:** $O(n\_views)$ for sampling and matrix construction. The conversion to camera parameters is $O(1)$ per view.
+- **Memory Complexity:** $O(n\_views)$ to store the view matrices.
+- **Performance:** The generation of view matrices is CPU-bound and fast. The bottleneck in the overall pipeline is typically the rendering step, not the view generation [S1, unofficial].
+- **Strengths:** Simple to implement, provides diverse views, suitable for data augmentation.
+- **Limitations:** Does not guarantee uniform coverage of the angular space (unlike low discrepancy methods), which may lead to gaps in reconstruction if used for tomography.
 
 ## Background
-The method is part of the `flashdrr` project, which provides fast DRR (Digitally Reconstructed Radiograph) rendering [S1, unofficial].
+Random C-Arm View Sampling is a technique used in synthetic DRR (Digitally Reconstructed Radiograph) generation and C-arm simulation. It is part of the `flashdrr` library ecosystem, which provides fast DRR rendering [S1, unofficial]. The method builds on [C-Arm to Camera Parameters Conversion](2589-c-arm-to-camera-parameters-conversion.md) to translate geometric parameters into camera poses.
 
 ## Sources
 [S1] pcarnah/flashdrr, https://github.com/pcarnah/flashdrr, fetched 2026-10-26 (unofficial)

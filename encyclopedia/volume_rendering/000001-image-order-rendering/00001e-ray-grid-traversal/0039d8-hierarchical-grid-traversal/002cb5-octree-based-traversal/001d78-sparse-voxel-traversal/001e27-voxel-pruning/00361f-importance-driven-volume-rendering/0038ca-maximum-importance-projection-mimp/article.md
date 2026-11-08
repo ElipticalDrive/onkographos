@@ -1,0 +1,145 @@
+# Maximum Importance Projection (MImP)
+## Overview
+Maximum Importance Projection (MImP) is an importance-based compositing method that clips unimportant parts of volume data based on assigned importance values [S1, unofficial]. It assigns the lowest sparseness value (densest representation) to the object with the maximum importance along a ray, while all other objects receive the highest sparseness value, effectively rendering them either densely or not at all [S1, unofficial]. Unlike more complex importance-based methods that allow reduced opacity representations for less important objects, MImP is simpler to implement but offers less control over sparseness selection [S1, unofficial].
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   Volumetric dataset with associated importance values per voxel.
+*   Camera parameters (view direction, projection type: parallel or perspective).
+*   Sparseness threshold configuration (binary: dense or sparse).
+*   Depth information of the scene (typically from a previous pass or depth buffer).
+
+**Outputs:**
+*   Final rendered image with importance-driven visibility.
+
+### Data Structures
+*   **Depth Footprint:** A 2D image/array storing the depth ($z$) of the last hit of each ray with an object along the viewing direction.
+*   **Distance Field:** A 2D image/array resulting from a chamfer distance transform on the depth footprint, representing the distance of each pixel from the "desired object" (the one with maximal importance).
+*   **Ray State:** Standard raycasting state including current position, direction, and step size.
+
+### Steps
+1.  **Compute Depth Footprint:** Render the scene to obtain the depth of the most distant object hit by each ray. Identify the "desired object" for each ray as the one with the maximum importance value among all objects along that ray [S1, unofficial].
+2.  **Generate Distance Field:** Apply a 2D chamfer distance transform to the depth footprint. This creates a distance field where each pixel value $d_i$ represents the distance of the ray from the desired object's footprint [S1, unofficial].
+3.  **Calculate New Ray Starting Points:** For each ray, determine if it intersects the clipping frustum. If it does, calculate the new starting depth $e_i$ using the formula:
+    $$e_i = e_{max} - d_i \times s_c$$
+    Where:
+    *   $e_i$ is the calculated depth of the new starting point.
+    *   $e_{max}$ is the maximal depth value of the desired object along that ray.
+    *   $d_i$ is the distance of the ray to the object according to the depth footprint (from the distance field).
+    *   $s_c$ is the slope of the countersink (a user-defined parameter controlling the angle of the conical frustum) [S1, unofficial].
+4.  **Modify Raycasting:**
+    *   **Cylindrical MImP:** For rays where the desired object is identified, skip all ray samples ahead of the desired object (i.e., samples with depth $> e_{max}$) [S1, unofficial].
+    *   **Conical MImP:** For rays intersecting the conical frustum, set the ray's starting position to the new depth $e_i$ calculated in Step 3. This effectively clips the volume data behind the conical surface [S1, unofficial].
+5.  **Gradient Modification:** To simulate the cut-out correctly and create a visual countersink effect, modify the gradient vector of the first ray sample on any modified ray (i.e., rays whose starting point was changed or that are clipped).
+    *   Calculate two components of the gradient using the 2D distance field.
+    *   Calculate the z-component of the gradient using the slope $s_c$.
+    *   Scale up the resulting gradient vector, as gradients inside objects are normally very small [S1, unofficial].
+6.  **Compositing:** Perform standard volume rendering compositing along the modified rays. Objects with the maximum importance are rendered densely. All other objects are rendered with the highest sparseness value (effectively skipped or rendered with very low opacity, depending on the specific implementation of "highest sparseness") [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_with_mimp(volume, importance, depth_footprint, slope_sc, camera):
+    """
+    Render volume using Maximum Importance Projection.
+    
+    Args:
+        volume: Volumetric dataset.
+        importance: Importance values per voxel.
+        depth_footprint: 2D array of max depth per ray.
+        slope_sc: Slope of the conical countersink.
+        camera: Camera object with projection type and parameters.
+        
+    Returns:
+        Image buffer.
+    """
+    # Step 1 & 2: Pre-compute distance field from depth footprint
+    # Assuming chamfer_distance_transform is available or implemented
+    distance_field = chamfer_distance_transform(depth_footprint)
+    
+    # Initialize output image
+    image = empty_image_like(depth_footprint)
+    
+    # For each pixel (ray)
+    for y, x in pixels(depth_footprint):
+        ray = camera.get_ray(x, y)
+        
+        # Find the desired object's max depth and importance
+        # In practice, this requires a prior pass or depth buffer with importance
+        # Here we assume depth_footprint corresponds to the object with max importance
+        e_max = depth_footprint[y, x]
+        
+        # Get distance from the desired object footprint
+        d_i = distance_field[y, x]
+        
+        # Calculate new starting depth
+        e_i = e_max - d_i * slope_sc
+        
+        # Determine if ray is clipped (conical MImP)
+        # If d_i is 0, the ray hits the desired object directly, no clipping needed
+        if d_i > 0:
+            # Move ray origin to the new starting point along the ray direction
+            # Assuming ray.origin is at the eye point
+            ray.origin = ray.origin + ray.direction * e_i
+            
+            # Modify gradient for the first sample
+            # This is handled during shading/compositing
+            modify_gradient_flag = True
+        else:
+            modify_gradient_flag = False
+            
+        # Step 6: Compositing along the ray
+        color = (0.0, 0.0, 0.0)
+        alpha = 0.0
+        
+        # Traverse volume from ray.origin to far plane
+        # Note: In cylindrical MImP, we would skip samples > e_max
+        # In conical MImP, we start at e_i, so we naturally skip the clipped part
+        
+        for sample in ray.traverse(volume):
+            # Get importance of the current sample
+            imp = importance.get_value(sample.position)
+            
+            # Determine sparseness
+            # If this sample belongs to the desired object (max importance), render densely
+            # Otherwise, render with high sparseness (skip or low opacity)
+            # For simplicity, we assume a binary decision based on importance comparison
+            # In a full implementation, we need to know if this sample is part of the "desired object"
+            # This usually requires storing which object ID has max importance per ray
+            
+            if is_desired_object_sample(sample, importance):
+                # Dense rendering
+                sample_color, sample_alpha = sample.shade(volume, modify_gradient_flag)
+                color, alpha = composite(color, alpha, sample_color, sample_alpha)
+            else:
+                # Sparse rendering (skip or very low opacity)
+                # For MImP, this often means skipping entirely
+                pass
+                
+        image[y, x] = color
+```
+
+### Parameters
+*   **$s_c$ (Slope of the countersink):** Controls the angle of the conical clipping frustum. A steeper slope results in a narrower cut-away. Not given in the sources.
+*   **Sparseness Threshold:** Binary threshold determining whether an object is rendered densely or not. Not given in the sources.
+
+### Edge Cases and Pitfalls
+*   **Parallel Projection:** Simple cylindrical MImP creates only a cylindrical countersink, which can cause a loss of spatial impression in parallel projection [S1, unofficial]. Conical MImP mitigates this by creating a conical clipping frustum [S1, unofficial].
+*   **Gradient Scaling:** Gradients inside objects are normally very small, so the gradient must be scaled up to create a visible countersink effect [S1, unofficial].
+*   **Depth Information:** Accurate depth information of the last hit of each ray is required. This may necessitate a pre-pass or depth buffer [S1, unofficial].
+*   **Implementation Complexity:** While simpler than other importance-based methods, MImP offers less control over sparseness selection [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The core raycasting complexity is similar to standard volume rendering, but with potential early termination for non-desired objects. The pre-processing steps (depth footprint, chamfer distance transform) add overhead. The chamfer distance transform is described as "very fast" [S1, unofficial].
+*   **Memory Complexity:** Requires storage for the depth footprint and distance field, both of size proportional to the image resolution.
+*   **Strengths:** Simple to implement; fast assignment of sparseness values; effective for highlighting the most important structures [S1, unofficial].
+*   **Limitations:** Less control over sparseness selection compared to more complex methods; binary nature (dense or sparse) may not suit all visualization needs; potential loss of spatial impression with cylindrical MImP in parallel projection [S1, unofficial].
+*   **When to Use:** When the goal is to quickly highlight the most important structures in a volume without complex sparseness tuning.
+*   **When Not to Use:** When fine-grained control over the visibility of less important structures is required, or when parallel projection is used and spatial impression is critical (use conical MImP instead).
+
+## Background
+Maximum Importance Projection (MImP) was introduced in the context of importance-driven volume rendering, a technique for automatic focus and context display of volumetric data [S1, unofficial]. It generalizes cut-away views by assigning object importance to determine visibility priority [S1, unofficial]. MImP is based on the concept of Maximum Intensity Projection, where the object with the maximum importance value along a ray is prioritized [S1, unofficial]. The method was proposed as an easy way to clip unimportant parts of volume data, contrasting with more complex methods that allow reduced opacity representations [S1, unofficial].
+
+## Sources
+[S1] Implementation of Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2005/Thurner-2005-IVR/Thurner-2005-IVR-paper.pdf, fetched 2026-10-29 (unofficial)

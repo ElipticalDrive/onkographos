@@ -1,0 +1,88 @@
+# Prefix Rank for Compact Child Indexing
+
+Also called: Popcount-based Child Index Mapping, Prefix Rank
+
+## Overview
+Prefix Rank maps a child's logical index within an octree node to its compact position in a payload array, based on a bitmask of active children [S1, unofficial]. It solves the problem of dense indexing in sparse voxel grids by allowing traversal to skip empty octants without allocating storage for them [S1, unofficial]. Unlike [Voxel Child Address Calculation](2495-voxel-child-address-calculation.md), which may handle general address arithmetic, this method specifically implements the rank query on a bit vector to determine the offset [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `mask`: An 8-bit integer where bit $i$ is 1 if child $i$ is active, 0 otherwise.
+- `child_index`: The target child index, an integer in $[0, 7]$ for standard octrees.
+
+**Outputs:**
+- `rank`: The number of active children with indices strictly less than `child_index`. This is the compact index.
+
+**Data Structures:**
+- No auxiliary structures are required for the basic implementation. The operation is stateless and relies on bitwise operations.
+
+**Steps:**
+1. If `child_index` is less than or equal to 0, return 0 [S1, unofficial].
+2. Construct a `lower_mask` that has bits set to 1 for all positions strictly less than `child_index`. This is calculated as $(1 \ll \text{child\_index}) - 1$ [S1, unofficial].
+3. Compute the bitwise AND of `mask` and `lower_mask` to isolate active children preceding the target [S1, unofficial].
+4. Count the number of set bits (population count) in the result [S1, unofficial].
+
+**Formula:**
+$$ \text{rank} = \text{popcount}(\text{mask} \ \& \ ((1 \ll \text{child\_index}) - 1)) $$
+
+Where:
+- $\text{popcount}(x)$ returns the number of 1-bits in $x$.
+- $\&$ is the bitwise AND operator.
+- $\ll$ is the bitwise left shift operator.
+
+**Parameters:**
+- `mask`: 8-bit unsigned integer.
+- `child_index`: Integer $0 \dots 7$.
+
+**Edge Cases and Pitfalls:**
+- If `child_index` is 0, the shift amount is 0, resulting in `lower_mask` being 0. The result is correctly 0 [S1, unofficial].
+- If `child_index` is 8 (invalid for 8-way branching), the shift creates a value outside the 8-bit range if not handled. The sources specify the check `child_index <= 0` but imply valid input $0-7$ [S1, unofficial]. For indices $\ge 8$, the behavior is undefined in the provided snippet [S1, unofficial].
+- Precision issues are minimal as the operation is integer-based.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def prefix_rank(mask: int, child_index: int) -> int:
+    """
+    Calculates the rank of a child index in a bitmask.
+    
+    Args:
+        mask: Bitmask of active children (1 bit per child).
+        child_index: Target child index (0-7).
+        
+    Returns:
+        The number of active children with index < child_index.
+    """
+    if child_index <= 0:
+        return 0
+    
+    # Create a mask with bits 0 to child_index-1 set to 1
+    # For child_index=1, lower_mask = (1<<1) - 1 = 0b00000001
+    lower_mask = (1 << child_index) - 1
+    
+    # Isolate active children preceding the target
+    active_lower = mask & lower_mask
+    
+    # Count set bits
+    return bin(active_lower).count('1')
+```
+
+## Subtopics
+
+### Flat Rank
+A space-efficient approach for answering rank queries on bit vectors in constant time [S2, unofficial]. It partitions the bit vector into blocks and stores the cumulative count of 1-bits up to each block in an auxiliary array [S2, unofficial]. This method requires approximately 3.51% additional space overhead compared to the raw bit vector [S2, unofficial]. It is chosen when the bit vector is large and frequent rank queries are needed, trading memory for query speed, whereas Prefix Rank is typically used for small, fixed-size nodes (e.g., 8 bits) where no auxiliary storage is needed [S2, unofficial].
+
+## Operating characteristics
+**Time Complexity:** $O(1)$ for fixed-size masks (e.g., 8 bits). The operation involves a constant number of bitwise operations and a population count [S1, unofficial].
+**Memory Complexity:** $O(1)$ auxiliary space. No extra storage is required for the basic algorithm [S1, unofficial].
+**Performance:** Extremely fast on modern hardware due to hardware-supported population count instructions (e.g., `POPCNT` on x86) [S1, unofficial].
+**Strengths:** Zero memory overhead for the index structure; very low latency [S1, unofficial].
+**Limitations:** Only suitable for small, fixed-width masks. For large bit vectors, the lack of precomputed tables makes it slower than block-based approaches like Flat Rank [S2, unofficial].
+
+## Background
+The method is derived from implementations in sparse voxel octree rendering, specifically cited from the `sparse-voxels` repository [S1, unofficial]. The concept of rank queries on bit vectors dates back to earlier work on compressed bit vectors [S2, Jac89, unofficial]. Flat Rank, a variant for larger vectors, was detailed in recent research on segmentation volume compression [S2, Kur22, unofficial].
+
+## Sources
+[S1] hectorpiteau/sparse-voxels, https://github.com/hectorpiteau/sparse-voxels, fetched 2026-10-24 (unofficial)
+[S2] Random Access Segmentation Volume Compression for Interactive Volume Rendering, https://doi.org/10.1111/cgf.70116, fetched 2026-10-28 (unofficial)

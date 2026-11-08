@@ -6,9 +6,9 @@ Exponential Fog (Beer-Lambert) is a depth-cueing technique that simulates atmosp
 
 ## How it works
 **Inputs:**
-- `viewDist`: The Euclidean distance from the camera origin to the surface hit point. If no hit occurs, this is the ray limit `tLimit` [S1, unofficial].
+- `viewDist`: The Euclidean distance from the camera origin to the surface hit point [S1, unofficial]. If no hit occurs, this is the ray limit `tLimit` [S1, unofficial].
 - `FOG_DENSITY`: A scalar coefficient controlling the rate of fog accumulation [S1, S3, unofficial].
-- `FOG_START`: The distance from the camera at which fog begins to appear. Distances less than this result in zero fog [S1, unofficial].
+- `FOG_START`: The distance from the camera at which fog begins to appear [S1, unofficial]. Distances less than this result in zero fog [S1, unofficial].
 - `fogColor`: The background or sky color to blend towards [S1, S2, unofficial].
 - `finalColor`: The computed color of the surface at the hit point [S1, S2, unofficial].
 
@@ -16,33 +16,41 @@ Exponential Fog (Beer-Lambert) is a depth-cueing technique that simulates atmosp
 - `finalColor`: The blended color after applying the fog effect [S1, S2, unofficial].
 
 **Data Structures:**
-No complex data structures are required. The method operates on scalar distances and vector colors.
+No complex data structures are required [S1, S2, S3, unofficial]. The method operates on scalar distances and vector colors [S1, S2, S3, unofficial].
 
 **Steps:**
-1. Calculate the effective distance for fog calculation. If the hit distance `tr.t` is less than `FOG_START`, the effective distance is 0. Otherwise, it is `tr.t - FOG_START`. If no hit occurs, use `tLimit` [S1, unofficial].
+1. Calculate the effective distance for fog calculation [S1, unofficial]. If the hit distance `tr.t` is less than `FOG_START`, the effective distance is 0 [S1, unofficial]. Otherwise, it is `tr.t - FOG_START` [S1, unofficial]. If no hit occurs, use `tLimit` [S1, unofficial].
    $$ d_{eff} = \max(0.0, viewDist - FOG\_START) $$
-2. Compute the raw fog factor using the Beer-Lambert law. This represents the fraction of light absorbed/scattered by the medium [S1, S3, unofficial].
+2. Compute the raw fog factor using the Beer-Lambert law [S1, unofficial]. This represents the fraction of light absorbed or scattered by the medium [S1, unofficial].
    $$ fogRaw = 1.0 - e^{-FOG\_DENSITY \cdot d_{eff}} $$
    *Note: Some implementations use a squared distance term $t^2$ instead of linear $t$ for the exponent, e.g., $1 - e^{-k \cdot t^2}$ [S2, S3, unofficial]. The linear form is the standard Beer-Lambert definition for homogeneous media [S1, unofficial].*
-3. Clamp the fog factor to prevent complete obscuration of the scene. A common practice is to clamp the maximum value to 0.97, ensuring the underlying surface color remains visible [S1, unofficial].
+3. Clamp the fog factor to prevent complete obscuration of the scene [S1, unofficial]. A common practice is to clamp the maximum value to 0.97, ensuring the underlying surface color remains visible [S1, unofficial].
    $$ fogFact = \text{clamp}(fogRaw, 0.0, 0.97) $$
-4. Blend the object color with the fog color using the fog factor.
+4. Blend the object color with the fog color using the fog factor [S3, unofficial].
    $$ finalColor = \text{mix}(finalColor, fogColor, fogFact) $$
 
 **Parameters and Typical Values:**
-- `FOG_DENSITY`: Varies by implementation. [S1, unofficial] uses a variable `FOG_DENSITY`. [S2, unofficial] uses 0.02. [S3, unofficial] uses 0.00007 (with squared distance).
+- `FOG_DENSITY`: Varies by implementation [S1, S2, S3, unofficial]. [S1, unofficial] uses a variable `FOG_DENSITY`. [S2, unofficial] uses 0.02. [S3, unofficial] uses 0.00007 (with squared distance).
 - `FOG_START`: Often 0.0 for global fog, or a specific value to hide near-field artifacts [S1, unofficial].
 - `fogColor`: Typically a dark blue-grey or sky color, e.g., `vec3(0.03, 0.04, 0.06)` [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Clamping:** If `fogFact` reaches 1.0, the scene becomes completely opaque with the fog color, hiding all geometry. Clamping to 0.97 is recommended [S1, unofficial].
+- **Clamping:** If `fogFact` reaches 1.0, the scene becomes completely opaque with the fog color, hiding all geometry [S1, unofficial]. Clamping to 0.97 is recommended [S1, unofficial].
 - **Start Distance:** If `FOG_START` is not handled correctly (i.e., using raw distance instead of `max(0.0, dist - start)`), fog will appear immediately at the camera, causing visual artifacts [S1, unofficial].
-- **Precision:** For very large distances, the exponential term may underflow or overflow depending on the density coefficient. Ensure `FOG_DENSITY` is scaled appropriately for the scene's unit system [S3, unofficial].
+- **Precision:** For very large distances, the exponential term may underflow or overflow depending on the density coefficient [S3, unofficial]. Ensure `FOG_DENSITY` is scaled appropriately for the scene's unit system [S3, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
+def mix(a, b, t):
+    return a + t * (b - a)
+
+def clamp(x, lo, hi):
+    return max(lo, min(hi, x))
+
 def apply_exponential_fog(final_color, fog_color, view_dist, fog_density, fog_start):
     # Step 1: Calculate effective distance
     # If no hit, view_dist is tLimit. If hit, view_dist is tr.t.
@@ -51,7 +59,7 @@ def apply_exponential_fog(final_color, fog_color, view_dist, fog_density, fog_st
     # Step 2: Compute raw fog factor (Beer-Lambert)
     # Using linear distance as per standard Beer-Lambert [S1, unofficial]
     # Note: Some variants use squared distance [S2, S3, unofficial]
-    fog_raw = 1.0 - exp(-fog_density * effective_dist)
+    fog_raw = 1.0 - math.exp(-fog_density * effective_dist)
     
     # Step 3: Clamp to prevent full obscuration
     fog_factor = clamp(fog_raw, 0.0, 0.97)
@@ -103,40 +111,45 @@ where $d$ is fog distance and $k = 0.000002$ [S4, unofficial].
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
+def mix(a, b, t):
+    return a + t * (b - a)
+
 def apply_exponential_distance_fog(uv, frag_coord_z, frag_coord_w, texture_sampler):
     # Step 1: Sample texture
     tex_col = texture(texture_sampler, uv).rgb
     
     # Step 2: Expand gamma
-    gamma = vec3(2.2)
-    inv_gamma = vec3(1.0 / 2.2)
-    tex_col = pow(tex_col, gamma)
+    gamma = (2.2, 2.2, 2.2)
+    inv_gamma = (1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2)
+    tex_col = tuple(c ** g for c, g in zip(tex_col, gamma))
     
     # Step 3: Compute fog distance from clip-space depth
     fog_dist = frag_coord_z / frag_coord_w
     
     # Step 4: Calculate alpha
     k = 0.000002
-    alpha = mix(0.5, 0.0, 1.0 - exp(-k * fog_dist * fog_dist))
+    alpha = mix(0.5, 0.0, 1.0 - math.exp(-k * fog_dist * fog_dist))
     
     # Step 5: Compress gamma
-    tex_col = pow(tex_col, inv_gamma)
+    tex_col = tuple(c ** g for c, g in zip(tex_col, inv_gamma))
     
     # Step 6: Output
-    return vec4(tex_col, alpha)
+    return (tex_col[0], tex_col[1], tex_col[2], alpha)
 ```
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per pixel. The calculation involves a few arithmetic operations and an exponential function.
-- **Memory Complexity:** $O(1)$. No additional buffers are required beyond the input color and parameters.
-- **Performance:** Extremely fast, suitable for real-time rendering on all hardware. The exponential function is typically hardware-accelerated.
-- **Strengths:** Physically plausible appearance for homogeneous media; simple to implement; effective at hiding far-clipping artifacts.
-- **Limitations:** Assumes homogeneous density; does not account for in-scattering or height variations; can look flat if not combined with other effects like [Height-based Fog with Directional In-scatter](4400-height-based-fog-with-directional-in-scatter.md).
-- **When to Use:** Small to medium-scale scenes, indoor environments, or as a post-process for atmospheric haze.
-- **When Not to Use:** Large-scale outdoor scenes requiring altitude-dependent fog or volumetric cloud structures.
+- **Time Complexity:** $O(1)$ per pixel [G].
+- **Memory Complexity:** $O(1)$ [G].
+- **Performance:** Extremely fast, suitable for real-time rendering on all hardware [G].
+- **Strengths:** Physically plausible appearance for homogeneous media; simple to implement; effective at hiding far-clipping artifacts [G].
+- **Limitations:** Assumes homogeneous density; does not account for in-scattering or height variations; can look flat if not combined with other effects like [Height-based Fog with Directional In-scatter](4400-height-based-fog-with-directional-in-scatter.md) [G].
+- **When to Use:** Small to medium-scale scenes, indoor environments, or as a post-process for atmospheric haze [G].
+- **When Not to Use:** Large-scale outdoor scenes requiring altitude-dependent fog or volumetric cloud structures [G].
 
 ## Background
-Exponential Fog is based on the Beer-Lambert law, which describes the attenuation of light as it passes through a medium [S1, unofficial]. It has been widely used in computer graphics since the early days of ray tracing and real-time rendering to simulate atmospheric effects. The method is commonly implemented in shaders for games and visualizations to enhance depth perception and visual quality.
+Exponential Fog is based on the Beer-Lambert law, which describes the attenuation of light as it passes through a medium [S1, unofficial]. It has been widely used in computer graphics since the early days of ray tracing and real-time rendering to simulate atmospheric effects [G]. The method is commonly implemented in shaders for games and visualizations to enhance depth perception and visual quality [G].
 
 ## Sources
 [S1] GitHub - razzle-reinizu/Voxel-World-Shader: A GLSL voxel-world shader ..., https://github.com/razzle-reinizu/Voxel-World-Shader, fetched 2026-10-25 (unofficial)

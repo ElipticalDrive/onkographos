@@ -1,97 +1,212 @@
 # Near Plane Clipping Correction
 
-Also called: Camera Inside Volume Handling
+Also called: Camera Inside Volume Handling, Inside-Volume Volume Rendering via Backface Raycasting
 
 ## Overview
-Near Plane Clipping Correction handles the artifact where the camera is located inside a fluid volume and the camera's near clipping plane intersects the front faces of the volume geometry. Without correction, the front faces are clipped, leaving no valid entry point for the ray-marching algorithm, which results in incorrect ray depths and missing volume data. It sets itself apart from standard bounding-box raycasting by explicitly detecting clipped regions via back-face rendering markers and correcting the ray origin and depth using the near plane intersection [S1, unofficial].
+Near Plane Clipping Correction is a technique for rendering volumetric data when the camera is located inside the volume bounds or when the camera's near clipping plane intersects the front faces of the volume bounding box [S1, S2, unofficial]. It solves the problem of incorrect ray entry points and depth values that occur when the front faces are clipped, which would otherwise cause the raymarching algorithm to sample outside the volume or miss the entry point entirely [S2, unofficial]. It sets itself apart from standard back-face rasterized volume rendering by explicitly detecting clipped regions via channel marking and correcting the ray origin and depth for those specific pixels [S2, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A RayData texture (initialized to zero), the volume geometry (front and back faces), the camera near plane distance, and the camera-to-near-plane intersection positions.
-*   **Output:** A corrected RayData texture where pixels corresponding to clipped front faces contain valid entry positions and marching distances derived from the near plane.
+The method operates in two rendering passes (front faces and back faces) to populate a `RayData` texture, followed by a raymarching pass that uses this data.
 
-**Data Structures:**
-*   **RayData Texture:** A 2D texture storing ray parameters.
-    *   **Red Channel:** Stores a large negative value to mark empty space or invalid rays [S1, unofficial].
-    *   **Green Channel:** Used as a marker. A negative value indicates that the back face was rendered but the front face was clipped [S1, unofficial].
-    *   **Other Channels:** Store the ray entry position and marching distance (as per the parent method [3077-volume-ray-casting-with-raydata-texture.md]).
+### Inputs and Outputs
+*   **Inputs:**
+    *   Camera position in world coordinates ($C_{world}$).
+    *   Volume bounding box defined by its center, axes, and sizes.
+    *   `RayData` texture (cleared to zero before rendering).
+    *   3D volume texture.
+*   **Outputs:**
+    *   Final composited image.
+    *   Updated `RayData` texture containing ray entry positions and marching distances.
 
-**Steps:**
-1.  **Clear RayData Texture:** Initialize the RayData texture to zero for all pixels [S1, unofficial].
-2.  **Render Back Faces:** Render the back faces of the fluid volume. When writing to the RayData texture, write a negative color value into the green channel. This marks pixels where the back face is visible [S1, unofficial].
-3.  **Render Front Faces:** Render the front faces of the fluid volume. Do not modify the RGB values of the destination color during this pass (using alpha blending as defined in Equation 1 of the source) [S1, unofficial].
-4.  **Identify Clipped Regions:** After both passes, inspect the RayData texture. Pixels with a negative green channel indicate that the back face was rendered (step 2) but the front face was not rendered (step 3) due to near-plane clipping [S1, unofficial].
-5.  **Correct Ray Origin in Shader:** In the ray-casting shader, for any pixel identified as clipped (negative green channel):
-    *   Explicitly initialize the ray entry position to the texture-space position of the corresponding point on the near plane [S1, unofficial].
-6.  **Correct Ray Depth:**
-    *   Read the depth value from the RayData texture.
-    *   Subtract the distance from the eye (camera) to the corresponding point on the near plane from this depth value [S1, unofficial].
+### Data Structures
+1.  **Volume Box Matrix ($M_{vol}$):** A $4 \times 4$ matrix defining the local coordinate system of the volume.
+    *   Columns 0, 1, 2: `vec4(axis_direction * length, 0)`.
+    *   Column 3: `vec4(tx, ty, tz, 1)` where $(tx, ty, tz)$ is the box position.
+2.  **RayData Texture:** Stores ray entry position and length.
+    *   Green channel: Used to mark pixels where back faces were rendered but front faces were clipped (negative value indicates clipping) [S2, unofficial].
+3.  **AABB Structure:**
+    ```glsl
+    struct AABB {
+        vec3 min; // (0,0,0) in local unit cube
+        vec3 max; // (1,1,1) in local unit cube
+    };
+    ```
+4.  **Ray Structure:**
+    ```glsl
+    struct Ray {
+        vec3 origin;
+        vec3 dir;
+    };
+    ```
 
-**Pseudocode:**
+### Numbered Steps
+
+1.  **Coordinate System Transformation:**
+    Construct $M_{vol}$ based on the volume box axes and sizes. Compute the inverse matrix $M_{inv} = M_{vol}^{-1}$ [S1, unofficial]. Transform the camera position $C_{world}$ into the local unit cube coordinate system ($C_{local}$) by multiplying $M_{inv}$ by $vec4(C_{world}, 1)$ from the right [S1, unofficial]. Pass $C_{local}$ as a uniform `LOCAL_CAM_POS` to the shader [S1, unofficial].
+
+2.  **Front Face Rendering (Preparation):**
+    Render the front faces of the volume bounding box. Do not modify the RGB channels of the `RayData` texture during this pass (use alpha blending that ignores destination RGB) [S2, unofficial]. This pass establishes the baseline depth and entry points for pixels where the camera is outside the volume [S2, unofficial].
+
+3.  **Back Face Rendering (Marking):**
+    Render only the back faces of the volume bounding box. The vertices of these faces have coordinates $(0,0,0)$ to $(1,1,1)$ in the local system. Pass the interpolated local unit texture coordinates ($v_{LocalUnitTexCoord}$) to the shader [S1, unofficial].
+    *   Write a **negative** color value into the **green channel** of the `RayData` texture for these pixels [S2, unofficial].
+    *   This marks pixels where the back face is visible but the front face was clipped by the near plane [S2, unofficial].
+
+4.  **Ray Setup in Shader:**
+    For each pixel, define the ray origin and direction:
+    *   Ray Origin: $r.origin = LOCAL\_CAM\_POS$ [S1, unofficial].
+    *   Ray Direction: $r.dir = normalize(v_{LocalUnitTexCoord} - LOCAL\_CAM\_POS)$ [S1, unofficial].
+
+5.  **Entry Distance Calculation:**
+    Calculate the entry distance $t$ to the unit AABB ($[0,1]^3$) using the slab method [S1, unofficial]:
+    $$
+    rInvDir = \frac{1.0}{r.dir}
+    $$
+    $$
+    tMinima = (b.min - r.origin) \times rInvDir
+    $$
+    $$
+    tMaxima = (b.max - r.origin) \times rInvDir
+    $$
+    $$
+    tEntries = \min(tMinima, tMaxima)
+    $$
+    $$
+    tMaxEntryCandidates = \max(\max(tEntries.x, tEntries.y), tEntries.z) \quad \text{(via vec2 operations)}
+    $$
+    $$
+    t = tMaxEntry
+    $$
+    *(Note: The source code computes `tMaxEntry` as the maximum of the minimums, which corresponds to the first entry point of the ray into the box)* [S1, unofficial].
+
+6.  **Start Position Determination:**
+    Determine the start position for the raymarching loop by mixing between the camera position and the front-face intersection point based on the sign of $t$ [S1, unofficial]:
+    $$
+    useFrontCoord = 0.5 + 0.5 \times \text{sign}(t)
+    $$
+    $$
+    startPos = \text{mix}(LOCAL\_CAM\_POS, frontFaceIntersection, useFrontCoord)
+    $$
+    Where $frontFaceIntersection = LOCAL\_CAM\_POS + r.dir \times t$ [S1, unofficial].
+    *   If $t > 0$ (camera outside), use the front face intersection.
+    *   If $t \le 0$ (camera inside), use the camera position [S1, unofficial].
+
+7.  **Clipping Correction (Shader):**
+    Check the green channel of the `RayData` texture. If it is negative, the front face was clipped [S2, unofficial]:
+    *   **Origin Correction:** Explicitly initialize the ray entry position to the texture-space position of the corresponding point on the near plane [S2, unofficial].
+    *   **Depth Correction:** Subtract the distance from the eye to the corresponding point on the near plane from the depth value read from the `RayData` texture [S2, unofficial].
+
+8.  **Raymarching:**
+    Perform the standard raymarching loop from $startPos$ to $v_{LocalUnitTexCoord}$ (end point) [S1, unofficial].
+
+### Pseudocode
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pseudocode for the ray-casting shader fragment
-def ray_cast_shader(uv):
-    # Read RayData texture
-    ray_data = read_ray_data(uv)
+# Vertex Shader / Setup
+# M_vol is the 4x4 matrix of volume box axes and position
+# M_inv is M_vol inverse
+# C_world is camera position in world space
+LOCAL_CAM_POS = M_inv * vec4(C_world, 1.0)
+
+# Fragment Shader (Back Face Pass)
+# vLocalUnitTexCoord: interpolated local unit texture coordinate of the back face vertex
+# RayDataTex: texture storing ray info, cleared to 0 before rendering
+
+void render_back_face() {
+    // Mark clipped regions by writing negative value to green channel
+    // This happens when back face is rendered but front face was clipped
+    write_to_raydata_texture(vec4(0.0, -1.0, 0.0, 0.0)); 
+}
+
+# Fragment Shader (Raymarching Pass)
+vec3 LOCAL_CAM_POS; // Uniform from step 1
+varying vec3 vLocalUnitTexCoord; // From back face rendering
+
+struct AABB {
+    vec3 min;
+    vec3 max;
+};
+
+struct Ray {
+    vec3 origin;
+    vec3 dir;
+};
+
+float get_unit_aabb_entry(Ray r) {
+    AABB b;
+    b.min = vec3(0.0);
+    b.max = vec3(1.0);
     
-    # Check if this pixel was marked as clipped
-    # Negative green channel indicates back face rendered, front face clipped
-    if ray_data.green < 0:
-        # Get the intersection point with the near plane
-        # This requires computing the ray direction from the camera to uv
-        # and intersecting with the near plane at distance z_near
-        near_plane_pos = compute_near_plane_intersection(uv, camera_position, camera_direction, z_near)
-        
-        # Correct the ray entry position
-        ray_entry_position = near_plane_pos
-        
-        # Correct the depth
-        # Distance from eye to near plane point
-        dist_to_near = length(near_plane_pos - camera_position)
-        
-        # Original depth from RayData (which is incorrect/invalid for clipped regions)
-        original_depth = ray_data.depth
-        
-        # Subtract the distance to the near plane to get the correct remaining march distance
-        # Note: The source says "subtract from it the distance... from the depth value"
-        # This implies the stored depth might be absolute or relative to a different origin.
-        # Assuming the RayData texture stores the total distance to the back face or similar,
-        # we adjust it.
-        corrected_depth = original_depth - dist_to_near
-        
-        return ray_entry_position, corrected_depth
-    else:
-        # Standard case: use data from RayData texture
-        return ray_data.entry_position, ray_data.depth
+    vec3 rInvDir = vec3(1.0) / r.dir;
+    vec3 tMinima = (b.min - r.origin) * rInvDir;
+    vec3 tMaxima = (b.max - r.origin) * rInvDir;
+    
+    vec3 tEntries = min(tMinima, tMaxima);
+    
+    // Find the maximum of the minimums (first entry point)
+    // Using vec2 operations as per source
+    vec2 tMaxEntryCandidates = max(vec2(tEntries.x, tEntries.y), vec2(tEntries.z, tEntries.z));
+    float tMaxEntry = max(tMaxEntryCandidates.x, tMaxEntryCandidates.y);
+    
+    return tMaxEntry;
+}
+
+vec3 get_closer_pos(vec3 camera, vec3 frontFaceIntersection, float t) {
+    float useFrontCoord = 0.5 + 0.5 * sign(t);
+    return mix(camera, frontFaceIntersection, useFrontCoord);
+}
+
+void main() {
+    Ray r;
+    r.origin = LOCAL_CAM_POS;
+    r.dir = normalize(vLocalUnitTexCoord - LOCAL_CAM_POS);
+    
+    float t = get_unit_aabb_entry(r);
+    vec3 frontFaceLocalUnitTexCoord = r.origin + r.dir * t;
+    vec3 startPos = get_closer_pos(LOCAL_CAM_POS, frontFaceLocalUnitTexCoord, t);
+    
+    // Clipping Correction
+    float greenChannel = read_raydata_green_channel();
+    if (greenChannel < 0.0) {
+        // Camera is inside or front face is clipped
+        // Initialize position to near plane point
+        // Correct depth by subtracting distance to near plane
+        startPos = get_near_plane_point(vLocalUnitTexCoord); // [G] Implementation detail for near plane intersection
+        // Depth correction logic would be applied here to the RayData depth value
+    }
+    
+    vec3 end = vLocalUnitTexCoord;
+    
+    // Raymarching loop from startPos to end
+    // ...
+}
 ```
 
-**Parameters:**
-*   **Negative Marker Value:** Any negative value in the green channel serves as the marker [S1, unofficial].
-*   **Large Negative Value:** A large negative value in the red channel is used to mark empty space or rays that should not sample the volume [S1, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **Precision:** Ensure the negative marker in the green channel is distinguishable from valid positive depth/position data.
-*   **Boundary Conditions:** The correction only applies to pixels where the front face is clipped. If the front face is fully visible, the standard RayData values are used.
-*   **Near Plane Intersection:** Accurately computing the texture-space position of the near plane intersection is critical for correct ray origin initialization [S1, unofficial].
+### Parameters and Edge Cases
+*   **RayData Texture Clearing:** Must be cleared to zero before rendering front faces [S2, unofficial].
+*   **Green Channel Sign:** Negative green channel indicates clipping [S2, unofficial].
+*   **Precision:** The slab method relies on division by `r.dir`. If `r.dir` components are zero, special handling is required (not detailed in sources) [S1, unofficial].
+*   **Camera Inside Volume:** The method correctly handles the case where the camera is inside the volume by using the camera position as the start point when $t \le 0$ [S1, unofficial].
 
 ## Subtopics
 
 ### Viewpoint Inside Volume Ray Setup
-A technique to allow the viewpoint to be inside the volume (e.g., virtual colonoscopy) by intersecting the ray with polygonal geometry instead of just a bounding box. It involves computing a starting position image, a ray length image, rendering polygonal geometry to modify the ray length image (filling holes caused by clipping), performing raycasting into a compositing buffer, and blending to the final image. A key pitfall is that the near clipping plane may clip into the front faces of the volume, creating holes that must be filled using the near clipping plane or depth buffer [S2, unofficial].
+A technique to allow the viewpoint to be inside the volume (e.g., virtual colonoscopy) by intersecting the ray with polygonal geometry instead of just a bounding box [S3, unofficial]. It involves computing a starting position image, a ray length image, rendering polygonal geometry to modify the ray length image (filling holes caused by near clipping), performing raycasting into a compositing buffer, and blending to the final image [S3, unofficial]. The pitfall is that the near clipping plane may clip into the front faces of the volume, creating holes that must be filled using the near clipping plane or depth buffer [S3, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Adds two additional rendering passes (back faces and front faces) to populate the RayData texture, plus a conditional check in the ray-casting shader.
-*   **Memory Complexity:** Requires a RayData texture with specific channel usage (green for marking, red for empty space markers).
-*   **Strengths:** Correctly handles the complex case of a camera inside a volume, which is common in medical visualization (e.g., virtual colonoscopy) [S2, unofficial].
-*   **Limitations:** Requires careful management of the RayData texture channels and additional rendering passes. The correction relies on the assumption that the back face is visible when the front face is clipped.
-*   **When to Use:** When the camera can be inside the volume and the near plane may intersect the volume geometry.
-*   **When Not to Use:** When the camera is always outside the volume and the near plane does not intersect the volume front faces.
+*   **Time Complexity:** Adds two additional rendering passes (front and back faces) to populate the `RayData` texture, plus the standard raymarching pass. The raymarching pass itself is $O(N)$ where $N$ is the number of samples per ray.
+*   **Memory Complexity:** Requires a `RayData` texture to store entry positions and depths.
+*   **Strengths:** Correctly handles camera positions inside the volume and near-plane clipping without requiring complex scene traversal or multiple ray origins [S1, S2, unofficial].
+*   **Limitations:** Relies on the volume being approximated by a bounding box for the entry point calculation. If the volume has complex internal geometry, the bounding box approximation may be inaccurate [S3, unofficial].
+*   **When to Use:** When rendering fluid volumes or when the camera is expected to move inside the volume bounds [S1, S3, unofficial].
+*   **When Not to Use:** When the volume has complex internal geometry that cannot be approximated by a simple bounding box, or when the camera is always outside the volume [S3, unofficial].
 
 ## Background
-The method was described in the context of real-time simulation and rendering of 3D fluids, specifically addressing artifacts caused by near-plane clipping when the camera is inside the fluid volume [S1, unofficial]. It is also discussed in the context of GPU-based volume ray-casting with advanced illumination, where it is part of a broader strategy for handling viewpoints inside the volume, such as in virtual colonoscopy [S2, unofficial].
+The technique originates from GPU Gems 3, Chapter 30, "Real-Time Simulation and Rendering of 3D Fluids" [S2, unofficial]. It was developed to handle the specific challenges of rendering fluid simulations where the camera can be located inside the fluid volume or where the near clipping plane intersects the fluid boundaries [S2, unofficial]. The method is also discussed in the context of advanced illumination techniques for GPU-based volume raycasting, particularly for applications like virtual colonoscopy [S3, unofficial].
 
 ## Sources
-[S1] Real-Time Simulation and Rendering of 3D Fluids, https://wo1fsea.github.io/files/About_NavMesh/P5_GPU_Gems_3_Real-Time_Simulation_and_Rendering_of_3D_Fluids.pdf, fetched 2026-10-27 (unofficial)
-[S2] GPU-Based Volume Ray-Casting with Advanced Illumination, https://doi.org/10.2312/egt.20091069, fetched 2026-10-26 (unofficial)
+[S1] Volume rendering from inside volume, https://stackoverflow.com/questions/30235879/volume-rendering-from-inside-volume, fetched 2026-10-27 (unofficial)
+[S2] PDF Real-Time Simulation and Rendering of 3D Fluids, https://wo1fsea.github.io/files/About_NavMesh/P5_GPU_Gems_3_Real-Time_Simulation_and_Rendering_of_3D_Fluids.pdf, fetched 2026-10-27 (unofficial)
+[S3] GPU-Based Volume Ray-Casting with Advanced Illumination, https://doi.org/10.2312/egt.20091069, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,140 @@
+# Fractal Value Noise with Domain Warping
+Also called: Tiled Fractal Noise
+## Overview
+Fractal Value Noise with Domain Warping is a multi-scale procedural noise technique that generates seamless tiled volume data by warping the input coordinate space before sampling. It solves the problem of directional stripe artifacts common in standard tiled noise by using independent lattices for warping and sampling, ensuring isotropic, organic patterns without fixed-direction periodicity [S1, unofficial]. It builds on [Tiled Value Noise](8293-tiled-value-noise.md) by adding non-linear coordinate distortion and fractal summation.
+## How it works
+**Inputs and Outputs:**
+- Input: 3D coordinates $(x, y, z)$, a detail parameter $d \in [0.0, 1.0]$, a seed, and a list of pre-generated value noise lattices.
+- Output: A scalar value $v \in [0.0, 1.0]$ representing the noise amplitude at the warped location.
+
+**Data Structures:**
+- `lattices`: A list of value noise lookup tables. The source specifies using at least three distinct lattices for warping and sampling [S1, unofficial].
+- `MaskParameters`: Contains `seed`, `resolution`, `weather`, etc., but for the noise function itself, only `seed` and `lattices` are directly relevant to the noise generation step [S1, unofficial].
+
+**Parameters:**
+- Warp strength base: $0.12$
+- Warp strength scale: $0.08$ per detail unit
+- Weight decay base: $0.52$
+- Weight decay scale: $0.16$ per detail unit
+- Detail parameter $d$: Range $[0.0, 1.0]$ [S1, unofficial]
+
+**Steps:**
+1. Calculate warp strength $W$:
+   $$ W = 0.12 + 0.08 \cdot \text{clip}(d, 0.0, 1.0) $$
+2. Select warping lattices $L_x, L_y, L_z$ from the available lattices list:
+   $$ L_x = \text{lattices}[0] $$
+   $$ L_y = \text{lattices}[\min(1, \text{len}(\text{lattices}) - 1)] $$
+   $$ L_z = \text{lattices}[\min(2, \text{len}(\text{lattices}) - 1)] $$
+3. Compute warp offsets using linear combinations of input coordinates to maintain periodicity. The offsets are centered around zero by subtracting 0.5:
+   $$ w_x = \text{value\_noise\_slice}(L_x, x + y, y - z, z + x) - 0.5 $$
+   $$ w_y = \text{value\_noise\_slice}(L_y, 2.0x - y, x + z, y + z) - 0.5 $$
+   $$ w_z = \text{value\_noise\_slice}(L_z, x - z, 2.0y + z, x + y - z) - 0.5 $$
+4. Apply warp to coordinates:
+   $$ x' = x + W \cdot w_x $$
+   $$ y' = y + W \cdot w_y $$
+   $$ z' = z + W \cdot w_z $$
+5. Define five coordinate transforms for multi-scale sampling. Let $(x', y', z')$ be the warped coordinates:
+   - Transform 0: $(x', y', z')$
+   - Transform 1: $(x' + y', y' + z', z' + x')$
+   - Transform 2: $(2.0x' - y', x' + 2.0y', z' + y')$
+   - Transform 3: $(x' - z', 2.0y' + z', x' + y' - z')$
+   - Transform 4: $(2.0x' + z', y' - x', 2.0z' + y')$
+6. Sample noise at each scale using rotating transforms. For $i$ from $0$ to $N-1$ (where $N$ is the number of lattices):
+   $$ \text{sample}_i = \text{value\_noise\_slice}(\text{lattices}[i], \text{transforms}[i \pmod 5]) $$
+7. Calculate weights for fractal summation. The first weight is 1.0. Subsequent weights decay based on the detail parameter:
+   $$ \text{weights}[0] = 1.0 $$
+   $$ \text{weights}[i] = (0.52 + d \cdot 0.16)^i \quad \text{for } i > 0 $$
+8. Normalize and clip the result:
+   $$ v = \text{clip}\left( \frac{\sum_{i=0}^{N-1} \text{sample}_i \cdot \text{weights}[i]}{\sum_{i=0}^{N-1} \text{weights}[i]}, 0.0, 1.0 \right) $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def fractal_value_noise_with_domain_warp(x, y, z, detail, lattices):
+    """
+    Generates fractal value noise with domain warping.
+    
+    Args:
+        x, y, z: Input 3D coordinates.
+        detail: Detail parameter in [0.0, 1.0].
+        lattices: List of value noise lookup tables (lattice objects or arrays).
+        
+    Returns:
+        float: Noise value in [0.0, 1.0].
+    """
+    # 1. Calculate warp strength
+    warp_strength = 0.12 + 0.08 * np.clip(detail, 0.0, 1.0)
+    
+    # 2. Select warping lattices
+    lattice_x = lattices[0]
+    lattice_y = lattices[min(1, len(lattices) - 1)]
+    lattice_z = lattices[min(2, len(lattices) - 1)]
+    
+    # 3. Compute warp offsets
+    # Note: _value_noise_slice is assumed to be the underlying tiled value noise function
+    # defined in the parent article [Tiled Value Noise](8293-tiled-value-noise.md).
+    warp_x = _value_noise_slice(lattice_x, x + y, y - z, z + x) - 0.5
+    warp_y = _value_noise_slice(lattice_y, 2.0 * x - y, x + z, y + z) - 0.5
+    warp_z = _value_noise_slice(lattice_z, x - z, 2.0 * y + z, x + y - z) - 0.5
+    
+    # 4. Apply warp to coordinates
+    warped_x = x + warp_strength * warp_x
+    warped_y = y + warp_strength * warp_y
+    warped_z = z + warp_strength * warp_z
+    
+    # 5. Define coordinate transforms
+    transforms = [
+        (warped_x, warped_y, warped_z),
+        (warped_x + warped_y, warped_y + warped_z, warped_z + warped_x),
+        (2.0 * warped_x - warped_y, warped_x + 2.0 * warped_y, warped_z + warped_y),
+        (warped_x - warped_z, 2.0 * warped_y + warped_z, warped_x + warped_y - warped_z),
+        (2.0 * warped_x + warped_z, warped_y - warped_x, 2.0 * warped_z + warped_y)
+    ]
+    
+    # 6. Sample noise at each scale
+    samples = []
+    for index, lattice in enumerate(lattices):
+        # Rotate through transforms
+        transform_idx = index % len(transforms)
+        tx, ty, tz = transforms[transform_idx]
+        samples.append(_value_noise_slice(lattice, tx, ty, tz))
+        
+    # 7. Calculate weights
+    weights = [1.0]
+    for index in range(1, len(lattices)):
+        weight = (0.52 + detail * 0.16) ** index
+        weights.append(weight)
+        
+    # 8. Normalize and clip
+    total = sum(s * w for s, w in zip(samples, weights))
+    sum_weights = sum(weights)
+    
+    if sum_weights == 0:
+        return 0.5 # [G] Fallback for empty lattices, though unlikely given logic
+        
+    result = total / sum_weights
+    return np.clip(result, 0.0, 1.0)
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The linear combinations in warp offset calculation (e.g., $2.0x - y$) can amplify floating-point errors if coordinates are very large. However, since the underlying noise is tiled, coordinates are typically normalized or wrapped. [S1, unofficial]
+- **Boundary Conditions:** The method relies on the periodicity of the underlying tiled value noise. If the underlying noise implementation is not strictly periodic, the domain warping will introduce seams. [S1, unofficial]
+- **Degenerate Input:** If `lattices` is empty, the function should handle this gracefully. The pseudocode assumes at least one lattice. [G]
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of lattices used for fractal summation. Each lattice requires a constant number of value noise lookups.
+- **Memory Complexity:** $O(N)$ for storing the lattices. The warp calculation uses $O(1)$ additional memory.
+- **Performance:** The method is computationally more expensive than standard value noise due to the multiple lookups and coordinate transformations. However, it avoids expensive trigonometric functions, relying on linear combinations and integer-based tiling. [S1, unofficial]
+- **Strengths:** Produces organic, isotropic patterns without directional artifacts. Seamless tiling is maintained. [S1, unofficial]
+- **Limitations:** Requires pre-generated lattices. The warp strength and detail parameters need tuning for specific visual effects. [S1, unofficial]
+- **When to use:** Ideal for procedural volume textures like clouds, smoke, or terrain where seamless tiling and organic detail are required. [S1, unofficial]
+- **When not to use:** When computational resources are extremely limited and simple noise suffices, or when non-periodic boundaries are required. [S1, unofficial]
+
+## Background
+This method is described in the context of generating cloud masks for Unreal Engine 5 (UE5) in the repository `Noise-Cloud` by mingtu149411. It is an unofficial technique designed to produce high-quality, seamless procedural noise for volume rendering applications. [S1, unofficial]
+
+## Sources
+[S1] mingtu149411/Noise-Cloud, https://github.com/mingtu149411/Noise-Cloud, fetched 2026-10-27 (unofficial)

@@ -3,18 +3,15 @@
 Also called: Benefit-Cost Optimization, Greedy Optimization for Data Storage
 
 ## Overview
-This method selects which nodes in a wavelet tree should have their data pre-reconstructed and stored on disk to trade storage space for run-time efficiency [S1]. It solves the problem of limited storage by maximizing the reduction in reconstruction time subject to a per-processor storage constraint [S1]. It differs from its parent, [L2 Norm Wavelet Compression](3542-l2-norm-wavelet-compression.md), by introducing a greedy heuristic that balances visiting likelihood, load-balancing penalties, and time savings, rather than relying solely on error metrics for compression decisions [S1].
+This method selects which nodes in a wavelet tree should have their data pre-reconstructed and stored on disk to trade storage space for run-time efficiency [S1]. It solves the problem of limited storage by maximizing the reduction in reconstruction time subject to a per-processor storage constraint [S1]. It differs from its parent, [L2 Norm Wavelet Compression](3542-l2-norm-wavelet-compression.md), by formulating node selection as a benefit-cost optimization solved via a greedy heuristic [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** The wavelet tree structure, the additional storage budget $\Delta$ per processor, and the current state of selected nodes.
-*   **Output:** A set $\Omega$ of nodes selected to store pre-reconstructed data.
+*   **Input:** The wavelet tree structure, the additional storage budget $\Delta$ per processor, and the current state of selected nodes [S1].
+*   **Output:** A set $\Omega$ of nodes selected to store pre-reconstructed data [S1].
 
 **Data Structures:**
-The wavelet tree is organized into distribution units assigned to processors. Each node $i$ in the tree maintains:
-*   Error value $E(i)$.
-*   Status: selected or unselected.
-*   Count of selected descendants/ancestors within its distribution unit (for penalty calculation).
+The wavelet tree is organized into distribution units assigned to processors [S1]. Each node $i$ maintains its error value $E(i)$, selection status, and the count of selected nodes within its distribution unit for penalty calculation [S1].
 
 **Formulas:**
 The goal is to maximize the total benefit subject to the storage constraint [S1]:
@@ -25,7 +22,7 @@ The benefit $B(i)$ for a node $i$ is defined as [S1]:
 $$ B(i) = L(i) \times P(i) \times R(i) $$
 
 Where:
-1.  **Visiting Likelihood $L(i)$:** Approximated by the error value $E(i)$ of the node. Nodes closer to the root or containing more information (non-uniform) are visited more often [S1]. The value is normalized before use in $B(i)$ [S1]:
+1.  **Visiting Likelihood $L(i)$:** Approximated by the error value $E(i)$ of the node [S1]. Nodes closer to the root or containing more information are visited more often [S1]. The value is normalized before use in $B(i)$ [S1]:
     $$ L(i) = E(i) $$
 2.  **Penalty Factor $P(i)$:** Prevents clustering of selected nodes within a single distribution unit to avoid load imbalance [S1]:
     $$ P(i) = p^\lambda $$
@@ -33,25 +30,24 @@ Where:
 3.  **Reconstruction Quality/Time Reduction $R(i)$:** Estimates the contribution to the reduction of overall reconstruction time per unit of storage [S1]:
     $$ R(i) = \frac{T'(i) - T(i)}{S(i) - S'(i)} $$
 
-Time components are defined as follows [S1]:
-*   $T(i)$: Time to load reconstructed data if node $i$ is selected.
+The time components for calculating $R(i)$ are defined as [S1]:
+*   $T(i)$: Time to load the reconstructed data if node $i$ is selected.
     $$ T(i) = T_1(i) $$
-*   $T'(i)$: Time to load and reconstruct data if node $i$ is not selected.
+*   $T'(i)$: Time to load and reconstruct the data if node $i$ is not selected.
     $$ T'(i) = T_2(i) + T_3(i) + T_4(i) $$
 
 The specific time operations are [S1]:
 *   $T_1(i)$: Load the file stream of the reconstructed data from disk.
 *   $T_2(i)$: Load the compressed file stream of the wavelet coefficients from disk and perform decoding.
 *   $T_3(i)$: Retrieve the low-pass filtered subblock from ancestor nodes recursively. This depends on the status of the parent node $j$ of node $i$:
-    $$ T_3 = \begin{cases} T(j) + T_5(i) & \text{if } j \in \Omega \\ T_5(i) & \text{if } j \notin \Omega \end{cases} $$
-    *(Note: The source formula $T_3 = \{ T(j) + T_5(i) \mid j \in \Omega; \quad T'(j) + T_5(i) \mid j \notin \Omega \}$ implies a conditional sum or selection based on parent status. Standard interpretation is that if the parent is selected, we use its pre-loaded data $T(j)$; otherwise, we must reconstruct it, costing $T'(j)$ or similar. However, the text explicitly links $T_3$ to retrieving from ancestors. If the parent is selected, its data is available via $T(j)$. If not, it must be reconstructed. The source notation is slightly ambiguous, but logically $T_3$ represents the cost to get the low-pass block. If parent $j$ is in $\Omega$, we load it ($T(j)$). If not, we must reconstruct it. The source writes $T'(j)$ for the non-selected case. Thus: $T_3 = T(j) + T_5(i)$ if $j \in \Omega$, else $T'(j) + T_5(i)$)*.
+    $$ T_3(i) = \begin{cases} T(j) + T_5(i) & \text{if } j \in \Omega \\ T'(j) + T_5(i) & \text{if } j \notin \Omega \end{cases} $$
 *   $T_4(i)$: Compose the low-pass filtered subblock and wavelet coefficients into one block, and perform a 3D inverse wavelet transform.
 *   $T_5(i)$: Extract the low-pass filtered subblock from a data block.
 
 Storage components are defined as [S1]:
 *   $S(i)$: Storage space node $i$ consumes to store reconstructed data if selected.
 *   $S'(i)$: Storage space node $i$ needs to store wavelet coefficients when not selected.
-*   $\text{Cost}(i) = S(i) - S'(i)$ (Implicitly, the additional storage required).
+*   $\text{Cost}(i) = S(i) - S'(i)$ represents the additional storage required [S1].
 
 **Parameters:**
 *   $\Delta$: The additional storage space the user is allowed to use in each processor [S1].
@@ -63,9 +59,7 @@ Storage components are defined as [S1]:
 3.  While there is remaining storage space in any processor ($\sum_{\omega \in \Omega} \text{Cost}(\omega) < \Delta$):
     a. Traverse all wavelet tree nodes in all distribution units assigned to a processor.
     b. Identify the unselected node $i$ with the highest benefit $B(i)$.
-    c. If $\text{Cost}(i)$ fits within the remaining budget for that processor:
-        i. Add $i$ to $\Omega$.
-        ii. Update the benefit values for all remaining nodes in node $i$'s distribution unit (specifically, update $\lambda$ for nodes in the same unit, which affects $P(i)$).
+    c. If $\text{Cost}(i)$ fits within the remaining budget for that processor: add $i$ to $\Omega$ and update the benefit values for all remaining nodes in node $i$'s distribution unit (specifically, update $\lambda$ for nodes in the same unit, which affects $P(i)$) [S1].
     d. If no node fits or no nodes remain, break.
 4.  Return $\Omega$.
 
@@ -78,18 +72,17 @@ def greedy_optimization(wavelet_tree, delta_per_processor, penalty_p):
     Select nodes to pre-reconstruct to maximize time reduction within storage budget.
     
     Args:
-        wavelet_tree: Structure containing nodes. Each node has:
-            - id
-            - distribution_unit_id
-            - error_value E(i)
-            - is_selected (bool)
-            - storage_reconstructed S(i)
-            - storage_wavelet S_prime(i)
-            - time_load_reconstructed T1(i)
-            - time_load_decode T2(i)
-            - time_extract_lowpass T5(i)
-            - time_inverse_transform T4(i)
-            - parent_node_ref
+        wavelet_tree: List of node objects. Each node has:
+            - id: unique identifier
+            - distribution_unit_id: integer
+            - E: normalized error value
+            - S: storage for reconstructed data
+            - S_prime: storage for wavelet coefficients
+            - T1: time to load reconstructed data
+            - T2: time to load/decode coefficients
+            - T4: time for 3D inverse wavelet transform
+            - T5: time to extract low-pass subblock
+            - parent_id: id of parent node or None
         delta_per_processor: Dict mapping processor_id to remaining storage budget.
         penalty_p: Float in (0.0, 1.0).
         
@@ -98,155 +91,62 @@ def greedy_optimization(wavelet_tree, delta_per_processor, penalty_p):
     """
     selected_nodes = set()
     
-    # Pre-calculate initial benefits
-    # Note: L(i) needs normalization. We assume a global normalization step or 
-    # that E(i) is already normalized. The source says "normalized before being used".
-    # For implementation, we might need to find max E(i) or sum E(i).
-    # Let's assume E(i) is normalized such that it represents relative likelihood.
+    def get_processor(unit_id):
+        """Map distribution unit ID to processor ID [G]."""
+        return unit_id  # Assumes 1:1 mapping; in practice, a lookup table is used.
     
-    # Helper to calculate T3
     def calc_T3(node):
-        parent = node.parent_node_ref
-        if parent is None:
-            # Root node, no ancestor to retrieve from? 
-            # Source says "retrieve ... from ancestor nodes". 
-            # If no ancestor, T3 might be 0 or just T5. 
-            # Assuming T5 is extraction from the block itself if no ancestor needed.
-            # However, T3 is "retrieve low-pass ... from ancestor". 
-            # If node is root, it has no ancestor. 
-            # Let's assume T3 = T5(i) if no ancestor, or 0 if T5 handles extraction from self.
-            # Source table: T5 is "extract low-pass ... from a data block".
-            # T3 is "retrieve ... from ancestor".
-            # If parent is selected, we use T(parent). If not, T'(parent).
-            # If no parent, T3 = 0? Or T5? 
-            # Let's assume if no parent, T3 = 0, and T5 is the extraction cost from the 
-            # reconstructed block if available, or from coefficients if not.
-            # Actually, T'(i) = T2 + T3 + T4. T2 gets coefficients. T3 gets lowpass. T4 combines.
-            # If parent is selected, T3 = T(parent) + T5(i). 
-            # If parent is NOT selected, T3 = T'(parent) + T5(i).
-            # If no parent, T3 = T5(i) (assuming T5 extracts from the current node's 
-            # available data, which for root might be the whole block).
-            # Let's stick to the formula: T3 depends on parent status.
-            return node.T5(i) # Assuming T5 handles the case where no ancestor is needed
-        
+        """Calculate T3(i) based on parent status [S1]."""
+        parent_id = node.parent_id
+        if parent_id is None:
+            return node.T5
+        parent = next(n for n in wavelet_tree if n.id == parent_id)
         if parent.id in selected_nodes:
-            return node.parent.T1() + node.T5(i)
+            return parent.T1 + node.T5
         else:
-            # Parent is not selected, must reconstruct it
-            # T'(parent) = T2(parent) + T3(parent) + T4(parent)
-            return node.parent.T_prime() + node.T5(i)
-
+            return (parent.T2 + calc_T3(parent) + parent.T4) + node.T5
+    
     def calc_T_prime(node):
+        """Calculate T'(i) [S1]."""
         if node.id in selected_nodes:
-            return node.T1()
-        
-        t2 = node.T2(i)
-        t3 = calc_T3(node)
-        t4 = node.T4(i)
-        return t2 + t3 + t4
-
-    def calc_Benefit(node):
+            return node.T1
+        return node.T2 + calc_T3(node) + node.T4
+    
+    def calc_benefit(node):
+        """Calculate B(i) [S1]."""
         if node.id in selected_nodes:
-            return 0 # Already selected
-        
-        # L(i) = E(i) (normalized)
-        L = node.E(i) 
-        
-        # P(i) = p^lambda
-        # Lambda is number of nodes already selected in node's distribution unit
-        dist_unit = node.distribution_unit_id
-        lambda_count = sum(1 for n in wavelet_tree.nodes if n.distribution_unit_id == dist_unit and n.id in selected_nodes)
+            return 0.0
+        L = node.E  # Normalized per source [S1]
+        unit = node.distribution_unit_id
+        lambda_count = sum(1 for n in wavelet_tree if n.distribution_unit_id == unit and n.id in selected_nodes)
         P = penalty_p ** lambda_count
-        
-        # R(i) = (T'(i) - T(i)) / (S(i) - S'(i))
-        T_i = node.T1() if node.id in selected_nodes else node.T1() # If selected, T(i)=T1. But we only calc for unselected.
-        # For unselected node i:
-        T_i = node.T1() # Wait, T(i) is time IF selected.
+        T_i = node.T1
         T_prime_i = calc_T_prime(node)
-        
-        S_i = node.S(i)
-        S_prime_i = node.S_prime(i)
-        
-        cost_storage = S_i - S_prime_i
+        cost_storage = node.S - node.S_prime
         if cost_storage == 0:
-            return 0 # No benefit in storage trade-off
-        
+            return 0.0
         R = (T_prime_i - T_i) / cost_storage
-        
         return L * P * R
-
-    # Main loop
+    
     while True:
         best_node = None
-        max_benefit = -1
-        
-        # Find node with highest benefit across all processors
-        for node in wavelet_tree.nodes:
+        max_benefit = -1.0
+        for node in wavelet_tree:
             if node.id not in selected_nodes:
-                benefit = calc_Benefit(node)
-                if benefit > max_benefit:
-                    max_benefit = benefit
+                b = calc_benefit(node)
+                if b > max_benefit:
+                    max_benefit = b
                     best_node = node
-        
         if best_node is None:
             break
-            
-        # Check storage budget
-        dist_unit = best_node.distribution_unit_id
-        # Map dist_unit to processor? Source says "in each processor".
-        # Assume distribution units are assigned to processors.
-        # Let's assume a function get_processor(dist_unit)
-        processor_id = get_processor(dist_unit)
-        remaining_budget = delta_per_processor[processor_id]
-        
-        cost = best_node.S(i) - best_node.S_prime(i)
-        
-        if cost <= remaining_budget:
+        proc = get_processor(best_node.distribution_unit_id)
+        remaining = delta_per_processor[proc]
+        cost = best_node.S - best_node.S_prime
+        if cost <= remaining:
             selected_nodes.add(best_node.id)
-            delta_per_processor[processor_id] -= cost
+            delta_per_processor[proc] -= cost
         else:
-            # Cannot fit this node. 
-            # Should we try the next best? 
-            # The source says "select the one with the highest benefit... until no more storage space available".
-            # It implies a global greedy selection. If the best doesn't fit, we might skip it or stop.
-            # Usually, greedy knapsack-like problems skip if it doesn't fit, or stop if sorted.
-            # Given "traversing... select highest... update... repeat", it implies we pick the absolute highest.
-            # If it doesn't fit, we can't pick it. Do we pick the next highest?
-            # The source doesn't specify a "skip" mechanism, but "until no more storage space available" 
-            # could mean the budget is exhausted.
-            # Let's assume we skip nodes that don't fit and continue searching for the next highest that fits.
-            # However, recalculating benefits is expensive. 
-            # A simpler interpretation: Pick highest. If it fits, take it. If not, maybe stop?
-            # But "update benefit values... repeat selection" suggests continuous selection.
-            # Let's implement: find highest that FITS.
-            pass 
-            
-        # Re-evaluate if we just picked the highest overall or highest that fits.
-        # To be safe and efficient, let's find the highest benefit node that FITS.
-        
-        best_fitting_node = None
-        max_fitting_benefit = -1
-        
-        for node in wavelet_tree.nodes:
-            if node.id not in selected_nodes:
-                dist_unit = node.distribution_unit_id
-                processor_id = get_processor(dist_unit)
-                remaining_budget = delta_per_processor[processor_unit]
-                cost = node.S(i) - node.S_prime(i)
-                
-                if cost <= remaining_budget:
-                    benefit = calc_Benefit(node)
-                    if benefit > max_fitting_benefit:
-                        max_fitting_benefit = benefit
-                        best_fitting_node = node
-                        
-        if best_fitting_node is None:
             break
-            
-        selected_nodes.add(best_fitting_node.id)
-        processor_id = get_processor(best_fitting_node.distribution_unit_id)
-        delta_per_processor[processor_id] -= (best_fitting_node.S(i) - best_fitting_node.S_prime(i))
-
     return selected_nodes
 ```
 
@@ -257,13 +157,13 @@ def greedy_optimization(wavelet_tree, delta_per_processor, penalty_p):
 *   Normalization of $L(i)$ is required before use in $B(i)$ [S1].
 
 ## Operating characteristics
-*   **Complexity:** The problem is NP-complete [S1]. The greedy approach provides an approximate solution.
+*   **Complexity:** The exact optimal solution for this optimization problem is NP-complete [S1]. The greedy algorithm provides an approximate solution [S1].
 *   **Performance:** The method trades storage space for run-time efficiency [S1].
 *   **Strengths:** Reduces reconstruction time by pre-loading data for frequently visited nodes [S1].
 *   **Limitations:** Approximate solution; requires tuning of penalty heuristic $p$ [S1].
 
 ## Background
-This method was proposed in the context of parallel multiresolution volume rendering for large data sets [S1]. It addresses the need to manage limited storage in distributed systems while maintaining rendering performance [S1].
+This method was proposed to address limited storage in distributed systems while maintaining rendering performance [S1].
 
 ## Sources
 [S1] A Parallel Multiresolution Volume Rendering Algorithm for Large Data ..., https://academicweb.nd.edu/~cwang11/papers/pc05-pmvr.pdf, fetched 2026-10-26
