@@ -44,11 +44,11 @@ The method models the relationship between viewpoints and volume data as an info
 
 **Parameters**
 *   **Visibility Function $vis(z|v)$:** Defined as the contribution of voxel $z$ to the final image from $v$ [S1, unofficial].
-*   **Logarithm Base:** Not given in the sources.
+*   **Logarithm Base:** Not given in the sources [S1, unofficial].
 
 **Edge Cases and Pitfalls**
-*   **Zero Visibility:** If $vis(z|v) = 0$, then $p(z|v) = 0$. By standard mathematical convention, $0 \log 0 = 0$ in the entropy sum [G].
-*   **Degenerate Viewpoints:** If $vis(v) = 0$ (no voxels visible), $p(z|v)$ is undefined. Such viewpoints should be excluded from $\mathcal{V}$ or handled with a guard [G].
+*   **Zero Visibility:** If $vis(z|v) = 0$, then $p(z|v) = 0$ [G]. By standard mathematical convention, $0 \log 0 = 0$ in the entropy sum [G].
+*   **Degenerate Viewpoints:** If $vis(v) = 0$ (no voxels visible), $p(z|v)$ is undefined [G]. Such viewpoints should be excluded from $\mathcal{V}$ or handled with a guard [G].
 *   **Maximum VE:** Achieved when a viewpoint sees all voxels with equal projected visibility (uniform distribution) [S1, unofficial].
 *   **Minimum VE:** Achieved when most of the visibility is captured from only a few voxels (sparse distribution) [S1, unofficial].
 
@@ -72,9 +72,6 @@ def calculate_visibility_entropy(viewpoints, voxels, visibility_function):
     Returns:
         The best viewpoint index.
     """
-    n_v = len(viewpoints)
-    n_z = len(voxels)
-    
     # Step 1: Calculate captured visibility vis(v) for each viewpoint
     vis_v = {}
     for v in viewpoints:
@@ -99,7 +96,7 @@ def calculate_visibility_entropy(viewpoints, voxels, visibility_function):
     for v in viewpoints:
         current_vis_v = vis_v[v]
         if current_vis_v == 0:
-            continue # Skip degenerate viewpoints
+            continue # [G] Skip degenerate viewpoints where p(z|v) is undefined
             
         ve = 0.0
         for z in voxels:
@@ -126,10 +123,10 @@ A strategy presented by Viola et al. to emphasize objects of interest within the
 ## Operating characteristics
 *   **Scaling:** Requires computing visibility contributions for all voxel-viewpoint pairs, scaling linearly with $|\mathcal{V}| \cdot |\mathcal{Z}|$ [S1, unofficial].
 *   **Strengths:** Robust to any type of discretisation or resolution of the volume data set, and behaves similarly for polygonal data [S1, unofficial].
-*   **Time complexity:** Not given in the sources.
-*   **Memory complexity:** Not given in the sources.
-*   **When to use:** Not given in the sources.
-*   **When not to use:** Not given in the sources.
+*   **Time complexity:** Not given in the sources [S1, unofficial].
+*   **Memory complexity:** Not given in the sources [S1, unofficial].
+*   **When to use:** Not given in the sources [S1, unofficial].
+*   **When not to use:** Not given in the sources [S1, unofficial].
 
 ## Background
 The concept of the visibility channel and viewpoint entropy was introduced in the context of volume visualization to address the problem of selecting the most representative views of a volume dataset [S1, unofficial]. The specific formulation of Viewpoint Entropy (VE) and its relationship to Viewpoint Mutual Information (VMI) is detailed in works by González [2008] and Feixas [2009] [S1, unofficial]. Viola [2006] originally proposed using mutual information for view selection, with uniform viewpoint importance [S1, unofficial]. The framework is applicable to both voxel-based and polygonal data [S1, unofficial].

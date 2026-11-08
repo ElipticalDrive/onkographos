@@ -1,29 +1,32 @@
 # Brick-based Hierarchical Storage
 
-Also called: Brick Maps, Brick-based Storage
+Also called: Brick Maps, ExaBricks, Sparse Page Table and Brick Pool, Compressed Segmentation Volume (CSV)
 
 ## Overview
-Brick-based Hierarchical Storage organizes volumetric data into fixed-size, non-overlapping blocks (bricks) to optimize memory locality, enable efficient spatial indexing, and support multi-resolution rendering. It solves the problem of cache inefficiency and high memory overhead associated with dense voxel grids or complex pointer-based sparse structures by grouping data into cache-friendly tiles. Unlike sibling methods that rely on hash grids for direct addressing [936-hash-grids.md] or deep pointer trees for arbitrary sparsity [4139-tree-based-structures-octree-pointer-tree-sparse-voxel-dag.md], brick-based approaches typically use a two-level hierarchy (e.g., page tables or active regions) to map logical coordinates to resident bricks, balancing random access speed with memory compactness.
+Brick-based Hierarchical Storage organizes volumetric data into fixed-size, non-overlapping cubic blocks (bricks) to optimize memory locality, enable efficient sparse access, and support multi-resolution rendering. It solves the problem of inefficient memory access patterns and high memory overhead associated with dense voxel grids or deep tree traversals by decoupling logical spatial organization from physical storage [S1, S3, unofficial]. Unlike sibling sparse structures that rely on explicit pointers or hash tables for navigation, brick-based methods typically use spatial partitioning (ABRs, page tables) or compact encoding (CSV) to map logical coordinates to resident bricks, enabling $O(1)$ or $O(\log N)$ retrieval with minimal overhead [S1, S3, unofficial].
 
 ## Shared principles
-The family shares the following mechanism:
+All compression methods in this family share the following mechanism:
 
-1.  **Brick Partitioning:** The volume is divided into fixed-size cubic blocks (bricks). Each brick contains a dense array of voxels or attributes. The brick size is chosen to fit within GPU cache lines or texture units to maximize throughput [G].
-2.  **Spatial Indexing:** A secondary structure (e.g., page table, hash map, or coarse grid) maps logical brick coordinates to physical storage locations. This allows $O(1)$ or $O(\log N)$ lookup of bricks without traversing deep trees [G].
-3.  **Residency Management:** Only bricks containing relevant data (or within the view frustum) are loaded into fast memory (VRAM). Empty or distant bricks are swapped out or skipped [G].
-4.  **Boundary Handling:** Bricks often include an "apron" or halo of voxels from neighboring bricks to support trilinear filtering and smooth interpolation across brick boundaries without sampling errors [G].
-5.  **Multi-Resolution (Optional):** Some variants support brick maps (mipmaps), where each brick has downscaled versions to reduce aliasing at distance [S1, unofficial].
+1.  **Redundancy Exploitation:** The core principle is to identify and eliminate redundancy in the volumetric data. This redundancy can be spatial (empty space, homogeneous regions), statistical (correlated values between neighbors), or structural (repetitive patterns in time-varying data) [G].
+2.  **Transformation/Encoding:** Data is transformed into a domain where redundancy is more apparent or compact. This includes spatial subdivision (sparse structures), frequency domain transformation (wavelets), or dictionary-based representation (sparse coding, vector quantization) [G].
+3.  **Quantization (Lossy):** For lossy compression, continuous or high-precision values are mapped to a discrete set of representatives. This step is critical for achieving high compression ratios but introduces reconstruction error, which must be managed via metrics like PSNR or perceptual quality [G].
+4.  **Entropy Coding:** The transformed or quantized data is encoded into a bitstream using entropy coding techniques (e.g., Huffman, Arithmetic, rANS) to approach the Shannon entropy limit of the source [G].
+5.  **Decompression/Reconstruction:** Rendering requires decoding the bitstream and reconstructing the volume data, either fully or partially (e.g., via LOD or adaptive loading), to provide input to the ray-marching or ray-casting pipeline [G].
 
 ## Subtopics
 
 ### [ExaBricks Hierarchy](2182-exabricks-hierarchy.md)
-A rendering method for Block-Structured Adaptive Mesh Refinement (BS-AMR) data that re-organizes irregular AMR cells into compact, non-overlapping bricks to enable high-quality smooth interpolation and efficient hardware-accelerated ray tracing [2182-exabricks-hierarchy.md]. It solves the problem of discontinuous interpolation at AMR level boundaries and the high computational cost of locating cells for reconstruction in deep hierarchies [2182-exabricks-hierarchy.md]. Unlike sibling methods that rely on costly per-sample k-d tree traversals or complex stitching of unstructured meshes, ExaBricks uses Active Brick Regions (ABRs) to provide fast, trivial cell retrieval from structured brick arrays, combined with an RTX BVH for space skipping and adaptive sampling [2182-exabricks-hierarchy.md].
+ExaBricks is a rendering method for Block-Structured Adaptive Mesh Refinement (BS-AMR) data that reorganizes input cells into compact, non-overlapping bricks to enable high-quality smooth interpolation across level boundaries and efficient hardware-accelerated ray tracing [2182-exabricks-hierarchy.md]. It solves the problem of costly cell location kernels and discontinuous interpolation at AMR refinement boundaries by decoupling storage (bricks) from spatial traversal (Active Brick Regions) [2182-exabricks-hierarchy.md]. Unlike prior methods that require deep tree traversals or stitching unstructured meshes, ExaBricks uses a spatial partitioning of brick support regions to provide $O(1)$ cell retrieval for reconstruction and supports adaptive sampling via an RTX BVH [2182-exabricks-hierarchy.md].
 
 ### [Sparse Page Table and Brick Pool](2550-sparse-page-table-and-brick-pool.md)
-Sparse Page Table and Brick Pool is a sparse volume representation that avoids materializing a dense 3D grid by using a two-level structure: a page table mapping logical $8^3$-texel regions to resident bricks, and a pool of apron-padded bricks [2550-sparse-page-table-and-brick-pool.md]. It allows full source resolution (up to 2048 cells per axis) while bounding memory usage and enabling empty-space skipping [2550-sparse-page-table-and-brick-pool.md]. It is implemented in Unreal Engine as "Heterogeneous Volumes" and "Sparse Volume Textures" (SVT) [2550-sparse-page-table-and-brick-pool.md], and in web-based raymarchers as a replacement for dense coarsened grids [2550-sparse-page-table-and-brick-pool.md]. Unlike dense voxel grids, it significantly reduces memory footprint by storing only non-empty tiles [2550-sparse-page-table-and-brick-pool.md].
+Sparse Page Table and Brick Pool is a sparse volume representation that avoids materializing a dense 3D grid by using a two-level structure: a page table mapping logical $8^3$-texel regions to resident bricks, and a pool of apron-padded bricks [2550-sparse-page-table-and-brick-pool.md]. It allows full source resolution (up to 2048 cells per axis) while bounding memory usage and enabling empty-space skipping [2550-sparse-page-table-and-brick-pool.md]. It is implemented in Unreal Engine as "Heterogeneous Volumes" and "Sparse Volume Textures" (SVT) [2550-sparse-page-table-and-brick-pool.md]. Unlike dense voxel grids, it significantly reduces memory footprint by storing only non-empty tiles [2550-sparse-page-table-and-brick-pool.md].
+
+### [Brick ID Page Table Layout](3192-brick-id-page-table-layout.md)
+Not given in the sources.
 
 ### [Compressed Segmentation Volume](4985-compressed-segmentation-volume.md)
-Compressed Segmentation Volume (CSV) is a lossless compression technique for segmentation volumes that encodes individual bricks using a multi-resolution label pyramid and entropy coding, enabling fast decompression and GPU-based rendering [4985-compressed-segmentation-volume.md]. It builds on Brick-based Hierarchical Storage by replacing static label storage with an operation stream (Parent Reuse, Neighbor Reuse, Palette Advance, Palette Back Reference) compressed via rANS [4985-compressed-segmentation-volume.md]. Unlike ExaBricks Hierarchy which focuses on sparse page tables, CSV optimizes for high compression ratios (1–3% of original size) and parallel brick-wise decompression [4985-compressed-segmentation-volume.md].
+Compressed Segmentation Volume (CSV) is a lossless compression technique for voxel-based segmentation volumes that encodes individual bricks using a multi-resolution label pyramid and entropy-coded operation sequences [4985-compressed-segmentation-volume.md]. It solves the storage and transfer bottlenecks of large segmentation datasets by achieving compression ratios of 1–3% of the original data size while supporting fast, parallel decompression and GPU-based level-of-detail (LoD) rendering [4985-compressed-segmentation-volume.md]. Unlike general-purpose compressors (e.g., HDF5, PNG) or specialized segmentation tools (e.g., Compresso), CSV exploits the local homogeneity of label regions through parent/neighbor reuse and palette back-references, enabling efficient on-the-fly decompression without full volume reconstruction [4985-compressed-segmentation-volume.md].
 
 ### Brick Maps
 #### definition
@@ -40,21 +43,13 @@ Compressed Segmentation Volume (CSV) is a lossless compression technique for seg
 #### usage
 - [S1, unofficial] Supported by production renderers and formats such as OpenVDB.
 
-### Brick ID Page Table Layout
-#### parameter
-- [S2] Page table ID uniquely identifies $(m \times k) \le 256$ page tables, where $m$ is number of channels and $k$ is number of resolution levels representable on GPU.
-#### layout
-- [S2] Multi-channel page table hierarchy uses unsigned 32-bit integers for brick IDs.
-- [S2] Brick ID structure: 24 bits for spatial offset (8 bits each for x, y, z coordinates relative to origin), remaining bits for page table ID.
-
 ### SGGX Storage Format
 #### definition
-- [S3] Stores the main indices of the SGGX matrix S in leaf nodes (LoD 0) using a compact linear space representation allowing 1 byte per parameter, totaling 6 bytes per distribution.
+- [S2] Stores the main indices of the SGGX matrix S in leaf nodes (LoD 0) using a compact linear space representation allowing 1 byte per parameter, totaling 6 bytes per distribution.
 
 ## Background
-The term "brick map" was coined by the Pixar Renderman team, though the general idea of multi-resolution caches is older [S1, unofficial]. Brick-based storage is widely used in production renderers and formats such as OpenVDB [S1, unofficial]. It is particularly prevalent in real-time rendering (e.g., Unreal Engine's Sparse Volume Textures) and web-based volume rendering to manage memory constraints [2550-sparse-page-table-and-brick-pool.md]. Recent adaptations include ExaBricks for AMR data [2182-exabricks-hierarchy.md] and Compressed Segmentation Volumes for medical imaging [4985-compressed-segmentation-volume.md].
+Brick-based storage concepts originated in the context of 3D texture caching and volume rendering optimization. The term "brick map" was coined by the Pixar Renderman team, adapting the 2D mipmap concept to 3D voxel grids to handle aliasing and memory bandwidth constraints [S1, unofficial]. The approach has since been generalized to handle adaptive mesh refinement (ExaBricks), sparse voxel datasets (Sparse Page Table), and semantic segmentation volumes (CSV), reflecting a broader industry shift towards block-based data structures for efficient GPU rendering [2182-exabricks-hierarchy.md, 2550-sparse-page-table-and-brick-pool.md, 4985-compressed-segmentation-volume.md].
 
 ## Sources
 [S1] Volume Rendering Based On 3D Voxel Grids, https://scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers/volume-rendering-voxel-grids.html, fetched 2026-10-24 (unofficial)
-[S2] Residency Octree: A Hybrid Approach for Scalable Web ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC10840607/, fetched 2026-10-29
-[S3] Fast Voxelization and Level of Detail for Microgeometry Rendering, https://doi.org/10.48550/arxiv.2604.13191, fetched 2026-10-26
+[S2] Fast Voxelization and Level of Detail for Microgeometry Rendering, https://doi.org/10.48550/arxiv.2604.13191, fetched 2026-10-26

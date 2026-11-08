@@ -1,109 +1,133 @@
 # Boundary-Enhanced Opacity
 
-Also called: Boundary Enhancement, Edge Coloring, Gradient-based Boundary Enhancement, Gradient-based opacity enhancement, Levoy90 gradient-based shading, gradient opacity enhancement
+Also called: Edge Coloring, Gradient-Based Boundary Enhancement, Gradient-Based Opacity Classification, Gradient-based opacity enhancement, Levoy90 gradient-based shading, gradient opacity enhancement
 
 ## Overview
-Boundary-Enhanced Opacity is a technique that selectively increases the opacity of volume samples based on the local gradient magnitude, thereby emphasizing boundaries between regions of different densities while making areas of constant density transparent [S1][S2][S3, unofficial]. It distinguishes itself from its parent [Classification and transfer functions](38-classification-and-transfer-functions.md) by using gradient magnitude as a multiplicative modifier to the base opacity, rather than as a primary classification criterion or a 2D lookup table input [S2][S3, unofficial]. Unlike [Silhouette Enhancement](796-silhouette-enhancement.md), which incorporates view direction to highlight surface contours, this method relies solely on scalar field discontinuities [S1].
+Boundary-Enhanced Opacity is a classification technique that modulates the opacity of volume samples based on the local gradient magnitude of the scalar field, emphasizing material boundaries while rendering constant-density regions transparent [S1, S2][S3, S4, unofficial]. It solves the problem of visualizing interfaces between disparate materials (e.g., air/skin, skin/muscle) by assigning high opacity to voxels with high gradients and low opacity to voxels with low gradients [S5, unofficial]. Unlike [Binary and Soft Classification](6229-binary-and-soft-classification.md), which uses fixed thresholds, this method uses the derivative of the data to define opacity, and unlike [Classification and Shading](2278-classification-and-shading.md), which relies on lighting models for surface appearance, it directly alters volumetric transparency to reveal internal structure [S1, S2].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A volume dataset $V$ defined by scalar field $f(x,y,z)$, sample positions $P_i$, and optionally a base transfer function mapping voxel values to color $c_v$ and opacity $o_v$ [S3, unofficial].
-*   **Output:** Enhanced opacity $o_g$ for each sample, used during ray casting [S3, unofficial].
+*   **Input:** A scalar volume dataset $V$ where each sample point $\mathbf{x}$ has an intensity value $v = f(\mathbf{x})$. Optionally, a base transfer function $T(v)$ providing initial opacity $o_v$ and color $c_v$.
+*   **Output:** Enhanced opacity $o_g$ and color $c_g$ for each sample point used in ray casting.
 
 **Data Structures:**
-*   **Volume Data:** A 3D grid or set of sample points where each point $P_i = (x_i, y_i, z_i)$ has an associated scalar value $v_i = f(P_i)$ [S2][S3, unofficial].
-*   **Gradient:** The spatial gradient vector $\nabla f(P_i)$ at each sample point [S2][S3, unofficial].
-*   **Normalized Gradient:** $\nabla f_n$, the unit vector of the gradient, used if directional operations are required, though the core formula uses magnitude [S2][S3, unofficial].
-
-**Parameters:**
-*   $k_{gc}$: Base opacity scaling factor. Controls the range of effects.
-    *   $k_{gc} = 1, k_{gs} = 0$: No enhancement [S1][S2][S3, unofficial].
-    *   $k_{gc} = 0$: Only areas with large gradients are visible [S1][S2][S3, unofficial].
-    *   Default: $1$ yields the neutral state [S2][S3, unofficial].
-*   $k_{gs}$: Gradient scaling factor. Controls the amount of enhancement.
-    *   Default: $0$ (no enhancement) [S2][S3, unofficial].
-    *   Typical usage: $\ge 1$ for full enhancement [S1][S2][S3, unofficial].
-*   $k_{ge}$: Exponent. Controls the slope of the opacity curve [S1][S2][S3, unofficial].
-    *   Typical value: $2.0$ [S1][S2][S3, unofficial].
-    *   Example parameters: $k_{gc}=0.7, k_{gs}=10, k_{ge}=2.0$ [S2][S3, unofficial].
+*   **Volume Data:** A 3D grid of scalar values.
+*   **Gradient Field:** A 3D grid of 3D vectors $\nabla f(\mathbf{x})$, computed from the volume data.
+*   **Gradient Magnitude Field:** A 3D grid of scalars $\|\nabla f(\mathbf{x})\|$.
 
 **Steps:**
-1.  **Sample Value:** For each sample point $P_i$, calculate the scalar volume value $v_i = f(P_i)$ [S2][S3, unofficial].
-2.  **Gradient Calculation:** Calculate the value gradient $\nabla f(P_i)$ at $P_i$ [S2][S3, unofficial].
-3.  **Normalization:** Normalize the gradient to obtain $\nabla f_n$ if required by specific variants, though the core formula uses the magnitude $\|\nabla f\|$ [S2][S3, unofficial].
-4.  **Base Opacity:** Determine the base opacity $o_v$ [S3, unofficial]. This is obtained by mapping $v_i$ through a standard transfer function [S3, unofficial]. If no transfer function is used, $o_v$ is set to a constant for the entire volume [S2][S3, unofficial].
-5.  **Enhanced Opacity Calculation:** Compute the boundary-enhanced opacity $o_g$ using the formula:
-    $$ o_g = o_v \left( k_{gc} + k_{gs} \|\nabla f(P_i)\| \right)^{k_{ge}} $$
-    *Note on Formula Discrepancy:* Source [S1] presents the formula as $o_g = o_v ( k_{gc} + k_{gs} (\|\nabla_{fn}\|)^{k_{gc}} )$, using $k_{gc}$ as the exponent for the gradient term. However, the parameter description in [S1] and the consistent formulas in [S2][S3, unofficial] define $k_{ge}$ as the exponent controlling the slope. The sources [S2][S3, unofficial] explicitly state $k_{ge}$ is the exponent. The formula in [S1] appears to contain a typo where $k_{gc}$ was used instead of $k_{ge}$ in the exponent position. Given [S2][S3, unofficial] provide the parameter $k_{ge}$ specifically for this purpose, the exponent is $k_{ge}$ [S1][S2][S3, unofficial].
-6.  **Rendering:** Use $o_g$ as the final opacity for the sample during volume integration [S3, unofficial].
+1.  **Sample Value Retrieval:** For each sample point $\mathbf{x}$ along a ray, retrieve the scalar value $v = f(\mathbf{x})$. If pre-classification is used, $v$ is the voxel value; if post-classification, $v$ is the interpolated value [S2][S3, S4, unofficial].
+2.  **Gradient Calculation:** Compute the gradient vector $\nabla f(\mathbf{x})$ at $\mathbf{x}$. This is typically done using finite differences (e.g., central differences) on the scalar field [S1][S5, unofficial].
+3.  **Gradient Magnitude:** Calculate the magnitude of the gradient: $g = \|\nabla f(\mathbf{x})\| = \sqrt{\nabla f_x^2 + \nabla f_y^2 + \nabla f_z^2}$ [S2][S3, S4, unofficial].
+4.  **Base Opacity Retrieval:** Determine the base opacity $o_v$ and color $c_v$ from a standard transfer function $T(v)$ or assign constants if no transfer function is used [S3, S4, unofficial].
+5.  **Enhancement Factor Calculation:** Compute the gradient enhancement factor using the parameters $k_{gc}$, $k_{gs}$, and $k_{ge}$:
+    $$ \text{factor} = (k_{gc} + k_{gs} \cdot g)^{k_{ge}} $$
+    *Note: Source [S2] presents a formula with $\|\nabla_{fn}\|^{k_{gc}}$ in the exponent, but the parameter description and [S3, S4, unofficial] consistently use $k_{ge}$ as the exponent for the entire term $(k_{gc} + k_{gs} \cdot g)$. The implementation below follows the consistent parameter description and [S3, S4, unofficial] formulation.* [S2][S3, S4, unofficial].
+6.  **Final Opacity:** Compute the enhanced opacity:
+    $$ o_g = o_v \cdot \text{factor} $$
+    Clamp $o_g$ to $[0, 1]$ [S3, S4, unofficial].
+7.  **Color Assignment:** The color $c_g$ is typically the base color $c_v$ from the transfer function. Some variants apply "Edge Coloring" by darkening the color based on gradient magnitude, but the core method primarily affects opacity [S1][S3, S4, unofficial].
+8.  **Ray Casting:** Use $o_g$ and $c_g$ in the standard volume rendering integral (compositing) [S5, unofficial].
+
+**Parameters:**
+*   $k_{gc}$ (Base Opacity Scaling): Controls the opacity of regions with zero or low gradient.
+    *   $k_{gc} = 1, k_{gs} = 0$: No enhancement (original opacity).
+    *   $k_{gc} = 0$: Only areas with large gradients are visible (traditional gradient-based shading).
+    *   Default: 1 [S2][S3, S4, unofficial].
+*   $k_{gs}$ (Gradient Scaling): Controls the strength of the gradient enhancement.
+    *   Typical values: $0$ to $10+$ [S2][S3, S4, unofficial].
+    *   Default: 0 [S3, S4, unofficial].
+*   $k_{ge}$ (Exponent/Slope): Controls the slope of the opacity curve relative to gradient magnitude.
+    *   Typical value: 2.0 [S2][S3, S4, unofficial].
+    *   Default: 1 [S3, S4, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_boundary_enhanced_opacity(v_value, gradient_magnitude, o_v, k_gc, k_gs, k_ge):
+def boundary_enhanced_opacity(v, gradient_magnitude, o_v, c_v, k_gc=1.0, k_gs=0.0, k_ge=1.0):
     """
-    Computes the boundary-enhanced opacity for a single sample.
+    Computes boundary-enhanced opacity and color for a volume sample.
     
     Args:
-        v_value (float): Scalar value of the voxel f(P_i).
-        gradient_magnitude (float): Magnitude of the gradient ||∇f(P_i)||.
-        o_v (float): Base opacity from transfer function or constant.
+        v (float): Scalar value at the sample point.
+        gradient_magnitude (float): ||grad(f(x))|| at the sample point.
+        o_v (float): Original opacity from transfer function or constant.
+        c_v (vec3): Original color from transfer function or constant.
         k_gc (float): Base opacity scaling factor.
         k_gs (float): Gradient scaling factor.
         k_ge (float): Exponent for the opacity curve slope.
         
     Returns:
-        float: Enhanced opacity o_g.
+        (float, vec3): Enhanced opacity and color.
     """
-    # Calculate the term inside the parenthesis
+    # Calculate the enhancement factor
+    # Formula: (k_gc + k_gs * gradient_magnitude) ^ k_ge
+    # Note: If k_gs is 0, the factor is k_gc ^ k_ge.
+    # If k_gc is 0 and k_gs > 0, the factor is (k_gs * gradient_magnitude) ^ k_ge.
+    
     base_term = k_gc + k_gs * gradient_magnitude
     
-    # Clamp negative base terms to zero to prevent complex results from fractional exponents
+    # Handle potential negative base due to floating point errors if k_gs is negative (unlikely)
     if base_term < 0:
         base_term = 0.0
         
-    # Apply exponent k_ge
-    enhanced_factor = base_term ** k_ge
+    enhancement_factor = base_term ** k_ge
     
-    o_g = o_v * enhanced_factor
+    # Compute final opacity
+    o_g = o_v * enhancement_factor
     
-    return o_g
+    # Clamp opacity to [0, 1]
+    if o_g > 1.0:
+        o_g = 1.0
+    elif o_g < 0.0:
+        o_g = 0.0
+        
+    # Color is typically unchanged in the basic method, 
+    # though "Edge Coloring" variants may darken it.
+    c_g = c_v
+    
+    return o_g, c_g
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Zero Gradient:** In regions of constant density, $\|\nabla f\| = 0$ [S3, unofficial]. If $k_{gc} = 0$, the opacity becomes $0$, making the region transparent [S1][S2][S3, unofficial]. If $k_{gc} > 0$, the region retains opacity $o_v k_{gc}^{k_{ge}}$ [S2][S3, unofficial].
-*   **No Transfer Function:** If no transfer function is applied, $o_v$ must be explicitly set to a constant value (e.g., $1.0$) to avoid zero opacity [S2][S3, unofficial].
-*   **Formula Ambiguity:** Source [S1] contains a discrepancy where $k_{gc}$ is used as the exponent in the formula text, while $k_{ge}$ is described as the exponent in the parameters. Sources [S2][S3, unofficial] consistently use $k_{ge}$ as the exponent. Implementers should use $k_{ge}$ as the exponent [S1][S2][S3, unofficial].
+*   **Noise Amplification:** Gradient magnitude is sensitive to high-frequency noise. In noisy data, boundaries may be over-emphasized or false boundaries may appear. Pre-filtering (e.g., Gaussian blur) is often required [G].
+*   **Zero Gradient:** If $k_{gc}=0$ and $k_{gs}=0$, opacity becomes 0. If $k_{gc}=0$ and $k_{gs}>0$, regions with zero gradient (flat interiors) become fully transparent, which is the intended behavior for "seeing through" organs [S2][S3, S4, unofficial].
+*   **Parameter Interaction:** The interaction between $k_{gc}$ and $k_{gs}$ can be non-intuitive. Setting $k_{gc}=1$ and $k_{gs}=0$ yields no change. Setting $k_{gc}=0$ removes all non-boundary information [S2][S3, S4, unofficial].
+*   **Gradient Normalization:** Some implementations normalize the gradient vector $\nabla f_n$ before computing magnitude, but the magnitude itself is not normalized. The formula uses the raw magnitude $\|\nabla f\|$ [S2][S3, S4, unofficial].
 
 ## Subtopics
 
 ### [Silhouette Enhancement](796-silhouette-enhancement.md)
-Silhouette Enhancement is a technique used in volume rendering to increase the opacity of volume samples where the local gradient is nearly perpendicular to the view direction, thereby enhancing the perception of surface shape and silhouettes. It distinguishes itself from its parent, Boundary-Enhanced Opacity, which emphasizes boundaries between data of different densities based on gradient magnitude alone, by adding a directional component that specifically targets the visual cues of object edges relative to the camera. Choose it when surface shape perception is critical.
+Silhouette Enhancement increases opacity where the gradient is nearly perpendicular to the view direction, creating illustrative "sketch" effects or emphasizing orientation. It builds on Boundary-Enhanced Opacity by adding view-dependent modulation to the gradient-based opacity, distinguishing it from [Isovalue Contour Surface Classification](1328-isovalue-contour-surface-classification.md) which extracts explicit surfaces.
 
 ### [Isovalue Contour Surface Classification](1328-isovalue-contour-surface-classification.md)
-Isovalue Contour Surface Classification is a volume rendering technique that assigns opacity to voxels based on their proximity to a selected scalar value $f_v$, creating a smooth, anti-aliased representation of an isosurface. It solves the problem of binary thresholding artifacts, such as jagged edges or holes in thin structures, by ensuring the transition region between opaque and transparent voxels maintains a constant physical thickness in voxels, regardless of local gradient magnitude. Unlike its sibling [Silhouette Enhancement](796-silhouette-enhancement.md), which emphasizes boundaries via gradient magnitude scaling, or [Classification and Shading](2278-classification-and-shading.md), which maps arbitrary ranges to color and opacity, this method specifically targets the visualization of one or more specific density contours with spatially consistent edge softness. Choose it when visualizing specific isosurfaces with smooth edges.
+This method assigns opacity based on proximity to a selected isovalue $f_s$, ensuring constant spatial width of the transition region regardless of gradient magnitude. It differs from Boundary-Enhanced Opacity by explicitly modeling the inverse relationship between opacity falloff and gradient magnitude to preserve geometric thickness, rather than relying solely on gradient magnitude for opacity.
 
 ### [Classification and Shading](2278-classification-and-shading.md)
-Classification and Shading maps raw volume intensity values to colors and opacities to produce a realistic visualization of volumetric data. It solves the problem of interpreting scalar fields by combining material classification (color) with lighting models (shading) to reveal surface orientation and depth. Unlike [Boundary-Enhanced Opacity](795-boundary-enhanced-opacity.md), which modulates opacity based on gradient magnitude to emphasize boundaries, this method primarily uses gradient-based shading to enhance surface appearance while maintaining uniform or segment-specific opacity. Choose it for general volume rendering with shading.
+This method maps intensity to color and opacity, then applies lighting models (shading) to reveal surface orientation. Unlike Boundary-Enhanced Opacity, which modulates opacity based on gradient magnitude to emphasize boundaries, Classification and Shading maintains uniform or segment-specific opacity and uses gradient-based shading for appearance.
 
 ### [Boundary Emphasis Slider](5644-boundary-emphasis-slider.md)
-A control used to emphasize regions where the second derivative magnitude is small or zero, specifically by giving maximal opacity to zero second derivative and decreasing linearly towards extremal values. Choose it for interactive parameter tuning.
+An interactive control that modulates opacity based on the magnitude of the second derivative of the scalar data. It sets itself apart from Boundary-Enhanced Opacity (which uses the first derivative) by using the second derivative to distinguish between boundary centers and other high-gradient features, ensuring maximal opacity at the center of boundaries.
+
+### Boundary Emphasis Function
+A function $b(x)$ used in conjunction with a distance map $d(v)$ to create an opacity function $\alpha(v) = b(d(v))$ that emphasizes boundaries [S6, unofficial]. Simple boundary emphasis functions can accurately isolate material boundaries (e.g., 4 distinct boundaries in a tooth scan: Pulp, Background, Dentine, Enamel) [S6, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is the number of samples, as it requires one gradient calculation and one opacity evaluation per sample [G].
-*   **Memory Complexity:** $O(N)$ to store gradients if precomputed, or $O(1)$ if computed on the fly (though gradient computation requires neighbor access) [G].
-*   **Strengths:** Effectively removes internal clutter in homogeneous regions (e.g., organ interiors) while highlighting boundaries (e.g., tissue interfaces) [S1][S2][S3, unofficial].
-*   **Limitations:** Does not provide depth cues via view direction (unlike Silhouette Enhancement) [S1]. Sensitive to noise in the gradient calculation, which can create false boundaries [G].
-*   **When to Use:** When the goal is to visualize the structure of a volume by emphasizing interfaces between different materials or densities, and internal homogeneity is not of interest [S1][S2][S3, unofficial].
-*   **When Not to Use:** When the internal structure of homogeneous regions is important, as the technique makes areas of constant density transparent [S2][S3, unofficial].
+*   **Time Complexity:** $O(N)$ where $N$ is the number of samples, as gradient computation and opacity scaling are per-sample operations. Gradient computation requires accessing neighboring voxels, increasing memory bandwidth usage [S1, S2][S3, S4, unofficial].
+*   **Memory Complexity:** Requires storage for the scalar volume and optionally the gradient field (3x scalar volume size) if precomputed. If computed on-the-fly, no extra storage is needed but computation increases [G].
+*   **Strengths:** Effectively visualizes interfaces between materials (e.g., air/skin, skin/muscle) and reveals internal structures by making constant-density regions transparent [S2][S3, S4, S5, unofficial].
+*   **Limitations:** Sensitive to noise, which can create false boundaries. May obscure internal structures if gradient enhancement is too strong [S2][S3, S4, unofficial].
+*   **When to Use:** When the goal is to visualize boundaries and interfaces in medical or scientific data, especially when internal structures need to be seen through outer layers [S2][S3, S4, S5, unofficial].
+*   **When Not to Use:** When the data is noisy without pre-filtering, or when the goal is to visualize homogeneous regions rather than boundaries [S2][S3, S4, unofficial].
 
 ## Background
-The technique was introduced by Marc Levoy in 1990 as "gradient-based shading" to emphasize boundaries between data of different densities [S2][S3, unofficial]. It was later adapted by Rheingans et al. in the early 2000s for non-photorealistic volume illustration, allowing user-selectable enhancement functions via parameters $k_{gc}$, $k_{gs}$, and $k_{ge}$ [S1][S2][S3, unofficial]. It is widely used in medical volume rendering to visualize anatomical structures like lungs and vasculature [S1][S2][S3, unofficial].
+Boundary-Enhanced Opacity was introduced by Marc Levoy in 1990, who scaled voxel opacity by gradient magnitude to emphasize boundaries between data of different densities and make areas of constant density transparent [S2][S3, S4, unofficial]. This technique was later adapted by Rheingans et al. to allow user-selectable enhancement functions with parameters $k_{gc}$, $k_{gs}$, and $k_{ge}$ [S2][S3, S4, unofficial]. It is widely used in medical visualization to highlight tissue interfaces [S2][S3, S4, S5, unofficial].
 
 ## Sources
 [S1] Volume illustration for medicine and flows, https://doi.org/10.1145/1185657.1185694, fetched 2026-10-28
 [S2] PDF Volume illustration: nonphotorealistic rendering of volume models ..., https://www.csee.umbc.edu/~rheingan/pubs/volillus.tvcg01.pdf, fetched 2026-10-27
 [S3] Non-Photorealistic Rendering of Volume Models, https://www.cs.umbc.edu/~rheingan/pubs/volillus00.pdf, fetched 2026-10-27 (unofficial)
 [S4] Non-Photorealistic Rendering of Volume Models, https://userpages.cs.umbc.edu/ebert/npr/volillus.pdf, fetched 2026-10-27 (unofficial)
-[S5] PDF Transfer Functions for Direct Volume Rendering, https://www.cs.purdue.edu/homes/xmt/classes/slides/CS530/Transfer_Functions.pdf, fetched 2026-10-28 (unofficial)
+[S5] 14 Acceleration Techniques for Volume Rendering Mark W. Jones 14 Acceleration Techniques for Volume Rendering Mark W. Jones, https://docslib.org/doc/3014834/14-acceleration-techniques-for-volume-rendering-mark-w-jones, fetched 2026-10-28 (unofficial)
+[S6] PDF Transfer Functions for Direct Volume Rendering, https://www.cs.purdue.edu/homes/xmt/classes/slides/CS530/Transfer_Functions.pdf, fetched 2026-10-28 (unofficial)

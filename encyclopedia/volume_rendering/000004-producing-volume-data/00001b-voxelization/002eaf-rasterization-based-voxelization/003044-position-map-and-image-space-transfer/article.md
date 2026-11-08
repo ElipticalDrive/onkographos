@@ -1,18 +1,17 @@
 # Position Map and Image-Space Transfer
 
-Also called: Image-Space Voxelization, Position Map Voxelization Family
 
 ## Overview
-This family of techniques converts 3D geometric data into voxel grids by projecting or transferring information into 2D image space (textures) before reconstructing the 3D volume. Unlike direct 3D rasterization, these methods leverage the GPU's fixed-function rasterizer or image load/store operations on 2D textures to determine voxel occupancy, often trading memory bandwidth for computational simplicity. They are distinguished from direct triangle rasterization by operating on pre-computed surface samples or 2D texture slices, ensuring connectivity or enabling real-time performance insensitive to scene complexity [S1, unofficial].
+This family of techniques converts 3D geometric data into voxel grids by projecting or transferring information into 2D image space (textures) before reconstructing the 3D volume [G]. Unlike direct 3D rasterization, these methods leverage the GPU's fixed-function rasterizer or image load/store operations on 2D textures to determine voxel occupancy [G]. They are distinguished from direct triangle rasterization by operating on pre-computed surface samples or 2D texture slices, ensuring connectivity or enabling real-time performance insensitive to scene complexity [G].
 
 ## Shared principles
-All methods in this family rely on the mapping of world-space coordinates to discrete voxel indices. Given a world position $p = (p_x, p_y, p_z)$, a bounding box defined by minimum $p_{min}$ and maximum $p_{max}$, and a volume resolution $D$, the voxel index $i$ is calculated as:
+All methods in this family rely on the mapping of world-space coordinates to discrete voxel indices [G]. Given a world position $p = (p_x, p_y, p_z)$, a bounding box defined by minimum $p_{min}$ and maximum $p_{max}$, and a volume resolution $D$, the voxel index $i$ is calculated as:
 
 $$
 i = D \times \frac{p - p_{min}}{p_{max} - p_{min}}
 $$
 
-The result is truncated (floored) to an integer to yield the discrete voxel index [G]. This formula is applied consistently across Position Map Voxelization, Billboard Voxelization, and Hardware-accelerated Surface Voxelization to map continuous geometry to the discrete 3D grid.
+The result is truncated (floored) to an integer to yield the discrete voxel index [G]. This formula is applied consistently across Position Map Voxelization, Billboard Voxelization, and Hardware-accelerated Surface Voxelization to map continuous geometry to the discrete 3D grid [G].
 
 ## Subtopics
 
@@ -26,7 +25,6 @@ A two-pass rasterization-based technique that initializes a 3D volume by renderi
 This method transfers the geometric intersection computation from 3D space to 2D image space by rasterizing model surfaces into 2D textures (worksheets). It is distinguished from slicing-based voxelization by rasterizing the scene approximately once rather than $N$ times (where $N$ is the volume resolution), making its performance insensitive to scene complexity and dependent only on volume resolution. It is optimal for real-time collision detection and volumetric rendering of complex models.
 
 ## Background
-The concept of using image-space techniques for volume generation stems from the efficiency of GPU rasterization hardware. By projecting 3D data into 2D textures, developers can utilize standard graphics pipeline stages for coverage testing and interpolation. This approach is particularly prevalent in real-time applications such as video games and interactive simulations, where performance is critical. The specific variants described here have been developed to address limitations in memory usage, connectivity, and scene complexity sensitivity, with origins in various unofficial graphics programming communities and technical blogs [S1, unofficial].
+Not given in the sources.
 
 ## Sources
-[S1] Unofficial notes on Position Map and Image-Space Transfer techniques, accessed 2023-10-27.

@@ -3,147 +3,88 @@
 Also called: PyVista Mesh Voxelization, PyVista Mesh Voxelization & Watertight Handling, Union of Sets Voxelization, VTK-based Mesh Voxelization
 
 ## Overview
-Polygon Mesh Voxelization via Union of Sets transforms a polygon mesh into a UniformGrid voxel representation by computing the union of discrete volumes associated with vertices, edges, and faces [S1, unofficial][S2]. It solves the problem of converting continuous geometric models into discrete volumetric data for volume rendering or simulation. It is distinguished from sibling methods by its reliance on VTK/PyVista interfaces for watertight validation and its specific geometric bounding volume approach (spheres for vertices, cylinders for edges) to ensure topological separability [S1, unofficial][S2].
+This method transforms a polygon mesh into a binary or labeled `UniformGrid` voxel representation using the VTK/PyVista interface [S1, unofficial]. It solves the problem of discretizing continuous mesh geometry into a regular grid while enforcing topological validity through built-in watertightness checks [S1, unofficial]. It is distinguished from sibling methods like [Improved Tetrahedral Mesh Generation for Voxelization](7476-improved-tetrahedral-mesh-generation-for-voxelization.md) by relying on high-level library abstractions rather than explicit geometric decomposition, and from [Labeled Volume Creation via MultiBlock Iteration](7389-labeled-volume-creation-via-multiblock-iteration.md) by its focus on single-mesh watertight validation rather than multi-component labeling [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A polygon mesh (vertices and faces). If the input is a point cloud, it must first be triangulated into a mesh [S1, unofficial].
-*   **Output:** A `UniformGrid` object containing voxels representing the mesh volume [S1, unofficial].
+*   **Input:** A polygon mesh (e.g., `pyvista.PolyData`). If the input is a point cloud, it must first be triangulated into a mesh using `delaunay_3d` [S1, unofficial].
+*   **Output:** A `pyvista.UniformGrid` object containing the voxelized representation [S1, unofficial].
 
 **Data Structures:**
-*   **UniformGrid:** A regular grid structure where each cell (voxel) is identified by integer indices $(i, j, k)$. The grid stores voxel centers and bounds [S1, unofficial].
-*   **Voxel Set:** The final representation is the union of three sets: $S_v$ (vertex voxels), $S_e$ (edge voxels), and $S_b$ (body/face voxels) [S2].
+*   **Input Mesh:** Standard polygon mesh structure containing vertices, edges, and faces (triangles) [S1, unofficial].
+*   **Output Grid:** A `UniformGrid` where each cell represents a voxel. The grid stores voxel centers, coordinates of X, Y, Z bounds, and potentially the convex hull of voxels containing mesh parts [S1, unofficial].
 
 **Parameters:**
-*   `check_surface`: Boolean flag. Default `True`. If `True`, validates that the mesh is watertight before voxelization. If `False`, skips validation, allowing voxelization of non-watertight meshes but risking noise or artifacts if holes are large [S1, unofficial].
-*   $L$: Voxel width (grid spacing) [S2].
-*   $R_c$: Radius for bounding volumes.
-    *   For 6-separability: $R_c = L/2$ [S2].
-    *   For 26-separability: $R_c = \frac{L}{2\sqrt{3}}$ [S2].
+*   `check_surface` (Boolean): Default `True`. If `True`, the method validates that the input mesh is watertight. If `False`, validation is skipped [S1, unofficial].
+*   **Voxel Resolution:** Determined by the bounding box of the mesh and the desired voxel size (not explicitly parameterized in the `voxelize` call signature in the source, but implied by the output grid dimensions) [S1, unofficial].
 
-**Algorithm Steps:**
-
-1.  **Validation:** If `check_surface` is `True`, verify the mesh is watertight. If not, raise an error or require the user to fix the mesh externally (e.g., in Blender) or set `check_surface=False` [S1, unofficial].
-2.  **Grid Definition:** Define the bounding box of the mesh and the voxel resolution $L$.
-3.  **Vertex Set ($S_v$):** For each vertex $v$ of the mesh, define a bounding sphere of radius $R_c$ centered at $v$. Include all voxels whose centers fall inside this sphere [S2].
-4.  **Edge Set ($S_e$):** For each edge $e$ of the mesh, define a regular bounding cylinder of radius $R_c$ and length equal to the edge length. The cylinder axis aligns with the edge. Include all voxels whose centers fall inside any of these cylinders [S2].
-5.  **Body Set ($S_b$):** For the body (faces) of the mesh, define a set of bounding planes.
-    *   Define two global bounding planes $G$ and $H$ based on the plane equation $Ap x + Bp y + Cp z + Dp = 0$ and the desired separability distance $t^*$ [S2].
-    *   For each edge, define a local plane passing through the edge and perpendicular to the face normal.
-    *   The intersection of these planes forms a closed region. Include all voxels whose centers fall within this region [S2].
-6.  **Union:** The final voxel set is $S = S_v \cup S_e \cup S_b$ [S2].
-7.  **Post-processing (Optional):** Compute implicit distances to verify consistency or filter internal voxels for hollow representations. Replace cubic voxels with other primitives using glyphing if needed [S1, unofficial].
+**Steps:**
+1.  **Validation (Optional):** If `check_surface=True`, verify the mesh is watertight. A watertight mesh has no holes, non-manifold edges, or overlapping geometry [S1, unofficial].
+2.  **Voxelization:** Call `pyvista.voxelize(input_mesh, check_surface=check_surface)`. This generates the `UniformGrid` [S1, unofficial].
+    *   *Pitfall:* If the mesh is not watertight and `check_surface=True`, an error is thrown [S1, unofficial].
+    *   *Workaround:* Set `check_surface=False` to bypass validation. This may yield noise or incorrect voxelization if large holes or geometric imperfections exist [S1, unofficial].
+3.  **Post-Processing (Optional):**
+    *   Compute implicit distances using `compute_implicit_distance` to verify consistency or filter internal voxels for a hollow representation [S1, unofficial].
+    *   Replace cube primitives with other geometric shapes using `voxelized_object.glyph(geom=type_of_primitive())` [S1, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import pyvista as pv
-import numpy as np
 
-def voxelize_mesh_union_of_sets(input_mesh, check_surface=True, voxel_size=1.0):
+def voxelize_mesh(mesh_input, check_surface=True):
     """
-    Voxelize a polygon mesh using PyVista's Union of Sets approach.
+    Voxelize a polygon mesh into a UniformGrid.
     
     Args:
-        input_mesh: pyvista.PolyData or pyvista.UnstructuredGrid representing the mesh.
-        check_surface: bool, default True. If True, ensures mesh is watertight.
-        voxel_size: float, the resolution L of the output grid.
+        mesh_input: pyvista.PolyData mesh or point cloud.
+        check_surface: bool, default True. Validate watertightness.
         
     Returns:
-        pyvista.UniformGrid: The voxelized representation.
+        pyvista.UniformGrid voxel representation.
     """
-    # Step 1: Input Validation
     # If input is a point cloud, triangulate it first [S1, unofficial]
-    if not isinstance(input_mesh, pv.PolyData):
-        # Assuming delaunay_3d is available for point clouds [S1, unofficial]
-        input_mesh = input_mesh.delaunay_3d()
-        
-    # Step 2: Watertight Check
-    # PyVista expects watertight meshes by default [S1, unofficial]
-    if check_surface:
-        # Check if mesh is watertight. If not, this may raise an error or 
-        # the voxelize function will fail.
-        if not input_mesh.is_manifold:
-            raise ValueError("Mesh is not watertight. Fix mesh or set check_surface=False.")
-            
-    # Step 3: Voxelization
-    # Call pyvista.voxelize which implements the union of sets logic internally
-    # It computes S_v, S_e, and S_b and unions them [S1, unofficial][S2]
-    voxel_grid = pv.voxelize(input_mesh, resolution=voxel_size, check_surface=check_surface)
+    if not isinstance(mesh_input, pv.PolyData):
+        mesh_input = mesh_input.delaunay_3d()
+    
+    # Perform voxelization [S1, unofficial]
+    # If check_surface is True and mesh is not watertight, this raises an error [S1, unofficial]
+    voxel_grid = pv.voxelize(mesh_input, check_surface=check_surface)
     
     return voxel_grid
 
-def compute_separability_radii(voxel_size, separability_type):
+def analyze_voxels(voxel_grid):
     """
-    Calculate R_c for vertex/edge bounding volumes based on separability type [S2].
+    Extract additional information from the voxel representation [S1, unofficial].
+    """
+    # Get voxel centers
+    centers = voxel_grid.points
     
-    Args:
-        voxel_size: float, L.
-        separability_type: str, '6' or '26'.
-        
-    Returns:
-        float, R_c.
-    """
-    if separability_type == '6':
-        return voxel_size / 2.0
-    elif separability_type == '26':
-        return voxel_size / (2.0 * np.sqrt(3))
-    else:
-        raise ValueError("Separability type must be '6' or '26'")
+    # Get bounds of the voxel grid
+    bounds = voxel_grid.bounds
+    
+    # Compute convex hull of voxels containing mesh parts [S1, unofficial]
+    # Note: Specific API for convex hull extraction may vary; 
+    # the source mentions it as an available analysis [S1, unofficial].
+    
+    return centers, bounds
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Non-Watertight Meshes:** If the mesh has holes, overlapping edges, or incorrect geometry, `pyvista.voxelize` throws an error if `check_surface=True` [S1, unofficial]. Setting `check_surface=False` bypasses this but may yield noise or incorrect voxelization if holes are large [S1, unofficial].
-*   **Intersection Holes:** Using the connectivity distance $t$ directly for bounding volumes instead of $R_c$ can cause holes at intersections. For example, if two lines meet at 45 degrees, the intersection point might be further from the line centers than $t_4$, causing both lines to exclude the intersection voxel [S2]. Using $R_c$ ensures the intersection is covered [S2].
+*   **Non-Watertight Meshes:** Holes, overlapping edges, or incorrect geometry cause errors if `check_surface=True` [S1, unofficial]. Skipping the check (`check_surface=False`) may result in noise or incorrect voxelization for meshes with large holes [S1, unofficial].
 *   **Point Clouds:** Point clouds cannot be voxelized directly; they must be triangulated first [S1, unofficial].
 
 ## Operating characteristics
-**Time and Memory Complexity:**
-*   The time complexity depends on the implementation details, specifically the data structures used to store the volume model (e.g., linked lists) [S2]. Complexity is influenced by the number of voxels and the complexity of the polygon mesh, as more voxels require longer linked lists and higher maintenance costs [S2].
-*   Memory usage scales with the number of voxels in the `UniformGrid` [S1, unofficial].
-
-**Measured Performance:**
-*   Hardware: SGI workstation, 195MHz R10000 processor, 640MB memory [S2].
-*   Resolution: 512x512x512 [S2].
-*   **Pump Model (3030 facets):**
-    *   6-separability: 67.8 seconds (21.8 voxels/ms) [S2].
-    *   26-separability: 95.4 seconds (21.2 voxels/ms) [S2].
-*   **Bowl Model:**
-    *   6-separability: 33.3 seconds (25.1 voxels/ms) [S2].
-    *   26-separability: 44.7 seconds (24.9 voxels/ms) [S2].
-*   **Brevi Model:**
-    *   6-separability: 12.7 seconds (36.7 voxels/ms) [S2].
-    *   26-separability: 18.2 seconds (35.0 voxels/ms) [S2].
-*   **Connector Model:**
-    *   6-separability: 4.7 seconds (46.4 voxels/ms) [S2].
-    *   26-separability: 6.2 seconds (approx, derived from table context, exact value not explicitly listed in snippet but implied similar scale) [S2].
-
-**Strengths and Limitations:**
-*   **Strengths:** Simple interface via PyVista/VTK; built-in watertight validation; supports both 6 and 26 separability [S1, unofficial][S2].
-*   **Limitations:** Requires watertight meshes for robust results; performance degrades with high mesh complexity and high resolution; non-watertight meshes require manual fixing or risk artifacts [S1, unofficial][S2].
+*   **Time Complexity:** Not given in the sources. The complexity depends on the underlying VTK implementation and the number of voxels and mesh facets [S2][S1, unofficial].
+*   **Memory Complexity:** Not given in the sources. Depends on the resolution of the output `UniformGrid` [S1, unofficial].
+*   **Measured Performance:** Performance data from [S2] (SGI 195MHz R10000, 640MB RAM, 512x512x512 resolution) is provided for a different algorithm (Union of Sets with bounding volumes) and should not be directly attributed to the PyVista/VTK method, though it illustrates the scale of voxelization tasks [S2]. For the Pump model (3030 facets), the alternative method took 67.8 seconds for 6-separability and 95.4 seconds for 26-separability [S2].
+*   **Strengths:** Simple API; built-in watertightness validation; supports post-processing like implicit distance computation [S1, unofficial].
+*   **Limitations:** Requires watertight meshes for accurate results; may produce noise if validation is skipped on imperfect meshes [S1, unofficial].
 
 ## Background
-**Origin:**
-*   The theoretical foundation for voxelizing polygon meshes using bounding volumes (spheres for vertices, cylinders for edges) to ensure separability was presented in "An Accurate Method for Voxelizing Polygon Meshes" [S2].
-*   The practical implementation using PyVista and VTK is documented in "How to Voxelize Meshes and Point Clouds in Python" [S1, unofficial].
-
-**History and Development:**
-*   The method relies on VTK's `voxelize` functionality, which abstracts the geometric calculations of the union of sets [S1, unofficial].
-*   The separability proofs (6 and 26) were developed to ensure that the discrete representation maintains the topological properties of the continuous mesh [S2].
-
-**Usage:**
-*   Used in medical imaging, computer graphics, and simulation for converting CAD models or scanned meshes into volumetric data [S1, unofficial][S2].
-
-## Subtopics
-
-### [Labeled Volume Creation via MultiBlock Iteration](7389-labeled-volume-creation-via-multiblock-iteration.md)
-Creates labeled volumes by iterating over multi-block datasets. Choose when you need to preserve multiple distinct mesh bodies as separate labels in a single volume.
-
-### [Improved Tetrahedral Mesh Generation for Voxelization](7476-improved-tetrahedral-mesh-generation-for-voxelization.md)
-Generates tetrahedral meshes to aid voxelization. Choose when the input mesh is complex or non-manifold and requires tetrahedralization for robust volumetric conversion.
+This method is implemented in PyVista, a Python library built on top of VTK (Visualization Toolkit) [S1, unofficial]. It provides a straightforward interface for transforming meshes into `UniformGrid` objects for building voxel representations [S1, unofficial]. It is commonly used in Python-based mesh and point cloud visualization workflows [S1, unofficial].
 
 ## Sources
-[S1] How to Voxelize Meshes and Point Clouds in Python, https://medium.com/data-science/how-to-voxelize-meshes-and-point-clouds-in-python-ca94d403f81d, fetched 2026-10-28 (unofficial)
+[S1] How to Voxelize Meshes and Point Clouds in Python - Medium, https://medium.com/data-science/how-to-voxelize-meshes-and-point-clouds-in-python-ca94d403f81d, fetched 2026-10-28 (unofficial)
 [S2] An Accurate Method for Voxelizing Polygon Meshes, https://web.eecs.utk.edu/~huangj/papers/polygon.pdf, fetched 2026-10-29
