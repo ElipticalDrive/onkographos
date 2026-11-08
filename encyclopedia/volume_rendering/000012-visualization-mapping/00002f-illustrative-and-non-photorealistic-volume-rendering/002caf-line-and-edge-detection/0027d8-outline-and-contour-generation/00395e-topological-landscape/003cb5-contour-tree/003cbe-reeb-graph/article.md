@@ -1,205 +1,63 @@
 # Reeb Graph
 
-Also called: Reeb Space (for multivariate generalizations, though distinct from Joint Contour Net)
+Also called: Reeb Space (for multivariate generalizations, though distinct in discrete implementation)
 
 ## Overview
-The Reeb graph is a topological data structure that generalizes the contour tree to handle scalar fields defined on domains that are not simply connected (i.e., domains containing loops or handles) or lack a boundary [S1, unofficial]. While the contour tree tracks the merging and splitting of connected components of level sets in simply connected domains, the Reeb graph captures the topology of these level sets even when they form cycles [S1, unofficial]. It is primarily used to analyze the genus of the input domain and to assist in transfer function design by identifying obscured objects and proximity to field edges [S1, unofficial].
+The Reeb graph is a topological data structure that generalizes the contour tree to handle scalar fields defined on domains that are not simply connected (i.e., domains containing loops or lacking a boundary) [S1, unofficial]. While the contour tree tracks the evolution of connected components of level sets, the Reeb graph tracks the evolution of connected components of level sets modulo homotopy, effectively identifying points in the domain that can be connected by a path of constant scalar value [S1, unofficial]. It solves the problem of capturing the global topology of scalar data in complex geometries, such as toroidal volumes or data with internal voids, where standard contour trees fail or produce ambiguous results [S1, unofficial]. It sets itself apart from the [Contour Tree](9312-contour-tree.md) by explicitly handling genus (loops) in the input domain, and from the [Joint Contour Net](9316-joint-contour-net.md) by operating on single-variable scalar fields rather than multivariate data.
 
 ## How it works
-The Reeb graph is constructed by analyzing the equivalence classes of points in the domain that share the same scalar value and belong to the same connected component of that level set.
+The Reeb graph is constructed by analyzing the connectivity of level sets of a scalar function $f: M \to \mathbb{R}$ defined on a domain $M$. The algorithm typically operates on a discretized representation of the domain.
 
-### Inputs and Outputs
-*   **Input:** A scalar field $f: M \to \mathbb{R}$ defined on a domain $M$. The domain $M$ must be represented as a simplicial mesh (typically a 2-skeleton for 3D volumes or 1-skeleton for 2D surfaces) [S1, unofficial].
-*   **Output:** A graph where nodes represent critical points (local minima, maxima, saddles) and edges represent connected components of regular level sets. The graph structure reflects the topology of the domain, including loops [S1, unofficial].
+**Inputs and Outputs:**
+*   **Input:** A scalar field $f$ defined on a simplicial mesh (specifically a 2-skeleton for 3D volumes, or generally an $(n-1)$-skeleton for $n$-dimensional data) [S1, unofficial]. The mesh consists of vertices, edges, and triangles (or higher-dimensional simplices).
+*   **Output:** A graph where nodes represent critical points (minima, maxima, saddles) and connected components of regular level sets, and edges represent the evolution of these components between critical values [S1, unofficial].
 
-### Data Structures
-The implementation relies on a simplicial mesh representation of the domain.
-*   **Mesh:** A collection of vertices, edges, and triangles (for 3D) or vertices and edges (for 2D).
-*   **Level Sets:** Maintained explicitly in sweep-based methods or implicitly via merge/join trees in split-and-compute methods [S1, unofficial].
-*   **Critical Points:** Identified via the gradient or discrete differences on the mesh.
+**Data Structures:**
+The implementation relies on the simplicial mesh structure. For an $n$-dimensional input, the algorithm requires the $(n-1)$-skeleton of the triangulation [S1, unofficial]. In 3D, this is the 2-skeleton (vertices, edges, and triangular faces) [S1, unofficial]. The graph itself is typically stored as an adjacency list or a merge/join tree structure that is subsequently modified to handle loops.
 
-### Algorithm Steps
-Reeb graph algorithms generally fall into two categories: sweep-based methods and split-and-compute methods [S1, unofficial].
+**Algorithm Steps:**
+Reeb graph algorithms are broadly categorized into two groups: sweep-based methods and split-and-compute methods [S1, unofficial].
 
-#### 1. Sweep-Based Methods
-These methods maintain the state of level sets as the scalar value sweeps through the domain.
-1.  **Sort Vertices:** Sort all vertices of the simplicial mesh by their scalar values $f(v)$ [S1, unofficial].
-2.  **Initialize:** Create an empty graph. Initialize data structures to track connected components of the current level set (e.g., using a Disjoint Set Union or explicit list of components) [S1, unofficial].
-3.  **Process Vertices:** Iterate through the sorted vertices.
-    *   **Local Minimum:** Create a new component in the level set. Add a new node to the Reeb graph representing this minimum.
-    *   **Saddle Point:** Merge existing components or split a component. Update the graph by adding edges or nodes to reflect the topological change (merge or split of level set components) [S1, unofficial].
-    *   **Local Maximum:** Merge components into a single component. Add a node for the maximum and close the corresponding edges in the graph [S1, unofficial].
-4.  **Handle Loops:** If the domain has genus > 0, the level sets may form cycles. The algorithm must detect when a new vertex connects two parts of the *same* existing component, creating a loop in the Reeb graph [S1, unofficial].
+1.  **Sweep-based Methods:**
+    *   These methods maintain the explicit structure of level sets as the scalar value sweeps through the domain [S1, unofficial].
+    *   As the sweep line (or plane/hyperplane) moves, it updates the connectivity of the level sets.
+    *   This approach explicitly maintains level sets, which eliminates the need for pre-processing steps like loop surgery but can be computationally expensive [S1, unofficial].
+    *   Doraiswamy and Natarajan proposed an approach that explicitly maintains level sets, generalizing to higher-dimensional inputs [S1, unofficial].
 
-#### 2. Split-and-Compute Methods (Loop Surgery)
-These methods reduce the problem to contour tree computation by temporarily removing loops [S1, unofficial].
-1.  **Identify Loops:** Detect cycles in the level set topology. This is often done by analyzing the merge tree of the scalar field [S1, unofficial].
-2.  **Loop Surgery:** Perform symbolic cuts at specific locations (e.g., at saddle points or along non-separating curves) to break all loops in the domain, effectively converting the non-simply connected domain into a simply connected one [S1, unofficial].
-3.  **Compute Contour Tree:** Run a standard contour tree algorithm on the modified, simply connected domain [S1, unofficial].
-4.  **Stitching:** Re-introduce the symbolic cuts into the contour tree structure to restore the topological loops, resulting in the final Reeb graph [S1, unofficial].
+2.  **Split-and-Compute Methods (via Contour Tree):**
+    *   These methods reduce the Reeb graph computation to a contour tree computation by temporarily simplifying the topology [S1, unofficial].
+    *   **Loop Surgery (Tierny et al.):**
+        1.  Perform symbolic cuts on the domain to break all loops, converting the non-simply connected domain into a simply connected one [S1, unofficial].
+        2.  Compute the contour tree (specifically the merge tree) of the cut domain [S1, unofficial].
+        3.  Stitch the symbolic cuts back together to retrieve the topologically correct Reeb graph [S1, unofficial].
+    *   **Optimized Split-and-Compute (Doraiswamy and Natarajan):**
+        1.  Use the join tree of the data to identify potential loops [S1, unofficial].
+        2.  Segment the domain into multiple loop-free contour trees instead of a single global one [S1, unofficial].
+        3.  Compute the contour trees for these segments in parallel [S1, unofficial].
+        4.  Reconstruct the Reeb graph by merging the results, accounting for the identified loops [S1, unofficial].
 
-#### 3. Optimized Split-and-Compute (Parallel)
-An optimized variant segments the domain into multiple loop-free regions [S1, unofficial].
-1.  **Segmentation:** Divide the domain into sub-regions that are individually loop-free [S1, unofficial].
-2.  **Parallel Computation:** Compute the contour tree for each sub-region in parallel [S1, unofficial].
-3.  **Integration:** Combine the results, using the join tree to identify potential loops across region boundaries [S1, unofficial].
+3.  **Streaming Algorithm (Pascucci et al.):**
+    *   This is an online algorithm that processes data points as they arrive [S1, unofficial].
+    *   The output is continually updated as additional data points are added [S1, unofficial].
+    *   This approach limits peak memory usage, making it suitable for large datasets, but has higher time complexity [S1, unofficial].
 
-### Formulas
-*   **Reeb Equivalence:** Two points $x, y \in M$ are equivalent ($x \sim y$) if $f(x) = f(y)$ and they lie in the same connected component of the level set $f^{-1}(f(x))$ [S1, unofficial].
-*   **Reeb Graph:** The quotient space $M / \sim$ [S1, unofficial].
+4.  **Random Collapse (Harvey et al.):**
+    *   For arbitrary 2-skeletons, triangles are randomly collapsed to improve running time [S1, unofficial].
+    *   This method aims to reduce the complexity to $O(m \log m)$, where $m$ is the number of triangles [S1, unofficial].
 
-### Parameters
+**Formulas and Definitions:**
+*   Let $f: M \to \mathbb{R}$ be the scalar function.
+*   The Reeb graph $R_f$ is the quotient space of $M$ where two points $x, y \in M$ are equivalent if they belong to the same connected component of the level set $f^{-1}(c)$ for some $c \in \mathbb{R}$ [S1, unofficial].
+*   Complexity of the streaming algorithm: $O(n^2)$, where $n$ is the number of triangles [S1, unofficial].
+
+**Parameters:**
 *   **Input Representation:** The method requires the input to be represented on a simplicial mesh [S1, unofficial].
-*   **Handle Size Metric:** When used for topology simplification, the handle size is defined as the smaller of the Reeb loop length and the cross loop length [S2].
-*   **User Control:** Users can specify material addition/subtraction by filtering nodes based on $F(x) < 0$ or $F(x) \ge 0$ [S2].
+*   **Dimension:** The method applies to models of any dimension, provided the appropriate skeleton is used [S1, unofficial].
 
-### Edge Cases and Pitfalls
-*   **Genus Sensitivity:** The computation is sensitive to the topological genus of the input domain. The number of loops extends algorithm complexity [S1, unofficial].
-*   **Precision:** Variations in neighbor definitions can slightly alter critical vertex locations, though the overall graph structure remains fixed if the simplicial subdivision does not change [S1, unofficial].
-*   **Non-Simply Connected Domains:** Standard contour tree algorithms fail on domains with holes or handles; Reeb graph algorithms are required [S1, unofficial].
-
-### Pseudocode
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def compute_reeb_graph(mesh, scalar_field, method="sweep"):
-    """
-    Computes the Reeb graph for a scalar field on a simplicial mesh.
-    
-    Args:
-        mesh: A simplicial mesh (vertices, edges, triangles).
-        scalar_field: A function f(v) returning scalar value for vertex v.
-        method: "sweep" or "split_and_compute".
-        
-    Returns:
-        reeb_graph: A graph structure representing the Reeb graph.
-    """
-    if method == "sweep":
-        return _sweep_based_reeb(mesh, scalar_field)
-    elif method == "split_and_compute":
-        return _split_and_compute_reeb(mesh, scalar_field)
-    else:
-        raise ValueError("Unknown method")
-
-def _sweep_based_reeb(mesh, scalar_field):
-    """
-    Sweep-based algorithm maintaining level sets explicitly.
-    """
-    # 1. Sort vertices by scalar value
-    vertices = mesh.vertices
-    sorted_vertices = sorted(vertices, key=lambda v: scalar_field(v))
-    
-    # 2. Initialize data structures
-    # components: maps scalar value range to a set of connected components
-    # Each component is a set of vertices
-    components = {} 
-    reeb_graph = Graph()
-    
-    # 3. Process vertices
-    for v in sorted_vertices:
-        val = scalar_field(v)
-        neighbors = mesh.get_neighbors(v)
-        
-        # Determine which components the neighbors belong to
-        neighbor_components = set()
-        for n in neighbors:
-            n_val = scalar_field(n)
-            # Find component containing n at value n_val
-            # In a continuous sweep, we track components across scalar values
-            # For discrete mesh, we look at components active at n_val
-            if n_val <= val:
-                comp = get_component_at_value(n, n_val, components)
-                if comp is not None:
-                    neighbor_components.add(comp)
-        
-        # 4. Update Reeb Graph and Components
-        if not neighbor_components:
-            # Local Minimum: New component
-            new_comp = {v}
-            components[val] = components.get(val, set())
-            components[val].add(new_comp)
-            reeb_graph.add_node(v, type="minimum")
-        else:
-            # Merge or Split
-            if len(neighbor_components) == 1:
-                # Component continues
-                comp = neighbor_components.pop()
-                comp.add(v)
-            elif len(neighbor_components) > 1:
-                # Merge: Multiple components join
-                merged_comp = set()
-                for c in neighbor_components:
-                    merged_comp.update(c)
-                merged_comp.add(v)
-                # Remove old components from tracking
-                for c in neighbor_components:
-                    remove_component(c, components)
-                # Add merged component
-                components[val] = components.get(val, set())
-                components[val].add(merged_comp)
-                reeb_graph.add_node(v, type="saddle")
-                # Add edges in Reeb graph for the merge
-                for c in neighbor_components:
-                    # Find the node in Reeb graph corresponding to the start of c
-                    start_node = get_component_start_node(c)
-                    reeb_graph.add_edge(start_node, v)
-            else:
-                # Split: One component splits into multiple
-                # This is complex in discrete mesh; typically handled by saddle points
-                # For simplicity, assume split is handled by subsequent vertices
-                pass
-                
-        # Handle Loop Detection
-        # If a vertex connects two parts of the same component, a loop is formed
-        # This requires checking if v connects two vertices already in the same component
-        # via a path that does not include v
-        if v in some_component and has_path_between_neighbors(v, some_component):
-            reeb_graph.add_loop(v)
-
-    return reeb_graph
-
-def _split_and_compute_reeb(mesh, scalar_field):
-    """
-    Split-and-compute method using loop surgery.
-    """
-    # 1. Identify loops in the domain
-    loops = identify_topological_loops(mesh, scalar_field)
-    
-    # 2. Perform symbolic cuts
-    # Cut the mesh along the loops to make it simply connected
-    cut_mesh = apply_symbolic_cuts(mesh, loops)
-    
-    # 3. Compute Contour Tree on cut mesh
-    contour_tree = compute_contour_tree(cut_mesh, scalar_field)
-    
-    # 4. Stitch back the loops
-    reeb_graph = stitch_loops_into_contour_tree(contour_tree, loops)
-    
-    return reeb_graph
-
-def identify_topological_loops(mesh, scalar_field):
-    """
-    Identifies non-separating cycles in the mesh.
-    Returns a list of cycles.
-    """
-    # Implementation depends on specific topology library
-    # Uses homology or cycle basis computation
-    return [] # Placeholder for topological analysis
-
-def apply_symbolic_cuts(mesh, loops):
-    """
-    Creates a new mesh with cuts along the identified loops.
-    """
-    # Duplicate vertices along the cut paths
-    return mesh.copy()
-
-def stitch_loops_into_contour_tree(contour_tree, loops):
-    """
-    Re-introduces the loops into the contour tree structure.
-    """
-    # Add edges/nodes to contour_tree to represent the loops
-    return contour_tree
-```
+**Edge Cases and Pitfalls:**
+*   **Genus Sensitivity:** Reeb graph computations are sensitive to the topological genus of the input domain (e.g., sphere vs. torus) [S1, unofficial]. The number of loops in the data extends algorithm complexity [S1, unofficial].
+*   **Critical Point Precision:** Variations in neighbor definition can slightly alter the location of critical vertices without changing the overall graph structure [S1, unofficial].
+*   **Stability:** Output remains fixed provided the simplicial subdivision does not change [S1, unofficial].
 
 ## Subtopics
 
@@ -209,16 +67,19 @@ The Joint Contour Net (JCN) is a discrete graph-based representation of the Reeb
 ### [Multi-Dimensional Reeb Graph](9382-multi-dimensional-reeb-graph.md)
 The Multi-Dimensional Reeb Graph (MDRG) is a hierarchical data structure used to represent the topology of multivariate scalar fields by recursively storing joint contours. It solves the problem of capturing complex topological relationships in domains with multiple independent functions (e.g., pressure, temperature) where standard univariate methods fail. It sets itself apart from the [Joint Contour Net](9316-joint-contour-net.md) by providing a recursive, tiered representation of the Reeb space, which serves as an intermediate structure for extracting the Jacobi structure and the Reeb skeleton.
 
+### [Handle Size Measurement via Nonseparating Cuts](9825-handle-size-measurement-via-nonseparating-cuts.md)
+This method measures the geometric size of topological handles in a scalar field by computing two specific nonseparating loops: the Reeb loop and the cross loop. It solves the problem of quantifying handle prominence to guide topology simplification, ensuring that geometric changes to the volume are minimized. It differs from sibling methods like [Joint Contour Net](9316-joint-contour-net.md) by explicitly constructing these minimal loops on the isosurface to define a handle size metric, rather than relying solely on multi-dimensional topological descriptors.
+
 ## Operating characteristics
-*   **Time Complexity:** The streaming algorithm by Pascucci et al. has $O(n^2)$ complexity, where $n$ is the number of triangles [S1, unofficial]. Harvey et al. proposed a method with $O(m \log m)$ complexity for arbitrary 2-skeletons [S1, unofficial].
-*   **Memory Complexity:** The streaming nature of the algorithm limits peak memory usage [S1, unofficial].
-*   **Performance:** The algorithm is optimal for 2D inputs but performs less favorably for higher dimensional inputs due to the $O(n^2)$ complexity [S1, unofficial].
-*   **Strengths:** Can handle non-simply connected domains and domains without boundaries [S1, unofficial]. Useful for transfer function design in volume visualization [S1, unofficial].
-*   **Limitations:** Sensitive to the topological genus of the input domain [S1, unofficial]. Output is fixed provided the simplicial subdivision does not change [S1, unofficial].
+*   **Time Complexity:** The streaming algorithm by Pascucci et al. has $O(n^2)$ complexity, where $n$ is the number of triangles [S1, unofficial]. This is optimal for 2D inputs but performs less favorably for higher-dimensional inputs [S1, unofficial]. Harvey et al. propose a method with $O(m \log m)$ complexity for arbitrary 2-skeletons [S1, unofficial].
+*   **Memory Complexity:** The streaming nature of the Pascucci et al. algorithm limits peak memory usage [S1, unofficial].
+*   **Strengths:** It correctly handles non-simply connected domains (genus > 0) and domains without boundaries, which the contour tree cannot [S1, unofficial]. It can be computed online (streaming) [S1, unofficial]. It generalizes to higher dimensions [S1, unofficial].
+*   **Limitations:** Computation is sensitive to the topological genus; more loops increase complexity [S1, unofficial]. Requires a simplicial mesh representation [S1, unofficial].
+*   **When to use:** Use when the scalar field is defined on a domain with loops (e.g., torus) or no boundary, and single-variable topology is sufficient. Use when online/streaming computation is required.
+*   **When not to use:** Use the [Contour Tree](9312-contour-tree.md) if the domain is simply connected and boundary exists, as it is simpler. Use [Joint Contour Net](9316-joint-contour-net.md) or [Multi-Dimensional Reeb Graph](9382-multi-dimensional-reeb-graph.md) if the data is multivariate.
 
 ## Background
-The Reeb graph was first used for encoding topological features for visualization purposes by Shinagawa and Kunii [S1, unofficial], where it was used to represent objects obtained from computerized-tomography (CT) sources [S1, unofficial]. Pascucci et al. provided an online algorithm using a streaming approach [S1, unofficial]. McLaughlin demonstrated the sensitivity of Reeb graph computations to the topological genus of the input domain [S1, unofficial]. Tierny et al. addressed genus sensitivity via 'loop-surgery' [S1, unofficial]. Doraiswamy and Natarajan proposed alternative approaches, including explicit level set maintenance and optimized split-and-compute techniques [S1, unofficial].
+The Reeb graph was first used for encoding topological features for visualization purposes by Shinagawa and Kunii [S1, unofficial]. They used the structure to represent objects obtained from computerized-tomography (CT) sources [S1, unofficial]. The sensitivity of Reeb graph computations to the topological genus of the input domain was first demonstrated by McLaughlin [S1, unofficial]. Pascucci et al. later provided an online streaming algorithm [S1, unofficial]. Tierny et al. introduced the "loop-surgery" technique to address genus sensitivity [S1, unofficial]. Doraiswamy and Natarajan proposed alternative approaches, including explicit level set maintenance and optimized split-and-compute techniques using join trees [S1, unofficial]. The Reeb graph has also been used to assist in the design of transfer functions in volume visualization by assigning opacity based on how many objects were obscured by nested surfaces and their proximity to the edge of a scalar field [S1, unofficial].
 
 ## Sources
 [S1] Chapter Topological Visualisation Techniques for Volume Multifield Data, https://archive.org/details/oapen-20.500.12657-49310, fetched 2026-10-27 (unofficial)
-[S2] Removing excess topology from isosurfaces, https://doi.org/10.1145/990002.990007, fetched 2026-11-03

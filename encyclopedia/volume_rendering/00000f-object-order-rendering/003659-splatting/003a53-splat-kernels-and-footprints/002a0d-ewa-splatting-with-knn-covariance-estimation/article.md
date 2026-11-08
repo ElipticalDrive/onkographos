@@ -1,0 +1,243 @@
+# EWA Splatting with kNN Covariance Estimation
+
+Also called: Elliptical Weighted Average splatting
+
+## Overview
+EWA Splatting with kNN Covariance Estimation is a rendering method that projects an elliptical weighted average (EWA) footprint onto the 2D image plane for each point in a raw point cloud, using a 3D covariance matrix estimated from its k-nearest neighbours [S1, unofficial]. Unlike simple disk splatting which assumes isotropic coverage, this method adapts the splat shape to local point density and orientation, providing denser and more geometrically consistent coverage [S1, unofficial]. It builds on [Splat Kernels and Footprints](8724-splat-kernels-and-footprints.md) by replacing fixed kernel parameters with data-driven covariance estimation.
+
+## How it works
+**Inputs:**
+- Point cloud: positions $\mathbf{xyz} \in \mathbb{R}^{N \times 3}$, colors $\mathbf{rgb} \in \mathbb{R}^{N \times 3}$ (normalized to $[0,1]$), and semantic labels $\mathbf{label} \in \mathbb{Z}^N$.
+- Camera parameters: intrinsic matrix $\mathbf{K}$ (typically $[f_x, f_y, c_x, c_y]$), extrinsic matrix $\mathbf{E}$ (world-to-camera $4 \times 4$), viewport width $W$, and height $H$.
+- Parameters: $k$ (number of neighbours, default 16), splat radius limit (default 32 pixels), and frustum culling extent (default 1.3) [S1, unofficial].
+
+**Outputs:**
+- Color image: $\mathbf{C} \in \mathbb{U}^{H \times W \times 3}$ (uint8).
+- Label image: $\mathbf{L} \in \mathbb{U}^{H \times W}$ (uint8).
+- Index map: $\mathbf{I} \in \mathbb{Z}^{H \times W}$ (int32), storing the source point index for each pixel (or -1 if empty) [S1, unofficial].
+
+**Data Structures:**
+- KDTree: Built on $\mathbf{xyz}$ for efficient nearest-neighbour queries.
+- Covariance Matrix: For each point $i$, a $3 \times 3$ symmetric matrix $\mathbf{\Sigma}_i$ computed from its $k$ neighbours.
+- Conic Matrix: The 2D projection of $\mathbf{\Sigma}_i$, used to define the elliptical footprint.
+
+**Steps:**
+1. **Build KDTree:** Convert $\mathbf{xyz}$ to a format suitable for spatial indexing (e.g., numpy array) and construct a KDTree [S1, unofficial].
+2. **Query Neighbours:** For each point $i$, query the $k$ nearest neighbours to obtain indices $\mathbf{idx}_i \in \mathbb{Z}^k$ [S1, unofficial].
+3. **Gather Coordinates:** Retrieve the 3D positions of the $k$ neighbours for each point, resulting in a tensor of shape $[N, k, 3]$ [S1, unofficial].
+4. **Compute 3D Covariance:** Calculate the covariance matrix $\mathbf{\Sigma}_i$ for each point using the gathered neighbour positions. The standard estimator is:
+   $$ \mathbf{\Sigma}_i = \frac{1}{k-1} \sum_{j=1}^{k} (\mathbf{p}_{ij} - \bar{\mathbf{p}}_i)(\mathbf{p}_{ij} - \bar{\mathbf{p}}_i)^T $$
+   where $\mathbf{p}_{ij}$ is the position of the $j$-th neighbour of point $i$, and $\bar{\mathbf{p}}_i$ is the mean position of the $k$ neighbours [S1, unofficial].
+5. **Project to 2D:** For each camera view, project the 3D covariance $\mathbf{\Sigma}_i$ to the 2D image plane using the camera intrinsics and extrinsics. This yields a 2D conic matrix defining the elliptical footprint, along with the projected pixel coordinates and depth [S1, unofficial].
+6. **Visibility Filtering:** Filter points that are visible and have positive depth. A point is visible if its projected coordinates are within the viewport bounds (expanded by the culling extent) and its depth is positive [S1, unofficial].
+7. **Radius Calculation:** Determine the integer splat radius $r_i$ for each visible point based on the eigenvalues of the 2D conic matrix. Clamp $r_i$ to the range $[0, 32]$ [S1, unofficial].
+8. **Depth Sorting:** Sort the visible points by their depth values in ascending order (front-to-back) [S1, unofficial].
+9. **Rasterization (Z-buffer):** Iterate through the sorted points. For each point, iterate over the pixel grid defined by its elliptical footprint (from $-r_i$ to $r_i$ in both axes). If the pixel is within bounds and the point's depth is less than the current depth stored in the Z-buffer (depth canvas), write the point's color, label, and index to the output canvases, and update the Z-buffer [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import numpy as np
+from scipy.spatial import KDTree
+
+def ewa_splatting_knn(xyz, rgb, label, cameras, k=16, max_radius=32):
+    """
+    xyz: [N, 3] float32
+    rgb: [N, 3] float32 (0-1)
+    label: [N] int64
+    cameras: list of dicts with keys 'intr' (4,), 'extr' (4,4), 'W', 'H'
+    k: int, number of neighbours
+    max_radius: int, max splat radius
+    """
+    N = xyz.shape[0]
+    device = xyz.device
+    
+    # Step 1 & 2: Build KDTree and query neighbours
+    xyz_np = xyz.cpu().numpy()
+    kdt = KDTree(xyz_np)
+    _, knn_idx = kdt.query(xyz_np, k=k) # Shape [N, k]
+    
+    # Step 3: Gather neighbour coordinates
+    # knn_idx is on CPU, gather from xyz_np
+    xyz_padded = xyz_np[knn_idx] # Shape [N, k, 3]
+    
+    # Step 4: Compute 3D covariance
+    # Mean of neighbours
+    mean_p = xyz_padded.mean(axis=1, keepdims=True) # [N, 1, 3]
+    diff = xyz_padded - mean_p # [N, k, 3]
+    # Covariance: (N, k, 3) @ (N, 3, k) -> (N, 3, 3)
+    cov3d = np.einsum('nki,nkj->nij', diff, diff) / (k - 1)
+    
+    # Initialize output canvases
+    # We process one camera at a time for clarity, or batch if optimized
+    results = []
+    
+    for cam in cameras:
+        intr = cam['intr']
+        extr = cam['extr']
+        W, H = cam['W'], cam['H']
+        
+        # Step 5: Project 3D covariance to 2D
+        # This involves projecting the point and the covariance ellipsoid
+        # Simplified projection logic:
+        # 1. Transform point to camera space
+        # 2. Project to 2D
+        # 3. Transform covariance using Jacobian of projection
+        
+        # Assume project_ewa function handles the complex projection
+        # Returns: uv (N, 2), depths (N), cov2d_conic (N, 3, 3), radii (N)
+        uv, depths, cov2d_conic, radii = project_ewa_to_2d(
+            xyz, cov3d, intr, extr, W, H
+        )
+        
+        # Step 6: Visibility filtering
+        # Check if uv is within bounds (with margin) and depth > 0
+        margin = 1.3 # extent
+        vis_x = (uv[:, 0] >= -margin * W) & (uv[:, 0] <= (1 + margin) * W)
+        vis_y = (uv[:, 1] >= -margin * H) & (uv[:, 1] <= (1 + margin) * H)
+        vis_z = depths > 0
+        visible = vis_x & vis_y & vis_z
+        
+        if not visible.any():
+            # Handle empty visible set
+            results.append({
+                'color': np.zeros((H, W, 3), dtype=np.uint8),
+                'label': np.zeros((H, W), dtype=np.uint8),
+                'index': np.full((H, W), -1, dtype=np.int32)
+            })
+            continue
+            
+        # Filter tensors
+        uv_vis = uv[visible]
+        depths_vis = depths[visible]
+        radii_vis = radii[visible]
+        rgb_vis = rgb[visible]
+        label_vis = label[visible]
+        idx_vis = torch.arange(N)[visible]
+        
+        # Step 7: Clamp radius
+        r_int = np.clip(radii_vis.astype(int), 0, max_radius)
+        
+        # Step 8: Sort by depth
+        sort_idx = np.argsort(depths_vis)
+        uv_vis = uv_vis[sort_idx]
+        depths_vis = depths_vis[sort_idx]
+        r_int = r_int[sort_idx]
+        rgb_vis = rgb_vis[sort_idx]
+        label_vis = label_vis[sort_idx]
+        idx_vis = idx_vis[sort_idx]
+        
+        # Step 9: Rasterize
+        color_img = np.zeros((H, W, 3), dtype=np.uint8)
+        label_img = np.zeros((H, W), dtype=np.uint8)
+        index_map = np.full((H, W), -1, dtype=np.int32)
+        depth_canvas = np.full((H, W), np.inf, dtype=np.float32)
+        
+        for i in range(len(uv_vis)):
+            px, py = uv_vis[i]
+            r = r_int[i]
+            d = depths_vis[i]
+            
+            # Flip Y axis: World Y up, Image Y down
+            py_img = H - 1 - py
+            
+            # Iterate over footprint
+            for dy in range(-r, r + 1):
+                for dx in range(-r, r + 1):
+                    x = int(px) + dx
+                    y = int(py_img) + dy
+                    
+                    if 0 <= x < W and 0 <= y < H:
+                        if d < depth_canvas[y, x]:
+                            depth_canvas[y, x] = d
+                            color_img[y, x] = (rgb_vis[i] * 255).astype(np.uint8)
+                            label_img[y, x] = label_vis[i]
+                            index_map[y, x] = idx_vis[i]
+                            
+        results.append({
+            'color': color_img,
+            'label': label_img,
+            'index': index_map
+        })
+        
+    return results
+
+def project_ewa_to_2d(xyz, cov3d, intr, extr, W, H):
+    """
+    Projects 3D points and their covariance matrices to 2D image plane.
+    Returns uv (N, 2), depths (N), cov2d_conic (N, 3, 3), radii (N)
+    """
+    # Extract rotation and translation from extrinsic
+    R = extr[:3, :3]
+    t = extr[:3, 3]
+    
+    # Transform points to camera space
+    # xyz: [N, 3]
+    xyz_cam = (R @ xyz.T).T + t # [N, 3]
+    
+    # Project to 2D
+    # intr: [fx, fy, cx, cy]
+    fx, fy, cx, cy = intr
+    depths = xyz_cam[:, 2]
+    
+    # Avoid division by zero
+    safe_depths = np.where(depths > 0, depths, 1e-6)
+    
+    uv = np.zeros((xyz.shape[0], 2))
+    uv[:, 0] = fx * (xyz_cam[:, 0] / safe_depths) + cx
+    uv[:, 1] = fy * (xyz_cam[:, 1] / safe_depths) + cy
+    
+    # Project covariance
+    # Jacobian of projection for a point at depth z:
+    # J = [ fx/z, 0,   -fx*x/z^2 ]
+    #     [ 0,   fy/z, -fy*y/z^2 ]
+    # cov2d = J @ cov3d @ J.T
+    
+    cov2d_conic = np.zeros((xyz.shape[0], 3, 3))
+    for i in range(xyz.shape[0]):
+        z = safe_depths[i]
+        x, y = xyz_cam[i, 0], xyz_cam[i, 1]
+        J = np.array([
+            [fx/z, 0, -fx*x/(z*z)],
+            [0, fy/z, -fy*y/(z*z)]
+        ])
+        cov2d = J @ cov3d[i] @ J.T
+        # The conic matrix for the ellipse is related to the inverse of the covariance
+        # For rasterization, we often use the covariance directly to determine extent
+        # Store the 2x2 part for radius calculation
+        cov2d_conic[i] = cov2d # Simplified, full conic might be needed for exact ellipse
+        
+    # Calculate radii from eigenvalues of the 2x2 covariance
+    radii = np.zeros(xyz.shape[0])
+    for i in range(xyz.shape[0]):
+        # Eigenvalues of the 2x2 top-left block
+        eigvals = np.linalg.eigvalsh(cov2d[i, :2, :2])
+        # Radius is typically sqrt(eigenvalue) * some factor (e.g., 3 for 3-sigma)
+        # Assuming the source uses a direct mapping or sqrt
+        radii[i] = np.sqrt(np.max(eigvals)) * 3 # Heuristic factor
+        
+    return uv, depths, cov2d_conic, radii
+```
+
+**Edge Cases and Pitfalls:**
+- **Y-axis Orientation:** World camera Y points up, but image v coordinates point down. The Y coordinate must be flipped: $y_{img} = H - 1 - y_{proj}$ [S1, unofficial].
+- **Empty Visible Set:** If no points are visible, return zero-filled canvases with the index map filled with -1 [S1, unofficial].
+- **Precision:** Depth comparisons in the Z-buffer should use float32 or float64 to avoid z-fighting, especially for closely spaced points [S1, unofficial].
+- **Boundary Conditions:** Pixel coordinates must be clamped to the image bounds $[0, W-1] \times [0, H-1]$ before writing to the output arrays [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot k \log N)$ for KDTree construction and query, plus $O(N \cdot r^2)$ for rasterization, where $r$ is the average splat radius. With $k=16$ and $r \approx 10$, this is efficient for real-time rendering on GPU [S1, unofficial].
+- **Memory Complexity:** $O(N \cdot k)$ for storing neighbour indices and $O(N)$ for covariance matrices. Output images are $O(W \cdot H)$ [S1, unofficial].
+- **Performance:** Achieves real-time performance on modern GPUs for point clouds with up to millions of points, depending on $k$ and $r$ [S1, unofficial].
+- **Strengths:** Handles raw point clouds without mesh reconstruction; adapts to local geometry; provides dense coverage [S1, unofficial].
+- **Limitations:** Sensitive to $k$ and point density; may produce artifacts in sparse regions; requires careful tuning of splat radius [S1, unofficial].
+- **When to Use:** Real-time visualization of point clouds; multi-view rendering; applications where mesh reconstruction is undesirable [S1, unofficial].
+- **When Not to Use:** Scenes with extreme depth variation where z-fighting is problematic; very sparse point clouds where $k$-NN is unreliable [S1, unofficial].
+
+## Background
+EWA Splatting with kNN Covariance Estimation was introduced in the context of point-cloud rendering pipelines, specifically in the CamPoint repository and related research on efficient point-based rendering [S1, unofficial]. It extends the classic EWA splatting technique by incorporating local covariance estimation, allowing for more accurate representation of point cloud geometry. The method is used in applications requiring fast, high-quality visualization of 3D point clouds, such as photogrammetry, LiDAR data visualization, and neural radiance field (NeRF) post-processing [S1, unofficial].
+
+## Sources
+[S1] Luhao03/Point-Splatting-Multi-View-2D-Rendering-Pipeline, https://github.com/Luhao03/Point-Splatting-Multi-View-2D-Rendering-Pipeline, fetched 2026-10-28 (unofficial)

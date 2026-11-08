@@ -1,0 +1,180 @@
+--- v001.md
++++ v002.md
+@@ -1,43 +1,33 @@
+ # Point Cloud Rendering
+ 
+-Also called: Point Splatting, Point-based Rendering
+ 
+ ## Overview
+-Point Cloud Rendering projects a set of 3D points into screen space and aggregates their contributions to determine the final pixel color [S1, unofficial]. It differs from mesh rendering by operating on unstructured discrete samples rather than continuous surfaces, and from voxel rendering by avoiding the memory overhead of a dense 3D grid [S1, unofficial]. The method is primarily distinguished by its differentiability, allowing gradients to flow from the rendered image back to the 3D point positions and attributes [S1, unofficial].
++Point Cloud Rendering projects a set of 3D points into screen space and aggregates their contributions to determine the final pixel color [S1, unofficial]. It is primarily distinguished by its differentiability, allowing gradients to flow from the rendered image back to the 3D point positions and attributes [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A set of 3D points $P_{xyz}^{(i)} = (x_i, y_i, z_i)$ with associated attributes (e.g., color $C_i$), and camera parameters (projection matrix $M$, view matrix $V$).
+-**Outputs:** A 2D image $I(u, v)$ with color values for each pixel.
+-
+-**Data Structures:**
+-*   **Point Cloud:** An array of structures, each containing:
+-    *   `position`: `vec3` $(x, y, z)$
+-    *   `color`: `vec3` $(r, g, b)$
+-    *   `size`: `float` (influence radius, optional)
++**Inputs:** A set of 3D points with attributes (e.g., color) and camera parameters [S1, unofficial].
++**Outputs:** A 2D image with color values for each pixel [S1, unofficial].
+ 
+ **Steps:**
+ 
+-1.  **Calculate Screen Space Coordinates:**
+-    For each point $P_{xyz}^{(i)}$, compute its screen space coordinates $p_{uv}^{(i)} = (u_i, v_i)$. This is achieved via matrix multiplication using the camera's projection and view matrices [S1, unofficial].
+-    $$
+-    \begin{bmatrix} u_i \\ v_i \\ w_i \end{bmatrix} = M \cdot V \cdot \begin{bmatrix} x_i \\ y_i \\ z_i \\ 1 \end{bmatrix}
+-    $$
+-    $$
+-    u_i = \frac{u_i}{w_i}, \quad v_i = \frac{v_i}{w_i}
+-    $$
+-    This step is differentiable with respect to the point positions [S1, unofficial].
++1. **Calculate Screen Space Coordinates:**
++   Compute the screen space coordinates $p_{uv}$ of a 3D point $P_{xyz}$ via matrix multiplication [S1, unofficial]. This step is differentiable with respect to the point positions [S1, unofficial].
++   $$
++   \begin{bmatrix} u \\ v \\ w \end{bmatrix} = M \cdot \begin{bmatrix} x \\ y \\ z \\ 1 \end{bmatrix}
++   $$
++   $$
++   u = \frac{u}{w}, \quad v = \frac{v}{w}
++   $$
++   where $M$ is the transformation matrix [G].
+ 
+-2.  **Compute Influence:**
+-    Calculate the spatial influence $I_i$ of each point on a target pixel. Assuming a size of one pixel leads to sparse images [S1, unofficial]. Common methods include:
+-    *   **Truncated Gaussian Blur:** $I_i$ is determined by a Gaussian kernel centered at $p_{uv}^{(i)}$ [S1, unofficial].
+-    *   **Distance-based:** $I_i$ is a function of the Euclidean distance between the pixel center and $p_{uv}^{(i)}$ [S1, unofficial].
+-    *   **Trade-off:** Large influence sizes prevent derivatives from becoming zero for distant points but reduce rendering quality [S1, unofficial].
++2. **Compute Influence:**
++   Calculate the spatial influence $I_i$ of each point on target pixels [S1, unofficial]. Assuming an influence size of one pixel leads to very sparse images [S1, unofficial]. To solve this, influences larger than one pixel are created using truncated Gaussian blur [S1, unofficial] or distance-based influence values [S1, unofficial]. A large influence size prevents derivatives from becoming zero for distant points but reduces rendering quality [S1, unofficial].
+ 
+-3.  **Aggregate Pixel Color:**
+-    Determine the final color $C_{pixel}$ for each pixel based on $I_i$ and depth $z_i$. Several aggregation strategies exist:
+-    *   **Weighted Sum:** $C_{pixel} = \sum I_i \cdot C_i$. This does not account for occlusion [S1, unofficial].
+-    *   **Closest Point (Z-Buffer):** Select the single point $i$ with the smallest $z_i$ among those influencing the pixel. This prevents optimization of occluded points [S1, unofficial].
+-    *   **K-Nearest Neighbors:** Select the $K$ nearest 3D points to the camera and weigh them by $I_i$ [S1, unofficial].
+-    *   **Distance-Weighted Sum:** Weigh all points by both spatial influence $I_i$ and distance from the camera [S1, unofficial].
++3. **Aggregate Pixel Color:**
++   Aggregate points based on their influences and z-values to determine the final color for each pixel [S1, unofficial]. Methods include:
++   * **Weighted Sum:** Compute a weighted sum of the points' colors based on their influences [S1, unofficial]. This approach does not account for occlusion [S1, unofficial].
++   * **Closest Point:** Select the single closest point to the camera for a given pixel to handle occlusion [S1, unofficial].
++   * **K-Nearest Neighbors:** Select the $K$ nearest 3D points to the camera and weigh them based on spatial influence [S1, unofficial].
++   * **Distance-Weighted Sum:** Weigh all points by both spatial influence and distance from the camera [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -48,75 +38,64 @@
+     Render a point cloud using weighted sum aggregation.
+     points: List of dicts with 'pos' (vec3), 'color' (vec3)
+-    camera_matrix: 4x4 projection matrix
++    camera_matrix: 4x4 transformation matrix
+     """
+-    image = zeros((image_height, image_width, 3))
+-    
++    # Initialize image buffer
++    image = [[0.0, 0.0, 0.0] for _ in range(image_height)]
++
++    def mat_vec_mul(M, v):
++        """Standard 4x4 matrix-vector multiplication."""
++        return [sum(M[r][c] * v[c] for c in range(4)) for r in range(4)]
++
++    projected = []
+     # Step 1: Project points to screen space
+-    projected_points = []
+     for p in points:
+-        # Homogeneous coordinates
+         p_homo = [p['pos'][0], p['pos'][1], p['pos'][2], 1.0]
+-        # Matrix multiplication
+-        p_proj = multiply_matrix_vector(camera_matrix, p_homo)
+-        
+-        # Perspective division
+-        if p_proj[3] == 0:
++        proj = mat_vec_mul(camera_matrix, p_homo)
++        if proj[3] == 0:
+             continue
+-        u = p_proj[0] / p_proj[3]
+-        v = p_proj[1] / p_proj[3]
+-        z = p_proj[2] / p_proj[3]
+-        
+-        # Check if within image bounds
++        u = proj[0] / proj[3]
++        v = proj[1] / proj[3]
++        z = proj[2] / proj[3]
+         if 0 <= u < image_width and 0 <= v < image_height:
+-            projected_points.append({
+-                'u': u, 'v': v, 'z': z, 'color': p['color']
+-            })
+-            
++            projected.append({'u': u, 'v': v, 'z': z, 'color': p['color']})
++
+     # Step 2 & 3: Aggregate
+-    for pp in projected_points:
++    for pp in projected:
+         u, v, z, color = pp['u'], pp['v'], pp['z'], pp['color']
+-        
+-        # Compute influence (e.g., Gaussian)
+-        # Note: Exact kernel parameters are not specified in sources [S1, unofficial]
+-        influence = compute_gaussian_influence(u, v, image_width, image_height)
+-        
+-        # Additive blending (Weighted Sum)
+-        # This does not handle occlusion [S1, unofficial]
+-        image[int(v)][int(u)] += influence * color
+-        
++        # [G] Simple normalized influence for demonstration; sources mention truncated Gaussian or distance-based kernels
++        influence = 1.0
++        y_idx, x_idx = int(v), int(u)
++        image[y_idx][x_idx] = [
++            image[y_idx][x_idx][0] + influence * color[0],
++            image[y_idx][x_idx][1] + influence * color[1],
++            image[y_idx][x_idx][2] + influence * color[2]
++        ]
+     return image
+-
+-def compute_gaussian_influence(u, v, width, height):
+-    # Placeholder for specific kernel implementation
+-    # Sources mention truncated Gaussian blur [S1, unofficial]
+-    # but do not provide the exact formula or radius.
+-    # [G] Assuming a simple normalized Gaussian kernel centered at pixel.
+-    return 1.0 
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Sparsity:** Assuming point influence size is one pixel results in very sparse images [S1, unofficial].
+-*   **Occlusion:** Simple weighted sum approaches do not account for occlusion [S1, unofficial].
+-*   **Convergence Trade-off:** Large influence sizes aid optimization convergence by preventing zero derivatives for distant points but degrade rendering quality [S1, unofficial].
+-*   **Depth Density:** When converting depth images to point clouds, point density decreases inversely proportional to distance [S1, unofficial].
++* **Sparsity:** Assuming point influence size is one pixel results in very sparse images [S1, unofficial].
++* **Occlusion:** Simple weighted sum approaches do not account for occlusion [S1, unofficial].
++* **Convergence Trade-off:** Large influence sizes aid optimization convergence by preventing zero derivatives for distant points but degrade rendering quality [S1, unofficial].
++* **Depth Density:** When converting depth images to point clouds, point density decreases inversely proportional to distance [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Voxel-based Point Rendering
+-Generates 3D voxels from the point cloud and renders them using voxel-based methods [S1, unofficial]. Chosen when voxel-based acceleration structures are preferred over direct splatting. See [Voxel Rendering](52-voxel-rendering.md).
++Generates 3D voxels from the point cloud and renders them using a voxel-based method [S1, unofficial]. Chosen when voxel-based acceleration structures are preferred over direct splatting. See [Voxel Rendering](52-voxel-rendering.md).
+ 
+ ### Depth Image Rendering
+-Treats depth images as a special case of point cloud rendering by converting depth to points and projecting to a virtual view [S1, unofficial]. Used in self-supervised monocular depth estimation. See [Depth Rendering](52-depth-rendering.md).
++Converts depth to a point cloud and projects it to a virtual camera view, serving as a special case of point cloud rendering [S1, unofficial]. Used in self-supervised learning of monocular depth estimation. See [Depth Rendering](52-depth-rendering.md).
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot K)$ where $N$ is the number of points and $K$ is the number of pixels influenced by each point (or $K$ nearest neighbors).
+-*   **Memory Complexity:** $O(N)$ for storing points, plus $O(W \cdot H)$ for the image buffer.
+-*   **Strengths:** Differentiable with respect to point positions and attributes, enabling optimization in neural networks [S1, unofficial]. Simple implementation.
+-*   **Limitations:** Sparse images if influence is small. Occlusion handling is non-trivial with simple blending. Quality-convergence trade-off with influence size [S1, unofficial].
+-*   **When to use:** Differentiable rendering tasks, neural implicit representations, and scenarios with reduced 3D supervision [S1, unofficial].
+-*   **When not to use:** When high-fidelity occlusion is required without complex aggregation logic, or when dense surface representation is needed.
++* **Time Complexity:** Not given in the sources.
++* **Memory Complexity:** Not given in the sources.
++* **Strengths:** Differentiable with respect to point positions and attributes, enabling optimization in neural networks [S1, unofficial].
++* **Limitations:** Sparse images if influence is small. Occlusion handling is non-trivial with simple blending. Quality-convergence trade-off with influence size [S1, unofficial].
++* **When to use:** Differentiable rendering tasks, neural implicit representations, and scenarios with reduced 3D supervision [S1, unofficial].
++* **When not to use:** Not given in the sources.
+ 
+ ## Background
+-Point cloud rendering has become a natural choice for data representation in differentiable rendering and scene understanding with reduced 3D supervision [S1, unofficial]. It is used in various practical 3D problems [S1, unofficial]. The method is foundational for neural implicit representations and self-supervised learning of monocular depth estimation [S1, unofficial].
++Point clouds have become a natural choice for data representation in differentiable rendering and scene understanding with reduced 3D supervision [S1, unofficial]. The method is used in a variety of practical 3D problems [S1, unofficial]. It supports self-supervised learning of monocular depth estimation and neural implicit representations [S1, unofficial].
+ 
+ ## Sources

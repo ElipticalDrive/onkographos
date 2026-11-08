@@ -1,0 +1,326 @@
+# Two-stage CBR Method for Transfer Function Design
+
+Also called: CBR-TF, Retrieval based Transfer Function Design, Two-stage CBR-TF approach, two-stage method
+
+## Overview
+The Two-stage CBR Method automatically generates transfer functions (TFs) for volume rendering by retrieving similar visualization cases from a pre-constructed knowledge database based on user-selected ray features, then optimizing the retrieved TF for visibility [S1, unofficial]. It solves the problem of manual TF design by combining deep image feature matching with intensity profile similarity to accurately identify Structures of Interest (SOIs) [S1, unofficial]. Unlike single-stage methods that rely solely on intensity profiles or image features, this approach uses a two-stage pipeline: first matching co-planar images using CNN features, then re-ranking results using Dynamic Time Warping (DTW) on intensity profiles, which significantly improves recall for complex or ambiguous SOIs like arteries and kidneys [S1, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+1.  **Knowledge Database:** A collection of labeled ray elements extracted from training image volumes. Each element consists of:
+    *   A pair of co-planar 2D images aligned with the primary axes (x, y, z) relative to the ray.
+    *   An intensity profile along the ray.
+    *   SOI labels along the ray.
+    *   Entry and exit coordinates of the ray.
+2.  **Input Image Volume:** The target volume for which a TF is to be generated.
+3.  **User Interaction:** A user-drawn line (ray) on a 2D cross-sectional view (axial, coronal, sagittal) or a point on a 3D DVR visualization [S1, unofficial].
+
+**Outputs:**
+1.  **Optimized Transfer Function:** A 1D intensity-based TF defined by tent-shaped components for each identified SOI.
+2.  **Volume Rendering:** The final DVR visualization emphasizing the identified SOIs [S1, unofficial].
+
+### Data Structures
+
+**Ray Element (Database Entry):**
+*   `images`: Array of 2 images (co-planar to the ray).
+*   `intensity_profile`: Array of float values representing voxel intensities along the ray.
+*   `soi_labels`: Array of integer labels corresponding to SOIs along the ray.
+*   `coordinates`: Tuple of entry and exit 3D coordinates.
+
+**Target Intensity Query (TIQ):**
+*   `qi`: Pair of co-planar images extracted from the user-selected ray in the input volume.
+*   `qp`: Intensity profile along the user-selected ray.
+
+**Transfer Function Component (Tent Shape):**
+*   `Il,m`: Lowest intensity in SOI $S_m$.
+*   `Ih,m`: Highest intensity in SOI $S_m$.
+*   `Im`: Average intensity in SOI $S_m$.
+*   `σm`: Initial opacity of the tent peak (default 0.3).
+
+### Numbered Steps
+
+1.  **Offline Knowledge Database Construction:**
+    *   Extract 192 rays uniformly from each of the three primary axes (64 per axis) from labeled training volumes.
+    *   Exclude empty background regions.
+    *   For each ray, extract the pair of co-planar images, the intensity profile, SOI labels, and coordinates [S1, unofficial].
+
+2.  **User Input and TIQ Generation:**
+    *   The user draws a line (ray) on a 2D view or clicks a point in 3D.
+    *   Extract the corresponding pair of co-planar images ($q_i$) and intensity profile ($q_p$) from the input volume for this ray [S1, unofficial].
+
+3.  **Stage 1: Image Matching (CNN Feature Extraction):**
+    *   Extract 4096-dimensional feature vectors from the last fully connected layer (FC7) of a pre-trained AlexNet for each image in $q_i$ and each corresponding image in the database $c_i$.
+    *   Calculate the Euclidean Distance (ED) between the feature vectors of $q_i$ and $c_i$ for all database entries.
+    *   Formula:
+        $$ \text{Image Similarity Distance}(q_i, c_i) = \sum_{j=1}^{2} \sum_{b=1}^{4096} (F^b_{qij} - F^b_{cij})^2 $$
+        where $F^b$ is the $b$-th CNN feature, $j$ indexes the two images, and $i$ indexes the database entry [S1, unofficial].
+    *   Retrieve the top $N$ candidates with the smallest ED [S1, unofficial].
+
+4.  **Stage 2: Intensity Profile Matching (DTW):**
+    *   For each of the top $N$ candidates from Stage 1, calculate the similarity between the query intensity profile $q_p$ and the candidate profile $c_p$ using Dynamic Time Warping (DTW).
+    *   Construct a distance matrix of size $L_{q_p} \times L_{c_p}$, where $L$ is the length of the profile.
+    *   Find the optimal warping path $P^*$ with minimum cost subject to:
+        *   Boundary condition: Path starts and ends in diagonally opposite corners.
+        *   Continuity: Steps move to adjacent cells.
+        *   Monotonicity: No backward steps [S1, unofficial].
+    *   Formula:
+        $$ \text{Intensity Profile Similarity Distance}(q_p, c_p) = \min \sqrt{\sum_{k=1}^{K} p_k / K} $$
+        where $K$ is the length of the warping path sequence and $p_k$ is the cost of the $k$-th step [S1, unofficial].
+    *   Re-rank the top $N$ candidates based on this DTW distance. The final retrieval result is the candidate with the smallest combined distance (implicitly the lowest DTW score among the top image matches, as the method re-ranks based on profile similarity) [S1, unofficial].
+
+5.  **TF Generation:**
+    *   Retrieve the SOI labels from the best-matching database entry.
+    *   For each unique SOI $S_m$ ($m=1..M$), generate a tent-shaped TF component $T_m$:
+        $$ T_m = \{(I_{l,m}, 0), (I_m, \sigma_m), (I_{h,m}, 0)\} $$
+        where $I_{l,m}$ is the min intensity, $I_{h,m}$ is the max intensity, $I_m$ is the average intensity, and $\sigma_m = 0.3$ [S1, unofficial].
+    *   The initial TF is the union of all $T_m$:
+        $$ \text{Initial TF} = \bigcup_{m=1}^{M} T_m $$
+    *   Assign unique colors to tent apexes and a single color (e.g., black) to end points for depth perception [S1, unofficial].
+
+6.  **TF Optimization:**
+    *   Optimize the opacity parameters $\theta$ (specifically $\sigma_m$) using the downhill simplex method to minimize the energy function $E(\theta)$:
+        $$ \min_\theta E(\theta) = \sum_{m=1}^{M} (V^T_m - V^R_m)^2 $$
+        where $V^T_m$ is the target visibility for SOI $m$ (uniformly set or user-defined) and $V^R_m$ is the resultant visibility [S1, unofficial].
+    *   Visibility $V_{SOI}$ is calculated as:
+        $$ V_{SOI} = \sum_{p \in SOI} O(p)F(p) $$
+        where $O(p)$ is the opacity defined by the TF at voxel $p$, and $F(p)$ is the front-to-back opacity composition:
+        $$ F(p) = e^{-\int_{h}^{p} A(g) dg} $$
+        $$ A(p) = A(p - \Delta p) + (1.0 - A(p - \Delta p))O(p) $$
+        where $A(p)$ is the composited opacity, $\Delta p$ is the sampling step size, and $h$ is the viewpoint [S1, unofficial].
+    *   Iterate until convergence [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from scipy.spatial.distance import euclidean
+# Note: DTW implementation assumed available or implemented as per standard algorithm
+# Note: AlexNet feature extraction assumed available or implemented as per standard CNN forward pass
+
+def extract_ray_features(volume, ray_indices):
+    """
+    Extracts co-planar images and intensity profile for a given ray.
+    ray_indices: list of voxel indices along the ray.
+    Returns: (image_pair, intensity_profile)
+    """
+    # Extract two co-planar 2D slices perpendicular to the ray direction
+    # and the intensity values along the ray indices
+    img1 = get_slice(volume, ray_indices, plane='x')
+    img2 = get_slice(volume, ray_indices, plane='y')
+    profile = volume[ray_indices]
+    return (img1, img2), profile
+
+def get_cnn_features(images, model):
+    """
+    Extracts 4096-dim feature vector from AlexNet FC7 layer.
+    """
+    features = []
+    for img in images:
+        # Preprocess image (resize, normalize) as per AlexNet requirements
+        processed_img = preprocess(img)
+        # Forward pass through CNN up to FC7
+        feat = model.forward_fc7(processed_img)
+        features.append(feat)
+    return features
+
+def calculate_image_distance(feat_q, feat_c):
+    """
+    Calculate Euclidean Distance between two sets of CNN features.
+    feat_q: list of 2 feature vectors for query images.
+    feat_c: list of 2 feature vectors for candidate images.
+    """
+    dist = 0.0
+    for f_q, f_c in zip(feat_q, feat_c):
+        dist += np.sum((f_q - f_c) ** 2)
+    return dist
+
+def calculate_dtw_distance(profile_q, profile_c):
+    """
+    Calculate DTW distance between two intensity profiles.
+    """
+    # Standard DTW implementation
+    n = len(profile_q)
+    m = len(profile_c)
+    dtw_matrix = np.full((n + 1, m + 1), np.inf)
+    dtw_matrix[0, 0] = 0
+    
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            cost = (profile_q[i-1] - profile_c[j-1]) ** 2
+            dtw_matrix[i, j] = cost + min(
+                dtw_matrix[i-1, j],     # insertion
+                dtw_matrix[i, j-1],     # deletion
+                dtw_matrix[i-1, j-1]    # match
+            )
+    
+    # Calculate the final distance metric as per formula: min sqrt(sum(pk)/K)
+    # Reconstruct path to get pk values
+    path = []
+    i, j = n, m
+    while i > 0 or j > 0:
+        path.append((i, j))
+        if i == 0: j -= 1
+        elif j == 0: i -= 1
+        else:
+            d1 = dtw_matrix[i-1, j]
+            d2 = dtw_matrix[i, j-1]
+            d3 = dtw_matrix[i-1, j-1]
+            if d1 < d2 and d1 < d3:
+                i -= 1
+            elif d3 < d1 and d3 < d2:
+                i -= 1
+                j -= 1
+            else:
+                j -= 1
+    
+    # Calculate sum of costs along the path
+    total_cost = 0
+    for i, j in path:
+        total_cost += (profile_q[i-1] - profile_c[j-1]) ** 2
+    
+    k = len(path)
+    return np.sqrt(total_cost / k)
+
+def generate_tent_tf(soi_data):
+    """
+    Generate tent-shaped TF components for identified SOIs.
+    soi_data: dict mapping SOI label to list of intensities.
+    Returns: list of TF parameters (intensity, opacity)
+    """
+    tf_params = []
+    for label, intensities in soi_data.items():
+        il = np.min(intensities)
+        ih = np.max(intensities)
+        im = np.mean(intensities)
+        sigma = 0.3 # Initial opacity
+        # Tent shape: (min_intensity, 0), (avg_intensity, sigma), (max_intensity, 0)
+        tf_params.append((il, 0.0))
+        tf_params.append((im, sigma))
+        tf_params.append((ih, 0.0))
+    return tf_params
+
+def optimize_tf_visibility(tf_params, volume, ray_indices, target_visibilities):
+    """
+    Optimize TF parameters using downhill simplex to match target visibilities.
+    """
+    # Define energy function
+    def energy_function(params):
+        # Reconstruct TF from params
+        current_tf = reconstruct_tf_from_params(params)
+        # Calculate resultant visibility for each SOI
+        resultant_vis = []
+        for soi_label in target_visibilities.keys():
+            v_soi = 0.0
+            for p in ray_indices:
+                if volume[p] corresponds to soi_label:
+                    o_p = current_tf(volume[p])
+                    f_p = calculate_front_to_back_opacity(volume, p, current_tf)
+                    v_soi += o_p * f_p
+            resultant_vis.append(v_soi)
+        
+        # Calculate energy
+        e = 0.0
+        for vt, vr in zip(target_visibilities.values(), resultant_vis):
+            e += (vt - vr) ** 2
+        return e
+
+    # Initial simplex points (perturb initial sigma values)
+    initial_params = [p[1] for p in tf_params] # Only optimize opacities
+    simplex = generate_simplex(initial_params)
+    
+    # Downhill simplex iteration
+    optimized_params = downhill_simplex(energy_function, simplex)
+    return optimized_params
+
+def two_stage_cbr(volume, user_ray_indices, knowledge_db, cnn_model):
+    """
+    Main Two-Stage CBR Method.
+    """
+    # 1. Generate TIQ
+    q_images, q_profile = extract_ray_features(volume, user_ray_indices)
+    q_features = get_cnn_features(q_images, cnn_model)
+    
+    # 2. Stage 1: Image Matching
+    candidates = []
+    for db_entry in knowledge_db:
+        c_images, c_profile = db_entry.images, db_entry.profile
+        c_features = get_cnn_features(c_images, cnn_model)
+        dist = calculate_image_distance(q_features, c_features)
+        candidates.append((dist, db_entry))
+    
+    # Sort by distance and take top N
+    candidates.sort(key=lambda x: x[0])
+    top_n_candidates = candidates[:N]
+    
+    # 3. Stage 2: Intensity Profile Matching (DTW)
+    ranked_candidates = []
+    for dist, db_entry in top_n_candidates:
+        dtw_dist = calculate_dtw_distance(q_profile, db_entry.profile)
+        ranked_candidates.append((dtw_dist, db_entry))
+    
+    # Sort by DTW distance
+    ranked_candidates.sort(key=lambda x: x[0])
+    best_match = ranked_candidates[0][1]
+    
+    # 4. TF Generation
+    soi_data = best_match.soi_labels # Map intensities to SOI labels
+    tf_params = generate_tent_tf(soi_data)
+    
+    # 5. TF Optimization
+    target_vis = {label: 1.0/M for label in soi_data.keys()} # Uniform target
+    optimized_params = optimize_tf_visibility(tf_params, volume, user_ray_indices, target_vis)
+    
+    return optimized_params
+```
+
+### Parameters and Typical Values
+*   **CNN Architecture:** AlexNet, pre-trained on ImageNet (1.2 million images). 7 trainable layers (5 convolutional, 2 fully connected). FC7 output is 4096 dimensions [S1, unofficial].
+*   **Tent Opacity ($\sigma_m$):** Initial value set to 0.3 [S1, unofficial].
+*   **Rays per Volume:** 192 total (64 per axis: x, y, z) [S1, unofficial].
+*   **Knowledge Database Size:** 3840 ray elements derived from 20 CT image volumes [S1, unofficial].
+*   **Target Visibility ($V^T$):** Can be auto-uniform (e.g., $1/M$ for $M$ SOIs) or user-defined. $V=1.0$ means exclusive priority [S1, unofficial].
+*   **Optimization Method:** Downhill simplex method [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Empty Backgrounds:** Must be excluded during ray extraction to avoid irrelevant matches [S1, unofficial].
+*   **Ambiguous SOIs:** Single-stage methods (ED baseline) incorrectly label arteries and kidneys. The two-stage method corrects this by combining image and profile matching [S1, unofficial].
+*   **Fine-tuning:** Fine-tuning AlexNet did not consistently improve recall compared to pre-trained AlexNet, suggesting pre-trained features are more robust for this application [S1, unofficial].
+*   **Precision vs. Recall:** False positives can be manually eliminated by the user, but false negatives (missing SOIs) are harder to correct, so recall is the primary metric [S1, unofficial].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Retrieval Time:** The AlexNet compartment dominates computation time. On an Intel i7 CPU and Nvidia GTX 980 Ti GPU, the AlexNet compartment took 15.70 seconds, DTW took 1.14 seconds, and the ED baseline took 0.84 seconds. The total two-stage method took 15.93 seconds [S1, unofficial].
+*   **TF Generation Time:** Less than 1 second [S1, unofficial].
+*   **Memory:** Depends on the size of the knowledge database (3840 ray elements) and the CNN model weights (AlexNet has 60 million parameters) [S1, unofficial].
+
+### Measured Performance
+*   **Recall:** On 20 CT volumes, the two-stage method achieved 0.719 recall for 'All' SOIs, compared to 0.518 for the ED baseline. Average improvement of 0.201 across all SOIs [S1, unofficial].
+*   **CNN Comparison:** Pre-trained AlexNet (0.719) outperformed GoogleNet (0.707) and ResNet (0.620). GoogleNet was marginally better for Lung (0.836 vs 0.829) [S1, unofficial].
+*   **Stage Contribution:** AlexNet performed better for Artery, Bone, and Kidney. DTW performed better for Liver, Lung, and Spleen. The combination outperformed both individually [S1, unofficial].
+
+### Strengths and Limitations
+*   **Strengths:** High recall for complex SOIs; intuitive user interaction (drawing a line); automatic TF generation; robust to intensity variations due to CNN features.
+*   **Limitations:** High computational cost for CNN feature extraction; requires a pre-constructed labeled knowledge database; fine-tuning CNNs may not improve performance; relies on user to draw a meaningful ray [S1, unofficial].
+
+### When to Use
+*   Use when automatic TF generation is needed for medical volumes with known SOIs.
+*   Use when user interaction via ray selection is acceptable.
+*   Do not use when real-time performance is critical due to CNN computation time.
+*   Do not use if a labeled knowledge database is not available.
+
+## Background
+
+### Origin and History
+The Two-stage CBR Method was proposed by Y. Jung, J. Kong, and J. Kim in the paper "A Transfer Function Design Using A Knowledge Database based on Deep Image and Primitive Intensity Profile Features Retrieval" [S1, unofficial]. It builds upon earlier case-based reasoning approaches for TF design, such as the ED baseline by Kohlmann et al. [KBKG09], by integrating deep learning for image feature extraction [S1, unofficial].
+
+### Usage
+The method was implemented in the Voreen volume rendering engine [MSRMH09] and evaluated on the 3D-IRCADb-01 dataset, which contains 20 CT image volumes of the upper abdomen [S1, unofficial]. It is used for automatic visualization of Structures of Interest (SOIs) such as arteries, bones, kidneys, liver, lung, and spleen [S1, unofficial].
+
+## Sources
+
+[S1] A Transfer Function Design Using A Knowledge Database based on Deep Image and Primitive Intensity Profile Features Retrieval, https://arxiv.org/abs/2209.06421v1, fetched 2026-10-26 (unofficial)

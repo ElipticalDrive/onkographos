@@ -1,0 +1,161 @@
+--- v002.md
++++ v003.md
+@@ -1,98 +1,87 @@
+ # Velocity Visualization via Geometry Shader Extrusion
+-
+ Also called: Grid Velocity Lines, Velocity Vector Lines
+ 
+ ## Overview
+-This technique visualizes a grid of velocities by rendering short line segments with alpha gradients, where line length and direction reflect the velocity vector in each grid cell [S1, unofficial]. It populates a vertex buffer with one point per grid cell and uses a geometry shader to extrude each point into a line segment based on sampled volume data [S1, unofficial].
++This method visualizes a 3D velocity field by rendering short line segments whose length and direction correspond to the velocity vector in each grid cell [S1, unofficial]. It differs from volume rendering techniques by converting scalar/vector field data into explicit geometric primitives (lines) rather than splatting or ray-marching, providing a sparse, vector-based representation of flow [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A Vertex Buffer Object (VBO) containing one point per grid cell and a 3D texture volume (`sampler3D`) storing velocity vectors [S1, unofficial].
+-*   **Output:** A rendered image of red line segments with alpha gradients [S1, unofficial].
++- **Input:** A Vertex Buffer Object (VBO) containing one point per grid cell in world space; a 3D texture volume (`sampler3D`) storing the velocity vectors; Model-View-Projection (MVP) matrix.
++- **Output:** A set of line primitives rendered with red color and alpha gradients.
+ 
+ **Data Structures:**
+-*   **VBO:** Contains `vec4 Position` representing world-space coordinates [S1, unofficial].
+-*   **Volume Texture:** 3D texture storing velocity vectors with coordinates normalized to [0, 1] [S1, unofficial].
++- **VBO:** Contains `vec4 Position` for each grid cell.
++- **Volume Texture:** 3D texture where each texel stores a `vec3` velocity vector. Coordinates are normalized to $[0, 1]$.
+ 
+-**Steps:**
+-1.  **Vertex Shader:** Compute clip-space position using the ModelviewProjection matrix and pass the original world-space position to the geometry shader [S1, unofficial].
+-2.  **Geometry Shader Input:** Receive the point and retrieve the world-space position [S1, unofficial].
+-3.  **Velocity Sampling:** Convert the world-space position to normalized texture coordinates and sample the 3D volume texture to get the velocity vector [S1, unofficial].
+-4.  **Emit First Vertex:** Set alpha to 0 and set clip-space position to the input point's clip-space position, then emit the vertex [S1, unofficial].
+-5.  **Emit Second Vertex:** Calculate the end position by adding the velocity vector to the world-space start position, transform to clip-space, set alpha to 1, and emit the vertex [S1, unofficial].
+-6.  **Finalize Primitive:** Call `EndPrimitive()` to finalize the line strip [S1, unofficial].
+-7.  **Fragment Shader:** Output a red color scaled by the interpolated alpha and a uniform brightness factor [S1, unofficial].
++**Numbered Steps:**
++1.  **Vertex Shader:** Compute the clip-space position using the MVP matrix. Pass the original world-space position to the geometry shader.
++2.  **Geometry Shader Input:** Receive the point primitive. Retrieve the world-space position.
++3.  **Velocity Sampling:** Sample the velocity vector from the 3D volume texture. The texture coordinates are derived from the world-space position, typically normalized to $[0, 1]$ or $[-1, 1]$ depending on the coordinate system. The source code uses `0.5 * (vPosition[0].xyz + 1.0)`, implying the input positions are in $[-1, 1]$ range.
++4.  **Line Extrusion:**
++    -   Emit the first vertex at the original position with alpha $0$.
++    -   Compute the second vertex position by adding the sampled velocity vector to the original position.
++    -   Transform the second vertex to clip space using the MVP matrix.
++    -   Emit the second vertex with alpha $1$.
++5.  **Fragment Shader:** Output a red color scaled by the interpolated alpha and a uniform brightness factor.
+ 
+ **Formulas:**
+-*   Normalized Coordinate: $\text{coord} = 0.5 \times (\text{vPosition}.xyz + 1.0)$ [S1, unofficial].
+-*   Velocity Vector: $\mathbf{V} = \text{texture}(\text{Volume}, \text{coord}).xyz$ [S1, unofficial].
+-*   End Position (Clip Space): $\text{gl\_Position}_{end} = \text{ModelviewProjection} \times (\text{vPosition}[0] + \mathbf{V})$ [S1, unofficial].
+-*   Fragment Color: $\text{FragColor} = \text{Brightness} \times \text{vec4}(\text{gAlpha}, 0, 0, 1)$ [S1, unofficial].
++-   **Clip Space Position:** $P_{clip} = M_{vp} \times P_{world}$
++-   **Texture Coordinate:** $C_{tex} = 0.5 \times (P_{world} + 1.0)$ (assuming $P_{world} \in [-1, 1]$)
++-   **Velocity Vector:** $V = \text{texture}(Volume, C_{tex}).xyz$
++-   **Second Vertex Position:** $P_{end} = P_{world} + V$
++-   **Fragment Color:** $C_{frag} = B \times (A, 0, 0, 1)$, where $B$ is brightness and $A$ is interpolated alpha.
+ 
+ **Parameters:**
+-*   **Brightness:** Uniform float controlling intensity, typically 0.5 [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Blending:** Requires `GL_MAX` blending rather than the default `GL_FUNC_ADD` to prevent incorrect visual results [S1, unofficial].
+-*   **Coordinate System:** The normalization formula `0.5 * (vPosition.xyz + 1.0)` assumes input positions are in the [-1, 1] range to map correctly to texture coordinates [S1, unofficial].
+-*   **Velocity Magnitude:** The velocity vector is added directly to the position; large magnitudes may extend lines beyond the view frustum or cause clipping issues [G].
++-   **Brightness:** Uniform float controlling intensity, typically $0.5$ [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def mul_mat_vec(m: list, v: list) -> list:
+-    return [sum(m[i][j] * v[j] for j in range(4)) for i in range(4)]
++# Vertex Shader
++def vertex_shader(Position: vec4, ModelviewProjection: mat4) -> (vec4 clip_pos, vec4 world_pos):
++    clip_pos = ModelviewProjection * Position
++    world_pos = Position
++    return clip_pos, world_pos
+ 
+-def sample_3d_texture(tex: dict, coord: list) -> list:
+-    return tex.get(tuple(coord), [0.0, 0.0, 0.0, 0.0])
++# Geometry Shader
++def geometry_shader(world_pos: vec4, ModelviewProjection: mat4, Volume: sampler3D) -> list[Vertex]:
++    # Sample velocity from 3D texture
++    # Assuming world_pos.xyz is in [-1, 1] range
++    coord = 0.5 * (world_pos.xyz + 1.0)
++    velocity = texture(Volume, coord).xyz
++    
++    vertices = []
++    
++    # First vertex: original position, alpha 0
++    v1_clip = ModelviewProjection * world_pos
++    v1_alpha = 0.0
++    vertices.append(Vertex(clip_pos=v1_clip, alpha=v1_alpha))
++    
++    # Second vertex: offset by velocity, alpha 1
++    end_pos = world_pos + vec4(velocity, 0.0)
++    v2_clip = ModelviewProjection * end_pos
++    v2_alpha = 1.0
++    vertices.append(Vertex(clip_pos=v2_clip, alpha=v2_alpha))
++    
++    return vertices
+ 
+-def vertex_shader(position: list, mvp: list) -> tuple:
+-    clip_pos = mul_mat_vec(mvp, position)
+-    return clip_pos, position
+-
+-def geometry_shader(v_position: list, mvp: list, volume: dict) -> list:
+-    coord = [0.5 * (v_position[i] + 1.0) for i in range(3)]
+-    vel_sample = sample_3d_texture(volume, coord)
+-    v = [vel_sample[0], vel_sample[1], vel_sample[2], 0.0]
+-    
+-    alpha_1 = 0.0
+-    pos_1_clip = v_position  # Represents gl_in[0].gl_Position
+-    
+-    alpha_2 = 1.0
+-    end_world = [v_position[i] + v[i] for i in range(4)]
+-    pos_2_clip = mul_mat_vec(mvp, end_world)
+-    
+-    return [
+-        {"clip_pos": pos_1_clip, "alpha": alpha_1},
+-        {"clip_pos": pos_2_clip, "alpha": alpha_2}
+-    ]
+-
+-def fragment_shader(alpha: float, brightness: float) -> list:
+-    return [brightness * alpha, 0.0, 0.0, 1.0]
++# Fragment Shader
++def fragment_shader(alpha: float, Brightness: float) -> vec4:
++    color = vec4(alpha, 0.0, 0.0, 1.0)
++    return Brightness * color
+ ```
+ 
+-## Subtopics
+-
+-### [Geometry Shader Cube Expansion](1074-geometry-shader-cube-expansion.md)
+-Extrudes points into cubes. Use for volumetric primitives.
+-
+-### [Geometry Shader Triangle Slicing (Z-Pass)](1681-geometry-shader-triangle-slicing-z-pass.md)
+-Slices geometry for Z-pass rendering. Use for specific depth testing.
+-
+-### [Geometry Shader (Quads)](4369-geometry-shader-quads.md)
+-Generates quads. Use for billboarded sprites.
+-
+-### [GPU Particle Rendering via Geometry Shader](4444-gpu-particle-rendering-via-geometry-shader.md)
+-Renders particles as geometry. Use for unstructured particle systems.
++**Edge Cases and Pitfalls:**
++-   **Coordinate System:** The source code assumes input positions are in $[-1, 1]$ range for texture sampling. If positions are in a different range, the texture coordinate calculation must be adjusted [S1, unofficial].
++-   **Blending:** The technique relies on alpha blending. The source mentions using `GL_MAX` blending rather than `GL_FUNC_ADD` for certain effects, but the default blending equation is `GL_FUNC_ADD` [S1, unofficial].
++-   **Velocity Magnitude:** The length of the line is directly proportional to the velocity vector's magnitude. Large velocities may cause lines to extend far outside the voxel, potentially causing visual clutter or occlusion issues.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with the number of grid cells, as each cell generates one line strip with two vertices [S1, unofficial].
+-*   **Memory Complexity:** Low, requiring only a VBO for points and a 3D texture for velocities [S1, unofficial].
+-*   **Strengths:** Simple implementation, efficient for structured grids, and visually intuitive for flow fields [S1, unofficial].
+-*   **Limitations:** Requires `GL_MAX` blending for correct visual results and depends on proper velocity magnitude scaling [S1, unofficial].
+-*   **When to use:** Visualizing structured velocity fields such as fluid simulation grids [S1, unofficial].
+-*   **When not to use:** Unstructured particle systems (use [GPU Particle Rendering via Geometry Shader](4444-gpu-particle-rendering-via-geometry-shader.md)) or when additive blending is desired [S1, unofficial].
++-   **Time Complexity:** $O(N)$ where $N$ is the number of grid cells. Each cell generates a constant number of vertices (2) and fragments.
++-   **Memory Complexity:** $O(N)$ for the VBO and $O(V)$ for the volume texture, where $V$ is the volume resolution.
++-   **Strengths:** Simple implementation; efficient on GPU; provides clear vector direction and magnitude visualization.
++-   **Limitations:** Sparse representation; may not show flow continuity as well as streamlines; sensitive to velocity magnitude scaling.
+ 
+ ## Background
+-This technique was described by Philip Rideout in a blog post on November 28th, 2010, as part of the "Volumetric Splatting" series [S1, unofficial]. It is presented as a simple and "beautiful" way to visualize velocity grids using modern OpenGL geometry shaders [S1, unofficial].
++This technique was described by Philip Rideout in a blog post titled "Volumetric Splatting at The Little Grasshopper" in November 2010 [S1, unofficial]. It is part of the "Pez" ecosystem, which includes demo code for various rendering techniques.
+ 
+ ## Sources

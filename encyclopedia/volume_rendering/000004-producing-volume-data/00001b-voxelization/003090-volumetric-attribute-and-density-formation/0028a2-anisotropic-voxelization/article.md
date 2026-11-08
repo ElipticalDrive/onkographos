@@ -3,117 +3,111 @@
 Also called: Directional Voxelization, Face-based Voxelization
 
 ## Overview
-Anisotropic voxelization improves rendering quality by storing directional data (such as surface normals or radiance) in voxels as direction-dependent values rather than isotropic averages [S1, unofficial]. It specifically addresses artifacts in thin models (e.g., cloth) where opposing surface normals cancel out during averaging, and reduces "light leaking" where isotropic voxels incorrectly illuminate surfaces facing away from light sources [S1, unofficial]. Unlike its siblings, it maintains six separate data grids (one per face of the voxel cube) to preserve directional fidelity [S1, unofficial].
+Anisotropic voxelization improves rendering quality by storing directional data (such as surface normals or radiance) in separate grids for each of the six faces of a voxel cube, rather than averaging them into a single isotropic value [S1, unofficial]. This method specifically addresses the cancellation of opposing surface normals in thin models (e.g., cloth) and reduces light leaking, where isotropic voxels incorrectly illuminate surfaces facing away from light sources [S1, unofficial]. It builds on the coordinate mapping and occupancy determination from [Voxelization](12-voxelization.md).
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A stream of geometric primitives (triangles) with associated attributes (e.g., color, normal vectors) and a target voxel grid resolution.
-*   **Output:** Six distinct voxel grids (or a single structure containing six channels), one for each of the six cardinal directions ($\pm x, \pm y, \pm z$).
+*   **Input:** A set of geometric primitives (triangles) with associated attributes (e.g., color, normal vector) and a target voxel grid defined by origin, resolution, and voxel size.
+*   **Output:** Six separate voxel grids (one for each axis direction: $\pm X, \pm Y, \pm Z$), where each grid stores the accumulated directional attribute for that specific face.
 
 **Data Structures:**
-The method requires storing data for each face of a voxel cube. This results in 6 separate voxel grids [S1, unofficial]. If implemented as a single tensor, the layout is typically $[X, Y, Z, 6]$, where the last dimension indexes the face direction. Each entry stores an accumulated weighted value (e.g., color or normal component) and a weight sum for normalization.
+The method requires six distinct voxel grids. If the base voxel grid has dimensions $W \times H \times D$, each of the six grids has the same dimensions.
+*   **Grid Layout:** Each grid stores a value $V$ (e.g., color or normal component) for each voxel coordinate $(i, j, k)$.
+*   **Memory:** The total memory usage is six times that of a single isotropic voxel grid [S1, unofficial].
 
 **Steps:**
-1.  **Rasterization/Projection:** For each primitive, determine which voxels it intersects or covers.
-2.  **Face Selection:** For each intersected voxel, identify the relevant face(s) based on the primitive's surface normal.
-3.  **Weight Calculation:** Compute the contribution weight for the attribute value using the dot product between the surface normal and the voxel face's axis vector.
-4.  **Accumulation:** Atomically add the weighted attribute value and the weight to the corresponding face grid in the target voxel.
-5.  **Normalization:** After all primitives are processed, normalize the accumulated values in each face grid by dividing by the total accumulated weight for that voxel face.
-
-**Formulas:**
-To store a value $V$ (e.g., color) into a specific voxel face, the value is multiplied by the dot product of the surface normal $\mathbf{n}$ and the axis vector $\mathbf{a}$ of that face [S1, unofficial].
-
-For a face with axis $\mathbf{a}$, the weight $w$ is:
-$$ w = \max(\mathbf{a} \cdot \mathbf{n}, 0.0) $$
-
-For example, for the negative x-face ($\mathbf{a} = (-1, 0, 0)$):
-$$ w = \max(-n_x, 0.0) $$
-
-The accumulated value $C_{acc}$ for a voxel face is updated as:
-$$ C_{acc} \leftarrow C_{acc} + V \cdot w $$
-$$ W_{acc} \leftarrow W_{acc} + w $$
-
-The final value $C_{final}$ is:
-$$ C_{final} = \frac{C_{acc}}{W_{acc}} $$
-(If $W_{acc} = 0$, the value is undefined or zero [G]).
-
-**Parameters:**
-*   **Face Count:** 6 (one for each axis direction) [S1, unofficial].
-*   **Memory Multiplier:** 6x compared to isotropic voxelization [S1, unofficial].
-
-**Pitfalls:**
-*   **Normal Cancellation:** In thin models where both sides of a surface fall into the same voxel, isotropic averaging results in a zero-vector normal, causing incorrect lighting [S1, unofficial]. Anisotropic voxelization avoids this by storing normals per face.
-*   **Light Leaking:** Isotropic voxels give a surface the same radiance in all 6 directions, potentially lighting surfaces facing away from the light source. Anisotropic voxelization reduces this by providing independent values per face [S1, unofficial].
-*   **Performance:** The need for atomic averaging across 6 face grids can negatively impact voxelization performance [S1, unofficial].
+1.  **Rasterization/Projection:** For each primitive (e.g., triangle) in the scene, determine which voxels it intersects or covers.
+2.  **Face Selection:** For each intersected voxel, identify the relevant face(s) based on the primitive's surface normal. The six faces correspond to the six cardinal directions:
+    *   $+X$: Axis vector $(1, 0, 0)$
+    *   $-X$: Axis vector $(-1, 0, 0)$
+    *   $+Y$: Axis vector $(0, 1, 0)$
+    *   $-Y$: Axis vector $(0, -1, 0)$
+    *   $+Z$: Axis vector $(0, 0, 1)$
+    *   $-Z$: Axis vector $(0, 0, -1)$
+3.  **Weight Calculation:** Calculate the contribution weight for each face using the dot product between the surface normal $\mathbf{n}$ and the face's axis vector $\mathbf{a}$. The weight $w$ is clamped to zero for negative contributions:
+    $$ w = \max(\mathbf{a} \cdot \mathbf{n}, 0.0) $$
+    For example, for the $-X$ face, $\mathbf{a} = (-1, 0, 0)$, so $w = \max(-n_x, 0.0)$ [S1, unofficial].
+4.  **Value Accumulation:** Multiply the primitive's attribute value $\mathbf{C}$ (e.g., color) by the weight $w$ and accumulate it into the corresponding voxel in the specific face grid. This accumulation often requires atomic operations if multiple primitives contribute to the same voxel face in parallel [S1, unofficial].
+    $$ \text{Grid}_{\mathbf{a}}[i, j, k] \leftarrow \text{Grid}_{\mathbf{a}}[i, j, k] + \mathbf{C} \cdot w $$
+5.  **Normalization (Optional):** If the accumulated values are not already normalized, normalize the resulting vectors (e.g., normals) or clamp scalar values (e.g., density) to the valid range [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def anisotropic_voxelize(primitives, voxel_grid):
-    """
-    primitives: List of triangles, each with vertices and a computed face normal.
-    voxel_grid: A 3D array of shape (X, Y, Z, 6) for accumulated values,
-                and a parallel 3D array of shape (X, Y, Z, 6) for weights.
-    """
-    # Initialize accumulators and weights to zero
-    # voxel_grid_accum[x,y,z,face] = 0.0
-    # voxel_grid_weight[x,y,z,face] = 0.0
+# Initialize six voxel grids with zeros
+# Grids: grid_pos_x, grid_neg_x, grid_pos_y, grid_neg_y, grid_pos_z, grid_neg_z
+# Each grid has dimensions (W, H, D)
 
-    for triangle in primitives:
-        # Determine bounding box of triangle in voxel space
-        min_voxel, max_voxel = get_voxel_bounds(triangle)
+def anisotropic_voxelization(primitives, voxel_grid_dims):
+    # Initialize grids
+    grids = {
+        'pos_x': zeros(voxel_grid_dims),
+        'neg_x': zeros(voxel_grid_dims),
+        'pos_y': zeros(voxel_grid_dims),
+        'neg_y': zeros(voxel_grid_dims),
+        'pos_z': zeros(voxel_grid_dims),
+        'neg_z': zeros(voxel_grid_dims)
+    }
+    
+    for primitive in primitives:
+        # Get primitive attributes
+        color = primitive.color
+        normal = normalize(primitive.normal)
         
-        for x in range(min_voxel.x, max_voxel.x + 1):
-            for y in range(min_voxel.y, max_voxel.y + 1):
-                for z in range(min_voxel.z, max_voxel.z + 1):
-                    # Check if triangle intersects voxel (e.g., via rasterization or AABB check)
-                    if triangle_intersects_voxel(triangle, x, y, z):
-                        normal = triangle.normal
-                        
-                        # Iterate over 6 faces
-                        for face_idx in range(6):
-                            # Define axis vector for the face
-                            if face_idx == 0: axis = (-1, 0, 0) # -X
-                            elif face_idx == 1: axis = (1, 0, 0) # +X
-                            elif face_idx == 2: axis = (0, -1, 0) # -Y
-                            elif face_idx == 3: axis = (0, 1, 0) # +Y
-                            elif face_idx == 4: axis = (0, 0, -1) # -Z
-                            else: axis = (0, 0, 1) # +Z
-                            
-                            # Calculate weight: max(dot(axis, normal), 0.0)
-                            dot_product = axis[0]*normal.x + axis[1]*normal.y + axis[2]*normal.z
-                            weight = max(dot_product, 0.0)
-                            
-                            if weight > 0.0:
-                                # Accumulate weighted value (e.g., color)
-                                # voxel_grid_accum[x, y, z, face_idx] += triangle.color * weight
-                                # voxel_grid_weight[x, y, z, face_idx] += weight
-                                pass # Atomic update would occur here in GPU implementation
-
-    # Normalize
-    for x in range(X):
-        for y in range(Y):
-            for z in range(Z):
-                for face_idx in range(6):
-                    w = voxel_grid_weight[x, y, z, face_idx]
-                    if w > 0.0:
-                        voxel_grid_accum[x, y, z, face_idx] /= w
+        # Determine which voxels the primitive intersects
+        intersected_voxels = get_intersected_voxels(primitive, voxel_grid_dims)
+        
+        for voxel in intersected_voxels:
+            # Calculate weights for each face
+            # Axis vectors for each face
+            axes = {
+                'pos_x': (1, 0, 0),
+                'neg_x': (-1, 0, 0),
+                'pos_y': (0, 1, 0),
+                'neg_y': (0, -1, 0),
+                'pos_z': (0, 0, 1),
+                'neg_z': (0, 0, -1)
+            }
+            
+            for face_name, axis in axes.items():
+                # Calculate dot product weight
+                dot_product = dot(axis, normal)
+                weight = max(dot_product, 0.0)
+                
+                # Accumulate weighted color into the specific face grid
+                # Note: In a real GPU implementation, this would use atomicAdd
+                grids[face_name][voxel.x, voxel.y, voxel.z] += color * weight
+                
+    return grids
 ```
+
+**Parameters:**
+*   **Voxel Resolution:** Determines the granularity of the directional data. Higher resolution increases memory usage and computation time [S1, unofficial].
+*   **Number of Faces:** Fixed at 6 for axis-aligned voxelization [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Thin Models:** In thin models where both sides of a surface fall into the same voxel, isotropic averaging cancels out normals, producing a zero-vector. Anisotropic voxelization avoids this by storing normals separately for each face [S1, unofficial].
+*   **Light Leaking:** Isotropic voxels can cause light leaking by giving a surface the same radiance in all directions. Anisotropic voxelization reduces this by providing independent values for each face [S1, unofficial].
+*   **Performance:** The need for atomic averaging across six grids can negatively impact performance [S1, unofficial].
+*   **Memory Usage:** Memory usage is increased sixfold compared to isotropic voxelization [S1, unofficial].
 
 ## Subtopics
 
 ### Anisotropic Voxelization via Projection
-Computes view-direction-dependent probability of an event using finer resolution voxel data (level 3) to produce anisotropic voxels, solving the inaccuracy of storing single density values without view direction consideration [S2]. It projects 3D voxel block grids to 2D grids (XY, XZ, YZ planes) using GPU shared memory, storing the projected position of every sample by block to obtain a value per axis [S2]. Occupancy $O$ for second-level voxels is computed by analyzing third-level data: dividing the number of different identifiers by the amount of voxels in the third level of voxelization [S2].
+This variant computes view-direction-dependent probability of an event using finer resolution voxel data (level 3) to produce anisotropic voxels, solving the inaccuracy of storing single density values without view direction consideration [S2]. It projects 3D voxel block grids to 2D grids (XY, XZ, YZ planes) using GPU shared memory, storing the projected position of every sample by block to obtain a value per axis [S2]. Occupancy $O$ for second-level voxels is computed by analyzing third-level data: dividing the number of different identifiers by the amount of voxels in the third level of voxelization [S2].
 
 ## Operating characteristics
-*   **Memory:** Increases memory usage sixfold compared to isotropic voxelization [S1, unofficial].
-*   **Performance:** The voxelization stage performance can be negatively impacted due to the need for atomic averaging across the 6 face grids [S1, unofficial].
-*   **Strengths:** Significantly improves rendering quality for thin models (e.g., cloth) by preventing normal cancellation [S1, unofficial]. Reduces light leaking by providing independent radiance values per face [S1, unofficial].
-*   **Limitations:** Higher memory footprint and computational cost during the voxelization phase [S1, unofficial].
+*   **Time Complexity:** $O(N \cdot F)$, where $N$ is the number of primitives and $F$ is the number of faces (6). The complexity is dominated by the rasterization and atomic accumulation steps [S1, unofficial].
+*   **Memory Complexity:** $6 \times W \times H \times D \times S$, where $W, H, D$ are the voxel grid dimensions and $S$ is the size of the stored attribute per voxel. This is six times the memory of isotropic voxelization [S1, unofficial].
+*   **Performance:** Performance can be negatively impacted due to the need for atomic averaging across the six face grids [S1, unofficial].
+*   **Strengths:** Significantly improves rendering quality for thin models and reduces light leaking [S1, unofficial].
+*   **Limitations:** High memory usage and potential performance bottlenecks due to atomic operations [S1, unofficial].
+*   **When to Use:** When rendering thin models (e.g., cloth) or when light leaking is a significant issue [S1, unofficial].
+*   **When Not to Use:** When memory or performance is constrained and the scene does not contain thin models or complex directional lighting interactions [S1, unofficial].
 
 ## Background
-Anisotropic voxelization was introduced as an improvement over isotropic methods to handle directional data like surface normals and radiance more accurately [S1, unofficial]. It addresses specific failure modes of isotropic averaging, such as zero-vector normals in thin geometry and light leaking [S1, unofficial]. The method is particularly relevant for real-time ray-traced voxel global illumination applications where visual fidelity is critical [S1, unofficial].
+Anisotropic voxelization was introduced as an improvement over isotropic voxelization methods to address the limitations of averaging directional data within a single voxel [S1, unofficial]. It is particularly relevant in real-time ray-traced voxel global illumination, where accurate representation of surface normals and radiance is crucial for high-quality rendering [S1, unofficial]. The method builds on the principles of voxelization and attribute sampling, extending them to handle directional dependencies [S1, unofficial].
 
 ## Sources
 [S1] Real-Time Ray Traced Voxel Global Illumination, https://doi.org/10.34626/0vdq-7m27, fetched 2026-10-26 (unofficial)

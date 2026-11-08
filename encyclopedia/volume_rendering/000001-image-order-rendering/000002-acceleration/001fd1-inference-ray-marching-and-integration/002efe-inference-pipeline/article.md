@@ -1,0 +1,114 @@
+# Inference Pipeline
+
+Also called: Inference Module
+
+## Overview
+The Inference Pipeline renders images from a trained dense point cloud and new camera poses without performing optimization [S1, unofficial]. It differs from training methods by skipping gradient computation and parameter updates, focusing solely on forward rasterization [S1, unofficial]. It builds on [Inference Ray Marching and Integration](2148-inference-ray-marching-and-integration.md) by utilizing the accelerated ray processing for final image synthesis.
+
+## How it works
+**Inputs:**
+1. `DensePointCloudWithExtraFeatures`: The trained set of 3D Gaussians, including position, covariance, opacity, and spherical harmonic coefficients.
+2. `NewCameraPose`: The extrinsic and intrinsic parameters for the target view.
+
+**Outputs:**
+1. `Image`: The rendered 2D color image.
+
+**Data Structures:**
+- `DensePointCloudWithExtraFeatures`: A list or array of Gaussian primitives. Each primitive contains:
+  - `mean`: 3D position vector $(x, y, z)$.
+  - `covariance`: $3 \times 3$ covariance matrix (or lower triangular decomposition).
+  - `opacity`: Scalar value $\alpha \in [0, 1]$.
+  - `features`: Spherical Harmonic coefficients for color.
+- `NewCameraPose`: Contains view matrix $V$ and projection matrix $P$.
+
+**Steps:**
+1. **Projection**: Transform each Gaussian's mean from world space to camera space using the view matrix $V$. Project the center to screen space using the projection matrix $P$ [S1, unofficial].
+2. **Culling**: Discard Gaussians that are behind the camera or outside the frustum [S1, unofficial].
+3. **Rasterization**: For each pixel in the output image, identify the set of visible Gaussians that project onto that pixel. Sort these Gaussians by depth (front-to-back) [S1, unofficial].
+4. **Compositing**: Iterate through the sorted Gaussians for each pixel. Compute the contribution of each Gaussian to the pixel color and opacity using the rasterizer's projection and blending logic. Accumulate color and opacity until the accumulated opacity reaches a threshold or all Gaussians are processed [S1, unofficial].
+5. **Output**: Return the accumulated color as the final `Image` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def inference_pipeline(dense_point_cloud, new_camera_pose):
+    # 1. Transform Gaussians to camera space
+    camera_gaussians = []
+    for gaussian in dense_point_cloud:
+        # Transform mean to camera space
+        mean_cam = new_camera_pose.view_matrix @ gaussian.mean
+        # Check if behind camera
+        if mean_cam.z <= 0:
+            continue
+        # Project to screen space
+        screen_pos = new_camera_pose.projection_matrix @ mean_cam
+        screen_pos /= screen_pos.w
+        # Store projected data
+        camera_gaussians.append({
+            'screen_pos': screen_pos[:2],
+            'depth': mean_cam.z,
+            'opacity': gaussian.opacity,
+            'features': gaussian.features,
+            'covariance': gaussian.covariance
+        })
+
+    # 2. Rasterize to image
+    height, width = new_camera_pose.image_dimensions
+    image = np.zeros((height, width, 3))
+    
+    # Group Gaussians by pixel (simplified grid approach)
+    pixel_gaussians = {}
+    for g in camera_gaussians:
+        px, py = g['screen_pos'].astype(int)
+        if 0 <= px < width and 0 <= py < height:
+            if (px, py) not in pixel_gaussians:
+                pixel_gaussians[(px, py)] = []
+            pixel_gaussians[(px, py)].append(g)
+
+    # 3. Composite for each pixel
+    for (px, py), gaussians in pixel_gaussians.items():
+        # Sort by depth (front to back)
+        gaussians.sort(key=lambda x: x['depth'])
+        
+        accumulated_color = np.zeros(3)
+        accumulated_opacity = 0.0
+        
+        for g in gaussians:
+            # Compute contribution based on Gaussian properties and rasterizer
+            # This step involves projecting the covariance to screen space
+            # and computing the alpha contribution at the pixel center
+            # [G] Specific rasterization math (e.g., 2D Gaussian projection)
+            # is assumed to be handled by the rasterizer module.
+            color, alpha = rasterize_gaussian(g, px, py)
+            
+            # Alpha blending
+            weight = alpha * (1.0 - accumulated_opacity)
+            accumulated_color += color * weight
+            accumulated_opacity += weight
+            
+            if accumulated_opacity > 0.99:
+                break
+        
+        image[py, px] = accumulated_color
+
+    return image
+```
+
+## Subtopics
+
+### [Depth Map Rendering and Visualization](8160-depth-map-rendering-and-visualization.md)
+Renders a set of views, prunes points near the camera, and saves rendered images, depth maps, and colored depth maps.
+
+## Operating characteristics
+- **Time Complexity**: Linear with respect to the number of Gaussians and pixels, $O(N \cdot P)$, where $N$ is the number of Gaussians and $P$ is the number of pixels. Rasterization is typically optimized using tile-based or binning approaches.
+- **Memory Complexity**: Linear with respect to the number of Gaussians $O(N)$ to store the point cloud data.
+- **Performance**: Real-time performance is achievable on modern GPUs due to the parallel nature of rasterization.
+- **Strengths**: Fast inference without optimization; suitable for real-time visualization.
+- **Limitations**: Quality depends entirely on the trained point cloud; no refinement during inference.
+
+## Background
+The Inference Pipeline is part of the 3D Gaussian Splatting framework, specifically implemented in the Taichi-based 3D Gaussian Splatting repository [S1, unofficial]. It enables real-time rendering of trained scenes without the computational overhead of training loops.
+
+## Sources
+[S1] wanmeihuali/taichi_3d_gaussian_splatting, https://github.com/wanmeihuali/taichi_3d_gaussian_splatting, fetched 2026-10-27 (unofficial)

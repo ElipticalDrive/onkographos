@@ -1,0 +1,242 @@
+# Unbalanced Octree Construction
+
+Also called: Bottom-up recursive construction of an unbalanced octree
+
+## Overview
+This method constructs an adaptive-resolution octree from a sorted array of leaf nodes (typically bounding spheres of mesh primitives) by recursively grouping them into clusters of up to eight. It is designed for 3-manifold solids where an unbalanced octree is preferred over an unbalanced quadtree to increase the average branching factor, thereby reducing the number of interior nodes, memory footprint, and traversal time [S1, unofficial].
+
+## How it works
+**Inputs:** A sorted array of leaf nodes (e.g., `SolidNode` objects representing bounding spheres of mesh primitives). The leaves are assumed to be sorted along a space-filling curve or spatial axis to facilitate efficient clustering.
+**Outputs:** A root `SolidNode` representing the constructed unbalanced octree.
+
+**Data Structures:**
+*   `SolidNode`: Represents a node in the tree.
+    *   `center`: 3D vector, the center of the bounding sphere.
+    *   `radius`: Scalar, the radius of the bounding sphere.
+    *   `field_values`: Scalar or vector, averaged from children.
+    *   `boundary_label`: Integer/Bitmask, combined via bitwise OR from children.
+*   `I`: Integer array of size 9, used to track split indices during recursion.
+
+**Algorithm Steps:**
+1.  **Base Case:** If the number of leaf nodes in the current range `[i1, i2)` is 8 or fewer (`i2 - i1 <= 8`), merge them directly into a single node and return [S1, unofficial].
+2.  **Recursive Splitting:** If the range contains more than 8 nodes, the algorithm performs a series of binary splits to divide the nodes into up to 8 clusters.
+    *   Initialize an index array `I` of size 9: `I[0] = i1`, `I[8] = i2`, and `I[1..7] = -1`.
+    *   Use a variable `N` (initially 0) to track the current split level.
+    *   **Split Function:** `Split(i_start, i_end)` bi-sects the array of input leaf nodes along the longest edge of the corresponding axis-aligned bounding box (AABB) of the nodes in that range. It returns the index of the middle leaf node that divides the range into two halves [S1, unofficial].
+    *   **Branching Logic:**
+        *   The algorithm attempts to create 8 children by recursively bisecting.
+        *   First, split the entire range `[I[0], I[8])` at `I[4] = Split(I[0], I[8])`.
+        *   If the left sub-range `[I[0], I[4])` has more than 8 nodes, split it at `I[2] = Split(I[0], I[4])`.
+        *   If the right sub-range `[I[4], I[8])` has more than 8 nodes, split it at `I[6] = Split(I[4], I[8])`.
+        *   Continue this logic to fill `I[1], I[3], I[5], I[7]` if their respective sub-ranges exceed the threshold [S1, unofficial].
+        *   *Note:* The provided C++ code uses a `goto`-based loop to handle the nested splitting logic efficiently.
+3.  **Recursive Construction:** For each valid sub-range defined by `I` (where `I[i] != -1`), recursively call `BuildTree` to construct the child subtrees.
+4.  **Merge Function:** Combine the resulting child nodes (1 to 8) into a new parent `SolidNode`:
+    *   **Center:** Simple average of the children's centers.
+    *   **Radius:** Derived from the bounding sphere of all input child nodes (i.e., the smallest sphere enclosing all child spheres).
+    *   **Field Values:** Simple average of the children's field values.
+    *   **Boundary Label:** Combined using a binary OR operator of the children's labels [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def build_tree(leaf_nodes, i1, i2):
+    """
+    Recursively builds an unbalanced octree from leaf_nodes[i1:i2].
+    leaf_nodes: List of SolidNode objects, sorted spatially.
+    i1, i2: Indices defining the range [i1, i2).
+    """
+    # Base case: 8 or fewer leaves
+    if i2 - i1 <= 8:
+        return merge_nodes(leaf_nodes[i1:i2])
+
+    # Initialize index array I with -1
+    # I[0] is start, I[8] is end
+    I = [-1] * 9
+    I[0] = i1
+    I[8] = i2
+    
+    # We need to determine split points I[1]...I[7]
+    # The logic from the C++ code is a specific way to bisect up to 8 times
+    
+    # Helper to split a range along the longest AABB edge
+    def split_range(start_idx, end_idx):
+        # Calculate AABB of leaf_nodes[start_idx:end_idx]
+        # Find the longest axis (x, y, or z)
+        # Return the index of the middle leaf node along that axis
+        # This assumes leaf_nodes are sorted such that spatial proximity 
+        # correlates with array index, or we sort by the longest axis locally.
+        # The source says "bi-sects the array... along the longest edge... returns index of middle leaf"
+        # Implementation detail: Find median index based on the longest dimension of the bounding box.
+        pass 
+
+    # The C++ code uses a specific iterative approach to fill I
+    # N starts at 0. It tries to split the range [I[N], I[N+4])
+    # If that range is too big, it splits it.
+    
+    N = 0
+    while True:
+        # Try to split the current segment defined by I[N] and I[N+4]
+        # The C++ code checks if I[4+N] - I[N] > 8
+        if I[4 + N] == -1 or I[4 + N] - I[N] <= 8:
+            # No split needed for this segment, move to next N
+            N += 1
+            if N == 4:
+                break
+            continue
+        
+        # Perform split
+        mid_idx = split_range(I[N], I[4 + N])
+        I[2 + N] = mid_idx
+        
+        # Now check if the left sub-segment [I[N], I[2+N]] needs splitting
+        if I[2 + N] - I[N] > 8:
+            I[1 + N] = split_range(I[N], I[2 + N])
+        
+        # Check if the right sub-segment [I[2+N], I[4+N]] needs splitting
+        if I[4 + N] - I[2 + N] > 8:
+            I[3 + N] = split_range(I[2 + N], I[4 + N])
+            
+        # In the C++ code, after splitting, it continues the loop for the same N?
+        # Actually, the C++ code structure is:
+        # Branch: if (I[4+N]-I[N]>8) { split; check left; check right; }
+        # if ((N+=4)==4) goto Branch;
+        # This implies N increments by 4? No, N is an index into the I array structure?
+        # Let's re-read carefully:
+        # int N=0, I[]={i1,-1,-1,-1,Split(i1,i2),-1,-1,-1,i2};
+        # Branch : if (I[4+N]-I[N]>8) {
+        #   I[2+N] = Split(I[N],I[4+N]);
+        #   if (I[2+N]-I[ N]>8) I[1+N]=Split(I[ N],I[2+N]);
+        #   if (I[4+N]-I[2+N]>8) I[3+N]=Split(I[2+N],I[4+N]);
+        # }
+        # if ((N+=4)==4) goto Branch;
+        
+        # This logic is tricky. N starts at 0.
+        # Iteration 1: N=0. Checks I[4]-I[0]. If >8, sets I[2]. Then checks I[2]-I[0] and I[4]-I[2].
+        # Then N becomes 4.
+        # Iteration 2: N=4. Checks I[8]-I[4]. If >8, sets I[6]. Then checks I[6]-I[4] and I[8]-I[6].
+        # Then N becomes 8. Loop ends.
+        
+        # So the loop runs twice: once for the left half (N=0), once for the right half (N=4).
+        # But wait, the C++ code has `if ((N+=4)==4) goto Branch;`.
+        # If N=0, N+=4 -> 4. Condition (4==4) is true. Goto Branch.
+        # Next iteration N=4. N+=4 -> 8. Condition (8==4) is false. Loop ends.
+        
+        # So we only process N=0 and N=4.
+        # This means we only split the top-level range into 4 chunks?
+        # No, I[0]...I[8] are 9 indices.
+        # I[0] = start
+        # I[4] = mid of whole
+        # I[2] = mid of left half
+        # I[6] = mid of right half
+        # I[1] = mid of left-left
+        # I[3] = mid of left-right
+        # I[5] = mid of right-left
+        # I[7] = mid of right-right
+        
+        # The C++ code sets I[2+N] and potentially I[1+N] and I[3+N].
+        # For N=0: Sets I[2], I[1], I[3].
+        # For N=4: Sets I[6], I[5], I[7].
+        # This fills I[1]..I[7].
+        
+        # So the logic is:
+        # 1. Split [0,8] at 4.
+        # 2. If [0,4] > 8, split at 2. If [0,2] > 8, split at 1. If [2,4] > 8, split at 3.
+        # 3. If [4,8] > 8, split at 6. If [4,6] > 8, split at 5. If [6,8] > 8, split at 7.
+        
+        # We need to implement this specific control flow.
+        pass
+
+    # Re-implementing the C++ control flow accurately
+    I = [-1] * 9
+    I[0] = i1
+    I[8] = i2
+    
+    # Initial split of the whole range
+    I[4] = split_range(i1, i2)
+    
+    N = 0
+    while True:
+        # Check if the segment [I[N], I[N+4]] needs splitting
+        if I[4 + N] - I[N] > 8:
+            # Split the segment [I[N], I[N+4]]
+            I[2 + N] = split_range(I[N], I[4 + N])
+            
+            # Check left sub-segment [I[N], I[2+N]]
+            if I[2 + N] - I[N] > 8:
+                I[1 + N] = split_range(I[N], I[2 + N])
+            
+            # Check right sub-segment [I[2+N], I[N+4]]
+            if I[4 + N] - I[2 + N] > 8:
+                I[3 + N] = split_range(I[2 + N], I[4 + N])
+        
+        N += 4
+        if N == 4:
+            continue # Go back to Branch
+        else:
+            break # Exit loop
+
+    # Collect valid ranges and build children
+    children = []
+    first = I[0]
+    for i in range(1, 9):
+        if I[i] == -1:
+            continue
+        # Recursively build tree for range [first, I[i])
+        child = build_tree(leaf_nodes, first, I[i])
+        children.append(child)
+        first = I[i]
+        
+    return merge_nodes(children)
+
+def merge_nodes(nodes):
+    """
+    Merges a list of SolidNodes into a single parent SolidNode.
+    """
+    if not nodes:
+        return None
+    
+    # Calculate bounding sphere of all nodes
+    # Center is average of centers
+    center = sum(n.center for n in nodes) / len(nodes)
+    
+    # Radius is derived from the bounding sphere of all input nodes
+    # This usually means the smallest sphere enclosing all child spheres
+    # A simple approximation is max distance from center to any child's farthest point
+    max_radius = 0
+    for n in nodes:
+        dist = distance(center, n.center)
+        farthest_point = dist + n.radius
+        if farthest_point > max_radius:
+            max_radius = farthest_point
+            
+    radius = max_radius
+    
+    # Field values are simple averages
+    field_values = sum(n.field_values for n in nodes) / len(nodes)
+    
+    # Boundary label is binary OR
+    boundary_label = 0
+    for n in nodes:
+        boundary_label |= n.boundary_label
+        
+    return SolidNode(center, radius, field_values, boundary_label)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The radius calculation relies on the bounding sphere of children. If children are far apart, the parent sphere may be large, potentially including empty space. This is a trade-off for simplicity [S1, unofficial].
+*   **Sorting:** The `Split` function assumes the input array is sorted in a way that allows bi-section along the longest AABB edge to produce balanced clusters. If the leaves are not sorted spatially, the clustering may be inefficient [S1, unofficial].
+*   **Degenerate Input:** If all nodes are identical, the bounding box has zero volume. The "longest edge" is undefined. A guard should handle this case, perhaps by defaulting to a specific axis or returning the first index [G].
+
+## Operating characteristics
+*   **Time Complexity:** The splitting process is recursive. In the worst case, it splits until each cluster has 8 or fewer nodes. The `Split` function requires calculating the AABB and finding the median, which is $O(k)$ for $k$ nodes in the range. The total time complexity is roughly $O(N \log N)$ or $O(N)$ depending on the sorting and split efficiency, where $N$ is the number of leaves [S1, unofficial].
+*   **Memory Complexity:** The tree structure stores one node per internal node and leaf. The number of internal nodes is reduced by the higher branching factor (up to 8) compared to a quadtree (up to 4). This leads to a smaller memory footprint [S1, unofficial].
+*   **Strengths:** Faster traversal times and more compact data structures for 3-manifold solids compared to unbalanced quadtrees [S1, unofficial].
+*   **Limitations:** The unbalanced nature means the tree depth can vary, which might complicate uniform traversal strategies. The simple averaging of centers and ORing of labels may lose some geometric precision [S1, unofficial].
+
+## Background
+This method was introduced by Kenneth Museth and Nicolas Lombeyna in the context of the "TetSplat" system for real-time rendering and volume clipping of large triangle meshes [S1, unofficial]. It is part of a pipeline that constructs a "Solid" mesh representation from triangulated 3-manifold data. The use of an unbalanced octree is motivated by the 3D nature of the data, where an octree provides a better balance between spatial resolution and memory usage than a quadtree [S1, unofficial].
+
+## Sources
+[S1] TetSplat: Real-time Rendering and Volume Clipping of Large ... - Museth, https://ken.museth.org/Publications_files/Museth-Lombeyda_VIS04.pdf, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,87 @@
+# Central Difference Stencils
+
+Also called: Central Finite Differences, Symmetric Finite Differences
+
+## Overview
+Central difference stencils approximate the first-order partial derivative of a scalar field at a voxel center by computing the difference between values at symmetrically offset neighbors, divided by twice the step size. This method is distinguished from its siblings, the [Forward Difference Gradient](3362-forward-difference-gradient.md) and [Backward Difference Gradient](3362-forward-difference-gradient.md), by its second-order accuracy ($O(h^2)$ truncation error) compared to their first-order accuracy ($O(h)$), while maintaining the same computational cost of two samples per axis. It serves as the foundational mechanism for higher-order methods like the [4th-Order Finite Difference Gradient](4889-4th-order-finite-difference-gradient.md) and vector field analyses such as [Jacobian Estimation via Central Differences](2650-jacobian-estimation-via-central-differences.md).
+
+## Shared principles
+The central difference approximation for the partial derivative of a scalar volume $V$ with respect to coordinate $x_i$ at voxel index $\mathbf{p}$ is given by:
+
+$$ \frac{\partial V}{\partial x_i} \approx \frac{V(\mathbf{p} + \mathbf{e}_i) - V(\mathbf{p} - \mathbf{e}_i)}{2h} $$
+
+where:
+- $\mathbf{e}_i$ is the unit vector in the $i$-th dimension (e.g., $(1,0,0)$ for $x$).
+- $h$ is the voxel spacing (assumed isotropic). In index space, $h=1$, simplifying the denominator to 2.
+- $V(\mathbf{p} + \mathbf{e}_i)$ and $V(\mathbf{p} - \mathbf{e}_i)$ are the scalar values at the immediate neighbors along the axis of differentiation.
+
+The gradient vector $\mathbf{G} = (G_x, G_y, G_z)$ is constructed by applying this stencil independently along each axis. The method requires accessing two neighbors per axis, totaling six neighbor lookups for the full 3D gradient.
+
+Boundary conditions are critical because the stencil requires neighbors outside the current voxel. If a neighbor index falls outside the volume bounds, the value must be determined via clamping (using the boundary value), zero-padding, or extrapolation [G]. The choice of boundary condition affects the continuity of the gradient at the volume edges.
+
+## Subtopics
+
+### [Jacobian Estimation via Central Differences](2650-jacobian-estimation-via-central-differences.md)
+This method extends the scalar central difference stencil to estimate the $3 \times 3$ Jacobian matrix $\mathbf{J}$ of a vector-valued deformation field $f(\mathbf{p})$. Unlike the [Sobel Operator](1416-sobel-operator.md) or [Forward Difference Gradient](3362-forward-difference-gradient.md) which produce scalar gradients or single vectors, this approach computes the full matrix of partial derivatives $\frac{\partial f_j}{\partial x_i}$. It builds on [Finite Difference Stencils (Central/Forward/Backward)](3858-finite-difference-stencils-central-forward-backward.md) by applying the central difference formula to each component of the vector field. The Jacobian is constructed such that the $i$-th column is the gradient of the $i$-th component of the field. The method requires evaluating the field function at six perturbed positions: $\mathbf{p} \pm \epsilon \mathbf{e}_x$, $\mathbf{p} \pm \epsilon \mathbf{e}_y$, and $\mathbf{p} \pm \epsilon \mathbf{e}_z$. The step size $\epsilon$ must be chosen carefully to balance truncation error against numerical cancellation [G].
+
+### Clamped Central Differences
+**Definition**
+A variant of central differencing for gradient computation in structured AMR (Adaptive Mesh Refinement) data that clamps offset positions to the current region to avoid additional ray traversals [S1].
+
+**Step**
+1. Compute six additional basis reconstruction samples at positions offset from the current sample by a distance proportional to the region's sample rate [S1].
+2. Clamp the offset positions to the current region before evaluating them [S1].
+
+**Pitfall**
+Gradients are not necessarily continuous at level boundaries because the offset size can change between regions of different refinement levels [S1].
+
+**Comparison**
+Accurate central differencing requires tracing 6 additional rays per sample via infinitesimal rays to find the containing regions in the BVH, which is expensive. The clamped version removes ray traversals but reduces quality [S1].
+
+### Curl Grid Computation
+**Definition**
+Computes the curl $\nabla \times \mathbf{F}$ at every active voxel of a vector grid using central differences [S2, unofficial].
+
+**Step**
+1. Initialize a `GradStencil` with the grid tree [S2, unofficial].
+2. Iterate over all active voxels $(c, \_)$ in the grid tree [S2, unofficial].
+3. Move the stencil to the current coordinate $c$ [S2, unofficial].
+4. Compute the $x, y,$ and $z$ components of the curl using the specific stencil formulas and store the tuple $(c_x, c_y, c_z)$ in a dictionary keyed by coordinate [S2, unofficial].
+5. Build the result grid using the computed data, a background value of zero vector $(0,0,0)$, and the original grid's voxel size [S2, unofficial].
+
+**Formula**
+The components are computed using indices relative to the current voxel, where $v[i][j]$ denotes the $j$-th component of the vector at the $i$-th neighbor in the stencil pattern. The scalar multiplier `half` represents $0.5$ (or $1/(2 \cdot \text{voxel\_size})$ in physical space) [S2, unofficial]:
+
+$$ \text{curl}_x = (v[4][3] - v[5][3] - v[6][2] + v[7][2]) \times 0.5 $$
+$$ \text{curl}_y = (v[6][1] - v[7][1] - v[2][3] + v[3][3]) \times 0.5 $$
+$$ \text{curl}_z = (v[2][2] - v[3][2] - v[4][1] + v[5][1]) \times 0.5 $$
+
+**Parameter**
+`half`: The scalar multiplier 0.5, representing $1/(2 \cdot \text{voxel\_size})$ in index space [S2, unofficial].
+
+### Hessian-Vector Product via Central Differences
+**Definition**
+An approximation of the Hessian-vector product $H(\theta)\mathbf{v}$ that avoids computing the full Hessian matrix by estimating the directional derivative of the gradient [S3]. It computes $D_{HVP} = \nabla^2 \mathbf{v}$, which is the directional gradient of the gradient, resulting in an $n$-dimensional vector [S3].
+
+**Step**
+Evaluate the first-order gradient estimator at positions shifted from the current solution along the direction $\mathbf{v}$ by $\pm \epsilon$ [S3].
+
+**Formula**
+The approximation using central differences is:
+
+$$ H(\theta)\mathbf{v} \approx \lim_{\epsilon \to 0} \frac{\mathbf{g}(\theta + \epsilon \mathbf{v}) - \mathbf{g}(\theta - \epsilon \mathbf{v})}{2\epsilon} $$
+
+The smooth HVP kernel is estimated using directional central differences of the gradient estimator $D_G$:
+
+$$ D_{HVP} \kappa(\tau) = \frac{D_G \kappa(\tau - \epsilon \mathbf{v}) - D_G \kappa(\tau + \epsilon \mathbf{v})}{2\epsilon} $$
+
+**Complexity**
+Time complexity is $O(n)$ function evaluations without Importance Sampling (IS), $O(n)$ with IS, and $O(1)$ with Aggregate IS. Space complexity for Aggregate IS is $O(n)$ [S3].
+
+## Background
+Central differences are a standard numerical analysis technique derived from the Taylor series expansion. In the context of volume rendering and graphics, they are widely used for gradient estimation in ray marching, particularly for computing surface normals from scalar fields (e.g., density or distance fields) when analytic gradients are unavailable or too expensive to compute. The method is fundamental to differentiable rendering pipelines, where it serves as the basis for higher-order derivatives like the Jacobian [2650-jacobian-estimation-via-central-differences.md] and Hessian-vector products [S3]. In structured AMR data, specific variants like clamped central differences were developed to handle multi-resolution boundaries efficiently [S1].
+
+## Sources
+[S1] PDF Ray Tracing Structured AMR Data Using ExaBricks, https://www.sci.utah.edu/~wald/Publications/2020/exabrick/exabrick.pdf, fetched 2026-10-30
+[S2] tobiasosborne/Lyr.jl, https://github.com/tobiasosborne/Lyr.jl, fetched 2026-10-26 (unofficial)
+[S3] Stochastic Gradient Estimation for Higher-Order Differentiable Rendering, https://doi.org/10.1109/iccv51701.2025.02618, fetched 2026-10-29

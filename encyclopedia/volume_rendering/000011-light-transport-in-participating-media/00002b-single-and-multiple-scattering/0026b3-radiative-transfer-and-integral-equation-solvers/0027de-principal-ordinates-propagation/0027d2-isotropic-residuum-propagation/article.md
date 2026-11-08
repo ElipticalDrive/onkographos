@@ -3,120 +3,136 @@
 Also called: IR propagation
 
 ## Overview
-Isotropic Residuum Propagation (IR propagation) is a secondary propagation stage within Principal-Ordinates Propagation that rapidly transports remaining isotropic energy after the initial anisotropic phase. It solves the problem of high computational cost in optically thick media by switching from expensive directional propagation to a cheaper single-grid isotropic scheme once radiance anisotropy falls below a threshold. It sets itself apart from full anisotropic propagation by merging multiple directional grids into one global grid, achieving significant speed-ups with negligible visual difference for the residuum energy.
+Isotropic Residuum Propagation (IR propagation) is a secondary optimization stage within Principal-Ordinates Propagation [4121-principal-ordinates-propagation.md] that accelerates light transport simulation by switching from expensive anisotropic propagation to cheaper isotropic propagation once radiance anisotropy falls below a threshold. It solves the problem of high computational cost in optically thick media by merging multiple directional propagation grids into a single global grid, reducing propagation costs tremendously while maintaining negligible visual difference compared to full anisotropic propagation.
 
 ## How it works
 **Inputs and Outputs:**
-- **Inputs:** Radiance fields from the anisotropic propagation stage, phase function anisotropy $g$, scattering coefficient $\sigma_s$, grid spacing $\Delta x$, anisotropy threshold $\varepsilon_a$, and initial radiance anisotropy $a_b$.
-- **Outputs:** Final radiance field in a single global grid.
+- **Inputs:** Propagation state after $m_0$ anisotropic iterations; maximum radiance anisotropy $a_b$; phase function anisotropy $g$; scattering coefficient $\sigma_s$; grid spacing $\Delta x$; anisotropy threshold $\varepsilon_a$.
+- **Outputs:** Final radiance distribution stored in a single global grid.
 
 **Data Structures:**
-- **Global Grid:** A single 3D grid aligned with the medium, typically at double the resolution of individual directional propagation grids to ensure sufficient penetration depth from the first row of cells [S1].
-- **Radiance Field:** Stored as scalar values per cell, as directionality is no longer tracked.
+- **Propagation Grids:** Initially, multiple grids aligned with principal ordinates. After switching, a single global grid aligned with the medium (no directionality).
+- **Radiance Fields:** Stored per grid cell. Anisotropy metrics $a_{n,i}$ are tracked per cell and ordinate during anisotropic phase.
 
 **Parameters:**
 - $\varepsilon_a$: Small anisotropy threshold. Typical value: around 0.1 or higher [S1].
-- $\Delta x$: Grid spacing. Example: 0.25 m [S1].
-- $g$: Phase function anisotropy.
-- $\sigma_s$: Scattering coefficient.
-- $a_b$: Initial maximum radiance anisotropy (e.g., 1 for directional light, lower if prefiltered) [S1].
+- $m_0$: Iteration count at which switch occurs. Determined by formula below.
+- $\Delta x$: Grid spacing. Typical value: 0.25 m [S1].
 
-**Algorithm Steps:**
-1. **Initialization:** Determine initial parameters $a_b$ and $g$ at initialization. $a_b$ may be reduced by prefiltering incident radiance [S1].
-2. **Calculate Switch Iteration ($m_0$):** Compute the number of anisotropic iterations after which to switch to isotropic propagation using the Henyey-Greenstein (HG) self-convolution property [S1]:
-   $$ m_0 = \frac{\ln \varepsilon_a - \ln a_b}{\ln g} \cdot \frac{1}{\sigma_s \cdot \Delta x} $$
+**Steps:**
+1. **Initialization:** Determine $a_b$ (maximum radiance anisotropy, typically 1 for directional light, lower if prefiltered) and $g$ (phase function anisotropy) at initialization [S1].
+2. **Calculate Switch Iteration $m_0$:** Compute the number of anisotropic iterations required for light anisotropy to fall below $\varepsilon_a$ using the Henyey-Greenstein (HG) self-convolution property [S1]:
+   $$
+   m_0 = \frac{\ln \varepsilon_a - \ln a_b}{\ln g} \cdot \frac{1}{\sigma_s \cdot \Delta x}
+   $$
    [S1]
-3. **Anisotropic Propagation:** Perform full anisotropic propagation for $m_0$ iterations using multiple directional grids aligned with principal ordinates [S1].
-4. **Check Anisotropy:** After $m_0$ iterations, verify if all propagation grids satisfy $|a_{n,i}| < \varepsilon_a$ for all cells $i$ and ordinates $n$ [S1]. If not, continue anisotropic propagation or adjust $m_0$ [S1].
-5. **Merge Grids:** Combine energy from all directional grids into a single global grid aligned with the medium. This is valid because directionality is negligible [S1].
-6. **Isotropic Residuum Propagation:** Propagate the merged residuum energy in the single global grid for additional iterations until the residual energy falls below a threshold $\varepsilon_L$ or convergence is reached [S1].
+3. **Anisotropic Propagation:** Perform $m_0$ iterations of Principal-Ordinates Propagation. During this phase, track anisotropy $a_{n,i}$ for each cell $i$ and ordinate $n$ [S1].
+4. **Check Anisotropy Criterion:** After $m_0$ iterations, check if $|a_{n,i}| < \varepsilon_a$ for all $i, n$ [S1]. If not, continue anisotropic propagation until criterion is met or $m_0$ is reached [S1].
+5. **Merge Grids:** Once the criterion is fulfilled, merge energy from all directional propagation grids into a single global grid aligned with the medium, as directionality is no longer present [S1]. Use double the resolution of individual grids to allow light penetration from the first row of cells [S1].
+6. **Isotropic Propagation:** Perform additional iterations on the single global grid to propagate the remaining isotropic residuum energy. Iterate until residual energy falls below $\varepsilon_L$ (not given in sources) or a fixed number of iterations [S1].
+7. **Final Accumulation:** Combine results with other pipeline stages (e.g., ray-marching) [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def isotropic_residuum_propagation(radiance_fields, g, sigma_s, delta_x, epsilon_a, epsilon_L):
-    # Step 1: Determine initial anisotropy
-    # a_b is the maximum radiance anisotropy at initialization
-    # For directional light, a_b = 1; prefiltering may reduce it
-    a_b = get_initial_radiance_anisotropy(radiance_fields)
+def isotropic_residuum_propagation(propagation_grids, sigma_s, delta_x, g, a_b, epsilon_a):
+    """
+    Performs isotropic residuum propagation after anisotropic phase.
     
-    # Step 2: Calculate switch iteration m0
-    # Using HG self-convolution property
-    # Note: ln(g) is negative for g < 1, so the formula yields positive m0
-    numerator = math.log(epsilon_a) - math.log(a_b)
-    denominator = math.log(g) * sigma_s * delta_x
-    m0 = numerator / denominator
-    
-    # Step 3: Anisotropic Propagation (handled by parent method)
-    # Perform m0 iterations of anisotropic propagation
-    radiance_fields = anisotropic_propagation(radiance_fields, m0)
-    
-    # Step 4: Check anisotropy threshold
-    # Verify if |a_{n,i}| < epsilon_a for all cells and ordinates
-    max_anisotropy = get_max_anisotropy(radiance_fields)
-    if max_anisotropy >= epsilon_a:
-        # Continue anisotropic propagation or adjust m0
-        # [G] In practice, m0 is often a heuristic; if threshold not met, 
-        # more anisotropic iterations may be needed.
-        pass
-    
-    # Step 5: Merge grids into single global grid
-    # Use double resolution of individual grids for global grid
-    global_grid = merge_directional_grids(radiance_fields, resolution_factor=2)
-    
-    # Step 6: Isotropic Residuum Propagation
-    # Propagate in single grid until residual energy < epsilon_L
-    while get_residual_energy(global_grid) > epsilon_L:
-        global_grid = isotropic_transport_step(global_grid, sigma_s, delta_x)
+    Args:
+        propagation_grids: List of propagation grids aligned with principal ordinates.
+        sigma_s: Scattering coefficient.
+        delta_x: Grid spacing.
+        g: Phase function anisotropy.
+        a_b: Maximum radiance anisotropy.
+        epsilon_a: Anisotropy threshold.
         
+    Returns:
+        Final radiance distribution in a single global grid.
+    """
+    # Step 2: Calculate switch iteration m0
+    # Handle edge case where g is 1 (no scattering anisotropy reduction)
+    if g == 1.0:
+        m0 = float('inf')
+    else:
+        m0 = (math.log(epsilon_a) - math.log(a_b)) / (math.log(g) * sigma_s * delta_x)
+    
+    # Ensure m0 is at least equal to grid resolution along propagation direction [S1]
+    # Not given in sources: exact value for this minimum. Assume m0 = max(m0, grid_resolution)
+    m0 = max(m0, len(propagation_grids[0].cells))
+    
+    # Step 3: Anisotropic Propagation
+    for m in range(int(m0)):
+        for grid in propagation_grids:
+            propagate_anisotropic(grid)
+            update_anisotropy_metrics(grid)
+    
+    # Step 4: Check Anisotropy Criterion
+    all_isotropic = True
+    for grid in propagation_grids:
+        for cell in grid.cells:
+            for n in grid.ordinates:
+                if abs(cell.anisotropy[n]) >= epsilon_a:
+                    all_isotropic = False
+                    break
+            if not all_isotropic:
+                break
+        if not all_isotropic:
+            break
+    
+    # If not all isotropic, continue anisotropic propagation (simplified: assume m0 is sufficient)
+    # In practice, loop until criterion is met or max iterations reached.
+    
+    # Step 5: Merge Grids
+    global_grid = merge_grids_to_global(propagation_grids, resolution=2*propagation_grids[0].resolution)
+    
+    # Step 6: Isotropic Propagation
+    # Iterate until residual energy falls below epsilon_L or fixed iterations
+    # Not given in sources: epsilon_L value or iteration count. Use fixed iterations for example.
+    for _ in range(20): # Example: 20 additional iterations
+        propagate_isotropic(global_grid)
+    
     return global_grid
 ```
 
 **Edge Cases and Pitfalls:**
-- **Precision:** Logarithms in $m_0$ calculation require $a_b > 0$ and $g < 1$. If $a_b$ is very small, $m_0$ may be negative or zero, requiring a minimum iteration count [S1].
-- **Boundaries:** Global grid resolution must be sufficient to allow light penetration from the first row of cells [S1].
-- **Degenerate Input:** If $g=1$ (pure forward scattering), $\ln g = 0$, causing division by zero. This case is not handled in the formula [S1].
+- **Precision:** Logarithm of $g$ when $g \approx 1$ can cause numerical instability. Guard against division by zero or near-zero [G].
+- **Boundaries:** Merging grids requires careful handling of boundary conditions to avoid artifacts. Use double resolution to mitigate penetration issues [S1].
+- **Degenerate Input:** If $g=1$ (isotropic scattering), anisotropy does not decrease, and IR propagation may not trigger. Handle by falling back to full anisotropic propagation or treating as isotropic from start [G].
 
 ## Subtopics
 
+### [Light Propagation Maps](9948-light-propagation-maps.md)
+Light Propagation Maps (LPM) is a Discrete Ordinate Method (DOM) technique for computing multiple scattering in participating media. It approximates the radiative transfer equation by decoupling spatial and directional sampling: it uses high-resolution 2D maps for iterative light propagation to minimize false scattering and ray effects, while using coarse 3D grids for storing accumulated radiance. This approach reduces memory usage and artifacts compared to standard DOM techniques that require fine sampling in both space and direction.
+
 ### Multiple Propagation Grids for Environment Lighting
-This variant handles distant environment illumination by using multiple superimposed, relatively small propagation grids oriented along different principal directions [S1]. It addresses the issue of high computational cost for environment maps by prefiltering incident radiance for each grid's finite solid angle to avoid singularity artifacts during initialization [S1]. The grids are combined for rendering, and the isotropic residuum propagation stage remains applicable [S1].
+For distant environment illumination, multiple superimposed propagation grids are used, oriented along different principal directions to cover the environment map's solid angles [S1]. Prefiltering is applied to incident radiance from the environment map for each grid's finite solid angle to avoid singularity issues during initialization [S1]. This allows efficient handling of environment lighting with a low number of iterations per grid [S1].
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-- **Time:** IR propagation significantly reduces computation time. In the dragon dataset (milk, $\sigma_s = \{0.91, 1.07, 1.25\} m^{-1}$, $g = 0.95$, albedo > 99.9%), full propagation (64 ordinates, $16^3$ grid) took 120 ms and 90 ms for ~100 iterations. IR propagation ($m_0=20$, $32^3$ grid) took 28 ms and 24 ms, a ~4-fold speed-up [S1]. Typical setting for residuum propagation takes 2 ms [S1].
-- **Memory:** Requires a single global grid for the residuum stage, reducing memory overhead compared to maintaining multiple directional grids [S1].
+- **Time:** IR propagation provides a ~4-fold speed-up compared to full anisotropic propagation. Typical setting takes 2 ms for residuum propagation, with total combined propagation time around 24-28 ms for the dragon dataset [S1]. Full propagation took 90-120 ms [S1].
+- **Memory:** Reduces memory usage by merging multiple grids into a single global grid during isotropic phase [S1].
 
 **Measured Performance:**
-- Hardware: Not specified in sources [S1].
-- Resolution: Dragon dataset used $16^3$ for anisotropic and $32^3$ for global grid [S1].
-- Scene: Milk medium with high albedo [S1].
+- **Hardware/Scene:** Dragon dataset (milk, $\sigma_s = \{0.91, 1.07, 1.25\} m^{-1}$, $g = 0.95$, albedo > 99.9%) [S1].
+- **Resolution:** 32^3 grid for IR propagation, 16^3 grid for full propagation (with 64 ordinates) [S1].
+- **Performance:** IR propagation (m0=20) took 28 ms (#1) and 24 ms (#2) [S1]. Full propagation took 120 ms (#1) and 90 ms (#2) [S1].
 
 **Scaling:**
-- Media with higher optical thickness decrease anisotropy faster, allowing earlier switch to isotropic mode [S1].
-- Isotropic transport allows lower-resolution propagation domains due to low-frequency lighting frequencies [S1].
+- Media with higher optical thickness decrease anisotropy faster, allowing earlier switch to isotropic propagation [S1].
+- Isotropic transport has low-frequency lighting, allowing lower-resolution propagation domains [S1].
 
 **Strengths and Limitations:**
-- **Strengths:** Efficient handling of optically thick anisotropic media; significant speed-up with negligible visual difference [S1].
-- **Limitations:** Heuristic nature of $m_0$ calculation; potential bias from empirical heuristics [S1].
+- **Strengths:** Efficiently handles optically thick anisotropic media; reduces propagation costs tremendously; negligible visual difference [S1].
+- **Limitations:** Heuristic nature introduces bias; requires careful tuning of $\varepsilon_a$ and $m_0$ [S1].
 
 **When to Use:**
-- Use for optically thick media where anisotropy decays rapidly.
-- Use when real-time performance is critical and slight visual approximation is acceptable [S1].
-
-**When Not to Use:**
-- Avoid for scenes requiring precise preservation of high-anisotropy effects in deep scattering regions [S1].
+- Use for optically thick media with high albedo where anisotropy reduces quickly [S1].
+- Not suitable for highly anisotropic media where anisotropy persists, or when prefiltering is not applied [S1].
 
 ## Background
-**Origin:**
-- Proposed by Elek et al. in 2014 as part of Principal-Ordinates Propagation [S1].
-
-**History and Development:**
-- The method builds on the observation that scattering reduces radiance anisotropy, allowing a switch to isotropic propagation [S1]. It is similar to merging accumulation grids but applied to radiance fields [S1].
-
-**Usage:**
-- Used in real-time rendering of participating media, including direct illumination, low-order scattering, and arbitrary multiple scattering [S1].
+Isotropic Residuum Propagation was introduced in the paper "Principal-Ordinates Propagation for Real-Time Rendering of Participating Media" by Elek et al. (2014) [S1]. It is part of the Principal-Ordinates Propagation method, which aims to solve false scattering and ray effects in finite-element light transport methods. The technique leverages the property that scattering reduces radiance anisotropy, allowing a switch to cheaper isotropic propagation in later stages [S1].
 
 ## Sources
 [S1] Principal-Ordinates Propagation for Real-Time Rendering ..., https://cg.ivd.kit.edu/publications/2015/principal-ordinates/ElekCAG2014.pdf, fetched 2026-10-29

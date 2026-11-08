@@ -1,36 +1,36 @@
 # Packed Quad Vertex Format
 
-Also called: PackedVertex
+Also called: Compact Data Packing, PackedVertex
 
 ## Overview
 Packed Quad Vertex Format is a GPU-ready vertex structure designed to minimize memory bandwidth and VRAM usage during procedural mesh generation and hardware-accelerated volume splatting [S1, S2, unofficial]. It achieves this by packing vertex normals, texture coordinates, ambient occlusion (AO) data, and color metadata into a single 32-bit integer field per vertex, alongside a 3-component position vector [S1, S2, unofficial]. This method is distinct from floating-point attribute storage by using discrete bit-fields for metadata, allowing four vertices of a quad to share compact AO data within a single byte [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Vertex position $(x, y, z)$, normal index, texture index, UV corner index, quad width, quad height, ambient occlusion value, and RGB color components.
-*   **Output:** A `Vertex` struct containing a 12-byte position and a 4-byte packed integer.
+*   **Input:** Vertex position $(x, y, z)$, normal index, texture index, UV corner index, quad width, quad height, ambient occlusion value, and RGB color components [S1, S2, unofficial].
+*   **Output:** A `Vertex` struct containing a 12-byte position and a 4-byte packed integer [S1, unofficial].
 
 **Data Structures:**
 The vertex is stored in a struct with `#[repr(C)]` layout, ensuring memory alignment compatible with GPU buffers [S1, unofficial].
 
-*   **Struct `Vertex`** (Total size: 16 bytes)
-    *   `position`: `[f32; 3]` (Offset 0, Size 12 bytes, Type `Float32x3`)
-    *   `packed`: `u32` (Offset 12, Size 4 bytes, Type `Uint32`)
+*   **Struct `Vertex`** (Total size: 16 bytes) [S1, unofficial].
+    *   `position`: `[f32; 3]` (Offset 0, Size 12 bytes, Type `Float32x3`) [S1, unofficial].
+    *   `packed`: `u32` (Offset 12, Size 4 bytes, Type `Uint32`) [S1, unofficial].
 
 **Packed Field Bit Layout (32 bits):**
 The `packed` field organizes metadata as follows [S1, S2, unofficial]:
 
 | Bits | Field | Size | Range/Description |
 | :--- | :--- | :--- | :--- |
-| 0–2 | Normal Index | 3 bits | 0–5 (Cardinal directions) |
-| 3–10 | Texture Index | 8 bits | 0–255 |
-| 11–12 | UV Corner | 2 bits | 0–3 |
-| 13–16 | Width - 1 | 4 bits | 0–15 (Stored as `width - 1`) |
-| 17–20 | Height - 1 | 4 bits | 0–15 (Stored as `height - 1`) |
-| 21–22 | Voxel AO | 2 bits | 0–3 (4 discrete levels) |
-| 23–25 | Color R | 3 bits | 0–7 |
-| 26–28 | Color G | 3 bits | 0–7 |
-| 29–31 | Color B | 3 bits | 0–7 |
+| 0–2 | Normal Index | 3 bits | 0–5 (Cardinal directions) [S1, unofficial] |
+| 3–10 | Texture Index | 8 bits | 0–255 [S1, unofficial] |
+| 11–12 | UV Corner | 2 bits | 0–3 [S1, unofficial] |
+| 13–16 | Width - 1 | 4 bits | 0–15 (Stored as `width - 1`) [S1, unofficial] |
+| 17–20 | Height - 1 | 4 bits | 0–15 (Stored as `height - 1`) [S1, unofficial] |
+| 21–22 | Voxel AO | 2 bits | 0–3 (4 discrete levels) [S1, unofficial] |
+| 23–25 | Color R | 3 bits | 0–7 [S1, unofficial] |
+| 26–28 | Color G | 3 bits | 0–7 [S1, unofficial] |
+| 29–31 | Color B | 3 bits | 0–7 [S1, unofficial] |
 
 **Parameters:**
 *   **AO Bits:** 2 bits per vertex [S2, unofficial].
@@ -38,34 +38,34 @@ The `packed` field organizes metadata as follows [S1, S2, unofficial]:
 *   **AO Default:** 3 (fully open) [S1, unofficial].
 
 **Algorithm:**
-The packing process extracts specific bit ranges from input values and combines them into a single 32-bit integer. The function `pack` defaults to an AO value of 3 [S1, unofficial].
+The packing process extracts specific bit ranges from input values and combines them into a single 32-bit integer [S1, S2, unofficial]. The function `pack` defaults to an AO value of 3 [S1, unofficial].
 
 1.  **Extract Normal Index:** Mask the lower 3 bits of the normal index.
-    $$n = \text{normal\_idx} \ \& \ 0x7$$
+    $$n = \text{normal\_idx} \ \& \ 0x7$$ [S1, unofficial]
 2.  **Extract Texture Index:** Mask the lower 8 bits of the texture index.
-    $$t = \text{tex\_index} \ \& \ 0xFF$$
+    $$t = \text{tex\_index} \ \& \ 0xFF$$ [S1, unofficial]
 3.  **Extract UV Corner:** Mask the lower 2 bits of the corner index.
-    $$uv = \text{corner\_idx} \ \& \ 0x3$$
+    $$uv = \text{corner\_idx} \ \& \ 0x3$$ [S1, unofficial]
 4.  **Extract Width:** Saturate-subtract 1 from width, then mask the lower 4 bits.
-    $$w = (\max(0, \text{width} - 1)) \ \& \ 0xF$$
+    $$w = (\max(0, \text{width} - 1)) \ \& \ 0xF$$ [S1, unofficial]
 5.  **Extract Height:** Saturate-subtract 1 from height, then mask the lower 4 bits.
-    $$h = (\max(0, \text{height} - 1)) \ \& \ 0xF$$
+    $$h = (\max(0, \text{height} - 1)) \ \& \ 0xF$$ [S1, unofficial]
 6.  **Extract AO:** Clamp AO to a maximum of 3, then mask the lower 2 bits.
-    $$ao = \min(\text{ao}, 3) \ \& \ 0x3$$
+    $$ao = \min(\text{ao}, 3) \ \& \ 0x3$$ [S1, unofficial]
 7.  **Extract Color Components:** Mask the lower 3 bits of each color channel (R, G, B).
-    $$c_r = \text{color\_r} \ \& \ 0x7$$
-    $$c_g = \text{color\_g} \ \& \ 0x7$$
-    $$c_b = \text{color\_b} \ \& \ 0x7$$
+    $$c_r = \text{color\_r} \ \& \ 0x7$$ [S1, unofficial]
+    $$c_g = \text{color\_g} \ \& \ 0x7$$ [S1, unofficial]
+    $$c_b = \text{color\_b} \ \& \ 0x7$$ [S1, unofficial]
 8.  **Combine:** Shift and OR the components into the 32-bit integer.
-    $$\text{packed} = (n \ll 0) \ | \ (t \ll 3) \ | \ (uv \ll 11) \ | \ (w \ll 13) \ | \ (h \ll 17) \ | \ (ao \ll 21) \ | \ (c_r \ll 23) \ | \ (c_g \ll 26) \ | \ (c_b \ll 29)$$
+    $$\text{packed} = (n \ll 0) \ | \ (t \ll 3) \ | \ (uv \ll 11) \ | \ (w \ll 13) \ | \ (h \ll 17) \ | \ (ao \ll 21) \ | \ (c_r \ll 23) \ | \ (c_g \ll 26) \ | \ (c_b \ll 29)$$ [S1, unofficial]
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def pack(normal_idx: int, tex_index: int, corner_idx: int, 
-         width: int, height: int, ao: int, 
-         color_r: int, color_g: int, color_b: int) -> int:
+def pack_with_ao(normal_idx: int, tex_index: int, corner_idx: int, 
+                 width: int, height: int, ao: int, 
+                 color_r: int, color_g: int, color_b: int) -> int:
     # Extract bits with masks
     n = normal_idx & 0x7
     t = tex_index & 0xFF
@@ -96,26 +96,26 @@ def pack(normal_idx: int, tex_index: int, corner_idx: int,
              
     return packed
 
-def pack_with_ao(normal_idx: int, tex_index: int, corner_idx: int, 
-                 width: int, height: int, 
-                 color_r: int, color_g: int, color_b: int, 
-                 ao: int = 3) -> int:
+def pack(normal_idx: int, tex_index: int, corner_idx: int, 
+         width: int, height: int, 
+         color_r: int, color_g: int, color_b: int, 
+         ao: int = 3) -> int:
     """
-    Wrapper that defaults AO to 3 (fully open).
+    Wrapper that defaults AO to 3 (fully open) and calls pack_with_ao.
     """
-    return pack(normal_idx, tex_index, corner_idx, width, height, ao, color_r, color_g, color_b)
+    return pack_with_ao(normal_idx, tex_index, corner_idx, width, height, ao, color_r, color_g, color_b)
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Width/Height Limits:** The format supports widths and heights up to 16 (since `width-1` is stored in 4 bits, max value 15 implies max dimension 16). Larger dimensions will wrap or clamp incorrectly [S1, S2, unofficial].
+*   **Width/Height Limits:** The format supports widths and heights up to 16 (since `width-1` is stored in 4 bits, max value 15 implies max dimension 16) [S1, unofficial].
 *   **AO Clamping:** Ambient occlusion values greater than 3 are clamped to 3, losing precision for finer AO gradients [S1, S2, unofficial].
 *   **Color Precision:** RGB is limited to 3 bits per channel (8 levels), which may result in visible banding for high-fidelity rendering [S1, S2, unofficial].
 
 ## Operating characteristics
-*   **Memory Usage:** 16 bytes per vertex (12 bytes position + 4 bytes packed metadata). This is significantly smaller than standard vertex formats that store normals (12 bytes), UVs (8 bytes), and colors (12 bytes) separately.
+*   **Memory Usage:** 16 bytes per vertex (12 bytes position + 4 bytes packed metadata) [S1, unofficial].
 *   **Bandwidth:** Reduces memory bandwidth by packing multiple attributes into a single 32-bit word, accelerating mesh upload times from CPU to GPU [S2, unofficial].
 *   **Strengths:** Ideal for procedural mesh generation and voxel terrain where metadata (AO, texture ID, corner) is discrete and limited in range [S1, S2, unofficial].
-*   **Limitations:** Low precision for color (3-bit) and AO (2-bit). Not suitable for high-fidelity shading requiring continuous normal or color data. Width/Height limited to 16x16 quads [S1, S2, unofficial].
+*   **Limitations:** Low precision for color (3-bit) and AO (2-bit) [S1, S2, unofficial]. Not suitable for high-fidelity shading requiring continuous normal or color data [S2, unofficial]. Width/Height limited to 16x16 quads [S1, unofficial].
 
 ## Background
 The Packed Quad Vertex Format originates from implementations in procedural voxel generation and terrain rendering, specifically noted in the context of the "Minerust" project and dynamic ambient occlusion baking in procedural voxels [S1, S2, unofficial]. It addresses the bottleneck of memory bandwidth during high-frequency mesh updates by replacing floating-point attributes with compact bit-packed integers [S2, unofficial].

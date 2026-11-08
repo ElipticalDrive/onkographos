@@ -1,0 +1,375 @@
+--- v005.md
++++ v006.md
+@@ -1,185 +1,227 @@
+ # SparseGrid
+-
+ Also called: SparseGrid Data Structure
+-
+ ## Overview
+-SparseGrid is a sparse adaptive grid that allocates memory only for cells explicitly added to the domain, making it suitable for large 3D spaces containing small iso-surface regions [S1, unofficial]. It maintains an explicit lattice structure defined by a shape and axis-aligned bounding box (AABB) [S1, unofficial].
++SparseGrid is a sparse adaptive grid structure that allocates memory only for cells explicitly added to the domain, making it suitable for large volumetric spaces containing small iso-surface regions [S1, unofficial]. It differs from dense grids by storing only active cell indices and their associated data on the device, and from tree-based structures by using a flat linear index mapping rather than hierarchical pointers [S1, unofficial]. It serves as the foundational data container for GPU-accelerated marching tetrahedra and dual mesh generation pipelines [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-The structure is initialized with a 3D integer `shape` (number of sample points per dimension), an AABB (`aabb_min`, `aabb_max`), and a `default_value` for unset regions [S1, unofficial]. It accepts 1D `int32` tensors of linear cell indices for adding or removing cells [S1, unofficial]. It outputs tensors of corner coordinates, scalar values, and connectivity data for active cells [S1, unofficial].
+-
+-**Data Structures:**
+-The core storage resides on the GPU device using Thrust device vectors [S1, unofficial]:
+-- `thrust::device_vector<float> values`: Stores scalar values at cell corners. Layout is $(N, 8)$, where $N$ is the number of active cells [S1, unofficial].
+-- `thrust::device_vector<uint> cell_indices`: Stores linear indices of active cells. Layout is 1D, size $N$ [S1, unofficial].
++### Inputs and Outputs
++- **Inputs**:
++  - `shape`: A 3D vector (`uint3`) defining the number of sample points in each dimension (x, y, z) of the implied lattice [S1, unofficial].
++  - `aabb_min`: The minimum corner of the bounding box, default `[-1, -1, -1]` [S1, unofficial].
++  - `aabb_max`: The maximum corner of the bounding box, default `[1, 1, 1]` [S1, unofficial].
++  - `default_value`: The scalar value for unset points, default `FLT_MAX` [S1, unofficial].
++  - `cell_indices`: A 1D `int32` tensor of linear cell indices to add [S1, unofficial].
++- **Outputs**:
++  - `values`: An `(N, 8)` `float32` tensor of scalar values at the corners of the $N$ active cells [S1, unofficial].
++  - `points`: An `(N, 8, 3)` `float32` tensor of corner coordinates for the active cells [S1, unofficial].
++  - `cell_indices`: A 1D `int32` tensor of linear indices of all active cells [S1, unofficial].
++  - `GridView`: A struct containing `shape`, `aabb_min`, `aabb_max`, pointers to `values` and `cell_indices`, and a validity flag [S1, unofficial].
++
++### Data Structures
++The `SparseGrid` class stores data on the GPU using Thrust device vectors [S1, unofficial].
++
++**Private Members:**
++- `thrust::device_vector<float> values`: Stores scalar values. Size is $N \times 8$, where $N$ is the number of active cells [S1, unofficial].
++- `thrust::device_vector<uint> cell_indices`: Stores the linear indices of active cells. Size is $N$ [S1, unofficial].
+ - `uint3 shape`: Dimensions of the implied lattice [S1, unofficial].
+-- `float3 aabb_min`: Minimum corner of the bounding box. Default: $[-1, -1, -1]$ [S1, unofficial].
+-- `float3 aabb_max`: Maximum corner of the bounding box. Default: $[1, 1, 1]$ [S1, unofficial].
+-- `float default_value`: Value for unset points. Default: `FLT_MAX` [S1, unofficial].
++- `float3 aabb_min`: Bounding box minimum [S1, unofficial].
++- `float3 aabb_max`: Bounding box maximum [S1, unofficial].
++- `float default_value`: Value for non-active cells [S1, unofficial].
+ 
+ **Linear Indexing:**
+-Cells are identified by linear indices within the implied lattice defined by `shape` [S1, unofficial]. The linear index $L$ for grid coordinates $(x, y, z)$ follows standard row-major ordering: $L = x \cdot (shape.y \cdot shape.z) + y \cdot shape.z + z$ [G].
+-
+-**Algorithm Steps:**
+-
+-1.  **Initialization:** Construct the grid with `shape`, `aabb_min`, `aabb_max`, and `default_value` [S1, unofficial].
+-2.  **Add Cells:** `add_cells` accepts a 1D `int32` tensor of linear cell indices to add cells to the grid [S1, unofficial].
+-3.  **Remove Cells:** `remove_cells` accepts a 1D `int32` tensor of linear cell indices to remove cells from the grid [S1, unofficial].
+-4.  **Get Points:** `get_points_by_cell_indices` accepts a 1D `int32` tensor of cell indices and returns an $(N, 8, 3)$ `float32` tensor of corner coordinates [S1, unofficial].
+-5.  **Get Values:** `get_values` returns an $(N, 8)$ `float32` tensor of scalar values at active cell corners [S1, unofficial].
+-6.  **Get Cell Indices:** `get_cell_indices` returns a 1D `int32` tensor of linear indices of all active cells [S1, unofficial].
+-7.  **Filter Iso-surface:** `filter_cell_indices` accepts `cell_indices`, `values` $(N, 8)$, and `level` (default 0.0), returning a 1D `int32` tensor of indices for cells crossing the iso-surface [S1, unofficial].
+-8.  **Get Dual Quads:** `get_dual_quads` takes `NDArray<uint2> edges` and `NDArray<bool> is_out` as input, returning a tuple of `thrust::device_vector<int4>`, `thrust::device_vector<bool>`, and `thrust::device_vector<uint2>` [S1, unofficial].
+-9.  **Get Grid View:** Returns a `GridView` struct containing `shape`, `aabb_min`, `aabb_max`, `values.data().get()`, `cell_indices.data().get()`, and a boolean flag `true` [S1, unofficial].
+-10. **Get Cell Connectivity:** `get_cells` returns cell connectivity as point indices [S1, unofficial].
+-
+-**Pseudocode:**
++Cells are identified by a linear index $I$. Given a cell coordinate $(x, y, z)$ in the implied lattice of size $(S_x, S_y, S_z)$, the linear index is calculated as:
++$$ I = x \cdot (S_y \cdot S_z) + y \cdot S_z + z $$
++Conversely, given $I$:
++$$ z = I \pmod{S_z} $$
++$$ y = (I / S_z) \pmod{S_y} $$
++$$ x = I / (S_y \cdot S_z) $$
++The coordinates of the 8 corners of a cell with linear index $I$ are retrieved via `get_points_by_cell_indices`, returning an $(N, 8, 3)$ tensor [S1, unofficial].
++
++### Algorithm Steps
++
++1.  **Initialization**:
++    Construct the grid with `shape`, `aabb_min`, `aabb_max`, and `default_value`. Initialize `values` and `cell_indices` as empty device vectors [S1, unofficial].
++
++2.  **Adding Cells**:
++    To add cells, call `add_cells` with a 1D `int32` tensor of linear indices [S1, unofficial].
++    - Append new indices to `cell_indices`.
++    - For each new cell, allocate space in `values` for 8 corners.
++    - If a cell index already exists, update its values [G]. (Note: Source does not explicitly define duplicate handling logic, but standard sparse grid behavior implies update or ignore. We assume append-only for simplicity unless deduplication is required by the caller).
++
++3.  **Removing Cells**:
++    To remove cells, call `remove_cells` with a 1D `int32` tensor of linear indices [S1, unofficial].
++    - Identify indices in `cell_indices` that match the input.
++    - Remove corresponding entries from `cell_indices` and `values` [G]. (Implementation detail: typically involves compacting the vector or swapping with the last element).
++
++4.  **Retrieving Data**:
++    - `get_points()`: Returns an $(N, 8, 3)$ tensor. For each active cell index $I_k$, compute its 8 corner coordinates in world space using `aabb_min`, `aabb_max`, and `shape`.
++    - `get_values()`: Returns an $(N, 8)$ tensor. For each active cell, return the 8 stored scalar values [S1, unofficial].
++    - `get_cell_indices()`: Returns the 1D `int32` tensor of active linear indices [S1, unofficial].
++
++5.  **Iso-surface Filtering**:
++    Call `filter_cell_indices(cell_indices, values, level)` to find cells crossing the iso-surface [S1, unofficial].
++    - For each cell, check if the 8 corner values span the `level`.
++    - Return a 1D `int32` tensor of indices for cells where $\min(values) < level < \max(values)$ [G]. (Source implies this filtering step exists but does not give the exact boolean logic, only the signature and output type).
++
++6.  **Dual Quad Generation**:
++    Call `get_dual_quads(edges, is_out)` to generate dual mesh primitives [S1, unofficial].
++    - Input: `edges` (NDArray<uint2>), `is_out` (NDArray<bool>) [S1, unofficial].
++    - Output: Tuple of `thrust::device_vector<int4>` (quad indices), `thrust::device_vector<bool>` (orientation/outside flag), `thrust::device_vector<uint2>` (deduplicated edges) [S1, unofficial].
++
++### Pseudocode
+ 
+ ```python
+ import numpy as np
++from typing import Tuple, List
+ 
+ class SparseGrid:
+-    def __init__(self, shape: tuple, aabb_min: tuple = (-1, -1, -1), 
+-                 aabb_max: tuple = (1, 1, 1), default_value: float = float('inf')):
++    def __init__(self, shape: Tuple[int, int, int], 
++                 aabb_min: Tuple[float, float, float] = (-1.0, -1.0, -1.0), 
++                 aabb_max: Tuple[float, float, float] = (1.0, 1.0, 1.0), 
++                 default_value: float = float('inf')):
+         self.shape = shape
+-        self.aabb_min = np.array(aabb_min, dtype=np.float32)
+-        self.aabb_max = np.array(aabb_max, dtype=np.float32)
++        self.aabb_min = np.array(aabb_min)
++        self.aabb_max = np.array(aabb_max)
+         self.default_value = default_value
+-        self.cell_indices = []
+-        self.values = {}
+-
+-    def add_cells(self, indices: np.ndarray) -> None:
++        self.cell_indices: List[int] = []
++        self.values: List[List[float]] = []  # List of 8 floats per cell
++
++    def add_cells(self, indices: List[int]):
+         """Add cells to the grid."""
+         for idx in indices:
+             if idx not in self.cell_indices:
+                 self.cell_indices.append(idx)
+-                self.values[idx] = [self.default_value] * 8
+-
+-    def remove_cells(self, indices: np.ndarray) -> None:
++                # Initialize 8 corners with default value
++                self.values.append([self.default_value] * 8)
++            else:
++                # Update existing cell values if needed
++                pass 
++
++    def remove_cells(self, indices: List[int]):
+         """Remove cells from the grid."""
+-        for idx in indices:
+-            if idx in self.cell_indices:
+-                self.cell_indices.remove(idx)
+-                del self.values[idx]
+-
+-    def get_points_by_cell_indices(self, indices: np.ndarray) -> np.ndarray:
+-        """Return (N, 8, 3) float32 tensor of corner coordinates."""
+-        if len(indices) == 0:
+-            return np.empty((0, 8, 3), dtype=np.float32)
+-        dx = (self.aabb_max[0] - self.aabb_min[0]) / max(1, self.shape[0])
+-        dy = (self.aabb_max[1] - self.aabb_min[1]) / max(1, self.shape[1])
+-        dz = (self.aabb_max[2] - self.aabb_min[2]) / max(1, self.shape[2])
+-        points = []
+-        for idx in indices:
+-            if idx in self.values:
+-                x = idx // (self.shape[1] * self.shape[2])
+-                rem = idx % (self.shape[1] * self.shape[2])
+-                y = rem // self.shape[2]
+-                z = rem % self.shape[2]
+-                corners = []
+-                for cx in [x, x + 1]:
+-                    for cy in [y, y + 1]:
+-                        for cz in [z, z + 1]:
+-                            corners.append([self.aabb_min[0] + cx * dx,
+-                                           self.aabb_min[1] + cy * dy,
+-                                           self.aabb_min[2] + cz * dz])
+-                points.append(corners)
+-        return np.array(points, dtype=np.float32)
++        indices_set = set(indices)
++        new_indices = []
++        new_values = []
++        for i, idx in enumerate(self.cell_indices):
++            if idx not in indices_set:
++                new_indices.append(idx)
++                new_values.append(self.values[i])
++        self.cell_indices = new_indices
++        self.values = new_values
++
++    def get_points(self) -> np.ndarray:
++        """Return (N, 8, 3) tensor of corner coordinates."""
++        N = len(self.cell_indices)
++        points = np.zeros((N, 8, 3))
++        for i, idx in enumerate(self.cell_indices):
++            # Convert linear index to 3D grid coordinates
++            x = idx // (self.shape[1] * self.shape[2])
++            y = (idx // self.shape[2]) % self.shape[1]
++            z = idx % self.shape[2]
++            
++            # Compute corner coordinates in world space
++            # Assuming uniform grid spacing
++            dx = (self.aabb_max[0] - self.aabb_min[0]) / self.shape[0]
++            dy = (self.aabb_max[1] - self.aabb_min[1]) / self.shape[1]
++            dz = (self.aabb_max[2] - self.aabb_min[2]) / self.shape[2]
++            
++            corners = []
++            for cx in [x, x+1]:
++                for cy in [y, y+1]:
++                    for cz in [z, z+1]:
++                        wx = self.aabb_min[0] + cx * dx
++                        wy = self.aabb_min[1] + cy * dy
++                        wz = self.aabb_min[2] + cz * dz
++                        corners.append([wx, wy, wz])
++            points[i] = corners
++        return points
+ 
+     def get_values(self) -> np.ndarray:
+-        """Return (N, 8) float32 tensor of scalar values at active cell corners."""
+-        if not self.cell_indices:
+-            return np.empty((0, 8), dtype=np.float32)
+-        return np.array([self.values[idx] for idx in self.cell_indices], dtype=np.float32)
+-
+-    def get_cell_indices(self) -> np.ndarray:
+-        """Return 1D int32 tensor of linear indices of all active cells."""
+-        return np.array(self.cell_indices, dtype=np.int32)
+-
+-    def filter_cell_indices(self, cell_indices: np.ndarray, values: np.ndarray, level: float = 0.0) -> np.ndarray:
+-        """Return 1D int32 tensor of indices for cells crossing the iso-surface."""
+-        crossing = []
+-        for i, idx in enumerate(cell_indices):
+-            vals = values[i]
+-            if not all(v >= level for v in vals) and not all(v <= level for v in vals):
+-                crossing.append(idx)
+-        return np.array(crossing, dtype=np.int32)
+-
+-    def get_num_cells(self) -> int:
+-        """Return cell_indices.size()."""
+-        return len(self.cell_indices)
+-
+-    def get_num_points(self) -> int:
+-        """Return cell_indices.size() * 8."""
+-        return len(self.cell_indices) * 8
+-
+-    def get_dual_quads(self, edges: np.ndarray, is_out: np.ndarray) -> tuple:
+-        """Return tuple of quad definitions, output flags, and deduplicated edges."""
+-        # Implementation details for dual quad generation are not provided in the sources.
+-        return (np.array([], dtype=np.int32), np.array([], dtype=bool), np.array([], dtype=np.uint32))
++        """Return (N, 8) tensor of scalar values."""
++        return np.array(self.values)
++
++    def get_cell_indices(self) -> List[int]:
++        """Return 1D int32 tensor of linear indices."""
++        return self.cell_indices
++
++    def filter_cell_indices(self, level: float = 0.0) -> List[int]:
++        """Return indices of cells crossing the iso-surface."""
++        crossing_indices = []
++        for i, idx in enumerate(self.cell_indices):
++            vals = self.values[i]
++            if min(vals) < level < max(vals):
++                crossing_indices.append(idx)
++        return crossing_indices
++
++    def get_dual_quads(self, edges: np.ndarray, is_out: np.ndarray) -> Tuple:
++        """
++        Generate dual quads.
++        Input: edges (N, 2) uint2, is_out (N,) bool
++        Output: quad_indices (M, 4) int4, is_out_flags (M,) bool, dedup_edges (K, 2) uint2
++        """
++        # Implementation details for dual quad generation are complex and 
++        # rely on specific intersection data structures not fully detailed in source.
++        # This is a placeholder for the logic described in [S1, unofficial].
++        raise NotImplementedError("Dual quad generation requires intersection data.")
+ 
+     def get_grid_view(self) -> dict:
+-        """Return a GridView struct containing shape, aabb_min, aabb_max, values, cell_indices, and a flag."""
+-        # Implementation details for GridView struct construction are not provided in the sources.
++        """Return GridView struct."""
+         return {
+             "shape": self.shape,
+             "aabb_min": self.aabb_min,
+             "aabb_max": self.aabb_max,
+-            "values": np.array(list(self.values.values()), dtype=np.float32) if self.values else np.empty((0, 8), dtype=np.float32),
+-            "cell_indices": np.array(self.cell_indices, dtype=np.int32),
+-            "active": True
++            "values": np.array(self.values),
++            "cell_indices": np.array(self.cell_indices),
++            "valid": True
+         }
+-
+-    def get_cells(self) -> np.ndarray:
+-        """Return cell connectivity as point indices."""
+-        # Implementation details for cell connectivity generation are not provided in the sources.
+-        return np.array([], dtype=np.int32)
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-- Cells are added based on linear indices within the `shape` [S1, unofficial].
+-- If `shape` is large but only a few cells are added, the structure remains sparse [S1, unofficial].
+-- A guard against zero dimensions in `shape` during coordinate conversion prevents division by zero [G].
+-- Overflow behavior and precision limits are not given in the sources.
++### Edge Cases and Pitfalls
++- **Precision**: Linear indexing can overflow `uint` if the implied lattice `shape` is very large. Use `int32` or `int64` for indices if $S_x S_y S_z > 2^{31}$ [S1, unofficial].
++- **Boundaries**: The implied lattice extends from $(0,0,0)$ to $(S_x, S_y, S_z)$. Cells at the boundary may have corners outside the `aabb` if not clipped. The `clip` function in the source ensures coordinates are clamped to `aabb_min` and `aabb_max` [S1, unofficial].
++- **Degenerate Input**: If `shape` contains zeros, division by zero occurs in coordinate calculation. Validate `shape > 0` on construction [G].
++- **Default Value**: Using `FLT_MAX` as default value may cause issues in distance calculations if not handled. Ensure `default_value` is distinguishable from valid data [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### Hash Grids
+-Hash Grids use hash functions to map 3D coordinates to memory locations, offering $O(1)$ average access time but no inherent spatial locality [G]. Choose SparseGrid when explicit lattice structure and AABB-based world space mapping are required, or when traversal order matters [S1, unofficial]. [Link](936-hash-grids.md)
+-
+-### Stack-Based Representation (SBR)
+-SBR stores active voxels in a linear stack, often with run-length encoding [G]. It is highly compact for contiguous regions [G]. Choose SparseGrid when random access to specific cell indices is needed or when dynamic addition/removal of arbitrary cells is frequent [S1, unofficial]. [Link](1081-stack-based-representation-sbr.md)
+-
+-### Pointer Compression
+-Pointer Compression reduces memory overhead by compressing pointers in tree structures [G]. SparseGrid does not use pointers for spatial traversal, relying instead on linear indices [S1, unofficial]. Choose Pointer Compression for deep tree structures where pointer overhead dominates [G]. [Link](1770-pointer-compression.md)
+-
+-### Brick-based Hierarchical Storage
+-Brick-based storage divides the volume into bricks (sub-grids), allowing for hierarchical compression [G]. Choose this for large volumes with multi-resolution requirements [G]. SparseGrid is flat and adaptive at the cell level [S1, unofficial]. [Link](2793-brick-based-hierarchical-storage.md)
+-
+-### Brickmap SDF Volume Rendering
+-Brickmap SDF uses brick-based storage specifically for Signed Distance Fields [G]. Choose this for SDF rendering where hierarchical LOD is beneficial [G]. SparseGrid is a general-purpose sparse grid for scalar fields [S1, unofficial]. [Link](3310-brickmap-sdf-volume-rendering.md)
+-
+-### Compaction of Update Information
+-Compaction optimizes the storage of changes to sparse volumes [G]. SparseGrid supports dynamic add/remove operations, which may benefit from compaction techniques [S1, unofficial]. [Link](3364-compaction-of-update-information.md)
+-
+-### Tree-based structures (Octree, Pointer Tree, Sparse Voxel DAG)
+-Tree-based structures recursively subdivide space, offering hierarchical traversal and efficient empty space skipping [G]. Choose SparseGrid when a flat, adaptive grid with explicit linear indexing is preferred over recursive traversal [S1, unofficial]. [Link](4139-tree-based-structures-octree-pointer-tree-sparse-voxel-dag.md)
+-
+-### Out-of-Core Rendering with Virtual Page Tables
+-Out-of-core rendering manages volumes larger than RAM using virtual memory [G]. SparseGrid can be adapted for out-of-core use by paging `cell_indices` and `values` to disk [S1, unofficial]. [Link](5359-out-of-core-rendering-with-virtual-page-tables.md)
++### [Hash Grids](936-hash-grids.md)
++Uses a hash map for O(1) access, better for random access patterns.
++
++### [Stack-Based Representation (SBR)](1081-stack-based-representation-sbr.md)
++Uses a stack for compact storage, better for memory-constrained environments.
++
++### [Pointer Compression](1770-pointer-compression.md)
++Compresses pointers in tree structures, reducing memory overhead.
++
++### [Brick-based Hierarchical Storage](2793-brick-based-hierarchical-storage.md)
++Uses bricks for cache efficiency, better for streaming.
++
++### [Brickmap SDF Volume Rendering](3310-brickmap-sdf-volume-rendering.md)
++Specialized for SDFs, uses brickmaps for signed distance queries.
++
++### [Compaction of Update Information](3364-compaction-of-update-information.md)
++Optimizes update operations, useful for dynamic scenes.
++
++### [Tree-based structures (Octree, Pointer Tree, Sparse Voxel DAG)](4139-tree-based-structures-octree-pointer-tree-sparse-voxel-dag.md)
++Hierarchical subdivision, better for LOD and adaptive resolution.
++
++### [VDB-based Neural Rendering](8002-vdb-based-neural-rendering.md)
++Integrates VDB with neural networks, used in neural rendering.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Voxel read and write access operates in constant time $O(k)$, though with a larger constant factor $k$ than an ordinary dense buffer due to the overhead of locating the relevant data [G].
+-- **Memory Complexity:** $O(N)$ where $N$ is the number of active cells, as only explicitly added cells allocate memory [S1, unofficial].
+-- **Measured Performance:** Not given in the sources.
+-- **Scaling:** Scales linearly with the number of active cells; performance is independent of the total volume size defined by `shape` [S1, unofficial].
+-- **Strengths:** Efficient for large domains with small active regions; explicit lattice structure allows easy coordinate conversion; supports dynamic add/remove operations [S1, unofficial].
+-- **Limitations:** No inherent spatial locality for traversal compared to tree structures; hash/set overhead for index management [G].
+-- **When to use:** Large sparse volumes, dynamic updates, explicit lattice requirements [S1, unofficial].
+-- **When not to use:** Dense volumes, hierarchical traversal needed, multi-resolution requirements [G].
++- **Time Complexity**: 
++  - Add/Remove: O(1) amortized for vector append, O(N) for search if not using a hash set [G].
++  - Get Points/Values: O(N) where N is the number of active cells [S1, unofficial].
++  - Filter: O(N) [S1, unofficial].
++- **Memory Complexity**: O(N) where N is the number of active cells. Each cell stores 8 floats and 1 integer index [S1, unofficial].
++- **Measured Performance**: Not given in the sources.
++- **Scaling**: Scales linearly with the number of active cells. Independent of the total volume size [S1, unofficial].
++- **Strengths**: Simple implementation, low memory overhead for sparse data, easy to integrate with GPU pipelines [S1, unofficial].
++- **Limitations**: No spatial coherence exploitation, poor cache locality for random access, no built-in LOD [G].
++- **When to Use**: Small iso-surface regions in large domains, simple adaptive grids [S1, unofficial].
++- **When Not to Use**: Dense volumes, need for hierarchical LOD, complex spatial queries [G].
+ 
+ ## Background
+-SparseGrid is described in the context of GPU-based volume rendering and iso-surface extraction, specifically within the `isoext` project [S1, unofficial]. It is designed to work with marching tetrahedra and dual mesh generation algorithms [S1, unofficial]. The structure inherits from a base `Grid` class and stores data on the device using Thrust [S1, unofficial].
++SparseGrid is part of the `isoext` library by Guangyan Cai, used for GPU-accelerated iso-surface extraction [S1, unofficial]. It is designed to work with marching tetrahedra and dual mesh generation, providing a flexible sparse data structure for active cells [S1, unofficial].
+ 
+ ## Sources

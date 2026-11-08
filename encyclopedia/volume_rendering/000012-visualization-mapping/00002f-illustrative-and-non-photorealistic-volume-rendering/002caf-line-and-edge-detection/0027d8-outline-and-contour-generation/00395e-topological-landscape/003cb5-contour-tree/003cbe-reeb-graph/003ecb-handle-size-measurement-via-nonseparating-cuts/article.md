@@ -1,0 +1,175 @@
+# Handle Size Measurement via Nonseparating Cuts
+
+Also called: Reeb loop and cross loop measurement
+
+## Overview
+This method measures the geometric size of topological handles in a scalar field by computing two specific nonseparating loops: the Reeb loop and the cross loop. It solves the problem of quantifying handle prominence to guide topology simplification, ensuring that geometric changes to the volume are minimized. It differs from sibling methods like [Joint Contour Net](9316-joint-contour-net.md) by explicitly constructing these minimal loops on the isosurface to define a handle size metric, rather than relying solely on multi-dimensional topological descriptors.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A scalar field $F(x)$, its isosurface mesh $M$, and the Reeb graph $R$ of the field.
+*   **Output:** A handle size metric (scalar value) and the geometric definitions of the Reeb loop and cross loop.
+
+**Data Structures:**
+*   **Isosurface Mesh $M$:** A triangle mesh representing the level set $F(x) = c$.
+*   **Reeb Graph $R$:** A graph where nodes represent connected components of level sets and edges represent topological changes. A "Reeb cycle" is a cycle in $R$ corresponding to a handle.
+*   **Shortest Path Data:** Distances and predecessors on the mesh graph for Dijkstra's algorithm.
+
+**Steps:**
+
+1.  **Identify the Reeb Cycle:** Locate the cycle in the Reeb graph $R$ corresponding to the handle to be measured. Let this cycle be $C_R$.
+
+2.  **Construct the Reeb Loop ($L_{Reeb}$):**
+    *   Select a contour $\gamma$ within the Reeb cycle $C_R$. This contour is a nonseparating curve on the isosurface.
+    *   Cut the isosurface along $\gamma$. This operation topologically transforms the handle region into a cylinder open at both ends.
+    *   Define the two boundary sets $A$ and $B$ as the two sides of the cut $\gamma$.
+    *   Compute the shortest path on the isosurface mesh $M$ between any point in $A$ and any point in $B$.
+    *   **Constraint:** The search for the shortest path must be restricted to the region of the isolated handle associated with the Reeb cycle. This ensures the loop matches the specific Reeb cycle.
+    *   The resulting path, combined with the segment of $\gamma$ it connects, forms the Reeb loop $L_{Reeb}$. This loop is locally nearly minimal because it closes by traversing along the contour.
+
+3.  **Construct the Cross Loop ($L_{Cross}$):**
+    *   Identify the Reeb loop $L_{Reeb}$ from Step 2.
+    *   Let $S_1$ and $S_2$ be the two sides of the Reeb loop $L_{Reeb}$ on the isosurface.
+    *   Compute shortest paths from all points in $S_1$ to all points in $S_2$ on the isosurface mesh $M$.
+    *   Among all shortest paths that form cycles (i.e., paths connecting $S_1$ to $S_2$ that, when combined with the segment of $L_{Reeb}$, enclose a region), select the one with the minimum length.
+    *   This shortest path forms the cross loop $L_{Cross}$.
+
+4.  **Calculate Handle Size:**
+    *   Calculate the length of the Reeb loop, $|L_{Reeb}|$.
+    *   Calculate the length of the cross loop, $|L_{Cross}|$.
+    *   The handle size $H$ is defined as:
+        $$ H = \min(|L_{Reeb}|, |L_{Cross}|) $$
+    *   **Alternative Metric:** The area of the spanning minimal surface bounded by the loop can be used instead of length if deemed more appropriate for the application [S1].
+
+5.  **User Control and Filtering (Optional):**
+    *   **Ratio Preservation:** To avoid removing long, skinny handles, preserve handles where the ratio $|L_{Reeb}| / |L_{Cross}|$ is large.
+    *   **Material Orientation:** Determine the orientation of the contour in the Reeb graph cycle.
+        *   If the ribbon cycle encloses a void ($F(x) \ge 0$), exclude loops corresponding to material addition.
+        *   If the ribbon cycle encloses material ($F(x) < 0$), exclude loops corresponding to material subtraction.
+        *   This allows users to specify material addition or subtraction only by changing nodes with $F(x) < 0$ or $F(x) \ge 0$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_handle_size(isosurface_mesh, reeb_cycle, scalar_field):
+    """
+    Computes the handle size for a given Reeb cycle.
+    
+    Args:
+        isosurface_mesh: Triangle mesh M.
+        reeb_cycle: List of contours forming the Reeb cycle C_R.
+        scalar_field: Function F(x) or grid data.
+        
+    Returns:
+        handle_size: Float, the minimum loop length.
+        reeb_loop: List of vertices/edges forming the Reeb loop.
+        cross_loop: List of vertices/edges forming the cross loop.
+    """
+    
+    # Step 2: Construct Reeb Loop
+    # Select a contour from the Reeb cycle to cut along
+    contour_gamma = reeb_cycle[0] 
+    
+    # Cut the mesh along contour_gamma to get two boundary sets A and B
+    # Note: In implementation, this involves splitting vertices/edges along the contour
+    boundary_A, boundary_B = cut_mesh_along_contour(isosurface_mesh, contour_gamma)
+    
+    # Compute shortest path between A and B restricted to the handle region
+    # The handle region is defined by the topology of the Reeb cycle
+    handle_region_mask = get_handle_region_mask(isosurface_mesh, reeb_cycle)
+    
+    # Dijkstra's algorithm restricted to handle_region_mask
+    # Source: any vertex in boundary_A
+    # Target: any vertex in boundary_B
+    shortest_path_A_to_B = dijkstra_shortest_path(
+        isosurface_mesh, 
+        boundary_A, 
+        boundary_B, 
+        mask=handle_region_mask
+    )
+    
+    # The Reeb loop is the shortest path plus the segment of the contour it connects
+    reeb_loop = shortest_path_A_to_B + contour_gamma_segment
+    
+    # Step 3: Construct Cross Loop
+    # Identify the two sides of the Reeb loop on the mesh
+    side_1, side_2 = split_mesh_by_loop(isosurface_mesh, reeb_loop)
+    
+    # Compute shortest paths from side_1 to side_2
+    # We look for the shortest path that forms a cycle with the Reeb loop
+    shortest_path_cross = dijkstra_shortest_path(
+        isosurface_mesh, 
+        side_1, 
+        side_2, 
+        mask=handle_region_mask
+    )
+    
+    cross_loop = shortest_path_cross + reeb_loop_segment
+    
+    # Step 4: Calculate Handle Size
+    length_reeb = compute_loop_length(reeb_loop)
+    length_cross = compute_loop_length(cross_loop)
+    
+    handle_size = min(length_reeb, length_cross)
+    
+    return handle_size, reeb_loop, cross_loop
+
+def dijkstra_shortest_path(mesh, sources, targets, mask):
+    """
+    Standard Dijkstra's algorithm on a mesh graph.
+    Returns the shortest path from any source to any target.
+    """
+    # Implementation details of Dijkstra's algorithm
+    # Initialize distances to infinity
+    # Set distance of sources to 0
+    # Priority queue with sources
+    # While queue not empty:
+    #   u = extract_min()
+    #   if u in targets: return path
+    #   for v in neighbors(u):
+    #       if mask[v] is valid:
+    #           relax(u, v)
+    pass
+
+def cut_mesh_along_contour(mesh, contour):
+    """
+    Splits the mesh along the given contour.
+    Returns two sets of boundary vertices/edges.
+    """
+    pass
+
+def get_handle_region_mask(mesh, reeb_cycle):
+    """
+    Returns a boolean mask for vertices/edges belonging to the handle region
+    associated with the Reeb cycle.
+    """
+    pass
+
+def split_mesh_by_loop(mesh, loop):
+    """
+    Splits the mesh into two sides based on the loop.
+    """
+    pass
+
+def compute_loop_length(loop):
+    """
+    Computes the sum of edge lengths in the loop.
+    """
+    return sum(edge_length(e) for e in loop)
+```
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the shortest path computations (Dijkstra's algorithm) on the isosurface mesh. For a mesh with $V$ vertices and $E$ edges, each shortest path computation is $O(E + V \log V)$ using a binary heap. Two such computations are performed per handle.
+*   **Memory Complexity:** $O(V + E)$ to store the mesh and distance maps.
+*   **Strengths:** Provides a tight geometric measure of handle size. The use of shortest paths ensures the loops are locally minimal. The method allows for user control over topology simplification based on geometric properties (length vs. area) and material orientation.
+*   **Limitations:** Computationally expensive for large meshes due to multiple shortest path computations. The quality of the measure depends on the resolution of the isosurface mesh. The method assumes the Reeb graph is already computed.
+*   **When to use:** When simplifying isosurfaces while preserving significant topological features (handles) and minimizing geometric distortion. Particularly useful when distinguishing between "long skinny" handles and "short fat" handles is important.
+*   **When not to use:** For real-time applications where performance is critical and approximate topology simplification is acceptable. If the scalar field is noisy, the Reeb graph may contain spurious cycles, leading to incorrect handle measurements.
+
+## Background
+The method was introduced by [S1] in the context of removing excess topology from isosurfaces. It builds on the concept of Reeb graphs for non-simply connected domains. The key insight is that a handle can be characterized by two nonseparating loops: one that follows the cycle of the handle (Reeb loop) and one that crosses it (cross loop). The minimum of their lengths serves as a robust measure of the handle's "size" or "thickness." This approach allows for more informed decisions about which handles to remove during topology simplification, compared to methods that rely solely on topological persistence or arbitrary geometric thresholds.
+
+## Sources
+[S1] Removing excess topology from isosurfaces, https://doi.org/10.1145/990002.990007, fetched 2026-11-03

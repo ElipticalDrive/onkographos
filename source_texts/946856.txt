@@ -1,0 +1,1375 @@
+1
+TIDI-GS: Floater Suppression in 3D Gaussian
+Splatting for Enhanced Indoor Scene Fidelity
+Sooyeun Yang1,2 , Cheyul Im1,2 , Jee Won Lee1,2 , and Jongseong Brad Choi1,2∗
+1 Department of Mechanical Engineering, State University of New York, Korea, Incheon, South Korea
+2 Department of Mechanical Engineering, State University of New York, Stony Brook, NY, United States
+arXiv:2601.09291v2 [cs.GR] 19 Jan 2026
+∗ Corresponding Author
+Fig. 1: Overview of the TIDI-GS framework. Our method introduces two key components to the standard 3DGS pipeline: (left)
+a soft geometric prior from monocular depth and (center) a periodic, detail-guarded cleanup stage. These modules work in
+conjunction with the standard densification and optimization steps to produce a refined Gaussian model (right) with suppressed
+floaters and enhanced geometric fidelity.
+Abstract—3D Gaussian Splatting (3DGS) is a technique to
+create high-quality, real-time 3D scenes from images. This
+method often produces visual artifacts known as floaters–nearly
+transparent, disconnected elements that drift in space away from
+the actual surface. This geometric inaccuracy undermines the
+reliability of these models for practical applications, which is
+critical. To address this issue, we introduce TIDI-GS, a new
+training framework designed to eliminate these floaters. A key
+benefit of our approach is that it functions as a lightweight plugin
+for the standard 3DGS pipeline, requiring no major architectural
+changes and adding minimal overhead to the training process.
+The core of our method is a floater pruning algorithm–TIDI–that
+identifies and removes floaters based on several criteria: their
+consistency across multiple viewpoints, their spatial relationship
+to other elements, and an importance score learned during
+training. The framework includes a mechanism to preserve fine
+details, ensuring that important high-frequency elements are
+not mistakenly removed. This targeted cleanup is supported
+by a monocular depth-based loss function that helps improve
+the overall geometric structure of the scene. Our experiments
+demonstrate that TIDI-GS improves both the perceptual quality
+and geometric integrity of reconstructions, transforming them
+into robust digital assets, suitable for high-fidelity applications.
+Index Terms—3D Gaussian Splatting, Artifact Removal, 3D
+Reconstruction, Point-Based Rendering, Novel View Synthesis,
+Geometric Fidelity.
+This work was supported by the National Research Foundation of Korea
+(NRF) grant funded by the Korea government (MSIT) (Grant No. RS-2022NR067080 and RS-2025-05515607).
+I. I NTRODUCTION
+R
+ECENT developments in 3D Gaussian Splatting (3DGS)
+[1] allow interactive, photorealistic 3D scenes in realtime. This is achieved by optimizing millions of small shapes
+using a spherical rendering process. However, when the
+viewpoint changes, distracting floaters often appear. These
+artifacts are not just a visual problem; they indicate an
+unstable geometric structure that undermines the accuracy of
+measurements, the understanding of object occlusion, and the
+extraction of surfaces. Even small visual errors can lead to
+an incorrect view of clearances or defects. This limits the
+reliability of 3DGS.
+This problem is especially challenging in indoor scenes.
+Capturing indoor spaces involves a mix of bright lights, glossy
+or glass surfaces, shadows, and large, plain areas such as
+walls and ceilings. These elements provide weak visual cues
+from multiple views and can confuse the optimization process.
+3DGS may create translucent Gaussians in empty space
+to explain these view-dependent effects. Traditional cleanup
+methods that remove elements based on their transparency
+frequently fail to eliminate these artifacts. They can also
+accidentally remove genuine thin structures such as wires or
+edges. Previous research has mainly focused on outdoor or
+simpler scenes, leaving the challenges of indoor environments
+unresolved.
+2
+We hypothesize that an effective floater-removal strategy
+should be: (i) evidence aware: it should track an object’s
+visibility from multiple views over time, rather than just
+relying on its transparency at one moment, (ii) context aware:
+it should identify if a point is isolated in space by examining
+its neighbors, and (iii) detail aware: it should protect fine
+details using specific visual cues. Our TIDI-GS (Training
+for Indoor scenes with Detail-aware pruning and Importanceweighting for Gaussian Splatting) applies these principles. It
+adds a regular cleanup stage to the standard training process
+that is driven by evidence and context, similar to MicroSplatting [2]. It also uses depth information to help stabilize
+the geometry without requiring major architectural changes or
+causing significant overhead.
+Our evaluation is designed to highlight its practical benefits
+for interactive applications rather than the algorithm itself.
+While we report standard image quality metrics such as PSNR
+(Peak Signal-to-Noise Ratio), SSIM (Structural Similarity
+Index Measure), and LPIPS (Learned Perceptual Image Patch
+Similarity), we focus our analysis on performance aspects
+that directly capture the visual problems caused by floaters.
+We assess improvements in silhouette integrity, background
+consistency, and depth stability during camera motion. Our
+experiments on various indoor scenes show that TIDI-GS
+reduces visual noise and errors without sacrificing the fidelity
+of thin structures. Further tests confirm the contribution of
+each component in our system. We also show that our cleanup
+process adds very little time to the standard training. These
+results indicate that TIDI-GS is a practical upgrade for creating
+inspection-grade indoor models. TIDI-GS precisely targets
+floaters, removing unsupported Gaussians while protecting real
+details, and it integrates easily into existing 3DGS pipelines.
+Our main contributions are:
+• A method that combines evidence from multiple views and
+spatial isolation, going beyond simple transparency-based
+cleaning or complex architectural modifications.
+• A complete training framework that includes a depth
+regularization loss that accounts for uncertainty to produce
+geometrically accurate, visually clean results.
+• A comprehensive evaluation on challenging indoor scenes,
+using analysis targeted at the geometric stability issues
+common in inspection scenarios.
+II. R ELATED W ORK
+A. From Neural Radiance Fields to 3D Gaussian Splatting
+Novel View Synthesis was significantly advanced by Neural
+Radiance Fields (NeRF) [3], which introduced an implicit
+volumetric representation of a scene. However, NeRF’s
+requirement for dense sampling during rendering leads to
+slow performance. Much research explored explicit and
+hybrid representations, such as multi-resolution grids [4], to
+accelerate rendering. 3D Gaussian Splatting (3DGS) [1] has
+emerged as a leading method for real-time photo-realistic
+rendering. It represents scenes with millions of anisotropic
+Gaussians and uses a tile-based rasterizer for efficiency. This
+approach is based on ideas from classic point-based rendering
+techniques [5]–[7]. However, a significant disadvantage of the
+standard optimization process is the creation of distracting
+floater artifacts, which degrade the reconstruction’s geometric
+fidelity. While recent work like Micro-Splatting [2] has
+improved the stability of the Gaussians, it does not directly
+address the problem of floater artifacts.
+B. Controlling Geometry and Artifacts in 3DGS
+A key challenge in 3DGS is managing the density of
+Gaussians to accurately represent surfaces without introducing
+artifacts. The standard 3DGS training loop uses simple
+and view-independent rules for pruning, such as removing
+Gaussians with low opacity [1]. This approach is often
+insufficient, as it can preserve unsupported floaters in empty
+space while incorrectly removing legitimate thin structures.
+Methods like Pixel-GS [8] use pixel-aware gradients to
+guide the creation of Gaussians more carefully, which can
+reduce artifacts but at the cost of increased model size and
+training time. An effective pruning strategy requires a more
+subtle approach: one that accumulates evidence over multiple
+views [1], understands the spatial context to identify isolated
+points [8], and includes explicit safeguards to preserve highfrequency details [2].
+To further improve geometric accuracy, especially in indoor
+scenes with large or textureless regions, external geometric
+priors can be used. This concept was demonstrated in the
+context of NeRF, where supervising the training with even
+noisy depth maps was shown to improve results [9]. When
+ground truth depth is not available, monocular depth estimators
+such as MiDaS [10], [11] and Depth Anything [12], [13]
+can provide valuable, although scale and shift ambiguous,
+geometric cues. In our work, we integrate these priors as a
+soft constraint, using an uncertainty-aware loss function that
+adapts its influence during training [14]. This helps to prevent
+the initial formation of floaters without relying on hard pruning
+from potentially biased depth estimates.
+C. Evaluating Scene Fidelity
+While standard metrics like PSNR, SSIM, and LPIPS
+[15] are widely used to measure image quality, they do
+not fully capture the interactive failure modes common
+to 3DGS. Artifacts like noisy floaters, incorrect silhouette
+boundaries, and depth inconsistencies under camera motion
+are often missed by these static metrics [16]. To provide a
+more complete picture of reconstruction quality for practical
+applications, recent work has complemented these scores
+with analysis that directly measures geometric stability. Our
+evaluation includes indicators of silhouette integrity, depth
+stability under small viewpoint changes, and background
+consistency to better assess the cleanliness and reliability of
+the final model.
+III. P RELIMINARIES
+Our work builds upon the 3D Gaussian Splatting (3DGS)
+framework. This section briefly reviews the core rendering
+mechanism and introduces the key concepts we use for
+identifying floaters and regularizing geometry.
+3
+A. Differentiable Rasterization in 3DGS
+In 3DGS, a scene is represented by a large set of 3D
+Gaussians, each defined by properties such as its position,
+shape (covariance), opacity, and color, which is modeled using
+Spherical Harmonics (SH) to capture view-dependent effects
+[1]. To create an image, these 3D Gaussians are projected
+onto the 2D image plane. The final color of each pixel is
+then calculated by blending the projected Gaussians in order
+from front to back. This entire process is differentiable, which
+allows the properties of all Gaussians to be optimized using
+gradient-based methods. The final color Î(u) for a pixel u is
+determined by the α-blending equation:
+Î(u) =
+X
+Tk (u)αk ck
+(1)
+k
+ck represents the color of the k-th Gaussian as determined
+by its SH coefficients, and αk is its opacity. The term Tk (u)
+denotes the transmittance, which calculates how much light
+from Gaussians behind the k-th one can reach the camera. It
+is computed by multiplying the capacities of all Gaussians in
+front of it, ensuring that closer objects correctly occlude those
+farther away.
+B. Evidence Accumulation for Floater Identification
+A common artifact in 3DGS is the creation of floaters,
+which are unsupported Gaussians that appear to float in empty
+space. To distinguish these from legitimate parts of the scene,
+we track several lightweight statistics for each Gaussian during
+the training process. These statistics provide evidence to guide
+our pruning algorithm.
+First, we track multi-view visibility by counting the number
+of training views in which a Gaussian significantly contributes
+to the rendered image. A low count suggests the Gaussian is
+not part of a consistent surface. We also monitor optimization
+activity using a moving average of a Gaussian’s position
+gradient. A small gradient means the optimizer has less reason
+to move the Gaussian, suggesting it might no longer be needed.
+We introduce a learnable scalar weight for each Gaussian as
+a measure of its learned importance, allowing the model to
+determine which Gaussians are most critical for minimizing
+the loss. We employ several detail-preserving guards to prevent
+the accidental removal of fine details. These guards protect
+Gaussians that exhibit signs of real structure, such as highfrequency color information, significant local texture, or thin,
+elongated shapes. We measure spatial isolation by calculating a
+Gaussian’s average distance to its nearest neighbors. Floaters
+typically have a large isolation distance, whereas Gaussians
+representing real surfaces are found in dense clusters. These
+signals enable us to differentiate unsupported artifacts from
+legitimate scene geometry [1], [8].
+C. Geometric Priors from Monocular Depth
+In indoor scenes that often contain large, textureless
+surfaces, relying on color information can be insufficient
+for reconstructing accurate geometry. We address this by
+incorporating a geometric prior from a pretrained monocular
+depth estimation network, MiDaS [10], [11]. We align the
+rendered depth with the predicted depth for each camera view
+because these depth predictions are only accurate up to an
+unknown scale and shift. We then introduce a loss term that
+is weighted by the uncertainty of the depth prediction, which
+is a principle derived from multi-task learning [14].
+Ldepth =
+X
+e
+pwuncert (p) · ρ! (s, Ẑ(p) + t − Z(p))
+(2)
+For each pixel p, s and t are the scale and shift parameters
+used to align the rendered depth Ẑ(p) with the monocular
+e
+prediction Z(p).
+wuncert (p) is a crucial uncertainty weight that
+reduces the loss contribution from pixels where the depth
+estimator is likely to be inaccurate (e.g., on reflective surfaces
+or object boundaries). ρ is a Huber loss function, which is less
+sensitive to large prediction errors. This approach provides soft
+geometric guidance that discourages the formation of floaters
+during training and complements our evidence-based cleanup
+stage, which removes any floaters that still appear.
+IV. M ETHODOLOGY
+TIDI-GS enhances the standard 3D Gaussian Splatting
+(3DGS) framework by introducing two complementary
+mechanisms. The primary component is a periodic cleanup
+process that systematically identifies and removes floaters
+based on accumulated evidence. This is paired with a
+lightweight monocular depth regularizer that guides the
+geometry toward more likely surfaces during training, reducing
+the initial formation of such artifacts. Both components are
+designed as plugin modules that operate within the standard
+3DGS training loop without changing its core architecture,
+thereby preserving its real-time rendering capabilities and
+adding minimal computational overhead [1], [8].
+A. Evidence Accumulation and Candidate Pooling
+Our method maintains an evidence log for each Gaussian
+that accumulates multiple cues over time, enabling more
+informed and adaptive pruning decisions instead of relying on
+instant opacity thresholds. In Fig 2, a Gaussian is considered
+a potential floater if it exhibits multiple and persistent signs of
+being unsupported. We track four primary cues to build this
+evidence.
+The first cue is multi-view support that is measured by a
+running visibility counter vi . This counter matches the number
+of training iterations in which a Gaussian gi makes a nontrivial contribution to any rendered pixel. A low count over
+an extended period indicates that the primitive is not part
+of a coherent surface observed from multiple viewpoints, but
+rather an artifact that may only explain a local residual in a
+few specific views. We monitor optimizer usage through an
+exponential moving average (EMA) of the position-gradient
+norm. This metric tracks whether the optimizer is actively
+relocating the Gaussian to reduce the training loss. The update
+rule is:
+(t)
+gi
+(t−1)
+= βgi
++ (1 − β)||∇xi L||2
+(3)
+4
+Guards for geometry analyze the Gaussian’s shape as
+derived from its 3D covariance matrix. We compute its
+thinness and anisotropy from its scales (si,1 ≤ si,2 ≤ si,3 ):
+X thin i = si, 1,
+Fig. 2: Conceptual illustration of floater cues. Our method
+identifies floaters based on a combination of weak evidence
+signals, including low opacity, low multi-view visibility,
+low optimization activity (Gradient EMA), and high spatial
+isolation (High Distance Factor). These signals are used
+to trigger a periodic pruning pass to clean the scene
+representation.
+(t)
+where gi is the EMA at training step, t and β is a decay
+rate that smooths out the signal over time, and ||∇xi L||2
+is the magnitude of the gradient of the loss L with respect
+to the Gaussian’s center xi . A continuously small EMA
+value suggests the Gaussians have become a passenger in the
+optimization and contribute little to further error reduction.
+Next, a learnable scalar parameter ωi provides a measure of
+learned importance, allowing the model itself to assign utility
+to each primitive. Each scale ωi is initialized as a model
+parameter (e.g., within a value of 1.0) and is optimized jointly
+with other Gaussian attributes such as position and color
+through standard back-propagation. This allows the optimizer
+to dynamically increase the importance of primitives that are
+decisive for reducing the loss and decrease it for those that
+are redundant or harmful. We also consider its opacity αi as
+a measure of radiometric contribution.
+The pipeline in Fig. 3 shows how these cues are combined to
+form a base candidate set Cbase . We flag any Gaussian that falls
+below predefined, conservative thresholds for all four weakevidence signals (τvis , τα , τω , τgrad ) during training. This initial
+step functions as a coarse-grained filter and is intentionally
+excessive to ensure that all potential floaters are captured for
+more detailed analysis in the subsequent stages.
+B. Detail Preserving Guards
+Aggressive pruning of the base candidate set could
+unintentionally destroy legitimate fine structures that may
+share characteristics with floaters like low opacity. Therefore,
+we apply a series of detail preserving guards that function
+as a test for visually significant information. A candidate
+Gaussian is exempted from the pruning process if it passes any
+of these checks. One set of guards is related to appearance,
+assessing features such as high-frequency content encoded in
+the spherical harmonics (SH) coefficients. The energy of the
+non-DC (Direct Current) terms EiSH is a strong indicator of
+view-dependent effects like highlights. Such effects are critical
+for photorealism and must be preserved [17]. We also measure
+local color variance to identify Gaussians in textured regions.
+X ianiso =
+si, 3
+si,1
+(4)
+A very small scale Xithin signifies a wire-like object, while a
+high anisotropy ratio Xianiso indicates a flat or planar structure.
+Both often represent critical geometric details that standard
+opacity-based pruning might mistakenly remove [1]. The
+thresholds for these guards are set adaptively based on the
+distribution of features within the population of stable, noncandidate Gaussians, making the method adaptable to different
+scene scales and content. Only candidates that fail all of these
+guard tests proceed to the final removal stage. This ensures
+that our method conservatively prioritizes preserving important
+details.
+Algorithm 1 Detail-Aware Floater Pruning
+1: Input: All Gaussians G, thresholds τ...
+2: Output: Pruned set of Gaussians G ′
+3:
+4: // Step 1: Identify Initial Candidates
+5: Cbase ← {gi ∈ G | vi ≤ τvis ∧ αi ≤ τα ∧ σ(ωi ) ≤ τω ∧
+∥∇xi ∥EMA ≤ τgrad }
+6:
+7: // Step 2: Apply detail-preserving Guards
+8: Mdetail ← {gi ∈ Cbase | ∥fi,rest ∥2 ≥ τH ∨ Vi
+≥ τV ∨
+min(si ) ≤ τs }
+9: Cprune ← Cbase \ Mdetail
+10:
+11: // Step 3: Isolation-Based Removal with Adaptive Capping
+12: Gcandidates to remove ← {gi ∈ Cprune | di ≥ τiso · extent}
+13: Gremoved ← TopK(Gcandidates to remove , cap ratio)
+14: G ′ ← G \ Gremoved
+15: return G ′
+C. Isolation Aware Pruning with Adaptive Caps
+The final set of unguarded candidates is pruned based on
+its spatial context. This step is founded on the assumption that
+valid geometric structures form dense or coherent manifolds,
+whereas floaters are weakly connected to these structures and
+thus spatially isolated [8] by definition. We quantify this
+(k)
+isolation by calculating the average distance di of each
+candidate to its k-nearest neighbors (k-NN) in 3D space. A
+composite pruning score is then computed for each candidate,
+and it combines its normalized spatial isolation with other
+weak evidence signals like low opacity and low learned
+importance. This score provides a ranking of the candidates,
+and it prioritizes those that are simultaneously isolated,
+transparent, and considered unimportant by the optimizer. A
+greedy pass then removes candidates with the highest scores.
+Fig. 4 provides empirical validation for this strategy. The
+heatmap shows the fraction of pruned Gaussians as a function
+of their spatial isolation (x-axis) and learned importance (yaxis). The red region, which indicates a high pruning rate
+5
+Fig. 3: The pipeline for identifying the base candidate set Cbase for pruning. A Gaussian is selected for this set if it falls below
+predefined thresholds for all four weak evidence signals shown: (i) its visibility count (vi ) indicates insufficient multi-view
+support; (ii) its opacity (αi ) shows a negligible radiometric contribution; (iii) its learned importance (σ(ωi )) is low; and (iv)
+its position-gradient EMA (||∇xi ||EMA ) is small. This multi-criteria approach creates an initial set of potential floaters that will
+be further refined by the detail-preserving guards.
+Fig. 4: Empirical pruning rate as a function of spatial isolation
+and learned importance. The high pruning rate (red) is
+concentrated in the region of high spatial isolation (large kNN distance) and low learned importance, confirming our
+method’s targeted removal of floaters.
+of nearly 100%, is concentrated in the area of high spatial
+isolation and low learned importance. This confirms that our
+removal policy has learned to precisely target the population
+of Gaussians that are characteristic of floaters. To maintain
+training stability and prevent excessive removals in a single
+step, we impose adaptive local (per-cell) and global caps on
+the number of Gaussians pruned. This ensures that the cleanup
+is balanced and gradual.
+D. Uncertainty Guided Geometric Regularization
+While the periodic TIDI cleanup acts as a reactive
+mechanism to remove floaters that have already formed, it is
+complemented by a proactive strategy designed to suppress
+their initial formation. This regularization is particularly
+critical in photometrically ambiguous regions, such as large
+textureless walls or glossy floors, where weak multi-view
+constraints make the optimization problem ill-posed. In these
+areas, the optimizer is prone to creating geometrically incorrect
+structures to satisfy the photometric loss.
+To address this, we incorporate a geometric prior derived
+from pre-trained monocular depth estimation networks, such
+as MiDaS-DPT [10], [11] or Depth Anything [12]. These
+networks provide a plausible, high-level understanding of the
+scene’s structure. A critical challenge is that these priors are
+only accurate up to an unknown scale and shift and can
+contain significant errors, especially on challenging surfaces.
+Therefore, we use this prior not as a hard constraint, but as a
+form of soft guidance.
+During training, we introduce a loss term that minimizes
+the error between the rendered depth map (Ẑ(p)) and
+e
+the monocular prediction (Z(p)).
+To handle the inherent
+ambiguity, we solve for the optimal scale (s) and shift (t)
+parameters that align the two depth maps for each camera
+view. Crucially, the entire loss is guided by uncertainty
+to ensure robustness, following the principles of multi-task
+learning [14]. The uncertainty-aware depth loss is formulated
+as:
+Ldepth =
+X
+e
+pwuncert (p) · ρ! (s, Ẑ(p) + t − Z(p))
+(5)
+For each pixel p, the uncertainty weight wuncert (p) is a
+crucial term that reduces the loss contribution in regions
+where the depth estimator is intrinsically unreliable (e.g., on
+reflective surfaces, object boundaries, or transparent objects).
+This weighting scheme prevents the model from importing
+biases from the depth estimator and focuses the regularization
+on areas where the prior is most trustworthy. Furthermore,
+we use a robust Huber loss (ρ) [18], which is less sensitive
+to large, occasional prediction errors than a standard L2 loss,
+making the training process more stable.
+By applying this uncertainty-aware loss, we effectively
+‘nudge’ the optimizer to form geometric structures that
+conform to the surfaces suggested by the depth prior. This
+discourages the placement of Gaussians in empty space,
+thereby suppressing the initial formation of floaters and
+reducing the burden on the subsequent cleanup stage. Finally,
+to ensure training stability, we introduce this depth loss
+gradually using a curriculum schedule. The influence of
+the depth term is increased only after the photometric
+reconstruction has become reasonably stable, preventing the
+geometric prior from overpowering the color information in
+the early stages of training. This approach provides robust
+geometric guidance without being overly restrictive, making
+6
+Fig. 5: TIDI-GS training dynamics. (Left) Photometric (PSNR, LPIPS) and geometric (Depth Error) quality metrics improve
+concurrently throughout training. (Right) The total number of Gaussians grows and then stabilizes as the pruning activity (red
+bars) increases in the later stages, indicating a shift from a growth phase to a refinement phase.
+it an effective complement to our evidence-based pruning,
+similar in spirit to depth supervision in NeRF [9].
+V. R ESULTS AND E VALUATION
+This section provides a comprehensive evaluation of our
+TIDI-GS. We begin by detailing the experimental setup and
+evaluation protocols designed to test the performance of our
+framework. We then present an in-depth analysis of our
+method’s internal dynamics, followed by extensive qualitative
+and quantitative comparisons against several leading baseline
+methods on a variety of challenging indoor datasets.
+The results collectively demonstrate the effectiveness and
+efficiency of our floater suppression framework in producing
+high-fidelity 3D reconstructions.
+A. Implementation Details
+We implemented TIDI-GS in PyTorch to ensure a fair and
+reproducible comparison. It builds directly upon the publicly
+available 3DGS source code with its tile-based differentiable
+rasterizer [1]. This approach guarantees that the core rendering
+pipeline remains identical across all tested methods, and
+it isolates the performance differences to the contributions
+of our framework. All experiments were conducted on a
+single consumer-grade NVIDIA RTX 4080 GPU with 16 GB
+of memory. We employed mixed-precision rendering (FP16)
+for efficiency and memory savings, while maintaining full
+precision (FP32) for the optimizer state and EMA buffers to
+ensure numerical stability throughout the training process.
+Our evaluation is centered on five challenging indoor
+sequences: Auditorium, Ballroom, Church, and Museum from
+the Tanks and Temples dataset [19], and the Room scene
+from the Mip-NeRF 360 dataset [20]. Each scene consists
+of 120-200 high-resolution (1600×1200) images, which were
+pre-processed with COLMAP to obtain initial camera poses
+and a sparse point cloud. We trained each scene for a fixed
+30,000 iterations, initializing the model with one anisotropic
+Gaussian per point from the COLMAP output. The standard
+3DGS densification schedule was kept intact for all methods.
+Our TIDI cleanup process was executed periodically every
+400 training steps, following an initial 500-step period to
+allow the learnable importance parameters (ω) to stabilize for
+newly spawned Gaussians. The photometric regularization was
+provided by a composite loss function combining L1, SSIM
+(λSSIM = 0.2), and LPIPS (using AlexNet [21] with a weight
+of 0.1), a combination chosen to effectively balance pixel-level
+accuracy with the preservation of structural and perceptual
+fidelity under complex indoor lighting [15].
+For the geometric regularization component, monocular
+depth priors were generated by fusing the outputs of MiDaSDPT [10], [11] and Depth-Anything V2 [12], [13]. The
+fusion was weighted using precision estimates derived from
+flip consistency variance to prioritize more reliable depth
+predictions. The evidence ledger statistics, which include
+multi-view visibility and the position gradient EMA (β =
+0.99), were accumulated online with minimal overhead. The
+pruning process utilized a k-NN distance score (with k=16)
+and was constrained by adaptive local and global removal caps
+of 1.0% and 0.2% of the Gaussians per cell and per scene,
+respectively. All baseline methods, including the original
+3DGS [1], Pixel-GS [8], LP-GS [22], and Micro-Splatting
+[2], were retrained from scratch on our data splits using their
+author-recommended hyperparameter settings. We found the
+method to be robust with respect to different pruning threshold
+choices. A detailed hyperparameter sensitivity analysis is
+provided in Table II.
+B. Evaluation Protocol
+The indoor scenes for our benchmark were specifically
+chosen because they contain a high concentration of features
+known to induce floater artifacts. These include high-intensity
+direct and indirect light sources, glossy and specular materials
+like polished floors and glass, large textureless regions such as
+walls and ceilings, and complex, repeated geometric patterns.
+To provide a thorough quantitative assessment, we report a
+suite of standard, full image quality metrics: Peak Signalto-Noise Ratio (PSNR) for pixel-level fidelity, Structural
+Similarity Index (SSIM) for structural coherence, and Learned
+Perceptual Image Patch Similarity (LPIPS) [15] for perceptual
+quality.
+7
+Fig. 6: Visualization of the detail-aware pruning pipeline across different scenes. From left to right: (1) All Gaussians, (2)
+Candidate floaters (Cbase ) in red, (3) Detail guarded candidates (Mdetail ) in blue, and (4) Finally removed Gaussians in green.
+The process effectively isolates sparse floaters while preserving the dense structure of the underlying geometry.
+However, it is well-known that these static, pixel-wise
+metrics often fail to capture the dynamic artifacts that most
+significantly degrade the user experience and reliability of
+interactively rendered 3D models [17], [23]. Artifacts such
+as temporal shimmering of translucent surfaces, light leaks
+across silhouette boundaries, and sudden spikes in the depth
+map during camera motion are poorly penalized by metrics
+that average errors over the entire image. Therefore, we
+complement these standard scores with a targeted analysis
+of cleanliness indicators. These are computed on short or
+rendered video sequences with small camera jitters around
+validation viewpoints and include: (i) silhouette leakage:
+8
+Fig. 7: Qualitative comparison of rendering results on five indoor scenes at 30K training iterations. The columns correspond to
+scenes, and the rows correspond to different methods: Ground Truth (GT), baseline 3DGS, LP-GS, PixelGS, Micro-Splatting,
+and our TIDI-GS (bottom row). Our method consistently removes floater artifacts, haze, and blur present in baseline methods
+while preserving sharp details and clean surfaces, resulting in a reliable reconstruction compared to the ground truth.
+Fig. 8: Qualitative comparison on challenging indoor scenes from the Mip-NeRF 360 dataset. From left to right, we present
+the input RGB images, geometry/appearance visualizations, and point-based representations. Baseline results exhibit noticeable
+geometric distortions and floating artifacts, while the improved results show cleaner geometry with more consistent structure
+and appearance across views.
+9
+Fig. 9: Qualitative results on large-scale indoor scenes from the Tanks and Temples benchmark. Each row compares different
+reconstruction stages, including rendered views, internal geometry visualizations, and point distributions. Baseline results exhibit
+heavy over-accumulation of Gaussians, interior clutter, and visibility leakage, particularly in texture-poor regions such as walls,
+ceilings, and long corridors. The improved results show substantially suppressed floating artifacts, enhanced spatial consistency,
+and clearer structural boundaries, especially in large halls and long-range indoor environments.
+10
+quantifies the fraction of foreground-mask pixels whose
+rendered transmittance incorrectly exceeds a small threshold
+outside of the ground truth object contours, (ii) depth stability:
+measures the proportion of pixels whose rendered depth
+remains stable (below a fixed tolerance) under small camera
+noise, and (iii) background consistency: measures the PSNR of
+static scene regions that should remain unchanged. By pairing
+conventional metrics with this stability-focused analysis, we
+provide a more holistic and practically relevant assessment of
+reconstruction quality.
+detail-aware guards, however, correctly identify their high SH
+energy and protect them, highlighting the sophistication of
+our method beyond simple thresholding. The plots also show
+a dense concentration of low-importance, low-opacity points
+that are the primary targets of our pruning policy.
+C. Analysis of TIDI-GS Behavior
+To verify that the components of TIDI-GS function as
+intended, we first analyze its internal training dynamics.
+Fig. 5 provides a detailed look at the evolution of key
+metrics throughout the training process. The plot on the
+left demonstrates that as training progresses, the validation
+PSNR (blue) steadily increases while the depth error (red)
+and perceptual LPIPS metric (green) consistently decrease.
+This concurrent improvement indicates a healthy optimization
+process where photometric quality and geometric accuracy
+are refined in parallel. The plot on the right details the
+management of the Gaussian population. The total count
+(blue line) grows rapidly during the initial densification
+phase, driven by the standard 3DGS logic. It then stabilizes
+and begins to slightly decrease once our periodic TIDI
+cleanup process activates. The bar chart shows that while
+new Gaussians are added throughout training (green bars),
+the pruning activity (red bars) becomes more significant
+and consistent in the later stages. This illustrates a shift
+from a growth-dominated phase to a refinement-dominated
+phase, where our method efficiently removes redundant or
+unsupported primitives without causing instability.
+The pruning pathway itself is visualized in greater detail
+in Fig. 6. For a representative scene, we start with the
+entire set of Gaussians (leftmost column). Our method first
+identifies a broad, over-inclusive set of candidates (second
+column, red) that exhibit weak evidence across multiple
+criteria. The third column powerfully illustrates the crucial
+role of the detail-preserving guards: it shows in blue the subset
+of candidates that were protected from pruning because they
+were identified as being part of consistent or high-frequency
+structures. The final set of removed Gaussians (rightmost
+column, green) consists almost entirely of sparse, isolated
+points located in free space. This visual breakdown confirms
+that our method successfully isolates and excises floaters while
+carefully preserving the dense geometry of the underlying
+scene.
+The learned behavior of our framework is further evidenced
+in Fig. 10 which plots the relationship between opacity and
+learned importance, with each Gaussian colored by its nonDC SH energy. A critical insight from this analysis is the
+significant population of yellow points, representing high
+SH energy that persist even at very low opacity levels.
+These points correspond to specular details on surfaces which
+contribute significantly to realism. A naive opacity-based
+pruner would likely eliminate these valuable primitives. Our
+Fig. 10: Analysis of Gaussian properties across the five test
+scenes. The plots show many low-opacity Gaussians with
+high spherical harmonics (SH) energy, which correspond to
+important specular details. This indicates that opacity alone is
+not sufficient for pruning and motivates the use of our detailpreserving guards.
+D. Qualitative Comparison
+The most direct evidence of our method’s effectiveness is
+found in a qualitative comparison of the final rendered images.
+Fig. 7 presents a side-by-side evaluation of TIDI-GS against
+several leading baseline methods across five challenging
+indoor test scenes. A consistent pattern emerges: our method
+produces reconstructions that are noticeably cleaner and
+more detailed than the baselines. Common artifacts from the
+other methods, such as semi-transparent veils, hazy glows
+around lights, and distinct free-space floaters, are effectively
+eliminated by TIDI-GS. As a result, the renders produced by
+TIDI-GS not only exhibit higher perceptual quality, but also
+align closely with the ground truth.
+To understand the source of these visual improvements,
+Fig. 8 and Fig. 9 offer a diagnostic look into the
+underlying geometric representation learned by our method in
+11
+TABLE I: Quantitative result of Tanks and Temples [19] and Mip-NeRF 360 [20] (30K iterations)
+3DGS
+LP-GS
+Micro-Splatting
+PixelGS
+TIDI-GS
+3DGS
+LP-GS
+Micro-Splatting
+PixelGS
+TIDI-GS
+Auditorium
+SSIM↑
+PSNR↑
+LPIPS↓
+Time↓
+0.935
+0.906
+0.852
+0.830
+0.934
+30.8
+29.0
+29.8
+24.1
+29.6
+0.109
+0.257
+0.106
+0.351
+0.028
+24 min
+31 min
+9 min
+28 min
+20 min
+SSIM↑
+Church
+PSNR↑
+LPIPS↓
+Time↓
+0.898
+0.825
+0.797
+0.781
+0.865
+26.2
+24.3
+24.6
+24.7
+25.4
+0.128
+0.269
+0.117
+0.287
+0.049
+21 min
+40 min
+17 min
+33 min
+21 min
+3DGS
+LP-GS
+Micro-Splatting
+PixelGS
+TIDI-GS
+3DGS
+LP-GS
+Micro-Splatting
+PixelGS
+TIDI-GS
+3DGS
+LP-GS
+Micro-Splatting
+PixelGS
+TIDI-GS
+Ballroom
+SSIM↑
+PSNR↑
+LPIPS↓
+Time↓
+0.933
+0.867
+0.9254
+0.818
+0.918
+28.5
+26.2
+26.3
+24.4
+28.8
+0.050
+0.152
+0.073
+0.191
+0.023
+27 min
+45 min
+15 min
+22 min
+19 min
+Museum
+SSIM↑
+PSNR↑
+LPIPS↓
+Time↓
+0.914
+0.854
+0.868
+0.781
+0.904
+0.127
+0.196
+0.089
+0.255
+0.028
+29 min
+52 min
+17 min
+21 min
+23 min
+SSIM↑
+Room
+PSNR↑
+LPIPS↓
+Time↓
+0.959
+0.951
+0.922
+0.933
+0.964
+35.9
+34.6
+24.6
+31.9
+35.9
+0.079
+0.0976
+0.058
+0.180
+0.016
+23 min
+25 min
+8 min
+27 min
+16 min
+comparison to the baseline 3DGS. These figures deconstruct
+the reconstruction of two representative scenes into the
+following components: the final rendered image (‘Splat’),
+a visualization of the 3D Gaussians as geometric ellipses
+(‘Ellipse’), and the sparse ‘Initial Points’ from which both
+methods began training. This comparison makes it clear that
+TIDI-GS’s superior results stem from its ability to learn a
+fundamentally cleaner and more geometrically accurate set
+of primitives, rather than from any superficial post-processing
+effect.
+This difference is clearly demonstrated in the Auditorium
+scene: the baseline 3DGS render is obscured by a pervasive
+haze that reduces contrast and washes out details. The
+corresponding ‘Ellipse’ visualization reveals the cause, a
+chaotic, noisy cloud of poorly structured primitives. In
+contrast, the TIDI-GS render is sharp and clear throughout. Its
+‘Ellipse’ view shows a clean, well-organized set of Gaussians
+that conform closely to the actual surfaces of the scene,
+indicating a far more coherent underlying geometric structure.
+While the Auditorium example shows significant
+improvement, the difference is even more striking in
+the Room scene, where the baseline method suffers a
+catastrophic failure. It generates a large, scene-occluding
+floater that completely obstructs the view. As shown in
+Fig. 8, TIDI-GS completely eliminates this artifact. The
+‘Ellipse’ view reveals why: the baseline has populated
+what should be empty space with a dense, unstructured
+cluster of large, unsupported Gaussians. TIDI-GS, guided
+by its evidence-based pruning and geometric regularization,
+completely avoids this pathological behavior. Crucially, both
+methods started from the same initial points, proving that
+this dramatic improvement is a direct result of our proposed
+training framework.
+This principle of improved geometric organization explains
+27.3
+25.8
+25.7
+22.3
+26.7
+TIDI-GS’s superior results across all test cases in Fig. 7.
+For example, TIDI-GS renders the intricate patterns of the
+Ballroom ceiling and the fine wooden details of the Church
+chairs with crisp definition, free from the hazy artifacts that
+degrade the other reconstructions. In all instances, the visual
+evidence shows that TIDI-GS produces reconstructions that
+are not only cleaner on the surface, but also more robust and
+faithful in their underlying geometric representation.
+E. Quantitative Comparison
+The quantitative results, presented in Table I, provide
+strong statistical support for the visual trends observed in
+our qualitative analysis. Across the five challenging indoor
+scenes, TIDI-GS achieves PSNR and SSIM scores that are
+highly competitive with, and in several cases exceed, the
+baseline 3DGS method. This demonstrates that our framework
+successfully preserves the high-fidelity photometric accuracy
+that is a hallmark of Gaussian Splatting. The most significant
+and consistent advantage, however, is observed in the LPIPS
+metric, where TIDI-GS delivers the lowest (best) scores across
+all scenes, often by a substantial margin. This indicates a major
+improvement in perceptual quality, as the LPIPS metric is
+designed to be more aligned with human perception of detail,
+texture, and structural correctness.
+Beyond raw image quality, the efficiency of our method
+is a critical aspect of its design. The quality gains are
+achieved with a training time that remains comparable to
+the baseline 3DGS, confirming the computational efficiency
+of our lightweight, plug-in approach. The final model sizes
+(measured by the number of Gaussians) are also similar to the
+baseline, which is a crucial finding. It demonstrates that TIDIGS improves quality not by naively increasing model capacity,
+but by intelligently optimizing the existing primitives and,
+most importantly, by removing false or unnecessary elements.
+12
+TABLE II: Sensitivity analysis for key pruning thresholds on the Room scene. We vary the visibility count threshold (τvis )
+and the gradient EMA threshold (τgrad ). The results show that our method is robust, with optimal performance achieved at
+τvis = 2.0 and τgrad = 5.00E − 04.
+Metrics
+1.0
+2.0
+3.0
+SSIM↑
+0.9518
+0.9643
+0.951
+Metrics
+0.01
+0.04
+0.08
+SSIM↑
+0.9515
+0.9643
+0.9515
+Visibility (τvis )
+LPIPS↓
+Loss↓
+0.0234
+0.0136
+0.016
+0.0104
+0.0238
+0.01356
+Opacity (τα )
+PSNR↑
+LPIPS↓
+Loss↓
+34.023
+0.0238
+0.0133
+35.8983
+0.016
+0.0104
+33.9695
+0.0236
+0.0135
+PSNR↑
+33.9525
+35.8983
+33.9598
+AbsRel↓
+0.742
+0.6979
+0.7135
+δ1.25↑
+0.621
+0.6597
+0.639
+Metrics
+1.00E-04
+5.00E-04
+1.00E-03
+SSIM↑
+0.9515
+0.9643
+0.9517
+AbsRel↓
+0.752
+0.6979
+0.7210
+δ1.25↑
+0.618
+0.6597
+0.6360
+Metrics
+0.2
+0.35
+0.5
+SSIM↑
+0.9521
+0.9643
+0.9513
+This leads to a more compact and efficient representation of
+the scene geometry.
+While standard metrics offer a static snapshot, our
+evaluation also focuses on dynamic ‘cleanliness’ indicators
+that directly quantify the distracting artifacts that appear
+during interactive viewing. To quantify the improvements in
+geometric integrity that are not fully captured by these metrics,
+we evaluate silhouette leakage and depth stability under minor
+camera motion. The results, presented in the ablation study in
+Table III, show a clear advantage for the full TIDI-GS model.
+Our method significantly reduces silhouette leakage, which
+indicates cleaner and more accurate object boundaries without
+the hazy artifacts common in other methods. Furthermore,
+it achieves the highest depth stability, confirming that our
+geometrically regularized reconstructions are more temporally
+consistent and less prone to the distracting shimmering or
+‘popping’ artifacts. This demonstrates the practical benefit
+of our floater suppression framework in creating robust and
+reliable digital assets.
+Finally, a practical method must not only perform well but
+also be robust to its hyperparameter settings, avoiding the
+need for extensive, per-scene tuning. To validate the robustness
+of our TIDI cleanup framework, we conducted a sensitivity
+analysis on all four of its key pruning thresholds: the visibility
+count (τvis ), the position gradient EMA (τgrad ), opacity (τα ),
+and learned importance (τω ). The comprehensive results are
+shown in Table II. Across all four experiments, a clear trend
+emerges: there is a ‘sweet spot’ where the thresholds are strict
+enough to effectively remove floaters but not so aggressive that
+they begin to damage legitimate scene content. For example,
+a visibility threshold (τvis ) of 2.0 achieves the best balance
+across all metrics. Setting the threshold too low (1.0) or too
+high (3.0) leads to a noticeable degradation in performance.
+This same pattern holds for the other parameters, with optimal
+performances found at τgrad = 5.00E − 04, τα = 0.04, and
+τω = 0.35. This analysis demonstrates that while the choice of
+thresholds is important, our method is not overly sensitive and
+performs robustly with a single, well-chosen set of parameters
+across different scenes, underscoring its practicality.
+F. Ablation Study
+To validate the design of TIDI-GS and isolate the
+contribution of its key components, we conducted a
+comprehensive ablation study. We disabled individual
+mechanisms while keeping the training budget and camera
+paths identical across all runs. The following analysis focuses
+Grad (τgrad )
+PSNR↑
+LPIPS↓
+Loss↓
+33.9543
+0.0237
+0.0135
+35.8983
+0.016
+0.0104
+34.0208
+0.0235
+0.0134
+Importance (τω )
+PSNR↑
+LPIPS↓
+Loss↓
+34.0135
+0.0236
+0.0134
+35.8983
+0.016
+0.0104
+33.9578
+0.0237
+0.0134
+AbsRel↓
+0.735
+0.6979
+0.709
+δ1.25↑
+0.6305
+0.6597
+0.642
+AbsRel↓
+0.7240
+0.6979
+0.7310
+δ1.25↑
+0.6420
+0.6597
+0.6330
+on five of the most critical factors that highlight our
+framework, (a) depth regularization: the uncertainty guided
+monocular depth priors, (b) LPIPS term: the perceptual
+guidance provided by the LPIPS loss term, (c) floater
+cleanup: the core of our reactive artifact removal system,
+(d) importance regularization: the learned and data-driven
+aspect of our evidence log, and (e) full TIDI-GS. Qualitative
+comparisons are shown in Fig. 11, with the pruning pipeline
+visualized in Fig. 6, opacity-importance distributions in Fig.
+10, scene comparisons in Fig. 7, and full numeric results in
+Table III.
+(a) Depth regularization: it provides a geometric foundation
+for the reconstruction, particularly for large, textureless
+surfaces where photometric evidence from multi-view
+images is weak or ambiguous. It acts as a proactive
+regularizer, and it encourages the formation of plausible
+and smooth surfaces from the early stages of training.
+(b) LPIPS Term: while standard L1 and L2 losses ensure
+pixel-level accuracy, the LPIPS term encourages the
+model to reproduce features that are important to human
+perception, such as sharp edges, fine textures, and
+complex structural details, which is critical for highfidelity rendering.
+(c) Floater Cleanup: it encompasses the entire three-step
+TIDI: identifying a broad set of candidates based on
+the evidence log, applying detail-preserving guards, and
+performing isolation-aware removal of the remaining
+unguarded primitives. Its purpose is to surgically excise
+the residual, high-frequency artifacts (floaters) that persist
+even with a stable geometric base.
+(d) Importance Regularization: by associating a learnable
+scalar importance weight, ω, with each Gaussian, we
+allow the model to determine which primitives are most
+useful for reconstruction by moving beyond purely handcrafted heuristics like opacity or visibility.
+These ablations trace a clear causal chain. When the cleanup
+stack (c) is disabled, unsupported translucent splats persist
+and dominate the long-tail failures like shimmer and leakage.
+Removing depth regularization (a) specifically destabilizes
+large low-texture spans, and it seeds the halos that later
+manifest as jitter spikes. Dropping the LPIPS term (b) flattens
+the perceptual structure, causing edges to fray and textures
+to blur, which raises leakage even when PSNR/SSIM remain
+similar. Eliminating importance regularization (d) inflates
+the model with low utility splats, as seen in the opacityimportance scatter in Fig. 10 and the heavier model footprint
+13
+Fig. 11: Qualitative ablation study on an indoor scene. The full TIDI-GS model (Left) is compared to representative ablations.
+Disabling key components like floater cleanup, depth regularization, LPIPS terms, and importance regularization reintroduces
+artifacts like translucent veils and wavy geometry, demonstrating the necessity of each component for both the final render
+and the underlying splat structure.
+TABLE III: Ablation study: performance across different metrics and configurations. Configurations (a)-(e) correspond to the
+ablation settings described in Section V-E.
+Metrics
+SSIM↑
+PSNR↑
+LPIPS↓
+Loss↓
+Time↓
+Size↓
+(a)
+0.9637
+35.7709
+0.0165
+0.0229
+24 min
+245.6 MB
+(b)
+0.9511
+34.5192
+0.0123
+0.0299
+27 min
+283.1 MB
+(c)
+0.9646
+35.9617
+0.0160
+0.0205
+35 min
+240.7 MB
+(d)
+0.9645
+35.8903
+0.0161
+0.0150
+21 min
+265.2 MB
+(e) Ours
+0.9643
+35.8983
+0.0100
+0.0104
+16 min
+241.4 MB
+in Table III. In contrast, the full TIDI-GS model balances
+these forces: evidence-aware pruning removes truly isolated,
+low usage splats, detail guards retain high frequency content,
+and uncertainty-guided depth regularization suppresses nascent
+drift, yielding the robust and high fidelity reconstructions seen
+in Fig. 7.
+VI. D ISCUSSION AND C ONCLUSION
+We presented TIDI-GS, a training framework that addresses
+a central failure mode of 3D Gaussian Splatting in indoor
+environments: unsupported, semi-transparent floaters that
+degrade both visual quality and measurement fidelity. Our
+method combines a temporally accumulated evidence log
+with conservative detail-preserving guards, an isolationaware removal policy, and an uncertainty-guided monocular
+depth regularizer to effectively reduce these artifacts without
+requiring architectural changes or significant computational
+overhead. The success of this approach is rooted in its
+explicit optimization for indoor reconstructions, where the
+geometry is at a finite depth and richly constrained by
+multi-view overlaps. Our evidence-based pruning is highly
+effective because the concept of geometric support is welldefined, and the monocular depth prior is most reliable on
+the large, low-texture surfaces common indoors, allowing it
+to guide geometry without overregularizing complex, high-
+Metrics
+AbsRel↓
+δ1.25 ↑
+Added
+Pruned
+Gaussians
+(a)
+0.6283
+0.7142
+1,682,010
+64,929
+990,145
+(b)
+0.9033
+0.6353
+2,563,112
+1,472,282
+1,141,636
+(c)
+0.7373
+0.7192
+1,672,244
+752,540
+970,510
+(d)
+0.7395
+0.6699
+1,661,167
+643,269
+1,069,215
+(e) Ours
+0.6979
+0.6597
+1,678,696
+755,996
+973,506
+frequency details. This specialization for indoor scenes,
+however, also defines the framework’s primary limitation:
+scenes with unbounded depth, such as outdoor environments
+with distant horizons and sky domes, where our assumptions
+about evidence and depth reliability become less stable. We
+view this not as a flaw but as a deliberate scope choice, which
+in turn points toward straightforward future extensions such
+as incorporating dedicated background models to broaden the
+method’s applicability without sacrificing the simplicity of the
+current design. Other than improving rendering aesthetics, the
+practical outcome of TIDI-GS is the creation of more stable
+and geometrically reliable reconstructions. By aligning the
+3DGS training loop with multi-view evidence and geometric
+uncertainty, our work advances the methodology toward the
+generation of robust digital twins for indoor analysis and offers
+a principled and efficient template for future artifact-aware
+optimization in splat-based rendering.
+ACKNOWLEDGMENTS
+This work was supported by the National Research
+Foundation of Korea (NRF) grant funded by the Korea
+government (MSIT) (Grant No. RS-2022-NR067080 and RS2025-05515607).
+14
+R EFERENCES
+[1] B. Kerbl, G. Kopanas, T. Leimkühler, and G. Drettakis, “3d gaussian
+splatting for real-time radiance field rendering,” ACM Trans. Graph.,
+vol. 42, no. 4, 2023.
+[2] J. W. Lee, H. Lim, S. Yang, and J. B. Choi, “Micro-splatting:
+Multistage isotropy-informed covariance regularization optimization for
+high-fidelity 3d gaussian splatting,” arXiv preprint arXiv:2404.05740,
+2024.
+[3] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi,
+and R. Ng, “Nerf: Representing scenes as neural radiance fields for view
+synthesis,” in Proc. Eur. Conf. Comput. Vis. (ECCV), 2020.
+[4] T. Müller, A. Evans, C. Schied, and A. Keller, “Instant neural graphics
+primitives with a multiresolution hash encoding,” ACM Trans. Graph.,
+vol. 41, no. 4, 2022.
+[5] M. Zwicker, H. Pfister, J. van Baar, and M. Gross, “Surface splatting,”
+in Proc. ACM SIGGRAPH, 2001.
+[6] ——, “Ewa splatting,” IEEE Transactions on Visualization and
+Computer Graphics, vol. 8, no. 3, pp. 223–238, 2002.
+[7] S. Rusinkiewicz and M. Levoy, “Qsplat: A multiresolution point
+rendering system for large meshes,” in Proc. ACM SIGGRAPH, 2000.
+[8] H. Zhang, Y. Wang, T. Chen, and L. Van Gool, “Pixel-gs: Density control
+with pixel-aware gradient for 3d gaussian splatting,” in Proc. Eur. Conf.
+Comput. Vis. (ECCV), 2024.
+[9] K. Deng, A. Liu, J. T. Springenberg, and T. Brox, “Depth-supervised
+nerf: Fewer views and faster training for free,” in Proc. IEEE/CVF Conf.
+Comput. Vis. Pattern Recognit. (CVPR), 2022.
+[10] R. Ranftl, K. Lasinger, D. Hafner, K. Schindler, and V. Koltun, “Towards
+robust monocular depth estimation: Mixing datasets for zero-shot crossdataset transfer,” IEEE Trans. Pattern Anal. Mach. Intell., vol. 44, no. 1,
+pp. 382–397, 2022.
+[11] R. Ranftl, A. Bochkovskiy, and V. Koltun, “Vision transformers for dense
+prediction,” in Proc. IEEE/CVF Int. Conf. Comput. Vis. (ICCV), 2021.
+[12] L. Yang, B. Kang, Z. Huang, X. Xu, J. Feng, and H. Zhao, “Depth
+anything: Unleashing the power of large-scale unlabeled data,” in Proc.
+IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR), 2024.
+[13] L. Yang, B. Kang, Z. Huang, Z. Zhao, X. Xu, J. Feng, and H. Zhao,
+“Depth anything v2,” arXiv preprint arXiv:2406.09414, 2024.
+[14] A. Kendall, Y. Gal, and R. Cipolla, “Multi-task learning using
+uncertainty to weigh losses for scene geometry and semantics,” in Proc.
+IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR), 2018.
+[15] R. Zhang, P. Isola, A. A. Efros, E. Shechtman, and O. Wang, “The
+unreasonable effectiveness of deep features as a perceptual metric,” in
+Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR), 2018.
+[16] J. T. Barron, B. Mildenhall, M. Tancik, P. Hedman, R. Martin-Brualla,
+and P. P. Srinivasan, “Mip-nerf: A multiscale representation for antialiasing neural radiance fields,” in Adv. Neural Inf. Process. Syst.
+(NeurIPS), 2021.
+[17] D. Verbin, P. Hedman, B. Mildenhall, J. T. Barron, and P. P. Srinivasan,
+“Ref-nerf: Structured view-dependent appearance for neural radiance
+fields,” in Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit.
+(CVPR), 2022.
+[18] P. J. Huber, “Robust estimation of a location parameter,” Ann. Math.
+Statist., vol. 35, no. 1, pp. 73–101, 1964.
+[19] A. Knapitsch, J. Park, Q.-Y. Zhou, and V. Koltun, “Tanks and temples:
+Benchmarking large-scale scene reconstruction,” ACM Trans. Graph.,
+vol. 36, no. 4, 2017.
+[20] J. T. Barron, B. Mildenhall, D. Verbin, P. P. Srinivasan, and P. Hedman,
+“Mip-nerf 360: Unbounded anti-aliased neural radiance fields,” in Proc.
+IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR), 2022.
+[21] A. Krizhevsky, I. Sutsever, and G. E. Hinton, “Imagenet classification
+with deep convolutional neural networks,” in Adv. Neural Inf. Process.
+Syst. (NeurIPS), 2012.
+[22] Z. Zhang, T. Song, Y. Lee, L. Yang, C. Peng, R. Chellappa, and D. Fan,
+“Lp-3dgs: Learning to prune 3d gaussian splatting,” in Adv. Neural Inf.
+Process. Syst. (NeurIPS), 2024.
+[23] J. T. Barron, B. Mildenhall, D. Verbin, P. P. Srinivasan, and P. Hedman,
+“Zip-nerf: Anti-aliased grid-based neural radiance fields,” ICCV, 2023.
+[24] S. F. Bhat, R. Birkl, D. Wofk, P. Wonka, and M. Müller, “Zoedepth:
+Zero-shot transfer by combining relative and metric depth,” arXiv
+preprint arXiv:2302.12288, 2023.
+[25] A. Chen, Z. Xu, F. Ge et al., “Tensorf: Tensorial radiance fields,” in
+Proc. Eur. Conf. Comput. Vis. (ECCV), 2022.
+[26] Z. Chen, X. Li, Y. Zhang, K. Huang, and J. Wang, “Stablegs:
+A floater-free framework for 3d gaussian splatting,” arXiv preprint
+arXiv:2403.18458, 2024.
+[27] A. Dai, M. Nießner, M. Zollhöfer, S. Izadi, and C. Theobalt,
+“Bundlefusion: Real-time globally consistent 3d reconstruction using
+on-the-fly surface re-integration,” in ACM Trans. Graph. (SIGGRAPH),
+2017.
+[28] S. Fridovich-Keil, A. Yu, M. Tancik, Q. Yang, B. Mildenhall, and
+A. Kanazawa, “Plenoxels: Radiance fields without neural networks,” in
+Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR), 2022.
+[29] A. Guédon and V. Lepetit, “Extracting triangle meshes from 3d
+gaussians,” arXiv preprint arXiv:2403.17868, 2024.
+[30] ——, “Sugar: Surface-aligned gaussian splatting for efficient 3d mesh
+reconstruction and high-quality mesh rendering,” in Proc. IEEE/CVF
+Conf. Comput. Vis. Pattern Recognit. (CVPR), 2024.
+[31] M. Kazhdan and H. Hoppe, “Screened poisson surface reconstruction,”
+ACM Trans. Graph., vol. 32, no. 3, pp. 1–13, 2013.
+[32] J.-s. Lee, G.-w. Choe, M.-c. Park, S.-e. Lee, and M.-h. Kim, “Gsreg: 3d gaussian splatting with geometric regularization,” arXiv preprint
+arXiv:2404.14927, 2024.
+[33] R. A. Newcombe, S. Izadi, O. Hilliges, D. Molyneaux, D. Kim,
+A. J. Davison, P. Kohi, J. Shotton, S. Hodges, and A. Fitzgibbon,
+“Kinectfusion: Real-time dense surface reconstruction and interaction,”
+in ACM SIGGRAPH Asia, 2011.
+[34] J. L. Schönberger and J.-M. Frahm, “Structure-from-motion revisited,”
+in Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR), 2016.
+[35] L. Shao, L. Li, J. Liao, W. Zhang, Z. Zhang, H. Liu, and G. Wang,
+“Scaffold-gs: Structured 3d gaussians for view-adaptive rendering,”
+arXiv preprint arXiv:2403.16649, 2024.
+[36] C. Sun, M. Wang, B. Jiang, W. Chen, and J. Gao, “Direct voxel grid
+optimization: Super-fast convergence for radiance fields reconstruction,”
+in Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR), 2022.
+[37] M. Tancik, E. Reiser, B. Mildenhall et al., “Nerfstudio: A modular
+framework for neural radiance field development,” in SIGGRAPH Asia
+2023 Conference Papers, 2023.
+[38] P. Wang, L. Liu, Y. Liu, C. Theobalt, T. Komura, and W. Wang, “Neus:
+Learning neural implicit surfaces by volume rendering for multi-view
+reconstruction,” in Adv. Neural Inf. Process. Syst. (NeurIPS), 2021.
+[39] Y. Wang, J. Liu, K. Zhang, Z.-H. Chen, P. Yu, and L. Xu, “Lowfrequency first: Eliminating floating artifacts in 3d gaussian splatting,”
+arXiv preprint arXiv:2308.02493, 2023.
+[40] G. Wu, T. Yi, J. Fang, L. Xie, X. Zhang, W. Wei, W. Liu, Q. Tian, and
+X. Wang, “4d gaussian splatting for real-time dynamic scene rendering,”
+in Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR), 2024.
+[41] T. Wu, Z. Liu, Y. Xu, and Y. Wang, “Recent advances in 3d gaussian
+splatting,” Computational Visual Media, 2024.
+[42] A. Yu, R. Ye, M. Tancik et al., “Plenoctrees for real-time rendering
+of neural radiance fields,” in Proc. IEEE/CVF Int. Conf. Comput. Vis.
+(ICCV), 2021.
+[43] Z. Yu, A. Chen, B. Huang, T. Sattler, and A. Geiger, “Mip-splatting:
+Alias-free 3d gaussian splatting,” in Proc. IEEE/CVF Conf. Comput.
+Vis. Pattern Recognit. (CVPR), 2024.
+[44] Z. Zhu, S. Peng, V. Larsson, W. Xu, H. Bao, Z. Cui, and M. Pollefeys,
+“NICE-SLAM: Neural implicit scalable encoding for SLAM,” in Proc.
+IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR), 2022.
+15
+Sooyeun Yang received the BE degree in
+Mechanical Engineering from SUNY Korea, in
+2024. Since then, She has been working toward the
+Master degree with the Department of Mechanical
+Engineering, SUNY Korea. Her research focuses on
+Digital Twin, Vision Sensing and Control, Radiance
+Field Rendering, and 3D Reconstruction.
+Cheyul Im received the BE degree in Mechanical
+Engineering from The State University of New York
+(SUNY) Korea, in 2025. He has been working
+toward the Master degree with the Department of
+Mechanical Engineering, SUNY Korea. His research
+interest is Physics-Informed Machine Learning,
+Computer Vision, and Digital Twin.
+Jee Won Lee received her BE degree in Mechanical
+Engineering from The State University of New
+York (SUNY) Korea in 2021 and continued her her
+MS degree in Mechanical Engineering from SUNY
+Korea in 2025. She is currently working toward the
+Ph.D. degree with the Department of Mechanical
+Engineering, SUNY Korea. Her research interest is
+AI, Computer Vision, Embedded System, Degital
+Twin, and Deep Learning.
+Jongseong Brad Choi received the Ph.D. degree
+in Mechanical Engineering from Purdue University,
+West Lafayette, IN, USA, in 2020. He is currently
+an Assistant Professor with the Department of
+Mechanical Engineering at The State University
+of New York (SUNY) Korea and holds a joint
+appointment as a Research Assistant Professor at
+Stony Brook University, USA. Prior to this, he
+was a Postdoctoral Researcher at Argonne National
+Laboratory. He has authored and coauthored
+numerous journal and conference papers in leading
+venues across computer vision, visual analytics, digital twins, and structural
+health monitoring. He has served as an organizer, session chair, and committee
+member for multiple international conferences. His research interests include
+visual analytics, computer vision, digital twin technologies, and humanmachine collaborative systems for predictive engineering and infrastructure
+assessment.

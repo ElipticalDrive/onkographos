@@ -1,0 +1,152 @@
+# Volume Data Structure and Indexing
+
+Also called: IJK to RAS coordinate mapping, Volume class
+
+## Overview
+The Volume data structure stores 3D scalar data in a contiguous typed array while managing the coordinate transformation between voxel indices (IJK) and physical space (RAS) [S1, unofficial]. It solves the problem of efficiently accessing and mapping volumetric data for rendering by providing linear indexing formulas and spatial metadata [S1, unofficial]. It differs from sparse representations by using a dense grid layout where memory is allocated for the entire bounding box, regardless of data sparsity [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A typed array buffer (e.g., `Float32Array`, `Uint8Array`) containing voxel values, and dimensions $xLength$, $yLength$, $zLength$.
+*   **Output:** A `Volume` object instance providing access to data, coordinate transforms, and metadata.
+
+**Data Structures:**
+The `Volume` object contains the following fields [S1, unofficial]:
+*   `this.data`: The `TypedArray` holding the voxel values.
+*   `this.xLength`, `this.yLength`, `this.zLength`: Integer dimensions of the volume.
+*   `this.spacing`: Array of 3 numbers representing voxel size in physical units. Default: `[1, 1, 1]`.
+*   `this.offset`: Array of 3 numbers representing the physical origin. Default: `[0, 0, 0]`.
+*   `this.matrix`: A $3 \times 3$ matrix (identity by default) for coordinate rotation/scaling.
+*   `this.inverseMatrix`: The inverse of `this.matrix`.
+*   `this.segmentation`: Boolean flag, default `false`.
+*   `this.sliceList`: Array of `VolumeSlice` objects associated with this volume.
+*   `this.min`, `this.max`: Numbers representing the minimum and maximum values in the data.
+
+**Linear Indexing (IJK to Linear):**
+The data is stored in row-major order where the I index varies fastest, then J, then K [S1, unofficial]. The linear index $idx$ for voxel coordinates $(i, j, k)$ is calculated as [S1, unofficial]:
+
+$$
+idx = k \times xLength \times yLength + j \times xLength + i
+$$
+
+**Reverse Indexing (Linear to IJK):**
+Given a linear index $idx$, the voxel coordinates $(x, y, z)$ (corresponding to $i, j, k$) are derived as [S1, unofficial]:
+
+$$
+z = \lfloor idx / (yLength \times xLength) \rfloor
+$$
+
+$$
+y = \lfloor (idx - z \times yLength \times xLength) / xLength \rfloor
+$$
+
+$$
+x = idx - z \times yLength \times xLength - y \times xLength
+$$
+
+**Coordinate Transformation (IJK to RAS):**
+While specific matrix multiplication code is not detailed in the source, the `Volume` object manages the transformation between IJK (voxel index) and RAS (Right-Anterior-Superior, physical) spaces using `spacing`, `offset`, and the `matrix` [S1, unofficial].
+
+**Parameters:**
+*   `lowerThreshold`: Voxel values below this are excluded from slices. Default: `-Infinity`. Changing this sets `geometryNeedsUpdate = true` on all associated slices [S1, unofficial].
+*   `upperThreshold`: Voxel values above this are excluded from slices. Default: `Infinity`. Changing this sets `geometryNeedsUpdate = true` on all associated slices [S1, unofficial].
+
+**Pseudocode:**
+The following Python-like pseudocode implements the core indexing and validation logic described in the sources [S1, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+class Volume:
+    def __init__(self, data, x_length, y_length, z_length):
+        # Validate input size
+        expected_size = x_length * y_length * z_length
+        if len(data) != expected_size:
+            raise ValueError("Error in Volume constructor, lengths are not matching arrayBuffer size")
+        
+        # Check for unsupported types (JavaScript TypedArrays do not support 64-bit integers)
+        # [G] Assuming a helper function type_check exists to detect int64/uint64
+        if type_check(data) == 'int64' or type_check(data) == 'uint64':
+            raise ValueError("Error in Volume constructor : this type is not supported in JavaScript")
+
+        self.data = data
+        self.xLength = x_length
+        self.yLength = y_length
+        self.zLength = z_length
+        
+        # Default metadata
+        self.spacing = [1, 1, 1]
+        self.offset = [0, 0, 0]
+        self.matrix = IdentityMatrix3() # Placeholder for 3x3 identity
+        self.inverseMatrix = IdentityMatrix3()
+        self.segmentation = False
+        self.sliceList = []
+        
+        # Compute min/max ignoring NaN
+        self.min, self.max = compute_min_max(self.data)
+
+    def ijk_to_linear(self, i, j, k):
+        """
+        Convert IJK voxel indices to linear array index.
+        Assumes row-major storage: I varies fastest, then J, then K.
+        """
+        return k * self.xLength * self.yLength + j * self.xLength + i
+
+    def linear_to_ijk(self, index):
+        """
+        Convert linear array index to IJK voxel indices.
+        """
+        z = math.floor(index / (self.yLength * self.xLength))
+        y = math.floor((index - z * self.yLength * self.xLength) / self.xLength)
+        x = index - z * self.yLength * self.xLength - y * self.xLength
+        return x, y, z
+
+    def map_voxels(self, callback):
+        """
+        Apply a callback function to every voxel in place.
+        """
+        for idx in range(len(self.data)):
+            self.data[idx] = callback(self.data[idx], idx)
+
+def compute_min_max(data):
+    """
+    Compute min and max values, ignoring NaN.
+    """
+    min_val = float('inf')
+    max_val = float('-inf')
+    
+    for val in data:
+        if val != val: # Check for NaN (NaN != NaN is True)
+            continue
+        if val < min_val:
+            min_val = val
+        if val > max_val:
+            max_val = val
+            
+    # Handle case where all values are NaN
+    if min_val == float('inf'):
+        return 0, 0
+        
+    return min_val, max_val
+```
+
+**Edge Cases and Pitfalls:**
+*   **Buffer Size Mismatch:** If the input `arrayBuffer` size does not match `xLength * yLength * zLength`, an error is thrown: 'Error in Volume constructor, lengths are not matching arrayBuffer size' [S1, unofficial].
+*   **Unsupported Data Types:** JavaScript TypedArrays do not support 64-bit integers (`int64`/`uint64`). If the volume type is detected as such, an error is thrown: 'Error in Volume constructor : this type is not supported in JavaScript' [S1, unofficial].
+*   **NaN Handling:** Min/Max calculations must explicitly ignore `NaN` values [S1, unofficial].
+
+## Operating characteristics
+*   **Memory Complexity:** $O(N)$ where $N = xLength \times yLength \times zLength$. The entire volume is stored in a contiguous typed array.
+*   **Time Complexity:** Indexing is $O(1)$. Computing min/max is $O(N)$.
+*   **Strengths:** Simple, cache-friendly linear access pattern for dense data. Direct mapping between voxel coordinates and memory offsets.
+*   **Limitations:** High memory usage for large volumes, even if sparse. Not suitable for very large datasets with low fill factors compared to sparse structures.
+*   **When to use:** Dense volumetric data where random access to any voxel is required and memory is sufficient.
+*   **When not to use:** Sparse volumes where memory efficiency is critical.
+
+## Background
+The `Volume` class and its associated indexing scheme are part of the `webgl_volume_demo` project by PeterC-DLS [S1, unofficial]. It provides a foundational data structure for WebGL-based volume rendering, handling the mapping between logical voxel indices and physical coordinates.
+
+## Sources
+[S1] PeterC-DLS/webgl_volume_demo, https://github.com/PeterC-DLS/webgl_volume_demo, fetched 2026-10-27 (unofficial)

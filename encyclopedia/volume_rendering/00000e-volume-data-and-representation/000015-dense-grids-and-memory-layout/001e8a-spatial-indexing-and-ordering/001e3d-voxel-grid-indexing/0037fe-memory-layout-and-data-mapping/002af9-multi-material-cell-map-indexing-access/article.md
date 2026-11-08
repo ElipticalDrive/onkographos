@@ -3,213 +3,156 @@
 Also called: 3D Grid to 1D Array Mapping, MMCellMap
 
 ## Overview
-Multi-Material Cell Map Indexing & Access provides the fundamental data structure and accessor logic for representing multi-material volumetric data in a contiguous 1D memory layout. It solves the problem of efficiently mapping 3D voxel coordinates to linear array indices and retrieving associated cell properties (flags, labels, and vertex offsets) required for surface reconstruction algorithms like SurfaceNets. It differs from [3D Texture Representation](2393-3d-texture-representation-cpu-gpu-indexing.md) by explicitly managing per-cell vertex offsets for sub-voxel precision, and from [Spatial Hashing](5002-spatial-hashing.md) by using a dense, contiguous array rather than a sparse hash map.
+Multi-Material Cell Map (MMCellMap) indexing is a memory layout and access pattern used in multi-material surface reconstruction (specifically SurfaceNets) to map 3D voxel grid coordinates to a contiguous 1D array of cell descriptors. It solves the problem of efficiently retrieving cell metadata (flags, material labels, and vertex offsets) required for generating surface geometry from multi-material volumetric data. It differs from standard volume rendering indexing by including per-cell vertex offset vectors and material flags, rather than just scalar density or color values, and is tightly coupled with the neighbor access logic required for surface net relaxation [S1, unofficial].
 
 ## How it works
 ### Inputs and Outputs
-- **Input**: 3D grid dimensions $(N_x, N_y, N_z)$, voxel physical size $(v_x, v_y, v_z)$, and raw material data (labels).
-- **Output**: A contiguous 1D array `m_cellArray` where each element represents a cell with associated metadata.
+*   **Input**: 3D grid dimensions $N_x, N_y, N_z$ (stored as `m_arraySize[0]`, `m_arraySize[1]`, `m_arraySize[2]`), and a linear index $idx$ or voxel coordinates $(i, j, k)$.
+*   **Output**: A pointer or reference to a `Cell` structure in the contiguous `m_cellArray`, or the linear index of a neighbor cell.
 
 ### Data Structures
-The core structure is `MMCellMap`. It maintains a contiguous 1D array `m_cellArray` of size $N_x \times N_y \times N_z$. Each element in this array is a cell object containing:
-1.  `flag`: An integer or bitfield used to determine edge crossing or vertex type during surface extraction.
-2.  `label`: The material ID (e.g., `unsigned short` as per source [S1, unofficial]).
-3.  `vertexOffset`: A 3D float vector $(o_x, o_y, o_z)$ representing the sub-voxel displacement of the vertex from the cell's grid corner.
-
-The grid dimensions are stored in `m_arraySize[3]`, where `m_arraySize[0]` is $N_x$, `m_arraySize[1]` is $N_y$, and `m_arraySize[2]` is $N_z$. The physical voxel size is stored in `m_voxelSize[3]`.
+The core data structure is a contiguous 1D array `m_cellArray` of type `Cell`. Each `Cell` element contains:
+1.  `flag`: An integer or unsigned short used to determine edge crossings or vertex types.
+2.  `label`: An integer representing the Material ID (MID).
+3.  `vertexOffset`: A 3D vector of floats (`float[3]`) representing the offset of the vertex relative to the cell's grid position.
 
 ### Indexing Formulas
-The mapping from 3D voxel coordinates $(i, j, k)$ to a 1D linear array index is performed using row-major ordering [S1, unofficial]:
+The mapping from 3D voxel coordinates $(i, j, k)$ to the 1D linear index $idx$ uses row-major ordering, where $i$ is the fastest-varying dimension (x-axis), $j$ is the middle (y-axis), and $k$ is the slowest (z-axis) [S1, unofficial].
 
 $$
-\text{cellArrayIndex}(i, j, k) = i + N_x \cdot j + N_x \cdot N_y \cdot k
+idx(i, j, k) = i + N_x \cdot j + N_x \cdot N_y \cdot k
 $$
 
-where $0 \le i < N_x$, $0 \le j < N_y$, and $0 \le k < N_z$.
+Where:
+*   $i \in [0, N_x - 1]$
+*   $j \in [0, N_y - 1]$
+*   $k \in [0, N_z - 1]$
+*   $N_x = \text{m\_arraySize}[0]$
+*   $N_y = \text{m\_arraySize}[1]$
 
-The 3D world position of a vertex associated with a cell is computed from the cell's grid index and its stored vertex offset [S1, unofficial]:
-
+Conversely, given a linear index $idx$, the coordinates are derived as:
 $$
-\text{position}[x] = v_x \cdot (i + o_x)
+k = \lfloor idx / (N_x \cdot N_y) \rfloor
 $$
-
 $$
-\text{position}[y] = v_y \cdot (j + o_y)
+j = \lfloor (idx \pmod{N_x \cdot N_y}) / N_x \rfloor
 $$
-
 $$
-\text{position}[z] = v_z \cdot (k + o_z)
+i = idx \pmod{N_x}
 $$
-
-for $x, y, z \in \{0, 1, 2\}$, where $(i, j, k)$ are the integer grid coordinates of the cell, $(o_x, o_y, o_z)$ are the components of `vertexOffset`, and $(v_x, v_y, v_z)$ are the components of `m_voxelSize`.
 
 ### Neighbor Access
-To access face neighbors, the method computes the 1D index of the neighbor based on the current cell index and the face direction [S1, unofficial]. The directions are defined as:
--   `LeftFace`: $-1$ in x-direction.
--   `RightFace`: $+1$ in x-direction.
--   `BackFace`: $-1$ in y-direction.
--   `FrontFace`: $+1$ in y-direction.
--   `BottomFace`: $-1$ in z-direction.
--   `TopFace`: $+1$ in z-direction.
+The method provides specific logic to compute the linear index of face-adjacent neighbors. Let $idx_{curr}$ be the current cell's linear index. The neighbor indices are calculated as follows [S1, unofficial]:
 
-The 1D index calculation for a neighbor in direction $d$ from current index $idx$ is:
+*   **Left Face** ($-x$): $idx_{left} = idx_{curr} - 1$
+*   **Right Face** ($+x$): $idx_{right} = idx_{curr} + 1$
+*   **Back Face** ($-y$): $idx_{back} = idx_{curr} - N_x$
+*   **Front Face** ($+y$): $idx_{front} = idx_{curr} + N_x$
+*   **Bottom Face** ($-z$): $idx_{bottom} = idx_{curr} - (N_x \cdot N_y)$
+*   **Top Face** ($+z$): $idx_{top} = idx_{curr} + (N_x \cdot N_y)$
 
-$$
-\text{neighborIndex} = idx + \Delta_d
-$$
-
-where $\Delta_d$ is:
--   $-1$ for `LeftFace`
--   $+1$ for `RightFace`
--   $-N_x$ for `BackFace`
--   $+N_x$ for `FrontFace`
--   $-N_x \cdot N_y$ for `BottomFace`
--   $+N_x \cdot N_y$ for `TopFace`
-
-The 3D coordinates of the neighbor are derived by adjusting the corresponding axis of the current cell's coordinates [S1, unofficial].
+To retrieve the 3D coordinates of a neighbor, the linear index is converted back to $(i, j, k)$, and the corresponding axis is incremented or decremented by 1.
 
 ### Corner Vertex Label Retrieval
-For flag computation (e.g., in SurfaceNets), the 8 corner vertices of a cell are retrieved in a fixed order. Let `labels` be an array of 8 material IDs. The indices into the `m_cellArray` for the corners of a cell at $(i, j, k)$ are computed relative to the current cell's index [S1, unofficial]:
+For flag computation, the 8 corner vertices of a cell are accessed in a fixed order. Let $m_x = N_x$ and $m_y = N_y$. The linear indices of the 8 corners relative to the current cell's base index are [S1, unofficial]:
 
-1.  `labels[0]`: Current cell $(i, j, k)$.
-2.  `labels[1]`: $(i+1, j, k)$
-3.  `labels[2]`: $(i+1, j+1, k)$
-4.  `labels[3]`: $(i, j+1, k)$
-5.  `labels[4]`: $(i, j, k+1)$
-6.  `labels[5]`: $(i+1, j, k+1)$
-7.  `labels[6]`: $(i+1, j+1, k+1)$
-8.  `labels[7]`: $(i, j+1, k+1)$
+1.  `labels[0]`: Current cell index (offset 0)
+2.  `labels[1]`: Current cell + 1 ($+x$)
+3.  `labels[2]`: Current cell + $1 + m_x$ ($+x, +y$)
+4.  `labels[3]`: Current cell + $m_x$ ($+y$)
+5.  `labels[4]`: Current cell + $m_x \cdot m_y$ ($+z$)
+6.  `labels[5]`: Current cell + $1 + m_x \cdot m_y$ ($+x, +z$)
+7.  `labels[6]`: Current cell + $1 + m_x + m_x \cdot m_y$ ($+x, +y, +z$)
+8.  `labels[7]`: Current cell + $m_x + m_x \cdot m_y$ ($+y, +z$)
 
-The linear indices for these corners are calculated using the row-major formula above.
+### World Position Calculation
+The physical world position of a vertex is derived from the cell index and the stored vertex offset. For a cell at linear index $idx$, let $(c_x, c_y, c_z)$ be its voxel coordinates. The world position $P$ is [S1, unofficial]:
+
+$$
+P[x] = \text{voxelSize}[x] \cdot (c_x + \text{vertexOffset}[x]) \quad \text{for } x \in \{0, 1, 2\}
+$$
+
+Where `voxelSize` is the physical dimension of a single voxel.
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-class MMCellMap:
-    def __init__(self, array_size, voxel_size):
-        """
-        Initialize the cell map.
-        :param array_size: Tuple (Nx, Ny, Nz)
-        :param voxel_size: Tuple (vx, vy, vz)
-        """
-        self.Nx = array_size[0]
-        self.Ny = array_size[1]
-        self.Nz = array_size[2]
-        self.vx = voxel_size[0]
-        self.vy = voxel_size[1]
-        self.vz = voxel_size[2]
-        
-        # Contiguous 1D array of cells
-        # Each cell is a dict or object with 'flag', 'label', 'vertexOffset'
-        self.m_cellArray = [None] * (self.Nx * self.Ny * self.Nz)
+def get_cell_index(i, j, k, nx, ny):
+    """
+    Maps 3D voxel coordinates to a 1D linear index.
+    """
+    return i + nx * j + nx * ny * k
 
-    def index_3d_to_1d(self, i, j, k):
-        """
-        Map 3D coordinates to 1D array index.
-        """
-        return i + self.Nx * j + self.Nx * self.Ny * k
+def get_cell_coordinates(idx, nx, ny):
+    """
+    Maps a 1D linear index back to 3D voxel coordinates.
+    """
+    k = idx // (nx * ny)
+    remainder = idx % (nx * ny)
+    j = remainder // nx
+    i = remainder % nx
+    return (i, j, k)
 
-    def get_cell(self, i, j, k):
-        """
-        Retrieve a cell. Caller must perform bounds checking.
-        """
-        idx = self.index_3d_to_1d(i, j, k)
-        return self.m_cellArray[idx]
+def get_neighbor_index(idx, nx, ny, face_direction):
+    """
+    Computes the linear index of a face neighbor.
+    face_direction: 'left', 'right', 'back', 'front', 'bottom', 'top'
+    """
+    if face_direction == 'left':
+        return idx - 1
+    elif face_direction == 'right':
+        return idx + 1
+    elif face_direction == 'back':
+        return idx - nx
+    elif face_direction == 'front':
+        return idx + nx
+    elif face_direction == 'bottom':
+        return idx - (nx * ny)
+    elif face_direction == 'top':
+        return idx + (nx * ny)
+    else:
+        raise ValueError("Invalid face direction")
 
-    def get_neighbor_1d_index(self, current_idx, face_direction):
-        """
-        Compute 1D index of a face neighbor.
-        :param current_idx: 1D index of current cell
-        :param face_direction: Enum or int representing direction
-        :return: 1D index of neighbor
-        """
-        if face_direction == 'LeftFace':
-            return current_idx - 1
-        elif face_direction == 'RightFace':
-            return current_idx + 1
-        elif face_direction == 'BackFace':
-            return current_idx - self.Nx
-        elif face_direction == 'FrontFace':
-            return current_idx + self.Nx
-        elif face_direction == 'BottomFace':
-            return current_idx - self.Nx * self.Ny
-        elif face_direction == 'TopFace':
-            return current_idx + self.Nx * self.Ny
-        else:
-            raise ValueError("Invalid face direction")
+def get_corner_labels(base_idx, nx, ny):
+    """
+    Returns the linear indices of the 8 corner vertices of a cell.
+    """
+    labels = [
+        base_idx,
+        base_idx + 1,
+        base_idx + 1 + nx,
+        base_idx + nx,
+        base_idx + nx * ny,
+        base_idx + 1 + nx * ny,
+        base_idx + 1 + nx + nx * ny,
+        base_idx + nx + nx * ny
+    ]
+    return labels
 
-    def get_neighbor_3d_coords(self, i, j, k, face_direction):
-        """
-        Compute 3D coordinates of a face neighbor.
-        """
-        ni, nj, nk = i, j, k
-        if face_direction == 'LeftFace':
-            ni -= 1
-        elif face_direction == 'RightFace':
-            ni += 1
-        elif face_direction == 'BackFace':
-            nj -= 1
-        elif face_direction == 'FrontFace':
-            nj += 1
-        elif face_direction == 'BottomFace':
-            nk -= 1
-        elif face_direction == 'TopFace':
-            nk += 1
-        return (ni, nj, nk)
-
-    def get_vertex_position(self, i, j, k, vertex_offset):
-        """
-        Compute world position of a vertex.
-        :param i, j, k: Grid coordinates of the cell
-        :param vertex_offset: Tuple (ox, oy, oz)
-        :return: Tuple (x, y, z) world position
-        """
-        ox, oy, oz = vertex_offset
-        x = self.vx * (i + ox)
-        y = self.vy * (j + oy)
-        z = self.vz * (k + oz)
-        return (x, y, z)
-
-    def get_corner_labels(self, i, j, k):
-        """
-        Retrieve labels for the 8 corners of a cell in fixed order.
-        """
-        # Indices relative to current cell (i, j, k)
-        # Order: 0:(i,j,k), 1:(i+1,j,k), 2:(i+1,j+1,k), 3:(i,j+1,k)
-        #        4:(i,j,k+1), 5:(i+1,j,k+1), 6:(i+1,j+1,k+1), 7:(i,j+1,k+1)
-        corners = [
-            (i, j, k),
-            (i + 1, j, k),
-            (i + 1, j + 1, k),
-            (i, j + 1, k),
-            (i, j, k + 1),
-            (i + 1, j, k + 1),
-            (i + 1, j + 1, k + 1),
-            (i, j + 1, k + 1)
-        ]
-        labels = []
-        for (ci, cj, ck) in corners:
-            idx = self.index_3d_to_1d(ci, cj, ck)
-            cell = self.m_cellArray[idx]
-            labels.append(cell.label)
-        return labels
+def get_world_position(cell_idx, nx, ny, voxel_size, vertex_offset):
+    """
+    Computes the world position of a vertex given its cell index and offset.
+    """
+    i, j, k = get_cell_coordinates(cell_idx, nx, ny)
+    x = voxel_size[0] * (i + vertex_offset[0])
+    y = voxel_size[1] * (j + vertex_offset[1])
+    z = voxel_size[2] * (k + vertex_offset[2])
+    return (x, y, z)
 ```
 
-### Edge Cases and Pitfalls
--   **Bounds Checking**: The accessor methods assume the caller performs bounds checking before accessing cells or vertices. No internal clamping or boundary validation is implemented in `getCell` or neighbor calculations [S1, unofficial]. Accessing out-of-bounds indices will result in undefined behavior or memory errors.
--   **Precision**: Vertex positions are computed using floating-point arithmetic. Precision issues may arise for very large grid dimensions or very small voxel sizes.
--   **Degenerate Input**: If `m_arraySize` contains zeros, the index calculation will fail or produce incorrect results.
+### Parameters and Edge Cases
+*   **Bounds Checking**: The accessor methods assume the caller performs bounds checking. No internal clamping or boundary validation is implemented for `getCell` or neighbor calculations [S1, unofficial]. Accessing neighbors of boundary cells (e.g., `left` of $i=0$) will result in invalid indices or out-of-bounds memory access if not handled by the caller.
+*   **Precision**: Vertex offsets are stored as floats. World position calculations rely on floating-point arithmetic, which may introduce minor precision errors in large grids.
 
 ## Operating characteristics
--   **Time Complexity**: Indexing is $O(1)$. Neighbor access is $O(1)$.
--   **Memory Complexity**: $O(N_x \cdot N_y \cdot N_z)$ for the contiguous array. Each cell stores a flag, a label, and a 3D float offset.
--   **Performance**: Contiguous memory layout ensures cache-friendly access patterns for sequential traversal. Random access is efficient due to direct indexing.
--   **Strengths**: Simple implementation, low overhead, cache-efficient.
--   **Limitations**: Dense storage requires significant memory for large grids. No support for sparse data without padding. Boundary conditions must be handled by the caller.
+*   **Time Complexity**: Indexing and neighbor access are $O(1)$ arithmetic operations.
+*   **Memory Complexity**: $O(N_x \cdot N_y \cdot N_z)$ for the contiguous cell array. Each cell stores a flag, a label, and a 3-float offset.
+*   **Strengths**: Extremely fast neighbor traversal and coordinate conversion due to simple arithmetic and contiguous memory layout. Ideal for algorithms requiring frequent access to local cell neighborhoods, such as surface net relaxation.
+*   **Limitations**: No built-in boundary checks; the caller must manage grid boundaries. The fixed 8-corner labeling scheme is specific to the SurfaceNet algorithm and may not generalize to other voxel-based methods without modification.
 
 ## Background
-The Multi-Material Cell Map is used in the SurfaceNets algorithm for multi-material volume rendering. It was implemented in the `sarahfrisken/surfaceNets-multi-material` repository [S1, unofficial]. The approach maps 3D voxel data to a 1D array to facilitate efficient surface extraction and rendering.
+The Multi-Material Cell Map indexing scheme originates from the SurfaceNets algorithm for multi-material surface reconstruction. It was implemented in the `sarahfrisken/surfaceNets-multi-material` repository, which extends the original SurfaceNets method to handle multiple materials within a single volume [S1, unofficial]. The method is used in medical imaging and scientific visualization contexts where multi-material boundaries need to be extracted from volumetric data.
 
 ## Sources
 [S1] sarahfrisken/surfaceNets-multi-material, https://github.com/sarahfrisken/surfaceNets-multi-material, fetched 2026-10-27 (unofficial)

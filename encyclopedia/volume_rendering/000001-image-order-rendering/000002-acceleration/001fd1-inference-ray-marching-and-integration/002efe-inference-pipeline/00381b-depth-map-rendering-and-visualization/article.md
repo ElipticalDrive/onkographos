@@ -1,0 +1,196 @@
+# Depth Map Rendering and Visualization
+
+
+## Overview
+This method renders a set of camera views from a trained dense point cloud (specifically 3D Gaussians) and generates visualization outputs including color images, depth maps, and colored depth maps [S1, unofficial]. It distinguishes itself by explicitly handling the "near-camera" artifact problem through point pruning before rendering, ensuring that depth values are physically meaningful for downstream tasks like video generation or multi-view consistency checks [S1, unofficial].
+
+## How it works
+**Inputs:**
+- A trained Gaussian model (`gaussians`) containing 3D positions (`xyz`), opacities, and spherical harmonics coefficients.
+- A list of camera viewpoints (`view`), each containing intrinsic parameters, extrinsic pose, and a `camera_center` position.
+- A `near` distance threshold parameter defining the pruning radius.
+- A background color tensor (`background`).
+- A rendering pipeline (`pipeline`) and renderer function (`render`).
+
+**Outputs:**
+- Directory structure containing rendered PNGs:
+  - `{idx:05d}.png`: Color image.
+  - `depth_{idx:05d}.png`: Inverted normalized depth map.
+  - `cdepth_{idx:05d}.png`: Colored depth map using the 'turbo' colormap.
+- Video files for each sequence.
+
+**Data Structures:**
+- `gaussians.get_xyz`: Tensor of shape $(N, 3)$ containing the 3D coordinates of all $N$ Gaussians.
+- `mask_near`: Boolean tensor of shape $(N, 1)$ indicating points within the `near` distance of any processed camera.
+
+**Parameters:**
+- `near`: Float. The Euclidean distance threshold below which points are considered "too close" to the camera and are pruned. [S1, unofficial]
+- `bg_color`: Float tensor $[R, G, B]$. Default is $[1, 1, 1]$ for white background or $[0, 0, 0]$ for black. [S1, unofficial]
+
+**Steps:**
+
+1.  **Initialize Output Directory:**
+    Create a directory at `render_path = os.path.join(model_path, name, "ours_{}".format(iteration))` [S1, unofficial].
+
+2.  **Prune Near-Camera Points:**
+    To prevent depth artifacts caused by Gaussians overlapping the camera center, identify and remove points within the `near` distance.
+    -   Initialize `mask_near` as `None`.
+    -   For each view in the render set:
+        -   Compute the distance from each Gaussian to the camera center:
+            $$ d_i = \| \mathbf{p}_i - \mathbf{c}_{view} \|_2 $$
+            where $\mathbf{p}_i$ is the $i$-th Gaussian's position and $\mathbf{c}_{view}$ is the camera center.
+        -   Create a temporary mask:
+            $$ \text{mask\_temp}_i = (d_i < \text{near}) $$
+        -   Accumulate the mask across all views to identify points that are too close to *any* camera in the set:
+            $$ \text{mask\_near} = \text{mask\_near} \lor \text{mask\_temp} $$
+            (If `mask_near` is `None`, initialize it with `mask_temp`) [S1, unofficial].
+    -   Call `gaussians.prune_points_inference(mask_near)` to remove these points from the model [S1, unofficial].
+
+3.  **Render Views:**
+    For each view in the render set (indexed by `idx`):
+    -   Perform rendering in inference mode (no gradients):
+        $$ \text{render\_pkg} = \text{render}(\text{view}, \text{gaussians}, \text{pipeline}, \text{background}, \text{inference}=\text{True}) $$
+    -   Extract the raw depth map $D_{raw}$ and alpha map $\alpha$ from `render_pkg` [S1, unofficial].
+
+4.  **Normalize and Compute Depth:**
+    Compute the normalized depth map $D_{norm}$ using the following formula [S1, unofficial]:
+    $$ D_{norm} = \frac{D_{raw} - \min(D_{raw})}{\max(D_{raw}) - \min(D_{raw})} + 1 \cdot (1 - \alpha) $$
+    *Note:* This formula normalizes the depth to $[0, 1]$ for visible pixels and sets the background (where $\alpha \approx 0$) to 1.0.
+
+5.  **Save Color Image:**
+    Save the `render_pkg["render"]` tensor as a PNG file named `{idx:05d}.png` [S1, unofficial].
+
+6.  **Save Inverted Depth Map:**
+    Compute the inverted depth for visualization (closer objects appear brighter):
+    $$ D_{inv} = 1 - D_{norm} $$
+    Save $D_{inv}$ as `depth_{idx:05d}.png` [S1, unofficial].
+
+7.  **Generate Colored Depth Map:**
+    -   Convert $D_{norm}$ to a NumPy array: $D_{np} = D_{norm}.\text{squeeze}().\text{cpu}().\text{numpy}()$.
+    -   Define a logarithmic curve function for non-linear depth visualization:
+        $$ f(x) = -\ln(x + \epsilon) $$
+        where $\epsilon = \text{np.finfo}(\text{np.float32}).\text{eps}$ [S1, unofficial].
+    -   Apply the colormap (e.g., 'turbo') using the curve function:
+        $$ D_{colored} = \text{visualize\_cmap}(D_{np}, \mathbf{1}, \text{cmap}=\text{'turbo'}, \text{curve\_fn}=f) $$
+        where $\mathbf{1}$ is an array of ones (used as the alpha channel for the colormap function).
+    -   Convert back to tensor, permute to $(C, H, W)$, and save as `cdepth_{idx:05d}.png` [S1, unofficial].
+
+8.  **Create Videos:**
+    Use `ffmpeg` to concatenate the sequence of color, depth, and colored depth images into video files [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import os
+import numpy as np
+import torch
+import torchvision.utils
+import matplotlib.cm as cm
+
+def depth_map_rendering(gaussians, views, near, render_path, render_fn, background):
+    """
+    Renders views, prunes near-camera points, and saves depth visualizations.
+    """
+    # Step 1: Initialize Output Directory
+    os.makedirs(render_path, exist_ok=True)
+
+    # Step 2: Prune Near-Camera Points
+    # Accumulate mask for points near ANY camera in the set
+    mask_near = None
+    for view in views:
+        # Get camera center (shape: [1, 3]) and Gaussians positions (shape: [N, 3])
+        cam_center = view.camera_center.unsqueeze(0) # Ensure broadcastable
+        gaussians_xyz = gaussians.get_xyz # Shape: [N, 3]
+        
+        # Compute Euclidean distance for each Gaussian to the camera center
+        # diff shape: [N, 3], norm shape: [N, 1]
+        diff = gaussians_xyz - cam_center.repeat(gaussians_xyz.shape[0], 1)
+        dists = torch.norm(diff, dim=1, keepdim=True)
+        
+        # Create mask for points closer than 'near'
+        mask_temp = dists < near
+        
+        # Accumulate mask
+        if mask_near is None:
+            mask_near = mask_temp
+        else:
+            mask_near = mask_near | mask_temp
+            
+    # Prune points that are too close to any camera
+    if mask_near is not None:
+        gaussians.prune_points_inference(mask_near)
+
+    # Step 3-7: Render and Save for each view
+    for idx, view in enumerate(views):
+        # Render with no gradients
+        with torch.no_grad():
+            render_pkg = render_fn(view, gaussians, pipeline=None, background=background, inference=True)
+            
+        # Extract raw depth and alpha
+        depth_raw = render_pkg['depth']
+        alpha = render_pkg['alpha']
+        rendering = render_pkg['render']
+        
+        # Normalize depth
+        # Handle case where max == min to avoid division by zero
+        d_min = depth_raw.min()
+        d_max = depth_raw.max()
+        if d_max - d_min == 0:
+            depth_norm = torch.zeros_like(depth_raw)
+        else:
+            depth_norm = (depth_raw - d_min) / (d_max - d_min)
+            
+        # Add background term: 1 * (1 - alpha)
+        # This sets background pixels (alpha ~ 0) to depth value 1.0
+        depth_norm = depth_norm + 1.0 * (1.0 - alpha)
+        
+        # Save Color Image
+        torchvision.utils.save_image(rendering, os.path.join(render_path, f'{idx:05d}.png'))
+        
+        # Save Inverted Depth Map
+        depth_inv = 1.0 - depth_norm
+        torchvision.utils.save_image(depth_inv, os.path.join(render_path, f'depth_{idx:05d}.png'))
+        
+        # Generate Colored Depth Map
+        depth_np = depth_norm.squeeze().cpu().numpy()
+        
+        # Define log curve function
+        eps = np.finfo(np.float32).eps
+        depth_curve_fn = lambda x: -np.log(x + eps)
+        
+        # Visualize colormap
+        # Assuming visualize_cmap takes (data, alpha_channel, colormap, curve_fn)
+        # Note: The source passes np.ones_like(depth_est) as the second argument, 
+        # likely representing an alpha mask or intensity map for the colormap.
+        depth_est = visualize_cmap(depth_np, np.ones_like(depth_np), cm.get_cmap('turbo'), curve_fn=depth_curve_fn).copy()
+        
+        # Convert to tensor and save
+        depth_est_tensor = torch.as_tensor(depth_est).permute(2, 0, 1)
+        torchvision.utils.save_image(depth_est_tensor, os.path.join(render_path, f'cdepth_{idx:05d}.png'))
+
+    # Step 8: Create Videos (Implementation detail depends on ffmpeg wrapper)
+    # create_video(render_path, 'render')
+    # create_video(render_path, 'depth')
+    # create_video(render_path, 'cdepth')
+```
+
+**Edge Cases and Pitfalls:**
+-   **Division by Zero:** If all depth values in a view are identical, `d_max - d_min` is zero. The pseudocode includes a guard for this [G].
+-   **Mask Accumulation:** The mask is accumulated across *all* views in the set. This means a point is pruned if it is near *any* camera, not just the current one being rendered. This is intentional to clean the model for the entire dataset [S1, unofficial].
+-   **Depth Normalization:** The normalization is per-view (`min` and `max` are computed from `render_pkg['depth']` for that specific view). This means depth values are relative to the scene's depth range in that specific view, not absolute world coordinates [S1, unofficial].
+-   **Background Handling:** The formula `+ 1 * (1 - alpha)` forces background pixels to depth value 1.0. This is consistent with the inverted depth saving (`1 - depth`), where background becomes 0.0. Ensure the colormap function handles the value 1.0 correctly if it expects normalized inputs [S1, unofficial].
+
+## Operating characteristics
+-   **Time Complexity:** Dominated by the rendering step for each view. Pruning is $O(N \cdot V)$ where $N$ is the number of Gaussians and $V$ is the number of views.
+-   **Memory Complexity:** Requires storing the Gaussian model and temporary masks. The mask accumulation requires $O(N)$ memory.
+-   **Strengths:** Effectively removes near-camera artifacts that cause depth discontinuities. Generates standardized outputs for evaluation and visualization.
+-   **Limitations:** Pruning is irreversible. The depth normalization is relative, not absolute, which may complicate fusion with other depth sources.
+-   **When to use:** When generating evaluation metrics, visualizations, or video sequences from a fixed Gaussian model. Not suitable for interactive applications where the model must remain intact.
+
+## Background
+This method is part of the inference pipeline for 3D Gaussian Splatting variants, specifically as implemented in the DNGaussian repository [S1, unofficial]. It addresses the need for clean, artifact-free depth maps for downstream tasks such as novel view synthesis evaluation and video generation. The near-camera pruning technique is a common heuristic in point-based rendering to avoid singularities when the camera intersects the point cloud [S1, unofficial].
+
+## Sources
+[S1] Fictionarry/DNGaussian, https://github.com/Fictionarry/DNGaussian, fetched 2026-10-27 (unofficial)
