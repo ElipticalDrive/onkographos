@@ -28,25 +28,25 @@ The Sparse AABB Collision Test determines whether an Axis-Aligned Bounding Box (
 - `colHeight`, `colRelief`: Arrays of floats indexed by column index, caching terrain height and relief values [S1, unofficial].
 
 **Steps:**
-1. **Validation**: Check if `aabb.min` or `aabb.max` contains non-finite values (NaN or Inf). If so, return immediately with `blocked = true` and status `UnknownBlockedVolume` [S1, unofficial].
-2. **Voxel Range Calculation**: Convert `aabb.min` and `aabb.max` to voxel indices `minX, minY, minZ` and `maxX, maxY, maxZ` using `TryBuildVoxelRange`. This helper uses `nextafter` on the max coordinates to handle floating-point precision boundaries correctly [S1, unofficial].
-3. **Sample Limit Check**: Calculate the total number of voxels: $N = (maxX - minX + 1) \times (maxY - minY + 1) \times (maxZ - minZ + 1)$. If $N > kMaxCollisionVolumeSamples$ (where $kMaxCollisionVolumeSamples = 32768$), return immediately with `blocked = true` and status `UnknownBlockedVolume` [S1, unofficial].
-4. **Column Cache Initialization**: Determine the XZ footprint of the AABB. For each column $(x, z)$ in the footprint, precompute and store the terrain height and relief in `colHeight` and `colRelief` arrays. This collapses the noise evaluation cost from $O(voxels)$ to $O(columns)$ [S1, unofficial].
+1. **Validation**: Check if `aabb.min` or `aabb.max` contains non-finite values (NaN or Inf) [S1, unofficial]. If so, return immediately with `blocked = true` and status `UnknownBlockedVolume` [S1, unofficial].
+2. **Voxel Range Calculation**: Convert `aabb.min` and `aabb.max` to voxel indices `minX, minY, minZ` and `maxX, maxY, maxZ` using `TryBuildVoxelRange` [S1, unofficial]. This helper uses `nextafter` on the max coordinates to handle floating-point precision boundaries correctly [S1, unofficial].
+3. **Sample Limit Check**: Calculate the total number of voxels: $N = (maxX - minX + 1) \times (maxY - minY + 1) \times (maxZ - minZ + 1)$ [S1, unofficial]. If $N > kMaxCollisionVolumeSamples$ (where $kMaxCollisionVolumeSamples = 32768$), return immediately with `blocked = true` and status `UnknownBlockedVolume` [S1, unofficial].
+4. **Column Cache Initialization**: Determine the XZ footprint of the AABB [S1, unofficial]. For each column $(x, z)$ in the footprint, precompute and store the terrain height and relief in `colHeight` and `colRelief` arrays [S1, unofficial]. This collapses the noise evaluation cost from $O(voxels)$ to $O(columns)$ [S1, unofficial].
 5. **Voxel Iteration**: Iterate through the voxel grid in the order: $Z$ from $minZ$ to $maxZ$, $Y$ from $minY$ to $maxY$, $X$ from $minX$ to $maxX$ [S1, unofficial].
 6. **Index Calculation**: For each voxel $(x, y, z)$, calculate the linear index for the column cache:
    $$idx = (x - minX) + (z - minZ) \times (maxX - minX + 1)$$
    [S1, unofficial].
 7. **Sampling**: Call `SampleWithColumn(x, y, z, colHeight[idx], colRelief[idx])` to get the `CollisionSample` status [S1, unofficial].
 8. **Classification**:
-   - Increment `sampledVoxels`.
-   - If `status` is `KnownAir`: Continue.
-   - If `status` is `KnownSolid`: Increment `solidVoxels`. Set `sampleBlocks = true`.
-   - If `status` is `KnownLiquid`: Increment `liquidVoxels`. Set `hasLiquid = true`. Set `sampleBlocks = liquidsBlock`.
-   - If `status` is `UnknownBlocked` (or default): Increment `unknownVoxels`. Set `hasUnknown = true`. Set `sampleBlocks = true`.
+   - Increment `sampledVoxels` [S1, unofficial].
+   - If `status` is `KnownAir`: Continue [S1, unofficial].
+   - If `status` is `KnownSolid`: Increment `solidVoxels` [S1, unofficial]. Set `sampleBlocks = true` [S1, unofficial].
+   - If `status` is `KnownLiquid`: Increment `liquidVoxels` [S1, unofficial]. Set `hasLiquid = true` [S1, unofficial]. Set `sampleBlocks = liquidsBlock` [S1, unofficial].
+   - If `status` is `UnknownBlocked` (or default): Increment `unknownVoxels` [S1, unofficial]. Set `hasUnknown = true` [S1, unofficial]. Set `sampleBlocks = true` [S1, unofficial].
 9. **Blocking Check**: If `sampleBlocks` is true and `result.blocked` is false:
-   - Set `result.blocked = true`.
-   - Store `sample` in `result.firstBlockingSample`.
-   - Store $x, y, z$ in `result.firstBlockingX`, `result.firstBlockingY`, `result.firstBlockingZ`.
+   - Set `result.blocked = true` [S1, unofficial].
+   - Store `sample` in `result.firstBlockingSample` [S1, unofficial].
+   - Store $x, y, z$ in `result.firstBlockingX`, `result.firstBlockingY`, `result.firstBlockingZ` [S1, unofficial].
 10. **Return**: Return the populated result structure [S1, unofficial].
 
 **Pseudocode:**
@@ -169,7 +169,7 @@ The Sparse AABB Sweep Test is a voxel occupancy test that determines whether an 
 Support Below Search determines if a voxel position has structural support directly beneath it within a specified vertical drop distance. It solves the problem of identifying valid standing positions for entities or objects in a voxel world by finding the first non-empty voxel (solid, liquid, or blocked unknown) below a given footprint. It differs from [Sparse AABB Sweep Test](5413-sparse-aabb-sweep-test.md) by iterating through a defined volume to find the *first* support rather than sweeping for *any* collision along a path, and builds on [Sparse AABB Collision Test](3047-sparse-aabb-collision-test.md) by utilizing its collision sample semantics [G].
 
 ## Operating characteristics
-- **Time Complexity**: $O(C + V)$, where $C$ is the number of columns in the XZ footprint and $V$ is the total number of voxels in the AABB. The column cache initialization is $O(C)$, and the voxel sampling is $O(V)$ [S1, unofficial].
+- **Time Complexity**: $O(C + V)$, where $C$ is the number of columns in the XZ footprint and $V$ is the total number of voxels in the AABB [S1, unofficial]. The column cache initialization is $O(C)$, and the voxel sampling is $O(V)$ [S1, unofficial].
 - **Memory Complexity**: $O(C)$ for the `colHeight` and `colRelief` caches, plus $O(1)$ for the result structure [S1, unofficial].
 - **Performance**: The method optimizes terrain noise evaluation by caching it per column, reducing the cost from $O(V)$ to $O(C)$ for the noise component [S1, unofficial].
 - **Strengths**: Handles heterogeneous voxel types (solid, liquid, unknown); provides detailed statistics on voxel composition; fast early exit for invalid or excessively large volumes [S1, unofficial].

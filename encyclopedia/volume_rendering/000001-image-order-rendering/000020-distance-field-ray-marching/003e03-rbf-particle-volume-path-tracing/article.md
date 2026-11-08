@@ -1,0 +1,198 @@
+# RBF Particle Volume Path Tracing
+
+Also called: RBF volume rendering, SPH volume rendering, Smoothed Particle Hydrodynamics (SPH) volume rendering
+
+## Overview
+RBF Particle Volume Path Tracing renders particle-based data (such as Smoothed Particle Hydrodynamics fluid simulations) by treating the volume as a continuous scalar field composed of additive weighted radial basis functions (RBFs), specifically Gaussians [S1, book]. This approach solves the visual clutter and pathological performance issues associated with BVH-based ray tracing of overlapping splatted particles by unifying the volume into a single field [S1, book]. It differs from [Ray-marching on 3D Gaussians](1036-ray-marching-on-3d-gaussians.md) by explicitly using a BVH structure for spatial acceleration of the RBF evaluation and integrating the field into a path tracer via delta tracking, whereas splatting methods are often limited to primary ray casting [S1, book].
+
+## How it works
+**Inputs:**
+*   Particle positions $\mathbf{x}_i$, radii $r_i$, and weights $w_i$ for $i=0 \dots N-1$.
+*   Camera ray $r(t) = \mathbf{o} + t\mathbf{d}$.
+*   Transfer function parameters: color map $C(\cdot)$, opacity map $\alpha(\cdot)$.
+*   Parameters: `radiusSupportFactor` (default 3), `clampMaxCumulativeValue` (default 0, disabled).
+
+**Outputs:**
+*   Radiance $L(0, \omega)$ for the pixel.
+
+**Data Structures:**
+*   **BVH:** A Bounding Volume Hierarchy built over individual particles (one particle per leaf node). Bounds are determined by `radiusSupportFactor` $\times$ base particle radius. Interior nodes store min/max value ranges of the RBF field $\Phi$ within their bounds [S1, book].
+*   **Particle Data:** Arrays for positions, radii, and weights.
+
+**Preprocessing:**
+1.  **BVH Construction:** Build a BVH using the particle support radii [S1, book].
+2.  **Value Range Estimation:** For each leaf node (particle), evaluate the RBF field $\Phi$ over a small grid (e.g., $10^3$ points) within the support radius to find local min/max. Propagate these ranges to interior nodes and store global min/max [S1, book]. This step has worst-case complexity $O(N)$ [S1, book].
+
+**Sampling and Rendering (Per Ray):**
+1.  **Delta Tracking Setup:** Determine $\sigma_{t,\max}$. If `clampMaxCumulativeValue` is provided by the user, use it as an upper bound for the field value to derive $\sigma_{t,\max}$; otherwise, perform the $O(N)$ estimation [S1, book].
+2.  **Ray Marching Loop:**
+    *   Sample a distance $t$ to the next event using delta tracking:
+        $$t = -\frac{\ln(1-\xi)}{\sigma_{t,\max}}$$
+        where $\xi \in [0, 1)$ is a uniform random number [S1, book].
+    *   Advance the ray: $\mathbf{p} = \mathbf{o} + t\mathbf{d}$.
+    *   **RBF Evaluation:** Evaluate the scalar field $\Phi(\mathbf{p})$ by traversing the BVH.
+        *   Traverse the BVH to find relevant particles.
+        *   For each candidate particle $i$, check if $\|\mathbf{p} - \mathbf{x}_i\| < \sigma r_i$.
+        *   If inside support, accumulate the Gaussian kernel contribution:
+            $$\phi_i(\mathbf{p}) = w_i e^{-\frac{1}{2}(\|\mathbf{p} - \mathbf{x}_i\|/r_i)^2}$$
+        *   Add $\phi_i(\mathbf{p})$ to the accumulated result.
+        *   If `clampMaxCumulativeValue` > 0 and accumulated result $\ge$ `clampMaxCumulativeValue`, terminate evaluation early [S1, book].
+    *   **Virtual Event Rejection:** Calculate the actual extinction coefficient $\sigma_t(\mathbf{p})$ derived from $\Phi(\mathbf{p})$ via the transfer function. Generate a random number $\eta \in [0, 1)$. If $\eta < 1 - \frac{\sigma_t(\mathbf{p})}{\sigma_{t,\max}}$, the event is "virtual"; reject it and repeat from step 2 with a new $t$ [S1, book].
+    *   **Interaction:** If the event is accepted, compute emission $L^e$ and transmittance $T$ using the transfer function applied to $\Phi(\mathbf{p})$:
+        $$L^e(\mathbf{p}, -\omega) = L^e(C(\Phi(\mathbf{p})), -\omega)$$
+        $$T(\mathbf{p}, -\omega) = T(\alpha(\Phi(\mathbf{p})), -\omega)$$
+        Accumulate radiance and update transmittance. If the medium is non-scattering ($\sigma_s=0$), the radiance contribution is:
+        $$L(0, \omega) = \int_0^\infty T(0, t) \sigma_e(t) L^e(t, \omega) dt$$
+        Discretized via the sampled events [S1, book].
+    *   **Termination:** If $t > t_{max}$ or transmittance drops below a threshold, terminate the path [S1, book].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def evaluate_rbf_field(sample_pos, bvh_root, particles, radius_support_factor, clamp_max_cumulative_value):
+    """
+    Evaluates the RBF scalar field Phi at sample_pos using BVH traversal.
+    Returns the accumulated value.
+    """
+    accumulated_value = 0.0
+    
+    # Traverse BVH to find candidate particles
+    # Note: traverse_bvh is a standard BVH traversal routine
+    candidates = traverse_bvh(bvh_root, sample_pos)
+    
+    for particle_id in candidates:
+        center = particles[particle_id].position
+        radius = particles[particle_id].radius
+        weight = particles[particle_id].weight
+        
+        delta = sample_pos - center
+        dist_sq = dot(delta, delta)
+        support_radius = radius * radius_support_factor
+        support_radius_sq = support_radius * support_radius
+        
+        if dist_sq < support_radius_sq:
+            # Gaussian kernel evaluation
+            # phi(x) = w * exp(-0.5 * (d/r)^2)
+            # Note: (d/r)^2 = d^2 / r^2
+            exponent = -0.5 * (dist_sq / (radius * radius))
+            value = weight * exp(exponent)
+            
+            accumulated_value += value
+            
+            # Early termination if clamp is active
+            if clamp_max_cumulative_value > 0.0 and accumulated_value >= clamp_max_cumulative_value:
+                return accumulated_value
+                
+    return accumulated_value
+
+def path_trace_rbf_volume(ray_origin, ray_direction, bvh_root, particles, sigma_t_max, clamp_max_cumulative_value, transfer_function):
+    """
+    Path traces through an RBF particle volume using delta tracking.
+    """
+    radiance = vec3f(0.0)
+    throughput = vec3f(1.0)
+    t = 0.0
+    
+    while t < MAX_DISTANCE:
+        # 1. Sample distance to next event using delta tracking
+        xi = random_float() # Uniform [0, 1)
+        t_step = -log(1.0 - xi) / sigma_t_max
+        t += t_step
+        
+        # 2. Evaluate position
+        pos = ray_origin + t * ray_direction
+        
+        # 3. Evaluate RBF field Phi(pos)
+        phi_val = evaluate_rbf_field(pos, bvh_root, particles, 3.0, clamp_max_cumulative_value)
+        
+        # 4. Determine actual extinction coefficient sigma_t from Phi
+        # Assuming sigma_t is proportional to Phi or derived via transfer function
+        # For this implementation, we assume a direct mapping or user-defined sigma_t_max
+        # based on the max possible Phi value.
+        # sigma_t(pos) = sigma_t_max * (Phi(pos) / Phi_max) 
+        # However, the source uses sigma_t_max as a bounding volume for delta tracking.
+        # The rejection probability depends on the ratio sigma_t / sigma_t_max.
+        
+        # Let's assume the transfer function provides opacity/alpha, 
+        # and sigma_t is derived. For non-scattering media, sigma_t = sigma_a.
+        # The source implies sigma_t is the actual extinction at the point.
+        # We need a way to get sigma_t from Phi. 
+        # Standard SPH rendering often maps density to opacity.
+        # Let's assume a helper function get_extinction(phi) exists.
+        sigma_t_actual = get_extinction_from_phi(phi_val)
+        
+        # 5. Virtual event rejection
+        # P[virtual] = 1 - sigma_t / sigma_t_max
+        # Accept if random > P[virtual] => random < sigma_t / sigma_t_max
+        eta = random_float()
+        if eta < 1.0 - (sigma_t_actual / sigma_t_max):
+            # Virtual event, skip interaction
+            continue
+            
+        # 6. Process real interaction
+        # Get emission and transmittance factor from transfer function
+        color = transfer_function.get_color(phi_val)
+        alpha = transfer_function.get_opacity(phi_val)
+        
+        # For non-scattering media, contribution is:
+        # L += throughput * T(0, t) * sigma_e(t) * L^e(t) * dt
+        # In delta tracking, the integral is approximated by summing contributions
+        # weighted by the probability of selection.
+        # The term sigma_e(t) * L^e(t) is the emission density.
+        # T(0, t) is the transmittance from origin to t.
+        
+        # Transmittance from origin to current t
+        # T(0, t) = exp(- integral_0^t sigma_t(s) ds)
+        # In delta tracking, we accumulate transmittance multiplicatively or 
+        # compute it analytically if sigma_t is constant. 
+        # Here, sigma_t varies. We approximate T(0, t) using the sampled points.
+        # A common approach in delta tracking path tracing:
+        # radiance += throughput * (sigma_t_actual / sigma_t_max) * emission / sigma_t_max ?
+        # Actually, the standard delta tracking estimator for emission:
+        # Contribution = throughput * (sigma_e / sigma_t_max) * emission * exp(-integral)
+        # But we don't have the exact integral easily.
+        # The source cites Raab's Woodcock-tracking path tracer.
+        # Simplified: 
+        # radiance += throughput * (sigma_t_actual / sigma_t_max) * color * alpha
+        
+        # Note: The exact weighting depends on the specific path tracing formulation.
+        # The source equation 44.4 is for non-scattering.
+        # L = integral T * sigma_e * L^e dt.
+        # Delta tracking samples t from sigma_t_max.
+        # Unbiased estimator: (sigma_e * L^e) / sigma_t_max.
+        
+        contribution = (sigma_t_actual / sigma_t_max) * color
+        radiance += throughput * contribution
+        
+        # Update throughput for next bounces (if scattering were present)
+        # For non-scattering, throughput remains for transmittance calculation if needed,
+        # but usually throughput is just for scattering bounces.
+        # If purely absorbing/emitting, we just accumulate.
+        
+        # Break if alpha is very low (Russian Roulette or threshold)
+        if alpha < 0.01:
+            break
+            
+    return radiance
+```
+
+**Edge Cases and Pitfalls:**
+*   **Truncation Artifacts:** Using a small `radiusSupportFactor` improves performance but may cause visual artifacts if the RBF kernel is truncated too aggressively [S1, book].
+*   **Performance Overhead:** Estimating $\sigma_{t,\max}$ via grid sampling has $O(N)$ complexity and can be costly for large datasets. It is recommended only for small datasets with unpredictable overlap or when the user cannot guess the maximum value [S1, book].
+*   **Overlap Clutter:** Unlike splatting, RBF rendering handles overlapping particles naturally as a scalar field, avoiding the pathological BVH performance issues seen in splatting approaches [S1, book].
+
+## Operating characteristics
+*   **Time Complexity:** The preprocessing step for value estimation is $O(N)$ [S1, book]. Ray traversal depends on the BVH depth and the number of particles within the support radius.
+*   **Memory Complexity:** Requires storage for particle data and the BVH structure.
+*   **Strengths:** Supports full path tracing (unlike earlier RBF implementations restricted to ray casting); handles overlapping particles without visual clutter; allows adjustable smoothing/sharpening via kernel parameters [S1, book].
+*   **Limitations:** Value estimation can be slow for large, complex datasets; requires careful tuning of `radiusSupportFactor` and `clampMaxCumulativeValue` [S1, book].
+*   **When to Use:** Scientific visualization of particle-based data (e.g., SPH fluids) where path tracing effects (ambient occlusion, reflections) are desired and particle overlap is significant [S1, book].
+*   **When Not to Use:** Real-time rendering of extremely large datasets where $O(N)$ preprocessing is prohibitive and pre-computed bounds or user-specified clamping are not feasible [S1, book].
+
+## Background
+RBF volume rendering is frequently referred to as a Smoothed Particle Hydrodynamics (SPH) approach due to its application in visualizing SPH fluid dynamics codes [S1, book]. The method was implemented in Intel OSPRay and the Open Volume Kernel Library (VKL) using ISPC, leveraging interval iterators for space skipping and supporting abstraction of rendering methods including path tracing [S1, book]. It builds on the Woodcock-tracking volume path tracer of Raab [S1, book].
+
+## Sources
+[S1] Path Tracing RBF Particle Volumes, https://link.springer.com/chapter/10.1007/978-1-4842-7185-8_44, fetched 2026-10-25 (book)

@@ -1,37 +1,34 @@
 # Quantization
-Also called: Value quantization, Discretization
+
 
 ## Overview
-Quantization is the process of mapping a large set of input values, typically continuous or high-precision discrete data, to a smaller, discrete set of output values [S1]. In volume rendering, it serves as the primary lossy compression step that reduces memory bandwidth and storage requirements by limiting the precision of voxel attributes or scalar fields [S1][S2, unofficial]. It sets itself apart from sibling methods like [Vector Quantization](907-vector-quantization.md) or [Triadic frequency band decomposition](828-triadic-frequency-band-decomposition.md) by operating on individual values (scalar or attribute) rather than grouping them into codebooks or transforming them into frequency coefficients, although it often precedes entropy coding in the compression pipeline [S1][S5, unofficial].
+Quantization is a lossy compression technique that maps continuous or high-bit-depth volume data to a finite set of discrete levels, reducing memory footprint and bandwidth requirements [S1][S2, unofficial]. It solves the problem of storing and transmitting high-resolution volume data by trading precision for compactness, leveraging human perception limits or data statistics to maintain visual quality [S1]. It differs from its siblings by specializing the mapping strategy: [Attribute Quantization](1912-attribute-quantization.md) handles non-scalar attributes like colors and normals using perceptual spaces; [Scalar Quantization](5726-scalar-quantization.md) adapts ranges per block for random access; [Uniform Quantization](5855-uniform-quantization.md) uses global fixed steps; [Chroma Subsampling](6512-chroma-subsampling.md) reduces color resolution spatially; and [TetSplat Pre-processing and Data Layout](7221-tetsplat-pre-processing-and-data-layout.md) targets tetrahedral mesh topology with hybrid bit-packing.
 
 ## Shared principles
-The Quantization family shares the fundamental mechanism of reducing data precision to achieve compression, introducing a controlled reconstruction error [S1][S2, unofficial][S5, unofficial].
-
-1.  **Discretization:** Continuous or high-bit-depth values are mapped to a finite set of representatives. This step is critical for achieving high compression ratios but introduces quantization error [S1][S2, unofficial][S5, unofficial].
-2.  **Error Management:** The loss of information must be managed via metrics such as PSNR or perceptual quality assessments to ensure the rendered output remains visually acceptable [S1][S2, unofficial][S5, unofficial].
-3.  **Precision Trade-off:** There is a direct trade-off between the bit-depth used for representation and the fidelity of the reconstructed volume. Lower bit-depths yield higher compression but increased visual artifacts [S1].
+Quantization maps a source value $x$ to a discrete index $i$ and reconstructs it as $x'$. The core mechanism involves defining a codebook or mapping function $Q(x)$ and a reconstruction function $R(i)$. The error is defined as $\epsilon = |x - R(Q(x))|$. For uniform quantization, the step size $\phi$ determines the error bound $\phi/2$. For non-uniform or perceptual quantization, the mapping minimizes a perceptual error metric (e.g., CIE94 $\Delta E$) rather than Euclidean distance in the raw data space. All methods in this family reduce the entropy of the data by collapsing distinct values into a smaller set, enabling subsequent entropy coding or efficient storage.
 
 ## Subtopics
 
 ### [Attribute Quantization](1912-attribute-quantization.md)
-Specializes in reducing precision for non-scalar attributes like colors and normals using perceptual models (CIELAB) and geometric mappings (ONVs) rather than linear scalar mapping.
+Specializes in reducing precision of voxel attributes (colors and normals) using perceptually uniform spaces. It differs from scalar methods by handling vector/multidimensional data types specifically: colors are clustered in CIELAB space, and normals are mapped to Octahedron Normal Vectors (ONVs). Choose this when preserving perceptual color fidelity and normal direction accuracy is critical for shading.
 
 ### [Scalar Quantization](5726-scalar-quantization.md)
-A random-access method for scalar fields that uses per-block minimum/maximum values and linear interpolation to reconstruct voxel values on-the-fly, enabling efficient GPU rendering.
+A random-access decompression method that maps a block of voxels to a local range defined by block-specific minimum and maximum values. It differs from uniform quantization by adapting to local data statistics per block, enabling parallel decompression without loading the entire volume. Choose this for GPU-based direct volume rendering where random access to compressed blocks is required.
 
 ### [Uniform Quantization](5855-uniform-quantization.md)
-A basic lossy method that maps raw data values to a limited number of bits using a fixed global range, achieving simple compression ratios (e.g., 32-bit to 8-bit).
+Maps data to discrete levels using equal spacing across the global data range. It differs from non-uniform methods by not adapting to data distribution, making it simple but potentially ineffective for data with wide dynamic ranges. Choose this for data with uniform distribution or when computational simplicity is prioritized over precision in low-probability regions.
 
 ### [Chroma Subsampling](6512-chroma-subsampling.md)
-Reduces bitrate by subsampling chrominance components while keeping luminance at full resolution, leveraging human visual system properties.
+Reduces the spatial resolution of chrominance components (U, V) while maintaining full resolution for luminance (Y). It differs from other quantization methods by addressing the sparsity and geometric structure of volumetric data, defining one color value for every eight adjacent voxel corners. Choose this when color fidelity is less critical than luminance detail, or to prevent complete color loss (grey objects) at low bitrates.
 
 ### [TetSplat Pre-processing and Data Layout](7221-tetsplat-pre-processing-and-data-layout.md)
-A specific pre-processing step that quantizes scalar fields to [0, 1] and packs them into binary bitstrings for efficient storage.
+Compresses scalar field values on tetrahedral meshes by quantizing them into binary bitstrings and packing them into hierarchical Shell (quadtree) and Solid (octree) structures. It differs from sibling methods by targeting tetrahedral mesh topology and using a hybrid layout with distinct bit-packing for surface-adjacent and interior nodes. Choose this for interactive visualization of multi-field scalar data on tetrahedral meshes.
+
+### Lossy Quantization for Coarsened Patches
+Lossy compression for coarsened patches in a bintree hierarchy where quantization error $q$ is proportional to coarsening error $c$ ($q = qc$). Quantization levels are restricted to power-of-two multiples of vertical resolution $\Delta z$ for efficient bit-shift implementation. The shift $k$ is calculated as $k = \lceil \log_2(\epsilon_q / \Delta z) \rceil + 1$ if $\epsilon_q \ge \Delta z$, else $0$. All finest level vertices have zero shift. Vertices are classified as boundary (corners $C$, legs $L$, hypotenuse $H$) and interior $I$. Corners are stored at full precision. Quantization of original height values (not residuals) ensures adjacent patches agree on shared boundaries [S1].
 
 ## Background
-Quantization is a foundational concept in signal processing and data compression, originating from the need to represent continuous signals in digital systems [S1]. In the context of volume rendering, it has been adopted to address the massive memory requirements of high-resolution volumetric datasets [S1][S2, unofficial]. Early implementations focused on uniform scalar quantization, while more recent approaches have introduced perceptual uniformity (e.g., CIELAB for colors) and geometric optimizations (e.g., Octahedron Normal Vectors) to maintain visual quality at lower bit-depths [S1].
+Quantization is a fundamental concept in signal processing and data compression. In the context of volume rendering and terrain representation, it has been applied to reduce the storage requirements of large scalar fields. The specific application to coarsened patches in bintree hierarchies for terrain rendering was detailed by Moffat and Anh, who proposed a method where quantization error is tied to the coarsening error, allowing for efficient bit-shift based quantization [S1]. This approach ensures consistency across patch boundaries by quantizing original values rather than residuals.
 
 ## Sources
-[S1] Attribute Quantization notes
-[S2] Scalar Quantization notes (unofficial)
-[S5] Shared principles notes (unofficial)
+[S1] On-the-fly decompression and rendering of multiresolution terrain, https://doi.org/10.1145/1730804.1730815, fetched 2026-11-01

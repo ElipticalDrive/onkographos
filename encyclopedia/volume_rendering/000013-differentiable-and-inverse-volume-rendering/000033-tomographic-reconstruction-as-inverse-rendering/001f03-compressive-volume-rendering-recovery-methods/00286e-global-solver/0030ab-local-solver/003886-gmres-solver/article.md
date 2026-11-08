@@ -3,41 +3,69 @@
 Also called: GMRES Solver for CT Reconstruction, GMRES Solver for Regularized Normal Equations, Generalized Minimal Residual Method, Generalized Minimal Residual Method for CT, Iterative CT Reconstruction, Matrix-Free Regularized Least-Squares Solver
 
 ## Overview
-The GMRES Solver is an iterative Krylov subspace method used to solve the regularized normal equations arising from least-squares Computed Tomography (CT) reconstruction [S1, unofficial]. It minimizes the residual between the forward-projected reconstruction and the observed sinogram data while applying Tikhonov regularization to enforce smoothness [S1, unofficial]. Unlike direct solvers that explicitly construct the large, sparse system matrix $A^TA$, GMRES operates in a matrix-free manner, computing matrix-vector products on the fly to reduce memory overhead [S1, unofficial]. It is distinguished from its sibling [Local Solver](4294-local-solver.md) by solving the global inverse problem rather than partitioning the image into independent blocks.
+The GMRES Solver is an iterative Krylov subspace method used to solve the regularized normal equations arising in Compressive Volume Rendering Recovery [S1, unofficial]. It addresses the ill-posed inverse problem of reconstructing a volume from sparse or limited-angle sinogram data by minimizing a least-squares objective with Tikhonov regularization [S1, unofficial]. Unlike direct solvers that require explicit matrix inversion, GMRES operates in a matrix-free manner, making it suitable for large-scale tomographic reconstruction where the system matrix is too large to store [S1, unofficial]. It is distinguished from other local solvers by its global convergence properties over the entire image domain rather than block-wise partitioning [Parent].
 
 ## How it works
-The method solves the regularized normal equation:
-$$ A^T A f + \alpha R f = A^T g $$
-where $f$ is the reconstructed image, $g$ is the measured sinogram, $A$ is the forward projection operator, $\alpha$ is the regularization strength, and $R$ is the regularization operator [S1, unofficial].
-
 **Inputs:**
-*   `vol_geom`: Volume geometry definition (dimensions $v \times h$).
-*   `proj_geom`: Projection geometry definition (angles, samples).
-*   `g`: Measured sinogram data.
-*   `alpha`: Regularization parameter scalar.
-*   `penalty`: String specifying regularization type ("tikhonov" or "gradient") [S1, unofficial].
-*   `maxiter`: Maximum number of iterations (default 700) [S1, unofficial].
+- `vol_geom`: Volume geometry object defining the reconstruction grid dimensions $v \times h$ [S1, unofficial].
+- `proj_geom`: Projection geometry object defining the detector and source parameters [S1, unofficial].
+- `projector_id`: Identifier for the forward projection operator (e.g., 'line', 'pixel') [S1, unofficial].
+- `gNoisy_id`: Identifier for the measured sinogram data $g$ [S1, unofficial].
+- `max_angle`: Maximum projection angle in radians [S1, unofficial].
+- `n_angles`: Number of projection angles [S1, unofficial].
+- `n_samples`: Number of detector samples per projection [S1, unofficial].
+- `v`, `h`: Height and width of the reconstruction volume [S1, unofficial].
+- `alpha`: Regularization strength parameter [S1, unofficial].
+- `penalty`: String specifying the regularization type: "tikhonov" (0-order) or "gradient" (1st-order) [S1, unofficial].
+- `maxiter`: Maximum number of iterations (default 700) [S1, unofficial].
 
 **Outputs:**
-*   `f`: Reconstructed image reshaped to $(v, h)$ [S1, unofficial].
+- `f_alpha`: Reconstructed volume image reshaped to $(v, h)$ [S1, unofficial].
 
 **Data Structures:**
-*   `LinearOperator`: A `scipy.sparse.linalg.LinearOperator` object representing the system matrix $M = A^T A + \alpha R$. It does not store the matrix explicitly but defines `matvec` and `rmatvec` functions [S1, unofficial].
-*   `ATg`: The vector $A^T g$, computed once via `astra.data2d.create` and `astra.op` operations [S1, unofficial].
+- The system is represented as a `scipy.sparse.linalg.LinearOperator` object `A`. This object does not store the full matrix $A^T A + \alpha R$ but defines a `matvec` function that computes the product of the regularized normal matrix with a vector [S1, unofficial].
+- The right-hand side vector is $b = A^T g$, computed using the adjoint projection operator `AT_y` [S1, unofficial].
 
 **Steps:**
-1.  **Initialize Geometry:** Define volume dimensions $v, h$ and projection angles using `astra.create_vol_geom` and `np.linspace` [S1, unofficial].
-2.  **Compute RHS:** Calculate the right-hand side vector $b = A^T g$ using the adjoint projection operator `AT_y` [S1, unofficial]. Flatten $b$ to 1D.
-3.  **Construct Operator:** Create a `LinearOperator` `A_sys` with shape $(v \times h, v \times h)$.
-    *   Define `matvec(v)`: Computes $(A^T A + \alpha R) v$.
-        *   Compute $Av$ using forward projection.
-        *   Compute $A^T(Av)$ using backprojection.
-        *   Compute $Rv$:
-            *   If `penalty` is "tikhonov", $R = I$, so $Rv = v$.
-            *   If `penalty` is "gradient", $R$ is the Laplacian operator (1st-order Tikhonov), so $Rv = \nabla^2 v$ [S1, unofficial].
-        *   Return $A^T(Av) + \alpha Rv$.
-4.  **Solve:** Call `scipy.sparse.linalg.gmres` with `A_sys`, the flattened RHS `ATg.flatten()`, and a callback function for monitoring [S1, unofficial].
-5.  **Reshape:** Reshape the resulting 1D solution vector to the 2D image shape $(v, h)$ [S1, unofficial].
+1.  **Geometry Setup**: Initialize `vol_geom` and `proj_geom` using the provided dimensions and angles. Compute the total number of pixels $M = v \times h$ and $N = M$ [S1, unofficial].
+2.  **Compute Right-Hand Side**: Calculate the vector $b = A^T g$ by applying the adjoint projection operator to the sinogram data $g$ [S1, unofficial].
+3.  **Construct Linear Operator**: Define a `LinearOperator` `A` with shape $(M, M)$. Its `matvec` method must compute $(A^T A + \alpha R) x$ for any input vector $x$:
+    - Compute $y = A x$ using the forward projection operator.
+    - Compute $z = A^T y$ using the adjoint projection operator.
+    - Apply regularization $R$:
+        - If `penalty` is "tikhonov", $R = I$ (identity). The term is $\alpha x$.
+        - If `penalty` is "gradient", $R$ is the Laplacian operator (discrete second derivative). The term is $\alpha R x$. Note that in some implementations, the gradient penalty may use a scaling factor of $2\alpha$ compared to the tikhonov penalty [S1, unofficial].
+    - Return $z + \alpha R x$.
+4.  **Solve**: Call the GMRES solver with the `LinearOperator` `A`, the flattened right-hand side vector $b.flatten()$, and the callback function for monitoring convergence [S1, unofficial].
+5.  **Reshape**: Reshape the resulting solution vector to the 2D volume dimensions $(v, h)$ [S1, unofficial].
+
+**Formulas:**
+The solver minimizes the regularized least-squares objective:
+$$ \min_f \| A f - g \|^2 + \alpha \| R f \|^2 $$
+This leads to the regularized normal equations:
+$$ (A^T A + \alpha R) f = A^T g $$
+Where:
+- $A$ is the forward projection matrix [S1, unofficial].
+- $g$ is the sinogram vector [S1, unofficial].
+- $R$ is the regularization operator [S1, unofficial].
+- $\alpha$ is the regularization parameter [S1, unofficial].
+
+For 0-order Tikhonov regularization:
+$$ R = I $$
+For 1st-order Tikhonov (gradient) regularization:
+$$ R = \nabla^2 $$
+where $\nabla^2$ is the discrete Laplacian operator [S1, unofficial].
+
+**Parameters:**
+- `penalty`: "tikhonov" or "gradient" [S1, unofficial].
+- `alpha`: Regularization strength. The optimal value is often determined using the L-Curve method [S1, unofficial].
+- `maxiter`: 700 [S1, unofficial].
+
+**Pitfalls:**
+- The regularization parameter $\alpha$ significantly affects the trade-off between data fidelity and smoothness. An inappropriate $\alpha$ can lead to over-smoothing or noisy reconstructions [S1, unofficial].
+- The implementation relies on the ASTRA toolbox for projection operations. Incorrect geometry setup or projector IDs will cause errors [S1, unofficial].
+- For large volumes, memory usage can be high if the `LinearOperator` is not implemented efficiently, although GMRES itself is matrix-free [S1, unofficial].
+- The callback function is optional but useful for monitoring convergence [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -46,107 +74,83 @@ where $f$ is the reconstructed image, $g$ is the measured sinogram, $A$ is the f
 import numpy as np
 import scipy.sparse.linalg as sp
 
-def matvec(v, A_op, alpha, penalty):
+def gmres_solver(vol_geom, proj_geom, projector_id, gNoisy_id, max_angle, n_angles, n_samples, v, h, alpha, penalty, maxiter=700):
     """
-    Computes (A^T A + alpha * R) * v without forming matrices.
-    A_op: Object with forward() and adjoint() methods.
+    Solves the regularized normal equations for CT reconstruction using GMRES.
     """
-    # Forward projection: A * v
-    Av = A_op.forward(v)
+    # Step 1: Compute A^T g
+    # Assuming astra toolbox is available and initialized
+    # AT_y computes the adjoint projection of the sinogram
+    ATg = astra.opfop('AT_y', proj_geom, vol_geom, projector_id, gNoisy_id)
+    b = ATg.flatten()
     
-    # Backprojection: A^T * (A * v)
-    AT_Av = A_op.adjoint(Av)
-    
-    # Regularization term R * v
-    if penalty == "tikhonov":
-        # 0-order Tikhonov: Identity matrix
-        Rv = v
-    elif penalty == "gradient":
-        # 1st-order Tikhonov: Laplacian (gradient penalty)
-        # Note: Implementation of Laplacian depends on specific grid handling.
-        # Here we assume a standard discrete Laplacian operator is available.
-        Rv = apply_laplacian(v)
-    else:
-        raise ValueError("Unknown penalty type")
+    # Step 2: Define the LinearOperator for (A^T A + alpha R)
+    def matvec(x):
+        # x is a flattened vector of shape (v*h,)
+        # Compute A * x
+        Ax = astra.opfop('A_y', proj_geom, vol_geom, projector_id, x.reshape(v, h))
+        # Compute A^T * (A * x)
+        AT_Ax = astra.opfop('AT_y', proj_geom, vol_geom, projector_id, Ax)
         
-    return AT_Av + alpha * Rv
+        # Apply regularization
+        if penalty == "tikhonov":
+            R_x = x
+        elif penalty == "gradient":
+            # Compute Laplacian of x
+            # Reshape to 2D for Laplacian computation
+            x_2d = x.reshape(v, h)
+            # Discrete Laplacian: sum of second derivatives in x and y directions
+            # Using numpy for simplicity, though astra might have a built-in operator
+            laplacian = np.zeros_like(x_2d)
+            laplacian[1:-1, 1:-1] = (x_2d[2:, 1:-1] + x_2d[:-2, 1:-1] + 
+                                     x_2d[1:-1, 2:] + x_2d[1:-1, :-2] - 
+                                     4 * x_2d[1:-1, 1:-1])
+            # Handle boundaries: zero-padding or replication (not specified in source)
+            # For simplicity, we assume zero-padding for boundaries
+            laplacian[0, :] = 0
+            laplacian[-1, :] = 0
+            laplacian[:, 0] = 0
+            laplacian[:, -1] = 0
+            R_x = laplacian.flatten()
+        else:
+            raise ValueError("Unknown penalty type")
+            
+        return AT_Ax + alpha * R_x
 
-def gmres_solver(vol_geom, proj_geom, g, alpha, penalty="tikhonov", maxiter=700):
-    # 1. Setup geometries
-    v, h = vol_geom.shape
-    n_angles = proj_geom.n_angles
-    n_samples = proj_geom.n_samples
+    A = sp.LinearOperator(shape=(v*h, v*h), matvec=matvec)
     
-    # 2. Compute A^T * g
-    # Using ASTRA toolbox conventions as per source
-    g_id = astra.data2d.create('-sino', proj_geom, g)
-    vol_id = astra.data3d.create('-vol', vol_geom) # Placeholder for setup
-    # Compute AT_y directly
-    ATg = astra.op.AT_y(proj_geom, vol_geom, g) # Pseudonym for adjoint projection of sinogram
-    ATg_flat = ATg.flatten()
-    
-    # 3. Create LinearOperator
-    # The operator applies (A^T A + alpha R)
-    def apply_system(v_vec):
-        v_2d = v_vec.reshape(v, h)
-        res_2d = matvec(v_2d, proj_geom, alpha, penalty)
-        return res_2d.flatten()
+    # Step 3: Solve using GMRES
+    # Callback function for monitoring
+    def callback(rk):
+        print(f"Iteration {rk}")
         
-    A_sys = sp.LinearOperator((v*h, v*h), matvec=apply_system)
+    solution, info = sp.gmres(A, b, callback=callback, maxiter=maxiter)
     
-    # 4. Run GMRES
-    # callback is optional for monitoring convergence
-    solution_flat, info = sp.sparse.linalg.gmres(
-        A_sys, 
-        ATg_flat, 
-        maxiter=maxiter,
-        callback=lambda x: None # Placeholder for callback logic
-    )
+    if info != 0:
+        print(f"GMRES did not converge: {info}")
+        
+    # Step 4: Reshape output
+    f_alpha = solution.reshape(v, h)
     
-    # 5. Reshape output
-    f_recon = solution_flat.reshape(v, h)
-    return f_recon
+    return f_alpha
 ```
-
-**Parameters:**
-*   `alpha`: Regularization strength. Swept in L-curve analysis [S1, unofficial].
-*   `penalty`: "tikhonov" (0-order, identity) or "gradient" (1st-order, Laplacian) [S1, unofficial].
-*   `maxiter`: Maximum iterations. Default 700 [S1, unofficial].
-*   `theta`: Noise level for sinogram generation (used in L-curve testing, typical value 10000) [S1, unofficial].
-
-**Edge Cases:**
-*   **Sparse/Limited Angles:** The method performs well with sparse angles (e.g., 45 angles) and limited angles (e.g., $\pi/4$), but convergence may be slower or require higher `maxiter` [S1, unofficial].
-*   **Precision:** Matrix-free approach avoids explicit matrix storage errors but relies on the accuracy of the forward/backprojection operators [S1, unofficial].
 
 ## Subtopics
 
-### L-Curve Regularization Parameter Selection
-A technique to automatically select the optimal regularization parameter $\alpha$ for the GMRES solver. It computes the solution norm $\|f_\alpha\|$ and residual norm $\|r\| = \|g - A f_\alpha\|$ for a range of $\alpha$ values. The optimal $\alpha$ is chosen at the "corner" of the L-curve plot (log-log scale of solution norm vs. residual norm), representing the best trade-off between data fidelity and smoothness [S1, unofficial].
-
-**Steps:**
-1.  Define a range of $\alpha$ values (e.g., $10^{-3}$ to $10^4$) [S1, unofficial].
-2.  For each $\alpha$, run `gmres_solver` to obtain $f_\alpha$ [S1, unofficial].
-3.  Compute the forward projection $A f_\alpha$ [S1, unofficial].
-4.  Compute the residual $r = g - A f_\alpha$ [S1, unofficial].
-5.  Calculate norms: $\text{fi\_norm} = \|f_\alpha\|$ and $\text{r\_norm} = \|r\|$ [S1, unofficial].
-6.  Plot $\log(\text{fi\_norm})$ vs $\log(\text{r\_norm})$ and identify the corner point [S1, unofficial].
-
-**Formula:**
-$$ r = g - A f_\alpha $$
-$$ \text{fi\_norm} = \|f_\alpha\|_2 $$
-$$ \text{r\_norm} = \|g - A f_\alpha\|_2 $$
+### [L-Curve Regularization Parameter Selection](8262-l-curve-regularization-parameter-selection.md)
+A heuristic method for determining the optimal regularization parameter $\alpha$ by identifying the corner of the L-shaped curve plotting the norm of the solution against the norm of the residual on a log-log scale. It is used to balance data fidelity and smoothness in ill-posed inverse problems like tomographic reconstruction.
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the number of GMRES iterations $k$ and the cost of matrix-vector products. Each iteration requires one forward and one adjoint projection ($O(N \log N)$ or $O(N)$ depending on projector). Total: $O(k \cdot N \log N)$ [S1, unofficial].
-*   **Memory Complexity:** $O(N)$ for storing vectors and the sinogram, as the matrix $A$ is never explicitly formed. This is significantly lower than direct solvers which require $O(N^2)$ or more for sparse matrix storage [S1, unofficial].
-*   **Performance:** Effective for large-scale CT reconstruction where explicit matrix construction is infeasible. Handles sparse and limited angle scenarios robustly [S1, unofficial].
-*   **Strengths:** Matrix-free (low memory), supports various regularization types, robust to noise when combined with L-curve selection [S1, unofficial].
-*   **Limitations:** Convergence can be slow for ill-conditioned systems (e.g., very limited angles). Requires careful tuning of $\alpha$ and `maxiter` [S1, unofficial].
-*   **When to use:** When memory is constrained, or when the system matrix is too large to store explicitly. Ideal for regularized least-squares CT reconstruction [S1, unofficial].
-*   **When not to use:** When a direct solution is required for small problems, or when real-time performance is critical and iterative convergence is too slow [S1, unofficial].
+- **Time Complexity**: GMRES is an iterative method. The cost per iteration is dominated by the matrix-vector product, which involves forward and adjoint projections. For $k$ iterations, the complexity is $O(k \cdot (N_{proj} + N_{adj}))$, where $N_{proj}$ and $N_{adj}$ are the costs of forward and adjoint projections. The total complexity is $O(k \cdot M^2)$ if the projection is dense, but typically $O(k \cdot M \log M)$ or better with sparse representations [S1, unofficial].
+- **Memory Complexity**: GMRES requires storing the Krylov basis vectors, which grows with the number of iterations. However, since it is matrix-free, it does not store the system matrix $A^T A + \alpha R$. The memory usage is $O(k \cdot M)$, where $M$ is the number of pixels [S1, unofficial].
+- **Performance**: GMRES is effective for large-scale problems where direct solvers are infeasible. It converges faster than simple iterative methods like Landweber or SIRT for ill-conditioned systems [S1, unofficial].
+- **Strengths**: Matrix-free operation, handles large sparse systems, supports various regularization types [S1, unofficial].
+- **Limitations**: Convergence can be slow for ill-conditioned problems without preconditioning. Memory usage grows with iterations [S1, unofficial].
+- **When to use**: Large-scale tomographic reconstruction with sparse or limited-angle data [S1, unofficial].
+- **When not to use**: Small-scale problems where direct solvers are faster, or when real-time performance is critical and convergence is slow [S1, unofficial].
 
 ## Background
-The GMRES (Generalized Minimal Residual) method was originally developed by Young and Iter (1986) for solving non-symmetric linear systems [S1, unofficial]. In the context of CT reconstruction, it is applied to the regularized normal equations derived from the least-squares formulation of the inverse problem. The specific implementation described here utilizes the ASTRA Toolbox for efficient GPU-accelerated forward and adjoint projections, enabling practical application to large 2D/3D volumes [S1, unofficial]. The L-curve method for parameter selection is a standard technique in inverse problems, popularized by Hansen (1992) [S1, unofficial].
+The GMRES (Generalized Minimal Residual) method was developed by Yousef Saad and Martin Schultz in 1986 [S1, unofficial]. It is a popular iterative solver for non-symmetric linear systems. In the context of CT reconstruction, it is applied to the regularized normal equations to solve the inverse problem efficiently [S1, unofficial]. The method is particularly useful in compressive volume rendering recovery where the system matrix is large and sparse [S1, unofficial].
 
 ## Sources
-[S1] imanfs/inverse-problems-CT-scans, https://github.com/imanfs/inverse-problems-CT-scans, fetched 2026-10-27 (unofficial)
+[S1] imanfs/inverse-problems-CT-scans - GitHub, https://github.com/imanfs/inverse-problems-CT-scans, fetched 2026-10-27 (unofficial)

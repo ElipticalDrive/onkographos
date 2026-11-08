@@ -20,7 +20,7 @@ Each splat $S_j$ requires **17 floating-point values** [S1]:
     *   $\alpha, \beta$ (2 floats: linear coefficients for the x and y components of the normal field) [S1].
     *   *Note:* The third component of the normal is implicitly 1 (homogeneous representation) [S1].
 4.  **Clipping Data:** Optional scalars $(a, b, c)$ defining clip lines in tangent space (3 floats per line) [S1].
-5.  **Precomputed Depth Factor:** $n \cdot (c^T n)^{-1}$ (1 float, computed in vertex shader) [S1].
+5.  **Precomputed Depth Factor:** $c^T n$ (1 float, computed in vertex shader) [S1].
 *Comparison:* Standard elliptical splatting requires only 12 floats per splat [S1]. However, Phong Splatting requires an order of magnitude fewer splats for comparable quality [S1].
 
 ### Steps
@@ -29,11 +29,11 @@ Each splat $S_j$ requires **17 floating-point values** [S1]:
 Given input samples $P$ and error tolerance $\epsilon$:
 1.  **Selection:** Generate an initial set of elliptical splats $S_j$ covering $P$ using a curvature-aware selection and global relaxation algorithm (e.g., [WK04]) [S1].
 2.  **Association:** For each splat $S_j$, identify the subset $P_j \subset P$ of samples contained within the elliptical cylinder defined by $S_j$'s tangents and offset by $\pm \epsilon$ along the normal [S1].
-3.  **Frame Construction:** Align $u_j$ and $v_j$ with principal curvature directions. If the geometry fitting scheme does not provide this, estimate them as eigenvectors of the covariance matrix of sample normals in $P_j$ [S1].
+3.  **Frame Construction:** Align $u_j$ and $v_j$ with principal curvature directions [S1]. If the geometry fitting scheme does not provide this, estimate them as eigenvectors of the covariance matrix of sample normals in $P_j$ [S1].
 4.  **Normal Fitting:**
     *   Represent each sample normal $n_i \in P_j$ in the local frame $(u_j, v_j, u_j \times v_j)$ [S1].
-    *   Set the third coordinate (normal direction) to 1. The normal is thus represented as a point $(x_i, y_i)$ on an offset tangent plane [S1].
-    *   Solve for the linear field parameters $\bar{n}=(\bar{x}, \bar{y})$, $\alpha$, and $\beta$ using least squares. The systems are uncoupled:
+    *   Set the third coordinate (normal direction) to 1 [S1]. The normal is thus represented as a point $(x_i, y_i)$ on an offset tangent plane [S1].
+    *   Solve for the linear field parameters $\bar{n}=(\bar{x}, \bar{y})$, $\alpha$, and $\beta$ using least squares [S1]. The systems are uncoupled:
         $$
         \begin{pmatrix} |P_j| & \sum u_i \\ \sum u_i & \sum u_i^2 \end{pmatrix} \begin{pmatrix} \bar{x} \\ \alpha \end{pmatrix} = \begin{pmatrix} \sum x_i \\ \sum x_i u_i \end{pmatrix}
         $$
@@ -50,24 +50,24 @@ Render each splat $S_j$ as a single point primitive (vertex at $c_j$) [S1]. Pass
 2.  Transform $u_j, v_j, n_j$ to eye space [S1].
 3.  Compute the rasterization square size $size$ using the larger ellipse radius $r = \max(\|u_j\|, \|v_j\|)$:
     $$
-    size = 2r \cdot \frac{n}{z_{eye}} \cdot \frac{h_{vp}}{t-b}
+    size = 2r \cdot \frac{near}{z_{eye}} \cdot \frac{h_{vp}}{t-b}
     $$
-    where $n, t, b$ are frustum near, top, bottom parameters, $h_{vp}$ is viewport height, and $z_{eye}$ is the eye-space depth of $c_j$ [S1].
-4.  Precompute the ray intersection factor: $k = n_j \cdot (c_j^T n_j)^{-1}$ [S1].
+    where $near, t, b$ are frustum near, top, bottom parameters, $h_{vp}$ is viewport height, and $z_{eye}$ is the eye-space depth of $c_j$ [S1].
+4.  Precompute the ray intersection scalar: $k = c_j^T n_j$ [S1].
 5.  Pass $u_j, v_j, \bar{n}, \alpha, \beta$ as texture coordinates to the fragment shader [S1].
 
 **Fragment Shader:**
 For each pixel in the $size \times size$ square:
 1.  **Ray Casting:** Compute the point $q_n$ on the near plane corresponding to window pixel $(x, y)$:
     $$
-    q_n = \begin{pmatrix} x \frac{w_h}{w_{vp}} - \frac{w_h}{2} \\ y \frac{h_n}{h_{vp}} - \frac{h_n}{2} \\ -n \end{pmatrix}
+    q_n = \begin{pmatrix} x \frac{w_h}{w_{vp}} - \frac{w_h}{2} \\ y \frac{h_n}{h_{vp}} - \frac{h_n}{2} \\ -near \end{pmatrix}
     $$
     where $w_h, h_n$ are near plane width/height, and $w_{vp}, h_{vp}$ are viewport dimensions [S1].
 2.  **Intersection:** Compute the point $q$ on the splat's supporting plane:
     $$
-    q = q_n \cdot k
+    q = q_n \cdot \frac{c_j^T n_j}{q_n^T n_j}
     $$
-    where $k = \frac{c_j^T n_j}{q_n^T n_j}$ [S1].
+    where $c_j$ and $n_j$ are the splat's center and normal vector in eye coordinates [S1].
 3.  **Local Parameters:** Compute $(u, v)$ by projecting $q - c_j$ onto the tangents:
     $$
     u = u_j^T (q - c_j), \quad v = v_j^T (q - c_j)
@@ -84,8 +84,8 @@ For each pixel in the $size \times size$ square:
 
 #### 3. Blending and Filtering
 To achieve high-quality antialiasing and correct transparency:
-1.  **Pass 1 (Visibility Splatting):** Render all splats with alpha blending. Assign a radially decreasing weight $w(u,v)$ to each pixel (e.g., Gaussian falloff). Accumulate weighted color and weight sum [S1].
-2.  **Pass 2 (Normalization):** Render a full-screen quad textured with the accumulated color and weight sum. Divide the color by the weight sum per pixel [S1].
+1.  **Pass 1 (Visibility Splatting):** Render all splats with alpha blending [S1]. Assign a radially decreasing weight to each splat pixel and accumulate weighted color and weight sum [S1].
+2.  **Pass 2 (Normalization):** Render a full-screen quad textured with the accumulated color and weight sum [S1]. Divide the color by the weight sum per pixel in a pixel shader [S1].
 *Optimization:* Render non-clipped splats first, then splats with one clip line, then two clip lines, to minimize shader state switches [S1].
 
 ### Pseudocode
@@ -97,37 +97,40 @@ def render_splat(center, tangents, normal_params, clip_lines=None):
     c_win = transform_to_window(center)
     u_eye, v_eye, n_eye = transform_to_eye(tangents[0], tangents[1], normal_params[0])
     r = max(norm(u_eye), norm(v_eye))
-    size = 2 * r * (n / z_eye) * (h_vp / (t - b))
-    k = dot(n_eye, inverse(dot(center, n_eye)))
-    pass_to_fragment(u_eye, v_eye, normal_params, clip_lines, k)
+    size = 2 * r * (near / z_eye) * (h_vp / (top - bottom))
+    k_scalar = dot(center, n_eye) # Precompute c^T n
+    pass_to_fragment(u_eye, v_eye, normal_params, clip_lines, k_scalar)
 
     # Fragment shader
     for pixel in rasterize_square(size):
         x, y = pixel.window_coords
-        q_n = vec3(x * (w_h / w_vp) - w_h/2, y * (h_n / h_vp) - h_n/2, -n)
-        q = q_n * k
+        q_n = vec3(x * (w_h / w_vp) - w_h/2, y * (h_n / h_vp) - h_n/2, -near)
+        denom = dot(q_n, n_eye)
+        if abs(denom) < 1e-6: discard # Avoid division by zero
+        q = q_n * (k_scalar / denom)
         u = dot(u_eye, q - center)
         v = dot(v_eye, q - center)
         if u*u + v*v > 1: discard
-        if clip_lines:
+        if clip_lines is not None:
             for a, b, c in clip_lines:
                 if a*u + b*v + c < 0: discard
         x_interp = normal_params[1] + normal_params[2] * u
         y_interp = normal_params[3] + normal_params[4] * v
-        normal_local = vec3(x_interp, y_interp, 1.0)
-        normal_eye = reconstruct_normal(normal_local, u_eye, v_eye, n_eye)
+        # Reconstruct normal in eye space from local frame (u_eye, v_eye, n_eye)
+        normal_eye = x_interp * u_eye + y_interp * v_eye + 1.0 * n_eye
         color = sample_cube_map(normalize(normal_eye))
         depth = q.z
-        return color, depth
+        output_color = color
+        output_depth = depth
 ```
 
 ### Parameters
 *   **Error Tolerance $\epsilon$:** Controls the coverage of splats during generation [S1].
-*   **Frustum Parameters:** $n, t, b, h_{vp}$ are standard camera settings [S1].
+*   **Frustum Parameters:** $near, top, bottom, h_{vp}$ are standard camera settings [S1].
 
 ### Edge Cases and Pitfalls
-*   **Underdetermined Systems:** If a splat covers fewer than 2 samples, the normal fitting linear system is underdetermined. Use the pseudo-inverse to find the least-norm solution [S1].
-*   **Affine Approximation:** Do not use an affine approximation for projection. It disables the exact per-pixel parameterization required for correct clipping and depth, and while it allows EWA filtering, the object-space filter alone is sufficient [S1].
+*   **Underdetermined Systems:** If a splat covers fewer than 2 samples, the normal fitting linear system is underdetermined [S1]. Use the pseudo-inverse to find the least-norm solution [S1].
+*   **Affine Approximation:** Do not use an affine approximation for projection [S1]. It disables the exact per-pixel parameterization required for correct clipping and depth, and while it allows EWA filtering, the object-space filter alone is sufficient [S1].
 *   **Backface Culling:** Optionally perform a conservative backface test in the vertex shader for closed models using the transformed normal [S1].
 
 ## Operating characteristics
@@ -137,7 +140,7 @@ def render_splat(center, tangents, normal_params, clip_lines=None):
 *   **Speed:** Achieves up to 4 million Phong-shaded, filtered, and blended splats per second on modern GPUs [S1].
 
 ### Measured Performance
-*   **Quality vs. Count:** A torso model with 3,000 splats rendered with Phong Splatting achieves visual quality comparable to Phong-shaded triangle meshes. Flat shading requires 170,000 splats, and flat shading with Gaussian blending requires 33,000 splats for comparable quality [S1].
+*   **Quality vs. Count:** A torso model with 3,000 splats rendered with Phong Splatting achieves visual quality comparable to Phong-shaded triangle meshes [S1]. Flat shading requires 170,000 splats, and flat shading with Gaussian blending requires 33,000 splats for comparable quality [S1].
 
 ### Strengths and Limitations
 *   **Strengths:** Projectively correct per-pixel parameterization; exact depth values prevent blending artifacts; superior shading quality compared to flat or Gouraud-like splatting; efficient GPU implementation using cube maps for lighting [S1].
@@ -152,7 +155,7 @@ def render_splat(center, tangents, normal_params, clip_lines=None):
 *   Use [Deferred Surface Splatting](1072-deferred-surface-splatting.md) if deferred shading pipelines are already in place and per-pixel lighting overhead is a concern [S1].
 
 ## Background
-Phong Splatting was introduced in [S1]. It builds on the concept of varying normal fields proposed by [KV01], but differs by using a dense input point cloud and a linear normal field fit over the splat area, rather than local Taylor expansions at the center. It addresses the limitations of earlier point-based rendering systems that used constant normals, resulting in flat shading artifacts [S1]. The method leverages the programmable pipeline of modern GPUs, specifically vertex and fragment shaders, to achieve real-time performance [S1].
+Phong Splatting was introduced in [S1]. It builds on the concept of varying normal fields proposed by [KV01], but differs by using a dense input point cloud and a linear normal field fit over the splat area, rather than local Taylor expansions at the center [S1]. It addresses the limitations of earlier point-based rendering systems that used constant normals, resulting in flat shading artifacts [S1]. The method leverages the programmable pipeline of modern GPUs, specifically vertex and fragment shaders, to achieve real-time performance [S1].
 
 ## Sources
 [S1] Phong Splatting, https://doi.org/10.2312/spbg/spbg04/025-032, fetched 2026-10-26

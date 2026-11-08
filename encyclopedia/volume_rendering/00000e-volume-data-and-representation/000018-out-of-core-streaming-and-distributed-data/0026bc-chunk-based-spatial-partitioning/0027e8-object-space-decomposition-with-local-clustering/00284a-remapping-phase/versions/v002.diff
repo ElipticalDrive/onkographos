@@ -1,0 +1,242 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-The Remapping Phase is a view-dependent preprocessing step in chunk-based spatial partitioning for parallel volume rendering, designed to reassign data clusters to processors based on the current viewing parameters [S1, unofficial]. It solves the problem of load imbalance and communication overhead that arises when the camera or transfer function changes, ensuring that clusters with high interaction (pseudo-boundary faces) remain co-located on the same processor [S1, unofficial]. It is distinguished from its parent method, Object-space decomposition with local clustering, by introducing a dynamic graph-partitioning loop (Graph Update, Graph Partitioning, Cluster Migration) that adapts the static clustering solution to the current view [S1, unofficial].
++The Remapping Phase is a view-dependent preprocessing step in chunk-based spatial partitioning for parallel volume rendering, designed to reassign data clusters to processors based on the current viewing parameters [S1, unofficial]. It solves load imbalance and communication overhead when the camera changes, ensuring clusters with high interaction remain co-located [S1, unofficial]. It adapts the static clustering solution from Object-space decomposition with local clustering to the current view via a dynamic graph-partitioning loop [S1, unofficial].
+ 
+ ## How it works
+@@ -28,5 +28,5 @@
+ *   **Pseudo-boundary face:** A face of a cell in cluster $C_i$ that is shared by a cell in a different cluster $C_j$ [S1, unofficial].
+ *   **Boundary face:** A pseudo-boundary face that becomes a boundary face after remapping if the two clusters it separates are mapped to different processors [S1, unofficial].
+-*   **bf-face:** Boundary face (relative to the current mapping) [S1, unofficial].
++*   **bf-face:** Boundary face relative to the current mapping [S1, unofficial].
+ *   **ff-face:** Face relative to the local subvolume (all local clusters treated as one) [S1, unofficial].
+ 
+@@ -48,12 +48,12 @@
+ 
+ Where $(x_k, y_k)$ are the NPC coordinates of the $k$-th vertex of the face [S1, unofficial].
+-*   **Optimization:** The implementation exploits that a bf-internal face of a cell is an ff-internal face of a neighbor cell. This allows computing the projection area of each internal face only once, avoiding expensive face orientation checks [S1, unofficial].
++*   **Optimization:** The implementation exploits that a bf-internal face of a cell is an ff-internal face of a neighbor cell [S1, unofficial]. This allows computing the projection area of each internal face only once, avoiding expensive face orientation checks [S1, unofficial].
+ *   **Error:** Discretization errors from screen pixelation cancel out due to the summation of contiguous floating-point area values [S1, unofficial].
+ 
+ **2. Estimating $S_{\mathcal{C}}^v$ (Samples):**
+ Estimated by calculating the volume of the cluster in NPC [S1, unofficial].
+-*   Volume in NPC is the number of unit cubes.
++*   Volume in NPC is the number of unit cubes [S1, unofficial].
+ *   Samples per unit cube = $1/A_c$, where $A_c$ is the distance between successive sampling points along a ray [S1, unofficial].
+-*   **Efficient Calculation:** Instead of summing volumes in NPC for each view, the method uses a constant scaling factor $k$ between the view-independent WSC system and the view-dependent NPC system [S1, unofficial]. The volume of the cluster in WSC is stored in `ClusterData`. Thus:
++*   **Efficient Calculation:** Instead of summing volumes in NPC for each view, the method uses a constant scaling factor $k$ between the view-independent WSC system and the view-dependent NPC system [S1, unofficial]. The volume of the cluster in WSC is stored in `ClusterData` [S1, unofficial]. Thus:
+     $$S_{\mathcal{C}}^v \propto \text{Volume}_{WSC} \times \frac{k}{A_c}$$
+     The estimation error is confined to the boundary surface of the cluster [S1, unofficial].
+@@ -77,5 +77,5 @@
+ 1.  **Concurrent Partitioning:** All processors concurrently execute RM-MeTiS for $K$-way partitioning of their copies of $Q_c$, using different random seeds [S1, unofficial].
+ 2.  **Global Minimum:** A global-minimum operation is performed on the cutsize values of the local partition solutions to determine the best partition [S1, unofficial].
+-3.  **Broadcast Solution:** The processor producing the best solution broadcasts its partition vector, which corresponds to the new mapping function $M_e$ [S1, unofficial]. This avoids the worst-case behavior of the randomized RM-MeTiS algorithm [S1, unofficial].
++3.  **Broadcast Solution:** The processor producing the best solution broadcasts its partition vector, which corresponds to the new mapping function $M_e$ [S1, unofficial]. This scheme is an effort towards avoiding the worst case behavior of RM-MeTiS which is a randomized algorithm [S1, unofficial].
+ 
+ ### Step 3: Cluster Migration (CM)
+@@ -86,109 +86,122 @@
+ 
+ ```python
+-def remapping_phase(viewing_param v, previous_graph Q_c, current_mapping M_e, K, ClusterData):
+-    """
+-    Performs the Remapping Phase to reassign clusters to processors.
+-    """
++def remapping_phase(viewing_param, previous_graph, current_mapping, K, cluster_data):
+     # Step 1: Graph Update (GU)
+-    
+-    # 1.1 Compute local graph portions
+-    local_graph = compute_local_graph(Q_c, v, M_e, ClusterData)
+-    
+-    # 1.2 Augment with migration costs
+-    # T_c is the cluster-migration cost function
+-    augmented_local_graph = augment_with_migration_costs(local_graph, M_e, T_c)
+-    
+-    # 1.3 All-to-All Broadcast to gather global graph
++    local_graph = compute_local_graph(previous_graph, viewing_param, current_mapping, cluster_data)
++    augmented_local_graph = augment_with_migration_costs(local_graph, current_mapping)
+     global_Q_c = all_to_all_broadcast(augmented_local_graph)
+-    
++
+     # Step 2: Graph Partitioning (GP)
+-    
+-    # 2.1 Concurrent RM-MeTiS with different seeds
+     my_seed = get_unique_seed()
+     local_partition, local_cutsize = rm_metis(global_Q_c, K, my_seed)
+-    
+-    # 2.2 Global Minimum to find best partition
+     best_cutsize, best_processor_id = global_minimum(local_cutsize)
+-    
+-    # 2.3 Broadcast new mapping from best processor
++
+     if my_processor_id == best_processor_id:
+         new_mapping = local_partition
+     else:
+         new_mapping = receive_broadcast_from(best_processor_id)
+-        
++
+     # Step 3: Cluster Migration (CM)
+-    
+-    # 3.1 Migrate clusters
+     for cluster_id, new_processor in new_mapping.items():
+         if new_processor != current_mapping[cluster_id]:
+-            migrate_cluster(cluster_id, new_processor, ClusterData[cluster_id])
+-            
+-    # 3.2 Update local map
++            migrate_cluster(cluster_id, new_processor, cluster_data[cluster_id])
++
+     current_mapping = new_mapping
+     update_cluster_map_array(current_mapping)
+-    
+     return new_mapping
+ 
++def compute_local_graph(previous_graph, viewing_param, current_mapping, cluster_data):
++    # Recompute node and edge weights for the new viewing parameter
++    # For the first instance, use the view-independent graph
++    new_graph = copy_graph(previous_graph)
++    for node in new_graph.nodes:
++        node.weight = estimate_node_weight(node.cluster_id, viewing_param, cluster_data)
++    for edge in new_graph.edges:
++        edge.weight = estimate_edge_weight(edge.cluster_i, edge.cluster_j, viewing_param)
++    return new_graph
++
++def augment_with_migration_costs(local_graph, current_mapping):
++    # Augment local graph using cluster-migration cost function Tc and current mapping Me
++    # Not given in the sources.
++    return local_graph
++
++def all_to_all_broadcast(local_graph):
++    # Perform all-to-all broadcast so each processor gathers a copy of the global graph
++    # Implementation depends on MPI or similar; here we assume a collective operation
++    global_graph = collective_all_to_all(local_graph)
++    return global_graph
++
++def rm_metis(graph, K, seed):
++    # Execute RM-MeTiS for K-way partitioning
++    partition, cutsize = metis_partition(graph, K, seed)
++    return partition, cutsize
++
++def global_minimum(cutsize_values):
++    # Find the minimum cutsize across all processors
++    best_cutsize = min(cutsize_values)
++    best_processor_id = cutsize_values.index(best_cutsize)
++    return best_cutsize, best_processor_id
++
++def receive_broadcast_from(source_id):
++    # Receive partition vector from the best processor
++    return broadcast_data[source_id]
++
++def migrate_cluster(cluster_id, new_processor, data):
++    # Send ClusterData to new home processor
++    send_data(new_processor, data)
++
++def update_cluster_map_array(mapping):
++    # Update local ClusterMapArray structure
++    local_map.update(mapping)
++
++def estimate_node_weight(cluster_id, viewing_param, cluster_data):
++    # w(n_i) = I_C^v t_I + S_C^v t_S + R_C^v t_R
++    I_C_v = estimate_ray_face_intersections(cluster_id, viewing_param)
++    S_C_v = estimate_samples(cluster_id, viewing_param, cluster_data)
++    # R_C_v is not used in node weighting
++    return I_C_v * t_I + S_C_v * t_S + 0 * t_R
++
++def estimate_ray_face_intersections(cluster_id, viewing_param):
++    # Sum projection areas of bf-faces
++    faces = get_boundary_faces(cluster_id, viewing_param)
++    area_sum = 0.0
++    for face in faces:
++        area_sum += compute_projection_area(face.vertices)
++    return area_sum
++
++def estimate_samples(cluster_id, viewing_param, cluster_data):
++    # Volume in WSC * (k / A_c)
++    volume_wsc = cluster_data[cluster_id].volume_wsc
++    A_c = get_sampling_distance(viewing_param)
++    k = get_scaling_factor()
++    return volume_wsc * (k / A_c)
++
++def estimate_edge_weight(cluster_i, cluster_j, viewing_param):
++    # Sum projection areas of pseudo-boundary faces
++    shared_faces = get_shared_faces(cluster_i, cluster_j)
++    weight = 0.0
++    for face in shared_faces:
++        weight += compute_projection_area(face.vertices)
++    return weight
++
+ def compute_projection_area(vertices):
+-    """
+-    Computes projection area of a triangular face in NPC.
+-    vertices: list of 3 tuples (x, y)
+-    """
+     x1, y1 = vertices[0]
+     x2, y2 = vertices[1]
+     x3, y3 = vertices[2]
+     return x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2)
+-
+-def estimate_node_weight(cluster_id, viewing_param v, ClusterData):
+-    """
+-    Estimates w(n_i) for cluster C_i.
+-    """
+-    # 1. Estimate I_C^v (Ray-Face Intersections)
+-    # Sum projection areas of bf-faces
+-    # Optimization: compute internal face areas only once
+-    bf_faces = get_boundary_faces(cluster_id, current_mapping)
+-    I_C_v = sum(compute_projection_area(face.vertices) for face in bf_faces)
+-    
+-    # 2. Estimate S_C^v (Samples)
+-    # Volume in WSC * (k / A_c)
+-    volume_wsc = ClusterData[cluster_id].volume_wsc
+-    A_c = get_sampling_distance(viewing_param)
+-    k = get_scaling_factor()
+-    S_C_v = volume_wsc * (k / A_c)
+-    
+-    # 3. Estimate R_C^v (Ray-Segments)
+-    # Not used in node weight, but computed for edge weight logic if needed
+-    # R_C_v = sum(projection_areas(ff_external_faces) + projection_areas(ff_pseudo_boundary_faces))
+-    
+-    # Unit costs t_I, t_S, t_R are pre-determined
+-    return I_C_v * t_I + S_C_v * t_S + 0 * t_R # R_C_v cost excluded from node weight
+-
+-def estimate_edge_weight(cluster_i, cluster_j, viewing_param v):
+-    """
+-    Estimates w(n_i, n_j) based on pseudo-boundary faces.
+-    """
+-    shared_faces = get_shared_faces(cluster_i, cluster_j)
+-    weight = sum(compute_projection_area(face.vertices) for face in shared_faces)
+-    return weight
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Transfer Function Changes:** Node and edge weights do not depend on the transfer function (mapping scalar values to color/opacity). If only the transfer function changes, the remapping phase should be skipped [S1, unofficial].
+-*   **Image Size Changes:** While node and edge weights change with image size, their relative weights remain the same. If only image size changes, the remapping phase can be skipped [S1, unofficial].
++*   **Transfer Function Changes:** Node and edge weights do not depend on the transfer function (mapping scalar values to color/opacity) [S1, unofficial]. If only the transfer function changes, the remapping phase should be skipped [S1, unofficial].
++*   **Image Size Changes:** While node and edge weights change with image size, their relative weights remain the same [S1, unofficial]. If only image size changes, the remapping phase can be skipped [S1, unofficial].
+ *   **First Visualization:** For the first instance, the graph is effectively the view-independent contracted visualization graph $Q_c$ [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### Graph Update
+-The first step of the Remapping Phase where the remapping graph $Q_c$ is updated in parallel for the new viewing parameter. It involves computing local graph portions, augmenting them with migration costs, and performing an all-to-all broadcast to construct the global graph [S1, unofficial].
+-
+-### Graph Partitioning
+-The second step where all processors concurrently execute RM-MeTiS for $K$-way partitioning using different random seeds. The best partition is selected via a global-minimum operation on cutsize values, and the solution is broadcast to all processors to determine the new mapping [S1, unofficial].
+-
+ ### Cluster Migration
+-The third step where clusters with changed mappings migrate to new home processors via personalized communication of `ClusterData` structures. Each processor updates its `ClusterMapArray` to reflect the new mapping [S1, unofficial].
++The third step where clusters with changed mappings migrate to new home processors via personalized communication of `ClusterData` structures [S1, unofficial]. Each processor updates its `ClusterMapArray` to reflect the new mapping [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by the all-to-all broadcast of the graph and the RM-MeTiS partitioning. RM-MeTiS is a randomized algorithm, so performance may vary slightly between runs due to different seeds [S1, unofficial].
++*   **Time Complexity:** Dominated by the all-to-all broadcast of the graph and the RM-MeTiS partitioning [S1, unofficial].
+ *   **Memory Complexity:** Requires each processor to store a copy of the global remapping graph $Q_c$ during the GP step [S1, unofficial].
+ *   **Strengths:**
+@@ -198,5 +211,5 @@
+ *   **Limitations:**
+     *   View-dependent preprocessing overhead (GU and GP steps) [S1, unofficial].
+-    *   RM-MeTiS is randomized; worst-case behavior is mitigated by global minimum selection but adds communication overhead [S1, unofficial].
++    *   RM-MeTiS is randomized; the global-minimum selection mitigates worst-case behavior but adds communication overhead [S1, unofficial].
+ *   **When to use:** When the viewing parameter (camera position/orientation) changes significantly, affecting the projected areas and thus the load distribution [S1, unofficial].
+ *   **When not to use:** When only the transfer function changes, or when only the image size changes (relative weights remain constant) [S1, unofficial].

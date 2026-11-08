@@ -1,1390 +1,365 @@
-NeRFPlayer: A Streamable Dynamic Scene Representation with
-Decomposed Neural Radiance Fields
-Liangchen Song1 Anpei Chen2,4 Zhong Li3 Zhang Chen3
-Junsong Yuan1 Yi Xu3 Andreas Geiger4
-arXiv:2210.15947v2 [cs.CV] 18 Feb 2023
-1
-3
-Lele Chen3
-University at Buffalo 2 ETH Zürich
-OPPO US Research Center, InnoPeak Tech 4 University of Tübingen
-https://bit.ly/nerfplayer
-59.8 KB/frame
-(a) Inputs
-(b) Real-time rendering
-78.8 KB/frame
-(c) Low bitrate streaming
-Figure 1. (a) Our framework takes as input the RGB images captured from a camera array or a single moving camera. (b) After offline
-optimization, our framework can render a novel view and perform temporal interpolation interactively. (c) Our framework is highly
-configurable. Adopting TensoRF-CP [11] voxel representation in our framework results in low bitrate streaming of high-quality rendering.
-1. Introduction
-Abstract
-Representing scenes as Neural Radiance Fields (NeRF)
-has brought a series of breakthroughs in 3D reconstruction
-and analysis [51, 88]. High-fidelity real-time rendering of
-real-world scenes now can be obtained after a few seconds
-of training [52, 67]. The rendering system only requires a
-few real-world RGB images [49], but can well model scenes
-as small as a cell [43] and as large as a city [76] or even a
-black hole [33].
-Visually exploring in a real-world 4D spatiotemporal
-space freely in VR has been a long-term quest. The task
-is especially appealing when only a few or even single RGB
-cameras are used for capturing the dynamic scene. To this
-end, we present an efficient framework capable of fast reconstruction, compact modeling, and streamable rendering. First, we propose to decompose the 4D spatiotemporal
-space according to temporal characteristics. Points in the
-4D space are associated with probabilities of belonging to
-three categories: static, deforming, and new areas. Each
-area is represented and regularized by a separate neural
-field. Second, we propose a hybrid representations based
-feature streaming scheme for efficiently modeling the neural fields. Our approach, coined NeRFPlayer, is evaluated
-on dynamic scenes captured by single hand-held cameras
-and multi-camera arrays, achieving comparable or superior rendering performance in terms of quality and speed
-comparable to recent state-of-the-art methods, achieving
-reconstruction in 10 seconds per frame and interactive rendering.
-Despite NeRF’s success in static scenes, extending it to
-handle dynamic scenes remains challenging. Introducing
-an extra time dimension t to NeRF’s 5D representation (3D
-location x, y, z and 2D viewing direction θ, φ) is non-trivial
-for the following two reasons. First, the supervisory signal
-for a spatiotemporal point (x, y, z, t) is sparser than a static
-point (x, y, z). Multi-view images of static scenes are easy
-to access as we can move the camera around, but an extra
-view in dynamic scenes requires an extra recording camera, leading to sparse input views. Second, the appearance
-and geometry frequency of the scene are different along the
-spatial axis and temporal axis. The content usually changes
-a lot when moving from one location to another location,
-but the background scene is unlikely to completely change
-from one timestamp to another. An inappropriate frequency
+# NeRFPlayer: A Streamable Dynamic Scene Representation with Decomposed Neural Radiance Fields
+
+Liangchen Song1 Anpei Chen2,4 Zhong Li3 Zhang Chen3 Lele Chen3 Junsong Yuan1 Yi Xu3 Andreas Geiger4
+
+1University at Buffalo 2ETH Zurich ¨
+
+3OPPO US Research Center, InnoPeak Tech 4University of Tubingen ¨
+
+#### [https://bit.ly/nerfplayer](https://lsongx.github.io/projects/nerfplayer.html)
+
+Figure 1. (a) Our framework takes as input the RGB images captured from a camera array or a single moving camera. (b) After offline optimization, our framework can render a novel view and perform temporal interpolation interactively. (c) Our framework is highly configurable. Adopting TensoRF-CP [11] voxel representation in our framework results in low bitrate streaming of high-quality rendering.
+
+#### Abstract 1. Introduction
+
+Visually exploring in a real-world 4D spatiotemporal space freely in VR has been a long-term quest. The task is especially appealing when only a few or even single RGB cameras are used for capturing the dynamic scene. To this end, we present an efficient framework capable of fast reconstruction, compact modeling, and streamable rendering. First, we propose to decompose the 4D spatiotemporal space according to temporal characteristics. Points in the 4D space are associated with probabilities of belonging to three categories: static, deforming, and new areas. Each area is represented and regularized by a separate neural field. Second, we propose a hybrid representations based feature streaming scheme for efficiently modeling the neural fields. Our approach, coined NeRFPlayer, is evaluated on dynamic scenes captured by single hand-held cameras and multi-camera arrays, achieving comparable or superior rendering performance in terms of quality and speed comparable to recent state-of-the-art methods, achieving reconstruction in 10 seconds per frame and interactive rendering.
+
+Representing scenes as Neural Radiance Fields (NeRF) has brought a series of breakthroughs in 3D reconstruction and analysis [51, 88]. High-fidelity real-time rendering of real-world scenes now can be obtained after a few seconds of training [52, 67]. The rendering system only requires a few real-world RGB images [49], but can well model scenes as small as a cell [43] and as large as a city [76] or even a black hole [33].
+
+Despite NeRF's success in static scenes, extending it to handle dynamic scenes remains challenging. Introducing an extra time dimension t to NeRF's 5D representation (3D location x, y, z and 2D viewing direction θ, φ) is non-trivial for the following two reasons. First, the supervisory signal for a spatiotemporal point (x, y, z, t) is sparser than a static point (x, y, z). Multi-view images of static scenes are easy to access as we can move the camera around, but an extra view in dynamic scenes requires an extra recording camera, leading to sparse input views. Second, the appearance and geometry frequency of the scene are different along the spatial axis and temporal axis. The content usually changes a lot when moving from one location to another location, but the background scene is unlikely to completely change from one timestamp to another. An inappropriate frequency
+
+
+
 Work done while the first author was an intern at Innopeak Tech.
-1
-modeling for the time t dimension results in poor temporal
-interpolation performance.
-A lot of progress has been made in addressing the
-aforementioned two challenges. Existing solutions include adopting motion models for matching the points (e.g.,
-[16,40,58,59,64,77]) and leveraging data-driven priors like
-depth and optical flow (e.g., [14,37,81,87]). Different from
-existing works, we are motivated by the observation that in
-dynamic scenes different spatial areas have different temporal characteristics. We assume that there are three kinds of
-temporal patterns in a dynamic scene (Figs. 2 and 3): static,
-deforming, and new areas. We thus propose to decompose
-the dynamic scene into these categories, which is achieved
-by a decomposition field that predicts the point-wise probabilities of being static, deforming, and new. The decomposition field is self-supervised and regularized by a manually
-assigned global parsimony regularization (e.g., suppressing
-the global probabilities of being new).
-The proposed decomposition can address both of the
-aforementioned challenges. First, different temporal regularizations are introduced for each decomposed area, thus
-alleviating the ambiguity in reconstruction from sparse observations. For instance, the static area decomposition simplifies the dynamic modeling to a static scene modeling
-problem. The deforming areas enforce the foreground object to be consistent in the dynamic scene. Second, the
-scene is split into different areas according to their temporal
-characteristics, thus resulting in consistent frequency in the
-time dimension in each of the areas.
-In response to the discrepancy between spatial and temporal frequency, we further decouple spatial and temporal
-dimensions based on the recent developed hybrid representations [11, 52, 67, 73]. Hybrid representations maintain a
-grid of (x, y, z) feature volumes for fast rendering. Instead
-of designing a grid of (x, y, z, t) feature volumes, we treat
-the channels of (x, y, z) feature volumes as temporally dependent. To support streamable dynamic scene representation, we propose a sliding window scheme on the feature
-channels to introduce t into the representation (Fig. 4). Sliding window not only supports streaming of the feature volumes, but also implicitly encourages the representation to
-be compact by leveraging the overlapped channels in adjacent frames.
-For validation, we conduct experiments on datasets
-captured under both single-camera and multi-camera settings. Our extensive ablation studies validate our proposed
-method in three aspects: 1) the necessity of modeling all of
-the three areas on single-camera datasets, 2) the necessity
-of decomposing static areas on multi-camera datasets, and
-3) the necessity of deforming decomposition on inputs with
-large frame-wise motion even for multi-camera datasets. To
-sum up, our contributions are as follows:
-ing to their temporal characteristics. The decomposition is achieved by a decomposition field that takes as
-input each (x, y, z, t) point and outputs probabilities
-belonging to three categories: static, deforming, and
-new.
-• We design a self-supervised scheme for optimizing the
-decomposition field and regularizing the decomposition field with a global parsimony loss.
-• We design a sliding window scheme on recently developed hybrid representations for efficiently modeling spatiotemporal fields.
-• We present extensive experiments and interactive rendering demos on both single-camera and multi-camera
-datasets. Our ablation studies validate the implied regularizations behind the proposed three temporal patterns.
-2. Related Work
-2.1. Neural Fields
-Neural fields are neural networks that take in the coordinates and output the properties of that point [88]. 3D representations based on neural fields have made tremendous
-advancements in recent years. The pioneering work Occupancy Networks [48] represents the geometry of 3D objects
-with a continuous decision boundary modeled by a neural network. Occupancy Networks are further improved to
-model dynamic objects [54]. Concurrently, DeepSDF [57]
-represents the geometry with signed distance function with
-a network. Chibane et al. [12] predicts the unsigned distance field for 3D shapes from point clouds. NeRF [51], a
-milestone work, proposes to represent the scene with a 5D
-function modeled by MLP. NeRF significantly improves the
-performance of novel view synthesis (i.e., image-based rendering). The scene representation in NeRF inspired a number of works focusing on 3D modeling, such as human face
-and body capture [24, 42, 55, 61, 62, 72], relighting [4, 5, 71]
-and 3D content generation [9, 10, 22, 25, 31, 69, 78].
-Hybrid Representation Scenes are implicitly represented by MLPs in vanilla NeRF and forwarding with the
-MLPs is time-consuming. Some methods like DONeRF
-[53] accelerate the sampling step [15, 32, 39, 63]. HyperReel [1] and ENeRF [38] have adapted this idea in dynamic
-scenes. Another set of insightful methods [20, 23, 41, 66,
-84, 85, 91] are designed by adopting explicit data structures to efficiently query from the fields. Further, hybrid
-representations are developed by leveraging both explicit
-and implicit representations to improve the differentiability of the framework. DVGO [73] uses two feature voxels
-• We propose to decompose the dynamic scene accord2
-to represent occupancy and appearance. The feature vectors queried from the voxels are decoded by small MLPs.
-Plenoxels [67] prune empty spaces and save the sphere harmonic coefficients. InstantNGP [52] proposes a hash encoding of the saved feature grids and solves hashing collision by multi-scale encoding and small MLP decoding.
-TensoRF [11] leverages tensor decomposition to reduce the
-model size of the voxels. Hybrid representations are further leveraged for efficient dynamic scene modeling. Recent concurrent works [16, 18, 40] propose to model canonical spaces with voxels and motion with deformation fields.
-Li et al. [35] propose to stream the difference of voxels in
-dynamic scenes. Different from the above methods, our
-method decomposes the scene into different areas and models them separately. A straightforward InstantNGP based
-dynamic representation is adding extra input dimension of
-time, but such a baseline requires the full representation of
-a dynamic sequence to be completely loaded into the GPU
-memory before rendering. For TensoRF based dynamic
-modeling, D-TensoRF [27] uses a 5D tensor to represent
-a 4D spatiotemporal grid. HexPlane [7] and K-Planes [17]
-propose to decompose the dynamic scene to a set of planes.
-Our method can be widely applicable, as long as the representation adopts feature vectors for modeling points in the
-space.
-stone work developed by Collet et al. [13] utilizes tracked
-textured meshes for free-viewpoint video streaming. With
-RGB, infrared (IR), and silhouette information as the input, their system can output accurate geometric, detailed
-texture, and efficient streaming. Another impressive system developed by Broxton et al. [6] proposes multi-sphere
-image based Layered Meshes. The capturing setting is a
-low-cost hemispherical array with 46 synchronized cameras
-and Layered Meshes are validated to be efficient and can
-well-handle non-Lambertian surfaces with view-dependent
-or semi-transparent effects. Bansal et al. [2] use convolutional neural nets to compose static and dynamic parts of
-the event and then adopt U-Net to render images from intermediate results composited from depth-based re-projected
-images. Neural Volumes (NV) [44] leverages differentiable
-volume rendering for optimizing a 3D volume representation, which can be transformed from 2D input RGB images
-using an encoder-decoder network. NV is further strengthened in [45] with volumetric primitives. X-Fields [3] consider input images from different view, time or illumination conditions in structured captures. DyNeRF [36] assign
-observation frames with a set of compact latent codes and
-then use time-conditioned neural radiance fields to represent dynamic scenes. Fourier PlenOctrees [82] extend the
-real-time rendering framework PlenOctrees [91] to dynamic
-scenes. DeVRF [40] proposes a voxel-based representation
-that first reconstructs a canonical object from multi-view
-dense supervisions and then reconstructs deformation from
-few-view observations.
-Scene Decomposition Neural fields have been adopted
-for decomposing scenes. Yang et al. [89] and Zhang et al.
-[93] decompose the scene by objects for editing. DeRF [65]
-spatially decomposes the scene and uses small networks for
-each area for efficiency. Kobayashi et al. [29] and Tschernezki et al. [79] semantically decompose the scene with
-pre-trained models. Ost et al. [56] decompose scenes into
-semantic scene graphs. Objects are decomposed by motion in NeuralDiff [80] and STaR [92]. More recently, a
-decomposition between static and dynamic areas is studied
-in D2 NeRF [86] and Sharma et al. [70]. Our decomposition
-is different from existing works since we decompose areas
-according to the temporal changing patterns.
-Another thread of research aims at modeling dynamic
-scenes without the requirements of multiple synchronized
-cameras. Multi-view information is collected by moving the
-camera around in the dynamic space. The setting of singlecamera input is much more challenging than the multicamera setting mentioned above. Data-driven solutions like
-video depth estimation [30, 46] are developed. Based on
-the priors and motivated by the success of NeRF, motions
-are modeled by neural fields. Some methods first define
-a canonical space that is modeled by a NeRF, then align
-the following frames from the canonical space. Representative methods include D-NeRF [64], Nerfies [58] and NRNeRF [77]. The trajectory of points is modeled by a neural
-field in DCT-NeRF [81]. Directly modeling the 4D field
-by introducing an extra time dimension into the original radiance field is adopted in NSFF [37], VideoNeRF [87], and
-NeRFlow [14]. HyperNeRF [59] points out the issue of motion inconsistency in topologically varying scenes and proposes a hyperspace representation, which is inspired by the
-level-set methods, for optimizing motion in a more smooth
-solution space. Gao et al. [19] demonstrate the discrepancy
-between the casual monocular video and the above existing
-monocular testing videos.
-2.2. 4D Modeling of Dynamic Scenes
-Free viewpoint rendering from video captures has been
-widely studied over the decades. The idea of viewing an
-event from multiple perspectives dates back to Multiple
-Perspective Interactive Video [26], in which 3D environments are generated with dynamic motion models. Virtualized Reality [28] design 3D dome and recovered 3D structure based on multi-camera stereo methods. Inspired by
-image-based rendering [21, 34], some video-based rendering methods are developed [8, 68, 90], which requires dense
-capturing of the scene. Zitnick et al. [95] propose a layered depth image representation for the high-quality videobased rendering of dynamic scenes. More recently, a mile-
-The above methods are able to generate impressive re3
-Figure 4. The proposed streamable hybrid representation. A timedependent sliding window is adopted for streaming the feature
-channels.
-Figure 2. First row: We categorize the areas in a dynamic scene
-into three groups: deforming, new and static areas. Second row:
-Visualization of the self-supervised decomposition obtained from
-our framework. Red and blue areas indicate estimated high and
-low probabilities of a category.
-d = (θ, φ) is the viewing direction. The pixel color C of a
-camera ray r is computed by accumulating a set of samples
-on the ray with volume rendering. Let the optical origin and
-direction of the camera be o and d, then a set of points are
-sampled by pi = o + id and the expected color C(r) is
-computed by
-Z if
-C(r) =
-Ri
-
-
-e− in σ(pj ) dj σ pi c pi , d di,
-(1)
-in
-where in , if are near and far bounds. Numerical approximation by summing up a set of sample points on the ray is
-used for computing the integration in Eq. (1). In vanilla
-NeRF, the radiance field is implicitly represented by an
-MLP that takes in the point p as input and outputs its density and color. The MLP is then trained with a reconstruction loss between the reconstructed color and ground-truth
-color Cgt (r), i.e.,
-X
-Lrec =
-kC(r) − Cgt (r)k22 ,
-(2)
-Figure 3. A toy example of 2D dynamic sequence interpolation.
-The first row shows the 2D input sequence with missing frames.
-Without modeling deformation d(·), the second row fails to interpolate the rigid motion of ‘2022’. Without modeling newness
-n(·), the third row fails to interpolate the gradually appearing effect. Full decomposition handles both phenomena well.
-r∈R
-sults under various settings. However, rendering with both
-single- and multi-camera inputs can be further studied, such
-as the effectiveness of motion modeling with multi-camera
-inputs. Moreover, a tradeoff still exists among model size,
-training and rendering speed, and rendering quality. Our
-method studies both single- and multi-camera inputs and
-focuses on efficient and high-quality free-viewpoint video
-rendering.
+
+modeling for the time t dimension results in poor temporal interpolation performance.
+
+A lot of progress has been made in addressing the aforementioned two challenges. Existing solutions include adopting motion models for matching the points (e.g., [16,40,58,59,64,77]) and leveraging data-driven priors like depth and optical flow (e.g., [14,37,81,87]). Different from existing works, we are motivated by the observation that in dynamic scenes different spatial areas have different temporal characteristics. We assume that there are three kinds of temporal patterns in a dynamic scene (Figs. 2 and 3\): static, deforming, and new areas. We thus propose to decompose the dynamic scene into these categories, which is achieved by a decomposition field that predicts the point-wise probabilities of being static, deforming, and new. The decomposition field is self-supervised and regularized by a manually assigned global parsimony regularization (e.g., suppressing the global probabilities of being new).
+
+The proposed decomposition can address both of the aforementioned challenges. First, different temporal regularizations are introduced for each decomposed area, thus alleviating the ambiguity in reconstruction from sparse observations. For instance, the static area decomposition simplifies the dynamic modeling to a static scene modeling problem. The deforming areas enforce the foreground object to be consistent in the dynamic scene. Second, the scene is split into different areas according to their temporal characteristics, thus resulting in consistent frequency in the time dimension in each of the areas.
+
+In response to the discrepancy between spatial and temporal frequency, we further decouple spatial and temporal dimensions based on the recent developed hybrid representations [11, 52, 67, 73]. Hybrid representations maintain a grid of (x, y, z) feature volumes for fast rendering. Instead of designing a grid of (x, y, z, t) feature volumes, we treat the channels of (x, y, z) feature volumes as temporally dependent. To support streamable dynamic scene representation, we propose a sliding window scheme on the feature channels to introduce t into the representation (Fig. 4\). Sliding window not only supports streaming of the feature volumes, but also implicitly encourages the representation to be compact by leveraging the overlapped channels in adjacent frames.
+
+For validation, we conduct experiments on datasets captured under both single-camera and multi-camera settings. Our extensive ablation studies validate our proposed method in three aspects: 1) the necessity of modeling all of the three areas on single-camera datasets, 2) the necessity of decomposing static areas on multi-camera datasets, and 3) the necessity of deforming decomposition on inputs with large frame-wise motion even for multi-camera datasets. To sum up, our contributions are as follows:
+
+- We propose to decompose the dynamic scene accord-
+
+ing to their temporal characteristics. The decomposition is achieved by a decomposition field that takes as input each (x, y, z, t) point and outputs probabilities belonging to three categories: static, deforming, and new.
+
+- We design a self-supervised scheme for optimizing the decomposition field and regularizing the decomposition field with a global parsimony loss.
+- We design a sliding window scheme on recently developed hybrid representations for efficiently modeling spatiotemporal fields.
+- We present extensive experiments and interactive rendering demos on both single-camera and multi-camera datasets. Our ablation studies validate the implied regularizations behind the proposed three temporal patterns.
+
+### 2. Related Work
+
+#### 2.1. Neural Fields
+
+Neural fields are neural networks that take in the coordinates and output the properties of that point [88]. 3D representations based on neural fields have made tremendous advancements in recent years. The pioneering work Occupancy Networks [48] represents the geometry of 3D objects with a continuous decision boundary modeled by a neural network. Occupancy Networks are further improved to model dynamic objects [54]. Concurrently, DeepSDF [57] represents the geometry with signed distance function with a network. Chibane et al. [12] predicts the unsigned distance field for 3D shapes from point clouds. NeRF [51], a milestone work, proposes to represent the scene with a 5D function modeled by MLP. NeRF significantly improves the performance of novel view synthesis (i.e., image-based rendering). The scene representation in NeRF inspired a number of works focusing on 3D modeling, such as human face and body capture [24, 42,55, 61,62, 72], relighting [4,5,71] and 3D content generation [9, 10, 22, 25, 31, 69, 78].
+
+Hybrid Representation Scenes are implicitly represented by MLPs in vanilla NeRF and forwarding with the MLPs is time-consuming. Some methods like DONeRF [53] accelerate the sampling step [15, 32, 39, 63]. Hyper-Reel [1] and ENeRF [38] have adapted this idea in dynamic scenes. Another set of insightful methods [20, 23, 41, 66, 84, 85, 91] are designed by adopting explicit data structures to efficiently query from the fields. Further, hybrid representations are developed by leveraging both explicit and implicit representations to improve the differentiability of the framework. DVGO [73] uses two feature voxels to represent occupancy and appearance. The feature vectors queried from the voxels are decoded by small MLPs. Plenoxels [67] prune empty spaces and save the sphere harmonic coefficients. InstantNGP [52] proposes a hash encoding of the saved feature grids and solves hashing collision by multi-scale encoding and small MLP decoding. TensoRF [11] leverages tensor decomposition to reduce the model size of the voxels. Hybrid representations are further leveraged for efficient dynamic scene modeling. Recent concurrent works [16, 18, 40] propose to model canonical spaces with voxels and motion with deformation fields. Li et al. [35] propose to stream the difference of voxels in dynamic scenes. Different from the above methods, our method decomposes the scene into different areas and models them separately. A straightforward InstantNGP based dynamic representation is adding extra input dimension of time, but such a baseline requires the full representation of a dynamic sequence to be completely loaded into the GPU memory before rendering. For TensoRF based dynamic modeling, D-TensoRF [27] uses a 5D tensor to represent a 4D spatiotemporal grid. HexPlane [7] and K-Planes [17] propose to decompose the dynamic scene to a set of planes. Our method can be widely applicable, as long as the representation adopts feature vectors for modeling points in the space.
+
+Scene Decomposition Neural fields have been adopted for decomposing scenes. Yang et al. [89] and Zhang et al. [93] decompose the scene by objects for editing. DeRF [65] spatially decomposes the scene and uses small networks for each area for efficiency. Kobayashi et al. [29] and Tschernezki et al. [79] semantically decompose the scene with pre-trained models. Ost et al. [56] decompose scenes into semantic scene graphs. Objects are decomposed by motion in NeuralDiff [80] and STaR [92]. More recently, a decomposition between static and dynamic areas is studied in D2NeRF [86] and Sharma et al. [70]. Our decomposition is different from existing works since we decompose areas according to the temporal changing patterns.
+
+#### 2.2. 4D Modeling of Dynamic Scenes
+
+Free viewpoint rendering from video captures has been widely studied over the decades. The idea of viewing an event from multiple perspectives dates back to Multiple Perspective Interactive Video [26], in which 3D environments are generated with dynamic motion models. Virtualized Reality [28] design 3D dome and recovered 3D structure based on multi-camera stereo methods. Inspired by image-based rendering [21, 34], some video-based rendering methods are developed [8,68,90], which requires dense capturing of the scene. Zitnick et al. [95] propose a layered depth image representation for the high-quality videobased rendering of dynamic scenes. More recently, a milestone work developed by Collet et al. [13] utilizes tracked textured meshes for free-viewpoint video streaming. With RGB, infrared (IR), and silhouette information as the input, their system can output accurate geometric, detailed texture, and efficient streaming. Another impressive system developed by Broxton et al. [6] proposes multi-sphere image based Layered Meshes. The capturing setting is a low-cost hemispherical array with 46 synchronized cameras and Layered Meshes are validated to be efficient and can well-handle non-Lambertian surfaces with view-dependent or semi-transparent effects. Bansal et al. [2] use convolutional neural nets to compose static and dynamic parts of the event and then adopt U-Net to render images from intermediate results composited from depth-based re-projected images. Neural Volumes (NV) [44] leverages differentiable volume rendering for optimizing a 3D volume representation, which can be transformed from 2D input RGB images using an encoder-decoder network. NV is further strengthened in [45] with volumetric primitives. X-Fields [3] consider input images from different view, time or illumination conditions in structured captures. DyNeRF [36] assign observation frames with a set of compact latent codes and then use time-conditioned neural radiance fields to represent dynamic scenes. Fourier PlenOctrees [82] extend the real-time rendering framework PlenOctrees [91] to dynamic scenes. DeVRF [40] proposes a voxel-based representation that first reconstructs a canonical object from multi-view dense supervisions and then reconstructs deformation from few-view observations.
+
+Another thread of research aims at modeling dynamic scenes without the requirements of multiple synchronized cameras. Multi-view information is collected by moving the camera around in the dynamic space. The setting of singlecamera input is much more challenging than the multicamera setting mentioned above. Data-driven solutions like video depth estimation [30, 46] are developed. Based on the priors and motivated by the success of NeRF, motions are modeled by neural fields. Some methods first define a canonical space that is modeled by a NeRF, then align the following frames from the canonical space. Representative methods include D-NeRF [64], Nerfies [58] and NR-NeRF [77]. The trajectory of points is modeled by a neural field in DCT-NeRF [81]. Directly modeling the 4D field by introducing an extra time dimension into the original radiance field is adopted in NSFF [37], VideoNeRF [87], and NeRFlow [14]. HyperNeRF [59] points out the issue of motion inconsistency in topologically varying scenes and proposes a hyperspace representation, which is inspired by the level-set methods, for optimizing motion in a more smooth solution space. Gao et al. [19] demonstrate the discrepancy between the casual monocular video and the above existing monocular testing videos.
+
+The above methods are able to generate impressive re-
+
+
+
+
+
+Figure 2. First row: We categorize the areas in a dynamic scene into three groups: deforming, new and static areas. Second row: Visualization of the self-supervised decomposition obtained from our framework. Red and blue areas indicate estimated high and low probabilities of a category.
+
+Figure 3. A toy example of 2D dynamic sequence interpolation. The first row shows the 2D input sequence with missing frames. Without modeling deformation d(·), the second row fails to interpolate the rigid motion of '2022'. Without modeling newness n(·), the third row fails to interpolate the gradually appearing effect. Full decomposition handles both phenomena well.
+
+sults under various settings. However, rendering with both single- and multi-camera inputs can be further studied, such as the effectiveness of motion modeling with multi-camera inputs. Moreover, a tradeoff still exists among model size, training and rendering speed, and rendering quality. Our method studies both single- and multi-camera inputs and focuses on efficient and high-quality free-viewpoint video rendering.
+
+### 3. Preliminaries
+
+Our method leverages the rendering scheme proposed by NeRF [51] and hybrid representation for static scenes [11,41,52,67,73–75,85,94]. We first briefly review the rendering framework in NeRF, then we introduce the recently developed hybrid representation for efficient neural fields.
+
+For each point p = (x, y, z) in NeRF, we denote its volume density as σ(p) and its color as c(p, d), where
+
+Figure 4. The proposed streamable hybrid representation. A timedependent sliding window is adopted for streaming the feature channels.
+
+d = (θ, φ) is the viewing direction. The pixel color C of a camera ray r is computed by accumulating a set of samples on the ray with volume rendering. Let the optical origin and direction of the camera be o and d, then a set of points are sampled by pi = o + id and the expected color C(r) is computed by
+
+
+
+
+$$C(\mathbf{r}) = \int_{i_n}^{i^f} e^{-\int_{i_n}^i \sigma(\mathbf{p}_j) dj} \sigma(\mathbf{p}_i) \mathbf{c}(\mathbf{p}_i, \mathbf{d}) di, \quad (1)$$
+
+where in, if are near and far bounds. Numerical approximation by summing up a set of sample points on the ray is used for computing the integration in Eq. \(1\). In vanilla NeRF, the radiance field is implicitly represented by an MLP that takes in the point p as input and outputs its density and color. The MLP is then trained with a reconstruction loss between the reconstructed color and ground-truth color Cgt(r), i.e.,
+
+
+$$L_{\text{rec}} = \sum_{r \in \mathcal{R}} \|C(r) - C_{\text{gt}}(r)\|_2^2, \quad (2)$$
+
 where R is a batch of ray samples.
-The implicit representation in NeRF is highly compact
-but computationally expensive, resulting in slow training
-and rendering speed. Hybrid representations, in which
-both explicit and implicit representations can be adopted,
-are developed for efficiently reconstructing and rendering
-with a radiance field. Though these methods have their
-unique standouts, all these hybrid representations follow
-a common framework. First, we have some explicitly
-stored features V , which can be in the form of a voxel
-grid [41, 67, 73, 75, 85, 94], a hash table [52] or a set of basis
-vectors/matrices [11]. For any point p in the 3D space, a
-feature vector vp = V (p) can be efficiently obtained with
-cheap operations (e.g., tri-linear interpolation for a voxel).
-Next, a decoder D is adopted to get properties like the density σ and color c of the point from vp . The decoder D can
-be an MLP [11, 52, 73] or spherical harmonics [67].
-3. Preliminaries
-Our method leverages the rendering scheme proposed
-by NeRF [51] and hybrid representation for static scenes
-[11,41,52,67,73–75,85,94]. We first briefly review the rendering framework in NeRF, then we introduce the recently
-developed hybrid representation for efficient neural fields.
-For each point p = (x, y, z) in NeRF, we denote its
-volume density as σ(p) and its color as c(p, d), where
-4
-Figure 5. An overview of our framework. The newness field and decomposition field are implemented with the channel streaming technique
-proposed in Fig. 4. A small MLP is adopted in the decomposition field for predicting the probabilities. The stationary field consists of
-a static feature volume for modeling time-invariant areas and a tiny MLP with time t input for modeling low-frequency time-varying
-appearance. The deformation field and radiance field are two small MLPs.
-4. Our Method
-espresso into water. A newness feature field n(·) with
-inputs (p, t) is adopted for representing new areas.
-Our method is built on the assumption that different areas in a dynamic scene can have different temporal changing patterns. Modeling different areas with different temporal regularizations not only helps keep temporal consistency
-but also saves computation. For example, some objects in
-the background may have a static geometry in the dynamic
-sequence, which allows us to reduce the capacity and complexity of their representation. We begin our method with
-a decomposed spatiotemporal representation which aims to
-first categorize and then model different dynamic areas using different representations based on their categories.
-To decompose the scene, we design a decomposition
-field f (·) : (p, t) 7→ (Pstatic , Pdeform , Pnew ), where
-Pstatic , Pdeform , Pnew denotes the probability of being
-static, deforming and new. Next, we consider the output
-of the fields mentioned above (s, n) to be feature vectors
-rather than properties like the density of the point and denote the output feature vector as vstatic , vdeform , vnew , respectively. Finally, given a query point p, we first collect
-the outputs from the above fields and then compute
-P the expected feature vector v of this point by v =
-∗ P∗ v∗ ,
-where ∗ ∈ {static, deform, new}. Then v is sent to a
-lightweight view-conditioned network for density and color
-prediction.
-In Fig. 3, we demonstrate our approach using a simple
-2D toy example. The task studied in the figure is a temporal interpolation from the given 2D images. The fields
-mentioned above take (x, y) locations as the input. The
-string ‘2022’ undergoes rigid motion while the string ‘VR’
-gradually appears. The different interpolation performance
-demonstrates the necessity of modeling dynamic scenes
-with both deforming and new fields. Note that we do not
-manually annotate the probability when performing decomposition. Instead, the decomposition field f is only supervised by the reconstruction loss and generic parsimony priors which penalize objects being modeled as new. More
-details about training will be introduced in Sec. 4.4.
-Hybrid representations, which enable fast training and
-real-time rendering, are adopted for implementing the
-above neural fields. However, most of existing static
-scene targeted hybrid representations implement the mapping p 7→ (σ, c). Adapting to inputs with an extra dimension time t (i.e., dynamic scenes) is not straightforward,
-since modeling 4D inputs with the explicit representation
-V may significantly increase the model size. A streamable
-4.1. Decomposed Spatiotemporal Representation
-As illustrated in Fig. 2, we assume three kinds of areas in
-a dynamic scene and model these areas with separate fields:
-• Static areas have a constant geometry and location in
-the dynamic scene, such as the table. Besides, we assume the appearance of the static areas will not change
-frequently over time, i.e., is temporally low-frequency.
-This is based on the observation that the appearance
-change is mainly caused by lighting conditions and the
-albedo is time-invariant. Hence a stationary field s(·)
-is used for representing static points.
-• Deforming areas model objects with deforming surfaces, such as the hand and the cup in Fig. 2. Deforming areas may comprise rigid or non-rigid motion,
-but they are always presented in the sequence of interest. Deforming points are represented by a deformation field d(·) : (p, t) 7→ (∆p). Then the deformed
-point p + ∆p is sent as the query point into a predefined canonical space (e.g., the static field s).
-• New areas model new content emerging at some point
-in the sequence, such as the new fluid after pouring
-5
-plicitly cached features (denoted by Vs ) and a tiny MLP
-decoder. Time t and feature obtained from Vs will be the
-input to the tiny MLP. The reason for using a tiny MLP
-is for modeling time-dependent appearance changes caused
-by time-varying illumination, which is assumed to be of
-low-frequency. The newness field n is explicitly saved features Vn . Note that in the above explicit representations,
-both Vf and Vn take in a 4D input (p, t), hence streaming
-channels are used here. The final expected feature vector
-v is then decoded by a radiance field r. Viewing direction
-(θ, φ) is also sent to r as in NeRF.
-hybrid representation for efficient spatiotemporal mapping
-is introduced in the next section.
-4.2. Streamable Hybrid Representation
-We observe that the explicit representation V commonly
-consists of array entries with a predefined feature dimension. For example, each entry in the hash table in InstantNGP [52] and each basis vector/matrix in TensoRF [11]
-both have a fixed feature dimension. Thus, we propose to
-stream the feature channels so that V can be a mapping
-from a spatiotemporal point (p, t) to the fixed-length feature vector vp,t .
-We propose to select feature channels with a sliding window along with the time dimension t, as demonstrated in
-Fig. 4. Assume that for each frame the feature vector vp,t
-is of dimension F and k channels are newly needed for a
-new frame, then for a T frame sequence the array entry v
-in V is of dimension F + k(T − 1). For a single frame t,
-the channels [kt, kt + F ] in V will be used for computing
-vp,t , such as trilinear interpolation in InstantNGP or tensor
-multiplication in TensoRF.
-To ensure vp,t smoothly translates along with t, a rearrangement of feature channels is conducted to match the
-shared channels. For example, let t = 0, k = 2, and F = 4,
-then channels [0, 1, 2, 3] of V are used for vp,0 . Next, we
-use channels [4, 5, 2, 3] for t = 1 and channels [4, 5, 6, 7]
-for t = 2. The principle behind the rearrangement is that
-shared feature channels are always aligned to be with the
-same index in the vector. Otherwise, a smooth translation
-between frames is not guaranteed.
-The streaming channels readily enable us to temporally
-interpolate a frame t between two observed frames ts and
-ts+1 by linearly interpolating the feature vectors: vp,t =
-ts+1 −t
-t−ts
-ts+1 −ts vp,ts+1 + ts+1 −ts vp,ts . Note that our proposed
-method can be applied to any hybrid representation V that
-contains entries of feature vectors. The implementation of
-V employed will be referred to as backbone in the following text. The sliding window scheme brings two benefits:
-First, overlapping feature channels are forced to be shared
-in adjacent frames, thus reducing the model size; Second,
-after rendering one frame, only new feature channels need
-to be loaded when moving to the subsequent frames, thus
-being streaming friendly.
-4.4. Optimization
-Training. Our training process follows the practice of
-NeRF. A batch of camera rays R is first randomly sampled
-from the observed data and then points on those rays, denoted by Rp , are sampled for training.
-In practical reconstruction and rendering tasks, a precise
-supervisory signal to the decomposition field is inaccessible. Instead, we supervise the output probabilities with a
-global parsimony regularization. Therefore, besides the reconstruction loss defined in Eq. (2), a regularization loss
-Lreg is introduced in our method. We use the average probability of allPpoints in the batch for this loss, denoted as
-P∗ = |R1p | p∈Rp P∗ (p), where |Rp | is the number of
-points. In our implementation, assuming the existence of
-static background, we propose to minimize the probability
-of not being a static point, thus the regularization loss is
-chosen as
-Lreg = αPdeform + Pnew ,
-(3)
-where α is a tunable parameter for weighting the ratio of
-being deforming and new. Minimizing the probability of
-being new points in Eq. (3) relies on the assumption that
-most of the points in the dynamic scene are either static or
-deforming. Overall, our training loss is
-L = Lrec + λLreg ,
-(4)
+
+The implicit representation in NeRF is highly compact but computationally expensive, resulting in slow training and rendering speed. Hybrid representations, in which both explicit and implicit representations can be adopted, are developed for efficiently reconstructing and rendering with a radiance field. Though these methods have their unique standouts, all these hybrid representations follow a common framework. First, we have some explicitly stored features V , which can be in the form of a voxel grid [41,67,73,75,85,94], a hash table [52] or a set of basis vectors/matrices [11]. For any point p in the 3D space, a feature vector vp = V (p) can be efficiently obtained with cheap operations (e.g., tri-linear interpolation for a voxel). Next, a decoder D is adopted to get properties like the density σ and color c of the point from vp. The decoder D can be an MLP [11, 52, 73] or spherical harmonics [67].
+
+
+
+Figure 5. An overview of our framework. The newness field and decomposition field are implemented with the channel streaming technique proposed in Fig. 4. A small MLP is adopted in the decomposition field for predicting the probabilities. The stationary field consists of a static feature volume for modeling time-invariant areas and a tiny MLP with time t input for modeling low-frequency time-varying appearance. The deformation field and radiance field are two small MLPs.
+
+### 4. Our Method
+
+Our method is built on the assumption that different areas in a dynamic scene can have different temporal changing patterns. Modeling different areas with different temporal regularizations not only helps keep temporal consistency but also saves computation. For example, some objects in the background may have a static geometry in the dynamic sequence, which allows us to reduce the capacity and complexity of their representation. We begin our method with a decomposed spatiotemporal representation which aims to first categorize and then model different dynamic areas using different representations based on their categories.
+
+#### 4.1. Decomposed Spatiotemporal Representation
+
+As illustrated in Fig. 2, we assume three kinds of areas in a dynamic scene and model these areas with separate fields:
+
+- Static areas have a constant geometry and location in the dynamic scene, such as the table. Besides, we assume the appearance of the static areas will not change frequently over time, i.e., is temporally low-frequency. This is based on the observation that the appearance change is mainly caused by lighting conditions and the albedo is time-invariant. Hence a stationary field s(·) is used for representing static points.
+- Deforming areas model objects with deforming surfaces, such as the hand and the cup in Fig. 2. Deforming areas may comprise rigid or non-rigid motion, but they are always presented in the sequence of interest. Deforming points are represented by a deformation field d(·) : (p, t) 7→ (∆p). Then the deformed point p + ∆p is sent as the query point into a predefined canonical space (e.g., the static field s).
+- New areas model new content emerging at some point in the sequence, such as the new fluid after pouring
+
+espresso into water. A newness feature field n(·) with inputs (p, t) is adopted for representing new areas.
+
+To decompose the scene, we design a decomposition field f(·) : (p, t) 7→ (Pstatic, Pdeform, Pnew), where Pstatic, Pdeform, Pnew denotes the probability of being static, deforming and new. Next, we consider the output of the fields mentioned above (s, n) to be feature vectors rather than properties like the density of the point and denote the output feature vector as vstatic, vdeform, vnew, respectively. Finally, given a query point p, we first collect the outputs from the above fields and then compute the expected feature vector v of this point by v = P ∗ P∗v∗, where ∗ ∈ {static, deform, new}. Then v is sent to a lightweight view-conditioned network for density and color prediction.
+
+In Fig. 3, we demonstrate our approach using a simple 2D toy example. The task studied in the figure is a temporal interpolation from the given 2D images. The fields mentioned above take (x, y) locations as the input. The string '2022' undergoes rigid motion while the string 'VR' gradually appears. The different interpolation performance demonstrates the necessity of modeling dynamic scenes with both deforming and new fields. Note that we do not manually annotate the probability when performing decomposition. Instead, the decomposition field f is only supervised by the reconstruction loss and generic parsimony priors which penalize objects being modeled as new. More details about training will be introduced in Sec. 4.4.
+
+Hybrid representations, which enable fast training and real-time rendering, are adopted for implementing the above neural fields. However, most of existing static scene targeted hybrid representations implement the mapping p 7→ (σ, c). Adapting to inputs with an extra dimension time t (i.e., dynamic scenes) is not straightforward, since modeling 4D inputs with the explicit representation V may significantly increase the model size. A streamable hybrid representation for efficient spatiotemporal mapping is introduced in the next section.
+
+#### 4.2. Streamable Hybrid Representation
+
+We observe that the explicit representation V commonly consists of array entries with a predefined feature dimension. For example, each entry in the hash table in Instant-NGP [52] and each basis vector/matrix in TensoRF [11] both have a fixed feature dimension. Thus, we propose to stream the feature channels so that V can be a mapping from a spatiotemporal point (p, t) to the fixed-length feature vector vp,t.
+
+We propose to select feature channels with a sliding window along with the time dimension t, as demonstrated in Fig. 4. Assume that for each frame the feature vector vp,t is of dimension F and k channels are newly needed for a new frame, then for a T frame sequence the array entry v in V is of dimension F + k(T − 1). For a single frame t, the channels [kt, kt + F] in V will be used for computing vp,t, such as trilinear interpolation in InstantNGP or tensor multiplication in TensoRF.
+
+To ensure vp,t smoothly translates along with t, a rearrangement of feature channels is conducted to match the shared channels. For example, let t = 0, k = 2, and F = 4, then channels [0, 1, 2, 3] of V are used for vp,0. Next, we use channels [4, 5, 2, 3] for t = 1 and channels [4, 5, 6, 7] for t = 2. The principle behind the rearrangement is that shared feature channels are always aligned to be with the same index in the vector. Otherwise, a smooth translation between frames is not guaranteed.
+
+The streaming channels readily enable us to temporally interpolate a frame t between two observed frames ts and ts+1 by linearly interpolating the feature vectors: vp,t = t−ts ts+1−ts vp,ts+1 + ts+1−t ts+1−ts vp,ts . Note that our proposed method can be applied to any hybrid representation V that contains entries of feature vectors. The implementation of V employed will be referred to as backbone in the following text. The sliding window scheme brings two benefits: First, overlapping feature channels are forced to be shared in adjacent frames, thus reducing the model size; Second, after rendering one frame, only new feature channels need to be loaded when moving to the subsequent frames, thus being streaming friendly.
+
+#### 4.3. Overall Framework.
+
+Now we introduce the details of implementing the decomposed spatiotemporal representation (Sec. 4.1\) with the streamable hybrid representation (Sec. 4.2\). An illustration is presented in Fig. 5. The decomposition field f consists of explicitly cached features (denoted by Vf ) and a small MLP decoder Df . The deformation field d is an MLP since the deformation is sparse and of low-frequency, where a small MLP is enough. The stationary field consists of explicitly cached features (denoted by Vs) and a tiny MLP decoder. Time t and feature obtained from Vs will be the input to the tiny MLP. The reason for using a tiny MLP is for modeling time-dependent appearance changes caused by time-varying illumination, which is assumed to be of low-frequency. The newness field n is explicitly saved features Vn. Note that in the above explicit representations, both Vf and Vn take in a 4D input (p, t), hence streaming channels are used here. The final expected feature vector v is then decoded by a radiance field r. Viewing direction (θ, φ) is also sent to r as in NeRF.
+
+#### 4.4. Optimization
+
+Training. Our training process follows the practice of NeRF. A batch of camera rays R is first randomly sampled from the observed data and then points on those rays, denoted by Rp, are sampled for training.
+
+In practical reconstruction and rendering tasks, a precise supervisory signal to the decomposition field is inaccessible. Instead, we supervise the output probabilities with a global parsimony regularization. Therefore, besides the reconstruction loss defined in Eq. \(2\), a regularization loss Lreg is introduced in our method. We use the average probability of all points in the batch for this loss, denoted as P∗ = |Rp| P p∈Rp P∗(p), where |Rp| is the number of points. In our implementation, assuming the existence of static background, we propose to minimize the probability of not being a static point, thus the regularization loss is chosen as
+
+
+$$L_{\text{reg}} = \alpha \overline{P_{\text{deform}}} + \overline{P_{\text{new}}}, \quad (3)$$
+
+where α is a tunable parameter for weighting the ratio of being deforming and new. Minimizing the probability of being new points in Eq. \(3\) relies on the assumption that most of the points in the dynamic scene are either static or deforming. Overall, our training loss is
+
+$$L = L_{\text{rec}} + \lambda L_{\text{reg}}, \quad (4)$$
+
 where λ is a balancing hyper-parameter.
-Rendering. When rendering an image with a given camera pose, we first forward the sampled points using the decomposition field. After knowing the probabilities, we can
-skip the forwarding process of some fields for efficiency.
-With a predefined threshold τ , if P∗ < τ then we directly
-set v∗ =  and skip the field. We set τ as 0.001 in our
-implementation.
-4.3. Overall Framework.
-Now we introduce the details of implementing the decomposed spatiotemporal representation (Sec. 4.1) with the
-streamable hybrid representation (Sec. 4.2). An illustration
-is presented in Fig. 5. The decomposition field f consists
-of explicitly cached features (denoted by Vf ) and a small
-MLP decoder Df . The deformation field d is an MLP since
-the deformation is sparse and of low-frequency, where a
-small MLP is enough. The stationary field consists of ex-
-5. Experiments
-We first quantitatively and qualitatively compare our
-method with prior works, then extensive ablation studies are
-presented to validate our proposed components. We urge
-6
-Multi-View Stereo
-LLFF [50]
-Ours-InstantNGP
-• Immersive Video [6] includes synchronized videos
-from 46 4K fisheye cameras. For the raw video data
-provided by the authors, each camera has different
-imaging parameters like exposure and white balance.
-We select 7 dynamic scenes with relatively similar
-imaging parameters. We downsample the images to
-1280 × 960 in our experiments. The camera with ID 0
-(the central camera) is used for validation and the other
-cameras are used for training.
-NV [44]
-• Plenoptic Video [36] is captured with 21 cameras at
-a resolution of 2704 × 2028. Different from Immersive Video which mostly focuses on outdoor scenes,
-Plenoptic Video consists of indoor activities in various lighting conditions. We downsample images to
-1352 × 1014 in our experiments. We follow the training and validation camera split provided by [36]. Six
-scenes are publically available.
-DyNeRF [36]
-• HyperNeRF [58, 59] provides only one view for each
-timestamp in a dynamic scene. The dataset is challenging due to the single-camera setting. We adopt the
-same training and validation settings as in [59]: images
-of 960 × 540 are used for quantitative evaluation and
-images of 1920 × 1080 are used for qualitative comparisons. There are two capturing settings in HyperNeRF: “vrig” captures the scene with stereo cameras and
-training with one camera and validating with the other;
-“interp” is a monocular video from a moving camera
-capturing dynamic scenes.
-Ours-TensoRF-VM
+
+Rendering. When rendering an image with a given camera pose, we first forward the sampled points using the decomposition field. After knowing the probabilities, we can skip the forwarding process of some fields for efficiency. With a predefined threshold τ , if P∗ < τ then we directly set v∗ = and skip the field. We set τ as 0.001 in our implementation.
+
+### 5. Experiments
+
+We first quantitatively and qualitatively compare our method with prior works, then extensive ablation studies are presented to validate our proposed components. We urge
+
+
+
+
+
 Figure 6. Qualitative comparisons on the Plenoptic Video (multicamera setting) dataset.
-DyNeRF [36]
-Implementation details. Our framework, as demonstrated by Fig. 5, is implemented with PyTorch [60]. As
-highlighted in Sec. 4.3, our framework is general and any
-hybrid representation adopting explicit features can be used.
-We implement our framework with two backbones: InstantNGP [52] and TensoRF [11]. In both of the implementations, the deformation network is a 4-layer MLP with a
-width of 256. The stationary field s uses a 2-layer MLP
-with a width of 64. The radiance field r is a 4-layer MLP
-with a width of 64 and has the same structure as the decoder in the backbone. For InstantNGP based model, the
-number of levels is 8 and the number of feature dimensions per entry is 4. TensoRF based model follows the
-same setting as in their experiments on the real forwardfacing datasets (i.e., LLFF [50]). For both of the two backbones, we set the number of channels for streaming k to be
-1, and loss hyper-parameters λ = 0.1, α = 0.01. We follow the default optimization schedule and settings as in the
-static-scene targeted backbone methods. For the two multicamera datasets, we observe that their frame rates are high
-and simply modeling every dynamic area as new areas already lead to good temporal interpolation performance, so
-the deformation is not used by default for efficiency. An
-Ours-TensoRF-VM
-Figure 7. Comparisons of rendering performance on fast moving
-objects.
+
+
+
+Figure 7. Comparisons of rendering performance on fast moving objects.
+
 the reader to watch our video to better appreciate the efficiency and rendering quality of our system.
-Datasets. Our method requires only RGB observations of
-the dynamic scene for reconstruction. Unlike most existing
-methods, our framework does not require special capturing
-settings or prior knowledge, and detailed comparisons of the
-framework’s requirements against competitive methods are
-attached in the supplementary. Two multi-camera datasets
-and one single-camera dataset are used:
-7
-Table 1. Quantitative comparisons on Plenoptic Video [36] for
-multi-camera dynamic scenes.
-Training Time
-Rendering Time
-(GPU Hours)
-(s/img)
-22.797
-23.238
-28.448
-29.580
-1344
-90
-90
-30.293
-30.692
-5.5
-6
-10.8
-22.1
-Method
-PSNR↑
-Neural Volumes [44]
-LLFF [50]
-NeRF-T [36]
-DyNeRF [36]
-Ours-InstantNGP
-Ours-TensoRF-VM
-Note that NSFF requires data-driven depth and optical flow
-priors. We can observe that our method outperforms HyperNeRF in terms of PSNR but is slightly worse than HyperNeRF on SSIM. We presume the reason is that our method
-generates more accurate but less sharp images compared to
-HyperNeRF. Visual comparisons can be found at Fig. 8. We
-can observe that HyperNeRF sometimes has misalignment
-between the rendered and real images regarding moving objects, such as the wire in the second row. We attribute the
-misalignment problem to not correctly modeling the deformation. The incorrect modeling is partially caused by treating all pointing as deforming in their representation. Lacking decomposing static and dynamic areas also leads to a
-flickering background (demonstrated in our video). In our
-method, by decomposing static and dynamic areas, the deformation field is regularized to only model dynamic areas.
-ablation is presented for studying the impact of video FPS
-when modeling with and without deformation decomposition. Due to the limitation of model sizes, we split a long
-video into 90-frame clips and trained on these clips separately. PSNR and SSIM [83] are reported for evaluating the
-rendering performance.
-5.2. Ablation Studies
-5.1. Comparison with State-of-The-Art Methods
-5.2.1
-DyNeRF [36] and HyperNeRF [59] are considered for
-multi- and single-camera settings. Besides the two methods,
-we also quote the results of other baseline methods reported
-in their paper.
-We first study the necessity of the proposed three categories
-for decomposition. Visual comparisons of different decomposition variants are demonstrated in Fig. 10 and quantitative results are reported in Tab. 3. First, we study the impact of decomposing deforming and new areas on a singlecamera dataset. We can observe from Fig. 10(a) that removing new area decomposition leads to failure of modeling the
-newly poured out espresso and removing deforming area
-decomposition leads to a blurred hand and cup. Second, we
-study the impact of our decomposition on the multi-camera
-dataset. Fig. 10(b) demonstrates that the static area becomes
-sharper after decomposing static areas. Besides, without
-static area decomposition, we observe that the background
-is flickering as we render images with novel time and view.
-Finally, we study the impact of deforming area decomposition on the multi-camera dataset. This ablation study is
-motivated by the observation that rendering with and without deformation modeling leads to little difference (PSNR
-difference less than 0.1). We presume that this is because
-the motion of objects between frames is small from cameras with a high FPS recording rate. Therefore modeling
-all dynamic areas with a newness field can still produce a
-smooth interpolation. We manually downsample the frame
-sampling rate for training in Fig. 10(c) to enlarge the motion
-between frames. We can observe that without deformation
-modeling the moving helmet becomes first disappeared and
-then reappeared when interpolating between two training
-timestamps. As a comparison, the content of the helmet is
-well preserved if the deformation is modeled.
-5.1.1
-On multi-camera dataset
-In Tab. 1, we report out results with both InstantNGP and
-TensoRF backbones. Training time and rendering time of
-DyNeRF are quoted from their paper. Our method reaches
-a higher PSNR while significantly reducing the training and
-rendering time. We further compare the rendered images
-in Fig. 6. Images of comparison methods are again quoted
-from the result images in DyNeRF’s paper. Our method
-with InstantNGP renders images with 12% of the time required by DyNeRF while being comparable. Besides, our
-method with TensoRF-VM achieves better performance on
-fast-moving objects. As demonstrated in Fig. 7, we compare our rendered results with extracted frames from DyNeRF’s result video. Since the code and rendering parameters of DyNeRF are not publically available, we manually
-select similar camera poses and timestamp for comparison.
-We can observe that the knife in DyNeRF’s results is blurry
-while our method yields clearer results.
-5.1.2
-On single-camera dataset
-A challenging and practical appealing setting is reconstructing and rendering without per-frame multi-view observations, i.e., capturing with a single camera. Our method with
-TensoRF backbone is not reported on this dataset since we
-find that the GPU memory required for training is too large
-with the default model setting. We compare our method
-with SoTA single-camera reconstruction methods in Tab. 2.
-5.2.2
-Impact of Decomposition
-Scene Decomposition Regularizing
-In our method, we use α to balance the ratio of being deforming and new in Eq. (3). A larger α encourages the
-8
+
+Datasets. Our method requires only RGB observations of the dynamic scene for reconstruction. Unlike most existing methods, our framework does not require special capturing settings or prior knowledge, and detailed comparisons of the framework's requirements against competitive methods are attached in the supplementary. Two multi-camera datasets and one single-camera dataset are used:
+
+- Immersive Video [6] includes synchronized videos from 46 4K fisheye cameras. For the raw video data provided by the authors, each camera has different imaging parameters like exposure and white balance. We select 7 dynamic scenes with relatively similar imaging parameters. We downsample the images to 1280 × 960 in our experiments. The camera with ID 0 (the central camera) is used for validation and the other cameras are used for training.
+- Plenoptic Video [36] is captured with 21 cameras at a resolution of 2704 × 2028. Different from Immersive Video which mostly focuses on outdoor scenes, Plenoptic Video consists of indoor activities in various lighting conditions. We downsample images to 1352 × 1014 in our experiments. We follow the training and validation camera split provided by [36]. Six scenes are publically available.
+- HyperNeRF [58, 59] provides only one view for each timestamp in a dynamic scene. The dataset is challenging due to the single-camera setting. We adopt the same training and validation settings as in [59]: images of 960 × 540 are used for quantitative evaluation and images of 1920 × 1080 are used for qualitative comparisons. There are two capturing settings in HyperNeRF: "vrig" captures the scene with stereo cameras and training with one camera and validating with the other; "interp" is a monocular video from a moving camera capturing dynamic scenes.
+
+Implementation details. Our framework, as demonstrated by Fig. 5, is implemented with PyTorch [60]. As highlighted in Sec. 4.3, our framework is general and any hybrid representation adopting explicit features can be used. We implement our framework with two backbones: Instant-NGP [52] and TensoRF [11]. In both of the implementations, the deformation network is a 4-layer MLP with a width of 256. The stationary field s uses a 2-layer MLP with a width of 64. The radiance field r is a 4-layer MLP with a width of 64 and has the same structure as the decoder in the backbone. For InstantNGP based model, the number of levels is 8 and the number of feature dimensions per entry is 4. TensoRF based model follows the same setting as in their experiments on the real forwardfacing datasets (i.e., LLFF [50]). For both of the two backbones, we set the number of channels for streaming k to be 1, and loss hyper-parameters λ = 0.1, α = 0.01. We follow the default optimization schedule and settings as in the static-scene targeted backbone methods. For the two multicamera datasets, we observe that their frame rates are high and simply modeling every dynamic area as new areas already lead to good temporal interpolation performance, so the deformation is not used by default for efficiency. An
+
+Table 1. Quantitative comparisons on Plenoptic Video [36] for multi-camera dynamic scenes.
+
+| Method Neural Volumes [44] LLFF [50] NeRF-T [36] | PSNR ↑ 22.797 23.238 28.448 | Training Time (GPU Hours) | Rendering Time (s/img) 90 |
+|--------------------------------------------------|-----------------------------|---------------------------|---------------------------|
+| DyNeRF [36]                                      | 29.580                      | 1344                      | 90                        |
+| Ours-InstantNGP                                  | 30.293                      | 5.5                       | 10.8                      |
+| Ours-TensoRF-VM                                  | 30.692                      | 6                         | 22.1                      |
+
+ablation is presented for studying the impact of video FPS when modeling with and without deformation decomposition. Due to the limitation of model sizes, we split a long video into 90-frame clips and trained on these clips separately. PSNR and SSIM [83] are reported for evaluating the rendering performance.
+
+#### 5.1. Comparison with State-of-The-Art Methods
+
+DyNeRF [36] and HyperNeRF [59] are considered for multi- and single-camera settings. Besides the two methods, we also quote the results of other baseline methods reported in their paper.
+
+#### 5.1.1 On multi-camera dataset
+
+In Tab. 1, we report out results with both InstantNGP and TensoRF backbones. Training time and rendering time of DyNeRF are quoted from their paper. Our method reaches a higher PSNR while significantly reducing the training and rendering time. We further compare the rendered images in Fig. 6. Images of comparison methods are again quoted from the result images in DyNeRF's paper. Our method with InstantNGP renders images with 12% of the time required by DyNeRF while being comparable. Besides, our method with TensoRF-VM achieves better performance on fast-moving objects. As demonstrated in Fig. 7, we compare our rendered results with extracted frames from DyNeRF's result video. Since the code and rendering parameters of DyNeRF are not publically available, we manually select similar camera poses and timestamp for comparison. We can observe that the knife in DyNeRF's results is blurry while our method yields clearer results.
+
+#### 5.1.2 On single-camera dataset
+
+A challenging and practical appealing setting is reconstructing and rendering without per-frame multi-view observations, i.e., capturing with a single camera. Our method with TensoRF backbone is not reported on this dataset since we find that the GPU memory required for training is too large with the default model setting. We compare our method with SoTA single-camera reconstruction methods in Tab. 2. Note that NSFF requires data-driven depth and optical flow priors. We can observe that our method outperforms Hyper-NeRF in terms of PSNR but is slightly worse than Hyper-NeRF on SSIM. We presume the reason is that our method generates more accurate but less sharp images compared to HyperNeRF. Visual comparisons can be found at Fig. 8. We can observe that HyperNeRF sometimes has misalignment between the rendered and real images regarding moving objects, such as the wire in the second row. We attribute the misalignment problem to not correctly modeling the deformation. The incorrect modeling is partially caused by treating all pointing as deforming in their representation. Lacking decomposing static and dynamic areas also leads to a flickering background (demonstrated in our video). In our method, by decomposing static and dynamic areas, the deformation field is regularized to only model dynamic areas.
+
+#### 5.2. Ablation Studies
+
+#### 5.2.1 Impact of Decomposition
+
+We first study the necessity of the proposed three categories for decomposition. Visual comparisons of different decomposition variants are demonstrated in Fig. 10 and quantitative results are reported in Tab. 3. First, we study the impact of decomposing deforming and new areas on a singlecamera dataset. We can observe from Fig. 10\(a) that removing new area decomposition leads to failure of modeling the newly poured out espresso and removing deforming area decomposition leads to a blurred hand and cup. Second, we study the impact of our decomposition on the multi-camera dataset. Fig. 10\(b) demonstrates that the static area becomes sharper after decomposing static areas. Besides, without static area decomposition, we observe that the background is flickering as we render images with novel time and view.
+
+Finally, we study the impact of deforming area decomposition on the multi-camera dataset. This ablation study is motivated by the observation that rendering with and without deformation modeling leads to little difference (PSNR difference less than 0.1). We presume that this is because the motion of objects between frames is small from cameras with a high FPS recording rate. Therefore modeling all dynamic areas with a newness field can still produce a smooth interpolation. We manually downsample the frame sampling rate for training in Fig. 10\(c) to enlarge the motion between frames. We can observe that without deformation modeling the moving helmet becomes first disappeared and then reappeared when interpolating between two training timestamps. As a comparison, the content of the helmet is well preserved if the deformation is modeled.
+
+#### 5.2.2 Scene Decomposition Regularizing
+
+In our method, we use α to balance the ratio of being deforming and new in Eq. \(3\). A larger α encourages the
+
 Table 2. Per-scene quantitative comparisons on HyperNeRF-vrig [59] for single-camera dynamic scenes.
-Rendering Time
-(s/img)
-Method
-Broom
-PSNR↑ SSIM↑
-3D Printer
-PSNR↑ SSIM↑
-Chicken
-PSNR↑ SSIM↑
-Peel Banana
-PSNR↑ SSIM↑
-Mean
-PSNR↑ SSIM↑
-NeRF [51]
-NV [44]
-NSFF [37]∗
-Nerfies [58]
-HyperNeRF [59]
-∼75
-<0.03
-∼90
-∼90
-∼90
-19.9
-17.7
-26.1
-19.2
-19.3
-0.653
-0.623
-0.871
-0.567
-0.591
-20.7
-16.2
-27.7
-20.6
-20.0
-0.780
-0.665
-0.947
-0.830
-0.821
-19.9
-17.6
-26.9
-26.7
-26.9
-0.777
-0.615
-0.944
-0.943
-0.948
-20.0
-15.9
-24.6
-22.4
-23.3
-0.769
-0.380
-0.902
-0.872
-0.896
-20.1
-16.9
-26.3
-22.2
-22.4
-0.745
-0.571
-0.916
-0.803
-0.814
-Ours-InstantNGP
-4.8
-21.7
-0.635
-22.9
-0.810
-26.3
-0.905
-24.0
-0.863
-23.7
-0.803
-GT
-Ours-InstantNGP
-HyperNeRF [59]
-Nerfies [58]
-NSFF [37]
-NV [44]
-NeRF [51]
+
+
+
+|                 | Method | Rendering | Time (s/img) | PSNR | Broom ↑ SSIM | 3D ↑ PSNR | Printer ↑ SSIM | ↑ PSNR | Chicken ↑ SSIM | Peel ↑ PSNR | Banana ↑ SSIM | ↑ PSNR | Mean ↑ SSIM ↑ |
+|-----------------|--------|-----------|--------------|------|--------------|-----------|----------------|--------|----------------|-------------|---------------|--------|---------------|
+| NeRF            | [51]   | ∼         | 75           | 19.9 | 0.653        | 20.7      | 0.780          | 19.9   | 0.777          | 20.0        | 0.769         | 20.1   | 0.745         |
+| NV              | [44]   | <         | 0.03         | 17.7 | 0.623        | 16.2      | 0.665          | 17.6   | 0.615          | 15.9        | 0.380         | 16.9   | 0.571         |
+| NSFF            | [37]   |           |              |      |              |           |                |        |                |             |               |        |               |
+|                 | ∗      | ∼         | 90           | 26.1 | 0.871        | 27.7      | 0.947          | 26.9   | 0.944          | 24.6        | 0.902         | 26.3   | 0.916         |
+| Nerfies         | [58]   | ∼         | 90           | 19.2 | 0.567        | 20.6      | 0.830          | 26.7   | 0.943          | 22.4        | 0.872         | 22.2   | 0.803         |
+| HyperNeRF       | [59]   | ∼         | 90           | 19.3 | 0.591        | 20.0      | 0.821          | 26.9   | 0.948          | 23.3        | 0.896         | 22.4   | 0.814         |
+| Ours-InstantNGP |        | 4.8       |              | 21.7 | 0.635        | 22.9      | 0.810          | 26.3   | 0.905          | 24.0        | 0.863         | 23.7   | 0.803         |
+
+
+
 Figure 8. Qualitative comparisons on the HyperNeRF-vrig dataset. Error map is demonstrated beside each rendered image.
-Table 3. Quantitative results of different decomposition variants
-with InstantNGP as the backbone.
-PSNR↑
-SSIM↑
-LPIPSVGG ↓
-LPIPSAlex ↓
-on HyperNeRF-interp
-w/o deforming
-28.2
-w/o new
-28.2
-full
-29.2
-0.820
-0.837
-0.858
-0.358
-0.323
-0.294
-0.220
-0.188
-0.163
-on Immersive Video (“Horse”)
-w/o static
-27.0
-0.860
-w/ static
-27.4
-0.871
-0.423
-0.425
-0.255
-0.295
-of α in Fig. 11 on a scene from HyperNeRF. We can observe that over-suppressing deforming areas (α = 1) lead
-to blurry moving objects and under-suppressing deforming
-areas (α = 0.005) leads to a noisy scene. The reason behind the blur from large α is the same as the second row
-in Fig. 3 and Fig. 10(c): falsely modeling a moving object
-as first-disappear-then-reappear. A good practice is that we
-can start with a relatively large α to penalize deforming areas and then gradually allow areas to deform by decreasing
-α.
-0.195
-0.168
-5.2.3
-Method
-on Immersive Video (“Welder” with every 8 frames)
-w/o deforming
-26.1
-0.826
-0.366
-w/ deforming
-25.2
-0.800
-0.327
-An important metric for a streaming service is the bitrate.
-To render a new frame, the user is usually sensitive to the
-new data needed to download. We can easily tune the bitrate requirements in our method by setting the value of k.
-In Tab. 4, we report the bitrate for streaming a new frame
-with different k values. The testing data is a sequence from
-Immersive Video with 90 frames. Note that k denotes new
-channels needed for rendering a new frame and rendering
-the first frame still follows the channels required for static
-scenes (96 for TensoRF-CP and 4 for TensoRF-VM). For
-fair comparisons, bitrate is computed by the total model size
-over the number of frames.
-The TensoRF-CP based model achieves low bitrate and
-reasonable performance, while the cost of TensoRF-VM is
-higher but the performance gain is obvious. We further
-scene to contain fewer deforming areas. As introduced in
-the previous section, single-camera datasets are more sensitive to the deformation field, thus we study the impact
-29.0
-T=17
-T=18
-T=19
-28.5
-PSNR
-28.0
-27.5
-27.0
-26.5
-26.0
-25.5
-5
-10
-15
-FPS
-20
-25
-Streaming Bitrates
-0.1875
-0.1667
-0.1458
-0.1250
-0.1042
-0.0833
-0.0625
-0.0417
-0.0208
-0.0000
-Figure 9. Rendering speed and quality tradeoff with InstantNGP
-backbone. The color of the marker demonstrates the value of exponential stepping during ray marching.
-9
-Ground Truth
-w/o new area decomposition
-w/o deforming area decomposition
-full decomposition
+
+Table 3. Quantitative results of different decomposition variants with InstantNGP as the backbone.
+
+| on   | Method    | PSNR HyperNeRF-interp | ↑ SSIM ↑       | LPIPS VGG       | ↓ LPIPS Alex ↓ |
+|------|-----------|-----------------------|----------------|-----------------|----------------|
+| w/o  | deforming | 28.2                  | 0.820          | 0.358           | 0.220          |
+| w/o  | new       | 28.2                  | 0.837          | 0.323           | 0.188          |
+| full |           | 29.2                  | 0.858          | 0.294           | 0.163          |
+| on   | Immersive | Video                 | (“Horse”)      |                 |                |
+| w/o  | static    | 27.0                  | 0.860          | 0.423           | 0.255          |
+| w/   | static    | 27.4                  | 0.871          | 0.425           | 0.295          |
+| on   | Immersive | Video                 | (“Welder” with | every 8 frames) |                |
+| w/o  | deforming | 26.1                  | 0.826          | 0.366           | 0.195          |
+| w/   | deforming | 25.2                  | 0.800          | 0.327           | 0.168          |
+
+scene to contain fewer deforming areas. As introduced in the previous section, single-camera datasets are more sensitive to the deformation field, thus we study the impact
+
+
+
+FPS Figure 9. Rendering speed and quality tradeoff with InstantNGP backbone. The color of the marker demonstrates the value of exponential stepping during ray marching.
+
+of α in Fig. 11 on a scene from HyperNeRF. We can observe that over-suppressing deforming areas (α = 1) lead to blurry moving objects and under-suppressing deforming areas (α = 0.005) leads to a noisy scene. The reason behind the blur from large α is the same as the second row in Fig. 3 and Fig. 10\(c): falsely modeling a moving object as first-disappear-then-reappear. A good practice is that we can start with a relatively large α to penalize deforming areas and then gradually allow areas to deform by decreasing α.
+
+#### 5.2.3 Streaming Bitrates
+
+An important metric for a streaming service is the bitrate. To render a new frame, the user is usually sensitive to the new data needed to download. We can easily tune the bitrate requirements in our method by setting the value of k. In Tab. 4, we report the bitrate for streaming a new frame with different k values. The testing data is a sequence from Immersive Video with 90 frames. Note that k denotes new channels needed for rendering a new frame and rendering the first frame still follows the channels required for static scenes (96 for TensoRF-CP and 4 for TensoRF-VM). For fair comparisons, bitrate is computed by the total model size over the number of frames.
+
+The TensoRF-CP based model achieves low bitrate and reasonable performance, while the cost of TensoRF-VM is higher but the performance gain is obvious. We further
+
+
+
+
+
 (a) Results after removing deforming and new area decomposition on the single-camera dataset (HyperNeRF).
-Ground Truth
-w/o static area decomposition
-w/o static area decomposition
-with static area decomposition
-with static area decomposition
+
+
+
+
+
 (b) Ablation of static area decomposition on the multi-camera dataset (Immersive Video). Second row: novel time and view rendering.
-novel time
-input time
-with deforming
-w/o deforming
-input time
+
+
+
 (c) Ablation of deforming area decomposition on the multi-camera dataset (Immersive Video). Every 8 frames are used for training.
-Figure 10. Ablation of scene decompositions with InstantNGP as the backbone. (a) For the single-camera dataset (HyperNeRF), the full
-decomposition can well reconstruct the newly generated fluid and moving cup. (b) For multi-camera dataset (Immersive Video), static area
-decomposition leads to a clearer background and suppress flickering background. (c) When the recording frame rate is low (∼4 FPS) and
-objects move faster, deformation decomposition can help generate smoother temporal interpolation results.
-10
-Figure 12. Comparison of results with different bitrate budgets for
-streaming. On each image, we report the model name followed by
-the value of k and the bitrate respectively.
-Table 4. Quantitative results of rendering with different bitrate
-budgets for streaming.
+
+Figure 10. Ablation of scene decompositions with InstantNGP as the backbone. (a) For the single-camera dataset (HyperNeRF), the full decomposition can well reconstruct the newly generated fluid and moving cup. (b) For multi-camera dataset (Immersive Video), static area decomposition leads to a clearer background and suppress flickering background. (c) When the recording frame rate is low (∼4 FPS) and objects move faster, deformation decomposition can help generate smoother temporal interpolation results.
+
+
+
+
+
 Figure 11. Visualization of the decomposition and rendering results on HyperNeRF under different scene regularization settings.
-Method
-PSNR↑
-SSIM↑
-LPIPSVGG ↓
-Bitrates
-(MB/frame)
--
--
--
-∼0.5
-present rendering results in Fig. 12. We can observe clearer
-details of the background (i.e., car) and the moving objects
-(i.e., person) with increased bitrate budgets. The above results validate the extensibility of our framework.
-Immersive [6]
-Ours-TensoRF-CP
-k=0.50
-25.200
-k=1.00
-25.798
-k=4.00
-25.870
-k=16.00
-25.885
-0.754
-0.846
-0.835
-0.857
-0.284
-0.264
-0.266
-0.244
-0.041
-0.058
-0.114
-0.333
-5.2.4
-Ours-TensoRF-VM
-k=0.05
-26.093
-k=0.25
-26.032
-k=0.50
-26.187
-k=1.00
-26.203
-0.866
-0.865
-0.872
-0.878
-0.184
-0.188
-0.192
-0.173
-3.423
-6.357
-9.942
-17.112
-Rendering Speed and Quality
-The performance of our framework is highly correlated with
-the chosen backbones. Thus, in our method, there exists a tradeoff between rendering speed and quality, mainly
-affected by predefined model size and rendering hyperparameters. In Fig. 9, we present the rendering FPS and
-PSNR with different hyper-parameter settings. We consider
-two parameters: T for the hash table size and the step-
+
+present rendering results in Fig. 12. We can observe clearer details of the background (i.e., car) and the moving objects (i.e., person) with increased bitrate budgets. The above results validate the extensibility of our framework.
+
+#### 5.2.4 Rendering Speed and Quality
+
+The performance of our framework is highly correlated with the chosen backbones. Thus, in our method, there exists a tradeoff between rendering speed and quality, mainly affected by predefined model size and rendering hyperparameters. In Fig. 9, we present the rendering FPS and PSNR with different hyper-parameter settings. We consider two parameters: T for the hash table size and the step-
+
+Figure 12. Comparison of results with different bitrate budgets for streaming. On each image, we report the model name followed by the value of k and the bitrate respectively.
+
+Table 4. Quantitative results of rendering with different bitrate budgets for streaming.
+
+| Method Immersive | PSNR [6] Ours-TensoRF-CP | ↑ SSIM ↑ | LPIPS VGG | Bitrates ↓ (MB/frame) ∼ 0.5 |
+|------------------|--------------------------|----------|-----------|-----------------------------|
+| k=0.50           | 25.200                   | 0.754    | 0.284     | 0.041                       |
+| k=1.00           | 25.798                   | 0.846    | 0.264     | 0.058                       |
+| k=4.00           | 25.870                   | 0.835    | 0.266     | 0.114                       |
+| k=16.00          | 25.885                   | 0.857    | 0.244     | 0.333                       |
+| k=0.05           | 26.093                   | 0.866    | 0.184     | 3.423                       |
+| k=0.25           | 26.032                   | 0.865    | 0.188     | 6.357                       |
+| k=0.50           | 26.187                   | 0.872    | 0.192     | 9.942                       |
+| k=1.00           | 26.203                   | 0.878    | 0.173     | 17.112                      |
+
 ping value during ray marching. Scenes from the Immersive Video dataset are considered. We can observe that our
-11
-method inherits the flexibility of the backbone and we can
-easily tune the parameters to obtain the desired speed and
-quality.
-Input images
-[2] Aayush Bansal, Minh Vo, Yaser Sheikh, Deva Ramanan, and
-Srinivasa Narasimhan. 4d visualization of dynamic events
-from unconstrained multi-view videos. In Proceedings of
-the IEEE/CVF Conference on Computer Vision and Pattern
-Recognition, pages 5366–5375, 2020. 3
-[3] Mojtaba Bemana, Karol Myszkowski, Hans-Peter Seidel,
-and Tobias Ritschel. X-fields: Implicit neural view-, lightand time-image interpolation. ACM Transactions on Graphics (TOG), 39(6):1–15, 2020. 3
-[4] Mark Boss, Raphael Braun, Varun Jampani, Jonathan T Barron, Ce Liu, and Hendrik Lensch. Nerd: Neural reflectance
-decomposition from image collections. In Proceedings of
-the IEEE/CVF International Conference on Computer Vision, pages 12684–12694, 2021. 2
-[5] Mark Boss, Varun Jampani, Raphael Braun, Ce Liu,
-Jonathan T. Barron, and Hendrik P.A. Lensch. Neuralpil: Neural pre-integrated lighting for reflectance decomposition. In Advances in Neural Information Processing Systems, 2021. 2
-[6] Michael Broxton, John Flynn, Ryan Overbeck, Daniel Erickson, Peter Hedman, Matthew Duvall, Jason Dourgarian, Jay
-Busch, Matt Whalen, and Paul Debevec. Immersive light
-field video with a layered mesh representation. ACM Transactions on Graphics (TOG), 39(4):86–1, 2020. 3, 7, 11
-[7] Ang Cao and Justin Johnson. Hexplane: A fast representation for dynamic scenes. arXiv:2301.09632, 2023. 3
-[8] Joel Carranza, Christian Theobalt, Marcus A Magnor, and
-Hans-Peter Seidel. Free-viewpoint video of human actors.
-ACM transactions on graphics (TOG), 22(3):569–577, 2003.
-3
-[9] Eric R. Chan, Connor Z. Lin, Matthew A. Chan, Koki
-Nagano, Boxiao Pan, Shalini De Mello, Orazio Gallo,
-Leonidas Guibas, Jonathan Tremblay, Sameh Khamis, Tero
-Karras, and Gordon Wetzstein. In Proceedings of the
-IEEE/CVF Conference on Computer Vision and Pattern
-Recognition, pages 16123–16133, 2022. 2
-[10] Eric R Chan, Marco Monteiro, Petr Kellnhofer, Jiajun Wu,
-and Gordon Wetzstein. pi-gan: Periodic implicit generative
-adversarial networks for 3d-aware image synthesis. In Proceedings of the IEEE/CVF Conference on Computer Vision
-and Pattern Recognition, pages 5799–5809, 2021. 2
-[11] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and
-Hao Su. Tensorf: Tensorial radiance fields. In Proceedings
-of the European Conference on Computer Vision, 2022. 1, 2,
-3, 4, 6, 7
-[12] Julian Chibane, Gerard Pons-Moll, et al. Neural unsigned
-distance fields for implicit function learning. Advances in
-Neural Information Processing Systems, 33, 2020. 2
-[13] Alvaro Collet, Ming Chuang, Pat Sweeney, Don Gillett, Dennis Evseev, David Calabrese, Hugues Hoppe, Adam Kirk,
-and Steve Sullivan. High-quality streamable free-viewpoint
-video. ACM Transactions on Graphics (ToG), 34(4):1–13,
-2015. 3
-[14] Yilun Du, Yinan Zhang, Hong-Xing Yu, Joshua B. Tenenbaum, and Jiajun Wu. Neural radiance flow for 4d view
-synthesis and video processing. In Proceedings of the
-IEEE/CVF International Conference on Computer Vision,
-2021. 2, 3
-Novel view
-Figure 13. Our method fails when inputs are with different imaging configurations (e.g., exposure).
-6. Limitation and Failure Cases
-Our method models each frame in the scene with local
-feature channels, which enables streaming but limits the
-representation of long-range repeated activities. For example, the activity of pouring espresso in Fig. 2 may repeat
-several times in a scene. Further modeling the repeating
-activities can reduce redundancy and improve the reconstruction quality by leveraging all the views of the same object. Moreover, our method assumes input multi-view images are with the same camera imaging configuration (e.g.,
-exposure). A failure example from Immersive Video is
-demonstrated in Fig. 13. Though view dependency can still
-be modeled in the framework, the model tends to generate
-floating points to overfit the training views. Recent progress
-that considers the photography process [47, 49] may help
-solve the issue.
-7. Conclusion
-We present a framework for representing dynamic scenes
-from both multi- and single-camera captured images. The
-key components of our framework are the decomposition
-module and the feature streaming module. The decomposition module decomposes the scene into static, deforming, and new areas. A sliding window based hybrid representation is then designed for efficiently modeling the decomposed neural fields. Experiments on multi- and singlecamera datasets validate our method’s efficiency and effectiveness. Extensive ablation studies further provide insight
-into the model design, such as the necessity of modeling
-deformation in large-motion scenes captured by camera arrays.
-References
-[1] Benjamin Attal, Jia-Bin Huang, Christian Richardt, Michael
-Zollhoefer, Johannes Kopf, Matthew O’Toole, and Changil
-Kim. HyperReel: High-fidelity 6-DoF video with rayconditioned sampling. arXiv preprint arXiv:2301.02238,
-2023. 2
-12
-[30] Johannes Kopf, Xuejian Rong, and Jia-Bin Huang. Robust consistent video depth estimation. In Proceedings of
-the IEEE/CVF Conference on Computer Vision and Pattern
-Recognition, pages 1611–1621, 2021. 3
-[31] Adam R Kosiorek, Heiko Strathmann, Daniel Zoran, Pol Moreno, Rosalia Schneider, Sona Mokrá, and
-Danilo Jimenez Rezende. Nerf-vae: A geometry aware 3d
-scene generative model. In International Conference on Machine Learning, pages 5742–5752. PMLR, 2021. 2
-[32] Andreas Kurz, Thomas Neff, Zhaoyang Lv, Michael Zollhofer, and Markus Steinberger. Adanerf: Adaptive sampling
-for real-time rendering of neural radiance fields. In European
-Conference on Computer Vision, 2022. 2
-[33] Aviad Levis, Pratul P Srinivasan, Andrew A Chael, Ren Ng,
-and Katherine L Bouman. Gravitationally lensed black hole
-emission tomography. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
-19841–19850, 2022. 1
-[34] Marc Levoy and Pat Hanrahan. Light field rendering. In John
-Fujii, editor, SIGGRAPH, pages 31–42. ACM, 1996. 3
-[35] Lingzhi Li, Zhen Shen, Zhongshu Wang, Li Shen, and Ping
-Tan. Streaming radiance fields for 3d video synthesis. In
-Neural Information Processing Systems (Neurips), 2022. 3
-[36] Tianye Li, Mira Slavcheva, Michael Zollhöfer, Simon Green,
-Christoph Lassner, Changil Kim, Tanner Schmidt, Steven
-Lovegrove, Michael Goesele, Richard Newcombe, and
-Zhaoyang Lv. Neural 3d video synthesis from multi-view
-video. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 5521–
-5531, June 2022. 3, 7, 8
-[37] Zhengqi Li, Simon Niklaus, Noah Snavely, and Oliver Wang.
-Neural scene flow fields for space-time view synthesis of dynamic scenes. In Proceedings of the IEEE/CVF Conference
-on Computer Vision and Pattern Recognition, 2021. 2, 3, 9
-[38] Haotong Lin, Sida Peng, Zhen Xu, Yunzhi Yan, Qing Shuai,
-Hujun Bao, and Xiaowei Zhou. Efficient neural radiance
-fields with learned depth-guided sampling. In SIGGRAPH
-Asia Conference Proceedings, 2022. 2
-[39] D. B.* Lindell, J. N. P.* Martel, and G. Wetzstein. Autoint:
-Automatic integration for fast neural volume rendering. In
-Proceedings of the IEEE/CVF International Conference on
-Computer Vision, 2021. 2
-[40] Jia-Wei Liu, Yan-Pei Cao, Weijia Mao, Wenqiao Zhang,
-David Junhao Zhang, Jussi Keppo, Ying Shan, Xiaohu
-Qie, and Mike Zheng Shou. Devrf: Fast deformable
-voxel radiance fields for dynamic scenes. arXiv preprint
-arXiv:2205.15723, 2022. 2, 3
-[41] Lingjie Liu, Jiatao Gu, Kyaw Zaw Lin, Tat-Seng Chua, and
-Christian Theobalt. Neural sparse voxel fields. In Advances
-in Neural Information Processing Systems, 2020. 2, 4
-[42] Lingjie Liu, Marc Habermann, Viktor Rudnev, Kripasindhu
-Sarkar, Jiatao Gu, and Christian Theobalt. Neural actor:
-Neural free-view synthesis of human actors with pose control. ACM Trans. Graph.(ACM SIGGRAPH Asia), 2021. 2
-[43] Renhao Liu, Yu Sun, Jiabei Zhu, Lei Tian, and Ulugbek S Kamilov. Recovery of continuous 3d refractive index
-maps from discrete intensity-only measurements using neu-
-[15] Jiemin Fang, Lingxi Xie, Xinggang Wang, Xiaopeng Zhang,
-Wenyu Liu, and Qi Tian. Neusample: Neural sample field
-for efficient view synthesis. arXiv:2111.15552, 2021. 2
-[16] Jiemin Fang, Taoran Yi, Xinggang Wang, Lingxi Xie, Xiaopeng Zhang, Wenyu Liu, Matthias Nießner, and Qi Tian.
-Fast dynamic radiance fields with time-aware neural voxels.
-arXiv preprint arXiv:2205.15285, 2022. 2, 3
-[17] Sara Fridovich-Keil, Giacomo Meanti, Frederik Rahbæk
-Warburg, Benjamin Recht, and Angjoo Kanazawa. K-planes:
-Explicit radiance fields in space, time, and appearance, 2023.
-3
-[18] Wanshui Gan, Hongbin Xu, Yi Huang, Shifeng Chen, and
-Naoto Yokoya. V4d: Voxel for 4d novel view synthesis.
-arXiv preprint arXiv:2205.14332, 2022. 3
-[19] Hang Gao, Ruilong Li, Shubham Tulsiani, Bryan Russell,
-and Angjoo Kanazawa. Monocular dynamic view synthesis:
-A reality check. In Neural Information Processing Systems
-(Neurips), 2022. 3
-[20] Stephan J. Garbin, Marek Kowalski, Matthew Johnson,
-Jamie Shotton, and Julien Valentin. Fastnerf: High-fidelity
-neural rendering at 200fps. In Proceedings of the IEEE/CVF
-International Conference on Computer Vision, pages 14346–
-14355, October 2021. 2
-[21] Steven J. Gortler, Radek Grzeszczuk, Richard Szeliski, and
-Michael F. Cohen. The lumigraph. In John Fujii, editor,
-SIGGRAPH, pages 43–54. ACM, 1996. 3
-[22] Jiatao Gu, Lingjie Liu, Peng Wang, and Christian Theobalt.
-Stylenerf: A style-based 3d aware generator for highresolution image synthesis. In International Conference on
-Learning Representations, 2021. 2
-[23] Peter Hedman, Pratul P. Srinivasan, Ben Mildenhall,
-Jonathan T. Barron, and Paul Debevec. Baking neural radiance fields for real-time view synthesis. In Proceedings
-of the IEEE/CVF International Conference on Computer Vision, pages 5875–5884, October 2021. 2
-[24] Yang Hong, Bo Peng, Haiyao Xiao, Ligang Liu, and Juyong Zhang. Headnerf: A real-time nerf-based parametric
-head model. In Proceedings of the IEEE/CVF Conference
-on Computer Vision and Pattern Recognition, pages 20374–
-20384, 2022. 2
-[25] Ajay Jain, Ben Mildenhall, Jonathan T Barron, Pieter
-Abbeel, and Ben Poole. Zero-shot text-guided object generation with dream fields. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
-867–876, 2022. 2
-[26] Ramesh Jain and Koji Wakimoto. Multiple perspective interactive video. In Proceedings of the international conference on multimedia computing and systems, pages 202–211.
-IEEE, 1995. 3
-[27] Hankyu Jang and Daeyoung Kim. D-tensorf: Tensorial radiance fields for dynamic scenes. ArXiv, abs/2212.02375,
-2022. 3
-[28] Takeo Kanade, Peter Rander, and PJ Narayanan. Virtualized
-reality: Constructing virtual worlds from real scenes. IEEE
-MultiMedia, 4(1):34–47, 1997. 3
-[29] Sosuke Kobayashi, Eiichi Matsumoto, and Vincent Sitzmann. Decomposing nerf for editing via feature field distillation. In arXiv, 2022. 3
-13
-ral fields. Nature Machine Intelligence, 4(9):781–791, 2022.
-1
-[44] Stephen Lombardi, Tomas Simon, Jason Saragih, Gabriel
-Schwartz, Andreas Lehrmann, and Yaser Sheikh. Neural volumes: learning dynamic renderable volumes from images.
-ACM Transactions on Graphics, 38(4):1–14, 2019. 3, 7, 8, 9
-[45] Stephen Lombardi, Tomas Simon, Gabriel Schwartz,
-Michael Zollhöfer, Yaser Sheikh, and Jason M. Saragih.
-Mixture of volumetric primitives for efficient neural rendering. ACM Trans. Graph., 40(4):59:1–59:13, 2021. 3
-[46] Xuan Luo, Jia-Bin Huang, Richard Szeliski, Kevin Matzen,
-and Johannes Kopf. Consistent video depth estimation. ACM
-Transactions on Graphics (ToG), 39(4):71–1, 2020. 3
-[47] Ricardo Martin-Brualla, Noha Radwan, Mehdi SM Sajjadi,
-Jonathan T Barron, Alexey Dosovitskiy, and Daniel Duckworth. Nerf in the wild: Neural radiance fields for unconstrained photo collections. In Proceedings of the IEEE/CVF
-Conference on Computer Vision and Pattern Recognition,
-pages 7210–7219, 2021. 12
-[48] Lars Mescheder, Michael Oechsle, Michael Niemeyer, Sebastian Nowozin, and Andreas Geiger. Occupancy networks:
-Learning 3d reconstruction in function space. In Proceedings
-of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 4460–4470, 2019. 2
-[49] Ben Mildenhall, Peter Hedman, Ricardo Martin-Brualla,
-Pratul P Srinivasan, and Jonathan T Barron. Nerf in the dark:
-High dynamic range view synthesis from noisy raw images.
-In Proceedings of the IEEE/CVF Conference on Computer
-Vision and Pattern Recognition, pages 16190–16199, 2022.
-1, 12
-[50] Ben Mildenhall, Pratul P. Srinivasan, Rodrigo Ortiz-Cayon,
-Nima Khademi Kalantari, Ravi Ramamoorthi, Ren Ng, and
-Abhishek Kar. Local light field fusion: Practical view synthesis with prescriptive sampling guidelines. ACM Transactions on Graphics (Proceedings of SIGGRAPH), 38(4),
-2019. 7, 8
-[51] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik,
-Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
-Representing scenes as neural radiance fields for view synthesis. In European Conference on Computer Vision, pages
-405–421. Springer, 2020. 1, 2, 4, 9
-[52] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM Trans. Graph., 41(4):102:1–
-102:15, July 2022. 1, 2, 3, 4, 6, 7
-[53] Thomas Neff, Pascal Stadlbauer, Mathias Parger, Andreas
-Kurz, Joerg H. Mueller, Chakravarty R. Alla Chaitanya, Anton S. Kaplanyan, and Markus Steinberger. DONeRF: Towards Real-Time Rendering of Compact Neural Radiance
-Fields using Depth Oracle Networks. Computer Graphics
-Forum, 40(4), 2021. 2
-[54] Michael Niemeyer, Lars Mescheder, Michael Oechsle, and
-Andreas Geiger. Occupancy flow: 4d reconstruction by
-learning particle dynamics. In Proceedings of the IEEE/CVF
-international conference on computer vision, pages 5379–
-5389, 2019. 2
-[55] Atsuhiro Noguchi, Xiao Sun, Stephen Lin, and Tatsuya
-Harada. Neural articulated radiance field. In Proceedings
-of the IEEE/CVF International Conference on Computer Vision, pages 5762–5772, October 2021. 2
-[56] Julian Ost, Fahim Mannan, Nils Thuerey, Julian Knodt, and
-Felix Heide. Neural scene graphs for dynamic scenes. In
-Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 2856–2865, 2021. 3
-[57] Jeong Joon Park, Peter Florence, Julian Straub, Richard
-Newcombe, and Steven Lovegrove. Deepsdf: Learning continuous signed distance functions for shape representation.
-In Proceedings of the IEEE/CVF Conference on Computer
-Vision and Pattern Recognition, pages 165–174, 2019. 2
-[58] Keunhong Park, Utkarsh Sinha, Jonathan T. Barron, Sofien
-Bouaziz, Dan B Goldman, Steven M. Seitz, and Ricardo
-Martin-Brualla. Nerfies: Deformable neural radiance fields.
-In Proceedings of the IEEE/CVF International Conference
-on Computer Vision, pages 5865–5874, October 2021. 2, 3,
-7, 9
-[59] Keunhong Park, Utkarsh Sinha, Peter Hedman, Jonathan T.
-Barron, Sofien Bouaziz, Dan B Goldman, Ricardo MartinBrualla, and Steven M. Seitz. Hypernerf: A higherdimensional representation for topologically varying neural
-radiance fields. ACM Trans. Graph., 40(6), dec 2021. 2, 3,
-7, 8, 9
-[60] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer,
-James Bradbury, Gregory Chanan, Trevor Killeen, Zeming
-Lin, Natalia Gimelshein, Luca Antiga, et al. Pytorch: An imperative style, high-performance deep learning library. Advances in neural information processing systems, 32:8026–
-8037, 2019. 7
-[61] Sida Peng, Junting Dong, Qianqian Wang, Shangzhan
-Zhang, Qing Shuai, Xiaowei Zhou, and Hujun Bao. Animatable neural radiance fields for modeling dynamic human
-bodies. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 14314–14323, October
-2021. 2
-[62] Sida Peng, Yuanqing Zhang, Yinghao Xu, Qianqian Wang,
-Qing Shuai, Hujun Bao, and Xiaowei Zhou. Neural body:
-Implicit neural representations with structured latent codes
-for novel view synthesis of dynamic humans. In Proceedings of the IEEE/CVF Conference on Computer Vision and
-Pattern Recognition, pages 9054–9063, 2021. 2
-[63] Martin Piala and Ronald Clark. Terminerf: Ray termination
-prediction for efficient neural rendering. International Conference on 3D Vision, pages 1106–1114, 2021. 2
-[64] Albert Pumarola, Enric Corona, Gerard Pons-Moll, and
-Francesc Moreno-Noguer. D-nerf: Neural radiance fields
-for dynamic scenes. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
-10318–10327, 2021. 2, 3
-[65] Daniel Rebain, Wei Jiang, Soroosh Yazdani, Ke Li,
-Kwang Moo Yi, and Andrea Tagliasacchi. Derf: Decomposed radiance fields. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
-14153–14161, 2021. 3
-[66] Christian Reiser, Songyou Peng, Yiyi Liao, and Andreas
-Geiger. Kilonerf: Speeding up neural radiance fields with
-thousands of tiny mlps. In Proceedings of the IEEE/CVF In-
-14
-[78] Alex Trevithick and Bo Yang. Grf: Learning a general radiance field for 3d representation and rendering. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 15182–15192, October 2021. 2
-[79] Vadim Tschernezki, Iro Laina, Diane Larlus, and Andrea
-Vedaldi. Neural Feature Fusion Fields: 3D distillation of
-self-supervised 2D image representations. In Proceedings of
-the International Conference on 3D Vision (3DV), 2022. 3
-[80] Vadim Tschernezki, Diane Larlus, and Andrea Vedaldi. Neuraldiff: Segmenting 3d objects that move in egocentric
-videos. In International Conference on 3D Vision (3DV),
-pages 910–919. IEEE, 2021. 3
-[81] Chaoyang Wang, Ben Eckart, Simon Lucey, and Orazio
-Gallo. Neural trajectory fields for dynamic novel view synthesis. arXiv preprint arXiv:2105.05994, 2021. 2, 3
-[82] Liao Wang, Jiakai Zhang, Xinhang Liu, Fuqiang Zhao, Yanshun Zhang, Yingliang Zhang, Minye Wu, Jingyi Yu, and
-Lan Xu. Fourier plenoctrees for dynamic radiance field rendering in real-time. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
-13524–13534, 2022. 3
-[83] Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P Simoncelli. Image quality assessment: from error visibility to
-structural similarity. IEEE transactions on image processing,
-13(4):600–612, 2004. 8
-[84] Suttisak Wizadwongsa, Pakkapon Phongthawee, Jiraphon
-Yenphraphai, and Supasorn Suwajanakorn. Nex: Real-time
-view synthesis with neural basis expansion. In Proceedings
-of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 8534–8543, 2021. 2
-[85] Liwen Wu, Jae Yong Lee, Anand Bhattad, Yu-Xiong Wang,
-and David Forsyth. Diver: Real-time and accurate neural radiance fields with deterministic integration for volume rendering. In Proceedings of the IEEE/CVF Conference on
-Computer Vision and Pattern Recognition, pages 16200–
-16209, 2022. 2, 4
-[86] Tianhao Wu, Fangcheng Zhong, Andrea Tagliasacchi, Forrester Cole, and Cengiz Oztireli. D2 nerf: Self-supervised
-decoupling of dynamic and static objects from a monocular
-video. arXiv preprint arXiv:2205.15838, 2022. 3
-[87] Wenqi Xian, Jia-Bin Huang, Johannes Kopf, and Changil
-Kim. Space-time neural irradiance fields for free-viewpoint
-video. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 9421–9431,
-2021. 2, 3
-[88] Yiheng Xie, Towaki Takikawa, Shunsuke Saito, Or Litany,
-Shiqin Yan, Numair Khan, Federico Tombari, James Tompkin, Vincent Sitzmann, and Srinath Sridhar. Neural fields in
-visual computing and beyond. In Computer Graphics Forum,
-volume 41, pages 641–676. Wiley Online Library, 2022. 1,
-2
-[89] Bangbang Yang, Yinda Zhang, Yinghao Xu, Yijin Li, Han
-Zhou, Hujun Bao, Guofeng Zhang, and Zhaopeng Cui.
-Learning object-compositional neural radiance field for editable scene rendering. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 13779–
-13788, 2021. 3
-ternational Conference on Computer Vision, pages 14335–
-14345, October 2021. 2
-[67] Sara Fridovich-Keil and Alex Yu, Matthew Tancik, Qinhong
-Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels:
-Radiance fields without neural networks. In Proceedings of
-the IEEE/CVF Conference on Computer Vision and Pattern
-Recognition, 2022. 1, 2, 3, 4
-[68] Hartmut Schirmacher, Li Ming, and Hans-Peter Seidel. Onthe-fly processing of generalized lumigraphs. In Computer
-Graphics Forum, volume 20, pages 165–174. Wiley Online
-Library, 2001. 3
-[69] Katja Schwarz, Yiyi Liao, Michael Niemeyer, and Andreas
-Geiger. Graf: Generative radiance fields for 3d-aware image synthesis. Advances in Neural Information Processing
-Systems, 33, 2020. 2
-[70] Prafull Sharma, Ayush Tewari, Yilun Du, Sergey Zakharov,
-Rares Ambrus, Adrien Gaidon, William T Freeman, Frédo
-Durand, Joshua B Tenenbaum, and Vincent Sitzmann. Seeing 3d objects in a single image via self-supervised staticdynamic disentanglement. arXiv preprint arXiv:2207.11232,
-2022. 3
-[71] Pratul P Srinivasan, Boyang Deng, Xiuming Zhang,
-Matthew Tancik, Ben Mildenhall, and Jonathan T Barron.
-Nerv: Neural reflectance and visibility fields for relighting
-and view synthesis. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
-7495–7504, 2021. 2
-[72] Shih-Yang Su, Frank Yu, Michael Zollhoefer, and Helge
-Rhodin. A-nerf: Articulated neural radiance fields for learning human shape, appearance, and pose. In NeurIPS, 2021.
-2
-[73] Cheng Sun, Min Sun, and Hwann-Tzong Chen. Direct voxel
-grid optimization: Super-fast convergence for radiance fields
-reconstruction. In Proceedings of the IEEE/CVF Conference
-on Computer Vision and Pattern Recognition, pages 5459–
-5469, 2022. 2, 4
-[74] Towaki Takikawa, Alex Evans, Jonathan Tremblay, Thomas
-Müller, Morgan McGuire, Alec Jacobson, and Sanja Fidler.
-Variable bitrate neural fields. In ACM SIGGRAPH Conference Proceedings, pages 1–9, 2022. 4
-[75] Towaki Takikawa, Joey Litalien, Kangxue Yin, Karsten
-Kreis, Charles Loop, Derek Nowrouzezahrai, Alec Jacobson,
-Morgan McGuire, and Sanja Fidler. Neural geometric level
-of detail: Real-time rendering with implicit 3d shapes. In
-Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 11358–11367, 2021. 4
-[76] Matthew Tancik, Vincent Casser, Xinchen Yan, Sabeek Pradhan, Ben Mildenhall, Pratul P Srinivasan, Jonathan T Barron,
-and Henrik Kretzschmar. Block-nerf: Scalable large scene
-neural view synthesis. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
-8248–8258, 2022. 1
-[77] Edgar Tretschk, Ayush Tewari, Vladislav Golyanik, Michael
-Zollhöfer, Christoph Lassner, and Christian Theobalt. Nonrigid neural radiance fields: Reconstruction and novel view
-synthesis of a dynamic scene from monocular video. In
-Proceedings of the IEEE/CVF International Conference on
-Computer Vision, pages 12959–12970, October 2021. 2, 3
-15
-[90] Jason C Yang, Matthew Everett, Chris Buehler, and Leonard
-McMillan. A real-time distributed light field camera. Rendering Techniques, 2002:77–86, 2002. 3
-[91] Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng,
-and Angjoo Kanazawa. Plenoctrees for real-time rendering
-of neural radiance fields. In Proceedings of the IEEE/CVF
-International Conference on Computer Vision, pages 5752–
-5761, October 2021. 2, 3
-[92] Wentao Yuan, Zhaoyang Lv, Tanner Schmidt, and Steven
-Lovegrove. Star: Self-supervised tracking and reconstruction of rigid objects in motion with neural rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision
-and Pattern Recognition, pages 13144–13152, 2021. 3
-[93] Jiakai Zhang, Xinhang Liu, Xinyi Ye, Fuqiang Zhao, Yanshun Zhang, Minye Wu, Yingliang Zhang, Lan Xu, and
-Jingyi Yu. Editable free-viewpoint video using a layered neural representation. ACM Trans. Graph., 40(4):149:1–149:18,
-2021. 3
-[94] Xiaoshuai Zhang, Sai Bi, Kalyan Sunkavalli, Hao Su, and
-Zexiang Xu. Nerfusion: Fusing radiance fields for largescale scene reconstruction. In Proceedings of the IEEE/CVF
-Conference on Computer Vision and Pattern Recognition,
-pages 5449–5458, 2022. 4
-[95] C Lawrence Zitnick, Sing Bing Kang, Matthew Uyttendaele,
-Simon Winder, and Richard Szeliski. High-quality video
-view interpolation using a layered representation. ACM
-transactions on graphics (TOG), 23(3):600–608, 2004. 3
-16
-Appendix
+
+- method inherits the flexibility of the backbone and we can easily tune the parameters to obtain the desired speed and quality. Input images Novel view Figure 13. Our method fails when inputs are with different imaging configurations (e.g., exposure).
+- 6. Limitation and Failure Cases Our method models each frame in the scene with local feature channels, which enables streaming but limits the representation of long-range repeated activities. For example, the activity of pouring espresso in Fig. 2 may repeat several times in a scene. Further modeling the repeating activities can reduce redundancy and improve the reconstruction quality by leveraging all the views of the same object. Moreover, our method assumes input multi-view images are with the same camera imaging configuration (e.g., exposure). A failure example from Immersive Video is demonstrated in Fig. 13. Though view dependency can still be modeled in the framework, the model tends to generate floating points to overfit the training views. Recent progress that considers the photography process [47, 49] may help solve the issue.
+- 7. Conclusion We present a framework for representing dynamic scenes from both multi- and single-camera captured images. The key components of our framework are the decomposition module and the feature streaming module. The decomposition module decomposes the scene into static, deforming, and new areas. A sliding window based hybrid representation is then designed for efficiently modeling the decomposed neural fields. Experiments on multi- and singlecamera datasets validate our method's efficiency and effectiveness. Extensive ablation studies further provide insight into the model design, such as the necessity of modeling deformation in large-motion scenes captured by camera arrays. References [1] Benjamin Attal, Jia-Bin Huang, Christian Richardt, Michael Zollhoefer, Johannes Kopf, Matthew O'Toole, and Changil Kim. HyperReel: High-fidelity 6-DoF video with rayconditioned sampling. arXiv preprint arXiv:2301.02238, 2023. 2 [2] Aayush Bansal, Minh Vo, Yaser Sheikh, Deva Ramanan, and Srinivasa Narasimhan. 4d visualization of dynamic events from unconstrained multi-view videos. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 5366–5375, 2020. 3 [3] Mojtaba Bemana, Karol Myszkowski, Hans-Peter Seidel, and Tobias Ritschel. X-fields: Implicit neural view-, lightand time-image interpolation. ACM Transactions on Graphics (TOG), 39(6):1–15, 2020. 3 [4] Mark Boss, Raphael Braun, Varun Jampani, Jonathan T Barron, Ce Liu, and Hendrik Lensch. Nerd: Neural reflectance decomposition from image collections. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 12684–12694, 2021. 2 [5] Mark Boss, Varun Jampani, Raphael Braun, Ce Liu, Jonathan T. Barron, and Hendrik P.A. Lensch. Neuralpil: Neural pre-integrated lighting for reflectance decomposition. In Advances in Neural Information Processing Systems, 2021. 2 [6] Michael Broxton, John Flynn, Ryan Overbeck, Daniel Erickson, Peter Hedman, Matthew Duvall, Jason Dourgarian, Jay Busch, Matt Whalen, and Paul Debevec. Immersive light field video with a layered mesh representation. ACM Transactions on Graphics (TOG), 39(4):86–1, 2020. 3, 7, 11 [7] Ang Cao and Justin Johnson. Hexplane: A fast representation for dynamic scenes. arXiv:2301.09632, 2023. 3 [8] Joel Carranza, Christian Theobalt, Marcus A Magnor, and Hans-Peter Seidel. Free-viewpoint video of human actors. ACM transactions on graphics (TOG), 22(3):569–577, 2003. 3 [9] Eric R. Chan, Connor Z. Lin, Matthew A. Chan, Koki Nagano, Boxiao Pan, Shalini De Mello, Orazio Gallo, Leonidas Guibas, Jonathan Tremblay, Sameh Khamis, Tero Karras, and Gordon Wetzstein. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 16123–16133, 2022. 2 [10] Eric R Chan, Marco Monteiro, Petr Kellnhofer, Jiajun Wu, and Gordon Wetzstein. pi-gan: Periodic implicit generative adversarial networks for 3d-aware image synthesis. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 5799–5809, 2021. 2 [11] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and Hao Su. Tensorf: Tensorial radiance fields. In Proceedings of the European Conference on Computer Vision, 2022. 1, 2, 3, 4, 6, 7 [12] Julian Chibane, Gerard Pons-Moll, et al. Neural unsigned distance fields for implicit function learning. Advances in Neural Information Processing Systems, 33, 2020. 2 [13] Alvaro Collet, Ming Chuang, Pat Sweeney, Don Gillett, Dennis Evseev, David Calabrese, Hugues Hoppe, Adam Kirk, and Steve Sullivan. High-quality streamable free-viewpoint video. ACM Transactions on Graphics (ToG), 34(4):1–13, 2015. 3 [14] Yilun Du, Yinan Zhang, Hong-Xing Yu, Joshua B. Tenenbaum, and Jiajun Wu. Neural radiance flow for 4d view synthesis and video processing. In Proceedings of the IEEE/CVF International Conference on Computer Vision, 2021. 2, 3
+
+
+
+
+
+
+
+
+
+[15] Jiemin Fang, Lingxi Xie, Xinggang Wang, Xiaopeng Zhang, Wenyu Liu, and Qi Tian. Neusample: Neural sample field for efficient view synthesis. arXiv:2111.15552, 2021. 2 [16] Jiemin Fang, Taoran Yi, Xinggang Wang, Lingxi Xie, Xiaopeng Zhang, Wenyu Liu, Matthias Nießner, and Qi Tian. Fast dynamic radiance fields with time-aware neural voxels. arXiv preprint arXiv:2205.15285, 2022. 2, 3 [17] Sara Fridovich-Keil, Giacomo Meanti, Frederik Rahbæk Warburg, Benjamin Recht, and Angjoo Kanazawa. K-planes: Explicit radiance fields in space, time, and appearance, 2023. 3 [18] Wanshui Gan, Hongbin Xu, Yi Huang, Shifeng Chen, and Naoto Yokoya. V4d: Voxel for 4d novel view synthesis. arXiv preprint arXiv:2205.14332, 2022. 3 [19] Hang Gao, Ruilong Li, Shubham Tulsiani, Bryan Russell, and Angjoo Kanazawa. Monocular dynamic view synthesis: A reality check. In Neural Information Processing Systems (Neurips), 2022. 3 [20] Stephan J. Garbin, Marek Kowalski, Matthew Johnson, Jamie Shotton, and Julien Valentin. Fastnerf: High-fidelity neural rendering at 200fps. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 14346– 14355, October 2021. 2 [21] Steven J. Gortler, Radek Grzeszczuk, Richard Szeliski, and Michael F. Cohen. The lumigraph. In John Fujii, editor, SIGGRAPH, pages 43–54. ACM, 1996. 3 [22] Jiatao Gu, Lingjie Liu, Peng Wang, and Christian Theobalt. Stylenerf: A style-based 3d aware generator for highresolution image synthesis. In International Conference on Learning Representations, 2021. 2 [23] Peter Hedman, Pratul P. Srinivasan, Ben Mildenhall, Jonathan T. Barron, and Paul Debevec. Baking neural radiance fields for real-time view synthesis. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 5875–5884, October 2021. 2 [24] Yang Hong, Bo Peng, Haiyao Xiao, Ligang Liu, and Juyong Zhang. Headnerf: A real-time nerf-based parametric head model. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 20374– 20384, 2022. 2 [25] Ajay Jain, Ben Mildenhall, Jonathan T Barron, Pieter Abbeel, and Ben Poole. Zero-shot text-guided object generation with dream fields. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 867–876, 2022. 2 [26] Ramesh Jain and Koji Wakimoto. Multiple perspective interactive video. In Proceedings of the international conference on multimedia computing and systems, pages 202–211. IEEE, 1995. 3 [27] Hankyu Jang and Daeyoung Kim. D-tensorf: Tensorial radiance fields for dynamic scenes. ArXiv, abs/2212.02375, 2022. 3 [28] Takeo Kanade, Peter Rander, and PJ Narayanan. Virtualized reality: Constructing virtual worlds from real scenes. IEEE MultiMedia, 4(1):34–47, 1997. 3 [29] Sosuke Kobayashi, Eiichi Matsumoto, and Vincent Sitzmann. Decomposing nerf for editing via feature field distillation. In arXiv, 2022. 3 [30] Johannes Kopf, Xuejian Rong, and Jia-Bin Huang. Robust consistent video depth estimation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 1611–1621, 2021. 3 [31] Adam R Kosiorek, Heiko Strathmann, Daniel Zoran, Pol Moreno, Rosalia Schneider, Sona Mokra, and ´ Danilo Jimenez Rezende. Nerf-vae: A geometry aware 3d scene generative model. In International Conference on Machine Learning, pages 5742–5752. PMLR, 2021. 2 [32] Andreas Kurz, Thomas Neff, Zhaoyang Lv, Michael Zollhofer, and Markus Steinberger. Adanerf: Adaptive sampling for real-time rendering of neural radiance fields. In European Conference on Computer Vision, 2022. 2 [33] Aviad Levis, Pratul P Srinivasan, Andrew A Chael, Ren Ng, and Katherine L Bouman. Gravitationally lensed black hole emission tomography. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 19841–19850, 2022. 1 [34] Marc Levoy and Pat Hanrahan. Light field rendering. In John Fujii, editor, SIGGRAPH, pages 31–42. ACM, 1996. 3 [35] Lingzhi Li, Zhen Shen, Zhongshu Wang, Li Shen, and Ping Tan. Streaming radiance fields for 3d video synthesis. In Neural Information Processing Systems (Neurips), 2022. 3 [36] Tianye Li, Mira Slavcheva, Michael Zollhofer, Simon Green, ¨ Christoph Lassner, Changil Kim, Tanner Schmidt, Steven Lovegrove, Michael Goesele, Richard Newcombe, and Zhaoyang Lv. Neural 3d video synthesis from multi-view video. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 5521– 5531, June 2022. 3, 7, 8 [37] Zhengqi Li, Simon Niklaus, Noah Snavely, and Oliver Wang. Neural scene flow fields for space-time view synthesis of dynamic scenes. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, 2021. 2, 3, 9 [38] Haotong Lin, Sida Peng, Zhen Xu, Yunzhi Yan, Qing Shuai, Hujun Bao, and Xiaowei Zhou. Efficient neural radiance fields with learned depth-guided sampling. In SIGGRAPH Asia Conference Proceedings, 2022. 2 [39] D. B.\* Lindell, J. N. P.\* Martel, and G. Wetzstein. Autoint: Automatic integration for fast neural volume rendering. In Proceedings of the IEEE/CVF International Conference on Computer Vision, 2021. 2 [40] Jia-Wei Liu, Yan-Pei Cao, Weijia Mao, Wenqiao Zhang, David Junhao Zhang, Jussi Keppo, Ying Shan, Xiaohu Qie, and Mike Zheng Shou. Devrf: Fast deformable voxel radiance fields for dynamic scenes. arXiv preprint arXiv:2205.15723, 2022. 2, 3 [41] Lingjie Liu, Jiatao Gu, Kyaw Zaw Lin, Tat-Seng Chua, and Christian Theobalt. Neural sparse voxel fields. In Advances in Neural Information Processing Systems, 2020. 2, 4 [42] Lingjie Liu, Marc Habermann, Viktor Rudnev, Kripasindhu Sarkar, Jiatao Gu, and Christian Theobalt. Neural actor: Neural free-view synthesis of human actors with pose control. ACM Trans. Graph.(ACM SIGGRAPH Asia), 2021. 2 [43] Renhao Liu, Yu Sun, Jiabei Zhu, Lei Tian, and Ulugbek S Kamilov. Recovery of continuous 3d refractive index maps from discrete intensity-only measurements using neu-
+
+ral fields. Nature Machine Intelligence, 4(9):781–791, 2022. 1 [44] Stephen Lombardi, Tomas Simon, Jason Saragih, Gabriel Schwartz, Andreas Lehrmann, and Yaser Sheikh. Neural volumes: learning dynamic renderable volumes from images. ACM Transactions on Graphics, 38(4):1–14, 2019. 3, 7, 8, 9 [45] Stephen Lombardi, Tomas Simon, Gabriel Schwartz, Michael Zollhofer, Yaser Sheikh, and Jason M. Saragih. ¨ Mixture of volumetric primitives for efficient neural rendering. ACM Trans. Graph., 40(4):59:1–59:13, 2021. 3 [46] Xuan Luo, Jia-Bin Huang, Richard Szeliski, Kevin Matzen, and Johannes Kopf. Consistent video depth estimation. ACM Transactions on Graphics (ToG), 39(4):71–1, 2020. 3 [47] Ricardo Martin-Brualla, Noha Radwan, Mehdi SM Sajjadi, Jonathan T Barron, Alexey Dosovitskiy, and Daniel Duckworth. Nerf in the wild: Neural radiance fields for unconstrained photo collections. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 7210–7219, 2021. 12 [48] Lars Mescheder, Michael Oechsle, Michael Niemeyer, Sebastian Nowozin, and Andreas Geiger. Occupancy networks: Learning 3d reconstruction in function space. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 4460–4470, 2019. 2 [49] Ben Mildenhall, Peter Hedman, Ricardo Martin-Brualla, Pratul P Srinivasan, and Jonathan T Barron. Nerf in the dark: High dynamic range view synthesis from noisy raw images. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 16190–16199, 2022. 1, 12 [50] Ben Mildenhall, Pratul P. Srinivasan, Rodrigo Ortiz-Cayon, Nima Khademi Kalantari, Ravi Ramamoorthi, Ren Ng, and Abhishek Kar. Local light field fusion: Practical view synthesis with prescriptive sampling guidelines. ACM Transactions on Graphics (Proceedings of SIGGRAPH), 38(4), 2019. 7, 8 [51] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf: Representing scenes as neural radiance fields for view synthesis. In European Conference on Computer Vision, pages 405–421. Springer, 2020. 1, 2, 4, 9 [52] Thomas Muller, Alex Evans, Christoph Schied, and Alexan- ¨ der Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM Trans. Graph., 41(4):102:1– 102:15, July 2022. 1, 2, 3, 4, 6, 7 [53] Thomas Neff, Pascal Stadlbauer, Mathias Parger, Andreas Kurz, Joerg H. Mueller, Chakravarty R. Alla Chaitanya, Anton S. Kaplanyan, and Markus Steinberger. DONeRF: Towards Real-Time Rendering of Compact Neural Radiance Fields using Depth Oracle Networks. Computer Graphics Forum, 40(4), 2021. 2 [54] Michael Niemeyer, Lars Mescheder, Michael Oechsle, and Andreas Geiger. Occupancy flow: 4d reconstruction by learning particle dynamics. In Proceedings of the IEEE/CVF international conference on computer vision, pages 5379– 5389, 2019. 2 [55] Atsuhiro Noguchi, Xiao Sun, Stephen Lin, and Tatsuya Harada. Neural articulated radiance field. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 5762–5772, October 2021. 2 [56] Julian Ost, Fahim Mannan, Nils Thuerey, Julian Knodt, and Felix Heide. Neural scene graphs for dynamic scenes. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 2856–2865, 2021. 3 [57] Jeong Joon Park, Peter Florence, Julian Straub, Richard Newcombe, and Steven Lovegrove. Deepsdf: Learning continuous signed distance functions for shape representation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 165–174, 2019. 2 [58] Keunhong Park, Utkarsh Sinha, Jonathan T. Barron, Sofien Bouaziz, Dan B Goldman, Steven M. Seitz, and Ricardo Martin-Brualla. Nerfies: Deformable neural radiance fields. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 5865–5874, October 2021. 2, 3, 7, 9 [59] Keunhong Park, Utkarsh Sinha, Peter Hedman, Jonathan T. Barron, Sofien Bouaziz, Dan B Goldman, Ricardo Martin-Brualla, and Steven M. Seitz. Hypernerf: A higherdimensional representation for topologically varying neural radiance fields. ACM Trans. Graph., 40(6), dec 2021. 2, 3, 7, 8, 9 [60] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan, Trevor Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga, et al. Pytorch: An imperative style, high-performance deep learning library. Advances in neural information processing systems, 32:8026– 8037, 2019. 7 [61] Sida Peng, Junting Dong, Qianqian Wang, Shangzhan Zhang, Qing Shuai, Xiaowei Zhou, and Hujun Bao. Animatable neural radiance fields for modeling dynamic human bodies. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 14314–14323, October 2021. 2 [62] Sida Peng, Yuanqing Zhang, Yinghao Xu, Qianqian Wang, Qing Shuai, Hujun Bao, and Xiaowei Zhou. Neural body: Implicit neural representations with structured latent codes for novel view synthesis of dynamic humans. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 9054–9063, 2021. 2 [63] Martin Piala and Ronald Clark. Terminerf: Ray termination prediction for efficient neural rendering. International Conference on 3D Vision, pages 1106–1114, 2021. 2 [64] Albert Pumarola, Enric Corona, Gerard Pons-Moll, and Francesc Moreno-Noguer. D-nerf: Neural radiance fields for dynamic scenes. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 10318–10327, 2021. 2, 3 [65] Daniel Rebain, Wei Jiang, Soroosh Yazdani, Ke Li, Kwang Moo Yi, and Andrea Tagliasacchi. Derf: Decomposed radiance fields. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 14153–14161, 2021. 3 [66] Christian Reiser, Songyou Peng, Yiyi Liao, and Andreas Geiger. Kilonerf: Speeding up neural radiance fields with thousands of tiny mlps. In Proceedings of the IEEE/CVF In-
+
+ternational Conference on Computer Vision, pages 14335– 14345, October 2021. 2 [67] Sara Fridovich-Keil and Alex Yu, Matthew Tancik, Qinhong Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels: Radiance fields without neural networks. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, 2022. 1, 2, 3, 4 [68] Hartmut Schirmacher, Li Ming, and Hans-Peter Seidel. Onthe-fly processing of generalized lumigraphs. In Computer Graphics Forum, volume 20, pages 165–174. Wiley Online Library, 2001. 3 [69] Katja Schwarz, Yiyi Liao, Michael Niemeyer, and Andreas Geiger. Graf: Generative radiance fields for 3d-aware image synthesis. Advances in Neural Information Processing Systems, 33, 2020. 2 [70] Prafull Sharma, Ayush Tewari, Yilun Du, Sergey Zakharov, Rares Ambrus, Adrien Gaidon, William T Freeman, Fredo ´ Durand, Joshua B Tenenbaum, and Vincent Sitzmann. Seeing 3d objects in a single image via self-supervised staticdynamic disentanglement. arXiv preprint arXiv:2207.11232, 2022. 3 [71] Pratul P Srinivasan, Boyang Deng, Xiuming Zhang, Matthew Tancik, Ben Mildenhall, and Jonathan T Barron. Nerv: Neural reflectance and visibility fields for relighting and view synthesis. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 7495–7504, 2021. 2 [72] Shih-Yang Su, Frank Yu, Michael Zollhoefer, and Helge Rhodin. A-nerf: Articulated neural radiance fields for learning human shape, appearance, and pose. In NeurIPS, 2021. 2 [73] Cheng Sun, Min Sun, and Hwann-Tzong Chen. Direct voxel grid optimization: Super-fast convergence for radiance fields reconstruction. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 5459– 5469, 2022. 2, 4 [74] Towaki Takikawa, Alex Evans, Jonathan Tremblay, Thomas Muller, Morgan McGuire, Alec Jacobson, and Sanja Fidler. ¨ Variable bitrate neural fields. In ACM SIGGRAPH Conference Proceedings, pages 1–9, 2022. 4 [75] Towaki Takikawa, Joey Litalien, Kangxue Yin, Karsten Kreis, Charles Loop, Derek Nowrouzezahrai, Alec Jacobson, Morgan McGuire, and Sanja Fidler. Neural geometric level of detail: Real-time rendering with implicit 3d shapes. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 11358–11367, 2021. 4 [76] Matthew Tancik, Vincent Casser, Xinchen Yan, Sabeek Pradhan, Ben Mildenhall, Pratul P Srinivasan, Jonathan T Barron, and Henrik Kretzschmar. Block-nerf: Scalable large scene neural view synthesis. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 8248–8258, 2022. 1 [77] Edgar Tretschk, Ayush Tewari, Vladislav Golyanik, Michael Zollhofer, Christoph Lassner, and Christian Theobalt. Non- ¨ rigid neural radiance fields: Reconstruction and novel view synthesis of a dynamic scene from monocular video. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 12959–12970, October 2021. 2, 3 [78] Alex Trevithick and Bo Yang. Grf: Learning a general radiance field for 3d representation and rendering. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 15182–15192, October 2021. 2 [79] Vadim Tschernezki, Iro Laina, Diane Larlus, and Andrea Vedaldi. Neural Feature Fusion Fields: 3D distillation of self-supervised 2D image representations. In Proceedings of the International Conference on 3D Vision (3DV), 2022. 3 [80] Vadim Tschernezki, Diane Larlus, and Andrea Vedaldi. Neuraldiff: Segmenting 3d objects that move in egocentric videos. In International Conference on 3D Vision (3DV), pages 910–919. IEEE, 2021. 3 [81] Chaoyang Wang, Ben Eckart, Simon Lucey, and Orazio Gallo. Neural trajectory fields for dynamic novel view synthesis. arXiv preprint arXiv:2105.05994, 2021. 2, 3 [82] Liao Wang, Jiakai Zhang, Xinhang Liu, Fuqiang Zhao, Yanshun Zhang, Yingliang Zhang, Minye Wu, Jingyi Yu, and Lan Xu. Fourier plenoctrees for dynamic radiance field rendering in real-time. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 13524–13534, 2022. 3 [83] Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P Simoncelli. Image quality assessment: from error visibility to structural similarity. IEEE transactions on image processing, 13(4):600–612, 2004. 8 [84] Suttisak Wizadwongsa, Pakkapon Phongthawee, Jiraphon Yenphraphai, and Supasorn Suwajanakorn. Nex: Real-time view synthesis with neural basis expansion. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 8534–8543, 2021. 2 [85] Liwen Wu, Jae Yong Lee, Anand Bhattad, Yu-Xiong Wang, and David Forsyth. Diver: Real-time and accurate neural radiance fields with deterministic integration for volume rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 16200– 16209, 2022. 2, 4 [86] Tianhao Wu, Fangcheng Zhong, Andrea Tagliasacchi, Forrester Cole, and Cengiz Oztireli. D2 nerf: Self-supervised decoupling of dynamic and static objects from a monocular video. arXiv preprint arXiv:2205.15838, 2022. 3 [87] Wenqi Xian, Jia-Bin Huang, Johannes Kopf, and Changil Kim. Space-time neural irradiance fields for free-viewpoint video. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 9421–9431, 2021. 2, 3 [88] Yiheng Xie, Towaki Takikawa, Shunsuke Saito, Or Litany, Shiqin Yan, Numair Khan, Federico Tombari, James Tompkin, Vincent Sitzmann, and Srinath Sridhar. Neural fields in visual computing and beyond. In Computer Graphics Forum, volume 41, pages 641–676. Wiley Online Library, 2022. 1, 2 [89] Bangbang Yang, Yinda Zhang, Yinghao Xu, Yijin Li, Han Zhou, Hujun Bao, Guofeng Zhang, and Zhaopeng Cui. Learning object-compositional neural radiance field for editable scene rendering. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 13779– 13788, 2021. 3
+
+[90] Jason C Yang, Matthew Everett, Chris Buehler, and Leonard McMillan. A real-time distributed light field camera. Rendering Techniques, 2002:77–86, 2002. 3 [91] Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng, and Angjoo Kanazawa. Plenoctrees for real-time rendering of neural radiance fields. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 5752– 5761, October 2021. 2, 3 [92] Wentao Yuan, Zhaoyang Lv, Tanner Schmidt, and Steven Lovegrove. Star: Self-supervised tracking and reconstruction of rigid objects in motion with neural rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 13144–13152, 2021. 3 [93] Jiakai Zhang, Xinhang Liu, Xinyi Ye, Fuqiang Zhao, Yanshun Zhang, Minye Wu, Yingliang Zhang, Lan Xu, and Jingyi Yu. Editable free-viewpoint video using a layered neural representation. ACM Trans. Graph., 40(4):149:1–149:18, 2021. 3 [94] Xiaoshuai Zhang, Sai Bi, Kalyan Sunkavalli, Hao Su, and Zexiang Xu. Nerfusion: Fusing radiance fields for largescale scene reconstruction. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 5449–5458, 2022. 4 [95] C Lawrence Zitnick, Sing Bing Kang, Matthew Uyttendaele, Simon Winder, and Richard Szeliski. High-quality video view interpolation using a layered representation. ACM transactions on graphics (TOG), 23(3):600–608, 2004. 3
+
+## Appendix
+
 Per-scene performance evaluations are presented in Tab. 5 (for Immersive Video) and Tab. 6 (for Plenoptic Video).
-Scene
-PSNR
-SSIM
-LPIPSAlex
-LPIPSVGG
-01 W ELDER
-02 F LAMES
-03 D OG
-04 T RUCK
-05 H ORSE
-06 G OATS
-07 C AR
-08 P OND
-09 A LEXA M EADE E XHIBIT
-10 A LEXA M EADE FACE PAINT 1
-11 A LEXA M EADE FACE PAINT 2
-12 C AVE
-13 B IRDS
-14 P UPPY
-25.568
-26.554
-18.764
-27.021
-27.416
-23.023
-19.656
-18.132
-24.549
-27.772
-27.352
-21.825
-13.776
-15.594
-0.818
-0.842
-0.579
-0.877
-0.871
-0.794
-0.624
-0.728
-0.869
-0.916
-0.902
-0.715
-0.826
-0.791
-0.289
-0.154
-0.463
-0.164
-0.295
-0.278
-0.393
-0.352
-0.151
-0.147
-0.152
-0.314
-0.318
-0.305
-0.420
-0.271
-0.515
-0.311
-0.425
-0.386
-0.501
-0.487
-0.278
-0.314
-0.326
-0.381
-0.451
-0.482
-M EAN (A LL )
-M EAN (S ELECTED 7)
-22.643
-26.604
-0.796
-0.870
-0.269
-0.193
-0.396
-0.335
-Table 5. Per scene performance on the Immersive Video dataset. The 7 scenes marked with gray background are the scenes that we find
-consistent among cameras.
-(a) Ours-InstantNGP
-Scene
-PSNR
-SSIM
-LPIPSAlex
-LPIPSVGG
-COFFEE MARTINI
-SEAR STEAK
-32.053
-32.064
-31.830
-26.140
-27.361
-32.310
-0.938
-0.930
-0.928
-0.849
-0.867
-0.940
-0.115
-0.116
-0.119
-0.233
-0.215
-0.111
-0.279
-0.284
-0.287
-0.379
-0.355
-0.272
-M EAN
-30.293
-0.909
-0.152
-0.309
-COOK SPINACH
-CUT ROASTED BEEF
-FLAME SALMON
-FLAME STEAK
-(b) Ours-TensoRF-VM
-Scene
-PSNR
-SSIM
-LPIPSAlex
-LPIPSVGG
-COFFEE MARTINI
-SEAR STEAK
-31.534
-30.557
-29.353
-31.646
-31.932
-29.129
-0.951
-0.929
-0.908
-0.940
-0.950
-0.908
-0.085
-0.113
-0.144
-0.098
-0.088
-0.138
-0.187
-0.226
-0.221
-0.203
-0.190
-0.227
-M EAN
-30.692
-0.931
-0.111
-0.209
-COOK SPINACH
-CUT ROASTED BEEF
-FLAME SALMON
-FLAME STEAK
+
+|    | Scene |                   | PSNR            | SSIM  | LPIPS Alex | LPIPS VGG |
+|----|-------|-------------------|-----------------|-------|------------|-----------|
+| 01 | W     | ELDER             | 25.568          | 0.818 | 0.289      | 0.420     |
+| 02 | F     | LAMES             | 26.554          | 0.842 | 0.154      | 0.271     |
+| 03 | D     | OG                | 18.764          | 0.579 | 0.463      | 0.515     |
+| 04 | T     | RUCK              | 27.021          | 0.877 | 0.164      | 0.311     |
+| 05 | H     | ORSE              | 27.416          | 0.871 | 0.295      | 0.425     |
+| 06 | G     | OATS              | 23.023          | 0.794 | 0.278      | 0.386     |
+| 07 | C     | AR                | 19.656          | 0.624 | 0.393      | 0.501     |
+| 08 | P     | OND               | 18.132          | 0.728 | 0.352      | 0.487     |
+| 09 | A     | LEXA M EADE E     | XHIBIT 24.549   | 0.869 | 0.151      | 0.278     |
+| 10 | A     | LEXA M EADE F ACE | P AINT 1 27.772 | 0.916 | 0.147      | 0.314     |
+| 11 | A     | LEXA M EADE F ACE | P AINT 2 27.352 | 0.902 | 0.152      | 0.326     |
+| 12 | C     | AVE               | 21.825          | 0.715 | 0.314      | 0.381     |
+| 13 | B     | IRDS              | 13.776          | 0.826 | 0.318      | 0.451     |
+| 14 | P     | UPPY              | 15.594          | 0.791 | 0.305      | 0.482     |
+| M  | EAN   | (A LL )           | 22.643          | 0.796 | 0.269      | 0.396     |
+| M  | EAN   | (S ELECTED 7)     | 26.604          | 0.870 | 0.193      | 0.335     |
+
+Table 5. Per scene performance on the Immersive Video dataset. The 7 scenes marked with gray background are the scenes that we find consistent among cameras.
+
+| Scene  |              | (a) PSNR            | Ours-InstantNGP SSIM | LPIPS Alex | LPIPS VGG |
+|--------|--------------|---------------------|----------------------|------------|-----------|
+| COFFEE | MARTINI      | 32.053              | 0.938                | 0.115      | 0.279     |
+| COOK   | SPINACH      | 32.064              | 0.930                | 0.116      | 0.284     |
+| CUT    | ROASTED BEEF | 31.830              | 0.928                | 0.119      | 0.287     |
+| FLAME  | SALMON       | 26.140              | 0.849                | 0.233      | 0.379     |
+| FLAME  | STEAK        | 27.361              | 0.867                | 0.215      | 0.355     |
+| SEAR   | STEAK        | 32.310              | 0.940                | 0.111      | 0.272     |
+| M EAN  |              | 30.293              | 0.909                | 0.152      | 0.309     |
+|        |              | (b) Ours-TensoRF-VM |                      |            |           |
+| Scene  |              | PSNR                | SSIM                 | LPIPS Alex | LPIPS VGG |
+| COFFEE | MARTINI      | 31.534              | 0.951                | 0.085      | 0.187     |
+| COOK   | SPINACH      | 30.557              | 0.929                | 0.113      | 0.226     |
+| CUT    | ROASTED BEEF | 29.353              | 0.908                | 0.144      | 0.221     |
+| FLAME  | SALMON       | 31.646              | 0.940                | 0.098      | 0.203     |
+| FLAME  | STEAK        | 31.932              | 0.950                | 0.088      | 0.190     |
+| SEAR   | STEAK        | 29.129              | 0.908                | 0.138      | 0.227     |
+| M EAN  |              | 30.692              | 0.931                | 0.111      | 0.209     |
+
 Table 6. Per scene performance on the Plenoptic Video dataset.
-17

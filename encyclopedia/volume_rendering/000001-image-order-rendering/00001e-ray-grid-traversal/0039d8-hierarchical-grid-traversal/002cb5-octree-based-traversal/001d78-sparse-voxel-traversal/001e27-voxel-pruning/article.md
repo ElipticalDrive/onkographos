@@ -3,143 +3,206 @@
 Also called: Importance-based Voxel Pruning
 
 ## Overview
-Voxel Pruning is a model compression technique for volumetric representations that reduces storage size by omitting voxels with low rendering importance scores [S1]. It operates on the observation that a small percentage of voxels contribute the majority of rendering importance, while the majority have minimal effect on the final image [S1]. Unlike sibling methods that focus on traversal acceleration (e.g., [Sparse Voxel Traversal](1525-sparse-voxel-traversal.md)) or structural optimization (e.g., [DeepBrick](2191-deepbrick.md)), Voxel Pruning directly modifies the data structure by removing inactive entries based on a learned importance metric [S1].
+Voxel pruning is a technique to reduce model size and memory usage in volumetric representations by omitting voxels with low importance scores, based on the observation that a small percentage of voxels contribute the majority of rendering importance [S1, S2]. It solves the problem of redundant storage and computation in sparse voxel grids or neural feature volumes. Unlike [Sparse Voxel Traversal](1525-sparse-voxel-traversal.md) which focuses on efficient traversal of existing data, voxel pruning actively modifies the data structure by removing non-essential voxels. It differs from [DeepBrick](2191-deepbrick.md) and [Hierarchical Brick-Map DDA](4105-hierarchical-brick-map-dda.md) by operating on individual voxel importance rather than hierarchical block occupancy, and from [LightGaussian Pruning Scoring](3213-lightgaussian-pruning-scoring.md) by typically operating in volumetric space (though image-space variants exist) to preserve structural fidelity [S3, unofficial].
 
 ## How it works
-**Inputs:** A trained volumetric grid model (e.g., DVGO) containing density and color features for each voxel; a set of training views [S1].
-**Outputs:** A pruned grid model with a subset of voxels retained [S1].
+The method consists of two main phases: importance scoring and threshold-based removal. The specific implementation varies depending on whether the underlying representation is a neural radiance field (NeRF) or a geometric primitive set (e.g., ellipsoids).
 
-**Data Structures:**
-The method operates on a 3D grid where each voxel $v_l$ stores density and color features [S1]. The algorithm computes a scalar importance score $I_l$ for each voxel [S1].
+### Inputs and Outputs
+**Inputs:**
+1.  A volumetric representation (grid of voxels or set of primitives).
+2.  For NeRF-based pruning: A trained neural network predicting density $\sigma$ and color/features.
+3.  For NeRF-based pruning: A set of training views (camera poses and images).
+4.  Pruning hyperparameters: $\gamma$ (density threshold), $\beta_p$ (importance fraction to prune), or fixed ratio.
 
-**Steps:**
-1.  **Ray Shooting and Point Scoring:** Shoot a batch of rays through the images of the training views [S1]. For each sampling point $\mathbf{x}_i$ along these rays, calculate the ray termination probability $\alpha_i$ and accumulated transmittance $T_i$ [S1]. Compute the importance score of the sampling point:
-    $$I_i = T_i \cdot \alpha_i \quad (3)$$
-2.  **Voxel Score Assignment:** Assign the importance score $I_i$ of each sampling point to its neighboring voxels $v_l$ proportionally to the distance factor [S1]. The neighborhood $\mathcal{N}_l$ consists of sampling points within distance 1 from the voxel center [S1]. The total importance score for voxel $v_l$ is:
-    $$I_l = \sum_{\mathbf{x}_i \in \mathcal{N}_l} (1 - |\mathbf{v}_l - \mathbf{x}_i|) \cdot I_i \quad (4)$$
-    where $|\mathbf{v}_l - \mathbf{x}_i| \le 1$ [S1].
-3.  **Sorting:** Sort all voxels in ascending order of their importance scores $I_l$ [S1].
-4.  **Threshold Selection:** Select a pruning threshold $\theta_p$ using the quantile function to control the amount of importance to be pruned [S1]:
-    $$\theta_p = F^{-1}(\beta_p) \quad (6)$$
-    where $\beta_p$ is a hyperparameter representing the total amount of importance to be pruned [S1]. The cumulative score rate for a threshold $\theta$ is defined as:
-    $$\theta(\theta) = \frac{\sum I_l \cdot \mathbf{1}\{I_l < \theta\}}{\sum I_l} \quad (5)$$
-    where $\mathbf{1}\{\cdot\}$ is the binary indicator function [S1].
-5.  **Pruning:** For all voxels with importance score $I_l < \theta_p$, omit them from the grid model, including their densities and color features [S1].
+**Outputs:**
+1.  A pruned set of voxels/primitives with their associated features (density, color, covariance).
+2.  A mapping or grid structure containing only the retained elements.
 
-**Pseudocode:**
+### Data Structures
+*   **Voxel Grid:** A sparse hash map or list storing voxel coordinates $(x, y, z)$ and their features (density $\sigma$, color $c$, etc.).
+*   **Importance Score Map:** A temporary structure mapping voxel indices or coordinates to a scalar importance score $I$.
+*   **Primitives (for Structure-Aware):** For ellipsoid-based methods, each primitive $i$ stores center intensity $I_i$, covariance matrix $\Sigma_i$ (eigenvalues $\lambda_{1,i}, \lambda_{2,i}, \lambda_{3,i}$), and voxel coverage $|\Omega_i|$.
+
+### Algorithm: NeRF-Based Voxel Pruning
+This variant, described in [S1] and [S2], uses ray casting to determine importance.
+
+1.  **Ray Casting and Point Sampling:**
+    Shoot a batch of rays through the training views. For each ray, sample $k$ points uniformly distributed inside each voxel $V$ traversed. Let $v_i$ be a sampling point inside voxel $V$.
+
+2.  **Density Prediction:**
+    For each sampling point $v_i$, predict the volume density $\sigma(v_i)$ using the trained neural network.
+
+3.  **Point Importance Calculation:**
+    Calculate the accumulated transmittance $T_i$ and ray termination probability $\alpha_i$ for each point $x_i$ along the ray. The importance score of the sampling point $x_i$ is defined as [S1]:
+    $$ I_i = T_i \cdot \alpha_i $$
+    where $T_i = \exp(-\sum_{j < i} \sigma_j \delta_j)$ and $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$.
+
+4.  **Voxel Importance Aggregation (Method A: Distance-Weighted):**
+    Assign the importance score $I_i$ of each sampling point $x_i$ to its neighboring voxels $v_l$ proportionally to the distance. The importance score of voxel $v_l$ is [S1]:
+    $$ I_l = \sum_{\mathbf{x}_i \in \mathcal{N}_l} (1 - |\mathbf{v}_l - \mathbf{x}_i|) \cdot I_i $$
+    where $\mathcal{N}_l$ is the set of sampling points within distance 1 of voxel $v_l$, and $|\mathbf{v}_l - \mathbf{x}_i|$ is the Euclidean distance.
+
+    **Alternative Aggregation (Method B: Density Threshold):**
+    For methods relying purely on density (e.g., [S2]), sample $k$ points $v_i$ inside voxel $V$. Compute $\exp(-\sigma(v_i))$. If the minimum value exceeds a threshold $\gamma$, the voxel is considered empty [S2]:
+    $$ \text{Prune } V \text{ if } \min_{i=1\dots k} \exp(-\sigma(v_i)) > \gamma $$
+
+5.  **Threshold Selection:**
+    Sort all voxels by their aggregated importance score $I_l$ in ascending order. Define the cumulative score rate $\theta(\theta)$ as [S1]:
+    $$ \theta(\theta) = \frac{\sum I_l \cdot \mathbf{1}\{I_l < \theta\}}{\sum I_l} $$
+    Select the pruning threshold $\theta_p$ using the quantile function to prune a fraction $\beta_p$ of the total importance [S1]:
+    $$ \theta_p = F^{-1}(\beta_p) $$
+    where $F^{-1}$ is the inverse cumulative distribution function of the importance scores.
+
+6.  **Pruning:**
+    For all voxels with $I_l < \theta_p$, omit them from the grid model, including their densities and color features.
+
+### Algorithm: Structure-Aware Pruning (Ellipsoids)
+This variant, described in [S3, unofficial], operates on 3D Gaussian/Ellipsoid primitives.
+
+1.  **Coverage Calculation:**
+    Determine the voxel coverage $|\Omega_i|$ for each primitive $i$. A voxel $v$ is covered by ellipsoid $i$ if the primitive yields a non-negligible contribution at its center:
+    $$ \tilde{P}_i(v) \geq \epsilon $$
+    where $\epsilon = 1/255$.
+
+2.  **Fractional Anisotropy (FA) Calculation:**
+    Compute the fractional anisotropy $FA_i$ from the eigenvalues $(\lambda_{1,i}, \lambda_{2,i}, \lambda_{3,i})$ of the covariance matrix $\Sigma_i$ [S3, unofficial]:
+    $$ \text{FA}_i = \sqrt{\frac{1}{2}} \frac{\sqrt{(\lambda_{1,i} - \lambda_{2,i})^2 + (\lambda_{2,i} - \lambda_{3,i})^2 + (\lambda_{3,i} - \lambda_{1,i})^2}}{\sqrt{\lambda_{1,i}^2 + \lambda_{2,i}^2 + \lambda_{3,i}^2}} $$
+
+3.  **Importance Score Calculation:**
+    Compute the structure-aware importance score for each primitive $i$ [S3, unofficial]:
+    $$ \text{score}_i = |\Omega_i| \cdot I_i \cdot \text{FA}_i $$
+    where $I_i$ is the learned center intensity.
+
+4.  **Pruning:**
+    Rank primitives by $\text{score}_i$ in ascending order. Remove the lowest-scoring primitives according to a preset pruning ratio.
+
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def voxel_pruning(grid_model, training_views, beta_p):
+def voxel_pruning_nerf(voxels, neural_net, training_views, beta_p):
     """
-    grid_model: dict mapping voxel_id -> {'center': (x,y,z), 'density': float, 'color': float}
-    training_views: list of dicts with 'camera_pose' and 'image_shape'
-    beta_p: float in [0, 1], fraction of total importance to prune
+    Prunes voxels based on importance scores derived from ray casting.
     """
-    voxel_scores = {vid: 0.0 for vid in grid_model}
-    voxel_centers = {vid: data['center'] for vid, data in grid_model.items()}
-
-    # Step 1 & 2: Ray shooting, scoring, and assignment
+    importance_scores = {}
+    
+    # Step 1-3: Ray casting and point importance calculation
     for view in training_views:
-        for u in range(view['image_shape'][1]):
-            for v in range(view['image_shape'][0]):
-                ray_origin, ray_direction = compute_ray(view['camera_pose'], u, v, view['image_shape'])
-                samples = volume_render(ray_origin, ray_direction, grid_model)
-                for sample in samples:
-                    x_i = sample['position']
-                    alpha_i = sample['alpha']
-                    T_i = sample['transmittance']
-                    I_i = T_i * alpha_i
-
-                    neighbors = find_voxels_in_radius(x_i, voxel_centers, radius=1.0)
-                    for v_l_id in neighbors:
-                        dist = vector_norm(subtract(voxel_centers[v_l_id], x_i))
+        rays = generate_rays(view)
+        for ray in rays:
+            # Sample points along the ray
+            points = sample_points_along_ray(ray, num_samples=100)
+            accumulated_transmittance = 1.0
+            
+            for point in points:
+                # Predict density
+                sigma = neural_net.predict_density(point)
+                
+                # Calculate alpha and point importance
+                alpha = 1.0 - exp(-sigma * delta) # delta is step size
+                point_importance = accumulated_transmittance * alpha
+                
+                # Step 4: Assign importance to neighboring voxels
+                # Identify voxels intersected by the segment
+                neighboring_voxels = get_intersected_voxels(point, next_point)
+                for v in neighboring_voxels:
+                    dist = distance(v.center, point)
+                    if dist <= 1.0:
                         weight = 1.0 - dist
-                        voxel_scores[v_l_id] += weight * I_i
+                        importance_scores[v.id] = importance_scores.get(v.id, 0) + weight * point_importance
+                
+                # Update transmittance
+                accumulated_transmittance *= (1.0 - alpha)
 
-    # Step 3: Sort voxels by importance score ascending
-    sorted_voxels = sorted(voxel_scores.items(), key=lambda item: item[1])
-
-    # Step 4: Threshold selection via quantile function
-    total_score = sum(voxel_scores.values())
-    target_pruned_score = total_score * beta_p
-    current_pruned_score = 0.0
-    threshold = 0.0
-
-    for voxel_id, score in sorted_voxels:
-        current_pruned_score += score
-        if current_pruned_score >= target_pruned_score:
-            threshold = score
+    # Step 5: Threshold selection
+    if not importance_scores:
+        return voxels # No voxels to prune
+    
+    sorted_scores = sorted(importance_scores.values())
+    total_importance = sum(sorted_scores)
+    
+    # Find threshold theta_p such that fraction beta_p of importance is removed
+    cumulative = 0.0
+    theta_p = 0.0
+    for score in sorted_scores:
+        cumulative += score
+        if cumulative / total_importance >= beta_p:
+            theta_p = score
             break
+            
+    # Step 6: Pruning
+    pruned_voxels = []
+    for v in voxels:
+        if importance_scores.get(v.id, 0) >= theta_p:
+            pruned_voxels.append(v)
+            
+    return pruned_voxels
 
-    # Step 5: Prune voxels below threshold
-    pruned_grid = {}
-    for voxel_id, data in grid_model.items():
-        if voxel_scores[voxel_id] >= threshold:
-            pruned_grid[voxel_id] = data
-
-    return pruned_grid
-
-def compute_ray(camera_pose, u, v, image_shape):
-    fx, fy = image_shape[0] / 2, image_shape[1] / 2
-    ray_dir = normalize(camera_pose['rotation'] @ (u - fx, v - fy, -1))
-    return camera_pose['position'], ray_dir
-
-def volume_render(origin, direction, grid_model):
-    samples = []
-    t = 0.0
-    step_size = 0.05
-    T = 1.0
-    while t < 10.0:
-        pos = origin + direction * t
-        density = trilinear_interpolate(pos, grid_model)
-        alpha = 1.0 - exp(-density * step_size)
-        samples.append({'position': pos, 'alpha': alpha, 'transmittance': T})
-        T *= (1.0 - alpha)
-        t += step_size
-    return samples
-
-def find_voxels_in_radius(center, voxel_centers, radius):
-    return [vid for vid, c in voxel_centers.items() if vector_norm(subtract(c, center)) <= radius]
-
-def vector_norm(v): return (v[0]**2 + v[1]**2 + v[2]**2)**0.5
-def subtract(a, b): return (a[0]-b[0], a[1]-b[1], a[2]-b[2])
-def normalize(v): n = vector_norm(v); return (v[0]/n, v[1]/n, v[2]/n)
-def trilinear_interpolate(pos, grid_model):
-    return 0.0 # Standard trilinear interpolation [G]
+def voxel_pruning_ellipsoids(primitives, epsilon=1/255):
+    """
+    Structure-aware pruning for ellipsoid primitives.
+    """
+    scores = []
+    for prim in primitives:
+        # Calculate coverage
+        coverage = count_covered_voxels(prim, epsilon)
+        
+        # Calculate FA
+        eigenvalues = compute_eigenvalues(prim.covariance)
+        l1, l2, l3 = eigenvalues
+        numerator = sqrt((l1-l2)**2 + (l2-l3)**2 + (l3-l1)**2)
+        denominator = sqrt(l1**2 + l2**2 + l3**2)
+        fa = sqrt(0.5) * (numerator / denominator) if denominator > 0 else 0
+        
+        # Calculate score
+        score = coverage * prim.intensity * fa
+        scores.append((score, prim))
+        
+    # Sort and prune
+    scores.sort(key=lambda x: x[0])
+    # Return top N or prune bottom fraction based on preset ratio
+    return [p for _, p in scores[int(len(scores)*0.1):]] # Example: keep top 90%
 ```
 
-**Parameters:**
-*   $\beta_p$: Hyperparameter representing the total amount of importance to be pruned. Typical values are not explicitly given, but the method relies on this quantile-based selection to adapt to different scenes [S1].
-
-**Edge Cases and Pitfalls:**
-*   **Precision:** The distance factor $(1 - |\mathbf{v}_l - \mathbf{x}_i|)$ requires precise floating-point arithmetic to ensure correct weighting [S1].
-*   **Boundaries:** The neighborhood definition $|\mathbf{v}_l - \mathbf{x}_i| \le 1$ must handle voxels near the grid boundaries correctly [S1].
-*   **Degenerate Input:** If the grid is empty or has no training views, the scoring process cannot proceed [S1].
+### Parameters and Edge Cases
+*   **$\beta_p$ (Importance Fraction):** Hyperparameter representing the total amount of importance to be pruned. Typical values depend on the desired compression ratio. A long-tail distribution is common, where >99.9% of importance is held by 10% of voxels [S1].
+*   **$\gamma$ (Density Threshold):** Used in density-based pruning [S2]. If not given, default values are not specified.
+*   **$\epsilon$ (Coverage Threshold):** Used in structure-aware pruning. Default is $1/255$ [S3, unofficial].
+*   **Edge Cases:**
+    *   **Empty Voxels:** Voxels with no scene content should be pruned aggressively [S2].
+    *   **Degenerate Covariance:** If eigenvalues are all zero, FA is undefined; handle as 0 or skip [S3, unofficial].
+    *   **Precision:** Accumulated transmittance can underflow for long rays; use log-space or clamp [G].
 
 ## Subtopics
 
-### LightGaussian Pruning Scoring
-A 2D projection-based primitive scoring method that ranks primitives for pruning based on accumulated ray contributions across multiple synthesized views, utilizing view-dependent features like ray hits and transmittance [S3, unofficial]. It generates 360 uniformly sampled views on a sphere, renders them, and scores primitives based on accumulated contributions [S3, unofficial]. This method yields lower accuracy in volumetric settings compared to volume-based scoring (e.g., 48.76 dB vs 50.76 dB on Aneurysm data) because it does not integrate voxel intensities covered by each primitive [S3, unofficial].
+### [LightGaussian Pruning Scoring](3213-lightgaussian-pruning-scoring.md)
+LightGaussian Pruning Scoring is a 2D projection-based method for ranking 3D Gaussian primitives to determine which ones to prune, based on accumulated ray contributions across multiple synthesized views. It differs from volume-based scoring methods by operating in image space rather than volumetric space, making it less accurate for volumetric data where intensity integration and anisotropy weighting are critical.
 
-### FA-based Pruning
-A pruning strategy that combines fractional anisotropy (FA) with intensity and scale cues to rank primitives [S3, unofficial]. Combining FA with intensity and scale yields the best reconstruction quality compared to using only intensity and scale cues [S3, unofficial].
+### [FA-based Pruning](3236-fa-based-pruning.md)
+FA-based pruning reduces model size and rendering cost by omitting voxels with low importance scores, leveraging the observation that a small percentage of voxels contribute the majority of rendering importance [Parent]. It sets itself apart from intensity-only or scale-only heuristics by incorporating Feature Anisotropy (FA) cues, which yields superior reconstruction quality when combined with intensity and scale.
+
+### [Importance-Driven Volume Rendering](7632-importance-driven-volume-rendering.md)
+Importance-Driven Volume Rendering (IDVR) is a technique that assigns an importance value to volumetric features to dynamically adjust their visual sparseness (opacity/density) based on viewpoint-dependent occlusion, ensuring important features remain visible while less important ones are suppressed. It solves the problem of volume object occlusion by cutting or suppressing transparency of less important parts if they are in front of more important objects, allowing users to view hidden but important objects regardless of view direction. Unlike traditional techniques that classify features independently from the viewpoint using constant optical properties, IDVR uses multiple levels of sparseness with smooth transitions that vary continuously within a single feature depending on viewpoint and occlusion.
 
 ### Structure-Aware Pruning
-A pruning strategy that computes a structure-aware importance score for each ellipsoid to remove redundant primitives while preserving structural fidelity [S3, unofficial]. It defines coverage $\Omega_i$ as voxels where the primitive yields a non-negligible contribution ($\tilde{P}_i(v) \geq \epsilon$ with $\epsilon = 1/255$) [S3, unofficial]. The importance score is $score_i = |\Omega_i| \cdot I_i \cdot FA_i$, where $I_i$ is the learned center intensity, $|\Omega_i|$ is the voxel coverage, and $FA_i$ is the fractional anisotropy [S3, unofficial]. Primitives are ranked by $score_i$ and the lowest-scoring ones are removed according to a preset pruning ratio [S3, unofficial].
+Structure-Aware Pruning is a pruning strategy that computes a structure-aware importance score for each ellipsoid to remove redundant primitives while preserving structural fidelity [S3, unofficial]. It differs from view-dependent scoring by operating in volumetric space and integrating intensity, voxel coverage, and fractional anisotropy [S3, unofficial]. A voxel is considered covered if the primitive's contribution at its center exceeds $\epsilon = 1/255$. The score is $score_i = |\Omega_i| \cdot I_i \cdot FA_i$. Primitives are ranked by score and removed according to a preset ratio [S3, unofficial].
+
+### Volume Thinning
+Volume Thinning is a scheme that reduces volume visibility by sorting voxels according to gradient and curvature magnitudes, dissolving iso-surfaces gradually [S4, unofficial]. It sorts voxels first by gradient magnitude, then by curvature magnitude. Reducing sparseness according to gradient magnitude reduces the volume to fewer strong iso-surfaces. As few iso-surfaces remain, reduction proceeds according to curvature magnitude, gradually dissolving iso-surfaces so that only few high curvature areas remain in the most sparse representation [S4, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The method requires shooting rays through training views and computing importance scores for all sampling points, which is proportional to the number of rays and samples [S1]. Sorting voxels is $O(N \log N)$ where $N$ is the number of voxels [S1].
-*   **Memory Complexity:** Reduces model size by omitting voxels with low importance scores [S1]. The reduction depends on the threshold $\theta_p$ [S1].
-*   **Strengths:** Reduces model size significantly (e.g., to 1 MB) while maintaining rendering quality [S1]. The adaptive threshold selection makes it general across different scenes or base models [S1].
-*   **Limitations:** Requires training views for importance estimation [S1]. Projection-based scoring (LightGaussian) yields lower accuracy in volumetric settings [S3, unofficial].
-*   **When to use:** When model size is a critical constraint and a small percentage of voxels dominate rendering importance [S1].
-*   **When not to use:** When high volumetric accuracy is required and projection-based scoring is used [S3, unofficial].
+*   **Time Complexity:** The pruning process is $O(N \log N)$ due to sorting voxels by importance score, where $N$ is the number of voxels. Ray casting for importance calculation is $O(R \cdot S)$, where $R$ is the number of rays and $S$ is the number of samples per ray.
+*   **Memory Complexity:** Reduces memory usage by the fraction of pruned voxels. The importance score map requires $O(N)$ additional memory temporarily.
+*   **Performance:** Can significantly reduce model size (e.g., to 1 MB as cited in [S1]) with minimal quality loss if the pruning threshold is chosen correctly.
+*   **Strengths:** Adaptive to scene content; general across different scenes or base models [S1].
+*   **Limitations:** Requires a training phase or pre-computation of importance scores; not suitable for dynamic scenes without re-pruning.
 
 ## Background
-Voxel Pruning was introduced in the paper "Compressing Volumetric Radiance Fields to 1 MB" [S1]. The method is based on the observation that a small percentage of voxels contribute the majority of rendering importance [S1]. It is used to compress volumetric radiance fields, such as those in DVGO [S1].
+Voxel pruning originated as a method to compress volumetric radiance fields. It was introduced in the context of compressing NeRF-based representations to reduce model size while maintaining rendering quality [S1]. The technique leverages the sparsity of natural scenes, where most voxels contribute little to the final image. It has been adapted for various volumetric representations, including neural feature volumes [S2] and 3D Gaussian/Ellipsoid splatting [S3, unofficial].
 
 ## Sources
 [S1] Compressing Volumetric Radiance Fields to 1 MB, https://doi.org/10.1109/cvpr52729.2023.00411, fetched 2026-10-26
 [S2] NeRFusion: Fusing Radiance Fields for Large-Scale Scene Reconstruction, https://doi.org/10.1109/cvpr52688.2022.00537, fetched 2026-10-26
 [S3] ESVR: 3D Ellipsoid-based Sparse Volume Rendering via Structure-aware Primitive Learning and Per-primitive Ray Sampling, https://arxiv.org/abs/2608.05564v1, fetched 2026-10-26 (unofficial)
+[S4] (PDF) Importance-Driven Volume Rendering, https://www.researchgate.net/publication/220943935_Importance-Driven_Volume_Rendering, fetched 2026-11-03 (unofficial)

@@ -7,83 +7,77 @@ This method generates view rays for each framebuffer pixel by bilinearly interpo
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Integer pixel coordinates `px` (from `gl_GlobalInvocationID.xy`), camera eye position `eye`, four world-space corner direction vectors (`ray00`, `ray01`, `ray10`, `ray11`) defining the frustum corners, framebuffer dimensions `size`, and a 3D voxel texture containing the scene data.
-*   **Outputs:** An RGB color with alpha 1.0 stored in the framebuffer image at `px`.
+*   **Inputs:** Integer pixel coordinates `px` (from `gl_GlobalInvocationID.xy`), camera eye position `eye`, four world-space corner direction vectors (`ray00`, `ray01`, `ray10`, `ray11`) defining the frustum corners, framebuffer dimensions `size`, and a 3D voxel texture containing the scene data [S1, unofficial].
+*   **Outputs:** An RGB color with alpha 1.0 stored in the framebuffer image at `px` [S1, unofficial].
 
 **Data Structures:**
-*   **Voxel Texture:** A 3D OpenGL texture (`GL_TEXTURE_3D`) storing the SVO or volume data. It is uploaded with a specific `textureSize` uniform [S1, unofficial].
-*   **Framebuffer:** An OpenGL image (`framebufferImage`) bound for write access via `imageStore` [S1, unofficial].
+*   **Voxel Texture:** A 3D OpenGL texture (`GL_TEXTURE_3D`) storing the SVO or volume data, uploaded via `SVO.uploadTexture(textureSize, svo.getTextureData())` [S1, unofficial].
+*   **Framebuffer:** An OpenGL image (`framebufferImage`) bound at a specific binding point for write access via `imageStore` [S1, unofficial].
 *   **Uniforms:**
-    *   `textureSize`: A `vec3` uniform set to `(texSize, 1.0/texSize, 1.0/(2.0*texSize))`, providing resolution and reciprocals for coordinate normalization [S1, unofficial].
+    *   `textureSize`: A `vec3` uniform set to `(texSize, 1.0/texSize, 1.0/(2.0*texSize))`, providing the texture resolution and its reciprocals for coordinate normalization [S1, unofficial].
     *   `invNumberOfIndGrids`: A float uniform set to `2.0 / texSize`, used to scale indirection grid lookups [S1, unofficial].
 
 **Algorithm Steps:**
 1.  **Boundary Check:** Determine the framebuffer `size` using the built-in `imageSize` function. If the current global invocation ID `px` exceeds `size` in any dimension, terminate the shader execution to prevent out-of-bounds memory access [S1, unofficial].
 2.  **Normalize Pixel Coordinate:** Calculate the normalized pixel coordinate `p` in the interval $(0, 1)$ by adding $0.5$ to the integer pixel index `px`, casting to `vec2`, and dividing by the framebuffer `size` [S1, unofficial]:
     $$ p = \frac{\text{vec2}(px) + \text{vec2}(0.5)}{\text{vec2}(size)} $$
-3.  **Interpolate Ray Direction:** Compute the world-space ray direction `dir` by bilinearly interpolating the four corner rays using `p.x` and `p.y`. The interpolation is performed as follows:
+3.  **Interpolate Ray Direction:** Compute the world-space ray direction `dir` by bilinearly interpolating the four corner rays using `p.x` and `p.y` [S1, unofficial]:
     $$ \text{dir} = \text{mix}(\text{mix}(\text{ray00}, \text{ray01}, p.y), \text{mix}(\text{ray10}, \text{ray11}, p.y), p.x) $$
     Here, `ray00`, `ray01`, `ray10`, and `ray11` represent the world-space direction vectors from the eye to the four corners of the view frustum [S1, unofficial].
 4.  **Normalize Direction:** Normalize the interpolated `dir` vector to ensure it is a unit vector. This is critical because the bilinearly interpolated direction is not guaranteed to be of unit length, and normalization ensures consistent step sizes or intersection calculations during tracing [S1, unofficial].
-5.  **Trace Ray:** Trace the ray starting at the `eye` position along the normalized `dir` through the voxel texture. The `trace` function returns a `vec4` color value [S1, unofficial].
+5.  **Trace Ray:** Trace the ray starting at the `eye` position along the normalized `dir` through the voxel texture. The traversal samples the 3D texture and accumulates color until an opaque voxel is found or the maximum depth is reached [S1, unofficial].
 6.  **Store Result:** Store the resulting RGB color with an alpha of 1.0 into the framebuffer image at the current pixel index `px` [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Assume these uniforms and inputs are available in the shader environment:
-# vec3 eye;
-# vec3 ray00, ray01, ray10, ray11;
-# image2D framebufferImage;
-# ivec2 gl_GlobalInvocationID;
+def main():
+    px = gl_GlobalInvocationID.xy
+    size = framebuffer_image.shape
+    if px[0] >= size[0] or px[1] >= size[1]:
+        return
 
-void main() {
-    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
-    ivec2 size = imageSize(framebufferImage);
+    # Step 1: Normalize pixel coordinate to (0, 1)
+    p = (np.array(px, dtype=float) + 0.5) / size
 
-    // Guard against work items outside the actual framebuffer dimensions
-    if (any(greaterThanEqual(px, size))) {
-        return;
-    }
+    # Step 2: Bilinearly interpolate the four corner rays
+    dir = mix(mix(ray00, ray01, p[1]), mix(ray10, ray11, p[1]), p[0])
 
-    // Step 1: Normalize pixel coordinate to (0, 1)
-    vec2 p = (vec2(px) + vec2(0.5)) / vec2(size);
+    # Step 3: Normalize the direction vector
+    dir = normalize(dir)
 
-    // Step 2: Bilinearly interpolate the four corner rays
-    // mix(a, b, t) performs linear interpolation: a * (1-t) + b * t
-    vec3 dir = mix(
-        mix(ray00, ray01, p.y),
-        mix(ray10, ray11, p.y),
-        p.x
-    );
+    # Step 4: Trace the ray through the voxel texture
+    t = 0.0
+    color = np.array([0.0, 0.0, 0.0, 0.0])
+    max_steps = 1000
+    step = 0.5  # Not given in the sources. [G]
 
-    // Step 3: Normalize the direction vector
-    dir = normalize(dir);
+    for _ in range(max_steps):
+        pos = eye + dir * t
+        # Normalize to texture coordinates using textureSize uniform [S1, unofficial]
+        uv = pos * texture_size_recip
+        uv = np.clip(uv, 0.0, 1.0)
+        sample = texture(voxel_texture_direct, uv)
+        if sample[3] > 0.0:
+            color = np.array([sample[0], sample[1], sample[2], 1.0])
+            break
+        t += step
 
-    // Step 4: Trace the ray
-    // trace() is a helper function defined elsewhere that performs
-    // the actual voxel traversal and shading.
-    vec4 color = trace(eye, dir);
-
-    // Step 5: Store result with alpha = 1.0
-    imageStore(framebufferImage, px, vec4(color.rgb, 1.0));
-}
+    # Step 5: Store result with alpha = 1.0
+    framebuffer_image[px[0], px[1]] = color
 ```
+*Note: `mix`, `normalize`, `texture`, and vector arithmetic are standard math/vector operations [G]. `texture_size_recip` corresponds to the `y` and `z` components of the `textureSize` uniform.*
 
 **Edge Cases and Pitfalls:**
 *   **Non-Unit Direction:** The interpolated `dir` vector is not guaranteed to be unit length. Failing to normalize it before tracing can lead to incorrect step sizes in the ray marching algorithm or inaccurate intersection calculations [S1, unofficial].
 *   **Out-of-Bounds Execution:** Compute shaders often require work group sizes that are powers of two. If the framebuffer dimensions are not powers of two, extra work items may be launched. A boundary check against `imageSize` is required to prevent writing to unallocated memory [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Ray generation is $O(1)$ per pixel. The total time is dominated by the ray tracing step through the voxel structure, which depends on the density and traversal depth of the SVO/voxel grid.
-*   **Memory Complexity:** Requires storage for the 3D voxel texture and the four corner ray vectors. The framebuffer image size scales with resolution.
-*   **Strengths:** Avoids per-pixel matrix multiplications for ray direction generation, potentially offering slight performance gains on hardware where texture lookups or interpolation are highly optimized. Simple to implement within a compute shader framework.
-*   **Limitations:** Accuracy depends on the linearity of the projection; for wide-angle or highly distorted lenses, bilinear interpolation of corner rays may introduce geometric inaccuracies compared to full projection matrix multiplication.
-*   **When to use:** Suitable for standard perspective projections where high precision in ray direction generation is not the primary bottleneck, or when integrating with existing SVO traversal codebases that expect pre-computed corner vectors.
+Not given in the sources.
 
 ## Background
-This method is implemented in the `lwjgl-voxel-raycasting` project by RvanderLaan, which demonstrates voxel raycasting using OpenGL Compute Shaders and the LWJGL library [S1, unofficial]. It represents a practical approach to integrating ray generation with sparse voxel octree traversal in a compute shader environment.
+This method is implemented in the `lwjgl-voxel-raycasting` project by RvanderLaan, which demonstrates voxel raycasting using OpenGL Compute Shaders and the LWJGL library [S1, unofficial]. It represents a practical approach to integrating ray generation with sparse voxel octree traversal in a compute shader environment [S1, unofficial].
 
 ## Sources
 [S1] RvanderLaan/lwjgl-voxel-raycasting, https://github.com/RvanderLaan/lwjgl-voxel-raycasting, fetched 2026-10-24 (unofficial)

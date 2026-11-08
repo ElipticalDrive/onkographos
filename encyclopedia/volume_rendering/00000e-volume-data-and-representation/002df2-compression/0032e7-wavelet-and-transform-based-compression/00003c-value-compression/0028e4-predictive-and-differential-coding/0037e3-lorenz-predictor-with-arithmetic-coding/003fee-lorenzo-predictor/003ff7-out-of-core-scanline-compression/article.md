@@ -1,0 +1,208 @@
+# Out-of-Core Scanline Compression
+
+Also called: Lorenzo Out-of-Core Compression, Lorenzo-based Out-of-Core Compression, Scanline Compression Algorithm
+
+## Overview
+Out-of-Core Scanline Compression is a method for compressing large $n$-dimensional scalar fields by processing data in scanline order using the Lorenzo predictor to generate residuals, which are then encoded (typically via arithmetic coding). It solves the problem of compressing datasets too large to fit in main memory by requiring only a small buffer (the size of a single slice) in core memory, unlike wavelet-based methods that require hierarchical processing and larger temporary storage [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** An $n$-dimensional scalar field $F$ organized as a regular grid with dimensions $d_{max} = [D_1, D_2, \dots, D_n]$. The data is accessed sequentially in scanline order.
+*   **Output:** A compressed bitstream of residuals.
+
+**Data Structures:**
+*   **Grid:** $F[x_1, \dots, x_n]$ where $0 \le x_i < D_i$.
+*   **Buffer:** A circular FIFO vector storing the "footprint" points required by the predictor. The buffer size is the size of one $(n-1)$-dimensional slice plus the footprint for a dataset one dimension less [S1, unofficial]. For $R^4$, the buffer size is $X_M Y_M Z_M + X_M Y_M + X_M + 1$ [S1, unofficial].
+*   **Probability Tables:** Space for an adaptive arithmetic encoder (much smaller than the dataset) [S1, unofficial].
+
+**The Lorenzo Predictor:**
+The predictor estimates the value $E(v)$ at sample $v$ using its immediate neighbors that have already been processed. In a local coordinate system where $v$ is at $(1, \dots, 1)$, the neighbors $u$ are vertices of the unit cube $\{0,1\}^n \setminus \{v\}$ [S2, unofficial]. The prediction is:
+
+$$ E(v) = \sum_{u \in U} (-1)^{c_0(u)+1} F(u) $$
+
+where $U = \{0,1\}^n \setminus \{v\}$ and $c_0(u)$ is the number of coordinates of $u$ equal to 0 [S2, unofficial]. Note: Source [S1, unofficial] uses the formula $P(v) = \sum_u (-1)^{g(u)} F(u)$ where $g(u)$ is the number of zero coordinates. Both describe the same isotropic predictor for polynomials of degree $< n$ [S1, S2, unofficial].
+
+**Algorithm Steps:**
+1.  Initialize the recursive traversal function `Lorenzo(d, x_1, ..., x_n)` with $d=n$ and all coordinates $x_i = -1$ [S1, unofficial].
+2.  The function `Lorenzo(d, x_1, ..., x_n)` performs the following:
+    *   If all coordinates $x_1, \dots, x_n$ are not $-1$:
+        *   Compute prediction $p = \text{LorenzoPredictor}(d, x_1, \dots, x_n)$ using the formula above [S1, unofficial].
+        *   Calculate residual $r = F[x_1, \dots, x_n] - p$ [S1, unofficial].
+        *   Encode $r$ using arithmetic coding [S1, unofficial].
+    *   Else (if any coordinate is $-1$):
+        *   Recursively call `Lorenzo(d-1, x_1, ..., x_{d-1}, 0, x_{d+1}, ..., x_n)` to initialize the current dimension's index to 0 [S1, unofficial].
+        *   Iterate $i$ from 1 to $D_d$ (the size of the $d$-th dimension):
+            *   Call `Lorenzo(d, x_1, ..., x_{d-1}, i, x_{d+1}, ..., x_n)` [S1, unofficial].
+3.  The starting call for a 4D dataset is `Lorenzo(4, -1, -1, -1, -1)` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def lorenzo_predictor(coords):
+    """
+    Computes the Lorenzo prediction for a sample given its local coordinates.
+    coords: tuple of length n, where the sample is at (1,1,...,1) and neighbors are in {0,1}^n.
+    Returns the predicted value.
+    """
+    n = len(coords)
+    # The sample v is at (1, ..., 1).
+    # Neighbors u are all combinations of 0 and 1 of length n, excluding v itself.
+    prediction = 0.0
+    # Iterate through all 2^n vertices of the unit cube
+    for mask in range(1 << n):
+        # Construct neighbor u from mask bits
+        u = tuple(1 if (mask >> j) & 1 else 0 for j in range(n))
+        
+        # Skip the sample itself (all 1s)
+        if all(coord == 1 for coord in u):
+            continue
+            
+        # Count zeros in u
+        c0 = sum(1 for coord in u if coord == 0)
+        
+        # Get the value F(u) from the buffer or grid
+        # Note: In a real implementation, F(u) must be retrieved from the buffer
+        # which stores the footprint.
+        value_u = get_value_from_buffer(u)
+        
+        # Add to prediction with sign (-1)^(c0 + 1)
+        if (c0 + 1) % 2 == 0:
+            prediction += value_u
+        else:
+            prediction -= value_u
+            
+    return prediction
+
+def get_value_from_buffer(coords):
+    """
+    Retrieves F(u) from the circular FIFO buffer.
+    In a full implementation, this maps local coordinates to buffer indices.
+    For the purpose of this algorithm description, we assume the buffer
+    provides access to the necessary footprint points.
+    """
+    # [G] Implementation detail: The buffer stores the (n-1)-dimensional slice.
+    # The mapping depends on the specific scanline order and dimension.
+    # This function is a placeholder for the buffer lookup logic.
+    raise NotImplementedError("Buffer lookup logic depends on specific memory layout.")
+
+def encode_out_of_core(grid_dimensions):
+    """
+    Main out-of-core compression routine.
+    grid_dimensions: list of integers [D1, D2, ..., Dn]
+    """
+    n = len(grid_dimensions)
+    
+    # Initialize buffer for footprint
+    # Size calculation example for R4: X*Y*Z + X*Y + X + 1
+    # [G] Exact buffer indexing logic is complex and depends on dimension n.
+    # The buffer must store the values of the footprint points.
+    buffer = CircularFIFOBuffer(grid_dimensions)
+    
+    # Start recursive traversal
+    # Coordinates initialized to -1
+    coords = [-1] * n
+    lorenzo_recursive(n, coords, buffer)
+
+def lorenzo_recursive(d, coords, buffer):
+    """
+    Recursive function to traverse the grid and encode residuals.
+    d: current dimension index (1-based, or 0-based depending on convention)
+    coords: current coordinates, -1 indicates unvisited dimension
+    buffer: the footprint buffer
+    """
+    # Check if all coordinates are valid (not -1)
+    if all(c != -1 for c in coords):
+        # All dimensions visited, process this sample
+        # 1. Compute prediction
+        # Note: The predictor formula uses local coordinates relative to the current sample.
+        # If the current sample is at (x1, ..., xn), its neighbors are at (x1-1, ...), etc.
+        # The formula in [S2, unofficial] assumes local coords where sample is (1,1,...,1).
+        # We must map global coords to local neighbor offsets.
+        
+        # Local coords for neighbors: 0 or 1.
+        # Global coords for neighbors: coords[i] - 1 if local is 0, coords[i] if local is 1?
+        # Actually, the formula sums over u in {0,1}^n \ {v}.
+        # If v is at global (x1...xn), then u corresponds to global (x1 - u1, ..., xn - un)
+        # where ui is 0 or 1.
+        
+        prediction = 0.0
+        n_dims = len(coords)
+        for mask in range(1 << n_dims):
+            u_local = tuple(1 if (mask >> j) & 1 else 0 for j in range(n_dims))
+            if all(c == 1 for c in u_local):
+                continue # Skip v itself
+            
+            # Global coordinates of neighbor u
+            u_global = tuple(coords[i] - u_local[i] for i in range(n_dims))
+            
+            # Retrieve F(u_global) from buffer
+            # [G] This requires the buffer to support retrieval by global or relative coordinates.
+            # The buffer stores the footprint.
+            val = buffer.get(u_global)
+            
+            c0 = sum(1 for coord in u_local if coord == 0)
+            if (c0 + 1) % 2 == 0:
+                prediction += val
+            else:
+                prediction -= val
+        
+        # 2. Get actual value F(v)
+        # [G] In out-of-core, we read F(v) from the input stream.
+        actual_value = read_next_value_from_input_stream()
+        
+        # 3. Compute residual
+        residual = actual_value - prediction
+        
+        # 4. Encode residual
+        arithmetic_encoder.encode(residual)
+        
+        # 5. Update buffer with actual value F(v)
+        # The buffer must store F(v) for future predictions.
+        buffer.put(u_global, actual_value) # Note: u_global here is v's global coords
+        
+    else:
+        # Find the first dimension with -1
+        for i in range(len(coords)):
+            if coords[i] == -1:
+                # Initialize this dimension to 0
+                coords[i] = 0
+                # Recurse to lower dimension
+                lorenzo_recursive(d - 1, coords, buffer)
+                
+                # Iterate through the rest of this dimension
+                dim_size = grid_dimensions[i] # Assuming grid_dimensions is accessible
+                for k in range(1, dim_size):
+                    coords[i] = k
+                    lorenzo_recursive(d, coords, buffer)
+                break
+```
+
+**Parameters:**
+*   $d$: Current dimension being processed in recursion [S1, unofficial].
+*   $x_1 \dots x_n$: Coordinates of the sample, initialized to $-1$ [S1, unofficial].
+*   $d_{max}$: Number of samples in the $d$-th dimension [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   The algorithm assumes data is organized as a regular grid and visited in scanline order [S1, unofficial].
+*   The predictor relies on previously recovered neighbors; if the buffer is not correctly maintained, predictions will fail [S1, unofficial].
+*   If corrections are compressed with an adaptive arithmetic encoder, space for probability tables is needed [S1, unofficial].
+*   Only a subset of corrections (representing >99% of all corrections, small range centered around 0) need to be compressed with arithmetic coding [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Linear in the number of samples $N$, as each sample is visited once [S1, unofficial].
+*   **Memory Complexity:** $O(D_1 \times \dots \times D_{n-1})$, i.e., the size of a single $(n-1)$-dimensional slice [S1, unofficial]. This is significantly smaller than the full dataset size $N$.
+*   **Performance:** Often outperforms wavelet compression in an $L_\infty$ sense [S1, S2, unofficial].
+*   **Strengths:** Low memory footprint (out-of-core capable), simple isotropic predictor, no need to split data into chunks [S1, S2, unofficial].
+*   **Limitations:** Requires regular grid structure. Anisotropic predictors (lower-dimensional) fail to exploit coherence in all dimensions, but Lorenzo is isotropic [S1, unofficial].
+*   **When to use:** When data is too large for main memory and a regular grid structure is available.
+*   **When not to use:** For irregular grids or when hierarchical processing is already required for other reasons.
+
+## Background
+*   **Origin:** Introduced by [S1, S2, unofficial] for compressing large $n$-dimensional scalar fields from engineering, biomedical, and scientific simulations.
+*   **History:** Extended from a simple two-dimensional parallelogram predictor [S2, unofficial]. The method was developed to address the limitations of wavelet and DCT approaches which require more temporary storage or chunking [S2, unofficial].
+*   **Usage:** Used for lossy and lossless compression of volumetric data [S1, S2, unofficial].
+
+## Sources
+[S1] Out-of-Core Compression and Decompression of Large n-Dimensional Scalar Fields, https://digital.library.unt.edu/ark:/67531/metadc1404787/?q=volume data compression rendering, fetched 2026-10-28 (unofficial)
+[S2] Out-of-Core Compression and Decompression of Large n-Dimensional Scalar Fields, https://digital.library.unt.edu/ark:/67531/metadc1406792/?q=volume data compression rendering, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,90 @@
+# Wasserstein Distance
+Also called: Wasserstein Distance Volumes, Wasserstein Distance for Volumes
+## Overview
+Computes the 1D Wasserstein distance between the distribution of voxel values inside a target object and those outside, serving as a shape or alignment metric for volume data [S1, unofficial]. It differs from its parent [Bhattacharyya Distance Coefficient](6998-bhattacharyya-distance-coefficient.md) by measuring the "cost" to transform one distribution into another rather than just their overlap integral, making it sensitive to shifts in value magnitude rather than just presence/absence [S1, unofficial].
+## How it works
+**Inputs:**
+- `target`: 3D array of voxel values for the target object.
+- `volume`: 3D array of voxel values for the scene or reference volume.
+- `hist_size`: Integer, number of bins for the histogram (Not given in the sources).
+
+**Outputs:**
+- `distance`: Float, the 1D Wasserstein distance between the two distributions.
+
+**Data Structures:**
+- `mask`: Binary 3D array, `1` where `target > 0`, `0` otherwise.
+- `p`: 1D array of floats, voxel values from `volume` where `mask == 1`.
+- `q`: 1D array of floats, voxel values from `volume` where `mask == 0`.
+
+**Steps:**
+1. Create a binary mask `mask` where `target` is greater than 0.
+2. Extract voxel values from `volume` at locations where `mask` is true into array `p`.
+3. Extract voxel values from `volume` at locations where `mask` is false into array `q`.
+4. Compute the 1D Wasserstein distance between distributions `p` and `q`.
+
+**Formula:**
+The 1D Wasserstein distance $W_1(p, q)$ between two discrete distributions with sorted values $x_i$ and $y_j$ and probabilities $w_i, w_j$ is:
+$$ W_1(p, q) = \sum_{k} |F_p^{-1}(k) - F_q^{-1}(k)| $$
+Where $F_p^{-1}$ and $F_q^{-1}$ are the inverse cumulative distribution functions (quantile functions) of $p$ and $q$ respectively [S1, unofficial]. In implementation, this is often calculated by sorting the values in $p$ and $q$, normalizing them to form probability distributions, and summing the absolute differences of their cumulative sums.
+
+**Parameters:**
+- `hist_size`: Not given in the sources.
+
+**Edge Cases:**
+- If `p` or `q` is empty, the distance is undefined or zero depending on implementation [G].
+- Precision issues may arise if voxel values vary widely in magnitude [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def wasserstein_distance_volume(target, volume):
+    # Step 1: Create binary mask
+    mask = (target > 0).astype(float)
+    
+    # Step 2 & 3: Extract voxel values
+    p = volume[mask == 1]
+    q = volume[mask == 0]
+    
+    # Step 4: Compute 1D Wasserstein distance
+    # Sort values
+    p_sorted = np.sort(p)
+    q_sorted = np.sort(q)
+    
+    # Handle empty arrays
+    if len(p_sorted) == 0 or len(q_sorted) == 0:
+        return 0.0
+        
+    # Normalize to form probability distributions
+    p_prob = p_sorted / np.sum(p_sorted)
+    q_prob = q_sorted / np.sum(q_sorted)
+    
+    # Compute cumulative distribution functions
+    p_cdf = np.cumsum(p_prob)
+    q_cdf = np.cumsum(q_prob)
+    
+    # Calculate Wasserstein distance
+    # Note: This is a simplified approximation for discrete uniform distributions
+    # The exact 1D Wasserstein distance requires matching quantiles
+    # For non-equal lengths, interpolation or padding is needed [G]
+    min_len = min(len(p_cdf), len(q_cdf))
+    distance = np.sum(np.abs(p_cdf[:min_len] - q_cdf[:min_len]))
+    
+    return distance
+```
+## Subtopics
+
+### [Interval Distortion Metric](7945-interval-distortion-metric.md)
+Computes the mean absolute difference between two uniform distributions defined by intervals [t0_lo, t0_hi] and [t1_lo, t1_hi].
+
+## Operating characteristics
+- Time Complexity: $O(N \log N)$ due to sorting, where $N$ is the number of voxels [S1, unofficial].
+- Memory Complexity: $O(N)$ to store the extracted voxel arrays [S1, unofficial].
+- Strengths: Sensitive to shifts in value magnitude; robust to small misalignments compared to pixel-wise differences [S1, unofficial].
+- Limitations: Computationally expensive for large volumes; sensitive to outliers in voxel values [G].
+- When to use: When aligning volumes based on intensity distribution rather than geometric overlap [S1, unofficial].
+- When not to use: For real-time applications or very large datasets where speed is critical [G].
+## Background
+Originated in the context of inverse rendering for tomographic volumetric additive manufacturing [S1, unofficial]. Used to optimize volume representations by minimizing the distance between target and rendered distributions [S1, unofficial].
+## Sources
+[S1] Dr. TVAM – Inverse Rendering for Tomographic Volumetric Additive Manufacturing, https://github.com/rgl-epfl/drtvam, fetched 2026-10-26 (unofficial)

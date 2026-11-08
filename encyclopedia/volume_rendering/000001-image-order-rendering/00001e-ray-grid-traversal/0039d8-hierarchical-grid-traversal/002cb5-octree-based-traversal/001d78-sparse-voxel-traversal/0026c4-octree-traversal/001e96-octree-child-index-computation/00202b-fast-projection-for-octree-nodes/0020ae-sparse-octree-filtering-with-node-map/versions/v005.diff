@@ -1,0 +1,137 @@
+--- v004.md
++++ v005.md
+@@ -19,6 +19,7 @@
+ **Algorithm Steps:**
+ 1.  **Construct Node Map:**
+-    *   For the lowest level of the node map, iterate through all pixels of the light-view map. For each pixel, determine the leaf node index containing the associated photon and store it in the corresponding node map pixel [S1, S2].
+-    *   For each subsequent level $L$ of the node map, aggregate the leaf node indices from level $L-1$. For each pixel in level $L$, compute the lowest common ancestor of all non-empty leaf node indices from the corresponding region in level $L-1$. Store the LCA index in the node map pixel [S1, S2].
++    *   For the lowest level of the node map, iterate through all pixels of the light-view map and store the corresponding 3D leaf node index in the node map pixel [S1, S2].
++    *   For each subsequent level $L$ of the node map, aggregate the leaf node indices from level $L-1$ [S1, S2].
++    *   For each pixel in level $L$, compute the lowest common ancestor of all non-empty leaf node indices from the corresponding region in level $L-1$ and store the LCA index in the node map pixel [S1, S2].
+ 2.  **Filtering Pass (Parallel Execution):**
+     *   Launch one thread per pixel of the lowest level of the node map for each MIP-mapping pass [S1, S2].
+@@ -31,6 +32,5 @@
+ **Pseudocode:**
+ ```python
+-def sparse_octree_filtering_with_node_map(light_view_map, octree, node_map_levels):
+-    # Step 1: Construct Node Map Pyramid
++def build_node_map(light_view_map, octree):
+     # Level 0: Map light-view pixels to leaf node indices
+     level_0 = [[None] * light_view_map.width for _ in range(light_view_map.height)]
+@@ -40,13 +40,12 @@
+             if photon is not None:
+                 level_0[y][x] = octree.find_leaf_node(photon)
+-    node_map_levels[0] = level_0
++    node_map = [level_0]
+ 
+     # Higher levels: Map to Lowest Common Ancestor (LCA)
+-    for level in range(1, len(node_map_levels)):
+-        prev_level = node_map_levels[level - 1]
+-        curr_h = len(prev_level) // 2
+-        curr_w = len(prev_level[0]) // 2
++    for level in range(1, len(light_view_map.levels)):
++        prev_level = node_map[-1]
++        curr_h = (len(prev_level) + 1) // 2
++        curr_w = (len(prev_level[0]) + 1) // 2
+         curr_level = [[None] * curr_w for _ in range(curr_h)]
+-
+         for y in range(curr_h):
+             for x in range(curr_w):
+@@ -54,55 +53,40 @@
+                 for dy in range(2):
+                     for dx in range(2):
+-                        idx = prev_level[y * 2 + dy][x * 2 + dx]
+-                        if idx is not None:
+-                            leaf_indices.append(idx)
++                        py, px = y * 2 + dy, x * 2 + dx
++                        if py < len(prev_level) and px < len(prev_level[0]):
++                            idx = prev_level[py][px]
++                            if idx is not None:
++                                leaf_indices.append(idx)
++                curr_level[y][x] = octree.compute_lca(leaf_indices) if leaf_indices else None
++        node_map.append(curr_level)
++    return node_map
+ 
+-                if leaf_indices:
+-                    curr_level[y][x] = octree.compute_lca(leaf_indices)
+-                else:
+-                    curr_level[y][x] = None
++def filter_pass(mip_level, node_map, octree, mip_map):
++    # Launch one thread per pixel of the lowest node map level
++    # Each thread corresponds to pixel (y, x) at mip_level
++    for y in range(len(node_map[mip_level])):
++        for x in range(len(node_map[mip_level][0])):
++            target_node = node_map[mip_level][y][x]
++            if target_node is None:
++                continue
+ 
+-        node_map_levels[level] = curr_level
++            # Redundancy check: only the "upper left" thread computes
++            is_leader = True
++            for other_y in range(y):
++                for other_x in range(len(node_map[mip_level][0])):
++                    if node_map[mip_level][other_y][other_x] == target_node:
++                        is_leader = False
++                        break
++                if not is_leader:
++                    break
++            if is_leader:
++                for other_x in range(x):
++                    if node_map[mip_level][y][other_x] == target_node:
++                        is_leader = False
++                        break
+ 
+-    # Step 2: Parallel Filtering Pass
+-    # Launch one thread per pixel of the lowest node map level
+-    # (Thread launch mechanism abstracted; logic per thread follows)
+-    for y in range(len(node_map_levels[0])):
+-        for x in range(len(node_map_levels[0][0])):
+-            filter_thread(y, x, node_map_levels)
+-
+-def filter_thread(y, x, node_map_levels):
+-    # Determine target node for this thread's work at the current MIP level
+-    # The node map at level L_node_map corresponds to the current MIP pass level.
+-    current_level_idx = 0 # Placeholder for current MIP pass level
+-    target_node = node_map_levels[current_level_idx][y][x]
+-
+-    if target_node is None:
+-        return
+-
+-    # Check for common ancestor redundancy
+-    # If multiple threads map to the same node, only the "upper left" one computes.
+-    # "Upper left" means smallest row index, then smallest column index.
+-    is_leader = True
+-    for other_y in range(y):
+-        for other_x in range(len(node_map_levels[current_level_idx][0])):
+-            if node_map_levels[current_level_idx][other_y][other_x] == target_node:
+-                is_leader = False
+-                break
+-        if not is_leader:
+-            break
+-    for other_x in range(x):
+-        if node_map_levels[current_level_idx][y][other_x] == target_node:
+-            is_leader = False
+-            break
+-
+-    if not is_leader:
+-        return # Terminate thread
+-
+-    # Compute the filtered value
+-    filtered_value = octree.compute_filtered_value(target_node)
+-
+-    # Store result in the MIP-map
+-    mip_map[target_node] = filtered_value
++            if is_leader:
++                filtered_value = octree.compute_filtered_value(target_node)
++                mip_map[target_node] = filtered_value
+ ```
+ 
+@@ -124,6 +108,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1, S2].
++*   **Memory Complexity:** Not given in the sources [S1, S2].
+ *   **Measured Performance:** The strategy yields a speedup of greater than 2x compared to not using the heuristic to terminate threads [S1, S2].
+ *   **Strengths:** Significantly reduces redundant computation in sparse octrees where many photons map to the same or nearby nodes [S1, S2].

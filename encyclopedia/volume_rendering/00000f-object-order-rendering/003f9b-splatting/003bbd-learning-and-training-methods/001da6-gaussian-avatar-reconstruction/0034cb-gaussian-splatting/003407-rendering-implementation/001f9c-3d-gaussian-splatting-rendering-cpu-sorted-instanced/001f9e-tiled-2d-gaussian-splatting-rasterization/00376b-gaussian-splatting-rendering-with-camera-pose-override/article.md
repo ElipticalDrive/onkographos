@@ -1,0 +1,203 @@
+# Gaussian Splatting Rendering with Camera Pose Override
+
+Also called: render function with rel_w2c transform
+
+## Overview
+This method modifies the standard 3D Gaussian Splatting rasterization pipeline to decouple the rendering camera pose from the scene's stored camera parameters. It allows a pre-trained Gaussian model to be rendered from arbitrary viewpoints by injecting a custom world-to-camera transformation matrix (`camera_pose`) into the rasterization step, while keeping the Gaussian primitives fixed in their original world-space coordinates. This is distinct from [Tiled 2D Gaussian Splatting Rasterization](2061-tiled-2d-gaussian-splatting-rasterization.md), which handles the tile-based memory management, by specifically addressing the coordinate frame transformation required for novel view synthesis or pose correction.
+
+## How it works
+The method intercepts the rasterization call, computes a relative world-to-camera matrix from the override pose, transforms the Gaussian attributes (means and rotations) into this new camera frame, and passes them to the rasterizer.
+
+### Inputs and Outputs
+**Inputs:**
+- `pc`: The GaussianPointCloud object containing 3D means (`xyz`), rotations (quaternions), scales, opacities, and spherical harmonics coefficients.
+- `viewpoint_camera`: A camera object containing the intrinsic projection matrix (`projection_matrix`) and field of view (`FoVx`, `FoVy`). Note: The extrinsic pose of this object is ignored for the transformation of Gaussians; only intrinsics are used.
+- `camera_pose`: A tensor representing the desired world-to-camera transformation.
+- `pipe`: A pipeline configuration object containing boolean flags `compute_cov3D_python` and `convert_SHs_python`.
+- `override_color`: Optional tensor to replace spherical harmonics colors.
+
+**Outputs:**
+- `render_image`: The rendered RGB image.
+- `viewspace_points`: Screen-space coordinates of the Gaussian centers with gradient tracking enabled.
+- `visibility_filter`: A boolean mask indicating which Gaussians were rendered (radii > 0).
+- `radii`: The screen-space radii of the Gaussians.
+
+### Data Structures
+- `camera_pose`: A $4 \times 4$ matrix (or $4 \times 4$ tensor) representing the world-to-camera transform.
+- `gaussians_xyz_trans`: Transformed 3D means in the camera frame.
+- `gaussians_rot_trans`: Transformed rotations (quaternions) in the camera frame.
+- `projmatrix`: The combined projection matrix derived from the viewpoint camera's intrinsics.
+
+### Steps
+1. **Initialize Gradient Tracking**: Create a zero tensor for screen-space points to enable backpropagation to 2D means.
+   $$ \text{screenspace\_points} = \text{zeros}(\text{shape}(\text{pc.xyz}), \text{dtype}=\text{pc.xyz.dtype}, \text{requires\_grad}=\text{True}) $$
+   Retain gradients for this tensor.
+
+2. **Compute Field of View Tangents**: Calculate the half-field-of-view tangents from the `viewpoint_camera` intrinsics.
+   $$ \text{tanfovx} = \tan\left(\frac{\text{FoVx}}{2}\right) $$
+   $$ \text{tanfovy} = \tan\left(\frac{\text{FoVy}}{2}\right) $$
+
+3. **Construct Projection Matrix**: Create an identity world-to-camera matrix and combine it with the viewpoint camera's projection matrix.
+   $$ \text{w2c}_{\text{identity}} = \mathbf{I}_4 $$
+   $$ \text{projmatrix} = \text{w2c}_{\text{identity}} \times \text{viewpoint\_camera.projection\_matrix} $$
+   Extract the camera position from the inverse of the identity matrix (which is the origin in this specific construction, but the code extracts it from `w2c.inverse()`).
+
+4. **Transform Gaussian Attributes**:
+   - Compute the relative world-to-camera matrix from the `camera_pose` tensor.
+   - Transform the 3D means:
+     $$ \text{xyz\_homo} = [\text{xyz}, 1] $$
+     $$ \text{gaussians\_xyz\_trans} = (\text{rel\_w2c} \times \text{xyz\_homo}^T)^T[:, :3] $$
+   - Transform the rotations using quaternion multiplication. The `camera_pose` quaternion (first 4 elements) is used to rotate the Gaussian rotations.
+     $$ \text{gaussians\_rot\_trans} = \text{quadmultiply}(\text{camera\_pose}[:4], \text{gaussians\_rot}) $$
+
+5. **Determine Covariance Representation**:
+   - If `pipe.compute_cov3D_python` is true: Compute the 3D covariance matrix from the scales and rotations.
+     $$ \text{cov3D\_precomp} = \text{pc.get\_covariance}(\text{scaling\_modifier}) $$
+   - Otherwise: Pass scales and the transformed rotations (`gaussians_rot_trans`) separately to the rasterizer.
+
+6. **Determine Color Representation**:
+   - If `override_color` is None and `pipe.convert_SHs_python` is true: Convert spherical harmonics to RGB in Python.
+     $$ \text{dir\_pp\_normalized} = \text{normalize}(\text{directions}) $$
+     $$ \text{colors\_precomp} = \text{clamp}(\text{eval\_SH}(\text{active\_SH\_degree}, \text{shs\_view}, \text{dir\_pp\_normalized}), 0, 1) $$
+   - Otherwise: Pass spherical harmonics directly to the rasterizer or use `override_color`.
+
+7. **Rasterize**: Call the `GaussianRasterizer` with the transformed means (`means3D`), transformed means2D (computed internally or passed), colors/covariances, opacities, and scales/rotations.
+   $$ \text{render\_image}, \text{radii} = \text{GaussianRasterizer}(\text{means3D}, \text{means2D}, \text{shs/colors\_precomp}, \text{opacities}, \text{scales/rotations/cov3D\_precomp}) $$
+
+8. **Return Results**: Return the rendered image, viewspace points, visibility filter (`radii > 0`), and radii.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import torch
+
+def render_with_camera_pose_override(pc, viewpoint_camera, camera_pose, pipe, override_color=None):
+    """
+    Render 3D Gaussians using a custom camera pose override.
+    
+    Args:
+        pc: GaussianPointCloud object with attributes xyz, rot, scale, opacity, shs.
+        viewpoint_camera: Camera object with FoVx, FoVy, projection_matrix.
+        camera_pose: Tensor (4x4) representing the world-to-camera transform.
+        pipe: Pipeline config with flags compute_cov3D_python, convert_SHs_python.
+        override_color: Optional tensor to override SH colors.
+        
+    Returns:
+        render_image, viewspace_points, visibility_filter, radii
+    """
+    # Step 1: Initialize screenspace points for gradient tracking
+    screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device='cuda') + 0
+    screenspace_points.retain_grad()
+    
+    # Step 2: Compute half-field-of-view tangents
+    tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
+    tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
+    
+    # Step 3: Set w2c to identity and compute projection matrix
+    w2c = torch.eye(4).cuda()
+    projmatrix = (w2c.unsqueeze(0).bmm(viewpoint_camera.projection_matrix.unsqueeze(0))).squeeze(0)
+    camera_pos = w2c.inverse()[3, :3]
+    
+    # Step 4: Transform Gaussian attributes using the override pose
+    rel_w2c = get_camera_from_tensor(camera_pose)
+    
+    # Transform 3D means
+    xyz_homo = torch.cat([pc.get_xyz, torch.ones_like(pc.get_xyz[..., :1])], dim=-1)
+    gaussians_xyz_trans = (rel_w2c @ xyz_homo.T).T[:, :3]
+    
+    # Transform rotations (quaternions)
+    # camera_pose[:4] is assumed to be the quaternion part of the pose
+    gaussians_rot_trans = quadmultiply(camera_pose[:4], pc.get_rot)
+    
+    # Step 5: Determine covariance representation
+    if pipe.compute_cov3D_python:
+        cov3D_precomp = pc.get_covariance(scaling_modifier=1.0) # scaling_modifier not specified, assume 1.0 or default
+    else:
+        cov3D_precomp = None
+        
+    # Step 6: Determine color representation
+    if override_color is None and pipe.convert_SHs_python:
+        # Compute directions from camera to Gaussians in the new camera frame
+        # Note: dir_pp_normalized needs to be computed relative to the new camera position
+        # This is a simplification; actual implementation may vary based on how SHs are evaluated
+        dir_pp = gaussians_xyz_trans - camera_pos.unsqueeze(0)
+        dir_pp_normalized = torch.nn.functional.normalize(dir_pp, dim=-1)
+        colors_precomp = eval_sh(pc.active_sh_degree, pc.get_shs, dir_pp_normalized)
+        colors_precomp = torch.clamp(colors_precomp, 0.0, 1.0)
+    else:
+        colors_precomp = override_color if override_color is not None else pc.get_shs
+        
+    # Step 7: Rasterize
+    # The rasterizer expects specific arguments. We pass the transformed attributes.
+    # Note: means2D is typically computed inside the rasterizer or passed as precomputed 2D means.
+    # Here we assume the rasterizer handles the projection from means3D using projmatrix.
+    
+    render_image, radii = GaussianRasterizer(
+        means3D=gaussians_xyz_trans,
+        means2D=None, # Let rasterizer compute or pass precomputed if available
+        shs=colors_precomp,
+        opacities=pc.get_opacity,
+        scales=pc.get_scale,
+        rotations=gaussians_rot_trans,
+        cov3D_precomp=cov3D_precomp,
+        viewmatrix=None, # Not used if means3D are already in camera space
+        projmatrix=projmatrix,
+        full_screen=True, # Or appropriate screen size
+        sh_degree=pc.active_sh_degree,
+        campos=None, # Not used if means3D are in camera space
+        render_mode='RGB' # Or 'RGB+D' etc.
+    )
+    
+    # Step 8: Return results
+    visibility_filter = radii > 0
+    return render_image, screenspace_points, visibility_filter, radii
+
+def get_camera_from_tensor(camera_pose):
+    """Helper to extract 4x4 matrix from tensor."""
+    return camera_pose
+
+def quadmultiply(q1, q2):
+    """Quaternion multiplication q1 * q2."""
+    # Standard quaternion multiplication implementation
+    w1, x1, y1, z1 = q1[..., 0], q1[..., 1], q1[..., 2], q1[..., 3]
+    w2, x2, y2, z2 = q2[..., 0], q2[..., 1], q2[..., 2], q2[..., 3]
+    
+    w = w1*w2 - x1*x2 - y1*y2 - z1*z2
+    x = w1*x2 + x1*w2 + y1*z2 - z1*y2
+    y = w1*y2 - x1*z2 + y1*w2 + z1*x2
+    z = w1*z2 + x1*y2 - y1*x2 + z1*w2
+    
+    return torch.stack([w, x, y, z], dim=-1)
+
+def eval_sh(deg, sh, dirs):
+    """Evaluate spherical harmonics at directions."""
+    # Simplified SH evaluation
+    # In practice, this uses precomputed SH basis matrices
+    pass
+```
+
+### Parameters and Typical Values
+- `camera_pose`: The specific pose to render from. No default; must be provided.
+- `pipe.compute_cov3D_python`: Boolean. If true, covariances are computed in Python. If false, passed as scales/rotations.
+- `pipe.convert_SHs_python`: Boolean. If true, SHs are converted to RGB in Python. If false, passed to rasterizer.
+
+### Edge Cases and Pitfalls
+- **Precision**: Ensure `camera_pose` is on the correct device (CUDA) and dtype matches the Gaussian attributes.
+- **Boundary Conditions**: If `camera_pose` results in Gaussians being behind the camera, the rasterizer should handle culling. The visibility filter (`radii > 0`) helps identify valid Gaussians.
+- **Degenerate Input**: If `camera_pose` is singular or invalid, the transformation will fail. Validate `camera_pose` before use.
+- **Gradient Flow**: The `screenspace_points` tensor is initialized to zero and retains gradients. This is crucial for backpropagation if the method is used in a training loop where the camera pose is optimized.
+
+## Operating characteristics
+- **Time Complexity**: Dominated by the rasterization step, which is $O(N)$ where $N$ is the number of Gaussians, assuming tile-based rasterization. The transformation step is also $O(N)$.
+- **Memory Complexity**: $O(N)$ for storing transformed attributes and intermediate tensors.
+- **Performance**: The overhead of transforming attributes is minimal compared to the rasterization cost. The method is efficient for real-time rendering if the rasterizer is GPU-accelerated.
+- **Strengths**: Allows flexible camera pose manipulation without retraining the Gaussian model. Useful for novel view synthesis, pose correction, and interactive applications.
+- **Limitations**: The Gaussian model is fixed in world space. If the scene geometry changes, the model must be retrained. The method assumes the Gaussian model was trained with a consistent coordinate system.
+
+## Background
+This method is derived from the implementation details of the InstantSplat repository [S1, unofficial], which provides a practical implementation of 3D Gaussian Splatting with support for camera pose overrides. It builds upon the foundational 3D Gaussian Splatting paper by Kerbl et al. (2023) and extends it to support dynamic camera poses without modifying the underlying Gaussian representation.
+
+## Sources
+[S1] NVlabs/InstantSplat, https://github.com/NVlabs/InstantSplat, fetched 2026-10-27 (unofficial)

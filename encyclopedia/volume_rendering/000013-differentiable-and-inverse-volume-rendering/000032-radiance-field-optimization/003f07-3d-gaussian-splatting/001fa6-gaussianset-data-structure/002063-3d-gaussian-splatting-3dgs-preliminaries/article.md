@@ -1,281 +1,273 @@
 # 3D Gaussian Splatting (3DGS) Preliminaries
 
-Also called: Kerbl et al. 3DGS, Standard 3DGS representation, Vanilla 3D Gaussian Splatting
+Also called: 3D Gaussian Splatting (3D-GS), 3D Gaussian Splatting (3DGS) Representation, 3D-GS, Standard 3DGS representation, Vanilla 3D Gaussian Splatting
 
 ## Overview
-3D Gaussian Splatting (3DGS) is a differentiable, point-based scene representation that replaces the implicit multi-layer perceptron (MLP) and ray-marched volume integration of NeRF with an explicit collection of 3D anisotropic Gaussians [S3, unofficial]. It enables real-time synthesis of high-fidelity novel views via a GPU-friendly tile-based rasterizer that depth-sorts and alpha-composites 2D projections of these Gaussians [S2, unofficial][S5]. Unlike NeRF, which infers density and color at arbitrary points, 3DGS optimizes the parameters of a fixed set of Gaussian primitives (position, covariance, opacity, and spherical harmonic coefficients) to minimize photometric loss, using adaptive density control to adjust the number of primitives during training [S3, unofficial].
+3D Gaussian Splatting (3DGS) is a scene representation method that replaces implicit neural fields with an explicit set of anisotropic 3D Gaussian primitives, enabling real-time rendering via GPU rasterization without ray marching [S1, S2][S5, S7, S9, unofficial]. It solves the trade-off between the high visual quality of neural radiance fields (NeRFs) and the speed of explicit geometry by representing the scene as millions of splats (ellipsoids) that are projected and alpha-composited [S5, S6, unofficial][S8]. Unlike NeRFs, which require per-pixel network queries and volume integration, 3DGS uses a differentiable sort-and-blend rasterizer, allowing for end-to-end optimization of geometric and photometric attributes [S9, S12, unofficial]. It sets itself apart from its siblings by serving as the foundational "vanilla" baseline that uses fixed-degree spherical harmonics and heuristic adaptive density control, whereas variants like [ECoNGS Optimization and Coding](2087-econgs-optimization-and-coding.md) focus on compression or [N-DGS Bounded Cholesky Parameterization](2811-n-dgs-bounded-cholesky-parameterization.md) focus on parameterization stability.
 
 ## How it works
+**Inputs and Outputs**
+*   **Inputs:** A sparse point cloud (typically from Structure-from-Motion, e.g., COLMAP) providing initial positions, and a set of $N$ training images with known camera poses $P$.
+*   **Outputs:** A rendered image $\hat{I}$ for a novel view, and a set of optimized 3D Gaussian parameters $\{\mu_k, q_k, s_k, \alpha_k, \text{SH}_k\}_{k=1}^K$.
 
-### Inputs and Outputs
-**Inputs:**
-*   A set of $N$ 3D Gaussian primitives, each defined by a mean $\boldsymbol{\mu} \in \mathbb{R}^3$, a covariance matrix $\Sigma \in \mathbb{R}^{3\times3}$, an opacity scalar $\alpha$, and spherical harmonic (SH) coefficients for view-dependent color [S2, S3, unofficial].
-*   A camera view defined by world-to-camera matrix $W$ and projection parameters [S3, unofficial].
-*   Training images $I_v$ for photometric supervision [S3, unofficial].
+**Data Structures**
+Each Gaussian primitive $k$ stores the following parameters, which are optimized via gradient descent:
+1.  **Mean Position:** $\boldsymbol{\mu}_k \in \mathbb{R}^3$ [S2][S9, S15, unofficial].
+2.  **Rotation:** A unit quaternion $\mathbf{q}_k \in \mathbb{R}^4$ ($\|\mathbf{q}_k\|=1$) [S9, unofficial][S14][S16, unofficial].
+3.  **Scale:** A vector $\mathbf{s}_k \in \mathbb{R}^3$ representing the scaling factors along the principal axes. These are stored in logarithmic space ($\log \mathbf{s}_k$) to ensure positivity during optimization [S9, unofficial][S14].
+4.  **Opacity:** A scalar raw logit $\alpha_k \in \mathbb{R}$. The effective opacity is obtained via a Sigmoid activation: $\hat{\alpha}_k = \sigma(\alpha_k)$ [S9, unofficial][S14].
+5.  **Color:** Spherical Harmonics (SH) coefficients $\mathbf{c}_k \in \mathbb{R}^{3 \times (\ell+1)^2}$, where $\ell$ is the degree. Vanilla 3DGS uses degree $\ell=3$, resulting in 16 coefficients per channel (48 floats total) [S9, S16, unofficial].
 
-**Outputs:**
-*   Rendered image $\hat{I}_v$ for a given camera view [S3, unofficial].
-*   Optimized Gaussian parameters after training [S3, unofficial].
+The covariance matrix $\boldsymbol{\Sigma}_k \in \mathbb{R}^{3 \times 3}$ is derived from rotation and scale:
+$$ \boldsymbol{\Sigma}_k = \mathbf{R}_k \mathbf{S}_k \mathbf{S}_k^\top \mathbf{R}_k^\top $$
+where $\mathbf{R}_k$ is the rotation matrix constructed from $\mathbf{q}_k$, and $\mathbf{S}_k = \text{diag}(\mathbf{s}_k)$ [S7, S9, S16, unofficial].
 
-### Data Structures
-Each Gaussian primitive $i$ stores the following parameters, which are optimized via gradient descent [S3, unofficial][S4]:
-*   **Mean:** $\boldsymbol{\mu}_i \in \mathbb{R}^3$ (3D position).
-*   **Rotation:** A unit quaternion $q_i \in \mathbb{R}^4$ representing orientation, normalized after each optimization step [S3, unofficial][S4].
-*   **Scale:** A vector $\mathbf{s}_i \in \mathbb{R}^3$ representing scale along principal axes, stored in logarithmic space to ensure positivity [S3, unofficial][S4].
-*   **Opacity:** A raw logit $\alpha_i \in \mathbb{R}$, mapped to $[0,1]$ via a Sigmoid activation during rendering [S3, unofficial][S4].
-*   **Color:** Spherical Harmonic coefficients up to degree $\ell=3$, resulting in 16 coefficients per channel (48 floats total per Gaussian) [S3, unofficial][S4].
+**Rendering Pipeline**
+1.  **Culling:** Gaussians outside the view frustum or behind the camera are discarded [S9, unofficial].
+2.  **Projection:** Each 3D Gaussian is projected to the 2D image plane. The 2D mean $\boldsymbol{\mu}'_k$ is computed via the projection matrix. The 2D covariance $\boldsymbol{\Sigma}'_k$ is approximated using the Jacobian of the projective transformation $J$ and the world-to-camera matrix $W$:
+    $$ \boldsymbol{\Sigma}'_k = J W \boldsymbol{\Sigma}_k W^\top J^\top $$
+    [S2][S9, S16, unofficial].
+3.  **Bounding Box:** A 2D axis-aligned bounding box (AABB) is computed for each Gaussian based on $\boldsymbol{\Sigma}'_k$ (typically expanding the ellipse to cover $3\sigma$) [S7, S9, unofficial].
+4.  **Tiling and Sorting:** Gaussians are binned into tiles (e.g., $16 \times 16$ pixels). Within each tile, Gaussians are sorted front-to-back by their depth (center depth) [S7, S9, unofficial].
+5.  **Rasterization and Compositing:** For each pixel, the contributing Gaussians are alpha-composited. The color $C(\mathbf{p})$ at pixel $\mathbf{p}$ is:
+    $$ C(\mathbf{p}) = \sum_{k \in N} \mathbf{c}_k(\mathbf{d}_k) \, \hat{\alpha}_k \, G_k^{2D}(\mathbf{p}) \prod_{j < k} \left( 1 - \hat{\alpha}_j \, G_j^{2D}(\mathbf{p}) \right) $$
+    where $N$ is the set of sorted Gaussians covering the pixel, $\mathbf{d}_k$ is the view direction, and $G_k^{2D}(\mathbf{p})$ is the 2D Gaussian kernel value:
+    $$ G_k^{2D}(\mathbf{p}) = \exp\left( -\frac{1}{2} (\mathbf{p} - \boldsymbol{\mu}'_k)^\top (\boldsymbol{\Sigma}'_k)^{-1} (\mathbf{p} - \boldsymbol{\mu}'_k) \right) $$
+    [S4][S7, S9, S16, unofficial]. The term $\hat{\alpha}_k G_k^{2D}(\mathbf{p})$ represents the effective alpha of the $k$-th splat at the pixel.
+6.  **Loss and Optimization:** The rendered image is compared to the ground truth using a combined L1 and SSIM loss:
+    $$ \mathcal{L} = (1 - \lambda) \|\hat{I} - I\|_1 + \lambda (1 - \text{SSIM}(\hat{I}, I)) $$
+    with $\lambda = 0.2$ [S9, unofficial]. Gradients are backpropagated through the rasterizer to update $\boldsymbol{\mu}, \mathbf{q}, \mathbf{s}, \alpha, \text{SH}$ using the Adam optimizer [S9, unofficial].
 
-The covariance matrix $\Sigma_i$ is constructed from the rotation and scale parameters [S2, S3, unofficial]:
-$$ \Sigma_i = R_i \, \mathrm{diag}(\mathbf{s}_i)^2 \, R_i^\top $$
-where $R_i$ is the rotation matrix derived from the unit quaternion $q_i$ [S3, unofficial].
+**Adaptive Density Control (ADC)**
+To handle local minima and varying detail, 3DGS employs periodic densification and pruning every $K$ iterations (typically every 100 iterations within a window of 500–15,000) [S7, S9, unofficial]:
+*   **Gradient Tracking:** The magnitude of the 2D position gradient $\|\nabla_{\boldsymbol{\mu}_{2D}} \mathcal{L}\|$ is tracked for each Gaussian [S9, unofficial].
+*   **Clone:** If a Gaussian has small scale and high gradient, it is cloned (duplicated with perturbed position) to fill under-reconstructed areas [S9, unofficial].
+*   **Split:** If a Gaussian has large scale and high gradient, it is replaced by two smaller Gaussians (clones with halved scale) to increase resolution [S9, unofficial].
+*   **Prune:** Gaussians with opacity below a threshold $\epsilon_\alpha \approx 0.005$ are removed [S9, unofficial].
+*   **Opacity Reset:** Every 3,000 iterations, all opacities are reset to a low value (e.g., 0.01) to escape local minima where Gaussians are opaque but incorrect [S9, unofficial].
 
-### Rendering Pipeline
-
-1.  **Culling:** Gaussians outside the view frustum or behind the camera are discarded [S3, unofficial].
-2.  **Projection:** Each Gaussian is projected into screen space. The 3D covariance $\Sigma$ is transformed to a 2D covariance $\Sigma_{2D}$ using the Jacobian $J$ of the perspective projection at the projected center $\boldsymbol{\mu}_c = W\boldsymbol{\mu}$ [S3, unofficial]:
-    $$ \Sigma_{2D} = J \, W \, \Sigma \, W^\top J^\top \in \mathbb{R}^{2\times2} $$
-    This is an affine approximation (EWA splatting) [S3, unofficial].
-3.  **Bounding Box:** A 2D axis-aligned bounding box (AABB) is computed for each Gaussian based on $\Sigma_{2D}$, typically expanded to cover the $3\sigma$ influence region ($d^\top \Sigma^{-1} d \leq 9$) [S2, S3, unofficial][S4].
-4.  **Tiling:** The image is divided into tiles (default $16\times16$ pixels) [S3, unofficial]. Gaussians are binned into tile lists based on their AABB overlap [S3, unofficial].
-5.  **Sorting:** Within each tile, Gaussians are sorted front-to-back by their depth (center depth) [S3, unofficial].
-6.  **Rasterization and Compositing:** For each pixel, the 2D Gaussian value is computed and alpha-composited with previously accumulated color [S2, S3, unofficial].
-
-### Formulas
-
-**3D Gaussian Function:**
-The unnormalized Gaussian function at position $\mathbf{x}$ is [S2, S3, unofficial][S5]:
-$$ G(\mathbf{x}) = \exp\!\left(-\tfrac{1}{2}(\mathbf{x}-\boldsymbol{\mu})^\top \Sigma^{-1}(\mathbf{x}-\boldsymbol{\mu})\right) $$
-
-**2D Gaussian Evaluation:**
-For a pixel $\mathbf{p}$, the 2D Gaussian footprint $G_i^{2D}(\mathbf{p})$ is evaluated using the projected covariance $\Sigma_{2D}$ and the 2D displacement from the projected center [S3, unofficial].
-
-**Alpha Compositing:**
-The color $C(\mathbf{p})$ at pixel $\mathbf{p}$ is computed by front-to-back alpha compositing of the sorted Gaussians $N$ contributing to that pixel [S2, S3, unofficial]:
-$$ C(\mathbf{p}) = \sum_{i\in N} \mathbf{c}_i(\mathbf{d}) \, \alpha_i \, G_i^{2D}(\mathbf{p}) \prod_{j<i}\!\left(1 - \alpha_j \, G_j^{2D}(\mathbf{p})\right) $$
-where $\mathbf{c}_i(\mathbf{d})$ is the view-dependent color evaluated from the SH coefficients for viewing direction $\mathbf{d}$ [S3, unofficial].
-
-**Loss Function:**
-Training minimizes a combination of L1 loss and SSIM loss [S3, unofficial]:
-$$ \mathcal{L} = (1-\lambda)\,\|\hat{I}_v - I_v\|_1 + \lambda\,(1 - \mathrm{SSIM}(\hat{I}_v, I_v)) $$
-with $\lambda = 0.2$ [S3, unofficial].
-
-### Training Loop and Adaptive Density Control
-
-1.  **Initialization:** Start from a Structure-from-Motion (SfM) sparse point cloud (e.g., COLMAP). If no SfM is available, use random uniform points in the scene bound [S3, unofficial].
-2.  **Optimization:** Each iteration, pick a random training view, render $\hat{I}_v$, compute loss, and backpropagate through the rasterizer to update parameters $\{\boldsymbol{\mu}, q, s, \alpha, \mathrm{SH}\}$ using Adam [S3, unofficial].
-3.  **Adaptive Density Control (ADC):** Applied every $K$ iterations (typically every 100 iterations within a window of 500–15,000) [S3, unofficial]:
-    *   **Densification:** Where the 2D position gradient magnitude $\|\nabla_{\boldsymbol{\mu}_{2D}} L\|$ exceeds a threshold $\tau_\nabla \sim 2\times10^{-4}$ [S3, unofficial]:
-        *   **Clone:** For small Gaussians (under-reconstructed), duplicate and perturb position [S3, unofficial].
-        *   **Split:** For large Gaussians (over-reconstructed), replace with two smaller Gaussians [S3, unofficial].
-    *   **Pruning:** Remove Gaussians with opacity below $\epsilon_\alpha \sim 0.005$, or those that are off-screen or have huge projections [S3, unofficial].
-    *   **Opacity Reset:** Every 3000 iterations, reset opacity to $0.01$ to escape local minima [S3, unofficial].
-
-### Pseudocode
+**Pseudocode**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import numpy as np
 
-def render_gaussians(gaussians, camera_matrix, image_shape, tile_size=16):
+def render_gaussians(gaussians, camera_matrix, image_width, image_height, tile_size=16):
     """
-    Renders a set of 3D Gaussians to an image using tile-based rasterization.
+    Renders a scene defined by 3D Gaussians using tile-based rasterization.
+    
+    Args:
+        gaussians: List of Gaussian objects with attributes:
+            - mu: (3,) mean position
+            - q: (4,) unit quaternion
+            - s: (3,) log-scale
+            - alpha_raw: scalar opacity logit
+            - sh_coeffs: (48,) spherical harmonic coefficients
+            - cov3d: (3,3) 3D covariance matrix (precomputed or computed from q, s)
+        camera_matrix: (4,4) world-to-camera projection matrix
+        image_width, image_height: int
+        tile_size: int
+        
+    Returns:
+        image: (H, W, 3) rendered RGB image
     """
-    H, W = image_shape
-    num_tiles_h = (H + tile_size - 1) // tile_size
-    num_tiles_w = (W + tile_size - 1) // tile_size
-    
-    # Initialize output buffers
-    C = np.zeros((H, W, 3), dtype=np.float32)
-    T = np.zeros((H, W), dtype=np.float32)
-    
-    # Precompute 2D projections and bounding boxes
+    # 1. Precompute 2D parameters for all Gaussians
     projected_gaussians = []
     for g in gaussians:
-        mu_cam = camera_matrix[:3, :3] @ g.mu + camera_matrix[:3, 3]
-        if mu_cam[2] <= 0.1:
-            continue
-            
+        # Compute 3D covariance from quaternion and scale
         R = quaternion_to_rotation_matrix(g.q)
-        S = np.diag(np.exp(g.s))
-        Sigma_3D = R @ (S @ S.T) @ R.T
+        S = np.diag(np.exp(g.s)) # s is stored in log space
+        Sigma_3d = R @ (S @ S.T) @ R.T
         
-        z = mu_cam[2]
-        fx, fy = 1.0, 1.0
-        cx, cy = W / 2.0, H / 2.0
+        # Project to 2D
+        # W is the view matrix (top 3 rows of camera_matrix usually, or full 4x4 depending on convention)
+        # J is the Jacobian of the perspective projection at mu
+        # For simplicity, assume a helper function handles the full projection math
+        mu_2d, Sigma_2d, depth, valid = project_gaussian_3d_to_2d(g.mu, Sigma_3d, camera_matrix)
         
-        J = np.array([
-            [fx/z, 0,    -fx*mu_cam[0]/(z*z)],
-            [0,    fy/z, -fy*mu_cam[1]/(z*z)],
-            [0,    0,    0]
-        ])
-        
-        W_rot = camera_matrix[:3, :3]
-        Sigma_2D = J @ W_rot @ Sigma_3D @ W_rot.T @ J.T
-        
-        eigenvalues, _ = np.linalg.eigh(Sigma_2D)
-        max_extent = 3.0 * np.sqrt(np.maximum(eigenvalues, 1e-6))
-        
-        x_2d = fx * mu_cam[0] / mu_cam[2] + cx
-        y_2d = fy * mu_cam[1] / mu_cam[2] + cy
-        
-        min_x = int(max(0, x_2d - max_extent[0]))
-        max_x = int(min(W, x_2d + max_extent[0]))
-        min_y = int(max(0, y_2d - max_extent[1]))
-        max_y = int(min(H, y_2d + max_extent[1]))
-        
-        if min_x >= max_x or min_y >= max_y:
+        if not valid or depth < 0:
             continue
             
+        # Compute effective opacity
+        alpha = sigmoid(g.alpha_raw)
+        
+        # Compute 2D bounding box
+        # Expand Sigma_2d to cover 3 sigma (9 in Mahalanobis distance)
+        # Approximate AABB from eigenvalues of Sigma_2d
+        eigenvalues, _ = np.linalg.eigh(Sigma_2d)
+        max_extent = 3.0 * np.sqrt(np.max(eigenvalues))
+        
+        min_x = int(np.floor((mu_2d[0] - max_extent) / tile_size))
+        max_x = int(np.ceil((mu_2d[0] + max_extent) / tile_size))
+        min_y = int(np.floor((mu_2d[1] - max_extent) / tile_size))
+        max_y = int(np.ceil((mu_2d[1] + max_extent) / tile_size))
+        
         projected_gaussians.append({
-            'mu_2d': np.array([x_2d, y_2d]),
-            'Sigma_2D': Sigma_2D,
-            'alpha': 1.0 / (1.0 + np.exp(-g.alpha)),
+            'mu_2d': mu_2d,
+            'Sigma_2d': Sigma_2d,
+            'alpha': alpha,
             'sh_coeffs': g.sh_coeffs,
-            'depth': mu_cam[2],
-            'bbox': (min_x, max_x, min_y, max_y)
+            'depth': depth,
+            'tile_min': (min_x, min_y),
+            'tile_max': (max_x, max_y)
         })
         
-    # Bin into tiles
+    # 2. Bin into tiles
+    num_tiles_x = (image_width + tile_size - 1) // tile_size
+    num_tiles_y = (image_height + tile_size - 1) // tile_size
     tiles = {}
-    for i, pg in enumerate(projected_gaussians):
-        min_x, max_x, min_y, max_y = pg['bbox']
-        tile_min_x = min_x // tile_size
-        tile_max_x = (max_x - 1) // tile_size
-        tile_min_y = min_y // tile_size
-        tile_max_y = (max_y - 1) // tile_size
+    
+    for pg in projected_gaussians:
+        for tx in range(pg['tile_min'][0], pg['tile_max'][0] + 1):
+            for ty in range(pg['tile_min'][1], pg['tile_max'][1] + 1):
+                if 0 <= tx < num_tiles_x and 0 <= ty < num_tiles_y:
+                    key = (tx, ty)
+                    if key not in tiles:
+                        tiles[key] = []
+                    tiles[key].append(pg)
+                    
+    # 3. Render each tile
+    image = np.zeros((image_height, image_width, 3))
+    
+    for (tx, ty), pg_list in tiles.items():
+        # Sort by depth (front-to-back)
+        pg_list.sort(key=lambda x: x['depth'])
         
-        for ty in range(tile_min_y, tile_max_y + 1):
-            for tx in range(tile_min_x, tile_max_x + 1):
-                key = (ty, tx)
-                if key not in tiles:
-                    tiles[key] = []
-                tiles[key].append((i, pg['depth']))
-                
-    # Sort and Composite per tile
-    for (ty, tx), tile_data in tiles.items():
-        tile_data.sort(key=lambda x: x[1])
-        y_start = ty * tile_size
+        # Define tile pixel range
         x_start = tx * tile_size
+        y_start = ty * tile_size
+        x_end = min(x_start + tile_size, image_width)
+        y_end = min(y_start + tile_size, image_height)
         
-        for idx, depth in tile_data:
-            pg = projected_gaussians[idx]
-            mu_2d = pg['mu_2d']
-            Sigma_2D = pg['Sigma_2D']
-            alpha = pg['alpha']
-            sh_coeffs = pg['sh_coeffs']
-            
-            min_x, max_x, min_y, max_y = pg['bbox']
-            min_x = max(min_x, x_start)
-            max_x = min(max_x, x_start + tile_size)
-            min_y = max(min_y, y_start)
-            max_y = min(max_y, y_start + tile_size)
-            
-            ys, xs = np.meshgrid(np.arange(min_y, max_y), np.arange(min_x, max_x), indexing='ij')
-            pixel_coords = np.stack([xs.flatten(), ys.flatten()], axis=-1).astype(np.float32)
-            
-            diff = pixel_coords - mu_2d
-            det = Sigma_2D[0,0]*Sigma_2D[1,1] - Sigma_2D[0,1]*Sigma_2D[1,0]
-            if abs(det) < 1e-6:
-                continue
-            inv_Sigma_2D = np.array([
-                [Sigma_2D[1,1], -Sigma_2D[0,1]],
-                [-Sigma_2D[1,0], Sigma_2D[0,0]]
-            ]) / det
-            
-            exponents = -0.5 * np.sum((diff @ inv_Sigma_2D) * diff, axis=1)
-            g_2d_values = np.exp(exponents)
-            
-            d = np.array([0, 0, 1])
-            color = evaluate_sh(sh_coeffs, d)
-            
-            flat_g_2d = g_2d_values.reshape(-1)
-            flat_color = np.tile(color, (len(flat_g_2d), 1))
-            
-            pixel_indices = np.arange(len(flat_g_2d))
-            img_y = min_y + (pixel_indices // (max_x - min_x))
-            img_x = min_x + (pixel_indices % (max_x - min_x))
-            
-            for k in range(len(flat_g_2d)):
-                y, x = img_y[k], img_x[k]
-                a = alpha * flat_g_2d[k]
-                if a < 1e-4:
-                    continue
-                t_prev = T[y, x]
-                if t_prev > 0.9999:
-                    continue
-                C[y, x] += flat_color[k] * a * (1 - t_prev)
-                T[y, x] += a * (1 - t_prev)
+        # Rasterize
+        for y in range(y_start, y_end):
+            for x in range(x_start, x_end):
+                # Pixel coordinate relative to image
+                # Note: mu_2d is typically in image coordinates
                 
-    return C
+                # Accumulate color and transmittance
+                T = 1.0
+                color = np.zeros(3)
+                
+                for pg in pg_list:
+                    # Compute Mahalanobis distance
+                    diff = np.array([x, y]) - pg['mu_2d']
+                    inv_Sigma = np.linalg.inv(pg['Sigma_2d'])
+                    dist = diff @ inv_Sigma @ diff
+                    
+                    # Gaussian kernel value
+                    G_2d = np.exp(-0.5 * dist)
+                    
+                    # Effective alpha
+                    alpha_eff = pg['alpha'] * G_2d
+                    
+                    if alpha_eff < 1e-4: # Early out if negligible
+                        continue
+                        
+                    # Get color from SH
+                    # View direction d is needed for SH evaluation
+                    # Assuming camera center is origin for simplicity or passed in
+                    d = get_view_direction(x, y, camera_matrix)
+                    c = evaluate_sh(pg['sh_coeffs'], d)
+                    
+                    # Alpha compositing
+                    color += c * alpha_eff * T
+                    T *= (1.0 - alpha_eff)
+                    
+                    if T < 1e-4: # Early out if fully opaque
+                        break
+                
+                image[y, x] = color
+                
+    return image
 
-def evaluate_sh(coeffs, direction):
-    """Evaluate spherical harmonics for a given direction."""
-    return coeffs[:3]
+def optimize_gaussians(gaussians, training_images, camera_poses, num_iterations=30000):
+    """
+    Optimizes Gaussian parameters using Adam and Adaptive Density Control.
+    """
+    optimizer = Adam(gaussians.parameters(), lr=1e-4)
+    
+    for iter in range(num_iterations):
+        # 1. Pick a random training view
+        idx = random.choice(len(training_images))
+        img = training_images[idx]
+        pose = camera_poses[idx]
+        
+        # 2. Render
+        rendered_img = render_gaussians(gaussians, pose, img.width, img.height)
+        
+        # 3. Compute Loss
+        loss = compute_loss(rendered_img, img) # L1 + SSIM
+        
+        # 4. Backprop
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+        
+        # 5. Adaptive Density Control (every 100 iters, within window 500-15000)
+        if 500 < iter < 15000 and iter % 100 == 0:
+            densify_and_prune(gaussians, threshold=2e-4)
+            
+        # 6. Opacity Reset (every 3000 iters)
+        if iter % 3000 == 0:
+            reset_opacities(gaussians, new_value=0.01)
+            
+        # 7. SH Degree Warmup (every 1000 iters)
+        if iter % 1000 == 0 and iter > 0:
+            increase_sh_degree(gaussians)
 
-def quaternion_to_rotation_matrix(q):
-    """Convert unit quaternion to 3x3 rotation matrix."""
-    w, x, y, z = q
-    return np.array([
-        [1 - 2*y*y - 2*z*z, 2*x*y - 2*z*w, 2*x*z + 2*y*w],
-        [2*x*y + 2*z*w, 1 - 2*x*x - 2*z*z, 2*y*z - 2*x*w],
-        [2*x*z - 2*y*w, 2*y*z + 2*x*w, 1 - 2*x*x - 2*y*y]
-    ])
+def densify_and_prune(gaussians, threshold):
+    """
+    Clones, splits, and prunes Gaussians based on gradients.
+    """
+    # Compute 2D position gradients
+    grads = compute_gradient_magnitude(gaussians, 'mu_2d')
+    
+    # Clone small Gaussians with high gradient
+    for g in gaussians:
+        if g.scale < small_threshold and grads[g.id] > threshold:
+            clone_gaussian(g)
+            
+    # Split large Gaussians with high gradient
+    for g in gaussians:
+        if g.scale > large_threshold and grads[g.id] > threshold:
+            split_gaussian(g)
+            
+    # Prune low opacity Gaussians
+    gaussians = [g for g in gaussians if sigmoid(g.alpha_raw) > 0.005]
 ```
-
-### Parameters and Hyperparameters
-*   **Iterations:** 30,000 (7k–15k for fast preview) [S3, unofficial].
-*   **Learning Rates:** Position: $1.6\times10^{-4}$ (scaled by scene extent, exponential decay) [S3, unofficial]. Opacity: $5\times10^{-2}$ (sigmoid raw) [S3, unofficial]. Scale: $5\times10^{-3}$ (exp raw) [S3, unofficial]. Rotation: $10^{-3}$ (quaternion, normalized after step) [S3, unofficial]. SH: $2.5\times10^{-3}$ for DC, $/20$ for higher bands [S3, unofficial].
-*   **Densification:** Gradient threshold $\tau_\nabla \sim 2\times10^{-4}$, applied every 100 iterations within a window of 500–15,000 [S3, unofficial].
-*   **Opacity Reset:** Every 3000 iterations, set $\alpha \leftarrow 0.01$ [S3, unofficial].
-*   **Tile Size:** $16\times16$ [S3, unofficial].
-*   **SSIM Weight:** $\lambda = 0.2$ [S3, unofficial].
-*   **SH Warm-up:** Start with degree 0, add 1 band every 1000 iterations up to degree 3 [S3, unofficial].
-
-### Edge Cases and Pitfalls
-*   **Popping Artifacts:** The per-tile depth sort uses the Gaussian center depth, not per-pixel depth. In distant tiles with strong overlap, the sort order can flip across views, causing popping [S3, unofficial].
-*   **Pre-classification Limitation:** Color is assigned prior to compositing (pre-classification), which is not aligned with transfer function mapping in alpha-blended ray casting, leading to inaccurate TF evaluation and artifacts in overlapping regions [S2, unofficial].
-*   **Heuristic Densification:** Adaptive density control based on 2D projections may fail to capture local structural characteristics, generating excessive overlapping Gaussians [S2, unofficial].
-*   **3σ Support:** The $3\sigma$ cutoff ($d^\top \Sigma^{-1} d \leq 9$) often overestimates the primitive footprint, leading to redundant primitives and increased memory cost [S2, unofficial].
 
 ## Subtopics
 
 ### [3D Gaussian Splatting Optimization Parameters](3460-3d-gaussian-splatting-optimization-parameters.md)
-Details the specific learning rates, decay schedules, and hyperparameters used in the Adam optimizer for 3DGS.
-
-### [ECoNGS Optimization and Coding](2087-econgs-optimization-and-coding.md)
-A variant focusing on efficient coding and optimization strategies for 3DGS.
-
-### [GaussianList Data Structure and Initialization](2214-gaussianlist-data-structure-and-initialization.md)
-Describes the data structure for storing and initializing the list of Gaussians.
-
-### [Gaussian Property Loading](2221-gaussian-property-loading.md)
-Methods for loading Gaussian properties from various sources.
-
-### [3D Covariance Computation](2231-3d-covariance-computation.md)
-Algorithms for computing the 3D covariance matrix from rotation and scale parameters.
-
-### [3D Gaussian Data Layout](2242-3d-gaussian-data-layout.md)
-Memory layout optimizations for 3D Gaussian data.
-
-### [N-DGS Bounded Cholesky Parameterization](2811-n-dgs-bounded-cholesky-parameterization.md)
-An alternative parameterization for covariance matrices using bounded Cholesky decomposition.
+Defines the hyperparameters and procedural rules for optimizing a set of 3D Gaussians, specifically introducing adaptive density control (clone, split, prune, opacity reset) and periodic opacity resets to converge to a high-fidelity radiance field.
 
 ## Operating characteristics
-*   **Time Complexity:** Rendering is $O(N)$ per pixel where $N$ is the number of Gaussians contributing to the pixel, but accelerated by tiling and culling [G]. Training is dominated by the rasterization and backpropagation steps, scaling with the number of Gaussians and image resolution [S3, unofficial].
-*   **Memory Complexity:** $O(N)$ where $N$ is the number of Gaussians [G]. Each Gaussian stores $\boldsymbol{\mu}$ (12 bytes), $q$ (16 bytes), $s$ (12 bytes), $\alpha$ (4 bytes), and SH coefficients (192 bytes for degree 3), totaling ~236 bytes per Gaussian [G].
-*   **Performance:** Real-time rendering (100–300 FPS at 1080p) is achievable on modern GPUs due to the tile-based rasterizer [S3, unofficial].
-*   **Strengths:** High-fidelity rendering, real-time performance, explicit representation allows for easy editing and manipulation [G].
-*   **Limitations:** Popping artifacts due to depth sorting, pre-classification artifacts, and heuristic densification can lead to redundancy [S2, S3, unofficial]. Not inherently designed for volumetric media, leading to inaccuracies in TF evaluation [S2, unofficial].
-*   **When to Use:** Ideal for static scene reconstruction and novel view synthesis where real-time performance and high visual quality are required [G].
-*   **When Not to Use:** Not suitable for scenes with complex volumetric effects (e.g., smoke, fire) without modifications, as it does not model volumetric ray integration [S2, unofficial].
+*   **Time Complexity:** Rendering is $O(K)$ per pixel where $K$ is the number of overlapping Gaussians, but effectively constant due to tiling and culling. Training is dominated by the rasterization and backpropagation, scaling linearly with the number of Gaussians and training views.
+*   **Memory Complexity:** $O(K)$, where $K$ is the number of Gaussians. Vanilla 3DGS can require millions of Gaussians (e.g., 1-5 million for synthetic scenes), leading to high VRAM usage during training [S5, S9, unofficial].
+*   **Performance:** Achieves real-time rendering speeds (e.g., 68.4 FPS at 1080p on an A100 GPU) [S1]. Training time is significantly faster than NeRF (30-60 minutes vs. hours/days) but slower than Instant-NGP (18.4 minutes to 95% PSNR vs. 2.4 minutes) [S1].
+*   **Strengths:** Real-time novel view synthesis, high visual quality (PSNR 33.2 dB on Blender dataset), differentiable end-to-end optimization, simple data structure [S1][S5, S9, unofficial].
+*   **Limitations:** Moderate surface accuracy (ellipsoids approximate geometry but do not conform to exact surfaces) [S1]. Popping artifacts can occur due to per-tile depth sorting using center depth rather than per-pixel depth [S9, unofficial]. Heuristic ADC can generate excessive overlapping Gaussians [S7, unofficial]. Not directly compatible with generalizable neural prediction due to non-differentiable pruning/splitting operations [S8].
 
 ## Background
-3D Gaussian Splatting was introduced by Kerbl et al. in 2023 as a state-of-the-art reconstruction approach [S3, unofficial]. It represents scenes using 3D Gaussians, serving as a baseline for many subsequent methods despite not being specifically designed for volumetric media [S1]. The method leverages hardware rasterization for efficient rendering, replacing the implicit MLPs of NeRF with explicit Gaussian primitives [S2, S3, unofficial]. It has become a foundational technique in computer graphics, inspiring numerous variants for dynamic scenes, compression, and volumetric rendering [S5].
+3D Gaussian Splatting was introduced as a method to replace implicit neural representations with explicit 3D Gaussians, enabling real-time rendering through GPU rasterization [S1, S2]. It was developed to address the computational bottleneck of ray marching in NeRFs while maintaining high visual fidelity [S5, S9, unofficial]. The method initializes from a sparse Structure-from-Motion point cloud and optimizes parameters end-to-end [S1][S9, unofficial]. It has become a baseline for many subsequent variants in the 3DGS family [S3][S9, unofficial].
 
 ## Sources
-[S1] A High-Efficiency Physics-Based Differentiable Renderer for Smoke Reconstruction, https://doi.org/10.26599/cvm.2026.9450546, fetched 2026-10-27
-[S2] ESVR: 3D Ellipsoid-based Sparse Volume Rendering via Structure-aware Primitive Learning and Per-primitive Ray Sampling, https://arxiv.org/abs/2608.05564v1, fetched 2026-10-26 (unofficial)
-[S3] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
-[S4] Efficient Perspective‐Correct 3D Gaussian Splatting Using Hybrid Transparency, https://doi.org/10.1111/cgf.70014, fetched 2026-10-30
-[S5] “Real-time Photorealistic Dynamic Scene Representation and Rendering with 4D Gaussian Splatting”, https://radiancefields.com/papers/real-time-photorealistic-dynamic-scene-representation-and-rendering-with-4d-gaussian-splatting, fetched 2026-10-30
+[S1] Neural Rendering Techniques, https://doi.org/10.5281/zenodo.19614729, fetched 2026-10-26
+[S2] iVR-GS: Inverse Volume Rendering for Explorable Visualization via Editable 3D Gaussian Splatting., https://doi.org/10.1109/tvcg.2025.3567121, fetched 2026-10-26
+[S3] A High-Efficiency Physics-Based Differentiable Renderer for Smoke Reconstruction, https://doi.org/10.26599/cvm.2026.9450546, fetched 2026-10-27
+[S4] DNGaussian: Optimizing Sparse-View 3D Gaussian Radiance Fields with Global-Local Depth Normalization, https://doi.org/10.1109/cvpr52733.2024.01963, fetched 2026-10-26
+[S5] 3D Gaussian Splatting | The Future of Real-Time Neural Rendering, https://www.youtube.com/watch?v=iKJd9K7cCxs, fetched 2026-10-27 (unofficial)
+[S6] Core Philosophy of 3D Gaussian Splatting | The Idea That Changed 3D Rendering, https://www.youtube.com/watch?v=3Lml90hiQgU, fetched 2026-10-27 (unofficial)
+[S7] ESVR: 3D Ellipsoid-based Sparse Volume Rendering via Structure-aware Primitive Learning and Per-primitive Ray Sampling, https://arxiv.org/abs/2608.05564v1, fetched 2026-10-26 (unofficial)
+[S8] PixelSplat: 3D Gaussian Splats from Image Pairs for Scalable Generalizable 3D Reconstruction, https://doi.org/10.1109/cvpr52733.2024.01840, fetched 2026-10-26
+[S9] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+[S10] Gaussian Splatting SLAM, https://arxiv.org/abs/2312.06741, fetched 2026-10-27 (unofficial)
+[S11] EndoGaussian: Real-time Gaussian Splatting for Dynamic Endoscopic Scene Reconstruction, https://huggingface.co/papers/2401.12561, fetched 2026-10-30 (unofficial)
+[S12] Road to 3D Gaussian Splatting | Nazir Nayal, https://nazirnayal.xyz/blog/2024/road-to-3dgs/, fetched 2026-10-29 (unofficial)
+[S13] What is Gaussian Splatting? | PlayCanvas Developer Site, https://developer.playcanvas.com/user-manual/gaussian-splatting/what-is-gaussian-splatting/, fetched 2026-10-29
+[S14] Efficient Perspective‐Correct 3D Gaussian Splatting Using Hybrid Transparency, https://doi.org/10.1111/cgf.70014, fetched 2026-10-30
+[S15] “Real-time Photorealistic Dynamic Scene Representation and Rendering with 4D Gaussian Splatting”, https://radiancefields.com/papers/real-time-photorealistic-dynamic-scene-representation-and-rendering-with-4d-gaussian-splatting, fetched 2026-10-30 (unofficial)
+[S16] Universal Beta Splatting, https://doi.org/10.48550/arXiv.2510.03312, fetched 2026-10-30 (unofficial)
+[S17] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)

@@ -3,143 +3,164 @@
 Also called: L1+Regularization Loss for Gaussians, Regularised Loss Function for Gaussian Fitting
 
 ## Overview
-The Regularised Gaussian Fitting Loss is a composite objective function used to optimize Gaussian splat representations of volumetric data by combining a data-fidelity term with penalties on splat amplitude and extent. It addresses the problem of overfitting and instability in differentiable volume rendering by constraining the learned Gaussian parameters to physically plausible ranges. It distinguishes itself from sibling regularization methods like Total Variation by focusing specifically on the statistical moments (amplitude and covariance diagonal) of the Gaussian primitives rather than spatial smoothness of the field.
+This method defines the primary objective function for optimizing a set of 3D Gaussian splats to reconstruct a target volume, combining data fidelity with structural regularization. It differs from standard reconstruction losses by explicitly penalizing extreme splat amplitudes and extents to prevent overfitting and ensure stable optimization [S1, unofficial]. It is typically used in single-pass benchmarks for differentiable volume rendering, serving as the baseline against which progressive fitting variants are compared [S1, unofficial].
 
 ## How it works
-The method minimizes a total loss $\mathcal{L}$ composed of a reconstruction loss and two regularization terms. The optimization updates the Gaussian splat parameters (amplitude, diagonal covariance, position) to match a target volume.
+**Inputs and Outputs**
+- **Inputs**: Target volume data, current set of $K$ Gaussian splats. Each splat $k$ has parameters including diagonal covariance entries $L_{k,ii}$ (related to extent) and amplitude parameter $a_k$.
+- **Output**: A scalar loss value $L$ used for gradient-based optimization.
 
-**Inputs:**
-- Target volume data.
-- Current Gaussian splat parameters: amplitude $a_k$, diagonal covariance matrix entries $L_{k,ii}$ for $K$ splats in $D$ dimensions.
-- Hyperparameters: learning rate $lr$, regularization weights $\lambda_a, \lambda_d$, minimum covariance floor $\sigma_{min}$.
+**Data Structures**
+- **Splat Parameters**:
+  - $L_{k,ii}$: Diagonal covariance entries for splat $k$ along dimension $i$. These are optimized parameters, typically passed through a softplus activation to ensure positivity, with a floor $\sigma_{min}$.
+  - $a_k$: Amplitude parameter for splat $k$.
+  - $\mu_{k,i}$: Center coordinate of splat $k$ along dimension $i$.
+  - $S_i$: Volume extent (size) along dimension $i$.
+- **Constants**:
+  - $\tau$: Truncation threshold for effective radius calculation.
+  - $\sigma_{min}$: Minimum floor for covariance softplus.
+  - $\lambda_a, \lambda_d, \lambda_b$: Regularization weights.
 
-**Outputs:**
-- Gradients for the splat parameters to be passed to the optimizer (e.g., Adam).
-
-**Data Structures:**
-- Splat parameters are stored as tensors. The diagonal covariance entries $L_{k,ii}$ are typically softplus-activated parameters to ensure positivity, with a floor $\sigma_{min}$.
-- Amplitudes $a_k$ may be subject to a clamp $a_{max}$ during evaluation but the regularization is applied to the raw parameters before clamping.
-
-**Formulas:**
+**Formulas**
 The total loss is defined as [S1, unofficial]:
+
 $$
-\mathcal{L} = \mathcal{L}_{recon} + \lambda_a \sum_{k=1}^{K} |a_k| + \lambda_d \sum_{k=1}^{K} \sum_{i=1}^{D} |L_{k,ii} - \sigma_{min}|
+L = L_{recon} + \lambda_a \sum_{k=1}^K |a_k| + \lambda_d \sum_{k=1}^K \sum_{i=1}^D |L_{k,ii} - \sigma_{min}|
 $$
+
 Where:
-- $\mathcal{L}_{recon}$ is the L1 reconstruction loss between the predicted volume (rendered from the Gaussians) and the target volume.
-- $K$ is the number of splats.
-- $D$ is the dimensionality of the volume (typically 3).
-- $a_k$ is the amplitude of splat $k$.
-- $L_{k,ii}$ is the $i$-th diagonal entry of the covariance matrix for splat $k$.
-- $\sigma_{min}$ is the minimum floor for the covariance diagonal entries.
-- $\lambda_a$ and $\lambda_d$ are the regularization weights.
+- $L_{recon}$ is the L1 reconstruction loss between the predicted volume (rendered from the Gaussians) and the target volume.
+- $\lambda_a = 0.1 \times lr$ regularizes the splat amplitude.
+- $\lambda_d = 0.01 \times lr$ regularizes the splat extent (diagonal covariance).
+- $lr$ is the learning rate (typically $0.01$).
+- $D$ is the number of dimensions (typically 3).
+- The regularization terms are means over the $K$ splats and $D$ diagonal entries. The terms $|a_k|$ and $|L_{k,ii} - \sigma_{min}|$ are evaluated on the softplus-activated parameters before any amplitude clamp $a_{max}$ is applied [S1, unofficial].
 
-**Parameters:**
-- $\lambda_a = 0.1 \times lr$. With a standard learning rate $lr = 0.01$, $\lambda_a = 10^{-3}$ [S1, unofficial].
-- $\lambda_d = 0.01 \times lr$. With $lr = 0.01$, $\lambda_d = 10^{-4}$ [S1, unofficial].
-- $\sigma_{min}$: Not given in the sources.
-- $\tau$ (truncation threshold): Used in the optional boundary term, but not in the primary loss. Not given in the sources for the primary loss.
-
-**Optional Boundary Term:**
-An optional boundary-containment term $\mathcal{L}_{boundary}$ can be added with weight $\lambda_b$:
+**Optional Boundary Term**
+An optional boundary-containment term can be added:
 $$
-\mathcal{L}_{boundary} = \sum_{k=1}^{K} \sum_{i=1}^{D} \left[ \max(0, r_{k,i} - \mu_{k,i})^2 + \max(0, r_{k,i} - (S_i - 1 - \mu_{k,i}))^2 \right]
+L_{boundary} = \sum_{k=1}^K \sum_{i=1}^D \left[ \max(0, r_{k,i} - \mu_{k,i})^2 + \max(0, r_{k,i} - (S_i - 1 - \mu_{k,i}))^2 \right]
 $$
-Where:
-- $r_{k,i} = \tau \sqrt{\sum_j L_{k,ij}}$ is the effective radius of splat $k$ along dimension $i$ at truncation threshold $\tau$.
-- $\mu_{k,i}$ is the center of splat $k$ along dimension $i$.
-- $S_i$ is the volume extent along dimension $i$.
-- This term is disabled ($\lambda_b = 0$) in reported benchmarks [S1, unofficial].
+Where $r_{k,i} = \tau \sqrt{\sum_j L_{k,ij}}$ is the effective radius of splat $k$ along dimension $i$ at truncation threshold $\tau$ [S1, unofficial]. This term is disabled ($\lambda_b = 0$) in standard benchmarks [S1, unofficial].
 
-**Pseudocode:**
+**Parameters**
+- $\lambda_a$: Regularization weight for amplitude. Set to $10^{-3}$ (assuming $lr=0.01$) [S1, unofficial].
+- $\lambda_d$: Regularization weight for extent. Set to $10^{-4}$ (assuming $lr=0.01$) [S1, unofficial].
+- $\lambda_b$: Weight for boundary term. Set to $0$ (disabled) [S1, unofficial].
+- $lr$: Learning rate. Typically $0.01$ [S1, unofficial].
+
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def regularised_gaussian_fitting_loss(target_volume, predicted_volume, amplitudes, cov_diagonals, lr, sigma_min):
+def regularised_gaussian_fitting_loss(target_volume, predicted_volume, splats, lr, sigma_min, tau, volume_size):
     """
     Computes the Regularised Gaussian Fitting Loss.
     
     Args:
         target_volume: Tensor of target voxel values.
-        predicted_volume: Tensor of rendered voxel values from Gaussians.
-        amplitudes: Tensor of shape (K,) containing raw amplitude parameters a_k.
-        cov_diagonals: Tensor of shape (K, D) containing raw diagonal covariance parameters L_{k,ii}.
-        lr: Learning rate scalar.
-        sigma_min: Minimum floor for covariance diagonal.
+        predicted_volume: Tensor of rendered voxel values from splats.
+        splats: List of splat objects containing attributes:
+            - k: index of splat
+            - a: amplitude parameter (pre-activation or raw)
+            - L_diag: diagonal covariance entries [D]
+            - mu: center coordinates [D]
+            - L_full: full covariance matrix [D, D] (for radius calc)
+        lr: Learning rate.
+        sigma_min: Minimum floor for covariance softplus.
+        tau: Truncation threshold.
+        volume_size: Size of volume along each dimension [D].
         
     Returns:
-        Total loss scalar.
+        loss: Scalar loss value.
     """
     # 1. L1 Reconstruction Loss
-    # L_recon is the mean L1 error between predicted and target volumes
+    # L_recon is the L1 distance between predicted and target volumes
     l_recon = torch.mean(torch.abs(target_volume - predicted_volume))
     
-    # 2. Regularization Weights
-    # lambda_a = 0.1 * lr
-    # lambda_d = 0.01 * lr
+    # 2. Amplitude Regularization
+    # Sum of absolute amplitudes over all K splats
+    # Note: Sources indicate |a_k| is used directly on the parameter
+    sum_amplitude = 0.0
+    for k in range(len(splats)):
+        sum_amplitude += torch.abs(splats[k].a)
+    l_amp = sum_amplitude / len(splats)
+    
+    # 3. Extent Regularization
+    # Sum of absolute differences between softplus(L_ii) and sigma_min
+    # Evaluated before amplitude clamp
+    sum_extent = 0.0
+    for k in range(len(splats)):
+        for i in range(splats[k].L_diag.shape[0]):
+            # Softplus activation with floor
+            l_ii = torch.nn.functional.softplus(splats[k].L_diag[i])
+            # Ensure it respects sigma_min floor if softplus doesn't inherently
+            # The source says "softplus-activated parameters (for the diagonal, 
+            # the softplus term above the floor sigma_min)"
+            # This implies the parameter is L_ii, and we compare softplus(L_ii) to sigma_min?
+            # Or is sigma_min the floor of the softplus? 
+            # Text: "softplus-activated parameters (for the diagonal, the softplus term above the floor sigma_min)"
+            # This suggests the parameter stored is L_ii, and the value used is softplus(L_ii).
+            # The penalty is |softplus(L_ii) - sigma_min|.
+            val = torch.nn.functional.softplus(splats[k].L_diag[i])
+            sum_extent += torch.abs(val - sigma_min)
+            
+    l_extent = sum_extent / (len(splats) * splats[0].L_diag.shape[0])
+    
+    # 4. Combine Losses
     lambda_a = 0.1 * lr
     lambda_d = 0.01 * lr
     
-    # 3. Amplitude Regularization
-    # Sum of absolute amplitudes over K splats
-    # Note: Applied to raw parameters before amplitude clamp a_max
-    l_amp = torch.sum(torch.abs(amplitudes))
+    loss = l_recon + lambda_a * l_amp + lambda_d * l_extent
     
-    # 4. Extent (Covariance Diagonal) Regularization
-    # Sum of absolute differences between diagonal entries and sigma_min
-    # Applied to softplus-activated parameters above the floor sigma_min
-    # cov_diagonals are assumed to be the raw parameters that are softplus-activated
-    # The term is |L_{k,ii} - sigma_min|
-    l_ext = torch.sum(torch.abs(cov_diagonals - sigma_min))
-    
-    # 5. Total Loss
-    # L = L_recon + lambda_a * sum(|a_k|) + lambda_d * sum(|L_{k,ii} - sigma_min|)
-    # The regularization terms are means over K splats and D entries in the source formula context,
-    # but the summation notation implies summing. The text says "Both penalties are means over the K splats...".
-    # However, the formula shows summation. We follow the formula structure but normalize if "mean" is strictly required.
-    # The source says: "lambda_a sum |a_k| + lambda_d sum sum |L_{k,ii} - sigma_min|"
-    # And "Both penalties are means over the K splats (and D diagonal entries)".
-    # This implies the loss terms should be divided by K and D respectively, or the lambda absorbs it.
-    # Given lambda is small, we assume the formula sums, but the text says "means".
-    # To be safe and consistent with "means over K splats", we divide by K.
-    # For D, it says "means over ... D diagonal entries".
-    
-    # Re-interpreting "means over K splats (and D diagonal entries)":
-    # L_reg_a = (1/K) * sum(|a_k|)
-    # L_reg_d = (1/(K*D)) * sum(sum(|L_{k,ii} - sigma_min|))
-    
-    K = amplitudes.shape[0]
-    D = cov_diagonals.shape[1]
-    
-    l_amp_mean = torch.sum(torch.abs(amplitudes)) / K
-    l_ext_mean = torch.sum(torch.abs(cov_diagonals - sigma_min)) / (K * D)
-    
-    total_loss = l_recon + lambda_a * l_amp_mean + lambda_d * l_ext_mean
-    
-    return total_loss
+    # Optional Boundary Term (Disabled by default in benchmarks)
+    # lambda_b = 0
+    # if lambda_b > 0:
+    #     l_boundary = 0.0
+    #     for k in range(len(splats)):
+    #         for i in range(splats[k].mu.shape[0]):
+    #             # Effective radius r_ki = tau * sqrt(sum_j L_kij)
+    #             # L_kij is the full covariance matrix element
+    #             r_ki = tau * torch.sqrt(torch.sum(splats[k].L_full ** 2)) # Approximation if L_full is covariance
+    #             # Note: Source says r_ki = tau * sqrt(sum_j L_kij). 
+    #             # If L_kij are diagonal entries, this is sqrt(sum L_kii). 
+    #             # If L_kij is full covariance, it's the Frobenius norm? 
+    #             # Context implies diagonal covariance for extent regularization, 
+    #             # but radius might use full covariance. 
+    #             # Assuming L_full is the covariance matrix Sigma.
+    #             # r_ki = tau * sqrt(sum_j Sigma_kij) -> sum of elements? Or norm?
+    #             # "sum_j L_kij" usually implies sum over j for fixed i,k.
+    #             # If diagonal, sum_j L_kij = L_kii.
+    #             # Let's assume diagonal for simplicity as per extent reg.
+    #             r_ki = tau * torch.sqrt(torch.sum(splats[k].L_diag))
+    #             
+    #             term1 = torch.clamp(r_ki - splats[k].mu[i], min=0) ** 2
+    #             term2 = torch.clamp(r_ki - (volume_size[i] - 1 - splats[k].mu[i]), min=0) ** 2
+    #             l_boundary += term1 + term2
+    #     loss += lambda_b * l_boundary / (len(splats) * splats[0].mu.shape[0])
+        
+    return loss
 ```
 
-**Edge Cases and Pitfalls:**
-- The regularization is applied to the raw parameters before any amplitude clamping ($a_{max}$), ensuring the weight does not grow with splat count $K$ as the pool is swept [S1, unofficial].
-- The covariance diagonal entries are softplus-activated parameters; the regularization term $|L_{k,ii} - \sigma_{min}|$ operates on these parameters above the floor $\sigma_{min}$ [S1, unofficial].
-- L1 loss is preferred over MSE or Poisson deviance for reconstruction, as MSE performs worse on held-out PSNR for these regularised, early-stopped fits [S1, unofficial].
+**Edge Cases and Pitfalls**
+- **Amplitude Clamp**: The regularization terms are evaluated *before* any amplitude clamp $a_{max}$ is applied. This ensures the weight does not grow with $K$ as splat count increases [S1, unofficial].
+- **Softplus Floor**: The extent regularization uses the softplus-activated covariance values. The floor $\sigma_{min}$ is part of the softplus activation or a separate constraint, and the penalty is the deviation from this floor [S1, unofficial].
+- **L1 vs MSE**: L1 is preferred over MSE for training PSNR in this context. MSE performs worse on held-out PSNR for 11 of 17 volumes and is not the best training loss for early-stopped fits [S1, unofficial].
 
 ## Subtopics
 
 ### [Progressive Multi-Pass Fitting](3185-progressive-multi-pass-fitting.md)
-A strategy where a nominal splat budget is distributed across sequential passes, fitting residuals left by frozen earlier passes. It is evaluated as an alternative to single-pass fitting within this framework, trading off some PSNR for potential SSIM gains.
+Distributes splat budget across sequential passes, optimizing residuals left by frozen earlier passes. Trades marginal PSNR gains for improved SSIM on complex structures.
 
 ## Operating characteristics
-- **Time Complexity:** The loss computation is $O(K \cdot D)$ for the regularization terms and $O(N)$ for the reconstruction loss (where $N$ is the number of voxels). The optimization uses standard Adam, which has constant tensor shapes due to fixed-pool relocation, preserving vectorized efficiency [S1, unofficial].
-- **Memory Complexity:** Requires storage for $K$ splat parameters (amplitude, covariance diagonal, position) and the target/predicted volumes.
-- **Performance:** L1 reconstruction loss beats MSE on 11 of 17 volumes by +0.20 to +7.78 dB in held-out PSNR and never trails by more than 0.28 dB [S1, unofficial].
-- **Strengths:** Prevents overfitting by constraining amplitude and extent; L1 loss provides robust reconstruction.
-- **Limitations:** Single-pass fitting generally achieves higher training PSNR than progressive variants; the boundary term is disabled in benchmarks, so boundary artifacts may occur if not handled elsewhere.
-- **When to use:** When optimizing Gaussian splats for volumetric data where stability and physical plausibility of splat sizes are important.
-- **When not to use:** If maximum PSNR is the sole metric and progressive fitting is not an option, single-pass with L1 is preferred.
+- **Time Complexity**: Depends on the number of splats $K$, volume resolution, and rendering samples. The loss computation itself is $O(K \cdot D)$ for regularization terms plus the cost of rendering $L_{recon}$.
+- **Memory Complexity**: Constant with respect to splat count for optimizer states due to fixed-pool relocation mechanism [S1, unofficial].
+- **Performance**: L1 reconstruction loss yields better held-out PSNR than MSE on most volumes (11 of 17), with improvements ranging from +0.20 to +7.78 dB [S1, unofficial].
+- **Strengths**: Prevents overfitting via amplitude and extent regularization; stable optimization with standard Adam; L1 loss provides robust reconstruction.
+- **Limitations**: Requires tuning of $\lambda_a$ and $\lambda_d$ relative to learning rate; boundary term is optional and not used in standard benchmarks.
 
 ## Background
-The method originates from the Luxar project, which applies Gaussian splatting to microscopy and scientific data visualization. The specific loss formulation was detailed in an unofficial preprint/report on Luxar [S1, unofficial]. It was designed to handle the specific challenges of volumetric data, where resolution varies relative to splat size (resolution over splat FWHM 1.15–8.7, median 2.4) [S1, unofficial].
+The Regularised Gaussian Fitting Loss was introduced in the context of "Luxar," a method for Gaussian splatting for microscopy and scalable interactive web visualization of multidimensional scientific data [S1, unofficial]. It is designed to optimize a fixed pool of Gaussian splats to represent volumetric data, balancing fidelity with structural constraints to enable efficient rendering and visualization.
 
 ## Sources
 [S1] Luxar: Gaussian splatting for microscopy and scalable interactive web visualisation of multidimensional scientific data, https://doi.org/10.64898/2026.09.22.753676, fetched 2026-10-26 (unofficial)

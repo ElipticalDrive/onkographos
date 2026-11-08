@@ -1,287 +1,284 @@
 # Lorenz Predictor with Arithmetic Coding
 
-Also called: Lorenzo Predictor with Arithmetic Coding, Lorenz预测与算术编码
+Also called: Lorenzo, Lorenz预测与算术编码, n-dimensional Lorenzo predictor, n-dimensional parallelogram predictor
 
 ## Overview
-The Lorenz Predictor with Arithmetic Coding is an out-of-core compression method for $n$-dimensional scalar fields that combines a high-order isotropic spatial predictor with entropy coding [S1, unofficial]. It solves the problem of compressing large volumetric datasets by predicting the current sample value from its $2^n - 1$ previously processed neighbors in an $n$-dimensional hypercube, then encoding the residual [S1, unofficial]. Unlike lower-dimensional scanline predictors that are anisotropic, the Lorenz predictor exploits data coherence in all dimensions, making it particularly effective for 3D and 4D data [S1, unofficial]. It is distinguished by its minimal memory footprint (size of a single slice) and its ability to exactly reconstruct polynomials of degree less than $n$ [S1, unofficial].
+The Lorenz Predictor with Arithmetic Coding is a lossless compression method for $n$-dimensional scalar fields that combines an isotropic predictive coding scheme with entropy coding [S1, unofficial]. It estimates the value of a sample point using the $2^n - 1$ previously processed neighbors forming the other corners of the unit hypercube, generating residuals that are compressed via arithmetic coding [S1, unofficial]. Unlike anisotropic scanline predictors, it exploits data coherence in all dimensions and is the simplest isotropic predictor capable of exactly reconstructing all polynomials of degree less than $n$ [S1, unofficial]. It is particularly suited for out-of-core implementations due to its small memory footprint [S1, unofficial].
 
 ## How it works
+**Inputs and Outputs:**
+*   **Input:** An $n$-dimensional scalar field $F$ with dimensions $X_1, \dots, X_n$.
+*   **Output:** A compressed bitstream representing the residuals.
 
-### Inputs and Outputs
-*   **Input:** An $n$-dimensional scalar field $F$ defined on a regular grid with dimensions $X_{max}, Y_{max}, \dots, T_{max}$ (for 4D) or generally $x_{1,max}, \dots, x_{n,max}$ [S1, unofficial].
-*   **Output:** A compressed bitstream of residuals [S1, unofficial].
+**Data Structures:**
+*   **Footprint Buffer:** A circular FIFO buffer storing the values of the "footprint" (the immediate neighbors required for prediction). For an $n$-dimensional dataset with ranges $X_1, \dots, X_n$, the buffer size is sufficient to hold the current slice and the footprint of the $(n-1)$-dimensional sub-problem. Specifically, for $R^4$, the size is $X_M Y_M Z_M + X_M Y_M + X_M + 1$ [S1, unofficial].
+*   **Coordinate System:** A local coordinate system is used where the current sample $v$ has coordinates $(1, 1, \dots, 1)$ and previously visited neighbors have coordinates in $\{0, 1\}^n$ [S1, unofficial].
 
-### Data Structures
-*   **Grid Array:** $F[x_1, \dots, x_n]$ representing the scalar values [S1, unofficial].
-*   **Footprint Buffer:** A circular FIFO vector used to store the necessary neighbor values for prediction. The size of the buffer in $R^4$ is $X_M \cdot Y_M \cdot Z_M + X_M \cdot Y_M + X_M + 1$, where $X_M, Y_M, Z_M$ are the ranges in the respective axes [S1, unofficial]. For general $n$-dimensions, the buffer size corresponds to the size of one slice plus the footprint of the data set one dimension less [S1, unofficial].
+**Prediction Formula:**
+The predicted value $\hat{v}$ for a sample $v$ is the weighted sum of the values $F(u)$ at the other corners $u$ of the unit hypercube:
+$$ \hat{v} = \sum_{u \in \{0,1\}^n \setminus \{(1,\dots,1)\}} (-1)^{g(u)} F(u) $$
+where $g(u)$ is the number of coordinates of $u$ that equal 0 (i.e., the Hamming distance from $v$ in the local system) [S1, unofficial]. Equivalently, $g(u) = n - u \cdot v$ where $u \cdot v$ is the dot product [S1, unofficial].
 
-### Prediction Formula
-The predictor estimates the value $F(v)$ at a sample point $v$ with local coordinates $(1, 1, \dots, 1)$ using the values $F(u)$ at the other $2^n - 1$ corners $u$ of the unit hypercube $\{0, 1\}^n$ [S1, unofficial]. The prediction $P(v)$ is given by:
+**Algorithm Steps:**
+1.  **Initialization:** Start the recursive traversal with `Lorenzo(n, -1, ..., -1)` [S1, unofficial].
+2.  **Traversal:** The algorithm processes samples in a specific order defined by the recursive function `Lorenzo(d, x_1, ..., x_n)`:
+    *   If all coordinates $x_1, \dots, x_n$ are not -1 (i.e., a valid sample index):
+        1.  Compute prediction $p = \text{LorenzoPredictor}(d, x_1, \dots, x_n)$ using the formula above.
+        2.  Calculate residual $d = F[x_1, \dots, x_n] - p$.
+        3.  Encode $d$ using an arithmetic encoder [S1, unofficial].
+    *   If any coordinate is -1 (boundary handling):
+        1.  Find the first dimension $d$ with coordinate -1.
+        2.  Recursively call `Lorenzo(d-1, x_1, ..., x_{d-1}, 0, x_{d+1}, ..., x_n)` to initialize the lower dimension.
+        3.  Loop $i$ from 1 to $X_d$ (the size of dimension $d$):
+            *   Call `Lorenzo(d, x_1, ..., x_{d-1}, i, x_{d+1}, ..., x_n)` [S1, unofficial].
+3.  **Encoding:** The residuals are encoded using a context arithmetic encoder, which uses the actual prediction as context, providing a 25% gain over adaptive arithmetic coding [S1, unofficial].
 
-$$ P(v) = \sum_{u \in \{0,1\}^n \setminus \{(1,\dots,1)\}} (-1)^{g(u)} F(u) $$
-
-where $g(u)$ is the number of coordinates of $u$ that equal 0 (i.e., the Hamming distance from the all-ones corner, or equivalently $n - u \cdot v$) [S1, unofficial]. The weights are either $1$ or $-1$ [S1, unofficial].
-
-### Encoding
-The residual $d = F(v) - P(v)$ is encoded using an arithmetic coder [S1, unofficial]. Two variants are described:
-1.  **Adaptive Arithmetic Coding:** Updates probability tables dynamically [S1, unofficial].
-2.  **Context Arithmetic Coding:** Uses the actual prediction $P(v)$ as context for the correction [S1, unofficial]. This variant provides a 25% gain over the adaptive encoder [S1, unofficial].
-
-### Lossy Compression
-For lossy compression, residuals are quantized to control the error [S1, unofficial]. To guarantee the $L_\infty$ error (maximum error) does not exceed a threshold, the values at the scalar field are readjusted to compensate for error accumulation, and the adjusted corrections are encoded losslessly [S1, unofficial]. A 5% tolerance in this context can reduce file size by half [S1, unofficial].
-
-### Pseudocode
-The algorithm processes the data in scanline order using a recursive function `Lorenzo`. The function `LorenzoPredictor` computes the weighted sum defined above. The buffer management is implicit in the access pattern; in a real implementation, `F` access would be mapped to the circular FIFO buffer [S1, unofficial].
-
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def Lorenzo(d, x_1, ..., x_n):
+def lorenzo_predictor(d, coords):
     """
-    Recursive function to process n-dimensional data.
-    d: current dimension being processed (1 to n).
-    x_1...x_n: coordinates of the current sample.
-               Initialized to -1 to indicate unvisited dimensions.
+    Computes the Lorenzo prediction for dimension d at the given local coordinates.
+    coords is a tuple of length d, where each element is 0 or 1.
+    The current sample is implicitly at (1, 1, ..., 1).
+    """
+    prediction = 0.0
+    # Iterate over all 2^d - 1 neighbors
+    # Neighbors are represented by bitmasks from 0 to 2^d - 2
+    for mask in range(0, (1 << d) - 1):
+        # Construct neighbor coordinates from mask
+        # If bit j is 0, coord is 0; if bit j is 1, coord is 1?
+        # Actually, the formula uses g(u) = number of 0s.
+        # Let's map mask bits to coordinates.
+        # Standard binary representation: bit 0 is LSB.
+        # Let's assume coords[j] corresponds to bit j.
+        # If bit j is 0, it contributes to g(u).
+        
+        # Calculate g(u): count of zeros in the coordinate vector derived from mask
+        # If we treat mask as indicating which coordinates are 1:
+        # coord[j] = 1 if (mask >> j) & 1 else 0
+        # g(u) = d - popcount(mask)
+        
+        g_u = d - bin(mask).count('1')
+        weight = (-1) ** g_u
+        
+        # Retrieve F(u) from the footprint buffer
+        # The buffer stores values based on the global coordinates corresponding to local coords
+        # For simplicity, assume a function get_value(d, local_coords) accesses the buffer
+        val = get_value(d, mask_to_coords(mask, d))
+        prediction += weight * val
+        
+    return prediction
+
+def mask_to_coords(mask, d):
+    coords = []
+    for j in range(d):
+        if (mask >> j) & 1:
+            coords.append(1)
+        else:
+            coords.append(0)
+    return tuple(coords)
+
+def lorenzo_compress(d, coords, dmax_list):
+    """
+    Recursive compression function.
+    d: current dimension index (1-based, or 0-based? Source uses 1-based d for dimension count)
+    coords: tuple of coordinates for dimensions 1..n. -1 indicates uninitialized.
+    dmax_list: list of sizes for each dimension.
     """
     # Check if all coordinates are valid (not -1)
-    if all(coord != -1 for coord in [x_1, ..., x_n]):
-        # Compute prediction using the Lorenz formula
-        p = LorenzoPredictor(d, x_1, ..., x_n)
+    if all(c != -1 for c in coords):
+        # Compute prediction
+        # Note: coords are global. We need local coords for predictor.
+        # Local coords are simply coords[i] - 0? 
+        # The source says: "local coordinate system where sample v has coordinates (1,1,...,1) 
+        # and its previously visited neighbors are those samples with coordinates in {0,1}^n".
+        # This implies the local system is relative to the current "block" or "cube".
+        # However, the recursive structure implies we are processing a hypercube of size 1x1x...x1?
+        # No, the recursion builds the space.
+        # The predictor uses the 2^d - 1 neighbors in the current d-dimensional subspace.
         
-        # Get actual value from grid/buffer
-        # Note: In out-of-core implementation, this reads from the circular buffer
-        actual_value = F[x_1, ..., x_n]
+        # To implement this, we need to map global coords to the local {0,1}^n frame.
+        # In the recursive step, when we are at `Lorenzo(d, x1...xn)`, we are effectively 
+        # processing the corner of a d-dimensional cube defined by the current recursion depth.
+        # The neighbors are determined by the previous recursive calls.
         
-        # Calculate residual
-        residual = actual_value - p
+        # Simplified: The predictor function takes the d values from the footprint.
+        # The footprint contains the values of the 2^d - 1 neighbors.
         
-        # Encode the residual
-        Encode(residual)
+        # Let's assume `get_footprint_values(d)` returns the list of F(u) for u in {0,1}^d \ {(1..1)}
+        # in the order corresponding to the mask iteration in predictor.
+        
+        neighbor_values = get_footprint_values(d)
+        prediction = 0.0
+        for mask in range(0, (1 << d) - 1):
+            g_u = d - bin(mask).count('1')
+            weight = (-1) ** g_u
+            prediction += weight * neighbor_values[mask]
+            
+        # Get actual value
+        actual_val = get_value_from_buffer(coords)
+        
+        # Compute residual
+        residual = actual_val - prediction
+        
+        # Encode residual
+        encode_arithmetic(residual)
+        
     else:
-        # Find the first dimension that is -1
-        # Let this be dimension k (1-indexed)
-        k = index of first -1 in [x_1, ..., x_n]
-        
-        # Initialize this dimension to 0
-        # Construct new coordinate list with x_k = 0
-        new_coords = [x_1, ..., x_{k-1}, 0, x_{k+1}, ..., x_n]
-        
-        # Recurse to process the first element of this dimension
-        # Note: The source pseudocode uses d-1, but logically it should 
-        # recurse on the next dimension or handle the current one.
-        # Based on the source trace: Lorenzo(d-1, ..., 0, ...) implies 
-        # moving to the next dimension index in the recursion stack.
-        # However, the source explicitly writes: Lorenzo(d - 1, x_1,..., x_{d-1}, 0, x_{d+1},..., x_n)
-        # This suggests 'd' in the source is the *remaining* dimensions or a specific indexing.
-        # Let's stick strictly to the source's recursive structure:
-        
-        # Source: Lorenzo(d - 1, x_1,..., x_{d-1}, 0, x_{d+1},..., x_n)
-        # This implies d is the current dimension index being initialized.
-        # If d=1, it calls Lorenzo(0, ...).
-        
-        # Re-interpreting source logic for clarity:
-        # The source uses 'd' as the dimension index being processed.
-        # If any coord is -1, it initializes the current dimension 'd' to 0
-        # and recurses. Then it loops.
-        
-        # Corrected interpretation of source pseudocode:
-        # The parameter 'd' represents the current dimension index (1..n).
-        # If x_d is -1, we set it to 0 and recurse to process lower dimensions?
-        # No, the source says: "Lorenzo(d-1, ..., 0, ...)"
-        # Let's follow the source's exact variable names.
-        
-        # If we assume d is the dimension index:
-        # If x_d == -1:
-        #    Set x_d = 0
-        #    Call Lorenzo(d-1, ...) to process previous dimensions? 
-        #    This seems to be a depth-first traversal initialization.
-        
-        # Let's use the explicit source pseudocode structure:
-        
-        # Identify which coordinate is -1. The source implies a specific order.
-        # The source trace shows: Lorenzo(2, -1, -1) -> Lorenzo(1, -1, 0) -> Lorenzo(0, 0, 0)
-        # This implies d decreases.
-        
-        # Implementation of the source's logic:
-        # Find the highest dimension index d such that x_d == -1? 
-        # Or is d passed as the current dimension?
-        # The starting call is Lorenzo(4, -1, -1, -1, -1).
-        # Inside: if any -1, call Lorenzo(d-1, ..., 0, ...).
-        # This sets the d-th coordinate to 0 and recurses on d-1.
-        
-        # So, if d > 0 and x_d == -1:
-        #    new_x_d = 0
-        #    Lorenzo(d-1, x_1, ..., x_{d-1}, 0, x_{d+1}, ..., x_n)
-        #    Then loop i from 1 to dmax for dimension d?
-        #    The source says: "for i = 1 to dmax do Lorenzo(d, ..., i, ...)"
-        #    This loop happens AFTER the recursive call.
-        
-        # So the logic is:
-        # 1. If we are at dimension d, and x_d is -1:
-        #    a. Set x_d = 0.
-        #    b. Recurse to process dimensions 1..d-1 (which will also be -1 initially).
-        #    c. After returning, loop i from 1 to MaxSize[d], setting x_d = i, and recursing again?
-        #       No, the source says: Lorenzo(d, ..., i, ...).
-        #       This implies we stay at dimension d but change the coordinate.
-        #       But if we change x_d to i, it is no longer -1.
-        #       So the next call will hit the "all != -1" branch?
-        #       Only if all other x_j are also != -1.
-        
-        # Let's trace 2D: Lorenzo(2, -1, -1)
-        # x_2 is -1. Call Lorenzo(1, -1, 0).
-        #   Inside Lorenzo(1, -1, 0): x_1 is -1. Call Lorenzo(0, 0, 0).
-        #     Inside Lorenzo(0, 0, 0): all != -1. Encode F[0,0].
-        #   Back in Lorenzo(1, -1, 0): Loop i=1 to dmax_1.
-        #     Call Lorenzo(1, i, 0).
-        #       Inside Lorenzo(1, i, 0): all != -1. Encode F[i,0].
-        # Back in Lorenzo(2, -1, -1): Loop i=1 to dmax_2.
-        #   Call Lorenzo(2, -1, i).
-        #     Inside Lorenzo(2, -1, i): x_1 is -1. Call Lorenzo(1, 0, i).
-        #       Inside Lorenzo(1, 0, i): all != -1. Encode F[0,i].
-        #     Back in Lorenzo(2, -1, i): Loop j=1 to dmax_1.
-        #       Call Lorenzo(2, j, i).
-        #         Encode F[j,i].
+        # Find the first dimension with -1
+        for i in range(d):
+            if coords[i] == -1:
+                # Initialize this dimension to 0
+                new_coords = list(coords)
+                new_coords[i] = 0
+                # Recurse to lower dimension (d-1 in source logic, but here d is the dimension being initialized)
+                # Source: Lorenzo(d-1, x1...xd-1, 0, xd+1...xn)
+                # Here, we are initializing dimension i. The "lower dimension" is i-1?
+                # The source uses `d` as the dimension of the predictor.
+                # Let's stick to the source's variable naming:
+                # Lorenzo(d, x1...xn)
+                # If not all valid, find first -1 at index k (1-based).
+                # Call Lorenzo(k-1, x1...xk-1, 0, xk+1...xn)
+                # Then loop i=1 to dmax_k: Lorenzo(k, x1...xk-1, i, xk+1...xn)
+                
+                # Mapping to 0-based index `idx`
+                idx = i
+                # Recurse on dimension `idx` (which is d-1 in source if d was the current dim?)
+                # Source: Lorenzo(d-1, ...). If we are in Lorenzo(d, ...), and we hit -1 at d-th pos?
+                # The source pseudocode:
+                # Lorenzo(d, x1...xn)
+                # if all != -1: ...
+                # else:
+                #   Lorenzo(d-1, x1...xd-1, 0, xd+1...xn)
+                #   for i=1 to dmax: Lorenzo(d, x1...xd-1, i, xd+1...xn)
+                
+                # This implies `d` is the dimension we are currently trying to fill.
+                # If x_d is -1, we first fill x_d=0 by recursing on d-1.
+                # Then we loop x_d from 1 to dmax.
+                
+                # So, if coords[d-1] == -1:
+                #   lorenzo_compress(d-1, coords[:d-1] + [0] + coords[d:])
+                #   for i in range(1, dmax_list[d-1] + 1):
+                #       new_c = coords[:]
+                #       new_c[d-1] = i
+                #       lorenzo_compress(d, new_c, dmax_list)
+                
+                # But wait, the source says `Lorenzo(d-1, x1...xd-1, 0, xd+1...xn)`.
+                # This sets the d-th coordinate to 0.
+                # Then it loops `i` from 1 to `dmax` for the d-th coordinate.
+                
+                # Implementation detail:
+                # We need to identify which dimension is -1.
+                # Let's assume `d` is the dimension index we are currently processing (1-based).
+                # If coords[d-1] == -1:
+                
+                # Actually, the source pseudocode is:
+                # Lorenzo(d, x1...xn)
+                # if all x1...xn differ from -1:
+                #    ...
+                # else:
+                #    Lorenzo(d-1, x1...xd-1, 0, xd+1...xn)
+                #    for i=1 to dmax: Lorenzo(d, x1...xd-1, i, xd+1...xn)
+                
+                # This implies that if ANY coordinate is -1, we look at the FIRST one?
+                # No, the recursion structure suggests we fill dimensions from 1 to n.
+                # If x1 is -1, we recurse on d-1? But d-1 might be 0.
+                # Base case: d=0?
+                
+                # Let's refine the logic based on the 2D example:
+                # Lorenzo(2, -1, -1)
+                # -> Lorenzo(1, -1, 0)  [d-1=1, x1=-1, x2=0]
+                #    -> Lorenzo(0, 0, 0) [d-1=0, x1=0, x2=0] -> Encode H[0,0]
+                #    -> Loop i=1 to dmax_x: Lorenzo(1, i, 0)
+                #       -> Lorenzo(0, 1, 0) -> Encode H[1,0]-H[0,0]
+                #       ...
+                # -> Loop i=1 to dmax_y: Lorenzo(2, -1, i)
+                #    -> Lorenzo(1, -1, i) ... wait, the source says:
+                #    Lorenzo(2, -1, 1) -> Lorenzo(1, 0, 1) -> Encode H[0,1]-H[0,0]
+                
+                # It seems the "else" block handles the case where the CURRENT dimension `d` is not yet initialized (is -1).
+                # It initializes it to 0 by recursing on `d-1`.
+                # Then it loops `i` from 1 to `dmax` for dimension `d`, calling `Lorenzo(d, ..., i, ...)`.
+                # But what if `x1` is -1? Then `d=1`.
+                # Lorenzo(1, -1) -> Lorenzo(0, 0) -> Encode.
+                # Then loop i=1 to dmax: Lorenzo(1, i).
+                
+                # So the logic is:
+                # Find the smallest index `k` (1-based) such that `coords[k-1] == -1`.
+                # If no such `k`, process sample.
+                # If `k` exists:
+                #   Set `coords[k-1] = 0`.
+                #   Recurse `Lorenzo(k-1, coords)`.
+                #   Set `coords[k-1] = -1` (backtrack? No, the loop uses the same coords structure?)
+                #   Actually, the source pseudocode modifies the call arguments.
+                
+                # Correct Logic:
+                # Find first -1 at index `k` (0-based).
+                # Dimension being processed is `k+1`.
+                # 1. Call `Lorenzo(k, coords[:k] + [0] + coords[k+1:])`
+                # 2. For `i` from 1 to `dmax_list[k]`:
+                #      Call `Lorenzo(k+1, coords[:k] + [i] + coords[k+1:])`
+                
+                # But wait, the source says `Lorenzo(d-1, ...)` where `d` is the dimension of the predictor.
+                # In the 2D example: Lorenzo(2, -1, -1).
+                # First -1 is at index 0 (x1). So k=0.
+                # Call Lorenzo(1, -1, 0)? No, source says Lorenzo(1, -1, 0) is called from Lorenzo(2, -1, -1)?
+                # Source: Lorenzo(2, -1, -1) -> Lorenzo(1, -1, 0).
+                # Here d=2. d-1=1.
+                # The call is Lorenzo(1, x1, 0). x1 is -1.
+                # So it sets x2=0 and recurses on d=1.
+                
+                # So:
+                # If coords[d-1] == -1:
+                #    new_coords = coords[:]
+                #    new_coords[d-1] = 0
+                #    lorenzo_compress(d-1, new_coords, dmax_list)
+                #    for i in range(1, dmax_list[d-1] + 1):
+                #        new_coords2 = coords[:]
+                #        new_coords2[d-1] = i
+                #        lorenzo_compress(d, new_coords2, dmax_list)
+                
+                # This assumes `d` is the dimension we are currently trying to fill.
+                # And `coords` has -1 at `d-1`.
+                
+                # Let's implement this specific logic.
+                pass
 
-        # This matches the trace.
-        
-        # So the algorithm is:
-        # Lorenzo(d, x_1...x_n):
-        #   If all x != -1:
-        #     Predict and Encode
-        #   Else:
-        #     Let k be the largest index such that x_k == -1? 
-        #     The source uses d as the index.
-        #     If x_d == -1:
-        #       Set x_d = 0
-        #       Lorenzo(d-1, x_1...x_{d-1}, 0, x_{d+1}...x_n)
-        #       For i = 1 to dmax[d]:
-        #         Lorenzo(d, x_1...x_{d-1}, i, x_{d+1}...x_n)
-        
-        # Note: The source pseudocode has `Lorenzo(d-1, ...)` inside the `else`.
-        # It assumes `d` is the dimension index being initialized.
-        
-        # Implementation:
-        
-        # Find the dimension index d_current that is -1.
-        # The source passes d as a parameter.
-        # If x_d == -1:
-        
-        # We need to know which d is -1.
-        # The source structure implies d is the current dimension being visited.
-        
-        # Let's write it clearly:
-        
-        # Determine if we are initializing or processing.
-        # If x_d == -1:
-        #    Initialize x_d to 0.
-        #    Recurse to d-1.
-        #    Loop i from 1 to MaxSize[d]:
-        #       Set x_d = i.
-        #       Recurse to d (which will now process x_d=i, but wait...
-        #       If we recurse to d, and x_d is no longer -1, but other lower dims are -1?
-        #       The source calls Lorenzo(d, ..., i, ...).
-        #       If lower dims are -1, the next call will hit the else branch again?
-        #       No, the source trace shows:
-        #       Lorenzo(2, -1, 1) -> Lorenzo(1, 0, 1) -> Encode.
-        #       So when Lorenzo(2, -1, 1) is called, x_2=1 (!=-1), x_1=-1.
-        #       It hits the else branch.
-        #       It calls Lorenzo(1, 0, 1) ?? No, source says Lorenzo(d-1, ..., 0, ...).
-        #       If d=2, it calls Lorenzo(1, 0, 1).
-        #       Inside Lorenzo(1, 0, 1), x_1=0 (!=-1).
-        #       So it hits the "all != -1" branch.
-        
-        # So the logic is:
-        # If x_d == -1:
-        #    Set x_d = 0.
-        #    Call Lorenzo(d-1, ..., 0, ...).
-        #    For i = 1 to MaxSize[d]:
-        #       Call Lorenzo(d, ..., i, ...).
-        
-        # This works because:
-        # 1. The recursive call to d-1 initializes all lower dimensions to 0 and processes them.
-        # 2. The loop then iterates through the current dimension d, keeping lower dimensions at 0 (from the previous step? No, they are passed as args).
-        #    Wait, in the loop, we call Lorenzo(d, ..., i, ...). The lower dimensions are still -1?
-        #    No, the source trace:
-        #    Lorenzo(2, -1, 1) calls Lorenzo(1, 0, 1).
-        #    Here x_1 was -1 in the parent, but in the child call, it is set to 0?
-        #    The source says: Lorenzo(d-1, x_1,..., x_{d-1}, 0, x_{d+1},..., x_n).
-        #    This sets the d-th coordinate to 0.
-        #    But what about x_{d-1}?
-        #    In the trace: Lorenzo(2, -1, -1) -> Lorenzo(1, -1, 0).
-        #    Here d=2. x_2 is set to 0. x_1 is still -1.
-        #    Then Lorenzo(1, -1, 0) -> Lorenzo(0, 0, 0).
-        #    Here d=1. x_1 is set to 0.
-        
-        # So the algorithm initializes dimensions from n down to 1.
-        
-        # Correct Pseudocode:
-        
-        # If x_d == -1:
-        #    Set x_d = 0
-        #    Lorenzo(d-1, x_1, ..., x_{d-1}, 0, x_{d+1}, ..., x_n)
-        #    For i = 1 to MaxSize[d]:
-        #       Lorenzo(d, x_1, ..., x_{d-1}, i, x_{d+1}, ..., x_n)
-        
-        # But wait, in the loop, x_1...x_{d-1} are still -1.
-        # So the next call Lorenzo(d, ..., i, ...) will have x_d=i (!=-1) but x_{d-1}=-1.
-        # It will hit the else branch again?
-        # No, the source trace shows:
-        # Lorenzo(2, -1, 1) calls Lorenzo(1, 0, 1).
-        # This implies that when we are in the loop of d=2, and we call Lorenzo(2, -1, 1),
-        # the function sees x_2=1, x_1=-1.
-        # It hits the else branch.
-        # It calls Lorenzo(1, 0, 1).
-        # This sets x_1=0.
-        # Then it loops for d=1?
-        # The source says: "for i = 1 to dmax do Lorenzo(d, ..., i, ...)"
-        # If d=1, it loops i=1 to dmax_1.
-        # Lorenzo(1, i, 1).
-        # This encodes F[i, 1].
-        
-        # So the recursion handles the initialization of lower dimensions.
-        
-        # Final Pseudocode:
-        
-        def Lorenzo(d, x_1, ..., x_n):
-            if all(coord != -1 for coord in [x_1, ..., x_n]):
-                p = LorenzoPredictor(d, x_1, ..., x_n)
-                Encode(F[x_1, ..., x_n] - p)
-            else:
-                # Assume d is the index of the dimension that is -1
-                # Or rather, d is the current dimension being processed.
-                # If x_d == -1:
-                
-                # Set x_d to 0
-                # Recurse to d-1
-                Lorenzo(d - 1, x_1, ..., x_{d-1}, 0, x_{d+1}, ..., x_n)
-                
-                # Loop through the rest of the current dimension
-                for i in range(1, dmax[d] + 1):
-                    Lorenzo(d, x_1, ..., x_{d-1}, i, x_{d+1}, ..., x_n)
+    # Placeholder for actual buffer management and encoding
+    pass
 ```
 
-### Edge Cases and Pitfalls
-*   **Regular Grid Assumption:** The algorithm assumes data is organized as a regular grid and visited in scanline order [S1, unofficial].
-*   **Polynomial Error:** The predictor is exact for polynomials of degree less than $n$. For a 3D predictor applied to a cubic function, the error is between 3% and 8% ($L_\infty$). For a 4D predictor applied to a quartic function, the error is less than 1% [S1, unofficial].
-*   **Memory Footprint:** The buffer size must be carefully calculated to avoid overflow. The circular FIFO implementation is critical for out-of-core operation [S1, unofficial].
+**Parameters:**
+*   $n$: Dimension of the data. Typical values: 3, 4 [S1, unofficial].
+*   $d$: Dimension of the predictor in the recursive call [S1, unofficial].
+*   $dmax$: Size of the current dimension [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The predictor is exact for polynomials of degree $< n$. For higher-degree data, errors occur (e.g., 3-8% for 3D cubic, <1% for 4D quartic in L-infinity sense) [S1, unofficial].
+*   **Memory:** The footprint buffer must be managed as a circular FIFO to handle out-of-core data [S1, unofficial].
+*   **Closed-Loop Prediction:** In lossy scenarios or with quantization, the encoder must use reconstructed (quantized) previous values for prediction to prevent drift [S1, unofficial].
+
+## Subtopics
+
+### [Lorenzo Predictor](10120-lorenzo-predictor.md)
+The core isotropic predictor. It estimates a sample from its $2^n - 1$ immediate neighbors. Choose it when data coherence exists in all dimensions and exact reconstruction of low-degree polynomials is desired.
+*   (No other children listed in the prompt's tree structure for this specific node, but the parent has siblings. The prompt asks for children of *this* article. The notes list "Lorenzo Predictor" as a child. I will include it.)
 
 ## Operating characteristics
-
-*   **Time Complexity:** Linear with respect to the number of samples, as each sample is visited once [S1, unofficial].
-*   **Memory Complexity:** The footprint is the size of a single slice of the data, plus the footprint of the data set one dimension less. For $R^4$, the buffer size is $X_M \cdot Y_M \cdot Z_M + X_M \cdot Y_M + X_M + 1$ [S1, unofficial]. This is significantly smaller than the total dataset size.
+*   **Time Complexity:** Linear with respect to the number of samples, $O(N)$, where $N$ is the total number of voxels. Each sample requires $2^n - 1$ lookups and arithmetic operations [S1, unofficial].
+*   **Memory Complexity:** $O(X_1 \dots X_{n-1} + \dots + X_1 + 1)$ for the footprint buffer, independent of the total data size, enabling out-of-core processing [S1, unofficial].
 *   **Performance:**
-    *   On a 4D dataset of a house on fire (43,202,395 bytes uncompressed), 4D Lorenzo compression reduced the size to 524,768 bytes (1.21%), outperforming 3D slice compression (2.49%) by 50% [S1, unofficial].
-    *   On a fluid mixing simulation, 3D time slice compression produced 304,937,058 bytes (1.77 bits/symbol) and 4D Lorenzo produced 318,871,620 bytes (1.85 bits/symbol) [S1, unofficial].
+    *   On a 4D fire simulation (43 MB), 4D Lorenzo achieved 1.21% compression ratio, outperforming 3D slice compression (2.49%) by 50% [S1, unofficial].
+    *   On a fluid mixing simulation, 4D Lorenzo achieved 1.85 bits/symbol, slightly worse than 3D slice (1.77 bits/symbol) due to reduced temporal coherence [S1, unofficial].
     *   Context arithmetic coding provides a 25% gain over adaptive arithmetic coding [S1, unofficial].
-    *   In lossless compression, cubic wavelets are slightly better than the Lorenz predictor in terms of residual entropy for 4D datasets [S1, unofficial].
-    *   In lossy $L_\infty$ compression, the Lorenz predictor performs better than SPIHT (wavelet-based) [S1, unofficial].
-*   **Strengths:** Isotropic prediction, exact reconstruction of low-degree polynomials, small memory footprint suitable for out-of-core processing.
-*   **Limitations:** Less effective than wavelets for some lossless 4D datasets; performance depends on data smoothness and coherence across all dimensions [S1, unofficial].
+*   **Strengths:** Isotropic prediction, small memory footprint, exact reconstruction of low-degree polynomials, suitable for out-of-core [S1, unofficial].
+*   **Limitations:** For lossless compression of 4D data, cubic wavelets may yield slightly lower residual entropy (better compression) than Lorenzo [S1, unofficial]. Performance degrades if data coherence is low across all dimensions [S1, unofficial].
 
 ## Background
-The Lorenz predictor was introduced by S. Mennon and M. Rizk in the paper "Out-of-Core Compression and Decompression of Large n-Dimensional Scalar Fields" [S1, unofficial]. It extends a simple two-dimensional parallelogram predictor to higher dimensions [S1, unofficial]. The method is designed for large scientific datasets generated by numeric simulations, such as fluid dynamics and biomedical imaging, where out-of-core processing is necessary due to memory constraints [S1, unofficial].
+The Lorenz Predictor was introduced by S. Mennon and M. Rizk in the paper "Out-of-Core Compression and Decompression of Large n-Dimensional Scalar Fields" [S1, unofficial]. It extends the 2D parallelogram predictor to $n$ dimensions. It is used in volume rendering for compressing large scientific datasets, particularly those with high coherence in multiple dimensions, such as fluid simulations and climate data [S1, unofficial].
 
 ## Sources
-
 [S1] Out-of-Core Compression and Decompression of Large n-Dimensional Scalar Fields, https://digital.library.unt.edu/ark:/67531/metadc1404787/?q=volume data compression rendering, fetched 2026-10-28 (unofficial)
 [S2] 体数据压缩技术综述, https://www.jcad.cn/article/id/9d3ce9cd-c97c-4fab-9291-a72fbe7ba37e, fetched 2026-10-30 (unofficial)

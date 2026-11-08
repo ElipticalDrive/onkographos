@@ -1,39 +1,51 @@
 # BRDF and Relighting Extensions
-Also called: Relightable 3D Gaussian Splatting, Physically Based 3DGS
+
+Also called: Relightable 3D Gaussian Splatting, PBR Gaussian Splatting
 
 ## Overview
-This family extends 3D Gaussian Splatting to support physically based rendering (PBR) and dynamic relighting by decoupling material properties from lighting conditions. Unlike standard 3DGS, which bakes lighting into spherical harmonics (SH) coefficients and limits performance on reflective surfaces [S1], these methods store explicit BRDF parameters (albedo, roughness, normals) per Gaussian. This enables per-point relighting and specular reflection, addressing the inability of standard emission-absorption models to handle complex interreflections or material variation [S1].
+This family extends 3D Gaussian Splatting (3DGS) by decoupling material properties from lighting, enabling physically based rendering (PBR) and dynamic relighting. Unlike standard 3DGS, which bakes view-dependent appearance into spherical harmonics (SH) coefficients via an emission-absorption model, these methods store explicit BRDF parameters (albedo, roughness, normals) per Gaussian [S1][S2, unofficial]. This allows for accurate specular highlights, shadow casting, and re-rendering under arbitrary environment maps, distinguishing it from siblings like [Gaussian Splatting Volume Rendering](2063-gaussian-splatting-volume-rendering.md) which focuses on volumetric density, and [Rendering and Lighting Pipelines](4135-rendering-and-lighting-pipelines.md) which may use different primitive types.
 
 ## Shared principles
-All methods in this family share the core objective of minimizing a photometric loss $\mathcal{L}$ between the rendered color $\hat{C}(\mathbf{r})$ and the ground-truth color $C(\mathbf{r})$ for a batch of rays $\mathcal{R}$:
+All methods in this family share the core mechanism of projecting 3D primitives into 2D screen space and accumulating color based on depth order or spatial locality [G].
 
-$$
-\mathcal{L} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \left\| \hat{C}(\mathbf{r}) - C(\mathbf{r}) \right\|_2^2
-$$
-
-The optimization loop generally follows these steps:
-1.  **Ray Sampling**: Random pixels are selected from training images. Ray origins and directions are computed using camera intrinsics ($K$) and extrinsics ($c2w$).
-2.  **Forward Pass**: Points are sampled along rays within near/far bounds. The field model predicts density ($\sigma$) and color ($c$). Differentiable volume rendering computes the final pixel color.
-3.  **Loss Computation**: The Mean Squared Error (MSE) is calculated. Additional terms (e.g., Eikonal, TV) may be added.
-4.  **Backpropagation**: Gradients are computed and weights are updated via an optimizer (typically Adam).
-5.  **Scheduling**: Learning rates and other hyperparameters are adjusted based on the current step or epoch.
+1.  **Projection:** Primitives are transformed from world space to camera space [G].
+2.  **Rasterization:** Primitives are assigned to screen tiles [G]. Visibility is determined by bounding boxes or projected extents [G].
+3.  **Compositing:** Color is accumulated using front-to-back alpha blending or order-independent techniques [G].
+4.  **Sorting:** Most methods require sorting primitives by depth within tiles to ensure correct front-to-back compositing, although some variants use spatial hashing or cell-level sorting to approximate this or enable order-independent transparency [G].
 
 ## Subtopics
 
 ### [3D Gaussian Splatting with BRDF Embedding](1174-3d-gaussian-splatting-with-brdf-embedding.md)
-This method extends 3D Gaussian Splatting by embedding physically based rendering (PBR) parameters into each Gaussian primitive, enabling per-point relighting and specular reflection. Unlike standard 3DGS, which bakes lighting into spherical harmonics (SH) coefficients and limits performance on reflective surfaces, this approach decouples geometry, material, and lighting. It distinguishes itself from siblings like [Relightable 3D Gaussian](6001-relightable-3d-gaussian.md) by explicitly storing BRDF parameters (albedo, roughness, normals) per Gaussian rather than relying on differentiable shading networks or separate light probes.
+This method extends 3DGS by embedding physically based rendering (PBR) parameters into each Gaussian primitive, enabling per-point BRDF evaluation. Unlike standard 3DGS which bakes lighting into spherical harmonics (SH) coefficients via an emission-absorption model, this approach decouples material properties from lighting, allowing for accurate specular highlights and relighting. It distinguishes itself from siblings like [Relightable 3D Gaussian](6001-relightable-3d-gaussian.md) by explicitly storing albedo, roughness, and normals as learnable Gaussian attributes.
+
+### [3D Gaussian Splatting with Reflection and Relighting](5873-3d-gaussian-splatting-with-reflection-and-relighting.md)
+This method extends 3DGS by incorporating classical reflection and shading concepts to address limitations with highly reflective surfaces and enable dynamic relighting. Unlike standard 3DGS, which bakes lighting into spherical harmonics via an emission-absorption model, this approach integrates secondary rays (reflections and refractions) spawned upon primary ray interactions to model interreflections. It leverages the Gaussian kernel's shortest axis for natural normal estimation, offering a balance between physically based rendering (PBR) accuracy and training efficiency.
 
 ### [Relightable 3D Gaussian](6001-relightable-3d-gaussian.md)
-Relightable 3D Gaussian is a method that extends 3D Gaussian Splatting to support physically-based rendering by assigning per-Gaussian BRDF parameters and precomputed visibility for shadows. It distinguishes itself from standard 3D Gaussian Splatting by enabling dynamic relighting and material variation, and from [3D Gaussian Splatting with BRDF Embedding](1174-3d-gaussian-splatting-with-brdf-embedding.md) by explicitly baking ambient occlusion and visibility data per Gaussian to handle self-shadowing.
+Relightable 3D Gaussian extends the standard 3D Gaussian Splatting representation by assigning physically-based BRDF parameters (albedo, roughness, normal) to each Gaussian primitive, enabling dynamic relighting and shadow casting. Unlike standard 3DGS which renders fixed colors, this method decouples material properties from lighting, allowing the scene to be re-rendered under arbitrary environment maps or light sources. It distinguishes itself from sibling methods like [3D Gaussian Splatting with BRDF Embedding](1174-3d-gaussian-splatting-with-brdf-embedding.md) by explicitly baking precomputed visibility for shadows directly into the Gaussian attributes, rather than relying solely on learned embeddings or deferred shading passes.
 
-### 3D Gaussian Splatting with Reflection and Relighting
+### [Inverse Rendering with Gaussians (GS-IR / GIR)](6153-inverse-rendering-with-gaussians-gs-ir-gir.md)
+Inverse Rendering with Gaussians (GS-IR / GIR) is a method that extends 3D Gaussian Splatting to recover scene materials and lighting by solving the inverse rendering problem. It addresses the limitation of standard 3DGS, which only models direct view-dependent appearance, by estimating physically based parameters such as albedo, roughness, and environment lighting. It sets itself apart from sibling methods like [BRDF and Relighting Extensions](6227-brdf-and-relighting-extensions.md) by specifically employing a split-sum approximation to handle indirect illumination, allowing for more accurate material estimation in complex lighting conditions.
+
+### GaussianShader Material Model
 #### definition
-- [S1] Methods that incorporate classical reflection and shading concepts into the 3DGS framework to address limitations with highly reflective surfaces and enable relighting.
+- [S1] Enhances 3DGS by incorporating trainable material parameters: diffuse $d_p$, specular $s_p$, roughness $\rho_p$, and normal $n_p$, along with a global environment map.
+#### formula
+- [S1] $c_p(r_i) = d_p + s_p \odot L_s(r_i, n_p, \rho_p)$. Where $c_p$ is the fused color, $d_p$ is diffuse color, $s_p$ is specular intensity, $\odot$ is element-wise multiplication, and $L_s$ is specular light pre-filtered into mip maps.
+#### parameter
+- [S1] $L_s(r_i, n_p, \rho_p)$ is the specular light for the kernel along $r_i$ given normal and roughness. It can be pre-filtered into multiple mip maps.
+
+### BRDF Decoder Strategies
 #### step
-- [S1] Integrate secondary rays (reflections and refractions) spawned upon primary ray interactions with Gaussians using ray tracing techniques to model interreflections.
+- [S2, unofficial] For datasets with physical attributes (albedo, roughness), use a simplified Disney principle-based BRDF model. Regress physical attributes using multiple MLPs and calculate Normal Distribution, Fresnel, and Geometry terms using Neilf's formula.
+- [S2, unofficial] For datasets lacking physical attributes, use MLPs or LSTMs to directly analyze energy distribution of incident light and reflection to represent BRDF as a light reflection weight.
+- [S2, unofficial] Mitigate highlight loss by applying a brightening operation to training images: multiply pixels with gray values surpassing a threshold by a brightness coefficient.
+#### pitfall
+- [S2, unofficial] Direct training of reflection weights without physical constraints may lead to loss of highlight information.
 
 ## Background
-Standard 3D Gaussian Splatting uses an emission-absorption model, effectively baking lighting conditions into spherical harmonics coefficients [S1]. This limits performance on highly reflective surfaces and prevents relighting [S1]. To address this, methods such as Gaussian-Shader [17], 3DGS-DR [18], and IRGS [19] incorporate classical reflection and shading concepts into the 3DGS framework [S1]. An alternative approach by Ginter et al. [20] uses diffusion models for relighting [S1]. Additionally, Gao et al. [21] embed BRDF parameters—albedo, roughness, surface normals, and incident lighting—into each Gaussian, enabling per-point physically based rendering [S1]. Direct lighting is reconstructed using environment maps, while spherical harmonics model indirect lighting [S1]. Additionally, while standard 3DGS relies only on primary rays, recent methods incorporate secondary rays to model interreflections [S1]. To this end, ray tracing techniques have been integrated [19], [22], allowing secondary rays—such as reflections and refractions—to be spawned upon primary ray interactions with Gaussians [S1].
+The extension of 3D Gaussian Splatting to support PBR and relighting emerged as a response to the limitations of the original emission-absorption model, which struggles with specular highlights and dynamic lighting changes. GaussianShader [S1] was among the early works to introduce trainable material parameters (diffuse, specular, roughness, normal) and environment maps into the Gaussian kernel structure. Subsequent works like STensoRRF [S2, unofficial] explored tensorial representations and various decoder strategies, including simplified Disney BRDF models and direct regression of reflection weights. These methods collectively form the basis for relightable Gaussian splatting, enabling applications in virtual production, inverse rendering, and physically based simulation.
 
 ## Sources
-[S1] From Volume Rendering to 3D Gaussian Splatting: Theory and Applications, https://doi.org/10.1109/sibgrapi67909.2025.11223276, fetched 2026-10-26
+[S1] Gaussian Splashing: Unified Particles for Versatile Motion Synthesis and Rendering, https://doi.org/10.1109/CVPR52734.2025.00057, fetched 2026-10-29
+[S2] STensoRRF:Tensorial able Relighting Radiance Field for Single-Tensor Scene Representation, https://doi.org/10.20944/preprints202401.1085.v1, fetched 2026-10-30 (unofficial)

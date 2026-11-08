@@ -1,0 +1,129 @@
+# Template-based Voxelization
+
+Also called: DGtal::MeshVoxelizer, MeshVoxelizer
+
+## Overview
+Template-based Voxelization computes the digitization of a triangle or a mesh by determining if a voxel belongs to the digitization based on whether a template centered at the voxel intersects the triangle [S1][S2]. It is a CPU straightforward implementation of reference [79] (or [78] in earlier versions) [S1][S2]. This method is distinct from rasterization-based approaches by using geometric intersection tests with predefined connectivity templates rather than projecting primitives onto a screen or grid [S1][S2].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- A mesh (collection of faces) or a single triangle defined by vertices $A, B, C$ [S1][S2].
+- A digital set model (`TDigitalSet`) that defines the output domain and space [S1][S2].
+- A separation strategy parameter (`Separation`), which must be either 6 or 26 [S1][S2].
+- A scale factor (`scaleFactor`), a double value applied to mesh vertex coordinates before voxelization (default 1.0) [S1][S2].
+
+**Outputs:**
+- The `outputSet` digital set, populated with voxels (points in the digital set) that intersect the input geometry [S1][S2].
+
+### Data Structures
+The method relies on the following types and structures defined within the `DGtal::MeshVoxelizer` template:
+- `DigitalSet`: The type of the output digital set, modeled on `concepts::CDigitalSet` [S1][S2].
+- `Space`: The space of the digital set, with dimension 3 [S1][S2].
+- `PointR3`: Real-valued 3D points (coordinates) [S1][S2].
+- `PointZ3`: Integer-valued 3D points (voxel indices) [S1][S2].
+- `IntersectionTarget`: A type derived from `IntersectionTargetTrait<Space, Separation, 1>::Type` [S1][S2]. This represents the geometric template used for intersection testing.
+- `OrientationFunctor`: A functor of type `InHalfPlaneBySimple3x3Matrix<PointR2, double>` used for 2D triangle containment tests [S1][S2].
+- `TriangleOrientation`: An enum with values `TRIANGLE_OUTSIDE`, `TRIANGLE_INSIDE`, `TRIANGLE_ONEDGE`, `TRIANGLE_ONVERTEX` [S1][S2].
+
+### Steps
+1.  **Initialization**:
+    - Assert that `DigitalSet::Space::dimension` is 3 [S1][S2].
+    - Assert that `Separation` is either 6 or 26 [S1][S2].
+    - Construct the `IntersectionTarget` template based on the `Separation` parameter [S1][S2].
+        - If `Separation` is 6, the template corresponds to 6-separating digitization [S1][S2].
+        - If `Separation` is 26, the template corresponds to 26-separating digitization [S1][S2].
+    - The choice of `Separation` determines the connectivity of the background. For `Separation=6`, no 6-path exists from one side of a digitized Euclidean plane to the other [S1][S2].
+
+2.  **Mesh Processing**:
+    - If the input is a mesh, iterate over each face [S2].
+    - If a face is non-triangular, naively triangulate it using a triangle fan at the first vertex (zero) [S1][S2].
+        - **Pitfall**: If the face is not convex, this triangulation produces incorrect digitization results [S1][S2].
+    - For each resulting triangle with vertices $A, B, C$ and normal $n$:
+        - Apply `scaleFactor` to the vertex coordinates [S2].
+        - Cast coordinates to `PointR3` [S1][S2].
+        - Compute the bounding box (`bbox`) of the triangle in voxel indices (`PointZ3`) [S2].
+        - Call `voxelizeTriangle` with the triangle vertices, normal, bounding box, and `outputSet` [S2].
+
+3.  **Triangle Voxelization (`voxelizeTriangle`)**:
+    - For each voxel index $v$ within the `bbox`:
+        - Construct the `IntersectionTarget` template centered at $v$ [S1][S2].
+        - Check if the template intersects the triangle defined by $A, B, C$ [S1][S2].
+        - **Condition**: A voxel belongs to the digitization if and only if the template centered at that voxel intersects the triangle [S1][S2].
+        - If the intersection test returns true:
+            - Check if $v$ is within the domain of `outputSet` [S1][S2].
+            - If $v$ is outside the domain, skip it [S1][S2].
+            - Insert $v$ into `outputSet` [S2].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class MeshVoxelizer:
+    def __init__(self, digital_set, separation):
+        # separation must be 6 or 26
+        assert separation in [6, 26]
+        assert digital_set.space.dimension == 3
+        
+        self.separation = separation
+        self.digital_set = digital_set
+        self.intersection_target = IntersectionTargetTrait(digital_set.space, separation, 1)
+        
+    def voxelize_mesh(self, mesh, output_set, scale_factor=1.0):
+        for face in mesh.faces:
+            # Naive triangulation for non-triangular faces
+            triangles = face.triangulate_fan_at_zero()
+            for tri in triangles:
+                self.voxelize_triangle(tri, output_set, scale_factor)
+                
+    def voxelize_triangle(self, triangle, output_set, scale_factor):
+        # Apply scale factor and cast to real points
+        A = triangle.A * scale_factor
+        B = triangle.B * scale_factor
+        C = triangle.C * scale_factor
+        
+        # Compute bounding box in voxel indices
+        bbox = compute_bounding_box(A, B, C, self.digital_set.domain)
+        
+        for v in bbox:
+            # Check if voxel v is within the output set domain
+            if not self.digital_set.domain.contains(v):
+                continue
+                
+            # Construct template centered at v
+            template = self.intersection_target.centered_at(v)
+            
+            # Check intersection between template and triangle
+            if template.intersects_triangle(A, B, C):
+                output_set.insert(v)
+
+    def voxelize_single_triangle(self, a, b, c, output_set, scale_factor=1.0):
+        self.voxelize_triangle(Triangle(a, b, c), output_set, scale_factor)
+```
+
+### Parameters
+- **Separation**: Integer, 6 or 26. Determines the separability strategy and background connectivity [S1][S2].
+- **scaleFactor**: Double, default 1.0. Applied to mesh vertex coordinates [S1][S2].
+
+### Edge Cases and Pitfalls
+- **Non-convex Faces**: If the input mesh contains non-triangular faces, they are triangulated using a triangle fan at the first vertex. If the face is not convex, the output will be incorrect [S1][S2].
+- **Domain Bounds**: Voxels computed outside the domain of the `outputSet` are skipped [S1][S2].
+- **Precision**: The method uses real-valued points for intersection tests, which may be subject to floating-point precision issues, though specific mitigation strategies are not detailed in the sources [S1][S2].
+
+## Operating characteristics
+- **Time Complexity**: Not given in the sources.
+- **Memory Complexity**: Not given in the sources.
+- **Performance**: Not given in the sources.
+- **Strengths**: Straightforward CPU implementation; provides topological guarantees via separation parameters (6 vs 26) [S1][S2].
+- **Limitations**: Naive triangulation of non-convex faces leads to incorrect results; CPU-only implementation [S1][S2].
+- **When to use**: When topological correctness (separability) is required and the mesh consists of convex faces or can be safely triangulated [S1][S2].
+- **When not to use**: For large meshes with many non-convex faces, or when GPU acceleration is needed [S1][S2].
+
+## Background
+- **Origin**: The method is a CPU straightforward implementation of reference [79] (or [78] in earlier versions) [S1][S2].
+- **History**: Based on reference [78] in the DGtal documentation [S2].
+- **Usage**: Used in the DGtal library for computing the digitization of triangles and meshes [S1][S2].
+
+## Sources
+[S1] MeshVoxelizer Aim: A class for computing the digitization of a triangle or a Mesh., https://www.dgtal.org/doc/1.4/classDGtal_1_1MeshVoxelizer.html, fetched 2026-10-26
+[S2] MeshVoxelizer Aim: A class for computing the digitization of a triangle or a Mesh., https://dgtal-team.github.io/doc-pr/pr1697/classDGtal_1_1MeshVoxelizer.html, fetched 2026-10-26

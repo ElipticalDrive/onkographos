@@ -8,337 +8,192 @@ Recursive-NeRF is a volume rendering method that synthesizes novel views by rout
 ## How it works
 ### Inputs and outputs
 **Inputs:**
-- A set of training images with known camera poses.
-- A query point $\mathbf{x} = (x, y, z)$ and viewing direction $\mathbf{d}$.
-- An uncertainty threshold $\epsilon$ (user-specified).
-- A maximum number of training iterations.
+- A set of training images with known camera poses [S1].
+- A query point $\mathbf{x} = (x, y, z)$ and viewing direction $\mathbf{d}$ [S1].
+- An uncertainty threshold $\epsilon$ (user-specified) [S1].
+- A maximum number of training iterations [S1].
 
 **Outputs:**
-- A rendered image composed of color values $C(\mathbf{r})$ for each pixel ray $\mathbf{r}$.
-- A dynamically grown neural network structure consisting of an initial network and multiple branch networks.
+- A rendered image composed of color values $C(\mathbf{r})$ for each pixel ray $\mathbf{r}$ [S1].
+- A dynamically grown neural network structure consisting of an initial network and multiple branch networks [S1].
 
 ### Data structures
-The method uses a hierarchical network structure. The structure is defined by stages $i = 1, 2, \dots, K$.
-
-1.  **Network Layers:**
-    -   Stage 1 (Initial Network $\Phi_1$): 2 linear layers.
-    -   Stage 2 (First Grown Network): 2 linear layers.
-    -   Stage 3 (Second Grown Network): 4 linear layers.
-    -   Stage 4 (Third Grown Network): 4 linear layers.
-    -   *Note:* The network grows up to a maximum depth of 12 layers total across stages [S1].
-
-2.  **Outnet Module:**
-    -   Each branch network includes an "Outnet" module responsible for decoding features into density $\sigma$.
-    -   The Outnet contains an "alpha linear" component [S1].
-
-3.  **Branch Regions ($R_i$):**
-    -   $R_i$ is the set of query points contained in the $i$-th branch. Points are clustered and assigned to specific branch networks based on their spatial location or feature similarity during the growth phase [S1].
-
-4.  **Uncertainty Value ($\delta_i$):**
-    -   A scalar value predicted by branch network $i$ for a given query point, representing the confidence in the predicted color and density.
+The method uses a hierarchical network structure [S1]. The structure is defined by stages $i = 1, 2, \dots, K$ [S1].
+1. **Network Layers:**
+   - Stage 1 (Initial Network $\Phi_1$): 2 linear layers [S1].
+   - Stage 2 (First Grown Network): 2 linear layers [S1].
+   - Stage 3 (Second Grown Network): 4 linear layers [S1].
+   - Stage 4 (Third Grown Network): 4 linear layers [S1].
+   - *Note:* The network grows up to a maximum depth of 12 layers total across stages [S1].
+2. **Outnet Module:**
+   - Each branch network includes an "Outnet" module responsible for decoding features into density $\sigma$ [S1].
+   - The Outnet contains an "alpha linear" component [S1].
+3. **Branch Regions ($R_i$):**
+   - $R_i$ is the set of query points contained in the $i$-th branch [S1]. Points are clustered and assigned to specific branch networks based on their spatial location or feature similarity during the growth phase [S1].
+4. **Uncertainty Value ($\delta_i$):**
+   - A scalar value predicted by branch network $i$ for a given query point, representing the confidence in the predicted color and density [S1].
 
 ### Numbered steps
-
 **Training Phase:**
-1.  **Initialization:** Start with an initial network $\Phi_1$ (2 linear layers). This network takes position $\mathbf{x}$ and direction $\mathbf{d}$ as input.
-2.  **Forward Pass:** For each query point, $\Phi_1$ outputs color $c_1$, density $\sigma_1$, and uncertainty $\delta_1$.
-3.  **Uncertainty Evaluation:** Check if $\delta_1 < \epsilon$.
-    -   If $\delta_1 < \epsilon$, the point is considered "finalized" at this stage.
-    -   If $\delta_1 \ge \epsilon$, the point is marked as "uncertain" and forwarded to the next stage.
-4.  **Clustering:** Cluster the uncertain points from the current stage.
-5.  **Dynamic Growth:**
-    -   Grow new branch networks for the next stage.
-    -   The new networks have the same structure as the previous stage's grown networks (e.g., if moving to stage 3, use 4 linear layers).
-    -   **Initialization Pitfall Fix:** To prevent density collapse (where density reduces to 0, causing missing geometry), initialize the "alpha linear" weights of the new sub-network's Outnet module to be identical to those of the parent network [S1].
-6.  **Training:** Train the new branch networks on the clustered uncertain points.
-7.  **Iteration:** Repeat steps 2-6 for subsequent stages until:
-    -   All query points have uncertainty $\delta < \epsilon$, OR
-    -   The maximal number of iterations is reached.
-8.  **Termination:** The training process terminates when uncertainties for all query coordinates are less than $\epsilon$ or the iteration limit is hit [S1].
+1. **Initialization:** Start with an initial network $\Phi_1$ (2 linear layers) [S1]. This network takes position $\mathbf{x}$ and direction $\mathbf{d}$ as input [S1].
+2. **Forward Pass:** For each query point, $\Phi_1$ outputs color $c_1$, density $\sigma_1$, and uncertainty $\delta_1$ [S1].
+3. **Uncertainty Evaluation:** Check if $\delta_1 < \epsilon$ [S1].
+   - If $\delta_1 < \epsilon$, the point is considered "finalized" at this stage [S1].
+   - If $\delta_1 \ge \epsilon$, the point is marked as "uncertain" and forwarded to the next stage [S1].
+4. **Clustering:** Cluster the uncertain points from the current stage [S1].
+5. **Dynamic Growth:**
+   - Grow new branch networks for the next stage [S1].
+   - The new networks have the same structure as the previous stage's grown networks (e.g., if moving to stage 3, use 4 linear layers) [S1].
+   - **Initialization Pitfall Fix:** To prevent density collapse (where density reduces to 0, causing missing geometry), initialize the "alpha linear" weights of the new sub-network's Outnet module to be identical to those of the parent network [S1].
+6. **Training:** Train the new branch networks on the clustered uncertain points [S1].
+7. **Iteration:** Repeat steps 2-6 for subsequent stages until:
+   - All query points have uncertainty $\delta < \epsilon$, OR [S1]
+   - The maximal number of iterations is reached [S1].
+8. **Termination:** The training process terminates when uncertainties for all query coordinates are less than $\epsilon$ or the iteration limit is hit [S1].
 
 **Rendering Phase:**
-1.  **Ray Casting:** For each pixel, cast a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$.
-2.  **Query Point Routing:** For each sample point $t$ along the ray:
-    -   Determine the branch index $i$ such that the uncertainty $\delta_i$ is less than threshold $\epsilon$ and the ray $\mathbf{r}$ belongs to the region $R_i$ of that branch.
-    -   Select the minimum such $i$.
-    -   Use the color $c_i$ and density $\sigma_i$ predicted by the selected branch network $i$ to represent $c(\mathbf{r}(t))$ and $\sigma(\mathbf{r}(t))$ [S1].
-3.  **Volume Rendering:** Calculate the final color $C(\mathbf{r})$ using the standard volume rendering equation:
-    $$C(\mathbf{r}) = \int_0^{+\infty} T(t) \sigma(\mathbf{r}(t)) c(\mathbf{r}(t), \mathbf{d}) \, dt$$
-    where cumulative transparency $T(t)$ is:
-    $$T(t) = \exp \left( - \int_0^t \sigma(\mathbf{r}(s)) \, ds \right)$$
-    [S1]
-4.  **Composition:** The final image is a composition of results from neural networks of all levels, where points exit at different times (stages) based on their uncertainty [S1].
+1. **Ray Casting:** For each pixel, cast a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ [S1].
+2. **Query Point Routing:** For each sample point $t$ along the ray:
+   - Determine the branch index $i$ such that the uncertainty $\delta_i$ is less than threshold $\epsilon$ and the ray $\mathbf{r}$ belongs to the region $R_i$ of that branch [S1].
+   - Select the minimum such $i$ [S1].
+   - Use the color $c_i$ and density $\sigma_i$ predicted by the selected branch network $i$ to represent $c(\mathbf{r}(t))$ and $\sigma(\mathbf{r}(t))$ [S1].
+3. **Volume Rendering:** Calculate the final color $C(\mathbf{r})$ using the standard volume rendering equation:
+   $$C(\mathbf{r}) = \int_0^{+\infty} T(t) \sigma(\mathbf{r}(t)) c(\mathbf{r}(t), \mathbf{d}) \, dt$$
+   where cumulative transparency $T(t)$ is:
+   $$T(t) = \exp \left( - \int_0^t \sigma(\mathbf{r}(s)) \, ds \right)$$
+   [S1]
+4. **Composition:** The final image is a composition of results from neural networks of all levels, where points exit at different times (stages) based on their uncertainty [S1].
 
 ### Formulas
 The selection of the branch network for a query point $\mathbf{r}(t)$ is defined by:
-
 $$\sigma(\mathbf{r}(t)) = \sigma_i, \quad i = \min\{i \mid \delta_i < \epsilon \wedge \mathbf{r} \in R_i\}$$
-
 $$c(\mathbf{r}(t)) = c_i, \quad i = \min\{i \mid \delta_i < \epsilon \wedge \mathbf{r} \in R_i\}$$
-
 Where:
--   $\sigma(\mathbf{r}(t))$ is the volume density at point $\mathbf{r}(t)$.
--   $c(\mathbf{r}(t))$ is the emitted color at point $\mathbf{r}(t)$.
--   $\sigma_i$ and $c_i$ are the density and color predicted by branch network $i$.
--   $\delta_i$ is the uncertainty predicted by branch network $i$.
--   $\epsilon$ is the uncertainty threshold.
--   $R_i$ is the set of points contained in the $i$-th branch [S1].
+- $\sigma(\mathbf{r}(t))$ is the volume density at point $\mathbf{r}(t)$ [S1].
+- $c(\mathbf{r}(t))$ is the emitted color at point $\mathbf{r}(t)$ [S1].
+- $\sigma_i$ and $c_i$ are the density and color predicted by branch network $i$ [S1].
+- $\delta_i$ is the uncertainty predicted by branch network $i$ [S1].
+- $\epsilon$ is the uncertainty threshold [S1].
+- $R_i$ is the set of points contained in the $i$-th branch [S1].
 
 The base network function is:
 $$F_\theta : (\mathbf{x}, \mathbf{d}) \rightarrow (c, \sigma)$$
 where $\mathbf{x}$ is position and $\mathbf{d}$ is viewing direction [S1].
 
 ### Parameters
--   **Uncertainty Threshold ($\epsilon$):** A user-specified threshold. If a query point's uncertainty $\delta_i < \epsilon$, it exits the current stage. Training terminates when all points satisfy this condition [S1].
--   **Maximal Iterations:** A limit on the number of training iterations. Training stops if $\epsilon$ is not reached within this count [S1].
--   **Batch Size:** 4096 [S1].
--   **Sampling Points:** 64 for coarse network, 128 for fine network [S1].
--   **Learning Rate:** Initial value $5 \times 10^{-4}$, with 10 times exponential decay after 250k iterations [S1].
--   **Optimizer:** Adam [S1].
+- **Uncertainty Threshold ($\epsilon$):** A user-specified threshold. If a query point's uncertainty $\delta_i < \epsilon$, it exits the current stage. Training terminates when all points satisfy this condition [S1].
+- **Maximal Iterations:** A limit on the number of training iterations. Training stops if $\epsilon$ is not reached within this count [S1].
+- **Batch Size:** 4096 [S1].
+- **Learning Rate:** Initial value $5 \times 10^{-4}$, with 10 times exponential decay after 250k iterations [S1].
+- **Optimizer:** Adam [S1].
 
 ### Edge cases and pitfalls
--   **Density Collapse:** During staged training, directly growing a randomly initialized network can cause instability, leading the density of some grown networks to reduce to 0. This results in missing pieces in the rendered scene [S1].
-    -   *Mitigation:* Initialize the alpha linear weights of the grown sub-network's Outnet module to be the same as those of the parent network. This allows the density generation network to inherit density information from the parent, avoiding instability [S1].
--   **Uncertainty Prediction Difficulty:** Unlike classification tasks where probability naturally serves as confidence, Recursive-NeRF is a regression task. Predicting a confidence value (uncertainty) is harder to train than classification [S1].
--   **Empty Space vs. Complex Geometry:** Low uncertainty at early stages typically corresponds to empty spaces or surfaces with simple structure (e.g., floors). High uncertainty corresponds to complex geometry requiring deeper networks [S1].
+- **Density Collapse:** During staged training, directly growing a randomly initialized network can cause instability, leading the density of some grown networks to reduce to 0. This results in missing pieces in the rendered scene [S1].
+  - *Mitigation:* Initialize the alpha linear weights of the grown sub-network's Outnet module to be the same as those of the parent network. This allows the density generation network to inherit density information from the parent, avoiding instability [S1].
+- **Uncertainty Prediction Difficulty:** Unlike classification tasks where probability naturally serves as confidence, Recursive-NeRF is a regression task. Predicting a confidence value (uncertainty) is harder to train than classification [S1].
+- **Empty Space vs. Complex Geometry:** Low uncertainty at early stages typically corresponds to empty spaces or surfaces with simple structure (e.g., floors). High uncertainty corresponds to complex geometry requiring deeper networks [S1].
 
 ### Pseudocode
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
 ```python
 import math
 
-def recursive_nerf_render(ray_o, ray_d, epsilon, networks, regions):
+def recursive_nerf_render(ray_o, ray_d, epsilon, networks, regions, near=0.0, far=1.0):
     """
     Renders a single ray using Recursive-NeRF.
-    
     Args:
         ray_o: Origin of the ray (3D vector).
         ray_d: Direction of the ray (3D vector).
         epsilon: Uncertainty threshold.
         networks: List of branch networks. networks[i] is the network for stage i+1.
-        regions: List of branch regions. regions[i] defines the spatial region for stage i+1.
-        
+        regions: List of branch regions. regions[i] defines the cluster assignment for stage i+1.
+        near, far: Ray clipping distances.
     Returns:
-        color: Rendered color for the ray.
+        color: Rendered color for the ray (RGB list).
     """
-    # Standard NeRF sampling parameters
-    N_samples_coarse = 64
-    N_samples_fine = 128
-    
-    # Sample points along the ray
-    # In practice, this involves stratified sampling within intervals
-    # Here we assume a helper function that returns t values
-    t_vals = sample_points_along_ray(ray_o, ray_d, N_samples_coarse + N_samples_fine)
-    
-    # Initialize cumulative transparency
+    N_samples = 192
+    t_vals = [near + (far - near) * i / N_samples for i in range(N_samples)]
+    pts = [ray_o + t * ray_d for t in t_vals]
     T_cumulative = 1.0
     color_accum = [0.0, 0.0, 0.0]
-    
-    for t in t_vals:
-        # Query point
-        x = ray_o + t * ray_d
-        
-        # Determine which network to use
-        # Find the minimum index i such that uncertainty < epsilon and point is in region R_i
-        # Note: In a real implementation, regions are checked spatially.
-        # We iterate through stages 1 to K.
-        
+
+    for k, t in enumerate(t_vals):
+        p = pts[k]
         selected_sigma = None
         selected_color = None
-        selected_uncertainty = None
-        network_used = None
-        
+
         for i, network in enumerate(networks):
-            # Check if point is in region R_i
-            if not is_in_region(x, regions[i]):
+            if not is_in_region(p, regions[i]):
                 continue
-                
-            # Forward pass through network i
-            # Network takes (x, d) and outputs (c, sigma, delta)
-            c, sigma, delta = network.forward(x, ray_d)
-            
-            # Check uncertainty condition
+            c, sigma, delta = network.forward(p, ray_d)
             if delta < epsilon:
                 selected_sigma = sigma
                 selected_color = c
-                selected_uncertainty = delta
-                network_used = network
-                break # Early termination: this point is finalized at this stage
-        
-        # If no network satisfied the condition, use the deepest network's output
-        # (Though training ensures epsilon is reached for most points)
+                break
+
         if selected_sigma is None:
-            # Fallback to the last network
             last_network = networks[-1]
-            c, sigma, delta = last_network.forward(x, ray_d)
+            c, sigma, delta = last_network.forward(p, ray_d)
             selected_sigma = sigma
             selected_color = c
-            
-        # Volume rendering contribution
-        # T(t) = exp(-int_0^t sigma(s) ds)
-        # We approximate the integral using the previous T_cumulative
-        # alpha = 1 - exp(-sigma * delta_t)
-        # But Recursive-NeRF uses the standard NeRF integration formula with the selected sigma
-        
-        # Calculate alpha for this segment
-        # Assuming uniform sampling step dt
-        dt = get_step_size(t) 
+
+        dt = t_vals[k+1] - t_vals[k] if k < N_samples - 1 else 0.01
         alpha = 1.0 - math.exp(-selected_sigma * dt)
-        
-        # Contribution to color
-        # weight = T_cumulative * alpha
-        # color_accum += weight * selected_color
-        
-        # Update T_cumulative
+        color_accum = [color_accum[j] + T_cumulative * alpha * selected_color[j] for j in range(3)]
         T_cumulative *= math.exp(-selected_sigma * dt)
-        
-        # Accumulate color
-        weight = T_cumulative * (1.0 - math.exp(-selected_sigma * dt)) / math.exp(-selected_sigma * dt) # Simplified logic for illustration
-        # Correct standard NeRF accumulation:
-        # alpha = 1 - exp(-sigma * dt)
-        # T_cumulative_new = T_cumulative * exp(-sigma * dt)
-        # contribution = T_cumulative * alpha * color
-        # T_cumulative = T_cumulative_new
-        
-        # Let's write it explicitly as per standard NeRF integration
-        alpha_val = 1.0 - math.exp(-selected_sigma * dt)
-        contribution = T_cumulative * alpha_val * selected_color
-        color_accum += contribution
-        T_cumulative *= math.exp(-selected_sigma * dt)
-        
-        # Early termination for the ray if fully opaque
+
         if T_cumulative < 1e-4:
             break
-            
+
     return color_accum
 
-def train_recursive_nerf(training_data, epsilon, max_iterations):
+def is_in_region(point, region):
     """
-    Trains the Recursive-NeRF model.
+    Checks if a point belongs to a specific branch region.
+    Regions are defined by cluster IDs assigned during the training phase [G].
     """
-    # Stage 1: Initial Network
-    # 2 linear layers
-    network_1 = create_network(layers=2)
-    networks = [network_1]
-    regions = [get_initial_region(training_data)]
-    
-    current_uncertainties = {}
-    
-    for iteration in range(max_iterations):
-        # Forward pass through current networks
-        # For points not yet finalized, pass through current stage network
-        # For points finalized, skip further processing
-        
-        # 1. Evaluate uncertainty for all points
-        finalized_points = []
-        uncertain_points = []
-        
-        for point in training_data:
-            # Find the current stage network for this point
-            # Initially all points go through network_1
-            current_network = networks[-1] # Simplified: points go through the latest grown network if not finalized
-            
-            # Actually, points are finalized at the stage where delta < epsilon
-            # So we check each point against the networks it has passed through
-            
-            is_finalized = False
-            for i, net in enumerate(networks):
-                if is_in_region(point.x, regions[i]):
-                    c, sigma, delta = net.forward(point.x, point.d)
-                    if delta < epsilon:
-                        is_finalized = True
-                        break
-            
-            if is_finalized:
-                finalized_points.append(point)
-            else:
-                uncertain_points.append(point)
-        
-        # 2. If all points are finalized, stop
-        if len(uncertain_points) == 0:
-            break
-            
-        # 3. Cluster uncertain points
-        clusters = cluster_points(uncertain_points)
-        
-        # 4. Grow new networks for next stage
-        # Determine structure based on stage index
-        # Stage 1: 2 layers
-        # Stage 2: 2 layers
-        # Stage 3: 4 layers
-        # Stage 4: 4 layers
-        stage_index = len(networks)
-        if stage_index == 1:
-            new_layers = 2
-        elif stage_index == 2:
-            new_layers = 4
-        elif stage_index == 3:
-            new_layers = 4
-        else:
-            new_layers = 4 # Max depth reached
-            
-        new_network = create_network(layers=new_layers)
-        
-        # Pitfall Fix: Initialize alpha linear weights from parent
-        parent_network = networks[-1]
-        new_network.outnet.alpha_linear.weights = parent_network.outnet.alpha_linear.weights
-        
-        networks.append(new_network)
-        
-        # Assign regions to new network based on clusters
-        # Each cluster gets a branch
-        for cluster in clusters:
-            new_region = get_region_from_cluster(cluster)
-            regions.append(new_region)
-            
-        # 5. Train the new network on the clustered points
-        train_network(new_network, clusters, learning_rate=5e-4)
-        
-    return networks, regions
+    return point.cluster_id == region.cluster_id
 ```
 
 ## Subtopics
 
 ### NeRF (Neural Radiance Fields)
-The foundational method that Recursive-NeRF extends. NeRF uses a single MLP to predict color and density for all points. Recursive-NeRF differs by using a dynamic hierarchy and early termination based on uncertainty. [Link](1185-nerf-neural-radiance-fields.md)
+The foundational method that Recursive-NeRF extends [S1]. NeRF uses a single MLP to predict color and density for all points [S1]. Recursive-NeRF differs by using a dynamic hierarchy and early termination based on uncertainty [S1]. [Link](1185-nerf-neural-radiance-fields.md)
 
 ### NeRF Training Configuration
-Details the standard training setup (batch size, sampling, optimizer) which Recursive-NeRF adopts but modifies with dynamic growth. [Link](1203-nerf-training-configuration.md)
+Details the standard training setup (batch size, sampling, optimizer) which Recursive-NeRF adopts but modifies with dynamic growth [S1]. [Link](1203-nerf-training-configuration.md)
 
 ### NeRF-SH
-Uses spherical harmonics for view-dependent color. Recursive-NeRF does not specify SH usage but focuses on network depth/uncertainty. [Link](1348-nerf-sh.md)
+Uses spherical harmonics for view-dependent color [S1]. Recursive-NeRF does not specify SH usage but focuses on network depth/uncertainty [S1]. [Link](1348-nerf-sh.md)
 
 ### Mip-NeRF
-Addresses aliasing by rendering cones instead of rays. Recursive-NeRF addresses efficiency via network depth. [Link](3381-mip-nerf.md)
+Addresses aliasing by rendering cones instead of rays [S1]. Recursive-NeRF addresses efficiency via network depth [S1]. [Link](3381-mip-nerf.md)
 
 ### NeMF (Neural Microflake Field)
-Represents scenes as microflakes. Recursive-NeRF uses volumetric density. [Link](3387-nemf-neural-microflake-field.md)
+Represents scenes as microflakes [S1]. Recursive-NeRF uses volumetric density [S1]. [Link](3387-nemf-neural-microflake-field.md)
 
 ### EgoNeRF
-Optimized for ego-centric video. Recursive-NeRF is general-purpose. [Link](4096-egonerf.md)
+Optimized for ego-centric video [S1]. Recursive-NeRF is general-purpose [S1]. [Link](4096-egonerf.md)
 
 ### Intrinsic NeRF
-Decomposes scene into intrinsic properties. Recursive-NeRF focuses on rendering efficiency. [Link](4623-intrinsic-nerf.md)
+Decomposes scene into intrinsic properties [S1]. Recursive-NeRF focuses on rendering efficiency [S1]. [Link](4623-intrinsic-nerf.md)
 
 ## Operating characteristics
--   **Time Complexity**: Recursive-NeRF reduces rendering time by 32.36% compared to standard NeRF [S1]. The average number of layers a sample point goes through is 4.95, compared to the full depth in NeRF [S1].
--   **Memory Complexity**: The total number of parameters is reduced because simple regions are handled by smaller networks. The method reduces computational effort (FLOPs) by 37% compared to NeRF [S1].
--   **Measured Performance**:
-    -   **Synthetic-NeRF Dataset**: PSNR 31.34, SSIM 0.953, LPIPS 0.052, FLOPs 377,159, Time 17.68s [S1].
-    -   **Cornell Box Dataset**: PSNR 48.010, SSIM 0.996, LPIPS 0.010, FLOPs 198,361, Time 10.82s [S1].
--   **Scaling**: The method adapts to scene complexity. Simple scenes (like Cornell Box) see greater speed improvements. The maximum network depth can reach 12 layers, deeper than NeRF's 8 layers, but early termination keeps average load low [S1].
--   **Strengths**:
-    -   Efficient rendering by skipping unnecessary calculations for simple points.
-    -   High quality view synthesis with state-of-the-art results.
-    -   Adaptive representation of scene complexity.
--   **Limitations**:
-    -   Training instability if not properly initialized (density collapse).
-    -   Uncertainty prediction is harder to train than classification confidence.
-    -   Requires dynamic graph execution support (e.g., Jittor) for dynamic network growth [S1].
--   **When to use**: When computational efficiency is critical and the scene has varying complexity (simple regions and complex details).
--   **When not to use**: If the scene is uniformly complex and early termination provides little benefit, or if the framework does not support dynamic graph execution.
+- **Time Complexity**: Recursive-NeRF reduces rendering time by 32.36% compared to standard NeRF [S1]. The average number of layers a sample point goes through is 4.95, compared to the full depth in NeRF [S1].
+- **Memory Complexity**: The total number of parameters is reduced because simple regions are handled by smaller networks. The method reduces computational effort (FLOPs) by 37% compared to NeRF [S1].
+- **Measured Performance**:
+  - **Synthetic-NeRF Dataset**: PSNR 31.34, SSIM 0.953, LPIPS 0.052, FLOPs 377,159, Time 17.68s [S1].
+  - **Cornell Box Dataset**: PSNR 48.010, SSIM 0.996, LPIPS 0.010, FLOPs 198,361, Time 10.82s [S1].
+- **Scaling**: The method adapts to scene complexity. Simple scenes (like Cornell Box) see greater speed improvements. The maximum network depth can reach 12 layers, deeper than NeRF's 8 layers, but early termination keeps average load low [S1].
+- **Strengths**:
+  - Efficient rendering by skipping unnecessary calculations for simple points.
+  - High quality view synthesis with state-of-the-art results.
+  - Adaptive representation of scene complexity.
+- **Limitations**:
+  - Training instability if not properly initialized (density collapse).
+  - Uncertainty prediction is harder to train than classification confidence.
+  - Requires dynamic graph execution support (e.g., Jittor) for dynamic network growth [S1].
+- **When to use**: When computational efficiency is critical and the scene has varying complexity (simple regions and complex details).
+- **When not to use**: If the scene is uniformly complex and early termination provides little benefit, or if the framework does not support dynamic graph execution.
 
 ## Background
 Recursive-NeRF was proposed by G.-W. Yang, W.-Y. Zhou, H.-Y. Peng, D. Liang, T.-J. Mu, and S.-M. Hu from BNRist, Tsinghua University [S1]. It was published in the IEEE Transactions on Visualization and Computer Graphics in 2022 [S1]. The method builds on the idea that complicated regions of a scene should be represented by large neural networks while simple regions can be encoded by small networks, balancing efficiency and quality [S1]. It addresses the limitations of standard NeRF, which processes all points through the full network depth regardless of complexity, and dynamic networks that adjust architecture based on hardware resources rather than training situation [S1]. The code was made available at https://github.com/Gword/Recursive-NeRF [S1].

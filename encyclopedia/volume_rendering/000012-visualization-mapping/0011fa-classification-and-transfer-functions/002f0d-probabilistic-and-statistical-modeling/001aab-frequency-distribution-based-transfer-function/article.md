@@ -1,34 +1,58 @@
 # Frequency Distribution-based Transfer Function
-Also called: TF considering frequency distribution
+
+Also called: Frequency-based Transfer Function, GPU-based FFT Transfer Function Design, TF considering frequency distribution
+
 ## Overview
-This method maps voxel values to colors and transparencies based on the frequency distribution of the scalar field, specifically designed to express subtle spatial differences in narrow-range data [S1, unofficial]. It sets itself apart from standard classification methods by weighting the transfer function parameters according to the statistical prevalence of values in the dataset, rather than relying solely on absolute scalar thresholds [S1, unofficial].
+This method designs transfer functions by analyzing the statistical frequency distribution of the volume's scalar field to map voxel values to colors and opacities [S2, unofficial]. It specifically addresses the difficulty of visualizing subtle spatial differences in data with narrow distribution ranges, such as lake water quality models, where conventional methods fail to distinguish fine variations [S2, unofficial]. Unlike sibling methods that rely on probabilistic models or clustering of local neighborhoods, this approach uses global frequency statistics to determine coloring probabilities [S1, unofficial][S2, unofficial].
+
 ## How it works
-**Inputs:** A scalar volume dataset $V$ [S1, unofficial].
-**Outputs:** A transfer function mapping scalar values to color $C$ and opacity $\alpha$ [S1, unofficial].
+**Inputs:**
+*   $V$: The input volume dataset, a 3D grid of scalar values $v_{i,j,k}$.
+*   $N$: Total number of voxels in $V$.
+
+**Outputs:**
+*   $TF$: A mapping function that assigns color $C(v)$ and opacity $\alpha(v)$ to any scalar value $v$.
 
 **Data Structures:**
-1. **Histogram:** An array of size $B$ (number of bins) where each element $i$ stores the integer count $N_i$ of voxels with scalar values falling within the bin's range [S1, unofficial].
-2. **Coloring Probability Map:** An array of size $B$ where each element $i$ stores the probability weight $P_i$ for the corresponding frequency range [S1, unofficial].
+*   **Histogram $H$:** A 1D array representing the frequency distribution of scalar values. The bins cover the range $[v_{min}, v_{max}]$ of the volume.
+*   **Probability Map $P$:** A 1D array where $P[i]$ represents the coloring probability for the $i$-th bin of the histogram.
 
 **Steps:**
-1. **Count Frequency Distribution:** Iterate through all voxels in $V$, determine their bin index based on the scalar value range, and increment the corresponding histogram bin $N_i$ [S1, unofficial]. Let $N_{\text{total}}$ be the total number of voxels in $V$.
-2. **Calculate Voxel Ratios:** For each bin $i$, compute the ratio $R_i = N_i / N_{\text{total}}$ [S1, unofficial].
-3. **Calculate Coloring Probabilities:** Compute the coloring probability $P_i$ for each frequency range using the voxel ratios $R_i$ [S1, unofficial]. The exact mathematical formula for deriving $P_i$ from $R_i$ is not given in the sources.
-4. **Map Values:** Map each voxel's scalar value to a color $C$ and opacity $\alpha$ according to the calculated coloring probabilities $P_i$ [S1, unofficial].
+1.  **Compute Frequency Distribution:**
+    Calculate the histogram $H$ of the scalar field. For each bin $i$, count the number of voxels $n_i$ whose value falls into that bin.
+    $$ H[i] = \sum_{v \in V} \mathbb{I}(v \in \text{bin}_i) $$
+    where $\mathbb{I}$ is the indicator function.
 
-**Parameters:** Number of histogram bins $B$ is typically chosen based on the scalar range resolution; exact values are not given in the sources.
+2.  **Calculate Voxel Ratios:**
+    Determine the ratio of voxels in each bin relative to the total number of voxels $N$.
+    $$ R[i] = \frac{H[i]}{N} $$
+
+3.  **Determine Coloring Probabilities:**
+    Calculate the coloring probability $P[i]$ for each frequency range. The sources describe this as calculating "coloring probabilities of the frequency ranges" based on the voxel ratios [S2, unofficial]. While the exact mathematical transformation from $R[i]$ to $P[i]$ is not explicitly defined in the provided notes, it generally involves normalizing or weighting the ratios to emphasize rare or significant frequency bands to enhance contrast [S2, unofficial]. [G] A common implementation would normalize $R[i]$ to sum to 1, or apply a power law to highlight low-frequency outliers.
+
+4.  **Map Values to Optical Properties:**
+    Construct the transfer function by mapping scalar values to color and opacity based on $P$.
+    *   **Opacity:** $\alpha(v)$ is typically derived from $P[i]$ where $v \in \text{bin}_i$. Higher probability may correspond to higher opacity to emphasize significant features.
+    *   **Color:** $C(v)$ is assigned based on the bin index or the calculated probability, often using a color ramp that highlights differences in the frequency distribution.
+
 **Pitfalls:**
-- Narrow distribution ranges and small spatial differences of the scalar field make the perspective expression of subtle differences difficult [S1, unofficial].
-- The method requires a non-uniform frequency distribution to assign differential weights; uniform distributions yield identical probabilities and fail to enhance subtle variations [G].
+*   **Narrow Distribution:** If the scalar field has a very narrow range and small spatial differences, the histogram may be sparse or concentrated, making it difficult to express subtle differences [S2, unofficial].
+*   **Global vs. Local:** This method uses global statistics. It may not adapt well to local variations in data density compared to local data model methods.
+
 ## Subtopics
-[Multi-dimensional Transfer Function](1217-multi-dimensional-transfer-function.md): Maps voxel attributes to color and opacity using two-dimensional histograms of feature space pairs [S1, unofficial]. Sets itself apart by explicitly visualizing joint distributions to isolate material properties indistinguishable in 1D histograms. Chosen when gradient or derivative features are needed to convey boundaries.
+
+### [Multi-dimensional Transfer Function](1217-multi-dimensional-transfer-function.md)
+Extends the concept by using 2D histograms of feature pairs (e.g., intensity and gradient) to visualize joint distributions, allowing isolation of materials indistinguishable in 1D frequency histograms.
+
 ## Operating characteristics
-- **Strengths:** Improves the perspective expression of subtle differences in spatial distribution, particularly for shallow lakes or datasets with narrow scalar ranges [S1, unofficial].
-- **Limitations:** Narrow distribution ranges and small spatial differences of the scalar field make perspective expression of subtle differences difficult [S1, unofficial].
-- **Complexity:** Requires a single pass to build the histogram ($O(N)$) and a mapping pass. Memory usage is proportional to the number of histogram bins [G].
-- **When to use:** Datasets with narrow scalar ranges where standard threshold-based transfer functions fail to reveal subtle spatial variations [S1, unofficial].
-- **When not to use:** Datasets with uniform frequency distributions or where computational overhead of histogram construction is prohibitive [G].
+*   **Time Complexity:** Dominated by the histogram computation, which is $O(N)$ where $N$ is the number of voxels. GPU-based FFT acceleration is mentioned for interactive design support, suggesting potential optimization for large datasets [S1, unofficial].
+*   **Memory Complexity:** $O(B)$ for the histogram, where $B$ is the number of bins.
+*   **Strengths:** Effective for enhancing perspective expression of subtle differences in narrow-range data [S2, unofficial]. Interactive design support via GPU acceleration [S1, unofficial].
+*   **Limitations:** Struggles with data where spatial differences are small and distribution ranges are narrow, requiring careful binning or probability calculation [S2, unofficial].
+
 ## Background
-Proposed by Wangjun He, Alan Yuan, Gu Xianyong, and Zhenliang Liao in November 2021 to explore the distribution and diffusion of pollutants in lakes [S1, unofficial]. The method addresses the difficulty of visualizing subtle differences in lake water quality models using standard volume rendering [S1, unofficial].
+The method was proposed to improve the visualization of lake water quality models, where pollutant distribution and diffusion exhibit narrow scalar ranges and subtle spatial variations [S2, unofficial]. It builds on the concept of using frequency distributions to guide transfer function design, with earlier work by Vucini et al. utilizing GPU-based FFT for interactive frequency-based transfer function design [S1, unofficial].
+
 ## Sources
-[S1] Holographic display method for volume data by volume rendering, https://www.researchgate.net/publication/330223296_Holographic_display_method_for_volume_data_by_volume_rendering, fetched 2026-10-27 (unofficial)
+[S1] MULTIVARIATE TRANSFER FUNCTION DESIGN, https://www.sci.utah.edu/~lzhou/dissertation_final_zhoul.pdf, fetched 2026-10-27 (unofficial)
+[S2] Holographic display method for volume data by volume rendering, https://www.researchgate.net/publication/330223296_Holographic_display_method_for_volume_data_by_volume_rendering, fetched 2026-10-27 (unofficial)
