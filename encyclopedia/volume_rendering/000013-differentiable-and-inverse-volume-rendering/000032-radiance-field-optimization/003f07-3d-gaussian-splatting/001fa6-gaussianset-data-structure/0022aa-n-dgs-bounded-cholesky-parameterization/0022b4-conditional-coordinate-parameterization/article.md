@@ -3,20 +3,27 @@
 Also called: Proposition C.1, dGS conditional parameterization
 
 ## Overview
-Conditional-coordinate parameterization provides a non-redundant, smooth bijection between the space of joint Gaussian covariances and a set of operational quantities: conditional spatial covariance, query-space precision, and a regression operator. It solves the problem of efficiently representing and optimizing the cross-covariance between spatial and query dimensions in differentiable Gaussian splatting by avoiding the computational cost and instability of inverting the query covariance block during rendering. Unlike N-DGS, which derives the regression operator from a joint Cholesky factor, this method directly optimizes the regression operator and precision, treating the coupling as a block shear.
+Conditional-coordinate parameterization provides a non-redundant, smooth bijection between the space of joint Gaussian covariances and a set of operational quantities: conditional spatial covariance, query-space precision, and a regression operator [S1, unofficial]. It solves the problem of efficiently representing and optimizing the cross-covariance between spatial and query dimensions in differentiable Gaussian splatting by avoiding the computational cost and instability of inverting the query covariance block during rendering [S1, unofficial]. Unlike N-DGS, which derives the regression operator from a joint Cholesky factor, this method directly optimizes the regression operator and precision, treating the coupling as a block shear [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs**
-*   **Input:** A joint covariance matrix $\Psi \in \mathbb{R}^{(p+C) \times (p+C)}$ that is symmetric positive-definite (SPD), where $p$ is the spatial dimension and $C$ is the query dimension.
+*   **Input:** A joint covariance matrix $\Psi \in \mathbb{R}^{(p+C) \times (p+C)}$ that is symmetric positive-definite (SPD), where $p$ is the spatial dimension and $C$ is the query dimension [S1, unofficial].
 *   **Output:** A triplet $(\Sigma_{\text{cond}}, \mathbf{M}, \mathbf{V}_{qq})$ where:
-    *   $\Sigma_{\text{cond}} \in \mathbb{R}^{p \times p}$ is the conditional spatial covariance (SPD).
-    *   $\mathbf{M} \in \mathbb{R}^{p \times C}$ is the effective query-to-position regression operator.
-    *   $\mathbf{V}_{qq} \in \mathbb{R}^{C \times C}$ is the query-space precision matrix (SPD).
+    *   $\Sigma_{\text{cond}} \in \mathbb{R}^{p \times p}$ is the conditional spatial covariance (SPD) [S1, unofficial].
+    *   $\mathbf{M} \in \mathbb{R}^{p \times C}$ is the effective query-to-position regression operator [S1, unofficial].
+    *   $\mathbf{V}_{qq} \in \mathbb{R}^{C \times C}$ is the query-space precision matrix (SPD) [S1, unofficial].
 
 **Data Structures**
-*   $\Sigma_{\text{cond}}$: Stored as a symmetric matrix. In practice, only the lower triangular part is stored to save memory, requiring $p(p+1)/2$ parameters.
-*   $\mathbf{M}$: Stored as a dense rectangular matrix, requiring $pC$ parameters.
-*   $\mathbf{V}_{qq}$: Stored as a symmetric matrix. In dGS implementations, it is often factorized as $\mathbf{L}\mathbf{L}^\top$ where $\mathbf{L}$ is lower triangular with strictly positive diagonal entries to ensure positive definiteness. This requires $C(C+1)/2$ parameters.
+*   $\Sigma_{\text{cond}}$: Stored as a symmetric matrix. In practice, only the lower triangular part is stored to save memory, requiring $p(p+1)/2$ parameters [S1, unofficial].
+*   $\mathbf{M}$: Stored as a dense rectangular matrix, requiring $pC$ parameters [S1, unofficial].
+*   $\mathbf{V}_{qq}$: Stored as a symmetric matrix. In dGS implementations, it is factorized as $\mathbf{L}\mathbf{L}^\top$ where $\mathbf{L}$ is lower triangular with strictly positive diagonal entries to ensure positive definiteness, requiring $C(C+1)/2$ parameters [S1, unofficial].
+
+**Numbered Steps**
+1.  **Decompose Joint Covariance:** Given $\Psi$, extract the blocks $\Sigma_{pp}$ ($p \times p$), $\Sigma_{pq}$ ($p \times C$), and $\Sigma_{qq}$ ($C \times C$) [S1, unofficial].
+2.  **Compute Query Precision:** Invert $\Sigma_{qq}$ to obtain $\mathbf{V}_{qq}$ [S1, unofficial].
+3.  **Compute Regression Operator:** Multiply $\Sigma_{pq}$ by $\mathbf{V}_{qq}$ to obtain $\mathbf{M}$ [S1, unofficial].
+4.  **Compute Conditional Covariance:** Subtract the Schur complement term $\Sigma_{pq} \mathbf{V}_{qq} \Sigma_{pq}^\top$ from $\Sigma_{pp}$ to obtain $\Sigma_{\text{cond}}$ [S1, unofficial].
+5.  **Validation:** Ensure $\Sigma_{\text{cond}}$ and $\mathbf{V}_{qq}$ are positive definite [S1, unofficial]. If using the Cholesky factorization for $\mathbf{V}_{qq}$, enforce strictly positive diagonal elements in $\mathbf{L}$ [S1, unofficial].
 
 **Formulas**
 The joint covariance $\Psi$ is parameterized by the triplet via the following block structure:
@@ -27,18 +34,26 @@ The blocks are defined as:
 1.  $\Sigma_{qq} = \mathbf{V}_{qq}^{-1}$
 2.  $\Sigma_{pq} = \mathbf{M}\mathbf{V}_{qq}^{-1}$
 3.  $\Sigma_{pp} = \Sigma_{\text{cond}} + \mathbf{M}\mathbf{V}_{qq}^{-1}\mathbf{M}^\top$
+These relations follow from the block-triangular factorization $\Psi = \begin{pmatrix} \mathbf{I}_p & \mathbf{M} \\ \mathbf{0} & \mathbf{I}_C \end{pmatrix} \begin{pmatrix} \mathbf{\Sigma}_{\text{cond}} & \mathbf{0} \\ \mathbf{0} & \mathbf{V}_{qq}^{-1} \end{pmatrix} \begin{pmatrix} \mathbf{I}_p & \mathbf{0} \\ \mathbf{M}^\top & \mathbf{I}_C \end{pmatrix}$ [S1, unofficial].
 
 The inverse map, recovering the parameters from a given joint covariance $\Psi$, is:
 1.  $\mathbf{V}_{qq} = \Sigma_{qq}^{-1}$
 2.  $\mathbf{M} = \Sigma_{pq} \Sigma_{qq}^{-1}$
 3.  $\Sigma_{\text{cond}} = \Sigma_{pp} - \Sigma_{pq} \Sigma_{qq}^{-1} \Sigma_{pq}^\top$
+The Schur complement theorem guarantees $\Sigma_{\text{cond}} \succ \mathbf{0}$ [S1, unofficial].
 
-**Numbered Steps**
-1.  **Decompose Joint Covariance:** Given $\Psi$, extract the blocks $\Sigma_{pp}$ ($p \times p$), $\Sigma_{pq}$ ($p \times C$), and $\Sigma_{qq}$ ($C \times C$).
-2.  **Compute Query Precision:** Invert $\Sigma_{qq}$ to obtain $\mathbf{V}_{qq}$.
-3.  **Compute Regression Operator:** Multiply $\Sigma_{pq}$ by $\mathbf{V}_{qq}$ to obtain $\mathbf{M}$.
-4.  **Compute Conditional Covariance:** Subtract the Schur complement term $\Sigma_{pq} \mathbf{V}_{qq} \Sigma_{pq}^\top$ from $\Sigma_{pp}$ to obtain $\Sigma_{\text{cond}}$.
-5.  **Validation:** Ensure $\Sigma_{\text{cond}}$ and $\mathbf{V}_{qq}$ are positive definite. If using the Cholesky factorization for $\mathbf{V}_{qq}$, enforce strictly positive diagonal elements in $\mathbf{L}$.
+The volume-element Jacobian of the coordinate transformation has a closed-form determinant:
+$$|\det D\Psi| = (\det \mathbf{V}_{qq})^{-(p+C+1)}$$
+For spatial dimension $p=3$, this simplifies to $(\det \mathbf{V}_{qq})^{-(C+4)}$ [S1, unofficial].
+
+**Parameters**
+*   $p$: Spatial dimension (typically 3) [S1, unofficial].
+*   $C$: Query dimension (e.g., number of query features or dimensions) [S1, unofficial].
+*   Typical values: For 3D Gaussian Splatting, $p=3$ [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Singularity:** The map is singular if $\mathbf{V}_{qq}$ approaches singularity ($\det \mathbf{V}_{qq} \to 0$) or if $\Sigma_{\text{cond}}$ approaches its boundary (becomes singular) [S1, unofficial]. The construction $\mathbf{V}_{qq} = \mathbf{L}\mathbf{L}^\top$ with strictly positive Cholesky diagonal keeps the parameterization in the interior of the SPD domain [S1, unofficial].
+*   **Precision:** Inverting $\Sigma_{qq}$ can be numerically unstable if $\Sigma_{qq}$ is ill-conditioned [G]. Using the Cholesky factorization of $\mathbf{V}_{qq}$ directly avoids explicit inversion in some contexts, but the definition relies on $\mathbf{V}_{qq}^{-1}$ [S1, unofficial].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -67,8 +82,7 @@ def joint_to_conditional_parameters(Sigma_pp, Sigma_pq, Sigma_qq):
     M = Sigma_pq @ Vqq
     
     # Step 4: Compute Conditional Covariance Sigma_cond = Sigma_pp - Sigma_pq * Vqq * Sigma_pq^T
-    # Note: Sigma_pq @ Vqq is M, so M @ Sigma_pq^T is equivalent to Sigma_pq @ Vqq @ Sigma_pq^T
-    Sigma_cond = Sigma_pp - M @ Sigma_pq.T
+    Sigma_cond = Sigma_pp - Sigma_pq @ Vqq @ Sigma_pq.T
     
     return Sigma_cond, M, Vqq
 
@@ -98,34 +112,20 @@ def conditional_parameters_to_joint(Sigma_cond, M, Vqq):
     return Sigma_pp, Sigma_pq, Sigma_qq
 ```
 
-**Parameters**
-*   $p$: Spatial dimension (typically 3).
-*   $C$: Query dimension (e.g., number of query features or dimensions).
-*   Typical values: For 3D Gaussian Splatting, $p=3$. $C$ depends on the specific query space (e.g., frequency domain dimensions).
-
-**Edge Cases and Pitfalls**
-*   **Singularity:** The map is singular if $\mathbf{V}_{qq}$ approaches singularity ($\det \mathbf{V}_{qq} \to 0$) or if $\Sigma_{\text{cond}}$ approaches its boundary (becomes singular). The construction $\mathbf{V}_{qq} = \mathbf{L}\mathbf{L}^\top$ with strictly positive Cholesky diagonal keeps the parameterization in the interior of the SPD domain [S1, unofficial].
-*   **Precision:** Inverting $\Sigma_{qq}$ can be numerically unstable if $\Sigma_{qq}$ is ill-conditioned. Using the Cholesky factorization of $\mathbf{V}_{qq}$ directly avoids explicit inversion in some contexts, but the definition relies on $\mathbf{V}_{qq}^{-1}$.
-
-## Subtopics
-
-### dGS Direct Regression Parameterization
-A variant that directly optimizes the regression operator and precision without the joint Cholesky derivation. It avoids the computational cost of inverting the query covariance block during rendering. [dGS Direct Regression Parameterization](2821-dgs-direct-regression-parameterization.md)
-
 ## Operating characteristics
-*   **Time Complexity:** The forward map involves matrix inversion ($O(C^3)$) and matrix multiplications ($O(p^2 C + p C^2)$). The inverse map involves similar operations. For fixed $p$ and $C$, this is constant time per Gaussian.
+*   **Time Complexity:** The forward map involves matrix inversion ($O(C^3)$) and matrix multiplications ($O(p^2 C + p C^2)$) [G]. The inverse map involves similar operations [G]. For fixed $p$ and $C$, this is constant time per Gaussian [G].
 *   **Memory Complexity:** The parameter count is $\frac{p(p+1)}{2} + pC + \frac{C(C+1)}{2} = \frac{(p+C)(p+C+1)}{2}$, which is non-redundant and matches the number of parameters in the full joint covariance matrix [S1, unofficial].
 *   **Strengths:**
-    *   **Efficiency:** Avoids repeated inversion of the query covariance block during rendering by optimizing $\mathbf{V}_{qq}$ and $\mathbf{M}$ directly.
-    *   **Stability:** The block shear interpretation provides a clear geometric understanding and stable optimization landscape when $\mathbf{V}_{qq}$ is kept positive definite.
-    *   **Non-redundancy:** The parameterization is a smooth bijection, ensuring no loss of information.
+    *   **Efficiency:** Avoids repeated inversion of the query covariance block during rendering by optimizing $\mathbf{V}_{qq}$ and $\mathbf{M}$ directly [S1, unofficial].
+    *   **Stability:** The block shear interpretation provides a clear geometric understanding and stable optimization landscape when $\mathbf{V}_{qq}$ is kept positive definite [S1, unofficial].
+    *   **Non-redundancy:** The parameterization is a smooth bijection, ensuring no loss of information [S1, unofficial].
 *   **Limitations:**
-    *   **Singularity Risk:** If $\mathbf{V}_{qq}$ becomes singular, the parameterization breaks down. Strictly positive Cholesky diagonals are required.
-    *   **Complexity:** The inverse map requires matrix inversion, which can be costly for large $C$.
-*   **When to Use:** Use when optimizing query-dependent Gaussian splats where the query-space precision and regression operator are natural optimization variables. Prefer over N-DGS when avoiding query covariance inversion during rendering is critical.
+    *   **Singularity Risk:** If $\mathbf{V}_{qq}$ becomes singular, the parameterization breaks down [S1, unofficial]. Strictly positive Cholesky diagonals are required [S1, unofficial].
+    *   **Complexity:** The inverse map requires matrix inversion, which can be costly for large $C$ [G].
+*   **When to Use:** Use when optimizing query-dependent Gaussian splats where the query-space precision and regression operator are natural optimization variables [S1, unofficial]. Prefer over N-DGS when avoiding query covariance inversion during rendering is critical [S1, unofficial].
 
 ## Background
-The conditional-coordinate parameterization was introduced in the context of differentiable Gaussian splatting, specifically in the "Direct Conditional Parameterization for N-Dimensional Splatting" paper. It formalizes the relationship between joint Gaussian covariances and their conditional components, providing a theoretical foundation for efficient optimization of query-dependent splats. The method leverages the Schur complement and block-triangular factorization to define a smooth bijection between the joint covariance space and the conditional parameters.
+The conditional-coordinate parameterization was introduced in the context of differentiable Gaussian splatting, specifically in the "Direct Conditional Parameterization for N-Dimensional Splatting" paper [S1, unofficial]. It formalizes the relationship between joint Gaussian covariances and their conditional components, providing a theoretical foundation for efficient optimization of query-dependent splats [S1, unofficial]. The method leverages the Schur complement and block-triangular factorization to define a smooth bijection between the joint covariance space and the conditional parameters [S1, unofficial].
 
 ## Sources
 [S1] Direct Conditional Parameterization for N-Dimensional Splatting, https://arxiv.org/abs/2610.22778, fetched 2026-10-30 (unofficial)

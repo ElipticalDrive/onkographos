@@ -1,165 +1,134 @@
 # Multi-Isosurface Extraction
-
+Also called: Multiple Isosurface Extraction, Multi-Resolution Isosurface Extraction
 
 ## Overview
-Multi-Isosurface Extraction is a technique to extract and render multiple isosurfaces from the same scalar volume data simultaneously by running the Marching Cubes algorithm for each selected isovalue [S1, unofficial]. Unlike single isosurface extraction, this method requires managing multiple triangle lists and potentially multiple rendering passes or state changes for different isovalue colors [S1, unofficial]. It builds on [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md) by extending the extraction loop to iterate over a user-defined list of isovalues rather than a single scalar threshold [S1, unofficial].
+Multi-Isosurface Extraction is a technique for extracting and rendering multiple distinct isosurfaces from the same scalar volume data simultaneously by invoking the Marching Cubes algorithm for each selected isovalue [S1, unofficial]. It solves the problem of visualizing complex scalar fields with multiple material boundaries or density thresholds in a single pass, differing from single-isosurface methods by managing multiple independent triangle lists and rendering states [S1, unofficial].
 
 ## How it works
-**Inputs:**
-*   Scalar volume dataset: a 3D array `dataset` of dimensions `maxX × maxY × maxZ` [S1, unofficial].
-*   List of isovalue inputs: a list of floating-point numbers representing the thresholds for extraction [S1, unofficial].
-*   Resolution control parameter: an integer `inc` (iteration step) applied per isosurface [S1, unofficial].
-
-**Outputs:**
-*   A collection of triangle lists, one for each isovalue [S1, unofficial].
-*   Rendered geometry, potentially on different viewports or in the same viewport with distinct colors/materials [S1, unofficial].
+**Inputs and Outputs:**
+*   **Input:** A 3D scalar volume dataset `dataset` of dimensions `maxX x maxY x maxZ`, and a list of isovalue thresholds `isoValues`.
+*   **Output:** A collection of triangle meshes, one for each isovalue, ready for rendering.
 
 **Data Structures:**
-*   `NODE`: A linked list node structure containing triangle data, returned as `NODE *list` by the extraction function [S1, unofficial].
-*   `GRIDCELL`: A structure representing a voxel cell with 8 vertices (`v.val[0..7]` for values, `v.p[0..7]` for positions) [S1, unofficial].
-*   `TRIANGLE`: A structure representing a single triangle, containing 3 vertices [S1, unofficial].
+The implementation uses a node-based linked list to store generated triangles.
+*   `NODE`: Contains a `TRIANGLE` structure and a pointer to the next node.
+*   `TRIANGLE`: Contains three vertices (`XYZ`), where `XYZ` has fields `x`, `y`, `z`.
+*   `GRIDCELL`: Represents a voxel cell with 8 vertices. Each vertex has a value (`val`) and a 3D position (`p`).
 
 **Algorithm Steps:**
-1. Accept a list of multiple isovalue inputs from the user [S1, unofficial].
-2. For each isovalue in the list:
-   a. Initialize an empty triangle list `list` [S1, unofficial].
-   b. Determine the resolution step `inc` for this specific isovalue (default `inc = 1` for full resolution) [S1, unofficial].
-   c. Iterate through the volume grid using the step `inc`:
-      $$ \text{for } i = 0 \text{ to } maxX - inc \text{ step } inc $$
-      $$ \text{for } j = 0 \text{ to } maxY - inc \text{ step } inc $$
-      $$ \text{for } k = 0 \text{ to } maxZ - inc \text{ step } inc $$
-   d. For each voxel at $(i, j, k)$, retrieve the 8 corner values and positions from `dataset` into `GRIDCELL v` [S1, unofficial].
-   e. Invoke the standard Marching Cubes lookup and configuration logic using `v`, `isoValue`, and `inc` to determine the triangulation case [S1, unofficial].
-   f. Generate the corresponding triangles and append them to `list` [S1, unofficial].
-3. Render the generated triangles for each isovalue [S1, unofficial].
+1.  **Initialization:** Load the scalar volume data into memory. Initialize an empty list for each isovalue in the input list.
+2.  **Iteration over Isovalues:** For each `isoValue` in the `isoValues` list:
+    a.  Determine the resolution step `inc`. If multi-resolution is enabled for this isovalue, `inc > 1`; otherwise, `inc = 1`.
+    b.  Traverse the volume grid using nested loops for `i`, `j`, `k` with step size `inc`:
+        $$ i \in [0, maxX - inc), \quad j \in [0, maxY - inc), \quad k \in [0, maxZ - inc) $$
+    c.  For each cell defined by corners $(i, j, k)$ to $(i+inc, j+inc, k+inc)$, extract the 8 vertex values and positions.
+    d.  Apply the standard Marching Cubes algorithm using `isoValue` to determine the topology of the surface within the cell.
+    e.  Generate the corresponding triangles.
+    f.  Append the generated triangles to the list associated with `isoValue`.
+3.  **Rendering:** Render the triangle lists for each isovalue. This may involve setting distinct materials/colors for each isovalue and potentially using different viewports or blending modes [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def multi_isosurface_extraction(dataset, max_x, max_y, max_z, isovalue_list):
+def multi_isosurface_extraction(dataset, iso_values, resolution_steps=None):
     """
-    Extracts multiple isosurfaces from a scalar volume.
+    Extracts multiple isosurfaces from a 3D scalar volume.
     
     Args:
-        dataset: 3D array of shape (max_x, max_y, max_z)
-        max_x, max_y, max_z: Dimensions of the volume
-        isovalue_list: List of tuples (iso_value, resolution_inc)
-                       iso_value: float, the threshold
-                       resolution_inc: int, step size for iteration (1 for full res)
-    
+        dataset: 3D array of floats, shape (maxX, maxY, maxZ).
+        iso_values: List of float thresholds.
+        resolution_steps: Optional dict mapping iso_value -> int step size. 
+                          Defaults to 1 for all if not provided.
+                          
     Returns:
-        list_of_triangle_lists: A list where each element is a list of triangles 
-                                for the corresponding isovalue.
+        dict: Mapping of iso_value -> list of Triangle objects.
     """
-    all_triangle_lists = []
-    
-    for iso_value, inc in isovalue_list:
-        triangle_list = []
+    if resolution_steps is None:
+        resolution_steps = {v: 1 for v in iso_values}
         
-        # Iterate through the volume with the specified resolution step
-        for i in range(0, max_x - inc, inc):
-            for j in range(0, max_y - inc, inc):
-                for k in range(0, max_z - inc, inc):
-                    
-                    # Extract the 8 corners of the current voxel
-                    corners = []
+    results = {v: [] for v in iso_values}
+    maxX, maxY, maxZ = dataset.shape
+    
+    for iso_value in iso_values:
+        inc = resolution_steps[iso_value]
+        current_triangles = []
+        
+        # Traverse grid with step 'inc'
+        for i in range(0, maxX - inc, inc):
+            for j in range(0, maxY - inc, inc):
+                for k in range(0, maxZ - inc, inc):
+                    # Extract cell vertices
+                    # Note: Standard Marching Cubes assumes unit spacing.
+                    # Here, positions are scaled by inc.
+                    vertices = []
                     for dx in [0, inc]:
                         for dy in [0, inc]:
                             for dz in [0, inc]:
-                                val = dataset[i + dx][j + dy][k + dz]
+                                val = dataset[i + dx, j + dy, k + dz]
                                 pos = (i + dx, j + dy, k + dz)
-                                corners.append({'val': val, 'pos': pos})
+                                vertices.append({'val': val, 'pos': pos})
                     
-                    # Call the Marching Cubes algorithm for this cell
-                    triangles = marching_cubes_cell(corners, iso_value)
-                    
-                    # Append generated triangles to the list
-                    for tri in triangles:
-                        triangle_list.append(tri)
+                    # Generate triangles for this cell
+                    # This calls the standard Marching Cubes logic
+                    triangles = marching_cubes_cell(vertices, iso_value)
+                    current_triangles.extend(triangles)
         
-        all_triangle_lists.append(triangle_list)
+        results[iso_value] = current_triangles
         
-    return all_triangle_lists
+    return results
 
-def marching_cubes_cell(corners, iso_value):
+def marching_cubes_cell(vertices, iso_value):
     """
-    Standard Marching Cubes cell extraction [G].
-    Returns a list of triangles for the given cell and isovalue.
+    Standard Marching Cubes implementation for a single cell.
+    Returns a list of Triangle objects.
     """
-    # Standard 256-case lookup table (simplified representation)
-    # Each entry is a list of edge pairs to connect
-    case_table = [
-        [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [],
-        [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [],
-        # ... (full 256 entries omitted for brevity; standard implementation uses complete table)
-        # For a complete implementation, populate all 256 cases with edge indices.
-    ]
-    
-    # Compute case index
-    case_idx = 0
-    for i in range(8):
-        if corners[i]['val'] < iso_value:
-            case_idx |= (1 << i)
+    # 1. Determine cell case (0-255) based on sign of (val - iso_value)
+    case_index = 0
+    for idx, v in enumerate(vertices):
+        if v['val'] < iso_value:
+            case_index |= (1 << idx)
             
-    # Get edges to process for this case
-    edges_to_process = case_table[case_idx]
+    # 2. Lookup edge intersections
+    # 3. Generate vertices at intersection points via linear interpolation
+    # 4. Return triangles based on lookup table
     
-    # Edge interpolation helper
-    def interpolate(v1, v2):
-        t = (iso_value - v1['val']) / (v2['val'] - v1['val'])
-        return (v1['pos'][0] + t * (v2['pos'][0] - v1['pos'][0]),
-                v1['pos'][1] + t * (v2['pos'][1] - v1['pos'][1]),
-                v1['pos'][2] + t * (v2['pos'][2] - v1['pos'][2]))
-                
-    # Map edge indices to corner pairs
-    edge_map = [
-        (0,1), (1,2), (2,3), (3,0), # bottom
-        (4,5), (5,6), (6,7), (7,4), # top
-        (0,4), (1,5), (2,6), (3,7)  # vertical
-    ]
-    
-    triangles = []
-    for edge_pair in edges_to_process:
-        v1 = interpolate(corners[edge_pair[0]], corners[edge_pair[1]])
-        triangles.append(v1)
-        
-    # Group into triangles (3 vertices per triangle)
-    result = []
-    for i in range(0, len(triangles), 3):
-        if i + 2 < len(triangles):
-            result.append((triangles[i], triangles[i+1], triangles[i+2]))
-            
-    return result
+    # [G] Placeholder for standard MC logic. 
+    # In a full implementation, this returns a list of (v1, v2, v3) tuples.
+    return [] 
 ```
 
 **Parameters:**
-*   `inc`: Controls resolution. `inc=1` is full resolution. `inc>1` reduces resolution by processing every `inc`-th voxel [S1, unofficial]. Typical values are integers like 2, 4, etc. [S1, unofficial].
+*   `inc` (Resolution Step): Controls the sampling density. `inc=1` processes every voxel. `inc>1` skips voxels, reducing resolution by a factor of `inc` in each dimension [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Duplicate Isovalues:** The source notes entering two same isovalues (e.g., 0.04, 0.04) as a test case, implying the system handles duplicates by generating separate lists or merging them, but the exact behavior is not specified [S1, unofficial].
-*   **Viewport Management:** Rendering multiple isosurfaces requires careful management of viewports or rendering states to avoid visual overlap issues unless depth testing and transparency are correctly configured [S1, unofficial].
+*   **Degenerate Cases:** If a vertex value equals the isovalue exactly, the sign test is ambiguous. Standard MC implementations handle this by treating equality as less than or greater than consistently [G].
+*   **Memory Management:** Storing multiple large triangle lists can exhaust memory. The source notes mention performance metrics for list creation, implying dynamic allocation [S1, unofficial].
+*   **Rendering Order:** When rendering multiple isosurfaces in the same viewport, depth buffering must be enabled to handle occlusion correctly.
 
 ## Subtopics
 
-### Multi-Isosurface Visualization
-A technique for rendering multiple isosurfaces with different opacities concurrently by maintaining one Matryoshka layer per isosurface and processing corresponding planes across all layers together [S2, unofficial]. It uses an auxiliary buffer to mark all active cells as drawable for a set of corresponding planes from different isosurfaces, then processes this buffer in a front-to-back order dependent on the viewing camera to ensure correct ordering across all isosurfaces [S2, unofficial]. Choose this when transparency and correct depth ordering between multiple isosurfaces are required [S2, unofficial]. Link: [Speeding Up Isosurfacing: The Matryoshka Algorithm](https://doi.org/10.2312/localchapterevents/tpcg/tpcg07/097-105) [S2, unofficial].
-
 ### Multi-Resolution Extraction
-A scheme where selected isosurfaces are rendered at high resolution (original voxel grid) while others are rendered at lower resolutions by skipping voxels during extraction [S1, unofficial]. It achieves this by setting the iteration step `inc` to a value greater than 1 for low-resolution isosurfaces [S1, unofficial]. Choose this when performance is critical for less important isosurfaces or when visualizing features at different scales simultaneously [S1, unofficial]. Link: [Multi-Isosurface Extraction](52-multi-isosurface-extraction.md) [S1, unofficial].
+A variant where selected isosurfaces are rendered at high resolution (original voxel grid) while others are rendered at lower resolutions by skipping voxels during extraction [S1, unofficial]. It sets itself apart by allowing performance optimization for less critical features. Choose this when visualizing many isosurfaces and some are less important or coarser. It uses a step parameter `inc > 1` to skip voxels [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of voxels in the volume and $M$ is the number of isovalue lists. If multi-resolution is used, $N$ is effectively reduced for lower resolution isosurfaces by a factor of $inc^3$ [G].
-*   **Memory Complexity:** $O(T \cdot M)$, where $T$ is the average number of triangles per isosurface. Multiple triangle lists must be stored in memory simultaneously [G].
-*   **Measured Performance:** Creating list cost 0.027208 seconds for 6 isovalues; display times vary (e.g., 0.004254 s) [S1, unofficial]. Loading data cost 0.177353 seconds [S1, unofficial].
-*   **Strengths:** Allows simultaneous visualization of distinct features within a volume; supports varying levels of detail [S1, unofficial].
-*   **Limitations:** Increased memory usage due to multiple triangle lists; potential rendering complexity for transparency and depth sorting; performance scales linearly with the number of isovalue lists [S1, unofficial].
-*   **When to use:** When analyzing multiple distinct thresholds in a single volume (e.g., different tissue types in medical imaging) [G].
-*   **When not to use:** When only a single feature is of interest, or when memory is severely constrained [G].
+**Time and Memory Complexity:**
+*   **Time:** $O(N \cdot M)$, where $N$ is the number of voxels and $M$ is the number of isovalue lists. Multi-resolution reduces $N$ for specific isovalue lists by a factor of $inc^3$.
+*   **Memory:** $O(M \cdot T)$, where $T$ is the average number of triangles per isosurface.
+
+**Measured Performance:**
+Based on the source implementation [S1, unofficial]:
+*   Loading 6 isovalue data took 0.177 seconds.
+*   Creating the triangle lists for 6 isovalue took 0.027 seconds.
+*   Display times varied per frame, averaging around 0.002-0.004 seconds per isosurface render pass.
+*   Performance scales linearly with the number of isovalue lists and inversely with the resolution step `inc`.
+
+**Strengths and Limitations:**
+*   **Strengths:** Simple to implement by wrapping existing Marching Cubes code. Allows simultaneous visualization of multiple density levels. Multi-resolution support improves performance for less detailed features.
+*   **Limitations:** Does not handle intersections between isosurfaces specially (no boolean operations). Rendering multiple surfaces can be visually cluttered without careful color/material selection.
 
 ## Background
-The Matryoshka variant for handling transparency and ordering was introduced in the paper "Speeding Up Isosurfacing: The Matryoshka Algorithm" [S2, unofficial].
+This method originates from educational and practical implementations of volume visualization, specifically demonstrated in the LSU-7433 Data Visualization course materials [S1, unofficial]. It builds on the foundational Marching Cubes algorithm [30-isosurface-extraction.md].
 
 ## Sources
 [S1] LSU-7433-Data-Visiualization/multiple_isosurface, https://github.com/LSU-7433-Data-Visiualization/multiple_isosurface, fetched 2026-10-27 (unofficial)
-[S2] Speeding Up Isosurfacing: The Matryoshka Algorithm, https://doi.org/10.2312/localchapterevents/tpcg/tpcg07/097-105, fetched 2026-10-26 (unofficial)

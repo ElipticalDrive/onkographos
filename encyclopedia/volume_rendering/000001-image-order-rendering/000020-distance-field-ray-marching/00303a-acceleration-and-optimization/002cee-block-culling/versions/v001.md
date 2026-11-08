@@ -1,0 +1,67 @@
+# Block Culling
+
+Also called: RT+Cull
+
+## Overview
+Block culling is an optimization technique for sparse volume rendering that reduces the time required to reach content values inside RGBA volumes by skipping empty or irrelevant blocks [S1, unofficial]. It is particularly effective when sparsity results from runtime parameters, such as narrower allowed density ranges, rather than inherent data sparsity [S1, unofficial]. Unlike [Beam Optimization](932-beam-optimization.md), which groups rays to exploit coherence, block culling operates by traversing the volume hierarchy and discarding blocks that do not contain relevant content based on precomputed bounds [S1, unofficial].
+
+## How it works
+Block culling integrates with hardware ray tracing (RT) to accelerate the traversal of sparse volume data structures, typically octrees or similar hierarchical block representations [S1, unofficial]. The method relies on the assumption that blocks can be classified as "empty" or "full" with respect to the user-defined content range, allowing the ray tracer to skip intersection tests for empty blocks [S1, unofficial].
+
+**Inputs and Outputs:**
+*   **Input:** A sparse volume dataset (e.g., RGBA), a user-defined content range (density threshold), and a ray traversal state.
+*   **Output:** Rendered image with reduced traversal time for rays passing through empty space [S1, unofficial].
+
+**Data Structures:**
+The volume is organized into blocks. Each block typically stores metadata indicating whether it contains any values within the specified content range [S1, unofficial]. Exact bit-packing details are not provided in the sources [G].
+
+**Steps:**
+1.  **Ray Traversal Initiation:** The ray tracer begins traversal from the root of the volume hierarchy [S1, unofficial].
+2.  **Block Evaluation:** For each block encountered, the algorithm checks if the block contains any content within the user-requested density range [S1, unofficial].
+3.  **Culling Decision:**
+    *   If the block is determined to be empty relative to the content range, the block is culled (skipped) [S1, unofficial].
+    *   If the block contains relevant content, traversal continues into the block's children or the block is processed for ray marching [S1, unofficial].
+4.  **Content Range Check:** The culling logic is sensitive to the user-requested content range. If this range is greater than or equal to the actual content range of the data, culling provides no benefit and may incur negligible overhead [S1, unofficial].
+
+**Parameters:**
+*   **User-requested content range:** The density threshold defining what constitutes "content." Typical values depend on the specific volume data [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **No Sparsity Benefit:** If the user-requested content range encompasses all data values, block culling does not provide significant performance regression but also no gain [S1, unofficial].
+*   **Precision:** The sources do not specify precision issues, but hardware ray tracing implementations may vary in how they handle boundary conditions [G].
+
+## Subtopics
+
+### Block Walking with Culling
+Block walking with culling combines block walking and block culling algorithms to further reduce render time [S1, unofficial]. Block walking optimizes traversal by skipping empty blocks more aggressively, while culling filters based on content range [S1, unofficial]. This combination yields the best average performance compared to using either technique alone or standard ray tracing [S1, unofficial]. It is particularly effective in scenarios where block walking alone might suffer from high overhead due to excessive sparsity, as culling can mitigate this by filtering based on density ranges [S1, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+The sources do not provide explicit asymptotic complexity formulas [G]. Performance is measured in milliseconds on specific datasets [S1, unofficial].
+
+**Measured Performance:**
+Performance was measured on an unspecified hardware platform using datasets such as "Fish" (2172x1448x1020, 5.06GB) and "Rock" (1425x950x1208, 4.38GB) [S1, unofficial].
+
+*   **Block Traversal Mode:**
+    *   **Fish (c):** RT+Cull achieved 4.823ms vs. 7.375ms for RT [S1, unofficial].
+    *   **Fish (a):** RT+Walk+Cull achieved 5.543ms vs. 9.745ms for RT [S1, unofficial].
+    *   **Chip (d):** RT+Walk+Cull achieved 1.612ms vs. 2.310ms for RT [S1, unofficial].
+    *   **Rock (e):** RT+Walk+Cull achieved 4.294ms vs. 7.949ms for RT [S1, unofficial].
+
+*   **Blend Mode:**
+    *   **Fish (c):** RT+Cull achieved 8.079ms vs. 10.798ms for RT [S1, unofficial].
+    *   **Fish (a):** RT+Walk+Cull achieved 107.725ms vs. 113.983ms for RT [S1, unofficial].
+    *   **Rock (g):** RT+Walk+Cull achieved 44.793ms vs. 49.117ms for RT [S1, unofficial].
+
+**Scaling and Trade-offs:**
+Block culling provides approximately 2x performance gains in block traversal mode for certain datasets [S1, unofficial]. However, block walking can have high cost when content is too sparse, whereas block culling has high gain if the original content is dense but sparsity results from runtime parameters [S1, unofficial]. The combination of both techniques results in the best average performance [S1, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** Significant speedup in block traversal and blend modes for sparse volumes; effective when sparsity is due to narrow density ranges [S1, unofficial].
+*   **Limitations:** Block walking alone is ineffective when content is too sparse; culling benefits are nullified if the content range covers all data [S1, unofficial].
+
+## Background
+Block culling was introduced in the context of sparse volume rendering using hardware ray tracing [S1, unofficial]. The technique is part of a broader effort to optimize volume rendering performance by leveraging hardware acceleration and hierarchical data structures [S1, unofficial].
+
+## Sources
+[S1] Sparse Volume Rendering using Hardware Ray Tracing and Block ..., https://gpuopen.com/download/SA2021_BlockWalk.pdf, fetched 2026-10-26 (unofficial)

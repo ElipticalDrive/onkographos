@@ -3,31 +3,32 @@
 Also called: Complete Polygonal Scene Voxelization
 
 ## Overview
-Robust Inside and Outside Solid Voxelization is a method for determining the solid/empty status of octree cells in a voxelized mesh, specifically designed to handle non-watertight meshes with holes and intersecting geometry [S1, unofficial]. Unlike ray casting methods which require watertight meshes, this technique uses a heuristic model based on cube map rendering and visibility propagation to classify cells [S1, unofficial]. It sets itself apart by allowing "seed" cells to propagate their status to visible neighbors, overcoming the topological restrictions of traditional ray casting [S1, unofficial].
+Robust Inside and Outside Solid Voxelization is a method for determining the solid/empty status of octree cells in a voxelized mesh, specifically designed to handle non-watertight meshes with holes and intersecting geometry [S1, unofficial]. Unlike ray casting methods which require watertight meshes, this technique uses a heuristic model based on cube map rendering and visibility propagation to classify cells [S1, unofficial]. It sets itself apart by allowing "seed" cells to propagate their status to visible neighbors, overcoming the topological restrictions of traditional ray casting [S1, unofficial]. It builds on [Solid Voxelization based on Octree](2062-solid-voxelization-based-on-octree.md) by replacing the ray-casting sign test with a GPU-accelerated cube map heuristic.
 
 ## How it works
 The algorithm operates in three main stages: Octree Creation, Seed Cell Classification, and Status Propagation [S1, unofficial].
 
 ### Inputs and Outputs
 **Inputs:**
-- A triangular mesh (OBJ format or similar).
+- A triangular mesh [S1, unofficial].
 - Maximum octree depth (typically 5; 7 or 8 for thin walls) [S1, unofficial].
 - `MIN_INSIDE_FACES`: Integer constant, value 4 [S1, unofficial].
-- `MIN_INSIDE_PERCENTAGE`: Float constant, value 0.03f (3%) [S1, unofficial].
-- `Propagation Threshold`: Integer value, example 16 [S1, unofficial].
+- `MIN_INSIDE_PERCENTAGE`: Float constant, value 0.03 (3%) [S1, unofficial].
+- `PROPAGATION_THRESHOLD`: Integer value, example 16 [S1, unofficial].
 
 **Outputs:**
 - An octree where each leaf node is classified as `Inside`, `Outside`, or `Intersecting` [S1, unofficial].
 
 ### Data Structures
-- **Octree Cell**: Contains bounding box, status (`Unknown`, `Inside`, `Outside`, `Intersecting`), and propagation counters.
+- **Octree Cell**: Contains bounding box, status (`Unknown`, `Inside`, `Outside`, `Intersecting`), and propagation counters [S1, unofficial].
 - **Propagation Counters**: For each `Unknown` cell, maintain two integer counters: `inside_count` and `outside_count`, initialized to 0 [S1, unofficial].
 
 ### Steps
 
 1. **Create Octree**:
    - Subdivide the root cell containing the mesh until no triangle intersection occurs or the maximum depth is reached [S1, unofficial].
-   - During subdivision, test triangle intersection against mesh bounds. Immediately mark cells outside mesh bounds as `Outside` without treating them as seed cells [S1, unofficial].
+   - During subdivision, test triangle intersection against mesh bounds [S1, unofficial].
+   - Immediately mark cells outside mesh bounds as `Outside` without treating them as seed cells [S1, unofficial].
    - Mark cells intersecting triangles as `Intersecting` [S1, unofficial].
 
 2. **Find Seed Cell**:
@@ -51,7 +52,7 @@ The algorithm operates in three main stages: Octree Creation, Seed Cell Classifi
    - Project the 8 corners of the octree cell into the camera space of each cube face [S1, unofficial].
    - If any corner is closer than the depth value at that pixel, the cell is visible from the seed [S1, unofficial].
    - If visible, increment the corresponding counter (`inside_count` if seed is `Inside`, `outside_count` if seed is `Outside`) for the target cell [S1, unofficial].
-   - If either counter reaches `Propagation Threshold`, commit the status to the target cell and stop processing it [S1, unofficial].
+   - If either counter reaches `PROPAGATION_THRESHOLD`, commit the status to the target cell and stop processing it [S1, unofficial].
    - **Note**: Only seed cells propagate status. Cells that receive propagated status do not become new seed cells [S1, unofficial].
 
 4. **Repeat Loop**:
@@ -63,33 +64,49 @@ The algorithm operates in three main stages: Octree Creation, Seed Cell Classifi
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+# Constants from evidence
+MIN_INSIDE_FACES = 4
+MIN_INSIDE_PERCENTAGE = 0.03
+PROPAGATION_THRESHOLD = 16
+
+class CellStatus:
+    UNKNOWN = 0
+    INSIDE = 1
+    OUTSIDE = 2
+    INTERSECTING = 3
+
+class OctreeCell:
+    def __init__(self):
+        self.bounding_box = None
+        self.status = CellStatus.UNKNOWN
+        self.inside_count = 0
+        self.outside_count = 0
+
 def robust_voxelization(mesh, max_depth):
+    # Standard octree subdivision: recursively split AABB until triangle intersection count is 0 or depth == max_depth
     octree = build_octree(mesh, max_depth)
-    # Mark cells outside mesh bounds as Outside
     for cell in octree.leaves:
+        # Standard AABB vs mesh bounding box test
         if not intersects_mesh_bounds(cell):
-            cell.status = CellStatus.Outside
+            cell.status = CellStatus.OUTSIDE
             continue
+        # Standard AABB vs triangle intersection test (e.g., Möller-Trumbore)
         if intersects_triangles(cell):
-            cell.status = CellStatus.Intersecting
+            cell.status = CellStatus.INTERSECTING
             continue
-        cell.status = CellStatus.Unknown
+        cell.status = CellStatus.UNKNOWN
         cell.inside_count = 0
         cell.outside_count = 0
 
+    unknown_cells = [c for c in octree.leaves if c.status == CellStatus.UNKNOWN]
     seed_cells = []
-    unknown_cells = [c for c in octree.leaves if c.status == CellStatus.Unknown]
 
     while unknown_cells:
-        # Find Seed Cell
         seed = find_seed_cell(unknown_cells)
         if seed is None:
-            break # No more seeds can be found
-        
+            break
         seed_cells.append(seed)
         unknown_cells.remove(seed)
-        
-        # Propagate Seed Cell
         propagate_status(seed, unknown_cells)
 
     return octree
@@ -98,38 +115,74 @@ def find_seed_cell(unknown_cells):
     for cell in unknown_cells:
         cubemap_sides_seeing_inside = 0
         for i in range(6):
+            # Render scene from cell center, 6 faces, near plane at cell edge
             render_cube_map_side(i, cell)
+            # Read back GPU buffer, count red pixels / total colored pixels
             backface_percentage = calculate_backface_percentage(i)
             if backface_percentage > MIN_INSIDE_PERCENTAGE:
                 cubemap_sides_seeing_inside += 1
-        
+
         if cubemap_sides_seeing_inside >= MIN_INSIDE_FACES:
-            cell.status = CellStatus.Inside
+            cell.status = CellStatus.INSIDE
             return cell
         elif cubemap_sides_seeing_inside == 0:
-            cell.status = CellStatus.Outside
+            cell.status = CellStatus.OUTSIDE
             return cell
     return None
 
 def propagate_status(seed, unknown_cells):
     for cell in unknown_cells:
         if is_visible_from_seed(seed, cell):
-            if seed.status == CellStatus.Inside:
+            if seed.status == CellStatus.INSIDE:
                 cell.inside_count += 1
-                if cell.inside_count >= Propagation_Threshold:
-                    cell.status = CellStatus.Inside
+                if cell.inside_count >= PROPAGATION_THRESHOLD:
+                    cell.status = CellStatus.INSIDE
                     unknown_cells.remove(cell)
-            elif seed.status == CellStatus.Outside:
+            elif seed.status == CellStatus.OUTSIDE:
                 cell.outside_count += 1
-                if cell.outside_count >= Propagation_Threshold:
-                    cell.status = CellStatus.Outside
+                if cell.outside_count >= PROPAGATION_THRESHOLD:
+                    cell.status = CellStatus.OUTSIDE
                     unknown_cells.remove(cell)
 
 def is_visible_from_seed(seed, cell):
-    # Project 8 corners of cell into seed's cube map camera space
-    # Check if any corner is closer than depth value at that pixel
-    # Return True if visible
-    pass
+    # Project 8 corners of cell into seed's cube map camera space for each face
+    for face_idx in range(6):
+        for corner in cell.bounding_box.corners:
+            screen_pos = project_to_screen(corner, seed.cube_map_view_matrix[face_idx], seed.cube_map_proj_matrix[face_idx])
+            depth_val = seed.cube_map_depth_buffer[face_idx][screen_pos.x][screen_pos.y]
+            if corner.z < depth_val:
+                return True
+    return False
+
+# Standard operation definitions
+def build_octree(mesh, max_depth):
+    root = OctreeCell()
+    root.bounding_box = mesh.bounding_box
+    queue = [root]
+    while queue:
+        node = queue.pop(0)
+        if node.depth < max_depth and intersects_triangles(node):
+            node.children = split_aabb(node.bounding_box)
+            queue.extend(node.children)
+    return root
+
+def intersects_mesh_bounds(cell):
+    return cell.bounding_box.intersects(mesh.bounding_box)
+
+def intersects_triangles(cell):
+    return cell.bounding_box.intersects_any_triangle(mesh.triangles)
+
+def render_cube_map_side(face_idx, cell):
+    # Standard GPU render: set camera at cell center, look along face normal, near plane at cell edge
+    pass # Standard graphics pipeline call
+
+def calculate_backface_percentage(face_idx):
+    # Standard GPU readback: count pixels where color == (1,0,0) / total pixels
+    pass # Standard GPU readback call
+
+def project_to_screen(corner, view_matrix, proj_matrix):
+    # Standard math: clip space = proj * view * corner; perspective divide; viewport transform
+    pass # Standard math operation
 ```
 
 ### Edge Cases and Pitfalls
@@ -139,13 +192,12 @@ def is_visible_from_seed(seed, cell):
 - **Infinite Loops**: Ensure code handles undetermined statuses to prevent infinite loops [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity**: Not given in the sources.
-- **Memory Complexity**: Not given in the sources.
-- **Measured Performance**: Not given in the sources.
+- **Time Complexity**: Not given in the sources [S1, unofficial].
+- **Memory Complexity**: Not given in the sources [S1, unofficial].
+- **Measured Performance**: Not given in the sources [S1, unofficial].
 - **Strengths**: Handles non-watertight meshes with holes and intersecting geometry [S1, unofficial].
 - **Limitations**: Only seed cells propagate status, which may limit propagation efficiency [S1, unofficial].
 - **When to Use**: Generating simplified occluders for hierarchical Z-buffer occlusion culling in game development tools [S1, unofficial].
-- **When Not to Use**: When watertight meshes are guaranteed and ray casting is preferred for simplicity [S1, unofficial].
 
 ## Background
 - **Origin**: Introduced in the 'Complete Polygonal Scene Voxelization' paper published in 2002 [S1, unofficial].

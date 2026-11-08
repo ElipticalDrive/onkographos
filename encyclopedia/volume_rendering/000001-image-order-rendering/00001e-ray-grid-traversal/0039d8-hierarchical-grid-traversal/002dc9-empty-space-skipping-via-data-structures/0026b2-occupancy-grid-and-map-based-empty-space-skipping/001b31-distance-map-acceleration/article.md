@@ -3,15 +3,15 @@
 Also called: Accelerated Volume Rendering with Chebyshev Distance Maps, Chebyshev Distance Maps, Chebyshev distance map ray traversal, Distance Field Ray Marching Acceleration, Empty space skipping using distance maps, Ray Traversal with Distance Map Skipping
 
 ## Overview
-Distance Map Acceleration is a ray traversal technique that uses a precomputed Chebyshev distance map, derived from an occupancy map, to skip sampling points in empty regions of a volumetric image [S1]. It reduces the number of texture samples and improves frame rates for volume and isosurface rendering by allowing rays to leap past inactive blocks without evaluating the transfer function or volume texture [S1]. Unlike sibling methods that may use hierarchical structures or simple occupancy grids for binary skipping, this method encodes the *distance* to the nearest occupied region, enabling larger, more informed skip steps [S1]. It builds on [Occupancy Grid and Map-Based Empty Space Skipping](3852-occupancy-grid-and-map-based-empty-space-skipping.md) by adding a distance field to the occupancy data.
+Distance Map Acceleration is a ray traversal technique that uses a precomputed Chebyshev distance map, derived from an occupancy map, to skip sampling points in empty regions of a volumetric image [S1]. It reduces the number of texture samples and improves frame rates for volume and isosurface rendering by allowing rays to leap past inactive blocks without evaluating the transfer function or volume texture [S1]. Unlike sibling methods that may use hierarchical structures or simple occupancy grids for binary skipping, this method encodes the *distance* to the nearest occupied region, enabling larger, more informed skip steps [S1]. It builds on [Occupancy Grid and Map-Based Empty Space Skipping](3852-occupancy-grid-and-map-based-empty-space-skipping.md) by adding a distance field to the occupancy data [S1].
 
 ## How it works
-The method consists of an offline/preprocessing phase to generate acceleration structures and a runtime phase for ray traversal.
+The method consists of an offline preprocessing phase to generate acceleration structures and a runtime phase for ray traversal [S1][S2, unofficial].
 
 ### Inputs and Outputs
 **Inputs:**
 *   Volume texture $V$ of dimensions $d_{\text{vol}} = (d_x, d_y, d_z)$ [S1].
-*   Transfer function (TF) parameters defining opacity and gradient thresholds [S2, unofficial].
+*   Transfer function (TF) parameters defining intensity and gradient thresholds [S2, unofficial].
 *   Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ [S1].
 
 **Outputs:**
@@ -21,9 +21,9 @@ The method consists of an offline/preprocessing phase to generate acceleration s
 ### Data Structures
 1.  **Occupancy Map ($O$):** A 3D texture of dimensions $d_{\text{occ}} = d_{\text{vol}} / B$, where $B$ is the block size [S1]. Each voxel $u_{\text{occ}}$ stores a binary value indicating if the corresponding volume block is active [S1].
     *   **Layout:** 1 component (e.g., `float` or `uint`).
-    *   **Size:** $1/64^{\text{th}}$ of the volume memory for $B=4$ [S1].
-2.  **Distance Map ($D$):** A 3D texture of the same dimensions as $O$ [S1]. Each voxel stores the Chebyshev distance (L-infinity norm) to the nearest occupied block [S1].
-    *   **Layout:** 1 component (e.g., `float`).
+    *   **Size:** Requires $1/64^{\text{th}}$ of the memory of the associated volume for $B=4$ [S1].
+2.  **Distance Map ($D$):** A 3D texture storing the Chebyshev distance (L-infinity norm) to the nearest occupied block [S1].
+    *   **Layout:** 1 component (`float`).
     *   **Value:** Distance in units of occupancy map voxels [S1].
 3.  **Gradient Map ($G$):** (Optional) A 3D texture storing precomputed gradient magnitudes for each voxel in $V$ [S1].
     *   **Layout:** 1 component (`float`).
@@ -32,7 +32,7 @@ The method consists of an offline/preprocessing phase to generate acceleration s
 ### Parameters
 *   $B \in \mathbb{N}^3$: Block size. Default $B=4$ [S1][S2, unofficial].
 *   $f \ge 1$: Sampling factor for quality adjustment. Ensures at least one sample per voxel on average [S1].
-*   $\tau$: Isosurface threshold (for isosurface rendering) [S1].
+*   Isosurface threshold: Used for isosurface rendering occupancy criteria [S1].
 *   `imin`, `imax`: Intensity thresholds for TF. Default `imin`=0.1, `imax`=1.0 [S2, unofficial].
 *   `gmin`, `gmax`: Gradient thresholds for TF. Default `gmin`=0.0, `gmax`=0.2 [S2, unofficial].
 *   `clip_distance`: Distance from camera for volume clipping. Default 1.0f in benchmark mode [S2, unofficial].
@@ -47,7 +47,7 @@ The method consists of an offline/preprocessing phase to generate acceleration s
         $$ u_{\text{vol}}^{\min} = B \cdot u_{\text{occ}} $$
         $$ u_{\text{vol}}^{\max} = \min(u_{\text{vol}}^{\min} + B, d_{\text{vol}}) - 1 $$
     *   **Volume Rendering Criterion:** The block is occupied if any voxel in $[u_{\text{vol}}^{\min}, u_{\text{vol}}^{\max}]$ has non-zero alpha according to the TF [S1].
-    *   **Isosurface Rendering Criterion:** The block is occupied if the isosurface threshold $\tau$ lies between the min and max voxel values in the block, considering a single-voxel halo around the region [S1].
+    *   **Isosurface Rendering Criterion:** The block is occupied if the isosurface threshold lies between the min and max voxel values in the block, considering a single-voxel halo around the region [S1].
     *   Write the result to $O[u_{\text{occ}}]$ [S1].
 3.  **Generate Distance Map:** Convert $O$ to $D$ using a multi-stage Chebyshev distance transform algorithm on the GPU [S1][S2, unofficial]. This computes the L-infinity distance from each empty block to the nearest occupied block [S1].
 
@@ -63,8 +63,7 @@ The method consists of an offline/preprocessing phase to generate acceleration s
     *   Map the current ray position $\mathbf{t}$ to occupancy map coordinates $u_{\text{occ}}$:
         $$ u_{\text{occ}} = \frac{d_{\text{vol}}}{B} \mathbf{t} $$
         (More precisely, $t_{\text{occ}} = \frac{d_{\text{vol}}}{B \cdot d_{\text{occ}}} t_{\text{vol}}$) [S1].
-    *   Query $D[u_{\text{occ}}]$. Let $d_{\text{skip}}$ be this value [S1].
-    *   If $D[u_{\text{occ}}] > 0$ (empty region), calculate the number of steps $\Delta i_j$ to skip along dimension $j \in \{x, y, z\}$ to reach the next occupied region:
+    *   Query $D[u_{\text{occ}}]$. If $D[u_{\text{occ}}] > 0$ (empty region), calculate the number of steps $\Delta i_j$ to skip along dimension $j \in \{x, y, z\}$ to reach the next occupied region:
         $$ \Delta i_j = \begin{cases} \lceil (1 + \lfloor u_j \rfloor - u_j) / \Delta u_j \rceil, & \text{if } \Delta u_j > 0 \\ \lceil (\lfloor u_j \rfloor - u_j) / \Delta u_j \rceil, & \text{otherwise} \end{cases} $$
         where $u_j$ is the current coordinate in the occupancy map and $\Delta u_j$ is the step size in occupancy map units [S1].
     *   Advance the ray index $i$ by $\max_j(\Delta i_j)$ [S1].
@@ -75,108 +74,104 @@ The method consists of an offline/preprocessing phase to generate acceleration s
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def distance_map_accelerated_render(ray_origin, ray_direction, volume_texture, occupancy_map, distance_map, block_size, sampling_factor):
-    # 1. Compute ray-volume intersection
-    t_entry, t_exit = intersect_box(ray_origin, ray_direction, volume_bounds)
+def distance_map_accelerated_render(ray_origin, ray_direction, volume_texture, occupancy_map, distance_map, block_size, sampling_factor, volume_min, volume_max):
+    # 1. Ray-AABB intersection (returns normalized t in [0, 1])
+    t_entry, t_exit = intersect_aabb(ray_origin, ray_direction, volume_min, volume_max)
     if t_entry > t_exit:
-        return transparent_color
+        return vec4(0.0, 0.0, 0.0, 0.0)
 
-    # 2. Determine sampling parameters
-    max_dir_component = max(abs(ray_direction.x), abs(ray_direction.y), abs(ray_direction.z))
-    ray_length = length(t_exit - t_entry)
-    n_samples = ceil(max_dir_component * ray_length * sampling_factor)
-    
+    # 2. Sampling parameters
+    max_dir = max(abs(ray_direction.x), abs(ray_direction.y), abs(ray_direction.z))
+    ray_len = length(t_exit - t_entry)
+    n_samples = ceil(max_dir * ray_len * sampling_factor)
     if n_samples < 1:
         n_samples = 1
-        
     delta_t = (t_exit - t_entry) / (n_samples - 1)
-    
-    # 3. Map ray to occupancy map grid
-    # t_vol is normalized [0,1] in volume space
-    # t_occ is normalized [0,1] in occupancy map space
-    # u_occ is integer index in occupancy map
-    # d_vol, d_occ are dimensions
+
+    # 3. Coordinate mapping constants
     d_vol = volume_texture.dimensions
-    d_occ = occupancy_map.dimensions
-    
-    # Precompute scaling factor
-    occ_scale = d_vol / (block_size * d_occ) # Simplified from source: u_occ = (d_vol / B) * t_vol
-    
+    occ_scale = d_vol / block_size  # Maps normalized t to occupancy grid index
+    delta_u = delta_t * occ_scale   # Step size in occupancy map units
+
     current_t = t_entry
-    accumulated_color = vec4(0.0)
-    accumulated_opacity = 0.0
-    
+    acc_color = vec4(0.0)
+    acc_opacity = 0.0
+
     for i in range(n_samples):
-        # Map current ray position to occupancy map index
-        t_vol_normalized = current_t # Assuming t is normalized [0,1]
-        u_occ = floor(t_vol_normalized * d_vol / block_size)
+        # Map to occupancy grid
+        u_occ = floor(current_t * occ_scale)
         
         # Query distance map
         dist = distance_map.sample(u_occ)
         
         if dist > 0:
-            # Empty region: Skip
-            # Calculate steps to next occupied block
-            # This requires calculating the distance to the boundary of the current block
-            # and dividing by the step size in occupancy map units.
-            # Source formula for delta_i_j is complex; simplified logic:
-            # Skip 'dist' blocks in occupancy map space.
-            # Convert 'dist' in occupancy units to steps in ray index.
+            # Empty region: calculate steps to next block boundary
+            u_curr = current_t * occ_scale
+            steps = 0
+            for j in range(3):
+                u_j = u_curr[j]
+                du_j = delta_u[j] if isinstance(delta_u, vec3) else delta_u
+                if du_j > 0:
+                    steps_j = ceil((1.0 + floor(u_j) - u_j) / du_j)
+                else:
+                    steps_j = ceil((floor(u_j) - u_j) / du_j)
+                steps = max(steps, steps_j)
             
-            # Step size in occupancy map units per ray sample
-            delta_u_occ = (t_exit - t_entry) / (n_samples - 1) * (d_vol / block_size)
-            
-            # Number of samples to skip
-            samples_to_skip = ceil(dist / delta_u_occ)
-            
-            # Advance ray
-            current_t += samples_to_skip * delta_t
-            i += samples_to_skip - 1 # Adjust loop counter
+            # Advance ray by computed steps
+            current_t += steps * delta_t
+            i += steps - 1
             continue
             
         else:
-            # Occupied region: Sample
-            # Sample volume texture
-            value = volume_texture.sample(current_t)
+            # Occupied region: sample and composite
+            val = volume_texture.sample(current_t)
+            grad = 0.0
+            if distance_map.dimensions == volume_texture.dimensions:
+                grad = occupancy_map.sample(current_t)
             
-            # Sample gradient map (if available)
-            if gradient_map_available:
-                grad = gradient_map.sample(current_t)
-            else:
-                grad = 0.0
-                
-            # Apply Transfer Function
-            color, opacity = transfer_function(value, grad)
+            color, opacity = apply_tf(val, grad)
             
-            # Front-to-back compositing
-            alpha = 1.0 - accumulated_opacity
-            accumulated_color += color * opacity * alpha
-            accumulated_opacity += opacity * alpha
+            alpha = 1.0 - acc_opacity
+            acc_color += color * opacity * alpha
+            acc_opacity += opacity * alpha
             
-            if accumulated_opacity >= 1.0:
+            if acc_opacity >= 0.95:
                 break
                 
         current_t += delta_t
-        
-    return accumulated_color
+
+    return acc_color
+
+def intersect_aabb(origin, direction, min_b, max_b):
+    t_min = (min_b - origin) / direction
+    t_max = (max_b - origin) / direction
+    t1 = min(t_min, t_max)
+    t2 = max(t_min, t_max)
+    t_entry = max(max(t1.x, t1.y, t1.z), 0.0)
+    t_exit = min(min(t2.x, t2.y, t2.z), 1.0)
+    return t_entry, t_exit
+
+def apply_tf(value, gradient):
+    opacity = clamp((value - 0.1) / (1.0 - 0.1), 0.0, 1.0)
+    color = vec3(value)
+    return color, opacity
 ```
 
 ## Subtopics
 
 ### [Partitioned Distance Map Combination](1191-partitioned-distance-map-combination.md)
-Runtime assembly of partitioned distance maps into a global map using ping-pong buffers.
+Runtime assembly of partitioned distance maps into a global map using ping-pong buffers. It merges a selected subset of precomputed partitioned distance maps into a single global distance map for empty space skipping. It uses a ping-pong buffer strategy with two swap textures to iteratively combine maps, allowing more maps to be processed than can be bound simultaneously as shader inputs. Choose this when memory bandwidth limits the number of bound textures.
 
 ### [Occupancy Map Generation](1197-occupancy-map-generation.md)
-GPU compute shader routine to generate the binary occupancy map from volume and TF textures.
+GPU compute shader routine to generate the binary occupancy map from volume and TF textures. It serves as the foundational step for Distance Map Acceleration, providing the binary occupancy data required for empty space skipping during volume ray marching. It differs from its sibling [Partitioned Distance Map Combination](1191-partitioned-distance-map-combination.md) by generating a single global occupancy map rather than partitioned variants, and from its child [Distance Map Computation (Multi-Stage)](1205-distance-map-computation-multi-stage.md) by producing the binary mask rather than the distance field itself. Use this as the initial preprocessing step.
 
 ## Operating characteristics
-*   **Time Complexity:** Preprocessing is $O(N)$ where $N$ is the number of voxels/blocks, dominated by the distance transform [S1]. Runtime is $O(S)$ where $S$ is the number of samples in occupied regions, significantly reduced from the total ray length by skipping [S1].
-*   **Memory Complexity:** Occupancy map is $1/B^3$ of the volume size. Distance map is same size as occupancy map. Gradient map is same size as volume if precomputed [S1][S2, unofficial].
+*   **Time Complexity:** Preprocessing is dominated by the distance transform and occupancy evaluation [S1]. Runtime is proportional to the number of samples in occupied regions, significantly reduced from the total ray length by skipping [S1].
+*   **Memory Complexity:** Occupancy map requires $1/B^3$ of the volume size [S1]. Distance map requires the same memory as the occupancy map [S1]. Gradient map requires the same memory as the volume if precomputed [S1][S2, unofficial].
 *   **Performance:** Reduces texture samples in empty space, improving frame rates [S1]. Performance depends on the sparsity of the volume and the block size $B$ [S1].
 *   **Strengths:** Efficient empty space skipping, simple data structure, GPU-friendly [S1][S2, unofficial].
 *   **Limitations:** Distance map generation cost, memory overhead for distance map, less effective for dense volumes [S1].
 *   **When to use:** Sparse volumes with large empty regions [S1].
-*   **When not to use:** Dense volumes where skipping provides little benefit, or memory is constrained [S1].
 
 ## Background
 The method was introduced by Lachlan Deakin and Mark Knackstedt in 2019 in "Accelerated Volume Rendering with Chebyshev Distance Maps" [S1][S2, unofficial]. It is implemented in the open-source Vulkan renderer `VkVolume` [S2, unofficial]. The approach extends earlier work on occupancy grids by incorporating distance fields to allow larger skip steps [S1].

@@ -1,6 +1,6 @@
 # Two-Pass Depth Ray Casting
 
-Also called: Depth Peeling Ray Casting, Entry/Exit Depth Ray Casting, GPU Ray-Casting, Krüger Ray-Casting, Ray-Casting de Krüger, Volumetric Ray-Casting
+Also called: Depth Peeling Ray Casting, Entry/Exit Depth Ray Casting, Krüger Ray-Casting, Ray-Casting de Krüger, Volumetric Ray-Casting
 
 ## Overview
 
@@ -35,9 +35,9 @@ Two-Pass Depth Ray Casting is a direct volume rendering technique that computes 
 
 ### Steps
 
-1.  **Pass 1 (Entry Point):** Render the volume's bounding box with **back-face culling** enabled. Set the depth test to `DEPTH_LESS` and clear the depth buffer to 1.0. The fragment shader outputs the world-space coordinates of the intersection to `ProjInFB` [S2, unofficial]. This captures the nearest intersection (ray entry point) for each screen pixel [S2, unofficial].
-2.  **Pass 2 (Exit Point):** Render the same bounding box with **front-face culling** enabled. Set the depth test to `DEPTH_GREATER` and clear the depth buffer to 0.0. The fragment shader outputs the world-space coordinates to `ProjOutFB` [S2, unofficial]. This captures the farthest intersection (ray exit point) [S2, unofficial].
-3.  **Pass 3+ (Ray Casting and Accumulation):** Render a fullscreen quad (or front-facing cube) to `RenderFB`. Bind `ProjInFB` and `ProjOutFB` as textures providing ray start and end coordinates. Bind the 3D volume texture and transfer function.
+1.  **Pass 1 (Entry Point):** Render the volume's bounding box with back-face culling enabled [S2, unofficial]. Set the depth test to `DEPTH_LESS` and clear the depth buffer to 1.0 [S2, unofficial]. The fragment shader outputs the world-space coordinates of the intersection to `ProjInFB` [S2, unofficial]. This captures the nearest intersection (ray entry point) for each screen pixel [S2, unofficial].
+2.  **Pass 2 (Exit Point):** Render the same bounding box with front-face culling enabled [S2, unofficial]. Set the depth test to `DEPTH_GREATER` and clear the depth buffer to 0.0 [S2, unofficial]. The fragment shader outputs the world-space coordinates to `ProjOutFB` [S2, unofficial]. This captures the farthest intersection (ray exit point) [S2, unofficial].
+3.  **Pass 3+ (Ray Casting and Accumulation):** Render a fullscreen quad to `RenderFB` [S2, unofficial]. Bind `ProjInFB` and `ProjOutFB` as textures providing ray start and end coordinates [S2, unofficial]. Bind the 3D volume texture and transfer function [S2, unofficial].
     -   Calculate ray vector: $\vec{ray} = \vec{backPosition} - \vec{frontPosition}$ [S3, unofficial].
     -   Calculate ray length: $L = \|\vec{ray}\|$ [S3, unofficial].
     -   Calculate step parameters: $\delta = 1.0 / \text{steps}$, $\vec{deltaDirection} = \text{normalize}(\vec{ray}) \cdot \delta$, $\Delta L = \|\vec{deltaDirection}\|$ [S3, unofficial].
@@ -53,115 +53,93 @@ Two-Pass Depth Ray Casting is a direct volume rendering technique that computes 
         -   Update: $L_{acc} += \Delta L$, $\vec{currentPosition} += \vec{deltaDirection}$ [S3, unofficial].
         -   Early Termination: If $L_{acc} \ge L$ or $\vec{accumulatedColor}.a \ge 1.0$, break loop [S3, unofficial].
     -   Output $\vec{accumulatedColor}$ to `gl_FragColor` [S3, unofficial].
-4.  **Early Depth Test Optimization:** In passes 3 to N, write a depth value that forces fragment rejection in subsequent passes for fragments that have reached maximum opacity, utilizing the GPU's Early Depth Test feature to skip expensive fragment shader execution [S1, unofficial].
+4.  **Early Depth Test Optimization:** In passes 3 to N, write a depth value that forces fragment rejection in subsequent passes for fragments that have reached maximum opacity, utilizing the GPU's Early Depth Test feature to skip expensive fragment shader execution [S1, unofficial]. The method requires 3+ passes per frame (2 for depth, 1+ for accumulation) [S1, unofficial].
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pass 1: Entry Point
-def pass1_entry_point():
-    set_depth_test(LESS)
-    clear_depth(1.0)
-    set_culling(BACK)
-    render_bounding_box()
-    # Fragment shader: gl_FragColor = vec4(worldSpaceCoords, 1.0)
-
-# Pass 2: Exit Point
-def pass2_exit_point():
-    set_depth_test(GREATER)
-    clear_depth(0.0)
-    set_culling(FRONT)
-    render_bounding_box()
-    # Fragment shader: gl_FragColor = vec4(worldSpaceCoords, 1.0)
-
-# Pass 3+: Ray Casting
-def pass3_ray_casting():
-    set_depth_test(LESS) # For early rejection
-    clear_depth(0.0)
-    bind_framebuffer(RenderFB)
-    bind_texture("tex", ProjInFB) # Entry coords
-    bind_texture("texOut", ProjOutFB) # Exit coords (if needed, though entry is usually sufficient for direction if origin is known, but here we use both)
-    bind_texture("cubeTex", t_Volume)
+def two_pass_depth_ray_casting(volume_texture, transfer_function, viewport_width, viewport_height, steps=256, contrast=1.0, brightness=0.0, color_tresh_low=0.0, color_tresh_high=1.0, alpha_correction=2.0):
+    # Pass 1: Entry Point
+    # Render back-facing bounding box, capture world-space coordinates of back-face intersection
+    entry_coords_texture = render_bounding_box(cull_mode='BACK', depth_test='LESS', depth_clear=1.0)
     
-    # Render fullscreen quad
-    render_quad()
-
-    # Fragment Shader Logic
-    def fragment_shader():
-        # Get projected coordinates
-        projected_coords = get_fragment_position()
-        texc = vec2(
-            (projected_coords.x / projected_coords.w + 1.0) / 2.0,
-            (projected_coords.y / projected_coords.w + 1.0) / 2.0
-        )
-        
-        # Retrieve entry and exit points
-        back_position = texture2D(tex, texc).xyz
-        front_position = get_world_space_coords() # From vertex shader/quad geometry
-        
-        # Edge case: Invalid intersection
-        if back_position.x == 0.0 and back_position.y == 0.0:
-            return vec4(0.0)
-        
-        # Ray setup
-        ray = back_position - front_position
-        ray_length = length(ray)
-        steps = 256 # Typical value
-        delta = 1.0 / steps
-        delta_direction = normalize(ray) * delta
-        delta_length = length(delta_direction)
-        
-        current_position = front_position
-        accumulated_color = vec4(0.0)
-        accumulated_length = 0.0
-        
-        # Parameters
-        contrast = 1.0
-        brightness = 0.0
-        color_tresh_low = 0.0
-        color_tresh_high = 1.0
-        alpha_correction = 2.0
-        
-        for i in range(998): # Fixed max iterations
-            # Sample volume
-            texture_intensity = texture(cubeTex, current_position).r
-            texture_intensity = contrast * texture_intensity + brightness
+    # Pass 2: Exit Point
+    # Render front-facing bounding box, capture world-space coordinates of front-face intersection
+    exit_coords_texture = render_bounding_box(cull_mode='FRONT', depth_test='GREATER', depth_clear=0.0)
+    
+    # Pass 3+: Ray Casting and Accumulation
+    output_image = []
+    depth_buffer = []
+    
+    for y in range(viewport_height):
+        for x in range(viewport_width):
+            # Retrieve entry and exit points from textures
+            back_position = sample_2d_texture(entry_coords_texture, x, y)
+            front_position = get_world_space_coords_for_pixel(x, y)
             
-            # Thresholding
-            if texture_intensity <= color_tresh_low or texture_intensity >= color_tresh_high:
-                texture_intensity = 0.0
+            # Edge case: Invalid intersection
+            if back_position[0] == 0.0 and back_position[1] == 0.0:
+                output_image.append((0.0, 0.0, 0.0, 0.0))
+                depth_buffer.append(0.0)
+                continue
             
-            # Color contribution
-            if texture_intensity >= 0.5:
-                color = vec4(
-                    texture_intensity * 2.56 * alpha_correction * delta,
-                    0.0,
-                    0.0,
-                    texture_intensity * 2.56 * alpha_correction * delta
+            # Ray setup
+            ray = (back_position[0] - front_position[0], back_position[1] - front_position[1], back_position[2] - front_position[2])
+            ray_length = math.sqrt(ray[0]**2 + ray[1]**2 + ray[2]**2)
+            delta = 1.0 / steps
+            ray_dir_normalized = normalize(ray)
+            delta_direction = (ray_dir_normalized[0] * delta, ray_dir_normalized[1] * delta, ray_dir_normalized[2] * delta)
+            delta_length = math.sqrt(delta_direction[0]**2 + delta_direction[1]**2 + delta_direction[2]**2)
+            
+            current_position = front_position
+            accumulated_color = (0.0, 0.0, 0.0, 0.0)
+            accumulated_length = 0.0
+            
+            max_iterations = min(steps, 998)
+            for i in range(max_iterations):
+                # Sample volume
+                texture_intensity = sample_3d_texture(volume_texture, current_position)[0]
+                texture_intensity = contrast * texture_intensity + brightness
+                
+                # Thresholding
+                if texture_intensity <= color_tresh_low or texture_intensity >= color_tresh_high:
+                    texture_intensity = 0.0
+                
+                # Color contribution
+                scale = texture_intensity * 2.56 * alpha_correction * delta
+                if texture_intensity >= 0.5:
+                    color = (scale, 0.0, 0.0, scale)
+                else:
+                    color = (scale, scale, scale, scale)
+                
+                # Accumulate
+                accumulated_color = (
+                    accumulated_color[0] + color[0],
+                    accumulated_color[1] + color[1],
+                    accumulated_color[2] + color[2],
+                    accumulated_color[3] + color[3]
                 )
+                accumulated_length += delta_length
+                current_position = (
+                    current_position[0] + delta_direction[0],
+                    current_position[1] + delta_direction[1],
+                    current_position[2] + delta_direction[2]
+                )
+                
+                # Early termination
+                if accumulated_length >= ray_length or accumulated_color[3] >= 1.0:
+                    break
+            
+            output_image.append(accumulated_color)
+            # Write depth for early rejection in subsequent passes if fully opaque
+            if accumulated_color[3] >= 1.0:
+                depth_buffer.append(1.0)
             else:
-                color = vec4(
-                    texture_intensity * 2.56 * alpha_correction * delta,
-                    texture_intensity * 2.56 * alpha_correction * delta,
-                    texture_intensity * 2.56 * alpha_correction * delta,
-                    texture_intensity * 2.56 * alpha_correction * delta
-                )
-            
-            accumulated_color += color
-            accumulated_length += delta_length
-            current_position += delta_direction
-            
-            # Early termination
-            if accumulated_length >= ray_length or accumulated_color.a >= 1.0:
-                break
-        
-        # Write depth for early rejection in subsequent passes if fully opaque
-        if accumulated_color.a >= 1.0:
-            set_depth(1.0) # Force rejection
-        
-        return accumulated_color
+                depth_buffer.append(0.0)
+                
+    return output_image, depth_buffer
 ```
 
 ### Parameters
@@ -183,9 +161,8 @@ def pass3_ray_casting():
 
 ## Operating characteristics
 
-- **Time Complexity:** $O(P \cdot S)$, where $P$ is the number of pixels and $S$ is the number of steps per ray. The method requires 3+ passes per frame (2 for depth, 1+ for accumulation).
-- **Memory Complexity:** $O(V + P)$, where $V$ is the volume texture size and $P$ is the framebuffer size for storing entry/exit coordinates [S2, unofficial].
-- **Performance:** Early Depth Test allows skipping fragments that reach full opacity, improving performance in transparent regions [S1, unofficial]. However, the method does not scale well with large data volumes due to the overhead of rasterizing bounding box primitives for every pass [S1, unofficial].
+- **Early Depth Test:** Allows skipping fragments that reach full opacity, improving performance in transparent regions [S1, unofficial].
+- **Performance:** The method does not scale well with large data volumes due to the overhead of rasterizing bounding box primitives for every pass [S1, unofficial].
 - **Strengths:** Simple implementation on GPU; leverages hardware depth testing; no complex ray-triangle intersection code required [S1, unofficial].
 - **Limitations:** Fixed step count may lead to aliasing or slow convergence; additive accumulation is less physically accurate than alpha compositing; poor scalability with data size [S1, S3, unofficial].
 - **When to use:** Real-time rendering on Shader Model 2.0/3.0 GPUs for moderate-sized regular voxel grids [S1, unofficial].

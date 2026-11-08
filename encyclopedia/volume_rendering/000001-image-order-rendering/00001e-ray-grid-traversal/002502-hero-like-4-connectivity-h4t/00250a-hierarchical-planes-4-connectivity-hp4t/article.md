@@ -1,71 +1,71 @@
 # Hierarchical Planes 4-Connectivity (HP4T)
 
-
 ## Overview
 Hierarchical Planes 4-Connectivity (HP4T) is a ray traversal algorithm for hierarchical grids, such as Octrees or Sparse Voxel Octrees (SVO), that ensures strict 4-connectivity by preventing diagonal jumps between cells [S1, unofficial]. It distinguishes itself from its sibling [Hierarchical Planes 8-Connectivity (HP8T)](5220-hierarchical-planes-8-connectivity-hp8t.md) by applying clamping logic to the non-hit axis, thereby avoiding the surface normal ambiguities and connectivity errors inherent in 8-connected approaches [S1, unofficial].
 
 ## How it works
-HP4T calculates the intersection of a ray with the bounding planes of the current cell to determine the next cell. It uses the plane positions directly to compute the new grid coordinates, ensuring that the ray does not skip adjacent cells diagonally [S1, unofficial].
+HP4T calculates the intersection of a ray with the bounding planes of the current cell to determine the next cell [S1, unofficial]. It uses the plane positions directly to compute the new grid coordinates, ensuring that the ray does not skip adjacent cells diagonally [S1, unofficial].
 
 **Inputs and Outputs**
-*   **Inputs**: Ray origin (`ray_position`), ray direction (`ray_dir`), inverse ray direction (`inv_dir`), current grid position (`grid_position`), current cell size (`cellsize`), and grid dimensions (`grid_width`, `grid_height`).
-*   **Outputs**: Updated `grid_position` for the next cell, and the traversal distance `t` to that cell.
+*   **Inputs**: Ray origin (`ray_position`), ray direction (`ray_dir`), inverse ray direction (`inv_dir`), current grid position (`grid_position`), current cell size (`cellsize`), and grid dimensions (`grid_width`, `grid_height`) [S1, unofficial].
+*   **Outputs**: Updated `grid_position` for the next cell, and the traversal distance `t` to that cell [S1, unofficial].
 
 **Data Structures**
-The method operates on 2D grid positions (x, y) representing the current cell indices in the hierarchical level.
-*   `grid_position`: A 2D vector $(x, y)$ of integer or floating-point coordinates.
-*   `ray_position`: A 2D vector $(x, y)$ representing the ray origin projected or relevant to the current plane.
-*   `ray_dir`: A 2D vector $(x, y)$ representing the ray direction.
-*   `inv_dir`: A 2D vector $(x, y)$ where each component is the reciprocal of the corresponding component in `ray_dir`.
-*   `cellsize`: A scalar representing the physical size of the cell at the current hierarchy level.
+The method operates on 2D grid positions $(x, y)$ representing the current cell indices in the hierarchical level [S1, unofficial].
+*   `grid_position`: A 2D vector $(x, y)$ of integer or floating-point coordinates [S1, unofficial].
+*   `ray_position`: A 2D vector $(x, y)$ representing the ray origin projected or relevant to the current plane [S1, unofficial].
+*   `ray_dir`: A 2D vector $(x, y)$ representing the ray direction [S1, unofficial].
+*   `inv_dir`: A 2D vector $(x, y)$ where each component is the reciprocal of the corresponding component in `ray_dir` [S1, unofficial].
+*   `cellsize`: A scalar representing the physical size of the cell at the current hierarchy level [S1, unofficial].
 
 **Parameters**
-*   `cellsize`: The size of the cell in world units. It is determined by the hierarchy level $L$ as $2^L$. For example, at level 0, `cellsize` is 1; at level 1, it is 2; at level 2, it is 4 [S1, unofficial].
-*   `inv_dir`: Defined as the element-wise reciprocal of `ray_dir`. Note that this is distinct from `abs_inv_dir` as it retains the sign of the direction [S1, unofficial].
-*   `is_dir_pos(x)`: A helper function returning $1$ if $x \ge 0$, else $0$. Used to determine the offset of the next plane in the positive direction [S1, unofficial].
-*   `is_dir_neg(x)`: A helper function returning $0$ if $x \ge 0$, else $1$. Used to determine the offset of the next plane in the negative direction [S1, unofficial].
-*   `sign_dir(x)`: A helper function returning the sign of $x$ ($1$ if $x \ge 0$, $-1$ if $x < 0$).
+*   `cellsize`: The size of the cell in world units, determined by the hierarchy level $L$ as $2^L$ [S1, unofficial]. For example, at level 0, `cellsize` is 1; at level 1, it is 2; at level 2, it is 4 [S1, unofficial].
+*   `inv_dir`: Defined as the element-wise reciprocal of `ray_dir`, retaining the sign of the direction rather than using absolute values [S1, unofficial].
+*   `is_dir_pos(x)`: A helper function returning $1$ if $x \ge 0$, else $0$, used to determine the offset of the next plane in the positive direction [S1, unofficial].
+*   `is_dir_neg(x)`: A helper function returning $0$ if $x \ge 0$, else $1$, used to determine the offset of the next plane in the negative direction [S1, unofficial].
+*   `sign_dir(x)`: A helper function returning the sign of $x$ ($1$ if $x \ge 0$, $-1$ if $x < 0$) [S1, unofficial].
 
 **Steps**
-1.  **Calculate Plane Positions**: Compute the world coordinates of the planes bounding the current cell in both axes.
-    $$ \text{planes} = (\lfloor \text{grid\_position} / \text{cellsize} \rfloor + \text{is\_dir\_pos}) \times \text{cellsize} $$
-    Here, division and addition are performed component-wise (Hadamard product logic for the final multiplication). $\lfloor \cdot \rfloor$ denotes the floor function [S1, unofficial].
+1.  **Calculate Plane Positions**: Compute the world coordinates of the planes bounding the current cell in both axes using component-wise operations:
+    $$ \text{planes} = (\lfloor \text{grid\_position} / \text{cellsize} \rfloor + \text{is\_dir\_pos}(\text{ray\_dir})) \times \text{cellsize} $$
+    Here, $\lfloor \cdot \rfloor$ denotes the floor function applied component-wise, and the final multiplication is a Hadamard (pairwise) product [S1, unofficial].
 
-2.  **Calculate Total T**: Compute the distance along the ray to each plane.
+2.  **Calculate Total T**: Compute the distance along the ray to each plane using component-wise multiplication:
     $$ \text{total\_t} = (\text{planes} - \text{ray\_position}) \times \text{inv\_dir} $$
-    This multiplication is component-wise [S1, unofficial].
+    This yields the parametric distance to the X and Y planes respectively [S1, unofficial].
 
-3.  **Determine Hit Axis**: Compare `total_t.x` and `total_t.y`.
+3.  **Determine Hit Axis**: Compare `total_t.x` and `total_t.y` to identify which plane the ray intersects first [S1, unofficial].
 
 4.  **If `total_t.x <= total_t.y` (X-plane hit first)**:
-    a. Set $t = \text{total\_t.x}$.
+    a. Set $t = \text{total\_t.x}$ [S1, unofficial].
     b. Update X position:
-       $$ \text{grid\_position.x} = \text{planes.x} - \text{is\_ray\_neg.x} $$
-       Note: `is_ray_neg` is derived from the ray direction sign. If `ray_dir.x < 0`, `is_ray_neg.x` is 1, otherwise 0. This effectively moves the grid index to the next cell in the direction of travel [S1, unofficial].
+       $$ \text{grid\_position.x} = \text{planes.x} - \text{is\_dir\_neg}(\text{ray\_dir.x}) $$
+       This moves the grid index to the next cell in the direction of travel [S1, unofficial].
     c. Store the old Y position:
        $$ \text{old\_grid\_pos\_y} = \text{grid\_position.y} $$
     d. Calculate the candidate new Y position based on ray intersection:
        $$ \text{grid\_position.y} = \lfloor \text{ray\_dir.y} \times t + \text{ray\_position.y} \rfloor $$
     e. Apply 4-connectivity clamping to Y. First, ensure no backward movement:
-       $$ \text{grid\_position.y} = \text{sign\_dir.y} \times \max(0.0, \text{sign\_dir.y} \times (\text{grid\_position.y} - \text{old\_grid\_pos\_y})) $$
+       $$ \text{grid\_position.y} = \text{sign\_dir}(\text{ray\_dir.y}) \times \max(0.0, \text{sign\_dir}(\text{ray\_dir.y}) \times (\text{grid\_position.y} - \text{old\_grid\_pos\_y})) $$
        Second, ensure the new Y does not skip the adjacent cell defined by the plane:
-       $$ \text{grid\_position.y} = \text{sign\_dir.y} \times \min(\text{sign\_dir.y} \times (\text{planes.y} - \text{is\_dir\_pos.y}), \text{sign\_dir.y} \times (\text{grid\_position.y} + \text{old\_grid\_pos\_y})) $$
+       $$ \text{grid\_position.y} = \text{sign\_dir}(\text{ray\_dir.y}) \times \min(\text{sign\_dir}(\text{ray\_dir.y}) \times (\text{planes.y} - \text{is\_dir\_pos}(\text{ray\_dir.y})), \text{sign\_dir}(\text{ray\_dir.y}) \times (\text{grid\_position.y} + \text{old\_grid\_pos\_y})) $$
        This clamping prevents diagonal jumps by restricting the Y update to the immediate neighbor [S1, unofficial].
 
 5.  **Else (`total_t.x > total_t.y`, Y-plane hit first)**:
-    a. Set $t = \text{total\_t.y}$.
+    a. Set $t = \text{total\_t.y}$ [S1, unofficial].
     b. Update Y position:
-       $$ \text{grid\_position.y} = \text{planes.y} - \text{is\_ray\_neg.y} $$
-    c. Update X position using simplified clamping logic equivalent to steps 4b-4e:
-       $$ \text{grid\_position.x} = \text{sign\_dir.x} \times \min(\text{sign\_dir.x} \times \text{planes.x} - \text{is\_dir\_pos.x}, \max(0.0, \text{sign\_dir.x} \times (\lfloor \text{ray\_dir.x} \times t + \text{ray\_position.x} \rfloor - \text{grid\_position.x})) + \text{sign\_dir.x} \times \text{grid\_position.x}) $$
-       *Note: The source code presents this as a single complex expression. The logic mirrors the X-hit case: calculate candidate, clamp to prevent backward movement, clamp to prevent skipping the plane neighbor [S1, unofficial].*
+       $$ \text{grid\_position.y} = \text{planes.y} - \text{is\_dir\_neg}(\text{ray\_dir.y}) $$
+    c. Update X position using simplified clamping logic:
+       $$ \text{grid\_position.x} = \text{sign\_dir}(\text{ray\_dir.x}) \times \min(\text{sign\_dir}(\text{ray\_dir.x}) \times \text{planes.x} - \text{is\_dir\_pos}(\text{ray\_dir.x}), \max(0.0, \text{sign\_dir}(\text{ray\_dir.x}) \times (\lfloor \text{ray\_dir.x} \times t + \text{ray\_position.x} \rfloor - \text{grid\_position.x})) + \text{sign\_dir}(\text{ray\_dir.x}) \times \text{grid\_position.x}) $$
+       This mirrors the X-hit case logic, calculating a candidate position, clamping to prevent backward movement, and clamping to prevent skipping the plane neighbor [S1, unofficial].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def hp4t_step(grid_position, ray_position, ray_dir, inv_dir, cellsize, grid_width, grid_height):
-    # Helper functions
     def is_dir_pos(x):
         return 1 if x >= 0 else 0
     
@@ -75,13 +75,11 @@ def hp4t_step(grid_position, ray_position, ray_dir, inv_dir, cellsize, grid_widt
     def sign_dir(x):
         return 1 if x >= 0 else -1
 
-    # 1. Calculate plane positions
-    # floor is applied component-wise
-    planes_x = (floor(grid_position.x / cellsize) + is_dir_pos(ray_dir.x)) * cellsize
-    planes_y = (floor(grid_position.y / cellsize) + is_dir_pos(ray_dir.y)) * cellsize
+    # 1. Calculate plane positions (component-wise)
+    planes_x = (math.floor(grid_position.x / cellsize) + is_dir_pos(ray_dir.x)) * cellsize
+    planes_y = (math.floor(grid_position.y / cellsize) + is_dir_pos(ray_dir.y)) * cellsize
     
-    # 2. Calculate total_t
-    # Component-wise multiplication
+    # 2. Calculate total_t (component-wise)
     total_t_x = (planes_x - ray_position.x) * inv_dir.x
     total_t_y = (planes_y - ray_position.y) * inv_dir.y
     
@@ -94,41 +92,16 @@ def hp4t_step(grid_position, ray_position, ray_dir, inv_dir, cellsize, grid_widt
         
         # Clamp Y
         old_grid_pos_y = grid_position.y
-        candidate_y = floor(ray_dir.y * t + ray_position.y)
+        candidate_y = math.floor(ray_dir.y * t + ray_position.y)
         
         # Clamp 1: prevent backward movement
-        diff_y = candidate_y - old_grid_pos_y
-        if ray_dir.y >= 0:
-            diff_y = max(0.0, diff_y)
-        else:
-            diff_y = min(0.0, diff_y) # sign_dir.y * max(0, sign_dir.y * diff) logic adapted for float
-        
-        # More precise implementation of the source's sign logic:
-        # grid_position.y = sign_dir.y * max(0.0f, sign_dir.y * (grid_position.y - old_grid_pos_y))
-        # Let's stick to the source formula structure for clarity
-        temp_y = candidate_y - old_grid_pos_y
-        if ray_dir.y >= 0:
-            grid_position.y = max(0.0, temp_y)
-        else:
-            grid_position.y = min(0.0, temp_y) # This is sign_dir.y * max(0, sign_dir.y * temp)
-            
-        # Actually, let's rewrite the source's specific clamping exactly:
-        # grid_position.y = sign_dir.y * max(0.0f, sign_dir.y * (grid_position.y - old_grid_pos_y))
-        # If ray_dir.y > 0: sign=1. max(0, 1*(new-old)). If new<old, result 0. new stays old.
-        # If ray_dir.y < 0: sign=-1. max(0, -1*(new-old)) = max(0, old-new). Result is old-new.
-        # grid_pos = -1 * (old-new) = new-old. Wait.
-        # Let's use the explicit source lines:
-        
-        grid_position.y = candidate_y
-        s_y = sign_dir(ray_dir.y)
-        grid_position.y = s_y * max(0.0, s_y * (grid_position.y - old_grid_pos_y))
+        grid_position.y = sign_dir(ray_dir.y) * max(0.0, sign_dir(ray_dir.y) * (candidate_y - old_grid_pos_y))
         
         # Clamp 2: prevent skipping plane
-        # grid_position.y = sign_dir.y * min( sign_dir.y * (planes.y - is_dir_pos.y), sign_dir.y * (grid_position.y + old_grid_pos_y))
-        limit1 = planes_y - is_dir_pos(ray_dir.y)
-        limit2 = grid_position.y + old_grid_pos_y
-        grid_position.y = s_y * min(s_y * limit1, s_y * limit2)
-        
+        grid_position.y = sign_dir(ray_dir.y) * min(
+            sign_dir(ray_dir.y) * (planes_y - is_dir_pos(ray_dir.y)),
+            sign_dir(ray_dir.y) * (grid_position.y + old_grid_pos_y)
+        )
     else:
         # Y plane hit first
         t = total_t_y
@@ -136,33 +109,20 @@ def hp4t_step(grid_position, ray_position, ray_dir, inv_dir, cellsize, grid_widt
         # Update Y
         grid_position.y = planes_y - is_dir_neg(ray_dir.y)
         
-        # Update X with simplified clamping (Line 9 in source)
-        # grid_position.x = sign_dir.x * min( sign_dir.x * planes.x - is_dir_pos.x, max(0.0, sign_dir.x * (floor(ray_dir.x * t + ray_position.x) - grid_position.x)) + sign_dir.x * grid_position.x)
-        
+        # Clamp X
         s_x = sign_dir(ray_dir.x)
-        candidate_x = floor(ray_dir.x * t + ray_position.x)
+        candidate_x = math.floor(ray_dir.x * t + ray_position.x)
         
-        # Inner max term
-        diff_x = candidate_x - grid_position.x
-        max_term = max(0.0, s_x * diff_x)
-        
-        # Final min term
-        limit1 = s_x * planes_x - is_dir_pos(ray_dir.x) # Note: source says sign_dir.x * planes.x - is_dir_pos.x
-        # Wait, source line 9: sign_dir.x * min( sign_dir.x * planes.x - is_dir_pos.x, ... )
-        # The first arg to min is: sign_dir.x * planes.x - is_dir_pos.x ? 
-        # Source: sign_dir.x * min( sign_dir.x * planes.x - is_dir_pos.x, ... )
-        # Let's parse carefully:
-        # A = sign_dir.x * planes.x - is_dir_pos.x
-        # B = max(0.0, sign_dir.x * (floor(...) - grid_position.x)) + sign_dir.x * grid_position.x
-        # Result = sign_dir.x * min(A, B)
-        
-        A = s_x * planes_x - is_dir_pos(ray_dir.x)
-        B = max(0.0, s_x * (candidate_x - grid_position.x)) + s_x * grid_position.x
-        
-        grid_position.x = s_x * min(A, B)
+        grid_position.x = s_x * min(
+            s_x * planes_x - is_dir_pos(ray_dir.x),
+            max(0.0, s_x * (candidate_x - grid_position.x)) + s_x * grid_position.x
+        )
 
     return grid_position, t
 ```
+
+**Pitfalls**
+Precision and connectivity errors in naive implementations using `compare` variables and `t + eps` can cause 8-connectivity (diagonal jumps) and incorrect surface normals [S1, unofficial]. HP4T avoids this by using the explicit clamping logic described above [S1, unofficial].
 
 ## Subtopics
 
@@ -170,16 +130,16 @@ def hp4t_step(grid_position, ray_position, ray_dir, inv_dir, cellsize, grid_widt
 Removes the clamping logic of HP4T to allow 8-connectivity (diagonal jumps), simplifying the update code but requiring careful handling of surface normals and fractional positions. Choose HP8T when performance is critical and normal accuracy can be handled via post-processing or alternative methods.
 
 ## Operating characteristics
-*   **Time Complexity**: Constant time per cell traversal step, involving basic arithmetic operations (floor, multiply, add, min, max).
-*   **Memory Complexity**: Constant space, requiring only a few temporary variables for the current step.
-*   **Performance**: In randomized testing of 100,000,000 cases, HP4T achieved a 99.99% chance of correct position and 99.99% chance of correct surface normal [S1, unofficial].
-*   **Strengths**: Ensures strict 4-connectivity, avoiding diagonal jumps that can cause artifacts in hierarchical grids. More robust than naive DDA or 8-connected variants regarding normal calculation.
-*   **Limitations**: Slightly more complex logic than HP8T due to clamping. Not 100% accurate in all edge cases compared to H4T (which achieves 100% in testing) [S1, unofficial].
-*   **When to use**: When traversing hierarchical grids (Octrees/SVO) and strict 4-connectivity is required to avoid skipping cells or producing incorrect normals, and the slight performance overhead of clamping is acceptable.
-*   **When not to use**: If 100% geometric correctness is required and the overhead of H4T is acceptable, or if maximum performance is needed and 8-connectivity artifacts can be mitigated elsewhere.
+*   **Time Complexity**: Constant time per cell traversal step, involving basic arithmetic operations (floor, multiply, add, min, max) [S1, unofficial].
+*   **Memory Complexity**: Constant space, requiring only a few temporary variables for the current step [S1, unofficial].
+*   **Performance**: In randomized testing of 100,000,000 cases, HP4T achieved a 99.99% chance of correct position and a 99.99% chance of correct surface normal [S1, unofficial].
+*   **Strengths**: Ensures strict 4-connectivity, avoiding diagonal jumps that can cause artifacts in hierarchical grids [S1, unofficial].
+*   **Limitations**: Slightly more complex logic than HP8T due to clamping, and achieves 99.99% accuracy rather than the 100% accuracy of H4T in randomized testing [S1, unofficial].
+*   **When to use**: When traversing hierarchical grids (Octrees/SVO) and strict 4-connectivity is required to avoid skipping cells or producing incorrect normals, and the slight performance overhead of clamping is acceptable [S1, unofficial].
+*   **When not to use**: If 100% geometric correctness is required and the overhead of H4T is acceptable, or if maximum performance is needed and 8-connectivity artifacts can be mitigated elsewhere [S1, unofficial].
 
 ## Background
-HP4T is part of a family of ray traversal methods for hierarchical grids, including H4T and HP8T. The "T" stands for "total," referring to the total summation concept from earlier chapters in the source material, and "HP" stands for Hierarchical Planes [S1, unofficial]. The method was developed to address precision and connectivity errors found in naive implementations that use `compare` variables and `t + eps` for level switching, which can result in 8-connectivity and incorrect surface normals [S1, unofficial]. The author notes that such issues may be a reason for surface normal errors in games like *Teardown*, which uses a similar flawed compare variable optimization [S1, unofficial]. The method draws inspiration from Scratchapixel's code for clamping [S1, unofficial].
+HP4T is part of a family of ray traversal methods for hierarchical grids, including H4T and HP8T [S1, unofficial]. The "T" stands for "total," referring to the total summation concept from earlier chapters in the source material, and "HP" stands for Hierarchical Planes [S1, unofficial]. The method was developed to address precision and connectivity errors found in naive implementations that use `compare` variables and `t + eps` for level switching, which can result in 8-connectivity and incorrect surface normals [S1, unofficial]. The author notes that such issues may be a reason for surface normal errors in games like *Teardown*, which uses a similar flawed compare variable optimization [S1, unofficial]. The method draws inspiration from Scratchapixel's code for clamping [S1, unofficial].
 
 ## Sources
 [S1] versal algorithm for ray tracing Hur man gör en hierarkisk ..., https://kth.diva-portal.org/smash/get/diva2:2069409/FULLTEXT01.pdf, fetched 2026-10-25 (unofficial)

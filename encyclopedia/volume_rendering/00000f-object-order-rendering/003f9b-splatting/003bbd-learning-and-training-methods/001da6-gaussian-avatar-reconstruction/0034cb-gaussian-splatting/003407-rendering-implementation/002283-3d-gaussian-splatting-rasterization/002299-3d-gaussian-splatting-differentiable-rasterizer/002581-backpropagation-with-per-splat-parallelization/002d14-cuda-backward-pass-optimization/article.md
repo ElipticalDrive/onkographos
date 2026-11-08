@@ -3,82 +3,115 @@
 Also called: Backward pass CUDA optimisation, CUDA Backward Pass Optimisations, CUDA Parallel Optimisation for Backward Pass, CUDA-level optimisation, Efficient CUDA Backward Optimisation, cu-opt
 
 ## Overview
-This method applies low-level GPU kernel optimizations to the 3D Gaussian Splatting backward pass to reduce memory access overhead and improve cache utilization [S1, unofficial]. It differs from structural optimizations like Loss-Accumulation Guided (LAG) densification or pruning by reducing training time independently of the number of Gaussian primitives, providing consistent speedups across all configurations [S1, unofficial]. While LAG and pruning reduce the Gaussian count, this CUDA-level optimization reduces per-iteration execution overhead without altering rendering results or optimization behavior [S1, unofficial].
+This method applies low-level CUDA kernel optimizations to the 3D Gaussian Splatting backward pass to reduce memory access overhead and improve cache utilization [S2, S3, unofficial]. It differs from algorithmic changes like Loss-Accumulation Guided (LAG) densification or pruning by reducing training time independently of the Gaussian count, providing consistent speedups across all configurations [S2, unofficial]. It builds on [Backpropagation with Per-Splat Parallelization](3533-backpropagation-with-per-splat-parallelization.md) by refining the thread organization and memory access patterns within that parallelization scheme.
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** The original 3D Gaussian Splatting backward pass kernel parameters, including gradients, Gaussian attributes, and camera parameters [S1, unofficial].
-*   **Output:** An optimized backward pass execution that reduces redundant global memory transactions and improves warp-level parallelism [S1, unofficial].
+The optimization targets the backward pass kernel, which is often a bottleneck due to redundant global memory transactions and warp stalls [S2, S3, unofficial]. It operates on buckets of 32 Gaussians (one warp) to efficiently compute gradients using warp-level primitives [S3, unofficial].
 
-**Data Structures and Layout:**
-The optimization relies on a specific thread block organization and memory hierarchy [S1, unofficial]:
-1.  **Thread Block Organization:** Each block uses 8 warps, totaling 256 threads [S1, unofficial]. Each thread corresponds to a single pixel (1:1 thread-to-pixel mapping) [S1, unofficial]. This contrasts with the original 3DGS implementation where each block contains 32 threads and each thread loads data from multiple pixels [S1, unofficial].
-2.  **Memory Hierarchy:** Tile-level data are stored in shared memory to enable reuse across warps within the block [S1, unofficial].
+### Inputs and Outputs
+*   **Inputs:**
+    *   Gradients of the loss with respect to the final pixel colors ($\frac{\partial L}{\partial C_{final}}$) [S3, unofficial].
+    *   Intermediate buffers from the forward pass:
+        *   $T_{32k}$: Transmittance after every 32nd Gaussian (bucket boundary) for each pixel [S3, unofficial].
+        *   $C_{32k}$: Color contribution accumulated after every 32nd Gaussian for each pixel [S3, unofficial].
+        *   $N_{contrib}$: The final number of contributing Gaussians at each pixel [S3, unofficial].
+    *   Gaussian parameters (position, covariance, opacity, spherical harmonics coefficients) [S2, S3, unofficial].
+*   **Outputs:**
+    *   Gradients for all Gaussian parameters ($\frac{\partial L}{\partial \theta}$) written to global memory [S3, unofficial].
 
-**Steps:**
-1.  **Redesign Thread Organization:** Reconfigure the kernel launch parameters so that each thread block consists of 256 threads (8 warps) [S1, unofficial]. Assign one thread per pixel to be processed [S1, unofficial].
-2.  **Adjust Memory Layouts:** Restructure data access patterns to enable vectorised memory access [S1, unofficial]. This involves loading tile-level data into shared memory so that threads within a warp can reuse the same data [S1, unofficial].
-3.  **Reduce Redundant Transactions:** By leveraging warp-level data reuse via shared memory and vectorised access, eliminate redundant global memory transactions [S1, unofficial].
+### Data Structures and Layouts
+*   **Thread Block Organization:** Each block uses 8 warps (256 threads) [S2, unofficial]. Each thread corresponds to a single pixel, contrasting with the original 3DGS where each thread loads data from multiple pixels [S2, unofficial].
+*   **Memory Hierarchy:** Tile-level data (intermediate blending states) are stored in shared memory for reuse across warps [S2, S3, unofficial].
+*   **Parameter Packing:** Function parameters are coalesced into compact `float4` structs to reduce memory traffic. Specifically, conics (projected covariances) are combined with the mean $\mu$ in the rasterizer [S1, unofficial].
 
-**Pseudocode:**
-The following pseudocode illustrates the kernel structure. Note that the actual gradient computation logic remains unchanged; only the data access pattern is optimized [S1, unofficial].
+### Steps
+1.  **Bucket Assignment:** Divide the Gaussians in each tile into buckets of 32 Gaussians [S3, unofficial]. Launch 32 threads (one warp) per bucket, where each thread is responsible for accumulating the gradient of a single Gaussian across the associated tile [S3, unofficial].
+2.  **Shared Memory Prefetching:** To avoid warp stalls caused by global memory latency, all 32 threads in a warp collaboratively load a batch of alpha blending states (transmittance and color contributions) into shared memory before they are needed [S3, unofficial]. Specifically, they load the states corresponding to the next 32 Gaussians in the bucket [S3, unofficial].
+3.  **Replay Blending:** Starting from the initial color and transmittance written in the forward pass (stored in $C_{32k}$ and $T_{32k}$), the threads replay the alpha blending process using warp-level primitives to compute the necessary gradients for the current bucket [S3, unofficial]. The first thread in each warp reads the next state directly from shared memory instead of global memory [S3, unofficial].
+4.  **Gradient Accumulation:** Each thread accumulates the gradients for its assigned Gaussian across all pixels in the tile [S3, unofficial].
+5.  **Atomic Write:** Write the accumulated gradients to global memory using atomics, as Gaussians can be inside multiple buckets across tiles [S3, unofficial].
+
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def backward_pass_kernel(gradients, gaussians, cameras, image_width, image_height):
-    # Kernel launch: gridDim = (ceil(image_width/16), ceil(image_height/16)), blockDim = (16, 16)
-    # Total threads per block = 256 (8 warps)
-    tile_size = 16
-    pixel_x = blockIdx.x * tile_size + threadIdx.x
-    pixel_y = blockIdx.y * tile_size + threadIdx.y
+# Kernel: BackwardPassOptimized
+# Grid: (num_tiles, num_buckets_per_tile)
+# Block: (32 threads, 1 warp)
 
-    if pixel_x >= image_width or pixel_y >= image_height:
-        return
+def backward_pass_optimized(tile_id, bucket_id):
+    # 1. Identify the 32 Gaussians in this bucket
+    gaussian_indices = get_bucket_gaussians(tile_id, bucket_id)
+    
+    # 2. Load intermediate states from forward pass buffers
+    # These are stored per-pixel for every 32nd Gaussian
+    start_transmittance = load_from_global(T_32k, tile_id, bucket_id)
+    start_color = load_from_global(C_32k, tile_id, bucket_id)
+    
+    # 3. Prefetch blending states into shared memory
+    # All 32 threads collaborate to load the next batch of states
+    shared_states = load_batch_into_shared_memory(tile_id, bucket_id)
+    
+    # Initialize per-thread gradient accumulators
+    grad_pos = zeros(3)
+    grad_cov = zeros(6) # Symmetric 3x3 matrix
+    grad_opacity = 0.0
+    grad_sh = zeros(num_sh_coeffs)
+    
+    current_transmittance = start_transmittance
+    current_color = start_color
+    
+    # 4. Replay blending for the 32 Gaussians in the bucket
+    for i in range(32):
+        # Read next state from shared memory (low latency)
+        next_transmittance, next_color = read_from_shared_memory(shared_states, i)
+        
+        # Get Gaussian parameters
+        g = get_gaussian(gaussian_indices[i])
+        
+        # Compute contribution and gradient for this Gaussian
+        # This involves the derivative of the alpha blending equation
+        # dL/dg = sum_over_pixels( dL/dC_final * dC_final/dg )
+        
+        # Warp-level reduction to accumulate gradients across pixels in the tile
+        # Note: In a real implementation, this uses __shfl_down_sync
+        grad_pos += compute_grad_pos(g, current_transmittance, next_transmittance, grad_loss)
+        grad_cov += compute_grad_cov(g, current_transmittance, next_transmittance, grad_loss)
+        grad_opacity += compute_grad_opacity(g, current_transmittance, next_transmittance, grad_loss)
+        grad_sh += compute_grad_sh(g, current_transmittance, next_transmittance, grad_loss)
+        
+        current_transmittance = next_transmittance
+        current_color = next_color
 
-    # Shared memory allocation for tile-level data reuse across warps
-    shared_tile = [0.0] * (tile_size * tile_size)
-
-    # Load tile data into shared memory (vectorised access pattern)
-    if threadIdx.x < tile_size and threadIdx.y < tile_size:
-        shared_tile[threadIdx.y * tile_size + threadIdx.x] = global_memory_load(pixel_x, pixel_y)
-
-    # Synchronize threads within the block
-    sync_threads()
-
-    # Each thread computes gradients for its assigned pixel using shared memory
-    gradients[pixel_y, pixel_x] = compute_pixel_gradients(pixel_x, pixel_y, shared_tile, gaussians, cameras)
+    # 5. Write gradients to global memory using atomics
+    # Gaussians may be processed in multiple buckets/tiles
+    atomic_add(grad_pos_buffer, gaussian_indices[i], grad_pos)
+    atomic_add(grad_cov_buffer, gaussian_indices[i], grad_cov)
+    atomic_add(grad_opacity_buffer, gaussian_indices[i], grad_opacity)
+    atomic_add(grad_sh_buffer, gaussian_indices[i], grad_sh)
 ```
 
-**Parameters:**
-*   **Block Size:** 256 threads (8 warps) [S1, unofficial].
-*   **Warp Size:** 32 threads (standard NVIDIA GPU warp size) [S1, unofficial].
+### Parameters and Typical Values
+*   **Bucket Size:** 32 Gaussians (one warp) [S3, unofficial].
+*   **Threads per Block:** 256 (8 warps) [S2, unofficial].
+*   **Shared Memory Usage:** Sufficient to hold blending states for the next batch of 32 Gaussians for all pixels in the tile [S3, unofficial].
 
-**Edge Cases and Pitfalls:**
-*   **Precision:** The optimization does not alter the mathematical operations, so numerical precision remains identical to the original implementation [S1, unofficial].
-*   **Boundaries:** Standard boundary checks for image dimensions are required, as with any rasterization kernel [G].
-*   **Shared Memory Limits:** Tile size must fit within the GPU's shared memory capacity per block [G].
-
-### Subtopics
-**Loss-Accumulation Guided (LAG) Densification**
-A strategy that inhibits unnecessary Gaussian generation in well-reconstructed regions by combining opacity, opacity gradients, and training loss [S1, unofficial]. It sets itself apart by controlling density dynamically during training rather than removing primitives afterward [G]. Choose this when you want to reduce the total number of Gaussians during training [G]. [LAG](3532-loss-accumulation-guided-densification.md)
-
-**Pruning Strategy**
-Removes unstable or low-contribution primitives after densification based on opacity and pruning scores [S1, unofficial]. It sets itself apart by actively discarding redundant Gaussians to compact the scene [G]. Choose this to further reduce Gaussian count and training time with negligible impact on rendering quality [G]. [Pruning](3531-pruning-strategy.md)
-
-**Backpropagation with Per-Splat Parallelization**
-Maps threads to 2D splats instead of pixels to avoid atomic contention on gradient accumulation [G]. It sets itself apart by addressing parallelization bottlenecks at the splat level rather than optimizing memory access patterns [G]. Choose this when atomic contention is the primary bottleneck [G]. [Per-Splat Parallelization](3533-backpropagation-with-per-splat-parallelization.md)
+### Edge Cases and Pitfalls
+*   **Warp Stalls:** If threads are synchronized while the first thread loads alpha blending state from global memory, the entire warp stalls [S3, unofficial]. The shared memory prefetching optimization specifically addresses this [S3, unofficial].
+*   **Atomic Contention:** Since Gaussians can be inside multiple buckets across tiles, atomic writes are required, which can become a bottleneck if not managed carefully [S3, unofficial].
+*   **Bounding Box Overestimation:** While not part of the backward pass optimization itself, using square bounding boxes for anisotropic/transparent Gaussians leads to overestimation. Using axis-aligned, rectangular bounding boxes with factored-in density reduces this, improving the efficiency of the backward pass by reducing the number of irrelevant pixels processed [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Reduces training time by approximately 7% on Mip-NeRF 360 datasets (200.1s vs 215.4s for LAG alone) [S1, unofficial].
-*   **Memory Complexity:** Improves cache utilization by using shared memory for tile-level data reuse, reducing redundant global memory transactions [S1, unofficial].
-*   **Scaling:** Provides consistent speedups across all configurations because it reduces overhead independent of the number of Gaussians [S1, unofficial].
-*   **Strengths:** Low-level optimization that does not require changes to the high-level training loop or data structures. Maintains competitive PSNR, SSIM, and LPIPS performance [S1, unofficial].
-*   **Limitations:** Requires specific CUDA kernel restructuring. Performance gains scale with the GPU's shared memory capacity and warp execution efficiency [S1, unofficial].
-*   **When to Use:** When training time is a bottleneck and structural optimizations (LAG, pruning) have already been applied or are insufficient [G].
-*   **When Not to Use:** When the primary bottleneck is not memory access overhead in the backward pass, or when hardware does not support efficient warp-level shared memory access [G].
+*   **Time Complexity:** The optimization reduces the backward pass overhead significantly. On an RTX 4070 Ti SUPER, the baseline rasterizer takes 210 ms for a 2K image, while the optimized kernel takes 9.3 ms, a 22x acceleration [S1, unofficial].
+*   **Memory Complexity:** Requires additional buffers for intermediate color and transmittance after every 32nd Gaussian and the final number of contributing Gaussians [S3, unofficial]. Shared memory is used for blending states [S3, unofficial].
+*   **Measured Performance:** On Mip-NeRF 360, LAG+cu-opt achieves 200.1s training time versus 215.4s for LAG alone, a ~7% reduction [S2, unofficial]. Shared memory optimization improves kernel runtime by up to 2x [S3, unofficial].
+*   **Strengths:** Reduces training time independently of the number of Gaussians, providing consistent speedups across all configurations [S2, unofficial]. Does not alter rendering results or optimization behavior [S2, unofficial].
+*   **Limitations:** Requires careful management of shared memory and atomic operations. The speedup is specific to the backward pass and may be less pronounced if the forward pass or other stages are the bottleneck.
 
 ## Background
-This method was introduced in the paper "Loss-Guided Density Control and Efficient Backward Optimisation for Compact Gaussian Splatting" [S1, unofficial]. It is part of a framework that combines loss-aware density control (LAG), pruning, and CUDA-level optimizations to achieve faster and more compact Gaussian Splatting [S1, unofficial]. The optimization specifically targets the backward pass kernel, which is a significant component of training time in 3D Gaussian Splatting [S1, unofficial].
+The method originates from optimizations proposed in "Loss-Guided Density Control and Efficient Backward Optimisation for Compact Gaussian Splatting" [S2, unofficial] and "Faster-GS: Analyzing and Improving Gaussian Splatting Optimization" [S3, unofficial]. It builds on the per-Gaussian backward pass formulation by Mallick et al. [56] (cited in [S3, unofficial]). The goal is to reduce the computational overhead of the backward pass, which is a significant part of the training time in 3D Gaussian Splatting [S1, S2, unofficial].
 
 ## Sources
-[S1] Loss-Guided Density Control and Efficient Backward Optimisation for Compact Gaussian Splatting, https://doi.org/10.21203/rs.3.rs-10572680/v1, fetched 2026-10-26 (unofficial)
+[S1] FaCT-GS: Fast and Scalable CT Reconstruction with Gaussian Splatting, https://doi.org/10.1007/978-3-032-37464-6_13, fetched 2026-10-26 (unofficial)
+[S2] Loss-Guided Density Control and Efficient Backward Optimisation for Compact Gaussian Splatting, https://doi.org/10.21203/rs.3.rs-10572680/v1, fetched 2026-10-26 (unofficial)
+[S3] Faster-GS: Analyzing and Improving Gaussian Splatting Optimization, https://arxiv.org/abs/2602.09999v1, fetched 2026-10-26 (unofficial)

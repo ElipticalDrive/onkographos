@@ -1,0 +1,200 @@
+# Random Pose Selection
+
+Also called: Random Pose Generation
+
+## Overview
+Random Pose Selection generates intermediate camera poses by interpolating between two randomly chosen training poses, ensuring that rendered views remain within the observed regions of the training data [S1]. This approach prevents rendering failures on unobserved parts of the scene that occur when attempting to render frames significantly outside the training view coverage [S1]. It differs from deterministic trajectory generation by relying on stochastic sampling constrained by proximity thresholds, and from simple linear interpolation by using rotation-aware interpolation for the orientation component [S1].
+
+## How it works
+The method constructs a $4 \times 4$ output pose matrix by selecting a pair of training poses that are sufficiently close in both rotation and translation, then interpolating between them using a random factor.
+
+### Inputs and Outputs
+*   **Input**: A set of training poses $P = \{ \{R_i, t_i\} \}_{i=1}^{N}$, where $R_i \in \mathbb{R}^{3 \times 3}$ is the rotation matrix and $t_i \in \mathbb{R}^3$ is the translation vector for the $i$-th pose [S1].
+*   **Input**: Rotation distance threshold $\theta$ [S1].
+*   **Input**: Translation distance threshold $d$ [S1].
+*   **Output**: A $4 \times 4$ pose matrix $p_{out} \in \mathbb{R}^{4 \times 4}$ [S1].
+*   **Output**: An intrinsic matrix and image shape, randomly selected from the training set corresponding to the chosen poses [S1].
+
+### Data Structures
+*   **Pose Set $P$**: A collection of $N$ poses. Each pose consists of a $3 \times 3$ rotation matrix $R$ and a $3 \times 1$ translation vector $t$.
+*   **Output Pose $p_{out}$**: A $4 \times 4$ matrix representing the camera-to-world transformation.
+    *   Rows 0-2, Columns 0-2: Rotation matrix $R_{jk}$.
+    *   Rows 0-2, Column 3: Translation vector $t_{out}$.
+    *   Row 3, Column 3: $1.0$.
+    *   Row 3, Columns 0-2: $0.0$ (standard homogeneous coordinate convention, implied by $p_{out}[3,3]=1$ and standard matrix structure).
+
+### Parameters
+*   **Rotation threshold $\theta$**: Set to $24^\circ$ (or $\frac{24\pi}{180}$ radians) [S1].
+*   **Translation threshold $d$**: Set to $0.5$ [S1].
+*   **Interpolation factor $s$**: A random value uniformly sampled from $[0, 1]$ [S1].
+
+### Distance Functions
+To determine if a pair of poses is "close enough," two distance metrics are used [S1]:
+
+1.  **Rotation Distance $D_R$**:
+    $$ D_R(R_1, R_2) = \arccos\left(\frac{\text{Tr}(R_2^{-1} R_1)}{2} - 1\right) $$
+    where $R_1, R_2$ are rotation matrices and $\text{Tr}(\cdot)$ is the trace [S1].
+
+2.  **Translation Distance $D_t$**:
+    $$ D_t(t_1, t_2) = \| t_2 - t_1 \|_2^2 $$
+    where $t_1, t_2$ are translation vectors and $\| \cdot \|_2$ is the Euclidean norm [S1].
+
+### Rotation Interpolation
+The rotation between two poses is interpolated using axis-angle representation [S1]:
+
+1.  **Axis-Angle to Rotation ($R2AA$)**: Converts a rotation matrix $R$ to an axis-angle pair $(v, \theta_{angle})$, where $v$ is the unit axis and $\theta_{angle}$ is the angle [S1].
+2.  **Axis-Angle to Rotation ($AA2R$)**: Converts an axis-angle pair $(v, \theta_{angle})$ back to a rotation matrix [S1].
+3.  **ReduceAngle**:
+    $$ \text{ReduceAngle}(R, s) = AA2R\left( R2AA(R)_v, \ s \cdot R2AA(R)_{\theta} \right) $$
+    This converts $R$ to axis-angle, scales the angle by $s$, and converts back [S1].
+4.  **IntermediateRot**:
+    $$ \text{IntermediateRot}(R_1, R_2, s) = \text{ReduceAngle}(R_2 R_1^{-1}, s) R_1 $$
+    This computes the relative rotation from $R_1$ to $R_2$, scales it by $s$, and applies it to $R_1$ [S1].
+
+### Algorithm Steps
+1.  Initialize output pose $p_{out}$ as a $4 \times 4$ matrix [S1].
+2.  Randomly select two indices $j$ and $k$ from the range $[0, N-1]$ [S1].
+3.  While $D_R(R_j, R_k) \ge \theta$ AND $D_t(t_j, t_k) \ge d$:
+    *   Re-randomly select $j$ and $k$ from $[0, N-1]$ [S1].
+4.  Compute the intermediate rotation $R_{jk} = \text{IntermediateRot}(R_j, R_k, s)$ [S1].
+5.  Set the upper-left $3 \times 3$ block of $p_{out}$ to $R_{jk}$ [S1].
+6.  Set the translation column of $p_{out}$ to $s t_k + (1 - s) t_j$ [S1].
+7.  Set $p_{out}[3, 3] = 1$ [S1].
+8.  Randomly select an intrinsic matrix and image shape from the training set corresponding to the selected poses [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def random_index(n):
+    """Return a random integer in [0, n-1]."""
+    return np.random.randint(0, n)
+
+def rotation_distance(R1, R2):
+    """Compute DR(R1, R2) = arccos(Tr(R2^-1 R1)/2 - 1)."""
+    # R2^-1 is R2.T for rotation matrices
+    rel_rot = R2.T @ R1
+    trace_val = np.trace(rel_rot)
+    # Clamp to [-1, 1] for numerical stability in arccos
+    cos_val = trace_val / 2.0 - 1.0
+    cos_val = np.clip(cos_val, -1.0, 1.0)
+    return np.arccos(cos_val)
+
+def translation_distance_sq(t1, t2):
+    """Compute Dt(t1, t2) = ||t2 - t1||_2^2."""
+    diff = t2 - t1
+    return np.dot(diff, diff)
+
+def axis_angle_to_rotation(v, angle):
+    """Convert axis-angle (v, angle) to rotation matrix R."""
+    # Rodrigues' rotation formula
+    v = v / np.linalg.norm(v)
+    k = np.array([[0, -v[2], v[1]],
+                  [v[2], 0, -v[0]],
+                  [-v[1], v[0], 0]])
+    R = np.eye(3) + np.sin(angle) * k + (1 - np.cos(angle)) * (k @ k)
+    return R
+
+def rotation_to_axis_angle(R):
+    """Convert rotation matrix R to axis-angle (v, angle)."""
+    # Extract angle from trace
+    trace = np.trace(R)
+    cos_angle = (trace - 1.0) / 2.0
+    cos_angle = np.clip(cos_angle, -1.0, 1.0)
+    angle = np.arccos(cos_angle)
+    
+    if np.isclose(angle, 0):
+        return np.array([1.0, 0.0, 0.0]), 0.0
+    
+    # Extract axis
+    # R - R^T = 2*sin(angle)*K
+    skew = R - R.T
+    v = np.array([skew[2, 1], skew[0, 2], skew[1, 0]])
+    v = v / (2.0 * np.sin(angle))
+    return v, angle
+
+def reduce_angle(R, s):
+    """ReduceAngle(R, s) = AA2R(R2AA(R)_v, s * R2AA(R)_theta)."""
+    v, theta = rotation_to_axis_angle(R)
+    new_theta = s * theta
+    return axis_angle_to_rotation(v, new_theta)
+
+def intermediate_rot(R1, R2, s):
+    """IntermediateRot(R1, R2, s) = ReduceAngle(R2 R1^-1, s) R1."""
+    # R1^-1 is R1.T
+    rel_rot = R2 @ R1.T
+    reduced_rel = reduce_angle(rel_rot, s)
+    return reduced_rel @ R1
+
+def random_pose_selection(P, theta_deg, d, N):
+    """
+    Generate a random intermediate pose.
+    
+    Args:
+        P: List of tuples (R, t) where R is 3x3 matrix, t is 3-vector.
+        theta_deg: Rotation threshold in degrees.
+        d: Translation distance threshold (squared Euclidean distance).
+        N: Number of training poses.
+        
+    Returns:
+        pout: 4x4 pose matrix.
+    """
+    # Convert theta to radians
+    theta = np.radians(theta_deg)
+    
+    # Step 2: Randomly select two indices
+    j = random_index(N)
+    k = random_index(N)
+    
+    Rj, tj = P[j]
+    Rk, tk = P[k]
+    
+    # Step 3: While loop condition
+    # Note: The source uses AND. If either condition fails, the loop terminates?
+    # No, "While DR >= theta AND Dt >= d" means we continue selecting ONLY if BOTH are too far.
+    # If one is close, we accept the pair.
+    while rotation_distance(Rj, Rk) >= theta and translation_distance_sq(tj, tk) >= d:
+        j = random_index(N)
+        k = random_index(N)
+        Rj, tj = P[j]
+        Rk, tk = P[k]
+        
+    # Step 4: Compute intermediate rotation
+    Rjk = intermediate_rot(Rj, Rk, np.random.uniform(0, 1))
+    
+    # Step 5: Set rotation block
+    pout = np.eye(4)
+    pout[:3, :3] = Rjk
+    
+    # Step 6: Set translation column
+    # pout[:3, 3] = s*tk + (1-s)*tj
+    s = np.random.uniform(0, 1)
+    pout[:3, 3] = s * tk + (1 - s) * tj
+    
+    # Step 7: Set bottom-right element (already 1 from eye(4))
+    
+    # Step 8: Select intrinsic and shape (not implemented in matrix output)
+    
+    return pout
+```
+
+### Edge Cases and Pitfalls
+*   **No Close Pairs Exist**: If no pair of poses in $P$ satisfies the condition $D_R < \theta$ AND $D_t < d$, the `while` loop may run indefinitely. The source does not specify a maximum iteration count or fallback behavior [S1]. [G] In practice, a maximum iteration limit should be added, or the thresholds should be relaxed.
+*   **Rotation Ambiguity**: The axis-angle conversion assumes the principal range of the angle. The `rotation_to_axis_angle` implementation handles the standard case, but numerical instability can occur when the angle is close to 0 or $\pi$.
+*   **Translation Distance Definition**: The source defines $D_t$ as the squared Euclidean distance $\|t_2 - t_1\|_2^2$, not the Euclidean distance itself. The threshold $d=0.5$ applies to this squared value [S1].
+
+## Operating characteristics
+*   **Time Complexity**: The expected number of iterations in the selection loop depends on the density of poses in the training set relative to the thresholds $\theta$ and $d$. In the worst case (no close pairs), it is unbounded without a limit [S1].
+*   **Memory Complexity**: $O(1)$ auxiliary space beyond storing the training poses $P$ [S1].
+*   **Strengths**: Ensures rendered views are within the observed region, avoiding artifacts from unobserved geometry [S1]. Simple to implement [S1].
+*   **Limitations**: Relies on the density and distribution of training poses. If training poses are sparse or clustered, the method may struggle to find valid pairs or produce poses that are not representative of the full scene [S1].
+*   **When to Use**: When generating synthetic data for training neural radiance fields or similar models where view consistency with training data is critical [S1].
+*   **When Not to Use**: When the training data is sparse or when coverage of unobserved regions is desired [S1].
+
+## Background
+The method was proposed in the context of "PeRFception," a system for perception using radiance fields [S1]. It addresses the issue that standard random pose selection can lead to rendering failures on unobserved parts of the scene [S1]. The technique is part of the data generation pipeline for training 3D ResUNets for semantic segmentation on datasets like PeRFception-ScanNet [S1].
+
+## Sources
+[S1] PeRFception: Perception using Radiance Fields, https://doi.org/10.48550/arxiv.2208.11537, fetched 2026-10-26

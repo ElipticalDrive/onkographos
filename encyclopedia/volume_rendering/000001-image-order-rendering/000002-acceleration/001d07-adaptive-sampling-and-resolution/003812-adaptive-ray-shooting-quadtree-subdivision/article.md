@@ -1,0 +1,202 @@
+# Adaptive Ray Shooting & Quadtree Subdivision
+
+Also called: Adaptive quadtree subdivision, Image context based probability distribution
+
+## Overview
+Adaptive Ray Shooting & Quadtree Subdivision is a general strategy to accelerate the training of radiance field-based methods by reducing ray redundancy during volume rendering [S1]. It differs from architecture-specific accelerations like Instant-NGP or Plenoxels by operating as a universal sampling framework that requires no modification to the underlying neural network or data structures [S1]. The method identifies complex regions in the image space via rendering error and adaptively increases ray density there while subsampling uniform regions, maintaining accuracy with significantly fewer total rays [S1].
+
+## How it works
+The method accelerates training by dynamically adjusting the number of rays sampled per image based on local image complexity. It combines a probability-based sampling function with an adaptive quadtree subdivision strategy [S1].
+
+### Inputs and Outputs
+**Inputs:**
+- Set of training images $\mathcal{I}$ with size $N$ [S1].
+- Target pixel colors $c_{ki}$ for each ray [S1].
+- A volume rendering function $V_\Theta$ that maps a ray to a rendered color $\hat{c}_{ki}$ [S1].
+- A neural network $F_\Theta$ that maps 5D points $(\mathbf{x}, \mathbf{d})$ to color $\mathbf{c}$ and density $\sigma$ [S1].
+
+**Outputs:**
+- A set of rays $R_i$ for each image $I_i$, where the density of rays varies across the image plane [S1].
+- Optimized network parameters $\Theta$ [S1].
+
+### Data Structures
+**Quadtree:**
+Each view is subdivided into a quadtree structure. Each node in the quadtree stores the average rendering error of the rays passing through that region [S1].
+- **Node Layout:** Contains a bounding box (region of the image plane) and a scalar value representing the average error [S1].
+- **Subdivision:** Nodes are recursively subdivided into four children if the error exceeds a threshold or to refine the sampling distribution [S1].
+
+**5D Point Representation:**
+The radiance field is queried using 5D points consisting of:
+- 3D spatial coordinates $\mathbf{x} = (x, y, z) \in \mathbb{R}^3$ [S1].
+- 2D viewing direction $\mathbf{d} = (\theta, \phi) \in \mathbb{R}^2$ [S1].
+
+### Numbered Steps
+1. **Initialization:** For each training image $I_i \in \mathcal{I}$, generate an initial set of rays $R_i$ [S1].
+2. **Forward Pass:** For each ray $r_{ki} \in R_i$, sample 5D points along the ray. Query $F_\Theta$ to get color and density. Compute rendered color $\hat{c}_{ki} = V_\Theta(r_{ki})$ [S1].
+3. **Error Calculation:** Compute the pixel-level color error for each ray: $e_{ki} = ||V_\Theta(r_{ki}) - c_{ki}||_2^2$ [S1].
+4. **Quadtree Update:** Aggregate errors to update the quadtree nodes. For each node, calculate the average rendering error of all rays passing through its region [S1].
+5. **Adaptive Subdivision:** Subdivide quadtree nodes based on the average error. Regions with larger rendering errors are subdivided to create smaller nodes, allowing for higher ray density in complex areas [S1].
+6. **Ray Resampling:** Generate new rays for the next iteration. Shoot more rays in regions corresponding to nodes with high error (complex regions) and fewer rays in regions with low error (simple regions) [S1].
+7. **Optimization:** Minimize the volume rendering loss $L$ using the newly sampled rays [S1].
+
+### Formulas
+The volume rendering loss $L$ is defined as [S1]:
+
+$$
+L = \frac{1}{NM} \sum_{I_i \in \mathcal{I}} \sum_{r_{ki} \in R_i} ||V_\Theta(r_{ki}) - c_{ki}||_2^2
+$$
+
+Where:
+- $L$ is the volume rendering loss [S1].
+- $N$ is the number of training images [S1].
+- $M$ is the number of rays per image (average or total count depending on normalization, source implies average over all rays) [S1].
+- $\mathcal{I}$ is the set of all training images [S1].
+- $R_i$ is the set of rays generated from image $I_i$ [S1].
+- $r_{ki}$ is the $k$-th ray from the $i$-th training image [S1].
+- $V_\Theta$ is the volume rendering function mapping a ray to rendered color $\hat{c}_{ki}$ [S1].
+- $c_{ki}$ is the target pixel color for ray $r_{ki}$ [S1].
+
+### Parameters
+- $N$: Number of training images [S1].
+- $\mathcal{I}$: Set of all training images [S1].
+- $R_i$: Set of rays generated from training image $I_i$ [S1].
+- $r_{ki}$: The $k$-th ray from the $i$-th training image $I_i$ [S1].
+- $V_\Theta$: Volume rendering function [S1].
+- $c_{ki}$: Target pixel color [S1].
+- Threshold for quadtree subdivision: Not given in the sources.
+- Initial number of rays $M$: Not given in the sources.
+
+### Edge Cases and Pitfalls
+- **Degenerate Input:** If an image has uniform color, the error will be low, and rays will be subsampled heavily. This is intended behavior [S1].
+- **Precision:** The method relies on accurate error calculation. Floating-point precision in $||V_\Theta(r_{ki}) - c_{ki}||_2^2$ should be sufficient for standard RGB values [S1].
+- **Boundary Conditions:** When subdividing the image plane into a quadtree, ensure that leaf nodes cover the entire image without gaps or overlaps [G].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adaptive_ray_shooting_quadtree(training_images, target_colors, network, volume_render_func, max_depth=4):
+    """
+    Accelerates radiance field training using adaptive ray shooting and quadtree subdivision.
+    
+    Args:
+        training_images: List of training images I_i.
+        target_colors: Corresponding target pixel colors c_ki.
+        network: Neural network F_Theta mapping (x, d) to (c, sigma).
+        volume_render_func: Function V_Theta mapping ray to rendered color.
+        max_depth: Maximum depth of the quadtree.
+        
+    Returns:
+        Optimized network parameters.
+    """
+    num_images = len(training_images)
+    # Initialize quadtree for each image
+    quadtrees = [Quadtree(image_size) for _ in training_images]
+    
+    # Initial ray generation (uniform or heuristic)
+    rays = generate_initial_rays(training_images)
+    
+    for iteration in range(num_iterations):
+        total_loss = 0.0
+        ray_counts = []
+        
+        for i, image in enumerate(training_images):
+            # 1. Forward pass and error calculation
+            image_rays = rays[i]
+            errors = []
+            rendered_colors = []
+            
+            for ray in image_rays:
+                # Sample 5D points along ray
+                points = sample_points_along_ray(ray, network)
+                # Render color
+                rendered_c = volume_render_func(ray, points, network)
+                rendered_colors.append(rendered_c)
+                
+                # Calculate error
+                target_c = get_target_color(ray, target_colors[i])
+                error = l2_norm(rendered_c - target_c) ** 2
+                errors.append(error)
+                
+            # 2. Update Quadtree
+            quadtrees[i].update(errors, image_rays)
+            
+            # 3. Adaptive Subdivision
+            quadtrees[i].subdivide(max_depth=max_depth)
+            
+            # 4. Resample Rays based on Quadtree
+            # Shoot more rays in high-error regions
+            new_rays = resample_rays_based_on_quadtree(quadtrees[i], image)
+            rays[i] = new_rays
+            
+            # Accumulate loss
+            image_loss = sum(errors) / len(errors)
+            total_loss += image_loss
+            ray_counts.append(len(new_rays))
+            
+        # 5. Optimize Network
+        # Backpropagate through volume rendering to update network parameters
+        optimize_network(network, total_loss / num_images)
+        
+    return network
+
+class Quadtree:
+    def __init__(self, image_size):
+        self.root = Node(image_size)
+        
+    def update(self, errors, rays):
+        # Map each ray's error to the corresponding quadtree node
+        for ray, error in zip(rays, errors):
+            node = self.get_node_for_ray(ray)
+            node.add_error(error)
+            
+    def add_error(self, error):
+        self.total_error += error
+        self.count += 1
+        
+    @property
+    def avg_error(self):
+        return self.total_error / self.count if self.count > 0 else 0
+        
+    def subdivide(self, max_depth):
+        # Recursively subdivide nodes with high average error
+        if self.depth < max_depth and self.avg_error > threshold:
+            self.split()
+            for child in self.children:
+                child.subdivide(max_depth)
+                
+    def get_node_for_ray(self, ray):
+        # Determine which leaf node contains the ray's origin/center
+        pass
+        
+    def split(self):
+        # Divide current node into 4 children
+        pass
+```
+
+## Subtopics
+
+### [Context-Based Adaptive Ray Sampling with Quadtree Subdivision](8164-context-based-adaptive-ray-sampling-with-quadtree-subdivisio.md)
+A specific implementation or variant focusing on the context-based probability distribution aspect.
+
+### [Adaptive Refinement for Volume Rendering](1892-adaptive-refinement-for-volume-rendering.md)
+A sibling method that also refines sampling adaptively, potentially using different criteria.
+
+### [Adaptive Sampling Step with Early Ray Termination](4573-adaptive-sampling-step-with-early-ray-termination.md)
+Combines adaptive sampling with early termination, whereas this method focuses on spatial subdivision.
+
+## Operating characteristics
+- **Time Complexity:** Reduces the number of rays $M$ per image, leading to faster training times compared to uniform sampling [S1]. The quadtree subdivision adds overhead but is negligible compared to the savings from fewer ray queries [S1].
+- **Memory Complexity:** Requires storing the quadtree structure for each image, which is small compared to the radiance field data [S1].
+- **Measured Performance:** Evaluated with NeRF and Plenoxels under widely used benchmarks, achieving comparable accuracy to state-of-the-art methods with much faster training [S1].
+- **Strengths:** General strategy applicable to almost all radiance field-based methods without specific architectural modifications [S1]. Reduces training burden significantly [S1].
+- **Limitations:** Requires an initial pass to estimate errors before adaptive sampling can be fully effective [S1].
+- **When to use:** When training radiance fields is computationally expensive and the scene has varying levels of detail across different views [S1].
+- **When not to use:** If the scene is uniformly simple, the overhead of quadtree management might not be justified, though the method would still subsample rays effectively [S1].
+
+## Background
+The method was introduced to address the high computational cost of training radiance fields, which typically requires shooting many rays per image [S1]. Previous approaches like Plenoxels, TensoRF, and Instant-NGP required specific architectures (sparse voxel grids, discrete tensor coordinates, hash coding) that were not easily adaptable to other neural radiance field variations [S1]. This method, proposed in "Fast Learning Radiance Fields by Shooting Much Fewer Rays" (2023), provides a general framework to speed up learning by reducing ray redundancy [S1]. It leverages the observation that shooting rays at pixels with dramatic color change reduces training burden with minimal accuracy loss [S1].
+
+## Sources
+[S1] Fast Learning Radiance Fields by Shooting Much Fewer Rays, https://doi.org/10.1109/tip.2023.3267049, fetched 2026-10-26

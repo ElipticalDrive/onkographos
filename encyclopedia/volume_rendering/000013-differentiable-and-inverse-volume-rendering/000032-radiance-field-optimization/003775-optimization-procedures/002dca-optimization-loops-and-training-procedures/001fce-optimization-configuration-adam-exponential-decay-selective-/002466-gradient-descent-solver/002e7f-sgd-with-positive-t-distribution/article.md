@@ -1,0 +1,83 @@
+# SGD with Positive t-Distribution
+
+Also called: SGD + positive t-distribution
+
+## Overview
+An ablation study variant of differentiable volume rendering optimization that replaces Gaussian noise assumptions with a positive Student's t-distribution to model gradient uncertainty [S1]. It serves as a controlled baseline to isolate the impact of heavy-tailed noise modeling from other components like MCMC sampling, ensuring fair comparison with methods using low-pass filtering [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Gradient vectors $\mathbf{g}$ computed from the loss function with respect to scene parameters.
+- Output: Updated scene parameters $\mathbf{\theta}_{new} = \mathbf{\theta}_{old} - \mathbf{\Delta}$.
+
+**Data Structures:**
+- Parameter vector $\mathbf{\theta}$: Standard float32 array.
+- Gradient $\mathbf{g}$: Standard float32 array.
+- Distribution parameters: Degrees of freedom $\nu$ (typically small, e.g., 1-5 for heavy tails), scale parameter $\sigma$.
+
+**Steps:**
+1. **Compute Gradients:** Calculate the standard stochastic gradient $\mathbf{g}$ of the loss function [S1].
+2. **Sample from Positive t-Distribution:** Instead of adding Gaussian noise or using Hamiltonian dynamics, sample a noise term $\epsilon$ from a Student's t-distribution with $\nu$ degrees of freedom, conditioned to be positive (or applied to specific components to maintain stability) [S1]. The probability density function for a t-distribution is:
+   $$ f(t | \nu, \mu, \gamma) = \frac{\Gamma(\frac{\nu+1}{2})}{\sqrt{\nu\pi}\gamma\Gamma(\frac{\nu}{2})} \left( 1 + \frac{1}{\nu} \left( \frac{t-\mu}{\gamma} \right)^2 \right)^{-\frac{\nu+1}{2}} $$
+   Where $\mu$ is location, $\gamma$ is scale, and $\nu$ is degrees of freedom. The "positive" constraint implies restricting the support or sampling mechanism to non-negative values for the noise component, or applying the distribution to the magnitude of updates [S1].
+3. **Apply Update:** Update parameters using the gradient and the sampled noise:
+   $$ \mathbf{\theta}_{new} = \mathbf{\theta}_{old} - \alpha (\mathbf{g} + \epsilon) $$
+   Where $\alpha$ is the learning rate [S1].
+4. **Remove Negative Components:** Explicitly remove or clamp negative components of the update or noise if they violate physical constraints or stability conditions [S1].
+5. **Apply Low-Pass Filter:** Apply a low-pass filter with a 0.3 diagonal offset to the update or parameters to ensure fair comparison with methods using similar component counts and filtering strategies [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def sgd_positive_t_update(theta, gradient, alpha, nu, scale):
+    # Sample from Student's t-distribution
+    # Note: Standard libraries may not support truncated positive t directly.
+    # Implementation detail [G]: Sample from standard t, take absolute value or reject negative samples.
+    noise = sample_positive_t_distribution(nu, scale)
+    
+    # Combine gradient and noise
+    update = gradient + noise
+    
+    # Remove negative components as per method definition
+    update = max(update, 0)
+    
+    # Apply learning rate
+    step = alpha * update
+    
+    # Apply low-pass filter (0.3 diagonal offset)
+    # Implementation detail [G]: This typically means adding 0.3 * I to the covariance or smoothing the update.
+    # Assuming a simple diagonal damping for the update step:
+    step = step / (1.0 + 0.3) 
+    
+    # Update parameters
+    theta_new = theta - step
+    return theta_new
+```
+
+**Parameters:**
+- $\nu$ (degrees of freedom): Controls tail heaviness. Lower values imply heavier tails. Not given in the sources.
+- $\alpha$ (learning rate): Standard SGD learning rate. Not given in the sources.
+- Low-pass filter offset: 0.3 diagonal offset [S1].
+
+**Edge Cases:**
+- **Negative Gradients:** The method explicitly removes negative components, which may bias the optimization if the gradient direction is critical [S1].
+- **Heavy Tails:** Large noise samples can cause instability if not properly scaled or filtered [S1].
+
+## Subtopics
+
+### [Reparameterized Stochastic Gradient Descent](10267-reparameterized-stochastic-gradient-descent.md)
+An optimization technique to find altered scattering parameters (g, σₛ) that minimize an error function d(g, σₛ) between a rendered image and a target image, using a reparameterized search space to avoid local minima.
+
+## Operating characteristics
+- **Time Complexity:** Similar to standard SGD, with overhead from sampling from the t-distribution and applying the low-pass filter [S1].
+- **Memory Complexity:** Standard SGD memory requirements [S1].
+- **Performance:** Used in ablation studies to compare against methods with similar component counts, showing competitive LPIPS scores on Mip-NeRF 360 and Tanks&Temples datasets [S1].
+- **Strengths:** Provides a robust baseline for heavy-tailed noise modeling; fair comparison with filtered methods [S1].
+- **Limitations:** Ablation variant; not a standalone production method; removal of negative components may limit convergence in some scenarios [S1].
+
+## Background
+Originated in the paper "3D Student Splatting and Scooping" (2025) as part of an ablation study to evaluate the impact of noise distribution choices in differentiable volume rendering optimization [S1]. It builds on the Gradient Descent Solver [3280-gradient-descent-solver.md] by modifying the noise model.
+
+## Sources
+[S1] 3D Student Splatting and Scooping, https://doi.org/10.1109/cvpr52734.2025.01960, fetched 2026-10-29

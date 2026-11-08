@@ -1,0 +1,153 @@
+# Single-Atomic High-Quality Robust Variant (HQS1R)
+
+Also called: Compute-based blending, High-Quality Shader, High-Quality Shader with Single Atomic Reduction, Robust high-quality shading with overflow protection
+
+## Overview
+HQS1R is a high-quality point cloud rendering method that reduces aliasing by blending overlapping points together, similar to mipmapping [S1, unofficial]. It is a simplified, compute-based implementation of the blending algorithm from [BHZK05], designed to be faster than aliased `GL_POINTS` results while providing anti-aliasing [S1, unofficial]. It sets itself apart from its sibling [GGX Microfacet BRDF](3715-ggx-microfacet-brdf.md) and [Blinn-Phong with Metallic Reflections](4252-blinn-phong-with-metallic-reflections.md) by operating on point primitives rather than surface geometry, and from [HQS1×](#single-atomic-high-quality-variant-hqs1x) by using a robust overflow protection mechanism that prevents artifacts when more than 255 points contribute to a pixel [S1, unofficial]. Unlike surface splatting [ZPVG01], it blends overlapping points without considering oriented disks with variable radii [S1, unofficial].
+
+## How it works
+HQS1R operates on a set of points, each with a position and color. It computes the average color of overlapping points within a depth range using a single 64-bit atomic operation per point in the fast path, with overflow protection via fallback buffers [S1, unofficial].
+
+**Inputs and Outputs:**
+- Input: A list of points, each defined by a 3D position $\mathbf{p}$ and a color $\mathbf{c} = (r, g, b)$.
+- Output: A framebuffer containing the average color for each pixel, resolved from the main buffer and fallback buffers.
+
+**Data Structures:**
+The method uses a custom 64-bit integer layout to pack color and count data.
+
+1.  **Main Buffer (`ssRGBA`):** A 64-bit integer per pixel.
+    -   Bits 0-15: Count (Alpha/Counter).
+    -   Bits 16-31: Blue component ($b$).
+    -   Bits 32-47: Green component ($g$).
+    -   Bits 48-63: Red component ($r$).
+    -   Format: `16-16-16-16` bit pattern [S1, unofficial].
+
+2.  **Fallback Buffers:** Two 64-bit integer buffers per pixel, used when the main buffer count exceeds 255.
+    -   `fallback[2 * pixelID + 0]`: Stores Red (bits 32-63) and Green (bits 0-31).
+    -   `fallback[2 * pixelID + 1]`: Stores Blue (bits 32-63) and Alpha/Count (bits 0-31).
+    -   Format: `16-16-16-16` bit pattern [S1, unofficial].
+
+**Numbered Steps:**
+
+1.  **Depth Map Pass (Optional but required for high-quality variations):** Compute a depth map over all points. This results in a total of two geometry passes and one screen pass [S1, unofficial].
+2.  **Screen Pass (Render Pass):** For each point:
+    a.  Transform the point position to screen space and determine the pixel ID (`pixelID`) it covers.
+    b.  Encode the point's color $(r, g, b)$ and a count of 1 into a 64-bit integer `rgba`:
+        $$ \text{rgba} = (r \ll 48) \mid (g \ll 32) \mid (b \ll 16) \mid 1 $$
+        where $r, g, b$ are 16-bit unsigned integers [S1, unofficial].
+    c.  Perform an atomic addition of `rgba` to the main framebuffer buffer `ssRGBA` at `pixelID`. Store the previous value in `old`:
+        $$ \text{old} = \text{atomicAdd}(\text{ssRGBA}[\text{pixelID}], \text{rgba}) $$
+    d.  Extract the lower 16 bits of `old` to get the previous count:
+        $$ \text{count} = \text{old} \ \& \ 0\text{xFFFF} $$
+    e.  Check if `count >= 255`. If true, an overflow condition is detected [S1, unofficial].
+    f.  If `count == 255` (indicating this is the first thread to overflow for this pixel):
+        i.  Atomically exchange the main buffer value to 0 to reset it:
+            $$ \text{atomicExchange}(\text{ssRGBA}[\text{pixelID}], 0) $$
+        ii. Extract the previous color components from `old` and accumulate them into local variables $r, g, b$, and set $a=1$:
+            $$ r += (\text{old} \gg 48) \ \& \ 0\text{xFFFF} $$
+            $$ g += (\text{old} \gg 32) \ \& \ 0\text{xFFFF} $$
+            $$ b += (\text{old} \gg 16) \ \& \ 0\text{xFFFF} $$
+            $$ a = 1 $$
+        iii. Add 255 to $a$ to account for the points already counted in the buffer before the reset:
+            $$ a += 255 $$
+    g.  If overflow was detected (`count >= 255`):
+        i.  Encode the accumulated color $(r, g)$ and accumulated alpha/count $(b, a)$ into two 64-bit integers:
+            $$ \text{rg} = (r \ll 32) \mid g $$
+            $$ \text{ba} = (b \ll 32) \mid a $$
+        ii. Write the accumulated values to the two separate fallback buffers using `atomicAdd`. Indices are `fallback[2 * pixelID + 0]` for `rg` and `fallback[2 * pixelID + 1]` for `ba`:
+            $$ \text{atomicAdd}(\text{fallback}[2 \times \text{pixelID} + 0], \text{rg}) $$
+            $$ \text{atomicAdd}(\text{fallback}[2 \times \text{pixelID} + 1], \text{ba}) $$
+
+3.  **Resolve Pass:** Combine the results from the main buffer and fallback buffers to compute the final average color for each pixel.
+    a.  For each pixel, read `ssRGBA`, `fallback[2 * pixelID + 0]`, and `fallback[2 * pixelID + 1]`.
+    b.  Extract the total count and color components from all buffers.
+    c.  Normalize the accumulated color by dividing by the total count to get the average color [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# GLSL-like pseudocode for the render pass
+
+# Constants
+OVERFLOW_THRESHOLD = 255
+
+# Input: point position (vec4), point color (vec3)
+# Output: ssRGBA (layout(r32ui), binding = 0), fallback (layout(r32ui), binding = 1)
+
+void main() {
+    // 1. Transform point to screen space
+    vec4 pos = worldViewProj * position;
+    
+    // 2. Determine pixel ID
+    int pixelID = toPixelID(pos);
+    
+    // 3. Encode color and count into 64-bit integer
+    // r, g, b are assumed to be 16-bit unsigned integers (0-65535)
+    uint r = uint(pointColor.r * 65535.0);
+    uint g = uint(pointColor.g * 65535.0);
+    uint b = uint(pointColor.b * 65535.0);
+    
+    uint64_t rgba = (uint64_t(r) << 48) | (uint64_t(g) << 32) | (uint64_t(b) << 16) | 1;
+    
+    // 4. Atomic addition to main buffer
+    uint64_t old = atomicAdd(ssRGBA[pixelID], rgba);
+    
+    // 5. Extract previous count
+    uint count = uint(old & 0xFFFF);
+    
+    // 6. Check for overflow
+    if (count >= OVERFLOW_THRESHOLD) {
+        uint a = 1;
+        
+        // 7. If this is the first thread to overflow (count == 255)
+        if (count == OVERFLOW_THRESHOLD) {
+            // Reset main buffer
+            atomicExchange(ssRGBA[pixelID], 0);
+            
+            // Accumulate previous values from 'old'
+            r += uint((old >> 48) & 0xFFFF);
+            g += uint((old >> 32) & 0xFFFF);
+            b += uint((old >> 16) & 0xFFFF);
+            a += OVERFLOW_THRESHOLD;
+        }
+        
+        // 8. Encode accumulated values for fallback buffers
+        uint64_t rg = (uint64_t(r) << 32) | g;
+        uint64_t ba = (uint64_t(b) << 32) | a;
+        
+        // 9. Write to fallback buffers
+        atomicAdd(fallback[2 * pixelID + 0], rg);
+        atomicAdd(fallback[2 * pixelID + 1], ba);
+    }
+}
+```
+
+**Parameters:**
+-   **Overflow Threshold:** 255. If the counter reaches exactly 255, the current pixel's buffer is reset to zero and data is moved to fallback buffers [S1, unofficial].
+-   **Bit Pattern:** 16 bits for Red, 16 bits for Green, 16 bits for Blue, 16 bits for Counter (Alpha/Count). Total 64 bits [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+-   **Overflow:** If more than 1023 points contribute to a pixel, the naive 18-18-18-10 bit pattern (used in HQS1×) overflows. The 16-16-16-16 pattern handles up to 255 points in the main buffer before falling back, with a safety margin of $65,536 - 256$ counts [S1, unofficial].
+-   **Simultaneous Accesses:** The unused $2^{16} - 256$ counts serve as a safety margin for potentially several thousand simultaneously executing threads to detect the overflow. If more or significantly fewer than 65k simultaneous accesses to a pixel are expected, the bit pattern may be changed accordingly [S1, unofficial].
+
+## Subtopics
+
+### Single-Atomic High-Quality Variant (HQS1x)
+A variant of HQS that reduces atomic operations by encoding RGB channels and counter into a single 64-bit integer [S1, unofficial]. It uses a 18-18-18-10 bit pattern, where the 10-bit counter allows correct computation of the sum of up to 1023 points per pixel [S1, unofficial]. However, this naive approach is prone to overflow artifacts when more than 1023 points contribute to a pixel's average color value, leading to strongly noticeable rendering artifacts in larger scenes [S1, unofficial]. HQS1R is robust against these overflow artifacts compared to HQS1×, with negligible overhead [S1, unofficial].
+
+## Operating characteristics
+-   **Time Complexity:** The method requires two geometry passes and one screen pass for high-quality variations [S1, unofficial]. The render pass performs a single atomic operation per point in the fast path, reducing memory bandwidth usage compared to the standard HQS [S1, unofficial].
+-   **Memory Complexity:** Uses a 64-bit integer per pixel for the main buffer and two 64-bit integers per pixel for fallback buffers [S1, unofficial].
+-   **Performance:** Achieves higher frame rates than aliased `GL_POINTS` results while providing anti-aliasing [S1, unofficial]. The robust variant, HQS1R, shows negligible overhead compared to the unstable HQS1× version [S1, unofficial].
+-   **Strengths:** Reduces aliasing, robust against overflow artifacts, efficient memory access pattern.
+-   **Limitations:** Requires fallback buffers for overflow handling, which increases memory usage. Not suitable for surface-based rendering.
+-   **When to use:** Point cloud rendering where anti-aliasing is desired and performance is critical.
+-   **When not to use:** Surface-based rendering or scenes with extremely high point density per pixel where fallback buffers might become a bottleneck.
+
+## Background
+HQS1R was introduced in the paper "Rendering Point Clouds with Compute Shaders and Vertex Order Optimization" [S1, unofficial]. It is a compute-based implementation of the blending algorithm from [BHZK05]. The method was developed to address the limitations of traditional `GL_POINTS` rendering, such as aliasing and performance issues, by leveraging compute shaders for parallel processing. The HQS1R variant was specifically designed to handle overflow conditions robustly, ensuring high-quality rendering even in dense point clouds [S1, unofficial].
+
+## Sources
+[S1] Rendering Point Clouds with Compute Shaders and Vertex Order Optimization, https://doi.org/10.1111/cgf.14345, fetched 2026-10-26 (unofficial)

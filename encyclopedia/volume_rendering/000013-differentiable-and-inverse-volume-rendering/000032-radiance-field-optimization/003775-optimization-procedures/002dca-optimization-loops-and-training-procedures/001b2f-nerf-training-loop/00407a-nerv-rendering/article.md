@@ -1,0 +1,170 @@
+# NeRV Rendering
+Also called: NeRV ray marching, NeRV volume rendering
+
+## Overview
+NeRV rendering computes the pixel color for a camera ray by integrating reflected radiance along the ray, where the radiance at each sample point is derived from a physically-based shading model that accounts for direct and indirect illumination [S1, unofficial]. It differs from standard NeRF volume rendering by explicitly modeling surface normals and microfacet BRDF parameters via separate MLPs, and by estimating indirect lighting through secondary visibility queries rather than simple volumetric absorption [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** Camera origin $\mathbf{c}$, viewing direction $\boldsymbol{\omega}_o$, environment lighting map $E$, and trained NeRV MLPs: Shape MLP $\text{MLP}_\theta$, Reflectance MLP $\text{MLP}_\psi$, and Visibility MLP $\text{MLP}_\phi$.
+*   **Output:** Pixel color $V(\mathbf{c}, \boldsymbol{\omega}_o)$.
+
+**Data Structures**
+*   **Shape MLP ($\text{MLP}_\theta$):** Input 3D position $\mathbf{x}$. Outputs volume density $\sigma$ and surface normal $\mathbf{n} = \nabla_\mathbf{x} \text{MLP}_\theta(\mathbf{x})$.
+*   **Reflectance MLP ($\text{MLP}_\psi$):** Input 3D position $\mathbf{x}$. Outputs BRDF parameters $(a, \gamma)$.
+*   **Visibility MLP ($\text{MLP}_\phi$):** Input 3D position $\mathbf{x}$ and direction $\boldsymbol{\omega}_i$. Outputs expected termination depth $\tilde{D}_\phi(\mathbf{x}, \boldsymbol{\omega}_i)$.
+
+**Parameters**
+*   Number of stratified samples along the primary camera ray: $N_{ray} = 256$ [S1, unofficial].
+*   Grid resolution for environment lighting sampling: $12 \times 24$ directions [S1, unofficial].
+*   Number of random directions for indirect illumination secondary rays: $N_{ind} = 128$ [S1, unofficial].
+*   Sample spacing: $\delta$ (distance between adjacent samples along the ray) [S1, unofficial].
+
+**Algorithm**
+The rendering process estimates the volume rendering integral using a quadrature rule [S1, unofficial].
+
+1.  **Primary Ray Sampling:** Draw $N_{ray}=256$ stratified samples along the camera ray $\mathbf{x}(t) = \mathbf{c} - t\boldsymbol{\omega}_o$. For each sample point $\mathbf{x}(t)$:
+    *   Query $\text{MLP}_\theta$ to obtain volume density $\sigma(t) = \text{MLP}_\theta(\mathbf{x}(t))$ and surface normal $\mathbf{n}(t) = \nabla_\mathbf{x} \text{MLP}_\theta(\mathbf{x}(t))$ [S1, unofficial].
+    *   Query $\text{MLP}_\psi$ to obtain BRDF parameters $(a(t), \gamma(t)) = \text{MLP}_\psi(\mathbf{x}(t))$ [S1, unofficial].
+
+2.  **Direct Illumination Estimation:** For each sample point $\mathbf{x}(t)$:
+    *   Sample the environment lighting $E(\mathbf{x}(t), -\boldsymbol{\omega}_i)$ on a $12 \times 24$ grid of directions $\boldsymbol{\omega}_i$ on the sphere surrounding $\mathbf{x}(t)$ [S1, unofficial].
+    *   Query $\text{MLP}_\phi$ to obtain predicted visibility $\tilde{V}_\phi(\mathbf{x}(t), \boldsymbol{\omega}_i)$ for each direction $\boldsymbol{\omega}_i$ [S1, unofficial].
+    *   Compute the microfacet BRDF value $R(\mathbf{x}(t), \boldsymbol{\omega}_i, \boldsymbol{\omega}_o)$ using the parameters $(a(t), \gamma(t))$ and the normal $\mathbf{n}(t)$ [S1, unofficial].
+    *   Estimate the direct illumination contribution $L_{dir}(\mathbf{x}(t), \boldsymbol{\omega}_o)$ by integrating the product of environment lighting, predicted visibility, and BRDF over the sphere:
+        $$ L_{dir}(\mathbf{x}(t), \boldsymbol{\omega}_o) \approx \sum_{i} E(\mathbf{x}(t), -\boldsymbol{\omega}_i) \tilde{V}_\phi(\mathbf{x}(t), \boldsymbol{\omega}_i) R(\mathbf{x}(t), \boldsymbol{\omega}_i, \boldsymbol{\omega}_o) \Delta \Omega_i $$
+        where $\Delta \Omega_i$ is the solid angle associated with each grid direction [S1, unofficial].
+
+3.  **Indirect Illumination Estimation:** For each sample point $\mathbf{x}(t)$:
+    *   Compute the expected camera ray termination depth $t_0 = D(\mathbf{c}, -\boldsymbol{\omega}_o)$ using the density samples from Step 1 [S1, unofficial].
+    *   Identify the termination point $\mathbf{x}(t_0)$ [S1, unofficial].
+    *   Sample $N_{ind}=128$ random directions $\boldsymbol{\omega}_i$ on the upper hemisphere centered at $\mathbf{x}(t_0)$ [S1, unofficial].
+    *   For each direction $\boldsymbol{\omega}_i$, query $\text{MLP}_\phi$ to obtain the expected termination depth $t''_0 = \tilde{D}_\phi(\mathbf{x}(t_0), \boldsymbol{\omega}_i)$ [S1, unofficial].
+    *   Compute the secondary surface intersection point $\mathbf{x}_0(t''_0) = \mathbf{x}(t_0) + t''_0 \boldsymbol{\omega}_i$ [S1, unofficial].
+    *   Shade each secondary point $\mathbf{x}_0(t''_0)$ with direct illumination following the procedure in Step 2 to obtain $L_{dir}(\mathbf{x}_0(t''_0), \boldsymbol{\omega}_i)$ [S1, unofficial].
+    *   Estimate the indirect illumination incident at $\mathbf{x}(t_0)$ by multiplying the direct illumination at the secondary points by the microfacet BRDF values $R(\mathbf{x}(t_0), \boldsymbol{\omega}_i, \boldsymbol{\omega}_o)$ and integrating over the hemisphere:
+        $$ L_{ind}(\mathbf{x}(t_0), \boldsymbol{\omega}_o) \approx \sum_{j} L_{dir}(\mathbf{x}_0(t''_0), \boldsymbol{\omega}_j) R(\mathbf{x}(t_0), \boldsymbol{\omega}_j, \boldsymbol{\omega}_o) \Delta \Omega_j $$
+        where $\Delta \Omega_j$ is the solid angle for each sampled direction [S1, unofficial].
+
+4.  **Radiance Composition:**
+    *   Compute the total reflected radiance at each primary sample point: $L_r(\mathbf{x}(t), \boldsymbol{\omega}_o) = L_{dir}(\mathbf{x}(t), \boldsymbol{\omega}_o) + L_{ind}(\mathbf{x}(t), \boldsymbol{\omega}_o)$ [S1, unofficial]. Note: Indirect illumination is typically evaluated at the termination depth $t_0$, but the formulation sums contributions along the ray [S1, unofficial].
+    *   Composite the pixel color using the quadrature rule:
+        $$ V(\mathbf{c}, \boldsymbol{\omega}_o) = \sum_t V(\mathbf{x}(t), \mathbf{c}) \alpha(\sigma(\mathbf{x}(t)) \delta) L_r(\mathbf{x}(t), \boldsymbol{\omega}_o) $$
+        where the transmittance is $V(\mathbf{x}(t), \mathbf{c}) = \exp(-\sum_{s < t} \sigma(\mathbf{x}(s)) \delta)$ and the opacity is $\alpha(z) = 1 - \exp(-z)$ [S1, unofficial].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def nerv_render(c, w_o, env_light, mlp_theta, mlp_psi, mlp_phi, N_ray=256, N_ind=128):
+    """
+    Render a single pixel for camera ray defined by origin c and direction w_o.
+    """
+    # Step 1: Primary Ray Sampling
+    t_samples = stratified_samples(N_ray) # Returns sorted depths t
+    points = [c - t * w_o for t in t_samples]
+    
+    densities = []
+    normals = []
+    brdf_params = []
+    
+    for x in points:
+        sigma = mlp_theta(x)
+        n = gradient_mlp_theta(x) # n = grad_x MLP_theta(x)
+        a, gamma = mlp_psi(x)
+        densities.append(sigma)
+        normals.append(n)
+        brdf_params.append((a, gamma))
+        
+    # Precompute transmittance and opacity for compositing
+    # V(x(t), c) = exp(-sum_{s<t} sigma(x(s)) * delta)
+    # alpha(z) = 1 - exp(-z)
+    # delta is the distance between samples. For stratified, we assume uniform spacing or compute delta_t.
+    # Assuming uniform spacing for simplicity in structure, delta = t_samples[i+1] - t_samples[i]
+    # However, standard NeRF quadrature uses the interval length.
+    
+    pixel_color = 0.0
+    accumulated_transmittance = 1.0
+    
+    for i, (x, sigma, n, (a, gamma)) in enumerate(zip(points, densities, normals, brdf_params)):
+        delta = t_samples[i+1] - t_samples[i] if i < len(t_samples)-1 else t_samples[i] - t_samples[i-1]
+        # Handle edge cases for first/last sample if necessary, but standard NeRF uses interval length
+        
+        # Step 2: Direct Illumination
+        # Sample 12x24 grid of directions omega_i
+        env_dirs = generate_env_light_grid(12, 24)
+        direct_light = 0.0
+        for omega_i in env_dirs:
+            # Query visibility
+            vis = mlp_phi(x, omega_i)
+            # Compute BRDF R(x, omega_i, w_o)
+            R = microfacet_brdf(n, omega_i, w_o, a, gamma)
+            # Sample environment lighting
+            E = env_light.sample(x, -omega_i)
+            direct_light += E * vis * R
+            
+        # Step 3: Indirect Illumination
+        # Compute expected termination depth t0
+        # D(c, -w_o) is derived from density samples. 
+        # In NeRV, this is often approximated or explicitly stored. 
+        # The source says "using the density samples from Step 1".
+        # We assume a function to find the depth where transmittance drops significantly or mean depth.
+        # For implementation, we might use the last sample or a specific depth calculation.
+        # Let's assume we have a function get_termination_depth(t_samples, densities)
+        t0 = get_termination_depth(t_samples, densities)
+        x0 = c - t0 * w_o
+        
+        # Sample 128 random directions on upper hemisphere at x0
+        ind_dirs = sample_upper_hemisphere(N_ind, normal=n) # Normal at x0? Or just hemisphere relative to view?
+        # Source says "upper hemisphere at x(t0)". Usually implies hemisphere oriented by surface normal n0.
+        # We need normal at x0.
+        n0 = gradient_mlp_theta(x0)
+        ind_dirs = sample_upper_hemisphere(N_ind, normal=n0)
+        
+        indirect_light = 0.0
+        for omega_i in ind_dirs:
+            # Query visibility MLP for secondary ray
+            t_prime = mlp_phi(x0, omega_i)
+            x_sec = x0 + t_prime * omega_i
+            
+            # Shade secondary point with direct illumination
+            # This requires querying MLPs at x_sec
+            sigma_sec = mlp_theta(x_sec)
+            n_sec = gradient_mlp_theta(x_sec)
+            a_sec, gamma_sec = mlp_psi(x_sec)
+            
+            # Re-use direct illumination logic for x_sec
+            direct_light_sec = 0.0
+            for omega_i_sec in env_dirs:
+                vis_sec = mlp_phi(x_sec, omega_i_sec)
+                R_sec = microfacet_brdf(n_sec, omega_i_sec, omega_i, a_sec, gamma_sec) # Note: outgoing is omega_i for the secondary ray's contribution to x0
+                E_sec = env_light.sample(x_sec, -omega_i_sec)
+                direct_light_sec += E_sec * vis_sec * R_sec
+                
+            # Multiply by BRDF at x0
+            R_ind = microfacet_brdf(n0, omega_i, w_o, a, gamma)
+            indirect_light += direct_light_sec * R_ind
+            
+        # Total Radiance
+        L_r = direct_light + indirect_light
+        
+        # Composite
+        alpha = 1.0 - exp(-sigma * delta)
+        pixel_color += accumulated_transmittance * alpha * L_r
+        accumulated_transmittance *= (1.0 - alpha)
+        
+    return pixel_color
+```
+
+## Operating characteristics
+*   **Time Complexity:** Significantly higher than standard NeRF due to the evaluation of indirect illumination. For each of the 256 primary samples, 128 secondary rays are spawned, each requiring a full direct illumination integration over a $12 \times 24$ grid. This results in roughly $256 \times 128 \times 288$ MLP queries per pixel, making it computationally expensive [S1, unofficial].
+*   **Memory Complexity:** Requires storing the parameters for three MLPs ($\theta, \psi, \phi$). No additional large data structures are mentioned [S1, unofficial].
+*   **Strengths:** Enables physically-based relighting and view synthesis with accurate indirect lighting effects [S1, unofficial].
+*   **Limitations:** High computational cost limits real-time application. Relies on the accuracy of the visibility MLP for indirect path tracing [S1, unofficial].
+
+## Background
+NeRV (Neural Reflectance and Visibility Fields) was introduced in the paper "NeRV: Neural Reflectance and Visibility Fields for Relighting and View Synthesis" [S1, unofficial]. It extends the NeRF framework by incorporating explicit surface normals and BRDF parameters to enable relighting, and uses a visibility field to estimate indirect illumination [S1, unofficial].
+
+## Sources
+[S1] NeRV: Neural Reflectance and Visibility Fields for Relighting and View Synthesis, https://doi.org/10.1109/cvpr46437.2021.00741, fetched 2026-10-26 (unofficial)

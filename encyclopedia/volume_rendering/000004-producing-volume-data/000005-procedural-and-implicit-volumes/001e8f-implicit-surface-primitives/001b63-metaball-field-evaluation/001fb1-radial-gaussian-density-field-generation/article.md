@@ -24,7 +24,7 @@ The `RadialGaussian` class stores:
 2. Compute inverse dimensions:
    $$ invDimX = \frac{1.0}{dimX - 1}, \quad invDimY = \frac{1.0}{dimY - 1}, \quad invDimZ = \frac{1.0}{dimZ - 1} $$
    [S1, unofficial].
-3. Define atom centers and variance-derived scales. In the example, a scale factor $s = 0.1$ and offsets $o_X=0.5, o_Y=0.5, o_Z=0.5$ are applied to raw coordinates [S1, unofficial].
+3. Define atom centers and variance-derived scales [S1, unofficial].
 4. For each voxel $(z, y, x)$:
    a. Compute normalized coordinates:
       $$ n_X = x \cdot invDimX, \quad n_Y = y \cdot invDimY, \quad n_Z = z \cdot invDimZ $$

@@ -1,0 +1,107 @@
+# Per-Gaussian Backward
+
+Also called: Bucket-based backward, Mallick et al. backward
+
+## Overview
+Per-Gaussian Backward is a backward pass optimization for 3D Gaussian Splatting that parallelizes gradient computation over Gaussians rather than pixels to reduce atomic contention [S1, unofficial]. It differs from standard pixel-parallel backpropagation by operating on fixed-size buckets of 32 Gaussians (one GPU warp), allowing threads to collaboratively replay the alpha blending process using warp-level primitives [S1, unofficial]. This approach significantly reduces warp stalls caused by global memory latency during gradient accumulation [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Forward pass buffers storing intermediate color, transmittance, and Gaussian counts per tile; Gaussian attributes (position, covariance, opacity, color); camera parameters; tile definitions.
+*   **Outputs:** Gradients for Gaussian attributes (position, covariance, opacity, color) written to global memory.
+
+**Data Structures:**
+1.  **Intermediate Buffers:** Allocated during the forward pass. For each tile, these store:
+    *   `intermediate_color[tile_id][step][pixel]`: Color after every 32nd Gaussian.
+    *   `intermediate_transmittance[tile_id][step][pixel]`: Transmittance after every 32nd Gaussian.
+    *   `contributing_count[tile_id][pixel]`: Total number of Gaussians contributing to each pixel.
+    *   *Size:* Determined by the known lengths of per-tile Gaussian lists. The "step" dimension corresponds to the number of 32-Gaussian buckets in the tile.
+2.  **Bucket:** A group of 32 Gaussians associated with a single tile.
+3.  **Shared Memory Buffer:** Used by a warp (32 threads) to store alpha blending states (color/transmittance pairs) for the current bucket's pixels.
+
+**Numbered Steps:**
+1.  **Forward Pass Buffer Population:** During the forward rendering pass, after processing every 32nd Gaussian in a tile's list, write the current accumulated color and transmittance for all pixels in that tile into the `intermediate_color` and `intermediate_transmittance` buffers. Also, write the final count of contributing Gaussians per pixel.
+2.  **Bucket Launch:** For each tile, launch a kernel block where each thread block (warp) handles one bucket of 32 Gaussians.
+3.  **Thread Assignment:** In a warp of 32 threads, thread $i$ (where $i \in [0, 31]$) is responsible for computing the gradient contribution of the $i$-th Gaussian in the bucket across all pixels in the associated tile.
+4.  **Shared Memory Pre-loading:** All 32 threads in the warp collaboratively load the initial alpha blending states (color and transmittance) for the pixels affected by their respective Gaussians into shared memory. Each thread loads the state for its specific Gaussian's contribution range. This avoids global memory latency stalls [S1, unofficial].
+5.  **Gradient Replay:** Starting from the initial color and transmittance values stored in the buffers (or loaded into shared memory), the warp replays the alpha blending process using warp-level primitives (e.g., `__shfl_down_sync`).
+    *   The blending equation is replayed in reverse or forward order to compute the partial derivatives $\frac{\partial C}{\partial \alpha}$ and $\frac{\partial C}{\partial c}$ for each Gaussian.
+    *   Warp-level primitives allow efficient communication of intermediate blending states between threads within the same warp without global memory synchronization.
+6.  **Atomic Accumulation:** Each thread accumulates the computed gradients for its assigned Gaussian. Since a Gaussian may contribute to multiple tiles (and thus appear in multiple buckets), the final gradients are written to global memory using atomic operations to ensure correctness.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Kernel: PerGaussianBackward
+# Input: bucket_gaussians[32], tile_id, intermediate_buffers, shared_mem
+# Output: gradients_global
+
+def PerGaussianBackward(bucket_gaussians, tile_id, intermediate_buffers, shared_mem):
+    # 1. Load initial blending states into shared memory
+    # Each thread loads the state for its Gaussian's contribution
+    for i in range(32):
+        gauss = bucket_gaussians[i]
+        # Determine pixel range covered by this Gaussian in the tile
+        pixel_range = get_pixel_range(gauss, tile_id)
+        
+        # Load initial color and transmittance from intermediate buffers
+        # These were saved after the previous 32-Gaussian block
+        init_color = intermediate_buffers.color[tile_id][bucket_index][pixel_range]
+        init_trans = intermediate_buffers.transmittance[tile_id][bucket_index][pixel_range]
+        
+        # Store in shared memory for warp-wide access
+        shared_mem[i] = (init_color, init_trans)
+
+    # 2. Replay blending using warp-level primitives
+    # Threads cooperate to compute gradients for their assigned Gaussian
+    for i in range(32):
+        gauss = bucket_gaussians[i]
+        color_grad = 0.0
+        trans_grad = 0.0
+        
+        # Iterate over pixels affected by this Gaussian
+        for pixel in gauss.affected_pixels:
+            # Retrieve current blending state from shared memory
+            # Note: In a real warp, threads might need to synchronize or use shuffles
+            # to pass intermediate states. The key is avoiding global memory loads.
+            current_color, current_trans = shared_mem[i]
+            
+            # Compute gradient contribution for this pixel
+            # dL/dC = dL/dC_out * dC_out/dC
+            # dC_out/dC depends on alpha and previous transmittance
+            grad = compute_gradient(gauss, pixel, current_color, current_trans)
+            
+            color_grad += grad.color
+            trans_grad += grad.trans
+            
+        # 3. Write gradients to global memory using atomics
+        # Gaussians can be in multiple tiles, so atomics are required
+        atomic_add(gradients_global.position, gauss.id, grad.position)
+        atomic_add(gradients_global.covariance, gauss.id, grad.covariance)
+        atomic_add(gradients_global.opacity, gauss.id, grad.opacity)
+        atomic_add(gradients_global.color, gauss.id, grad.color)
+```
+
+**Parameters:**
+*   **Bucket Size:** 32 Gaussians (one warp).
+*   **Tile Size:** Typically 16x16 pixels (256 pixels per tile).
+*   **Shared Memory Usage:** 32 entries per warp, each entry containing color and transmittance for the relevant pixel range.
+
+**Edge Cases and Pitfalls:**
+*   **Warp Stalls:** If threads are synchronized while the first thread loads alpha blending state from global memory, the entire warp stalls. This is mitigated by collaborative loading into shared memory [S1, unofficial].
+*   **Multiple Tile Membership:** A single Gaussian may contribute to multiple tiles. Therefore, gradient accumulation must use atomic operations in global memory [S1, unofficial].
+*   **Buffer Size:** The intermediate buffers must be sized according to the maximum number of 32-Gaussian buckets in any tile. This is determined by the per-tile Gaussian list lengths.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of Gaussians, but with a significantly reduced constant factor due to warp-level parallelism and reduced global memory traffic.
+*   **Memory Complexity:** Additional memory for intermediate buffers: $O(T \cdot B \cdot P)$ where $T$ is the number of tiles, $B$ is the average number of buckets per tile, and $P$ is the number of pixels per tile.
+*   **Performance:** The shared memory optimization improves kernel runtime by up to 2x compared to the original Mallick et al. implementation [S1, unofficial].
+*   **Strengths:** Reduces atomic contention by parallelizing over Gaussians; minimizes global memory latency through shared memory usage; efficient use of warp-level primitives.
+*   **Limitations:** Requires additional memory for intermediate buffers; complex implementation due to warp-level synchronization and shared memory management; Gaussians spanning multiple tiles still require atomic writes.
+
+## Background
+Per-Gaussian Backward was proposed by Mallick et al. [56] as a key optimization for 3D Gaussian Splatting training. It was later analyzed and improved by the Faster-GS team, who introduced the shared memory optimization to reduce warp stalls [S1, unofficial]. The method is part of the broader effort to make differentiable volume rendering and radiance field optimization computationally efficient.
+
+## Sources
+[S1] Faster-GS: Analyzing and Improving Gaussian Splatting Optimization, https://arxiv.org/abs/2602.09999v1, fetched 2026-10-26 (unofficial)

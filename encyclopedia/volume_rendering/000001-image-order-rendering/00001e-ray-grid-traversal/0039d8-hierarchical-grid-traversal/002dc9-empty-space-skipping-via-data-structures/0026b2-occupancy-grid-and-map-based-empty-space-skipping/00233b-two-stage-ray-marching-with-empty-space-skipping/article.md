@@ -6,11 +6,11 @@ Also called: Occupancy Map Empty Space Skipping, Occupancy-based early exit, Sim
 Two-stage Ray Marching with Empty-Space Skipping is a rendering optimization that accelerates volumetric ray casting by decoupling the search for active volume data from the expensive density sampling process [S1][S2, unofficial]. It solves the problem of wasting computational resources sampling empty space by using a lower-resolution occupancy map to quickly identify entry points into active regions [S1][S2, unofficial]. Unlike its siblings, it employs a strict two-phase loop: Stage 1 performs cheap, coarse-grained occupancy lookups to skip inactive blocks, while Stage 2 performs fine-grained, expensive density sampling only within confirmed active regions [S2, unofficial]. This approach is distinct from hierarchical methods like [Hierarchical Sampling with Occupancy Grid](3035-hierarchical-sampling-with-occupancy-grid.md) by using a flat occupancy map and fixed-step skipping rather than recursive tree traversal, and from [Distance Map Acceleration](972-distance-map-acceleration.md) by relying on binary occupancy flags rather than distance-to-nearest-occupied-voxel metrics [S1][S2, unofficial].
 
 ## How it works
-The method operates in two distinct phases per ray. It requires a precomputed occupancy map and a primary volume dataset.
+The method operates in two distinct phases per ray [S2, unofficial]. It requires a precomputed occupancy map and a primary volume dataset [S1][S2, unofficial].
 
 ### Inputs and Outputs
 *   **Inputs:**
-    *   Primary volume data (density/opacity field).
+    *   Primary volume data (density/opacity field) [S1][S2, unofficial].
     *   Occupancy map: A lower-resolution grid where each voxel indicates if its corresponding volume block is active (non-zero density/opacity) or empty [S1][S2, unofficial].
     *   Camera parameters: Origin, direction, projection matrix, and world-to-camera matrices [S2, unofficial].
     *   Parameters:
@@ -23,24 +23,22 @@ The method operates in two distinct phases per ray. It requires a precomputed oc
     *   Final accumulated color and opacity for each pixel [S2, unofficial].
 
 ### Data Structures
-1.  **Occupancy Map:** A 3D grid of integers (or bits). Each element corresponds to a block of $B \times B \times B$ volume voxels.
-    *   Value `1`: Block contains active data.
-    *   Value `0`: Block is empty.
+1.  **Occupancy Map:** A 3D grid of integers (or bits). Each element corresponds to a block of $B \times B \times B$ volume voxels [S1].
+    *   Value `1`: Block contains active data [S2, unofficial].
+    *   Value `0`: Block is empty [S2, unofficial].
     *   Generation: Computed via a compute shader where each invocation evaluates a unique volume block for occupancy and writes the result [S1].
 2.  **Volume Buffer:** Structured buffer or texture storing the primary density/opacity values [S2, unofficial].
 3.  **Ray State:**
     *   `origin`: Camera position in world space.
     *   `rayVector`: Normalized direction vector.
     *   `length`: Current distance traveled along the ray.
-    *   `smokeValue`: Current occupancy/density sample result.
+    *   `smokeValue`: Current occupancy/density sample result [S2, unofficial].
 
 ### Numbered Steps
-
 1.  **Ray Initialization:**
     *   Compute ray direction from UV coordinates using inverse projection and camera-to-world matrices [S2, unofficial]:
         $$ \mathbf{rayVector} = \text{normalize}(\text{mul}(_{\text{CamToWorldMatrix}}, \text{float4}(\text{mul}(_{\text{invProjectionMatrix}}, \text{float4}(uv.x \cdot 2 - 1, uv.y \cdot 2 - 1, 0, 1)).xyz, 0)).xyz) $$
     *   Initialize `length = 0`, `smokeValue = -1` (or 0) [S2, unofficial].
-
 2.  **Stage 1: Occupancy Lookup (Empty Space Skipping):**
     *   Loop while `smokeValue <= 0` AND `length < _RayMaxLength`:
         *   Increment `length` by `stepSize` [S2, unofficial].
@@ -48,7 +46,6 @@ The method operates in two distinct phases per ray. It requires a precomputed oc
         *   Query occupancy: `smokeValue = getSmokeVoxel(positionWS)` [S2, unofficial].
             *   `getSmokeVoxel` converts world position to voxel indices, checks bounds, and returns the occupancy map value (0 or 1) [S2, unofficial].
     *   **Exit Condition:** If `smokeValue <= 0` after exceeding `_RayMaxLength`, the ray misses the volume. Output black color and terminate [S2, unofficial].
-
 3.  **Stage 2: Density Sampling (Active Region Traversal):**
     *   If `smokeValue == 1` (entry detected):
         *   Initialize `stage2StepNum = 0`, `accumulatedDensity = 0` [S2, unofficial].
@@ -60,48 +57,36 @@ The method operates in two distinct phases per ray. It requires a precomputed oc
             *   Increment `length` by `stepSize` [S2, unofficial].
             *   Increment `stage2StepNum` [S2, unofficial].
     *   **Resuming Skipping:** After Stage 2, if the ray is still within the volume bounds, check if the occupancy map coordinate $u_{occ}$ has changed and if the previously sampled voxel had zero opacity. If so, resume Stage 1 skipping [S1].
-
 4.  **Backward Adjustment (Boundary Handling):**
     *   When an occupied region is found, decrement the ray step number by $\Delta i_{\text{backward}} = -\lfloor f \rfloor$ to ensure the ray goes back at least one voxel length, accounting for interpolation or boundary isosurfaces [S1]. Here, $f$ is the sampling factor [S1].
 
 ### Formulas
-
 **Step Calculation in Occupancy Space:**
 To determine how many steps to skip in the occupancy map, the algorithm calculates the distance to the next block boundary. For a ray parameter $\mathbf{u}$ and step $\Delta \mathbf{u}$, the number of steps $\Delta \mathbf{i}$ on each dimension $j \in \{x, y, z\}$ is:
-
 $$ \Delta i_j = \begin{cases} \lceil (1 + \lfloor \mathbf{u}_j \rfloor - \mathbf{u}_j) / \Delta \mathbf{u}_j \rceil, & \text{if } \Delta \mathbf{u}_j > 0 \\ \lceil (\lfloor \mathbf{u}_j \rfloor - \mathbf{u}_j) / \Delta \mathbf{u}_j \rceil, & \text{otherwise} \end{cases} $$
-
 This can be vectorized using the Heaviside step function:
-
 $$ \Delta \mathbf{i} = \lceil (\text{step}(\Delta \mathbf{u}) + \lfloor \mathbf{u} \rfloor - \mathbf{u}) / \Delta \mathbf{u} \rceil $$
-
 The final step count is the minimum of the dimensional steps, clamped to a minimum of 1:
-
 $$ \Delta i = \max(\min(\Delta \mathbf{i}), 1) $$
-
 **Occupancy Map Step Size:**
 The distance step in occupancy map space $\Delta \mathbf{u}_{\text{occ}}$ is derived from the volume step $\Delta \mathbf{t}_{\text{vol}}$ and block size $B$:
-
 $$ \Delta \mathbf{u}_{\text{occ}} = \frac{d_{\text{vol}}}{B} \Delta \mathbf{t}_{\text{vol}} $$
-
 where $d_{\text{vol}}$ is the volume resolution [S1].
-
 **Density Calculation (Example):**
 $$ \text{density} = 1 - \text{smoothstep}(_{\text{Smoothing}}, 1.0, \text{normalizedDistance} + \text{noiseValue}) $$
 where $\text{normalizedDistance} = \text{length}(\mathbf{pos} - _{\text{SmokeOrigin}}) / _{\text{SmokeRadius}}$ [S2, unofficial].
 
 ### Pseudocode
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def two_stage_ray_marching(ray_origin, ray_direction, occupancy_map, volume_data, params):
     """
-    ray_origin: float3
-    ray_direction: float3 (normalized)
-    occupancy_map: 3D array of ints (0 or 1)
-    volume_data: 3D array of floats
-    params: dict containing B, stepSize, RayMaxLength, stage2StepMax, etc.
+    ray_origin: list of 3 floats [x, y, z]
+    ray_direction: list of 3 floats [x, y, z] (normalized)
+    occupancy_map: 3D list of ints (0 or 1)
+    volume_data: 3D list of floats
+    params: dict containing B, stepSize, RayMaxLength, stage2StepMax, voxelResolution, boundsExtent, densityMult
     """
     length = 0.0
     smoke_value = 0  # 0 means empty/unfound
@@ -109,61 +94,62 @@ def two_stage_ray_marching(ray_origin, ray_direction, occupancy_map, volume_data
     # Stage 1: Find active region
     while smoke_value <= 0 and length < params['RayMaxLength']:
         length += params['stepSize']
-        position_ws = ray_origin + length * ray_direction
+        position_ws = [ray_origin[i] + length * ray_direction[i] for i in range(3)]
         
         # Convert world position to occupancy map index
-        # Assuming simple division by block size B for regular grids
-        voxel_pos = position_ws / params['voxel_resolution']
-        occ_index = voxel_pos / params['B']
+        voxel_pos = [(position_ws[i] + params['boundsExtent'][i]) / params['voxelResolution'] for i in range(3)]
+        occ_index = [int(voxel_pos[i] // params['B']) for i in range(3)]
         
         if is_within_bounds(occ_index, occupancy_map.shape):
-            smoke_value = occupancy_map[occ_index]
+            smoke_value = occupancy_map[occ_index[0]][occ_index[1]][occ_index[2]]
         else:
             smoke_value = 0 # Out of bounds is empty
             
     # If no active region found within max length
     if smoke_value <= 0:
-        return (0.0, 0.0, 0.0, 0.0) # Black, transparent
+        return [0.0, 0.0, 0.0, 0.0] # Black, transparent
 
     # Stage 2: Sample density in active region
     stage2_step_num = 0
     accumulated_density = 0.0
     
     while stage2_step_num < params['stage2StepMax']:
-        sample_point = ray_origin + length * ray_direction
+        sample_point = [ray_origin[i] + length * ray_direction[i] for i in range(3)]
         
         # Sample density from volume data
         density = sample_volume_density(sample_point, volume_data, params)
         
-        accumulated_density += density * params['DensityMult']
+        accumulated_density += density * params['densityMult']
         
         length += params['stepSize']
         stage2_step_num += 1
         
-        # Optional: Check if we should resume skipping
-        # If current position is in a new empty block, break to Stage 1
-        # This requires checking occupancy_map again
-        
-    # Composite color based on accumulated_density
-    color = composite_color(accumulated_density)
+        # Check if we should resume skipping
+        current_voxel_pos = [(sample_point[i] + params['boundsExtent'][i]) / params['voxelResolution'] for i in range(3)]
+        current_occ_index = [int(current_voxel_pos[i] // params['B']) for i in range(3)]
+        if is_within_bounds(current_occ_index, occupancy_map.shape) and occupancy_map[current_occ_index[0]][current_occ_index[1]][current_occ_index[2]] == 0:
+            break # Resume Stage 1 skipping logic in a real implementation
+            
+    # Simple transfer function for output
+    color = [accumulated_density, accumulated_density, accumulated_density, 1.0]
     return color
 
 def sample_volume_density(pos, volume_data, params):
     # Convert world pos to voxel index
-    voxel_pos = (pos + params['BoundsExtent']) / params['VoxelResolution']
-    voxel_idx = floor(voxel_pos)
+    voxel_pos = [(pos[i] + params['boundsExtent'][i]) / params['voxelResolution'] for i in range(3)]
+    voxel_idx = [int(voxel_pos[i] // 1.0) for i in range(3)] # floor
     
     if not is_within_bounds(voxel_idx, volume_data.shape):
         return 0.0
         
-    # Trilinear interpolation or direct lookup
-    val = volume_data[voxel_idx]
+    # Direct lookup or trilinear interpolation
+    val = volume_data[voxel_idx[0]][voxel_idx[1]][voxel_idx[2]]
     
     # Apply transfer function or density calculation if needed
     # Example from [S2, unofficial]:
-    # dist = length(pos - SmokeOrigin)
-    # norm_dist = dist / SmokeRadius
-    # val = 1 - smoothstep(Smoothing, 1.0, norm_dist)
+    # dist = sqrt(sum((pos[i] - smokeOrigin[i])**2 for i in range(3)))
+    # norm_dist = dist / smokeRadius
+    # val = 1.0 - smoothstep(smoothing, 1.0, norm_dist)
     
     return val
 
@@ -184,7 +170,7 @@ def is_within_bounds(idx, shape):
 PDF Light Weight Space Leaping (LWSL) is a space-leaping acceleration technique for volume rendering that exploits ray coherence to skip empty space without requiring pre-processing or 3D data structures. It divides image-plane rays into two groups: **detector rays**, which perform full ray casting to determine the distance to the first non-empty cell, and **space leap rays**, which are accelerated by skipping empty space based on information propagated from detector rays. Unlike data-structure-based methods (e.g., DFB) or temporal coherence techniques, LWSL is an image-space method with memory and run-time complexity proportional only to the image size, making it independent of dataset complexity and transfer function changes.
 
 ### Volume Occupancy Map Skip
-Volume Occupancy Map Skip is a technique to skip empty voxels (e.g., sparse clouds) by using a preprocessed Volume Occupancy Map. If the current voxel is detected as empty, traversal jumps directly to the next non-empty voxel [S3, unofficial]. In a medical imaging project, this technique increased rendering frame rate by 3.2x [S3, unofficial].
+Volume Occupancy Map Skip is a technique to skip empty voxels (e.g., sparse clouds) by using a preprocessed Volume Occupancy Map [S3, unofficial]. If the current voxel is detected as empty, traversal jumps directly to the next non-empty voxel [S3, unofficial]. In a medical imaging project, this technique increased rendering frame rate by 3.2x [S3, unofficial].
 
 ## Operating characteristics
 *   **Time Complexity:** Stage 1 is $O(k)$ where $k$ is the number of empty blocks skipped. Stage 2 is $O(m)$ where $m$ is the number of samples in the active region. Overall complexity depends on the sparsity of the volume. For sparse volumes, it is significantly faster than brute-force marching [S3, unofficial].

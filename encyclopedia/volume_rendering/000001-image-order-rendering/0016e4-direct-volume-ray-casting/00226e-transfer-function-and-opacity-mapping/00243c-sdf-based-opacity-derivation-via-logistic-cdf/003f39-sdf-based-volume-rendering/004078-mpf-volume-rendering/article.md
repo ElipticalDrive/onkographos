@@ -1,0 +1,98 @@
+# MPF Volume Rendering
+Also called: Volume Rendering with MPFs
+## Overview
+MPF Volume Rendering is a neural volume rendering technique that replaces the Signed Distance Field (SDF) backbone with Metric-Phase Fields (MPFs) to handle sign-ambiguous geometry and thin structures [S1, unofficial]. It derives opacity from a signed composite field $\phi$ using a NeuS-style logistic mapping, while color is predicted by a separate radiance network, isolating the geometry representation change from the rendering pipeline [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   Camera ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$, where $\mathbf{o}$ is the origin and $\mathbf{d}$ is the direction.
+*   MPF network predicting the signed composite field $\phi(\mathbf{x})$.
+*   Radiance network predicting color $\mathbf{c}(\mathbf{x}, \mathbf{d})$.
+
+**Outputs:**
+*   Rendered color $\widehat{C}(\mathbf{r})$ for the ray.
+
+**Data Structures:**
+*   Sample points: A set of depths $t_1 < t_2 < \dots < t_n$ along the ray.
+*   Field values: $\phi_i = \phi(\mathbf{r}(t_i))$ and color $\mathbf{c}_i = \mathbf{c}(\mathbf{r}(t_i), \mathbf{d})$ for each sample $i$.
+
+**Parameters:**
+*   $s > 0$: Learned sharpness parameter controlling the transition band width of the occupancy CDF [S1, unofficial].
+*   $\varepsilon$: Small constant for numerical stability in opacity calculation [S1, unofficial].
+
+**Steps:**
+1.  **Sampling:** For each pixel, generate sample depths $t_1 < t_2 < \dots < t_n$ along the ray $\mathbf{r}(t)$.
+2.  **Evaluation:** Evaluate the signed composite field $\phi_i = \phi(\mathbf{r}(t_i))$ and the color $\mathbf{c}_i = \mathbf{c}(\mathbf{r}(t_i), \mathbf{d})$ at each sample point [S1, unofficial].
+3.  **Occupancy Mapping:** Compute the occupancy function $\Phi_i$ using a monotone Cumulative Distribution Function (CDF) applied to the scaled field value:
+    $$ \Phi_i = \text{CDF}\left(\frac{\phi_i}{s}\right) $$
+    The CDF is typically the logistic function (sigmoid) as adopted from NeuS [S1, unofficial].
+4.  **Opacity Estimation:** Calculate the per-interval opacity $\alpha_i$ based on the change in occupancy between adjacent samples:
+    $$ \alpha_i = \text{clip}_{[0,1]}\left( \frac{\Phi_i - \Phi_{i+1}}{\Phi_i + \varepsilon} \right) $$
+    This formulation leverages the signed nature of $\phi$ to produce well-conditioned zero crossings [S1, unofficial].
+5.  **Weight Computation:** Compute rendering weights $w_i$. The source text contains a garbled formula `wi = αi Q jαj )`. Based on the context of standard volumetric rendering and the subsequent color summation, the weights are computed as:
+    $$ w_i = \alpha_i \prod_{j < i} (1 - \alpha_j) $$
+    This represents the probability of the ray terminating in the $i$-th interval, accounting for transmission through previous intervals [S1, unofficial].
+6.  **Color Accumulation:** Compute the final rendered color by summing the weighted colors:
+    $$ \widehat{C}(\mathbf{r}) = \sum_{i=1}^{n} w_i \mathbf{c}_i $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def mpf_volume_render(ray_o, ray_d, mpf_net, radiance_net, t_vals, s, eps):
+    """
+    ray_o: (3,) ray origin
+    ray_d: (3,) ray direction
+    t_vals: (n,) sorted sample depths
+    mpf_net: function returning phi(x)
+    radiance_net: function returning color(x, d)
+    s: sharpness parameter
+    eps: numerical stability constant
+    """
+    n = len(t_vals)
+    positions = ray_o + t_vals[:, None] * ray_d  # (n, 3)
+    
+    # Evaluate fields
+    phi_vals = mpf_net(positions)  # (n,)
+    colors = radiance_net(positions, ray_d)  # (n, 3)
+    
+    # Occupancy mapping
+    # Assuming CDF is logistic sigmoid
+    occupancy = 1.0 / (1.0 + torch.exp(-phi_vals / s))  # (n,)
+    
+    # Opacity estimation
+    # alpha_i = clip((Phi_i - Phi_{i+1}) / (Phi_i + eps))
+    # Note: Phi_{n+1} is typically 0 (outside volume)
+    phi_next = torch.cat([occupancy[1:], torch.zeros(1, device=occupancy.device)])
+    alphas = (occupancy - phi_next) / (occupancy + eps)
+    alphas = torch.clamp(alphas, 0.0, 1.0)  # clip[0,1]
+    
+    # Weights
+    # w_i = alpha_i * product_{j<i} (1 - alpha_j)
+    transmittance = torch.cat([torch.ones(1, device=alphas.device), 
+                               torch.cumprod(1.0 - alphas[:-1], dim=0)])
+    weights = alphas * transmittance
+    
+    # Color accumulation
+    rendered_color = torch.sum(weights[:, None] * colors, dim=0)
+    
+    return rendered_color
+```
+
+**Edge Cases and Pitfalls:**
+*   **Numerical Stability:** The denominator $\Phi_i + \varepsilon$ prevents division by zero when $\Phi_i$ is near zero. $\varepsilon$ must be small but non-zero [S1, unofficial].
+*   **Sign Ambiguity:** MPFs retain flexibility in sign-ambiguous regions through metric/phase decomposition, which helps in thin structures where SDFs might fail [S1, unofficial].
+*   **Garbled Formula:** The source text's rendering weight formula `wi = αi Q jαj )` is ambiguous. The implementation assumes the standard volumetric rendering weight definition implied by the context [S1, unofficial].
+
+## Operating characteristics
+*   **Complexity:** Time complexity is linear with respect to the number of samples $n$ per ray. Memory complexity is dominated by the storage of the MPF and radiance networks.
+*   **Strengths:** Handles sign-ambiguous geometry and thin structures better than standard SDF-based methods by using MPFs [S1, unofficial]. Produces well-conditioned zero crossings and occlusion-aware weights [S1, unofficial].
+*   **Limitations:** Requires learning the sharpness parameter $s$ and potentially more complex geometry representation (MPF) compared to simple SDFs [S1, unofficial].
+*   **When to use:** Suitable for scenes with thin structures or sign-ambiguous geometry where standard SDFs struggle [S1, unofficial].
+*   **When not to use:** For simple, watertight, sign-definite geometry, standard SDF-based methods may be simpler and sufficient [S1, unofficial].
+
+## Background
+MPF Volume Rendering builds on the NeuS pipeline, which uses a signed-field-to-opacity mapping via a logistic CDF [S1, unofficial]. It specifically addresses limitations of SDFs in handling sign-ambiguous geometry and thin structures by introducing Metric-Phase Fields (MPFs) as the geometry backbone [S1, unofficial]. The method was introduced in the paper "Volume Rendering with Metric--Phase Fields for Thin Structures and Sign-Ambiguous Geometry" [S1, unofficial].
+
+## Sources
+[S1] Volume Rendering with Metric--Phase Fields for Thin Structures and Sign-Ambiguous Geometry, https://doi.org/10.48550/arxiv.2610.13088, fetched 2026-10-26 (unofficial)

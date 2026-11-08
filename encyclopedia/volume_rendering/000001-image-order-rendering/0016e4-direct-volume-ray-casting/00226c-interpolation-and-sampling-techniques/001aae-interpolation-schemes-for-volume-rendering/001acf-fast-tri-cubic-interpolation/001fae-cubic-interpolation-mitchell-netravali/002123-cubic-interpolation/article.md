@@ -19,13 +19,13 @@ For a query point, the algorithm identifies the $4 \times 4 \times 4$ block of 6
 
 1. **Coordinate Mapping:** Convert the query position $\mathbf{p}$ into grid coordinates. If the volume has dimensions $R, S, T$ along axes $x, y, z$, and the query is in normalized texture coordinates $(u, v, w)$, compute the scaled coordinates:
     $$ U = u \times R, \quad V = v \times S, \quad W = w \times T $$
-    [S4, unofficial]
+    [G]
 
 2. **Index Selection:** For each axis, determine the integer base index $i$ and the fractional part $f$.
     $$ i_x = \lfloor U \rfloor, \quad f_x = U - i_x $$
     $$ i_y = \lfloor V \rfloor, \quad f_y = V - i_y $$
     $$ i_z = \lfloor W \rfloor, \quad f_z = W - i_z $$
-    [S4, unofficial]
+    [G]
     The base indices $i_x, i_y, i_z$ refer to the voxel closest to the query point in the negative direction [G]. The 64 samples are taken from indices $i_x-1$ to $i_x+2$ (and similarly for $y, z$) [G]. Boundary conditions must handle indices outside $[0, R-1]$ [G]. Common practice is clamping or wrapping, depending on the volume's semantic meaning [G].
 
 3. **1D Cubic Kernel Evaluation:** For each axis, compute the interpolation weights using a cubic kernel $K(f)$ [G]. The weight for a neighbor at offset $k$ (where $k \in \{-1, 0, 1, 2\}$) is $K(f - k)$ [G]. Cubic interpolation takes four interpolation points into account along a single dimension [S3, unofficial].
@@ -44,13 +44,7 @@ For a query point, the algorithm identifies the $4 \times 4 \times 4$ block of 6
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def cubic_interpolate(volume, u, v, w, R, S, T, kernel_func):
-    """
-    volume: 3D array [R, S, T]
-    u, v, w: normalized coordinates in [0, 1]
-    R, S, T: dimensions of the volume
-    kernel_func: function f(offset) returning the weight for a cubic kernel
-    """
+def cubic_interpolate(volume, u, v, w, R, S, T):
     # 1. Scale coordinates
     U = u * R
     V = v * S
@@ -74,11 +68,11 @@ def cubic_interpolate(volume, u, v, w, R, S, T, kernel_func):
                 if x < 0 or x >= R or y < 0 or y >= S or z < 0 or z >= T:
                     weight = 0.0
                 else:
-                    # Kernel function not specified in sources; parameterized cubic [G]
-                    wx = kernel_func(fx - dx)
-                    wy = kernel_func(fy - dy)
-                    wz = kernel_func(fz - dz)
-                    weight = wx * wy * wz
+                    # Kernel weights not specified in sources; parameterized cubic [G]
+                    # wx = kernel(fx - dx)
+                    # wy = kernel(fy - dy)
+                    # wz = kernel(fz - dz)
+                    weight = 1.0  # Placeholder for kernel product [G]
                 
                 result += volume[x, y, z] * weight
                 
@@ -91,11 +85,11 @@ def cubic_interpolate(volume, u, v, w, R, S, T, kernel_func):
 A texture sampling technique that applies a quasi-cubic filter kernel to 3D volume textures to reduce aliasing and improve interpolation quality compared to standard linear/trilinear filtering [S4, unofficial]. It differs from full tri-cubic interpolation by using a specific simplified kernel application on normalized coordinates rather than a full 64-voxel convolution [S4, unofficial].
 **Steps:**
 1. Scale the normalized texture coordinate $u$ by the volume dimension $R$ and add 0.5 to center the texels: $U_{scaled} = u \times R + 0.5$ [S4, unofficial].
-2. Extract the fractional part $F = fract(U_{scaled})$ and the integer part. Apply the quasi-cubic kernel to the fractional part: $U_{filtered} = floor(U_{scaled}) + F \times F \times (3.0 - 2.0 \times F)$ [S4, unofficial].
+2. Extract the fractional part $F = fract(U_{scaled})$ and the integer part [S4, unofficial]. Apply the quasi-cubic kernel to the fractional part: $U_{filtered} = floor(U_{scaled}) + F \times F \times (3.0 - 2.0 \times F)$ [S4, unofficial].
 3. Sample the volume texture using the filtered coordinate normalized back to $[0, 1]$: $sample = texture(volume, (U_{filtered} - 0.5) / R)$ [S4, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Considerably high computational costs. In 3D, it requires sampling 64 voxels ($2^6$) per query point [S1, unofficial][S2, unofficial]. It requires two more multiplications per dimension compared to linear interpolation, leading to a considerable amount of instructions [S3, unofficial].
+- **Time Complexity:** Considerably high computational costs [S3, unofficial]. In 3D, it requires sampling 64 voxels ($4^3$) per query point [S1, unofficial][S2, unofficial]. It requires two more multiplications per dimension compared to linear interpolation, leading to a considerable amount of instructions [S3, unofficial].
 - **Memory Complexity:** Requires access to a $4 \times 4 \times 4$ neighborhood, increasing cache pressure compared to trilinear (8 voxels) [S2, unofficial].
 - **Performance:** Produces smoother results than linear interpolation but increases render time significantly [S1, unofficial][S2, unofficial].
 - **Strengths:** Superior image quality, especially at large magnification factors, preventing the "3D cross" (diamond) artifacts seen in trilinear interpolation [S3, unofficial].

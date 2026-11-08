@@ -1,1793 +1,433 @@
-arXiv:2304.09987v3 [cs.CV] 20 Aug 2023
-Tetra-NeRF: Representing Neural Radiance Fields Using Tetrahedra
-Jonas Kulhanek
-Czech Technical University in Prague
-Torsten Sattler
-Czech Technical University in Prague
+# Tetra-NeRF: Representing Neural Radiance Fields Using Tetrahedra
+
+Jonas Kulhanek Czech Technical University in Prague
+
 jonas.kulhanek@cvut.cz
+
+Torsten Sattler Czech Technical University in Prague
+
 torsten.sattler@cvut.cz
-1) input: point cloud
-3) barycetric interpolation of features
-2) scene representation: dense tetrahedra
-4) shallow MLP predicts
-density and colour
-Figure 1. The input to Tetra-NeRF is a point cloud which is triangulated to get a set of tetrahedra used to represent the radiance field.
-Rays are sampled, and the field is queried. Barycentric interpolation is used to interpolate tetrahedra vertices, and the resulting features are
-passed through a shallow MLP to get the density and colours for volumetric rendering.
-Abstract
-NeRFs used MLPs to represent the 3D scene as an implicit function. Given a set of posed images, NeRF randomly samples a batch of pixels, casts rays from the pixels into the 3D space, queries the implicit function at randomly sampled distances along the rays, and aggregates the
-sampled values using volumetric rendering [37, 39]. While
-the visual results of such methods are of high quality, the
-problem is that querying large MLPs at millions of points
-is costly. Also, once the network is trained, it is difficult to
-make any changes to the represented radiance field as everything is baked into the MLPs parameters, and any change
-has a non-local effect. Since then, there have been a lot
-of proposed alternatives to the large MLP field representation [9, 17, 32, 41, 57, 70, 74]. These methods combine an
-MLP with a voxel feature grid [41, 57], or in some cases
-represent the radiance field directly as a tensor [9, 10, 17].
-When querying these representations, first, the containing
-voxel is found, and the features stored at the eight corner
-points of the voxel are trilinearly interpolated. The result
-is either passed through a shallow MLP [9, 10, 41, 57] or is
-used directly as the density and colour [17, 32, 57].
-Neural Radiance Fields (NeRFs) are a very recent and
-very popular approach for the problems of novel view synthesis and 3D reconstruction. A popular scene representation used by NeRFs is to combine a uniform, voxel-based
-subdivision of the scene with an MLP. Based on the observation that a (sparse) point cloud of the scene is often
-available, this paper proposes to use an adaptive representation based on tetrahedra obtained by Delaunay triangulation instead of uniform subdivision or point-based representations. We show that such a representation enables efficient
-training and leads to state-of-the-art results. Our approach
-elegantly combines concepts from 3D geometry processing, triangle-based rendering, and modern neural radiance
-fields. Compared to voxel-based representations, ours provides more detail around parts of the scene likely to be close
-to the surface. Compared to point-based representations,
-our approach achieves better performance. The source code
-is publicly available at: https://jkulhanek.com/tetra-nerf.
-Having a dense tensor represent the entire scene is very
-inefficient, as we only need to represent a small space
-around surfaces. Therefore, different methods propose different ways of tackling the issue. Instant-NGP [41], for example, uses a hash grid instead of a dense tensor, where it
-relies on optimisation to resolve the hash collisions. How-
-1. Introduction
-Reconstructing 3D scenes from images and rendering
-photo-realistic novel views is a key problem in computer
-vision. Recently, NeRFs [3, 4, 39] became dominant in the
-field for their superior photo-realistic results. Originally,
+
+
+
+Figure 1. The input to Tetra-NeRF is a point cloud which is triangulated to get a set of tetrahedra used to represent the radiance field. Rays are sampled, and the field is queried. Barycentric interpolation is used to interpolate tetrahedra vertices, and the resulting features are passed through a shallow MLP to get the density and colours for volumetric rendering.
+
+## Abstract
+
+Neural Radiance Fields (NeRFs) are a very recent and very popular approach for the problems of novel view synthesis and 3D reconstruction. A popular scene representation used by NeRFs is to combine a uniform, voxel-based subdivision of the scene with an MLP. Based on the observation that a (sparse) point cloud of the scene is often available, this paper proposes to use an adaptive representation based on tetrahedra obtained by Delaunay triangulation instead of uniform subdivision or point-based representations. We show that such a representation enables efficient training and leads to state-of-the-art results. Our approach elegantly combines concepts from 3D geometry processing, triangle-based rendering, and modern neural radiance fields. Compared to voxel-based representations, ours provides more detail around parts of the scene likely to be close to the surface. Compared to point-based representations, our approach achieves better performance. The source code is publicly available at: [https://jkulhanek.com/tetra-nerf.](https://jkulhanek.com/tetra-nerf/)
+
+# 1. Introduction
+
+Reconstructing 3D scenes from images and rendering photo-realistic novel views is a key problem in computer vision. Recently, NeRFs [3, 4, 39] became dominant in the field for their superior photo-realistic results. Originally, NeRFs used MLPs to represent the 3D scene as an implicit function. Given a set of posed images, NeRF randomly samples a batch of pixels, casts rays from the pixels into the 3D space, queries the implicit function at randomly sampled distances along the rays, and aggregates the sampled values using volumetric rendering [37, 39]. While the visual results of such methods are of high quality, the problem is that querying large MLPs at millions of points is costly. Also, once the network is trained, it is difficult to make any changes to the represented radiance field as everything is baked into the MLPs parameters, and any change has a non-local effect. Since then, there have been a lot of proposed alternatives to the large MLP field representation [9, 17, 32, 41, 57, 70, 74]. These methods combine an MLP with a voxel feature grid [41, 57], or in some cases represent the radiance field directly as a tensor [9, 10, 17]. When querying these representations, first, the containing voxel is found, and the features stored at the eight corner points of the voxel are trilinearly interpolated. The result is either passed through a shallow MLP [9, 10, 41, 57] or is used directly as the density and colour [17, 32, 57].
+
+Having a dense tensor represent the entire scene is very inefficient, as we only need to represent a small space around surfaces. Therefore, different methods propose different ways of tackling the issue. Instant-NGP [41], for example, uses a hash grid instead of a dense tensor, where it relies on optimisation to resolve the hash collisions. However, similarly to MLPs, any change to the stored hashmap influences the field in many places. A more common direction to addressing the issue is by directly using a sparse tensor representation [9, 17]. These methods start with a low-resolution grid and, at predefined steps, subsample the representation, increasing the resolution. These approaches tend to require a careful setting of hyperparameters, such as the scene bounding box and the subdivision steps, in order for the methods to work well.
+
+Because many of these methods use traditional structure from motion (SfM) [54, 55] methods to generate the initial poses for the captured images, we can reuse the original reconstruction in the scene representation. Inspired by classical surface reconstruction methods [22,23,29,30], we represent the scene as a dense triangulation of the input point cloud, where the scene is a set of non-overlapping tetrahedra whose union is the convex hull of the original point cloud [14]. When querying such a representation, we find to which tetrahedron the query point belongs and perform barycentric linear interpolation of the features stored in the vertices of the tetrahedron. This very simple representation can be thought of as the direct extension of the classical triangle-rendering pipelines used in graphics [40,43,45]. The representation avoids problems with the sparsity of the input point cloud as the tetrahedra fully cover the scene, resulting in a continuous rather than discrete representation.
+
+This paper makes the following contributions: (1) We propose a novel radiance field representation which is initialised from a sparse or dense point cloud. This representation is naturally denser in the proximity of surfaces and, therefore, provides a higher resolution in these regions. (2) The proposed representation is evaluated on multiple synthetic and real-world datasets and is compared with a stateof-the-art point-cloud-based representation – Point-NeRF [70]. The presented results show that our method clearly outperforms this baseline. We further demonstrate the effectiveness of our adaptive representation by comparing it with a voxel-based representation that uses the same number of trainable parameters. (3) We make the source code and model checkpoints publicly available.1
+
+# 2. Related work
+
+Multi-view reconstruction. The problem of multi-view reconstruction has been studied extensively and tackled with a variety of structure from motion (SfM) [54, 61, 63], and multi-view stereo (MVS) [12, 18, 55, 71] methods. These methods usually output the scene represented as a point cloud [54, 55]. In most rendering approaches, the point cloud is converted into a mesh [24, 35], and novel views are rendered by reprojecting observed images into each novel viewpoint and blending them together using either heuristically-defined [8, 13, 69] or learned [20, 50, 51, 73] blending weights.
+
+However, the process of getting the meshes is usually quite noisy, and the resulting meshes tend to have inaccurate geometry in regions with fine details or complex materials. Instead of using noisy meshes, point-based neural rendering methods [1, 26, 38, 53] perform splatting of neural features and use 2D convolutions to render them. In contrast to these methods, our approach operates and aggregates features directly in 3D and does not suffer from the noise in the point cloud or the reconstructed mesh.
+
+Neural radiance fields. Recently, NeRFs [3, 4, 34, 39, 77] have gained a lot of attention thanks to their high-quality rendering performance. The original NeRF method [39] was extended to better handle aliasing artefacts in [3], to better represent unbounded scenes in [4, 48, 77], or to handle real-world captured images [36, 58]. The training of the large MLPs used in these methods can be quite slow, and there has been a lot of effort on speeding up either the training [9, 17, 41] or the rendering [21, 47, 48, 74] sometimes at the cost of larger storage requirements. Other approaches tackled different aspects of NeRFs like view-dependent artefacts [62], relighting [5,7], or proposed generative models [46,64]. Also, a popular research direction is making the models generalize across different scenes [11,28,49,66,75]. A large area of research is dedicated to the surface reconstruction and, instead of using the radiance fields, represents the scene implicitly by modelling the signed distance function (SDF) [52,65,67,72,76]. Unlike those approaches, we focus only on the radiance field representation and consider these methods orthogonal to ours.
+
+Although there are some methods that train radiance fields while fine-tuning the poses [31,60] or without known cameras [6, 68], most methods need camera poses for the reconstruction. SfM, e.g., COLMAP [54, 55], is typically used for estimating the poses, which also produces a (sparse) point cloud. Our approach makes use of this byproduct of the pose recovery process instead of only using the poses themselves.
+
+Field representations. When a single MLP is used to represent the entire scene, everything is baked into a single set of parameters which cannot be easily modified, because any change to the parameters has a non-local effect, i.e., it changes the scene at multiple unrelated places. To overcome this problem, others have experimented with different representations of the radiance fields [9, 10, 17, 32, 41, 44, 57, 70]. A common practice is to represent the scene as a shallow MLP and an efficiently encoded voxel grid [9, 10, 32, 41, 44]. The encoded voxel grid can also be used represent the radiance field directly [17,57]. The voxel grid can be encoded as a sparse tensor [17,32,57], a factorisation of the 4D tensor [9, 10], or a hashmap [41]. When
+
 1
-ever, similarly to MLPs, any change to the stored hashmap
-influences the field in many places. A more common direction to addressing the issue is by directly using a sparse
-tensor representation [9, 17]. These methods start with a
-low-resolution grid and, at predefined steps, subsample the
-representation, increasing the resolution. These approaches
-tend to require a careful setting of hyperparameters, such as
-the scene bounding box and the subdivision steps, in order
-for the methods to work well.
-Because many of these methods use traditional structure
-from motion (SfM) [54, 55] methods to generate the initial
-poses for the captured images, we can reuse the original
-reconstruction in the scene representation. Inspired by classical surface reconstruction methods [22,23,29,30], we represent the scene as a dense triangulation of the input point
-cloud, where the scene is a set of non-overlapping tetrahedra whose union is the convex hull of the original point
-cloud [14]. When querying such a representation, we find
-to which tetrahedron the query point belongs and perform
-barycentric linear interpolation of the features stored in the
-vertices of the tetrahedron. This very simple representation can be thought of as the direct extension of the classical triangle-rendering pipelines used in graphics [40,43,45].
-The representation avoids problems with the sparsity of the
-input point cloud as the tetrahedra fully cover the scene, resulting in a continuous rather than discrete representation.
-This paper makes the following contributions: (1) We
-propose a novel radiance field representation which is initialised from a sparse or dense point cloud. This representation is naturally denser in the proximity of surfaces and,
-therefore, provides a higher resolution in these regions. (2)
-The proposed representation is evaluated on multiple synthetic and real-world datasets and is compared with a stateof-the-art point-cloud-based representation – Point-NeRF
-[70]. The presented results show that our method clearly
-outperforms this baseline. We further demonstrate the effectiveness of our adaptive representation by comparing it
-with a voxel-based representation that uses the same number of trainable parameters. (3) We make the source code
-and model checkpoints publicly available.1
-ther heuristically-defined [8, 13, 69] or learned [20, 50, 51,
-73] blending weights.
-However, the process of getting the meshes is usually
-quite noisy, and the resulting meshes tend to have inaccurate
-geometry in regions with fine details or complex materials.
-Instead of using noisy meshes, point-based neural rendering
-methods [1, 26, 38, 53] perform splatting of neural features
-and use 2D convolutions to render them. In contrast to these
-methods, our approach operates and aggregates features directly in 3D and does not suffer from the noise in the point
-cloud or the reconstructed mesh.
-2. Related work
-Field representations. When a single MLP is used to
-represent the entire scene, everything is baked into a single set of parameters which cannot be easily modified, because any change to the parameters has a non-local effect,
-i.e., it changes the scene at multiple unrelated places. To
-overcome this problem, others have experimented with different representations of the radiance fields [9, 10, 17, 32,
-41, 44, 57, 70]. A common practice is to represent the
-scene as a shallow MLP and an efficiently encoded voxel
-grid [9, 10, 32, 41, 44]. The encoded voxel grid can also be
-used represent the radiance field directly [17,57]. The voxel
-grid can be encoded as a sparse tensor [17,32,57], a factorisation of the 4D tensor [9, 10], or a hashmap [41]. When
-Neural radiance fields. Recently, NeRFs [3, 4, 34, 39, 77]
-have gained a lot of attention thanks to their high-quality
-rendering performance. The original NeRF method [39]
-was extended to better handle aliasing artefacts in [3], to
-better represent unbounded scenes in [4, 48, 77], or to handle real-world captured images [36, 58]. The training of the
-large MLPs used in these methods can be quite slow, and
-there has been a lot of effort on speeding up either the training [9, 17, 41] or the rendering [21, 47, 48, 74] sometimes at
-the cost of larger storage requirements. Other approaches
-tackled different aspects of NeRFs like view-dependent
-artefacts [62], relighting [5,7], or proposed generative models [46,64]. Also, a popular research direction is making the
-models generalize across different scenes [11,28,49,66,75].
-A large area of research is dedicated to the surface reconstruction and, instead of using the radiance fields, represents
-the scene implicitly by modelling the signed distance function (SDF) [52, 65, 67, 72, 76]. Unlike those approaches, we
-focus only on the radiance field representation and consider
-these methods orthogonal to ours.
-Although there are some methods that train radiance
-fields while fine-tuning the poses [31, 60] or without known
-cameras [6, 68], most methods need camera poses for the
-reconstruction. SfM, e.g., COLMAP [54, 55], is typically used for estimating the poses, which also produces a
-(sparse) point cloud. Our approach makes use of this byproduct of the pose recovery process instead of only using
-the poses themselves.
-Multi-view reconstruction. The problem of multi-view
-reconstruction has been studied extensively and tackled
-with a variety of structure from motion (SfM) [54, 61, 63],
-and multi-view stereo (MVS) [12, 18, 55, 71] methods.
-These methods usually output the scene represented as a
-point cloud [54, 55]. In most rendering approaches, the
-point cloud is converted into a mesh [24, 35], and novel
-views are rendered by reprojecting observed images into
-each novel viewpoint and blending them together using ei1 https://github.com/jkulhanek/tetra-nerf
-2
-(a) dense point cloud
-(b) dense tetrahedra slice
-(a) trilinear interpolation
-(b) barycentric interpolation
-Figure 3. Trilinear and barycentric intepolation. Trilinear interpolation is a weighted combination of the eight voxel corners.
-Barycentric interpolation weights the four vertices of the tetrahedron vertices based on the barycentric coordinates [16].
-(c) sparse point cloud
-(d) sparse tetrahedra slice
-Fig. 2). In the following, we explain how this adaptive subdivision of the scene can be used instead of voxels for volume rendering and neural rendering.
-Figure 2. Input point cloud and a slice through the triangulated
-tetrahedra. Note that smaller tetrahedra are created closer to the
-surface of the scene, i.e., regions close to the surface are represented with a finer resolution.
-3.1. Preliminaries
-these structures are queried, trilinear interpolation is used to
-combine the feature vectors stored in the containing voxel
-corners. Unfortunately, the hashmaps [41] and hierarchical
-representations [10] have the same non-local effect problem, and the rest of the approaches rely on subsequent upsampling of the field and can be overly complicated. Also,
-feature vectors cannot be placed arbitrarily in the 3D space
-as they must lie on the grid with a fixed resolution. In contrast, our approach is much more flexible as it stores the
-feature vectors freely in 3D space.
-Finally, Point-NeRF [70] represents the scene as a point
-cloud of features which are queried using k-nearest neighbours search. However, when the point cloud contains
-sparse regions, the rays do not intersect any neighbourhoods
-of any points and the pixels stay empty without the ability
-to optimise. Therefore, Point-NeRF [70] relies on gradually adding more points during training and increasing the
-scene complexity. Since we use the triangulation of the
-point cloud rather than the discrete point cloud itself, our
-representation is continuous and does not suffer from empty
-regions. Therefore, we do not have to add any points during
-training.
-Neural Radiance Fields (NeRFs) [39] represent a scene
-through an implicit function F (x, d), often modelled via a
-neural network, that returns a colour value and a volume
-density prediction for a given 3D point x in the scene observed from a viewing direction d. Volume rendering [37]
-is used to synthesise novel views: for each pixel in a virtual view, we project a ray from the camera plane into the
-scene and sample the radiance field to obtain the colour and
-density values ci and σi at distances ti along the ray, where
-i = 1 . . . N . The individual samples are then combined to
-predict the colour C for the pixel:
-\label {eq:volumetric-rendering} \begin {split} \mathbf {C} &= \sum _{i=1}^{N} T_i (1 - \exp (\sigma _i \delta _i))\mathbf {c}_i \enspace , \text {where} \\ T_i &= \exp (-\sum _{i=1}^{N - 1} \sigma _i \delta _i) \enspace , \end {split}
-(1)
-and δi = ti −ti−1 is the distance between adjacent samples.
-This process is fully differentiable. Thus, after computing
-the mean squared error (MSE) between the predicted and
-ground truth colours associated with each ray, we can backpropagate the gradients to the radiance field.
-Voxel-based feature fields such as NSVF [32] represent
-the scene as a voxel grid and an MLP. Each grid point of
-the voxel grid is assigned a trainable vector. There are
-eight feature vectors associated with a single voxel, but
-the vectors are shared between neighbouring voxels. For
-each query point sampled along the ray, its corresponding
-voxel is found first. A feature for the point is then computed via trilinear interpolation of the features of the voxel
-grid points based on the position of the query point (c.f .
-Fig. 3, left). The resulting feature vector is passed through
-an MLP to predict the density and appearance vector. The
-appearance vector is combined with the ray direction and
-3. Method
-A common strategy in the literature is to represent the
-scene explicitly through a voxel volume. In contrast to this
-uniform subdivision, we investigate using an adaptive subdivision of the scene. In many scenarios, an approximation
-of the scene geometry is either given, e.g., when using SfM
-to compute the input camera poses, or can be computed,
-e.g., via MVS or single-view depth predictions [79]. This
-allows us to compute an adaptive subdivision of the scene
-via Delaunay triangulation [14] of such a point cloud. This
-results in a set of non-overlapping tetrahedra, where smaller
-tetrahedra are created close to the surface of the scene (c.f .
-3
-passed through a second MLP in order to compute a viewdependent colour.
-contrast, finding the corresponding tetrahedron for a query
-point is more complex. This in turn can significantly impact
-rendering, and thus training, efficiency [17, 41, 57].
-In order to efficiently look up the corresponding tetrahedra, we exploit that we are not considering isolated points,
-but points sampled from a ray. We compute the tetrahedra
-that are intersected by the ray, allowing us to march through
-the tetrahedra rather than computing them individually per
-point. The relevant tetrahedra can be found efficiently using acceleration structures for fast ray-triangle intersection
-computations, e.g., via NVidia’s OptiX library [43]: We first
-compute the intersections between the rays from a synthetic
-view and all faces of the tetrahedra. For each ray, we take
-the first 512 intersected triangles2 , and determine the corresponding tetrahedra. The tetrahedra can be ordered based
-on the intersections along the ray, allowing us to easily
-march through the tetrahedra to determine which tetrahedron to use for a given query point.
-A side benefit of computing ray-triangle intersections is
-that we can simplify computing the barycentric coordinates:
-For each intersection, we compute the 2D barycentric coordinates w.r.t. the triangle. We then obtain the 3D barycentric coordinates w.r.t. the associate tetrahedron by simply
-adding zero for the vertex opposite to the triangle. For a
-query point inside a tetrahedron, we can compute its tetrahedron barycentric coordinates by linearly interpolating between the barycentric coordinates of the two intersections
-of the ray and the tetrahedron.
-3.2. Tetrahedra fields
-Given a set of points in 3D space, we build the tetrahedra structure by triangulating the points. We apply the Delaunay triangulation [14] to obtain a set of non-overlapping
-tetrahedra whose union is the convex hull of the original
-points. Fig. 2 shows example tetrahedra obtained by triangulating dense and sparse COLMAP-reconstructed point
-clouds [54, 55]. Note that the resulting representation is
-adaptive as it uses a higher resolution (smaller tetrahedra)
-closer to the surface and larger tetrahedra to model regions
-farther away from the surface.
-We associate all vertices of the tetrahedra with trainable
-vectors. As in the voxel grid case, vertices, and thus vectors, are shared between adjacent tetrahedra. The resulting
-tetrahedra field can be queried in the same way a voxel grid
-representation is queried: for each query point, we first find
-the tetrahedron containing the point. Instead of the trilinear
-interpolation used for voxel volumes, we use the barycentric interpolation [16] to compute a feature vector for the
-query point from the four feature vectors stored at the tetrahedron’s vertices (c.f . Fig. 3). To this end, we compute the
-query point x’s barycentric coordinates λ, which express
-the point’s 3D coordinates as a unique weighted combination of the 3D coordinates of the tetrahedron’s vertices. In
-particular, the weight for a vertex is the volume of the tetrahedron constructed from the query point and the face opposite to the vertex divided by the volume of the full tetrahedron:
-\bm {\lambda } = \bigg (\frac {V_{x234}}{V_{1234}}, \frac {V_{1x34}}{V_{1234}}, \frac {V_{12x4}}{V_{1234}}, \frac {V_{123x}}{V_{1234}}\bigg ) \,,
-3.4. Coarse and fine sampling
-We follow the common practice of having a two-stage
-sampling procedure [9, 39]. In the coarse stage, we sample
-uniformly along the ray. In the fine stage, we use the density weights from the coarse sampling stage to bias the sampling towards sampling closer to the potential surface. Following [39], we use the stratified uniform sampling for the
-coarse stage. The stratified uniform sampling splits the ray
-into equally long intervals and samples uniformly in each
-interval. Unlike NeRF [39], we limit the sampling to the
-space occupied by tetrahedra. In the fine sampling stage,
-we use the same network as in the coarse sampling stage.
-For the fine sampling stage, we take the accumulated
-weights wi from the coarse sampling:
-(2)
-where V1234 is the volume of the full tetrahedron and Vx234 ,
-V1x34 , . . . , are volumes of tetrahedra with 1st , 2nd , . . . , vertex replaced by x. The same weights λ are applied to the
-feature vectors of the vertices to obtain the query feature.
-The interpolated features are used as the input to a small
-MLP in order to predict density and colour at the query
-point. We first pass the barycentric-interpolated features
-through a three-layer MLP to compute the density and appearance features. We then concatenate the appearance features with the ray direction vector encoded using Fourier
-features [39, 59] and pass the result through a single linear
-layer to get the raw RGB colour value.
-Finally, to map the raw density values σ̄i returned by
-the network to the volume density σi required by volume
-rendering, we apply the softplus activation function [3]. For
-the RGB colour value, we use the sigmoid function [17].
-\bar {w_i} = (1 - \exp (-\sigma _i \delta _i))\exp \bigg (-\sum _{j=1}^{i-1}\sigma _j \delta _j\bigg ) \enspace .
-(3)
-These weights are the coefficients used in Equation 1 as
-multipliers for the colours [39]. We obtain wi by normalizing w̄i . Following [39], we sample set of fine samples using
-3.3. Efficiently querying a tetrahedra field
-2 For efficiency, we only consider a fixed number of triangles. As dis-
-cussed later on, this can degrade results in larger scenes / scenes with a
-fine-grained tetrahedralisation, where more intersections are needed. Naturally, more triangles can be considered at the cost of longer run-times.
-Determining the corresponding voxel for a given query
-point can be done highly efficiently via hashing [42]. In
-4
-weight wi . To render the final colour, we merge the dense
-and fine samples and use all in the rendering equation [9].
-NeRF [39]
-NSVF [32]
-mip-NeRF [3]
-instant-NGP [41]
-Plenoxels [17]
-Point-NeRFcol [70]
-Point-NeRFmvs [70]
-Tetra-NeRF
-4. Experiments
-We compare Tetra-NeRF to relevant methods on the
-commonly used synthetic Blender [39], the real-world
-Tanks and Temples [25], and the challenging object-centric
-Mip-NeRF 360 [4] datasets. To show its effectiveness,
-we compare Tetra-NeRF to a dense-grid representation and
-evaluate it with reduced quality of the input point cloud. We
-start by describing the exact hyperparameters used.
-PSNR ↑
-31.00
-31.77
-34.51
-33.18
-31.71
-31.77
-33.31
-32.53
-SSIM ↑
-0.947
-0.953
-0.961
-0.958
-0.973
-0.978
-0.982
-LPIPS ↓
-0.081
-0.043
-0.049
-0.062
-0.049
-0.041
-Table 1. Results on the Blender dataset [39] averaged over all
-scenes in the dataset. Even though we use the same input point
-cloud as Point-NeRFcol , we outperform it greatly. We perform on
-par with Point-NeRFmvs even though it uses many more points
-and densifies the point cloud during training. We highlight the
-best , second , and third values.
-4.1. Implementation details
-Generating point cloud & triangulation. Given a set of
-posed images, we use the COLMAP reconstruction pipeline
-[54, 55] to get the point cloud used in our tetrahedra field
-representation. We then reduce the size of the resulting
-point cloud such that if the number of points is larger than
-106 , we subsample 106 points randomly. For the Blender
-dataset experiments, where the number of points is smaller,
-we add more randomly generated points. In that case, the
-number of random points is half the number of original
-points. The reason for adding the points is that with a low
-number of points, some pixels on edges may not intersect
-any tetrahedra, potentially producing artefacts on the edges.
-Each added point is sampled as follows: we sample a random point x0 from the original point cloud, sample a ran¯ d¯2 ), where d¯
-dom normal vector n, and a number α ∼ N (d,
-is the average spacing of the original point cloud, i.e. the average distance between each point and its six closest neighbours. We then add the point x = x0 + αn.
-Initialization. Given the processed point cloud, we apply
-the Delaunay triangulation [14] to get a set of tetrahedra.
-To this end, we use the CGAL library [2], which in our
-experiments runs in the order of milliseconds. Following
-[41], we initialise the features of size 64 at the vertices of
-the tetrahedra with small values sampled uniformly in the
-range −10−4 to 10−4 . However, to allow the model to reuse
-the information contained in the point cloud, we set the first
-four dimensions of the feature field to the RGBA colour
-values (rescaled to interval [0, 1]) stored at the associated
-points in the point cloud. The alpha value of all original
-points is one, whereas all randomly sampled points have an
-alpha value of zero. For the MLP, we follow the common
-practice of using the Kaiming uniform initialisation [19].
-The hidden sizes in all MLPs are 128.
-Training. During training, we sample batches of 4,096 random rays from random training images. We use volumetric
-rendering to predict the colour of each ray. The gradients
-are computed by backpropagating the MSE loss between
-the predicted colour and the ground truth colour value. We
-use the RAdam optimizer [33] and decay the learning rate
-exponentially from 10−3 to 10−4 in 300k steps. The train-
-ing code is built on top of the Nerfstudio framework [60],
-and the tetrahedra field is implemented in CUDA and uses
-the OptiX library [43]. We train on a single NVIDIA A100
-GPU and the training speed ranges from 15k rays per second to 30k rays per second. The speed depends on how
-well-structured the triangulation is, how many vertices there
-are, and if there is empty space around the object. The full
-training with 300k iterations takes between 11 and 24 hours,
-depending on the scene complexity. However, good results
-are typically obtained much earlier, e.g., in 100k iterations.
-4.2. Results
-Blender dataset [39] results.
-We compare to relevant
-baselines on the standard Blender dataset. We used the
-same split and evaluation procedure as in the original NeRF
-paper [39] and the same SSIM implementation as PointNeRF [70]. In order to ensure a fair comparison with PointNeRF [70] when COLMAP points were used, we use the
-exact same COLMAP reconstruction as Point-NeRF. We
-report the PSNR, SSIM, and LPIPS (VGG) [78] metrics.
-Tab. 1 shows averaged results, Fig. 4 shows qualitative results, and the results for individual scenes are given in Supp.
-Mat.
-When we use the exact same COLMAP points as PointNeRF (row Point-NeRFcol ), we outperform it in all three
-metrics. We score comparably with Point-NeRFmvs , even
-though it starts from a much denser and higher-quality initial point cloud, which it generates from a jointly trained
-model. Also note that both of these Point-NeRF configurations grow the point cloud during training and, therefore,
-the complexity of the scene representation grows. For us,
-the points are fixed, and the number of parameters stays the
-same. We also outperform Plenoxels [17], which uses a
-sparse grid. Note that same as Point-NeRF, Plenoxels also
-gradually increases the representation complexity by subdividing the grid resolution at predefined training epochs.
-Even though both Mip-NeRF and instant-NGP outperform
+
+
+
+
+
+(c) sparse point cloud (d) sparse tetrahedra slice Figure 2. Input point cloud and a slice through the triangulated tetrahedra. Note that smaller tetrahedra are created closer to the surface of the scene, i.e., regions close to the surface are represented with a finer resolution.
+
+these structures are queried, trilinear interpolation is used to combine the feature vectors stored in the containing voxel corners. Unfortunately, the hashmaps [41] and hierarchical representations [10] have the same non-local effect problem, and the rest of the approaches rely on subsequent upsampling of the field and can be overly complicated. Also, feature vectors cannot be placed arbitrarily in the 3D space as they must lie on the grid with a fixed resolution. In contrast, our approach is much more flexible as it stores the feature vectors freely in 3D space.
+
+Finally, Point-NeRF [70] represents the scene as a point cloud of features which are queried using k-nearest neighbours search. However, when the point cloud contains sparse regions, the rays do not intersect any neighbourhoods of any points and the pixels stay empty without the ability to optimise. Therefore, Point-NeRF [70] relies on gradually adding more points during training and increasing the scene complexity. Since we use the triangulation of the point cloud rather than the discrete point cloud itself, our representation is continuous and does not suffer from empty regions. Therefore, we do not have to add any points during training.
+
+# 3. Method
+
+A common strategy in the literature is to represent the scene explicitly through a voxel volume. In contrast to this uniform subdivision, we investigate using an adaptive subdivision of the scene. In many scenarios, an approximation of the scene geometry is either given, e.g., when using SfM to compute the input camera poses, or can be computed, e.g., via MVS or single-view depth predictions [79]. This allows us to compute an adaptive subdivision of the scene via Delaunay triangulation [14] of such a point cloud. This results in a set of non-overlapping tetrahedra, where smaller tetrahedra are created close to the surface of the scene (c.f .
+
+
+
+Figure 3. Trilinear and barycentric intepolation. Trilinear interpolation is a weighted combination of the eight voxel corners. Barycentric interpolation weights the four vertices of the tetrahedron vertices based on the barycentric coordinates [16].
+
+Fig. 2\). In the following, we explain how this adaptive subdivision of the scene can be used instead of voxels for volume rendering and neural rendering.
+
+#### 3.1. Preliminaries
+
+Neural Radiance Fields (NeRFs) [39] represent a scene through an implicit function F(x, d), often modelled via a neural network, that returns a colour value and a volume density prediction for a given 3D point x in the scene observed from a viewing direction d. Volume rendering [37] is used to synthesise novel views: for each pixel in a virtual view, we project a ray from the camera plane into the scene and sample the radiance field to obtain the colour and density values ci and σi at distances ti along the ray, where i = 1 . . . N. The individual samples are then combined to predict the colour C for the pixel:
+
+
+$$\mathbf{C} = \sum_{i=1}^N T_i (1 - \exp(\sigma_i \delta_i)) \mathbf{c}_i \quad , \text{where} \quad (1)$$
+
+$$T_i = \exp\left(- \sum_{i=1}^{N-1} \sigma_i \delta_i\right) \quad ,$$
+
+and δi = ti−ti−1 is the distance between adjacent samples. This process is fully differentiable. Thus, after computing the mean squared error (MSE) between the predicted and ground truth colours associated with each ray, we can backpropagate the gradients to the radiance field.
+
+Voxel-based feature fields such as NSVF [32] represent the scene as a voxel grid and an MLP. Each grid point of the voxel grid is assigned a trainable vector. There are eight feature vectors associated with a single voxel, but the vectors are shared between neighbouring voxels. For each query point sampled along the ray, its corresponding voxel is found first. A feature for the point is then computed via trilinear interpolation of the features of the voxel grid points based on the position of the query point (c.f . Fig. 3, left). The resulting feature vector is passed through an MLP to predict the density and appearance vector. The appearance vector is combined with the ray direction and passed through a second MLP in order to compute a viewdependent colour.
+
+#### 3.2. Tetrahedra fields
+
+Given a set of points in 3D space, we build the tetrahedra structure by triangulating the points. We apply the Delaunay triangulation [14] to obtain a set of non-overlapping tetrahedra whose union is the convex hull of the original points. Fig. 2 shows example tetrahedra obtained by triangulating dense and sparse COLMAP-reconstructed point clouds [54, 55]. Note that the resulting representation is adaptive as it uses a higher resolution (smaller tetrahedra) closer to the surface and larger tetrahedra to model regions farther away from the surface.
+
+We associate all vertices of the tetrahedra with trainable vectors. As in the voxel grid case, vertices, and thus vectors, are shared between adjacent tetrahedra. The resulting tetrahedra field can be queried in the same way a voxel grid representation is queried: for each query point, we first find the tetrahedron containing the point. Instead of the trilinear interpolation used for voxel volumes, we use the barycentric interpolation [16] to compute a feature vector for the query point from the four feature vectors stored at the tetrahedron's vertices (c.f . Fig. 3\). To this end, we compute the query point x's barycentric coordinates λ, which express the point's 3D coordinates as a unique weighted combination of the 3D coordinates of the tetrahedron's vertices. In particular, the weight for a vertex is the volume of the tetrahedron constructed from the query point and the face opposite to the vertex divided by the volume of the full tetrahedron:
+
+$$\lambda = \left( \frac{V_{2344}}{V_{2344}}, \frac{V_{1x34}}{V_{1234}}, \frac{V_{12x4}}{V_{1234}}, \frac{V_{123x}}{V_{1234}} \right), \quad (2)$$
+
+where V1234 is the volume of the full tetrahedron and Vx234, V1x34, . . . , are volumes of tetrahedra with 1 st , 2 nd, . . . , vertex replaced by x. The same weights λ are applied to the feature vectors of the vertices to obtain the query feature.
+
+The interpolated features are used as the input to a small MLP in order to predict density and colour at the query point. We first pass the barycentric-interpolated features through a three-layer MLP to compute the density and appearance features. We then concatenate the appearance features with the ray direction vector encoded using Fourier features [39, 59] and pass the result through a single linear layer to get the raw RGB colour value.
+
+Finally, to map the raw density values σ¯i returned by the network to the volume density σi required by volume rendering, we apply the softplus activation function [3]. For the RGB colour value, we use the sigmoid function [17].
+
+### 3.3. Efficiently querying a tetrahedra field
+
+Determining the corresponding voxel for a given query point can be done highly efficiently via hashing [42]. In contrast, finding the corresponding tetrahedron for a query point is more complex. This in turn can significantly impact rendering, and thus training, efficiency [17, 41, 57].
+
+In order to efficiently look up the corresponding tetrahedra, we exploit that we are not considering isolated points, but points sampled from a ray. We compute the tetrahedra that are intersected by the ray, allowing us to march through the tetrahedra rather than computing them individually per point. The relevant tetrahedra can be found efficiently using acceleration structures for fast ray-triangle intersection computations, e.g., via NVidia's OptiX library [43]: We first compute the intersections between the rays from a synthetic view and all faces of the tetrahedra. For each ray, we take the first 512 intersected triangles2 , and determine the corresponding tetrahedra. The tetrahedra can be ordered based on the intersections along the ray, allowing us to easily march through the tetrahedra to determine which tetrahedron to use for a given query point.
+
+A side benefit of computing ray-triangle intersections is that we can simplify computing the barycentric coordinates: For each intersection, we compute the 2D barycentric coordinates w.r.t. the triangle. We then obtain the 3D barycentric coordinates w.r.t. the associate tetrahedron by simply adding zero for the vertex opposite to the triangle. For a query point inside a tetrahedron, we can compute its tetrahedron barycentric coordinates by linearly interpolating between the barycentric coordinates of the two intersections of the ray and the tetrahedron.
+
+#### 3.4. Coarse and fine sampling
+
+We follow the common practice of having a two-stage sampling procedure [9, 39]. In the coarse stage, we sample uniformly along the ray. In the fine stage, we use the density weights from the coarse sampling stage to bias the sampling towards sampling closer to the potential surface. Following [39], we use the stratified uniform sampling for the coarse stage. The stratified uniform sampling splits the ray into equally long intervals and samples uniformly in each interval. Unlike NeRF [39], we limit the sampling to the space occupied by tetrahedra. In the fine sampling stage, we use the same network as in the coarse sampling stage.
+
+For the fine sampling stage, we take the accumulated weights wi from the coarse sampling:
+
+$$\bar{w}_i = (1 - \exp(-\sigma_i \delta_i)) \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right). \quad (3)$$
+
+These weights are the coefficients used in Equation 1 as multipliers for the colours [39]. We obtain wi by normalizing w¯i . Following [39], we sample set of fine samples using
+
+2For efficiency, we only consider a fixed number of triangles. As discussed later on, this can degrade results in larger scenes / scenes with a fine-grained tetrahedralisation, where more intersections are needed. Naturally, more triangles can be considered at the cost of longer run-times.
+
+weight wi . To render the final colour, we merge the dense and fine samples and use all in the rendering equation [9].
+
+#### 4. Experiments
+
+We compare Tetra-NeRF to relevant methods on the commonly used synthetic Blender [39], the real-world Tanks and Temples [25], and the challenging object-centric Mip-NeRF 360 [4] datasets. To show its effectiveness, we compare Tetra-NeRF to a dense-grid representation and evaluate it with reduced quality of the input point cloud. We start by describing the exact hyperparameters used.
+
+#### 4.1. Implementation details
+
+Generating point cloud & triangulation. Given a set of posed images, we use the COLMAP reconstruction pipeline [54, 55] to get the point cloud used in our tetrahedra field representation. We then reduce the size of the resulting point cloud such that if the number of points is larger than 106 , we subsample 106 points randomly. For the Blender dataset experiments, where the number of points is smaller, we add more randomly generated points. In that case, the number of random points is half the number of original points. The reason for adding the points is that with a low number of points, some pixels on edges may not intersect any tetrahedra, potentially producing artefacts on the edges. Each added point is sampled as follows: we sample a random point x0 from the original point cloud, sample a random normal vector n, and a number α ∼ N ( ¯d, ¯d 2 ), where ¯d is the average spacing of the original point cloud, i.e. the average distance between each point and its six closest neighbours. We then add the point x = x0 + αn.
+
+Initialization. Given the processed point cloud, we apply the Delaunay triangulation [14] to get a set of tetrahedra. To this end, we use the CGAL library [2], which in our experiments runs in the order of milliseconds. Following [41], we initialise the features of size 64 at the vertices of the tetrahedra with small values sampled uniformly in the range −10−4 to 10−4 . However, to allow the model to reuse the information contained in the point cloud, we set the first four dimensions of the feature field to the RGBA colour values (rescaled to interval [0, 1]) stored at the associated points in the point cloud. The alpha value of all original points is one, whereas all randomly sampled points have an alpha value of zero. For the MLP, we follow the common practice of using the Kaiming uniform initialisation [19]. The hidden sizes in all MLPs are 128.
+
+Training. During training, we sample batches of 4,096 random rays from random training images. We use volumetric rendering to predict the colour of each ray. The gradients are computed by backpropagating the MSE loss between the predicted colour and the ground truth colour value. We use the RAdam optimizer [33] and decay the learning rate exponentially from 10−3 to 10−4 in 300k steps. The train-
+
+|             |          | PSNR  | ↑ SSIM | ↑ LPIPS ↓ |
+|-------------|----------|-------|--------|-----------|
+| NeRF        | [39]     | 31.00 | 0.947  | 0.081     |
+| NSVF        | [32]     | 31.77 | 0.953  |           |
+| mip-NeRF    | [3]      | 34.51 | 0.961  | 0.043     |
+| instant-NGP | [41]     | 33.18 |        |           |
+| Plenoxels   | [17]     | 31.71 | 0.958  | 0.049     |
+| Point-NeRF  | col [70] | 31.77 | 0.973  | 0.062     |
+| Point-NeRF  | mvs [70] | 33.31 | 0.978  | 0.049     |
+| Tetra-NeRF  |          | 32.53 | 0.982  | 0.041     |
+
+Table 1. Results on the Blender dataset [39] averaged over all scenes in the dataset. Even though we use the same input point cloud as Point-NeRFcol, we outperform it greatly. We perform on par with Point-NeRFmvs even though it uses many more points and densifies the point cloud during training. We highlight the best , second , and third values.
+
+ing code is built on top of the Nerfstudio framework [60], and the tetrahedra field is implemented in CUDA and uses the OptiX library [43]. We train on a single NVIDIA A100 GPU and the training speed ranges from 15k rays per second to 30k rays per second. The speed depends on how well-structured the triangulation is, how many vertices there are, and if there is empty space around the object. The full training with 300k iterations takes between 11 and 24 hours, depending on the scene complexity. However, good results are typically obtained much earlier, e.g., in 100k iterations.
+
+#### 4.2. Results
+
+Blender dataset [39] results. We compare to relevant baselines on the standard Blender dataset. We used the same split and evaluation procedure as in the original NeRF paper [39] and the same SSIM implementation as Point-NeRF [70]. In order to ensure a fair comparison with Point-NeRF [70] when COLMAP points were used, we use the exact same COLMAP reconstruction as Point-NeRF. We report the PSNR, SSIM, and LPIPS (VGG) [78] metrics. Tab. 1 shows averaged results, Fig. 4 shows qualitative results, and the results for individual scenes are given in Supp. Mat.
+
+When we use the exact same COLMAP points as Point-NeRF (row *Point-NeRF*col), we outperform it in all three metrics. We score comparably with *Point-NeRF*mvs, even though it starts from a much denser and higher-quality initial point cloud, which it generates from a jointly trained model. Also note that both of these Point-NeRF configurations grow the point cloud during training and, therefore, the complexity of the scene representation grows. For us, the points are fixed, and the number of parameters stays the same. We also outperform Plenoxels [17], which uses a sparse grid. Note that same as Point-NeRF, Plenoxels also gradually increases the representation complexity by subdividing the grid resolution at predefined training epochs. Even though both Mip-NeRF and instant-NGP outperform
+
+
+
+
+
+
+
+Figure 4. Qualitative results on the Blender dataset. We compare with Point-NeRFcol as we use the same input point cloud. In the top-row picture, we can see that Tetra-NeRF is able to represent fine details well on the mic scene. On the drums scene (2 nd row), both methods struggle with shiny materials, but our method performs slightly better. 3 rd row: Tetra-NeRF can render thin ropes. Bottom row: accumulation is nonzero in areas close to surface.
+
+|                              | ship |       | ship |       |
+|------------------------------|-------------|-------|-------------|-------|
+|                              | PtnR ↑      | SIM ↑ |             |       |
+| Point-NeFr static | 29.91       | 0.978 | 19.35       | 0.905 |
+| Tetra-NeRF            | 33.31       | 0.989 | 31.13       | 0.994 |
+
+Table 2. Comparison with Point-NeRF with disabled point cloud growing and prunning shows that Point-NeRF performs significantly worse in all measured metrics because it struggles to handle the sparse point clouds.
+
+our approach in terms of PSNR, our method is slightly better in terms of SSIM, and on par with Mip-NeRF in terms of LPIPS.
+
+To analyze the tetrahedra field representation, we compare it with the point cloud field representation used in Point-NeRF. In Table 2, we compare our method to Point-NeRF when we disable point cloud growth and pruning. We show the results on two scenes from the Blender dataset [39] which were selected in the Point-NeRF paper. With this setup, we vastly outperform Point-NeRF in all metrics. The reason is that Point-NeRF requires the point cloud to be dense such that all rays have a chance to intersect a neighbourhood of a point. Since we use a continuous representation (tetrahedra field) rather than a discrete one, we can achieve good results even for sparser point clouds.
+
+Figure 5. Comparison with dense grid field representation. Tetra-NeRF on the left, dense grid on the right. We used a comparable number of parameters for both methods (the dense grid having slightly more parameters). Due to the adaptive nature of tetrahedra fields, Tetra-NeRF produces significantly better rendering as it is able to focus on relevant parts of the scene.
+
+|            |      | PSNR  | ↑ SSIM | ↑ LPIPS ↓ |
+|------------|------|-------|--------|-----------|
+| NV         | [34] | 23.70 | 0.848  | 0.260     |
+| NeRF       | [39] | 25.78 | 0.864  | 0.198     |
+| NSVF       | [32] | 28.40 | 0.900  | 0.153     |
+| Point-NeRF | [70] |       |        |           |
+|            |      | 28.35 | 0.942  | 0.090     |
+| Tetra-NeRF |      | 28.90 | 0.957  | 0.059     |
+
+Table 3. Result on the Tanks and Temples dataset [25] as processed by NSVF [32] averaged over all scenes. We show the PSNR, SSIM, and LPIPS (Alex) [78] metrics. We highlight the best , second , and third values. ∗Note, that Point-NeRF [70] results differ from the paper as they were recomputed with the resolution used in other methods.
+
+Comparison with the dense grid representation. In order to show the utility of the adaptive tetrahedra field representation, we compare it to a dense grid representation. Similarly to NSVF [32], we split the 3D scene bounding box into equally-sized voxels. When querying the field, we find the voxel to which the query point belongs and perform trilinear interpolation of the eight corners of the voxel. We choose the grid resolution such that the number of grid points is the lowest cube number larger than the number of points of the original point cloud. This ensures a fair comparison as the baseline uses a comparable (but larger) number of features than our approach. All other hyperparameters are kept the same as for Tetra-NeRF. We evaluate both approaches on two scenes from the Blender dataset [39]. The dense grid representation only scores PSNR 18.81 and 18.91 on the lego and ship scenes, respectively, whereas Tetra-NeRF scores PSNR 33.79 and 30.69, respectively. The results can be seen in Figure 5. Note that in this experiment, we only trained for 100, 000 iterations to save computation time. From the numbers and the figure, we can clearly see that the dense grid resolution is not sufficient to reconstruct the scene in enough detail. Because Tetra-NeRF uses an adaptive subdivision, which is more detailed around the surface, we are better able to focus on relevant scene parts. With a similar number of trainable parameters, we thus obtain better results.
+
+Tanks and Temples [25] dataset. To be able to compare
+
+
+
+Figure 6. Results on Tanks and Temples dataset. In the top row, we can see that we are able to represent the rim of the wheel better than Point-NeRF. Similarly, we can represent the tyre better in the third row. Finally, in the bottom, Point-NeRF fails on the wall and the roof, whereas Tetra-NeRF can render these parts well.
+
+with Point-NeRF [70] on real-world data, we have evaluated Tetra-NeRF on the Tanks and Temples [25] dataset. We use the same setup as in NSVF [32], where the object is masked. We report the usual metrics: PSNR, SSIM, and LPIPS (Alex).3 We used the dense COLMAP reconstruction to get the point cloud used in the tetrahedra field. Quantitative results are shown in Table 3, qualitative results are presented in Figure 6, and the per-scene results are given in the Supp. Mat. Note that the results originally reported in the Point-NeRF paper [70] were evaluated with a resolution different from the compared methods. Therefore, to ensure a fair comparison, we have recomputed the metrics in the publicly available Point-NeRF's predictions with the full resolution of 1920 × 1080 as used in NSVF [32]. In the public dataset, one of the scenes had corrupted camera parameters and we had to reconstruct the poses again for the Ignatius scene. With the reconstructed poses, our method performs slightly worse on that scene compared to others.
+
+The results show that our method outperforms the baselines in all compared metrics. This indicates that even though Point-NeRF relies on the ability to grow the point cloud density during training, this is not needed when using a continuous instead of a discrete representation.
+
+Sparse and dense point cloud comparison. Previ-
+
+
+
+Figure 7. Sparse vs. dense model comparison detail. Even though the area in the bottom contains few points, we are still able to reconstruct at least low-frequency data.
+
+ous experiments have used dense COLMAP reconstructions. However, dense point clouds may not be required to achieve good reconstructions. In this section, we compare models trained on dense reconstructions and sparse reconstructions. Table 5 compares PSNR, and SSIM metrics on two synthetic scenes from the Blender dataset [39] and two real-world scenes from the Mip-NeRF 360 dataset [4]. We also show the number of vertices of the tetrahedra, which is the size of the input point cloud, including the random points added at the beginning. Note that in this experiment, we only trained for 100, 000 iterations to save computation time.
+
+From the results, we can see that for the Blender dataset [39] case, the dense model is much better. This is to be expected since the number of points obtained from the sparse reconstruction on the Blender dataset is very small and our MLP does not have enough capacity to represent fine details. However, even in regions with zero point coverage, we are still able to provide at least some low-frequency data (c.f . Fig. 7\). On real-world scenes, the sparse point cloud model is almost on par with the dense one. The sparse reconstructions on the real-world dataset provide many more points compared to the synthetic dataset case, and the coverage is sufficient. From these results, we conclude that on real-world data the sparse model can be sufficient to achieve good performance.
+
+Mip-NeRF 360 [4] dataset. We have further evaluated our method on the Mip-NeRF 360 [4] dataset. In order to ensure a fair comparison with Mip-NeRF 360 [4], we trained and evaluated on four times downsized images for the outdoor scenes and two times downsized images for the indoor scenes. The quantitative results are presented in Table 4, and the qualitative results are shown in Figure 8.
+
+From the results, we can see that Tetra-NeRF is able to outperform both the vanilla NeRF [39] and Mip-NeRF [3]. We also outperform Stable View Synthesis [51] in terms of PSNR and score comparably in terms of LPIPS. This is pos-
+
+3We always choose the type of LPIPS (Alex [27]/VGG [56]) such that we can compare with more methods as some only evaluate using one type.
+
+
+
+|        |             |                  | PSNR       | Outdoor ↑ SSIM | ↑ LPIPS | ↓ PSNR | Indoor ↑ SSIM | ↑ LPIPS | ↓ PSNR | Mean ↑ SSIM | ↑ LPIPS ↓ |
+|--------|-------------|------------------|------------|----------------|---------|--------|---------------|---------|--------|-------------|-----------|
+| NeRF   | [15,        | 39]              | 21.46      | 0.458          | 0.515   | 26.84  | 0.790         | 0.370   | 23.85  | 0.605       | 0.451     |
+|        | mip-NeRF    | [3]              | 21.69      | 0.471          | 0.505   | 26.98  | 0.798         | 0.361   | 24.04  | 0.616       | 0.441     |
+|        | NeRF++      | [77]             | 22.76      | 0.548          | 0.427   | 28.05  | 0.836         | 0.309   | 25.11  | 0.676       | 0.375     |
+| Deep   | Blending    | [20]             | 21.54      | 0.524          | 0.364   | 26.39  | 0.844         | 0.261   | 23.70  | 0.666       | 0.318     |
+|        | Point-Based | Neural Rendering | [26] 21.66 | 0.612          | 0.302   | 26.28  | 0.887         | 0.191   | 23.71  | 0.734       | 0.253     |
+| Stable | View        | Synthesis [51]   | 23.01      | 0.662          | 0.253   | 28.22  | 0.907         | 0.160   | 25.33  | 0.771       | 0.211     |
+|        | mip-NeRF    | 360 [4]          | 23.72      | 0.687          | 0.282   | 29.43  | 0.911         | 0.181   | 26.26  | 0.786       | 0.237     |
+|        | Tetra-NeRF  |                  | 23.17      | 0.586          | 0.298   | 30.21  | 0.881         | 0.103   | 26.30  | 0.717       | 0.211     |
+
+Table 4. Mip-NeRF 360 dataset results. We show the PSNR, SSIM, and LPIPS (Alex) [78] on two categories of Mip-NeRF 360 [4] scenes: outdoor, and indoor. On the outdoor scenes, we outperform the Stable View Synthesis [51] and are comparable to Mip-NeRF 360 [4], even though our method does not implement the improvements suggested in NeRF++ [77] and Mip-NeRF 360 [4], and is more comparable to vanilla NeRF [39]. We highlight the best , second , and third values.
+
+|              |             | sparse  |             | dense     |
+|--------------|-------------|---------|-------------|-----------|
+|              | PSNR/SSIM   | #points | PSNR/SSIM   | #points   |
+| Blender/lego | 29.77/0.959 | 25,784  | 33.79/0.985 | 302,781   |
+| Blender/ship | 26.90/0.899 | 7,152   | 30.69/0.942 | 321,861   |
+| 360/bonsai   | 28.12/0.902 | 413,226 | 28.34/0.902 | 1,000,000 |
+| 360/garden   | 24.79/0.806 | 227,532 | 25.41/0.838 | 1,000,000 |
+
+Table 5. Dense and sparse point cloud comparison. We present results on two scenes from the Blender [39] and Mip-NeRF 360 [4] datasets. We also show the number of vertices of the tetrahedra field – including the randomly sampled points.
+
+
+
+Figure 8. Mip-NeRF 360 results. 1st row: we show the results on the garden scene. 2 nd: we can see that Tetra-NeRF has some problems rendering grass. 3 rd: Tetra-NeRF is able to represent the delicate texture of the tablecloth well. 4 th: Tetra-NeRF is able to recover fine geometry.
+
+sible because outdoor scenes contain a lot of high-resolution geometries, such as leaves and Stable View Synthesis is not able to overcome noise in the approximate geometry. TetraNeRF does not suffer from these problems as we aggregate features in 3D along rays rather than on the surface. Mip-NeRF 360 scores comparably to Tetra-NeRF in terms of PSNR and LPIPS, but it outperforms Tetra-NeRF in terms of SSIM. However, Mip-NeRF 360 implements some tricks designed to boost its performance. On the other hand, our approach is based on vanilla NeRF, and we believe that the performance can be boosted similarly.
+
+Varying the number of input points We conducted a study on the effect of the input point cloud size on the reconstruction quality. We consider both the sparse and the dense point clouds and analyse the performance as we subsample the points or add more points randomly. We evaluate on the family and the truck scenes from the Tanks and Temples [25] (tt) dataset, and the room and the garden scenes from the Mip-NeRF 360 [4] dataset. The sizes of sparse point clouds were roughly 16K, 30K, 113K, and 139K respectively and the sizes of dense point clouds were larger than 5M for all scenes. When the size of the original point cloud was larger than the desired size, we selected points uniformly at random, and when smaller, we added new random points as described Section 4.1. We include detailed results in the Supp. Mat. In order to save computational resources, we only train the method for 100k iterations. The results are visualised in Figure 16.
+
+As expected, the performance improves with the number of points used, as it leads to a finer subdivision of the scene around the surface. We can also observe (e.g., from tt/family) that the sparse reconstruction leads to a better reconstruction quality at the same point cloud size. The likely explanation is that sampling uniformly at random will be biased towards regions with high density and some regions may be missed or covered extremely sparsely.
+
+Speed of convergence Figures 9b, 9c show the rate of convergence on the ship scene from the Blender dataset and aggregated results on the Tanks and Temples [25], and Mip-NeRF 360 (indoor/outdoor) [4] datasets. Similar to Point-NeRF, good results can be achieved quite early in the train-
+
+
+
+Figure 9. a) shows the PSNR with different sizes of input point clouds. The solid and dashed lines represent the dense and coarse COLMAP reconstructions. The following scenes were evaluated (best to worst): tt/family, 360/room, tt/truck, and 360/garden from Tanks and Temples [25] (tt) and Mip-NeRF 360 [4] (360-indoor/360-outdoor) datasets. As expected, the quality increases with the number of points. b) visualizes the training speed (PSNR at different training iterations) on the blender/ship scene [39]. It shows Tetra-NeRF training times for various timesteps and compares the rate of convergence with Point-NeRF [70] and Mip-NeRF [3]. Similarly, c) shows the rate of convergence aggregated over Tanks and Temples [25] (tt) and Mip-NeRF 360 [4] (360-indoor/360-outdoor) datasets. It shows the average PSNR, and the highlighted area represents the standard deviation.
+
+
+
+Figure 10. Failure cases. Left: barn scene from [25]. Right: tree hill scene from [4].
+
+ing process. E.g., on the blender/ship scene, in 24 minutes, our method achieves performance similar to Mip-NeRF [3] after several hours of training. The efficiency of the implementation is a large factor in the speed of different methods. E.g., in Instant-NGP [41], the authors invested a significant effort in optimizing GPU memory accesses, and the result is highly optimised efficient code (a main contribution of [41]). There are several places where our implementation can easily be made more efficient. E.g., changing the memory layout (row-major vs. column-major) of the tetrahedra field leads to a 10% speedup.
+
+## 5. Limitations
+
+One drawback of our approach is that the quality of different regions of the rendered scene depends on the density of the point cloud in these regions. If the original point cloud was constructed using 2D feature matching, there can be regions with a very low number of 3D points. We show such an example in Fig. 10a. There are few 3D points on the ground, resulting in blurry renderings for that region.
+
+Another issue is that the current implementation has a limit on the number of intersected tetrahedra per ray. For large or badly structured scenes, where rays intersect many tetrahedra, this can limit the reconstruction quality. Fig. 10b shows such a case on a Mip-NeRF 360 scene [4]. This problem can be addressed by increasing the limit on the number of visited tetrahedra at the cost of higher memory requirements and run-time. Alternatively, coarse-to-fine schemes that start with a coarser tetrahedralisation and prune the space could potentially handle this issue.
+
+#### 6. Conclusion
+
+This paper proposes a novel radiance field representation that, compared to standard voxel-based representations, is easily able to adapt to 3D geometry priors given in the form of a (sparse) point cloud. Our approach elegantly combines concepts from geometry processing (Delaunay triangulation) and triangle-based rendering (ray-triangle intersections) with modern neural rendering approaches. The representation has a naturally higher resolution in the space near surfaces, and the input point cloud provides a straightforward way to initialise the radiance field. Compared to Point-NeRF, a state-of-the-art point cloud-based radiance field representation which uses the same input as our approach, Tetra-NeRF shows clearly better results. Our method performs comparably to state-of-the-art MLP-based methods. The results demonstrate that Tetra-NeRF is an interesting alternative to existing radiance field representations that is worth further investigation. Interesting research directions include adaptive refinement and pruning of the tetrahedralisation and exploiting the fact that the surface of the scene is likely close to some of the triangles in the scene.
+
+Acknowledgements This work was supported by the Czech Science Foundation (GACR) EXPRO (grant no. 23- ˇ 07973X), the Grant Agency of the Czech Technical University in Prague (grant no. SGS22/112/OHK3/2T/13), and by the Ministry of Education, Youth and Sports of the Czech Republic through the e-INFRA CZ (ID:90254).
+
+# Supplementary Material
+
+First, in Section A, we describe the attached video4 where we illustrate the tetrahedra field and the optimisation process. Next, we extend Sections 4.2, 4.3, and 4.4 from the main paper by giving detailed results on the Blender [39], Tanks and Temples [25], and Mip-NeRF 360 [4] datasets in Sections B, C, and D. Finally, we extend Section 4.5 from the main paper and evaluate how the performance changes when varying the size of the input point cloud in Section E.
+
+## A. Attached video
+
+To present the idea of the paper visually, we include a video illustrating the tetrahedra field representation and showing the results of the optimisation at different points in the early stages of the training. In the video, we used the garden scene from the Mip-NeRF 360 dataset [4]. We show the optimisation using both the sparse and the dense input point clouds. The video starts by showing the initial point cloud and the tetrahedra obtained by the Delaunay triangulation. It then shows how the scene is optimised from the first iteration. Finally, it presents the resulting video generated by the fully trained model.
+
+# B. Blender results
+
+In Sec. 4.2 and Tab. 1 of the main paper, we presented results averaged over all scenes in the Blender dataset [39]. In the following, we present results individually per scene. The quantitative results can be seen in Table 6. We report the PSNR, SSIM, and LPIPS (VGG) [78] metrics. The evaluation protocol is the same as in Point-NeRF [70], and we use the same input point cloud as Point-NeRFcol. From the results, we can see that we outperform the closest approach to ours, Point-NeRF, in all three metrics on almost all scenes when using the same input point cloud (row Point-NeRFcol). We are slightly outperformed by Point-NeRFmvs, which uses denser input point clouds obtained from its end-to-end optimised Multi-View Stereo (MVS) pipeline. The results are more pronounced on the ficus scene where Point-NeRF performs exceptionally well, outperforming other baselines, including Mip-NeRF [3]. Note that both Point-NeRF configurations grow the point cloud during training and, therefore, the complexity of the scene representation grows. For us, the points are fixed, and the number of parameters stays the same. In most scenes, we also outperform Plenoxels [17] which uses a sparse grid. Note that same as Point-NeRF, Plenoxels also gradually increases the representation complexity by subdividing the grid resolution at predefined training epochs. Even though Mip-NeRF [3] outperforms our approach in terms of PSNR, our method is slightly better in terms of SSIM and on par with Mip-NeRF [3] in terms of LPIPS.
+
+We also show rendered images from all Blender scenes in Figures 11 and 12. Some artefacts can only be noticed on scenes with highly reflective surfaces – materials, and drums. By closely inspecting the produced depth maps, one can notice that sometimes the density is non-zero in large tetrahedra connecting different parts of the object. A possible cause could be the combination of the training process and the implicit bias of our model. Since the tetrahedra field uses barycentric interpolation, the features will change linearly in the tetrahedra connecting different parts of the object. However, these tetrahedra should have a density of zero everywhere except for the regions close to the vertices. For the shallow MLP, it is difficult to represent such a function, and there is not enough pressure in the optimisation process to enforce it because the error will be close to zero since the background is white, without any texture, independently of how the density is distributed in these regions.
+
+4Video can be found at: 
+
+
+
+|             |      | chair      | drums | ficus | hotdog | PSNR lego | ↑ materials | mic   | ship  | mean  |
+|-------------|------|------------|-------|-------|--------|-----------|-------------|-------|-------|-------|
+| NPBG        | [1]  | 26.47      | 21.53 | 24.60 | 29.01  | 24.84     | 21.58       | 26.62 | 21.83 | 24.56 |
+| NeRF        | [39] | 33.00      | 25.01 | 30.13 | 36.18  | 32.54     | 29.62       | 32.91 | 28.65 | 31.01 |
+| NSVF        | [32] | 33.19      | 25.18 | 31.23 | 37.14  | 32.54     | 32.68       | 34.27 | 27.93 | 31.77 |
+| Mip-NeRF    | [3]  | 37.14      | 27.02 | 33.19 | 39.31  | 35.74     | 32.56       | 38.04 | 33.08 | 34.51 |
+| Instant-NGP | [41] | 35.00      | 26.02 | 33.51 | 37.40  | 36.39     | 29.78       | 36.22 | 31.10 | 33.18 |
+| Plenoxels   | [17] | 33.98      | 25.35 | 31.83 | 36.43  | 34.10     | 29.14       | 33.26 | 29.62 | 31.71 |
+| Point-NeRF  | col  | [70] 35.09 | 25.01 | 33.24 | 35.49  | 32.65     | 26.97       | 35.54 | 30.18 | 31.77 |
+| Point-NeRF  | mvs  | [70] 35.40 | 26.06 | 36.13 | 37.30  | 35.04     | 29.61       | 35.95 | 30.97 | 33.31 |
+| Tetra-NeRF  |      | 35.05      | 25.01 | 33.31 | 36.16  | 34.75     | 29.30       | 35.49 | 31.13 | 32.53 |
+|             |      |            |       |       |        | SSIM      | ↑           |       |       |       |
+|             |      | chair      | drums | ficus | hotdog | lego      | materials   | mic   | ship  | mean  |
+| NPBG        | [1]  | 0.939      | 0.904 | 0.940 | 0.964  | 0.923     | 0.887       | 0.959 | 0.866 | 0.923 |
+| NeRF        | [39] | 0.967      | 0.925 | 0.964 | 0.974  | 0.961     | 0.949       | 0.980 | 0.856 | 0.947 |
+| NSVF        | [32] | 0.968      | 0.931 | 0.973 | 0.980  | 0.960     | 0.973       | 0.987 | 0.854 | 0.953 |
+| Mip-NeRF    | [3]  | 0.981      | 0.932 | 0.980 | 0.982  | 0.978     | 0.959       | 0.991 | 0.882 | 0.961 |
+| Plenoxels   | [17] | 0.977      | 0.933 | 0.890 | 0.985  | 0.976     | 0.975       | 0.980 | 0.949 | 0.958 |
+| Point-NeRF  | col  | [70] 0.990 | 0.944 | 0.989 | 0.986  | 0.983     | 0.955       | 0.993 | 0.941 | 0.973 |
+| Point-NeRF  | mvs  | [70] 0.991 | 0.954 | 0.993 | 0.991  | 0.988     | 0.971       | 0.994 | 0.942 | 0.978 |
+| Tetra-NeRF  |      | 0.990      | 0.947 | 0.989 | 0.989  | 0.987     | 0.968       | 0.993 | 0.994 | 0.982 |
+|             |      |            |       |       |        | LPIPS     | ↓           |       |       |       |
+|             |      | chair      | drums | ficus | hotdog | lego      | materials   | mic   | ship  | mean  |
+| NPBG        | [1]  | 0.085      | 0.112 | 0.078 | 0.075  | 0.119     | 0.134       | 0.060 | 0.210 | 0.109 |
+| NeRF        | [39] | 0.046      | 0.091 | 0.044 | 0.121  | 0.050     | 0.063       | 0.028 | 0.206 | 0.081 |
+| Mip-NeRF    | [3]  | 0.021      | 0.065 | 0.020 | 0.027  | 0.021     | 0.040       | 0.009 | 0.138 | 0.043 |
+| Plenoxels   | [17] | 0.031      | 0.067 | 0.026 | 0.037  | 0.028     | 0.057       | 0.015 | 0.134 | 0.049 |
+| Point-NeRF  | col  | [70] 0.026 | 0.099 | 0.028 | 0.061  | 0.031     | 0.100       | 0.019 | 0.134 | 0.062 |
+| Point-NeRF  | mvs  | [70] 0.023 | 0.078 | 0.022 | 0.037  | 0.024     | 0.072       | 0.014 | 0.124 | 0.049 |
+| Tetra-NeRF  |      | 0.016      | 0.073 | 0.023 | 0.027  | 0.022     | 0.056       | 0.011 | 0.103 | 0.041 |
+
+Table 6. Detailed results on the Blender dataset [39]. We show the PSNR, SSIM, and LPIPS (VGG) results averaged over the testing images. We highlight the best , second , and third values. We outperform Point-NeRFcol [70] which was evaluated with the same input point cloud as our method.
+
+
+
+
+
+Figure 11. Results on the Blender dataset [39] (part 1). We show the ground-truth image, the prediction, and the predicted depth map on scenes: ship (top), lego, mic, and chair (bottom). The red squares highlight regions where there are visible errors in the images. Notice how our approach is able to recover fine textures in chair scene and tiny details in the ship scene geometry. However, the density seems to be non-zero in tetrahedra connecting different legs of the chair.
+
+
+
+Figure 12. Results on the Blender dataset [39] (part 2). We show the ground-truth image, the prediction, and the predicted depth map on scenes: materials (top), drums, hotdog, and ficus (bottom). The red squares highlight regions where there are visible errors in the images. Some artefacts can be noticed in the top two scenes, where there are highly reflective surfaces. Also, the density seems to be non-zero in tetrahedra connecting distant parts of the 3D object.
+
+## C. Tanks and Temples results
+
+We show the detailed per-scene results for the Tanks and Temples dataset [25]. Note that to be able to compare with the Point-NeRF method [70], we used the data pre-processing and splits proposed by NSVF [32], where the background is masked out. The quantitative results can be seen in Table 7. We report the PSNR, SSIM, and LPIPS (Alex) [78] metrics. The evaluation protocol is the same as in Point-NeRF [70], but we evaluate on the original resolution, the same as other compared methods. To be able to compare with Point-NeRF [70] which evaluated on a lower-resolution images5 , we have recomputed its metrics with the same full image resolution 1920 × 1080. To obtain the initial point clouds, we used the dense COLMAP reconstruction, which was computed using the known intrinsic and extrinsic camera parameters. However, the NSVF [32] published split had corrupted camera parameters for the ignatius scene, and we had to run COLMAP reconstruction from scratch to obtain both the camera poses and intrinsics. This is likely the reason for the worse results on that scene. Otherwise, we outperform all baseline methods on all metrics.
+
+We also extend Fig. 6 from the main paper and show more qualitative results in Figure 13. Compared to Point-NeRF [70], our method produces less noisy images. When looking at the depth maps, we can observe similar non-zero density artefacts to the ones observed on the Blender dataset. Same as in the Blender dataset case, a likely cause could be a combination of the implicit bias of our method and the usage of non-textured background.
+
+|            |      | barn  | caterpillar | family | PSNR ↑ ignatius | truck | mean  |
+|------------|------|-------|-------------|--------|-----------------|-------|-------|
+| NV         | [34] | 20.82 | 20.71       | 28.72  | 26.54           | 21.71 | 23.70 |
+| NeRF       | [39] | 24.05 | 23.75       | 30.29  | 25.43           | 25.36 | 25.78 |
+| NSVF       | [32] | 27.16 | 26.44       | 33.58  | 27.91           | 26.92 | 28.40 |
+| Point-NeRF | [70] |       |             |        |                 |       |       |
+|            |      | 27.40 | 25.58       | 33.57  | 28.39           | 26.83 | 28.35 |
+| Tetra-NeRF |      | 28.86 | 26.64       | 34.27  | 27.17           | †     |       |
+|            |      |       |             |        |                 | 27.58 | 28.90 |
+|            |      |       |             | SSIM   | ↑               |       |       |
+|            |      | barn  | caterpillar | family | ignatius        | truck | mean  |
+| NV         | [34] | 0.721 | 0.819       | 0.916  | 0.992           | 0.793 | 0.848 |
+| NeRF       | [39] | 0.750 | 0.860       | 0.932  | 0.920           | 0.860 | 0.864 |
+| NSVF       | [32] | 0.823 | 0.900       | 0.954  | 0.930           | 0.895 | 0.900 |
+| Point-NeRF | [70] |       |             |        |                 |       |       |
+|            |      | 0.908 | 0.927       | 0.976  | 0.959           | 0.939 | 0.942 |
+| Tetra-NeRF |      | 0.942 | 0.944       | 0.985  | 0.962           | 0.952 | 0.957 |
+|            |      |       |             | LPIPS  | ↓               |       |       |
+|            |      | barn  | caterpillar | family | ignatius        | truck | mean  |
+| NV         | [34] | 0.117 | 0.312       | 0.479  | 0.280           | 0.111 | 0.260 |
+| NeRF       | [39] | 0.111 | 0.192       | 0.395  | 0.196           | 0.098 | 0.198 |
+| NSVF       | [32] | 0.106 | 0.148       | 0.307  | 0.141           | 0.063 | 0.153 |
+| Point-NeRF | [70] |       |             |        |                 |       |       |
+|            |      | 0.142 | 0.118       | 0.034  | 0.064           | 0.091 | 0.090 |
+| Tetra-NeRF |      | 0.087 | 0.077       | 0.021  | 0.050           | 0.062 | 0.059 |
+
+Table 7. Tanks and Temples results. We show the PSNR, SSIM, and LPIPS (Alex) results averaged over the testing images. We highlight the best , second , and third values. We outperform all compared methods in all metrics on all scenes except for ignatius, where we did not have the correct camera parameters and had to run camera pose estimation prior to training.
+
 5
-ground truth Point-NeRFcol
-ours
-ours depth
-Figure 5. Comparison with dense grid field representation.
-Tetra-NeRF on the left, dense grid on the right. We used a comparable number of parameters for both methods (the dense grid
-having slightly more parameters). Due to the adaptive nature of
-tetrahedra fields, Tetra-NeRF produces significantly better rendering as it is able to focus on relevant parts of the scene.
-NV [34]
-NeRF [39]
-NSVF [32]
-Point-NeRF [70]∗
-Tetra-NeRF
-SSIM ↑
-0.848
-0.864
-0.900
-0.942
-0.957
-LPIPS ↓
-0.260
-0.198
-0.153
-0.090
-0.059
-Table 3. Result on the Tanks and Temples dataset [25] as
-processed by NSVF [32] averaged over all scenes. We show the
-PSNR, SSIM, and LPIPS (Alex) [78] metrics. We highlight the
-best , second , and third values. ∗ Note, that Point-NeRF [70]
-results differ from the paper as they were recomputed with the resolution used in other methods.
-Figure 4. Qualitative results on the Blender dataset. We compare with Point-NeRFcol as we use the same input point cloud. In
-the top-row picture, we can see that Tetra-NeRF is able to represent fine details well on the mic scene. On the drums scene (2nd
-row), both methods struggle with shiny materials, but our method
-performs slightly better. 3rd row: Tetra-NeRF can render thin
-ropes. Bottom row: accumulation is nonzero in areas close to
-surface.
-Point-NeRFstatic
-Tetra-NeRF
-PSNR ↑
-23.70
-25.78
-28.40
-28.35
-28.90
-Comparison with the dense grid representation. In order
-to show the utility of the adaptive tetrahedra field representation, we compare it to a dense grid representation. Similarly to NSVF [32], we split the 3D scene bounding box into
-equally-sized voxels. When querying the field, we find the
-voxel to which the query point belongs and perform trilinear
-interpolation of the eight corners of the voxel. We choose
-the grid resolution such that the number of grid points is
-the lowest cube number larger than the number of points of
-the original point cloud. This ensures a fair comparison as
-the baseline uses a comparable (but larger) number of features than our approach. All other hyperparameters are kept
-the same as for Tetra-NeRF. We evaluate both approaches
-on two scenes from the Blender dataset [39]. The dense
-grid representation only scores PSNR 18.81 and 18.91 on
-the lego and ship scenes, respectively, whereas Tetra-NeRF
-scores PSNR 33.79 and 30.69, respectively. The results can
-be seen in Figure 5. Note that in this experiment, we only
-trained for 100, 000 iterations to save computation time.
-From the numbers and the figure, we can clearly see that
-the dense grid resolution is not sufficient to reconstruct the
-scene in enough detail. Because Tetra-NeRF uses an adaptive subdivision, which is more detailed around the surface,
-we are better able to focus on relevant scene parts. With a
-similar number of trainable parameters, we thus obtain better results.
-hotdog
-ship
-PSNR ↑ SSIM ↑ PSNR ↑ SSIM ↑
-29.91
-0.978
-19.35
-0.905
-33.31
-0.989
-31.13
-0.994
-Table 2. Comparison with Point-NeRF with disabled point
-cloud growing and prunning shows that Point-NeRF performs
-significantly worse in all measured metrics because it struggles to
-handle the sparse point clouds.
-our approach in terms of PSNR, our method is slightly better in terms of SSIM, and on par with Mip-NeRF in terms
-of LPIPS.
-To analyze the tetrahedra field representation, we compare it with the point cloud field representation used in
-Point-NeRF. In Table 2, we compare our method to PointNeRF when we disable point cloud growth and pruning. We
-show the results on two scenes from the Blender dataset [39]
-which were selected in the Point-NeRF paper. With this
-setup, we vastly outperform Point-NeRF in all metrics. The
-reason is that Point-NeRF requires the point cloud to be
-dense such that all rays have a chance to intersect a neighbourhood of a point. Since we use a continuous representation (tetrahedra field) rather than a discrete one, we can
-achieve good results even for sparser point clouds.
-Tanks and Temples [25] dataset.
-6
-To be able to compare
-ground truth
-Point-NeRF
-Tetra-NeRF
-(a) sparse point cloud
-(b) ground-truth image
-(c) sparse model
-(d) dense model
-Figure 7. Sparse vs. dense model comparison detail. Even
-though the area in the bottom contains few points, we are still able
-to reconstruct at least low-frequency data.
-ous experiments have used dense COLMAP reconstructions. However, dense point clouds may not be required to
-achieve good reconstructions. In this section, we compare
-models trained on dense reconstructions and sparse reconstructions. Table 5 compares PSNR, and SSIM metrics on
-two synthetic scenes from the Blender dataset [39] and two
-real-world scenes from the Mip-NeRF 360 dataset [4]. We
-also show the number of vertices of the tetrahedra, which
-is the size of the input point cloud, including the random
-points added at the beginning. Note that in this experiment,
-we only trained for 100, 000 iterations to save computation
-time.
-From the results, we can see that for the Blender
-dataset [39] case, the dense model is much better. This is
-to be expected since the number of points obtained from
-the sparse reconstruction on the Blender dataset is very
-small and our MLP does not have enough capacity to represent fine details. However, even in regions with zero
-point coverage, we are still able to provide at least some
-low-frequency data (c.f . Fig. 7). On real-world scenes, the
-sparse point cloud model is almost on par with the dense
-one. The sparse reconstructions on the real-world dataset
-provide many more points compared to the synthetic dataset
-case, and the coverage is sufficient. From these results, we
-conclude that on real-world data the sparse model can be
-sufficient to achieve good performance.
-Figure 6. Results on Tanks and Temples dataset. In the top row,
-we can see that we are able to represent the rim of the wheel better
-than Point-NeRF. Similarly, we can represent the tyre better in the
-third row. Finally, in the bottom, Point-NeRF fails on the wall
-and the roof, whereas Tetra-NeRF can render these parts well.
-with Point-NeRF [70] on real-world data, we have evaluated Tetra-NeRF on the Tanks and Temples [25] dataset.
-We use the same setup as in NSVF [32], where the object
-is masked. We report the usual metrics: PSNR, SSIM, and
-LPIPS (Alex).3 We used the dense COLMAP reconstruction to get the point cloud used in the tetrahedra field. Quantitative results are shown in Table 3, qualitative results are
-presented in Figure 6, and the per-scene results are given
-in the Supp. Mat. Note that the results originally reported
-in the Point-NeRF paper [70] were evaluated with a resolution different from the compared methods. Therefore, to
-ensure a fair comparison, we have recomputed the metrics
-in the publicly available Point-NeRF’s predictions with the
-full resolution of 1920 × 1080 as used in NSVF [32]. In the
-public dataset, one of the scenes had corrupted camera parameters and we had to reconstruct the poses again for the
-Ignatius scene. With the reconstructed poses, our method
-performs slightly worse on that scene compared to others.
-The results show that our method outperforms the baselines in all compared metrics. This indicates that even
-though Point-NeRF relies on the ability to grow the point
-cloud density during training, this is not needed when using
-a continuous instead of a discrete representation.
-Sparse and dense point cloud comparison.
-Mip-NeRF 360 [4] dataset. We have further evaluated our
-method on the Mip-NeRF 360 [4] dataset. In order to ensure a fair comparison with Mip-NeRF 360 [4], we trained
-and evaluated on four times downsized images for the outdoor scenes and two times downsized images for the indoor
-scenes. The quantitative results are presented in Table 4,
-and the qualitative results are shown in Figure 8.
-From the results, we can see that Tetra-NeRF is able to
-outperform both the vanilla NeRF [39] and Mip-NeRF [3].
-We also outperform Stable View Synthesis [51] in terms of
-PSNR and score comparably in terms of LPIPS. This is pos-
-Previ-
-3 We always choose the type of LPIPS (Alex [27]/VGG [56]) such that
-we can compare with more methods as some only evaluate using one type.
-7
-NeRF [15, 39]
-mip-NeRF [3]
-NeRF++ [77]
-Deep Blending [20]
-Point-Based Neural Rendering [26]
-Stable View Synthesis [51]
-mip-NeRF 360 [4]
-Tetra-NeRF
-PSNR ↑
-21.46
-21.69
-22.76
-21.54
-21.66
-23.01
-23.72
-23.17
-Outdoor
-SSIM ↑ LPIPS ↓
-0.458
-0.515
-0.471
-0.505
-0.548
-0.427
-0.524
-0.364
-0.612
-0.302
-0.662
-0.253
-0.687
-0.282
-0.586
-0.298
-PSNR ↑
-26.84
-26.98
-28.05
-26.39
-26.28
-28.22
-29.43
-30.21
-Indoor
-SSIM ↑
-0.790
-0.798
-0.836
-0.844
-0.887
-0.907
-0.911
-0.881
-LPIPS ↓
-0.370
-0.361
-0.309
-0.261
-0.191
-0.160
-0.181
-0.103
-PSNR ↑
-23.85
-24.04
-25.11
-23.70
-23.71
-25.33
-26.26
-26.30
-Mean
-SSIM ↑
-0.605
-0.616
-0.676
-0.666
-0.734
-0.771
-0.786
-0.717
-LPIPS ↓
-0.451
-0.441
-0.375
-0.318
-0.253
-0.211
-0.237
-0.211
-Table 4. Mip-NeRF 360 dataset results. We show the PSNR, SSIM, and LPIPS (Alex) [78] on two categories of Mip-NeRF 360 [4]
-scenes: outdoor, and indoor. On the outdoor scenes, we outperform the Stable View Synthesis [51] and are comparable to Mip-NeRF
-360 [4], even though our method does not implement the improvements suggested in NeRF++ [77] and Mip-NeRF 360 [4], and is more
-comparable to vanilla NeRF [39]. We highlight the best , second , and third values.
-sparse
-dense
-PSNR/SSIM #points PSNR/SSIM #points
-Blender/lego 29.77/0.959 25,784 33.79/0.985 302,781
-Blender/ship 26.90/0.899 7,152 30.69/0.942 321,861
-360/bonsai 28.12/0.902 413,226 28.34/0.902 1,000,000
-360/garden 24.79/0.806 227,532 25.41/0.838 1,000,000
-NeRF does not suffer from these problems as we aggregate
-features in 3D along rays rather than on the surface. MipNeRF 360 scores comparably to Tetra-NeRF in terms of
-PSNR and LPIPS, but it outperforms Tetra-NeRF in terms
-of SSIM. However, Mip-NeRF 360 implements some tricks
-designed to boost its performance. On the other hand, our
-approach is based on vanilla NeRF, and we believe that the
-performance can be boosted similarly.
-Table 5. Dense and sparse point cloud comparison. We present
-results on two scenes from the Blender [39] and Mip-NeRF 360 [4]
-datasets. We also show the number of vertices of the tetrahedra
-field – including the randomly sampled points.
-ground truth
-prediction
-Varying the number of input points
-We conducted a
-study on the effect of the input point cloud size on the reconstruction quality. We consider both the sparse and the
-dense point clouds and analyse the performance as we subsample the points or add more points randomly. We evaluate
-on the family and the truck scenes from the Tanks and Temples [25] (tt) dataset, and the room and the garden scenes
-from the Mip-NeRF 360 [4] dataset. The sizes of sparse
-point clouds were roughly 16K, 30K, 113K, and 139K respectively and the sizes of dense point clouds were larger
-than 5M for all scenes. When the size of the original point
-cloud was larger than the desired size, we selected points
-uniformly at random, and when smaller, we added new random points as described Section 4.1. We include detailed
-results in the Supp. Mat. In order to save computational resources, we only train the method for 100k iterations. The
-results are visualised in Figure 16.
-As expected, the performance improves with the number of points used, as it leads to a finer subdivision of the
-scene around the surface. We can also observe (e.g., from
-tt/family) that the sparse reconstruction leads to a better reconstruction quality at the same point cloud size. The likely
-explanation is that sampling uniformly at random will be
-biased towards regions with high density and some regions
-may be missed or covered extremely sparsely.
-depth
-Figure 8. Mip-NeRF 360 results. 1st row: we show the results
-on the garden scene. 2nd : we can see that Tetra-NeRF has some
-problems rendering grass. 3rd : Tetra-NeRF is able to represent the
-delicate texture of the tablecloth well. 4th : Tetra-NeRF is able to
-recover fine geometry.
-Speed of convergence
-Figures 9b, 9c show the rate of
-convergence on the ship scene from the Blender dataset and
-aggregated results on the Tanks and Temples [25], and MipNeRF 360 (indoor/outdoor) [4] datasets. Similar to PointNeRF, good results can be achieved quite early in the train-
-sible because outdoor scenes contain a lot of high-resolution
-geometries, such as leaves and Stable View Synthesis is not
-able to overcome noise in the approximate geometry. Tetra8
-32.5
-30
-30.0
-28
-27.5
-26
-25.0
-24
-22.5
-47m
-118m
-236m
-30.0
-27.5
-24m
-25.0
-Tetra-NeRF
-Point-NeRF
-Mip-NeRF
-22
-10K 20K
-50K 100K 250K
-1M 2M
-(a) Different point cloud sizes (PSNR)
-0
-tt
-360-indoor
-360-outdoor
-50K
-100K
-150K
-200K
-(b) Training performance on blender/ship (PSNR)
-22.5
-20.0
-0
-50K 100K 150K 200K 250K 300K
-(c) Training performance (PSNR)
-Figure 9. a) shows the PSNR with different sizes of input point clouds. The solid and dashed lines represent the dense and coarse
-COLMAP reconstructions. The following scenes were evaluated (best to worst): tt/family, 360/room, tt/truck, and 360/garden from Tanks
-and Temples [25] (tt) and Mip-NeRF 360 [4] (360-indoor/360-outdoor) datasets. As expected, the quality increases with the number of
-points. b) visualizes the training speed (PSNR at different training iterations) on the blender/ship scene [39]. It shows Tetra-NeRF training
-times for various timesteps and compares the rate of convergence with Point-NeRF [70] and Mip-NeRF [3]. Similarly, c) shows the rate of
-convergence aggregated over Tanks and Temples [25] (tt) and Mip-NeRF 360 [4] (360-indoor/360-outdoor) datasets. It shows the average
-PSNR, and the highlighted area represents the standard deviation.
-shows such a case on a Mip-NeRF 360 scene [4]. This problem can be addressed by increasing the limit on the number
-of visited tetrahedra at the cost of higher memory requirements and run-time. Alternatively, coarse-to-fine schemes
-that start with a coarser tetrahedralisation and prune the
-space could potentially handle this issue.
-(a) Failure case 1: low point cloud
-density on the ground
-(b) Failure case 2: too many
-intersected tetrahedra
-6. Conclusion
-Figure 10. Failure cases. Left: barn scene from [25]. Right: tree
-hill scene from [4].
-This paper proposes a novel radiance field representation
-that, compared to standard voxel-based representations, is
-easily able to adapt to 3D geometry priors given in the form
-of a (sparse) point cloud. Our approach elegantly combines
-concepts from geometry processing (Delaunay triangulation) and triangle-based rendering (ray-triangle intersections) with modern neural rendering approaches. The representation has a naturally higher resolution in the space near
-surfaces, and the input point cloud provides a straightforward way to initialise the radiance field. Compared to PointNeRF, a state-of-the-art point cloud-based radiance field
-representation which uses the same input as our approach,
-Tetra-NeRF shows clearly better results. Our method performs comparably to state-of-the-art MLP-based methods.
-The results demonstrate that Tetra-NeRF is an interesting
-alternative to existing radiance field representations that is
-worth further investigation. Interesting research directions
-include adaptive refinement and pruning of the tetrahedralisation and exploiting the fact that the surface of the scene is
-likely close to some of the triangles in the scene.
-ing process. E.g., on the blender/ship scene, in 24 minutes,
-our method achieves performance similar to Mip-NeRF [3]
-after several hours of training. The efficiency of the implementation is a large factor in the speed of different methods. E.g., in Instant-NGP [41], the authors invested a significant effort in optimizing GPU memory accesses, and the
-result is highly optimised efficient code (a main contribution
-of [41]). There are several places where our implementation
-can easily be made more efficient. E.g., changing the memory layout (row-major vs. column-major) of the tetrahedra
-field leads to a 10% speedup.
-5. Limitations
-One drawback of our approach is that the quality of different regions of the rendered scene depends on the density
-of the point cloud in these regions. If the original point
-cloud was constructed using 2D feature matching, there can
-be regions with a very low number of 3D points. We show
-such an example in Fig. 10a. There are few 3D points on
-the ground, resulting in blurry renderings for that region.
-Another issue is that the current implementation has a
-limit on the number of intersected tetrahedra per ray. For
-large or badly structured scenes, where rays intersect many
-tetrahedra, this can limit the reconstruction quality. Fig. 10b
-Acknowledgements This work was supported by the
-Czech Science Foundation (GAČR) EXPRO (grant no. 2307973X), the Grant Agency of the Czech Technical University in Prague (grant no. SGS22/112/OHK3/2T/13), and by
-the Ministry of Education, Youth and Sports of the Czech
-Republic through the e-INFRA CZ (ID:90254).
-9
-Supplementary Material
-First, in Section A, we describe the attached video4 where we illustrate the tetrahedra field and the optimisation process.
-Next, we extend Sections 4.2, 4.3, and 4.4 from the main paper by giving detailed results on the Blender [39], Tanks and
-Temples [25], and Mip-NeRF 360 [4] datasets in Sections B, C, and D. Finally, we extend Section 4.5 from the main paper
-and evaluate how the performance changes when varying the size of the input point cloud in Section E.
-A. Attached video
-To present the idea of the paper visually, we include a video illustrating the tetrahedra field representation and showing
-the results of the optimisation at different points in the early stages of the training. In the video, we used the garden scene
-from the Mip-NeRF 360 dataset [4]. We show the optimisation using both the sparse and the dense input point clouds. The
-video starts by showing the initial point cloud and the tetrahedra obtained by the Delaunay triangulation. It then shows how
-the scene is optimised from the first iteration. Finally, it presents the resulting video generated by the fully trained model.
-B. Blender results
-In Sec. 4.2 and Tab. 1 of the main paper, we presented results averaged over all scenes in the Blender dataset [39]. In the
-following, we present results individually per scene. The quantitative results can be seen in Table 6. We report the PSNR,
-SSIM, and LPIPS (VGG) [78] metrics. The evaluation protocol is the same as in Point-NeRF [70], and we use the same
-input point cloud as Point-NeRFcol . From the results, we can see that we outperform the closest approach to ours, PointNeRF, in all three metrics on almost all scenes when using the same input point cloud (row Point-NeRFcol ). We are slightly
-outperformed by Point-NeRFmvs , which uses denser input point clouds obtained from its end-to-end optimised Multi-View
-Stereo (MVS) pipeline. The results are more pronounced on the ficus scene where Point-NeRF performs exceptionally well,
-outperforming other baselines, including Mip-NeRF [3]. Note that both Point-NeRF configurations grow the point cloud
-during training and, therefore, the complexity of the scene representation grows. For us, the points are fixed, and the number
-of parameters stays the same. In most scenes, we also outperform Plenoxels [17] which uses a sparse grid. Note that same as
-Point-NeRF, Plenoxels also gradually increases the representation complexity by subdividing the grid resolution at predefined
-training epochs. Even though Mip-NeRF [3] outperforms our approach in terms of PSNR, our method is slightly better in
-terms of SSIM and on par with Mip-NeRF [3] in terms of LPIPS.
-We also show rendered images from all Blender scenes in Figures 11 and 12. Some artefacts can only be noticed on
-scenes with highly reflective surfaces – materials, and drums. By closely inspecting the produced depth maps, one can notice
-that sometimes the density is non-zero in large tetrahedra connecting different parts of the object. A possible cause could
-be the combination of the training process and the implicit bias of our model. Since the tetrahedra field uses barycentric
-interpolation, the features will change linearly in the tetrahedra connecting different parts of the object. However, these
-tetrahedra should have a density of zero everywhere except for the regions close to the vertices. For the shallow MLP, it is
-difficult to represent such a function, and there is not enough pressure in the optimisation process to enforce it because the
-error will be close to zero since the background is white, without any texture, independently of how the density is distributed
-in these regions.
-4 Video can be found at: https://jkulhanek.com/tetra-nerf/video.html
-10
-NPBG [1]
-NeRF [39]
-NSVF [32]
-Mip-NeRF [3]
-Instant-NGP [41]
-Plenoxels [17]
-Point-NeRFcol [70]
-Point-NeRFmvs [70]
-Tetra-NeRF
-chair drums
-26.47 21.53
-33.00 25.01
-33.19 25.18
-37.14 27.02
-35.00 26.02
-33.98 25.35
-35.09 25.01
-35.40 26.06
-35.05 25.01
-ficus hotdog
-24.60 29.01
-30.13 36.18
-31.23 37.14
-33.19 39.31
-33.51 37.40
-31.83 36.43
-33.24 35.49
-36.13 37.30
-33.31 36.16
-PSNR↑
-lego materials
-24.84
-21.58
-32.54
-29.62
-32.54
-32.68
-35.74
-32.56
-36.39
-29.78
-34.10
-29.14
-32.65
-26.97
-35.04
-29.61
-34.75
-29.30
-mic
-26.62
-32.91
-34.27
-38.04
-36.22
-33.26
-35.54
-35.95
-35.49
-ship
-21.83
-28.65
-27.93
-33.08
-31.10
-29.62
-30.18
-30.97
-31.13
-mean
-24.56
-31.01
-31.77
-34.51
-33.18
-31.71
-31.77
-33.31
-32.53
-NPBG [1]
-NeRF [39]
-NSVF [32]
-Mip-NeRF [3]
-Plenoxels [17]
-Point-NeRFcol [70]
-Point-NeRFmvs [70]
-Tetra-NeRF
-chair drums
-0.939 0.904
-0.967 0.925
-0.968 0.931
-0.981 0.932
-0.977 0.933
-0.990 0.944
-0.991 0.954
-0.990 0.947
-ficus hotdog
-0.940 0.964
-0.964 0.974
-0.973 0.980
-0.980 0.982
-0.890 0.985
-0.989 0.986
-0.993 0.991
-0.989 0.989
-SSIM↑
-lego materials
-0.923
-0.887
-0.961
-0.949
-0.960
-0.973
-0.978
-0.959
-0.976
-0.975
-0.983
-0.955
-0.988
-0.971
-0.987
-0.968
-mic
-0.959
-0.980
-0.987
-0.991
-0.980
-0.993
-0.994
-0.993
-ship
-0.866
-0.856
-0.854
-0.882
-0.949
-0.941
-0.942
-0.994
-mean
-0.923
-0.947
-0.953
-0.961
-0.958
-0.973
-0.978
-0.982
-NPBG [1]
-NeRF [39]
-Mip-NeRF [3]
-Plenoxels [17]
-Point-NeRFcol [70]
-Point-NeRFmvs [70]
-Tetra-NeRF
-chair drums
-0.085 0.112
-0.046 0.091
-0.021 0.065
-0.031 0.067
-0.026 0.099
-0.023 0.078
-0.016 0.073
-ficus hotdog
-0.078 0.075
-0.044 0.121
-0.020 0.027
-0.026 0.037
-0.028 0.061
-0.022 0.037
-0.023 0.027
-LPIPS↓
-lego materials
-0.119
-0.134
-0.050
-0.063
-0.021
-0.040
-0.028
-0.057
-0.031
-0.100
-0.024
-0.072
-0.022
-0.056
-mic
-0.060
-0.028
-0.009
-0.015
-0.019
-0.014
-0.011
-ship
-0.210
-0.206
-0.138
-0.134
-0.134
-0.124
-0.103
-mean
-0.109
-0.081
-0.043
-0.049
-0.062
-0.049
-0.041
-Table 6. Detailed results on the Blender dataset [39]. We show the PSNR, SSIM, and LPIPS (VGG) results averaged over the testing
-images. We highlight the best , second , and third values. We outperform Point-NeRFcol [70] which was evaluated with the same input
-point cloud as our method.
-11
-ground truth
-prediction
-depth
-Figure 11. Results on the Blender dataset [39] (part 1). We show the ground-truth image, the prediction, and the predicted depth
-map on scenes: ship (top), lego, mic, and chair (bottom). The red squares highlight regions where there are visible errors in the images.
-Notice how our approach is able to recover fine textures in chair scene and tiny details in the ship scene geometry. However, the density
-seems to be non-zero in tetrahedra connecting different legs of the chair.
-12
-ground truth
-prediction
-depth
-Figure 12. Results on the Blender dataset [39] (part 2). We show the ground-truth image, the prediction, and the predicted depth
-map on scenes: materials (top), drums, hotdog, and ficus (bottom). The red squares highlight regions where there are visible errors in
-the images. Some artefacts can be noticed in the top two scenes, where there are highly reflective surfaces. Also, the density seems to be
-non-zero in tetrahedra connecting distant parts of the 3D object.
-13
-C. Tanks and Temples results
-We show the detailed per-scene results for the Tanks and Temples dataset [25]. Note that to be able to compare with
-the Point-NeRF method [70], we used the data pre-processing and splits proposed by NSVF [32], where the background is
-masked out. The quantitative results can be seen in Table 7. We report the PSNR, SSIM, and LPIPS (Alex) [78] metrics. The
-evaluation protocol is the same as in Point-NeRF [70], but we evaluate on the original resolution, the same as other compared
-methods. To be able to compare with Point-NeRF [70] which evaluated on a lower-resolution images5 , we have recomputed
-its metrics with the same full image resolution 1920 × 1080. To obtain the initial point clouds, we used the dense COLMAP
-reconstruction, which was computed using the known intrinsic and extrinsic camera parameters. However, the NSVF [32]
-published split had corrupted camera parameters for the ignatius scene, and we had to run COLMAP reconstruction from
-scratch to obtain both the camera poses and intrinsics. This is likely the reason for the worse results on that scene. Otherwise,
-we outperform all baseline methods on all metrics.
-We also extend Fig. 6 from the main paper and show more qualitative results in Figure 13. Compared to Point-NeRF [70],
-our method produces less noisy images. When looking at the depth maps, we can observe similar non-zero density artefacts
-to the ones observed on the Blender dataset. Same as in the Blender dataset case, a likely cause could be a combination of
-the implicit bias of our method and the usage of non-textured background.
-NV [34]
-NeRF [39]
-NSVF [32]
-Point-NeRF [70]∗
-Tetra-NeRF
-barn
-20.82
-24.05
-27.16
-27.40
-28.86
-caterpillar
-20.71
-23.75
-26.44
-25.58
-26.64
-PSNR ↑
-family ignatius
-28.72
-26.54
-30.29
-25.43
-33.58
-27.91
-33.57
-28.39
-34.27
-27.17†
-truck
-21.71
-25.36
-26.92
-26.83
-27.58
-mean
-23.70
-25.78
-28.40
-28.35
-28.90
-NV [34]
-NeRF [39]
-NSVF [32]
-Point-NeRF [70]∗
-Tetra-NeRF
-barn
-0.721
-0.750
-0.823
-0.908
-0.942
-caterpillar
-0.819
-0.860
-0.900
-0.927
-0.944
-SSIM ↑
-family ignatius
-0.916
-0.992
-0.932
-0.920
-0.954
-0.930
-0.976
-0.959
-0.985
-0.962
-truck
-0.793
-0.860
-0.895
-0.939
-0.952
-mean
-0.848
-0.864
-0.900
-0.942
-0.957
-NV [34]
-NeRF [39]
-NSVF [32]
-Point-NeRF [70]∗
-Tetra-NeRF
-barn
-0.117
-0.111
-0.106
-0.142
-0.087
-caterpillar
-0.312
-0.192
-0.148
-0.118
-0.077
-LPIPS ↓
-family ignatius
-0.479
-0.280
-0.395
-0.196
-0.307
-0.141
-0.034
-0.064
-0.021
-0.050
-truck
-0.111
-0.098
-0.063
-0.091
-0.062
-mean
-0.260
-0.198
-0.153
-0.090
-0.059
-Table 7. Tanks and Temples results. We show the PSNR, SSIM, and LPIPS (Alex) results averaged over the testing images. We highlight
-the best , second , and third values. We outperform all compared methods in all metrics on all scenes except for ignatius, where we did
-not have the correct camera parameters and had to run camera pose estimation prior to training.
-5 https://github.com/Xharlie/pointnerf/issues/62
-14
-ground truth
-Tetra-NeRF
-Point-NeRF
-Tetra-NeRF depth
-Figure 13. Results on the Tanks and Temples dataset [25]. We show the ground-truth image, the prediction, and the predicted depth
-map on scenes: barn (top), caterpillar, family, truck, and ignatius (bottom). We also show a comparison with Point-NeRF [70]. The
-red squares highlight regions where our method has fewer artefacts compared to Point-NeRF. Notice how our method produces less noisy
-images compared to Point-NeRF. We can observe similar non-zero density artefacts to the ones observed on the Blender dataset. Again,
-we attribute it to a combination of implicit bias and non-textured background.
-15
-D. Mip-NeRF 360 results
-We also extend the results on the Mip-NeRF 360 dataset [4], presented in Table 8 and Figure 4 in the main paper, by
-showing detailed results for each scene. We follow the same training and evaluation procedure as Mip-NeRF 360 [4], and
-for the outdoor and indoor scenes, we train and evaluate with 4x and 2x downsampled images, respectively. The PSNR,
-SSIM, and LPIPS (Alex) [78] results are presented in Table 8. In terms of SSIM, our approach performs slightly worse than
-Point-Based Neural Rendering [26], Stable View Synthesis [51], and Mip-NeRF 360 [4]. In terms of the PSNR and LPIPS
-metrics, our approach performs comparable or better than these baselines. E.g., the state-of-the-art Mip-NeRF 360 [4] has a
-slightly better PSNR and Tetra-NeRF has a slightly better LPIPS. We typically outperform Stable View Synthesis [51] and
-competitors other than Mip-NeRF 360 in terms of PSNR. Note that similarly to Tetra-NeRF, Stable View Synthesis uses a
-geometric prior as input – a mesh instead of a point cloud.
-We also show qualitative results for indoor and outdoor Mip-NeRF 360 scenes in Figures 14 and 15. We notice more
-artefacts in the outdoor scenes compared to indoor ones. Small, high-frequency details such as grass are not represented well,
-which can be visible, e.g., in the flowers scene. One potential cause for this behaviour, which we plan to investigate in future
-work, could be that the poses estimated outdoors (where the camera is typically farther away from the scene than indoors)
-are noisier which makes it harder to recover fine details. For the indoor scenes, our model is able to represent the scenes with
-PSNR
-NeRF [15, 39]
-mip-NeRF [3]
-NeRF++ [77]
-Deep Blending [20]
-Point-Based Neural Rendering [26]
-Stable View Synthesis [51]
-mip-NeRF 360 [4]
-Tetra-NeRF
-bicycle
-21.76
-21.69
-22.64
-21.09
-21.64
-22.79
-23.95
-23.53
-Outdoor
-flowers garden
-19.40
-23.11
-19.31
-23.16
-20.31
-24.32
-18.13
-23.61
-19.28
-22.50
-20.15
-25.99
-21.60
-25.09
-20.36
-26.15
-bicycle
-0.455
-0.454
-0.526
-0.466
-0.608
-0.663
-0.687
-0.614
-Outdoor
-flowers garden
-0.376
-0.546
-0.373
-0.543
-0.453
-0.635
-0.320
-0.675
-0.487
-0.735
-0.541
-0.818
-0.582
-0.800
-0.470
-0.775
-bicycle
-0.536
-0.541
-0.455
-0.377
-0.313
-0.243
-0.296
-0.271
-Outdoor
-flowers garden
-0.529
-0.415
-0.535
-0.422
-0.466
-0.331
-0.476
-0.231
-0.372
-0.197
-0.317
-0.137
-0.343
-0.173
-0.378
-0.136
-stump
-21.73
-23.10
-24.34
-24.08
-23.90
-24.39
-25.98
-24.42
-treehill
-21.28
-21.21
-22.20
-20.80
-20.98
-21.72
-21.99
-21.41
-room
-28.56
-28.73
-28.87
-27.20
-26.99
-28.93
-28.24
-32.02
-Indoor
-counter kitchen
-25.67
-26.31
-25.59
-26.47
-26.38
-27.80
-26.28
-25.02
-25.23
-24.47
-26.40
-28.49
-28.40
-30.81
-28.02
-29.66
-bonsai
-26.81
-27.13
-29.15
-27.08
-28.42
-29.07
-30.27
-31.13
-room
-0.843
-0.851
-0.852
-0.868
-0.887
-0.905
-0.907
-0.894
-Indoor
-counter kitchen
-0.775
-0.749
-0.779
-0.745
-0.802
-0.816
-0.856
-0.768
-0.868
-0.876
-0.886
-0.910
-0.890
-0.916
-0.850
-0.877
-bonsai
-0.792
-0.818
-0.876
-0.883
-0.919
-0.925
-0.932
-0.905
-room
-0.353
-0.346
-0.335
-0.266
-0.216
-0.182
-0.208
-0.104
-Indoor
-counter kitchen
-0.394
-0.335
-0.390
-0.336
-0.351
-0.260
-0.258
-0.246
-0.209
-0.160
-0.168
-0.125
-0.206
-0.129
-0.127
-0.098
-bonsai
-0.398
-0.370
-0.291
-0.275
-0.178
-0.164
-0.182
-0.084
-SSIM
-NeRF [15, 39]
-mip-NeRF [3]
-NeRF++ [77]
-Deep Blending [20]
-Point-Based Neural Rendering [26]
-Stable View Synthesis [51]
-mip-NeRF 360 [4]
-Tetra-NeRF
-stump
-0.453
-0.517
-0.594
-0.634
-0.651
-0.683
-0.745
-0.613
-treehill
-0.459
-0.466
-0.530
-0.523
-0.579
-0.606
-0.619
-0.456
-LPIPS
-NeRF [15, 39]
-mip-NeRF [3]
-NeRF++ [77]
-Deep Blending [20]
-Point-Based Neural Rendering [26]
-Stable View Synthesis [51]
-mip-NeRF 360 [4]
-Tetra-NeRF
-stump
-0.551
-0.490
-0.416
-0.351
-0.303
-0.281
-0.258
-0.274
-treehill
-0.546
-0.538
-0.466
-0.383
-0.325
-0.286
-0.338
-0.429
-Table 8. Detailed Mip-NeRF 360 [4] results. We show the PSNR, SSIM, and LPIPS (Alex) results averaged over the testing images. We
-highlight the best , second , and third values. Our method has a worse SSIM. However, Tetra-NeRF seems to perform comparably to
-Mip-NeRF 360 [4] on most scenes in terms of PSNR and LPIPS, where we seem to achieve a slightly higher LPIPS and a slightly lower
-PSNR. We also outperform Stable View Synthesis [51] and all competitors other than Mip-NeRF 360 on all scenes in terms of PSNR.
-16
-ground truth
-prediction
-depth
-Figure 14. Results on the indoor scenes from Mip-NeRF 360 dataset [4]. We show the ground-truth image, the prediction, and the
-predicted depth map on scenes: bonsai (top), counter, kitchen, and room (bottom). The red squares highlight regions where there are
-visible errors in the images. Tetra-NeRF is able to represent even fine details, such as texts on products in the counter scene, well.
+
+
+
+Figure 13. Results on the Tanks and Temples dataset [25]. We show the ground-truth image, the prediction, and the predicted depth map on scenes: barn (top), caterpillar, family, truck, and ignatius (bottom). We also show a comparison with Point-NeRF [70]. The red squares highlight regions where our method has fewer artefacts compared to Point-NeRF. Notice how our method produces less noisy images compared to Point-NeRF. We can observe similar non-zero density artefacts to the ones observed on the Blender dataset. Again, we attribute it to a combination of implicit bias and non-textured background.
+
+# D. Mip-NeRF 360 results
+
+We also extend the results on the Mip-NeRF 360 dataset [4], presented in Table 8 and Figure 4 in the main paper, by showing detailed results for each scene. We follow the same training and evaluation procedure as Mip-NeRF 360 [4], and for the outdoor and indoor scenes, we train and evaluate with 4x and 2x downsampled images, respectively. The PSNR, SSIM, and LPIPS (Alex) [78] results are presented in Table 8. In terms of SSIM, our approach performs slightly worse than Point-Based Neural Rendering [26], Stable View Synthesis [51], and Mip-NeRF 360 [4]. In terms of the PSNR and LPIPS metrics, our approach performs comparable or better than these baselines. E.g., the state-of-the-art Mip-NeRF 360 [4] has a slightly better PSNR and Tetra-NeRF has a slightly better LPIPS. We typically outperform Stable View Synthesis [51] and competitors other than Mip-NeRF 360 in terms of PSNR. Note that similarly to Tetra-NeRF, Stable View Synthesis uses a geometric prior as input – a mesh instead of a point cloud.
+
+We also show qualitative results for indoor and outdoor Mip-NeRF 360 scenes in Figures 14 and 15. We notice more artefacts in the outdoor scenes compared to indoor ones. Small, high-frequency details such as grass are not represented well, which can be visible, e.g., in the flowers scene. One potential cause for this behaviour, which we plan to investigate in future work, could be that the poses estimated outdoors (where the camera is typically farther away from the scene than indoors) are noisier which makes it harder to recover fine details. For the indoor scenes, our model is able to represent the scenes with
+
+|        |             |                  | bicycle    | flowers | Outdoor garden | stump | PSNR treehill | room  | counter | Indoor kitchen | bonsai |
+|--------|-------------|------------------|------------|---------|----------------|-------|---------------|-------|---------|----------------|--------|
+| NeRF   | [15,        | 39]              | 21.76      | 19.40   | 23.11          | 21.73 | 21.28         | 28.56 | 25.67   | 26.31          | 26.81  |
+|        | mip-NeRF    | [3]              | 21.69      | 19.31   | 23.16          | 23.10 | 21.21         | 28.73 | 25.59   | 26.47          | 27.13  |
+|        | NeRF++      | [77]             | 22.64      | 20.31   | 24.32          | 24.34 | 22.20         | 28.87 | 26.38   | 27.80          | 29.15  |
+| Deep   | Blending    | [20]             | 21.09      | 18.13   | 23.61          | 24.08 | 20.80         | 27.20 | 26.28   | 25.02          | 27.08  |
+|        | Point-Based | Neural Rendering | [26] 21.64 | 19.28   | 22.50          | 23.90 | 20.98         | 26.99 | 25.23   | 24.47          | 28.42  |
+| Stable | View        | Synthesis [51]   | 22.79      | 20.15   | 25.99          | 24.39 | 21.72         | 28.93 | 26.40   | 28.49          | 29.07  |
+|        | mip-NeRF    | 360 [4]          | 23.95      | 21.60   | 25.09          | 25.98 | 21.99         | 28.24 | 28.40   | 30.81          | 30.27  |
+|        | Tetra-NeRF  |                  | 23.53      | 20.36   | 26.15          | 24.42 | 21.41         | 32.02 | 28.02   | 29.66          | 31.13  |
+
+|        |             |                  | bicycle    | flowers | Outdoor garden | stump | SSIM treehill | room  | counter | Indoor kitchen | bonsai |
+|--------|-------------|------------------|------------|---------|----------------|-------|---------------|-------|---------|----------------|--------|
+| NeRF   | [15,        | 39]              | 0.455      | 0.376   | 0.546          | 0.453 | 0.459         | 0.843 | 0.775   | 0.749          | 0.792  |
+|        | mip-NeRF    | [3]              | 0.454      | 0.373   | 0.543          | 0.517 | 0.466         | 0.851 | 0.779   | 0.745          | 0.818  |
+|        | NeRF++      | [77]             | 0.526      | 0.453   | 0.635          | 0.594 | 0.530         | 0.852 | 0.802   | 0.816          | 0.876  |
+| Deep   | Blending    | [20]             | 0.466      | 0.320   | 0.675          | 0.634 | 0.523         | 0.868 | 0.856   | 0.768          | 0.883  |
+|        | Point-Based | Neural Rendering | [26] 0.608 | 0.487   | 0.735          | 0.651 | 0.579         | 0.887 | 0.868   | 0.876          | 0.919  |
+| Stable | View        | Synthesis [51]   | 0.663      | 0.541   | 0.818          | 0.683 | 0.606         | 0.905 | 0.886   | 0.910          | 0.925  |
+|        | mip-NeRF    | 360 [4]          | 0.687      | 0.582   | 0.800          | 0.745 | 0.619         | 0.907 | 0.890   | 0.916          | 0.932  |
+|        | Tetra-NeRF  |                  | 0.614      | 0.470   | 0.775          | 0.613 | 0.456         | 0.894 | 0.850   | 0.877          | 0.905  |
+
+|        |             |                  | bicycle    | flowers | Outdoor garden | stump | LPIPS treehill | room  | counter | Indoor kitchen | bonsai |
+|--------|-------------|------------------|------------|---------|----------------|-------|----------------|-------|---------|----------------|--------|
+| NeRF   | [15,        | 39]              | 0.536      | 0.529   | 0.415          | 0.551 | 0.546          | 0.353 | 0.394   | 0.335          | 0.398  |
+|        | mip-NeRF    | [3]              | 0.541      | 0.535   | 0.422          | 0.490 | 0.538          | 0.346 | 0.390   | 0.336          | 0.370  |
+|        | NeRF++      | [77]             | 0.455      | 0.466   | 0.331          | 0.416 | 0.466          | 0.335 | 0.351   | 0.260          | 0.291  |
+| Deep   | Blending    | [20]             | 0.377      | 0.476   | 0.231          | 0.351 | 0.383          | 0.266 | 0.258   | 0.246          | 0.275  |
+|        | Point-Based | Neural Rendering | [26] 0.313 | 0.372   | 0.197          | 0.303 | 0.325          | 0.216 | 0.209   | 0.160          | 0.178  |
+| Stable | View        | Synthesis [51]   | 0.243      | 0.317   | 0.137          | 0.281 | 0.286          | 0.182 | 0.168   | 0.125          | 0.164  |
+|        | mip-NeRF    | 360 [4]          | 0.296      | 0.343   | 0.173          | 0.258 | 0.338          | 0.208 | 0.206   | 0.129          | 0.182  |
+|        | Tetra-NeRF  |                  | 0.271      | 0.378   | 0.136          | 0.274 | 0.429          | 0.104 | 0.127   | 0.098          | 0.084  |
+
+Table 8. Detailed Mip-NeRF 360 [4] results. We show the PSNR, SSIM, and LPIPS (Alex) results averaged over the testing images. We highlight the best , second , and third values. Our method has a worse SSIM. However, Tetra-NeRF seems to perform comparably to Mip-NeRF 360 [4] on most scenes in terms of PSNR and LPIPS, where we seem to achieve a slightly higher LPIPS and a slightly lower PSNR. We also outperform Stable View Synthesis [51] and all competitors other than Mip-NeRF 360 on all scenes in terms of PSNR.
+
+
+
+Figure 14. Results on the indoor scenes from Mip-NeRF 360 dataset [4]. We show the ground-truth image, the prediction, and the predicted depth map on scenes: bonsai (top), counter, kitchen, and room (bottom). The red squares highlight regions where there are visible errors in the images. Tetra-NeRF is able to represent even fine details, such as texts on products in the counter scene, well.
+
 very high fidelity, including very fine details such as texts on products in the counter scene.
-17
-ground truth
-prediction
-depth
-Figure 15. Results on the outdoor scenes from Mip-NeRF 360 dataset [4]. We show the ground-truth image, the prediction, and the
-predicted depth map on scenes: garden (top), bicycle, treehill, stump, and flowers (bottom). The red squares highlight regions where
-there are visible errors in the images. Tetra-NeRF is not able to represent the grass and the ground in flowers and treehill scenes well,
-and we can see blur artefacts. On the garden scene, the reconstruction achieves high fidelity except for the centre of the table, where the
-reflections are slightly incorrect.
-18
-E. Varying the number of input points
-0.5
-32.5
-0.9
-30.0
-0.8
-27.5
-0.7
-0.4
-0.3
-0.2
-0.6
-25.0
-0.1
-0.5
-22.5
-10K 20K
-50K 100K 250K
-(a) PSNR
-1M 2M
-10K 20K
-50K 100K 250K
-(b) SSIM
-1M 2M
-10K 20K
-50K 100K 250K
-1M 2M
-(c) LPIPS
-Figure 16. Performance with different sizes and quality of the input point cloud. a, b, c) shows the PSNR, SSIM, and LPIPS [78] with
-different sizes of input point clouds (PSNR is repeated from the main paper). The solid and dashed lines represent the dense and coarse
-COLMAP reconstructions. The following scenes were evaluated (best to worst): tt/family, 360/room, tt/truck, and 360/garden from the
-Tanks and Temples [25] (tt) and the Mip-NeRF 360 [4] (360-indoor/360-outdoor) datasets. As expected, the quality increases with the
-number of points, but also sparse reconstruction performs better at the same number of points.
-We conducted a study on the effect of different sizes of the input point cloud. In the main paper, we presented the
-PSNR results on four scenes. Here we also show the SSIM and LPIPS. We consider both the sparse and dense COLMAP
-reconstructions and analyse the performance as we sub-sample the points or add more points randomly. In order to save
-computational resources, we only train the method for 100k iterations. The results are visualised in Figure 16.
-As expected, the performance improves with the number of points used, as it leads to a finer subdivision of the scene
-around the surface. Note how the performance of dense reconstruction is lower than sparse reconstruction with the same size.
-Also, note how the performance of 360/garden increases when adding randomly sampled points to the sparse point cloud.
-For Tetra-NeRF it is important to have a dense-enough coverage in regions close to surfaces and randomly subsampling a
-larger point cloud may miss some regions. Similarly, adding more points at random in proximity to existing ones helps as it
-increases the density in those regions. For all experiments in the paper and the Supp. Mat., we used random sub-sampling.
-An interesting direction for future work is to investigate more sophisticated strategies that, e.g., sample more points around
-fine details such as corners and edges and fewer points in planar regions.
-19
-References
-[15] Boyang Deng, Jonathan T. Barron, and Pratul P. Srinivasan.
-JaxNeRF: an efficient JAX implementation of NeRF, 2020.
-8, 16
-[16] Michael S Floater. Generalized barycentric coordinates and
-applications. Acta Numerica, 24:161–214, 2015. 3, 4
-[17] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong
-Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels:
-Radiance fields without neural networks. In CVPR, 2022. 1,
-2, 4, 5, 10, 11
-[18] Yasutaka Furukawa and Jean Ponce. Accurate, dense, and
-robust multiview stereopsis. IEEE Transactions on Pattern
-Analysis and Machine Intelligence, 32:1362–1376, 2009. 2
-[19] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
-Delving deep into rectifiers: Surpassing human-level performance on imagenet classification. In ICCV, 2015. 5
-[20] Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm,
-George Drettakis, and Gabriel Brostow. Deep blending for
-free-viewpoint image-based rendering. SIGGRAPH, ToG,
-37(6):1–15, 2018. 2, 8, 16
-[21] Peter Hedman, Pratul P Srinivasan, Ben Mildenhall,
-Jonathan T Barron, and Paul Debevec. Baking neural radiance fields for real-time view synthesis. In ICCV, 2021.
-2
-[22] Vu Hoang Hiep, Renaud Keriven, Patrick Labatut, and JeanPhilippe Pons. Towards high-resolution large-scale multiview stereo. In CVPR, 2009. 2
-[23] Michal Jancosek and Tomas Pajdla. Multi-view reconstruction preserving weakly-supported surfaces. In CVPR, 2011.
-2
-[24] Michael Kazhdan, Matthew Bolitho, and Hugues Hoppe.
-Poisson surface reconstruction. In SGP, 2006. 2
-[25] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen
-Koltun. Tanks and temples: Benchmarking large-scale scene
-reconstruction. SIGGRAPH, ToG, 2017. 5, 6, 7, 8, 9, 10, 14,
-15, 19
-[26] Georgios Kopanas, Julien Philip, Thomas Leimkühler, and
-George Drettakis. Point-based neural rendering with perview optimization. In Computer Graphics Forum, volume 40, pages 29–43. Wiley Online Library, 2021. 2, 8,
-16
-[27] Alex Krizhevsky, Ilya Sutskever, and Geoffrey E Hinton.
-Imagenet classification with deep convolutional neural networks. Advances in Neural Information Processing Systems,
-25, 2012. 7
-[28] Jonáš Kulhánek, Erik Derner, Torsten Sattler, and Robert
-Babuška. ViewFormer: Nerf-free neural rendering from few
-images using transformers. In ECCV, 2022. 2
-[29] Patrick Labatut, Jean-Philippe Pons, and Renaud Keriven.
-Efficient multi-view reconstruction of large-scale scenes using interest points, Delaunay triangulation and graph cuts. In
-ICCV, 2007. 2
-[30] Patrick Labatut, J-P Pons, and Renaud Keriven. Robust and
-efficient surface reconstruction from range data. In Computer graphics forum, volume 28, pages 2275–2290. Wiley
-Online Library, 2009. 2
-[31] Chen-Hsuan Lin, Wei-Chiu Ma, Antonio Torralba, and Simon Lucey. BARF: Bundle-adjusting neural radiance fields.
-In ICCV, 2021. 2
-[1] Kara-Ali Aliev, Artem Sevastopolsky, Maria Kolos, Dmitry
-Ulyanov, and Victor Lempitsky. Neural point-based graphics. In ECCV, 2020. 2, 11
-[2] Pierre Alliez, Simon Giraudot, Clément Jamin, Florent Lafarge, Quentin Mérigot, Jocelyn Meyron, Laurent Saboret,
-Nader Salman, Shihao Wu, and Necip Fazil Yildiran. Point
-set processing. In CGAL User and Reference Manual. CGAL
-Editorial Board, 5.5.1 edition, 2022. 5
-[3] Jonathan T Barron, Ben Mildenhall, Matthew Tancik, Peter Hedman, Ricardo Martin-Brualla, and Pratul P Srinivasan. Mip-NeRF: A multiscale representation for antialiasing neural radiance fields. In ICCV, 2021. 1, 2, 4, 5,
-7, 8, 9, 10, 11, 16
-[4] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P
-Srinivasan, and Peter Hedman. Mip-NeRF 360: Unbounded
-anti-aliased neural radiance fields. In CVPR, 2022. 1, 2, 5,
-7, 8, 9, 10, 16, 17, 18, 19
-[5] Sai Bi, Zexiang Xu, Pratul Srinivasan, Ben Mildenhall,
-Kalyan Sunkavalli, Miloš Hašan, Yannick Hold-Geoffroy,
-David Kriegman, and Ravi Ramamoorthi. Neural reflectance
-fields for appearance acquisition. arXiv:2008.03824, 2020.
-2
-[6] Wenjing Bian, Zirui Wang, Kejie Li, Jia-Wang Bian, and
-Victor Adrian Prisacariu. NoPe-NeRF: Optimising neural
-radiance field with no pose prior. arXiv:2212.07388, 2022.
-2
-[7] Mark Boss, Raphael Braun, Varun Jampani, Jonathan T Barron, Ce Liu, and Hendrik Lensch. NeRD: Neural reflectance
-decomposition from image collections. In ICCV, 2021. 2
-[8] Chris Buehler, Michael Bosse, Leonard McMillan, Steven
-Gortler, and Michael Cohen. Unstructured lumigraph rendering. In Proceedings of the 28th annual conference on
-Computer graphics and interactive techniques, 2001. 2
-[9] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and
-Hao Su. TensoRF: Tensorial radiance fields. In ECCV, 2022.
-1, 2, 4, 5
-[10] Anpei Chen, Zexiang Xu, Xinyue Wei, Siyu Tang, Hao Su,
-and Andreas Geiger. Factor fields: A unified framework for
-neural fields and beyond. arXiv:2302.01226, 2023. 1, 2, 3
-[11] Anpei Chen, Zexiang Xu, Fuqiang Zhao, Xiaoshuai Zhang,
-Fanbo Xiang, Jingyi Yu, and Hao Su. MVSNeRF: Fast
-generalizable radiance field reconstruction from multi-view
-stereo. In ICCV, 2021. 2
-[12] Shuo Cheng, Zexiang Xu, Shilin Zhu, Zhuwen Li, Li Erran
-Li, Ravi Ramamoorthi, and Hao Su. Deep stereo using adaptive thin volume representation with uncertainty awareness.
-In CVPR, 2020. 2
-[13] Paul E Debevec, Camillo J Taylor, and Jitendra Malik. Modeling and rendering architecture from photographs: A hybrid
-geometry-and image-based approach. In Proceedings of the
-23rd annual conference on Computer graphics and interactive techniques, 1996. 2
-[14] B Delaunay, S Vide, A Lamémoire, and V De Georges. Bulletin de l’academie des sciences de l’URSS. Classe des sciences mathématiques et naturelles, 6:793–800, 1934. 2, 3, 4,
-5
-20
-[48] Christian Reiser, Richard Szeliski, Dor Verbin, Pratul P
-Srinivasan, Ben Mildenhall, Andreas Geiger, Jonathan T
-Barron, and Peter Hedman. MERF: Memory-efficient radiance fields for real-time view synthesis in unbounded scenes.
-arXiv:2302.12249, 2023. 2
-[49] Jeremy Reizenstein, Roman Shapovalov, Philipp Henzler,
-Luca Sbordone, Patrick Labatut, and David Novotny. Common objects in 3D: Large-scale learning and evaluation of
-real-life 3D category reconstruction. In ICCV, 2021. 2
-[50] Gernot Riegler and Vladlen Koltun. Free view synthesis. In
-ECCV, 2020. 2
-[51] Gernot Riegler and Vladlen Koltun. Stable view synthesis.
-In CVPR, 2021. 2, 7, 8, 16
-[52] Radu Alexandru Rosu and Sven Behnke. Permutosdf: Fast
-multi-view reconstruction with implicit surfaces using permutohedral lattices. In CVPR, 2023. 2
-[53] Darius Rückert, Linus Franke, and Marc Stamminger.
-ADOP: Approximate differentiable one-pixel point rendering. SIGGRAPH, ToG, 41(4):1–14, 2022. 2
-[54] Johannes Lutz Schönberger and Jan-Michael Frahm.
-Structure-from-motion revisited. In CVPR, 2016. 2, 4, 5
-[55] Johannes Lutz Schönberger, Enliang Zheng, Marc Pollefeys,
-and Jan-Michael Frahm. Pixelwise view selection for unstructured multi-view stereo. In ECCV, 2016. 2, 4, 5
-[56] Karen Simonyan and Andrew Zisserman.
-Very deep
-convolutional networks for large-scale image recognition.
-arXiv:1409.1556, 2014. 7
-[57] Cheng Sun, Min Sun, and Hwann-Tzong Chen. Direct voxel
-grid optimization: Super-fast convergence for radiance fields
-reconstruction. In CVPR, 2022. 1, 2, 4
-[58] Matthew Tancik, Vincent Casser, Xinchen Yan, Sabeek Pradhan, Ben Mildenhall, Pratul P Srinivasan, Jonathan T Barron,
-and Henrik Kretzschmar. Block-NeRF: Scalable large scene
-neural view synthesis. In CVPR, 2022. 2
-[59] Matthew Tancik, Pratul Srinivasan, Ben Mildenhall, Sara
-Fridovich-Keil, Nithin Raghavan, Utkarsh Singhal, Ravi Ramamoorthi, Jonathan Barron, and Ren Ng. Fourier features
-let networks learn high frequency functions in low dimensional domains. Advances in Neural Information Processing
-Systems, 33:7537–7547, 2020. 4
-[60] Matthew Tancik, Ethan Weber, Evonne Ng, Ruilong Li,
-Brent Yi, Justin Kerr, Terrance Wang, Alexander Kristoffersen, Jake Austin, Kamyar Salahi, et al. Nerfstudio: A
-modular framework for neural radiance field development.
-arXiv:2302.04264, 2023. 2, 5
-[61] Chengzhou Tang and Ping Tan. BA-net: Dense bundle adjustment networks. In International Conference on Learning
-Representations, 2019. 2
-[62] Dor Verbin, Peter Hedman, Ben Mildenhall, Todd Zickler,
-Jonathan T Barron, and Pratul P Srinivasan. Ref-NeRF:
-Structured view-dependent appearance for neural radiance
-fields. In CVPR, 2022. 2
-[63] Sudheendra Vijayanarasimhan, Susanna Ricco, Cordelia
-Schmid, Rahul Sukthankar, and Katerina Fragkiadaki.
-SfM-Net: Learning of structure and motion from video.
-arXiv:1704.07804, 2017. 2
-[32] Lingjie Liu, Jiatao Gu, Kyaw Zaw Lin, Tat-Seng Chua, and
-Christian Theobalt. Neural sparse voxel fields. Advances
-in Neural Information Processing Systems, 33:15651–15663,
-2020. 1, 2, 3, 5, 6, 7, 11, 14
-[33] Liyuan Liu, Haoming Jiang, Pengcheng He, Weizhu Chen,
-Xiaodong Liu, Jianfeng Gao, and Jiawei Han. On the variance of the adaptive learning rate and beyond. In International Conference on Learning Representations, 2020. 5
-[34] Stephen Lombardi, Tomas Simon, Jason Saragih, Gabriel
-Schwartz, Andreas Lehrmann, and Yaser Sheikh. Neural volumes: learning dynamic renderable volumes from images.
-SIGGRAPH, ToG, 38(4):1–14, 2019. 2, 6, 14
-[35] William E Lorensen and Harvey E Cline. Marching cubes:
-A high resolution 3D surface construction algorithm. SIGGRAPH, ToG, 1987. 2
-[36] Ricardo Martin-Brualla, Noha Radwan, Mehdi SM Sajjadi,
-Jonathan T Barron, Alexey Dosovitskiy, and Daniel Duckworth. NeRF in the wild: Neural radiance fields for unconstrained photo collections. In CVPR, 2021. 2
-[37] Nelson Max. Optical models for direct volume rendering.
-IEEE Transactions on Visualization and Computer Graphics,
-1(2):99–108, 1995. 1, 3
-[38] Moustafa Meshry, Dan B. Goldman, Sameh Khamis, Hugues
-Hoppe, Rohit Pandey, Noah Snavely, and Ricardo MartinBrualla. Neural rerendering in the wild. In CVPR, June 2019.
-2
-[39] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik,
-Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. NeRF:
-Representing scenes as neural radiance fields for view synthesis. In ECCV, 2020. 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
-14, 16
-[40] Tomas Möller. A fast triangle-triangle intersection test. Journal of Graphics Tools, 2(2):25–30, 1997. 2
-[41] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. SIGGRAPH, ToG, 2022. 1, 2, 3, 4, 5,
-9, 11
-[42] M. Nießner, M. Zollhöfer, S. Izadi, and M. Stamminger.
-Real-time 3D reconstruction at scale using voxel hashing.
-SIGGRAPH, ToG, 2013. 4
-[43] Steven G Parker, James Bigler, Andreas Dietrich, Heiko
-Friedrich, Jared Hoberock, David Luebke, David McAllister, Morgan McGuire, Keith Morley, Austin Robison, et al.
-OptiX: a general purpose ray tracing engine. ACM Transactions on Graphics (ToG), 29(4):1–13, 2010. 2, 4, 5
-[44] Songyou Peng, Michael Niemeyer, Lars Mescheder, Marc
-Pollefeys, and Andreas Geiger. Convolutional occupancy
-networks. In ECCV, 2020. 2
-[45] Bui Tuong Phong. Illumination for computer generated pictures. Communications of the ACM, 18(6):311–317, 1975.
-2
-[46] Ben Poole, Ajay Jain, Jonathan T Barron, and Ben Mildenhall.
-DreamFusion: Text-to-3D using 2D diffusion.
-arXiv:2209.14988, 2022. 2
-[47] Christian Reiser, Songyou Peng, Yiyi Liao, and Andreas
-Geiger. KiloNeRF: Speeding up neural radiance fields with
-thousands of tiny mlps. In ICCV, 2021. 2
-21
-[79] Chaoqiang Zhao, Qiyu Sun, Chongzhen Zhang, Yang Tang,
-and Feng Qian. Monocular depth estimation based on deep
-learning: An overview. Science China Technological Sciences, 63(9):1612–1627, 2020. 3
-[64] Can Wang, Menglei Chai, Mingming He, Dongdong Chen,
-and Jing Liao. Clip-NeRF: Text-and-image driven manipulation of neural radiance fields. In CVPR, 2022. 2
-[65] Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku
-Komura, and Wenping Wang. NeuS: Learning neural implicit surfaces by volume rendering for multi-view reconstruction. Advances in Neural Information Processing Systems, 34:27171–27183, 2021. 2
-[66] Qianqian Wang, Zhicheng Wang, Kyle Genova, Pratul P.
-Srinivasan, Howard Zhou, Jonathan T. Barron, Ricardo
-Martin-Brualla, Noah Snavely, and Thomas Funkhouser.
-IBRNet: Learning multi-view image-based rendering. In
-CVPR, 2021. 2
-[67] Yiming Wang, Qin Han, Marc Habermann, Kostas Daniilidis, Christian Theobalt, and Lingjie Liu. NeuS2: Fast
-learning of neural implicit surfaces for multi-view reconstruction. arXiv:2212.05231, 2022. 2
-[68] Zirui Wang, Shangzhe Wu, Weidi Xie, Min Chen, and Victor Adrian Prisacariu. NeRF–: Neural radiance fields without
-known camera parameters. arXiv:2102.07064, 2021. 2
-[69] Daniel N Wood, Daniel I Azuma, Ken Aldinger, Brian Curless, Tom Duchamp, David H Salesin, and Werner Stuetzle.
-Surface light fields for 3D photography. In Proceedings of
-the 27th annual conference on Computer graphics and interactive techniques, 2000. 2
-[70] Qiangeng Xu, Zexiang Xu, Julien Philip, Sai Bi, Zhixin
-Shu, Kalyan Sunkavalli, and Ulrich Neumann. Point-NeRF:
-Point-based neural radiance fields. In CVPR, 2022. 1, 2, 3,
-5, 6, 7, 9, 10, 11, 14, 15
-[71] Yao Yao, Zixin Luo, Shiwei Li, Tian Fang, and Long
-Quan. MVSNet: Depth inference for unstructured multiview stereo. In ECCV, 2018. 2
-[72] Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman. Volume rendering of neural implicit surfaces. Advances in Neural Information Processing Systems, 34:4805–4815, 2021. 2
-[73] Lior Yariv, Peter Hedman, Christian Reiser, Dor Verbin,
-Pratul P Srinivasan, Richard Szeliski, Jonathan T Barron,
-and Ben Mildenhall. BakedSDF: Meshing neural SDFs for
-real-time view synthesis. arXiv:2302.14859, 2023. 2
-[74] Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng, and
-Angjoo Kanazawa. PlenOctrees for real-time rendering of
-neural radiance fields. In ICCV, 2021. 1, 2
-[75] Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo Kanazawa.
-PixelNeRF: Neural radiance fields from one or few images.
-In CVPR, 2021. 2
-[76] Zehao Yu, Songyou Peng, Michael Niemeyer, Torsten Sattler, and Andreas Geiger. MonoSDF: Exploring monocular
-geometric cues for neural implicit surface reconstruction. In
-Advances in Neural Information Processing Systems, 2022.
-2
-[77] Kai Zhang, Gernot Riegler, Noah Snavely, and Vladlen
-Koltun. NeRF++: Analyzing and improving neural radiance
-fields. arXiv:2010.07492, 2020. 2, 8, 16
-[78] Richard Zhang, Phillip Isola, Alexei A. Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness of
-deep features as a perceptual metric. In CVPR, June 2018. 5,
-6, 8, 10, 14, 16, 19
-22
+
+
+
+Figure 15. Results on the outdoor scenes from Mip-NeRF 360 dataset [4]. We show the ground-truth image, the prediction, and the predicted depth map on scenes: garden (top), bicycle, treehill, stump, and flowers (bottom). The red squares highlight regions where there are visible errors in the images. Tetra-NeRF is not able to represent the grass and the ground in flowers and treehill scenes well, and we can see blur artefacts. On the garden scene, the reconstruction achieves high fidelity except for the centre of the table, where the reflections are slightly incorrect.
+
+## E. Varying the number of input points
+
+
+
+Figure 16. Performance with different sizes and quality of the input point cloud. a, b, c) shows the PSNR, SSIM, and LPIPS [78] with different sizes of input point clouds (PSNR is repeated from the main paper). The solid and dashed lines represent the dense and coarse COLMAP reconstructions. The following scenes were evaluated (best to worst): tt/family, 360/room, tt/truck, and 360/garden from the Tanks and Temples [25] (tt) and the Mip-NeRF 360 [4] (360-indoor/360-outdoor) datasets. As expected, the quality increases with the number of points, but also sparse reconstruction performs better at the same number of points.
+
+We conducted a study on the effect of different sizes of the input point cloud. In the main paper, we presented the PSNR results on four scenes. Here we also show the SSIM and LPIPS. We consider both the sparse and dense COLMAP reconstructions and analyse the performance as we sub-sample the points or add more points randomly. In order to save computational resources, we only train the method for 100k iterations. The results are visualised in Figure 16.
+
+As expected, the performance improves with the number of points used, as it leads to a finer subdivision of the scene around the surface. Note how the performance of dense reconstruction is lower than sparse reconstruction with the same size. Also, note how the performance of 360/garden increases when adding randomly sampled points to the sparse point cloud. For Tetra-NeRF it is important to have a dense-enough coverage in regions close to surfaces and randomly subsampling a larger point cloud may miss some regions. Similarly, adding more points at random in proximity to existing ones helps as it increases the density in those regions. For all experiments in the paper and the Supp. Mat., we used random sub-sampling. An interesting direction for future work is to investigate more sophisticated strategies that, e.g., sample more points around fine details such as corners and edges and fewer points in planar regions.
+
+## References
+
+[1] Kara-Ali Aliev, Artem Sevastopolsky, Maria Kolos, Dmitry Ulyanov, and Victor Lempitsky. Neural point-based graphics. In ECCV, 2020. 2, 11 [2] Pierre Alliez, Simon Giraudot, Clement Jamin, Florent La- ´ farge, Quentin Merigot, Jocelyn Meyron, Laurent Saboret, ´ Nader Salman, Shihao Wu, and Necip Fazil Yildiran. Point set processing. In CGAL User and Reference Manual. CGAL Editorial Board, 5.5.1 edition, 2022. 5 [3] Jonathan T Barron, Ben Mildenhall, Matthew Tancik, Peter Hedman, Ricardo Martin-Brualla, and Pratul P Srinivasan. Mip-NeRF: A multiscale representation for antialiasing neural radiance fields. In ICCV, 2021. 1, 2, 4, 5, 7, 8, 9, 10, 11, 16 [4] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P Srinivasan, and Peter Hedman. Mip-NeRF 360: Unbounded anti-aliased neural radiance fields. In CVPR, 2022. 1, 2, 5, 7, 8, 9, 10, 16, 17, 18, 19 [5] Sai Bi, Zexiang Xu, Pratul Srinivasan, Ben Mildenhall, Kalyan Sunkavalli, Milos Ha ˇ san, Yannick Hold-Geoffroy, ˇ David Kriegman, and Ravi Ramamoorthi. Neural reflectance fields for appearance acquisition. arXiv:2008.03824, 2020. 2 [6] Wenjing Bian, Zirui Wang, Kejie Li, Jia-Wang Bian, and Victor Adrian Prisacariu. NoPe-NeRF: Optimising neural radiance field with no pose prior. arXiv:2212.07388, 2022. 2 [7] Mark Boss, Raphael Braun, Varun Jampani, Jonathan T Barron, Ce Liu, and Hendrik Lensch. NeRD: Neural reflectance decomposition from image collections. In ICCV, 2021. 2 [8] Chris Buehler, Michael Bosse, Leonard McMillan, Steven Gortler, and Michael Cohen. Unstructured lumigraph rendering. In Proceedings of the 28th annual conference on Computer graphics and interactive techniques, 2001. 2 [9] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and Hao Su. TensoRF: Tensorial radiance fields. In ECCV, 2022. 1, 2, 4, 5 [10] Anpei Chen, Zexiang Xu, Xinyue Wei, Siyu Tang, Hao Su, and Andreas Geiger. Factor fields: A unified framework for neural fields and beyond. arXiv:2302.01226, 2023. 1, 2, 3 [11] Anpei Chen, Zexiang Xu, Fuqiang Zhao, Xiaoshuai Zhang, Fanbo Xiang, Jingyi Yu, and Hao Su. MVSNeRF: Fast generalizable radiance field reconstruction from multi-view stereo. In ICCV, 2021. 2 [12] Shuo Cheng, Zexiang Xu, Shilin Zhu, Zhuwen Li, Li Erran Li, Ravi Ramamoorthi, and Hao Su. Deep stereo using adaptive thin volume representation with uncertainty awareness. In CVPR, 2020. 2 [13] Paul E Debevec, Camillo J Taylor, and Jitendra Malik. Modeling and rendering architecture from photographs: A hybrid geometry-and image-based approach. In Proceedings of the 23rd annual conference on Computer graphics and interactive techniques, 1996. 2 [14] B Delaunay, S Vide, A Lamemoire, and V De Georges. Bul- ´ letin de l'academie des sciences de l'URSS. Classe des sciences mathematiques et naturelles ´ , 6:793–800, 1934. 2, 3, 4, 5 [15] Boyang Deng, Jonathan T. Barron, and Pratul P. Srinivasan. JaxNeRF: an efficient JAX implementation of NeRF, 2020. 8, 16 [16] Michael S Floater. Generalized barycentric coordinates and applications. Acta Numerica, 24:161–214, 2015. 3, 4 [17] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels: Radiance fields without neural networks. In CVPR, 2022. 1, 2, 4, 5, 10, 11 [18] Yasutaka Furukawa and Jean Ponce. Accurate, dense, and robust multiview stereopsis. IEEE Transactions on Pattern Analysis and Machine Intelligence, 32:1362–1376, 2009. 2 [19] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Delving deep into rectifiers: Surpassing human-level performance on imagenet classification. In ICCV, 2015. 5 [20] Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm, George Drettakis, and Gabriel Brostow. Deep blending for free-viewpoint image-based rendering. SIGGRAPH, ToG, 37(6):1–15, 2018. 2, 8, 16 [21] Peter Hedman, Pratul P Srinivasan, Ben Mildenhall, Jonathan T Barron, and Paul Debevec. Baking neural radiance fields for real-time view synthesis. In ICCV, 2021. 2 [22] Vu Hoang Hiep, Renaud Keriven, Patrick Labatut, and Jean-Philippe Pons. Towards high-resolution large-scale multiview stereo. In CVPR, 2009. 2 [23] Michal Jancosek and Tomas Pajdla. Multi-view reconstruction preserving weakly-supported surfaces. In CVPR, 2011. 2 [24] Michael Kazhdan, Matthew Bolitho, and Hugues Hoppe. Poisson surface reconstruction. In SGP, 2006. 2 [25] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. Tanks and temples: Benchmarking large-scale scene reconstruction. SIGGRAPH, ToG, 2017. 5, 6, 7, 8, 9, 10, 14, 15, 19 [26] Georgios Kopanas, Julien Philip, Thomas Leimkuhler, and ¨ George Drettakis. Point-based neural rendering with perview optimization. In Computer Graphics Forum, volume 40, pages 29–43. Wiley Online Library, 2021. 2, 8, 16 [27] Alex Krizhevsky, Ilya Sutskever, and Geoffrey E Hinton. Imagenet classification with deep convolutional neural networks. Advances in Neural Information Processing Systems, 25, 2012. 7 [28] Jona´s Kulh ˇ anek, Erik Derner, Torsten Sattler, and Robert ´ Babuska. ViewFormer: Nerf-free neural rendering from few ˇ images using transformers. In ECCV, 2022. 2 [29] Patrick Labatut, Jean-Philippe Pons, and Renaud Keriven. Efficient multi-view reconstruction of large-scale scenes using interest points, Delaunay triangulation and graph cuts. In ICCV, 2007. 2 [30] Patrick Labatut, J-P Pons, and Renaud Keriven. Robust and efficient surface reconstruction from range data. In Computer graphics forum, volume 28, pages 2275–2290. Wiley Online Library, 2009. 2 [31] Chen-Hsuan Lin, Wei-Chiu Ma, Antonio Torralba, and Simon Lucey. BARF: Bundle-adjusting neural radiance fields. In ICCV, 2021. 2
+
+[32] Lingjie Liu, Jiatao Gu, Kyaw Zaw Lin, Tat-Seng Chua, and Christian Theobalt. Neural sparse voxel fields. Advances in Neural Information Processing Systems, 33:15651–15663, 2020. 1, 2, 3, 5, 6, 7, 11, 14 [33] Liyuan Liu, Haoming Jiang, Pengcheng He, Weizhu Chen, Xiaodong Liu, Jianfeng Gao, and Jiawei Han. On the variance of the adaptive learning rate and beyond. In International Conference on Learning Representations, 2020. 5 [34] Stephen Lombardi, Tomas Simon, Jason Saragih, Gabriel Schwartz, Andreas Lehrmann, and Yaser Sheikh. Neural volumes: learning dynamic renderable volumes from images. SIGGRAPH, ToG, 38(4):1–14, 2019. 2, 6, 14 [35] William E Lorensen and Harvey E Cline. Marching cubes: A high resolution 3D surface construction algorithm. SIG-GRAPH, ToG, 1987. 2 [36] Ricardo Martin-Brualla, Noha Radwan, Mehdi SM Sajjadi, Jonathan T Barron, Alexey Dosovitskiy, and Daniel Duckworth. NeRF in the wild: Neural radiance fields for unconstrained photo collections. In CVPR, 2021. 2 [37] Nelson Max. Optical models for direct volume rendering. IEEE Transactions on Visualization and Computer Graphics, 1(2):99–108, 1995. 1, 3 [38] Moustafa Meshry, Dan B. Goldman, Sameh Khamis, Hugues Hoppe, Rohit Pandey, Noah Snavely, and Ricardo Martin-Brualla. Neural rerendering in the wild. In CVPR, June 2019. 2 [39] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. NeRF: Representing scenes as neural radiance fields for view synthesis. In ECCV, 2020. 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16 [40] Tomas Moller. A fast triangle-triangle intersection test. ¨ Journal of Graphics Tools, 2(2):25–30, 1997. 2 [41] Thomas Muller, Alex Evans, Christoph Schied, and Alexan- ¨ der Keller. Instant neural graphics primitives with a multiresolution hash encoding. SIGGRAPH, ToG, 2022. 1, 2, 3, 4, 5, 9, 11 [42] M. Nießner, M. Zollhofer, S. Izadi, and M. Stamminger. ¨ Real-time 3D reconstruction at scale using voxel hashing. SIGGRAPH, ToG, 2013. 4 [43] Steven G Parker, James Bigler, Andreas Dietrich, Heiko Friedrich, Jared Hoberock, David Luebke, David McAllister, Morgan McGuire, Keith Morley, Austin Robison, et al. OptiX: a general purpose ray tracing engine. ACM Transactions on Graphics (ToG), 29(4):1–13, 2010. 2, 4, 5 [44] Songyou Peng, Michael Niemeyer, Lars Mescheder, Marc Pollefeys, and Andreas Geiger. Convolutional occupancy networks. In ECCV, 2020. 2 [45] Bui Tuong Phong. Illumination for computer generated pictures. Communications of the ACM, 18(6):311–317, 1975. 2 [46] Ben Poole, Ajay Jain, Jonathan T Barron, and Ben Mildenhall. DreamFusion: Text-to-3D using 2D diffusion. arXiv:2209.14988, 2022. 2 [47] Christian Reiser, Songyou Peng, Yiyi Liao, and Andreas Geiger. KiloNeRF: Speeding up neural radiance fields with thousands of tiny mlps. In ICCV, 2021. 2 [48] Christian Reiser, Richard Szeliski, Dor Verbin, Pratul P Srinivasan, Ben Mildenhall, Andreas Geiger, Jonathan T Barron, and Peter Hedman. MERF: Memory-efficient radiance fields for real-time view synthesis in unbounded scenes. arXiv:2302.12249, 2023. 2 [49] Jeremy Reizenstein, Roman Shapovalov, Philipp Henzler, Luca Sbordone, Patrick Labatut, and David Novotny. Common objects in 3D: Large-scale learning and evaluation of real-life 3D category reconstruction. In ICCV, 2021. 2 [50] Gernot Riegler and Vladlen Koltun. Free view synthesis. In ECCV, 2020. 2 [51] Gernot Riegler and Vladlen Koltun. Stable view synthesis. In CVPR, 2021. 2, 7, 8, 16 [52] Radu Alexandru Rosu and Sven Behnke. Permutosdf: Fast multi-view reconstruction with implicit surfaces using permutohedral lattices. In CVPR, 2023. 2 [53] Darius Ruckert, Linus Franke, and Marc Stamminger. ¨ ADOP: Approximate differentiable one-pixel point rendering. SIGGRAPH, ToG, 41(4):1–14, 2022. 2 [54] Johannes Lutz Schonberger and Jan-Michael Frahm. ¨ Structure-from-motion revisited. In CVPR, 2016. 2, 4, 5 [55] Johannes Lutz Schonberger, Enliang Zheng, Marc Pollefeys, ¨ and Jan-Michael Frahm. Pixelwise view selection for unstructured multi-view stereo. In ECCV, 2016. 2, 4, 5 [56] Karen Simonyan and Andrew Zisserman. Very deep convolutional networks for large-scale image recognition. arXiv:1409.1556, 2014. 7 [57] Cheng Sun, Min Sun, and Hwann-Tzong Chen. Direct voxel grid optimization: Super-fast convergence for radiance fields reconstruction. In CVPR, 2022. 1, 2, 4 [58] Matthew Tancik, Vincent Casser, Xinchen Yan, Sabeek Pradhan, Ben Mildenhall, Pratul P Srinivasan, Jonathan T Barron, and Henrik Kretzschmar. Block-NeRF: Scalable large scene neural view synthesis. In CVPR, 2022. 2 [59] Matthew Tancik, Pratul Srinivasan, Ben Mildenhall, Sara Fridovich-Keil, Nithin Raghavan, Utkarsh Singhal, Ravi Ramamoorthi, Jonathan Barron, and Ren Ng. Fourier features let networks learn high frequency functions in low dimensional domains. Advances in Neural Information Processing Systems, 33:7537–7547, 2020. 4 [60] Matthew Tancik, Ethan Weber, Evonne Ng, Ruilong Li, Brent Yi, Justin Kerr, Terrance Wang, Alexander Kristoffersen, Jake Austin, Kamyar Salahi, et al. Nerfstudio: A modular framework for neural radiance field development. arXiv:2302.04264, 2023. 2, 5 [61] Chengzhou Tang and Ping Tan. BA-net: Dense bundle adjustment networks. In International Conference on Learning Representations, 2019. 2 [62] Dor Verbin, Peter Hedman, Ben Mildenhall, Todd Zickler, Jonathan T Barron, and Pratul P Srinivasan. Ref-NeRF: Structured view-dependent appearance for neural radiance fields. In CVPR, 2022. 2 [63] Sudheendra Vijayanarasimhan, Susanna Ricco, Cordelia Schmid, Rahul Sukthankar, and Katerina Fragkiadaki. SfM-Net: Learning of structure and motion from video. arXiv:1704.07804, 2017. 2
+
+[64] Can Wang, Menglei Chai, Mingming He, Dongdong Chen, and Jing Liao. Clip-NeRF: Text-and-image driven manipulation of neural radiance fields. In CVPR, 2022. 2 [65] Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku Komura, and Wenping Wang. NeuS: Learning neural implicit surfaces by volume rendering for multi-view reconstruction. Advances in Neural Information Processing Systems, 34:27171–27183, 2021. 2 [66] Qianqian Wang, Zhicheng Wang, Kyle Genova, Pratul P. Srinivasan, Howard Zhou, Jonathan T. Barron, Ricardo Martin-Brualla, Noah Snavely, and Thomas Funkhouser. IBRNet: Learning multi-view image-based rendering. In CVPR, 2021. 2 [67] Yiming Wang, Qin Han, Marc Habermann, Kostas Daniilidis, Christian Theobalt, and Lingjie Liu. NeuS2: Fast learning of neural implicit surfaces for multi-view reconstruction. arXiv:2212.05231, 2022. 2 [68] Zirui Wang, Shangzhe Wu, Weidi Xie, Min Chen, and Victor Adrian Prisacariu. NeRF–: Neural radiance fields without known camera parameters. arXiv:2102.07064, 2021. 2 [69] Daniel N Wood, Daniel I Azuma, Ken Aldinger, Brian Curless, Tom Duchamp, David H Salesin, and Werner Stuetzle. Surface light fields for 3D photography. In Proceedings of the 27th annual conference on Computer graphics and interactive techniques, 2000. 2 [70] Qiangeng Xu, Zexiang Xu, Julien Philip, Sai Bi, Zhixin Shu, Kalyan Sunkavalli, and Ulrich Neumann. Point-NeRF: Point-based neural radiance fields. In CVPR, 2022. 1, 2, 3, 5, 6, 7, 9, 10, 11, 14, 15 [71] Yao Yao, Zixin Luo, Shiwei Li, Tian Fang, and Long Quan. MVSNet: Depth inference for unstructured multiview stereo. In ECCV, 2018. 2 [72] Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman. Volume rendering of neural implicit surfaces. Advances in Neural Information Processing Systems, 34:4805–4815, 2021. 2 [73] Lior Yariv, Peter Hedman, Christian Reiser, Dor Verbin, Pratul P Srinivasan, Richard Szeliski, Jonathan T Barron, and Ben Mildenhall. BakedSDF: Meshing neural SDFs for real-time view synthesis. arXiv:2302.14859, 2023. 2 [74] Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng, and Angjoo Kanazawa. PlenOctrees for real-time rendering of neural radiance fields. In ICCV, 2021. 1, 2 [75] Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo Kanazawa. PixelNeRF: Neural radiance fields from one or few images. In CVPR, 2021. 2 [76] Zehao Yu, Songyou Peng, Michael Niemeyer, Torsten Sattler, and Andreas Geiger. MonoSDF: Exploring monocular geometric cues for neural implicit surface reconstruction. In Advances in Neural Information Processing Systems, 2022. 2 [77] Kai Zhang, Gernot Riegler, Noah Snavely, and Vladlen Koltun. NeRF++: Analyzing and improving neural radiance fields. arXiv:2010.07492, 2020. 2, 8, 16 [78] Richard Zhang, Phillip Isola, Alexei A. Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness of deep features as a perceptual metric. In CVPR, June 2018. 5, 6, 8, 10, 14, 16, 19 [79] Chaoqiang Zhao, Qiyu Sun, Chongzhen Zhang, Yang Tang, and Feng Qian. Monocular depth estimation based on deep learning: An overview. Science China Technological Sciences, 63(9):1612–1627, 2020. 3

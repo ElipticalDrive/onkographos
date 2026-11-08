@@ -1,0 +1,128 @@
+# Spatial Style Zones
+
+Also called: Multi-level Interface Zones, Zones with Different Styles
+
+## Overview
+Spatial Style Zones is a technique for volume illustration where regions of volume space (zones) are assigned distinct rendering styles, defined as sets of transfer functions controlling appearance per material [S1][S2, unofficial]. It solves the problem of managing complex, multi-parameter transfer functions by allowing users to apply different visual effects (e.g., sketch, illumination) to specific spatial regions independently [S1][S2, unofficial]. It differs from Model-Based Local Transfer Functions by defining zones via simple geometric primitives (ellipsoids or rectangles) rather than model-derived features, and from standard spatial TFs by associating entire style sets (combinations of effects) with zones rather than single scalar mappings [S1][S2, unofficial].
+
+## How it works
+**Inputs:** Volume data; zone definitions (geometric shapes); style definitions (sets of transfer functions); material definitions (regions of transfer domain mapped to names/IDs).
+**Outputs:** Rendered image with spatially varying illustrative styles.
+
+**Data Structures:**
+1.  **Zone:** Defined as either an ellipsoid or a rectangle within the volume space [S1][S2, unofficial].
+    *   Ellipsoid: Center $(c_x, c_y, c_z)$, axes $(a_x, a_y, a_z)$, rotation (if applicable) [S1][S2, unofficial].
+    *   Rectangle: Min corner $(min_x, min_y, min_z)$, Max corner $(max_x, max_y, max_z)$ [S1][S2, unofficial].
+2.  **Style:** A set of transfer functions controlling rendering appearance (per material) [S1][S2, unofficial]. Includes parameters for color, opacity, effect blending, and enhancement parameters (e.g., sketch, illumination) [S1][S2, unofficial].
+3.  **Material:** A region of the transfer domain assigned a meaningful name and a unique Material ID [S2, unofficial]. Multiple widgets can share the same Material ID [S2, unofficial].
+
+**Steps:**
+1.  **Define Zones:** Create zones as ellipsoids or rectangles within the volume space [S1][S2, unofficial].
+2.  **Define Materials:** Identify regions in the transfer domain (e.g., density ranges) and assign them meaningful names and unique Material IDs [S2, unofficial].
+3.  **Assign Styles to Zones:** Assign a specific style (a set of transfer functions) to each zone [S1][S2, unofficial]. Each transfer function within the style can be modified independently [S2, unofficial].
+4.  **Map Materials to Styles:** Associate materials with the transfer functions in the assigned styles [S2, unofficial]. For example, a style might specify "Apply white sketch to everything except bone and brain, bone is pale yellow and illuminated, brain is invisible" [S1][S2, unofficial].
+5.  **Render:** For each sample point during ray casting:
+    a. Determine which zone(s) contain the point.
+    b. Retrieve the style associated with the active zone.
+    c. Determine the material ID for the sample value.
+    d. Apply the transfer functions from the style corresponding to the material ID to compute color, opacity, and effects [S1][S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Define zone as ellipsoid
+def is_inside_ellipsoid(point, center, axes):
+    dx = point.x - center.x
+    dy = point.y - center.y
+    dz = point.z - center.z
+    return (dx/axes.x)**2 + (dy/axes.y)**2 + (dz/axes.z)**2 <= 1.0
+
+# Define zone as rectangle
+def is_inside_rectangle(point, min_corner, max_corner):
+    return (min_corner.x <= point.x <= max_corner.x and
+            min_corner.y <= point.y <= max_corner.y and
+            min_corner.z <= point.z <= max_corner.z)
+
+# Main rendering loop for a ray
+def render_ray(ray_origin, ray_direction, zones, styles, materials):
+    color = (0, 0, 0, 0)
+    alpha = 0.0
+    t = 0.0
+    step_size = 0.1 # Not given in sources, typical value [G]
+    
+    while t < ray_length: # ray_length not given in sources [G]
+        point = ray_origin + ray_direction * t
+        
+        # Find active zone
+        active_zone = None
+        for zone in zones:
+            if zone.shape == 'ellipsoid':
+                if is_inside_ellipsoid(point, zone.center, zone.axes):
+                    active_zone = zone
+                    break
+            elif zone.shape == 'rectangle':
+                if is_inside_rectangle(point, zone.min_corner, zone.max_corner):
+                    active_zone = zone
+                    break
+        
+        if active_zone is None:
+            # Default style or no style? Not given in sources [G]
+            pass
+        else:
+            style = active_zone.style
+            
+            # Get sample value
+            sample_value = get_volume_sample(point)
+            
+            # Find material ID for sample value
+            material_id = find_material_id(sample_value, materials)
+            
+            # Apply style transfer functions for this material
+            if material_id in style.materials:
+                tf = style.materials[material_id]
+                color_sample = tf.color(sample_value)
+                alpha_sample = tf.opacity(sample_value)
+                effects = tf.effects(sample_value) # e.g., sketch, illumination
+                
+                # Composite
+                color = color + color_sample * alpha_sample * (1 - alpha)
+                alpha = alpha + alpha_sample * (1 - alpha)
+        
+        t += step_size
+    
+    return color
+```
+
+**Parameters:**
+*   Zone Shape: Ellipsoid or Rectangle [S2, unofficial].
+*   Style Components: Color, opacity, effect blending, enhancement parameters (sketch, illumination) [S1][S2, unofficial].
+*   Typical Values: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   Zone Overlap: If a point lies in multiple zones, the behavior is not specified. [G] Assume first-match or last-match priority.
+*   Boundary Precision: Geometric tests for ellipsoids/rectangles must handle floating-point precision at boundaries. [G] Use epsilon for comparisons.
+*   Material Definition: Materials are regions of the transfer domain, not spatial regions. Confusion between spatial zones and transfer domain materials must be avoided. [S2, unofficial]
+
+## Subtopics
+
+### Multi-level Interface
+A UI approach where transfer functions are parameterized at different levels of expertise (high-level materials, middle-level parameters, low-level transfer functions) to manage complexity. [S2, unofficial]
+
+### Illustration Motifs
+Predefined combinations of effects (e.g., sketch, illumination) that can be applied to materials. [S1][S2, unofficial]
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of zones and the cost of geometric containment tests. For each sample point, all zones may need to be checked. [S1][S2, unofficial]
+*   **Memory Complexity:** Storage for zone definitions, style definitions, and material mappings. [S1][S2, unofficial]
+*   **Strengths:** Allows large set of possible effects; independent modification of transfer functions per zone; simplifies complex parameter management via materials. [S1][S2, unofficial]
+*   **Limitations:** Requires manual definition of zones and styles; geometric zones may not align with complex anatomical structures as well as model-based methods. [S1][S2, unofficial]
+*   **When to Use:** When illustrative effects (sketch, illumination) need to be applied differently to different spatial regions, and simple geometric shapes are sufficient to define those regions. [S1][S2, unofficial]
+*   **When Not to Use:** When regions are complex and non-geometric; when automatic segmentation is preferred. [S1][S2, unofficial]
+
+## Background
+Originated in the context of Interactive Volume Illustration Systems for medicine and science [S1][S2, unofficial]. Developed to address the difficulty of mastering large numbers of transfer function parameters by novices and experts alike [S2, unofficial]. Introduced in works by the authors of [S1] and [S2, unofficial] around 2006-2007 [S1][S2, unofficial].
+
+## Sources
+[S1] Volume illustration for medicine and flows, https://doi.org/10.1145/1185657.1185694, fetched 2026-10-28
+[S2] Illustrative Visualization for Medicine and Science, https://doi.org/10.2312/egt.20061068, fetched 2026-10-26 (unofficial)

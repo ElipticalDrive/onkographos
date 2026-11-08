@@ -1,0 +1,190 @@
+# NeRV Training
+Also called: NeRV loss minimization, NeRV optimization
+
+## Overview
+NeRV training optimizes a continuous volumetric representation that decouples scene geometry (shape) from material appearance (reflectance) and lighting interactions (visibility) to enable efficient relighting and view synthesis [S1, unofficial]. It differs from standard NeRF training by introducing a separate "visibility MLP" that predicts ray visibility and termination depth, supervised by consistency terms with the primary shape MLP rather than ground-truth labels, allowing the simulation of direct and one-bounce indirect illumination within the training loop [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of posed RGB images of a scene and corresponding lighting environment maps.
+*   **Outputs:** Weights for three MLPs: Shape/Reflectance MLP ($\theta$), Visibility MLP ($\phi$).
+
+**Data Structures:**
+1.  **Positional Encoding:** Inputs are mapped using NeRF's positional encoding [S1, unofficial].
+    *   3D coordinates $\mathbf{x}$: Maximum frequency $L_{coord} = 7$ (frequencies $2^0$ to $2^7$).
+    *   3D direction vectors $\boldsymbol{\omega}$: Maximum frequency $L_{dir} = 4$ (frequencies $2^0$ to $2^4$).
+2.  **Shape and Reflectance MLP ($\theta$):**
+    *   Architecture: 8 fully-connected ReLU layers, 256 channels each.
+    *   Input: Encoded $\mathbf{x}$ and $\boldsymbol{\omega}$.
+    *   Output: Volume density $\sigma$ and reflectance properties.
+3.  **Visibility MLP ($\phi$):**
+    *   Stage 1: 8 fully-connected ReLU layers, 256 channels each. Maps encoded $\mathbf{x}$ to an 8-dimensional feature vector.
+    *   Stage 2: Concatenation with encoded $\boldsymbol{\omega}$.
+    *   Stage 3: 4 fully-connected ReLU layers, 128 channels each.
+    *   Output: Predicted visibility $\tilde{V}_\phi$ and expected termination depth $\tilde{D}_\phi$.
+
+**Training Procedure:**
+1.  **Initialization:** Initialize $\theta$ and $\phi$ from scratch.
+2.  **Ray Sampling:** At each iteration:
+    *   Sample a batch of $\mathcal{R}$ pixel rays from input images. Size: 512 rays.
+    *   Sample a set of random rays $\mathcal{R}'$ intersecting the volume. Size: 256 rays.
+3.  **Forward Pass (Pixel Rays $\mathcal{R}$):**
+    *   Render pixels using the current NeRV model (Shape/Reflectance MLPs) to obtain rendered radiance $\tilde{L}(\mathbf{r})$.
+    *   Compute pixel loss against ground truth image pixels $L(\mathbf{r})$.
+4.  **Forward Pass (Random Rays $\mathcal{R}'$):**
+    *   For each ray $\mathbf{r}' \in \mathcal{R}'$, compute visibility $V_\theta(\mathbf{r}'(t))$ and expected termination depth $D_\theta(\mathbf{r}'(t))$ implied by the Shape MLP's density $\sigma$ [S1, unofficial].
+    *   Query the Visibility MLP to get predictions $\tilde{V}_\phi(\mathbf{r}'(t))$ and $\tilde{D}_\phi(\mathbf{r}'(t))$.
+5.  **Loss Computation:**
+    *   Define tone-mapping operator: $\tau(x) = \frac{x}{1+x}$.
+    *   Compute total loss $\mathcal{L}$:
+        $$ \mathcal{L} = \sum_{\mathbf{r} \in \mathcal{R}} \left\| \tau(\tilde{L}(\mathbf{r})) - \tau(L(\mathbf{r})) \right\|_2^2 + \lambda \sum_{\mathbf{r}' \in \mathcal{R} \setminus \mathcal{R}_{\text{ret}}} \left( \left\| \tilde{V}_\phi(\mathbf{r}'(t)) - V_\theta(\mathbf{r}'(t)) \right\|_2^2 + \left\| \tilde{D}_\phi(\mathbf{r}'(t)) - D_\theta(\mathbf{r}'(t)) \right\|_2^2 \right) $$
+    *   Where $\lambda = 20$ [S1, unofficial].
+    *   $\mathcal{R}_{\text{ret}}$ denotes rays excluded from the consistency term (likely those not interacting with reflective surfaces, though exact definition is not provided in the source text beyond the set difference notation) [S1, unofficial].
+    *   Apply a **stop gradient** to $V_\theta$ and $D_\theta$ in the consistency terms to prevent the shape MLP from degrading to match the visibility MLP [S1, unofficial].
+6.  **Optimization:**
+    *   Update $\theta$ and $\phi$ using Adam optimizer.
+    *   Total iterations: 1,000,000.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import jax
+import jax.numpy as jnp
+from jax import grad, value_and_grad
+
+# Hyperparameters
+BATCH_SIZE_PIXEL = 512
+BATCH_SIZE_RANDOM = 256
+LAMBDA = 20
+LR_INIT = 1e-5
+LR_DECAY = 1e-6
+BETA_1 = 0.9
+BETA_2 = 0.999
+EPSILON = 1e-8
+TOTAL_ITERATIONS = 1_000_000
+
+# MLP Architectures
+def positional_encoding(x, max_freq_log2):
+    """Standard NeRF positional encoding."""
+    # Implementation details of NeRF PE not provided in source, assumed standard.
+    pass
+
+def shape_reflectance_mlp(params, x_enc, omega_enc):
+    """8 FC ReLU layers, 256 channels. Returns sigma and reflectance."""
+    # Not given in the sources. Standard MLP forward pass.
+    pass
+
+def visibility_mlp(params, x_enc, omega_enc):
+    """
+    Stage 1: 8 FC ReLU layers, 256 channels -> 8-dim vector.
+    Concat with omega_enc.
+    Stage 2: 4 FC ReLU layers, 128 channels -> returns V, D.
+    """
+    # Not given in the sources. Standard MLP forward pass.
+    pass
+
+def compute_visibility_and_depth(sigma, t_samples, delta):
+    """
+    Compute visibility V and expected termination depth D from density sigma.
+    V(x, c) = exp(-sum_{s < t} sigma(x(s)) * delta)
+    D is expected termination depth.
+    """
+    # Not given in the sources. Derived from Eq 5 and 6 in [S1, unofficial].
+    pass
+
+def tone_mapping(x):
+    return x / (1 + x)
+
+def loss_fn(params_shape, params_vis, batch_rays, batch_random_rays, gt_images):
+    """
+    params_shape: Weights for Shape/Reflectance MLP.
+    params_vis: Weights for Visibility MLP.
+    batch_rays: Rays for pixel loss.
+    batch_random_rays: Rays for consistency loss.
+    gt_images: Ground truth pixel values.
+    """
+    # 1. Pixel Ray Loss
+    # Render pixels using shape/reflectance MLP
+    # Render function involves ray marching with 256 stratified samples [S1, unofficial]
+    rendered_radiance = render_nev(batch_rays, params_shape)
+    
+    # Tone-mapped L2 loss
+    pixel_loss = jnp.sum(jnp.square(tone_mapping(rendered_radiance) - tone_mapping(gt_images)))
+    
+    # 2. Random Ray Consistency Loss
+    # Compute V_theta and D_theta from shape MLP
+    # For each ray in batch_random_rays, sample points t
+    # Compute sigma from shape MLP at t
+    # Compute V_theta, D_theta from sigma
+    
+    # Compute V_phi, D_phi from visibility MLP
+    # Note: Stop gradient on V_theta and D_theta
+    
+    v_theta = compute_visibility_and_depth(...) # Placeholder for exact implementation
+    d_theta = compute_visibility_and_depth(...) # Placeholder for exact implementation
+    
+    v_phi = visibility_mlp(params_vis, ...)
+    d_phi = visibility_mlp(params_vis, ...)
+    
+    # Exclude R_ret (definition not provided, assume all random rays for now or mask)
+    # Source says R \ R_ret. R_ret is not defined.
+    # We assume R_ret is empty or handled by a mask not provided.
+    
+    consistency_loss = jnp.sum(jnp.square(v_phi - jax.lax.stop_gradient(v_theta))) + \
+                       jnp.sum(jnp.square(d_phi - jax.lax.stop_gradient(d_theta)))
+    
+    total_loss = pixel_loss + LAMBDA * consistency_loss
+    return total_loss
+
+def train():
+    # Initialize params_shape, params_vis
+    # Initialize Adam optimizer state with lr=1e-5, beta1=0.9, beta2=0.999, eps=1e-8
+    opt_state = init_optimizer(params_shape, params_vis, lr=LR_INIT, beta1=BETA_1, beta2=BETA_2, eps=EPSILON)
+    
+    for i in range(TOTAL_ITERATIONS):
+        # Decay learning rate exponentially to 1e-6
+        current_lr = decay_lr(i, LR_INIT, LR_DECAY, TOTAL_ITERATIONS)
+        update_optimizer_lr(opt_state, current_lr)
+        
+        # Sample rays
+        batch_rays = sample_pixel_rays(BATCH_SIZE_PIXEL)
+        batch_random_rays = sample_random_rays_intersecting_volume(BATCH_SIZE_RANDOM)
+        gt_images = get_gt_pixels(batch_rays)
+        
+        # Compute loss and gradients
+        loss, grads = value_and_grad(loss_fn)(params_shape, params_vis, batch_rays, batch_random_rays, gt_images)
+        
+        # Update parameters
+        opt_state = apply_gradients(opt_state, grads)
+        
+        params_shape, params_vis = get_params(opt_state)
+```
+
+**Parameters:**
+*   **Batch Size (Pixel Rays):** 512 [S1, unofficial].
+*   **Batch Size (Random Rays):** 256 [S1, unofficial].
+*   **Loss Weight ($\lambda$):** 20 [S1, unofficial].
+*   **Optimizer:** Adam [S1, unofficial].
+*   **Learning Rate:** Starts at $10^{-5}$, decays exponentially to $10^{-6}$ [S1, unofficial].
+*   **Adam Hyperparameters:** $\beta_1 = 0.9$, $\beta_2 = 0.999$, $\epsilon = 10^{-8}$ [S1, unofficial].
+*   **Total Iterations:** 1,000,000 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Stop Gradient:** The shape MLP must not be updated via the consistency loss terms to prevent it from degrading its rendering quality to match the visibility MLP [S1, unofficial].
+*   **R_ret:** The set $\mathcal{R}_{\text{ret}}$ is subtracted from the random rays in the consistency loss. The source does not define what constitutes a "ret" ray (likely "retro-reflected" or similar, but exact criteria are not given) [S1, unofficial].
+*   **Visibility Supervision:** The visibility MLP is not supervised by ground-truth visibility/depth. It is only optimized for consistency with the shape MLP's current geometry estimate [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Rendering involves 256 stratified samples per ray [S1, unofficial]. The visibility MLP adds computational overhead but reduces the complexity of computing direct and indirect illumination from quadratic/cubic to linear, enabling real-time-like training updates for relighting [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources.
+*   **Hardware:** Implemented in JAX and trained on 128 TPU cores [S1, unofficial].
+*   **Strengths:** Enables simulation of direct illumination from environment lighting and one-bounce indirect illumination within the training loop [S1, unofficial]. Decouples geometry and appearance for relighting.
+*   **Limitations:** Requires posed RGB images and corresponding lighting environments for each scene [S1, unofficial]. The visibility MLP is not supervised by ground truth, relying solely on consistency with the shape MLP [S1, unofficial].
+
+## Background
+NeRV (Neural Reflectance and Visibility Fields) was introduced in the paper "NeRV: Neural Reflectance and Visibility Fields for Relighting and View Synthesis" [S1, unofficial]. The method was developed to address the limitations of standard NeRF in handling relighting and complex lighting interactions by explicitly modeling visibility and reflectance fields. It builds on the NeRF training loop but adds the visibility MLP and consistency losses [S1, unofficial].
+
+## Sources
+[S1] NeRV: Neural Reflectance and Visibility Fields for Relighting and View Synthesis, https://doi.org/10.1109/cvpr46437.2021.00741, fetched 2026-10-26 (unofficial)
