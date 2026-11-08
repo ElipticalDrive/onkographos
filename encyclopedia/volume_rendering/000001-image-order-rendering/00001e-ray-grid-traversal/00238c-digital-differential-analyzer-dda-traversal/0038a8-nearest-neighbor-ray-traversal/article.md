@@ -1,0 +1,114 @@
+# Nearest Neighbor Ray Traversal
+
+Also called: Scan Conversion, Nearest Neighbor Interpolation
+
+## Overview
+Nearest Neighbor Ray Traversal is a volume rendering method that samples data values at the center of each voxel immediately upon entry, requiring zero interpolation [S2, unofficial]. It is distinguished from sibling methods like [Two-Step Discrete Ray Tracing](5204-two-step-discrete-ray-tracing.md) and [Zero-Crossing DDA Traversal](5474-zero-crossing-dda-traversal.md) by its lack of boundary-based sampling logic, prioritizing maximum speed over sampling uniformity [S2, unofficial].
+
+## How it works
+**Inputs:** A ray defined by origin $P$ and direction $V$, and a voxel grid where data values are stored at cell centers.
+**Outputs:** A sequence of sampled intensity values along the ray path.
+
+**Data Structures:**
+The voxel grid is pre-shifted by $0.5$ units in all dimensions so that data values reside at the geometric centers of the grid cells rather than the corners [S2, unofficial]. This allows direct indexing of the center value for any visited voxel.
+
+**Steps:**
+1.  Initialize the ray parameter $k=0$.
+2.  Calculate the sample point $Q$ using the formula:
+    $$Q = P + k \times V$$
+    where $V = d \times g$ represents the step vector, with $d$ being the desired step size and $g$ the normalized ray direction [S1, unofficial].
+3.  Round $Q$ to the nearest integer voxel coordinates $(i, j, l)$ [S1, unofficial]. This is equivalent to the standard DDA traversal step but applied directly to the shifted grid [S1, unofficial].
+4.  Retrieve the data value stored at the center of the voxel $(i, j, l)$ [S2, unofficial].
+5.  Check if the current voxel is on the boundary of the volume or object by comparing its value against a threshold [S1, unofficial].
+6.  If the voxel is on the boundary, perform shading/compositing [S1, unofficial].
+7.  Increment $k$ and repeat from Step 2 until the ray exits the volume [S2, unofficial].
+
+**Parameters:**
+*   **Interpolation Count:** 0 interpolations are required in both 2D and 3D [S2, unofficial].
+*   **Grid Shift:** The grid must be shifted by half a unit ($0.5$) to align data with voxel centers [S2, unofficial].
+
+**Pitfalls:**
+*   **Jagged Artifacts:** The method produces jagged sampling artifacts because the distance between effective data samples is not uniform [S2, unofficial].
+*   **Non-Uniform Density:** Large gaps in sampling density occur as the ray traverses cells, leading to lower accuracy compared to regular sampling [S2, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def nearest_neighbor_traversal(ray_origin, ray_direction, grid, grid_shift=0.5):
+    """
+    Performs Nearest Neighbor Ray Traversal on a pre-shifted grid.
+    
+    Args:
+        ray_origin: (x, y, z) tuple representing P.
+        ray_direction: (dx, dy, dz) tuple representing V (normalized).
+        grid: 3D array where data is stored at voxel centers.
+        grid_shift: 0.5, shifting grid coordinates so centers align with integer indices.
+    
+    Returns:
+        List of sampled values along the ray.
+    """
+    samples = []
+    k = 0
+    # Step vector V = d * g. Assuming unit step size d=1 for simplicity in traversal logic
+    # or d is determined by resolution. Here we assume V is the step vector.
+    step_vector = ray_direction 
+    
+    while True:
+        # Calculate sample point Q
+        q_x = ray_origin[0] + k * step_vector[0]
+        q_y = ray_origin[1] + k * step_vector[1]
+        q_z = ray_origin[2] + k * step_vector[2]
+        
+        # Round Q to nearest voxel coordinate
+        # Note: In a real implementation, bounds checking against grid dimensions is required.
+        ix = int(round(q_x))
+        iy = int(round(q_y))
+        iz = int(round(q_z))
+        
+        # Check if voxel is within grid bounds
+        if not (0 <= ix < grid.shape[0] and 
+                0 <= iy < grid.shape[1] and 
+                0 <= iz < grid.shape[2]):
+            break
+            
+        # Retrieve value at center of current voxel
+        # The grid is assumed to be pre-shifted so that index (ix, iy, iz) 
+        # corresponds to the center of the voxel entered.
+        value = grid[ix, iy, iz]
+        
+        # Check if voxel is on boundary (compare against threshold)
+        # [G] Threshold logic depends on specific application (e.g., alpha > 0)
+        if is_boundary(value):
+            perform_shading(value)
+            
+        samples.append(value)
+        k += 1
+        
+    return samples
+
+def is_boundary(value):
+    # Placeholder for boundary check logic
+    # Typically checks if value exceeds a threshold or is non-zero
+    return value > 0
+```
+
+## Subtopics
+
+### Regular Sampling
+Samples at uniform intervals along the ray, requiring interpolation. More accurate but slower than Nearest Neighbor [S2, unofficial].
+
+### Blocked Intersection Approach
+Samples at voxel boundaries/edges. A compromise between speed and accuracy, requiring fewer interpolations than regular sampling but more than Nearest Neighbor [S2, unofficial].
+
+## Operating characteristics
+*   **Speed:** Fastest among ray traversal methods due to zero interpolation cost [S2, unofficial].
+*   **Accuracy:** Least accurate due to jagged sampling and non-uniform distances between effective data samples [S2, unofficial].
+*   **Memory:** Requires a pre-shifted grid structure to store data at centers [S2, unofficial].
+*   **Use Case:** Suitable for real-time applications where speed is critical and visual fidelity regarding sampling uniformity is secondary [S2, unofficial].
+
+## Background
+The method is described in the context of Direct Volume Rendering (DVR) ray-casting pipelines, where data is typically defined at voxel corners and interpolated [S1, unofficial]. The specific "Nearest Neighbor" traversal approach, also referred to as "Scan Conversion," is highlighted in educational materials comparing traversal strategies [S2, unofficial]. It is often contrasted with Tuy's ray-casting pipeline which uses interpolation [S1, unofficial].
+
+## Sources
+[S1] PPT - Direct Volume Rendering (DVR): Ray-casting PowerPoint Presentation - ID:465503, https://slideserve.com/jariath/direct-volume-rendering-dvr-ray-casting, fetched 2026-10-24 (unofficial)
+[S2] Approaches to Ray Traversal for Direct Volume Rendering: Student Q&A and Exam Preparation, https://www.youtube.com/watch?v=Gwh395J4MeM, fetched 2026-10-25 (unofficial)

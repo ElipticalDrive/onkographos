@@ -1,0 +1,103 @@
+I've been experimenting with using the module in a game that requires real-time terrain editing of LOD Terrain, and have come into a few hurdles that I would appreciate some input on. My primary issue is that I want to allow the user to ...
+
+Real Time Edition Issues · Issue #225 · Zylann/godot_voxel · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Real Time Edition Issues #225
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Real Time Edition Issues#225
+Copy link
+Labels
+question
+Description
+Cryptoclysm
+opened on Jan 23, 2021
+Issue body actions
+I've been experimenting with using the module in a game that requires real-time terrain editing of LOD Terrain, and have come into a few hurdles that I would appreciate some input on.
+My primary issue is that I want to allow the user to smoothly change the terrain, but I have found that using VoxelTool's functions gets very slow when calling them once per frame/physics frame. Voxel Tool's do_sphere starts to become very slow very quickly, and it can take up to a few seconds to update the terrain when requesting one update per frame for 1000ms. Actual FPS doesn't get badly impacted, so I don't think the processing within do_sphere is the problem here.
+Are there any optimisations I can apply to get editing to real-time? I've developed my own VoxelTool functions too, but only find that decreasing the edit area has any effect on performance.
+A secondary problem I have seen is that momentarily, it appears that adjacent meshes disconnect from one-another immediately after an edit, then correct within a few frames. This is fine for single operation edits, but as you can imagine, it is quite jarring when editing continuously in real-time like I'm attempting. I've attached an image that demonstrates this effect.
+Activity
+Zylann commented on Jan 23, 2021
+Zylann
+on Jan 23, 2021
+Last edited by Zylann
+Owner
+More actions
+Which commit did you get the module at? There was a performance issue solved in 25c033c
+Did you build the engine in release_debug or release mode?
+Are you using do_sphere only, or are you using set_voxel manually within a box?
+Which radius are you using? The bigger, the more temporary artifacts will show up. Performance limits can show up very quickly for polygonized volumetric data.
+Are you using visible collision shapes while you do your tests? (I suggest you turn them off)
+Are your fps limited to 60 or did you uncap it?
+When you edit terrain like you do, you can get a hint of where the bottleneck is by drawing the amount of remaining background tasks as text on the screen (see VoxelServer.get_stats() https://voxel-tools.readthedocs.io/en/latest/api/VoxelServer/, and VoxelLodTerrain.get_statistics() https://voxel-tools.readthedocs.io/en/latest/api/VoxelLodTerrain/#i_get_statistics where remaining_main_thread_blocks is the thing). There are mainly two things going on: threaded meshing tasks, and main-thread meshing tasks. In the case of lag, one of the two will noticeably remain above 0 for a while.
+Threaded tasks use 2 threads and have a bit of latency, but such latency should rarely exceed a few frames and more threads can be added to speed it up on machines that have enough power. Usually a few dozen 16x16x16 blocks can be remeshed in one frame at a time.
+Main thread tasks happen within a 8 ms budget each frame, and are entirely limited by Godot's VisualServer and PhysicsServer. The renderer can be a bottleneck because it doesnt truly provide any improvement when used with threads. And PhysicsServer just doesnt support multithreading so constructing a collision mesh has to be done on the main thread too... and it's sad because it's one of the slowest things. See how slow it is to create a Mesh compared to a CollisionShape (polygonizing is done in threads, here I'm referring to creating the Godot resource from it): Create collision shapes from the meshing thread #124 . If you don't need collision shapes while sculpting, turning them off can give a big boost.
+The holes you might see while the terrain updates are bound to happen because these processes are asynchronous. Sometimes not all updates will have completed in a given frame. But I believe the second point makes them happen much more often.
+Cryptoclysm commented on Jan 24, 2021
+Cryptoclysm
+on Jan 24, 2021
+Author
+More actions
+Hi Zylann, thanks for the speedy and detailed response.
+Edition Performance:
+I have been using do_sphere only, I never call set_voxel. (I have been careful to follow the optimisation advice in the docs regarding this).
+FPS is uncapped.
+I have rebuilt the engine in release_debug mode, and that resulted in an instant increase in performance. This allowed near-realtime placement of spheres of radius 5. Awesome improvement.
+Next, I turned off visible collision shapes, and this resulted in an additional improvement, allowing near-realtime spheres of radius 10.
+I was using commit 8bdd862. I have now updated to the latest (5ec5136), and camera movement now feels more fluid and framerate is more reliable, but I can't say that there was a change in terrain edition performance from this.
+I followed your advice of drawing the amount of remaining background tasks as text on the screen. As expected, the number balloons while holding down the do_sphere function, then reduces to 0 as the operations are completed. I used the code below to only call do_sphere once all previous edits have taken effect, and it worked surprisingly well, allowing me to reach a radius of 15, with a reduction in update rate, but no major lag.
+```
+if terrain.get_statistics().remaining_main_thread_blocks == 0:
+	vt.do_sphere(editPosition, editRadius)
+```
+Forcing the game to wait for the previous edit to complete before continuing to edit is desirable for me, but I'm not sure the way I achieved it looks elegant for long term use. Would there be a better way to achieve the same thing, or is using remaining_main_thread_blocks fine in this context?
+The holes:
+My improvements above have not had an effect on holes. Your comments regarding physics interest me, as I don't need physics to be functional while editing... But I do need raytracing to work so that the game knows where to edit, and I don't believe (Understandably) that VoxelTool::raycast is implemented for LOD terrain.
+As a test, I tried disabling generate_collisions on alternate edit operations, and comparing the time_process_update_response statistic average value over 1000ms between the two options. The screenshot below shows the result when continuously attempting to add new spheres.
+As you can see, collision generation (physicsOn) does have a huge impact, as you said. I'm not able to use this technique of disabling collision mesh generation in practice, as I need the raycast result, but it was an interesting experiment.
+In the future I may experiment with workarounds to reduce the hole issue, but for now I'm leaving that one. Smaller radii now update quickly enough that the holes are barely visible.
+Zylann commented on Jan 24, 2021
+Zylann
+on Jan 24, 2021
+Last edited by Zylann
+Owner
+More actions
+FPS is uncapped.
+This means you are potentially spamming the world with edits way more than 60 times per second, so you should consider adressing this to give the engine some breathing room. This is relevant if you do it in _input() or _process(). Maybe use _physics_process()? Even reducing editing rate to 30 per second might be enough.
+I have rebuilt the engine in release_debug mode, and that resulted in an instant increase in performance.
+This is how the official editor builds are made. It often increases performance ten folds :D You might also see a 5~10% increase in release (exported game).
+I used the code below to only call do_sphere once all previous edits have taken effect
+Interesting approach. I hadn't thought of that before. It is similar to limiting edition rate. It might cause a few discontinuities in your edits though, so if you use spheres you might want to use do_capsule() to link the previous edited position to the current (yes that function does not exist yet, but I was thinking about it recently^^). But it sounds like a good way to limit edits if they exceed the speed at which the engine can process them.
+I do need raytracing to work so that the game knows where to edit, and I don't believe (Understandably) that VoxelTool::raycast is implemented for LOD terrain.
+It is not available yet but it is possible to implement it. The important thing with LOD terrain is that it would only be able to raycast against LOD0, since that's the only level that can be edited at the moment.
+Zylann
+added
+question
+on Jan 25, 2021
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+question
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

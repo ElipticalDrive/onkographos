@@ -1,0 +1,243 @@
+I've been working on an alternative SVD implementation based on https://scicomp.stackexchange.com/questions/8899/robust-algorithm-for-2-times-2-svd#answer-28506 which includes the initial rotation. The reasons for the change are twofold ...
+
+Better SVD (preparation for making `Arc` work like `Ellipse`) · Issue #250 · linebender/kurbo · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Better SVD (preparation for making Arc work like Ellipse) #250
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Better SVD (preparation for making Arc work like Ellipse)#250
+Copy link
+Labels
+questionFurther information is requestedFurther information is requested
+Description
+richard-uk1
+opened on Mar 23, 2023
+Issue body actions
+I've been working on an alternative SVD implementation based on https://scicomp.stackexchange.com/questions/8899/robust-algorithm-for-2-times-2-svd#answer-28506 which includes the initial rotation. The reasons for the change are twofold
+More robust algorithm (round-trip testing on a random selection of linear maps retains accuracy to 1e-14)
+We need the initial rotation when handling Arcs (because they have a start angle that is influenced by this initial rotation)
+It uses an RQ decomposition as an intermediate step to improve stability.
+Currently I'm returning the angle at the end, but eventually I will return sin and cos the angles instead, because algorithms that use this result tend to use the rotation matrix and so it makes no sense to go to polar coordinates and back again.
+I'm posting it here as a request for comments, and also to discuss whether the RQ or SVD decompositions might be made public in the future.
+```
+impl Affine {
+    /// Compute the singular value decomposition of the linear transformation (ignoring the
+    /// translation).
+    ///
+    /// All non-degenerate linear transformations can be represented as
+    ///
+    ///  1. a rotation about the origin.
+    ///  2. a scaling along the x and y axes
+    ///  3. another rotation about the origin
+    ///
+    /// composed together. Decomposing a 2x2 matrix in this way is called a "singular value
+    /// decomposition" and is written `U Σ V^T`, where U and V^T are orthogonal (rotations) and Σ
+    /// is a diagonal matrix (a scaling along the axes).
+    ///
+    /// Will return NaNs if the matrix (or equivalently the linear map) is singular.
+    ///
+    /// The return values correspond to the operations as they would be written, meaning if we
+    /// label the return value `(rot2, scale, rot1)`, `rot1` is performed first, followed by
+    /// `scale`, followed by `rot2`.
+    // Heavily influenced by
+    // https://scicomp.stackexchange.com/questions/8899/robust-algorithm-for-2-times-2-svd
+    #[inline]
+    pub(crate) fn svd(self) -> (f64, Vec2, f64) {
+
+        let (x, y, z, s2, c2) = self.rq();
+        /*
+        println!(
+            "RQ = ( {x:+6.4}, {y:+6.4} )( {c2:+6.4}, {:+6.4} )\n     \
+                 (       0, {z:+6.4} )( {s2:+6.4}, {c2:+6.4} )",
+            s2
+        );
+        */
+
+        // Calculate tangent of rotation on R[x,y;0,z] to diagonalize R^T*R
+        let scalar = x.abs().max(y.abs()).recip();
+        let x_ = x * scalar;
+        let y_ = y * scalar;
+        let z_ = z * scalar;
+        let numer = (x_ - z_) * (x_ + z_) - y_ * y_;
+        let gamma = if numer == 0. { 1. } else { x_ * y_ };
+        let zeta = numer / gamma;
+        let t = 2. * zeta.signum() / (zeta.abs() + (zeta * zeta + 4.).sqrt());
+
+        // Calculate sines and cosines
+        let c1 = (t * t + 1.).sqrt().recip();
+        let s1 = c1 * t;
+
+        // Calculate U*S = R*rot(c1,s1)
+        let usa = c1 * x + s1 * y;
+        let usb = c1 * y - s1 * x;
+        let usc = s1 * z;
+        let usd = c1 * z;
+
+        // Update V = rot(c1,s1)^T*Q
+        let t = c1 * c2 + s1 * s2;
+        let s2 = c1 * s2 - c2 * s1;
+        let c2 = t;
+
+        // Separate U and S
+        let d1 = usa.hypot(usc);
+        let mut d2 = usb.hypot(usd);
+        let mut dmax = d1.max(d2);
+        let usmax1 = if d2 > d1 { usd } else { usa };
+        let usmax2 = if d2 > d1 { usb } else { -usc };
+
+        let signd1 = (x * z).signum();
+        dmax *= if d2 > d1 { signd1 } else { 1. };
+        d2 *= signd1;
+        let rcpdmax = dmax.recip();
+
+        let c1 = if dmax != 0. { usmax1 * rcpdmax } else { 1. };
+        let s1 = if dmax != 0. { -usmax2 * rcpdmax } else { 0. };
+
+        // TODO consider return sin/cos of the angle, to avoid unnecessary change between polar
+        // space and cartesian space TODO atan2?
+        let th1 = s1.asin().signum() * c1.acos();
+        //assert_approx_eq!(f64, th1.sin(), s1, epsilon = 1e-13);
+        //assert_approx_eq!(f64, th1.cos(), c1, epsilon = 1e-13);
+        let th2 = s2.asin().signum() * c2.acos();
+        //assert_approx_eq!(f64, th2.sin(), s2, epsilon = 1e-13);
+        //assert_approx_eq!(f64, th2.cos(), c2, epsilon = 1e-13);
+        (th1, Vec2::new(d1, d2), th2)
+    }
+
+    /// Perform an RQ decomposition (useful for accurate SVD decomposition).
+    ///
+    /// R = upper triangular, Q = orthonormal (i.e. rotation)
+    ///
+    /// Returns (`x`, `y`, `z`, `s`, `c`) where
+    ///
+    /// ```text
+    /// R = | x  y | Q = | c -s |
+    ///     | 0  z |     | s  c |
+    /// ```
+    // From https://scicomp.stackexchange.com/questions/8899/robust-algorithm-for-2-times-2-svd/28506#28506
+    fn rq(self) -> (f64, f64, f64, f64, f64) {
+        let a = self.0[0];
+        let b = self.0[2];
+        let c = self.0[1];
+        let d = self.0[3];
+
+        if c == 0. {
+            return (a, b, d, 0., 1.);
+        }
+
+        // First scale the bottom row to have a max abs value of 1
+        let maxcd = c.abs().max(d.abs());
+        let maxcd_recip = maxcd.recip();
+        let c = c * maxcd_recip;
+        let d = d * maxcd_recip;
+
+        // Don't use hypot here because we know that the max abs value of c and d is 1, so save a
+        // branch
+        let z = (c * c + d * d).sqrt();
+        let zm1 = z.recip();
+        let x = (a * d - b * c) * zm1;
+        let y = (a * c + b * d) * zm1;
+        let sin = c * zm1;
+        let cos = d * zm1;
+        // at the end we undo the operation on the bottom row, by scaling z by the inverse of the
+        // scales to c and d. The math checks out.
+        (x, y, z * maxcd, sin, cos)
+    }
+}
+```
+Activity
+richard-uk1
+added
+questionFurther information is requestedFurther information is requested
+on Mar 24, 2023
+raphlinus commented on Mar 24, 2023
+raphlinus
+on Mar 24, 2023
+Contributor
+More actions
+I'm following this loosely, it looks pretty cool. I'm also thinking I might adapt it into Vello for the stroke rework; it currently doesn't apply non-angle preserving transforms to strokes correctly, and knowing the "eccentricity" of that transform looks like it would be useful. That's the ratio of the two values of the Σ diagonal, if I'm reading this correctly.
+richard-uk1 commented on Mar 24, 2023
+richard-uk1
+on Mar 24, 2023
+CollaboratorAuthor
+More actions
+Yep the two singular values are the two radii of the ellipse (mapped from the unit circle), so their ratio will be the eccentricity IIUC. There might be a way to compute them more directly - I don't know enough to say one way or the other.
+richard-uk1 commented on Mar 24, 2023
+richard-uk1
+on Mar 24, 2023
+CollaboratorAuthor
+More actions
+I was also wondering if it is worth adding some more linear algebra methods, like condition number and spectral (RMS) norm. The latter would be useful for measuring the difference between at least the linear part of the affine map, e.g. for testing approximate equality. The condition number would be useful for stability of the linear map (in this case the affine part is always stable so I think we don't have to worry about it). The condition number requires finding eigenvalues so adding eigendecomposition would be a prerequisite.
+anthrotype commented on Mar 24, 2023
+anthrotype
+on Mar 24, 2023
+Last edited by anthrotype
+Collaborator
+More actions
+Pardon my density, I'm here just trying to learn :) In your example code and inline comments above you only discuss about rotation in the context of the orthogonal matrices that are returned as part of SVD, but never mention that reflection is also orthogonal and can well be returned from SVD..
+https://en.wikipedia.org/wiki/Singular_value_decomposition
+the SVD decomposition breaks down any linear transformation [...] into a composition of three geometrical transformations: a rotation or reflection (V*), followed by a coordinate-by-coordinate scaling (Σ), followed by another rotation or reflection (U). [emphasis mine]
+Is your SVD code special in the sense that only deals with rotation specifically?
+E.g if I do this in Python with a 2x2 matrix I picked at random, both U and V* happen to be reflections..
+```
+>>> import numpy as np
+>>> A = np.array([[1.0, 0.5], [0.5, 4.0]])
+>>> U, s, Vt = np.linalg.svd(A)
+>>> U
+array([[ 0.16018224,  0.98708746],
+       [ 0.98708746, -0.16018224]])
+>>> np.linalg.det(U)  # determinant is -1.0, hence a reflection
+-0.9999999999999998
+>>> np.linalg.det(Vt)
+-0.9999999999999996
+```
+Maybe the code does handle all that and it's just a matter of adjusting the terminology used in the comments accompanying the code (I haven't actually digged in the implementation details).
+Anyway, thanks!
+richard-uk1 commented on Mar 24, 2023
+richard-uk1
+on Mar 24, 2023
+CollaboratorAuthor
+More actions
+@anthrotype yep I think you're right. We should change the language. I forgot about reflections because they haven't come up in the things I've used the SVD for, but of course they would need to be considered if the function was made public. For the ellipse case (where the code is currently used) I think you could get a reflection if you used negative radii, but I think everything should 'just work'. Perhaps I should experiment.
+raphlinus commented on Mar 24, 2023
+raphlinus
+on Mar 24, 2023
+Contributor
+More actions
+Maybe I'm not understanding, but I'd expect a reflection to be represented as one positive and one negative diagonal coefficient in the Σ matrix, which falls under "nonuniform scaling."
+👍React with 👍1Reacted by Richard Dodd
+richard-uk1 commented on Mar 26, 2023
+richard-uk1
+on Mar 26, 2023
+CollaboratorAuthor
+More actions
+IIUC, the problem is that the reflection will get 'moved' into one of the orthonormal matrices, and that the singular values are always two positive numbers.
+None of this matters for ellipses, but it might do for other things.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+questionFurther information is requestedFurther information is requested
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

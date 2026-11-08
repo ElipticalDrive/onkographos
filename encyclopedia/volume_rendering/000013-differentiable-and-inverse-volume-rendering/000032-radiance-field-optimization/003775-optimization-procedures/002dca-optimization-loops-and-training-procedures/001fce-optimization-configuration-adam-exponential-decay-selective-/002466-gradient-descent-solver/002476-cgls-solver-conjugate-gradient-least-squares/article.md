@@ -4,12 +4,12 @@ Also called: Sparse Linear Least Squares Solver
 The CGLS solver is a sparse linear least squares solver used to avoid the ill-conditioning of normal equations ($A^T A$), providing numerically stable results for large or rank-deficient problems [S1, unofficial].
 ## How it works
 **Inputs and outputs:**
-- Input: Matrix $A$ (provided via matrix-vector products), vector $b$.
-- Output: Solution vector $x$ minimizing $\|Ax - b\|^2$.
+- Input: Matrix $A$ (accessed via matrix-vector products $Ap$ and $A^Tp$), vector $b$ [G].
+- Output: Solution vector $x$ minimizing $\|Ax - b\|^2$ [G].
 
 **Data structures:**
-- Vectors $p, r, x, q, z$ of size $n$ (dimension of the solution space) [G].
-- Scalars $\alpha, \beta, \rho$ for step sizes and norms [G].
+- Vectors $x, r, p, q, z$ of size $n$ (dimension of the solution space) [G].
+- Scalars $\alpha, \beta, \rho$ for step sizes and inner products [G].
 
 **Steps:**
 1. Initialize $x_0 = 0$ [G].
@@ -17,19 +17,19 @@ The CGLS solver is a sparse linear least squares solver used to avoid the ill-co
 3. Set initial search direction $p_0 = A^T r_0$ [G].
 4. Compute $\rho_0 = r_0^T r_0$ [G].
 5. For $k = 0, 1, \dots$ until convergence:
-   a. Compute matrix-vector product $q = A p_k$ [G].
-   b. Compute step size $\alpha_k = \rho_k / (p_k^T q)$ [G].
+   a. Compute $q = A p_k$ [G].
+   b. Compute step size $\alpha_k = \rho_k / (q^T q)$ [G].
    c. Update solution: $x_{k+1} = x_k + \alpha_k p_k$ [G].
    d. Update residual: $r_{k+1} = r_k - \alpha_k q$ [G].
-   e. Apply Jacobi preconditioning to the residual to achieve faster convergence [S1, unofficial]. Let $M$ be the diagonal of $A^T A$. Compute the preconditioned residual $\tilde{r}_{k+1} = M^{-1} r_{k+1}$ [G].
-   f. Compute new search direction: $p_{k+1} = A^T \tilde{r}_{k+1} + \beta_k p_k$ [G].
-   g. Compute $\rho_{k+1} = r_{k+1}^T \tilde{r}_{k+1}$ [G].
+   e. Apply Jacobi preconditioning to the residual to achieve faster convergence [S1, unofficial]. Let $M$ be the diagonal of $A^T A$. Compute the preconditioned residual $z_{k+1} = M^{-1} r_{k+1}$ [G].
+   f. Compute new search direction: $p_{k+1} = z_{k+1} + \beta_k p_k$ [G].
+   g. Compute $\rho_{k+1} = r_{k+1}^T z_{k+1}$ [G].
    h. Compute $\beta_k = \rho_{k+1} / \rho_k$ [G].
    i. Check convergence: if $\|r_{k+1}\|$ is sufficiently small, stop [G].
 
 **Parameters:**
-- Tolerance for convergence: Not given in the sources.
-- Maximum iterations: Not given in the sources.
+- Tolerance for convergence: Not given in the sources. [G]
+- Maximum iterations: Not given in the sources. [G]
 
 **Edge cases and pitfalls:**
 - Ill-conditioning: CGLS is preferred over normal equations for ill-conditioned systems [S1, unofficial].
@@ -61,7 +61,7 @@ def cgls(A_matvec, At_matvec, b, max_iter=1000, tol=1e-6):
     
     for k in range(max_iter):
         q = A_matvec(p)
-        pTq = sum(p[i] * q[i] for i in range(n))
+        pTq = sum(q[i] * q[i] for i in range(n))  # q^T q = p^T A^T A p
         if pTq == 0.0:
             break
             
@@ -82,23 +82,23 @@ def cgls(A_matvec, At_matvec, b, max_iter=1000, tol=1e-6):
             p[i] = z[i] + beta * p[i]
             
         rho = rho_new
-        if abs(rho_new) < tol:
+        if sum(r[i] * r[i] for i in range(n)) < tol * tol:
             break
     return x
 ```
 ## Subtopics
 
 ### [Conjugate Gradient Solver for Compressive Volume Rendering](4270-conjugate-gradient-solver-for-compressive-volume-rendering.md)
-This method recovers missing pixels in a rendered volume image by solving a regularized least-squares optimization problem using the Conjugate Gradient algorithm. It allows reconstruction from a subset of pixels, reducing total rendering time compared to full volume rendering. It differs from its parent [CGLS Solver (Conjugate Gradient Least Squares)](3285-cgls-solver-conjugate-gradient-least-squares.md) by explicitly defining the regularization term $H$ via B-spline convolution and the sampling matrix $S$ for pixel dropping, whereas the parent focuses on the general numerical stability of the least-squares formulation.
+This method recovers missing pixels in a rendered volume image by solving a regularized least-squares optimization problem using the Conjugate Gradient algorithm. It allows reconstruction from a subset of pixels, reducing total rendering time compared to full volume rendering. It differs from its parent [CGLS Solver (Conjugate Gradient Least Squares)](3285-cgls-solver-conjugate-gradient-least-squares.md) by explicitly defining the regularization term $H$ via B-spline convolution and the sampling matrix $S$ for pixel dropping, whereas the parent focuses on the general numerical stability of the least-squares formulation. [G]
 
 ### [Symmetric Least Squares Solver](4723-symmetric-least-squares-solver.md)
-The Symmetric Least Squares Solver computes the minimum-norm solution to the linear system $Ax = b$ where $A$ is a symmetric matrix, using Singular Value Decomposition (SVD) to construct the Moore-Penrose pseudoinverse. It is distinguished from its parent, the [CGLS Solver](3285-cgls-solver-conjugate-gradient-least-squares.md), by its reliance on explicit spectral decomposition rather than iterative conjugate gradients, making it suitable for small, dense symmetric systems where direct inversion via SVD is computationally feasible and numerically robust against rank deficiency.
+The Symmetric Least Squares Solver computes the minimum-norm solution to the linear system $Ax = b$ where $A$ is a symmetric matrix, using Singular Value Decomposition (SVD) to construct the Moore-Penrose pseudoinverse. It is distinguished from its parent, the [CGLS Solver](3285-cgls-solver-conjugate-gradient-least-squares.md), by its reliance on explicit spectral decomposition rather than iterative conjugate gradients, making it suitable for small, dense symmetric systems where direct inversion via SVD is computationally feasible and numerically robust against rank deficiency. [G]
 
 ## Operating characteristics
-- Time complexity: Not given in the sources.
-- Memory complexity: Not given in the sources.
-- Measured performance: Not given in the sources.
-- Scaling: Not given in the sources.
+- Time complexity: Not given in the sources. [G]
+- Memory complexity: Not given in the sources. [G]
+- Measured performance: Not given in the sources. [G]
+- Scaling: Not given in the sources. [G]
 - Strengths: Numerically stable for very large or almost rank-deficient problems [S1, unofficial].
 - Limitations: Generally slower than computing $A^T A$ and $A^T b$ explicitly [S1, unofficial].
 - When to use: For ill-conditioned or rank-deficient systems where normal equations are unstable [S1, unofficial].

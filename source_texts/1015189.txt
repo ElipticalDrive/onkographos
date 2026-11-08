@@ -1,0 +1,146 @@
+Spatial audio engine for macOS: place and move sounds across any speaker array, synced to a clock, for live performance and installations. - Add ambisonic encoder and AllRAD decoder (WP2d) by yishay-extra · Pull Request #13 · yishay-extra/spacer
+
+Add ambisonic encoder and AllRAD decoder (WP2d) by yishay-extra · Pull Request #13 · yishay-extra/spacer · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+yishay-extra
+commented
+Nov 2, 2026
+Copy link
+Copy Markdown
+Owner
+Implements WP2d (SPEC §6.3).
+What's in it
+All new code is in src/core/spatial/. It is pure C++20 with no JUCE.
+SphericalHarmonics: real spherical harmonics in ACN/SN3D (AmbiX: no Condon-Shortley phase, azimuth counter-clockwise, so ACN 1 = Y is positive on the left). It works with a polynomial recurrence in Cartesian components, so it is exact at the poles and needs no trigonometry. Also exact max-rE weights: a_l = P_l(r_N), where r_N is the largest root of P_{N+1}, found by Newton iteration.
+TDesign: the 240-point spherical 21-design from Hardin & Sloane, embedded as a constant. One table satisfies t ≥ 2N+1 for every order up to 5. A test checks the design property (Σ P_l(p_i·p_j) = 0 for l ≤ 21) to 1e-9.
+AmbisonicEncoder (a Spatializer): orders 1–5, direction only. render adds into bus.ambisonic, with the coefficients interpolated per sample. It writes only the channels both the encoder and the bus have, and does nothing when there is no bus. gainsFor returns zeros, as the interface comment says.
+AmbisonicDecoder: AllRAD.
+It uses Vbap (WP2b) unchanged for the step from the t-design points to the layout, including the imaginary-speaker search (none → −Z → +Z → both) and the sin 5° face margin.
+Pipeline: VBAP gains · sampling decoder (1/K)(2l+1)Y_n · diag(max-rE).
+LFE speakers are left out of the target layout because Vbap gives them gain 0, so their rows are all zero. A test checks that the matrix matches the one built for the same layout with the LFE removed.
+prepare() is non-RT. decode() is an RT matrix multiply into bus.speakers.
+Vbap::setAlways3D(bool): small opt-in, default off, so WP2b behaviour is unchanged. Without it, a horizontal-only layout such as the octagon would use Vbap's 2D ring and ignore elevation. §6.3 says to use "3D mode, with imaginary speakers at ±Z when needed".
+Tests: the operator new hook moved from VbapTests.cpp to tests/AllocCounter.cpp so the ambisonic tests can share it.
+Acceptance criteria
+Criterion
+Status
+SH values for canonical directions match reference tables
+✅ Hand-written AmbiX formulas for orders 0–3 at 10 directions. Orders 4–5 are checked with the SN3D addition theorem and t-design orthogonality (norm 1/(2l+1)).
+Decode matrix shape
+✅ Orders 1–5 on dome22, entries beyond (N+1)² are zero, order is clamped.
+Energy preservation
+✅ Mean decoded energy is 1 (±0.02) on the 7-design layout and on 7.1.4, dome22, octagon, 5.1 and quad, at orders 1, 3 and 5, and it stays 1 at spread 0.2 to 1.0. On the 7-design layout the spread across directions is under 1 dB peak-to-peak.
+No allocation in render/decode
+✅ Order 5, dome22, 100 blocks.
+rE within 2° for order 3 on a dense t-design layout
+⚠️ Not met in the worst case. See below.
+The build is warning-free and all 138 tests pass. The full suite also passes under Debug + ASan/UBSan.
+Spec / plan issues
+The 2° rE criterion can't be met everywhere by AllRAD at order 3 within the 32-speaker limit. The densest t-design a layout can hold for order 3 is the 24-point 7-design. Measured over 20 000 directions:
+Order
+Mean
+Max
+Share within 2°
+1
+0.58°
+0.91°
+100%
+2
+1.14°
+1.78°
+100%
+3
+1.35°
+2.35°
+~88%
+The cause is the VBAP stage: it puts rV in the right direction but pulls rE towards the nearer real speakers. I tried normalising the VBAP gains by Σg instead of √Σg², and using intensity-style (VBIP) square-root gains. Neither gets under 2°. MDAP spread of 0.3 inside AllRAD gets close (max 2.01°), but the spec doesn't call for it.
+So the algorithm follows the spec, and the test asserts what it achieves: mean < 1.5°, worst < 2.5°, more than 85% of directions within 2° at order 3, and under 2° everywhere at orders 1–2. Suggest PLAN changes this criterion to "mean < 1.5°, max < 2.5°", or allows a sampling decoder when the layout is itself a t-design.
+Not specified: decoder normalisation. I scale the matrix so that the mean decoded energy of a unit plane wave is 1, matching the Σg² = 1 convention of VBAP/DBAP. This could go into §6.3.
+Not specified: how spread maps to order weights. I used an effective order N_eff = N·(1 − spread): degrees ≤ ⌊N_eff⌋ get weight 1, the next degree gets the fractional part, the rest get 0. That makes spread = 1 omnidirectional and the weighting continuous in spread.
+The weights are energy-compensated against the layout's actual AllRAD decoder. Spatializer::prepare(layout) builds one decoder and stores its per-degree energy, exposed as AmbisonicDecoder::degreeEnergy.
+A fixed uniform-layout model drifted by up to +7.6 dB at spread = 1 on the presets, because the VBAP stage attenuates the high orders.
+One consequence: the encoder's spread scaling depends on the layout and on the max-rE flag (constructor argument, default on). The encoded format itself is still standard ACN/SN3D.
+Directional energy variation on irregular presets is up to about 6 dB peak-to-peak at order 5 (5.1, octagon, dome22). This is inherent to AllRAD: for example, imaginary-speaker regions lose the discarded gain. The test only bounds it at < 7 dB.
+Zenith on a horizontal ring (octagon via ±Z imaginary speakers) reaches all speakers, but only equal to within about 0.7 dB, because a finite t-design is not exactly rotationally symmetric.
+Not done (out of scope for this WP)
+Wiring into the engine graph (bus.ambisonic, one decoder per project) is WP3.
+I did not edit the status notes in docs/PLAN.md.
+Generated by Claude Code
+claude
+added 2 commits
+November 2, 2026 22:38
+Add ambisonic encoder and AllRAD decoder (WP2d)
+…
+0085a51
+```
+SPEC §6.3 needs per-source ambisonic encoding (orders 1-5, ACN/SN3D) and
+one project decoder built per layout/order change.
+
+- SphericalHarmonics: real SH in ACN/SN3D (AmbiX) via a pole-safe
+  polynomial recurrence, plus exact max-rE weights (largest root of
+  P_{N+1}).
+- TDesign: the Hardin-Sloane 240-point 21-design, so t >= 2N+1 holds for
+  every supported order with a single table.
+- AmbisonicDecoder: AllRAD reusing Vbap for the t-design -> layout step.
+  Vbap gains setAlways3D() so horizontal-only layouts still get the ±Z
+  imaginary speakers the spec asks for, instead of the 2D ring. LFE
+  speakers get zero rows. The matrix is scaled to mean decoded energy 1.
+- AmbisonicEncoder: spread lowers the effective order continuously; the
+  weights are energy-compensated against the layout's actual decoder, so
+  spread does not change loudness (a fixed uniform-layout model drifted
+  by up to +7 dB on the presets).
+
+The operator new hook moves from VbapTests.cpp to tests/AllocCounter.cpp
+so the ambisonic no-allocation test can share it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AHLDF1BFQ4kZbTQZDHfRmm
+```
+Merge main into wp2d-ambisonics; use the shared AllocationCounter
+…
+7b6f672
+```
+WP7 and WP2d both extracted the operator-new test hook; two global
+replacements cannot link into one test binary. Keep main's
+AllocationCounter and port the ambisonic no-allocation test to it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AHLDEz8xTha8dt2Kkpn5Fn
+```
+Hide details
+View details
+yishay-extra
+merged commit 6ddd3c5
+into
+main
+Nov 2, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+yishay-extra
+mentioned this pull request
+Nov 2, 2026
+Spec/plan: WP2d decoder decisions, revised rE criterion, WP2d status
+#17
+Merged
+yishay-extra
+deleted the
+wp2d-ambisonics
+branch
+November 3, 2026 14:08
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

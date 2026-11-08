@@ -1,0 +1,169 @@
+A modular C++20 game engine with independent runtime libraries. - Evaluate an atmosphere's transmittance by aoinoikaz · Pull Request #198 · Gondola-Bros-Entertainment/anima
+
+Evaluate an atmosphere's transmittance by aoinoikaz · Pull Request #198 · Gondola-Bros-Entertainment/anima · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+aoinoikaz
+commented
+Oct 3, 2026
+Copy link
+Copy Markdown
+Contributor
+The first of three steps toward the physically based sky of #185, after Hillaire, "A Scalable and Production Ready Sky and Atmosphere Rendering Technique" (EGSR 2020). It adds the atmosphere's medium and its transmittance on the CPU, which the next step uses to tint the sun so that surfaces, fog and the sky agree at sunset.
+Plan
+This PR: Atmosphere, validate_atmosphere() and atmosphere_transmittance(), header-only in environment.hpp.
+The sky: transmittance, multiple scattering and sky-view tables built by compute dispatches at the start of each frame, a sky pass that replaces the gradient, and the sun's radiance tinted by atmosphere_transmittance(). The scene environment document moves to v3.
+Aerial perspective: a 32x32x32 volume applied to opaque, blended, impostor and custom materials, beneath Add height fog and sun scattering, and fog the sky #177's height fog.
+Clouds will be a separate issue.
+Model
+Extinction is Rayleigh scattering times exp(-h / rayleigh_scale_height), plus Mie scattering and absorption times exp(-h / mie_scale_height), plus ozone absorption times a tent max(0, 1 - |h - ozone_altitude| / (ozone_width / 2)). The defaults are the reference implementation's Earth (SkyAtmosphereCommon.cpp), converted to meters: ground radius 6,360 km, thickness 100 km, Rayleigh (5.802, 13.558, 33.1) per Mm with an 8 km scale height, Mie scattering 3.996 and absorption 0.444 per Mm with 1.2 km, ozone (0.650, 1.881, 0.085) per Mm in a tent from 10 to 40 km.
+atmosphere_transmittance(atmosphere, altitude, cos_zenith) integrates along the straight path to the top with 1,024 midpoint steps in u, at distance t = L u^2, so the steps crowd toward the start where the air is densest. A path that meets the ground keeps no light; from the ground that is every path below the horizon, and a path along the horizon is open.
+Tests
+The zenith from the ground against its closed form, exp(-sum(sigma * H * (1 - exp(-thickness / H))) - sigma_ozone * width / 2), within 1e-5.
+Twelve paths, from the ground, 2 km and 20 km at 10, 2, 0 and -0.5 degrees, against a separate integral in the test: 100,000 uniform steps along a point marched from the planet's center outward, sharing nothing with the implementation but the density model, within 1e-4. From 2 km, -0.5 degrees passes above the ground, and from the ground it meets it.
+Earth's transmittance at the zenith (0.940, 0.868, 0.762), 10 degrees (0.713, 0.459, 0.222) and 2 degrees (0.331, 0.085, 0.006), which two other independent integrations, in C++ and Python, gave while designing this; matched within 1e-3.
+Transmittance that rises in every channel and a red-to-blue ratio that falls from the horizon to the zenith, and the ground blocking every path below the horizon from it.
+Every rejection, with its message.
+Checks
+clang-format 22.1.8 over the files CI checks; Homebrew clang 22 compiles the changed tests and the renderer cleanly; Doxygen builds without warnings.
+Full Debug build with warnings as errors (AppleClang 21.0.0); ctest -LE gpu: all pass.
+No rendering changes, so I did not run the gpu label locally; CI runs it on lavapipe.
+Part of #185
+Evaluate an atmosphere's transmittance
+…
+997f3bf
+```
+The physically based sky (#185) will tint the sun by the light that
+crosses the atmosphere to the ground, and its tables integrate the same
+media. This adds the medium and that integral on the CPU first.
+
+- Atmosphere holds a planet's ground radius and thickness, Rayleigh and
+  Mie scattering with their exponential scale heights, Mie absorption
+  and ozone absorption in a tent, defaulting to Earth's values from
+  Hillaire's reference implementation. validate_atmosphere() rejects
+  nonpositive lengths, negative or non-finite coefficients and a top
+  beyond 1,000,000,000 m.
+- atmosphere_transmittance() integrates the extinction from an
+  altitude to the top along a direction, in double precision, with
+  1,024 midpoint steps in the square root of the distance. A path that
+  meets the ground keeps no light.
+
+Tests: the zenith against its closed form within 1e-5; twelve paths
+from the ground, 2 km and 20 km, between 10 degrees and below the
+horizon, against an independent uniform-step integral within 1e-4;
+Earth's zenith, 10 and 2 degree values against two other independent
+integrations to three places; light that dims and reddens as the path
+lowers; and every rejection.
+```
+aoinoikaz
+mentioned this pull request
+Oct 3, 2026
+Apply the atmosphere's aerial perspective to distant geometry
+#185
+Open
+2 tasks
+aoinoikaz
+added this pull request to the merge queue
+Oct 3, 2026
+Hide details
+View details
+Merged
+via the queue into
+main
+with commit d03bf75
+Oct 3, 2026
+20 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+aoinoikaz
+deleted the
+atmosphere-transmittance
+branch
+October 3, 2026 21:14
+aoinoikaz
+mentioned this pull request
+Oct 3, 2026
+Render the sky from a physically based atmosphere
+#201
+Merged
+aoinoikaz
+added a commit
+that referenced
+this pull request
+Oct 3, 2026
+Render the sky from a physically based atmosphere
+…
+ac16530
+```
+The sky was a gradient of three authored colors, lit by nothing, and the
+sun kept its radiance whatever its height, so a low sun neither reddened
+nor dimmed the scene and a sunset had to be painted by hand.
+
+- EnvironmentSettings::atmosphere replaces sky, sky_zenith, sky_horizon
+  and sky_ground. Atmosphere gains enabled, ground_height,
+  mie_anisotropy, ground_albedo and sun_angular_radius beside the media
+  of #198, and requires a thickness of more than 2 m, so that the eye,
+  kept 1 m inside the ground and the top, has room. Its contract states
+  the sky's radiance as the integral of Hillaire's technique (EGSR
+  2020), with f_ms limited to 0.99 and the radiance to 65504 per unit
+  of sunlight.
+- Three compute passes, the engine's first, build half-float tables at
+  the start of each frame that draws the sky: transmittance in
+  Bruneton's parameterization and multiple scattering when the medium
+  changes, and the sky view from the eye's altitude every frame. The
+  shaders receive the thickness itself, apart from the planet's radius,
+  whose float spacing would swallow it. The graphics queue family must
+  now support compute.
+- The sky draws the sky view table and the sun's disc, then fogs them.
+  atmosphere_sunlight() is the sun as it reaches the ground, through the
+  atmosphere and across the horizon as its disc sets; surfaces, the fog
+  and custom materials' sunRadiance and fogSun receive it.
+- Two departures from the paper, which the new GPU check found against
+  an independent evaluation of the integral. The multiple scattering
+  table holds the logarithm of Psi_ms at 64 sun angles instead of 32,
+  since linear interpolation across the terminator overshot by 35% at a
+  sun 2 degrees below the horizon and 77% at 6. Its directions crowd
+  toward each point's horizon, 128 paths instead of 64 uniform ones,
+  which missed the grazing light of a set sun by up to 66% at 30 km;
+  the worst is now 2.2% from the ground to 30 km.
+- The sky forms its view rays from a matrix relative to the eye, built
+  in double precision, since unprojecting a point near the eye and
+  subtracting its world position moved the horizon by a row 1 km from
+  the origin.
+- Scene environment documents move to anima.scene-environment.v3, with
+  every field required. CONTRIBUTING now requires every document field
+  and a version change for any change to them, and points at each GPU
+  check's header instead of describing each one.
+
+Tests: atmosphere_sunlight() through the atmosphere and across the
+horizon, and every new rejection; the v3 codec, v2 rejected and the
+removed sky field unknown; and an --atmosphere GPU check, whose double
+precision reference shares no code with the shaders. It compares 61
+sky pixels from noon to 6 degrees below the horizon, and from 2 km in
+haze, within 4% and 2 levels; requires the horizon toward a 2 degree
+sun at least 4 times as red against blue as noon's, and the sky to
+darken through twilight; requires lit quads to show
+atmosphere_sunlight(); requires a change to each of the 11 fields the
+tables read to rebuild them, comparing the frame after the change with
+one drawn after a forced rebuild (removing any field from the
+comparison fails it); keeps the frame when the eye and the ground rise
+together; and reports the tables' memory and time. The fog check's sky
+moves to the atmosphere, with the sky's own color dimmed by the fog.
+
+Part of #185.
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

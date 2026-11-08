@@ -1,0 +1,160 @@
+# Volume Level-of-Detail (LOD) Rendering
+
+Also called: Active Cut Rendering, Adaptive LOD Rendering
+
+## Overview
+Volume Level-of-Detail (LOD) Rendering is a method that maximizes image quality within user-specified frame rate and system constraints (RAM, texture memory, bandwidth) by adaptively modifying the set of rendered cells in an octree [S1]. It differs from sibling methods like [Level-of-detail (LOD) methods](1007-level-of-detail-lod-methods.md) by explicitly maintaining an "active cut" of octree nodes to ensure space is covered exactly once, and by integrating data loading from disk/RAM into the adaptation loop [S1]. It builds on [Resolution Adaptation](3063-resolution-adaptation.md) by using error metrics to drive the structural changes in the volume representation rather than just step size or viewport scaling.
+
+## How it works
+The method operates in two primary phases: Adapt/Load and Cull/Render, driven by user parameters (desired frame rate, transfer function, view position) and system parameters (RAM, texture memory size, bandwidths, polygon/fill performance) [S1].
+
+### Data Structures
+*   **Octree:** Hierarchical voxel grid. Internal nodes store pointers to children; leaf nodes store voxel data (RGBA).
+*   **Active Cut:** A set of octree nodes whose cells cover the model space exactly once [S1].
+*   **Split Queue:** Contains non-leaf nodes currently on the active cut, sorted by decreasing error [S1].
+*   **Merge Queue:** Contains nodes that are inactive (merged) but available to be split if frame rate requirements drop [S1].
+*   **Node State:** Each node has a state: `Active` (on active cut) or `Inactive` (merged/covered by parent) [S1].
+
+### Algorithm Steps
+
+1.  **Initialize Error Metric:** For each non-leaf node in the octree, compute an error metric representing the visual difference between the node's children and the node itself (or a coarser approximation). Sort these nodes into the **Split Queue** in descending order of error [S1].
+2.  **Adapt Phase (Frame-to-Frame Update):**
+    *   Evaluate the current frame's performance against the desired frame rate.
+    *   **To Decrease Error (Increase Detail):**
+        1.  Pop the first node $N$ from the **Split Queue** [S1].
+        2.  Mark $N$ as `Inactive` and push it to the **Merge Queue** [S1].
+        3.  Push $N$'s children to the **Split Queue** and mark them `Active` [S1].
+        4.  **Border Continuity Fix:** If $N$'s children have neighbors at different octree levels, fix internal border discontinuities by copying border data from adjacent cells to ensure smooth blending [S1].
+    *   **To Increase Error (Decrease Detail/Increase Frame Rate):**
+        1.  Pop the first node $M$ from the **Merge Queue** [S1].
+        2.  Mark $M$ as `Active` and push it to the **Split Queue** [S1].
+        3.  Push $M$'s parent to the **Merge Queue** and mark it `Inactive` [S1].
+        4.  Remove $M$'s children from the **Split Queue** and mark them `Inactive` [S1].
+3.  **Load Phase:**
+    *   Traverse the **Active Cut**.
+    *   For any node whose data is not resident in texture memory, load it from RAM or disk [S1].
+    *   Ensure the **Active Cut** remains a valid partition of space (covering exactly once) [S1].
+4.  **Cull/Render Phase:**
+    *   Traverse the octree from the root.
+    *   Perform hierarchical culling based on view frustum and occlusion [S1].
+    *   Render flagged nodes (those in the **Active Cut**) using 3D texture mapping and blending in back-to-front order [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def volume_lod_rendering(frame_time_budget, current_active_cut, split_queue, merge_queue, octree, transfer_function):
+    """
+    Main loop for Volume LOD Rendering.
+    """
+    # 1. Evaluate Performance
+    actual_frame_time = measure_render_time()
+    error_metric = compute_error_metric(current_active_cut, octree)
+    
+    # 2. Adapt Phase
+    if actual_frame_time > frame_time_budget:
+        # Need to reduce detail (increase error) to meet frame rate
+        adapt_to_increase_error(merge_queue, split_queue, octree)
+    else:
+        # Can afford more detail (decrease error)
+        adapt_to_decrease_error(split_queue, merge_queue, octree)
+
+    # 3. Load Phase
+    active_nodes = get_active_nodes_from_cut(current_active_cut)
+    for node in active_nodes:
+        if not node.data_in_texture_memory:
+            load_node_data(node, source=RAM_or_DISK)
+
+    # 4. Render Phase
+    render_buffer = clear_screen()
+    sorted_nodes = sort_back_to_front(active_nodes, camera_position)
+    for node in sorted_nodes:
+        if is_in_view_frustum(node):
+            render_node_3d_texture(node, transfer_function, render_buffer)
+            
+    return render_buffer
+
+def adapt_to_decrease_error(split_queue, merge_queue, octree):
+    """
+    Split the highest error node to increase detail.
+    """
+    if not split_queue:
+        return
+    
+    # Pop highest error node
+    split_node = split_queue.pop(0)
+    
+    # Mark as inactive and move to merge queue
+    split_node.state = INACTIVE
+    merge_queue.push(split_node)
+    
+    # Add children to split queue
+    for child in split_node.children:
+        child.state = ACTIVE
+        split_queue.push(child)
+        
+    # Fix border discontinuities for children
+    fix_border_continuity(split_node.children, octree)
+    
+    # Re-sort split queue by error
+    split_queue.sort_by_decreasing_error()
+
+def adapt_to_increase_error(merge_queue, split_queue, octree):
+    """
+    Merge the lowest error node (first in merge queue) to decrease detail.
+    """
+    if not merge_queue:
+        return
+
+    # Pop node from merge queue
+    merge_node = merge_queue.pop(0)
+    
+    # Mark as active and move to split queue
+    merge_node.state = ACTIVE
+    split_queue.push(merge_node)
+    
+    # Get parent
+    parent = merge_node.parent
+    
+    # If parent exists, mark it inactive and add to merge queue
+    if parent:
+        parent.state = INACTIVE
+        merge_queue.push(parent)
+        
+        # Remove children from split queue
+        for child in parent.children:
+            if child in split_queue:
+                split_queue.remove(child)
+            child.state = INACTIVE
+
+def fix_border_continuity(children, octree):
+    """
+    Fix discontinuities between children of different levels.
+    Copies border data from adjacent cells.
+    """
+    for child in children:
+        for neighbor in get_adjacent_cells_at_different_levels(child, octree):
+            copy_border_data(child, neighbor)
+```
+
+## Subtopics
+
+### Octree-Level Adaptive Rendering
+A technique that cuts rendering cost by rendering at coarser octree levels (moving up the octree) to match data resolution to image resolution, maintaining interactivity [S2]. It selectively reduces computation and data transfer based on visualization requirements [S2]. Performance: Adaptive rendering (e.g., level 6) provides enough high-level information and is generated about 3 times faster than high-resolution rendering (level 11) [S2]. It reduces both rendering time and data transfer from disk but does not change the effectiveness or scalability of 1DIP/2DIP strategies [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the depth of the octree and the number of nodes in the active cut. Splitting/merging operations are $O(1)$ per node, but sorting the split queue is $O(N \log N)$ where $N$ is the number of non-leaf nodes [S1].
+*   **Memory Complexity:** Requires storing the octree structure, the active cut, and the split/merge queues. Texture memory usage is proportional to the number of active leaf nodes [S1].
+*   **Performance:** Adaptive rendering can be significantly faster than high-resolution rendering (e.g., 3x faster) while maintaining visual fidelity [S2].
+*   **Strengths:** Maximizes image quality within constraints; handles large datasets by loading only necessary data; maintains interactivity [S1, S2].
+*   **Limitations:** Requires complex data structures (queues, active cut); border discontinuities must be handled carefully; performance depends on system parameters (RAM, bandwidth) [S1].
+*   **When to Use:** Interactive visualization of large unstructured grids where frame rate is critical [S1, S2].
+*   **When Not to Use:** When static, high-quality offline rendering is sufficient; when system resources are extremely limited and cannot support the overhead of the adaptation logic [S1].
+
+## Background
+Originated from the need to visualize large unstructured grids interactively [S1]. The method was developed by Levenberg et al. (2002) as part of the "Interactive Visualization of Unstructured Grids Using Hierarchical 3D Textures" project [S1]. It builds on view-dependent continuous level-of-detail techniques for polygonal models [S1]. Later applied to parallel rendering of large time-varying volume data (e.g., earthquake simulations) by Yu et al. (2004) [S2].
+
+## Sources
+[S1] Interactive Visualization of Unstructured Grids Using Hierarchical 3D Textures, https://web.eecs.umich.edu/~jjcorso/pubs/leven02unstructgrid.pdf, fetched 2026-10-27
+[S2] I/O Strategies for Parallel Rendering of Large Time-Varying Volume Data, https://doi.org/10.2312/egpgv/egpgv04/031-040, fetched 2026-10-26

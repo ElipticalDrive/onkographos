@@ -1,0 +1,162 @@
+--- v002.md
++++ v003.md
+@@ -4,23 +4,22 @@
+ 
+ ## Overview
+-GVDB Ambient Occlusion computes local occlusion at a surface point by sampling a hemisphere of directions against a volume density field, using either point sampling or ray casting with distance-based falloff [S1, unofficial]. It differs from SDF-based AO by querying a volumetric density field directly rather than a signed distance function, and from SSAO by operating in world-space volume coordinates rather than screen-space depth buffers [S1, unofficial].
++GVDB Ambient Occlusion computes local occlusion at a surface point by sampling a hemisphere of directions against a volume density field, using either point sampling or ray casting with distance-based falloff [S1, unofficial]. It operates in world-space volume coordinates using a device function for GPU execution [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- Volume data structure supporting density queries.
+-- Surface position `pos` (world space).
+-- Surface normal `normal` (world space, normalized).
+-- `aoSamples`: Number of hemisphere samples (integer, max 512).
+-- `aoRadius`: World-space radius for AO sampling (float).
+-- `aoBias`: Backtrack distance to reduce acne artifacts (float, typically $10^{-3}$).
+-- `AMBIENT_OCCLUSION_MODE`: Integer switch (0 for point sampling, 1 for ray sampling).
+-- `noise`: A precomputed random rotation vector (float3).
++- Surface position `pos` (world space) [S1, unofficial].
++- Surface normal `normal` (world space, normalized) [S1, unofficial].
++- `aoSamples`: Number of hemisphere samples (integer, max 512) [S1, unofficial].
++- `aoRadius`: World-space radius for AO sampling (float) [S1, unofficial].
++- `aoBias`: Backtrack distance to reduce acne artifacts (float, typically $10^{-3}$) [S1, unofficial].
++- `AMBIENT_OCCLUSION_MODE`: Integer switch (0 for point sampling, 1 for ray sampling) [S1, unofficial].
++- `noise`: A precomputed random rotation vector (float3) [S1, unofficial].
+ 
+ **Outputs:**
+-- Occlusion factor (float, range [0, 1]).
++- Occlusion factor (float, range [0, 1]) [S1, unofficial].
+ 
+ **Data Structures:**
+-- The volume is accessed via a query function `queryVolume(pos)` returning a scalar density value.
+-- Vectors are 3D floats (`float3`).
++- The volume is accessed via a query function returning a scalar density value [S1, unofficial].
++- Vectors are 3D floats (`float3`) [S1, unofficial].
+ 
+ **Steps:**
+@@ -29,28 +28,12 @@
+    $$ \text{tangent} = \frac{\text{noise} - \text{normal} \cdot \text{noise}}{\|\text{noise} - \text{normal} \cdot \text{noise}\|} $$
+    $$ \text{bitangent} = \text{normal} \times \text{tangent} $$
+-   [S1, unofficial]
+-3. Determine the query position by backtracking along the normal to avoid self-intersection/acne:
+-   $$ \text{queryPos} = \text{pos} + \text{normal} \times \text{aoBias} $$
+-   [S1, unofficial]
+-4. Initialize `occlusionSum = 0.0` [S1, unofficial].
+-5. For `i` from 0 to `aoSamples - 1`:
+-   a. Generate a sample direction `sampleLocal` in the hemisphere defined by the tangent-bitangent-normal basis. (Note: The specific hemisphere sampling algorithm is not detailed in the source, but it implies uniform or stratified sampling over the upper hemisphere relative to the normal) [S1, unofficial].
+-   b. Transform `sampleLocal` to world space:
+-      $$ \text{sampleWorld} = \text{tangent} \times \text{sampleLocal.x} + \text{bitangent} \times \text{sampleLocal.y} + \text{normal} \times \text{sampleLocal.z} $$
+-      [S1, unofficial]
+-   c. If `AMBIENT_OCCLUSION_MODE == 0` (Point Sampling):
+-      i. Compute sample point: `samplePoint = queryPos + sampleWorld * aoRadius` [S1, unofficial].
+-      ii. Query volume: `density = queryVolume(samplePoint)` [S1, unofficial].
+-      iii. If `density <= aoBias`, add 1.0 to `occlusionSum` [S1, unofficial].
+-   d. If `AMBIENT_OCCLUSION_MODE == 1` (Ray Sampling):
+-      i. Shoot a ray from `queryPos` in direction `sampleWorld` with length `aoRadius` [S1, unofficial].
+-      ii. If a hit is found at distance `dist`:
+-          $$ \text{weight} = \text{smoothstep}(1, 0, \frac{\text{aoRadius}}{\text{dist}}) $$
+-          [S1, unofficial]
+-          iii. Add `weight` to `occlusionSum` [S1, unofficial].
+-      iii. If no hit is found, add 0.0 to `occlusionSum` [S1, unofficial].
+-6. Compute final occlusion:
+-   $$ \text{occlusion} = \frac{\text{occlusionSum}}{\text{aoSamples}} $$
+-   [S1, unofficial]
++3. Backtrack the query position along the normal by `aoBias` to mitigate acne artifacts [S1, unofficial].
++4. Initialize `occlusion = 0.0` [S1, unofficial].
++5. For each of `aoSamples` hemisphere directions:
++   a. Generate a sample direction in the hemisphere defined by the tangent-bitangent-normal basis [G].
++   b. Transform the sample to world space using the basis [S1, unofficial].
++   c. In mode 0 (point sampling), query the volume at `pos + aoRadius * sampleWorld`; if the value is less than or equal to `aoBias`, add 1.0 to `occlusion` [S1, unofficial].
++   d. In mode 1 (ray sampling), shoot a ray; if a hit is found, compute the distance `dist`, apply `smoothstep(1, 0, aoRadius / dist)` to get the value, and add it to `occlusion` [S1, unofficial].
++6. Divide `occlusion` by `aoSamples` and return the result [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -60,21 +43,18 @@
+         return 1.0
+ 
+-    # Compute tangent and bitangent
+-    # Note: Source uses 'noise' as a random vector for rotation
++    # Compute tangent and bitangent from random rotation vector and normal
+     proj = noise - normal * dot(noise, normal)
+     tangent = normalize(proj)
+     bitangent = cross(normal, tangent)
+ 
+-    # Backtrack to avoid acne
+-    queryPos = pos + normal * aoBias
++    # Backtrack position to reduce acne artifacts
++    queryPos = pos - normal * aoBias
+ 
+-    occlusionSum = 0.0
++    occlusion = 0.0
+ 
+     for i in range(aoSamples):
+-        # Generate hemisphere sample in local space
+-        # Assuming standard hemisphere sampling (e.g., uniform or stratified)
+-        # sampleLocal is a unit vector with z >= 0 in tangent-bitangent-normal basis
+-        sampleLocal = generateHemisphereSample(i, aoSamples) 
+-        
++        # Generate hemisphere sample in local tangent-bitangent-normal space
++        sampleLocal = hemisphere_sample(i, aoSamples)
++
+         # Transform to world space
+         sampleWorld = tangent * sampleLocal.x + bitangent * sampleLocal.y + normal * sampleLocal.z
+@@ -85,21 +65,34 @@
+             density = queryVolume(samplePoint)
+             if density <= aoBias:
+-                occlusionSum += 1.0
++                occlusion += 1.0
+         elif mode == 1:
+             # Ray sampling
+-            hitDist = rayMarch(queryPos, sampleWorld, aoRadius, queryVolume)
++            # Sources do not specify the exact ray march implementation [Comment]
++            hitDist = ray_march(queryPos, sampleWorld, aoRadius, queryVolume)
+             if hitDist < aoRadius:
+-                # smoothstep(1, 0, aoRadius / dist)
+                 t = aoRadius / hitDist
+-                # clamp t to [0, 1] for smoothstep if necessary, though formula implies t > 1 if dist < radius
+-                # smoothstep(edge0, edge1, x) returns 0 if x <= edge0, 1 if x >= edge1
+-                # Here edge0=1, edge1=0. So if t >= 1 (dist <= radius), result is 1.
+-                # If t <= 0 (dist >= infinity), result is 0.
+-                # Standard smoothstep implementation:
++                # smoothstep(1, 0, t)
+                 t_clamped = max(0.0, min(1.0, t))
+                 weight = t_clamped * t_clamped * (3.0 - 2.0 * t_clamped)
+-                occlusionSum += weight
++                occlusion += weight
+ 
+-    return occlusionSum / aoSamples
++    return occlusion / aoSamples
++
++def hemisphere_sample(index, total):
++    # Standard uniform hemisphere sampling [G]
++    phi = 2.0 * 3.14159265358979 * (index / total)
++    cos_theta = 1.0 - 2.0 * (index / total)
++    sin_theta = sqrt(1.0 - cos_theta * cos_theta)
++    return float3(sin_theta * cos(phi), sin_theta * sin(phi), cos_theta)
++
++def ray_march(origin, direction, max_dist, queryVolume):
++    # Standard volume ray march [G]
++    step = 0.01
++    dist = 0.0
++    while dist < max_dist:
++        if queryVolume(origin + direction * dist) > 0.0:
++            return dist
++        dist += step
++    return max_dist
+ ```
+ 
+@@ -110,5 +103,5 @@
+ **Edge Cases and Pitfalls:**
+ - Acne artifacts from sampling at the surface are mitigated by backtracking position by `aoBias` before querying the volume [S1, unofficial].
+-- If `aoSamples` is 0, the function returns 1.0 (no occlusion) [S1, unofficial].
++- If `aoSamples` is 0, the function returns 1.0 [S1, unofficial].
+ 
+ ## Operating characteristics
+@@ -116,5 +109,5 @@
+ 
+ ## Background
+-The method is part of the GVDB (GPU Volume Database) library, specifically within the context of adaptive sampling and reconstruction for volume visualization [S1, unofficial]. It is implemented as a device function for GPU execution [S1, unofficial].
++The method is implemented as a device function for GPU execution within the context of adaptive sampling and reconstruction for volume visualization [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,941 @@
+Contribute to yachtrock/JumpBlocks development by creating an account on GitHub.
+
+Add chunk persistence, streaming, LOD, and clustering systems by yachtrock · Pull Request #12 · yachtrock/JumpBlocks · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+yachtrock
+commented
+Jul 22, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+This PR introduces a complete chunk management pipeline for the voxel engine, including disk persistence, dynamic streaming around the player, level-of-detail (LOD) rendering with dither-fade transitions, and cluster-based impostor rendering for distant chunks.
+Key Changes
+Persistence & Storage
+persistence.rs: Binary serialization for chunk data with RLE-compressed cell grids. Chunks are saved to disk in a region-based directory structure with version tracking and external cell reconstruction.
+region.rs: Region-level chunk storage with dirty-state tracking (data generation, save state, mesh generation). Chunks are stored in ChunkSlot wrappers with Arc-wrapped data for efficient neighbor sharing.
+coords.rs: Coordinate system definitions (ChunkPos, RegionId, ClusterKey) with bounds checking and world-to-chunk conversions.
+world_grid.rs: Top-level world resource managing multiple regions and the active region context.
+Streaming & Loading
+streaming.rs: Per-frame chunk streaming system that loads/unloads chunks based on camera distance, auto-wires neighbor references, and manages entity lifecycle. Includes configurable load radius, budgets, and hysteresis.
+world_paths.rs: Platform-specific world save directory resolution (macOS, Windows, Linux).
+LOD & Rendering
+chunk_lod.rs: Immediate-mode LOD tier management with dither-fade transitions. Implements DitherFadeExtension material for smooth crossfades between Full/Reduced/Hidden tiers. Tracks in-progress transitions and chamfer amount per chunk.
+cluster.rs: 4×4 XZ chunk clustering system that merges distant chunk columns into single impostor meshes when all members are at Reduced LOD tier. Includes render stats collection.
+Shaders (dither_fade.wgsl, chunk_vertex.wgsl, dither_prepass.wgsl): Screen-space ordered dithering for LOD transitions, chamfer offset vertex attribute handling, and prepass support.
+World Generation
+worldgen.rs: Island terrain generator using heightmap approach. Generates multi-chunk vertical terrain with configurable peak height, coastline shape, ridges, and flat surroundings.
+Integration
+lib.rs: Exports new modules and adds ChunkMeshLevel enum to track mesh generation state (None/LodOnly/Full).
+meshing.rs: Added ATTRIBUTE_SHARP_NORMAL vertex attribute to preserve original face normals before chamfer smoothing.
+chunk.rs: Added Debug impl for ChunkData.
+world.rs: Refactored to use new streaming/LOD systems. Removed hardcoded demo chunk, now uses WorldGrid and streaming anchor. Adds SpawnPoint resource and collision layer attachment.
+main.rs: Added CLI arguments for world management (--world, --new-world, --clear-world).
+debug_ui.rs: Integrated LOD, streaming, and cluster config controls into debug UI.
+player.rs: Added StreamingAnchor component to player for chunk streaming.
+curtain.rs: Updated level-ready check to wait for chunk meshing completion.
+Notable Implementation Details
+Immediate-mode LOD: Materials are created once per chunk and mutated in-place every frame, avoiding pipeline re-specialization races.
+RLE Compression: Cell grids use run-length encoding with cell type tags (Empty/Local/External) to reduce disk footprint.
+External Cell Reconstruction: External cells are not saved to disk; they're reconstructed from neighbor data at load time.
+Dither-Fade Transitions: Uses 4×4 Bayer matrix ordered dithering for smooth, flicker-free LOD crossfades.
+Cluster Activation: Clusters only render when all members are at Reduced tier; otherwise individual chunks render per their LOD state.
+Generation Tracking: Dirty state uses monotonic generation counters to efficiently track what needs saving/meshing/
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+claude
+added 30 commits
+July 22, 2026 22:27
+Add world grid system foundation: regions, chunk coords, dirty tracking
+…
+791c7ef
+```
+Introduces the spatial hierarchy for the island-based world:
+- ChunkPos/RegionId/ColumnPos coordinate types with region bounds constants
+- Region struct with sparse HashMap<ChunkPos, ChunkSlot> storage
+- WorldGrid resource holding all regions with spatial lookup
+- Generation-based dirty tracking for chunks and regions (save/mesh/lod/impostor)
+- ChunkCoord ECS component for tagging chunk entities with their grid position
+- Switch ChunkNeighbors from cloned ChunkData to Arc<ChunkData> for shared refs
+- Wire demo world.rs to use WorldGrid and Arc-based neighbor sharing
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Add chunk persistence, streaming, and auto neighbor wiring
+…
+05b3def
+```
+- persistence.rs: Binary chunk format (JBCK) with packed block table + RLE
+  cell grid. Region metadata format (JBRG). Disk path helpers for the
+  saves/{world}/regions/{id}/chunks/{x}_{y}_{z}.chunk layout.
+- streaming.rs: Camera-driven chunk streaming system with configurable
+  load/unload radii, per-frame budgets, distance-priority loading, and
+  hysteresis unload padding. Auto neighbor wiring system that populates
+  ChunkNeighbors from Arc<ChunkData> in the region's spatial index.
+  StreamingPlugin bundles both systems.
+- chunk.rs: Add from_raw() constructor and get_cell_by_index() for
+  deserialization support.
+
+8 new persistence tests, all passing. 43 total tests pass.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Wire streaming into game: region-based chunk spawning replaces manual…
+…
+8d04570
+```
+… setup
+
+- world.rs: Refactored to populate region data only; streaming handles
+  entity spawning. Extracted demo chunk builders into clean functions.
+  Added attach_chunk_collision_layers system for game-specific physics.
+  Inserts ChunkMaterial resource for streamed chunks.
+- player.rs: Added StreamingAnchor to player entity so streaming
+  knows where to load chunks around.
+- main.rs: Added StreamingPlugin to client-side plugin set.
+- streaming.rs: Added ChunkMaterial resource, MeshMaterial3d on spawned
+  chunks, chunk_writeback_system to sync building edits back to region
+  storage. Cleaned up imports.
+
+Chunks are now owned by the region (canonical data) and cloned into ECS
+entities by streaming. Building edits flow back via writeback system.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Add LOD tier management and disk save/load
+…
+3993bef
+```
+LOD system (chunk_lod.rs):
+- LodTier component (Full/Reduced/Hidden) assigned by camera distance
+- LodConfig resource with configurable full/reduced radii
+- ChunkLodMesh component stores both full-res and LOD mesh handles
+- lod_mesh_swap_system swaps visible mesh when tier changes
+- Meshing pipeline now builds and stores both mesh handles
+
+Disk I/O (persistence.rs):
+- save_chunk_to_disk / load_chunk_from_disk file operations
+- save_region_meta_to_disk / load_region_meta_from_disk
+- save_dirty_chunks batch save for a region
+- WorldSavePath resource controls save directory
+
+Streaming (streaming.rs):
+- chunk_save_system auto-saves dirty chunks when WorldSavePath is set
+- Integrated into StreamingPlugin system ordering
+
+45 tests passing.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Add LOD debug materials: reduced-tier chunks render light blue
+…
+49e5441
+```
+When LodDebugMaterials resource is present, chunks swap material color
+based on their LOD tier. Full = normal brown, Reduced = light blue.
+Remove the LodDebugMaterials resource insert in world.rs to disable.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Add World/LOD debug panel with live streaming and LOD sliders
+…
+75c23c6
+```
+Debug UI (backtick toggle) now has a "World / LOD" collapsible section:
+- Streaming: load radius XZ/Y, unload padding, load/unload budget per frame
+- LOD Tiers: full radius, reduced radius
+- Stats: total chunks loaded, count per tier (Full/Reduced/Hidden)
+
+All values are live-editable via sliders.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Add dither-fade LOD transitions with permanent child entity
+…
+9b0d316
+```
+Each chunk has a permanent child (LodChild) holding the alternate LOD
+mesh. During tier transitions, both parent and child are visible with
+complementary 4x4 Bayer dither patterns — no entity spawning/despawning.
+
+Architecture:
+  Chunk entity: Mesh3d(full_res) + ChunkDitherMaterial(fade_a)
+    └─ LodChild: Mesh3d(lod)    + ChunkDitherMaterial(fade_b)
+
+At rest, one has fade=0 (visible) and the other fade=1 (invisible).
+During crossfade they animate toward each other over transition_duration.
+
+New files:
+- dither_fade.wgsl: Screen-space 4x4 Bayer dither fragment shader
+  extending the full PBR pipeline via MaterialExtension
+- ChunkDitherMaterial = ExtendedMaterial<StandardMaterial, DitherFadeExtension>
+
+Systems:
+- lod_target_assignment: decides desired tier by distance
+- lod_child_setup: creates permanent child when ChunkLodMesh appears
+- lod_transition_start: begins crossfade when target != current tier
+- lod_transition_update: animates fade values, finalizes on completion
+
+Debug panel now has transition_duration slider.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Fix dither shader bind group: use MATERIAL_BIND_GROUP template
+…
+c459434
+```
+The extension uniform was hard-coded to @group(2) but Bevy uses
+#{MATERIAL_BIND_GROUP} which resolves to the correct group at
+pipeline creation time.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Fix LOD dither transition pop and reduce default radii
+…
+bafe993
+```
+The final material after a transition was sometimes reusing shared debug
+handles that always had fade=0 (visible), causing a pop when the mesh
+that should be hidden became briefly visible. Now always creates a
+material with the correct fade value for each mesh.
+
+Reduced default LOD radii: full_radius 4→2, reduced_radius 8→6
+so the transition is visible with fewer chunks.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Fix dither crossfade: use complementary patterns for incoming/outgoing
+…
+4ae6685
+```
+Both meshes were using the same dither pattern, so at t=0.5 the same
+pixels were discarded from both, leaving holes. Now the outgoing mesh
+uses the normal Bayer pattern and the incoming mesh uses the inverted
+pattern (1-threshold), ensuring every pixel is always covered by
+exactly one mesh throughout the transition.
+
+Added invert field to DitherFadeExtension/DitherFadeUniform and the
+WGSL shader.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Fix LOD child always visible: use Visibility::Hidden when not transit…
+…
+6b57144
+```
+…ioning
+
+The LOD child mesh was always rendering (fade=1 discard wasn't working
+reliably, likely due to material type mismatch or pipeline ordering).
+Now the child starts Hidden, is set to Inherited only during active
+transitions, and Hidden again when the transition completes and the
+child should be invisible.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Properly hide/show both LOD meshes at transition endpoints
+…
+bb7b64e
+```
+Parent mesh (full_res): use Mesh3d add/remove to hide/show since
+Visibility on the parent would cascade and hide the child too.
+At transition start, re-insert Mesh3d from ChunkLodMesh handle.
+At transition end, remove Mesh3d if tier is Reduced or Hidden.
+
+Child mesh (lod): continues using Visibility::Hidden/Inherited.
+Both meshes are only simultaneously visible during active crossfade.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Fix flash between LOD transitions: rely on fade=1 discard, not Visibi…
+…
+3d8cf88
+```
+…lity/Mesh3d removal
+
+Removing Mesh3d and toggling Visibility at transition endpoints caused
+a one-frame flash when both meshes were invisible (deferred commands
+race). Now both meshes always have Mesh3d and Visibility::default —
+visibility is controlled purely by the dither shader's fade uniform.
+fade=1.0 discards all fragments, fade=0.0 renders normally.
+
+This eliminates the ordering dependency between transition end and
+transition start commands.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Fix LOD1 missing IBL: generate tangents on LOD mesh, clone parent mat…
+…
+2d1afda
+```
+…erial
+
+Two fixes for LOD1 looking flat compared to LOD0:
+- Generate tangents on the LOD mesh (build_lod_mesh) so IBL specular
+  reflections work correctly. The full-res mesh had tangent data from
+  the chamfer offset attribute; the LOD mesh was missing it.
+- Clone the parent chunk's base StandardMaterial for the LOD child
+  instead of constructing a new one, ensuring identical PBR properties
+  (roughness, reflectance, metallic, etc.)
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Add distance-based chamfer fade: fillets smoothly flatten with distance
+…
+6a0044f
+```
+Custom vertex shader (chunk_vertex.wgsl) reads the ChamferOffset vertex
+attribute and scales it by chamfer_amount (0=flat, 1=full chamfer).
+As the player moves away, chamfer_amount smoothly interpolates from 1→0
+over the chamfer_start..chamfer_end distance band, so fillets gradually
+flatten before the LOD swap happens.
+
+- DitherFadeExtension gains chamfer_amount field
+- DitherFadeUniform padded to 16 bytes (fade, invert, chamfer_amount, _pad)
+- chamfer_fade_system updates chamfer_amount per-chunk per-frame
+- LodConfig gains chamfer_start (default 1.0) and chamfer_end (default 2.0)
+- Debug panel has Chamfer start/end sliders
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Fix vertex shader: use vertex color for chamfer offset instead of cus…
+…
+e8a691e
+```
+…tom attribute
+
+Custom @location attributes on module-scope variables aren't valid WGSL.
+Instead, store the chamfer offset in vertex color (RGB = offset, A = 1)
+which Bevy's standard Vertex struct already supports via VERTEX_COLORS.
+
+The vertex shader reads vertex.color.xyz as the chamfer offset and
+subtracts (1 - chamfer_amount) * offset to flatten the chamfer.
+Vertex color is not passed through to the fragment (it's repurposed).
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Use custom vertex attribute for chamfer offset instead of vertex color
+…
+75be5b5
+```
+Replaced the vertex color hack with proper custom attribute support:
+- DitherFadeExtension::specialize() rebuilds the vertex buffer layout
+  to include ATTRIBUTE_CHAMFER_OFFSET at @location(10), and sets the
+  HAS_CHAMFER_OFFSET shader define
+- Vertex shader uses a custom ChunkVertex struct with the attribute
+  behind #ifdef HAS_CHAMFER_OFFSET
+- Removed vertex color override from build_full_res_mesh
+- LOD meshes (without chamfer data) work unchanged — the shader
+  skips the offset when HAS_CHAMFER_OFFSET is not defined
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Add sharp normal interpolation for chamfer fade
+…
+08d6fd5
+```
+Stores the original face normal (before chamfer smoothing) as a second
+vertex attribute ATTRIBUTE_SHARP_NORMAL (@location(11)). The vertex
+shader interpolates: mix(sharp_normal, smooth_normal, chamfer_amount).
+
+At chamfer_amount=1 (close), vertices have smooth bisector normals
+(full fillet look). At chamfer_amount=0 (far), normals snap back to
+flat face normals (matching the LOD mesh). This eliminates the shading
+discontinuity during the fillet→flat transition.
+
+Changes:
+- ChunkMeshData gains sharp_normals field
+- cut_offset_chamfer captures normals before the smoothing loop
+- LOD mesh sets sharp_normals = normals (identical, no chamfer)
+- specialize() adds ATTRIBUTE_SHARP_NORMAL at location 11
+- Vertex shader blends normals via mix()
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Fix LOD1 bleed-through: give LOD mesh same vertex layout as full-res
+…
+3a901de
+```
+The LOD mesh was missing ATTRIBUTE_CHAMFER_OFFSET and ATTRIBUTE_SHARP_NORMAL,
+causing a different pipeline specialization. During pipeline switching the
+material wasn't ready, so the mesh rendered without dither discard for a
+frame — making LOD1 visible through LOD0.
+
+Now the LOD mesh includes zero-filled chamfer offsets and copies of its
+normals as sharp normals, giving it the same vertex layout. Both meshes
+share one pipeline specialization, eliminating the flash.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Rewrite LOD system as immediate-mode: persistent materials mutated ev…
+…
+798444c
+```
+…ery frame
+
+Eliminates all deferred material swaps and command-based visibility
+toggling that caused init-state bugs, flashes, and LOD bleed-through.
+
+New approach:
+- lod_setup_system: creates two persistent ChunkDitherMaterial handles
+  per chunk (one for parent, one for child), stored in ChunkLodMaterials
+- lod_update_system: runs every frame, computes distance → desired tier,
+  chamfer amount, and fade values, then writes directly to the material
+  assets via get_mut(). No commands, no new allocations, no races.
+- LodTransition component tracks blend progress (0→1) between tiers
+- rest_fades() and transition_fades() are pure functions computing
+  (main_fade, main_invert, child_fade, child_invert) from state
+
+Removed: LodTarget, chamfer_fade_system (merged into lod_update_system),
+lod_transition_start_system, lod_transition_update_system,
+lod_child_setup_system (merged into lod_setup_system),
+base_material_for_tier, final_material_for_tier.
+
+LodDebugMaterials now stores Colors instead of material handles.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Add prepass dither discard to prevent shadow artifacts from faded meshes
+…
+ff3af09
+```
+Fully-faded meshes (fade=1.0) were still writing to the shadow/depth
+prepass buffer because the dither discard only ran in the main fragment
+shader. Added dither_prepass.wgsl that applies the same Bayer dither
+discard in the prepass, and registered it via prepass_fragment_shader()
+on the MaterialExtension.
+
+Now when a mesh is faded out it produces no shadows and no depth writes.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Hide LOD child via Visibility::Hidden when fully faded
+…
+fef5f68
+```
+The prepass shader wasn't enough — wireframe rendering and other passes
+bypass custom materials entirely. The only reliable way to fully exclude
+a mesh from all render passes is Visibility::Hidden.
+
+Now lod_update_system sets Visibility::Hidden on the child entity when
+child_fade >= 1.0, and Visibility::Inherited when it needs to render.
+Done in immediate-mode every frame (no deferred commands), so no races.
+Safe because the child has no descendants.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Add disk I/O: world management CLI, save/load, platform paths
+…
+6616160
+```
+World management:
+- --world <name>: use a named world (default: "default")
+- --new-world <name>: build demo chunks to disk and exit
+- --clear-world <name>: delete a world from disk and exit
+- --list-worlds: show all worlds and their directory
+
+Platform paths (world_paths.rs):
+- macOS: ~/Library/Application Support/JumpBlocks/worlds/
+- Windows: AppData/Roaming/JumpBlocks/worlds/
+- Linux: ~/.local/share/JumpBlocks/worlds/
+
+Disk I/O flow:
+- setup_world loads chunks from disk if available, falls back to
+  generating demo chunks in memory and saving them
+- build_world_to_disk generates and saves without starting the game
+- chunk_save_system throttled to every 5 seconds (SaveTimer)
+- WorldSavePath resource inserted before app starts
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Add island terrain generator and lazy distance-based meshing
+…
+4305187
+```
+Island generator (worldgen.rs):
+- Radial falloff from region center with sine-based perimeter bumps
+- Configurable via IslandGenConfig (radius, max height, bump params)
+- Fills chunks with cube blocks from y=0 to computed height
+- Region origin centers the island at world origin
+
+Lazy meshing (MeshLevel::LodOnly vs Full):
+- Distant chunks only generate LOD mesh (fast, no chamfer)
+- Close chunks get full chamfer mesh on demand
+- ChunkMeshLevel component tracks what's been generated
+- start_chunk_meshing decides level based on distance to camera
+- Automatically upgrades LodOnly→Full when chunk enters close range
+- ChunkMeshResult.full_res is now Option<ChunkMeshData>
+
+LOD stalling:
+- lod_update_system checks ChunkLodMesh.full_res.is_some() before
+  allowing transition to Full tier — stays at Reduced until ready
+
+55 tests passing.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Spawn player above island terrain (y=10 instead of y=2)
+…
+9049a38
+```
+The island surface is ~6 world units tall at the center. The player
+was spawning at y=2 which is inside the terrain. Now spawns at y=10
+and physics drops them onto the surface.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Fix chunks not rendering: move ChunkMaterial creation outside renderi…
+…
+09802c2
+```
+…ng block
+
+ChunkMaterial resource was created inside the `if let (meshes, materials)`
+rendering block, and further nested inside `if let dither_materials`.
+If the nesting failed, no ChunkMaterial was inserted, so streaming
+spawned chunks without any material, and lod_setup_system's query
+(which requires MeshMaterial3d<ChunkDitherMaterial>) never matched.
+
+Moved ChunkMaterial creation to the top level of setup_world so it's
+always created when Assets<ChunkDitherMaterial> is available.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Fix distance calculations: use GlobalTransform instead of region-loca…
+…
+e0e3924
+```
+…l ChunkCoord
+
+Both start_chunk_meshing and lod_update_system were computing distance
+using coord.pos.to_world_offset() which is region-local, not world-space.
+With the region origin at (-2048, 0, -2048), all distances were ~2048
+chunks off, so nothing was considered "close" and no full-res meshes
+were generated.
+
+Now both systems read the entity's GlobalTransform (set by streaming
+from region.chunk_to_world()) for correct world-space distance.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Upgrade island generator: multi-Y chunks, bigger terrain, smart spawn
+…
+66e6305
+```
+Island generator rewrite:
+- 8-chunk radius (was 4), peak height 80 cells (was 12)
+- Terrain spans multiple vertical chunks (y=-1 through y=2+)
+- 16-cell underground depth for digging
+- Surface ridges via overlapping sine waves for visual interest
+- Heightmap-based: compute per-column height, distribute across Y chunks
+
+Spawn point:
+- island_spawn_height() samples the heightmap at island center
+- SpawnPoint resource communicates world-space spawn position
+- Player reads SpawnPoint for initial transform (falls back to y=10)
+
+Tests: multi-Y chunks generated, underground chunks present,
+spawn height is reasonable, cell_y_to_chunk_y edge cases.
+
+Use --clear-world default to regenerate with new terrain.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Fix player spawning below terrain: compute SpawnPoint during plugin b…
+…
+8d8c942
+```
+…uild
+
+SpawnPoint was inserted during setup_world (Startup system) but the
+player also spawns at Startup — ordering wasn't guaranteed. Now
+WorldPlugin::build() computes the spawn height immediately from
+IslandGenConfig and inserts SpawnPoint as a resource before any
+systems run. Player reads it as Res<SpawnPoint> (non-optional).
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Add pre-computed Aabb to chunks for immediate frustum culling
+…
+8e7e581
+```
+Bevy auto-computes Aabb from mesh vertex data, but only after the mesh
+is uploaded to GPU. By pre-inserting a known Aabb (CHUNK_WORLD_SIZE box)
+at spawn time, frustum culling works from frame 1 — even while the
+mesh is still being generated async.
+
+Also ensures the LOD child entity (which inherits the parent's
+transform) is culled correctly since the Aabb is in local space.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+claude
+added 23 commits
+July 22, 2026 22:30
+Add 4x4 chunk cluster system and render stats
+…
+90b7712
+```
+Cluster system (cluster.rs):
+- Groups distant chunks into 4x4 XZ clusters
+- When all chunks in a cluster are beyond cluster_radius, their LOD
+  meshes are merged into a single combined mesh entity
+- Individual chunk entities are hidden while their cluster is active
+- Clusters are despawned when the player approaches (chunks un-hidden)
+- ClusterConfig with adjustable cluster_radius
+
+Render stats (RenderStats resource):
+- LOD0 count: chunks rendering with full chamfer mesh
+- LOD1 count: chunks rendering with reduced mesh
+- Cluster count: active merged cluster entities
+- Impostor count: placeholder for future region impostors
+- Stats based on actual material fade values (what's actually rendering)
+
+Debug panel additions:
+- Cluster radius slider
+- Render stats display (LOD0, LOD1, Clusters, Impostors)
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Add F4 LOD debug visualization toggle
+…
+a8898f7
+```
+F4 cycles between Normal and Tinted modes:
+- Normal: all chunks render with their natural color
+- Tinted: LOD0 = normal, LOD1 = blue, Clusters = red
+
+Replaces the old LodDebugMaterials resource with LodDebugMode enum.
+Colors are applied in immediate-mode every frame by lod_update_system
+(for chunks) and cluster_debug_color_system (for clusters).
+Cluster creation also reads the current mode for initial color.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Fix cluster system panic: remove duplicate Assets<Mesh> access
+…
+6ee4b19
+```
+cluster_management_system had both ResMut<Assets<Mesh>> and
+Res<Assets<Mesh>> which Bevy rejects at runtime. Removed the
+duplicate Res and use the ResMut for both reading and writing.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Fix cluster entity despawn panic: guard commands with get_entity()
+…
+ba5bd4b
+```
+Chunk entities can be despawned by the streaming system in the same
+frame the cluster system tries to hide/show them. Use get_entity()
+(returns Result) instead of entity() (panics on invalid entity).
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Fix cluster positioning: use same origin for mesh offsets and transform
+…
+4c92060
+```
+The merged mesh vertices were offset relative to the first member's
+world position, but the cluster entity was placed at min_pos (the
+minimum corner). Now both use the same reference point (first member).
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Fix cluster system: no z-fighting, no distance culling, Clustered marker
+…
+6be053e
+```
+Major rework:
+- Added Clustered marker component on chunks inside active clusters
+- lod_update_system skips chunks with Clustered — no material updates,
+  no visibility changes, no z-fighting with the cluster mesh
+- Cluster system uses Visibility::Hidden + Clustered on members,
+  removes both when cluster is destroyed
+- Streaming defaults: load_radius_xz=32, load_radius_y=8, budget=16
+  (loads entire island, no distance culling)
+- reduced_radius bumped to 32 so LOD1 covers the whole island
+- Cluster uses get_entity() for all member commands (despawn-safe)
+- ChunkInfo moved to module level for merge function access
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Faster startup: curtain after 8 chunks ready, full_radius 2→1
+…
+ff86f8d
+```
+The curtain was waiting for ALL chunks to reach Ready state, which
+meant the entire island had to finish meshing before gameplay started.
+Now it raises after just 8 chunks are ready — distant chunks continue
+meshing in the background.
+
+Also reduced full_radius from 2 to 1 so fewer chunks generate the
+expensive chamfer mesh. Most of the island renders with fast LOD1.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Curtain waits for all chunks to have meshes (LOD1 minimum)
+…
+6b28036
+```
+Changed from "raise after 8 chunks" to "raise when every loaded chunk
+has reached Ready state". Since distant chunks only generate fast LOD
+meshes (no chamfer), this is still quick. The expensive full-res
+chamfer meshes generate lazily after the curtain is already up.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Add detailed render diagnostics to debug panel
+…
+ef5bf7c
+```
+Debug panel now shows three sections under World/LOD:
+
+Rendering: LOD0 (chamfer), LOD1 (flat), Clusters, Draw calls
+Mesh Generation: Full (chamfer), LOD-only, No mesh, Meshing now
+Chunks: Total entities, Clustered count, LOD tier breakdown
+
+This makes it clear:
+- How many chunks have chamfer meshes vs LOD-only
+- Whether lazy meshing is working (most should be LOD-only)
+- How many chunks are currently being meshed async
+- Whether clusters are actually reducing draw calls
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Fix LOD over-assignment: init chunks as Reduced, remove meshing margin
+…
+a2dd8b6
+```
+Two bugs causing too many chunks at Full tier and too many chamfer meshes:
+
+1. Chunks spawned with LodTier::Full (default) — 228 chunks started as
+   Full before the LOD system could evaluate them. Now spawn as Reduced;
+   the LOD system promotes nearby ones to Full on the next frame.
+
+2. Meshing had full_radius+1 margin, generating chamfer for 67 chunks
+   instead of ~27. Removed the margin — exact full_radius match only.
+
+Expected after fix: Full(chamfer) ~7-12, LOD-only ~500+, LOD0 rendering ~7
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Fix lod_setup_system forcing all chunks to Full tier
+…
+0b7a1fa
+```
+lod_setup_system was inserting LodTier::Full on every chunk when
+creating LOD materials, overriding the Reduced tier set by streaming.
+This caused 188 chunks to be at Full tier instead of ~7.
+
+Removed the LodTier::Full insert — chunks keep their Reduced tier
+from streaming, and lod_update_system promotes only nearby ones.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Add checkerboard chunk boundary visualization in LOD tinted mode
+…
+59e73c8
+```
+In Tinted mode (F4), chunks now alternate brightness based on
+(x + y + z) & 1 parity — creating a checkerboard pattern that
+shows chunk boundaries. Bright/dark variants for both LOD0 (brown)
+and LOD1 (blue). Only visible in Tinted mode; Normal mode unchanged.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Checkerboard uses XZ only, not Y axis
+…
+59b2f79
+```
+Vertical chunks in the same column should be the same shade.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Fix clusters: merge full Y columns, skip empty chunks, XZ distance only
+…
+a66bb54
+```
+Clusters now properly represent 4×4 XZ column groups across all Y levels:
+- Skip empty chunks (no LOD mesh) when checking eligibility — don't
+  let underground empties block cluster formation
+- All Y chunks for the 4×4 XZ area are included (hidden when clustered)
+- Only chunks WITH meshes contribute geometry to the merged mesh
+- Distance check uses XZ only (not Y), measured from cluster center
+- Region offset computed correctly from member world positions
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Rewrite cluster system as top-down rendering tree
+…
+590187b
+```
+Decision per 4×4 XZ cluster group:
+1. Compute XZ distance from anchor to cluster center (grid-aligned)
+2. If close (< cluster_radius): dissolve cluster, show individuals
+3. If far: check all members are Reduced tier with LOD meshes
+   → Yes: activate cluster, merge meshes, hide all members
+   → No: keep rendering individually (some chunks still at Full tier)
+
+Key fixes:
+- Cluster origin computed from grid-aligned position, not first member
+- Region offset derived from actual chunk world positions
+- cluster_radius reduced to 3 (clusters activate sooner)
+- Empty chunks (no mesh) don't block cluster formation
+- All Y levels for the 4×4 XZ group included in one cluster
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Fix clusters forming with incomplete membership
+…
+7a41aca
+```
+Two bugs:
+1. Chunks still meshing (has_blocks but no LOD mesh yet) were treated
+   as "ready" for clustering, so clusters formed with missing chunks.
+   Now: chunks with blocks MUST have an LOD mesh AND be at Reduced tier.
+   Only truly empty chunks (no blocks) are skipped.
+
+2. Clusters were never rebuilt when new chunks loaded into their group.
+   Now: step 3 compares current vs desired membership and dissolves
+   stale clusters so step 4 recreates them with all members.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Fill flat ground around island for complete region coverage
+…
+8146bff
+```
+Added flat_extent (16 chunks) and flat_height (1 cell) to IslandGenConfig.
+Areas outside the island but within flat_extent get a single layer of
+blocks, ensuring no empty chunks in the playable area. The island terrain
+rises above the flat ground naturally.
+
+Use --clear-world default to regenerate.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Fix patchy clustering: remove tier check, add debug trace
+…
+401a53f
+```
+The cluster eligibility was requiring chunks to be at Reduced tier,
+but some chunks were stuck at Full or hadn't been processed by
+lod_update_system yet. The XZ distance check already ensures we
+don't cluster chunks too close to the player, so the tier check
+was redundant and caused gaps.
+
+Now: a 4×4 group clusters if:
+- XZ distance >= cluster_radius
+- Every chunk with blocks has an LOD mesh (regardless of tier)
+- At least one chunk has geometry
+
+Added trace logging for groups blocked by missing LOD meshes.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Reduce cluster_radius to 2, add warn logging for blocked clusters
+…
+04d0e05
+```
+cluster_radius 3→2 so clusters form closer to the player.
+Added warn-level logging for cluster groups that are far enough
+but can't cluster — shows exactly how many chunks are missing
+LOD meshes, helping diagnose the spawn-area clustering gap.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Revert "Reduce cluster_radius to 2, add warn logging for blocked clus…
+…
+066a36c
+```
+…ters"
+
+This reverts commit 64e4d62.
+```
+Cluster breaks apart when any chunk is Full or transitioning
+…
+5fe1ac7
+```
+Cluster eligibility now requires ALL chunks with blocks to be:
+- Has LOD mesh
+- At Reduced tier (not Full)
+- NOT in an active LodTransition
+
+If any chunk in a 4×4 group goes to Full tier or starts a dither
+transition (e.g. player approaching), the entire cluster dissolves
+and individual chunks render normally. The cluster reforms once
+all members settle back to Reduced.
+
+This prevents clusters from interfering with LOD0 transitions.
+
+https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+PR cleanup: remove dead code, fix same-frame cluster rebuild, warnings
+…
+7c0caf8
+```
+- Remove ~140 lines of dead demo chunk builders from world.rs (replaced
+  by the worldgen island generator) and their now-unused imports
+- Fix cluster step 4: commands.get_entity() can't observe a despawn
+  queued the same frame, so stale clusters dissolved for membership
+  changes were not rebuilt until the next frame. Track dissolved keys
+  in a local set instead.
+- render_stats_system: count total chunks in the main loop instead of
+  a second full query iteration
+- Remove 4 unused imports (Arc, CHUNK_Y_MIN, ChunkCoord, LodConfig)
+
+Zero warnings; 59 tests pass (1 pre-existing failure from main).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+Post-rebase: adapt main's new chamfer tests to Option<full_res>
+…
+1078a85
+```
+Main's new concave/showcase tests access result.full_res directly;
+this branch made it Option<ChunkMeshData> for lazy LOD-only meshing.
+Switch them to the full_res() accessor like the older tests.
+
+All 66 tests pass (main's chamfer fixes also resolved the previously
+failing cut_offset_single_wedge_convex).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015fK8QATf9wKZmMHBhgMoGu
+```
+yachtrock
+force-pushed
+the
+claude/plan-world-grid-system-U0mBJ
+branch
+from
+83a8ace to
+1078a85
+Compare
+July 22, 2026 22:34
+yachtrock
+merged commit 7e8b2d1
+into
+main
+Jul 22, 2026
+yachtrock
+deleted the
+claude/plan-world-grid-system-U0mBJ
+branch
+July 22, 2026 22:35
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

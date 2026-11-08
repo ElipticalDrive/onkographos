@@ -22,13 +22,13 @@ The `ShadowVolume` class maintains the following state [S1, unofficial]:
 
 ### Numbered Steps
 
-1. **Initialization**: Create a 3D texture with three mip levels. Level 0 has dimensions $(W, H, D)$, Level 1 has $(W/2, H/2, D/2)$, and Level 2 has $(W/4, H/4, D/4)$. The internal format is `GL_R8UI` [S1, unofficial]. Initialize `shadow_volume_mip0` as a zero-filled array of size $W \times H \times D$ bytes [S1, unofficial].
+1. **Initialization**: Create a 3D texture with three mip levels [S1, unofficial]. Level 0 has dimensions $(W, H, D)$, Level 1 has $(W/2, H/2, D/2)$, and Level 2 has $(W/4, H/4, D/4)$ [S1, unofficial]. The internal format is `GL_R8UI` [S1, unofficial]. Initialize `shadow_volume_mip0` as a zero-filled array of size $W \times H \times D$ bytes [S1, unofficial].
 
 2. **Voxel Position Calculation**: For each voxel $(x_v, y_v, z_v)$ in the input shape:
    - Calculate its world position by centering the voxel:
-     $$ \text{voxel\_pos} = \vec{3}(x_v, y_v, z_v) + \vec{3}(0.5, 0.5, 0.5) $$
+     $$ \text{voxel\_pos} = (x_v + 0.5, y_v + 0.5, z_v + 0.5) $$
    - Transform by the model matrix (assuming 10 units per meter):
-     $$ \text{voxel\_pos} = \text{model\_matrix} \times \vec{4}(\text{voxel\_pos}, 10.0) $$
+     $$ \text{voxel\_pos} = \text{model\_matrix} \times (x_v + 0.5, y_v + 0.5, z_v + 0.5, 10.0) $$
      [S1, unofficial]
 
 3. **Grid Coordinate Mapping**: Map the transformed world position to 3D texture grid coordinates $(x, y, z)$, centered in the grid:
@@ -39,7 +39,7 @@ The `ShadowVolume` class maintains the following state [S1, unofficial]:
 
 4. **Boundary Check**: If $x < 0$ or $x \geq \text{width}$ or $y < 0$ or $y \geq \text{height}$ or $z < 0$ or $z \geq \text{depth}$, skip the voxel [S1, unofficial].
 
-5. **Index Calculation**: Calculate the index in Level 0. Since 8 voxels share one index in the coarse grid (representing a 2x2x2 block), use integer division:
+5. **Index Calculation**: Calculate the index in Level 0 [S1, unofficial]. Since 8 voxels share one index in the coarse grid (representing a 2x2x2 block), use integer division:
    $$ \text{index} = \left\lfloor \frac{x}{2} \right\rfloor + \text{width} \times \left( \left\lfloor \frac{y}{2} \right\rfloor + \text{height} \times \left\lfloor \frac{z}{2} \right\rfloor \right) $$
    [S1, unofficial]
 
@@ -49,13 +49,13 @@ The `ShadowVolume` class maintains the following state [S1, unofficial]:
    $$ \text{shadow\_volume\_mip0}[\text{index}] \ |= \ (1 \ll \text{offset}) $$
    [S1, unofficial]
 
-7. **Mipmap Generation (Level 1)**: Iterate over Level 0 dimensions $(i, j, k)$. For each cell, compute the Level 1 index:
+7. **Mipmap Generation (Level 1)**: Iterate over Level 0 dimensions $(i, j, k)$ [S1, unofficial]. For each cell, compute the Level 1 index:
    $$ \text{index\_mip1} = \left\lfloor \frac{i}{2} \right\rfloor + \text{width\_mip1} \times \left( \left\lfloor \frac{j}{2} \right\rfloor + \text{height\_mip1} \times \left\lfloor \frac{k}{2} \right\rfloor \right) $$
    Perform a bitwise OR of the Level 0 cell into the Level 1 cell:
    $$ \text{shadow\_volume\_mip1}[\text{index\_mip1}] \ |= \ \text{shadow\_volume\_mip0}[\text{index}] $$
    [S1, unofficial]
 
-8. **Mipmap Generation (Level 2)**: Iterate over Level 1 dimensions $(i, j, k)$. Compute Level 2 index:
+8. **Mipmap Generation (Level 2)**: Iterate over Level 1 dimensions $(i, j, k)$ [S1, unofficial]. Compute Level 2 index:
    $$ \text{index\_mip2} = \left\lfloor \frac{i}{2} \right\rfloor + \text{width\_mip2} \times \left( \left\lfloor \frac{j}{2} \right\rfloor + \text{height\_mip2} \times \left\lfloor \frac{k}{2} \right\rfloor \right) $$
    Perform bitwise OR:
    $$ \text{shadow\_volume\_mip2}[\text{index\_mip2}] \ |= \ \text{shadow\_volume\_mip1}[\text{index}] $$
@@ -78,6 +78,17 @@ The `ShadowVolume` class maintains the following state [S1, unofficial]:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
+def mat4_mul_vec(m, v):
+    # Standard 4x4 matrix * 4-component vector multiplication
+    return (
+        m[0][0]*v[0] + m[1][0]*v[1] + m[2][0]*v[2] + m[3][0]*v[3],
+        m[0][1]*v[0] + m[1][1]*v[1] + m[2][1]*v[2] + m[3][1]*v[3],
+        m[0][2]*v[0] + m[1][2]*v[1] + m[2][2]*v[2] + m[3][2]*v[3],
+        m[0][3]*v[0] + m[1][3]*v[1] + m[2][3]*v[2] + m[3][3]*v[3]
+    )
+
 def shadow_volume_voxelization(width_m, height_m, depth_m, shapes):
     # Level 0 dimensions
     w0, h0, d0 = width_m, height_m, depth_m
@@ -95,19 +106,20 @@ def shadow_volume_voxelization(width_m, height_m, depth_m, shapes):
     for shape in shapes:
         model_matrix = shape.model_matrix
         # Iterate over voxels in the shape's local space
-        # Note: The exact iteration bounds for the shape are not specified in the sources.
         for xv, yv, zv in shape.get_voxel_indices():
             # Step 2: Calculate world position
             voxel_pos_centered = (xv + 0.5, yv + 0.5, zv + 0.5)
             # Transform by model matrix (assuming 10 units per meter)
             voxel_pos_homogeneous = (voxel_pos_centered[0], voxel_pos_centered[1], 
                                      voxel_pos_centered[2], 10.0)
-            voxel_pos_world = model_matrix.transform(voxel_pos_homogeneous)
+            voxel_pos_world = mat4_mul_vec(model_matrix, voxel_pos_homogeneous)
+            # Extract xyz components
+            voxel_pos_world = (voxel_pos_world[0], voxel_pos_world[1], voxel_pos_world[2])
             
             # Step 3: Map to grid coordinates
-            x = int(voxel_pos_world[0]) + width_m // 2
-            y = int(voxel_pos_world[1])
-            z = int(voxel_pos_world[2]) + depth_m // 2
+            x = math.floor(voxel_pos_world[0]) + width_m // 2
+            y = math.floor(voxel_pos_world[1])
+            z = math.floor(voxel_pos_world[2]) + depth_m // 2
             
             # Step 4: Boundary check
             if x < 0 or x >= width_m or y < 0 or y >= height_m or z < 0 or z >= depth_m:

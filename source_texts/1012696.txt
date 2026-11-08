@@ -1,0 +1,354 @@
+A collection of arcade games and different scenarios to train an adaptable generic AI model that can compete humans without being limited to a single game. Training is done in-browser with low amount of inputs for performance EDIT: This was a proof of concept done in 2021 before cool AI stuff, it was touched with AI since - Cave: exact mesh contacts, robust slab resolution, fixed-offset camera by zeachco · Pull Request #3 · zeachco/phantom-game-ai-training
+
+Cave: exact mesh contacts, robust slab resolution, fixed-offset camera by zeachco · Pull Request #3 · zeachco/phantom-game-ai-training · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+zeachco
+commented
+Oct 11, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Cave#nearestRadial now collides against the exact rendered rock mesh (cached per-row rings/patches) instead of the analytic radial approximation, so sphere contacts match the drawn surface on steep banks, ramps and rock features. The old surface-gradient normal correction is removed.
+Ball physics: adaptive substepping keeps every integration step under half a ball radius (including fast falls), preventing tunneling between steps. Rock and bronze-slab contact resolution alternate for up to 64 passes so a curved slab meeting a bank clears both contacts; ordinary contacts still exit early.
+WallSolid: zero-area collapsed triangles are excluded from rendering and collision queries (closestPointToPoint could yield NaN), and the wall half-angle comparison gains an epsilon so generated end columns never degenerate.
+ChaseCamera: replaced the cave-axis blend/look-ahead/curve-amplification/FOV-fit camera with a fixed world-space offset behind the ball. The close-obstruction depthTest fallback and its material hacks in main.ts are removed. Config loses CAMERA_BALL_BLEND, CAMERA_LOOK_AHEAD_SECTIONS and CAMERA_CURVE_AMPLIFICATION; gains CAMERA_FOLLOW_HEIGHT.
+Evidence
+bun test: 50 pass / 0 fail (110k assertions), 5.6s
+bun run build (tsc + vite): green
+biome check: 20 diagnostics, identical count and kinds before and after this change (pre-existing; dist/ noise dominates a bare bun run lint)
+Risk
+Camera behavior is intentionally much simpler; framing near walls is no longer guaranteed by pull-in logic (fixed offset instead).
+nearestRadial allocates a cached ring/patch per cave row; eviction mirrors the existing chunk eviction.
+Rollout
+Single commit on a feature branch; revert by deleting the branch. No data or protocol changes.
+Cave: exact mesh contacts, robust slab resolution, fixed-offset camera
+…
+a71f723
+```
+- Cave#nearestRadial now queries the exact rendered rock triangles
+  (cached per-row rings/patches) instead of the analytic radial
+  approximation, so steep banks and rock features match what is drawn.
+  The surface-gradient normal correction is no longer needed.
+- WallSolid skips zero-area collapsed triangles; the seeded wall-angle
+  epsilon keeps end-column extrusions from degenerating, and
+  closestPointToPoint NaN results are rejected.
+- Ball: adaptive substeps keep each integration step under half a
+  radius, including fast falls (no tunneling between steps). Rock and
+  bronze-slab resolution alternate up to 64 passes so a curved slab
+  meeting a bank clears both contacts.
+- ChaseCamera is a fixed world-space offset behind the ball; the
+  cave-axis blend, look-ahead aim, FOV fitting and the close-obstruction
+  depthTest fallback are removed along with their config knobs.
+- Tests rewritten for the fixed camera and added for slab triangle
+  validity, front-face contacts, mesh-exact rock contacts and
+  fall tunneling.
+```
+zeachco
+commented
+Oct 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Code review (zeachco style)
+Good work: the new tests validate collisions against independently sampled rendered geometry (Raycaster crossings, matrixWorld triangle walks) instead of the same math under test — exactly the right evidence for a "collision must match what is drawn" change. The NaN guard and wall-angle epsilon both close plausible corruption paths, and the removed config knobs have zero stale references. bun test 50/50, build green, lint diagnostics identical to main (all pre-existing).
+1. main.ts:53 — wireframe defaults to on. Blocker (or explain)
+let wireframe = true renders the cave and both ball materials as wireframe; main had false. Reads like a leftover from visually verifying mesh contacts. If deliberate for this dev phase, say so; otherwise initialize to false (the backtick toggle still works).
+2. ChaseCamera.ts — fixed world-space offset ≠ behind the ball. Should-fix
+Verified with the path generator: seed 7 tangent z reaches +0.025, seed 40 +0.377, and pure ±X runs have z ≈ 0. On those stretches the +Z-offset camera sits beside or in front of the ball, and the view snaps 180° when the ball crosses the camera's z-plane. Either offset along the negated tangent/velocity (keeping the no-smoothing property the tests assert), or record the accepted limitation in this PR.
+3. ChaseCamera.ts / main.ts — camera can enter rock, no fallback. Question
+The clearance ray + depthTest hack are gone; a narrowing tunnel or wall feature between camera and ball now yields a hidden ball with no mitigation. If "briefly hidden ball" is the accepted price of the simplification, make that acceptance explicit.
+4. Ball.ts contact loop — measure it. Should-fix (perf)
+#resolveRock runs every pass of the up-to-64-pass loop, and each call is a mesh scan (9 rows × 40 patches × 2 triangles, bounds-pruned) per substep per ball — even in the common 1-pass case. Worst case ~46k point-triangle queries per substep. Please measure frame time on seed 5 with 6+ balls vs main; if noticeable, skip the scan when position/velocity didn't change since the last pass, or lower the alternation bound (tests exercise far fewer than 64).
+5. Ball.ts:537 — substep estimate clamps horizontal speed. Should-fix
+Math.min(Math.hypot(vx, vz), effectiveMaxSpeed()) bounds the estimate, but the integration uses the real velocity — bounces/slope launches can exceed the cap, so a step can exceed half a radius exactly when moving fastest. Use the actual horizontal speed or comment why the cap is safe.
+6. Cave.ts #nearestRock — degenerate result when no rows queried. Question
+If all candidates fall below #controlOffset * SAMPLES, best stays Infinity → dist = -Infinity with stale #rockNearest/#rockNormal; the ball silently passes through rock. Likely unreachable, but an isFinite(best) guard would make failure explicit.
+7. #nearestRock — #rockClosest doubles as scratch delta. Nit
+subVectors overwrites the closest-point vector with the delta; correct but requires tracing the aliasing. Comment or separate scratch vector.
+8. tests/cave-path.test.ts — magic frame f === 59. Nit
+Derive from speed/distance or assert "was ≤ front+1 at some frame", else tuning silently voids the check.
+9. tests/cave-terrain.test.ts — golden coordinates. Nit
+Fine as independent samples, but one comment on how they were sampled prevents future "fixes" to match the implementation.
+Verdict: approve after #1 and #5; #2 and #3 need an explicit fix-or-accept decision.
+zeachco
+commented
+Oct 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+self-review: Context and intent
+Context
+Problem/request: The cave game's sphere-vs-terrain contacts did not match the drawn surface: the analytic radial approximation missed steep banks, ramps and rock features (visible gap between what the mesh draws and where the ball stops), fast falls could tunnel through bronze slabs between fixed physics substeps, and collapsed (zero-area) slab faces could poison closestPointToPoint with NaN distances. Separately, the chase camera had accumulated four interacting mechanisms (cave-axis blend, look-ahead aim, curve amplification, FOV fitting, plus a close-obstruction depthTest fallback) whose interplay was hard to reason about and harder to test.
+Affected users/systems: Anyone playing the cave game (src/games/cave); the AI-training loop that depends on honest terrain sensors and collisions.
+Evidence/root cause: The pre-existing failing/incorrect-contact stretch motivated commits 352753e and c804de9; the new tests (seed 3 sphere contacts use the visible rock on steep banks and ceilings, a fast fall cannot tunnel through a slab between physics steps) pin the defect being fixed.
+Desired behavior: A ball resting or rolling against rock stays exactly radius away from the rendered triangles; a ball falling at any achievable speed cannot skip a slab in one step; the camera is a simple, deterministic function of ball position.
+Goal and non-goals
+This PR will: make Cave#nearestRadial query the exact rendered rock mesh (cached rings/patches); make WallSolid reject zero-area triangles and degenerate end columns; adaptively substep integration so each step is < half a ball radius including falls; alternate rock/slab contact resolution until both clear; replace the chase camera with a fixed world-space offset; remove the depthTest fallback and its material hacks.
+This PR will not: change scoring, gates, path/feature generation, sensors (Sensor.ts ray queries untouched), or any non-cave game.
+zeachco
+commented
+Oct 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+self-review: Design, tradeoffs and evidence
+Change and scope
+Affected: src/games/cave/classes/{Cave,Ball,WallSolid,ChaseCamera,Config}.ts, src/games/cave/main.ts, four test files.
+Behavior changes: sphere contacts now resolve against mesh triangles (steep banks/ceilings included); falls can no longer tunnel; camera is a fixed offset (0, +CAMERA_FOLLOW_HEIGHT, +CAMERA_FOLLOW_DISTANCE) in world space with fixed 72° lens.
+Config: removed CAMERA_BALL_BLEND, CAMERA_LOOK_AHEAD_SECTIONS, CAMERA_CURVE_AMPLIFICATION; added CAMERA_FOLLOW_HEIGHT. No stale references remain.
+Deliberately not changing: wallRayDistance/castWheelRay (still used by Sensor.ts), feature/path generation, all other games.
+Design and tradeoffs
+Why mesh-exact contacts: "collision must match what is drawn" is the game's core fairness property; approximating the analytic tube again invites the same drift the new tests catch. Ring/patch caches mirror the existing per-chunk eviction, so memory stays bounded with the streamed terrain.
+Why the fixed camera: the previous blend/look-ahead/FOV-fit stack was five interacting mechanisms with heavy test scaffolding; a pure function of ball position is trivially testable and jitter-free. Tradeoff accepted: no obstruction clearance and no direction following — on lateral tunnel stretches the view is sideways rather than behind (verified: seed 7 tangent z reaches +0.025, seed 40 +0.377), and the ball can be briefly hidden behind rock. This is pending an explicit accept-or-fix decision (review findings Add circuit boost clones #2/Cave: exact mesh contacts, robust slab resolution, fixed-offset camera #3).
+Why adaptive substeps: velocity-scaled step length is the smallest change that removes tunneling without a global physics-freq bump; the estimate clamps horizontal speed at effectiveMaxSpeed, which is the one known soft spot (review finding #5).
+Alternatives rejected: widening PHYSICS_SUBSTEPS globally (costs everyone for a rare case); keeping the analytic radial normal and patching it per-feature (what this PR removes — it was the root cause).
+Acceptance criteria
+Given a ball resting against any rendered rock triangle, distance to that triangle ≥ radius − 0.001 (covered: seed 3 banks/ceilings, seed 5 slabs).
+Given a fall at any speed, the ball never appears below a slab deck between frames (covered).
+Given any ball position, camera pose is the fixed offset — jump, impact, respawn, direction and speed cannot alter it (covered).
+Testing and evidence
+bun test: 50 pass / 0 fail, 110,245 assertions in 5.6s.
+bun run build (tsc + vite): green.
+biome check src tests: 20 diagnostics, identical count and kinds before and after this change (pre-existing; a bare bun run lint additionally scans ignored dist/).
+Not tested: manual browser play; frame-time measurement of the 64-pass contact loop vs main (review finding #4) — unknown until measured, seed 5 with several balls is the suggested benchmark.
+zeachco
+commented
+Oct 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+self-review: Reviewer focus, safety and links
+Reviewer focus
+Camera directionality (ChaseCamera.ts): fixed world-space +Z offset vs tunnel direction — seed 7/40 have lateral/+Z stretches (measured). Accept the limitation explicitly or offset along the negated tangent.
+Contact-loop cost (Ball.ts): #resolveRock mesh scan runs every pass of the up-to-64-pass loop, per substep per ball; needs a frame-time measurement vs main.
+Substep estimate clamp (Ball.ts:537): min(hypot(vx,vz), effectiveMaxSpeed()) can undercount when bounces/slopes exceed the cap — step length then exceeds half a radius exactly at peak speed.
+Degenerate rock query (Cave.ts #nearestRock): if all row candidates fall outside the generated window, result is dist = -Infinity with stale cached normal — ball would silently pass through rock; cheap isFinite guard would make it explicit.
+Wireframe default (main.ts:53): wireframe = true — diagnostic leftover or intentional for this phase? Decision needed before merge.
+Release safety
+Rollout: single feature branch; merges to main like prior cave commits; no flags, migrations, or data changes.
+Rollback: delete/git revert the merge commit — no persistence or protocol coupling.
+Monitoring: gameplay-visible symptoms to watch after merge: camera sideways/front views on lateral stretches (finding switched to vite and added highway project #1 above), ball visibly clipping near slab/bank corners, frame dips in slab-dense stretches.
+Owner/follow-up: findings switched to vite and added highway project #1–#5 on this PR are the open list; the two review comments above (code review, context/design) carry the same IDs.
+Links
+Code review comment: Cave: exact mesh contacts, robust slab resolution, fixed-offset camera #3 (comment)
+Context/scope comment: Cave: exact mesh contacts, robust slab resolution, fixed-offset camera #3 (comment)
+Design/evidence comment: Cave: exact mesh contacts, robust slab resolution, fixed-offset camera #3 (comment)
+zeachco
+commented
+Oct 11, 2026
+View reviewed changes
+zeachco
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+self-review: inline findings mirrored from the summary review (see PR comment). Findings #1–#5 are the approval blockers/questions; the nits are optional.
+Comment thread
+src/games/cave/main.ts
+Outdated
+);
+const cave = new Cave(seed, scene);
+let wireframe = true;
+zeachco
+Oct 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+self-review: Blocker (or explain). wireframe = true renders the cave and both ball materials as wireframe; main had false. This reads like a leftover from visually verifying mesh contacts against collision. If it is deliberate for this dev phase, record that in the PR description; otherwise the smallest fix is initializing to false — the backtick toggle already flips it at runtime.
+Comment thread
+src/games/cave/classes/ChaseCamera.ts
+verticalFov,
+2 * Math.atan(Math.tan(verticalFov / 2) * camera.aspect),
+update(camera: PerspectiveCamera, ball: Ball) {
+camera.position.set(
+zeachco
+Oct 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+self-review: Should-fix. The offset is fixed in world space (+Z), not "behind the ball". Measured with the path generator: seed 7 tangent z reaches +0.025, seed 40 +0.377, and pure ±X runs have z ≈ 0 — there the camera sits beside or in front of the ball, and the view snaps 180° when the ball crosses the camera's z-plane. Smallest improvement: offset along the negated tangent/velocity direction (keeping the no-blend, no-smoothing property the tests assert), or record the accepted limitation explicitly.
+Comment thread
+src/games/cave/classes/Ball.ts
+for (let pass = 0; pass < 6; pass++) {
+// Curved slabs meeting a bank can require several alternating pushes
+// before both contacts are clear. Ordinary contacts still exit early.
+for (let pass = 0; pass < 64; pass++) {
+zeachco
+Oct 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+self-review: Should-fix (perf). #resolveRock runs on every pass of this up-to-64-iteration loop, and each call is a mesh scan (9 rows × 40 patches × 2 triangles, bounds-pruned) per substep per ball — including the common 1-pass case. Worst case ≈ 46k point-triangle queries per substep when slab⇄rock contacts alternate. Consequence: frame-time regression concentrated in slab-dense stretches with several balls. Please measure frame time on seed 5 with 6+ balls vs main; if noticeable, skip the scan when position/velocity did not change since the last pass, or lower the alternation bound (the tests exercise far fewer than 64).
+Comment thread
+src/games/cave/classes/Ball.ts
+Outdated
+config.PHYSICS_SUBSTEPS,
+Math.ceil(
+Math.hypot(
+Math.min(Math.hypot(this.vx, this.vz), this.effectiveMaxSpeed()),
+zeachco
+Oct 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+self-review: Should-fix. Math.min(hypot(vx, vz), effectiveMaxSpeed()) clamps the estimate, but the integration below uses the real velocity — bounces and slope launches can exceed effectiveMaxSpeed, so a step can exceed half a radius exactly when moving fastest, violating the "< half a radius" guarantee in the edge case it exists for. Use the actual horizontal speed (the count is already velocity-bounded), or comment why the cap cannot be exceeded.
+Comment thread
+src/games/cave/classes/Cave.ts
+const column = Math.floor(
+(((out.a % TWO_PI) + TWO_PI) % TWO_PI) / WALL_ANGLE_STEP,
+);
+let best = Infinity;
+zeachco
+Oct 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+self-review: Question. If every row candidate falls below #controlOffset * SAMPLES (see the guard two loops down), best stays Infinity and the hit returns dist = -Infinity with a stale #rockNearest/#rockNormal from a previous call — the ball would silently pass through rock. Likely unreachable while the ball stays inside the generated window, but a cheap if (!Number.isFinite(best)) neutral fallback would make the failure mode explicit instead of silent.
+Comment thread
+src/games/cave/classes/Cave.ts
+Outdated
+this.#rockNearest.copy(this.#rockClosest);
+this.#rockNormal.copy(normal);
+outside =
+this.#rockClosest
+zeachco
+Oct 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+self-review: Nit. #rockClosest is reused as the scratch delta for the outside test (subVectors(point, nearest)), then overwritten as a closest-point target on the next loop iteration. Correct, but a reader must trace the aliasing to believe it. A one-line comment or a dedicated scratch vector keeps it obvious.
+Comment thread
+tests/cave-path.test.ts
+Outdated
+}
+// Exact sloped rock normals can eventually carry an unsteered ball
+// around the side. Check the direct impact before that valid pass.
+if (f === 59) expect(ball.s).toBeLessThanOrEqual(front + 1);
+zeachco
+Oct 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+self-review: Nit. The direct-impact assertion fires at exactly one hardcoded frame. If ball speed or slab distance tuning changes, it silently stops checking anything. Derive the frame from speed/distance, or assert "ball.s was ≤ front + 1 at some frame" so the check survives retuning.
+Comment thread
+tests/cave-terrain.test.ts
+// Independently sampled rendered back/deck faces near gates 4 and 7.
+for (const [x, y, z, s] of [
+[
+191.26767269208068, -16.5014736280183, -2329.5698313627,
+zeachco
+Oct 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+self-review: Nit. These golden coordinates are fine because they are independently sampled, but nothing here says how. One comment ("sampled from the rendered seed-5 mesh via Raycaster") prevents a future reader from "fixing" them to match the implementation under test.
+Address review: tangent camera, boom collision, cheaper contacts
+…
+b7ab9c5
+```
+- main.ts: wireframe is opt-in again (was left true from mesh debugging).
+- ChaseCamera: follow behind the ball's negated horizontal tangent instead of
+  a fixed world +Z, so lateral stretches no longer put the camera beside or in
+  front of the ball. Shorten the boom when castRay finds rock between the ball
+  and camera, so a narrowing tunnel cannot hide the ball. Keeps the
+  no-smoothing, pure-function pose.
+- Ball: bound substeps by the real integration velocity; the effective-speed
+  clamp could under-substep a bounce or slope launch above the cap.
+- Cave: split the centerline locate out of nearestRadial so the per-substep
+  progress query stops doing the exact-mesh scan; drop the redundant
+  confirmation scan after a resolved rock contact. Restores frame cost to
+  the pre-PR level while keeping exact contacts.
+- Cave#nearestRock: throw when no candidate row is queried instead of leaving
+  stale nearest/normal, and stop aliasing #rockClosest as the delta scratch.
+- Tests: rewrite camera tests for the tangent boom and collision pull-in,
+  replace the magic frame 59 check with an approach bound, document the golden
+  contact samples.
+
+bun test 53/53, build green, biome diagnostics same errors and one fewer
+warning than before this commit.
+```
+zeachco
+commented
+Oct 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+self-review: all findings addressed in b7ab9c5.
+wireframe — fixed. let wireframe = false; the backtick toggle is unchanged.
+camera behind the ball — fixed. The boom is now the negated horizontal tangent (velocity, then +Z, as fallbacks), so lateral stretches no longer put the camera beside/in front of the ball. The pose stays a pure function of the current ball state (asserted by a no-lag test that returns to a prior state).
+camera in rock — fixed rather than accepted. ChaseCamera.update takes an optional Cave and runs castRay along the boom, shortening it by CAMERA_COLLISION_MARGIN (2) when rock sits between the ball and camera. Covered by a stub-cave test.
+contact-loop cost — measured and reduced. Two changes: the per-substep progress query now calls a new Cave#locate (centerline s,a only) instead of nearestRadial, and the redundant confirmation scan after an already-resolved rock contact is gone. On seed 5 with 8 balls the benchmark is noisy but back at the pre-PR level; structurally this removes ~1 exact 9×40×2 mesh scan per substep per ball. I intentionally kept the 64-pass alternation bound: an A/B showed the seed-5 slab/bank case needs many alternating pushes (it fails below ~16), so the win is dropping redundant scans, not capping the loop.
+substep velocity — fixed. The estimate now uses the real horizontal speed; the effectiveMaxSpeed() clamp is gone, so a bounce/slope launch above the cap still substeps below half a radius.
+#nearestRock degenerate result — fixed. Number.isFinite(best) is checked and throws with the query point and s, instead of leaving stale nearest/normal.
+#rockClosest aliasing — fixed, added #rockDelta scratch and use it for the point-to-closest delta.
+magic frame 59 — replaced with an approachMaxS bound: until the first contact the ball must not have passed the wall's leading face (s <= front + 1).
+golden coordinates — documented how the seed-5 samples were taken (chunk-mesh triangle midpoint offset inward by a ball radius).
+Evidence: bun test 53 pass / 0 fail (110k assertions), bun run build green, biome diagnostics unchanged in errors and one fewer warning than before this commit.
+Hide details
+View details
+zeachco
+merged commit 3e59318
+into
+main
+Oct 11, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

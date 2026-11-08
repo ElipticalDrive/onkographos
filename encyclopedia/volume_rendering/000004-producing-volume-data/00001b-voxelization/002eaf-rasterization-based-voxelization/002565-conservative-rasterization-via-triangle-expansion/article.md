@@ -7,14 +7,14 @@ This method eliminates voxelization holes caused by standard rasterization, whic
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Triangle vertices in clip space ($P_0, P_1, P_2$), each a `vec4` $(x, y, z, w)$.
-- Output: Expanded triangle vertices in clip space, which are then rasterized by the hardware.
+- Input: Triangle vertices in clip space ($P_0, P_1, P_2$), each a `vec4` $(x, y, z, w)$ [S1, unofficial].
+- Output: Expanded triangle vertices in clip space, which are then rasterized by the hardware [S1, unofficial].
 
 **Data Structures:**
-- `vec4 pos[3]`: Array of three clip-space vertices.
-- `vec3 edgePlanes[3]`: Array of three homogeneous plane normals.
-- `vec4 aabb`: Axis-Aligned Bounding Box storing min $(x, y)$ and max $(z, w)$ in clip space.
-- `vec2 halfPixel`: Half-pixel diagonal distance in clip space.
+- `vec4 pos[3]`: Array of three clip-space vertices [S1, unofficial].
+- `vec3 edgePlanes[3]`: Array of three homogeneous plane normals [S1, unofficial].
+- `vec4 aabb`: Axis-Aligned Bounding Box storing min $(x, y)$ and max $(z, w)$ in clip space [S1, unofficial].
+- `vec2 pixelDiagonal`: Half-pixel diagonal distance in clip space [S1, unofficial].
 
 **Numbered Steps:**
 
@@ -26,154 +26,69 @@ This method eliminates voxelization holes caused by standard rasterization, whic
     $$ N = (P_i.xyw - P_j.xyw) \times P_j.xyw $$
     This defines a plane passing through the origin in homogeneous space, representing the line segment in 2D [S1, unofficial].
 
-3.  **Expand Edge Planes:** Offset each plane normal's $z$ component (the constant term in the homogeneous line equation) outward. The offset distance is determined by the projection of the half-pixel size onto the plane's normal [S1, unofficial]:
-    $$ N.z \leftarrow N.z - \text{dot}(halfPixel, |N.xy|) $$
+3.  **Expand Edge Planes:** Offset each plane normal's $z$ component (the constant term in the homogeneous line equation) outward [S1, unofficial]. The offset distance is determined by the projection of the half-pixel size onto the plane's normal [S1, unofficial]:
+    $$ N.z \leftarrow N.z - \text{dot}(pixelDiagonal, |N.xy|) $$
     This moves the edge outward, effectively expanding the triangle boundary [S1, unofficial].
 
-4.  **Compute New Vertices:** Calculate the intersection lines of the expanded planes. The intersection line vector of two planes is the cross product of their normals. Find the intersection of these lines with the original triangle plane to determine the new vertex positions [S1, unofficial].
+4.  **Compute New Vertices:** Calculate the intersection lines of the expanded planes [S1, unofficial]. The intersection line vector of two planes is the cross product of their normals [G]. Find the intersection of these lines with the original triangle plane to determine the new vertex positions [S1, unofficial].
 
-5.  **Fragment Shader Culling:** In the fragment shader, calculate the barycentric coordinates or distance to the original triangle edges. Discard fragments that lie within the expanded region but outside the original triangle to prevent over-rasterization [S1, unofficial].
+5.  **Fragment Shader Culling:** In the fragment shader, calculate the barycentric coordinates or distance to the original triangle edges [S1, unofficial]. Discard fragments that lie within the expanded region but outside the original triangle to prevent over-rasterization [S1, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def conservative_rasterization_expand(pos: list[vec4], half_pixel: vec2) -> list[vec4]:
+def conservative_rasterization_expand(pos: list[tuple[float, float, float, float]], pixel_diagonal: tuple[float, float]) -> list[tuple[float, float, float, float]]:
     """
     Expands a triangle in clip space to ensure conservative rasterization coverage.
-    pos: List of 3 vec4 clip-space vertices.
-    half_pixel: vec2 representing half-pixel diagonal in clip space.
+    pos: List of 3 vec4 clip-space vertices (x, y, z, w).
+    pixel_diagonal: Tuple (dx, dy) representing half-pixel diagonal in clip space.
     Returns: List of 3 expanded vec4 vertices.
     """
     # Step 1: Calculate AABB and expand
-    # Note: AABB expansion is used for culling in fragment shader, 
-    # but the core expansion happens via plane offsets.
-    # The source code snippet shows AABB calculation for potential culling bounds.
-    aabb_min = min(pos[0].xy, min(pos[1].xy, pos[2].xy))
-    aabb_max = max(pos[0].xy, max(pos[1].xy, pos[2].xy))
-    aabb_min -= half_pixel
-    aabb_max += half_pixel
-    
-    # Step 2: Compute homogeneous edge planes
-    # Edge 0: P2 -> P0
-    # Edge 1: P0 -> P1
-    # Edge 2: P1 -> P2
-    # Using xyw components for homogeneous 2D line representation
-    edge_planes = [
-        cross(pos[0].xyw - pos[2].xyw, pos[2].xyw),
-        cross(pos[1].xyw - pos[0].xyw, pos[0].xyw),
-        cross(pos[2].xyw - pos[1].xyw, pos[1].xyw)
-    ]
-    
-    # Step 3: Expand edge planes
-    # Offset the constant term (z) by the projection of half-pixel onto the normal
-    for i in range(3):
-        # abs(edge_planes[i].xy) computes the absolute values of x and y components
-        offset = dot(half_pixel, abs(edge_planes[i].xy))
-        edge_planes[i].z -= offset
-        
-    # Step 4: Compute new vertices
-    # The source text mentions calculating intersection of expanded planes with the triangle plane.
-    # However, the provided GLSL snippet stops at plane expansion.
-    # A complete implementation would solve for the new vertices.
-    # Since the source does not provide the explicit vertex solving formula, 
-    # we note that the new vertices are found at the intersection of the expanded planes.
-    
-    # Placeholder for vertex solving logic not explicitly detailed in source snippet
-    # but implied by "calculate the intersection of the expanded edge planes with the triangle plane"
-    new_pos = solve_new_vertices(pos, edge_planes)
-    
-    return new_pos
+    xs = [v[0] for v in pos]
+    ys = [v[1] for v in pos]
+    aabb_min = (min(xs), min(ys))
+    aabb_max = (max(xs), max(ys))
+    aabb_min = (aabb_min[0] - pixel_diagonal[0], aabb_min[1] - pixel_diagonal[1])
+    aabb_max = (aabb_max[0] + pixel_diagonal[0], aabb_max[1] + pixel_diagonal[1])
 
-def solve_new_vertices(pos: list[vec4], edge_planes: list[vec3]) -> list[vec4]:
-    """
-    Solves for the new vertices by intersecting the expanded homogeneous planes.
-    This is a conceptual implementation of the step described in the source.
-    """
-    # The intersection of two homogeneous planes (lines in 2D) is a point.
-    # However, we need the intersection of the expanded edges with the original triangle plane.
-    # In homogeneous coordinates, the intersection of two lines L1 and L2 is L1 x L2.
-    # The new vertex V_i is the intersection of the expanded edges E_i and E_{i-1}.
-    
+    # Helper functions for 3D vector operations
+    def cross3d(a: tuple, b: tuple) -> tuple:
+        return (a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0])
+    def dot3d(a: tuple, b: tuple) -> float:
+        return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+    # Step 2: Compute homogeneous edge planes
+    # Edge 0: P2 -> P0, Edge 1: P0 -> P1, Edge 2: P1 -> P2
+    edge_planes = []
+    edge_planes.append(cross3d((pos[0][0]-pos[2][0], pos[0][1]-pos[2][1], pos[0][3]-pos[2][3]), (pos[2][0], pos[2][1], pos[2][3])))
+    edge_planes.append(cross3d((pos[1][0]-pos[0][0], pos[1][1]-pos[0][1], pos[1][3]-pos[0][3]), (pos[0][0], pos[0][1], pos[0][3])))
+    edge_planes.append(cross3d((pos[2][0]-pos[1][0], pos[2][1]-pos[1][1], pos[2][3]-pos[1][3]), (pos[1][0], pos[1][1], pos[1][3])))
+
+    # Step 3: Expand edge planes
+    for i in range(3):
+        # Compute dot(pixel_diagonal, abs(N.xy)) safely for 2D inputs
+        offset = pixel_diagonal[0] * abs(edge_planes[i][0]) + pixel_diagonal[1] * abs(edge_planes[i][1])
+        edge_planes[i] = (edge_planes[i][0], edge_planes[i][1], edge_planes[i][2] - offset)
+
+    # Step 4: Compute new vertices
+    # The intersection of two homogeneous lines L1 and L2 is L1 x L2
     new_pos = []
     for i in range(3):
-        # Intersection of expanded plane i and expanded plane (i+1)%3
-        # Note: The order of planes in edge_planes corresponds to edges.
-        # We need to intersect the two planes meeting at vertex i.
-        # Based on the source: edgePlanes[0] is P2->P0, edgePlanes[1] is P0->P1, etc.
-        # Vertex 0 is between Edge 2 (P1->P0? No, P0->P1 is Edge 1, P2->P0 is Edge 0)
-        # Let's assume standard cyclic order.
-        # Vertex 0 is intersection of Edge 2 (P1->P2? No) and Edge 0 (P2->P0).
-        # Actually, let's look at the cross product order.
-        # edgePlanes[0] = cross(P0-P2, P2). This is the line P2->P0.
-        # edgePlanes[1] = cross(P1-P0, P0). This is the line P0->P1.
-        # edgePlanes[2] = cross(P2-P1, P1). This is the line P1->P2.
-        
-        # Vertex 0 is the intersection of Edge 2 (P1->P2) and Edge 0 (P2->P0)? No.
-        # Vertex 0 is the start of Edge 1 and end of Edge 2.
-        # So Vertex 0 is intersection of Edge 2 and Edge 1?
-        # Let's intersect Edge 2 and Edge 1 for Vertex 0?
-        # Actually, the source says "calculate the intersection of the expanded edge planes with the triangle plane".
-        # This implies a 3D intersection.
-        
-        # Simplified approach: The new vertex is the intersection of the two expanded lines in 2D homogeneous space.
-        # Line L1: edgePlanes[i]
-        # Line L2: edgePlanes[(i+1)%3]
-        # Intersection point in 2D homogeneous coords: cross(L1, L2)
-        
-        # However, the source mentions "intersection ... with the triangle plane".
-        # Since we are in clip space, and assuming orthographic projection (w=1),
-        # the 2D homogeneous intersection is sufficient for the x,y,w coordinates.
-        
-        # Let's compute the intersection of the two expanded planes meeting at vertex i.
-        # For vertex 0, the edges are Edge 2 (P1->P2) and Edge 0 (P2->P0)? No.
-        # Vertex 0 is connected to Edge 1 (P0->P1) and Edge 2 (P1->P0? No, P2->P0 is Edge 0).
-        # Vertex 0 is the common point of Edge 0 (P2->P0) and Edge 1 (P0->P1).
-        # So Vertex 0 is intersection of Edge 0 and Edge 1.
-        
-        # Wait, Edge 0 is P2->P0. Edge 1 is P0->P1. They meet at P0.
-        # So Vertex 0 is intersection of Edge 0 and Edge 1.
-        # Vertex 1 is intersection of Edge 1 and Edge 2.
-        # Vertex 2 is intersection of Edge 2 and Edge 0.
-        
-        p1 = edge_planes[i]
-        p2 = edge_planes[(i + 1) % 3]
-        
-        # Intersection of two homogeneous lines
-        intersect = cross(p1, p2)
-        
-        # Convert back to clip space vertex
-        # The result is a vec3 (x, y, w). We need to reconstruct z.
-        # Since the expansion is in xyw space, z is not directly affected by the 2D expansion.
-        # However, the source says "ignore z component" for the plane calculation.
-        # The new vertex should retain the original z/w relationship or be interpolated.
-        # For conservative rasterization, the z value is often kept from the original vertex 
-        # or interpolated based on the new x,y.
-        
-        # Reconstruct vec4
-        # If w is 0, handle division by zero (though unlikely in clip space for valid triangles)
-        if intersect.w != 0:
-            x = intersect.x / intersect.w
-            y = intersect.y / intersect.w
-            # z is not computed in the 2D expansion. 
-            # We assume the original z/w ratio is preserved or z is interpolated.
-            # A common approach is to use the original z and w to find the new z.
-            # But since we are in clip space, and the expansion is 2D, 
-            # the new vertex's z is often just the original z if the projection is orthographic.
-            # For perspective, it's more complex.
-            # The source mentions "orthographic projection" as a simplification.
-            # Assuming general case, we might need to project back.
-            
-            # Let's assume the new vertex is (x, y, original_z, 1.0) if w=1.
-            # But the source uses vec4 pos.
-            
-            # Given the ambiguity in the source for the final vertex reconstruction,
-            # we note that the new vertex is derived from the homogeneous intersection.
-            new_pos.append(vec4(x, y, pos[i].z, 1.0)) # Placeholder for z reconstruction
+        # Vertex i is the intersection of edge plane i and edge plane (i+1)%3
+        intersect = cross3d(edge_planes[i], edge_planes[(i + 1) % 3])
+        # Convert homogeneous point (x, y, w) to clip space
+        if intersect[2] != 0:
+            x = intersect[0] / intersect[2]
+            y = intersect[1] / intersect[2]
+            # z is preserved from the original vertex as the expansion is purely 2D in xyw [G]
+            z = pos[i][2]
+            w = 1.0
+            new_pos.append((x, y, z, w))
         else:
-            new_pos.append(pos[i]) # Fallback
-            
+            new_pos.append(pos[i])
     return new_pos
 ```
 
@@ -181,8 +96,8 @@ def solve_new_vertices(pos: list[vec4], edge_planes: list[vec3]) -> list[vec4]:
 - `pixelDiagonal`: Half the diagonal length of a pixel in clip space [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- Precision issues may arise if the triangle is very small or very large in clip space.
-- Degenerate triangles (zero area) may produce undefined plane normals.
+- Precision issues may arise if the triangle is very small or very large in clip space [G].
+- Degenerate triangles (zero area) may produce undefined plane normals [G].
 - The method assumes orthographic projection for the simplified 2D homogeneous line interpretation; perspective projection requires careful handling of the $w$ component [S1, unofficial].
 
 ## Subtopics
@@ -194,14 +109,14 @@ Uses hardware extensions for conservative rasterization. Choose when hardware su
 Rasterizes directly into a 3D grid. Choose when avoiding 2D projection artifacts is critical.
 
 ## Operating characteristics
-- **Time Complexity:** Linear with respect to the number of triangles, as each triangle is processed in the geometry shader.
-- **Memory Complexity:** Low, as it only stores temporary plane data in the geometry shader.
-- **Strengths:** Effectively eliminates holes caused by standard rasterization without requiring post-processing.
-- **Limitations:** Requires manual implementation in the geometry shader. Performance may be impacted by the complexity of the plane intersection calculations.
-- **When to use:** When using standard rasterization pipelines and encountering voxelization holes, especially in multi-view projection scenarios.
+- **Time Complexity:** Not given in the sources [S1, unofficial].
+- **Memory Complexity:** Not given in the sources [S1, unofficial].
+- **Strengths:** Effectively eliminates holes caused by standard rasterization without requiring post-processing [S1, unofficial].
+- **Limitations:** Requires manual implementation in the geometry shader [S1, unofficial].
+- **When to use:** When using standard rasterization pipelines and encountering voxelization holes, especially in multi-view projection scenarios [S1, unofficial].
 
 ## Background
-The method was described by YangWC in a blog post on GPU-based 3D voxelization, addressing the issue of holes in voxelized models due to standard rasterization [S1, unofficial]. It is part of a broader effort to improve the quality of rasterization-based voxelization techniques.
+The method was described by YangWC in a blog post on GPU-based 3D voxelization, addressing the issue of holes in voxelized models due to standard rasterization [S1, unofficial].
 
 ## Sources
 [S1] 体素化Voxelization：基于GPU的三维体素化 - YangWC's Blog, https://yangwc.com/2019/06/11/Voxelization/, fetched 2026-10-30 (unofficial)

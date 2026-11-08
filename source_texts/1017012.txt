@@ -1,0 +1,115 @@
+Generate multiresolution neuroglancer meshes and skeletons from segmentation volumes (zarr, N5, precomputed), parallelized with Dask. - Hand meshes to the multires step in packs for sharded output by davidackerman · Pull Request #65 · janelia-cellmap/mesh-n-bone
+
+Hand meshes to the multires step in packs for sharded output by davidackerman · Pull Request #65 · janelia-cellmap/mesh-n-bone · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+davidackerman
+commented
+Nov 5, 2026
+Copy link
+Copy Markdown
+Collaborator
+Summary
+Take the per-segment files out of the multires step for sharded output. Builds on #64.
+After #64, a small segment's meshing costs little, but everything after assembly still went through one file per segment per step on the shared filesystem: a PLY per level from each meshing pass, read back by the multires step; an <id> and <id>.index written per segment, read back by the shard packer and deleted; and the level PLYs deleted at the end. For a prediction with millions of tiny segments, that is several million file creates, reads and deletes.
+Meshing passes hand their meshes on in packs. In a multires run that is sharded, uses the downsample strategy, deletes both its level meshes and its unsharded files, and runs no analysis, the block workers and assembly batches write their finished meshes into one pack file per block or batch, with an offset manifest, instead of a PLY per segment. The bytes are the PLY bytes the file would have held. When assembly redoes a segment a block finished early, it lists it as superseded, so the index takes assembly's mesh, as #64 does with files.
+Small segments are built in batches on each worker's own disk. Segments whose LOD-0 mesh is at most 1 MiB are batched by the LOD-0 pack they sit in, so a batch's coarser levels come from the few packs covering the same region and its reads stay sequential. A batch copies its segments' level meshes to local scratch, runs the unchanged per-segment multires writer there, and writes the shard-ready chunks into one pack with a manifest. A retry skips batches whose manifest exists; an earlier run's batches are cleared first.
+Large segments keep the per-segment route. Their level meshes are written out as PLYs and go through generate_all_neuroglancer_multires_meshes as before, which can spread one segment over several workers.
+The shard packer joins both. It reads small segments' chunks from the batch packs, in offset order through one open file per pack, and large ones from their files. Segment properties are written from the ids that got a chunk instead of a scan for .index files.
+Every other configuration keeps the file route, since something reads those files. The code that builds a segment's chunk is the same on both routes, so the output is the same.
+On a 256³ crop of a synapse prediction (3,681 labels, eight 128³ blocks, three levels read from the input's own pyramid, sharded, one process, output on the shared filesystem), against master:
+master
+this PR, with #63 and #64
+LOD 0 meshing and assembly
+224 s
+41 s
+LOD 1
+170 s
+23 s
+LOD 2
+21 s
+2 s
+multires
+171 s
+11 s
+shard packing
+37 s
+1 s
+deleting per-segment files
+44 s
+0.3 s
+total
+669 s
+80 s
+The 8 shards, the info file and the segment properties are byte-identical to master's.
+Tests: tests/test_mesh_packs.py runs the full multires pipeline on a volume of small blobs, a segment in two parts and a sphere that lasts through every level, with packs on and off, once with every segment small and once with a mix of small and large; every shard, the info file and the segment properties must be byte-identical, and nothing per segment may be left. It also tests the batching, that an earlier run's packs are not read, and which settings use packs.
+https://claude.ai/code/session_01JpyHq69qadw54o6L68YFGx
+Hand meshes to the multires step in packs for sharded output
+…
+37fbd18
+```
+After assembly, every segment still cost file operations on the shared
+filesystem at each step: a PLY per level from the meshing passes, read
+back by the multires step, two unsharded files per segment written,
+read back by the shard packer and deleted, and the level PLYs deleted.
+For millions of small segments these dominate the run.
+
+When nothing else reads those files (sharded output, the downsample
+strategy, no analysis, neither level meshes nor unsharded files kept):
+
+- Block workers and assembly batches write their finished meshes into
+  pack files with an offset manifest, one per block or batch, instead
+  of one PLY per segment per level. A segment a block finished early
+  but assembly redid is listed as superseded, so the index takes
+  assembly's mesh.
+- Small segments (LOD-0 PLY up to 1 MiB) are batched by the LOD-0 pack
+  they sit in. A batch copies its segments' level meshes to the
+  worker's own disk, runs the unchanged per-segment multires writer
+  there, and writes the shard-ready chunks into one pack. Large
+  segments take the existing per-segment route.
+- The shard packer reads small segments' chunks from those packs and
+  large ones from their files; segment properties come from the ids
+  that got a chunk.
+
+The code that builds a segment's chunk is the same on both routes, so
+the shards, info and segment properties are byte-identical.
+
+Claude-Session: https://claude.ai/code/session_01JpyHq69qadw54o6L68YFGx
+```
+davidackerman
+merged commit 0ce01a6
+into
+block-finish
+Nov 5, 2026
+davidackerman
+mentioned this pull request
+Nov 5, 2026
+Land #64 and #65 on master
+#66
+Merged
+davidackerman
+added a commit
+that referenced
+this pull request
+Nov 5, 2026
+Merge pull request #66 from janelia-cellmap/block-finish
+…
+e9f327e
+```
+Land #64 and #65 on master
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

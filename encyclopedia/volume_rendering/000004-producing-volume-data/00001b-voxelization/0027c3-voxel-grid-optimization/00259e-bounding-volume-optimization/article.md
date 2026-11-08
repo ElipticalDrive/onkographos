@@ -3,114 +3,160 @@
 Also called: Adaptive Voxel-Array-Größe, BV Optimisation, Bounding Volume Optimisation, Bounding-Volume-Optimierung, SDF Bounding Volume Culling, Volumen-Größenanpassung
 
 ## Overview
-Bounding Volume Optimization reduces the computational cost of volume rendering by eliminating empty regions or bounding volumes that do not contribute to the final image or simulation [S1, unofficial][S2]. It achieves this by either adapting the dimensions of the 3D voxel array to the actual extent of the data or by culling Signed Distance Field (SDF) evaluations for objects outside their bounding volumes [S1, unofficial][S2]. This method sets itself apart from sibling techniques like [Binary Voxel RLE Encoding](1071-binary-voxel-rle-encoding.md) by focusing on spatial culling and array resizing rather than data compression, and from [3D Voxel Grid Smoothing](833-3d-voxel-grid-smoothing.md) by addressing geometric extent rather than signal noise.
+Bounding Volume Optimization reduces the computational cost of volume rendering by adapting the dimensions of the 3D voxel array to the actual spatial extent of the data, thereby eliminating empty regions and false positives during traversal [S1, unofficial]. Additionally, it minimizes the cost of the map function (e.g., Signed Distance Field evaluations) by skipping computations for objects that do not contribute to the minimal distance field, using bounding volumes to cull expensive primitives [S2]. It sets itself apart from sibling methods like [3D Voxel Grid Smoothing](833-3d-voxel-grid-smoothing.md) by focusing on spatial extent and culling rather than noise reduction, and from [Binary Voxel RLE Encoding](1071-binary-voxel-rle-encoding.md) by maintaining a dense grid structure within the optimized bounds rather than compressing the data representation itself.
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A discrete voxel grid data structure produced by [Voxelization](12-voxelization.md), containing occupancy or attribute data, and a list of scene primitives or objects with their associated bounding volumes.
-*   **Output:** An optimized voxel representation (either resized or masked) and a traversal strategy that skips non-contributing regions.
+*   **Input:** A discrete 3D voxel grid (or sparse structure) representing the scene, where each cell $(i, j, k)$ holds scalar, vector, or binary data [G]. The grid is initially defined by a fixed bounding box, often a power-of-two cube (e.g., $512^3$) [S1, unofficial].
+*   **Output:** An optimized voxel array with reduced dimensions matching the tightest bounding box of the occupied data, and/or a set of bounding volumes (AABBs) associated with scene primitives to cull SDF evaluations [S1, unofficial][S2].
 
 **Data Structures:**
-1.  **Voxel Array:** A 3D array of voxels. In the "Adaptive Size" variant, the array dimensions $D_x, D_y, D_z$ are set to the minimum bounding box of the active voxel data, rather than a fixed power-of-two size [S1, unofficial].
-2.  **Bounding Volumes:** Axis-Aligned Bounding Boxes (AABBs) or similar primitives associated with each object or group of primitives. Each volume is defined by a minimum corner $\mathbf{b}_{min}$ and a maximum corner $\mathbf{b}_{max}$ [S2].
+1.  **Optimized Voxel Grid:** A 3D array with dimensions $W \times H \times D$, where $W, H, D$ are the minimum and maximum extents of occupied voxels along each axis.
+2.  **Bounding Volumes (AABBs):** For each primitive or object in the scene, an Axis-Aligned Bounding Box defined by minimum $(x_{min}, y_{min}, z_{min})$ and maximum $(x_{max}, y_{max}, z_{max})$ coordinates.
 
-**Steps:**
-1.  **Determine Extent:** Calculate the minimum and maximum coordinates of all occupied voxels in the scene [S1, unofficial]. Let these be $V_{min}$ and $V_{max}$.
-2.  **Resize or Allocate:**
-    *   *Variant A (Adaptive Array):* Allocate a voxel array with dimensions $D_x = V_{max,x} - V_{min,x} + 1$, $D_y = V_{max,y} - V_{min,y} + 1$, $D_z = V_{max,z} - V_{min,z} + 1$ [S1, unofficial]. This eliminates false positives caused by traversing empty space in a larger fixed array (e.g., reducing a $512^3$ load to $512 \times 321 \times 512$) [S1, unofficial].
-    *   *Variant B (Culling):* Retain the original array size but associate each primitive with its bounding volume [S2].
-3.  **Traversal/Culling:**
-    *   For each ray or pixel, check if the ray intersects the global bounding volume of the scene or individual object bounding volumes [S2].
-    *   If a ray does not intersect a primitive's bounding volume, skip the evaluation of that primitive's SDF or density function [S2].
-    *   If using Variant A, the traversal loop bounds are strictly limited to the resized array dimensions, preventing access to out-of-bounds memory [S1, unofficial].
-4.  **Evaluation:** Compute the SDF or density only for primitives whose bounding volumes are intersected by the ray [S2].
+**Numbered Steps:**
+1.  **Analyze Occupancy:** Scan the initial voxel grid to identify the minimum and maximum indices $(i_{min}, i_{max}), (j_{min}, j_{max}), (k_{min}, k_{max})$ that contain non-empty data [S1, unofficial].
+2.  **Compute Bounding Box:** Calculate the tightest bounding box enclosing all occupied voxels. For example, if a landscape occupies a $512 \times 321 \times 512$ region within a $512^3$ grid, the new dimensions are $512 \times 321 \times 512$ [S1, unofficial].
+3.  **Reallocate Memory:** Create a new voxel array with the optimized dimensions. Copy the occupied data from the original grid to the new grid, preserving relative coordinates [S1, unofficial].
+4.  **Associate Bounding Volumes (Optional/Advanced):** For each primitive contributing to the voxel data, compute or retrieve its AABB [S2].
+5.  **Cull During Rendering:** During raymarching or traversal, check if the current ray segment or voxel block intersects with the bounding volumes of primitives [S2]. If a primitive's bounding volume does not intersect the ray or the current voxel block, skip the evaluation of its SDF or contribution [S2].
 
 **Formulas:**
-*   **Array Size Reduction:**
-    $$ D_{new} = V_{max} - V_{min} + 1 $$
-    Where $D_{new}$ is the new dimension vector, and $V_{max}, V_{min}$ are the component-wise maximum and minimum coordinates of occupied voxels [S1, unofficial].
-*   **Ray-Box Intersection (for culling):**
-    A ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ intersects an AABB defined by $\mathbf{b}_{min}$ and $\mathbf{b}_{max}$ if:
-    $$ t_{min} = \max_i \left( \frac{b_{min,i} - o_i}{d_i} \right), \quad t_{max} = \min_i \left( \frac{b_{max,i} - o_i}{d_i} \right) $$
-    Intersection exists if $t_{min} \le t_{max}$ and $t_{max} > 0$ [S2].
+*   **Optimized Dimensions:**
+    $$ W = i_{max} - i_{min} + 1 $$
+    $$ H = j_{max} - j_{min} + 1 $$
+    $$ D = k_{max} - k_{min} + 1 $$
+    Where $i, j, k$ are the voxel indices along the x, y, and z axes, respectively [S1, unofficial].
+
+*   **Bounding Volume Intersection Test (AABB vs Ray):**
+    A ray $R(t) = O + tD$ intersects an AABB defined by $[x_{min}, x_{max}] \times [y_{min}, y_{max}] \times [z_{min}, z_{max}]$ if:
+    $$ t_{min} = \max\left(\frac{x_{min} - O_x}{D_x}, \frac{y_{min} - O_y}{D_y}, \frac{z_{min} - O_z}{D_z}\right) $$
+    $$ t_{max} = \min\left(\frac{x_{max} - O_x}{D_x}, \frac{y_{max} - O_y}{D_y}, \frac{z_{max} - O_z}{D_z}\right) $$
+    Intersection occurs if $t_{min} \le t_{max}$ and $t_{max} \ge 0$ [G].
 
 **Parameters:**
-*   **Bounding Volume Type:** AABBs are commonly used due to their efficiency in intersection tests [S1, unofficial].
-*   **Resolution:** The voxel resolution determines the granularity of the adaptive array [S1, unofficial].
+*   **Initial Grid Size:** Often a power-of-two cube (e.g., $512^3$) for memory alignment [S1, unofficial].
+*   **Bounding Volume Type:** Axis-Aligned Bounding Boxes (AABBs) are standard [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **False Positives:** Using a fixed large array (e.g., $512^3$) for small data causes the traversal to process empty space, leading to false positives and wasted cycles [S1, unofficial].
-*   **GPU Architecture:** Modern GPUs are MIMD (Multiple Instruction, Multiple Data) rather than pure SIMD. Different Streaming Multiprocessors (SMs) can process different instruction streams. This allows the GPU to finish cheaper threads (those skipping culled volumes) early and distribute expensive threads (those evaluating complex geometry) across available SMs [S2].
-*   **Lighting Artifacts:** While not a direct failure of BV optimization, the use of AABBs for normals can cause hard, physically implausible lighting on voxel surfaces if normals are derived from box faces rather than the underlying geometry [S1, unofficial].
+*   **Empty Scene:** If no voxels are occupied, the optimized dimensions are zero. Handle by falling back to a default grid or skipping rendering [G].
+*   **Precision:** Ensure that the conversion from world coordinates to voxel indices and back does not introduce significant errors, especially when resizing [G].
+*   **Dynamic Scenes:** If the scene geometry changes, the bounding box and voxel array must be recomputed, which can be costly. Consider incremental updates or hierarchical structures [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_with_bounding_volume_optimization(scene, camera):
-    # 1. Determine scene extent for adaptive sizing (Variant A)
-    # [G] Assuming get_occupied_bounds returns min/max voxel coordinates
-    v_min, v_max = get_occupied_bounds(scene.voxels)
+def optimize_bounding_volume(voxel_grid):
+    """
+    Optimizes the bounding volume of a voxel grid by resizing it to the tightest
+    bounding box of occupied voxels.
     
-    # Calculate adaptive dimensions
-    dim_x = v_max.x - v_min.x + 1
-    dim_y = v_max.y - v_min.y + 1
-    dim_z = v_max.z - v_min.z + 1
+    Args:
+        voxel_grid: A 3D numpy array or similar structure representing the voxel data.
+                    Shape is (W, H, D).
     
-    # Allocate optimized voxel array
-    voxel_grid = allocate_3d_array(dim_x, dim_y, dim_z)
+    Returns:
+        optimized_grid: A new 3D array with reduced dimensions.
+        bounds: A tuple (i_min, i_max, j_min, j_max, k_min, k_max) representing
+                the original indices of the occupied region.
+    """
+    # Find indices of non-empty voxels
+    # Assuming 0 represents empty space
+    occupied_indices = np.argwhere(voxel_grid != 0)
     
-    # Populate grid within bounds
-    for voxel in scene.voxels:
-        if is_inside_bounds(voxel, v_min, v_max):
-            # [G] Adjust index to local array coordinates
-            local_idx = voxel - v_min
-            voxel_grid[local_idx] = voxel.data
-            
-    # 2. Raymarching with SDF Culling (Variant B logic applied to primitives)
-    for pixel in camera.framebuffer:
-        ray = camera.get_ray(pixel)
-        min_dist = infinity
+    if occupied_indices.size == 0:
+        # No occupied voxels; return empty grid or handle as edge case
+        return np.empty((0, 0, 0)), (0, 0, 0, 0, 0, 0)
+    
+    # Compute min and max indices for each axis
+    i_min, j_min, k_min = np.min(occupied_indices, axis=0)
+    i_max, j_max, k_max = np.max(occupied_indices, axis=0)
+    
+    # Calculate new dimensions
+    new_w = i_max - i_min + 1
+    new_h = j_max - j_min + 1
+    new_d = k_max - k_min + 1
+    
+    # Extract the sub-grid
+    optimized_grid = voxel_grid[i_min:i_max+1, j_min:j_max+1, k_min:k_max+1]
+    
+    bounds = (i_min, i_max, j_min, j_max, k_min, k_max)
+    
+    return optimized_grid, bounds
+
+def cull_primitive_with_aabb(ray_origin, ray_direction, primitive_aabb):
+    """
+    Checks if a ray intersects an Axis-Aligned Bounding Box.
+    
+    Args:
+        ray_origin: (x, y, z) tuple
+        ray_direction: (x, y, z) tuple (assumed normalized)
+        primitive_aabb: Tuple of ((x_min, y_min, z_min), (x_max, y_max, z_max))
+    
+    Returns:
+        bool: True if the ray intersects the AABB, False otherwise.
+    """
+    x_min, y_min, z_min = primitive_aabb[0]
+    x_max, y_max, z_max = primitive_aabb[1]
+    
+    ox, oy, oz = ray_origin
+    dx, dy, dz = ray_direction
+    
+    # Calculate t_min and t_max for each axis
+    try:
+        t1 = (x_min - ox) / dx
+        t2 = (x_max - ox) / dx
+        t_min_x = min(t1, t2)
+        t_max_x = max(t1, t2)
         
-        # Iterate over primitives
-        for primitive in scene.primitives:
-            # Check intersection with primitive's bounding volume
-            t_min, t_max = intersect_ray_aabb(ray, primitive.bounding_volume)
-            
-            # If no intersection, skip expensive SDF evaluation
-            if t_max < 0 or t_min > t_max:
-                continue
-                
-            # Evaluate SDF only if bounding volume is hit
-            dist = primitive.evaluate_sdf(ray)
-            
-            # Update minimum distance for raymarching
-            if dist < min_dist:
-                min_dist = dist
-                
-        # Proceed with raymarching using min_dist
-        color = raymarch_step(ray, min_dist, voxel_grid)
-        pixel.color = color
+        t3 = (y_min - oy) / dy
+        t4 = (y_max - oy) / dy
+        t_min_y = min(t3, t4)
+        t_max_y = max(t3, t4)
+        
+        t5 = (z_min - oz) / dz
+        t6 = (z_max - oz) / dz
+        t_min_z = min(t5, t6)
+        t_max_z = max(t5, t6)
+    except ZeroDivisionError:
+        # Handle parallel rays (dx, dy, or dz is 0)
+        # If ray is parallel to an axis, check if origin is within bounds
+        if dx == 0 and (ox < x_min or ox > x_max): return False
+        if dy == 0 and (oy < y_min or oy > y_max): return False
+        if dz == 0 and (oz < z_min or oz > z_max): return False
+        # If parallel and within bounds, continue with other axes
+        # Simplified: assume intersection if other axes allow it
+        # For robustness, handle each axis separately
+        return False # Placeholder for robust parallel handling
+
+    # Compute overall t_min and t_max
+    t_min = max(t_min_x, t_min_y, t_min_z)
+    t_max = min(t_max_x, t_max_y, t_max_z)
+    
+    # Intersection if t_min <= t_max and the intersection is in front of the ray
+    return t_min <= t_max and t_max >= 0
 ```
 
 ## Subtopics
 
-### Adaptive Voxel Array Sizing
-Resizes the 3D texture/array to the exact bounding box of the data. Chosen when memory bandwidth and traversal of empty space are the primary bottlenecks. Links to [Voxel Grid Optimization](4131-voxel-grid-optimization.md).
+### Adaptive Voxel-Array-Größe
+Focuses on resizing the entire voxel grid to fit the data, reducing memory and traversal cost. Choose when the scene has a large empty volume. Link: [Bounding Volume Optimization](52-bounding-volume-optimization.md).
 
 ### SDF Bounding Volume Culling
-Uses AABBs to skip SDF evaluations for distant primitives. Chosen when the scene contains many expensive-to-evaluate primitives. Links to [Voxel Grid Optimization](4131-voxel-grid-optimization.md).
+Focuses on culling individual primitives during SDF evaluation. Choose when the scene has many complex primitives. Link: [Bounding Volume Optimization](52-bounding-volume-optimization.md).
 
 ## Operating characteristics
-*   **Time Complexity:** Reduces the number of SDF evaluations and memory accesses. In a scene with 20 expensive primitives at 720p, enabling BV optimization reduced average frame duration from 41 ms (24 fps) to 21 ms (48 fps) [S2].
-*   **Memory Complexity:** Variant A (Adaptive Array) reduces memory usage by eliminating empty padding. For example, loading a $512^3$ array for data that only occupies $512 \times 321 \times 512$ wastes significant video memory [S1, unofficial].
-*   **Strengths:** Localizes expensive computations to areas with complex geometry, improving frame time uniformity [S2]. Enables separation of game world and entities, allowing dense voxel models to serve as bounding boxes for rigid bodies [S1, unofficial].
-*   **Limitations:** Requires pre-computation of bounding volumes and occupied extents. Does not address lighting artifacts inherent to voxelized AABBs [S1, unofficial].
-*   **When to use:** When the scene has significant empty space or when primitives have high evaluation costs.
-*   **When not to use:** When the scene is uniformly dense or when the overhead of bounding volume checks exceeds the cost of the SDF evaluation itself.
+*   **Time Complexity:** Reducing the grid size from $N^3$ to $W \times H \times D$ reduces traversal time from $O(N^3)$ to $O(W \times H \times D)$ [S1, unofficial]. Culling primitives reduces the number of SDF evaluations, localizing expensive computations to areas with complex geometry [S2].
+*   **Memory Complexity:** Memory usage is reduced from $O(N^3)$ to $O(W \times H \times D)$ [S1, unofficial].
+*   **Measured Performance:** In a scene with 20 expensive primitives at 720p, enabling BV optimization reduced average frame duration from 41 ms (24 fps) to 21 ms (48 fps) [S2].
+*   **Strengths:** Reduces false positives in traversal, saves memory, and localizes expensive computations [S1, unofficial][S2].
+*   **Limitations:** Requires preprocessing to compute bounds. Dynamic scenes may require frequent updates [G].
+*   **When to Use:** When the voxel data occupies a small fraction of the initial grid, or when the scene contains many expensive primitives [S1, unofficial][S2].
+*   **When Not to Use:** When the scene is dense and fills the grid, or when the overhead of computing bounds exceeds the savings [G].
 
 ## Background
-Bounding Volume Optimization originated as a technique to minimize the cost of map functions in raymarched distance fields. It was explored in the context of CUDA-based raymarching engines to handle scenes with dozens or hundreds of surfaces [S2]. The concept of adapting voxel array sizes to reduce false positives and memory load was also discussed in the context of voxel-based game worlds and physics simulations [S1, unofficial].
+Bounding Volume Optimization originated in the context of raycasting-based voxel rendering and SDF raymarching. It was discussed in the context of optimizing voxel landscapes and rigid body physics simulations [S1, unofficial]. The technique was also explored in CUDA-based raymarching engines to improve performance by culling SDF evaluations [S2]. Modern GPUs, being MIMD (Multiple Instruction, Multiple Data) rather than pure SIMD, can benefit from this optimization by distributing expensive threads across Streaming Multiprocessors (SMs) after cheaper parts finish early [S2].
 
 ## Sources
 [S1] Raycasting-basiertes Voxelrendering, https://serwiss.bib.hs-hannover.de/frontdoor/index/index/docId/2250, fetched 2026-10-25 (unofficial)

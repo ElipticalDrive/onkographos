@@ -1,0 +1,128 @@
+Documentation update reminder Summary Add a bit of info on the backend method for projections, and the differences between the SPH and AMR/grid backends, to the narrative docs and the docstrings for the API projection functions/methods. ...
+
+DOC: SPH and grid/AMR projection methodologies · Issue #4992 · yt-project/yt · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+DOC: SPH and grid/AMR projection methodologies #4992
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+DOC: SPH and grid/AMR projection methodologies#4992
+Copy link
+Labels
+docs
+Description
+nastasha-w
+opened on Sep 14, 2024
+Issue body actions
+Documentation update reminder
+Summary
+Add a bit of info on the backend method for projections, and the differences between the SPH and AMR/grid backends, to the narrative docs and the docstrings for the API projection functions/methods.
+In more detail
+The current SPH data projection method integrates the field to be projected (e.g., gas density) along a pencil-beam line of sight through the center of each pixel in the grid. This is a reasonable approach for e.g., a sampling of the column densities you would find in absorption spectroscopy in the spectrum of a point source behind the projected region. However, it does not give the average surface density in each pixel of the grid, like users might expect, and which would likely be more suitable to predict what gas would look like in emission.
+Additionally, the methodology used for projections of fixed grid and AMR datasets is different. Here, contributions from all cells that overlap with the projection grid pixel are taken account, weighted by their overlap with that pixel. This is more akin to averaging the projected quantity over the rectangular prism defined by each pixel in the grid.
+It might be useful for users to understand this different when comparing projections created from these different types of datasets, and when trying to understand what is required to get results that are converged with the grid spacing.
+Activity
+nastasha-w
+changed the title [-]DOC[/-] [+]DOC: SPH and grid/AMR projection methodologies[/+] on Sep 14, 2024
+neutrinoceros
+added
+docs
+on Sep 14, 2024
+cphyc commented on Sep 17, 2024
+cphyc
+on Sep 17, 2024
+Member
+More actions
+As a side note, the off-axis AMR renderer #4741 could be reused for an SPH renderer by replacing
+yt/yt/utilities/lib/image_utilities.pyx
+Lines 212 to 221
+in
+cadddb6
+direct_integrate_cube(
+o,
+a,
+b,
+c,
+stamp_arr[depth, :, :],
+stamp_mask_arr[depth, :, :],
+imin(1 << depth, Nsx),
+imin(1 << depth, Nsy),
+)
+for SPH kernel.
+The way it works is by pre-computing the kernel, evaluated on a grid and then use this as a "stamp" for each particle/cell. This would allow the use of the same interface for both SPH and AMR but with a different stamp.
+nastasha-w commented on Sep 17, 2024
+nastasha-w
+on Sep 17, 2024
+ContributorAuthor
+More actions
+@cphyc Huh... I'm personally not that familiar with AMR datasets, and I can't tell easily from looking at the code what the underlying method is. The stamps and pre-computing seem to be getting at calculating possible overlap fractions between projection grid pixels/cells (rectangular prisms) and AMR grid cells (boxes angled with respect to those prisms). This does seem useful for SPH. I'm guessing that the main thing that varies between AMR resolution elements is their size relative to the output size, and their (e.g., cell center) position relative to the output grid cell (e.g., that grid's centers). If I've understood correctly, it is essentially the 'depth' parameter adjusting for different cell sizes here.
+There may be an important difference with SPH here though: those AMR cell sizes only come in particular, discrete numbers, which if I'm not mistaken are some fraction $1/2^n$ times the box size. However, in SPH, the particle size (smoothing length) does not come in such discrete values. The method for handling different relative grid/resolution element offsets might be more similar though.
+As a note, calculating the 1D path length integral through the SPH kernel is already implemented as a table method in the projection backend, for the line of sight integrals through the cell centers. This integration can be reduced to a product of some SPH particle properties and a dimensionless integral:
+$$dl_j = \left( m_j / ( \rho_j \cdot h_j^2) \right) \cdot \left[ \int dr U \left( \sqrt{(b_j / h_j)^2 + r^2} \right)\right],$$
+where $dl_j$ is the integral along a line of sight through the SPH kernel of particle $j$, $m_j$ is that particle's mass $\rho_j$ its density, and $h_j$ its smoothing length. $b_j$ is the impact parameter of that line of sight relative to the SPH particle (center) position, and $U$ is the dimensionless kernel function, which is spherically symmetrical in SPH.
+The key thing in that equation is that the integral part depends only on the ratio $(b_j / h_j)$, i.e., a single number. Therefore, the code pre-calculates that integral for a bunch of $b/h$ values (from 0 to 1, since the integral is always zero for larger ratios), and then stores a table of those integrals as a function of $b/h$ (or rather, $(b/h)^2$).
+When the integral part is evaluated in the projection, a linear interpolation of those table values is used to calculate $dl_j$ for each particle $j$, for each projection grid cell the SPH particle overlaps with.
+I think for the cell-center projections (current SPH projection method), this is already pretty optimized, but let me know if you think I've missed something there!
+I guess this seems like a bunch of random info, but I'm hoping you could explain in a bit more detail how those stamps work, and that the SPH info might help you translate this to the SPH case.
+What we'd conceptually want to do for the pixel-averaging projections in #4993 is to integrate the kernel of each SPH particle over the rectangular prism defined by each projection grid cell.
+Following this paper, there are three case here:
+The SPH particle lies entirely within one of those prisms: the dimensionless integral comes out to 1.
+The SPH particle intersects $\gg 1$ cells along each output dimension: the kernel varies little over each cell and can be adequately approximated as [line of sight kernel integral through the cell center] x [projection grid cell area].
+The SPH particle intersects $&gt;1$ cell, but not that many. Here is where @JBorrow and @AshKelly's paper made the big difference. In this case, they create a grid of sighlines aligned with the projection grid, and evaluate the kernel on that finite grid to integrate the kernel over the pixels in the projection grid. This also seems like the step where the stamping approach might be most helpful.
+By the way, @cphyc, if you think this would indeed be most useful for the pixel-averaging approach, it might be better to move the discussion to #4993.
+cphyc commented on Sep 17, 2024
+cphyc
+on Sep 17, 2024
+Last edited by cphyc
+Member
+More actions
+Today I learned you can add LaTeX into GitHub comments!
+You are right that, for AMR datasets, cell size ratios are powers of two (or inverse of them). However, the PR I linked to does not use this fact and works for any size. My implementation works with the same approach as sprites in video games. You precompute some 2D images at different resolutions and paste them at different locations with different sizes. Here the locations are the position of the cells on screen space and the size their physical size, with no assumption of it being a power of two.
+nastasha-w commented on Sep 19, 2024
+nastasha-w
+on Sep 19, 2024
+Last edited by nastasha-w
+ContributorAuthor
+More actions
+I'll check that out then! I still think this would probably be most useful for the pixel-averaging case. It seems like the code from the paper I mentioned (found on @JBorrow's github for swiftsimio) already does something like that for small SPH particles that overlap at most 4 cells. The value calculation for one particle and one pixel in the line-of-sight integral case uses linear interpolation for the dimensionless kernel part, which seems fast-ish to me. That said, I'd love for you to take a look at this and improve it! (Personally, I don't feel like I could implement this from only looking at the code for AMR datasets.)
+JBorrow commented on Sep 29, 2024
+JBorrow
+on Sep 29, 2024
+Contributor
+More actions
+Yes, we use pre-rendered kernels for mid-size (~1-10) pixel overlaps for accuracy. In all other cases we use an extremely simple numerical integration. The reasoning for not simply using the linear interpolation technique everywhere is that the kernel functions are so well optimized that they are faster to run than interpolation, especially the Wendland kernels that completely minimise branching and as such might^[citation needed] vectorize better.
+nastasha-w commented on Feb 21, 2025
+nastasha-w
+on Feb 21, 2025
+ContributorAuthor
+More actions
+I'm linking some bits I wrote that could be a starting point for documenting the SPH part of the code:
+pixel-averaging
+pencil-beam integration
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+docs
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

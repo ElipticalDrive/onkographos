@@ -1,0 +1,1076 @@
+Contribute to openvdb/fvdb-core development by creating an account on GitHub.
+
+Build dual/padded grids via leaf-mask morphology to cut memory by swahtz · Pull Request #710 · openvdb/fvdb-core · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+swahtz
+commented
+Jul 31, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+dual_grid materialized an 8x-expanded candidate coordinate list before deduplicating it, costing ~420-450 bytes of transient memory per input voxel (and overflowing an int32 cast in NanoVDB's segmented radix sort above ~2^31 candidates). A ~500M-voxel grid OOMed on an 80GB GPU.
+Build the padded topology directly from the 512-bit leaf activity masks via nanovdb::tools::cuda::TopologyBuilder instead, so scratch is O(node count) rather than O(voxel count).
+New src/fvdb/detail/utils/nanovdb/PadGrid.cuh: a one-sided (octant) analogue of nanovdb's DilateGrid. The internal-node functor reuses DilateInternalNodesFunctor's scatter verbatim with only the neighbor stencil swapped for a one-sided one; the leaf and erosion functors are the one-sided shift-OR / shift-AND derivations.
+BuildPaddedGrid.cu CUDA path composes bmax positive + -bmin negative unit passes (pad, or erode + PruneGrid for exclude_border), preserving the primal/dual transform swap. dual_grid is one positive pass.
+Guard the empty-erosion case (PruneGrid cannot build an empty grid); use GridHandle::copy for the bmin==bmax==0 identity.
+Reject exclude_border on PrivateUse1 explicitly (was a latent crash) and require bmin <= 0 <= bmax.
+Add a low-level build_padded_grid python binding for the generic box, plus tests covering CUDA/CPU parity, leaf/root boundary crossings, empty batch items, erode-to-empty, and peak memory.
+Build dual/padded grids via leaf-mask morphology to cut memory
+…
+bd2e430
+```
+dual_grid materialized an 8x-expanded candidate coordinate list before
+deduplicating it, costing ~420-450 bytes of transient memory per input
+voxel (and overflowing an int32 cast in NanoVDB's segmented radix sort
+above ~2^31 candidates). A ~500M-voxel grid OOMed on an 80GB GPU.
+
+Build the padded topology directly from the 512-bit leaf activity masks
+via nanovdb::tools::cuda::TopologyBuilder instead, so scratch is
+O(node count) rather than O(voxel count).
+
+- New src/fvdb/detail/utils/nanovdb/PadGrid.cuh: a one-sided (octant)
+  analogue of nanovdb's DilateGrid. The internal-node functor reuses
+  DilateInternalNodesFunctor's scatter verbatim with only the neighbor
+  stencil swapped for a one-sided one; the leaf and erosion functors are
+  the one-sided shift-OR / shift-AND derivations.
+- BuildPaddedGrid.cu CUDA path composes bmax positive + -bmin negative
+  unit passes (pad, or erode + PruneGrid for exclude_border), preserving
+  the primal/dual transform swap. dual_grid is one positive pass.
+- Guard the empty-erosion case (PruneGrid cannot build an empty grid);
+  use GridHandle::copy for the bmin==bmax==0 identity.
+- Reject exclude_border on PrivateUse1 explicitly (was a latent crash)
+  and require bmin <= 0 <= bmax.
+- Add a low-level build_padded_grid binding for the generic box, plus
+  tests covering CUDA/CPU parity, leaf/root boundary crossings, empty
+  batch items, erode-to-empty, and peak memory.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+requested a review
+from a team
+as a code owner
+July 31, 2026 04:13
+swahtz
+requested review from
+harrism and
+sifakis
+July 31, 2026 04:13
+swahtz
+added
+optimization
+Performance or memory optimization
+Topology Operations
+Issues related to topology operations (prune, merge, dilate, etc.
+labels
+Jul 31, 2026
+swahtz
+self-assigned this
+Jul 31, 2026
+swahtz
+added this to the
+v0.6 milestone
+Jul 31, 2026
+Formatting fixes
+…
+49912e5
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+requested a review
+from Copilot
+July 31, 2026 04:15
+Copilot started reviewing on behalf of
+swahtz
+July 31, 2026 04:16
+View session
+Copilot
+AI
+reviewed
+Jul 31, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+This PR reworks the CUDA implementation of dual_grid / padded-grid construction to avoid materializing an 8× expanded coordinate list by instead building padded topology directly from NanoVDB leaf activity masks via TopologyBuilder, significantly reducing transient memory usage and avoiding large-candidate overflows.
+Changes:
+Adds a new device-side one-sided morphology implementation (PadGrid.cuh) to build padded/dual topologies from leaf masks.
+Updates the CUDA padded-grid path (BuildPaddedGrid.cu) to use mask-morphology passes (and erosion+prune for exclude_border), with explicit guards for identity and empty-erosion cases.
+Exposes a low-level Python binding build_padded_grid(...) and adds CUDA/CPU parity + boundary + memory tests.
+Reviewed changes
+Copilot reviewed 5 out of 5 changed files in this pull request and generated 3 comments.
+Show a summary per file
+File
+Description
+tests/unit/test_dual.py
+Adds CUDA/CPU parity tests for dual_grid and generic padded boxes, plus boundary/empty/memory coverage.
+src/python/GridBatchOps.cpp
+Exposes build_padded_grid binding and routes dual_grid through buildPaddedGrid.
+src/fvdb/detail/utils/nanovdb/PadGrid.cuh
+New one-sided (octant) mask-morphology topology builder for padded/dual grids on CUDA.
+src/fvdb/detail/ops/BuildPaddedGrid.cu
+Switches CUDA implementation to TopologyBuilder-based mask morphology; adds erosion+prune path and guards.
+fvdb/_fvdb_cpp.pyi
+Adds the build_padded_grid type stub.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+src/fvdb/detail/utils/nanovdb/PadGrid.cuh
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/fvdb/detail/utils/nanovdb/PadGrid.cuh
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/fvdb/detail/ops/BuildPaddedGrid.cu
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Address review: fix 1<<31 UB and bitwise & in PadGrid root speculation
+…
+a496cf2
+```
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+requested a review
+from Copilot
+July 31, 2026 04:30
+format fix
+…
+f152909
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Copilot started reviewing on behalf of
+swahtz
+July 31, 2026 04:30
+View session
+Copilot
+AI
+reviewed
+Jul 31, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 5 out of 5 changed files in this pull request and generated no new comments.
+Suppressed comments (1)
+src/python/GridBatchOps.cpp:675
+build_padded_grid is exposed as a general padding primitive, but it delegates to ops::buildPaddedGrid, which always swaps primal/dual transforms (see BuildPaddedGrid.cu where mDualTransform/mPrimalTransform are swapped). For callers, build_padded_grid(bmin=0,bmax=0) is therefore not a pure identity (it still swaps transforms), which is surprising given the name/signature. Please either document this behavior on the binding or rename the binding to make the dual-grid semantics explicit.
+```
+        [](const GBI &grid, int bmin, int bmax, bool excludeBorder) {
+            if (grid.batchSize() == 0) {
+                return fvdb::detail::makeEmptyGridBatchData(grid.device());
+            }
+            return ops::buildPaddedGrid(grid, bmin, bmax, excludeBorder);
+```
+swahtz
+mentioned this pull request
+Jul 31, 2026
+Replace coordinate-list grid-topology construction with leaf-mask morphology
+#712
+Merged
+Only swap primal/dual transforms for dual_grid, not plain padded grids
+…
+e0c8b26
+```
+buildPaddedGrid unconditionally swapped the source's primal/dual transforms
+in its metadata tail. That is correct for dual_grid, whose result voxels sit
+on the corner (dual) lattice, but wrong for the general build_padded_grid
+primitive exposed in this PR: a plain padded grid stays on the *same* lattice
+as its source, so build_padded_grid(0, 0) was not an identity (it shifted the
+origin by half a voxel) and every box pad silently moved to the dual lattice.
+
+Thread a dualTransform flag through ops::buildPaddedGrid: dual_grid passes
+true (keep the swap), build_padded_grid passes false (carry the source
+transforms verbatim). populateGridMetadata already recomputes the correct
+primal/dual transforms from the source's (voxelSize, origin), so the non-dual
+path just copies them over unchanged.
+
+Adds test_dual_grid_transform_is_dual_lattice (origin shifts by -0.5 voxel)
+and test_build_padded_grid_preserves_transform (origin/voxel size unchanged
+for every box), both on CPU and CUDA.
+
+Addresses the review on openvdb#710.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+commented
+Aug 1, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Re: the suppressed Copilot note on GridBatchOps.cpp — that build_padded_grid inherits buildPaddedGrid's unconditional primal/dual transform swap, so build_padded_grid(bmin=0, bmax=0) isn't a pure identity.
+Good catch, and it's a real correctness bug rather than just a naming/doc nit. The swap is only correct for dual_grid, whose result voxels sit on the corner (dual) lattice; a plain padded grid stays on the same lattice as its source and must keep the source's transforms.
+Fixed: ops::buildPaddedGrid now takes a dualTransform flag.
+dual_grid → true: keeps the primal↔dual swap (origin shifts by −½ voxel). Behavior unchanged.
+build_padded_grid → false: carries the source transforms verbatim, so build_padded_grid(0, 0) is a true identity and every box pad stays on the source lattice.
+populateGridMetadata already recomputes the correct primal/dual transforms from the source's (voxelSize, origin), so the non-dual path just copies them across unchanged.
+Added regression tests on CPU + CUDA: test_dual_grid_transform_is_dual_lattice (dual origin == base − ½·voxel_size) and test_build_padded_grid_preserves_transform (origin and voxel size unchanged for every box, including asymmetric [0, 2] / [-2, 1]). Full unit suite green.
+swahtz
+requested a review
+from Copilot
+August 1, 2026 06:25
+Copilot started reviewing on behalf of
+swahtz
+August 1, 2026 06:25
+View session
+Copilot
+AI
+reviewed
+Aug 1, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 6 out of 6 changed files in this pull request and generated no new comments.
+Suppressed comments (1)
+src/fvdb/detail/utils/nanovdb/PadGrid.cuh:179
+valueMask is declared but never used in PadInternalNodesFunctor. This will trigger an unused-variable warning (and can fail builds if warnings are treated as errors). Remove it or explicitly mark it unused.
+```
+        const auto &srcTree = srcGrid->tree();
+        const auto &lower   = srcTree.template getFirstNode<1>()[lowerID];
+        auto &valueMask     = const_cast<LowerMaskT &>(lower.valueMask());
+```
+Remove unused valueMask local in PadInternalNodesFunctor
+…
+6f172b5
+```
+The valueMask reference bound in PadInternalNodesFunctor was never read --
+the padding stencil reads each child leaf's valueMask() directly -- so it
+only produced an unused-variable warning. The const_cast reference binding
+had no side effect, so drop it. Addresses the Copilot review note on openvdb#710.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+commented
+Aug 1, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Re: the suppressed Copilot note on PadGrid.cuh — valueMask declared but never used in PadInternalNodesFunctor.
+Fixed — removed it. The stencil reads each child leaf's mask directly (padNeighborMaskStencil<Positive>(leaf.valueMask())), so the outer const_cast reference to the lower node's valueMask() was dead and had no side effect. Clean build, unit suite green.
+swahtz
+requested a review
+from Copilot
+August 2, 2026 01:11
+Copilot started reviewing on behalf of
+swahtz
+August 2, 2026 01:11
+View session
+Copilot
+AI
+reviewed
+Aug 2, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 6 out of 6 changed files in this pull request and generated 1 comment.
+Suppressed comments (1)
+src/fvdb/detail/ops/BuildPaddedGrid.cu:337
+This retrieves the per-item grid via mGridHdl->deviceGrid(i), which assumes batch item i corresponds to the i-th grid in the underlying handle. That is not true for non-contiguous/sliced GridBatchData (which uses per-item mCumBytes offsets; see GridBatchData::Accessor::grid). Use the batch metadata’s byte offsets to compute the grid pointer so CUDA padding works correctly on indexed batches too.
+```
+        nanovdb::OnIndexGrid *grid = baseBatchHdl.mGridHdl->deviceGrid<nanovdb::ValueOnIndex>(i);
+        TORCH_CHECK(grid, "Grid is null");
+```
+Comment thread
+src/fvdb/detail/ops/BuildPaddedGrid.cu
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Handle sliced/non-contiguous batches in buildPaddedGrid
+…
+f0f6ba2
+```
+A sliced or indexed GridBatchData is a view: it shares the underlying NanoVDB
+handle (which keeps every grid) and only shrinks batchSize() and the metadata
+array, so batchSize() < nanoGridHandle().gridCount() and each item's grid is
+located by its mCumBytes byte offset, not by physical index.
+
+The CUDA path indexed the handle physically (mGridHdl->deviceGrid(i)) and the
+identity fast-path copied the whole handle, so on a sliced batch dual_grid
+returned the wrong grids and build_padded_grid pulled in the excluded siblings
+(with an out-of-bounds metadata read in the transform fix-up). The CPU path
+looped gridCount() with the same effect, corrupting the heap. main's CUDA path
+was correct here (it went through the Accessor); this restores that.
+
+- CUDA padding loop: resolve each source grid as bufBase + cumBytesAt(i) (the
+  mapping Accessor::grid() uses), iterating batchSize(). No input copy.
+- CUDA identity (bmin==bmax==0): keep the one-shot whole-handle copy for a
+  contiguous batch; for a sliced view rebuild from Accessor-mapped coordinates
+  (only build_padded_grid(0,0) reaches this; dual_grid, being (0,1), never does).
+- CPU paths: iterate batchSize() and resolve grids by byte offset.
+
+Adds test_sliced_batch_padding_matches_contiguous (CPU+CUDA) over tail, gap,
+reversed, and single-item selections. Addresses the review on openvdb#710.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+requested a review
+from Copilot
+August 2, 2026 22:58
+Copilot started reviewing on behalf of
+swahtz
+August 2, 2026 22:58
+View session
+Copilot
+AI
+reviewed
+Aug 2, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 6 out of 6 changed files in this pull request and generated 1 comment.
+Suppressed comments (1)
+src/fvdb/detail/utils/nanovdb/PadGrid.cuh:534
+Same UB pattern as in PadLeafNodesFunctor: originalWords is defined via reinterpret_cast<WordStencilT>(originalWordsShifted[1][1][1]) and later indexed with negative indices (originalWords[-1][…], originalWords[i][…][-1], etc.). Because the reference does not denote an actual [10][3][3] array object, this relies on undefined behavior and could be miscompiled.
+Recommend switching to direct indexing into originalWordsShifted with explicit +1 offsets (or an accessor helper) so all indices stay within the declared array object.
+```
+        uint64_t originalWordsShifted[10][3][3] = {};
+        using WordStencilT                      = uint64_t(&)[10][3][3];
+        auto &originalWords = reinterpret_cast<WordStencilT>(originalWordsShifted[1][1][1]);
+```
+Comment thread
+src/fvdb/detail/utils/nanovdb/PadGrid.cuh
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Avoid UB in PadGrid stencil: centered accessor, not negative array in…
+…
+1957679
+```
+…dexing
+
+PadLeafNodesFunctor and ErodeKeepMaskFunctor built a uint64_t(&)[10][3][3]
+reference by reinterpret_cast'ing the address of the middle element
+originalWordsShifted[1][1][1], then indexed it with negative and out-of-range
+subscripts (originalWords[-1][..], originalWords[8][..], originalWords[i-1][..][-1]).
+The notional [10][3][3] array does not exist at that address (it also extends
+past the real buffer), so the negative/out-of-range subscripting is undefined
+behavior an optimizer may miscompile.
+
+Replace the reference with a small centered-accessor lambda that indexes the
+real array with an explicit +1 offset -- originalWords(i, dBj, dBk) maps to
+originalWordsShifted[i + 1][dBj + 1][dBk + 1] -- so every access is in bounds.
+The computed addresses (and generated code) are identical; the CUDA<->CPU
+parity tests are unchanged. Addresses the review on openvdb#710.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+requested a review
+from Copilot
+August 2, 2026 23:14
+Copilot started reviewing on behalf of
+swahtz
+August 2, 2026 23:15
+View session
+Copilot
+AI
+reviewed
+Aug 2, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 6 out of 6 changed files in this pull request and generated no new comments.
+Suppressed comments (2)
+src/fvdb/detail/ops/BuildPaddedGrid.cu:376
+When excludeBorder==true, a grid with numVoxelsAt(i) > 0 but leafCount == 0 (e.g. a grid represented by value tiles, or otherwise malformed metadata) will hit break before handle is assigned. The code then pushes a default-constructed GridHandle, which can lead to crashes later.
+Even if this situation “shouldn’t happen”, it’s safer to make the leafCount==0 branch produce an explicit empty handle (or throw) so behavior is well-defined.
+```
+                              .mNodeCount[0]
+                        : baseBatchHdl.numLeavesAt(i);
+                if (leafCount == 0) {
+                    break; // already eroded to empty; further erosion is a no-op
+                }
+```
+src/fvdb/detail/ops/BuildPaddedGrid.cu:277
+keepTensor is allocated as a uint8 tensor and then reinterpreted as nanovdb::Mask<3>*. This relies on the returned pointer being suitably aligned for Mask<3> (likely 8-byte alignment); if it isn't, dereferencing in the CUDA kernels is undefined behavior and can cause misaligned global memory accesses.
+Allocate the sidecar as a torch::kUInt64 tensor (or otherwise ensure alignment) before casting to Mask<3>*.
+This issue also appears on line 372 of the same file.
+```
+    const int64_t maskBytes = static_cast<int64_t>(sizeof(nanovdb::Mask<3>)) * leafCount;
+    torch::Tensor keepTensor =
+        torch::empty({maskBytes}, torch::TensorOptions().dtype(torch::kUInt8).device(device));
+    auto *keepMasks = reinterpret_cast<nanovdb::Mask<3> *>(keepTensor.data_ptr());
+```
+Harden buildPaddedGrid erosion: aligned keep-mask + guard empty-leaf …
+…
+39847f2
+```
+…grids
+
+Two defensive fixes from the openvdb#710 review, both on the exclude_border erosion path:
+
+- Allocate the per-leaf keep-mask sidecar as uint64 rather than uint8 so its
+  data pointer is guaranteed 8-byte aligned for Mask<3> (8 uint64_t words),
+  which the kernels dereference directly. torch's allocators over-align in
+  practice, but the tensor API doesn't guarantee it. The emptiness check runs
+  on a zero-copy uint8 view, since torch's any() (an 'or' reduction) isn't
+  implemented for uint64.
+
+- In the erosion pass loop, if the first pass sees leafCount == 0 (a grid with
+  voxels but no leaf nodes, e.g. a tile-only grid), push an explicit empty grid
+  handle instead of the default-constructed one, which would crash downstream.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+commented
+Aug 2, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Addressed the two suppressed Copilot notes on BuildPaddedGrid.cu (in 39847f2):
+Erosion leafCount == 0: a grid with voxels but no leaf nodes (a tile-only grid) would break before handle was assigned and push a default-constructed GridHandle. It now pushes an explicit createEmptyGridHandle in that case, so the result is always well-defined.
+kUInt8 keep-mask sidecar → Mask<3>*: now allocated as kUInt64 so the data pointer is guaranteed 8-byte aligned for Mask<3> (8 uint64 words). The emptiness check runs on a zero-copy uint8 view, since torch's any() (an or reduction) isn't implemented for uint64. (There's a single such sidecar; the "also on line 372" reference didn't correspond to a second allocation.)
+test_dual (including the exclude_border erosion paths) and the full unit suite are green.
+swahtz
+requested a review
+from Copilot
+August 2, 2026 23:36
+Copilot started reviewing on behalf of
+swahtz
+August 2, 2026 23:36
+View session
+Copilot
+AI
+reviewed
+Aug 2, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 6 out of 6 changed files in this pull request and generated no new comments.
+Suppressed comments (2)
+src/fvdb/detail/ops/BuildPaddedGrid.cu:334
+numNegative is computed as -bmin using int arithmetic. If a caller passes bmin == INT_MIN, this negation overflows (undefined behavior) before any range checks can catch it, and totalPasses becomes incorrect. Compute counts in a wider signed type and validate that the pass count is non-negative and fits in an int loop bound.
+```
+    const int numPositive = bmax;
+    const int numNegative = -bmin;
+    const int totalPasses = numPositive + numNegative;
+```
+src/fvdb/detail/utils/nanovdb/PadGrid.cuh:720
+cudaMemcpyAsync(..., cudaMemcpyDeviceToHost, mStream) is followed by immediate dereference of srcRootAndUpperBuffer on the host without synchronizing the stream. This is only safe if HostBuffer::create() always returns pageable memory (making the copy implicitly synchronous); if it ever returns pinned memory, this becomes a real race and can read uninitialized data. Prefer making the copy explicitly synchronous (either cudaMemcpy or cudaStreamSynchronize(mStream) after the async copy) to keep correctness independent of the host-buffer allocation strategy.
+```
+        auto srcRootAndUpperBuffer = nanovdb::HostBuffer::create(rootAndUpperSize);
+        cudaCheck(cudaMemcpyAsync(srcRootAndUpperBuffer.data(),
+                                  deviceSrcRoot,
+                                  rootAndUpperSize,
+                                  cudaMemcpyDeviceToHost,
+                                  mStream));
+        auto srcRootAndUpper = static_cast<RootT *>(srcRootAndUpperBuffer.data());
+
+        for (uint32_t t = 0; t < srcRootAndUpper->tileCount(); t++) {
+```
+Sync after D2H root copy in PadGrid before host dereference
+…
+93a6f46
+```
+The root-speculation step copies the source root+upper nodes to a host buffer
+with cudaMemcpyAsync(..., cudaMemcpyDeviceToHost, mStream) and then dereferences
+it on the host to enumerate tiles. nanovdb::HostBuffer::create() returns pageable
+memory today, which makes that D2H copy implicitly host-synchronous, so it works
+-- but a pinned host buffer would leave the copy in flight and the host read
+would race on uninitialized data.
+
+Add an explicit cudaStreamSynchronize(mStream) before the dereference so
+correctness no longer depends on the host-buffer allocation strategy. Cost is
+negligible: one small copy per grid. Addresses the review on openvdb#710.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+added a commit
+to swahtz/fvdb-core
+that referenced
+this pull request
+Aug 3, 2026
+Fix topology ops on sliced/non-contiguous GridBatch views
+…
+5878cec
+```
+A sliced/indexed GridBatch (grid[idx], grid[a:b]) is a view: it shares the
+underlying handle (which keeps every grid) and only shrinks batchSize() and the
+per-grid metadata, so batchSize() < nanoGridHandle().gridCount() and each item's
+grid is located by its mCumBytes byte offset, not by physical index. The
+mask-morphology fast paths resolved grids with mGridHdl->deviceGrid(i) (physical)
+and returned whole-handle copies, so on an indexed batch they silently produced
+the wrong grids or a voxelSizes/gridCount mismatch -- the same bug class fixed in
+buildPaddedGrid (openvdb#710), across the rest of the openvdb#711 ops and the pre-existing
+dilate/prune/clone helpers they use.
+
+- GridBatchData gains view-aware accessors deviceGridPtrAt(i)/hostGridPtrAt(i):
+  the i-th *logical* grid resolved by byte offset (like Accessor::grid(i)). Every
+  physical-index site (conv, conv_transpose, coarsen, subdivide, dilate, prune --
+  CUDA fast paths and CPU proxy loops) now uses them.
+
+- MakeContiguous exposes contiguousGridHandle() (compact the selected grids: a
+  per-grid byte copy + mGridIndex/mGridCount header fixup, no radix sort) and
+  cloneGridHandleAt(); makeContiguous and cloneGrid build on them. cloneGrid had
+  copied *every physical grid* of a shared handle -- wrong for a sliced batch.
+
+- Zero-copy identity: coarsened_grid(1) / refined_grid(1) / dilated_grid(0) now
+  return the input grid unchanged in Python, preserving its view and metadata with
+  no copy (the C++ ops keep a compacting-copy fallback for direct callers).
+
+Adds test_sliced_batch.py: every op on tail/gap/reversed/single-item views
+(CPU+CUDA) matches an independently-built contiguous reference. Full unit suite
+green (2775 passed).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Use (mask != 0).any() instead of a uint8 view for the erode empty check
+…
+8585523
+```
+The erode keep-mask emptiness check reduced over a uint8 view of the uint64
+sidecar because any() (an 'or' reduction) is not implemented for uint64 on CUDA.
+(mask != 0).any() is equivalent and clearer -- the != yields a bool tensor whose
+any() reduction is implemented, so no dtype-reinterpreting view is needed.
+(.view(dtype) did compile and work; this just avoids the byte-reinterpretation.)
+Addresses the review on openvdb#712.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+added a commit
+to swahtz/fvdb-core
+that referenced
+this pull request
+Aug 3, 2026
+Fix topology ops on sliced/non-contiguous GridBatch views
+…
+11fd2eb
+```
+A sliced/indexed GridBatch (grid[idx], grid[a:b]) is a view: it shares the
+underlying handle (which keeps every grid) and only shrinks batchSize() and the
+per-grid metadata, so batchSize() < nanoGridHandle().gridCount() and each item's
+grid is located by its mCumBytes byte offset, not by physical index. The
+mask-morphology fast paths resolved grids with mGridHdl->deviceGrid(i) (physical)
+and returned whole-handle copies, so on an indexed batch they silently produced
+the wrong grids or a voxelSizes/gridCount mismatch -- the same bug class fixed in
+buildPaddedGrid (openvdb#710), across the rest of the openvdb#711 ops and the pre-existing
+dilate/prune/clone helpers they use.
+
+- GridBatchData gains view-aware accessors deviceGridPtrAt(i)/hostGridPtrAt(i):
+  the i-th *logical* grid resolved by byte offset (like Accessor::grid(i)). Every
+  physical-index site (conv, conv_transpose, coarsen, subdivide, dilate, prune --
+  CUDA fast paths and CPU proxy loops) now uses them.
+
+- MakeContiguous exposes contiguousGridHandle() (compact the selected grids: a
+  per-grid byte copy + mGridIndex/mGridCount header fixup, no radix sort) and
+  cloneGridHandleAt(); makeContiguous and cloneGrid build on them. cloneGrid had
+  copied *every physical grid* of a shared handle -- wrong for a sliced batch.
+
+- Zero-copy identity: coarsened_grid(1) / refined_grid(1) / dilated_grid(0) now
+  return the input grid unchanged in Python, preserving its view and metadata with
+  no copy (the C++ ops keep a compacting-copy fallback for direct callers).
+
+Adds test_sliced_batch.py: every op on tail/gap/reversed/single-item views
+(CPU+CUDA) matches an independently-built contiguous reference. Full unit suite
+green (2775 passed).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+mentioned this pull request
+Aug 3, 2026
+Generalize leaf-mask morphology to arbitrary factors: non-power-of-two coarsen/subdivide and general conv strides still pay the coordinate-list + radix-sort path
+#716
+Open
+matthewdcong
+reviewed
+Aug 3, 2026
+View reviewed changes
+Comment thread
+src/fvdb/detail/ops/BuildPaddedGrid.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+matthewdcong
+reviewed
+Aug 3, 2026
+View reviewed changes
+Comment thread
+src/fvdb/detail/utils/nanovdb/PadGrid.cuh
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+matthewdcong
+approved these changes
+Aug 3, 2026
+View reviewed changes
+This was referenced Aug 3, 2026
+GridEdgeNetwork emits 8 vertices + 12 edges per voxel with no deduplication (~368 B/voxel)
+#720
+Open
+Evaluate moving PadGrid.cuh functionality to NanoVDB
+#721
+Open
+Cleaned up buildPaddedGrid comments
+…
+f79207e
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+enabled auto-merge (squash)
+August 3, 2026 05:57
+swahtz
+added a commit
+to swahtz/fvdb-core
+that referenced
+this pull request
+Aug 3, 2026
+Fix topology ops on sliced/non-contiguous GridBatch views
+…
+d3c0954
+```
+A sliced/indexed GridBatch (grid[idx], grid[a:b]) is a view: it shares the
+underlying handle (which keeps every grid) and only shrinks batchSize() and the
+per-grid metadata, so batchSize() < nanoGridHandle().gridCount() and each item's
+grid is located by its mCumBytes byte offset, not by physical index. The
+mask-morphology fast paths resolved grids with mGridHdl->deviceGrid(i) (physical)
+and returned whole-handle copies, so on an indexed batch they silently produced
+the wrong grids or a voxelSizes/gridCount mismatch -- the same bug class fixed in
+buildPaddedGrid (openvdb#710), across the rest of the openvdb#711 ops and the pre-existing
+dilate/prune/clone helpers they use.
+
+- GridBatchData gains view-aware accessors deviceGridPtrAt(i)/hostGridPtrAt(i):
+  the i-th *logical* grid resolved by byte offset (like Accessor::grid(i)). Every
+  physical-index site (conv, conv_transpose, coarsen, subdivide, dilate, prune --
+  CUDA fast paths and CPU proxy loops) now uses them.
+
+- MakeContiguous exposes contiguousGridHandle() (compact the selected grids: a
+  per-grid byte copy + mGridIndex/mGridCount header fixup, no radix sort) and
+  cloneGridHandleAt(); makeContiguous and cloneGrid build on them. cloneGrid had
+  copied *every physical grid* of a shared handle -- wrong for a sliced batch.
+
+- Zero-copy identity: coarsened_grid(1) / refined_grid(1) / dilated_grid(0) now
+  return the input grid unchanged in Python, preserving its view and metadata with
+  no copy (the C++ ops keep a compacting-copy fallback for direct callers).
+
+Adds test_sliced_batch.py: every op on tail/gap/reversed/single-item views
+(CPU+CUDA) matches an independently-built contiguous reference. Full unit suite
+green (2775 passed).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Hide details
+View details
+swahtz
+merged commit 940630c
+into
+openvdb:main
+Aug 3, 2026
+40 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+swahtz
+added a commit
+to swahtz/fvdb-core
+that referenced
+this pull request
+Aug 3, 2026
+Fix topology ops on sliced/non-contiguous GridBatch views
+…
+0c1e4bf
+```
+A sliced/indexed GridBatch (grid[idx], grid[a:b]) is a view: it shares the
+underlying handle (which keeps every grid) and only shrinks batchSize() and the
+per-grid metadata, so batchSize() < nanoGridHandle().gridCount() and each item's
+grid is located by its mCumBytes byte offset, not by physical index. The
+mask-morphology fast paths resolved grids with mGridHdl->deviceGrid(i) (physical)
+and returned whole-handle copies, so on an indexed batch they silently produced
+the wrong grids or a voxelSizes/gridCount mismatch -- the same bug class fixed in
+buildPaddedGrid (openvdb#710), across the rest of the openvdb#711 ops and the pre-existing
+dilate/prune/clone helpers they use.
+
+- GridBatchData gains view-aware accessors deviceGridPtrAt(i)/hostGridPtrAt(i):
+  the i-th *logical* grid resolved by byte offset (like Accessor::grid(i)). Every
+  physical-index site (conv, conv_transpose, coarsen, subdivide, dilate, prune --
+  CUDA fast paths and CPU proxy loops) now uses them.
+
+- MakeContiguous exposes contiguousGridHandle() (compact the selected grids: a
+  per-grid byte copy + mGridIndex/mGridCount header fixup, no radix sort) and
+  cloneGridHandleAt(); makeContiguous and cloneGrid build on them. cloneGrid had
+  copied *every physical grid* of a shared handle -- wrong for a sliced batch.
+
+- Zero-copy identity: coarsened_grid(1) / refined_grid(1) / dilated_grid(0) now
+  return the input grid unchanged in Python, preserving its view and metadata with
+  no copy (the C++ ops keep a compacting-copy fallback for direct callers).
+
+Adds test_sliced_batch.py: every op on tail/gap/reversed/single-item views
+(CPU+CUDA) matches an independently-built contiguous reference. Full unit suite
+green (2775 passed).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+added a commit
+that referenced
+this pull request
+Aug 3, 2026
+Replace coordinate-list grid-topology construction with leaf-mask mor…
+…
+a73d3a2
+```
+…phology (#712)
+
+Most of fvdb's sparse-grid *topology* builders construct their output
+grid by materializing an expanded int32 candidate-coordinate list —
+`torch.empty({V·K, 3})` plus a per-candidate batch-index array — and
+then deduplicating it with a radix sort inside NanoVDB `PointsToGrid`.
+For a builder with a `K`-voxel stencil (`K = 8` for dual/subdivide, `27`
+for a 3³ conv, `V` for coarsen) this costs hundreds to ~1000 transient
+bytes **per output voxel**, allocates raw `cudaMalloc` scratch that
+bypasses the torch caching allocator, and silently corrupts results once
+the candidate count crosses 2³¹ (an `(int)pointCount` cast in
+`PointsToGrid.cuh`).
+
+This PR rewrites the device path of those builders to operate directly
+on the 512-bit leaf activity masks via
+`nanovdb::tools::cuda::TopologyBuilder` (`DilateGrid` / `PruneGrid` /
+`CoarsenGrid` / `RefineGrid` / `MergeGrids`) and the `PadGrid` driver
+from #710 (now merged, so it is on `main`). The candidate list — and its
+sort scratch — is never materialized. Result: **1–2 orders of magnitude
+less time and up to ~1500× less transient memory** on the affected ops,
+and the >2³¹ overflow is removed.
+
+It also **hardens these ops (and the pre-existing**
+`dilate`**/**`prune`**/**`clone` **helpers they use) for
+sliced/indexed** `GridBatch` **views** — a latent wrong-grid bug
+surfaced in review — via view-aware `GridBatchData` accessors and a
+compacting-copy helper (see *Sliced / non-contiguous batch correctness*
+below).
+
+**#710 has since merged**, so this PR now targets `main` directly and is
+independently reviewable — no stacking, and its 12 commits are no longer
+part of this branch. #710 fixed the flagship `dual_grid` case and added
+`src/fvdb/detail/utils/nanovdb/PadGrid.cuh`, which this PR builds on.
+Filed from **issue #711**.
+
+## Motivation
+
+A user OOM'd a ~500M-voxel `dual_grid` on an 80 GB GPU. Root cause: the
+8× candidate list alone is ~500M·8·16 B ≈ 64 GB of transient allocation
+before the grid is even built. #710 (merged) fixed `dual_grid`; #711
+(this PR) applies the same leaf-mask approach to the rest of the
+builders that share the anti-pattern.
+
+## What changed
+
+The mask-morphology rewrite is on the **CUDA** specializations; the
+**CPU** proxy-grid paths and the `PrivateUse1`/`DistributedPointsToGrid`
+legs keep their existing algorithm (the sliced-batch fix below does
+update the CPU per-item loops to be view-aware). For the hot cases the
+mask path is taken; **non-power-of-two coarsen/subdivide factors and
+general strides keep the coordinate-list path as a correctness
+fallback.**
+
+
+| Step | Op(s) | Change |
+| ---- | ------------------------------------- |
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+|
+| 1 | shared infra | Reject `>2³¹` candidates in
+`_createNanoGridFromIJK` + dense volume guard; short-circuit
+`jidx_from_joffsets` for a single list (empty jidx, matching the
+existing single-tensor / `JIdxForGrid` convention); drop a redundant
+int64→int32 copy |
+| 2 | `clipped_grid` | in-bounds bool mask → `PruneGrid` (was:
+active-in-bounds coord list → rebuild) |
+| 3 | `from_nearest_voxels_to_points` | floored-points grid + one
+positive `PadGrid` pass (was: 8× candidate list); deletes
+`NearestIjkForPoints.{cu,h}`. Also fixes an `eidx*8` int32 overflow
+above ~268M points |
+| 4 | `from_dense` | build the grid once and `GridHandle::copy` across
+the batch (was: re-sort identical coords `B` times) |
+| 5 | `coarsened_grid`, `conv_grid` | coarsen 2ⁿ → repeated
+`CoarsenGrid`; conv 3³ s1 → `DilateGrid`, 2³ s1 → positive `PadGrid`;
+conv re-points its coarsen short-circuit at the new builder |
+| 6 | `refined_grid`, `conv_transpose_grid` | subdivide 2ⁿ →
+`RefineGrid` (masked → `PruneGrid` then `RefineGrid`); conv-transpose
+s2/k3³ → `RefineGrid` + negative `PadGrid` |
+| 7 | `from_mesh` | fixes int32 truncation of the surface-sample index
+(`tid`/`totalSamples`) and removes a dead `1 << 31` guard
+(signed-overflow UB) in `ijkForMesh`. Same parametric sampler — no
+topology change |
+
+
+
+
+## Performance
+
+Measured on an NVIDIA RTX PRO 6000 Blackwell (96 GB) with the same
+script run on `main` (before) and this branch (after). Inputs are solid
+`S³` cubes built via `from_ijk` (worst-case dense topology) and random
+point clouds for `nearest`. Time is the median of 7 iters (warmup +
+`cuda.synchronize()`, input built outside the timed loop). Memory is
+peak **torch high-water allocated** during the op — i.e. the candidate
+tensor being removed — cross-checked against driver-level peak (polling
+`mem_get_info()` every 0.3 ms, which also captures the raw `cudaMalloc`
+sort scratch); on the old path the two agree to within ~1%, confirming
+the candidate list dominates.
+
+### "fit" scale — both paths succeed (apples-to-apples)
+
+
+| op | out voxels | time before → after | speedup | mem before → after |
+reduction |
+| ------------------------------- | ----------- | ------------------- |
+-------- | ------------------ | --------- |
+| `dual_grid` † | 57,066,625 | 184.3 → 1.81 ms | **102×** | 9.07 GB →
+26.9 MB | **337×** |
+| `from_nearest_voxels_to_points` | 40,326,494 | 135.1 → 22.19 ms |
+**6×** | 6.88 GB → 978 MB | **7×** |
+| `conv_grid` k3 s1 | 11,543,176 | 246.0 → 1.85 ms | **133×** | 11.23 GB
+→ 8.6 MB | **1302×** |
+| `conv_transpose_grid` k3 s1 | 11,543,176 | 237.1 → 1.86 ms | **127×**
+| 9.72 GB → 8.6 MB | **1126×** |
+| `conv_grid` k2 s1 | 11,390,625 | 66.5 → 1.84 ms | **36×** | 3.33 GB →
+5.8 MB | **573×** |
+| `coarsened_grid` ×2 | 11,239,424 | 39.9 → 1.01 ms | **39×** | 1.82 GB
+→ 22.8 MB | **80×** |
+| `refined_grid` ×2 | 191,102,976 | 88.9 → 1.54 ms | **58×** | 3.83 GB →
+49.2 MB | **78×** |
+| `clipped_grid` | 11,390,625 | 11.2 → 3.08 ms | **4×** | 2.28 GB → 829
+MB | **3×** |
+
+
+
+
+### "big" scale — larger inputs; the trend holds and steepens
+
+
+| op | out voxels | time before → after | speedup | mem before → after |
+reduction |
+| ------------------------------- | ----------- | ------------------- |
+-------- | ------------------ | --------- |
+| `dual_grid` † | 135,005,697 | 428.1 → 2.17 ms | **197×** | 21.50 GB →
+61.7 MB | **348×** |
+| `from_nearest_voxels_to_points` | 120,948,271 | 382.1 → 56.46 ms |
+**7×** | 20.64 GB → 2.93 GB | **7×** |
+| `conv_grid` k3 s1 | 24,389,000 | 519.7 → 1.68 ms | **309×** | 23.87 GB
+→ 15.9 MB | **1502×** |
+| `conv_transpose_grid` k3 s1 | 24,389,000 | 489.7 → 1.69 ms | **291×**
+| 20.65 GB → 15.9 MB | **1299×** |
+| `conv_grid` k2 s1 | 24,137,569 | 143.3 → 1.64 ms | **87×** | 7.08 GB →
+12.3 MB | **575×** |
+| `coarsened_grid` ×2 | 21,952,000 | 78.4 → 0.99 ms | **79×** | 3.55 GB
+→ 44.5 MB | **80×** |
+| `refined_grid` ×2 | 452,984,832 | 203.4 → 1.88 ms | **108×** | 9.07 GB
+→ 111.8 MB | **81×** |
+| `clipped_grid` | 22,188,041 | 21.7 → 5.27 ms | **4×** | 4.44 GB → 1.62
+GB | **3×** |
+
+
+
+
+† `dual_grid` is #710's work, already merged, and is **not** part of
+this PR's diff. It is kept in the tables because the other ops use the
+same mechanism and were measured with the same script on the same
+hardware, so it is the reference point for the rest of the rows.
+
+### Reading the numbers
+
+- **Transient memory scales linearly with input — that is the reported
+OOM.** Old `conv_grid` k3 needs ~980 B of scratch per output voxel
+(11.5M → 11.2 GB; 24.4M → 23.9 GB); the new path is < 1 B/voxel. An
+~80M-voxel conv OOMs an 80 GB card on `main` and takes < 20 MB here.
+`dual_grid` costs ~160 B/input-voxel old → ~500M voxels ≈ 80 GB → OOM,
+matching the original bug report.
+- **Kernel-cubed builders win most** (3³ conv materializes 27
+candidates/voxel; dual/subdivide 8) — the mask path never forms that
+list.
+- `clip` **(3–4×) and** `nearest` **(6–7×) are the smaller wins by
+design:** their fast paths still touch per-voxel data (clip builds an
+in-bounds mask and prunes; nearest floors points to a grid then does one
+`PadGrid` pass), so they cut the constant factor rather than eliminate
+the list — while also fixing the int32 overflow in `nearest`.
+
+
+
+## Correctness & safety
+
+- **Reordering is safe.** All 8 builders are pure-forward topology
+construction (no autograd). Every differentiable consumer (pool / refine
+/ gather-scatter conv / inject) maps voxels by **IJK coordinate**, not
+linear index, and `TopologyBuilder` enumerates in NanoVDB canonical
+order — the same order `PointsToGrid` produces — so the "feature row *i*
+↔ voxel with `getValue()==i+1`" invariant is preserved. Tests assert
+ordered-ijk CUDA↔CPU parity plus a consumer round-trip per op.
+- `clipGridFeaturesWithMask` **row alignment** (features `rmask`ed in
+input-active order vs the pruned grid) is explicitly tested —
+input-active order *is* canonical, so they align.
+- Non-power-of-two factors / general strides fall back to the
+coordinate-list path, so those cases are byte-for-byte unchanged.
+
+
+
+## Sliced / non-contiguous batch correctness
+
+Reviewing the mask-morphology fast paths surfaced a latent bug shared
+with several pre-existing helpers. A **sliced or indexed** `GridBatch`
+(`grid[idx]`, `grid[a:b]`) is a *view*: it shares the underlying NanoVDB
+handle (which keeps every grid) and only shrinks `batchSize()` and the
+per-grid metadata, so `batchSize() < nanoGridHandle().gridCount()` and
+each item's grid lives at its `mCumBytes` byte offset — **not** at
+physical index `i`. The fast paths resolved grids with
+`mGridHdl->deviceGrid(i)` (physical) and returned whole-handle copies,
+so on an indexed batch they silently produced the wrong grids or a
+`voxelSizes`/`gridCount` mismatch.
+
+- **View-aware accessors on** `GridBatchData`**:** `deviceGridPtrAt(i)`
+/ `hostGridPtrAt(i)` return the *i-th logical grid* resolved by byte
+offset (the mapping `Accessor::grid(i)` already used), so op authors
+reach for the correct pointer by default instead of the `deviceGrid(i)`
+footgun. Every site — `conv`, `conv_transpose`, `coarsen`, `subdivide`,
+`dilate`, `prune`, across CUDA fast paths and CPU proxy loops — was
+retrofitted.
+- **Compacting copy for identity / whole-copy paths:** `MakeContiguous`
+now exposes `contiguousGridHandle()` (compact the selected grids: a
+per-grid byte copy + `mGridIndex`/`mGridCount` header fixup, no radix
+sort) and `cloneGridHandleAt()`; `makeContiguous` and `cloneGrid` build
+on them. `cloneGrid` had been copying *every physical grid* of a shared
+handle — the source of a `dilated_grid(0)` mismatch on a slice.
+- **Zero-copy identity:** `coarsened_grid(1)` / `refined_grid(1)`
+(unmasked) / `dilated_grid(0)` now return the input grid unchanged in
+Python, preserving its view and metadata with no copy (the C++ ops keep
+a compacting-copy fallback for direct callers).
+- **Test:** `tests/unit/test_sliced_batch.py` runs every op on
+tail/gap/reversed/single-item views (CPU+CUDA) against an
+independently-built contiguous reference.
+
+
+
+## Testing
+
+- **Python:** full `pytest unit/` — **2775 passed, 10 skipped**. Adds
+per-op CUDA↔CPU parity, consumer round-trip, edge-case (empty /
+empty-middle-item / single-voxel / leaf & root-tile boundary),
+peak-memory, and sliced/non-contiguous-batch (`test_sliced_batch.py`)
+tests.
+- **C++:** `ctest` — **40/41 pass**. The one failure,
+`PredGatherIGemmTest`, is a pre-existing `"Support for cp.async
+instructions has not been enabled"` CUTLASS igemm error on this
+sm_120/Blackwell setup; this branch touches **zero**
+igemm/gather/CUTLASS files (`git diff --name-only main...HEAD`
+confirms), so it is unrelated.
+
+
+
+## Notes for the reviewer
+
+- Previously stacked on #710; that PR has merged and this branch has
+been rebased onto `main` with its commits dropped, so this is now a
+standalone PR.
+- The view-aware `GridBatchData` accessors and the compacting-copy
+helpers also fix the same sliced-batch bug in the pre-existing
+`dilate`/`prune`/`clone` helpers those ops route through.
+
+---------
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+Co-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+optimization
+Performance or memory optimization
+Topology Operations
+Issues related to topology operations (prune, merge, dilate, etc.
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

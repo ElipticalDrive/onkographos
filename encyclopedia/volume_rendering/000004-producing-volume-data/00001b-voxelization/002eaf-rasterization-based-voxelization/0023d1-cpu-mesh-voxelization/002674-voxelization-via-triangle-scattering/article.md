@@ -16,25 +16,25 @@ Voxelization via Triangle Scattering converts a triangle mesh into a 3D grid of 
 **Algorithm Steps:**
 
 1.  **Grid Initialization:**
-    Initialize the `Grid` to all `false` (air). The padding cells are conceptually exterior [S1, unofficial].
+    Initialize the `Grid` to all `false` (air) [S1, unofficial]. The padding cells are conceptually exterior [S1, unofficial].
 
 2.  **Triangle Scattering (Rasterization):**
     For each triangle $T$ in the input mesh:
-    a.  Compute the axis-aligned bounding box (AABB) of $T$ in world coordinates.
+    a.  Compute the axis-aligned bounding box (AABB) of $T$ in world coordinates [S1, unofficial].
     b.  Convert the AABB to grid coordinates to determine the range of cells $[i_{min}, i_{max}] \times [j_{min}, j_{max}] \times [k_{min}, k_{max}]$ that intersect the triangle's bounding box [S1, unofficial].
-    c.  Iterate over every cell $(i, j, k)$ in this range.
+    c.  Iterate over every cell $(i, j, k)$ in this range [S1, unofficial].
     d.  Perform an **exact 13-axis Separating Axis Theorem (SAT)** overlap test between the triangle $T$ and the voxel cell $C_{i,j,k}$ [S1, unofficial].
-        *   The 13 axes consist of the 3 face normals of the cell, the 1 face normal of the triangle, and the 9 cross products of the triangle edges with the cell axes.
-        *   If a separating axis is found, the triangle and cell do not overlap.
-        *   If no separating axis is found, they overlap.
+        *   The 13 axes consist of the 3 face normals of the cell, the 1 face normal of the triangle, and the 9 cross products of the triangle edges with the cell axes [S1, unofficial].
+        *   If a separating axis is found, the triangle and cell do not overlap [S1, unofficial].
+        *   If no separating axis is found, they overlap [S1, unofficial].
     e.  If they overlap, mark `Grid[i, j, k] = true` (solid) [S1, unofficial].
 
 3.  **Flood Fill for Air Region:**
     a.  Select a seed point $P_{seed}$ inside the room [S1, unofficial].
     b.  Map $P_{seed}$ to grid coordinates $(i_s, j_s, k_s)$ [S1, unofficial].
-    c.  If `Grid[i_s, j_s, k_s]` is `true` (solid), the seed is invalid. Perform **Seed Relocation**:
+    c.  If `Grid[i_s, j_s, k_s]` is `true` (solid), the seed is invalid [S1, unofficial]. Perform **Seed Relocation**:
         *   Generate candidate cells ordered by increasing radius from the seed, then by distance to the grid center [S1, unofficial].
-        *   For each candidate, perform a temporary flood fill.
+        *   For each candidate, perform a temporary flood fill [S1, unofficial].
         *   Select the first candidate that results in a sealed fill (does not reach the padded rim) [S1, unofficial].
     d.  Perform a 6-connected flood fill starting from the valid seed cell [S1, unofficial].
     e.  Mark all reachable cells as `false` (air) [S1, unofficial].
@@ -57,6 +57,12 @@ def voxelize(triangles, grid_dims, cell_size):
     # 1. Initialize grid with padding
     shape = (grid_dims[0] + 2, grid_dims[1] + 2, grid_dims[2] + 2)
     grid = [[[False] * shape[2] for _ in range(shape[1])] for _ in range(shape[0])]
+
+    # Vector ops
+    def cross(a, b):
+        return (a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0])
+    def dot(a, b):
+        return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
 
     # Helper: Convert world point to grid index
     def world_to_grid(p):
@@ -110,12 +116,6 @@ def voxelize(triangles, grid_dims, cell_size):
 
         return True
 
-    # Vector ops
-    def cross(a, b):
-        return (a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0])
-    def dot(a, b):
-        return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
-
     # 2. Scatter Triangles
     for tri in triangles:
         min_x = min(v[0] for v in tri)
@@ -125,12 +125,12 @@ def voxelize(triangles, grid_dims, cell_size):
         min_z = min(v[2] for v in tri)
         max_z = max(v[2] for v in tri)
 
-        i_min = max(1, int(math.floor(min_x / cell_size)) + 1)
-        i_max = min(grid_dims[0], int(math.floor(max_x / cell_size)) + 1)
-        j_min = max(1, int(math.floor(min_y / cell_size)) + 1)
-        j_max = min(grid_dims[1], int(math.floor(max_y / cell_size)) + 1)
-        k_min = max(1, int(math.floor(min_z / cell_size)) + 1)
-        k_max = min(grid_dims[2], int(math.floor(max_z / cell_size)) + 1)
+        i_min = max(1, int(math.floor(min_x / cell_size)))
+        i_max = min(grid_dims[0], int(math.ceil(max_x / cell_size)) - 1)
+        j_min = max(1, int(math.floor(min_y / cell_size)))
+        j_max = min(grid_dims[1], int(math.ceil(max_y / cell_size)) - 1)
+        k_min = max(1, int(math.floor(min_z / cell_size)))
+        k_max = min(grid_dims[2], int(math.ceil(max_z / cell_size)) - 1)
 
         for i in range(i_min, i_max + 1):
             for j in range(j_min, j_max + 1):
@@ -216,7 +216,7 @@ def is_sealed_fill(grid, si, sj, sk, grid_dims):
 
 ## Operating characteristics
 *   **Time Complexity:** Proportional to the surface area in cells (number of solid cells produced) rather than grid volume $\times \log(\text{triangles})$ [S1, unofficial].
-*   **Memory Complexity:** $O(N_x N_y N_z)$ for the grid. No acceleration structures (BVH) are required [S1, unofficial].
+*   **Memory Complexity:** $O(N_x N_y N_z)$ for the grid [G]. No acceleration structures (BVH) are required [S1, unofficial].
 *   **Strengths:** No BVH construction overhead. Exact overlap test preserves geometry fidelity for acoustic modal frequencies. Leak detection allows the caller to inspect the grid [S1, unofficial].
 *   **Limitations:** Staircasing of non-axis-aligned surfaces is intrinsic to grid methods. Corner attribution is ambiguous (first triangle to reach a cell wins) [S1, unofficial].
 *   **When to use:** When exact geometry is critical for acoustic simulation and BVH construction is undesirable or too slow [S1, unofficial].

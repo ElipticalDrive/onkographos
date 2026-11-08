@@ -3,65 +3,92 @@
 Also called: RT+Cull
 
 ## Overview
-Block culling is an optimization technique for sparse volume rendering that reduces the time required to reach content values inside RGBA volumes by skipping empty or irrelevant blocks [S1, unofficial]. It is particularly effective when sparsity results from runtime parameters, such as narrower allowed density ranges, rather than inherent data sparsity [S1, unofficial]. Unlike [Beam Optimization](932-beam-optimization.md), which groups rays to exploit coherence, block culling operates by traversing the volume hierarchy and discarding blocks that do not contain relevant content based on precomputed bounds [S1, unofficial].
+Block culling is an optimization technique for distance-field ray marching that reduces rendering time by skipping traversal of empty or irrelevant blocks within RGBA volumes [S1, unofficial]. It is particularly effective when sparsity in the volume is induced by runtime parameters, such as narrowing the allowed density range, rather than inherent data sparsity [S1, unofficial]. Unlike [Beam Optimization](932-beam-optimization.md) which focuses on ray coherence, or [Bounding Shape Optimization](7750-bounding-shape-optimization.md) which refines geometry bounds, block culling operates on a hierarchical block structure to prune entire regions of the volume tree [S1, unofficial].
 
 ## How it works
-Block culling integrates with hardware ray tracing (RT) to accelerate the traversal of sparse volume data structures, typically octrees or similar hierarchical block representations [S1, unofficial]. The method relies on the assumption that blocks can be classified as "empty" or "full" with respect to the user-defined content range, allowing the ray tracer to skip intersection tests for empty blocks [S1, unofficial].
+Block culling integrates with the ray traversal logic to determine if a block contains any voxels that satisfy the current rendering criteria (e.g., density threshold). If a block is determined to be "culled" (empty with respect to the criteria), the ray traversal skips the block entirely, avoiding sample fetches and shading calculations.
 
 **Inputs and Outputs:**
-*   **Input:** A sparse volume dataset (e.g., RGBA), a user-defined content range (density threshold), and a ray traversal state.
-*   **Output:** Rendered image with reduced traversal time for rays passing through empty space [S1, unofficial].
+*   **Input:** Ray origin, ray direction, volume block hierarchy (e.g., octree or grid), current density/content range parameters.
+*   **Output:** Rendered pixel color, reduced traversal time.
 
 **Data Structures:**
-The volume is organized into blocks. Each block typically stores metadata indicating whether it contains any values within the specified content range [S1, unofficial]. Exact bit-packing details are not provided in the sources [G].
+The method relies on the existing block hierarchy used in [Block Walking](932-beam-optimization.md) or standard ray tracing. Each block node typically contains bounding information and a summary statistic (e.g., max density, occupancy bit) used for culling tests [S1, unofficial].
 
 **Steps:**
-1.  **Ray Traversal Initiation:** The ray tracer begins traversal from the root of the volume hierarchy [S1, unofficial].
-2.  **Block Evaluation:** For each block encountered, the algorithm checks if the block contains any content within the user-requested density range [S1, unofficial].
-3.  **Culling Decision:**
-    *   If the block is determined to be empty relative to the content range, the block is culled (skipped) [S1, unofficial].
-    *   If the block contains relevant content, traversal continues into the block's children or the block is processed for ray marching [S1, unofficial].
-4.  **Content Range Check:** The culling logic is sensitive to the user-requested content range. If this range is greater than or equal to the actual content range of the data, culling provides no benefit and may incur negligible overhead [S1, unofficial].
+1.  **Ray-Block Intersection:** Intersect the ray with the current block's bounding volume.
+2.  **Culling Test:** Evaluate the block's summary statistic against the user-requested content range.
+    *   If the block's maximum density is below the lower threshold of the requested range, or minimum density is above the upper threshold, the block is culled.
+    *   If the block passes the test, traversal continues into the block's children or interior samples.
+3.  **Traversal:** Proceed to the next block or sample. If culled, skip to the next sibling or parent's next child.
 
 **Parameters:**
-*   **User-requested content range:** The density threshold defining what constitutes "content." Typical values depend on the specific volume data [S1, unofficial].
+*   **Content Range:** The density interval $[d_{min}, d_{max}]$ considered "visible" or relevant. This is often a runtime parameter [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **No Sparsity Benefit:** If the user-requested content range encompasses all data values, block culling does not provide significant performance regression but also no gain [S1, unofficial].
-*   **Precision:** The sources do not specify precision issues, but hardware ray tracing implementations may vary in how they handle boundary conditions [G].
+*   **No Impact:** If the user-requested content range is greater than or equal to the actual content range of the volume, block culling provides no significant performance gain and does not cause regression [S1, unofficial].
+*   **Sparse Data:** When data is inherently too sparse, block culling may not be as effective as block walking, as the overhead of checking culling conditions might outweigh the benefits if few blocks are actually skipped [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cull_block(block, ray, density_range):
+    """
+    Determines if a block can be skipped based on density range.
+    block.max_density: Maximum density value in the block.
+    block.min_density: Minimum density value in the block.
+    density_range: Tuple (lower_bound, upper_bound).
+    """
+    lower, upper = density_range
+    # If the block's density range does not overlap with the requested range, cull it
+    if block.max_density < lower or block.min_density > upper:
+        return True  # Cull this block
+    return False     # Keep this block for further traversal
+
+def ray_march_with_culling(ray, root_block, density_range):
+    """
+    Simplified ray marching with block culling.
+    """
+    stack = [root_block]
+    color = vec3(0.0)
+    
+    while stack:
+        block = stack.pop()
+        
+        # 1. Intersect ray with block
+        if not ray_intersects_block(ray, block):
+            continue
+            
+        # 2. Apply Culling Test
+        if cull_block(block, ray, density_range):
+            continue
+            
+        # 3. Traverse or Sample
+        if block.is_leaf():
+            color += sample_block(ray, block)
+        else:
+            # Push children to stack (order may vary based on traversal strategy)
+            for child in block.children:
+                stack.append(child)
+                
+    return color
+```
 
 ## Subtopics
 
 ### Block Walking with Culling
-Block walking with culling combines block walking and block culling algorithms to further reduce render time [S1, unofficial]. Block walking optimizes traversal by skipping empty blocks more aggressively, while culling filters based on content range [S1, unofficial]. This combination yields the best average performance compared to using either technique alone or standard ray tracing [S1, unofficial]. It is particularly effective in scenarios where block walking alone might suffer from high overhead due to excessive sparsity, as culling can mitigate this by filtering based on density ranges [S1, unofficial].
+This variant combines block walking (which skips empty space by jumping between occupied blocks) with block culling (which prunes blocks outside the density range) [S1, unofficial]. It is chosen when both spatial sparsity and density-based filtering are present. It offers the best average performance compared to using either technique alone or standard ray tracing [S1, unofficial].
 
 ## Operating characteristics
-**Time and Memory Complexity:**
-The sources do not provide explicit asymptotic complexity formulas [G]. Performance is measured in milliseconds on specific datasets [S1, unofficial].
-
-**Measured Performance:**
-Performance was measured on an unspecified hardware platform using datasets such as "Fish" (2172x1448x1020, 5.06GB) and "Rock" (1425x950x1208, 4.38GB) [S1, unofficial].
-
-*   **Block Traversal Mode:**
-    *   **Fish (c):** RT+Cull achieved 4.823ms vs. 7.375ms for RT [S1, unofficial].
-    *   **Fish (a):** RT+Walk+Cull achieved 5.543ms vs. 9.745ms for RT [S1, unofficial].
-    *   **Chip (d):** RT+Walk+Cull achieved 1.612ms vs. 2.310ms for RT [S1, unofficial].
-    *   **Rock (e):** RT+Walk+Cull achieved 4.294ms vs. 7.949ms for RT [S1, unofficial].
-
-*   **Blend Mode:**
-    *   **Fish (c):** RT+Cull achieved 8.079ms vs. 10.798ms for RT [S1, unofficial].
-    *   **Fish (a):** RT+Walk+Cull achieved 107.725ms vs. 113.983ms for RT [S1, unofficial].
-    *   **Rock (g):** RT+Walk+Cull achieved 44.793ms vs. 49.117ms for RT [S1, unofficial].
-
-**Scaling and Trade-offs:**
-Block culling provides approximately 2x performance gains in block traversal mode for certain datasets [S1, unofficial]. However, block walking can have high cost when content is too sparse, whereas block culling has high gain if the original content is dense but sparsity results from runtime parameters [S1, unofficial]. The combination of both techniques results in the best average performance [S1, unofficial].
-
-**Strengths and Limitations:**
-*   **Strengths:** Significant speedup in block traversal and blend modes for sparse volumes; effective when sparsity is due to narrow density ranges [S1, unofficial].
-*   **Limitations:** Block walking alone is ineffective when content is too sparse; culling benefits are nullified if the content range covers all data [S1, unofficial].
+*   **Time Complexity:** Reduces the number of visited blocks and samples. In block traversal mode, 'RT+Cull' achieved 4.823ms on Fish (c) vs 7.375ms for 'RT' [S1, unofficial]. In blend mode, 'RT+Cull' achieved 8.079ms on Fish (c) vs 10.798ms for 'RT' [S1, unofficial].
+*   **Memory Complexity:** No additional memory overhead beyond the block hierarchy's existing metadata.
+*   **Strengths:** Significant performance gains (up to 2x in block traversal mode) when sparsity is caused by runtime density filtering [S1, unofficial]. No performance regression when culling is ineffective [S1, unofficial].
+*   **Limitations:** Less effective when data is inherently too sparse, where block walking overhead is high and culling gains are limited [S1, unofficial].
+*   **Scaling:** Performance improvement scales with the degree of sparsity induced by the content range.
 
 ## Background
-Block culling was introduced in the context of sparse volume rendering using hardware ray tracing [S1, unofficial]. The technique is part of a broader effort to optimize volume rendering performance by leveraging hardware acceleration and hierarchical data structures [S1, unofficial].
+Block culling was introduced as part of sparse volume rendering techniques leveraging hardware ray tracing [S1, unofficial]. It addresses the inefficiency of standard ray marching in large, sparse RGBA volumes where much of the space is empty or irrelevant to the current view [S1, unofficial].
 
 ## Sources
 [S1] Sparse Volume Rendering using Hardware Ray Tracing and Block ..., https://gpuopen.com/download/SA2021_BlockWalk.pdf, fetched 2026-10-26 (unofficial)

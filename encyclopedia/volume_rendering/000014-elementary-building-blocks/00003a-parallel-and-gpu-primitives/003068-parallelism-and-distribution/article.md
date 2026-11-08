@@ -1,200 +1,62 @@
 # Parallelism and Distribution
+
+Also called: Distributed Volume Rendering, Parallel Volume Rendering
+
 ## Overview
-Parallelism and Distribution addresses the computational bottleneck of volume rendering by distributing ray casting, compositing, or voxel processing tasks across multiple processors, threads, or networked nodes to achieve real-time or near-real-time frame rates [G]. It differs from sibling acceleration techniques like [Early Termination and Probabilistic Path Control](1791-early-termination-and-probabilistic-path-control.md) or [Visibility Culling](6226-visibility-culling.md), which optimize the work per ray, by instead increasing the total throughput of the rendering pipeline through hardware or cluster-level concurrency [G].
+Parallelism and Distribution refers to the family of strategies that decompose volume rendering workloads across multiple processing units (CPUs, GPUs, or networked nodes) to accelerate rendering or enable the visualization of datasets larger than a single processor's memory. It solves the computational bottleneck of ray marching and the memory constraints of large volumetric datasets. This family is distinguished from sibling primitives like [Compute Shader Kernel](1202-compute-shader-kernel.md) by its focus on high-level task decomposition (spatial, temporal, or object-order) and inter-processor communication, rather than low-level thread scheduling or memory hierarchy management.
 
 ## Shared principles
-This family inherits the core mechanism and common principles from [Parallel and GPU primitives](771-parallel-and-gpu-primitives.md).
+The core mechanism of this family is the mapping of computational tasks (pixels, rays, or data elements) to parallel execution units (threads, warps, or cores) [G]. Common principles include:
+1. **Thread Mapping:** Assigning one or more threads to process specific data elements (e.g., one thread per pixel or one thread per voxel sample) [G].
+2. **Memory Hierarchy Utilization:** Leveraging global memory for large datasets, shared/local memory for intermediate results (reductions), and registers for per-thread state [G].
+3. **Synchronization:** Managing concurrency conflicts using atomic operations, barriers, or spatial partitioning (tiles) to ensure data consistency without excessive serialization [G].
+4. **Data Parallelism:** Performing identical operations on different data elements simultaneously, often requiring coalesced memory access patterns to maximize bandwidth [G].
 
 ## Subtopics
 
-### [Parallel Ray Casting with Segment Lists](2565-parallel-ray-casting-with-segment-lists.md)
-Parallel Ray Casting with Segment Lists is a volume rendering acceleration method that combines spatial decomposition of the image plane with ray-space culling via segment lists to skip empty space. It distributes rendering tasks across multiple processors (MPI ranks) and threads (OpenMP), calculating sampling points based on precomputed segment boundaries rather than iterating every voxel. This approach differs from [Parallel Image Compositing with Overlapping](3554-parallel-image-compositing-with-overlapping.md) by handling visibility culling at the ray level before compositing, and from [Ray Compaction](4039-ray-compaction.md) by retaining the full ray structure but skipping empty intervals explicitly via list iteration rather than compacting active rays into a dense array.
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-import math
-
-def parallel_ray_casting_segment_lists(width, height, cam_pos, ray_dir_func, volume, config):
-    comm_size = config.comm_size
-    thread_nums = config.thread_nums
-    sampling_rate = config.sampling_rate
-    dims = volume.dims
-    my_rank = config.my_rank
-    
-    # Precompute step length
-    dims_norm = math.sqrt(dims.x**2 + dims.y**2 + dims.z**2)
-    step_len = 1.0 / (sampling_rate * dims_norm)
-    
-    # Precompute block offsets
-    block_offsets = {}
-    for k in range(volume.bricks.k):
-        for j in range(volume.bricks.j):
-            for i in range(volume.bricks.i):
-                block = volume.get_block(k, j, i)
-                if block is None:
-                    block_offsets[(k,j,i)] = -1
-                else:
-                    block_offsets[(k,j,i)] = block.data - volume.buf_base
-
-    # Calculate distribution
-    line_nums = math.ceil(height / comm_size)
-    t_line_nums = math.ceil(line_nums / thread_nums)
-    
-    # Parallel region (conceptual)
-    for t_id in range(thread_nums):
-        for i in range(t_line_nums):
-            row = my_rank + (t_id * t_line_nums + i) * comm_size
-            if row >= height:
-                break
-            
-            for col in range(width):
-                # Calculate ray
-                u = (-0.5 + (col + 0.5) / width) * config.aspect
-                v = -0.5 + (row + 0.5) / height
-                ray_dir = ray_dir_func(u, v)
-                ray_dir_norm = math.sqrt(ray_dir[0]**2 + ray_dir[1]**2 + ray_dir[2]**2)
-                ray_dir = (ray_dir[0]/ray_dir_norm, ray_dir[1]/ray_dir_norm, ray_dir[2]/ray_dir_norm)
-                
-                # Get segment info
-                seg = volume.get_ray_distance(cam_pos, ray_dir)
-                seg_list = volume.get_seg_list(cam_pos, ray_dir)
-                point_list = []
-                
-                # Generate sampling points
-                for s_beg, s_end in seg_list:
-                    # Align s_beg to step grid
-                    aligned_beg = seg.x + math.ceil((s_beg - seg.x) / step_len) * step_len
-                    
-                    current = aligned_beg
-                    while current <= s_end:
-                        point_list.append(current)
-                        current += step_len
-                
-                # Composite pixel (implementation not in source)
-                # color = composite(volume, cam_pos, ray_dir, point_list)
-                # image.set_pixel(row, col, color)
-```
-
 ### [Parallel Image Compositing with Overlapping](3554-parallel-image-compositing-with-overlapping.md)
-Parallel Image Compositing with Overlapping is a distributed rendering strategy where ray segments are transmitted to their responsible processors immediately upon generation, rather than waiting for local ray-casting to complete. This approach solves the network congestion problem inherent in non-overlapping methods, where all processors send large batches of data simultaneously at the end of the frame. It distinguishes itself from [Parallel Ray Casting with Segment Lists](2565-parallel-ray-casting-with-segment-lists.md) by prioritizing continuous, smaller message transfers over batched delivery, and from [Ray Compaction](4039-ray-compaction.md) by maintaining the full segment list structure for visibility sorting rather than compacting rays into dense arrays.
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-class RaySegment:
-    def __init__(self, color, opacity, depth):
-        self.color = color
-        self.opacity = opacity
-        self.depth = depth
-
-class LinkedListNode:
-    def __init__(self, segment):
-        self.segment = segment
-        self.next = None
-
-class RayBuffer:
-    def __init__(self, width, height):
-        self.width = width
-        self.height = height
-        self.buckets = [[None for _ in range(width)] for _ in range(height)]
-
-    def add_segment(self, pixel_x, pixel_y, segment):
-        node = LinkedListNode(segment)
-        head = self.buckets[pixel_y][pixel_x]
-        if head is None or head.segment.depth >= segment.depth:
-            node.next = head
-            self.buckets[pixel_y][pixel_x] = node
-        else:
-            current = head
-            while current.next is not None and current.next.segment.depth < segment.depth:
-                current = current.next
-            node.next = current.next
-            current.next = node
-
-def parallel_compositing_overlapping(rank, size, image_width, image_height, volume_data):
-    rows_per_proc = image_height // size
-    start_row = rank * rows_per_proc
-    end_row = start_row + rows_per_proc
-    
-    local_buffer = RayBuffer(image_width, rows_per_proc)
-    
-    for y in range(start_row, end_row):
-        for x in range(image_width):
-            ray = generate_ray(x, y)
-            segments = cast_ray(ray, volume_data)
-            
-            for seg in segments:
-                dest_pixel_x = x
-                dest_pixel_y = y - start_row
-                # Send segment to destination processor
-                # send_segment_to_dest(dest_pixel_x, dest_pixel_y, seg)
-                local_buffer.add_segment(dest_pixel_x, dest_pixel_y, seg)
-    
-    final_subimage = [[0.0, 0.0, 0.0] for _ in range(rows_per_proc)]
-    
-    for y in range(rows_per_proc):
-        for x in range(image_width):
-            head = local_buffer.buckets[y][x]
-            r, g, b, a = 0.0, 0.0, 0.0, 0.0
-            
-            while head is not None:
-                seg = head.segment
-                contrib = seg.opacity * (1 - a)
-                r += contrib * seg.color[0]
-                g += contrib * seg.color[1]
-                b += contrib * seg.color[2]
-                a += contrib
-                head = head.next
-            
-            final_subimage[y][x] = [r, g, b]
-            
-    # Send subimage to host
-    # send_subimage_to_host(final_subimage)
-```
+A distributed rendering strategy where ray segments are transmitted to their responsible processors immediately upon generation, rather than waiting for local ray-casting to complete. It solves the network congestion problem inherent in non-overlapping methods, where all processors send large batches of data simultaneously at the end of the frame. It sets itself apart from [Sort-last Parallel Rendering](6889-sort-last-parallel-rendering.md) by operating in image space with immediate delivery, overlapping communication with computation to improve performance by up to 40%.
 
 ### [Ray Compaction](4039-ray-compaction.md)
-Ray Compaction is a parallel primitive used in volume rendering to filter a list of active rays, removing those that have terminated (e.g., reached the volume boundary or accumulated sufficient opacity) and compacting the remaining "alive" rays into a dense, contiguous buffer. It solves the problem of sparse ray lists causing inefficient memory access and underutilized GPU occupancy in subsequent ray-marching steps. It sets itself apart from siblings like [Parallel Ray Casting with Segment Lists](2565-parallel-ray-casting-with-segment-lists.md) by operating directly on per-ray state arrays using atomic counters rather than hierarchical segment structures, and from [Ray Buffer Reordering](4073-ray-buffer-reordering.md) by focusing on the initial compaction logic rather than the double-buffering swap mechanism.
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def compact_rays_kernel(rays_alive_old, rays_t_old, rays_alive, rays_t, alive_counter):
-    n = get_global_thread_id()
-    if n < len(rays_t_old):
-        if rays_t_old[n] >= 0:
-            # Atomic increment of alive_counter
-            idx = alive_counter + 1
-            alive_counter += 1
-            rays_alive[idx] = rays_alive_old[n]
-            rays_t[idx] = rays_t_old[n]
-```
+A parallel primitive used in volume rendering to filter a list of active rays, removing those that have terminated (e.g., reached the volume boundary or accumulated sufficient opacity) and compacting the remaining "alive" rays into a dense, contiguous buffer. It solves the problem of sparse ray lists causing inefficient memory access and underutilized GPU occupancy in subsequent ray-marching steps. It sets itself apart from siblings like [Parallel Ray Casting with Segment Lists](2565-parallel-ray-casting-with-segment-lists.md) by operating directly on per-ray state arrays using atomic counters rather than hierarchical segment structures, and from [Ray Buffer Reordering](4073-ray-buffer-reordering.md) by focusing on the initial compaction logic rather than the double-buffering swap mechanism.
 
 ### [Manager/Workers Parallel Implementation](6359-manager-workers-parallel-implementation.md)
-A parallel architecture using a worker manager and distant workers for load-balanced cluster execution (e.g., Platform LSF-HPC).
+A task-based parallel architecture designed for extracting, merging, and dumping isosurfaces on load-balanced clusters where processor availability varies over time. It solves the problem of distributing independent geometric extraction tasks across distant workers while maintaining global mesh consistency through a central coordinator. Unlike sibling methods that rely on static data decomposition or specific GPU primitives, this approach uses a dynamic task scheduler (e.g., Platform LSF-HPC) to dispatch work, allowing the system to adapt to fluctuating cluster resources.
 
 ### [Sort-last Parallel Rendering](6889-sort-last-parallel-rendering.md)
-Divides the dataset into portions, renders each portion separately on different processors, and composites all sub-images at the end.
+Sort-last parallel rendering is a distributed volume rendering strategy that partitions the volume dataset into sub-volumes, distributes them across independent rendering processors, and composites the resulting partial images at the end of the pipeline. Unlike [Parallel Image Compositing with Overlapping](3554-parallel-image-compositing-with-overlapping.md) which operates in image space, or [Ray Compaction](4039-ray-compaction.md) which optimizes ray traversal, sort-last uses an object-order distribution approach where each processor renders its assigned portion regardless of visibility, deferring the final depth and alpha determination to the compositing stage. This method is particularly suited for distributed memory clusters where data locality is prioritized over network bandwidth, as the volume data can remain stationary while only pixel data is transferred.
 
 ### [Sort-middle Parallel Rendering](6893-sort-middle-parallel-rendering.md)
-Distributes primitives between the transformation/lighting stage and the rasterization stage of rendering.
+Sort-middle parallel rendering is a parallelization strategy that distributes screen-space primitives between the geometry preprocessing (transformation and lighting) stage and the rasterization stage. It assigns an arbitrary subset of primitives to each geometry processor and a portion of the screen to each rasterizer. This approach is distinct from sort-first, which distributes primitives before transformation, and sort-last, which distributes pixels after rasterization. Sort-middle was developed to mitigate the network delays associated with sort-first by allowing geometry processing to occur in parallel, achieving approximately twice the frame rate of sort-first in systems like Chromium.
 
 ### [Temporal Division of Uniform Resolution Data](7094-temporal-division-of-uniform-resolution-data.md)
+Temporal division is a parallelism strategy for time-varying volume rendering where processors are assigned unique groups of time steps rather than spatial regions of a single dataset. It solves the problem of efficiently animating large, time-varying volumes by distributing the temporal workload across multiple processors, ensuring that the frame generation rate matches the display rate. Unlike spatial decomposition methods such as [Parallel Image Compositing with Overlapping](3554-parallel-image-compositing-with-overlapping.md), which require breaking up single data files and complex compositing, temporal division avoids file fragmentation and simplifies preprocessing by allowing each time step to reside on a single processor.
+
+### [Breakable Integrals](10328-breakable-integrals.md)
+Breakable integrals are a family of integral functions defined over a domain $[t_1, t_{N+1}]$ that can be decomposed into a sum of products of integrals over individual segments $[t_k, t_{k+1}]$. This decomposition enables the parallel or distributed computation of the total integral by allowing partial results from independent segments to be combined, facilitating distribution across multiple GPUs. Unlike simple parallel image compositing which assumes independent rays or sort-last approaches that require global sorting, breakable integrals allow for the accumulation of per-ray data across GPUs after independent segment processing, provided the integral structure supports this factorization.
 
 ### Coalescing Launch Mode
-A launch mode that coalesces input records into batches to reduce workload, providing expansion (many threads spawned for a single input record) but not thread coalescing for SIMD groups [S1, unofficial]. It does not provide the coalescing capability, but it does provide expansion since many threads can be spawned for a single input record [S1, unofficial]. It opportunistically merges input records to reduce workload [S1, unofficial]. Merge targets include rectangles before drawing, draw call parameters into draw instance call parameters, or draw leaf records to pass a list of leaves to draw to a mesh node [S1, unofficial]. It spawns one workgroup for a variable number of input records [S1, unofficial].
+**Definition:** A launch mode that coalesces input records into batches to reduce workload, providing expansion (many threads spawned for a single input record) but not thread coalescing for SIMD groups [S1, unofficial].
+**Step:** Opportunistically merge input records to reduce workload [S1, unofficial].
+**Parameter:** Merge targets include rectangles before drawing, draw call parameters into draw instance call parameters, or draw leaf records to pass a list of leaves to draw to a mesh node [S1, unofficial].
+**Layout:** Spawns one workgroup for a variable number of input records [S1, unofficial].
 
 ### Parallel Volume Partitioning (X-axis split)
-Divides a 3D volume rendering task among multiple CPU threads by splitting the X-axis range into contiguous sections [S2, unofficial]. Calculate thread count from system processors: `int threads = max(1, sysinfo.dwNumberOfProcessors - 1);` [S2, unofficial]. Compute X-section width: `float x_section = (2.0f * vw.aspx) / threads;` [S2, unofficial]. For each thread i, set start/end bounds: `thread_args[i].start = -vw.aspx + i * x_section; thread_args[i].end = thread_args[i].start + x_section;` [S2, unofficial]. Launch threads with `_beginthreadex` and wait with `WaitForMultipleObjects` [S2, unofficial]. Each thread iterates X from start to end, Y from -vw.aspy to vw.aspy, Z from -vw.aspz to vw.aspz, stepping by voxel_size [S2, unofficial]. Thread argument struct: `iter_3d_thread_args` contains `float start; float end; voxie_frame_t *vf; point3d voxel_size; int func_idx;` [S2, unofficial].
+**Definition:** Divides a 3D volume rendering task among multiple CPU threads by splitting the X-axis range into contiguous sections [S2, unofficial].
+**Step:** Calculate thread count from system processors: `int threads = max(1, sysinfo.dwNumberOfProcessors - 1);` Compute X-section width: `float x_section = (2.0f * vw.aspx) / threads;` For each thread $i$, set start/end bounds: `thread_args[i].start = -vw.aspx + i * x_section; thread_args[i].end = thread_args[i].start + x_section;` Launch threads with `_beginthreadex` and wait with `WaitForMultipleObjects`. Each thread iterates X from start to end, Y from `-vw.aspy` to `vw.aspy`, Z from `-vw.aspz` to `vw.aspz`, stepping by `voxel_size` [S2, unofficial].
+**Layout:** Thread argument struct: `iter_3d_thread_args` contains `float start; float end; voxie_frame_t *vf; point3d voxel_size; int func_idx;` [S2, unofficial].
 
 ### Williams Distributed Projection
 The system can be well parallelized [S3, unofficial].
 
 ### Distributed Data Parallel Training
-Multi-GPU training using PyTorch DDP with NCCL backend [S4, unofficial]. Initialize distributed process group with NCCL backend: `dist.init_process_group("nccl", rank=rank, world_size=world_size)` [S4, unofficial]. Wrap model in DDP: `model = DDP(model.to(rank), device_ids=[rank])` [S4, unofficial]. Use `DistributedSampler` for data loading to ensure each GPU processes unique data [S4, unofficial]. Synchronize epoch for sampler: `train_loader.sampler.set_epoch(epoch)` [S4, unofficial]. Master address is `localhost` and port is `12355` [S4, unofficial]. World size equals number of available CUDA devices: `world_size = torch.cuda.device_count()` [S4, unofficial].
+**Definition:** Multi-GPU training using PyTorch DDP with NCCL backend [S4, unofficial].
+**Step:** Initialize distributed process group with NCCL backend: `dist.init_process_group("nccl", rank=rank, world_size=world_size)`. Wrap model in DDP: `model = DDP(model.to(rank), device_ids=[rank])`. Use `DistributedSampler` for data loading to ensure each GPU processes unique data. Synchronize epoch for sampler: `train_loader.sampler.set_epoch(epoch)` [S4, unofficial].
+**Parameter:** Master address is `localhost` and port is `12355`. World size equals number of available CUDA devices: `world_size = torch.cuda.device_count()` [S4, unofficial].
+**Code:** DDP setup and model wrapping [S4, unofficial].
 
 ## Background
-Parallel volume rendering has evolved from early shared-memory multi-threading approaches to distributed cluster rendering [G]. Early work focused on splitting the image plane among CPU cores [S2, unofficial].
+Parallel volume rendering has evolved from early distributed systems to modern GPU-accelerated techniques. Early work by Ben-Beniet et al. demonstrated that volume rendering equations could be parallelized, noting that early ray termination could be performed when opacity $\alpha$ exceeded a threshold $(1 - \zeta)$ [S3, unofficial]. Williams et al. further established that distributed projection systems could be effectively parallelized [S3, unofficial]. In the context of isosurface extraction, the Manager/Workers approach was developed to handle load balancing on clusters with fluctuating resources, utilizing task schedulers like Platform LSF-HPC [S1, S2, unofficial]. For time-varying data, temporal division was introduced to avoid the complexities of spatial decomposition and file fragmentation [S1, unofficial]. More recently, the concept of "breakable integrals" has been formalized to enable parallel accumulation of volume rendering equations and distortion losses in neural radiance fields (NeRF) across multiple GPUs [S1, unofficial].
 
 ## Sources
 [S1] Real-Time Rendering of Ultra-Large and Ultra-Detailed Virtual World using Voxels, https://hal.science/tel-05803730v1, fetched 2026-10-26 (unofficial)

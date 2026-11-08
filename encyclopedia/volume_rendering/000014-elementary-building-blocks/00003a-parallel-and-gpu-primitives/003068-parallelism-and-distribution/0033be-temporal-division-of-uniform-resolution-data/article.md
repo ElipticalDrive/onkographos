@@ -3,119 +3,77 @@
 Also called: Data streaming, Frame multiplexing, Temporal Decomposition, Time-step Parallelism
 
 ## Overview
-Temporal division of uniform resolution data is a parallelism strategy for volume rendering time-varying datasets where processors are assigned distinct time steps rather than spatial regions of the volume [S1, unofficial]. It solves the problem of rendering animation sequences efficiently by distributing the computational load across the temporal axis, ensuring that frame generation rates match display rates to maintain smooth playback [S1, unofficial]. Unlike spatial decomposition methods which require breaking up single large data files among processors, temporal division assigns whole time steps (often stored in separate files) to different processors, reducing preprocessing overhead and allowing datasets larger than a single node's memory to be rendered by distributing time steps across the cluster [S1, unofficial].
+Temporal division is a parallelism strategy for time-varying volume rendering where processors are assigned unique groups of time steps rather than spatial regions of a single dataset [S1, unofficial]. It solves the problem of efficiently animating large, time-varying volumes by distributing the temporal workload across multiple processors, ensuring that the frame generation rate matches the display rate [S1, unofficial]. Unlike spatial decomposition methods such as [Parallel Image Compositing with Overlapping](3554-parallel-image-compositing-with-overlapping.md), which require breaking up single data files and complex compositing, temporal division avoids file fragmentation and simplifies preprocessing by allowing each time step to reside on a single processor [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-- **Input:** A sequence of $N$ time steps (frames) representing a time-varying volume dataset. Each time step $t_i$ is typically stored as a separate data file or block.
-- **Output:** A sequence of rendered images $I_1, I_2, \dots, I_N$ displayed in chronological order.
+**Inputs:** A sequence of $N$ time steps (volume datasets), $P$ available processors, and a rendering algorithm (typically ray tracing) [S1, unofficial].
+**Outputs:** A sequence of rendered frames displayed in temporal order [S1, unofficial].
 
 **Data Structures:**
-- **Frame Pool:** A data structure (e.g., a queue or buffer) that stores completed frames awaiting display. Each entry contains the frame index and the rendered image data.
-- **Processor Assignment Map:** A mapping of processor IDs to the specific time steps they are responsible for rendering.
+- **Frame Pool:** A buffer storing completed frames from processors, indexed by time step ID [S1, unofficial].
+- **Assignment Map:** A static mapping of time step IDs to processor IDs. For uniform resolution, this is typically a round-robin interleaving: Processor $i$ (where $0 \le i < P$) is assigned time steps $t$ where $t \equiv i \pmod P$ [S1, unofficial].
 
-**Algorithm Steps:**
-1. **Assignment:** Divide the $N$ time steps among $P$ processors. For uniform resolution data, a round-robin or interleaved assignment is used to balance the load. Processor $p$ (where $0 \le p < P$) is assigned time steps $t$ such that $t \equiv p \pmod P$ (using 0-based indexing for time steps and processors). For example, with 3 processors and 9 time steps:
-   - Processor 0: Steps 0, 3, 6
-   - Processor 1: Steps 1, 4, 7
-   - Processor 2: Steps 2, 5, 8
-   [S1, unofficial]
-2. **Rendering Loop (Per Processor):** Each processor executes the following loop for its assigned time steps:
-   a. Fetch the data for the next assigned time step $t$.
-   b. Render the volume data for time step $t$ using a parallel rendering algorithm (e.g., parallel ray tracing) [S1, unofficial].
-   c. Store the resulting frame $I_t$ in the Frame Pool.
-   d. Proceed to the next assigned time step.
-   [S1, unofficial]
-3. **Display Sequencing:** A display controller or compositor retrieves frames from the Frame Pool in increasing order of time step index ($t=0, 1, 2, \dots$).
-   a. Request frame $I_t$.
-   b. If $I_t$ is available in the pool, display it and increment $t$.
-   c. If $I_t$ is not yet available, wait (or display a placeholder/previous frame if using decoupled display) until it arrives.
-   [S1, unofficial]
+**Steps:**
+1. **Assignment:** Distribute time steps among processors. In the standard uniform case, Processor $k$ receives time steps $k, k+P, k+2P, \dots$ [S1, unofficial].
+2. **Rendering Loop (per processor):**
+   a. Fetch the next assigned time step's data.
+   b. Render the volume using the assigned algorithm (e.g., ray casting) [S1, unofficial].
+   c. Store the resulting frame in the global Frame Pool [S1, unofficial].
+   d. Repeat for the next assigned time step.
+3. **Display/Sequencing:**
+   a. A display controller or compositor retrieves frames from the Frame Pool in increasing time order ($t=1, 2, 3, \dots$) [S1, unofficial].
+   b. If the frame for time $t$ is ready, it is displayed immediately.
+   c. If not ready, the system waits or displays a placeholder (see *Decoupled Display Phase*) [S2, unofficial].
 
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def temporal_division_rendering(time_steps, num_processors, render_function):
-    """
-    time_steps: List of data objects for each time step.
-    num_processors: Number of available processors.
-    render_function: Function that takes a time step data object and returns an image.
-    """
-    # 1. Assignment
-    # Each processor p handles time steps where index % num_processors == p
-    # We simulate this with a single loop for clarity, but in practice,
-    # this logic runs on separate threads/processes.
-    
-    frame_pool = {}  # Dictionary mapping time_step_index -> image
-    
-    # Simulate parallel execution by iterating through all time steps
-    # and assigning them to processors based on index
-    for t in range(len(time_steps)):
-        processor_id = t % num_processors
-        
-        # Each processor renders its assigned time step
-        # In a real distributed system, this would be a blocking call on the specific processor
-        image = render_function(time_steps[t])
-        
-        # Store in pool
-        frame_pool[t] = image
-        
-        # Note: In a real system, the display loop runs concurrently.
-        # Here we simulate the display sequence after all are done for simplicity,
-        # but the core principle is that the pool is populated as rendering completes.
-        
-    # 3. Display Sequencing
-    displayed_frames = []
-    for t in range(len(time_steps)):
-        if t in frame_pool:
-            displayed_frames.append(frame_pool[t])
-        else:
-            # Wait for frame to arrive (blocking in this simulation)
-            # In reality, this is handled by the compositor waiting for the network/queue
-            pass
-            
-    return displayed_frames
-```
-[G] The pseudocode above simplifies the concurrency. In a real implementation, the "Rendering Loop" and "Display Sequencing" are concurrent processes. The display loop must check for frame availability non-blockingly or use a semaphore/event mechanism to avoid busy-waiting.
+**Formulas:**
+- **Ideal Latency:** The initial startup delay is approximately $(P-1) \times T_{render}$, where $T_{render}$ is the time to render one frame [S1, unofficial]. After startup, if $T_{render} \le T_{display}$, there is no lag [S1, unofficial].
+- **Workload Balance (Uniform):** Each processor handles $N/P$ time steps [S1, unofficial].
 
 **Parameters:**
-- **Interleaving Stride:** Typically equal to the number of processors $P$.
-- **Initial Lag:** An initial delay may be required to fill the frame pool before the first frame is displayed, ensuring the pipeline is full [S1, unofficial].
+- $P$: Number of processors.
+- $N$: Total number of time steps.
+- $T_{render}$: Time to render one frame.
+- $T_{display}$: Time allowed per frame for smooth animation (e.g., $1/30$ s for 30 Hz) [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Late Frames:** If one processor is slower than others, its assigned frames may arrive late, causing the display sequence to stall and resulting in fluctuating frame rates [S1, unofficial].
-- **Memory Constraints:** This method relies on each processor having enough memory to hold its assigned time step data. If a time step is too large for a single processor, this method cannot be used directly for that step without further spatial decomposition [S1, unofficial].
-- **Uniform Resolution Assumption:** The basic round-robin assignment assumes all time steps have equal computational cost. If resolutions vary, this leads to load imbalance (see Subtopics).
+- **Late Frames:** If one processor is slower, its frames arrive late, causing the animation to stall or fluctuate in speed [S1, unofficial].
+- **Memory Constraints:** Unlike spatial decomposition, temporal division allows large datasets that do not fit in one processor's memory, as each processor only holds a few time steps [S1, unofficial].
+- **Synchronization:** Perfect synchronization is rare; a frame pool and sequencing mechanism are required to handle out-of-order arrival [S1, unofficial].
 
 ## Subtopics
 
+### [1D Input Processors (1DIP)](10828-1d-input-processors-1dip.md)
+1D Input Processors (1DIP) is a parallel I/O strategy that uses multiple input processors to fetch and preprocess a single complete time step of volume data, maximizing parallel file system bandwidth. It differs from its sibling [2D Input Processors (2DIP)](10833-2d-input-processors-2dip.md) by focusing on parallelizing the read of one time step rather than concurrently reading multiple time steps, making it suitable when sending time per time step is the bottleneck.
+
+### [2D Input Processors (2DIP)](10833-2d-input-processors-2dip.md)
+2D Input Processors (2DIP) is a parallel I/O strategy for rendering large time-varying volume data that addresses the bottleneck where the data sending time ($T_s$) exceeds the rendering time ($T_r$). Unlike [1D Input Processors (1DIP)](10828-1d-input-processors-1dip.md), which distributes a single time step across multiple input processors to reduce send time, 2DIP concurrently reads and distributes multiple time steps using a two-dimensional configuration of input processors. This ensures that rendering processors remain busy by overlapping I/O and preprocessing of future time steps with the rendering of the current one.
+
 ### Decoupled Display Phase
-A technique to hide latency in distributed temporal rendering by decoupling the display phase from the rendering and I/O phases [S2, unofficial]. Instead of waiting for the final high-quality rendered image, the system displays and warps approximate images based on 2.5D data while no newly rendered image data is available from remote servers [S2, unofficial]. This approach achieves interactive frame rates of approximately 30 Hz, which is necessary for virtual reality applications [S2, unofficial]. It is particularly useful when network latencies or rendering bottlenecks would otherwise cause unacceptable delays [S2, unofficial].
+A technique to hide latency by decoupling the display phase from the rendering and I/O phases, showing only approximate images while no reliable image information is available [S2, unofficial]. The system displays and warps approximate images based on 2.5D data while no newly rendered image data is available from the remote servers [S2, unofficial]. This approach achieves interactive frame rates of approximately 30 Hz, necessary for virtual reality applications [S2, unofficial].
 
 ### Temporal Distribution of Adaptive-Resolution Data
-A load-balancing strategy for temporal division where time steps are assigned to processors based on their computational cost (resolution) rather than simple interleaving [S1, unofficial]. In uniform resolution data, round-robin assignment works well. However, if time steps have varying resolutions, high-resolution steps take longer to render. To balance the workload, processors assigned high-resolution time steps receive fewer steps, while processors assigned low-resolution steps receive more [S1, unofficial]. For example, Processor 1 might be assigned 3 high-resolution frames, while Processor 2 is assigned 6 low-resolution frames to achieve equal total work distribution [S1, unofficial]. This requires pre-calculating the relative cost/resolution of each time step [S1, unofficial].
+A load-balancing strategy for temporal division where time steps are assigned to processors based on their resolution (computational cost) rather than simple interleaving [S1, unofficial]. The system calculates the relative cost/resolution of each time step and assigns fewer high-resolution time steps to processors and more low-resolution time steps to balance the total workload [S1, unofficial]. In a specific example, Processor 1 was assigned 3 high-resolution frames and Processor 2 was assigned 6 low-resolution frames to achieve equal work distribution [S1, unofficial].
 
 ### Temporal Sequencing
-A post-processing step for temporal division where completed frames from a pool are displayed in increasing time order [S1, unofficial]. When a processor finishes a time step, it adds the image to a shared pool. The sequencer picks the frame for the current time step from the pool and displays it, then increments the time and repeats [S1, unofficial]. To mitigate late frames, a time lag can be introduced at the start to ensure enough frames are in the pool, or a fixed display time can be set for each frame equal to the maximum rendering time of any resolution [S1, unofficial]. A key pitfall is that if a processor slows down, frames arrive late, causing the animation to wait and resulting in fluctuating frame rates [S1, unofficial].
+A post-processing step for temporal division where completed frames from a pool are displayed in increasing time order [S1, unofficial]. The system maintains a pool of frames; when a processor finishes a time step, it adds the image to the pool [S1, unofficial]. The sequencer picks the frame for the current time step from the pool and displays it, then increments the time and repeats [S1, unofficial]. To mitigate late frames, a time lag is introduced at the start to ensure enough frames are in the pool, or a fixed display time for each frame is set equal to the max rendering time of any resolution [S1, unofficial]. If a processor slows down, frames arrive late, causing the animation to wait and resulting in fluctuating frame rates [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** The total rendering time is determined by the slowest processor's workload. For uniform resolution data with round-robin assignment, the load is balanced, so the time is approximately $T_{total} \approx \frac{N}{P} \times T_{render}$, where $T_{render}$ is the time to render one frame [S1, unofficial].
-- **Memory Complexity:** Each processor must store the data for its assigned time steps. If time steps are stored in separate files, only the current time step needs to be in memory, reducing peak memory usage per node compared to loading the entire dataset [S1, unofficial].
-- **Scaling:** Scales linearly with the number of processors for uniform resolution data, assuming no communication overhead for frame assembly (since each frame is rendered independently) [S1, unofficial].
-- **Strengths:**
-  - No need to break up single data files, reducing preprocessing work [S1, unofficial].
-  - Allows rendering of datasets larger than a single processor's memory by distributing time steps [S1, unofficial].
-  - Simple load balancing for uniform resolution data [S1, unofficial].
-- **Limitations:**
-  - Requires time steps to be independent (no temporal dependencies for rendering, e.g., no temporal filtering that requires previous frames) [S1, unofficial].
-  - Load imbalance if time steps have varying computational costs (resolution, complexity) [S1, unofficial].
-  - Latency issues if processors are heterogeneous or network delays are high [S1, unofficial].
-- **When to Use:** Ideal for rendering time-varying datasets with uniform resolution where each time step is independent and can be stored separately. Suitable for systems where preprocessing time is a concern or where data files are naturally separated by time [S1, unofficial].
-- **When Not to Use:** When time steps have highly variable computational costs without adaptive assignment, or when temporal dependencies exist between time steps [S1, unofficial].
+**Time Complexity:** The total wall-clock time for rendering $N$ frames with $P$ processors is approximately $N/P \times T_{render}$, assuming perfect load balancing and no I/O bottlenecks [S1, unofficial].
+**Memory Complexity:** Each processor stores only the data for its assigned time steps, allowing the system to handle datasets larger than the memory of a single node [S1, unofficial].
+**Performance:** STARVolume uses this method to visualize huge datasets at high speeds, dividing the workload equally among processors [S1, unofficial].
+**Strengths:**
+- No need to break up single files between processors, reducing preprocessing work [S1, unofficial].
+- Naturally handles time-varying data where each step is independent.
+- Can achieve interactive frame rates (e.g., 30 Hz) when combined with decoupled display techniques [S2, unofficial].
+**Limitations:**
+- Requires a frame pool and sequencing mechanism to handle out-of-order completion.
+- Fluctuating frame rates if processor speeds vary or resolutions are adaptive [S1, unofficial].
+- Initial startup latency of $(P-1) \times T_{render}$ before the first frame is displayed [S1, unofficial].
+**When to use:** When the bottleneck is the rendering of individual time steps and the dataset is too large for single-node memory, or when I/O bandwidth can be parallelized via 1DIP/2DIP [S1, unofficial].
+**When not to use:** When strict real-time synchronization is required without buffering, or when the rendering time per frame is highly variable and cannot be balanced by adaptive assignment [S1, unofficial].
 
 ## Background
-Temporal decomposition techniques were described by Bhaniramka et al. [S1, unofficial]. They introduced two temporal techniques: frame multiplexing (where each processor is assigned a group of unique time steps) and data streaming (where all processors work jointly on each time step) [S1, unofficial]. STARVolume uses the sort-last approach for spatial decomposition and frame multiplexing for temporal parallel rendering [S1, unofficial]. Ray tracing is often used for rendering in these systems due to its inherent parallel nature [S1, unofficial].
+Temporal decomposition techniques were described by Bhaniramka et al. [S1, unofficial]. Two primary techniques were identified: frame multiplexing (each processor assigned a group of unique time steps) and data streaming (all processors work jointly on each time step) [S1, unofficial]. STARVolume, a parallel visualization system, uses frame multiplexing for temporal parallel rendering because it allows each time step to be needed by only one processor, simplifying data management [S1, unofficial]. The approach leverages the inherent parallelism of ray tracing, which was adapted for parallel systems by Ma et al. [S1, unofficial].
 
 ## Sources
 [S1] Volume visualization of time-varying data using parallel, multiresolution and adaptive-resolution techniques, https://scholars.unh.edu/cgi/viewcontent.cgi?article=1245&context=thesis, fetched 2026-10-27 (unofficial)

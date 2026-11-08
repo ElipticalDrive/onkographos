@@ -1,27 +1,27 @@
 # Resolution Adaptation
 
-Also called: Adaptive Resolution, Dynamic Resolution, View-Dependent Resolution
+Also called: Adaptive Resolution, Dynamic Resolution, Resolution Scaling
 
 ## Overview
-Resolution Adaptation encompasses techniques that dynamically adjust the spatial discretization of volume rendering—such as voxel grid resolution, sampling step size, or screen-space viewport dimensions—to balance rendering fidelity against computational cost [S1][S2, unofficial][S3]. It solves the problem of fixed computational budgets in interactive or real-time volume rendering, where static resolution leads to either wasted resources in empty regions or insufficient detail in complex areas [S2, unofficial][S3]. Unlike static hierarchical structures or single-pass optimizations, this family adapts in real-time to user interaction, frame time budgets, or spatial context, trading accuracy for speed to ensure interactivity [S3].
+Resolution Adaptation is a family of techniques that adjust the spatial discretization of the rendering process—such as voxel grid resolution, sampling step size, or viewport dimensions—to balance computational cost and visual fidelity. It solves the problem of performance instability in volume rendering, where static sampling rates often fail to maintain target frame rates under varying scene complexity or user interaction. Unlike static hierarchical structures, these methods adapt in real-time, trading accuracy for speed to ensure interactivity or stability [S1][S2, unofficial][S3].
 
 ## Shared principles
-The core mechanism of Resolution Adaptation involves a feedback loop or predictive model that modifies the rendering resolution based on a specific metric. Common principles include:
+The core mechanism involves a feedback loop or metric evaluation that determines a resolution parameter $R$ (e.g., grid size, step size $\Delta t$, or viewport scale) and applies it to the rendering integral.
 
-1.  **Metric Evaluation:** A scalar value is computed to determine the required level of detail. This metric is typically either:
-    *   **Performance-based:** The ratio of a target frame time (or time budget) to the actual render time of the previous frame [S1][S4, unofficial].
-    *   **Visual Error-based:** A measure of visual discrepancy, such as the density of "lone" or "tooth" texels in an auxiliary texture, or the frequency content of the transfer function [S4, unofficial][S1].
-2.  **Discretization Adjustment:** The resolution parameter (e.g., reduction factor $n$, voxel count, or step size $\Delta t$) is updated based on the metric.
-    *   For performance-based methods, the adjustment often follows a proportional scaling:
-        $$ \text{NewResolution} \propto \text{CurrentResolution} \times \frac{\text{TargetTime}}{\text{ActualTime}} $$
-    *   For error-based methods, the resolution is increased if the error exceeds a threshold $S_{max}$ and decreased if it falls below $S_{min}$ [S4, unofficial].
-3.  **Integration:** The volume rendering integral is computed using the adjusted discretization. This may involve sampling from lower-resolution textures, using larger step sizes, or rendering to a smaller viewport [S2, unofficial][S1].
-4.  **Coherence and Stability:** To prevent visual popping and performance oscillation, adjustments are often smoothed, clamped, or applied with hysteresis [S1][S4, unofficial].
+1.  **Metric Evaluation:** Compute a metric to determine the required level of detail. Common metrics include:
+    *   **Performance-based:** The ratio of desired frame time to actual render time [S1].
+    *   **Visual Error-based:** Metrics such as the ratio of "lone" or "tooth" texels to total texels in an auxiliary texture [S4, unofficial], or frequency content analysis [S1][S2, unofficial].
+2.  **Discretization Adjustment:** Modify rendering parameters based on the metric. This may involve:
+    *   Changing the voxel grid resolution $reso$ [S1].
+    *   Adjusting the step size $\Delta t$ or sample count per ray [S2, unofficial].
+    *   Scaling the viewport dimensions by a reduction factor $n \in (0.0, 1.0]$ [S1].
+3.  **Integration:** Compute the volume rendering integral using the adjusted discretization. For sample-based simplification, the original geometry is used with approximate integration; for domain-based simplification, the domain geometry is approximated first [S1].
+4.  **Stability:** Methods often employ smoothing, hysteresis, or clamping to prevent oscillation in resolution levels, which can cause visual artifacts and performance instability [S1].
 
 ## Subtopics
 
 ### [Level-of-detail (LOD) methods](1007-level-of-detail-lod-methods.md)
-Level-of-detail (LOD) methods are techniques for interactive visualization of large scalar fields that maintain responsive frame rates by generating reduced-resolution approximations of the original data during viewpoint interaction. They solve the problem of computational intensity in volume rendering by dynamically adjusting the discretization of the rendering process—such as step size, sample count, or spatial resolution—based on a metric of visual error or performance. Unlike static hierarchical structures, these methods adapt in real-time to user manipulation, trading accuracy for speed to ensure interactivity.
+Techniques for interactive visualization of large scalar fields that maintain responsive frame rates by generating reduced-resolution approximations of the original data during viewpoint interaction. They solve the problem of computational intensity by dynamically adjusting discretization based on visual error or performance metrics. Unlike static hierarchical structures, these methods adapt in real-time to user manipulation, trading accuracy for speed.
 
 ### [Dynamic Volume Resolution & Alpha Mask Update](2539-dynamic-volume-resolution-alpha-mask-update.md)
 This method dynamically adjusts the voxel grid resolution and the active spatial bounding box of a neural volume representation during training to balance memory usage and rendering fidelity. It solves the problem of inefficiently allocating resources to empty space or overly dense regions by periodically shrinking the volume to its occupied core and upscaling the grid density at predefined intervals. It differs from [Dynamic Resolution Adaptation](2683-dynamic-resolution-adaptation.md) by explicitly managing the *training* state (optimizer, learning rate, bounding box) rather than just the inference-time sampling rate, and from [Level-of-detail (LOD) methods](1007-level-of-detail-lod-methods.md) by modifying the underlying neural field's parameter space rather than selecting precomputed textures.
@@ -32,16 +32,17 @@ Dynamic Resolution Adaptation is a runtime performance management technique that
 ### [Mixed-Resolution Multi-Volume Rendering](3193-mixed-resolution-multi-volume-rendering.md)
 Mixed-resolution multi-volume rendering is a technique where different channels of a multi-volume dataset are rendered at different spatial resolution levels to save memory and reduce sample evaluation costs. It addresses the inefficiency of rendering all channels at the highest resolution when some channels have lower frequency content or lower visual importance.
 
+### [Volume Level-of-Detail (LOD) Rendering](4614-volume-level-of-detail-lod-rendering.md)
+Volume Level-of-Detail (LOD) Rendering is a method that maximizes image quality within user-specified frame rate and system constraints (RAM, texture memory, bandwidth) by adaptively modifying the set of rendered octree cells. It differs from sibling methods like [Level-of-detail (LOD) methods](1007-level-of-detail-lod-methods.md) by explicitly maintaining an "active cut" of nodes that cover the model space exactly once, rather than relying solely on geometric error metrics or fixed hierarchy levels. It builds on [Resolution Adaptation](3063-resolution-adaptation.md) by adjusting the discretization of the volume data itself (via octree traversal depth) rather than just the sampling rate or viewport size.
+
 ### [Focus and Context Multiresolution Rendering](8163-focus-and-context-multiresolution-rendering.md)
 Focus and Context Multiresolution Rendering is a technique to balance processing capacity between a high-detail focus region and a lower-detail context region to improve interactivity in time-critical applications. It sets itself apart from sibling methods like [Level-of-detail (LOD) methods](1007-level-of-detail-lod-methods.md) by explicitly decoupling the rendering parameters (resolution, lighting, sampling) of two distinct spatial regions rather than adjusting a single global level of detail. The goal is not seamless integration but a tradeoff between quality and speed.
 
 ### [Multiresolution Atlas Buffer (MAB)](8219-multiresolution-atlas-buffer-mab.md)
 The Multiresolution Atlas Buffer (MAB) is an acceleration wrapper for Direct Volume Rendering (DVR) in Virtual Reality (VR) that reduces ray density adaptively based on peripheral vision and Head-Mounted Display (HMD) lens distortion, then reconstructs the full-resolution image via compositing. It differs from standard foveated rendering by not requiring high-speed eye-tracking hardware, relying instead on the fixed nature of HMD lenses and the human visual system's (HVS) non-uniform resolution perception to define static gaze-dependent resolution zones. Unlike Mip-Maps which use fixed power-of-two scaling, MAB supports arbitrary resolution ratios between levels to minimize the visual difference between resolution steps.
 
-### Mixed Resolution Scene Rendering
-#### definition
+#### Mixed Resolution Scene Rendering
 - [S1] Combines full-resolution scene elements with low-resolution high-density volume data by rendering the volume to off-screen targets and projecting them onto a quad.
-#### step
 - [S1] Setup two off-screen cameras, one for each eye, updating each frame.
 - [S1] Setup two low-resolution render targets (e.g., 200x200) for the cameras.
 - [S1] Set up a quad that moves in front of the user.
@@ -50,30 +51,12 @@ The Multiresolution Atlas Buffer (MAB) is an acceleration wrapper for Direct Vol
 - [S1] Each frame: Draw a quad in front of the user and project the low-res renders onto it.
 
 ### Resolution and Frame Splitting
-#### step
 - [S2, unofficial] High-end: Reduce resolution to 1/2x1/2.
 - [S2, unofficial] Mid/Low-end: Use frame splitting (similar to RDR2), simplified for clouds not intersecting other objects.
 
-### Volume Level-of-Detail (LOD) Rendering
-#### definition
-- [S3] A rendering process that maximizes image quality within user-specified frame rate and system constraints (RAM, texture memory, bandwidth) by adaptively modifying the set of rendered cells.
-#### step
-- [S3] Adapt/Load Phase: Determine which octree cells to render. Load non-resident textures from RAM or disk to texture memory. Maintain an 'active cut' (nodes covering space exactly once).
-- [S3] Active Cut Maintenance: Split queue contains non-leaf nodes on active cut, sorted by decreasing error. To decrease error: Move first split node to merge queue (mark inactive), add its children to split queue (mark active). To increase error (frame rate): Remove first node from merge queue to split queue (mark active), add its parent to merge queue, remove children from split queue (mark inactive).
-- [S3] Cull/Render Phase: Traverse octree from root. Perform hierarchical cull. Render flagged nodes using 3D texture mapping and blending in back-to-front order.
-#### parameter
-- [S3] User parameters: Desired frame rate, transfer function (data to RGBA), view position.
-- [S3] System parameters: RAM, texture memory size, bandwidths, polygon and fill performance.
-
 ## Background
-The concept of Level-of-Detail (LOD) in volume rendering originated in the early 2000s, with significant contributions from researchers like Levenberg et al. [S3]. Their work on "Interactive Visualization of Unstructured Grids Using Hierarchical 3D..." introduced an adaptive voxelization process that maintains an "active cut" of octree nodes to maximize image quality within system constraints (RAM, bandwidth) [S3]. This approach allowed for interactive frame rates by dynamically splitting or merging cells based on error metrics and performance budgets [S3].
-
-More recently, with the rise of Neural Radiance Fields (NeRF) and neural volume representations, resolution adaptation has shifted towards dynamic training-time adjustments. Methods like Dynamic Volume Resolution & Alpha Mask Update [S1] address the inefficiency of static neural grids by periodically updating the bounding box and resolution during training.
-
-In the context of Virtual Reality and Mixed Reality, Resolution Adaptation has become critical for maintaining high frame rates (90-120 Hz) required to prevent cybersickness. Techniques like the Multiresolution Atlas Buffer (MAB) [S1] and Dynamic Resolution Adaptation [S1] leverage the fixed nature of HMD lenses and human peripheral vision to reduce rendering load without explicit eye-tracking. Similarly, in real-time cloud rendering for games, resolution and frame splitting techniques [S2, unofficial] are used to balance visual fidelity with performance on varying hardware tiers.
+Resolution adaptation in volume rendering has evolved from static hierarchical structures (like Mip-maps) to dynamic, feedback-driven systems. Early methods focused on precomputed LODs for interactive visualization of large scalar fields [S1][S2, unofficial]. With the advent of neural volume representations (e.g., NeRF), methods like Dynamic Volume Resolution & Alpha Mask Update introduced training-time adaptation of grid density and bounding boxes [S1]. In real-time applications, particularly VR and cloud rendering, techniques like Dynamic Resolution Adaptation and MAB have been developed to manage performance budgets and leverage human visual system properties [S1][S2, unofficial].
 
 ## Sources
-
 [S1] Volume rendering - Mixed Reality | Microsoft Learn, https://learn.microsoft.com/en-us/windows/mixed-reality/develop/native/volume-rendering, fetched 2026-10-27
 [S2] 体积云效果的实现，游戏世界的云合雾集, https://leihuo.163.com/institution/news/20230719/38423_1099592.html, fetched 2026-10-30 (unofficial)
-[S3] PDF Interactive Visualization of Unstructured Grids Using Hierarchical 3D ..., https://web.eecs.umich.edu/~jjcorso/pubs/leven02unstructgrid.pdf, fetched 2026-10-27

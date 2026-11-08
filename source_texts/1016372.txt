@@ -1,0 +1,156 @@
+User-reported 2026-10-08, live engine, current build (exact commit not recorded; HEAD at report time was 00f580e09). What it looks like In the --cornell box (game-data-free, byroredux/src/cornell.rs), the soft shadow under the floating s...
+
+Stochastic direct-light shadows never converge: Cornell box penumbra and contact shadows stay grainy (game-data-free repro) · Issue #5369 · matiaszanolli/ByroRedux · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Stochastic direct-light shadows never converge: Cornell box penumbra and contact shadows stay grainy (game-data-free repro) #5369
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Stochastic direct-light shadows never converge: Cornell box penumbra and contact shadows stay grainy (game-data-free repro)#5369
+Copy link
+Labels
+bugSomething isn't workingSomething isn't workinghighHigh severityHigh severityrendererVulkan rendererVulkan renderershadersGLSL / SPIR-V shader sources and the shader contractGLSL / SPIR-V shader sources and the shader contract
+Description
+matiaszanolli
+opened on Oct 9, 2026
+Issue body actions
+User-reported 2026-10-08, live engine, current build (exact commit not recorded; HEAD at report time was 00f580e09).
+What it looks like
+In the --cornell box (game-data-free, byroredux/src/cornell.rs), the soft shadow under the floating shelf and the contact region where the red wall meets the floor stay heavily grainy: fine per-pixel black/white Monte-Carlo noise. The directly lit floor area under the ceiling light is clean. The noise is confined to the penumbra and contact-shadow regions, the pixels whose direct term depends on the stochastic shadow rays (MAX_DIRECT_SHADOW_SAMPLES disk samples per frame, PCG-seeded by frameCount).
+Screenshot (local): /mnt/data/tmp/noise-issue/3.png.
+The design intent is that these regions converge. The ReSTIR finalize in triangle.frag EMA-accumulates a per-pixel shadow ratio (Heitz et al. 2018 ratio estimator, #4942) and "still refines further over parked frames via 1/N". A visibly grainy penumbra therefore means either the temporal history is being rejected or reset, or the per-frame samples are not decorrelated across frames. That is a correctness bug, not expected sampling noise.
+This is the game-data-free reproducer for the full-surface speckle reported on the FO4 Institute (filed alongside, linked below). It may also be the same family as #5159 (terrain dark-patch MC noise).
+First discriminator (not yet run)
+Parked camera, two captures N frames apart; diff them.
+Identical noise in both: the per-frame seed is not advancing (cameraPos.w / frame_counter path) and the EMA averages one fixed pattern.
+Different noise that never smooths: the history is being rejected every frame.
+Named views via byro-dbg: render.debug shadow_visibility, direct_only, indirect_only, restir_light. These confirm the noise sits in the direct/shadow term and not in GI/SVGF.
+Launch-time A/B via BYROREDUX_RENDER_DEBUG: DBG_DISABLE_TEMPORAL (0x40000), DBG_DISABLE_RESTIR (0x8000). If disabling temporal reuse leaves the noise unchanged, the temporal history was already contributing nothing.
+Where to look
+crates/renderer/shaders/triangle.frag ReSTIR finalize, temporal reuse gate (~3443-3560). reprojValid requires all of: sameSurface (stable inst.surfaceId, depth tolerance max(2, 0.5%), normal cos 25°), remapReservoirLight(rp.lightAndSurface) < lightCount, visibilityMaskNeedsTrace(...), and finite positive rp.W. Any one failing every frame silently degrades the pixel to single-frame RIS.
+remapReservoirLight / CPU-side light identities (c705c310d, PERF-D4-2026-09-29-01: GpuLight.history_id is CPU-only identity shipped in the GPU struct (+16 B per light) and mirrored in four shaders that never read it #5055/PERF-D5-2026-09-23-02: When any transport emitter is active, every froxel in the grid runs the RK2 backtrace, the six-neighbour gather and the curl forcing, including the empty majority #4784, 2026-10-02). A broken previous-to-current light remap rejects every reservoir.
+Shadow-ray loop (~3760-3790) and its seed hash2_pixel_frame(..., (frameCount*K + sr)*9 + i).
+Recent changes in this exact block: 34c3adf14 (REN-D10-2026-10-05-01: #5192 returns the wrap-excess, back-light and translucency lobes to the unshadowed path for every light, sun and XCLL directional included (regression of #4946) #5249, transmission lobes take their own shadow trace, 2026-10-07) and its compile fix ebf1d0492 (FNV interiors: black wall/floor voids from stale triangle shader pair (uncompilable source since 34c3adf14) #5368). Between those two commits triangle.frag did not compile and the committed .spv was stale. Also a4b6a7360 (REN-D10-2026-10-03-02: Soft-light wrap, back-light and thick-translucency lobes self-occlude on closed meshes (zero inside shadowFade, unshadowed past it), the decision #5018 deferred #5192, transmission split out of traced visibility, 2026-10-04). From the 2026-10-08 audit suite: REN-D10-2026-10-08-01 (the REN-D10-2026-10-05-01: #5192 returns the wrap-excess, back-light and translucency lobes to the unshadowed path for every light, sun and XCLL directional included (regression of #4946) #5249 trace passes an opaque-only mask to its foreign-hit handoff) and PERF-D5-2026-10-08-01 (the REN-D10-2026-10-05-01: #5192 returns the wrap-excess, back-light and translucency lobes to the unshadowed path for every light, sun and XCLL directional included (regression of #4946) #5249 up-to-8-hop loop).
+Bisect candidates if the discriminator points at a regression: c705c310d, a4b6a7360, 34c3adf14/ebf1d0492. Use a separate worktree with its own CARGO_TARGET_DIR (a shared target/ regenerated shader_constants.glsl wrongly during an earlier bisect).
+Oracle: cargo test --release -p byroredux --test cornell_rt_oracle -- --ignored --test-threads=1 (L0-L5). Check whether any level measures penumbra variance after N parked frames. If none does, add one; that is the regression gate this bug lacked.
+No fix is proposed until the discriminator and a capture confirm the mechanism (no speculative render-path changes).
+Related
+FO4 Institute full-surface speckle (the worst-case symptom): FO4 Institute: dense per-pixel speckle over every bright surface at full light #5370
+Exterior terrain dark patches show heavy MC noise (dirt stain speckle) — SVGF/ReSTIR variance on low-luminance surfaces #5159 (terrain dark-patch MC noise, possibly the same family)
+Activity
+matiaszanolli
+added
+bugSomething isn't workingSomething isn't working
+rendererVulkan rendererVulkan renderer
+highHigh severityHigh severity
+shadersGLSL / SPIR-V shader sources and the shader contractGLSL / SPIR-V shader sources and the shader contract
+on Oct 9, 2026
+matiaszanolli commented on Oct 9, 2026
+matiaszanolli
+on Oct 9, 2026
+OwnerAuthor
+More actions
+Evidence from the 2026-10-08 /audit-runtime run, which was interrupted mid-bisect. It bisected the combustion_lab_golden_frame failure (cargo test --release -p byroredux --test golden_frames -- --ignored) in its own worktree and CARGO_TARGET_DIR:
+commit
+diff vs committed golden
+1a12670ae, 078f650ec, b7491072f (09-24 → 09-26)
+1.65–1.66 % (baseline drift)
+186234944 (09-26, "Implement ReSTIR light identity and opaque early-depth optimization")
+97.45 %
+8eef6658c (09-30)
+97.79 %
+HEAD 00f580e09
+95.54 %
+First divergent commit: 186234944. Its parent b7491072f matches the golden. In the golden there is no shadow under the shelf at all, so there is no stochastic penumbra to be noisy. From 186234944 on, the frame shows the shelf shadow, a dark blob on the red wall with a grainy edge, the yellow glow and a cooler white balance: the exact scene in this issue's screenshot.
+What this does and does not establish:
+It does: the grainy penumbra appears in this scene at the commit that introduced ReSTIR light identities (the remapReservoirLight path listed above), which is the strongest single lead so far.
+It does not: show that the noise is a defect of that commit. The golden was never re-blessed after it, and the 97 % diff is dominated by the intended lighting change, not by the grain. The convergence question (does the penumbra smooth over parked frames?) is still open.
+Captures (local): /mnt/data/tmp/noise-issue/bisect/combustion_{baseline,b7491072f,186234944,actual_head}.png, plus the bisect logs.
+Next step: run the parked-camera two-capture discriminator at 186234944 and at HEAD. If the grain converges at 186234944 and not at HEAD, bisect again inside 186234944..HEAD.
+matiaszanolli
+closed this as completedin 2a72231on Oct 9, 2026
+matiaszanolli commented on Oct 9, 2026
+matiaszanolli
+on Oct 9, 2026
+OwnerAuthor
+More actions
+Live diagnosis + partial fix landed in 2a72231 (kept open for the residual tail).
+What the discriminators established (parked bursts, spatial-vs-temporal variance, controlled frozen-scene A/B on lavapipe): the seed DOES advance (pattern drifts ~1.3 levels/frame), history IS valid (reprojValid holds), and the speckle is standing EMA noise with three causes found:
+Flicker reset — the scene-static signal folded every light float, so the fire lab (and any flickering-light scene — see FO4 Institute: dense per-pixel speckle over every bright surface at full light #5370's Institute) sat at the 0.1 refresh floor forever. Fixed: a new intensity-blind light-rig geometry key drives history mode 3; the Heitz-2018 ratio estimator cancels intensity, so flicker scenes now keep the deep tail. The Cornell fire lab's lights are geometry-stable (measured: zero position/radius delta frame-to-frame), so this is the repro's main mechanism.
+A hard clamp(rpHistLen, 0, 64) sat before historyCap applied, defeating any cap raise. Fixed.
+Parked tail deepened 64/0.025 → 256/0.008. Frozen-scene A/B: mean grain −23%, hot-pixel density 1.37→1.26%.
+Remaining, narrowed: rayBudget.direct_shadow_samples is 1 — one shadow ray per pixel per frame (the shader's own comments advertise four). At K=1 a p≈0.5 penumbra keeps a ~7-level converged speckle tail; raising parked K (or per-pixel adaptive K in penumbrae) is the next lever. BYRO_VALIDATION=1 clean over 240 renderer-static frames; shader parity green.
+Also: the parked-frame penumbra-variance oracle level this issue asks for is still owed — the frozen-scene A/B harness in this session was ad-hoc scripts; the L0-L5 oracle has no such level yet.
+matiaszanolli
+added a commit that references this issue on Oct 10, 2026
+Fix #5507: the ReSTIR rig key is independent of the light order
+...
+a851c62
+matiaszanolli commented on Oct 11, 2026
+matiaszanolli
+on Oct 11, 2026
+OwnerAuthor
+More actions
+Reopening: 2a7223121 was titled Fix #5369 (partial), and the keyword auto-closed this issue, even though the partial-fix comment above says it is kept open for the residual tail. Still open: the one-shadow-ray-per-pixel (direct_shadow_samples = 1) penumbra speckle tail, and the parked-frame penumbra-variance oracle level. Found at the Session 97 close.
+matiaszanolli
+reopened this on Oct 11, 2026
+matiaszanolli
+added 3 commits that reference this issue on Oct 11, 2026
+Fix #5532: camera-UBO mirrors and presentation docs catch up with his…
+...
+b27e52c
+Parked shadow-ratio tail deepened to cap 1024 / floor 0.002; parked-p…
+...
+48bed05
+Dither the shadow-ray disk samples: per-pixel R2 sequence rotated by …
+...
+4d991ba
+matiaszanolli commented on Oct 11, 2026
+matiaszanolli
+on Oct 11, 2026
+OwnerAuthor
+More actions
+Residual tail closed. Measured on the Cornell penumbra (direct-only view, RMSE vs an 8-ray deep reference): at ONE ray/pixel the 256/0.008 tail left a frozen grain (~8.1, flat from frame 400 to 1500). 48bed05 deepens the parked tail to cap 1024 / floor 0.002 (history clamp matched): 4.4 at 1500 frames. 4d991ba replaces the white PCG hash shadow samples with a blue-noise-dithered R2 sequence (R2 in time, IGN-rotated per pixel): 3.4, visibly smoother same-frame crops, unbiased. The parked-frame penumbra-variance gate this issue owed is cornell_parked_penumbra_converges_at_one_shadow_ray (limit 5.0; old build 8.9). Raising K was measured and judged not worth it (K=1 now ~matches the old K=8, at no GPU cost). Other Cornell oracle rungs pass; cornell_forced_low_blas_budget_preserves_rt_shadows fails identically before/after (pre-existing, missing_rigid=1 under the BLAS budget override).
+matiaszanolli
+closed this as completedon Oct 11, 2026
+matiaszanolli
+added 3 commits that reference this issue on Oct 11, 2026
+Fix #5617: the ReSTIR direct-light EMA caps, floors and history modes…
+...
+5f50f0b
+Fix #5567: the ReSTIR direct-EMA lag fixtures read the live parked α …
+...
+aaad8c2
+fix(renderer): only the visible surface owns the ReSTIR shadow-ratio …
+...
+c2647d4
+matiaszanolli
+added a commit that references this issue on Oct 24, 2026
+Fix #6344: the exterior sun's per-frame drift no longer re-keys the S…
+...
+8828dc6
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+bugSomething isn't workingSomething isn't workinghighHigh severityHigh severityrendererVulkan rendererVulkan renderershadersGLSL / SPIR-V shader sources and the shader contractGLSL / SPIR-V shader sources and the shader contract
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

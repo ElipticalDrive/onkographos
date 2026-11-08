@@ -7,14 +7,14 @@ Ray Origin Offset Noise is a technique used in volume rendering to perturb the s
 
 ## How it works
 **Inputs:**
-- `uv`: A 2D vector representing the normalized screen coordinates or spatial position of the sample/pixel.
-- `unitVector`: A constant 2D vector used to break symmetry in the hash function.
+- `uv`: A 2D vector representing the normalized screen coordinates or spatial position of the sample/pixel [S1, unofficial].
+- `unitVector`: A constant 2D vector used to break symmetry in the hash function [G].
 
 **Outputs:**
-- `r`: A pseudo-random floating-point value in the range $[0, 1)$.
+- `r`: A pseudo-random floating-point value in the range $[0, 1)$ [S1, unofficial].
 
 **Data Structures:**
-- No persistent data structures are required. The method is stateless and computes the random value on the fly from the input coordinates [G].
+- No persistent data structures are required [G]. The method is stateless and computes the random value on the fly from the input coordinates [S1, unofficial].
 
 **Steps:**
 1. Scale `unitVector` by the constant $79.30408$ [S1, unofficial].
@@ -29,7 +29,7 @@ $$ r = \text{fract}(\sin(\text{dot}(uv, \text{unitVector} \times 79.30408)) \tim
 Where:
 - $\text{fract}(x) = x - \lfloor x \rfloor$ [G].
 - $\text{dot}(a, b) = a_x b_x + a_y b_y$ [G].
-- $\text{unitVector}$ is a constant 2D vector. The specific vector is not defined in the source, only the scaling factor is provided [S1, unofficial].
+- $\text{unitVector}$ is a constant 2D vector [G].
 - The constant $79.30408$ scales the input vector [S1, unofficial].
 - The constant $43758.5453$ is a multiplier that exploits the chaotic nature of the sine function's tail to produce a uniform distribution [G].
 
@@ -77,7 +77,7 @@ def ray_origin_offset_noise(uv: Tuple[float, float], unit_vector: Tuple[float, f
 
 **Edge Cases and Pitfalls:**
 - **Precision:** The method relies on the precision of the sine function and floating-point arithmetic. In low-precision environments, the output may exhibit patterns or reduced randomness [G].
-- **Boundary Conditions:** The method is stateless, so boundary conditions are handled by the input `uv`. However, if `uv` is not normalized or scaled appropriately, the randomness may not be uniform across the screen [G].
+- **Boundary Conditions:** The method is stateless, so boundary conditions are handled by the input `uv` [G]. However, if `uv` is not normalized or scaled appropriately, the randomness may not be uniform across the screen [G].
 - **Correlation:** If `unitVector` is not chosen carefully (e.g., if it has integer components), the output may exhibit banding or correlation artifacts [G].
 
 ## Subtopics
@@ -89,7 +89,7 @@ A hash-based pseudo-random number generator (PRNG) maps integer or floating-poin
 Incremental Random Number Generation is a method for producing low-discrepancy pseudo-random sequences by iteratively adding an irrational constant to a state variable and taking the fractional part. It solves the problem of generating uniformly distributed samples with minimal correlation between consecutive iterations, which is critical for avoiding banding artifacts in ray marching. It differs from hash-based generators by maintaining a continuous state that evolves deterministically, ensuring that the sequence covers the sampling space more evenly (quasi-Monte Carlo properties) than standard linear congruential generators, while being computationally cheaper than complex hash functions.
 
 ### Deterministic LCG Noise Generation
-A Linear Congruential Generator (LCG) producing deterministic pseudo-random floats in the range [-1, 1) using Numerical Recipes constants. Used for procedural sound synthesis [S2, unofficial].
+A Linear Congruential Generator (LCG) producing deterministic pseudo-random floats in the range [-1, 1) using Numerical Recipes constants [S2, unofficial]. Used for procedural sound synthesis [S2, unofficial].
 
 **Steps:**
 1. Update state: Multiply current state by 6,364,136,223,846,793,005 and add 1,442,695,040,888,963,407 using wrapping arithmetic (mod 2^64) [S2, unofficial].
@@ -106,11 +106,11 @@ $$ v = \left(\frac{x_n \gg 40}{8388608.0}\right) - 1.0 $$
 - Output range: [-1.0, 1.0) [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per sample. The computation involves a dot product, sine, multiplication, and fractional part extraction, all of which are constant-time operations [G].
-- **Memory Complexity:** $O(1)$. No additional memory is required beyond the input coordinates and constant values [G].
-- **Performance:** The method is computationally inexpensive and suitable for real-time applications. The use of transcendental functions (sine) may be slightly more expensive than bitwise operations, but modern GPUs optimize these well [G].
+- **Time Complexity:** $O(1)$ per sample [G]. The computation involves a dot product, sine, multiplication, and fractional part extraction, all of which are constant-time operations [G].
+- **Memory Complexity:** $O(1)$ [G]. No additional memory is required beyond the input coordinates and constant values [G].
+- **Performance:** The method is computationally inexpensive and suitable for real-time applications [G]. The use of transcendental functions (sine) may be slightly more expensive than bitwise operations, but modern GPUs optimize these well [G].
 - **Strengths:** Deterministic, stateless, easy to implement, avoids banding artifacts [G].
-- **Limitations:** The quality of randomness depends on the choice of constants and input coordinates. May not provide high-quality randomness for applications requiring statistical rigor [G].
+- **Limitations:** The quality of randomness depends on the choice of constants and input coordinates [G]. May not provide high-quality randomness for applications requiring statistical rigor [G].
 - **When to use:** When avoiding banding artifacts in volume rendering is critical and computational resources are limited [G].
 - **When not to use:** When high-quality statistical randomness is required, or when the input coordinates are not available or meaningful [G].
 

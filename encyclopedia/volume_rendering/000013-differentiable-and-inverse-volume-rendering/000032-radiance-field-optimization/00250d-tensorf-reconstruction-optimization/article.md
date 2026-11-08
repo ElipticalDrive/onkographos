@@ -1,0 +1,170 @@
+# TensoRF Reconstruction Optimization
+Also called: Tensorial Radiance Field Optimization
+
+## Overview
+TensoRF Reconstruction Optimization is the training procedure for the TensoRF method, which represents a radiance field using tensor factorization to reduce memory and improve optimization stability [S1, unofficial]. It solves the problem of high memory consumption and overfitting in dense voxel-based radiance fields by decomposing the field into low-rank tensor factors [S1, unofficial]. It differs from standard NeRF optimization by using structured tensor bases (vectors and matrices) instead of independent per-voxel features, allowing for coarse-to-fine reconstruction via simple upsampling of factors rather than re-gridding [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A set of multi-view input images with known camera poses.
+- **Output:** Optimized tensor factors (vectors and matrices) representing the density $\sigma$ and color $\mathbf{c}$ fields.
+
+**Data Structures:**
+The radiance field is modeled by a set of global vectors and matrices.
+- **Density Field ($\sigma$):** Decomposed into a sum of rank-$R_\sigma$ components. Each component consists of three mode vectors (one for each spatial dimension X, Y, Z) and a scalar coefficient.
+- **Color Field ($\mathbf{c}$):** Decomposed into a sum of rank-$R_c$ components. Each component consists of three mode vectors and a color vector (RGB).
+- **Feature Grid:** The actual resolution of each dimension is computed based on the shape of the bounding box. The grid starts at an initial resolution $N_0^3$ (where $N_0 = 128$) and upsamples to a final resolution $N^3$.
+
+**Numbered Steps:**
+1. **Initialization:** Initialize the tensor factors (global vectors and matrices) for density and color. The initial grid resolution is $N_0^3$ with $N_0 = 128$ [S1, unofficial].
+2. **Rendering:** For each ray $\mathbf{r}$, compute the rendered color $\hat{C}(\mathbf{r})$ using the standard emission-absorption model [44-radiance-field-optimization.md]. The density $\sigma_q$ and color $\mathbf{c}_q$ at sampled locations $\mathbf{x}_q$ are computed by evaluating the tensor factors [S1, unofficial].
+3. **Loss Computation:** Compute the L2 rendering loss between the rendered pixel colors $\hat{C}(\mathbf{r})$ and the ground truth pixel colors $C(\mathbf{r})$ [S1, unofficial].
+4. **Regularization:** Apply regularization terms to the vector and matrix factors to address overfitting and local minima:
+   - **L1 Norm Loss:** Sparsity loss applied to factors. Used for most datasets [S1, unofficial].
+   - **TV (Total Variation) Loss:** Applied for real datasets with few input images (e.g., LLFF) or imperfect capture conditions (e.g., Tanks and Temples with varying exposure/inconsistent masks) [S1, unofficial].
+5. **Optimization Step:** Update the tensor factors using the Adam optimizer [S1, unofficial].
+6. **Coarse-to-Fine Upsampling:** At specific optimization steps (2000, 3000, 4000, 5500, 7000), linearly and bilinearly upsample the XYZ-mode vector and matrix factors [S1, unofficial]. The number of voxels is interpolated between $N_0^3$ and $N^3$ linearly in logarithmic space [S1, unofficial].
+
+**Formulas:**
+- **Rendering Loss:**
+  $$
+  \mathcal{L}_{render} = \sum_{\mathbf{r}} \| \hat{C}(\mathbf{r}) - C(\mathbf{r}) \|_2^2
+  $$
+- **Regularization Loss:**
+  $$
+  \mathcal{L}_{reg} = \lambda_{L1} \sum_{f \in \text{factors}} \| f \|_1 + \lambda_{TV} \sum_{f \in \text{factors}} \text{TV}(f)
+  $$
+  Where $\lambda_{L1}$ and $\lambda_{TV}$ are weighting coefficients. The sources do not specify the exact values of these coefficients [S1, unofficial].
+
+**Parameters:**
+- **Optimizer:** Adam [S1, unofficial].
+- **Initial Learning Rate:** Not given in the sources.
+- **Batch Size:** 4096 pixel rays [S1, unofficial].
+- **Initial Resolution:** $N_0^3$ voxels with $N_0 = 128$ [S1, unofficial].
+- **Final Resolution:** $N^3$ voxels.
+- **Upsampling Steps:** 2000, 3000, 4000, 5500, 7000 [S1, unofficial].
+- **Interpolation:** Linear in logarithmic space for the number of voxels between $N_0^3$ and $N^3$ [S1, unofficial].
+- **Feature Decoding:** Either an MLP or SH function. For SH, 3rd-order SH coefficients with RGB channels (27 features). For MLP, a small MLP with two FC layers (128-channel hidden layers) and ReLU activation [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+def initialize_factors(N0, R_sigma, R_c):
+    """
+    Initialize tensor factors for density and color.
+    N0: Initial resolution (128).
+    R_sigma: Rank for density decomposition.
+    R_c: Rank for color decomposition.
+    """
+    # Density factors: 3 mode vectors per component, R_sigma components
+    sigma_factors = []
+    for _ in range(R_sigma):
+        # Each mode vector has size N0
+        vec_x = nn.Parameter(torch.randn(N0))
+        vec_y = nn.Parameter(torch.randn(N0))
+        vec_z = nn.Parameter(torch.randn(N0))
+        coeff = nn.Parameter(torch.tensor(1.0))
+        sigma_factors.append((vec_x, vec_y, vec_z, coeff))
+    
+    # Color factors: 3 mode vectors per component, R_c components
+    color_factors = []
+    for _ in range(R_c):
+        vec_x = nn.Parameter(torch.randn(N0))
+        vec_y = nn.Parameter(torch.randn(N0))
+        vec_z = nn.Parameter(torch.randn(N0))
+        color_vec = nn.Parameter(torch.randn(3)) # RGB
+        color_factors.append((vec_x, vec_y, vec_z, color_vec))
+        
+    return sigma_factors, color_factors
+
+def compute_rendered_color(sigma_factors, color_factors, rays, N):
+    """
+    Compute rendered color for a batch of rays using tensor factors.
+    This is a placeholder for the actual tensor evaluation logic.
+    """
+    # Evaluate tensor factors at ray sample points
+    # Compute density sigma and color c at each sample point
+    # Apply volume rendering equation
+    pass
+
+def compute_loss(rendered_colors, ground_truth_colors, sigma_factors, color_factors):
+    """
+    Compute L2 rendering loss and regularization losses.
+    """
+    # L2 Rendering Loss
+    l2_loss = torch.mean((rendered_colors - ground_truth_colors) ** 2)
+    
+    # L1 Sparsity Loss
+    l1_loss = 0.0
+    for vec_x, vec_y, vec_z, coeff in sigma_factors:
+        l1_loss += torch.norm(vec_x, 1) + torch.norm(vec_y, 1) + torch.norm(vec_z, 1) + torch.norm(coeff, 1)
+    for vec_x, vec_y, vec_z, color_vec in color_factors:
+        l1_loss += torch.norm(vec_x, 1) + torch.norm(vec_y, 1) + torch.norm(vec_z, 1) + torch.norm(color_vec, 1)
+        
+    # TV Loss (placeholder)
+    tv_loss = 0.0
+    # Compute total variation for each factor
+    # ...
+    
+    return l2_loss + l1_loss + tv_loss
+
+def train_tensoRF(images, poses, R_sigma, R_c, N, steps):
+    """
+    Main training loop for TensoRF.
+    """
+    N0 = 128
+    sigma_factors, color_factors = initialize_factors(N0, R_sigma, R_c)
+    
+    optimizer = optim.Adam(list(sigma_factors.parameters()) + list(color_factors.parameters()), lr=0.001) # LR not given
+    
+    upsampling_steps = [2000, 3000, 4000, 5500, 7000]
+    
+    for step in range(steps):
+        # Sample rays
+        rays, ground_truth_colors = sample_rays(images, poses)
+        
+        # Render
+        rendered_colors = compute_rendered_color(sigma_factors, color_factors, rays, N0)
+        
+        # Compute Loss
+        loss = compute_loss(rendered_colors, ground_truth_colors, sigma_factors, color_factors)
+        
+        # Optimize
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        # Coarse-to-Fine Upsampling
+        if step in upsampling_steps:
+            # Interpolate resolution linearly in log space
+            # Upsample vectors and matrices linearly and bilinearly
+            # ...
+            pass
+            
+    return sigma_factors, color_factors
+```
+
+## Subtopics
+
+### [TensoRF Training Loop](8644-tensorf-training-loop.md)
+Details the specific training loop implementation, including learning rate schedules and batch processing strategies.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Reduced compared to dense voxel grids due to tensor factorization. The memory usage is proportional to the number of factors ($3R_\sigma + 3R_c$) and the resolution $N$ [S1, unofficial].
+- **Measured Performance:** Evaluated on Synthetic NeRF, LLFF, and Tanks and Temples datasets [S1, unofficial].
+- **Strengths:** Reduces memory consumption, avoids overfitting with regularization, and allows for coarse-to-fine reconstruction via simple upsampling [S1, unofficial].
+- **Limitations:** May suffer from local minima if regularization is not properly applied [S1, unofficial].
+- **When to Use:** Suitable for scenes where memory is a constraint and high-quality reconstruction is needed [S1, unofficial].
+- **When Not to Use:** Not suitable for real-time rendering without further optimization [S1, unofficial].
+
+## Background
+TensoRF was introduced by [S1, unofficial]. It builds on the idea of tensor factorization for radiance fields, aiming to improve upon the memory and optimization challenges of previous methods like NeRF [S1, unofficial].
+
+## Sources
+[S1] PDF TensoRF: Tensorial Radiance Fields - ECVA, https://www.ecva.net/papers/eccv_2022/papers_ECCV/papers/136920332.pdf, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,89 @@
+Problem #2258 replaced the CUDA VoxelBlockManager inverse-map decode with an output-centric rank + select (jumpMap popcount rank + the leaf's 9-bit mPrefixSum directory + in-word bit select), making decode work proportional to outputs in...
+
+NanoVDB: output-proportional CPU VBM inverse-map decode, sharing rank/select primitives with the CUDA decode · Issue #2290 · AcademySoftwareFoundation/openvdb · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+NanoVDB: output-proportional CPU VBM inverse-map decode, sharing rank/select primitives with the CUDA decode #2290
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+NanoVDB: output-proportional CPU VBM inverse-map decode, sharing rank/select primitives with the CUDA decode#2290
+Copy link
+Labels
+nanovdb
+Description
+swahtz
+opened on Aug 20, 2026
+Issue body actions
+Problem
+#2258 replaced the CUDA VoxelBlockManager inverse-map decode with an output-centric rank + select (jumpMap popcount rank + the leaf's 9-bit mPrefixSum directory + in-word bit select), making decode work proportional to outputs instead of O(nLeaves × 512) per block.
+The CPU decode in nanovdb/tools/VoxelBlockManager.h still has the input-proportional cost structure: per overlapping leaf it computes a full 512-wide batch select (util::buildMaskPrefixSums + nine util::shuffleDownMask passes compacting an identity array), then copies out the block∩leaf slice. The compaction is recomputed for every block a leaf spans, and a leaf contributing 4 voxels to a block pays the same ~9×512 element-ops as a full one. The formulation was chosen because it reliably auto-vectorizes from portable source (#pragma omp simd, fixed trips, branchless blends) — but the redundancy costs more than the vectorization recovers.
+Proposal
+Replace the host decodeInverseMaps body (same signature) with a portable, output-proportional bit-iteration: per leaf overlapping the block, locate the block's first voxel via the mPrefixSum directory (once per leaf), then emit sequentially by iterating set bits:
+```
+// per leaf: directory scan -> (wordID, activesBeforeWord) for the first needed rank,
+// skip (rank - activesBeforeWord) bits, then:
+for (uint32_t count = ...; count; --count, ++p) {
+    while (!word) word = leafData.mValueMask.words()[++w];
+    leafIndex[p]   = leafID;
+    voxelOffset[p] = uint16_t((w << 6) + util::findLowestOn(word));
+    word &= word - 1;
+}
+```
+Standard C++ only — no intrinsics, and deliberately no reliance on auto-vectorization (the loop is serially dependent by construction; its win is doing ~1 op per output). shuffleDownMask / buildMaskPrefixSums become unused by this path.
+Measured (prototype, byte-exact vs. current, single-threaded over all blocks, level-set sphere shells at 16–86% leaf occupancy, Threadripper PRO 3975WX / AVX2, gcc -O3 -march=native -fopenmp-simd):
+occupancy
+width 128
+width 512
+16%
+2.81×
+2.75×
+60%
+2.34×
+1.44×
+86%
+2.11×
+1.32×
+Share the rank/select primitives with the CUDA decode
+The math is identical on both architectures; single-source it __hostdev__ in the .h (the pattern util::countOn already uses), so CPU/GPU byte-agreement holds by construction:
+jumpMapRank and the mPrefixSum directory scan (selectVoxelInLeaf) move from the .cuh to __hostdev__ members of the shared base; the tools::cuda::VoxelBlockManager inherits them.
+One new arch-specialized helper, e.g. util::findNthSetOn(uint64_t w, uint32_t n): __fns (split into 32-bit halves) under __CUDA_ARCH__, a portable clear-lowest-bit loop on host (only used off the hot path there).
+The per-slot decodeInverseMap then becomes __hostdev__ — one implementation for both.
+Do not merge the two batch decodeInverseMaps bodies: the device body is a grid-stride per-slot loop ending in __syncthreads, the host body is the sequential bit-iteration — same contract, per-architecture implementation, each in its natural file (an #ifdef __CUDA_ARCH__-merged body would be one name over two disjoint algorithms).
+Validation
+Byte-compare the new host decode against the current implementation across block widths and occupancies (the prototype passed at all 12 configurations), and add a host↔device bit-exactness check — cheap once the primitives are shared.
+Caveats / notes
+Numbers above are AVX2 (Zen 2). On AVX-512 the current shuffle network's times roughly halve while bit-iteration's don't move, so the dense-grid width-512 corner (~1.3×) may approach parity there — worth one AVX-512 run before removing the old path rather than keeping it as an alternative. Sparse and width-128 cases remain clear wins.
+Optional follow-up: cache the per-leaf state across consecutive blocks that share a boundary leaf (blocks arrive in contiguous ranges from util::forEach).
+Sequencing: depends on VBM select-based inverse-map decode #2258 (uses its selectVoxelInLeaf factoring); touches the same .cuh region as the Alternative stencil resolvers for VoxelBlockManager #2263 branch, so coordinate the stacking.
+Activity
+Idclip
+added
+nanovdb
+on Aug 31, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+nanovdb
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,40 +1,45 @@
 # Multi-Pass and Sequential Stage Architectures
 
-Also called: Multi-Pass Rendering, Sequential Stage Pipelines
 
 ## Overview
-Multi-Pass and Sequential Stage Architectures decompose volume rendering into discrete, ordered operations executed across multiple rendering passes or shader stages to manage complexity, memory, or specific lighting requirements [S1, unofficial]. Unlike single-pass methods that compute final pixel color in one go, these architectures separate concerns such as geometry assembly, shading, and compositing into distinct steps [S1, unofficial]. They are chosen when single-pass approaches fail to handle complex lighting (e.g., shadows, SSAO), require decoupling of geometry traversal from screen-space shading, or need to manage large intermediate data structures like fragment lists [S1, unofficial].
+Multi-pass and sequential stage architectures decompose the volume rendering process into distinct, ordered rendering passes or pipeline stages to manage complexity, memory bandwidth, or specific shading requirements [S1, unofficial]. Unlike single-pass methods that attempt to compute the final pixel color in one traversal, these architectures separate concerns such as geometry assembly, data classification, shading, and compositing into independent steps [S1, unofficial]. This separation allows for techniques like deferred shading, fragment list accumulation, or explicit multi-buffer compositing, which are difficult or impossible to implement in a single rasterization pass [S1, unofficial].
 
 ## Shared principles
-The family shares the mechanism of breaking the image formation process into a sequence of independent or dependent stages, where the output of one stage serves as the input (via buffers, textures, or memory) for the next [S1, unofficial].
+The family shares the fundamental mechanism of treating volumetric data as a set of geometric or parametric primitives that are transformed and rasterized [S1, S3, S4, unofficial].
 
-1.  **Stage Decomposition:** The rendering task is split into logical units (e.g., Clear, Construction, Insertion, Evaluation; or Depth, Position, Shading) [S1, unofficial]. Each stage is typically implemented as a separate shader program or pipeline state [S1, unofficial].
-2.  **Intermediate Storage:** Results from early stages are stored in intermediate Framebuffer Objects (FBOs), textures, or buffer objects (e.g., depth buffers, position buffers, fragment lists) [S1, unofficial]. These buffers are bound to texture units for subsequent passes [S1, unofficial].
-3.  **Sequential Execution:** Stages are executed in a strict order defined by data dependencies. For example, depth must be computed before position reconstruction; geometry must be assembled before shading [S1, unofficial].
-4.  **Buffer Management:** The pipeline requires explicit management of buffer states, including clearing buffers, transitioning layouts (e.g., from ColorAttachmentOptimal to ShaderReadOnlyOptimal), and binding/unbinding textures [S1, unofficial].
-5.  **Final Composition:** A final pass typically combines all intermediate data (depth, normals, materials, lighting) to produce the final image [S1, unofficial].
+1.  **Primitive Representation:** The volume is decomposed into primitives. These may be explicit geometric shapes (cubes, cells, splats) or implicit functions sampled via texture hardware [S1, S3, S4, unofficial]. Each primitive $k$ is defined by its position $\mathbf{p}_k$, density/extinction coefficient $g_k$ or $\rho_k$, and a reconstruction kernel $h$ (typically a Gaussian) [S1, unofficial][S6, unofficial][S10, abstract only, unofficial].
+2.  **Transformation:** Primitives are transformed from volume space to screen space using the Model-View-Projection (MVP) matrix or specific factorizations (e.g., shear-warp) [S2, S3, S4, unofficial]. For perspective projections, the kernel shape may be distorted (e.g., EWA splatting) to account for foreshortening [S6, unofficial][S10, abstract only, unofficial].
+3.  **Rasterization:** The transformed primitives are projected onto the 2D image plane. This step leverages hardware-accelerated scan-conversion, depth testing, and blending [S1, S2, S3, S4, unofficial]. The contribution of a voxel $D$ to a screen point $(x,y)$ is determined by the footprint function $F(x,y)$, which is the integral of the 3D kernel along the view direction [S2, unofficial][S6, unofficial][S10, abstract only, unofficial]:
+    $$ F(x,y) = \int h(x-x_D, y-y_D, z) \, dz $$
+    The intensity written to the pixel is modulated by the voxel density:
+    $$ P(x,y) = \text{weight}(x,y) \cdot \rho(D) $$
+    where $\text{weight}(x,y) = F(x-x_D, y-y_D)$ [S10, abstract only, unofficial].
+4.  **Compositing:** Contributions are accumulated to form the final image. This is typically done using alpha blending in back-to-front or front-to-back order to handle transparency correctly [S1, S2, S3, unofficial][S7]. Splatting compositing is performed along sheets (all pixels at once for a set of voxels), whereas ray-casting composites along rays (one sample at a time) [S10, abstract only, unofficial].
+5.  **Hardware Acceleration:** Most methods in this family rely on GPU rasterization pipelines for performance, enabling real-time interactivity [S1, S2, S3, unofficial].
 
 ## Subtopics
 
 ### [Volume Rendering Pipeline](1318-volume-rendering-pipeline.md)
-A standard implementation structure for direct volume rendering that decomposes image formation into discrete stages: data traversal, interpolation, gradient computation, classification, shading, and compositing. It solves the problem of projecting a 3D scalar field onto a 2D image plane without fitting explicit geometric primitives, treating each sample as a semi-transparent, light-interacting entity. Unlike fragment-list or deferred approaches that decouple geometry assembly from shading via intermediate buffers, this pipeline typically processes rays sequentially or in parallel batches, where shading and classification are often performed in parallel on the sample data before compositing.
+A conceptual and implementation structure that decomposes the image formation process of direct volume rendering into a sequence of independent or dependent stages. It solves the problem of mapping a 3D scalar field to a 2D image by treating each sample point along a viewing ray as a semi-transparent, reflective, and light-emitting entity. Unlike methods that fit geometric primitives to the data, this pipeline directly shades and projects samples onto the picture plane. It is distinct from its siblings, the [Fragment List-Based Rendering Pipeline](3488-fragment-list-based-rendering-pipeline.md) and [Deferred Rendering Pipeline](10584-deferred-rendering-pipeline.md), by its reliance on explicit per-sample classification and shading before compositing, rather than deferred shading or fragment list assembly.
 
 ### [Fragment List-Based Rendering Pipeline](3488-fragment-list-based-rendering-pipeline.md)
-A multi-pass object-order technique for real-time smoke volume rendering that decouples geometric traversal from shading to maintain accuracy and avoid raytracing self-intersection artifacts. It differs from the [Volume Rendering Pipeline](1318-volume-rendering-pipeline.md) by explicitly managing per-pixel fragment data in intermediate storage structures rather than accumulating color directly, and differs from the [Deferred Rendering Pipeline](10584-deferred-rendering-pipeline.md) by focusing on volumetric primitive assembly and insertion rather than standard surface geometry.
+A fragment list-based rendering pipeline that processes smoke volumes through four distinct stages (Clear, Construction, Insertion, Evaluation) using fragment lists to store and evaluate per-pixel data, chosen to maintain accuracy and avoid raytracing/self-intersection problems. It differs from [Volume Rendering Pipeline](1318-volume-rendering-pipeline.md) by explicitly decoupling geometry assembly and fragment storage from final shading, and from [Deferred Rendering Pipeline](10584-deferred-rendering-pipeline.md) by using fragment lists for volumetric density accumulation rather than deferred G-buffers for surface properties.
 
 ### [Deferred Rendering Pipeline](10584-deferred-rendering-pipeline.md)
-This method implements a multi-pass deferred rendering sequence for volume visualization, computing depth, position, normals, materials, shadows, and ambient occlusion in separate framebuffer objects before a final shading pass. It distinguishes itself from object-order splatting by decoupling geometric traversal from screen-space shading, allowing complex lighting effects like SSAO and filtered normals to be applied via screen-space quads rather than per-voxel computation.
+A multi-pass deferred rendering sequence that decouples geometry processing from lighting and post-processing by storing intermediate scene attributes in separate framebuffer objects (FBOs). It differs from forward rendering by deferring shading until after depth and position are known, and from fragment-list approaches by relying on screen-space quad passes for filtering and lighting rather than explicit geometry lists.
 
 ### Eye/Light/Composite Pass Pipeline
-*   **Definition:** Renders volumetric data in three sequential passes: eye pass (direct lighting/color), light pass (opacity accumulation for shadows), and composite pass (blends results) [S1, unofficial].
-*   **Steps:**
-    1.  **Eye Pass:** Render volume to `m_eyeBuffer` with direct lighting, using `m_eyePipeline` and `m_eyeSet` [S1, unofficial].
-    2.  **Light Pass:** Accumulate opacity into `m_lightBuffer` using `m_lightPipeline` and `m_volSet`, transitioning layout from `ColorAttachmentOptimal` to `ShaderReadOnlyOptimal` [S1, unofficial].
-    3.  **Composite Pass:** Bind `m_compositePipeline` and `m_compSet`, draw 3 triangles (full-screen quad) using `m_eyeBuffer` as a sampled texture [S1, unofficial].
-*   **Layout:** Buffers: `m_eyeBuffer` (eye pass output), `m_lightBuffer` (light pass opacity accumulation), `m_volumeTex` (3D volume data, R8G8Unorm), `m_tfTex` (transfer function) [S1, unofficial].
+#### definition
+- [S1, unofficial] Renders volumetric data in three sequential passes: eye pass (direct lighting/color), light pass (opacity accumulation for shadows), and composite pass (blends results).
+#### step
+- [S1, unofficial] Eye pass: Render volume to m_eyeBuffer with direct lighting, using m_eyePipeline and m_eyeSet.
+- [S1, unofficial] Light pass: Accumulate opacity into m_lightBuffer using m_lightPipeline and m_volSet, transitioning layout from ColorAttachmentOptimal to ShaderReadOnlyOptimal.
+- [S1, unofficial] Composite pass: Bind m_compositePipeline and m_compSet, draw 3 triangles (full-screen quad) using m_eyeBuffer as a sampled texture.
+#### layout
+- [S1, unofficial] Buffers: m_eyeBuffer (eye pass output), m_lightBuffer (light pass opacity accumulation), m_volumeTex (3D volume data, R8G8Unorm), m_tfTex (transfer function).
 
 ## Background
-The concept of multi-pass rendering in volume visualization has evolved alongside GPU architecture, moving from fixed-function pipelines to programmable shaders. Early implementations used multiple render passes to handle complex lighting and transparency that single-pass methods could not efficiently manage. The specific architectures described here, such as fragment list-based and deferred pipelines, emerged to address performance bottlenecks in real-time volume rendering, particularly for smoke and fluid simulations where self-intersection and lighting accuracy are critical [S1, unofficial]. The Eye/Light/Composite pattern is often used in game engines and real-time applications to separate direct lighting from shadow casting, allowing for dynamic shadow maps to be updated independently of the main view [S1, unofficial].
+The concept of decomposing rendering into stages originates from the need to handle complex lighting and transparency in volumetric data, which cannot be easily solved with standard single-pass rasterization. The canonical Volume Rendering Pipeline was described in foundational literature [S2, unofficial][S3, unofficial], establishing the sequence of Data Traversal, Interpolation, Gradient Computation, Classification, Shading/Illumination, and Compositing. The use of fragment lists for smoke visualization was introduced to handle the specific challenges of volumetric density accumulation without self-intersection artifacts [S1, unofficial]. Deferred rendering techniques were adapted for volume rendering to separate geometry processing from lighting calculations, allowing for more flexible shading models [S1, unofficial].
 
 ## Sources
-[S1] GPUGems Volume Rendering, https://github.com/sho3la/GPUGemsVolumeRendering, fetched 2026-10-26 (unofficial)
+[S1] sho3la/GPUGemsVolumeRendering, https://github.com/sho3la/GPUGemsVolumeRendering, fetched 2026-10-26 (unofficial)

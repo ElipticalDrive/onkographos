@@ -3,102 +3,112 @@
 Also called: depthPriorLearned
 
 ## Overview
-Depth-Prior Ray Truncation adjusts the near and far bounds of volumetric ray marching using a learned depth prior (disparity map) to restrict sampling to relevant depth ranges, thereby reducing floating artifacts and improving rendering efficiency [S1, unofficial]. It differs from standard Early Ray Termination, which stops based on accumulated opacity, by proactively limiting the spatial extent of the ray traversal based on geometric cues [S1, unofficial].
+Depth-Prior Ray Truncation adjusts the near and far bounds of volumetric ray marching using a learned depth prior (disparity map) to restrict sampling to relevant depth ranges, thereby reducing floater artifacts and computational waste [S1, unofficial]. It differs from standard [Early Stop](1790-early-stop.md) by proactively limiting the search space via external geometric guidance rather than reacting to accumulated opacity, and from [Empty-space skipping](1002-empty-space-skipping.md) by using semantic/learned depth rather than empty voxel checks.
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** Ray origin and direction (`rayInfo`), a boolean flag `depthPriorLearned`, and a per-pixel disparity value from a ground truth or learned depth map (`groundTruth.disparityDevice`).
-*   **Output:** Modified ray bounds `near_t` and `far_t` used for subsequent volume sampling.
+**Inputs:** Ray origin, ray direction, raw AABB intersection bounds ($t_{min}, t_{max}$), a boolean flag `depthPriorLearned`, and a per-pixel disparity value from a ground truth or learned depth map (`groundTruth.disparityDevice`).
+**Outputs:** Truncated near bound ($t_{near}$) and far bound ($t_{far}$) for the ray marching loop.
 
 **Data Structures:**
-*   `rayInfo`: A 2-element array or vector containing the raw AABB intersection distances `[t_min, t_max]`.
-*   `groundTruth.disparityDevice`: An array indexed by pixel coordinate, storing disparity values.
+- `rayInfo`: Array of size 2 containing raw intersection distances $[t_{min}, t_{max}]$.
+- `groundTruth.disparityDevice`: Array of per-pixel disparity values.
 
 **Parameters:**
-*   `depthPriorLearned`: Boolean flag. If `true`, depth prior logic is applied; if `false`, raw AABB bounds are used [S1, unofficial].
-*   `scaling_factor`: Fixed constant `0.5` applied to the disparity value [S1, unofficial].
-*   `far_offset`: Fixed constant `10.0` subtracted from the far bound [S1, unofficial].
+- `depthPriorLearned`: Boolean flag. Default: `true` in implementations utilizing the prior [S1, unofficial].
+- `scaling_factor`: Multiplier for disparity. Value: $0.5$ [S1, unofficial].
+- `far_offset`: Fixed value subtracted from the far bound. Value: $10.0$ [S1, unofficial].
 
-**Algorithm Steps:**
-1.  Check the `depthPriorLearned` flag.
-2.  If `depthPriorLearned` is `true`:
-    a. Retrieve the disparity value $d$ for the current pixel index from `groundTruth.disparityDevice`.
-    b. Calculate the new near bound: $t_{near} = rayInfo[0] + d \times 0.5$.
-    c. Calculate the new far bound: $t_{far} = rayInfo[1] - 10.0$.
-3.  If `depthPriorLearned` is `false`:
-    a. Set $t_{near} = rayInfo[0]$.
-    b. Set $t_{far} = rayInfo[1]$.
-4.  Use $t_{near}$ and $t_{far}$ as the traversal limits for the ray marching loop.
+**Steps:**
+1. Check if `depthPriorLearned` is enabled.
+2. If enabled:
+   a. Retrieve the raw near bound $t_{raw\_near}$ from `rayInfo[0]`.
+   b. Retrieve the per-pixel disparity $d$ from `groundTruth.disparityDevice` at the current pixel index.
+   c. Calculate the truncated near bound: $t_{near} = t_{raw\_near} + d \times 0.5$.
+   d. Retrieve the raw far bound $t_{raw\_far}$ from `rayInfo[1]`.
+   e. Calculate the truncated far bound: $t_{far} = t_{raw\_far} - 10.0$.
+3. If disabled:
+   a. Set $t_{near} = t_{raw\_near}$.
+   b. Set $t_{far} = t_{raw\_far}$.
+4. Clamp $t_{near}$ and $t_{far}$ to ensure $t_{near} < t_{far}$ and $t_{near}, t_{far} > 0$ [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_ray_bounds(ray_info, depth_prior_learned, disparity_map, pixel_index):
+def truncate_ray_bounds(ray_info, disparity_map, pixel_index, use_prior=True):
     """
-    Computes ray traversal bounds using depth-prior truncation.
+    Truncates ray marching bounds using a depth prior.
     
     Args:
-        ray_info (list): [t_min, t_max] from raw AABB intersection.
-        depth_prior_learned (bool): Flag to enable depth prior logic.
-        disparity_map (list): Array of disparity values indexed by pixel.
-        pixel_index (int): Current pixel index.
+        ray_info: List[float, float] containing [t_min, t_max] from AABB intersection.
+        disparity_map: List[float] of per-pixel disparity values.
+        pixel_index: int, index into disparity_map.
+        use_prior: bool, whether to apply depth prior truncation.
         
     Returns:
-        tuple: (near_t, far_t)
+        Tuple[float, float] (t_near, t_far)
     """
-    t_min_raw, t_max_raw = ray_info
+    t_min = ray_info[0]
+    t_max = ray_info[1]
     
-    if depth_prior_learned:
-        # Retrieve disparity for the current pixel
+    if use_prior:
         disparity = disparity_map[pixel_index]
-        
-        # Apply scaling factor to disparity for near bound
-        # Source specifies: rayInfo[0] + groundTruth.disparityDevice[pixelIndex] * 0.5
-        near_t = t_min_raw + disparity * 0.5
-        
-        # Apply fixed offset to far bound
-        # Source specifies: rayInfo[1] - 10.0
-        far_t = t_max_raw - 10.0
+        # Apply scaling factor 0.5 to disparity for near bound
+        t_near = t_min + disparity * 0.5
+        # Subtract fixed offset 10.0 from far bound
+        t_far = t_max - 10.0
     else:
-        # Fallback to raw AABB intersection
-        near_t = t_min_raw
-        far_t = t_max_raw
+        t_near = t_min
+        t_far = t_max
         
-    return near_t, far_t
+    # Guard: Ensure valid interval [G]
+    if t_near >= t_far:
+        t_near = t_min
+        t_far = t_max
+        
+    # Guard: Ensure positive distances [G]
+    if t_near < 0:
+        t_near = 0.0
+    if t_far < 0:
+        t_far = 0.0
+        
+    return t_near, t_far
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Negative Bounds:** If the disparity is large and negative, or if `far_offset` exceeds `t_max_raw`, the resulting bounds may be invalid (e.g., $t_{near} > t_{far}$ or negative). The implementation must clamp or handle these degenerate cases, though specific handling is not detailed in the source [S1, unofficial].
-*   **Disparity Accuracy:** The method relies on the accuracy of the disparity map. Inaccurate disparities will truncate valid geometry or include empty space, degrading quality [S1, unofficial].
+- If the disparity value is inaccurate or the prior is noisy, the truncated bounds may exclude valid geometry or include excessive empty space, leading to artifacts or wasted computation [S1, unofficial].
+- The fixed offset of $10.0$ is scene-dependent; if the scene scale differs significantly, this value may need adjustment [S1, unofficial].
+- Division by zero or invalid disparity values (e.g., infinity) must be handled [G].
 
 ## Subtopics
 
 ### Auxiliary Depth Prediction Head
-An auxiliary depth prediction head trained simultaneously with radiance field reconstruction to predict depth maps, which are used to supervise rendered depth, narrow the depth range, and guide point sampling [S2, unofficial].
+An auxiliary depth prediction head trained simultaneously with radiance field reconstruction to predict depth maps, which are used to supervise rendered depth, narrow the depth range, and guide point sampling [S2, unofficial]. Unlike methods using third-party depth (e.g., COLMAP), this method predicts depth jointly, allowing for more compact geometry learning [S2, unofficial].
 
-*   **Definition:** A depth prediction head (typically a convolutional layer $F_{depth}$) is appended after each scale encoding volume to predict a depth map $D_l$ and confidence score $U_l$ for the target view [S2, unofficial].
-*   **How it works:**
-    1.  The head predicts depth and confidence from the encoding volume features: $D_l, U_l = F_{depth}(V_l)$ [S2, unofficial].
-    2.  The predicted depth map supervises the rendered depth calculated by volume rendering [S2, unofficial].
-    3.  The predicted depth narrows the depth range for the next level of sampling. If the current range is $R_l$, the next range $R_{l+1}$ is reduced to $R_l \times \beta_l$ centered on the predicted depth value, where $\beta_l < 1$ is the reduction factor [S2, unofficial].
-    4.  The predicted depth guides point sampling, allowing for fewer sample points while maintaining precision [S2, unofficial].
-*   **Parameters:**
-    *   Number of encoding points $[N^A_l]$: $[48, 32, 8]$ for three levels [S2, unofficial].
-    *   Reduction factor $\alpha_l$: $[1/6, 1/4, 1/2]$ [S2, unofficial].
-    *   Depth range reduction factor $\beta_l$: $[1/6, 1/16]$ (Note: Source lists two values for three levels, implying a potential typo or missing value for the third level) [S2, unofficial].
-*   **Comparison:** Unlike methods using third-party depth (e.g., COLMAP), this method predicts depth jointly, allowing for more compact geometry learning [S2, unofficial].
+**Definition:** A depth prediction head appended after each scale encoding volume to predict depth maps and confidence scores, guiding sampling points and narrowing depth ranges for subsequent levels [S2, unofficial].
+
+**Steps:**
+1. Train an auxiliary depth prediction head in an unsupervised manner [S2, unofficial].
+2. Use the predicted depth map to supervise the rendered depth [S2, unofficial].
+3. Use the predicted depth map to narrow the depth range for sampling [S2, unofficial].
+4. Use the predicted depth map to guide point sampling [S2, unofficial].
+
+**Parameters:**
+- Default parameters for three levels: Number of encoding points $[N^A_l]$ is $[48, 32, 8]$, reduction factor $\alpha_l$ is $[1/6, 1/4, 1/2]$, and depth range reduction factor $\beta_l$ is $[1/6, 1/16]$ (note: text says $[1/6, 1/16]$ for $\beta_l$ but implies three levels, likely missing one value or typo in source, but quote exactly) [S2, unofficial].
+
+**Comparison:**
+- Unlike methods using third-party depth (e.g., COLMAP), this method predicts depth jointly, allowing for more compact geometry learning [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Reduces the number of samples per ray by narrowing the depth range, potentially improving rendering speed [S2, unofficial].
-*   **Memory Complexity:** Requires storage for the disparity map or depth prediction head outputs [S1, unofficial][S2, unofficial].
-*   **Strengths:** Reduces floating artifacts by restricting sampling to relevant depths; improves geometric compactness when using joint prediction [S1, unofficial][S2, unofficial].
-*   **Limitations:** Relies on the quality of the depth prior; inaccurate priors can lead to incorrect truncation [S1, unofficial].
-*   **When to use:** When a reliable depth prior (ground truth or learned) is available and floating artifacts are a concern [S1, unofficial].
-*   **When not to use:** When depth information is unavailable or unreliable [S1, unofficial].
+**Time Complexity:** Reduces the number of samples per ray by narrowing the integration interval, leading to faster rendering per frame [S1, unofficial][S2, unofficial].
+**Memory Complexity:** Requires storage for the disparity map/depth prior [S1, unofficial][S2, unofficial].
+**Strengths:** Effectively reduces floater artifacts in transparent or thin geometry regions by avoiding sampling in empty space behind the primary surface [S1, unofficial]. Enables more compact geometry learning when used with auxiliary heads [S2, unofficial].
+**Limitations:** Relies on the accuracy of the depth prior; inaccurate priors can lead to missing geometry or artifacts [S1, unofficial]. The fixed offset in the basic method is not adaptive to scene scale [S1, unofficial].
+**When to use:** When floater artifacts are prevalent due to incorrect depth estimation in standard volume rendering, and a reliable depth prior (learned or ground truth) is available [S1, unofficial].
+**When not to use:** When the scene contains significant occlusion or complex geometry where a single depth prior is insufficient to define the volume bounds accurately [S2, unofficial].
 
 ## Background
-Depth-Prior Ray Truncation is associated with the Clear-Plenoxels project, which utilizes learned depth priors to improve volumetric rendering [S1, unofficial]. The concept of using auxiliary depth prediction heads for joint radiance field reconstruction and depth prediction was proposed in "Improved Neural Radiance Fields Using Pseudo-depth and Fusion" to enhance novel view synthesis and dense geometry modeling without per-scene optimization [S2, unofficial].
+Originated in the context of neural radiance fields and voxel-based rendering (e.g., Plenoxels) to address the issue of floating artifacts caused by incorrect depth estimation in sparse or transparent regions [S1, unofficial]. The concept of using auxiliary depth prediction heads for joint learning was introduced in "Improved Neural Radiance Fields Using Pseudo-depth and Fusion" [S2, unofficial].
 
 ## Sources
 [S1] nortonBryan/Clear-plenoxels, https://github.com/nortonBryan/Clear-plenoxels, fetched 2026-10-27 (unofficial)

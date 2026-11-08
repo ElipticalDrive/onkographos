@@ -3,57 +3,57 @@
 Also called: BVH UDF to Mesh, UDF-based Marching Cubes
 
 ## Overview
-DCX extracts a triangular mesh from a BVH (Bounding Volume Hierarchy) structure by computing an Unsigned Distance Field (UDF) on a regular grid, converting it to a Signed Distance Field (SDF) via flood fill to determine interior/exterior regions, and applying Marching Cubes [S1, unofficial]. It differs from standard Marching Cubes by accepting a BVH as input rather than a pre-computed scalar grid, allowing direct surface extraction from hierarchical geometric representations without intermediate voxelization of the mesh geometry itself [S1, unofficial].
+DCX extracts a triangular mesh from a BVH structure by computing an Unsigned Distance Field (UDF) on a regular grid, converting it to a Signed Distance Field (SDF) via flood fill to determine interior regions, and applying Marching Cubes [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- A BVH structure supporting unsigned distance queries.
-- A target grid resolution $R$ (integer).
+- A BVH structure supporting unsigned distance queries [S1, unofficial].
+- A target grid resolution $R$ (integer) [S1, unofficial].
 
 **Outputs:**
-- A `trimesh.Trimesh` object containing vertices, faces, and normals.
+- A `trimesh.Trimesh` object containing vertices, faces, and normals [S1, unofficial].
 
 **Data Structures:**
-- `udf`: 3D array of shape $(R, R, R)$, `float32`, initialized to zero.
-- `occ_mask`: 3D boolean array of shape $(R, R, R)$, indicating occupied voxels.
-- `sdf`: 3D array of shape $(R, R, R)$, `float32`, the signed distance field.
-- `verts`: Array of shape $(N, 3)$, `float32`, vertex coordinates.
-- `faces`: Array of shape $(M, 3)$, `int64`, face indices.
+- `udf`: 3D array of shape $(R, R, R)$, `float32`, initialized to zero [S1, unofficial].
+- `occ_mask`: 3D boolean array of shape $(R, R, R)$, indicating occupied voxels [S1, unofficial].
+- `sdf`: 3D array of shape $(R, R, R)$, `float32`, the signed distance field [S1, unofficial].
+- `verts`: Array of shape $(N, 3)$, `float32`, vertex coordinates [S1, unofficial].
+- `faces`: Array of shape $(M, 3)$, `int64`, face indices [S1, unofficial].
 
 **Parameters:**
-- `resolution` ($R$): Integer defining the grid resolution. Typical values depend on scene complexity; the source uses a fixed resolution for the grid generation [S1, unofficial].
+- `resolution` ($R$): Integer defining the grid resolution [S1, unofficial].
 - `occupancy_threshold`: $2/R$. Voxels with UDF $< 2/R$ are considered inside the object [S1, unofficial].
 
 **Steps:**
 
 1.  **Grid Initialization**:
-    Define the spatial domain as $[-0.5, 0.5]^3$. Split this range into chunks of size $N=32$ for X, Y, and Z axes to facilitate batched processing. Create a meshgrid from these coordinates to form a tensor `pts` of shape $(num\_points, 3)$ containing all grid sample points [S1, unofficial].
+    Define the spatial domain as $[-0.5, 0.5]^3$ [S1, unofficial]. Split this range into chunks of size $N=32$ for X, Y, and Z axes to facilitate batched processing [S1, unofficial]. Create a meshgrid from these coordinates to form a tensor `pts` of shape $(num\_points, 3)$ containing all grid sample points [S1, unofficial].
 
 2.  **UDF Computation**:
-    Query the BVH for the unsigned distance to the surface for all points in `pts`.
+    Query the BVH for the unsigned distance to the surface for all points in `pts` [S1, unofficial].
     $$ udf\_val = \text{BVH.unsigned\_distance}(pts, \text{return\_uvw}=\text{False}) $$
     Reshape the resulting 1D array into the 3D grid structure and store in `udf` [S1, unofficial].
 
 3.  **Occupancy Determination**:
     Compute a binary occupancy mask based on the UDF threshold:
     $$ occ = udf < \frac{2}{R} $$
-    Perform a 3D flood fill on `occ` to identify connected components. Identify the label corresponding to the background (empty space) by checking the voxel at index $[0, 0, 0]$. Let this label be $L_{empty}$.
+    Perform a 3D flood fill on `occ` to identify connected components [S1, unofficial]. Identify the label corresponding to the background (empty space) by checking the voxel at index $[0, 0, 0]$ [S1, unofficial]. Let this label be $L_{empty}$.
     $$ empty\_mask = (floodfill\_mask == L_{empty}) $$
     $$ occ\_mask = \neg empty\_mask $$
-    *Pitfall*: The flood fill must correctly identify the exterior. The assumption is that the corner $[0,0,0]$ lies outside the object or represents the background component [S1, unofficial].
+    *Pitfall*: The flood fill must correctly identify the exterior [S1, unofficial]. The implementation assumes the corner $[0,0,0]$ lies outside the object or represents the background component [S1, unofficial].
 
 4.  **SDF Conversion**:
-    Initialize `sdf` with the values from `udf`. Invert the sign for all voxels identified as occupied:
+    Initialize `sdf` with the values from `udf` [S1, unofficial]. Invert the sign for all voxels identified as occupied:
     $$ sdf[i,j,k] = \begin{cases} -udf[i,j,k] & \text{if } occ\_mask[i,j,k] \\ udf[i,j,k] & \text{otherwise} \end{cases} $$
     This creates a Signed Distance Field where the zero-crossing represents the surface [S1, unofficial].
 
 5.  **Marching Cubes Extraction**:
-    Apply the Marching Cubes algorithm to `sdf` with an isovalue of $0$.
+    Apply the Marching Cubes algorithm to `sdf` with an isovalue of $0$ [S1, unofficial].
     $$ verts, faces, normals, values = \text{marching\_cubes}(sdf, 0, \text{spacing}=(1/R, 1/R, 1/R)) $$
     The spacing parameter ensures the output coordinates are in the correct physical scale relative to the grid [S1, unofficial].
 
 6.  **Coordinate Adjustment**:
-    The Marching Cubes output typically assumes a grid indexed from $0$ to $R-1$. Adjust vertices to map back to the original $[-0.5, 0.5]$ domain:
+    The Marching Cubes output typically assumes a grid indexed from $0$ to $R-1$ [S1, unofficial]. Adjust vertices to map back to the original $[-0.5, 0.5]$ domain:
     $$ verts = verts - 0.5 + \frac{0.5}{R-1} $$
     $$ verts = verts \times \frac{R}{R-1} $$
     Construct the final mesh object [S1, unofficial].
@@ -64,9 +64,9 @@ DCX extracts a triangular mesh from a BVH (Bounding Volume Hierarchy) structure 
 
 ```python
 import numpy as np
-import torch
 from skimage import measure
 import trimesh
+from scipy.ndimage import label
 
 def dcx_mesh_extraction(bvh, resolution):
     """
@@ -80,82 +80,60 @@ def dcx_mesh_extraction(bvh, resolution):
         trimesh.Trimesh object.
     """
     R = resolution
-    
-    # 1. Grid Initialization
-    # Split [-0.5, 0.5] into chunks of 32 for batching
     chunk_size = 32
+    udf = np.zeros((R, R, R), dtype=np.float32)
     xs = np.linspace(-0.5, 0.5, R)
     ys = np.linspace(-0.5, 0.5, R)
     zs = np.linspace(-0.5, 0.5, R)
-    
-    # Create full meshgrid
-    xx, yy, zz = np.meshgrid(xs, ys, zs, indexing='ij')
-    pts = np.stack([xx.ravel(), yy.ravel(), zz.ravel()], axis=-1).astype(np.float32)
-    
-    # 2. UDF Computation
-    # Query BVH for unsigned distance
-    # Note: bvh.unsigned_distance is assumed to return a numpy array or tensor
-    udf_flat = bvh.unsigned_distance(pts, return_uvw=False)
-    
-    # Reshape to 3D grid
-    udf = udf_flat.reshape((R, R, R)).astype(np.float32)
-    
+
+    # 1 & 2. Grid Initialization & UDF Computation (chunked)
+    for xi in range(0, R, chunk_size):
+        for yi in range(0, R, chunk_size):
+            for zi in range(0, R, chunk_size):
+                x_end = min(xi + chunk_size, R)
+                y_end = min(yi + chunk_size, R)
+                z_end = min(zi + chunk_size, R)
+                cx, cy, cz = np.meshgrid(xs[xi:x_end], ys[yi:y_end], zs[zi:z_end], indexing='ij')
+                pts = np.stack([cx.ravel(), cy.ravel(), cz.ravel()], axis=-1).astype(np.float32)
+                sub_udf = bvh.unsigned_distance(pts, return_uvw=False)
+                udf[xi:x_end, yi:y_end, zi:z_end] = sub_udf.reshape((x_end - xi, y_end - yi, z_end - zi))
+
     # 3. Occupancy Determination
-    # Threshold: 2 / resolution
     threshold = 2.0 / R
     occ = udf < threshold
-    
-    # Convert to torch tensor for flood fill (assuming cubvh library availability)
-    # If not available, a standard scipy.ndimage.binary_fill_holes or custom BFS is needed.
-    # Here we assume the source's specific CUDA-accelerated flood fill.
-    occ_tensor = torch.from_numpy(occ)
-    
-    # Perform flood fill
-    # floodfill_mask contains labels for connected components
-    floodfill_mask = cubvh.floodfill(occ_tensor)
-    
-    # Identify empty label from corner [0,0,0]
-    empty_label = floodfill_mask[0, 0, 0].item()
-    
-    # Create masks
+    # Standard 3D connected-component labeling [G]
+    floodfill_mask = label(occ.astype(int), structure=np.ones((3, 3, 3)))[0]
+    empty_label = floodfill_mask[0, 0, 0]
     empty_mask = (floodfill_mask == empty_label)
     occ_mask = ~empty_mask
-    
+
     # 4. SDF Conversion
     sdf = udf.copy()
     sdf[occ_mask] *= -1
-    
+
     # 5. Marching Cubes Extraction
-    # spacing is 1/R because the grid spans [-0.5, 0.5] with R points?
-    # Actually, linspace(-0.5, 0.5, R) has spacing 1/(R-1).
-    # However, the source code explicitly passes 1/resolution.
-    # We follow the source exactly.
     spacing_val = 1.0 / R
     verts, faces, normals, values = measure.marching_cubes(
-        sdf, 
-        level=0, 
-        spacing=(spacing_val, spacing_val, spacing_val)
+        sdf, level=0, spacing=(spacing_val, spacing_val, spacing_val)
     )
-    
+
     # 6. Coordinate Adjustment
-    # Map from Marching Cubes grid coordinates to [-0.5, 0.5] domain
     verts = verts - 0.5 + (0.5 / (R - 1))
     verts = verts * (R / (R - 1))
-    
-    mesh = trimesh.Trimesh(verts, faces, normals=normals)
-    return mesh
+
+    return trimesh.Trimesh(verts, faces, normals=normals)
 ```
 
 ## Operating characteristics
-- **Time Complexity**: Dominated by the BVH distance queries for $R^3$ points. If the BVH query is $O(\log N)$ where $N$ is the number of primitives, the total time is $O(R^3 \log N)$. The flood fill is $O(R^3)$. Marching Cubes is $O(R^3)$.
-- **Memory Complexity**: $O(R^3)$ for storing the UDF, occupancy mask, and SDF. For high resolutions, this can be significant. The source uses chunking ($N=32$) to manage memory during the BVH query phase, but the final grid requires full storage [S1, unofficial].
-- **Strengths**: Directly utilizes BVH structures, which are efficient for ray tracing and distance queries. Handles complex geometry without explicit voxelization of the mesh triangles.
-- **Limitations**: Requires a full grid resolution, which can be memory-intensive. The flood fill assumes the background is connected and accessible from the grid corners. The occupancy threshold ($2/R$) is a heuristic that may need tuning for thin features [S1, unofficial].
-- **When to use**: When the input is a BVH and a smooth, watertight mesh is required from a hierarchical representation.
-- **When not to use**: For very large scenes where $R^3$ memory is prohibitive, or when the BVH does not support efficient unsigned distance queries.
+- **Time Complexity**: Dominated by the BVH distance queries for $R^3$ points [G]. If the BVH query is $O(\log N)$ where $N$ is the number of primitives, the total time is $O(R^3 \log N)$ [G]. The flood fill and Marching Cubes steps are both $O(R^3)$ [G].
+- **Memory Complexity**: $O(R^3)$ for storing the UDF, occupancy mask, and SDF [G]. The source uses chunking ($N=32$) to manage memory during the BVH query phase, but the final grid requires full storage [S1, unofficial].
+- **Strengths**: Directly utilizes BVH structures for distance queries without rasterizing mesh triangles [G]. Produces a watertight mesh via the SDF zero-crossing [G].
+- **Limitations**: Requires a full grid resolution, which can be memory-intensive. The flood fill assumes the background is connected and accessible from the grid corners [S1, unofficial]. The occupancy threshold is a fixed implementation detail rather than a tunable heuristic [S1, unofficial].
+- **When to use**: When the input is a BVH and a smooth, watertight mesh is required from a hierarchical representation [G].
+- **When not to use**: For very large scenes where $R^3$ memory is prohibitive, or when the BVH does not support efficient unsigned distance queries [G].
 
 ## Background
-The method is described in the unofficial repository `jjjkkyz/DCx` [S1, unofficial]. It combines techniques from distance field computation, connected component analysis (flood fill), and classic isosurface extraction (Marching Cubes) to bridge the gap between hierarchical geometric data structures and polygonal meshes.
+The method combines techniques from distance field computation, connected component analysis (flood fill), and classic isosurface extraction (Marching Cubes) to bridge the gap between hierarchical geometric data structures and polygonal meshes [S1, unofficial].
 
 ## Sources
 [S1] DCx, https://github.com/jjjkkyz/DCx, fetched 2026-10-26 (unofficial)

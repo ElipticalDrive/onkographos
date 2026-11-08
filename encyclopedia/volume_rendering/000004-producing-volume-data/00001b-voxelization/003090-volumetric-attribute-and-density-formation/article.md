@@ -2,63 +2,76 @@
 
 
 ## Overview
-Volumetric Attribute and Density Formation is the family of methods that assign physical or semantic values (such as density, velocity, color, or normals) to the discrete cells of a voxel grid, transforming binary occupancy into a continuous or semi-continuous scalar/vector field. It differs from sibling methods like [Voxel Carving](1213-voxel-carving.md) or [Voxel Occupancy Test](1281-voxel-occupancy-test.md) by focusing on the *value* assigned to occupied voxels rather than just their existence, and from [Shell-based Voxelization](1748-shell-based-voxelization.md) by producing the final attribute data rather than just a boundary mask.
+Volumetric Attribute and Density Formation is the family of methods that map continuous world-space coordinates to discrete voxel grids to store occupancy, density, or physical attributes (such as velocity or color) derived from input primitives like meshes or point clouds [S1, S2, unofficial]. It solves the problem of converting geometric or simulation data into a structured volume suitable for ray marching or volume rendering. It differs from sibling methods like [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) and [Point Cloud Voxelization](1000-point-cloud-voxelization.md) by focusing on the specific attribute assignment logic (e.g., density stretching, anisotropic storage, or coverage factors) rather than the primary rasterization or sampling mechanism.
 
 ## Shared principles
-All methods in this family operate on a voxel grid defined by origin, resolution, and voxel size, building on the coordinate mapping and occupancy determination from [Voxelization](12-voxelization.md). The core mechanism involves:
-1.  **Attribute Sampling/Projection**: Evaluating the input data (mesh vertices, point clouds, or simulation fields) at specific locations within the voxel grid. This may involve ray casting, point containment tests, or geometric intersection calculations [S1, S2, unofficial].
-2.  **Value Accumulation**: Assigning a value to a voxel based on the sampled data. This can be a binary flag, a scalar density, a vector velocity, or a directional attribute. If multiple primitives contribute to a single voxel, their contributions are often accumulated (e.g., via summation or weighted averaging) [S1, S2, unofficial].
-3.  **Normalization/Clamping**: Processing the accumulated values to fit the target data type, such as normalizing directional vectors or clamping density values to a valid range [S1, S2, unofficial].
+All methods in this family map continuous world-space coordinates to discrete integer grid indices $(i, j, k)$ [G]. The core mechanism involves:
+1.  **Coordinate Mapping**: Defining a grid resolution (number of cells per axis) and a bounding box (origin and extent) [G]. A world coordinate $x$ is mapped to a grid index $idx$ via:
+    $$ idx = \lfloor \frac{x - origin}{voxel\_size} \rfloor $$
+    where $voxel\_size$ is the physical dimension of a voxel [S1, unofficial][S3].
+2.  **Occupancy Determination**: Evaluating whether a specific voxel cell intersects with, contains, or is influenced by the input primitive [G]. This evaluation varies by method, such as subdivision, ray casting, or binvox algorithms [S1, unofficial].
+3.  **Attribute Assignment**: Storing data in the voxel [G]. This may include occupancy flags, density, or color/normal attributes derived from the source geometry or simulation [S12].
 
 ## Subtopics
 
 ### [Interior Voxelize](995-interior-voxelize.md)
-Determines occupancy by sampling points inside the grid and testing containment against the mesh. It differs from ray-casting methods by using deterministic point queries rather than ray intersections. Choose it for robust binary occupancy of closed meshes.
+Interior Voxelize determines the occupancy status of a voxel grid by sampling discrete points within the grid volume and testing whether each point lies inside the input mesh. It differs from its siblings [Ray-Cast Style Voxel Filling](1502-ray-cast-style-voxel-filling.md) and [Front/Back Face Flagging](1506-front-back-face-flagging.md) by relying on direct point containment queries rather than deterministic ray intersections or surface normal orientation flags. This method is distinct from [Stochastic Ray-Casting Voxelization](1067-stochastic-ray-casting-voxelization.md) because it uses a fixed grid of sample points rather than randomized ray directions, making it deterministic for a given grid resolution.
 
 ### [Shell-based Voxelization](1748-shell-based-voxelization.md)
-Marks voxels within a specified radius of any primitive. It serves as a pre-processing step to define the spatial support for boundary operations. Choose it when a thickened boundary is required for subsequent filtering or simulation.
+Shell-based Voxelization identifies and marks all voxels in a grid that lie within a specified shell radius of any primitive (triangle or polygon) in a mesh. It serves to determine the spatial support for subsequent voxelization operations.
 
 ### [Velocity Voxelization](3082-velocity-voxelization.md)
-Computes instantaneous velocity at grid cells by interpolating vertex velocities across triangle-slice intersections. It differs from static voxelization by outputting vector fields for fluid simulation. Choose it for dynamic meshes where boundary conditions for fluid solvers are needed.
+Velocity Voxelization computes the instantaneous velocity of an obstacle at each grid cell containing part of the obstacle's boundary, producing a velocity field for fluid simulation. It differs from standard occupancy voxelization by explicitly interpolating vertex velocities across the intersection segments of mesh triangles and grid slices, outputting thickened quads to populate the velocity attributes of the volume. It is best suited for watertight closed meshes to ensure consistent front/back face handling.
 
 ### [Anisotropic Voxelization](4331-anisotropic-voxelization.md)
-Stores directional data (normals/radiance) in six separate grids (one per face) to preserve directionality. It differs from isotropic averaging by preventing normal cancellation in thin models. Choose it for rendering thin surfaces (cloth, leaves) to reduce light leaking.
+Anisotropic voxelization improves rendering quality by storing directional data (such as surface normals or radiance) in separate grids for each of the six faces of a voxel cube, rather than averaging them into a single isotropic value. This method specifically addresses the cancellation of opposing surface normals in thin models (e.g., cloth) and reduces light leaking, where isotropic voxels incorrectly illuminate surfaces facing away from light sources. It builds on the coordinate mapping and occupancy determination from [Voxelization](12-voxelization.md).
 
 ### [Box-filtering Density Estimation](5987-box-filtering-density-estimation.md)
-Transforms binary slicemaps into density by downsampling and counting filled voxels. Choose it for converting sharp binary masks into smooth density fields for volume rendering.
+Box-filtering density estimation transforms a binary slicemap into a density representation by filtering and downsampling, where each voxel stores the count of filled voxels from the original grid. It sets itself apart from sibling methods like Kernel Density Estimation by using exact integer arithmetic on binary slicemaps rather than probabilistic or smoothed field approximations, prioritizing speed over smoothness.
 
 ### [Volume Density Stretching](8033-volume-density-stretching.md)
-Adjusts density based on deformation to simulate mass conservation. Choose it for deformable particle systems or soft bodies where density changes with volume expansion/compression.
+Volume Density Stretching adjusts voxel density values based on geometric deformation to simulate mass conservation, ensuring that density decreases when material is stretched over a greater distance. Unlike standard voxelization which returns constant density values regardless of local volume expansion, this method ensures that thinner regions appear denser and thicker regions appear less dense, correcting the optical thickness artifact where uniform density makes thicker parts block more light than intended.
 
 ### [Multi-pattern Volumetric Construction via Voxel Multiplication](8874-multi-pattern-volumetric-construction-via-voxel-multiplicati.md)
-Creates cross-sectional images by intersecting projection axes from voxel to original 2D patterns. Choose it for reconstructing 3D structures from multiple 2D patterned projections.
+This method constructs a 3D voxel grid that projects multiple distinct 2D patterns along different axes by calculating voxel values as the product of the pixel values from those patterns at their respective projection intersections. It differs from additive accumulation methods (e.g., [Box-filtering Density Estimation](5987-box-filtering-density-estimation.md)) by using multiplicative encoding, which allows independent pattern recognition along orthogonal views but introduces background noise interference.
 
 ### [Coverage Factor Voxelization](9079-coverage-factor-voxelization.md)
-Computes a scalar coverage factor (percentage of voxel covered) derived from binary solid voxelization. Choose it for anti-aliased volume rendering or precise volume fraction calculations in multiphase flows.
+Coverage Factor Voxelization computes a scalar-valued voxelization where each voxel stores the percentage of its volume covered by the input object, derived from a finer-resolution binary solid voxelization. It differs from sibling methods like [Interior Voxelize](995-interior-voxelize.md) by providing continuous density estimates rather than binary occupancy, leveraging an octree structure to achieve 64x supersampling efficiency.
 
 ### RGB-Alpha Volume Formation
-Forms an RGB-Alpha volume from raw data by mapping values to opacity and color.
+#### definition
+- [S1, unofficial] The process of forming an RGB-Alpha volume from raw data, which is a 3D four-vector data set where the first three components are R, G, and B color components and the last component, Alpha, represents opacity.
+#### step
+- [S1, unofficial] Map data values to opacity values to act as a classification of the data.
+- [S1, unofficial] Place an opaque background behind the RGB-Alpha volume.
+#### parameter
+- [S1, unofficial] Alpha value: 0 means totally transparent, 1 means totally opaque.
 
 ### Size Volume Computation
-Creates a size volume using scale-space computation, scale detection, and back projection for transfer functions.
+#### definition
+- [S2, unofficial] A three-step method to create a size volume S from an input volume, used as a tertiary attribute for transfer functions.
+#### step
+- [S2, unofficial] Perform scale-space computation using anisotropic diffusion to create the scale space with better localization.
+- [S2, unofficial] Perform scale detection using the classical normalized Laplacian kernel to detect blobs as local maxima both in spatial and scale domains.
+- [S2, unofficial] Perform back projection utilizing Shepard's interpolation with Wendland polynomials for the detected blob tuple (x, y, z, t).
+- [S2, unofficial] For each voxel, keep only the largest size value if it is part of features with multiple sizes, masking out smaller features.
+#### pitfall
+- [S2, unofficial] Smaller features get masked out by larger ones. To avoid this, allow the user to specify an intensity range to compute a scale space specifically for that range.
 
-### RGB-Alpha Volume Formation
-- **Definition**: The process of forming an RGB-Alpha volume from raw data, which is a 3D four-vector data set where the first three components are R, G, and B color components and the last component, Alpha, represents opacity [S1, unofficial].
-- **Steps**: Map data values to opacity values to act as a classification of the data one is interested in. Place an opaque background behind the RGB-Alpha volume [S1, unofficial].
-- **Parameters**: Alpha value: 0 means totally transparent, 1 means totally opaque [S1, unofficial].
-
-### Size Volume Computation
-- **Definition**: A three-step method to create a size volume $S$ from an input volume, used as a tertiary attribute for transfer functions [S2, unofficial].
-- **Steps**:
-    1. Perform scale-space computation using anisotropic diffusion to create the scale space with better localization [S2, unofficial].
-    2. Perform scale detection using the classical normalized Laplacian kernel to detect blobs as local maxima both in spatial and scale domains [S2, unofficial].
-    3. Perform back projection utilizing Shepard's interpolation with Wendland polynomials for the detected blob tuple $(x, y, z, t)$ [S2, unofficial].
-    4. For each voxel, keep only the largest size value if it is part of features with multiple sizes, masking out smaller features [S2, unofficial].
-- **Pitfalls**: Smaller features get masked out by larger ones. To avoid this, allow the user to specify an intensity range to compute a scale space specifically for that range [S2, unofficial].
+### Unbiased Photon Plane/Volume Estimation
+#### definition
+- [S3] A method by Bitterli and Jarosz [5] that extends density estimation to higher-dimensional expressions (photon plane, photon volume) and uses a zero-order estimator to achieve unbiased results.
+#### pitfall
+- [S3] Estimators suffer from singularities and require at least two bounces in the medium past any surface, leaving remaining transport to other techniques.
 
 ## Background
-Volume rendering techniques have been developed to visualize sampled functions of 3D data by computing 2D projections of a colored semitransparent volume [S1, unofficial]. The process typically involves forming an RGB-Alpha volume from raw data (such as cloud points, slide data, or surface data), reconstructing a continuous function, and projecting it onto a 2D viewing plane [S1, unofficial]. Medical imaging, including MRI and neuroscience data, often requires these techniques to visualize internal structures that are not accessible via surface rendering alone [S1, unofficial]. Advanced methods like size-based transfer functions use scale-space analysis to enhance the visualization of features with varying sizes, such as in brain MRI analysis [S2, unofficial].
+Volume rendering is a technique for visualizing sampled functions of 3D data by computing 2D projections of a colored semitransparent volume. It involves the forming of an RGB-Alpha volume from the data, reconstruction of a continuous function from this discrete data set, and projecting it onto the 2D viewing plane [S1, unofficial]. Raw datasets for medical purposes include cloud point data, slide data (e.g., MRI nii files), and surface data, which require special techniques and transfer functions to transform them into RGB-Alpha dataset modalities [S1, unofficial].
+
+Size-based transfer functions were proposed by Correa and Ma [14], who suggested a three-step method to create a size volume S from an input volume using scale-space computation, scale detection, and back projection [S2, unofficial]. Occlusion information computation was also suggested by Correa and Ma [15], using an extended ambient occlusion metric [S2, unofficial].
+
+In the context of participating media, recent work by Bitterli and Jarosz [5] improved convergence by extending to higher-dimensional expressions like photon planes and photon volumes, achieving unbiased results using a zero-order estimator [S3]. However, these estimators suffer from singularities and require at least two bounces in the medium past any surface [S3].
 
 ## Sources
 [S1] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)
 [S2] MULTIVARIATE TRANSFER FUNCTION DESIGN, https://www.sci.utah.edu/~lzhou/dissertation_final_zhoul.pdf, fetched 2026-10-27 (unofficial)
+[S3] A survey on rendering homogeneous participating media, https://doi.org/10.1007/s41095-021-0249-1, fetched 2026-10-26

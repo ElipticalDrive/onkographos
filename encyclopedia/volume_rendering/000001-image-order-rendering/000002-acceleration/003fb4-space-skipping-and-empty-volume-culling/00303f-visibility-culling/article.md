@@ -2,7 +2,7 @@
 
 
 ## Overview
-Visibility Culling is a family of acceleration techniques in volume rendering that reduces computational cost by identifying and skipping voxels, sub-volumes, or rays that do not contribute to the final image due to occlusion, emptiness, or view constraints [S1, unofficial][S2][S4, unofficial]. It solves the problem of redundant processing in dense or sparse volumes by bypassing work units that are either geometrically outside the view, hidden behind opaque surfaces, or radiometrically negligible [S1, S6, unofficial]. What sets this family apart from its siblings is its broad scope: while [Parallel Ray Casting with Segment Lists](2565-parallel-ray-casting-with-segment-lists.md) focuses on data structure traversal and [SparseLeap Ray-Casting with Occupancy Misses](9818-sparseleap-ray-casting-with-occupancy-misses.md) on sparse grid optimization, Visibility Culling encompasses diverse strategies ranging from screen-space occlusion maps and probabilistic tests to global frame-budget cancellation, often operating at the pixel or tile level rather than just the voxel level.
+Visibility Culling is a family of acceleration techniques in volume rendering that reduces computational cost by identifying and skipping voxels, primitives, or ray segments that do not contribute to the final image [S2][S4, S5]. It solves the problem of redundant processing in sparse or occluded volumes by modifying the standard front-to-back compositing loop to introduce early termination, spatial skipping, or geometric pre-filtering [S1, S6, unofficial]. What sets this family apart from its siblings is its broad scope: while [Parallel Ray Casting with Segment Lists](2565-parallel-ray-casting-with-segment-lists.md) focuses on data structure optimization for traversal, and [SparseLeap Ray-Casting with Occupancy Misses](9818-sparseleap-ray-casting-with-occupancy-misses.md) leverages hardware acceleration for sparse grids, Visibility Culling encompasses diverse strategies ranging from opacity-based early termination to screen-space feedback and probabilistic error tolerance [S1, S2, S6, unofficial].
 
 ## Shared principles
 The core mechanism shared by all methods in this family is the reduction of work units (samples, voxels, or pixels) processed per frame while maintaining acceptable visual fidelity [G]. This is achieved through three primary strategies:
@@ -21,78 +21,45 @@ by introducing conditions that break the loop early, skip iterations, or reduce 
 Occlusion Clipping with Orthogonal Opacity Map is an acceleration technique for texture-based volume rendering that skips occluded voxels by creating a low-resolution opacity map on a plane orthogonal to a major dataset axis. It solves the problem of inefficient per-voxel occlusion testing in texture-based rendering by operating at the sub-volume level, culling fully hidden sub-volumes and clipping partially hidden ones. Unlike early ray termination which tests occlusion per-voxel, this method tests occlusion at the sub-volume level, which is more efficient for texture-based rendering where primitives contain thousands of voxels. It differs from hierarchical approaches like [Hidden Volume Removal using Hierarchical Occlusion Maps](2624-hidden-volume-removal-using-hierarchical-occlusion-maps.md) by using a fixed-resolution, multi-pass averaging strategy rather than a tree structure, and it complements [Acceleration](18-acceleration.md) by being more effective when there are many non-empty voxels and significant occlusion.
 
 ### [Early Termination and Probabilistic Path Control](1791-early-termination-and-probabilistic-path-control.md)
-Early Termination and Probabilistic Path Control are visibility culling techniques that reduce computational cost by halting the ray-marching integration loop when the accumulated contribution to the final pixel becomes negligible. Unlike siblings such as [Empty-space skipping](1002-empty-space-skipping.md) which bypasses empty regions, or [Bounding Volume Culling](1239-bounding-volume-culling.md) which uses geometric bounds, this family terminates rays based on radiometric accumulation (opacity/transmittance) or statistical weight. It distinguishes itself from deterministic threshold methods by offering an unbiased alternative via probabilistic survival checks.
+Early Termination and Probabilistic Path Control are visibility culling techniques that reduce computational cost by halting ray traversal when further samples contribute negligibly to the final pixel color. Unlike [Empty-space skipping](1002-empty-space-skipping.md), which bypasses transparent regions entirely, these methods actively sample until a radiometric threshold (opacity or transmittance) is met, or probabilistically terminate paths to maintain unbiasedness. They differ from [Bounding Volume Culling](1239-bounding-volume-culling.md) by using material properties rather than geometric extent to decide when to stop.
 
 ### [Probabilistic Culling](2833-probabilistic-culling.md)
-Probabilistic culling is a rendering optimization that intentionally allows false-negatives in intersection tests to reduce duplicated fragments and rendering time, particularly in high-throughput scenarios like Virtual Reality (VR). It sets itself apart from conservative culling methods (such as its sibling [Occlusion Clipping with Orthogonal Opacity Map](990-occlusion-clipping-with-orthogonal-opacity-map.md)) by trading strict geometric accuracy for significant performance gains, justified by the fact that the resulting visual artifacts are virtually indistinguishable from correct renderings.
+Probabilistic Culling is a rendering optimization that intentionally allows false-negatives in intersection tests to reduce duplicated fragments and rendering time, particularly in high-resolution or virtual reality contexts. It sets itself apart from conservative culling methods (like [Occlusion Clipping with Orthogonal Opacity Map](990-occlusion-clipping-with-orthogonal-opacity-map.md)) by trading strict geometric accuracy for performance, relying on the fact that the resulting visual artifacts are imperceptible to the human eye.
 
 ### [Visibility Feedback with Screen Space Subdivision](3439-visibility-feedback-with-screen-space-subdivision.md)
-Visibility Feedback with Screen Space Subdivision is an out-of-core volume rendering optimization that uses visibility information gathered during the current frame to prevent the loading and refinement of occluded data in subsequent frames. Unlike standard early ray termination, which only reduces computation after data has already been loaded into the working set, this method integrates visibility feedback into the data loader to optimize GPU memory and bandwidth usage. It distinguishes itself from sibling methods by combining occlusion queries with a screen-space subdivision strategy to interleave query processing with rasterization, thereby reducing the latency inherent in asynchronous GPU occlusion queries.
+Visibility Feedback with Screen Space Subdivision is an out-of-core volume rendering optimization that uses visibility information gathered during the current frame to prevent the loading and refinement of occluded data in subsequent frames. Unlike standard early ray termination, which only skips computation after data has already been loaded into the GPU working set, this method feeds visibility results back to the loader to reduce GPU memory usage and bandwidth. It distinguishes itself from sibling methods by combining occlusion queries with a screen-space subdivision strategy to interleave query processing with rasterization, thereby hiding the latency inherent in asynchronous occlusion query results.
 
 ### [Adaptive Multi-Step Empty Voxel Skipping](6289-adaptive-multi-step-empty-voxel-skipping.md)
-Adaptive Multi-Step Empty Voxel Skipping is an acceleration technique for direct volume rendering that combines space-leaping (empty voxel skipping) with adaptive variable-step sampling to reduce redundant computation in sparse regions. Unlike traditional ray-casting which uses fixed equidistant sampling, this method detects empty regions to skip them entirely and adjusts the step length based on local voxel density, thereby lowering computational overhead while maintaining visual fidelity comparable to the original unaccelerated rendering. It builds on the principles of [Visibility Culling](6226-visibility-culling.md) by explicitly culling empty space and adapting computational effort.
+Adaptive Multi-Step Empty Voxel Skipping is an acceleration technique for direct volume rendering that combines space leaping (empty voxel skipping) with adaptive variable step-length sampling to reduce redundant computation in sparse regions. It distinguishes itself from standard ray casting by dynamically adjusting the integration step size based on local voxel density and explicitly bypassing empty space, whereas siblings like [Occlusion Clipping with Orthogonal Opacity Map](990-occlusion-clipping-with-orthogonal-opacity-map.md) rely on precomputed opacity maps and [Early Termination and Probabilistic Path Control](1791-early-termination-and-probabilistic-path-control.md) rely on transmittance thresholds for termination rather than spatial skipping.
+
+### [24-Region View-Dependent Visibility Preprocessing](6608-24-region-view-dependent-visibility-preprocessing.md)
+A preprocessing technique that decomposes the domain of viewing directions into 24 regions on a directional cube to extract a lower number of potentially visible voxels compared to the standard 6-region decomposition, improving extraction rate and rendering speed. It sets itself apart from [Occlusion Clipping with Orthogonal Opacity Map](990-occlusion-clipping-with-orthogonal-opacity-map.md) by using a directional decomposition strategy rather than orthogonal projection maps, and from [Adaptive Multi-Step Empty Voxel Skipping](6289-adaptive-multi-step-empty-voxel-skipping.md) by focusing on surface boundary extraction rather than empty space traversal.
 
 ### [Frustum Culling](8463-frustum-culling.md)
-Frustum culling is a visibility culling technique that avoids rendering geometry located outside the camera's field of view, thereby eliminating unnecessary computation. It distinguishes itself from occlusion culling by relying solely on geometric containment relative to the viewing frustum planes, rather than depth-buffered visibility tests. It serves as a coarse-grained filter, often preceding more expensive fine-grained culling methods.
+Frustum culling is a visibility culling technique that avoids rendering geometry or evaluating volume samples that lie outside the camera's field of view, thereby eliminating unnecessary computation. It is distinguished from its siblings by operating on the geometric relationship between the viewing frustum and scene primitives (bounding volumes, voxels, or points) rather than on opacity, occlusion, or probabilistic error estimates. Unlike [Occlusion Clipping with Orthogonal Opacity Map](990-occlusion-clipping-with-orthogonal-opacity-map.md) which uses depth/opacity buffers, or [Early Termination and Probabilistic Path Control](1791-early-termination-and-probabilistic-path-control.md) which relies on transmittance, frustum culling is a purely geometric pre-filter.
 
 ### [Interactive Render Quality Estimation & Cancellation](8895-interactive-render-quality-estimation-cancellation.md)
-This method prevents infinite rendering loops in interactive volume visualization by detecting when the rendering pipeline cannot keep up with the frame budget and forcing a quality reduction. It operates by checking a cancellation flag after octree traversal; if set, it bypasses the expensive rendering loop and returns a lower-quality estimate based on a configurable point threshold. It differs from [Early Termination and Probabolic Path Control](1791-early-termination-and-probabilistic-path-control.md) by acting as a global system-level safeguard against stalls rather than a per-ray or per-voxel optimization, and from [Visibility Culling](6226-visibility-culling.md) siblings by explicitly trading visual fidelity for stability when the renderer is overwhelmed.
+This method prevents infinite rendering loops and maintains interactivity in large-scale volume rendering by detecting when a frame cannot be completed within a time budget and immediately falling back to a lower-quality estimate. It sets apart from sibling methods like [Early Termination and Probabilistic Path Control](1791-early-termination-and-probabilistic-path-control.md) by explicitly managing the *rendering state machine* across frames rather than just terminating a single ray, ensuring the viewer sees *something* plausible rather than a frozen or black screen. It works in conjunction with [Visibility Culling](6226-visibility-culling.md) to reduce the workload before the cancellation check is even triggered.
 
-#### Screen Regions
-
-### definition
+### Screen Regions
 - [S1, unofficial] An optimization dividing image space into equal-sized squares of n x n pixels to reduce overhead from per-pixel visibility testing. If a screen region is full, rasterization skips to the next boundary.
-
-### number
 - [S1, unofficial] Screen regions save another 3 percent of overall rendering time on average.
 
-#### Visibility Culling via Scalar Range Lookup Table
-
-### definition
+### Visibility Culling via Scalar Range Lookup Table
 - [S2] A GPU-based visibility test using a 2*D* Boolean lookup table to cull cells that do not intersect the transfer function's opacity range, reducing load on the rendering stage.
-
-### step
 - [S2] Geometry shader computes the minimum and maximum of the 8 cell corner values. These two values are used as table lookup indices to fetch a visibility value. If the cell is deemed visible, the geometry shader instantiates its 6 faces.
-
-### parameter
 - [S2] Visibility Lookup Table: A 2*D* table where D is the number of scalar value bins. For each pair of values s1 and s2, the table holds 1 if there exists at least an opacity which is non-zero for scalar values in [s1, s2], otherwise 0.
-
-### number
 - [S2] On a PC with two Xeon E5345 processors, 4GB memory, GeForce 8800 GTX (768MB), using the 'meteorite' dataset (2,377,878 cells), removing the look-up table drops performance to <1 fps (specifically 0.76 fps). Adding the look-up table increases framerate to ~3.48 fps.
 - [S2] Adding the hybrid CPU-GPU mesh traversal mechanism to the look-up table optimization increases the framerate to 3.62 fps.
 
-#### 24-Region View-Dependent Visibility Preprocessing
-
-### definition
-- [S3, unofficial] A preprocessing technique that decomposes the domain of viewing directions into 24 regions on a directional cube to extract a lower number of potentially visible voxels compared to the standard 6-region decomposition, improving extraction rate and rendering speed.
-
-### step
-- [S3, unofficial] Decompose the viewing direction domain into 24 regions based on the signs of the x and y components, assuming the principal component of the viewing direction is the z coordinate.
-- [S3, unofficial] Perform preprocessing for all 24 regions. During rendering, select the appropriate precomputed data structure based on the current viewing direction.
-
-### formula
-- [S3, unofficial] The visibility function $v(i, j, k)$ for the case where x and y components are positive is defined as: $v(i, j, k) = 1$ if $k = 0$ or $\exists l, m \text{ s.t. } i - 1 \leq l \leq i, j - 1 \leq m \leq j, v(l, m, k - 1) = 1, b(l, m, k - 1) = 0$; otherwise 0. This checks only four voxels that could hide the current voxel.
-
-### number
-- [S3, unofficial] On a low resolution dataset, decomposing into 24 regions extracts 1.8% of voxels, compared to 3.4% for 6 regions. On a high resolution volume, it extracts 0.9% compared to 1.8% for 6 regions.
-
-#### Visible Zone Algorithm
-
-### definition
-- [S4, unofficial] A conservative visibility computation algorithm with incremental updates, developed by Hall-Holt and Rusinkiewicz [58].
-
-### number
-- [S4, unofficial] Able to achieve real-time frame rates for 2D and 2.5D datasets.
+### Visible Zone Algorithm
+- [S3, unofficial] A conservative visibility computation algorithm with incremental updates, developed by Hall-Holt and Rusinkiewicz [58].
+- [S3, unofficial] Able to achieve real-time frame rates for 2D and 2.5D datasets.
 
 ## Background
-Visibility culling in volume rendering has evolved from simple geometric checks to complex, view-dependent, and probabilistic strategies. Early methods focused on geometric containment, such as Frustum Culling, which is a standard coarse-grained filter in graphics pipelines [S2][S4, unofficial]. More specialized techniques emerged to address the specific challenges of volume data, such as the high cost of ray traversal in sparse datasets. The "Visible Zone Algorithm" by Hall-Holt and Rusinkiewicz provided a conservative visibility computation with incremental updates, achieving real-time frame rates for 2D and 2.5D datasets [S4, unofficial].
-
-In the context of texture-based and cell-based rendering, occlusion culling became prominent. The "Occlusion Clipping with Orthogonal Opacity Map" technique addressed the inefficiency of per-voxel occlusion testing by operating at the sub-volume level, using a low-resolution opacity map orthogonal to the viewing direction [S1, unofficial]. Similarly, "Visibility Culling via Scalar Range Lookup Table" leveraged GPU hardware to cull cells based on transfer function opacity ranges, significantly boosting performance for AMR datasets [S2].
-
-View-dependent preprocessing also played a key role, with methods like "24-Region View-Dependent Visibility Preprocessing" decomposing the viewing direction domain to extract fewer potentially visible voxels compared to standard 6-region decompositions [S3, unofficial]. More recently, out-of-core rendering has integrated visibility feedback, using screen-space subdivision and occlusion queries to manage memory bandwidth and loading latency [S1, unofficial]. Additionally, interactive visualization has introduced global safeguards like "Interactive Render Quality Estimation & Cancellation" to prevent stalls by trading fidelity for stability [S1, unofficial]. Probabilistic methods have also been adapted for high-throughput scenarios like VR, trading strict accuracy for performance gains [S2].
+Visibility culling in volume rendering has evolved from simple geometric checks to complex, view-dependent, and feedback-driven mechanisms. Early approaches focused on reducing the overhead of per-pixel visibility tests by grouping pixels into screen regions, which saved approximately 3% of rendering time [S1, unofficial]. As datasets grew larger, techniques like the Visible Zone Algorithm were developed to provide conservative visibility with incremental updates, enabling real-time frame rates for 2D and 2.5D datasets [S3, unofficial]. The advent of GPU-based rendering introduced scalar range lookup tables, which significantly improved performance for AMR datasets by culling cells based on transfer function opacity ranges [S2]. More recent methods incorporate screen-space feedback and probabilistic culling to handle out-of-core rendering and high-resolution VR contexts, balancing visual fidelity with performance constraints [S1, unofficial][S2].
 
 ## Sources
 [S1] (PDF) Cell-Based First-Hit Ray Casting - ResearchGate, https://www.researchgate.net/publication/2521319_Cell-Based_First-Hit_Ray_Casting, fetched 2026-10-27 (unofficial)
 [S2] High-Quality, Semi-Analytical Volume Rendering for AMR ..., https://people.freedesktop.org/~marcheu/vis09-amr.pdf, fetched 2026-10-26
-[S3] Interactive Volume-Rendering Techniques for Medical Data Visualization, https://doi.org/10.2312/diss.20018138, fetched 2026-10-26 (unofficial)
-[S4] New Techniques for Out-Of-Core Visualization of Large Datasets, https://ctsilva.github.io/thesis/wagner-correa-thesis.pdf, fetched 2026-10-30 (unofficial)
+[S3] New Techniques for Out-Of-Core Visualization of Large Datasets, https://ctsilva.github.io/thesis/wagner-correa-thesis.pdf, fetched 2026-10-30 (unofficial)

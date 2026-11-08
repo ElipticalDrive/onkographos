@@ -3,134 +3,108 @@
 Also called: Color Calibration, Exposure and Sensor Bias Estimation, Gain and Bias Calibration, Response Curve Optimization
 
 ## Overview
-Radiometric Self-Calibration optimizes per-camera and per-channel radiometric parameters (gain and bias) during the reconstruction process to correct for photometric errors and intensity mismatches between cameras [S1, S2]. It addresses the problem where geometrically calibrated cameras still produce inconsistent pixel values for the same radiance due to sensor differences or lighting variations [S2]. Unlike [Color Volume Optimization and Density Initialization](842-color-volume-optimization-and-density-initialization.md) which adjusts volume properties, this method adjusts the observation model [S2]. It typically improves reconstruction quality by approximately 1 dB [S1].
+Radiometric Self-Calibration optimizes radiometric parameters, specifically exposure and sensor bias, during volume reconstruction to correct for photometric errors arising from uncalibrated camera sensors or inconsistent lighting [S1, S2]. It differs from geometric self-calibration by focusing on intensity mapping rather than spatial pose, and from simple color correction by learning these parameters jointly with the volume representation [S1, S2].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Ground truth images $I_{\text{gt}}$, camera poses, volume representation (e.g., neural field or voxel grid), and initial volume color estimates $I_{\text{rgb}}(\mathbf{p})$ and opacity $I_\alpha(\mathbf{p})$ for each pixel $\mathbf{p}$ [S2].
-*   **Outputs:** Optimized per-camera, per-channel gain $g$ and bias $b$, and optionally a static background image $I_{\text{rgb}}^{(\text{bg})}$ [S2].
+*   **Inputs:** Training images $\{I_{\text{rgb}}^{(k)}\}$, camera poses, and an initial volume representation (e.g., neural radiance field or voxel grid).
+*   **Outputs:** Optimized volume parameters, per-camera gain $g$, per-camera bias $b$, and optionally per-camera background images $I_{\text{rgb}}^{(\text{bg})}$ [S2].
 
 **Data Structures:**
-*   **Gain/Bias Parameters:** A tensor of shape $(N_{\text{cameras}}, N_{\text{channels}})$ storing learnable parameters $g$ and $b$ [S2].
-*   **Background Image (Optional):** A static RGB image tensor $I_{\text{rgb}}^{(\text{bg})}$ of resolution matching the camera sensor, stored as a learnable parameter [S2].
+*   **Per-camera parameters:** For each camera $k$, store a gain scalar $g_k$ and a bias scalar $b_k$ (or vectors per color channel) [S2].
+*   **Background images:** Optional static per-camera RGB images $I_{\text{rgb}}^{(\text{bg})}$ [S2].
 
 **Steps:**
-1.  **Initialize:** Initialize gain $g$ to 1.0 and bias $b$ to 0.0 for all cameras and channels [G].
-2.  **Raymarch:** For each camera view, raymarch through the volume to compute the accumulated volume color $I_{\text{rgb}}(\mathbf{p})$ and opacity $I_\alpha(\mathbf{p})$ for each pixel $\mathbf{p}$ [S2].
-3.  **Apply Radiometric Transform:** Apply the per-camera, per-channel gain and bias to the volume color:
-    $$ I'_{\text{rgb}}(\mathbf{p}) = g \cdot I_{\text{rgb}}(\mathbf{p}) + b $$
-    [S2]
-4.  **Merge Background (Optional):** If background estimation is enabled, blend the transformed volume color with the static background image based on the volume's opacity:
-    $$ \widehat{I}_{\text{rgb}}(\mathbf{p}) = (1 - I_\alpha(\mathbf{p})) I_{\text{rgb}}^{(\text{bg})}(\mathbf{p}) + I'_{\text{rgb}}(\mathbf{p}) $$
-    [S2]
-5.  **Compute Loss:** Calculate the photometric loss (e.g., L2) between the rendered image $\widehat{I}_{\text{rgb}}(\mathbf{p})$ and the ground truth image $I_{\text{gt}}(\mathbf{p})$ [S2].
-6.  **Optimize:** Update the gain $g$, bias $b$, and optionally the background image $I_{\text{rgb}}^{(\text{bg})}$ using gradient descent [S2].
+1.  **Initialize:** Set initial values for gain $g=1$ and bias $b=0$ for all cameras [S2]. Initialize background images if used [S2].
+2.  **Ray Marching:** For each training view, ray march through the volume to compute the accumulated color $I_{\text{rgb}}(\mathbf{p})$ and opacity $I_\alpha(\mathbf{p})$ for each pixel $\mathbf{p}$ [S2].
+3.  **Radiometric Correction:** Apply the per-camera gain and bias to the accumulated volume color:
+    $$ I_{\text{corrected}}(\mathbf{p}) = g I_{\text{rgb}}(\mathbf{p}) + b $$
+    [S2].
+4.  **Background Merging (Optional):** If background estimation is enabled, blend the corrected volume color with the static background image based on the exiting opacity:
+    $$ \widehat{I}_{\text{rgb}}(\mathbf{p}) = (1 - I_\alpha(\mathbf{p})) I_{\text{rgb}}^{(\text{bg})}(\mathbf{p}) + I_{\text{corrected}}(\mathbf{p}) $$
+    [S2].
+5.  **Loss Computation:** Compute the photometric loss between the final rendered image $\widehat{I}_{\text{rgb}}(\mathbf{p})$ and the ground truth training image [S2].
+6.  **Optimization:** Update volume parameters, gain $g$, bias $b$, and background images using an optimizer (e.g., Adam) [S2].
 
 **Parameters:**
-*   **Learning Rate for Gain/Bias:** $10^{-3}$ [S2].
-*   **Learning Rate for Background Image:** $10^{-1}$ [S2].
-*   **Response Curve Optimization:** Can be enabled to further improve quality, though specific implementation details are not provided in the sources [S1].
+*   **Learning Rate for $g, b$:** $10^{-3}$ [S2].
+*   **Learning Rate for Background Images:** $10^{-1}$ [S2].
+*   **Response Curve Optimization:** Can be enabled to further improve quality, though specific functional form is not detailed in the provided notes [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def radiometric_self_calibration(volume_model, cameras, gt_images, 
-                                 use_background=False, 
-                                 lr_gain_bias=1e-3, 
-                                 lr_background=1e-1,
-                                 num_iterations=500000):
-    # Initialize learnable parameters
-    # g: (num_cameras, num_channels), b: (num_cameras, num_channels)
-    g = [1.0] * len(cameras)
-    b = [0.0] * len(cameras)
+def radiometric_self_calibration(volume_model, training_data, num_iterations=500000):
+    # Initialize per-camera gain and bias
+    gains = {cam_id: 1.0 for cam_id in training_data.cameras}
+    biases = {cam_id: 0.0 for cam_id in training_data.cameras}
     
-    if use_background:
-        # bg_images: (num_cameras, H, W, num_channels)
-        bg_images = [[0.0] * (H * W * 3) for _ in range(len(cameras))]
-        optimizer_bg = AdamOptimizer(bg_images, lr=lr_background)
-    
-    optimizer_gb = AdamOptimizer([g, b], lr=lr_gain_bias)
+    # Optional: Initialize background images
+    backgrounds = {cam_id: None for cam_id in training_data.cameras}
+    if use_background_estimation:
+        for cam_id in training_data.cameras:
+            backgrounds[cam_id] = torch.zeros_like(training_data.images[cam_id])
+            
+    optimizer = Adam([
+        {'params': volume_model.parameters(), 'lr': 1e-4},
+        {'params': list(gains.values()), 'lr': 1e-3},
+        {'params': list(biases.values()), 'lr': 1e-3},
+        {'params': list(backgrounds.values()), 'lr': 1e-1}
+    ])
     
     for iteration in range(num_iterations):
-        optimizer_gb.zero_grad()
-        if use_background:
-            optimizer_bg.zero_grad()
-            
-        total_loss = 0.0
+        # Sample a batch of views
+        batch = sample_batch(training_data, batch_size=16)
         
-        for camera, gt_image in zip(cameras, gt_images):
-            # 1. Raymarch to get volume color and opacity
-            volume_color, opacity = volume_model.raymarch(camera)
+        total_loss = 0
+        for cam_id, gt_image in batch:
+            # Ray march to get volume color and opacity
+            volume_color, opacity = volume_model.ray_march(cam_id)
             
-            # 2. Apply gain and bias
-            cam_idx = camera.id
-            transformed_color = [g[cam_idx][c] * volume_color[c] + b[cam_idx][c] for c in range(len(volume_color))]
+            # Apply gain and bias
+            corrected_color = gains[cam_id] * volume_color + biases[cam_id]
             
-            # 3. Merge with background if enabled
-            if use_background:
-                bg = bg_images[cam_idx]
-                rendered = [(1.0 - opacity[c]) * bg[c] + transformed_color[c] for c in range(len(volume_color))]
+            # Merge with background if enabled
+            if use_background_estimation and backgrounds[cam_id] is not None:
+                bg_image = backgrounds[cam_id]
+                rendered_image = (1 - opacity) * bg_image + corrected_color
             else:
-                rendered = transformed_color
+                rendered_image = corrected_color
                 
-            # 4. Compute loss (L2)
-            loss = sum((rendered[c] - gt_image[c])**2 for c in range(len(rendered))) / len(rendered)
+            # Compute loss
+            loss = mse_loss(rendered_image, gt_image)
             total_loss += loss
             
-        # 5. Backpropagation and parameter update
-        gradients = compute_gradients(total_loss)
-        optimizer_gb.step(gradients)
-        if use_background:
-            optimizer_bg.step(gradients)
-            
-    return g, b, bg_images if use_background else None
-
-class AdamOptimizer:
-    def __init__(self, params, lr):
-        self.params = params
-        self.lr = lr
-        self.t = 0
-        self.m = {id(p): 0.0 for p in params}
-        self.v = {id(p): 0.0 for p in params}
-    def zero_grad(self):
-        for p in self.params:
-            if hasattr(p, 'grad'): p.grad = 0
-    def step(self, grads):
-        self.t += 1
-        beta1, beta2, eps = 0.9, 0.999, 1e-8
-        for i, p in enumerate(self.params):
-            g = grads[i] if isinstance(grads, list) else grads
-            self.m[id(p)] = beta1 * self.m[id(p)] + (1 - beta1) * g
-            self.v[id(p)] = beta2 * self.v[id(p)] + (1 - beta2) * g**2
-            m_hat = self.m[id(p)] / (1 - beta1**self.t)
-            v_hat = self.v[id(p)] / (1 - beta2**self.t)
-            p = p - self.lr * m_hat / (v_hat**0.5 + eps)
-
-def compute_gradients(loss):
-    # Standard automatic differentiation step [G]
-    return [p.grad for p in loss.params]
+        total_loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+        
+    return volume_model, gains, biases, backgrounds
 ```
 
 ## Subtopics
 
 ### Geometric Self-Calibration
-Optimizes geometric parameters, such as detector orientation and source position, during reconstruction to correct for calibration errors [S1]. It recovers from significant initial calibration errors, specifically recovering from a 15 dB degradation caused by Gaussian noise in position and rotation, outperforming the baseline [S1]. It is chosen when initial camera poses are inaccurate or noisy [S1].
+Optimizes geometric parameters, such as detector orientation and source position, during reconstruction to correct for calibration errors [S1]. It recovers from significant initial errors (e.g., 15 dB degradation from Gaussian noise in position/rotation) and outperforms baselines with bad initial calibration [S1]. Choose this when geometric poses are inaccurate or unknown [S1].
 
 ### Background Image Merging
-Estimates a static per-camera background image $I_{\text{rgb}}^{(\text{bg})}$ to capture stationary objects outside the reconstruction volume, reducing artifacts caused by slight appearance differences from calibration errors or view-dependent effects [S2]. It is chosen when the scene contains static background elements that the volume reconstruction might otherwise try to model incorrectly, leading to smoke-like artifacts [S2].
+Estimates a static per-camera background image $I_{\text{rgb}}^{(\text{bg})}$ to capture stationary objects outside the reconstruction volume, reducing artifacts caused by calibration errors or view-dependent effects [S2]. It merges the volume output with the background using opacity weighting [S2]. Choose this when static backgrounds are present and cause reconstruction artifacts [S2].
+
+### Exposure Correction Strategy
+Corrects inconsistent exposure across training views caused by auto-exposure behavior by mimicking the exposure setting of the closest source view at novel views [S3]. Unlike prior work that only corrects training views, this strategy generalizes to images rendered at any viewpoint [S3]. Choose this when dealing with auto-exposure cameras in novel view synthesis [S3].
 
 ## Operating characteristics
-*   **Time Complexity:** Adds minimal overhead to the training loop as it involves only element-wise operations on the rendered images and optimization of a small number of parameters per camera [S2].
-*   **Memory Complexity:** Negligible for gain/bias parameters. If background images are used, memory usage increases by $N_{\text{cameras}} \times H \times W \times 3$ floats [S2].
-*   **Performance:** Improves reconstruction quality by approximately 1 dB when enabled [S1].
-*   **Strengths:** Robust to intensity mismatches between cameras; reduces artifacts from unmodeled background elements [S2].
-*   **Limitations:** Assumes a static background if used; does not correct for non-linear response curves unless explicitly enabled [S1, S2].
-*   **When to use:** When cameras are geometrically calibrated but exhibit photometric inconsistencies [S2]. When static background elements cause reconstruction artifacts [S2].
+*   **Performance:** Enabling exposure and sensor bias estimation improves reconstruction quality by approximately 1 dB [S1].
+*   **Complexity:** Adds minimal computational overhead per iteration as it involves simple per-pixel affine transformations [S2].
+*   **Memory:** Requires storing per-camera gain/bias (negligible) and optionally per-camera background images (significant if high resolution) [S2].
+*   **Strengths:** Robust to photometric inconsistencies and uncalibrated sensors [S1, S2].
+*   **Limitations:** Assumes static backgrounds for background merging; may not handle dynamic lighting changes well [S2].
 
 ## Background
-Originates from work on neural volume rendering and adaptive tomography [S1, S2]. It is used in differentiable volume rendering pipelines to improve photometric consistency [S1, S2].
+Radiometric self-calibration originated in the context of neural volume rendering and tomography to address photometric inconsistencies in real-world datasets [S1, S2]. It was introduced as a component of systems like NeAT (Neural Adaptive Tomography) and Neural Volumes to improve reconstruction quality by jointly optimizing radiometric parameters with the volume representation [S1, S2].
 
 ## Sources
 [S1] NeAT: Neural Adaptive Tomography, https://doi.org/10.48550/arxiv.2202.02171, fetched 2026-10-26
 [S2] Neural Volumes: Learning Dynamic Renderable Volumes from Images, https://arxiv.org/abs/1906.07751, fetched 2026-10-26
+[S3] IBGS: Image-Based Gaussian Splatting, https://arxiv.org/abs/2511.14357v1, fetched 2026-10-26

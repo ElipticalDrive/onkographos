@@ -1,0 +1,164 @@
+Rust‑first, cross‑platform wgpu/WebGPU renderer exposed to Python for fast, headless 3D rendering. Built in Rust, shipped as Python wheels. - SPLAT-FUSED: path-traced fusion and Forge3D 1.41.0 release by milos-agathon · Pull Request #205 · milos-agathon/forge3d
+
+SPLAT-FUSED: path-traced fusion and Forge3D 1.41.0 release by milos-agathon · Pull Request #205 · milos-agathon/forge3d · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+milos-agathon
+commented
+Oct 3, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+SPLAT-FUSED (moonshot 12): 3D Gaussian splats, COPC LiDAR and DEM terrain are path-traced in one ReSTIR pass and shadow each other through one function, shadow_transmittance = T_splat · T_lidar · T_terrain. Behind the new splat-fusion Cargo feature, which the wheel enables.
+src/splat/: GaussianSplatCloud (SoA, packed Σ⁻¹, memory-tracked) and 3DGS .ply loader; BVH/TLAS over splat pages, COPC nodes and terrain tiles; out-of-core page stores with a fixed GPU residency pool, LRU eviction, exact / progressive paging.
+src/shaders/splat/gaussian_intersect.wgsl (analytic ray/Gaussian closest-hit and any-hit, 3σ proxy) and src/shaders/fusion/unified_occlusion.wgsl.
+The fused kernel is a specialization of the existing hybrid ReSTIR kernel (shader_sources::fused_kernel()); the default kernel is byte-identical. The reservoir target calls shadow_transmittance.
+src/path_tracing/fused_reference.rs: AEQUITAS wavefront path-traced reference over hard proxies, plus shadow IoU.
+Python: forge3d.load_gaussian_splats, forge3d.render_fused, forge3d.splat.render_fused_reference, page-store helpers, splat.pyi, API contract lists. Both render entrypoints take certificate= / cache=.
+Docs: docs/splat-fused.md, CHANGELOG.
+Measured (local NVIDIA Vulkan, release)
+Shadow case vs path-traced reference
+IoU (gate > 0.9)
+Splat shadow on terrain
+0.9235
+LiDAR shadow on terrain
+0.9928
+Terrain shadow on splat
+0.9730
+Terrain shadow on LiDAR
+0.9537
+Terrain shadow on splat/LiDAR
+0.9618
+1,007,625,000 logical primitives (246,010 pages, peak 61 resident); tracked render peak 130.6 MiB of 512 MiB.
+GPU vs brute-force CPU transmittance: 8,006 shadow rays, worst difference 4.81e-4.
+Golden tests/golden/splat_fusion/fused_fixture.png: SSIM 1.0.
+CI
+splat-fusion added to the portable cargo check/test/doc feature lists, the acceptance clippy alias, PORTABLE_CI_CARGO_FEATURES and WHEEL_REQUIRED_FEATURES.
+New NVIDIA-lane step "Run SPLAT-FUSED cross-representation occlusion gate" with FORGE3D_SPLAT_FUSION_REQUIRED_GPU=1 and a zero-skip JUnit check. Hosted runners skip the GPU assertions (software / virtualized adapters).
+Needs owner review
+tests/data/world_coord_f32_ledger.json → splat_fused: 7 new as f32 sites (1821 → 1828), none narrowing world positions (splat and COPC positions go through Anchor::to_render_f32). Marked pending owner review in the record.
+Known limits
+The reference traces hard proxies, so soft shadow built from many overlapping faint splats has no counterpart there; splat-on-terrain has the thinnest margin.
+GPU splat colour uses SH bands 0–1; higher bands are evaluated on the CPU.
+LRU eviction happens across views (render_fused_sequence, Rust only).
+🤖 Generated with Claude Code
+Limits remediation (follow-up commit)
+Removes the ten limits found while producing the demo videos (plan and per-task evidence in docs/superpowers/plans/2026-10-03-splat-fused-limits*.md):
+Resolution: seamless tiles (tile=) keep per-pixel GPU memory bounded by one tile. A 1920x1080 frame renders in 471 MiB, and tiled output is bit-identical to monolithic. return_aovs=False skips the AOV targets.
+Terrain: a conservative f16 min-max pyramid halves terrain memory with unchanged output. An 8-bit sRGB colour map (FusedTerrain.albedo_map). Smooth shading normals (terrain_smooth_normals).
+LiDAR: oriented surfels for planar returns (lidar_surfels). Small COPC nodes are packed into shared pages (Lauterbrunnen: 12,959 to 1,228 pages). COPC header bounds are read from the correct LAS 1.4 offsets.
+Python: self-shadow bias kwargs and the self_bias AOV, GaussianSplatCloud.transformed, and render_fused_sequence/FusedView (one kernel, one page pool and one terrain upload per sequence).
+Fix: mapped terrain no longer takes the base kernel's spectral-ReSTIR path, which bypassed shadow_transmittance.
+The golden image was regenerated once, for smooth normals. Shadow IoU is unchanged or better: 0.9235 / 0.9928 / 0.9730 / 0.9701 / 0.9713.
+Release 1.41.0
+Align Cargo, Cargo.lock, Python package metadata, forge3d.__version__, and CMake at 1.41.0; move the current unreleased changelog into this release.
+Include current main in the candidate so the tested branch is ready to integrate.
+Export FusedView and render_fused_sequence from forge3d.splat.__all__, with public API assertions, and correct the changelog import paths.
+Local version/export checks, cargo forge3d-clippy, and cargo forge3d-clippy-acceptance passed. A focused contract run passed 51 tests and failed the inherited frozen conversion inventory (1,832 actual versus 1,828 recorded).
+The PyPI workflow is running in build-only mode to validate release wheels and installation on all supported platforms. No tag, GitHub release, or PyPI publication has been created.
+Merge/publication are pending green checks and owner resolution of the frozen ledger and existing main ORBIS/TESSELLA acceptance failures.
+milos-agathon
+and others
+added 6 commits
+October 3, 2026 08:20
+feat(splat): SPLAT-FUSED path-traced splat + LiDAR + terrain fusion
+…
+c93b653
+```
+Render 3D Gaussian splats, COPC LiDAR and DEM terrain in one ReSTIR
+path-traced pass with a unified occlusion function
+shadow_transmittance = T_splat * T_lidar * T_terrain, behind the new
+`splat-fusion` Cargo feature (enabled in the wheel).
+
+- src/splat: GaussianSplatCloud SoA + 3DGS .ply loader, packed inverse
+  covariance, BVH/TLAS, out-of-core page stores with an LRU residency
+  pool (exact / progressive paging), CPU kernel mirror.
+- WGSL: analytic ray/anisotropic-Gaussian closest-hit and any-hit,
+  unified occlusion, fused traversal seams; the fused kernel is a
+  specialization of the hybrid ReSTIR kernel (default kernel unchanged).
+- AEQUITAS hard-proxy path-traced reference and shadow IoU tooling.
+- Python: load_gaussian_splats, render_fused, render_fused_reference,
+  page-store helpers, stubs, API contracts; certificate=/cache= render
+  contract.
+- Tests: closed-form kernel unit tests, cross-representation shadow IoU
+  (> 0.9) at 1.0e9 logical primitives inside 512 MiB, CPU oracle, golden
+  image; NVIDIA-lane CI gate with zero skips.
+- as-f32 inventory: 7 non-world sites recorded as `splat_fused`
+  (pending owner review).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge remote-tracking branch 'origin/main' into splat-fused
+b255a99
+feat(splat): remove SPLAT-FUSED limits L1-L10
+…
+ec003e9
+```
+Implements docs/superpowers/plans/2026-10-03-splat-fused-limits.md
+(evidence: docs/superpowers/plans/2026-10-03-splat-fused-limits-evidence.md).
+
+- L1: seamless tiled rendering (always camera_flags = 1), AOV opt-out;
+  1080p and 4K peaks equal the single-tile peak; tiled == monolithic bit for bit
+- L2: conservative f16 min-max pyramid halves terrain memory, output unchanged
+- L3: 8-bit sRGB terrain colour map (FusedTerrain.albedo_map, 4 B/cell)
+- L4: smooth interpolated terrain shading normals (terrain_smooth_normals)
+- L5: oriented LiDAR surfels for planar returns (lidar_surfels); reference
+  uses matching disc proxies
+- L6: Python self-shadow bias kwargs and the self_bias AOV
+- L7: COPC header bounds read from the LAS 1.4 offsets
+- L8: Python render_fused_sequence/FusedView; one kernel, one residency
+  pool and one terrain upload per sequence
+- L9: GaussianSplatCloud.transformed for georeferencing captures
+- L10: small COPC nodes packed into shared pages
+- fused driver clears the base kernel's spectral-ReSTIR flag for mapped
+  terrain so every sun candidate goes through shadow_transmittance
+- golden regenerated once (smooth normals, SSIM 0.9898 before)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge remote-tracking branch 'origin/main' into splat-fused
+cf984bc
+docs(roadmap): mark 12 SPLAT-FUSED closed with its acceptance evidence
+…
+250fb1d
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Prepare Forge3D 1.41.0 release and integrate current main
+9709c5d
+milos-agathon
+changed the title
+SPLAT-FUSED: path-traced splat + LiDAR + terrain fusion
+SPLAT-FUSED: path-traced fusion and Forge3D 1.41.0 release
+Oct 4, 2026
+Hide details
+View details
+milos-agathon
+merged commit ac6bc40
+into
+main
+Oct 4, 2026
+56 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.
