@@ -3,129 +3,57 @@
 Also called: Monte Carlo Method for Directional Scattering, Monte Carlo ray tracing, Two-pass Monte Carlo
 
 ## Overview
-The Monte Carlo method solves the integral equation for directional scattering intensity $I(X, \omega)$ by stochastically tracing sample rays from the eye through a pixel [S1, unofficial][S2]. It builds on the [Multiple Scattering Model (Integral Equation)](1177-multiple-scattering-model-integral-equation.md) and differs from deterministic solvers like the [P-N Method (Spherical Harmonics)](1395-p-n-method-spherical-harmonics.md) or [Diffusion Approximation](2372-diffusion-approximation.md) by relying on random absorption and scattering events based on medium properties, making it unbiased but inherently noisy due to the low probability of eye-to-light ray connections [S1, unofficial][S2].
+The Monte Carlo method for multiple scattering solves the integral equation for directional scattering intensity $I(X, \omega)$ by stochastically tracing rays that undergo random absorption or scattering events based on the medium's optical properties [S1, unofficial][S2]. It is distinguished from deterministic solvers (such as the P-N method or Diffusion Approximation) by its ability to handle complex phase functions and geometries without discretizing the angular domain, though this comes at the cost of high variance and slow convergence [S1, unofficial][S2].
 
 ## How it works
-**Inputs:** Camera position and pixel sampling pattern [G]. Volume medium properties: extinction coefficient $\tau$, albedo $a$, and phase function $p$ [S1, unofficial][S2]. Light sources (emitters) [G].
+**Inputs and Outputs**
+*   **Inputs:** Extinction coefficient $\tau$, albedo $a$, phase function $p$, light source positions/intensities, and volume geometry.
+*   **Outputs:** Pixel intensity values representing the radiance reaching the eye.
 
-**Outputs:** Pixel intensity (flux contribution) [G].
+**Data Structures**
+*   **Texture Map:** A 2D or 3D buffer used to store intermediate radiance. In the two-pass variant, it stores either isotropic scattering intensity or directionally scattered texture $I(X_i, \omega)$ [S1, unofficial][S2].
+*   **Ray State:** Contains current position, direction, and accumulated throughput (weight).
 
-**Data Structures:** Ray state: position $X$, direction $\omega$, current weight [G]. Medium lookup: voxel grid or texture map storing $\tau, a, p$ at location $X$ [G]. Caustic Texture Map (optional, for hybrid approaches): stores scattered radiance $I(X_i, \omega)$ or isotropic scattering contributions from light sources [S1, unofficial][S2].
+**Algorithm Steps**
+The method can be implemented as a direct path tracer or a two-pass hybrid approach. The two-pass approach is preferred to mitigate the low probability of eye rays connecting to light sources [S1, unofficial][S2].
 
-**Steps:**
-1. **Ray Generation:** For each pixel, generate a primary ray from the eye into the scene [G].
-2. **Interaction Sampling:** As the ray traverses the volume, determine interaction points. At each point, decide between absorption or scattering based on the albedo $a$, extinction coefficient $\tau$, and phase function $p$ [S1, unofficial][S2].
-3. **Direction Selection:** If scattering occurs, select the new direction $\omega'$ using the phase function $p$ [S1, unofficial][S2].
-4. **Contribution Check:** If the ray reaches a light source or volume emitter, accumulate its flux to the pixel intensity [S1, unofficial][S2].
-5. **Hybrid/Caustic Pass (Optional):** Propagate rays from light sources to a texture map capturing directional interreflection, then use this map in a final rendering pass with rays from the eye [S1, unofficial][S2].
-6. **Termination:** If the ray is absorbed or leaves the volume without hitting a source, terminate the path [G].
+1.  **First Pass (Light Propagation):**
+    Trace rays from light sources into the volume.
+    *   For each ray, determine interaction at voxel $X_i$.
+    *   Sample absorption or scattering based on extinction coefficient $\tau$ and albedo $a$ [S1, unofficial][S2].
+    *   If scattering occurs, compute the scattered radiance using the phase function $p$ [S1, unofficial][S2].
+    *   Store the scattered contribution in a texture map. Blasi et al. stored an isotropic scattering texture, but the method generalizes to storing directionally scattered texture $I(X_i, \omega)$ [S1, unofficial][S2].
 
-**Formulas:**
-* Distance to next interaction: $d = -\frac{\ln(1-r)}{\tau}$, where $r \in [0,1)$ is a uniform random number [G].
-* Scattering probability: $a$ [S1, unofficial][S2].
-* Weight update after scattering: $W_{\text{new}} = W_{\text{old}} \cdot a \cdot p(\omega, \omega')$ [G].
+2.  **Second Pass (Eye Rendering):**
+    Trace rays from the eye through each pixel.
+    *   If a ray reaches a light source or volume emitter directly, add its flux to the pixel intensity [S1, unofficial][S2].
+    *   If the ray intersects a voxel, sample the stored texture map to retrieve the pre-computed scattered radiance $I(X_i, \omega)$ [S1, unofficial][S2].
+    *   Alternatively, perform one extra directional bounce toward the viewpoint using Monte Carlo sampling if a hybrid approach with the zonal method is used [S1, unofficial].
 
-**Parameters:**
-* $\tau$ (extinction coefficient): Controls mean free path [S1, unofficial][S2].
-* $a$ (albedo): Probability of scattering vs. absorption [S1, unofficial][S2].
-* $p$ (phase function): Angular distribution of scattered light [S1, unofficial][S2].
-* Typical values: Not given in the sources. [G]
+**Formulas**
+The probability of absorption or scattering is governed by the extinction coefficient $\tau$ and albedo $a$. The scattered radiance contribution involves the phase function $p$. The specific integral equation for $I(X, \omega)$ is solved by summing contributions from rays that successfully connect the eye to a light source via scattering events [S1, unofficial][S2].
 
-**Edge Cases:**
-* **Low Probability Paths:** Contributing rays are a small fraction of all considered rays, leading to high variance [S1, unofficial][S2].
-* **Boundary Conditions:** Rays may exit the volume before interacting; proper handling of exit distances is required [G].
-* **Zero Extinction/Phase:** Division by zero or zero weight must be guarded against when $\tau=0$ or $p=0$ [G].
+**Parameters**
+*   **Number of Samples:** High sample counts are required to decrease variance [S1, unofficial][S2].
+*   **Texture Resolution:** Determines the fidelity of the intermediate scattering data [S1, unofficial][S2].
 
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-import math
-import random
-
-def monte_carlo_volume_rendering(camera, volume, lights, use_caustic_map=False, caustic_map=None):
-    pixel_intensity = 0.0
-    ray_origin = camera.position
-    ray_direction = camera.generate_pixel_direction()
-    current_weight = 1.0
-    max_depth = 10  # Standard guard against infinite paths [G]
-    
-    for _ in range(max_depth):
-        # Find distance to next voxel boundary or scene object
-        hit_distance = volume.ray_intersect(ray_origin, ray_direction)
-        if hit_distance is None or hit_distance < 0:
-            break
-            
-        # Sample distance to next interaction based on extinction coefficient tau
-        tau = volume.extinction_coefficient(ray_origin)
-        if tau <= 0:
-            ray_origin += ray_direction * hit_distance
-            continue
-            
-        d = -math.log(1.0 - random.uniform(0.0, 1.0)) / tau
-        d = max(d, 0.0)
-        
-        if hit_distance < d:
-            # Ray exits volume or hits object before interaction
-            ray_origin += ray_direction * hit_distance
-            continue
-            
-        # Interaction occurs at ray_origin + d
-        interaction_pos = ray_origin + ray_direction * d
-        
-        # Determine if scattering or absorption based on albedo a
-        a = volume.albedo(interaction_pos)
-        if random.uniform(0.0, 1.0) < a:
-            # Scattering event
-            # Sample new direction omega' from phase function p
-            new_direction = sample_phase_function(volume.phase_function, ray_direction)
-            
-            # Update ray
-            ray_origin = interaction_pos
-            ray_direction = new_direction
-            
-            # Update weight by albedo and phase function
-            p_val = volume.phase_function(ray_direction, new_direction)
-            if p_val <= 0:
-                break
-            current_weight *= a * p_val
-        else:
-            # Absorption event
-            break
-            
-        # Check if ray hits a light source
-        light_hit = ray_hits_light(ray_origin, ray_direction, lights)
-        if light_hit:
-            pixel_intensity += current_weight * light_hit.flux
-            break
-            
-    return pixel_intensity
-
-def sample_phase_function(phase_func, incoming_direction):
-    # Standard rejection sampling or analytical sampling for phase function
-    # Returns a unit vector omega'
-    return phase_func.sample(incoming_direction)
-
-def ray_hits_light(origin, direction, lights):
-    # Returns light object and flux if ray intersects a light, else None
-    for light in lights:
-        if light.intersect(origin, direction):
-            return light
-    return None
-```
+**Edge Cases and Pitfalls**
+*   **Noise:** Contributing rays are a small fraction of all considered rays, leading to noisy images [S1, unofficial][S2].
+*   **Performance:** The method takes a long time to compute due to the need for many samples [S1, unofficial][S2].
+*   **Connectivity:** Rays from the eye rarely end up at a light source, and rays from light sources rarely end up at the eye, necessitating the two-pass or hybrid approaches [S1, unofficial][S2].
 
 ## Subtopics
-[Multiple Scattering Albedo Estimation](6357-multiple-scattering-albedo-estimation.md): Estimates the multiple scattering albedo $\sigma_{ms}$ (RGB) such that the effective albedo $\alpha_e$ of the low-res voxel matches the effective albedo $\alpha_e^{\text{input}}$ of the input block. [G]
 
 ## Operating characteristics
-* **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the number of samples per pixel [G].
-* **Memory Complexity:** Not given in the sources. [G]
-* **Performance:** Images tend to appear noisy and computation takes a long time because many samples are required to decrease the variance of the mean of contributions [S1, unofficial][S2].
-* **Strengths:** Unbiased solution; handles complex geometries and anisotropic scattering naturally [G].
-* **Limitations:** High noise levels; inefficient for scenes where eye-to-light paths are rare [S1, unofficial][S2].
+*   **Time Complexity:** High. Requires many samples to reduce variance, making it computationally expensive [S1, unofficial][S2].
+*   **Memory Complexity:** Depends on the texture map size in the two-pass variant. Storing directional textures $I(X_i, \omega)$ increases memory usage significantly compared to isotropic storage [S1, unofficial][S2].
+*   **Strengths:** Handles complex phase functions and geometries naturally; no angular discretization required [S1, unofficial][S2].
+*   **Limitations:** Noisy images; slow convergence; requires many samples for acceptable quality [S1, unofficial][S2].
+*   **When to Use:** When high accuracy in complex scattering scenarios is needed and computational resources are sufficient [S1, unofficial][S2].
+*   **When Not to Use:** When real-time performance is required or when the scene has simple scattering properties where deterministic methods suffice [S1, unofficial][S2].
 
 ## Background
-The Monte Carlo method was originally developed by physicists for neutron transport and applied to rendering surface interreflection by Cook et al. and Kajiya [S1, unofficial][S2]. It was applied to volume applications by Rushmeier [S1, unofficial][S2]. The hybrid approach using caustic texture maps was proposed by Shirley, Chen et al., and Heckbert, and adapted for volume rendering by Blasi et al. [S1, unofficial][S2].
+The Monte Carlo method was originally developed by physicists for neutron transport and applied to rendering surface interreflection by Cook et al. and Kajiya [S1, unofficial][S2]. It was applied to volume applications by Rushmeier [S1, unofficial][S2]. The two-pass approach using caustic texture maps was proposed by Shirley, Chen et al., and Heckbert for surface interreflection, and adapted for volume rendering by Blasi et al. [S1, unofficial][S2].
 
 ## Sources
 [S1] Optical Models for Direct Volume Rendering - Duke Computer Science, https://courses.cs.duke.edu/spring03/cps296.8/papers/max95opticalModelsForDirectVolumeRendering.pdf, fetched 2026-10-26 (unofficial)

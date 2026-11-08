@@ -2,45 +2,61 @@
 
 
 ## Overview
-Gaussian clustering and merging is a family of level-of-detail (LOD) techniques for 3D Gaussian Splatting that reduces the number of splats by grouping them into representative clusters. Unlike [MIP-Splatting](6063-mip-splatting.md), which handles frequency aliasing, or [CityGaussian / VastGaussian / DoGaussian](6143-citygaussian-vastgaussian-dogaussian.md), which use spatial clustering for pruning, this family focuses on substitutive merging where the merged splat replaces the group entirely. It builds on [3D Gaussian Splatting LOD methods](5439-3d-gaussian-splatting-lod-methods.md).
+Gaussian clustering and merging is a family of Level-of-Detail (LOD) techniques for 3D Gaussian Splatting that reduces scene complexity by grouping spatially or attribute-similar Gaussians into clusters and replacing them with a single representative Gaussian. This reduces the number of splats rendered, lowering memory bandwidth and computational overhead. It differs from sibling methods like [Hierarchical 3D Gaussian Splatting (H-3DGS)](10279-hierarchical-3d-gaussian-splatting-h-3dgs.md) by focusing on the merging arithmetic and clustering strategy rather than just hierarchical storage, and from [Virtual Memory for 3D Gaussian Splatting](8403-virtual-memory-for-3d-gaussian-splatting.md) by actively reducing Gaussian count per LOD rather than managing virtual page mappings.
 
 ## Shared principles
-The core mechanism involves partitioning a set of $N$ 3D Gaussian splats into disjoint groups and replacing each group with a single representative splat. The representative's parameters are computed to minimize the approximation error of the original group.
+All methods in this family operate on a set of input Gaussians $\{G_i\}_{i=1}^K$, where each $G_i$ is defined by position $\mathbf{t}_i$, covariance matrix $\mathbf{\Sigma}_i$ (or rotation/scale), opacity $\alpha_i$, and amplitude/color coefficients $c_i$. The core mechanism involves two phases:
+1.  **Clustering:** Partitioning the $N$ total splats into $M$ clusters ($M < N$). This is typically done via spatial proximity (e.g., k-means, Morton code sorting) or attribute similarity.
+2.  **Merging:** Computing a single representative Gaussian $G_{merged}$ for each cluster. The parameters $\mathbf{t}_{m}, \mathbf{\Sigma}_{m}, \alpha_{m}, c_{m}$ are derived from the cluster members. Common approaches include arithmetic averaging of properties or moment-matching to preserve spatial mass and extent.
 
-**Data Structures:**
-Each splat $i$ is defined by:
-- Position $\mathbf{c}_i \in \mathbb{R}^3$.
-- Covariance matrix $\mathbf{\Sigma}_i \in \mathbb{R}^{3 \times 3}$ (symmetric positive definite).
-- Amplitude $\alpha_i \in \mathbb{R}$ (opacity/intensity weight).
-
-**Merging Step:**
-For a group $G$, the merged parameters $(\mathbf{c}', \mathbf{\Sigma}', \alpha')$ are computed via weighted moments:
-1.  **Weighted Moments:**
-    $$ W = \sum_{i \in G} \alpha_i $$
-    $$ \mathbf{c}' = \frac{1}{W} \sum_{i \in G} \alpha_i \mathbf{c}_i $$
-    $$ \mathbf{M}' = \sum_{i \in G} \alpha_i (\mathbf{c}_i \mathbf{c}_i^T + \mathbf{\Sigma}_i) $$
-2.  **Covariance:**
-    $$ \mathbf{\Sigma}' = \mathbf{M}' - W \mathbf{c}' \mathbf{c}'^T $$
-    $\mathbf{\Sigma}'$ must be symmetrized and checked for positive definiteness. If not positive definite, regularization (e.g., adding $\epsilon \mathbf{I}$) is required [G].
-3.  **Amplitude:**
-    $\alpha'$ is optimized to minimize the L2 integrated squared error. In some variants, this involves a geometric angle parameter $\alpha$ where the relative merging error is $\epsilon = \sin^2 \alpha$ [S1].
-
-**Partitioning:**
-Splat groups are formed using algorithms such as greedy hierarchical merging (iteratively merging the pair with the lowest cost), cost-increment relocation, or joint relaxation [S1].
+The output is a reduced set of Gaussians that approximates the visual appearance of the original cluster.
 
 ## Subtopics
 
 ### [K-wise moment-matched merging with L2-optimal amplitude](5440-k-wise-moment-matched-merging-with-l2-optimal-amplitude.md)
-K-wise moment-matched merging with L2-optimal amplitude is a level-of-detail (LOD) technique that reduces the number of 3D Gaussian splats by grouping $K$ splats into a single representative splat. It achieves this by matching the statistical moments of the input splats and optimizing the resulting amplitude to minimize the L2 error. Unlike [MIP-Splatting](6063-mip-splatting.md), which handles frequency aliasing, or [CityGaussian / VastGaussian / DoGaussian](6143-citygaussian-vastgaussian-dogaussian.md), which use spatial clustering for pruning, this method focuses on substitutive merging where the merged splat replaces the group entirely.
+A LOD technique that reduces a set of $K$ Gaussian splats into a single representative splat by matching spatial moments and optimizing the resulting amplitude to minimize L2 error. It distinguishes itself from sibling methods like [Hierarchical Gaussian Merging](8358-hierarchical-gaussian-merging.md) by explicitly solving for the optimal amplitude via L2 loss rather than using fixed heuristics or simple averaging, and it differs from [LOD Generation for 3DGS](8408-lod-generation-for-3dgs.md) by employing specific cost-metric design spaces (L2, Cauchy–Schwarz, etc.) for partitioning.
+
+### [Hierarchical Gaussian Merging](8358-hierarchical-gaussian-merging.md)
+Hierarchical Gaussian Merging generates multiple Levels of Detail (LOD) for 3D Gaussian Splatting by recursively clustering and merging Gaussians to reduce scene complexity. It addresses the memory and rendering overhead of large Gaussian scenes by creating simplified representations where each LOD level contains fewer, larger Gaussians. Unlike methods that optimize for L2-optimal amplitude or use complex cluster culling, this approach relies on simple arithmetic averaging of Gaussian properties to construct a unified buffer hierarchy.
 
 ### [LOD Generation for 3DGS](8408-lod-generation-for-3dgs.md)
-This method reduces the number of 3D Gaussians copied, stored, sorted, and rendered by merging Gaussians into clusters based on similar attributes, minimizing distant appearance impact without altering the scene creation stage. Unlike virtual texturing where mip levels are uniform-sized pages, this method reduces the Gaussian count with each LOD level, allowing multiple virtual pages to reside within one physical page. It builds on [Gaussian clustering and merging](8436-gaussian-clustering-and-merging.md).
+This method reduces the computational load of 3D Gaussian Splatting (3DGS) by merging Gaussians into clusters based on attribute similarity, thereby minimizing the number of Gaussians copied, stored, sorted, and rendered. It differs from virtual texturing approaches where mip levels consist of uniform-sized pages; instead, this method reduces the Gaussian count with each LOD level, allowing multiple virtual pages to map to a single physical page. It builds on [Gaussian clustering and merging](8436-gaussian-clustering-and-merging.md) by specifying the clustering algorithm (k-means), the specific merging arithmetic, and the dynamic memory-driven threshold management.
 
-### Hierarchical Gaussian Merging
-Generating LOD levels by halving the number of Gaussians per page for each subsequent level, merging Gaussians based on average properties [S1]. Level 0 contains original Gaussians. Level 1, 2, 3, etc., are generated by merging Gaussians. The number of Gaussians per page is halved for each subsequent level. Merging Gaussians is done with an average for all properties but their scale [S1].
+### [Cluster Culling (Nanite-style)](10402-cluster-culling-nanite-style.md)
+Cluster Culling is a hierarchical frustum culling and Level-of-Detail (LOD) selection mechanism for 3D Gaussian Splatting, designed to emulate the spatial clustering efficiency of Nanite. It operates on pre-computed clusters of Gaussians, testing their bounding volumes against the view frustum and selecting the appropriate LOD level based on screen-space error, thereby reducing the number of draw calls and splats processed per frame. It differs from sibling methods by relying on a fixed, pre-built hierarchical cluster structure and GPU-driven indirect draw argument generation rather than dynamic merging or runtime LOD generation.
+
+### Gaussian Cluster Builder
+#### definition
+- [S1, unofficial] A builder class for constructing hierarchical cluster structures from Gaussian splat data, implementing Nanite-style spatial clustering.
+#### step
+- [S1, unofficial] Sort splats by Morton code (Z-order curve) for spatial locality.
+- [S1, unofficial] Group into leaf clusters of N splats each.
+- [S1, unofficial] Recursively merge clusters into parent nodes.
+- [S1, unofficial] Calculate bounding volumes and error metrics.
+#### parameter
+- [S1, unofficial] SplatsPerCluster: Number of splats per leaf cluster.
+- [S1, unofficial] MaxChildrenPerCluster: Maximum children per parent cluster.
+- [S1, unofficial] bReorderSplats: Whether to reorder splat data for cluster locality.
+- [S1, unofficial] bGenerateLOD: Whether to generate LOD splats for parent clusters.
+- [S1, unofficial] LODReductionRatio: How many original splats per LOD splat (default: divide by 4).
+#### layout
+- [S1, unofficial] FBuildSettings: int32 SplatsPerCluster (default: GaussianClusterConstants::DefaultSplatsPerCluster), int32 MaxChildrenPerCluster (default: GaussianClusterConstants::MaxChildrenPerCluster), bool bReorderSplats (default: true), bool bGenerateLOD (default: true), int32 LODReductionRatio (default: 4).
+
+### Cluster Hierarchy Construction
+#### step
+- [S1, unofficial] Calculate global bounding box of all splats using CalculateGlobalBounds.
+- [S1, unofficial] Build parent level by merging child clusters using BuildParentLevel, specifying MaxChildrenPerCluster, ParentLODLevel, and NextClusterID.
+#### parameter
+- [S1, unofficial] SplatsPerCluster: Number of splats per leaf cluster. Default value: 128 (from GaussianClusterConstants::DefaultSplatsPerCluster).
+- [S1, unofficial] MaxChildrenPerCluster: Maximum number of children per parent cluster. Default value: 8 (from GaussianClusterConstants::MaxChildrenPerCluster).
+- [S1, unofficial] bReorderSplats: Boolean flag to reorder splat data for cluster locality. Default value: true.
+- [S1, unofficial] bGenerateLOD: Boolean flag to generate LOD splats for parent clusters. Default value: true.
+- [S1, unofficial] LODReductionRatio: Ratio of original splats per LOD splat. Default value: 4.
+#### layout
+- [S1, unofficial] FSplatSortEntry: Structure for sorting splats by Morton code. Fields: uint64 MortonCode, int32 OriginalIndex. Comparison operator: returns true if MortonCode < Other.MortonCode.
 
 ## Background
-The concept of hierarchical LOD generation for 3D Gaussians, specifically involving page assignment and merging, was introduced in "Virtual memory for 3D Gaussian Splatting" [S1]. This work addresses the memory overhead of rendering large-scale scenes by grouping Gaussians into pages and generating multiple LOD levels through clustering and merging.
+The concept of merging Gaussians for LOD originates from the need to handle the massive number of splats generated by 3D Gaussian Splatting training. Early methods like [LOD Generation for 3DGS](8408-lod-generation-for-3dgs.md) and [Hierarchical Gaussian Merging](8358-hierarchical-gaussian-merging.md) introduced simple averaging strategies. More recent approaches, such as [K-wise moment-matched merging with L2-optimal amplitude](5440-k-wise-moment-matched-merging-with-l2-optimal-amplitude.md), refine this by optimizing the merged amplitude to minimize radiometric error [S1, unofficial]. The Nanite-style approach [Cluster Culling (Nanite-style)](10402-cluster-culling-nanite-style.md) adapts hierarchical clustering from geometry processing to Gaussian splats for efficient culling [S1, unofficial].
 
 ## Sources
-[S1] Virtual memory for 3D Gaussian Splatting, https://zenodo.org/records/19690968, fetched 2026-10-26
+[S1] YuanBaoSMadLab/OpenSplat4D, https://github.com/YuanBaoSMadLab/OpenSplat4D, fetched 2026-10-27 (unofficial)

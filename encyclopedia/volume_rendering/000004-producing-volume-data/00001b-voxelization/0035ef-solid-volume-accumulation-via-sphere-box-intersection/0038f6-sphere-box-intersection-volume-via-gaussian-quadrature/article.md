@@ -1,0 +1,162 @@
+# Sphere-Box Intersection Volume via Gaussian Quadrature
+
+
+## Overview
+Computes the exact volume of the intersection between a sphere and an axis-aligned bounding box (AABB) using numerical integration [S1, unofficial]. It sets itself apart from analytical clipping methods by handling arbitrary partial intersections via 2D Gaussian quadrature over the sphere's projection, avoiding complex case logic for sphere-box edge/corner intersections [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `center`: Sphere center coordinates $(c_x, c_y, c_z)$.
+- `radius`: Sphere radius $r$.
+- `box_min`: AABB minimum corner $(b_{min,x}, b_{min,y}, b_{min,z})$.
+- `box_max`: AABB maximum corner $(b_{max,x}, b_{max,y}, b_{max,z})$.
+- `nodes`: 1D array of Gaussian quadrature nodes (abscissas) for the chosen order.
+- `weights`: 1D array of Gaussian quadrature weights corresponding to `nodes`.
+
+**Outputs:**
+- `volume`: Scalar float representing the intersection volume.
+
+**Data Structures:**
+- No persistent data structures. Computation is stateless.
+
+**Steps:**
+1.  **Compute Sphere Bounds:**
+    Calculate the bounding box of the sphere:
+    $$ s_{min,i} = c_i - r $$
+    $$ s_{max,i} = c_i + r $$
+    for $i \in \{x, y, z\}$.
+
+2.  **Clip to Box:**
+    Determine the intersection of the sphere's bounding box and the target AABB:
+    $$ clip_{min,i} = \max(b_{min,i}, s_{min,i}) $$
+    $$ clip_{max,i} = \min(b_{max,i}, s_{max,i}) $$
+
+3.  **Check for Empty Intersection:**
+    If any dimension has $clip_{max,i} \le clip_{min,i}$, the intersection is empty. Return $0.0$ [S1, unofficial].
+
+4.  **Check for Full Containment:**
+    If the sphere is fully contained within the box ($b_{min,i} \le s_{min,i}$ and $b_{max,i} \ge s_{max,i}$ for all $i$), return the full sphere volume:
+    $$ V = \frac{4}{3} \pi r^3 $$
+    [S1, unofficial].
+
+5.  **Define Local Coordinates:**
+    Shift coordinates relative to the sphere center to simplify the sphere equation $x^2 + y^2 + z^2 \le r^2$:
+    $$ x_0 = clip_{min,x} - c_x, \quad x_1 = clip_{max,x} - c_x $$
+    $$ y_0 = clip_{min,y} - c_y, \quad y_1 = clip_{max,y} - c_y $$
+    $$ z_0 = clip_{min,z} - c_z, \quad z_1 = clip_{max,z} - c_z $$
+
+6.  **Compute Integration Parameters:**
+    Calculate the midpoint and half-length of the integration domain in the $x$ and $y$ dimensions:
+    $$ x_{mid} = \frac{x_0 + x_1}{2}, \quad x_{half} = \frac{x_1 - x_0}{2} $$
+    $$ y_{mid} = \frac{y_0 + y_1}{2}, \quad y_{half} = \frac{y_1 - y_0}{2} $$
+
+7.  **Initialize Accumulator:**
+    Set $total = 0.0$.
+
+8.  **Gaussian Quadrature Integration:**
+    Iterate over all pairs of quadrature nodes $(node_x, node_y)$ and weights $(weight_x, weight_y)$:
+    a.  Map nodes to physical coordinates in the shifted frame:
+        $$ x = x_{mid} + x_{half} \cdot node_x $$
+        $$ y = y_{mid} + y_{half} \cdot node_y $$
+    b.  Calculate the remaining squared radius in the $z$-direction:
+        $$ remaining = r^2 - x^2 - y^2 $$
+    c.  **Check Validity:** If $remaining \le 0$, the point $(x,y)$ is outside the sphere's projection. Skip to the next iteration [S1, unofficial].
+    d.  Calculate the sphere's $z$-radius at this $(x,y)$:
+        $$ z_{radius} = \sqrt{remaining} $$
+    e.  Determine the intersection height of the sphere slice with the box in the $z$-direction:
+        $$ z_{low} = \max(z_0, -z_{radius}) $$
+        $$ z_{high} = \min(z_1, z_{radius}) $$
+        $$ height = \max(z_{high} - z_{low}, 0.0) $$
+    f.  Add the weighted contribution to the total:
+        $$ total \leftarrow total + weight_x \cdot weight_y \cdot height $$
+
+9.  **Scale by Jacobian:**
+    The final volume is the sum scaled by the Jacobian of the coordinate transformation from the reference element $[-1, 1]^2$ to the physical $xy$ domain:
+    $$ V = x_{half} \cdot y_{half} \cdot total $$
+    [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def sphere_box_intersection_volume_plain(center, radius, box_min, box_max, nodes, weights):
+    # 1. Sphere bounds
+    sphere_min = [center[i] - radius for i in range(3)]
+    sphere_max = [center[i] + radius for i in range(3)]
+    
+    # 2. Clip to box
+    clipped_min = [max(box_min[i], sphere_min[i]) for i in range(3)]
+    clipped_max = [min(box_max[i], sphere_max[i]) for i in range(3)]
+    
+    # 3. Empty check
+    if any(clipped_max[i] <= clipped_min[i] for i in range(3)):
+        return 0.0
+    
+    # 4. Full containment check
+    if all(box_min[i] <= sphere_min[i] and box_max[i] >= sphere_max[i] for i in range(3)):
+        return (4.0 / 3.0) * math.pi * radius ** 3
+    
+    # 5. Local coordinates relative to center
+    x0, y0, z0 = [clipped_min[i] - center[i] for i in range(3)]
+    x1, y1, z1 = [clipped_max[i] - center[i] for i in range(3)]
+    
+    # 6. Integration parameters
+    x_mid = 0.5 * (x0 + x1)
+    y_mid = 0.5 * (y0 + y1)
+    x_half = 0.5 * (x1 - x0)
+    y_half = 0.5 * (y1 - y0)
+    
+    # 7. Initialize
+    total = 0.0
+    
+    # 8. Quadrature
+    for node_x, weight_x in zip(nodes, weights):
+        x = x_mid + x_half * node_x
+        for node_y, weight_y in zip(nodes, weights):
+            y = y_mid + y_half * node_y
+            
+            remaining = radius * radius - x * x - y * y
+            
+            # 8c. Validity check
+            if remaining <= 0.0:
+                continue
+                
+            z_radius = math.sqrt(remaining)
+            
+            # 8e. Intersection height
+            z_low = max(z0, -z_radius)
+            z_high = min(z1, z_radius)
+            height = max(z_high - z_low, 0.0)
+            
+            # 8f. Accumulate
+            total += weight_x * weight_y * height
+            
+    # 9. Scale
+    return x_half * y_half * total
+```
+
+**Parameters:**
+- `nodes`, `weights`: 1D arrays of Gaussian quadrature points and weights. Common orders are 2, 4, or 8 [S1, unofficial]. Higher orders increase accuracy for highly curved intersections but increase computational cost quadratically ($N^2$).
+
+**Edge Cases and Pitfalls:**
+- **Empty Intersection:** If the sphere and box do not overlap, `clipped_max[i] <= clipped_min[i]` in any dimension. The method returns 0.0 [S1, unofficial].
+- **Full Containment:** If the sphere is entirely inside the box, the analytical volume is returned to avoid unnecessary integration [S1, unofficial].
+- **Numerical Precision:** If `remaining` is very close to zero due to floating-point error, `sqrt` may produce NaN or small negative values. The check `remaining <= 0.0` handles this by skipping the point [S1, unofficial].
+- **Degenerate Box:** If the box has zero volume in any dimension, the intersection volume is 0.0.
+
+## Operating characteristics
+- **Time Complexity:** $O(N^2)$, where $N$ is the number of quadrature nodes per dimension. The complexity is independent of the scene complexity, depending only on the chosen quadrature order.
+- **Memory Complexity:** $O(1)$ auxiliary space. The algorithm is stateless and requires only scalar variables for accumulation.
+- **Performance:** For low quadrature orders (e.g., 2 or 4), the method is extremely fast and suitable for real-time voxelization or dense point cloud processing [S1, unofficial]. Accuracy improves with higher orders, but the $N^2$ scaling means order 8 requires 64 evaluations per sphere-box pair.
+- **Strengths:** Simple implementation; no complex geometric clipping logic required; robust for partial intersections; easy to parallelize.
+- **Limitations:** Numerical approximation; accuracy depends on quadrature order; slower than analytical methods for simple cases (though analytical methods have many edge cases).
+- **When to use:** When implementing voxelization for point clouds or spheres where simplicity and robustness are prioritized over maximum speed, or when analytical clipping is too complex to implement correctly.
+- **When not to use:** When extremely high performance is required for millions of spheres and low precision is acceptable, or when exact analytical volume is mandated.
+
+## Background
+This method is implemented in the `point-cloud-voxelization` repository by Sammy Suliman [S1, unofficial]. It is used in the context of solid volume accumulation for voxelizing point clouds, where spheres are used to represent point neighborhoods or densities. The approach leverages standard numerical integration techniques to solve a geometric problem that would otherwise require complex case-based analytical clipping.
+
+## Sources
+[S1] SammySuliman/point-cloud-voxelization, https://github.com/SammySuliman/point-cloud-voxelization, fetched 2026-10-27 (unofficial)

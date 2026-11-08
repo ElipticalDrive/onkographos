@@ -3,58 +3,58 @@
 Also called: 3D to 2D Tiled Texture Coordinate Conversion, XYZ to XY Tile Mapping
 
 ## Overview
-Sliced Volume Coordinate Mapping converts 3D voxel coordinates into 2D texture coordinates for volumetric data stored as a tiled grid of 2D slices within a single image [S1, unofficial]. It solves the problem of accessing 3D volumetric data in renderers that only support 2D texture sampling by mapping a 3D point to two adjacent 2D slice coordinates [S1, unofficial]. It is distinguished from nearest-neighbor sampling by using linear interpolation between slices to reduce banding artifacts [S1, unofficial].
+Sliced Volume Coordinate Mapping converts 3D voxel coordinates into 2D texture coordinates for volumetric data stored as a tiled grid of 2D slices within a single 2D image [S1, unofficial]. It solves the problem of accessing 3D volumetric data in raster-based renderers that lack native 3D texture sampling support by flattening the volume into a 2D layout [S1, unofficial]. It differs from standard 3D texture sampling by requiring explicit coordinate transformation logic to resolve 3D positions to 2D image pixels, and it uses linear interpolation between adjacent slices to reduce banding artifacts compared to nearest-neighbor sampling [S1, unofficial].
 
 ## How it works
-**Inputs:**
-- 3D voxel coordinates $(x, y, z)$, typically normalized to $[0, 1]$ or integer indices depending on the source domain.
-- $ZSlices$: Total number of slices in the volume (e.g., 128 or 361) [S1, unofficial].
-- $TileColumns$: Number of tiles horizontally in the 2D image grid [S1, unofficial].
-- $NumRows$: Number of rows of tiles vertically in the 2D image grid [S1, unofficial].
-
-**Outputs:**
-- Two 2D coordinate vectors $Output1$ and $Output2$, each containing $(u, v, 0)$ for the two adjacent slices [S1, unofficial].
-- $InterpolationMix$: The weight for linear interpolation between the two slices [S1, unofficial].
+**Inputs and Outputs:**
+*   **Inputs:** Continuous 3D voxel coordinates $(x, y, z)$ normalized to $[0, 1]$; total number of slices $ZSlices$; number of tile columns $TileColumns$; number of rows per tile $NumRows$.
+*   **Outputs:** Two 2D coordinate vectors $(u_1, v_1, 0)$ and $(u_2, v_2, 0)$ corresponding to the two adjacent slices, and an interpolation weight $w$.
 
 **Data Structures:**
-The volume is stored in a single 2D image where tiles are arranged in a grid. Each tile corresponds to one $z$-slice of the volume. The tiles are laid out row-major:
-- Tile $(0,0)$ is the top-left.
-- Tile $(c, r)$ is at column $c$ and row $r$.
-- The total number of tiles is $TileColumns \times NumRows$.
+No complex data structures are required. The method relies on scalar arithmetic and integer indexing. The volume is assumed to be stored in a 2D image where tiles are arranged in a grid of $TileColumns \times TileRows$. Each tile contains a 2D slice of the volume.
+
+**Parameters:**
+*   $ZSlices$: Total number of slices in the volume (e.g., 128 or 361) [S1, unofficial].
+*   $TileColumns$: Number of tiles horizontally in the 2D image [S1, unofficial].
+*   $NumRows$: Number of rows of pixels in each tile [S1, unofficial].
 
 **Steps:**
-1. **Clamp and Scale Z:** Clamp $z$ to $[0, 1]$ and scale by $ZSlices$ to get a continuous slice index.
-   $$ \text{slice} = \min(1, \max(z, 0)) \times ZSlices $$
-   This prevents out-of-bounds access for $z$ outside the valid range [S1, unofficial].
+1.  **Clamp and Scale Z:** Clamp the input $z$ coordinate to $[0, 1]$ and scale it by $ZSlices$ to get a continuous slice index $s$.
+    $$ s = \min(1, \max(z, 0)) \times ZSlices $$
+    This prevents out-of-bounds access [S1, unofficial].
 
-2. **Determine Integer Slice Indices:**
-   $$ \text{sliceNo1} = \lfloor \text{slice} \rfloor $$
-   $$ \text{sliceNo2} = \text{sliceNo1} + 1 $$
-   These represent the indices of the two adjacent slices to interpolate between [S1, unofficial].
+2.  **Determine Slice Indices:** Calculate the integer indices for the two adjacent slices to interpolate between.
+    $$ s_1 = \lfloor s \rfloor $$
+    $$ s_2 = s_1 + 1 $$
 
-3. **Calculate Tile Position for Slice 1:**
-   $$ \text{tilePosX1} = \text{sliceNo1} \pmod{TileColumns} $$
-   $$ \text{tilePosY1} = \left\lfloor \frac{\text{sliceNo1}}{TileColumns} + 0.001 \right\rfloor $$
-   The addition of $0.001$ to the row calculation avoids rounding crossover issues at tile boundaries [S1, unofficial].
+3.  **Calculate Tile Coordinates for Slice 1:** Determine the tile position $(tx_1, ty_1)$ in the 2D image grid for slice $s_1$.
+    $$ tx_1 = s_1 \pmod{TileColumns} $$
+    $$ ty_1 = \lfloor \frac{s_1}{TileColumns} + 0.001 \rfloor $$
+    The addition of $0.001$ to the division result before flooring avoids rounding crossover issues at tile boundaries [S1, unofficial].
 
-4. **Calculate Normalized UV for Slice 1:**
-   $$ \text{newx1} = \frac{\text{clip}(x) + \text{tilePosX1}}{TileColumns} $$
-   $$ \text{newy1} = \frac{\text{clip}(y) + \text{tilePosY1}}{NumRows} $$
-   Here, $\text{clip}(x)$ and $\text{clip}(y)$ refer to clamping $x$ and $y$ to the valid range of the tile (typically $[0, 1]$ if $x,y$ are normalized per-tile, or $[0, TileColumns-1]$ if they are global indices; the source code uses `clip(_x)` which implies clamping to $[0,1]$ if the input is normalized, but the addition of `tilePosX1` suggests `clip` might be identity or clamping to $[0, TileColumns-1]$ depending on context. Given the formula $\frac{\text{clip}(x) + \text{tilePosX1}}{TileColumns}$, if $x$ is in $[0,1]$, adding an integer tile index and dividing by total columns would be incorrect. However, the source code snippet shows `_newx1 = (clip(_x) + _tilePosX1)/ TileColumns`. If `_x` is a normalized coordinate $[0,1]$, this formula is likely incorrect unless `clip` returns a value in $[0, TileColumns-1]$. Let's assume standard normalized UV where $x \in [0,1]$ represents position within the tile. Then the global UV should be $\frac{\text{tilePosX1} + x}{TileColumns}$. The source code uses `clip(_x)`. In Blender's generated coordinates, $x$ is often $[0,1]$. If `clip` clamps to $[0,1]$, then adding `tilePosX1` (an integer) and dividing by `TileColumns` results in a value $>1$ if `tilePosX1 > 0`. This suggests `clip` might be clamping to $[0, TileColumns-1]$ or the source code implies `x` is already in tile-local integer coordinates. However, the most common interpretation for tiled textures is that $x,y$ are normalized $[0,1]$ within the tile. Let's look at the formula again: `(clip(_x) + _tilePosX1)/ TileColumns`. If `clip(_x)` is $x \in [0,1]$, and `tilePosX1` is e.g. 5, and `TileColumns` is 19, the result is $(5+x)/19 \approx 0.26$. This is correct for global UV. So `clip` likely ensures $x \in [0,1]$ [S1, unofficial].
+4.  **Calculate Normalized UV for Slice 1:** Compute the normalized texture coordinates $(u_1, v_1)$ within the 2D image.
+    $$ u_1 = \frac{\text{clip}(x) + tx_1}{TileColumns} $$
+    $$ v_1 = \frac{\text{clip}(y) + ty_1}{NumRows} $$
+    Here, $\text{clip}(x)$ and $\text{clip}(y)$ refer to clamping $x$ and $y$ to $[0, 1]$ [S1, unofficial].
 
-5. **Repeat for Slice 2:**
-   $$ \text{tilePosX2} = \text{sliceNo2} \pmod{TileColumns} $$
-   $$ \text{tilePosY2} = \left\lfloor \frac{\text{sliceNo2}}{TileColumns} + 0.001 \right\rfloor $$
-   $$ \text{newx2} = \frac{\text{clip}(x) + \text{tilePosX2}}{TileColumns} $$
-   $$ \text{newy2} = \frac{\text{clip}(y) + \text{tilePosY2}}{NumRows} $$
+5.  **Calculate Tile Coordinates for Slice 2:** Repeat for slice $s_2$.
+    $$ tx_2 = s_2 \pmod{TileColumns} $$
+    $$ ty_2 = \lfloor \frac{s_2}{TileColumns} + 0.001 \rfloor $$
 
-6. **Output Coordinates:**
-   $$ Output1 = (\text{newx1}, \text{newy1}, 0) $$
-   $$ Output2 = (\text{newx2}, \text{newy2}, 0) $$
+6.  **Calculate Normalized UV for Slice 2:**
+    $$ u_2 = \frac{\text{clip}(x) + tx_2}{TileColumns} $$
+    $$ v_2 = \frac{\text{clip}(y) + ty_2}{NumRows} $$
 
-7. **Calculate Interpolation Weight:**
-   $$ \text{InterpolationMix} = \text{slice} - \text{sliceNo1} $$
-   This weight is used to linearly interpolate between the sampled values from $Output1$ and $Output2$ [S1, unofficial].
+7.  **Output Coordinates:** The method outputs two 2D coordinate vectors for texture sampling.
+    $$ \text{Output}_1 = (u_1, v_1, 0) $$
+    $$ \text{Output}_2 = (u_2, v_2, 0) $$
+
+8.  **Calculate Interpolation Weight:** Determine the fractional part of the slice index for linear interpolation.
+    $$ w = s - s_1 $$
+
+**Pitfalls:**
+*   **Rounding Crossover:** Without the $0.001$ offset in the tile row calculation, floating-point precision errors can cause incorrect tile selection at boundaries [S1, unofficial].
+*   **Out-of-Bounds:** Failing to clamp $z$ before scaling can lead to accessing invalid slices [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -62,68 +62,54 @@ The volume is stored in a single 2D image where tiles are arranged in a grid. Ea
 ```python
 def sliced_volume_coordinate_mapping(x, y, z, ZSlices, TileColumns, NumRows):
     # Clamp z to [0, 1] and scale to slice index
-    slice = min(1.0, max(z, 0.0)) * ZSlices
+    z_clamped = max(0.0, min(1.0, z))
+    slice_index = z_clamped * ZSlices
     
     # Integer slice indices
-    sliceNo1 = floor(slice)
-    sliceNo2 = sliceNo1 + 1
+    slice1 = int(slice_index)
+    slice2 = slice1 + 1
     
-    # Tile position for slice 1
-    tilePosX1 = sliceNo1 % TileColumns
-    tilePosY1 = floor(sliceNo1 / TileColumns + 0.001)
+    # Tile positions for slice 1
+    tile_x1 = slice1 % TileColumns
+    tile_y1 = int(slice1 / TileColumns + 0.001)
     
     # Normalized UV for slice 1
-    # Assuming x, y are normalized [0, 1] within the tile
-    clip_x = max(0.0, min(1.0, x))
-    clip_y = max(0.0, min(1.0, y))
+    x_clamped = max(0.0, min(1.0, x))
+    y_clamped = max(0.0, min(1.0, y))
     
-    newx1 = (clip_x + tilePosX1) / TileColumns
-    newy1 = (clip_y + tilePosY1) / NumRows
+    u1 = (x_clamped + tile_x1) / TileColumns
+    v1 = (y_clamped + tile_y1) / NumRows
     
-    # Tile position for slice 2
-    tilePosX2 = sliceNo2 % TileColumns
-    tilePosY2 = floor(sliceNo2 / TileColumns + 0.001)
+    # Tile positions for slice 2
+    tile_x2 = slice2 % TileColumns
+    tile_y2 = int(slice2 / TileColumns + 0.001)
     
     # Normalized UV for slice 2
-    newx2 = (clip_x + tilePosX2) / TileColumns
-    newy2 = (clip_y + tilePosY2) / NumRows
-    
-    # Output coordinates
-    Output1 = (newx1, newy1, 0.0)
-    Output2 = (newx2, newy2, 0.0)
+    u2 = (x_clamped + tile_x2) / TileColumns
+    v2 = (y_clamped + tile_y2) / NumRows
     
     # Interpolation weight
-    InterpolationMix = slice - sliceNo1
+    weight = slice_index - slice1
     
-    return Output1, Output2, InterpolationMix
+    return (u1, v1, 0), (u2, v2, 0), weight
 ```
-
-**Parameters:**
-- $ZSlices$: Total number of slices (e.g., 128, 361) [S1, unofficial].
-- $TileColumns$: Number of tiles per row (e.g., 19 for a $19 \times 19$ grid) [S1, unofficial].
-- $NumRows$: Number of tile rows (e.g., 19 for a $19 \times 19$ grid) [S1, unofficial].
-
-**Edge Cases and Pitfalls:**
-- Rounding crossover issues at tile boundaries are avoided by adding $0.001$ to the row calculation [S1, unofficial].
-- Z-coordinate is clamped to $[0, 1]$ before scaling to prevent out-of-bounds access [S1, unofficial].
-- If $z$ is outside $[0, 1]$, it is clamped, which may cause artifacts at the volume boundaries [S1, unofficial].
 
 ## Subtopics
 
 ### [Voxel-to-Image Slicing (Tiled EXR)](8289-voxel-to-image-slicing-tiled-exr.md)
-A technique to render 3D voxel data in Cycles by converting raw volumetric data into a 2D tiled EXR image, where each tile represents a 2D slice of the volume along the Z-axis. This allows the renderer to access 3D data via 2D texture sampling.
+A specific application of this mapping in Blender's Cycles renderer, where voxel data is converted to a tiled EXR image. It differs by defining the specific image format and renderer context. Choose it when rendering 3D voxel data in Cycles without native 3D texture support.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per voxel, as it involves a constant number of arithmetic operations [S1, unofficial].
-- **Memory Complexity:** $O(1)$ auxiliary memory, as it only stores intermediate coordinates and weights [S1, unofficial].
-- **Performance:** The method is efficient and can be implemented in node-based systems (e.g., Blender's Node Expressions add-on) with minimal overhead [S1, unofficial].
-- **Strengths:** Reduces banding artifacts through linear interpolation between slices [S1, unofficial]. Allows 3D volume rendering in 2D texture-based renderers [S1, unofficial].
-- **Limitations:** Requires the volume to be pre-processed into a tiled 2D image format [S1, unofficial]. Precision issues may arise at tile boundaries if not handled correctly (mitigated by the $0.001$ offset) [S1, unofficial].
-- **When to Use:** When rendering volumetric data in a renderer that does not support 3D textures natively, or when using tiled EXR formats for efficient storage and access [S1, unofficial].
-- **When Not to Use:** When native 3D texture support is available and performance is not a constraint, as direct 3D sampling may be simpler [S1, unofficial].
+*   **Time Complexity:** $O(1)$ per sample, involving basic arithmetic operations.
+*   **Memory Complexity:** $O(1)$ auxiliary memory.
+*   **Performance:** The method is computationally inexpensive, allowing for real-time or near-real-time evaluation in shader networks [S1, unofficial].
+*   **Strengths:** Enables 3D volume rendering in 2D-only texture sampling environments; linear interpolation reduces banding artifacts compared to nearest-neighbor [S1, unofficial].
+*   **Limitations:** Requires manual setup of node groups or scripts; precision issues at tile boundaries if not handled correctly (mitigated by the 0.001 offset) [S1, unofficial].
+*   **When to Use:** When rendering volumetric data in raster-based renderers that do not support 3D textures, such as Cycles with tiled EXR inputs [S1, unofficial].
+*   **When Not to Use:** When native 3D texture sampling is available, as it is more direct and less prone to coordinate mapping errors.
 
 ## Background
-The method was described in the context of rendering voxel data in Blender's Cycles engine using tiled EXR images [S1, unofficial]. It was developed as a workaround to allow 3D volumetric data to be accessed via 2D texture sampling in a node-based shader system [S1, unofficial]. The specific implementation details, including the $0.001$ offset and interpolation logic, were shared by a community member on Blender Stack Exchange [S1, unofficial].
+The method originated from community solutions for rendering volumetric data in Blender's Cycles renderer, specifically when using tiled EXR images generated from smoke simulations [S1, unofficial]. It was developed to overcome the lack of native 3D texture support in Cycles by flattening the volume into a 2D grid of slices [S1, unofficial]. The technique is implemented using the Node Expressions add-on or manually built node groups in Blender [S1, unofficial].
 
 ## Sources
 [S1] Voxel data in Cycles, https://blender.stackexchange.com/questions/14995, fetched 2026-10-30 (unofficial)

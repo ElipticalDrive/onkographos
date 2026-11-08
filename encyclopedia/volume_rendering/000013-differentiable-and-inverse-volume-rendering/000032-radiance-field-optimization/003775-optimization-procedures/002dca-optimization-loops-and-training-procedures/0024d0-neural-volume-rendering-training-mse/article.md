@@ -1,124 +1,137 @@
 # Neural Volume Rendering Training (MSE)
 
-Also called: Standard Neural Volume Rendering Training, Photometric MSE Training
 
 ## Overview
-Neural Volume Rendering Training (MSE) is the foundational optimization procedure for learning implicit neural radiance fields by minimizing the mean squared error (MSE) between rendered images and ground-truth observations. It solves the inverse problem of recovering scene appearance (color and density) from 2D images by treating the volume rendering equation as a differentiable operator. It sets itself apart from sibling methods like [NeRF Training Loop](970-nerf-training-loop.md) by focusing specifically on the pixel-wise photometric loss metric, and from [Photometric Optimization](5790-photometric-optimization.md) by using the standard $L_2$ norm rather than perceptual or structural similarity metrics. It builds on [Optimization Loops and Training Procedures](5622-optimization-loops-and-training-procedures.md).
+Neural Volume Rendering Training (MSE) is the foundational optimization procedure for training Implicit Neural Representations (INRs) of volumetric data. It solves the problem of learning a continuous function that approximates a discrete volume by minimizing the Mean Squared Error (MSE) between the network's predictions and ground-truth samples. It sets itself apart from sibling methods like [NeRF Training Loop](970-nerf-training-loop.md) by operating directly on volumetric scalar fields (e.g., density, attenuation) rather than radiance fields, and from [Photometric Optimization](5790-photometric-optimization.md) by using pixel-space supervision rather than volume-space supervision.
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A dataset of $M$ images $\{I_m\}_{m=1}^M$, each with known camera poses $P_m$ and intrinsics. A neural network $\mathcal{N}_\theta$ parameterizing the scene (mapping 3D position $\mathbf{x}$ and view direction $\mathbf{d}$ to density $\sigma$ and color $\mathbf{c}$).
-*   **Outputs:** Optimized network weights $\theta$.
+*   **Input:** A discrete volume $V$ of size $N^3$, a neural network $f_\theta$ with parameters $\theta$, an encoding function $\gamma$, a learning rate $\eta$, and a batch size $B$.
+*   **Output:** A trained network $f_\theta$ representing $V$ as a continuous function.
 
 **Data Structures:**
-*   **Neural Network $\mathcal{N}_\theta$:** Typically a Multi-Layer Perceptron (MLP).
-    *   Input: Concatenated position $\mathbf{x} \in \mathbb{R}^3$ and view direction $\mathbf{d} \in \mathbb{R}^3$.
-    *   Output: Density $\sigma \in \mathbb{R}$ and color $\mathbf{c} \in \mathbb{R}^3$.
-    *   *Note:* Positional encoding is often applied to $\mathbf{x}$ and $\mathbf{d}$ before input to the MLP [S1, unofficial][S5, unofficial].
-*   **Ray Sampler:** Generates $N$ sample points $\{z_i\}_{i=1}^N$ along each ray $\mathbf{r}$, defined by near and far clipping planes.
+*   **Volume $V$:** A 3D grid of scalar values.
+*   **Network $f_\theta$:** A multilayer perceptron (MLP) or similar architecture taking encoded coordinates as input and outputting a scalar value.
+*   **Encoding $\gamma$:** A function mapping 3D coordinates to a higher-dimensional feature vector (e.g., positional encoding or hash encoding).
 
 **Numbered Steps:**
-1.  **Ray Generation:** For each training image $m$, generate a ray $\mathbf{r}_m$ for each pixel $(u,v)$ using camera intrinsics and pose $P_m$.
-2.  **Sampling:** Sample $N$ points $z_i$ along $\mathbf{r}_m$ within the bounding volume. Compute step sizes $\delta_i = z_{i+1} - z_i$.
-3.  **Network Query:** Evaluate $\mathcal{N}_\theta$ at each sample point $z_i$ to obtain density $\sigma_i$ and color $\mathbf{c}_i$.
-4.  **Volume Rendering:** Compute the predicted color $\hat{C}(\mathbf{r}_m)$ using the standard emission-absorption model:
-    $$
-    \hat{C}(\mathbf{r}_m) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
-    $$
-    where transmittance $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ and $T_1 = 1$.
-5.  **Loss Computation:** Calculate the Mean Squared Error (MSE) between the predicted color $\hat{C}(\mathbf{r}_m)$ and the ground-truth pixel color $C(\mathbf{r}_m)$:
-    $$
-    \mathcal{L}_{MSE} = \frac{1}{M} \sum_{m=1}^M \| \hat{C}(\mathbf{r}_m) - C(\mathbf{r}_m) \|^2
-    $$
-6.  **Backpropagation:** Compute gradients $\nabla_\theta \mathcal{L}_{MSE}$ using automatic differentiation or analytic inversion [S5, unofficial].
-7.  **Update:** Update parameters $\theta$ using an optimizer (e.g., Adam) [S1, unofficial].
+1.  For each training iteration:
+2.  Sample $B$ coordinates $\{(x_j, y_j, z_j)\}_{j=1}^B$ uniformly from the volume domain.
+3.  For each coordinate $(x_j, y_j, z_j)$:
+    a. Compute the encoded feature vector: $e_j \leftarrow \gamma(x_j, y_j, z_j)$.
+    b. Compute the network prediction: $\hat{v}_j \leftarrow f_\theta(e_j)$.
+    c. Retrieve the ground-truth value: $v_j \leftarrow \text{trilinear}(V, x_j, y_j, z_j)$.
+4.  Compute the MSE loss: $L \leftarrow \frac{1}{B} \sum_{j=1}^B (\hat{v}_j - v_j)^2$.
+5.  Update the network parameters: $\theta \leftarrow \theta - \eta \nabla_\theta L$.
+
+**Formulas:**
+The loss function is defined as:
+$$
+L = \frac{1}{B} \sum_{j=1}^B (\hat{v}_j - v_j)^2
+$$
+where $\hat{v}_j$ is the predicted value and $v_j$ is the ground-truth value obtained via trilinear interpolation from $V$.
 
 **Parameters:**
-*   $N$: Number of samples per ray. Typical values: 128–256 for coarse, 192–512 for fine [S1, unofficial].
-*   Learning Rate: Typically $1.6 \times 10^{-4}$ for Adam [S1, unofficial].
-*   Batch Size: Number of rays processed per iteration.
+*   **Batch Size ($B$):** Not given in the sources.
+*   **Learning Rate ($\eta$):** Not given in the sources.
+*   **Encoding ($\gamma$):** Positional or hash encoding [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Vanishing Gradients:** If $\sigma_i$ is too small, $T_i \approx 1$ and gradients w.r.t. $\sigma$ vanish. If $\sigma_i$ is too large, $T_i \approx 0$ and gradients w.r.t. $\mathbf{c}$ vanish.
-*   **Precision:** Use `exp(-sigma * delta)` carefully to avoid underflow/overflow. Standard practice is to compute transmittance iteratively: $T_{i+1} = T_i \exp(-\sigma_i \delta_i)$ [S5, unofficial].
-*   **Boundary Conditions:** Rays missing the scene must be handled (e.g., by clamping to background color or ignoring).
+*   **Interpolation:** Ground truth values are retrieved using trilinear interpolation, which assumes the volume is defined on a regular grid [S2, unofficial].
+*   **Sampling:** Uniform sampling from the volume domain is used, which may not capture rare features if the distribution is non-uniform [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def train_step(network, ray_sampler, ground_truth_images, optimizer):
+def train_inr(volume, network, encoding, learning_rate, batch_size, num_iterations):
     """
-    One step of Neural Volume Rendering Training with MSE loss.
+    Trains an Implicit Neural Representation (INR) for volumetric data.
+    
+    Args:
+        volume (ndarray): Discrete volume of size N^3.
+        network (nn.Module): Neural network f_theta.
+        encoding (callable): Encoding function gamma.
+        learning_rate (float): Step size for optimization.
+        batch_size (int): Number of samples per iteration.
+        num_iterations (int): Total number of training iterations.
+        
+    Returns:
+        nn.Module: Trained network f_theta.
     """
-    optimizer.zero_grad()
+    optimizer = torch.optim.Adam(network.parameters(), lr=learning_rate)
     
-    # 1. Sample rays from a batch of images
-    rays = ray_sampler.sample_batch(ground_truth_images)
-    # rays contains: origins, directions, near, far, and ground truth colors
+    for _ in range(num_iterations):
+        # Sample B coordinates uniformly from the volume domain
+        # Assuming volume is defined in [0, N-1]^3 or normalized [0,1]^3
+        # Adjust sampling range based on volume definition
+        coords = torch.rand(batch_size, 3) * volume.shape[0]
+        
+        # Encode coordinates
+        encoded_coords = encoding(coords)
+        
+        # Network prediction
+        predictions = network(encoded_coords)
+        
+        # Ground truth via trilinear interpolation
+        # Note: Trilinear interpolation requires coordinates to be within valid bounds
+        # and typically assumes a grid structure.
+        ground_truth = trilinear_interpolate(volume, coords)
+        
+        # Compute MSE loss
+        loss = torch.mean((predictions - ground_truth) ** 2)
+        
+        # Gradient update
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+    return network
+
+def trilinear_interpolate(volume, coords):
+    """
+    Performs trilinear interpolation on a 3D volume.
     
-    # 2. Sample points along rays
-    z_vals = ray_sampler.sample_points(rays.origins, rays.directions, rays.near, rays.far)
-    # z_vals shape: (num_rays, num_samples)
-    
-    # 3. Query network for density and color
-    # positions shape: (num_rays, num_samples, 3)
-    positions = rays.origins + rays.directions.unsqueeze(1) * z_vals.unsqueeze(2)
-    
-    # Flatten for network input
-    flat_positions = positions.view(-1, 3)
-    flat_directions = rays.directions.unsqueeze(1).expand_as(positions).view(-1, 3)
-    
-    sigma, color = network(flat_positions, flat_directions)
-    sigma = sigma.view(rays.origins.shape[0], -1)
-    color = color.view(rays.origins.shape[0], -1, 3)
-    
-    # 4. Compute step sizes
-    deltas = z_vals[:, 1:] - z_vals[:, :-1]
-    # Add a small epsilon to avoid division by zero or log(0) issues if needed
-    # In standard DVR, deltas are just differences
-    
-    # 5. Compute transmittance and rendered color
-    # T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
-    # We compute alpha_i = 1 - exp(-sigma_i * delta_i)
-    alpha = 1.0 - torch.exp(-sigma[:, :-1] * deltas)
-    
-    # Transmittance T_i
-    # T_1 = 1, T_i = T_{i-1} * (1 - alpha_{i-1})
-    # Using cumulative product for efficiency
-    T = torch.cumprod(torch.exp(-sigma[:, :-1] * deltas), dim=1)
-    T = torch.cat([torch.ones_like(T[:, :1]), T[:, :-1]], dim=1) # T_1 = 1
-    
-    # Rendered color
-    # C = sum_{i=1}^N T_i * alpha_i * c_i
-    rendered_color = torch.sum(T * alpha.unsqueeze(2) * color[:, :-1, :], dim=1)
-    
-    # 6. Compute MSE Loss
-    gt_color = rays.colors # Shape: (num_rays, 3)
-    loss = torch.mean((rendered_color - gt_color) ** 2)
-    
-    # 7. Backpropagate and update
-    loss.backward()
-    optimizer.step()
-    
-    return loss.item()
+    Args:
+        volume (ndarray): 3D array of shape (N, N, N).
+        coords (Tensor): Tensor of shape (B, 3) with coordinates.
+        
+    Returns:
+        Tensor: Interpolated values of shape (B,).
+    """
+    # Implementation details for trilinear interpolation
+    # This is a standard operation and assumed to be available
+    # or implemented as a helper function.
+    # For the purpose of this pseudocode, we assume a standard
+    # trilinear interpolation function is available.
+    return torch.nn.functional.grid_sample(
+        volume.unsqueeze(0).unsqueeze(0), # Add batch and channel dims
+        coords.unsqueeze(0).unsqueeze(0), # Add batch and channel dims
+        align_corners=True
+    ).squeeze()
 ```
 
 ## Subtopics
 
 ### Inverse Rendering for Texture/Attribute Refinement
-This variant uses inverse rendering to optimize texture attributes (TexF) by propagating image-space supervision through a differentiable rendering process. It minimizes a photometric loss between UV reference images and TexF renderings to reduce transfer and discretization errors during representation construction and refine the compressed neural field [S1, unofficial].
+This variant uses inverse rendering to optimize texture attributes (TexF) by propagating image-space supervision through a differentiable rendering process. It minimizes a photometric loss between UV reference images and TexF renderings to refine voxel attributes, reducing transfer and discretization errors [S1, unofficial].
+
+### INR Training Loop
+This is the standard loop for training INRs for volumetric data. It samples coordinates uniformly, encodes them, predicts values via the network, retrieves ground truth via trilinear interpolation, and updates parameters using MSE loss [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(M \cdot N \cdot D)$ per iteration, where $M$ is the number of rays, $N$ is the number of samples, and $D$ is the network depth/width.
-*   **Memory Complexity:** $O(M \cdot N)$ to store intermediate gradients and activations if using reverse-mode AD. Adjoint methods can reduce this to $O(M)$ [S5, unofficial].
-*   **Strengths:** Simple to implement; provides a strong baseline for photometric accuracy.
-*   **Limitations:** Prone to local minima; sensitive to sampling strategies; does not explicitly enforce geometric priors (unlike [Neural Surface Rendering Training (Eikonal & Boundary Regularization)](3430-neural-surface-rendering-training-eikonal-boundary-regulariz.md)).
-*   **When to use:** When ground-truth images are available and the primary goal is photometric fidelity.
-*   **When not to use:** When geometric accuracy is critical without additional regularization, or when data is sparse/incomplete (see [Global Optimization](5436-global-optimization.md)).
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** Simple to implement; directly minimizes the error in the volume domain.
+*   **Limitations:** Requires uniform sampling; may not capture rare features well; relies on trilinear interpolation for ground truth.
+*   **When to use:** When the goal is to learn a continuous representation of a scalar volume field.
+*   **When not to use:** When the goal is to learn a radiance field for novel view synthesis (use [NeRF Training Loop](970-nerf-training-loop.md)) or when image-space supervision is preferred (use [Photometric Optimization](5790-photometric-optimization.md)).
 
 ## Background
-Originating from the foundational work on Neural Radiance Fields (NeRF) by Mildenhall et al. (2020), this method established the standard pipeline for differentiable volume rendering. It relies on the differentiability of the volume rendering equation, allowing gradients to flow from the image space to the neural network parameters. It is widely used as the baseline for most neural rendering methods [S1, unofficial][S5, unofficial].
+This method is based on the general approach of training Implicit Neural Representations (INRs) for volumetric data, as described in [S2, unofficial]. It is also used in the context of refining surface-aligned texture fields (TexF) via inverse rendering, as described in [S1, unofficial].
 
 ## Sources
 [S1] Beyond UV Mapping: Mesh Texture Compression via Surface-Aligned Texture Fields, https://doi.org/10.48550/arxiv.2609.23606, fetched 2026-10-26 (unofficial)
+[S2] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)

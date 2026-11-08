@@ -1,0 +1,126 @@
+# Ray-Splat Intersection (Sphere Approximation)
+Also called: Approximate Sphere Splat Intersection, Splat Sphere Hit Test
+
+## Overview
+This method approximates the intersection of a viewing ray with a Gaussian splat by treating the splat as a sphere, rather than computing the exact intersection with its true ellipsoidal shape. It serves as a faster but less accurate alternative to ellipsoid-based raycasting [S1, unofficial]. It is used when high-fidelity geometric accuracy is traded for rendering performance, specifically in contexts where the splat's orientation and anisotropy are less critical than its overall volume presence [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ (normalized).
+- Splat center $\mathbf{c}$ (world space).
+- Splat scale components $s_x, s_y, s_z$.
+- Splat render mode (2D or 3D).
+
+**Outputs:**
+- Boolean indicating intersection.
+- Hit distance $t$ (if intersected).
+- Splat global index (if intersected).
+
+**Data Structures:**
+- `tempCenter`: Vector3 representing the splat's world-space center.
+- `tempScale`: Vector3 representing the splat's scale factors.
+- `SplatRenderMode`: Enum with values `TwoD` and `ThreeD`.
+
+**Steps:**
+1. **Calculate Approximate Radius:**
+   Compute a scalar radius $r$ that represents the splat's effective size. The formula depends on the render mode:
+   - If `SplatRenderMode.ThreeD`:
+     $$ r = \frac{s_x + s_y + s_z}{3} $$
+   - If `SplatRenderMode.TwoD` (or default):
+     $$ r = \frac{s_x + s_y}{2} $$
+   [S1, unofficial]
+
+2. **Ray-Sphere Intersection Test:**
+   Perform a standard ray-sphere intersection test using $\mathbf{o}$, $\mathbf{d}$, $\mathbf{c}$, and $r$. This builds on the analytical method described in [Ray-Sphere Intersection](3539-ray-sphere-intersection.md).
+   [S1, unofficial]
+
+3. **Record Hit:**
+   If the intersection test returns a valid hit (distance $t > 0$), record the hit point, the distance $t$, and the splat's global index.
+   [S1, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_splat_intersection_sphere_approx(ray_origin, ray_direction, splat_center, splat_scale, render_mode):
+    """
+    Performs a ray-splat intersection using a spherical approximation.
+    
+    Args:
+        ray_origin: Vector3, ray origin.
+        ray_direction: Vector3, normalized ray direction.
+        splat_center: Vector3, world-space center of the splat.
+        splat_scale: Vector3, scale components (x, y, z) of the splat.
+        render_mode: Enum, SplatRenderMode.TwoD or SplatRenderMode.ThreeD.
+        
+    Returns:
+        dict or None: Hit info with 't', 'point', 'index' if intersected, else None.
+    """
+    # Step 1: Calculate approximate radius
+    if render_mode == SplatRenderMode.ThreeD:
+        radius = (splat_scale.x + splat_scale.y + splat_scale.z) / 3.0
+    else:
+        # Default or TwoD mode
+        radius = (splat_scale.x + splat_scale.y) / 2.0
+    
+    # Step 2: Ray-sphere intersection
+    # Vector from ray origin to splat center
+    oc = ray_origin - splat_center
+    
+    # Quadratic coefficients for ray-sphere intersection: at^2 + bt + c = 0
+    a = dot(ray_direction, ray_direction)
+    b = 2.0 * dot(oc, ray_direction)
+    c = dot(oc, oc) - radius * radius
+    
+    discriminant = b * b - 4.0 * a * c
+    
+    if discriminant < 0:
+        return None
+    
+    sqrt_disc = sqrt(discriminant)
+    
+    # Calculate the two possible t values
+    t1 = (-b - sqrt_disc) / (2.0 * a)
+    t2 = (-b + sqrt_disc) / (2.0 * a)
+    
+    # Choose the smallest positive t (front face)
+    t = t1 if t1 > 0 else t2
+    if t <= 0:
+        t = t2 if t2 > 0 else None
+        
+    if t is None:
+        return None
+    
+    # Step 3: Record hit
+    hit_point = ray_origin + ray_direction * t
+    return {
+        't': t,
+        'point': hit_point,
+        'index': splat_global_index # Assumed available in context
+    }
+```
+
+**Edge Cases and Pitfalls:**
+- **Accuracy Loss:** This method ignores the splat's orientation and anisotropy. It is significantly less accurate than ellipsoid intersection, especially for highly stretched or rotated splats [S1, unofficial].
+- **Mode Selection:** The radius calculation differs between 2D and 3D modes. Using the wrong mode leads to incorrect radii [S1, unofficial].
+- **Performance vs. Quality:** This approximation is chosen specifically for speed when `raycastAgainstTrueSplatEllipsoid` is false [S1, unofficial].
+
+## Subtopics
+
+### Fast Sphere Rendering via Ray-Sphere Test
+A method to render spheres using only their radii and centers, avoiding polygon tessellation. It renders a rectangular region tightly fitting the perspective-projected sphere on the screen and performs a ray-sphere intersection test in the fragment shader [S2]. In the vertex shader, the rectangular region is specified. For each fragment in this region, an intersection test for the viewing ray and the sphere is performed in the fragment shader. Fragments with no intersection are discarded. Only the front or back face of the sphere, whichever is farther away from the previous intersection point, is rendered, as depth peeling does not require both [S2].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per splat for the intersection test, assuming constant-time arithmetic operations.
+- **Memory Complexity:** $O(1)$ additional memory per splat for the radius calculation.
+- **Performance:** Faster than ellipsoid intersection because it avoids solving the quadratic form for a general ellipsoid and computing normals via the ellipsoid gradient [S1, unofficial].
+- **Accuracy:** Lower than ellipsoid intersection. The spherical approximation may over- or under-estimate the splat's extent, leading to visual artifacts such as incorrect alpha blending or missing splats in dense regions [S1, unofficial].
+- **When to Use:** When rendering large numbers of splats and performance is critical, and the splats are relatively isotropic or the visual impact of the approximation is acceptable [S1, unofficial].
+- **When Not to Use:** When high geometric accuracy is required, or when splats are highly anisotropic and oriented in complex ways [S1, unofficial].
+
+## Background
+This method is commonly used in real-time Gaussian Splatting renderers as a fallback or optimization for ray-splat intersection. It is implemented in libraries such as GaussianSplats3D, where it is toggled via the `raycastAgainstTrueSplatEllipsoid` flag [S1, unofficial]. The concept of using spherical approximations for splats or metaballs dates back to earlier GPU-based rendering techniques for implicit surfaces, where ray-sphere tests were preferred for their simplicity and parallelizability [S2].
+
+## Sources
+[S1] mkkellogg/GaussianSplats3D, https://github.com/mkkellogg/GaussianSplats3D, fetched 2026-10-27 (unofficial)
+[S2] GPU‐based Fast Ray Casting for a Large Number of Metaballs, https://doi.org/10.1111/j.1467-8659.2008.01132.x, fetched 2026-11-01

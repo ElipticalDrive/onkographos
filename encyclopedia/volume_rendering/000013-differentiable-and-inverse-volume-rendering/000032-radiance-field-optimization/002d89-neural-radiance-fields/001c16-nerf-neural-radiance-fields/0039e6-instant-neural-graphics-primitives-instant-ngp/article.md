@@ -1,0 +1,125 @@
+# Instant Neural Graphics Primitives (Instant NGP)
+Also called: Instant NGP
+
+## Overview
+Instant NGP is an accelerated implementation of Neural Radiance Fields (NeRF) that reduces training time to under a minute and enables real-time rendering [S1, unofficial]. It achieves this by replacing the large MLP of the original NeRF with a Multi-resolution Hash Encoding data structure and a small fully-fused neural network [S1, unofficial]. Unlike standard NeRF, which relies on positional encoding and a deep MLP, Instant NGP uses hash-based feature lookups to drastically reduce parameter count and memory bandwidth bottlenecks [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of calibrated images with known camera poses and intrinsics.
+*   **Output:** A continuous volumetric scene representation allowing for novel view synthesis and real-time rendering.
+
+**Data Structures:**
+1.  **Multi-resolution Hash Encoding:** A collection of $L$ hash tables (grids). Each table $l$ has a resolution $R_l$ and a feature dimension $F$. The hash table maps spatial coordinates to feature vectors stored at grid vertices.
+    *   **Hash Function:** A hash function $H$ maps a 3D coordinate to an index in the hash table.
+    *   **Feature Storage:** Feature vectors are stored at the vertices of the grid. For a point $\mathbf{x}$, the features are interpolated from the 8 surrounding vertices in each resolution layer.
+2.  **Small MLP:** A shallow neural network (typically 3-4 layers) that takes the concatenated features from all hash layers and outputs density and color.
+3.  **Fully-fused MLP:** The entire network evaluation (hash lookups, interpolation, MLP forward pass) is implemented in a single CUDA kernel to maximize GPU cache efficiency [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Initialization:** Initialize hash tables with random feature vectors. Initialize the small MLP weights.
+2.  **Sampling:** For each pixel in a training image, cast a ray through the camera frustum. Sample points $\mathbf{x}_i$ along the ray.
+3.  **Feature Extraction:** For each sampled point $\mathbf{x}_i$:
+    *   For each resolution layer $l \in \{1, \dots, L\}$:
+        *   Compute the hash index for $\mathbf{x}_i$ in layer $l$.
+        *   Retrieve the 8 neighboring feature vectors from the hash table.
+        *   Trilinearly interpolate the features to get $\mathbf{f}_{i,l}$.
+    *   Concatenate all $\mathbf{f}_{i,l}$ to form the input vector $\mathbf{v}_i$.
+4.  **Network Forward Pass:** Pass $\mathbf{v}_i$ through the small MLP to predict density $\sigma_i$ and color $\mathbf{c}_i$.
+5.  **Volume Rendering:** Compute the rendered color $C$ using standard volume rendering integration:
+    $$ C = \sum_{i=1}^{N} T_i \alpha_i \mathbf{c}_i $$
+    where $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$, $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$, and $\delta_i$ is the distance between samples.
+6.  **Loss Calculation:** Compare the rendered color $C$ with the ground truth image pixel color. Compute loss (e.g., MSE).
+7.  **Optimization:** Update hash table features and MLP weights using gradient descent (e.g., Adam) [S1, unofficial].
+
+**Parameters:**
+*   **Number of Hash Tables ($L$):** Not specified in sources, but typically 16-20 in original implementation.
+*   **Hash Table Size:** Not specified in sources, but typically $2^{18}$ or $2^{19}$ entries per table.
+*   **Feature Dimension ($F$):** Typically 2 or 4.
+*   **MLP Layers:** Typically 3-4 layers with 64-256 hidden units.
+*   **Training Time:** 170 seconds for 20,000 iterations on a Lego model (800x800 resolution) on an RTX 3090 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Hash Collisions:** Hash collisions can cause artifacts. The hash function and table size are critical to minimize this [S1, unofficial].
+*   **Precision:** Floating-point precision in hash lookups and interpolation can affect quality [S1, unofficial].
+*   **Memory:** Hash tables consume significant GPU memory. The number of tables and their size must be balanced with available VRAM [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for Instant NGP training step
+# Assumes:
+# - hash_tables: List of L hash tables, each mapping indices to feature vectors
+# - mlp: Small neural network
+# - ray: Ray origin and direction
+# - gt_color: Ground truth color for the pixel
+
+def get_features(point, hash_tables, L):
+    features = []
+    for l in range(L):
+        table = hash_tables[l]
+        # Compute hash index for point in table l
+        index = hash_function(point, l)
+        # Get 8 neighbors and interpolate
+        # This is a simplified representation; actual implementation uses trilinear interpolation
+        neighbor_features = get_neighbor_features(point, table, index)
+        interpolated_feature = trilinear_interpolate(neighbor_features, point)
+        features.append(interpolated_feature)
+    return concat(features)
+
+def forward_pass(point, hash_tables, L, mlp):
+    features = get_features(point, hash_tables, L)
+    density, color = mlp(features)
+    return density, color
+
+def train_step(ray, gt_color, hash_tables, mlp, L):
+    # Sample points along ray
+    points = sample_points_along_ray(ray)
+    
+    # Forward pass for all points
+    densities = []
+    colors = []
+    for point in points:
+        density, color = forward_pass(point, hash_tables, L, mlp)
+        densities.append(density)
+        colors.append(color)
+    
+    # Volume rendering
+    rendered_color = volume_render(points, densities, colors)
+    
+    # Compute loss
+    loss = mse(rendered_color, gt_color)
+    
+    # Backpropagation and update
+    # Update hash table features and MLP weights
+    update_parameters(hash_tables, mlp, loss)
+    
+    return loss
+```
+
+## Subtopics
+
+### fV-SRN
+fV-SRN is an interactive rendering method for compressed Implicit Neural Representations (INRs) that uses a volumetric latent grid and a lightweight MLP to achieve real-time frame rates by fusing network evaluation into shared memory [S2, unofficial]. It differs from Neurcomp by eliminating global memory access via shared memory fusion, achieving significantly higher speed [S2, unofficial].
+*   **Definition:** Uses a volumetric latent grid (typically $32^3$ resolution, 16 features per vertex) paired with a lightweight MLP (four layers, 32 channels) [S2, unofficial].
+*   **Method:** Executes a custom GPU TensorCore kernel that fuses the entire network evaluation into 48 kB of on-chip shared memory, eliminating global memory access during inference [S2, unofficial]. Predicts density, gradient, and curvature in a single forward pass to avoid finite-difference gradient computation [S2, unofficial].
+*   **Parameters:** Latent grid resolution: typically $32^3$; MLP architecture: four layers, 32 channels; Shared memory size: 48 kB [S2, unofficial].
+*   **Performance:** Rendering speedup: 150–200× over Neurcomp; Shaded rendering speedup: 12×; Performance: 5–10 FPS at $512^2$ resolution on volumes up to $1024^3$ [S2, unofficial].
+*   **Pitfalls:** Training requires the full volume in GPU memory, limiting use to offline workflows or requiring sufficient VRAM [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Training time is significantly reduced compared to standard NeRF, achieving real-time rendering capabilities [S1, unofficial].
+*   **Memory Complexity:** Memory usage is dominated by the hash tables. The size of the hash tables and the number of layers determine the memory footprint [S1, unofficial].
+*   **Performance:** Training time for Instant NGP on a Lego model (800x800 resolution, 20,000 iterations) was 170s on an RTX 3090 [S1, unofficial].
+*   **Strengths:** Extremely fast training and rendering; real-time visualization; efficient memory usage compared to dense voxel grids.
+*   **Limitations:** Hash collisions can cause artifacts; memory usage can still be high for very large scenes; quality may be lower than high-quality NeRF variants with longer training times [S1, unofficial].
+*   **When to use:** When fast training and real-time rendering are required, and high-quality novel view synthesis is needed.
+*   **When not to use:** When maximum possible image quality is required and training time is not a constraint.
+
+## Background
+Instant NGP was introduced by NVIDIA in 2022 as a significant improvement over the original NeRF paper, which suffered from slow training and rendering times [S1, unofficial]. The core innovation was the Multi-resolution Hash Encoding, which replaced the positional encoding and large MLP of NeRF with a hash-based feature lookup system [S1, unofficial]. This allowed for much faster training and real-time rendering, making NeRF technology more feasible for practical applications [S1, unofficial]. The method has been implemented in various frameworks, including CUDA and Taichi, demonstrating its efficiency and ease of use [S1, unofficial].
+
+## Sources
+[S1] Taichi NeRF (Part 1): Develop and Deploy Instant NGP without writing CUDA | Taichi Docs, https://docs.taichi-lang.org/blog/taichi-instant-ngp, fetched 2026-10-29 (unofficial)
+[S2] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,62 @@
+# Generic Operators
+Also called: Bilinear-cubic scene interpolation, Trilinear scene interpolation
+
+## Overview
+This family defines a set of primitive image processing and geometric operators used to transform voxel data (density, gradient, or binary masks) before or during the classification and rendering pipeline. Unlike the parent [1D Lookup Table with Interpolation](2528-1d-lookup-table-with-interpolation.md) which maps scalar values to color/opacity, these operators modify the spatial structure or intensity values of the volume itself to enhance surface detection, reduce artifacts, or prepare data for specific rendering techniques. They are distinguished from siblings by operating on the scene geometry or raw voxel intensities rather than defining the final visual appearance mapping.
+
+## Shared principles
+The operators share the following characteristics:
+1.  **Input Domain**: They operate on scalar voxel fields (density, intensity, or binary masks) defined on a regular 3D grid.
+2.  **Local Neighborhood**: Most operators rely on local neighborhood computations (e.g., central differences, distance transforms, or interpolation kernels) to determine values at specific points or faces.
+3.  **Pre-classification/Pre-rendering**: They are typically applied as preprocessing steps or as integral parts of the ray-casting loop to compute normals, boundaries, or filtered densities, rather than as the final transfer function step.
+4.  **Coordinate Systems**: Some operators (like $R_{n_c}$) explicitly distinguish between view-space and scene-space normal estimation, requiring coordinate transformations or specific sampling patterns relative to the ray or voxel center.
+
+## Subtopics
+
+### [Trilinear Scene Interpolation](2636-trilinear-scene-interpolation.md)
+Interpolates voxel values using trilinear interpolation. Used for smooth density estimation.
+
+### [Bilinear-Cubic Scene Interpolation](1811-bilinear-cubic-scene-interpolation.md)
+Combines bilinear interpolation in the slice plane with cubic interpolation along the viewing direction. Used to reduce slicing artifacts.
+
+### [Shape-based Binary Scene Interpolation (City Block)](2643-shape-based-binary-scene-interpolation.md)
+Interpolates binary scenes using city block (Manhattan) distance. Used for fast boundary approximation.
+
+### [Shape-based Binary Scene Interpolation (Euclidean Approx)](3287-shape-based-binary-scene-interpolation.md)
+Interpolates binary scenes using an approximation to Euclidean distance. More accurate than city block but more expensive.
+
+### [Segmentation using Thresholding](3589-segmentation-using-thresholding.md)
+Binary segmentation by applying a global or local threshold to voxel density. Used to isolate structures.
+
+### [Surface Detection (Integer Boundary)](3725-surface-detection-integer-boundary.md)
+Detects surfaces in binary scenes by identifying boundary faces with integer coordinates. Fast but coarse.
+
+### [Surface Detection (Real Boundary)](5347-surface-detection-real-boundary.md)
+Detects surfaces in grey scenes by computing the exact intersection of a threshold with voxel edges. Provides sub-voxel accuracy.
+
+### [Classification based on Density and Gradient](2528-classification-density-gradient.md)
+Classifies voxels based on both density magnitude and gradient magnitude. Used to distinguish surfaces from internal structures.
+
+### [Surface Rendering (View Space Normals)](2636-surface-rendering-view-space-normals.md)
+Renders surfaces using normals estimated in view space. Provides consistent lighting regardless of view direction.
+
+### [Surface Rendering (Scene Space Normals - Central Diff)](1811-surface-rendering-scene-space-central-diff.md)
+Estimates scene space normals using central differences of density at 6 points around a boundary face. Accurate for smooth surfaces.
+
+### [Surface Rendering (Scene Space Normals - Eq 16-19)](3287-surface-rendering-scene-space-eq16-19.md)
+Estimates scene space normals using a specific method described in Equations 16-19 of the source. More complex normal estimation.
+
+### [Surface Rendering (Scene Space Normals - Voxel Center)](3589-surface-rendering-scene-space-voxel-center.md)
+Estimates scene space normals from the center of voxels. Simpler but less accurate than face-centered methods.
+
+### [Scene Filtering](3725-scene-filtering.md)
+Applies filtering operations as defined in Equations 3 and 4 of the source. Used to smooth noise or enhance features.
+
+### [Grey Transform with 2D Distance](5347-grey-transform-2d-distance.md)
+Transforms grey values based on 2D distance from the boundary within a slice. Used for edge enhancement or shading.
+
+## Background
+The generic operators were introduced by Kindlmann et al. in their work on "Imaging transforms for visualizing surfaces and volumes" [S1, unofficial]. The paper presents a framework for robust structure rendering, where these operators are combined in various configurations (e.g., R1-R6) to handle different types of volume data (binary, grey, robust, frail). The operators address specific challenges in volume visualization, such as slicing artifacts, inaccurate surface normals, and the need for sub-voxel boundary detection. The family is particularly relevant for techniques that rely on explicit surface extraction or normal-based shading within a volume rendering context.
+
+## Sources
+[S1] Imaging transforms for visualizing surfaces and volumes, https://doi.org/10.1007/bf03168529, fetched 2026-10-29 (unofficial)

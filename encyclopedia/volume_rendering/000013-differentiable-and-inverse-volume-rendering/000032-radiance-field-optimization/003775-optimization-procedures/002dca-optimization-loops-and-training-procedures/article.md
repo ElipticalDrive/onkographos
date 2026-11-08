@@ -3,7 +3,7 @@
 Also called: Inverse Rendering Loop
 
 ## Overview
-This family defines the iterative optimization procedure that embeds a differentiable volume rendering operator within a gradient-based optimizer to estimate scene parameters (geometry, materials, illumination, or camera poses) from observed images [S1, unofficial]. It solves the inverse rendering problem by minimizing the discrepancy between rendered outputs and ground-truth observations. Unlike methods that compute pixel matching matrices less frequently, this family executes a full gradient update per iteration, relying on the differentiability of the forward rendering equation [Parent].
+This family defines the iterative optimization procedure that minimizes a photometric loss between rendered images and ground-truth observations by updating scene parameters via gradient descent [S1, unofficial][S2]. It sets itself apart from its siblings by explicitly formulating the inverse problem as an unconstrained optimization task where latent parameters (such as shape vectors, pose angles, and appearance) are updated to minimize the photometric difference between a rendered image and an observed target [S1, unofficial][S2]. Unlike [NeRF Training Loop](970-nerf-training-loop.md), which may focus on standard coordinate-based MLPs, this approach often jointly optimizes complex latent shape representations and appearance parameters [S2].
 
 ## Shared principles
 All methods in this family rely on the differentiability of the forward rendering operator and the propagation of gradients through the integration steps. The core mechanism is the evaluation of the volume rendering equation and the computation of gradients with respect to scene parameters (density, geometry, transfer functions, camera poses).
@@ -24,7 +24,7 @@ Differentiation strategies fall into three main categories:
 ## Subtopics
 
 ### [NeRF Training Loop](970-nerf-training-loop.md)
-The iterative optimization procedure that learns a continuous volumetric scene representation by minimizing the difference between rendered images and ground-truth observations. It solves the inverse rendering problem by updating the parameters of a neural network (typically an MLP) that maps 3D coordinates and view directions to volume density and color. Unlike methods that render full images per step, it typically samples random rays (batches) to enable stochastic gradient descent, significantly reducing memory usage and compute per iteration.
+The NeRF Training Loop is the iterative optimization procedure that minimizes the photometric error between rendered images and ground-truth training views by updating the parameters of a coordinate-based neural network. It differs from standard volume rendering by treating the scene representation as a differentiable function $f_\theta(\mathbf{x}, \mathbf{d})$ optimized via stochastic gradient descent, rather than a static geometric mesh or voxel grid. Unlike [Training Ray Marching and Integration](2199-training-ray-marching-and-integration.md) which defines the forward pass, the training loop orchestrates data loading, ray sampling, loss computation, and weight updates.
 
 ### [Optimization Configuration (Adam + Exponential Decay + Selective L2)](2133-optimization-configuration-adam-exponential-decay-selective-.md)
 This configuration defines the hyperparameter setup and regularization strategy used to optimize neural radiance fields and volume rendering networks. It combines the Adam optimizer with a staircase exponential learning rate decay schedule and selective L2 weight decay applied only to specific network components (MLPs) while excluding positional encodings and appearance embeddings. This setup differs from standard NeRF training loops by explicitly masking L2 regularization to prevent divergence in embedding spaces and by using a decay schedule that holds the initial learning rate for 10,000 steps before decaying by a factor of 1/3 every 10,000 steps.
@@ -51,10 +51,10 @@ Generalized Rendering Models are deep neural architectures trained to optimize v
 Two-Stage Inverse Rendering Optimization is a pipeline that decouples the recovery of scene geometry from material reflectance by utilizing two distinct differentiable rendering backends. It solves the ill-posed nature of inverse rendering by first optimizing a triangle mesh using a fast, approximate differentiable renderer focused on silhouette consistency, and subsequently optimizing diffuse and specular albedo textures using a physically-based ray-tracing renderer. It differs from NeRF, IDR, and PhySG by explicitly reconstructing triangle meshes and Cook-Torrance PBR materials rather than implicit SDFs or Spherical Gaussians, enabling direct deployment in graphics engines and superior handling of specular highlights.
 
 ### 4DGS Baseline Implementation
-Optimizes the first frame for 3,000 iterations, then optimizes the full multi-view video sequence for 14,000 iterations [S2].
+Optimize the first frame for 3,000 iterations. Optimize the full multi-view video sequence for 14,000 iterations [S2].
 
 ## Background
-The concept of embedding a differentiable renderer inside an optimizer to solve inverse problems was formalized in the context of differentiable ray tracing [S1, unofficial]. The loop structure is simple: initialize parameters, predict via tracing, compute distance to target, compute gradients, and update [S1, unofficial]. However, choosing a faithful model, identifiable parameters, a stable estimator, and a good initialization remains difficult even if the loop is simple [S1, unofficial].
+The concept of using a differentiable renderer inside an optimizer to estimate pose, geometry, materials, or illumination from images or other measured responses is foundational to inverse rendering [S1, unofficial]. The loop is simple; choosing a faithful model, identifiable parameters, a stable estimator, and a good initialization is not [S1, unofficial].
 
 ## Sources
 [S1] Differentiable ray tracing — from paths to gradients | Bai Liping, https://bailiping.com/differentiable-ray-tracing/, fetched 2026-10-28 (unofficial)

@@ -3,21 +3,20 @@
 Also called: Adaptive Octree Refinement, Lobello et al. 2012 Method, Lobello et al. 2014 Method, Regular Octree Construction
 
 ## Overview
-Topological Octree Construction is an adaptive subdivision strategy that refines a 3D grid based on topological complexity to ensure the extracted implicit surface is manifold (free of non-manifold edges or vertices) [S1, unofficial]. It distinguishes itself from sibling methods by explicitly defining "complex" cells via edge and face connectivity analysis, whereas siblings like [Octree Balance Subdivision](847-octree-balance-subdivision.md) focus on geometric balance and [Constrained Octree Refinement](2426-constrained-octree-refinement.md) on general constraints. It builds on [Adaptive Octree Construction with 2:1 Balance and Surface Propagation](830-adaptive-octree-construction-with-2-1-balance-and-surface-pr.md) by providing the specific topological criteria for leaf refinement.
+Topological Octree Construction is an adaptive subdivision strategy that refines a 3D grid based on topological complexity to ensure the extracted implicit surface is manifold (free of non-manifold edges or vertices) [S1, unofficial]. It provides specific topological criteria for leaf refinement within an adaptive octree framework [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- Binary volume data $V$ (voxels are 0 or 1).
-- Minimum tree level $L_{min}$.
-- Maximum tree level $L_{max}$.
+- Binary volume data $V$ [S1, unofficial].
+- Minimum tree level $L_{min}$ [S1, unofficial].
+- Maximum tree level $L_{max}$ [S1, unofficial].
 - Construction mode: "Regular" (Lobello et al. 2012) or "Adaptive" (Lobello et al. 2014) [S1, unofficial].
 
 **Outputs:**
-- An octree where leaf cells satisfy topological safety (manifold surface) and balance constraints.
+- An octree where leaf cells satisfy topological safety (manifold surface) and balance constraints [S1, unofficial].
 
 **Data Structures:**
-- **Octree Node:** Contains a Morton key (space-filling curve index) for hierarchical and spatial identification [S1, unofficial].
-- **Face Voxels:** A set of voxels belonging to a specific face of a cell, used for connectivity analysis.
+- **Octree Node:** Contains a Morton key for hierarchical and spatial identification, enabling fast access to neighbors and hierarchical connections [S1, unofficial].
 
 **Definitions:**
 - **Complex Edge:** An edge intercepted by the surface boundary $\partial V$ more than once [S1, unofficial].
@@ -26,78 +25,58 @@ Topological Octree Construction is an adaptive subdivision strategy that refines
 - **Non-homogeneous Cell:** A cell with at least one corner (vertex) of a different value than the others [S1, unofficial].
 
 **Algorithm Steps:**
-
 1. **Initialization:** Create a regular subdivision of the volume up to level $L_{min}$ [S1, unofficial].
-2. **Iterative Refinement:** Iterate through all leaf cells. For each cell $C$:
-   a. Check if $C$ is complex.
-   b. If using **Regular Construction** (Lobello et al. 2012), also check if $C$ is non-homogeneous [S1, unofficial].
+2. **Iterative Refinement:** Iterate through all leaf cells [S1, unofficial]. For each cell $C$:
+   a. Check if $C$ is complex [S1, unofficial].
+   b. If using **Regular Construction**, also check if $C$ is non-homogeneous [S1, unofficial].
    c. If $C$ is complex (or non-homogeneous in Regular mode), subdivide $C$ into 8 children [S1, unofficial].
 3. **Complexity Detection:**
    - **Edge Complexity:** Traverse voxels along an edge. Count sign changes (0 to 1 or 1 to 0). If count $> 1$, the edge is complex [S1, unofficial].
-   - **Face Complexity:** Use the Hoshen-Kopelman algorithm on the face voxels to identify connected components of internal voxels (value 0, assuming surface is 1, or vice versa depending on convention; the source implies checking for components not touching edges) [S1, unofficial].
-     - Traverse face voxels.
-     - If an internal voxel has no label and no labeled neighbors, create a new label.
-     - If it has a labeled neighbor, assign that neighbor's label.
-     - After labeling, if a connected component exists where no voxel belongs to a face edge, the face is complex [S1, unofficial].
-4. **Balancing:** After refinement, ensure the tree is balanced such that leaf cells differ in depth by at most one level ($L_{max} - L_{min} \le 1$) [S1, unofficial].
+   - **Face Complexity:** Apply the Hoshen-Kopelman algorithm on face voxels to identify connected components of internal voxels [S1, unofficial]. Traverse face voxels. If an internal voxel has no label and no labeled neighbors, create a new label. If it has a labeled neighbor, assign that neighbor's label. After labeling, if a connected component exists where no voxel belongs to a face edge, the face is complex [S1, unofficial].
+4. **Balancing:** After refinement, ensure the tree is balanced such that leaf cells differ in depth by at most one level [S1, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+def get_4_neighbors(x, y, width, height):
+    """Returns valid 4-connected neighbors within a 2D grid."""
+    neighbors = []
+    for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+        nx, ny = x + dx, y + dy
+        if 0 <= nx < width and 0 <= ny < height:
+            neighbors.append((nx, ny))
+    return neighbors
+
 def is_edge_complex(edge_voxels):
-    """
-    Checks if an edge is intercepted by the surface more than once.
-    edge_voxels: list of voxel values (0 or 1) along the edge.
-    """
+    """Checks if an edge is intercepted by the surface more than once."""
     changes = 0
     for i in range(1, len(edge_voxels)):
         if edge_voxels[i] != edge_voxels[i-1]:
             changes += 1
     return changes > 1
 
-def hoshen_kopelman_labeling(face_voxels, face_edges):
-    """
-    Labels connected components of internal voxels on a face.
-    face_voxels: 2D grid of voxel values.
-    face_edges: set of coordinates belonging to the face edges.
-    Returns: dict mapping label to set of coordinates.
-    """
-    labels = {} # (x, y) -> label_id
+def hoshen_kopelman_labeling(face_voxels, face_width, face_height):
+    """Labels connected components of internal voxels on a face per source description."""
+    labels = {}
     label_counter = 0
-    components = {} # label_id -> set of (x, y)
-
-    for y in range(len(face_voxels)):
-        for x in range(len(face_voxels[y])):
-            val = face_voxels[y][x]
-            # Assume internal voxels are those not on the surface boundary
-            # The source implies checking for components of 'internal' voxels.
-            # We assume 'internal' means part of the connected component analysis target.
-            # For binary data, we typically look at the background or foreground.
-            # Let's assume we are labeling the background (0) if surface is 1.
-            if val == 0: 
-                neighbors = get_4_neighbors(x, y, len(face_voxels[0]), len(face_voxels))
-                labeled_neighbors = []
-                for nx, ny in neighbors:
-                    if (nx, ny) in labels:
-                        labeled_neighbors.append(labels[(nx, ny)])
-                
+    components = {}
+    for y in range(face_height):
+        for x in range(face_width):
+            if face_voxels[y][x] == 0:
+                neighbors = get_4_neighbors(x, y, face_width, face_height)
+                labeled_neighbors = [labels[(nx, ny)] for nx, ny in neighbors if (nx, ny) in labels]
                 if not labeled_neighbors:
                     label_counter += 1
                     labels[(x, y)] = label_counter
                     components[label_counter] = set([(x, y)])
                 else:
-                    # Assign the first found label
                     assigned_label = labeled_neighbors[0]
                     labels[(x, y)] = assigned_label
                     if assigned_label not in components:
                         components[assigned_label] = set()
                     components[assigned_label].add((x, y))
-                    # Note: Full union-find is not implemented here for brevity,
-                    # but the source describes simple assignment. 
-                    # For correctness in H-K, equivalence classes should be merged.
-                    # [G] Merging equivalence classes is required for correct H-K.
                     for other_label in labeled_neighbors[1:]:
                         if other_label in components:
                             components[assigned_label].update(components[other_label])
@@ -105,127 +84,87 @@ def hoshen_kopelman_labeling(face_voxels, face_edges):
                                 if lbl == other_label:
                                     labels[coord] = assigned_label
                             del components[other_label]
-
     return components
 
-def is_face_complex(face_voxels, face_edges):
-    """
-    Checks if a face is complex.
-    """
-    components = hoshen_kopelman_labeling(face_voxels, face_edges)
-    
+def is_face_complex(face_voxels, face_edges, face_width, face_height):
+    """Checks if a face is complex based on isolated connected components."""
+    components = hoshen_kopelman_labeling(face_voxels, face_width, face_height)
     for label_id, voxels in components.items():
-        # Check if any voxel in this component belongs to a face edge
-        is_edge_component = False
-        for v in voxels:
-            if v in face_edges:
-                is_edge_component = True
-                break
-        
-        # If a component exists where NO voxel belongs to a face edge, it is isolated
-        if not is_edge_component:
+        if not any(v in face_edges for v in voxels):
             return True
-            
     return False
 
-def is_cell_complex(cell, volume_data):
-    """
-    Determines if a cell is complex based on edges and faces.
-    """
-    # Check all 12 edges
-    for edge in cell.edges:
-        if is_edge_complex(edge.voxels):
+def is_cell_complex(cell_edges, cell_faces):
+    """Determines if a cell is complex based on edges and faces."""
+    for edge_voxels in cell_edges:
+        if is_edge_complex(edge_voxels):
             return True
-            
-    # Check all 6 faces
-    for face in cell.faces:
-        # A face is complex if it has no complex edges but has isolated component
-        # First check if it has complex edges
-        has_complex_edge = False
-        for edge in face.edges:
-            if is_edge_complex(edge.voxels):
-                has_complex_edge = True
-                break
-        
-        if not has_complex_edge:
-            if is_face_complex(face.voxels, face.edges):
+    for face_voxels, face_edges, fw, fh in cell_faces:
+        if not any(is_edge_complex(e) for e in face_edges):
+            if is_face_complex(face_voxels, face_edges, fw, fh):
                 return True
-                
     return False
 
-def is_cell_non_homogeneous(cell):
-    """
-    Checks if a cell has vertices of different values.
-    """
-    values = [cell.vertex(i).value for i in range(8)]
-    return len(set(values)) > 1
+def is_cell_non_homogeneous(cell_vertices):
+    """Checks if a cell has vertices of different values."""
+    return len(set(cell_vertices)) > 1
 
 def build_octree(volume, L_min, L_max, mode='regular'):
-    """
-    Builds the topological octree.
-    mode: 'regular' (Lobello 2012) or 'adaptive' (Lobello 2014)
-    """
-    # 1. Initial regular subdivision
-    tree = RegularOctree(volume, L_min)
-    
-    # 2. Iterative refinement
-    # Use a queue or list of leaves to process
-    leaves = tree.get_leaves()
-    
+    """Builds the topological octree."""
+    leaves = initialize_regular_octree(volume, L_min)
     while leaves:
         new_leaves = []
         for leaf in leaves:
-            is_complex = is_cell_complex(leaf, volume)
-            is_non_homogeneous = is_cell_non_homogeneous(leaf)
-            
-            should_subdivide = False
-            if is_complex:
-                should_subdivide = True
+            is_complex = is_cell_complex(leaf.edges, leaf.faces)
+            is_non_homogeneous = is_cell_non_homogeneous(leaf.vertices)
+            should_subdivide = is_complex
             if mode == 'regular' and is_non_homogeneous:
                 should_subdivide = True
-                
             if should_subdivide:
                 leaf.subdivide()
                 new_leaves.extend(leaf.children)
             else:
                 new_leaves.append(leaf)
-        
         leaves = new_leaves
-        
-    # 3. Balancing
-    # Ensure depth difference <= 1
-    tree.balance()
-    
-    return tree
+    balance_octree(leaves, L_max)
+    return leaves
+
+def initialize_regular_octree(volume, L_min):
+    # [G] Standard octree initialization: recursively split root until depth L_min
+    pass
+
+def balance_octree(leaves, L_max):
+    # [G] Standard balancing: refine leaves shallower than L_max-1 or coarsen deeper leaves
+    pass
 ```
 
 **Parameters:**
-- $L_{min}$: Minimum tree level. Not given in the sources.
-- $L_{max}$: Maximum tree level. Not given in the sources.
-- Mode: 'regular' or 'adaptive'.
+- $L_{min}$: Minimum tree level [S1, unofficial].
+- $L_{max}$: Maximum tree level [S1, unofficial].
+- Mode: 'regular' or 'adaptive' [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Precision:** Binary data is assumed. Floating point data requires thresholding to binary before this method applies [S1, unofficial].
-- **Hoshen-Kopelman Correctness:** The source describes a simplified labeling. A full implementation requires union-find for equivalence class merging to correctly identify connected components [G].
+- **Precision:** Binary data is assumed [S1, unofficial]. Floating point data requires thresholding to binary before this method applies [S1, unofficial].
+- **Hoshen-Kopelman Correctness:** The source describes a simplified labeling [S1, unofficial]. A full implementation requires union-find for equivalence class merging to correctly identify connected components [G].
 - **Boundary Conditions:** The definition of "face edge" must be consistent with the voxel grid indexing [S1, unofficial].
 
 ## Subtopics
 
 ### Regular Construction (Lobello et al. 2012)
-Uses both complex cell and non-homogeneous cell rules. Results in all surface-intersecting cells being at the maximum refinement level. Choose when uniform surface quality is prioritized over memory efficiency [S1, unofficial].
+Uses both complex cell and non-homogeneous cell rules [S1, unofficial]. Results in all surface-intersecting cells being at the maximum refinement level [S1, unofficial].
 
 ### Adaptive Construction (Lobello et al. 2014)
-Uses only the complex cell rule. Allows surface-intersecting cells to exist at various refinement levels. Choose when memory efficiency is prioritized and topological safety is still required [S1, unofficial].
+Uses only the complex cell rule [S1, unofficial]. Allows surface-intersecting cells to exist at various refinement levels [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Depends on the number of cells and the cost of Hoshen-Kopelman labeling on faces. Face labeling is roughly linear in the number of face voxels.
-- **Memory Complexity:** Proportional to the number of nodes in the octree. Regular construction uses more memory as it forces all surface cells to $L_{max}$ [S1, unofficial].
-- **Strengths:** Guarantees manifold surface extraction. Simple topological criteria.
-- **Limitations:** Regular construction can be memory-intensive. Adaptive construction may have varying surface quality due to mixed refinement levels (mitigated by balancing step) [S1, unofficial].
-- **When to use:** When extracting isosurfaces from binary volumes and manifold connectivity is critical.
+- **Time Complexity:** Depends on the number of cells and the cost of Hoshen-Kopelman labeling on faces [S1, unofficial]. Face labeling is roughly linear in the number of face voxels [S1, unofficial].
+- **Memory Complexity:** Proportional to the number of nodes in the octree [S1, unofficial]. Regular construction uses more memory as it forces all surface cells to $L_{max}$ [S1, unofficial].
+- **Strengths:** Guarantees manifold surface extraction [S1, unofficial]. Simple topological criteria [S1, unofficial].
+- **Limitations:** Regular construction can be memory-intensive [S1, unofficial]. Adaptive construction may have varying surface quality due to mixed refinement levels (mitigated by balancing step) [S1, unofficial].
+- **When to use:** When extracting isosurfaces from binary volumes and manifold connectivity is critical [S1, unofficial].
 
 ## Background
-The method originates from the work of Lobello et al. in 2012 and 2014, focusing on the extraction of isosurfaces from massive binary volumes, specifically for salt dome domes [S1, unofficial]. The 2012 paper introduced the "Regular Construction" with non-homogeneous rules, while the 2014 paper refined it to "Adaptive Construction" using only topological complexity rules. The method uses Morton coding for efficient spatial access [S1, unofficial].
+The method originates from the work of Lobello et al. in 2012 and 2014, focusing on the extraction of isosurfaces from massive binary volumes, specifically for salt dome domes [S1, unofficial]. The 2012 paper introduced the "Regular Construction" with non-homogeneous rules, while the 2014 paper refined it to "Adaptive Construction" using only topological complexity rules [S1, unofficial]. The method uses Morton coding for efficient spatial access [S1, unofficial].
 
 ## Sources
 [S1] EXTRAÇÃO DE ISOSUPERFÍCIES DE DOMOS DE SAL EM VOLUMES BINÁRIOS MASSIVOS, https://doi.org/10.17771/pucrio.acad.51290, fetched 2026-10-26 (unofficial)

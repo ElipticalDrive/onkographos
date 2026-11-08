@@ -1,0 +1,78 @@
+# Neuralangelo Hashgrid Configuration
+
+Also called: Neuralangelo Hashgrid Parameters
+
+## Overview
+This method defines the standard hyperparameter configuration for the hash-grid-based implicit neural representation used in Neuralangelo, as implemented in Sdfstudio [S1]. It solves the problem of balancing representation capacity and memory usage for high-fidelity surface reconstruction by specifying a fixed multi-level grid structure [S1]. It is distinguished from generic multi-level hashed grids by its specific resolution progression and feature dimensions tailored for SDF optimization [S1].
+
+## How it works
+The configuration defines the architecture of the hash grid used to store feature vectors for the neural field.
+
+**Inputs:** None (static configuration).
+**Outputs:** A set of hyperparameters defining the hash grid topology.
+
+**Data Structures:**
+The hash grid consists of $L$ levels. Each level $l$ has a resolution $R_l$ and maps 3D coordinates to feature vectors of size $F$.
+- **Levels ($L$):** 16 [S1].
+- **Resolutions ($R_l$):** A sequence from 32 to 4096 [S1]. The exact mapping of level index to resolution is not specified in the sources, but the range is inclusive [S1].
+- **Feature Size ($F$):** 8 [S1].
+- **Hashmap Size ($H$):** $2^{19}$ entries [S1].
+
+**Parameters:**
+- **Hash Function:** Not specified in the sources [G]. Typically a simple modulo or bitwise hash is used to map coordinate hashes to the $2^{19}$ bucket size.
+- **Training Epochs:** 100,000 [S1].
+- **Scheduler:** Schedulers and coarse-to-fine duration are scaled down proportionally from the original 500k epoch schedule to fit the 100k limit [S1].
+
+**Edge Cases and Pitfalls:**
+- **Background/Contraction:** For synthetic indoor datasets (e.g., Replica), background MLPs, appearance embeddings, and scene contraction are removed [S1].
+- **Initialization:** The method supports initialization via SDF inverted spheres, though the specific implementation details of this initialization are not provided in the sources [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Neuralangelo Hashgrid Configuration
+# Defines the static hyperparameters for the hash grid.
+
+def get_neuralangelo_config():
+    """
+    Returns the standard Neuralangelo hash grid configuration.
+    Based on Sdfstudio implementation [S1].
+    """
+    config = {
+        "num_levels": 16,
+        "resolution_min": 32,
+        "resolution_max": 4096,
+        "feature_size": 8,
+        "hashmap_size": 2**19,
+        "training_epochs": 100000,
+        "remove_background_mlp": True,
+        "remove_appearance_embedding": True,
+        "remove_scene_contraction": True
+    }
+    return config
+```
+
+## Subtopics
+
+### [Adaptive Feature Grids](10458-adaptive-feature-grids.md)
+A method using multiple spatially adaptive feature grids with learnable transformation matrices to concentrate capacity in high-error regions, addressing the inefficiency of fixed uniform placement [10458-adaptive-feature-grids.md].
+
+### Wu INR Compression
+A method scaling INR compression to tera-scale data on consumer hardware using hash grids combined with small fully fused MLPs and three engineering optimizations [S2, unofficial].
+1. **Sample-streaming rendering:** Provides a 3–8× speedup [S2, unofficial].
+2. **Macro-cell acceleration:** Enables empty-space skipping with a 40× speedup [S2, unofficial].
+3. **Out-of-core training:** Allows training on volumes exceeding GPU memory [S2, unofficial].
+Performance: On a DNS volume ($10,240 \times 7,680 \times 1,536$, ~950 GB double precision), it achieved 35.9 dB PSNR with a 1.5 GB model in under two hours on a single consumer GPU [S2, unofficial].
+
+## Operating characteristics
+- **Memory:** The hashmap size is fixed at $2^{19}$ entries [S1]. The total memory footprint depends on the feature size (8) and the number of levels (16), but the exact total bytes are not calculated in the sources [S1].
+- **Performance:** The configuration is designed for convergence within 100k epochs [S1].
+- **Limitations:** The sources do not provide specific time complexity or memory complexity formulas for the hash grid lookup itself [S1].
+
+## Background
+The configuration is based on the basic Neuralangelo implementation provided by Sdfstudio [S1]. The original implementation used a 500k epoch schedule, but it was observed that scaling down the schedulers and coarse-to-fine duration to 100k epochs resulted in similar convergence [S1]. This configuration is used in evaluations of RING-NeRF, NeuS-facto, and Neuralangelo on synthetic indoor datasets [S1].
+
+## Sources
+[S1] RING-NeRF : Rethinking Inductive Biases for Versatile and Efficient Neural Fields, https://doi.org/10.1007/978-3-031-72761-0_9, fetched 2026-10-30
+[S2] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)

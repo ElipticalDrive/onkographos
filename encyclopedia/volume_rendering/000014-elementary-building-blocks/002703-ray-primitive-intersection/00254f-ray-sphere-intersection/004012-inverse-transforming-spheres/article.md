@@ -1,0 +1,193 @@
+# Inverse Transforming Spheres
+
+Also called: Inverse Möbius Transformation of Spheres, Inverse Quaternion Möbius Transform for Spheres
+
+## Overview
+Inverse Transforming Spheres computes the coefficients $(\alpha', \beta', \gamma')$ of a sphere in "kernel space" (the domain of the inverse Möbius transformation) given the coefficients $(\alpha, \beta, \gamma)$ of that sphere in "world space" (the codomain) [S1, unofficial]. This allows a ray tracer to test if a world-space sphere intersects a kernel distance function by transforming the sphere into kernel space and performing a standard ray-sphere intersection [S1, unofficial]. It differs from forward transformation by solving for the pre-image coefficients directly via algebraic expansion of the quaternionic Möbius map, avoiding iterative root-finding [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Sphere coefficients in world space: $\alpha \in \mathbb{R}$, $\beta \in \mathbb{H}_0$ (pure quaternion), $\gamma \in \mathbb{R}$ [S1, unofficial].
+- Möbius transformation matrix coefficients: $a, b, c, d \in \mathbb{H}$ [S1, unofficial].
+
+**Outputs:**
+- Sphere coefficients in kernel space: $\alpha' \in \mathbb{R}$, $\beta' \in \mathbb{H}_0$, $\gamma' \in \mathbb{R}$ [S1, unofficial].
+
+**Data Structures:**
+- Quaternions are represented as 4-component vectors $(w, x, y, z)$ or $(q_0, q_1, q_2, q_3)$.
+- $\mathbb{H}_0$ denotes pure quaternions (scalar part is 0).
+- $\bar{q}$ denotes the quaternion conjugate.
+- $|q|^2 = q\bar{q}$ denotes the squared norm (scalar).
+- $\text{Re}(q)$ denotes the scalar part of $q$.
+
+**Formulas:**
+The implicit equation of a sphere/plane in quaternion space is:
+$$ \alpha(q\bar{q}) + \beta q + \bar{q}\bar{\beta} + \gamma = 0 $$
+where $q \in \mathbb{H}$ [S1, unofficial].
+
+The Möbius transformation is defined as:
+$$ \mathcal{L}(q) = (aq+b)(cq+d)^{-1} $$
+where $q, a, b, c, d \in \mathbb{H}$ [S1, unofficial].
+
+To find the original sphere coefficients, substitute $\mathcal{L}(q)$ into the sphere equation and clear denominators. The resulting coefficients for the original sphere are:
+
+$$ \alpha' = \alpha a \bar{a} + 2 \text{Re}(\bar{c} \beta a) + \gamma \bar{c} c $$
+$$ \beta' = \alpha \bar{b} a + \bar{d} \beta a + \bar{b} \bar{\beta} c + \gamma \bar{d} \bar{c} $$
+$$ \gamma' = \alpha b \bar{b} + 2 \text{Re}(\bar{d} \beta b) + \gamma d \bar{d} $$
+[S1, unofficial]
+
+*Note on $\beta'$:* The source text in Appendix A lists $\beta' = \alpha \bar{b} a + \bar{d} \beta a + \bar{b} \bar{\beta} c + \gamma \bar{d} \bar{c}$ [S1, unofficial]. However, the expanded equation in Appendix A shows the linear term coefficient as $(\alpha \bar{b} a + \bar{d} \beta a + \bar{b} \bar{\beta} c + \gamma \bar{d} c) q$. Since $\beta'$ must be a pure quaternion and $\bar{c}$ is the conjugate of $c$, the term $\gamma \bar{d} \bar{c}$ in the summary formula matches the structure of $\gamma \bar{d} c$ if we account for conjugation properties in the final assembly. We use the explicit summary formulas provided in the "formula" notes and Appendix A summary [S1, unofficial].
+
+**Steps:**
+1. Compute conjugates $\bar{a}, \bar{b}, \bar{c}, \bar{d}, \bar{\beta}$ [S1, unofficial].
+2. Compute scalar products and quaternion products required for $\alpha'$:
+   - $T_1 = a \bar{a}$ (scalar)
+   - $T_2 = \bar{c} \beta a$ (quaternion)
+   - $T_3 = \bar{c} c$ (scalar)
+   - $\alpha' = \alpha T_1 + 2 \text{Re}(T_2) + \gamma T_3$ [S1, unofficial]
+3. Compute terms for $\beta'$:
+   - $T_4 = \bar{b} a$ (quaternion)
+   - $T_5 = \bar{d} \beta a$ (quaternion)
+   - $T_6 = \bar{b} \bar{\beta} c$ (quaternion)
+   - $T_7 = \bar{d} \bar{c}$ (quaternion)
+   - $\beta' = \alpha T_4 + T_5 + \bar{\beta} T_6 + \gamma T_7$ [S1, unofficial]
+   - *Correction/Refinement:* The source formula is $\beta' = \alpha \bar{b} a + \bar{d} \beta a + \bar{b} \bar{\beta} c + \gamma \bar{d} \bar{c}$. Note that $\bar{\beta}$ is the conjugate of $\beta$. Since $\beta$ is pure, $\bar{\beta} = -\beta$. The term $\bar{b} \bar{\beta} c$ involves quaternion multiplication.
+4. Compute terms for $\gamma'$:
+   - $T_8 = b \bar{b}$ (scalar)
+   - $T_9 = \bar{d} \beta b$ (quaternion)
+   - $T_{10} = d \bar{d}$ (scalar)
+   - $\gamma' = \alpha T_8 + 2 \text{Re}(T_9) + \gamma T_{10}$ [S1, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def inverse_transform_sphere(alpha, beta, gamma, a, b, c, d):
+    """
+    Computes the coefficients (alpha_prime, beta_prime, gamma_prime) of the 
+    original sphere in kernel space, given world-space coefficients and 
+    Möbius matrix elements a, b, c, d.
+    
+    Inputs:
+    - alpha, gamma: float (real numbers)
+    - beta: tuple (w, x, y, z) representing a pure quaternion (w=0)
+    - a, b, c, d: tuple (w, x, y, z) representing quaternions
+    
+    Outputs:
+    - alpha_prime: float
+    - beta_prime: tuple (w, x, y, z) representing a pure quaternion
+    - gamma_prime: float
+    """
+    
+    # Helper: Quaternion conjugate
+    def conj(q):
+        return (q[0], -q[1], -q[2], -q[3])
+    
+    # Helper: Quaternion multiplication
+    def qmul(q1, q2):
+        w1, x1, y1, z1 = q1
+        w2, x2, y2, z2 = q2
+        return (
+            w1*w2 - x1*x2 - y1*y2 - z1*z2,
+            w1*x2 + x1*w2 + y1*z2 - z1*y2,
+            w1*y2 - x1*z2 + y1*w2 + z1*x2,
+            w1*z2 + x1*y2 - y1*x2 + z1*w2
+        )
+    
+    # Helper: Real part of quaternion
+    def re(q):
+        return q[0]
+    
+    # Helper: Scalar multiplication of quaternion
+    def smul(s, q):
+        return (s * q[0], s * q[1], s * q[2], s * q[3])
+    
+    # Helper: Add two quaternions
+    def qadd(q1, q2):
+        return (q1[0]+q2[0], q1[1]+q2[1], q1[2]+q2[2], q1[3]+q2[3])
+    
+    # Conjugates
+    a_bar = conj(a)
+    b_bar = conj(b)
+    c_bar = conj(c)
+    d_bar = conj(d)
+    beta_bar = conj(beta)
+    
+    # Calculate alpha'
+    # alpha' = alpha * a * a_bar + 2 * Re(c_bar * beta * a) + gamma * c_bar * c
+    term1_alpha = smul(alpha, qmul(a, a_bar)) # This is scalar, but stored as quat for consistency
+    # Note: a * a_bar is scalar. 
+    scalar_aa = qmul(a, a_bar)[0]
+    term1_alpha_val = alpha * scalar_aa
+    
+    term2_alpha_q = qmul(c_bar, qmul(beta, a))
+    term2_alpha_val = 2 * re(term2_alpha_q)
+    
+    scalar_cc = qmul(c_bar, c)[0]
+    term3_alpha_val = gamma * scalar_cc
+    
+    alpha_prime = term1_alpha_val + term2_alpha_val + term3_alpha_val
+    
+    # Calculate beta'
+    # beta' = alpha * b_bar * a + d_bar * beta * a + b_bar * beta_bar * c + gamma * d_bar * c_bar
+    # Note: Source says gamma * d_bar * c_bar. 
+    # Let's follow the source formula exactly: beta' = alpha * b_bar * a + d_bar * beta * a + b_bar * beta_bar * c + gamma * d_bar * c_bar
+    
+    term1_beta = qmul(b_bar, a)
+    term1_beta = smul(alpha, term1_beta)
+    
+    term2_beta = qmul(d_bar, qmul(beta, a))
+    
+    term3_beta = qmul(b_bar, qmul(beta_bar, c))
+    
+    term4_beta = qmul(d_bar, c_bar) # Source: d_bar * c_bar
+    term4_beta = smul(gamma, term4_beta)
+    
+    beta_prime = qadd(qadd(qadd(term1_beta, term2_beta), term3_beta), term4_beta)
+    
+    # Calculate gamma'
+    # gamma' = alpha * b * b_bar + 2 * Re(d_bar * beta * b) + gamma * d * d_bar
+    scalar_bb = qmul(b, b_bar)[0]
+    term1_gamma_val = alpha * scalar_bb
+    
+    term2_gamma_q = qmul(d_bar, qmul(beta, b))
+    term2_gamma_val = 2 * re(term2_gamma_q)
+    
+    scalar_dd = qmul(d, d_bar)[0]
+    term3_gamma_val = gamma * scalar_dd
+    
+    gamma_prime = term1_gamma_val + term2_gamma_val + term3_gamma_val
+    
+    return alpha_prime, beta_prime, gamma_prime
+```
+
+**Edge Cases and Pitfalls:**
+- **Degenerate Möbius Transform:** If $ad - bc = 0$ (determinant is zero), the transformation is not invertible. The source does not explicitly handle this, but standard Möbius theory requires non-zero determinant [S1, unofficial].
+- **Plane vs Sphere:** If $\alpha' = 0$, the resulting object in kernel space is a plane, not a sphere. The ray-sphere intersection method must handle planes [S1, unofficial].
+- **Precision:** Quaternion multiplication involves multiple floating-point operations. Accumulated error may affect the accuracy of the intersection test in kernel space [G].
+- **Pure Quaternion Constraint:** $\beta$ and $\beta'$ must be pure quaternions (scalar part 0). Numerical errors might introduce a small scalar component in $\beta'$. It should be zeroed out [G].
+
+## Subtopics
+
+### [3-Sphere Intersection (Trilateration)](5144-3-sphere-intersection-trilateration.md)
+Uses trilateration to intersect a ray with a sphere defined by three points. Choose when sphere center/radius are not explicitly available or when working with discrete point clouds.
+
+### [Ray-Splat Intersection (Sphere Approximation)](7123-ray-splat-intersection-sphere-approximation.md)
+Approximates splats as spheres for faster intersection. Choose when performance is critical and exact sphere geometry is not required.
+
+### [Pulsar Forward Pass (Sphere Intersection and Draw)](9396-pulsar-forward-pass-sphere-intersection-and-draw.md)
+Integrates sphere intersection into a rasterization forward pass. Choose for GPU-based rendering of large numbers of spheres.
+
+## Operating characteristics
+- **Time Complexity:** Constant time $O(1)$ per sphere, involving a fixed number of quaternion multiplications and additions.
+- **Memory Complexity:** $O(1)$ auxiliary space.
+- **Strengths:** Exact algebraic solution; no iterative approximation; enables efficient culling of spheres against kernel distance functions [S1, unofficial].
+- **Limitations:** Requires the Möbius transformation to be invertible; only applicable to spheres/planes; quaternion arithmetic is more expensive than standard 3D vector math [G].
+- **When to use:** When rendering Kernel-Reflection Sequences (KRS) or other conformally transformed implicit surfaces where spheres need to be tested against the kernel [S1, unofficial].
+- **When not to use:** For non-spherical primitives or when the transformation is not a Möbius transformation.
+
+## Background
+The method originates from the work on Kernel-Reflection Sequences (KRS) by [S1, unofficial]. It was introduced to allow efficient ray tracing of complex natural scenes by conformally distorting expansion levels. The technique leverages the properties of quaternionic Möbius transformations to map spheres in world space to spheres (or planes) in kernel space, enabling the use of standard ray-sphere intersection algorithms [S1, unofficial].
+
+## Sources
+[S1] Kernel-Reflection Sequences, https://doi.org/10.2312/stag.20161364, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,180 @@
+# GaussianRasterizer Initialization and Input Validation
+
+Also called: GaussianRasterizer, GaussianRasterizer Initialization and Validation, GaussianRasterizer initialization, Input validation for GaussianRasterizer, ToF Gaussian Rasterizer Initialization and Validation
+
+## Overview
+This method prepares input tensors for the CUDA-based differentiable rasterization backend by enforcing mutual exclusivity constraints on color and covariance representations and normalizing missing data into empty tensors. It ensures that the rasterizer receives a consistent state where exactly one color format (pre-computed or spherical harmonics) and exactly one covariance format (pre-computed or parametric) are active, preventing undefined behavior during the forward pass [S1, S2, unofficial].
+
+## How it works
+The initialization process occurs in two phases: static validation at construction time and dynamic validation/normalization at forward pass time. The goal is to sanitize inputs so the underlying `rasterize_gaussians` CUDA kernel receives valid, non-conflicting tensor layouts.
+
+### Inputs and Outputs
+**Inputs:**
+- `means3D`: Tensor of shape $(N, 3)$, 3D Gaussian centers.
+- `shs`: Tensor of shape $(N, K, C)$, Spherical Harmonics coefficients. $K$ is the number of bands, $C$ is channels (usually 3).
+- `colors_precomp`: Tensor of shape $(N, C)$, Pre-computed RGB colors.
+- `scales`: Tensor of shape $(N, 3)$, Log-scale factors.
+- `rotations`: Tensor of shape $(N, 4)$, Unit quaternions.
+- `cov3D_precomp`: Tensor of shape $(N, 6)$, Pre-computed 3D covariance matrix elements (symmetric positive definite).
+- `raster_settings`: Configuration object containing resolution, view/projection matrices, etc.
+
+**Outputs:**
+- Validated tensors ready for CUDA kernel invocation.
+- Raises exceptions if mutual exclusivity constraints are violated.
+
+### Data Structures
+The input tensors follow standard PyTorch layouts:
+- `means3D`: `float32`, $(N, 3)$
+- `shs`: `float32`, $(N, K, C)$ or empty
+- `colors_precomp`: `float32`, $(N, C)$ or empty
+- `scales`: `float32`, $(N, 3)$ or empty
+- `rotations`: `float32`, $(N, 4)$ or empty
+- `cov3D_precomp`: `float32`, $(N, 6)$ or empty
+
+### Steps
+1. **Color Representation Validation**: Check that exactly one of `shs` or `colors_precomp` is provided (not `None` and not empty in a way that implies absence, though the code treats `None` explicitly). If both are `None` or both are provided, raise an exception [S1, S2, unofficial].
+2. **Covariance Representation Validation**: Check that exactly one of the pair (`scales`, `rotations`) or `cov3D_precomp` is provided. If both are `None` or both are provided, raise an exception [S1, R2, unofficial].
+3. **Tensor Normalization**: Replace any `None` input tensors with empty tensors of appropriate shape. For `features` (if applicable), initialize as an empty tensor matching the feature dimension of `means3D` (slice `[..., :0]`) [S1, S2, unofficial].
+4. **CUDA Invocation**: Call the CUDA rasterization routine `rasterize_gaussians` with the prepared tensors and `raster_settings` [S1, S2, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def validate_and_prepare_gaussian_inputs(
+    means3D: torch.Tensor,
+    shs: torch.Tensor = None,
+    colors_precomp: torch.Tensor = None,
+    scales: torch.Tensor = None,
+    rotations: torch.Tensor = None,
+    cov3D_precomp: torch.Tensor = None,
+    features: torch.Tensor = None,
+    raster_settings: dict
+) -> tuple:
+    """
+    Validates and prepares inputs for GaussianRasterizer.
+    
+    Args:
+        means3D: (N, 3) tensor of 3D centers.
+        shs: (N, K, C) tensor of spherical harmonics coefficients.
+        colors_precomp: (N, C) tensor of pre-computed colors.
+        scales: (N, 3) tensor of log-scales.
+        rotations: (N, 4) tensor of quaternions.
+        cov3D_precomp: (N, 6) tensor of pre-computed covariances.
+        features: Optional feature tensor.
+        raster_settings: Configuration dictionary.
+        
+    Returns:
+        Tuple of validated tensors ready for CUDA kernel.
+    """
+    N = means3D.shape[0]
+    C = 3  # Default color channels
+    
+    # Step 1: Validate Color Representation
+    # Exactly one of shs or colors_precomp must be provided
+    has_shs = shs is not None
+    has_colors = colors_precomp is not None
+    
+    if has_shs == has_colors:
+        raise ValueError("Exactly one of 'shs' or 'colors_precomp' must be provided.")
+    
+    # Step 2: Validate Covariance Representation
+    # Exactly one of (scales, rotations) or cov3D_precomp must be provided
+    has_parametric_cov = scales is not None and rotations is not None
+    has_precomp_cov = cov3D_precomp is not None
+    
+    if has_parametric_cov == has_precomp_cov:
+        raise ValueError("Exactly one of 'scales/rotations' or 'cov3D_precomp' must be provided.")
+    
+    # Step 3: Normalize Tensors (Replace None with empty tensors)
+    if shs is None:
+        # Shape depends on SH bands, but if not used, empty is fine
+        shs = torch.empty(0, 0, 0, device=means3D.device)
+        
+    if colors_precomp is None:
+        colors_precomp = torch.empty(0, C, device=means3D.device)
+        
+    if scales is None:
+        scales = torch.empty(0, 3, device=means3D.device)
+        
+    if rotations is None:
+        rotations = torch.empty(0, 4, device=means3D.device)
+        
+    if cov3D_precomp is None:
+        cov3D_precomp = torch.empty(0, 6, device=means3D.device)
+        
+    if features is None:
+        # Initialize as empty tensor matching feature dim of means3D (slice [:, :0])
+        features = means3D[:, :0]
+        
+    # Step 4: Forward Pass Preparation
+    # In a real implementation, this would invoke the CUDA kernel
+    # rasterize_gaussians(means3D, shs, colors_precomp, scales, rotations, cov3D_precomp, features, raster_settings)
+    
+    return (means3D, shs, colors_precomp, scales, rotations, cov3D_precomp, features)
+```
+
+### Parameters
+- `N`: Number of Gaussians. Not given in the sources.
+- `K`: Number of SH bands. Not given in the sources.
+- `C`: Number of color channels (typically 3). Not given in the sources.
+
+### Edge Cases and Pitfalls
+- **Precision**: Empty tensors must be created on the same device as `means3D` to avoid CUDA errors during kernel launch [S1, S2, unofficial].
+- **Boundaries**: The validation logic strictly enforces mutual exclusivity. Providing both pre-computed and parametric representations will crash the rasterizer or produce undefined results if not caught [S1, S2, unofficial].
+- **Degenerate Input**: If `means3D` is empty, the validation still runs, but the CUDA kernel may handle zero Gaussians gracefully. Not given in the sources.
+
+## Subtopics
+
+### [GaussianRasterizationSettings](2924-gaussianrasterizationsettings.md)
+Configuration object passed to the rasterizer. Defines resolution, clipping, and blending modes.
+
+### [Gaussian Splat Rasterization (Vertex Shader)](3253-gaussian-splat-rasterization-vertex-shader.md)
+Alternative CPU/GPU hybrid approach using vertex shaders for splatting.
+
+### [Gaussian Splatting Rendering Pipeline](3415-gaussian-splatting-rendering-pipeline.md)
+End-to-end pipeline including training and rendering.
+
+### [Backpropagation with Per-Splat Parallelization](3533-backpropagation-with-per-splat-parallelization.md)
+Optimization for gradient computation.
+
+### [Masked-Rasterization](4366-masked-rasterization.md)
+Technique to skip empty pixels.
+
+### [Differentiable Radiative Rasterization](4526-differentiable-radiative-rasterization.md)
+Variant for radiative transfer.
+
+### [3D/2D Hybrid Gaussian Rasterization with Fallback Sigma](4812-3d-2d-hybrid-gaussian-rasterization-with-fallback-sigma.md)
+Hybrid approach for specific use cases.
+
+### [Opacity Rendering with SH Colors](7480-opacity-rendering-with-sh-colors.md)
+Specific handling of opacity and SH colors.
+
+### [3D Gaussian Unscented Transform (3DGUT)](9154-3d-gaussian-unscented-transform-3dgut.md)
+Alternative uncertainty-aware rendering.
+
+### [DARBF Backpropagation](10254-darbf-backpropagation.md)
+Advanced backpropagation technique.
+
+### [RoofGS Quadratic Form Expansion and Coefficient Folding](10258-roofgs-quadratic-form-expansion-and-coefficient-folding.md)
+Optimization for quadratic forms.
+
+### [Transmittance of Gaussian Splatting](10263-transmittance-of-gaussian-splatting.md)
+Handling transmittance in alpha compositing.
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ for validation, dominated by the CUDA kernel $O(N)$ or $O(P)$ where $P$ is pixels.
+- **Memory Complexity**: $O(N)$ for storing input tensors.
+- **Strengths**: Prevents runtime errors from invalid input combinations; simplifies API by handling tensor normalization.
+- **Limitations**: Adds a small CPU overhead for validation; does not optimize the rasterization itself.
+- **When to use**: Always required before calling the CUDA rasterization backend.
+- **When not**: Not applicable as a standalone method; it is a prerequisite step.
+
+## Background
+This validation logic is part of the standard implementation of 3D Gaussian Splatting rasterizers, specifically seen in unofficial repositories like VEG and gftorf [S1, S2, unofficial]. It ensures robustness in differentiable rendering pipelines by catching configuration errors early.
+
+## Sources
+[S1] VEG, https://github.com/ldyken53/VEG, fetched 2026-10-26 (unofficial)
+[S2] gftorf, https://github.com/brownvc/gftorf, fetched 2026-10-27 (unofficial)

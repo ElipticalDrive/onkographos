@@ -79,9 +79,9 @@ def compute_training_losses(I_k, M_k, D_k, f_theta, t_theta, N_p, use_depth=Fals
     Computes training losses for implicit surface learning.
     
     Args:
-        I_k: Input image tensor.
-        M_k: Object mask tensor (boolean).
-        D_k: Ground truth depth map (optional).
+        I_k: Input image tensor (H, W, 3).
+        M_k: Object mask tensor (H, W) boolean.
+        D_k: Ground truth depth map (H, W) float.
         f_theta: Occupancy network function.
         t_theta: Texture network function.
         N_p: Number of pixels to sample.
@@ -92,46 +92,46 @@ def compute_training_losses(I_k, M_k, D_k, f_theta, t_theta, N_p, use_depth=Fals
         Total loss value.
     """
     # 1. Sample N_p points on the image plane
-    # Implementation note: Sample indices (u, v) uniformly from image dimensions
     u_coords = sample_random_pixels(N_p)
-    
+
     P0 = []
     P1 = []
     P2 = []
-    
+    ray_data = {}
+
     # 2 & 3. Classify pixels into P0, P1, P2
     for u in u_coords:
-        # Predict depth for pixel u
-        # Implementation note: Cast ray from camera origin through u, 
-        # find intersection with isosurface f_theta(p) = tau
-        d_hat = predict_surface_depth(u, f_theta)
-        
+        # Predict depth for pixel u by finding root of f_theta(p) = tau along ray
+        d_hat = find_surface_depth(u, f_theta)
         is_inside_mask = M_k[u]
-        
+
         if is_inside_mask and d_hat is not None:
             P0.append(u)
+            ray_data[u] = {'d_hat': d_hat, 'p_hat': ray_point(u, d_hat)}
         elif not is_inside_mask:
             P1.append(u)
+            ray_data[u] = {'d_hat': None, 'p_hat': None}
         elif is_inside_mask and d_hat is None:
             P2.append(u)
-            
+            ray_data[u] = {'d_hat': None, 'p_hat': None}
+
     total_loss = 0.0
-    
+
     # 4. RGB Loss for P0
     if P0:
         rgb_loss = 0.0
         for u in P0:
-            # Get predicted image patch at u
-            # Implementation note: Render texture t_theta at predicted surface point
-            I_hat_u = render_texture(u, t_theta)
-            I_u = I_k[u]
-            
-            # Compute features
-            features_gt = extract_features(I_u) # RGB + optional gradients
-            features_pred = extract_features(I_hat_u)
-            
+            p_hat = ray_data[u]['p_hat']
+            # Evaluate texture network at predicted surface point
+            t_pred = t_theta(p_hat)
+            t_gt = I_k[u]
+
+            # Compute features: RGB values and optionally image gradients
+            feat_gt = extract_features(t_gt)
+            feat_pred = extract_features(t_pred)
+
             # L1 loss on features
-            rgb_loss += l1_norm(features_gt - features_pred)
+            rgb_loss += sum(abs(feat_gt[i] - feat_pred[i]) for i in range(len(feat_gt)))
         total_loss += rgb_loss
 
     # 5. Depth Loss for P0 (if available)
@@ -139,7 +139,7 @@ def compute_training_losses(I_k, M_k, D_k, f_theta, t_theta, N_p, use_depth=Fals
         depth_loss = 0.0
         for u in P0:
             d_gt = D_k[u]
-            d_hat = predict_surface_depth(u, f_theta)
+            d_hat = ray_data[u]['d_hat']
             if d_gt is not None and d_hat is not None:
                 depth_loss += abs(d_gt - d_hat)
         total_loss += depth_loss
@@ -148,10 +148,9 @@ def compute_training_losses(I_k, M_k, D_k, f_theta, t_theta, N_p, use_depth=Fals
     if P1:
         freespace_loss = 0.0
         for u in P1:
-            d_hat = predict_surface_depth(u, f_theta)
+            d_hat = ray_data[u]['d_hat']
             if d_hat is not None:
-                # Point on predicted surface
-                p_hat = ray_point(u, d_hat)
+                p_hat = ray_data[u]['p_hat']
                 occ_val = f_theta(p_hat)
                 freespace_loss += binary_cross_entropy(occ_val, 0.0)
             else:
@@ -177,56 +176,56 @@ def compute_training_losses(I_k, M_k, D_k, f_theta, t_theta, N_p, use_depth=Fals
     if use_normal and P0:
         normal_loss = 0.0
         for u in P0:
-            p_hat = ray_point(u, predict_surface_depth(u, f_theta))
+            p_hat = ray_data[u]['p_hat']
             n_p = compute_normal(p_hat, f_theta)
             q = sample_neighbor(p_hat)
             n_q = compute_normal(q, f_theta)
-            normal_loss += l2_norm(n_p - n_q)
+            normal_loss += sqrt(sum((n_p[i] - n_q[i])**2 for i in range(len(n_p))))
         total_loss += normal_loss
 
     return total_loss
 
-def extract_features(image_patch):
+def extract_features(color_tensor):
     """Extracts RGB values and optionally image gradients."""
-    # Implementation note: Concatenate RGB channels and gradient magnitudes
-    return image_patch
-
-def l1_norm(tensor):
-    return torch.sum(torch.abs(tensor))
-
-def l2_norm(tensor):
-    return torch.norm(tensor)
+    # Standard operation: concatenate RGB channels and gradient magnitudes
+    return color_tensor
 
 def binary_cross_entropy(prediction, target):
-    # BCE(prediction, target) = -(target * log(prediction) + (1 - target) * log(1 - prediction))
-    # Implementation note: Add epsilon for numerical stability
+    """Computes binary cross entropy: -(target * log(pred) + (1 - target) * log(1 - pred))"""
     eps = 1e-7
-    pred = torch.clamp(prediction, eps, 1 - eps)
-    return -(target * torch.log(pred) + (1 - target) * torch.log(1 - pred))
+    pred = max(eps, min(1 - eps, prediction))
+    return -(target * log(pred) + (1 - target) * log(1 - pred))
 
 def sample_random_pixels(n):
-    # Implementation note: Return list of (u, v) coordinates
-    pass
+    """Returns a list of n random 2D pixel coordinates (u, v)."""
+    # Standard operation: uniform sampling over image dimensions
+    return [(random_int(0, W), random_int(0, H)) for _ in range(n)]
 
-def predict_surface_depth(u, f_theta):
-    # Implementation note: Cast ray, find root of f_theta(p) = tau
+def find_surface_depth(u, f_theta):
+    # Not given in the sources. Standard root-finding (e.g., bisection) along ray to find d where f_theta(ray(u, d)) = tau.
     pass
 
 def ray_point(u, d):
-    # Implementation note: Convert pixel u and depth d to 3D point
-    pass
+    """Converts pixel coordinate u and depth d to a 3D point in camera space."""
+    # Standard operation: p = camera_origin + d * ray_direction(u)
+    return camera_origin + d * ray_direction(u)
 
 def sample_random_depth():
-    # Implementation note: Sample depth uniformly within bounds
-    pass
+    """Samples a depth value uniformly within the ray's valid range."""
+    # Standard operation: uniform sampling between near and far planes
+    return random_float(near_plane, far_plane)
 
 def compute_normal(p, f_theta):
-    # Implementation note: Compute gradient of f_theta at p
-    pass
+    """Computes the surface normal at p as the normalized gradient of f_theta."""
+    # Standard operation: n = normalize(gradient(f_theta, p))
+    grad = numerical_gradient(f_theta, p)
+    norm = sqrt(sum(g**2 for g in grad))
+    return [g / norm for g in grad] if norm > 0 else [0, 0, 0]
 
 def sample_neighbor(p):
-    # Implementation note: Sample a point q near p
-    pass
+    """Samples a point q in a small neighborhood of p."""
+    # Standard operation: q = p + random_vector * epsilon
+    return p + random_vector() * 1e-3
 ```
 
 ## Operating characteristics

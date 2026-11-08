@@ -3,12 +3,12 @@
 Also called: RayID Culling, RayID Technique for Avoiding Multiple Intersections
 
 ## Overview
-Ray ID Caching is an optimization technique used in volume rendering and ray tracing to eliminate redundant intersection tests when a single ray intersects the same geometric object multiple times across different voxels [S1, unofficial]. It solves the problem of "multiple intersection" overhead by storing a unique identifier (`rayID`) on each ray and the last intersecting `rayID` on each object [S1, unofficial]. Unlike methods that require precise voxel-object containment checks (such as Glassner's method), this technique allows for looser voxel lists because redundant intersections are filtered by the ID comparison rather than geometric precision [S1, unofficial].
+Ray ID Caching is an optimization technique used in volume rendering and ray tracing to eliminate redundant intersection tests when a single ray intersects the same geometric object multiple times across different voxels [S1, unofficial]. It solves the multiple intersection overhead by storing a unique identifier (`rayID`) on each ray and the last intersecting `rayID` on each object [S1, unofficial]. Unlike methods that require precise voxel-object containment checks (such as Glassner's method), this technique allows for looser voxel lists because redundant intersections are filtered by the ID comparison rather than geometric precision [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs**
-- **Input**: A set of rays, each with a unique `rayID`; a set of objects, each with a stored `object_rayID`; and a voxel traversal structure providing candidate objects for each ray.
-- **Output**: A reduced set of actual intersection tests performed, skipping those where the object has already been tested by the current ray.
+- **Input**: A set of rays, each with a unique `rayID`; a set of objects, each with a stored `object_rayID`; and a voxel traversal structure providing candidate objects for each ray [S1, unofficial].
+- **Output**: A reduced set of actual intersection tests performed, skipping those where the object has already been tested by the current ray [S1, unofficial].
 
 **Data Structures**
 1.  **Ray Structure**:
@@ -18,25 +18,26 @@ Ray ID Caching is an optimization technique used in volume rendering and ray tra
     -   Initialization: `object_rayID` is initialized to 0. No valid ray is ever allowed to have a `rayID` of 0 [S1, unofficial].
 
 **Algorithm Steps**
-1.  For each ray $r$ with `rayID` $R$, iterate through the list of candidate objects $o$ provided by the voxel traversal.
-2.  Let $O$ be the `object_rayID` stored in object $o$.
+1.  For each ray $r$ with `rayID` $R$, iterate through the list of candidate objects $o$ provided by the voxel traversal [S1, unofficial].
+2.  Let $O$ be the `object_rayID` stored in object $o$ [S1, unofficial].
 3.  Compare $R$ and $O$:
     -   If $R == O$: The object $o$ has already been intersected (or tested) by ray $r$. Skip the intersection test for $o$ [S1, unofficial].
     -   If $R \neq O$: Perform the geometric intersection test between ray $r$ and object $o$ [S1, unofficial].
-4.  If an intersection occurs (or if the test is performed regardless of outcome, depending on implementation intent to mark as "tested"):
-    -   Update the object's stored ID: Set $o.\text{object\_rayID} = R$ [S1, unofficial].
-    -   *Note*: The source states "If an intersection occurs, update the object's stored rayID" in one instance, but also says "If not [match], the intersection test is performed and the object's rayID is set to that of the ray's" in another. The primary goal is to prevent *multiple* tests. If the test is performed, the ID is updated to prevent a *second* test in the same traversal pass. If the test fails, the ID is still updated to prevent re-testing in the same pass, as the object is known to be "visited" by this ray in this context [S1, unofficial].
+4.  After the comparison and potential test, update the object's stored ID: Set $o.\text{object\_rayID} = R$ [S1, unofficial].
+5.  If the intersection test succeeds, process the hit according to the rendering pipeline [G].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def process_ray(ray, candidate_objects):
+def apply_ray_id_caching(ray, candidate_objects):
     """
     ray: object with attribute rayID (int)
     candidate_objects: list of objects, each with attribute object_rayID (int)
+    Returns: list of objects that actually required an intersection test.
     """
     current_ray_id = ray.rayID
+    tested_objects = []
     
     for obj in candidate_objects:
         # Step 1: Compare rayID with object's stored rayID
@@ -45,27 +46,27 @@ def process_ray(ray, candidate_objects):
             continue
         
         # Step 2: Perform intersection test
-        # Note: The source implies the test is performed if IDs don't match.
-        # The update happens after the test to prevent future redundant tests
-        # in the same traversal pass.
-        intersection = perform_intersection_test(ray, obj)
+        # The source implies the test is performed if IDs don't match.
+        intersection_hit = intersect_ray_object(ray, obj)
         
         # Step 3: Update object's stored rayID
         # This marks the object as "tested" by the current ray.
-        # This prevents redundant tests even if the intersection failed,
-        # ensuring the object is only tested once per ray per traversal.
+        # This prevents redundant tests in the same traversal pass.
         obj.object_rayID = current_ray_id
         
-        # If intersection is successful, process hit (e.g., update closest hit)
-        if intersection:
-            update_closest_hit(ray, intersection)
+        # Step 4: Process hit if successful
+        if intersection_hit:
+            tested_objects.append(obj)
+            
+    return tested_objects
 
-def initialize_objects(objects):
+def intersect_ray_object(ray, obj):
     """
-    Initialize object_rayID to 0 for all objects.
+    Standard geometric intersection routine.
+    Returns True if ray intersects obj, False otherwise.
     """
-    for obj in objects:
-        obj.object_rayID = 0
+    # Implementation varies by primitive type (triangle, sphere, etc.)
+    return False
 ```
 
 **Parameters**
@@ -79,14 +80,13 @@ def initialize_objects(objects):
 -   **Memory**: Requires storing an additional integer per object [S1, unofficial].
 
 ## Operating characteristics
--   **Time Complexity**: Adds one integer comparison per potential intersection. This is negligible compared to the cost of a full geometric intersection test, which is typically several orders of magnitude more expensive [S1, unofficial].
+-   **Time Complexity**: Adds one integer comparison per potential intersection [S1, unofficial]. This is negligible compared to the cost of a full geometric intersection test, which is typically several orders of magnitude more expensive [S1, unofficial].
 -   **Memory Complexity**: Adds one integer field per object [S1, unofficial].
 -   **Performance**: Significantly reduces the number of objects that must be intersected, especially as grid subdivision increases and objects span more voxels [S1, unofficial]. In test scenes with up to 3540 objects, the number of actual intersections remained small [S1, unofficial].
 -   **Strengths**: Allows for looser voxel lists (faster voxelization/traversal setup) because redundant intersections are filtered by ID rather than requiring tight voxel-object containment [S1, unofficial].
--   **Limitations**: Requires memory for the `object_rayID` field. Does not reduce the cost of the initial voxel traversal or voxelization [S1, unofficial].
 
 ## Background
-The technique was described in the context of "Fast Voxel Traversal for Ray Tracing" [S1, unofficial]. It addresses the "multiple intersection problem" where a ray intersects the same object multiple times as it traverses different voxels. The paper contrasts this with Glassner's method, which required computing the exact voxels an object occupies—a non-trivial task for complicated objects [S1, unofficial]. The implementation was tested on a Sun 3/75 running Unix, with scenes rendered at 512x512 resolution [S1, unofficial]. Future research directions mentioned include reducing reliance on floating-point calculations and adapting the algorithm to other space partitioning structures [S1, unofficial].
+The technique was described in the context of "Fast Voxel Traversal for Ray Tracing" [S1, unofficial]. It addresses the "multiple intersection problem" where a ray intersects the same object multiple times as it traverses different voxels [S1, unofficial]. The paper contrasts this with Glassner's method, which required computing the exact voxels an object occupies—a non-trivial task for complicated objects [S1, unofficial]. The implementation was tested on a Sun 3/75 running Unix, with scenes rendered at 512x512 resolution [S1, unofficial]. Future research directions mentioned include reducing reliance on floating-point calculations and adapting the algorithm to other space partitioning structures [S1, unofficial].
 
 ## Sources
 [S1] Fast Voxel Traversal for Ray Tracing, https://www.scribd.com/document/841721013/Voxel-Traversal-Paper, fetched 2026-10-25 (unofficial)

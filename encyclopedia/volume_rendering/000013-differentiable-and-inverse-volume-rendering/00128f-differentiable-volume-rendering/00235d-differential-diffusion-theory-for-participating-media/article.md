@@ -7,7 +7,7 @@ Differential Diffusion Theory is a differentiable rendering framework for partic
 
 ## How it works
 **Inputs:**
-*   Scene parameters $\pi$ (density $\rho$, scattering coefficient $\sigma_s$, absorption coefficient $\sigma_a$, anisotropy $\bar{\mu}$, lighting parameters).
+*   Scene parameters $\pi$ (density $\rho$, scattering coefficient $\sigma_s$, absorption coefficient $\sigma_a$, anisotropy $\bar{\mu}$, lighting parameters) [S1].
 *   Initial radiance fields $L_d^0$ (scalar fluence) and $\vec{L}_d^1$ (vector flux) from a previous iteration or initialization [S1].
 *   Target image (for optimization tasks) [S1].
 
@@ -27,13 +27,13 @@ Differential Diffusion Theory is a differentiable rendering framework for partic
 **Algorithm Steps:**
 
 1.  **Pre-computation of Optical Derivatives:**
-    Compute the derivatives of the transport cross-section $\sigma_{tr}$ and the diffusion coefficient $\kappa$ with respect to $\pi$ [S1].
+    Compute the derivatives of the transport cross-section $\sigma_{tr}$ and the diffusion coefficient $\kappa$ with respect to $\pi$ using direct calculation [S1].
     $$ \partial_\pi \sigma_{tr} = \partial_\pi \sigma_s \left(1 - \frac{\bar{\mu}}{3}\right) - \frac{\partial_\pi \bar{\mu} \sigma_s}{3} + \partial_\pi \sigma_a \quad (13) $$
     $$ \partial_\pi \kappa(x_u) = -\frac{\partial_\pi \rho(x_u)}{\sigma_{tr} \rho^2(x_u)} - \frac{\partial_\pi \sigma_{tr}}{\sigma_{tr}^2 \rho(x_u)} \quad (12) $$
     Note: $\kappa = \frac{1}{3\sigma_{tr}\rho}$ is the diffusion coefficient [S1].
 
 2.  **Compute Source Term Derivatives:**
-    Calculate the derivative of the source term $S(x_u)$ required for the differential diffusion equation [S1].
+    Compute the derivative of the source term $\partial_\pi S(x_u)$ for the differential diffusion equation [S1].
     $$ \partial_\pi S(x_u) = \partial_\pi \kappa_S(x_u) Q_{ri}^0(x_u) + \kappa_S(x_u) \partial_\pi Q_{ri}^0(x_u) - \frac{\sigma_S}{\sigma_{tr}} \nabla \cdot \partial_\pi \vec{Q}_{ri}^1(x_u) - \frac{\partial_\pi \sigma_S \sigma_{tr} - \partial_\pi \sigma_{tr} \sigma_S}{\sigma_{tr}^2} \nabla \cdot \vec{Q}_{ri}^1(x_u) \quad (14) $$
     Where:
     $$ \partial_\pi Q_{ri}^0(x_u) = \frac{1}{4\pi} \int_{\mathbb{S}^2} \partial_\pi L_{ri}(x_u, \omega') d\omega' \quad (15) $$
@@ -42,7 +42,7 @@ Differential Diffusion Theory is a differentiable rendering framework for partic
 
 3.  **Solve Differential Diffusion Equation for $\partial_\pi L_d^0$:**
     Solve the following PDE for $\partial_\pi L_d^0(x_t)$ using an iterative numerical solver (e.g., Jacobi or Gauss-Seidel) [S1]:
-    $$ \begin{aligned} & \nabla \partial \kappa(x_t) \cdot \nabla L_d^0(x_t) + \nabla \kappa(x_t) \cdot \nabla \partial L_d^0(x_t) \\ & + \partial_{\kappa} \kappa(x_t) \nabla^2 L_d^0(x_t) + \kappa(x_t) \nabla^2 \partial_{\kappa} L_d^0(x_t) \\ & - \partial_{\kappa} \kappa_d(x_t) L_d^0(x_t) - \kappa_d(x_t) \partial_{\kappa} L_d^0(x_t) + \partial_{\kappa} S(x_t) = 0. \end{aligned} \quad (11) $$
+    $$ \begin{aligned} & \nabla \partial_\pi \kappa(x_t) \cdot \nabla L_d^0(x_t) + \nabla \kappa(x_t) \cdot \nabla \partial_\pi L_d^0(x_t) \\ & + \partial_\pi \kappa(x_t) \nabla^2 L_d^0(x_t) + \kappa(x_t) \nabla^2 \partial_\pi L_d^0(x_t) \\ & - \partial_\pi \kappa_d(x_t) L_d^0(x_t) - \kappa_d(x_t) \partial_\pi L_d^0(x_t) + \partial_\pi S(x_t) = 0. \end{aligned} \quad (11) $$
     *   **Initialization:** Use the results from the previous iteration ($L_d^0$ and $\partial_\pi L_d^0$) as initial values to reduce convergence time [S1].
     *   **Iteration Count:** Typically 500 iterations are used for convergence in reported experiments [S1].
 
@@ -75,7 +75,7 @@ Differential Diffusion Theory is a differentiable rendering framework for partic
 **Edge Cases and Pitfalls:**
 *   **Vacuum/Thin Regions:** Classical diffusion approximation fails in transparent regions, leading to non-physical radiative fluxes. Flux-limited diffusion is required to modulate the diffusion coefficient in low-density or high-albedo regions [S1].
 *   **Boundary Errors:** Cumulative errors in gradient computation occur at the surface of the volume data or in vacuum regions due to ray marching bias and diffusion approximation limitations [S1].
-*   **Surface Models:** The method currently omits the Rendering Equation (RE) and assumes no surface models, neglecting interface integral derivatives [S1].
+*   **Surface Models:** The method is limited to volume-only scenes without surface models, omitting the Rendering Equation (RE) and neglecting the derivative of the interface integral [S1].
 
 ## Subtopics
 
@@ -98,7 +98,7 @@ Standard diffusion approximation for radiance computation without differentiabil
 *   **When Not to Use:** Scenes with significant surface interactions, highly transparent media without flux-limiting, or when exact unbiased gradients are required (use MC or RB) [S1].
 
 ## Background
-Originated from the work of Stam [Sta95] who introduced diffusion theory to computer graphics, and Koerner et al. [KPS*14] who introduced flux-limited diffusion. The specific differentiable framework was proposed by Cen et al. [S1] (2024), published in Computer Graphics Forum (doi: 10.1111/cgf.14956). It is the first differentiable rendering framework to compute scene parameter derivatives based on diffusion approximation [S1]. Implemented in Taichi [HLY*21] for real-time performance [S1].
+Originated from the work of Stam [Sta95] who introduced diffusion theory to computer graphics, and Koerner et al. [KPS*14] who introduced flux-limited diffusion [S1]. The specific differentiable framework was proposed by Cen et al. [S1] (2024), published in Computer Graphics Forum (doi: 10.1111/cgf.14956). It is the first differentiable rendering framework to compute scene parameter derivatives based on diffusion approximation [S1]. Implemented in Taichi [HLY*21] for real-time performance [S1].
 
 ## Sources
 [S1] A Differential Diffusion Theory for Participating Media, https://doi.org/10.1111/cgf.14956, fetched 2026-10-30

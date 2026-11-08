@@ -1,0 +1,103 @@
+# Virtual Texture Memory for Magnification Lenses
+
+Also called: Index volume brick mapping, Virtual texture coordinates
+
+## Overview
+Virtual Texture Memory for Magnification Lenses is a technique that enables arbitrary coordinate transformations, such as magnification, in volume rendering fragment shaders without rebinding textures [S1, unofficial]. It solves the problem of accessing high-resolution data subsets from a large dataset when only a limited portion can reside in on-board texture memory [S1, unofficial]. Unlike standard brick-based rendering where texture coordinates map directly to physical memory, this method uses an index volume to translate virtual coordinates to physical addresses, allowing the shader to modify coordinates on the fly while ensuring they point to the currently bound bricks [S1, unofficial].
+
+## How it works
+The method maintains all bricks in a single memory pool (a single 3D texture object) and uses a separate index volume (or texture) to locate bricks [S1, unofficial]. The fragment shader performs a virtual-to-physical address translation for each axis [S1, unofficial].
+
+**Inputs and Outputs:**
+*   **Input:** Virtual texture coordinate $t_v$ (normalized $[0, 1]$), number of voxels in the logical volume $n_v$, number of bricks along the axis $n_b$, brick size $s_b$, number of voxels in the physical memory space $n_p$, and the index texture lookup.
+*   **Output:** Physical texture coordinate $t_p$ (normalized $[0, 1]$) for sampling the brick pool.
+
+**Data Structures:**
+*   **Brick Pool:** A single 3D texture containing all bricks packed sequentially.
+*   **Index Texture:** A small texture storing the brick index $i_b$ for each region of the virtual volume.
+
+**Parameters:**
+*   $n_v$: Number of voxels along the axis in the virtual volume.
+*   $n_b$: Number of bricks along the axis.
+*   $s_b$: Size of a brick in voxels.
+*   $n_p$: Number of voxels along the axis in the physical memory space (total capacity of the brick pool along that axis).
+*   **Voxel Overlap:** Assumes a single voxel overlap at brick boundaries [S1, unofficial].
+
+**Algorithm Steps:**
+1.  Compute the index texture coordinate $t_i$ from the virtual texture coordinate $t_v$, $n_v$, and $n_b$:
+    $$t_i = \frac{t_v n_v - 0.5}{n_v - n_b}$$
+2.  Terminate execution if $t_i < 0$ or $t_i > 1$ [S1, unofficial].
+3.  Look up the brick index $i_b$ from the index texture at $t_i$. Compute the physical brick base address $t_{pb}$:
+    $$t_{pb} = \frac{i_b s_b}{n_p}$$
+4.  Compute the virtual offset $t_{vo}$ within the brick by taking the fractional part of $t_i n_b$:
+    $$t_{vo} = \text{frac}(t_i n_b)$$
+5.  Compute the physical offset $t_{po}$:
+    $$t_{po} = \frac{t_{vo} (s_b - 1) + 0.5}{n_p}$$
+6.  Add $t_{po}$ to $t_{pb}$ to obtain the final physical address $t_p$:
+    $$t_p = t_{pb} + t_{po}$$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def virtual_to_physical_address(t_v, n_v, n_b, s_b, n_p, index_texture):
+    """
+    Translate virtual texture coordinate to physical address in brick pool.
+    
+    Args:
+        t_v: Virtual texture coordinate (float, 0.0 to 1.0)
+        n_v: Number of voxels in logical volume along axis
+        n_b: Number of bricks along axis
+        s_b: Size of brick in voxels
+        n_p: Number of voxels in physical memory space along axis
+        index_texture: Function/lookup to get brick index i_b at coordinate t_i
+        
+    Returns:
+        t_p: Physical texture coordinate (float, 0.0 to 1.0)
+    """
+    # Step 1: Compute index texture coordinate
+    t_i = (t_v * n_v - 0.5) / (n_v - n_b)
+    
+    # Step 2: Boundary check
+    if t_i < 0.0 or t_i > 1.0:
+        return None  # Out of bounds
+        
+    # Step 3: Lookup brick index and compute base address
+    i_b = index_texture.lookup(t_i)
+    t_pb = (i_b * s_b) / n_p
+    
+    # Step 4: Compute virtual offset within brick
+    t_vo = (t_i * n_b) % 1.0  # Fractional part
+    
+    # Step 5: Compute physical offset
+    t_po = (t_vo * (s_b - 1) + 0.5) / n_p
+    
+    # Step 6: Combine to get physical address
+    t_p = t_pb + t_po
+    
+    return t_p
+```
+
+**Optimization:**
+When magnification is not used (only high-resolution rendering), the address translation can be optimized by computing index texture coordinates on the CPU, eliminating steps 1 and 2 of the algorithm [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   Without virtual-to-physical translation, modified texture coordinates might point into a different brick than the currently bound bricks in the shader [S1, unofficial].
+*   The formula assumes a single voxel overlap at brick boundaries [S1, unofficial].
+
+## Subtopics
+
+### Hierarchical Index/Address Translation
+A data structure used to map virtual volume coordinates to physical texture coordinates, supporting multi-resolution rendering and memory management [S2, unofficial]. The index texture stores metadata for bricks including: Number of bricks, Texture size of brick, and Physical extent of brick [S2, unofficial]. This allows for hierarchical addressing rather than flat mapping [S2, unofficial].
+
+## Operating characteristics
+*   **Performance:** The index texture is usually small, and the address translation adds minimal overhead [S1, unofficial].
+*   **Use Case:** Useful for browsing very large datasets with limited resources, especially when only a small part of the original data can be placed in on-board texture memory and other multiresolution strategies fail [S1, unofficial].
+*   **Limitations:** Requires maintaining an index volume/texture and performing additional arithmetic in the shader for every sample [S1, unofficial].
+
+## Background
+This scheme was proposed in the context of a Focus and Context Interface for Interactive Volume Rendering [S1, unofficial]. It builds on the concept of virtual texture memory [S1, unofficial]. The approach allows for volume deformation and perturbation for large datasets [S1, unofficial].
+
+## Sources
+[S1] PDF A Focus and Context Interface for Interactive Volume Rendering, https://www.sci.utah.edu/~ikits/publications/Ikits_Unpublished_04.pdf, fetched 2026-10-27 (unofficial)
+[S2] GPU-Based Volume Ray-Casting with Advanced Illumination, https://doi.org/10.2312/egt.20091069, fetched 2026-10-26 (unofficial)

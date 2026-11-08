@@ -1,56 +1,54 @@
 # Custom Hardware Rendering
 
+
 ## Overview
-Custom Hardware Rendering refers to direct volume rendering techniques implemented via dedicated, application-specific integrated circuits (ASICs) or field-programmable gate arrays (FPGAs) rather than general-purpose GPUs or CPUs [S2, unofficial]. It solves the problem of achieving real-time interactive frame rates for large, regular volumetric datasets at a time when general-purpose graphics hardware lacked sufficient throughput [S1, unofficial]. Unlike GPU-based methods which rely on programmable fragment shaders, custom hardware units utilize fixed-function pipelines optimized for the highly regular computation patterns of volume rendering, such as shear-warp or ray-marching [S1, unofficial].
+Custom Hardware Rendering is a direct volume rendering technique implemented via dedicated, application-specific integrated circuits (ASICs) or field-programmable gate arrays (FPGAs) rather than general-purpose processors [S2, unofficial]. It addresses the historical need for real-time volume rendering systems when neither CPUs nor GPUs possessed sufficient computational throughput [S1, unofficial]. Unlike software-based ray casting or texture-mapped approaches, these systems offload the entire computationally intensive pipeline to fixed-function hardware, achieving interactive frame rates for regular data sets through highly parallel, regular computation [S1, unofficial].
 
 ## How it works
+Custom hardware rendering systems are specialized accelerators designed to execute volume rendering algorithms with minimal latency. The implementation varies by specific architecture (e.g., Cube, Vizard, VolumePro), but generally follows a pipeline approach optimized for regular grid data.
+
 **Inputs and Outputs:**
-*   **Input:** A regular 3D scalar volume dataset (e.g., $256^3$ voxels).
-*   **Output:** A 2D image rendered at a specific resolution (e.g., screen resolution).
+*   **Input:** 3D scalar volume data (typically regular grids), transfer functions, and camera parameters.
+*   **Output:** 2D color image frame buffer.
 
 **Data Structures:**
-*   **Volume Data:** Stored in on-chip memory or high-bandwidth external memory. The data is typically accessed in memory order to maximize bandwidth efficiency [S1, unofficial].
-*   **On-Chip Buffers:** Used to store intermediate voxel slices or sample results before compositing [S1, unofficial].
+*   **Volume Data:** Stored in on-chip memory or high-bandwidth external memory. The data is accessed in memory order to maximize bandwidth efficiency [S1, unofficial].
+*   **On-chip Buffers:** Used to store intermediate voxel slices or sample results between processing stages (e.g., between voxel processing and sample processing) [S1, unofficial].
 
-**Method:**
-Custom hardware systems are designed with parallel processing pipelines tailored to specific rendering algorithms. The most prominent example is the Cube architecture and its successor, VolumePro, which utilize a hybrid-order approach based on the Shear-Warp algorithm [S1, unofficial].
+**Algorithm Steps:**
+1.  **Pipeline Configuration:** The hardware is configured with a specific number of identical rendering pipelines. For example, the Cube architecture utilized eight identical pipelines [S1, unofficial].
+2.  **Voxel Processing (Traversal):** Voxel processors traverse the volume data slice-by-slice in memory order. This step involves fetching voxel values and performing initial classification or filtering [S1, unofficial].
+3.  **Sample Processing (Compositing):** Sample processors traverse the on-chip buffers to perform illumination, filtering, and front-to-back compositing. This stage accumulates the final color and opacity for each pixel [S1, unofficial].
+4.  **Image Warping/Rendering:** In hybrid-order algorithms like Cube, the hardware may compute only the shear step on-board, while a graphics board handles the warp and final image rendering [S1, unofficial].
 
-1.  **Pipeline Architecture:** The hardware consists of multiple identical rendering pipelines or distinct processing stages. For instance, the Cube system utilized eight identical rendering pipelines [S1, unofficial]. Later generations, such as VolumePro, separated the processing into distinct "voxel processors" and "sample processors" [S1, unofficial].
-2.  **Voxel Processing (Shear Step):** Voxel processors traverse the volume data slice-by-slice in memory order. They perform the shear transformation required to align the volume with the view direction. In the Cube design, this shear step was computed on-board [S1, unofficial].
-3.  **Sample Processing (Warp and Compositing):** The transformed data is passed to sample processors. These units are responsible for illumination, filtering, and front-to-back compositing. The warp step and final image rendering were handled by the graphics board in the Cube design, while VolumePro integrated these functions into the sample processors [S1, unofficial].
-4.  **Compositing:** The hardware applies the standard front-to-back compositing equation for each sample along the ray:
-    $$
-    C'_{i} = C'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i C_i
-    $$
-    $$
-    \alpha'_{i} = \alpha'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i
-    $$
-    where $C_i$ and $\alpha_i$ are the color and opacity of the current sample, and $C'_{i}$ and $\alpha'_{i}$ are the accumulated color and opacity [S1, unofficial][S2, unofficial].
+**Formulas:**
+The compositing step follows the standard front-to-back volume rendering equation [S1, unofficial]:
+$$
+C'_{i} = C'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i C_i
+$$
+$$
+\alpha'_{i} = \alpha'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i
+$$
+Where $C_i$ and $\alpha_i$ are the color and opacity of the current sample, and $C'_{i}$ and $\alpha'_{i}$ are the accumulated color and opacity.
 
 **Parameters:**
-*   **Throughput:** Eight identical rendering pipelines in the Cube system were capable of rendering a $256^3$ volume at 30 fps [S1, unofficial].
+*   **Pipeline Count:** The number of parallel pipelines determines throughput. Cube used 8 pipelines [S1, unofficial].
+*   **Resolution Support:** Systems were designed for specific resolutions, e.g., Cube rendered a $256^3$ volume [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Memory Limitations:** Like GPUs, custom hardware units suffer from limited on-chip memory. Out-of-core solutions are generally not viable due to the extremely high memory bandwidth required for real-time rendering [S1, unofficial].
-*   **Rigidity:** Changing or extending the functionality of custom hardware is tedious and costly compared to software or GPU-based approaches [S1, unofficial].
-*   **Perspective Limitations:** Early custom hardware like Cube and VolumePro struggled with perspective rendering, often relying on orthographic projections or approximations [S1, unofficial].
-
-## Subtopics
-
-### Cube Architecture
-A predecessor to VolumePro, based on a hybrid-order Shear-Warp algorithm. It used eight pipelines to render $256^3$ volumes at 30 fps. It planned to compute only the shear step on-board, offloading warping to the graphics board [S1, unofficial].
-
-### VolumePro
-An enhanced successor to Cube. It introduced separate sample and voxel processing pipelines. Voxel processors traverse data in memory order, storing results in on-chip buffers for sample processors to handle illumination and compositing. It improved scalability but still lacked native perspective rendering in early generations [S1, unofficial].
+*   **Memory Limitations:** Custom hardware shares the limited memory constraint of GPUs. Out-of-core solutions are generally not viable due to the high memory bandwidth required for real-time rendering [S1, unofficial].
+*   **Rigidity:** Changing or extending the hardware logic is tedious and costly, as it requires physical redesign or reconfiguration of the hardware [S1, unofficial].
+*   **Perspective Limitations:** Early systems like Cube and VolumePro did not support perspective rendering, limiting their applicability to orthographic views [S1, unofficial].
 
 ## Operating characteristics
-*   **Performance:** Custom hardware achieved real-time frame rates for interactive rendering due to the highly regular nature of the computation [S1, unofficial]. For example, Cube rendered $256^3$ volumes at 30 fps [S1, unofficial].
-*   **Memory:** Limited by on-chip memory capacity. High bandwidth requirements make out-of-core rendering impractical [S1, unofficial].
-*   **Flexibility:** Low. Hardware is fixed-function, making updates or extensions costly and difficult [S1, unofficial].
-*   **Use Case:** Best suited for applications requiring deterministic, high-throughput rendering of regular, static volumetric data where perspective accuracy was secondary or handled via approximation. Not suitable for dynamic or irregular data structures.
+*   **Performance:** Achieved real-time frame rates (e.g., 30 fps for a $256^3$ volume on Cube) due to highly regular computation and parallel pipelines [S1, unofficial].
+*   **Scalability:** Scalability was enhanced in later generations (VolumePro), but perspective rendering remained unsupported in early custom hardware [S1, unofficial].
+*   **Memory:** Limited by on-chip or dedicated high-bandwidth memory; not suitable for out-of-core rendering [S1, unofficial].
+*   **Flexibility:** Low. Hardware is fixed-function, making updates expensive and difficult [S1, unofficial].
+*   **Use Case:** Best suited for static, regular grid data where maximum throughput is required and perspective viewing is not critical. Not suitable for irregular data or dynamic algorithm changes.
 
 ## Background
-The development of custom hardware rendering was driven by the demand for real-time volume rendering systems in the late 1990s, a period when neither CPUs nor general-purpose GPUs possessed sufficient computational power [S1, unofficial]. Key systems include Cube [KK99], Vizard [KS97], and VolumePro [PHK* 99]. Cube was the direct predecessor to VolumePro. While Cube was never commercially realized, VolumePro became a well-known hardware solution. The field has largely been superseded by GPU-based implementations, which offer greater flexibility and comparable performance for most use cases [S1, unofficial][S2, unofficial].
+Custom hardware rendering emerged in the late 1990s when CPUs and GPUs could not meet the real-time requirements for volume rendering [S1, unofficial]. Key systems included Cube [KK99], Vizard [KS97], and VolumePro [PHK* 99]. Cube, based on a Shear-Warp hybrid algorithm, was the predecessor to VolumePro [S1, unofficial]. VolumePro evolved to include separate sample and voxel processing pipelines, improving scalability but still lacking perspective support in its earlier generations [S1, unofficial]. These systems were primarily developed for medical imaging and scientific visualization of regular data sets [S1, unofficial].
 
 ## Sources
 [S1] Interactive Volume Rendering with Ray Tracing, https://doi.org/10.2312/egst.20061055, fetched 2026-10-24 (unofficial)
