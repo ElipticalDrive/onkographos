@@ -1,0 +1,265 @@
+Found against: gren 0.6.6, gren-lang/core 7.4.2, node 22 Reproduction: scripts are in 2026-09-10-random-pcg-multiply in https://github.com/gilramir/gren-bug-reports Sorry for the long bug report, but this one is complicated to explain. S...
+
+`Random` 's PCG algorithm is incorrect: `peel`'s multiply overflows float64 · Issue #146 · gren-lang/core · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Random 's PCG algorithm is incorrect: peel's multiply overflows float64 #146
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Random 's PCG algorithm is incorrect: peel's multiply overflows float64#146
+Copy link
+Labels
+bugSomething isn't workingSomething isn't working
+Description
+gilramir
+opened on Sep 11, 2026
+Issue body actions
+Found against: gren 0.6.6, gren-lang/core 7.4.2, node 22
+Reproduction: scripts are in 2026-09-10-random-pcg-multiply in https://github.com/gilramir/gren-bug-reports
+Sorry for the long bug report, but this one is complicated to explain.
+Summary
+Random.peel is the heart of the Random module. It implements PCG's RXS-M-XS, and its own comment cites the
+reference:
+```
+-- This is the RXS-M-SH version of PCG, see section 6.3.4 of the paper
+-- and line 184 of pcg_variants.h in the 0.94 (non-minimal) C implementation,
+-- the latter of which is the source of the magic constant.
+word =
+    (Bitwise.xor state (Bitwise.shiftRightZfBy ((Bitwise.shiftRightZfBy 28 state) + 4) state)) * 277803737
+```
+(the comment above says RXS-M-SH, but it should actually say RXS-M-XS; this should also be fixed)
+That * does not do what the algorithm needs. Up to seven bits at the bottom of
+the value are lost to rounding so the low bits of the numbers Random
+generates are not the ones RXS-M-XS specifies.
+The generated numbers are still well spread out; this is not a "random numbers come
+out in a pattern" report. What is broken is
+that Random is not producing the sequence of numbers the generator is supposed to, so the cited
+reference cannot be used to predict, test or reproduce the stream.
+What the algorithm asks for, and what Gren does
+RXS-M-XS says: multiply the working value by 277803737, and keep only the
+bottom 32 bits of the answer. (mod 2^32)
+Both of the references cited in Random.gren's own comment say so. In the paper, §6.3.4's
+permutation takes a w-bit word and returns one, so every step inside it, the
+multiply included, is mod 2^w.
+Gren's Int is a JavaScript number, which is a float64. A float64 holds about 15
+to 16 decimal digits — 53 binary digits — and this product needs up to 59. So the
+answer comes back rounded, and rounding keeps the digits at the top and drops
+the ones at the bottom: exactly the ones the algorithm wanted.
+What it does to the stream
+Roll dice 8 times: Random.int 1 6 rolls from Random.initialSeed 7,
+and Gren produces the wrong sequence.
+stream
+gren-lang/core 7.4.2
+6 4 5 5 3 3 6 4
+RXS-M-XS, exact arithmetic
+4 3 5 1 5 5 6 3
+Both rows come from ./run.sh. The second is reference.js, an independent
+implementation of the same generator in JavaScript BigInt — next, peel, the
+2^32 % range rejection threshold and initialSeed transcribed from
+Random.gren with every step taken mod 2^32 and nothing else changed.
+Which bits are missing
+The rest of this section is printed by ./bits.sh. It takes a bit of explanation,
+because the interesting value is one the module actually hides because
+it's in the middle of the computation.
+Step 1: Reaching peel's output from outside the module
+The peel function gives us the random number.
+But peel is not exported. Everything the public API returns is peel's output already
+altered: Random.int 1 6 hands back a number from one to six, not 32-bits of randomness.
+But one public call returns the number. This is int's fast path:
+```
+range = hi - lo + 1
+
+if (Bitwise.and (range - 1) range) == 0 then
+    { value = (Bitwise.shiftRightZfBy 0 (Bitwise.and (range - 1) (peel seed0))) + lo, ... }
+```
+Call it as Random.int 0 4294967295, so range is 2^32.
+So Random.int 0 4294967295 returns peel seed0 itself, untouched.
+Step 2: Undoing peel's last step
+This is the tricky math part.
+The peel function permutes the random number by scrambling it with a simple
+function, chosen so that the quality concentrated in the top bits is
+spread over the whole word. It xor's word with itself, shifted 22 bits.
+The variant here is pcg_output_rxs_m_xs_32_32, which in
+imneme/pcg-c's pcg_variants.h reads:
+```
+inline uint32_t pcg_output_rxs_m_xs_32_32(uint32_t state)
+{
+    uint32_t word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+```
+In Gren that last step is:
+```
+Bitwise.shiftRightZfBy 0 (Bitwise.xor (Bitwise.shiftRightZfBy 22 word) word)
+```
+To demonstrate this bug, we want to get "word" before it is scrambled.
+We need to undo the xor/shift.
+Shifting a 32-bit value right by 22 twice pushes everything off the end, so this
+step is its own inverse: doing it a second time gives word back. The number
+Random hands out still contains the damaged word, reversibly scrambled, and
+word = p ^ (p >>> 22) recovers it.
+Create p from word:
+```
+    word                    1000 1111 1100 1101 1010 1000 1100 0000   2412619968
+    word >>> 22             0000 0000 0000 0000 0000 0010 0011 1111          575
+    p = word ^ (word>>>22)  1000 1111 1100 1101 1010 1010 1111 1111   2412620543
+```
+Recover word from p
+```
+    p                       1000 1111 1100 1101 1010 1010 1111 1111   2412620543
+    p >>> 22                0000 0000 0000 0000 0000 0010 0011 1111          575
+    p ^ (p >>> 22)          1000 1111 1100 1101 1010 1000 1100 0000   2412619968
+```
+Once we recover it, we can compare it to what PCG should have generated before the permutation.
+The count
+100000 draws of Random.int 0 4294967295 from Random.initialSeed 7, counting
+how often each bit is 1. Bit 0 is the ones place; bit 31 is the top. A healthy
+bit is set in about half of the draws.
+```
+           Random's  recovered `word`
+           output    as written                       with imul
+  bit  0    50.05%     0.74% |                    |    50.07% |##########          |
+  bit  1    50.14%     1.11% |                    |    49.81% |##########          |
+  bit  2    50.06%     2.57% |#                   |    50.09% |##########          |
+  bit  3    49.94%     5.71% |#                   |    50.05% |##########          |
+  bit  4    50.05%    11.44% |##                  |    49.73% |##########          |
+  bit  5    50.00%    23.67% |#####               |    50.14% |##########          |
+  bit  6    50.02%    47.81% |##########          |    49.75% |##########          |
+  bit  7    49.98%    50.13% |##########          |    49.95% |##########          |
+  bit  8    50.15%    49.92% |##########          |    49.87% |##########          |
+  bit  9    50.06%    50.01% |##########          |    50.04% |##########          |
+  ...       bits 10 through 31 stay within 0.29 points of 50% in all three columns
+```
+The middle column is the recovered word as Random computes it today, the right
+column the same generator with a wrapping multiply and nothing else changed.
+Random's own output, on the left, is 32 "fair values" (bits are 1 about half the time).
+That is why this went unnoticed, and why no distribution test would have caught it. The word it was
+made from is not: bit 0 is set in 0.74 percent of draws rather than 50, bit 1 in
+1.11, and so on up to bit 6. Those are the digits the rounding replaced with
+zeros. The effect thins out going up because how many bits are lost depends on
+how big the product is: almost every product clears 2^53 and loses at least one
+bit, but only the largest reach 2^59 and lose seven.
+The same thing as a picture
+The same recovered word, one draw per row, written out in binary with # for a
+set bit and . for a clear one, bit 31 on the left:
+```
+  as written                           with imul
+  #...######..##.##.#.#...##......     #...######..##.##.#.#...##..###.
+  ..###..#.#.####..##...#..#......     ..###..#.#.####..##...#..#..####
+  ####.#..#.#.###.#......#.#......     ####.#..#.#.###.#......#..##.#..
+  #..#.##.#..#..#..#.#..##.#......     #..#.##.#..#..#..#.#..##.#..#.#.
+  ..####..#...#.#...##.##.........     ..####..#...#.#...##.##....#....
+  #.#..##.#....####...##.##.......     #.#..##.#....####...##.#.##.###.
+  .#.#.....#.###..##.#..###.......     .#.#.....#.###..##.#..##.##.#.#.
+  ####....####.#......#.##........     ####....####.#......#.#.#####..#
+  .#...##...##...######.#.###.....     .#...##...##...######.#.##.#.##.
+  ......#.###......###..##........     ......#.###......###..##...#....
+  .#.##...#.###..#.##.##.#.#......     .#.##...#.###..#.##.##.#.#...##.
+  ##..##.#.###.#..#..##.##.#......     ##..##.#.###.#..#..##.##..##.#..
+  #...###.#.#..###...#..####......     #...###.#.#..###...#..###.##...#
+  ####.#...####..#.###....##......     ####.#...####..#.###....#.#####.
+  #....#...#.##..#.#..##...#......     #....#...#.##..#.#..##...#......
+  ##.#.##...#.####....###......#..     ##.#.##...#.####....###.......##
+  .#.##...#...##.###.#.#..##......     .#.##...#...##.###.#.#..#.#...#.
+  ......####..........#####.......     ......####..........#####.#.###.
+  #.##.##.####.#.##...#.####......     #.##.##.####.#.##...#.####...#..
+  ####.#....####.#####...##.......     ####.#....####.#####...#.####...
+  ..#.###.#..####.....#.#.##......     ..#.###.#..####.....#.#.##.####.
+  ###.##..##.#..##..###...##......     ###.##..##.#..##..###...#.#.#..#
+                           ^^^^^^^
+                           bits 0-6, the room float64 ran out of. The
+                           lower the bit, the more completely it is gone.
+```
+Left is Random today; right is the same seed with the multiply fixed. Every row
+on the left ends in blanks, bar the one that keeps a # at bit 2 — a draw whose
+product was small enough to lose fewer bits, the 2.57 percent in the count above.
+Cause
+* on Int compiles to JavaScript *, which is the float64 operation. The
+other multiply in the module is safe by luck rather than by design:
+state0 * 1664525 in next reaches only 2^52.6, just under the exact range.
+Suggested fix
+Math.imul is the 32-bit wrapping multiply, which is the multiply RXS-M-XS is
+specified with — §6.3.4's w-bit permutation and pcg_variants.h's uint32_t
+product. A one-line change to peel's kernel path, or to
+whatever helper the module is given:
+```
+var word = Math.imul(state ^ (state >>> ((state >>> 28) + 4)), 277803737);
+```
+Another alternative is to leave peel alone and correct the comment to say
+that the low bits are not PCG's. But this is probably not a good choice.
+Checking the fix
+./check.sh can be used for the before-and-after test. It prints a verdict per check and exits 0
+only when every one of them passes; against gren-lang/core 7.4.2 it fails all
+eight. It asserts two different kinds of thing on purpose:
+How random the sequences are
+The expected answer, having initialized the RNG with seed 7
+Against core as it stands:
+```
+     bit  0 vs bit 22    99.26%   want 50.00% +/- 1.50   FAIL
+     bit  1 vs bit 23    98.89%   want 50.00% +/- 1.50   FAIL
+     bit  2 vs bit 24    97.43%   want 50.00% +/- 1.50   FAIL
+     bit  3 vs bit 25    94.29%   want 50.00% +/- 1.50   FAIL
+     bit  4 vs bit 26    88.56%   want 50.00% +/- 1.50   FAIL
+     bit  5 vs bit 27    76.33%   want 50.00% +/- 1.50   FAIL
+     bit  6 vs bit 28    52.19%   reported, not asserted: the shallowest
+
+   Random.int 0 4294967295, from Random.initialSeed 7
+     draw          got         want
+        1   2412620543   2412620529   <
+        2    962486949    962486954   <
+        3   4105077394   4105077478   <
+        4   2526171418   2526171408   <
+
+RESULT  FAIL, 8 of 8 checks
+```
+Once Gren's PCG is fixed, it will show:
+```
+     bit  0 vs bit 22    49.93%   want 50.00% +/- 1.50   pass
+     bit  1 vs bit 23    50.19%   want 50.00% +/- 1.50   pass
+     bit  2 vs bit 24    49.91%   want 50.00% +/- 1.50   pass
+     bit  3 vs bit 25    49.95%   want 50.00% +/- 1.50   pass
+     bit  4 vs bit 26    50.27%   want 50.00% +/- 1.50   pass
+     bit  5 vs bit 27    49.86%   want 50.00% +/- 1.50   pass
+     bit  6 vs bit 28    50.26%   reported, not asserted: the shallowest
+
+   Random.int 0 4294967295, from Random.initialSeed 7
+     draw          got         want
+        1   2412620529   2412620529
+        2    962486954    962486954
+        3   4105077478   4105077478
+        4   2526171408   2526171408
+
+RESULT  pass, all 8 checks
+```
+Activity
+robinheghan
+added
+bugSomething isn't workingSomething isn't working
+on Sep 15, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+bugSomething isn't workingSomething isn't working
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

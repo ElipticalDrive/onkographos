@@ -3,183 +3,173 @@
 Also called: Gradient-scaled opacity mapping, Gradient-scaled piecewise linear opacity, Surface-enhanced volume rendering
 
 ## Overview
-This method renders volume data by mapping voxel scalar values to opacity using piecewise linear functions defined by tissue types, then scaling the resulting opacity by the magnitude of the local gradient vector to suppress tissue interiors and enhance bounding surfaces [S1, unofficial][S2, unofficial]. Unlike [Linear Opacity Interpolation](7016-linear-opacity-interpolation.md), which maps values directly to opacity without geometric weighting, this technique ensures that thin structures appear as faint wisps rather than holes, and that surface boundaries are visually emphasized over homogeneous regions [S1, unofficial][S2, unofficial].
+This method maps scalar volume values to opacity using piecewise linear functions defined by tissue types, then scales the resulting opacity by the magnitude of the local gradient vector to suppress tissue interiors and enhance bounding surfaces [S1, S2, unofficial]. It solves the problem of visualizing thin, wispy structures that binary thresholding would miss, while simultaneously creating semi-transparent surface overlays (e.g., skin over bone) by attenuating interior opacity [S1, S2, unofficial]. Unlike [Linear Opacity Interpolation](7016-linear-opacity-interpolation.md), which maps opacity directly without gradient scaling, this method explicitly uses gradient magnitude to modulate visibility, making it suitable for rendering multiple semi-transparent surfaces in superposition [S1, S2, unofficial].
 
 ## How it works
-### Inputs and Outputs
 **Inputs:**
-*   A 3D scalar volume $V$ where $V(x_i)$ is the value at voxel $x_i$.
-*   $N$ tissue types, each defined by a known scalar value $f_{vn}$ and a target opacity $\alpha_{vn}$.
-*   The tissue types are ordered such that $f_{v1} < f_{v2} < \dots < f_{vN}$.
+- Scalar volume data $f(x_i)$ for voxels at positions $x_i$.
+- $N$ tissue types, each defined by a known CT number (scalar value) $f_{vn}$ and a target opacity $\alpha_{vn}$.
+- The tissue types are ordered such that $f_{v1} < f_{v2} < \dots < f_{vN}$ [S1, S2, unofficial].
 
 **Outputs:**
-*   A rendered 2D image.
+- Opacity $\alpha(x_i)$ for each voxel $x_i$, ready for compositing.
 
-### Data Structures
-*   **Tissue Definition:** An array of $N$ pairs $(f_{vn}, \alpha_{vn})$.
-*   **Gradient Magnitude Volume:** A 3D array $G$ where $G(x_i) = |\nabla f(x_i)|$. This is typically pre-computed [S1, unofficial][S2, unofficial].
-*   **Lookup Table (Optional):** A table mapping the pair $(V(x_i), G(x_i))$ to opacity $\alpha(x_i)$ to accelerate rendering [S1, unofficial][S2, unofficial].
+**Data Structures:**
+- **Tissue Definition:** An array of $N$ pairs $(f_{vn}, \alpha_{vn})$.
+- **Gradient Magnitude:** A pre-computed scalar field $|\nabla f(x_i)|$ for all voxels. If not pre-computed, it must be calculated per voxel.
+- **Lookup Table (Optional):** A table mapping the pair $(f(x_i), |\nabla f(x_i)|)$ to $\alpha(x_i)$, or separate tables if computed in stages.
 
-### Assumptions and Constraints
-The method relies on the **Adjacency Criteria**:
-1.  Each tissue type touches at most two other tissue types.
-2.  If tissue types are ordered by their scalar values $f_{vn}$, a tissue of type $n$ only touches tissues of type $n-1$ and $n+1$.
-3.  Formally, no tissue with CT number $f_{vn_1}$ touches any tissue with CT number $f_{vn_2}$ where $|n_1 - n_2| > 1$ [S1, unofficial][S2, unofficial].
+**Assumptions and Constraints:**
+The method assumes the scene meets specific adjacency criteria: tissues of each type touch at most two other types, and if ordered by CT number, each type touches only types adjacent to it in the ordering [S1, S2, unofficial]. Formally, no tissue of CT number $f_{vn}$ touches any tissue of CT number $f_{vm}$ where $|n - m| > 1$ [S1, S2, unofficial]. Violation of this criteria leads to ambiguous classification and incorrect rendering [S1, S2, unofficial].
 
-If these criteria are violated (e.g., non-adjacent tissue types touch), voxels at boundaries cannot be unambiguously classified, leading to incorrect rendering [S1, unofficial][S2, unofficial]. For datasets that do not meet these criteria (such as internal soft tissue organs), users must interactively clip or carve away unwanted tissues to isolate subsets that satisfy the adjacency rule [S1, unofficial][S2, unofficial].
+**Steps:**
 
-### Algorithm Steps
+1.  **Gradient Calculation:** Compute the local gradient vector $\nabla f(x_i)$ for each voxel. The magnitude $|\nabla f(x_i)|$ is derived from this vector. The source specifies using the operator described in Section 3 of the original document [S1, S2, unofficial]. [G: Standard central difference or Sobel operators are typically used for gradient approximation in volume data.]
 
-1.  **Gradient Calculation:** Compute the local gradient vector $\nabla f(x_i)$ for each voxel and its magnitude $|\nabla f(x_i)|$. The gradient is approximated using a standard finite difference operator [S1, unofficial][S2, unofficial].
-2.  **Interval Identification:** For each voxel $x_i$ with value $f(x_i)$, determine which interval $[f_{vn}, f_{vn+1}]$ the value falls into.
-3.  **Base Opacity Interpolation:** Calculate the base opacity $\alpha_{base}$ by linearly interpolating between the target opacities $\alpha_{vn}$ and $\alpha_{vn+1}$ based on the position of $f(x_i)$ within the interval [S1, unofficial][S2, unofficial].
-4.  **Gradient Scaling:** Multiply the base opacity by the gradient magnitude to obtain the final opacity $\alpha(x_i)$.
-5.  **Out-of-Range Handling:** If $f(x_i)$ is outside all defined intervals (i.e., $f(x_i) < f_{v1}$ or $f(x_i) > f_{vN}$), set $\alpha(x_i) = 0$ [S1, unofficial][S2, unofficial].
+2.  **Interval Identification:** For a voxel with value $f(x_i)$, determine which tissue interval $[f_{vn}, f_{vn+1}]$ it falls into.
+    - If $f_{vn} \le f(x_i) \le f_{vn+1}$ for some $n \in \{1, \dots, N-1\}$, proceed to Step 3.
+    - If $f(x_i)$ is outside all defined intervals (i.e., $f(x_i) < f_{v1}$ or $f(x_i) > f_{vN}$), set $\alpha(x_i) = 0$ [S2, unofficial].
 
-### Formula
-For a voxel $x_i$ with value $f(x_i)$, if $f_{vn} \le f(x_i) \le f_{vn+1}$ for some $n \in \{1, \dots, N-1\}$, the opacity is:
+3.  **Linear Interpolation of Base Opacity:** Calculate the base opacity by linearly interpolating between $\alpha_{vn}$ and $\alpha_{vn+1}$ based on the position of $f(x_i)$ within $[f_{vn}, f_{vn+1}]$ [S1, S2, unofficial].
 
+4.  **Gradient Scaling:** Multiply the interpolated base opacity by the gradient magnitude $|\nabla f(x_i)|$ [S1, S2, unofficial].
+
+5.  **Final Opacity:** The resulting value is $\alpha(x_i)$. [G: The source implies $\alpha(x_i)$ may exceed 1.0 if $|\nabla f(x_i)| > 1$. Standard compositing requires $\alpha \in [0, 1]$. Clamp to 1.0 if necessary, or rely on the compositing step's handling of values $>1$ if the implementation supports it. The source does not explicitly state clamping, but physical opacity is bounded.]
+
+**Formula:**
+For $n = 1, \dots, N-1$, if $f_{vn} \le f(x_i) \le f_{vn+1}$:
 $$
-\alpha(x_i) = |\nabla f(x_i)| \cdot \left( \alpha_{vn} \frac{f_{vn+1} - f(x_i)}{f_{vn+1} - f_{vn}} + \alpha_{vn+1} \frac{f(x_i) - f_{vn}}{f_{vn+1} - f_{vn}} \right)
+\alpha(x_i) = |\nabla f(x_i)| \left( \frac{f(x_i) - f_{vn}}{f_{vn+1} - f_{vn}} \alpha_{vn+1} + \frac{f_{vn+1} - f(x_i)}{f_{vn+1} - f_{vn}} \alpha_{vn} \right)
 $$
+Otherwise:
+$$
+\alpha(x_i) = 0
+$$
+[S1, S2, unofficial]
 
-Otherwise, $\alpha(x_i) = 0$ [S1, unofficial][S2, unofficial].
+**Parameters:**
+- $f_{vn}$: Known CT number for tissue type $n$. Ordered $f_{v1} < f_{v2} < \dots < f_{vN}$ [S1, S2, unofficial].
+- $\alpha_{vn}$: Target opacity for tissue type $n$ at $f_{vn}$ [S1, S2, unofficial].
+- $N$: Number of tissue types, $N \ge 1$ [S1, S2, unofficial].
 
-### Pseudocode
+**Edge Cases and Pitfalls:**
+- **Non-adjacent tissues:** If tissues with non-adjacent CT numbers touch, voxels at boundaries cannot be unambiguously classified [S1, S2, unofficial]. Solution: Interactive clipping or segmentation to isolate subsets meeting adjacency criteria [S1, S2, unofficial].
+- **Thin features:** Binary thresholds may miss thin features of tissue type B if their voxel values are less than $f_{vB}$. This method maps all voxels to non-zero opacity (within intervals), rendering thin regions as faint wisps [S1, S2, unofficial].
+- **Gradient constancy:** The thickness of the transition region around isosurface contours remains constant only if the local gradient magnitude is constant within a radius of $r$ voxels around the surface [S1, S2, unofficial].
+- **Striping artifacts:** CT scanners have anisotropic spatial sensitivity, causing striping. Patient motion also causes striping because shading depends on gradient orientation, and misalignments between adjacent slices disrupt this [S1, S2, unofficial].
+- **High-resolution aspect ratio:** For high-resolution datasets (e.g., 512x512), casting 4 rays per slice in the vertical direction can correct for aspect ratio issues [S2, unofficial]. Alternatively, expand the dataset using cubic B-spline interpolation in the vertical direction and cast one ray per slice [S2, unofficial].
+- **Blurring:** Slight blurring of opacities softens silhouettes without affecting surface detail crispness [S1, S2, unofficial]. Blurring acquired values may affect other details [S2, unofficial].
+- **Super-sampling:** Interpolating additional samples between acquired ones prior to compositing improves visibility calculation accuracy and reduces aliasing, but substantially increases computational expense [S1, S2, unofficial].
+
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_opacity(f_val, gradient_magnitude, tissue_types):
+def compute_opacity_gradient_scaled(f_voxel, f_v, alpha_v, grad_magnitude):
     """
-    Compute opacity for a single voxel using piecewise linear mapping with gradient scaling.
+    Computes opacity for a single voxel using piecewise linear mapping with gradient scaling.
     
     Args:
-        f_val: Scalar value of the voxel.
-        gradient_magnitude: Magnitude of the local gradient |grad f(x_i)|.
-        tissue_types: List of tuples (f_vn, alpha_vn), sorted by f_vn ascending.
+        f_voxel (float): Scalar value of the voxel f(xi).
+        f_v (list of float): Ordered list of known CT numbers for N tissue types [fv1, fv2, ..., fvN].
+        alpha_v (list of float): List of target opacities corresponding to f_v.
+        grad_magnitude (float): Magnitude of the local gradient vector |grad f(xi)|.
         
     Returns:
-        Opacity alpha(x_i).
+        float: Computed opacity alpha(xi).
     """
-    n = len(tissue_types)
+    N = len(f_v)
     
-    # Check if value is within the global range
-    if f_val < tissue_types[0][0] or f_val > tissue_types[-1][0]:
+    # Find the interval [f_v[n], f_v[n+1]] containing f_voxel
+    n = -1
+    for i in range(N - 1):
+        if f_v[i] <= f_voxel <= f_v[i+1]:
+            n = i
+            break
+            
+    # If voxel is outside all defined intervals, opacity is 0
+    if n == -1:
         return 0.0
-    
-    # Find the interval [f_vn, f_vn+1]
-    for i in range(n - 1):
-        f_vn, alpha_vn = tissue_types[i]
-        f_vn1, alpha_vn1 = tissue_types[i+1]
         
-        if f_vn <= f_val <= f_vn1:
-            # Linear interpolation weight
-            # t = 0 at f_vn, t = 1 at f_vn1
-            if f_vn1 == f_vn:
-                # Avoid division by zero if adjacent tissue types have same value
-                # This violates strict ordering assumption, but handled as [G]
-                weight = 0.0
-            else:
-                weight = (f_val - f_vn) / (f_vn1 - f_vn)
-            
-            # Interpolate base opacity
-            alpha_base = alpha_vn * (1.0 - weight) + alpha_vn1 * weight
-            
-            # Scale by gradient magnitude
-            alpha = gradient_magnitude * alpha_base
-            
-            return alpha
-            
-    # Fallback if not found (should not happen if range check passed)
-    return 0.0
-
-def render_volume(volume_data, gradient_magnitude_data, tissue_types, ray_directions, image_width, image_height):
-    """
-    Render the volume using front-to-back compositing.
-    Note: This is a simplified ray-casting loop. Actual implementation requires
-    interpolation of volume values along rays.
-    """
-    image = zeros((image_height, image_width, 3))
+    # Linear interpolation of base opacity
+    fv_n = f_v[n]
+    fv_n1 = f_v[n+1]
+    alpha_n = alpha_v[n]
+    alpha_n1 = alpha_v[n+1]
     
-    for y in range(image_height):
-        for x in range(image_width):
-            # Cast ray through the volume
-            # Determine ray origin and direction based on camera setup
-            ray_origin, ray_direction = get_ray(x, y, ray_directions)
-            
-            # Front-to-back compositing
-            accumulated_color = (0, 0, 0)
-            accumulated_opacity = 0.0
-            
-            # Sample along the ray
-            # K is the number of samples per ray
-            for k in range(K):
-                # Calculate sample position along ray
-                t = k / K # Normalized distance, or use actual step size
-                sample_pos = ray_origin + t * ray_direction * volume_extent
-                
-                # Interpolate volume value f(xi) at sample_pos
-                f_val = interpolate_volume(volume_data, sample_pos)
-                
-                # Interpolate gradient magnitude |grad f(xi)| at sample_pos
-                grad_mag = interpolate_volume(gradient_magnitude_data, sample_pos)
-                
-                # Compute opacity using the method defined above
-                alpha = compute_opacity(f_val, grad_mag, tissue_types)
-                
-                # Compute color c(xi) based on f_val and shading (not detailed in method core)
-                # [G] Color computation is separate; assume a function get_color(f_val) exists
-                color = get_color(f_val)
-                
-                # Composite
-                # C_out = C_in + c * alpha * (1 - alpha_accumulated)
-                # alpha_out = alpha_accumulated + alpha * (1 - alpha_accumulated)
-                
-                weight = alpha * (1.0 - accumulated_opacity)
-                accumulated_color = accumulated_color + color * weight
-                accumulated_opacity = accumulated_opacity + weight
-                
-                # Early termination if fully opaque
-                if accumulated_opacity >= 1.0:
-                    break
-            
-            image[y, x] = accumulated_color
+    # Avoid division by zero if adjacent tissue types have same CT number (unlikely but safe)
+    if fv_n1 == fv_n:
+        base_opacity = alpha_n
+    else:
+        t = (f_voxel - fv_n) / (fv_n1 - fv_n)
+        base_opacity = (1 - t) * alpha_n + t * alpha_n1
+        
+    # Scale by gradient magnitude
+    alpha = grad_magnitude * base_opacity
+    
+    # [G] Clamp opacity to [0, 1] as physical opacity is bounded.
+    # The source does not explicitly state clamping, but compositing typically requires alpha <= 1.
+    if alpha > 1.0:
+        alpha = 1.0
+    if alpha < 0.0:
+        alpha = 0.0
+        
+    return alpha
 
-    return image
+def precompute_gradients(volume_data, shape):
+    """
+    Computes gradient magnitude for all voxels using central differences.
+    [G] The source references an operator from Section 3 but does not detail it.
+    Standard central differences are used here as a common implementation.
+    """
+    import numpy as np
+    
+    # Pad volume to handle boundaries
+    padded = np.pad(volume_data, 1, mode='edge')
+    
+    # Compute gradients in x, y, z directions
+    # Assuming shape is (z, y, x)
+    gx = (padded[1:-1, 1:-1, 2:] - padded[1:-1, 1:-1, :-2]) / 2.0
+    gy = (padded[1:-1, 2:, 1:-1] - padded[1:-1, :-2, 1:-1]) / 2.0
+    gz = (padded[2:, 1:-1, 1:-1] - padded[:-2, 1:-1, 1:-1]) / 2.0
+    
+    # Compute magnitude
+    grad_mag = np.sqrt(gx**2 + gy**2 + gz**2)
+    
+    return grad_mag
 ```
 
-### Parameters
-*   $f_{vn}$: The known scalar value (e.g., CT number) for tissue type $n$. Values are ordered $f_{v1} < f_{v2} < \dots < f_{vN}$ [S1, unofficial][S2, unofficial].
-*   $\alpha_{vn}$: The target opacity assigned to tissue type $n$ at value $f_{vn}$ [S1, unofficial][S2, unofficial].
-*   $N$: The number of tissue types, $N \ge 1$ [S1, unofficial][S2, unofficial].
+## Subtopics
 
-### Edge Cases and Pitfalls
-*   **Adjacency Violation:** If the adjacency criteria are violated, classification is ambiguous. Solutions include interactive clipping or combining with segmentation algorithms [S1, unofficial][S2, unofficial].
-*   **Thin Features:** Binary thresholding misses thin features. This method maps all voxels to non-zero opacity (within range), rendering thin regions as faint wisps [S1, unofficial][S2, unofficial].
-*   **Gradient Constancy:** The thickness of the transition region around isosurface contours remains constant only if the local gradient magnitude is constant within a radius of $r$ voxels around the surface. Variations in gradient magnitude can distort perceived surface thickness [S1, unofficial][S2, unofficial].
-*   **Acquisition Artifacts:** CT scanners have anisotropic spatial sensitivity, causing striping. Patient motion also causes striping because shading depends on gradient orientation, and misalignments between slices disrupt this [S1, unofficial][S2, unofficial].
-*   **Rotation Shading:** Fixing colors and opacities while rotating the view causes light sources to appear to travel with the data, creating incorrect highlights. To produce efficient rotation sequences, hold colors and opacities constant and alter only the ray direction [S1, unofficial][S2, unofficial].
-*   **Aspect Ratio:** High-resolution datasets (e.g., 512x512) may require casting multiple rays per slice in the vertical direction to correct for aspect ratio, or expanding the dataset using cubic B-spline interpolation [S1, unofficial][S2, unofficial].
+### Linear Opacity Interpolation
+Maps opacity linearly between tissue types without gradient scaling. Choose when surface enhancement via gradient magnitude is not required or when computational simplicity is prioritized over surface crispness. See [Linear Opacity Interpolation](7016-linear-opacity-interpolation.md).
 
 ## Operating characteristics
-### Time and Memory Complexity
-*   **Opacity Computation:** If gradient magnitudes are pre-stored, opacity computation requires one lookup table reference per voxel. Changing classification parameters requires generating a new lookup table but no re-computation of gradients [S1, unofficial][S2, unofficial].
-*   **Ray Tracing Cost:** For a square image of $n$ pixels with $K$ samples per ray and orthographic projection, the cost is $3Kn^2$ additions, $2Kn^2$ tri-linear interpolations, and $Kn^2$ linear interpolations [S1, unofficial][S2, unofficial].
-*   **Memory:** Requires storing the volume data, the gradient magnitude volume, and potentially a lookup table [S1, unofficial][S2, unofficial].
+**Time and Memory Complexity:**
+- **Opacity Computation:** One lookup table reference per voxel if gradient magnitudes are pre-stored. New lookup table generation is required if classification parameters change [S1, S2, unofficial].
+- **Ray Tracing/Compositing:** For a square image of $n$ pixels with orthographic projection and $K$ samples per ray, the cost is $3Kn^2$ additions, $2Kn^2$ tri-linear interpolations, and $Kn^2$ linear interpolations [S1, S2, unofficial].
 
-### Measured Performance
-*   **Molecular Graphics (113³ voxels):** Classification/shading took 5 minutes; ray tracing/compositing took 40 minutes on a SUN 4/280 with 32MB RAM [S1, unofficial][S2, unofficial].
-*   **Medical Imaging (113 slices of 256x256):** Computation of colors/opacities took 20 minutes per set; each view/compositing took an additional 20 minutes [S1, unofficial][S2, unofficial].
+**Measured Performance:**
+- **Molecular Graphics (Cytochrome B5, 113x113x113 voxels):** Classification/shading took 5 minutes on a SUN 4/280 with 32MB RAM. Ray tracing/compositing took 40 minutes [S1, S2, unofficial].
+- **Medical Imaging (CT Cadaver, 113 slices of 256x256):** Computation of each set of colors/opacities took 20 minutes. Each view/compositing took an additional 20 minutes [S1, S2, unofficial].
 
-### Strengths and Limitations
-*   **Strengths:** Renders thin, wispy surfaces instead of holes; suppresses interior opacity to highlight boundaries; reduces aliasing by carrying 3-D bandlimiting into the 2-D projection [S1, unofficial][S2, unofficial].
-*   **Limitations:** Sensitive to acquisition artifacts (striping); requires adjacency criteria to be met for unambiguous classification; super-sampling improves quality but substantially increases computational expense [S1, unofficial][S2, unofficial].
-*   **When to Use:** Suitable for visualizing surfaces in molecular graphics and medical imaging where boundary enhancement is desired and data meets adjacency criteria.
-*   **When Not to Use:** Unsuitable for datasets with non-adjacent tissue types touching (e.g., internal soft tissue organs) unless pre-processed by clipping or segmentation [S1, unofficial][S2, unofficial].
+**Strengths and Limitations:**
+- **Strengths:** Renders thin, wispy surfaces instead of holes for regions not meeting strict threshold criteria. Suppresses tissue interiors while enhancing bounding surfaces, allowing superposition of multiple semi-transparent surfaces (e.g., skin and bone) [S1, S2, unofficial]. Non-binary classification carries 3-D bandlimiting into the 2-D projection, reducing aliasing artifacts from point sampling (one ray per pixel) [S1, S2, unofficial].
+- **Limitations:** Sensitive to acquisition artifacts like striping from CT scanner anisotropy or patient motion, as shading depends on gradient orientation [S1, S2, unofficial]. Requires adjacency criteria to be met for unambiguous classification. Fixing shading (colors/opacities) while rotating causes light sources to appear to travel with the data, creating incorrect highlights [S1, S2, unofficial]. Super-sampling improves quality but substantially increases computational expense [S1, S2, unofficial].
+
+**When to Use:**
+- When visualizing multiple semi-transparent surfaces (e.g., skin over bone) is desired.
+- When thin structures need to be visible even if their voxel values do not strictly match a tissue type's CT number.
+- When computational resources allow for gradient calculation and ray tracing.
+
+**When Not to Use:**
+- When the data violates adjacency criteria and interactive clipping is not feasible.
+- When strict, sharp binary boundaries are required without the "faint wisp" effect.
+- When real-time performance is critical and gradient pre-computation or ray tracing is too expensive.
 
 ## Background
-The method was introduced by Levoy in 1988 in the paper "Display of Surfaces from Volume Data" [S2, unofficial]. It was demonstrated on molecular graphics (Cytochrome B5 electron density map) and medical imaging (CT cadaver study) [S1, unofficial][S2, unofficial]. The approach builds on the principles of direct volume ray casting and piecewise linear mapping, specifically addressing the need to enhance surface visibility while suppressing interior noise [S1, unofficial][S2, unofficial].
+Originating from the work of Levoy in 1988, this method was introduced in "Display of Surfaces from Volume Data" [S1, S2, unofficial]. It was applied to molecular graphics (Cytochrome B5 electron density map) and medical imaging (CT cadaver study) [S1, S2, unofficial]. The method builds on the principles of piecewise linear mapping and integration [9000-piecewise-linear-mapping-and-integration.md], adding gradient scaling to enhance surface visibility and suppress interior opacity. It addresses limitations of binary classification, which creates holes for thin structures, by mapping all voxels to non-zero opacity within defined intervals [S1, S2, unofficial].
 
 ## Sources
 [S1] DTIC ADA193649: Rendering of Surfaces from Volume Data, https://archive.org/details/DTIC_ADA193649, fetched 2026-10-26 (unofficial)

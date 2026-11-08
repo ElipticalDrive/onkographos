@@ -1,0 +1,454 @@
+An open source multi-modal trip planner. Contribute to opentripplanner/OpenTripPlanner development by creating an account on GitHub.
+
+Transfers v2 by t2gran · Pull Request #8133 · opentripplanner/OpenTripPlanner · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+t2gran
+commented
+Oct 27, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Summary
+Replaces the DirectTransferGenerator and the per-request transfer index with a new regular transfer implementation. The transfers between stops are found once per profile when the graph is built, stored as path templates, and turned into Raptor transfers for the preferences of each request from the closest profile. Walk, wheelchair, bicycle and car are supported as profile types.
+Issue
+Closes #7998, part of #8061.
+Motivation. transferRequests is a List<RouteRequest>, and every entry means one full street search per stop. Entries are only deduplicated when they find the identical edge path, so adding one wheelchair entry to Norway grew the stored transfers by 62.8% and the build time by 18%. At request time every transfer in the mode bag was re-costed, whether the request needed it or not. The config also exposed dozens of RouteRequest fields that have no meaning for transfers.
+How it works.
+The build config gets a transfers block, grouped by profile type (walk, wheelchair, bicycle, car). Every profile has a required id, optional user preferences (speed, reluctance, safety factor, bicycle walking and optimize triangle) and a routing request the street search is based on. Without the block a single default walk profile is used. See doc/user/TransferConfiguration.md.
+Each profile still runs its own discovery search, but a profile can have a parent, also of another type (e.g. a wheelchair profile with a walk parent). Paths that are the same once re-costed with the child's preferences are stored once, within the resueLimit (a CostLinearFunction, e.g. 10s + 1%). This is what saves the stored paths; the search cost is not reduced.
+The max duration is set per type, and depends on which stops the mode can use: all stops for walk and wheelchair, stops that allow bicycles for bicycle, stops that allow cars for car. Bicycle can also have longer limits between stops that allow all modes or cars. The street search from a stop is bounded by the longest limit that applies to it, and there is no search from a stop that cannot be used by the mode. Paths that are too long for the two stops they connect are dropped.
+At request time the snapshot of the repository finds the closest profile for the request's preferences and re-costs its paths. The result is kept in a cache sized by cacheMaxSize. The keys of the profiles and of the warmup entries are never evicted and not counted against the max size, so a request that matches a configured profile never pays for the first computation. Warmup entries are also created when the server starts.
+User preferences are rounded (Speed, Reluctance, NormalizedRatio) so values that are close are the same cache key. A normalized distance is used to find the closest profile.
+The repository is split in a build repository, written when the graph is built, and a transactional one that publishes a new snapshot on commit, so real-time updates can change the transfers. A report of the cache keys, with hits per key, is added to the ReportApi sandbox.
+Design decisions.
+raptor now asks for a RaptorDataProvider with a separate RaptorTransferDataProvider, so the transfers can be supplied by another module than the transit data. The behavior of Raptor is the same.
+The new transit/transfer module does not depend on the application. The routing request is a type parameter, and the street search is a SPI (TransferPathProvider) implemented in the application.
+Deduplication works across types, but inheritance does not: the routing request and the user preferences are only inherited from a parent of the same type, since the preferences of another type have different default values and fields. A parent of another type is only used to deduplicate street paths.
+Stops of a station that does not allow transfers are neither source nor target of a transfer (this also fixes the old behavior where they were only pruned by the pattern pruning).
+NOTE! This is a breaking config change. transferRequests, maxTransferDuration and
+transferCacheRequests are no longer read for the regular transfers, and the old per-request
+transfer cache and the OnDemandRaptorTransfer feature are removed. The flex and via settings
+move to transfers.flex.requests, transfers.flex.maxDuration and transfers.via.maxDuration.
+The old keys are reported as unknown parameters, so an old config fails loudly instead of
+silently changing behavior.
+NOTE! The transfer analyzer uses a fixed 30 minute search radius until it has a config of its
+own. Rebuilding station transfers when a station changes is not implemented (TODO in the code).
+Unit tests
+✅ Unit tests are added at the lowest level: the transfer store, the profile ordering and inheritance, the max duration validation, the cache (eviction, retained keys, carry-forward to the next snapshot, metrics), the repository lifecycle, the value types and the config parsing. The config documentation is generated and verified by the doc tests.
+Performance
+✅ The goal for this PR is to have at least the same performance as the old code. There are several optimizations we can do, but we need to refactor the regular transfers first. Routing is on par with dev-2.x, the graph build is 3–6% slower on Norway and Skanetrafiken, and the transfers use 10–20% more memory. The transfer lookup is a small part of the Raptor search (about 4–5% of the Raptor time by the "Minute Transfers" timer of SpeedTest), so the faster RaptorTransfers cannot show up much in SpeedTest. The main thing for performance, with parts still pending, is to compress the Routing Regular Transfers used by Raptor. This allows us to cache more of them, and get better memory spatial locality. Cache misses are probably the main reason why this PR in some cases improves the SpeedTest for Germany. Mean of 2 paired SpeedTest runs each, run alternately on the performance-test runner:
+Location
+Routing dev-2.x → this PR
+Graph build dev-2.x → this PR
+Germany
+2485 → 2253 ms (−9%)
+3m53s → 3m50s
+Norway
+257 → 255 ms (−1%)
+4m55s → 5m05s (+3%)
+Skanetrafiken
+114 → 114 ms (0%)
+2m40s → 2m50s (+6%)
+Germany is noisy, the two dev-2.x runs differ by 20%. Memory, live heap after a full GC, measured on a build with the sort fix (before the latest commits):
+Skanetrafiken dev-2.x → this PR
+Norway dev-2.x → this PR
+All classes with Transfer in the name (transfer objects, path transfers, constrained transfers)
+48.8 → 53.6 MB (+10%)
+67.9 → 81.2 MB (+20%)
+Live heap in total
+1605 → 1622 MB (+1%)
+2415 → 2421 MB (+0.2%)
+Serialized graph
+587 → 579 MB (−1%)
+800 → 792 MB (−1%)
+In the measured runs the cache holds two entries, the profile and the request preferences (the walk speed in router-config.json differs from the profile), so the transfers exist twice. There are twice as many DefaultRaptorTransfer objects as in dev-2.x, which holds one index.
+Cache miss. SpeedTest does not measure a cache miss: in dev-2.x the transfers for the request preferences are created at startup, and in this PR by the JIT warm-up requests that run before the timer starts. The time to create the transfers for one set of preferences, logged when the server starts, is a good estimate of the cost of one miss. Measured on the same machine (18 cores), creating the transfers of one profile:
+Location
+dev-2.x, parallel (server start)
+dev-2.x, sequential (a miss in a request)
+This PR (sequential)
+Norway
+0.25 s
+0.87 s
+0.67 s
+Skanetrafiken
+0.24 s
+0.92 s
+0.88 s
+The new code is on par with the sequential old code. In dev-2.x only the creation at server start is parallel (a miss in a request is parallel only with the ParallelRouting feature), the new code creates the transfers on one thread in both cases. So the server start is a little slower, and a miss costs about the same as before. A request with preferences that match a profile or a warmup entry never pays this, so configure a warmup entry for the preferences that clients use.
+Microbenchmark of the transfer lookup alone (the transfer loop of Raptor): a list of one object per transfer, like the old index, against RaptorTransfers. 492,000 transfers over 16,612 stops, 59 million transfers iterated per round in random stop order, 5 JVM launches:
+dev-2.x index
+RaptorTransfers
+Time per iterated transfer
+3.3 ns
+1.3 ns (2.4x faster)
+The old index is a copy of the structure in the benchmark and it is read through its concrete type, so the real index is not faster than this. The lookup is about 4–5% of the Raptor time, so the end to end gain is estimated to be about 1–3% (not measured), which is lost in the noise of SpeedTest.
+A packed int[] layout was about 3.5–4x faster per lookup in an earlier prototype and about 20–25% smaller Object(toStop, duration, c1, pathRef) → int[] {toStop, duration, c1}. It is not part of this PR, it needs a small change in Raptor first, but it is a trivial optimization.
+Documentation
+✅ New doc/user/TransferConfiguration.md, linked from the build configuration. The generated config docs and the ReportApi doc are updated. All public types are documented with Javadoc.
+Changelog
+✅ User-facing: new transfer configuration and removed config parameters.
+Bumping the serialization version id
+✅ The regular transfers are stored in a new repository, so the serialized graph format changed.
+t2gran
+requested a review
+from a team
+as a code owner
+October 27, 2026 10:47
+t2gran
+added this to the
+2.11 (next release) milestone
+Oct 27, 2026
+t2gran
+added
+!New Feature
+A functional feature targeting the end user.
++Bump Serialization Id
+Add this label if you want the serialization id automatically bumped after merging the PR
++Config Change
+This PR might require the configuration to be updated.
+labels
+Oct 27, 2026
+t2gran
+assigned
+jessicaKoehnke and
+sigtot
+Oct 27, 2026
+t2gran
+requested review from
+jessicaKoehnke and
+sigtot
+October 27, 2026 10:48
+codecov
+Bot
+commented
+Oct 27, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codecov Report
+❌ Patch coverage is 91.13842% with 137 lines in your changes missing coverage. Please review.
+✅ Project coverage is 75.25%. Comparing base (4367346) to head (efb73be).
+⚠️ Report is 1 commits behind head on dev-2.x.
+✅ All tests successful. No failed tests found.
+Files with missing lines
+Patch %
+Lines
+...ner/transfer/dataimport/FlexTransferGenerator.java
+85.29%
+9 Missing and 6 partials ⚠️
+...fer/regular/api/parameters/TransferParameters.java
+80.51%
+15 Missing ⚠️
+..._builder/module/configure/GraphBuilderModules.java
+0.00%
+12 Missing ⚠️
+...er/dataimport/RegularTransitTransferGenerator.java
+75.60%
+9 Missing and 1 partial ⚠️
+...transfer/dataimport/StopNotLinkedForTransfers.java
+0.00%
+9 Missing ⚠️
+.../data/transfers/regular/DefaultRaptorTransfer.java
+50.00%
+8 Missing ⚠️
+...er/regular/api/preferences/BicyclePreferences.java
+84.90%
+8 Missing ⚠️
+...ner/standalone/configure/ConstructApplication.java
+0.00%
+5 Missing ⚠️
+...fer/configure/RegularTransferRepositoryModule.java
+71.42%
+3 Missing and 1 partial ⚠️
+...g/opentripplanner/core/model/basic/Reluctance.java
+76.47%
+2 Missing and 2 partials ⚠️
+... and 30 more
+Additional details and impacted files
+```
+@@              Coverage Diff              @@
+##             dev-2.x    #8133      +/-   ##
+=============================================
++ Coverage      74.92%   75.25%   +0.32%     
+- Complexity     23176    23828     +652     
+=============================================
+  Files           2546     2606      +60     
+  Lines          89196    90918    +1722     
+  Branches        8821     8978     +157     
+=============================================
++ Hits           66828    68416    +1588     
+- Misses         19277    19381     +104     
+- Partials        3091     3121      +30     
+```
+☔ View full report in Codecov by Harness.
+📢 Have feedback on the report? Share it here.
+🚀 New features to boost your workflow:
+📦 JS Bundle Analysis: Save yourself from yourself by tracking and limiting bundle sizes in JS merges.
+t2gran
+mentioned this pull request
+Oct 27, 2026
+Transfers overview and TODO list
+#8061
+Open
+42 of 84 tasks
+t2gran
+force-pushed
+the
+transfers-v2
+branch
+2 times, most recently
+from
+db28687 to
+c1b5146
+Compare
+October 30, 2026 14:31
+sigtot
+requested changes
+Nov 3, 2026
+View reviewed changes
+sigtot
+left a comment
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Reviewed the transfers api and spi packages. A bit. rapid-fire so take the comments with a grain of salt.
+Comment thread
+...it/transfer/src/main/java/org/opentripplanner/transit/transfer/regular/spi/TransferPath.java
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+...fer/src/main/java/org/opentripplanner/transit/transfer/regular/spi/TransferPathProvider.java
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+...er/src/main/java/org/opentripplanner/transit/transfer/regular/spi/TransferRequestMapper.java
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+...ava/org/opentripplanner/transit/transfer/regular/api/maxduration/MaxDurationsPreference.java
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+...ava/org/opentripplanner/transit/transfer/regular/api/maxduration/MaxDurationsPreference.java
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+...ntripplanner/transit/transfer/regular/api/preferences/TimeSlopeSafetyTrianglePreference.java
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+...ntripplanner/transit/transfer/regular/api/preferences/TimeSlopeSafetyTrianglePreference.java
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+core/model/src/main/java/org/opentripplanner/core/model/basic/Ratio.java
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+core/model/src/main/java/org/opentripplanner/core/model/basic/NormalizedRatio.java
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+.../src/main/java/org/opentripplanner/transit/transfer/regular/api/RegularTransfersService.java
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+t2gran
+commented
+Nov 4, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Author
+We put a lot work into the distance function to match user-preferences with a street path template. The details is in this REPORT.md.
+t2gran
+force-pushed
+the
+transfers-v2
+branch
+2 times, most recently
+from
+4c2e959 to
+3350ef9
+Compare
+November 5, 2026 00:57
+jessicaKoehnke
+mentioned this pull request
+Nov 5, 2026
+Add a framework to update elevator status at runtime
+#8177
+Open
+t2gran
+and others
+added 3 commits
+November 5, 2026 21:19
+feat(core): Add the value types of the transfer user preferences
+…
+b9c85b5
+```
+Add Speed, Reluctance and NormalizedRatio, value types that round their value so they
+can be used as a part of a cache key, and NormalizedDistance, the normalized distance
+between two values. Add DurationUtils.requirePositive.
+
+Co-authored-by: Jessica Köhnke <jek@hbt.de>
+Co-authored-by: Max Gosau <max.gosau@hbt.de>
+Co-authored-by: Sigurd Totland <sigurdtotland@gmail.com>
+```
+feat(raptor): Add the array based store of regular transfers
+…
+0b049d0
+```
+Add RaptorTransferStore, a compact array based store of the regular transfers of every
+stop, sorted by duration, with a patch to replace the transfers of some stops. Add
+RaptorStopIndex, and the SPI interfaces RaptorDataProvider and RaptorTransferDataProvider
+that split the transit data from the transfer data of the Raptor data provider.
+
+Co-authored-by: Jessica Köhnke <jek@hbt.de>
+Co-authored-by: Max Gosau <max.gosau@hbt.de>
+Co-authored-by: Sigurd Totland <sigurdtotland@gmail.com>
+```
+feat(transfers): Add the regular transfers module
+…
+9710424
+```
+Add the transit-transfer module with the generation, storage and routing-time lookup of
+the regular transfers: transfer profiles per profile type with user preferences, the reuse
+of street paths between profiles, the max durations per type and the modes of the stops,
+the closest profile for a request, the cache of the Raptor transfers with warmup, and the
+cache report. The module is independent of the street search, which is behind an SPI.
+
+Co-authored-by: Jessica Köhnke <jek@hbt.de>
+Co-authored-by: Max Gosau <max.gosau@hbt.de>
+Co-authored-by: Sigurd Totland <sigurdtotland@gmail.com>
+```
+t2gran
+force-pushed
+the
+transfers-v2
+branch
+from
+3350ef9 to
+6aa24ea
+Compare
+November 5, 2026 20:21
+t2gran
+added
+the
+Entur Test
+This is currently being tested at Entur
+label
+Nov 5, 2026
+t2gran
+and others
+added 3 commits
+November 5, 2026 22:04
+feat(transfers): Replace the direct transfer generator with the regul…
+…
+83ca670
+```
+…ar transfers (git-mv)
+```
+feat(transfers): Replace the direct transfer generator with the regul…
+…
+155d844
+```
+…ar transfers (code)
+
+The regular transfers between stops are generated at graph build with the new module, for
+each configured profile, and stored in the serialized graph. A routing request is matched to
+the profile with the closest user preferences, and the Raptor transfers are created from the
+paths of the profile and cached, with warmup entries created at startup.
+
+- Configure the transfers per profile type (walk, wheelchair, bicycle, car) in the
+  transfers section of build-config.json: profiles with user preferences and a reuse limit,
+  the max durations, the street parameters of the type, and the warmup entries. The flex and
+  via transfers move into the same section.
+- Search the streets with the new street adapter. A stop is a transfer source if a scheduled
+  pattern visits it, with ConsiderPatternsForDirectTransfers on. The flex transfers are
+  generated by their own generator.
+- Split the Raptor transit data provider into the transit data and the transfer data, and
+  read the transfers from the new store. Remove the old transfer cache of the request.
+- Report the cache keys with the Report API, and the cache size and hits as metrics.
+- Remove the direct transfer generator and its configuration, and update the example
+  configurations and the generated documentation.
+
+Co-authored-by: Jessica Köhnke <jek@hbt.de>
+Co-authored-by: Max Gosau <max.gosau@hbt.de>
+Co-authored-by: Sigurd Totland <sigurdtotland@gmail.com>
+```
+docs(transfers): Add the transfer configuration documentation
+…
+efb73be
+```
+Describe the concepts (template, routing transfer, profile, user preferences), the
+configuration structure with an example, the user preferences, the street parameters, the
+reuse of street paths, the warmup and how to find the entries with the cache report, the max
+durations, the stops with transfers, the flex and via transfers, and the migration from the
+old configuration. The configuration reference and a complete example are generated from the
+configuration code. Update the accessibility and report API pages and the navigation.
+```
+t2gran
+force-pushed
+the
+transfers-v2
+branch
+from
+6aa24ea to
+efb73be
+Compare
+November 5, 2026 21:32
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
++Bump Serialization Id
+Add this label if you want the serialization id automatically bumped after merging the PR
++Config Change
+This PR might require the configuration to be updated.
+Entur Test
+This is currently being tested at Entur
+!New Feature
+A functional feature targeting the end user.
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

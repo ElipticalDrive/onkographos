@@ -3,116 +3,109 @@
 Also called: Block trait interface, Shape enum system
 
 ## Overview
-Voxel Block Shape & Culling Configuration is a trait-based system that defines block geometry, transparency culling modes, and lighting properties per block type [S1, unofficial]. It solves the problem of heterogeneous block rendering by allowing different geometry types (cubes, ramps, fluids) and rendering behaviors (opaque, transparent merged, transparent unmerged) to be configured via a single interface, rather than hard-coded logic [S1, S3, unofficial]. Unlike sibling methods that focus on mesh assembly or vertex packing, this method defines the *rules* for which faces are generated and how they are classified before meshing begins [S1, S3, unofficial].
+This method defines a trait-based configuration system that decouples voxel geometry definition from mesh generation logic. It solves the problem of rigid, switch-case-heavy meshing by allowing each block type to declare its own shape, transparency culling behavior, and lighting properties [S1, unofficial]. Unlike the parent method which assumes uniform cube geometry, this approach supports complex shapes (ramps, fluids) and fine-grained transparency control (merged vs. unmerged) [S1, S2, S3, unofficial].
 
 ## How it works
-The system operates by associating each block type with a configuration object that implements a specific interface. This configuration determines the block's shape, its culling behavior relative to neighbors, and its lighting parameters.
+**Inputs:** A voxel grid (or chunk) containing block IDs; a registry of block types implementing the configuration interface.
+**Outputs:** A list of vertices and indices for the mesh, annotated with block-specific metadata (AO, light, atlas offset).
 
-### Inputs and Outputs
-*   **Input**: A block type identifier (e.g., `MyBlock::Glass`) and the face normal being evaluated.
-*   **Output**: A configuration struct containing:
-    *   `Shape`: The geometric primitive to generate (e.g., `WholeBlock`, `Cross`, `Ramp`).
-    *   `CullMode`: The transparency culling strategy.
-    *   `Light`: Per-face or per-block lighting intensity.
+**Data Structures:**
+1.  **Block Trait Interface:** Each block type implements a trait (or interface) with three key methods:
+    *   `shape() -> Shape`: Returns the geometric primitive(s) for the block.
+    *   `cull_mode() -> CullMode`: Returns the transparency handling strategy.
+    *   `light() -> u8` (or `f32`): Returns the light level or intensity per face.
+2.  **Shape Enum:** Defines the geometry. Common variants include:
+    *   `WholeBlock`: A full 1x1x1 cube.
+    *   `Cross(CrossInfo)`: A cross-shaped block (e.g., chains) defined by an `AlignedFace` and `stretch` value [S1, unofficial].
+    *   `Ramp`: A sloped block composed of a slope quad and side triangles [S2, unofficial].
+    *   `Fluid`: Implicit surface geometry stitched from neighbors [S1, unofficial].
+3.  **CullMode Enum:** Determines face visibility logic.
+    *   `Empty`: No geometry generated.
+    *   `Opaque`: Standard culling; shared faces between two opaque blocks are culled.
+    *   `TransparentMerged(T)`: Shared faces between two transparent blocks are culled if their `TransparentGroup` values match. This reduces overdraw for identical transparent materials [S1, unofficial].
+    *   `TransparentUnmerged`: Faces are never culled against other transparent blocks, even if identical. Used for blocks that should appear distinct or have unique lighting (e.g., leaves, chains) [S1, unofficial].
+4.  **Vertex Structure:**
+    ```rust
+    struct Vertex {
+        pos: Vec4<f32>,      // Position in world space
+        uv: Vec2<f32>,       // Texture coordinates
+        normal: Vec3<f32>,   // Surface normal
+        ao: f32,             // Ambient occlusion (0.0 = occluded, 1.0 = lit)
+        smooth_light: f32,   // Smooth light level (0.0..1.0)
+        block: MyBlock,      // Block ID for render pass filtering
+        atlas_offset: f32,   // Pre-computed atlas tile offset
+        two_sided: bool,     // Whether the quad is two-sided
+    }
+    ```
+    Interpolated vertex-to-fragment data (`VsOut`) includes `uv`, `normal`, `atlas_u_offset`, `ao`, and `smooth_light` [S1, unofficial].
 
-### Data Structures
+**Steps:**
+1.  **Iterate Voxel Grid:** For each non-empty voxel at position $P$ with block type $B$:
+2.  **Retrieve Configuration:** Call $B$.`shape()`, $B$.`cull_mode()`, and $B$.`light()`.
+3.  **Generate Geometry:**
+    *   If `shape()` returns `WholeBlock`, generate 6 faces.
+    *   If `shape()` returns `Cross`, generate the specific cross geometry based on `CrossInfo` [S1, unofficial].
+    *   If `shape()` returns `Ramp`, generate slope quad and side triangles [S2, unofficial].
+    *   If `shape()` returns `Fluid`, calculate surface height and stitch with neighbors if `FluidInfo::id` matches [S1, unofficial].
+4.  **Apply Culling:** For each generated face with normal $\mathbf{n}$:
+    *   Calculate neighbor position $P_{neighbor} = P + \mathbf{n}$.
+    *   Get neighbor block type $B_{neighbor}$.
+    *   If $B_{neighbor}$ is empty, the face is visible.
+    *   If $B_{neighbor}$ is not empty, check `cull_mode()`:
+        *   If `Opaque`, cull if $B$ is opaque.
+        *   If `TransparentMerged(T)`, cull if $B$ and $B_{neighbor}$ are transparent and their `TransparentGroup` values are equal.
+        *   If `TransparentUnmerged`, do not cull against transparent neighbors.
+5.  **Compute Lighting:** For each visible face, retrieve light level from $B$.`light()` (which may vary by face, e.g., for Cactus) [S1, unofficial].
+6.  **Add to Mesh:** Add vertices and indices to the chunk's vertex/index lists.
+7.  **Finalize:** Once all voxels are processed, upload vertex/index data to the GPU [S3, unofficial].
 
-#### Block Configuration Trait
-The core interface defines three methods [S1, unofficial]:
+**Pitfalls:**
+*   **Fluid Shape Missing:** Setting `FLUID_ENABLED` to true without implementing fluid shape causes a debug assertion failure rather than silently drawing fluids as cubes [S1, unofficial].
+*   **Threading:** In Unity3D, mesh creation (placing data into `Mesh` object) must occur on the main thread, even if geometry calculation is done on a background thread [S3, unofficial].
 
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-```rust
-trait BlockConfig {
-    /// Returns the geometric shape of the block.
-    fn shape(&self) -> Shape;
+```python
+def generate_chunk_mesh(chunk: Chunk, block_registry: Dict[BlockID, BlockConfig]):
+    vertices = []
+    indices = []
     
-    /// Returns the culling mode for transparent blocks.
-    fn cull_mode(&self) -> CullMode;
+    for x, y, z in chunk.occupied_voxels():
+        block_id = chunk.get_block(x, y, z)
+        config = block_registry[block_id]
+        
+        # Get shape and culling mode
+        shape = config.shape()
+        cull_mode = config.cull_mode()
+        
+        # Generate faces based on shape
+        faces = shape.generate_faces()
+        
+        for face in faces:
+            # Determine visibility
+            neighbor_pos = face.position + face.normal
+            neighbor_id = chunk.get_block_at(neighbor_pos)
+            
+            if neighbor_id is None:
+                visible = True
+            else:
+                neighbor_config = block_registry[neighbor_id]
+                visible = not cull_mode.should_cull(config, neighbor_config)
+            
+            if visible:
+                # Compute lighting
+                light_level = config.light(face)
+                
+                # Generate vertex data
+                verts = shape.generate_vertices(face, light_level)
+                indices.extend(shape.generate_indices(face))
+                vertices.extend(verts)
     
-    /// Returns the light level for a specific face.
-    fn light(&self, face: Face) -> f32;
-}
+    # Finalize mesh (must be on main thread in Unity)
+    mesh = create_unity_mesh(vertices, indices)
+    return mesh
 ```
-
-#### Shape Enum
-Defines the geometry type [S1, unofficial]:
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```rust
-enum Shape {
-    /// Standard 1x1x1 cube.
-    WholeBlock,
-    /// Partial block with a specific face removed or modified.
-    Cross(CrossInfo),
-    /// Sloped face (see Subtopics).
-    Ramp,
-    /// Fluid surface (see Subtopics).
-    Fluid,
-}
-
-struct CrossInfo {
-    face: AlignedFace, // e.g., PosZ, NegY
-    stretch: f32,      // Extension length
-}
-```
-
-#### CullMode Enum
-Determines how transparency is handled during face culling [S1, unofficial]:
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```rust
-enum CullMode {
-    /// Block is fully opaque; no transparency checks.
-    Opaque,
-    /// Block is transparent. Shared faces are culled if the neighbor has the same TransparentGroup.
-    TransparentMerged(TransparentGroup),
-    /// Block is transparent. Shared faces are never culled based on neighbor transparency (unmerged).
-    TransparentUnmerged,
-    /// Block is empty/air.
-    Empty,
-}
-```
-
-#### Vertex Layout
-Vertices generated by this configuration include per-vertex attributes [S1, unofficial]:
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```rust
-struct Vertex {
-    pos: Vec4<f32>,       // Position
-    uv: Vec2<f32>,        // Texture coordinates
-    normal: Vec3<f32>,    // Face normal
-    ao: f32,              // Ambient occlusion (0.0 = occluded, 1.0 = lit)
-    smooth_light: f32,    // Smooth lighting value
-    block: MyBlock,       // Block ID for render pass filtering
-    atlas_offset: f32,    // Atlas tile offset
-    two_sided: bool,      // Is the quad two-sided?
-}
-```
-
-### Steps
-
-1.  **Configuration Lookup**: For each non-empty voxel at position $P$, retrieve its `BlockConfig` from the block type registry.
-2.  **Shape Determination**: Call `config.shape()` to determine the geometric primitive. If `Shape::Cross`, use `CrossInfo` to define the specific face and stretch. If `Shape::Ramp` or `Shape::Fluid`, use the specific subtopic logic.
-3.  **Culling Decision**:
-    *   If `config.cull_mode() == CullMode::Opaque`, generate all visible faces based on neighbor occupancy.
-    *   If `config.cull_mode() == CullMode::TransparentMerged(group)`, check the neighbor's `CullMode`. If the neighbor is also `TransparentMerged(group)`, cull the shared face.
-    *   If `config.cull_mode() == CullMode::TransparentUnmerged`, do not cull shared faces based on transparency; only cull based on solid occupancy.
-4.  **Lighting Calculation**: Call `config.light(face)` to get the light intensity for the specific face being generated. This value is stored in the vertex's `smooth_light` attribute.
-5.  **Geometry Generation**: Pass the configuration and voxel position to the Geometry Builder (see Subtopics) to generate vertices and indices.
-
-### Parameters
-*   **TransparentGroup**: A unique identifier (e.g., `()`, `u8`) for grouping transparent blocks. Blocks with the same group merge their surfaces [S1, unofficial].
-*   **Light Intensity**: A `f32` value, typically $0.0$ to $14.0$, where higher values indicate brighter blocks [S1, unofficial].
-
-### Edge Cases and Pitfalls
-*   **Fluid Shape Missing**: Setting `FLUID_ENABLED` to true without implementing the fluid shape logic causes a debug assertion failure rather than silently drawing fluids as cubes [S1, unofficial].
-*   **Threading Constraints**: In Unity3D implementations, vertex/index calculation can be done on a background thread, but the final `Mesh` object creation must be moved to the main thread [S3, unofficial].
-*   **Tint Fallback**: For ramp shapes, if a specific tint is `Vector3.One`, fallback to another face's tint [S2, unofficial].
 
 ## Subtopics
 
@@ -120,31 +113,24 @@ struct Vertex {
 A classification system for block IDs into three mutually exclusive layers: 'opaque', 'water', and 'transparentSolid'. It solves the insufficiency of a single boolean 'transparent' flag by distinguishing between fluids (water) requiring bespoke shaders and see-through solids (glass/leaves) requiring alpha blending. Unlike a boolean transparent flag which collapses water and glass/leaves into one category, this three-valued model allows water to use a bespoke shader (ripple, refraction) while glass/leaves use the ordinary block atlas with alpha blending.
 
 ### Ramp Shape Geometry
-A shape representing a sloped block face, composed of a slope quad (2 triangles) and two side triangles (left and right) [S2, unofficial].
-*   **Step**: Iterate visible faces. If face is Left, Right, Top, or Front, set `drawSlope = true` and assign tint to `tints[0]` (Top/Front), `tints[1]` (Left), or `tints[2]` (Right). If a specific tint is `Vector3.One`, fallback to another face's tint. Add instances for slope, left triangle, and right triangle using respective shape IDs and tints. If face is Back or Bottom, add instance using `cubeBackFaceShapeID` or `cubeBottomFaceShapeID` [S2, unofficial].
-*   **Layout**:
-    *   Slope vertices (6 vertices): (0,1,0) with UV[0], (0,0,1) with UV[1], (1,1,0) with UV[2], (1,1,0) with UV[3], (0,0,1) with UV[4], (1,0,1) with UV[5] [S2, unofficial].
-    *   Left triangle vertices (3 vertices): (0,0,1) with UV[0], (0,1,0) with UV[1], (0,0,0) with UV[2] [S2, unofficial].
-    *   Right triangle vertices (3 vertices): (1,0,0) with UV[0], (1,1,0) with UV[1], (1,0,1) with UV[2] [S2, unofficial].
+A shape representing a sloped block face, composed of a slope quad (2 triangles) and two side triangles (left and right) [S2, unofficial]. Instance creation iterates visible faces; if the face is Left, Right, Top, or Front, `drawSlope` is set to true and tint is assigned from `tints[0]` (Top/Front), `tints[1]` (Left), or `tints[2]` (Right) [S2, unofficial]. If a specific tint is `Vector3.One`, it falls back to another face's tint [S2, unofficial]. Slope vertices are defined as: (0,1,0) UV[0], (0,0,1) UV[1], (1,1,0) UV[2], (1,1,0) UV[3], (0,0,1) UV[4], (1,0,1) UV[5] [S2, unofficial]. Left triangle vertices: (0,0,1) UV[0], (0,1,0) UV[1], (0,0,0) UV[2] [S2, unofficial]. Right triangle vertices: (1,0,0) UV[0], (1,1,0) UV[1], (1,0,1) UV[2] [S2, unofficial].
 
 ### Fluid Surface Stitching
-A mesh generation technique where fluid columns share a surface height field with neighbors, stitching surfaces when fluid IDs match [S1, unofficial].
-*   **Parameter**: `FluidInfo::id: u8`. Two adjacent fluid blocks join their surfaces only when their ids match [S1, unofficial].
+A mesh generation technique where fluid columns share a surface height field with neighbors, stitching surfaces when fluid IDs match [S1, unofficial]. Two adjacent fluid blocks join their surfaces only when their `FluidInfo::id` (u8) values are equal [S1, unofficial].
 
 ### Geometry Builder Pattern
-A design pattern using an interface to control the type of geometry created for each non-empty voxel, allowing different geometry types (cubes, ramps, X-shapes) to be generated via polymorphism without large switch statements [S3, unofficial].
-*   **Step**: During mesh creation, call `BuildGeometry()` once for each non-empty block. Pass a reference to the chunk object to `BuildGeometry()`. Inside `BuildGeometry()`, use the chunk reference to add vertices and indices to the chunk's linked list. After `BuildGeometry()` has been called on every block for the chunk, place the vertex and index data into a Unity3D Mesh object on the main thread [S3, unofficial].
-*   **Layout**: Interface `IGeometryBuilder` contains a single function: `BuildGeometry()` [S3, unofficial].
-*   **Pitfall**: Unity3D functions must be called on the main thread. While vertex/index calculation is done on a background thread, the final Mesh object creation must be moved to the main thread [S3, unofficial].
+A design pattern using an interface to control the type of geometry created for each non-empty voxel, allowing different geometry types (cubes, ramps, X-shapes) to be generated via polymorphism without large switch statements [S3, unofficial]. The interface `IGeometryBuilder` contains a single function `BuildGeometry()` [S3, unofficial]. During mesh creation, `BuildGeometry()` is called once for each non-empty block, passing a reference to the chunk object to add vertices and indices to the chunk's linked list [S3, unofficial]. After all blocks are processed, the data is placed into a Unity3D Mesh object on the main thread [S3, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity**: $O(1)$ per block for configuration lookup and shape determination. The overall meshing complexity depends on the number of visible faces, which is reduced by the culling modes defined here.
-*   **Memory Complexity**: Minimal overhead for configuration structs. The vertex layout includes additional fields (`block`, `atlas_offset`, `two_sided`) compared to basic cube meshing, increasing per-vertex memory usage [S1, unofficial].
-*   **Strengths**: Highly extensible; new block types and shapes can be added by implementing the trait/interface without modifying the core meshing loop [S3, unofficial]. Supports complex rendering requirements (e.g., separate shaders for water vs. glass) [S1, unofficial].
-*   **Limitations**: Requires careful management of transparency groups to avoid visual artifacts. Debugging assertion failures can occur if shape implementations are incomplete [S1, unofficial]. Threading constraints in some engines (e.g., Unity3D) require careful separation of calculation and mesh creation [S3, unofficial].
+*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the chunk, assuming constant-time shape generation per voxel.
+*   **Memory Complexity:** $O(V)$ where $V$ is the number of visible faces. The vertex structure is larger than a simple cube vertex due to additional fields (AO, light, block ID, atlas offset) [S1, unofficial].
+*   **Strengths:** Highly flexible; supports complex shapes and fine-grained transparency control without modifying the core meshing algorithm [S1, S3, unofficial].
+*   **Limitations:** Increased per-vertex memory usage; requires careful management of threading (e.g., Unity main thread constraint) [S3, unofficial].
+*   **When to use:** When the voxel world contains diverse block types with different geometries and transparency requirements (e.g., Minecraft-like worlds) [S1, S3, unofficial].
+*   **When not to use:** For simple, uniform voxel worlds where performance is critical and shape diversity is low [S1, unofficial].
 
 ## Background
-The trait-based configuration system originated in voxel meshing implementations aiming to support heterogeneous block types like those in Minecraft [S1, S3, unofficial]. The Geometry Builder pattern was introduced to avoid large switch statements in mesh generation code, allowing for polymorphic geometry creation [S3, unofficial]. The Three-Valued Opacity Classification was developed to address the limitations of binary transparency flags in rendering fluids and see-through solids differently [S1, unofficial].
+Originated in implementations of voxel meshing for games like Minecraft, where block diversity necessitated a more flexible meshing approach than simple cube generation [S1, S3, unofficial]. The trait-based interface and geometry builder pattern were introduced to avoid large switch statements and support complex shapes like ramps and fluids [S3, unofficial]. The three-valued opacity classification addresses the need for distinct rendering pipelines for fluids and transparent solids [S1, unofficial].
 
 ## Sources
 [S1] finnbear/voxmesh, https://github.com/finnbear/voxmesh, fetched 2026-10-26 (unofficial)

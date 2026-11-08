@@ -1,0 +1,103 @@
+# Interactive Render Quality Estimation & Cancellation
+
+Also called: Interactive quality fallback, Octree render cancellation
+
+## Overview
+This method prevents infinite rendering loops and maintains interactivity in large-scale volume rendering by detecting when a frame cannot be completed within a time budget and immediately falling back to a lower-quality estimate. It sets apart from sibling methods like [Early Termination and Probabilistic Path Control](1791-early-termination-and-probabilistic-path-control.md) by explicitly managing the *rendering state machine* across frames rather than just terminating a single ray, ensuring the viewer sees *something* plausible rather than a frozen or black screen. It works in conjunction with [Visibility Culling](6226-visibility-culling.md) to reduce the workload before the cancellation check is even triggered.
+
+## How it works
+The method operates as a post-traversal guard in an octree-based rendering pipeline. It monitors the progress of the rendering loop and, if the traversal is interrupted or flagged as incomplete, it bypasses the final compositing step and returns a pre-estimated lower-quality image.
+
+**Inputs and Outputs:**
+*   **Input:** The current octree traversal state, specifically the `_renderingRequired` flag structure.
+*   **Output:** A boolean flag `OCTREE_RENDERING_CANCELED` and a fallback rendering decision.
+
+**Data Structures:**
+*   `_renderingRequired`: A structure containing boolean flags. Key field: `OCTREE_RENDERING_CANCELED` [S1, unofficial].
+
+**Parameters:**
+*   `OCTREE_INTERACTIVE_RENDERING_POINT_THRESHOLD`: A threshold value used to estimate a safe, lower render quality when cancellation is detected. The exact numerical value is not specified in the sources [S1, unofficial].
+
+**Steps:**
+1.  **Traversal:** Perform the standard octree traversal and ray-marching loop for the current frame.
+2.  **Cancellation Check:** After the traversal loop (or if the loop is interrupted by a timer), check if the `OCTREE_RENDERING_CANCELED` flag is set within `_renderingRequired` [S1, unofficial].
+3.  **Fallback Decision:**
+    *   If `OCTREE_RENDERING_CANCELED` is **false**: Proceed with normal compositing and display the result.
+    *   If `OCTREE_RENDERING_CANCELED` is **true**:
+        1.  Unlock the rendering API to allow UI interaction or camera movement [S1, unofficial].
+        2.  Estimate a lower interactive render quality using `OCTREE_INTERACTIVE_RENDERING_POINT_THRESHOLD` [S1, unofficial]. This typically involves reducing sample counts, increasing voxel step sizes, or skipping lower-detail levels of the octree.
+        3.  Render this lower-quality estimate.
+        4.  Return early to avoid a full-resolution rendering loop that would cause stuttering or infinite waiting [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_frame(octree, camera, time_budget):
+    # 1. Start traversal
+    rendering_state = {
+        "OCTREE_RENDERING_CANCELED": False,
+        "time_elapsed": 0.0
+    }
+    
+    # Perform traversal loop with time check
+    for ray in rays:
+        if rendering_state["time_elapsed"] > time_budget:
+            rendering_state["OCTREE_RENDERING_CANCELED"] = True
+            break
+            
+        # ... standard octree traversal and compositing ...
+        rendering_state["time_elapsed"] += compute_time()
+
+    # 2. Check for cancellation
+    if rendering_state["OCTREE_RENDERING_CANCELED"]:
+        # 3. Fallback
+        unlock_api() # Allow user input
+        
+        # Estimate lower quality based on threshold
+        # The specific formula for quality estimation is not detailed, 
+        # but it relies on OCTREE_INTERACTIVE_RENDERING_POINT_THRESHOLD [S1, unofficial]
+        quality_factor = estimate_quality(OCTREE_INTERACTIVE_RENDERING_POINT_THRESHOLD)
+        
+        # Render with reduced fidelity
+        image = render_low_quality(octree, camera, quality_factor)
+        return image
+        
+    # Normal completion
+    return composite_final_image()
+```
+
+**Edge Cases and Pitfalls:**
+*   **Infinite Loops:** Overestimating the render quality when a cancellation is detected can cause the renderer to attempt a full-resolution render again on the next frame, leading to an infinite loop of high-cost renders and cancellations [S1, unofficial]. The mechanism forces a *lower* quality on the next frame to break this cycle [S1, unofficial].
+*   **Visual Artifacts:** The fallback image may appear significantly lower quality or noisy. This is an acceptable trade-off for maintaining interactivity [S1, unofficial].
+
+## Subtopics
+
+### Visibility Coefficient Computation
+A preprocessing step that computes view-dependent visibility coefficients for each octree leaf to prioritize visible nodes at runtime, reducing the workload before the cancellation check is triggered [S2, unofficial].
+*   **Definition:** Estimates the likelihood of a node blocking light (screen coverage) relative to its bounding box [S2, unofficial].
+*   **Steps:**
+    1.  For each octree leaf, place $N$ sample viewpoints around the leaf [S2, unofficial].
+    2.  Position viewpoints such that the entire node is visible towards the center, maximizing the projected screen area of the node's bounding box [S2, unofficial].
+    3.  For each viewpoint:
+        a. Rasterize the node's bounding box in green [S2, unofficial].
+        b. Rasterize the node's contents in red over a black background, without depth tests [S2, unofficial].
+        c. Read back the frame buffer [S2, unofficial].
+        d. Count green pixels ($n_g$) and red pixels ($n_r$) [S2, unofficial].
+        e. Compute coefficient $c = \frac{n_r}{n_r + n_g}$ [S2, unofficial].
+    4.  At runtime, pick the coefficient whose sampling direction is closest to the current viewing direction [S2, unofficial].
+*   **Parameters:** `num_coefficients`: Typically 20 coefficients are stored per node [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The cancellation check itself is $O(1)$. The cost is in the fallback rendering, which is significantly cheaper than the full render. The preprocessing for visibility coefficients is $O(N \cdot V)$ where $N$ is nodes and $V$ is view samples, but this is done offline [S2, unofficial].
+*   **Memory Complexity:** Stores `num_coefficients` (typically 20) floats per octree leaf [S2, unofficial].
+*   **Strengths:** Prevents UI freezing and infinite render loops; ensures continuous interactivity [S1, unofficial].
+*   **Limitations:** The fallback image is low quality; relies on accurate time budgeting [S1, unofficial].
+*   **When to use:** Interactive visualization of very large datasets where frame times are unpredictable [S1, S2, unofficial].
+
+## Background
+The concept of interactive quality fallback is associated with the iVoxel project, which focuses on out-of-core visualization of large datasets [S1, unofficial]. The visibility coefficient computation method was introduced by Wagner, Correa, and Silva in their thesis "New Techniques for Out-Of-Core Visualization of Large Datasets" to improve the efficiency of the Prioritized-Layered Projection (PLP) algorithm [S2, unofficial].
+
+## Sources
+[S1] larsxschneider/iVoxel, https://github.com/larsxschneider/iVoxel, fetched 2026-10-27 (unofficial)
+[S2] New Techniques for Out-Of-Core Visualization of Large Datasets, https://ctsilva.github.io/thesis/wagner-correa-thesis.pdf, fetched 2026-10-30 (unofficial)

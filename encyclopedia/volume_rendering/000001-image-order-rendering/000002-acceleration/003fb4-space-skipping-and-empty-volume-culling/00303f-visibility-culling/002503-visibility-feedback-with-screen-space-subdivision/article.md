@@ -3,210 +3,153 @@
 Also called: Occlusion Culling Feedback, Visibility Feedback for Occlusion Culling, Visibility-based Node Refinement
 
 ## Overview
-Visibility Feedback with Screen Space Subdivision is an out-of-core volume rendering optimization that uses visibility information gathered during the current frame to prevent the loading and refinement of occluded data in subsequent frames [S1]. Unlike standard early ray termination, which only reduces computation after data has already been loaded into the working set, this method integrates visibility feedback into the data loader to optimize GPU memory and bandwidth usage [S1]. It distinguishes itself from sibling methods by combining occlusion queries with a screen-space subdivision strategy to interleave query processing with rasterization, thereby reducing the latency inherent in asynchronous GPU occlusion queries [S1].
+Visibility Feedback with Screen Space Subdivision is an out-of-core volume rendering optimization that uses visibility information gathered during the current frame to prevent the loading and refinement of occluded data in subsequent frames [S1]. Unlike standard early ray termination, which only skips computation after data has already been loaded into the GPU working set, this method feeds visibility results back to the loader to reduce GPU memory usage and bandwidth [S1]. It distinguishes itself from sibling methods by combining occlusion queries with a screen-space subdivision strategy to interleave query processing with rasterization, thereby hiding the latency inherent in asynchronous occlusion query results [S1].
 
 ## How it works
-The method operates on an octree structure where nodes are refined based on a view-dependent working set. The core innovation is the feedback loop: visibility status is determined at the end of a frame and applied to the refinement cycle of the next frame [S1].
+The method operates on an octree data structure where nodes represent bricks of volume data. It modifies the standard rendering loop by introducing a feedback cycle that updates node visibility status based on rasterization results [S1].
 
 ### Inputs and Outputs
-*   **Input:** An octree representation of the volume data; the current frame's rendering output (depth buffer); a budget for visibility queries per frame.
-*   **Output:** A refined working set of nodes for the next frame; updated visibility flags for octree nodes.
+*   **Input:** An octree of volume bricks, a camera view, and a transfer function.
+*   **Output:** A rendered image and an updated visibility status for each octree node.
 
 ### Data Structures
-*   **Octree Node:** Contains visibility status (boolean), bounding box (3D), and projected screen-space bounding box (2D rectangle).
-*   **Visibility Query List:** A list of 2D rectangles representing the screen-space projection of non-empty leaf nodes selected for occlusion testing.
-*   **Tile List:** A partitioning of the viewport into rectangular tiles, generated via binary space subdivision.
+*   **Octree Node:** Contains bounding box, refinement status, and a boolean `visible` flag.
+*   **Visibility Query List:** A list of bounding boxes for non-empty leaf nodes selected for occlusion testing.
+*   **Screen Tiles:** A recursive partition of the viewport used to schedule queries.
 
-### Numbered Steps
+### Algorithm Steps
 
-1.  **Depth Buffer Update:** During the volume rendering pass (raycasting), the fragment shader writes the depth of the last visited sample for each pixel into the depth buffer [S1]. This marks the front-most visible surface for that ray.
-
-2.  **Screen Space Subdivision:**
-    *   Collect the 2D screen-space bounding rectangles of all non-empty leaf nodes that are candidates for visibility testing [S1].
-    *   Recursively partition the screen into tiles using a 2D binary space subdivision (BSP) [S1].
-    *   At each subdivision step, place a split plane along one axis (X or Y) that separates the set of node rectangles into two equally sized subsets [S1].
-    *   Select one of the two resulting tiles as the "queried" subset. Continue subdividing only this selected tile until its size falls below a threshold or the query budget is exhausted [S1].
-    *   To ensure all nodes are eventually tested, alternate the selection of the halfspace (queried vs. non-queried) at each frame [S1].
-    *   The result is a list of tiles partitioning the viewport and a list of blocks whose projections are entirely contained within the queried tiles [S1].
-
-3.  **Occlusion Query Issuance:**
-    *   Instruct the graphics pipeline to raycast the tiles.
-    *   Issue occlusion queries for the bounding boxes of the non-empty leaf nodes contained in the queried tiles [S1].
-    *   Crucially, issue these queries immediately after issuing the rendering command for the *first* tile [S1]. This interleaving allows the rasterization of subsequent tiles to proceed while the GPU processes the occlusion queries for the first tile, hiding the query latency [S1].
-
-4.  **Visibility Determination:**
-    *   After the rendering pass completes, check the results of the occlusion queries [S1].
-    *   For each queried node, count the number of visible pixels (pixels where the depth test passed) [S1].
-    *   If the number of visible pixels is below a **visibility threshold** (typically 4 pixels), mark the node as **not visible** [S1]. Otherwise, mark it as **visible** [S1].
-
-5.  **Visibility Propagation:**
-    *   Propagate the visibility status up the octree hierarchy [S1].
-    *   An inner node is considered **visible** if and only if at least one of its children is marked as visible [S1].
-    *   Nodes marked as not visible are excluded from the refinement cycle in the next frame [S1].
-
-6.  **Refinement Cycle:**
-    *   Initialize the working set for the next frame with the octree root [S1].
-    *   Refine nodes in the working set based on priority (e.g., projected screen-space size) [S1].
-    *   **Constraint:** Only refine nodes that were marked as visible in the previous frame's feedback step [S1].
-    *   Empty nodes are terminal and do not require refinement [S1].
-
-### Parameters
-*   **Visibility Threshold:** The minimum number of visible pixels required to mark a node as visible. Typical value: 4 pixels [S1].
-*   **Visibility Incorporation Delay:** The number of frames between when a node is tested and when its visibility status affects the working set. Calculated as $N + 1$, where $N$ is the number of partitions (frames) required to cover all blocks. Typical value: 2 to 4 frames [S1].
+1.  **Initialization:** Start with the octree root. Mark all nodes as potentially visible.
+2.  **Refinement and Rendering:**
+    *   Refine nodes marked as visible from the previous frame.
+    *   Perform front-to-back ray casting for the current frame.
+    *   In the fragment shader, write the depth of the last visited sample to the depth buffer [S1].
+    *   Accumulate color and opacity using standard front-to-back compositing:
+        $$ C_{acc} = C_{acc} + C_{sample} \cdot \alpha_{sample} \cdot (1 - \alpha_{acc}) $$
+        $$ \alpha_{acc} = \alpha_{acc} + \alpha_{sample} \cdot (1 - \alpha_{acc}) $$
+    *   Terminate rays when $\alpha_{acc}$ exceeds a threshold (early ray termination) [S1].
+3.  **Screen Space Subdivision:**
+    *   Collect the 2D screen-space projections (bounding rectangles) of all non-empty leaf nodes that were rendered [S1].
+    *   Recursively partition the screen into tiles using a 2D binary space subdivision (BSP) to separate blocks for which visibility will be queried from others [S1].
+    *   At each subdivision step, place a split plane along one of the axes (X or Y) at the position that separates the set of blocks into two equally sized subsets [S1].
+    *   Select one of the two resulting tiles as containing the subset of nodes to be occlusion queried.
+    *   Continue subdividing only the selected tile until its size falls below a threshold or the query budget is met [S1].
+    *   Rotate the selection strategy (e.g., alternate which half-space is queried) across frames to ensure all nodes are covered within a minimum number of frames [S1].
+4.  **Occlusion Query Execution:**
+    *   Issue rendering commands for the tiles.
+    *   For the tile selected for querying, issue an occlusion query for the bounding box of the non-empty leaves contained within it [S1].
+    *   The query is issued immediately after the rendering command for the first tile to interleave query processing with the rasterization of other tiles, reducing end-to-end latency [S1].
+5.  **Visibility Update:**
+    *   After the frame completes, retrieve occlusion query results.
+    *   If the number of visible pixels for a node's bounding box is below a **visibility threshold** (typically 4 pixels), mark the node as not visible [S1].
+    *   Propagate visibility up the tree: an inner node is considered visible if and only if at least one of its children is visible [S1].
+    *   Store these visibility flags for use in the next frame's refinement cycle [S1].
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def visibility_feedback_step(frame_id, octree, viewport_width, viewport_height, query_budget):
-    """
-    Executes the visibility feedback and subdivision logic.
-    """
-    # 1. Gather candidate nodes from the previous frame's working set
-    # These are non-empty leaves that were rendered in the previous frame
-    candidate_nodes = get_non_empty_leaves_from_previous_working_set()
+def render_frame(octree, camera, transfer_function, prev_visibility_flags):
+    # 1. Refinement
+    # Only refine nodes marked visible in the previous frame
+    visible_nodes = [node for node in octree.nodes if prev_visibility_flags[node.id]]
+    working_set = refine_octree(octree, visible_nodes)
     
-    # 2. Screen Space Subdivision
-    # Project node bounding boxes to screen space
-    node_rects = []
-    for node in candidate_nodes:
-        rect = project_3d_bbox_to_screen(node.bbox_3d, camera_matrix)
-        node_rects.append((node, rect))
+    # 2. Rendering and Depth Collection
+    # Render the volume. Fragment shader writes depth of last sample.
+    # Early ray termination is applied during compositing.
+    render_volume(working_set, camera, transfer_function)
     
-    # Recursively partition screen into tiles
-    # Returns: list of tiles, and a list of nodes assigned to queried tiles
-    tiles, queried_nodes = screen_space_subdivision(
-        node_rects, 
-        viewport_width, 
-        viewport_height, 
-        query_budget,
-        frame_id % 2  # Alternate selection strategy for coverage
-    )
+    # 3. Screen Space Subdivision
+    # Get projections of non-empty leaves rendered in this frame
+    leaf_projections = get_leaf_projections(working_set)
     
-    # 3. Issue Occlusion Queries
-    # Issue queries for queried_nodes immediately after starting the first tile's render
-    for node in queried_nodes:
-        query_id = issue_occlusion_query(node.bbox_3d)
-        store_query_id(node, query_id)
-        
-    # 4. Render Tiles
-    # The graphics pipeline processes queries for the first tile while rendering subsequent tiles
+    # Partition screen to schedule queries
+    tiles, queried_nodes = screen_space_subdivide(leaf_projections)
+    
+    # 4. Issue Occlusion Queries
+    # Render tiles. For the queried subset, issue occlusion queries.
+    # This interleaves query processing with rasterization of other tiles.
     for tile in tiles:
-        render_tile(tile)
-        
-    # 5. Retrieve Query Results
-    # Wait for queries to complete (handled by driver/hardware latency hiding)
-    visibility_status = {}
-    for node in queried_nodes:
-        query_id = get_query_id(node)
-        visible_pixels = get_occlusion_query_result(query_id)
-        
-        # Apply visibility threshold
-        if visible_pixels < VISIBILITY_THRESHOLD:
-            visibility_status[node.id] = False
+        if tile in queried_nodes:
+            issue_occlusion_query(tile.bounding_box)
         else:
-            visibility_status[node.id] = True
+            render_tile(tile)
             
-    # 6. Propagate Visibility Up the Tree
-    # Mark nodes as visible if any child is visible
-    propagate_visibility(octree, visibility_status)
+    # 5. Visibility Feedback (Delayed by N+1 frames)
+    # In a real implementation, this happens asynchronously or in the next frame's setup
+    # based on query results from N frames ago.
+    query_results = get_occlusion_query_results()
     
-    return octree
+    new_visibility_flags = {}
+    for node in octree.nodes:
+        if node.is_leaf and node in queried_nodes:
+            visible_pixels = query_results[node.id]
+            if visible_pixels < VISIBILITY_THRESHOLD: # Typically 4
+                new_visibility_flags[node.id] = False
+            else:
+                new_visibility_flags[node.id] = True
+        else:
+            # Propagate up: node is visible if any child is visible
+            # This requires a post-order traversal or storing child visibility
+            new_visibility_flags[node.id] = any(new_visibility_flags[child.id] for child in node.children)
+            
+    return new_visibility_flags
 
-def screen_space_subdivision(node_rects, width, height, budget, alternate_flag):
+def screen_space_subdivide(projections):
     """
-    Recursively partitions the screen to separate queried nodes from others.
+    Recursively partition projections into tiles.
+    Returns a list of tiles and the subset of nodes selected for querying.
     """
-    if len(node_rects) == 0:
+    if not projections:
         return [], []
     
-    # Base case: if budget is exhausted or rect count is small, assign all to current tile
-    # For simplicity, assume we split until budget is met or single tile remains
-    if budget <= 0 or len(node_rects) <= 1:
-        # All remaining nodes are in the current tile
-        # Depending on alternate_flag, this tile might be the "queried" one
-        # For this implementation, we assume the recursion handles the selection
-        pass 
-
-    # Split plane selection
-    # Choose axis (X or Y) and position to split node_rects into two equal halves
-    axis, split_pos = find_balanced_split(node_rects)
+    # Split plane separates set into two equally sized subsets
+    mid = len(projections) // 2
+    left_projections = projections[:mid]
+    right_projections = projections[mid:]
     
-    left_rects, right_rects = split_rects(node_rects, axis, split_pos)
+    # Determine split axis and position based on bounding boxes
+    # (Implementation detail: align split with min/max of coordinates)
+    split_axis, split_pos = compute_split(left_projections, right_projections)
     
-    # Select which side is the "queried" subset
-    if alternate_flag:
-        queried_side = left_rects
-        non_queried_side = right_rects
+    # Select one tile for querying (strategy rotates per frame)
+    # For simplicity, assume we always query the left tile in this step
+    queried_nodes = [p.node for p in left_projections]
+    
+    # Recurse on the queried tile if it's large enough
+    if size(left_projections) > THRESHOLD:
+        sub_tiles, sub_queried = screen_space_subdivide(left_projections)
+        return sub_tiles, sub_queried
     else:
-        queried_side = right_rects
-        non_queried_side = left_rects
-        
-    # Recurse on the queried side to further subdivide if needed
-    # The non-queried side is finalized as a tile
-    sub_tiles, sub_queried_nodes = screen_space_subdivision(
-        queried_side, 
-        width, 
-        height, 
-        budget - 1, # Reduce budget
-        not alternate_flag
-    )
-    
-    # Combine results
-    all_tiles = [non_queried_side_rect] + sub_tiles
-    all_queried_nodes = sub_queried_nodes
-    
-    return all_tiles, all_queried_nodes
-
-def propagate_visibility(octree, leaf_visibility):
-    """
-    Propagates visibility from leaves to root.
-    """
-    # Reset all nodes to invisible
-    for node in octree.all_nodes:
-        node.visible = False
-        
-    # Mark leaves based on query results
-    for node_id, is_visible in leaf_visibility.items():
-        node = octree.get_node(node_id)
-        node.visible = is_visible
-        
-    # Propagate up
-    for node in octree.all_nodes:
-        if node.is_leaf:
-            continue
-        for child in node.children:
-            if child.visible:
-                node.visible = True
-                break
+        return [Tile(left_projections)], queried_nodes
 ```
 
+### Parameters
+*   **Visibility Threshold:** The minimum number of visible pixels required to mark a node as visible. Typical value: 4 pixels [S1].
+*   **Visibility Incorporation Delay:** The number of frames between issuing a query and using its result. Calculated as $N + 1$, where $N$ is the number of partitions required to cover all blocks. Typical value: 2 to 4 frames [S1].
+
 ### Edge Cases and Pitfalls
-*   **Query Latency:** Occlusion query results are not available immediately due to pipeline delays. Issuing queries for all nodes simultaneously is inefficient. The screen space subdivision interleaves query processing with rasterization to hide this latency [S1].
-*   **Visibility Incorporation Delay:** Visibility information is incorporated with a delay of $N+1$ frames. This means the working set may contain nodes that are actually occluded in the current frame, but this is accepted to maintain performance [S1].
-*   **Semitransparent Volumes:** Visibility culling is less effective for semitransparent materials because more samples are accumulated, and occlusion is harder to determine. The working set reduction is approximately 50% for semitransparent cases, compared to 60% for opaque surfaces [S1].
+*   **Pipeline Latency:** Occlusion query results are not available immediately due to the delay between issuing the query and rasterizer processing [S1]. A straightforward implementation issuing queries for all nodes is inefficient. The screen space subdivision mitigates this by interleaving queries with rasterization [S1].
+*   **Semitransparent Materials:** Visibility culling is less effective for semitransparent materials because more samples are accumulated, leading to higher texture memory needs and reduced working set reduction [S1].
+*   **Degenerate Input:** If the screen space subdivision results in tiles smaller than the threshold but still containing nodes, the recursion stops, and the query is issued for the entire tile [S1].
 
 ## Operating characteristics
-*   **Working Set Reduction:** Reduces the GPU working set by approximately 50% in semitransparent cases and 60% for more opaque surfaces [S1].
+*   **Working Set Reduction:** Reduces the working set by approximately 50% in semitransparent cases and by approximately 60% when surfaces are more opaque [S1].
 *   **Memory Occupation:**
     *   Isosurface rendering: Average 1560 bricks, peak 1820 bricks [S1].
     *   Direct Volume Rendering (DVR): Average 1890 bricks, peak 2450 bricks [S1].
-    *   Minimum texture memory occupation (both): ~475 octree bricks [S1].
+    *   Minimum texture memory occupation for both: ~475 octree bricks (corresponding to distant views) [S1].
 *   **Performance:**
     *   Isosurface rendering: Average 20 Hz, peak 40 Hz [S1].
-    *   Direct Volume Rendering: Average 12-30 Hz, peak 16 Hz (Note: Source text says "12-30 Hz avg, 16 Hz avg" which is contradictory; likely 12-30 Hz range with 16 Hz being a specific test case or typo. We cite the range) [S1].
-    *   Scaling: On a 1024x1024 window, performance slows down by a factor of 3 compared to 640x480, corresponding to the pixel count increase [S1].
-*   **Strengths:**
-    *   Optimizes GPU memory and bandwidth by preventing loading of occluded data [S1].
-    *   Reduces end-to-end latency through interleaved query processing [S1].
-*   **Limitations:**
-    *   Introduces a delay in visibility feedback (2-4 frames) [S1].
-    *   Less effective for highly semitransparent volumes [S1].
-    *   Requires additional overhead for screen space subdivision and query management [S1].
+    *   DVR: Average 12-30 Hz (varies by transfer function) [S1].
+    *   Scaling: On a 1024x1024 window, performance slows down by a factor of 3 compared to 640x480, roughly corresponding to the pixel count increase [S1].
+*   **Strengths:** Significantly reduces GPU memory bandwidth and memory usage by preventing the loading of occluded data. Effective for opaque surfaces.
+*   **Limitations:** Less effective for highly semitransparent volumes. Requires asynchronous query handling to hide latency. Adds complexity to the rendering pipeline due to screen space subdivision and feedback delay.
 
 ## Background
-The method was introduced in the paper "A single-pass GPU ray casting framework for interactive out-of-core volume rendering" (2008) [S1]. It addresses the limitations of standard early ray termination, which discovers occluded areas only at rasterization time, after data is already in the working set. By incorporating visibility feedback into the loader, the method prevents the refinement and data loading of occluded zones, optimizing resource usage for out-of-core rendering [S1].
+This method was introduced in the context of out-of-core GPU ray casting for interactive volume rendering [S1]. It addresses the limitation of standard early ray termination, which discovers occlusion only after data is loaded, by incorporating visibility feedback into the loader [S1]. The technique relies on the spatial and temporal coherence of volume rendering to schedule occlusion queries efficiently [S1].
 
 ## Sources
 [S1] A single-pass GPU ray casting framework for interactive out-of-core ..., https://www.crs4.it/vic/data/papers/cgi2008-movr.pdf, fetched 2026-10-29

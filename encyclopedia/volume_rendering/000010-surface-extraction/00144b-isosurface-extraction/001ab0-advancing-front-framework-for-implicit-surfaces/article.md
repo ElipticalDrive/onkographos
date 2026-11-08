@@ -10,8 +10,8 @@ The Advancing Front Framework is an isosurface extraction method that constructs
 *   **Output:** A triangulated mesh representing the isosurface [S1].
 
 **Data Structures:**
-*   **Front:** A list of edges forming the boundary of the generated mesh [S1]. Exact field layouts, sizes, and bit packing are not given in the sources.
-*   **Mesh:** A collection of triangles [S1]. Exact field layouts, sizes, and bit packing are not given in the sources.
+*   **Front:** A list of edges forming the boundary of the generated mesh [S1]. Exact field layouts, sizes, and bit packing are not given in the sources [S1].
+*   **Mesh:** A collection of triangles [S1]. Exact field layouts, sizes, and bit packing are not given in the sources [S1].
 
 **Algorithm Steps:**
 1.  **Initialization:** Place the seed point on the surface and create an initial front edge set [G].
@@ -24,31 +24,27 @@ The Advancing Front Framework is an isosurface extraction method that constructs
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-class Edge:
-    def __init__(self, v1, v2):
-        self.vertices = (v1, v2)
-
 def advancing_front_implicit_surface(f, seed_point):
     # f is the implicit function f(x) = 0
     # seed_point is a point on the surface
-    front = [Edge(seed_point, seed_point)]  # [G] Initial front setup
+    front = [[seed_point, seed_point]]  # [G] Initial front setup
     mesh = []
     while front:
         edge = front.pop(0)
-        v_a, v_b = edge.vertices
+        v_a, v_b = edge
         # [G] Compute candidate third vertex on surface
         v_c = project_onto_surface(v_a, v_b, f)
-        new_triangle = (v_a, v_b, v_c)
-        # Check if triangle intersects the same front
+        new_triangle = [v_a, v_b, v_c]
+        # [G] Check if triangle intersects the same front
         if intersects_same_front(new_triangle, front):
             front = split_front_at_intersection(front, new_triangle)
-        # Check if triangle intersects a different front
+        # [G] Check if triangle intersects a different front
         elif intersects_different_front(new_triangle, front):
             front = merge_fronts(front, new_triangle)
         else:
             mesh.append(new_triangle)
-            front.append(Edge(v_b, v_c))
-            front.append(Edge(v_c, v_a))
+            front.append([v_b, v_c])
+            front.append([v_c, v_a])
     return mesh
 
 def project_onto_surface(v_a, v_b, f):

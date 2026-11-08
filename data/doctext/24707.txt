@@ -1,0 +1,863 @@
+# Volume Visualization
+With this Three.js application you can visualize all sorts of volumetric data from MRI or CT scans.
+The visualisation is done using a technique called first-hit rendering and blinn-phong shading to accurately visualize the measured medical data.  
+The editor allows to visualize this data in realtime, filtering out different layers (bones, skin, ...), coloring them to make them more visible, and saving.
+In addition to the editor allows a full 360 degree orbital camera as well as zooming to get a more detailed look at the data.
+
+## How to Use
+
+Load one of the provided volume files through the GUI. 
+Rotate the orbit camera around the bounding box using the left mouse button. Zoom using the scroll wheel. 
+
+The interactive editor allows to add and remove different iso-surface layers. 
+You change the intensity (opacity) as well as the density (iso-value) of the current layer
+in the visualization by dragging the pin in the diagram around. You can also change the color of the current layer
+by clicking on the color picker and choosing whatever color you like. Once content with your selections
+you can save the current layer by clicking on the "save layer" button. This persists your layer.
+You can start adding a new layer using the same procedure as mentioned above. 
+It is also possible to delete the most recent layer by clicking on the Delete layer button.
+This deletes the last layer you persisted. 
+
+
+**Human Head:** (skull: white, full opaque; skin: yellow, semi transparent)
+<br>
+![Screenshot 2024-07-04 201048](https://github.com/nikiblauer/volume_vis/assets/39680062/560348d3-aac5-460d-b7ff-f73ff167687a)
+
+
+**Beetle:**
+<br>
+![Screenshot 2024-07-04 201207](https://github.com/nikiblauer/volume_vis/assets/39680062/9e2009e8-c79a-4f2c-8ec8-7cc71d340573)
+
+### Vis/js/camera.js
+```
+class OrbitCamera {
+    constructor(camera, targetPos, radius, domElement){
+        this.camera = camera;
+        this.targetPos = targetPos;
+        this.camera.lookAt(this.targetPos);
+        this.radius = radius;
+        this.minRadius = radius / 2;
+        this.maxRadius = radius * 2;
+        this.phi = 0;
+        this.theta = 0;
+
+        this.pointerPos = new THREE.Vector2(0, 0);
+        this.drag = false;
+        this.autoRotate= false;
+
+        this.domElement = domElement;
+        this.domElement.addEventListener('pointerdown', event => this.#onMouseDown(event), false);
+        this.domElement.addEventListener('pointerup', event => this.#onMouseUp(event), false);
+        this.domElement.addEventListener('pointermove', event => this.#onMouseMove(event), false);
+        this.domElement.addEventListener('wheel', event => this.#onMouseWheel(event), false);
+        // catch mouse-up outside the browser window
+        window.addEventListener('pointerup', event => this.#onMouseUp(event));
+
+        this.camera.up.set(0, 0, -1);
+        this.#updateCamera(0, 0, 0);
+    }
+
+    update(){
+        if(this.autoRotate){
+            this.#updateCamera(0.5, 0, 0);
+        }
+    }
+
+    #updateCamera(dx, dy, dz){
+        this.phi += dx / 100.0;
+        this.theta += dy / 100.0;
+        this.radius += dz / 10.0;
+
+        const clamp = (num, min, max) => Math.min(Math.max(num, min), max);
+        this.theta = clamp(this.theta, -Math.PI / 2.0, Math.PI / 2.0);
+        this.radius = clamp(this.radius, this.minRadius, this.maxRadius);
+
+        this.camera.position.x = -this.radius * Math.cos(this.theta)* Math.sin(this.phi);
+        this.camera.position.y = -this.radius * Math.cos(this.theta) * Math.cos(this.phi);
+        this.camera.position.z = this.radius * Math.sin(this.theta);
+
+        this.camera.lookAt(this.targetPos);
+
+        requestAnimationFrame(paint);
+    }
+
+    #onMouseDown(event){
+        event.preventDefault(); // no scrolling!
+        let that = this;
+
+        switch(event.button){
+            // left mouse button only
+            case 0:
+                that.drag = true;
+                that.pointerPos.x = event.clientX;
+                that.pointerPos.y = event.clientY;
+                break;
+        }
+    }
+
+    #onMouseUp(event){
+        switch(event.button){
+            case 0:
+                this.drag = false;
+                break;
+        }
+    }
+
+    #onMouseMove(event){
+        let that = this;
+        if(this.drag){
+            let newPointerPos = new THREE.Vector2(event.clientX, event.clientY);
+            let pointerDiff = new THREE.Vector2().subVectors(that.pointerPos, newPointerPos);
+            that.pointerPos = newPointerPos;
+            that.#updateCamera(pointerDiff.x, pointerDiff.y, 0);
+        }
+
+    }
+
+    #onMouseWheel(event){
+        event.preventDefault();
+        this.#updateCamera(0, 0, -event.wheelDelta);
+    }
+}
+```
+
+### Vis/js/firsHitShader.js
+```
+class FirstHitShader extends Shader {
+    constructor() {
+        super("firsthit_vert", "firsthit_frag");
+        this.setSteps(200);
+    }
+
+    /**
+     * Creates the 3D Texture and also sets all needed uniforms for rendering
+     *
+     * @param volume volume to render
+     */
+    setVolume(volume) {
+        const texture = new THREE.Data3DTexture(volume.voxels, volume.width, volume.height, volume.depth);
+        texture.format = THREE.RedFormat;
+        texture.type = THREE.FloatType;
+        texture.minFilter = texture.magFilter = THREE.LinearFilter;
+        texture.unpackAlignment = 1;
+        texture.needsUpdate = true;
+
+
+        this.setUniform("volume", texture);
+        this.setUniform("volume_scale", volume.scale);
+    }
+
+    /**
+     * Sets the resolution of the rendering
+     * @param steps > 1
+     */
+    setSteps(steps) {
+        this.setUniform("steps", steps);
+    }
+
+    setIsoValues(isoValues) {
+        this.setUniform("iso_values", isoValues);
+    }
+
+    setOpacities(opacities) {
+        this.setUniform("opacities", opacities);
+    }
+
+    setSurfaceColors(colors){
+        this.setUniform("surface_colors", colors, "v3v");
+    }
+}
+```
+
+### Vis/js/mipShader.js
+```
+class MipShader extends Shader {
+    constructor() {
+        super("mip_vert", "mip_frag");
+        this.setSteps(200);
+    }
+
+    /**
+     * Creates the 3D Texture and also sets all needed uniforms for rendering
+     *
+     * @param volume volume to render
+     */
+    setVolume(volume) {
+        const texture = new THREE.Data3DTexture(volume.voxels, volume.width, volume.height, volume.depth);
+        texture.format = THREE.RedFormat;
+        texture.type = THREE.FloatType;
+        texture.minFilter = texture.magFilter = THREE.LinearFilter;
+        texture.unpackAlignment = 1;
+        texture.needsUpdate = true;
+
+        this.setUniform("volume", texture);
+        this.setUniform("volume_dims", new THREE.Vector3(volume.width, volume.height, volume.depth));
+    }
+
+    /**
+     * Sets the resolution of the rendering
+     * @param steps > 1
+     */
+    setSteps(steps) {
+        this.setUniform("steps", steps);
+    }
+}
+```
+
+### Vis/js/shader.js
+```
+class Shader {
+    constructor(vertexProgram, fragmentProgram) {
+        this.vertexProgram = vertexProgram;
+        this.fragmentProgram = fragmentProgram;
+        this.material = new THREE.ShaderMaterial
+        ({
+            glslVersion: THREE.GLSL3,
+            uniforms: {},
+            transparent: true
+        });
+    }
+
+    async #loadShader(shader, name){
+        const program = await d3.text("shaders/"+name+".essl");
+        this.material[shader] = program;
+    }
+
+
+    async load(){
+        await this.#loadShader("vertexShader", this.vertexProgram);
+        await this.#loadShader("fragmentShader", this.fragmentProgram);
+    }
+
+
+    setUniform(key, value, type){
+        if(typeof type !== 'undefined'){
+            this.material.uniforms[key] = {
+                'type': type,
+                'value': value
+            };
+        }
+        else{
+            this.material.uniforms[key] = new THREE.Uniform(value);
+        }
+    }
+}
+```
+
+### Vis/js/vis1.js
+```
+let renderer, camera, scene, orbitCamera;
+let canvasWidth, canvasHeight = 0;
+let container = null;
+let volume = null;
+let fileInput = null;
+let mipShader = null;
+
+/**
+ * Load all data and initialize UI here.
+ */
+function init() {
+    // volume viewer
+    container = document.getElementById("viewContainer");
+    canvasWidth = window.innerWidth * 0.7;
+    canvasHeight = window.innerHeight * 0.7;
+
+    // WebGL renderer
+    renderer = new THREE.WebGLRenderer();
+    renderer.setSize(canvasWidth, canvasHeight);
+    container.appendChild(renderer.domElement);
+
+    // read and parse volume file
+    fileInput = document.getElementById("upload");
+    fileInput.addEventListener('change', readFile);
+
+    // create new maximum intensity projection shader
+    mipShader = new MipShader();
+}
+
+/**
+ * Handles the file reader. No need to change anything here.
+ */
+async function readFile() {
+    let reader = new FileReader();
+    reader.onloadend = function () {
+        console.log("data loaded: ");
+
+        let data = new Uint16Array(reader.result);
+        volume = new Volume(data);
+        generateHistogram(volume.voxels);
+
+        // set shader data
+        mipShader.setVolume(volume);
+        mipShader.setSteps(300);
+
+        resetVis();
+    };
+    reader.readAsArrayBuffer(fileInput.files[0]);
+}
+
+/**
+ * Construct the THREE.js scene and update histogram when a new volume is loaded by the user.
+ *
+ */
+async function resetVis() {
+    // create new empty scene and perspective camera
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(75, canvasWidth / canvasHeight, 0.1, 1000);
+
+
+    const boundingBox = new THREE.BoxGeometry(volume.width, volume.height, volume.depth); // create bounding box in which we render the volume
+    const material = mipShader.material;
+    await mipShader.load(); // this function needs to be called explicitly, and only works within an async function!
+    const mesh = new THREE.Mesh(boundingBox, material);
+    scene.add(mesh);
+
+    // our camera orbits around an object centered at (0,0,0)
+    orbitCamera = new OrbitCamera(camera, new THREE.Vector3(0, 0, 0), 2 * volume.max, renderer.domElement);
+
+    // init paint loop
+    requestAnimationFrame(paint);
+}
+
+/**
+ * Render the scene and update all necessary shader information.
+ */
+function paint() {
+    if (volume) {
+        renderer.render(scene, camera);
+    }
+}
+
+
+/**
+ * Draws the corresponding histogram in the div histogram
+ * @param voxels the float array to be updated.
+ */
+function generateHistogram(voxels) {
+    const container = d3.select("#tfContainer");
+    const width = 500;
+    const height = width/2;
+    const margin = {top: 10, right: 30, bottom: 40, left: 40};
+    const adjWidth = width - margin.left - margin.right;
+    const adjHeight = height - margin.top - margin.bottom;
+
+    // for task 3
+    let intensity = 0;
+    let density = 0;
+
+    // Check if the SVG already exists, create it if not
+    let svg = container.select('svg');
+    if (svg.empty()) {
+        svg = container.append('svg')
+            .attr('width', '100%')
+            .attr('height', '100%')
+            .append('g')
+            .attr('transform', `translate(${margin.left},${margin.top})`);
+
+        // Initial x-axis
+        svg.append('g')
+            .attr('class', 'x-axis')
+            .attr('transform', `translate(0,${adjHeight})`);
+
+        // Initial y-axis
+        svg.append('g')
+            .attr('class', 'y-axis');
+
+        const line = svg.append("line")
+            .attr("x1", (adjWidth/2))
+            .attr("x2", (adjWidth/2))
+            .attr("y1", 0)
+            .attr("y2", adjHeight)
+            .style("stroke", "#ffffff")
+            .style("stroke-width", "2px")
+            .style("cursor", "pointer");
+
+
+        const ball = svg.append("circle")
+            .attr("cx", (adjWidth/2))
+            .attr("cy", 0)
+            .attr("r", 10)
+            .style("fill", "#ffffff")
+            .style("stroke-width", "2px")
+            .style("cursor", "pointer");
+
+        const dragLine = d3.drag()
+            .on("drag", function(event) {
+                const newX = Math.max(0, Math.min(adjWidth, event.x));
+                const newY = Math.max(0, Math.min(adjHeight, event.y));
+                line.attr("x1", newX)
+                    .attr("x2", newX)
+                    .attr("y1", newY)
+                    .attr("y2", adjHeight);
+                ball.attr("cx", newX)
+                    .attr("cy", newY);
+
+                density = line.node().getAttribute("x1") / adjWidth;
+                intensity = line.node().getAttribute("y1") / (adjHeight) * -1 + 1;
+            });
+
+        line.call(dragLine);
+        ball.call(dragLine);
+    }
+
+    // Setup the x-axis scale
+    const xScale = d3.scaleLinear()
+        .domain([0, 1]) // Adjust based on your actual data needs
+        .range([0, adjWidth]);
+
+    // Histogram function to compute the bins
+    let histogram = d3.histogram()
+        .value(d => d)
+        .domain(xScale.domain())
+        .thresholds(xScale.ticks(100));
+
+    let bins = histogram(voxels);
+
+    // Setup the y-axis scale
+    const yScale = d3.scaleLinear()
+        .domain([0, 1])
+        .range([adjHeight, 0]);
+
+    // Update the axes
+    svg.select('.x-axis').call(d3.axisBottom(xScale));
+    svg.select('.y-axis').call(d3.axisLeft(yScale));
+
+    // Adding labels to the axes
+    svg.select('.x-axis').append('text')
+        .attr('class', 'x-axis-label')
+        .attr('text-anchor', 'end')
+        .attr('x', adjWidth)
+        .attr('y', 40)
+        .text('Density')
+        .attr('fill', 'white');
+
+    svg.select('.y-axis').append('text')
+        .attr('class', 'y-axis-label')
+        .attr('text-anchor', 'end')
+        .attr('transform', 'rotate(-90)')
+        .attr('y', -40)
+        .attr('dy', '.75em')
+        .text('Intensity')
+        .attr('fill', 'white');
+
+    // Select all bars and bind data
+    let bars = svg.selectAll('rect')
+        .data(bins);
+
+    // y-scale down for the histogram data
+    const yScaleDown = d3.scalePow()
+        .exponent(0.25)
+        .domain([0, d3.max(bins, d => d.length) * 1.5])
+        .range([0, adjHeight]);
+
+    // Enter selection
+    bars.enter().append('rect')
+        .attr('x', d => xScale(d.x0))
+        .attr('y', adjHeight)
+        .attr('width', d => Math.max(0, xScale(d.x1) - xScale(d.x0) - 1))
+        .attr('height', 0) // Start with height 0 for transition
+        .style('fill', 'white')
+        .merge(bars) // Merge enter and update selections
+        .transition() // Start a transition to animate new changes
+        .duration(750) // Transition time of 750ms
+        .attr('y', adjHeight)
+        .attr('height', d => yScaleDown(d.length))
+        .style('opacity', 0.4);
+
+    // Exit transition
+    bars.exit()
+        .transition()
+        .duration(750)
+        .attr('y', adjHeight)
+        .attr('height', 0)
+        .remove();
+
+}
+```
+
+### Vis/js/vis2.js
+```
+let renderer, camera, scene, orbitCamera;
+let canvasWidth, canvasHeight = 0;
+let container = null;
+let volume = null;
+let fileInput = null;
+let firstHitShader = null;
+
+let cursor_x;
+let cursor_y;
+
+const MAX_LAYERS = 3;
+let isoValues = [0.5, -1, -1]; // Example iso-values
+let surfaceColors = [new THREE.Vector3(1, 1, 1), new THREE.Vector3(1, 1, 1), new THREE.Vector3(1, 1, 1)];
+let opacities = [1.0, -1, -1]; // Example opacities
+
+let layerIndex = 0;
+
+let theColorRgb = new THREE.Vector3(255, 255, 255);
+
+
+/**
+ * Load all data and initialize UI here.
+ */
+function init() {
+    // volume viewer
+    container = document.getElementById("viewContainer");
+    canvasWidth = window.innerWidth * 0.7;
+    canvasHeight = window.innerHeight * 0.7;
+
+    // WebGL renderer
+    renderer = new THREE.WebGLRenderer();
+    renderer.setSize(canvasWidth, canvasHeight);
+    container.appendChild(renderer.domElement);
+
+    // read and parse volume file
+    fileInput = document.getElementById("upload");
+    fileInput.addEventListener('change', readFile);
+
+    // create new maximum intensity projection shader
+    firstHitShader = new FirstHitShader();
+
+    buttonpress();
+    buttonPressDelete();
+
+
+    firstHitShader.setIsoValues(isoValues);
+    firstHitShader.setSurfaceColors(surfaceColors);
+    firstHitShader.setOpacities(opacities);
+
+
+    // color changing
+    var colorInput = document.getElementById("surfaceColor");
+
+    colorInput.addEventListener("input", function () {
+        let theColor = colorInput.value;
+
+        theColorRgb = hexToRgb(theColor);
+
+        //firstHitShader.setSurfaceColor(new THREE.Vector3(theColorRgb.r/255, theColorRgb.g/255, theColorRgb.b/255));
+        surfaceColors[layerIndex] = new THREE.Vector3(theColorRgb.x / 255.0, theColorRgb.y / 255.0, theColorRgb.z / 255.0)
+        firstHitShader.setSurfaceColors(surfaceColors);
+        paint();
+    }, false);
+}
+
+function hexToRgb(hex) {
+    // Remove the leading #
+    hex = hex.replace(/^#/, '');
+
+    // Convert 3-digit hex to 6-digit hex
+    if (hex.length === MAX_LAYERS) {
+        hex = hex.split('').map(hexChar => hexChar + hexChar).join('');
+    }
+
+    const bigint = parseInt(hex, 16);
+    const r = ((bigint >> 16) & 255);
+    const g = ((bigint >> 8) & 255);
+    const b = (bigint & 255);
+
+    return new THREE.Vector3(r, g, b);
+}
+
+/**
+ * Handles the file reader. No need to change anything here.
+ */
+async function readFile() {
+    let reader = new FileReader();
+    reader.onloadend = function () {
+        console.log("data loaded: ");
+
+        let data = new Uint16Array(reader.result);
+        volume = new Volume(data);
+        generateHistogram(volume.voxels);
+
+        // set shader data
+        firstHitShader.setVolume(volume);
+        firstHitShader.setSteps(500);
+
+        resetVis();
+    };
+    reader.readAsArrayBuffer(fileInput.files[0]);
+}
+
+/**
+ * Construct the THREE.js scene and update histogram when a new volume is loaded by the user.
+ *
+ */
+async function resetVis() {
+    // create new empty scene and perspective camera
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(75, canvasWidth / canvasHeight, 0.1, 1000);
+
+
+    const boundingBox = new THREE.BoxGeometry(volume.width, volume.height, volume.depth); // create bounding box in which we render the volume
+    const material = firstHitShader.material;
+    await firstHitShader.load(); // this function needs to be called explicitly, and only works within an async function!
+    const mesh = new THREE.Mesh(boundingBox, material);
+    scene.add(mesh);
+
+    // our camera orbits around an object centered at (0,0,0)
+    orbitCamera = new OrbitCamera(camera, new THREE.Vector3(0, 0, 0), 2 * volume.max, renderer.domElement);
+
+    // init paint loop
+    requestAnimationFrame(paint);
+}
+
+/**
+ * Render the scene and update all necessary shader information.
+ */
+function paint() {
+    if (volume) {
+        renderer.render(scene, camera);
+    }
+}
+
+
+/**
+ * Draws the corresponding histogram in the div histogram
+ * @param voxels the float array to be updated.
+ */
+function generateHistogram(voxels) {
+    const container = d3.select("#tfContainer");
+    const width = 500;
+    const height = width / 2;
+    const margin = {top: 10, right: 30, bottom: 40, left: 40};
+    const adjWidth = width - margin.left - margin.right;
+    const adjHeight = height - margin.top - margin.bottom;
+
+
+    // Check if the SVG already exists, create it if not
+    let svg = container.select('svg');
+    if (svg.empty()) {
+        svg = container.append('svg')
+            .attr('width', '100%')
+            .attr('height', '100%')
+            .append('g')
+            .attr('transform', `translate(${margin.left},${margin.top})`);
+
+        // Initial x-axis
+        svg.append('g')
+            .attr('class', 'x-axis')
+            .attr('transform', `translate(0,${adjHeight})`);
+
+        // Initial y-axis
+        svg.append('g')
+            .attr('class', 'y-axis');
+
+        const line = svg.append("line")
+            .attr("x1", (adjWidth / 2))
+            .attr("x2", (adjWidth / 2))
+            .attr("y1", 0)
+            .attr("y2", adjHeight)
+            .style("stroke", "white")
+            .style("stroke-width", "2px")
+            .style("cursor", "pointer");
+
+
+        const ball = svg.append("circle")
+            .attr("cx", (adjWidth / 2))
+            .attr("cy", 0)
+            .attr("r", 10)
+            .style("fill", "white")
+            .style("stroke-width", "2px")
+            .style("cursor", "pointer");
+
+        const dragLine = d3.drag()
+            .on("drag", function (event) {
+                const newX = Math.max(0, Math.min(adjWidth, event.x));
+                const newY = Math.max(0, Math.min(adjHeight, event.y));
+                line.attr("x1", newX)
+                    .attr("x2", newX)
+                    .attr("y1", newY)
+                    .attr("y2", adjHeight);
+                ball.attr("cx", newX)
+                    .attr("cy", newY);
+
+
+                cursor_x = line.node().getAttribute("x1") / adjWidth;
+                cursor_y = line.node().getAttribute("y1") / (adjHeight) * -1 + 1;
+                if (layerIndex !== MAX_LAYERS) {
+                    isoValues[layerIndex] = cursor_x;
+                    opacities[layerIndex] = cursor_y;
+                    firstHitShader.setIsoValues(isoValues);
+                    firstHitShader.setOpacities(opacities);
+                    paint();
+                }
+            });
+
+        line.call(dragLine);
+        ball.call(dragLine);
+    }
+
+    // Setup the x-axis scale
+    const xScale = d3.scaleLinear()
+        .domain([0, 1]) // Adjust based on your actual data needs
+        .range([0, adjWidth]);
+
+    // Histogram function to compute the bins
+    let histogram = d3.histogram()
+        .value(d => d)
+        .domain(xScale.domain())
+        .thresholds(xScale.ticks(100));
+
+    let bins = histogram(voxels);
+
+    // Setup the y-axis scale
+    const yScale = d3.scaleLinear()
+        .domain([0, 1])
+        .range([adjHeight, 0]);
+
+    // Update the axes
+    svg.select('.x-axis').call(d3.axisBottom(xScale));
+    svg.select('.y-axis').call(d3.axisLeft(yScale));
+
+    // Adding labels to the axes
+    svg.select('.x-axis').append('text')
+        .attr('class', 'x-axis-label')
+        .attr('text-anchor', 'end')
+        .attr('x', adjWidth)
+        .attr('y', 40)
+        .text('Density')
+        .attr('fill', 'white');
+
+    svg.select('.y-axis').append('text')
+        .attr('class', 'y-axis-label')
+        .attr('text-anchor', 'end')
+        .attr('transform', 'rotate(-90)')
+        .attr('y', -40)
+        .attr('dy', '.75em')
+        .text('Intensity')
+        .attr('fill', 'white');
+
+    // Select all bars and bind data
+    let bars = svg.selectAll('rect')
+        .data(bins);
+
+    // y-scale down for the histogram data
+    const yScaleDown = d3.scalePow()
+        .exponent(0.25)
+        .domain([0, d3.max(bins, d => d.length) * 1.5])
+        .range([0, adjHeight]);
+
+    // Enter selection
+    bars.enter().append('rect')
+        .attr('x', d => xScale(d.x0))
+        .attr('y', adjHeight)
+        .attr('width', d => Math.max(0, xScale(d.x1) - xScale(d.x0) - 1))
+        .attr('height', 0) // Start with height 0 for transition
+        .style('fill', 'white')
+        .merge(bars) // Merge enter and update selections
+        .transition() // Start a transition to animate new changes
+        .duration(750) // Transition time of 750ms
+        .attr('y', adjHeight)
+        .attr('height', d => yScaleDown(d.length))
+        .style('opacity', 0.4);
+
+    // Exit transition
+    bars.exit()
+        .transition()
+        .duration(750)
+        .attr('y', adjHeight)
+        .attr('height', 0)
+        .remove();
+
+}
+
+function buttonpress() {
+    document.getElementById('saveButton').addEventListener("click", function () {
+        if (layerIndex === MAX_LAYERS) {
+            return;
+        }
+        updateValuesIfNeed();
+        layerIndex++;
+        document.getElementById('surfaceColor').value = '#ffffff';
+        updateLineAndCircle();
+    });
+}
+
+function buttonPressDelete() {
+    document.getElementById('deleteButton').addEventListener("click", function () {
+        if (layerIndex <= 0) {
+            return;
+        }
+        layerIndex--;
+        for (let i = layerIndex; i < MAX_LAYERS; i++) {
+            isoValues[i] = -1;
+            opacities[i] = -1;
+            surfaceColors[i] = new THREE.Vector3(1, 1, 1);
+        }
+        document.getElementById('surfaceColor').value = '#ffffff';
+        updateLineAndCircle();
+        paint();
+    })
+}
+
+function updateLineAndCircle() {
+    const svg = d3.select('#tfContainer').select('svg').select('g');
+
+    const width = 500;
+    const height = width / 2;
+    const margin = {top: 10, right: 30, bottom: 40, left: 40};
+    const adjWidth = width - margin.left - margin.right;
+    const adjHeight = height - margin.top - margin.bottom;
+    svg.selectAll(".saved-line").remove();
+    svg.selectAll(".saved-circle").remove();
+    for (let i = 0; i < layerIndex; i++) {
+        const newX = isoValues[i] * adjWidth;
+        const newY = (opacities[i] - 1) * -1 * adjHeight;
+
+        svg.insert("line", ":first-child")
+            .attr("x1", newX)
+            .attr("x2", newX)
+            .attr("y1", newY)
+            .attr("y2", adjHeight)
+            .attr("class", "saved-line")
+            .style("stroke", "rgb(" + surfaceColors[i].x * 255 + ", " + surfaceColors[i].y * 255 + ", " + surfaceColors[i].z * 255 + ")")
+            .style("stroke-width", "2px")
+
+
+        svg.insert("circle", ":first-child")
+            .attr("cx", newX)
+            .attr("cy", newY)
+            .attr("r", 10)
+            .attr("class", "saved-circle")
+            .style("fill", "rgb(" + surfaceColors[i].x * 255 + ", " + surfaceColors[i].y * 255 + ", " + surfaceColors[i].z * 255 + ")")
+            .style("stroke-width", "2px")
+    }
+}
+
+function updateValuesIfNeed() {
+    if (isoValues[layerIndex] === -1) {
+        isoValues[layerIndex] = cursor_x;
+        firstHitShader.setIsoValues(isoValues);
+        opacities[layerIndex] = cursor_y;
+        firstHitShader.setOpacities(opacities);
+    }
+    paint();
+}
+```
+
+### Vis/js/volume.js
+```
+class Volume {
+    constructor(uint16Array) {
+        this.width = uint16Array[0];
+        this.height = uint16Array[1];
+        this.depth = uint16Array[2];
+        this.slice = this.width * this.height;
+        this.size = this.slice * this.depth;
+        this.max = Math.max(this.width, this.height, this.depth);
+        this.scale = new THREE.Vector3(this.width, this.height, this.depth);
+
+        let floatArray = [];
+        uint16Array.slice(3).forEach(function(voxel){
+            floatArray.push(voxel / 4095.0);
+        });
+        this.voxels = Float32Array.from(floatArray);
+
+        console.log(this.voxels.length + " voxels loaded - ["
+            + this.width + ", " + this.height + ", " + this.depth + "], max: " + this.max);
+    }
+
+}
+```

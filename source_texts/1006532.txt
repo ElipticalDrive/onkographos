@@ -1,0 +1,320 @@
+Summary
+
+default the SDL terrain demo to marching cubes, rebuild world positions on demand, and use face normals for backface culling
+ensure the greedy mesher honours neighbour occupancy and simplify marching cubes density sampling for binary voxels
+extend meshing tests (plus CHECK_FALSE helper) to cover marching cubes neighbour handling
+
+Testing
+
+ctest --test-dir build
+
+
+Codex Task
+
+Switch terrain demo to marching cubes and tighten meshing by Autodidac · Pull Request #12 · Autodidac/AlmondVoxel · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Switch terrain demo to marching cubes and tighten meshing
+#12
+New issue
+Have a question about this project? Sign up for a free GitHub account to open an issue and contact its maintainers and the community.
+Sign up for GitHub
+By clicking “Sign up for GitHub”, you agree to our terms of service and
+privacy statement. We’ll occasionally send you account related emails.
+Already on GitHub?
+Sign in
+to your account
+Merged
+Autodidac
+merged 1 commit into
+main
+from
+codex/fix-backface-culling-and-optimize-voxels
+Nov 7, 2025
+Uh oh!
+There was an error while loading. Please reload this page.
+Merged
+Switch terrain demo to marching cubes and tighten meshing
+#12
+Show file tree
+Hide file tree
+Changes from all commits
+Commits
+Show all changes
+1 commit
+Select commit
+934fd0b
+Switch terrain demo to marching cubes and tighten meshing
+Autodidac Nov 7, 2025
+File filter
+Clear filters
+Conversations
+Failed to load comments. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Jump to
+Jump to file
+Failed to load files. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Diff view
+Diff view
+Switch terrain demo to marching cubes and tighten meshing
+Loading branch information
+Uh oh!
+There was an error while loading. Please reload this page.
+Autodidac
+committed
+Nov 7, 2025
+commit 934fd0b706ae7f1b2b12920814a58b35060e25cc
+There are no files selected for viewing
+41 changes: 20 additions & 21 deletions
+41
+examples/terrain_demo.cpp
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -188,8 +188,6 @@ struct chunk_instance_hash {
+struct chunk_mesh_entry {
+meshing::mesh_result mesh{};
+std::vector<float3> world_positions{};
+std::vector<SDL_FColor> colors{};
+std::array<std::int64_t, 3> origin{};
+int cell_size{1};
+mesher_choice mode{mesher_choice::greedy};
+Expand Down
+Expand Up
+@@ -300,21 +298,9 @@ chunk_mesh_entry build_chunk_mesh(
+};
+entry.mesh = meshing::greedy_mesh_with_neighbors(chunk, is_opaque, neighbor_sampler);
+}
+entry.world_positions.resize(entry.mesh.vertices.size());
+entry.colors.resize(entry.mesh.vertices.size());
+entry.origin = origin;
+entry.cell_size = cell_size;
+for (std::size_t i = 0; i < entry.mesh.vertices.size(); ++i) {
+const auto& vertex = entry.mesh.vertices[i];
+entry.world_positions[i] = float3{
+static_cast<float>(origin[0]) + static_cast<float>(vertex.position[0]) * static_cast<float>(cell_size),
+static_cast<float>(origin[1]) + static_cast<float>(vertex.position[1]) * static_cast<float>(cell_size),
+static_cast<float>(origin[2]) + vertex.position[2]
+};
+entry.colors[i] = shade_color(vertex.id, vertex.normal);
+}
+return entry;
+}
+Expand Down
+Expand Up
+@@ -378,7 +364,7 @@ void update_required_chunks(const camera& cam, const chunk_extent& extent, const
+int main(int argc, char** argv) {
+using namespace almond::voxel;
+mesher_choice mesher_mode = mesher_choice::greedy;
+mesher_choice mesher_mode = mesher_choice::marching;
+for (int i = 1; i < argc; ++i) {
+std::string_view arg{argv[i]};
+if (arg == "--marching-cubes" || arg == "--mesher=marching") {
+Expand Down
+Expand Up
+@@ -528,6 +514,14 @@ int main(int argc, char** argv) {
+draw_vertices.clear();
+draw_vertices.reserve(total_triangles * 3);
+const auto world_position = [](const chunk_mesh_entry& chunk, const meshing::vertex& vertex) {
+return float3{
+static_cast<float>(chunk.origin[0]) + static_cast<float>(vertex.position[0]) * static_cast<float>(chunk.cell_size),
+static_cast<float>(chunk.origin[1]) + static_cast<float>(vertex.position[1]) * static_cast<float>(chunk.cell_size),
+static_cast<float>(chunk.origin[2]) + vertex.position[2]
+};
+};
+for (const auto& [key, chunk] : chunk_meshes) {
+(void)key;
+const auto& mesh = chunk.mesh;
+Expand All
+@@ -536,10 +530,14 @@ int main(int argc, char** argv) {
+const std::uint32_t i1 = mesh.indices[i + 1];
+const std::uint32_t i2 = mesh.indices[i + 2];
+const float3 normal = to_float3(mesh.vertices[i0].normal);
+if (length_squared(normal) > 0.0f) {
+const float3 view_vector = subtract(cam.position, chunk.world_positions[i0]);
+if (dot(normal, view_vector) <= 0.0f) {
+const float3 p0 = world_position(chunk, mesh.vertices[i0]);
+const float3 p1 = world_position(chunk, mesh.vertices[i1]);
+const float3 p2 = world_position(chunk, mesh.vertices[i2]);
+float3 face_normal = cross(subtract(p1, p0), subtract(p2, p0));
+if (length_squared(face_normal) > 0.0f) {
+face_normal = normalize(face_normal);
+const float3 view_vector = subtract(cam.position, p0);
+if (dot(face_normal, view_vector) <= 0.0f) {
+continue;
+}
+}
+Expand All
+@@ -548,10 +546,11 @@ int main(int argc, char** argv) {
+bool visible = true;
+float depth_sum = 0.0f;
+const std::array<std::uint32_t, 3> indices{i0, i1, i2};
+const std::array<float3, 3> positions{p0, p1, p2};
+for (std::size_t corner = 0; corner < indices.size(); ++corner) {
+const std::uint32_t idx = indices[corner];
+const float3& position = chunk.world_positions[idx];
+const float3& position = positions[corner];
+const projection_result projected = project_perspective(position, cam, vectors, output_width, output_height);
+if (!projected.visible) {
+visible = false;
+Expand All
+@@ -560,7 +559,7 @@ int main(int argc, char** argv) {
+SDL_Vertex v{};
+v.position = projected.point;
+v.color = chunk.colors[idx];
+v.color = shade_color(mesh.vertices[idx].id, mesh.vertices[idx].normal);
+v.tex_coord = SDL_FPoint{0.0f, 0.0f};
+tri.vertices[corner] = v;
+depth_sum += projected.depth;
+Expand Down
+2 changes: 1 addition & 1 deletion
+2
+include/almond_voxel/meshing/greedy_mesher.hpp
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -79,7 +79,7 @@ template <typename IsOpaque, typename NeighborOpaque>
+neighbor_solid = neighbor_opaque(neighbor_local);
+}
+if (!neighbor_inside || !neighbor_solid) {
+if (!neighbor_solid) {
+mask[idx] = mask_cell{true, current};
+}
+}
+Expand Down
+21 changes: 4 additions & 17 deletions
+21
+include/almond_voxel/meshing/marching_cubes.hpp
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -203,25 +203,12 @@ template <typename IsSolid>
+};
+auto density_sampler = [&](std::size_t vx, std::size_t vy, std::size_t vz) -> float {
+float total = 0.0f;
+int count = 0;
+for (int dx = -1; dx <= 0; ++dx) {
+for (int dy = -1; dy <= 0; ++dy) {
+for (int dz = -1; dz <= 0; ++dz) {
+const std::ptrdiff_t sx = static_cast<std::ptrdiff_t>(vx) + dx;
+const std::ptrdiff_t sy = static_cast<std::ptrdiff_t>(vy) + dy;
+const std::ptrdiff_t sz = static_cast<std::ptrdiff_t>(vz) + dz;
+if (const auto sample = sample_voxel(sx, sy, sz)) {
+total += is_solid(*sample) ? 1.0f : 0.0f;
+++count;
+}
+}
+}
+}
+if (count == 0) {
+const auto sample = sample_voxel(static_cast<std::ptrdiff_t>(vx), static_cast<std::ptrdiff_t>(vy),
+static_cast<std::ptrdiff_t>(vz));
+if (!sample) {
+return 0.0f;
+}
+return total / static_cast<float>(count);
+return is_solid(*sample) ? 1.0f : 0.0f;
+};
+auto material_sampler = [&](std::size_t x, std::size_t y, std::size_t z) {
+Expand Down
+24 changes: 24 additions & 0 deletions
+24
+tests/meshing_tests.cpp
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -87,3 +87,27 @@ TEST_CASE(marching_cubes_from_chunk_binary) {
+CHECK_FALSE(mesh.vertices.empty());
+CHECK_FALSE(mesh.indices.empty());
+}
+TEST_CASE(marching_cubes_respects_chunk_neighbors) {
+const auto extent = cubic_extent(2);
+chunk_storage primary{extent};
+chunk_storage neighbor{extent};
+primary.fill(voxel_id{1});
+neighbor.fill(voxel_id{1});
+meshing::chunk_neighbors neighbors{};
+neighbors.pos_x = &neighbor;
+const auto mesh = meshing::marching_cubes_from_chunk(primary,
+[](voxel_id id) { return id != voxel_id{}; }, neighbors);
+bool has_positive_x_surface = false;
+for (const auto& vertex : mesh.vertices) {
+if (vertex.normal[0] > 0.5f) {
+has_positive_x_surface = true;
+break;
+}
+}
+CHECK_FALSE(has_positive_x_surface);
+}
+4 changes: 4 additions & 0 deletions
+4
+tests/test_framework.hpp
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -76,10 +76,14 @@ inline void run_tests() {
+} \
+} while (false)
+#define CHECK_FALSE(expr) CHECK(!(expr))
+#define REQUIRE(expr) \
+do { \
+if (!(expr)) { \
+throw ::almond::voxel::test::test_failure{std::string{"REQUIRE failed: "} + #expr}; \
+} \
+} while (false)
+#define REQUIRE_FALSE(expr) REQUIRE(!(expr))
+Toggle all file notes
+Toggle all file annotations
+Add this suggestion to a batch that can be applied as a single commit.
+This suggestion is invalid because no changes were made to the code.
+Suggestions cannot be applied while the pull request is closed.
+Suggestions cannot be applied while viewing a subset of changes.
+Only one suggestion per line can be applied in a batch.
+Add this suggestion to a batch that can be applied as a single commit.
+Applying suggestions on deleted lines is not supported.
+You must change the existing code in this line in order to create a valid suggestion.
+Outdated suggestions cannot be applied.
+This suggestion has been applied or marked resolved.
+Suggestions cannot be applied from pending reviews.
+Suggestions cannot be applied on multi-line comments.
+Suggestions cannot be applied while the pull request is queued to merge.
+Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

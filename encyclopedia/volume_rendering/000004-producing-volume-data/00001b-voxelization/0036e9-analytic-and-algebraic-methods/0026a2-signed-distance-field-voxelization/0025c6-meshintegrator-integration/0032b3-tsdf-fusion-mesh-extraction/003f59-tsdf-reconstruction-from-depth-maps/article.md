@@ -3,57 +3,143 @@
 Also called: Depth Map Fusion, TSDF Reconstruction
 
 ## Overview
-This method converts per-surfel depth outputs from a 2D Gaussian Splatting variant into a unified 3D mesh by computing a robust depth value per pixel and fusing the resulting depth maps via Truncated Signed Distance Function (TSDF) fusion [S1]. It differs from implicit surface extraction methods by relying on explicit depth estimation followed by volumetric integration, offering a balance between geometric fidelity and computational efficiency [S1].
+This method converts per-surfel depth outputs from a 2D Gaussian Splatting (or similar primitive-based) renderer into a unified 3D mesh by computing a robust depth value per pixel and fusing the resulting depth maps via Truncated Signed Distance Function (TSDF) fusion [S1]. It differs from direct neural rendering mesh extraction by relying on explicit geometric fusion of rendered depth maps rather than differentiable surface optimization [S1]. It serves as the final step in the pipeline, taking the depth and color maps produced by [TSDF Fusion Mesh Extraction](6831-tsdf-fusion-mesh-extraction.md) (which uses Open3D's ScalableTSDFVolume) and providing the specific algorithmic details for generating the input depth maps and configuring the fusion parameters [S1].
 
 ## How it works
 **Inputs:**
-- A set of $N$ depth maps, one for each training view, where each map contains per-pixel depth values $t_i$ and transmittance values $T_i$ for all splats $i$ contributing to that pixel.
+- Rendered depth maps: For each pixel $p$ in each view, a list of splats $i$ contributing to that pixel, along with their depth $t_i$ and transmittance $T_i$.
 - Camera intrinsics and extrinsics for each view.
+- TSDF grid configuration parameters.
 
 **Outputs:**
-- A triangular mesh representing the reconstructed surface.
+- A fused TSDF volume.
+- A mesh extracted from the TSDF volume (typically via Marching Cubes, as handled by the parent method).
 
 **Data Structures:**
-- **TSDF Volume:** A 3D voxel grid managed by Open3D's `ScalableTSDFVolume` [S1].
-  - **Voxel Size:** $0.004$ units [S1].
-  - **Truncation Threshold:** $0.02$ units [S1].
-  - The volume integrates signed distance values from multiple views.
+- **TSDF Volume:** A 3D grid of voxels. Each voxel stores a weighted average distance value and a weight accumulator.
+- **Voxel Layout:** Not explicitly defined in the sources, but standard TSDF implementations store a float for the distance value and a float for the weight [G].
+- **Parameters:**
+  - Voxel size: $0.004$ [S1].
+  - Truncation threshold: $0.02$ [S1].
+  - Gradient threshold: $0.3$ [S1].
+  - Percent dense value: $0.001$ [S1].
 
-**Parameters:**
-- **Voxel Size:** $0.004$ [S1].
-- **Truncation Threshold:** $0.02$ [S1].
-- **Gradient Threshold:** $0.3$ (used in the adaptive control strategy for point cloud density, ensuring consistency with other methods) [S1].
-- **Percent Dense Value:** $0.001$ (used in the adaptive control strategy) [S1].
+**Algorithm Steps:**
 
-**Steps:**
-
-1. **Robust Depth Estimation:** For each pixel $p$ in each depth map, compute the median depth $t_{median}$. This is defined as the maximum depth $t_i$ among all splats $i$ where the transmittance $T_i$ exceeds $0.5$ [S1].
+1. **Compute Median Depth per Pixel:**
+   For each pixel $p$ in a rendered depth map, identify all splats $i$ that contribute to that pixel. Calculate the transmittance $T_i$ for each splat. Select the maximum depth $t_i$ among all splats where the transmittance $T_i$ exceeds $0.5$. This value is the median depth $t_{median}$ for the pixel [S1].
+   
+   Formula:
    $$ t_{median} = \max \{ t_i \mid T_i > 0.5 \} $$
-   [S1]
 
-2. **TSDF Fusion:** Project the computed $t_{median}$ depth maps into the 3D voxel space using the corresponding camera poses. Integrate these depth maps into the TSDF volume using Open3D's TSDF fusion algorithm [S1].
-   - The integration uses the specified voxel size ($0.004$) and truncation threshold ($0.02$) [S1].
-   - The TSDF volume accumulates weighted signed distance values from all views.
+2. **TSDF Fusion:**
+   Fuse the computed $t_{median}$ depth maps from all views into a single 3D representation using Truncated Signed Distance Fusion (TSDF) via Open3D [S1].
+   - For each view, project the depth map into the 3D TSDF volume.
+   - For each voxel intersected by a ray from the camera through a pixel with valid depth:
+     - Compute the signed distance from the voxel center to the depth surface.
+     - If the absolute distance is less than the truncation threshold ($0.02$), update the voxel's TSDF value using a weighted average based on the new observation and previous observations.
+     - Accumulate weights to handle multi-view consistency.
 
-3. **Mesh Extraction:** Extract the mesh from the fused TSDF volume using Open3D's marching cubes implementation [S1]. This step is performed by the parent method [TSDF Fusion Mesh Extraction](6831-tsdf-fusion-mesh-extraction.md).
+3. **Mesh Extraction:**
+   The resulting TSDF volume is passed to the mesh extraction stage (handled by [TSDF Fusion Mesh Extraction](6831-tsdf-fusion-mesh-extraction.md)), which uses Open3D's `TruncatedSDFVolume` to extract the mesh [S1].
 
-**Pitfalls:**
-- **Overfitting:** The high geometric fitting capability of quadric surfels can cause overfitting in regions with sparse views or low texture, resulting in surface artifacts like dents [S1].
-- **Resolution:** Evaluations are typically performed at half the original image resolution to maintain consistency with other methods and reduce computational load [S1].
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_median_depth(depth_map, splats, transmittances):
+    """
+    Computes the median depth for each pixel based on splat contributions.
+    
+    Args:
+        depth_map: List of depths t_i for each splat i contributing to each pixel.
+        splats: List of splat objects.
+        transmittances: List of transmittance T_i for each splat i.
+        
+    Returns:
+        median_depth_map: 2D array of median depths per pixel.
+    """
+    median_depth_map = np.zeros_like(depth_map[0]) # Assuming all depth maps have same shape
+    for pixel in range(num_pixels):
+        # Get all splats contributing to this pixel
+        contributing_splats = get_contributing_splats(pixel, splats)
+        contributing_transmittances = get_contributing_transmittances(pixel, transmittances)
+        contributing_depths = get_contributing_depths(pixel, depth_map)
+        
+        # Filter splats with transmittance > 0.5
+        valid_indices = [i for i, T in enumerate(contributing_transmittances) if T > 0.5]
+        
+        if valid_indices:
+            # Select max depth among valid splats
+            valid_depths = [contributing_depths[i] for i in valid_indices]
+            median_depth_map[pixel] = max(valid_depths)
+        else:
+            median_depth_map[pixel] = np.nan # No valid splats
+            
+    return median_depth_map
+
+def tsdf_fusion(median_depth_maps, camera_poses, intrinsics, voxel_size=0.004, truncation_threshold=0.02):
+    """
+    Fuses median depth maps into a TSDF volume using Open3D.
+    
+    Args:
+        median_depth_maps: List of 2D arrays containing median depths.
+        camera_poses: List of 4x4 transformation matrices for each view.
+        intrinsics: Camera intrinsic matrix.
+        voxel_size: Size of each voxel in meters.
+        truncation_threshold: Maximum distance to consider for TSDF update.
+        
+    Returns:
+        tsdf_volume: Open3D TSDF volume object.
+    """
+    # Initialize TSDF volume using Open3D
+    # Note: The exact initialization parameters (volume extent, resolution) 
+    # are not specified in the sources, but are required for implementation [G].
+    tsdf_volume = o3d.pipelines.integration.ScalableTSDFVolume(
+        voxel_length=voxel_size,
+        sdf_trunc=truncation_threshold,
+        color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
+    )
+    
+    for depth_map, pose in zip(median_depth_maps, camera_poses):
+        # Create RGBD image from depth map (color can be dummy or from color map)
+        # Note: Color map integration is not detailed in the sources for this specific step [G].
+        rgbd_image = o3d.geometry.RGBDImage.create_from_depth_and_color(
+            o3d.geometry.Image(depth_map.astype(np.float32)),
+            o3d.geometry.Image(np.zeros_like(depth_map).astype(np.uint8)) # Dummy color
+        )
+        
+        # Integrate into TSDF volume
+        tsdf_volume.integrate(
+            rgbd_image,
+            intrinsics=intrinsics,
+            extrinsic=pose
+        )
+        
+    return tsdf_volume
+```
+
+## Subtopics
+
+### [Progressive TSDF Fusion & Mesh Extraction](10786-progressive-tsdf-fusion-mesh-extraction.md)
+Progressive TSDF Fusion & Mesh Extraction is a multi-resolution surface reconstruction method that fuses rendered depth and alpha maps into a Truncated Signed Distance Field (TSDF) grid, progressively refining the voxel resolution while pruning empty space, and finally extracts a mesh via Marching Cubes. It differs from single-resolution TSDF fusion by reducing memory usage and computational cost through early pruning of empty voxels and subdividing only where necessary, and it differs from direct neural rendering mesh extraction by relying on explicit geometric fusion rather than differentiable surface optimization.
 
 ## Operating characteristics
-- **Time Complexity:** The method is faster than many NeRF-like methods. On the TNT dataset, full QGS achieves a mean F1-Score of 0.50 with a training time of 75 minutes [S1]. Without multi-view regularization, it requires only half the computation time of comparable methods like GOF [S1].
-- **Memory Complexity:** Depends on the TSDF volume resolution and the number of views. The use of Open3D's `ScalableTSDFVolume` helps manage memory efficiently [S1].
-- **Performance:**
-  - **DTU Dataset:** Outperforms both implicit and explicit SOTA reconstruction methods in Chamfer Distance [S1].
-  - **TNT Dataset:** Achieves state-of-the-art F1-Score (0.50 mean) [S1].
-  - **Mip-NeRF 360 Indoor:** PSNR 30.45, SSIM 0.919, LPIPS 0.184 [S1].
-  - **Mip-NeRF 360 Outdoor:** PSNR 24.32, SSIM 0.706, LPIPS 0.242 [S1].
-- **Strengths:** Superior geometric fitting capability of quadrics enables finer detail preservation [S1]. Comparable accuracy to GOF with significantly lower computation time [S1].
-- **Limitations:** Susceptible to artifacts in sparse/low-texture regions due to overfitting [S1].
+- **Time Complexity:** Not explicitly given in the sources. However, the method is noted to require half the computation time of GOF (Geometric Optimization Framework) on the TNT dataset [S1].
+- **Memory Complexity:** Not explicitly given. The parent method uses Open3D's ScalableTSDFVolume, which is designed for scalability [S1].
+- **Measured Performance:**
+  - On the TNT dataset, full QGS achieves a mean F1-Score of 0.50 with a training time of 75 minutes [S1].
+  - On Mip-NeRF 360 indoor scenes, full QGS achieves PSNR 30.45, SSIM 0.919, and LPIPS 0.184 [S1].
+  - On Mip-NeRF 360 outdoor scenes, full QGS achieves PSNR 24.32, SSIM 0.706, and LPIPS 0.242 [S1].
+  - On the DTU dataset, evaluations are performed at half the original image resolution [S1].
+- **Strengths:** Superior geometric fitting capability of quadrics enables finer detail preservation [S1]. Outperforms both implicit and explicit approaches on the DTU dataset [S1].
+- **Limitations:** High geometric fitting capability can cause overfitting in regions with sparse views or low texture, resulting in surface artifacts like dents [S1].
+- **When to use:** When high-quality surface reconstruction is needed from 2D Gaussian Splatting outputs, and computational efficiency is a concern compared to other explicit methods like GOF [S1].
+- **When not to use:** In scenes with sparse views or low texture, where overfitting may occur [S1].
 
 ## Background
-This method is part of the Quadratic Gaussian Splatting (QGS) pipeline, which uses second-order geometric primitives for high-quality surface reconstruction [S1]. It builds on the TSDF fusion approach used in 2DGS [S1]. The adaptive control strategy for point cloud density is adopted from 3DGS [S1]. Experiments were conducted on a single A6000 GPU [S1].
+The method originates from the Quadratic Gaussian Splatting (QGS) paper, which introduces high-quality surface reconstruction using second-order geometric primitives [S1]. It builds on the TSDF fusion approach used in 2DGS [16] and adapts it for quadric surfels [S1]. The adaptive control strategy is adopted from 3DGS [21] [S1].
 
 ## Sources
 [S1] Quadratic Gaussian Splatting: High Quality Surface Reconstruction with Second-Order Geometric Primitives, https://doi.org/10.1109/ICCV51701.2025.02624, fetched 2026-10-30

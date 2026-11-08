@@ -1,0 +1,315 @@
+Is there any way to trilaterate when some of the circles are not intersecting with the perimeter but with the area? For example, I would like to trilaterate this circles, but it only works when they are intersecting with the perimeter: f...
+
+Trilaterate by area · Issue #43 · mrJean1/PyGeodesy · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Trilaterate by area #43
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Trilaterate by area#43
+Copy link
+Description
+AleixDev
+opened on Sep 17, 2020
+Issue body actions
+Is there any way to trilaterate when some of the circles are not intersecting with the perimeter but with the area?
+For example, I would like to trilaterate this circles, but it only works when they are intersecting with the perimeter:
+```
+from pygeodesy.sphericalNvector import LatLon
+
+distance = 5110
+
+p1 = LatLon(42.688839, 2.438857)
+p2 = LatLon(42.635421, 2.522570)
+p3 = LatLon(42.64540, 2.504811)
+t = p1.trilaterate(distance, p2, distance, p3, distance)
+print('trilaterate:', t.lat, t.lon) # (INCORRECT: 43.051858748236725, 2.944630261790253)
+
+
+p1 = LatLon(42.688839,2.438857)
+p2 = LatLon(42.635421,2.522570)
+p3 = LatLon(42.630788,2.500713)
+t = p1.trilaterate(distance, p2, distance, p3, distance)
+print('trilaterate:', t.lat, t.lon) # (CORRECT: 42.67456065072384, 2.4953950233084456)
+```
+Incorrect:
+Correct:
+Activity
+mrJean1 commented on Sep 17, 2020
+mrJean1
+on Sep 17, 2020
+Last edited by mrJean1
+Owner
+More actions
+Thank you for posting the issue. The images are very helpful. Two things.
+At least the first example must be a bug in sphericalNvector.trilaterate. The distance from trilaterated point t to all three points p1, p2 and p3 is the same, but very different from the given distance value. After adding the following 3 lines to both examples:
+```
+print('trilaterate:', t.lat, t.lon)
+...
+print(t.distanceTo(p1))
+print(t.distanceTo(p2))
+print(t.distanceTo(p3))
+```
+the results are
+```
+trilaterate: 43.05185874823812 2.9446302617919247
+57691.28241925844
+57691.28241925878
+57691.282419259085
+
+trilaterate: 42.67456065072385 2.4953950233084585
+4886.695113883056
+4886.695113882949
+4886.695113883015
+```
+As expected, the 3 distances in each example are the same. However, in the first example, 57691 is much larger than the given distance 5110. That is one issue to be investigated further.
+In the second example, the value of 4886 is close to and less than 5110. The difference is about 4% which seems a bit large, but may be within the accuracy of the -Nvector code. Another issue to be investigated further.
+Does trilaterate by area mean determine whether the 3 circles overlap, i.e. have some area in common, like a the Intersection part of a Venn diagram? If so, perhaps the following method may work ... "for each pair of circles, determine the intersection point or points. Then determine whether the line (segment) between the intersection points (aka the radical line) overlaps the third circle" ... Untested and also to be investigated further.
+In any case, the most recent Pygeodesy releases include a function and LatLon method called intersections2 to compute the intersection point(s) of 2 circles in the sphericalTrigonometry, ellipsoidalVincenty and ellipsoidalKarney (but not in the -Nvector) modules. Perhaps, those could be used to build trilaterate by area.
+HTH
+AleixDev commented on Sep 17, 2020
+AleixDev
+on Sep 17, 2020
+Last edited by AleixDev
+Author
+More actions
+Okay I see... In my case, the second example is nearly correct so it's not a big issue for me. The first one is what worries me.
+Yes, sorry, that was what I meant (I didn't know exactly how to say that).
+Thank you very much for your response! I will try your suggestions and I'll let you know if I achieve something relevant.
+mrJean1 commented on Sep 17, 2020
+mrJean1
+on Sep 17, 2020
+Last edited by mrJean1
+Owner
+More actions
+For your consideration, following an initial attempt for a function triliterateBy2 to provide trilaterate-by-area or -by-perimeter.
+For all 3 circle combinations, it uses the LatLon.intersections2 method to get the intersection points between the 1st and 2nd circle.
+For the -by-area case, it then uses the nearestOn method to get the nearest point between in the radical segment and the center of the 3rd circle. If the distance between those is less than the radius of the 3rd circle (less the given margin eps), there is overlap.
+For the -by-perimeter case, it computes the distance between the center of the 3rd circle and the intersection points of the 1st and 2nd circle. Then, it compares the required margin with the closest distance to the closest intersection point.
+```
+from pygeodesy import EPS, IntersectionError, R_M
+from pygeodesy.sphericalTrigonometry import LatLon
+
+distance = 5110
+
+if True:
+    p1 = LatLon(42.688839, 2.438857)
+    p2 = LatLon(42.635421, 2.522570)
+    p3 = LatLon(42.64540, 2.504811)
+else:
+    p1 = LatLon(42.688839,2.438857)
+    p2 = LatLon(42.635421,2.522570)
+    p3 = LatLon(42.630788,2.500713)
+
+
+def trilaterateBy2(p1, d1, p2, d2, p3, d3, area=True, eps=EPS, radius=R_M):
+    '''Trilaterate 3 points by area (overlap) or perimeter (intersection).
+ 
+       Margin C{eps} is the required I{minimal overlap} for C{area=True}
+       or the I{maximally allowed intersection error} for C{area=False}
+       in the same units as C{radius} passed to method C{.distanceTo}.
+
+       @return: 2-Tuple(distance, point) with the C{distance} and I{an}
+                intersection C{point}.  If there is no area overlap
+                or perimeter intersection, the returned result is
+                C({None, None)}.
+   '''
+    for _ in range(3):
+        p1, d1, p2, d2, p3, d3 = p2, d2, p3, d3, p1, d1
+        try:
+            c1, c2 = p1.intersections2(d1, p2, d2)
+            if area:  # check overlap
+                if c1 is c2:  # abutting
+                    c = c1
+                else:  # nearest point on radical
+                    c = p3.nearestOn(c1, c2, radius=radius)
+                d = d3 - p3.distanceTo(c)
+                if d > eps:  # min overlap required
+                    return d, c
+
+            else:  # check intersection
+                for c in ((c1,) if c1 is c2 else (c1, c2)):
+                    d = abs(d3 - p3.distanceTo(c, radius=radius))
+                    if d < eps:  # max distance allowed
+                        return d, c
+
+        except IntersectionError:
+            # no intersection, concentric, etc.
+            if area:
+                pass
+            else:
+                break
+
+    return None, None
+
+for area in (False, True):
+    d, t = trilaterateBy2(p1, distance, p2, distance, p3, distance, area=area, eps=10)  # meter
+    print('trilaterateBy', area, d, (t.lat, t.lon) if t else t)
+```
+One note, triliterateBy2 only works with sphericalTrigonometry.LatLon due to the lack of the nearestOn2 method for ellipsoidal LatLon classes.
+mrJean1 commented on Sep 17, 2020
+mrJean1
+on Sep 17, 2020
+Owner
+More actions
+On issue 1, the result of your first example. Strictly speaking, the result may be a valid trilaterate intersection based on -Nvector math but that is unexpected. Would it be helpful if there was a keyword argument to specify whether the intersection point must be on or near the perimeter?
+mrJean1 commented on Sep 17, 2020
+mrJean1
+on Sep 17, 2020
+Owner
+More actions
+Another comment on the trilaterateBy2 function. That does not handle pathological cases like concentric circles, yet. It is still a question, what is the correct result for 3 concentric circles?
+AleixDev commented on Sep 18, 2020
+AleixDev
+on Sep 18, 2020
+Last edited by AleixDev
+Author
+More actions
+Thank you, that's exactly what I needed!! It works in all the cases that I have tested so far :))
+On issue 1, the result of your first example. Strictly speaking, the result may be a valid trilaterate intersection based on -Nvector math but that is unexpected. Would it be helpful if there was a keyword argument to specify whether the intersection point must be on or near the perimeter?
+Do you mean the result of the second example (42.67456065072384, 2.4953950233084456)..? 🤔 Anyways I think that adding this argument could be a nice addition (although not mandatory for me).
+Another comment on the trilaterateBy2 function. That does not handle pathological cases like concentric circles, yet. It is still a question, what is the correct result for 3 concentric circles?
+I think that the correct result would be to return the center of the circles. Similarly with what happens, with your code, when you use "nearly concentric circles" like this example:
+```
+distance = 5110
+p1 = LatLon(42.688839,5.438857)
+p2 = LatLon(42.688839,5.438857)
+p3 = LatLon(42.688839,5.438858)
+d, t = trilaterateBy2(p1, distance, p2, distance, p3, distance, area=True, eps=10)
+print(t.lat, t.lon) # (returns: [42.688839, 5.438857674568252])
+```
+mrJean1 commented on Sep 18, 2020
+mrJean1
+on Sep 18, 2020
+Last edited by mrJean1
+Owner
+More actions
+Thank you for your comments! I plan to add a method/function trilateral2 based on your suggestions and it will look like the following, including the concentric cases. Hope you have a change to review and test this one.
+```
+from pygeodesy import EPS, IntersectionError, R_M, unstr
+# from pygeodesy.ellipsoidalVincenty import LatLon
+# from pygeodesy.ellipsoidalKarney import LatLon
+from pygeodesy.sphericalTrigonometry import LatLon
+
+distance = 5110
+
+if False:
+    p1 = LatLon(42.688839, 2.438857)
+    p2 = LatLon(42.635421, 2.522570)
+    p3 = LatLon(42.64540, 2.504811)
+else:
+    p1 = LatLon(42.688839,2.438857)
+    p2 = LatLon(42.635421,2.522570)
+    p3 = LatLon(42.630788,2.500713)
+
+
+def trilaterate2(p1, d1, p2, d2, p3, d3, area=True, eps=EPS, radius=R_M, wrap=False):
+    '''Trilaterate 3 points by area (overlap) or perimeter (intersection).
+
+       Margin C{eps} is the required I{minimal overlap} for C{area=True}
+       or the I{maximally allowed intersection error} for C{area=False}
+       in the same units as C{radius} passed to method C{.distanceTo}.
+
+       @return: 2-Tuple(distance, point) with the C{distance} and I{an}
+                area overlap o perimeter intersection C{point}.  If all
+                points and distances are pairwise concentric for C{area=True},
+                the point with the smallest distance is returned.
+
+       @raise IntersectionError: No overlap or intersection for the given C{eps}.
+    '''
+    pc = 0
+    for _ in range(3):
+        try:
+            c1, c2 = p1.intersections2(d1, p2, d2)
+
+            if area:  # check overlap
+                if c1 is c2:  # abutting
+                    c = c1
+                else:  # nearest point on radical
+                    c = p3.nearestOn(c1, c2)
+                d = d3 - p3.distanceTo(c, radius=radius, wrap=wrap)
+                if d > eps:  # exceeds required overlap
+                    return d, c
+
+            else:  # check intersection
+                for c in ((c1,) if c1 is c2 else (c1, c2)):
+                    d = abs(d3 - p3.distanceTo(c, radius=radius, wrap=wrap))
+                    if d < eps:  # below permitted error
+                        return d, c
+
+        except IntersectionError as x:
+            if 'concentric' in str(x):  # XXX ConcentricError?
+                pc += 1
+
+        p1, d1, p2, d2, p3, d3 = p2, d2, p3, d3, p1, d1  # rotate
+
+    if area and pc == 3:  # all pairwise concentric
+        if d2 < d1:
+            d1, p1 = d2, p2
+        if d3 < d1:
+            d1, p1 = d3, p3
+        return d1, p1  # smallest distance and point
+
+    raise IntersectionError(area=area, eps=eps, txt='no overlap' if area else 'no intersection')
+
+
+for area in (False, True):
+    try:
+        d, t = trilaterate2(p1, distance, p2, distance, p3, distance, area=area, eps=10)  # meter
+        print('trilaterate2', area, d, (t.lat, t.lon) if t else t)
+    except ValueError as x:
+        print('trilaterate2', repr(x))
+```
+AleixDev commented on Sep 21, 2020
+AleixDev
+on Sep 21, 2020
+Author
+More actions
+I've tested it and seems to work perfectly with every situation so far. Thanks again!
+mrJean1 commented on Sep 23, 2020
+mrJean1
+on Sep 23, 2020
+Last edited by mrJean1
+Owner
+More actions
+The latest PyGeodesy 20.9.23 release includes a new method trilaterate5 for all ellipsoidalKarney.-, ellipsoidalVincenty.- and sphericalTrigonometry.LatLon classes to trilaterate 3 circles by intersection or overlap (and with some restrictions for ellipsoidal- and sphericalNvector.LatLon).
+The trailing -5 in the name trilaterate5 reflects the returned result, a 5-tuple returned as result. More details in the documentation.
+Separately, the original sphericalNvector.LatLon.trilaterate method and sphericalNvector.trilaterate function has been fixed to no longer report false trilaterations (without using an new eps-like keyword argument). And that .trilaterate method is now also available for the ellipsoidalNvector.LatLon class.
+Lastly, several new trilaterate tests are based on your examples. Thank you again for reporting the original problem.
+👍React with 👍1Reacted by Aleix
+mrJean1 commented on Sep 29, 2020
+mrJean1
+on Sep 29, 2020
+Owner
+More actions
+PyGeodesy 20.9.29 includes yet another trilateration function trilaterate3d2. That compute the intersections of 3 spheres using this novel, algebraic method (and numpy).
+Interestingly, trilaterate3d2 with the earth as one of the spheres centered at (0, 0, 0) produces the same intersections as the spherical Cartesian.intersections2 method.
+Closing this issue.
+mrJean1
+closed this as completedon Sep 29, 2020
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

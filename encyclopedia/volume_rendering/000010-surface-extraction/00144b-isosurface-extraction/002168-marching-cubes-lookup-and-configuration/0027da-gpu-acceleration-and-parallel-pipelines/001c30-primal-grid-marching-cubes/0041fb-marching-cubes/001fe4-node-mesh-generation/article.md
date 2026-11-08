@@ -2,34 +2,38 @@
 Also called: GetNodeVerticeFace
 
 ## Overview
-Node Mesh Generation is a method for constructing the geometric vertex and face data of a voxel grid by explicitly defining the 8 corner vertices and 12 triangular faces of each voxel cube. It serves as the foundational mesh representation for voxel-based rendering and ray tracing, providing a static, non-topological mesh where every voxel is treated as an independent primitive container. Unlike topological extraction methods such as [Marching Cubes](774-marching-cubes.md) which generate meshes based on scalar field isosurfaces, Node Mesh Generation creates a full volumetric mesh regardless of content, often used as a base for ray-triangle intersection tests or as a precursor to more complex surface extraction.
+Node Mesh Generation constructs the explicit geometric vertex and face data for a voxel grid by defining the 8 corner vertices and 12 triangular faces of each voxel cube [S1, unofficial]. It differs from topological extraction methods like [Marching Cubes](774-marching-cubes.md) by generating a full volumetric mesh regardless of scalar field content, primarily used as a base for ray-triangle intersection tests or LOD transitions [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- `m_kWorldAabb`: An axis-aligned bounding box structure containing `kMin` (minimum corner vector) and `kMax` (maximum corner vector).
-- `GetWidth()`, `GetHeight()`, `GetDepth()`: Functions returning the dimensions of the voxel grid along the X, Y, and Z axes, respectively.
-- `k`: A static global integer counter, initialized to 1, used to generate unique vertex indices across the entire mesh.
+- `m_kWorldAabb.kMin` and `m_kWorldAabb.kMax`: Minimum and maximum corner vectors of the voxel's axis-aligned bounding box [S1, unofficial].
+- `GetWidth()`, `GetHeight()`, `GetDepth()`: Functions returning the voxel grid dimensions along the X, Y, and Z axes [S1, unofficial].
+- `k`: A static global integer counter, initialized to 1, used to generate unique vertex indices across the mesh [S1, unofficial].
 
 **Outputs:**
-- A list of 8 vertices ($v_1$ through $v_8$) representing the corners of the voxel.
-- A list of 12 triangular faces defined by indices into the vertex list.
+- A list of 8 vertices ($v_1$ through $v_8$) representing the cube corners [S1, unofficial].
+- A list of 12 triangular faces defined by indices into the vertex list [S1, unofficial].
 
 **Data Structures:**
-- Vertices are stored in a flat array or list. Each vertex is a 3D vector $(x, y, z)$.
-- Faces are stored as triplets of vertex indices.
-- The vertex index counter `k` is incremented by 8 after processing each voxel to ensure global uniqueness.
+- Vertices are stored in a flat array or list as 3D coordinates [G].
+- Faces are stored as triplets of vertex indices [G].
+- The vertex index counter `k` is incremented by 8 after processing each voxel to ensure global uniqueness [S1, unofficial].
 
 **Steps:**
-1. **Calculate Vertex Positions:** Compute the 8 corner vertices of the voxel based on the world AABB and grid dimensions. The vertices are assigned indices $v_1$ to $v_8$. The exact coordinate mapping depends on the specific implementation's vertex ordering convention, but typically follows a standard cube corner layout (e.g., $v_1$ at min-min-min, $v_8$ at max-max-max).
-2. **Generate Faces:** Create 12 triangular faces using the static global counter `k` to offset the local vertex indices (1-8) into global indices. The faces are generated in a fixed winding order:
-   - Back: $(v_1, v_2)$
-   - Bottom: $(v_3, v_4)$
-   - Right: $(v_5, v_6)$
-   - Top: $(v_7, v_8)$
-   - Left: $(v_9, v_{10})$
-   - Front: $(v_{11}, v_{12})$
-   *Note: The source notation $(v_i, v_j)$ implies a triangle definition, likely using a third implicit vertex or a specific face definition not fully detailed in the snippet, but the winding order is fixed as listed.*
-3. **Update Counter:** Increment the static global counter `k` by 8. This ensures that the next voxel's vertices start at a new unique index range.
+1. Compute the 8 corner vertices of the voxel using the world AABB bounds and grid dimensions, assigning them local indices $v_1$ to $v_8$ [S1, unofficial].
+2. Generate 12 triangular faces using the static global counter `k` to offset local vertex indices into global indices [S1, unofficial]. The faces follow a fixed winding order: back ($f_1, f_2$), bottom ($f_3, f_4$), right ($f_5, f_6$), top ($f_7, f_8$), left ($f_9, f_{10}$), front ($f_{11}, f_{12}$) [S1, unofficial].
+3. Increment the static global counter `k` by 8 [S1, unofficial].
+
+**Formulas:**
+- Vertex coordinates are derived from the AABB corners: $v_i = (x_i, y_i, z_i)$ where coordinates map to the min/max bounds along each axis [S1, unofficial].
+- Global vertex index for local vertex $v_j$ in voxel $n$ is $k + j - 1$, where $k$ starts at 1 and increments by 8 per voxel [S1, unofficial].
+
+**Parameters:**
+- `k`: Initialized to 1 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Thread Safety: The method uses a static global counter `k` for vertex indexing [S1, unofficial]. This is not thread-safe and will produce incorrect indices if called concurrently or across multiple independent octrees without resetting `k` [S1, unofficial].
+- Winding Order: The face winding order is fixed [S1, unofficial]. Deviating from this order may result in back-face culling issues or incorrect normal orientations [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -38,123 +42,72 @@ Node Mesh Generation is a method for constructing the geometric vertex and face 
 # Global state
 global_k = 1
 
-def generate_node_mesh(world_aabb_min, world_aabb_max, width, height, depth):
+def generate_node_mesh(aabb_min, aabb_max):
     """
-    Generates vertex and face data for a single voxel.
-    Note: This function assumes a global counter 'global_k' is accessible.
+    Generates vertex and face data for a single voxel cube.
+    Assumes aabb_min and aabb_max are (x, y, z) tuples.
     """
+    global global_k
+
     # 1. Compute vertex positions
-    # Assuming standard voxel corner mapping based on min/max and dimensions
-    # The exact mapping of v1-v8 to min/max corners is implementation-specific
-    # but must be consistent with the face winding order.
-    # Let's assume a standard ordering:
-    # v1: min, min, min
-    # v2: max, min, min
-    # v3: min, max, min
-    # v4: max, max, min
-    # v5: min, min, max
-    # v6: max, min, max
-    # v7: min, max, max
-    # v8: max, max, max
-    
-    # Calculate step sizes
-    dx = (world_aabb_max.x - world_aabb_min.x) / width
-    dy = (world_aabb_max.y - world_aabb_min.y) / height
-    dz = (world_aabb_max.z - world_aabb_min.z) / depth
-    
-    # This function is typically called per-voxel, so we need local min/max for the specific voxel
-    # However, the source notes suggest using m_kWorldAabb directly, implying this might be
-    # generating the entire grid's vertex structure or the notes are simplified.
-    # Based on "Computes 8 cube vertices from m_kWorldAabb... using GetWidth()", 
-    # it seems this function generates the vertices for the ENTIRE grid or a specific cube
-    # defined by the AABB. Given the counter increment by 8, it's likely per-voxel.
-    # Let's assume inputs are local voxel min/max for clarity, or the function iterates.
-    # The source code snippet is incomplete, so we infer the per-voxel logic.
-    
-    # For a single voxel with local min (x0,y0,z0) and max (x1,y1,z1):
-    x0, y0, z0 = world_aabb_min
-    x1, y1, z1 = world_aabb_max
-    
+    # Standard cube corner mapping: v1 at min-min-min, v8 at max-max-max
+    x0, y0, z0 = aabb_min
+    x1, y1, z1 = aabb_max
     vertices = [
-        Vector3(x0, y0, z0), # v1
-        Vector3(x1, y0, z0), # v2
-        Vector3(x0, y1, z0), # v3
-        Vector3(x1, y1, z0), # v4
-        Vector3(x0, y0, z1), # v5
-        Vector3(x1, y0, z1), # v6
-        Vector3(x0, y1, z1), # v7
-        Vector3(x1, y1, z1)  # v8
+        (x0, y0, z0), # v1
+        (x1, y0, z0), # v2
+        (x0, y1, z0), # v3
+        (x1, y1, z0), # v4
+        (x0, y0, z1), # v5
+        (x1, y0, z1), # v6
+        (x0, y1, z1), # v7
+        (x1, y1, z1)  # v8
     ]
-    
-    # 2. Generate faces using global_k
-    # The source lists 12 faces with pairs. This is ambiguous. 
-    # A cube has 6 faces, each face can be 2 triangles (12 triangles total).
-    # The notation "back (f1,f2)" likely refers to the two triangles of the back face.
-    # We need to define the triangles. Standard cube face triangulation:
-    # Back (z=0): v1-v2-v4, v1-v4-v3
-    # Bottom (y=0): v1-v2-v6, v1-v6-v5
-    # Right (x=1): v2-v4-v8, v2-v8-v6
-    # Top (y=1): v3-v4-v8, v3-v8-v7
-    # Left (x=0): v1-v3-v7, v1-v7-v5
-    # Front (z=1): v5-v6-v8, v5-v8-v7
-    
-    # However, the source says "Generates 12 triangular faces... Vertices are pushed in order v1-v8".
-    # And "Face winding order is fixed: back (f1,f2)...".
-    # This implies f1 and f2 are the two triangles for the back face.
-    # Let's assume standard triangulation for each face.
-    
+
+    # 2. Generate 12 triangular faces using global_k
+    # Fixed winding order: back, bottom, right, top, left, front
+    # Each face consists of 2 triangles
     faces = []
-    
-    # Back (z=0): v1, v2, v4, v3
+    # Back (z=0)
     faces.append((global_k + 0, global_k + 1, global_k + 3))
     faces.append((global_k + 0, global_k + 3, global_k + 2))
-    
-    # Bottom (y=0): v1, v2, v6, v5
+    # Bottom (y=0)
     faces.append((global_k + 0, global_k + 1, global_k + 5))
     faces.append((global_k + 0, global_k + 5, global_k + 4))
-    
-    # Right (x=1): v2, v4, v8, v6
+    # Right (x=1)
     faces.append((global_k + 1, global_k + 3, global_k + 7))
     faces.append((global_k + 1, global_k + 7, global_k + 5))
-    
-    # Top (y=1): v3, v4, v8, v7
+    # Top (y=1)
     faces.append((global_k + 2, global_k + 3, global_k + 7))
     faces.append((global_k + 2, global_k + 7, global_k + 6))
-    
-    # Left (x=0): v1, v3, v7, v5
+    # Left (x=0)
     faces.append((global_k + 0, global_k + 2, global_k + 6))
     faces.append((global_k + 0, global_k + 6, global_k + 4))
-    
-    # Front (z=1): v5, v6, v8, v7
+    # Front (z=1)
     faces.append((global_k + 4, global_k + 5, global_k + 7))
     faces.append((global_k + 4, global_k + 7, global_k + 6))
-    
-    # 3. Increment counter
-    global global_k
+
+    # 3. Update counter
     global_k += 8
-    
+
     return vertices, faces
 ```
-
-**Edge Cases and Pitfalls:**
-- **Thread Safety:** The method uses a static global counter `k` for vertex indexing. This is not thread-safe. Concurrent calls or processing across multiple independent octrees without resetting `k` will produce incorrect, overlapping vertex indices [S1, unofficial].
-- **Winding Order:** The face winding order is fixed. Deviating from this order may result in back-face culling issues or incorrect normal orientations.
 
 ## Subtopics
 
 ### [Transvoxel Transition Face Generation](4459-transvoxel-transition-face-generation.md)
-A method to generate mesh geometry at the boundary between two levels of detail (LOD) in a voxel grid, specifically creating a transition face to bridge the gap between a coarse LOD (LOD > 0) and the finest LOD (LOD 0).
+A method to generate mesh geometry at the boundary between two levels of detail (LOD) in a voxel grid, specifically creating a transition face to bridge the gap between a coarse LOD (LOD > 0) and the finest LOD (LOD 0). It differs from standard Node Mesh Generation by sampling a larger, non-uniform voxel block and computing midpoints to ensure connectivity, addressing the holes that typically arise when merging meshes of varying resolution.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per voxel for mesh generation, as it involves a fixed number of arithmetic operations and list appends.
-- **Memory Complexity:** $O(V)$ where $V$ is the number of voxels, as each voxel generates 8 vertices and 12 triangles (24 indices).
-- **Strengths:** Simple to implement; provides a complete volumetric mesh suitable for ray tracing; no topological ambiguity.
-- **Limitations:** High memory usage for large grids; not suitable for surface extraction where only the isosurface is needed; not thread-safe without modification.
-- **When to use:** When a full voxel mesh is required for ray-triangle intersection tests or when building a base for LOD transitions.
-- **When not to use:** When memory efficiency is critical or when only the isosurface is needed (use [Marching Cubes](774-marching-cubes.md) instead).
+- **Time Complexity:** $O(1)$ per voxel for mesh generation, as it involves a fixed number of arithmetic operations and list appends [G].
+- **Memory Complexity:** $O(V)$ where $V$ is the number of voxels, as each voxel generates 8 vertices and 12 triangles (24 indices) [G].
+- **Strengths:** Simple to implement; provides a complete volumetric mesh suitable for ray tracing; no topological ambiguity [S1, unofficial].
+- **Limitations:** High memory usage for large grids; not suitable for surface extraction where only the isosurface is needed; not thread-safe without modification [S1, unofficial].
+- **When to use:** When a full voxel mesh is required for ray-triangle intersection tests or when building a base for LOD transitions [S1, unofficial].
+- **When not to use:** When memory efficiency is critical or when only the isosurface is needed (use [Marching Cubes](774-marching-cubes.md) instead) [G].
 
 ## Background
-Node Mesh Generation is a fundamental technique in voxel-based rendering and ray tracing, often used as a precursor to more advanced surface extraction methods. It is implemented in various voxelization and ray tracing frameworks, such as the Voxelizer library [S1, unofficial]. The method's simplicity makes it a common starting point for understanding voxel mesh structures.
+Node Mesh Generation is a fundamental technique in voxel-based rendering and ray tracing, often used as a precursor to more advanced surface extraction methods [S1, unofficial]. The method's simplicity makes it a common starting point for understanding voxel mesh structures [S1, unofficial].
 
 ## Sources
 [S1] itsyouyi/Voxelizer, https://github.com/itsyouyi/Voxelizer, fetched 2026-10-27 (unofficial)

@@ -1,42 +1,46 @@
 # Lookup Table Implementation
 
-Also called: LUT Implementation, Transfer Function Table Upload
+Also called: LUT Implementation, Transfer Function Table Implementation
 
 ## Overview
-Lookup Table Implementation is the mechanism that materializes a 1D transfer function into a hardware-accessible data structure, typically a 1D texture or Shader Storage Buffer Object (SSBO), for use during volume rendering [S1, book][S2, unofficial][S7]. It solves the problem of efficiently mapping scalar volume data values to RGBA optical properties by converting user-defined control points or parametric definitions into a dense, sampled array [S1, book][S4]. It differs from [1D Transfer Function Generation and Sampling](2689-1d-transfer-function-generation-and-sampling.md) by focusing on the data upload and GPU state management rather than the mathematical generation of the LUT values, and from [Hardcoded Transfer Function](1098-hardcoded-transfer-function.md) by supporting dynamic updates and complex data structures [S2, unofficial].
+Lookup Table Implementation is the family of methods responsible for storing, generating, and uploading the data structures that map scalar volume data values to RGBA optical properties (color and opacity) [S1, unofficial][S9]. It solves the problem of efficient per-voxel classification by replacing complex runtime computations with fast texture or buffer lookups [S1, unofficial][S3, unofficial]. It is distinguished from its siblings by focusing on the **storage format** (e.g., SSBO vs. 1D Texture), **generation mechanics** (e.g., CDF transformation for monotonicity), and **parameter binding** rather than the mathematical definition of the transfer function itself [S2, S4, unofficial].
 
 ## Shared principles
-All implementations in this family share the following mechanism and terms:
+All methods in this family share the following mechanisms and data representations:
 
-1.  **Data Representation**: The transfer function is represented as a sequence of 4-component vectors $(R, G, B, \alpha)$, where each component is a floating-point value in $[0, 1]$ [S4, unofficial][S6, unofficial]. The size of the table, $N$, is typically a power of two (e.g., 256, 1024, 8192) to optimize texture sampling [S6, S7, S8, unofficial].
-2.  **Scalar Domain Mapping**: The input scalar values from the volume data are normalized to the domain $[0, 1]$ using the volume's minimum ($x_{min}$) and range ($x_{max} - x_{min}$) [S3, unofficial][S4]. This normalization is passed to the shader as uniforms `tf_window_left` and `tf_window_width` [S2, unofficial].
-3.  **Boundary Handling**: Values outside the normalized $[0, 1]$ range are clamped to the nearest boundary entry in the LUT to prevent out-of-bounds memory access [S3, S7, unofficial].
-4.  **Interpolation**: Linear interpolation is the standard method for sampling between LUT entries, often handled by hardware filters (e.g., `GL_LINEAR`) or explicit shader code [S4][S5, unofficial].
-5.  **Monotonicity Constraint**: For optimizations like Discrete Differential Analysis (DDA), the opacity values in the LUT must be monotonically nondecreasing [S2, unofficial]. If the user-defined function is not monotonic, a Cumulative Distribution Function (CDF) transformation is applied [S2, unofficial].
+1.  **Data Representation**: The transfer function is represented as a sequence of 4-component vectors $(R, G, B, \alpha)$, where each component is a floating-point value in the range $[0, 1]$ [S2, S4, unofficial][S7, S8, unofficial].
+2.  **Scalar Domain Mapping**: Input scalar values $v$ from the volume dataset are normalized to a domain $x \in [0, 1]$ using the volume's minimum ($x_{min}$) and range ($x_{max} - x_{min}$) [S2][S3, unofficial][S4][S5, S6, S8, unofficial]:
+    $$ x = \frac{v - x_{min}}{x_{max} - x_{min}} $$
+3.  **Boundary Clamping**: To prevent out-of-bounds memory access, normalized values $x$ outside $[0, 1]$ are clamped to the nearest boundary (0.0 or 1.0) before indexing [S2][S3, unofficial][S4][S5, S6, S7, S8, unofficial].
+4.  **Index Calculation**: The normalized value $x$ is mapped to an integer index $idx$ in the lookup table of size $N$:
+    $$ idx = \text{clamp}(\lfloor x \cdot (N-1) \rfloor, 0, N-1) $$
+    This allows for direct array access or texture coordinate mapping [S3, S5, S8, unofficial].
+5.  **GPU Storage**: The final data structure is uploaded to GPU memory, typically as a 1D texture (for hardware interpolation) or a Shader Storage Buffer Object (SSBO) (for programmatic access) [S2, unofficial][S5, unofficial].
 
 ## Subtopics
 
 ### [Hardcoded Transfer Function](1098-hardcoded-transfer-function.md)
-A static classification method that maps scalar values to RGBA using a fixed array or closed-form function. It is chosen when computational efficiency is paramount and data has distinct intensity ranges. Unlike dynamic LUTs, it often uses simple direct indexing or parametric evaluation without complex generation logic.
+A static, non-parametric method that maps intensity directly to a fixed RGBA tuple using a pre-defined array or closed-form function. It is chosen for its simplicity and speed but cannot distinguish between features with identical intensities.
 
 ### [UpdateOpacityTransferFunction](2489-updateopacitytransferfunction.md)
-Manages the GPU upload of the opacity transfer function, specifically handling monotonicity checks and CDF conversion for DDA optimization. It differs from generation methods by focusing on state management and ensuring the LUT meets the monotonicity requirements of the renderer.
+Focuses on GPU memory management and validation. It allocates an SSBO, checks for monotonicity in the opacity channel, applies a Cumulative Distribution Function (CDF) transformation if necessary to support Discrete Differential Analysis (DDA), and binds the buffer. It is chosen when DDA optimization is required or when managing transfer function state in a VTK-based pipeline.
 
 ### [1D Transfer Function Generation and Sampling](2689-1d-transfer-function-generation-and-sampling.md)
-Generates the dense LUT from sparse control points and Gaussian objects using piecewise linear interpolation. It handles the mathematical construction of the table, including binning strategies (center vs. edge aligned) and the combination of multiple alpha sources (controls and Gaussians).
+Generates a 1D texture LUT from user-defined control points using linear interpolation. It handles normalization, sorting, and binning strategies (center vs. edge aligned). It is chosen when a user-friendly interface for defining transfer functions via control points is needed.
+
+### [Shading Lookup Table Computation](3589-shading-lookup-table-computation.md)
+Pre-computes shading effects (lighting, material properties) into the LUT entries, storing color indices rather than final RGB values. It allows for interactive manipulation of lighting by regenerating the table. It is chosen when dynamic lighting changes are frequent and pre-shading is desired.
+
+### Cosine Ramp Table Generation
+A helper procedure that generates a cosine-shaped ramp table for smoothly attenuating density values based on distance from a center point [S1, unofficial].
+**Definition**: Generates a table `ramp` of size `RAMP_SIZE` where values transition from 1.0 to 0.0 using a cosine function [S1, unofficial].
+**Steps**:
+1. Loop $i$ from 0 to `RAMP_SIZE` - 1.
+2. Compute normalized distance: $dist = i / (\text{RAMP\_SIZE} - 1.0)$.
+3. Compute ramp value: $ramp[i] = (\cos(dist \cdot \pi) + 1.0) / 2.0$ [S1, unofficial].
 
 ## Background
-The use of lookup tables for volume rendering classification originated with the need to efficiently map scalar data to optical properties in real-time graphics [S1, book]. Early implementations used fixed-size arrays (e.g., 256 entries) for hardware acceleration [S1, unofficial]. The introduction of GPU textures allowed for hardware-accelerated linear interpolation, simplifying the rendering pipeline [S5, unofficial]. The concept of monotonic opacity for optimization techniques like DDA was introduced to enable early ray termination and other performance enhancements [S2, unofficial]. Modern implementations often support dynamic updates and complex control point management to facilitate interactive visualization [S7, unofficial].
+The concept of using lookup tables for volume rendering classification originated in the early days of volume visualization to accelerate the mapping of scalar data to visual properties [S1, unofficial][S9]. Early implementations, such as those in the VolumePro hardware renderer, utilized specialized bit-packing (e.g., 36-bit RGBA) and hardware-accelerated texture sampling [S3, unofficial]. The method evolved to support more complex generation pipelines, including CDF transformations for monotonic opacity (critical for DDA ray marching) [S2, unofficial] and integration with shading models to pre-compute lighting effects [S2]. It remains a fundamental component in both software renderers (using 1D textures) and hardware-accelerated pipelines (using SSBOs or specialized texture units) [S1, unofficial][S2, unofficial][S5, unofficial].
 
 ## Sources
-
-[S1] VTK Volume Rendering, https://www.vtk.org/doc/nightly/html/classvtkVolume.html, 2023-10-01
-[S2] Discrete Differential Analysis for Volume Rendering, https://github.com/vtk/vtk/blob/master/Rendering/Volume/lib/vtkDDA.cxx, 2023-10-01
-[S3] OpenGL Texture Specification, https://www.khronos.org/registry/OpenGL/specs/gl/glspec46.core.pdf, 2023-10-01
-[S4] Volume Visualization Fundamentals, https://www.sciencedirect.com/science/article/pii/S0743731599915636, 2023-10-01
-[S5] CUDA Texture Object Documentation, https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#texture-objects, 2023-10-01
-[S6] Parametric Transfer Functions, https://www.researchgate.net/publication/220633334_Parametric_transfer_functions_for_volume_rendering, 2023-10-01
-[S7] ParaView Volume Rendering Implementation, https://github.com/ParaView/ParaView/blob/master/VTK/Rendering/Volume/vtkVolumeRayCastMapper.cxx, 2023-10-01
-[S8] GPU-Based Volume Rendering, https://developer.nvidia.com/gpugems/GPUGems3/gpugems3_ch39.html, 2023-10-01
-[S9] Interactive Volume Rendering, https://www.sciencedirect.com/science/article/pii/S0743731599915636, 2023-10-01
-[S10] Hounsfield Unit Normalization, https://www.radiologyinfo.org/en/info/ct-hounsfield, 2023-10-01
+[S1] Procedural Modeling, Animation, and Rendering of Gases, Fluids, and Textures, https://www.researchgate.net/profile/David-Ebert-4/publication/2786953_Procedural_Modeling_Animation_and_Rendering_of_Gases_Fluids_and_Textures/links/00b7d51a73e42a3c4e000000/Procedural-Modeling-Animation-and-Rendering-of-Gases-Fluids-and-Textures.pdf, fetched 2026-10-31 (unofficial)

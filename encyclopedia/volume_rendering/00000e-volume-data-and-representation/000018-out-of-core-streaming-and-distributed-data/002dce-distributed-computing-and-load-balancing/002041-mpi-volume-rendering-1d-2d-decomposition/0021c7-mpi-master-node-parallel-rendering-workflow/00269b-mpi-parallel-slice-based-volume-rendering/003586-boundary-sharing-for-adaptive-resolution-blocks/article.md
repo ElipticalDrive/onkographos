@@ -1,0 +1,163 @@
+# Boundary Sharing for Adaptive-Resolution Blocks
+
+Also called: Block Boundary Sharing, Slice Sharing for Blocks
+
+## Overview
+Boundary Sharing for Adaptive-Resolution Blocks is a technique to eliminate visual artifacts (such as black strips or visible seams) in parallel volume rendering when the volume data is partitioned into 3D blocks rather than 2D slices [S1, unofficial]. It solves the problem of lost ray samples at subvolume boundaries by sharing boundary slices between adjacent blocks [S1, unofficial][S2]. Unlike standard slice-based sharing which only handles 2D cuts, this method manages 3D block interfaces and adapts to multi-resolution data where adjacent blocks may have different voxel densities [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A volume dataset partitioned into $N$ 3D blocks. Each block $B_i$ has a defined spatial extent and resolution. Adjacency relationships between blocks are known.
+- **Output:** A single composited image with no boundary artifacts.
+
+**Data Structures:**
+- **Block:** Defined by its 3D grid dimensions $(D_x, D_y, D_z)$ and resolution (voxel spacing or grid density).
+- **Shared Slice:** A 2D plane of voxels extracted from a block's boundary. For adaptive resolution, this slice may be upsampled or downsampled to match the resolution of the receiving block.
+
+**Algorithm Steps:**
+
+1.  **Identify Boundary Sides:**
+    For each block $B_i$, determine which of its 6 faces (left, right, front, back, top, bottom) coincide with the global data boundary. These faces do not require sharing. All internal faces (those adjacent to another block) require sharing [S1, unofficial].
+
+2.  **Determine Sharing Requirements:**
+    -   **Central Block:** Requires sharing 6 slices (one for each face) [S1, unofficial].
+    -   **Corner/Edge Block:** Requires sharing only the slices corresponding to internal faces. For example, a top-right corner block might share only 3 slices (bottom, left, back) [S1, unofficial].
+    -   *Note:* The specific sides are determined by the block's position in the global grid [S1, unofficial].
+
+3.  **Adapt Resolution for Shared Slices (Adaptive-Resolution Case):**
+    If the dataset has multiple resolutions:
+    -   Let $S$ be a shared slice from block $B_A$ intended for block $B_B$.
+    -   If $B_B$ has a higher resolution than $B_A$, **expand** (upsample) the resolution of slice $S$ to match $B_B$'s grid density [S1, unofficial].
+    -   If $B_B$ has a lower resolution than $B_A$, **contract** (downsample) the resolution of slice $S$ to match $B_B$'s grid density [S1, unofficial].
+    -   The resolution within a single block must remain consistent for rendering [S1, unofficial].
+    -   *Note:* The same physical slice may exist in memory at different resolutions for different adjacent blocks [S1, unofficial].
+
+4.  **Render Partial Images:**
+    Each block $B_i$ renders its volume data including its own internal voxels and the shared slices from adjacent blocks. This produces a partial image $I_i$ free of boundary artifacts [S1, unofficial].
+
+5.  **Recursive Compositing:**
+    Composite the partial images $I_i$ recursively in pairs until a single final image is generated. This leverages the hierarchical structure of the block decomposition (e.g., an octree or grid hierarchy) [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_blocks(blocks, adjacency_map):
+    """
+    blocks: List of Block objects. Each block has:
+        - id: int
+        - resolution: float (voxel spacing or density)
+        - voxels: 3D array of data values
+        - bounds: (min_x, max_x, min_y, max_y, min_z, max_z)
+    adjacency_map: Dict mapping block_id to list of neighbor block_ids.
+    """
+    partial_images = {}
+
+    # Step 1 & 2: Identify and prepare shared slices
+    for block in blocks:
+        block.shared_slices = {}
+        neighbors = adjacency_map.get(block.id, [])
+        
+        for neighbor_id in neighbors:
+            neighbor = get_block_by_id(neighbor_id)
+            # Determine which face is shared with this neighbor
+            shared_face = get_shared_face(block, neighbor)
+            
+            # Extract the boundary slice from the current block
+            raw_slice = extract_slice(block.voxels, shared_face)
+            
+            # Step 3: Adapt resolution
+            if neighbor.resolution > block.resolution:
+                # Neighbor has higher resolution (finer grid), expand slice
+                adapted_slice = upsample_slice(raw_slice, block.resolution, neighbor.resolution)
+            elif neighbor.resolution < block.resolution:
+                # Neighbor has lower resolution (coarser grid), contract slice
+                adapted_slice = downsample_slice(raw_slice, block.resolution, neighbor.resolution)
+            else:
+                adapted_slice = raw_slice
+            
+            # Store slice for the neighbor's use (or render locally if we are the source)
+            # In a distributed setting, this data is sent to the neighbor.
+            # Here we assume local rendering with all necessary data.
+            block.shared_slices[neighbor_id] = adapted_slice
+
+    # Step 4: Render each block
+    for block in blocks:
+        # Combine internal voxels and shared slices into a complete volume representation
+        # Note: Shared slices are added to the boundary of the block's local volume
+        complete_volume = merge_slices_into_block(block, block.shared_slices)
+        
+        # Render the volume using ray-casting or similar method
+        # View parameters are identical for all blocks
+        image = ray_cast(complete_volume, view_params)
+        partial_images[block.id] = image
+
+    # Step 5: Recursive Compositing
+    final_image = recursive_composite(partial_images, adjacency_map)
+    return final_image
+
+def recursive_composite(images, adjacency_map):
+    """
+    Composites images in pairs based on the block hierarchy.
+    Assumes a hierarchical structure where blocks can be grouped.
+    """
+    # Simplified logic: If blocks are in a grid, composite neighbors first,
+    # then composite the resulting super-blocks.
+    # For 8 blocks (2x2x2), composite pairs along one axis, then next, then next.
+    
+    # Example for 2x2x2 grid:
+    # 1. Composite (0,0,0) with (1,0,0), (0,1,0) with (1,1,0), etc.
+    # 2. Composite results along Y axis.
+    # 3. Composite results along Z axis.
+    
+    # General implementation depends on the specific decomposition tree.
+    # The source describes a pairwise recursive compositing [S1, unofficial].
+    if len(images) == 1:
+        return list(images.values())[0]
+    
+    # Placeholder for specific compositing logic based on spatial adjacency
+    # The source does not provide the exact compositing order algorithm,
+    # only that it is pairwise recursive [S1, unofficial].
+    return composite_pairwise(images)
+
+def extract_slice(voxels, face):
+    # Returns the 2D array of voxels at the specified face (e.g., min_x, max_y)
+    pass
+
+def upsample_slice(slice_2d, src_res, dst_res):
+    # Interpolates slice_2d to match dst_res
+    pass
+
+def downsample_slice(slice_2d, src_res, dst_res):
+    # Averages/contracts slice_2d to match dst_res
+    pass
+
+def merge_slices_into_block(block, shared_slices):
+    # Adds shared_slices to the boundaries of block.voxels
+    pass
+
+def composite_pairwise(images):
+    # Composites two images using alpha blending or similar
+    pass
+```
+
+## Subtopics
+
+### Boundary Replication for Volume Partitioning
+A technique to prevent visual artifacts (black strips) at subvolume boundaries in parallel ray-casting by replicating boundary grid layers between adjacent subvolumes [S2]. It is chosen when partitioning a volume along a plane and the view vector is parallel to the cut plane, which would otherwise cause ray samples in the cut boundary region to be lost [S2]. Unlike general boundary sharing which may involve complex resolution adaptation, this method specifically replicates one layer of the boundary grid into the adjacent subvolume to ensure consistent sampling [S2].
+
+## Operating characteristics
+- **Time Complexity:** Rendering time is proportional to the number of voxels plus the cost of sharing and compositing. The resolution adaptation (upsampling/downsampling) adds overhead for adaptive-resolution datasets [S1, unofficial].
+- **Memory Complexity:** Increased memory usage due to storing shared slices. In adaptive-resolution cases, the same physical slice may be stored in multiple resolutions for different blocks [S1, unofficial].
+- **Strengths:** Eliminates boundary artifacts in block-divided data; handles multi-resolution data effectively; allows independent rendering of subvolumes [S1, unofficial][S2].
+- **Limitations:** Requires communication of boundary data between processes; resolution adaptation adds computational cost; compositing must be done recursively [S1, unofficial].
+- **When to use:** When using MPI or distributed rendering with 3D block decomposition and/or adaptive-resolution data [S1, unofficial].
+- **When not to use:** When using simple 2D slice-based decomposition without blocks, or when uniform resolution is used and boundary artifacts are negligible [S1, unofficial].
+
+## Background
+This method was developed in the context of parallel volume visualization of time-varying and adaptive-resolution data. It extends earlier slice-based boundary sharing techniques to 3D blocks [S1, unofficial]. The concept of boundary replication for ray-casting was introduced earlier in the context of parallel ray-traced volume rendering [S2].
+
+## Sources
+[S1] Volume visualization of time-varying data using parallel, multiresolution and adaptive-resolution techniques, https://scholars.unh.edu/cgi/viewcontent.cgi?article=1245&context=thesis, fetched 2026-10-27 (unofficial)
+[S2] A data distributed, parallel algorithm for ray-traced volume ..., https://www.cs.ucdavis.edu/~ma/papers/PRS93.pdf, fetched 2026-10-27

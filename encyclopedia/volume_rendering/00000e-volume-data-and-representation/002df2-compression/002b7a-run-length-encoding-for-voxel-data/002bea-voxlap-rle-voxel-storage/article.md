@@ -3,98 +3,104 @@
 Also called: VxlCompiledRLE, VxlMap
 
 ## Overview
-VOXLAP RLE Voxel Storage is an in-memory compressed voxel data structure used by the VOXLAP engine for CPU-based volume rendering. It solves the problem of efficiently storing and editing sparse voxel grids using a Run-Length Encoding (RLE) scheme organized as a 2D array of columns. It sets itself apart from generic RLE methods by its specific column-oriented arena allocation and batched edit support, tailored for the constraints of the original VOXLAP engine [S1, unofficial].
+VOXLAP RLE Voxel Storage is an in-memory compressed voxel data structure used by the VOXLAP engine, designed for CPU-based volume rendering of voxelized models [S1, unofficial]. It solves the problem of efficiently storing and editing large 3D voxel grids by organizing data into columns with run-length encoded (RLE) slabs, supporting batched edits [S1, unofficial]. It distinguishes itself from sibling methods like [Chunk Serialization with RLE](5162-chunk-serialization-with-rle.md) by using a fixed-size arena with column-major organization and specific bit-packed ranges, rather than generic chunk-based serialization [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-The method manages a voxel grid defined by dimensions $X, Y, Z$. The primary input is a set of rectangular edit operations (slabs) defined by $(x_{start}, x_{end}, y_{start}, y_{end}, z_{start}, z_{end})$ and a state value. The output is the updated internal state of the voxel storage, allowing for subsequent rendering or querying.
+- Input: A 3D voxel grid defined by dimensions $X, Y, Z$ (bounded by constants below) and voxel states.
+- Output: An in-memory representation using a fixed-size arena (`VxlArena`) and column structures (`VxlColumn`) that store RLE slabs.
 
 **Data Structures:**
 
-1.  **VxlColor**: A packed 4-byte structure representing color and brightness.
-    *   Layout: `b` (u8), `g` (u8), `r` (u8), `shade` (u8).
-    *   The `shade` field acts as a brightness multiplier: $0x00 \rightarrow 0.0$, $0x80 \rightarrow 1.0$, $0xFF \rightarrow 2.0$ [S1, unofficial].
+1.  **`VxlColor`**: A packed 4-byte struct (`#[repr(C, packed)]`) representing voxel color and brightness.
+    -   Fields: `b: u8`, `g: u8`, `r: u8`, `shade: u8`.
+    -   Total size: 4 bytes.
+    -   `shade` acts as a brightness multiplier: $0x00 \rightarrow 0.0$, $0x80 \rightarrow 1.0$, $0xFF \rightarrow 2.0$.
 
-2.  **VxlState**: An enumeration of voxel states.
-    *   Variants: `Air`, `Unexposed`, `Color(VxlColor)` [S1, unofficial].
+2.  **`VxlState`**: An enum representing the state of a voxel.
+    -   Variants: `Air`, `Unexposed`, `Color(VxlColor)`.
 
-3.  **VxlSlab**: Represents a contiguous vertical range of voxels.
-    *   Fields: `start` (u8), `end` (u8).
-    *   Semantics: Represents an inclusive z-range $[start, end]$. Internally, it is stored as a half-open interval $[start, end + 1)$ to facilitate arithmetic [S1, unofficial].
+3.  **`VxlSlab`**: Represents a contiguous range of voxels along the Z-axis.
+    -   Fields: `start: u8`, `end: u8`.
+    -   Represents an inclusive Z-range $[start, end]$. Internally stored as a half-open interval $[start, end + 1)$.
 
-4.  **VxlArena**: A fixed-size memory pool for storing RLE spans.
-    *   Total Capacity: $VXL\_ARENA\_WORDS = 4,194,304$ 32-bit words.
-    *   Per-Column Allocation: $VXL\_ARENA\_WORDS\_PER\_COLUMN = 16$ words.
-    *   Maximum Dimensions: $VSID = 512$ (max x and y), $MAXZDIM = 64$ (max z).
-    *   Derived Constant: $MAX\_VERTICAL\_STACK = 32$ ($MAXZDIM / 2$) [S1, unofficial].
-    *   The arena uses a bitarray (`VxlArenaBits`) to track allocated words and a data array (`VxlData`) to store the RLE values.
+4.  **`VxlArena`**: A fixed-size memory pool for storing slab data.
+    -   Capacity: `VXL_ARENA_WORDS` 32-bit words.
+    -   Structure: A bit array `used` tracking allocated words and a data array `data` of `MaybeUninit<VxlData>`.
+    -   Allocation: Uses a first-fit strategy with sliding candidates to find contiguous free space.
 
-**Algorithm Steps:**
+5.  **`VxlArenaSpanRangePacked`**: A bit-packed representation of a range within the arena.
+    -   Layout: 32-bit total.
+        -   `start`: 22 bits (offset in words).
+        -   `len`: 10 bits (length in words).
 
-The storage supports batched edits via a context object (`ctx`). The following steps describe the `set_rect` operation, which applies a rectangular volume change:
+**Constants:**
+-   `VSID = 512`: Maximum dimensions in X and Y directions.
+-   `MAXZDIM = 64`: Maximum dimension in Z direction (height).
+-   `MAX_VERTICAL_STACK = 32`: Derived constant, $MAXZDIM / 2$.
+-   `VXL_ARENA_WORDS_PER_COLUMN = 16`: Number of 32-bit words allocated per column in the arena.
+-   `VXL_ARENA_WORDS = 4194304`: Total arena capacity in words, calculated as $VSID \times VSID \times VXL_ARENA_WORDS\_PER\_COLUMN$.
 
-1.  **Initialize Context**: Create a `VxlSlab` with `start = z_start` and `end = z_end + 1`. This defines the vertical extent of the edit [S1, unofficial].
-2.  **Iterate Y**: Loop $y$ from $y_{start}$ to $y_{end}$ (inclusive) [S1, unofficial].
-3.  **Iterate X**: Loop $x$ from $x_{start}$ to $y_{end}$ (inclusive). *Note: The source code iterates to $y_{end}$ instead of $x_{end}$, which is a documented implementation detail or potential bug in the reference implementation* [S1, unofficial].
-4.  **Get Column**: Call `ctx.edit_column(x)` to retrieve a mutable reference to the column data structure for the current x-coordinate [S1, unofficial].
-5.  **Apply State**: Determine the target state (solid or empty).
-    *   If the target state is solid (non-air), call `column.insert(slab)` to add the RLE span to the column [S1, unofficial].
-    *   If the target state is empty (air), call `column.remove(slab)` to remove the RLE span [S1, unofficial].
-6.  **Flush**: After the inner X loop completes for a given y, call `ctx.advance_and_flush()` to commit changes for that row [S1, unofficial].
-7.  **Finalize**: After all loops complete, call `ctx.finish()` to finalize the batched edits [S1, unofficial].
+**Algorithm: Batched Edit (`set_rect`)**
+The method applies a rectangular region edit across the Z-axis using a slab cache context.
+
+1.  Initialize `ctx` (slab cache context).
+2.  Create `VxlSlab` with `start = z_start` and `end = z_end + 1`.
+3.  Iterate `y` from `y_start` to `y_end` (inclusive):
+    a.  Iterate `x` from `x_start` to `y_end` (Note: Source code uses `y_end` for the X loop bound, which is likely a bug or specific quirk; standard interpretation would be `x_end` [S1, unofficial]).
+    b.  Call `ctx.edit_column(x)` to obtain a mutable reference to the column at `(x, y)`.
+    c.  Determine `solid` boolean (true for solid voxels, false for air/empty).
+    d.  If `solid` is true, call `column.insert(slab)`.
+    e.  If `solid` is false, call `column.remove(slab)`.
+    f.  After the inner loop, call `ctx.advance_and_flush()` to commit changes for the current Y-slice.
+4.  After all loops complete, call `ctx.finish()` to finalize the context.
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def set_rect(ctx, x_start, x_end, y_start, y_end, z_start, z_end, is_solid):
-    """
-    Applies a rectangular edit to the voxel storage.
-    Note: The reference implementation iterates x to y_end.
-    """
-    # Step 1: Initialize slab context
+def set_rect(ctx, x_start, x_end, y_start, y_end, z_start, z_end, solid):
+    # Create slab representing the Z-range [z_start, z_end + 1)
     slab = VxlSlab(start=z_start, end=z_end + 1)
     
-    # Step 2: Outer loop Y
+    # Outer loop over Y
     for y in range(y_start, y_end + 1):
-        # Step 3: Inner loop X (Reference uses y_end as limit)
+        # Inner loop over X
+        # Note: Source code iterates to y_end instead of x_end [S1, unofficial]
         for x in range(x_start, y_end + 1):
-            # Step 4: Get column reference
             column = ctx.edit_column(x)
             
-            # Step 5: Apply state
-            if is_solid:
+            if solid:
                 column.insert(slab)
             else:
                 column.remove(slab)
         
-        # Step 6: Flush after each Y iteration
+        # Flush changes for the current Y row
         ctx.advance_and_flush()
     
-    # Step 7: Finish batch
+    # Finalize context
     ctx.finish()
 ```
 
-**Parameters and Constants:**
-*   $VSID = 512$: Maximum dimension for X and Y axes [S1, unofficial].
-*   $MAXZDIM = 64$: Maximum dimension for Z axis [S1, unofficial].
-*   $VXL\_ARENA\_WORDS\_PER\_COLUMN = 16$: Words allocated per column [S1, unofficial].
-*   $VXL\_ARENA\_WORDS = 4,194,304$: Total arena size in 32-bit words [S1, unofficial].
-
 **Edge Cases and Pitfalls:**
-*   **Iteration Bug**: The reference implementation uses $y_{end}$ as the upper bound for the X loop, which may cause incorrect behavior if $x_{end} \neq y_{end}$ [S1, unofficial].
-*   **Arena Saturation**: The arena has a fixed size. If the number of RLE spans exceeds the allocated words, allocation may fail or overwrite data. The source notes that saturation is unlikely in normal use [S1, unofficial].
-*   **Precision**: The Z coordinates are stored as `u8`, limiting the maximum Z dimension to 256, though the engine restricts it to 64 [S1, unofficial].
+-   **Loop Bound Bug:** The source code iterates the X loop up to `y_end` instead of `x_end` [S1, unofficial]. Implementers should verify if this is intentional or a bug.
+-   **Arena Saturation:** The arena has a fixed size. If edits exceed `VXL_ARENA_WORDS`, allocation will fail. The implementation assumes normal use will not saturate the 16MB arena [S1, unofficial].
+-   **Shade Interpretation:** The `shade` byte maps non-linearly to brightness. $0x00$ is 0.0, $0x80$ is 1.0, $0xFF$ is 2.0. Linear interpolation is not explicitly defined for intermediate values [S1, unofficial].
+
+## Subtopics
+
+### [GPU Renderer for RL-compressed data](10812-gpu-renderer-for-rl-compressed-data.md)
+A GPU-based volume rendering technique designed for data compressed via run-length encoding (RLE), specifically targeting voxelized models with sharp or small details. It solves the problem of efficiently accessing massive voxel grids (1000³ and larger) by storing only surface voxels uncompressed while compressing inside and outside voxels, achieving compression ratios up to 1:20 for noise-free data. Unlike methods that require full decompression of the volume, this approach distinguishes between uncompressed surface voxels and compressed interior/exterior regions on-the-fly during ray casting, avoiding the overhead of reconstructing the full volume in memory.
 
 ## Operating characteristics
-*   **Memory**: The storage uses a fixed-size arena of 16 MB ($4,194,304 \times 4$ bytes). Memory usage is static and does not grow with the number of voxels, but is limited by the $VSID \times VSID \times 16$ capacity [S1, unofficial].
-*   **Time Complexity**: Edit operations are $O((x_{end}-x_{start}) \times (y_{end}-y_{start}))$ for the loop overhead, plus the cost of RLE insertion/removal within columns. The source does not provide specific complexity for the RLE operations themselves [S1, unofficial].
-*   **Performance**: Optimized for CPU rendering in the VOXLAP engine. The column-oriented structure allows for efficient batched updates [S1, unofficial].
-*   **Limitations**: The fixed arena size limits the maximum number of distinct RLE spans. The Z dimension is limited to 64. The iteration bug in the reference implementation is a significant pitfall for direct porting [S1, unofficial].
+-   **Time Complexity:** Edit operations are $O(N)$ where $N$ is the number of voxels in the rectangular region, but with a small constant factor due to RLE compression. Column access is $O(1)$.
+-   **Memory Complexity:** Fixed memory usage of `VXL_ARENA_WORDS` * 4 bytes = 16 MB for the arena, plus overhead for column structures. This is independent of the actual number of voxels, bounded by `VSID^2 * MAXZDIM` [S1, unofficial].
+-   **Performance:** Optimized for CPU rendering. The fixed-size arena reduces allocation overhead. Compression ratios depend on data uniformity; noise-free data can achieve up to 1:20 compression [S1, unofficial].
+-   **Strengths:** Low memory footprint for large grids, fast batched edits, simple data layout.
+-   **Limitations:** Fixed maximum dimensions (512x512x64), potential for arena overflow, CPU-centric design (not GPU-friendly without conversion), and a potential bug in the X-loop bound [S1, unofficial].
 
 ## Background
-VOXLAP is a voxel engine created by Ken Silverman. The specific RLE storage format described here is a reimplementation of the storage used in VOXLAP, written in Rust by MuffinTastic. The project was created for educational purposes to learn about VOXLAP and Rust, and is not intended for production use in modern GPU-centric pipelines [S1, unofficial].
+VOXLAP is a voxel engine created by Ken Silverman [S1, unofficial]. The RLE storage format was designed for CPU-based volume rendering, which has become less common with the rise of GPU rendering [S1, unofficial]. The format is used in VOXLAP's `.vxl` map files. A reimplementation in Rust (`rust-voxlap-vxl`) was created to learn about VOXLAP and Rust, noting that CPU renderers are largely irrelevant for modern projects [S1, unofficial].
 
 ## Sources
 [S1] MuffinTastic/rust-voxlap-vxl, https://github.com/MuffinTastic/rust-voxlap-vxl, fetched 2026-10-28 (unofficial)

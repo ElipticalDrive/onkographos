@@ -1,0 +1,300 @@
+Preliminary checks I've checked that there aren't other open issues on the same topic. Describe the problem requiring a solution Randomness is an important part of the game, and I believe there are 2 aspects that we can improve on: Perfo...
+
+Random Number Generation Improvements · Issue #9867 · ihhub/fheroes2 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Random Number Generation Improvements #9867
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Random Number Generation Improvements#9867
+Copy link
+Assignees
+Labels
+improvementNew feature, request or improvementNew feature, request or improvementlogicThings related to game logicThings related to game logic
+Milestone
+1.3.0
+Description
+usidedown
+opened on Jun 5, 2025
+Issue body actions
+Preliminary checks
+I've checked that there aren't other open issues on the same topic.
+Describe the problem requiring a solution
+Randomness is an important part of the game, and I believe there are 2 aspects that we can improve on:
+Performance - I believe there are low hanging fruits available to make RNG faster and use less memory.
+Reproducibility - It's very nice when you re-load the game and the results remain the same. The game does this very well, unless you switch platforms. This isn't a problem for game play (maybe a little for debugging) but could be a fundamental problem with the editor when it begins generating random maps.
+Performance
+One-off Random Engine
+Let's look at the following code:
+```
+uint32_t Rand::GetWithSeed( uint32_t from, uint32_t to, uint32_t seed )
+{
+    if ( from > to ) {
+        std::swap( from, to );
+    }
+
+    std::uniform_int_distribution<uint32_t> distrib( from, to );
+    std::mt19937 seededGen( seed );
+
+    return distrib( seededGen );
+```
+This function from rand.cpp is called many times during a battle, and each time creates its own engine.
+Creating this engine is a relatively expensive operation (see below). Preferably we should re-use the same engine.
+We have the similar Rand::GetWithGen which does re-use the engine.
+There are additional oddities, such as manually keeping the state and re-seeding the engine
+```
+uint32_t Rand::DeterministicRandomGenerator::Get( const uint32_t from, const uint32_t to /* = 0 */ )
+{
+    ++_currentSeed;
+    return Rand::GetWithSeed( from, to, _currentSeed );
+}
+```
+The engine already keeps its state internally. I am not sure what benefit there is to use a seed for each generation.
+Mersenne-Twister
+mt19937 is an okay engine...But it's outdated and has some big disadvantages.
+For once, its size:
+```
+static_assert(sizeof(std::mt19937) == 5000);
+```
+The state of std::mt19937 uses 624 values of internal state. That's actually pretty big!
+Additionally, mt is considered slow when compared to alternatives.
+On the bright side, it is identical on all platforms (see below)
+Reproducibility
+Let me start by saying the current code does a great job at reproducibility. A deterministic PRNG is used. Seeds are used and saved. Unfortunately, the c++ standard doesn't guarantee reproducibility between different platforms. And in fact we'll get different numbers on different c++ implementations thanks to uniform_int_distribution.
+Describe the possible solution
+Performance
+One-off Random Engine
+This one requires refactoring existing code. No magic here :(.
+Fortunately I think it can greatly be mitigated by swapping out the heavy mt19937 (see below).
+Mersenne-Twister
+This one is actually pretty easy to deal with - just pick a different PRNG with a similar interface and search+replace everywhere.
+PCG RNG family look like a decent candidate. It's simple, fast and requires a small state.
+pcg32 is sound "default" choice. It's available with a permissive license by the author
+An alternative is philox family of algorithms, which is going to be added to c++26. It's mainly designed to be highly parallelized (for GPU/SIMD implementations). I don't see any clear advantage other then being added to the standard. Implementation can be found here.
+Reproducibility
+This one can only be solved by bundling the logic used around the engine (e.g. uniform_int_distribution).
+Any implementation will probably solve this problem:
+An existing fully-fledged random library, such as Boost.Random.
+Note that we can't link with the system's version, that would break our cross-platform guarantee.
+pcg-cpp has uniform_int_distribution-like function built in
+implementing uniform_int_distribution is not very hard. Lemire has published a fast and simple method. As long as 32-bit int engine is used, it saves expensive divisions by using 64-bit mult.
+Additional info
+No response
+Activity
+usidedown
+added
+improvementNew feature, request or improvementNew feature, request or improvement
+on Jun 5, 2025
+oleg-derevenetz commented on Jun 5, 2025
+oleg-derevenetz
+on Jun 5, 2025
+Last edited by oleg-derevenetz
+Collaborator
+More actions
+An existing fully-fledged random library, such as Boost.Random.
+No, please, not Boost :) It is advisable to try something lightweight, preferably something header-only that can be just put into src/thirdparty and doesn't depend on something that needs to be installed separately, because the corresponding package may not be available on relatively exotic platforms like PS Vita or Nintendo Switch. Also, we don't need crypto-grade random generators, so if the candidate is handy enough, then that's fine.
+usidedown commented on Jun 5, 2025
+usidedown
+on Jun 5, 2025
+Last edited by usidedown
+ContributorAuthor
+More actions
+No, please, not Boost :)
+I share the sentiment 😆
+I felt obligated to present all options.
+header-only
+pcg-cpp is header only, and is a good candidate both in terms of engine (PCG) and utilities (uniform_distribution, shuffle).
+👍React with 👍1Reacted by Oleg Derevenetz
+zenseii commented on Jun 6, 2025
+zenseii
+on Jun 6, 2025
+Collaborator
+More actions
+Hi, @usidedown are these issues in any way related to your changes?
+#4265 #4268
+usidedown commented on Jun 6, 2025
+usidedown
+on Jun 6, 2025
+ContributorAuthor
+More actions
+Hi, @usidedown are these issues in any way related to your changes? #4265 #4268
+Yes and no.
+The reproducibility improvements make sure that all platforms behave in the same way.
+If some aspect is currently non-deterministic, then it would stay non-deterministic.
+If something is already deterministic (when loaded in the same platform), then it now should be the same on all platforms.
+I'll take a look at these issues though, they look interesting!
+👍React with 👍1Reacted by Zenseii
+❤️React with ❤️1Reacted by Zenseii
+ihhub
+assigned
+usidedown
+on Jun 7, 2025
+usidedown commented on Jun 11, 2025
+usidedown
+on Jun 11, 2025
+ContributorAuthor
+More actions
+@oleg-derevenetz How do you think we should go about the performance issues of std::mt19937?
+As I see it we have a few alternatives:
+Keep using Mersenne Twister. IMHO this is the worse option. It's slow, it's huge (bad for both runtime and potential serialization in the future)
+Find a maintained library that provides a good PRNG engine.
+In my understanding the biggest objection to my PR introducing PCG is that the library was unmaintained. While not easy, it's possible to find a library that's actively maintained.
+utl::random is a small, header-only & maintained library. It provides implementations for splitmix32 and xoshiro128++ which both could be useful.
+Roll our own PRNG engine implementation. Honestly it's not hard. There are many references in C. pcg32, sfc32 look like good candidates here.
+oleg-derevenetz commented on Jun 11, 2025
+oleg-derevenetz
+on Jun 11, 2025
+Last edited by oleg-derevenetz
+Collaborator
+More actions
+Eh, of course, you can write your own implementation within the scope of engine/rand module - after all, there is no cryptography, so the cost of a potential mistake is relatively low.
+usidedown commented on Jun 23, 2025
+usidedown
+on Jun 23, 2025
+ContributorAuthor
+More actions
+Last item on the menu: one-off uses of the random engine.
+And for bonus I addressed some reproducibility issues.
+TL;DR
+I suggest the following for performance:
+Removing DeterministicRandomGenerator in favor of using PCG32 directly
+A single persistent engine to govern new week, month and tavern rumors
+An engine per Hero to govern levelup
+I suggest the following for reproducibility:
+A single engine for magic garden, wheels and dwellings (can be the same as week/month engine)
+A single engine for monster population (can be combined with another world-engine, but not the new-week/month one)
+World generation can be done with an engine based on the world seed, but this is of lower priority
+Battle animations randonmess should be left as is
+Please let me know what you guys think.
+One-off uses of PCG
+DeterministicRandomGenerator
+```
+class DeterministicRandomGenerator
+{
+...
+}
+```
+This one is used in battle to make sure battles are reproducible. Seems a bit of an overkill, as the random engine already guarantees reproducibility (as long as the seed is the same). I suggest dropping it in favor of using the random engine directly.
+It does have an interesting mechanism for making the RNG dependant on the player's actions.
+```
+        const uint32_t newSeed = std::accumulate( actions.cbegin(), actions.cend(), _randomGenerator.GetSeed(),
+                                                  []( const uint32_t seed, const Command & cmd ) { return cmd.updateSeed( seed ); } );
+        _randomGenerator.UpdateSeed( newSeed );
+```
+If the user re-loads the game and starts the same battle, then as soon as the player changes anything the RNG will be completely different (of course, if the user doesn't change anything then the battle is completely deterministic).
+I don't think it's necessary and can be safely discarded. We can keep this behavior (but change the implementation) if you think otherwise.
+New Week & New Month & Tavern Rumor
+Week & Month have their own scheme for generating a seed based on the world seed, and use that to one-off a random engine.
+I believe this can be relatively simply replaced by persisting a random engine dedicated for this purpose.
+Hero Levelup
+The game generates 4 seeds for leveling up:
+```
+    struct HeroSeedsForLevelUp
+    {
+        uint32_t seedPrimarySkill{ 0 };
+        uint32_t seedSecondarySkill1{ 0 };
+        uint32_t seedSecondarySkill2{ 0 };
+        uint32_t seedSecondarySkillRandomChoose{ 0 };
+    };
+```
+It derives these seeds from the world seed, the hero primary skills and secondary skills (without artifcats).
+It's reproducible, but has a weird quirk that it's influenced by external factors (anything that changes the hero's skills other than leveling up).
+I think we can just use a per-hero random engine, that way they are not influenced by anything.
+Making non-reproducible behavior reproducible
+There are other uses of random which currently use an unpredictable seed, making them unreproducible. These change behavior when the game is loaded for example
+This is slightly off-topic to this issue, but since we get asked that a lot I thought it's best to add 😄
+Battle animations
+Battle animations use the RNG of the current thread with a random seed. I believe this behavior is good and can stay the same.
+Map Objects When Creating the World
+The following map objects use randomness (maps_tiles_helper.cpp::Maps::updateObjectInfoTile)
+Witch Hut (which skill)
+Skeleton (does it hold an artifact? Which?)
+Wagon (what does it hold)
+Artifact (which artifact + does it cost?)
+Resource Pile (amount)
+Random Resource (resource kind)
+Campfires (which resources)
+Flotsam
+Shipwreck survivor
+Sea chest
+Treasure chest
+Shipwreck
+Daemon Cave
+Tree of Knowledge
+Abandoned mine
+Genie Lamp
+Graveyard
+Shrines
+Pyramid
+Random Monster
+These are irrepreducible in the sense that they are independant of the world seed. The same world seed will lead to different results in these. That being said, their state is presumably saved and re-loading the game doesn't impact them.
+I don't mind leaving it as is or changing them to rely on random engine derived from the world seed.
+Monster join chance
+maps_tile_helper.cpp::Maps::setMonsterOnTile Uses random chance for monster to join
+I'm guessing this is similar to above
+Map Objects When Visiting
+Again maps_tiles_helper.cpp::Maps::updateObjectInfoTile, but this time every week and not just on game setup
+Magic Gardent (gold vs. gems)
+Windmill
+Dwelling populations
+Monster populations
+These are currently completely irrepreducible. If you save at the end of the week, then on the next turn you'll get different resources on each save.
+I suggest instead using a persistent random engine to generate it. This engine can be shared with other "world" features above.
+This engine will be distinct from other things previously discussed - week, month, hero leveling
+Others?
+I am sure there's more, but this post is already too long.
+oleg-derevenetz commented on Jun 23, 2025
+oleg-derevenetz
+on Jun 23, 2025
+Last edited by oleg-derevenetz
+Collaborator
+More actions
+If the user re-loads the game and starts the same battle, then as soon as the player changes anything the RNG will be completely different (of course, if the user doesn't change anything then the battle is completely deterministic).
+I don't think it's necessary and can be safely discarded. We can keep this behavior (but change the implementation) if you think otherwise.
+I think that if we remove this, then the players will abuse the repeatability. For instance, they will know that if they move a unit to a different cell (compared to the previous attempt), the damage on the next attack (which is calculated randomly from the range min-max) will remain the same. This is not the case now.
+usidedown commented on Jun 23, 2025
+usidedown
+on Jun 23, 2025
+ContributorAuthor
+More actions
+I think that if we remove this, then the players will abuse the repeatability. For instance, they will know that if they move a unit to a different cell (compared to the previous attempt), the damage on the next attack (which is calculated randomly from the range min-max) will remain the same. This is not the case now.
+On the other hand, the user knows they can change their actions slightly and get more favorable results 😉
+We can keep this mechanism if necessary. PCG32 supports a stream argument (supports any odd uint64_t number), we can select stream using the existing mechanism. It's faster than reseeding PCG32 (and most certainly than MT).
+oleg-derevenetz commented on Jun 23, 2025
+oleg-derevenetz
+on Jun 23, 2025
+Collaborator
+More actions
+On the other hand, the user knows they can change their actions slightly and get more favorable results 😉
+Or less favorable :) At least now you can't know this in advance.
+ihhub
+added
+logicThings related to game logicThings related to game logic
+on Oct 13, 2025
+ihhub
+added this to the 1.3.0 milestone on Oct 13, 2025
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+usidedown
+Labels
+improvementNew feature, request or improvementNew feature, request or improvementlogicThings related to game logicThings related to game logic
+Projects
+No projects
+Milestone
+1.3.0No due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

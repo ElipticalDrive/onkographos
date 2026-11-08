@@ -1,0 +1,269 @@
+--- v003.md
++++ v004.md
+@@ -1,143 +1,155 @@
+ # Distributed Volume Rendering Pipeline
+ 
+-Also called: Distributed Volume Rendering Architecture, Distributed software architecture for volume rendering, Virvo Architecture, Virvo system
++Also called: Virvo system, Virvo Architecture
+ 
+ ## Overview
+-The Distributed Volume Rendering Pipeline is a software architecture for direct volume rendering on heterogeneous High-Performance Computing (HPC) systems, structured as a pipeline of loosely coupled stages [S1, unofficial]. It solves the problem of managing interactive rendering across distributed, multi-user environments by decoupling elementary renderers from parallelism and resource management logic [S1, unofficial]. Unlike traditional batch-style resource managers, it uses Zero Configuration Networking (ZCN) for dynamic node allocation and exposes domain-specific hardware metrics for node selection [S1, unofficial]. It builds on [Sort-last Parallel Rendering](6889-sort-last-parallel-rendering.md) by enforcing a strict four-stage pipeline where data distribution and display are sequential, while rendering and compositing are parallelized [S1, unofficial].
++The Distributed Volume Rendering Pipeline is a parallel software architecture that structures distributed direct volume rendering as a loosely coupled pipeline of sequential and parallel stages to hide I/O costs and achieve interactive framerates on heterogeneous High-Performance Computing (HPC) systems [S1][S2, unofficial]. It solves the problem of limited local hardware performance and data locality by decoupling elementary renderers from parallelism and resource management, allowing the system to scale across distributed memory clusters and Multi-GPU nodes [S2, unofficial]. Unlike sibling methods that focus primarily on data distribution algorithms or compositing optimizations, this architecture emphasizes a modular pipeline design with a dedicated display phase and Zero Configuration Networking (ZCN) for dynamic resource allocation, enabling seamless integration of new resources without system restarts [S2, unofficial].
+ 
+ ## How it works
+-The architecture implements a four-stage pipeline: **Data Distribution**, **Rendering**, **Compositing**, and **Display** [S1, unofficial].
++The pipeline consists of four distinct stages: data distribution, rendering, compositing, and display [S2, unofficial]. Data distribution and display are sequential tasks assigned to a single processor (or host), while rendering and compositing are performed by multiple processors in parallel [S2, unofficial]. The architecture supports two primary operational modes: single-resource mode (where compositing is omitted) and multi-resource mode (sort-last parallel rendering) [S2, unofficial].
+ 
+ ### Inputs and Outputs
+-*   **Input**: A volume dataset (scalar field), transfer functions, viewing parameters, and a list of available computing resources (nodes/GPUs) registered via ZCN [S1, unofficial].
+-*   **Output**: A final composited image displayed on the client interface [S1, unofficial].
++*   **Inputs:** Raw volume data (stored on a parallel file system or distributed storage), transfer functions, and viewing transformation matrices [S1][S3].
++*   **Outputs:** A final composited image displayed on a client device or stored to disk [S1][S2, unofficial].
+ 
+ ### Data Structures
+-The system relies on a **Resource Manager** and **Resources** (workers).
+-*   **Resource**: An entity capable of rendering. It exposes hardware metrics such as available/used video memory and CUDA compute capability [S1, unofficial].
+-*   **Renderer**:
+-    *   *Elementary Renderer*: Handles the core volume rendering task for a single resource [S1, unofficial].
+-    *   *Parallel Brick Renderer*: Instantiated when a request requires multiple resources. It is configured for sort-last parallel Multi-GPU or distributed memory rendering [S1, unofficial].
+-*   **Visibility Sorting Structure**: A k-d tree search structure superimposed on top of elementary renderers to handle threading and parallelism [S1, unofficial]. The implementation chooses not to expose this structure for replacement to avoid performance degradation compared to ray tracing [S1, unofficial].
++*   **Spatial Encoding:** For time-varying data with static mesh structures, a one-time preprocessing step generates a spatial octree encoding of the raw data [S1]. Each block of elements is associated with a subtree of the global octree [S1].
++*   **Resource List:** A dynamic list of available computing resources managed via ZCN, tracking hardware metrics such as available/used video memory and CUDA compute capability [S2, unofficial].
++*   **Image Portions:** Partially composited images held by each node after the compositing phase, which are sent back to the host [S3].
++
++### Parameters
++*   **Partition Sizes:** Tested on CM-5 with 32, 64, 128, 256, and 512 nodes [S3].
++*   **Data Sets:** 256³ voxel vorticity data, 128³ voxel head data, and 256×256×128 voxel vessel data [S3].
+ 
+ ### Steps
+-1.  **Resource Registration**: Resources dynamically register with the Resource Manager using Zero Configuration Networking (ZCN) [S1, unofficial].
+-2.  **Request Reception**: The client sends a rendering request. The Resource Manager selects a suitable node based on hardware-specific metrics (e.g., video memory, CUDA capability) [S1, unofficial].
+-3.  **Data Distribution**: Assigned to a single processor. The dataset is distributed to the selected rendering resources [S1, unofficial].
+-4.  **Rendering**:
+-    *   If one resource is assigned, an *Elementary Renderer* is created [S1, unofficial].
+-    *   If multiple resources are assigned, a *Parallel Brick Renderer* is created, configured for sort-last parallel rendering [S1, unofficial].
+-    *   The renderer uses the k-d tree structure for parallelism [S1, unofficial].
+-5.  **Compositing**:
+-    *   If multiple resources rendered the job, their sub-images are composited [S1, unofficial].
+-    *   If a single resource handled the job, this stage is omitted, and execution proceeds directly to Display [S1, unofficial].
+-6.  **Display**: A dedicated stage determines how the final image is displayed on the remote client, accommodating varying interactive requirements (e.g., high-frame-rate VR vs. low-frame-rate monitoring) [S1, unofficial].
+-7.  **Re-registration**: After completing a request, resources re-register with the Resource Manager via ZCN [S1, unofficial].
++1.  **Initialization and Resource Discovery:**
++    The resource manager monitors socket connections and uses Zero Configuration Networking (ZCN) to dynamically discover and add idle resources to the active resource list [S2, unofficial]. If a connection breaks, the client is notified, and the resource is removed from the list [S2, unofficial].
++
++2.  **Data Distribution (Sequential):**
++    *   Input processors read data files from the parallel file system storage device [S1].
++    *   Input processors prepare raw data for rendering (e.g., quantization from 32-bit to smaller types) [S1].
++    *   Using the precomputed octree and workload estimation, input processors partition the data and distribute data blocks to rendering processors [S1].
++    *   Non-blocking send and receive are used for block distribution [S1].
++    *   *Alternative (Host-Node Model):* The host broadcasts data-space partitioning information and the portion of data to each node [S3]. The host also broadcasts transfer functions and transform matrices [S3].
++
++3.  **Rendering (Parallel):**
++    *   Rendering processors (or nodes) receive their local data blocks [S1][S3].
++    *   Nodes update their local transfer functions and transform matrices [S3].
++    *   Each node executes its own copy of the renderer [S3].
++    *   *Architecture Detail:* If a single resource is assigned, an elementary renderer is used. If multiple resources are assigned, a parallel brick renderer is instantiated, configured for sort-last parallel Multi-GPU or distributed memory rendering [S2, unofficial].
++    *   The renderer superimposes a k-d tree search structure and threading logic on top of elementary renderers to handle parallelism [S2, unofficial].
++
++4.  **Compositing (Parallel):**
++    *   Nodes synchronize after rendering and before compositing [S3].
++    *   Rendering processors deliver their rendered images to output processors (or other nodes) [S1].
++    *   A parallel compositing method (e.g., binary-swap) combines the independently rendered results [S3].
++    *   *Single Resource Mode:* If only one resource is assigned, this stage is omitted, and execution proceeds directly to display [S2, unofficial].
++
++5.  **Display (Sequential):**
++    *   Output processors send the final images to a display or storage device [S1].
++    *   *Host-Node Model:* Once compositing is finished, each node holds a portion of the image and sends it back to the host for display [S3]. The host performs an I/O servicing loop to receive these portions [S3].
++    *   The display phase determines how the image is presented, accommodating varying requirements such as high-frame-rate VR head tracking or low-frame-rate HPC monitoring [S2, unofficial].
+ 
+ ### Pseudocode
+ ```python
+-class Resource:
+-    def __init__(self, node_id, video_memory, cuda_capability):
+-        self.node_id = node_id
+-        self.video_memory = video_memory
+-        self.cuda_capability = cuda_capability
+-        self.is_available = True
++# Distributed Volume Rendering Pipeline Implementation
++# Based on [S1][S2, unofficial][S3]
+ 
+-class ResourceManager:
+-    def __init__(self):
+-        self.resources = []
+-        # ZCN protocol handles dynamic addition/removal
+-        pass
++def run_pipeline():
++    # 1. Resource Management (ZCN)
++    resource_manager = ZCNResourceManager()
++    resources = resource_manager.discover_and_add_resources()
++    
++    # 2. Data Distribution (Sequential on Host/Input Processor)
++    # Check if data is time-varying with static mesh
++    if is_time_varying_static_mesh():
++        octree = preprocess_data_to_octree(raw_data)
++    else:
++        octree = None
++        
++    # Partition data based on octree/workload estimation
++    data_partitions = partition_data(raw_data, octree, resources)
++    
++    # 3. Rendering (Parallel on Nodes)
++    # Broadcast control data
++    broadcast_transfer_functions()
++    broadcast_transform_matrices()
++    
++    # Launch parallel rendering tasks
++    render_tasks = []
++    for node in resources:
++        # Send partition and control data
++        send_data(node, data_partitions[node])
++        
++        # Node executes renderer
++        task = node.execute_renderer(
++            data=data_partitions[node],
++            transfer_function=local_transfer_function,
++            transform_matrix=local_transform_matrix
++        )
++        render_tasks.append(task)
++        
++    # Synchronize after rendering
++    wait_for_all(render_tasks)
++    
++    # 4. Compositing (Parallel or Omitted)
++    if len(resources) > 1:
++        # Parallel compositing (e.g., binary-swap)
++        composited_images = parallel_composite(render_tasks)
++        
++        # Send portions back to host for final assembly/display
++        for node, image_portion in zip(resources, composited_images):
++            send_image_to_host(node, image_portion)
++    else:
++        # Single resource: skip compositing
++        final_image = render_tasks[0].result
++        
++    # 5. Display (Sequential on Host/Output Processor)
++    if len(resources) > 1:
++        # Host receives portions and assembles
++        final_image = host_assemble_images()
++        
++    display_image(final_image)
+ 
+-    def select_node(self, request):
+-        # Select based on hardware metrics, not batch scheduling
+-        # [G] Simple greedy selection for illustration
+-        for r in self.resources:
+-            if r.is_available and r.video_memory >= request.memory_requirement:
+-                return r
+-        return None
++def preprocess_data_to_octree(data):
++    # One-time preprocessing for static mesh
++    return build_octree(data)
+ 
+-class Pipeline:
+-    def __init__(self, resource_manager):
+-        self.rm = resource_manager
++def partition_data(data, octree, resources):
++    # Use octree subtrees and workload estimation
++    return distribute_blocks(data, octree, resources)
+ 
+-    def execute(self, volume_data, transfer_function, view_params):
+-        # 1. Data Distribution (Sequential, Single Processor)
+-        # [G] Distribute volume data to selected nodes
+-        selected_nodes = self.rm.select_nodes_for_job(volume_data)
+-        
+-        # 2. Rendering (Parallel)
+-        if len(selected_nodes) == 1:
+-            renderer = ElementaryRenderer(selected_nodes[0])
+-        else:
+-            renderer = ParallelBrickRenderer(selected_nodes)
+-        
+-        # [G] Execute rendering using k-d tree for parallelism
+-        sub_images = renderer.render(volume_data, transfer_function, view_params)
+-        
+-        # 3. Compositing (Parallel or Omitted)
+-        if len(selected_nodes) > 1:
+-            final_image = Composite(sub_images)
+-        else:
+-            final_image = sub_images[0]
+-            
+-        # 4. Display (Sequential, Single Processor)
+-        DisplayStage.show(final_image)
+-        
+-        # 5. Re-registration
+-        for node in selected_nodes:
+-            node.re_register_via_zcn()
+-
+-class ElementaryRenderer:
+-    def __init__(self, resource):
+-        self.resource = resource
+-        # [G] Initialize k-d tree for this resource
+-        self.kd_tree = build_kd_tree(resource.data_partition)
+-
+-    def render(self, volume, tf, view):
+-        # [G] Ray casting or similar DVR method using k-d tree
+-        return render_slice(self.kd_tree, volume, tf, view)
+-
+-class ParallelBrickRenderer:
+-    def __init__(self, resources):
+-        self.resources = resources
+-        # [G] Configure for sort-last parallel Multi-GPU/Distributed Memory
+-        pass
+-
+-    def render(self, volume, tf, view):
+-        # [G] Distribute bricks, render in parallel, return sub-images
+-        return [r.render(volume, tf, view) for r in self.resources]
++def parallel_composite(render_results):
++    # Binary-swap compositing algorithm
++    # Keeps all processors busy, decreasing image size
++    return binary_swap_compositing(render_results)
+ ```
+ 
+-### Parameters and Edge Cases
+-*   **Parallelism Model**: Restricted to sort-last parallel volume rendering to achieve data parallelism [S1, unofficial]. Sort-first is noted as easily accommodable but would generalize the compositing stage [S1, unofficial].
+-*   **Single Resource**: If one resource handles the job, the compositing stage is omitted [S1, unofficial].
+-*   **Failure Handling**:
+-    *   If a socket connection breaks during a job, the client is notified of the resource's unavailability [S1, unofficial].
+-    *   The resource management subsystem remains unaffected due to loose coupling [S1, unofficial].
+-    *   If an idle resource becomes unavailable, its status is broadcast via ZCN, and it is removed from the active list [S1, unofficial].
+-*   **Limitations**: The handcrafted resource management system lacks generality and is restricted to direct volume rendering; supporting alternative visualization methods requires explicit adaptation [S1, unofficial].
++### Edge Cases and Pitfalls
++*   **Pipeline Fill Time:** The pipeline is not efficient until all stages are filled; performance improves significantly once the pipeline is full [S1].
++*   **Load Balancing:** Datasets with many empty voxels (e.g., head, vessel) cause load imbalance and non-linear speedup, whereas dense datasets (e.g., vorticity) exhibit nearly linear speedup [S3].
++*   **Communication Costs:** On heterogeneous shared workstations, communication costs are highly variable due to Ethernet sharing, which can degrade performance [S3]. Communication dominates compositing costs on workstations (~97% of compositing time) [S3].
++*   **Small Image Overhead:** Rendering small images (e.g., 64x64) exhibits less speedup due to overhead costs associated with rendering and compositing steps [S3].
++*   **Resource Unavailability:** The system is tolerant to resource failure; if a socket connection breaks, the client is notified, and the resource is removed from the list without affecting the management subsystem [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Remote Rendering Client/Server Architecture](8196-remote-rendering-client-server-architecture.md)
+-Separates the engine into a remote server (computation) and local client (interaction). It serves as the foundational communication layer for this pipeline, facilitating sort-last parallel rendering across heterogeneous clusters.
++Separates the rendering engine into a computation server and an interaction client, serving as the foundational communication layer for this pipeline.
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Not given in the sources.
+-*   **Memory Complexity**: Not given in the sources.
+-*   **Performance**: The architecture is designed to scale to heterogeneous HPC systems, ranging from high-end graphics workstations to dedicated render clusters with Multi-GPU nodes and large distributed memory systems without graphics accelerators [S1, unofficial].
+-*   **Strengths**:
+-    *   Dynamic resource allocation via ZCN reduces system downtime and allows runtime load balancing without restarts [S1, unofficial].
+-    *   Loose coupling allows generic replacement of pipeline stages with custom logic via subclassing [S1, unofficial].
+-    *   Dedicated display stage accommodates varying interactive requirements (VR vs. monitoring) [S1, unofficial].
+-*   **Limitations**:
+-    *   Restricted to direct volume rendering; not generalizable to other visualization methods without adaptation [S1, unofficial].
+-    *   Network latency and bandwidth constraints are primary bottlenecks in remote scenarios [S2, unofficial].
+-    *   The handcrafted resource management system lacks the generality of traditional batch-style systems [S1, unofficial].
++*   **Time Complexity:** Rendering time dominates the overall process [S3]. Communication costs dominate compositing costs on workstations (~97% of compositing time) [S3].
++*   **Memory Complexity:** Nodes must store their portion of the data in local memory [S3]. The architecture allows nodes to store the whole dataset in main memory if data parallelism is abandoned, though the default is data parallelism [S2, unofficial].
++*   **Performance:** On CM-5, nearly linear speedup was achieved for dense datasets (vorticity) across various image sizes, except for small images (64x64) where overhead reduced speedup [S3]. Speedup for compositing was lower (1.46 from 32 to 512 nodes) due to communication overhead [S3].
++*   **Strengths:** Hides I/O costs, supports interactive framerates, scales to heterogeneous hardware (from workstations to Multi-GPU clusters), and allows dynamic resource addition via ZCN [S1][S2, unofficial].
++*   **Limitations:** Not efficient until pipeline is full; sensitive to load imbalance from sparse data; communication costs can be high on shared networks; resource management is handcrafted and lacks generality for non-direct volume rendering methods [S1][S2, unofficial][S3].
++*   **When to Use:** Interactive visualization of large, time-varying volume data on distributed HPC systems or clusters with heterogeneous hardware [S1][S2, unofficial].
++*   **When Not to Use:** When data is sparse and load balancing is difficult, or when the system lacks a parallel file system for efficient data distribution [S1][S3].
+ 
+ ## Background
+-The Distributed Volume Rendering Pipeline, also known as the Virvo Architecture, was introduced in a paper titled "A SOFTWARE ARCHITECTURE FOR DISTRIBUTED VOLUME RENDERING ON HPC SYSTEMS" [S1, unofficial]. It addresses the need for interactive, multi-user volume rendering on heterogeneous clusters by extending existing pipeline approaches with multi-user support and a dedicated display phase [S1, unofficial]. It differs from traditional resource management by being handcrafted for visualization, exposing domain-specific metrics like CUDA capability and video memory [S1, unofficial].
++The Distributed Volume Rendering Pipeline was introduced as a parallel pipeline architecture for visualizing time-varying volume data, aiming to hide I/O costs and achieve interactive framerates [S1]. It was implemented on the CM-5 and a network of scientific workstations using PVM [S3]. A later software architecture extension emphasized loose coupling, ZCN for dynamic node allocation, and a dedicated display phase to support diverse scenarios from VR to HPC monitoring [S2, unofficial]. The architecture is also known as the Virvo system or Virvo Architecture [S1][S2, unofficial].
+ 
+ ## Sources
+-[S1] A SOFTWARE ARCHITECTURE FOR DISTRIBUTED VOLUME RENDERING ON ... - Actapress, https://actapress.com/Abstract.aspx?paperId=454770, fetched 2026-10-27 (unofficial)+[S1] I/O Strategies for Parallel Rendering of Large Time-Varying Volume Data, https://doi.org/10.2312/egpgv/egpgv04/031-040, fetched 2026-10-26
++[S2] A SOFTWARE ARCHITECTURE FOR DISTRIBUTED VOLUME RENDERING ON ... - Actapress, https://actapress.com/Abstract.aspx?paperId=454770, fetched 2026-10-27 (unofficial)
++[S3] A data distributed, parallel algorithm for ray-traced volume ..., https://www.cs.ucdavis.edu/~ma/papers/PRS93.pdf, fetched 2026-10-27

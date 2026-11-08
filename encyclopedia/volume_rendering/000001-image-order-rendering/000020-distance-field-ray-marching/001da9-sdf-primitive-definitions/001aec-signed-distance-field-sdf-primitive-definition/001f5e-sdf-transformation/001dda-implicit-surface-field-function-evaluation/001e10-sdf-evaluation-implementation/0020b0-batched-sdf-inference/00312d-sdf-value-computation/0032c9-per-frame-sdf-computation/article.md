@@ -2,36 +2,41 @@
 
 
 ## Overview
-Computes the signed distance function (SDF) and RGB color for a set of 3D points projected into a single camera view by comparing projected depth against a sampled depth map [S1, unofficial]. It serves as the per-view evaluation step in multi-view fusion pipelines, distinct from batched inference by operating on a single viewpoint's projection at a time [S1, unofficial].
+Per-Frame SDF Computation calculates the Signed Distance Function (SDF) and RGB color for a set of 3D points by projecting them into a single camera view. It solves the problem of assigning geometric and photometric consistency to 3D points relative to a specific training view by comparing projected depths against a pre-computed depth map. It differs from multi-view fusion methods by operating on a single viewpoint at a time, serving as the atomic unit for subsequent TSDF fusion or colorization.
 
 ## How it works
 **Inputs:**
 - `points`: Tensor of shape $(N, 3)$ containing 3D point coordinates in world space.
-- `full_proj_transform`: $4 \times 4$ projection matrix mapping world coordinates to clip space.
-- `depth_map`: Tensor of shape $(H, W)$ containing the depth buffer for the current view.
-- `rgb_map`: Tensor of shape $(H, W, 3)$ containing the color buffer for the current view.
-- `inv_contraction`: Optional tensor or flag indicating if points are in contracted space (used in Unbounded TSDF Fusion variant).
+- `full_proj_transform`: Tensor of shape $(4, 4)$ representing the combined projection and view transformation matrix.
+- `depth_map`: Tensor of shape $(H, W)$ containing the depth values for the current view.
+- `rgb_map`: Tensor of shape $(H, W, 3)$ containing the RGB color values for the current view.
 
 **Outputs:**
-- `sdf`: Tensor of shape $(N, 1)$ containing signed distance values.
-- `rgb`: Tensor of shape $(N, 3)$ containing interpolated RGB colors.
-- `mask`: Boolean tensor of shape $(N, 1)$ indicating valid pixels.
+- `sdf`: Tensor of shape $(N, 1)$ containing the signed distance values.
+- `rgb`: Tensor of shape $(N, 3)$ containing the sampled RGB colors.
+- `mask`: Boolean tensor of shape $(N, 1)$ indicating valid projections.
 
 **Data Structures:**
 - Points are stored as floating-point tensors.
-- Depth and RGB maps are sampled using bilinear interpolation with border padding.
+- Depth and RGB maps are stored as 2D/3D tensors corresponding to image resolution.
 
 **Steps:**
 1. **Homogenization**: Append a column of ones to `points` to create homogeneous coordinates of shape $(N, 4)$.
-2. **Projection**: Multiply homogeneous points by `full_proj_transform` to obtain clip space coordinates $z_{clip}$.
-3. **Perspective Division**: Extract $z_{clip}$ and compute pixel coordinates $(u, v)$ by dividing $x_{clip}$ and $y_{clip}$ by $z_{clip}$:
-   $$ u = \frac{x_{clip}}{z_{clip}}, \quad v = \frac{y_{clip}}{z_{clip}} $$
-4. **Masking**: Create a projection mask where $-1 \le u \le 1$, $-1 \le v \le 1$, and $z_{clip} > 0$.
-5. **Sampling**:
-   - Sample `depth_map` at $(u, v)$ using bilinear `grid_sample` with border padding. Reshape to $(N, 1)$.
-   - Sample `rgb_map` at $(u, v)$ using bilinear `grid_sample` with border padding. Reshape to $(N, 3)$.
-6. **SDF Calculation**: Compute SDF as the difference between the sampled depth $d_{sampled}$ and the projected z-coordinate $z_{clip}$:
-   $$ \text{SDF} = d_{sampled} - z_{clip} $$
+2. **Projection**: Multiply the homogeneous points by `full_proj_transform` to obtain clip-space coordinates.
+   $$ p_{clip} = P_{world} \times M_{proj} $$
+   Where $P_{world}$ is the $(N, 4)$ homogeneous point matrix and $M_{proj}$ is the $(4, 4)$ transformation matrix.
+3. **Perspective Division**: Extract the $z$-coordinate ($z_{clip}$) and divide the $x$ and $y$ coordinates by $z_{clip}$ to normalize device coordinates (NDC).
+   $$ x_{ndc} = \frac{x_{clip}}{z_{clip}}, \quad y_{ndc} = \frac{y_{clip}}{z_{clip}} $$
+4. **Masking**: Create a boolean mask where:
+   - $-1 \le x_{ndc} \le 1$
+   - $-1 \le y_{ndc} \le 1$
+   - $z_{clip} > 0$
+   Points failing any condition are invalid.
+5. **Depth Sampling**: Sample the `depth_map` at $(x_{ndc}, y_{ndc})$ using bilinear interpolation (`grid_sample` with border padding). Reshape the result to $(N, 1)$. Let this be $d_{sampled}$.
+6. **Color Sampling**: Sample the `rgb_map` at $(x_{ndc}, y_{ndc})$ using bilinear interpolation (`grid_sample` with border padding). Reshape the result to $(N, 3)$. Let this be $c_{sampled}$.
+7. **SDF Calculation**: Compute the SDF as the difference between the sampled depth and the projected $z$-coordinate.
+   $$ sdf = d_{sampled} - z_{clip} $$
+   [G] Note: The sign convention depends on the specific depth map definition (e.g., linear vs. inverse). The source defines it as sampled minus projected.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -43,89 +48,82 @@ def compute_sdf_perframe(points, full_proj_transform, depth_map, rgb_map):
     # depth_map: (H, W)
     # rgb_map: (H, W, 3)
 
-    # 1. Homogenize
+    # 1. Homogenize points
     ones = torch.ones(points.shape[0], 1, device=points.device)
     points_homo = torch.cat([points, ones], dim=1)  # (N, 4)
 
     # 2. Project to clip space
-    clip_coords = torch.matmul(points_homo, full_proj_transform.T)  # (N, 4)
-    x_clip = clip_coords[:, 0]
-    y_clip = clip_coords[:, 1]
-    z_clip = clip_coords[:, 2]
+    points_clip = torch.matmul(points_homo, full_proj_transform.T)  # (N, 4)
+    x_clip = points_clip[:, 0]
+    y_clip = points_clip[:, 1]
+    z_clip = points_clip[:, 2]
 
     # 3. Perspective division
     # Avoid division by zero
-    z_clip_safe = torch.clamp(z_clip, min=1e-5)
-    u = x_clip / z_clip_safe
-    v = y_clip / z_clip_safe
+    eps = 1e-7
+    x_ndc = x_clip / (z_clip + eps)
+    y_ndc = y_clip / (z_clip + eps)
 
     # 4. Create projection mask
-    # Normalize u, v to [-1, 1] range for grid_sample if not already, 
-    # but grid_sample expects normalized coordinates. 
-    # Assuming u, v are already in normalized device coordinates (-1 to 1).
-    mask = (u >= -1) & (u <= 1) & (v >= -1) & (v <= 1) & (z_clip > 0)
+    valid_x = (x_ndc >= -1.0) & (x_ndc <= 1.0)
+    valid_y = (y_ndc >= -1.0) & (y_ndc <= 1.0)
+    valid_z = z_clip > 0
+    mask = valid_x & valid_y & valid_z
 
     # 5. Sample depth and RGB
-    # Reshape to (1, H, W) and (1, H, W, 3) for grid_sample if needed, 
-    # or use appropriate tensor shapes. 
-    # grid_sample expects input (N, C, H, W) or (N, C, H, W, D).
-    # Here we assume single view, so N=1 for the map.
-    depth_map_4d = depth_map.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
-    rgb_map_4d = rgb_map.unsqueeze(0)  # (1, H, W, 3) -> needs adjustment for grid_sample
-    
-    # grid_sample expects coordinates in (N, H_out, W_out, 2)
-    # We have N points. We need to reshape u, v to (1, N, 1, 2)
-    coords = torch.stack([u, v], dim=-1).unsqueeze(0).unsqueeze(2)  # (1, N, 1, 2)
+    # grid_sample expects input (N, C, H, W) and grid (N, H_out, W_out, 2)
+    # We need to reshape for grid_sample
+    # Normalize NDC to [-1, 1] range for grid_sample (already there)
+    # Convert to (1, N, 1, 2) for grid_sample
+    grid = torch.stack([x_ndc, y_ndc], dim=-1).unsqueeze(0).unsqueeze(2)  # (1, N, 1, 2)
     
     # Sample depth
-    sampled_depth = torch.nn.functional.grid_sample(
-        depth_map_4d, coords, mode='bilinear', padding_mode='border', align_corners=False
-    ).squeeze()  # (1, 1, N, 1) -> (N, 1)
+    depth_sampled = torch.nn.functional.grid_sample(
+        depth_map.unsqueeze(0).unsqueeze(0), # (1, 1, H, W)
+        grid,
+        mode='bilinear',
+        padding_mode='border',
+        align_corners=False
+    ).squeeze().squeeze(-1)  # (N, 1)
     
     # Sample RGB
-    # rgb_map needs to be (1, 3, H, W) for grid_sample
-    rgb_map_4d_ch = rgb_map.permute(2, 0, 1).unsqueeze(0)  # (1, 3, H, W)
-    sampled_rgb = torch.nn.functional.grid_sample(
-        rgb_map_4d_ch, coords, mode='bilinear', padding_mode='border', align_corners=False
-    ).squeeze()  # (1, 3, N, 1) -> (N, 3, 1) -> (N, 3)
+    rgb_sampled = torch.nn.functional.grid_sample(
+        rgb_map.permute(2, 0, 1).unsqueeze(0), # (1, 3, H, W)
+        grid,
+        mode='bilinear',
+        padding_mode='border',
+        align_corners=False
+    ).squeeze().permute(1, 0)  # (N, 3)
 
     # 6. Compute SDF
-    sdf = sampled_depth - z_clip.unsqueeze(1)  # (N, 1)
+    sdf = depth_sampled - z_clip.unsqueeze(1)
 
-    return sdf, sampled_rgb, mask
+    return sdf, rgb_sampled, mask
 ```
 
+**Parameters:**
+- `padding_mode`: 'border' is used to handle out-of-bounds coordinates.
+- `align_corners`: False is used for standard grid sampling.
+
 **Edge Cases:**
-- Points with $z_{clip} \le 0$ are masked out.
-- Points outside the image bounds are masked out.
-- Precision issues may arise if $z_{clip}$ is very small; clamping is applied.
+- **Division by Zero**: If $z_{clip} \le 0$, the point is behind the camera or on the near plane. These points are masked out.
+- **Out of Bounds**: Points projecting outside $[-1, 1]$ in NDC space are masked out. Border padding ensures sampling does not return NaN or extreme values for slightly out-of-bounds points, but they are still masked.
 
 ## Subtopics
 
 ### Unbounded TSDF Fusion
-Fuses SDF values from multiple frames in contracted space with adaptive truncation, then uncontracts the space [S1, unofficial]. It differs from standard per-frame computation by integrating multi-view data and handling unbounded scenes via contraction mapping [S1, unofficial]. Choose this when fusing multiple views for a complete reconstruction [S1, unofficial].
-
-**Steps:**
-1. If `inv_contraction` is provided, identify points outside the unit sphere ($||samples|| > 1$).
-2. Set base `sdf_trunc` to $5 \times \text{voxel\_size}$. For points outside the unit sphere, scale truncation by $1/(2-||x||)$. If no `inv_contraction`, set `sdf_trunc` to constant $5 \times \text{voxel\_size}$.
-3. Initialize `tsdfs` to -1 and `rgbs` to 0. Initialize `weights` to 1.
-4. Iterate through `viewpoint_stack`. Call `compute_sdf_perframe` for each view.
-5. Flatten SDF. Update mask to include points where SDF > `-sdf_trunc`.
-6. Normalize SDF by `sdf_trunc`, clamp to $[-1, 1]$. Apply mask.
-7. Update TSDF and RGB using weighted average: $new = (old \times w + val) / (w + 1)$.
-8. Update weights: $w_{new} = w_{old} + 1$.
-9. If `inv_contraction` is provided, uncontract the samples before returning.
+Unbounded TSDF Fusion extends Per-Frame SDF Computation by fusing SDF values from multiple frames in contracted space with adaptive truncation, then uncontracting the space. It differs from standard TSDF fusion by handling points outside the unit sphere using a scaled truncation parameter. It is chosen when reconstructing scenes with large depth ranges or unbounded geometry. The fusion process iterates through a `viewpoint_stack`, calling `compute_sdf_perframe` for each view, normalizing SDF by truncation, and updating the TSDF and RGB using a weighted average. The truncation $sdf\_trunc$ is set to $5 \times voxel\_size$ for points inside the unit sphere, and scaled by $1/(2-||x||)$ for points outside.
 
 ## Operating characteristics
-- **Time Complexity**: Linear in the number of points $N$ and number of views $V$ for fusion.
-- **Memory Complexity**: Linear in $N$ for storing SDF and RGB values.
-- **Strengths**: Efficient per-view evaluation; supports multi-view fusion.
-- **Limitations**: Requires depth and RGB maps; sensitive to projection accuracy.
-- **When to use**: Multi-view reconstruction pipelines.
-- **When not to use**: Single-view rendering without depth buffer.
+- **Time Complexity**: $O(N)$ per frame, where $N$ is the number of points. The dominant operation is the matrix multiplication and bilinear sampling.
+- **Memory Complexity**: $O(N)$ for storing intermediate tensors (clip coordinates, NDC, masks, sampled values).
+- **Strengths**: Efficiently computes geometric consistency for a single view. Integrates seamlessly with multi-view fusion pipelines.
+- **Limitations**: Only considers one view at a time. Does not handle occlusions from other views within the single-frame computation (this is handled in the fusion step).
+- **When to use**: When initializing or updating SDF fields for a specific training view.
+- **When not to use**: When multi-view consistency is required immediately without fusion.
 
 ## Background
-Originated in the context of 2D Gaussian Splatting for novel view synthesis, specifically in the `2d-gaussian-splatting` repository by Inria's GRAPHDECO research group [S1, unofficial]. It is used to fuse multi-view depth information into a consistent SDF representation.
+Per-Frame SDF Computation is part of the 2D Gaussian Splatting pipeline, specifically used in the context of post-processing or refining 3D points using depth information from training views. It originates from the work on 2D Gaussian Splatting by Inria's GRAPHDECO research group.
 
 ## Sources
 [S1] hbb1/2d-gaussian-splatting, https://github.com/hbb1/2d-gaussian-splatting, fetched 2026-10-27 (unofficial)

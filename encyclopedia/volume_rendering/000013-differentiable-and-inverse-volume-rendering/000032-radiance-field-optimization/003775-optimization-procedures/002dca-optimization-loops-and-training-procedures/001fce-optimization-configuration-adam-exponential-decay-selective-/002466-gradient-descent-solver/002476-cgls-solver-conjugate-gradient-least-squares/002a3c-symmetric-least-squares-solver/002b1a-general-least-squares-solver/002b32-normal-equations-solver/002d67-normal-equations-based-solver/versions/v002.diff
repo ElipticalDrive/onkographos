@@ -1,0 +1,137 @@
+--- v001.md
++++ v002.md
+@@ -4,105 +4,53 @@
+ 
+ ## Overview
+-The Normal Equations-based Solver addresses the box-constrained least squares problem $\forall i \in [1,...,n] : 0 \le x_i \le 1$ by formulating it as a quadratic programming (QP) problem [S1, unofficial]. It is distinguished from direct normal equation solvers by its explicit handling of bound constraints via the Alternating Direction Method of Multipliers (ADMM), whereas standard normal equation solvers typically ignore constraints or apply post-hoc truncation [S1, unofficial]. It serves as a robust alternative when the solution space is strictly bounded, such as in opacity or transfer function optimization, though it incurs higher computational overhead than unconstrained methods [S1, unofficial].
++The Normal Equations-based Solver addresses the box-constrained least squares problem $\forall i \in [1,...,n] : 0 \le x_i \le 1$ by formulating it as a quadratic programming (QP) problem [S1, unofficial]. It differs from direct unconstrained solvers by explicitly handling the box constraints, often via the Alternating Direction Method of Multipliers (ADMM), and differs from iterative least-squares solvers (like CGLS) by relying on the explicit construction of the Hessian matrix $Q = A^T A$ [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: Matrix $A \in \mathbb{R}^{m \times n}$ and vector $b \in \mathbb{R}^m$ from the linear system $Ax \approx b$.
+-- Output: Vector $x \in \mathbb{R}^n$ such that $0 \le x_i \le 1$ for all $i$, minimizing the constrained least squares error.
++- Input: Matrix $A$ (size $m \times n$), vector $b$ (size $m$), and constraint bounds $[0, 1]$ for each element of $x$.
++- Output: Vector $x$ (size $n$) minimizing the constrained objective.
+ 
+ **Data Structures:**
+-- The core data structure is the quadratic programming formulation defined by the Hessian matrix $Q$ and linear term vector $c$.
+-- $Q = A^T A \in \mathbb{R}^{n \times n}$.
+-- $c = -A^T b \in \mathbb{R}^n$.
+-- The solver exploits the sparsity of $Q$ if $A$ is sparse [S1, unofficial].
++- The core data structure is the sparse matrix $Q = A^T A$ and vector $c = -A^T b$. The solver exploits the sparsity of $Q$ [S1, unofficial].
+ 
+ **Steps:**
+-1. **Formulate QP Problem:** Compute $Q = A^T A$ and $c = -A^T b$. The objective is to minimize:
+-   $$ \min_x \frac{1}{2} x^T Q x + c^T x $$
+-   subject to $0 \le x_i \le 1$ for all $i \in [1, \dots, n]$ [S1, unofficial].
+-2. **Solve via ADMM:** Use the Alternating Direction Method of Multipliers (ADMM) to solve the convex optimization problem. ADMM decomposes the problem into subproblems that are easier to solve, handling the separable constraint structure [S1, unofficial].
+-3. **Implementation:** Utilize the OSQP (Operator Splitting Quadratic Program) solver library, which supports ADMM and exploits sparsity [S1, unofficial].
+-4. **Constraint Enforcement:** If an unconstrained solver is used instead of ADMM, enforce constraints via truncation:
+-   $$ x'_i = \max(\min(x_i, 1), 0) $$
+-   However, the primary method described uses explicit constrained solving [S1, unofficial].
++1. Construct the quadratic programming parameters:
++   - Compute $Q = A^T A$.
++   - Compute $c = -A^T b$.
++   - The objective is $\min_x \frac{1}{2} x^T Q x + c^T x$ [S1, unofficial].
++2. Solve the constrained QP problem using an ADMM solver (e.g., OSQP) [S1, unofficial].
++   - The ADMM method splits the objective into a data term and a prior term, alternating between subproblems and maintaining a dual variable $u$ to enforce consensus [S1, unofficial].
++   - If the solver returns an unconstrained solution $x'$, enforce constraints via truncation: $x_i = \max(\min(x'_i, 1), 0)$ [S1, unofficial].
++
++**Formulas:**
++- Objective: $\min_x \frac{1}{2} x^T Q x + c^T x$ [S1, unofficial].
++- Hessian: $Q = A^T A$ [S1, unofficial].
++- Linear term: $c = -A^T b$ [S1, unofficial].
++- Constraint enforcement: $x_i = \text{clip}(x'_i, 0, 1)$ [S1, unofficial].
+ 
+ **Parameters:**
+ - Solver: OSQP [S1, unofficial].
+-- Algorithm: ADMM [S1, unofficial].
++- Hardware: CPU implementation is standard; GPU implementation exists but offers no significant speed-up for the small matrix sizes resulting from normal equations [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Ill-conditioning:** The condition number of $Q$ is the square of the condition number of $A$. For large, ill-conditioned systems, this formulation is numerically unstable [S1, unofficial].
+-- **Performance:** While a GPU implementation of OSQP exists, no significant speed-up was observed for the small matrix sizes resulting from normal equations compared to CPU implementations [S1, unofficial].
+-
+-**Pseudocode:**
+-```python
+-def normal_equations_constrained_solver(A, b):
+-    """
+-    Solves box-constrained least squares using Normal Equations and ADMM.
+-    A: Sparse matrix (m x n)
+-    b: Vector (m,)
+-    Returns: x (n,), constrained to [0, 1]
+-    """
+-    # Step 1: Formulate QP problem
+-    # Q = A^T A
+-    Q = A.T @ A
+-    # c = -A^T b
+-    c = -A.T @ b
+-    
+-    # Step 2: Solve using OSQP with ADMM
+-    # OSQP expects the problem in the form:
+-    # min 0.5 * x^T P x + q^T x
+-    # subject to l <= Ax <= u
+-    # Here, P = Q, q = c
+-    # Constraints: 0 <= x <= 1
+-    
+-    import osqp
+-    import scipy.sparse as sp
+-    
+-    # Ensure Q is sparse if A is sparse
+-    if sp.issparse(Q):
+-        P = Q
+-    else:
+-        P = sp.csc_matrix(Q)
+-        
+-    q = c
+-    
+-    # Define constraints
+-    l = np.zeros(len(c))
+-    u = np.ones(len(c))
+-    
+-    # Construct constraint matrix (identity for simple bounds)
+-    M = len(c)
+-    A_con = sp.eye(M, format='csc')
+-    
+-    # Setup OSQP problem
+-    prob = osqp.OSQP()
+-    prob.setup(P=P, q=q, A=A_con, l=l, u=u, verbose=False)
+-    
+-    # Solve
+-    res = prob.solve()
+-    
+-    if res.info.status != 'solved':
+-        raise ValueError("OSQP did not converge to a solution")
+-        
+-    return res.x
+-```
++- Ill-conditioning: The condition number of $Q$ is the square of the condition number of $A$. This makes the method prone to stability issues for large, ill-conditioned systems [S1, unofficial].
++- Convexity: The ordinary least squares problem is convex, as the Hessian $H(x) = 2 A^T A$ is positive semi-definite [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [ADMM Solver](10107-admm-solver.md)
+-A technique to solve minimization problems of the form $\min_x f(x) + g(x)$ with variable $x$ and objectives $f(x)$ and $g(x)$ that are separable. $f(x)$ is a data term measuring goodness of fit, $g(x)$ is a prior term measuring deviation from expectations. It is chosen here for its ability to handle the box constraints efficiently via operator splitting.
++The ADMM Solver is an optimization method for solving separable minimization problems of the form $\min_x f(x) + g(x)$ by splitting the objective into a data term $f(x)$ and a prior term $g(x). It differs from direct solvers by decoupling these terms into alternating subproblems, allowing specialized solvers for each component, and differs from primal-dual methods by explicitly maintaining a dual variable $u$ to enforce consensus between the split variables.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Dominated by the formation of $Q = A^T A$ ($O(mn^2)$ or less if sparse) and the iterative ADMM convergence. Convergence speed depends on the condition number of $Q$, which is poor for ill-conditioned $A$ [S1, unofficial].
+-- **Memory Complexity:** Requires storing $Q$ ($n \times n$). If $A$ is sparse, $Q$ may be denser, increasing memory usage [S1, unofficial].
+-- **Measured Performance:** For the small matrix sizes resulting from normal equations in typical volume rendering applications, no significant speed-up was observed using a GPU implementation of OSQP compared to the CPU implementation [S1, unofficial].
+-- **Strengths:** Explicitly handles box constraints ($0 \le x_i \le 1$) without post-hoc truncation errors; convex formulation guarantees a global minimum [S1, unofficial].
+-- **Limitations:** Numerically unstable for ill-conditioned systems due to squaring of the condition number; potentially slower than unconstrained solvers due to iterative nature [S1, unofficial].
+-- **When to use:** When strict adherence to bounds is required and the system size is small enough that the quadratic condition number does not cause numerical failure.
+-- **When not to use:** For large, ill-conditioned systems where CGLS or other preconditioned methods are preferred [S1, unofficial].
++- **Time Complexity:** Depends on the sparsity of $A$ and the efficiency of the ADMM solver (OSQP). Construction of $Q = A^T A$ is $O(m n^2)$ or less if sparse.
++- **Memory Complexity:** Requires storage for $Q$ ($n \times n$) and $c$ ($n$).
++- **Performance:** For the small size of $A^T A$ resulting from normal equations, no significant speed-up was observed with GPU implementations compared to CPU implementations [S1, unofficial].
++- **Strengths:** Handles box constraints explicitly; leverages sparse solvers.
++- **Limitations:** Prone to stability issues if the matrix is ill-conditioned due to the quadratic condition number [S1, unofficial].
++- **When to use:** When box constraints are required and the system size is small enough to avoid severe ill-conditioning.
++- **When not to use:** For very large, ill-conditioned systems where avoiding $A^T A$ is preferable [S1, unofficial].
+ 
+ ## Background
+-The formulation of least squares as a quadratic programming problem was introduced in the context of transfer function optimization for volume rendering [S1, unofficial]. The use of ADMM for such problems traces back to Boyd et al. [BPC* 11], and the specific implementation relies on the OSQP solver library [SBG* 20]. The approach was evaluated as a reference for handling constraints in RGB*α optimization, noting that while more general QP solvers exist, they share the stability drawbacks of normal equations [S1, unofficial].
++The method is based on formulating box-constrained least squares as a quadratic programming problem, a technique used in opacity optimization approaches [GRT13, AZD17] [S1, unofficial]. The ADMM method was first introduced by Boyd et al. [BPC∗ 11] for solving convex optimization problems [S1, unofficial]. The OSQP solver library [SBG∗ 20] is commonly used for this purpose [S1, unofficial].
+ 
+ ## Sources

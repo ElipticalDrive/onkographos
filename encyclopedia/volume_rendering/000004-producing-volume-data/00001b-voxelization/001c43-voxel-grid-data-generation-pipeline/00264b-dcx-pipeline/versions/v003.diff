@@ -1,0 +1,165 @@
+--- v002.md
++++ v003.md
+@@ -1,8 +1,8 @@
+ # DCX Pipeline
+ 
+-Also called: DCX, Deep Marching Cubes, Deep Marching Cubes Data Pipeline & Mesh Extraction
++Also called: Deep Marching Cubes, Deep Marching Cubes Data Pipeline & Mesh Extraction
+ 
+ ## Overview
+-The DCX Pipeline is a method for converting point clouds or volumetric inputs into explicit surface triangle meshes by learning a discrete topology class and continuous vertex offset for each voxel grid cell, then extracting the mesh via a C++/CUDA extension [S1, S2, unofficial]. It distinguishes itself from direct surface reconstruction methods (like Poisson Reconstruction) by operating on a discrete voxel grid, allowing for explicit control over topology via cube types and enabling supplementary sampling to fill geometric holes [S1, S2, unofficial]. It builds on [Voxel Grid Data Generation Pipeline](1208-voxel-grid-data-generation-pipeline.md).
++The DCX Pipeline is a method for converting point clouds or volumetric inputs into explicit surface triangle meshes by learning a discrete topology class and continuous vertex offset for each voxel grid cell, then extracting the mesh via a C++/CUDA extension [S1, S2, unofficial]. It distinguishes itself from direct surface reconstruction methods (like Poisson Reconstruction) by operating on a discrete voxel grid, allowing for explicit control over topology via cube types and enabling supplementary sampling to fill geometric holes [S1, S2, unofficial]. It builds on [Voxel Grid Data Generation Pipeline](1208-voxel-grid-data-generation-pipeline.md) [S2, unofficial].
+ 
+ ## How it works
+@@ -11,5 +11,5 @@
+ *   Bounding box: 1D array `bbox` of 6 floats `[min_x, min_y, min_z, max_x, max_y, max_z]` [S2, unofficial].
+ *   Resolution: Integer `resolution` specifying the voxel grid resolution per dimension [S2, unofficial].
+-*   Parameters: `enable_thinning` (boolean), `enable_supplementary_sampling` (boolean), `enable_postprocessing` (boolean, typically `False` for margin extraction, `True` for final extraction) [S2, unofficial].
++*   Parameters: `enable_thinning` (boolean), `enable_supplementary_sampling` (boolean), `enable_postprocessing` (boolean, typically `False` for margin extraction and `True` for final extraction) [S2, unofficial].
+ 
+ **Outputs:**
+@@ -30,52 +30,73 @@
+ 
+ **Steps:**
++1.  **points_to_voxels**: Convert input points to voxels [S2, unofficial].
++2.  **get_cube_types**: Compute cube types from voxels [S2, unofficial].
++3.  **thinning**: Run thinning on voxels and cube types (optional, controlled by `enable_thinning`) [S2, unofficial].
++4.  **reconstruction**: Run reconstruction from voxels and cube types [S2, unofficial].
++5.  **filling_holes_prepare**: Prepare hole-filling query points (optional, controlled by `enable_supplementary_sampling`) [S2, unofficial].
++6.  **filling_holes_apply**: Apply selected supplementary points [S2, unofficial].
+ 
+-1.  **points_to_voxels**: Convert input points to voxels.
+-    *   Create 3D grid boundaries: `x_grids = np.arange(0, resolution+1, 1.0)` (and identical for y and z axes, assuming unit cell size or scaled by `args.len_cell` if specified) [S1, unofficial].
+-    *   Assign points to voxel cells based on coordinates [S2, unofficial].
+-    *   Output: `voxel_ids_arr`, `voxel_points_arr`, `orders_arr` [S2, unofficial].
++```python
++def dcx_pipeline(pts, bbox, resolution, enable_thinning, enable_supplementary_sampling, enable_postprocessing):
++    # 1. points_to_voxels
++    x_grids = np.arange(0, resolution + 1, 1.0)
++    y_grids = np.arange(0, resolution + 1, 1.0)
++    z_grids = np.arange(0, resolution + 1, 1.0)
++    voxel_ids_arr, voxel_points_arr, orders_arr = assign_points_to_voxels(pts, x_grids, y_grids, z_grids)
++    
++    # 2. get_cube_types
++    voxels = parse_voxels(voxel_ids_arr, voxel_points_arr)
++    orders = parse_orders(orders_arr)
++    initialize_thinning_context(orders, resolution)
++    cube_types = get_cube_types(voxels)
++    cube_ids_arr, cube_types_arr = serialize_cube_types(cube_types)
++    
++    # 3. thinning
++    if enable_thinning:
++        voxels, cube_types = thinning(voxels, cube_types)
++        voxel_ids_arr, voxel_points_arr = serialize_voxels(voxels)
++        cube_types_arr = serialize_cube_types(cube_types)
++        
++    # 4. reconstruction
++    voxels = parse_voxels(voxel_ids_arr, voxel_points_arr)
++    cube_types = parse_cube_types(cube_ids_arr, cube_types_arr)
++    orders = parse_orders(orders_arr)
++    initialize_thinning_context(orders, resolution)
++    margin_voxels = set()
++    out_vertices = []
++    out_faces = []
++    reconstruction(voxels, cube_types, pattern=0, margin_voxels=margin_voxels, 
++                   enable_postprocessing=enable_postprocessing, 
++                   out_vertices=out_vertices, out_faces=out_faces)
++    vertices, faces = serialize_vertices(out_vertices), serialize_faces(out_faces)
++    
++    # 5. filling_holes_prepare
++    query_points_arr = generate_hole_filling_candidates(voxels, cube_types)
++    
++    # 6. filling_holes_apply
++    if enable_supplementary_sampling:
++        selected_voxel_ids_arr, selected_points_arr = filter_query_points(query_points_arr)
++        added_voxels = parse_voxels(selected_voxel_ids_arr, selected_points_arr)
++        for item in added_voxels:
++            voxels[item.first] = item.second
++        voxel_ids_arr, voxel_points_arr = serialize_voxels(voxels)
++        # Re-run reconstruction if necessary to incorporate new points
++        vertices, faces = reconstruction(voxels, cube_types, pattern=0, 
++                                         enable_postprocessing=enable_postprocessing)
++    return vertices, faces
++```
+ 
+-2.  **get_cube_types**: Compute cube types from voxels.
+-    *   Parse voxels: `auto voxels = parse_voxels(voxel_ids_arr, voxel_points_arr)` [S2, unofficial].
+-    *   Parse orders: `auto orders = parse_orders(orders_arr)` [S2, unofficial].
+-    *   Initialize thinning context: `initialize_thinning_context(orders, resolution)` [S2, unofficial].
+-    *   Compute cube types: `unordered_map<LL, int> cube_types; get_cube_types<LL>(voxels, cube_types)` [S2, unofficial].
+-    *   Serialize: `return serialize_cube_types(cube_types)` [S2, unofficial].
+-    *   Output: `cube_ids_arr`, `cube_types_arr` [S2, unofficial].
++**Formulas:**
++*   Grid boundaries: `x_grids = np.arange(0, args.num_cells+1, args.len_cell)` (and identical for y and z axes) [S1, unofficial].
++*   Cone simulation for incomplete observation: `cone_dir = np.random.uniform(-1, 1, (3, 1))`, normalized; `cone_dist = np.dot(pts_i, cone_dir)`; `cone_radius = (cone_dist / h) * r`; `orth_dist = np.linalg.norm(pts_i - np.dot(cone_dist, cone_dir.transpose()), axis=1)`; mask points where `cone_dist < 0` or `orth_dist > cone_radius` [S1, unofficial].
++*   Vertex deduplication: `vertices_unique, indices = unique_rows(vertices)`, then `faces = faces[indices].reshape((-1, 3))` [S1, unofficial].
+ 
+-3.  **thinning**: Run thinning on voxels and cube types (optional, controlled by `enable_thinning`) [S2, unofficial].
+-    *   Parse inputs: `auto voxels = parse_voxels(voxel_ids_arr, voxel_points_arr); auto cube_types = parse_cube_types(cube_ids_arr, cube_types_arr); auto orders = parse_orders(orders_arr)` [S2, unofficial].
+-    *   Initialize context: `initialize_thinning_context(orders, resolution)` [S2, unofficial].
+-    *   Run thinning: `thinning<LL>(voxels, cube_types)` [S2, unofficial].
+-    *   Serialize outputs: `auto voxels_out = serialize_voxels(voxels); auto cube_types_out = serialize_cube_types(cube_types)` [S2, unofficial].
+-    *   Return: `py::make_tuple(voxels_out[0], voxels_out[1], cube_types_out[0], cube_types_out[1])` [S2, unofficial].
+-    *   Update `voxel_ids_arr`, `voxel_points_arr`, `cube_types_arr` with thinned results [S2, unofficial].
+-
+-4.  **reconstruction**: Run reconstruction from voxels and cube types.
+-    *   Parse inputs: `auto voxels = parse_voxels(voxel_ids_arr, voxel_points_arr); auto cube_types = parse_cube_types(cube_ids_arr, cube_types_arr); auto orders = parse_orders(orders_arr)` [S2, unofficial].
+-    *   Initialize context: `initialize_thinning_context(orders, resolution)` [S2, unofficial].
+-    *   Run reconstruction: `reconstruction<LL>(voxels, cube_types, pattern, margin_voxels, enable_postprocessing, out_vertices, out_faces)` [S2, unofficial].
+-        *   `pattern`: Integer pattern identifier (e.g., 0) [S2, unofficial].
+-        *   `margin_voxels`: `unordered_set<LL>` for margin voxels [S2, unofficial].
+-        *   `enable_postprocessing`: Boolean flag [S2, unofficial].
+-        *   `out_vertices`: `vector<vector<float>>` for output vertices [S2, unofficial].
+-        *   `out_faces`: `vector<vector<LL>>` for output faces [S2, unofficial].
+-    *   Serialize outputs: `return py::make_tuple(serialize_voxel_set(margin_voxels), serialize_vertices(out_vertices), serialize_faces(out_faces))` [S2, unofficial].
+-    *   Output: `vertices`, `faces` [S2, unofficial].
+-    *   **Pitfall**: If `num_vertices[0] == 0` after mesh extraction, the function returns early to prevent plotting or saving empty meshes [S1, unofficial].
+-
+-5.  **filling_holes_prepare**: Prepare hole-filling query points (optional, controlled by `enable_supplementary_sampling`) [S2, unofficial].
+-    *   This step generates candidate query points for hole filling.
+-    *   The legacy `filling_holes()` function is disabled and throws a runtime error if called directly; users must use `filling_holes_prepare()` followed by `filling_holes_apply()` [S2, unofficial].
+-    *   The pipeline separates hole filling into two steps to allow for external filtering (`hole_query_fn`) between candidate generation and application [S2, unofficial].
+-    *   Output: `query_points_arr` [S2, unofficial].
+-
+-6.  **filling_holes_apply**: Apply selected supplementary points [S2, unofficial].
+-    *   Parse inputs: `auto voxels = parse_voxels(voxel_ids_arr, voxel_points_arr); auto added_voxels = parse_voxels(selected_voxel_ids_arr, selected_points_arr)` [S2, unofficial].
+-    *   Merge added voxels: `for (const auto &item : added_voxels) { voxels[item.first] = item.second; }` [S2, unofficial].
+-    *   Serialize outputs: `auto voxels_out = serialize_voxels(voxels); auto added_voxels_out = serialize_voxels(added_voxels)` [S2, unofficial].
+-    *   Return: `py::make_tuple(voxels_out[0], voxels_out[1], added_voxels_out[0], added_voxels_out[1])` [S2, unofficial].
+-    *   Update `voxel_ids_arr`, `voxel_points_arr` with supplementary points [S2, unofficial].
+-    *   Re-run **reconstruction** if necessary to incorporate new points [S2, unofficial].
++**Parameters:**
++*   `args.num_cells`: Voxel grid resolution per dimension. Default toy example uses 8 [S1, unofficial].
++*   `args.bias_level`: Ratio controlling virtual cone removal extent, where cone radius `r = args.num_cells * args.bias_level` [S1, unofficial].
++*   `args.noise`: Multiplier for Gaussian point noise standard deviation, scaled by `args.num_cells/2` [S1, unofficial].
++*   `args.encoder_type`: Input modality selector, either `'point'` (point cloud) or `'voxel'` (TSDF/binary occupancy grid) [S1, unofficial].
++*   `resolution`: Integer parameter specifying the voxel grid resolution, passed to `points_to_voxels`, `get_cube_types`, `thinning`, `reconstruction`, and `filling_holes_prepare` [S2, unofficial].
++*   `enable_postprocessing`: Boolean parameter for reconstruction, typically set to `False` during margin extraction and likely `True` for final extraction [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -83,4 +104,5 @@
+ *   When `args.bias_level > 0.0`, removed points are padded to a fixed maximum length matrix `pts_removed_mtx` to maintain batch dimensions, filled with `-1` if fewer than max were removed [S1, unofficial].
+ *   If `num_vertices[0] == 0` after mesh extraction, the function returns early to prevent plotting or saving empty meshes [S1, unofficial].
++*   The legacy `filling_holes()` function is disabled and throws a runtime error if called directly; users must use `filling_holes_prepare()` followed by `filling_holes_apply()` [S2, unofficial].
+ 
+ ## Subtopics
+@@ -90,8 +112,8 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Not given in the sources.
+-*   **Memory Complexity**: Not given in the sources.
+-*   **Measured Performance**: Not given in the sources.
+-*   **Scaling**: Not given in the sources.
++*   **Time Complexity**: Not given in the sources [S1, S2, unofficial].
++*   **Memory Complexity**: Not given in the sources [S1, S2, unofficial].
++*   **Measured Performance**: Not given in the sources [S1, S2, unofficial].
++*   **Scaling**: Not given in the sources [S1, S2, unofficial].
+ *   **Strengths**: Explicit control over topology via cube types; enables supplementary sampling to fill geometric holes; separates hole filling into prepare and apply steps for external filtering [S1, S2, unofficial].
+ *   **Limitations**: Requires voxelization; dependent on resolution; legacy hole filling function is disabled [S1, S2, unofficial].
+@@ -100,5 +122,5 @@
+ 
+ ## Background
+-The DCX Pipeline originates from the "Deep Marching Cubes: Learning Explicit Surface Representations" paper by Yiyi Liao, Simon Donne, and Andreas Geiger, published at CVPR 2018 [S1, unofficial]. It was developed by the Autonomous Vision Group at the Max Planck Institute for Intelligent Systems [S1, unofficial]. The pipeline is implemented in the `deep_marching_cubes` repository [S1, unofficial] and later extended in the `DCx` repository [S2, unofficial]. It is used in `evaluate_finetune.py` for mesh extraction from points, with optional thinning and supplementary sampling (hole filling) [S2, unofficial].
++The DCX Pipeline originates from the "Deep Marching Cubes: Learning Explicit Surface Representations" paper by Yiyi Liao, Simon Donn\'{e}, and Andreas Geiger, published at CVPR 2018 [S1, unofficial]. It was developed by the Autonomous Vision Group at the Max Planck Institute for Intelligent Systems [S1, unofficial]. The pipeline is implemented in the `deep_marching_cubes` repository [S1, unofficial] and later extended in the `DCx` repository [S2, unofficial]. It is used in `evaluate_finetune.py` for mesh extraction from points, with optional thinning and supplementary sampling (hole filling) [S2, unofficial].
+ 
+ ## Sources

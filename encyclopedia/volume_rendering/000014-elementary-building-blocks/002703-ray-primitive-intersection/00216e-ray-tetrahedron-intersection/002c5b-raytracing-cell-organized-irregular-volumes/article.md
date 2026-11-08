@@ -18,21 +18,21 @@ This method enables efficient ray traversal through irregular volumetric dataset
 
 **Data Structures:**
 - **Cell:** Contains vertex indices and material properties [G].
-- **Face:** Defined by three vertex indices $(a, b, c)$. Stores the precomputed normal vector $N = Ab \times Ac$, where $Ab = b - a$ and $Ac = c - a$ [S1]. Stores adjacency: a list of neighbor cell indices. If the list is empty, the face is an exposed boundary [S1].
+- **Face:** Defined by three vertex indices $(a, b, c)$. Stores the precomputed normal vector $N = Ab \times Ac$, where $Ab = b - a$ and $Ac = c - a$ [S1]. Stores adjacency: a list of neighbor cell indices [S1]. If the list is empty, the face is an exposed boundary [S1].
 - **Adjacency Map:** Hash map or array linking Face ID to Neighbor Cell IDs [G].
 
 **Algorithm Steps:**
 
-1. **Initial Intersection:** Intersect the ray against all exposed faces of the dataset to find the first entry point. Select the face with the smallest positive intersection parameter $t$. If no intersection is found, the ray misses the volume [S1].
+1. **Initial Intersection:** Intersect the ray against all exposed faces of the dataset to find the first entry point [S1]. Select the face with the smallest positive intersection parameter $t$ [S1]. If no intersection is found, the ray misses the volume [S1].
 
 2. **Cell Traversal Loop:** While the ray has not exited the dataset:
    a. **Identify Current Cell:** Determine the cell containing the current intersection point [S1].
    b. **Intersect Cell Faces:** For each of the four faces of the current tetrahedral cell (or six for hexahedra), compute the intersection parameter $t_{face}$ using the plane intersection formula [S1].
    c. **Verify Face Containment:** For each candidate face with a positive $t_{face} > t_{current}$, verify if the intersection point lies within the triangular face boundaries using barycentric coordinates [S1].
    d. **Select Exit Face:** Choose the face with the smallest valid $t_{face}$ [S1].
-   e. **Check Adjacency:** If the selected face has a neighbor cell, update the current cell to the neighbor and repeat step 2. If the selected face has no neighbor (exposed face), the ray has exited the current connected component. Proceed to Step 3 [S1].
+   e. **Check Adjacency:** If the selected face has a neighbor cell, update the current cell to the neighbor and repeat step 2 [S1]. If the selected face has no neighbor (exposed face), the ray has exited the current connected component [S1]. Proceed to Step 3.
 
-3. **Re-entry Check (Concavity Handling):** Since irregular volumes can be concave, the ray may re-enter the dataset. Intersect the ray against all exposed faces again. Find the face with the smallest positive $t_{face}$ that is greater than the current exit $t$. If found, update the current cell to the neighbor of this new entry face and resume Step 2. If no such face exists, the ray has fully exited the dataset [S1].
+3. **Re-entry Check (Concavity Handling):** Since irregular volumes can be concave, the ray may re-enter the dataset [S1]. Intersect the ray against all exposed faces again [S1]. Find the face with the smallest positive $t_{face}$ that is greater than the current exit $t$ [S1]. If found, update the current cell to the neighbor of this new entry face and resume Step 2 [S1]. If no such face exists, the ray has fully exited the dataset [S1].
 
 **Formulas:**
 
@@ -42,14 +42,14 @@ $$ t = \frac{(Ab \times Ac) \cdot a - (Ab \times Ac) \cdot d}{(Ab \times Ac) \cd
 where $Ab = b - a$ and $Ac = c - a$. The cross product $N = Ab \times Ac$ is precomputed and stored with the face [S1].
 
 *Point-in-Triangle Test:*
-To verify if the intersection point $P = d + t c$ lies inside the triangle defined by $a, b, c$ with ray direction $e$ (where $e$ is the normalized ray direction $c$):
+To verify if an intersection point lies inside the triangle defined by $a, b, c$ and ray direction $e$ (where $e$ is the normalized ray direction $c$):
 $$ u = \frac{(Ac \times e) \cdot d - (Ac \times e) \cdot a}{(Ac \times e) \cdot b} $$
 $$ v = \frac{(Ab \times e) \cdot d - (Ab \times e) \cdot a}{(Ab \times e) \cdot c} $$
-The point is inside the face if $u > 0$, $v > 0$, and $u + v < 1$ [S1].
+The point is inside the face if $u > 0$, $v > 0$, and $u + v < 1$ [S1]. Note: the source notation uses $d$ in the numerator to represent the intersection point being tested.
 
 **Degenerate Cases:**
-- **Coincident Vertices:** If a tetrahedron has two coincident vertices, two faces have zero area. These faces are ignored. If the ray enters through a non-degenerate face, it exits through the other non-degenerate face. The distance difference $dt = 0$, so no integration is required [S1].
-- **Planar Tetrahedron:** If a tetrahedron is planar (no coincident vertices but zero volume), all face intersection distances are identical. The ray passes through the interior of two specific triangular faces (entry and exit). $dt = 0$, so no integration is required [S1].
+- **Coincident Vertices:** If a tetrahedron has two coincident vertices, two faces have zero area [S1]. These faces are ignored [S1]. If the ray enters through a non-degenerate face, it exits through the other non-degenerate face [S1]. The distance difference $dt = 0$, so no integration is required [S1].
+- **Planar Tetrahedron:** If a tetrahedron is planar (no coincident vertices but zero volume), all face intersection distances are identical [S1]. The ray passes through the interior of two specific triangular faces (entry and exit) [S1]. $dt = 0$, so no integration is required [S1].
 
 **Pseudocode:**
 
@@ -60,12 +60,12 @@ def raytrace_irregular_volume(ray_origin, ray_direction, volume_data):
     """
     ray_origin: vector d
     ray_direction: vector c
-    volume_data: object containing cells, faces, and adjacency map
+    volume_data: object containing cells, faces, adjacency map, and exposed_faces list
     """
     current_t = 0.0
-    current_cell = None
     epsilon = 1e-9
     infinity = float('inf')
+    visited_cells = []
     
     # Step 1: Initial Entry
     entry_face = None
@@ -87,8 +87,9 @@ def raytrace_irregular_volume(ray_origin, ray_direction, volume_data):
         return [] # Ray misses volume
     
     current_t = min_t
-    current_cell = entry_face.neighbors[0]
-    visited_cells = [current_cell]
+    # Get the cell associated with the entry face [G]
+    current_cell = volume_data.face_to_cell[entry_face.id]
+    visited_cells.append(current_cell)
     
     while True:
         # Step 2: Traverse current cell
@@ -113,7 +114,7 @@ def raytrace_irregular_volume(ray_origin, ray_direction, volume_data):
         
         if exit_face is None:
             break # Should not happen in valid convex cell
-        
+            
         current_t = min_t
         
         # Check adjacency
@@ -136,7 +137,7 @@ def raytrace_irregular_volume(ray_origin, ray_direction, volume_data):
             
             if re_entry_face is not None:
                 current_t = re_min_t
-                current_cell = re_entry_face.neighbors[0]
+                current_cell = volume_data.face_to_cell[re_entry_face.id]
                 visited_cells.append(current_cell)
                 continue
             else:
@@ -150,6 +151,7 @@ def raytrace_irregular_volume(ray_origin, ray_direction, volume_data):
                     break
             
             if next_cell is None:
+                # Fallback re-entry check if neighbor lookup fails
                 re_entry_face = None
                 re_min_t = infinity
                 for face in volume_data.exposed_faces:
@@ -167,7 +169,7 @@ def raytrace_irregular_volume(ray_origin, ray_direction, volume_data):
                 
                 if re_entry_face is not None:
                     current_t = re_min_t
-                    current_cell = re_entry_face.neighbors[0]
+                    current_cell = volume_data.face_to_cell[re_entry_face.id]
                     visited_cells.append(current_cell)
                     continue
                 else:
@@ -177,7 +179,6 @@ def raytrace_irregular_volume(ray_origin, ray_direction, volume_data):
             visited_cells.append(current_cell)
             
             # Integration step would occur here using current_cell and previous_t
-            # previous_t = current_t (before update)
             
     return visited_cells
 
@@ -186,7 +187,7 @@ def is_point_in_triangle(point, a, b, c, ray_dir):
     Ac = c - a
     e = ray_dir
     
-    # Formula from [S1]
+    # Formula from [S1] (source uses d for the intersection point in numerator)
     denom_u = dot(cross(Ac, e), b)
     if abs(denom_u) < 1e-9: return False
     u = (dot(cross(Ac, e), point) - dot(cross(Ac, e), a)) / denom_u
@@ -199,16 +200,16 @@ def is_point_in_triangle(point, a, b, c, ray_dir):
 ```
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Measured Performance:** Not given in the sources.
-- **Scaling:** Not given in the sources.
+- **Time Complexity:** Not given in the sources [S1].
+- **Memory Complexity:** Not given in the sources [S1].
+- **Measured Performance:** Not given in the sources [S1].
+- **Scaling:** Not given in the sources [S1].
 - **Strengths:** Efficient for irregular meshes; avoids redundant intersection tests by following connectivity; handles concave volumes via re-entry logic [S1].
 - **Limitations:** Requires precomputed adjacency data; degenerate cells require special handling; re-entry checks can be expensive if the surface is complex [S1].
 - **When to use:** Ideal for unstructured grid volumes (e.g., finite element analysis data) where regular grid traversal is not applicable [S1].
 
 ## Background
-This method was introduced by [S1] as a technique for raytracing irregular volume data. It addresses the limitations of regular grid traversal when applied to unstructured meshes. The approach relies on the geometric properties of the cells (tetrahedra or hexahedra) and their adjacency relationships. For hexahedra, if symmetric tessellation is not possible, the method suggests subdividing each hexahedron into twenty-four tetrahedra by adding a vertex at the center of each face [S1].
+This method was introduced by [S1] as a technique for raytracing irregular volume data. It addresses the limitations of regular grid traversal when applied to unstructured meshes [S1]. The approach relies on the geometric properties of the cells (tetrahedra or hexahedra) and their adjacency relationships [S1]. For hexahedra, if symmetric tessellation is not possible, the method suggests subdividing each hexahedron into twenty-four tetrahedra by adding a vertex at the center of each face [S1].
 
 ## Sources
 [S1] Raytracing irregular volume data, https://doi.org/10.1145/99307.99316, fetched 2026-10-25

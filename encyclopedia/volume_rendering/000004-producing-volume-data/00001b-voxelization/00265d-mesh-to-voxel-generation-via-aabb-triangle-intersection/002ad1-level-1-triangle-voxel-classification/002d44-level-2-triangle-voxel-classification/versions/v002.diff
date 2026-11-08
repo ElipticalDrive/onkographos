@@ -1,0 +1,161 @@
+--- v001.md
++++ v002.md
+@@ -1,7 +1,7 @@
+ # Level 2 Triangle-Voxel Classification
+-Also called: CUDAClassifyTessellationLevel2Kernel, Level 2 Inside/Outside Determination
++Also called: CUDAClassifyTessellationLevel2Kernel
+ 
+ ## Overview
+-Refines the coarse triangle classification from Level 1 into a finer 3D voxel grid by re-evaluating triangle overlaps and determining inside/outside status for sub-voxels [S1, unofficial]. It builds on [Level 1 Triangle-Voxel Classification](4872-level-1-triangle-voxel-classification.md) by using Level 1 results to limit the search space, processing each Level 2 box against only the triangles assigned to its parent Level 1 box [S1, unofficial]. Unlike Level 1, which maps vertices to coarse indices, Level 2 computes precise geometric intersections (overlap or ray casting) within the finer grid to resolve topology [S1, unofficial].
++Refines the coarse triangle classification from Level 1 into a finer 3D voxel grid by re-evaluating triangle overlaps and determining inside/outside status for sub-voxels [S1, unofficial]. It builds on [Level 1 Triangle-Voxel Classification](4872-level-1-triangle-voxel-classification.md) by using Level 1 results to limit the search space, processing each Level 2 box against only the triangles assigned to its parent Level 1 box [S1, unofficial]. Unlike Level 1, which maps vertices to coarse indices, Level 2 computes precise geometric intersections (ray casting) within the finer grid to resolve topology [S1, unofficial].
+ 
+ ## How it works
+@@ -19,81 +19,96 @@
+ 
+ **Algorithm Steps:**
+-1.  Each thread `b` processes one Level 2 box.
++1.  Each thread `b` processes one Level 2 box [S1, unofficial].
+ 2.  Retrieve the parent Level 1 box index: `level1BoxIndex = level2IndexCUDAData[b]` [S1, unofficial].
+ 3.  Get the number of triangles in the parent box: `numTriangles = voxelTriCountCUDAData[level1BoxIndex]` [S1, unofficial].
+ 4.  Get the starting index in the flat triangle list: `localIndex = level1TriFlatIndexCUDAData[level1BoxIndex]` [S1, unofficial].
+-5.  Retrieve the Level 1 box center: `midPoint = level1MidPointCUDAData[b * 3 : b * 3 + 3]` [S1, unofficial].
++5.  Retrieve the Level 1 box center: `midPoint.x = level1MidPointCUDAData[b * 3 + 0]`, `midPoint.y = level1MidPointCUDAData[b * 3 + 1]`, `midPoint.z = level1MidPointCUDAData[b * 3 + 2]` [S1, unofficial].
+ 6.  Compute the Level 2 box coordinates `(p, q, r)` from the global Level 2 box index `localBoxIndex`:
+-    *   `r = localBoxIndex / (numDiv2.x * numDiv2.y)`
+-    *   `pqIndex = localBoxIndex - (r * numDiv2.x * numDiv2.y)`
+-    *   `q = pqIndex / numDiv2.x`
+-    *   `p = pqIndex % numDiv2.x`
+-    [S1, unofficial]
++    *   `r = localBoxIndex / (numDiv2.x * numDiv2.y)` [S1, unofficial]
++    *   `pqIndex = localBoxIndex - (r * numDiv2.x * numDiv2.y)` [S1, unofficial]
++    *   `q = pqIndex / numDiv2.x` [S1, unofficial]
++    *   `p = pqIndex % numDiv2.x` [S1, unofficial]
+ 7.  Compute the Level 2 box midpoint `boxMidPoint`:
+-    *   `boxMidPoint.x = (2 * p + 1) * boxExtentsLevel2.x + midPoint.x - boxExtentsLevel1.x`
+-    *   `boxMidPoint.y = (2 * q + 1) * boxExtentsLevel2.y + midPoint.y - boxExtentsLevel1.y`
+-    *   `boxMidPoint.z = (2 * r + 1) * boxExtentsLevel2.z + midPoint.z - boxExtentsLevel1.z`
+-    [S1, unofficial]
++    *   `boxMidPoint.x = (2 * p + 1) * boxExtentsLevel2.x + midPoint.x - boxExtentsLevel1.x` [S1, unofficial]
++    *   `boxMidPoint.y = (2 * q + 1) * boxExtentsLevel2.y + midPoint.y - boxExtentsLevel1.y` [S1, unofficial]
++    *   `boxMidPoint.z = (2 * r + 1) * boxExtentsLevel2.z + midPoint.z - boxExtentsLevel1.z` [S1, unofficial]
+ 8.  Iterate through each triangle `t` in the Level 1 box (from `localIndex` to `localIndex + numTriangles`):
+     a. Extract vertices `v0, v1, v2` from `trianglesCUDAData` [S1, unofficial].
+-    b. Check for overlap between the triangle and the Level 2 box using `TriBoxOverlapCUDA` [S1, unofficial].
+-    c. If overlapping, compute the face normal:
+-       *   `e01 = v1 - v0`
+-       *   `e02 = v2 - v0`
+-       *   `faceNormal = normalize(cross(e01, e02))`
+-       [S1, unofficial]
+-    d. Add the point and normal to the Level 2 voxel buffer via `AddPointNormalToVoxelLevel2` [S1, unofficial].
++    b. Check for intersection between the triangle and a ray from the voxel center along the Z-axis using `TriRayIntersectCUDA` [S1, unofficial].
++    c. If intersecting, increment `numIntersections`. If `numIntersections % 2 == 1`, mark the voxel as inside via `AddPointToVoxelLevel2` [S1, unofficial].
++    d. For normal computation, calculate edge vectors `e01 = v1 - v0` and `e02 = v2 - v0`, then compute `faceNormal = normalize(cross(e01, e02))` [S1, unofficial].
++    e. Add the point and normal to the Level 2 voxel buffer via `AddPointNormalToVoxelLevel2` [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ def classify_level_2(triangles, level1_midpoints, level1_tri_counts, level1_tri_flat_indices, level1_tri_flat, level2_to_level1_map, num_div2, box_extents_l1, box_extents_l2, num_level2_boxes):
+-    # Output buffers
+     level2_normals = [None] * num_level2_boxes
+     level2_inside = [False] * num_level2_boxes
+ 
+     for b in range(num_level2_boxes):
+-        # 1. Retrieve parent Level 1 box info
+         level1_box_idx = level2_to_level1_map[b]
+         num_tris = level1_tri_counts[level1_box_idx]
+         local_idx = level1_tri_flat_indices[level1_box_idx]
+-        mid_point = level1_midpoints[b * 3 : b * 3 + 3]
++        mid_point = [level1_midpoints[b * 3 + 0], level1_midpoints[b * 3 + 1], level1_midpoints[b * 3 + 2]]
+ 
+-        # 2. Compute Level 2 box coordinates (p, q, r)
+-        # Assuming localBoxIndex is b for simplicity in this global loop context
+-        r = b // (num_div2.x * num_div2.y)
+-        pq_index = b - (r * num_div2.x * num_div2.y)
+-        q = pq_index // num_div2.x
+-        p = pq_index % num_div2.x
++        r = b // (num_div2[0] * num_div2[1])
++        pq_index = b - (r * num_div2[0] * num_div2[1])
++        q = pq_index // num_div2[0]
++        p = pq_index % num_div2[0]
+ 
+-        # 3. Compute Level 2 box midpoint
+         box_mid = [
+-            (2 * p + 1) * box_extents_l2.x + mid_point.x - box_extents_l1.x,
+-            (2 * q + 1) * box_extents_l2.y + mid_point.y - box_extents_l1.y,
+-            (2 * r + 1) * box_extents_l2.z + mid_point.z - box_extents_l1.z
++            (2 * p + 1) * box_extents_l2[0] + mid_point[0] - box_extents_l1[0],
++            (2 * q + 1) * box_extents_l2[1] + mid_point[1] - box_extents_l1[1],
++            (2 * r + 1) * box_extents_l2[2] + mid_point[2] - box_extents_l1[2]
+         ]
+ 
+-        # 4. Iterate Level 1 triangles
++        num_intersections = 0
+         for i in range(num_tris):
+             tri_idx = level1_tri_flat[local_idx + i]
+-            # Extract vertices (9 floats per triangle)
+             v0 = [triangles[tri_idx * 9], triangles[tri_idx * 9 + 1], triangles[tri_idx * 9 + 2]]
+             v1 = [triangles[tri_idx * 9 + 3], triangles[tri_idx * 9 + 4], triangles[tri_idx * 9 + 5]]
+             v2 = [triangles[tri_idx * 9 + 6], triangles[tri_idx * 9 + 7], triangles[tri_idx * 9 + 8]]
+ 
+-            # 5. Check overlap
+-            if tri_box_overlap(v0, v1, v2, box_mid, box_extents_l2):
+-                # 6. Compute normal
+-                e01 = [v1[j] - v0[j] for j in range(3)]
+-                e02 = [v2[j] - v0[j] for j in range(3)]
+-                normal = normalize(cross(e01, e02))
+-                level2_normals[b] = normal
+-                level2_inside[b] = True # Simplified: presence implies inside for this variant
++            if tri_ray_intersect(v0, v1, v2, box_mid, [0, 0, 1]):
++                num_intersections += 1
++
++        if num_intersections % 2 == 1:
++            level2_inside[b] = True
++
++        e01 = [v1[j] - v0[j] for j in range(3)]
++        e02 = [v2[j] - v0[j] for j in range(3)]
++        level2_normals[b] = normalize(cross(e01, e02))
+ 
+     return level2_inside, level2_normals
+ 
+-def tri_box_overlap(v0, v1, v2, box_mid, box_extents):
+-    # Placeholder for TriBoxOverlapCUDA logic
+-    # Returns True if triangle intersects the box centered at box_mid with size box_extents
+-    return True # [G] Implementation detail omitted in source, assumed to exist
++def tri_ray_intersect(v0, v1, v2, origin, direction):
++    # Standard Möller–Trumbore ray-triangle intersection [G]
++    e01 = [v1[j] - v0[j] for j in range(3)]
++    e02 = [v2[j] - v0[j] for j in range(3)]
++    h = cross(direction, e02)
++    a = dot(e01, h)
++    if a > -1e-6 and a < 1e-6:
++        return False
++    f = 1.0 / a
++    s = [origin[j] - v0[j] for j in range(3)]
++    u = f * dot(s, h)
++    if u < 0.0 or u > 1.0:
++        return False
++    q = cross(s, e01)
++    v = f * dot(direction, q)
++    if v < 0.0 or u + v > 1.0:
++        return False
++    return True
++
++def cross(a, b):
++    return [a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]]
++
++def dot(a, b):
++    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
++
++def normalize(v):
++    mag = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
++    if mag == 0: return [0, 0, 0]
++    return [v[0]/mag, v[1]/mag, v[2]/mag]
+ ```
+ 
+@@ -119,5 +134,5 @@
+ 
+ ## Background
+-Originated in the GPView project by idealab-isu, implemented as a CUDA kernel for real-time volume rendering tessellation [S1, unofficial]. It extends the coarse voxelization method to provide detailed surface representation for volume rendering pipelines [S1, unofficial].
++The method is implemented in the GPView project as a CUDA kernel for volume rendering tessellation [S1, unofficial]. It extends the coarse voxelization method to provide detailed surface representation for volume rendering pipelines [S1, unofficial].
+ 
+ ## Sources

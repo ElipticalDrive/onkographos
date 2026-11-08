@@ -1,0 +1,372 @@
+Tracks #93. @pch asked for a plan here to work from rather than in the thread. A .cube 3D LUT is mostly a solved problem in this tree already: src/camera_profiles/rgb_table.rs does tetrahedral interpolation "as the DNG SDK does", on the ...
+
+3D LUT support (.cube) · Issue #202 · pch/rawmakase · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+3D LUT support (.cube) #202
+New issue
+Copy link
+New issue
+Copy link
+Closed as not planned
+Closed as not planned
+3D LUT support (.cube)#202
+Copy link
+Description
+lukewalker2010
+opened on Oct 5, 2026
+Issue body actions
+Tracks #93. @pch asked for a plan here to work from rather than in the thread.
+A .cube 3D LUT is mostly a solved problem in this tree already:
+src/camera_profiles/rgb_table.rs does tetrahedral interpolation "as the DNG SDK does", on the
+CPU and in the GPU shader, agreeing within 0.0007 of the output range, and Adobe's own 3D RGB
+tables (up to 64 divisions per side) already go through it after the colour mixer. A 17³ or 33³
+cube is comfortably inside what already works; 65³ is 274,625 entries, about 3.3 MB as f32.
+What is missing is .cube parsing, a user-facing LUT that is not an Adobe look, a strength
+control, a way to browse and choose one, and persistence.
+1. Parse .cube and apply it on the CPU.
+LUT_3D_SIZE, DOMAIN_MIN/DOMAIN_MAX, TITLE, LUT_3D_INPUT_RANGE,
+LUT_3D_OUTPUT_RANGE.
+Tetrahedral interpolation, reusing the approach in rgb_table.rs.
+Strength 0–1, blending between the untouched pixel and the looked-up one.
+The application point is one function, so the placement below is a single-line change
+if it turns out to be wrong.
+2. Tests that need no reference render. This is what makes step 1 reviewable on its own.
+An identity cube produces bit-identical output.
+A known cube hits exactly at its grid nodes.
+DOMAIN_MIN/DOMAIN_MAX away from 0/1, and values outside the domain clamp.
+Tetrahedral results agree with the existing rgb_table path.
+Strength 0 is an exact no-op.
+A 1D-only cube (LUT_1D_SIZE) is refused with a clear message.
+3. GPU parity. Reuse the rgb_table shader plumbing; CPU and GPU agree to the same
+tolerance the existing tables hold (0.0007).
+4. Browser and library. List .cube files from a folder and from custom folders,
+enable/disable, a strength slider, Visualize-style preview if it turns out to be wanted.
+5. Persistence. The LUT and its strength in the recipe, in presets, and written to
+XMP; applied at export because the recipe carries it.
+6. Importing edits that already carry a .cube look. Investigate the XMP form first —
+it may embed the whole cube, in which case this is a large read and write and should be sized
+before it is started.
+Placement, and what is not being claimed
+A .cube carries no primaries, so it is conventionally authored in a display space, usually
+gamma-encoded sRGB. Step 1 applies it in gamma-encoded sRGB, after grading and the user's
+master curve and before the final per-channel gamut clip. That is what #93 asks for (the last
+creative stage, after the colour corrections), and clipping after the lookup keeps a LUT that
+pushes colour out of sRGB inside the display range the way new edits already do.
+This is reasoned from the format and the pipeline, not measured against Camera Raw, and the
+issue says so. Steps 1–3 are "RAWmakase applies .cube files correctly and provably". Parity with
+Camera Raw's own .cube handling is a separate, later question: it needs ACR's exact placement and
+encoding, which is measurement work and not claimed here.
+Out of scope
+1D .cube files, and .cube variants other than the Adobe spec.
+Authoring or editing LUTs in the app.
+Colour-managed application into arbitrary working spaces.
+Baking a LUT into a DNG.
+Any claim about Camera Raw parity.
+Notes for whoever picks a step up
+PRs should reference this issue, as with Export several photos at once #174.
+main moves quickly; rebase before starting and check whether a later merge has already moved
+the pipeline stage this applies at.
+The chromatic-abrasion-style trap applies here: a plausible placement that looks right can
+still be wrong, and nothing local will say so. Keep step 1 free of placement assumptions so the
+choice stays visible and cheap to reverse.
+Activity
+lukewalker2010 commented on Oct 5, 2026
+lukewalker2010
+on Oct 5, 2026
+ContributorAuthor
+More actions
+A correction to the placement I wrote above, found by reading finish_color properly rather than
+from the pipeline summary. Nothing is built on the wrong version — #204 is the reader and the
+lookup, and renders nothing — but the reasoning was wrong in the part that makes it actionable.
+I wrote:
+apply it in gamma-encoded sRGB, after grading and the user's master curve and before the
+final per-channel gamut clip.
+There is no gamut clip after the encode. The order in finish_color is:
+grade in Oklab, then lab_to_srgb — linear sRGB, values outside it survive;
+r.gamut_model.into_srgb(rgb, lab[0]) — the per-channel clip, still in linear light
+(GamutModel::Clip is literally rgb.map(|v| v.clamp(0., 1.)));
+srgb_encode — the transfer function, so from here it is encoded;
+encoded.clamp(0., 1.) on engine 4, or apply_curve on engine 3.
+So the clip I said the LUT would sit in front of happens before the encode, and step 4 is a
+plain clamp rather than a gamut clip. "After the user's master curve" was loose too: on engine 4
+there is no per-channel curve at that point, only the clamp.
+Corrected placement: apply to the encoded value at the end of finish_color, after
+srgb_encode and the clamp. That is still the last creative stage in the colour path, which is
+what #93 asks for, and it is still gamma-encoded, which is the space a .cube is conventionally
+authored in. It is simply later in the function than I said.
+Two consequences worth deciding rather than inheriting:
+Nothing re-clamps afterwards. A cube that deliberately pushes a channel past 0 or 1 will
+keep it there into quantization. That is probably what a .cube means, but it is a choice.
+It runs after the per-channel curve on engine 3, since that is apply_curve in the same
+step 4. If it should precede the curve there, that is a different answer for engine 3.
+Both are one-line differences, which is the reason for isolating the call site. Still no Camera
+Raw reference, so still unverified — the correction is to my own description of the code, not
+evidence about Camera Raw.
+lukewalker2010 commented on Oct 5, 2026
+lukewalker2010
+on Oct 5, 2026
+ContributorAuthor
+More actions
+A second correction, to the order of the steps above, from looking at where a LUT would actually
+have to live. #204 (the reader) is unaffected. What this changes is that wiring the pipeline is
+later than I listed, and I had it early for a reason that turns out not to hold.
+Two implementations of the colour stage
+finish_color in src/develop/pipeline.rs is the CPU copy. src/develop/gpu/develop.wgsl has
+its own, including rgb_table and the gamut step. So a LUT applied only on the CPU would make the
+GPU preview and the CPU export disagree on the same photo — which is worse than not having the
+feature, because it looks like a rendering bug rather than a missing one.
+GPU parity has to land before any LUT is reachable by a user, not after. That reverses the
+order I gave: step 3 is a precondition for step 4 being usable, not a follow-up tidy-up.
+The cost is real and worth naming: a 65³ cube is 274,625 entries, so it has to reach the GPU as a
+buffer. rgb_table already does exactly that, so there is precedent and no new mechanism, but it
+is not free and the size should be a deliberate choice rather than whatever the file happens to be.
+The Recipe cannot carry a cube, and carrying a reference is a compatibility decision
+src/storage/format.rs has SAVED_FIELDS, documented as:
+The fields a freshly saved recipe writes, as of schema 6. ... adding a field is safe only when
+it is skipped at its default (skip_serializing_if) or when every release that may still read
+the file can be shown to tolerate it; either way, changing this list is a deliberate
+compatibility decision, not a side effect.
+saved_version(&Recipe) derives the schema from what a recipe contains (8 for a plain profile, 9
+for one with an RGB table or develop settings). So persisting a LUT means a schema bump and a
+deliberate decision, which is step 5 and not something to slip in while wiring something else.
+The cube itself must not go in the recipe at all: 3.3 MB of f32 in a SQLite row is not a format,
+it is an accident. A LUT has to be referenced — path or an id in a library — which is the browser
+in step 4.
+Good news: the wiring itself is cheap
+CurveSet (pipeline.rs:492) is private, built per render, and not serialized — and it
+already carries rgb_table: Option<RgbLook>, which is the closest analogue there is: a table
+applied after the colour mixer, at the profile's amount. A LUT belongs there, not on the Recipe,
+and adding it needs no schema change at all. Only the reference does.
+That also means the placement is testable before any of it is reachable: finish_color can take a
+LUT and be exercised directly, with the existing colour tests as the proof that a photo with no LUT
+renders exactly as before.
+Revised order
+✅ Reader and lookup — 3D LUT support (.cube): reader, pipeline integration, UI, and persistence #204
+GPU parity for the colour stage, before anything is reachable
+Reference model — how a cube is chosen and held (library, path or id, size limits)
+Persistence — schema bump and SAVED_FIELDS, as the deliberate decision it is
+Wiring into CurveSet, with the placement corrected above
+Browser UI
+Import of edits that already carry a cube
+Steps 3 and 4 are the ones I would most like @pch to weigh in on, because they are product and
+compatibility decisions rather than rendering ones, and getting them wrong is expensive in a way
+that a wrong interpolation is not.
+lukewalker2010 commented on Oct 5, 2026
+lukewalker2010
+on Oct 5, 2026
+ContributorAuthor
+More actions
+Follow-up to the two corrections above, from reading the GPU colour stage. This is the map I needed
+before touching step 2, and it answers the open question I left in the placement correction.
+The whole colour stage is one shader
+finish.wgsl is output sharpening (radius, halo, threshold), not the colour transform. Everything
+relevant is src/develop/gpu/develop.wgsl, and its order mirrors pipeline.rs:
+```
+rgb = reference_curves(rgb);          // engine-4 basic tone
+     mixer(rgb)                       // P_MIXER
+     point_colors(rgb)                // P_POINT
+     rgb_table(rgb)                   // P_RGB, gated on amount != 0
+     grade(rgb)                       // P_GRADE
+     ... Oklab round trip, adjust ...
+```
+develop.wgsl:994 is the counterpart of the CPU's into_srgb → srgb_encode → clamp:
+```
+out[k] = clamp(srgb_encode(select(gray + (rgb[k] - gray) * gamut,
+                                  clamp(rgb[k], 0.0, 1.0), clip)), 0.0, 1.0);
+```
+with clip = p(P_GAMUT_CLIP) != 0.0 just above it. Same three steps, same order as
+finish_color. So the placement corrected above maps symmetrically: the end of finish_color on
+the CPU is immediately after line 994 on the GPU. Both are after the encode and after the clamp.
+That answers the question I left open
+I asked whether anything re-clamps a cube that deliberately pushes a channel past 0 or 1. On both
+paths, a LUT applied at the corrected placement is the last thing to touch the value, so the answer
+is the same either way: nothing re-clamps, and the value carries on to quantization. A LUT placed
+before the encode would instead be clamped by the clamp(..., 0.0, 1.0) already there. So the
+question is not "should we clamp after" but "before or after", and the corrected placement is the
+one that honours what the cube says. Good — one fewer decision, and it is the one #93 asks for.
+What step 2 actually costs
+Less than I feared, and more than a shader edit:
+The shader already has tetrahedral interpolation for a 3D table, documented as
+"rgb_table::tetrahedral" (develop.wgsl:695). It is a second implementation of the CPU routine,
+and the existing GPU tests hold the two to 0.0007. So the interpolation is not new work on either
+side; 3D LUT support (.cube): reader, pipeline integration, UI, and persistence #204 shares the CPU one rather than adding a third.
+The data rides in @group(0) @binding(4) var<storage, read> tables: array<f32>, indexed by
+offsets handed over from the CPU side. A cube could go in the same buffer, but a 65³ cube is
+274,625 entries and it would share allocation with the colour-mixer tables and any RGB table.
+That is the one real decision in step 2, and it is a size/memory judgement rather than a
+correctness one: same buffer is simpler, a second binding is cleaner. Worth an opinion before
+someone writes it.
+Nothing reaches the GPU until a LUT can be selected at all, so none of this is urgent for
+correctness — it is the price of not shipping a CPU-only look.
+One thing worth saying plainly
+There are now three places tetrahedral interpolation is written: rgb_table.rs, develop.wgsl, and
+#204 (which reuses the first). That is the codebase's existing arrangement, not something I
+introduced, and the CPU/GPU pair is pinned by tests. But it does mean a change to the algorithm has
+three places to land, and the shader copy is the one a Rust-only test will not catch.
+lukewalker2010
+added 5 commits that reference this issue on Oct 5, 2026
+Read .cube 3D lookup tables
+...
+8a8c374
+Read .cube 3D lookup tables
+...
+80e7654
+Read .cube 3D lookup tables
+...
+eb61a1d
+Read .cube 3D lookup tables
+...
+b7d8d53
+Read .cube 3D lookup tables
+...
+4936f81
+pch commented on Oct 19, 2026
+pch
+on Oct 19, 2026
+Owner
+More actions
+@lukewalker2010 would you mind revisiting this? or should I close and start over?
+lukewalker2010 commented on Oct 19, 2026
+lukewalker2010
+on Oct 19, 2026
+ContributorAuthor
+More actions
+I had started on this. Let me take another look.
+lukewalker2010 commented on Oct 19, 2026
+lukewalker2010
+on Oct 19, 2026
+ContributorAuthor
+More actions
+Revisiting this. Wired the LUT into the CPU pipeline (finish_color, after srgb_encode, before final clip) with Recipe fields (lut_3d, lut_3d_strength) and persistence through the storage format. 990 tests pass, clippy clean. GPU parity (step 3), browser/library UI (step 4), and XMP import (step 6) remain. The CPU path is the foundation; GPU can follow the existing rgb_table shader plumbing.
+lukewalker2010
+added a commit that references this issue on Oct 19, 2026
+Wire 3D LUT into the rendering pipeline
+...
+ed0f03c
+lukewalker2010 commented on Oct 19, 2026
+lukewalker2010
+on Oct 19, 2026
+ContributorAuthor
+More actions
+Step 6 investigation: XMP form for .cube LUTs
+I investigated whether XMP sidecars embed .cube LUT data, and how RAWmakase should handle importing edits that carry one.
+Findings
+Adobe Lightroom does NOT embed .cube data in XMP. The crs: namespace has no field for embedded cube LUT data. Lightroom stores cube LUTs as separate creative profile files (.xmp in the CameraProfiles directory) and references them by name/UUID via crs:CameraProfile / crs:Look.
+RAWmakase already handles this. The parity checklist confirms: ".cube 3D LUTs (files, folders, zips) become creative profiles with Amount, grouped in the profile browser, kept with the library." These are resolved through the existing resolve_profile/resolve_look path when an XMP sidecar names them.
+No XMP parsing or writing changes are needed. Cube LUT profiles are referenced by name/UUID in XMP, exactly like any other profile. RAWmakase resolves them the same way.
+The lut_3d Recipe field (added this session) is RAWmakase-specific. It provides direct LUT application outside the profile system. It does not round-trip through XMP (like other RAWmakase-specific settings such as lut_3d_strength). If a user applies a cube LUT directly and then saves XMP, the LUT is not written — the same as any setting without an Adobe XMP equivalent. To preserve a cube LUT across XMP, import it as a creative profile first (step 4 UI).
+Conclusion
+Step 6 requires no new work. The XMP form for a cube LUT is a profile reference by name/UUID, which RAWmakase already resolves. The investigation confirms that embedding cube data in XMP is not how Lightroom works, so there is no large read/write to size.
+What remains for #202
+Step
+Status
+1. Parse & apply (CPU)
+✅ Done (PR #204)
+2. Reference-free tests
+✅ Done (28 tests)
+3. GPU parity
+⬜ Not started (needs GPU hardware)
+4. Browser & library UI
+⬜ Not started (file picker, strength slider)
+5. Persistence
+✅ Done (Recipe fields + pipeline)
+6. XMP import
+✅ Done (investigation: no XMP changes needed)
+The CPU path is complete. The next most impactful step is step 4 (UI) — making cube LUTs browsable and applicable from the app.
+lukewalker2010
+added a commit that references this issue on Oct 19, 2026
+Add UI for loading and adjusting 3D LUTs (.cube)
+...
+9d4a438
+lukewalker2010 commented on Oct 19, 2026
+lukewalker2010
+on Oct 19, 2026
+ContributorAuthor
+More actions
+Step 4 complete: Browser and library UI for .cube LUTs
+Added a minimal but functional UI for loading and adjusting 3D LUTs:
+Load LUT… button in the inspector's profile section opens a file dialog filtered to .cube files
+The selected file is parsed and applied to the recipe (lut_3d + lut_3d_strength = 1.0)
+Clear button removes the LUT
+LUT strength slider (0–100%) appears when a LUT is loaded
+Error handling: parse failures and file read errors are shown in the status bar
+What this covers
+Listing/loading .cube files from any folder (via the file dialog)
+Enable/disable (Load / Clear)
+Strength slider
+Preview is automatic (the LUT is applied in the rendering pipeline, so the preview reflects it immediately)
+What remains
+Step 3 (GPU parity): needs GPU hardware; the CPU path is complete and tested
+A dedicated folder browser (like the profile import folder scanner) could be added later, but the file dialog already covers ad-hoc loading
+Updated #202 status
+Step
+Status
+1. Parse & apply (CPU)
+✅ Done (PR #204)
+2. Reference-free tests
+✅ Done (28 tests)
+3. GPU parity
+⬜ Not started (needs GPU hardware)
+4. Browser & library UI
+✅ Done (this session)
+5. Persistence
+✅ Done (Recipe fields + pipeline)
+6. XMP import
+✅ Done (investigation: no XMP changes needed)
+Only step 3 (GPU parity) remains, which requires a machine with a compute adapter to validate.
+lukewalker2010
+added a commit that references this issue on Oct 19, 2026
+3D LUT support (.cube): reader, pipeline integration, UI, and persist…
+...
+aafc06f
+lukewalker2010 commented on Oct 19, 2026
+lukewalker2010
+on Oct 19, 2026
+ContributorAuthor
+More actions
+PR #204 is ported onto the crate layout and is mergeable again.
+The workspace split moved src/develop/ into crates/rawmakase-engine/ and crates/rawmakase-model/, so the PR was unmergeable for a while. It is now rebased onto main at e354a088.
+What changed in the port
+The reader moved to rawmakase-model (crates/rawmakase-model/src/model/lut3d.rs), where the Recipe that holds it lives. The engine depends on the model, not the other way round, so the other way round was not possible.
+tetrahedral is now pub and re-exported from camera_profiles, so the model crate's own LUT reader uses the same routine the DNG SDK's tables already use. One implementation, not two.
+The placement moved with the pipeline. The old pipeline had the master curve in finish_color; the new one has it in apply_reference_curves, and finish_color is now only the final clip and encode. The cube is applied in finish_color, in gamma-encoded sRGB after the master's curve and the grading and before the final per-channel clip, as 3D LUT support (.cube) #202 specifies. Without a cube the clip stays exactly where it was (in linear light, before the transfer function), so no existing render changes.
+A recipe carrying a cube renders on the CPU. The GPU port has no shader for one yet, and a preview that skipped the LUT would not match the export, which is worse than a slower preview. pixel_params::supported is the gate, and a test pins it.
+New tests
+a_cube_lut_is_applied_through_the_pipeline — the cube changes the output, swaps red for green as the cube says, and strength 0 is an exact no-op
+a_cube_lut_is_applied_after_the_master_curve_and_before_the_clip — a flat cube sends every colour to mid grey, and a cube that answers outside sRGB is clipped back in
+a_recipe_with_a_cube_lut_is_not_left_to_the_gpu — the CPU fallback is pinned
+Checks
+1999 tests pass, clippy clean, fmt clean.
+pch commented on Oct 22, 2026
+pch
+on Oct 22, 2026
+Owner
+More actions
+Closing in favour of #582, which replans this from scratch.
+The plan here built a separate LUT stage at the end of the colour pipeline (and #204 implemented it with the cube stored in the Recipe). The new plan follows Camera Raw instead: there a .cube becomes a creative look profile whose RGB table is the cube, and RAWmakase already renders those looks with measured parity, Profile Amount, GPU support and recipe storage. So #582 converts a .cube into a look profile, imports it into the profile library, and validates it against Camera Raw renders, with no new pipeline stage or recipe field.
+@lukewalker2010's .cube reader from #204 is kept with his authorship. Thanks to him for the plan and the investigation here, and to @nicolasernult-lgtm for the original request in #93.
+pch
+closed this as not plannedon Oct 22, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -3,14 +3,14 @@
 Also called: CG Solver, Compressive Volume Rendering with Conjugate Gradient Solver, Global CG Solver
 
 ## Overview
-This method recovers missing pixels in a rendered volume image by solving a regularized least-squares optimization problem using the Conjugate Gradient algorithm [S1, unofficial]. It allows reconstruction from a subset of pixels, reducing total rendering time compared to full volume rendering [S1, unofficial]. It differs from its parent [CGLS Solver (Conjugate Gradient Least Squares)](3285-cgls-solver-conjugate-gradient-least-squares.md) by explicitly defining the regularization term $H$ via B-spline convolution and the sampling matrix $S$ for pixel dropping, whereas the parent focuses on the general numerical stability of the least-squares formulation.
+This method recovers missing pixels in a rendered volume image by solving a regularized least-squares optimization problem using the Conjugate Gradient algorithm [S1, unofficial]. It allows reconstruction from a subset of pixels, reducing total rendering time compared to full volume rendering [S1, unofficial]. It differs from its parent [CGLS Solver (Conjugate Gradient Least Squares)](3285-cgls-solver-conjugate-gradient-least-squares.md) by explicitly defining the regularization term $H$ via B-spline convolution and the sampling matrix $S$ for pixel dropping, whereas the parent focuses on the general numerical stability of the least-squares formulation [S1, unofficial].
 
 ## How it works
 **Inputs:**
 - $Y$: The observed rendered image vector (size $N \times 1$, where $N = \text{imageWidth} \times \text{imageHeight}$) [S1, unofficial].
 - $S$: The binary sampling matrix (size $N \times N$) [S1, unofficial].
 - $\lambda$: Regularization parameter [S1, unofficial].
-- $\phi$: The basis function (univariate uniform centered cubic B-spline $\beta_3(t)$) [S1, unofficial].
+- $\phi$: The basis function (univariate uniform centered cubic B-spline $\beta_3(t)$, tensor-producted to 2D) [S1, unofficial].
 
 **Outputs:**
 - $x$: The reconstructed full-resolution image vector (size $N \times 1$) [S1, unofficial].
@@ -28,7 +28,7 @@ $$ (S^T S + \lambda H)x = S^T y $$
 Let $A = S^T S + \lambda H$ and $b = S^T y$ [S1, unofficial].
 
 **Steps:**
-1. Initialize $x_0$ (e.g., zeros or interpolated guess).
+1. Initialize $x_0$ to zeros [G].
 2. Compute $b = S^T Y$. Note that $S^T$ acts as an upsampling operator inserting zeros at missing pixel locations [S1, unofficial].
 3. Initialize residual $r_0 := b - A x_0$ and search direction $p_0 := r_0$ [S1, unofficial].
 4. Iterate for $k = 0, 1, \dots$:
@@ -45,69 +45,73 @@ Let $A = S^T S + \lambda H$ and $b = S^T y$ [S1, unofficial].
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def solve_compressive_volume_rendering(Y, S, lambda_reg, phi_kernel, max_iter=100, tol=1e-6):
-    """
-    Solves (S^T S + lambda H) x = S^T Y using Conjugate Gradient.
-    Y: observed image vector (N,)
-    S: sampling matrix (N, N) - binary, rows are sampled pixels
-    lambda_reg: regularization weight
-    phi_kernel: kernel for H (used in convolve_H)
-    """
+import math
+
+def dot(a, b):
+    return sum(ai * bi for ai, bi in zip(a, b))
+
+def apply_S(x, S_map):
+    # S_map: list of (output_index, input_index) where S[output_index, input_index] = 1
+    # Sx is downsampling: returns vector of observed pixel values
+    return [x[idx] for _, idx in S_map]
+
+def apply_S_T(y, S_map, N):
+    # S^T inserts zeros at missing pixels
+    res = [0.0] * N
+    for i, (_, idx) in enumerate(S_map):
+        res[idx] = y[i]
+    return res
+
+def convolve_H(x, kernel, N):
+    # Hx is equivalent to convolving the image with a 2D kernel phi
+    # phi is the tensor product of univariate uniform centered cubic B-spline beta_3
+    H = int(math.sqrt(N))
+    W = H
+    img = [x[i*W:(i+1)*W] for i in range(H)]
+    kh, kw = len(kernel), len(kernel[0])
+    out = [[0.0]*W for _ in range(H)]
+    for i in range(H):
+        for j in range(W):
+            val = 0.0
+            for ki in range(kh):
+                for kj in range(kw):
+                    ni, nj = i + ki - kh//2, j + kj - kw//2
+                    if 0 <= ni < H and 0 <= nj < W:
+                        val += img[ni][nj] * kernel[ki][kj]
+            out[i][j] = val
+    return [v for row in out for v in row]
+
+def solve_compressive_volume_rendering(Y, S_map, lambda_reg, phi_kernel, max_iter=100, tol=1e-6):
     N = len(Y)
-    x = np.zeros(N)
-    
-    # b = S^T Y. S^T inserts zeros at missing pixels.
-    # In practice, S is sparse. S^T Y places Y values at their original indices in a zero-filled vector.
-    b = np.zeros(N)
-    # Assuming S is defined such that S[i, j] = 1 if pixel j is observed in output i
-    # Then (S^T Y)[j] = Y[i] if pixel j corresponds to observed pixel i, else 0.
-    # Implementation detail: map observed pixels back to original coordinates.
-    # For this generic implementation, we assume a helper `apply_S_transpose` exists.
-    b = apply_S_transpose(Y, S) 
-    
-    # Initial residual r0 = b - A*x0. Since x0=0, r0 = b.
-    r = b.copy()
-    p = r.copy()
-    
-    # Precompute r^T r
-    r_dot = np.dot(r, r)
-    
+    x = [0.0] * N
+    b = apply_S_T(Y, S_map, N)
+    r = b[:]
+    p = r[:]
+    r_dot = dot(r, r)
+
     for k in range(max_iter):
-        # Compute A*p = (S^T S + lambda H) p
-        # S^T S p: downsamples p, then upsamples (inserts zeros)
-        p_down = apply_S(p, S)
-        Ap = apply_S_transpose(p_down, S)
-        
-        # lambda H p: convolution with kernel phi
-        Ap += lambda_reg * convolve_H(p, phi_kernel)
-        
-        # alpha = (r^T r) / (p^T A p)
-        p_dot_Ap = np.dot(p, Ap)
+        # Ap = (S^T S + lambda H) p
+        p_down = apply_S(p, S_map)
+        Sp = apply_S_T(p_down, S_map, N)
+        Hp = convolve_H(p, phi_kernel, N)
+        Ap = [Sp_i + lambda_reg * Hp_i for Sp_i, Hp_i in zip(Sp, Hp)]
+
+        p_dot_Ap = dot(p, Ap)
         if p_dot_Ap == 0:
-            break # Zero search direction
-            
-        alpha = r_dot / p_dot_Ap
-        
-        # x_new = x + alpha * p
-        x += alpha * p
-        
-        # r_new = r - alpha * A * p
-        r -= alpha * Ap
-        
-        r_dot_new = np.dot(r, r)
-        
-        # Check convergence
-        if np.sqrt(r_dot_new) < tol:
             break
-            
-        # beta = (r_new^T r_new) / (r^T r)
+
+        alpha = r_dot / p_dot_Ap
+        x = [x_i + alpha * p_i for x_i, p_i in zip(x, p)]
+        r = [r_i - alpha * Ap_i for r_i, Ap_i in zip(r, Ap)]
+
+        r_dot_new = dot(r, r)
+        if math.sqrt(r_dot_new) < tol:
+            break
+
         beta = r_dot_new / r_dot
-        
-        # p_new = r_new + beta * p
-        p = r + beta * p
-        
+        p = [r_i + beta * p_i for r_i, p_i in zip(r, p)]
         r_dot = r_dot_new
-        
+
     return x
 ```
 
@@ -119,13 +123,13 @@ def solve_compressive_volume_rendering(Y, S, lambda_reg, phi_kernel, max_iter=10
 
 ## Operating characteristics
 - **Time Complexity:** The reconstruction time is almost constant regardless of the number of features or pixels added, while total rendering time increases with features/pixels [S1, unofficial]. However, the global solver is computationally expensive and performance depends on image size and iteration count [S1, unofficial].
-- **Memory Complexity:** Requires storage for vectors $x, r, p, b$ and intermediate results for $S^T S$ and $H$ operations. FFT-based convolution requires additional memory for transforms [S1, unofficial].
+- **Memory Complexity:** Requires storage for vectors $x, r, p, b$ and intermediate results for $S^T S$ and $H$ operations. FFT-based convolution requires additional memory for transforms [G].
 - **Performance:** Volume rendering using 100% of the pixels takes more time than the compressive rendering method [S1, unofficial]. The global reconstruction process is too slow to interact with the volume renderer in real-time due to CPU-GPU data transfers [S1, unofficial].
 - **Strengths:** Acceptable image quality for reconstructed images [S1, unofficial]. Can significantly reduce rendering time by using a subset of pixels [S1, unofficial].
 - **Limitations:** Poor performance for real-time interactive rendering due to data transfer overheads [S1, unofficial].
 
 ## Background
-This method is described in the thesis "GPU-based Compressive Volume Rendering" [S1, unofficial]. It builds on the concept of compressive sensing applied to volume rendering, utilizing the Conjugate Gradient solver to recover missing pixel data. The regularization term $H$ is defined using cubic B-splines [S1, unofficial].
+This method is described in the thesis "GPU-based Compressive Volume Rendering" [S1, unofficial]. It builds on the concept of compressive sensing applied to volume rendering, utilizing the Conjugate Gradient solver to recover missing pixel data [S1, unofficial]. The regularization term $H$ is defined using cubic B-splines [S1, unofficial].
 
 ## Sources
 [S1] GPU-based Compressive Volume Rendering, https://doi.org/10.11575/prism/5366, fetched 2026-10-26 (unofficial)

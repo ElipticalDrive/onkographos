@@ -1,0 +1,193 @@
+# Capture Studio
+
+Capture Studio is a local photo-to-3D Gaussian Splatting project. Its first
+portfolio feature analyzes photographs before training and explains which files
+may reduce reconstruction quality.
+
+## Current status
+
+The project has a reproducible Python environment, a verified CUDA-enabled
+PyTorch installation, a working gsplat CUDA rasterizer, COLMAP GPU feature
+extraction, basic photo-quality analysis, and a verified sparse reconstruction
+pipeline. Quality Trainer v2 has completed a 30,000-step run with Gaussian
+splitting, pruning, view-dependent colour, resumable checkpoints, and evaluation
+on photographs excluded from photometric training. A local interactive viewer
+loads the exported Gaussian PLY.
+
+## Final result: 30,000-step South Building reconstruction
+
+Trained on an **RTX 5070 Ti**, using **112 training photos** and **16 evaluation
+photos**, at 1600x1196 resolution with SH degree 3. The finished model contains
+**1,289,948 Gaussians** (initialized from 84,004 sparse points).
+
+Original photograph on the left; final 3DGS render on the right. This evaluation
+view (`P1180316.JPG`) has PSNR 20.48 dB, close to the median of the 16 views.
+
+![Original photograph beside the final 30000-step Gaussian render](examples/training/south-building-v2-final-comparison.png)
+
+| Mean across 16 evaluation views | Final result |
+| --- | ---: |
+| PSNR (higher is better) | 20.85 dB |
+| SSIM (higher is better) | 0.7431 |
+| L1 (lower is better) | 0.06722 |
+
+These are full-SH evaluation renders. The browser viewer currently displays
+base colour only. Brick and window detail is visible, while foliage and some
+viewpoints still have artifacts. The [first evaluation view](examples/training/south-building-v2-final-first-view.png)
+has a substantial brightness mismatch (PSNR 11.31 dB); quality varies by view.
+
+Evaluation photos were excluded from photometric training, but COLMAP camera
+estimation and sparse initialization used all 128 photos. See the
+[full per-view metrics](examples/training/south-building-v2-final-metrics.json)
+and [verification record](docs/quality-v2-validation.md).
+
+The completed model is stored locally at `outputs\demo\3dgs\quality-v2\model.ply`.
+Follow [Open the interactive viewer](#open-the-interactive-viewer) to explore it.
+The generated model stays local; the comparison images and metrics are included
+in this repository.
+
+## Setup
+
+The Windows setup currently expects CUDA Toolkit 13.0 and Visual Studio 2022
+Build Tools. Install [uv](https://docs.astral.sh/uv/), then run:
+
+```powershell
+.\scripts\setup-windows.ps1
+.\scripts\install-colmap-windows.ps1
+uv run capture-studio check-system
+uv run capture-studio check-gpu
+uv run capture-studio check-gsplat
+uv run capture-studio check-colmap
+uv run pytest
+```
+
+## Analyze a photo folder
+
+Run the first user-facing feature against the included synthetic example:
+
+```powershell
+uv run capture-studio analyze .\examples\photo-analysis\photos
+```
+
+The visual comparison is saved at
+[`examples/photo-analysis/comparison.png`](examples/photo-analysis/comparison.png).
+The analyzer accepts any explicitly selected folder containing JPEG, PNG,
+WebP, TIFF, or BMP images.
+
+The report identifies unreadable images, photos below 2 megapixels, possible
+blur, and byte-for-byte duplicates. The blur score is calculated at a
+consistent maximum size so photographs can be compared more fairly. It is a
+screening hint: a low-texture wall can score like a blurry photo even when it
+is in focus.
+
+This command currently analyzes files directly inside the selected folder. It
+does not analyze videos or nested folders. Near-duplicate viewpoints and camera
+coverage will be added after COLMAP reconstruction data is available.
+
+## Run the public reconstruction demo
+
+Download COLMAP's public South Building dataset and reconstruct it:
+
+```powershell
+.\scripts\download-demo-data.ps1
+uv run capture-studio reconstruct .\data\demo\south-building\images --output .\outputs\demo
+```
+
+The download is about 400 MB and contains 128 photographs. Dataset images and
+generated outputs stay inside this project but are ignored by Git. The command
+refuses to overwrite a non-empty output folder; choose a new output name when
+running another reconstruction.
+
+The pipeline runs GPU feature extraction, GPU exhaustive matching, and sparse
+camera reconstruction. It saves each stage's log, the original binary COLMAP
+model, a readable text model for later training, and a PNG point-cloud preview.
+
+Prepare an undistorted, training-ready copy of the registered photos and camera
+model. The 1600-pixel limit balances image detail with GPU memory use:
+
+```powershell
+uv run capture-studio prepare-training .\data\demo\south-building\images `
+  --model .\outputs\demo\sparse\0 `
+  --output .\outputs\demo\3dgs\data `
+  --max-image-size 1600
+```
+
+This creates resized images plus matching binary and readable COLMAP models
+under `outputs\demo\3dgs\data`. Generated training data remains ignored by Git.
+
+Run a short end-to-end Gaussian training test at quarter resolution:
+
+```powershell
+uv run capture-studio train-smoke .\outputs\demo\3dgs\data `
+  --output .\outputs\demo\3dgs\smoke `
+  --steps 100 `
+  --image-scale 4
+```
+
+The smoke test loads all cameras and sparse points, optimizes the Gaussians on
+the CUDA GPU, and saves a checkpoint, metrics, and an original-versus-rendered
+comparison. It verifies the training path; it is not the final-quality model.
+
+The verified RTX 5070 Ti run initialized 84,004 Gaussians and reduced the fixed
+preview's L1 loss from 0.2281 to 0.0879 in 100 steps:
+
+![Original photograph beside the 100-step Gaussian render](examples/training/south-building-smoke-comparison.png)
+
+Quality Trainer v2 uses equally sampled training cameras, SH degree 0 through 3
+for view-dependent colour, and an evaluation split (every eighth photograph).
+The default run uses full prepared resolution and 30,000 steps. Splitting and
+pruning stop at step 15,000, leaving time to refine the resulting Gaussians.
+Short runs scale the schedule down for testing.
+
+```powershell
+uv run capture-studio train-quality .\outputs\demo\3dgs\data `
+  --output .\outputs\demo\3dgs\quality-v2 `
+  --steps 30000 `
+  --image-scale 1
+```
+
+The earlier v1 1,000-step run increased the scene from 84,004 to 109,796
+Gaussians and reduced its training preview's L1 loss from 0.2325 to 0.0427.
+This historical result used half resolution and favoured the preview camera;
+it is not a held-out evaluation score:
+
+![Original photograph beside the densified 1000-step Gaussian render](examples/training/south-building-quality-comparison.png)
+
+V2 saves `checkpoint.pt` atomically every 1,000 steps, including Adam optimiser
+states, the learning-rate schedule, densification statistics, and random state.
+To resume, keep the same total `--steps`, `--image-scale`, and input data, and
+choose a new empty output folder:
+
+```powershell
+uv run capture-studio train-quality .\outputs\demo\3dgs\data `
+  --output .\outputs\demo\3dgs\quality-v2-resumed `
+  --resume .\outputs\demo\3dgs\quality-v2\checkpoint.pt
+```
+
+`--stop-after 1000` pauses deliberately at step 1,000 while retaining the
+30,000-step schedule. A forced interruption resumes from the last saved step.
+V1 checkpoints can still be exported and viewed, but cannot resume v2 training.
+Resume verifies the prepared model and image contents using SHA-256.
+`training.log` records progress, Gaussian counts, and the estimated remaining time.
+CUDA training is not bitwise deterministic; resumed and uninterrupted runs can
+develop slightly different splitting decisions despite restoring training state.
+
+At completion or a deliberate pause, `metrics.json` contains mean and per-camera
+PSNR (higher is better), SSIM (higher is better), and L1 (lower is better).
+`evaluation-*.png` pairs each evaluation photograph with its rendered view.
+The 16 evaluation images in this demo are excluded from photometric training;
+COLMAP camera estimation and sparse initialization still use all 128 images.
+This is a view-rendering evaluation, not a completely unseen reconstruction test.
+
+The PLY exporter preserves SH coefficients from v2 checkpoints. The current
+Viser WebGL viewer displays base colour only and labels that limitation when
+loading an SH model. Use the evaluation renders to inspect full SH appearance.
+The training schedule follows the [original 3DGS recipe](https://github.com/graphdeco-inria/gaussian-splatting)
+and [gsplat's default strategy](https://docs.gsplat.studio/main/apis/strategy.html).
+
+Export a completed v2 quality checkpoint to a standard Gaussian Splatting PLY:
+
+```powershell
+uv run capture-studio export-ply .\outputs\demo\3dgs\quality-v2\checkpoint.pt `
+  --output .\outputs\demo\3dgs\quality-v2\model.ply
+```

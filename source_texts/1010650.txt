@@ -1,0 +1,521 @@
+Contribute to Horizon-Creations/HorizonEngine development by creating an account on GitHub.
+
+Real volumetric fog across all five render backends by Horizon-Creations · Pull Request #225 · Horizon-Creations/HorizonEngine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Horizon-Creations
+commented
+Nov 7, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Replaces the analytic height-fog background blend with real volumetric fog: a froxel-grid raymarching pipeline (Inject → Integrate → Apply) with sun/light in-scattering, shadow sampling in the volume, and noise-based density, implemented on Metal, OpenGL, Vulkan, D3D11 and D3D12.
+Adds host-side FogVolume data, env/inspector fields, serializer support (with old-scene backward compatibility), weather-system hooks (fog bank/noise driven by presets), and a volumetric default for new scenes.
+Keeps the existing analytic fog as the fallback for backends/hardware that can't run the volume (supportsVolumetricFog capability, gated per backend).
+Changes
+Design/docs: docs/volumetric-fog-plan.md and per-backend acceptance docs (Metal, Vulkan, D3D11, D3D12) recording the froxel approach, data formats, performance budget and hardware witnesses.
+Core data: src/HE_Rendering/include/HorizonRendering/FogVolume.h, RenderExtractor/RenderWorld wiring, EnvironmentSettings.h/EnvironmentComponent.h fields, editor InspectorPanel/EditorHelp/HcNodeDocs entries, ProjectManager default for new scenes.
+Metal: compute Inject/Integrate, Apply split from the scene encoder, heApplyFogT on texture 17 (MetalRenderer.mm/.h).
+OpenGL: fragment-path Inject/Integrate/Apply (OpenGLRenderer.cpp/.h).
+Vulkan: SPIR-V compute kernels, Apply split, binding 34 (VulkanRenderer.cpp, VulkanMaterialLayout.h).
+D3D11: HLSL compute Inject/Integrate (giShadowCS pattern) + fullscreen Apply, own shadow fill for Inject, HE_FOG_VOLUME define and t34 binding for forward graph materials (D3D11Renderer.cpp, D3D11MaterialBindings.h); Inject moved to run after the shadow pass so it reads current-frame shadows.
+D3D12: same Inject/Integrate/Apply wiring plus root-signature/t34 support for graph materials (D3D12Renderer.cpp, D3D12MaterialRootSignature.h).
+Shared shader source: src/HE_Rendering/src/material/FogVolumeShaderSource.h, MaterialShaderLibrary HLSL cross-compile path (via SPIRV-Cross) for all three kernels.
+Weather/scene: WeatherSystem.cpp drives fog bank/noise from presets; EngineApi/EnvironmentPush expose the new fields.
+Tests: tests/test_fog_volume.cpp (new, 724 lines), plus updates to test_scene_serializer.cpp, test_weather.cpp, test_material_graph.cpp, test_engine_api.cpp, test_third_person_template.cpp.
+Testing
+Metal: witness captures (sun shafts, fog bank, point light, with/without lights) under docs/volumetric-fog-metal-2026-11-02/.
+OpenGL: headless-dump witnesses on macOS.
+Vulkan: MoltenVK syntax check locally, lavapipe CI image test.
+D3D11 + D3D12: hardware-verified on NN-WS03 (RTX 4070) — HorizonEditor builds clean, full he_tests green (6159/6159), HE_DUMP_FOGTEST run on both backends in both fog modes (mode 0 vs 1), fallback confirmed both in code (supportsVolumetricFog false by default) and in pixels (zero byte diff in the ground/fog region between modes, aside from known D3D11 sky-cloud time drift).
+Not verified: HE_FOG_PARITY=1 pixel-tolerance measurement against mode 0 (plan §9) was not run; deeper pixel characterization of the mode0/mode1 diff beyond raw byte-diff count was not done; a test_physics_threading.cpp SEH crash seen in one full he_tests run was not confirmed pre-existing (unrelated code, no baseline comparison done); CI run 42239434867 was triggered but its result was not observed.
+An internal code review (step review-225-1) approved the weather hooks, new-scene default, and FogVolume/extractor wiring, with two minor findings noted: Vulkan's capability gate should also check m_postFxReady, and WeatherSystem::drive() can overwrite authored fog-bank/noise values even while fogMode is 0.
+Notes
+D3D12 root-signature binding is strict (a missing binding rejects the whole PSO), so it was deliberately scoped as its own careful pass after D3D11 was proven out, per agreement with the topic owner.
+The two minor review findings above (Vulkan capability gate, weather overwrite at fogMode 0) were not fixed in this branch and may be worth a follow-up.
+🤖 Generated with Claude Code
+Hive topic #225 · written by sonnet · low
+🤖 Generated with Claude Code
+Horizon-Creations
+and others
+added 22 commits
+October 19, 2026 13:09
+docs(fog 225 step 1): volumetric fog design: froxel grid, passes, for…
+…
+d30f88e
+```
+…mats, budget, fallback
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs(fog 225 step 1): fog colour is heSkyEnv everywhere; parity witne…
+…
+fc1c99c
+```
+…ss on graph-material pixels only
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(fog 225 step 2): host-side volumetric fog data, env fields, SPIR…
+…
+3c4af46
+```
+…V-Cross compute probe
+
+Host-side infrastructure for volumetric fog (docs/volumetric-fog-plan.md),
+no render passes and no visual change:
+
+- HorizonRendering/FogVolume.h (new, header-only): froxel grid sizing,
+  exponential slice distribution, the analytic height-fog integral as a
+  segment (fogOpticalSegment, matches heApplyFog bit for bit), temporal
+  history alpha + R1 jitter, FogVolumeData, MakeFogVolumeData (gates
+  `enabled` on mode/density/capability/underwater), the std140
+  FogVolumeConstants (288 B, offsets pinned via static_assert), and a CPU
+  reference of the Integrate pass (FogIntegrateColumnCPU).
+- 11 new EnvironmentComponent fields (fogMode/fogQuality/fogVolumeDistance/
+  fogAlbedo/fogAnisotropy/fogNoiseAmount/fogNoiseScale/fogBankDensity/
+  fogBankBaseY/fogBankThickness/fogLocalLightScatter), wired through the
+  HE_ENV_FIELDS_* X-lists (serializer/scripting/HorizonCode come for free),
+  EnvironmentSettings + EnvironmentPush, Inspector rows under "Atmospheric
+  Fog" (greyed out without IRenderer::Capabilities::supportsVolumetricFog),
+  EditorHelp tooltips and HcNodeDocs rows.
+- RenderWorld::fogVolume (HE::FogVolumeData) + HE::ExtractFogVolumeData,
+  a standalone function (not yet wired into RenderExtractor::extract(),
+  so no backend call site changes) reading the Sky entity's environment.
+- IRenderer::Capabilities::supportsVolumetricFog, false everywhere for now.
+- tests/test_fog_volume.cpp: unit tests for all of the above, plus a
+  feasibility probe (plan §10) that reads the REAL heCsmShadow /
+  heLocalShadowFactor / heCloudShadowFactor bodies and the real HeLighting
+  UBO straight out of MaterialShaderLibrary.cpp (text-pin technique, like
+  test_culling.cpp's shader-drift checks) and cross-compiles a GLSL-450
+  Compute kernel through glslang -> SPIR-V -> MSL / HLSL SM5.0, the HLSL
+  verified by a real D3DCompile cs_5_0. Result: it works end to end: the
+  pin mechanism already handles the Compute stage (ShaderCompiler.cpp maps
+  it to spv::ExecutionModelGLCompute); the only thing needed is the same
+  sampler-slot pinning fragment shaders already require (heCloudShadow's
+  binding 33 needs its sampler moved into HLSL SM5.0's 16-slot range, same
+  as production code does for t34/s0). Step 3 can use runtime cross-compile
+  rather than falling back to hand-written kernels per backend.
+- tests/test_scene_serializer.cpp: explicit fogMode=1 roundtrip test, a
+  backward-compat test (pre-existing scene without the 11 keys loads with
+  fogMode=0 and defaults), and the 11 fields added to the two existing
+  hand-written EnvironmentSettings parity checks.
+- tests/test_engine_api.cpp: the hardcoded env.* registry row count
+  updated for the 11 new fields (+22 rows).
+
+Verified: he_tests (Debug, scratch tree) builds clean; test_fog_volume,
+test_scene_serializer, test_hc_node_docs, test_engine_api, test_weather,
+test_engine_materials all green; scripts/editor_help_audit.py --check
+reports 0 open (1215/1215 covered, no regression).
+
+Not done (plan step 3+): no backend reads FogVolumeData or
+supportsVolumetricFog; ExtractFogVolumeData is not called from
+RenderExtractor::extract(); WeatherPreset fogBank/fogNoise hooks (plan
+§11) are step 7; scripts/script_api_docs/registry.json is now stale
+(needs regeneration via dump_engine_api.sh on a Mac/Linux build).
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+feat(fog 225 step 3): HE_DUMP_FOG* env keys and HE_DUMP_FOGTEST witne…
+…
+b5ee7e4
+```
+…ss scene
+
+Headless-dump knobs for the fog fields (mode, quality, distance, anisotropy,
+noise, bank, local-light scatter, analytic density/falloff) and a witness
+scene (ground, five pillars, two cubes, optional shadow-casting point lamp).
+No render code changed; this editor build is the mode-0 'before' reference.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+feat(fog 225 step 3): Metal volumetric fog: Inject/Integrate compute,…
+…
+b0275bb
+```
+… Apply + scene-encoder split, heApplyFogT on texture 17
+
+- HeLighting v3.6 (fogVol/fogVolGrid/fogViewProj, append-only), heApplyFog is a
+  no-op while the volume owns the fog, heApplyFogT reads the integrated volume
+  (texelFetch trilinear) behind HE_FOG_VOLUME, which only Metal's material
+  variants define; every other backend compiles the analytic fog unchanged.
+- MaterialGraph emits heApplyFogT for Translucent blend.
+- MaterialShaderLibrary::fogInject/fogIntegrate/fogApply: one GLSL source
+  (FogVolumeShaderSource.h), inject reuses the real lighting preamble
+  (heCsmShadow, heLocalShadowFactor, heCloudShadowFactor) via stub macros.
+- RenderExtractor wires ExtractFogVolumeData; Metal reports supportsVolumetricFog.
+- MetalRenderer: froxel volumes, Inject/Integrate before the scene encoder, scene
+  encoder split after the sky for the full-screen Apply pass (blend ONE,
+  SRC_ALPHA), depth stored when the fog runs, texture 17 = fog volume (3D dummy
+  otherwise), built-in analytic fog off while the volume is on.
+- FogVolume.h: HE_FOG_MODE / HE_FOG_PARITY / HE_FOG_SUNGAIN debug switches.
+- tests: kernels cross-compile through the pin path, texture 17 on Metal only.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+feat(fog 225 step 3): fog noise volume 64^3, one-tap shadows in the k…
+…
+538d05a
+```
+…ernel, HE_FOG_* switches, witnesses + handoff
+
+- Inject spent two thirds of its time fetching the sky's 256^3 noise (67 MB) once
+  per froxel: the fog now has its own 64^3 bake of the same generator and one tile
+  spans 16 x fogNoiseScale (+2.5..4.5 ms -> about +0.5 ms for the whole fog in the
+  detailed capture on the M5).
+- HE_SHADOW_PCF_R (default 1 = the surfaces' 3x3, identical maths) lets the compute
+  kernel take one tap.
+- HE_FOG_TIMING / HE_FOG_DENSITY / HE_FOG_SUNGAIN / HE_FOG_LIGHTGAIN debug switches.
+- removed the step-2 feasibility probe test (superseded by the production-kernel tests).
+- docs/volumetric-fog-metal-2026-11-02.md (handoff, measured cost, witnesses).
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+wip(fog 225 step 4): OpenGL fragment-path Inject/Integrate/Apply, doe…
+…
+80f6925
+```
+…s NOT build yet
+
+GL 4.1 fragment-shaped twin of Metal's compute Inject/Integrate (one
+fullscreen-quad draw per Z slice; a 2D RGBA32F accumulator ping-pong for
+Integrate's running (L, T); invViewProj/prevViewProj carry an extra flipY
+to compensate for GL's bottom-left raster origin against the shared
+top-origin froxel uv convention). Apply is the shared fragment pass already.
+
+Also fixes a pre-existing, unrelated-to-this-step bug this uncovered:
+kLightingPreamble (MaterialShaderLibrary.cpp) had grown past MSVC's
+16380-byte single-string-literal limit (C2026) across Thema 225 steps
+1-3 — nobody had built this file with MSVC since. Split into 3 adjacent
+literals (byte-for-byte the same GLSL, concatenation happens before the
+per-literal check).
+
+NOT building: a scope bug of mine (OpenGLRenderer.cpp ~11897) calls the
+fillMatLight lambda before its definition — see the handoff. The same
+C2026 limit also hit SkyShaderSource.h (5 more literals) and
+D3D11Renderer.cpp, both pre-existing and out of this step's scope,
+left unfixed and reported to the topic.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+fix(fog 225 step 4): RenderFogVolume state corruption, scope bug, doc…
+…
+f86b895
+```
+…test C2338, revert false-alarm literal split
+
+RenderFogVolume (Inject/Integrate) ran right after the scene bound its
+per-frame program/units/UBO and then clobbered all of it: left
+m_fogIntegrateProgram current, stomped texture units the scene reuses
+(0/1/3/6...), left UBO point 0 on the real-CSM fog lighting buffer.
+Fixed by:
+  - moving the call back to right after UpdateSkyEnvCube/heSkyEnv (before
+    the scene rebinds anything), restoring GL_CURRENT_PROGRAM and
+    GL_ACTIVE_TEXTURE on exit
+  - giving Inject/Integrate their own texture units (22-27), disjoint
+    from the scene's 0-21, so there is nothing left to leak
+  - building a dedicated HeLighting fill inline (dominant light,
+    ambient, FillMaterialLightWindow, local/CSM shadow matrices, cloud
+    shadow) instead of calling DrawScene's fillMatLight lambda, which
+    needed matClustered/frameClusters declared later than this must run
+
+This also fixes the actual bug from the last run: fillMatLight was
+being called before its own textual lambda definition (C3861).
+
+Reverted the 3-way kLightingPreamble string-literal split from the
+previous commit: it was chasing a local toolchain issue (an old
+VS2022 v17.0 install), not a real MSVC limit — CI's Windows job and a
+local VS18 (MSVC 14.51, matching CI) build the single ~41KB literal
+with zero C2026.
+
+test_fog_volume.cpp: one CHECK had a chained `!=`/`||` doctest can't
+decompose (C2338 "Expression Too Complex") on MSVC 14.51 specifically
+— split into a named bool first.
+
+Verified: he_tests --source-file=test_fog_volume.cpp,test_material_graph.cpp,test_scene_serializer.cpp
+= 178/178 test cases, 15713/15713 assertions, built with the VS18
+toolchain CI uses (MSVC 14.51.36231).
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+fix(fog 225 step 4): GL volume read mirrored, Apply depth wrong, two …
+…
+afeadfc
+```
+…missing state restores
+
+Four correctness bugs an advisor review found, all GL-only:
+
+1. m_fogViewProjFlip (heApplyFogT, the material-facing read) was set to
+   flipY*viewProj, copied from Metal. heApplyFogT's uv = clip.xy/clip.w
+   *0.5+0.5 has no mirroring built in, and the rows Inject actually wrote
+   (raw, unflipped gl_FragCoord) already line up with a PLAIN viewProj's
+   uv — Metal needs the flip because ITS rows run the other way. Every
+   translucent-material fog read would have come out vertically mirrored.
+   Fixed: m_fogViewProjFlip = viewProj (no flip) for GL.
+
+2. kApplyMain (shared, unchanged) feeds the raw depth-buffer texel
+   straight into fv.invViewProj's z. Metal's depth buffer already stores
+   NDC z in [0,1] == its own clip convention; GL's depth buffer stores
+   (ndc.z+1)/2 (same reason the underwater pass' depthParams use scale 2,
+   bias -1). Fixed: compose a depthRemap (z' = 2d-1) into fc.invViewProj
+   before the flipY*viewProj inverse — harmless for heFogRayDir's fixed
+   z=0.5 probe (same (ndc.x,ndc.y) traces one ray regardless of ndc.z, and
+   that call only wants the direction).
+
+3. UBO binding point 0 ("HeLighting" on every GL program) was left on
+   m_fogLightUBO (real CSM, fogVol.x=0) after Inject/Integrate — nothing
+   between there and the first graph-material draw rebinds point 0 itself
+   (the deferred G-buffer pre-fill only calls glBufferSubData), so a
+   material would have read the fog pass's lighting fill and double-
+   applied the analytic fog on top of Apply. Fixed: save/restore with
+   glGetIntegeri_v(GL_UNIFORM_BUFFER_BINDING, 0, ...).
+
+4. GL_CULL_FACE was disabled for the fullscreen Inject/Integrate quads
+   and never restored. Fixed: save/restore with glIsEnabled.
+
+Verified: he_tests --source-file=test_fog_volume.cpp,test_material_graph.cpp,test_scene_serializer.cpp
+still 178/178, 15713/15713 (these bugs are in render-time matrices/state
+the test suite doesn't exercise — only a rendered witness would show
+them, which is why they survived the last round).
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+Merge remote-tracking branch 'origin/release/0.8.0' into claude/echte…
+…
+8485c13
+```
+…s-volumetrisches-nebel-statt-hintergrund-blend
+
+# Conflicts:
+#	src/HE_Rendering/include/Backends/Metal/MetalRenderer.h
+#	src/HE_Rendering/include/material/MaterialShaderLibrary.h
+#	src/HE_Rendering/src/RenderExtractor.cpp
+#	src/HE_Rendering/src/material/MaterialShaderLibrary.cpp
+```
+feat(fog 225 step 5): Vulkan volumetric fog (WIP, stopped by the quee…
+…
+ecd1208
+```
+…n): SPIR-V kernels, Inject/Integrate compute, Apply split, binding 34, tests, lavapipe case
+
+Syntax-checked against MoltenVK, kernels glslang+spirv-val clean; he_tests run and any Vulkan execution NOT done. See docs/volumetric-fog-vulkan-2026-11-02.md.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+fix(fog 225 step 5): test variable 'small' is a Windows macro (C2628)…
+…
+4795ee3
+```
+…; handoff with lavapipe results
+
+lavapipe run 41529249343: 16/16 cases, fog case 0 validation messages.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+docs: fog step 5 handoff, CI results
+…
+a9b5732
+```
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+feat(fog 225 step 7): weather presets drive the fog bank + noise, new…
+…
+0a40ee0
+```
+… skies start volumetric, help + manual
+
+WeatherPreset gets fogBank/fogNoise (Foggy 0.15/0.7, Rain+Storm 0.02), driven through drive()
+with lastFogBank/lastFogNoise sentinels. addSky() and the project templates' Sky start at
+fogMode 1; the struct default stays 0 so scenes saved before the field load unchanged.
+HE_DUMP_SKYTEST keeps its analytic default. Help entries and he-docs.json updated.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+docs(fog 225 step 7): handoff, perf numbers (Metal only), plan step 7…
+…
+971b962
+```
+… status
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+feat(fog 225 step 6): HLSL cross-compile for Inject/Integrate/Apply; …
+…
+ea9d975
+```
+…D3D11/D3D12 hardware regression + fallback verified on NN-WS03
+
+MaterialShaderLibrary::fogInject/fogIntegrate/fogApply gain a Backend::HLSL
+branch via compileHlslPinned (same canonical GLSL-450 kernels Metal/Vulkan
+already run, fresh b/t/u register pins since these dispatches bind nothing
+else concurrently). Resolves the plan's open §10 risk: the HlslPin path
+handles Stage::Compute with no special-casing. test_fog_volume.cpp's old
+"not implemented" checks for HLSL are replaced with a positive test case
+that checks real register syntax in the compiled source.
+
+Hardware acceptance on NN-WS03 (RTX 4070): HorizonEditor builds clean
+(VS18, HE_SDK_RELEASE_SET=OFF workaround for the known dev-MISMATCH trap),
+full he_tests 6159/6159 green with a scratch APPDATA. HE_DUMP_FOGTEST
+witness captures on D3D11 and D3D12, mode 0 vs mode 1: pixel-identical in
+the fog-relevant (lower) band on both backends — the new fogMode=1 scene
+default is invisible on D3D, confirmed both by code (supportsVolumetricFog
+defaults false, neither backend sets it, neither reads FogVolumeData) and
+by pixel diff. The sky-band diff that does show up is the known D3D11
+wall-clock cloud-drift noise, not fog.
+
+Renderer-side dispatch (PSO/root signature, resource creation, the Apply
+splice at the decals->transparent seam) is intentionally not started here
+-- see docs/volumetric-fog-d3d-acceptance-2026-11-06.md for the concrete
+next-step plan with file:line references. Scope agreed with the queen
+(Hive request 165) after confirming no prior step touched D3D11/D3D12 at
+all, unlike Metal/GL/Vulkan which each got a dedicated implementation step.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+feat(fog 225 step 8): D3D11 volumetric fog renderer wiring (Inject/In…
+…
+54252b1
+```
+…tegrate/Apply)
+
+Real D3D11 Inject/Integrate (compute, giShadowCS's pattern) + Apply (fullscreen
+fragment at Decals -> Transparent, EncodeDecals' DSV-unbind trick, blend ONE/
+SRC_ALPHA) dispatch, following the step 6 acceptance doc's register table
+(b0 HeLighting/b1 HeFogVol/t0..t5/u0 Inject; b0/t0/u0 Integrate; b0/t0..t2 Apply).
+
+- D3D11Renderer.cpp: EnsureFogVolumePipelines (compiles the HLSL cross-compiled
+  kernels via D3DCompile, creates the 3D UAV/SRV ping-pong + integrated volume
+  textures, the 288 B HeFogVol cbuffer, a dedicated small HeLighting fill
+  (fogLightCB) so Inject gets real CSM/local shadows regardless of GI state),
+  RenderFogVolume (dispatch, mirrors VulkanRenderer::encodeFogVolume) and
+  RenderFogApply (the Decals -> Transparent splice). fillPerFrame zeroes the
+  built-in shader's analytic fog when the volume is active; fillMatLight fills
+  lit.fogVol/fogVolGrid/fogViewProj (HeLighting v3.6) for graph materials.
+  supportsVolumetricFog + the extractor capability flag follow
+  EnsureFogVolumePipelines' result.
+- MaterialShaderLibrary.{h,cpp}: setHlslFogVolume (D3D11/D3D12's own instance
+  switch, mirroring Vulkan's setSpirvFogVolume) turns on HE_FOG_VOLUME for
+  Backend::HLSL once a renderer's dispatch is wired; adds the t34 heFogVolume
+  pin to kHlslMaterialPins (texelFetch only, no sampler, like heAO's t16).
+- D3D11MaterialBindings.h: BindFogVolume/RestoreAfterFogVolume (t34), the same
+  shape as BindGIReflFwd, wired into the forward graph-material draw path.
+
+Verified on NN-WS03 (RTX 4070): HorizonEditor + he_tests build clean
+(C:/hwfog debug tree), he_tests --source-file=*test_fog_volume.cpp 16/16,
+full he_tests 3781/3783 (the one new failure, PhysicsWorld contact-cache SEH,
+is unrelated to rendering/fog). HE_DUMP_FOGTEST on real D3D11 hardware:
+mode 0 exits clean with "volumetric fog pipelines built", no fog frame logged
+(fallback, as before); mode 1 logs "volumetric fog frame (grid 160x90x64,
+range 96 m, full)" and exits 0/0/0 — real Inject/Integrate/Apply dispatch, no
+GPU errors. Mode 0 vs mode 1 BMP differs in ~2.76M/3.68M bytes (fog visibly
+renders, not a no-op).
+
+Not done in this run (time-boxed, queen-approved reduced scope — request 166):
+D3D12 (own follow-up step, D3D11 above as the proven template), a dedicated
+HE_FOG_PARITY=1 pixel-tolerance measurement, and a deeper pixel-level
+characterization of the mode 0/1 diff beyond the raw byte count.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+docs(fog 225 step 8): D3D11 hardware verification handoff
+…
+7362fe0
+```
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+feat(fog 225 step 9): D3D12 volumetric fog (Inject/Integrate/Apply)
+…
+d2d1f32
+```
+Real D3D12 dispatch for the HLSL kernels step 6 cross-compiled, D3D11's step 8 as the
+template: eager pipelines + capability flag, three small root signatures (Inject
+b0/b1/t0..t5/u0 + s0..s5, Integrate b0/t0/u0, Apply b0/t0..t2 + s0/s1), ping-pong RGBA16F
+3D volumes, a per-frame-slot descriptor heap and constant buffers, Inject/Integrate
+recorded before the scene fills, Apply at the Decals -> Transparent seam (HDR viewport
+frames only), fillPerFrame/fillMatLight fog fields.
+
+Verified on NN-WS03 (RTX 4070, debug layer + DRED): editor builds; HE_DUMP_FOGTEST on D3D12
+forward and deferred at mode 0 (pipelines built, no fog frame) and mode 1 (fog frame
+dispatched), exit 0, no new debug-layer warnings; mode 1 image differs from D3D11's in 17 of
+3 686 454 bytes. test_fog_volume 16/16.
+
+Not done: t34 for D3D12 graph materials (translucent materials keep the analytic fog),
+real shadow/density witnesses, HE_FOG_PARITY tolerance run, perf measurement, no-shadow
+fallback textures. See docs/volumetric-fog-d3d12-step9-2026-11-07.md.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+feat(fog 225 step 9): D3D12 graph materials read the fog volume (t34)
+…
+cad37ed
+```
+Material root signature gets a t34 Texture3D slot (kSrvPerDraw 17 -> 18, kRangeCount 7 -> 8);
+the template block holds a null 3D view there, the forward draw block writes the integrated
+volume over it while the fog frame is active, fogVol.w is raised, and HE_FOG_VOLUME is turned
+on for D3D12's HLSL materials at Initialize (setHlslFogVolume). Translucent graph materials
+(water, glass) now fog through heApplyFogT instead of the analytic fallback.
+
+Verified on NN-WS03 (RTX 4070, debug layer): water witness D3D12 vs D3D11 14 of 3 686 454
+bytes at fog mode 1 (6 at mode 0), slits scene 15 bytes, deferred 14 bytes; no errors.
+test_fog_volume 16/16, test_engine_materials 15/15, test_material_graph 123/123.
+
+Open: the point-light term of the fog differs from D3D11 (point scene, ~2.4M bytes, mean ~2
+levels) with and without water; sun-only scenes match. See
+docs/volumetric-fog-d3d12-step9-2026-11-07.md.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+fix(fog 225): D3D11 fog Inject read last frame's shadows - run it aft…
+…
+5ad34c0
+```
+…er the shadow pass
+
+D3D11RendererImpl::RenderFogVolume was called before m_renderGraph.execute, i.e. before the
+cascade/local shadow pass wrote this frame's atlases, so Inject sampled the previous frame's
+shadows (empty atlases on the first frame). The call now sits in the scene body right before the
+final fillPerFrame/fillMatLight, like D3D12.
+
+Found by comparing the point-light fog witness across backends: D3D12 matched Vulkan on the real
+GPU, D3D11 was darker (up to 29 levels, ~2.4M bytes). After the fix D3D11 vs D3D12 differs in 10
+bytes (point), 18 (point + water), 15 (slits), 14 (water, deferred); D3D11 mode 0 unchanged.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+Merge origin/release/0.8.0 into echtes-volumetrisches-nebel-statt-hin…
+…
+c5ad4cf
+```
+…tergrund-blend
+
+# Conflicts:
+#	src/HE_Scene/include/HorizonScene/EngineApi.h
+#	tests/test_engine_api.cpp
+```
+Hide details
+View details
+Horizon-Creations
+merged commit 78d782c
+into
+release/0.8.0
+Nov 7, 2026
+4 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

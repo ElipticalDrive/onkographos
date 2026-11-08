@@ -1,0 +1,186 @@
+# CUDA Sparse Voxel Rasterization Wrapper
+
+Also called: PyTorch autograd wrapper for CUDA sparse voxel rasterization
+
+## Overview
+This method provides a differentiable PyTorch interface for rasterizing sparse voxel representations into 2D image space, enabling gradient-based optimization of voxel geometry and appearance [S1, unofficial]. It distinguishes itself from standard rasterization by supporting simultaneous outputs for color, depth, surface normals, and distortion, which facilitates advanced regularization and reconstruction tasks [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:**
+    *   `vox_centers`: Tensor of shape `[N, 3]` containing voxel center coordinates.
+    *   `geos`: Tensor of shape `[N, 8]` containing geometric parameters (e.g., corner offsets or SDF values) for each voxel.
+    *   `rgbs`: Tensor of shape `[N, 3]` containing voxel colors.
+    *   `subdiv_p`: Tensor of shape `[N, 1]` containing subdivision probabilities or weights.
+    *   `n_samp_per_vox`: Integer specifying samples per voxel, constrained to `[1, _C.MAX_N_SAMP]`.
+    *   `RasterSettings`: A configuration object defining camera parameters, rendering flags, and loss weights.
+*   **Outputs:**
+    *   `out_color`: Rendered RGB image.
+    *   `out_depth`: Rendered depth map.
+    *   `out_normal`: Rendered surface normal map.
+    *   `out_T`: Transmittance/opacity map.
+    *   `max_w`: Maximum weight (non-differentiable).
+
+**Data Structures**
+The `RasterSettings` NamedTuple contains the following fields [S1, unofficial]:
+*   `color_mode` (str): Rendering mode.
+*   `n_samp_per_vox` (int): Samples per voxel.
+*   `image_width`, `image_height` (int): Output resolution.
+*   `tanfovx`, `tanfovy` (float): Tangent of horizontal/vertical field of view.
+*   `cx`, `cy` (float): Principal point coordinates.
+*   `w2c_matrix` (torch.Tensor): World-to-camera transformation matrix.
+*   `c2w_matrix` (torch.Tensor): Camera-to-world transformation matrix.
+*   `bg_color` (float, default 0): Background color value.
+*   `near_plane` (float, default 0.02): Near clipping plane distance.
+*   `need_depth` (bool): Flag to enable depth output.
+*   `need_normal` (bool): Flag to enable normal output.
+*   `track_max_w` (bool): Flag to track maximum weight.
+*   `lambda_R_concen` (float): Regularization weight for concentration.
+*   `lambda_ascending` (float): Regularization weight for ascending order.
+*   `lambda_dist` (float): Regularization weight for distortion (enabled when > 0).
+*   `gt_color` (torch.Tensor, default empty): Ground truth color tensor `[3, H, W]` for backward loss computation.
+*   `debug` (bool): Debugging flag.
+
+**Algorithm Steps**
+1.  **Input Validation:** Verify that `n_samp_per_vox` is within `[1, _C.MAX_N_SAMP]`. Ensure `vox_centers` is `[N, 3]`, `geos` is `[N, 8]`, `rgbs` is `[N, 3]`, and `subdiv_p` is `[N, 1]`. Check for device mismatches among `w2c_matrix`, `c2w_matrix`, `vox_centers`, `vox_lengths`, `geos`, `rgbs`, and `gt_color` [S1, unofficial].
+2.  **Preprocessing:** Call the C++ extension `_C.rasterize_preprocess` with camera matrices, dimensions, and voxel data to generate `geomBuffer` and count duplicates `n_duplicates` [S1, unofficial].
+3.  **Frustum Culling:** Identify voxels inside the view frustum using `in_frusts_idx = torch.where(n_duplicates > 0)[0]` [S1, unofficial].
+4.  **Parameter Extraction:** Extract relevant voxel parameters for the frustum voxels using `vox_fn(in_frusts_idx, cam_pos, raster_settings.color_mode)` to obtain `geos`, `rgbs`, and `subdiv_p` [S1, unofficial].
+5.  **Rasterization:** Invoke the CUDA kernel `_C.rasterize_voxels` with the extracted parameters and settings. This returns `num_rendered`, `binningBuffer`, `imgBuffer`, `out_color`, `out_depth`, `out_normal`, `out_T`, and `max_w` [S1, unofficial].
+6.  **Backward State Saving:** Save tensors required for the backward pass: `octree_paths`, `vox_centers`, `vox_lengths`, `geos`, `rgbs`, `geomBuffer`, `binningBuffer`, `imgBuffer`, `out_T`, `out_depth`, `out_normal` [S1, unofficial].
+7.  **Non-differentiable Marking:** Mark `max_w` as non-differentiable using `ctx.mark_non_differentiable(max_w)` [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import svraster_cuda # Assuming this exposes _C and vox_fn
+
+class SparseVoxelRasterization(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, vox_centers, geos, rgbs, subdiv_p, n_samp_per_vox, 
+                w2c_matrix, c2w_matrix, image_width, image_height, 
+                tanfovx, tanfovy, cx, cy, bg_color, near_plane, 
+                need_depth, need_normal, track_max_w, 
+                lambda_R_concen, lambda_ascending, lambda_dist, 
+                gt_color, color_mode, debug):
+        
+        # 1. Validate inputs
+        assert 1 <= n_samp_per_vox <= svraster_cuda._C.MAX_N_SAMP
+        assert vox_centers.shape == (vox_centers.size(0), 3)
+        assert geos.shape == (geos.size(0), 8)
+        assert rgbs.shape == (rgbs.size(0), 3)
+        assert subdiv_p.shape == (subdiv_p.size(0), 1)
+        
+        # Device mismatch checks
+        devices = [vox_centers.device, geos.device, rgbs.device, subdiv_p.device, 
+                   w2c_matrix.device, c2w_matrix.device]
+        if gt_color.numel() > 0:
+            devices.append(gt_color.device)
+        assert all(d == devices[0] for d in devices)
+
+        # 2. Preprocess geometry
+        n_duplicates, geomBuffer = svraster_cuda._C.rasterize_preprocess(
+            vox_centers, geos, subdiv_p, 
+            w2c_matrix, c2w_matrix, 
+            image_width, image_height, 
+            tanfovx, tanfovy, cx, cy, 
+            near_plane
+        )
+
+        # 3. Identify voxels in frustum
+        in_frusts_idx = torch.where(n_duplicates > 0)[0]
+
+        # 4. Extract voxel parameters
+        cam_pos = ... # Derived from c2w_matrix or provided
+        vox_params = svraster_cuda.vox_fn(in_frusts_idx, cam_pos, color_mode)
+        # Assuming vox_fn returns a tuple or dict containing geos, rgbs, subdiv_p for the subset
+        # For the sake of the wrapper, we assume the C++ extension handles the indexing internally 
+        # or vox_fn returns the specific tensors needed. 
+        # Based on notes: "extracting geos, rgbs, subdiv_p"
+        # We pass the full tensors and indices to the rasterize call if the C++ API expects it,
+        # or we slice them here. The notes imply vox_fn does the extraction.
+        
+        # 5. Invoke rasterization
+        # Note: The exact signature of _C.rasterize_voxels is inferred from the notes.
+        # It takes the preprocessed buffers and voxel data.
+        num_rendered, binningBuffer, imgBuffer, out_color, out_depth, out_normal, out_T, max_w = \
+            svraster_cuda._C.rasterize_voxels(
+                in_frusts_idx, 
+                vox_centers, geos, rgbs, subdiv_p, # Or the sliced versions from vox_fn
+                n_samp_per_vox,
+                w2c_matrix, c2w_matrix,
+                image_width, image_height,
+                tanfovx, tanfovy, cx, cy,
+                bg_color, near_plane,
+                need_depth, need_normal, track_max_w,
+                lambda_R_concen, lambda_ascending, lambda_dist,
+                gt_color,
+                debug
+            )
+
+        # 6. Save for backward
+        ctx.save_for_backward(
+            in_frusts_idx, vox_centers, geos, rgbs, subdiv_p, 
+            geomBuffer, binningBuffer, imgBuffer, out_T, out_depth, out_normal
+        )
+        ctx.mark_non_differentiable(max_w)
+        
+        # Store settings for backward
+        ctx.raster_settings = (
+            n_samp_per_vox, lambda_R_concen, lambda_ascending, lambda_dist, 
+            gt_color, color_mode, debug
+        )
+        
+        return out_color, out_depth, out_normal, out_T, max_w
+
+    @staticmethod
+    def backward(ctx, grad_out_color, grad_out_depth, grad_out_normal, grad_out_T, grad_max_w):
+        # Retrieve saved tensors
+        in_frusts_idx, vox_centers, geos, rgbs, subdiv_p, \
+        geomBuffer, binningBuffer, imgBuffer, out_T, out_depth, out_normal = ctx.saved_tensors
+        
+        n_samp_per_vox, lambda_R_concen, lambda_ascending, lambda_dist, \
+        gt_color, color_mode, debug = ctx.raster_settings
+        
+        # Call backward kernel
+        # The C++ extension likely provides a backward function
+        grad_vox_centers, grad_geos, grad_rgbs, grad_subdiv_p = \
+            svraster_cuda._C.rasterize_voxels_backward(
+                in_frusts_idx, vox_centers, geos, rgbs, subdiv_p,
+                geomBuffer, binningBuffer, imgBuffer,
+                out_T, out_depth, out_normal,
+                grad_out_color, grad_out_depth, grad_out_normal, grad_out_T,
+                gt_color,
+                lambda_dist, # Used for distortion regularization gradient
+                debug
+            )
+            
+        return (grad_vox_centers, grad_geos, grad_rgbs, grad_subdiv_p, None, # n_samp_per_vox
+                None, None, None, None, None, None, None, # Camera params
+                None, None, None, None, None, None, None, # Settings
+                None, None, None, None, None, None) # Other settings
+```
+
+**Parameters**
+*   `lambda_dist` (float): Enables distortion regularization in the loss calculation when greater than 0 [S1, unofficial].
+*   `gt_color` (torch.Tensor): Ground truth color tensor of shape `[3, H, W]` used to compute color concentration loss during the backward pass [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Device Mismatch:** The implementation enforces strict device consistency for all input tensors (`w2c_matrix`, `c2w_matrix`, `vox_centers`, `vox_lengths`, `geos`, `rgbs`, `gt_color`). Mismatched devices will cause errors [S1, unofficial].
+*   **Sample Count:** `n_samp_per_vox` must be within the hardware-defined limit `_C.MAX_N_SAMP`. Values outside `[1, _C.MAX_N_SAMP]` are invalid [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the CUDA rasterization kernel and preprocessing step. Complexity depends on the number of voxels $N$ and image resolution $H \times W$.
+*   **Memory Complexity:** Requires storage for `geomBuffer`, `binningBuffer`, `imgBuffer`, and intermediate tensors for backward pass.
+*   **Strengths:** Differentiable rendering allows end-to-end training of voxel parameters. Supports multiple output channels (color, depth, normal).
+*   **Limitations:** Requires CUDA-capable hardware. Performance scales with the number of voxels and samples per voxel.
+*   **When to use:** When differentiable rendering of sparse voxel structures is required for optimization.
+*   **When not to use:** For non-differentiable visualization or when hardware lacks CUDA support.
+
+## Background
+This method originates from the `svraster` project, specifically the `svraster_cuda` extension, which provides a PyTorch autograd wrapper for efficient sparse voxel rasterization [S1, unofficial]. It is part of a broader ecosystem of tools for 3D reconstruction and neural rendering using sparse voxel representations.
+
+## Sources
+[S1] leonhardrobin/svraster-win10, https://github.com/leonhardrobin/svraster-win10, fetched 2026-10-27 (unofficial)

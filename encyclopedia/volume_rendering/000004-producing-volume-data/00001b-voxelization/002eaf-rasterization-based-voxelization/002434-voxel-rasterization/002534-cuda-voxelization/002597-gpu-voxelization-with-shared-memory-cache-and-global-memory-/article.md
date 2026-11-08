@@ -3,30 +3,22 @@
 Also called: Parallel Downsample GPU, mapPointsToVoxelsKernel
 
 ## Overview
-A CUDA kernel that maps 3D LiDAR points to a voxel grid by aggregating attributes into a block-level shared memory cache, falling back to atomic operations on global memory for cache collisions [S1, unofficial]. It differs from standard global-memory-only voxelization by reducing global memory contention through a small, fixed-size cache per block, and from pure shared-memory approaches by handling hash collisions gracefully [S1, unofficial].
+A CUDA kernel that maps 3D LiDAR points to a voxel grid by aggregating attributes into a block-level shared memory cache, falling back to atomic operations on global memory for cache collisions [S1, unofficial]. It builds on [CUDA Voxelization](3491-cuda-voxelization.md) by reducing global memory contention for spatially clustered points through a fixed-size per-block cache, while gracefully handling hash collisions that pure shared-memory approaches cannot [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- Array of 3D points with attributes: $x, y, z, \text{intensity}, \text{ring}$ [S1, unofficial].
-- Voxel grid dimensions: $\text{dim}_x, \text{dim}_y, \text{dim}_z$ [S1, unofficial].
-- Voxel side length: $\text{leaf\_size}$ (metres) [S1, unofficial].
-- Coordinate bounds: $\min_x, \min_y, \min_z$ [S1, unofficial].
-- Cache size: $\text{CACHE\_SIZE} = 256$ [S1, unofficial].
+- Point arrays: `points_x`, `points_y`, `points_z`, `points_intensity`, `points_ring` [S1, unofficial].
+- Voxel grid dimensions: `dim_x`, `dim_y`, `dim_z` [S1, unofficial].
+- Coordinate bounds: `min_x`, `min_y`, `min_z` [S1, unofficial].
+- Voxel side length: `leaf_size` (metres) [S1, unofficial].
+- Cache size: `CACHE_SIZE` (default 256) [S1, unofficial].
 
 **Outputs:**
-- Global voxel grid `d_grid` containing aggregated voxel data [S1, unofficial].
+- Global voxel grid arrays: `d_grid_sum_x`, `d_grid_sum_y`, `d_grid_sum_z`, `d_grid_intensity`, `d_grid_ring`, `d_grid_count` [S1, unofficial].
 
 **Data Structures:**
-- `VoxelGPU` struct in global and shared memory:
-  - `sum_x`: float
-  - `sum_y`: float
-  - `sum_z`: float
-  - `sum_intensity`: float
-  - `sum_ring`: float
-  - `count`: int
-- Shared memory arrays per block:
-  - `smem_voxel_idx[CACHE_SIZE]`: unsigned long long, initialized to `-1ULL` [S1, unofficial].
-  - `smem_voxel_data[CACHE_SIZE]`: array of `VoxelGPU`, initialized to zero [S1, unofficial].
+- `VoxelGPU` struct (global/shared): `sum_x` (float), `sum_y` (float), `sum_z` (float), `sum_intensity` (float), `sum_ring` (float), `count` (int) [S1, unofficial].
+- Shared memory arrays per block: `smem_voxel_idx` (`unsigned long long` array of size `CACHE_SIZE`, initialized to `-1`) and `smem_voxel_data` (`VoxelGPU` array of size `CACHE_SIZE`, initialized to zero) [S1, unofficial].
 
 **Algorithm Steps:**
 1. **Initialize Shared Memory:** If `threadIdx.x < CACHE_SIZE`, set `smem_voxel_idx[threadIdx.x] = -1ULL` and zero all fields in `smem_voxel_data[threadIdx.x]` [S1, unofficial].
@@ -51,131 +43,125 @@ A CUDA kernel that maps 3D LiDAR points to a voxel grid by aggregating attribute
    \text{cache\_idx} = \text{voxel\_idx} \pmod{\text{CACHE\_SIZE}}
    $$
    [S1, unofficial]
-7. **Attempt to Claim Slot:** Use `atomicCAS` on `smem_voxel_idx[cache_idx]` with value `-1ULL`. If the returned old value is `-1ULL` or equals `voxel_idx`, the claim is successful [S1, unofficial].
+7. **Attempt to Claim Slot:** Use `atomicCAS` on `smem_voxel_idx[cache_idx]` with value `-1ULL` [S1, unofficial]. If the returned old value is `-1ULL` or equals `voxel_idx`, the claim is successful [S1, unofficial].
 8. **Shared Memory Reduction (Claimed):** If claimed, perform `atomicAdd` on `smem_voxel_data[cache_idx]` for `sum_x`, `sum_y`, `sum_z`, `sum_intensity`, `sum_ring`, and `count` [S1, unofficial].
 9. **Global Memory Reduction (Collision):** If not claimed (collision), perform `atomicAdd` on `d_grid[voxel_idx]` for all fields [S1, unofficial].
 10. **Synchronize:** `__syncthreads()` [S1, unofficial].
 11. **Write Back Results:** If `threadIdx.x < CACHE_SIZE` and `smem_voxel_idx[threadIdx.x] != -1ULL` and `count > 0`, perform `atomicAdd` on `d_grid[smem_voxel_idx[threadIdx.x]]` for all fields [S1, unofficial].
 
+**Parameters:**
+- `CACHE_SIZE`: Shared memory cache size, set to 256 [S1, unofficial].
+- `leaf_size`: Voxel side length in metres [S1, unofficial].
+
+**Pitfalls:**
+- Cache collision: If another voxel already occupies the cache slot, the kernel falls back to global memory atomic operations [S1, unofficial].
+- Boundary handling: Voxel indices are clamped to `[0, dim-1]` to prevent out-of-bounds access [S1, unofficial].
+
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-__global__ void mapPointsToVoxelsKernel(
-    const float* points_x,
-    const float* points_y,
-    const float* points_z,
-    const float* points_intensity,
-    const int* points_ring,
-    const int num_points,
-    float* d_grid_sum_x,
-    float* d_grid_sum_y,
-    float* d_grid_sum_z,
-    float* d_grid_intensity,
-    float* d_grid_ring,
-    int* d_grid_count,
-    float min_x, float min_y, float min_z,
-    float leaf_size,
-    int dim_x, int dim_y, int dim_z,
-    int CACHE_SIZE
-) {
-    extern __shared__ char shared_mem[];
-    
-    // Cast shared memory
-    unsigned long long* smem_voxel_idx = reinterpret_cast<unsigned long long*>(shared_mem);
-    VoxelGPU* smem_voxel_data = reinterpret_cast<VoxelGPU*>(shared_mem + CACHE_SIZE * sizeof(unsigned long long));
+import math
 
-    // Step 1: Initialize shared memory
-    if (threadIdx.x < CACHE_SIZE) {
-        smem_voxel_idx[threadIdx.x] = -1ULL;
-        smem_voxel_data[threadIdx.x].sum_x = 0.0f;
-        smem_voxel_data[threadIdx.x].sum_y = 0.0f;
-        smem_voxel_data[threadIdx.x].sum_z = 0.0f;
-        smem_voxel_data[threadIdx.x].sum_intensity = 0.0f;
-        smem_voxel_data[threadIdx.x].sum_ring = 0.0f;
-        smem_voxel_data[threadIdx.x].count = 0;
-    }
-    __syncthreads();
+def mapPointsToVoxelsKernel(points_x, points_y, points_z, points_intensity, points_ring,
+                            num_points, min_x, min_y, min_z, leaf_size, 
+                            dim_x, dim_y, dim_z, CACHE_SIZE):
+    # Initialize global grid arrays (simulating pre-allocated device memory)
+    grid_size = dim_x * dim_y * dim_z
+    d_grid_sum_x = [0.0] * grid_size
+    d_grid_sum_y = [0.0] * grid_size
+    d_grid_sum_z = [0.0] * grid_size
+    d_grid_intensity = [0.0] * grid_size
+    d_grid_ring = [0.0] * grid_size
+    d_grid_count = [0] * grid_size
 
-    // Step 3-9: Process points assigned to this block
-    // Note: In a real implementation, a grid-stride loop or block index mapping would be used.
-    // Here we assume a simplified mapping where each thread processes one point or a subset.
-    // For completeness, we assume a standard 1D grid of threads mapping to points.
-    int point_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (point_idx < num_points) {
-        float px = points_x[point_idx];
-        float py = points_y[point_idx];
-        float pz = points_z[point_idx];
-        float p_intensity = points_intensity[point_idx];
-        int p_ring = points_ring[point_idx];
+    # Simulate shared memory arrays per block
+    smem_voxel_idx = [-1] * CACHE_SIZE
+    smem_voxel_data = [{'sum_x': 0.0, 'sum_y': 0.0, 'sum_z': 0.0, 
+                        'sum_intensity': 0.0, 'sum_ring': 0.0, 'count': 0} for _ in range(CACHE_SIZE)]
 
-        // Step 3: Calculate voxel indices
-        int idx_x = floorf((px - min_x) / leaf_size);
-        int idx_y = floorf((py - min_y) / leaf_size);
-        int idx_z = floorf((pz - min_z) / leaf_size);
+    # Step 1: Initialize shared memory
+    for i in range(CACHE_SIZE):
+        smem_voxel_idx[i] = -1
+        smem_voxel_data[i] = {'sum_x': 0.0, 'sum_y': 0.0, 'sum_z': 0.0, 
+                              'sum_intensity': 0.0, 'sum_ring': 0.0, 'count': 0}
 
-        // Step 4: Clamp indices
-        if (idx_x < 0) idx_x = 0;
-        if (idx_x >= dim_x) idx_x = dim_x - 1;
-        if (idx_y < 0) idx_y = 0;
-        if (idx_y >= dim_y) idx_y = dim_y - 1;
-        if (idx_z < 0) idx_z = 0;
-        if (idx_z >= dim_z) idx_z = dim_z - 1;
+    # Step 2: Synchronize (simulated)
+    # __syncthreads()
 
-        // Step 5: Calculate global voxel index
-        int voxel_idx = idx_x + idx_y * dim_x + idx_z * dim_x * dim_y;
+    # Process points
+    for point_idx in range(num_points):
+        px = points_x[point_idx]
+        py = points_y[point_idx]
+        pz = points_z[point_idx]
+        p_intensity = points_intensity[point_idx]
+        p_ring = points_ring[point_idx]
 
-        // Step 6: Compute cache slot
-        int cache_idx = voxel_idx % CACHE_SIZE;
+        # Step 3: Calculate voxel indices
+        idx_x = math.floor((px - min_x) / leaf_size)
+        idx_y = math.floor((py - min_y) / leaf_size)
+        idx_z = math.floor((pz - min_z) / leaf_size)
 
-        // Step 7: Attempt to claim slot
-        unsigned long long old_val = atomicCAS(&smem_voxel_idx[cache_idx], -1ULL, (unsigned long long)voxel_idx);
-        
-        bool claimed = (old_val == -1ULL) || (old_val == (unsigned long long)voxel_idx);
+        # Step 4: Clamp indices
+        idx_x = max(0, min(idx_x, dim_x - 1))
+        idx_y = max(0, min(idx_y, dim_y - 1))
+        idx_z = max(0, min(idx_z, dim_z - 1))
 
-        if (claimed) {
-            // Step 8: Shared memory reduction
-            atomicAdd(&smem_voxel_data[cache_idx].sum_x, px);
-            atomicAdd(&smem_voxel_data[cache_idx].sum_y, py);
-            atomicAdd(&smem_voxel_data[cache_idx].sum_z, pz);
-            atomicAdd(&smem_voxel_data[cache_idx].sum_intensity, p_intensity);
-            atomicAdd(&smem_voxel_data[cache_idx].sum_ring, (float)p_ring);
-            atomicAdd(&smem_voxel_data[cache_idx].count, 1);
-        } else {
-            // Step 9: Global memory reduction (collision fallback)
-            atomicAdd(&d_grid_sum_x[voxel_idx], px);
-            atomicAdd(&d_grid_sum_y[voxel_idx], py);
-            atomicAdd(&d_grid_sum_z[voxel_idx], pz);
-            atomicAdd(&d_grid_intensity[voxel_idx], p_intensity);
-            atomicAdd(&d_grid_ring[voxel_idx], (float)p_ring);
-            atomicAdd(&d_grid_count[voxel_idx], 1);
-        }
-    }
+        # Step 5: Calculate global voxel index
+        voxel_idx = idx_x + idx_y * dim_x + idx_z * dim_x * dim_y
 
-    __syncthreads();
+        # Step 6: Compute cache slot
+        cache_idx = voxel_idx % CACHE_SIZE
 
-    // Step 11: Write back shared memory results
-    if (threadIdx.x < CACHE_SIZE) {
-        if (smem_voxel_idx[threadIdx.x] != -1ULL && smem_voxel_data[threadIdx.x].count > 0) {
-            int v_idx = (int)smem_voxel_idx[threadIdx.x];
-            atomicAdd(&d_grid_sum_x[v_idx], smem_voxel_data[threadIdx.x].sum_x);
-            atomicAdd(&d_grid_sum_y[v_idx], smem_voxel_data[threadIdx.x].sum_y);
-            atomicAdd(&d_grid_sum_z[v_idx], smem_voxel_data[threadIdx.x].sum_z);
-            atomicAdd(&d_grid_intensity[v_idx], smem_voxel_data[threadIdx.x].sum_intensity);
-            atomicAdd(&d_grid_ring[v_idx], smem_voxel_data[threadIdx.x].sum_ring);
-            atomicAdd(&d_grid_count[v_idx], smem_voxel_data[threadIdx.x].count);
-        }
-    }
-}
+        # Step 7: Attempt to claim slot (simulated atomicCAS)
+        old_val = smem_voxel_idx[cache_idx]
+        if old_val == -1 or old_val == voxel_idx:
+            smem_voxel_idx[cache_idx] = voxel_idx
+            claimed = True
+        else:
+            claimed = False
+
+        if claimed:
+            # Step 8: Shared memory reduction
+            smem_voxel_data[cache_idx]['sum_x'] += px
+            smem_voxel_data[cache_idx]['sum_y'] += py
+            smem_voxel_data[cache_idx]['sum_z'] += pz
+            smem_voxel_data[cache_idx]['sum_intensity'] += p_intensity
+            smem_voxel_data[cache_idx]['sum_ring'] += float(p_ring)
+            smem_voxel_data[cache_idx]['count'] += 1
+        else:
+            # Step 9: Global memory reduction (collision fallback)
+            d_grid_sum_x[voxel_idx] += px
+            d_grid_sum_y[voxel_idx] += py
+            d_grid_sum_z[voxel_idx] += pz
+            d_grid_intensity[voxel_idx] += p_intensity
+            d_grid_ring[voxel_idx] += float(p_ring)
+            d_grid_count[voxel_idx] += 1
+
+    # Step 10: Synchronize
+    # __syncthreads()
+
+    # Step 11: Write back shared memory results
+    for i in range(CACHE_SIZE):
+        if smem_voxel_idx[i] != -1 and smem_voxel_data[i]['count'] > 0:
+            v_idx = int(smem_voxel_idx[i])
+            d_grid_sum_x[v_idx] += smem_voxel_data[i]['sum_x']
+            d_grid_sum_y[v_idx] += smem_voxel_data[i]['sum_y']
+            d_grid_sum_z[v_idx] += smem_voxel_data[i]['sum_z']
+            d_grid_intensity[v_idx] += smem_voxel_data[i]['sum_intensity']
+            d_grid_ring[v_idx] += smem_voxel_data[i]['sum_ring']
+            d_grid_count[v_idx] += smem_voxel_data[i]['count']
+
+    return d_grid_sum_x, d_grid_sum_y, d_grid_sum_z, d_grid_intensity, d_grid_ring, d_grid_count
 ```
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ for $N$ points, with reduced global memory contention due to caching [S1, unofficial].
-- **Memory Complexity:** $O(\text{CACHE\_SIZE} \cdot \text{num\_blocks})$ for shared memory, plus $O(\text{dim}_x \cdot \text{dim}_y \cdot \text{dim}_z)$ for global grid [S1, unofficial].
-- **Strengths:** Reduces global memory atomic contention for clustered points [S1, unofficial].
-- **Limitations:** Cache collisions force fallback to global memory, which may still be a bottleneck if collision rate is high [S1, unofficial].
+- **Time Complexity:** Not given in the sources [S1, unofficial].
+- **Memory Complexity:** Not given in the sources [S1, unofficial].
+- **Strengths:** Reduces global memory atomic contention for spatially clustered points by aggregating them in shared memory first [S1, unofficial].
+- **Limitations:** Cache collisions force fallback to global memory atomic operations, which may degrade performance if collision rates are high [S1, unofficial].
 - **When to use:** When points are spatially clustered, leading to repeated access to the same voxels within a block [S1, unofficial].
-- **When not to use:** When points are uniformly distributed across a large volume, leading to high cache miss rates [S1, unofficial].
+- **When not to use:** Not given in the sources [S1, unofficial].
 
 ## Background
 Originated in the context of GPU-accelerated LiDAR point cloud voxelization, specifically in the `benchmark_parallel.exe` tool from the Aleyna-B/Point-Cloud-Voxelization repository [S1, unofficial]. It is used for downsampling LiDAR scans, such as those from the nuScenes dataset, into voxel grids for further processing [S1, unofficial].

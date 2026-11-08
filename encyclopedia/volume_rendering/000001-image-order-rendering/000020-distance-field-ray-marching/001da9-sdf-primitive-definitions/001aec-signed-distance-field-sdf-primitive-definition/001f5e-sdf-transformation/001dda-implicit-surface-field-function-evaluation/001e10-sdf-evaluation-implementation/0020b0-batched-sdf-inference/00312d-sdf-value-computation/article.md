@@ -3,62 +3,102 @@
 Also called: IsoVal.compute
 
 ## Overview
-SDF Value Computation is the core kernel that calculates the Signed Distance Function (SDF) value for each voxel in a grid. It transforms grid coordinates to world space, evaluates the SDF function, and stores the result. It builds on [Batched SDF Inference](2329-batched-sdf-inference.md) by performing the actual geometric evaluation for a batch of samples.
+SDF Value Computation is the core kernel that evaluates the Signed Distance Function (SDF) for a grid of voxels, transforming local shape coordinates to world space and storing the resulting distance values. It serves as the atomic evaluation step within batched inference pipelines, providing the geometric data required for subsequent ray marching or surface extraction. It differs from multi-view fusion methods by operating on a single implicit shape definition at a time, focusing purely on the mathematical evaluation of the distance field rather than photometric consistency or view-dependent projection.
 
 ## How it works
-**Inputs:**
-- Grid ID (integer index of the voxel).
-- `_ShapeToWorld`: A 4x4 matrix transforming local shape coordinates to world space.
-- `SHAPE_SIZE`: Parameter defining the scale or bounds of the primitive shape.
-- `FUNCTION`: The specific SDF primitive function to evaluate.
-
-**Outputs:**
-- SDF value for the voxel.
+**Inputs and Outputs:**
+*   **Input:** A 3D grid of voxel indices (IDs), a 4x4 transformation matrix `_ShapeToWorld` mapping local shape space to world space, and the shape's intrinsic size `SHAPE_SIZE`.
+*   **Output:** A 1D array or texture storing the computed SDF value for each voxel.
 
 **Data Structures:**
-- `_IsoVals`: Array storing computed SDF values.
-- `_ShapeToWorld`: 4x4 transformation matrix.
+*   `_IsoVals`: A 1D array storing SDF values, indexed by a linearized 3D coordinate ID.
+*   `_ShapeToWorld`: A $4 \times 4$ matrix.
+*   `SHAPE_SIZE`: A scalar defining the scale or extent of the primitive shape.
 
 **Steps:**
-1. Get the surface position from the grid ID using `GetPosSurface(id)`.
-2. Transform the position to world space using `_ShapeToWorld`.
-3. Evaluate the SDF function (`FUNCTION`) at the world position with `SHAPE_SIZE`.
+1.  **Grid Coordinate Retrieval:** For each voxel, determine its 3D grid coordinates from its linear ID.
+2.  **Local Position Calculation:** Convert the grid coordinates into a local surface position. The source specifies a helper `GetPosSurface(id)` which maps the voxel ID to a 3D position in the local shape coordinate system.
+3.  **World Space Transformation:** Transform the local position $\mathbf{p}_{local}$ to world space $\mathbf{p}_{world}$ using the transformation matrix:
+    $$ \mathbf{p}_{world} = \mathbf{M}_{shape\_to\_world} \cdot \mathbf{p}_{local} $$
+    where $\mathbf{M}_{shape\_to\_world}$ is `_ShapeToWorld`.
+4.  **SDF Evaluation:** Evaluate the SDF function $F(\mathbf{p})$ at the world position. The function depends on the specific primitive shape defined by `SHAPE_SIZE`.
+    $$ d = \text{SDF}(\mathbf{p}_{world}, \text{SHAPE\_SIZE}) $$
+5.  **Storage:** Store the computed distance $d$ in the output array at the index corresponding to the voxel ID.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_sdf_value(id, shape_to_world, shape_size, function):
-    # Step 1: Get surface position from grid ID
-    local_pos = get_pos_surface(id)
+def compute_sdf_value(voxel_id, shape_to_world_matrix, shape_size):
+    """
+    Computes the SDF value for a single voxel.
     
-    # Step 2: Transform to world space
-    world_pos = transform_point(shape_to_world, local_pos)
+    Args:
+        voxel_id (int): Linear index of the voxel in the grid.
+        shape_to_world_matrix (Matrix4x4): Transformation from local shape space to world space.
+        shape_size (float): Size parameter of the implicit shape.
+        
+    Returns:
+        float: The signed distance value.
+    """
+    # Step 1 & 2: Get local position from grid ID
+    # Implementation detail: GetPosSurface maps linear ID to 3D local coordinates
+    local_pos = get_pos_surface(voxel_id)
     
-    # Step 3: Evaluate SDF function
-    sdf_value = function(world_pos, shape_size)
+    # Step 3: Transform to world space
+    # Assuming local_pos is a homogeneous vector (x, y, z, 1)
+    world_pos = transform_point(shape_to_world_matrix, local_pos)
     
+    # Step 4: Evaluate SDF function
+    # The specific SDF function depends on the shape type (e.g., sphere, box)
+    # and uses shape_size as a parameter.
+    sdf_value = evaluate_sdf_function(world_pos, shape_size)
+    
+    # Step 5: Return value (storage handled by caller/kernel launch)
     return sdf_value
+
+def get_pos_surface(voxel_id):
+    """
+    [G] Helper to map a linear voxel ID to a 3D local coordinate.
+    Assumes a regular grid with known dimensions and origin.
+    """
+    # Example implementation for a regular grid:
+    # grid_dims = (dim_x, dim_y, dim_z)
+    # x = (voxel_id % dim_x) / dim_x * 2 - 1  # Normalize to [-1, 1] or similar
+    # y = ((voxel_id // dim_x) % dim_y) / dim_y * 2 - 1
+    # z = (voxel_id // (dim_x * dim_y)) / dim_z * 2 - 1
+    # return float3(x, y, z)
+    raise NotImplementedError("Grid dimensions and origin not provided in source.")
+
+def evaluate_sdf_function(world_pos, shape_size):
+    """
+    [G] Placeholder for specific SDF primitives.
+    Common examples:
+    - Sphere: length(world_pos) - shape_size
+    - Box: length(max(abs(world_pos) - shape_size, 0.0)) - shape_size
+    """
+    raise NotImplementedError("Specific SDF primitive function not defined in source.")
 ```
 
-**Parameters:**
-- `_ShapeToWorld`: A 4x4 matrix transforming local shape coordinates to world space.
-- `SHAPE_SIZE`: Parameter defining the scale or bounds of the primitive shape.
-
 **Edge Cases and Pitfalls:**
-- Precision issues may arise if the transformation matrix is not properly normalized.
-- Boundary conditions for the grid must be handled to avoid out-of-bounds access.
+*   **Precision:** Floating-point precision errors in the transformation matrix multiplication can cause slight inaccuracies in the distance value, potentially affecting marching convergence.
+*   **Boundary Conditions:** The definition of `GetPosSurface` must correctly handle grid boundaries to avoid out-of-bounds access or incorrect coordinate mapping.
+*   **Shape Definition:** The `evaluate_sdf_function` must be consistent with the `SHAPE_SIZE` interpretation (e.g., radius vs. half-extent).
 
 ## Subtopics
 
+### [Per-Frame SDF Computation](6846-per-frame-sdf-computation.md)
+Calculates SDF and RGB for 3D points relative to a single camera view, solving geometric and photometric consistency. It differs by incorporating view-dependent color and depth comparison, whereas this method is view-agnostic and geometry-only.
+
 ## Operating characteristics
-- **Time Complexity:** O(1) per voxel, as it involves a fixed number of transformations and function evaluations.
-- **Memory Complexity:** O(N) for storing SDF values, where N is the number of voxels.
-- **Strengths:** Efficient for large grids due to batched processing.
-- **Limitations:** Performance may degrade with complex SDF functions or large transformation matrices.
+*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as each voxel is processed independently.
+*   **Memory Complexity:** $O(N)$ to store the SDF values.
+*   **Performance:** Highly parallelizable, making it suitable for GPU compute shaders. Performance is limited by the complexity of the SDF primitive function and memory bandwidth.
+*   **Strengths:** Simple, deterministic, and easily parallelizable.
+*   **Limitations:** Does not handle multi-view consistency or color; requires a defined shape primitive.
 
 ## Background
-Originated from the need to efficiently compute SDF values for voxel-based rendering. The method is part of a broader pipeline for implicit surface rendering.
+This method is derived from the `vinceniko/Isosurface` repository, which implements an isosurface extraction pipeline. The specific kernel is part of a larger system that includes marching cubes or similar surface extraction algorithms, as indicated by the surrounding code snippets involving triangle winding orders and quad splitting.
 
 ## Sources
 [S1] vinceniko/Isosurface, https://github.com/vinceniko/Isosurface, fetched 2026-10-27 (unofficial)

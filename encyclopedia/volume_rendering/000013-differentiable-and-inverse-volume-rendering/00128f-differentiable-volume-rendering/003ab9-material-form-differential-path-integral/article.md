@@ -1,0 +1,169 @@
+# Material-Form Differential Path Integral
+
+Also called: Differentiable Path Integral with BSSRDF, Differential path integral, Material Space Differentiation, Reynolds Transport Theorem for Path Integrals, Spatial-form Differential Path Integral, Spatial-form path integral derivative
+
+## Overview
+The Material-Form Differential Path Integral is a method for computing the gradient of a radiometric measurement with respect to scene parameters $\pi$ by transforming the integration domain from a deforming spatial path space to a fixed "material space" [S1, S2][S3, unofficial]. This approach solves the problem of differentiating integrals over domains that change shape or position with respect to parameters, which causes discontinuities in visibility and geometry [S1][S3, unofficial]. It sets itself apart from the Spatial-Form Differential Path Integral by eliminating boundary terms associated with static geometric features (like mesh edges) that do not move with $\pi$, thereby reducing the number of discontinuity types that require explicit boundary integration [S3, unofficial].
+
+## How it works
+The method computes the derivative of the path integral $I$ with respect to a scene parameter $\pi$ by decomposing it into an interior integral over the material path space and a boundary integral over the material boundary path space [S2][S3, unofficial].
+
+### Inputs and Outputs
+*   **Input:** Scene parameters $\pi$ (e.g., vertex positions, implicit surface parameters), a global parameterization $X$ mapping material points to spatial points, and the measurement function $f$ (or its material-space counterpart $\hat{f}$).
+*   **Output:** The scalar gradient $\frac{dI}{d\pi}$.
+
+### Data Structures
+*   **Material Path Space ($\hat{\Omega}$):** A fixed domain independent of $\pi$. A path $\bar{\mathbf{p}} = (\mathbf{p}_0, \dots, \mathbf{p}_n)$ consists of vertices in material space.
+*   **Material Boundary Path Space ($\partial\hat{\Omega}$):** A subspace of paths where exactly one vertex $\mathbf{p}_K$ is constrained to a visibility boundary curve $\Delta B(\mathbf{p}_{K-1})$ [S2][S3, unofficial].
+*   **Jacobian Determinant ($J$):** A scalar field representing the area distortion of the map $\chi$ from material to spatial space.
+
+### Steps
+1.  **Define Material Space:** Establish a fixed reference domain $\hat{M}$ (material space) and a deformation map $\chi(\mathbf{y}, \pi)$ that maps a material point $\mathbf{y} \in \hat{M}$ to a spatial point $\mathbf{x} \in M(\pi)$ [S1]. The spatial path $\bar{\mathbf{x}}$ is related to the material path $\bar{\mathbf{p}}$ by $\mathbf{x}_i = \chi(\mathbf{p}_i, \pi)$ [S3, unofficial].
+2.  **Transform the Integral:** Rewrite the original path integral $I = \int_{\Omega(\pi)} f(\bar{\mathbf{x}}) d\mu(\bar{\mathbf{x}})$ as an integral over the fixed material space $\hat{\Omega}$:
+    $$
+    I = \int_{\hat{\Omega}} \hat{f}(\bar{\mathbf{p}}) d\hat{\mu}(\bar{\mathbf{p}})
+    $$
+    where $\hat{f}(\bar{\mathbf{p}}) = f(\bar{\mathbf{x}}) \prod_{i=0}^{n} J(\mathbf{p}_i)$ and $J(\mathbf{p}) = \left| \frac{dA(\mathbf{x})}{dA(\mathbf{p})} \right|$ is the Jacobian determinant of the map [S1, S2][S3, unofficial].
+3.  **Differentiate:** Apply the Reynolds Transport Theorem (or material derivative) to the fixed-domain integral. The derivative $\frac{dI}{d\pi}$ is the sum of two terms [S2][S3, unofficial]:
+    $$
+    \frac{dI}{d\pi} = \int_{\hat{\Omega}} \frac{\partial \hat{f}}{\partial \pi}(\bar{\mathbf{p}}) d\hat{\mu}(\bar{\mathbf{p}}) + \int_{\partial\hat{\Omega}} \hat{f}(\bar{\mathbf{p}}) V_{\partial}(\mathbf{p}_K) d\hat{\mu}'(\bar{\mathbf{p}})
+    $$
+    *   **Interior Term:** The integral of the partial derivative of the material measurement contribution $\hat{f}$ with respect to $\pi$ over the entire material path space $\hat{\Omega}$ [S2][S3, unofficial].
+    *   **Boundary Term:** The integral over the material boundary path space $\partial\hat{\Omega}$. This space contains paths with exactly one vertex $\mathbf{p}_K$ constrained to a set of visibility boundaries $\Delta B(\mathbf{p}_{K-1})$ [S2]. $\Delta B$ represents the discontinuity curves of the visibility function $g$ with respect to $\mathbf{p}_K$ when $\mathbf{p}_{K-2}$ and $\mathbf{p}_{K-1}$ are fixed [S3, unofficial].
+4.  **Compute Boundary Velocity:** Calculate the normal velocity $V_{\partial}(\mathbf{p}_K)$ of the visibility boundary:
+    $$
+    V_{\partial}(\mathbf{p}_K) = \mathbf{n}_{\partial}(\mathbf{p}_K) \cdot \frac{d\mathbf{p}_K}{d\pi}
+    $$
+    where $\mathbf{n}_{\partial}(\mathbf{p}_K)$ is the unit normal of the visibility boundary (perpendicular to both the surface normal and the tangent of the boundary curve), assumed to point toward the occluded side [S2].
+5.  **Estimate:** Use Monte Carlo sampling to estimate the interior and boundary integrals. For the boundary term, sample paths where $\mathbf{p}_K$ lies on the silhouette/visibility boundary [S2].
+
+### Formulas
+*   **Material Measurement Contribution:**
+    $$
+    \hat{f}(\bar{\mathbf{p}}) = \hat{W}_e(\mathbf{p}_0, \mathbf{p}_1) C(\bar{\mathbf{p}}) G(\bar{\mathbf{p}}) \hat{L}_e(\mathbf{p}_n, \mathbf{p}_{n-1})
+    $$
+    where $C(\bar{\mathbf{p}}) = \prod \hat{\rho}$ and $G(\bar{\mathbf{p}}) = \prod \hat{G}$ are products of scattering and geometry terms in material space [S1].
+*   **Transformed Scattering/Geometry Terms:**
+    $$
+    \hat{\rho}(\mathbf{p}_{i-1}, \mathbf{p}_i, \mathbf{p}_{i+1}) = \rho(\mathbf{y}_{i-1}, \mathbf{y}_i, \mathbf{y}_{i+1}) J(\mathbf{p}_i)
+    $$
+    $$
+    \hat{G}(\mathbf{p}_i, \mathbf{p}_{i+1}) = G(\mathbf{y}_i, \mathbf{y}_{i+1})
+    $$
+    where $J(\mathbf{p}) = |dA(\mathbf{y})/dA(\mathbf{p})|$ is the Jacobian of the map $\chi$ [S1].
+*   **Boundary Contribution Jump:**
+    $$
+    \Delta \hat{f}_K(\bar{\mathbf{p}}) = \hat{f}(\bar{\mathbf{p}}) \frac{\Delta g(\mathbf{p}_K; \mathbf{p}_{K-2}, \mathbf{p}_{K-1})}{g(\mathbf{p}_K; \mathbf{p}_{K-2}, \mathbf{p}_{K-1})}
+    $$
+    [S3, unofficial]
+*   **General Transport Relation (for reference):**
+    $$
+    \dot{h}_n = \int_{M} [(h_{n+1} g)^\bullet - h_{n+1} g \kappa_V] dA + \int_{\partial M} h_{n+1} \Delta g_V \partial M d\ell
+    $$
+    [S3, unofficial]
+
+### Parameters
+*   $\pi$: Scene parameter (e.g., vertex position, implicit field value) [S3, unofficial].
+*   $\mathbf{n}_{\partial}(\mathbf{p}_K)$: Unit normal of the visibility boundary [S2].
+*   $X(\cdot, \pi)$: Global parameterization mapping material to spatial points [S3, unofficial].
+*   $\hat{\Omega}$: Material path space [S3, unofficial].
+*   $\partial \hat{\Omega}$: Material boundary path space [S3, unofficial].
+*   $\Delta B_K(\pi)$: Discontinuity curves of $\hat{g}$ with respect to $\mathbf{p}_K$ [S3, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Reciprocity:** The boundary term in the material form is not reciprocal due to the unidirectional definition of the boundary path space $\partial M^n(\pi)$ [S3, unofficial].
+*   **Implicit Surfaces:** Obtaining a global parameterization $X$ for implicit surfaces can be difficult. If a global parameterization is not available, the method may need to resort to the spatial form [S3, unofficial].
+*   **Discontinuity Independence:** If discontinuity curves $\Delta B[J]$ are independent of $\pi$, the formulation still holds, but the boundary velocity for those specific discontinuities will be zero [S3, unofficial].
+*   **Jacobian Derivatives:** Even if the Jacobian determinant $J$ is 1 (e.g., via local parameterization), the scene derivative $\dot{J}$ generally remains nonzero [S3, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def material_form_differential_path_integral(scene_params, path_sampler, boundary_sampler):
+    """
+    Computes the gradient of the path integral with respect to scene_params
+    using the material-form differential path integral formulation.
+    """
+    # 1. Define the material space parameterization
+    # X maps material point p to spatial point x
+    def map_material_to_spatial(p, pi):
+        return X(p, pi)
+
+    # 2. Compute Jacobian determinant J(p)
+    # J(p) = |dA(x)/dA(p)|
+    # Note: In practice, this requires the derivative of the parameterization map.
+    def compute_jacobian(p, pi):
+        # Implementation depends on the specific parameterization X
+        # For a local parameterization at pi_0, J might be 1, but dJ/dpi is not.
+        return J(p, pi)
+
+    # 3. Compute the interior term
+    # Integral over Omega_hat of d(f_hat)/d(pi)
+    interior_gradient = 0.0
+    for path in path_sampler.sample_material_paths():
+        # Calculate spatial path from material path
+        spatial_path = [map_material_to_spatial(p, scene_params) for p in path]
+        
+        # Calculate f_hat
+        f_hat = compute_measurement_contribution(spatial_path)
+        for p in path:
+            f_hat *= compute_jacobian(p, scene_params)
+            
+        # Calculate partial derivative of f_hat with respect to pi
+        # This involves differentiating the radiance, geometry, and BSDF terms
+        # as well as the Jacobian terms
+        df_hat_dpi = compute_partial_derivative_f_hat(spatial_path, path, scene_params)
+        
+        interior_gradient += df_hat_dpi
+
+    # 4. Compute the boundary term
+    # Integral over dOmega_hat of f_hat * V_boundary
+    boundary_gradient = 0.0
+    for boundary_path in boundary_sampler.sample_boundary_paths():
+        # boundary_path has one vertex p_K on the visibility boundary
+        p_K = boundary_path.vertex_K
+        spatial_p_K = map_material_to_spatial(p_K, scene_params)
+        
+        # Calculate f_hat for the full path
+        spatial_path = [map_material_to_spatial(p, scene_params) for p in boundary_path]
+        f_hat = compute_measurement_contribution(spatial_path)
+        for p in boundary_path:
+            f_hat *= compute_jacobian(p, scene_params)
+            
+        # Calculate normal velocity V_boundary
+        # V_boundary = n_boundary . dp_K/dpi
+        n_boundary = compute_visibility_boundary_normal(p_K, scene_params)
+        dp_K_dpi = compute_parameter_derivative_of_vertex(p_K, scene_params)
+        V_boundary = dot(n_boundary, dp_K_dpi)
+        
+        boundary_gradient += f_hat * V_boundary
+
+    return interior_gradient + boundary_gradient
+```
+
+## Subtopics
+
+### [Material-form reparameterization](8849-material-form-reparameterization.md)
+Reparameterizes the path integral using a fixed reference surface and a differentiable mapping to avoid differentiating evolving geometry directly, converting light paths to material paths.
+
+### Local Parameterization via Reference Map
+A technique to define a local motion $\hat{X}$ at a fixed parameter $\pi_0$ such that the Jacobian determinant $J$ becomes one, simplifying estimation [S3, unofficial]. The local motion is defined as $\hat{X}(\cdot, \pi) = X(\cdot, \pi) \circ P(\cdot, \pi_0)$, where $P$ is the reference map [S3, unofficial]. This reduces $\hat{X}(\cdot, \pi)$ to the identity map when $\pi = \pi_0$ [S3, unofficial]. While $J=1$, the scene derivatives $\dot{J}$ generally remain nonzero [S3, unofficial]. This allows efficient estimation using previously developed path sampling methods due to the unit Jacobian [S3, unofficial].
+
+### Discontinuity Handling in Material Form
+Analysis of discontinuity sources in the material-form differential path integral, noting that many jump discontinuities of $g$ with respect to $\mathbf{p}_{n+1}$ do not move with $\pi$, causing normal velocity to vanish [S3, unofficial]. For polygonal meshes, face edges in the reference $B$ are $\pi$-independent and do not need to be included in $\Delta B[\hat{f}]$ [S3, unofficial]. The Jacobian determinant $J$ is constant within faces but discontinuous across boundaries; however, face boundaries are $\pi$-independent and excluded from discontinuity curves [S3, unofficial]. Only visibility-related discontinuities (silhouette edges) need to be handled with boundary integrals in the material form for polygonal meshes [S3, unofficial].
+
+## Operating characteristics
+*   **Complexity:** The method requires sampling both interior paths and boundary paths (silhouettes). Boundary sampling is known to be challenging and often requires specific silhouette detection techniques [S2].
+*   **Memory:** By using a fixed material space, the method avoids storing intermediate states for deforming domains, potentially reducing memory overhead compared to naive reverse-mode AD on deforming meshes, though this depends on the specific implementation of the boundary term [S1, S5].
+*   **Strengths:** It simplifies the boundary term by excluding static geometric discontinuities (like mesh edges) that do not move with $\pi$, reducing the number of discontinuity types to handle compared to the spatial form [S3, unofficial]. It allows the use of standard path sampling methods when combined with local parameterization (unit Jacobian) [S3, unofficial].
+*   **Limitations:** It requires a global parameterization $X$ from material to spatial space, which can be difficult to obtain for implicit surfaces or complex topologies [S3, unofficial]. The boundary term is not reciprocal, which may complicate certain estimator designs [S3, unofficial].
+*   **When to use:** When the scene geometry deforms or changes with parameters and a suitable material parameterization exists. It is particularly useful for translucent objects and subsurface scattering where the path integral framework is extended with BSSRDF [S1].
+
+## Background
+The method originates from the application of the Reynolds Transport Theorem to path integrals in computer graphics [S1][S3, unofficial]. It was developed to handle differentiable rendering of translucent objects and implicit surfaces, where the integration domain (path space) depends on scene parameters [S1, S2]. The material-form formulation was introduced to simplify the boundary terms by leveraging a fixed reference domain, building on earlier work in spatial-form differential path integrals [S2][S3, unofficial]. It is used in differentiable rendering pipelines for reconstructing translucent objects and optimizing implicit surfaces [S1, S2].
+
+## Sources
+[S1] Reconstructing Translucent Objects using Differentiable Rendering, https://doi.org/10.1145/3528233.3530714, fetched 2026-11-03
+[S2] Path-Space Differentiable Rendering of Implicit Surfaces, https://doi.org/10.1145/3641519.3657473, fetched 2026-10-30
+[S3] Path-Space Differentiable Rendering, https://core.ac.uk/download/541724175.pdf, fetched 2026-10-29 (unofficial)

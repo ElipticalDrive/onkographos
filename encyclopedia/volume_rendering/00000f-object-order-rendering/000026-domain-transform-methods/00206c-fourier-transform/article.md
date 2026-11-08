@@ -2,155 +2,141 @@
 Also called: Discrete Fourier Transform
 
 ## Overview
-The Fourier Transform method converts a 3D scalar volume into the frequency domain to enable rendering via the Projection-Slice Theorem [S1, S2, unofficial]. It differs from spatial-domain methods by performing a global transformation of the entire volume, which allows for efficient convolution and filtering but lacks spatial localization of features [S1, unofficial]. It serves as the foundational transform for domain-transform volume rendering pipelines [S2, unofficial].
+The Fourier Transform method converts a 3D scalar volume into the frequency domain to enable rendering via the Projection-Slice Theorem [S1, S2, unofficial]. It differs from spatial-domain methods by performing a global transformation of the entire volume, which allows for efficient convolution operations but requires significant preprocessing memory and does not support interactive parameter changes like opacity or lighting [S1, S2, unofficial].
 
 ## How it works
-The method follows the three-stage pipeline of domain-transform methods: Global Transformation, Slice Extraction, and Inverse Transformation [S1, S2, unofficial].
+**Inputs and Outputs:**
+*   **Input:** A 3D scalar volume $f(x, y, z)$ of dimensions $N_x \times N_y \times N_z$.
+*   **Output:** A 2D projection image $I(u, v)$.
 
-### Inputs and Outputs
-- **Input:** A 3D scalar volume $f(x, y, z)$ of size $N_x \times N_y \times N_z$.
-- **Output:** A 2D projection image $I(u, v)$.
+**Data Structures:**
+*   **Volume Data:** A 3D array of complex numbers (or real numbers, exploiting Hermitian symmetry) representing the spatial domain.
+*   **Frequency Data:** A 3D array of complex numbers representing the frequency domain. For real input, the output is Hermitian symmetric, meaning $H_{-u,-v,-w} = H_{u,v,w}^*$, allowing storage of only half the data if optimized [S2, unofficial].
 
-### Data Structures
-- **Volume:** 3D array of real numbers.
-- **Spectrum:** 3D array of complex numbers $F(\omega_x, \omega_y, \omega_z)$.
-- **Slice:** 2D array of complex numbers $I(u, v)$.
+**Parameters:**
+*   $N$: Number of samples along a dimension. Assumed to be even for standard frequency point derivation [S2, unofficial].
+*   $\Delta$: Sampling interval (spacing between voxels) [S2, unofficial].
+*   $f_c$: Nyquist critical frequency, defined as $1/(2\Delta)$ [S2, unofficial].
 
-### Steps
+**Steps:**
 
-1.  **Preprocessing (Centering):**
-    To center the zero-frequency component in the spectrum, multiply the input volume by a checkerboard pattern:
-    $$ f'(x, y, z) = f(x, y, z) \cdot (-1)^{x+y+z} $$
-    This shifts the origin of the spatial data to the center [S2, unofficial].
+1.  **Preprocessing (Centering):** To center the zero-frequency component in the middle of the spectrum and avoid boundary discontinuities in visualization, multiply the input volume $f(x, y, z)$ by $(-1)^{x+y+z}$ [S2, unofficial].
+    *   *Note:* This step is optional for computation but recommended for correct interpretation of the frequency domain and reducing high-frequency artifacts from boundaries [S2, unofficial].
 
-2.  **Global Transformation (3D DFT):**
-    Compute the 3D Discrete Fourier Transform (DFT) of the centered volume $f'$ to obtain the spectrum $F$:
-    $$ F(u, v, w) = \sum_{x=0}^{N_x-1} \sum_{y=0}^{N_y-1} \sum_{z=0}^{N_z-1} f'(x, y, z) e^{2\pi i (ux/N_x + vy/N_y + wz/N_z)} $$
-    where $u \in [0, N_x-1]$, $v \in [0, N_y-1]$, $w \in [0, N_z-1]$ [S2, unofficial].
-    *Note:* The DFT is periodic with period $N$, such that $F_{-n} = F_{N-n}$ [S2, unofficial].
+2.  **Global Transformation (3D DFT):** Compute the 3D Discrete Fourier Transform of the volume. For a 1D sequence $h_k$ of length $N$, the DFT $H_n$ is defined as [S2, unofficial]:
+    $$H_n = \sum_{k=0}^{N-1} h_k e^{2\pi i k n/N}$$
+    For a 3D volume $f(x, y, z)$, the 3D DFT $F(u, v, w)$ is computed as [S2, unofficial]:
+    $$F(u, v, w) = \sum_{x=0}^{N_x-1} \sum_{y=0}^{N_y-1} \sum_{z=0}^{N_z-1} f(x, y, z) e^{-2\pi i (ux/N_x + vy/N_y + wz/N_z)}$$
+    *   *Note:* The sign in the exponent depends on the convention. The source [S2, unofficial] uses positive exponents for the forward transform definition in Eq 2.13 but negative in the integral approximation context. Standard signal processing often uses negative for forward. The key is consistency with the inverse. The source defines $H_n$ with positive exponent in Eq 2.13. We follow the source's definition for the DFT sum [S2, unofficial].
 
-3.  **Slice Extraction:**
-    For a viewing direction vector $V$, define a 2D plane passing through the origin of the frequency domain and perpendicular to $V$ [S3, S2, unofficial].
-    - Resample the 3D spectrum $F$ onto this 2D plane to obtain the 2D slice $I(u, v)$ [S1, S2, unofficial].
-    - Since the plane rarely aligns with the integer lattice, interpolation is required [S3, S2, unofficial]. Common schemes include Nearest Neighbor, Trilinear, Tri-cubic, and Windowed Sinc [S2, S3, unofficial].
-    - Ensure the output image resolution meets the Nyquist criterion to avoid aliasing [S2, S3, unofficial].
+3.  **Slice Extraction:** According to the Projection-Slice Theorem, the 2D Fourier transform of a projection of the volume along a viewing direction $\mathbf{v}$ is equal to a 2D slice through the origin of the 3D Fourier transform, perpendicular to $\mathbf{v}$ [S1, S3, unofficial].
+    *   Extract a 2D plane from the 3D frequency volume $F(u, v, w)$ corresponding to the viewing direction.
+    *   **Resampling:** The extracted slice lies on a grid that may not align with the discrete 3D lattice of $F$. Interpolation (e.g., trilinear or sinc) is required to resample the frequency data onto the 2D output grid [S3, S2, unofficial].
+    *   **Aliasing Check:** Ensure the output image resolution satisfies the Nyquist criterion relative to the volume's bandwidth to prevent aliasing artifacts [S2, S3, unofficial].
 
-4.  **Inverse Transformation (2D IDFT):**
-    Compute the 2D Inverse Discrete Fourier Transform (IDFT) of the slice $I(u, v)$ to generate the final 2D projection image $P$:
-    $$ P(x, y) = \frac{1}{N_u N_v} \sum_{u=0}^{N_u-1} \sum_{v=0}^{N_v-1} I(u, v) e^{-2\pi i (ux/N_u + vy/N_v)} $$
-    The result is scaled by $N^{-1}$ (where $N$ is the number of samples in the slice) [S1, S3, unofficial].
+4.  **Inverse Transformation (2D IDFT):** Compute the 2D Inverse Discrete Fourier Transform of the extracted slice to obtain the spatial domain projection image [S1, S2, unofficial].
+    $$I(x', y') = \frac{1}{N_u N_v} \sum_{u=0}^{N_u-1} \sum_{v=0}^{N_v-1} S(u, v) e^{2\pi i (ux'/N_u + vy'/N_v)}$$
+    *   *Note:* The source [S2, unofficial] defines the inverse transform with a normalization factor. The exact normalization factor ($1/N$ or $1/\sqrt{N}$) depends on the specific DFT definition used. The source implies a $1/N$ factor for the inverse in the context of recovering the signal [S2, unofficial].
 
-### Parameters
-- $N$: Number of samples. Assumed to be even for frequency point derivation [S2, unofficial].
-- $\Delta$: Sampling interval (space between consecutive samples) [S2, unofficial].
-- $f_c$: Nyquist critical frequency, $1/(2\Delta)$ [S2, unofficial].
+5.  **Post-processing:** If the volume was centered in Step 1, no further spatial shift is needed for the final image as the projection operation is linear and shift-invariant in the spatial domain for the final result, but the frequency domain centering was primarily for spectral analysis. However, if the slice extraction involved a shift in frequency domain, ensure the inverse transform correctly maps back to the spatial origin [S2, unofficial].
 
-### Edge Cases and Pitfalls
-- **Boundary Artifacts:** The DFT assumes periodic boundary conditions. Zero-padding or vignetting correction is often applied to mitigate aliasing and boundary artifacts [S3, S2, unofficial].
-- **Aliasing:** If the signal is not bandwidth-limited to $f_c$, aliasing occurs [S2, unofficial].
-- **Hermitian Symmetry:** For real input volumes, the DFT is Hermitian ($H_{N-n}^* = H_n$). This redundancy can be exploited for memory savings, storing only $N/2$ complex numbers [S2, unofficial].
-
-### Pseudocode
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
+import numpy as np
 
-def fourier_transform_volume_rendering(volume, view_direction, image_size):
+def fourier_transform_volume_rendering(volume, view_direction, output_shape):
     """
-    Renders a 3D volume using the Fourier Projection-Slice Theorem.
+    Renders a 3D volume using the Fourier Transform method.
     
     Args:
-        volume: 3D list of floats, shape (Nx, Ny, Nz)
-        view_direction: tuple (vx, vy, vz), normalized vector
-        image_size: tuple (width, height) for the output 2D image
+        volume: 3D numpy array (Nx, Ny, Nz) of real values.
+        view_direction: 3D vector (vx, vy, vz) specifying the viewing angle.
+        output_shape: Tuple (Ou, Ov) for the 2D output image dimensions.
         
     Returns:
-        2D list of floats, shape (height, width)
+        2D numpy array (Ou, Ov) of complex values (real part is the image).
     """
-    Nx, Ny, Nz = len(volume), len(volume[0]), len(volume[0][0])
+    Nx, Ny, Nz = volume.shape
     
-    # Step 1: Centering
+    # Step 1: Preprocessing - Center the zero frequency
+    # Create coordinate grids
+    x = np.arange(Nx)
+    y = np.arange(Ny)
+    z = np.arange(Nz)
+    X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
+    
     # Multiply by (-1)^(x+y+z)
-    centered_volume = [
-        [
-            [
-                volume[x][y][z] * ((-1)**(x + y + z))
-                for z in range(Nz)
-            ]
-            for y in range(Ny)
-        ]
-        for x in range(Nx)
-    ]
+    centered_volume = volume * ((-1) ** (X + Y + Z))
     
-    # Step 2: Global Transformation (3D DFT)
-    # Note: In practice, use an FFT library. Here we define the mathematical operation.
-    spectrum = compute_3d_dft(centered_volume, Nx, Ny, Nz)
+    # Step 2: Global Transformation - 3D DFT
+    # Using numpy's FFT which uses the standard definition (negative exponent for forward)
+    # Note: The source [S2, unofficial] defines DFT with positive exponent in Eq 2.13.
+    # However, numpy.fft.fft3 uses the standard engineering convention (negative exponent).
+    # To be consistent with the source's mathematical definition, one might need to conjugate.
+    # But for rendering, the relative phase matters less than magnitude if opacity is constant.
+    # We use numpy's standard FFT for efficiency.
+    freq_volume = np.fft.fft3(centered_volume)
     
     # Step 3: Slice Extraction
-    # Define the 2D plane perpendicular to view_direction passing through origin
-    # Resample spectrum onto this plane
-    # This requires interpolation. For simplicity, we assume a helper exists.
-    # The plane coordinates (u, v) map to 3D frequency coordinates.
-    slice_2d = resample_spectrum_onto_plane(spectrum, view_direction, image_size)
+    # Define the plane in frequency domain perpendicular to view_direction
+    # This requires resampling. For simplicity, we assume a direct slice if aligned,
+    # but generally, interpolation is needed.
+    # Here we demonstrate the concept of extracting a slice.
+    # A robust implementation would use scipy.ndimage.map_coordinates or similar.
     
-    # Step 4: Inverse Transformation (2D IDFT)
-    width, height = image_size
-    projection = compute_2d_idft(slice_2d, width, height)
+    # Generate 2D grid in frequency domain
+    # The plane passes through the origin (0,0,0) in the centered frequency domain.
+    # The normal to the plane is view_direction.
     
-    return projection
-
-def compute_3d_dft(data, Nx, Ny, Nz):
-    """
-    Computes the 3D DFT of the input data.
-    Returns a 3D complex array.
-    """
-    # This is a placeholder for the actual FFT algorithm.
-    # The mathematical definition is:
-    # F(u,v,w) = sum_{x,y,z} data(x,y,z) * exp(2*pi*i*(u*x/Nx + v*y/Ny + w*z/Nz))
-    # In a real implementation, this would call a 3D FFT routine.
-    raise NotImplementedError("Use a standard 3D FFT implementation.")
-
-def resample_spectrum_onto_plane(spectrum, view_direction, image_size):
-    """
-    Resamples the 3D spectrum onto a 2D plane perpendicular to view_direction.
-    """
-    # This involves defining the basis vectors for the 2D plane,
-    # mapping 2D image coordinates to 3D frequency coordinates,
-    # and interpolating the spectrum values.
-    # Interpolation methods: Nearest Neighbor, Trilinear, etc.
-    raise NotImplementedError("Implement interpolation logic.")
-
-def compute_2d_idft(data, width, height):
-    """
-    Computes the 2D IDFT of the input data.
-    Returns a 2D real array.
-    """
-    # Mathematical definition:
-    # I(x,y) = (1/(width*height)) * sum_{u,v} data(u,v) * exp(-2*pi*i*(u*x/width + v*y/height))
-    # In a real implementation, this would call a 2D IFFT routine.
-    raise NotImplementedError("Use a standard 2D IFFT implementation.")
+    # Create a 2D grid of coordinates for the output image in frequency space
+    # This is complex and depends on the specific resampling strategy.
+    # For the purpose of this article, we assume a function `extract_slice` exists
+    # that performs the necessary interpolation from the 3D freq_volume to a 2D grid.
+    
+    # Placeholder for the complex resampling logic
+    # slice_2d = extract_slice(freq_volume, view_direction, output_shape)
+    
+    # Simplified example: Assume view_direction is along Z, so we just take the middle slice
+    # This is a degenerate case and not general.
+    if np.allclose(view_direction, [0, 0, 1]):
+        slice_2d = freq_volume[:, :, Nz//2]
+    else:
+        # General case: Requires interpolation.
+        # Not given in the sources. [G]
+        # In practice, one would define a 2D grid in the plane perpendicular to view_direction
+        # and interpolate the values from the 3D frequency volume.
+        raise NotImplementedError("General slice extraction with interpolation is not detailed in the sources.")
+        
+    # Step 4: Inverse Transformation - 2D IDFT
+    # Apply 2D inverse FFT
+    image_complex = np.fft.ifft2(slice_2d)
+    
+    # Return the real part of the image
+    return np.real(image_complex)
 ```
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Artifacts:** The DFT assumes periodic boundary conditions. Discontinuities at the volume boundaries cause high-frequency artifacts. Mitigation includes zero-padding the volume or applying a window function (e.g., Hanning) before the transform [S3, S10, S11, S13, unofficial].
+*   **Aliasing:** If the output image resolution is too low, aliasing artifacts will appear. The resolution must meet the Nyquist criterion [S2, S3, unofficial].
+*   **Hermitian Symmetry:** For real-valued input, the DFT output is Hermitian symmetric. This can be exploited to reduce memory usage by storing only half the complex coefficients [S2, unofficial].
 
 ## Subtopics
 
-### Windowed Fourier Transform
-Unlike the standard Fourier transform which covers the whole spatial domain and is not spatially localized, the windowed Fourier transform uses a translated window to cover the whole signal, allowing localization of irregularities [S1, unofficial]. It is chosen when spatial localization of frequency content is required [S1, unofficial].
-
-### Centered DFT
-A method to compute the DFT of a real signal such that the frequency spectrum is centered (zero frequency at the center), avoiding the discontinuity at the boundaries of the standard DFT output range [S2, unofficial]. It is chosen when visualizing or processing the spectrum requires the zero-frequency component to be at the center [S2, unofficial]. For a 1D signal $h_k$ of length $N$, multiply each element by $(-1)^k$ before computing the DFT [S2, unofficial]. For a 2D signal $h_{x,y}$ of size $M \times N$, multiply each element by $(-1)^{x+y}$ before computing the 2D DFT [S2, unofficial].
+### [Windowed Fourier Transform](6084-windowed-fourier-transform.md)
+The Windowed Fourier Transform (WFT), also known as the Gabor Transform, addresses the lack of spatial localization inherent in the standard Fourier Transform. While the standard Fourier Transform provides a global frequency measure by integrating over the entire spatial domain, making it difficult to locate irregularities, the WFT uses a translated window function to cover the signal, allowing for the localization of these irregularities. It builds on [Fourier Transform](2288-fourier-transform.md) by introducing spatial constraints to the frequency analysis.
 
 ## Operating characteristics
-- **Time Complexity:** The 3D DFT and IDFT operations typically have complexity $O(N \log N)$ where $N$ is the total number of voxels, using Fast Fourier Transform (FFT) algorithms. The slice extraction step depends on the interpolation method and image resolution.
-- **Memory Complexity:** The spectrum requires storing complex numbers for the entire volume, which is $2 \times$ the memory of the real-valued volume if full precision is kept. However, Hermitian symmetry can reduce this by half for real inputs [S2, unofficial].
-- **Strengths:** Efficient convolution via the Convolution Theorem ($g * h \Leftrightarrow G(f)H(f)$) [S2, unofficial]. Global frequency analysis allows for easy filtering in the frequency domain [S1, unofficial].
-- **Limitations:** Lack of spatial localization makes it difficult to identify the position of irregularities [S1, unofficial]. Boundary artifacts due to periodic assumption [S3, S2, unofficial].
-- **When to use:** When global frequency filtering is needed or when the Projection-Slice Theorem is advantageous for specific viewing angles [S2, unofficial].
-- **When not to use:** When spatial localization of features is critical [S1, unofficial].
+*   **Time Complexity:** The 3D DFT using FFT algorithms has a complexity of $O(N^3 \log N)$ for a volume of size $N^3$. The 2D IDFT for an image of size $M \times M$ has a complexity of $O(M^2 \log M)$.
+*   **Memory Complexity:** The 3D frequency volume requires $O(N^3)$ memory. For real input, this can be reduced to $O(N^3/2)$ by exploiting Hermitian symmetry [S2, unofficial].
+*   **Performance:** The method is computationally intensive due to the global 3D transform. It is suitable for static volumes where the viewing direction changes frequently, as the 3D transform is performed once [S1, unofficial].
+*   **Strengths:** Efficient for multiple viewing angles once the 3D transform is computed. Convolution operations can be performed efficiently in the frequency domain [S2, unofficial].
+*   **Limitations:** High memory usage. Lack of interactivity for display parameters (opacity, lighting) [S1, unofficial]. Boundary artifacts require careful handling [S3, S10, S11, S13, unofficial].
 
 ## Background
-The Fourier transform is a classical theory for multiresolution decomposition [S1, unofficial]. It provides a measure of high frequency but information is not spatially localized [S1, unofficial]. The transform covers the whole spatial domain, making it difficult to find the position of irregularities [S1, unofficial]. It is used in volume rendering as part of domain-transform methods [S2, unofficial].
+The Fourier Transform is a classical theory for multiresolution decomposition [S1, unofficial]. It has been used in volume rendering since the early days of the field, leveraging the Projection-Slice Theorem to convert 3D volume rendering into 2D Fourier operations [S1, S2, unofficial]. The method was popularized by researchers such as Westin et al. in the context of Fourier Volume Rendering [S2, unofficial].
 
 ## Sources
 [S1] Direct rendering of multiresolution decomposed volume data., https://doi.org/10.82465/4870, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,124 @@
+# 2D Gaussian Splatting with PCA / EigenGS Initialisation
+
+A differentiable 2D Gaussian splatting renderer written from scratch in PyTorch, adaptive density control (clone / split / prune with Adam-state transfer), and a reproduction of the central experiment of [EigenGS (CVPR 2025)](https://openaccess.thecvf.com/content/CVPR2025/html/Tai_EigenGS_Representation_From_Eigenspace_to_Gaussian_Image_Space_CVPR_2025_paper.html): can a PCA basis predict a good *initial* set of Gaussians for a new image, and does that initialisation converge faster or higher than a random one?
+
+Evaluated on five datasets (MNIST, FashionMNIST, CIFAR-10, Olivetti faces, STL-10 at native 96×96) with a fair benchmark: same renderer, optimizer, learning rate, Gaussian budget, iteration count and seed — only the initialisation differs.
+
+![Regular vs PCA splatting on held-out FashionMNIST images](figures/readme_hero_fashionmnist.png)
+
+## Headline results
+
+**Benchmark: regular (random init) vs PCA splatting, 10 held-out images per dataset, N = 200 Gaussians, 1000 Adam iterations.**
+
+| Dataset | Init PSNR regular → PCA | Final PSNR regular | Final PSNR PCA | Iterations for PCA to match regular's final PSNR | Speed-up | PCA wins |
+|---|---|---|---|---|---|---|
+| MNIST | 13.1 → 21.2 dB | 49.4 dB | 52.5 dB | 445 | 2.25× | 7/10 |
+| FashionMNIST | 14.4 → 21.0 dB | 50.8 dB | 57.4 dB | 294 | **3.4×** | 9/10 |
+| CIFAR-10 | 17.8 → 20.9 dB | 44.8 dB | 45.4 dB | 800 | 1.25× | 10/10 |
+| Olivetti | 19.3 → 18.0 dB | 39.3 dB | 38.0 dB | not reached | — | 0/10 |
+| STL-10 | 15.8 → 17.3 dB | 26.7 dB | 26.6 dB | not reached | — | 5/10 |
+
+What this says, in short:
+
+- **A better start stays better.** Where the predictor gives a higher initial PSNR, the advantage survives 1000 iterations: +6.7 dB on FashionMNIST, +3.2 dB on MNIST, +0.6 dB on CIFAR-10. The optimisation does not reach the same optimum from both starts.
+- **Olivetti is the counter-example the paper did not predict.** The aligned faces are the easiest case for PCA (63 components explain 90% of the variance), but the same alignment makes the *random* baseline strong (19.3 dB at init, only 0.3 dB spread across faces) and leaves the predictor only 320 training images, which it memorises (28.7 dB train vs 19.8 dB held-out). PCA initialisation ends 1.3 dB *below* random.
+- **STL-10 is capacity-limited, not initialisation-limited.** At 96×96, 200 Gaussians cannot represent the texture either way; both methods plateau near 26.6 dB.
+- **Domain shift breaks the predictor.** Feeding MNIST digits through the FashionMNIST predictor drops one-shot PSNR from 19.5 dB to 12.8 dB; both the PCA basis and the MLP have learned one dataset's statistics.
+
+<p align="center">
+  <img src="figures/part5_convergence_curves.png" width="49%">
+  <img src="figures/part5_domain_shift.png" width="45%">
+</p>
+
+## What's in the repo
+
+```
+gs2d/
+  renderer.py    closed-form conics, anisotropic kernels, front-to-back alpha compositing
+  models.py      LearnableGaussians (sigmoid/softplus parameterisation) + single-image fitting loop
+  adaptive.py    AdaptiveGaussians, clone/split/prune density control, Adam-state transfer
+  eigengs.py     EigenGSPredictor (K → 256 → 512 → 9N MLP) trained through the renderer
+tests/
+  test_renderer.py   6 property tests of the renderer (pytest)
+notebooks/
+  eigengs_2d_gaussian_splatting.ipynb   full executed report: derivations, experiments, discussion
+figures/             every figure from the notebook, named by part
+```
+
+The notebook is 19 MB and may not render on GitHub; open it on [nbviewer](https://nbviewer.org/) if it doesn't.
+
+## Method
+
+**Renderer (Part 1).** Each Gaussian has 9 parameters: centre (x, y), scales (sx, sy), rotation θ, RGB colour, opacity α. The inverse covariance is built in closed form,
+
+Σ⁻¹ = [[a, b], [b, c]],  a = cos²θ/sx² + sin²θ/sy²,  b = sinθ cosθ (1/sx² − 1/sy²),  c = sin²θ/sx² + cos²θ/sy²,
+
+the kernel is `exp(−½ (a dx² + 2b dx dy + c dy²))`, and Gaussians are composited front-to-back with transmittance `T_i = Π_{j<i} (1 − α_j G_j)` via an exclusive cumulative product. Six property tests cover peak location, isotropic rotation invariance, energy vs scale, rotation reorientation, occlusion and gradient flow to every parameter.
+
+![Hand-placed Gaussians and their 2σ ellipses](figures/part1_sanity_rendering_ellipses.png)
+
+**Single-image optimisation (Part 2).** Random initialisation, colours sampled from the target at each centre, Adam on the MSE. Capacity ablation on a CIFAR-10 image: 28.8 / 35.1 / 43.9 / 53.1 dB for N = 50 / 100 / 200 / 400 — no saturation yet, since N stays well below the pixel count.
+
+**Adaptive density control (Part 3).** Start from N = 10; every M iterations read the average positional gradient of each centre, clone small high-gradient Gaussians, split large ones (scales ÷ 1.6, children sampled from the parent covariance), prune α < ε, cap N at 400. The parameter tensors are rebuilt on every topology change and the Adam `exp_avg` / `exp_avg_sq` rows of surviving Gaussians are copied across, so only new Gaussians start with fresh optimizer state.
+
+Compared with a fixed-N baseline run at exactly the N the adaptive run converged to (everything else matched):
+
+| Dataset | Final N | Adaptive PSNR | Fixed-N PSNR | Δ |
+|---|---|---|---|---|
+| MNIST | 142 | 50.3 dB | 43.4 dB | **+6.9 dB** |
+| FashionMNIST | 229 | 46.9 dB | 46.8 dB | +0.1 dB |
+| CIFAR-10 | 201 | 36.3 dB | 44.1 dB | −7.8 dB |
+| Olivetti | 196 | 32.0 dB | 36.1 dB | −4.1 dB |
+| STL-10 | 348 | 22.7 dB | 25.7 dB | −3.0 dB |
+
+Density control buys *placement*, and placement only pays off when the image has sparse structure to find (MNIST). On dense images the adaptive run spends its first few hundred iterations at a small N while the fixed baseline refines its full budget from step one. The gradient threshold dominates every other hyper-parameter (on Olivetti: 196 Gaussians / 32.0 dB at 5e-5 vs 37 / 24.1 dB at 4e-4).
+
+<p align="center">
+  <img src="figures/part3_gaussians_stl10.png" width="100%">
+</p>
+
+**PCA → Gaussian predictor (Part 4).** PCA per dataset (K = 128 components; 90% variance needs 84 / 79 / 95 / 63 / >300 components for MNIST / FashionMNIST / CIFAR-10 / Olivetti / STL-10). An MLP maps the K coefficients to N × 9 raw Gaussian parameters (sigmoid for positions/colours/opacity, softplus for scales) and is trained *through the renderer* on the pixel loss only — no Gaussian labels, no per-image optimisation. One forward pass reaches 18–21 dB on held-out images.
+
+| Dataset | Train PSNR | One-shot held-out PSNR | Gap |
+|---|---|---|---|
+| MNIST | 25.2 dB | 21.2 dB | 4.1 dB |
+| FashionMNIST | 23.8 dB | 20.6 dB | 3.2 dB |
+| CIFAR-10 | 23.2 dB | 20.6 dB | 2.6 dB |
+| Olivetti | 28.7 dB | 19.8 dB | **8.9 dB** (320 training faces of 40 people) |
+| STL-10 | 19.2 dB | 18.3 dB | 0.9 dB |
+
+**Benchmark (Part 5).** See headline results. Full per-image grids for all five datasets are in `figures/part5_comparison_grid_*.png`.
+
+## Quickstart
+
+```bash
+pip install -r requirements.txt
+pytest                      # 6 renderer tests, CPU, a few seconds
+```
+
+```python
+import torch
+from gs2d import render_gaussians, fit_gaussians_to_image
+
+# render 2 hand-placed Gaussians into a 64x64 RGB image
+image, kernels = render_gaussians(
+    centers=torch.tensor([[0.3, 0.4], [0.7, 0.6]]),
+    scales=torch.tensor([[0.15, 0.05], [0.08, 0.12]]),
+    rotations=torch.tensor([0.4, -0.6]),
+    colors=torch.tensor([[0.9, 0.2, 0.1], [0.1, 0.4, 0.9]]),
+    opacities=torch.tensor([0.9, 0.8]),
+    height=64, width=64,
+)
+
+# fit 200 Gaussians to a (3, H, W) target in [0, 1]
+result = fit_gaussians_to_image(target_image, number_of_gaussians=200, number_of_iterations=1000)
+print(result["final_psnr"])
+```
+
+The experiments in the notebook were run on a Colab T4. A forward + backward pass at N = 100 and 96×96 costs ~5 ms, so all five predictors train in minutes; datasets come from `torchvision` and `sklearn.datasets.fetch_olivetti_faces`.
+
+## Context
+
+Built with Celine Michael as Assignment 3 of the Computer Vision course (Dr. Simon Korman, University of Haifa, 2026). The assignment specified the renderer, the density-control rules and the benchmark protocol; the implementation, the equal-N and optimizer-state ablations, and the analysis are ours.
+
+Reference: Tai, Li, Chen, Tsai, Chen, Liu. *EigenGS Representation: From Eigenspace to Gaussian Image Space.* CVPR 2025.

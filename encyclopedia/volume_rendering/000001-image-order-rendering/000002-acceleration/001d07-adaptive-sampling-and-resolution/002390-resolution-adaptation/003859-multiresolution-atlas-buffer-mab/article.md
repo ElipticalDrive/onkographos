@@ -3,167 +3,209 @@
 Also called: VR DVR acceleration wrapper, bracket approach for VR raycasting, gaze-dependent resolution DVR
 
 ## Overview
-The Multiresolution Atlas Buffer (MAB) is an acceleration wrapper for Direct Volume Rendering (DVR) in Virtual Reality (VR) that adaptively reduces ray density based on peripheral vision and Head-Mounted Display (HMD) lens distortion, then reconstructs the full-resolution image via compositing [S1]. It differs from sibling methods like [Level-of-detail (LOD) methods](1007-level-of-detail-lod-methods.md) or [Dynamic Volume Resolution & Alpha Mask Update](2539-dynamic-volume-resolution-alpha-mask-update.md) by decoupling the raycasting resolution from the display resolution through a bidirectional mapping between a multiresolution buffer and the final framebuffer, rather than modifying the volume data structure or transfer function directly [S1]. Unlike [Focus and Context Multiresolution Rendering](8163-focus-and-context-multiresolution-rendering.md) which may rely on high-speed eye-tracking for foveated rendering, MAB assumes fixed HMD lenses with a static gaze center, simplifying the resolution distribution to a static radial falloff [S1].
+The Multiresolution Atlas Buffer (MAB) is an acceleration wrapper for Direct Volume Rendering (DVR) in Virtual Reality (VR) that reduces ray density adaptively based on peripheral vision and Head-Mounted Display (HMD) lens distortion, then reconstructs the full-resolution image via compositing [S1]. It differs from standard foveated rendering by not requiring high-speed eye-tracking hardware, relying instead on the fixed nature of HMD lenses and the human visual system's (HVS) non-uniform resolution perception to define static gaze-dependent resolution zones [S1]. Unlike Mip-Maps which use fixed power-of-two scaling, MAB supports arbitrary resolution ratios between levels to minimize the visual difference between resolution steps [S1].
 
 ## How it works
-The method operates as a "bracket" around existing raycasting implementations, requiring minimal changes to the core renderer [S1]. It consists of two main phases: adaptive ray subsampling (opening brace) and multiresolution compositing (closing brace) [S1].
+The method operates as a "bracket" around existing raycasting implementations, requiring minimal changes to the core renderer [S1]. It consists of two main phases: adaptive ray construction (opening brace) and compositing reconstruction (closing brace) [S1].
 
 ### Inputs and Outputs
 *   **Inputs:**
-    *   Volume dataset and transfer function (for the underlying raycaster).
-    *   HMD specifications: resolution (e.g., $2880 \times 1600$), refresh rate (e.g., $\ge 90$ Hz), and lens distortion characteristics [S1].
-    *   Target frame time $T_{target}$ (inverse of refresh rate) [S1].
-    *   Previous frame's render time $T_{render}$ [S1].
+    *   Volume dataset and transfer function (passed to the underlying raycaster).
+    *   Camera parameters (view/projection matrices).
+    *   Gaze direction (assumed to be the center of the screen or a fixed point, as rapid eye movements are ignored) [S1].
+    *   Target frame time (derived from HMD refresh rate) [S1].
 *   **Outputs:**
-    *   A single full-resolution color image mapped to the HMD framebuffer [S1].
+    *   Final color buffer at full HMD resolution submitted to the display [S1].
 
 ### Data Structures
 **Multiresolution Atlas Buffer (MAB):**
-*   **Layout:** The MAB is a 2D buffer partitioned into multiple non-overlapping regions. Each region corresponds to the entire frame buffer dimensions but at a specific resolution level $L_i$ [S1].
-*   **Resolution Levels:** There are $N$ levels. Level $L_0$ is the highest resolution (typically full HMD resolution or close to it), and $L_{N-1}$ is the lowest.
-*   **Ordering:** Levels are ordered to minimize the overall framebuffer size required to store all levels [S1].
-*   **Content:** Each region stores the accumulated color and opacity (or other DVR outputs) for rays traversed at that specific resolution.
-*   **Discarding:** Black areas (empty space) in each level are discarded before ray traversal to save computation [S1].
+*   **Layout:** A single texture or buffer partitioned into multiple rectangular regions.
+*   **Region Definition:** Each region corresponds to the entire frame buffer at a specific resolution level $L_i$.
+*   **Resolution Levels:** Levels $L_0, L_1, \dots, L_n$ are ordered to minimize the overall framebuffer size [S1].
+*   **Scaling:** The ratio between subsequent levels $R_i = \frac{\text{width}(L_i)}{\text{width}(L_{i+1})}$ is arbitrary and not necessarily a power of two [S1].
+*   **Black Areas:** Regions in lower-resolution levels that do not contribute to the final image (e.g., outside the gaze-dependent zones) are discarded or treated as empty to save memory and traversal time [S1].
 
 **Mapping Functions:**
-*   **Forward Mapping ($f_{forward}$):** Maps a MAB fragment at level $L_i$ to a unique position in the final framebuffer and a blending factor $\alpha_i$ [S1].
-*   **Inverse Mapping ($f_{inverse}$):** Maps a framebuffer fragment to a set of MAB fragments (coordinates and blending factors) for compositing [S1].
-
-### Parameters
-*   **Resolution Scaling:** The ratio between resolutions of subsequent levels $L_i$ and $L_{i+1}$ is arbitrary and not necessarily a power of two [S1]. This allows fine-tuning to minimize visual artifacts between levels.
-*   **Gaze Center:** Assumed to be the center of the screen/HMD view, as rapid eye movements are ignored due to fixed HMD lenses [S1].
-*   **Adaptation Step:** The number of resolution levels and their specific scaling factors are determined offline or via a predefined schedule to balance performance and quality [S1].
+Two functions define the bidirectional mapping between the MAB space and the Framebuffer (FB) space [S1]:
+1.  **Forward Mapping ($f_a, f_b$):**
+    *   $f_a(\mathbf{p}_{fb}) \rightarrow \{\alpha_0, \alpha_1, \dots, \alpha_n\}$: Takes screen-space coordinates $\mathbf{p}_{fb}$ and outputs blending factors for each MAB level.
+    *   $f_b(\mathbf{p}_{fb}) \rightarrow \{(\mathbf{p}_{mab,0}, \mathbf{p}_{mab,1}, \dots, \mathbf{p}_{mab,n})\}$: Takes screen-space coordinates $\mathbf{p}_{fb}$ and outputs the corresponding coordinates in each MAB region.
+2.  **Inverse Mapping:**
+    *   Assigns each framebuffer fragment a unique position in the MAB and a blending factor during ray generation [S1].
 
 ### Numbered Steps
 
-1.  **Initialization:**
-    *   Construct the MAB structure with $N$ levels.
-    *   Define the resolution for each level $R_i$ such that $R_0 \ge R_1 \ge \dots \ge R_{N-1}$ [S1].
-    *   Precompute the bidirectional mapping functions $f_a$ (blending factors) and $f_b$ (coordinates) based on screen-space distance to the gaze center [S1].
+1.  **MAB Construction:**
+    *   Define resolution levels $L_i$ with arbitrary scaling ratios.
+    *   Order levels to minimize total memory footprint [S1].
+    *   Define the gaze-dependent resolution distribution function (e.g., distance from center determines the highest required resolution level) [S1].
 
-2.  **Adaptive Ray Subsampling (Opening Brace):**
-    *   For each frame, evaluate the previous frame's render time $T_{render}$ against the target time $T_{target}$ [S1].
-    *   Adjust the rendering parameters for the next subsampling stage. This typically involves selecting which resolution levels to activate or adjusting the ray density within those levels to maintain a consistent refresh rate [S1].
-    *   Generate primary rays for the raycaster. The ray density is reduced in peripheral regions according to the selected resolution levels. Rays are cast into the volume dataset, and the results are accumulated into the corresponding regions of the MAB [S1].
-    *   *Note:* The raycaster operates independently of the final display resolution, only needing to know the resolution of the MAB region it is writing to [S1].
+2.  **Opening Brace: Adaptive Ray Construction:**
+    *   For each pixel in the framebuffer, determine the required resolution level based on its distance to the gaze center [S1].
+    *   Generate primary rays only for the pixels corresponding to the active regions in the MAB.
+    *   Map framebuffer coordinates to MAB coordinates using the inverse mapping.
+    *   Feed these reduced rays to the underlying raycaster [S1].
 
-3.  **Multiresolution Compositing (Closing Brace):**
+3.  **Ray Traversal:**
+    *   The underlying raycaster traverses the volume data using the adaptive ray density.
+    *   Results are written into the corresponding regions of the MAB [S1].
+
+4.  **Closing Brace: Compositing Reconstruction:**
     *   Render a full-screen primitive covering the entire output framebuffer [S1].
-    *   For each fragment generated by this primitive at screen-space coordinates $(x, y)$:
-        a.  Compute the distance $d$ from $(x, y)$ to the center of gaze [S1].
-        b.  Evaluate function $f_a(d)$ to obtain a set of blending factors $\{\alpha_0, \alpha_1, \dots, \alpha_{N-1}\}$ for the MAB levels [S1].
-        c.  Evaluate function $f_b(x, y)$ to obtain the corresponding coordinates $\{(u_0, v_0), (u_1, v_1), \dots, (u_{N-1}, v_{N-1})\}$ in the MAB for each level [S1].
+    *   For each fragment generated by this primitive:
+        a.  Compute the distance to the gaze center using screen-space coordinates [S1].
+        b.  Evaluate $f_a$ to obtain the set of blending factors $\{\alpha_i\}$ for the MAB levels [S1].
+        c.  Evaluate $f_b$ to obtain the set of corresponding coordinates $\{\mathbf{p}_{mab,i}\}$ in the MAB [S1].
         d.  For each level $i$ where $\alpha_i > 0$:
-            i.  Lookup the color $C_i$ and opacity $O_i$ from the MAB at coordinates $(u_i, v_i)$ [S1].
-            ii. Accumulate the color contribution using alpha blending:
-                $$ C_{final} = C_{final} + C_i \cdot \alpha_i $$
-                $$ O_{final} = O_{final} + \alpha_i \cdot (1 - O_{final}) $$
-                *(Note: Exact blending formula depends on the DVR output format, but the principle is weighted combination based on $\alpha_i$)* [S1].
-        e.  Output $C_{final}$ to the framebuffer [S1].
+            i.  Lookup the color value $C_i$ from the MAB at $\mathbf{p}_{mab,i}$ [S1].
+        e.  Blend the values: $C_{final} = \sum_{i} \alpha_i C_i$ [S1].
+        f.  Write $C_{final}$ to the framebuffer [S1].
+
+5.  **Dynamic Adjustment:**
+    *   Evaluate frame timings at the end of each frame [S1].
+    *   Adjust rendering parameters (e.g., the resolution distribution function or the set of levels) for the next frame to maintain a consistent refresh rate [S1].
+
+### Formulas
+*   **Blending:**
+    $$ C_{final}(\mathbf{p}_{fb}) = \sum_{i=0}^{n} \alpha_i(\mathbf{p}_{fb}) \cdot C_{MAB,i}(f_b(\mathbf{p}_{fb})_i) $$
+    Where:
+    *   $\mathbf{p}_{fb}$ is the screen-space coordinate of the framebuffer fragment.
+    *   $\alpha_i(\mathbf{p}_{fb})$ is the blending factor for level $i$, output by $f_a$.
+    *   $C_{MAB,i}$ is the color value stored in the MAB at level $i$.
+    *   $f_b(\mathbf{p}_{fb})_i$ is the coordinate in level $i$'s region, output by $f_b$.
+
+*   **Blending Factor Determination ($f_a$):**
+    The source describes $f_a$ as taking the distance to the center of gaze $d(\mathbf{p}_{fb})$ and outputting blending factors. While the exact mathematical function is not provided, it implies a step-wise or continuous function mapping distance to a set of weights. Typically, $\alpha_i$ is non-zero only for levels $i$ where the resolution is sufficient for the perceived detail at distance $d$ [S1].
+
+### Parameters
+*   **HMD Refresh Rate:** At least 90 Hz, tending toward 120 Hz or more [S1].
+*   **HMD Resolution:** Approximately 2880 x 1600 pixels [S1].
+*   **Resolution Scaling:** Arbitrary ratios between levels, not restricted to powers of two [S1].
+*   **Gaze Model:** Center of the screen (fixed), ignoring rapid eye movements [S1].
+
+### Edge Cases and Pitfalls
+*   **Eye Movement:** The method does not account for rapid eye movements (saccades) because HMD lenses are fixed and provide only a slight angle with the highest projected resolution [S1]. This may cause artifacts if the user moves their eyes quickly, though the fixed lens geometry mitigates the severity compared to dynamic foveated rendering.
+*   **Level Transition Artifacts:** Since scaling ratios are arbitrary, discontinuities between resolution levels must be managed by the blending factors to avoid visible seams [S1].
+*   **Precision:** The bidirectional mapping must be precise to ensure correct sampling during compositing [S1].
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def mab_rendering_loop(volume_data, transfer_function, hmd_spec, target_fps):
-    # 1. Initialization
-    # Define resolution levels. Example: [1.0, 0.75, 0.5, 0.25] relative to HMD resolution
-    # The ratios are arbitrary, not necessarily powers of two.
-    resolution_ratios = [1.0, 0.75, 0.5, 0.25] 
-    mab_levels = create_mab_levels(hmd_spec.resolution, resolution_ratios)
+def mab_rendering_pipeline(volume_data, transfer_function, camera, gaze_center, target_frame_time):
+    """
+    Main pipeline for MAB-based VR DVR.
+    """
+    # 1. Setup MAB Structure (One-time or infrequent)
+    mab_levels = define_mab_levels(target_resolution, gaze_distribution_function)
+    # mab_levels is a list of (width, height, region_offset) tuples
     
-    # Precompute mapping functions based on gaze center (screen center)
-    # f_a: distance -> blending factors
-    # f_b: screen_coords -> mab_coords
-    def compute_blending_factors(distance_to_gaze):
-        # Returns a list of weights [w0, w1, w2, w3] summing to 1.0
-        # Implementation depends on specific falloff function (e.g., Gaussian, linear)
-        # This is a placeholder for the specific function f_a defined in the paper
-        pass 
-
-    def compute_mab_coords(screen_x, screen_y, level_index):
-        # Returns (u, v) in the MAB buffer for the given level
-        # Implementation depends on specific mapping function f_b defined in the paper
-        pass
-
-    # 2. Main Loop
-    while rendering_active:
-        # Evaluate frame timings
-        current_frame_time = measure_render_time()
+    # 2. Opening Brace: Adaptive Ray Construction
+    # Determine which MAB regions need rays based on gaze
+    active_regions = get_active_regions(mab_levels, gaze_center)
+    
+    # Generate rays only for active regions
+    rays = []
+    for level_idx, (w, h, offset) in enumerate(mab_levels):
+        if level_idx in active_regions:
+            # Map framebuffer pixels to MAB coordinates for this level
+            mab_coords = map_fb_to_mab(level_idx, gaze_center)
+            for coord in mab_coords:
+                ray = generate_ray(camera, coord, volume_data)
+                rays.append((ray, level_idx, coord))
+                
+    # 3. Ray Traversal
+    # Render into MAB regions
+    for ray, level_idx, coord in rays:
+        color = raycast_volume(ray, volume_data, transfer_function)
+        write_to_mab(mab_levels, level_idx, coord, color)
         
-        # Adjust parameters for next frame (e.g., swap active levels or adjust ray density)
-        # This step ensures stable refresh rate to avoid cyber-sickness
-        adjust_rendering_parameters(current_frame_time, target_fps)
-
-        # Opening Brace: Adaptive Ray Subsampling
-        for level_index, ratio in enumerate(resolution_ratios):
-            level_resolution = scale_resolution(hmd_spec.resolution, ratio)
+    # 4. Closing Brace: Compositing Reconstruction
+    final_framebuffer = create_framebuffer(target_resolution)
+    
+    for y in range(target_resolution.height):
+        for x in range(target_resolution.width):
+            fb_coord = (x, y)
             
-            # Generate rays at reduced density for this level
-            # The raycaster only processes rays for the active regions of this level
-            rays = generate_rays(level_resolution, hmd_spec.lens_distortion)
+            # Evaluate mapping functions
+            blending_factors = f_a(fb_coord, gaze_center) # Returns dict {level_idx: alpha}
+            mab_coords = f_b(fb_coord) # Returns dict {level_idx: (mx, my)}
             
-            # Render into MAB level
-            render_volume_into_mab(
-                volume_data, 
-                transfer_function, 
-                rays, 
-                mab_levels[level_index]
-            )
+            accumulated_color = (0.0, 0.0, 0.0, 0.0)
+            
+            for level_idx, alpha in blending_factors.items():
+                if alpha > 0:
+                    mx, my = mab_coords[level_idx]
+                    mab_color = read_from_mab(mab_levels, level_idx, mx, my)
+                    accumulated_color += alpha * mab_color
+                    
+            final_framebuffer[y, x] = accumulated_color
+            
+    # 5. Dynamic Adjustment
+    current_frame_time = measure_frame_time()
+    if current_frame_time > target_frame_time:
+        mab_levels = adjust_mab_levels(mab_levels, current_frame_time, target_frame_time)
+        
+    return final_framebuffer
 
-        # Closing Brace: Compositing
-        output_framebuffer = create_empty_framebuffer(hmd_spec.resolution)
-        
-        for y in range(hmd_spec.resolution.height):
-            for x in range(hmd_spec.resolution.width):
-                # Compute distance to gaze center (screen center)
-                dist = distance_to_gaze(x, y, hmd_spec.resolution)
-                
-                # Get blending factors for this screen pixel
-                blending_factors = compute_blending_factors(dist)
-                
-                accumulated_color = (0, 0, 0, 0)
-                
-                for level_index, weight in enumerate(blending_factors):
-                    if weight > 0:
-                        # Get MAB coordinates for this level
-                        u, v = compute_mab_coords(x, y, level_index)
-                        
-                        # Lookup color from MAB
-                        mab_color = mab_levels[level_index].get_color(u, v)
-                        
-                        # Blend into final color
-                        # Simple weighted average as per description
-                        accumulated_color = blend(accumulated_color, mab_color, weight)
-                
-                output_framebuffer.set_pixel(x, y, accumulated_color)
-        
-        submit_to_hmd(output_framebuffer)
+def f_a(fb_coord, gaze_center):
+    """
+    Forward mapping function for blending factors.
+    Returns a dictionary of {level_idx: alpha}.
+    """
+    distance = euclidean_distance(fb_coord, gaze_center)
+    # Determine which levels are needed based on distance
+    # This is a simplified representation; the actual function is defined by the gaze distribution
+    levels_needed = get_levels_for_distance(distance)
+    
+    factors = {}
+    for level_idx in levels_needed:
+        # Assign blending factors. The source does not specify the exact weighting formula.
+        # A common approach is equal weighting or inverse-distance weighting.
+        factors[level_idx] = 1.0 / len(levels_needed) 
+    return factors
+
+def f_b(fb_coord):
+    """
+    Forward mapping function for MAB coordinates.
+    Returns a dictionary of {level_idx: (mx, my)}.
+    """
+    coords = {}
+    # Map the framebuffer coordinate to the corresponding coordinate in each MAB level
+    for level_idx in get_all_levels():
+        # Scale the coordinate based on the resolution ratio
+        scale = mab_levels[level_idx].resolution / fb_coord.resolution
+        mx = fb_coord.x * scale
+        my = fb_coord.y * scale
+        coords[level_idx] = (mx, my)
+    return coords
 ```
 
-### Edge Cases and Pitfalls
-*   **Precision:** Arbitrary resolution scaling requires careful handling of coordinate mapping to avoid aliasing or gaps between levels [S1].
-*   **Boundaries:** The transition between resolution levels must be smooth to avoid visible seams. The blending factors $f_a$ ensure smooth interpolation [S1].
-*   **Degenerate Input:** If the ray density is too low, visual quality degrades significantly. The adaptation mechanism must ensure a minimum ray density to maintain acceptable quality [S1].
-*   **HMD Distortion:** The mapping functions must account for the nonuniform lens distortion of the HMD, which affects the perceived resolution across the field of view [S1].
+## Subtopics
+
+### FAVR (Foveated Adaptive Volume Rendering)
+The predecessor method by Waschk and Krüger (2020) that established the concept of using HMD lens distortion and HVS properties for DVR acceleration, but without the explicit MAB compositing structure [S1].
+
+### Dynamic Resolution Adaptation
+A broader category of methods that adjust resolution based on performance metrics, whereas MAB specifically targets VR HMD characteristics and uses a fixed gaze model [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** The raycasting complexity is reduced by the factor of the average resolution ratio across the screen. The compositing step is $O(1)$ per pixel, involving a fixed number of MAB lookups and blends [S1].
-*   **Memory Complexity:** The MAB requires memory proportional to the sum of the areas of all resolution levels. Since levels are ordered to minimize size, the overhead is manageable [S1].
-*   **Measured Performance:** Designed for HMDs with resolutions around $2880 \times 1600$ and refresh rates of 90-120 Hz or more [S1]. It makes DVR feasible in VR by guaranteeing stable high refresh rates, thereby avoiding cyber-sickness [S1].
+*   **Time Complexity:** The ray traversal complexity is reduced proportionally to the reduction in ray density. The compositing step is $O(N)$ where $N$ is the number of framebuffer pixels, with a small constant factor for blending [S1].
+*   **Memory Complexity:** The MAB size is the sum of the areas of all resolution levels. By ordering levels to minimize size and using arbitrary scaling, the memory overhead is kept low compared to storing full-resolution buffers for all levels [S1].
+*   **Performance:** Designed to guarantee stable high refresh rates (90-120+ Hz) on HMDs with resolutions around 2880 x 1600, making DVR feasible in VR [S1].
 *   **Strengths:**
     *   Works as a wrapper, compatible with any ray traversal mechanism [S1].
-    *   Supports arbitrary resolution scaling, allowing fine-tuned optimization [S1].
-    *   Accounts for HMD lens distortion, not just human visual system [S1].
+    *   No eye-tracking hardware required [S1].
+    *   Arbitrary resolution scaling reduces visual artifacts between levels compared to Mip-Maps [S1].
 *   **Limitations:**
-    *   Does not account for rapid eye movements, assuming a static gaze center [S1].
-    *   Requires precomputation of mapping functions and MAB structure [S1].
-*   **When to Use:** VR setups with HMDs where stable high refresh rates are critical and DVR is too slow at full resolution [S1].
-*   **When Not to Use:** Desktop rendering or VR systems with high-speed eye-tracking where dynamic foveated rendering is preferred [S1].
+    *   Does not account for rapid eye movements (saccades) [S1].
+    *   Relies on the assumption that the user's gaze is centered or predictable [S1].
+*   **When to use:** VR applications requiring stable high refresh rates for DVR where eye-tracking hardware is unavailable or too costly [S1].
+*   **When not to use:** Applications requiring high-fidelity foveated rendering with dynamic eye-tracking [S1].
 
 ## Background
-The Multiresolution Atlas Buffer (MAB) method was introduced by Jens Krüger and Andre Waschk in the WSCG 2022 Proceedings (CSRN 3201) [S1]. It builds upon the Foveated Adaptive Volume Rendering (FAVR) approach by Waschk and Krüger (2020) and earlier gaze-dependent rendering works [S1]. The method addresses the challenge of performing Direct Volume Rendering in VR, where high resolutions (e.g., $2880 \times 1600$) and high refresh rates (90-120 Hz) are required to avoid cyber-sickness, but DVR is computationally expensive [S1]. By adapting the resolution based on the human visual system and HMD lens distortion, MAB reduces the number of primary rays while maintaining visual quality in the foveal region [S1].
+The Multiresolution Atlas Buffer (MAB) method was introduced by Jens Krüger and Andre Waschk in the WSCG 2022 Proceedings (CSRN 3201) [S1]. It builds upon the FAVR (Foveated Adaptive Volume Rendering) approach by Waschk and Krüger (2020) and earlier gaze-dependent rendering works [S1]. The method addresses the challenge of maintaining high refresh rates in VR to avoid cyber-sickness, given the high resolutions of modern HMDs and the performance-intensive nature of DVR [S1].
 
 ## Sources
 [S1] Embracing Raycasting for Virtual Reality, https://doi.org/10.24132/csrn.3201.16, fetched 2026-10-29

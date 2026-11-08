@@ -3,16 +3,16 @@
 Also called: Ribbon surface reconstruction, Triangulation of contours
 
 ## Overview
-Surface Tessellation from Iso-Contours is a method for representing iso-surfaces by generating polygonal meshes from stacks of 2D contours extracted from consecutive slices of parallel planes within a data volume [S1, unofficial]. It solves the problem of connecting discrete 2D boundary loops into a coherent 3D surface, primarily used in early medical imaging and volumetric visualization [S1, unofficial]. It differs from voxel-based methods like [Marching Cubes](30-isosurface-extraction.md) by operating on explicit contour data rather than scalar field samples, and from [Dual Contouring and Surface Nets](6319-dual-contouring-and-surface-nets.md) by relying on inter-slice triangulation of existing boundaries rather than local optimization of vertex positions [S1, unofficial].
+Surface Tessellation from Iso-Contours is a method for representing iso-surfaces by generating polygonal surfaces from stacks of 2D contours on consecutive slices of parallel planes within a data volume [S1, unofficial]. It solves the problem of connecting discrete 2D boundary loops into a coherent 3D surface, primarily used in early medical imaging and volumetric visualization [S1, unofficial].
 
 ## How it works
-**Inputs:** A set of 2D contours, where each contour is a closed polygon defined by a sequence of vertices $(x, y)$ on a specific $z$-slice. Contours are typically generated via thresholding or manual outlining [S1, unofficial].
-**Outputs:** A triangular mesh representing the surface between consecutive contour slices.
+**Inputs:** A set of 2D contours, where each contour is a closed polygon defined by a sequence of vertices on a specific slice [G]. Contours are typically generated via thresholding or manual outlining [S1, unofficial].
+**Outputs:** A triangular mesh representing the surface between consecutive contour slices [G].
 
 **Data Structures:**
-*   **Contour List:** A list of contours $C_i$, where each contour $C_i$ contains $N_i$ vertices.
-*   **Vertex:** A 2D point $(x, y)$ on slice $z_i$.
-*   **Triangulation State:** For each pair of consecutive contours $C_i$ and $C_{i+1}$, a set of triangles connecting vertices from $C_i$ to $C_{i+1}$.
+*   **Contour List:** A list of contours $C_i$, where each contour $C_i$ contains $N_i$ vertices [G].
+*   **Vertex:** A 2D point $(x, y)$ on slice $z_i$ [G].
+*   **Triangulation State:** For each pair of consecutive contours $C_i$ and $C_{i+1}$, a set of triangles connecting vertices from $C_i$ to $C_{i+1}$ [G].
 
 **Steps:**
 1.  **Contour Generation:** Extract 2D iso-contours from each slice of the volume data. This can be done manually or via automatic thresholding and iso-contour following routines [S1, unofficial].
@@ -21,7 +21,7 @@ Surface Tessellation from Iso-Contours is a method for representing iso-surfaces
     *   **Fuchs et al.:** Minimize the surface area of the tessellated ribbon. This method is limited to simply branching structures [S1, unofficial].
     *   **Christiansen and Sederburg:** Map the contours onto a unit square. Select the triangulation based on the shortest diagonal. Ambiguous branching cases are resolved by user interaction [S1, unofficial].
     *   **Xu and Lu:** Treat surface reconstruction as a functional minimization problem solved by a partial differential equation method. The constraint is that the sum of curvatures of the surface should be at a minimum (maximally smooth) [S1, unofficial].
-3.  **Assembly:** Combine the triangulated ribbons from all consecutive slice pairs to form the complete mesh.
+3.  **Assembly:** Combine the triangulated ribbons from all consecutive slice pairs to form the complete mesh [G].
 4.  **Rendering:** Display the resulting mesh. On vector terminals, use wireframe in perspective with or without hidden lines. On raster terminals, display polygons as opaque tiles with lighting highlights and shadows [S1, unofficial].
 
 **Pitfalls:**
@@ -29,15 +29,15 @@ Surface Tessellation from Iso-Contours is a method for representing iso-surfaces
 *   **Topology:** The method assumes a simple correspondence between contours on adjacent slices. Complex topological changes (splitting/merging) require special handling or user intervention [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the triangulation algorithm. Graph-based approaches (Keppel) can be exponential in the number of vertices without pruning, while heuristic approaches (Christiansen/Sederburg) are generally linear or near-linear with respect to the number of contour vertices.
-*   **Memory Complexity:** Proportional to the number of contours and vertices. Requires storing the contour data and the resulting triangle indices.
-*   **Strengths:** Produces smooth surfaces if contours are dense; computationally simpler than full 3D marching algorithms for data that is naturally slice-based (e.g., MRI/CT).
-*   **Limitations:** Struggles with complex topology (branching, holes) without user intervention or advanced heuristics; sensitive to noise in contour extraction; does not utilize interior volume data, only boundary information.
-*   **When to use:** When data is naturally available as 2D contours (e.g., segmented medical images) and topology is relatively simple.
-*   **When not to use:** For high-resolution scalar fields where voxel-based methods are more robust; for complex branching structures without user interaction capabilities.
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Not given in the sources.
+*   **Limitations:** Not given in the sources.
+*   **When to use:** Not given in the sources.
+*   **When not to use:** Not given in the sources.
 
 ## Background
-Surface tessellation from iso-contours was one of the first methods used to represent iso-surfaces, dating back to the early days of volumetric visualization in medical imaging [S1, unofficial]. Keppel was among the first to devise a method to reconstruct the ribbon surface defined by two consecutive contours [S1, unofficial]. Fuchs et al. presented a solution minimizing surface area [S1, unofficial]. Christiansen and Sederburg achieved similar results by mapping contours to a unit square [S1, unofficial]. Xu and Lu approached the problem via functional minimization using partial differential equations [S1, unofficial]. The THREA04 system, developed by Mazziotta et al. in 1976, was an early system capable of displaying 3D images from 20 sections using threshold segmentation and automatic boundary detection [S1, unofficial].
+Surface tessellation from iso-contours was one of the first methods used to represent iso-surfaces, dating back to the early days of volumetric visualization in medical imaging [S1, unofficial]. Keppel was among the first to devise a method to reconstruct the ribbon surface defined by two consecutive contours [S1, unofficial]. Fuchs et al. presented a solution minimizing surface area [S1, unofficial]. Christiansen and Sederburg achieved similar results by mapping contours to a unit square [S1, unofficial]. Xu and Lu approached the problem via functional minimization using partial differential equations [S1, unofficial]. The THREA04 system, developed by Mazziotta et al. in 1976, was an early system capable of displaying 30 images from 20 sections using threshold segmentation and automatic boundary detection [S1, unofficial].
 
 ## Sources
 [S1] Volumetric rendering of medical data : applications to stereotactic neurosurgery planning, https://doi.org/10.82308/10070, fetched 2026-10-26 (unofficial)

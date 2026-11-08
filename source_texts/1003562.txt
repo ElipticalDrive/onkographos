@@ -1,0 +1,170 @@
+modular Python packages for cryo-EM and cryo-ET. Contribute to teamtomo/teamtomo development by creating an account on GitHub.
+
+Feat/warp xml loader: load Warp/M tilt-series XML in torch-tilt-series; from_interpolating_data in torch-cubic-spline-grids by jtcarrion · Pull Request #159 · teamtomo/teamtomo · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jtcarrion
+commented
+Oct 22, 2026
+Copy link
+Copy Markdown
+Adds a Warp/M XML loader to torch-tilt-series, shaped like the AreTomo and etomo loaders, and the one primitive it needs in torch-cubic-spline-grids.
+torch-cubic-spline-grids: CubicSplineGrid.from_interpolating_data(data)
+from_grid_data sets control points. This classmethod instead solves for the control points so the spline passes through data at the grid points. The spline is linear in its control points, so the interpolation matrix is assembled by evaluating one-hot control points at the grid points and the fit is one torch.linalg.solve. About 25 lines, every grid class and dimension, tested from 1-D to 4-D (6 parametrised cases). On Warp's lattice the fit is exact (residual ~1e-5).
+torch-tilt-series: from_warp_xml(xml_path, pixel_spacing=None, image_path=None, apply_local_shifts=True, local_shifts_2d=None, device="cpu")
+Reads the file with warpxmlfile (same role as alnfile/etomofiles) and maps it onto TiltSeries. The loader builds one CubicBSplineGrid2d.from_interpolating_data per kept tilt and wires that into the existing local_shifts_2d hook.
+McHaillet
+commented
+Oct 23, 2026
+Copy link
+Copy Markdown
+Contributor
+Awesome 🚀
+I will have a detailed look and try it ASAP
+jdickerson95
+commented
+Nov 3, 2026
+Copy link
+Copy Markdown
+Contributor
+Awesome work @jtcarrion!
+I've been testing this out on a dataset and it look amazing. I just have a couple things I/Claude came across when testing it:
+LevelAngleX/Y are silently ignored. warpylib uses them in projection: tilt = angle + LevelAngleY, then Euler(...) @ Rx(LevelAngleX). With non-zero values the projection is wrong by hundreds of Å and nothing warns. This mapping reproduces warpylib exactly (max 0.001 Å):
+```
+tilt_angles = angles + level_angle_y
+x_tilts = -level_angle_x
+```
+Either map them like this, or raise when they are non-zero.
+Behaviour beyond the image edge. _warp_local_shifts_2d clamps the normalised position to [0, 1]. warpylib's grid evaluation doesn't seem to clamp. As far as I can tell its spline continues past the last node, which accounts for the 0.7–2 Å differences above, all for points projecting outside the image (0.2% of point–tilt pairs here). Points near the edge at high tilt are affected. I think this is fine but can you document the difference?
+jtcarrion
+added 5 commits
+November 3, 2026 22:59
+feat(torch-tilt-series): from_warp_xml loader for Warp/M tilt-series …
+…
+6fd2185
+```
+…XML via xmlfile
+```
+feat(torch-tilt-series): from_warp_xml reads through warpxmlfile's Wa…
+…
+6b45fb6
+```
+…rpTiltSeries model (+ trailer)
+```
+feat(torch-cubic-spline-grids): from_interpolating_data builds a grid…
+…
+e5a7dec
+```
+… through given values. One linear solve, the spline is linear in its control points, so the interpolation matrix is assembled by evaluating one-hot control points at the grid points.
+```
+feat(torch-tilt-series): from_warp_xml applies Warp's local grids by …
+…
+92ea6bf
+```
+…default. GridMovementX/Y become one CubicBSplineGrid2d per tilt through Warp's node values (via from_interpolating_data). Adds the torch-cubic-spline-grids dependency and the lock now resolves warpxmlfile 0.0.1 from PyPI.
+```
+from_warp_xml maps LevelAngleX/Y and documented grid edge differences
+7d7b58d
+jtcarrion
+force-pushed
+the
+feat/warp-xml-loader
+branch
+from
+12b1f1c to
+7d7b58d
+Compare
+November 4, 2026 04:03
+jtcarrion
+commented
+Nov 4, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Author
+Hey @jdickerson95 ! These are both great catches, thank you for checking this and letting me know. Both of my use cases did not include LevelAngleX/Y so I never thought about it. I went ahead and made a new commit to (1) add the LevelAngleY to all tilt angles, (2) added x_tilts=-LevelAngleX inside the TIltSeries() object, and (3) added a sentence to the from_warp_xml() doc string that documents the differences when outside of the normalized volume/image!
+Quick note on the git history... I rebased the branch onto current main while adding the fix, so the four earlier commits show up again with new hashes. Nothing in them changed, the only new work is the last commit... sorry if this looks kinda messy
+McHaillet
+commented
+Nov 4, 2026
+Copy link
+Copy Markdown
+Contributor
+Quick note on the git history... I rebased the branch onto current main while adding the fix, so the four earlier commits show up again with new hashes. Nothing in them changed, the only new work is the last commit... sorry if this looks kinda messy
+That is no problem, we can just squash and merge, so it condenses to a single commit!
+McHaillet
+reviewed
+Nov 4, 2026
+View reviewed changes
+McHaillet
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Looks very nice @jtcarrion
+Comment thread
+packages/primitives/torch-cubic-spline-grids/src/torch_cubic_spline_grids/_base_cubic_grid.py
+return grid
+@classmethod
+def from_interpolating_data(cls, data: torch.Tensor) -> Self:
+McHaillet
+Nov 4, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+What do you think about adding a to_interpolating_data() method? I don't recall if we decided against it in zulip.
+If anything, it could be nice for a test. Because then you can test if the round trip returns the initial values.
+Comment thread
+packages/primitives/torch-tilt-series/src/torch_tilt_series/io.py
+and subtracts the result. `tilt_indices` selects and orders the tilts kept
+in the `TiltSeries`. A grid of ones (`1x1`) is a constant per tilt.
+"""
+from torch_cubic_spline_grids import CubicBSplineGrid2d
+McHaillet
+Nov 4, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I think we usually have import at the top of the file. But I see that convention is not used in this io module. It could be needed for the xmlfile/alnfile and stuff because they can then be optional dependencies. torch_cubic_spline_grids is non-optional and not heavy, so we can move it to the top.
+Comment thread
+packages/primitives/torch-tilt-series/src/torch_tilt_series/io.py
+shifts[:, t, 1] = -movement_xy[:, 0]
+return shifts
+local_shifts_2d.grids = grids # type: ignore[attr-defined] # one CubicBSplineGrid2d per tilt
+McHaillet
+Nov 4, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I had no idea that you could attach an attribute to a passable function, that's neat :)
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

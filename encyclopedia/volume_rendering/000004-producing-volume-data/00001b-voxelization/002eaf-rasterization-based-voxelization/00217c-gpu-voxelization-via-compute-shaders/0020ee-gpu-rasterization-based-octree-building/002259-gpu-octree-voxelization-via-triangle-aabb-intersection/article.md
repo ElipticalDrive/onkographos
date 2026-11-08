@@ -22,15 +22,10 @@ This method constructs an octree from triangle meshes by recursively subdividing
 **Parameters:**
 -   `voxel_size`: Default value is `1` [S1, unofficial].
 -   `gridSize`: CUDA grid dimension, default `dim3(256)` [S1, unofficial].
--   `blockSize`: CUDA block dimension, default `dim3(256)` [S1, unofficial] [G]. Note: In CUDA, `gridSize` typically refers to the number of blocks, and `blockSize` to threads per block. The source uses `dim3` which allows 3D dimensions, but 1D is implied by the loop logic.
+-   `blockSize`: CUDA block dimension, default `dim3(256)` [S1, unofficial]. The source uses `dim3` which allows 3D dimensions, but 1D is implied by the loop logic [S1, unofficial].
 
 **Algorithm Steps:**
 1.  **Memory Allocation:** Allocate device memory for the triangle meshes and copy data from host to device [S1, unofficial].
-    ```python
-    # Pseudocode for memory setup
-    d_tri_meshes = cuda_malloc(num_tri_meshes * sizeof(glm::fmat3x3))
-    cuda_memcpy(d_tri_meshes, tri_meshes_host, num_tri_meshes * sizeof(glm::fmat3x3))
-    ```
 2.  **Root Initialization:** Create the root node and compute its AABB by calling the parallel bounding box kernel `getBoundingBox` [S1, unofficial].
 3.  **Recursive Subdivision:** Call `recSubDivision` on the root node [S1, unofficial].
     -   For each node, check for intersection with triangles using `isBoxleIntersectsTriangle` [S1, unofficial].
@@ -46,7 +41,45 @@ This method constructs an octree from triangle meshes by recursively subdividing
             -   Recursively call `recSubDivision` on each child [S1, unofficial].
     -   **If Intersection is False:**
         -   Set node type to `NT_EMPTY` [S1, unofficial].
-        -   [G] Note: The source code calculates signed distance even for empty nodes, which is unusual. This step is included as per source [S1, unofficial].
+        -   Calculate signed distance using `calcLeafNodeSignedDistance` kernel [S1, unofficial].
+        -   Store result in `m_singed_dist` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def build_octree(tri_meshes, voxel_size=1.0):
+    # 1. Memory Allocation
+    d_tri_meshes = cuda_malloc(len(tri_meshes) * sizeof(glm_fmat3x3))
+    cuda_memcpy(d_tri_meshes, tri_meshes, len(tri_meshes) * sizeof(glm_fmat3x3))
+    # 2. Root Initialization
+    root = Node()
+    root.m_box = get_bounding_box(d_tri_meshes, len(tri_meshes))
+    root.m_parent = None
+    root.m_children = [None] * 8
+    # 3. Recursive Subdivision
+    rec_sub_division(root, d_tri_meshes, len(tri_meshes), voxel_size)
+    return root
+
+def rec_sub_division(node, d_tri_meshes, num_triangles, voxel_size):
+    is_intersect = is_box_intersects_triangle(d_tri_meshes, node.m_box.min, node.m_box.max)
+    if is_intersect:
+        if node.dim == voxel_size:
+            node.m_node_type = NT_LEAF
+            node.m_singed_dist = calc_leaf_node_signed_distance(d_tri_meshes, node.m_box.center)
+        else:
+            node.m_node_type = NT_INTERNEL
+            node.m_singed_dist = 0.0
+            for i in range(8):
+                child = Node()
+                child.m_parent = node
+                child.m_box = set_aabb(node.m_box, i)
+                node.m_children[i] = child
+                rec_sub_division(child, d_tri_meshes, num_triangles, voxel_size)
+    else:
+        node.m_node_type = NT_EMPTY
+        node.m_singed_dist = calc_leaf_node_signed_distance(d_tri_meshes, node.m_box.center)
+```
 
 **Geometric Kernels:**
 1.  **Bounding Box Reduction (`findRecudedBoundingBox`):**
@@ -55,6 +88,7 @@ This method constructs an octree from triangle meshes by recursively subdividing
     -   Formula for min/max update:
         $$ \text{box}_{min} = \min(\text{box}_{min}, \text{cache}_{min}) $$
         $$ \text{box}_{max} = \max(\text{box}_{max}, \text{cache}_{max}) $$
+        [S1, unofficial].
 2.  **Signed Distance Calculation (`calcLeafNodeSignedDistance`):**
     -   Iterates over all triangles to find the closest point on any triangle to the node center [S1, unofficial].
     -   Uses `findClosestPointOnTriangle` to compute the closest point using barycentric coordinates [S1, unofficial].
@@ -74,10 +108,7 @@ This method constructs an octree from triangle meshes by recursively subdividing
 -   **Mutex Size:** The source uses `cudaMemset(d_mutex, 0, sizeof(float))` instead of `sizeof(int)`, which may cause issues if the mutex is expected to be an integer [S1, unofficial].
 
 ## Operating characteristics
--   **Time Complexity:** The recursive subdivision is $O(N)$ in the number of nodes, but each node requires a GPU kernel launch for intersection and distance calculations. The bounding box reduction is $O(M)$ where $M$ is the number of triangles. The signed distance calculation is $O(M)$ per leaf node.
--   **Memory Complexity:** $O(N)$ for the octree nodes and $O(M)$ for the triangle meshes in device memory [S1, unofficial].
--   **Strengths:** Leverages GPU parallelism for expensive geometric queries [S1, unofficial].
--   **Limitations:** The recursive CPU-side control flow may lead to kernel launch overhead. The source code has incomplete intersection testing [S1, unofficial].
+Time complexity is not given in the sources. Memory complexity is not given in the sources. Strengths: Leverages GPU parallelism for expensive geometric queries [S1, unofficial]. Limitations: The recursive CPU-side control flow may lead to kernel launch overhead. The source code has incomplete intersection testing [S1, unofficial].
 
 ## Background
 This method is described in the "ParallelVoxelizer" project by allenkim0129 [S1, unofficial]. It is a GPU-accelerated voxelization technique that constructs an octree from triangle meshes [S1, unofficial].

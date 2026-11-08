@@ -1,0 +1,548 @@
+Compile and explore arbitrarily large n-dimensional scientific data in the browser — points, lines, Gaussian splats and meshes, streamed from Zarr and rendered on the GPU. - Demos: pick tone mapping by range, not by reaching for Neutral (#1459) by royerloic · Pull Request #1570 · royerlab/luxar
+
+Demos: pick tone mapping by range, not by reaching for Neutral (#1459) by royerloic · Pull Request #1570 · royerlab/luxar · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+royerloic
+commented
+Aug 13, 2026
+Copy link
+Copy Markdown
+Member
+Closes #1459.
+#1527 carries the FlyWire half of this issue (opacity 0.79 + luminous on every layer, Neutral → ACES). This is the sweep the issue's implementer notes asked for: the five other demo modules that still pinned tone_mapping="Neutral".
+What I found
+Every one of those pins justified itself the same way — colour here is an exact encoding, ACES shifts hues — and for a scene that already fits inside [0, 1] that reasoning doesn't survive contact with the operator. Khronos PBR Neutral is not an identity anywhere: it subtracts an offset (0.04 once the channel minimum reaches 0.08, x - 6.25x² below that, which crushes near-black hardest) and, from peak 0.76 up, compresses the peak and mixes toward the grey equal to it. Running the three.js formula:
+in
+Neutral out
+clamp (None) out
+(0.5, 0.5, 0.5)
+(0.46, 0.46, 0.46)
+(0.5, 0.5, 0.5)
+(1, 0, 0)
+(0.880, 0.016, 0.016)
+(1, 0, 0)
+(8, 0.5, 8)
+(0.992, 0.535, 0.992) — g = 0.51
+(1, 0.5, 1)
+(100, 0, 0)
+(0.999, 0.936, 0.936) — hue 0°, sat 0.06
+(1, 0, 0) — hue 0°, sat 1.0
+(2, 1, 0)
+(0.961, 0.545, 0.130) — hue 30°
+(1, 1, 0) — hue 60°
+So the answer is decided by range, and over range it inverts: Neutral holds the HSV hue angle exactly (its offset, compression and mix are all "scale every channel, then add the same amount to all") but sheds chroma, while a hard clamp keeps saturation and shifts hue whenever several channels clip unequally.
+What changed
+Flipped to tone_mapping="None" — both provably in gamut, so the clamp is exact and Neutral was dulling the encoding the comment set out to protect:
+demo_ocean_currents_earth — Blue Marble texture and the blue→white speed LUT are both [0, 1], both nodes blending_mode="normal" at LINE_INTENSITY = 1.0, bloom off.
+demo_gsplats_recipes_tribolium — hsv palette in [0, 1] over six volumetric gsplat nodes. Working the shader through, emitted RGB is color·(1 − e^−τ)/absorption with τ = absorption·opacity·intensity, so opacity cancels and absorption=1.0 is what bounds it.
+Kept Neutral, with the comment now stating the real reason — all three run over range with colour as a hue encoding, which is exactly where Neutral's hue-exactness is worth its chroma cost:
+demo_nd_transforms (C_LIT peaks 1.9, CH_LIT 2.4), demo_biodiversity_planetary_scale (GLOBE_INTENSITY 4.88, OCCURRENCE_INTENSITY 100.0), demo_gsplats_3d_tribolium_embryo (exposure=1.97).
+Left alone deliberately: the _interop_common.build_interop_scene default. Five of its six callers are in gamut, but demo_gsplats_interop_sog_matrixcity builds recipe="overview", whose substitutive merge emits amplitudes with no bound of 1 that the gsplat normal shader feeds straight into RGB. That one needs a render check before it can claim to be in gamut, so the default stays and the docstring now says why.
+New guard — demos/tests/test_demos_tone_mapping_policy.py AST-scans the demo package (via the existing _scanned_modules denylist, so new demos join automatically) and requires "ACES" unless the module has a row, with a reason, in an exceptions table. It reads inline literals, signature defaults and module-level string constants, and its docstring is explicit about the dynamic spellings it cannot see (none occur today).
+Docs — the surfaces that were teaching the old rule now say to pick by range: CLAUDE.md, the HDR guide, gsplat convert's option help and docstring (they were about to contradict each other on one --help screen), the compiler's LUT notice, ViewerConfig.tone_mapping, the gsplat-ops and _compiler READMEs, the skill reference, and the viewer's tone-mapping tooltip + config comments. Worth noting None and Linear compile to the same shader mode in our mega-shader, so either spelling is the passthrough — None is just the clearer name.
+Test evidence
+hatch run pytest packages/luxar/src/luxar/demos/tests/ packages/luxar/src/luxar/io/_compiler -q → 1780 passed, 13 skipped
+hatch run pytest packages/luxar/src/luxar/core/tests packages/luxar/src/luxar/cli/tests -k "viewer_config or tone or scene or convert" → 182 passed
+The new guard fails before the fix, verified by mutation: reverting the ocean pin, the recipes pin, or the interop signature default each turns it red; dropping a fresh demo_*.py with a stray Neutral into the package also turns it red. 4 passed after; 34 modules pin a tone mapping against a floor of 25, so it isn't vacuous.
+Viewer: pnpm test --run → 11513 passed, 2 skipped (553 files); pnpm typecheck, pnpm lint, pnpm check:format clean.
+ruff check / ruff format --check clean on the 15 touched Python files; mypy packages/luxar/src/luxar/ → no issues in 819 files; make check-docs green.
+Not in here
+The gallery still/orbit recapture the issue mentions for FlyWire — that needs the datasets pulled down and a capture pass, and it belongs with #1527's change rather than this one. Neither demo flipped here has a gallery tile, so nothing existing goes stale.
+demos: pick tone mapping by range, not by reaching for Neutral (#1459)
+…
+ccec266
+```
+The sweep #1459 asked for, on the five demo modules that still pinned
+tone_mapping="Neutral". Each pin justified the choice the same way — colour
+here is an exact encoding and ACES shifts hues — and for a scene that already
+fits inside [0, 1] that reasoning does not survive contact with the operator:
+Khronos PBR Neutral is not an identity anywhere. It subtracts an offset (0.04
+once the channel minimum reaches 0.08, x - 6.25x^2 below that, which crushes
+near-black hardest) and, from peak 0.76 up, compresses the peak and mixes
+toward the grey equal to it. (0.5, 0.5, 0.5) comes out at 0.46; (1, 0, 0) at
+(0.880, 0.016, 0.016).
+
+So the rule is range, not reflex. Inside [0, 1] "None" is an exact passthrough
+(the viewer maps it to NoToneMapping, which the mega-shader aliases to its
+Linear clamp mode, and exposure/offset/gamma still apply because they run
+before the tone-mapping switch). demo_ocean_currents_earth and
+demo_gsplats_recipes_tribolium move there — both are provably in gamut.
+
+Over range the picture inverts and neither is faithful: Neutral holds the HSV
+hue angle exactly but sheds chroma ((100, 0, 0) leaves at saturation 0.06),
+while a clamp keeps saturation but shifts hue when several channels clip
+unequally ((2, 1, 0) -> (1, 1, 0), 30 deg -> 60 deg). demo_nd_transforms,
+demo_biodiversity_planetary_scale and demo_gsplats_3d_tribolium_embryo all run
+over range with colour as a hue encoding, so Neutral stays and each comment now
+states that as the reason rather than the in-gamut one it used to give.
+
+A new AST guard pins the policy over the whole demo package, and the surfaces
+that were teaching the old rule — CLAUDE.md, the HDR guide, gsplat convert's
+help and docstring, the compiler's LUT notice, ViewerConfig.tone_mapping, the
+viewer's tone-mapping tooltip — now say to pick by range.
+
+FlyWire's own flip is #1527; the gallery recapture is not in here.
+```
+royerloic
+mentioned this pull request
+Aug 13, 2026
+FlyWire connectome demo: bake tuned appearance (opacity 0.79 + luminous on all layers) and switch to ACES tone mapping
+#1459
+Closed
+royerloic
+commented
+Aug 13, 2026
+Copy link
+Copy Markdown
+Member
+Author
+(minor) packages/luxar/src/luxar/demos/tests/test_demos_tone_mapping_policy.py:228 — _as_string() resolves every ast.Name against module-level constants without considering lexical scope. A function-local rebinding can therefore produce either a false pass or false failure: with module-level TONE = "ACES" and local TONE = "Neutral", ViewerConfig(tone_mapping=TONE) is incorrectly treated as ACES. This is a natural spelling for future demos and silently defeats the new policy guard. Either make name resolution scope-aware or skip names shadowed in the containing function, and add a regression test.
+Checked and found clean: the literal/signature-default/annotated-module-constant extraction paths, exception-table consistency checks, updated "None" guidance across CLI/compiler/viewer documentation, and the two explicit demo changes are internally consistent. No security-sensitive changes were introduced.
+royerloic
+added 2 commits
+August 14, 2026 04:08
+Merge remote-tracking branch 'origin/main' into issue-1459-tone-mappi…
+…
+638aa24
+```
+…ng-sweep
+```
+Resolve tone-mapping constants in their own scope; drop the landed Fl…
+…
+8ef9e6d
+```
+…yWire row
+
+#1527 is on main, so demo_flywire_connectome pins ACES and its in-flight
+exception row is dead — delete it and the branch in the exception check that
+only existed to tolerate it.
+
+The scan used to resolve every ast.Name against module-level constants
+regardless of scope, so a function-local TONE = "Neutral" was either invisible
+(no module constant of that name) or reported as the module's value. Descend
+with a per-scope map instead: a function body's own string constants win, and
+its parameters shadow an outer constant of the same name, which is also what
+keeps a forwarded tone_mapping=tone_mapping policy-free.
+```
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Went through this at ccec266, then again at 8ef9e6d after updating the branch onto main. The change picks the demos' tone mapping by range instead of reflexively pinning Neutral: two demos that are provably inside [0, 1] move to None, three that run over range keep Neutral with the real reason written down, and a new AST guard in demos/tests/ pins the policy so a new demo can't copy-paste a Neutral in without a justified row.
+I checked the reasoning rather than taking it on trust:
+Re-ran the three.js Khronos PBR Neutral formula against every number quoted in the docs and comments — (0.5,0.5,0.5)→(0.46,…), (1,0,0)→(0.880,0.016,0.016), (8,0.5,8)→(0.992,0.535,0.992) at g = 0.51, (100,0,0)→(0.999,0.936,0.936) at saturation 0.063, the post-offset-0.9 case greying to 0.848 at g = 0.008, and (2,1,0) clamping from hue 30° to 60°. All of them check out, and the hue claim holds structurally: the offset, the peak compression and the grey mix are each "scale every channel, then add the same amount to all", which cannot move the HSV hue angle.
+The None plumbing: VALID_TONE_MAPPINGS accepts it, the viewer maps None → THREE.NoToneMapping → shader mode 1 (Linear clamp) on both the GLSL and the TSL path, EOG really does run before the tone-mapping switch, and every Python consumer tests is None rather than truthiness — so the string is an explicit choice and does silence the LUT notice.
+demo_ocean_currents_earth: the Blue Marble sample is clipped to [0, 1] and the speed LUT is /255; both nodes are normal at intensity 1.0, and bloom is off (the viewer default), so alpha-over of bounded premultiplied sources stays bounded.
+demo_gsplats_recipes_tribolium: six RECIPES entries, each added volumetric with opacity=1.0, absorption=1.0. The shader emits color·(1−e^−τ)/κ with α = 1−e^−τ, so RGB ≤ α whenever colour ≤ 1 and the One/OneMinusSrcAlpha sum stays bounded however large a substitutive merge makes the amplitudes. That is also why leaving _interop_common on Neutral is consistent rather than a double standard: there the node is normal, where RGB = colour·intensity·opacity and an unbounded amplitude does escape [0, 1]. Confirmed matrixcity really builds recipe="overview" and that the import path clips RGB to [0, 1].
+Neither flipped demo is in scripts/gallery/manifest.json, so no still or orbit goes stale.
+Doc sweep is complete — nothing outside the gitignored docs/_build still says "reach for Neutral for exact fidelity".
+Two things I fixed and pushed:
+1. The FlyWire exception row was dead. #1527 landed on main while this sat, so demo_flywire_connectome pins ACES now and the "both values accepted until that lands" row is exactly the state its own comment said to delete. Updated the branch onto main, removed the row, and dropped the branch in test_every_exception_is_real_and_justified that existed only to tolerate an ACES-allowing row — a dead row is caught unconditionally again. The changelog fragment said the sweep "only records its row"; corrected to say that half has landed.
+2. The scan resolved names without regard to scope. _as_string looked every ast.Name up in the module-level constant map, so a function-local TONE = "Neutral" was either invisible (no module constant of that name) or — worse — reported as a module-level TONE = "ACES", a silent pass. It now descends with a per-scope map: a function body's own string constants win, and its parameters shadow an outer constant of the same name, which is also what keeps a forwarded tone_mapping=tone_mapping policy-free. Two regression cases added. Graded by mutation: a local constant shadowing a module one, and a plain local with no module constant at all, both turn the guard red now and both passed before; reverting the ocean pin and re-adding the FlyWire row still trip it.
+Verification on the merged head: pytest demos/tests io/_compiler → 1781 passed / 12 skipped; pytest core/tests cli/tests -k "viewer_config or tone or scene or convert" → 185 passed; the mutation set above; ruff check/format, mypy and the C901 ratchet (0 new, 0 worsened) clean. I did not re-run the viewer suite: none of my fixes touch it, this PR's viewer edits are comments and one tooltip string, and nothing asserts that text — CI covers it on the push.
+Nothing left over, so no follow-up filed.
+royerloic
+enabled auto-merge (squash)
+August 14, 2026 11:23
+Merge branch 'main' into issue-1459-tone-mapping-sweep
+534a795
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+(major) packages/luxar/src/luxar/demos/tests/test_demos_tone_mapping_policy.py:183-207,271-275 — The scanner resolves constants using one map built from the entire body, so it uses the last assignment regardless of where the use occurs. For example, TONE = "Neutral"; ViewerConfig(tone_mapping=TONE); TONE = "ACES" is reported as "ACES" even though the scene receives "Neutral". The same issue exists inside functions. This creates a false negative in the new policy guard and contradicts its claim that constants are resolved where used. Traverse statements in order or conservatively report all relevant assignments, and add a reassignment-order test.
+(minor) packages/luxar/src/luxar/demos/tests/test_demos_tone_mapping_policy.py:16-21 (also docs/guides/user/HDR_GUIDE.md:312-318 and several updated comments) — “Neutral is not an identity anywhere” is factually too strong. The Neutral formula derives its offset from the minimum channel; when that minimum is zero, the offset is zero, and below the 0.76 compression threshold no further operation occurs. Thus values such as (0.5, 0, 0) pass through unchanged. Neutral is not an identity operator globally, which supports the policy, but the repeated “anywhere” claim and explanation that it always subtracts an offset should be corrected.
+Checked the changed demo pins against the exception table, the warning/help text for consistency, and the existing ACES/None/Neutral naming. No security-sensitive changes or additional concrete regressions found.
+Tone-mapping guard: report every binding of a rebound constant; fix t…
+…
+04bfc61
+```
+…he Neutral claim
+
+Two follow-ups on the demo tone-mapping policy guard.
+
+The AST scan resolved a name against one map per scope, keyed by name, so the
+LAST binding in a body won regardless of where the use sat:
+
+    TONE = "Neutral"
+    ViewerConfig(tone_mapping=TONE)   # the scene gets "Neutral"
+    TONE = "ACES"                     # ...but the scan reported "ACES"
+
+which is a silent false negative in a guard whose whole job is to not miss a
+stray pin. The scan has no notion of statement order, so a name now keeps every
+distinct string it is bound to and the policy check sees the "Neutral"; the
+conservative direction costs at most a spurious failure on a demo that really
+does rebind such a constant (none does). A lambda's parameters now shadow an
+outer constant the same way a def's already did — previously a forwarded
+`lambda tone_mapping: ViewerConfig(tone_mapping=tone_mapping)` reported whatever
+the module bound that name to. Tests for both, and the docstring's "statically
+known" boundary updated to match.
+
+Also corrected "Neutral is not an identity anywhere", which was too strong: its
+offset comes from the channel minimum, so a colour whose minimum is 0 and whose
+peak is under the 0.76 knee — a fully saturated hue, or black — passes through
+untouched. Everything desaturated at all does move, which is what the policy
+rests on, so the claim is now stated that way at all nine places it appeared.
+```
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Closing review pass over 534a795 (branch now at 04bfc61 with the fixes below).
+What this does. Sweeps the demo package's tone_mapping="Neutral" pins and replaces the "colour is an exact encoding, so reach for Neutral" rule with one decided by range: inside [0, 1] "None" is an exact passthrough (ocean_currents_earth, gsplats_recipes_tribolium move there), over range Neutral is the hue-exact-but-chroma-shedding option and keeps its pin with the real reason written down (nd_transforms, biodiversity_planetary_scale, gsplats_3d_tribolium_embryo, plus the _interop_common default, whose range is genuinely unproven because the overview recipe's merge feeds unbounded amplitudes into the normal shader). A new AST guard pins the policy, and every doc surface that taught the old rule now teaches the new one.
+Fixed and pushed
+The guard's constant resolution was order-blind. It built one name → value map per scope, so the last binding in a body won no matter where the use sat: TONE = "Neutral" / ViewerConfig(tone_mapping=TONE) / TONE = "ACES" reported "ACES" and the real pin vanished — a silent false negative in a guard whose only job is not to miss one. Since the scan has no notion of statement order, a name now keeps every distinct string it is bound to, so the check sees the "Neutral"; worst case is a spurious failure on a demo that genuinely rebinds such a constant, which none does. Same shape inside a function body. Test added for both.
+While in there: a lambda's parameters didn't shadow an outer constant the way a def's already did, so a forwarded lambda tone_mapping: ViewerConfig(tone_mapping=tone_mapping) reported whatever the module happened to bind to that name. Now handled through the same split, and the docstring's "statically known" boundary lists what actually holds.
+"Neutral is not an identity anywhere" was too strong. Its offset is taken from the channel minimum, so a colour with minimum 0 and peak under the 0.76 knee — a fully saturated hue, or black — comes through untouched; (0.5, 0, 0) is a literal identity. Anything desaturated at all does move, which is what the policy actually rests on, so that is how it now reads at all nine sites (CLAUDE.md, HDR guide, gsplat convert help + docstring, the LUT notice, ViewerConfig, the two READMEs, the viewer config comment, the changelog fragment).
+Checked and clean
+The exception table matches the tree exactly: the six non-ACES pins on disk are the six rows, no dead row and no missing one. main brought no new demo module, so the denylist set and the ≥25-modules floor still hold.
+The _interop_common reasoning: interop/_color.py does clip to [0, 1] on the sRGB → linear conversion, so the docstring's claim about the imported RGB is accurate and the overview caveat is the real reason the default stays.
+Both flipped demos: ocean currents is normal blending at intensity 1.0 with a [0, 1] texture and LUT and no exposure set; the recipes gallery is six volumetric nodes at absorption=1.0, where the emitted radiance is bounded regardless of the merged amplitudes — that asymmetry against _interop_common's normal mode is what makes one flip safe and the other not, and both comments say so.
+The main merge is a clean import of main's side only; nothing of this branch's work was dropped in it.
+hatch run pytest demos/tests io/_compiler → 1782 passed, 12 skipped. Colormap-notice, ViewerConfig and gsplat convert tests pass. ruff check/format, mypy clean on the touched files; viewer tsc --noEmit, prettier and the config unit suite (460) clean.
+Nothing deferred, no follow-up filed.
+Merge branch 'main' into issue-1459-tone-mapping-sweep
+0dd6500
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+(minor) changelog.d/1459.md:43-51 and packages/luxar/src/luxar/demos/tests/test_demos_tone_mapping_policy.py:112-125 — The Tribolium justification says opacity “cancels identically,” but the stated expression, color * (1 - exp(-absorption * opacity * intensity)) / absorption, still depends on opacity. The in-gamut conclusion may remain valid, but it requires an explicit bound such as opacity * intensity <= 1; it does not follow from cancellation. The related claim that lowering κ below 1 necessarily pushes a node over range also needs that range analysis corrected. Since this text is the policy exception’s justification, please make the proof mathematically accurate.
+Checked the tone-mapping guidance across CLI help, compiler warning, viewer documentation, and demo comments and found it internally consistent. The AST guard covers its documented literal/default/constant forms, handles parameter and local-constant shadowing, guards against vacuous scanning, and tests rebinding conservatively. No security-sensitive changes or other high-confidence regressions found.
+Tone mapping: state the volumetric in-gamut bound correctly
+…
+c259985
+```
+The Tribolium recipes-gallery exception said opacity "cancels identically"
+from the volumetric emission, which isn't what the shader does: the
+opacity*intensity ray mass cancels against the tau under S(tau), leaving
+1 - exp(-tau), which still depends on opacity. The bound is unchanged --
+that factor is below 1 for any tau >= 0, so absorption=1.0 is what pins a
+node at 1 -- but the reason now matches the math, in the guard's exception
+row and in the changelog fragment. Same for the kappa slider: dropping it
+below 1 raises the bound to 1/kappa rather than pushing a node over range
+outright.
+```
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Third look, at 0dd6500 (the earlier head plus a clean merge of main — #1567 only, nothing that touches demos). Read the full modified files rather than the hunks, and re-derived the operator and shader claims instead of taking them on trust.
+The change replaces the demo package's five remaining tone_mapping="Neutral" pins with a range-based rule ("None" inside [0, 1], Neutral kept only where the scene runs over range and hue is the encoding), pins that rule with an AST guard over the demo package, and syncs every doc surface that was still teaching "reach for Neutral for exact colour".
+Fixed and pushed (c259985):
+test_demos_tone_mapping_policy.py:105 / changelog.d/1459.md:44 — the Tribolium exception justified itself with "opacity cancels identically", which is not what the shader does. gsplat/shader-glsl.ts:545-597 computes finalColor = gammaColor * intensity * uOpacity and then multiplies by S(τ) = (1 − e^−τ)/τ with τ = κ·uOpacity·intensity, so it is the opacity·intensity ray mass that cancels — against S(τ)'s denominator — and opacity survives inside the exponential. The conclusion is unaffected (1 − e^−τ < 1 for any τ ≥ 0, so absorption=1.0 bounds the node at 1 whatever opacity and intensity do), but the stated reason now matches the math, since that text is the exception's justification. Same edit fixes the κ-slider sentence: dropping κ below 1 raises the bound to 1/κ, it does not by itself put a node over range.
+Checked and found clean (the load-bearing claims, re-derived rather than reread):
+"None" really is the passthrough the whole PR rests on: ViewerConfig.VALID_TONE_MAPPINGS accepts the literal string, hdr-setup maps it to THREE.NoToneMapping, and mega/material.ts:34 routes NoToneMapping to shader mode 1 (Linear/clamp) — not to the default: arm, which would have silently made it Neutral. --tone-mapping None on gsplat convert reaches ViewerConfig as the string, not as "unset", so the new --help example is real.
+Neutral's hue-exactness: the offset subtraction, the newPeak/peak scale and the mix(color, vec3(newPeak), g) are each "scale all channels, then add the same amount to all", which leaves every channel difference and max − min proportional — so the HSV hue angle is invariant and only saturation moves. (2,1,0) is hue 30° and clamps to hue 60°, as the text says.
+The two flips: demo_gsplats_recipes_tribolium is opacity=1.0/absorption=1.0/volumetric on all six nodes with amplitudes at ×0.03 and a colorsys palette, and every overlay is add_text (DOM, outside the HDR pass); demo_ocean_currents_earth is blending_mode="normal" at LINE_INTENSITY = 1.0 with no bloom.
+demo_gaia_milky_way_3m's new comment claims bloom is summed into the HDR sample before tone mapping — sampleHdrPlusBloom in mega/shader.glsl.ts:164 does exactly that, so keeping ACES there is right and the "not a free swap" note is accurate.
+The guard itself: scope resolution (function/lambda params shadow, local constants win), the rebinding case (a name bound twice reports both values, so a later compliant binding cannot mask a stray pin), the vacuity floor (34 pins against a floor of 25), and EXCEPTIONS matching the six non-ACES pins on disk exactly with no dead rows. A class-body constant is the one shape it would resolve against the wrong scope; no demo has one, and Python's own scoping means a method could not see it anyway, so it is not worth guarding.
+No stale "prefer Neutral for exact colour" text left anywhere in docs/, CLAUDE.md, the READMEs, the CLI or the viewer.
+hatch run pytest on the tone-mapping guard + test_demos_dependencies → 107 passed; scripts/tests/test_changelog_build.py → 9 passed; ruff check/format clean on the touched file. Nothing deferred, no follow-up filed.
+Merge branch 'main' into issue-1459-tone-mapping-sweep
+5d2eee8
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+(major) docs/guides/user/HDR_GUIDE.md:323-329 and packages/luxar/src/luxar/demos/tests/test_demos_tone_mapping_policy.py:35-42 incorrectly characterize hard clamping as preserving chroma/full saturation whenever only one channel is over range. For example, (2, 0.5, 0.5) has only one clipped channel, but clamps to (1, 0.5, 0.5), reducing HSV saturation from 0.75 to 0.5 and chroma from 1.5 to 0.5; (2, 1.5, 1) clamps to white and loses all chroma. The stated behavior holds only for already fully saturated colors with a zero minimum channel. This claim is repeated in CLAUDE.md, viewer_config.py, compiler guidance, and exception rationales, so the range-based guidance should say that clamping may preserve more chroma for some zero-minimum saturated colors, but does not generally preserve chroma.
+(minor) packages/luxar/src/luxar/demos/tests/test_demos_tone_mapping_policy.py:291-324 does not resolve class-local string constants, despite promising to detect plain NAME = "..." constants in their use scope. _collect() gives ClassDef generic traversal with the enclosing constant map, so this statically known pin is silently missed:
+```
+class Scene:
+    TONE = "Neutral"
+    config = ViewerConfig(tone_mapping=TONE)
+```
+Handle class bodies with their own _string_constants(node.body) scope and add a corresponding scanner test.
+Checked and found clean: the two demo changes to "None" are consistent with the documented in-gamut rationale; explicit ACES warning suppression remains unchanged; exception rows are validated for existence, justification, and live non-ACES pins; no security-sensitive behavior is introduced.
+Tone mapping: a hard clamp loses saturation too; scan class bodies
+…
+308a3b6
+```
+The range guidance said a `None` clamp 'keeps chroma' where Neutral keeps
+hue. That only holds where the darkest channel is already 0: (2, 0.5, 0.5)
+clamps to (1, 0.5, 0.5) and drops from saturation 0.75 to 0.5. Reworded in
+the seven places that stated it (CLAUDE.md, HDR guide, gsplat convert help
+and docstring, the compiler notice, ViewerConfig, the gsplat-ops README and
+the skill reference) to say the clamp distorts both and only holds full
+saturation at a zero floor.
+
+The policy guard also missed a class-body constant: a ClassDef fell through
+to the generic walk, so `class Scene: TONE = "Neutral"; ViewerConfig(
+tone_mapping=TONE)` resolved TONE against the module scope instead. Give a
+class body its own scope like a function body, with a case in the scanner
+test.
+```
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Closing pass on this one, now that the main merge (#1586, which adds a demo module) is in.
+What it does. Five demo modules that pinned tone_mapping="Neutral" are re-decided by range: two flip to "None" where the scene is provably in gamut (demo_ocean_currents_earth, demo_gsplats_recipes_tribolium), three keep Neutral with a comment that now states the actual reason (over range + colour is a hue encoding). _interop_common's default stays Neutral on an explicit unproven-range argument. A new AST guard pins the policy across the demo package, and the ten or so doc surfaces that were teaching "reach for Neutral when you need exact colour" now say to pick by range.
+Fixed here (pushed):
+The range guidance said a None clamp "keeps chroma" / "keeps full saturation when only one channel is over range", the mirror of Neutral keeping hue. That only holds where the darkest channel is already 0 — (2, 0.5, 0.5) clamps to (1, 0.5, 0.5) and drops from HSV saturation 0.75 to 0.5, and (2, 0.5, 0.3) shifts hue too with a single channel clipping. Reworded in the seven places that stated it (CLAUDE.md, HDR_GUIDE.md, gsplat convert's option help and docstring, the compiler's LUT notice, ViewerConfig.tone_mapping, cli/gsplat_ops/README.md, the skill reference) plus the changelog fragment and the guard's own docstring: the clamp distorts both, and holds full saturation only at a zero floor. The (100, 0, 0) → (1, 0, 0) and (2, 1, 0) hue-30°→60° numbers were all correct, so only the generalisation moved.
+The guard's scope resolution skipped class bodies: a ClassDef fell through to the generic walk, so class Scene: TONE = "Neutral" followed by ViewerConfig(tone_mapping=TONE) resolved TONE against the module scope — reporting a same-named module constant, or nothing. A class body now gets its own scope the way a function body does (bases/keywords/decorators still read in the enclosing scope), with a case in the scanner test. Deliberately permissive in one respect, noted in the docstring: class attributes stay visible to the class's methods, which over-reports rather than misses.
+Dropped as not worth a change: nothing else. The (2, 1, 0)-style worked examples in the changelog and the guard docstring were already carrying their own counterexamples, so they only needed the saturation clause, not a rewrite.
+Checked and found clean:
+The main merge is the interesting part of this head. The new demo_gsplats_3d_flylight_mcfo_63x_brain pins ACES, so it needs no exception row; the six non-ACES pins on disk are still exactly the six EXCEPTIONS rows, and 35 modules pin a tone mapping against the floor of 25.
+Both "None" flips: demo_ocean_currents_earth has no intensity on the globe node, LINE_INTENSITY = 1.0, both nodes blending_mode="normal"; demo_gsplats_recipes_tribolium really does set opacity=1.0, absorption=1.0 on the volumetric nodes, which is what bounds (1 − e^−τ) below 1. Neither enables bloom, and bloomEnabled defaults false — which matters, because the guide's new bloom caveat is right: bloom is summed in sampleHdrPlusBloom before the EOG and tone-mapping steps, so a None pin plus bloom would clip flat.
+The passthrough premise holds end to end: 'None' → THREE.NoToneMapping → shader mode 1 (Linear/clamp, not the default: '6' Neutral arm), toneMappingExposure is pinned to 1.0 in both the GLSL and TSL materials, and exposure/offset/gamma run at step (4) before the tone-mapping switch at (5). "None" is a validated ViewerConfig value and the LUT notice correctly treats it as an explicit choice.
+The gaia comment's "bloom strength 0.15, threshold 0.85" matches the config it sits next to.
+No test asserts on any of the reworded help/tooltip/warning text.
+Ran locally: the tone-mapping guard (5), test_demos_dependencies (102), test_compiler_colormap (38), core/tests/test_viewer_config + io/_compiler/tests (98), all green; ruff check/format --check clean on the touched Python. The viewer README's prettier complaint is pre-existing on main (table padding + a code-fence disagreement), untouched here.
+Merge branch 'main' into issue-1459-tone-mapping-sweep
+a63cf35
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+(minor) packages/luxar/src/luxar/demos/tests/test_demos_tone_mapping_policy.py:266 — _function_scope() only overlays recognized string constants; it does not remove inherited constants shadowed by other local bindings. For example, with module-level TONE = "ACES" and function-local TONE = "Neutral" if hdr else "ACES", the call ViewerConfig(tone_mapping=TONE) is incorrectly reported as "ACES", even though the docstring says conditional bindings should resolve to nothing. It can also produce false failures when an outer non-ACES constant is shadowed dynamically. Collect all locally bound names, remove them from the inherited map, then overlay the statically recognized string bindings.
+Checked and found clean: the CLI, compiler warning, viewer tooltip, and documentation recommendations are consistent; the demo changes match the exception table; the Neutral/None behavior described is consistent with the cited tone-mapping formulas; no security-sensitive changes are present.
+Tone mapping: an unreadable local binding must shadow too
+…
+9e8b5d8
+```
+The scan overlaid only the local bindings it could resolve to a string, so
+a local it could not read left the enclosing scope's value visible:
+`TONE = "Neutral" if hdr else "ACES"` inside a function reported the
+module's own `TONE`. That is wrong both ways — it hides a stray pin behind
+a compliant module constant, and it fails a module for a "Neutral" the call
+never receives.
+
+Collect every name a body binds (assignment, augmented assignment, loop and
+`with` targets, imports, `except`/`match` captures, nested def and class
+names) and drop those from the inherited scope before putting the readable
+ones back. Nested defs, lambdas and comprehensions are scopes of their own,
+so the walk stops there.
+```
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Closing review pass.
+What this is. The #1459 sweep: the repo told authors to "reach for Neutral when you need exact colour", which is only true over range — Neutral is not a passthrough (it subtracts a channel-minimum offset even well inside gamut). The docs, gsplat convert --help/docstring, the compiler's LUT notice, ViewerConfig.tone_mapping and the viewer tooltip now say to pick by RANGE; two demos whose colours provably sit in [0, 1] move to "None", three keep Neutral with the over-range reason spelled out, and a new AST guard (demos/tests/test_demos_tone_mapping_policy.py) pins the policy with an exception table.
+Fixed and pushed (9e8b5d8): the guard's scope resolution only overlaid the local bindings it could resolve to a string, so a local it couldn't read left the outer value visible. TONE = "Neutral" if hdr else "ACES" inside a function reported the module's TONE — wrong in both directions: it hides a stray pin behind a compliant module constant, and it fails a module for a "Neutral" the call never receives. I verified the same leak for TONE = pick(), for TONE in …, from x import TONE, a string bound inside an if:, a match capture and a dynamic class attribute — all seven reported the enclosing value. The scan now collects every name a body binds (assignments, loop/with targets, imports, except/match captures, nested def+class names) and drops those from the inherited scope before putting the readable ones back; nested defs, lambdas and comprehensions keep their own scopes, so a comprehension variable or an inner parameter of the same name doesn't blind the function's own pin. Regression test covers all of it, including the negative control.
+Dropped, not worth the churn: the changelog fragment says the guard reads a "module-level string constant" where it actually resolves one in whatever scope it's used — under-describes rather than misstates.
+Nothing deferred; no follow-up issue.
+Checked clean. "None" is a real value on both sides (VALID_TONE_MAPPINGS and the viewer's toneMapping union), so the two flips validate and load. No test asserts the old warning wording — test_compiler_colormap matches on "ACES" only — and nothing else in the tree still recommends Neutral for LUT fidelity apart from the historical CHANGELOG entry. Neither flipped demo has another consumer pinning its tone mapping. The "nine guards" bookkeeping in _scanned_modules matches the six modules that actually read the set. Exception rows all resolve to modules that are scanned, deviate, and carry a reason.
+Ran in the branch worktree: demos/tests/ + io/tests/test_compiler_colormap.py + core/tests/test_viewer_config.py — 1861 passed, 12 skipped; ruff check + format check + mypy clean on the touched file; complexity ratchet reports no new regressions.
+Merge branch 'main' into issue-1459-tone-mapping-sweep
+7ffcda6
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+(minor) packages/luxar/src/luxar/demos/tests/test_demos_tone_mapping_policy.py:383-389 — _collect() traverses comprehensions using the enclosing constant scope, even though comprehension targets have their own scope. For example, with module-level TONE = "ACES", [ViewerConfig(tone_mapping=TONE) for TONE in values] is reported as ACES rather than unresolved, potentially hiding a non-ACES runtime pin. Add explicit comprehension scope handling that removes generator-bound names before scanning subsequent generators and the element/key/value.
+(minor) packages/luxar/src/luxar/demos/tests/test_demos_tone_mapping_policy.py:467-507 — exceptions cannot coexist with compliant ACES pins in the same module. The policy test requires every discovered value to belong to the exception’s allowed tuple, while test_every_exception_is_real_and_justified() separately rejects any exception module containing ACES. A module containing one justified None/Neutral scene and another ordinary ACES scene therefore cannot satisfy the guard, despite both choices following the stated per-scene policy. Exception rows should permit ACES alongside their exceptional values, with dead-row detection based on whether at least one non-ACES allowed value is present.
+Checked and found clean: the two demo changes to None are consistent with the documented in-range rationale; retained Neutral pins have explicit range/render justifications; CLI help, compiler warning, viewer tooltip, and public documentation are updated consistently; no security-sensitive behavior or unsafe input handling was introduced.
+Tone mapping: comprehension targets shadow, and an exception row stil…
+…
+6430c5d
+```
+…l allows ACES
+
+Two holes in the policy guard. A comprehension is a scope, so its `for`
+targets are locals the scan cannot read and must shadow a same-named outer
+constant — `[ViewerConfig(tone_mapping=TONE) for TONE in values]` was
+reporting the module's TONE instead of nothing. Only the first iterable is
+evaluated outside, so that one still resolves in the enclosing scope.
+
+And an EXCEPTIONS row exempts the scene that needs it, not the whole file: a
+module with one justified Neutral scene and one ordinary ACES scene had no
+legal spelling at all (the row rejected the ACES pin, widening the row tripped
+the dead-row check, deleting it rejected the Neutral pin). ACES is allowed
+everywhere now, and a row is dead when its module pins nothing else.
+```
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Closing review.
+The PR replaces the old blanket "reach for Neutral when you need exact colour" advice with a range-based rule (inside [0, 1] None is the exact passthrough; over range nothing is faithful, and Neutral buys hue-exactness at the cost of peak chroma), flips demo_ocean_currents_earth and demo_gsplats_recipes_tribolium to None, restates the three surviving Neutral pins with their actual range argument, and adds an AST guard that pins the policy so a new demo cannot copy-paste a Neutral in without a reason.
+Two things fixed and pushed (6430c5d):
+The guard treated a comprehension as part of the enclosing scope. [ViewerConfig(tone_mapping=TONE) for TONE in values] under a module-level TONE = "ACES" reported ACES, when the name the call actually receives is a comprehension local the scan cannot read — the same shadowing hole that was already closed for def/class/lambda/loop bindings, just one scope short. _collect now descends a comprehension with its for targets removed (tuple targets included), for the element, the if clauses and every iterable after the first; the first iterable is evaluated in the enclosing scope, so it still resolves there. Covered both ways: the three unreadable-target spellings in the shadowing test, and a positive control that a comprehension which does not rebind the name still reads it.
+An EXCEPTIONS row made ACES illegal in the whole module. A file with one justified Neutral scene and one ordinary ACES scene had no legal spelling: the row rejected the ACES pin, adding "ACES" to the row tripped the dead-row assertion, and deleting the row rejected the Neutral pin. Since the house rule is that ACES is right almost everywhere, the guard was punishing the compliant scene. ACES is now allowed everywhere (_allowed_values), and "dead row" means the module pins nothing but ACES — the check that a row is real is unchanged in substance.
+Also trimmed "module-level string constant" to "string constant resolved in the scope it is used in" in the changelog fragment — the scan has resolved per-scope for a while and the fragment was describing an older version of it.
+Checked and clean: "None" is valid on both sides (VALID_TONE_MAPPINGS and the viewer's toneMapping union) and no test asserts the old compiler-warning or tooltip wording; the sampleHdrPlusBloom-before-tone-mapping claim in the HDR guide and the Gaia comment is what the mega shader does; gsplats/interop/_color.py does clip imported RGB to [0, 1], which is the premise of the _interop_common reason; nothing anywhere still recommends Neutral for LUT fidelity; the "nine guards" count in _scanned_modules matches the six modules reading it; and the demos merged in from main since the last look (visible-human head, neuromast) pin ACES, so the guard's floor and its exception table are both still accurate.
+Full demos test package green here: 1844 passed, 13 skipped. Ruff and mypy clean on the touched file.
+royerloic
+changed the base branch from
+main
+to
+dev
+August 14, 2026 23:04
+Tone mapping guard: get the AST walkers under the complexity limit
+…
+5427245
+```
+The C901 ratchet went red on the new guard: `_bound_names` at 12 and
+`_collect` at 14, both over the limit of 10. Extracted helpers rather than
+widening the baseline, keeping the walk behaviour byte-identical.
+
+`_bound_names` hands the per-node "what does this node itself bind" chain to
+a module-level `_names_bound_here`, leaving `visit` as the recursion alone.
+`_collect` becomes a dispatcher over `_collect_function`, `_collect_class`,
+`_collect_lambda` and `_collect_comprehension`, each carrying the comment
+that already explained its branch. Now 6 and 7.
+
+Since that extraction is exactly a reordering hazard and nothing pinned the
+order the values come back in, added a canary on it — a decorated def with
+three distinguishable pins. Its docstring is explicit that the order is the
+walk's own and not CPython's: the decorator expression is evaluated before
+the signature defaults, so only "body last" is evaluation-faithful, and
+reordering the visits to match is a legitimate change that should update the
+list. Also dropped the "signature"/"header" wording from the two new helper
+docstrings, which read as covering `returns` and `type_params` — never
+visited, here or before.
+```
+royerloic
+commented
+Aug 15, 2026
+Copy link
+Copy Markdown
+Member
+Author
+CI was red on the complexity ratchet, not on anything the policy does: the new guard's two AST walkers came in over the C901 limit — _bound_names at 12, _collect at 14, against 10.
+Extracted helpers instead of widening the baseline, with the walk behaviour left byte-identical:
+_bound_names now hands the per-node "what does this node itself bind" chain to a module-level _names_bound_here, so visit is the recursion and nothing else. 12 → 6.
+_collect is a dispatcher over _collect_function / _collect_class / _collect_lambda / _collect_comprehension, each carrying the comment that already explained its branch. 14 → 7. Every new helper measures ≤ 4.
+I checked the equivalence rather than assuming it — the two elif-chains became early returns, so the question is whether any node satisfies more than one test. All eight isinstance predicates in the file are pairwise disjoint over every class in ast, and the MatchAs(name=None) / MatchStar(name=None) / MatchMapping(rest=None) falsy cases only fall through to tests that were already false. A differential run of old-shape vs new-shape over 981 sources (44 synthetics plus every .py in the tree) gives identical found lists — values and order — and identical _bound_names sets.
+Two things came out of reviewing my own extraction:
+Nothing pinned the order the values come back in (every other assertion here compares a set, a sorted list, or a run of the same value), which is exactly the hazard a four-way split introduces. Added a canary on a decorated def with three distinguishable pins. Its docstring is explicit that the order is the walk's own and not CPython's — the decorator expression and its arguments are evaluated before the signature defaults, so only "body last" is evaluation-faithful — and that reordering the visits to match the interpreter is a legitimate change that should update the list rather than read as a regression. Verified it actually fails on a permutation and on a dropped visit.
+The two new helper docstrings said "signature" and "header", which reads as covering returns and type_params. Neither is visited (nor was before), so the wording now says what is actually walked.
+scripts/complexity_baseline.json is untouched — both offenders were new, so there is nothing stale left behind, and the 7 advisory improved entries in that report belong to other branches.
+Test evidence:
+pytest packages/luxar/src/luxar/tests/test_check_complexity.py → 45 passed, including the whole-tree gate; check-complexity reports New: 0, Worsened: 0.
+ruff check --select C901 on the file → clean at the real limit of 10.
+pytest packages/luxar/src/luxar/demos/tests/ → 1846 passed, 12 skipped.
+The guard still sees everything it did: 35 demo modules pinning a tone mapping (floor 25), {ACES: 29, Neutral: 4, None: 2}, all six EXCEPTIONS rows live and exact, no non-ACES pin uncovered.
+ruff check, ruff format --check, mypy clean on the touched file.
+royerloic
+commented
+Aug 15, 2026
+Copy link
+Copy Markdown
+Member
+Author
+(minor) docs/guides/user/HDR_GUIDE.md:325 — The claim that the subsequent sRGB encoding moves Neutral-preserved hue by only “a degree or two” is not generally true. Neutral preserves HSV hue only in the linear working space; the nonlinear output transfer can cause substantially larger changes. For example, applying the documented Neutral formula to (2, 1, 0) gives approximately (0.961, 0.545, 0.130) (linear hue 30°), whose sRGB-encoded HSV hue is about 38°. Similar unqualified “hue-exact” claims appear in changelog.d/1459.md, test_demos_tone_mapping_policy.py, and the exception-demo comments. Since the over-range recommendation rests on hue fidelity, these should consistently say “linear-space hue-preserving” and avoid promising exact on-screen hue.
+(minor) packages/luxar/src/luxar/demos/tests/test_demos_tone_mapping_policy.py:~540 — _allowed_values() grants each exception value to the entire module, despite the surrounding contract saying an exception applies to the scene that needs it rather than the whole file. Consequently, adding another unjustified tone_mapping="Neutral" anywhere in an existing Neutral-exception module passes silently, so the guard does not actually prevent the copy/paste regression it claims to pin. Key exceptions by a stable site/function, or pin the expected count/locations of each non-ACES value per module.
+Checked and found clean: the CLI/help/compiler-warning guidance is internally consistent about None requiring an in-range post-adjustment signal; explicit ACES still suppresses the LUT warning; the AST walker covers the documented literal, signature-default, scoped-constant, parameter-shadowing, and comprehension cases with focused tests; no security-sensitive changes were introduced.
+royerloic
+added 2 commits
+August 14, 2026 18:44
+Tone mapping: hue-exactness is a linear-space claim, and a row covers…
+…
+e9f79d4
+```
+… one site
+
+Two fixes to the #1459 sweep.
+
+The HDR guide and the guard's own docstring hedged Neutral's hue-exactness with
+"the sRGB encode can still move a measured hue reading by a degree or two".
+That number is wrong: (2, 1, 0) comes out (0.961, 0.545, 0.130), which is 30
+degrees in linear light and about 38 once encoded. Both now say the exactness
+holds in the shader's linear working space and that linear light is the frame to
+compare hues in — and note that the shift belongs to the per-channel encode, not
+to Neutral, since it lands the same way on whatever operator emitted the pixel.
+
+The exception table granted its value to a whole module, so a second
+tone_mapping="Neutral" pasted into a module that already justified one passed
+silently — the copy-paste the guard exists to catch, just one file further in.
+A row now covers one site per value: `_repeated_deviations` flags a non-ACES pin
+that occurs twice (ACES itself repeats freely), with a negative control on the
+helper and the docstrings corrected to say count, not just value. Verified by
+appending a second Neutral to demo_nd_transforms: the row no longer covers it.
+```
+Changelog: say the guard's exception rows cover one site per value
+d99b79f
+royerloic
+commented
+Aug 15, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Closing pass on the #1459 sweep. The PR re-derives the demos' tone-mapping pins from range rather than from "colour is an encoding, so use Neutral": two demos whose colours provably sit inside [0, 1] (demo_ocean_currents_earth, demo_gsplats_recipes_tribolium) move to the exact passthrough "None", three that genuinely run over range keep Neutral with the reason written at the pin, _interop_common keeps it pending a render check, and the house guidance in CLAUDE.md / HDR_GUIDE / gsplat convert help+docstring / the compiler's LUT notice / ViewerConfig.tone_mapping / the viewer tooltip is rewritten to pick by range. A new AST guard (test_demos_tone_mapping_policy.py) pins the policy over the whole demo package.
+Two things fixed and pushed:
+docs/guides/user/HDR_GUIDE.md:323 and the guard's module docstring hedged Neutral's hue-exactness with "the sRGB encode that follows can still move a measured hue reading by a degree or two". That number is wrong by a factor of several: running the three.js formula, (2, 1, 0) comes out (0.961, 0.545, 0.130) — 30° in linear light, ≈38° once sRGB-encoded. Both places now say the exactness is a linear-working-space claim and that linear light is the frame to compare hues in, and note the shift belongs to the per-channel encode rather than to Neutral (it lands the same way on whatever operator produced the pixel, so it is not a reason to prefer one).
+EXCEPTIONS granted its value to a whole module, so a second tone_mapping="Neutral" pasted into a module that already justified one passed silently — the same copy-paste the guard exists to catch, one file further in. A row now covers one site per value: _repeated_deviations() flags a non-ACES pin occurring twice (ACES repeats freely — a file may have many ordinary scenes), with a negative control on the helper and the two docstrings that claimed per-scene scope corrected to say count, not just value. I confirmed it bites by appending a second Neutral to demo_nd_transforms — the row no longer covers it. Kept the value grant per-module rather than keying rows by function/site: the count closes the hole without the guard having to name call sites that get renamed.
+Changelog fragment updated to match.
+Dropped as not worth the churn: re-qualifying "keeps the hue angle" in the changelog and at the five demo pins. Those sentences describe what the shader does in its linear working space, which is exactly where the statement is true, and the numbers they quote ((100, 0, 0) at hue 0°, (8, 0.5, 8) at 300°) are hue-exact in the encoded frame too — the wrong claim was only the quantified one, now fixed.
+Checked and clean:
+The two flips to "None" really are in-gamut. Ocean: both nodes are blending_mode="normal" with LINE_INTENSITY = 1.0, Blue Marble texels and the speed LUT both clipped to [0, 1]; the One/OneMinusSrcAlpha state composites bounded sources to a bounded result. Recipes: emitted radiance is color·(1 − e^(−τ))/κ, and (1 − e^(−τ)) < 1 for any τ ≥ 0, so absorption=1.0 bounds each node at its colour whatever opacity/intensity do — including the streaming energy compensation, which boosts τ and so cannot escape that bound (the reason text already carries the κ-slider caveat).
+Neither demo enables bloom (bloomEnabled defaults false), so the "a None pin has no headroom for bloom" caveat the guide adds does not apply to them; the Gaia comment correctly cites bloom as the reason ACES stays there.
+"None" end-to-end: valid in VALID_TONE_MAPPINGS, mapped to THREE.NoToneMapping, aliased to shader mode 1 (Linear = clamp), and toneMappingExposure is pinned to 1.0 with EOG applied before the switch — so the docs' "exposure/offset/gamma still apply" is accurate. Every Neutral figure in the docs reproduces (knee 0.76, the x − 6.25x² offset, (0.5,0.5,0.5) → (0.46,0.46,0.46), g = 0.51/0.94), as do the clamp counterexamples.
+The guard's own machinery: the six scope rungs (def, lambda, class, comprehension, params, unreadable locals) all shadow, the walk-order canary is honest that it pins the walk and not CPython's evaluation order, _scanned_modules' "nine guards" matches the six modules that read the set, and no test elsewhere asserted the old Neutral pins.
+C901 ratchet: 0 new, 0 worsened after this change; the earlier extraction is under the limit without touching complexity_baseline.json.
+hatch run pytest over the tone-mapping and dependency guards: 110 passed.
+Hide details
+View details
+royerloic
+merged commit 4c8d9b3
+into
+dev
+Aug 15, 2026
+11 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+royerloic
+deleted the
+issue-1459-tone-mapping-sweep
+branch
+August 15, 2026 04:40
+This was referenced Aug 23, 2026
+ocean_currents_earth: wrong layer appearance, and a missing North Atlantic wedge from a stale cached scene
+#1957
+Closed
+Rebuild a demo scene when its builder changes (#1957)
+#1961
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.
