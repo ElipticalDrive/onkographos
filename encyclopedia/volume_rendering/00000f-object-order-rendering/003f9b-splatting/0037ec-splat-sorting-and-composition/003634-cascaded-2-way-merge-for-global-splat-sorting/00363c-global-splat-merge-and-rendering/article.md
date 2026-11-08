@@ -1,0 +1,178 @@
+# Global Splat Merge and Rendering
+
+Also called: Global Splat Sort & Merge, GsplatGlobalRenderer, Merged Draw
+
+## Overview
+Global Splat Merge and Rendering is a technique that merges multiple independent Gaussian Splat renderers into a single global draw call by packing their splat data, spherical harmonic (SH) coefficients, and depth/order information into shared global buffers, then performing a cascaded merge of depth-sorted orders [S1, unofficial]. It merges two or more active Gaussian splat renderers into a single globally depth-sorted draw call to reduce overdraw and improve sorting accuracy across scenes [S1, unofficial]. Unlike per-renderer rendering, where each renderer handles its own depth sorting and draw calls independently, this method delegates sorting execution to a global sorter and rendering to a global renderer, triggered when camera movement exceeds thresholds or refresh rate dictates [S1, unofficial].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- A set of active Gaussian Splat renderers, each providing packed splat data, SH coefficients, and local depth-sorted order buffers.
+- Camera state (translation and rotation) to determine if sorting needs refresh.
+- Configuration parameters: `EnableGlobalSort`, `MaxRenderOrder`, `CameraTranslationRefreshTreshold`, `CameraRotationRefreshTreshold`.
+
+**Outputs:**
+- A single globally depth-sorted order buffer.
+- A single draw call rendering all active splats with correct depth ordering.
+
+### Data Structures
+The method relies on several global buffers allocated based on the total number of splats and the maximum SH bands among all active renderers.
+
+**RendererParams struct** (16-byte stride per renderer):
+- `Brightness`: float (4 bytes)
+- `ScaleFactor`: float (4 bytes)
+- `GammaToLinear`: uint (4 bytes)
+- `SHDegree`: uint (4 bytes)
+
+**Global Buffers:**
+- `m_globalPackedBuffer`: `uint[4]` per splat. Stores packed splat data (center xyz, scale, rgba, quaternion).
+- `m_globalOrderBuffer`: `uint` per splat. Stores the global render order.
+- `m_rendererOffsetsBuffer`: `uint` per active renderer. Stores the starting index in the global buffers for each renderer.
+- `m_rendererTransformsBuffer`: `float[16]` per renderer. Stores the 4x4 transformation matrix for each renderer.
+- `m_rendererParamsBuffer`: 16 bytes per renderer. Stores `RendererParams`.
+- `m_globalSH1Buffer`: `uint[2]` per splat (if `m_globalSHBands >= 1`).
+- `m_globalSH2Buffer`: `uint[4]` per splat (if `m_globalSHBands >= 2`).
+- `m_globalSH3Buffer`: `uint[4]` per splat (if `m_globalSHBands >= 3`).
+- `m_globalSH4Buffer`: `uint[4]` per splat (if `m_globalSHBands >= 4`).
+
+**Scratch Buffers:**
+- `m_packScratchOrders`: Used during order packing.
+- `m_packScratchDepths`: Used during depth packing.
+- `m_mergeScratchOrders`: Used during cascaded merge.
+- `m_mergeScratchDepths`: Used during cascaded merge.
+
+### Steps
+1. **Initialize Kernels:** Find kernel indices for `PackRendererOrders`, `MergeTwo`, `MergeTwoWithDepth` in `MergeShader`, and `CopyUint4`, `CopyUint2` in `CopyBufferShader` [S1, unofficial].
+2. **Check Dirty State:** If `m_globalBuffersDirty` is true or `ActiveSplatCountsChanged` is true, proceed to rebuild global buffers [S1, unofficial].
+3. **Calculate Totals:** Compute `m_totalSplatCount` as the sum of splat counts from all active renderers. Compute `m_rendererOffsets` for each active renderer `k` as the cumulative sum of splat counts of previous renderers [S1, unofficial]. Determine `m_globalSHBands` as the maximum SH bands among all active splats [S1, unofficial].
+4. **Allocate Global Buffers:** Create `GraphicsBuffers` for `m_globalPackedBuffer`, `m_globalOrderBuffer`, `m_rendererOffsetsBuffer`, `m_rendererTransformsBuffer`, `m_rendererParamsBuffer`, and SH buffers (`m_globalSH1Buffer` to `m_globalSH4Buffer`) based on `m_globalSHBands` [S1, unofficial]. Set `m_rendererOffsetsBuffer` data [S1, unofficial].
+5. **Copy Per-Renderer Data:** For each active renderer `k`, copy its packed splat data, SH coefficients, and order data into the global buffer sub-ranges starting at `m_rendererOffsets[k]` [S1, unofficial].
+6. **Dispatch Merge Passes:**
+    a. Dispatch `PackRendererOrders` kernel to pack orders and depths from individual renderer buffers into scratch buffers [S1, unofficial].
+    b. Perform cascaded merge using `MergeTwo` or `MergeTwoWithDepth` kernels on the scratch buffers to produce the final globally sorted `m_globalOrderBuffer` [S1, unofficial].
+7. **Render:** Delegate rendering to `GsplatGlobalRenderer` using the globally sorted order buffer [S1, unofficial].
+
+### Parameters
+- `EnableGlobalSort`: Boolean flag to activate the global merge pipeline. If false, each renderer renders individually [S1, unofficial].
+- `MaxRenderOrder`: Maximum depth sorting layers allowed. Range: 1 to 20 [S1, unofficial].
+- `CameraTranslationRefreshTreshold`: Distance threshold in world units that forces recomputation of sorting. Range: 0.05 to 1.0, default 0.2 [S1, unofficial].
+- `CameraRotationRefreshTreshold`: Rotation threshold in degrees that forces recomputation of sorting. Range: 0.2 to 30.0, default 10 [S1, unofficial].
+- `k_mergePassName`: String constant "Gsplat.MergeKWay" used for GPU profiling samples [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Assume these kernels are available in MergeShader and CopyBufferShader
+# PackRendererOrders: packs orders/depths from per-renderer buffers to scratch
+# MergeTwo/MergeTwoWithDepth: merges two sorted lists
+# CopyUint4/CopyUint2: copies buffer data
+
+def GlobalSplatMergeAndRender(active_renderers, camera_state, settings):
+    if not settings.EnableGlobalSort:
+        for renderer in active_renderers:
+            renderer.Render()
+        return
+
+    # Check if rebuild is needed
+    if m_globalBuffersDirty or ActiveSplatCountsChanged:
+        # Calculate totals
+        m_totalSplatCount = sum(r.SplatCount for r in active_renderers)
+        m_rendererOffsets = []
+        offset = 0
+        for r in active_renderers:
+            m_rendererOffsets.append(offset)
+            offset += r.SplatCount
+        
+        m_globalSHBands = max(r.GsplatAsset.SHBands for r in active_renderers if r.GsplatAsset)
+        
+        # Allocate buffers
+        m_globalPackedBuffer = AllocateBuffer(m_totalSplatCount * 4) # uint[4] per splat
+        m_globalOrderBuffer = AllocateBuffer(m_totalSplatCount) # uint per splat
+        m_rendererOffsetsBuffer = AllocateBuffer(len(active_renderers)) # uint per renderer
+        m_rendererTransformsBuffer = AllocateBuffer(len(active_renderers) * 16) # float[16] per renderer
+        m_rendererParamsBuffer = AllocateBuffer(len(active_renderers) * 16) # 16 bytes per renderer
+        
+        # Allocate SH buffers
+        if m_globalSHBands >= 1:
+            m_globalSH1Buffer = AllocateBuffer(m_totalSplatCount * 2) # uint[2] per splat
+        if m_globalSHBands >= 2:
+            m_globalSH2Buffer = AllocateBuffer(m_totalSplatCount * 4) # uint[4] per splat
+        if m_globalSHBands >= 3:
+            m_globalSH3Buffer = AllocateBuffer(m_totalSplatCount * 4) # uint[4] per splat
+        if m_globalSHBands >= 4:
+            m_globalSH4Buffer = AllocateBuffer(m_totalSplatCount * 4) # uint[4] per splat
+        
+        # Set renderer offsets
+        m_rendererOffsetsBuffer.SetData(m_rendererOffsets)
+        
+        # Copy per-renderer data
+        for k, renderer in enumerate(active_renderers):
+            start_idx = m_rendererOffsets[k]
+            count = renderer.SplatCount
+            
+            # Copy packed splats
+            m_globalPackedBuffer.SetData(renderer.PackedSplatsBuffer, start_idx * 4, count * 4)
+            
+            # Copy SH coefficients
+            if renderer.GsplatAsset.SHBands >= 1:
+                m_globalSH1Buffer.SetData(renderer.PackedSH1Buffer, start_idx * 2, count * 2)
+            if renderer.GsplatAsset.SHBands >= 2:
+                m_globalSH2Buffer.SetData(renderer.PackedSH2Buffer, start_idx * 4, count * 4)
+            if renderer.GsplatAsset.SHBands >= 3:
+                m_globalSH3Buffer.SetData(renderer.PackedSH3Buffer, start_idx * 4, count * 4)
+            if renderer.GsplatAsset.SHBands >= 4:
+                m_globalSH4Buffer.SetData(renderer.PackedSH4Buffer, start_idx * 4, count * 4)
+            
+            # Copy order data (assuming renderer has a local order buffer)
+            # This step is implied by "copy its ... order data"
+            # The exact source of order data per renderer is not detailed, 
+            # but it must be copied to the global order buffer initially or 
+            # used in the pack step. Based on "PackRendererOrders", it likely 
+            # packs local orders into scratch.
+            
+            # Copy transforms and params
+            m_rendererTransformsBuffer.SetData(renderer.TransformMatrix, k * 16, 16)
+            params = RendererParams(renderer.Brightness, renderer.ScaleFactor, renderer.GammaToLinear, renderer.SHDegree)
+            m_rendererParamsBuffer.SetData(params, k * 16, 16)
+            
+        m_globalBuffersDirty = False
+        ActiveSplatCountsChanged = False
+
+    # Check if sorting needs refresh based on camera movement
+    if CameraMovedSignificantly(camera_state, settings.CameraTranslationRefreshTreshold, settings.CameraRotationRefreshTreshold):
+        # Dispatch merge passes
+        # 1. Pack orders/depths
+        DispatchComputeShader(PackRendererOrders, num_groups=m_totalSplatCount)
+        
+        # 2. Cascaded merge
+        # Assuming a binary merge tree structure as per parent article
+        # This is a simplified representation of the cascaded merge
+        DispatchComputeShader(MergeTwo, num_groups=...) # Details depend on tree depth
+        # ... more merge passes ...
+        
+        # 3. Final render
+        GsplatGlobalRenderer.Draw(m_globalPackedBuffer, m_globalOrderBuffer, m_rendererTransformsBuffer, m_rendererParamsBuffer, 
+                                  m_globalSH1Buffer, m_globalSH2Buffer, m_globalSH3Buffer, m_globalSH4Buffer)
+```
+
+### Edge Cases and Pitfalls
+- **Async Upload Growth:** If a renderer uses AsyncUpload and its SplatCount grows frame-to-frame, the global buffers must be rebuilt when the count changes. Otherwise, the global sub-ranges only contain splats present at the first build, leaving the merge to read stale/under-sized buffers [S1, unofficial].
+- **Uncompressed Assets:** If any active renderer uses an uncompressed asset, the whole scene falls back to per-renderer rendering, even if `EnableGlobalSort` is true [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Dominated by the cascaded merge pass, which is $O(N \log K)$ where $N$ is the total number of splats and $K$ is the number of active renderers. The merge is performed on the GPU using compute shaders.
+- **Memory Complexity:** $O(N)$ for global buffers, where $N$ is the total number of splats. Additional memory for scratch buffers during merge.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Scales with the number of active renderers and total splat count. The cascaded merge tree depth increases logarithmically with the number of renderers.
+- **Strengths:** Reduces overdraw by globally sorting splats across multiple renderers. Improves sorting accuracy across scenes.
+- **Limitations:** Requires all active renderers to use compressed assets. Rebuilding global buffers can be expensive if splat counts change frequently.
+- **When to Use:** When rendering multiple Gaussian Splat scenes in a single frame and global depth sorting is desired.
+- **When Not to Use:** When renderers use uncompressed assets, or when the number of active renderers is small and per-renderer sorting is sufficient.
+
+## Background
+The method is part of the Gsplat-Unity project, an unofficial implementation of 3D Gaussian Splatting for Unity. It builds on the concept of cascaded 2-way merge for global splat sorting. The project is maintained by Yize Wu and Arthur Aillet.
+
+## Sources
+[S1] wuyize25/gsplat-unity, https://github.com/wuyize25/gsplat-unity, fetched 2026-10-27 (unofficial)

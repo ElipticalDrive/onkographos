@@ -1,7 +1,7 @@
 # Circular Camera Path Generation
 Also called: 360 Degree Camera Path Generation, Orbit Camera Path Generation
 ## Overview
-Circular Camera Path Generation creates a sequence of camera poses arranged in a 360-degree circular trajectory around a central origin at a fixed height and radius [S1, unofficial]. It solves the problem of generating consistent, orbiting viewpoints for novel view synthesis or 360-degree visualization. It is a degenerate case of Spiral Camera Path Generation where the vertical offset rate is zero, resulting in a planar orbit rather than a helical one [S1, unofficial].
+Circular Camera Path Generation creates a sequence of camera poses arranged in a 360-degree circular trajectory around a central origin at a fixed height and radius [S1, unofficial].
 ## How it works
 **Inputs:**
 - `n_views`: Integer, number of camera poses to generate. Default: 120 [S1, unofficial].
@@ -9,14 +9,14 @@ Circular Camera Path Generation creates a sequence of camera poses arranged in a
 - `height`: Float, fixed Y-coordinate (vertical offset) of the camera. Default: 0.0 [S1, unofficial].
 
 **Outputs:**
-- `poses`: A numpy array of shape `(n_views, 4, 4)` containing the camera-to-world (c2w) transformation matrices.
+- `poses`: A numpy array of shape `(n_views, 4, 4)` containing the camera-to-world (c2w) transformation matrices [S1, unofficial].
 
 **Data Structures:**
-- `poses`: List of 4x4 numpy arrays, appended during iteration, then stacked.
-- `c2w`: 4x4 numpy array representing the camera-to-world matrix.
+- `poses`: List of 4x4 numpy arrays, appended during iteration, then stacked [S1, unofficial].
+- `c2w`: 4x4 numpy array representing the camera-to-world matrix [S1, unofficial].
 
 **Steps:**
-1. Initialize an empty list `poses`.
+1. Initialize an empty list `poses` [S1, unofficial].
 2. Loop `i` from 0 to `n_views - 1`:
     a. Calculate the angular position: $\theta = \frac{2\pi i}{n\_views}$ [S1, unofficial].
     b. Calculate the camera position in world coordinates:
@@ -39,14 +39,24 @@ Circular Camera Path Generation creates a sequence of camera poses arranged in a
        $$
        \text{up} = \text{cross}(\text{right}, \text{forward})
        $$ [S1, unofficial].
-    g. Construct the 4x4 identity matrix `c2w`.
+    g. Construct the 4x4 identity matrix `c2w` [S1, unofficial].
     h. Set the rotation columns and translation row:
        - `c2w[:3, 0] = right`
        - `c2w[:3, 1] = up`
        - `c2w[:3, 2] = -forward`
        - `c2w[:3, 3] = cam_pos` [S1, unofficial].
-    i. Append `c2w` to `poses`.
+    i. Append `c2w` to `poses` [S1, unofficial].
 3. Return `np.stack(poses, axis=0)` [S1, unofficial].
+
+**Parameters:**
+- `n_views`: Number of views to generate. Default: 120 [S1, unofficial].
+- `radius`: Distance from origin. Default: 4.0 [S1, unofficial].
+- `height`: Camera height. Default: 0.0 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- If `radius` is 0, the camera position is the origin, and the forward vector is undefined (zero vector), causing normalization failure [G].
+- If `height` is 0 and the camera is at the origin, the up vector `[0,1,0]` is parallel to the forward vector (or zero), causing the cross product for `right` to be zero [G].
+- The sources do not specify handling for degenerate cases; implementation should guard against zero-length vectors [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -93,29 +103,16 @@ def generate_circular_path(n_views=120, radius=4.0, height=0.0):
     return np.stack(poses, axis=0)
 ```
 
-**Edge Cases and Pitfalls:**
-- If `radius` is 0, the camera position is the origin, and the forward vector is undefined (zero vector), causing normalization failure [S1, unofficial].
-- If `height` is 0 and the camera is at the origin, the up vector `[0,1,0]` is parallel to the forward vector (or zero), causing the cross product for `right` to be zero [S1, unofficial].
-- The sources do not specify handling for degenerate cases; implementation should guard against zero-length vectors [G].
-
-## Subtopics
-
-### [Spiral Camera Path Generation](1635-spiral-camera-path-generation.md)
-Generates a helical path with vertical offset. Choose when vertical variation is needed.
-
-### [Linear Camera Path Generation](linear-camera-path-generation.md)
-Generates poses along a straight line. Choose for fly-throughs.
-
 ## Operating characteristics
-- **Time Complexity:** $O(n\_views)$, as it performs constant-time vector operations per view [S1, unofficial].
-- **Memory Complexity:** $O(n\_views \times 16)$ bytes for the pose matrices [S1, unofficial].
-- **Strengths:** Simple to implement; provides uniform angular sampling; ideal for 360-degree object visualization [S1, unofficial].
-- **Limitations:** Cannot capture vertical structure or depth variation in the scene; assumes the scene center is at the origin [S1, unofficial].
-- **When to use:** When the subject is centered and the goal is to view it from all horizontal angles at a fixed height [S1, unofficial].
-- **When not to use:** When the scene requires vertical parallax or the camera needs to move closer/further from the subject [S1, unofficial].
+- Time complexity: $O(n\_views)$ [G].
+- Memory complexity: $O(n\_views)$ [G].
+- Strengths: Not given in the sources. [G]
+- Limitations: Not given in the sources. [G]
+- When to use: Not given in the sources. [G]
+- When not to use: Not given in the sources. [G]
 
 ## Background
-The method is implemented in the `nerf-from-scratch` repository by damn8daniel, which provides a foundational implementation for generating camera poses for NeRF training [S1, unofficial]. It is also referenced in the FLASH project by InanXR, which uses similar trajectory generation for Instant-NGP training [S2, unofficial]. The approach is standard in computer graphics for orbiting cameras.
+Not given in the sources. [G]
 
 ## Sources
 [S1] damn8daniel/nerf-from-scratch, https://github.com/damn8daniel/nerf-from-scratch, fetched 2026-10-26 (unofficial)

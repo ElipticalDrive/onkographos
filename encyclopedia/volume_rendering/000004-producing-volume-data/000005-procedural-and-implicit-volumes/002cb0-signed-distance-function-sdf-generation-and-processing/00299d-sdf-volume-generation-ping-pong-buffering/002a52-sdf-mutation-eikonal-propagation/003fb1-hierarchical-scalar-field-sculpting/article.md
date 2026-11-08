@@ -1,0 +1,181 @@
+# Hierarchical Scalar Field Sculpting
+
+Also called: Resolution Adaptive Volume Sculpting, ntree subdivision
+
+## Overview
+Hierarchical Scalar Field Sculpting is a method for interactive 3D modeling where the user modifies a scalar field representing material density using localized tools. It solves the trade-off between global resolution limits and interactive performance by using an adaptive hierarchical grid (ntree) that subdivides only where necessary. It differs from fixed-resolution sculpting by allowing local refinement to capture tool details, and from pure octree methods by using a fixed $n=4$ subdivision factor and direct subsampling of field values to ensure vertical independence between hierarchy levels.
+
+## How it works
+
+### Inputs and Outputs
+*   **Input:** A hierarchical scalar field representation (ntree), a Tool (scalar field function), and an Action (combination logic).
+*   **Output:** Modified scalar field values, gradients, and colors at the vertices of the ntree structure.
+
+### Data Structures
+
+**Vertex Structure**
+Stores the state of a sampling point in the regular grid basis.
+*   `field_value`: Scalar density value.
+*   `gradient`: Vector gradient of the field.
+*   `color`: Color attribute.
+*   `timestamp`: Used to prevent redundant updates on shared vertices.
+
+**ntree Cell Structure**
+A hierarchical space partitioning structure resembling Recursive Grids.
+*   `children`: A set of sub-cells (successors). Unlike octrees where nodes are replaced, cells are enriched with children.
+*   `subdivision_factor`: Fixed at $n=4$ per dimension.
+*   `size`: Current cell dimension.
+*   `vertices`: References to Vertex nodes. Vertices are shared among common faces or edges between adjacent Cells of the same level to reduce memory overhead.
+
+**Vertex Cache**
+*   Implemented as a hash map indexed by the memory addresses of Vertices.
+*   Maps the Vertex state (field value, gradient, color) *prior* to the current tool's modification.
+*   One cache is created per Tool-Action application couple to support interpolation during subdivision and undo operations.
+
+### The Tool: Wyvill's Ellipsoidal Field
+The tool is a scalar field $f(p)$ positioned, oriented, and scaled. The implementation uses Wyvill's field function, which is computationally cheap (uses squared distance), has a spatially limited domain of influence, and is bell-shaped with $C^1$ variations for smooth blending.
+
+$$
+f(p) = \begin{cases} 
+0 & \text{if } d \ge 1 \\
+3 \cdot \left( 1 - \frac{2}{9}d^2 + \frac{7}{9}d^4 - \frac{4}{9}d^6 \right) & \text{else}
+\end{cases}
+$$
+
+Where $p$ is the query point and $d^2$ is the squared distance from the tool center, normalized by the tool's scale.
+
+### The Action
+An Action takes a Tool and a Vertex as arguments. It computes the tool's contribution at the vertex and combines it with current vertex attributes.
+*   **AddAction Example:**
+    1.  Compute tool value $v_t = \text{Tool}(v.\text{position})$.
+    2.  Compute new field value $v_{new} = v.\text{field\_value} + v_t$.
+    3.  Clamp $v_{new}$ between 0 and 3.
+    4.  Use $v.\text{field\_value}$ and $v_{new}$ as weights to sum up attributes (gradient, color).
+    5.  Update vertex attributes.
+
+### Parameters
+*   **Field Clamping Range:** $[0, 3]$. Prevents negative values (which would block material creation) and excessive positive values (which would block material removal).
+*   **Iso-value:** 1.5. Defines the object's surface.
+*   **Min Resolution:** The smallest cell size to reach to capture tool features.
+*   **Max Resolution:** The largest cell size (smallest depth) not to overpass. Prevents infinite subdivision loops caused by subtractive tools creating discontinuities. Expressed as a constant factor depending on the tool's scale.
+
+### Algorithm Steps
+
+1.  **Initialization:** Create a Vertex Cache storing the current state of all vertices in the affected region.
+2.  **Apply Tool (Recursive):**
+    *   For the current Cell, iterate over all its Vertices.
+    *   Apply the Action: `a.update(t, v)`.
+    *   If the Cell has no children, test for subdivision (`checkSubdivide`).
+    *   If the Cell has children, recursively apply the tool to all children.
+3.  **Subdivision Test (`checkSubdivide`):**
+    *   If `Cell.size > t.getMinResolution()`: Subdivide the cell.
+    *   Else if `Cell.size < t.getMaxResolution()`:
+        *   Estimate discrepancy. If `discrepancy > acceptableDiscrepancy`: Subdivide.
+    *   *Note:* Subdivision creates new vertices. These are initialized by interpolating the *cached pre-update* field values from the parent level to ensure the tool's modification is added correctly on top of the previous state.
+4.  **Simplification Pass (Idle):**
+    *   Conducted separately at idle moments.
+    *   Destroys every Cell that does not cross the surface (iso-value 1.5) AND whose children do not cross the surface.
+    *   Cannot be done during active interaction because finer levels might add surface details that would be lost if coarser levels were simplified prematurely.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def apply_tool(cell: Cell, tool: Tool, action: Action, vertex_cache: dict):
+    """
+    Recursively applies a tool to a cell and its children.
+    Updates vertices first, then recurses to children.
+    """
+    # 1. Update current level vertices
+    for vertex in cell.vertices:
+        action.update(tool, vertex, vertex_cache)
+
+    # 2. Check if subdivision is needed if leaf
+    if not cell.has_children():
+        check_subdivide(cell, tool)
+
+    # 3. Recurse to children if they exist
+    if cell.has_children():
+        for child in cell.children:
+            apply_tool(child, tool, action, vertex_cache)
+
+def check_subdivide(cell: Cell, tool: Tool):
+    """
+    Determines if a cell should be subdivided based on resolution limits
+    and discrepancy estimation.
+    """
+    min_res = tool.get_min_resolution()
+    max_res = tool.get_max_resolution()
+    
+    if cell.size > min_res:
+        # Too coarse, must subdivide to capture features
+        subdivide(cell)
+    elif cell.size < max_res:
+        # Within resolution bounds, check for detail
+        discrepancy = estimate_discrepancy(cell)
+        if discrepancy > acceptable_discrepancy:
+            subdivide(cell)
+
+def subdivide(cell: Cell):
+    """
+    Subdivides a cell into n=4 sub-cells per dimension.
+    Shares vertices on common faces/edges.
+    Initializes new vertices using cached pre-update values.
+    """
+    # Create 4x4x4 sub-cells
+    new_children = create_sub_cells(cell)
+    
+    # Share vertices between adjacent new cells
+    wire_shared_vertices(new_children)
+    
+    # Initialize new vertices with interpolated pre-update values
+    # from the parent cell's state in the vertex cache
+    for child in new_children:
+        for vertex in child.vertices:
+            if vertex.is_new:
+                cached_state = vertex_cache[vertex.address]
+                vertex.field_value = interpolate(cached_state, cell)
+                vertex.gradient = interpolate_gradient(cached_state, cell)
+                vertex.color = interpolate_color(cached_state, cell)
+                
+    cell.children = new_children
+
+def simplify_field(root_cell: Cell):
+    """
+    Idle pass to remove unnecessary cells.
+    """
+    if not is_surface_crossing(root_cell):
+        # Check if any children cross the surface
+        if not any(is_surface_crossing(child) for child in root_cell.children):
+            destroy_cell(root_cell)
+        else:
+            for child in root_cell.children:
+                simplify_field(child)
+```
+
+### Edge Cases and Pitfalls
+*   **Irreversibility:** Field clamping makes the operation non-invertible. Reverse actions cannot simply subtract the tool value. The Vertex Cache is required to store pre-update states for correct interpolation during subdivision and for Undo operations.
+*   **Infinite Subdivision:** Subtractive tools can create discontinuities. The `Max Resolution` limit prevents infinite subdivision loops.
+*   **Shared Vertex Updates:** When subdividing, shared vertices between adjacent cells must be updated only once. A timestamp comparison prevents redundant computations.
+*   **Undo Mechanism:** Undo is treated as a special Action. Undo files store modified vertex addresses (not memory pointers, as vertices may be reallocated). The undo action uses the current tool's contribution to weight the reversal, enabling "Progressive Undo" and "Local Undo".
+
+## Operating characteristics
+
+*   **Time Complexity:** Depends on the number of active cells and vertices. Subdivision is $O(1)$ per cell but triggers recursive updates. Simplification is $O(N)$ where $N$ is the total number of cells, but runs only at idle.
+*   **Memory Complexity:** Higher than fixed-resolution grids for sparse details due to hierarchy overhead, but lower than uniform high-resolution grids. Vertex sharing reduces memory usage for adjacent cells.
+*   **Strengths:** Interactive visual feedback (updating coarse levels first), smooth blending ($C^1$ continuity), local detail capture.
+*   **Limitations:** Simplification is drastic (destroys non-surface cells), requires explicit caching for subdivision correctness, fixed subdivision factor ($n=4$) may not be optimal for all shapes.
+*   **When to use:** Interactive sculpting of organic shapes where local detail is needed without global high resolution.
+*   **When not to use:** When strict topological control is required (simplification is destructive), or when the scene is static and pre-computed.
+
+## Background
+
+*   **Origin:** Proposed by Eric Ferley, Marie-Paule Cani, and Jean-Dominique Gascuel.
+*   **Paper:** "Resolution Adaptive Volume Sculpting" (2001/2002).
+*   **History:** Builds on earlier work using hash-based grids for unlimited spatial extent. The method was developed to allow interactive editing of complex sculptures by adapting resolution to the tool's influence.
+*   **Usage:** Used in 3D modeling software for sculpting organic shapes, particularly in academic research on implicit surface modeling.
+
+## Sources
+
+[S1] Resolution Adaptive Volume Sculpting, https://doi.org/10.1006/gmod.2001.0558, fetched 2026-10-26

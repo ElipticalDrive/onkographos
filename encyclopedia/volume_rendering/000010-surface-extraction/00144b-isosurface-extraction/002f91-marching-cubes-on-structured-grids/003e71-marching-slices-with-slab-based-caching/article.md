@@ -1,0 +1,154 @@
+# Marching Slices with Slab-based Caching
+
+Also called: Marching Slices, Slab-based Marching Cubes
+
+## Overview
+Marching Slices is an isosurface extraction algorithm that reduces memory usage by processing a volume one slice at a time, caching only the data necessary for the current slab of cubes [S1]. It solves the problem of high memory consumption in standard marching cubes by discarding cached data that will not be reused and preventing redundant visits to completed cubes [S1]. Unlike surface-following marching cubes which keeps all slices in memory, this approach uses significantly less working memory and is faster due to increased locality of memory accesses [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 3D structured grid of field values $V$ of size $N_x \times N_y \times N_z$. An isovalue $I$.
+- Output: A list of triangles representing the isosurface.
+
+**Data Structures:**
+The algorithm treats the volume as a vertical array of $N_z$ slabs.
+- **Slabs:** Numbered $0$ to $N_z-1$ (where $z$ increases upwards). Each slab $k$ contains cubes with $z$-coordinates $k$. A slab is bounded above and below by 2D slices.
+- **Slices:** Numbered $0$ to $N_z$. Slice $k$ contains vertices with $z$-coordinate $k$. Adjacent slabs share slices.
+- **Todo List:** For each slab $k \in [0, N_z-1]$, a linked list containing integer tuples $(x, y)$ representing cubes in that slab that may need to be rendered.
+- **Slice Cache:** Allocated for the slice above and below a slab being polygonized. Each cache consists of:
+    - A 2D **corner index array** of size $(N_x + 1) \times (N_y + 1)$. Each element stores an index to retrieve a computed corner from the corner cache, or 0 if not computed.
+    - A **corner cache**: A dynamically resizing vector of corner values (coordinates).
+    - **Done Flags:** Each element in the corner index array also stores two boolean flags: `done_above` and `done_below`. These indicate whether the cubes above and below the slice at that location have been rendered.
+
+**Algorithm Steps:**
+1. **Initialization:**
+   - Create $N_z$ empty todo lists, one for each slab.
+   - Find a "seed cube" containing the isosurface. This can be done by scanning the volume or using a heuristic. Add the seed cube's $(x, y)$ to the todo list of its corresponding slab.
+   - [G] Initialize all corner index arrays and corner caches as empty.
+
+2. **Processing Loop:**
+   - While any todo list is not empty:
+     - Select a slab $k$ with a non-empty todo list.
+     - Allocate slice caches for slice $k$ (below slab $k$) and slice $k+1$ (above slab $k$) if not already allocated.
+     - While slab $k$'s todo list is not empty:
+       - Pop a cube $(x, y)$ from slab $k$'s todo list.
+       - **Check if already processed:** If the cube has been visited, skip. [S1] The algorithm must track visited cubes to avoid redundant processing. This is typically done by checking if the cube's corners have been fully processed or by maintaining a separate visited set. However, the primary mechanism described is the use of done flags in the slice caches to prevent adding already processed cubes to the todo list of adjacent slabs [S1].
+       - **March the Cube:** Perform standard marching cubes on the cube at $(x, y, k)$ using the field values and isovalue $I$.
+         - Retrieve or compute corner values for the 8 corners of the cube.
+         - If a corner is not in the corner cache, compute its position and add it to the corner cache, storing the new index in the corner index array of the relevant slices.
+         - Generate triangles for the isosurface within the cube.
+         - Mark the cube as processed.
+       - **Update Neighbors:** For each of the 8 corners of the cube, check the adjacent cubes.
+         - For each adjacent cube, if it contains the isosurface (field values straddle $I$) and has not been processed, add its $(x, y)$ to the todo list of its respective slab.
+         - Use the `done_above` and `done_below` flags in the slice caches to prevent adding cubes that have already been processed to the todo lists of adjacent slabs [S1].
+     - **Deallocate Slices:**
+       - If slab $k-1$'s todo list is empty, deallocate the slice cache for slice $k-1$ (below slab $k-1$).
+       - If slab $k+1$'s todo list is empty, deallocate the slice cache for slice $k+1$ (above slab $k+1$).
+       - When deallocating a slice, reset its corner index arrays by clearing nonzero indices and done flags using the (x, y) entries in its corner caches, and return the memory to a common pool [S1].
+
+3. **Termination:**
+   - The algorithm completes when there are no more todo list items for any slab in the block [S1].
+   - Flush index and vertex buffers to the video card [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def marching_slices(volume, isovalue, Nx, Ny, Nz):
+    # Initialize todo lists for each slab
+    todo_lists = [LinkedList() for _ in range(Nz)]
+    
+    # Find seed cube (simplified: scan for first cube containing isosurface)
+    seed_x, seed_y, seed_z = find_seed_cube(volume, isovalue, Nx, Ny, Nz)
+    todo_lists[seed_z].push((seed_x, seed_y))
+    
+    # Slice caches: dict mapping slice_index -> {corner_index_array, corner_cache, done_flags}
+    slice_caches = {}
+    
+    while any(not ll.is_empty() for ll in todo_lists):
+        # Select a slab with non-empty todo list
+        slab_k = next(k for k in range(Nz) if not todo_lists[k].is_empty())
+        
+        # Allocate slice caches for slab_k's boundaries if needed
+        if slab_k not in slice_caches:
+            slice_caches[slab_k] = allocate_slice_cache(Nx, Ny)
+        if slab_k + 1 not in slice_caches:
+            slice_caches[slab_k + 1] = allocate_slice_cache(Nx, Ny)
+            
+        while not todo_lists[slab_k].is_empty():
+            x, y = todo_lists[slab_k].pop()
+            
+            # Check if cube already processed (simplified: assume we track this)
+            if is_cube_processed(x, y, slab_k):
+                continue
+                
+            # March the cube
+            triangles = march_cube(volume, x, y, slab_k, isovalue, slice_caches)
+            output_triangles(triangles)
+            
+            # Mark cube as processed
+            mark_cube_processed(x, y, slab_k)
+            
+            # Update neighbors
+            for corner in cube_corners(x, y, slab_k):
+                # Determine adjacent cubes
+                adjacent_cubes = get_adjacent_cubes(corner, x, y, slab_k)
+                for adj_cube in adjacent_cubes:
+                    adj_x, adj_y, adj_z = adj_cube
+                    if cube_contains_isosurface(volume, adj_x, adj_y, adj_z, isovalue):
+                        if not is_cube_processed(adj_x, adj_y, adj_z):
+                            # Check done flags to avoid re-adding
+                            if not is_done(adj_x, adj_y, adj_z, slice_caches):
+                                todo_lists[adj_z].push((adj_x, adj_y))
+                                mark_done(adj_x, adj_y, adj_z, slice_caches)
+        
+        # Deallocate slices if their adjacent slabs are done
+        if slab_k - 1 >= 0 and todo_lists[slab_k - 1].is_empty():
+            if slab_k - 1 in slice_caches:
+                deallocate_slice_cache(slice_caches.pop(slab_k - 1))
+        if slab_k + 1 <= Nz and todo_lists[slab_k + 1].is_empty():
+            if slab_k + 1 in slice_caches:
+                deallocate_slice_cache(slice_caches.pop(slab_k + 1))
+
+def allocate_slice_cache(Nx, Ny):
+    # Allocate corner index array (Nx+1) x (Ny+1)
+    # Allocate corner cache (dynamic vector)
+    # Initialize done flags
+    pass
+
+def deallocate_slice_cache(cache):
+    # Clear corner index arrays
+    # Return memory to pool
+    pass
+
+def is_done(x, y, z, slice_caches):
+    # Check done flags in relevant slice caches
+    pass
+
+def mark_done(x, y, z, slice_caches):
+    # Set done flags in relevant slice caches
+    pass
+```
+
+**Parameters:**
+- Typical number of slices kept in memory at the same time is three [S1].
+
+**Edge Cases and Pitfalls:**
+- Field values are not known a-priori, so the algorithm cannot simply march back-to-front. It must march along connected cubes containing the isosurface starting at a seed cube, traversing all connected cubes in the current slice before moving to the next, with arbitrary forward/reverse order capability [S1].
+- Seeding algorithms may fail to find all local minima, causing the algorithm to step downwards to render connected cubes in slabs below that were missed, requiring additional slices to store the abandoned frontier [S1].
+- When seeding fails, the algorithm steps back to do work on a slab 'below' the current slab, breaking the unidirectional order of polygonization [S1].
+
+## Operating characteristics
+- **Time Complexity:** Not explicitly given, but the algorithm is designed to be efficient by avoiding hash map lookups and redundant visits [S1].
+- **Memory Complexity:** Significantly less than standard marching cubes. For a $110 \times 110 \times 110$ grid, the amount of cache memory used is below 1MB [S1].
+- **Performance:** Faster than surface-following marching cubes due to increased locality of memory accesses [S1]. Much faster than hash map based approaches by avoiding hash map lookup costs [S1].
+- **Strengths:** Low memory usage, good performance on multi-core hardware as each block can be rendered independently [S1].
+- **Limitations:** Seeding algorithms may fail to find all local minima, leading to complex traversal patterns [S1].
+
+## Background
+- **Origin:** The algorithm was introduced in "Real-time particle isosurface extraction" [S1].
+- **History:** It was developed to address the memory limitations of standard marching cubes for large volumes, particularly in the context of particle simulations.
+- **Usage:** Used in real-time particle isosurface extraction.
+
+## Sources
+[S1] Real-time particle isosurface extraction, https://doi.org/10.1145/1342250.1342256, fetched 2026-11-04

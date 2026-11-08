@@ -3,7 +3,7 @@
 Also called: Tile Boundary Buffer Setup, Tile Boundary Generation
 
 ## Overview
-This method initializes the data structures required for tiled parallel compositing [1192-tiled-parallel-compositing.md] by computing which geometry overlaps each tile in the output framebuffer. It differs from [Tile-Based Alpha Compositing](1215-tile-based-alpha-compositing.md) and [Dynamic Load Balancing via Tile Queue](1763-dynamic-load-balancing-via-tile-queue.md) by relying on a global radix-sort to organize tile relationships rather than per-tile queues or expensive coverage tests during setup [S1, unofficial].
+This method initializes the data structures required for tiled parallel compositing [1192-tiled-parallel-compositing.md] by computing which geometry overlaps each tile in the output framebuffer [S1, unofficial]. It differs from [Tile-Based Alpha Compositing](1215-tile-based-alpha-compositing.md) and [Dynamic Load Balancing via Tile Queue](1763-dynamic-load-balancing-via-tile-queue.md) by relying on a global radix-sort to organize tile relationships rather than per-tile queues or expensive coverage tests during setup [S1, unofficial].
 
 ## How it works
 **Inputs:**
@@ -41,39 +41,25 @@ def setup_tile_boundaries(width, height, num_instances, sort_k_buffer_even):
 
     # 2. Allocate tile boundary buffer
     buffer_size = tile_x * tile_y * 2 * 4  # 4 bytes per uint32
-    tile_boundary_buffer = allocate_storage_buffer(buffer_size)
+    tile_boundary_buffer = bytearray(buffer_size)
 
     # 3. Initialize buffer
-    fill_buffer(tile_boundary_buffer, 0)
+    tile_boundary_buffer[:] = b'\x00' * buffer_size
 
-    # 4. Pipeline barrier: Transfer -> ComputeShader
-    apply_pipeline_barrier(tile_boundary_buffer, src_stage='eTransfer', dst_stage='eComputeShader')
+    # 4. Pipeline barrier: Transfer -> ComputeShader (Vulkan memory barrier) [G]
+    # vkCmdPipelineBarrier(..., srcStageMask=VK_PIPELINE_STAGE_TRANSFER_BIT, dstStageMask=VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, ...)
 
-    # 5. Bind descriptors
-    descriptor_set = create_descriptor_set()
-    descriptor_set.bind_buffer(0, 'eStorageBuffer', 'eCompute', sort_k_buffer_even)
-    descriptor_set.bind_buffer(1, 'eStorageBuffer', 'eCompute', tile_boundary_buffer)
-    build_descriptor_set(descriptor_set)
+    # 5. Bind descriptors (Vulkan descriptor set binding) [G]
+    # vkCmdBindDescriptorSets(..., VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, sort_k_buffer_even, ...)
+    # vkCmdBindDescriptorSets(..., VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, tile_boundary_buffer, ...)
 
     # 6. Dispatch compute pipeline
     num_workgroups = (num_instances + 255) // 256
-    bind_pipeline('tileBoundaryPipeline')
-    bind_descriptor_set(0, descriptor_set)
-    push_constant(num_instances)
-    dispatch_compute(num_workgroups, 1, 1)
+    # vkCmdPushConstants(..., num_instances)
+    # vkCmdDispatch(..., num_workgroups, 1, 1)
 
-    # 7. Compute barrier
-    apply_pipeline_barrier(tile_boundary_buffer, src_stage='eComputeShader', dst_stage='eComputeShader')
-
-# Helper definitions to satisfy self-contained requirement
-def allocate_storage_buffer(size): return bytearray(size)
-def fill_buffer(buffer, value): buffer[:] = bytes([value]) * len(buffer)
-def apply_pipeline_barrier(buffer, src_stage, dst_stage): pass
-def create_descriptor_set(): return type('DS', (), {'bind_buffer': lambda s, i, t, p, b: None, 'build': lambda s: None})()
-def bind_pipeline(name): pass
-def bind_descriptor_set(idx, ds): pass
-def push_constant(val): pass
-def dispatch_compute(x, y, z): pass
+    # 7. Compute barrier (Vulkan memory barrier) [G]
+    # vkCmdPipelineBarrier(..., srcStageMask=VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, dstStageMask=VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, ...)
 ```
 
 **Edge Cases:**
@@ -86,11 +72,11 @@ def dispatch_compute(x, y, z): pass
 Performs triangle setup and emits a conservative list of triangles touching each tile. It differs by using global radix-sort to avoid per-tile queues and expensive coverage tests during setup, minimizing inter-thread communication.
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
+- **Time Complexity:** Not given in the sources [S1, unofficial].
 - **Memory Complexity:** $O(tileX \times tileY)$ for the boundary buffer [S1, unofficial].
-- **Strengths:** Not given in the sources.
-- **Limitations:** Not given in the sources.
-- **When to Use:** Not given in the sources.
+- **Strengths:** Not given in the sources [S1, unofficial].
+- **Limitations:** Not given in the sources [S1, unofficial].
+- **When to Use:** Not given in the sources [S1, unofficial].
 
 ## Background
 This method is part of the Vulkan-based Gaussian Splatting implementation in `3DGS.cpp`, utilizing Vulkan compute shaders for parallel processing [S1, unofficial].

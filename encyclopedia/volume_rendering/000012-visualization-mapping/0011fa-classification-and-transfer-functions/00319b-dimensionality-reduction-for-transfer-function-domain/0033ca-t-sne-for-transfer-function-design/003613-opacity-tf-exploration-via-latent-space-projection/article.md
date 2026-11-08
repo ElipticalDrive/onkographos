@@ -1,0 +1,220 @@
+# Opacity TF Exploration via Latent Space Projection
+
+Also called: Latent Space Browsing, Latent Space Interpolation, Latent Space TF Exploration, Opacity TF Latent Space Exploration, t-SNE based TF Browsing
+
+## Overview
+Opacity TF Exploration via Latent Space Projection is a user interface technique for volume rendering that allows users to browse and select transfer function (TF) variations by interacting with a projected 2D representation of the opacity TF latent space [S1]. It solves the problem of exploring the high-dimensional space of possible opacity functions to understand feature relationships and select appropriate visualizations [S1]. Unlike direct manipulation of TF control points, this method separates features based on latent space similarity, enabling structured browsing and detailed interpolation [S1]. It builds on [t-SNE for Transfer Function Design](7098-t-sne-for-transfer-function-design.md) by providing specific interaction mechanisms (grid browsing and Shepard interpolation) over the t-SNE projection.
+
+## How it works
+The method operates on a pre-trained opacity Transfer Function autoencoder/generator that maps a latent vector $\mathbf{z}$ to an opacity TF. The process consists of four main phases: latent space sampling, 2D projection, structured browsing, and detailed interpolation.
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   Pre-trained opacity TF decoder $D: \mathbb{R}^8 \rightarrow \text{TF}$ [S1].
+    *   Pre-trained opacity TF encoder $E: \text{TF} \rightarrow \mathbb{R}^8$ [S1].
+    *   View and Color TFs (fixed for the scene) [S1].
+    *   Volume data (for rendering) [S1].
+*   **Outputs:**
+    *   2D t-SNE projection of latent samples [S1].
+    *   Synthesized volume images corresponding to selected latent regions [S1].
+
+### Data Structures
+*   **Latent Space:** 8-dimensional vector space $\mathbb{R}^8$ [S1].
+*   **Samples:** A set of $N$ latent vectors $\{\mathbf{z}_i\}_{i=1}^N$ [S1].
+*   **Grid:** A $4 \times 4$ rectangular grid overlaid on the 2D projection [S1].
+*   **Interpolation Disk:** A circular region in 2D space centered at a user-selected point [S1].
+
+### Steps
+
+1.  **Sample Points in Latent Space**
+    Sample $N$ points uniformly at random in the 8D latent space. In experiments, $N = 10^4$ [S1].
+    $$ \mathbf{z}_i \sim \text{Uniform}(\mathbb{R}^8), \quad i = 1 \dots N $$
+
+2.  **Obtain TFs via Decoder**
+    Push the samples through the decoder to obtain a set of opacity TFs.
+    $$ \text{TF}_i = D(\mathbf{z}_i) $$
+
+3.  **Re-encode to Discover Valid Submanifold**
+    Transform the obtained TFs back to the latent space via the encoder (specifically the 1D convolutional layers of the generator/encoder structure) to probe the range of valid TFs. This step identifies the submanifold of valid TFs, as the decoder is not injective for invalid points [S1].
+    $$ \mathbf{z}'_i = E(\text{TF}_i) $$
+    *Note: The sources describe this as transforming via "1D convolutional layers in our opacity GAN’s generator" [S1]. In the context of the autoencoder, this corresponds to the encoding step.*
+
+4.  **Verify Low-Dimensional Structure (Optional Diagnostic)**
+    Compute the Singular Value Decomposition (SVD) of the re-encoded samples $\{\mathbf{z}'_i\}$ to observe the falloff in singular values, confirming the low-dimensional structure of valid TFs [S1].
+
+5.  **Project to 2D using t-SNE**
+    Project the set of re-encoded latent samples $\{\mathbf{z}'_i\}$ into 2D using t-SNE. The perplexity is set to 30 to avoid biasing cluster perception [S1].
+    $$ \mathbf{p}_i = \text{t-SNE}(\{\mathbf{z}'_j\}, \text{perplexity}=30) $$
+    where $\mathbf{p}_i \in \mathbb{R}^2$.
+
+6.  **Structured Browsing (Grid)**
+    *   The user brushes a $4 \times 4$ rectangular grid on the 2D projection [S1].
+    *   For each grid cell $c$, identify the subset of projected points $\mathcal{P}_c = \{\mathbf{p}_i \mid \mathbf{p}_i \in c\}$ [S1].
+    *   Compute the mean of the corresponding original latent samples for the cell:
+        $$ \bar{\mathbf{z}}_c = \frac{1}{|\mathcal{P}_c|} \sum_{\mathbf{p}_i \in \mathcal{P}_c} \mathbf{z}'_i $$
+        *Note: The sources state "compute the mean of this set of samples" [S1]. Since the grid is on the 2D projection, the samples must be mapped back to the latent space. The most valid samples are $\mathbf{z}'_i$ (re-encoded). If the user selects based on $\mathbf{p}_i$, we use the corresponding $\mathbf{z}'_i$.*
+    *   Synthesize the image for each cell using the mean latent vector $\bar{\mathbf{z}}_c$, alongside the view and color TF [S1].
+    *   For efficiency, push the $4 \times 4 = 16$ inputs through the network in a single minibatch [S1].
+
+7.  **Detailed Inspection (Interpolation)**
+    *   The user hovers over or selects a point $\mathbf{p}_{sel}$ in the 2D projection [S1].
+    *   Define a disk centered at $\mathbf{p}_{sel}$ with radius $R$. The radius is $5\%$ of the 2D bounding box diagonal [S1].
+    *   Identify all points $\mathbf{p}_i$ within this disk: $\mathcal{D} = \{\mathbf{p}_i \mid \|\mathbf{p}_i - \mathbf{p}_{sel}\| \le R\}$ [S1].
+    *   Perform scattered data interpolation of the latent opacity TFs using Shepard interpolation with a Gaussian kernel [S1].
+    *   The bandwidth $\sigma$ of the Gaussian kernel is $1/3$ of the specified radius $R$ [S1]:
+        $$ \sigma = \frac{1}{3} R $$
+    *   The interpolated latent vector $\mathbf{z}_{interp}$ is computed as:
+        $$ \mathbf{z}_{interp} = \frac{\sum_{\mathbf{p}_i \in \mathcal{D}} w_i \mathbf{z}'_i}{\sum_{\mathbf{p}_i \in \mathcal{D}} w_i}, \quad w_i = \exp\left(-\frac{\|\mathbf{p}_i - \mathbf{p}_{sel}\|^2}{2\sigma^2}\right) $$
+    *   Decode $\mathbf{z}_{interp}$ to obtain the opacity TF and synthesize the image [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def opacity_tf_exploration(latent_samples, decoder, encoder, volume_data, view_tf, color_tf):
+    """
+    Performs opacity TF exploration via latent space projection.
+    
+    Args:
+        latent_samples: List of N 8D latent vectors (initial random samples).
+        decoder: Function mapping 8D latent vector to opacity TF.
+        encoder: Function mapping opacity TF to 8D latent vector.
+        volume_data: The volume dataset.
+        view_tf: View transfer function.
+        color_tf: Color transfer function.
+        
+    Returns:
+        projected_points: 2D array of shape (N, 2)
+        grid_images: List of images for 4x4 grid cells
+        interpolated_image: Image for detailed inspection
+    """
+    N = len(latent_samples)
+    
+    # Step 1 & 2: Sample and Decode (Already sampled, decode to get TFs)
+    # Note: In the source, samples are generated, then decoded, then re-encoded.
+    # We assume latent_samples are the initial random draws.
+    
+    # Step 2: Push samples through decoder to obtain TFs
+    tfs = [decoder(z) for z in latent_samples]
+    
+    # Step 3: Transform TFs back to latent space via encoder
+    # This probes the range of valid TFs
+    valid_latent_samples = [encoder(tf) for tf in tfs]
+    
+    # Step 4: (Diagnostic) SVD to check falloff
+    # matrix = np.array(valid_latent_samples)
+    # U, S, Vt = np.linalg.svd(matrix, full_matrices=False)
+    # print("Singular values:", S)
+    
+    # Step 5: Project to 2D using t-SNE
+    # Using a standard t-SNE implementation
+    from sklearn.manifold import TSNE
+    tsne = TSNE(n_components=2, perplexity=30, random_state=42)
+    projected_points = tsne.fit_transform(valid_latent_samples)
+    
+    # Step 6: Structured Browsing (Grid)
+    # Define 4x4 grid bounds based on projected_points bounding box
+    min_x, max_x = projected_points[:, 0].min(), projected_points[:, 0].max()
+    min_y, max_y = projected_points[:, 1].min(), projected_points[:, 1].max()
+    
+    grid_step_x = (max_x - min_x) / 4
+    grid_step_y = (max_y - min_y) / 4
+    
+    grid_images = []
+    for row in range(4):
+        for col in range(4):
+            x_min = min_x + col * grid_step_x
+            x_max = x_min + grid_step_x
+            y_min = min_y + row * grid_step_y
+            y_max = y_min + grid_step_y
+            
+            # Find points in this cell
+            cell_mask = (
+                (projected_points[:, 0] >= x_min) & 
+                (projected_points[:, 0] < x_max) &
+                (projected_points[:, 1] >= y_min) & 
+                (projected_points[:, 1] < y_max)
+            )
+            cell_indices = np.where(cell_mask)[0]
+            
+            if len(cell_indices) > 0:
+                # Compute mean of latent samples in cell
+                cell_latents = np.array([valid_latent_samples[i] for i in cell_indices])
+                mean_latent = np.mean(cell_latents, axis=0)
+                
+                # Decode mean latent to get TF
+                mean_tf = decoder(mean_latent)
+                
+                # Synthesize image
+                image = render_volume(volume_data, mean_tf, view_tf, color_tf)
+                grid_images.append(image)
+            else:
+                grid_images.append(None) # Empty cell
+                
+    # Step 7: Detailed Inspection (Interpolation)
+    # Assume user selects a point p_sel in 2D
+    p_sel = np.array([0.0, 0.0]) # Placeholder for user selection
+    
+    # Calculate radius as 5% of bounding box diagonal
+    diag = np.sqrt((max_x - min_x)**2 + (max_y - min_y)**2)
+    R = 0.05 * diag
+    
+    # Find points in disk
+    dists = np.linalg.norm(projected_points - p_sel, axis=1)
+    disk_mask = dists <= R
+    disk_indices = np.where(disk_mask)[0]
+    
+    if len(disk_indices) > 0:
+        disk_latents = np.array([valid_latent_samples[i] for i in disk_indices])
+        disk_points = projected_points[disk_indices]
+        
+        # Shepard interpolation with Gaussian kernel
+        sigma = R / 3.0
+        weights = np.exp(-dists[disk_indices]**2 / (2 * sigma**2))
+        
+        # Weighted mean
+        interpolated_latent = np.average(disk_latents, axis=0, weights=weights)
+        
+        # Decode and render
+        interp_tf = decoder(interpolated_latent)
+        interpolated_image = render_volume(volume_data, interp_tf, view_tf, color_tf)
+    else:
+        interpolated_image = None
+        
+    return projected_points, grid_images, interpolated_image
+
+def render_volume(volume_data, opacity_tf, view_tf, color_tf):
+    """
+    Standard volume rendering using given TFs.
+    """
+    # Implementation depends on the specific renderer
+    # This is a placeholder for the actual rendering step
+    pass
+```
+
+### Parameters and Typical Values
+*   **Number of Samples ($N$):** $10^4$ [S1].
+*   **t-SNE Perplexity:** 30 [S1].
+*   **Grid Size:** $4 \times 4$ [S1].
+*   **Interpolation Radius ($R$):** $5\%$ of the 2D bounding box diagonal [S1].
+*   **Shepard Kernel Bandwidth ($\sigma$):** $1/3$ of $R$ [S1].
+
+### Edge Cases and Pitfalls
+*   **Invalid Latent Points:** The decoder is not injective for points in the latent space that do not correspond to valid TFs. Sampling must be restricted to the submanifold of valid TFs, which is achieved by re-encoding the decoded TFs [S1].
+*   **Precision:** The method relies on the stability of the t-SNE projection and the interpolation. Degenerate cases (e.g., no points in a grid cell or disk) must be handled gracefully [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The dominant cost is the t-SNE projection $O(N^2)$ or $O(N \log N)$ depending on implementation, and the rendering of the grid/interpolated images. With $N=10^4$, t-SNE is feasible. The grid browsing requires 16 renderings per interaction. Interpolation requires one decoding and one rendering [S1].
+*   **Memory Complexity:** Storage of $N$ latent samples and their 2D projections. $N=10^4$ 8D vectors is negligible. The main memory usage is for the volume data and the rendered images [S1].
+*   **Performance:** The method enables interactivity for manipulating and viewing the grid of images by pushing inputs through the network in a single minibatch [S1].
+*   **Strengths:** Allows users to understand feature relationships and select TF variations based on latent space similarity. Provides both overview (grid) and detailed inspection (interpolation) [S1].
+*   **Limitations:** Requires a pre-trained generative model (autoencoder/GAN) for the opacity TF. The quality of exploration depends on the fidelity of the latent space representation [S1].
+
+## Background
+This method was introduced in the paper "A Generative Model for Volume Rendering" [S1]. It is part of a broader approach to volume rendering exploration using generative models. The technique leverages the latent space of an opacity TF autoencoder to provide a structured way for users to browse and select transfer functions. The use of t-SNE for 2D projection follows the general trend of dimensionality reduction for visualization [S1].
+
+## Sources
+[S1] A Generative Model for Volume Rendering, https://doi.org/10.1109/tvcg.2018.2816059, fetched 2026-10-26

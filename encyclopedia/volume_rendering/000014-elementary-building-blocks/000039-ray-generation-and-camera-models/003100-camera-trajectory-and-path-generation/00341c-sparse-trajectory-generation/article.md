@@ -1,0 +1,107 @@
+# Sparse Trajectory Generation
+
+Also called: Mapping-based Trajectory Selection
+
+## Overview
+Sparse Trajectory Generation reduces the computational load of trajectory-based rendering methods by selecting a subset of frames from a full trajectory based on a predefined mapping file [S1, unofficial]. It serves as a preprocessing step for algorithms like 2D Gaussian Splatting, allowing for efficient training or rendering on hardware with limited memory or compute resources by skipping redundant or intermediate camera poses [S1, unofficial]. Unlike continuous path generation methods such as [Spiral Camera Path Generation](1635-spiral-camera-path-generation.md) or [Orbit Camera Path Generation](7811-orbit-camera-path-generation.md), this method operates on discrete, existing trajectory data, acting as a filter rather than a generator.
+
+## How it works
+The method consists of two primary operations: sparse selection via a mapping file and optional alignment using RANSAC.
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   `f_trajectory`: A list or array of full trajectory frames (e.g., camera poses, intrinsics).
+    *   `mapping`: A mapping file or structure defining the subset.
+    *   `gt_traj_col`: (Optional) Ground truth trajectory for alignment.
+    *   `gt_trans`: (Optional) Transformation matrix for ground truth alignment.
+*   **Outputs**:
+    *   `sparse_traj`: A list or array of selected trajectory frames.
+    *   `aligned_traj`: (Optional) The trajectory aligned to ground truth.
+
+### Data Structures
+*   **Mapping File**: Typically a text file or array where each row contains `[frame_index, total_frame_index]`.
+    *   `frame_index`: The index in the sparse trajectory (0-based).
+    *   `total_frame_index`: The index in the full trajectory (0-based).
+    *   `n_sampled_frames`: Total number of rows in the mapping.
+    *   `n_total_frames`: Total number of frames in the original trajectory.
+
+### Sparse Selection Algorithm
+1.  Initialize an empty list `sparse_traj`.
+2.  Iterate through each entry `m` in the `mapping` data structure.
+3.  Extract the `total_frame_index` from `m`.
+4.  Convert `total_frame_index` to an integer. Note: If the source data uses 1-based indexing, subtract 1 to convert to 0-based indexing [S1, unofficial].
+5.  Retrieve the frame `f_trajectory[index]`.
+6.  Append the retrieved frame to `sparse_traj`.
+7.  Return `sparse_traj`.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_sparse_trajectory(f_trajectory, mapping):
+    """
+    Generates a sparse trajectory from a full trajectory using a mapping file.
+    
+    Args:
+        f_trajectory: List of all trajectory frames (0-indexed).
+        mapping: List of tuples/lists [sparse_index, full_index].
+        
+    Returns:
+        sparse_traj: List of selected trajectory frames.
+    """
+    sparse_traj = []
+    for m in mapping:
+        # m[1] is the index in the full trajectory
+        full_index = int(m[1])
+        
+        # Guard against out-of-bounds access
+        if full_index < 0 or full_index >= len(f_trajectory):
+            continue
+            
+        sparse_traj.append(f_trajectory[full_index])
+        
+    return sparse_traj
+```
+
+### Trajectory Alignment (RANSAC)
+If ground truth data is available, the sparse trajectory can be aligned to it using RANSAC to correct for drift or misalignment [S1, unofficial].
+
+1.  **Preprocessing**:
+    *   Read the mapping file to determine `n_sampled_frames` and `n_total_frames`.
+    *   If the trajectory length is $\le 1600$ or no mapping file is provided, skip sparsity operations and use the full trajectory [S1, unofficial].
+    *   If a mapping file is provided and trajectory length $> 1600$, sparsify the input trajectory before alignment [S1, unofficial].
+2.  **Point Cloud Conversion**:
+    *   Convert the ground truth trajectory `gt_traj_col` into a point cloud `traj_pcd_col` [S1, unofficial].
+    *   If `gt_trans` is provided, apply the transformation: `traj_pcd_col.transform(gt_trans)` [S1, unofficial].
+3.  **Correspondence Setup**:
+    *   Create a correspondence vector `corres` assuming a 1-to-1 mapping between the sparse trajectory points and ground truth points by index [S1, unofficial]:
+        $$ \text{corres}_i = [i, i] \quad \forall i \in [0, N-1] $$
+        where $N$ is the number of points in `gt_traj_col`.
+4.  **RANSAC Execution**:
+    *   Run RANSAC to find the optimal rigid transformation aligning the sparse trajectory to `traj_pcd_col`.
+    *   **Parameters**:
+        *   `max_iteration`: 100,000 [S1, unofficial].
+        *   `max_validation`: 100,000 [S1, unofficial].
+        *   `randomvar`: Noise magnitude multiplier. Default: 0.0. If $< 10^{-5}$, no noise is added [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Indexing Mismatch**: Mapping files may use 1-based indexing. Implementers must verify if subtraction of 1 is required [S1, unofficial].
+*   **Length Threshold**: The sparsity optimization is skipped if the trajectory length is $\le 1600$ frames. This is a hard-coded threshold in the reference implementation [S1, unofficial].
+*   **Missing Ground Truth**: If `gt_traj_col` is not provided, alignment is skipped, and the trajectory remains in its original coordinate system.
+
+## Subtopics
+
+### Trajectory Alignment (RANSAC)
+A variant that integrates geometric registration into the trajectory generation pipeline. It differs from basic sparse selection by actively correcting spatial misalignments between the generated trajectory and a known ground truth. It is chosen when the input trajectory suffers from drift or when high-precision alignment is required for downstream tasks like multi-view stereo or SLAM evaluation. It relies on the RANSAC algorithm with specific convergence criteria (100,000 iterations) and handles noise via a configurable multiplier [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: $O(N)$ for sparse selection, where $N$ is the number of entries in the mapping file. RANSAC alignment is $O(K \cdot M)$, where $K$ is the number of iterations and $M$ is the number of points, though typically bounded by the fixed iteration limit [S1, unofficial].
+*   **Memory Complexity**: $O(S)$, where $S$ is the size of the sparse trajectory. This is significantly lower than storing the full trajectory if $S \ll N$.
+*   **Performance**: Reduces rendering and training time proportionally to the sparsity ratio. In 2D Gaussian Splatting, this allows for faster iteration cycles on large datasets [S1, unofficial].
+*   **Strengths**: Simple implementation, significant memory savings, decouples trajectory generation from selection logic.
+*   **Limitations**: Does not generate new viewpoints; relies entirely on the quality and coverage of the original full trajectory. The fixed threshold of 1600 frames may not be optimal for all scene scales [S1, unofficial].
+
+## Background
+Sparse Trajectory Generation is commonly used in modern differentiable rendering pipelines, particularly in 2D Gaussian Splatting, to manage the computational cost of processing large numbers of camera poses [S1, unofficial]. The method is implemented in the `2d-gaussian-splatting` repository by Inria's GRAPHDECO research group [S1, unofficial]. It builds on the principles of parallel execution and ray definition shared by its parent family, allowing the sparse set of rays to be processed efficiently on GPUs [S1, unofficial].
+
+## Sources
+[S1] hbb1/2d-gaussian-splatting, https://github.com/hbb1/2d-gaussian-splatting, fetched 2026-10-27 (unofficial)

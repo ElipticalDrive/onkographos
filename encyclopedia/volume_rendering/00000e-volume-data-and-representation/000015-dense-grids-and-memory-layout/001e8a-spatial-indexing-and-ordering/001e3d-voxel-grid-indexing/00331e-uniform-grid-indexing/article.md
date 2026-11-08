@@ -1,0 +1,109 @@
+# Uniform Grid Indexing
+
+Also called: 3D Grid Index Calculation
+
+## Overview
+Uniform Grid Indexing maps a 3D world-space position to a linear index in a dense, axis-aligned voxel grid by normalizing the position relative to a bounding box and applying a row-major layout. It solves the problem of spatial locality for dense volume data, providing $O(1)$ lookup for cell containment. Unlike [Spatial Hashing](5002-spatial-hashing.md), which handles sparse data via hash collisions, this method guarantees contiguous memory access but requires a fixed, potentially large memory allocation proportional to the cube of the grid resolution. It differs from [Coordinate Space Conversion](1785-coordinate-space-conversion.md) by specifically handling the discrete integer quantization and boundary clamping required for grid traversal, whereas coordinate conversion may remain in continuous space.
+
+## How it works
+**Inputs:**
+- `position`: A 3D vector $(x, y, z)$ in world or local space.
+- `boundsMin`: A 3D vector defining the minimum corner of the grid's bounding box.
+- `boundsMax`: A 3D vector defining the maximum corner of the grid's bounding box.
+- `cellsPerEdge`: An integer $N$ representing the number of voxels along each axis (assuming a cubic grid).
+
+**Outputs:**
+- `linearIndex`: An integer representing the 1D index in the flattened grid array.
+
+**Data Structures:**
+The grid is stored as a 1D array of size $N^3$. The mapping uses row-major order where the Z-axis is the most significant dimension, followed by Y, then X.
+
+**Steps:**
+1.  **Single Cell Check:** If `cellsPerEdge` is 1, the grid contains only one cell. Return index 0 immediately.
+2.  **Bounding Box Size:** Calculate the dimensions of the bounding box:
+    $$ \text{BoxSize} = \text{boundsMax} - \text{boundsMin} $$
+3.  **Relative Position:** Translate the input position to be relative to the minimum bound:
+    $$ \text{RelativePosition} = \text{position} - \text{boundsMin} $$
+4.  **Normalization:** Normalize the relative position to the range $[0, 1]$ for each axis. To prevent division by zero if the bounding box has zero thickness in any dimension, use a small epsilon value (`KINDA_SMALL_NUMBER`) if the box size component is zero.
+    $$ \text{NormalizedPosition}_i = \frac{\text{RelativePosition}_i}{\max(\text{BoxSize}_i, \epsilon)} $$
+    where $i \in \{x, y, z\}$.
+5.  **Scaling:** Scale the normalized coordinates by the grid resolution to obtain floating-point cell coordinates:
+    $$ \text{ScaledPosition}_i = \text{NormalizedPosition}_i \times \text{cellsPerEdge} $$
+6.  **Quantization:** Floor the scaled coordinates to obtain integer cell indices $(CellX, CellY, CellZ)$:
+    $$ CellX = \lfloor \text{ScaledPosition}_x \rfloor $$
+    $$ CellY = \lfloor \text{ScaledPosition}_y \rfloor $$
+    $$ CellZ = \lfloor \text{ScaledPosition}_z \rfloor $$
+7.  **Clamping:** Clamp the integer indices to the valid range $[0, \text{cellsPerEdge} - 1]$ to handle positions exactly on the upper boundary or outside the bounding box.
+    $$ CellX = \min(\max(CellX, 0), \text{cellsPerEdge} - 1) $$
+    $$ CellY = \min(\max(CellY, 0), \text{cellsPerEdge} - 1) $$
+    $$ CellZ = \min(\max(CellZ, 0), \text{cellsPerEdge} - 1) $$
+8.  **Linear Index Calculation:** Compute the 1D index using row-major ordering:
+    $$ \text{LinearIndex} = CellZ \times (\text{cellsPerEdge}^2) + CellY \times \text{cellsPerEdge} + CellX $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def uniform_grid_index(position, bounds_min, bounds_max, cells_per_edge):
+    # Step 1: Handle single cell case
+    if cells_per_edge == 1:
+        return 0
+
+    # Step 2: Calculate bounding box size
+    box_size = bounds_max - bounds_min
+
+    # Step 3: Translate position relative to boundsMin
+    relative_position = position - bounds_min
+
+    # Step 4: Normalize relative position to [0, 1] range per axis
+    # Using a small epsilon to handle division by zero
+    epsilon = 1e-6
+    normalized_position = vec3(
+        relative_position.x / max(box_size.x, epsilon),
+        relative_position.y / max(box_size.y, epsilon),
+        relative_position.z / max(box_size.z, epsilon)
+    )
+
+    # Step 5: Scale normalized position by cellsPerEdge
+    scaled_position = normalized_position * cells_per_edge
+
+    # Step 6: Floor the scaled position to get integer 3D grid cell indices
+    cell_x = floor(scaled_position.x)
+    cell_y = floor(scaled_position.y)
+    cell_z = floor(scaled_position.z)
+
+    # Step 7: Clamp cell indices to valid range [0, cellsPerEdge - 1]
+    max_index = cells_per_edge - 1
+    cell_x = clamp(cell_x, 0, max_index)
+    cell_y = clamp(cell_y, 0, max_index)
+    cell_z = clamp(cell_z, 0, max_index)
+
+    # Step 8: Calculate linear index using row-major order
+    linear_index = cell_z * (cells_per_edge ** 2) + cell_y * cells_per_edge + cell_x
+
+    return linear_index
+```
+
+## Subtopics
+
+### [Compact Grid Method](9891-compact-grid-method.md)
+A static data structure for representing a uniform grid acceleration structure with minimal memory requirements: exactly one index per grid cell and exactly one index per object reference, built in linear time. It optimizes the storage of the uniform grid by reducing overhead compared to standard pointer-based or dense array implementations.
+
+### Regular Grid Decomposition
+A variant where the scene is decomposed into a regular grid of network regions [S2]. While this eliminates the requirement to train a decomposition structure, it requires significantly more regions to achieve the same accuracy as learned decompositions due to the non-homogeneous structure of real scenes [S2]. This results in significant memory access incoherence for network weights, lowering computational performance [S2].
+
+## Operating characteristics
+**Time Complexity:** $O(1)$ for index calculation.
+**Memory Complexity:** $O(N^3)$ where $N$ is `cellsPerEdge`. This grows cubically, making it inefficient for large volumes or sparse data.
+**Performance:** Provides fast, predictable access times. However, for sparse scenes, it wastes memory on empty cells.
+**Strengths:** Simple implementation, no hashing collisions, cache-friendly for dense data.
+**Limitations:** High memory usage for large grids; poor performance on sparse data due to incoherent memory access patterns if the grid is large but mostly empty [S2].
+**When to use:** Dense volumes, small to medium grid resolutions, or when memory is not a constraint.
+**When not to use:** Sparse scenes, very large bounding boxes with low resolution requirements, or when memory bandwidth is a bottleneck for network weight access [S2].
+
+## Background
+Uniform grid indexing is a fundamental technique in computer graphics and computational geometry, widely used in ray tracing, volume rendering, and spatial partitioning. The specific implementation details involving `KINDA_SMALL_NUMBER` and row-major linearization are documented in the Unreal Engine ecosystem and related open-source projects [S1, unofficial]. The limitations regarding memory access incoherence in the context of neural radiance fields are discussed in DeRF [S2].
+
+## Sources
+[S1] JI20/unreal-splat, https://github.com/JI20/unreal-splat, fetched 2026-10-27 (unofficial)
+[S2] DeRF: Decomposed Radiance Fields, https://doi.org/10.1109/cvpr46437.2021.01393, fetched 2026-10-26

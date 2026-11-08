@@ -3,152 +3,187 @@
 Also called: Gradient Magnitude Approximation, Gradient Magnitude Calculation, Gradient Magnitude Illumination Modulation, Gradient Magnitude Opacity Modulation, Maximum Gradient Importance, Maximum Gradient Magnitude Measure
 
 ## Overview
-Gradient Magnitude Modulation is a technique in volume rendering that uses the computed gradient magnitude of a sample to modulate its opacity and/or illumination values [S1, S3, unofficial]. It solves the problem of internal features being occluded by external structures with higher scalar intensity, a limitation of Maximum Intensity Projection (MIP) [S2]. By treating gradient magnitude as an importance measure, it emphasizes surface boundaries and reduces the visual impact of noise or homogeneous regions [S1, unofficial][S2]. It builds on [Sobel Gradient Magnitude Approximation](1429-sobel-gradient-magnitude-approximation.md) to obtain the necessary gradient data.
+Gradient Magnitude Modulation is a volume rendering technique that uses the computed gradient magnitude of scalar data to modulate sample opacity and illumination values [S1, S3, unofficial]. It solves the problem of occlusion by internal features of lower scalar intensity, which often occurs when using maximum intensity projection, by treating high gradient magnitudes as indicators of surface presence or importance [S2]. It sets itself apart from its sibling [Sobel Gradient Magnitude Approximation](1429-sobel-gradient-magnitude-approximation.md) by defining how the calculated magnitude is applied to the rendering pipeline (modulation) rather than just how it is computed.
 
 ## How it works
-The method consists of two phases: computing the gradient magnitude and applying a modulation factor to the sample's optical properties.
+**Inputs:**
+*   Scalar volume data.
+*   Pre-computed gradient components ($\nabla_x, \nabla_y, \nabla_z$) or raw voxel data for on-the-fly estimation.
+*   Current sample opacity ($\alpha$) and illumination ($I$).
+*   Accumulated transparency state (for the "Maximum Gradient" variant).
 
-### Inputs and Outputs
-*   **Inputs**:
-    *   Scalar field values at the current sample position and its neighbors.
-    *   Current sample opacity ($\alpha$) and illumination ($I$).
-    *   Accumulated maximum gradient magnitude along the ray ($\text{grad}_{acc}$) [S2].
-    *   Gradient Magnitude Lookup Table (GmLUT) [S1, unofficial].
-*   **Outputs**:
-    *   Modulated opacity and/or illumination values.
-    *   Updated $\text{grad}_{acc}$ for the next sample [S2].
+**Outputs:**
+*   Modulated opacity and/or illumination values for the current sample.
 
-### Data Structures
-*   **Gradient Magnitude Lookup Table (GmLUT)**: Stores eight table entries specifying points of a piece-wise linear function at equal intervals along the gradient magnitude axis [S1, unofficial]. The table maps the computed gradient magnitude to a modulation value in the range $[0, 1]$ [S1, unofficial].
+**Data Structures:**
+*   **Gradient Magnitude Lookup Table (GmLUT):** Stores eight table entries specifying points of a piece-wise linear function at equal intervals along the gradient magnitude axis [S1, unofficial].
+*   **Registers:**
+    *   `Gmimd`: Gradient Magnitude Illumination Modulation for diffuse illumination [S1, unofficial].
+    *   `Gmims`: Gradient Magnitude Illumination Modulation for specular illumination [S1, unofficial].
+    *   `Gmom`: Gradient Magnitude Opacity Modulation [S1, unofficial].
 
-### Steps
+**Steps:**
 
-1.  **Compute Gradient Components**: Calculate the partial derivatives in the x, y, and z directions. Using forward differences with step length $d$:
-    $$
-    \begin{aligned}
-    dx &= V(x+d, y, z) - V(x, y, z) \\
-    dy &= V(x, y+d, z) - V(x, y, z) \\
-    dz &= V(x, y, z+d) - V(x, y, z)
-    \end{aligned}
-    $$
-    where $V$ is the volume texture/sample function [S3, unofficial].
+1.  **Compute Gradient Magnitude:**
+    Calculate the magnitude $|\nabla|$ from the gradient components.
+    *   *Approximation (VolumePro):* Compute the square of the gradient magnitude by summing the squares of the components, then use a Newton-Raphson iteration to compute the square root [S1, unofficial]. The result is an 8-bit approximation in the range $[0, 2^{20}]$ [S1, unofficial].
+    *   *Direct Estimation:* If components are not pre-computed, estimate them using finite differences (e.g., forward differences) [S3, unofficial].
+        $$ \nabla_x = V(x+d, y, z) - V(x, y, z) $$
+        $$ \nabla_y = V(x, y+d, z) - V(x, y, z) $$
+        $$ \nabla_z = V(x, y, z+d) - V(x, y, z) $$
+        $$ |\nabla| = \sqrt{\nabla_x^2 + \nabla_y^2 + \nabla_z^2} $$
+        where $d$ is the step length [S3, unofficial].
 
-2.  **Compute Squared Magnitude**: Sum the squares of the components:
-    $$
-    g^2 = dx^2 + dy^2 + dz^2
-    $$
-    [S1, unofficial].
+2.  **Map to Modulation Range:**
+    Map the computed gradient magnitude into the range $[0, 255]$ using a user-specified piece-wise linear function stored in the GmLUT [S1, unofficial].
+    *   The GmLUT contains 8 entries defining the function at equal intervals [S1, unofficial].
+    *   Perform linear interpolation between table values to compute an 8-bit repeating-fraction modulation value $\beta \in [0, 1]$ [S1, unofficial].
 
-3.  **Compute Gradient Magnitude**: Calculate $g = \sqrt{g^2}$.
-    *   **Hardware Implementation (VolumePro)**: A Newton-Raphson iteration is used to compute the square root, resulting in an 8-bit approximation in the range $[0, 2^{20}]$ [S1, unofficial].
-    *   **Software/GPU Implementation**: Direct square root calculation is used [S3, unofficial].
+3.  **Apply Modulation:**
+    Multiply the sample's opacity and/or illumination by $\beta$ based on the enabled registers [S1, unofficial].
+    $$ \alpha_{mod} = \alpha \cdot \beta $$
+    $$ I_{mod} = I \cdot \beta $$
 
-4.  **Map to Modulation Value**:
-    *   Map the gradient magnitude $g$ into the range $[0, 255]$ using a user-specified piece-wise linear function defined by the GmLUT [S1, unofficial].
-    *   Perform linear interpolation between the table values to compute an 8-bit repeating-fraction modulation value $\beta \in [0, 1]$ [S1, unofficial].
-    *   *Note*: In the "Maximum Gradient Importance" variant, $\beta$ is calculated dynamically based on the accumulated maximum gradient [S2]:
-        $$
-        \beta = B(\Delta_{imp}(\text{grad}_i, \text{grad}_{acc})) = \begin{cases} 1 - (\text{grad}_i - \text{grad}_{acc}) & \text{if } \text{grad}_i > \text{grad}_{acc} \\ 1 & \text{otherwise} \end{cases}
-        $$
-        where $\text{grad}_i$ is the current sample's gradient magnitude and $\text{grad}_{acc}$ is the maximum gradient magnitude encountered so far along the ray [S2].
-    *   Initialize $\text{grad}_{acc}$ to the gradient magnitude of the first sample or zero [S2]. If $\text{grad}_i > \text{grad}_{acc}$, update $\text{grad}_{acc} = \text{grad}_i$ [S2].
+    *Alternative "Maximum Gradient" Accumulation Strategy:*
+    In some implementations, $\beta$ is calculated dynamically based on the maximum gradient magnitude encountered along the viewing ray so far ($\text{grad}_{acc}$) [S2].
+    *   Initialize $\text{grad}_{acc}$ to the gradient magnitude of the first sample or zero [S2].
+    *   For each subsequent sample $i$ with gradient magnitude $\text{grad}_i$:
+        $$ \beta = \begin{cases} 1 - (\text{grad}_i - \text{grad}_{acc}) & \text{if } \text{grad}_i > \text{grad}_{acc} \\ 1 & \text{otherwise} \end{cases} $$
+        If $\text{grad}_i > \text{grad}_{acc}$, update $\text{grad}_{acc} = \text{grad}_i$ [S2].
+    *   Use this $\beta$ to modulate accumulated transparency [S2].
 
-5.  **Apply Modulation**:
-    *   Multiply the sample's opacity $\alpha$ and/or illumination $I$ by $\beta$ [S1, unofficial].
-    *   Registers control this: `Gmom` for opacity, `Gmimd` for diffuse illumination, and `Gmims` for specular illumination [S1, unofficial].
-
-### Pseudocode
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def gradient_magnitude_modulation(position, intensity, step_length, grad_acc, gm_lut):
+def compute_gradient_magnitude(volume, position, step_length, intensity):
     """
-    Computes gradient magnitude and returns modulation factor and updated grad_acc.
-    
-    Args:
-        position: vec3, current ray position
-        intensity: float, scalar value at current position
-        step_length: float, distance between samples
-        grad_acc: float, accumulated maximum gradient magnitude so far
-        gm_lut: list of 8 floats, lookup table for piece-wise linear mapping
-        
-    Returns:
-        beta: float, modulation factor in [0, 1]
-        new_grad_acc: float, updated accumulated maximum gradient
+    Computes gradient magnitude using forward differences.
+    Returns float magnitude.
     """
-    # Step 1: Compute gradient components (forward differences)
-    # Note: texture() assumes normalized coordinates or appropriate scaling
-    dx = texture(volume, position + vec3(step_length, 0, 0)).r - intensity
-    dy = texture(volume, position + vec3(0, step_length, 0)).r - intensity
-    dz = texture(volume, position + vec3(0, 0, step_length)).r - intensity
-    
-    # Step 2 & 3: Compute magnitude
-    grad_sq = dx*dx + dy*dy + dz*dz
-    grad_mag = sqrt(grad_sq)
-    
-    # Step 4: Calculate modulation factor beta
-    # Using Maximum Gradient Importance logic [S2]
-    if grad_mag > grad_acc:
-        # Update accumulated max gradient
-        new_grad_acc = grad_mag
-        # Calculate beta based on difference
-        # Note: The formula 1 - (grad_i - grad_acc) can exceed 1 or be negative 
-        # if not clamped. The source implies it acts as a transparency increase.
-        # We clamp to [0, 1] for valid modulation factor.
-        beta = 1.0 - (grad_mag - grad_acc)
-        beta = max(0.0, min(1.0, beta))
-    else:
-        new_grad_acc = grad_acc
-        beta = 1.0
-        
-    # Alternative: If using GmLUT [S1, unofficial], beta would be:
-    # mapped_val = map_grad_to_0_255(grad_mag)
-    # beta = interpolate_gm_lut(gm_lut, mapped_val)
-    
-    return beta, new_grad_acc
+    d = step_length
+    # Forward differences
+    dx = volume.sample(position + vec3(d, 0, 0)).r - intensity
+    dy = volume.sample(position + vec3(0, d, 0)).r - intensity
+    dz = volume.sample(position + vec3(0, 0, d)).r - intensity
+    return sqrt(dx*dx + dy*dy + dz*dz)
 
-def apply_modulation(opacity, illumination, beta):
+def apply_gradient_modulation(magnitude, alpha, illumination, gmlut, gmom, gmimd, gmims):
     """
-    Modulates opacity and illumination by beta.
+    Applies gradient magnitude modulation to opacity and illumination.
     """
-    modulated_opacity = opacity * beta
-    modulated_illumination = illumination * beta
-    return modulated_opacity, modulated_illumination
+    # 1. Map magnitude to [0, 255] using GmLUT
+    # GmLUT has 8 entries. Map magnitude to index 0-255.
+    # Assume magnitude is already scaled or normalized appropriately.
+    # For VolumePro style: magnitude is approx 8-bit in [0, 2^20] range?
+    # Actually, the text says "8-bit approximation ... in range [0, 2^20]" which implies
+    # the internal representation might be larger, but the LUT maps to 8-bit output.
+    # Let's assume a helper `map_to_lut` that takes the computed magnitude and returns
+    # an 8-bit repeating-fraction value in [0, 1].
+    
+    beta = map_to_gmlut(magnitude, gmlut)
+    
+    modulated_alpha = alpha
+    modulated_illumination = illumination
+    
+    # 2. Apply based on registers
+    if gmom:
+        modulated_alpha = alpha * beta
+        
+    if gmimd:
+        modulated_illumination = illumination * beta # For diffuse
+        
+    if gmims:
+        # Specular modulation might use a separate beta or the same
+        # The text implies Gmims uses the same mechanism
+        modulated_illumination = illumination * beta # Assuming same beta for simplicity unless specified otherwise
+        
+    return modulated_alpha, modulated_illumination
+
+def map_to_gmlut(magnitude, gmlut):
+    """
+    Maps a gradient magnitude to a value in [0, 1] using the Gradient Magnitude Lookup Table.
+    GmLUT stores 8 entries specifying points of a piece-wise linear function.
+    """
+    # Normalize magnitude to 0-255 range for indexing
+    # The source mentions range [0, 2^20] for the 8-bit approx result, 
+    # but then maps to [0, 255]. We assume magnitude is scaled.
+    normalized_mag = clamp(magnitude / max_magnitude, 0.0, 1.0) * 255.0
+    
+    idx = floor(normalized_mag)
+    frac = normalized_mag - idx
+    
+    # GmLUT has 8 entries. 
+    # If idx >= 255, return 1.0.
+    if idx >= 255:
+        return 1.0
+        
+    # Interpolate between table values.
+    # The table defines points at equal intervals.
+    # Let's assume the table values are pre-scaled to [0,1] or need scaling.
+    # The text says "8-bit repeating-fraction value ... range [0, 1]".
+    
+    # Simple linear interpolation between two adjacent LUT entries
+    # Note: The LUT has 8 entries for the *function*, but the index is 0-255.
+    # This implies the LUT defines the shape, and we interpolate within the 256 bins?
+    # Or does the LUT have 256 entries? 
+    # Text: "Eight table entries specify points of a piece-wise linear function at equal intervals along the gradient magnitude axis."
+    # This usually means 8 control points. The function is defined over [0, 255].
+    # We need to interpolate between these 8 points.
+    
+    # Let's assume the 8 entries are at indices: 0, 32, 64, 96, 128, 160, 192, 224, 255?
+    # Or simply 8 points distributed evenly.
+    # Let's implement a generic piece-wise linear interpolation given 8 control points.
+    
+    # Control points indices (example: 0, 36, 72, 108, 144, 180, 216, 255)
+    # The text says "equal intervals". 256 / 7 intervals? 
+    # Let's assume the LUT provides values at specific normalized positions.
+    
+    # For implementation simplicity based on "8 table entries":
+    # We map the 0-255 range to these 8 points.
+    
+    # Let's assume the GmLUT is an array of 8 floats [v0, v1, ..., v7]
+    # corresponding to x positions [0, 36.57, 73.14, ... 255]
+    
+    # Find which segment idx falls into
+    segment_size = 255.0 / 7.0
+    segment_idx = floor(idx / segment_size)
+    segment_idx = clamp(segment_idx, 0, 6)
+    
+    x0 = segment_idx * segment_size
+    x1 = (segment_idx + 1) * segment_size
+    
+    y0 = gmlut[segment_idx]
+    y1 = gmlut[segment_idx + 1]
+    
+    # Linear interpolation
+    if x1 == x0:
+        return y0
+    return y0 + (y1 - y0) * (idx - x0) / (x1 - x0)
 ```
 
-### Parameters
-*   **GmLUT**: 8-entry lookup table for piece-wise linear mapping [S1, unofficial].
-*   **Registers**: `Gmom`, `Gmimd`, `Gmims` control which channels are modulated [S1, unofficial].
-*   **Step Length ($d$)**: Distance between samples, used in finite difference calculations [S3, unofficial].
-
-### Edge Cases and Pitfalls
-*   **Precision**: Hardware implementations may use 8-bit signed precision for gradient components, representing values in $[-127, 127]$ [S1, unofficial].
-*   **Noise**: Small gradient magnitudes in noisy data can lead to low modulation values, effectively reducing noise impact [S1, unofficial].
-*   **Homogeneous Regions**: Regions with small gradient magnitudes (e.g., interior of walls) become more transparent, which is desirable for revealing internal structures [S1, unofficial].
+**Edge Cases and Pitfalls:**
+*   **Noise:** Small gradient magnitudes in homogeneous regions (noise) can cause unwanted reflections or opacity if not modulated. Modulation reduces this impact [S1, unofficial].
+*   **Occlusion:** Without modulation (or using max intensity), internal features may be occluded by external structures with higher scalar intensity but lower gradient [S2].
+*   **Precision:** The VolumePro implementation uses an 8-bit approximation for the gradient magnitude, which may introduce quantization artifacts [S1, unofficial].
 
 ## Subtopics
 
 ### [Adjacent Gradient Difference](5787-adjacent-gradient-difference.md)
-A variant that calculates importance difference by comparing gradient magnitudes of two adjacent samples, increasing accumulated transparency whenever an increase in gradient magnitude is detected.
+Calculates importance by comparing gradient magnitudes of two adjacent samples along a viewing ray, increasing transparency when gradient magnitude increases. It differs from absolute gradient magnitude modulation by focusing on the *change* in gradient rather than the absolute value.
 
-### [Maximum Gradient Magnitude Projection](5788-maximum-gradient-magnitude-projection.md)
-A projection technique that uses the maximum gradient magnitude along the ray as the importance measure, better revealing sharp features compared to MIP.
+### [Maximum Gradient Magnitude Projection](1429-sobel-gradient-magnitude-approximation.md)
+(Parent) Uses the maximum gradient magnitude along the ray as the importance measure. This variant replaces the maximum intensity measure to prevent occlusion of internal features.
 
 ## Operating characteristics
-*   **Time Complexity**: Computing the gradient magnitude requires 3 texture lookups and basic arithmetic operations per sample [S3, unofficial]. The lookup table interpolation is constant time [S1, unofficial].
-*   **Memory Complexity**: Requires storage for the GmLUT (8 entries) [S1, unofficial] and the accumulated gradient magnitude state [S2].
-*   **Strengths**:
-    *   Emphasizes surface boundaries [S1, unofficial].
-    *   Reduces reflection from non-surfaces (noise) [S1, unofficial].
-    *   Reveals internal features occluded by high-intensity external structures, outperforming MIP in revealing sharp features [S2].
-*   **Limitations**:
-    *   Requires additional texture lookups for gradient computation [S3, unofficial].
-    *   Synchronization issues may arise if gradient computation is delayed relative to sample processing (e.g., in hardware pipelines) [S1, unofficial].
-*   **When to Use**: When surface emphasis is desired, or when internal structures need to be visible despite high-intensity occluders [S1, unofficial][S2].
-*   **When Not to Use**: When maximum intensity projection is sufficient, or when computational resources are extremely limited and gradient computation is prohibitive [S2].
+*   **Time Complexity:** $O(1)$ per sample for modulation after gradient computation. Gradient computation itself is $O(1)$ but requires multiple texture fetches or memory accesses for finite differences [S3, unofficial].
+*   **Memory Complexity:** Requires storage for the GmLUT (8 entries) and registers [S1, unofficial].
+*   **Performance:** The VolumePro implementation uses hardware registers (`Gmimd`, `Gmims`, `Gmom`) for efficient modulation [S1, unofficial]. The Newton-Raphson iteration for square root is fast on modern hardware [S1, unofficial].
+*   **Strengths:** Emphasizes surface boundaries, reduces reflection from non-surfaces (noise), and reveals sharp features that might be occluded in max intensity projection [S1, unofficial][S2].
+*   **Limitations:** Requires gradient computation, which increases memory bandwidth usage [S3, unofficial]. The 8-bit approximation may lose precision [S1, unofficial].
 
 ## Background
-Gradient magnitude modulation was introduced in the VolumePro real-time ray-casting system [S1, unofficial]. It was developed to address the limitations of maximum intensity projection, where internal features of lower scalar intensity are occluded by external structures [S2]. The technique uses the gradient magnitude as an indication of surface presence [S1, unofficial]. It is widely used in transfer functions to emphasize surfaces [S3, unofficial].
+Gradient magnitude modulation was introduced in the VolumePro real-time ray-casting system [S1, unofficial]. It was designed to address the limitations of maximum intensity projection, where internal features of lower scalar intensity are occluded by external structures [S2]. The method uses the gradient magnitude as an indicator of surface presence, modulating opacity and illumination to emphasize surfaces and reduce noise impact [S1, S3, unofficial].
 
 ## Sources
 [S1] The VolumePro Real-Time Ray-Casting System, https://www.merl.com/publications/docs/TR99-19.pdf, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,208 @@
+# Free-Slip Boundary Condition Enforcement
+
+Also called: Dynamic Obstacle Handling with Free-Slip Boundary
+
+## Overview
+This method enforces a free-slip boundary condition for fluid simulations involving dynamic obstacles represented as voxelized solids. It ensures that fluid velocity normal to the obstacle surface matches the solid's normal velocity, allowing tangential slip, while preventing mass leakage into solid interiors. It differs from no-slip conditions by retaining tangential fluid velocity and from static boundary handling by explicitly updating obstacle velocity fields and modifying the pressure solver to ignore solid cell contributions.
+
+## How it works
+**Inputs:**
+- Fluid velocity field $\mathbf{u}$ (3D texture).
+- Pressure field $p$ (3D texture).
+- Divergence field $d$ (3D texture).
+- Obstacle mask texture `obstacles` (3D texture, scalar).
+- Obstacle velocity texture `obstaclevelocity` (3D texture, vector).
+- Simulation parameters: time step $\Delta t$, fluid density $\rho$, cell spacing $\Delta x$.
+
+**Outputs:**
+- Updated fluid velocity field $\mathbf{u}'$.
+- Updated pressure field $p'$.
+
+**Data Structures:**
+- `obstacles`: 3D texture where a texel value $> 0.9$ indicates a solid cell [S1, unofficial].
+- `obstaclevelocity`: 3D texture storing the velocity vector of the solid at each cell location [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Obstacle Masking:** Define a helper function `IsSolidCell(coords)` which returns true if `obstacles.Sample(coords).r > 0.9` [S1, unofficial].
+
+2.  **Pressure Solve (Jacobi Iteration):**
+    When solving the discrete pressure-Poisson equation for a fluid cell $(i,j,k)$, neighbors that are solid must not contribute to the pressure gradient. The standard 7-point stencil is modified [S1, unofficial]:
+    $$ \frac{\Delta t}{\rho \Delta x^2} \left( \left| F_{i,j,k} \right| p_{i,j,k} - \sum_{n \in F_{i,j,k}} p_n \right) = -d_{i,j,k} $$
+    where $F_{i,j,k}$ is the set of adjacent fluid cell indices. In practice, during Jacobi iteration, if a neighbor cell is solid, its pressure value $p_n$ is replaced by the center cell's pressure $p_C$ [S1, unofficial]. This nullifies the solid's contribution to the Laplacian.
+
+3.  **Divergence Computation:**
+    When computing the divergence of the velocity field, if a neighboring cell is solid, sample the velocity from `obstaclevelocity` instead of the fluid velocity field [S1, unofficial].
+
+4.  **Post-Projection Enforcement:**
+    After the pressure projection step, explicitly enforce the free-slip condition. For fluid cells adjacent to solid boundaries, compute the obstacle's velocity component normal to the boundary and replace the fluid velocity's normal component at the center cell [S1, unofficial].
+    The condition is:
+    $$ \mathbf{u} \cdot \mathbf{n} = \mathbf{u}_{\text{solid}} \cdot \mathbf{n} $$
+    where $\mathbf{n}$ is the surface normal. Since solid-fluid boundaries are aligned with voxel faces, $\mathbf{n}$ is axis-aligned. The tangential components of the fluid velocity are retained [S1, unofficial]. If two opposing faces are solid boundaries, selecting one face's normal velocity is sufficient for acceptable results [S1, unofficial].
+
+5.  **Advection Constraint:**
+    During advection of any quantity (e.g., density, temperature), ensure no quantity is advected into the interior of an obstacle. If the trace point of an advection step lands inside a solid cell, the advected quantity is set to zero [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def is_solid_cell(coords, obstacle_texture):
+    """Returns True if the cell at coords is solid."""
+    return obstacle_texture.sample(coords).r > 0.9
+
+def get_obstacle_velocity(coords, obstacle_velocity_texture):
+    """Returns the velocity of the solid at coords."""
+    return obstacle_velocity_texture.sample(coords)
+
+def solve_pressure_jacobi_obstacle(pressure_texture, divergence_texture, obstacle_texture, num_iterations):
+    """
+    Solves the pressure Poisson equation with free-slip boundary conditions.
+    Solid cells are ignored in the stencil by replacing their pressure with the center cell's pressure.
+    """
+    p = pressure_texture.copy()
+    d = divergence_texture
+    
+    for _ in range(num_iterations):
+        new_p = empty_3d_texture()
+        for cell in all_cells:
+            if is_solid_cell(cell, obstacle_texture):
+                continue # Skip solid cells or handle as needed
+            
+            p_center = p.sample(cell)
+            d_val = d.sample(cell)
+            
+            # Sample neighbors
+            p_left = p.sample(cell + LEFT)
+            p_right = p.sample(cell + RIGHT)
+            p_bottom = p.sample(cell + BOTTOM)
+            p_top = p.sample(cell + TOP)
+            p_down = p.sample(cell + DOWN)
+            p_up = p.sample(cell + UP)
+            
+            # Nullify solid neighbors
+            if is_solid_cell(cell + LEFT): p_left = p_center
+            if is_solid_cell(cell + RIGHT): p_right = p_center
+            if is_solid_cell(cell + BOTTOM): p_bottom = p_center
+            if is_solid_cell(cell + TOP): p_top = p_center
+            if is_solid_cell(cell + DOWN): p_down = p_center
+            if is_solid_cell(cell + UP): p_up = p_center
+            
+            # Jacobi update
+            new_p_val = (p_left + p_right + p_bottom + p_top + p_down + p_up - d_val) / 6.0
+            new_p.set(cell, new_p_val)
+        
+        p = new_p
+    
+    return p
+
+def compute_divergence_obstacle(velocity_texture, obstacle_texture, obstacle_velocity_texture):
+    """
+    Computes divergence of velocity, using obstacle velocity for solid neighbors.
+    """
+    divergence = empty_3d_texture()
+    for cell in all_cells:
+        if is_solid_cell(cell, obstacle_texture):
+            divergence.set(cell, 0.0)
+            continue
+            
+        # Get velocities from neighbors
+        v_left = velocity_texture.sample(cell + LEFT)
+        v_right = velocity_texture.sample(cell + RIGHT)
+        v_bottom = velocity_texture.sample(cell + BOTTOM)
+        v_top = velocity_texture.sample(cell + TOP)
+        v_down = velocity_texture.sample(cell + DOWN)
+        v_up = velocity_texture.sample(cell + UP)
+        
+        # Replace solid neighbor velocities with obstacle velocities
+        if is_solid_cell(cell + LEFT): v_left = get_obstacle_velocity(cell + LEFT, obstacle_velocity_texture)
+        if is_solid_cell(cell + RIGHT): v_right = get_obstacle_velocity(cell + RIGHT, obstacle_velocity_texture)
+        if is_solid_cell(cell + BOTTOM): v_bottom = get_obstacle_velocity(cell + BOTTOM, obstacle_velocity_texture)
+        if is_solid_cell(cell + TOP): v_top = get_obstacle_velocity(cell + TOP, obstacle_velocity_texture)
+        if is_solid_cell(cell + DOWN): v_down = get_obstacle_velocity(cell + DOWN, obstacle_velocity_texture)
+        if is_solid_cell(cell + UP): v_up = get_obstacle_velocity(cell + UP, obstacle_velocity_texture)
+        
+        # Compute divergence (simplified 1D example for one axis, extend to 3D)
+        # div = (v_right.x - v_left.x + v_top.y - v_bottom.y + v_up.z - v_down.z) / dx
+        # Note: Exact divergence formula depends on grid staggering. Assuming collocated for this pseudocode structure.
+        div = (v_right.x - v_left.x + v_top.y - v_bottom.y + v_up.z - v_down.z)
+        divergence.set(cell, div)
+        
+    return divergence
+
+def enforce_free_slip_boundary(velocity_texture, obstacle_texture, obstacle_velocity_texture):
+    """
+    Explicitly enforces u . n = u_solid . n after pressure projection.
+    """
+    for cell in all_cells:
+        if is_solid_cell(cell, obstacle_texture):
+            continue
+            
+        v = velocity_texture.sample(cell)
+        solid_vel = get_obstacle_velocity(cell, obstacle_velocity_texture)
+        
+        # Determine if cell is adjacent to solid boundary
+        # Check each face
+        if is_solid_cell(cell + LEFT):
+            # Normal is -x. u . n = -v.x. u_solid . n = -solid_vel.x.
+            # v.x should become solid_vel.x
+            v.x = solid_vel.x
+        if is_solid_cell(cell + RIGHT):
+            # Normal is +x. u . n = v.x. u_solid . n = solid_vel.x.
+            v.x = solid_vel.x
+        if is_solid_cell(cell + BOTTOM):
+            # Normal is -y.
+            v.y = solid_vel.y
+        if is_solid_cell(cell + TOP):
+            # Normal is +y.
+            v.y = solid_vel.y
+        if is_solid_cell(cell + DOWN):
+            # Normal is -z.
+            v.z = solid_vel.z
+        if is_solid_cell(cell + UP):
+            # Normal is +z.
+            v.z = solid_vel.z
+            
+        velocity_texture.set(cell, v)
+
+def advect_with_obstacle_constraint(field_texture, velocity_texture, obstacle_texture, dt, dx):
+    """
+    Advection step that prevents leaking into solids.
+    """
+    new_field = empty_3d_texture()
+    for cell in all_cells:
+        if is_solid_cell(cell, obstacle_texture):
+            new_field.set(cell, 0.0)
+            continue
+            
+        # Backtrace
+        trace_pos = cell - velocity_texture.sample(cell) * dt / dx
+        
+        # Check if trace point is inside a solid
+        if is_solid_cell(trace_pos, obstacle_texture):
+            new_field.set(cell, 0.0)
+        else:
+            # Bilinear/Trilinear interpolation from field_texture at trace_pos
+            val = field_texture.sample_bilinear(trace_pos)
+            new_field.set(cell, val)
+            
+    return new_field
+```
+
+**Edge Cases and Pitfalls:**
+- **Large Time Steps:** Quantities can "leak" through boundaries during advection if $\Delta t$ is large. The advection constraint (Step 5) is critical to prevent this [S1, unofficial].
+- **Precision:** The threshold `0.9` for solid detection is arbitrary but effective for binary voxelization [S1, unofficial].
+- **Opposing Boundaries:** If a fluid cell is bounded by solids on opposite faces, averaging the normal velocities from both sides is an option, but selecting one is sufficient and simpler [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Adds constant overhead per cell for texture lookups and conditional checks during pressure solve, divergence, and advection. The pressure solver may require more iterations to converge if the solid boundaries create complex geometries, but the nullification trick maintains the sparsity of the matrix [S1, unofficial].
+- **Memory Complexity:** Requires two additional 3D textures: `obstacles` (scalar) and `obstaclevelocity` (vector). This doubles the memory footprint for boundary data [S1, unofficial].
+- **Strengths:** Handles dynamic obstacles efficiently on GPU; allows tangential slip which is physically appropriate for many fluid scenarios; simple to implement using texture sampling [S1, unofficial].
+- **Limitations:** Free-slip may not be physically accurate for viscous flows near walls; requires pre-computed obstacle velocity field [S1, unofficial].
+
+## Background
+This method is described in "Real-Time Simulation and Rendering of 3D Fluids" from GPU Gems 3 [S1, unofficial]. It builds on the Stable Fluids method by Jos Stam and extends it to dynamic obstacles using voxel-based inside-outside representation. The approach is designed for real-time performance on GPUs, leveraging texture sampling for boundary checks.
+
+## Sources
+[S1] Real-Time Simulation and Rendering of 3D Fluids, https://wo1fsea.github.io/files/About_NavMesh/P5_GPU_Gems_3_Real-Time_Simulation_and_Rendering_of_3D_Fluids.pdf, fetched 2026-10-27 (unofficial)

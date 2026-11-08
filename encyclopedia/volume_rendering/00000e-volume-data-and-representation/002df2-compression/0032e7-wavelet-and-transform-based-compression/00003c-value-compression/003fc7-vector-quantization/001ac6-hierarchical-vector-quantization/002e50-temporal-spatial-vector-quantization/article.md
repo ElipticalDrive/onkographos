@@ -1,0 +1,64 @@
+# Temporal/Spatial Vector Quantization
+
+Also called: Temporal Vector Quantization, Spatial Vector Quantization, TVQ, SVQ
+
+## Overview
+Temporal/Spatial Vector Quantization (TSVQ) is a compression technique for multivariate time-varying volumetric data that groups voxels into blocks either along the temporal axis or the spatial axis to apply vector quantization algorithms [S1]. It differs from static volume compression by explicitly exploiting temporal coherence, and from purely spatial methods by allowing the grouping dimension to be chosen based on the data's coherence characteristics [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A multivariate time-varying volume dataset $V(x, y, z, t)$, where $x,y,z$ are spatial coordinates and $t$ is the time step.
+*   **Output:** A compressed bitstream representing the quantized vectors and their indices.
+
+**Data Structures:**
+The method operates on blocks of voxels. Two primary block structures are defined:
+1.  **Temporal Block:** A group of voxels at the same spatial position $(x, y, z)$ across multiple consecutive time steps.
+2.  **Spatial Block:** A group of voxels at the same time step $t$ within a local spatial neighborhood (e.g., a $2 \times 2 \times 2$ or larger cube).
+
+**Algorithm Steps:**
+1.  **Block Partitioning:**
+    *   For **Temporal Vector Quantization (TVQ)**: Partition the volume into temporal blocks. Each block consists of $N$ time steps for a fixed spatial location. The vector dimension is $D = N \times M$, where $M$ is the number of scalar components per voxel (e.g., $M=1$ for scalar fields, $M=3$ for RGB/vector fields).
+    *   For **Spatial Vector Quantization (SVQ)**: Partition the volume into spatial blocks at each time step. Each block consists of $K$ voxels at a fixed time step. The vector dimension is $D = K \times M$.
+2.  **Vector Formation:**
+    *   Extract the scalar values from the voxels in the block to form a single high-dimensional vector $\mathbf{v}$.
+    *   For TVQ: $\mathbf{v} = [v_{t_1}, v_{t_2}, ..., v_{t_N}]$ (flattened if multivariate).
+    *   For SVQ: $\mathbf{v} = [v_{1}, v_{2}, ..., v_{K}]$ (flattened if multivariate).
+3.  **Vector Quantization:**
+    *   Use a pre-trained codebook $\mathcal{C} = \{\mathbf{c}_1, \mathbf{c}_2, ..., \mathbf{c}_L\}$ of representative vectors.
+    *   For each input vector $\mathbf{v}$, find the index $i$ of the closest codeword $\mathbf{c}_i$ in the codebook using a distance metric (typically Euclidean distance):
+        $$ i = \arg \min_{j \in \{1, ..., L\}} \| \mathbf{v} - \mathbf{c}_j \|^2 $$
+    *   Store the index $i$ in the compressed stream.
+4.  **Reconstruction (Decoding):**
+    *   Retrieve the codeword $\mathbf{c}_i$ from the codebook.
+    *   De-vectorize $\mathbf{c}_i$ back into the original block structure (temporal or spatial).
+    *   Replace the original block values with the reconstructed values.
+
+**Parameters:**
+*   **Block Size:** Not given in the sources.
+*   **Codebook Size ($L$):** Not given in the sources.
+*   **Time Steps per Temporal Block ($N$):** Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Conditions:** Voxels at the edges of the volume or time sequence may not form complete blocks. Padding or irregular block handling is required [G].
+*   **Codebook Training:** The codebook must be trained on representative data to ensure low quantization error. Training on insufficient data leads to poor reconstruction [G].
+*   **Precision:** Quantization error accumulates. For high-precision scientific data, large codebooks or smaller block sizes may be necessary to maintain accuracy [G].
+
+## Subtopics
+
+### [Vector Quantization for Time-Varying Fields](6719-vector-quantization-for-time-varying-fields.md)
+Extends vector quantization to encode scalar fields based on temporal coherence in a hierarchical data structure for time-varying unstructured grids. Chosen when dealing with unstructured grids where regular spatial blocking is not feasible.
+
+## Operating characteristics
+*   **Time Complexity:** Encoding time depends on the number of blocks and the codebook size. Finding the nearest neighbor in a codebook of size $L$ for a vector of dimension $D$ is $O(L \cdot D)$. Total encoding time is $O(B \cdot L \cdot D)$, where $B$ is the number of blocks.
+*   **Memory Complexity:** Requires storing the codebook ($O(L \cdot D)$) and the indices for all blocks ($O(B \cdot \log_2 L)$ bits).
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Exploits temporal or spatial redundancy effectively. Simple to implement.
+*   **Limitations:** Performance depends heavily on the choice of block size and codebook. Not given in the sources.
+*   **When to Use:** Suitable for multivariate time-varying volumes where either temporal or spatial coherence is strong.
+*   **When Not to Use:** When data lacks coherence in both temporal and spatial domains, or when high precision is required without large codebooks.
+
+## Background
+The method was proposed by Fout et al. [FAM* 05] as part of a survey of compressed GPU-based direct volume rendering techniques [S1]. It builds on earlier work in wavelet-based compression and hierarchical structures for time-varying data [S1].
+
+## Sources
+[S1] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27

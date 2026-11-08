@@ -3,63 +3,59 @@
 Also called: Milestone 2 shading, Procedural Neon Shading
 
 ## Overview
-The Neon Raymarcher Shading Model is a real-time shading technique designed for procedural neon city scenes, combining diffuse, specular, ambient occlusion, metallic reflection, and emissive contributions [S1, unofficial]. It distinguishes itself by integrating a specific metallic reflection model weighted by a Fresnel-like term and a fixed-step shadow ray, tailored for the high-contrast, emissive aesthetic of cyberpunk environments [S1, unofficial].
+The Neon Raymarcher Shading Model is a real-time shading technique for procedural neon city scenes that computes diffuse, specular, ambient occlusion, metallic reflection, and emissive contributions per pixel [S1, unofficial]. It distinguishes itself by integrating a metalness-driven specular model and a Fresnel-weighted metallic reflection term tailored for high-contrast, emissive aesthetics [S1, unofficial].
 
 ## How it works
 **Inputs:**
-*   Surface point $\mathbf{p}$ in world space.
-*   Surface normal $\mathbf{n}$, normalized.
-*   View direction $\mathbf{v}$ (from $\mathbf{p}$ to camera), normalized.
-*   Light direction $\mathbf{l}$ (from $\mathbf{p}$ to light source), normalized.
-*   Light color $\mathbf{c}_{light}$.
-*   Sky color $\mathbf{c}_{sky}$ (for reflections).
-*   Material properties:
-    *   Albedo $\mathbf{c}_{albedo}$ (base color).
-    *   Emissive $\mathbf{c}_{emissive}$.
-    *   Metalness $m \in [0, 1]$.
+*   Surface point $\mathbf{p}$ in world space [S1, unofficial].
+*   Surface normal $\mathbf{n}$, normalized [S1, unofficial].
+*   Ray direction $\mathbf{rd}$ (camera to surface), normalized [S1, unofficial].
+*   Light direction $\mathbf{l}$ (surface to light), normalized [S1, unofficial].
+*   Light color $\mathbf{c}_{light}$ [S1, unofficial].
+*   Sky color function $\mathbf{c}_{sky}(\cdot)$ [S1, unofficial].
+*   Material properties: albedo $\mathbf{c}_{albedo}$, emissive $\mathbf{c}_{emissive}$, metalness $m \in [0, 1]$, and ambient light color/intensity $\mathbf{c}_{ambient}$ [S1, unofficial].
 
 **Outputs:**
-*   Final pixel color $\mathbf{c}_{out}$.
+*   Final pixel color $\mathbf{c}_{out}$ [S1, unofficial].
 
 **Data Structures:**
-No complex data structures are required beyond standard vector and scalar types. The method relies on a helper function `calcAO(p, n)` for ambient occlusion and `Shadow(origin, dir, maxDist)` for shadowing, which are standard components in raymarching pipelines [S1, unofficial].
+No complex data structures are required beyond standard vector and scalar types; the method relies on helper functions `calcAO` and `Shadow` [S1, unofficial].
 
 **Steps:**
 
 1.  **Geometric Setup:**
     Calculate the half-vector $\mathbf{h}$ for specular calculation:
-    $$ \mathbf{h} = \frac{\mathbf{l} - \mathbf{v}}{\|\mathbf{l} - \mathbf{v}\|} $$
+    $$ \mathbf{h} = \frac{\mathbf{l} - \mathbf{rd}}{\|\mathbf{l} - \mathbf{rd}\|} $$
     [S1, unofficial]
 
 2.  **Shadow Calculation:**
     Compute the shadow factor $s$ by casting a shadow ray from an offset position along the normal:
     $$ \mathbf{p}_{shadow} = \mathbf{p} + \mathbf{n} \cdot 0.03 $$
     $$ s = \text{Shadow}(\mathbf{p}_{shadow}, \mathbf{l}, 12.0) $$
-    The offset of $0.03$ units prevents self-shadowing artifacts (shadow acne) [S1, unofficial]. The maximum ray distance is $12.0$ units [S1, unofficial].
+    The offset of $0.03$ units prevents self-shadowing artifacts [S1, unofficial]. The maximum ray distance is $12.0$ units [S1, unofficial].
 
 3.  **Ambient Occlusion:**
     Compute the ambient occlusion factor $a_o$ using `calcAO(p, n)` [S1, unofficial].
 
 4.  **Diffuse Component:**
     Calculate the diffuse lighting contribution $\mathbf{c}_{diff}$:
-    $$ \mathbf{c}_{diff} = \mathbf{c}_{albedo} \cdot \max(\mathbf{n} \cdot \mathbf{l}, 0.0) \cdot s $$
+    $$ d = \max(\mathbf{n} \cdot \mathbf{l}, 0.0) \cdot s $$
+    $$ \mathbf{c}_{diff} = \mathbf{c}_{albedo} \cdot \mathbf{c}_{light} \cdot d $$
     [S1, unofficial]
 
 5.  **Specular Component:**
     Calculate the specular intensity using a Blinn-Phong model with metalness-dependent exponent and intensity:
-    $$ \text{spec\_pow} = \text{mix}(32.0, 140.0, m) $$
-    $$ \text{spec\_int} = \text{mix}(0.4, 2.0, m) $$
-    $$ \mathbf{c}_{spec} = \mathbf{c}_{light} \cdot \text{spec\_int} \cdot \max(\mathbf{n} \cdot \mathbf{h}, 0.0)^{\text{spec\_pow}} \cdot s $$
+    $$ \text{spec} = \max(\mathbf{n} \cdot \mathbf{h}, 0.0)^{\text{mix}(32.0, 140.0, m)} \cdot s $$
+    $$ \mathbf{c}_{spec} = \mathbf{c}_{light} \cdot \text{spec} \cdot \text{mix}(0.4, 2.0, m) $$
     [S1, unofficial]
 
 6.  **Metallic Reflection:**
     Calculate the Fresnel-like term for metallic reflection:
-    $$ f = \max(\mathbf{n} \cdot (-\mathbf{v}), 0.0) $$
-    $$ \text{fresnel\_term} = f^5 $$
+    $$ f = (1.0 - \max(\mathbf{n} \cdot (-\mathbf{rd}), 0.0))^5 $$
     [S1, unofficial]
     
-    Compute the reflected view direction:
-    $$ \mathbf{r} = \text{reflect}(\mathbf{v}, \mathbf{n}) $$
+    Compute the reflected ray direction:
+    $$ \mathbf{r} = \text{reflect}(\mathbf{rd}, \mathbf{n}) $$
     [S1, unofficial]
     
     Sample the sky color for the reflection:
@@ -67,14 +63,12 @@ No complex data structures are required beyond standard vector and scalar types.
     [S1, unofficial]
     
     Calculate the metallic reflection contribution $\mathbf{c}_{metal}$:
-    $$ \text{metal\_int} = \text{mix}(0.03, 0.6, m) $$
-    $$ \text{grazing\_boost} = 0.25 + 0.75 \cdot \text{fresnel\_term} $$
-    $$ \mathbf{c}_{metal} = \mathbf{c}_{refl} \cdot \text{metal\_int} \cdot \text{grazing\_boost} \cdot a_o $$
+    $$ \mathbf{c}_{metal} = \mathbf{c}_{refl} \cdot \text{mix}(0.03, 0.6, m) \cdot (0.25 + 0.75 \cdot f) \cdot a_o $$
     [S1, unofficial]
 
 7.  **Ambient Component:**
     Calculate the ambient lighting contribution $\mathbf{c}_{amb}$:
-    $$ \mathbf{c}_{amb} = \mathbf{c}_{albedo} \cdot a_o $$
+    $$ \mathbf{c}_{amb} = \mathbf{c}_{albedo} \cdot \mathbf{c}_{ambient} \cdot a_o $$
     [S1, unofficial]
 
 8.  **Color Accumulation:**
@@ -87,12 +81,14 @@ No complex data structures are required beyond standard vector and scalar types.
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def neon_raymarcher_shading(p, n, v, l, c_light, c_sky, c_albedo, c_emissive, metal):
+def mix(a, b, t):
+    return a + t * (b - a)
+
+def neon_raymarcher_shading(p, n, rd, l, c_light, c_sky, c_albedo, c_emissive, metal, c_ambient):
     # 1. Geometric Setup
-    half_vec = normalize(l - v)
+    half_vec = (l - rd) / norm(l - rd)
     
     # 2. Shadow Calculation
-    # Offset normal by 0.03 to prevent self-shadowing
     p_shadow = p + n * 0.03
     shadow_factor = shadow_ray(p_shadow, l, max_distance=12.0)
     
@@ -101,36 +97,51 @@ def neon_raymarcher_shading(p, n, v, l, c_light, c_sky, c_albedo, c_emissive, me
     
     # 4. Diffuse Component
     diff = max(dot(n, l), 0.0) * shadow_factor
-    c_diff = c_albedo * diff
+    c_diff = c_albedo * c_light * diff
     
     # 5. Specular Component
-    # Mix specular exponent and intensity based on metalness
     spec_pow = mix(32.0, 140.0, metal)
     spec_int = mix(0.4, 2.0, metal)
     spec = pow(max(dot(n, half_vec), 0.0), spec_pow) * shadow_factor
-    c_spec = c_light * spec_int * spec
+    c_spec = c_light * spec * spec_int
     
     # 6. Metallic Reflection
-    # Fresnel-like term
-    fresnel_val = max(dot(n, -v), 0.0)
+    fresnel_val = 1.0 - max(dot(n, -rd), 0.0)
     fresnel_term = pow(fresnel_val, 5.0)
     
-    # Reflection direction
-    r = reflect(v, n)
-    c_refl = sample_sky_color(r, c_sky)
+    r = reflect(rd, n)
+    c_refl = c_sky(r)
     
-    # Metallic reflection intensity
     metal_int = mix(0.03, 0.6, metal)
     grazing_boost = 0.25 + 0.75 * fresnel_term
     c_metal = c_refl * metal_int * grazing_boost * ao_factor
     
     # 7. Ambient Component
-    c_amb = c_albedo * ao_factor
+    c_amb = c_albedo * c_ambient * ao_factor
     
     # 8. Color Accumulation
     c_out = c_amb + c_diff + c_spec + c_metal + c_emissive
     
     return c_out
+
+# Helper: Shadow ray marching [G]
+def shadow_ray(origin, direction, max_distance):
+    t = 0.0
+    while t < max_distance:
+        t += step_size # step_size depends on scene scale
+        if signed_distance_function(origin + direction * t) < 0.0:
+            return 0.0
+    return 1.0
+
+# Helper: Ambient occlusion estimation [G]
+def calc_ao(point, normal):
+    # Standard SDF-based AO: sample along normal, accumulate occlusion
+    ao = 1.0
+    for i in range(1, 5):
+        sample_point = point + normal * (i * ao_scale)
+        if signed_distance_function(sample_point) < 0.0:
+            ao -= ao_weight
+    return max(ao, 0.0)
 ```
 
 **Parameters:**
@@ -143,20 +154,15 @@ def neon_raymarcher_shading(p, n, v, l, c_light, c_sky, c_albedo, c_emissive, me
 *   Grazing boost range: $0.25$ to $0.75$ [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Self-shadowing:** The normal offset of $0.03$ is critical. If too small, shadow acne occurs; if too large, objects may cast shadows on themselves incorrectly. [S1, unofficial]
-*   **Metalness Interpolation:** The `mix` function linearly interpolates between non-metal and metal values. Ensure $m$ is clamped to $[0, 1]$. [S1, unofficial]
-*   **Reflection Sampling:** `sample_sky_color` must handle directions where the raymarcher hits a surface, returning the appropriate surface color or a default sky color if the ray escapes. [S1, unofficial]
+*   **Self-shadowing:** The normal offset of $0.03$ is critical to prevent self-shadowing artifacts [S1, unofficial].
+*   **Metalness Interpolation:** The `mix` function linearly interpolates between non-metal and metal values [S1, unofficial].
+*   **Reflection Sampling:** The sky color function must return the environment color for the reflection direction $\mathbf{r}$ [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per pixel, assuming `shadow_ray` and `calc_ao` are $O(1)$ or bounded. The shadow ray and AO calls involve additional raymarching steps, so performance depends on scene density and raymarcher step count.
-*   **Memory Complexity:** $O(1)$ per pixel. No large buffers are required.
-*   **Strengths:** Real-time performance; captures the high-contrast, emissive look of neon scenes; simple to implement.
-*   **Limitations:** The fixed shadow offset and max distance may not work well for all scene scales; the metallic reflection model is simplified and may not physically based.
-*   **When to use:** Real-time procedural neon city scenes.
-*   **When not to use:** Physically based rendering requiring accurate global illumination or complex material interactions.
+Not given in the sources.
 
 ## Background
-The Neon Raymarcher Shading Model originates from the "neon-raymarcher" project by PIGJET, a real-time raymarched procedural city scene [S1, unofficial]. It is designed to showcase the capabilities of raymarching in creating visually striking, stylized environments.
+Not given in the sources.
 
 ## Sources
 [S1] PIGJET/neon-raymarcher, https://github.com/PIGJET/neon-raymarcher, fetched 2026-10-27 (unofficial)

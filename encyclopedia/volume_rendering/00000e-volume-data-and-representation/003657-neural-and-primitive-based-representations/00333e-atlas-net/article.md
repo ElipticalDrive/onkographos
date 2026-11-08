@@ -1,0 +1,126 @@
+# Atlas-Net
+
+Also called: Atlas-based representations, Neural Surfaces (Atlas)
+
+## Overview
+Atlas-Net represents 3D surfaces as a collection of independent charts (surface patches), each parameterized by a continuous mapping from a 2D domain to 3D space, learned using neural networks [S1]. It solves the problem of representing surfaces of arbitrary topology in a continuous and differentiable manner, distinguishing itself from single-chart methods (like FoldingNet) by allowing local refinement through multiple patches [S1]. Unlike sibling methods that may use shared weights or explicit consistency constraints, the basic Atlas-Net formulation defines each chart independently, which offers a better fit to complex 3D shapes but risks inconsistencies in overlapping regions [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of 2D query coordinates $\mathbf{s} \in D$, where $D$ is a continuous 2D manifold (e.g., a unit square or sphere) [S1].
+*   **Output:** A 3D position $\mathbf{x} \in \mathbb{R}^3$ representing the point on the surface [S1].
+
+**Data Structures:**
+The representation consists of a collection of $N$ charts. Each chart $i$ is defined by:
+1.  A domain $D_i \subset \mathbb{R}^2$ [S1].
+2.  A Multilayer Perceptron (MLP) with learnable weights $\theta_i$ [S1].
+3.  The mapping function $f_{\theta_i}: D_i \rightarrow \mathbb{R}^3$ [S1].
+
+The total memory cost is linear with respect to the number of patches $N$, as each chart has its own set of MLP weights [S1].
+
+**Steps:**
+1.  **Initialization:** Define $N$ charts to cover the target surface. For each chart $i \in \{1, \dots, N\}$, initialize an MLP with weights $\theta_i$ [S1].
+2.  **Parameterization:** For each chart, define the continuous mapping function:
+    $$ f_{\theta_i}(\mathbf{s}) = \mathbf{x} $$
+    where $\mathbf{s}$ is the 2D coordinate query and $\mathbf{x}$ is the resulting 3D position [S1].
+3.  **Training:** Minimize a loss function between the rendered observations (or ground truth geometry) and the output of the atlas. The charts are typically trained independently or with specific consistency losses if overlaps exist [S1].
+4.  **Evaluation:** To query the surface at a specific 3D location, or to render, sample 2D coordinates $\mathbf{s}$ from the domains $D_i$ and pass them through the respective MLPs to generate the 3D surface points [S1].
+
+**Parameters:**
+*   **Number of patches ($N$):** Determines the resolution and coverage of the surface. Increasing $N$ improves fit but increases memory linearly [S1].
+*   **Domain $D$:** Typically a unit square or sphere [S1].
+
+**Pitfalls:**
+*   **Inconsistencies:** Since each chart is defined independently, overlapping regions between charts may exhibit discontinuities or distortions [S1].
+*   **Memory Cost:** The memory cost increases linearly with the number of patches, which can be a significant limitation for real-life applications requiring high-resolution meshes [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+class AtlasNetChart:
+    """
+    A single chart in the Atlas-Net representation.
+    Maps 2D coordinates to 3D space via an MLP.
+    """
+    def __init__(self, input_dim=2, hidden_dims=[64, 64, 64], output_dim=3):
+        # Initialize MLP weights [G]
+        self.weights = []
+        current_dim = input_dim
+        for h_dim in hidden_dims:
+            # Xavier initialization for weights [G]
+            w = np.random.randn(current_dim, h_dim) * np.sqrt(2.0 / (current_dim + h_dim))
+            b = np.zeros(h_dim)
+            self.weights.append((w, b))
+            current_dim = h_dim
+        # Output layer
+        w_out = np.random.randn(current_dim, output_dim) * np.sqrt(2.0 / (current_dim + output_dim))
+        b_out = np.zeros(output_dim)
+        self.weights.append((w_out, b_out))
+
+    def forward(self, s):
+        """
+        Forward pass of the MLP.
+        :param s: 2D coordinates, shape (..., 2)
+        :return: 3D positions, shape (..., 3)
+        """
+        x = s
+        # Hidden layers with ReLU activation [G]
+        for i in range(len(self.weights) - 1):
+            w, b = self.weights[i]
+            x = np.dot(x, w) + b
+            x = np.maximum(0, x) # ReLU
+        # Output layer (linear)
+        w_out, b_out = self.weights[-1]
+        x = np.dot(x, w_out) + b_out
+        return x
+
+class AtlasNet:
+    """
+    Collection of charts representing a surface.
+    """
+    def __init__(self, num_patches, chart_input_dim=2, chart_hidden_dims=[64, 64, 64], chart_output_dim=3):
+        self.num_patches = num_patches
+        # Initialize N independent charts [S1]
+        self.charts = [AtlasNetChart(chart_input_dim, chart_hidden_dims, chart_output_dim) for _ in range(num_patches)]
+
+    def query(self, patch_index, s):
+        """
+        Query the 3D position for a specific patch and 2D coordinate.
+        :param patch_index: Index of the chart (0 to N-1)
+        :param s: 2D coordinate, shape (..., 2)
+        :return: 3D position, shape (..., 3)
+        """
+        return self.charts[patch_index].forward(s)
+
+    def get_memory_cost(self):
+        """
+        Memory cost is linear with the number of patches [S1].
+        """
+        # Approximate parameter count per chart [G]
+        params_per_chart = sum(w.size + b.size for w, b in self.charts[0].weights)
+        return self.num_patches * params_per_chart
+```
+
+## Subtopics
+
+### Per-face texture parametrization
+A texture mapping scheme used in NeRFMeshing for unbounded scenes where each triangular face of the mesh is assigned a dedicated region in a feature texture image to retain high image resolution for per-face features [S2]. Each face is mapped to a right-angled triangle of side 4 pixels in a 2048x2048 texture image [S2]. Each pixel in this texture stores a feature vector $\hat{\mathbf{f}}$ predicted by the SSAN (Surface-Signed Distance Field Network) at the 3D position corresponding to that face pixel [S2]. This approach is chosen when evaluating unbounded scenes (e.g., Mip-NeRF 360 dataset) to store SSAN-predicted features per face [S2]. A pitfall is that high-resolution meshes generate a large number of faces, requiring a large texture box (2048) and risking memory overhead if not managed [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Linear with the number of patches $N$ [S1].
+*   **Performance:** Not given in the sources for the base Atlas-Net. NeRFMeshing (using per-face parametrization) achieves PSNR of ~31.44 on Chair and ~29.01 on Lego in the Blender Synthetic Dataset [S2].
+*   **Strengths:** Can represent surfaces of arbitrary topology in a continuous and differentiable manner [S1]. Independent MLPs offer a better fit to 3D shapes [S1].
+*   **Limitations:** Inconsistencies and distortions across overlapping regions due to independent chart definition [S1]. Memory cost increases linearly with the number of patches, limiting real-life applications [S1].
+*   **When to use:** When representing complex surfaces with arbitrary topology is required, and single-chart methods fail to capture details [S1].
+*   **When not to use:** When memory is constrained and the surface topology is simple enough for a single chart or shared-weight approach [S1].
+
+## Background
+Atlas-Net was introduced by Groueix et al. in [GFK∗ 18b] [S1]. It builds on the idea of representing surfaces as a collection of charts, each parameterized by a continuous mapping from a 2D domain to 3D space [S1]. Subsequent works have proposed strategies to address inconsistencies, such as enforcing consistency across overlapping charts [BPG∗ 20], using local shape priors [BGKS20], or using more sophisticated architectures to model relationships between charts [LRPK21] [S1].
+
+## Sources
+[S1] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
+[S2] NeRFMeshing: Distilling Neural Radiance Fields into Geometrically-Accurate 3D Meshes, https://doi.org/10.1109/3dv62453.2024.00093, fetched 2026-10-29

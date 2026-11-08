@@ -3,74 +3,76 @@
 Also called: Gauss Laguerre-NeRF
 
 ## Overview
-GL-NeRF is a training-free acceleration method for volume rendering in Neural Radiance Fields (NeRF) that reduces the number of neural network (MLP) calls per ray by replacing stochastic sampling with deterministic point selection based on Gauss-Laguerre quadrature [S1]. Unlike sibling acceleration methods that introduce new data structures, depth oracles, or auxiliary neural networks (e.g., [Occlusion Clipping with Orthogonal Opacity Map](990-occlusion-clipping-with-orthogonal-opacity-map.md), [Inference Ray Marching and Integration](2148-inference-ray-marching-and-integration.md)), GL-NeRF modifies only the integration logic, requiring no additional representation or training [S1]. It builds on [Acceleration](18-acceleration.md) by optimizing the sample distribution rather than culling or skipping empty space.
+GL-NeRF is a training-free acceleration method for volume rendering in Neural Radiance Fields (NeRF) that reduces the number of neural network (MLP) calls per ray by replacing stochastic sampling with deterministic point selection based on Gauss-Laguerre quadrature [S1]. Unlike sibling acceleration methods that introduce new data structures, depth oracles, or auxiliary neural networks, GL-NeRF modifies only the integration logic, requiring no additional representation or training [S1].
 
 ## How it works
 GL-NeRF exploits the mathematical structure of the volume rendering integral. By changing variables to optical depth, the integral transforms into a form best approximated by Gauss-Laguerre quadrature [S1]. This allows the renderer to select specific points along the ray where the accumulated optical depth equals the roots of Laguerre polynomials, querying the MLP only at these deterministic locations [S1].
 
 ### Inputs and Outputs
 **Inputs:**
-*   Ray origin $\mathbf{o}$ and direction $\mathbf{d}$.
-*   Bounding box of the scene (for intersection).
-*   Pre-trained NeRF MLP functions: $\sigma(\mathbf{p})$ for volume density and $\mathbf{c}(\mathbf{p})$ for color.
-*   Step size $\Delta t$ for the coarse sampling grid.
-*   Sample number $M$ (degree of the quadrature).
-*   Pre-computed look-up tables for Gauss-Laguerre quadrature points $\mathbf{Lp}$ and weights $\mathbf{Lw}$ of size $M$.
+*   Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ [S1].
+*   Bounding box of the scene (for intersection) [S1].
+*   Pre-trained NeRF MLP functions: $\sigma(\mathbf{p})$ for volume density and $\mathbf{c}(\mathbf{p})$ for color [S1].
+*   Step size $\Delta t$ for the coarse sampling grid [S1].
+*   Sample number $M$ (degree of the quadrature) [S1].
+*   Pre-computed look-up tables for Gauss-Laguerre quadrature points $\mathbf{Lp}$ and weights $\mathbf{Lw}$ of size $M$ [S1].
+*   Background color $\mathbf{bg\_color}$ (assumed constant) [S1].
 
 **Outputs:**
-*   Rendered color $\mathbf{C}(\mathbf{r})$ for the ray.
-*   Background color $\mathbf{bg\_color}$ (assumed constant).
+*   Rendered color $\mathbf{C}(\mathbf{r})$ for the ray [S1].
 
 ### Data Structures
-*   **$\mathbf{Lp}$**: Array of size $M$. Contains the roots of the $M$-th degree Laguerre polynomial $L_M(x)$. These represent the target optical depths.
-*   **$\mathbf{Lw}$**: Array of size $M$. Contains the corresponding quadrature weights.
-*   **$M$**: Integer scalar, the number of samples per ray. Typical values are small integers (e.g., 5, 10) to significantly reduce MLP calls compared to standard NeRF (often 64-256 samples).
+*   **$\mathbf{Lp}$**: Array of size $M$. Contains the roots of the $M$-th degree Laguerre polynomial $L_M(x)$ [S1]. These represent the target optical depths [G].
+*   **$\mathbf{Lw}$**: Array of size $M$. Contains the corresponding quadrature weights [S1].
+*   **$M$**: Integer scalar, the number of samples per ray [S1]. Typical values are small integers (e.g., 5, 10) to significantly reduce MLP calls compared to standard NeRF (often 64-256 samples) [G].
 
 ### Formulas
 The volume rendering integral is:
 $$ \mathbf{C}(\mathbf{r}) = \int_{t_n}^{t_f} T(t) \sigma(\mathbf{r}(t)) \mathbf{c}(\mathbf{r}(t)) dt $$
-where transmittance is $T(t) = \exp(-\int_{t_n}^t \sigma(\mathbf{r}(s)) ds)$.
+where transmittance is $T(t) = \exp(-\int_{t_n}^t \sigma(\mathbf{r}(s)) ds)$ [S1].
 
 The optical depth $x$ is defined as:
 $$ x = -\log(T) = \int_{t_n}^t \sigma(\mathbf{r}(s)) ds $$
-
 The integral is approximated using Gauss-Laguerre quadrature:
 $$ \mathbf{C}(\mathbf{r}) \approx \sum_{i=0}^{M-1} w_i \mathbf{c}(\mathbf{r}(t_i)) + w_{bg} \mathbf{bg\_color} $$
-where $w_i$ are the quadrature weights $\mathbf{Lw}[i]$, and $w_{bg}$ is the sum of remaining weights if the ray terminates before all quadrature points are reached.
+where $w_i$ are the quadrature weights $\mathbf{Lw}[i]$, and $w_{bg}$ is the sum of remaining weights if the ray terminates before all quadrature points are reached [S1].
 
-The quadrature points $x_i$ (stored in $\mathbf{Lp}$) and weights $w_i$ (stored in $\mathbf{Lw}$) are derived from the Laguerre polynomials. For a given $n$, the weight is calculated as [S1]:
-$$ w_i = \frac{x_i}{(n+1)^2 [L_{n+1}(x_i)]^2} $$
-In practice, $\mathbf{Lp}$ and $\mathbf{Lw}$ are pre-computed and stored in look-up tables [S1].
+The quadrature points $x_i$ (stored in $\mathbf{Lp}$) and weights $w_i$ (stored in $\mathbf{Lw}$) are derived from the Laguerre polynomials [S1]. The source provides a closed-form calculation for weights $w_i = \frac{x_i}{(n+1)^2 [L_{n+1}(x_i)]^2}$ [S1], but notes that in practice $\mathbf{Lp}$ and $\mathbf{Lw}$ are pre-computed and stored in look-up tables [S1].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def gl_nerf_render(ray_origin, ray_direction, step_size, sample_count, 
                    lookup_points, lookup_weights, bg_color, 
-                   get_volume_density, get_color):
+                   get_volume_density, get_color, box_min, box_max):
     """
     Renders a single ray using GL-NeRF.
-    
-    Args:
-        ray_origin: 3D vector, origin of the ray.
-        ray_direction: 3D vector, direction of the ray.
-        step_size: float, coarse step size Delta_t.
-        sample_count: int, M, number of Gauss-Laguerre points.
-        lookup_points: list of floats, Lp, quadrature points (roots).
-        lookup_weights: list of floats, Lw, quadrature weights.
-        bg_color: 3D vector, background color.
-        get_volume_density: function, returns sigma at a 3D position.
-        get_color: function, returns color at a 3D position.
-        
-    Returns:
-        3D vector, rendered color.
     """
-    # 1. Intersect ray with bounding box
-    t_min, t_max = ray_intersect_bounding_box(ray_origin, ray_direction)
+    # 1. Intersect ray with bounding box (robust slab method)
+    def ray_aabb_intersect(origin, direction, bmin, bmax):
+        t_min = -float('inf')
+        t_max = float('inf')
+        for i in range(3):
+            if direction[i] == 0:
+                if origin[i] < bmin[i] or origin[i] > bmax[i]:
+                    return None
+            else:
+                t1 = (bmin[i] - origin[i]) / direction[i]
+                t2 = (bmax[i] - origin[i]) / direction[i]
+                if t1 > t2:
+                    t1, t2 = t2, t1
+                if t1 > t_min: t_min = t1
+                if t2 < t_max: t_max = t2
+                if t_min > t_max: return None
+        return t_min, t_max
+
+    t_min, t_max = ray_aabb_intersect(ray_origin, ray_direction, box_min, box_max)
     
     # Edge case: Ray misses bounding box
-    if t_min > t_max:
+    if t_min is None or t_min > t_max:
         return bg_color
     
     # 2. Initialize state
@@ -92,12 +94,7 @@ def gl_nerf_render(ray_origin, ray_direction, step_size, sample_count,
         sigma = get_volume_density(pos)
         
         # Calculate current and next optical depth
-        # x is the accumulated optical depth from t_min to t
-        x = -log(transmittance)
-        
-        # x_next is the accumulated optical depth from t_min to t + Delta_t
-        # Note: This assumes constant sigma over the step Delta_t for the 
-        # prediction of the crossing point.
+        x = -math.log(transmittance)
         x_next = x + step_size * sigma
         
         # Check if a quadrature point root lies within this coarse step
@@ -105,31 +102,14 @@ def gl_nerf_render(ray_origin, ray_direction, step_size, sample_count,
         
         if x < target_x and x_next >= target_x:
             # Calculate interpolation factor for the exact optical depth crossing
-            # We want to find t_cross such that optical_depth(t_cross) = target_x
-            # Linear interpolation in optical depth space:
-            # target_x = x + alpha * (x_next - x)
-            # alpha = (target_x - x) / (x_next - x)
-            # The position corresponds to t + alpha * step_size
-            # However, the source formula for possample is:
-            # o + (t + t_Laguerre * Delta_t - Delta_t) * d
-            # Let's map t_Laguerre to the interpolation factor.
-            # Source: t_Laguerre = (Lp[n] - x) / (x_next - x)
             t_laguerre = (target_x - x) / (x_next - x)
             
-            # Calculate sample position
-            # Source formula: o + (t + t_Laguerre * Delta_t - Delta_t) * d
-            # This simplifies to: o + (t - Delta_t + t_Laguerre * Delta_t) * d
-            # Which is: o + (t + (t_Laguerre - 1) * Delta_t) * d
-            # Note: This formula in the source [S1] seems to imply a specific 
-            # alignment. Standard linear interpolation would be:
-            # pos_sample = o + (t + t_laguerre * step_size) * ray_direction
-            # We follow the source [S1] exactly:
+            # Calculate sample position (matches source formula exactly)
             possample = ray_origin + (t + t_laguerre * step_size - step_size) * ray_direction
             
             # Query color and accumulate
             color = get_color(possample)
-            weight = lookup_weights[n]
-            ray_color += weight * color
+            ray_color = [ray_color[i] + lookup_weights[n] * color[i] for i in range(3)]
             
             # Increment sample counter
             n += 1
@@ -138,28 +118,27 @@ def gl_nerf_render(ray_origin, ray_direction, step_size, sample_count,
         t += step_size
         
         # Update transmittance for the coarse step
-        # T(t + Delta_t) = T(t) * exp(-sigma * Delta_t)
-        transmittance = transmittance * exp(-sigma * step_size)
+        transmittance = transmittance * math.exp(-sigma * step_size)
         
     # 4. Handle background contribution
     # Sum of remaining weights if loop broke early or if not all points were hit
     bg_weight = sum(lookup_weights[n:])
     
-    ray_color += bg_weight * bg_color
+    ray_color = [ray_color[i] + bg_weight * bg_color[i] for i in range(3)]
     
     return ray_color
 ```
 
 ### Parameters and Typical Values
-*   **$M$ (Sample Count)**: The number of quadrature points. The paper demonstrates results with $M=5$ and $M=10$ [S1]. Higher $M$ increases accuracy but also MLP calls.
-*   **$\Delta t$ (Step Size)**: The coarse sampling step. It must be small enough to ensure that the linear interpolation of optical depth accurately captures the crossing of the Laguerre roots. If $\Delta t$ is too large, the condition $x < Lp[n] \le x_{next}$ might be skipped or inaccurately interpolated. Not given in the sources.
-*   **$\mathbf{Lp}, \mathbf{Lw}$**: Pre-computed tables. For $M=5$, these are the roots and weights of the 5th degree Laguerre polynomial.
+*   **$M$ (Sample Count)**: The number of quadrature points [S1]. The paper demonstrates results with $M=5$ [S1]. Higher $M$ increases accuracy but also MLP calls [G].
+*   **$\Delta t$ (Step Size)**: The coarse sampling step [S1]. It must be small enough to ensure that the linear interpolation of optical depth accurately captures the crossing of the Laguerre roots [G]. Not given in the sources.
+*   **$\mathbf{Lp}, \mathbf{Lw}$**: Pre-computed tables [S1]. For $M=5$, these are the roots and weights of the 5th degree Laguerre polynomial [S1].
 
 ### Edge Cases and Pitfalls
 *   **Ray Miss**: If $t_{min} > t_{max}$, the ray does not intersect the scene, and the background color is returned immediately [S1].
-*   **Precision**: The interpolation relies on the assumption that optical depth changes linearly within the coarse step $\Delta t$. If the density $\sigma$ varies rapidly within $\Delta t$, the calculated $possample$ may be inaccurate, leading to artifacts. A smaller $\Delta t$ mitigates this but increases overhead [S1].
-*   **Early Termination**: If the ray exits the bounding box before all $M$ quadrature points are reached (i.e., $n < M$ when $t \ge t_{max}$), the remaining weights are assigned to the background color. This ensures energy conservation but may introduce bias if the background color differs significantly from the scene's tail [S1].
-*   **Optical Depth Monotonicity**: The method assumes optical depth increases monotonically with distance. This holds for standard volume rendering where $\sigma \ge 0$.
+*   **Precision**: The interpolation relies on the assumption that optical depth changes linearly within the coarse step $\Delta t$. If the density $\sigma$ varies rapidly within $\Delta t$, the calculated $possample$ may be inaccurate, leading to artifacts [G].
+*   **Early Termination**: If the ray exits the bounding box before all $M$ quadrature points are reached (i.e., $n < M$ when $t \ge t_{max}$), the remaining weights are assigned to the background color [S1].
+*   **Optical Depth Monotonicity**: The method assumes optical depth increases monotonically with distance. This holds for standard volume rendering where $\sigma \ge 0$ [G].
 
 ## Operating characteristics
 *   **Time Complexity**: $O(M \cdot K + N_{coarse})$, where $M$ is the number of quadrature points (MLP calls for color), $K$ is the cost of density queries (MLP calls for density), and $N_{coarse}$ is the number of coarse steps. Since $M$ is typically much smaller than the number of samples in standard NeRF (e.g., 5 vs 64), the number of MLP calls is drastically reduced. However, the coarse sampling loop still runs for every $\Delta t$ until all $M$ points are found or the ray exits.

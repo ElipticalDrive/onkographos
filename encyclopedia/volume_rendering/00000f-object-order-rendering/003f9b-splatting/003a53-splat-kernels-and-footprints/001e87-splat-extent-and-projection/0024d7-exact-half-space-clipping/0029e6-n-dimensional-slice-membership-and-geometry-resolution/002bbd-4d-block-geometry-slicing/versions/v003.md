@@ -1,0 +1,59 @@
+# 4D Block Geometry Slicing
+
+Also called: 4D cross-section rendering, Hyperplane block intersection
+
+## Overview
+4D Block Geometry Slicing renders a three-dimensional cross-section of a four-dimensional voxel world by intersecting 4D primitives with a 3D hyperplane [S1, unofficial]. It builds on [N-Dimensional Slice Membership and Geometry Resolution](4636-n-dimensional-slice-membership-and-geometry-resolution.md) by treating blocks as 4D primitives (4-balls or 4-boxes) rather than 3D cubes, allowing the slice geometry to change shape as the hyperplane rotates or translates through the fourth dimension [S1, unofficial].
+
+## How it works
+**Inputs:**
+- A 4D voxel world defined as a lattice of 4D primitives [S1, unofficial].
+- A 3D hyperplane defined by its orientation (rotation angles $\theta, \phi$) and position (distance $w$ along the fourth axis) [S1, unofficial].
+- A rendering mode flag `P` (boolean) [S1, unofficial].
+
+**Outputs:**
+- A 3D mesh representing the visible cross-section of the world [S1, unofficial].
+
+**Data Structures:**
+- **4D Primitive:** Defined by its center coordinates $(x, y, z, w)$, dimensions (for 4-boxes), and radius (for 4-balls) [S1, unofficial].
+- **3D Hyperplane:** Defined by normal vector and offset [S1, unofficial]. The camera is fixed in 3D space; the hyperplane moves or rotates relative to the static world [S1, unofficial].
+
+**Steps:**
+1. Identify the primitive type for each voxel (4-ball or 4-box) [S1, unofficial].
+2. Compute the intersection of each primitive with the 3D hyperplane to generate the visible cross-section geometry [S1, unofficial].
+3. Apply the rendering mode flag `P` to determine whether to output exact polygonal meshes or cubic approximations [S1, unofficial].
+4. Perform greedy meshing to merge adjacent faces where convexity is preserved [S1, unofficial].
+
+**Formulas:**
+- $r_{3D} = \sqrt{r^2 - d^2}$: Radius of the 3D spherical cross-section for a 4-ball, where $r$ is the 4D radius and $d$ is the distance from the 4D center to the hyperplane [S1, unofficial].
+- Visibility condition: A 4-ball is visible only if $d \le r$ [S1, unofficial].
+
+**Parameters:**
+- `P`: Toggles between rendering blocks as exact 4D cross-sections (polygons) or as cubes (approximation) [S1, unofficial].
+- `CLIP_TIME_OF_DAY`: Controls the time of day for capture clips. Default behavior cycles naturally; specific values pin the time [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision Loss in Translation:** Translation along the fourth axis ($w$) is not round-trip invariant due to floating-point precision [S1, unofficial]. Traveling from $w=0$ to $w=9$ and back to $w=0$ results in a difference of $9.77/255$ compared to the original frame [S1, unofficial]. Rotation, however, is byte-identical on round-trip [S1, unofficial].
+- **Degenerate Intersections:** If $d > r$ for a 4-ball, the block is empty [S1, unofficial]. For 4-boxes, if the hyperplane misses the box entirely, no geometry is generated [S1, unofficial].
+- **Polygon Complexity:** If the hyperplane rotation involves two planes (compound turn), cells become pentagons or hexagons [S1, unofficial]. These cannot be rendered as cubes and require accurate polygonal geometry [S1, unofficial].
+
+## Subtopics
+
+### 4D Voxel World Representation
+A representation where the world is a four-dimensional lattice [S1, unofficial]. The visible scene is a three-dimensional cross-section defined by a hyperplane [S1, unofficial]. The camera is fixed in 3D space; changing the view involves rotating or translating the hyperplane through the 4D world [S1, unofficial]. It is chosen when the goal is to visualize higher-dimensional spatial relationships without moving the observer [S1, unofficial]. A key pitfall is that translation along the fourth axis ($w$) is not round-trip invariant due to floating-point precision, whereas rotation is byte-identical on round-trip [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources. Greedy meshing is complicated by varying polygon angles, though convex set properties allow merging [S1, unofficial].
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** Demonstrated in a C++20 and OpenGL 4.1 voxel engine with live toggling of the `P` parameter and hyperplane rotation via scroll wheel [S1, unofficial].
+- **Scaling:** Polygon complexity increases with compound rotations; cubic approximation (`P` false) reduces rendering cost but sacrifices geometric accuracy [S1, unofficial].
+- **Strengths:** Provides exact geometric representation of 4D objects in 3D space; allows visualization of a fourth dimension as spatial traversal [S1, unofficial].
+- **Limitations:** Floating-point precision errors in $w$-axis translation; complex polygon generation for compound rotations; greedy meshing is non-trivial due to non-aligned faces [S1, unofficial].
+- **When to use:** When visualizing 4D data or simulating higher-dimensional spatial relationships [S1, unofficial].
+- **When not to use:** When performance is critical and approximate cubic rendering is sufficient, or when round-trip precision in $w$-axis translation is required [S1, unofficial].
+
+## Background
+Originating from a solo C++20 and OpenGL 4.1 voxel engine project by DanielWLiu07, this method demonstrates rendering a 3D cross-section of a 4D world [S1, unofficial]. It challenges the assumption that greedy meshing is impossible for such geometry, leveraging convex set properties [S1, unofficial]. The method highlights the difference between rotational and translational round-trip invariance in 4D slicing, noting that translation along the fourth axis is not round-trip invariant while rotation is byte-identical on round-trip [S1, unofficial].
+
+## Sources
+[S1] DanielWLiu07/voxel-engine, https://github.com/DanielWLiu07/voxel-engine, fetched 2026-10-26 (unofficial)

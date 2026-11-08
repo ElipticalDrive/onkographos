@@ -1,0 +1,101 @@
+# Blending Between Levels (Fast)
+Also called: blendFast
+
+## Overview
+Blending Between Levels (Fast) is an optimized method for computing the value at a query point $P$ in an adaptive volume grid by smoothly interpolating between different resolution levels. It solves the discontinuity problem inherent in level-selection by treating virtual cells as transparent and actual cells as opaque, allowing for a continuous transition between coarse and fine data. It sets itself apart from its sibling [Blending Between Levels (Naive)](2946-blending-between-levels-naive.md) by starting at the leaf level and blending both upwards and downwards to terminate early, whereas the naive method iterates from the coarsest level upwards. It improves upon [Finest Level Lerp](2945-finest-level-lerp.md) by incorporating contributions from coarser levels when the finest level is not fully opaque, ensuring continuity across level boundaries.
+
+## How it works
+The method computes a weighted average of interpolants from multiple levels. It assumes a hierarchical grid structure where cells at finer levels may be "virtual" (not explicitly stored, implying they are interpolated from coarser parents) or "leaf" (explicitly stored).
+
+**Inputs and Outputs:**
+- Input: Query point $P$ in 3D space.
+- Output: Blended value $f$ at $P$.
+
+**Data Structures:**
+- Grid levels $l \in [0, \text{MAX\_LEVEL}]$.
+- Dual cell $D$: The logical cell containing $P$ at a specific level.
+- Leaf cell $C$: The finest level cell containing $P$.
+- `lerp(P)`: Returns the interpolated value $(f_l, a_l)$ at point $P$ for the dual cell at the current level. $f_l$ is the value, $a_l$ is the opacity (1 if all vertices are actual/leaf, 0 if all are virtual, interpolated otherwise).
+- `lerpAlpha(P)`: Returns only the interpolated opacity $a_l$.
+
+**Steps:**
+1. **Find Leaf Level:** Identify the leaf cell $C$ containing $P$ and its level $C.l$.
+2. **Initialize:** Find the dual cell $D$ at level $C.l$ containing $P$. Compute the initial blended value $f = D.\text{lerp}(P)$.
+3. **Blend Towards Finer Levels:**
+   - Initialize $D' = D$.
+   - Loop level $l$ from $C.l + 1$ to $\text{MAX\_LEVEL}$:
+     - If all vertices of $D'$ are leaves, break the loop (no finer data exists or is relevant).
+     - Find dual cell $D'$ for level $l$.
+     - Get $(f_l, a_l)$ from $D'.\text{lerp}(P)$.
+     - Update $f = a_l \cdot f_l + (1 - a_l) \cdot f$.
+4. **Blend Towards Coarser Levels:**
+   - If any vertices in the initial dual cell $D$ are virtual:
+     - Compute $a = D.\text{lerpAlpha}(P)$.
+     - Update $f = f \cdot a$.
+     - Loop level $l$ from $C.l - 1$ down to $0$:
+       - Find dual cell $D'$ for level $l$.
+       - Update $f = f + (1 - a) \cdot D'.\text{lerp}(P)$.
+       - If all vertices in $D'$ exist (are leaves), break the loop.
+       - Update $a = a + (1 - a) \cdot D'.\text{lerpAlpha}(P)$.
+5. **Return:** Return $f$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def blend_fast(P):
+    # 1. Find leaf level, and lerp
+    C = find_leaf_cell(P)
+    D = find_dual_cell(C.l, P)
+    f = D.lerp(P)
+    
+    # 2. Blend towards finer levels
+    D_prime = D
+    for l in range(C.l + 1, MAX_LEVEL + 1):
+        if all_vertices_are_leaves(D_prime):
+            break
+        D_prime = find_dual_cell(l, P)
+        f_l, a_l = D_prime.lerp(P)
+        f = a_l * f_l + (1 - a_l) * f
+        
+    # 3. Blend towards coarser levels
+    if any_vertices_are_virtual(D):
+        a = D.lerp_alpha(P)
+        f = f * a
+        for l in range(C.l - 1, -1, -1):
+            D_prime = find_dual_cell(l, P)
+            f += (1 - a) * D_prime.lerp(P)
+            if all_vertices_exist(D_prime):
+                break
+            a += (1 - a) * D_prime.lerp_alpha(P)
+            
+    return f
+```
+
+**Parameters:**
+- `MAX_LEVEL`: The maximum depth of the adaptive grid hierarchy.
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The blending formula relies on the opacity $a$ being correctly interpolated. If $a$ is not computed correctly for virtual cells, the blending weights will be incorrect, leading to artifacts at level boundaries.
+- **Boundaries:** The method assumes that `find_dual_cell` correctly identifies the cell containing $P$ at any level.
+- **Degenerate Input:** If $P$ lies exactly on a boundary between levels, the virtual/leaf status of vertices determines the blending behavior. The method handles this by interpolating opacity.
+
+## Subtopics
+
+### Blending Between Levels (Naive)
+A continuous blending method that treats virtual cells as transparent (opacity 0) and actual cells as opaque (opacity 1). It blends interpolants from level $l$ and coarser levels using the interpolated opacity alpha. It starts from the coarsest level (0) and iterates upwards to MAX_LEVEL. If the opacity $a_l$ at a level is 0, the loop breaks. It is adaptive and continuous but expensive as it may process all levels. [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** The fast method is generally faster than the naive method because it starts at the leaf level and can terminate early if fully opaque/transparent levels are found. The naive method always iterates from level 0 upwards.
+- **Memory Complexity:** Depends on the storage of the adaptive grid. The method itself requires minimal additional memory.
+- **Measured Performance:** Not given in the sources.
+- **Strengths:** Continuous blending across level boundaries; efficient termination in homogeneous regions.
+- **Limitations:** More complex implementation than simple level selection; requires careful handling of virtual cells.
+- **When to use:** When continuous blending is required and performance is a concern, especially in regions with varying resolution.
+- **When not to use:** When simplicity is preferred and performance is not critical, or when the grid is uniform.
+
+## Background
+The method was introduced in the context of CPU volume rendering of adaptive mesh refinement data. It addresses the discontinuity in level selection by providing a smooth blending mechanism. The naive version was proposed first, followed by the optimized fast version. [S1, unofficial].
+
+## Sources
+[S1] CPU volume rendering of adaptive mesh refinement data, https://www.researchgate.net/publication/321321949_CPU_volume_rendering_of_adaptive_mesh_refinement_data, fetched 2026-10-26 (unofficial)

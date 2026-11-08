@@ -1,0 +1,194 @@
+# Dynamic Projection Mapping for Rotating Volumetric Display
+
+Also called: External Tracking of Rotating Objects, Handheld Volumetric Display Using Dynamic Projection Mapping
+
+## Overview
+This method renders layered volumetric images by projecting optical patterns onto the surface of a manually rotated object composed of fan-shaped disks, using external high-speed cameras for tracking and a high-speed projector for rendering [S1]. It enables users to freely move and rotate the physical display while maintaining a stable perceived image, distinguishing itself from spiral swept-volume approaches by providing discrete physical depth planes, albeit with lower depth resolution [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Target images for each layer ($T_i$), projector calibration matrix ($P$), real-time pose data of the rotating object (position, orientation, rotation angle $\alpha$).
+*   **Outputs:** Projected image frames on the rotating fan blades.
+
+**Data Structures:**
+*   **Rotating Object:** A stack of $l$ disks. Each disk has $n=3$ fan-shaped blades.
+    *   Blade radius: 50 mm [S1].
+    *   Blade thickness: 3 mm [S1].
+    *   Interval between adjacent disks: 10 mm [S1].
+    *   Angular offset between disks: $360^\circ / (3 \times l)$ [S1].
+*   **Tracking Markers:** Three retroreflective markers attached to the frontmost disk [S1]:
+    1.  One at the geometric center.
+    2.  Two along the bisector of the central angle of two blades, at distances 47 mm (outer) and 23.5 mm (inner) from the center [S1].
+
+**Numbered Steps:**
+1.  **Tracking:** Use external high-speed cameras (e.g., OptiTrack PrimeX 13W1) to detect the marker positions [S1]. Calculate the object's model matrix $M$ and the rotation angle $\alpha$ [°] around the axis of rotation using the tracking API (e.g., OptiTrack Motive) [S1].
+2.  **Layer Rotation:** For each layer $i$ (where $i=1$ is the frontmost layer) in an assembly with $l$ layers, rotate the target image $T_i$ by an angular offset of $\frac{360(i-1)}{3 \times l}$ [°] relative to the frontmost layer [S1].
+3.  **Rotation Compensation:** Counteract the physical rotation of the object by rotating the resulting image by $-\alpha$ [°] so that the perceived orientation remains constant [S1].
+4.  **Coordinate Transformation:** Calculate the homogeneous coordinates $p_p$ on the projector's frame for a point $p_r$ on the rotating object using the projector matrix $P$ and the inverse model matrix $M^{-1}$:
+    $$ p_p = P M^{-1} p_r $$
+    [S1]
+5.  **Projection Delay Compensation:** Measure the average projection delay $d_a$ [ms] (typically ~12.5 ms) [S1]. Calculate the predicted projection deviation $\Delta a_p$ [°] based on the current rotational speed $s$ [RPM]:
+    $$ \Delta a_p = \frac{360 \times d_a}{s \times 60000} $$
+    [S1]
+    Apply this angular offset to the projected pattern to align the image with the physical blade position at the time of light emission [S1].
+6.  **Rendering:** Render the transformed and compensated image onto the projector frame and project it onto the rotating blades [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_frame(target_images, projector_matrix, model_matrix, rotation_angle, rotational_speed, avg_delay_ms):
+    """
+    Renders the projection frame for a rotating volumetric display.
+    
+    Args:
+        target_images: List of images for each layer, indexed 0 to l-1.
+        projector_matrix: 4x4 calibration matrix P.
+        model_matrix: 4x4 object model matrix M.
+        rotation_angle: Current rotation angle alpha in degrees.
+        rotational_speed: Rotational speed s in RPM.
+        avg_delay_ms: Average measured projection delay d_a in ms.
+        
+    Returns:
+        projected_frame: The image to be sent to the projector.
+    """
+    num_layers = len(target_images)
+    num_blades = 3
+    projected_frame = None
+    
+    # Step 2 & 3: Layer rotation and compensation
+    # Note: In a real implementation, this generates a composite or handles per-layer projection.
+    # The source describes generating a projection frame for the surface.
+    # We assume the projector covers the visible blades or the system handles layer selection.
+    # Based on S1, the "projection frame" is rendered by processing target images for each layer.
+    
+    for i in range(num_layers):
+        # Get target image for layer i (1-based index in formula, 0-based here)
+        Ti = target_images[i]
+        
+        # Calculate angular offset for layer i relative to frontmost
+        # Formula: 360 * (i) / (3 * l) for 0-based index i? 
+        # Source says: i-th layer rotated by 360(i-1)/(3*l) relative to frontmost.
+        # If i=1 is frontmost, offset is 0.
+        # Let's use 1-based indexing for formula clarity, then map.
+        layer_index_1 = i + 1
+        layer_offset_deg = (360 * (layer_index_1 - 1)) / (num_blades * num_layers)
+        
+        # Rotate target image by layer offset
+        Ti_rotated = rotate_image(Ti, layer_offset_deg)
+        
+        # Step 3: Counteract physical rotation
+        # Rotate by -alpha
+        Ti_compensated = rotate_image(Ti_rotated, -rotation_angle)
+        
+        # Step 5: Projection Delay Compensation
+        # Calculate predicted deviation
+        delta_ap_deg = (360 * avg_delay_ms) / (rotational_speed * 60000)
+        
+        # Apply additional rotation to compensate for delay
+        # The source implies this is applied to the projected markers/image
+        Ti_final = rotate_image(Ti_compensated, delta_ap_deg)
+        
+        # Step 4: Coordinate Transformation
+        # This step maps the image content to the projector coordinates.
+        # In a rasterizer, this is done via the projection matrix P and model matrix M.
+        # For the purpose of generating the 'projected_frame' buffer, 
+        # we assume the renderer handles the P * M^-1 mapping internally or 
+        # we are generating the texture for a specific plane.
+        # Since the output is a single projector frame, and multiple layers exist,
+        # the source implies the projector projects the pattern onto the blades.
+        # If the projector covers all blades, they are composited. If sequential, 
+        # the source doesn't specify multiplexing. However, S1 says "projecting a specific 
+        # optical pattern... onto the surface".
+        # We will assume the function returns the composite or the specific layer's 
+        # transformed texture if the system handles layer selection externally.
+        # Given the "projection frame" singular, and discrete layers, 
+        # it is likely the projector displays the composite of all visible layers 
+        # or the system relies on the persistence of vision/rotation.
+        # However, S1 calculates pp = P M^-1 pr. This is a point mapping.
+        # The pseudocode below represents the generation of the image content 
+        # before rasterization into the projector buffer.
+        
+        if projected_frame is None:
+            projected_frame = Ti_final
+        else:
+            # Composite layers (simple alpha blend or overwrite depending on occlusion)
+            # S1 does not specify occlusion handling between layers in the projection.
+            # It states "discrete physical depth planes".
+            # We assume simple addition or the renderer handles depth.
+            projected_frame = composite(projected_frame, Ti_final)
+
+    return projected_frame
+
+def rotate_image(image, angle_deg):
+    """Rotates an image by the specified angle in degrees."""
+    # Standard image rotation implementation
+    pass
+
+def composite(img1, img2):
+    """Composites two images. Implementation depends on alpha/occlusion rules."""
+    # Not specified in sources. [G] Assuming simple overlay or alpha blend.
+    pass
+```
+
+**Parameters:**
+*   Number of blades per disk: 3 [S1].
+*   Blade radius: 50 mm [S1].
+*   Blade thickness: 3 mm [S1].
+*   Interval between adjacent disks: 10 mm [S1].
+*   Marker distance from center (outer): 47 mm [S1].
+*   Marker distance from center (inner): 23.5 mm [S1].
+*   Average projection delay: 12.5 ms (SD 1.30 ms) at 600–1200 RPM [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Deceleration:** Because the rotor is manually driven, contact with external objects causes rapid deceleration and stopping, requiring robust tracking updates [S1].
+*   **Precision:** The system achieves a mean apparent projection delay of 0.147 ms (SD 1.02 ms) after compensation, compared to 12.5 ms before [S1]. Failure to compensate for delay results in visible misalignment [S1].
+*   **Depth Resolution:** The discrete physical planes result in lower depth resolution compared to continuous swept-volume methods [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not explicitly given. Dependent on camera frame rate, tracking API latency, and projector refresh rate.
+*   **Memory Complexity:** Not explicitly given.
+*   **Measured Performance:** Average projection delay of 12.5 ms (SD 1.30 ms) was measured at rotational speeds between 600 and 1200 RPM [S1]. After compensation, the mean apparent projection delay was 0.147 ms (SD 1.02 ms, n=31) [S1].
+*   **Hardware:** Implemented with three high-speed cameras (PrimeX 13W1), Intel Core i7-13700KF CPU, NVIDIA GeForce RTX3080 GPU, and a high-speed projector (DynaFlash2) [S1].
+*   **Strengths:** Allows users to freely move and rotate the object; no embedded rotation mechanism or light-emitting elements in the object [S1].
+*   **Limitations:** Lower depth resolution compared to spiral swept-volume approaches [S1]. Manual rotation requires user supervision and can stop abruptly [S1].
+
+## Background
+*   **Origin:** The method was introduced in the paper "Mobile Volu-Me: Handheld Volumetric Display Using Dynamic Projection Mapping onto Rotating Fans" [S1].
+*   **History:** It builds on dynamic projection mapping technology, applying it to a handheld, manually rotated fan structure to enable portable volumetric displays [S1].
+*   **Usage:** Used in prototypes with 3D-printed PLA fan assemblies (3-layer and 5-layer configurations) for user studies on perceived quality and depth representation [S1].
+
+## Subtopics
+
+### [Galvanometer Scanner Volume Rendering](5277-galvanometer-scanner-volume-rendering.md)
+Uses mirrors to sweep a light sheet, offering continuous depth but requiring complex scanning mechanics.
+
+### [Drawing Space Separation (DSS)](5290-drawing-space-separation-dss.md)
+Separates the drawing space from the viewing space, allowing interaction without occlusion.
+
+### [Dual-Path Holographic Laser Rendering](5627-dual-path-holographic-laser-rendering.md)
+Uses holography for high-resolution volumetric displays.
+
+### [Multi-view Lenticular Volume Rendering](6636-multi-view-lenticular-volume-rendering.md)
+Uses lenticular lenses to direct views to different angles.
+
+### [Photophoretic-Trap Volumetric Display](6753-photophoretic-trap-volumetric-display.md)
+Traps particles in air using light to create the volume.
+
+### [Holographic Computer-Generated Holography (CGH) Calculation](6884-holographic-computer-generated-holography-cgh-calculation.md)
+Calculates holograms for volumetric display.
+
+### [Quantum-Dot-Based Volumetric Display](6943-quantum-dot-based-volumetric-display.md)
+Uses quantum dots for emission.
+
+### [Chromatic Dispersion Volumetric Display](7367-chromatic-dispersion-volumetric-display.md)
+Uses chromatic dispersion to create depth.
+
+### [Material-Based Volumetric Emission](7614-material-based-volumetric-emission.md)
+Uses materials that emit light in 3D.
+
+### [Rotational Swept-Screen Projection](8589-rotational-swept-screen-projection.md)
+Sweeps a screen continuously, offering continuous depth but potentially lower resolution per plane.
+
+## Sources
+[S1] Mobile Volu-Me: Handheld Volumetric Display Using Dynamic Projection Mapping onto Rotating Fans, https://doi.org/10.1145/3822518.3830063, fetched 2026-11-01
