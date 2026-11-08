@@ -1,0 +1,148 @@
+# Numerical Gradient Eikonal Loss
+
+Also called: Numerical Gradient Computation, Numerical gradients for higher-order derivatives
+
+## Overview
+Numerical Gradient Eikonal Loss is a regularization technique used in differentiable volume rendering with hash-encoded Signed Distance Functions (SDFs) to enforce the eikonal equation $\|\nabla f(\mathbf{x})\|_2 = 1$ [S1]. It addresses the "locality problem" inherent in analytical gradients of hash encodings, where non-differentiable rounding operations restrict back-propagation updates to only the local hash grid cells involved in trilinear interpolation [S1]. By computing surface normals via numerical finite differences, the method distributes optimization updates beyond the immediate local grid cell, acting as a smoothed gradient that ensures non-local smoothness and consistent surface reconstruction without requiring auxiliary networks [S1].
+
+## How it works
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   $\mathbf{x}_i$: A 3D point in canonical space, $\mathbf{x}_i = (x_i, y_i, z_i)$ [S1].
+    *   $f(\cdot)$: The neural network function predicting the SDF value, which internally uses a hash encoding $\gamma$ [S1].
+    *   $\epsilon$: The step size for numerical differentiation [S1].
+    *   $N$: The total number of sampled points in the batch [S1].
+*   **Outputs**:
+    *   $\mathcal{L}_{\text{eik}}$: The scalar eikonal loss value [S1].
+    *   Gradients $\frac{\partial \mathcal{L}_{\text{eik}}}{\partial \text{hash\_params}}$: Back-propagated gradients that update the hash grid entries [S1].
+
+### Data Structures
+The method operates on the standard hash encoding structure used in neural surface reconstruction [S1].
+*   **Hash Grid**: A collection of learnable feature vectors. Each 3D coordinate maps to one or more hash entries depending on the resolution level [S1].
+*   **SDF Prediction**: The output of the network $f(\mathbf{x})$, derived from the interpolated features of the hash grid at location $\mathbf{x}$ [S1].
+
+### Algorithm Steps
+
+1.  **Initialize Step Size**: Set the numerical gradient step size $\epsilon$. In practice, $\epsilon$ is initialized to the size of the coarsest hash grid cell and is exponentially decreased to match the resolution of finer hash grids as optimization progresses [S1].
+2.  **Sample Perturbed Points**: For each input point $\mathbf{x}_i$, compute six additional points by perturbing $\mathbf{x}_i$ along the positive and negative directions of the x, y, and z axes by $\epsilon$ [S1].
+    *   $\mathbf{x}_{i, x+} = \mathbf{x}_i + [\epsilon, 0, 0]$
+    *   $\mathbf{x}_{i, x-} = \mathbf{x}_i - [\epsilon, 0, 0]$
+    *   $\mathbf{x}_{i, y+} = \mathbf{x}_i + [0, \epsilon, 0]$
+    *   $\mathbf{x}_{i, y-} = \mathbf{x}_i - [0, \epsilon, 0]$
+    *   $\mathbf{x}_{i, z+} = \mathbf{x}_i + [0, 0, \epsilon]$
+    *   $\mathbf{x}_{i, z-} = \mathbf{x}_i - [0, 0, \epsilon]$
+3.  **Evaluate SDF**: Compute the SDF values for the original point and all six perturbed points using the hash encoding and network $f$ [S1].
+    *   $v_0 = f(\mathbf{x}_i)$
+    *   $v_{x+} = f(\mathbf{x}_{i, x+})$, $v_{x-} = f(\mathbf{x}_{i, x-})$
+    *   $v_{y+} = f(\mathbf{x}_{i, y+})$, $v_{y-} = f(\mathbf{x}_{i, y-})$
+    *   $v_{z+} = f(\mathbf{x}_{i, z+})$, $v_{z-} = f(\mathbf{x}_{i, z-})$
+4.  **Compute Numerical Gradient**: Calculate the components of the gradient $\nabla f(\mathbf{x}_i)$ using central finite differences [S1]:
+    $$
+    \nabla_x f(\mathbf{x}_i) = \frac{v_{x+} - v_{x-}}{2\epsilon}
+    $$
+    $$
+    \nabla_y f(\mathbf{x}_i) = \frac{v_{y+} - v_{y-}}{2\epsilon}
+    $$
+    $$
+    \nabla_z f(\mathbf{x}_i) = \frac{v_{z+} - v_{z-}}{2\epsilon}
+    $$
+    Let $\mathbf{g}_i = [\nabla_x f(\mathbf{x}_i), \nabla_y f(\mathbf{x}_i), \nabla_z f(\mathbf{x}_i)]^T$ [S1].
+5.  **Compute Eikonal Loss**: Calculate the loss for the batch based on the deviation of the gradient norm from 1 [S1]:
+    $$
+    \mathcal{L}_{\text{eik}} = \frac{1}{N} \sum_{i=1}^N (\|\mathbf{g}_i\|_2 - 1)^2
+    $$
+    where $\|\mathbf{g}_i\|_2 = \sqrt{\nabla_x f(\mathbf{x}_i)^2 + \nabla_y f(\mathbf{x}_i)^2 + \nabla_z f(\mathbf{x}_i)^2}$ [S1].
+6.  **Back-Propagation**: Perform double backward pass (second-order derivative) on $\mathcal{L}_{\text{eik}}$ with respect to the hash encoding parameters [S1]. This propagates gradients to the hash entries accessed by $\mathbf{x}_i$ and its six neighbors, effectively smoothing the update across the local neighborhood [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def numerical_gradient_eikonal_loss(f, x_batch, epsilon):
+    """
+    Computes the Eikonal loss using numerical gradients for a batch of points.
+    
+    Args:
+        f: Neural network function (SDF predictor with hash encoding).
+        x_batch: Tensor of shape (N, 3) containing sampled 3D points.
+        epsilon: Float, step size for numerical differentiation.
+        
+    Returns:
+        loss: Scalar tensor, the computed eikonal loss.
+    """
+    N = x_batch.shape[0]
+    
+    # Define perturbation vectors
+    eps_x = torch.tensor([epsilon, 0.0, 0.0])
+    eps_y = torch.tensor([0.0, epsilon, 0.0])
+    eps_z = torch.tensor([0.0, 0.0, epsilon])
+    
+    # Sample perturbed points
+    # x_batch shape: (N, 3)
+    x_plus_x = x_batch + eps_x
+    x_minus_x = x_batch - eps_x
+    x_plus_y = x_batch + eps_y
+    x_minus_y = x_batch - eps_y
+    x_plus_z = x_batch + eps_z
+    x_minus_z = x_batch - eps_z
+    
+    # Evaluate SDF for all points
+    # f returns shape (N,)
+    f_orig = f(x_batch)
+    f_plus_x = f(x_plus_x)
+    f_minus_x = f(x_minus_x)
+    f_plus_y = f(x_plus_y)
+    f_minus_y = f(x_minus_y)
+    f_plus_z = f(x_plus_z)
+    f_minus_z = f(x_minus_z)
+    
+    # Compute numerical gradient components
+    grad_x = (f_plus_x - f_minus_x) / (2.0 * epsilon)
+    grad_y = (f_plus_y - f_minus_y) / (2.0 * epsilon)
+    grad_z = (f_plus_z - f_minus_z) / (2.0 * epsilon)
+    
+    # Compute gradient norm
+    grad_norm = torch.sqrt(grad_x**2 + grad_y**2 + grad_z**2)
+    
+    # Compute Eikonal loss: mean squared error of (norm - 1)
+    loss = torch.mean((grad_norm - 1.0)**2)
+    
+    return loss
+```
+
+### Parameters
+*   **$\epsilon$ (Step Size)**: Controls the resolution and amount of recovered details. It determines the spatial extent over which the gradient is averaged. A larger $\epsilon$ enforces smoothness at a coarser scale, while a smaller $\epsilon$ captures finer details but risks noise if the hash grid is too fine [S1].
+    *   *Typical Value/Strategy*: Initialized to the size of the coarsest hash grid cell. It is exponentially decreased throughout the optimization process to match the activation of finer hash grid resolutions [S1].
+
+### Edge Cases and Pitfalls
+*   **Locality of Analytical Gradients**: Analytical gradients of hash encoding with trilinear interpolation are discontinuous across space because the rounding operations $\lfloor \cdot \rfloor$ and $\lceil \cdot \rceil$ used to find voxel grid corners are non-differentiable [S1]. This limits back-propagation to only the locally sampled hash entries, preventing non-local smoothness [S1]. Numerical gradients solve this by averaging over a neighborhood [S1].
+*   **Detail Loss with Large $\epsilon$**: If $\epsilon$ is too large relative to the current hash grid resolution, geometric details may be smoothed out or lost [S1].
+*   **Convergence Issues**: If all hash grids are activated from the start, fine grids may need to "unlearn" coarse optimization patterns. If optimization converges prematurely with a large $\epsilon$, details may be lost. Progressive activation of hash grids is recommended alongside the decreasing $\epsilon$ schedule [S1].
+*   **Computational Cost**: Requires 6 additional SDF evaluations per point, increasing memory and compute usage compared to analytical gradients [S1].
+
+## Operating characteristics
+
+*   **Time Complexity**: $O(N)$, where $N$ is the number of sampled points. However, the constant factor is significantly higher than analytical gradients due to the 6 additional forward passes required for finite differences.
+*   **Memory Complexity**: $O(N)$ for storing intermediate SDF values and gradients during the backward pass.
+*   **Strengths**:
+    *   Solves the locality problem of hash encoding gradients, ensuring updates propagate to non-local hash cells [S1].
+    *   Acts as a smoothed version of analytical gradients, improving surface continuity [S1].
+    *   Does not require additional networks or teacher-student curriculum approaches [S1].
+*   **Limitations**:
+    *   Higher computational overhead due to multiple SDF evaluations.
+    *   Requires careful scheduling of $\epsilon$ to balance smoothness and detail preservation [S1].
+*   **When to Use**: Use when optimizing hash-encoded SDFs where surface normal consistency and non-local smoothness are critical, and analytical gradients result in noisy or discontinuous surfaces due to hash grid locality [S1].
+*   **When Not to Use**: Avoid if computational resources are extremely limited and the hash grid resolution is low enough that analytical gradients do not exhibit severe locality artifacts.
+
+## Background
+
+*   **Origin**: The method was introduced in the paper "Neuralangelo: High-Fidelity Neural Surface Reconstruction" [S1].
+*   **Context**: It was developed to address specific limitations of hash encoding in neural surface reconstruction, particularly the discontinuity of analytical gradients caused by trilinear interpolation and non-differentiable rounding operations [S1].
+*   **Development**: Prior approaches, such as teacher-student curriculum methods, attempted to smooth normals but still suffered from the locality issue of analytical gradients in hash encodings [S1]. Numerical gradients provided a simpler, network-free solution to distribute back-propagation updates [S1].
+*   **Usage**: It is a key component in high-fidelity neural surface reconstruction pipelines that use hash-based neural fields, such as Neuralangelo [S1].
+
+## Sources
+
+[S1] Neuralangelo: High-Fidelity Neural Surface Reconstruction, https://doi.org/10.1109/cvpr52729.2023.00817, fetched 2026-10-26

@@ -3,72 +3,92 @@
 Also called: Customization Volume Integration in Ray Casting, Position-dependent Parameter Modification
 
 ## Overview
-Customization Volume Integration is a method for applying position-dependent modifications to visualization parameters within a direct volume ray casting pipeline [S1]. It solves the problem of static, global transfer function settings by allowing spatially varying adjustments (e.g., local gamma correction) via a secondary "customization volume" [S1]. Unlike sibling methods that modify the integrand's physical model (e.g., TVAM for polymerization or Cinematic Rendering for light transport), this method operates as a post-sampling, pre-transfer-function modifier, requiring only minor pipeline changes [S1, Parent].
+Customization Volume Integration is a method that integrates a pre-computed volume into the direct volume ray casting pipeline to apply position-dependent modifications to visualization parameters, such as gamma correction of intensity values [S1]. It differs from standard ray casting by introducing an auxiliary data structure (the customization volume) that modulates the input data before classification, allowing spatially varying adjustments to the rendering appearance [S1].
 
 ## How it works
-**Inputs and Outputs:**
-*   **InputVolume:** The primary scalar volume dataset to be visualized.
-*   **CustomizationVolume:** A pre-computed volume containing position-dependent visualization parameters (e.g., gamma values).
-*   **Output:** The final rendered image with spatially adapted intensity mapping.
+**Inputs and Outputs**
+*   **InputVolume**: The primary scalar volume data to be visualized.
+*   **CustomizationVolume**: A pre-computed volume containing position-dependent visualization parameters (e.g., gamma values).
+*   **Output**: The final rendered image with position-dependent parameter modifications applied.
 
-**Data Structures:**
-*   **CustomizationVolume:** Typically stored as a 3D grid. The sources note that resolution changes between $32^3$ and $128^3$ have negligible performance impact on rendering, though higher resolutions increase computational complexity for the pre-computation phase (e.g., Voronoi interpolation) [S1].
-*   **Helper Function:** `getValue(volume, position)` returns the value stored in the volume at the given position using linear filtering [S1].
+**Data Structures**
+*   **CustomizationVolume**: A 3D grid of scalar values. The resolution can vary (e.g., $32^3$ to $128^3$) [S1]. The values represent the modification parameter (e.g., gamma) for each spatial location [S1].
 
-**Algorithm Steps:**
-1.  Pass both `InputVolume` and `CustomizationVolume` to the rendering shader (e.g., ray-casting kernel) [S1].
-2.  Iterate through the ray samples from `ray.begin` to `ray.end` [S1].
-3.  Fetch the intensity value from the `InputVolume` at the current sampling position:
-    $$ I_{raw} = \text{getValue}(\text{InputVolume}, \text{position}) $$
-4.  Fetch the customization parameter (e.g., gamma) from the `CustomizationVolume` at the same position:
-    $$ P = \text{getValue}(\text{CustomizationVolume}, \text{position}) $$
-5.  Apply the modification to the intensity. In the standard example, this is a power function for gamma correction:
-    $$ I_{modified} = I_{raw}^P $$
-    *Note: This step assumes $I_{raw}$ is normalized to the range $[0, 1]$ to justify the gamma operation [S1].*
-6.  Apply the standard transfer function to the modified intensity:
-    $$ C = \text{applyTransFunc}(I_{modified}) $$
-7.  Proceed with standard compositing (accumulation) [S1].
+**Numbered Steps**
+1.  Pass the `CustomizationVolume` to the rendering shader (e.g., GPU kernel) alongside the `InputVolume` [S1].
+2.  For each ray sample position along the ray:
+    a. Fetch the intensity value from the `InputVolume` at the current sampling position using linear filtering [S1].
+    b. Fetch the visualization parameter (e.g., gamma) from the `CustomizationVolume` at the same sampling position using linear filtering [S1].
+    c. Apply the fetched parameter to the intensity value. For gamma correction, the operation is $intensity = pow(intensity, \gamma)$, where $\gamma$ is the fetched value [S1].
+    d. Proceed with the standard transfer function classification and compositing steps [S1].
 
-**Pseudocode:**
+**Formulas**
+*   **Gamma Correction**:
+    $$ I_{modified} = I_{input}^{\gamma} $$
+    Where:
+    *   $I_{input}$ is the intensity value fetched from `InputVolume`.
+    *   $\gamma$ is the parameter value fetched from `CustomizationVolume`.
+    *   $I_{modified}$ is the adjusted intensity passed to the transfer function [S1].
+    *   Note: The source specifies that $I_{input}$ is assumed to be in the range $[0, 1]$ for this formula to be valid [S1].
+
+**Parameters**
+*   **Intensity Range**: The input intensity values should be normalized to $[0, 1]$ to justify the gamma correction operation [S1].
+*   **Customization Volume Resolution**: Typical resolutions tested are $32^3$ and $128^3$ [S1].
+
+**Edge Cases and Pitfalls**
+*   **Performance Impact**: The additional lookups and computations (e.g., power function) reduce rendering performance. The impact depends on the number of samples and the complexity of the customization computation [S1].
+*   **Memory Bottleneck**: For large out-of-core volume datasets, the memory transfer bottleneck to the GPU may make the performance impact of the customization step negligible [S1].
+*   **Resolution Trade-off**: Changing the customization volume resolution between $32^3$ and $128^3$ has no significant impact on rendering performance. However, higher resolutions increase computational complexity for Voronoi/interpolation calculations during the pre-computation phase, diminishing interactivity when adjusting seed points. Mitigation: Use lower resolution for interactive customization and higher resolution for final rendering [S1].
+
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Algorithm 3: Ray-casting loop with customization volume integration
+# Algorithm 3: Pseudocode of a ray-casting loop for volume rendering
+# including the required modifications to support customization volume.
 # Input: InputVolume, CustomizationVolume
-# Helper: getValue(volume, position) returns linearly filtered value
+# Helper: getValue(volume, position) returns the value stored in the volume
+#         at the given position with linear filtering.
+# Helper: applyTransFunc(intensity) returns the color/opacity based on intensity.
 
-for position in ray_samples(ray.begin, ray.end):
-    # 1. Fetch raw intensity from input volume
-    intensity = getValue(InputVolume, position)
+def ray_casting_loop(ray_begin, ray_end, InputVolume, CustomizationVolume):
+    color_accumulator = vec4(0.0)
+    alpha_accumulator = 0.0
     
-    # 2. Fetch customization parameter (e.g., gamma) from customization volume
-    gamma = getValue(CustomizationVolume, position)
-    
-    # 3. Apply position-dependent modification
-    # Note: intensity is assumed to be in [0, 1] range
-    intensity = pow(intensity, gamma)
-    
-    # 4. Apply transfer function to modified intensity
-    color = applyTransFunc(intensity)
-    
-    # 5. Standard compositing step (e.g., front-to-back alpha blending)
-    # ... (standard accumulation logic from parent article)
+    for position from ray_begin to ray_end:
+        # Regular code before modification
+        # ...
+        
+        # 1. Fetch intensity from input volume
+        intensity = getValue(InputVolume, position)
+        
+        # 2. Fetch customization parameter (e.g., gamma)
+        gamma = getValue(CustomizationVolume, position)
+        
+        # 3. Apply modification
+        # Note: intensity is assumed to be in [0, 1]
+        intensity = pow(intensity, gamma)
+        
+        # 4. Apply transfer function
+        color = applyTransFunc(intensity)
+        
+        # 5. Regular compositing code
+        # ...
+        # color_accumulator += color * alpha * (1.0 - alpha_accumulator)
+        # alpha_accumulator += alpha * (1.0 - alpha_accumulator)
+        
+    return color_accumulator
 ```
 
-**Parameters and Edge Cases:**
-*   **Intensity Range:** The example implementation requires input intensity values to be in the range $[0, 1]$ [S1].
-*   **Filtering:** Linear filtering is used for lookups in both volumes [S1].
-*   **Pre-computation Pitfall:** If the customization volume is generated via Voronoi interpolation (e.g., from seed points), higher resolutions ($>128^3$) increase the computational cost of the pre-processing step, potentially reducing interactivity when adjusting seed points [S1]. Mitigation involves using lower resolution for interactive adjustment and higher resolution for final rendering [S1].
-
 ## Operating characteristics
-*   **Performance Impact:** The method introduces additional memory lookups and arithmetic operations (e.g., power function) per sample, reducing overall rendering performance [S1].
-*   **Scaling:** For large out-of-core volume datasets, the bottleneck is typically memory transfer to the GPU, making the relative performance impact of the customization step negligible [S1].
-*   **Resolution Sensitivity:** Changing the resolution of the `CustomizationVolume` between $32^3$ and $128^3$ has no significant impact on the *rendering* performance, but higher resolutions increase the complexity of the *pre-computation* (interpolation/Voronoi) [S1].
-*   **Strengths:** Requires only minor modifications to existing rendering pipelines; allows for intuitive, spatially varying control of visualization parameters [S1].
-*   **Limitations:** Adds computational overhead per sample; requires pre-computation of the customization volume if it is not manually authored [S1].
+*   **Time Complexity**: Adds $O(1)$ overhead per sample for the additional lookup and parameter application (e.g., power function) [S1].
+*   **Memory Complexity**: Requires additional memory for the `CustomizationVolume` [S1].
+*   **Performance**: The performance impact is generally small for large out-of-core datasets where memory transfer is the bottleneck [S1]. However, for smaller datasets or high sample counts, the overhead is measurable [S1].
+*   **Strengths**: Allows spatially varying adjustments to visualization parameters without modifying the core transfer function logic. Simple integration into existing pipelines [S1].
+*   **Limitations**: Requires pre-computation of the customization volume. Performance degrades if the customization computation is complex or if the customization volume resolution is very high during interactive phases [S1].
 
 ## Background
-The method was introduced in the context of interactive volume rendering to allow users to adjust classification parameters (like gamma) locally rather than globally [S1]. It builds on the standard direct volume ray casting framework [Parent].
+The method was introduced in the paper "Interactive Position-dependent Customization of Transfer Function Classification Parameters in Volume Rendering" [S1]. It addresses the need for flexible, position-dependent control over visualization parameters in volume rendering, such as gamma correction, which cannot be easily achieved with global transfer functions alone [S1].
 
 ## Sources
 [S1] Interactive Position-dependent Customization of Transfer Function Classification Parameters in Volume Rendering, https://doi.org/10.2312/vcbm.20151211, fetched 2026-10-29

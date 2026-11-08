@@ -1,177 +1,268 @@
 # Adjoint Method
 
-Also called: Adjoint Differentiation, Reverse mode differentiation, Backward-Mode Differentiation, Backward-mode Automatic Differentiation
+Also called: Reverse-Mode AD, Adjoint Differentiation, Reverse mode differentiation, Backward-Mode Differentiation, Reverse-mode automatic differentiation, Backward-mode Automatic Differentiation
 
 ## Overview
-The Adjoint Method is a technique for computing gradients of a volume rendering loss with respect to input parameters (such as transfer function, volume density, camera, or step size) by propagating adjoint variables backward through the rendering algorithm [S1][S3, unofficial]. It solves the problem of differentiating the rendering integral by evaluating the chain rule from left to right (output to input), which is equivalent to backpropagation [S1][S3, unofficial]. Unlike Forward-Mode Automatic Differentiation, which scales linearly with the number of parameters, the Adjoint Method has computational complexity largely constant in the number of parameters, making it preferable for optimizing many parameters like the transfer function [S1][S3, unofficial]. This method operates within the framework of [Differentiable volume rendering](43-differentiable-volume-rendering.md) [S1].
+The Adjoint Method is a technique for computing gradients in differentiable volume rendering by propagating adjoint variables (derivatives of the final output with respect to current variables) backward through the rendering algorithm, effectively evaluating the chain rule from output to input [S2]. It solves the problem of efficiently computing gradients with respect to a large number of input parameters (such as transfer function values or volume density fields) where the output dimension (pixel colors) is low [S1][S4, unofficial]. Unlike the Forward Method, which scales with the number of parameters, the Adjoint Method's computational complexity is largely constant with respect to the number of parameters, making it the preferred choice for optimizing high-dimensional parameters like transfer functions [S4, unofficial]. However, it typically requires storing intermediate states from the forward pass, leading to high memory consumption unless optimized with techniques like the Inversion Trick [S2].
 
 ## How it works
+The method consists of two distinct phases: a forward pass to compute the rendered image and store necessary intermediate variables, and a backward pass to propagate gradients from the loss function back to the input parameters.
+
 **Inputs and Outputs:**
-*   **Inputs:** The adjoint of the final output $\hat{x}_{\text{out}}$ (typically initialized to 1 or the gradient of the loss w.r.t. the output), and the forward pass variables (intermediate states) required for the backward pass [S1][S3, unofficial].
-*   **Outputs:** The gradients (adjoints) with respect to all input parameters: $\hat{\Delta t}$, $\hat{\text{cam}}$, $\hat{T}$, $\hat{V}$ [S3, unofficial].
+*   **Inputs:** Step size $\Delta t$, camera parameters $\text{cam}$, transfer function $T$, volume density field $V$, and the adjoint of the output $\hat{x}_{\text{out}}$ (initialized from the loss gradient).
+*   **Outputs:** Gradients with respect to step size $\hat{\Delta t}$, camera $\hat{\text{cam}}$, transfer function $\hat{T}$, and volume density $\hat{V}$.
 
 **Data Structures:**
-*   **Forward Variables:** During the forward pass, intermediate values such as transmittance, accumulated color, and ray states must be stored for reuse in the backward pass [S1][S3, unofficial]. For ray-based methods, the list of intersected primitives is also stored [S2].
-*   **Adjoint Variables:** A set of variables $\hat{x}_i$ initialized to 0, storing $\frac{\partial x_{\text{out}}}{\partial x_i}$ [S3, unofficial].
+*   **Forward State Stack:** A list or stack storing intermediate variables from the forward pass. For each ray sample $i$, this typically includes the accumulated color $c_i$, transmittance $\alpha_i$ (or opacity), and interpolated position $x_i$. In standard implementations without the Inversion Trick, this scales linearly with the number of samples $N$ [S2].
+*   **Adjoint Variables:** Variables initialized to zero that accumulate gradients. For a variable $x$, the adjoint $\hat{x}$ represents $\frac{\partial \text{Loss}}{\partial x}$ [S2].
 
-**Steps:**
-1.  **Forward Pass:** Trace the ray through the volume, computing color and opacity at each step $i$. Store intermediate forward variables (e.g., $\text{color}_i, c_i, d_i, \mathbf{x}_i$) and ray intersection lists [S1][S3, unofficial].
-2.  **Initialize Adjoint:** Set the adjoint of the final output $\hat{x}_{\text{out}} = 1$ (or $\frac{\partial f_{\text{loss}}}{\partial \text{color}_N}$) [S1][S3, unofficial]. Initialize all other intermediate adjoint variables to 0 [S3, unofficial].
-3.  **Backward Pass:** Iterate backwards from the last step $i = N-1$ down to $0$ [S1][S3, unofficial].
-    *   **Blend Gradient:** Compute adjoints for color and opacity at step $i$ using the blending derivative:
-        $$ \hat{\text{color}}_i, \hat{c}_i \ += \ \left( \frac{\partial f_{\text{blend}}(\text{color}_i, c_i)}{\partial (\text{color}_i, c_i)} \right)^T \hat{\text{color}}_N $$
-        [S1][S3, unofficial]
-    *   **TF Gradient:** Compute adjoints for density and transfer function values using the TF evaluation derivative:
-        $$ \hat{d}_i, \hat{T} \ += \ \left( \frac{\partial f_{\text{TF}}(d_i, T)}{\partial (d_i, T)} \right)^T \hat{c}_i $$
-        [S1][S3, unofficial]
-    *   **Interpolation Gradient:** Compute adjoints for interpolated position and volume density using the interpolation derivative:
-        $$ \hat{\mathbf{x}}_i, \hat{V} \ += \ \left( \frac{\partial f_{\text{interpolate}}(\mathbf{x}_i, V)}{\partial (\mathbf{x}_i, V)} \right)^T \hat{d}_i $$
-        [S1][S3, unofficial]
-    *   **Ray Update Gradient:** Accumulate adjoints for step size $\Delta t$, direction $\omega$, and origin $\mathbf{x}_o$ based on the ray marching update:
-        $$ \hat{\mathbf{x}}_o \ += \ \hat{\mathbf{x}}_i, \quad \hat{\Delta t} \ += \ i \omega^T \hat{\mathbf{x}}_i, \quad \hat{\omega} \ += \ i \Delta t \hat{\mathbf{x}}_i $$
-        [S1][S3, unofficial]
-4.  **Camera Gradient:** Accumulate adjoint for camera parameters using the camera projection derivative:
-    $$ \hat{\text{cam}} \ += \ \left( \frac{\partial f_{\text{camera}}(uv, \text{cam})}{\partial \text{cam}} \right)^T [\mathbf{x}_o; \omega] $$
-    [S1][S3, unofficial]
-5.  **Finalize:** Ignore $\hat{\text{color}}_0$ [S3, unofficial]. Sum adjoint variables if a parameter is used multiple times (along a ray or over multiple rays) [S1][S3, unofficial].
+**Numbered Steps:**
+
+1.  **Forward Pass:**
+    *   Initialize accumulated color $c_0 = 0$ and transmittance $T_0 = 1$.
+    *   For each sample $i$ from $0$ to $N-1$:
+        *   Compute density $d_i$ by interpolating volume $V$ at position $x_i$.
+        *   Evaluate transfer function to get color contribution $\mathbf{c}_i$ and opacity $\alpha_i$ using $d_i$ and $T$.
+        *   Store intermediate states $(x_i, d_i, \mathbf{c}_i, \alpha_i, c_i, T_i)$ in the forward stack [S2].
+        *   Update accumulated color and transmittance using front-to-back blending:
+            $$ c_{i+1} = c_i + T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
+            $$ T_{i+1} = T_i \exp(-\sigma_i \delta_i) $$
+            where $\sigma_i$ is density and $\delta_i$ is step size [S1].
+    *   Compute the final rendered color $\hat{C}(\mathbf{r}) = c_N$ and the loss function $L$.
+
+2.  **Backward Pass (Adjoint Propagation):**
+    *   Initialize all intermediate adjoint variables to 0.
+    *   Set the adjoint of the final output: $\hat{c}_N = \frac{\partial L}{\partial c_N}$ [S2].
+    *   Iterate backwards from $i = N-1$ down to $0$:
+        *   **Blend Adjoint:** Compute gradients for color and opacity at step $i$ using the blending derivative. The adjoint of the accumulated color at step $i$ is updated by the adjoint of step $i+1$ (denoted $\hat{c}_{i+1}$ or $\hat{\text{color}}_N$ in Algorithm 2 context):
+            $$ \hat{c}_i, \hat{\alpha}_i \ += \left( \frac{\partial f_{\text{blend}}(c_i, \alpha_i)}{\partial c_i, \alpha_i} \right)^T \hat{c}_{i+1} $$
+            [S2]
+        *   **Transfer Function Adjoint:** Compute adjoints for density $d_i$ and transfer function parameters $T$:
+            $$ \hat{d}_i, \hat{T} \ += \left( \frac{\partial f_{\text{TF}}(d_i, T)}{\partial d_i, T} \right)^T \hat{c}_i $$
+            [S2]
+        *   **Interpolation Adjoint:** Compute adjoints for interpolated position $x_i$ and volume density $V$:
+            $$ \hat{x}_i, \hat{V} \ += \left( \frac{\partial f_{\text{interpolate}}(x_i, V)}{\partial x_i, V} \right)^T \hat{d}_i $$
+            [S2]
+        *   **Ray Marching Adjoint:** Accumulate gradients for ray origin $x_o$, step size $\Delta t$, and direction $\omega$ based on the ray marching update $x_i = x_o + i \Delta t \omega$:
+            $$ \hat{x}_o \ += \hat{x}_i $$
+            $$ \hat{\Delta t} \ += i \omega^T \hat{x}_i $$
+            $$ \hat{\omega} \ += i \Delta t \hat{x}_i $$
+            [S2]
+    *   **Camera Adjoint:** Compute the gradient for camera parameters:
+        $$ \hat{\text{cam}} \ += \left( \frac{\partial f_{\text{camera}}(uv, \text{cam})}{\partial \text{cam}} \right)^T [x_o; \omega] $$
+        [S2]
+    *   If a parameter (e.g., TF entry or volume voxel) is accessed multiple times, sum the adjoint variables to accumulate the total gradient [S2].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import numpy as np
-
 def adjoint_dvr_forward_backward(
-    stepsize: float,
-    camera: dict,
-    tf: np.ndarray,
-    volume: np.ndarray,
-    grad_loss_color: np.ndarray,
-    forward_vars: dict
-) -> dict:
+    volume: Tensor, 
+    tf: Tensor, 
+    cam: Tensor, 
+    step_size: float, 
+    loss_fn: Callable, 
+    num_samples: int
+) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     """
-    Computes gradients for DVR using the Adjoint Method.
-    forward_vars contains intermediate states from the forward pass.
+    Performs forward and backward pass for differentiable volume rendering.
+    Returns gradients for volume, tf, cam, and step_size.
     """
-    # 1. Initialize adjoints
-    adj_stepsize = 0.0
-    adj_camera = np.zeros_like(camera)
-    adj_tf = np.zeros_like(tf)
-    adj_volume = np.zeros_like(volume)
-    adj_x_o = np.zeros(3)
-    adj_omega = np.zeros(3)
+    # 1. Forward Pass
+    # Initialize states
+    accumulated_color = torch.zeros_like(volume[..., :3]) # Assuming RGB
+    transmittance = torch.ones_like(accumulated_color[..., 0])
     
-    # Adjoint of current accumulated color and opacity
-    adj_color_N = grad_loss_color.copy()
+    # Storage for intermediates (Standard Adjoint Method)
+    # In practice, this might be optimized or replaced by Inversion Trick
+    intermediates = [] 
     
-    N = forward_vars['num_steps']
-    ray_direction = forward_vars['ray_direction']
+    # Ray generation and marching
+    rays = generate_rays(cam, num_samples) # Returns origins, directions
+    
+    for i in range(num_samples):
+        # Interpolate density
+        pos = rays.origins + i * step_size * rays.directions
+        density = interpolate_volume(volume, pos)
+        
+        # Evaluate Transfer Function
+        color_contrib, opacity = evaluate_tf(tf, density)
+        
+        # Store intermediates for backward pass
+        intermediates.append({
+            'pos': pos.detach(),
+            'density': density.detach(),
+            'color_contrib': color_contrib.detach(),
+            'opacity': opacity.detach(),
+            'accumulated_color': accumulated_color.detach(),
+            'transmittance': transmittance.detach()
+        })
+        
+        # Front-to-back blending
+        # c_{i+1} = c_i + T_i * (1 - exp(-sigma * delta)) * c_i_contrib
+        # T_{i+1} = T_i * exp(-sigma * delta)
+        alpha = 1.0 - torch.exp(-density * step_size)
+        accumulated_color = accumulated_color + transmittance.unsqueeze(-1) * alpha.unsqueeze(-1) * color_contrib
+        transmittance = transmittance * torch.exp(-density * step_size)
+        
+    final_color = accumulated_color
     
     # 2. Backward Pass
-    for i in range(N - 1, -1, -1):
-        color_i = forward_vars['color'][i]
-        c_i = forward_vars['opacity'][i]
-        d_i = forward_vars['density'][i]
-        x_i = forward_vars['position'][i]
-        
-        # Step 3a: Blend Gradient
-        def compute_blend_derivatives(color_i, c_i):
-            d_color_out_d_color_in = np.eye(3)
-            d_color_out_d_c_in = (1.0 - c_i) * color_i
-            return d_color_out_d_color_in, d_color_out_d_c_in
-
-        d_blend_d_color_i, d_blend_d_c_i = compute_blend_derivatives(color_i, c_i)
-        adj_color_i = d_blend_d_color_i.T @ adj_color_N
-        adj_c_i = d_blend_d_c_i.T @ adj_color_N
-        
-        # Step 3b: TF Gradient
-        def compute_tf_derivatives(d_i, tf):
-            d_c_i_d_d_i = np.eye(1)
-            d_c_i_d_T = np.zeros_like(tf)
-            return d_c_i_d_d_i, d_c_i_d_T
-
-        d_tf_d_d_i, d_tf_d_T = compute_tf_derivatives(d_i, tf)
-        adj_d_i = d_tf_d_d_i.T @ adj_c_i
-        adj_tf += d_tf_d_T.T @ adj_c_i
-        
-        # Step 3c: Interpolation Gradient
-        def compute_interp_derivatives(x_i, volume):
-            d_d_i_d_x_i = np.eye(3)
-            d_d_i_d_V = np.zeros_like(volume)
-            return d_d_i_d_x_i, d_d_i_d_V
-
-        d_interp_d_x_i, d_interp_d_V = compute_interp_derivatives(x_i, volume)
-        adj_x_i = d_interp_d_x_i.T @ adj_d_i
-        adj_volume += d_interp_d_V.T @ adj_d_i
-        
-        # Step 3d: Ray Update Gradient
-        adj_x_o += adj_x_i
-        adj_stepsize += i * ray_direction.T @ adj_x_i
-        adj_omega += i * stepsize * adj_x_i
-        
-        # Prepare adj_color_N for the next iteration
-        adj_color_N = adj_color_i
-
-    # Step 4: Camera Gradient
-    def compute_camera_derivatives(camera):
-        d_x_o_d_cam = np.zeros((3, len(camera)))
-        d_omega_d_cam = np.zeros((3, len(camera)))
-        return d_x_o_d_cam, d_omega_d_cam
-
-    d_cam_d_x_o, d_cam_d_omega = compute_camera_derivatives(camera)
-    adj_camera += d_cam_d_x_o.T @ adj_x_o + d_cam_d_omega.T @ adj_omega
+    # Initialize adjoints
+    grad_volume = torch.zeros_like(volume)
+    grad_tf = torch.zeros_like(tf)
+    grad_cam = torch.zeros_like(cam)
+    grad_step_size = torch.tensor(0.0, requires_grad=True)
     
-    return {
-        'stepsize': adj_stepsize,
-        'camera': adj_camera,
-        'tf': adj_tf,
-        'volume': adj_volume
-    }
+    # Gradient from loss
+    # Assuming loss_fn returns scalar and we compute gradient w.r.t final_color
+    # In a real framework, this is handled by autograd, but here we simulate the adjoint logic
+    dL_dfinal_color = torch.ones_like(final_color) # Placeholder for actual loss gradient
+    
+    # Propagate from last sample to first
+    for i in range(num_samples - 1, -1, -1):
+        state = intermediates[i]
+        
+        # Current accumulated color and transmittance adjoints
+        # Note: In standard DVR, the adjoint of the output of the blend operation
+        # flows back to the inputs of the blend operation.
+        # Let dL_dc_{i+1} be the adjoint of the color after step i+1.
+        # Initially for the last step, this is dL_dfinal_color.
+        # For intermediate steps, it is the adjoint passed from the next iteration.
+        
+        # We need to track the adjoint of the accumulated color and transmittance
+        # Let's assume dL_dc_next and dL_dT_next are carried over
+        if i == num_samples - 1:
+            dL_dc_next = dL_dfinal_color
+            dL_dT_next = torch.zeros_like(transmittance) # T_N doesn't affect color directly in standard DVR, but affects next T if loop continued. 
+            # Actually T_N is not used for blending, so its adjoint is 0 unless used elsewhere.
+            
+        # Blend Adjoint
+        # c_{i+1} = c_i + T_i * alpha_i * c_contrib_i
+        # T_{i+1} = T_i * (1 - alpha_i)
+        # Derivatives of blend function f_blend(c_i, T_i, c_contrib_i, alpha_i)
+        # dL_dc_i += dL_dc_next
+        # dL_dT_i += dL_dc_next * alpha_i * c_contrib_i + dL_dT_next * (1 - alpha_i)
+        # dL_dc_contrib_i += dL_dc_next * T_i * alpha_i
+        # dL_dalpha_i += dL_dc_next * T_i * c_contrib_i + dL_dT_next * T_i * (-1)
+        
+        # Simplified for standard DVR where T_i is transmittance TO the sample
+        # c_out = c_in + T_in * (1 - exp(-sigma dt)) * c
+        # T_out = T_in * exp(-sigma dt)
+        
+        # Adjoint of c_in
+        dL_dc_i = dL_dc_next
+        
+        # Adjoint of T_in
+        # d(T_out)/d(T_in) = exp(-sigma dt) = 1 - alpha
+        # d(c_out)/d(T_in) = (1 - alpha) * c
+        dL_dT_i = dL_dT_next * (1 - state['opacity']) + dL_dc_next.unsqueeze(-1) * (1 - state['opacity']) * state['color_contrib']
+        
+        # Adjoint of c_contrib
+        # d(c_out)/d(c_contrib) = T_in * alpha
+        dL_dc_contrib = dL_dc_next.unsqueeze(-1) * state['transmittance'].unsqueeze(-1) * state['opacity']
+        
+        # Adjoint of alpha (derived from density)
+        # d(c_out)/d(alpha) = T_in * c_contrib
+        # d(T_out)/d(alpha) = T_in * (-1)
+        dL_dalpha = dL_dc_next.unsqueeze(-1) * state['transmittance'].unsqueeze(-1) * state['color_contrib'] - dL_dT_next * state['transmittance']
+        
+        # Update next adjoints for the loop
+        dL_dc_next = dL_dc_i
+        dL_dT_next = dL_dT_i.squeeze() # Transmittance is scalar per ray
+        
+        # Transfer Function Adjoint
+        # c_contrib = f_tf(density, tf)
+        # alpha = g_tf(density, tf)
+        # We have dL_dc_contrib and dL_dalpha
+        # Combine to get gradient w.r.t density and TF
+        # density_grad = dL_dc_contrib * dc/dd + dL_dalpha * da/dd
+        # tf_grad = dL_dc_contrib * dc/dtf + dL_dalpha * da/dtf
+        
+        # For simplicity, assume we have a function that computes these partials
+        # density_grad, tf_grad = compute_tf_adjoint(state['density'], tf, dL_dc_contrib, dL_dalpha)
+        
+        # Accumulate TF gradient
+        # grad_tf += tf_grad
+        
+        # Accumulate Volume gradient
+        # grad_volume += density_grad * d(density)/d(volume)
+        
+        # Ray Marching Adjoint
+        # pos = origin + i * step_size * direction
+        # density = interpolate(volume, pos)
+        # dL_dpos = dL_ddensity * d(density)/d(pos)
+        
+        # dL_dorigin += dL_dpos
+        # dL_dstep_size += dL_dpos * i * direction
+        # dL_ddirection += dL_dpos * i * step_size
+        
+        # Camera Adjoint
+        # origin, direction = f_camera(cam)
+        # dL_dcam += dL_dorigin * d(origin)/d(cam) + dL_ddirection * d(direction)/d(cam)
+        
+        pass # Placeholder for specific derivative implementations
+
+    return grad_volume, grad_tf, grad_cam, grad_step_size
 ```
 
-**Parameters:**
-*   **Step size $\Delta t$:** Distance between samples. Used in ray marching updates [S1].
-*   **Memory Cost:** Storing intersection lists is approx. 1.2 KB per ray [S2].
-*   **Shared Memory Limit:** 48kB per multiprocessor limits TF resolution to 96 texels when using adjoint-delayed accumulation [S3, unofficial].
-
 **Edge Cases and Pitfalls:**
-*   **Memory Consumption:** Storing intermediate colors scales linearly with steps, exceeding memory [S1]. Solved by the Inversion Trick [S1].
-*   **Reverse Order:** Simple operator overloading is not applicable; operations must be recorded or manually derived [S1][S3, unofficial].
-*   **Atomic Conflicts:** Naive accumulation of TF gradients in global memory using atomics is >100x slower than forward pass due to write conflicts [S3, unofficial]. Use delayed accumulation in shared memory [S3, unofficial].
-*   **Ray Tracing Instability:** Using ray tracing to retrieve surfaces in reverse order causes high instability; storing intersections in forward pass is preferred [S2].
+*   **Memory Consumption:** Storing intermediate colors and transmittance for every sample scales linearly with the number of steps $N$, which can exceed available memory [S2]. This is mitigated by the Inversion Trick [S2].
+*   **Control Flow:** If conditions (if statements) are present inside loops, the specific branch taken must be stored in the stack along with the intermediate variables of that branch to ensure correct reverse traversal [S1].
+*   **Multiple Parameter Usage:** If a parameter (e.g., a transfer function entry) is used multiple times, the adjoint variables must be summed up to accumulate the total gradient [S2].
+*   **Race Conditions:** In parallel implementations (SIMD), reading from external arrays during the reverse pass can cause race conditions. Reads must be transformed into atomic scatter writes [S1].
 
 ## Subtopics
 
 ### [Inversion Trick](964-inversion-trick.md)
-The Inversion Trick is a memory optimization technique for differentiable volume rendering that reduces the memory complexity of the adjoint method from linear to constant with respect to the number of samples per ray. It solves the problem of excessive memory consumption in standard adjoint volume rendering, where intermediate accumulated colors must be stored for every sample along a ray to compute gradients. By exploiting the mathematical invertibility of the front-to-back blending operation, the method reconstructs intermediate accumulated colors on-the-fly during the backward pass instead of storing them, trading increased computation for reduced memory usage.
+A memory optimization technique that reduces memory complexity from linear to constant with respect to the number of samples by reconstructing intermediate states on-the-fly during the backward pass.
 
 ### [Gradient Accumulation Strategy](1374-gradient-accumulation-strategy.md)
-The Gradient Accumulation Strategy is a memory-efficient technique for computing gradients in differentiable volume rendering, specifically within the Adjoint Method framework. It solves the problem of high memory bandwidth and storage costs associated with storing per-sample gradients for every ray and sample. It sets itself apart from the [Inversion Trick](964-inversion-trick.md) by avoiding the inversion of the rendering equation, and from the [Autograd Wrapper for Volume Rendering](2158-autograd-wrapper-for-volume-rendering.md) by explicitly managing the reduction of gradient variables across parallel threads rather than relying on automatic differentiation frameworks to handle the reduction implicitly.
+A strategy to reduce memory bandwidth costs by reducing adjoint variables locally per ray or thread block before aggregating them into global memory via atomic operations.
 
 ### [Autograd Wrapper for Volume Rendering](2158-autograd-wrapper-for-volume-rendering.md)
-The Autograd Wrapper for Volume Rendering is a Python `torch.autograd.Function` implementation that replaces a previous C++-based autograd layer to route between custom C++/CUDA forward and backward operations. It solves the problem of integrating differentiable volume rendering into deep learning pipelines by handling gradient requirements, tensor management, and device placement automatically. It differs from lower-level C++ implementations by providing a high-level Python API that serves as the primary entry point for users, and it differs from the Adjoint Method by acting as the plumbing layer that invokes the underlying differentiable kernels (such as those implementing the adjoint method) rather than deriving analytical gradients itself.
+A Python `torch.autograd.Function` implementation that manages the dispatch logic for gradient computation, allowing gradients to flow from 2D projection losses back to 3D volume parameters.
 
 ### [Alpha-to-Weight Computation (Backward)](2383-alpha-to-weight-computation-backward.md)
-Computes the gradient of the rendering loss with respect to the per-sample alpha values, given the gradients flowing back from the rendered weights and the final transmittance. It is the backward pass counterpart to the Alpha-to-Weight computation, enabling differentiable volume rendering via the Adjoint Method [Parent]. Unlike the forward pass which accumulates transmittance, this method propagates gradients backwards through the ray samples, correcting for the dependency of each weight on its own alpha and the transmittance from preceding samples. Initialize `back_cum = grad_last[i_ray] * alphainv_last[i_ray]`. Iterate backwards from $i_e-1$ to $i_s$: compute `grad[i] = grad_weights[i] * T[i] - back_cum / (1.0 - alpha[i])`, then update `back_cum += grad_weights[i] * weight[i]`.
+Computes the gradient of the rendering loss with respect to the per-sample alpha values, enabling differentiable volume rendering via the Adjoint Method.
+
+### [Variance-aware Adaptive Pixel Sampling](6389-variance-aware-adaptive-pixel-sampling.md)
+A technique for inverse rendering that accelerates gradient-based optimization by dynamically allocating a fixed per-iteration pixel sampling budget based on the estimated variance of the loss gradient contributions.
+
+### [Path Replay Backpropagation](6780-path-replay-backpropagation.md)
+An efficient differentiation technique for inverse rendering that computes gradients by replaying primal Monte Carlo paths using pseudorandom number generators, avoiding the storage of large computational graphs.
 
 ### Adjoint Method > Gradient w.r.t Ray Direction
-Computes the gradient of the projection weight $P$ with respect to the ray direction $\mathbf{n}$, i.e., $\partial P / \partial \mathbf{n}_{idx}$, accounting for the implicit dependence of the entry point $p_a$ on $\mathbf{n}$ [S5, unofficial]. The total gradient is `ray_n.grad[idx] + fac_t * p_a.grad[idx]`, where `fac_t` accounts for the implicit dependence [S5, unofficial].
+Computes the gradient of the projection weight $P$ with respect to the ray direction $n$, i.e., $\partial P / \partial n_{idx}$. It accounts for the implicit dependence of the entry point $p_a$ on $n$. The total gradient is calculated as `ray_n.grad[idx] + fac_t * p_a.grad[idx]`, where `fac_t` accounts for the implicit dependence of the entry point $p_a$ on $n$ [S7, unofficial].
+
+### Memoized reverse-mode differentiation for recursion
+A technique to differentiate recursive functions in reverse mode by caching results in a stack (or tree) to avoid redundant recomputation of the forward function, which causes $O(N^2)$ complexity in naive implementations. The forward pass populates a stack with intermediate values, and the reverse pass iterates backwards through the stack to compute gradients. If the recursive function calls itself multiple times (branching recursion), a tree structure should be used instead of a stack [S1].
+
+### Differentiating SIMD-based rendering programs
+A strategy for differentiating parallel rendering programs (written in parallel for loops) by executing the forward pass, storing intermediates in a stack of arrays, and then executing the reverse pass with transformed statements. Any read from external arrays in the original parallel for loop must be transformed into an atomic scatter write in the reverse pass to avoid race conditions. Implemented in Enoki, the core of Mitsuba 2 [S1].
+
+### Checkpointing for Reverse-Mode Memory Optimization
+An optimization to reduce the memory complexity of reverse-mode automatic differentiation by storing only a subset of intermediate variables (checkpoints) and recomputing the loop segments between them during the reverse pass. Introduced by Andreas Griewank in 1992, it achieves memory complexity of $O(\log(N))$ at the cost of increasing time complexity to $O(N \log(N))$, where $N$ is the loop length [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Computational complexity is largely constant with respect to the number of parameters, making it efficient for optimizing many parameters (e.g., Transfer Function) [S3, unofficial]. However, it requires multiple passes for multi-component outputs [S3, unofficial].
-*   **Memory Complexity:** Standard adjoint method scales linearly with the number of steps ($O(np)$) due to storing intermediate variables [S1]. With the Inversion Trick, memory is constant [S1].
-*   **Measured Performance:** On an RTX 2070, a single forward/backward pass takes 9.5 ms / 14.6 ms respectively (total 24.1 ms) [S1][S3, unofficial]. Forward-immediate takes 21.3 ms [S3, unofficial]. Forward-delayed is ~30% slower due to re-tracing [S3, unofficial].
-*   **Strengths:** Efficient for optimizing many parameters; computes exact gradients (except rounding errors) [S1][S3, unofficial].
-*   **Limitations:** High memory usage without Inversion Trick; naive global memory accumulation is slow [S3, unofficial]; requires manual derivation of adjoint code for high-level functions [S1].
-*   **When to Use:** Optimizing many parameters (e.g., TF reconstruction) [S1][S3, unofficial].
-*   **When Not to Use:** Optimizing few parameters (e.g., camera position) where forward mode is faster [S1][S3, unofficial].
+*   **Time Complexity:** The time complexity is the same as the original algorithm when there is only a single output, regardless of the number of input variables [S1]. For Monte Carlo path tracing, time complexity is linear in path length [S6, unofficial].
+*   **Memory Complexity:** Standard implementation scales linearly with the number of samples $N$ ($O(N)$) due to the storage of intermediate states [S2]. With the Inversion Trick or Checkpointing, this can be reduced to $O(1)$ or $O(\log(N))$ respectively [S1][S2].
+*   **Measured Performance:** On an RTX 2070, a single forward/backward pass in the adjoint method requires about 9.5 ms / 14.6 ms respectively, giving a total of 24.1 ms [S4, unofficial]. Forward-immediate takes 21.3 ms, while forward-delayed is ~30% slower due to re-tracing [S4, unofficial].
+*   **Strengths:** Computational complexity is largely constant in the number of parameters, making it preferable for optimizing many parameters like the transfer function [S4, unofficial]. It computes exactly the same gradients as the forward method except for rounding errors [S4, unofficial].
+*   **Limitations:** High memory consumption in naive implementations. Simple operator overloading is not applicable; implementations must record operations in a computation graph or manually derive adjoint code [S4, unofficial]. Naive accumulation of gradients for the Transfer Function in global memory using atomics is over 100x slower than the non-adjoint forward pass due to memory access conflicts [S4, unofficial].
+*   **When to Use:** Preferable when optimizing a large number of parameters (e.g., transfer function, volume density) [S4, unofficial].
+*   **When Not to Use:** Less efficient than the Forward Method when optimizing for a low number of parameters (e.g., camera position) [S4, unofficial].
 
 ## Background
-The Adjoint Method for Direct Volume Rendering (DiffDVR) was introduced by [S1] (2021). It is based on the principles of Automatic Differentiation (AD), specifically reverse-mode differentiation, which evaluates the chain rule from left to right [S1][S3, unofficial]. The method was implemented as a custom CUDA operation in PyTorch using NVRTC for JIT compilation [S1]. It has been applied to TF reconstruction, volume reconstruction, and optimization tasks [S1][S3, unofficial].
+The Adjoint Method, also known as Reverse-Mode Automatic Differentiation, was introduced by Andreas Griewank in 1992 [S1]. It is widely used in differentiable rendering for inverse problems such as transfer function reconstruction, volume reconstruction, and scene optimization [S2]. It serves as a baseline in inverse rendering optimization experiments [S6, unofficial]. Implementations often use custom CUDA operations with JIT compilation (e.g., via NVRTC) to integrate with deep learning frameworks like PyTorch [S2].
 
 ## Sources
-[S1] Differentiable Direct Volume Rendering, https://arxiv.org/abs/2107.12672v1, fetched 2026-10-26
-[S2] EVER: Exact Volumetric Ellipsoid Rendering for Real-Time View Synthesis, https://doi.org/10.1109/ICCV51701.2025.00469, fetched 2026-10-27
-[S3] (PDF) Differentiable Direct Volume Rendering - ResearchGate, https://www.researchgate.net/publication/353510271_Differentiable_Direct_Volume_Rendering, fetched 2026-10-30 (unofficial)
-[S4] gkouros/ref-dvgo, https://github.com/gkouros/ref-dvgo, fetched 2026-10-28 (unofficial)
-[S5] HaouchatY/differentiable_xrt, https://github.com/HaouchatY/differentiable_xrt, fetched 2026-10-27 (unofficial)
+[S1] Physics-based differentiable rendering, https://doi.org/10.1145/3388769.3407454, fetched 2026-10-29
+[S2] Differentiable Direct Volume Rendering, https://arxiv.org/abs/2107.12672v1, fetched 2026-10-26
+[S3] EVER: Exact Volumetric Ellipsoid Rendering for Real-Time View Synthesis, https://doi.org/10.1109/ICCV51701.2025.00469, fetched 2026-10-27
+[S4] (PDF) Differentiable Direct Volume Rendering - ResearchGate, https://www.researchgate.net/publication/353510271_Differentiable_Direct_Volume_Rendering, fetched 2026-10-30 (unofficial)
+[S5] Optimizing 3D Scene Reconstruction with Differentiable Ray Tracing, https://doi.org/10.31224/5014, fetched 2026-10-29
+[S6] Differentiable Neural Radiosity, https://arxiv.org/abs/2201.13190, fetched 2026-10-29 (unofficial)
+[S7] HaouchatY/differentiable_xrt, https://github.com/HaouchatY/differentiable_xrt, fetched 2026-10-27 (unofficial)

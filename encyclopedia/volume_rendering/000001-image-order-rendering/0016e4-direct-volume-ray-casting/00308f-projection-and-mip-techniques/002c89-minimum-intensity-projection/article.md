@@ -2,93 +2,108 @@
 
 
 ## Overview
-Minimum Intensity Projection (MinIP) is a volume rendering technique that projects the voxel with the lowest scalar intensity along each viewing ray onto the 2D image plane [S1][S2, unofficial]. Unlike standard direct volume rendering which composites opacity-weighted colors, MinIP discards depth cues to highlight low-intensity structures such as air-filled spaces, vessels, or bone trabeculae [S1]. It is distinguished from its sibling Maximum Intensity Projection (MIP) by inverting the aggregation operator from maximum to minimum, making it complementary for visualizing hypodense or low-signal anatomical features [S1].
+Minimum Intensity Projection (MinIP) is a volume rendering technique that projects the scalar field by selecting the minimum intensity value encountered along each viewing ray [S1][S2, unofficial]. It is primarily used in medical imaging to visualize low-density structures, such as air-filled lungs or fluid-filled vessels, which are obscured by higher-density tissues in standard Maximum Intensity Projection (MIP) [S1]. Unlike standard Direct Volume Ray Casting, MinIP discards depth cues by rendering only the extremal value, resulting in a 2D projection that lacks explicit depth information but highlights specific anatomical features [S1].
 
 ## How it works
-MinIP builds on the shared ray-casting loop defined in [Direct volume ray casting](19-direct-volume-ray-casting.md). For each pixel, a ray is traversed through the volume, and the scalar value $s_i$ at each sample point is compared against a running minimum. The final pixel color is derived from the sample with the global minimum intensity along that ray [S1][S2, unofficial].
+**Inputs and Outputs:**
+*   **Input:** A 3D scalar volume $V$, camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$), volume bounds, and a transfer function $T$.
+*   **Output:** A 2D image where each pixel $(u,v)$ contains the color corresponding to the minimum scalar value along the ray.
 
-### Inputs and Outputs
-*   **Input**: Volume dataset $V$ (scalar field), camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$), transfer function $T$, and rendering parameters (number of steps $N$, initial search bounds).
-*   **Output**: A 2D image where each pixel $(u,v)$ contains the color $C$ and depth $Z$ corresponding to the minimum intensity voxel found along the ray.
+**Data Structures:**
+*   **Volume:** A 3D grid of scalar values. Access is performed via trilinear interpolation [G] or nearest-neighbor sampling [S2, unofficial].
+*   **Accumulators:**
+    *   `the_ref`: The current minimum scalar value found. Initialized to $+\infty$ (or maximum representable float) [S2, unofficial].
+    *   `the_coord`: The 3D coordinate in the volume where `the_ref` was found. Initialized to the ray start [S2, unofficial].
+    *   `the_value`: The full sampled value (e.g., RGBA or vec4) at `the_coord` [S2, unofficial].
 
-### Data Structures
-The implementation typically maintains the following state per ray:
-*   `the_ref`: The current minimum scalar value found, initialized to positive infinity ($\infty$) or the maximum representable float [S2, unofficial].
-*   `the_coord`: The 3D coordinate of the voxel holding `the_ref` [S2, unofficial].
-*   `the_value`: The full sampled value (e.g., RGBA or vec4) associated with `the_coord` [S2, unofficial].
-*   `step_coord`: The displacement vector between consecutive samples, calculated as $(t_{end} - t_{start})/N \cdot \mathbf{d}$ [S2, unofficial].
+**Algorithm Steps:**
 
-### Algorithm Steps
-
-1.  **Initialization**: Set `the_ref` to $\infty$ (or a value larger than any possible data value). Set `the_coord` to the ray start position. Set `the_value` to zero or undefined [S2, unofficial].
-2.  **Primary Coarse Search**: Iterate $i$ from $0$ to $N-1$:
-    *   Calculate sample coordinate: $\mathbf{p}_i = \mathbf{o} + i \cdot \Delta t \cdot \mathbf{d}$ [S2, unofficial].
-    *   Sample volume value $v_i = \text{Sample}(\mathbf{p}_i)$ [S2, unofficial].
-    *   Extract scalar $s_i = v_i.r$ (or the primary scalar component) [S2, unofficial].
-    *   If $s_i < \text{the\_ref}$:
-        *   Update $\text{the\_ref} = s_i$
-        *   Update $\text{the\_coord} = \mathbf{p}_i$
-        *   Update $\text{the\_value} = v_i$ [S2, unofficial].
-3.  **Refinement Loop**: To locate the minimum more precisely than the discrete grid allows, perform a binary search-like refinement [S2, unofficial]:
-    *   Initialize `substep` = $\Delta t \cdot \mathbf{d}$ (or a fraction thereof) [S2, unofficial].
-    *   Repeat for $k = 0$ to $3$ (4 iterations):
-        *   `substep` = `substep` / 2 [S2, unofficial].
-        *   Calculate candidate coordinates: $\mathbf{c}_1 = \text{the\_coord} - \text{substep}$ and $\mathbf{c}_2 = \text{the\_coord} + \text{substep}$ [S2, unofficial].
-        *   Sample values: $v_1 = \text{Sample}(\mathbf{c}_1)$, $v_2 = \text{Sample}(\mathbf{c}_2)$ [S2, unofficial].
+1.  **Ray Initialization:** For each pixel, compute the ray origin $\mathbf{o}$ and direction $\mathbf{d}$. Determine the entry and exit points of the ray with the volume bounding box. Discretize the ray into $N$ steps with step size $\Delta t$.
+2.  **Primary Search Loop:** Iterate through the ray samples to find the approximate location of the minimum intensity.
+    *   Initialize `the_ref` to $+\infty$ [S2, unofficial].
+    *   For each sample index $i$ from $0$ to $N-1$:
+        *   Compute sample coordinate: $\mathbf{c}_i = \mathbf{o} + i \cdot \Delta t \cdot \mathbf{d}$.
+        *   Sample the volume value $v_i = V(\mathbf{c}_i)$ [S2, unofficial].
+        *   Extract the scalar component $s_i$ (e.g., $v_i.r$) [S2, unofficial].
+        *   If $s_i < \text{the\_ref}$:
+            *   $\text{the\_ref} \leftarrow s_i$
+            *   $\text{the\_coord} \leftarrow \mathbf{c}_i$
+            *   $\text{the\_value} \leftarrow v_i$
+3.  **Refinement Loop:** Improve the precision of the minimum location using a binary search-like approach [S2, unofficial].
+    *   Initialize `substep` = $\Delta t \cdot \mathbf{d}$ [S2, unofficial].
+    *   For $k$ from $0$ to $3$ (4 iterations):
+        *   `substep` $\leftarrow$ `substep` $/ 2.0$ [S2, unofficial].
+        *   Compute candidate coordinates: $\mathbf{c}_1 = \text{the\_coord} - \text{substep}$ and $\mathbf{c}_2 = \text{the\_coord} + \text{substep}$ [S2, unofficial].
+        *   Sample values: $v_1 = V(\mathbf{c}_1)$, $v_2 = V(\mathbf{c}_2)$ [S2, unofficial].
         *   Extract scalars: $s_1 = v_1.r$, $s_2 = v_2.r$ [S2, unofficial].
         *   If $s_1 \le \text{the\_ref}$:
-            *   Update $\text{the\_ref} = s_1$, $\text{the\_coord} = \mathbf{c}_1$, $\text{the\_value} = v_1$ [S2, unofficial].
+            *   $\text{the\_ref} \leftarrow s_1$
+            *   $\text{the\_coord} \leftarrow \mathbf{c}_1$
+            *   $\text{the\_value} \leftarrow v_1$
         *   Else if $s_2 < \text{the\_ref}$:
-            *   Update $\text{the\_ref} = s_2$, $\text{the\_coord} = \mathbf{c}_2$, $\text{the\_value} = v_2$ [S2, unofficial].
-        *   *Note: The source uses `>=` for the first check in a max-intensity context, but for MinIP, the logic inverts to `<` and `<=` to find lower values [S2, unofficial]. The provided WGSL snippet for MinIP uses `reff < the_ref` in the main loop and `ref1 <= the_ref` in refinement.*
-4.  **Classification and Output**:
-    *   Map the final value to color: $C_{raw} = T(\text{the\_value})$ [S2, unofficial].
-    *   Convert to physical color space if necessary (e.g., sRGB to linear) [S2, unofficial].
-    *   Compute opacity $\alpha = C_{raw}.a \times \text{material\_opacity}$ [S2, unofficial].
-    *   Compute depth $Z$ by transforming `the_coord` to world space and then to NDC space [S2, unofficial].
+            *   $\text{the\_ref} \leftarrow s_2$
+            *   $\text{the\_coord} \leftarrow \mathbf{c}_2$
+            *   $\text{the\_value} \leftarrow v_2$
+4.  **Color Mapping:** Map the final scalar `the_ref` to a color.
+    *   Retrieve color $C = T(\text{the\_ref})$ [S2, unofficial].
+    *   If the color space is sRGB, convert to linear physical space: $C_{linear} = \text{srgb2linear}(C)$ [S2, unofficial].
+    *   Compute opacity $\alpha = C.a \cdot \alpha_{material}$ [S2, unofficial].
+5.  **Depth Calculation:** Compute the depth for the output buffer based on the refined coordinate [S2, unofficial].
+    *   Convert volume coordinate to world position.
+    *   Project to NDC and extract depth $z_{ndc}$.
 
-### Pseudocode
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def minip_render(ray_origin, ray_direction, volume, transfer_function, num_steps):
+def minip_render(volume, ray_origin, ray_direction, num_steps, transfer_function):
     """
     Renders a single ray using Minimum Intensity Projection.
     """
     # 1. Initialization
+    # Initialize reference to positive infinity
     the_ref = float('inf')
     the_coord = ray_origin
     the_value = None
     
     # Step size vector
-    step_coord = ray_direction * (1.0 / num_steps) # Assuming normalized ray length for simplicity
+    step_vector = ray_direction * (1.0 / num_steps) # Assuming normalized direction or adjusted for domain
     
-    # 2. Primary Coarse Search
+    # 2. Primary Search Loop
     for i in range(num_steps):
-        coord = ray_origin + i * step_coord
-        value = volume.sample(coord) # Trilinear interpolation assumed
-        scalar = value.r # Assuming scalar is in the first component
+        # Calculate current sample coordinate
+        coord = ray_origin + i * step_vector
         
+        # Sample volume (trilinear interpolation assumed for general case)
+        value = volume.sample(coord)
+        
+        # Extract scalar component (assuming .r is the scalar)
+        scalar = value.r
+        
+        # Update minimum
         if scalar < the_ref:
             the_ref = scalar
             the_coord = coord
             the_value = value
             
     # 3. Refinement Loop (4 iterations)
-    substep_coord = step_coord
+    substep = step_vector
     for _ in range(4):
-        substep_coord = substep_coord * 0.5
+        substep = substep * 0.5
         
-        coord1 = the_coord - substep_coord
-        coord2 = the_coord + substep_coord
+        # Candidate coordinates
+        coord1 = the_coord - substep
+        coord2 = the_coord + substep
         
+        # Sample candidates
         value1 = volume.sample(coord1)
         value2 = volume.sample(coord2)
         
         ref1 = value1.r
         ref2 = value2.r
         
+        # Update minimum with strict/non-strict comparisons as per source
         if ref1 <= the_ref:
             the_ref = ref1
             the_coord = coord1
@@ -98,44 +113,51 @@ def minip_render(ray_origin, ray_direction, volume, transfer_function, num_steps
             the_coord = coord2
             the_value = value2
             
-    # 4. Classification
-    color_raw = transfer_function(the_value)
+    # 4. Color Mapping
+    # Map scalar to color
+    color = transfer_function(the_ref)
     
-    # Convert to physical colorspace if needed (simplified)
-    if color_raw.colorspace == 'srgb':
-        physical_color = srgb_to_linear(color_raw.rgb)
+    # Convert to linear space if necessary (simplified logic)
+    if color.color_space == 'srgb':
+        physical_color = srgb_to_linear(color.rgb)
     else:
-        physical_color = color_raw.rgb
+        physical_color = color.rgb
         
-    opacity = color_raw.a * material_opacity
+    opacity = color.a * material_opacity
     
     # 5. Output
-    depth = compute_depth(the_coord)
-    
     return {
         'color': vec4(physical_color, opacity),
-        'depth': depth,
-        'coord': the_coord
+        'depth': project_depth(the_coord)
     }
 ```
 
-### Parameters and Edge Cases
-*   **Number of Steps ($N$)**: Determines the precision of the coarse search. Higher $N$ increases accuracy but costs more [S2, unofficial].
-*   **Refinement Iterations**: The source uses 4 iterations, halving the step size each time [S2, unofficial].
-*   **Initialization Value**: `the_ref` must be initialized to a value strictly greater than any possible data value (e.g., `float('inf')` or `999999.0` as in the source) [S2, unofficial].
-*   **Boundary Conditions**: If the refinement step moves outside the volume bounds, sampling should clamp or return a sentinel value that does not incorrectly become the minimum [G].
-*   **Precision**: Floating-point comparison order matters. The source uses `<=` for the first refinement check and `<` for the second, ensuring deterministic behavior when equal values are found [S2, unofficial].
+**Parameters:**
+*   `num_steps`: Number of samples along the ray. Typical values depend on resolution and desired accuracy. The source uses a fixed number of iterations for refinement [S2, unofficial].
+*   `refinement_iterations`: Fixed at 4 in the reference implementation [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Conditions:** The refinement loop may sample outside the volume bounds. The volume sampler must handle out-of-bounds queries gracefully (e.g., returning a value that does not affect the minimum, or clamping) [G].
+*   **Precision:** Using `float('inf')` for initialization is critical. If the volume contains values equal to the maximum representable float, initialization must use a value strictly larger than any possible data value [S2, unofficial].
+*   **Depth Loss:** MinIP inherently loses depth information. It is unsuitable for tasks requiring precise spatial localization of structures relative to others along the ray [S1].
+
+## Subtopics
+
+### Local MinIP
+Focuses on a slab or region of interest rather than the entire volume, reducing noise and clutter from distant low-intensity structures. [Link: [Local MIP](link)]
+
+### Slab MinIP
+Renders a subset of the volume (a slab) to reduce the "clutter" effect where distant low-intensity voxels obscure local features. [Link: [Projected Slabs Approximation](1449-projected-slabs-approximation.md)]
 
 ## Operating characteristics
-*   **Time Complexity**: $O(N)$ per ray for the coarse search, plus $O(1)$ for the fixed 4-step refinement. Total complexity is linear with respect to the number of samples per ray [S2, unofficial].
-*   **Memory Complexity**: $O(1)$ auxiliary memory per ray, storing only the current best reference, coordinate, and value [S2, unofficial].
-*   **Strengths**: Rapid generation of images highlighting low-intensity structures (e.g., airways, vessels in angiography); hardware acceleration is straightforward as it requires only a reduction operation [S1].
-*   **Limitations**: Loss of depth information makes it difficult to distinguish overlapping structures; static images lack context compared to volume rendering [S1].
-*   **When to Use**: When visualizing hypodense structures like lungs, air-filled sinuses, or specific vessel types in CT/MR angiography [S1].
-*   **When Not to Use**: When depth perception is critical or when the volume contains significant noise that could be mistaken for the true minimum [S1].
+*   **Time Complexity:** $O(N)$ per ray, where $N$ is the number of samples. The refinement loop adds a constant overhead ($4 \times 2$ samples).
+*   **Memory Complexity:** $O(1)$ auxiliary memory per ray, excluding the volume storage.
+*   **Performance:** Fast, as it requires only a single pass and no accumulation of opacity. It is often accelerated by graphics hardware [S1].
+*   **Strengths:** Clearly displays low-density structures (e.g., lungs, vessels) [S1]. Interactive exploration is feasible [S1].
+*   **Limitations:** Loses depth information, making it difficult to perceive the 3D arrangement of structures [S1]. Static images may be misleading due to the lack of depth cues [S1]. Only a small fraction of the data (the minimums) is used [S1].
 
 ## Background
-MinIP was developed as a complementary technique to Maximum Intensity Projection (MIP) in the context of projective diagnostic imaging [S1]. It gained prominence in 3D CT and MR angiography for its ability to clearly display vessels, tumors, or bones by highlighting the minimum intensity along the ray [S1]. While early implementations were computationally expensive, graphics hardware acceleration has made interactive exploration possible [S1]. Despite its utility, static MinIP images are limited by the lack of depth information, leading to the development of interactive or animated sequences to mitigate this drawback [S1].
+MinIP was developed in the context of projective diagnostic imaging, specifically for 3D CT and MR angiography [S1]. It is widely used alongside MIP to visualize different tissue densities [S1]. The technique has been accelerated by graphics hardware to allow for interactive exploration [S1].
 
 ## Sources
 [S1] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27

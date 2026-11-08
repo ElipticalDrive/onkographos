@@ -3,62 +3,52 @@
 Also called: Projected Tetrahedra, Tetrahedral Volume Rendering, Marching Tetrahedrons
 
 ## Overview
-This family renders volumetric data by decomposing the volume into tetrahedral primitives, projecting them onto the 2D image plane, and rasterizing them to accumulate color and opacity [S1, S2][S3, unofficial][S4, S6, S7][S8, S9, S10, unofficial][S11][S12, unofficial][S14, S16][S17, S18, unofficial]. It solves the problem of rendering unstructured or irregular grids with high performance by leveraging hardware-accelerated rasterization instead of ray marching [S3, unofficial]. Unlike [Tetrahedral Volume Rendering](820-tetrahedral-volume-rendering.md) which often relies on GPGPU techniques to compute projection geometry and intersection parameters in a first pass, [Projected Tetrahedra](877-projected-tetrahedra.md) uses explicit geometric projection and scan-conversion [S2][S4, S6, S7][S12, unofficial][S14, S16].
+The tetrahedral representation and traversal family decomposes volumetric data into tetrahedral primitives to leverage hardware-accelerated rasterization or efficient geometric traversal, solving the problem of rendering unstructured or irregular grids without the sampling artifacts of grid-based methods [S1][S2, unofficial][S3]. Unlike [Cell projection](26-cell-projection.md) methods that may use cubes or splats, this family specifically utilizes tetrahedra to resolve topological ambiguities in isosurface extraction or to provide exact geometric projection for transparency [S1][S2, unofficial][S3]. It differs from [Projected Tetrahedra](877-projected-tetrahedra.md) in that the broader family includes traversal-based ray casting and isosurface extraction, whereas PT is strictly an object-order rasterization technique.
 
 ## Shared principles
-The cell projection family shares the fundamental mechanism of treating volumetric data as a set of geometric primitives that are transformed and rasterized [S1][S3, unofficial][S4, book].
+The tetrahedral family shares the fundamental mechanism of decomposing volumetric cells into tetrahedra to handle irregular connectivity and topological consistency [S1][S2, unofficial][S3].
 
-1.  **Primitive Representation:** The volume is decomposed into primitives. These may be explicit geometric shapes (cubes, cells, splats) or implicit functions sampled via texture hardware [S1][S3, unofficial][S4, book].
-2.  **Transformation:** Primitives are transformed from volume space to screen space using the Model-View-Projection (MVP) matrix or specific factorizations (e.g., shear-warp) [S2][S3, unofficial][S4, book].
-3.  **Rasterization:** The transformed primitives are projected onto the 2D image plane. This step leverages hardware-accelerated scan-conversion, depth testing, and blending [S1, S2][S3, unofficial][S4, book].
-4.  **Compositing:** Contributions are accumulated to form the final image. This is typically done using alpha blending in back-to-front or front-to-back order to handle transparency correctly [S1, S2][S3, S7, unofficial].
-5.  **Hardware Acceleration:** Most methods in this family rely on GPU rasterization pipelines for performance, enabling real-time interactivity [S1, S2][S3, unofficial].
+1.  **Decomposition:** Volumetric cells (typically cubes or hexahedra) are subdivided into tetrahedra. For cubes, this often involves splitting along a main diagonal into 5 or 6 tetrahedra to ensure consistent connectivity and avoid cracks between adjacent cells [S1][S2, unofficial][S3].
+2.  **Geometric Primitive:** The tetrahedron is the primary primitive. It is defined by four vertices $\{V_0, V_1, V_2, V_3\}$ and associated scalar values or attributes [S1][S2, unofficial][S3].
+3.  **Topological Consistency:** Using tetrahedra resolves the topological ambiguities inherent in cube-based methods (like Marching Cubes) because the intersection of an isosurface with a tetrahedron is always a simple polygon, eliminating complex case tables [S1].
+4.  **Projection/Traversal:** The tetrahedra are either projected onto the 2D image plane for rasterization (object-order) or traversed by rays for ray casting (image-order) [S2, unofficial][S3].
 
 ## Subtopics
 
 ### [Tetrahedral Volume Rendering](820-tetrahedral-volume-rendering.md)
-A cell-projection method that decomposes volumetric data into tetrahedral primitives, projects them onto the screen, and rasterizes them to accumulate color and opacity. It solves the problem of rendering unstructured or irregular grids with high performance by leveraging hardware-accelerated rasterization instead of ray marching. Unlike [Projected Tetrahedra](877-projected-tetrahedra.md) which often relies on explicit geometry generation, this method frequently uses GPGPU techniques to compute projection geometry and intersection parameters in a first pass, then renders triangle fans in a second pass. It also supports Basis Tensor (BT) volumes for isosurface rendering, allowing arbitrary isosurface values via density addition.
+A GPU-based method using a two-pass pipeline to project tetrahedra and compute intersection data, supporting Basis Tensor volumes for isosurface rendering via density addition.
 
 ### [Projected Tetrahedra](877-projected-tetrahedra.md)
-An object-order volume rendering technique that projects volumetric primitives, specifically tetrahedra, onto the 2D image plane to leverage hardware-accelerated rasterization. It solves the problem of rendering unstructured tetrahedral grids by decomposing each 3D cell into a set of partially transparent 2D triangles, which are then composited in back-to-front order. Unlike [Tetrahedral Volume Rendering](820-tetrahedral-volume-rendering.md), which often relies on ray casting, PT uses explicit geometric projection and scan-conversion. It differs from [GPU-based Projected Tetrahedra](7484-gpu-based-projected-tetrahedra.md) in that the original PT algorithm performs sorting and projection in software, whereas later variants offload these steps to the GPU.
+An object-order technique that projects tetrahedra into 2D triangles, classifies them into projection classes, and rasterizes them in back-to-front order to handle transparency.
 
 ### [Marching Tetrahedrons Algorithm](940-marching-tetrahedrons-algorithm.md)
-An isosurface extraction method that decomposes volumetric data cells into tetrahedra to resolve topological ambiguities inherent in cube-based methods like Marching Cubes. Unlike its siblings, MTA guarantees topological consistency by ensuring that the intersection of an isosurface with a tetrahedron is always a simple polygon, eliminating the need for complex case tables required by cubic decompositions.
+An isosurface extraction method that decomposes cubes into tetrahedra to guarantee topological consistency, resolving ambiguities present in Marching Cubes.
 
 ### [Adaptive Delaunay Update](4923-adaptive-delaunay-update.md)
-A strategy for maintaining the topological validity of a tetrahedral mesh during optimization-based volumetric reconstruction, specifically within frameworks like Radiance Meshes. It addresses the problem of computational cost versus geometric accuracy when vertex positions change dynamically. Unlike methods that recompute the Delaunay triangulation from scratch at every iteration, this method updates the topology only periodically, balancing GPU acceleration speed with rendering accuracy.
-
-### [GPU-based Projected Tetrahedra](7484-gpu-based-projected-tetrahedra.md)
-A direct volume rendering method for unstructured tetrahedral data that achieves interactive rates by treating each tetrahedron as a distinct geometric primitive and rasterizing it using hardware operations. It differs from traditional ray casting by leveraging hardware rasterization and blending to compute pixel color, avoiding explicit per-pixel ray-tetrahedron intersection tests. It builds on [Projected Tetrahedra](877-projected-tetrahedra.md) by mapping the classification and decomposition logic into programmable vertex shaders, allowing tetrahedral elements to be volume scan-converted within the GPU without pre-processing or additional data structures.
-
-### [Texture-Encoded Isosurfacing](7682-texture-encoded-isosurfacing.md)
-A GPU-based method for extracting isosurfaces from unstructured tetrahedral grids by leveraging 2D texturing hardware to compute intersection points. It solves the problem of efficiently rasterizing implicit surfaces on unstructured data by replacing explicit geometric intersection calculations with texture lookups. It sets itself apart from sibling methods like [Marching Tetrahedrons Algorithm](940-marching-tetrahedrons-algorithm.md) by avoiding the generation of explicit triangle primitives for the surface; instead, it projects tetrahedra faces and uses a checkerboard texture to encode the scalar field values, allowing the GPU's texture sampling hardware to determine the isosurface location.
+A strategy for maintaining Delaunay validity during optimization by performing periodic topological flips (Pachner moves) when geometric constraints are violated.
 
 ### [Parallel Projected Tetrahedra with KD-Tree Partitioning](8767-parallel-projected-tetrahedra-with-kd-tree-partitioning.md)
-This method enables parallel rendering of large unstructured tetrahedral grids by partitioning the data using a kd-tree and applying a sort-last compositing algorithm. It renders unstructured grids natively without sampling into a regular grid, avoiding the oversampling and undersampling issues inherent in grid-based approaches. Unlike other parallel rendering approaches that require continuous cell transfer, this method requires no further cell transfer once distributed; only image data is communicated between processes.
+A parallel rendering approach that partitions unstructured grids using a kd-tree and uses sort-last compositing to render large datasets.
 
 ### [Tetrahedral Mesh Connectivity Encoding](8957-tetrahedral-mesh-connectivity-encoding.md)
-The Basic Cut-Border Machine (CBM) is a region-growing compression scheme that encodes the connectivity of a tetrahedral mesh by growing a region bounded by a cut-border. It solves the problem of efficiently storing and transmitting tetrahedral mesh topology by generating a stream of opcodes that describe the position of new vertices relative to the current boundary. Unlike sibling methods that may rely on global indexing or explicit adjacency lists, CBM determines connectivity locally during traversal, ensuring unique identification of vertices across multi-resolution segments through shared vertex indices.
+A compression scheme using the Basic Cut-Border Machine (CBM) to encode tetrahedral mesh connectivity via a stream of opcodes during region-growing traversal.
 
 ### Point Representation via Tetrahedra
-- **Definition:** Representing data points as small tetrahedra to fit them into the triangular mesh framework for rendering [S1].
-- **Parameter:** `size`: specifies the size of the point tetrahedra relative to the data ranges [S1].
-
-### LinPrim Tetrahedron Representation
-- **Definition:** A scene representation using transparent tetrahedra bounded by triangular faces with homogeneous density [S2].
-- **Step:** Define four basis vectors describing directions from the center on which corners are located, equally spaced to represent regular tetrahedra [S2]. Optimize the distance between the center and each corner independently [S2].
-- **Parameter:** Tetrahedra memory requirement: 12 floats per primitive (omitting color), due to absence of symmetry in the formulation [S2].
-- **Pitfall:** Unlike octahedra, the optimized position (center) can differ from the geometric center of the primitive due to lack of symmetry [S2].
+*   **Definition:** Representing data points as small tetrahedra to fit them into the triangular mesh framework for rendering [S1].
+*   **Parameter:** `size`: Specifies the size of the point tetrahedra relative to the data ranges [S1].
 
 ### Grid-based Traversal
-- **Definition:** A method using a hierarchical data structure for rectilinear grids to quickly determine tetrahedra possibly hit by traversed grid cells, enabling interactive rendering of irregular volume data [S3, unofficial].
-- **Step:** Attach all tetrahedra intersecting a given grid cell to that cell [S3, unofficial]. Use minimum and maximum values to cull regions outside of the current iso-value [S3, unofficial].
-- **Number:** Rendered a bioelectric field of over one million tetrahedra at interactive rates (512x512 viewport) with 16 processors or more [S3, unofficial].
+*   **Definition:** A method using a hierarchical data structure for rectilinear grids to quickly determine tetrahedra possibly hit by traversed grid cells, enabling interactive rendering of irregular volume data [S2, unofficial].
+*   **Step:** Attach all tetrahedra intersecting a given grid cell to that cell. Use minimum and maximum values to cull regions outside of the current iso-value [S2, unofficial].
+*   **Number:** Rendered a bioelectric field of over one million tetrahedra at interactive rates (512x512 viewport) with 16 processors or more [S2, unofficial].
+
+### Delaunay Triangulation for Tetrahedral Representation
+*   **Step:** Obtain a tetrahedral representation of the Voronoi sites via Delaunay triangulation using gDel3D to accelerate computation on the GPU. Recompute the triangulation from scratch at every iteration [S3].
 
 ## Background
-The concept of decomposing volumetric data into tetrahedra for rendering or surface extraction has roots in the late 1990s. Parker et al. demonstrated one of the first methods able to render irregular volume data at interactive rates on a supercomputer using tetrahedral decomposition [S3, unofficial]. The Marching Tetrahedrons Algorithm (MTA) was developed to resolve topological ambiguities present in the Marching Cubes algorithm by ensuring consistent isosurface extraction within tetrahedral cells [S1]. Projected Tetrahedra (PT) was introduced as an object-order rendering technique to leverage hardware rasterization for unstructured grids [S1, S2][S3, unofficial][S4, S6, S7][S8, S9, S10, unofficial][S11][S12, unofficial][S14, S16][S17, S18, unofficial]. More recently, differentiable rendering techniques have adapted tetrahedral representations for gradient-based optimization [S1][S2].
+The use of tetrahedra in volume rendering and geometric processing originated from the need to handle unstructured grids and resolve topological issues in isosurface extraction. The Marching Tetrahedrons Algorithm (MTA) was developed to address the topological ambiguities of Marching Cubes by ensuring consistent surface connectivity [S1]. Interactive rendering of large unstructured tetrahedral datasets was pioneered by Parker et al., who demonstrated ray tracing of over one million tetrahedra on supercomputers using grid-based traversal [S2, unofficial]. More recently, GPU-accelerated projected tetrahedra methods have enabled real-time rendering of unstructured data by leveraging hardware rasterization [S3].
 
 ## Sources
-[S1] Computing and Displaying Isosurfaces inR, https://doi.org/10.18637/jss.v028.i01, fetched 2026-10-27
-[S2] LinPrim: Linear Primitives for Differentiable Volumetric Rendering, https://arxiv.org/abs/2501.16312, fetched 2026-10-26
-[S3] Interactive Volume Rendering Techniques, https://www.scribd.com/document/479714183/Interactive-Volume-Rendering-with-Ray-Tracing, fetched 2026-10-25 (unofficial)
+[S1] Computing and Displaying Isosurfaces in R, https://doi.org/10.18637/jss.v028.i01, fetched 2026-10-27
+[S2] Interactive Volume Rendering Techniques, https://www.scribd.com/document/479714183/Interactive-Volume-Rendering-with-Ray-Tracing, fetched 2026-10-25 (unofficial)
+[S3] DCCVT: Differentiable Clipped Centroidal Voronoi Tessellation, https://arxiv.org/abs/2601.13603v1, fetched 2026-10-26

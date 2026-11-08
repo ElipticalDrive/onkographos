@@ -3,191 +3,235 @@
 Also called: Mesh Culling via Mask Projection
 
 ## Overview
-Mask Projection Culling is a visibility optimization technique that filters mesh vertices and faces by projecting them into multiple camera views and checking if they fall within dilated binary masks, thereby removing geometry not visible in any view [S1, unofficial]. Unlike sibling methods that rely on static voxel occupancy or back-face normals, this method uses explicit camera projections and image-space masks to determine visibility, making it suitable for dynamic scenes or specific view-dependent optimizations [S1, unofficial]. It builds on [Face Culling and Visibility Optimization](3861-face-culling-and-visibility-optimization.md) by replacing neighbor-based checks with projection-based masking.
+Mask Projection Culling is a visibility optimization technique that filters mesh vertices and faces by projecting them into multiple camera views and checking if they fall within dilated binary masks, removing geometry not visible in any view [S1, unofficial]. Unlike local adjacency-based methods like [Face Culling](8735-face-culling.md) or [Block Visibility Culling](5334-block-visibility-culling.md) which rely on voxel occupancy, this method uses global camera visibility to cull geometry, making it suitable for sparse or non-voxel-based representations where view-dependent occlusion is significant [S1, unofficial]. It sets itself apart from [Face Coverage Mask Culling](3397-face-coverage-mask-culling.md) by operating on the final mesh geometry rather than pre-computed face coverage data, and from [Mesh Culling via 3D Projection and Connected Components](6963-mesh-culling-via-3d-projection-and-connected-components.md) by relying on binary mask intersection rather than connected component analysis.
 
 ## How it works
 **Inputs:**
-- A mesh defined by vertices $V$ and faces $F$.
-- Camera parameters: world matrices ($W$), scale matrices ($S$), and intrinsic matrices ($K$).
-- Binary masks for each camera view, stored as images.
-- Image dimensions $W_{img}$ and $H_{img}$ (hard-coded as 1600 and 1200 in the source implementation) [S1, unofficial].
-- Mask dilation radius $r$ (hard-coded as 24 in the source implementation) [S1, unofficial].
+- A mesh defined by vertices $V \in \mathbb{R}^{N \times 3}$ and faces $F \in \mathbb{R}^{M \times 3}$ (indices).
+- A set of $K$ camera views, each with world-to-camera pose $P_{w2c} \in \mathbb{R}^{4 \times 4}$ and intrinsic matrix $K \in \mathbb{R}^{3 \times 3}$.
+- Binary masks $M_i \in \{0, 1\}^{H \times W}$ for each view $i$, representing the visible region (e.g., from a depth map or segmentation).
+- Image dimensions $W, H$.
 
 **Outputs:**
-- A filtered mesh containing only vertices and faces visible in at least one camera view.
+- A filtered mesh with vertices $V'$ and faces $F'$ containing only geometry visible in at least one camera view.
 
 **Data Structures:**
-- `vertices`: Array of 3D coordinates $(x, y, z)$.
-- `faces`: Array of indices referencing vertices.
-- `masks`: 2D binary arrays (float tensors) for each camera view.
+- `vertices`: Array of shape $(N, 3)$, float32.
+- `faces`: Array of shape $(M, 3)$, int32.
+- `masks`: List of tensors or arrays, each shape $(H, W)$, float32 (0.0 or 1.0).
+- `poses`: List of $4 \times 4$ matrices, float32.
+- `intrinsics`: $3 \times 3$ matrix, float32.
+
+**Parameters:**
+- `dilation_radius`: Integer, radius for morphological dilation of masks. Typical value: 24 [S1, unofficial].
+- `ndc_scale`: Float, used for normalization. Derived from image dimensions.
+- `epsilon`: Float, small constant for numerical stability in division. Typical value: $10^{-6}$ [S1, unofficial].
 
 **Steps:**
-1.  **Load Camera Parameters:** Extract scale matrices $S$ and world matrices $W$ from camera data. Compute the projection matrix $P = W \times S$. Decompose $P$ to extract intrinsic matrix $K$ and pose matrix (view matrix) $V_{iew}$ [S1, unofficial].
-2.  **Load Masks:** Load binary masks from image files. Convert to float tensors. Apply morphological dilation with a disk kernel of radius $r$ to handle boundary cases [S1, unofficial].
-3.  **Project Vertices:** For each camera view $i$:
-    a. Compute the inverse view matrix $V_{iew}^{-1}$ (world-to-camera inverse, or camera-to-world inverse depending on convention; source uses `torch.inverse(pose)` where pose is view) [S1, unofficial].
-    b. Transform vertices to camera space: $P_{cam} = K \times V_{iew}^{-1} \times V_{world}$. Note: The source code applies `intrinsic @ w2c @ vertices`, implying $V_{world}$ is the vertex positions in world space, and $w2c$ is the inverse of the pose matrix [S1, unofficial].
-    c. Compute pixel coordinates: $u = \frac{P_{cam,x}}{P_{cam,z} + \epsilon}$, $v = \frac{P_{cam,y}}{P_{cam,z} + \epsilon}$, where $\epsilon = 10^{-6}$ to avoid division by zero [S1, unofficial].
-    d. Normalize to NDC space $[-1, 1]$:
-       $$ u_{ndc} = \left( \frac{u}{W_{img} - 1} - 0.5 \right) \times 2 $$
-       $$ v_{ndc} = \left( \frac{v}{H_{img} - 1} - 0.5 \right) \times 2 $$
-    e. Compute validity mask for points inside NDC bounds: $valid = (u_{ndc} > -1) \land (u_{ndc} < 1) \land (v_{ndc} > -1) \land (v_{ndc} < 1)$ [S1, unofficial].
-    f. Sample the dilated mask at $(u_{ndc}, v_{ndc})$ using nearest-neighbor interpolation. A vertex is visible in this view if the sampled mask value is $> 0$ and the point is within NDC bounds [S1, unofficial].
-4.  **Aggregate Visibility:** A vertex is considered globally visible if it is visible in *any* camera view. Create a boolean mask for vertices [S1, unofficial].
-5.  **Filter Faces:** A face is kept if all its constituent vertices are globally visible. Create a boolean mask for faces [S1, unofficial].
-6.  **Transform and Export:** Transform the remaining vertices back to world space using the scale matrix $S$ (specifically $S[0,0]$ for scaling and $S[:3,3]$ for translation) and export the filtered mesh [S1, unofficial].
+
+1. **Load Camera Parameters:**
+   Extract world-to-camera transformation matrices and intrinsic matrices for all $K$ views. If raw world-to-camera matrices $W_{world}$ and scale matrices $S_{scale}$ are provided, compute the projection matrix $P = W_{world} \times S_{scale}$, then decompose $P$ into intrinsics $K$ and pose $P_{w2c}$ [S1, unofficial].
+
+2. **Load Masks:**
+   Load binary masks for each view. Ensure masks are resized or padded to match the target image dimensions $W \times H$ [S1, unofficial].
+
+3. **Dilate Masks:**
+   For each mask $M_i$, apply morphological dilation using a disk structuring element of radius `dilation_radius`. Convert the resulting binary mask to a float tensor $M'_i$ where visible pixels are 1.0 and others are 0.0 [S1, unofficial].
+
+4. **Project Vertices:**
+   For each view $i$ from $0$ to $K-1$:
+   a. Compute the inverse pose $W_{2c} = P_{w2c}^{-1}$ [S1, unofficial].
+   b. Transform vertices to camera space: $V_{cam} = W_{2c} \times [V^T, 1]^T$. This results in a $4 \times N$ matrix.
+   c. Project to 2D pixel coordinates:
+      $$
+      v_{uv} = \frac{K \times V_{cam}[0:2, :]}{V_{cam}[2, :] + \epsilon}
+      $$
+      where $v_{uv} \in \mathbb{R}^{2 \times N}$ [S1, unofficial].
+   d. Normalize to Normalized Device Coordinates (NDC) space $[-1, 1]$:
+      $$
+      v_{ndc}[0, :] = \frac{v_{uv}[0, :]}{W - 1} \times 2 - 1
+      $$
+      $$
+      v_{ndc}[1, :] = \frac{v_{uv}[1, :]}{H - 1} \times 2 - 1
+      $$
+      [S1, unofficial].
+   e. Compute validity mask for points inside NDC bounds:
+      $$
+      valid_i = (v_{ndc}[0, :] > -1) \land (v_{ndc}[0, :] < 1) \land (v_{ndc}[1, :] > -1) \land (v_{ndc}[1, :] < 1)
+      $$
+      [S1, unofficial].
+   f. Sample the dilated mask $M'_i$ at the NDC coordinates $v_{ndc}$. Using nearest-neighbor interpolation with zero padding:
+      $$
+      sampled\_mask_i = \text{GridSample}(M'_i, v_{ndc}, \text{mode}=\text{'nearest'}, \text{padding\_mode}=\text{'zeros'}, \text{align\_corners}=\text{True})
+      $$
+      [S1, unofficial].
+   g. Combine validity and mask sampling:
+      $$
+      visible\_mask_i = sampled\_mask_i > 0
+      $$
+      [S1, unofficial].
+
+5. **Aggregate Visibility:**
+   Combine visibility masks from all views. A vertex is considered visible if it is valid and within the dilated mask in *any* view:
+   $$
+   vertex\_visible = \bigvee_{i=0}^{K-1} visible\_mask_i
+   $$
+   [S1, unofficial].
+
+6. **Filter Faces:**
+   A face is kept if all its vertices are visible:
+   $$
+   face\_visible = vertex\_visible[faces[:, 0]] \land vertex\_visible[faces[:, 1]] \land vertex\_visible[faces[:, 2]]
+   $$
+   [S1, unofficial].
+
+7. **Update Mesh:**
+   Select vertices and faces where `vertex_visible` and `face_visible` are true. Transform the remaining vertices back to world space if necessary (e.g., scaling by $S_{scale}[0,0]$ and translating by $S_{scale}[0:3, 3]$) [S1, unofficial].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import torch
-import torch.nn.functional as F
-from scipy.ndimage import binary_dilation
 import numpy as np
+from scipy.ndimage import binary_dilation
+from scipy.ndimage import generate_binary_structure
 
-def mask_projection_culling(vertices, faces, cameras, masks, W_img=1600, H_img=1200, dilation_radius=24):
+def mask_projection_culling(vertices, faces, poses, intrinsics, masks, W, H, dilation_radius=24):
     """
-    vertices: (N, 3) numpy array
-    faces: (M, 3) numpy array
-    cameras: list of dicts with 'world_mat', 'scale_mat', 'K', 'pose'
-    masks: list of 2D numpy arrays (binary)
+    Filter mesh vertices and faces based on visibility in multiple camera views.
+    
+    Args:
+        vertices: np.ndarray, shape (N, 3)
+        faces: np.ndarray, shape (M, 3)
+        poses: list of np.ndarray, shape (4, 4), world-to-camera matrices
+        intrinsics: np.ndarray, shape (3, 3)
+        masks: list of np.ndarray, shape (H, W), binary masks (0 or 1)
+        W: int, image width
+        H: int, image height
+        dilation_radius: int, radius for mask dilation
+        
+    Returns:
+        filtered_vertices: np.ndarray, shape (N', 3)
+        filtered_faces: np.ndarray, shape (M', 3)
     """
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    vertices_t = torch.tensor(vertices, dtype=torch.float32, device=device).T  # (3, N)
     N = vertices.shape[0]
-    global_vertex_visible = np.zeros(N, dtype=bool)
     
-    # Precompute dilation
-    dilated_masks = []
-    for mask in masks:
-        # Binary dilation with disk kernel
-        kernel = np.ones((2*dilation_radius+1, 2*dilation_radius+1), dtype=bool)
-        # Approximate disk with square for simplicity, or use scipy
-        dilated = binary_dilation(mask > 0, structure=np.ones((2*dilation_radius+1, 2*dilation_radius+1)))
-        dilated_masks.append(dilated.astype(np.float32))
+    # Initialize global visibility mask
+    global_visible = torch.zeros(N, dtype=torch.bool, device=device)
     
-    for i, cam in enumerate(cameras):
-        # Extract matrices
-        # P = world_mat @ scale_mat
-        P = cam['world_mat'] @ cam['scale_mat']
-        # Decompose P to get K and pose (view matrix)
-        # Note: Source uses rend_util.load_K_Rt_from_P(None, P)
-        # Assuming this returns K and pose (view matrix)
-        K = cam['K']
-        pose = cam['pose'] # View matrix
+    for i in range(len(poses)):
+        # 1. Load camera parameters
+        pose = torch.tensor(poses[i], dtype=torch.float32, device=device)
+        mask = torch.tensor(masks[i], dtype=torch.float32, device=device)
         
-        # Inverse pose (world-to-camera inverse? Source uses torch.inverse(pose))
-        # If pose is view matrix (world to camera), inverse is camera to world.
-        # But source code: cam_points = intrinsic @ w2c @ vertices
-        # If vertices are in world space, w2c should be world-to-camera.
-        # Let's assume pose is view matrix (world to camera).
-        # Then w2c = pose. But source says w2c = torch.inverse(pose).
-        # This implies pose might be camera-to-world? Or source has a specific convention.
-        # Let's follow source literally: w2c = inverse(pose)
-        w2c = np.linalg.inv(pose)
+        # 2. Dilate mask
+        # Note: binary_dilation works on numpy arrays, so we convert back and forth or use a CUDA kernel
+        # For simplicity, assuming numpy dilation here, then converting to tensor
+        struct = generate_binary_structure(2, 1)
+        dilated_mask_np = binary_dilation(masks[i], structure=struct, iterations=dilation_radius)
+        dilated_mask_t = torch.tensor(dilated_mask_np, dtype=torch.float32, device=device)
         
-        # Convert to tensors
-        vertices_t = torch.tensor(vertices, dtype=torch.float32).cuda()
-        K_t = torch.tensor(K, dtype=torch.float32).cuda()
-        w2c_t = torch.tensor(w2c, dtype=torch.float32).cuda()
+        # 3. Project vertices
+        # Inverse pose: world-to-camera is pose, so camera-to-world is inverse. 
+        # But we need world-to-camera for projection. 
+        # The source says: compute inverse pose w2c = torch.inverse(pose).cuda()
+        # Wait, if 'pose' is world-to-camera, we don't invert it. 
+        # The source code snippet says: "extract intrinsics and pose using rend_util.load_K_Rt_from_P(None, P)"
+        # and then "w2c = torch.inverse(pose)". This implies 'pose' loaded might be camera-to-world or similar.
+        # Let's follow the source logic strictly:
+        # Source: "compute P = world_mat @ scale_mat, extract intrinsics and pose using ... load_K_Rt_from_P"
+        # Source: "w2c = torch.inverse(pose).cuda()"
+        # This suggests 'pose' variable holds Camera-to-World or similar, and we need World-to-Camera.
+        # Let's assume 'pose' passed to this function is Camera-to-World for consistency with source's inverse step.
+        # If 'pose' is World-to-Camera, we wouldn't invert. 
+        # Given the ambiguity, we follow the source's explicit step:
+        w2c = torch.inverse(pose) # (4, 4)
         
-        # Project vertices
-        # Add homogeneous coordinate
-        vertices_h = torch.cat([vertices_t, torch.ones(N, 1).cuda()], dim=1).T # (4, N)
+        # Homogeneous coordinates: (4, N)
+        vertices_h = torch.cat([vertices_t, torch.ones((1, N), device=device)], dim=0)
         
-        # w2c @ vertices_h -> (4, N)
-        cam_points_h = w2c_t @ vertices_h
-        # intrinsic @ cam_points_h -> (3, N)
-        cam_points = K_t @ cam_points_h
+        # Transform to camera space
+        cam_points = w2c @ vertices_h # (4, N)
         
-        # Compute pixel coordinates
-        # pix_coords = cam_points[:2, :] / (cam_points[2, :].unsqueeze(0) + 1e-6)
-        pix_coords = cam_points[:2, :] / (cam_points[2, :].unsqueeze(0) + 1e-6) # (2, N)
+        # Project to 2D
+        # cam_points[:2, :] / (cam_points[2, :] + eps)
+        eps = 1e-6
+        pix_coords = cam_points[:2, :] / (cam_points[2, :].unsqueeze(0) + eps) # (2, N)
         
-        # Normalize to NDC
-        # pix_coords[..., 0] /= W - 1; pix_coords[..., 1] /= H - 1
-        pix_coords[0, :] /= (W_img - 1)
-        pix_coords[1, :] /= (H_img - 1)
-        # pix_coords = (pix_coords - 0.5) * 2
+        # Normalize to NDC [-1, 1]
+        pix_coords[0, :] /= (W - 1)
+        pix_coords[1, :] /= (H - 1)
         pix_coords = (pix_coords - 0.5) * 2
         
-        # Validity mask
-        valid = ((pix_coords[0, :] > -1) & (pix_coords[0, :] < 1) & 
-                 (pix_coords[1, :] > -1) & (pix_coords[1, :] < 1))
+        # Validity mask: inside NDC bounds
+        valid = ((pix_coords[0, :] > -1.0) & (pix_coords[0, :] < 1.0) & 
+                 (pix_coords[1, :] > -1.0) & (pix_coords[1, :] < 1.0))
         
-        # Sample mask
-        # Convert pix_coords to grid_sample format: (1, N, 1, 2) with x, y in [-1, 1]
-        # grid_sample expects (N, H, W, 2) or (1, 1, H, W) for grid
-        # Here we sample at specific points
-        grid = pix_coords.permute(1, 0).unsqueeze(0).unsqueeze(0) # (1, 1, N, 2)
+        # Sample dilated mask at projected coordinates
+        # Grid sample expects coordinates in [-1, 1]
+        # dilated_mask_t is (H, W), grid_sample expects (1, 1, H, W) or similar
+        # We need to reshape for grid_sample
+        dilated_mask_t = dilated_mask_t.unsqueeze(0).unsqueeze(0) # (1, 1, H, W)
         
-        # Load mask tensor
-        mask_t = torch.tensor(dilated_masks[i], dtype=torch.float32).cuda().unsqueeze(0).unsqueeze(0) # (1, 1, H, W)
+        # Create grid for sampling
+        # pix_coords is (2, N). grid_sample expects (N, 2) in [-1, 1]
+        sample_coords = pix_coords.t().unsqueeze(0).unsqueeze(0) # (1, 1, N, 2)
         
-        # Sample
-        # F.grid_sample(input, grid, mode='nearest', padding_mode='zeros', align_corners=True)
-        sampled = F.grid_sample(mask_t, grid, mode='nearest', padding_mode='zeros', align_corners=True) # (1, 1, N, 1)
+        sampled = torch.nn.functional.grid_sample(
+            dilated_mask_t, 
+            sample_coords, 
+            mode='nearest', 
+            padding_mode='zeros', 
+            align_corners=True
+        ) # (1, 1, N, 1)
+        
         sampled = sampled.squeeze() # (N,)
         
-        # Vertex visible in this view if sampled > 0 and valid
-        view_visible = (sampled > 0) & valid
+        # Combine validity and mask
+        visible = (sampled > 0.0) & valid
         
         # Update global visibility
-        global_vertex_visible |= view_visible.cpu().numpy()
-    
+        global_visible = global_visible | visible
+        
     # Filter faces
-    # face_mask = mask[mesh.faces].all(axis=1)
-    face_mask = global_vertex_visible[faces].all(axis=1)
+    # faces is (M, 3)
+    face_vertices_visible = global_visible[faces] # (M, 3)
+    face_visible = face_vertices_visible.all(dim=1) # (M,)
     
-    # Filter vertices and faces
-    filtered_vertices = vertices[global_vertex_visible]
-    filtered_faces = faces[face_mask]
-    
-    # Transform back to world space
-    # Source: transform vertices back to world space using scale_mat[0,0] and scale_mat[:3,3]
-    # This implies scaling and translation.
-    # Let's assume scale_mat is a 4x4 matrix.
-    # The source code says: transform vertices back to world space using scale_mat[0,0] and scale_mat[:3,3]
-    # This is ambiguous. It might mean: v_world = v_filtered * scale_mat[0,0] + scale_mat[:3,3]
-    # Or it might mean applying the full scale_mat.
-    # Given the context of 3DGS, scale_mat often includes scale and translation.
-    # Let's assume the vertices are currently in a normalized space and need to be scaled/translated.
-    # We'll apply the scale and translation from scale_mat.
-    scale = cameras[0]['scale_mat'][0, 0]
-    translation = cameras[0]['scale_mat'][:3, 3]
-    
-    filtered_vertices = filtered_vertices * scale + translation
+    # Filter vertices
+    filtered_vertices = vertices[global_visible.cpu().numpy()]
+    filtered_faces = faces[face_visible.cpu().numpy()]
     
     return filtered_vertices, filtered_faces
 ```
 
-**Parameters:**
-- $W_{img}, H_{img}$: Image width and height. Typical values: 1600, 1200 [S1, unofficial].
-- $r$: Dilation radius. Typical value: 24 [S1, unofficial].
-- $\epsilon$: Epsilon for division. Typical value: $10^{-6}$ [S1, unofficial].
-
 **Edge Cases and Pitfalls:**
-- Division by zero in projection: handled by adding $\epsilon$ to depth [S1, unofficial].
-- Points outside NDC bounds: handled by validity mask [S1, unofficial].
-- Mask boundaries: handled by dilation [S1, unofficial].
-- Precision: Floating point operations in projection and normalization should be done in float32 or float64 to avoid precision issues [S1, unofficial].
+- **Precision:** Division by zero in projection is handled by adding $\epsilon$ [S1, unofficial].
+- **Boundaries:** Points exactly on the NDC boundary (-1 or 1) are excluded by strict inequality checks `> -1` and `< 1` [S1, unofficial].
+- **Degenerate Input:** If a mask is all zeros, no vertices will be visible in that view. If all masks are empty, the mesh is culled entirely.
+- **Performance:** Sampling masks for every vertex can be expensive for large meshes. Batching or GPU acceleration is recommended [S1, unofficial].
 
 ## Subtopics
 
 ### True Back-Face Culling via Group Masking
-A back-face culling technique that splits chunk meshes into 6 vertex pool buckets based on face orientation (groups 0-5). Draw calls are masked based on camera position relative to the chunk, preventing the draw call from being issued entirely rather than culling in the fragment shader [S2, unofficial]. It is chosen when driver overhead must be minimized and chunk meshing is used. It avoids the 6-fold increase in driver overhead that would result from splitting chunks into 6 sub-meshes [S2, unofficial].
+A back-face culling technique that splits chunk meshes into 6 vertex pool buckets based on face orientation (groups 0-5) [S2, unofficial]. Draw calls are masked based on the camera position relative to the chunk, preventing the draw call from being issued entirely rather than culling in the fragment shader [S2, unofficial]. It is chosen when driver overhead must be minimized compared to splitting chunks into 6 sub-meshes, which would increase overhead 6-fold [S2, unofficial]. The method uses a `groups` set to track which orientations are visible (e.g., if `cam::pos.x < 0`, group 0 is included) and masks the vertex pool accordingly [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N \times V)$, where $N$ is the number of vertices and $V$ is the number of views. Projection and sampling are linear in the number of vertices.
-- **Memory Complexity:** $O(N + M)$, where $M$ is the number of faces. Storage for masks and intermediate tensors.
+- **Time Complexity:** $O(N \cdot K)$, where $N$ is the number of vertices and $K$ is the number of camera views. Projection and sampling are linear in vertices and views.
+- **Memory Complexity:** $O(N + K \cdot H \cdot W)$ for storing vertices and masks.
 - **Measured Performance:** Not given in the sources.
-- **Scaling:** Scales linearly with the number of vertices and views.
-- **Strengths:** Effective for view-dependent culling, handles complex visibility patterns via masks.
-- **Limitations:** Requires pre-computed masks, which may not be available for all scenes. Performance depends on the number of views.
-- **When to use:** When visibility is view-dependent and masks are available.
-- **When not to use:** When masks are not available or when real-time culling without pre-computation is required.
+- **Scaling:** Scales linearly with the number of vertices and views. Mask dilation is constant time per view.
+- **Strengths:** Effective for view-dependent culling in sparse scenes or non-voxel representations. Can remove large portions of geometry not visible from any camera.
+- **Limitations:** Requires pre-defined camera views. Does not handle dynamic occlusion from other geometry within the scene, only camera visibility. Computationally expensive for very large meshes due to per-vertex sampling.
+- **When to use:** When visibility is determined by camera position and masks are available (e.g., from depth maps or segmentation).
+- **When not to use:** For real-time rendering with dynamic cameras where pre-computing masks is not feasible, or for dense voxel grids where local face culling is more efficient.
 
 ## Background
-Originated in the context of 2D Gaussian Splatting optimization, specifically in the `hbb1/2d-gaussian-splatting` repository [S1, unofficial]. It is used to filter mesh geometry based on camera views and masks, likely to reduce rendering load or improve training efficiency by focusing on visible regions.
+Mask Projection Culling originates from techniques used in 3D Gaussian Splatting and related rendering pipelines, where visibility is determined by projecting Gaussians or mesh vertices into camera views and checking against binary masks [S1, unofficial]. The method is described in the context of optimizing mesh representation for view-dependent rendering [S1, unofficial]. True Back-Face Culling via Group Masking is described in the context of high-performance voxel engines, aiming to reduce driver overhead by masking draw calls based on camera orientation [S2, unofficial].
 
 ## Sources
 [S1] hbb1/2d-gaussian-splatting, https://github.com/hbb1/2d-gaussian-splatting, fetched 2026-10-27 (unofficial)

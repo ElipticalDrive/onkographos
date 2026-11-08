@@ -1,0 +1,231 @@
+# Custom Volume Sampling via GLSL Injection
+
+Also called: Custom GLSL Volume Sampling
+
+## Overview
+Custom Volume Sampling via GLSL Injection is a mechanism that overrides the default volume sampling logic by injecting a user-defined GLSL function into the fragment shader. This allows for arbitrary scalar value calculation at voxel positions and time steps without requiring an atlas texture or pre-computed scalar fields [S1, unofficial]. It distinguishes itself from standard trilinear sampling by decoupling the data retrieval logic from the texture fetch, enabling dynamic, procedural, or external-data-driven volume evaluation directly within the rendering pipeline [S1, unofficial].
+
+## How it works
+The method operates by intercepting the scalar value retrieval step in the volume ray-marching loop. Instead of performing a `texture3D` (or equivalent) lookup on a bound 3D texture, the renderer executes a custom GLSL function provided by the application. This function computes the density or scalar value based on input parameters, which are passed from the CPU to the GPU via uniforms.
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   `options.customFunction`: A string containing the GLSL source code for the custom sampling function.
+    *   `options.raySteps`: Integer specifying the number of steps along the ray.
+    *   `options.useVolumetricDepthTest`: Boolean flag.
+    *   `options.useExtinctionCoefficient`: Boolean flag.
+    *   `options.useValueAsExtinctionCoefficient`: Boolean flag.
+    *   `options.usePointLights`: Boolean flag.
+    *   `options.useDirectionalLights`: Boolean flag.
+    *   `options.useRandomStart`: Boolean flag.
+    *   `options.renderMeanValue`: Boolean flag.
+    *   `options.invertNormals`: Boolean flag.
+    *   `options.renderNormals`: Boolean flag.
+    *   `options.minPaletteValue`: Number.
+    *   `options.maxPaletteValue`: Number.
+    *   `options.minCutoffValue`: Number.
+    *   `options.maxCutoffValue`: Number.
+    *   `options.cutoffFadeRange`: Number.
+    *   `options.valueMultiplier`: Number.
+    *   `options.valueAdded`: Number.
+    *   `options.extinctionCoefficient`: Number.
+    *   `options.extinctionMultiplier`: Number.
+    *   `options.alphaMultiplier`: Number.
+    *   `uniforms.normalEpsilon`: Number (default 0.001). Used for normal estimation if lighting/normals are enabled.
+    *   `uniforms.depthTexture`: Required if `useVolumetricDepthTest` is true.
+    *   `volumeOrigin`: World-space origin of the volume.
+    *   `time`: Current time step.
+*   **Outputs**:
+    *   The scalar value returned by `sampleValue`.
+    *   Final rendered color and alpha based on the accumulated samples and lighting.
+
+### Data Structures
+The implementation relies on a configuration object `options` passed to the renderer's material update routine. The core data structure for the custom function is a string containing valid GLSL code. The GLSL function signature is fixed:
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```glsl
+float sampleValue(float x, float y, float z, float t)
+```
+
+Where:
+*   `x`, `y`, `z`: Local positions inside the volume in world-space units relative to `volumeOrigin`.
+*   `t`: The current time step.
+*   Return value: The scalar value at that point.
+
+### Parameters and Typical Values
+*   `raySteps`: Default 64. Performance scales linearly with this value [S1, unofficial].
+*   `useRandomStart`: Default true. Randomizes ray start position to soften edges [S1, unofficial].
+*   `useExtinctionCoefficient`: Default true [S1, unofficial].
+*   `useValueAsExtinctionCoefficient`: Default false [S1, unofficial].
+*   `usePointLights`: Default false. Enables point lights; normals are estimated, decreasing performance [S1, unofficial].
+*   `useDirectionalLights`: Default false. Enables directional lights; normals are estimated, decreasing performance [S1, unofficial].
+*   `renderMeanValue`: Default false. Renders the mean value across the volume instead of alpha blending [S1, unofficial].
+*   `renderNormals`: Default false. Renders surface normals at the first hit; normals are estimated, decreasing performance [S1, unofficial].
+*   `normalEpsilon`: Default 0.001. Real-unit epsilon used when estimating the forward difference for normals [S1, unofficial].
+
+### Steps
+1.  **Configuration**: The user provides `options.customFunction` as a GLSL string. If `null` or empty, the default texture sampling is used [S1, unofficial].
+2.  **Shader Injection**: The renderer injects the `sampleValue` function body into the fragment shader. The function must adhere to the signature `float sampleValue(float x, float y, float z, float t)` [S1, unofficial].
+3.  **Uniform Update**: The renderer updates material uniforms based on `options`. Key uniforms include `raySteps`, `useExtinctionCoefficient`, `useValueAsExtinctionCoefficient`, `usePointLights`, `useDirectionalLights`, `useRandomStart`, `renderMeanValue`, `invertNormals`, `renderNormals`, `minPaletteValue`, `maxPaletteValue`, `minCutoffValue`, `maxCutoffValue`, `cutoffFadeRange`, `valueMultiplier`, `valueAdded`, `extinctionCoefficient`, `extinctionMultiplier`, `alphaMultiplier`, and `normalEpsilon` [S1, unofficial].
+4.  **Ray Marching Loop**: For each pixel, a ray is cast through the volume. The loop iterates `raySteps` times.
+    *   If `useRandomStart` is true, the initial ray origin is perturbed [S1, unofficial].
+    *   At each step, the current position `(x, y, z)` relative to `volumeOrigin` and the time `t` are passed to the injected `sampleValue` function [S1, unofficial].
+    *   The returned scalar value is processed according to other options:
+        *   If `renderNormals` is true, normals are estimated using `normalEpsilon` for forward differences, and the shader may exit early upon first hit [S1, unofficial].
+        *   If `renderMeanValue` is false, cutoffs (`minCutoffValue`, `maxCutoffValue`) are applied. Values outside the range are discarded or faded using `cutoffFadeRange` [S1, unofficial].
+        *   The value is scaled by `valueMultiplier` and offset by `valueAdded` [S1, unofficial].
+        *   If `useExtinctionCoefficient` is true and `useValueAsExtinctionCoefficient` is false, the fixed `extinctionCoefficient` (scaled by `extinctionMultiplier`) is used for alpha blending [S1, unofficial]. If `useValueAsExtinctionCoefficient` is true, the sampled value itself acts as the extinction coefficient [S1, unofficial].
+        *   If `usePointLights` or `useDirectionalLights` is true, lighting calculations are performed using the estimated normals [S1, unofficial].
+        *   The result is accumulated into the final color and alpha, scaled by `alphaMultiplier` if `renderNormals` is false [S1, unofficial].
+5.  **Volumetric Depth Test**: If `useVolumetricDepthTest` is true, the renderer expects a `uniforms.depthTexture` to be set and performs depth testing against it [S1, unofficial].
+
+### Pseudocode
+The following pseudocode illustrates the injection and execution logic in a Python-like style, representing the CPU-side setup and the resulting GPU-side shader logic.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def setup_custom_volume_sampling(renderer, options):
+    """
+    Configures the volume renderer with custom GLSL sampling.
+    """
+    # 1. Validate custom function
+    if not options.get('customFunction'):
+        raise ValueError("customFunction must be a non-empty GLSL string")
+
+    glsl_code = options['customFunction']
+    
+    # 2. Define the fixed signature wrapper
+    # The renderer injects this into the fragment shader
+    signature = "float sampleValue(float x, float y, float z, float t)"
+    
+    # 3. Construct the full shader function
+    # Note: In a real implementation, the renderer handles the injection.
+    # Here we show the logical structure.
+    full_function = f"""
+    {signature} {{
+        {glsl_code}
+    }}
+    """
+    
+    # 4. Update renderer material with options
+    # This triggers the shader recompilation or uniform updates
+    renderer.update_material({
+        'custom_function_source': full_function,
+        'ray_steps': options.get('raySteps', 64),
+        'use_volumetric_depth_test': options.get('useVolumetricDepthTest', False),
+        'use_extinction_coefficient': options.get('useExtinctionCoefficient', True),
+        'use_value_as_extinction_coefficient': options.get('useValueAsExtinctionCoefficient', False),
+        'use_point_lights': options.get('usePointLights', False),
+        'use_directional_lights': options.get('useDirectionalLights', False),
+        'use_random_start': options.get('useRandomStart', True),
+        'render_mean_value': options.get('renderMeanValue', False),
+        'invert_normals': options.get('invertNormals', False),
+        'render_normals': options.get('renderNormals', False),
+        'min_palette_value': options.get('minPaletteValue', 0.0),
+        'max_palette_value': options.get('maxPaletteValue', 1.0),
+        'min_cutoff_value': options.get('minCutoffValue', 0.0),
+        'max_cutoff_value': options.get('maxCutoffValue', 1.0),
+        'cutoff_fade_range': options.get('cutoffFadeRange', 0.0),
+        'value_multiplier': options.get('valueMultiplier', 1.0),
+        'value_added': options.get('valueAdded', 0.0),
+        'extinction_coefficient': options.get('extinctionCoefficient', 1.0),
+        'extinction_multiplier': options.get('extinctionMultiplier', 1.0),
+        'alpha_multiplier': options.get('alphaMultiplier', 1.0),
+        'normal_epsilon': renderer.uniforms.normalEpsilon.value # Default 0.001
+    })
+
+def simulate_gpu_sampling_step(options, position, time, volume_origin):
+    """
+    Simulates the logic performed in the GPU fragment shader for a single sample.
+    This is not executable code but represents the algorithmic flow.
+    """
+    # Calculate local position relative to volume origin
+    x = position.x - volume_origin.x
+    y = position.y - volume_origin.y
+    z = position.z - volume_origin.z
+    
+    # Call the injected custom function
+    # In reality, this is a GLSL function call, not a Python one
+    scalar = sample_value_glsl(x, y, z, time)
+    
+    # Apply value transformations
+    scalar = scalar * options['value_multiplier'] + options['value_added']
+    
+    # Handle cutoffs (only if not rendering mean value)
+    if not options['render_mean_value']:
+        if scalar < options['min_cutoff_value']:
+            scalar = 0.0
+        elif scalar > options['max_cutoff_value']:
+            scalar = 0.0
+        else:
+            # Fade near cutoffs
+            # Implementation detail: specific fade logic depends on renderer
+            pass
+            
+    # Handle extinction
+    if options['use_extinction_coefficient']:
+        if options['use_value_as_extinction_coefficient']:
+            extinction = scalar * options['extinction_multiplier']
+        else:
+            extinction = options['extinction_coefficient'] * options['extinction_multiplier']
+    else:
+        extinction = 1.0 # Or no extinction
+        
+    # Handle lighting (if enabled)
+    # Normals are estimated if use_point_lights or use_directional_lights is true
+    # This requires normal_epsilon for finite differences
+    color = 0.0
+    if options['use_point_lights'] or options['use_directional_lights']:
+        # Estimate normal at (x,y,z) using normal_epsilon
+        # normal = estimate_normal(x, y, z, normal_epsilon)
+        # if options['invert_normals']:
+        #     normal = -normal
+        # color = apply_lighting(normal, position, time)
+        pass
+        
+    # Handle rendering mode
+    if options['render_normals']:
+        # Render normals at first hit
+        # Return normal vector or color based on normal
+        pass
+    elif options['render_mean_value']:
+        # Accumulate mean value
+        pass
+    else:
+        # Alpha blending
+        # alpha = 1.0 - exp(-extinction * step_size)
+        # final_color = accumulate(color, alpha) * options['alpha_multiplier']
+        pass
+```
+
+### Edge Cases and Pitfalls
+*   **Performance**: Enabling `usePointLights`, `useDirectionalLights`, or `renderNormals` requires normal estimation via finite differences, which significantly decreases performance [S1, unofficial].
+*   **Precision**: The `normalEpsilon` value must be chosen carefully; too small leads to numerical noise, too large leads to inaccurate normals [S1, unofficial].
+*   **Boundary Conditions**: The `sampleValue` function must handle coordinates outside the volume bounds gracefully, typically by returning 0 or a background value, as the renderer does not automatically clamp coordinates before passing them to the custom function [G].
+*   **Shader Compilation**: Invalid GLSL syntax in `customFunction` will cause shader compilation failure, resulting in a black or error-colored render [G].
+*   **Depth Testing**: If `useVolumetricDepthTest` is true but `uniforms.depthTexture` is not set, the depth test will fail or produce undefined results [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: Linear with respect to `raySteps` [S1, unofficial]. Each step involves a call to the custom function and potential lighting/normal calculations.
+*   **Memory Complexity**: Low. The custom function is stored as a string in the options object. No additional large data structures are required beyond the standard volume renderer buffers [S1, unofficial].
+*   **Performance**: 
+    *   Base performance is determined by `raySteps` and the complexity of the custom GLSL function.
+    *   Enabling lighting or normals adds overhead due to normal estimation [S1, unofficial].
+    *   Performance scales linearly with `raySteps` [S1, unofficial].
+*   **Strengths**: 
+    *   Flexibility: Allows arbitrary scalar field definitions, including procedural noise, external data lookups, or time-varying fields.
+    *   No Atlas Texture Required: Does not rely on pre-computed 3D textures [S1, unofficial].
+*   **Limitations**: 
+    *   Debugging: GLSL code injection makes debugging harder compared to standard texture sampling.
+    *   Performance: Complex custom functions can be slower than optimized texture lookups.
+    *   Normal Estimation: Estimated normals are less accurate than pre-computed ones and are computationally expensive [S1, unofficial].
+*   **When to Use**: When the volume data is dynamic, procedural, or sourced from external systems not easily represented as a 3D texture. When standard trilinear sampling is insufficient for the required scalar field behavior.
+*   **When Not to Use**: When static, pre-computed volume data is available and performance is critical. When high-quality normals are required without the performance cost of estimation.
+
+## Background
+Custom Volume Sampling via GLSL Injection is a feature of the `three.js-volume-renderer` library, an unofficial extension for Three.js [S1, unofficial]. It was developed to provide greater flexibility in volume rendering by allowing users to define custom sampling logic directly in the shader, bypassing the need for traditional 3D texture lookups. This approach is particularly useful for real-time applications where volume data is generated procedurally or updated frequently.
+
+## Sources
+[S1] here, https://github.com/Donitzo/three.js-volume-renderer, fetched 2026-10-28 (unofficial)

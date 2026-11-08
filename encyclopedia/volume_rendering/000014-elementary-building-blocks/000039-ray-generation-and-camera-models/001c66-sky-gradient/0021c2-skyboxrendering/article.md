@@ -15,19 +15,19 @@ SkyboxRendering generates a dynamic sky color for a ray or fragment based on the
 *   `sky_color`: Final RGB color of the sky.
 
 **Data Structures:**
-*   No persistent data structures; all computation is stateless per-pixel/per-ray.
+*   Not given in the sources.
 
 **Parameters:**
 *   `SunSize`: Exponent for sun disk falloff. Default: $10.0$ [S2, unofficial].
-*   `StarThreshold`: Hash threshold for star presence. Default: $0.99514$ [S1, unofficial] or $0.985$ byte value [S4, unofficial].
+*   `StarThreshold`: Hash threshold for star presence. Default: $0.99514$ [S1, unofficial].
 *   `StarGridScale`: Scaling factor for star coordinate mapping. Default: $4096.0$ [S1, unofficial].
 *   `Day/Night Colors`: Pre-defined RGB vectors for zenith and horizon for both cycles [S2, unofficial].
-*   `Blend Bounds`: Smoothstep boundaries for vertical blending [S2, unofficial].
+*   `Blend Bounds`: Smoothstep boundaries for vertical blending. Default: $-0.5$ to $1.5$ [S2, unofficial].
 
 **Steps:**
 
 1.  **Calculate Day/Night Blend Factor:**
-    Determine the intensity of daylight based on the sun's vertical position or dot product with the world up vector ($\mathbf{y} = (0,1,0)$).
+    Determine the intensity of daylight based on the sun's vertical position or dot product with the world up vector ($\mathbf{y} = (0,1,0)$) [S1, S2, unofficial]:
     Using sun direction Y component [S1, unofficial]:
     $$ \text{mixFactor} = 1.0 - (1.0 - \mathbf{s}_y)^4 $$
     Or using light dot normalization [S2, unofficial]:
@@ -65,14 +65,13 @@ SkyboxRendering generates a dynamic sky color for a ray or fragment based on the
         $$ v = (\mathbf{r}_y \times 0.5) + 0.5 $$
         $$ \text{sample\_pos} = (u \times 4096.0, v \times 4096.0) $$
     *   **Stable Sampling:** Use bilinear interpolation of a noisy hash field to prevent star flickering [S1, unofficial].
-        1.  Calculate integer base coordinates: $\text{base} = \text{floor}(\text{sample\_pos})$.
-        2.  Calculate fractional parts: $\text{fract\_x} = \text{fract}(\text{sample\_pos}_x)$, $\text{fract\_y} = \text{fract}(\text{sample\_pos}_y)$.
-        3.  Sample `NoisyStarField` at four corners: $(0,0), (0,1), (1,0), (1,1)$ relative to base.
-        4.  Bilinearly interpolate the results using $\text{fract\_x}$ and $\text{fract\_y}$.
+        1.  Calculate integer base coordinates: $\text{base} = \text{floor}(\text{sample\_pos})$ [S1, unofficial].
+        2.  Calculate fractional parts: $\text{fract\_x} = \text{fract}(\text{sample\_pos}_x)$, $\text{fract\_y} = \text{fract}(\text{sample\_pos}_y)$ [S1, unofficial].
+        3.  Sample `NoisyStarField` at four corners: $(0,0), (0,1), (1,0), (1,1)$ relative to base [S1, unofficial].
+        4.  Bilinearly interpolate the results using $\text{fract\_x}$ and $\text{fract\_y}$ [S1, unofficial].
     *   **NoisyStarField Logic:**
-        1.  Hash the integer position to get a value $h \in [0, 1)$.
-        2.  If $h < \text{threshold}$, return $0.0$.
-        3.  Else, return $\text{pow}\left(\frac{h - \text{threshold}}{1.0 - \text{threshold}}, 6.0\right)$ [S1, unofficial].
+        1.  Hash the integer position to get a value $h \in [0, 1)$ [G].
+        2.  If $h \ge \text{threshold}$ ($0.99514$), return $\text{pow}\left(\frac{h - \text{threshold}}{1.0 - \text{threshold}}, 6.0\right)$, else return $0.0$ [S1, unofficial].
     *   **Fade Stars:**
         Apply horizon fade and night fade [S1, unofficial]:
         $$ \text{horizonFade} = \text{smoothstep}(0.0, 0.2, \mathbf{r}_y) $$
@@ -82,7 +81,8 @@ SkyboxRendering generates a dynamic sky color for a ray or fragment based on the
 8.  **Final Color Composition:**
     Mix ground and sky colors if ground is visible (ray $\mathbf{r}_y$ is low) [S1, unofficial]:
     $$ \text{groundColor} = \text{mix}(\text{NIGHT\_GROUND\_COLOR}, \text{DAY\_GROUND\_COLOR}, \text{mixFactor}) $$
-    $$ \text{baseColor} = \text{mix}(\text{groundColor}, \text{cycleColor}, \mathbf{r}_y) $$
+    $$ \text{skyColor} = \text{mix}(\text{NIGHT\_SKY\_COLOR}, \text{DAY\_SKY\_COLOR}, \text{mixFactor}) $$
+    $$ \text{baseColor} = \text{mix}(\text{groundColor}, \text{skyColor}, \mathbf{r}_y) $$
     $$ \text{finalColor} = \text{baseColor} + \text{starValue} $$
 
 9.  **Post-Processing (Optional):**
@@ -95,14 +95,55 @@ SkyboxRendering generates a dynamic sky color for a ray or fragment based on the
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def SkyboxRendering(ray_dir: vec3, sun_dir: vec3, time: float) -> vec3:
-    # 1. Day/Night Blend Factor
-    # Using sun_dir.y as per [S1, unofficial] for mixFactor, or lightDot as per [S2, unofficial]
-    # Here we follow [S1, unofficial] structure for mixFactor, but [S2, unofficial] for cycle blending logic
-    sun_dot_y = sun_dir.y
-    mix_factor = 1.0 - pow(1.0 - sun_dot_y, 4.0)
-    
-    # Light dot normalized for cycle blending [S2, unofficial]
+import math
+
+def mix(a, b, t):
+    return a + t * (b - a)
+
+def smoothstep(edge0, edge1, x):
+    t = max(0.0, min(1.0, (x - edge0) / (edge1 - edge0)))
+    return t * t * (3.0 - 2.0 * t)
+
+def fract(x):
+    return x - math.floor(x)
+
+def dot(v1, v2):
+    return v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]
+
+def clamp(x, mn, mx):
+    return max(mn, min(mx, x))
+
+def vec3(x, y, z):
+    return (x, y, z)
+
+def vec2(x, y):
+    return (x, y)
+
+def Hash2D(pos):
+    # Standard hash implementation [G]
+    p = vec2(dot(pos, vec2(127.1, 311.7)), dot(pos, vec2(269.5, 183.3)))
+    return fract(math.sin(p[0]) * 43758.5453123)
+
+def NoisyStarField(pos, threshold):
+    val = Hash2D(pos)
+    if val >= threshold:
+        return pow((val - threshold) / (1.0 - threshold), 6.0)
+    return 0.0
+
+def StableStarField(sample_pos, threshold):
+    base_x = math.floor(sample_pos[0])
+    base_y = math.floor(sample_pos[1])
+    fx = fract(sample_pos[0])
+    fy = fract(sample_pos[1])
+    h00 = NoisyStarField(vec2(base_x, base_y), threshold)
+    h10 = NoisyStarField(vec2(base_x + 1, base_y), threshold)
+    h01 = NoisyStarField(vec2(base_x, base_y + 1), threshold)
+    h11 = NoisyStarField(vec2(base_x + 1, base_y + 1), threshold)
+    return mix(mix(h00, h10, fx), mix(h01, h11, fx), fy)
+
+def SkyboxRendering(ray_dir, sun_dir, time):
+    # 1. Day/Night Blend Factor [S1, S2, unofficial]
+    mix_factor = 1.0 - pow(1.0 - sun_dir[1], 4.0)
     light_dot = dot(sun_dir, vec3(0.0, 1.0, 0.0))
     light_dot_normalized = (light_dot + 1.0) / 2.0
     cycle_blend_value = 1.0 - light_dot_normalized
@@ -110,12 +151,12 @@ def SkyboxRendering(ray_dir: vec3, sun_dir: vec3, time: float) -> vec3:
     # 2. Day Sky Gradient [S2, unofficial]
     day_bottom = vec3(205.0, 200.0, 252.0) / 255.0 * 1.3
     day_top = vec3(85.0, 105.0, 170.0) / 255.0
-    day = mix(day_bottom, day_top, smoothstep(-0.5, 1.5, ray_dir.y + 0.5))
+    day = mix(day_bottom, day_top, smoothstep(-0.5, 1.5, ray_dir[1] + 0.5))
 
     # 3. Night Sky Gradient [S2, unofficial]
     night_bottom = vec3(205.0, 220.0, 255.0) / 255.0 * 0.5
     night_top = vec3(0.0, 10.0, 51.0) / 255.0 * 0.7
-    night = mix(night_bottom, night_top, smoothstep(-0.5, 1.5, ray_dir.y + 0.5))
+    night = mix(night_bottom, night_top, smoothstep(-0.5, 1.5, ray_dir[1] + 0.5))
 
     # 4. Sun Contribution [S2, unofficial]
     sundot = clamp(dot(ray_dir, sun_dir), 0.0, 1.0)
@@ -127,58 +168,31 @@ def SkyboxRendering(ray_dir: vec3, sun_dir: vec3, time: float) -> vec3:
 
     # 5. Blend Day and Night [S2, unofficial]
     cycle_color = mix(day, night, cycle_blend_value)
-    
+
     # 6. Add Sun [S2, unofficial]
     cycle_color = mix(cycle_color + sun, sun, clamp(pow(sundot, sun_size), 0.0, 1.0))
 
     # 7. Starfield [S1, unofficial]
-    # Map ray to UV
-    u = fract(0.5 + atan2(ray_dir.z, ray_dir.x) / (2.0 * 3.14159265))
-    v = (ray_dir.y * 0.5) + 0.5
+    u = fract(0.5 + math.atan2(ray_dir[2], ray_dir[0]) / (2.0 * 3.14159265))
+    v = (ray_dir[1] * 0.5) + 0.5
     sample_pos = vec2(u * 4096.0, v * 4096.0)
-    
-    # Stable Star Sampling via Bilinear Interpolation of Noisy Hash [S1, unofficial]
-    base = floor(sample_pos)
-    fract_x = fract(sample_pos.x)
-    fract_y = fract(sample_pos.y)
-    
-    # Sample 4 corners
-    h00 = NoisyStarField(base)
-    h01 = NoisyStarField(base + vec2(0.0, 1.0))
-    h10 = NoisyStarField(base + vec2(1.0, 0.0))
-    h11 = NoisyStarField(base + vec2(1.0, 1.0))
-    
-    # Bilinear Interpolation
-    star_val = mix(mix(h00, h10, fract_x), mix(h01, h11, fract_x), fract_y)
-    
+    threshold = 0.99514
+    star_val = StableStarField(sample_pos, threshold)
+
     # Fade Stars [S1, unofficial]
-    horizon_fade = smoothstep(0.0, 0.2, ray_dir.y)
+    horizon_fade = smoothstep(0.0, 0.2, ray_dir[1])
     night_fade = smoothstep(1.0, 0.0, mix_factor)
     star_val *= horizon_fade * night_fade
 
     # 8. Final Color [S1, unofficial]
-    # Ground colors (example constants)
     night_ground = vec3(0.1, 0.1, 0.2)
     day_ground = vec3(0.5, 0.4, 0.3)
     ground_color = mix(night_ground, day_ground, mix_factor)
-    
-    base_color = mix(ground_color, cycle_color, ray_dir.y)
+    sky_color = mix(night_ground, day_ground, mix_factor)
+    base_color = mix(ground_color, sky_color, ray_dir[1])
     final_color = base_color + star_val
-    
+
     return final_color
-
-def NoisyStarField(pos: vec2) -> float:
-    threshold = 0.99514
-    val = Hash2D(pos)
-    if val >= threshold:
-        return pow((val - threshold) / (1.0 - threshold), 6.0)
-    else:
-        return 0.0
-
-def Hash2D(pos: vec2) -> float:
-    # Simple hash function implementation [G]
-    p = vec2(dot(pos, vec2(127.1, 311.7)), dot(pos, vec2(269.5, 183.3)))
-    return fract(sin(p.x) * 43758.5453123)
 ```
 
 ## Subtopics
@@ -187,11 +201,11 @@ def Hash2D(pos: vec2) -> float:
 A procedural star field generated by hashing sky directions into cells, with a sparse probability of holding a star, jittered position within the cell, and twinkle animation [S4, unofficial]. It differs from the StableStarField by using a single hash lookup per cell rather than bilinear interpolation, resulting in sharper but potentially flickering stars if not animated [S4, unofficial]. Choose this when visual sharpness is prioritized over temporal stability, or when twinkle effects are desired [S4, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per pixel/ray. The starfield involves a constant number of hash evaluations and interpolations.
-*   **Memory Complexity:** $O(1)$. No textures or large buffers are required.
-*   **Performance:** Extremely fast, suitable for real-time rendering on any hardware [S1, S2, S3, unofficial].
+*   **Time Complexity:** Not given in the sources [S1, S2, S3, S4, unofficial].
+*   **Memory Complexity:** Not given in the sources [S1, S2, S3, S4, unofficial].
+*   **Performance:** Not given in the sources.
 *   **Strengths:** No texture memory usage, fully procedural, supports dynamic day/night cycles [S1, S2, S3, unofficial].
-*   **Limitations:** Stars may flicker if not stabilized (StableStarField variant required) [S1, unofficial]. The "noisy" hash approach can produce artifacts if the hash function is not well-distributed [S4, unofficial].
+*   **Limitations:** Not given in the sources.
 
 ## Background
 SkyboxRendering is a common technique in real-time graphics, particularly in voxel engines and raymarched scenes, to provide a dynamic background without loading large skybox textures [S1, S2, S3, S4, unofficial]. The specific implementation details provided here are derived from various open-source voxel raymarching projects [S1, S2, S4, unofficial] and voxel engines [S3, unofficial].

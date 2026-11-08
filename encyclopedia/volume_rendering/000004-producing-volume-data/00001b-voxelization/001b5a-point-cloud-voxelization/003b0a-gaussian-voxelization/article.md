@@ -1,24 +1,33 @@
 # Gaussian Voxelization
+
 Also called: Gaussian Splat Voxelization, 3D Gaussian Voxel Grid Conversion
 
 ## Overview
-Gaussian Voxelization converts continuous 3D Gaussian distributions (splat representations) into discrete voxel grids or sparse octrees, enabling efficient processing by 3D neural networks, collision detection, and navigation systems [S1, unofficial]. It distinguishes itself from hard voxelization by sampling voxel locations based on the geometric extent and density of each Gaussian rather than simply rasterizing point centers, allowing for denser feature embedding and smoother representations [S1, unofficial].
+Gaussian Voxelization converts continuous 3D Gaussian primitives (or point clouds converted to Gaussians) into discrete voxel grid representations, enabling efficient processing by 3D neural networks and collision detection systems [S1, unofficial]. It distinguishes itself from hard voxelization by using soft, probabilistic kernels defined by local point proximity or Gaussian splat attributes, allowing for differentiable volume rendering and feature aggregation [S1, unofficial]. Unlike sparse octree methods that focus on topology, this family often targets dense or semi-dense grids optimized for transformer-based architectures or specific semantic tasks like navigation carving.
 
 ## Shared principles
-All methods in this family operate on a set of 3D Gaussians, where each Gaussian $k$ is defined by a center position $c_k$, a scale (or variance $\sigma_k$), and potentially a covariance matrix $\Sigma_k$. The core mechanism involves mapping these continuous probability distributions to discrete grid cells. This requires determining which voxels are influenced by a Gaussian, typically by evaluating the Gaussian's density function against the voxel boundaries or by sampling points within the Gaussian's effective support volume. The output is a sparse or dense set of voxels with associated features (e.g., opacity, color, density) aggregated from the contributing Gaussians.
+All methods in this family share the core mechanism of mapping continuous Gaussian distributions to discrete grid cells. The general process involves:
+1.  **Spatial Mapping**: Determining which voxels a Gaussian primitive influences, typically based on its covariance matrix or a fixed radius derived from its scale.
+2.  **Weighted Aggregation**: Depositing attributes (opacity, color, features) into affected voxels using interpolation weights (e.g., linear, Gaussian kernel) rather than binary inclusion.
+3.  **Normalization**: Normalizing aggregated features by the total accumulated weight to prevent bias from overlapping Gaussians.
+4.  **Sparsification/Deduplication**: Removing empty voxels or merging duplicates to create a compact representation suitable for downstream processing.
 
 ## Subtopics
 
 ### [Point Cloud to Gaussian Converter](1788-point-cloud-to-gaussian-converter.md)
-Transforms a discrete point cloud into isotropic Gaussian ellipsoids. It differs from other methods by generating the Gaussians themselves from point proximity, using a coverage rate $\zeta$ and neighbor count $m$ to determine variance. Choose this when starting from raw points rather than pre-existing splats.
+Transforms discrete points into isotropic Gaussian ellipsoids based on local neighbor density. It solves the problem of creating a continuous density field from unstructured points, distinguishing itself by deriving kernel scale from spatial distribution rather than mesh topology.
 
 ### [Voxel Format Generation](6914-voxel-format-generation.md)
-Converts 3D Gaussian Splats into a sparse voxel octree optimized for navigation and collision. It integrates scene topology analysis (interior/exterior classification) and agent-based navigation carving directly into the pipeline. Choose this for robotics or simulation applications requiring navigable meshes.
+Converts Gaussians into a sparse voxel octree optimized for navigation and collision. It distinguishes itself by integrating scene topology analysis (interior/exterior) and capsule-based carving directly into the generation pipeline.
 
 ### [3D Gaussian Voxelization](7020-3d-gaussian-voxelization.md)
-Converts 3D Gaussians into unique voxels and features for 3D neural networks. It samples voxel locations based on the geometric extent of each Gaussian using configurable shapes (volume, tri-plane, etc.). Choose this for deep learning pipelines requiring structured grid inputs from Gaussian representations.
+Converts continuous Gaussians into unique voxels with associated features for 3D neural networks. It addresses embedding high-dimensional features onto Gaussian Splatting representations by leveraging spatial locality and maintaining an inverse mapping for de-voxelization.
+
+### [Splat-to-Voxel Transfer](9930-splat-to-voxel-transfer.md)
+Converts Gaussians into a structured, discrete voxel grid for voxel transformers. It solves the bridging problem between point-based and grid-based processing by constructing a coarse-to-fine hierarchy and applying sparsification based on geometric weights.
 
 ## Background
-The concept of voxelizing Gaussian splats emerged with the rise of 3D Gaussian Splatting (3DGS) for novel view synthesis [S1, unofficial]. As 3DGS moved from rendering to downstream tasks like reconstruction, navigation, and neural processing, methods were developed to bridge the gap between the unstructured, continuous Gaussian representation and the structured, discrete nature of voxel grids. This family of techniques addresses the need for efficient spatial indexing and feature aggregation in these hybrid representations.
+The concept of voxelizing Gaussian splats emerged with the rise of 3D Gaussian Splatting (3DGS) for novel view synthesis [S1, unofficial]. As 3DGS moved from rendering to broader 3D understanding tasks (segmentation, reconstruction, navigation), the need for grid-based representations compatible with 3D CNNs and Transformers became critical. Early methods adapted point cloud voxelization techniques by first converting points to Gaussians to preserve smoothness [S1, unofficial]. Subsequent works introduced hierarchical and sparse variants to manage the computational cost of dense grids, enabling applications in robotics and large-scale scene understanding [S1].
 
 ## Sources
+[S1] Unofficial notes on Gaussian Voxelization methods, accessed 2024.

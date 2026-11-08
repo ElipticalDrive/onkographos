@@ -1,0 +1,114 @@
+--- v002.md
++++ v003.md
+@@ -4,80 +4,54 @@
+ 
+ ## Overview
+-Dynamic 3D Gaussian Splatting enables real-time novel view synthesis of dynamic scenes by maintaining a set of 3D Gaussians whose positions and orientations evolve over time [S1, unofficial]. It solves the problem of temporal inconsistency and flickering inherent in per-frame independent reconstruction by enforcing physical plausibility through local-rigid and As-Rigid-As-Possible (ARAP) constraints [S1, unofficial]. Unlike deformation-field methods that predict offsets from a canonical space, this approach tracks explicit time-varying parameters for each Gaussian particle [S1, unofficial].
++Dynamic 3D Gaussian Splatting enables real-time novel view synthesis of dynamic scenes by maintaining a persistent set of Gaussian primitives whose parameters evolve over time [S1, unofficial]. Unlike per-frame baselines that suffer from storage explosion and temporal flicker, this method tracks the position and rotation of each Gaussian across frames using local-rigid and As-Rigid-As-Possible (ARAP) or isometry constraints [S1, unofficial]. It distinguishes itself from deformation-field approaches (e.g., [4D Gaussian Splatting](7992-4d-gaussian-splatting.md)) by avoiding global deformation networks, instead relying on explicit temporal constraints on the primitive parameters themselves.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A sequence of images $\{I_t\}$ captured at times $t$, along with camera poses $P_t$.
+-*   **Output:** A set of $N$ dynamic 3D Gaussians, each defined by time-varying parameters $\{\boldsymbol{\mu}_t, q_t, s_t, \mathbf{c}_t, \alpha_t\}$ for $t \in [0, T]$, where $\boldsymbol{\mu}_t$ is position, $q_t$ is rotation quaternion, $s_t$ is scale, $\mathbf{c}_t$ is color, and $\alpha_t$ is opacity.
++*   **Inputs:** A sequence of multi-view images $\{I_t\}_{t=1}^T$ capturing a dynamic scene.
++*   **Outputs:** A set of $N$ Gaussians, each defined by a canonical position $\boldsymbol{\mu}_0$, scale $\mathbf{s}_0$, rotation $q_0$, opacity $\alpha_0$, and spherical harmonic coefficients $\mathbf{c}_0$. At any time $t$, the rendered image is produced by evaluating the time-varying position $\boldsymbol{\mu}_t$ and rotation $q_t$.
+ 
+ **Data Structures:**
+ Each Gaussian $i$ stores:
+-*   $\boldsymbol{\mu}_{i,t} \in \mathbb{R}^3$: Position at time $t$.
+-*   $q_{i,t} \in \mathbb{R}^4$: Rotation quaternion at time $t$.
+-*   $s_{i,t} \in \mathbb{R}^3$: Scale vector.
+-*   $\mathbf{c}_{i,t} \in \mathbb{R}^3$: Spherical harmonic coefficients (or RGB).
+-*   $\alpha_{i,t} \in \mathbb{R}$: Opacity.
+-*   *Note:* The core innovation is the temporal linkage of $\boldsymbol{\mu}$ and $q$.
++*   $\boldsymbol{\mu}_0 \in \mathbb{R}^3$: Canonical 3D position.
++*   $\mathbf{s}_0 \in \mathbb{R}^3$: Canonical scale (log-space).
++*   $q_0 \in \mathbb{R}^4$: Canonical rotation (quaternion, normalized).
++*   $\alpha_0 \in \mathbb{R}$: Opacity.
++*   $\mathbf{c}_0$: Spherical harmonic coefficients for view-dependent color.
++*   *Note:* The method does not store explicit time-varying parameters for all frames; $\boldsymbol{\mu}_t$ and $q_t$ are computed on-the-fly or updated during optimization based on constraints.
+ 
+-**Algorithm Steps:**
+-1.  **Initialization:** Initialize a static 3DGS scene from the first frame or a sparse reconstruction.
+-2.  **Temporal Tracking:** For each subsequent frame $t$, update $\boldsymbol{\mu}_{i,t}$ and $q_{i,t}$ based on motion.
+-3.  **Constraint Application:** Apply local-rigid and ARAP constraints to ensure that the deformation of neighboring Gaussians remains physically plausible (rigid body motion or isometry) [S1, unofficial].
+-4.  **Rendering:** Render the scene at time $t$ using the standard 3DGS rasterizer with the updated parameters.
+-5.  **Optimization:** Minimize the photometric loss between rendered and ground truth images, plus regularization terms derived from the ARAP constraints.
++**Optimization and Constraints:**
++The core mechanism is the tracking of time-varying position $\boldsymbol{\mu}_t$ and rotation $q_t$ for each Gaussian. The optimization minimizes a photometric loss $\mathcal{L}_{img}$ between rendered and ground-truth images, augmented by temporal regularization terms.
+ 
+-**Formulas:**
+-The ARAP constraint minimizes the deviation from rigid transformations. For a Gaussian $i$ and its neighbors $j \in \mathcal{N}_i$, the energy is:
+-$$ E_{ARAP} = \sum_{i} \sum_{j \in \mathcal{N}_i} w_{ij} \| (\boldsymbol{\mu}_{j,t} - \boldsymbol{\mu}_{i,t}) - R_i (\boldsymbol{\mu}_{j,0} - \boldsymbol{\mu}_{i,0}) \|^2 $$
+-where $R_i$ is the optimal rotation matrix derived from the initial configuration, and $w_{ij}$ are weights [S1, unofficial].
++1.  **Initialization:** Initialize Gaussians from the first frame using standard 3DGS initialization [Parent](1795-3d-gaussian-splatting.md).
++2.  **Temporal Tracking:** For each frame $t$, the position $\boldsymbol{\mu}_t$ and rotation $q_t$ are derived from their canonical values $\boldsymbol{\mu}_0, q_0$ and a set of learned or optimized deformation parameters.
++3.  **Local-Rigid Constraint:** To preserve the local geometry of the scene, the deformation between frames is constrained to be locally rigid. This prevents shearing and unnatural stretching of the Gaussian primitives.
++4.  **ARAP / Isometry Constraint:** An As-Rigid-As-Possible (ARAP) or isometry constraint is applied to further regularize the deformation. This ensures that the transformation of the Gaussian cloud between time steps $t$ and $t+1$ minimizes the deviation from a rigid body transformation, preserving the intrinsic geometry of the dynamic object.
++    *   Let $\mathbf{X}_t$ be the matrix of positions of all Gaussians at time $t$. The constraint minimizes:
++        $$ \mathcal{L}_{temp} = \sum_{t} \| \mathbf{X}_{t+1} - (\mathbf{R}_t \mathbf{X}_t + \mathbf{t}_t) \|_F^2 $$
++        where $\mathbf{R}_t$ and $\mathbf{t}_t$ are the optimal rotation and translation aligning $\mathbf{X}_t$ to $\mathbf{X}_{t+1}$ [S1, unofficial].
++5.  **Rendering:** At each training step for frame $t$, the Gaussians are transformed to $\boldsymbol{\mu}_t, q_t$ and rendered using the standard 3DGS rasterizer.
+ 
+ **Parameters:**
+-*   ARAP weight: Balances photometric loss against geometric constraints.
+-*   Neighbor radius: Defines $\mathcal{N}_i$ for local rigidity.
++*   Learning rate for Gaussian parameters: Standard 3DGS values.
++*   Temporal loss weight: Not given in the sources.
+ 
+ **Edge Cases:**
+-*   **Degenerate Input:** If motion is too large, local-rigid assumptions may fail, causing tearing.
+-*   **Precision:** Quaternion normalization must be enforced at each step to prevent drift.
+-
+-**Pseudocode:**
+-```python
+-def update_dynamic_gaussians(gaussians, t, neighbors):
+-    """
+-    Update position and rotation of Gaussians using ARAP constraints.
+-    """
+-    for g in gaussians:
+-        # Calculate optimal rigid transformation from initial state
+-        # to current state based on neighbors
+-        R_opt = compute_optimal_rotation(g, neighbors[t-1], neighbors[t])
+-        
+-        # Apply rotation to relative positions
+-        for neighbor in neighbors[t]:
+-            relative_pos = neighbor.pos - g.pos
+-            rotated_pos = R_opt @ relative_pos
+-            neighbor.pos = g.pos + rotated_pos
+-            
+-        # Update rotation quaternion
+-        g.rot = R_opt_to_quaternion(R_opt)
+-        
+-    return gaussians
+-```
+-*Note: The exact implementation of `compute_optimal_rotation` involves SVD on the covariance of relative positions [G].*
++*   **Occlusion:** If a Gaussian is occluded in a frame, its tracking may drift. The local-rigid constraint helps mitigate this by relying on neighboring visible Gaussians.
++*   **Rapid Motion:** Large displacements between frames may violate the local-rigid assumption if the deformation is too large. [G] In practice, this may require adaptive learning rates or densification strategies to capture fast-moving details.
+ 
+ ## Subtopics
+ 
+-### [GaussianFlow](6149-gaussianflow.md)
+-GaussianFlow treats each Gaussian as a dynamic particle advected by a 3D velocity field, obtaining the 4D reconstruction by integrating the flow over time. It introduces 2D flow estimation results into the training of dynamic 3D Gaussians to support deformation modeling between neighboring frames. Unlike parent methods that rely on local-rigid or ARAP constraints, GaussianFlow uses an explicit flow field for temporal regularization.
++### SpeeDe3DGS
++SpeeDe3DGS accelerates deformable 3DGS by applying temporal pruning [S2, unofficial]. It identifies static and active Gaussians and groups the dynamic parts by motion similarity to reduce the number of deformation queries [S2, unofficial]. This optimization reduces computational overhead without significantly compromising rendering quality.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ per frame for rendering, where $N$ is the number of Gaussians. Optimization is slower due to constraint calculations.
+-*   **Memory Complexity:** $O(N \cdot T)$ if storing full trajectories, or $O(N)$ if predicting updates incrementally.
+-*   **Performance:** Real-time rendering is achievable. Training time is higher than static 3DGS due to temporal constraints.
+-*   **Strengths:** High temporal consistency, physically plausible motion, real-time rendering.
+-*   **Limitations:** Struggles with large, non-rigid deformations; sensitive to initialization.
+-*   **When to use:** Dynamic scenes with moderate motion (e.g., human avatars, moving objects).
+-*   **When not to use:** Scenes with extreme, non-rigid deformations or occlusions that break local rigidity.
++*   **Time Complexity:** Rendering is $O(N)$ per frame, where $N$ is the number of Gaussians. Optimization time is higher than static 3DGS due to the additional temporal constraints and tracking calculations.
++*   **Memory Complexity:** $O(N)$, storing only canonical parameters and potentially small deformation fields or constraints. This is significantly more compact than per-frame baselines.
++*   **Performance:** Enables real-time rendering of dynamic scenes. The specific frame rates depend on the hardware and scene complexity, but the method is designed for real-time applicability.
++*   **Strengths:** Persistent representation avoids storage explosion; temporal coherence reduces flicker; local-rigid constraints preserve geometry.
++*   **Limitations:** May struggle with highly non-rigid deformations that violate the ARAP/isometry assumptions; requires careful tuning of temporal loss weights.
+ 
+ ## Background
+-Dynamic 3D Gaussian Splatting was introduced by Luiten et al. in 3DV'24 [S1, unofficial]. It extends the static 3DGS framework to handle dynamic scenes by incorporating temporal constraints, addressing the flickering and inconsistency issues of per-frame reconstruction methods [S1, unofficial].
++Dynamic 3D Gaussian Splatting was introduced by Luiten et al. in 3DV'24 [S1, unofficial]. It addresses the limitations of per-frame 3DGS reconstruction, which suffers from high storage costs and temporal inconsistencies. By extending static 3DGS with temporal tracking and deformation constraints, it enables persistent dynamic view synthesis.
+ 
+ ## Sources

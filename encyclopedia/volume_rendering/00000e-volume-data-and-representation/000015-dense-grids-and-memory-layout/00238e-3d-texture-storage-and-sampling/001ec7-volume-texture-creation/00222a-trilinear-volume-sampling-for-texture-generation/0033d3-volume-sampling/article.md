@@ -1,0 +1,70 @@
+# Volume Sampling
+
+Also called: Scalar Density Sampling, 3D Texture Lookup
+
+## Overview
+Volume Sampling retrieves the scalar density value from a 3D texture at specified normalized texture coordinates [S1, unofficial]. It serves as the fundamental data retrieval primitive for raycasting-based direct volume rendering, providing the intensity values required for isosurface detection and maximum intensity projection [S1, unofficial]. It is distinguished from its parent, Trilinear Volume Sampling for Texture Generation, by focusing specifically on extracting a single scalar channel (typically density) rather than returning multi-component attributes like color or material properties [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: `volume_data`, a 3D sampler texture containing volume intensity data [S1, unofficial].
+- Input: `texcoords`, normalized 3D texture coordinates $(u, v, w)$ mapping to the volume grid space [S1, unofficial].
+- Output: A scalar float representing the density value at the sampled position [S1, unofficial].
+
+**Data Structures:**
+- `volume_data`: A 3D texture object. The internal format is not specified in the sources, but the sampling operation assumes a channel structure where the red channel holds the scalar density [S1, unofficial].
+
+**Steps:**
+1. Perform a texture lookup on `volume_data` using `texcoords` [S1, unofficial].
+2. Extract the red channel component from the resulting 4D vector [S1, unofficial].
+3. Return the extracted scalar value [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def volume_sampling(volume_data, texcoords):
+    """
+    Samples the scalar density value from a 3D texture.
+    
+    Args:
+        volume_data: 3D sampler texture containing volume intensity data.
+        texcoords: Normalized 3D texture coordinates (vec3).
+        
+    Returns:
+        float: The scalar density value from the red channel.
+    """
+    # Sample the 3D texture at the given coordinates
+    # The sources specify returning the red channel of the sample
+    sample_result = texture(volume_data, texcoords)
+    
+    # Return the red channel component as the scalar density
+    return sample_result.r
+```
+
+**Parameters:**
+- `volume_data`: A 3D sampler texture. No specific resolution or format is mandated, but it must support 3D texture sampling [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Coordinate Bounds:** The sources indicate that the volume bounds are transformed to a unit cube from $(0,0,0)$ to $(1,1,1)$ in the vertex shader [S1, unofficial]. Coordinates outside this range may result in undefined behavior or clamping depending on the texture sampler settings, which are not specified [S1, unofficial].
+- **Channel Assumption:** The method explicitly assumes density is stored in the red channel. If the texture format uses a different channel layout, the sampling logic must be adjusted [S1, unofficial].
+
+## Subtopics
+
+### [Custom Volume Sampling via GLSL Injection](7156-custom-volume-sampling-via-glsl-injection.md)
+Overrides default logic with user-defined GLSL for dynamic evaluation. Choose when procedural or external data-driven evaluation is needed without pre-computed fields.
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per sample, as it involves a single texture lookup and component extraction.
+- **Memory Complexity:** Depends on the size of `volume_data`. The sampling operation itself uses constant memory.
+- **Performance:** Fast, as it is a basic hardware-accelerated texture fetch. Performance is limited by memory bandwidth and cache efficiency of the 3D texture access pattern.
+- **Strengths:** Simple, efficient, and directly integrates with standard graphics APIs.
+- **Limitations:** Limited to scalar extraction from the red channel. Does not handle interpolation or multi-component data retrieval natively (handled by parent or custom injection).
+- **When to use:** When a single scalar density value is needed for raycasting steps like isosurface marching or MIP calculation.
+- **When not to use:** When multi-component data (color, normal) is required, or when custom sampling logic (e.g., procedural generation) is needed.
+
+## Background
+Originating from direct volume rendering approaches using raycasting, this method is part of a framework where the camera and view rays are transformed to align with a unit cube containing the 3D texture [S1, unofficial]. It is used in educational and research contexts for visualizing scalar fields, often in conjunction with transfer functions like Viridis for coloring output [S1, unofficial]. The specific implementation cited is from a 2022 student project [S1, unofficial].
+
+## Sources
+[S1] Masdaofdisasda/Vis1_Direct_Volume_Rendering_2022W, https://github.com/Masdaofdisasda/Vis1_Direct_Volume_Rendering_2022W, fetched 2026-10-26 (unofficial)

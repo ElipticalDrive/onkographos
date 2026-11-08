@@ -3,24 +3,25 @@
 Also called: Iridescent Material (Cosine Palette), Iridescent Material with Specular and Shadow
 
 ## Overview
-This method renders iridescent surfaces by modulating a cosine-based palette function with a perturbed surface normal, simulating thin-film interference colors, while combining this base color with multi-component specular highlights and directional shadowing [S1, unofficial]. It differs from standard diffuse or simple specular models by generating color variation through geometric perturbation rather than wavelength-dependent physics, and it differs from physically accurate thin-film models (like Airy summation) by using a computationally cheaper, artistic approximation driven by position and normal noise [S1, S2, unofficial].
+This method renders iridescent surfaces by modulating a cosine-based palette function with a perturbed surface normal, simulating thin-film interference colors, while combining this base color with multi-component specular highlights and directional shadowing [S1, unofficial]. It differs from standard diffuse or simple specular models by generating color variation through geometric perturbation rather than wavelength-dependent physics, and it differs from physically accurate thin-film models by using a computationally cheaper, artistic approximation driven by position and normal noise [S1, S2, unofficial].
 
 ## How it works
 **Inputs:**
-*   Surface point position $\mathbf{p}$ (world space).
-*   Surface normal $\mathbf{n}$ (unit vector, derived from SDF gradient).
-*   Ray direction $\mathbf{v}_{ray}$ (from camera to $\mathbf{p}$, or eye direction $\mathbf{v} = \mathbf{p} - \mathbf{rayOrigin}$ normalized).
-*   Light direction $\mathbf{l}$ (from $\mathbf{p}$ to light source, normalized).
-*   Gamma value $\gamma$ (default 2.2).
-*   Optional blend factor $\alpha \in [0,1]$ for mixing with Blinn-Phong (default 0).
-*   Optional tint color $\mathbf{c}_{tint}$ (default white).
+*   Surface point position $\mathbf{p}$ (world space) [S1, unofficial].
+*   Surface normal $\mathbf{n}$ (unit vector, derived from SDF gradient) [G].
+*   Ray direction $\mathbf{d}$ (from camera to $\mathbf{p}$, normalized) [S1, unofficial].
+*   Eye direction $\mathbf{v}$ (from $\mathbf{p}$ to camera, normalized, $\mathbf{v} = -\mathbf{d}$) [S1, unofficial].
+*   Light direction $\mathbf{l}$ (from $\mathbf{p}$ to light source, normalized) [S1, unofficial].
+*   Gamma value $\gamma$ (default 2.2) [S1, unofficial].
+*   Optional blend factor $\alpha \in [0,1]$ for mixing with Blinn-Phong (default 0) [S1, unofficial].
+*   Optional tint color $\mathbf{c}_{\text{tint}}$ (default white) [S1, unofficial].
 
 **Outputs:**
-*   Final linear RGB color $\mathbf{c}_{final}$.
+*   Final linear RGB color $\mathbf{c}_{\text{final}}$ [S1, unofficial].
 
 **Data Structures:**
-*   Vectors are 3-component floating-point vectors (`vec3`).
-*   Scalars are floating-point numbers.
+*   Vectors are 3-component floating-point vectors (`vec3`) [G].
+*   Scalars are floating-point numbers [G].
 
 **Parameters:**
 *   `GAMMA`: Gamma correction exponent. Typical value: 2.2 [S1, unofficial].
@@ -42,28 +43,28 @@ This method renders iridescent surfaces by modulating a cosine-based palette fun
 **Steps:**
 
 1.  **Calculate Reflection Vector:**
-    Compute the reflection of the view direction off the surface normal:
-    $$ \mathbf{r} = \text{reflect}(-\mathbf{v}, \mathbf{n}) $$
-    where $\mathbf{v}$ is the normalized eye direction (from surface to camera). Note: In the source code, `reflect(rayDirection, nor)` is used where `rayDirection` points from camera to surface, implying the standard GLSL `reflect(I, N)` where $I$ is incident vector. We define $\mathbf{v}$ as the vector from surface to camera for clarity in dot products with light. If $\mathbf{v}_{eye}$ is from surface to camera, the incident vector is $-\mathbf{v}_{eye}$.
-    $$ \mathbf{r} = 2(\mathbf{n} \cdot (-\mathbf{v}_{eye}))\mathbf{n} - (-\mathbf{v}_{eye}) = 2(\mathbf{n} \cdot \mathbf{v}_{eye})\mathbf{n} + \mathbf{v}_{eye} $$
-    *Correction based on source:* The source uses `reflect(rayDirection, nor)` where `rayDirection` is from camera to surface. Let $\mathbf{d}$ be the ray direction (camera to surface). Then $\mathbf{r} = \text{reflect}(\mathbf{d}, \mathbf{n})$.
+    Compute the reflection of the incident ray direction off the surface normal:
+    $$ \mathbf{r} = \mathbf{d} - 2(\mathbf{d} \cdot \mathbf{n})\mathbf{n} $$
+    where $\mathbf{d}$ is the ray direction from camera to surface [S1, unofficial].
 
 2.  **Calculate Perturbed Normal for Iridescence:**
     Compute a perturbation vector based on the surface position:
-    $$ \mathbf{p}_{ert} = \sin(\mathbf{p} \cdot 10.0) $$
+    $$ \mathbf{p}_{\text{ert}} = \sin(\mathbf{p} \cdot 10.0) $$
     Add this perturbation to the geometric normal, scaled by 0.05:
-    $$ \mathbf{n}_{pert} = \mathbf{n} + \mathbf{p}_{ert} \cdot 0.05 $$
+    $$ \mathbf{n}_{\text{pert}} = \mathbf{n} + \mathbf{p}_{\text{ert}} \cdot 0.05 $$
+    [S1, unofficial]
 
 3.  **Calculate Base Iridescent Color:**
-    Compute the dot product between the perturbed normal and the eye direction (normalized):
-    $$ t = \mathbf{n}_{pert} \cdot \mathbf{v}_{eye} $$
+    Compute the dot product between the perturbed normal and the eye direction:
+    $$ t = \mathbf{n}_{\text{pert}} \cdot \mathbf{v} $$
     Pass this scalar through the spectrum palette function:
-    $$ \mathbf{c}_{base} = \text{spectrum}(t \cdot 2.0) $$
+    $$ \mathbf{c}_{\text{base}} = \text{spectrum}(t \cdot 2.0) $$
     The `spectrum` function uses the cosine palette:
     $$ \text{pal}(t, \mathbf{a}, \mathbf{b}, \mathbf{c}, \mathbf{d}) = \mathbf{a} + \mathbf{b} \cdot \cos(2\pi (\mathbf{c} \cdot t + \mathbf{d})) $$
     With parameters:
     $$ \mathbf{a} = (0.5, 0.5, 0.5), \quad \mathbf{b} = (0.5, 0.5, 0.5) $$
     $$ \mathbf{c} = (1.0, 1.0, 1.0), \quad \mathbf{d} = (0.0, 0.33, 0.67) $$
+    [S1, unofficial]
 
 4.  **Calculate Specular Highlights:**
     Compute the primary specular term:
@@ -72,37 +73,39 @@ This method renders iridescent surfaces by modulating a cosine-based palette fun
     $$ s_1 = \left( \sin(s_1 \cdot 20.0 - 3.0) \cdot 0.5 + 0.5 + 0.1 \right)^{32.0} \cdot s_1 $$
     Scale by 0.1:
     $$ s_1 = s_1 \cdot 0.1 $$
-    
     Compute the secondary specular term:
     $$ s_2 = \text{clamp}(\mathbf{r} \cdot \mathbf{l}, 0.0, 1.0) $$
     $$ s_2 = (s_2 + 0.3)^{8.0} \cdot 0.1 $$
-    
     Combine specular terms:
-    $$ \mathbf{c}_{spec} = s_1 + s_2 $$
+    $$ \mathbf{c}_{\text{spec}} = s_1 + s_2 $$
+    [S1, unofficial]
 
 5.  **Calculate Shadow:**
-    Compute the dot product between the geometric normal and the dome direction $\mathbf{d}_{ome} = (0, 1, 0)$:
-    $$ sh = \text{clamp}(\mathbf{n} \cdot \mathbf{d}_{ome} \cdot 0.5 + 1.2, 0.0, 1.0) $$
+    Compute the dot product between the geometric normal and the dome direction $\mathbf{d}_{\text{ome}} = (0, 1, 0)$:
+    $$ sh = \text{clamp}(\mathbf{n} \cdot \mathbf{d}_{\text{ome}} \cdot 0.5 + 1.2, 0.0, 1.0) $$
     Apply power:
-    $$ \mathbf{c}_{shadow} = sh^{3.0} $$
+    $$ \mathbf{c}_{\text{shadow}} = sh^{3.0} $$
+    [S1, unofficial]
 
 6.  **Combine Colors:**
-    $$ \mathbf{c}_{iridescent} = \mathbf{c}_{base} \cdot \mathbf{c}_{shadow} + \mathbf{c}_{spec} $$
+    $$ \mathbf{c}_{\text{iridescent}} = \mathbf{c}_{\text{base}} \cdot \mathbf{c}_{\text{shadow}} + \mathbf{c}_{\text{spec}} $$
+    [S1, unofficial]
 
 7.  **Optional: Mix with Blinn-Phong:**
     If blending is enabled ($\alpha > 0$):
-    Calculate Blinn-Phong specular:
-    $$ h = \text{normalize}(\mathbf{v}_{eye} + \mathbf{l}) $$
-    $$ power = (\mathbf{n} \cdot \mathbf{h})^{0.5} \quad \text{(Note: Source uses exponent 0.5 in blinnPhongSpec call, likely representing roughness or a simplified model)} $$
-    *Correction:* The source code snippet says `blinnPhongSpec(lightDirection, eyeDirection, nor, 0.5)`. Standard Blinn-Phong specular is $(\mathbf{n} \cdot \mathbf{h})^{\text{shininess}}$. The parameter 0.5 is unusual for shininess (usually >1). It might be a roughness parameter or a simplified power. Assuming the function returns a scalar intensity.
-    $$ \mathbf{c}_{phong} = power \cdot \mathbf{c}_{tint} $$
+    Calculate Blinn-Phong specular intensity using the source's `blinnPhongSpec` function with exponent 0.5:
+    $$ \mathbf{h} = \text{normalize}(\mathbf{v} + \mathbf{l}) $$
+    $$ \text{power} = (\mathbf{n} \cdot \mathbf{h})^{0.5} $$
+    $$ \mathbf{c}_{\text{phong}} = \text{power} \cdot \mathbf{c}_{\text{tint}} $$
     Blend:
-    $$ \mathbf{c}_{final\_linear} = \text{mix}(\mathbf{c}_{phong}, \mathbf{c}_{iridescent}, \alpha) $$
-    If $\alpha = 0$, $\mathbf{c}_{final\_linear} = \mathbf{c}_{iridescent}$.
+    $$ \mathbf{c}_{\text{final\_linear}} = \text{mix}(\mathbf{c}_{\text{phong}}, \mathbf{c}_{\text{iridescent}}, \alpha) $$
+    If $\alpha = 0$, $\mathbf{c}_{\text{final\_linear}} = \mathbf{c}_{\text{iridescent}}$.
+    [S1, unofficial]
 
 8.  **Gamma Correction:**
     Convert linear color to screen space:
-    $$ \mathbf{c}_{final} = \mathbf{c}_{final\_linear}^{\frac{1}{\gamma}} $$
+    $$ \mathbf{c}_{\text{final}} = \mathbf{c}_{\text{final\_linear}}^{\frac{1}{\gamma}} $$
+    [S1, unofficial]
 
 **Pseudocode:**
 
@@ -112,9 +115,8 @@ This method renders iridescent surfaces by modulating a cosine-based palette fun
 import math
 import numpy as np
 
-def pal(t: np.ndarray, a: np.ndarray, b: np.ndarray, c: np.ndarray, d: np.ndarray) -> np.ndarray:
-    """Cosine palette function."""
-    # t is scalar or array, a,b,c,d are vec3
+def pal(t: float, a: np.ndarray, b: np.ndarray, c: np.ndarray, d: np.ndarray) -> np.ndarray:
+    """Cosine palette function mapping scalar t to vec3 color."""
     return a + b * np.cos(2 * math.pi * (c * t + d))
 
 def spectrum(n: float) -> np.ndarray:
@@ -125,7 +127,7 @@ def spectrum(n: float) -> np.ndarray:
     d = np.array([0.0, 0.33, 0.67])
     return pal(n, a, b, c, d)
 
-def iridescent_material(p: np.ndarray, n: np.ndarray, v_eye: np.ndarray, l: np.ndarray, 
+def iridescent_material(p: np.ndarray, n: np.ndarray, d: np.ndarray, l: np.ndarray, 
                         gamma: float = 2.2, mix_alpha: float = 0.0, tint: np.ndarray = None) -> np.ndarray:
     """
     Computes the iridescent material color.
@@ -133,8 +135,8 @@ def iridescent_material(p: np.ndarray, n: np.ndarray, v_eye: np.ndarray, l: np.n
     Args:
         p: Surface position (world space).
         n: Surface normal (unit vector).
-        v_eye: Normalized eye direction (from surface to camera).
-        l: Normalized light direction (from surface to light).
+        d: Ray direction from camera to surface (normalized).
+        l: Light direction from surface to light (normalized).
         gamma: Gamma value.
         mix_alpha: Blend factor between Blinn-Phong and Iridescence [0,1].
         tint: Tint color for Blinn-Phong component.
@@ -146,14 +148,6 @@ def iridescent_material(p: np.ndarray, n: np.ndarray, v_eye: np.ndarray, l: np.n
         tint = np.array([1.0, 1.0, 1.0])
         
     # 1. Reflection vector
-    # reflect(I, N) where I is incident vector (camera to surface = -v_eye)
-    # r = 2 * dot(n, -v_eye) * n - (-v_eye)
-    # r = 2 * dot(n, v_eye) * n + v_eye  <-- Wait, standard reflect(I,N) = I - 2*dot(I,N)*N
-    # If I = -v_eye, r = -v_eye - 2*dot(-v_eye, n)*n = -v_eye + 2*dot(v_eye, n)*n
-    # Let's stick to the source logic: reflect(rayDirection, nor)
-    # rayDirection is from camera to surface. Let d = -v_eye.
-    # r = d - 2 * dot(d, n) * n
-    d = -v_eye
     r = d - 2 * np.dot(d, n) * n
     
     # 2. Perturbed Normal
@@ -161,6 +155,7 @@ def iridescent_material(p: np.ndarray, n: np.ndarray, v_eye: np.ndarray, l: np.n
     n_pert = n + perturb * 0.05
     
     # 3. Base Iridescent Color
+    v_eye = -d
     t_val = np.dot(n_pert, v_eye) * 2.0
     c_base = spectrum(t_val)
     
@@ -186,21 +181,16 @@ def iridescent_material(p: np.ndarray, n: np.ndarray, v_eye: np.ndarray, l: np.n
     
     # 7. Mix with Blinn-Phong
     if mix_alpha > 0.0:
-        # Blinn-Phong Specular
-        h = np.linalg.norm(v_eye + l)
-        if h > 1e-6:
-            h = (v_eye + l) / h
+        h = v_eye + l
+        h_norm = np.linalg.norm(h)
+        if h_norm > 1e-6:
+            h = h / h_norm
         else:
-            h = v_eye # Fallback
+            h = v_eye
             
-        # Source uses exponent 0.5 in blinnPhongSpec call. 
-        # Assuming this is the power for the specular highlight.
-        power = np.dot(n, h) ** 0.5 
-        
+        power = np.dot(n, h) ** 0.5
         c_phong = power * tint
-        c_final_linear = np.where(mix_alpha > 0, 
-                                  c_phong * (1.0 - mix_alpha) + c_iridescent * mix_alpha, 
-                                  c_iridescent)
+        c_final_linear = c_phong * (1.0 - mix_alpha) + c_iridescent * mix_alpha
     else:
         c_final_linear = c_iridescent
         
@@ -219,16 +209,16 @@ A physically based technique for rendering iridescence in thin films (e.g., soap
 A technique to blend Blinn-Phong lighting with the iridescent lighting model to create tinted iridescent objects [S1, unofficial]. It calculates the Blinn-Phong specular intensity, multiplies it by a tint color to get a base color, and then blends this with the iridescent color (base + shadow + specular) using a mix factor `mixBaseAndIridescent` in the range [0,1] [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per surface point. The computation involves a fixed number of trigonometric functions, dot products, and power operations.
-*   **Memory Complexity:** $O(1)$. No additional data structures are required beyond standard shading inputs.
-*   **Performance:** Very fast, suitable for real-time ray marching. The cosine palette avoids expensive spectral calculations.
-*   **Strengths:** Visually striking iridescent effect with minimal computational cost; easy to tune via palette parameters; supports blending with standard lighting models.
-*   **Limitations:** Not physically accurate; color variation is driven by geometry perturbation rather than film thickness or wavelength; may exhibit banding if the palette function is not smooth enough or if precision is low.
-*   **When to use:** Real-time applications, artistic rendering, crystal-like materials, soap bubbles, oil slicks where physical accuracy is not required.
-*   **When not to use:** Physically based rendering requiring accurate thin-film interference, scientific visualization of optical phenomena.
+*   **Time Complexity:** $O(1)$ per surface point. The computation involves a fixed number of trigonometric functions, dot products, and power operations [G].
+*   **Memory Complexity:** $O(1)$. No additional data structures are required beyond standard shading inputs [G].
+*   **Performance:** Very fast, suitable for real-time ray marching. The cosine palette avoids expensive spectral calculations [S1, unofficial].
+*   **Strengths:** Visually striking iridescent effect with minimal computational cost; easy to tune via palette parameters; supports blending with standard lighting models [S1, unofficial].
+*   **Limitations:** Not physically accurate; color variation is driven by geometry perturbation rather than film thickness or wavelength; may exhibit banding if the palette function is not smooth enough or if precision is low [S1, unofficial].
+*   **When to use:** Real-time applications, artistic rendering, crystal-like materials, soap bubbles, oil slicks where physical accuracy is not required [S1, unofficial].
+*   **When not to use:** Physically based rendering requiring accurate thin-film interference, scientific visualization of optical phenomena [S2, unofficial].
 
 ## Background
-This method originates from the ray marching and SDF community, popularized by shaders on platforms like ShaderToy [S1, unofficial]. It was notably used in Thomas Hooper's "Crystals" shader and adapted by Varun for an article on ray marching SDFs [S1, unofficial]. The cosine palette technique for iridescence is a common artistic shortcut in procedural shading. The variant mixing Blinn-Phong lighting was introduced to allow for tinted iridescent objects [S1, unofficial]. Physically accurate thin-film interference via Airy summation is a more rigorous approach found in advanced rendering engines like the Photon Engine [S2, unofficial].
+This method originates from the ray marching and SDF community, popularized by shaders on platforms like ShaderToy [S1, unofficial]. It was notably used in Thomas Hooper's "Crystals" shader and adapted by Varun for an article on ray marching SDFs [S1, unofficial]. The cosine palette technique for iridescent materials is a common artistic shortcut in procedural shading. The variant mixing Blinn-Phong lighting was introduced to allow for tinted iridescent objects [S1, unofficial]. Physically accurate thin-film interference via Airy summation is implemented in advanced rendering engines such as Photon Engine [S2, unofficial].
 
 ## Sources
 [S1] Show HN: Iridescent crystal with raymarching and signed distance fields, https://varun.ca/ray-march-sdf/, fetched 2026-10-26 (unofficial)

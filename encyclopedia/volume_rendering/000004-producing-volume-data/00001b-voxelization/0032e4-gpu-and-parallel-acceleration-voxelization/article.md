@@ -3,27 +3,65 @@
 Also called: GPU Voxelization, Parallel Voxelization
 
 ## Overview
-This family encompasses methods that accelerate the conversion of continuous primitives (meshes, points, or parametric curves) into discrete voxel grids by leveraging the massive parallelism of Graphics Processing Units (GPUs) [S1, unofficial]. Unlike CPU-based approaches, these methods typically map individual voxels or primitives to parallel threads to compute occupancy, distance, or geometric attributes simultaneously. They are distinguished from their siblings by their reliance on GPU-specific execution models (such as CUDA kernels or OpenGL compute shaders) to handle the high computational cost of spatial intersection tests and attribute accumulation [S1, unofficial].
+This family encompasses methods that accelerate the conversion of continuous geometry (meshes, points, or primitives) into discrete voxel grids by leveraging parallel processing units, primarily GPUs via CUDA or OpenGL/Vulkan, and multi-core CPUs. It solves the computational bottleneck of naive CPU-based scan-conversion, enabling real-time or near-real-time voxelization for dynamic scenes, large-scale environments, and complex volumetric effects like voxel cone tracing. It sets itself apart from its siblings by explicitly offloading the rasterization, intersection testing, or occupancy computation to parallel hardware architectures, often utilizing specialized hardware features like atomics, MSAA, or dedicated geometry shaders, rather than relying on single-threaded CPU loops or purely analytical CPU-based methods.
 
 ## Shared principles
-All methods in this family rely on the coordinate mapping and occupancy determination mechanisms defined in [Voxelization](12-voxelization.md). However, they share specific parallel execution strategies:
-1.  **Thread-to-Voxel Mapping**: A common pattern assigns one thread (or a small block of threads) to a single voxel $(i, j, k)$ in the output grid. This thread computes the voxel's world-space bounds and iterates over input primitives to determine occupancy [S1, unofficial].
-2.  **Thread-to-Primitive Mapping**: Alternatively, threads may be assigned to input primitives (e.g., triangles or vessel segments). Each thread determines the set of voxels intersected by its primitive and atomically updates the voxel grid [S1, unofficial].
-3.  **Atomic Operations**: When multiple threads write to the same voxel (e.g., accumulating density or solving QEF systems), atomic operations or shared memory synchronization are required to prevent race conditions [S1, unofficial].
-4.  **Spatial Acceleration**: To avoid $O(N \cdot V)$ complexity (where $N$ is primitives and $V$ is voxels), GPU methods often use spatial hashing, bounding volume hierarchies (BVH), or precomputed bounding boxes to cull non-intersecting primitives efficiently on the GPU [S1, unofficial].
+All methods in this family map continuous world-space coordinates to discrete integer grid indices $(i, j, k)$ [G]. The core mechanism involves:
+1.  **Coordinate Mapping**: Defining a grid resolution (number of cells per axis) and a bounding box (origin and extent) [G]. A world coordinate $x$ is mapped to a grid index $idx$ via:
+    $$ idx = \lfloor \frac{x - origin}{voxel\_size} \rfloor $$
+    where $voxel\_size$ is the physical dimension of a voxel [S1, unofficial][S3, unofficial].
+2.  **Occupancy Determination**: Evaluating whether a specific voxel cell intersects with, contains, or is influenced by the input primitive [G]. This evaluation varies by method, such as subdivision, ray casting, or binvox algorithms [S1, unofficial].
+3.  **Attribute Assignment**: Storing data in the voxel [G]. This may include occupancy flags, density, or color/normal attributes derived from the source geometry or simulation [S12].
 
 ## Subtopics
 
+### [Per-Pixel Linked List Voxelization](1187-per-pixel-linked-list-voxelization.md)
+[Per-Pixel Linked List Voxelization](1187-per-pixel-linked-list-voxelization.md) is a GPU-based technique that constructs a depth-sorted linked list of fragment depths per screen pixel using atomic counters and shader storage buffers, allowing for subsequent sorting and processing of depth-sorted voxels. It solves the problem of accumulating multiple surface intersections (depths) per pixel into a coherent, sorted structure suitable for volume rendering or ray marching, distinguishing itself from rasterization-based methods by explicitly handling multiple hits per pixel via dynamic linked lists rather than fixed-depth buffers or simple occupancy masks.
+
 ### [Vessel Voxelizer](2321-vessel-voxelizer.md)
-A CUDA-accelerated method for converting vascular structures (line segments with radii) into fuzzy voxel volumes. It differs from mesh voxelization by operating on parametric tube primitives and using supersampling to compute fractional occupancy. Choose this for biomedical imaging of blood vessels where continuous density is required.
+[Vessel Voxelizer](2321-vessel-voxelizer.md) is a CUDA-accelerated method that converts vascular structures, defined as line segments with associated radii, into a 3D "fuzzy" voxel volume where each voxel's value represents the fraction of its volume occupied by the vessels. It differs from binary voxelization methods by outputting continuous occupancy values via supersampling, and from general mesh voxelization by operating directly on parametric tube primitives (line segments) rather than polygonal surfaces.
 
 ### [Flexible Dual Grid Mesh Voxelization](2640-flexible-dual-grid-mesh-voxelization.md)
-A GPU method that constructs a dual-grid representation by solving an enhanced Quadratic Error Function (QEF) for active voxels. It differs from binary voxelization by capturing sharp features and open boundaries without watertight meshes. Choose this for high-quality 3D reconstruction and geometry processing where feature preservation is critical.
+[Flexible Dual Grid Mesh Voxelization](2640-flexible-dual-grid-mesh-voxelization.md) determines the set of active sparse voxels intersected by a triangle mesh and solves the Quadratic Error Function (QEF) to compute dual vertex positions within those voxels. It serves as the foundational geometry processing stage for [O-Voxel](3835-o-voxel.md), enabling the robust representation of surfaces with arbitrary topology, including non-manifold and open boundaries, without requiring watertight meshes. Unlike [Vessel Voxelizer](2321-vessel-voxelizer.md) which focuses on volumetric density, this method explicitly constructs a dual-grid representation where vertices are optimized to minimize distance to the original mesh geometry.
+
+### [Atomic Color Averaging in Voxelization](3529-atomic-color-averaging-in-voxelization.md)
+[Atomic Color Averaging in Voxelization](3529-atomic-color-averaging-in-voxelization.md) is a GPU-based voxelization technique that resolves write-ordering conflicts when multiple fragments map to the same voxel by computing an incremental arithmetic mean of their colors using integer atomic operations. Unlike methods that store raw sums or require floating-point atomic support, this approach packs the color and a sample counter into a 32-bit unsigned integer, allowing standard `imageAtomicCompSwap` loops to maintain time-coherent, flicker-free results during dynamic revoxelization. It sets itself apart from [Per-Pixel Linked List Voxelization](1187-per-pixel-linked-list-voxelization.md) by avoiding dynamic memory allocation for lists, and from [CUDA Voxelizer GPU Voxelization](6757-cuda-voxelizer-gpu-voxelization.md) by relying on portable OpenGL integer atomics rather than hardware-specific floating-point atomics or shared memory reductions.
 
 ### [CUDA Voxelizer GPU Voxelization](6757-cuda-voxelizer-gpu-voxelization.md)
-A general-purpose GPU-accelerated voxelizer for polygon meshes. It supports both surface and solid voxelization. Choose this for general-purpose mesh-to-voxel conversion where high throughput on NVIDIA hardware is needed.
+[CUDA Voxelizer GPU Voxelization](6757-cuda-voxelizer-gpu-voxelization.md) is a GPU-accelerated method to convert polygon meshes into voxel grids using CUDA, supporting both surface voxelization (faces) and solid voxelization (filled volume). It differs from its siblings by providing a complete, standalone command-line implementation that handles mesh loading, bounding box computation, and parallel rasterization in a single pipeline, whereas [Per-Pixel Linked List Voxelization](1187-per-pixel-linked-list-voxelization.md) focuses on specific rasterization techniques and [Vessel Voxelizer](2321-vessel-voxelizer.md) targets specific anatomical structures.
+
+### [Parallel CPU Voxelization](7135-parallel-cpu-voxelization.md)
+[Parallel CPU Voxelization](7135-parallel-cpu-voxelization.md) uses Python's `ThreadPoolExecutor` to parallelize the voxelization process across multiple CPU cores.
+
+### [MSAA Voxelization](7412-msaa-voxelization.md)
+[MSAA Voxelization](7412-msaa-voxelization.md) is a technique to achieve conservative rasterization without expanding primitive edges in the Geometry Shader. It uses MSAA (Multi-Sampling Anti-Aliasing) to invoke the pixel shader if any subsample is covered by a primitive.
+
+### [Triangle-Parallel Solid Voxelization](9770-triangle-parallel-solid-voxelization.md)
+[Triangle-Parallel Solid Voxelization](9770-triangle-parallel-solid-voxelization.md) is a data-parallel algorithm for solid voxelization that parallelizes over all triangles, dedicating one thread per triangle.
+
+### Low-Detail Obstacle Voxelization
+- **Definition**: Using simplified meshes for obstacles to allow voxelization at every frame with little performance cost [S1, unofficial].
+- **Parameter**: Mesh LOD: Use a low level of detail mesh for each obstacle [S1, unofficial].
+
+### Asynchronous Voxel Update
+- **Definition**: Updating the voxel world at a lower frequency than the render frame rate to leverage temporal coherency of static or slow-moving light sources and dynamic models [S2, unofficial].
+- **Parameter**: Update frequency: The voxelization can be performed at a lower frequency, such as every 5 frames [S2, unofficial].
+- **Pitfall**: Lower update frequency causes the voxel model to lag behind the triangle mesh, resulting in visual artifacts [S2, unofficial].
+
+### Voxelization Engine Workload Distribution
+- **Definition**: A pipeline architecture distributing voxelization tasks between CPU and GPU to handle ROI computation, classification, and rasterization efficiently [S3, unofficial].
+- **Step**: CPU: Compute Region of Interest (ROI) by updating index buffer dynamically. Perform normal-based classification and bucket sorting for polygonal models. Transfer updated data through AGP port. GPU: Rasterize classified primitives in streaming mode. Encode and store results as 2D textures in three directional sheet buffers. Create proxy rectangles to texture map patches for rendering/access [S3, unofficial].
+
+### Crack-Free Voxelization via Axis Swizzling
+- **Definition**: A technique to fix 'cracks' (holes/slots) in voxelization caused by steep primitive slopes relative to the view direction. It selects the projection direction (X, Y, or Z axis) based on the face normal to present the largest face area, avoiding high depth gradients [S4, unofficial].
+- **Step**: In the Geometry Shader (GS), per primitive, select the projection direction from the X, Y, and Z axes according to the face normal. Swizzle the X, Y, and Z components of the vertex positions in the Geometry Shader to change the projection direction. This allows rendering from 3 directions without 3 separate render passes. In the Pixel Shader, restore the coordinate components according to the information passed from the Geometry Shader [S4, unofficial].
+- **Formula**: Crack Condition: If $|ddx(depth)| > 1.0$ or $|ddy(depth)| > 1.0$, cracks occur perpendicular to the depth direction. Calculated in the pixel shader [S4, unofficial].
 
 ## Background
-GPU voxelization emerged with the advent of CUDA and OpenCL, allowing developers to offload the computationally intensive intersection tests of voxelization to thousands of parallel cores [S1, unofficial]. Early methods focused on rasterization-based acceleration, but modern approaches utilize compute shaders and direct CUDA kernels for more flexible geometric processing, such as solving QEF systems or handling non-polygonal primitives like vessels [S1, unofficial].
+The acceleration of voxelization on parallel hardware emerged alongside the rise of GPU computing capabilities. Early methods relied on CPU-based scan-conversion, which became a bottleneck for real-time applications. The introduction of CUDA allowed for direct parallel processing of mesh data on NVIDIA GPUs, leading to implementations like the CUDA Voxelizer which supported both surface and solid voxelization [S1, unofficial]. Concurrently, graphics API advancements enabled techniques like MSAA-based conservative rasterization and linked-list accumulation in fragment shaders, facilitating more complex voxel structures like depth-sorted A-buffers [S1, unofficial]. The need for efficient real-time global illumination, particularly voxel cone tracing, drove further optimizations such as asynchronous updates and workload distribution between CPU and GPU [S2, unofficial][S3, unofficial]. Techniques to address specific artifacts, such as cracks from steep slopes, were also developed using geometry shader swizzling [S4, unofficial].
 
 ## Sources
+[S1] PDF Real-Time Simulation and Rendering of 3D Fluids, https://wo1fsea.github.io/files/About_NavMesh/P5_GPU_Gems_3_Real-Time_Simulation_and_Rendering_of_3D_Fluids.pdf, fetched 2026-10-27 (unofficial)
+[S2] #AltDevBlog » Implementing Voxel Cone Tracing, https://jahej.com/alt/2013_01_31_implementing-voxel-cone-tracing.html, fetched 2026-10-28 (unofficial)
+[S3] (PDF) Real-time Voxelization for Complex Models, https://www.researchgate.net/publication/252533918_Real-time_Voxelization_for_Complex_Models, fetched 2026-11-03 (unofficial)
+[S4] https://developer.nvidia.com/content/basics-gpu-voxelization, https://developer.nvidia.com/content/basics-gpu-voxelization, fetched 2026-10-28 (unofficial)

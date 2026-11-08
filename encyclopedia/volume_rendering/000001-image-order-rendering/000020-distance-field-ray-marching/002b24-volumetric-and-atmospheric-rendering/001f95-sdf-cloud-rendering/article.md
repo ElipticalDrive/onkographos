@@ -6,14 +6,14 @@ Also called: Signed Distance Field Clouds
 SDF Cloud Rendering is a technique for rendering volumetric clouds using Signed Distance Fields (SDFs) via ray marching in a fragment shader, utilizing warped sphere primitives and smooth unions to create complex shapes [S1, unofficial]. It differs from standard volumetric rendering by representing the cloud volume as an implicit surface defined by analytic distance functions rather than a sampled density grid, allowing for sharp, stylized cloud structures with minimal memory overhead [S1, unofficial].
 
 ## How it works
-The method renders a scene by shooting a ray through each pixel, marching along the ray to find the intersection with the cloud volume defined by a composite SDF, and shading the surface based on a shadow map derived from the same SDF.
+The method renders a scene by shooting a ray through each pixel, marching along the ray to find the intersection with the cloud volume defined by a composite SDF, and shading the surface based on a shadow map derived from the same SDF [S1, unofficial].
 
 ### Inputs and Outputs
-- **Inputs**: Fragment coordinates (`gl_FragCoord`), screen resolution (`screenSize`), camera field of view (45.0 degrees), and a random seed for jitter generation.
-- **Outputs**: A final color value for each pixel, tone-mapped to the [0, 1] range.
+- **Inputs**: Fragment coordinates (`gl_FragCoord`), screen resolution (`screenSize`), camera field of view (45.0 degrees), and a random seed for jitter generation [S1, unofficial].
+- **Outputs**: A final color value for each pixel, tone-mapped to the [0, 1] range [S1, unofficial].
 
 ### Data Structures
-No complex data structures are used. The scene is defined entirely by constant parameters and analytic functions within the shader code.
+No complex data structures are used. The scene is defined entirely by constant parameters and analytic functions within the shader code [S1, unofficial].
 
 ### Parameters
 - `MAX_MARCHING_STEPS`: Integer constant, value 100 [S1, unofficial].
@@ -49,14 +49,14 @@ No complex data structures are used. The scene is defined entirely by constant p
 
 ### Steps
 1. **Ray Direction Calculation**:
-   Calculate the ray direction for the current fragment.
+   Calculate the ray direction for the current fragment [S1, unofficial].
    $$ xy = \text{fragCoord} - \frac{\text{screenSize}}{2.0} $$
    $$ z = \frac{\text{screenSize}.y}{\tan(\frac{\text{radians}(45.0)}{2.0})} $$
    $$ \text{dir} = \text{normalize}(\text{vec3}(xy, -z)) $$
    [S1, unofficial]
 
 2. **Ray Marching for Intersection**:
-   Initialize `depth = MIN_DIST`. Loop `i` from 0 to `MAX_MARCHING_STEPS - 1`:
+   Initialize `depth = MIN_DIST`. Loop `i` from 0 to `MAX_MARCHING_STEPS - 1` [S1, unofficial].
    - Calculate sample point: $p = \text{eye} + \text{depth} \times \text{dir}$.
    - Evaluate scene SDF: $dist = \text{sceneSDF}(p)$.
    - If $dist < \text{EPSILON}$, return `depth`.
@@ -65,7 +65,7 @@ No complex data structures are used. The scene is defined entirely by constant p
    [S1, unofficial]
 
 3. **Scene SDF Construction**:
-   The scene SDF is constructed by warping the input point and combining sphere primitives.
+   The scene SDF is constructed by warping the input point and combining sphere primitives [S1, unofficial].
    - Warp the sample point: $v_{warped} = \text{warp}(samplePoint, 1.5)$.
    - Compute distance to first sphere: $d1 = \text{sphereSDF}(v_{warped}, \text{vec3}(0.5, 0.0, 0.0), 1.0)$.
    - Compute distance to second sphere: $d2 = \text{sphereSDF}(v_{warped}, \text{vec3}(-0.5, -0.4, 0.2), 0.5)$.
@@ -75,7 +75,7 @@ No complex data structures are used. The scene is defined entirely by constant p
    [S1, unofficial]
 
 4. **Shading**:
-   - If the returned distance is greater than `MAX_DIST - EPSILON`, render the sky.
+   - If the returned distance is greater than `MAX_DIST - EPSILON`, render the sky [S1, unofficial].
      - Calculate sky color based on the dot product of the ray direction and the vertical vector $(0.0, -1.0, 0.0)$.
      - $d = \text{dot}(\text{dir}, \text{normalize}(\text{vec3}(0.0, -1.0, 0.0)))$.
      - $d = \text{clamp}(d \times 3.0 + 0.5, 0.0, 1.0)$.
@@ -96,7 +96,7 @@ No complex data structures are used. The scene is defined entirely by constant p
    [S1, unofficial]
 
 5. **Tone Mapping**:
-   - Apply Hable tone mapping to the final color.
+   - Apply Hable tone mapping to the final color [S1, unofficial].
    - Scale by $wScale = 1.0 / \text{toneMap}(\text{EXPOSURE} \times \text{WHITE})$.
    - Output $\text{vec4}(\text{toneMap}(\text{EXPOSURE} \times \text{color}) \times wScale, 1.0)$.
    [S1, unofficial]
@@ -127,7 +127,7 @@ def warp(v, scale, seed):
 
 def smooth_union(d1, d2, k):
     h = np.clip(0.5 + 0.5 * (d2 - d1) / k, 0.0, 1.0)
-    return np.where(h > 0.5, d1, d2) - k * h * (1.0 - h)
+    return d2 * (1.0 - h) + d1 * h - k * h * (1.0 - h)
 
 def sphere_sdf(p, origin, radius):
     return np.linalg.norm(p - origin) - radius
@@ -203,19 +203,19 @@ def render(frag_coord, screen_size, seed):
 ```
 
 ### Edge Cases and Pitfalls
-- **Precision**: The use of `EPSILON` (0.0001) is critical for determining intersection. If too large, the ray may miss thin cloud structures; if too small, floating-point errors may cause infinite loops or missed intersections [S1, unofficial].
-- **Overshooting**: `STEP_SCALE` (0.67) is used to prevent overshooting the surface. A value of 1.0 or higher could cause the ray to jump over the surface, leading to incorrect shading or missed intersections [S1, unofficial].
-- **Warping Artifacts**: The warping function introduces noise and distortion. The choice of offsets (0.0, 0.2, 0.5) and the seed value affect the visual appearance. A fixed seed will result in static clouds, while a varying seed can animate them [S1, unofficial].
+- **Precision**: The use of `EPSILON` (0.0001) is critical for determining intersection [S1, unofficial].
+- **Overshooting**: `STEP_SCALE` (0.67) is used to prevent overshooting the surface [S1, unofficial].
+- **Warping Artifacts**: The warping function introduces noise and distortion [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity**: $O(N \times M)$, where $N$ is the number of pixels and $M$ is the maximum number of marching steps (100). Each step involves a warp, three sphere SDF evaluations, and a smooth union operation.
-- **Memory Complexity**: $O(1)$, as no large data structures are stored. All computations are done on the fly in the fragment shader.
-- **Performance**: The method is computationally expensive per pixel due to the multiple SDF evaluations and the shadow ray marching. However, it is memory-efficient compared to voxel-based methods.
-- **Strengths**: No need for texture sampling or grid storage; sharp, stylized visuals; easy to animate by varying the seed or warp parameters.
-- **Limitations**: Limited to specific geometric primitives (spheres); not suitable for complex, organic cloud shapes without significant modification; shadow calculation adds significant overhead.
+- **Time Complexity**: $O(N \times M)$, where $N$ is the number of pixels and $M$ is the maximum number of marching steps (100). Each step involves a warp, three sphere SDF evaluations, and a smooth union operation [S1, unofficial].
+- **Memory Complexity**: $O(1)$, as no large data structures are stored. All computations are done on the fly in the fragment shader [S1, unofficial].
+- **Performance**: The method is computationally expensive per pixel due to the multiple SDF evaluations and the shadow ray marching. However, it is memory-efficient compared to voxel-based methods [S1, unofficial].
+- **Strengths**: No need for texture sampling or grid storage; sharp, stylized visuals [S1, unofficial].
+- **Limitations**: Limited to specific geometric primitives (spheres); shadow calculation adds significant overhead [S1, unofficial].
 
 ## Background
-SDF Cloud Rendering was created by Dave Pagurek as a small experiment in rendering with signed distance fields. It was created on the train from Ottawa to Kingston for Graphics Interface 2019 [S1, unofficial]. The technique demonstrates the potential of SDFs for creating volumetric effects without the need for complex volumetric data structures.
+SDF Cloud Rendering was created by Dave Pagurek as a small experiment in rendering with signed distance fields. It was created on the train from Ottawa to Kingston for Graphics Interface 2019 [S1, unofficial]. The technique demonstrates the potential of SDFs for creating volumetric effects without the need for complex volumetric data structures [S1, unofficial].
 
 ## Sources
 [S1] davepagurek/sdf-clouds, https://github.com/davepagurek/sdf-clouds, fetched 2026-10-27 (unofficial)

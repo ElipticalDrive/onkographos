@@ -1,52 +1,182 @@
 # Custom Perspective Projection Matrix Construction
 
-Also called: 3D Projection Matrix Construction, Camera projection matrix setup, Canvas projection setup, Custom Perspective Projection Matrix, Perspective projection, View matrix assembly, View matrix setup
+Also called: 3D Projection Matrix Construction, Camera projection matrix setup, Canvas projection setup, Custom Perspective Projection Matrix, View matrix assembly, View matrix setup
 
 ## Overview
-This method constructs the projection and view matrices required to transform 3D scene coordinates into clip space for rendering [S3, unofficial]. It differs from standard symmetric frustum constructors by allowing explicit control over non-square focal lengths ($f_x, f_y$) and supporting viewport shift vectors to align the camera with a visibility bounding box [S1, S2, unofficial].
+This method constructs the explicit mathematical matrices required to transform 3D scene coordinates into clip space for rendering, specifically tailored for volume rendering techniques like Gaussian Splatting. It solves the problem of establishing the correct camera coordinate system and perspective distortion by combining view and projection matrices, often handling coordinate system conversions (e.g., OpenGL to WGPU) via explicit matrix multiplication or axis flipping [S1, S2, S3, unofficial]. It differs from standard fixed-function pipeline setups by explicitly managing the computation of tangent-based Field of View (FOV) parameters for shader uniforms and allowing for custom focal lengths and aspect ratios rather than relying solely on standard API calls [S1, S2, S3, unofficial].
 
 ## How it works
 **Inputs:**
-- Focal lengths $f_x, f_y$ [S2, unofficial].
-- Viewport dimensions: width $W$, height $H$ [S2, unofficial].
-- Near plane distance $n$ [S2, S3, unofficial].
-- Far plane distance $f$ [S2, S3, unofficial].
-- Shift vectors `before` and `after` for coordinate alignment [S1, unofficial].
-- Camera orientation: yaw, pitch, and zoom/aspect ratio [S1, S3, unofficial].
+- Camera parameters: Focal lengths ($f_x, f_y$), near plane ($n$), far plane ($f$), and aspect ratio ($a = \text{width} / \text{height}$).
+- Camera orientation: Yaw ($\psi$) and Pitch ($\theta$) angles.
+- Viewport dimensions: Width ($W$) and Height ($H$).
+- Shift vectors: `before` and `after` vectors for coordinate system adjustments [S1, unofficial].
 
 **Outputs:**
-- Projection matrix $P$ [S2, S3, unofficial].
-- View matrix $V$ [S3, unofficial].
-- Model matrix $M$ [S3, unofficial].
-- Combined transformation matrix $M_{final} = P \cdot V \cdot M$ [S3, unofficial].
+- Combined Model-View-Projection (MVP) matrix ($M_{mvp}$).
+- Individual View ($M_{view}$) and Projection ($M_{proj}$) matrices.
 
 **Data Structures:**
-- $4 \times 4$ matrices for projection, view, and model [S3, unofficial].
+- Matrices are 4x4 column-major or row-major arrays of floating-point numbers (typically `float` or `f32`).
+- The projection matrix $P$ is defined by specific non-zero elements.
 
 **Steps:**
-1. **Initialize Model Matrix:** Set $M$ to the $4 \times 4$ identity matrix [S3, unofficial]. Apply uniform scaling with factor $0.7$ if required by the scene setup [S1, unofficial].
-2. **Construct View Matrix:** Initialize $V$ based on camera orientation [S3, unofficial]. Apply yaw rotation around the Z-axis if $|\text{yaw}| > 10^{-20}$ [S1, unofficial]. Apply pitch rotation around the X-axis if $|\text{pitch}| > 10^{-20}$ [S1, unofficial]. This threshold prevents numerical instability and skips unnecessary multiplications for near-zero angles [S1, unofficial].
-3. **Calculate Projection Matrix $P$:** Compute the aspect ratio $a = W / H$ [S3, unofficial]. Set the matrix elements explicitly as [S2, unofficial]:
-   $$P[0][0] = \frac{2 f_x}{W}, \quad P[1][1] = \frac{2 f_y}{H}, \quad P[2][2] = -\frac{f + n}{f - n}, \quad P[2][3] = -1, \quad P[3][2] = -\frac{2 f n}{f - n}$$
-   All other elements are zero [S2, unofficial]. Alternatively, standard libraries may be used with `glm::perspective(glm::radians(camera.Zoom), a, n, f)` [S3, unofficial], but the explicit construction is necessary when $f_x \neq f_y$ [S2, unofficial].
-4. **Apply Viewport Shifts:** If the `before` shift vector is non-zero, apply a translation to shift coordinates to the origin before projection [S1, unofficial]. If the `after` shift vector is non-zero, apply an inverse translation to shift back to screen coordinates after projection [S1, unofficial].
-5. **Combine and Update:** Compute $M_{final} = P \cdot V \cdot M$ [S3, unofficial]. Pass $M_{final}$ to shader uniforms. On viewport resize, retrieve new dimensions, temporarily set the renderer size to $1 \times 1$, update the camera aspect ratio and projection matrix, restore the actual renderer dimensions, and update the real projection matrix and splat mesh uniforms [S2, unofficial].
+
+1. **Initialize Matrices:**
+   Set the Model matrix $M_{model}$ to the identity matrix $I$.
+   $$ M_{model} = \begin{bmatrix} 1 & 0 & 0 & 0 \\ 0 & 1 & 0 & 0 \\ 0 & 0 & 1 & 0 \\ 0 & 0 & 0 & 1 \end{bmatrix} $$
+
+2. **Construct Projection Matrix ($P$):**
+   Calculate the elements of the projection matrix based on focal lengths and viewport dimensions. The standard formulation provided in the sources is:
+   $$ P[0][0] = \frac{2 f_x}{W} $$
+   $$ P[1][1] = \frac{2 f_y}{H} $$
+   $$ P[2][2] = -\frac{f + n}{f - n} $$
+   $$ P[2][3] = -1 $$
+   $$ P[3][2] = -\frac{2 f n}{f - n} $$
+   All other elements are zero.
+   *Note: This formulation maps depth to $[-1, 1]$ range with negative Z-forward convention typical in OpenGL-like systems [S2, unofficial].*
+
+3. **Construct View Matrix ($V$):**
+   Compute the view matrix based on camera orientation.
+   - If $|\psi| > 10^{-20}$, apply a rotation matrix $R_z(\psi)$ around the Z-axis.
+   - If $|\theta| > 10^{-20}$, apply a rotation matrix $R_x(\theta)$ around the X-axis.
+   - Combine rotations: $R = R_x(\theta) R_z(\psi)$.
+   - The view matrix is typically the inverse of the camera's world transformation. In many implementations, this is derived from the camera's position and orientation vectors [S3, unofficial].
+
+4. **Apply Scaling (Optional):**
+   Apply uniform scaling factor $s$ (e.g., $s=0.7$) to the model matrix if required by the specific rendering context [S1, unofficial].
+   $$ M_{model} = \text{Scale}(s) \times M_{model} $$
+
+5. **Combine Matrices:**
+   Compute the final MVP matrix:
+   $$ M_{mvp} = P \times V \times M_{model} $$
+
+6. **Handle Coordinate Shifts (Optional):**
+   If a `before` shift vector is non-zero, apply a translation to align the coordinate system before projection. If an `after` shift vector is non-zero, apply an inverse translation to map back to screen coordinates [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def construct_projection_matrix(fx, fy, width, height, near, far):
+    """
+    Constructs a 4x4 perspective projection matrix.
+    Uses the formulation from [S2, unofficial].
+    """
+    # Initialize 4x4 matrix with zeros
+    P = [[0.0 for _ in range(4)] for _ in range(4)]
+    
+    P[0][0] = 2.0 * fx / width
+    P[1][1] = 2.0 * fy / height
+    P[2][2] = -(far + near) / (far - near)
+    P[2][3] = -1.0
+    P[3][2] = -2.0 * far * near / (far - near)
+    
+    return P
+
+def construct_view_matrix(yaw, pitch):
+    """
+    Constructs a view matrix from yaw and pitch angles.
+    Skips rotation if angle is near zero to prevent instability [S1, unofficial].
+    """
+    # Identity matrix
+    V = [[1.0 if i == j else 0.0 for j in range(4)] for i in range(4)]
+    
+    # Apply Yaw (Rotation around Z-axis)
+    if abs(yaw) > 1e-20:
+        cos_yaw = cos(yaw)
+        sin_yaw = sin(yaw)
+        # Rotation matrix Rz
+        Rz = [
+            [cos_yaw, -sin_yaw, 0.0, 0.0],
+            [sin_yaw, cos_yaw, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0]
+        ]
+        V = multiply_matrices(Rz, V)
+        
+    # Apply Pitch (Rotation around X-axis)
+    if abs(pitch) > 1e-20:
+        cos_pitch = cos(pitch)
+        sin_pitch = sin(pitch)
+        # Rotation matrix Rx
+        Rx = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, cos_pitch, -sin_pitch, 0.0],
+            [0.0, sin_pitch, cos_pitch, 0.0],
+            [0.0, 0.0, 0.0, 1.0]
+        ]
+        V = multiply_matrices(Rx, V)
+        
+    return V
+
+def multiply_matrices(A, B):
+    """
+    Multiplies two 4x4 matrices A and B.
+    """
+    C = [[0.0 for _ in range(4)] for _ in range(4)]
+    for i in range(4):
+        for j in range(4):
+            for k in range(4):
+                C[i][j] += A[i][k] * B[k][j]
+    return C
+
+def construct_mvp(fx, fy, width, height, near, far, yaw, pitch, scale=1.0):
+    """
+    Constructs the final Model-View-Projection matrix.
+    """
+    # 1. Projection Matrix
+    P = construct_projection_matrix(fx, fy, width, height, near, far)
+    
+    # 2. View Matrix
+    V = construct_view_matrix(yaw, pitch)
+    
+    # 3. Model Matrix (Identity + Scale)
+    M = [[1.0 if i == j else 0.0 for j in range(4)] for i in range(4)]
+    if scale != 1.0:
+        M[0][0] = scale
+        M[1][1] = scale
+        M[2][2] = scale
+        
+    # 4. Combine: MVP = P * V * M
+    # First V * M
+    VM = multiply_matrices(V, M)
+    # Then P * (V * M)
+    MVP = multiply_matrices(P, VM)
+    
+    return MVP
+```
 
 **Parameters:**
-- Default camera specs: $f_x = 1159.5880733038064$, $f_y = 1164.6601287484507$, $n = 0.1$, $f = 500.0$ [S2, unofficial].
-- Default resolution: $1280 \times 720$ [S3, unofficial].
-- Rotation threshold: $10^{-20}$ [S1, unofficial].
+- $f_x, f_y$: Focal lengths in pixels. Default values from [S2, unofficial] are $f_x = 1159.5880733038064$, $f_y = 1164.6601287484507$.
+- $n$: Near plane distance. Default: $0.1$.
+- $f$: Far plane distance. Default: $500.0$ [S2, S3, unofficial].
+- Aspect Ratio: $W/H$. Default resolution $1280 \times 720$ [S3, unofficial].
 
-**Pitfalls:**
-- Numerical instability occurs if yaw or pitch are extremely small but non-zero; skip rotation if $|\theta| < 10^{-20}$ [S1, unofficial].
-- The resize procedure requires temporarily setting the renderer size to $1 \times 1$ to correctly update the aspect ratio and projection matrix before restoring the actual dimensions [S2, unofficial].
+**Edge Cases and Pitfalls:**
+- **Numerical Instability:** Rotations are skipped if the absolute value of the angle is less than $10^{-20}$ to avoid numerical instability and unnecessary matrix multiplications [S1, unofficial].
+- **Coordinate System Conversion:** When converting between coordinate systems (e.g., OpenGL to WGPU), explicit axis flipping or matrix multiplication is required [S1, S2, S3, unofficial].
+- **Resize Handling:** On viewport resize, the renderer size may be temporarily set to $1 \times 1$ to update the camera aspect ratio and projection matrix before restoring the actual dimensions [S2, unofficial].
 
 ## Subtopics
 
+### [View and Projection Matrix Construction](2432-view-and-projection-matrix-construction.md)
+This method constructs the view and projection matrices required to transform 3D scene coordinates into clip space for rendering, specifically tailored for Gaussian Splatting and similar volume rendering techniques. It solves the problem of establishing the correct camera coordinate system and perspective distortion for ray generation. It differs from standard fixed-function pipeline setups by explicitly managing the computation of tangent-based FOV parameters for shader uniforms and handling coordinate system conversions (e.g., OpenGL to WGPU) via explicit matrix multiplication or axis flipping.
+
+### [Reverse Z Perspective Projection with Infinite Far Plane](7544-reverse-z-perspective-projection-with-infinite-far-plane.md)
+A projection matrix that maps view space to clip space using reverse Z depth buffering and an infinite far plane, improving depth precision near the camera while avoiding far-plane clipping artifacts.
+
 ## Operating characteristics
+- **Time Complexity:** $O(1)$ for matrix construction, as it involves a fixed number of arithmetic operations.
+- **Memory Complexity:** $O(1)$, storing only a few 4x4 matrices.
+- **Strengths:** Explicit control over projection parameters allows for custom camera models and coordinate system handling. Suitable for real-time rendering where dynamic updates are needed.
+- **Limitations:** The standard formulation may suffer from depth precision issues near the far plane if not using Reverse Z. Requires manual handling of coordinate system conversions.
+- **When to Use:** When custom focal lengths, aspect ratios, or coordinate system conversions are required, such as in Gaussian Splatting viewers or custom volume rendering engines.
+- **When Not to Use:** When standard fixed-function pipeline behavior is sufficient and no custom coordinate transformations are needed.
 
 ## Background
-This method is documented in implementations for Gaussian Splatting web viewers and voxel demos [S2, S3, unofficial]. It provides explicit matrix assembly steps for custom camera models, combining projection, view, and model transformations for shader input [S3, unofficial].
+This method is commonly used in modern real-time rendering engines, particularly for novel view synthesis techniques like Gaussian Splatting. It originates from the need to accurately map 3D Gaussian splats to 2D screen space while maintaining correct perspective and depth information. The specific formulations and implementations are found in open-source projects such as `vdrm` [S1, unofficial], `Gaussian-Splatting-WebViewers` [S2, unofficial], and `VoxelDemo` [S3, unofficial].
 
 ## Sources
 [S1] hikaricai/vdrm, https://github.com/hikaricai/vdrm, fetched 2026-10-26 (unofficial)
