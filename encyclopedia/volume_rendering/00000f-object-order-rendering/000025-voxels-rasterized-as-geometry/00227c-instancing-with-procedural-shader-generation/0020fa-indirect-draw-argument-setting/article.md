@@ -1,0 +1,169 @@
+# Indirect Draw Argument Setting
+
+Also called: Vertex Pool
+
+## Overview
+Indirect Draw Argument Setting is a rendering optimization technique that uses a persistently mapped Vertex Buffer Object (VBO) as a memory pool for interleaved vertex data, divided into fixed-size buckets. Each occupied bucket is associated with an indirect draw call structure, allowing multiple sub-meshes to be rendered simultaneously via `glMultiDrawElementsIndirect` [S1, unofficial]. This method reduces driver overhead from frequent state changes and draw calls while simplifying memory management for procedural voxel meshing [S1, unofficial]. It sets itself apart from naive per-chunk VAO/VBO systems by merging sub-meshes and from merged VAO/VBO systems by avoiding full buffer resizes and re-uploads when updating sub-regions [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A request to allocate vertex storage for a new mesh chunk or sub-mesh.
+*   **Output:** A valid pointer to a bucket of vertices in the persistent VBO and an entry in an indirect draw call buffer (Indirect Args Buffer) ready for `glMultiDrawElementsIndirect`.
+
+**Data Structures:**
+
+1.  **Vertex Struct:** Interleaved float arrays.
+    *   `position`: `float[3]`
+    *   `normal`: `float[3]`
+    *   `color`: `float[4]`
+    *   Total stride: `sizeof(Vertex)` bytes.
+    *   *Note: The implementation in [S1, unofficial] hardcodes color alpha to 1.0.*
+
+2.  **DAIC Struct (Draw Elements Arrays Indirect Command):**
+    *   `cnt`: `uint` (Total number of indices to draw).
+    *   `instCnt`: `uint` (Total number of instances).
+    *   `start`: `uint` (First index to draw in the index buffer).
+    *   `baseVert`: `uint` (First vertex to draw in the VBO).
+    *   `baseInst`: `uint` (Base instance, hardcoded to 0).
+    *   `index`: `uint*` (Pointer to index data).
+
+3.  **Indirect Args Buffer:**
+    *   A `RWStructuredBuffer<uint>` (or equivalent OpenGL buffer) storing the DAIC structs contiguously.
+    *   Parameters: `vertexCountMultiplier` (uint), `instanceCountMultiplier` (uint), `startVertex` (uint), `startInstance` (uint).
+
+4.  **Free Queue:**
+    *   `std::deque<T*> free`: A FIFO queue storing pointers to available bucket starts.
+
+**Numbered Steps:**
+
+1.  **Initialize VAO and VBO:**
+    *   Generate a Vertex Array Object (VAO) and a Vertex Buffer Object (VBO).
+    *   Call a templated `format()` function on the VBO to enable vertex attribute arrays, set formats, binding divisors, and bindings.
+    *   Bind vertex attributes to the VBO offsets for position, normal, and color using `glVertexAttribFormat` and `glBindVertexBuffer`.
+
+2.  **Allocate Persistent Buffer:**
+    *   Define bucket size $K$ (vertices per bucket) and number of buckets $N$.
+    *   Allocate a buffer of size $N \times K \times \text{sizeof(Vertex)}$ using `glBufferStorage` with flags `GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT`.
+    *   Map the buffer persistently using `glMapBufferRange` to obtain a CPU-accessible pointer `start` to the entire pool.
+
+3.  **Initialize Free Queue:**
+    *   Iterate $i$ from 0 to $N-1$.
+    *   Push pointer `start + i * K` to the front of the `free` queue.
+
+4.  **Setup Indirect Draw Arguments:**
+    *   Multiply the first element of `indirectArgsBuffer` by `vertexCountMultiplier`:
+        $$ \text{indirectArgsBuffer}[0] \leftarrow \text{indirectArgsBuffer}[0] \times \text{vertexCountMultiplier} $$
+    *   Multiply the second element of `indirectArgsBuffer` by `instanceCountMultiplier`:
+        $$ \text{indirectArgsBuffer}[1] \leftarrow \text{indirectArgsBuffer}[1] \times \text{instanceCountMultiplier} $$
+    *   Set the third element to `startVertex`:
+        $$ \text{indirectArgsBuffer}[2] \leftarrow \text{startVertex} $$
+    *   Set the fourth element to `startInstance`:
+        $$ \text{indirectArgsBuffer}[3] \leftarrow \text{startInstance} $$
+    *   Set the fifth element to 0:
+        $$ \text{indirectArgsBuffer}[4] \leftarrow 0 $$
+
+5.  **Allocate Bucket for New Mesh:**
+    *   Pop a pointer `bucket_ptr` from the back of the `free` queue.
+    *   If the queue is empty, the pool is exhausted (edge case: requires resizing or flushing, not detailed in sources).
+    *   Write vertex data to `bucket_ptr`.
+    *   Create a DAIC struct entry in the indirect draw call buffer corresponding to this bucket.
+    *   Update `baseVert` in the DAIC struct to the offset of `bucket_ptr` relative to the VBO start.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import ctypes
+from collections import deque
+
+# Constants
+K = 1024  # Vertices per bucket
+N = 64    # Number of buckets
+VERTEX_SIZE = 3 * 4 + 3 * 4 + 4 * 4  # pos(3f) + norm(3f) + col(4f) = 40 bytes
+
+class Vertex:
+    def __init__(self, pos, norm, col):
+        self.pos = pos # [3 floats]
+        self.norm = norm # [3 floats]
+        self.col = col # [4 floats]
+
+class DAIC:
+    def __init__(self, cnt, inst_cnt, start, base_vert, index_ptr):
+        self.cnt = cnt
+        self.inst_cnt = inst_cnt
+        self.start = start
+        self.base_vert = base_vert
+        self.base_inst = 0
+        self.index = index_ptr
+
+class VertexPool:
+    def __init__(self, k, n):
+        self.K = k
+        self.N = n
+        self.free = deque()
+        
+        # 1. Allocate and Map Buffer
+        # In real OpenGL: glBufferStorage with GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT
+        # start is a pointer to the mapped memory
+        self.start = self.allocate_persistent_buffer(n * k * VERTEX_SIZE)
+        
+        # 3. Initialize Free Queue
+        for i in range(n):
+            bucket_ptr = self.start + i * k * VERTEX_SIZE
+            self.free.appendleft(bucket_ptr) # Push to front
+            
+        # 4. Setup Indirect Args Buffer (Simplified)
+        # indirectArgsBuffer is a GPU buffer
+        self.indirect_args = [0] * 5
+        self.indirect_args[0] *= 1 # vertexCountMultiplier (example: 1)
+        self.indirect_args[1] *= 1 # instanceCountMultiplier (example: 1)
+        self.indirect_args[2] = 0  # startVertex
+        self.indirect_args[3] = 0  # startInstance
+        self.indirect_args[4] = 0  # baseInst
+
+    def allocate_bucket(self):
+        # 5. Allocate Bucket
+        if not self.free:
+            raise Exception("Pool exhausted")
+        
+        bucket_ptr = self.free.pop() # Pop from back (FIFO)
+        
+        # Return pointer to caller to fill with vertex data
+        return bucket_ptr
+
+    def render(self, daic_list):
+        # Use glMultiDrawElementsIndirect with daic_list
+        pass
+
+    def allocate_persistent_buffer(self, size):
+        # Placeholder for OpenGL glBufferStorage and glMapBufferRange
+        # Returns a memory address/pointer
+        return 0 
+```
+
+**Edge Cases and Pitfalls:**
+*   **Double Buffering/Synchronization:** Reusing memory can cause race conditions if the GPU is still reading from a bucket while the CPU writes to it. This is mitigated by the FIFO queue allocation strategy, which ensures that reused buckets always point to memory regions cleared the longest ago [S1, unofficial].
+*   **Pool Exhaustion:** If $N$ buckets are insufficient, the system must handle allocation failure. The sources do not specify a dynamic resizing mechanism, implying a fixed maximum scene complexity or a flush-and-reuse strategy not detailed here.
+
+## Subtopics
+
+### Synchronization-Free Compute-Like Kernel Launch Using Draw Indirect
+A technique to launch GPU kernels with specific thread counts without CPU synchronization, using indirect draw calls triggered by a vertex shader with zero input vertex attributes [S3, unofficial]. Threads are identified using `gl_VertexID` [S3, unofficial]. Kernel launch parameters (thread count, starting offset) are stored in a buffer object in video memory [S3, unofficial]. Lightweight kernel launches (one thread) update these parameters via global memory pointers [S3, unofficial]. Memory barriers (`glMemoryBarrier()`) are required to ensure data availability when one kernel depends on the result of a previous one, as successive kernels may be scheduled simultaneously [S3, unofficial]. This allows zero CPU synchronization, which is not possible in CUDA or OpenCL [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Allocation is $O(1)$ due to the FIFO queue [S1, unofficial]. Rendering is $O(M)$ where $M$ is the number of occupied buckets, handled in a single driver call via `glMultiDrawElementsIndirect` [S1, unofficial].
+*   **Memory Complexity:** $O(N \times K \times \text{sizeof(Vertex)})$ for the persistent VBO [S1, unofficial].
+*   **Performance:** Performs better than regular chunk meshing in terms of garbage collection, getting data to the GPU, and CPU-based occlusion queries [S1, unofficial].
+*   **Strengths:** Reduces driver overhead from frequent state changes and draw calls; simplifies memory management; avoids full buffer resizes [S1, unofficial].
+*   **Limitations:** Fixed-size buckets may lead to fragmentation or exhaustion if $N$ is not chosen correctly; requires OpenGL 4.3+ for `glMultiDrawElementsIndirect` and persistent mapping features.
+*   **When to use:** Procedural voxel world visualization and meshing systems where many small sub-meshes are generated and updated frequently [S1, unofficial].
+*   **When not to use:** Scenes with very few draw calls or static geometry where driver overhead is negligible.
+
+## Background
+Originated in the context of high-performance voxel engines, specifically described by Nick McDermott in 2021 [S1, unofficial]. The author notes that while the individual concepts (persistent mapping, interleaved data, indirect drawing) are not new, their combination in this specific manner for voxel meshing was not widely documented online at the time [S1, unofficial]. The technique is implemented in C++ for OpenGL [S1, unofficial].
+
+## Sources
+[S1] High Performance Voxel Engine (2021), https://nickmcd.me/2021/04/04/high-performance-voxel-engine/, fetched 2026-10-26 (unofficial)
+[S2] 2JacT/Marching-Cubes-Terrain, https://github.com/2JacT/Marching-Cubes-Terrain, fetched 2026-10-27 (unofficial)
+[S3] PDF K14190_text - Icare3D, https://icare3d.org/research/OpenGLInsights-SparseVoxelization.pdf, fetched 2026-10-29 (unofficial)

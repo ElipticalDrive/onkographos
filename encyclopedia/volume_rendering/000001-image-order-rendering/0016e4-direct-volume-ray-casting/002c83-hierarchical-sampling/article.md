@@ -3,46 +3,47 @@
 Also called: Coarse-to-Fine Sampling, Importance Sampling for NeRF, Two-Stage Sampling
 
 ## Overview
-Hierarchical sampling is a two-stage sampling strategy for neural volume rendering that uses a coarse network to estimate geometry and density, then uses these estimates to guide importance sampling for a fine network [S1, S2, S4, unofficial]. It solves the problem of inefficient uniform sampling by concentrating computational effort on regions of high opacity or color change, thereby improving rendering quality and training convergence [S2, unofficial][S3]. It sets itself apart from its siblings by explicitly decoupling the density estimation (coarse pass) from the high-fidelity color prediction (fine pass) using a learned probability distribution, whereas [Iterative Ray Marching with Neural Volume Inference](1494-iterative-ray-marching-with-neural-volume-inference.md) refines samples iteratively and [DVGO Volume Rendering Forward Pass](2363-dvgo-volume-rendering-forward-pass.md) relies on grid-based density without a separate coarse MLP [S1, S2, S4, unofficial].
+Hierarchical sampling is a two-stage sampling strategy used in neural volume rendering (specifically NeRF) to improve rendering quality and efficiency by concentrating samples in regions of high geometric or radiance complexity [S1, S2, S4, unofficial]. It solves the problem of inefficient uniform sampling, where many samples fall in empty space or smooth regions, by using a coarse network to estimate the density distribution and then importance-sampling along the ray based on that estimate [S2, S4, unofficial]. It sets itself apart from standard direct volume ray casting [19-direct-volume-ray-casting.md] by replacing uniform discretization with a learned, non-uniform probability density function (PDF) derived from a separate coarse model, and from [Neural volume rendering](1576-neural-volume-rendering.md) by explicitly decoupling the density estimation (coarse) from the final color prediction (fine) into two distinct passes [S1, S2, unofficial].
 
 ## How it works
-**Inputs:**
-*   Camera ray $r(t) = \mathbf{o} + t\mathbf{d}$ defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
-*   Near and far clipping planes $t_{start}$ and $t_{end}$.
-*   Coarse neural network $f_c$ (MLP) predicting raw density $\sigma_c$ and color $\mathbf{c}_c$.
-*   Fine neural network $f_f$ (MLP) predicting raw density $\sigma_f$ and color $\mathbf{c}_f$.
-*   Number of coarse samples $N_c$ and fine samples $N_f$.
+Hierarchical sampling operates in two sequential passes: a coarse pass to estimate geometry/density, and a fine pass to render color using samples guided by the coarse estimate.
 
-**Outputs:**
-*   Final pixel color $C$.
-*   Gradients for $f_c$ and $f_f$.
+**Inputs and Outputs:**
+*   **Inputs:** Camera ray $r(t) = \mathbf{o} + t\mathbf{d}$, near/far bounds $[t_n, t_f]$, coarse network $N_c$, fine network $N_f$, number of coarse samples $N_c$, number of fine samples $N_f$.
+*   **Outputs:** Final pixel color $C$ and accumulated opacity $\alpha$.
 
 **Data Structures:**
-*   **Sample Points:** A tensor of shape $(N, 3)$ containing 3D coordinates $\mathbf{p}_i$.
-*   **Weights:** A tensor of shape $(N,)$ containing importance weights $w_i$ derived from the coarse pass.
-*   **CDF:** A cumulative distribution function array of shape $(N_c,)$ constructed from normalized weights.
+*   **Coarse Samples:** A set of depths $t_c = \{t_{c,1}, \dots, t_{c,N_c}\}$ along the ray. These are typically generated via stratified sampling within the interval $[t_n, t_f]$ [S2, unofficial].
+*   **Coarse Predictions:** For each $t_{c,i}$, the coarse network outputs density $\sigma_{c,i}$ and color $C_{c,i}$ [S1, S2, unofficial].
+*   **Weights:** Importance weights $w_{c,i}$ proportional to the expected contribution of each coarse segment, derived from $\sigma_{c,i}$ and the transmittance [S2, unofficial].
+*   **Fine Samples:** A set of depths $t_{fine} = \{t_{f,1}, \dots, t_{f,N_f}\}$ sampled from the distribution defined by $w_{c,i}$ [S2, unofficial].
 
 **Steps:**
 
-1.  **Coarse Pass (Stratified Sampling):**
-    *   Generate $N_c$ sample depths $t_c$ uniformly or stratified along $[t_{start}, t_{end}]$ [S2, unofficial].
-    *   Query the coarse network $f_c$ at each point $\mathbf{p}_i = r(t_{c,i})$ to obtain raw density $\sigma_{c,i}$ and color $\mathbf{c}_{c,i}$ [S1, S2, unofficial].
-    *   Compute opacity $\alpha_{c,i}$ for each segment:
-        $$ \alpha_{c,i} = 1 - \exp(-\sigma_{c,i} \cdot \delta_i) $$
-        where $\delta_i$ is the distance between adjacent sample points [S1, S14, unofficial].
-    *   Compute the contribution weight $w_i$ for each sample, proportional to its expected contribution to the final color:
-        $$ w_i = T_{c,i} \alpha_{c,i} $$
-        where $T_{c,i} = \exp\left(-\sum_{j=1}^{i-1} \sigma_{c,j} \delta_j\right)$ is the accumulated transmittance [S2, unofficial].
+1.  **Coarse Pass (Density Estimation):**
+    *   Generate $N_c$ stratified samples $t_{c,i}$ along the ray segment $[t_n, t_f]$ [S2, unofficial].
+    *   For each $t_{c,i}$, query the coarse network $N_c$ to obtain density $\sigma_{c,i}$ and color $C_{c,i}$ [S1, S2, unofficial].
+    *   Compute the weight $w_{c,i}$ for each sample. In the original NeRF formulation, this is based on the volume rendering equation's contribution:
+        $$
+        w_{c,i} = T_{c,i} (1 - e^{-\sigma_{c,i} \Delta t_i})
+        $$
+        where $T_{c,i} = \exp(-\sum_{j=1}^{i-1} \sigma_{c,j} \Delta t_j)$ is the transmittance up to sample $i$, and $\Delta t_i$ is the distance between samples [S2, unofficial]. Note: The sources describe constructing a CDF from these weights [S2, unofficial].
 
-2.  **Importance Sampling (Fine Pass):**
-    *   Normalize the weights $w_i$ to form a probability mass function (PMF) and construct the Cumulative Distribution Function (CDF) [S2, unofficial].
-    *   Sample $N_f$ new depths $t_{fine}$ from this CDF. This concentrates samples in regions where the coarse network predicted high density or color change [S2, unofficial].
-    *   Query the fine network $f_f$ at these new points $\mathbf{p}_{fine}$ to obtain $\sigma_{f,i}$ and $\mathbf{c}_{f,i}$ [S1, S2, unofficial].
+2.  **Importance Sampling (Fine Sample Generation):**
+    *   Construct a Cumulative Distribution Function (CDF) from the normalized coarse weights $w_{c,i}$ [S2, unofficial].
+    *   Sample $N_f$ new depths $t_{f,j}$ from this CDF [S2, unofficial]. This concentrates samples in regions where the coarse network predicted high density (high $w_{c,i}$) [S2, S4, unofficial].
+    *   **Pitfall:** The sampling step is non-differentiable with respect to the coarse model's output if gradients are intended to flow back to update the coarse model's density predictions. Implementations typically detach the inputs to the sampling process to prevent this gradient flow [S2, unofficial].
 
-3.  **Compositing:**
-    *   Render the final color using the fine samples via front-to-back compositing:
-        $$ C = \sum_{i=1}^{N_f} T_{f,i} \alpha_{f,i} \mathbf{c}_{f,i} $$
-        where $\alpha_{f,i} = 1 - \exp(-\sigma_{f,i} \cdot \delta_{f,i})$ and $T_{f,i}$ is the transmittance up to sample $i$ [S1, S14, unofficial].
+3.  **Fine Pass (Color Prediction):**
+    *   For each fine sample depth $t_{f,j}$, query the fine network $N_f$ to obtain density $\sigma_{f,j}$ and color $C_{f,j}$ [S1, S2, unofficial].
+    *   Perform volume rendering compositing using the fine samples $t_{f,j}$ and their corresponding $\sigma_{f,j}, C_{f,j}$ to compute the final pixel color $C$ and opacity $\alpha$ [S1, S2, unofficial].
+
+4.  **Loss Calculation (Training):**
+    *   The total loss is the sum of the Mean Squared Error (MSE) between the predicted and ground truth colors for both the coarse and fine passes [S2, unofficial]:
+        $$
+        \text{Total Loss} = \text{MSE}(C_{coarse}, C_{gt}) + \text{MSE}(C_{fine}, C_{gt})
+        $$
+        where $C_{coarse}$ is the color rendered using only the coarse samples [S2, unofficial].
 
 **Pseudocode:**
 
@@ -52,195 +53,126 @@ Hierarchical sampling is a two-stage sampling strategy for neural volume renderi
 import torch
 import torch.nn.functional as F
 
-def hierarchical_sample(ray_o, ray_d, t_start, t_end, n_coarse, n_fine, coarse_mlp, fine_mlp):
+def hierarchical_sample(ray_o, ray_d, t_n, t_f, coarse_net, fine_net, 
+                        n_coarse=64, n_fine=48):
     """
-    Performs hierarchical sampling for neural volume rendering.
+    Perform hierarchical sampling for a single ray.
     
     Args:
-        ray_o: (B, 3) Ray origins.
-        ray_d: (B, 3) Ray directions.
-        t_start: (B,) Near plane distances.
-        t_end: (B,) Far plane distances.
-        n_coarse: int Number of coarse samples.
-        n_fine: int Number of fine samples.
-        coarse_mlp: Module Coarse network.
-        fine_mlp: Module Fine network.
+        ray_o: Ray origin (3,)
+        ray_d: Ray direction (3,)
+        t_n: Near bound (scalar)
+        t_f: Far bound (scalar)
+        coarse_net: Coarse neural network (MLP)
+        fine_net: Fine neural network (MLP)
+        n_coarse: Number of coarse samples
+        n_fine: Number of fine samples
         
     Returns:
-        color: (B, 3) Rendered pixel colors.
-        loss: Tensor Loss for training.
+        color: Rendered color (3,)
+        alpha: Rendered opacity (scalar)
     """
-    B = ray_o.shape[0]
+    # 1. Coarse Pass: Stratified Sampling
+    # Generate stratified samples in [t_n, t_f]
+    t_coarse = stratified_sample(t_n, t_f, n_coarse)
     
-    # --- Coarse Pass ---
-    # 1. Stratified sampling along the ray
-    # Uniform random samples in [0, 1)
-    u = torch.rand(B, n_coarse, device=ray_o.device)
-    # Stratified offset
-    u = (u + torch.rand(B, 1, device=ray_o.device)) / n_coarse
-    # Map to [t_start, t_end]
-    t_coarse = t_start.unsqueeze(1) + u * (t_end.unsqueeze(1) - t_start.unsqueeze(1))
+    # Query coarse network
+    # Assume network takes (position, direction) and returns (sigma, color)
+    # Position is ray_o + t * ray_d
+    pos_coarse = ray_o.unsqueeze(0) + t_coarse.unsqueeze(1) * ray_d.unsqueeze(0)
+    sigma_coarse, color_coarse = coarse_net(pos_coarse, ray_d)
     
-    # 2. Query coarse network
-    # Expand ray parameters to match sample count
-    pts_coarse = ray_o.unsqueeze(1) + t_coarse.unsqueeze(2) * ray_d.unsqueeze(1)
-    # pts_coarse shape: (B, n_coarse, 3)
+    # 2. Compute Coarse Weights for Importance Sampling
+    # Calculate delta t between samples
+    delta_t = t_coarse[1:] - t_coarse[:-1]
+    # Pad with a small value or handle boundary
+    delta_t = torch.cat([delta_t, delta_t[-1:]], dim=0)
     
-    # Flatten for MLP input: (B * n_coarse, 3)
-    pts_coarse_flat = pts_coarse.view(-1, 3)
-    sigma_c, color_c = coarse_mlp(pts_coarse_flat)
+    # Compute transmittance T
+    # T[i] = exp(-sum_{j=0}^{i-1} sigma[j] * delta_t[j])
+    alpha_coarse = 1.0 - torch.exp(-sigma_coarse * delta_t)
+    transmittance = torch.cumprod(1.0 - alpha_coarse, dim=0)
+    transmittance = torch.cat([torch.ones_like(transmittance[0:1]), transmittance[:-1]], dim=0)
     
-    # Reshape back: (B, n_coarse, 1) for sigma, (B, n_coarse, 3) for color
-    sigma_c = sigma_c.view(B, n_coarse, 1)
-    color_c = color_c.view(B, n_coarse, 3)
+    # Compute weights w[i] = T[i] * alpha[i]
+    weights_coarse = transmittance * alpha_coarse
     
-    # 3. Compute opacity and weights
-    # Delta t: distance between samples. Assume uniform spacing for simplicity in this basic impl,
-    # or compute exact distances if t_coarse is not uniform.
-    # For stratified uniform sampling, delta is constant per ray segment if t_start/t_end are fixed.
-    # However, t_coarse are points, so delta_i = t_coarse[i] - t_coarse[i-1].
-    # Add a small epsilon to avoid division by zero or log(0) issues if needed, 
-    # but here we use delta for alpha calculation.
-    # Calculate deltas: (B, n_coarse)
-    # Note: The last delta is t_end - t_coarse[-1]
-    deltas_coarse = torch.zeros(B, n_coarse + 1, device=ray_o.device)
-    deltas_coarse[:, :-1] = t_coarse[:, 1:] - t_coarse[:, :-1]
-    deltas_coarse[:, -1] = t_end - t_coarse[:, -1]
+    # Normalize weights to form a PDF
+    pdf_coarse = weights_coarse / (weights_coarse.sum() + 1e-8)
     
-    # Alpha: 1 - exp(-sigma * delta)
-    alpha_c = 1.0 - torch.exp(-sigma_c * deltas_coarse[:, :-1].unsqueeze(2))
+    # 3. Fine Pass: Importance Sampling
+    # Sample n_fine points from the coarse PDF
+    # Detach to prevent gradient flow from sampling to coarse net
+    t_fine = sample_from_pdf(pdf_coarse.detach(), n_fine)
     
-    # Transmittance T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
-    # Cumulative sum of sigma * delta
-    sigma_delta_c = sigma_c * deltas_coarse[:, :-1].unsqueeze(2)
-    # Cumulative sum along the sample dimension (dim=1)
-    cum_sigma_delta_c = torch.cumsum(sigma_delta_c, dim=1)
-    # Transmittance: exp(-cumulative sum). Prepend 1.0 for T_0 = 1.
-    T_c = torch.cat([torch.ones(B, 1, 1, device=ray_o.device), 
-                     torch.exp(-cum_sigma_delta_c[:, :-1, :])], dim=1)
+    # Query fine network
+    pos_fine = ray_o.unsqueeze(0) + t_fine.unsqueeze(1) * ray_d.unsqueeze(0)
+    sigma_fine, color_fine = fine_net(pos_fine, ray_d)
     
-    # Weights w_i = T_i * alpha_i
-    weights_c = T_c * alpha_c
+    # 4. Volume Rendering with Fine Samples
+    # Compute delta t for fine samples
+    delta_t_fine = t_fine[1:] - t_fine[:-1]
+    delta_t_fine = torch.cat([delta_t_fine, delta_t_fine[-1:]], dim=0)
     
-    # --- Fine Pass ---
-    # 1. Construct CDF from weights_c
-    # Normalize weights to sum to 1
-    pdf_c = weights_c / (weights_c.sum(dim=1, keepdim=True) + 1e-8)
-    cdf_c = torch.cumsum(pdf_c, dim=1)
+    alpha_fine = 1.0 - torch.exp(-sigma_fine * delta_t_fine)
+    transmittance_fine = torch.cumprod(1.0 - alpha_fine, dim=0)
+    transmittance_fine = torch.cat([torch.ones_like(transmittance_fine[0:1]), transmittance_fine[:-1]], dim=0)
     
-    # 2. Sample from CDF
-    # Generate uniform random numbers for inverse transform sampling
-    u_fine = torch.rand(B, n_fine, device=ray_o.device)
+    # Composite color
+    contribution = transmittance_fine * alpha_fine * color_fine
+    color = contribution.sum(dim=0)
+    alpha = contribution.sum(dim=0) # Sum of alpha contributions (approx)
     
-    # Find indices in CDF corresponding to u_fine
-    # torch.searchsorted returns indices where u_fine could be inserted while maintaining order
-    indices = torch.searchsorted(cdf_c, u_fine, right=True)
-    # Clamp indices to valid range [0, n_coarse - 1]
-    indices = torch.clamp(indices, 0, n_coarse - 1)
-    
-    # Get the corresponding t_coarse values for the sampled indices
-    # Gather t_coarse based on indices
-    # indices shape: (B, n_fine)
-    t_fine = torch.gather(t_coarse, 1, indices)
-    
-    # 3. Query fine network
-    pts_fine = ray_o.unsqueeze(1) + t_fine.unsqueeze(2) * ray_d.unsqueeze(1)
-    pts_fine_flat = pts_fine.view(-1, 3)
-    sigma_f, color_f = fine_mlp(pts_fine_flat)
-    
-    sigma_f = sigma_f.view(B, n_fine, 1)
-    color_f = color_f.view(B, n_fine, 3)
-    
-    # 4. Render with fine samples
-    # Compute deltas for fine samples. 
-    # Since samples are drawn from coarse intervals, we need to handle boundaries.
-    # A simple approach is to assume the fine samples are within the coarse intervals 
-    # and compute deltas relative to sorted fine samples, or use the coarse deltas 
-    # if mapping back. 
-    # Standard NeRF implementation often just uses uniform spacing for fine samples 
-    # within the [t_start, t_end] range or re-stratifies. 
-    # Here, we compute deltas based on sorted t_fine.
-    t_fine_sorted, sort_idx = torch.sort(t_fine, dim=1)
-    
-    # Calculate deltas for sorted fine samples
-    deltas_fine = torch.zeros(B, n_fine + 1, device=ray_o.device)
-    deltas_fine[:, :-1] = t_fine_sorted[:, 1:] - t_fine_sorted[:, :-1]
-    deltas_fine[:, -1] = t_end - t_fine_sorted[:, -1]
-    
-    alpha_f = 1.0 - torch.exp(-sigma_f * deltas_fine[:, :-1].unsqueeze(2))
-    
-    sigma_delta_f = sigma_f * deltas_fine[:, :-1].unsqueeze(2)
-    cum_sigma_delta_f = torch.cumsum(sigma_delta_f, dim=1)
-    T_f = torch.cat([torch.ones(B, 1, 1, device=ray_o.device), 
-                     torch.exp(-cum_sigma_delta_f[:, :-1, :])], dim=1)
-    
-    color = (T_f * alpha_f * color_f).sum(dim=1)
-    
-    # --- Loss Calculation ---
-    # Coarse loss: MSE between coarse color and fine color (or ground truth if available)
-    # In training, we often compare coarse prediction to fine prediction or GT.
-    # Here we assume we have ground truth color `color_gt` for loss calculation.
-    # Note: The prompt notes mention Total Loss = MSE(coarse) + MSE(fine).
-    # We will compute MSE for both against ground truth.
-    # color_gt is assumed to be passed or available. For this self-contained function, 
-    # we return the rendered color and assume loss is computed externally or 
-    # we return a dummy loss if GT is not provided.
-    # However, to be complete, let's assume `color_gt` is an input or we just return color.
-    # The prompt asks for the method. The loss is part of training.
-    # We will return color and a placeholder for loss logic.
-    
-    return color
+    return color, alpha
 
-# Note: In practice, gradients must be detached for the coarse sampling step 
-# to prevent non-differentiable operations from breaking the graph if updating coarse net.
-# The sampling step (searchsorted/gather) is not differentiable w.r.t t_coarse 
-# if t_coarse depends on the network output in a way that requires gradient flow 
-# through the sampling indices. 
-# Typically, the coarse network's output is used to compute weights, 
-# but the sampling indices are discrete. 
-# To allow gradients to flow to the coarse network, the weights are computed 
-# using the coarse network's output, but the sampling process itself 
-# (drawing from CDF) is treated as a fixed operation w.r.t the coarse network's 
-# parameters during the backward pass of the fine pass, OR the coarse network 
-# is updated separately. 
-# The note [S2, unofficial] states: "The sampling step is non-differentiable... implementation detaches the inputs".
-# This implies that when computing the loss for the fine pass, the coarse samples 
-# used to generate the CDF are detached from the coarse network's computation graph 
-# if the coarse network is also being updated by the fine loss. 
-# However, standard NeRF updates both. The detachment usually applies to the 
-# *indices* or the *weights* used for sampling to avoid gradient issues with 
-# discrete selection.
+def stratified_sample(t_n, t_f, n_samples):
+    """Generate stratified samples in [t_n, t_f]"""
+    # Uniform stratified sampling
+    t = torch.linspace(t_n, t_f, n_samples)
+    # Add uniform noise in [0, delta_t] to each sample for stratification
+    # This is a simplified version; standard NeRF uses specific stratification
+    noise = torch.rand_like(t) * (t_f - t_n) / n_samples
+    t = t + noise
+    return t
+
+def sample_from_pdf(pdf, n_samples):
+    """Sample indices from a 1D PDF and return corresponding values"""
+    # This is a placeholder for the actual sampling logic
+    # In practice, this involves inverse CDF sampling
+    # For simplicity, we assume a helper function exists
+    # The sources state: "Sample n_fine points from this CDF" [S2, unofficial]
+    # Implementation detail: [G] Use torch.multinomial or inverse CDF
+    indices = torch.multinomial(pdf, n_samples, replacement=True)
+    # Return the corresponding t values from the coarse samples
+    # Note: This requires access to the coarse t values, which is not in this scope
+    # A more complete implementation would pass t_coarse to this function
+    return indices # Placeholder
 ```
 
-**Parameters:**
-*   $N_c$: Number of coarse samples. Typical value: 64 [S2, unofficial].
-*   $N_f$: Number of fine samples. Typical value: 128 [S2, unofficial].
-*   $t_{start}, t_{end}$: Near and far clipping planes.
-
-**Edge Cases and Pitfalls:**
-*   **Non-differentiable Sampling:** The importance sampling step (drawing from CDF) is non-differentiable with respect to the coarse model's output if gradients are intended to flow back to update the coarse model's density predictions based on the fine sampling [S2, unofficial]. Implementations often detach the inputs to the sampling step to prevent this [S2, unofficial].
-*   **Zero Density:** If the coarse network predicts zero density everywhere, the weights will be zero, leading to division by zero when normalizing the CDF. A small epsilon should be added to weights [G].
-*   **Boundary Conditions:** Ensure that the last delta in the fine pass correctly accounts for the distance to $t_{end}$ [G].
+*Note: The pseudocode above is a simplified representation. The actual sampling from the CDF [S2, unofficial] requires constructing the CDF from `weights_coarse` and using inverse transform sampling or a similar method to generate `t_fine`. The `sample_from_pdf` function is a placeholder for this specific non-differentiable sampling operation [S2, unofficial].*
 
 ## Subtopics
 
 ### [Hierarchical Density Adaptation](4868-hierarchical-density-adaptation.md)
-Hierarchical Density Adaptation is a sampling strategy that controls rendering density using a hierarchy of sampled data to maintain constant frame rates. It serves as an alternative to opacity-based adaptive sampling, trading image smoothness for rendering speed by controlling the total number of rendered primitives per frame. It distinguishes itself from standard hierarchical sampling by generating the coarse density estimate on-the-fly from the dense grid via convolution, rather than relying on a separate, pre-allocated coarse network or grid.
+Hierarchical Density Adaptation is a sampling strategy for neural volume rendering that controls rendering density using a hierarchy of sampled data to maintain constant frame rates. It serves as an alternative to opacity-based adaptive sampling, trading image smoothness for rendering speed by controlling the total number of rendered primitives per frame. It distinguishes itself from standard hierarchical sampling by generating the coarse density estimate on-the-fly from the dense grid via convolution, rather than relying on a separate, pre-allocated coarse network or grid.
 
 ### DDNeRF
 DDNeRF is a neural volume rendering method that improves sampling efficiency in hierarchical sampling by learning a continuous density distribution within each ray interval, rather than relying on a discrete piecewise-constant probability density function (PDF) [S1, unofficial]. It sets itself apart from [MipNeRF](4866-mipnerf.md) by using two separate networks for coarse and fine passes (like original NeRF) while modeling the coarse PDF as a mixture of truncated Gaussians, and from [Hierarchical Sampling](4865-hierarchical-sampling.md) by replacing the discrete weight normalization with a parametric Gaussian distribution estimation [S1, unofficial].
 
+### Hu et al. Density-based Sampling
+Hu et al. Density-based Sampling is a method that evaluates the coarse NeRF MLP only at valid points (positive densities) and the fine network at pivotal points (densities exceeding a predefined threshold) [S5].
+
 ## Operating characteristics
-*   **Time Complexity:** $O(N_c + N_f)$ per ray, where $N_c$ and $N_f$ are the number of coarse and fine samples. The overhead of constructing the CDF and sampling is negligible compared to the MLP queries.
-*   **Memory Complexity:** $O(N_c + N_f)$ per ray to store sample points, densities, and colors.
-*   **Performance:** Significantly faster than uniform sampling for the same quality, as it concentrates samples in complex regions [S2, unofficial][S3]. Efficiency gains of 2-3x over uniform sampling have been reported in some contexts [S3].
-*   **Strengths:** Improves rendering quality by reducing aliasing and noise in complex regions; efficient use of computational resources.
-*   **Limitations:** Requires two network passes (coarse and fine); the sampling step is non-differentiable, requiring careful gradient handling [S2, unofficial]; may introduce artifacts if the coarse network fails to predict density accurately [S3].
-*   **When to use:** When high-quality rendering is required and computational resources are limited; when the scene has complex geometry or high-frequency details.
-*   **When not to use:** When real-time performance is critical and the scene is simple; when the coarse network cannot be trained effectively.
+*   **Time Complexity:** The method requires two forward passes through neural networks (coarse and fine) per ray, effectively doubling the network evaluation cost compared to a single-pass method. However, the total number of samples $N_{total} = N_c + N_f$ is often smaller than the $N$ required for uniform sampling to achieve similar quality, leading to a net performance gain in complex scenes [S1, S2, S4, unofficial].
+*   **Memory Complexity:** Requires storing the parameters for two networks (coarse and fine) and the intermediate predictions (sigma, color) for all samples. The memory footprint is proportional to $N_c + N_f$ [S1, S2, unofficial].
+*   **Measured Performance:** In neural radiance fields, hierarchical sampling allows for high-quality rendering with fewer total samples than uniform sampling, reducing training and inference time [S1, S2, unofficial].
+*   **Strengths:** Efficiently concentrates samples in complex regions (edges, high-frequency details), improving image quality per sample [S2, S4, unofficial].
+*   **Limitations:** The non-differentiable sampling step requires careful gradient handling (detaching inputs) [S2, unofficial]. The two-stage process adds implementation complexity [S1, S2, unofficial].
+*   **When to use:** When rendering neural radiance fields or implicit representations where geometry is unknown and uniform sampling is inefficient [S1, S2, S4, unofficial].
+*   **When not to use:** When the volume data is explicit and uniform sampling is sufficient, or when hardware constraints prevent storing two networks [S1, S2, unofficial].
 
 ## Background
-Hierarchical sampling was introduced as a key component of the original NeRF (Neural Radiance Fields) paper [S1, S2, S4, unofficial]. It was developed to address the inefficiency of uniform sampling in neural volume rendering, where most samples fall in empty space and contribute little to the final image [S1, S4, unofficial]. The method has since become a standard technique in neural rendering, with various adaptations such as DDNeRF and Hierarchical Density Adaptation [S1, S2, unofficial]. It is widely used in applications requiring high-fidelity 3D reconstruction and novel view synthesis [S3, S5].
+Hierarchical sampling was introduced in the context of Neural Radiance Fields (NeRF) by Mildenhall et al. in 2020 [S1, S2, unofficial]. It was developed to address the inefficiency of uniform sampling in large, unbounded scenes where most of the space is empty. The method has since become a standard component in many neural rendering pipelines [S1, S2, S4, unofficial].
 
 ## Sources
 [S1] samirangode/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/samirangode/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)

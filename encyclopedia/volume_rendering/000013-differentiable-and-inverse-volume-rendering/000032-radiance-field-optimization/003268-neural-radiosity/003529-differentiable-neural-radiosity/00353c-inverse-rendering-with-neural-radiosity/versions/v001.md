@@ -1,0 +1,58 @@
+# Inverse Rendering with Neural Radiosity
+
+Also called: Inverse Differentiable Neural Radiosity
+
+## Overview
+Inverse rendering with Neural Radiosity optimizes scene parameters $p$ by minimizing the distance between a rendered candidate image and a reference image, using gradients computed via a differential radiance network [S1, unofficial]. It differs from standard Neural Radiosity by solving the differential rendering equation to obtain $\partial_p L$, enabling gradient-based optimization of scene properties (e.g., roughness, albedo) without backpropagating through the entire Monte Carlo rendering graph, which avoids the memory bottlenecks of generic automatic differentiation [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Scene parameters $p$ (e.g., material properties, geometry), reference image $I_{ref}$, initial primal radiance network $L_\phi$ (pre-trained via standard Neural Radiosity), and a differential radiance network $\partial_p L_\theta$.
+*   **Outputs:** Optimized scene parameters $p$.
+
+**Data Structures:**
+*   **Networks:** Two Multi-Layer Perceptrons (MLPs) with 6 fully-connected layers and 512 neurons per hidden layer [S1, unofficial].
+    *   $L_\phi$: Primal radiance. Inputs: position $x$, outgoing direction $\omega_o$, surface normal, diffuse/specular reflectance.
+    *   $\partial_p L_\theta$: Differential radiance. Inputs: same as $L_\phi$.
+*   **Sparse Grids:** Multiresolution learnable feature vectors stored in sparse grids for both networks [S1, unofficial].
+
+**Numbered Steps:**
+1.  **Primal Rendering:** Compute a non-differentiable candidate primal rendering $y = g(p)$ and calculate the loss $z$ (e.g., $L_2$ or $L_1$ distance) between $y$ and the reference image [S1, unofficial].
+2.  **Pixel Gradients:** Compute the gradient of the loss with respect to the pixel values, $\frac{\partial z}{\partial y}$ [S1, unofficial].
+3.  **Differential Radiance Query:** Compute $\frac{\partial_p I_k}{\partial_p L_\theta}$, the measurement vector for pixel $k$. Trace rays from the sensor to find the first hit point $x$. Query the differential radiance network $\partial_p L_\theta(x, \omega)$. Formally, integrate over the surface area $A$ and hemisphere $H^2$:
+    $$ \frac{\partial_p I_{k,\theta}}{\partial_p L_\theta} = \int_A \int_{H^2} W_k(x, \omega) \partial_p L_\theta(x'(x, \omega)) \, dx \, d\omega_i^\perp $$
+    where $W_k$ is the window function and $x'$ is the next point along the ray [S1, unofficial].
+4.  **Gradient Accumulation:** Compute the gradient of the loss w.r.t. parameters $\frac{\partial z}{\partial p}$ by multiplying the gradients from Step 2 and Step 3:
+    $$ \frac{\partial z}{\partial p} = \frac{\partial z}{\partial y} \cdot \frac{\partial y}{\partial p} $$
+    where $\frac{\partial y}{\partial p}$ is derived from the differential radiance integration [S1, unofficial].
+5.  **Parameter Update:** Update scene parameters $p$ using an optimizer (e.g., Adam) and a learning rate [S1, unofficial].
+6.  **Network Fine-tuning:** Fine-tune the networks $\partial_p L_\theta$ and $L_\phi$ to adapt to the new parameter state [S1, unofficial].
+
+**Formulas:**
+The differential radiance is decomposed into a network output and the derivative of emission:
+$$ \partial_p L_\theta(x, \omega_o) = N_\theta(x, \omega_o) + \partial_p E(x, \omega_o) $$
+The residual of the differential rendering equation $r_\theta$ is minimized during training:
+$$ r_\theta(x, \omega_o) = N_\theta(x, \omega_o) - T\{N_\theta + \partial_p E\}(x, \omega_o) - T'\{N_\phi + E\}(x, \omega_o) $$
+where $T$ and $T'$ are transport operators:
+$$ T\{\partial_p L_\theta\}(x, \omega_o) = \int_{H^2} f(x, \omega_i, \omega_o) \partial_p L_\theta(x'(x, \omega_i), -\omega_i) \, d\omega_i^\perp $$
+$$ T'\{L_\phi\}(x, \omega_o) = \int_{H^2} \partial_p f(x, \omega_i, \omega_o) L_\phi(x'(x, \omega_i), -\omega_i) \, d\omega_i^\perp $$
+Here, $f$ is the BSDF, $E$ is emission, and $L_\phi$ is the pre-trained primal radiance [S1, unofficial].
+
+**Parameters:**
+*   **Sampling:** Importance sample emitter directions and BSDF distributions in primal space to obtain incident directions $\omega_i$. Samples $\omega_{i,j,k}$ are detached (static w.r.t. perturbations in $p$) to avoid bias from correlated sampling [S1, unofficial].
+*   **Architecture:** 6 hidden layers, 512 neurons each [S1, unofficial].
+
+**Pitfalls:**
+*   **Fine-tuning Bottleneck:** Fine-tuning networks after every parameter update is computationally expensive. An alternative is to keep networks intact and use the Right-Hand Side (RHS) of the differential equation solution, which adapts faster but introduces bias [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by ray tracing for primal rendering and differential queries, plus network inference. Avoids storing large computation graphs compared to end-to-end differentiable rendering.
+*   **Memory Complexity:** Low compared to path-tracing-based inverse rendering, as gradients are cached in the neural network rather than computed via backpropagation through every light path.
+*   **Strengths:** Scalable to complex scenes; decouples rendering from optimization; avoids memory explosion of automatic differentiation.
+*   **Limitations:** Requires pre-training of primal radiance; bias introduced if networks are not fine-tuned; sensitivity to initialization of $L_\phi$ [S1, unofficial].
+
+## Background
+Originated from the work of Hadadan et al. (2021/2022), extending Neural Radiosity [Hadadan et al. 2021] to the inverse domain. It addresses the computational cost and memory limitations of standard differentiable rendering by using a neural network to approximate the differential radiance field, allowing for efficient gradient computation via the differential rendering equation [S1, unofficial].
+
+## Sources
+[S1] Differentiable Neural Radiosity, https://arxiv.org/abs/2201.13190, fetched 2026-10-29 (unofficial)

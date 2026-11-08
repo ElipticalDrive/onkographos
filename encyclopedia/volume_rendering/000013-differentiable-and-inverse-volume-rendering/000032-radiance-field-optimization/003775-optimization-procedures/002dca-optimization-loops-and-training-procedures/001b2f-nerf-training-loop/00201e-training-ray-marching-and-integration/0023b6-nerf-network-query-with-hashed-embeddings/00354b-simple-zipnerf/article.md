@@ -1,0 +1,128 @@
+# Simple-ZipNeRF
+
+Also called: Augmented ZipNeRF, Simple-RF ZipNeRF
+
+## Overview
+Simple-ZipNeRF is a regularized variant of ZipNeRF designed to mitigate floater artifacts in sparse input scenarios by introducing an auxiliary "augmented" model with reduced capacity [S1]. It differs from standard ZipNeRF by training a smaller hash-table model in parallel to provide depth priors that regularize the main model, whereas siblings like HybridNeRF or VoxNeRF use different architectural constraints or multi-resolution grids without this specific dual-model depth regularization mechanism [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Sparse set of input images (typically 4–36 views), camera poses, and intrinsics.
+*   **Outputs:** A trained ZipNeRF model (main) and an augmented ZipNeRF model (auxiliary) used only during training [S1].
+
+**Data Structures:**
+The method relies on the ZipNeRF data structures:
+1.  **Hash Table:** A sparse hash table mapping 3D coordinates to feature vectors.
+    *   **Main Model:** Hash table size $T = 2^{21}$ [S1].
+    *   **Augmented Model:** Hash table size $T_s = 2^{11}$ [S1].
+2.  **MLPs:** Multi-Layer Perceptrals for decoding features into color and density. The augmented model uses the same MLP architecture as the main model [S1].
+
+**Parameters:**
+*   Hash table size for augmented model: $T_s = 2^{11}$ [S1].
+*   Loss weights: $\lambda_m = 1$ (main photometric), $\lambda_a = 1$ (augmented photometric), $\lambda_{aug} = 10$ (regularization), $\lambda_{sd} = 0$ (sparse depth), $\lambda_{cfc} = 0$ (color consistency), $\lambda_{mc} = 0$ (mass concentration) [S1].
+*   Regularization start: After 5,000 iterations [S1].
+*   Regularization hyperparameters: $k=5$, $e_\tau = 0.2$ [S1].
+*   Base learning rate for augmented model: 0.3 [S1].
+
+**Algorithm Steps:**
+1.  **Initialize:** Initialize the main ZipNeRF model with hash table size $T = 2^{21}$ and the augmented ZipNeRF model with hash table size $T_s = 2^{11}$. Initialize all MLPs and hash tables [S1].
+2.  **Forward Pass (Main):** For a given ray, query the main ZipNeRF model to compute color $C_m$ and density $\sigma_m$ using standard volume rendering integration [S1].
+3.  **Forward Pass (Augmented):** For the same ray, query the augmented ZipNeRF model to compute color $C_a$ and density $\sigma_a$ [S1].
+4.  **Depth Estimation:** Compute the expected depth $D_a$ from the augmented model's density distribution [S1].
+5.  **Reliability Check:** Determine if the depth estimate $D_a$ is reliable. This is done by reprojecting the 3D point corresponding to $D_a$ to the closest training view and checking for consistency [S1]. If the depth is not reliable (e.g., visible in only one training view), skip the regularization loss for this ray [S1].
+6.  **Loss Computation:**
+    *   Compute photometric loss for the main model: $L_m = \| C_m - C_{gt} \|^2$ [S1].
+    *   Compute photometric loss for the augmented model: $L_a = \| C_a - C_{gt} \|^2$ [S1].
+    *   Compute regularization loss $L_{aug}$ using the reliable depth $D_a$ to supervise the main model's geometry [S1]. The specific formula for $L_{aug}$ is not detailed in the sources, but it utilizes the accurate depth estimates from the augmented model [S1].
+    *   Note: Sparse depth loss $L_{sd}$ is set to 0 because Colmap often fails or provides noisy depth in sparse settings [S1].
+7.  **Backpropagation:** Update both the main and augmented models using the combined loss: $L = \lambda_m L_m + \lambda_a L_a + \lambda_{aug} L_{aug}$ [S1].
+8.  **Inference:** Disable the augmented model. Render using only the main ZipNeRF model [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_simple_zipnerf(input_images, poses, intrinsics, num_iterations=50000):
+    # Initialize main model with large hash table
+    main_model = ZipNeRF(hash_table_size=2**21)
+    # Initialize augmented model with small hash table
+    aug_model = ZipNeRF(hash_table_size=2**11)
+    
+    optimizer_main = Adam(main_model.parameters())
+    optimizer_aug = Adam(aug_model.parameters())
+    
+    for iteration in range(num_iterations):
+        # Sample rays from input images
+        rays = sample_rays(input_images, poses, intrinsics)
+        
+        # Forward pass main model
+        C_m, sigma_m = render_ray(main_model, rays)
+        L_m = photometric_loss(C_m, rays.gt_color)
+        
+        # Forward pass augmented model
+        C_a, sigma_a = render_ray(aug_model, rays)
+        L_a = photometric_loss(C_a, rays.gt_color)
+        
+        L_total = L_m + L_a
+        
+        if iteration > 5000:
+            # Compute depth from augmented model
+            D_a = compute_expected_depth(sigma_a)
+            
+            # Check depth reliability via reprojection consistency
+            is_reliable = check_depth_reliability(D_a, rays, input_images, poses)
+            
+            if is_reliable:
+                # Apply regularization loss using augmented depth
+                # Note: Specific formula for L_aug is not provided in sources
+                L_aug = compute_regularization_loss(D_a, main_model, rays)
+                L_total += 10 * L_aug
+        
+        # Backpropagate
+        optimizer_main.zero_grad()
+        optimizer_aug.zero_grad()
+        
+        (L_m + L_a + (10 * L_aug if iteration > 5000 and is_reliable else 0)).backward()
+        
+        optimizer_main.step()
+        optimizer_aug.step()
+
+def render(model, rays):
+    # Standard ZipNeRF volume rendering
+    # Query hash table and MLPs for each sample point along ray
+    # Integrate color and density
+    pass
+
+def check_depth_reliability(depth, rays, images, poses):
+    # Reproject 3D point at 'depth' to closest training view
+    # Check consistency with observed image
+    # Return True if consistent, False otherwise
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Blur:** The small hash table ($2^{11}$) introduces blur, which may not reflect in quantitative metrics (PSNR/SSIM) but improves visual quality [S1].
+*   **Sparse Depth:** Do not use sparse depth loss ($L_{sd}$) as Colmap reconstruction is often unreliable in sparse settings [S1].
+*   **Performance Saturation:** The augmentation does not help if the base model has very few input images (performance too low) or a large number of views (performance saturated) [S1].
+*   **Translucent Floaters:** Some translucent floaters may persist even with Simple-ZipNeRF, particularly in regions visible in only one training view where reliable depth supervision is unavailable [S1].
+
+## Operating characteristics
+*   **Training Time:** Takes twice the training time of standard ZipNeRF because it employs a single augmentation with exactly the same number of queries as the main model (e.g., 256 queries per pixel for ZipNeRF becomes 512 total queries) [S1].
+*   **Inference Time:** Takes exactly the same time and memory as ZipNeRF because the augmented model is disabled during inference [S1].
+*   **Memory:** Higher training memory usage due to the presence of the augmented model. For example, on an NVIDIA RTX 2080 Ti 11GB GPU, ZipNeRF uses 6.7 GB and Simple-ZipNeRF uses 8.6 GB during training [S1]. Inference memory remains at 4.8 GB [S1].
+*   **Performance (MipNeRF360):**
+    *   12 views: PSNR 17.60, SSIM 0.5245, LPIPS 0.4876 [S1].
+    *   20 views: PSNR 21.03, SSIM 0.6456, LPIPS 0.3421 [S1].
+    *   36 views: PSNR 24.19, SSIM 0.7458, LPIPS 0.2390 [S1].
+*   **Performance (NeRF-Synthetic):**
+    *   4 views: PSNR 11.50, SSIM 0.7715, LPIPS 0.3878 [S1].
+    *   8 views: PSNR 15.88, SSIM 0.8063, LPIPS 0.2461 [S1].
+    *   12 views: PSNR 20.51, SSIM 0.8531, LPIPS 0.1532 [S1].
+*   **Strengths:** Significantly reduces floater artifacts in sparse input scenarios compared to standard ZipNeRF [S1].
+*   **Limitations:** Increased training time; blur may mask quantitative improvements; ineffective in extremely sparse or fully dense regimes [S1].
+
+## Background
+Simple-ZipNeRF is part of the "Simple Radiance Fields" (Simple-RF) family of models, which regularize radiance fields to choose simpler solutions over complex ones [S1]. It was introduced to address the issue of floater artifacts caused by large hash tables in ZipNeRF when training with sparse inputs [S1]. The method was evaluated on datasets including NeRF-LLFF, RealEstate-10K, MipNeRF360, and NeRF-Synthetic [S1].
+
+## Sources
+[S1] Simple-RF: Regularizing Sparse Input Radiance Fields with Simpler Solutions, https://arxiv.org/abs/2404.19015v5, fetched 2026-10-27

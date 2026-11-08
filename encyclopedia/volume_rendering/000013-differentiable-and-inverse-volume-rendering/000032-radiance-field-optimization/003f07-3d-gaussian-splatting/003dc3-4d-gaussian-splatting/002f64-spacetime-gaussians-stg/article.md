@@ -1,0 +1,119 @@
+# Spacetime Gaussians (STG)
+## Overview
+Spacetime Gaussians (STG) is a 4D Gaussian Splatting variant that models dynamic scenes using native 4D primitives, enabling real-time rendering of any arbitrary time slice [S1, unofficial]. It distinguishes itself from MLP-based deformation methods like Dynamic 3DGS by using explicit temporal opacity envelopes and polynomial trajectories for each Gaussian, avoiding the need for per-pixel neural network queries during rendering [S1, unofficial].
+## How it works
+**Inputs and Outputs:**
+- Input: A set of 4D Gaussians parameterized for time, and a target timestamp $t$.
+- Output: A 2D image rendered at time $t$.
+
+**Data Structures:**
+Each Gaussian $i$ stores:
+- Position: $\mathbf{p}_i(t) \in \mathbb{R}^3$ (computed via trajectory).
+- Rotation: $\mathbf{q}_i(t) \in \mathbb{R}^4$ (unit quaternion, computed via trajectory).
+- Scale: $\mathbf{s}_i \in \mathbb{R}^3$ (static or time-varying).
+- Opacity: $\alpha_i(t) \in [0, 1]$ (computed via envelope).
+- Color: $\mathbf{c}_i(t) \in \mathbb{R}^3$ (computed via spherical harmonics).
+
+**Parameters:**
+- Trajectory degree: $d$ (typically low, e.g., 1 or 2).
+- SH degree: $L$ (typically 3 or 4).
+
+**Steps:**
+1. **Trajectory Evaluation:** For each Gaussian $i$, compute position $\mathbf{p}_i(t)$ and rotation $\mathbf{q}_i(t)$ at time $t$ using polynomial functions of coefficients $\mathbf{a}_i, \mathbf{b}_i$.
+   $$ \mathbf{p}_i(t) = \sum_{k=0}^{d} \mathbf{a}_{i,k} t^k $$
+   $$ \mathbf{q}_i(t) = \text{Normalize}\left(\sum_{k=0}^{d} \mathbf{b}_{i,k} t^k\right) $$
+   [G] Rotation coefficients $\mathbf{b}_{i,k}$ are quaternions; normalization is required after summation.
+
+2. **Opacity Envelope:** Compute temporal opacity $\alpha_i(t)$ using a learned envelope function $E_i(t)$, often a Gaussian or polynomial curve defining birth, peak, and death times.
+   $$ \alpha_i(t) = E_i(t) $$
+   [G] $E_i(t)$ is typically a product of sigmoidal rise and fall functions or a Gaussian centered at peak time $t_{peak}$ with width $\sigma$.
+
+3. **Color Interpolation:** Compute color $\mathbf{c}_i(t)$ using spherical harmonics (SH) coefficients $\mathbf{c}_{i,l,m}$ and view direction $\mathbf{v}$.
+   $$ \mathbf{c}_i(t) = \sum_{l=0}^{L} \sum_{m=-l}^{l} \mathbf{c}_{i,l,m} Y_{l,m}(\mathbf{v}) $$
+   [G] SH coefficients may be static or time-varying; if static, color is view-dependent but not time-dependent. If time-varying, coefficients are interpolated.
+
+4. **Rendering:** Project 3D Gaussians to 2D at time $t$ using standard 3DGS rasterization pipeline, using $\mathbf{p}_i(t), \mathbf{q}_i(t), \mathbf{s}_i, \alpha_i(t), \mathbf{c}_i(t)$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_stg(gaussians, t, camera):
+    """
+    Render a scene at time t using Spacetime Gaussians.
+    gaussians: list of Gaussian objects with attributes:
+        - pos_coeffs: list of 3D vectors for position polynomial
+        - rot_coeffs: list of quaternions for rotation polynomial
+        - scale: 3D vector
+        - opacity_envelope: function or parameters for alpha(t)
+        - sh_coeffs: spherical harmonics coefficients
+        - view_dir: view direction (for SH)
+    t: float, timestamp
+    camera: camera object with projection matrix
+    """
+    projected_gaussians = []
+    for g in gaussians:
+        # 1. Evaluate trajectory
+        pos = evaluate_polynomial(g.pos_coeffs, t)
+        rot = normalize_quaternion(evaluate_polynomial(g.rot_coeffs, t))
+        
+        # 2. Evaluate opacity
+        alpha = evaluate_opacity_envelope(g.opacity_envelope, t)
+        
+        # 3. Evaluate color
+        color = evaluate_sh(g.sh_coeffs, g.view_dir)
+        
+        # 4. Project to 2D
+        screen_pos = project_to_screen(pos, rot, g.scale, camera)
+        
+        projected_gaussians.append({
+            'pos': screen_pos,
+            'alpha': alpha,
+            'color': color,
+            'scale': g.scale # 2D scale after projection
+        })
+    
+    # 5. Rasterize (standard 3DGS)
+    image = rasterize(projected_gaussians, camera)
+    return image
+
+def evaluate_polynomial(coeffs, t):
+    """Evaluate polynomial sum(coeffs[k] * t^k)"""
+    result = coeffs[0]
+    for k in range(1, len(coeffs)):
+        result += coeffs[k] * (t ** k)
+    return result
+
+def normalize_quaternion(q):
+    """Normalize quaternion to unit length"""
+    return q / norm(q)
+
+def evaluate_opacity_envelope(envelope_params, t):
+    """
+    Evaluate temporal opacity envelope.
+    envelope_params: dict with 'peak_time', 'width'
+    """
+    # Gaussian envelope: alpha = exp(-0.5 * ((t - peak) / width)^2)
+    # [G] This is a common implementation; exact form may vary.
+    peak = envelope_params['peak_time']
+    width = envelope_params['width']
+    alpha = exp(-0.5 * ((t - peak) / width) ** 2)
+    return alpha
+```
+
+## Subtopics
+
+### [Spacetime](7334-spacetime.md)
+A method that adds a temporal dimension to the feature field, enabling real-time interpolation of both color and geometry between keyframes.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ per frame, where $N$ is the number of Gaussians. Polynomial evaluation and SH evaluation are constant time per Gaussian.
+- **Memory Complexity:** $O(N \cdot (d + L^2))$, where $d$ is trajectory degree and $L$ is SH degree.
+- **Strengths:** Real-time rendering of any time slice; no per-pixel neural network queries; compact representation for smooth motions.
+- **Limitations:** Limited to polynomial trajectories; may not capture complex, non-smooth motions; opacity envelope must be learned or specified.
+- **When to use:** Dynamic scenes with smooth, predictable motion; real-time rendering requirements.
+- **When not to use:** Scenes with complex, non-smooth, or chaotic motion; scenes requiring high-fidelity deformation beyond polynomial approximation.
+## Background
+Spacetime Gaussians were introduced by Li et al. in CVPR'24 [S1, unofficial]. They are part of the evolution of 4D Gaussian Splatting, aiming to provide a more efficient and explicit representation of dynamic scenes compared to MLP-based deformation methods.
+## Sources
+[S1] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,224 @@
+# 3-D Medical Image Compression with VOI Coding
+
+Also called: Modified EBCOT with 3-D Contexts, Scalable Compression of 3-D Medical Image Data Using EBCOT with Volume of Interest Coding
+
+## Overview
+This method compresses 3-D medical images by partitioning wavelet coefficients into independent code-cubes and encoding them using a modified Embedded Block Coding with Optimized Truncation (EBCOT) algorithm that exploits 3-D spatial correlations [S1]. It solves the problem of efficient Volume of Interest (VOI) retrieval in telemedicine by generating a scalable layered bit-stream that allows the server to reorder and transmit only the relevant code-cubes for a requested VOI without recoding the entire image [S1]. It differs from standard 3D-JPEG2000 VOI methods (like MAXSHIFT and GSB) by achieving comparable lossless compression ratios while enabling the decoding of *any* arbitrary VOI from the same static compressed bit-stream through simple bit-stream reordering [S1].
+
+## How it works
+**Inputs:** A 3-D medical image volume $I$ of size $X \times Y \times Z$ voxels. A user-defined Volume of Interest (VOI) region within the volume.
+**Outputs:** A scalable layered bit-stream containing truncated code-cube bit-streams, organized by quality layers, with header information enabling VOI decoding.
+
+**Data Structures:**
+1.  **Code-Cube:** A 3-D group of wavelet coefficients.
+    *   **Layout:** $a \times a \times a$ samples, where $a$ is a power of 2 and $a \ge 2^3$ (i.e., $a \ge 8$) [S1].
+    *   **Context:** Each code-cube $C_i$ describes a specific region of the 3-D image at a specific decomposition level $r$ [S1].
+2.  **Header Information:** Stored per code-cube during encoding.
+    *   Contains incremental contributions to quality layers.
+    *   Contains probabilities: $w_p$ (proximity weight), $w_v$ (VOI contribution proportion), and $P_{empty}$ (probability of being empty background) [S1].
+
+**Algorithm Steps:**
+
+1.  **3-D Discrete Wavelet Transform (3-D IWT):**
+    *   Apply a 3-D IWT to the input image $I$.
+    *   Use the Le Gall 5/3 wavelet filter implemented via a lifting step scheme [S1].
+    *   Perform three levels of decomposition in all three dimensions ($x, y, z$) [S1].
+    *   Partition each 3-D sub-band into independent code-cubes of size $a \times a \times a$ [S1].
+
+2.  **Context Model Initialization (3-D Contexts):**
+    *   For each sample $c$ in a code-cube, identify its immediate neighbors in the 3-D grid: horizontal, vertical, diagonal, and temporal (slices $z-1$ and $z+1$) [S1].
+    *   These neighbors are used to model correlations during the coding passes [S1].
+
+3.  **Weight Assignment Model:**
+    *   Calculate a weight $W_i$ for each code-cube $C_i$ to prioritize inclusion in quality layers based on its relevance to the VOI [S1].
+    *   The weight is a function of three factors, each in the range $[0,1]$:
+        $$ W_i = f(w_p, w_e, w_v) $$
+        where:
+        *   $w_p$: Proximity weight. Depends on the distance between the center of code-cube $C_i$ and the center of the VOI [S1].
+        *   $w_e$: Mean energy weight. Depends on the mean energy of the wavelet coefficients in $C_i$ [S1].
+        *   $w_v$: VOI contribution proportion. Defined as:
+            $$ w_v = \begin{cases} 0 & \text{if } C_i \text{ is outside the VOI} \\ 1 & \text{if } C_i \text{ fully contributes to the VOI} \\ 0 < w_v < 1 & \text{if } C_i \text{ partially contributes to the VOI} \end{cases} $$
+            [S1]
+    *   Determine if a code-cube constitutes "empty background" (low energy, irrelevant to VOI) using a continuous, monotonically decreasing function of mean energy $E_i$:
+        $$ P_{empty} = \frac{1}{1 + e^{\alpha(E_i - E_{th})}} $$
+        where $\alpha$ and $E_{th}$ are parameters [S1]. If $P_{empty}$ is high, the code-cube is considered empty background [S1].
+
+4.  **Modified EBCOT Encoding:**
+    *   Encode each code-cube independently using a modified EBCOT algorithm that incorporates 3-D contexts [S1].
+    *   **Zero-Crossing (ZC) Pass:** Code whether sample $c$ becomes significant in the current bit-plane $p$. Use the significance of immediate horizontal, vertical, diagonal, and temporal neighbors to determine the context [S1].
+    *   **Significance Coding (SC) Pass:** Code the sign of sample $c$. Use the sign and significance information of temporal, vertical, and horizontal neighbors [S1].
+    *   **Magnitude Refinement (MR) Pass:** Code the magnitude of sample $c$. Use the magnitude of immediate temporal, vertical, and horizontal neighbors [S1].
+    *   Store the incremental bit-stream contributions and header information ($w_p, w_v, P_{empty}$) for each code-cube [S1].
+
+5.  **Scalable Layered Bit-Stream Creation:**
+    *   Truncate each code-cube's bit-stream to various lengths to form potential quality layers [S1].
+    *   Solve an optimization problem to assign code-cube contributions to quality layers $L$ such that the rate-distortion performance is optimal [S1].
+    *   The objective is to minimize the overall Mean Squared Error (MSE) of the 3-D image at layer $L$:
+        $$ MSE_{total} = \frac{1}{Q} \sum_{i=1}^{N} MSE_i $$
+        where $Q$ is the total number of voxels and $N$ is the number of code-cubes [S1].
+    *   Solve this by finding points on the lower convex hull of the rate-distortion plane corresponding to possible sets of bit-stream assignments [S1].
+    *   Organize the truncated bit-streams into quality layers. The bit-stream for layer $L$ includes the truncated bit-streams of code-cubes within the VOI, and potentially some peripheral code-cubes to improve background quality while retaining VOI decoding capability [S1].
+
+6.  **VOI Decoding (Bit-Stream Reordering):**
+    *   To decode a specific VOI at quality layer $L$, the server (or client) reorders the bit-stream to include only the truncated bit-streams of code-cubes that constitute the requested VOI [S1].
+    *   The output bit-stream is the summation of the truncated bit-streams of the code-cubes within the VOI [S1].
+    *   Because code-cubes are encoded independently, the decoder can decode any bit-stream regardless of the transmission order [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compress_3d_medical_image(image, voi_region, cube_size=16):
+    """
+    Compresses a 3D medical image using VOI coding with modified EBCOT.
+    
+    Args:
+        image: 3D numpy array of shape (X, Y, Z)
+        voi_region: Tuple defining the VOI bounds (x_start, x_end, y_start, y_end, z_start, z_end)
+        cube_size: Size of code-cubes (a), must be power of 2 >= 8
+        
+    Returns:
+        bit_stream: List of quality layers, each containing list of (code_cube_id, truncated_bits)
+        headers: Dictionary mapping code_cube_id to header info (w_p, w_v, P_empty)
+    """
+    # Step 1: 3-D IWT
+    # Apply Le Gall 5/3 wavelet filter via lifting scheme
+    # 3 levels of decomposition in all dimensions
+    wavelet_coeffs = apply_3d_iwt(image, levels=3, wavelet='legall53')
+    
+    # Step 2: Partition into Code-Cubes
+    code_cubes = partition_into_cubes(wavelet_coeffs, cube_size)
+    
+    # Step 3: Weight Assignment
+    headers = {}
+    for i, cube in enumerate(code_cubes):
+        # Calculate w_v: proportion of coefficients in cube contributing to VOI
+        w_v = calculate_voi_proportion(cube, voi_region)
+        
+        # Calculate w_p: proximity weight based on distance to VOI center
+        w_p = calculate_proximity_weight(cube.center, voi_region.center)
+        
+        # Calculate w_e: mean energy of cube
+        mean_energy = calculate_mean_energy(cube.coefficients)
+        
+        # Calculate P_empty: probability of being empty background
+        P_empty = calculate_empty_probability(mean_energy)
+        
+        # Calculate overall weight W_i
+        # Note: Specific function f(w_p, w_e, w_v) is not explicitly defined in sources,
+        # but sources state W_i is a function of these three factors in [0,1].
+        # We assume a weighted sum or product for implementation purposes [G].
+        W_i = w_p * w_v * (1 - P_empty)
+        
+        headers[i] = {
+            'w_p': w_p,
+            'w_v': w_v,
+            'P_empty': P_empty,
+            'W_i': W_i
+        }
+        
+    # Step 4: Modified EBCOT Encoding
+    cube_bit_streams = []
+    for i, cube in enumerate(code_cubes):
+        # Apply modified EBCOT with 3-D contexts
+        # Contexts include horizontal, vertical, diagonal, and temporal neighbors
+        full_bit_stream = modified_ebcot_3d_context(cube.coefficients, headers[i])
+        cube_bit_streams.append(full_bit_stream)
+        
+    # Step 5: Create Scalable Layered Bit-Stream
+    # Truncate bit-streams and optimize for rate-distortion
+    # Find points on lower convex hull of rate-distortion plane
+    quality_layers = optimize_quality_layers(cube_bit_streams, headers)
+    
+    return quality_layers, headers
+
+def decode_voi(quality_layers, voi_region, layer_index):
+    """
+    Decode a specific VOI from the compressed bit-stream.
+    
+    Args:
+        quality_layers: List of quality layers
+        voi_region: Tuple defining the VOI bounds
+        layer_index: Index of the desired quality layer
+        
+    Returns:
+        reconstructed_voi: 3D array of the decoded VOI
+    """
+    # Step 6: Bit-Stream Reordering
+    # Identify code-cubes that constitute the VOI
+    voi_cube_indices = get_voi_cube_indices(voi_region)
+    
+    # Extract truncated bit-streams for these code-cubes from the specified layer
+    voi_bit_stream = []
+    for idx in voi_cube_indices:
+        # Get the truncated bit-stream for this cube at the specified layer
+        bits = quality_layers[layer_index][idx]
+        voi_bit_stream.append((idx, bits))
+        
+    # Decode the reordered bit-stream
+    # Since code-cubes are independent, order does not matter for decoding
+    reconstructed_voi = decode_ebcot(voi_bit_stream)
+    
+    return reconstructed_voi
+
+def modified_ebcot_3d_context(coefficients, header):
+    """
+    Encode a single code-cube using modified EBCOT with 3-D contexts.
+    """
+    bit_stream = []
+    
+    # Initialize significance map
+    significance_map = zeros_like(coefficients)
+    
+    # Iterate through bit-planes
+    for p in range(max_bit_plane, -1, -1):
+        # Zero-Crossing Pass
+        for each sample c in coefficients:
+            if not significance_map[c]:
+                # Context: significance of horizontal, vertical, diagonal, temporal neighbors
+                context = get_3d_context_significance(c, significance_map)
+                # Code whether c becomes significant
+                bit = code_zc_pass(c, context)
+                bit_stream.append(bit)
+                if bit:
+                    significance_map[c] = True
+                    
+        # Significance Coding Pass
+        for each sample c in coefficients where significance_map[c]:
+            # Context: sign and significance of temporal, vertical, horizontal neighbors
+            context = get_3d_context_sign(c, significance_map)
+            # Code the sign of c
+            bit = code_sc_pass(c, context)
+            bit_stream.append(bit)
+            
+        # Magnitude Refinement Pass
+        for each sample c in coefficients where significance_map[c]:
+            # Context: magnitude of temporal, vertical, horizontal neighbors
+            context = get_3d_context_magnitude(c, coefficients)
+            # Code the magnitude refinement bit
+            bit = code_mr_pass(c, context)
+            bit_stream.append(bit)
+            
+    return bit_stream
+```
+
+## Operating characteristics
+*   **Time Complexity:** Not explicitly given in the sources. The encoding involves 3-D IWT, independent code-cube encoding, and rate-distortion optimization. The optimization step involves finding points on the lower convex hull of the rate-distortion plane [S1].
+*   **Memory Complexity:** Not explicitly given. Requires storing wavelet coefficients, code-cubes, and header information for all code-cubes [S1].
+*   **Measured Performance:** Achieves lossless compression ratios comparable to 3D-JPEG2000 with VOI coding using MAXSHIFT and GSB methods [S1].
+*   **Strengths:**
+    *   Enables VOI decoding from the same compressed bit-stream without recoding [S1].
+    *   Allows decoding any VOI at any resolution [S1].
+    *   Exploits 3-D interslice correlations for improved coding efficiency [S1].
+*   **Limitations:**
+    *   Requires storing header information for all code-cubes to enable reordering [S1].
+    *   The optimization for quality layers may be computationally intensive [S1].
+*   **When to use:** Interactive telemedicine applications where different clients request different VOIs of the same 3-D image stored on a central server [S1].
+*   **When not to use:** When the entire volume is always decoded, or when computational resources for the optimization step are limited [S1].
+
+## Background
+The method was proposed by Manimekalai and Anusuya in 2012 [S1]. It builds on the concept of EBCOT, which is the core of JPEG2000, and extends it to 3-D medical images by incorporating 3-D contexts and VOI coding capabilities [S1]. The method addresses the limitations of previous 3D-JPEG2000 VOI methods (MAXSHIFT and GSB) which required recoding or had limited flexibility in VOI selection [S1].
+
+## Sources
+[S1] Scalable Compression of 3-D Medical Image Data Using EBCOT with Volume of Interest Coding, https://doi.org/10.51983/ajcst-2012.1.1.1673, fetched 2026-10-26

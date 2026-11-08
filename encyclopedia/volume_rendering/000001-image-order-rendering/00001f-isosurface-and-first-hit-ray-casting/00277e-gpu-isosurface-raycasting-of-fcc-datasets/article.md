@@ -7,11 +7,11 @@ This method renders isosurfaces from volume data sampled on a Face-Centered Cubi
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A scalar field $V$ defined on the FCC lattice $\mathbb{Z}_{\text{fcc}}$, stored in a 3D texture. An isovalue $\tau$.
-- Output: The color of the first hit isosurface for each pixel.
+- Input: A scalar field $V$ defined on the FCC lattice $\mathbb{Z}_{\text{fcc}}$, stored in a 3D texture. An isovalue $\tau$ [S1].
+- Output: The color of the first hit isosurface for each pixel [S3, unofficial].
 
 **Data Structures:**
-- **FCC Lattice Storage:** The FCC dataset is stored in a four-channel (RGBA) 3D texture. The lattice is decomposed into four Cartesian sub-lattices: $\mathbb{Z}_{\text{fcc}} = (2\mathbb{Z}^3) \cup (2\mathbb{Z}^3 + \xi_{110}) \cup (2\mathbb{Z}^3 + \xi_{101}) \cup (2\mathbb{Z}^3 + \xi_{011})$, where $\xi_{110}=(1,1,0)^T$, $\xi_{101}=(1,0,1)^T$, $\xi_{011}=(0,1,1)^T$ [S1].
+- **FCC Lattice Storage:** The FCC dataset is stored in a four-channel (RGBA) 3D texture [S1]. The lattice is decomposed into four Cartesian sub-lattices: $\mathbb{Z}_{\text{fcc}} = (2\mathbb{Z}^3) \cup (2\mathbb{Z}^3 + \xi_{110}) \cup (2\mathbb{Z}^3 + \xi_{101}) \cup (2\mathbb{Z}^3 + \xi_{011})$, where $\xi_{110}=(1,1,0)^T$, $\xi_{101}=(1,0,1)^T$, $\xi_{011}=(0,1,1)^T$ [S1].
 - **Transformation Tables:** Pre-computed integer arrays `T[10]` and `R[10]` store the translation offsets and rotation/reflection signs for each of the 10 tetrahedral types (0-9) [S2, unofficial].
 - **Stencil:** A fixed array `stencil[19]` containing the relative integer offsets of the 19 data points required to evaluate the spline for any tetrahedron type [S2, unofficial].
 
@@ -23,39 +23,22 @@ $$
 The center shift is $\xi_c = [1, 1, 1]^T$ [S1]. The spline is given by $M_{\text{fcc}}(\mathbf{x}) = 2 M_{\Xi_{\text{fcc}}}(\mathbf{x} + \xi_c)$ [S1]. The polynomial degree is 3 [S1].
 
 **Algorithm Steps:**
-1.  **Ray Marching:** For each pixel, march along the ray. At each step, obtain the current 3D position $\mathbf{p}_{in}$ in the volume domain.
-2.  **Cube Identification:** Compute the integer cube corner $\mathbf{f} = \lfloor \mathbf{p}_{in} \rfloor$ and the fractional part $\mathbf{p}_{cube} = \mathbf{p}_{in} - \mathbf{f}$ [S2, unofficial].
-3.  **Parity Check:** Determine the parity bit $\pi$ of the cube corner:
-    $$ \pi = (\mathbf{f} \cdot [1, 1, 1]^T) \& 1 $$
-    If $\pi=1$, the cube is of odd parity (not in $\mathbb{Z}_{\text{fcc}}$) [S1][S2, unofficial].
-4.  **Normalization:** If $\pi=1$, reflect the fractional part to map the odd parity cube to an even parity equivalent:
-    $$ \mathbf{p}_{cube} \leftarrow [1, 1, 1]^T - \mathbf{p}_{cube} $$
-    Store the original fractional part in $\mathbf{p}_{local}$ for later transformation [S2, unofficial].
-5.  **Tetrahedron Indexing:** Determine the tetrahedron index $i \in \{0, \dots, 4\}$ by comparing $\mathbf{p}_{cube}$ against four knot planes:
-    - If $(-1, -1, -1) \cdot \mathbf{p}_{cube} > -1$, then $i=0$.
-    - Else if $(1, 1, -1) \cdot \mathbf{p}_{cube} > 1$, then $i=1$.
-    - Else if $(1, -1, 1) \cdot \mathbf{p}_{cube} > 1$, then $i=2$.
-    - Else if $(-1, 1, 1) \cdot \mathbf{p}_{cube} > 1$, then $i=3$.
-    - Else $i=4$.
-6.  **Type and Final Index:** Determine the spline type $\tau$ and the final index $i_{tet}$:
-    - If $i=4$, $\tau=1$ (blue tetrahedron $\tau_4$); else $\tau=0$ (red tetrahedron $\tau_0$).
-    - If $\pi=1$, $i_{tet} = i + 5$; else $i_{tet} = i$.
-    This maps the point to one of the 10 tetrahedral types [S2, unofficial].
-7.  **Transformation:** Retrieve the transformation matrix signs `R[i_tet]` and offset `T[i_tet]` from the pre-computed tables. Transform the local position and update the origin:
-    $$ \mathbf{p}_{local} \leftarrow \mathbf{p}_{local} \odot \mathbf{R}[i_{tet}] + \mathbf{T}[i_{tet}] $$
-    $$ \mathbf{f} \leftarrow \mathbf{f} + \mathbf{T}[i_{tet}] $$
-    where $\odot$ denotes component-wise multiplication [S2, unofficial].
-8.  **Data Fetching:** Fetch 19 scalar values from the volume texture using the transformed stencil. For each $k \in \{0, \dots, 18\}$:
-    $$ \mathbf{fcc}_k = \mathbf{f} + \mathbf{R}[i_{tet}] \odot \text{stencil}[k] $$
-    Fetch the value $V_k$ from the texture at $\mathbf{fcc}_k$. Note that because the data is stored in a 4-channel texture representing the 4 sub-lattices, the fetch must select the correct channel based on the parity of the coordinates [S1][S2, unofficial]. Specifically, if the texture stores the decomposition $\mathbb{Z}_{\text{fcc}} = L_0 \cup L_1 \cup L_2 \cup L_3$, the channel is determined by which sub-lattice the coordinate belongs to [S2, unofficial].
-9.  **Spline Evaluation:** Compute the spline value $s(\mathbf{p}_{in})$ using the fetched values and the basis function $M_{\text{fcc}}$ evaluated at the transformed local coordinates. The evaluation uses only the two base tetrahedra types $\tau_0$ and $\tau_4$ due to symmetry [S1].
-10. **Isosurface Test:** Check if $s(\mathbf{p}_{in}) \ge \tau$ (or sign change). If hit, compute the gradient $\nabla s$ using the property that directional derivatives of box-splines are backward differences of lower-degree box-splines, requiring evaluation of three additional quadratic box-splines [S2, unofficial]. Compute shading and return color.
+1. **Ray Marching:** Builds on [Image-order rendering](16-image-order-rendering.md). For each pixel, march along the ray until the isosurface condition $s(\mathbf{p}) \ge \tau$ or a sign change is met [S3, unofficial].
+2. **Cube Identification:** Compute the integer cube corner $\mathbf{f} = \lfloor \mathbf{p}_{in} \rfloor$ and the fractional part $\mathbf{p}_{cube} = \mathbf{p}_{in} - \mathbf{f}$ [S2, unofficial].
+3. **Parity Check:** Determine the parity bit $\pi = (\mathbf{f} \cdot [1, 1, 1]^T) \& 1$ [S1][S2, unofficial].
+4. **Normalization:** If $\pi=1$, reflect the fractional part: $\mathbf{p}_{cube} \leftarrow [1, 1, 1]^T - \mathbf{p}_{cube}$, and store the original fractional part in $\mathbf{p}_{local}$ [S2, unofficial].
+5. **Tetrahedron Indexing:** Determine the tetrahedron index $i \in \{0, \dots, 4\}$ by comparing $\mathbf{p}_{cube}$ against four knot planes [S2, unofficial].
+6. **Type and Final Index:** Determine the spline type $\tau$ and the final index $i_{tet}$ [S2, unofficial].
+7. **Transformation:** Retrieve the transformation matrix signs `R[i_tet]` and offset `T[i_tet]` from the pre-computed tables [S2, unofficial].
+8. **Data Fetching:** Fetch 19 scalar values from the volume texture using the transformed stencil [S2, unofficial].
+9. **Spline Evaluation:** Compute the spline value $s(\mathbf{p}_{in})$ using the fetched values and the basis function $M_{\text{fcc}}$ evaluated at the transformed local coordinates [S1].
+10. **Isosurface Test:** Check if $s(\mathbf{p}_{in}) \ge \tau$ (or sign change) [S3, unofficial]. If hit, compute the gradient $\nabla s$ using the property that directional derivatives of box-splines are backward differences of lower-degree box-splines, requiring evaluation of three additional quadratic box-splines [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pre-computed tables from [S2, unofficial]
+# Pre-computed transformation tables from [S2, unofficial]
 T = [
     (0,0,0), (1,1,0), (1,0,1), (0,1,1), (0,0,0),
     (1,1,1), (0,0,1), (0,1,0), (1,0,0), (1,1,1)
@@ -71,83 +54,57 @@ stencil = [
 ]
 
 def fetch_fcc(tex, x, y, z):
-    # Helper to fetch from 4-channel texture based on sub-lattice index
-    # Sub-lattices are determined by (x&1, y&1, z&1) mapped to 0-3
-    # This is a placeholder for the specific channel selection logic described in [S2, unofficial]
-    # i = 2*(x&1) + (y&1) is mentioned as a simplification, but full 3D parity is needed
-    # for the 4 sub-lattices: 2Z^3, 2Z^3+(1,1,0), 2Z^3+(1,0,1), 2Z^3+(0,1,1)
-    # The exact mapping depends on the texture layout implementation.
-    pass
+    # Channel selection for 4-channel texture storing 4 sub-lattices [S2, unofficial]
+    texel = texel_fetch(tex, x >> 1, y >> 1, z >> 1)
+    i = 2 * (x & 1) + (y & 1)
+    return dot(texel, vec4(i == 0, i == 1, i == 2, i == 3))
 
 def evaluate_spline(p_in, tex):
     f = floor(p_in)
     p_cube = p_in - vec3(f)
-    
-    # Parity
     parity = (f.x + f.y + f.z) & 1
-    
     p_local = p_cube
-    
-    # Normalize for odd parity
     if parity == 1:
-        p_cube = vec3(1,1,1) - p_cube
-        
-    # Determine tetrahedron index i (0-4)
-    if dot(p_cube, vec3(-1,-1,-1)) > -1:
+        p_cube = vec3(1, 1, 1) - p_cube
+    if dot(p_cube, vec3(-1, -1, -1)) > -1:
         i = 0
-    elif dot(p_cube, vec3(1,1,-1)) > 1:
+    elif dot(p_cube, vec3(1, 1, -1)) > 1:
         i = 1
-    elif dot(p_cube, vec3(1,-1,1)) > 1:
+    elif dot(p_cube, vec3(1, -1, 1)) > 1:
         i = 2
-    elif dot(p_cube, vec3(-1,1,1)) > 1:
+    elif dot(p_cube, vec3(-1, 1, 1)) > 1:
         i = 3
     else:
         i = 4
-        
-    # Determine type and final index
-    if i == 4:
-        type_val = 1
-    else:
-        type_val = 0
-        
-    if parity == 1:
-        i_tet = i + 5
-    else:
-        i_tet = i
-        
-    # Transform
+    type_val = 1 if i == 4 else 0
+    i_tet = i + 5 if parity == 1 else i
     r_vec = R[i_tet]
     t_vec = T[i_tet]
-    
-    p_local = p_local * r_vec + t_vec # Component-wise mult
+    p_local = p_local * r_vec + t_vec
     f = f + t_vec
-    
-    # Fetch 19 samples
     values = []
     for k in range(19):
-        stencil_vec = stencil[k]
-        fcc_coord = f + r_vec * stencil_vec # Component-wise mult
-        val = fetch_fcc(tex, fcc_coord.x, fcc_coord.y, fcc_coord.z)
-        values.append(val)
-        
-    # Evaluate spline using values and p_local
-    # The actual polynomial evaluation of M_fcc for tau_0 or tau_4
-    # is omitted here as it is a standard polynomial evaluation
-    # using the 19 coefficients and the transformed local coordinates.
-    s = evaluate_polynomial(values, p_local, type_val)
-    
+        fcc_coord = f + r_vec * stencil[k]
+        values.append(fetch_fcc(tex, fcc_coord.x, fcc_coord.y, fcc_coord.z))
+    # Not given in the sources. Evaluate cubic polynomial M_fcc on tau_0/tau_4 using p_local and fetched values [G].
+    s = 0.0 # Placeholder for polynomial evaluation
     return s
 ```
 
 **Parameters:**
-- Isovalue $\tau$: Scene-dependent.
-- Ray step size: Determined by the ray marching strategy (e.g., empty-space skipping).
+- Isovalue $\tau$: Scene-dependent [S1].
+- Ray step size: Determined by the ray marching strategy (e.g., empty-space skipping) [S3, unofficial].
 - Hardware: Tested on NVIDIA GeForce GTX 460 [S1].
 
 **Edge Cases and Pitfalls:**
 - **Channel Selection:** Storing FCC data in a 4-channel texture requires careful channel selection during fetches, which can slow down performance if not optimized [S2, unofficial].
 - **Precision:** The use of integer arithmetic for transformations (`R`, `T`) avoids precision issues in coordinate mapping [S2, unofficial].
 - **Boundary Conditions:** The method assumes the volume domain is properly bounded; ray casting must handle exits from the volume [S1].
+
+## Subtopics
+
+### Quartic Box-Spline on BCC Lattice
+A raycasting method using a 7-direction quartic box-spline on the Body-Centered Cubic (BCC) lattice [S2, unofficial]. It computes the floor of the input, determines a parity vector, computes an origin offset and rotation vector, transforms the local coordinate, and determines the tetrahedron index based on component comparisons [S2, unofficial]. It uses boolean vectors for permutation and computes transformed local coordinates and rotation vectors before fetching samples using axis-aligned updates [S2, unofficial]. The parity is defined as $\pi := \lfloor x \rfloor \mod 2$ [S2, unofficial]. Compared to [Finkbeiner et al. 2010], it is 1.2x faster, and compared to [Csébfalvi and Hadwiger 2006], it is 0.4x slower (i.e., slower) [S2, unofficial].
 
 ## Operating characteristics
 - **Time Complexity:** The evaluation is $O(1)$ per sample due to the fixed stencil size (19 fetches) and branchless transformation [S1][S2, unofficial].

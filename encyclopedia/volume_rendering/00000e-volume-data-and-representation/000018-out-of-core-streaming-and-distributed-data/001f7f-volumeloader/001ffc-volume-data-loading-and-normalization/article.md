@@ -3,7 +3,7 @@
 Also called: VolumeHandler
 
 ## Overview
-This method implements a C++ class for loading 3D and 4D volumetric data from `.npy` files, normalizing the scalar values, and managing frame indices for time-varying volumes [S1, unofficial]. It differs from sibling methods like the Raw Volume Data Reader and DICOM loader by strictly relying on the NumPy binary format and applying a specific min-subtraction normalization strategy rather than standard min-max scaling to $[0, 1]$ [S1, unofficial]. It solves the problem of ingesting pre-saved NumPy volume arrays into a rendering pipeline while ensuring consistent data types and value ranges.
+This method implements a C++ class for loading 3D and 4D volumetric data from `.npy` files, normalizing the scalar values, and managing frame indices for time-varying volumes [S1, unofficial]. It strictly relies on the NumPy binary format and applies a min-subtraction normalization strategy rather than standard min-max scaling to $[0, 1]$ [S1, unofficial]. It ingests pre-saved NumPy volume arrays into a rendering pipeline while ensuring consistent data types and value ranges [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
@@ -21,39 +21,21 @@ The method uses the following internal state:
 *   `FrameIndex`: `int`. The current frame index for time-varying volumes [S1, unofficial].
 
 **Steps:**
-1.  **Validation:** Check if the file exists and has the `.npy` extension. If not, throw a `runtime_error` [S1, unofficial].
-2.  **Reading:** Load the data using `npy::read_npy<T>`. Let the loaded shape be $d.shape$ and data be $d.data$ [S1, unofficial].
-3.  **Dimensionality Check:** Verify $d.shape.size()$ is either 3 or 4. If not, throw a `runtime_error` [S1, unofficial].
-4.  **Processing 3D Volumes (Single Frame):**
-    *   If $d.shape.size() == 3$:
-        *   Resize `VolumeFrames` to size 1.
-        *   Set `Shape` to $d.shape$.
-        *   Resize `Data` to size $Shape[0] \times Shape[1] \times Shape[2]$.
-        *   Transform $d.data$ to `float`.
-        *   Find $MinValue = \min(d.data)$ and $MaxValue = \max(d.data)$ [S1, unofficial].
-        *   Normalize: For each element $v$ in `Data`, $v_{new} = v - MinValue$.
-        *   Set `IsTimeVaryingVolume` to `false` [S1, unofficial].
-5.  **Processing 4D Volumes (Time-Varying):**
-    *   If $d.shape.size() == 4$:
-        *   Let $N = d.shape[0]$ (number of frames).
-        *   Let $X = d.shape[1], Y = d.shape[2], Z = d.shape[3]$.
-        *   Resize `VolumeFrames` to size $N$.
-        *   Set `IsTimeVaryingVolume` to `true` [S1, unofficial].
-        *   For each frame $t$ from $0$ to $N-1$:
-            *   Extract the sub-array for frame $t$ from $d.data$.
-            *   Set `Shape` to $(X, Y, Z)$.
-            *   Resize `Data` for this frame to $X \times Y \times Z$.
-            *   Copy frame data and transform to `float`.
-            *   Find $MinValue_t = \min(\text{frame}_t)$ and $MaxValue_t = \max(\text{frame}_t)$.
-            *   Set `MinValue` and `MaxValue` for this frame.
-            *   Normalize: For each element $v$ in the frame's `Data`, $v_{new} = v - MinValue_t$ [S1, unofficial].
+1.  **Validation:** Check if the file exists and has the `.npy` extension; throw `runtime_error` if invalid [S1, unofficial].
+2.  **Reading:** Load the data using `npy::read_npy<T>`, yielding shape $d.shape$ and raw data $d.data$ [S1, unofficial].
+3.  **Dimensionality Check:** Verify $d.shape.size()$ is either 3 or 4; throw `runtime_error` otherwise [S1, unofficial].
+4.  **Processing 3D Volumes (Single Frame):** If $d.shape.size() == 3$: resize `VolumeFrames` to 1; set `Shape` to $d.shape$; resize `Data` to $Shape[0] \times Shape[1] \times Shape[2]$; transform $d.data$ to `float`; find $MinValue = \min(d.data)$ and $MaxValue = \max(d.data)$; normalize by subtracting $MinValue$ from each element; set `IsTimeVaryingVolume` to `false` [S1, unofficial].
+5.  **Processing 4D Volumes (Time-Varying):** If $d.shape.size() == 4$: set $N = d.shape[0]$, $X = d.shape[1]$, $Y = d.shape[2]$, $Z = d.shape[3]$; resize `VolumeFrames` to $N$; set `IsTimeVaryingVolume` to `true`; for each frame $t$ from $0$ to $N-1$: set `Shape` to $(X, Y, Z)$; resize `Data` to $X \times Y \times Z$; copy frame data from $d.data$; transform to `float`; find $MinValue_t = \min(\text{frame}_t)$ and $MaxValue_t = \max(\text{frame}_t)$; set `MinValue` and `MaxValue`; normalize by subtracting $MinValue_t$ [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import os
+import numpy as np
+
 class VolumeData3D:
-    Shape: list[int]  # [x, y, z]
+    Shape: list[int]
     Data: list[float]
     MinValue: float
     MaxValue: float
@@ -65,62 +47,57 @@ class VolumeLoader:
 
     def load_and_normalize(self, filepath: str, T: type):
         # 1. Validation
-        if not filepath.endswith('.npy') or not file_exists(filepath):
+        if not filepath.endswith('.npy') or not os.path.exists(filepath):
             raise RuntimeError("File must exist and be .npy")
 
-        # 2. Reading
-        # npy::read_npy<T> returns an object with .shape (list) and .data (list of T)
-        d = read_npy(filepath, T)
+        # 2. Reading: standard numpy load and cast to template type T
+        raw_array = np.load(filepath)
+        if raw_array.dtype != T:
+            raw_array = raw_array.astype(T)
+        d_shape = list(raw_array.shape)
+        d_data = raw_array.flatten().tolist()
 
         # 3. Dimensionality Check
-        if len(d.shape) not in (3, 4):
+        if len(d_shape) not in (3, 4):
             raise RuntimeError("Shape dimensionality must be 3 or 4")
 
         self.VolumeFrames = []
         self.IsTimeVaryingVolume = False
 
-        if len(d.shape) == 3:
+        if len(d_shape) == 3:
             # 4. 3D Volume Handling
-            self.VolumeFrames.resize(1)
+            self.VolumeFrames.append(VolumeData3D())
             frame = self.VolumeFrames[0]
-            frame.Shape = d.shape
-            size = d.shape[0] * d.shape[1] * d.shape[2]
-            frame.Data.resize(size)
+            frame.Shape = d_shape
+            size = d_shape[0] * d_shape[1] * d_shape[2]
+            frame.Data = [0.0] * size
             
-            # Transform to float and find min/max
-            float_data = [float(x) for x in d.data]
+            float_data = [float(x) for x in d_data]
             frame.MinValue = min(float_data)
             frame.MaxValue = max(float_data)
-            
-            # Normalize: subtract MinValue
             frame.Data = [x - frame.MinValue for x in float_data]
-            
             self.IsTimeVaryingVolume = False
 
-        elif len(d.shape) == 4:
+        elif len(d_shape) == 4:
             # 5. 4D Volume Handling
-            num_frames = d.shape[0]
-            x, y, z = d.shape[1], d.shape[2], d.shape[3]
-            self.VolumeFrames.resize(num_frames)
+            num_frames = d_shape[0]
+            x, y, z = d_shape[1], d_shape[2], d_shape[3]
             self.IsTimeVaryingVolume = True
 
             for t in range(num_frames):
-                frame = self.VolumeFrames[t]
+                frame = VolumeData3D()
+                self.VolumeFrames.append(frame)
                 frame.Shape = [x, y, z]
                 frame_size = x * y * z
-                frame.Data.resize(frame_size)
+                frame.Data = [0.0] * frame_size
                 
-                # Extract frame data (assuming d.data is flattened 4D array)
-                # Note: Exact slicing logic depends on npy layout, assumed row-major here
                 start_idx = t * frame_size
                 end_idx = start_idx + frame_size
-                frame_raw = d.data[start_idx:end_idx]
+                frame_raw = d_data[start_idx:end_idx]
                 
                 float_data = [float(x) for x in frame_raw]
                 frame.MinValue = min(float_data)
                 frame.MaxValue = max(float_data)
-                
-                # Normalize
                 frame.Data = [x - frame.MinValue for x in float_data]
 
         self.FrameIndex = 0
@@ -130,18 +107,18 @@ class VolumeLoader:
 *   $T$: Template type for input data (e.g., `float`, `uint8_t`) [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Normalization Shift:** The method subtracts `MinValue` from all elements. The resulting data range is $[0, MaxValue - MinValue]$. It does *not* scale to $[0, 1]$ [S1, unofficial].
-*   **Unsupported Formats:** Only `.npy` files are supported. Other formats will trigger an error [S1, unofficial].
+*   **Normalization Shift:** The method subtracts `MinValue` from all elements, placing all data in the range $[0, MaxValue - MinValue]$ rather than scaling to $[0, 1]$ [S1, unofficial].
+*   **Unsupported Formats:** Only `.npy` files are supported; other formats trigger a `runtime_error` [S1, unofficial].
 *   **Dimensionality:** Inputs with dimensions other than 3 or 4 are rejected [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is the total number of voxels, as it requires a single pass to read, convert, and find min/max, followed by a pass to normalize [S1, unofficial].
-*   **Memory Complexity:** $O(N)$ for storing the float data. The original integer data is converted to float, potentially increasing memory usage if the source was 8-bit or 16-bit [S1, unofficial].
+*   **Time Complexity:** Linear with respect to the total number of voxels due to single-pass reading, conversion, and normalization [G].
+*   **Memory Complexity:** $O(N)$ for storing the float data, which may increase memory usage if the source format was 8-bit or 16-bit [G].
 *   **Strengths:** Simple implementation for NumPy-based pipelines; handles both static and dynamic volumes uniformly [S1, unofficial].
 *   **Limitations:** Strict format dependency (`.npy` only); normalization preserves absolute magnitude differences rather than normalizing to a standard range, which may require downstream adjustment [S1, unofficial].
 
 ## Background
-This method originates from the DDVR project, an unofficial implementation of a volume rendering system [S1, unofficial]. It is designed to bridge NumPy data structures with C++ rendering components.
+The implementation is part of a C++ volume rendering codebase that processes `.npy` files [S1, unofficial].
 
 ## Sources
 [S1] AoGao-Kedoka/DDVR, https://github.com/AoGao-Kedoka/DDVR, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,89 @@
+# Ray Start Position Jittering
+
+Also called: Ray start jittering
+
+## Overview
+Ray start position jittering is a stochastic sampling technique used in direct volume ray casting to mitigate aliasing artifacts, specifically "wood grain" patterns caused by visible slice boundaries or regular sampling grids [S1][S2, unofficial]. It differs from standard ray casting by introducing a random offset to the initial ray origin along the viewing direction before the integration loop begins [S1][S2, unofficial]. This method is particularly effective when using a low number of ray casting steps or when nearest-neighbor interpolation is employed [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, volume dataset, step size $\Delta s$, random number generator.
+*   **Output:** Modified ray origin $\mathbf{o}'$ for the current frame or ray.
+
+**Data Structures:**
+*   No specific data structure changes are required. The method modifies the ray parameters passed to the volume traversal loop.
+
+**Steps:**
+1.  Generate a random scalar value $r$ uniformly distributed in the interval $[0, 1)$ [S2, unofficial].
+2.  Calculate the jitter offset $\delta = r \cdot \Delta s$, where $\Delta s$ is the step size used for ray marching [S2, unofficial].
+3.  Update the ray origin: $\mathbf{o}' = \mathbf{o} + \delta \cdot \mathbf{d}$ [S2, unofficial].
+4.  Proceed with the standard volume ray casting loop using $\mathbf{o}'$ as the starting point [S1][S2, unofficial].
+
+**Formulas:**
+$$ \mathbf{o}' = \mathbf{o} + (r \cdot \Delta s) \cdot \mathbf{d} $$
+Where:
+*   $\mathbf{o}$ is the original ray origin.
+*   $\mathbf{d}$ is the normalized ray direction vector.
+*   $\Delta s$ is the fixed step size between samples.
+*   $r \in [0, 1)$ is a uniform random number.
+
+**Parameters:**
+*   **Jitter Range:** Typically one step size ($\Delta s$) [S2, unofficial].
+*   **Distribution:** Uniform [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Ensure the jitter offset is added to the origin before any distance checks against the volume bounding box to avoid sampling outside the valid data range [G].
+*   **Consistency:** The jitter should ideally be regenerated per frame or per pixel to break up coherent artifacts, rather than being static [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def jitter_ray_start(ray_origin, ray_direction, step_size, random_generator):
+    """
+    Applies jitter to the ray start position to reduce slice artifacts.
+    
+    Args:
+        ray_origin: Vector3, the original ray origin.
+        ray_direction: Vector3, the normalized ray direction.
+        step_size: Float, the distance between ray casting samples.
+        random_generator: Function returning a float in [0, 1).
+        
+    Returns:
+        Vector3, the jittered ray origin.
+    """
+    # Generate a random value between 0 and 1
+    r = random_generator()
+    
+    # Calculate offset: random fraction of the step size
+    offset = r * step_size
+    
+    # Update origin along the ray direction
+    jittered_origin = ray_origin + (offset * ray_direction)
+    
+    return jittered_origin
+```
+
+## Subtopics
+
+### Ray End Position Jittering
+Jittering the end of the ray instead of the start. Useful when the entry point is fixed (e.g., screen edge) but exit sampling causes artifacts. [Link](1629-ray-end-position-jittering.md)
+
+### Step Size Jittering
+Varying the step size $\Delta s$ dynamically during traversal. Reduces regularity in sampling density. [Link](1630-step-size-jittering.md)
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per ray for the jitter calculation. The volume traversal complexity remains unchanged.
+*   **Memory Complexity:** $O(1)$ additional memory for the random state.
+*   **Performance:** Negligible overhead. The cost is dominated by the volume traversal itself.
+*   **Strengths:** Simple to implement; effectively breaks up coherent "wood grain" artifacts caused by regular sampling grids [S1][S2, unofficial].
+*   **Limitations:** Does not solve aliasing from high-frequency content within the volume itself, only from the sampling grid structure [S2, unofficial]. Requires a random number generator.
+*   **When to use:** When using few ray casting steps or nearest-neighbor interpolation, where slice boundaries are visible [S1][S2, unofficial].
+*   **When not to use:** When high-quality trilinear/trilinear filtering is already used with sufficient sampling density, artifacts may be minimal [S1].
+
+## Background
+The technique was described in the context of volumetric display systems for the human musculoskeletal system, where it was employed alongside nearest-neighbor interpolation to reduce aliasing artifacts [S1]. It was also documented in a WebGL-based volume rendering tool, where it was noted as a basic technique to improve quality when working with low-quality (very few steps) ray casting iterations [S2, unofficial].
+
+## Sources
+[S1] Towards Advanced Volumetric Display of the Human Musculoskeletal System, https://doi.org/10.2312/localchapterevents/italchap/italianchapconf2008/021-025, fetched 2026-10-26
+[S2] Node-Based Shader Editor for Volume Rendering in WebGL, https://miccai-sb.github.io/materials/mec2020/2020_UbietoV.pdf, fetched 2026-10-28 (unofficial)

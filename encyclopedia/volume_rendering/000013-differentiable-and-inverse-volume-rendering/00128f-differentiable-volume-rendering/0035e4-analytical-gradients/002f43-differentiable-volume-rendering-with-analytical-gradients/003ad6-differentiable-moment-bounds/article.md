@@ -1,0 +1,124 @@
+# Differentiable Moment Bounds
+
+Also called: Differentiable Moment Shadow Mapping (as a specific application), Primal Algorithm for Moment Bounds
+
+## Overview
+Differentiable Moment Bounds is a technique that computes continuously differentiable upper and lower bounds on the cumulative mass of a measure consistent with a given sequence of power moments [S1]. It solves the truncated Hamburger moment problem by constructing a unique "canonical" discrete measure that tightly bounds the set of all valid measures [S1]. Unlike standard visibility functions based on Chebyshev's inequality, which use only the first two moments ($n=1$), this method generalizes to arbitrary moment sequences ($2n+1$ moments) to provide tighter bounds [S1]. It is distinguished from its parent method, [Differentiable Volume Rendering with Analytical Gradients](5983-differentiable-volume-rendering-with-analytical-gradients.md), by providing a robust, numerically stable implementation of these bounds that handles singularities, enabling their use in differentiable rendering pipelines where gradients with respect to scene parameters are required [S1].
+
+## How it works
+**Inputs:**
+*   Moments $\mathbf{m} = (m_0, \dots, m_{2n})$, a sequence of $2n+1$ power moments.
+*   Evaluation point $\eta \in \mathbb{R}$.
+*   Overestimation weight $\beta \in [0, 1]$.
+*   Bias parameter $\alpha \in [0, 1]$.
+*   Reference moment vector $\mathbf{m}^\star$ (used for biasing).
+
+**Outputs:**
+*   Bound $b = (1 - \beta)L + \beta U$, where $L$ and $U$ are the lower and upper bounds on the cumulative mass.
+
+**Data Structures:**
+*   **Hankel Matrix $H$**: A symmetric positive-definite matrix of size $(n+1) \times (n+1)$ constructed from the biased moments. The entry $H_{i,j}$ corresponds to the moment $m_{i+j}$ for $0 \le i, j \le n$.
+*   **Coefficient Vector $\mathbf{c}$**: A vector of size $n+1$ resulting from the Cholesky solve.
+*   **Roots $\mathbf{x}$**: A vector of size $n$ containing the roots of the kernel polynomial.
+*   **Weights $\mathbf{w}$**: A vector of size $n+1$ containing the weights of the canonical discrete measure.
+
+**Steps:**
+1.  **Biasing**: Regularize the input moments to ensure numerical stability. Compute $\mathbf{m}' = (1 - \alpha)\mathbf{m} + \alpha\mathbf{m}^\star$ [S1].
+2.  **Hankel Construction**: Construct the Hankel matrix $H$ from $\mathbf{m}'$ such that $H_{i,j} = m'_{i+j}$ [S1].
+3.  **Cholesky Solve**: Solve the linear system $H\mathbf{c} = \boldsymbol{\eta}$ for $\mathbf{c}$, where $\boldsymbol{\eta} = (1, \eta, \eta^2, \dots, \eta^n)^\top$ [S1]. This is typically done using Cholesky decomposition [S1].
+4.  **Root Finding**: Find the roots $x_1, \dots, x_n$ of the kernel polynomial defined by coefficients $\mathbf{c}$. The polynomial is $P(x) = \sum_{i=0}^n c_i x^i$ [S1]. Roots can be found in closed-form for low $n$ or as eigenvalues of the companion matrix for higher $n$ [S1].
+5.  **Partial Moments**: Define the partial moment vector $\bar{\mathbf{m}} = (m_0, \dots, m_n)$ [S1].
+6.  **Vandermonde Solve**: Solve the Vandermonde system for weights $\mathbf{w} = (w_0, \dots, w_n)$. The system is defined by the evaluation point $\eta$, roots $\mathbf{x}$, and partial moments $\bar{\mathbf{m}}$ [S1]. Specifically, the weights satisfy the condition that the discrete measure matches the moments up to order $n$ [S1].
+7.  **Bound Aggregation**: Initialize $b = \beta w_0$. Iterate $i$ from $1$ to $n$: if $x_i < \eta$, add $w_i$ to $b$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def differentiable_moment_bounds(m, eta, beta, alpha, m_star):
+    """
+    Computes the differentiable moment bound.
+    
+    Args:
+        m: List of moments [m0, ..., m_{2n}]
+        eta: Evaluation point
+        beta: Overestimation weight [0, 1]
+        alpha: Bias parameter [0, 1]
+        m_star: Reference moment vector [m0_star, ..., m_{2n}_star]
+        
+    Returns:
+        b: The computed bound
+    """
+    n = (len(m) - 1) // 2
+    
+    # Step 1: Biasing
+    m_biased = [(1 - alpha) * m[i] + alpha * m_star[i] for i in range(len(m))]
+    
+    # Step 2: Construct Hankel Matrix H of size (n+1)x(n+1)
+    # H[i][j] = m_biased[i+j]
+    H = [[m_biased[i + j] for j in range(n + 1)] for i in range(n + 1)]
+    
+    # Step 3: Solve H * c = eta_vec using Cholesky decomposition
+    # eta_vec = [1, eta, eta^2, ..., eta^n]
+    eta_vec = [eta**i for i in range(n + 1)]
+    c = solve_linear_system(H, eta_vec) # Implemented via Cholesky
+    
+    # Step 4: Find roots of polynomial defined by c
+    # P(x) = c[0] + c[1]*x + ... + c[n]*x^n
+    roots = find_polynomial_roots(c) # Returns list of n roots
+    
+    # Step 5: Partial moments
+    m_partial = m[:n + 1]
+    
+    # Step 6: Solve Vandermonde system for weights w
+    # The system relates roots, eta, and partial moments to weights
+    # w[0]...w[n]
+    w = solve_vandermonde_system(eta, roots, m_partial)
+    
+    # Step 7: Aggregate bound
+    b = beta * w[0]
+    for i in range(1, n + 1):
+        if roots[i - 1] < eta:
+            b += w[i]
+            
+    return b
+```
+
+**Parameters:**
+*   $\beta \in [0, 1]$: Overestimation weight blending between lower and upper bounds [S1].
+*   $\alpha \in [0, 1]$: Bias parameter for moment regularization [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Singularities**: The representation has singularities where evaluating the bound is numerically challenging [S1]. The differentiability analysis reveals the behavior of the bound and its derivatives near these singularities to enable robust implementation [S1].
+*   **Numerical Stability**: A straightforward implementation using automatic differentiation is numerically unstable and inefficient in terms of memory and runtime [S1]. Careful consideration of the derivative calculation (via the adjoint algorithm) is required for stability [S1].
+
+## Subtopics
+
+### [Moment Bounds for Measures](9308-moment-bounds-for-measures.md)
+This method computes differentiable upper and lower bounds on the cumulative mass of any measure consistent with a given sequence of moments $\mathbf{m}$. It solves the truncated Hamburger moment problem by constructing a unique "canonical" discrete measure that tightly bounds the set of all valid measures. Unlike standard visibility functions based on Chebyshev's inequality, which use only the first two moments ($n=1$), this method generalizes to arbitrary moment sequences ($2n+1$ moments) to provide tighter bounds. See [Moment Bounds for Measures](9308-moment-bounds-for-measures.md).
+
+### Primal Algorithm for Moment Bounds
+This is the specific algorithmic implementation of the differentiable moment bounds described in the main method. It involves biasing the input moments, constructing the Hankel matrix, solving for coefficients via Cholesky decomposition, finding polynomial roots, solving a Vandermonde system for weights, and aggregating the bound based on the evaluation point [S1]. It is designed to be robust against numerical singularities and efficient for use in differentiable rendering pipelines [S1].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+The complexity is dominated by the Cholesky decomposition of the $(n+1) \times (n+1)$ Hankel matrix and the root finding of the degree-$n$ polynomial. The Cholesky decomposition is $O(n^3)$, and root finding is typically $O(n^2)$ or $O(n^3)$ depending on the method (e.g., companion matrix eigenvalues) [S1]. The Vandermonde solve is also $O(n^2)$ [S1]. Memory complexity is $O(n^2)$ for the Hankel matrix and $O(n)$ for vectors [S1].
+
+**Measured Performance:**
+Not given in the sources.
+
+**Scaling:**
+The method scales with the order of the moment sequence $n$. Higher $n$ provides tighter bounds but increases computational cost [S1].
+
+**Strengths and Limitations:**
+*   **Strengths**: Provides continuously differentiable bounds, enabling their use in differentiable rendering pipelines [S1]. More accurate than existing differentiable shadow mapping techniques for the same computational cost [S1]. Generalizes Chebyshev's inequality to arbitrary moment sequences [S1].
+*   **Limitations**: Numerically unstable if not implemented carefully, particularly near singularities [S1]. Straightforward automatic differentiation implementations are inefficient [S1].
+
+**When to use it and when not:**
+Use when differentiable shadow mapping or visibility estimation is required with tighter bounds than Chebyshev's inequality can provide [S1]. Do not use when computational resources are extremely limited and $n$ must be large, or when numerical stability cannot be guaranteed due to the presence of singularities [S1].
+
+## Background
+The method originates from the work of Peters and Klein (2015) and Peters et al. (2019), who introduced moment-based approximations for visibility [S1]. The differentiability of these bounds was formally proven and an efficient implementation was developed in the paper "Moment Bounds are Differentiable: Efficiently Approximating Measures in Inverse Rendering" (2026) [S1]. It is used in differentiable shadow mapping, generalizing existing techniques by Donnelly and Lauritzen (2006) and Worchel and Alexa (2023) [S1].
+
+## Sources
+[S1] Moment Bounds are Differentiable: Efficiently Approximating Measures in Inverse Rendering, https://doi.org/10.1145/3730899, fetched 2026-10-27

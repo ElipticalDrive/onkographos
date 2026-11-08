@@ -3,53 +3,63 @@
 Also called: Relightable 3D Gaussian Splatting
 
 ## Overview
-Relightable 3D Gaussian is a method that extends 3D Gaussian Splatting to support physically-based rendering by assigning per-Gaussian BRDF parameters and precomputed visibility for shadows [S1, unofficial]. It distinguishes itself from standard 3D Gaussian Splatting by enabling dynamic relighting and material variation, and from [3D Gaussian Splatting with BRDF Embedding](1174-3d-gaussian-splatting-with-brdf-embedding.md) by explicitly baking ambient occlusion and visibility data per Gaussian to handle self-shadowing [S1, unofficial].
+Relightable 3D Gaussian extends the standard 3D Gaussian Splatting representation by assigning physically-based BRDF parameters (albedo, roughness, normal) to each Gaussian primitive, enabling dynamic relighting and shadow casting [S1, unofficial]. Unlike standard 3DGS which renders fixed colors, this method decouples material properties from lighting, allowing the scene to be re-rendered under arbitrary environment maps or light sources [S1, unofficial]. It distinguishes itself from sibling methods like [3D Gaussian Splatting with BRDF Embedding](1174-3d-gaussian-splatting-with-brdf-embedding.md) by explicitly baking precomputed visibility for shadows directly into the Gaussian attributes, rather than relying solely on learned embeddings or deferred shading passes [S1, unofficial].
 
 ## How it works
-**Inputs:** A set of 3D Gaussians (position, covariance, opacity, view-dependent color) and a set of training images with known lighting conditions.
-**Outputs:** A scene representation where each Gaussian stores BRDF parameters and visibility data.
+**Inputs and Outputs:**
+*   **Input:** A set of 3D Gaussians $\{G_i\}$ initialized from a standard 3DGS reconstruction, along with training images under varying lighting conditions (or a static light source for shadow baking).
+*   **Output:** A scene representation where each Gaussian $i$ stores position $\mathbf{p}_i$, covariance $\Sigma_i$, opacity $\alpha_i$, spherical harmonics coefficients for albedo $\mathbf{c}_{albedo}$, roughness $\rho_i$, normal $\mathbf{n}_i$, and a precomputed visibility term $V_i$.
 
 **Data Structures:**
-Each Gaussian $i$ is extended with the following fields:
-1.  **Albedo** ($\rho_i$): Diffuse reflectance color.
-2.  **Roughness** ($\alpha_i$): Microfacet roughness parameter.
-3.  **Normal** ($\mathbf{n}_i$): Surface normal vector.
-4.  **Visibility** ($V_i$): Precomputed visibility factor for shadowing.
+Each Gaussian $i$ maintains the following fields:
+1.  **Position:** $\mathbf{p}_i \in \mathbb{R}^3$
+2.  **Covariance:** $\Sigma_i \in \mathbb{R}^{3 \times 3}$ (or quaternion/scale representation)
+3.  **Opacity:** $\alpha_i \in [0, 1]$
+4.  **Albedo:** $\mathbf{c}_{albedo}$ (Spherical Harmonics coefficients, typically degree 0-3)
+5.  **Roughness:** $\rho_i \in [0, 1]$
+6.  **Normal:** $\mathbf{n}_i \in \mathbb{R}^3$ (unit vector)
+7.  **Visibility:** $V_i \in [0, 1]$ (precomputed shadow/occlusion factor)
 
-**Steps:**
-1.  **Initialization:** Initialize BRDF parameters ($\rho_i, \alpha_i, \mathbf{n}_i$) and visibility ($V_i$) for each Gaussian. [G] Typical initialization sets albedo to the mean color, roughness to 0.5, and normal to the Gaussian's principal axis.
-2.  **Differentiable Rendering:** Render the scene using a differentiable rasterizer. The radiance contribution of each Gaussian is computed using a BRDF model (e.g., Cook-Torrance) combined with the precomputed visibility $V_i$ to approximate self-shadowing.
-3.  **Optimization:** Minimize the difference between rendered images and ground truth images using gradient descent. The loss function typically includes photometric loss and potentially regularization terms for BRDF parameters.
-4.  **Visibility Update:** Update the visibility parameter $V_i$ during optimization to account for occlusions from other Gaussians. [G] This is often done by tracking the fraction of rays blocked by other geometry during training.
-
-**Formulas:**
-The rendered color $C$ for a pixel is the sum of contributions from visible Gaussians:
-$$ C = \sum_{i \in \text{sorted}} c_i \cdot \alpha_i \cdot \prod_{j < i} (1 - \alpha_j) $$
-where $c_i$ is the BRDF-based color of Gaussian $i$, modulated by its visibility $V_i$. [S1, unofficial]
+**Method Steps:**
+1.  **Initialization:** Initialize Gaussians using standard 3DGS SfM points. Assign initial albedo from the first training image's color. Set roughness to a default value (e.g., 0.5) and normals to the view direction or surface normal estimate [S1, unofficial].
+2.  **Visibility Baking:** To handle shadows, precompute visibility $V_i$ for each Gaussian. This involves casting rays from the light source to each Gaussian center. If occluded, $V_i$ is reduced. This step is performed once or updated periodically during optimization [S1, unofficial].
+3.  **Rendering:** For a given ray $\mathbf{r}$ and light environment $\mathcal{L}$:
+    *   Project Gaussians to 2D and sort by depth.
+    *   For each Gaussian $i$ along the ray, compute the outgoing radiance $L_o$ using the BRDF $f_r$:
+        $$
+        L_o = V_i \cdot \int_{\Omega} f_r(\omega_i, \omega_o) L_i(\omega_i) (\omega_i \cdot \mathbf{n}_i) d\omega_i
+        $$
+        where $L_i$ is the incident light, $\omega_i$ is the incoming light direction, and $\omega_o$ is the view direction.
+    *   Composite colors using alpha blending:
+        $$
+        \hat{C} = \sum_{i \in \mathcal{N}} T_i \alpha_i \hat{C}_i
+        $$
+        where $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$ is the accumulated transmittance, and $\hat{C}_i$ is the color contribution from Gaussian $i$ under the current lighting.
+4.  **Optimization:** Minimize the photometric loss $\mathcal{L}$ between rendered and ground truth images. Gradients flow through the BRDF parameters and visibility. The opacity $\alpha_i$ and covariance $\Sigma_i$ are also optimized as in standard 3DGS [S1, unofficial].
 
 **Parameters:**
-*   **Learning Rate:** Standard values for 3DGS optimization.
-*   **BRDF Model:** Cook-Torrance or similar. [S1, unofficial]
+*   **Roughness Range:** $[0, 1]$
+*   **Visibility Update Frequency:** Not given in the sources. [G] Typically updated every $K$ steps or per epoch to balance performance and accuracy.
+*   **SH Degree for Albedo:** Typically 3 (degree 0-3) to capture directional albedo variations.
 
 **Edge Cases:**
-*   **Degenerate Gaussians:** Ensure normals are well-defined for flat or thin Gaussians. [G]
-*   **Precision:** Use float32 for BRDF parameters to avoid quantization artifacts. [G]
+*   **Degenerate Normals:** If normal estimation is poor, reflections may appear incorrect. [G] Use normal regularization or fallback to view-dependent colors if confidence is low.
+*   **Shadow Artifacts:** Precomputed visibility may cause aliasing if Gaussians are small relative to shadow boundaries. [G] Consider softening visibility or using higher-resolution shadow maps.
 
 ## Subtopics
 
 ### R3DG
-R3DG is a variant that combines BRDF parameters with ambient occlusion baked per Gaussian [S1, unofficial]. It sets itself apart by explicitly baking ambient occlusion into the Gaussian representation, allowing for more accurate indirect lighting effects without complex ray tracing. Choose this variant when ambient occlusion is critical for visual fidelity. Link: [R3DG](link_to_R3DG_if_exists).
+R3DG is a variant that combines BRDF parameters with ambient occlusion baked per Gaussian [S1, unofficial]. It extends the basic relightable model by incorporating occlusion information directly into the Gaussian attributes, improving the realism of indirect lighting effects without requiring complex global illumination calculations. It is chosen when ambient occlusion is critical for material appearance but full path tracing is too expensive.
 
 ## Operating characteristics
-*   **Time Complexity:** Rendering time is similar to standard 3D Gaussian Splatting, but optimization is slower due to the additional BRDF parameters and visibility updates.
-*   **Memory Complexity:** Higher than standard 3DGS due to the storage of BRDF parameters and visibility data per Gaussian.
-*   **Strengths:** Enables dynamic relighting, physically-based materials, and self-shadowing.
-*   **Limitations:** Increased memory usage, slower optimization, potential artifacts in visibility estimation.
-*   **When to Use:** Scenes requiring dynamic lighting or physically-based materials.
-*   **When Not to Use:** Real-time applications with strict memory constraints or static lighting scenarios.
+*   **Time Complexity:** Rendering is similar to standard 3DGS, $O(N)$ per pixel where $N$ is the number of Gaussians. However, the BRDF evaluation adds constant overhead per Gaussian. Visibility baking is $O(N \cdot L)$ where $L$ is the number of light samples, but is done offline or periodically.
+*   **Memory Complexity:** Higher than standard 3DGS due to additional attributes (roughness, normal, visibility). Each Gaussian requires extra storage for BRDF parameters and visibility.
+*   **Performance:** Enables real-time relighting if the environment map is pre-filtered or low-resolution. High-frequency reflections may require higher bandwidth SH or pre-filtered environment maps, as SH-only is insufficient for sharp reflections [S1, unofficial].
+*   **Strengths:** Physically plausible materials, dynamic lighting, shadow support.
+*   **Limitations:** Requires training under varying lighting or careful visibility baking. May struggle with complex indirect lighting without additional techniques.
 
 ## Background
-Relightable 3D Gaussian was introduced by Gao et al. in ECCV'24 [S1, unofficial]. It builds on the success of 3D Gaussian Splatting by adding material and lighting capabilities, addressing the limitation of standard 3DGS which only supports view-dependent color. It is used in applications requiring physically-based rendering and dynamic relighting.
+Relightable 3D Gaussian was introduced by Gao et al. in ECCV'24 [S1, unofficial]. It builds upon the 3D Gaussian Splatting framework to address the limitation of fixed-color rendering by introducing material properties. It is used in applications requiring dynamic lighting, such as virtual production, AR/VR, and interactive 3D editing.
 
 ## Sources
 [S1] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)

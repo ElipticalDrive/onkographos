@@ -3,37 +3,26 @@
 Also called: Givens rotation for symmetric matrices, Schur2 rotation
 
 ## Overview
-An iterative method to diagonalize a $3 \times 3$ symmetric matrix using a sequence of 2D Givens rotations, implemented via the `Schur2` and `SVD` classes in the DualContouringCSharp repository [S1, unofficial]. It sets itself apart from direct algebraic solvers by using orthogonal transformations to zero out off-diagonal elements, ensuring numerical stability for ill-conditioned matrices, though it is generally slower than closed-form solutions for small fixed dimensions [S1, unofficial].
+An iterative method to diagonalize a $3 \times 3$ symmetric matrix using a sequence of 2D Givens rotations, implemented via the `Schur2` and `SVD` classes in the DualContouringCSharp repository [S1, unofficial]. It computes the eigenvalues and eigenvectors by zeroing off-diagonal elements [S1, unofficial].
 
 ## How it works
 **Inputs and outputs:**
-- Input: A $3 \times 3$ symmetric matrix $A$ (stored as 6 floats: $m_{00}, m_{01}, m_{02}, m_{11}, m_{12}, m_{22}$), tolerance `tol`, and maximum sweeps `max_sweeps`.
-- Outputs: The diagonalized matrix $VTAV$ (eigenvalues on diagonal) and the orthogonal matrix $V$ (eigenvectors as columns).
+- Input: A $3 \times 3$ symmetric matrix $A$ (stored as 6 floats: $m_{00}, m_{01}, m_{02}, m_{11}, m_{12}, m_{22}$), tolerance `tol`, and maximum sweeps `max_sweeps` [S1, unofficial].
+- Outputs: The diagonalized matrix $VTAV$ (eigenvalues on diagonal) and the orthogonal matrix $V$ (eigenvectors as columns) [S1, unofficial].
 
 **Data structures:**
-- `SMat3`: Stores symmetric matrix elements $m_{00}, m_{01}, m_{02}, m_{11}, m_{12}, m_{22}$.
-- `Mat3`: Stores $3 \times 3$ matrix elements $m_{ij}$ for $i,j \in \{0,1,2\}$.
+- `SMat3`: Stores symmetric matrix elements $m_{00}, m_{01}, m_{02}, m_{11}, m_{12}, m_{22}$ [S1, unofficial].
+- `Mat3`: Stores $3 \times 3$ matrix elements $m_{ij}$ for $i,j \in \{0,1,2\}$ [S1, unofficial].
 
 **Parameters:**
 - `tol`: Convergence tolerance. Typical value not specified [S1, unofficial].
 - `max_sweeps`: Maximum number of Jacobi sweeps. Typical value not specified [S1, unofficial].
 
 **Steps:**
-1. Initialize $VTAV$ with $A$ and $V$ as the identity matrix.
-2. Calculate the Frobenius norm of $VTAV$, denoted $fnorm(VTAV)$.
-3. Calculate convergence threshold $\delta = tol \times fnorm(VTAV)$.
-4. Loop for $i$ from 0 to `max_sweeps`:
-   - If the off-diagonal energy $off(VTAV) > \delta$, apply rotations:
-     - `rotate01(VTAV, V)`
-     - `rotate02(VTAV, V)`
-     - `rotate12(VTAV, V)`
-   - Else, break loop.
-
-**Rotation Logic:**
-For each pair $(p, q)$, if $m_{pq} \neq 0$:
-1. Compute Givens coefficients $c, s$ using `calcSymmetricGivensCoefficients`.
-2. Apply rotation to $VTAV$ to zero $m_{pq}$ and update other elements.
-3. Apply rotation to $V$ (post-multiply) to accumulate eigenvectors.
+1. Initialize $VTAV$ with $A$ and $V$ as the identity matrix [S1, unofficial].
+2. Calculate convergence threshold $\delta = \text{tol} \times \text{fnorm}(VTAV)$, where $\text{fnorm}$ is the Frobenius norm $\sqrt{\sum_{i,j} m_{ij}^2}$ [S1, unofficial][G].
+3. Loop for $i$ from 0 to `max_sweeps`: if off-diagonal energy $\text{off}(VTAV) > \delta$, apply `rotate01`, `rotate02`, and `rotate12` to $VTAV$ and $V$ [S1, unofficial]. Else, break loop [S1, unofficial].
+4. For each rotation `rotPQ` (where $PQ \in \{01, 02, 12\}$): if $m_{PQ} = 0$, skip [S1, unofficial]. Else compute Givens coefficients $c, s$ [S1, unofficial]. Update $VTAV$ elements using precomputed $cc=c^2, ss=s^2, mix=2cs m_{PQ}$ [S1, unofficial]. Post-multiply $V$ by the 2D Givens rotation in the $PQ$ plane to accumulate eigenvectors [S1, unofficial].
 
 **Formulas:**
 - **Givens Coefficients** (for elements $a_{pp}, a_{pq}, a_{qq}$):
@@ -42,7 +31,7 @@ For each pair $(p, q)$, if $m_{pq} \neq 0$:
   $$ \tan \theta = \begin{cases} \frac{1}{\tau + stt} & \text{if } \tau \ge 0 \\ \frac{1}{\tau - stt} & \text{if } \tau < 0 \end{cases} $$
   $$ c = \frac{1}{\sqrt{1 + \tan^2 \theta}} $$
   $$ s = \tan \theta \cdot c $$
-  If $a_{pq} = 0$, then $c=1, s=0$.
+  If $a_{pq} = 0$, then $c=1, s=0$ [S1, unofficial].
 
 - **Update for `rot01`** (zeroing $m_{01}$):
   Let $cc = c^2, ss = s^2, mix = 2cs m_{01}$.
@@ -52,6 +41,7 @@ For each pair $(p, q)$, if $m_{pq} \neq 0$:
   $$ m_{11} \leftarrow ss \cdot m_{00} + mix + cc \cdot m_{11} $$
   $$ m_{12} \leftarrow s \cdot m_{02} + c \cdot m_{12} $$
   $$ m_{22} \leftarrow m_{22} $$
+  All right-hand side values use the pre-rotation matrix state [S1, unofficial].
 
 - **Update for `rot02`** (zeroing $m_{02}$):
   Let $cc = c^2, ss = s^2, mix = 2cs m_{02}$.
@@ -61,6 +51,7 @@ For each pair $(p, q)$, if $m_{pq} \neq 0$:
   $$ m_{11} \leftarrow m_{11} $$
   $$ m_{12} \leftarrow s \cdot m_{01} + c \cdot m_{12} $$
   $$ m_{22} \leftarrow ss \cdot m_{00} + mix + cc \cdot m_{22} $$
+  All right-hand side values use the pre-rotation matrix state [S1, unofficial].
 
 - **Update for `rot12`** (zeroing $m_{12}$):
   Let $cc = c^2, ss = s^2, mix = 2cs m_{12}$.
@@ -70,20 +61,20 @@ For each pair $(p, q)$, if $m_{pq} \neq 0$:
   $$ m_{11} \leftarrow cc \cdot m_{11} - mix + ss \cdot m_{22} $$
   $$ m_{12} \leftarrow 0 $$
   $$ m_{22} \leftarrow ss \cdot m_{11} + mix + cc \cdot m_{22} $$
+  All right-hand side values use the pre-rotation matrix state [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def calc_symmetric_givens_coefficients(a_pp, a_pq, a_qq):
     if a_pq == 0:
         return 1.0, 0.0
     tau = (a_qq - a_pp) / (2.0 * a_pq)
     stt = math.sqrt(1.0 + tau * tau)
-    if tau >= 0:
-        tan_theta = 1.0 / (tau + stt)
-    else:
-        tan_theta = 1.0 / (tau - stt)
+    tan_theta = 1.0 / (tau + stt) if tau >= 0 else 1.0 / (tau - stt)
     c = 1.0 / math.sqrt(1.0 + tan_theta * tan_theta)
     s = tan_theta * c
     return c, s
@@ -95,14 +86,11 @@ def rot01(m, v):
     cc = c * c
     ss = s * s
     mix = 2.0 * c * s * m.m01
-    m.m00 = cc * m.m00 - mix + ss * m.m11
-    m.m01 = 0.0
-    m.m02 = c * m.m02 - s * m.m12
-    m.m11 = ss * m.m00 + mix + cc * m.m11
-    m.m12 = s * m.m02 + c * m.m12
-    # m.m22 unchanged
-    # Update V (post-multiply by Givens rotation in plane 0-1)
-    # v_new = v * G(0,1,c,s)
+    new_m00 = cc * m.m00 - mix + ss * m.m11
+    new_m02 = c * m.m02 - s * m.m12
+    new_m11 = ss * m.m00 + mix + cc * m.m11
+    new_m12 = s * m.m02 + c * m.m12
+    m.m00, m.m01, m.m02, m.m11, m.m12, m.m22 = new_m00, 0.0, new_m02, new_m11, new_m12, m.m22
     v.m00, v.m10 = c * v.m00 + s * v.m10, -s * v.m00 + c * v.m10
     v.m01, v.m11 = c * v.m01 + s * v.m11, -s * v.m01 + c * v.m11
     v.m02, v.m12 = c * v.m02 + s * v.m12, -s * v.m02 + c * v.m12
@@ -114,13 +102,11 @@ def rot02(m, v):
     cc = c * c
     ss = s * s
     mix = 2.0 * c * s * m.m02
-    m.m00 = cc * m.m00 - mix + ss * m.m22
-    m.m01 = c * m.m01 - s * m.m12
-    m.m02 = 0.0
-    # m.m11 unchanged
-    m.m12 = s * m.m01 + c * m.m12
-    m.m22 = ss * m.m00 + mix + cc * m.m22
-    # Update V (post-multiply by Givens rotation in plane 0-2)
+    new_m00 = cc * m.m00 - mix + ss * m.m22
+    new_m01 = c * m.m01 - s * m.m12
+    new_m12 = s * m.m01 + c * m.m12
+    new_m22 = ss * m.m00 + mix + cc * m.m22
+    m.m00, m.m01, m.m02, m.m11, m.m12, m.m22 = new_m00, new_m01, 0.0, m.m11, new_m12, new_m22
     v.m00, v.m20 = c * v.m00 + s * v.m20, -s * v.m00 + c * v.m20
     v.m01, v.m21 = c * v.m01 + s * v.m21, -s * v.m01 + c * v.m21
     v.m02, v.m22 = c * v.m02 + s * v.m22, -s * v.m02 + c * v.m22
@@ -132,45 +118,49 @@ def rot12(m, v):
     cc = c * c
     ss = s * s
     mix = 2.0 * c * s * m.m12
-    # m.m00 unchanged
-    m.m01 = c * m.m01 - s * m.m02
-    m.m02 = s * m.m01 + c * m.m02
-    m.m11 = cc * m.m11 - mix + ss * m.m22
-    m.m12 = 0.0
-    m.m22 = ss * m.m11 + mix + cc * m.m22
-    # Update V (post-multiply by Givens rotation in plane 1-2)
+    new_m01 = c * m.m01 - s * m.m02
+    new_m02 = s * m.m01 + c * m.m02
+    new_m11 = cc * m.m11 - mix + ss * m.m22
+    new_m22 = ss * m.m11 + mix + cc * m.m22
+    m.m00, m.m01, m.m02, m.m11, m.m12, m.m22 = m.m00, new_m01, new_m02, new_m11, 0.0, new_m22
     v.m10, v.m20 = c * v.m10 + s * v.m20, -s * v.m10 + c * v.m20
     v.m11, v.m21 = c * v.m11 + s * v.m21, -s * v.m11 + c * v.m21
     v.m12, v.m22 = c * v.m12 + s * v.m22, -s * v.m12 + c * v.m22
 
 def get_symmetric_svd(a, vtav, v, tol, max_sweeps):
-    vtav.set_symmetric(a)
-    v.set_identity()
-    delta = tol * mat_utils.fnorm(vtav)
+    vtav.m00, vtav.m01, vtav.m02, vtav.m11, vtav.m12, vtav.m22 = a.m00, a.m01, a.m02, a.m11, a.m12, a.m22
+    v.m00, v.m01, v.m02, v.m10, v.m11, v.m12, v.m20, v.m21, v.m22 = 1, 0, 0, 0, 1, 0, 0, 0, 1
+    delta = tol * math.sqrt(vtav.m00**2 + vtav.m01**2 + vtav.m02**2 + vtav.m11**2 + vtav.m12**2 + vtav.m22**2)
     for i in range(max_sweeps):
-        if mat_utils.off(vtav) <= delta:
+        off_energy = 2.0 * (vtav.m01**2 + vtav.m02**2 + vtav.m12**2)
+        if off_energy <= delta:
             break
         rot01(vtav, v)
         rot02(vtav, v)
         rot12(vtav, v)
 ```
 
+**Edge cases and pitfalls:**
+- If $a_{pq} = 0$, the rotation is skipped and coefficients default to $c=1, s=0$ [S1, unofficial].
+- The loop condition checks off-diagonal energy against $\delta$; if the matrix is already diagonal, the loop exits immediately [S1, unofficial].
+- Floating-point precision may cause $m_{pq}$ to not reach exactly zero; the tolerance $\delta$ handles this convergence criterion [S1, unofficial].
+
 ## Subtopics
 
 ### [Jacobi Eigendecomposition for 3x3 Symmetric Matrices](6258-jacobi-eigendecomposition-for-3x3-symmetric-matrices.md)
-Computes the eigenvalues and eigenvectors of a 3x3 symmetric matrix using the Jacobi iterative diagonalization method. It sets itself apart from direct algebraic solvers by using a sequence of orthogonal Givens rotations to zero out off-diagonal elements, ensuring numerical stability for ill-conditioned matrices, though it is generally slower than closed-form solutions for small fixed dimensions.
+Computes the eigenvalues and eigenvectors of a 3x3 symmetric matrix using the Jacobi iterative diagonalization method. It sets itself apart from direct algebraic solvers by using a sequence of orthogonal Givens rotations to zero out off-diagonal elements. It is generally slower than closed-form solutions for small fixed dimensions.
 
 ## Operating characteristics
-- **Time Complexity:** $O(n^3)$ per sweep for $3 \times 3$ matrix updates, with $n$ sweeps until convergence. Typically converges in few sweeps for well-conditioned matrices.
-- **Memory Complexity:** $O(1)$ for $3 \times 3$ matrices, storing only the symmetric matrix and the eigenvector matrix.
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
 - **Measured Performance:** Not given in the sources.
-- **Strengths:** Numerically stable for ill-conditioned matrices due to orthogonal transformations.
-- **Limitations:** Slower than closed-form solutions for small fixed dimensions like $3 \times 3$.
-- **When to use:** When numerical stability is critical and the matrix size is small.
-- **When not to use:** When performance is critical and the matrix is well-conditioned.
+- **Strengths:** Not given in the sources.
+- **Limitations:** Not given in the sources.
+- **When to use:** Not given in the sources.
+- **When not to use:** Not given in the sources.
 
 ## Background
-Originated in the DualContouringCSharp repository by tuckbone, implemented via `Schur2` and `SVD` classes [S1, unofficial]. It is used in dual contouring algorithms for implicit surface reconstruction, where symmetric matrices arise from quadratic error functions.
+Originated in the DualContouringCSharp repository by tuckbone, implemented via `Schur2` and `SVD` classes [S1, unofficial]. It is used in dual contouring algorithms for implicit surface reconstruction, where symmetric matrices arise from quadratic error functions [S1, unofficial].
 
 ## Sources
 [S1] tuckbone/DualContouringCSharp, https://github.com/tuckbone/DualContouringCSharp, fetched 2026-10-26 (unofficial)

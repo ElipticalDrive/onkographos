@@ -3,18 +3,18 @@
 Also called: Adaptive Sampling Rate, Adaptive Sampling Strategy, Adaptive Sampling with Bricking, Adaptive Volume Sampling, Adaptive density, Opacity-based Adaptation
 
 ## Overview
-Adaptive sampling is a volume rendering optimization that varies the sampling density along rays to reduce computational cost while preserving visual quality, by sampling non-homogeneous or high-detail regions more densely than homogeneous or empty regions [S1, S2, S3, S4, unofficial][S6]. Unlike fixed-step methods, it adapts to local data characteristics such as opacity, gradient magnitude, or variance [S6, S8]. It is distinguished from its siblings by its primary focus on spatial adaptation along the ray (step size) rather than temporal adaptation (frame budget) [S5, unofficial] or hierarchical preintegration termination [S11].
+Adaptive sampling is a volume rendering optimization that varies the sampling density along rays to reduce computational cost while preserving visual quality [S1, unofficial][S6]. Unlike uniform sampling, which treats all regions equally, adaptive sampling concentrates samples in high-detail or high-opacity areas and skips empty space [S4, unofficial][S10, unofficial]. It sets itself apart from its parent method, [Ray-Centric Adaptive Step and Termination](5938-ray-centric-adaptive-step-and-termination.md), by explicitly addressing GPU hardware constraints (warp divergence and texture cache coherence) through quantization and block-level metrics, rather than relying solely on continuous per-pixel step adjustments [S7][S8].
 
 ## How it works
-The method modifies the standard ray marching loop defined in [Ray-Centric Adaptive Step and Termination](5938-ray-centric-adaptive-step-and-termination.md) by dynamically determining the step size $\Delta t$ based on a local metric $m(\mathbf{x})$.
+Adaptive sampling modifies the standard ray marching loop by dynamically determining the step size $\Delta t$ based on a local metric $m(\mathbf{x})$ or accumulated state.
 
 ### Inputs and Outputs
-*   **Inputs:** Scalar field $f(\mathbf{x})$, ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, transfer function $T(f)$, isovalue $\rho$ (for isosurface rendering), and parameters controlling the adaptation (e.g., thresholds, multipliers).
-*   **Outputs:** Final pixel color $C$ and accumulated opacity $\alpha$.
+*   **Inputs:** Scalar field $f(\mathbf{x})$, ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, transfer function $T(f)$, isovalue $\rho$ (for isosurface rendering), and parameters controlling adaptation (thresholds, multipliers, discrete rates) [S6][S7].
+*   **Outputs:** Final pixel color $C$ and accumulated opacity $\alpha$ [S6].
 
 ### Data Structures
 *   **Metric Storage:** For per-macrocell or per-block adaptation, a scalar metric $m$ is computed for each region [S8].
-*   **State Variables:** Accumulated opacity $\alpha$, accumulated color $C$, current position $t$, and step size $\Delta t$ [S6][S9, unofficial].
+*   **State Variables:** Accumulated opacity $\alpha$, accumulated color $C$, current position $t$, step size $\Delta t$, and previous accumulated opacity $\alpha_{prev}$ for null-region detection [S6][S10, unofficial].
 
 ### Algorithm Steps
 
@@ -148,33 +148,43 @@ def quantize_to_discrete_rate(step, rates):
 ## Subtopics
 
 ### [Adaptive Sampling (Sparse Grid)](1656-adaptive-sampling-sparse-grid.md)
-Exploits projection coherence by casting a sparse grid of rays and adaptively increasing density in high-complexity regions. Suitable for scan-conversion methods.
+Adaptive Sampling (Sparse Grid) is a rendering optimization that exploits coherence in projections—often introduced by sensing device blurring—to reduce computational overhead by casting a sparse grid of rays (less than one per pixel) and adaptively increasing ray density in regions of high image complexity. It differs from uniform sampling by prioritizing high-frequency details and from pure brute-force methods by achieving savings of more than two orders of magnitude for many datasets. It is particularly well-suited for scan-conversion methods where polygons are filtered prior to ray tracing.
 
 ### [Adaptive Sampling with Relative Standard Error](4545-adaptive-sampling-with-relative-standard-error.md)
-Tracks per-pixel luminance variance to estimate error, stopping converged pixels.
+An adaptive sampling strategy that tracks per-pixel luminance squares to estimate relative standard error, stopping converged pixels and skipping noisy neighborhoods.
 
 ### Adaptive Sampling for Silhouettes
-Uses two discrete rates (base $r_0$ and max $r_1 = n r_0$) to improve intersection detection near silhouettes without diverging pipelines [S7]. Intersection is detected when sample value $f < \rho$. Rate increases from $r_0$ to $r_1$ when $|f - \rho| < \delta$ [S7]. Typical $n=8$ [S7].
+A sampling strategy using two discrete rates (base $r_0$ and max $r_1$) to improve intersection detection near silhouettes without diverging parallel execution pipelines [S7]. Intersection is detected when sample value $f < \text{isovalue } \rho$ (assuming front-to-back and isosurface defined by $f < \rho$). Exact intersection lies between samples. Missed intersections are possible if the segment crosses the isosurface twice. Guaranteed intersections require bounded gradient length $L$: $h = |f - \rho|/L$ [S7]. The base sampling rate $r_0$ is specified by the user (1.0 corresponds to a single voxel). The max sampling rate is $r_1 = n r_0$ (typical $n=8$) [S7]. The rate increases from $r_0$ to $r_1$ when $|sample\_value - \text{isovalue}| < \delta$ [S7]. For distance fields, $\delta$ is constant; for CT scans, it depends on data [S7]. Completely adaptive sampling causes neighboring pixels in parallel pipelines to diverge, under-utilizing the texture cache; the solution is to use only two discrete rates [S7].
 
 ### Adaptive Sampling with Opacity Correction
-Guarantees sampling frequency adapts to the finest level cell size in AMR data while keeping sample counts tractable, combined with opacity correction [S11].
+An adaptive sampling approach that guarantees the sampling frequency can adapt to the finest level cell size while keeping total sample counts tractable, combined with opacity correction [S11]. Unlike OSPRay's existing adaptive sampling code which is not aware of the underlying AMR hierarchy and may severely under- or over-sample, this method is tailored for AMR data [S11].
 
 ### Adaptive Sampling in Volume Rendering
-Enumerates non-empty leaves in front-to-back order and chooses step size matching local voxel density, adapting to brick resolution [S12].
+A technique where the fragment shader enumerates non-empty leaves in front-to-back order and chooses a step size matching local voxel density. It adapts sampling density to brick resolution [S12]. For isosurface rendering, it looks for intervals that bracket the selected isovalue. For semitransparent direct volume rendering, it implements a Phong illumination model with boundary enhancement and view-dependent transparency, stepping by a discrete number of intervals directly associated to octree levels [S12]. The transfer function is a compact precomputed 2D function using the octree level for the second dimension to adjust opacity and color weighting [S12].
 
 ### Adaptive Slicing with Slant Limiting
-Calculates slant $dh = k_{max} - k_{min}$ and limits slant to $k_M = 2h$ to prevent infinity at grazing view angles [S13].
+Calculates slant $dh = k_{max} - k_{min}$. The sliced volume becomes a prism of height $(h+dh)$ in the $-z$ direction [S13]. The parameters are defined as:
+$$ k_i = -\frac{\overline{GP_i} \cdot \overline{V}}{\overline{z} \cdot \overline{V}} $$
+$$ k_{min} = \min(k_i) \text{ and } k_{max} = \max(k_i) $$
+$$ P^0_i = P_i + (k_i - k_{max})\vec{-z} $$
+$$ P^j_i = P^0_i + \frac{j}{n-1}(h+dh)\vec{-z}, \quad j = 0..n-1 $$
+$$ d'_h = \min(dh, k_M) $$
+$$ P^j_i = P_i + \frac{d'_h}{dh}(k_i - k_{max}) + \frac{j}{n-1}(h+d'_h)\vec{-z} $$
+$$ \delta = \frac{1}{n-1}(h+d'_h)\vec{-z} \cdot \vec{V} $$
+$$ n = 1 + \frac{L}{2^l} \frac{(h+d'_h)\vec{-z} \cdot \vec{V}}{1} $$
+The maximum allowed slant $k_M$ prevents infinity at grazing view angles, with value $k_M = 2h$ [S13]. $L$ is the texture resolution (side length of $L^3$ volume) and $l$ is the MIP-map level [S13]. Grazing view angles cause slant to go to infinity, handled by limiting slant to $k_M$ [S13]. Transparent fragments from empty top/bottom regions are rasterized even if discarded by alpha test, handled by using clip registers feature (future) or accepting rasterization cost [S13]. Volume rendering applications often choose higher sampling rates than voxel size for quality; this method chooses rate close to voxel size to improve rendering time [S13].
 
 ## Operating characteristics
-*   **Time Complexity:** Reduces average samples per ray, leading to speedups of 2.6–2.8x over full density sampling [S3, unofficial]. Performance varies with dataset; e.g., 24 fps at sampling distance 1.0 vs 66 fps at 5.0 [S3, unofficial].
-*   **Memory Complexity:** Minimal overhead for metric calculation; may require storing variance or gradient data [S8].
-*   **Strengths:** Significant performance gains in datasets with large empty or homogeneous regions [S4, unofficial]. Preserves quality in high-detail areas [S1, unofficial].
-*   **Limitations:** GPU coherence issues if not quantized [S7]. Potential for missed intersections if step size is too large [S7].
-*   **When to Use:** Datasets with varying density/opacity, such as medical scans or atmospheric clouds [S6][S9, unofficial].
-*   **When Not to Use:** Uniform, high-density datasets where overhead of metric calculation outweighs savings.
+*   **Time Complexity:** Reduces the number of samples per ray in empty or homogeneous regions, leading to speed-ups of 2.6–2.8x compared to full density sampling [S3, unofficial]. Performance metrics show sampling distance 1.0 yields 24 fps, while 5.0 yields 66 fps [S3, unofficial].
+*   **Memory Complexity:** Requires storage for metrics (e.g., variance per macrocell) or precomputed gradient fields [S8].
+*   **Measured Performance:** On the Asian Dragon dataset (512x256x256), with brick size 32 and adaptive sampling ($r_1=8r_0$), the frame rate is 19.2 fps at sampling rate 0.25, 13.8 fps at 0.5, 10.2 fps at 1, and 6.9 fps at 2 [S7]. Adaptive sampling with bricking reduces the performance overhead of bricking, achieving 80-85% of the performance of rendering without bricking and without adaptive sampling [S7].
+*   **Strengths:** Significant speed-up in datasets with large empty spaces or homogeneous regions [S4, unofficial]. Preserves visual quality by focusing samples on high-detail areas [S1, unofficial].
+*   **Limitations:** Warp divergence if not quantized [S7]. Texture cache thrashing if sampling positions diverge [S7]. Potential for missed intersections in isosurface rendering if steps are too large [S7].
+*   **When to Use:** Real-time rendering of large volumetric datasets with significant empty space or varying detail levels [S4, unofficial].
+*   **When Not to Use:** When strict guaranteed intersections are required without additional refinement steps and the gradient is unbounded [S7].
 
 ## Background
-Adaptive sampling originated as a method to improve quality over uniform sampling by denser sampling of non-homogeneous regions [S1, unofficial]. It has been widely adopted in GPU-based volume raycasting to handle advanced illumination and large datasets [S3, unofficial]. Variants include opacity-based [S6], gradient-driven [S6], and variance-based [S8] approaches. It is often combined with bricking to reduce texture indirection overhead [S7].
+Adaptive sampling originated as a technique to improve rendering quality over uniform sampling by sampling non-homogeneous regions more densely [S1, unofficial]. It was further developed to reduce computational cost by casting rays in two steps: an initial sparse cast followed by additional rays for blocks with high variance [S2, unofficial]. The technique varies sampling density across volume levels to improve performance while maintaining visual quality [S3, unofficial]. It subdivides volumetric datasets into regions of varying detail levels to adjust sampling rates, reducing computation in low-detail areas and increasing it in high-detail areas [S4, unofficial].
 
 ## Sources
 [S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)

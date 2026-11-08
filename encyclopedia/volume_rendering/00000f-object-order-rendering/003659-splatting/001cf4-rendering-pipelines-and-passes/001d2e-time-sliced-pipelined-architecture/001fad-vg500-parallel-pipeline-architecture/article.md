@@ -1,0 +1,127 @@
+# Vg500 Parallel Pipeline Architecture
+
+Also called: Cube-4, EM-Cube, VolumePro / vg500 ASIC
+
+## Overview
+The Vg500 Parallel Pipeline Architecture is a highly parallel, template-based ray-casting hardware accelerator implemented as the vg500 ASIC for the VolumePro system [S1]. It solves the real-time rendering bottleneck by distributing the processing of adjacent voxel samples across four identical pipelines operating in parallel [S2, unofficial]. Unlike general-purpose DSP-based solutions like VIRIM, which require multiple chips and lower frame rates for similar volumes, the Vg500 integrates the entire rendering pipeline into a single ASIC, enabling real-time frame rates for large datasets [S1]. It builds on the Time-Sliced Pipelined Architecture by utilizing fixed-function hardware units for interpolation, shading, and compositing [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** 3D volume data stored in off-chip Voxel Memory (SDRAM); camera parameters and transfer function definitions.
+*   **Output:** Final image rendered on an off-chip Pixel Memory, which is subsequently warped to the screen by a host graphics card [S1].
+
+**Data Structures:**
+*   **Voxel Memory:** Organized into 16-bit wide SDRAM modules. Data is stored in $2 \times 2 \times 2$ cells called "miniblocks" [S1]. Miniblocks are linearly skewed to ensure cache locality [S1].
+*   **Miniblock Addressing:** A miniblock at position $[x, y, z]$ is assigned to memory module $k$ using the formula:
+    $$ k = (\lfloor x/2 \rfloor + \lfloor y/2 \rfloor + \lfloor z/2 \rfloor) \mod 4 $$
+    [S1]
+*   **Pipeline State:** Each of the 4 pipelines (0-3) maintains local state for the current ray segment, including accumulated color/opacity and current sample position [S1].
+
+**Algorithm Steps:**
+1.  **Ray Casting & Base Plane:** Rays are cast from each pixel on a base plane (co-planar to the volume face most parallel to the image plane) into the volume [S1].
+2.  **Voxel Fetch:** The Voxel Memory supplies data to all four pipelines. Each pipeline processes adjacent voxel values in the x-direction [S2, unofficial].
+3.  **Interpolation:** Sample values along the ray are calculated using tri-linear interpolation of the fetched voxel data [S1].
+4.  **Gradient Estimation:** A 3D gradient is computed using central differences between the tri-linear samples [S1].
+5.  **Shading:** The gradient is used in the shader stage to compute sample intensity according to the Phong illumination model [S1].
+6.  **Classification:** Lookup tables in the classification stage assign color and opacity to each sample point based on the intensity and transfer function [S1].
+7.  **Compositing:** Illuminated samples are accumulated into base plane pixels using front-to-back compositing [S1].
+8.  **Pipeline Communication:** Each pipeline is connected to its neighbor by shift registers in each major unit, providing values to neighbors in the same cycle [S2, unofficial]. The rightmost pipeline's shift registers recirculate values needed in the next cycle and send them to the leftmost pipeline (wrap-around) [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialization
+# 4 pipelines run in parallel.
+# Each pipeline i (0..3) handles a specific memory module or spatial slice.
+# Voxel Memory is accessed via 16-bit SDRAM interfaces.
+
+def process_frame():
+    for each ray in base_plane:
+        # Front-to-back compositing state
+        accumulated_color = (0, 0, 0, 0)
+        accumulated_opacity = 0.0
+        
+        # Traverse ray through volume
+        while ray_intersects_volume():
+            # 1. Fetch Voxel Data
+            # Pipelines work on adjacent voxel values in x-direction.
+            # Shift registers provide neighbor values.
+            voxel_data = fetch_voxel_from_memory(ray.current_position)
+            
+            # 2. Interpolation
+            # Tri-linear interpolation of voxel data
+            sample_value = tri_linear_interpolate(voxel_data)
+            
+            # 3. Gradient Estimation
+            # Central differences between tri-linear samples
+            gradient = compute_gradient(sample_value, neighbor_samples)
+            
+            # 4. Shading
+            # Phong illumination model
+            intensity = phong_shading(gradient, light_direction, view_direction)
+            
+            # 5. Classification
+            # Lookup tables assign color and opacity
+            color, opacity = lookup_classification(intensity)
+            
+            # 6. Compositing
+            # Front-to-back accumulation
+            alpha = opacity * (1.0 - accumulated_opacity)
+            accumulated_color += color * alpha
+            accumulated_opacity += alpha
+            
+            # Advance ray
+            ray.advance()
+            
+            # Pipeline communication: shift registers pass data to neighbors
+            # Rightmost pipeline wraps to leftmost
+            pass_shift_registers()
+            
+        # Write result to Pixel Memory
+        write_to_pixel_memory(ray.pixel_id, accumulated_color, accumulated_opacity)
+
+def fetch_voxel_from_memory(pos):
+    # Miniblock assignment
+    x, y, z = pos
+    k = (floor(x/2) + floor(y/2) + floor(z/2)) % 4
+    # Fetch from SDRAM module k
+    return read_sdramp(k, pos)
+
+def compute_gradient(sample_value, neighbors):
+    # Central differences
+    return (neighbors.right - neighbors.left, 
+            neighbors.top - neighbors.bottom, 
+            neighbors.front - neighbors.back)
+```
+
+**Parameters:**
+*   **Clock Speed:** 133 MHz [S1][S2, unofficial].
+*   **Memory Bandwidth:** 533 million 16-bit voxels per second ($4 \times 133 \times 10^6$) [S1].
+*   **Volume Memory Size:** 32, 64, or 128 MBytes of SDRAM [S1].
+*   **Performance:** Over 500 million tri-linear samples per second, sufficient to render $256^3$ volumes at 30 frames per second [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Linear Skewing:** Miniblocks must be linearly skewed to guarantee that rendering pipelines always have access to four adjacent miniblocks in any of the three slice orientations [S1]. Failure to skew results in cache misses or incorrect gradient computation.
+*   **Wrap-around:** The rightmost pipeline's shift registers must correctly recirculate values to the leftmost pipeline to maintain continuity across the x-direction boundary [S2, unofficial].
+
+## Subtopics
+
+### [Pixel-Planes 5 Volume Rendering Architecture](9107-pixel-planes-5-volume-rendering-architecture.md)
+A hardware architecture for real-time volume rendering using Pixel-Planes 5, consisting of graphics processors and pixel processors, where pixel processors store voxel function values and gradients, and graphics processors handle ray tracing and compositing.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the volume, as each voxel is read exactly once per frame [S1].
+*   **Memory Complexity:** $O(V)$ where $V$ is the volume size, stored in off-chip SDRAM (32-128 MB) [S1]. On-chip SRAM (2 Mbits) is used for buffering and control [S2, unofficial].
+*   **Performance:** Renders $256^3$ volumes at 30 fps [S1]. This is significantly faster than VIRIM, which achieves 2.5 fps for similar sizes using 16 DSPs [S1].
+*   **Strengths:** Real-time performance, single-ASIC implementation (low physical size), high memory bandwidth utilization via burst mode [S1].
+*   **Limitations:** Does not allow arbitrary intermixing of volumes and polygons [S1]. Fixed-function hardware limits flexibility compared to software-based ray casting [S1].
+*   **When to use:** Real-time volume visualization on PC-class hardware (Windows NT) [S1].
+*   **When not to use:** When dynamic polygon-volume interaction is required or when arbitrary transfer functions cannot be approximated by lookup tables [S1].
+
+## Background
+The Vg500 architecture is based on the Cube-4 technology developed by Mitsubishi Electric, which was licensed and evolved into the Enhanced Memory Cube-4 (EM-Cube) architecture [S1]. The VolumePro system, a commercial version of EM-Cube, was developed by Mitsubishi Electric [S1]. The vg500 ASIC contains approximately 3.2 million random logic transistors and 2 Mbits of on-chip SRAM, fabricated in 0.35 $\mu$m technology [S2, unofficial]. It was designed to provide real-time volume rendering capabilities for PC-class computers, targeting applications in medical imaging and scientific visualization [S1]. The architecture was presented in the late 1990s, with the VolumePro system being an improved commercial version of EM-Cube [S1].
+
+## Sources
+[S1] Architectures for real-time volume rendering, https://doi.org/10.1016/s0167-739x(98)00051-x, fetched 2026-11-01
+[S2] The VolumePro Real-Time Ray-Casting System, https://www.merl.com/publications/docs/TR99-19.pdf, fetched 2026-10-26 (unofficial)

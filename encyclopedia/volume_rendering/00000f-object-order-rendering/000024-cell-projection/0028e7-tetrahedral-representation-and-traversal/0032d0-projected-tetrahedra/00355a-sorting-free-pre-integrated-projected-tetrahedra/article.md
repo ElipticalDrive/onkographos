@@ -1,0 +1,172 @@
+# Sorting-free Pre-integrated Projected Tetrahedra
+
+Also called: Pre-integrated Projected Tetrahedra, Sorting-free approach that controls the fragment rendering by using the opacity value, Sorting-free technique for volume rendering of an irregular volume dataset
+
+## Overview
+Sorting-free Pre-integrated Projected Tetrahedra (PBVR) is a sorting-free volume rendering technique for irregular volume datasets that employs projected tetrahedra with pre-integration [S1]. It solves the problem of low image quality in particle-based methods (visible footprints) and the scalability/visibility-sorting requirements of conventional methods by treating volume rendering as a stochastic process where sampling points occur along a viewing ray with probability equal to opacity [S1]. Unlike conventional Projected Tetrahedra (PT), it does not require visibility sorting of tetrahedral cells from back to front [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** An irregular volume dataset represented as a set of tetrahedral cells. Each cell is defined by four vertices $\{V_0, V_1, V_2, V_3\}$ and associated scalar values (density $\rho$) [S1][S2, unofficial].
+*   **Output:** A rendered 2D image where pixel brightness is calculated via stochastic accumulation without explicit depth sorting [S1].
+
+**Data Structures:**
+*   **Tetrahedral Cell:** Defined by four vertices and scalar attributes. The specific bit-packing or memory layout is Not given in the sources.
+*   **Ray Segment:** A subdivision of the viewing ray where particle luminosity ($c_k$) and density ($\rho_k$) are treated as constants [S1].
+
+**Core Optical Model:**
+The method uses the density emitter model, where the 3D scalar field is characterized as a varying density emitter with a single level of scattering [S1]. The opacity is derived from the number of particles in a unit volume, assuming the number of particles follows a Poisson distribution [S1].
+
+**Numbered Steps:**
+1.  **Subdivision:** Subdivide the viewing ray into segments where particle luminosity ($c_k$) and density ($\rho_k$) are constant [S1].
+2.  **Opacity Calculation:** Calculate the opacity for each segment based on the Poisson distribution assumption. The opacity $\tau$ is defined as:
+    $$ \tau = 1 - e^{-\rho \times \text{area} \times \Delta t} $$
+    where $\Delta t$ is the ray-segment length, $\rho$ is the number of particles in a unit volume, and $\pi r^2 \rho \Delta t$ expresses the number of particles in the ray segment [S1].
+3.  **Stochastic Rendering:** Use the opacity value to control fragment rendering. This is achieved by repeating the rendering calculation multiple times to achieve semi-transparency without alpha-blending [S1].
+    *   **Step 1:** Fragments are rendered with a probability equal to the opacity value at each ray-segment along a viewing ray [S1].
+    *   **Step 2:** The luminosity is accumulated [S1].
+    *   **Step 3:** Steps 1 and 2 are repeated $N$ times (the repetition level), and the resulting brightness values are accumulated to obtain the average [S1].
+
+**Formulas:**
+*   **Brightness Calculation:** The brightness $B_k$ for a ray segment is calculated as:
+    $$ B_k = c_k \times (1 - e^{-\rho \times \text{area} \times \text{length}}) $$
+    where $c_k$ is particle luminosity and $\rho$ is particle density [S1].
+*   **Probability of Event:** The possibility that the $k$-th luminosity is equal to the brightness value is defined by:
+    $$ P(\text{event}_k) = \left( \prod_{i=1}^{k-1} (1 - \tau_i) \right) \times \tau_k $$
+    This represents an event where there is no particle from the first to the $(k-1)$-th ray-segments and more than one particle in the $k$-th ray segment [S1].
+
+**Parameters:**
+*   **Repetition Level ($N$):** The number of times the rendering calculation is repeated. Higher values improve image quality but increase computation time [S1]. Typical values tested include 1, 25, 100, and 144 [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The computational complexity of the basic brightness calculation is $O(n^2)$ if intermediate brightness values $B_k$ are considered [S1].
+*   **Boundaries:** Concave sub-volumes fail visibility-order compositing strategies, which is why sorting-free methods are preferred [S1].
+*   **Drastic Density Changes:** PBVR generates an insufficient number of particles when the density function changes drastically, leading to lower quality compared to Sorting-free Projected Tetrahedra (SPT) in such cases [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_stochastic_tetrahedra(tetrahedra, camera, resolution, repetition_level):
+    """
+    Renders an irregular volume using the sorting-free PBVR technique.
+    
+    Args:
+        tetrahedra: List of tetrahedral cells, each with vertices and density/radius attributes.
+        camera: Camera object with projection and ray generation capabilities.
+        resolution: Tuple (width, height) of the output image.
+        repetition_level: Integer N, the number of stochastic repetitions.
+        
+    Returns:
+        Image buffer with accumulated brightness.
+    """
+    # Initialize image buffer to zero
+    image = zeros(resolution)
+    
+    for rep in range(repetition_level):
+        # Create a temporary buffer for this repetition
+        current_frame = zeros(resolution)
+        
+        # Process each tetrahedron
+        for tet in tetrahedra:
+            # Project tetrahedron to screen space to get bounding box
+            # This step is implied by "cell-by-cell" object-order rendering [S1]
+            screen_bbox = project_to_screen(tet.vertices)
+            
+            # Iterate over pixels in the bounding box
+            for y, x in screen_bbox:
+                # Generate viewing ray for this pixel
+                ray = camera.get_ray(x, y)
+                
+                # Intersect ray with tetrahedron to find segments
+                # The ray is subdivided into segments where density is constant [S1]
+                segments = intersect_ray_with_tet(ray, tet)
+                
+                if not segments:
+                    continue
+                
+                # Calculate opacity for the first segment that intersects
+                # In a single pass of stochastic rendering, we decide if this 
+                # tetrahedron contributes to this pixel based on opacity [S1]
+                
+                # Simplified: Assume we pick the dominant segment or integrate
+                # The core logic is: render fragment with probability = opacity [S1]
+                
+                # Calculate opacity tau for the segment
+                # tau = 1 - exp(-rho * area * length) [S1]
+                # Note: 'area' and 'length' depend on the specific segment geometry
+                tau = calculate_opacity(segments[0])
+                
+                # Stochastic decision: compare random number with opacity
+                # If random > opacity, discard fragment; otherwise, render [S1]
+                random_val = random_float(0.0, 1.0)
+                
+                if random_val <= tau:
+                    # Fragment is rendered
+                    # Calculate brightness for this segment
+                    # B_k = c_k * (1 - exp(-rho * area * length)) [S1]
+                    brightness = calculate_brightness(segments[0])
+                    
+                    # Accumulate brightness to the image
+                    # Since this is a stochastic accumulation, we add the brightness
+                    # directly to the buffer. The average over N repetitions 
+                    # approximates the expected brightness [S1].
+                    current_frame[y, x] += brightness
+                    
+        # Add the current frame to the total image
+        image += current_frame
+        
+    # Average the result over the repetition level
+    image = image / repetition_level
+    
+    return image
+
+def calculate_opacity(segment):
+    """
+    Calculates opacity based on the density emitter model.
+    tau = 1 - e^(-rho * area * length)
+    """
+    rho = segment.density
+    area = segment.cross_section_area # Implied by pi*r^2 in source [S1]
+    length = segment.length
+    return 1.0 - math.exp(-rho * area * length)
+
+def calculate_brightness(segment):
+    """
+    Calculates brightness for a ray segment.
+    B_k = c_k * (1 - e^(-rho * area * length))
+    """
+    c_k = segment.luminosity
+    tau = calculate_opacity(segment)
+    return c_k * tau
+```
+
+## Subtopics
+
+### Tetrahedral Volume Rendering
+General rendering using tetrahedral primitives. PBVR is a specific object-order variant that avoids sorting [S1].
+
+### Projected Tetrahedra
+Renders tetrahedra as 2D polygons. PBVR builds on this but removes the need for back-to-front sorting [S1].
+
+### Parallelized Accurate Sorting for Projected Tetrahedra
+Uses sorting to optimize rendering. PBVR avoids sorting entirely, trading potential speed for scalability and simplicity in large irregular volumes [S1].
+
+### Sorting-free Projected Tetrahedra (SPT)
+A related sorting-free technique. PBVR differs by using pre-integrated projected tetrahedra and a stochastic particle model, whereas SPT may handle precipitous transfer functions better [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The computational complexity of the basic brightness calculation is $O(n^2)$ if intermediate brightness values are considered [S1]. The overall performance is influenced by the number of pixels and the repetition level [S1].
+*   **Memory Complexity:** PBVR is memory-consuming because the increase in image resolution affects the number of particles [S1]. It requires less memory than Hardware-Assisted Visibility Sorting (HAVS), which requires memory space for sorting cell faces about twice that for tetrahedral cells [S1].
+*   **Measured Performance:** On an NVIDIA GeForce 9600GT, PBVR can render ~10 million particles at 25.7 milliseconds per repetition with 1024x1024 resolution [S1]. On an Intel Core 2 Quad 2.83 GHz with Nvidia GeForce GTX 280, it handles large-scale CSM and CFD simulation results [S1].
+*   **Scaling:** PBVR performance is greatly influenced by the number of pixels. It is suitable for large-scale irregular volumes distributed across multiple computing nodes, as it does not require the entire dataset to be stored in a single node for visibility calculation [S1].
+*   **Strengths:** No visibility sorting required; avoids artifacts from insufficient k-buffer size (unlike HAVS); avoids visible footprints of particles (unlike PBVR particle-based methods); scalable to large irregular volumes [S1].
+*   **Limitations:** Image quality depends on the repetition level (noise at low N); generates insufficient particles when density changes drastically (worse than SPT for precipitous functions); memory consumption increases with resolution [S1].
+*   **When to Use:** Large-scale irregular volume datasets where visibility sorting is impractical or memory-intensive; when avoiding particle footprints is critical [S1].
+*   **When Not to Use:** When the density function changes drastically and high fidelity to precipitous transfer functions is required (use SPT instead); when memory is extremely constrained and resolution is high [S1].
+
+## Background
+Sorting-free Pre-integrated Projected Tetrahedra was introduced to address the difficulties of rendering large-scale irregular volume datasets. Conventional techniques require visibility sorting, which is difficult for large-scale irregular volumes distributed across multiple computing nodes [S1]. The method was developed to solve the low image quality of particle-based methods (visible footprints) and the scalability issues of sorting-based methods [S1]. It applies the concept of volume rendering as a stochastic process to object-order rendering techniques like cell-by-cell rendering [S1].
+
+## Sources
+[S1] Sorting-free pre-integrated projected tetrahedra, https://doi.org/10.1145/1838544.1838546, fetched 2026-11-01

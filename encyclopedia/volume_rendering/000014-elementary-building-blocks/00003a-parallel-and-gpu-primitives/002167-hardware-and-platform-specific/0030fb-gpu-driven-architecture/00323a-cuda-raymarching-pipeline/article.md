@@ -1,0 +1,154 @@
+# CUDA Raymarching Pipeline
+
+Also called: Full GPU-Based FVR Pipeline
+
+## Overview
+The CUDA Raymarching Pipeline is a rendering architecture where the majority of processing, including computational kernels and rendering contexts, resides on the GPU device [S1][S2, unofficial]. This design eliminates data transfer and API call bottlenecks between the host CPU and the device GPU, which are common in traditional raster engines where the host controls data assembly via draw calls [S1]. It builds on [GPU-Driven Architecture](6408-gpu-driven-architecture.md) by fully implementing the residency octree and renderer on the GPU, while the CPU handles only high-level orchestration such as loading data and switching contexts [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** Volume dataset (loaded on CPU), light and object data (stored in vectors on host CPU).
+- **Output:** Final reconstructed image displayed on screen.
+
+**Data Structures:**
+- **Host Memory:** Vectors for light and object data; volume dataset before upload.
+- **Device Global Memory:** Volume dataset, spectral volume (complex array), intermediate images.
+- **Device Texture Memory:** 3D texture for spectral volume, 2D texture for projection-slice and final image.
+- **Pixel Buffer Object (PBO):** Shared buffer between CUDA and OpenGL contexts to avoid CPU round-trips.
+- **Frame Buffer Object (FBO):** Attached to a 2D texture for off-screen rendering.
+
+**Numbered Steps:**
+1.  **Host Initialization:** Store light and object data in vectors on the host CPU [S1]. Load the volume dataset on the CPU [S2, unofficial].
+2.  **Data Upload:** Copy light and object data from host memory to device memory once per frame [S1]. Copy the volume directly to GPU global memory using `cudaMemcpy` [S2, unofficial]. Upload textures into VRAM [S1].
+3.  **Context Setup:** Create and activate a CUDA context on the GPU [S2, unofficial]. Expose uploaded textures using a texture object descriptor [S1].
+4.  **Spatial Centering:** Execute the `FFT_SHIFT_3D_REAL` kernel to center the 3D spatial volume [S2, unofficial].
+5.  **3D FFT:** Invoke `CUDA_FFT_3D` to obtain the 3D frequency spectrum of the input spatial volume [S2, unofficial].
+6.  **Spectral Centering:** Invoke `FFT_SHIFT_3D_COMPLEX` to center the spectral volume at the origin of k-space [S2, unofficial].
+7.  **Format Conversion:** Convert the complex array to a format compatible with an OpenGL 3D texture (two components) using the `REPACK_ARRAY` kernel [S2, unofficial].
+8.  **Interoperability Setup:** Solve the interoperability issue between CUDA and OpenGL by using an OpenGL Pixel Buffer Object (PBO) registered in the CUDA memory space to share the spectral array [S2, unofficial]. This avoids copying data back to the CPU and re-uploading, which is inefficient [S2, unofficial].
+9.  **Projection-Slice Extraction:** Map the shared spectral array to the OpenGL off-screen rendering context for projection-slice extraction [S2, unofficial]. Extract the projection-slice via intersection with a proxy quadrant (same as hybrid method) [S2, unofficial].
+10. **2D Texture Packing:** Pack the projection-slice into a 2D texture attached to an FBO [S2, unofficial].
+11. **CUDA Mapping:** Map the 2D texture to a CUDA array for processing [S2, unofficial].
+12. **Resampling:** Execute the `RESAMPLE_SLICE` kernel on the GPU to resample the slice [S2, unofficial].
+13. **Inverse 2D FFT:** Execute the `CUDA_FFT_2D` kernel to perform the inverse 2D FFT [S2, unofficial].
+14. **Image Shifting:** Execute the `FFT_SHIFT_2D_REAL` kernel to shift the resulting image [S2, unofficial].
+15. **Final Display:** Pack the final image into a 2D OpenGL texture and upload to GPU memory [S2, unofficial]. Activate the on-screen rendering context and display the texture [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cuda_raymarching_pipeline(volume_data, light_data, object_data):
+    # 1. Host Initialization
+    # Light and object data are already in host vectors
+    # Volume dataset is loaded on CPU
+    
+    # 2. Data Upload
+    # Copy light and object data to device memory (once per frame)
+    d_light_data = cuda_malloc_like(light_data)
+    cuda.memcpy_htod(d_light_data, light_data)
+    
+    d_object_data = cuda_malloc_like(object_data)
+    cuda.memcpy_htod(d_object_data, object_data)
+    
+    # Copy volume to GPU global memory
+    d_volume = cuda_malloc(volume_data.shape)
+    cuda.memcpy_htod(d_volume, volume_data)
+    
+    # 3. Context Setup
+    cuda_context = cuda.create_context()
+    cuda.activate_context(cuda_context)
+    
+    # 4. Spatial Centering
+    # FFT_SHIFT_3D_REAL kernel
+    d_volume_centered = cuda.zeros_like(d_volume)
+    cuda.execute_kernel(FFT_SHIFT_3D_REAL, d_volume, d_volume_centered)
+    
+    # 5. 3D FFT
+    # CUDA_FFT_3D function (encapsulates CUFFT plan)
+    d_spectrum = cuda.execute_fft_3d(d_volume_centered)
+    
+    # 6. Spectral Centering
+    # FFT_SHIFT_3D_COMPLEX kernel
+    d_spectrum_centered = cuda.zeros_like(d_spectrum)
+    cuda.execute_kernel(FFT_SHIFT_3D_COMPLEX, d_spectrum, d_spectrum_centered)
+    
+    # 7. Format Conversion
+    # REPACK_ARRAY kernel to match OpenGL 3D texture format (2 components)
+    d_spectrum_repacked = cuda.execute_kernel(REPACK_ARRAY, d_spectrum_centered)
+    
+    # 8. Interoperability Setup
+    # Create PBO registered in CUDA memory space
+    pbo = cuda.create_pbo_registered_with_cuda()
+    # Copy spectral array to PBO
+    cuda.memcpy_dtod(pbo, d_spectrum_repacked)
+    
+    # 9. Projection-Slice Extraction
+    # Switch to OpenGL off-screen context
+    gl_offscreen_context = gl.create_offscreen_context()
+    gl.activate_context(gl_offscreen_context)
+    
+    # Map PBO to OpenGL texture
+    gl_texture_3d = gl.create_3d_texture_from_pbo(pbo)
+    
+    # Intersect with proxy quadrant
+    gl_bind_fbo(fbo)
+    gl_bind_texture(gl_texture_3d)
+    gl_draw_proxy_quadrant() # Intersection operation
+    gl_unbind_fbo()
+    
+    # 10. 2D Texture Packing
+    # Projection-slice is now in FBO's attached 2D texture
+    d_2d_texture_ref = gl.get_texture_reference(fbo)
+    
+    # 11. CUDA Mapping
+    # Map 2D texture to CUDA array
+    cuda_array_2d = cuda.map_gl_texture_to_cuda_array(d_2d_texture_ref)
+    
+    # 12. Resampling
+    # RESAMPLE_SLICE kernel
+    d_resampled_slice = cuda.execute_kernel(RESAMPLE_SLICE, cuda_array_2d)
+    
+    # 13. Inverse 2D FFT
+    # CUDA_FFT_2D function
+    d_image_freq = cuda.execute_fft_2d(d_resampled_slice, inverse=True)
+    
+    # 14. Image Shifting
+    # FFT_SHIFT_2D_REAL kernel
+    d_image_shifted = cuda.zeros_like(d_image_freq)
+    cuda.execute_kernel(FFT_SHIFT_2D_REAL, d_image_freq, d_image_shifted)
+    
+    # 15. Final Display
+    # Pack final image into 2D OpenGL texture
+    gl_texture_2d_final = gl.create_2d_texture_from_cuda_array(d_image_shifted)
+    
+    # Switch to on-screen context
+    gl_onscreen_context = gl.create_onscreen_context()
+    gl.activate_context(gl_onscreen_context)
+    gl_display_texture(gl_texture_2d_final)
+```
+
+**Parameters:**
+- Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- CUDA address space arrays cannot be accessed directly by OpenGL [S2, unofficial]. Copying back to CPU and re-uploading is inefficient [S2, unofficial]. This is solved by using an OpenGL PBO registered in the CUDA memory space [S2, unofficial].
+
+## Subtopics
+
+## Operating characteristics
+- **Time and Memory Complexity:** Not given in the sources.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Not given in the sources.
+- **Strengths and Limitations:** Eliminates data transfer and API call bottlenecks from host to device [S1]. The hybrid implementation lacked interactivity due to bottlenecks, which this full GPU-based pipeline aims to suppress [S2, unofficial].
+- **When to Use:** When minimizing data transfer overhead is critical and the entire pipeline can be executed on the GPU [S1][S2, unofficial].
+- **When Not to Use:** When CPU-based control is required for complex scene management not easily offloaded to GPU [S2, unofficial].
+
+## Background
+- **Origin:** The pipeline was developed to address bottlenecks in raymarching engines, which were largely unexplored in terms of pipeline architecture compared to ray tracing and raster engines [S1]. It was presented in the context of High Performance GPU-Based Fourier Volume Rendering [S2, unofficial].
+- **History and Development:** The approach reuses OpenGL rendering contexts from a previous hybrid implementation but reimplements the computational context in CUDA [S2, unofficial]. It utilizes CUFFT library functions for FFT operations [S2, unofficial].
+- **Where it is Used:** Fourier Volume Rendering (FVR) [S2, unofficial].
+
+## Sources
+[S1] Raymarching Distance Fields with CUDA, https://doi.org/10.3390/electronics10222730, fetched 2026-10-26
+[S2] High Performance GPU-Based Fourier Volume Rendering - PMC, https://pmc.ncbi.nlm.nih.gov/articles/PMC4381991/, fetched 2026-10-27 (unofficial)

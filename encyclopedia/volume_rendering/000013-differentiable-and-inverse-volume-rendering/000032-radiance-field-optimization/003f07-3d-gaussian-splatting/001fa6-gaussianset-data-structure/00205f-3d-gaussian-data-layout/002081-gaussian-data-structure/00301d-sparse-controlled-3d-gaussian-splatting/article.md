@@ -1,0 +1,100 @@
+# Sparse-Controlled 3D Gaussian Splatting
+
+Also called: SC-GS, Sparse-Controlled
+
+## Overview
+Sparse-Controlled 3D Gaussian Splatting (SC-GS) is a method for editing dynamic scenes by allowing users to provide sparse control points that drive the deformation of the entire Gaussian set [S1, S2, unofficial]. It propagates these edits across time via a learned deformation prior, resulting in a compact and editable representation [S1, S2, unofficial]. Unlike Deformable 3DGS, which applies a deformation network to every Gaussian individually, SC-GS uses a small set of control points with influence weights to drive the deformation of other Gaussians [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of 3D Gaussians (position $\boldsymbol{\mu}$, rotation $q$, scale $s$, opacity $\alpha$, color $c$), a small set of user-provided sparse control points, and a learned deformation prior network.
+*   **Outputs:** Deformed Gaussian parameters $(\boldsymbol{\mu}', q', s')$ at time $t$, and the rendered image.
+
+**Data Structures:**
+*   **Control Points:** A small set of points $\{c_i\}$ with associated influence weights $w_i$.
+*   **Deformation Prior:** A network (e.g., MLP) that predicts deformation deltas $(\Delta\boldsymbol{\mu}, \Delta q, \Delta s)$ based on the control points and time $t$ [S2, unofficial].
+
+**Steps:**
+1.  **Initialize:** Start with a static or pre-trained dynamic Gaussian scene.
+2.  **User Input:** User provides sparse control points in the scene space.
+3.  **Deformation Prediction:** For each Gaussian $j$ at time $t$, the deformation prior network predicts the deformation deltas $(\Delta\boldsymbol{\mu}_j, \Delta q_j, \Delta s_j)$ based on the influence of the control points [S2, unofficial].
+4.  **Apply Deformation:** Update the Gaussian parameters:
+    $$ \boldsymbol{\mu}_j' = \boldsymbol{\mu}_j + \Delta\boldsymbol{\mu}_j $$
+    $$ q_j' = q_j \otimes \Delta q_j $$
+    $$ s_j' = s_j + \Delta s_j $$
+    where $\otimes$ denotes quaternion multiplication [S2, unofficial].
+5.  **Render:** Rasterize the deformed Gaussians using standard 3D Gaussian Splatting rasterization.
+
+**Parameters:**
+*   Number of control points: Small, user-defined.
+*   Deformation prior network: Architecture not specified in sources [G: Typically an MLP].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Deformation deltas must be small to avoid artifacts.
+*   **Boundaries:** Control points should be placed within the scene volume.
+*   **Degenerate Input:** If no control points are provided, the scene remains static.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def sc_gs_deform(gaussians, control_points, time_t, deformation_prior):
+    """
+    Deform Gaussians based on sparse control points.
+    
+    Args:
+        gaussians: List of Gaussian objects with attributes mu, q, s.
+        control_points: List of control point positions and weights.
+        time_t: Current time.
+        deformation_prior: Function/Network to predict deformation deltas.
+        
+    Returns:
+        Deformed Gaussians.
+    """
+    deformed_gaussians = []
+    for g in gaussians:
+        # Predict deformation deltas based on control points and time
+        delta_mu, delta_q, delta_s = deformation_prior.predict(
+            g.mu, g.q, g.s, control_points, time_t
+        )
+        
+        # Apply deformation
+        new_mu = g.mu + delta_mu
+        new_q = quaternion_multiply(g.q, delta_q)
+        new_s = g.s + delta_s
+        
+        # Create new Gaussian with deformed parameters
+        new_g = Gaussian(
+            mu=new_mu,
+            q=new_q,
+            s=new_s,
+            alpha=g.alpha,
+            color=g.color
+        )
+        deformed_gaussians.append(new_g)
+        
+    return deformed_gaussians
+```
+
+## Subtopics
+
+### Deformable 3DGS
+Applies a deformation network to every Gaussian individually. Choose when per-Gaussian deformation is needed. [Deformable 3DGS](6866-deformable-3dgs.md)
+
+### Spacetime Gaussians (STG)
+Models trajectories with neural ODE solvers for continuous-time 4D reconstruction. Choose for arbitrary frame rates. [Spacetime Gaussians](6866-deformable-3dgs.md) (Note: STG is a sibling in the broader 4D GS family, but SC-GS is the specific sparse-controlled variant).
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of Gaussians and the deformation prior network. Typically faster than per-Gaussian deformation networks if the number of control points is small.
+*   **Memory Complexity:** Compact representation due to sparse control points.
+*   **Strengths:** Editable, compact, efficient for dynamic scenes with sparse user interaction.
+*   **Limitations:** Limited to scenes where sparse control points can adequately describe the deformation.
+*   **When to use:** When user interaction is sparse and the scene deformation can be captured by a few control points.
+*   **When not to use:** For complex, dense deformations that cannot be captured by sparse controls.
+
+## Background
+SC-GS was introduced as a method to allow sparse user-provided control points to edit dynamic scenes, propagating edits across time via a learned deformation prior [S1, unofficial]. It builds on the idea of using a small set of control points with influence weights to drive the deformation of other Gaussians, resulting in a compact and editable representation [S2, unofficial]. It is a variant of Deformable 3DGS, which uses an MLP deformation network on per-Gaussian features over time [S2, unofficial].
+
+## Sources
+[S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+[S2] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)

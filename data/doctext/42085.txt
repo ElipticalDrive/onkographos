@@ -1,0 +1,206 @@
+Voxel game demos (Godot Engine 4.4)
+====================================
+
+This project contains several scenes to test and demo the voxel module I'm developing for Godot Engine.
+
+![Screenshot](screenshots/2020_05_05_1953_small.png)
+
+
+Dependencies
+---------------
+
+This project uses a C++ module:
+- [Voxel](https://github.com/Zylann/godot_voxel)
+
+For the old (unmaintained) pure-GDScript version, checkout the branch `full_gdscript`.
+
+
+Runnable scenes
+-----------------
+
+- `blocky_game/main.tscn`: sort of Minecraft clone with random features.
+- `blocky_terrain/main.tscn`: simple test for blocky terrain
+- `smooth_terrain/main.tscn`: simple test for Transvoxel smooth terrain
+
+
+Blocky Game
+------------
+
+This game is a demo meant to be a practical example of using `VoxelTerrain` with a blocky look. It is not complete, some features might be incomplete, but it doesn't aim to be a finished game.
+
+It can be played in multiplayer. You can either host a game, join a game, or play without multiplayer.
+Synchronization is very basic: players are authoritative of their physics, but voxels are sent by the server, and edited on the server.
+
+### project/blocky_fluid/fluid.gdshader
+```
+shader_type spatial;
+
+uniform sampler2D u_albedo : filter_nearest_mipmap, repeat_enable;
+
+varying flat vec2 v_flow_dir;
+//varying flat float v_debug_flowstate;
+
+void vertex() {
+	vec2 src_uv = UV;
+	//v_debug_flowstate = src_uv.y;
+
+	vec2 uv = VERTEX.xz;
+	if (round(src_uv.x) == 0.0) {
+		uv = VERTEX.zy;
+		uv.y *= -1.0;
+	} else if(round(src_uv.x) == 2.0) {
+		uv = VERTEX.xy;
+		uv.y *= -1.0;
+	}
+
+	vec2 flow_dir = vec2(0.0);
+	if (src_uv.y < 7.99) {
+		float angle = src_uv.y * (TAU / 8.0);
+		flow_dir = vec2(-cos(angle), sin(angle));
+	}
+
+	uv += TIME * flow_dir;
+
+	if (src_uv.y < 7.99) {
+		v_flow_dir = flow_dir;
+	} else {
+		v_flow_dir = vec2(1.0, 0.0);
+	}
+	UV = uv;
+}
+
+void fragment() {
+	vec2 tx = v_flow_dir;
+	vec2 ty = vec2(v_flow_dir.y, -v_flow_dir.x);
+	vec2 uv = tx * UV.x + ty * UV.y;
+	ALBEDO = texture(u_albedo, uv).rgb;
+	ALPHA = 0.5;
+	//ALBEDO = vec3(0.0, float(round(v_debug_flowstate) == 6.0), 0.0);
+}
+```
+
+### project/smooth_materials/smooth_texture_array_shader.gdshader
+```
+shader_type spatial;
+
+#include "res://addons/zylann.voxel/shaders/transvoxel.gdshaderinc"
+//#include "res://addons/zylann.voxel/shaders/virtual_texturing.gdshaderinc"
+#include "res://addons/zylann.voxel/shaders/triplanar.gdshaderinc"
+//#include "res://addons/zylann.voxel/shaders/lod_fade.gdshaderinc"
+#include "res://addons/zylann.voxel/shaders/voxel_texturing.gdshaderinc"
+
+uniform sampler2DArray u_albedo_array : source_color;
+
+varying vec3 v_world_pos;
+varying vec4 v_material_indices;
+varying vec4 v_material_weights;
+
+
+void vertex() {
+	VERTEX = get_transvoxel_position(VERTEX, CUSTOM0);
+
+	v_world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+
+    // Indices are integer values so we can decode them as-is
+    v_material_indices = decode_8bit_vec4(CUSTOM1.x);
+
+    // Weights must be in [0..1] so we divide them
+    v_material_weights = decode_8bit_vec4(CUSTOM1.y) / 255.0;
+}
+
+void fragment() {
+	vec3 normal = (INV_VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz;
+
+    // Define a texture scale for convenience.
+    // We can use an array instead if different scales per index is needed.
+    float uv_scale = 1.0;
+
+	vec3 wpos = v_world_pos * uv_scale;
+
+    // Sample the 4 blending textures, all with triplanar mapping.
+    // We can re-use the same triplanar blending factors for all of them so separating that part
+    // of the function improves performance a little.
+    vec3 blending = get_triplanar_blend(normal, 1.0);
+    vec3 col0 = texture_array_triplanar(u_albedo_array, wpos, blending, v_material_indices.x).rgb;
+    vec3 col1 = texture_array_triplanar(u_albedo_array, wpos, blending, v_material_indices.y).rgb;
+    vec3 col2 = texture_array_triplanar(u_albedo_array, wpos, blending, v_material_indices.z).rgb;
+    vec3 col3 = texture_array_triplanar(u_albedo_array, wpos, blending, v_material_indices.w).rgb;
+
+    // Get weights and make sure they are normalized.
+    // We may add a tiny safety margin so we can afford some degree of error.
+    vec4 weights = v_material_weights;
+    weights /= (weights.x + weights.y + weights.z + weights.w + 0.00001);
+
+    // Calculate albedo
+    vec3 col =
+        col0 * weights.r +
+        col1 * weights.g +
+        col2 * weights.b +
+        col3 * weights.a;
+
+    ALBEDO = col;
+//	ALBEDO = vec3(v_material_weights.rgb);
+}
+```
+
+### project/smooth_terrain/transvoxel_terrain.gdshader
+```
+shader_type spatial;
+
+#include "res://addons/zylann.voxel/shaders/transvoxel.gdshaderinc"
+#include "res://addons/zylann.voxel/shaders/virtual_texturing.gdshaderinc"
+#include "res://addons/zylann.voxel/shaders/triplanar.gdshaderinc"
+#include "res://addons/zylann.voxel/shaders/lod_fade.gdshaderinc"
+
+uniform sampler2D u_texture_top : source_color;
+uniform sampler2D u_texture_sides : source_color;
+
+varying vec3 v_world_pos;
+varying vec3 v_vertex_pos_model;
+
+
+void vertex() {
+	VERTEX = get_transvoxel_position(VERTEX, CUSTOM0);
+	v_vertex_pos_model = VERTEX;
+
+	v_world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+}
+
+void fragment() {
+	// float nm_factor = clamp(0.5 + 0.5 * (4.0 * sin(TIME * 2.0)), 0.0, 1.0);
+	// NORMAL = mix(NORMAL, get_voxel_normal_view(NORMAL, VIEW_MATRIX * MODEL_MATRIX), nm_factor);
+	NORMAL = get_voxel_normal_view(v_vertex_pos_model, NORMAL, VIEW_MATRIX * MODEL_MATRIX);
+
+	vec3 normal = (INV_VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz;
+	vec3 wpos = v_world_pos * 0.2;
+
+	float topness_midlevel = 0.5;
+	float topness_smoothness = 0.04;
+	float topness_min = topness_midlevel - topness_smoothness;
+	float topness_max = topness_midlevel + topness_smoothness;
+	float topness = smoothstep(topness_min, topness_max, normal.y);
+
+	float triplanar_sharpness = 8.0;
+	vec3 blending = get_triplanar_blend(normal, triplanar_sharpness);
+
+	// TODO After quick tests I was unable to figure out which is fastest between those 3 versions.
+	// But I'm sure there is a difference...
+	// 1)
+	// vec3 top_col = topness > 0.0 ? texture_triplanar(u_texture_top, wpos, blending).rgb : vec3(0.0);
+	// vec3 side_col = topness < 1.0 ? texture_triplanar(u_texture_sides, wpos, blending).rgb : vec3(0.0);
+	// 2)
+	vec3 top_col = texture_triplanar(u_texture_top, wpos, blending).rgb;
+	vec3 side_col = texture_triplanar(u_texture_sides, wpos, blending).rgb;
+	// 3)
+	// vec3 top_col = biplanar(u_texture_top, wpos, normal, 8.0).rgb;
+	// vec3 side_col = biplanar(u_texture_sides, wpos, normal, 8.0).rgb;
+
+	float r = top_col.r;
+	ALBEDO = mix(side_col, top_col, topness);
+
+	// Discard has to be last to workaround https://github.com/godotengine/godot/issues/34966
+	if (get_lod_fade_discard(SCREEN_UV)) {
+		discard;
+	}
+}
+```

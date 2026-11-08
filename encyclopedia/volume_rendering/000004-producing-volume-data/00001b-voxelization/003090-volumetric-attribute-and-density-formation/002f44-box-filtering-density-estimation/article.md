@@ -1,0 +1,87 @@
+# Box-filtering Density Estimation
+
+
+## Overview
+Box-filtering density estimation transforms a binary slicemap into a density representation by filtering and downsampling, where each voxel stores the count of filled voxels from the original grid [S1, unofficial]. It sets itself apart from sibling methods like Kernel Density Estimation by using exact integer arithmetic on binary slicemaps rather than probabilistic or smoothed field approximations, prioritizing speed over smoothness [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A binary slicemap $v$ (voxel values 0 or 1) at resolution $N \times N \times N$.
+- Output: A density map $d$ at resolution $\frac{N}{2} \times \frac{N}{2} \times \frac{N}{2}$ (assuming power-of-two downsampling).
+
+**Data Structures:**
+- The slicemap $v$ is stored as a 3D array of integers (0 or 1).
+- The density map $d$ is stored as a 3D array of integers.
+
+**Steps:**
+1.  **Kernel Selection:** A box-filter kernel of size $2 \times 2 \times 2$ is selected for speed [S1, unofficial]. The method supports any power-of-two kernel size obtained dyadically, but the $2 \times 2 \times 2$ case is the primary implementation detail [S1, unofficial].
+2.  **Summation:** For each voxel $(i, j, k)$ in the output density map, compute the sum of the 8 adjacent neighbors in the input slicemap. The formula is:
+    $$d(i, j, k) := \sum_{l, m, n=0}^1 v(2i+l, 2j+m, 2k+n)$$
+    where $v$ is the binary value of the slicemap [S1, unofficial].
+3.  **Storage:** Store the resulting integer sum in the downsampled volume at position $(i, j, k)$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def box_filter_density_estimation(slicemap, resolution):
+    """
+    Computes density map from binary slicemap using 2x2x2 box filtering.
+    
+    Args:
+        slicemap: 3D list/array of integers (0 or 1) with shape (resolution, resolution, resolution).
+        resolution: Integer, the dimension of the cubic slicemap.
+        
+    Returns:
+        density_map: 3D list/array of integers with shape (resolution/2, resolution/2, resolution/2).
+    """
+    # Assume resolution is a power of 2
+    new_res = resolution // 2
+    density_map = [[0] * new_res for _ in range(new_res)]
+    
+    for i in range(new_res):
+        for j in range(new_res):
+            for k in range(new_res):
+                # Sum the 2x2x2 block from the slicemap
+                count = 0
+                for l in range(2):
+                    for m in range(2):
+                        for n in range(2):
+                            # Access the 8 neighbors
+                            val = slicemap[2*i + l][2*j + m][2*k + n]
+                            count += val
+                density_map[i][j][k] = count
+                
+    return density_map
+```
+
+**Parameters:**
+- Kernel size: $2 \times 2 \times 2$ is used for speed [S1, unofficial].
+- Downsampling factor: 2 (dyadic) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Resolution must be a power of two for the dyadic downsampling to work cleanly without boundary handling [S1, unofficial].
+- Precision: Integer arithmetic is used, so no floating-point precision loss occurs during summation [S1, unofficial].
+
+## Subtopics
+
+### [Parallel Bitwise Density Computation](9127-parallel-bitwise-density-computation.md)
+Uses parallel bitwise operations on integer textures to compute voxel density, avoiding expensive texture lookups for bit counting. It sets itself apart by using exact integer arithmetic on binary slicemaps rather than smoothed field approximations. Choose it when GPU parallelism and speed are critical for binary data.
+
+### [Kernel Density Estimation for Volume Reconstruction](9516-kernel-density-estimation-for-volume-reconstruction.md)
+Reconstructs a 3D volume from discrete samples by treating reconstruction as a density estimation problem. It differs by allowing samples to be splatted independently and discarded, avoiding grid state maintenance. Choose it when smooth, probabilistic density fields are needed rather than exact counts.
+
+## Operating characteristics
+- **Time Complexity:** $O(N^3)$ for a grid of size $N$, as each output voxel requires a constant number of reads (8) and additions.
+- **Memory Complexity:** $O(N^3)$ for input and output storage.
+- **Performance:** Optimized for speed on GPU architectures due to simple memory access patterns and integer arithmetic [S1, unofficial].
+- **Strengths:** Fast, exact integer results, simple implementation.
+- **Limitations:** Produces a blocky, non-smooth density field compared to kernel-based methods. Limited to power-of-two downsampling without additional logic.
+- **When to use:** When speed is the primary concern and a binary-to-count transformation is sufficient.
+- **When not to use:** When smooth density gradients are required for rendering or simulation.
+
+## Background
+Originated in the context of single-pass GPU solid voxelization, where a binary slicemap needs to be converted into a density representation for further processing or rendering [S1, unofficial]. The method was chosen over more complex filtering kernels due to computational speed constraints on GPU hardware [S1, unofficial].
+
+## Sources
+[S1] Single-pass GPU Solid Voxelization and Applications, https://inria.hal.science/inria-00345291, fetched 2026-10-26 (unofficial)

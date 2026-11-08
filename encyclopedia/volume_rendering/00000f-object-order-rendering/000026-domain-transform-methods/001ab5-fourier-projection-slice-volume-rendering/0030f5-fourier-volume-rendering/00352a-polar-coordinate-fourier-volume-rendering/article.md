@@ -1,0 +1,120 @@
+# Polar Coordinate Fourier Volume Rendering
+
+Also called: Fourier volume rendering by polar coordinate data representation, Polar FVR
+
+## Overview
+Polar Coordinate Fourier Volume Rendering (Polar FVR) is a volume rendering technique that stores and processes frequency domain data in polar coordinates to reduce computational complexity from $O(n^2 \log n)$ to $O(n^2)$ and improve memory access efficiency [S1]. It sets itself apart from traditional Rectilinear FVR by exploiting data regularity and high sampling density near the origin, allowing slice extraction via nearest-neighbor or bilinear interpolation instead of trilinear interpolation, thereby shifting computational cost to preprocessing [S1].
+
+## How it works
+**Inputs:** 3D spatial domain data volume $V(x,y,z)$.
+**Outputs:** 2D projection images for various viewing angles.
+
+**Data Structures:**
+*   **Rectilinear Frequency Data:** 3D array of Hartley transform coefficients.
+*   **Polar Frequency Data:** 3D array stored along the radial direction first. The layout ensures that data accessed during slice extraction are in adjacent memory locations [S1].
+*   **Slice Data:** 2D array representing the extracted slice in polar coordinates, converted to rectilinear coordinates for the final transform.
+
+**Parameters:**
+*   **Interpolation for Slice Extraction:** Nearest-neighbor interpolation is used in the interactive rendering stage to achieve speed independent of interpolation kernel size [S1].
+*   **Interpolation for Coordinate Conversion:** A better interpolation kernel with larger support can be used during the one-time preprocessing conversion from rectilinear to polar coordinates [S1].
+*   **Sampling Density:** High sampling density near the origin allows for reduced sampling density at high spatial frequencies, trading memory storage for slight image quality loss [S1].
+
+**Steps:**
+1.  **Generate Rectilinear Frequency Data:** Apply the 3D Hartley transform to the spatial domain data $V(x,y,z)$ to obtain rectilinear coordinate frequency domain data [S1].
+2.  **Convert to Polar Coordinates:** Convert the rectilinear coordinate frequency data to polar coordinates. This is a one-time preprocessing step [S1].
+3.  **Extract Slice:** Extract a slice from the polar coordinate data corresponding to the desired viewing angle. Due to the storage order (radial first), this accesses adjacent memory locations [S1].
+4.  **Convert Slice to Rectilinear:** Convert the extracted slice from polar coordinates back to rectilinear coordinates. This is necessary because the inverse Fourier transform requires rectilinear input [S1].
+5.  **Apply Inverse Transform:** Apply the 2D inverse Hartley transform to the rectilinear slice to obtain the projection [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def polar_fvr_preprocessing(spatial_volume):
+    """
+    Preprocessing steps: Convert spatial data to polar frequency data.
+    """
+    # Step 1: Generate rectilinear coordinate frequency domain data
+    # Apply 3D Hartley transform to spatial_volume
+    rectilinear_freq = hartley_transform_3d(spatial_volume)
+    
+    # Step 2: Convert rectilinear coordinate data to polar coordinate
+    # Use a high-quality interpolation kernel with larger support
+    polar_freq = convert_rectilinear_to_polar(rectilinear_freq, kernel='high_quality')
+    
+    return polar_freq
+
+def polar_fvr_render(polar_freq, view_angle):
+    """
+    Interactive rendering step for a single view angle.
+    """
+    # Step 3: Extract a slice from the polar coordinate data
+    # Use nearest-neighbor interpolation for speed
+    slice_polar = extract_slice_polar(polar_freq, view_angle, interpolation='nearest')
+    
+    # Step 4: Convert the slice from polar coordinate back to rectilinear coordinate
+    # This conversion is also done by bilinear interpolation
+    slice_rect = convert_polar_to_rectilinear(slice_polar, interpolation='bilinear')
+    
+    # Step 5: Apply 2D inverse Hartley transform
+    projection = inverse_hartley_transform_2d(slice_rect)
+    
+    return projection
+
+def hartley_transform_3d(data):
+    """
+    Placeholder for 3D Hartley transform implementation.
+    """
+    # Implementation details of 3D Hartley transform
+    pass
+
+def convert_rectilinear_to_polar(rect_data, kernel):
+    """
+    Convert 3D rectilinear frequency data to polar coordinates.
+    """
+    # Implementation of coordinate conversion with specified kernel
+    pass
+
+def extract_slice_polar(polar_data, angle, interpolation):
+    """
+    Extract a 2D slice from 3D polar frequency data.
+    """
+    # Implementation of slice extraction with specified interpolation
+    pass
+
+def convert_polar_to_rectilinear(polar_slice, interpolation):
+    """
+    Convert 2D polar slice to rectilinear coordinates.
+    """
+    # Implementation of coordinate conversion with specified interpolation
+    pass
+
+def inverse_hartley_transform_2d(rect_slice):
+    """
+    Apply 2D inverse Hartley transform.
+    """
+    # Implementation of 2D inverse Hartley transform
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Coordinate Conversion Necessity:** Extracted slices are in polar coordinates and must be converted back to rectilinear coordinates before applying the inverse Fourier transform [S1].
+*   **Precision:** The use of nearest-neighbor interpolation in interactive rendering may introduce artifacts, but the high data density near the origin mitigates quality loss [S1].
+*   **Memory Access:** Storing polar data along the radial direction first is critical for efficient memory access during slice extraction [S1].
+
+## Operating characteristics
+*   **Time Complexity:** $O(n^2)$, reduced from the $O(n^2 \log n)$ complexity of traditional rectilinear FVR [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Tested on a desktop computer with a Pentium 4 3.2 GHz processor and 1 GB of RAM [S1]. The speed in interactive visualization is independent of the size of the interpolation kernel, achieving comparable image quality at a faster rate than previous methods [S1].
+*   **Scaling:** The method shifts most computational cost to the preprocessing stage, making real-time rendering extremely simple and fast [S1].
+*   **Strengths:** Reduced computational complexity, efficient memory access due to data regularity, and fast interactive rendering [S1].
+*   **Limitations:** Requires preprocessing step for coordinate conversion, and image quality may slightly degrade if sampling density is reduced at high spatial frequencies [S1].
+*   **When to Use:** Suitable for interactive visualization of large 3D datasets where speed is critical [S1].
+*   **When Not to Use:** Not suitable for applications requiring the highest possible image quality without any preprocessing overhead [S1].
+
+## Background
+Polar Coordinate Fourier Volume Rendering was proposed to address the computational complexity of traditional Fourier Volume Rendering (FVR) [S1]. Traditional FVR requires one trilinear interpolation for each pixel to obtain a slice, resulting in $O(n^2 \log n)$ complexity [S1]. The proposed method exploits three aspects of data processing previously impossible in rectilinear coordinates: data regularity, high data density near the origin, and the one-time nature of coordinate conversion [S1]. The method was tested using the CT Head dataset from Volume II of the Chapel Hill Volume Rendering Test Dataset, originally 256x256x113 samples, zero-filled and duplicated to 256x256x256 samples for testing [S1].
+
+## Sources
+[S1] Accelerating Fourier volume rendering by polar coordinate data representation, https://doi.org/10.1016/j.cmpb.2012.05.010, fetched 2026-10-27

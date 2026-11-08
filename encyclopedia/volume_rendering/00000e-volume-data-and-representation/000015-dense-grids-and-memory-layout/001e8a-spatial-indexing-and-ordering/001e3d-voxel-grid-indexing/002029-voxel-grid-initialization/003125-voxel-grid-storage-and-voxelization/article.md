@@ -1,52 +1,48 @@
 # Voxel Grid Storage and Voxelization
 
-Also called: Voxel Grid Storage, Voxelization
+Also called: Voxel Grid Storage
 
 ## Overview
-Voxel Grid Storage and Voxelization is the process of converting continuous geometric representations (such as meshes or implicit surfaces) into a discrete, dense 3D grid of scalar values, typically signed distances. It solves the problem of representing complex shapes in a format suitable for ray marching, marching cubes, or volumetric analysis. It differs from [Voxel Grid Construction](3085-voxel-grid-construction.md) by focusing on the specific memory layout and the per-voxel evaluation logic, and from [Grid Background Change](3210-grid-background-change.md) by establishing the initial data rather than modifying it.
+Voxel Grid Storage and Voxelization converts continuous geometric representations into a discrete, dense 3D grid of scalar values, typically signed distances [S1, unofficial]. It establishes the initial data layout for volume rendering, differing from [Voxel Grid Construction](3085-voxel-grid-construction.md) by defining the memory layout and per-voxel evaluation logic, and from [Grid Background Change](3210-grid-background-change.md) by populating the grid rather than modifying it [G].
 
 ## How it works
 **Inputs:**
-- A geometric shape defined by a Signed Distance Function (SDF) or a mesh.
-- A target voxel size (physical units per voxel).
-- Optional: An existing grid structure to fit or a shared grid for multi-mesh workflows.
+- A geometric shape defined by a Signed Distance Function (SDF) or a mesh [S1, unofficial].
+- A target voxel size (physical units per voxel) [S1, unofficial].
+- Optional: An existing grid structure to fit or a shared grid for multi-mesh workflows [S3, unofficial].
 
 **Outputs:**
-- A 1D array of floats (`voxels`) containing the SDF values.
-- Grid metadata: origin position, dimensions (width, height, depth), and voxel size.
+- A 1D array of floats (`voxels`) containing the SDF values [S1, unofficial].
+- Grid metadata: origin position, dimensions (width, height, depth), and voxel size [S1, unofficial].
 
 **Data Structures:**
-The scalar field is stored in a single 1D float array named `voxels`. The grid dimensions are `width`, `height`, and `depth`. Coordinates $(x, y, z)$ map to the array index using the formula:
+The scalar field is stored in a single 1D float array named `voxels` [S1, unofficial]. The grid dimensions are `width`, `height`, and `depth` [S1, unofficial]. Coordinates $(x, y, z)$ map to the array index using the formula:
 $$ \text{index} = (z \times \text{width} \times \text{height}) + (y \times \text{width}) + x $$
-This layout treats Z as the slowest-varying dimension, Y as the middle, and X as the fastest.
+This layout treats Z as the slowest-varying dimension, Y as the middle, and X as the fastest [S1, unofficial].
 
 **Algorithm Steps:**
 
 1.  **Determine Grid Bounds:**
-    Calculate the world-space bounding box of the shape. Let the bounding box minimum be $(b_{min_x}, b_{min_y}, b_{min_z})$ and maximum be $(b_{max_x}, b_{max_y}, b_{max_z})$.
-    Compute the grid origin $(pos_x, pos_y, pos_z)$ by flooring the bounding box minimum coordinates scaled by the voxel size reciprocal, then subtracting one voxel size:
+    Calculate the world-space bounding box of the shape [S1, unofficial]. Let the bounding box minimum be $(b_{min_x}, b_{min_y}, b_{min_z})$ and maximum be $(b_{max_x}, b_{max_y}, b_{max_z})$ [G]. Compute the grid origin $(pos_x, pos_y, pos_z)$ by flooring the bounding box minimum coordinates scaled by the voxel size reciprocal, then subtracting one voxel size [S1, unofficial].
     $$ \text{voxel\_size\_reciprocal} = \frac{1}{\text{voxel\_size}} $$
     $$ pos_x = \lfloor b_{min_x} \times \text{voxel\_size\_reciprocal} \rfloor - \text{voxel\_size} $$
     (Similarly for $pos_y$ and $pos_z$).
 
 2.  **Compute Grid Dimensions:**
-    Calculate the grid dimensions by ceiling the bounding box extents scaled by the voxel size reciprocal, then adding 2 voxels to each dimension for padding:
+    Calculate the grid dimensions by ceiling the bounding box extents scaled by the voxel size reciprocal, then adding 2 voxels to each dimension for padding [S1, unofficial].
     $$ \text{width} = \lceil (b_{max_x} - b_{min_x}) \times \text{voxel\_size\_reciprocal} \rceil + 2 $$
     $$ \text{height} = \lceil (b_{max_y} - b_{min_y}) \times \text{voxel\_size\_reciprocal} \rceil + 2 $$
     $$ \text{depth} = \lceil (b_{max_z} - b_{min_z}) \times \text{voxel\_size\_reciprocal} \rceil + 2 $$
 
 3.  **Allocate Memory:**
-    Calculate the required number of voxels: $N = \text{width} \times \text{height} \times \text{depth}$.
-    If the required number of voxels exceeds the current array length, resize the `voxels` array to the nearest power of 2 greater than or equal to $N$ using a bitwise rounding-up algorithm [S1, unofficial].
+    Calculate the required number of voxels: $N = \text{width} \times \text{height} \times \text{depth}$ [G]. If the required number of voxels exceeds the current array length, resize the `voxels` array to the nearest power of 2 greater than or equal to $N$ using a bitwise rounding-up algorithm [S1, unofficial].
 
 4.  **Voxelize (Evaluate SDF):**
-    Iterate through all voxel coordinates in nested loops: $z$ from 0 to `depth`, $y$ from 0 to `height`, $x$ from 0 to `width`.
-    For each coordinate $(x, y, z)$:
-    a. Compute the world-space center position using the grid origin and voxel size:
-       $$ \text{world\_pos} = (pos_x + (x + 0.5) \times \text{voxel\_size}, \quad pos_y + (y + 0.5) \times \text{voxel\_size}, \quad pos_z + (z + 0.5) \times \text{voxel\_size}) $$
-    b. Transform this point to the shape's local coordinate system.
-    c. Evaluate the shape's signed distance function (SDF) at the local point.
-    d. Store the resulting distance value in the `voxels` array at index calculated by the layout formula.
+    Iterate through all voxel coordinates in nested loops: $z$ from 0 to `depth`, $y$ from 0 to `height`, $x$ from 0 to `width` [S1, unofficial]. For each coordinate $(x, y, z)$:
+    a. Compute the world-space center position using the grid origin and voxel size [S1, unofficial].
+    b. Transform this point to the shape's local coordinate system [S1, unofficial].
+    c. Evaluate the shape's signed distance function (SDF) at the local point [S1, unofficial].
+    d. Store the resulting distance value in the `voxels` array at the index calculated by the layout formula [S1, unofficial].
 
 **Pseudocode:**
 
@@ -142,33 +138,30 @@ def get_voxel(voxels: np.ndarray, x: int, y: int, z: int, width: int, height: in
 - `DEFAULT_VOXEL_SIZE`: A static float constant set to `0.1f`, representing the default physical size of each voxel in world space [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Out-of-Bounds Access:** Accessing a voxel coordinate outside the grid bounds does not throw an error. Instead, the `getVoxel` method returns a large default value of `10_000.0f` to indicate out-of-bounds access [S1, unofficial].
-- **Memory Allocation:** If the required number of voxels is not a power of 2, the array is resized to the next power of 2. This may result in unused memory, but simplifies allocation and indexing in some implementations [S1, unofficial].
+- **Out-of-Bounds Access:** Accessing a voxel coordinate outside the grid bounds does not throw an error [S1, unofficial]. Instead, the `getVoxel` method returns a large default value of `10_000.0f` to indicate out-of-bounds access [S1, unofficial].
+- **Memory Allocation:** If the required number of voxels is not a power of 2, the array is resized to the next power of 2 [S1, unofficial].
 
 ## Subtopics
 
 ### [VoxelizationGrid](6601-voxelizationgrid.md)
-A data structure representing an explicit voxelization grid, defining bounds, grid dimensions, and voxel sizes in 3D space. It is used in shared-grid voxelization workflows where multiple meshes are voxelized onto a single grid, typically defined by the largest or outer mesh.
+A data structure representing an explicit voxelization grid, defining bounds, grid dimensions, and voxel sizes in 3D space. It solves the problem of converting arbitrary mesh bounding boxes into a discrete, aligned 3D grid suitable for dense volume storage, ensuring that grid indices map consistently to world coordinates.
 
 ### Shared-grid Voxelization
-A workflow where multiple meshes are voxelized onto a single, explicitly defined voxel grid, typically defined by the largest or outer mesh [S2, unofficial].
-- **Definition:** Multiple meshes (e.g., inner and outer) are aligned and stored in the same grid space.
-- **Steps:**
-    1.  **Build Shared Grid:** Load the outer mesh. Call `build_voxelization_grid(outer_mesh, voxel_size=voxel_size, pixel_size=pixel_size)` to create `shared_grid`. Calculate the translation vector `translation_xyz = (outer_mesh.center - inner_mesh.center).astype(np.float32)` [S2, unofficial].
-    2.  **Voxelize Outer Mesh:** Call `voxelize_on_grid(outer_mesh, grid=shared_grid, mode="solid")` to produce `outer_grid` [S2, unofficial].
-    3.  **Voxelize Inner Mesh:** Call `voxelize_on_grid(inner_mesh, grid=shared_grid, mode="solid", translation_xyz=translation_xyz)` to produce `inner_grid`, applying the translation to align it with the outer mesh's coordinate system [S2, unofficial].
-- **Parameters:** `mode` (str, default "solid"): Passed to `voxelize_on_grid`, specifies solid voxelization [S2, unofficial].
+A workflow where multiple meshes are voxelized onto a single, explicitly defined voxel grid, typically defined by the largest or outer mesh [S3, unofficial].
+- **Definition:** Multiple meshes are aligned and stored in the same grid space [S3, unofficial].
+- **Steps:** Build shared grid by loading the outer mesh and calling `build_voxelization_grid(outer_mesh, voxel_size=voxel_size, pixel_size=pixel_size)` to create `shared_grid` [S3, unofficial]. Calculate translation vector `translation_xyz = (outer_mesh.center - inner_mesh.center).astype(np.float32)` [S3, unofficial]. Voxelize outer mesh by calling `voxelize_on_grid(outer_mesh, grid=shared_grid, mode="solid")` to produce `outer_grid` [S3, unofficial]. Voxelize inner mesh by calling `voxelize_on_grid(inner_mesh, grid=shared_grid, mode="solid", translation_xyz=translation_xyz)` to produce `inner_grid`, applying the translation to align it with the outer mesh's coordinate system [S3, unofficial].
+- **Parameters:** `mode` (str, default "solid"): Passed to `voxelize_on_grid`, specifies solid voxelization [S3, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(W \times H \times D)$, where $W, H, D$ are the grid dimensions. Each voxel requires one SDF evaluation and coordinate transformation.
-- **Memory Complexity:** $O(W \times H \times D)$ for the 1D float array. The array size is rounded up to the nearest power of 2, potentially increasing memory usage by up to 2x [S1, unofficial].
-- **Performance:** Performance depends heavily on the cost of the SDF evaluation. For mesh-based SDFs, this involves ray-triangle intersection tests, which can be optimized using BVH structures [S2, unofficial].
-- **Strengths:** Simple memory layout, easy to implement, supports arbitrary shapes via SDFs.
-- **Limitations:** Dense storage is memory-intensive for large volumes. Padding adds overhead. Out-of-bounds handling relies on a sentinel value rather than bounds checking, which can mask logic errors if not handled carefully [S1, unofficial].
+- **Time Complexity:** $O(W \times H \times D)$, where $W, H, D$ are the grid dimensions [G]. Each voxel requires one SDF evaluation and coordinate transformation [S1, unofficial].
+- **Memory Complexity:** $O(W \times H \times D)$ for the 1D float array [S1, unofficial]. The array size is rounded up to the nearest power of 2, potentially increasing memory usage [S1, unofficial]. Alternative implementations store occupancy as a 3D array of booleans (`bool *** data`), which is memory inefficient because each boolean typically occupies a full byte rather than a single bit [S2, unofficial].
+- **Strengths:** Simple memory layout, easy to implement, supports arbitrary shapes via SDFs [S1, unofficial].
+- **Limitations:** Dense storage is memory-intensive for large volumes [G]. Padding adds overhead [S1, unofficial]. Out-of-bounds handling relies on a sentinel value rather than bounds checking, which can mask logic errors if not handled carefully [S1, unofficial].
 
 ## Background
-This method is derived from implementations in open-source projects for isosurface extraction and voxelization. The core algorithm for fitting the grid and evaluating the SDF is based on the `IsosurfaceExtraction` project [S1, unofficial]. The shared-grid workflow and specific data structures like `BVH` for mesh acceleration are drawn from the `Voxelerate` project [S2, unofficial].
+This method is derived from implementations in open-source projects for isosurface extraction and voxelization [S1, unofficial]. The core algorithm for fitting the grid and evaluating the SDF is based on the `IsosurfaceExtraction` project [S1, unofficial]. The shared-grid workflow is drawn from the `Voxelerate` project [S3, unofficial].
 
 ## Sources
 [S1] Chickenkeeper/IsosurfaceExtraction, https://github.com/Chickenkeeper/IsosurfaceExtraction, fetched 2026-10-27 (unofficial)
-[S2] hsafari68/Voxelerate, https://github.com/hsafari68/Voxelerate, fetched 2026-10-26 (unofficial)
+[S2] antonmartynov/OBJ-Solidizer-And-Voxelizer, https://github.com/antonmartynov/OBJ-Solidizer-And-Voxelizer, fetched 2026-10-27 (unofficial)
+[S3] hsafari68/Voxelerate, https://github.com/hsafari68/Voxelerate, fetched 2026-10-26 (unofficial)

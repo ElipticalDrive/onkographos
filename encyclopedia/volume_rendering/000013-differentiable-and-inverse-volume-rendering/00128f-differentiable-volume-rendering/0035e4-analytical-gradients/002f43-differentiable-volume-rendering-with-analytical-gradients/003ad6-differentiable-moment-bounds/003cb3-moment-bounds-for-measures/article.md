@@ -1,0 +1,186 @@
+# Moment Bounds for Measures
+
+Also called: Canonical representation bounds, Chebyshev-Markov bounds, Moment Bounds for Inverse Rendering, Moment-based bounds, Truncated Hamburger moment problem bounds
+
+## Overview
+This method computes differentiable upper and lower bounds on the cumulative mass of any measure consistent with a given sequence of moments $\mathbf{m}$ [S1]. It solves the truncated Hamburger moment problem by constructing a unique "canonical" discrete measure that tightly bounds the set of all valid measures [S1]. Unlike standard visibility functions based on Chebyshev's inequality, which use only the first two moments ($n=1$), this method generalizes to arbitrary moment sequences ($2n+1$ moments) to provide tighter bounds [S1].
+
+## How it works
+**Inputs:**
+- Moment sequence $\mathbf{m} = (m_0, m_1, \dots, m_{2n}) \in \mathbb{R}^{2n+1}$, where $n > 0$ [S1].
+- Evaluation point $\eta \in \mathbb{R}$ [S1].
+
+**Outputs:**
+- Lower bound $L(\eta)$: The mass in the interval $(-\infty, \eta)$ [S1].
+- Upper bound $U(\eta)$: The mass in the interval $(-\infty, \eta]$ [S1].
+
+**Data Structures:**
+- **Hankel Matrix $H$**: A $(n+1) \times (n+1)$ symmetric matrix where $H_{ij} = m_{i+j}$ for $0 \le i, j \le n$ [S1].
+- **Kernel Polynomial Vector $\eta_{vec}$**: A column vector of size $n+1$ representing the evaluation point $\eta$ in the monomial basis: $\eta_{vec} = (1, \eta, \eta^2, \dots, \eta^n)^\top$ [S1].
+- **Support Points $\{x_i\}_{i=1}^n$**: The $n$ distinct real roots of the kernel polynomial [S1].
+- **Weights $\{w_i\}_{i=0}^n$**: The weights of the canonical discrete measure, where $x_0 = \eta$ and $w_0$ is the weight at $\eta$ [S1].
+
+**Steps:**
+
+1.  **Construct the Hankel Matrix**:
+    Build $H$ from the input moments:
+    $$ H = \begin{bmatrix} m_0 & m_1 & \dots & m_n \\ m_1 & m_2 & \dots & m_{n+1} \\ \vdots & \vdots & \ddots & \vdots \\ m_n & m_{n+1} & \dots & m_{2n} \end{bmatrix} $$
+    [S1]
+
+2.  **Compute the Kernel Polynomial Coefficients**:
+    Calculate the coefficient vector $\mathbf{c}$ of the kernel polynomial $K(x)$ by solving the linear system or directly inverting $H$:
+    $$ \mathbf{c} = H^{-1} \eta_{vec} $$
+    The kernel polynomial is defined as:
+    $$ K(x) = \sum_{k=0}^{n} c_k x^k = x^\top H^{-1} \eta_{vec} $$
+    where $x = (1, x, \dots, x^n)^\top$ [S1].
+
+3.  **Find Support Points**:
+    Find the $n$ distinct real roots $\{x_i\}_{i=1}^n$ of the polynomial $K(x) = 0$. These roots are the support points of the canonical representation [S1].
+    *Note*: If $\mathbf{m}$ is strictly positive and $\eta$ is not a root of $K(x)$, the roots are guaranteed to be real and simple [S1].
+
+4.  **Compute Weights**:
+    The canonical measure $\mu_\eta$ is a discrete measure with support $\{x_0, x_1, \dots, x_n\}$ where $x_0 = \eta$. The weights $w_i$ satisfy the moment equations:
+    $$ m_k = \sum_{i=0}^{n} w_i x_i^k, \quad k = 0, \dots, 2n $$
+    [S1]
+    
+    The weights can be computed by solving the Vandermonde system or individually using the inverse Hankel matrix:
+    $$ w_i = \frac{1}{x_i^\top H^{-1} x_i} \quad \text{for } i=1,\dots,n $$
+    [S1]
+    The weight $w_0$ at $\eta$ is determined by the total mass constraint (e.g., $m_0=1$) or by solving the linear system for the first moment equation. Specifically, since the system is overdetermined but consistent for the canonical representation, $w_0$ can be found by ensuring the sum of weighted moments matches $\mathbf{m}$ [S1].
+
+5.  **Compute Bounds**:
+    Sort the support points $\{x_i\}_{i=1}^n$ such that $x_1 < x_2 < \dots < x_n$.
+    The lower bound $L(\eta)$ is the sum of weights of all support points strictly less than $\eta$:
+    $$ L(\eta) = \sum_{i: x_i < \eta} w_i $$
+    [S1]
+    
+    The upper bound $U(\eta)$ is the sum of weights of all support points less than or equal to $\eta$:
+    $$ U(\eta) = \sum_{i: x_i \le \eta} w_i $$
+    [S1]
+    
+    If $\eta$ coincides with a support point $x_j$, then $L(\eta) = \sum_{i=1}^{j-1} w_i$ and $U(\eta) = \sum_{i=1}^{j} w_i$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def moment_bounds(m, eta, n):
+    """
+    Compute differentiable upper and lower bounds for a measure
+    consistent with moments m at evaluation point eta.
+    
+    Args:
+        m: list of 2n+1 moments [m_0, ..., m_2n]
+        eta: float, evaluation point
+        n: int, order parameter (moments are 0 to 2n)
+        
+    Returns:
+        L: float, lower bound (mass in (-inf, eta))
+        U: float, upper bound (mass in (-inf, eta])
+    """
+    # Step 1: Construct Hankel Matrix H (n+1 x n+1)
+    H = [[0.0] * (n + 1) for _ in range(n + 1)]
+    for i in range(n + 1):
+        for j in range(n + 1):
+            H[i][j] = m[i + j]
+            
+    # Step 2: Compute Kernel Polynomial Coefficients c = H^-1 * eta_vec
+    # eta_vec = [1, eta, eta^2, ..., eta^n]
+    eta_vec = [eta**k for k in range(n + 1)]
+    
+    # Solve H * c = eta_vec for c
+    # Using a standard linear solver (e.g., LU decomposition)
+    c = solve_linear_system(H, eta_vec)
+    
+    # Step 3: Find roots of K(x) = sum(c_k * x^k)
+    # K(x) is a polynomial of degree n
+    roots = find_polynomial_roots(c)
+    
+    # Filter for real roots and sort them
+    real_roots = sorted([r.real for r in roots if abs(r.imag) < 1e-9])
+    
+    # Step 4: Compute Weights
+    # Weights w_i for roots x_i (i=1..n)
+    # w_i = 1 / (x_i^T * H^-1 * x_i)
+    # Precompute H_inv for efficiency
+    H_inv = invert_matrix(H)
+    
+    weights = []
+    support_points = []
+    
+    for x in real_roots:
+        # Vector x_vec = [1, x, x^2, ..., x^n]
+        x_vec = [x**k for k in range(n + 1)]
+        # Quadratic form x^T H^-1 x
+        denom = dot_product(x_vec, multiply_matrix_vector(H_inv, x_vec))
+        w = 1.0 / denom
+        weights.append(w)
+        support_points.append(x)
+        
+    # Step 5: Compute w_0 at eta
+    # The canonical measure includes eta as a support point x_0 = eta
+    # We need to determine w_0 such that the moments are satisfied.
+    # However, the bounds definition relies on the discrete measure mu_eta.
+    # According to Theorem 3, the bounds are sums of weights of mu_eta.
+    # mu_eta has support {eta, x_1, ..., x_n}.
+    # The weights w_i for i=1..n are computed above.
+    # w_0 is the weight at eta.
+    
+    # To find w_0, we can use the fact that the total mass m_0 is known.
+    # m_0 = w_0 + sum(w_i for i=1..n)
+    # This assumes the canonical representation is a probability measure (m_0=1).
+    # If m_0 != 1, the bounds scale accordingly, but the structure holds.
+    # [G] Assuming m_0 is the total mass.
+    sum_other_weights = sum(weights)
+    w_0 = m[0] - sum_other_weights
+    
+    # Combine all support points and weights
+    # x_0 = eta, w_0
+    all_points = [eta] + support_points
+    all_weights = [w_0] + weights
+    
+    # Sort all points to determine the cumulative sum
+    # Note: eta might coincide with one of the roots.
+    # If eta == x_k, we must handle the split between L and U carefully.
+    
+    # Create list of (point, weight)
+    points_weights = list(zip(all_points, all_weights))
+    points_weights.sort(key=lambda p: p[0])
+    
+    # Compute L(eta) and U(eta)
+    # L(eta) = sum of weights for points < eta
+    # U(eta) = sum of weights for points <= eta
+    
+    L = 0.0
+    U = 0.0
+    
+    for p, w in points_weights:
+        if p < eta:
+            L += w
+            U += w
+        elif p == eta:
+            # If p == eta, it contributes to U but not L
+            U += w
+        # If p > eta, no contribution
+            
+    return L, U
+```
+
+**Edge Cases and Pitfalls:**
+- **Strict Positivity**: The method requires the moment sequence to be strictly positive. If not, the roots may not be real or simple, and the bounds may not be valid [S1].
+- **Boundary Conditions**: The bounds are continuously differentiable within regions where the set of support points less than $\eta$ remains constant. Transitions occur when $\eta$ crosses a support point $x_i$ [S1].
+- **Precision**: Inverting the Hankel matrix can be numerically unstable if the moments are ill-conditioned. High-precision arithmetic may be required for large $n$ [S1].
+
+## Operating characteristics
+- **Time Complexity**: Computing the bounds requires inverting the Hankel matrix ($O(n^3)$) and finding roots of a degree-$n$ polynomial ($O(n)$ or $O(n^2)$ depending on the root-finding method), then summing $O(n)$ weights [S1].
+- **Memory Complexity**: $O(n^2)$ to store the Hankel matrix and its inverse [S1].
+- **Strengths**: Provides tighter bounds than Chebyshev's inequality by using more moments. The bounds are differentiable with respect to the moment parameters, enabling use in differentiable rendering pipelines [S1].
+- **Limitations**: Computationally more expensive than 2-moment bounds. Requires the moment sequence to be strictly positive. Performance degrades with large $n$ due to matrix inversion and root finding [S1].
+- **When to Use**: When tighter bounds are needed than Chebyshev's inequality allows, and differentiability is required. Suitable for shadow mapping and order-independent transparency where moment sequences are available [S1].
+
+## Background
+The method is based on the theory of moments, specifically the truncated Hamburger moment problem [S1]. The bounds are known as Chebyshev-Markov inequalities, originating from the work of Kreĭn and Nudel’man [1977] and Tari et al. [2005] [S1]. In computer graphics, these bounds have been used in efficient methods for shadow mapping [Peters and Klein 2015; Peters et al. 2016] and order-independent transparency [Münstermann et al. 2018] [S1]. The differentiability of these bounds was highlighted in recent work on differentiable volume rendering [S1].
+
+## Sources
+[S1] Moment Bounds are Differentiable: Efficiently Approximating Measures in Inverse Rendering, https://doi.org/10.1145/3730899, fetched 2026-10-27
