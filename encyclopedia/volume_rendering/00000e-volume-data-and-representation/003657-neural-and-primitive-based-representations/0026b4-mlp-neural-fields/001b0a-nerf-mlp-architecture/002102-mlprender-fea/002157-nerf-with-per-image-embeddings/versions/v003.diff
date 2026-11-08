@@ -1,0 +1,162 @@
+--- v002.md
++++ v003.md
+@@ -4,97 +4,86 @@
+ 
+ ## Overview
+-A model variant that learns a per-image embedding for each scene and injects it into the NeRF MLP during color prediction [S1]. Unlike Stable View Synthesis (SVS), which modifies scene brightness and color to explain camera variation, this method neutralizes photometric variation during training, yielding consistent global brightness and color across views [S1]. It builds on [MLPRender_Fea](2414-mlprender-fea.md).
++This method extends the standard NeRF MLP architecture by learning a distinct per-image embedding vector for each scene, which is injected into the color prediction network to account for view-dependent photometric variations such as lighting changes or camera exposure differences [S1]. It sets itself apart from standard NeRF by explicitly modeling global appearance shifts across input views rather than treating them as noise, and differs from [SVS](link) by neutralizing this variation during training to produce a consistent, photometrically averaged reconstruction at test time [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Training images with known camera poses and a set of learnable per-image embedding vectors [S1].
+-*   **Outputs:** RGB color values for rendered pixels [S1].
++*   **Inputs:** A set of $N$ training images $\{I_i\}_{i=1}^N$ with corresponding camera poses and intrinsics. Each image $I_i$ is associated with a learnable per-image embedding vector $e_i \in \mathbb{R}^d$.
++*   **Outputs:** A radiance field that predicts volume density $\sigma$ and RGB color $C$ for any 3D point $x$ and view direction $v$.
+ 
+ **Data Structures:**
+-*   **Per-Image Embeddings:** A learnable vector $e_i$ for each image $i$ in the training set [S1]. The vector length is not specified in the primary source [S1], but the affine modulation variant uses a length of 128 [S2].
+-*   **MLP:** The standard NeRF MLP structure defined in [MLPRender_Fea](2414-mlprender-fea.md), which takes position, view direction, and features as input [G].
++*   **Per-Image Embeddings:** A learnable parameter tensor $E \in \mathbb{R}^{N \times d}$, where $N$ is the number of training images and $d$ is the embedding dimension. The specific value of $d$ is not given in the sources [G: typical values in related literature are 16-64, but must be treated as a hyperparameter].
++*   **NeRF MLP:** The color prediction network (see [MLPRender_Fea](2414-mlprender-fea.md)) takes positional encoding of position $x$, view direction $v$, and the per-image embedding $e_i$ as input.
+ 
+-**Steps:**
+-1.  **Initialization:** Allocate a unique embedding vector $e_i$ for each training image $i$ [S1].
+-2.  **Training:** During training, for a ray sampled from image $i$, retrieve the corresponding embedding $e_i$ [S1].
+-3.  **Injection:** Inject $e_i$ into the NeRF MLP during the color prediction phase [S1].
+-4.  **Color Prediction:** The MLP predicts the RGB color based on the ray origin, direction, and the injected embedding [S1].
+-5.  **Test-Time Evaluation:** To produce a reconstruction corresponding to the photometric average of all input cameras, set the embedding vector to zero ($e_i = \mathbf{0}$) for all images [S1].
++**Numbered Steps:**
++1.  **Initialization:** Initialize the per-image embeddings $E$ randomly. Initialize the NeRF MLP weights.
++2.  **Forward Pass:** For a ray sampled from image $i$:
++    a. Sample points $x_j$ along the ray.
++    b. Compute volume density $\sigma_j$ and view direction $v_j$ for each point.
++    c. Retrieve the per-image embedding $e_i$ corresponding to the source image $i$.
++    d. Concatenate the positional encoding of $x_j$, the view direction $v_j$, and the embedding $e_i$.
++    e. Pass the concatenated vector through the color prediction MLP to obtain RGB color $C_j$.
++    f. Perform volume rendering to compute the final pixel color $C$ using standard alpha compositing.
++3.  **Loss Computation:** Compute the photometric loss between the rendered image and the ground truth image $I_i$. The sources do not specify additional regularization terms for the embeddings [G: L2 regularization is common but not cited].
++4.  **Optimization:** Update both the NeRF MLP weights and the per-image embeddings $E$ using gradient descent.
++5.  **Test-Time Inference:** To generate a consistent reconstruction, set the embedding vector to zero ($e_i = \mathbf{0}$) for all rays [S1]. This yields a rendering corresponding to the photometric average of all input cameras, neutralizing the per-image lighting variations learned during training [S1].
+ 
+ **Formulas:**
+-*   **Test-Time Rendering:** $C(x, d) = \text{NeRF}(x, d, e_i = \mathbf{0})$ [S1].
+-*   **Affine Modulation (Variant):** If using the affine modulation variant [S2], let $z$ be the bottleneck vector of the MLP. Let $MLP_{mod}(e_i)$ output two vectors: scale $s$ and shift $t$. The modulated bottleneck is $z' = s \odot z + t$, where $\odot$ is element-wise multiplication [S2]. The scale $s$ is computed as $\exp(MLP_{mod\_scale}(e_i))$ [S2].
++The rendered color $C$ for a ray is computed as:
++$$ C = \sum_{j=1}^T T_j \alpha_j C_j $$
++where $T_j = \exp(-\sum_{k=1}^{j-1} \sigma_k \delta_k)$ is the accumulated transmittance, $\alpha_j = 1 - \exp(-\sigma_j \delta_j)$ is the opacity, $\sigma_j$ is the volume density, $\delta_j$ is the distance between samples, and $C_j$ is the predicted color. The color $C_j$ is predicted by the MLP:
++$$ C_j = \text{MLP}(\text{PE}(x_j), v_j, e_i) $$
++where $\text{PE}(\cdot)$ is the positional encoding function [S1].
+ 
+ **Parameters:**
+-*   **Embedding Length:** Not given in [S1]. 128 in [S2] [S2].
+-*   **MLP Hidden Units (for modulation):** 128 [S2].
++*   **Embedding Dimension ($d$):** Not given in the sources.
++*   **Number of Images ($N$):** Determined by the dataset.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Evaluation Metrics:** Standard metrics like PSNR, SSIM, and LPIPS are difficult to interpret for this model on datasets with significant photometric variation (e.g., Tanks and Temples) because the model neutralizes these variations [S1]. The "w/GLO" variant may perform poorly on these metrics compared to models that preserve photometric variation, even if the visual result is more consistent [S1].
+-*   **Test-Time Embedding:** Setting the embedding to zero at test time is crucial for obtaining a consistent, average-brightness reconstruction [S1].
+-*   **Affine Variant Limitation:** The affine modulation technique is only used for video results and does not improve quantitative performance on metrics [S2].
+-
+-**Pseudocode:**
+-```python
+-import math
+-
+-def relu(x):
+-    return [max(0.0, v) for v in x]
+-
+-def linear(x, W, b):
+-    return [sum(x[i] * W[i][j] for i in range(len(x))) + b[j] for j in range(len(b))]
+-
+-def exp_vec(x):
+-    return [math.exp(v) for v in x]
+-
+-def modulation_mlp(e_i):
+-    # [S2] Two-layer MLP with 128 hidden units, ReLU activation
+-    h = relu(linear(e_i, W_mod1, b_mod1))
+-    out = linear(h, W_mod2, b_mod2)
+-    scale = out[:128]
+-    shift = out[128:]
+-    return scale, shift
+-
+-def nerf_query(x, d, e_i, use_affine=False):
+-    # [G] Forward pass through the MLP defined in [MLPRender_Fea]
+-    z = nerf_bottleneck(x, d, e_i)
+-    if use_affine:
+-        s, t = modulation_mlp(e_i)
+-        s = exp_vec(s)
+-        z = [s[i] * z[i] + t[i] for i in range(len(z))]
+-    return nerf_color_head(z)
+-
+-def render_ray(o, d, image_idx, embeddings, num_samples, near, far, use_affine=False):
+-    # [G] Standard volume rendering integration
+-    T = 1.0
+-    color = [0.0, 0.0, 0.0]
+-    step_size = (far - near) / num_samples
+-    for i in range(num_samples):
+-        t = near + i * step_size
+-        x = [o[j] + d[j] * t for j in range(3)]
+-        sigma, c = nerf_query(x, d, embeddings[image_idx], use_affine)
+-        alpha = 1.0 - math.exp(-max(1e-4, sigma) * step_size)
+-        T_curr = T
+-        T *= 1.0 - alpha
+-        color = [color[j] + T_curr * alpha * c[j] for j in range(3)]
+-    return color, T
+-```
++*   **Test-Time Evaluation:** Evaluating the model with the learned embeddings $e_i$ active will result in images that match the specific lighting of the source image $i$, which may appear inconsistent across views if the goal is a canonical representation. Setting $e_i = \mathbf{0}$ is required for the "photometric average" behavior [S1].
++*   **Photometric Variation:** Standard metrics like PSNR, SSIM, and LPIPS are difficult to interpret on datasets with significant photometric variation because they penalize global brightness/color shifts. The sources note that the "w/GLO" model performs poorly on these raw metrics compared to baselines that attempt to "explain away" variation, but produces visually consistent results [S1].
+ 
+ ## Subtopics
+ 
+-### Affine Generative Latent Optimization
+-A variant that allocates a 128-length vector for each image and uses these vectors as input to a two-layer MLP with 128 hidden units [S2]. The MLP outputs two vectors (scale and shift) of the same length as the bottleneck vector [S2]. The internal activation is ReLU, and the final activation for the scaling output is exp [S2]. The scale and shift are applied to the bottleneck vector before evaluating the view-dependent MLP [S2]. This technique is only used for video results and does not improve quantitative performance on metrics [S2].
++### [Affine Generative Latent Optimization](3497-affine-generative-latent-optimization.md)
++Affine Generative Latent Optimization (Affine GLO) is a technique for modulating the internal representations of a neural radiance field to capture per-image appearance variations, particularly for video sequences. It solves the problem of static NeRF models failing to represent dynamic lighting or texture changes across frames by applying an affine transformation to the bottleneck vector before view-dependent color prediction. It sets itself apart from standard [NeRF with Per-Image Embeddings](2484-nerf-with-per-image-embeddings.md) by learning a parametric mapping (an MLP) from a latent code to the affine parameters, rather than optimizing the embedding vectors directly, which allows for faster training and smoother interpolation.
+ 
+ ## Operating characteristics
+-*   **Performance:** On the Tanks and Temples dataset (color-corrected metrics), the model achieves the following PSNR scores: bicycle (24.37), flowers (21.73), Outdoor garden (26.98), stump (26.40), treehill (22.87), room (31.63), counter (29.55), Indoor kitchen (32.23), bonsai (33.46) [S1]. The variant with GLO (w/GLO) achieves: bicycle (23.95), flowers (21.60), Outdoor garden (25.09), stump (25.98), treehill (21.99), room (28.24), counter (28.40), Indoor kitchen (30.81), bonsai (30.27) [S1].
+-*   **Strengths:** Neutralizes photometric variation during training, yielding consistent global brightness and color across views [S1]. Produces pleasing reconstructions that correspond to the photometric average of all input cameras when the embedding is set to zero at test time [S1].
+-*   **Limitations:** Performs poorly on standard metrics (PSNR, SSIM, LPIPS) on datasets with significant photometric variation because it does not preserve the variation that these metrics might otherwise capture [S1]. The affine modulation variant does not improve quantitative performance [S2].
+-*   **When to use:** When consistent global appearance across views is desired, and photometric variation in the input data is considered noise or undesirable [S1].
+-*   **When not to use:** When standard metrics (PSNR, SSIM, LPIPS) are the primary evaluation criterion on datasets with significant photometric variation, as the model's neutralization of variation will yield artificially low scores compared to baselines that preserve it [S1].
++**Time and Memory Complexity:**
++*   **Memory:** Adds $O(N \cdot d)$ memory for the per-image embeddings, where $N$ is the number of training images and $d$ is the embedding dimension. This is negligible compared to the MLP weights for typical $N$ and $d$ [G].
++*   **Time:** Adds minimal overhead per training step for embedding lookup and concatenation. The optimization involves updating $N$ additional vectors, which scales linearly with $N$ but is generally fast [G].
++
++**Measured Performance:**
++On the Tanks and Temples dataset with color-corrected metrics (quadratic polynomial fit to RGB values, ignoring saturated pixels), the model achieves the following PSNR scores [S1]:
++*   Bicycle: 24.37
++*   Flowers: 21.73
++*   Outdoor garden: 26.98
++*   Stump: 26.40
++*   Treehill: 22.87
++*   Room: 31.63
++*   Counter: 29.55
++*   Indoor kitchen: 32.23
++*   Bonsai: 33.46
++
++The variant "w/GLO" (using the per-image embeddings) achieves slightly lower PSNR on these specific metrics due to the photometric neutralization [S1]:
++*   Bicycle: 23.95
++*   Flowers: 21.60
++*   Outdoor garden: 25.09
++*   Stump: 25.98
++*   Treehill: 21.99
++*   Room: 28.24
++*   Counter: 28.40
++*   Indoor kitchen: 30.81
++*   Bonsai: 30.27
++
++**Strengths and Limitations:**
++*   **Strengths:** Neutralizes photometric variation during training, yielding consistent global brightness and color across views [S1]. Produces pleasing reconstructions that correspond to the photometric average of all input cameras [S1].
++*   **Limitations:** Raw PSNR/SSIM/LPIPS metrics may be lower than baselines that do not neutralize variation, making direct comparison on standard metrics misleading on photometrically varying datasets [S1].
++
++**When to Use:**
++Use when the input dataset exhibits significant per-image photometric variation (e.g., lighting changes, exposure differences) and the goal is to produce a consistent, canonical view synthesis rather than reproducing the exact lighting of each source image [S1].
+ 
+ ## Background
+-Introduced in the Mip-NeRF 360 paper [S1]. The method was motivated by the difficulty of drawing meaningful conclusions from standard metrics on datasets with photometric variation, such as the Tanks and Temples dataset [S1]. The authors constructed their own dataset with careful control over photometric variation to better evaluate their method [S1]. The affine modulation variant was introduced in Zip-NeRF [S2].
++This method was introduced in the context of the Mip-NeRF 360 paper, which addressed unbounded anti-aliased neural radiance fields [S1]. It was developed to handle scenes with significant photometric variation, a common issue in real-world datasets where camera settings or lighting conditions change between shots [S1]. The approach is distinct from Stable View Synthesis (SVS), which modifies scene brightness to explain camera variation, by instead learning explicit per-image embeddings to model these variations [S1].
+ 
+ ## Sources
+-[S1] Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.00539, fetched 2026-10-26
+-[S2] Zip-NeRF: Anti-Aliased Grid-Based Neural Radiance Fields, https://doi.org/10.1109/iccv51070.2023.01804, fetched 2026-10-26+[S1] Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.00539, fetched 2026-10-26

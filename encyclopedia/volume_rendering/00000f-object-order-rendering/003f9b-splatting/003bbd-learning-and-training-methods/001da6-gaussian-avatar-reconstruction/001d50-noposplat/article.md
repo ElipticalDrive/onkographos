@@ -1,51 +1,82 @@
 # NoPoSplat
 
-Also called: No-Poses Splatting
+Also called: No-Pose Gaussian Splatting
 
 ## Overview
-NoPoSplat is a 3D Gaussian Splatting method designed for novel view synthesis from sparse or unposed input images [S1][S2, unofficial]. It eliminates the requirement for known camera poses by establishing a canonical coordinate system anchored to a single input view and utilizing intrinsics token embeddings to resolve scale ambiguity [S1][S2, unofficial]. This approach achieves superior reconstruction quality compared to pose-dependent methods, particularly in scenarios with minimal view overlap [S1][S2, unofficial].
+NoPoSplat is a 3D Gaussian Splatting method that eliminates the requirement for known camera poses during reconstruction [S1][S2, unofficial]. It addresses the critical limitation of pose-dependent methods by anchoring the canonical coordinate system to a single input view and introducing intrinsics token embeddings to resolve scale ambiguity [S1][S2, unofficial]. This approach achieves superior novel view synthesis quality, particularly in scenarios with minimal view overlap [S1][S2, unofficial].
 
 ## How it works
-**Inputs:** A set of input images with unknown camera poses and known or estimated intrinsics.
-**Outputs:** A set of 3D Gaussian primitives (position, covariance, opacity, spherical harmonics coefficients) defined in a canonical coordinate system.
+NoPoSplat operates within the framework of Learning and Training Methods for Gaussian Avatar Reconstruction, building on [Gaussian Avatar Reconstruction](1575-gaussian-avatar-reconstruction.md). Unlike standard pipelines that require pre-computed camera poses, NoPoSplat jointly optimizes the scene representation and camera parameters implicitly through a canonical view anchoring strategy.
+
+**Inputs and Outputs:**
+*   **Input:** A set of unposed input images (typically sparse views).
+*   **Output:** A set of 3D Gaussians defined in a canonical coordinate system, along with learned intrinsics embeddings.
 
 **Data Structures:**
-The method relies on a neural network (typically a transformer or MLP-based decoder) that outputs Gaussian parameters. The key data structure is the set of tokens representing the scene, which are decoded into Gaussian attributes.
+The method utilizes a set of 3D Gaussians $\mathcal{G} = \{g_i\}$. Each Gaussian $g_i$ is defined by:
+*   Mean position $\mu_i$ in the canonical space.
+*   Rotation $R_i$ (quaternion).
+*   Scale $S_i$.
+*   Opacity $\alpha_i$.
+*   Color $C_i$ (SH coefficients).
+
+Additionally, the method maintains **intrinsics token embeddings** $E_{intrinsics}$, which are learnable vectors associated with the camera parameters to resolve scale ambiguity [S1][S2, unofficial].
 
 **Steps:**
-1.  **Anchor Selection:** Select one input image as the anchor view. The canonical coordinate system is defined relative to this view [S1][S2, unofficial].
-2.  **Tokenization:** Encode the input images and their camera intrinsics into tokens. Unlike methods that use full pose matrices, NoPoSplat uses intrinsics token embeddings to provide scale information [S1][S2, unofficial].
-3.  **Feature Aggregation:** Process the tokens through a neural network (e.g., transformer blocks) to capture spatial relationships and resolve ambiguities arising from the lack of known poses [S1][S2, unofficial].
-4.  **Gaussian Decoding:** Decode the processed tokens into 3D Gaussian parameters (mean, covariance, opacity, color) in the canonical coordinate system [S1][S2, unofficial].
-5.  **Rendering:** Render the Gaussians using differentiable splatting [S1][S2, unofficial].
-6.  **Optimization:** Minimize the photometric loss between rendered images and input images to refine the Gaussian parameters and network weights [S1][S2, unofficial].
+1.  **Canonical Anchoring:** Define a canonical coordinate system anchored to a single reference input view [S1][S2, unofficial]. This view serves as the origin for the canonical space, removing the need for external pose estimation.
+2.  **Intrinsics Embedding:** Initialize learnable intrinsics token embeddings $E_{intrinsics}$ [S1][S2, unofficial]. These embeddings are used to parameterize the camera intrinsics (focal length, principal point) implicitly, allowing the model to adapt to the scale and projection of the input views without explicit pose inputs.
+3.  **Gaussian Initialization:** Initialize the 3D Gaussians $\mathcal{G}$ in the canonical space. This can be done via structure-from-motion (SfM) points if available, or randomly, but the key is that they are defined relative to the anchored view [S1][S2, unofficial].
+4.  **Differentiable Rendering:** Render the Gaussians to image space for each input view. The projection matrix for each view is constructed using the learned intrinsics embeddings $E_{intrinsics}$ and the relative pose of the view with respect to the anchored canonical frame [S1][S2, unofficial].
+5.  **Optimization:** Minimize the photometric loss between the rendered images and the input images. The optimization updates both the Gaussian parameters ($\mu_i, R_i, S_i, \alpha_i, C_i$) and the intrinsics embeddings $E_{intrinsics}$ [S1][S2, unofficial].
 
-**Formulas:**
-Let $I_i$ be the $i$-th input image. Let $K_i$ be the intrinsic matrix for view $i$. The canonical coordinate system is anchored to view $I_0$. The Gaussian parameters $\theta$ are decoded from tokens $T$ generated by the network $f$:
-$$ \theta = f(T(I_0, K_0, ..., I_n, K_n)) $$
-The rendered image $R$ is computed via differentiable splatting:
-$$ R = \text{Splat}(\theta) $$
-The loss is:
-$$ L = \sum_i \| R_i - I_i \|^2 $$
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-**Parameters:**
-*   Number of input views: Not specified, but optimized for sparse views [S1][S2, unofficial].
-*   Network architecture: Transformer or MLP-based decoder [S1][S2, unofficial].
+```python
+# NoPoSplat Optimization Loop
+# Inputs: Images I_1, ..., I_N (unposed)
+# Outputs: Gaussians G, Intrinsics Embeddings E_intrinsics
 
-**Edge Cases:**
-*   **Scale Ambiguity:** Resolved by intrinsics token embeddings [S1][S2, unofficial].
-*   **Minimal View Overlap:** The method is specifically noted to perform well in this scenario [S1][S2, unofficial].
+# 1. Initialization
+G = initialize_gaussians(canonical_anchor=view_1) # [G]
+E_intrinsics = learnable_embedding(num_views=N)
+
+# 2. Optimization Loop
+for epoch in range(max_epochs):
+    for view_idx in range(N):
+        # Construct projection using learned intrinsics
+        # The pose is relative to the anchored canonical view
+        intrinsics_params = decode_intrinsics(E_intrinsics[view_idx])
+        P = construct_projection_matrix(intrinsics_params, relative_pose=view_idx)
+        
+        # Render
+        rendered_image = differentiable_splatting(G, P)
+        
+        # Compute Loss
+        loss = photometric_loss(rendered_image, I[view_idx])
+        
+        # Backpropagate to update G and E_intrinsics
+        loss.backward()
+    
+    optimizer.step()
+    optimizer.zero_grad()
+```
+
+**Edge Cases and Pitfalls:**
+*   **Scale Ambiguity:** Without known poses, scale ambiguity is inherent. The intrinsics token embeddings are critical to resolve this [S1][S2, unofficial].
+*   **Minimal View Overlap:** NoPoSplat is specifically designed to handle minimal view overlap, where traditional pose estimation fails [S1][S2, unofficial].
+*   **Anchor View Selection:** The choice of the anchored view can impact convergence. It should be a representative view with good coverage [S1][S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Strengths:** Eliminates the need for known camera poses; superior quality in sparse view scenarios with minimal overlap [S1][S2, unofficial].
-*   **Limitations:** Relies on the accuracy of intrinsics embeddings to resolve scale; performance may degrade if intrinsics are incorrect [S1][S2, unofficial].
-*   **When to use:** When camera poses are unknown or unreliable, and input views are sparse [S1][S2, unofficial].
-*   **When not to use:** When high-quality pose estimation is available and dense views are present, other methods may be more efficient [S1][S2, unofficial].
+*   **Time Complexity:** Depends on the number of Gaussians and views. Optimization is iterative and requires differentiable rendering per view per epoch.
+*   **Memory Complexity:** Proportional to the number of Gaussians and the size of the intrinsics embeddings.
+*   **Strengths:** Eliminates the need for external pose estimation (e.g., COLMAP), which can be error-prone or impossible in sparse view scenarios. Robust to minimal view overlap [S1][S2, unofficial].
+*   **Limitations:** May be slower to converge than pose-fixed methods due to the joint optimization of geometry and camera parameters. Performance depends on the effectiveness of the intrinsics embeddings in resolving scale [S1][S2, unofficial].
+*   **When to Use:** Sparse view reconstruction, scenarios where camera poses are unknown or unreliable, and applications requiring robust novel view synthesis with minimal input views [S1][S2, unofficial].
+*   **When Not to Use:** When high-quality, known camera poses are available and computational efficiency is critical, as pose-fixed methods may converge faster.
 
 ## Background
-NoPoSplat was introduced to address critical limitations in existing 3D Gaussian Splatting methods that require known camera poses [S1][S2, unofficial]. It builds on the principles of Gaussian Splatting [S1][S2, unofficial] and extends them to handle unposed inputs by leveraging a canonical coordinate system and intrinsics embeddings [S1][S2, unofficial]. The method is cited in recent surveys on 3D Gaussian Splatting [S1][S2, unofficial].
+NoPoSplat was introduced to address the limitations of existing 3D Gaussian Splatting methods that rely on known camera poses [S1][S2, unofficial]. It was developed as part of the broader effort to make Gaussian Splatting more accessible and robust in real-world scenarios where pose information is not readily available [S1][S2, unofficial]. The method builds on the principles of differentiable rendering and parametric priors established in [Gaussian Avatar Reconstruction](1575-gaussian-avatar-reconstruction.md) [S1][S2, unofficial].
 
 ## Sources
 [S1] From Volume Rendering to 3D Gaussian Splatting: Theory and Applications, https://doi.org/10.1109/sibgrapi67909.2025.11223276, fetched 2026-10-26

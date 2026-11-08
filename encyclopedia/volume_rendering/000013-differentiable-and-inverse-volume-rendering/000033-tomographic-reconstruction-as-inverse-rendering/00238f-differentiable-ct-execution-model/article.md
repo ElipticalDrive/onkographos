@@ -3,94 +3,126 @@
 Also called: Differentiable CT Operators, cell-constant ray integrator, diffct, diffct 2.2.1 API, diffct Differentiable CT Execution Model, diffct Native Projector/Backprojector, matched discrete adjoint, native forward model
 
 ## Overview
-The Differentiable CT Execution Model (diffct) is a PyTorch-based framework for differentiable computed tomography projection and reconstruction [S1, unofficial]. It implements a cell-constant attenuation field integrator along rays defined by per-view acquisition geometry, where the backprojector is the matched discrete adjoint of the forward projector [S1, unofficial]. It distinguishes itself from analytical methods (like FBP/FDK) by supporting arbitrary trajectories, trainable geometry, and native first-order derivatives for iterative optimization, while avoiding the separable-footprint approximations of earlier releases [S1, unofficial].
+The Differentiable CT Execution Model (implemented as `diffct`) is a PyTorch-based framework for differentiable computed tomography that integrates a cell-constant attenuation field along rays defined by arbitrary per-view acquisition geometry [S1, unofficial]. It solves the forward projection and matched discrete adjoint (backprojection) operations required for gradient-based tomographic reconstruction, supporting parallel, fan, and cone beam geometries with non-circular trajectories [S1, unofficial]. It sets itself apart from siblings like [Neural Adaptive Tomography (NeAT)](1862-neural-adaptive-tomography-neat.md) and [DiffVox](10071-diffvox.md) by providing a native, hardware-accelerated Siddon traversal kernel with explicit support for distributed execution and first-order geometry derivatives, rather than relying solely on general-purpose differentiable renderers or fixed circular assumptions [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D volume tensor $x$ of shape $(D, H, W)$ representing attenuation coefficients, and a trajectory object defining the source and detector positions for each view [S1, unofficial].
-*   **Output:** A sinogram tensor $y$ of shape $(N_{views}, U, V)$ representing line integrals, or a reconstructed volume via backprojection [S1, unofficial].
+The primary input is a volume tensor $x$ of shape $(D, H, W)$ representing the 3D attenuation field, and a trajectory definition specifying source and detector positions for each view. The forward operator $\mathcal{P}$ outputs a sinogram $y$ of shape $(N_{views}, U, V)$. The backprojector $\mathcal{P}^T$ takes a sinogram residual and outputs a volume gradient.
 
 **Data Structures:**
-*   **Trajectory:** Stores source positions $S_n$, isocenters $C_n$, and detector axes $e_{u,n}, e_{v,n}$ for each view $n$ [S1, unofficial]. For parallel beams, it stores ray direction $d_n$, origin $o_n$, and detector axis $e_{u,n}$ [S1, unofficial].
-*   **Volume Layout:** World coordinates are $(x, y, z)$ [S1, unofficial]. Volume arrays use $(z, y, x)$ corresponding to $(D, H, W)$ [S1, unofficial]. The volume is centered on the origin. For an axis with $N$ cells and spacing $s$, voxel $i$ has center $(i + 0.5 - N/2)s$ and faces at $(i - N/2)s$ and $(i + 1 - N/2)s$ [S1, unofficial].
-*   **Detector Layout:** Flat detectors use a half-cell-centered convention [S1, unofficial]. Detector coordinates $u_k, v_\ell$ are defined as:
-    $$
-    u_k = \left( k - \frac{U-1}{2} \right) \Delta u, \quad v_\ell = \left( \ell - \frac{V-1}{2} \right) \Delta v
-    $$
-    where $k \in [0, U-1]$ and $\ell \in [0, V-1]$ [S1, unofficial].
+*   **Volume:** Stored as a 3D tensor with dimensions $(D, H, W)$ corresponding to physical axes $(z, y, x)$. Voxel spacing $s$ is isotropic.
+*   **Trajectory:** Defined by per-view parameters. For parallel beams, this includes ray direction $d_n$, origin $o_n$, and detector axis $e_{u,n}$. For cone/fan beams, it includes source position $S_n$, isocenter $C_n$, and detector axes $e_{u,n}, e_{v,n}$.
+*   **Detector:** Flat detectors use a half-cell-centered convention. Detector coordinates $u_k, v_l$ are calculated as:
+    $$ u_k = \left( k - \frac{U-1}{2} \right) \Delta u, \quad v_l = \left( l - \frac{V-1}{2} \right) \Delta v $$
+    where $k \in [0, U-1]$ and $l \in [0, V-1]$.
+
+**Voxel Centering:**
+The volume is centered on the origin. For an axis with $N$ cells and spacing $s$, voxel $i$ has its center at $(i + 0.5 - N/2)s$ and faces at $(i - N/2)s$ and $(i + 1 - N/2)s$.
 
 **Algorithm Steps:**
 
-1.  **Construction:** Initialize `Projector(trajectory, volume_shape, detector_shape, ...)` [S1, unofficial]. The constructor records shapes, pitches, beam type, and execution choices [S1, unofficial]. If geometry has no trainable components, it is cloned [S1, unofficial]. If any trajectory component requires gradients, the geometry is read live on each call, and values needed for backward are saved [S1, unofficial]. Trainable components must be marked before construction [S1, unofficial].
+1.  **Construction:** Initialize `Projector` with trajectory, `volume_shape`, and `detector_shape`. The constructor records shapes, pitches, beam type, and execution choices. If geometry components require gradients, they are marked as trainable before construction; otherwise, they are cloned as static buffers.
 2.  **Forward Projection (`project(x)`):**
-    *   For each view $n$, define the ray geometry [S1, unofficial].
-    *   **Parallel Beam:** Ray equation: $r_{n,k}(t) = o_n + u_k e_{u,n} + t d_n$ [S1, unofficial]. Projection: $p_{par}(n, k) = \int_{\mathbb{R}} f(r_{n,k}(t)) dt$ [S1, unofficial].
-    *   **Cone/Fan Beam:** Detector point: $D_{n,k,\ell} = C_n + u_k e_{u,n} + v_\ell e_{v,n}$ [S1, unofficial]. Vector $L_{n,k,\ell} = D_{n,k,\ell} - S_n$ [S1, unofficial]. Unit direction $\hat{d} = L_{n,k,\ell} / \|L_{n,k,\ell}\|$ [S1, unofficial]. Projection: $p_f(n, k, \ell) = \int_0^{\|L_{n,k,\ell}\|} f(S_n + t \hat{d}) dt$ [S1, unofficial].
-    *   **Integration:** Use Siddon's grid-plane traversal to clip the ray segment to the volume box. Integrate the cell-constant attenuation field along the clipped segment [S1, unofficial].
+    *   For each view $n$, define the ray line equation. For parallel beams:
+        $$ r_{n,k}(t) = o_n + u_k e_{u,n} + t d_n $$
+        For cone/fan beams, the detector point is $D_{n,k,l} = S_n + u_k e_{u,n} + v_l e_{v,n}$ (assuming fan/cone geometry where $e_{v,n}$ is orthogonal to $e_{u,n}$). The direction vector is $L_{n,k,l} = D_{n,k,l} - S_n$. The unit direction is $\hat{d} = L_{n,k,l} / \|L_{n,k,l}\|$.
+    *   Clip the ray segment to the volume bounding box.
+    *   Use Siddon’s grid-plane traversal to compute intersection intervals $[t_{in}, t_{out}]$ with each voxel along the ray.
+    *   Integrate the cell-constant attenuation field $f(r)$ along the clipped ray segment:
+        $$ p(n, k, l) = \int_{t_{in}}^{t_{out}} f(r(t)) \, dt $$
+    *   Return the sinogram $y$.
 3.  **Backprojection (`backproject(y)`):**
-    *   Compute the matched discrete adjoint of the forward projection [S1, unofficial].
-    *   Map measurement residuals from the sinogram space back into the volume space using the transpose of the forward operator's Jacobian [S1, unofficial].
+    *   Compute the matched discrete adjoint of the forward projection.
+    *   Distribute the sinogram values $y(n, k, l)$ back into the volume voxels intersected by the corresponding rays.
+    *   The weight assigned to each voxel is proportional to the path length within that voxel, ensuring the backprojector is the exact transpose of the forward projector in the discrete domain.
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import torch
 import math
-from diffct import Projector, circular_trajectory_3d, fdk
 
-# 1. Define Trajectory
-# Circular orbit with 360 views, Source-to-Isocenter Distance (SID) 320, Source-to-Detector Distance (SDD) 512
-trajectory = circular_trajectory_3d(360, sid=320., sdd=512., device="cpu")
+# 1. Define Trajectory (Example: Circular Cone Beam)
+# sid: Source-to-Isocenter Distance, sdd: Source-to-Detector Distance
+def create_circular_trajectory(num_views, sid, sdd, device):
+    angles = torch.arange(num_views, device=device) * (2 * math.pi / num_views)
+    # Source position S_n
+    S = torch.stack([sid * torch.cos(angles), sid * torch.sin(angles), torch.zeros_like(angles)], dim=1)
+    # Isocenter C_n (fixed at origin)
+    C = torch.zeros((num_views, 3), device=device)
+    # Detector axes (simplified for cone beam)
+    # e_u is typically along x, e_v along z in local frame, rotated by view angle
+    # For implementation, these are handled by the Projector class internals
+    return {
+        'S': S,
+        'C': C,
+        'num_views': num_views,
+        'sid': sid,
+        'sdd': sdd
+    }
 
 # 2. Initialize Projector
-# Volume shape: (128, 128, 128), Detector shape: (192, 128), Cone beam, detector spacing 1.0
-A = Projector(trajectory, (128, 128, 128), (192, 128), beam="cone", detector_spacing=1.)
+# volume_shape: (D, H, W), detector_shape: (U, V)
+# trajectory: dict from above
+projector = Projector(
+    trajectory=create_circular_trajectory(360, 320.0, 512.0, "cuda"),
+    volume_shape=(128, 128, 128),
+    detector_shape=(192, 128),
+    beam="cone",
+    detector_spacing=1.0
+)
 
-# 3. Prepare Volume
-# Initialize volume with ones, requires gradients for backprop
-x = torch.ones(A.volume_shape, device="cuda", requires_grad=True)
+# 3. Forward Projection
+x = torch.ones(projector.volume_shape, device="cuda", requires_grad=True)
+y = projector.project(x) # y shape: (360, 192, 128)
 
-# 4. Forward Projection
-# Computes sinogram y from volume x
-y = A.project(x)
+# 4. Backprojection (Adjoint)
+# Compute gradient of loss w.r.t sinogram (e.g., MSE residual)
+loss = (y - target_sinogram).pow(2).mean()
+loss.backward() # This triggers the adjoint operation internally if using autograd
+# Or explicitly:
+adjoint = projector.backproject(y)
 
-# 5. Backprojection
-# Computes adjoint (gradient of projection w.r.t volume) from sinogram y
-adjoint = A.backproject(y)
-
-# 6. Analytical Reconstruction (Optional)
-# Angles in radians
+# 5. Analytical Reconstruction (Optional, non-differentiable w.r.t geometry)
 angles = torch.arange(360, device="cuda") * (2 * math.pi / 360)
-# FDK reconstruction
-reconstruction = fdk(y, trajectory, A.volume_shape, angles, detector_spacing=1., isocenter=(0, 0, 0))
+reconstruction = fdk(
+    y, 
+    trajectory=create_circular_trajectory(360, 320.0, 512.0, "cuda"), 
+    volume_shape=(128, 128, 128), 
+    angles=angles, 
+    detector_spacing=1.0, 
+    isocenter=(0, 0, 0)
+)
 ```
 
-**Parameters:**
-*   **Data Type:** Native operations return `float32` data on the input device [S1, unofficial]. Data gradients are returned in the input dtype [S1, unofficial].
-*   **Voxel Spacing:** Must be isotropic [S1, unofficial].
-*   **Beam Types:**
-    *   Parallel: Stores $(d_n, o_n, e_{u,n})$.
-    *   Fan: Stores $(S_n, C_n, e_{u,n})$.
-    *   Cone: Adds $e_{v,n}$ orthogonal to $e_{u,n}$ [S1, unofficial].
-
 **Edge Cases and Pitfalls:**
-*   **Ray Clipping:** The ray segment is clipped to the volume box [S1, unofficial]. Rays do not extend through the detector or behind the source [S1, unofficial]. Source and detector-pixel coincidences are invalid [S1, unofficial].
+*   **Ray Clipping:** Rays are clipped to the volume box. Rays do not extend through the detector or behind the source. Source and detector-pixel coincidences are invalid [S1, unofficial].
 *   **Edge-on Detector:** The native flat path rejects detectors viewed edge-on from the source [S1, unofficial].
-*   **Float32 Stability:** At least one source or detector-center endpoint must lie within $10^6$ voxel lengths of the volume center, and both must lie within $10^{15}$ [S1, unofficial]. Sampled divergent surfaces apply corresponding checks; positions must remain finite in float32 [S1, unofficial].
-*   **Differentiability:** Cell-constant point-ray sampling does not integrate a pixel footprint and is only piecewise differentiable in geometry [S1, unofficial].
-*   **Analytical Limits:** FDK is approximate away from circular settings [S1, unofficial]. The helical extension is a slice-windowed approximation with coverage and truncation constraints [S1, unofficial]. Curved detectors and streamed/distributed analytical execution are outside the analytical contract [S1, unofficial].
+*   **Float32 Stability:** For stable float32 setup, at least one source or detector-center endpoint must lie within $10^6$ voxel lengths of the volume center, and both must lie within $10^{15}$ [S1, unofficial].
+*   **Differentiability:** Cell-constant point-ray sampling is only piecewise differentiable in geometry. Voxel spacing must be isotropic [S1, unofficial].
+*   **Analytical Limits:** FDK is approximate away from circular settings. The helical extension is a slice-windowed approximation with coverage and truncation constraints [S1, unofficial].
+
+## Subtopics
+
+### [Differential Rendering for CT Reconstruction](6462-differential-rendering-for-ct-reconstruction.md)
+Uses general differentiable renderers (e.g., Mitsuba 2) for end-to-end gradient computation, contrasting with diffct's specialized CUDA kernels.
+
+### [DiffVox](10071-diffvox.md)
+Optimizes a discrete voxel grid using physics-based rendering, similar to diffct's native path but potentially using different interpolation or traversal methods.
 
 ## Operating characteristics
-*   **Complexity:** Time complexity is proportional to the number of rays and the number of voxels intersected per ray (Siddon traversal) [S1, unofficial]. Memory complexity depends on the partitioning mode (view or spatial) [S1, unofficial].
-*   **Performance:** In a 512^3 experiment, cross-node view partitioning demonstrated up to 6.74× projection speedup on eight GPUs with checked numerical parity [S1, unofficial].
-*   **Strengths:** Supports arbitrary trajectories, trainable geometry, and native first-order derivatives [S1, unofficial]. Efficient multi-GPU execution via view and spatial partitions [S1, unofficial].
-*   **Limitations:** Does not integrate finite-area pixel footprints (point-ray sampling) [S1, unofficial]. Voxel spacing must be isotropic [S1, unofficial]. Analytical methods (FBP/FDK) are restricted to fixed geometry and do not support trainable acquisition parameters [S1, unofficial].
-*   **When to use:** Differentiable iterative reconstruction with arbitrary geometry or trainable calibration parameters [S1, unofficial].
-*   **When not to use:** When finite-area footprint integration is required, or when using curved detectors with analytical methods [S1, unofficial].
+*   **Time Complexity:** Linear with respect to the number of voxels intersected by rays and the number of views. Siddon traversal is efficient, typically $O(N_{views} \cdot N_{pixels} \cdot N_{voxels\_per\_ray})$.
+*   **Memory Complexity:** $O(N_{voxels} + N_{views} \cdot N_{pixels})$ for storing the volume and sinogram. Distributed modes increase memory usage due to replication strategies.
+*   **Performance:** In a 512^3 experiment, cross-node view partitioning demonstrated up to 6.74× projection speedup on eight GPUs [S1, unofficial].
+*   **Strengths:** Supports arbitrary trajectories, first-order geometry derivatives, and distributed execution. Native operations return float32 data on the input device.
+*   **Limitations:** Analytical FBP/FDK rejects trainable acquisition geometry. Cell-constant sampling does not integrate pixel footprints. Voxel spacing is constrained to be isotropic.
+*   **When to use:** When differentiable geometry calibration or arbitrary trajectory optimization is required within a PyTorch pipeline.
+*   **When not to use:** When pixel footprint integration is critical (use separable footprints if available in older versions, though 2.x does not expose them) or when non-isotropic voxels are needed.
 
 ## Background
-The Differentiable CT Execution Model (diffct) was developed by Yipeng Sun, Linda-Sophie Schneider, Chengze Ye, and Andreas Maier at the Pattern Recognition Lab, Friedrich-Alexander University Erlangen-Nürnberg [S1, unofficial]. It was released as version 2.2.1, extending earlier circular-orbit implementations to arbitrary trajectories [S1, unofficial]. It is used in PyTorch for differentiable programming, geometry calibration, and distributed reconstruction on CUDA GPUs [S1, unofficial].
+The Differentiable CT Execution Model (`diffct`) was developed by Yipeng Sun, Linda-Sophie Schneider, Chengze Ye, and Andreas Maier at the Pattern Recognition Lab, Friedrich-Alexander University Erlangen-Nürnberg [S1, unofficial]. It was released as version 2.2.1, extending earlier circular-orbit implementations to arbitrary trajectories. It addresses the need for differentiable tomographic operators that support complex acquisition geometries and distributed computing, bridging the gap between traditional algebraic reconstruction techniques and modern differentiable rendering frameworks [S1, unofficial].
 
 ## Sources
 [S1] diffct: Differentiable CT Operators from Circular Orbits to Arbitrary Trajectories, https://doi.org/10.20944/preprints202605.1446.v2, fetched 2026-10-26 (unofficial)

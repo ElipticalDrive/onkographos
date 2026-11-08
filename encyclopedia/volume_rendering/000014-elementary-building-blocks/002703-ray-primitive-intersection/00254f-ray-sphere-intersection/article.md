@@ -1,136 +1,153 @@
 # Ray-Sphere Intersection
+
 Also called: Analytical ray-sphere intersection, Quadratic Ray-Sphere Intersection, Quaternion-based Ray-Sphere Intersection, Ray-Sphere Intersection in Quaternion Space, Raymarching Sphere Hit Test, Sphere Hit Test, Sphere Ray Intersection, Sphere-Ray Intersection Check
 
 ## Overview
-Ray-sphere intersection computes the entry and exit points (or the nearest hit distance) where a parametric ray intersects a sphere defined by a center and radius [S5, S6, unofficial]. In volume rendering, this operation is primarily used to determine the marching bounds for ray-marching algorithms, ensuring samples are only taken within the volume's extent [S5, S6, unofficial]. It is distinct from [Sphere Intersection](1620-sphere-intersection.md) in that it solves for the intersection of a line (the ray) with a surface, whereas the latter typically refers to finding points on a sphere's surface satisfying other constraints (such as the 3-sphere trilateration variant) [G]. It is analytically exact and generally faster than iterative methods like [Implicit Surface and SDF Intersection](2795-implicit-surface-and-sdf-intersection.md) for simple spherical primitives [S8, unofficial].
+Ray-sphere intersection computes the geometric points where a ray intersects the surface of a sphere, providing the entry and exit distances along the ray parameter $t$. It solves the problem of efficiently determining if and where a viewing ray hits a spherical primitive, which is a fundamental building block for volume rendering [S1, S6, S7, unofficial]. Unlike [Ray-Triangle Intersection](909-general-ray-triangle-intersection-pl-cker-coordinates.md) which requires barycentric coordinate checks, or [Implicit Surface and SDF Intersection](2795-implicit-surface-and-sdf-intersection.md) which relies on iterative root-finding, this method uses a closed-form analytical solution to the quadratic equation derived from the sphere's implicit definition [S1, S6, unofficial].
 
 ## How it works
 **Inputs and Outputs**
-*   **Input**: Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$ (typically normalized), sphere center $\mathbf{c}$, sphere radius $r$, and optionally a ray segment $[t_{min}, t_{max}]$ [S1, S5, S6, unofficial].
-*   **Output**: Boolean hit status, intersection distance $t$, entry point $\mathbf{p}_{in}$, exit point $\mathbf{p}_{out}$, and surface normal $\mathbf{n}$ [S5, S6, S7, unofficial].
+*   **Input:** Ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ (typically normalized); Sphere defined by center $\mathbf{c}$ and radius $r$. Optional: ray segment bounds $[t_{min}, t_{max}]$.
+*   **Output:** Boolean hit status; intersection distance $t$; intersection point $\mathbf{p}$; surface normal $\mathbf{n}$. For volume rendering, entry and exit points $\mathbf{p}_{entry}, \mathbf{p}_{exit}$ are often required [S6, unofficial].
 
 **Data Structures**
-The sphere is typically stored as a struct containing:
-*   `Center`: A 3D vector $\mathbf{c} = (c_x, c_y, c_z)$ [S2, S5, unofficial].
-*   `Radius`: A scalar $r$ [S2, S5, unofficial].
-*   `Material`: Optional metadata [S2, unofficial].
+*   **Ray:** Struct containing `origin` (vec3) and `direction` (vec3).
+*   **Sphere:** Struct containing `center` (vec3) and `radius` (float) [S2, S5, S7, unofficial].
 
 **Method Steps**
-The standard analytical approach transforms the ray to local space or solves the quadratic equation directly in world space [S1, S6, unofficial].
+The standard analytical approach transforms the ray into the sphere's local coordinate system (where the sphere is centered at the origin) or solves directly in world space using vector algebra [S1, S6, unofficial].
 
-1.  **Compute Vector $L$**: Calculate the vector from the ray origin to the sphere center:
-    $$ \mathbf{L} = \mathbf{c} - \mathbf{o} $$
-    [S5, unofficial]
-
-2.  **Compute Quadratic Coefficients**:
-    The ray is defined as $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ [G]. Substituting into the sphere equation $|\mathbf{r}(t) - \mathbf{c}|^2 = r^2$ yields $At^2 + Bt + C = 0$ [G].
-    *   $A = \mathbf{d} \cdot \mathbf{d}$ (Squared length of direction) [S1, S5, unofficial]. If $\mathbf{d}$ is normalized, $A=1$.
-    *   $B = 2 (\mathbf{L} \cdot \mathbf{d})$ [S6, unofficial]. Note: Some implementations use $b = \mathbf{L} \cdot \mathbf{d}$ and adjust the quadratic formula denominator to $A$ instead of $2A$ [S2, unofficial]. We use the standard $B$ form here.
-    *   $C = \mathbf{L} \cdot \mathbf{L} - r^2$ [S1, S5, unofficial].
-
-3.  **Compute Discriminant**:
-    $$ \Delta = B^2 - 4AC $$
-    [S3, S5, unofficial]
-
-4.  **Evaluate Discriminant**:
-    *   If $\Delta < 0$, the ray misses the sphere. Return false [S5, unofficial].
-    *   If $\Delta = 0$, the ray is tangent. One solution exists.
-    *   If $\Delta > 0$, the ray intersects at two points.
-
-5.  **Compute Roots**:
-    $$ t_{1,2} = \frac{-B \pm \sqrt{\Delta}}{2A} $$
-    [S5, unofficial]
-    Ensure $t_1 \le t_2$ by swapping if necessary [S5, unofficial].
-
-6.  **Filter Roots**:
-    *   If both $t_1$ and $t_2$ are outside $[t_{min}, t_{max}]$, return false [S1, unofficial].
-    *   If $t_1 < t_{min}$, use $t_2$ as the hit distance if it is within bounds, else miss [S1, unofficial].
-    *   If $t_1 \ge t_{min}$, use $t_1$ as the entry point [S5, unofficial].
-    *   *Note*: Some implementations clamp negative $t$ values to 0.0, effectively treating intersections behind the camera as hits at the origin, which is generally incorrect for strict ray tracing but may be used in specific volume marching contexts [S5, unofficial].
-
-7.  **Compute Output Values**:
-    *   Entry point: $\mathbf{p}_{in} = \mathbf{o} + t_1 \mathbf{d}$ (if hit) [S5, unofficial].
-    *   Exit point: $\mathbf{p}_{out} = \mathbf{o} + t_2 \mathbf{d}$ (if hit) [S5, S6, unofficial].
-    *   Normal at hit point $\mathbf{p}$: $\mathbf{n} = \text{normalize}(\mathbf{p} - \mathbf{c})$ [S6, S8, unofficial].
+1.  **Compute Relative Vector:** Calculate the vector from the ray origin to the sphere center: $\mathbf{oc} = \mathbf{o} - \mathbf{c}$ [S1, S6, unofficial].
+2.  **Compute Quadratic Coefficients:**
+    *   $a = \mathbf{d} \cdot \mathbf{d}$ (Squared length of direction. If $\mathbf{d}$ is normalized, $a=1$) [S1, S6, unofficial].
+    *   $b = 2 (\mathbf{oc} \cdot \mathbf{d})$ [S1, S6, unofficial]. Note: Some implementations use `half_b = oc · d` and adjust the formula accordingly [S2, unofficial].
+    *   $c = \mathbf{oc} \cdot \mathbf{oc} - r^2$ [S1, S6, unofficial].
+3.  **Compute Discriminant:**
+    *   $\Delta = b^2 - 4ac$ [S1, S6, unofficial].
+    *   Alternatively, using the geometric projection method: Let $L = \mathbf{c} - \mathbf{o}$. Compute projection $t_{ca} = \mathbf{d} \cdot L$. Compute squared distance from ray line to center $d^2 = |L|^2 - t_{ca}^2$. Then $\Delta = r^2 - d^2$ (scaled by $a$) [S5, S7, unofficial].
+4.  **Check Intersection:**
+    *   If $\Delta < 0$, the ray misses the sphere. Return miss [S1, S6, unofficial].
+    *   If $\Delta = 0$, the ray is tangent. Return hit at $t = -b / (2a)$ [S6, unofficial].
+    *   If $\Delta > 0$, there are two roots.
+5.  **Compute Roots:**
+    *   $t_1 = \frac{-b - \sqrt{\Delta}}{2a}$
+    *   $t_2 = \frac{-b + \sqrt{\Delta}}{2a}$
+    *   Ensure $t_1 \le t_2$ [S6, unofficial].
+6.  **Filter Roots:**
+    *   If using a ray segment $[t_{min}, t_{max}]$, discard roots outside this range [S1, S2, unofficial].
+    *   If $t_1 < t_{min}$, use $t_2$ if $t_2 \ge t_{min}$. Otherwise, miss [S1, S2, unofficial].
+    *   If $t_1 \ge t_{min}$, use $t_1$ as the nearest hit [S1, S2, unofficial].
+    *   For volume rendering marching bounds, both $t_1$ and $t_2$ are used as entry and exit points, clamped to $[t_{min}, t_{max}]$ and non-negative values [S6, unofficial].
+7.  **Compute Output:**
+    *   Hit point: $\mathbf{p} = \mathbf{o} + t \mathbf{d}$ [S6, S9, unofficial].
+    *   Normal: $\mathbf{n} = \text{normalize}(\mathbf{p} - \mathbf{c})$ [S1, S7, S9, unofficial].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def ray_sphere_intersect(ray_origin, ray_direction, sphere_center, sphere_radius, t_min=0.0, t_max=float('inf')):
-    # 1. Vector from ray origin to sphere center
+def ray_sphere_intersection(ray_origin, ray_direction, sphere_center, sphere_radius, t_min=0.0, t_max=float('inf')):
+    """
+    Computes the intersection of a ray with a sphere.
+    
+    Args:
+        ray_origin: vec3, origin of the ray.
+        ray_direction: vec3, direction of the ray (should be normalized).
+        sphere_center: vec3, center of the sphere.
+        sphere_radius: float, radius of the sphere.
+        t_min: float, minimum distance along the ray (default 0.0).
+        t_max: float, maximum distance along the ray (default infinity).
+        
+    Returns:
+        tuple: (hit: bool, t: float, point: vec3, normal: vec3)
+    """
+    # 1. Compute relative vector from ray origin to sphere center
     oc = ray_origin - sphere_center
     
-    # 2. Quadratic coefficients
+    # 2. Compute quadratic coefficients
+    # a = d . d (1.0 if normalized)
     a = dot(ray_direction, ray_direction)
+    
+    # b = 2 * (oc . d)
     b = 2.0 * dot(oc, ray_direction)
+    
+    # c = oc . oc - r^2
     c = dot(oc, oc) - sphere_radius * sphere_radius
     
-    # 3. Discriminant
+    # 3. Compute discriminant
     discriminant = b * b - 4.0 * a * c
     
-    # 4. Check for intersection
+    # 4. Check if intersection exists
     if discriminant < 0.0:
-        return False, None, None, None
-        
-    sqrt_disc = sqrt(discriminant)
+        return (False, 0.0, vec3(0), vec3(0))
     
-    # 5. Roots
+    # 5. Compute roots
+    sqrt_disc = sqrt(discriminant)
     t1 = (-b - sqrt_disc) / (2.0 * a)
     t2 = (-b + sqrt_disc) / (2.0 * a)
     
-    # Ensure t1 is the smaller root
-    if t1 > t2:
-        t1, t2 = t2, t1
-        
-    # 6. Filter against ray segment
-    # If the closest hit is behind t_min, try the further hit
-    if t1 < t_min:
+    # 6. Filter roots based on ray segment [t_min, t_max]
+    # We want the smallest t >= t_min
+    t_hit = float('inf')
+    
+    if t1 >= t_min and t1 <= t_max:
+        t_hit = t1
+    elif t2 >= t_min and t2 <= t_max:
         t_hit = t2
     else:
-        t_hit = t1
-        
-    if t_hit > t_max:
-        return False, None, None, None
+        return (False, 0.0, vec3(0), vec3(0))
         
     # 7. Compute hit point and normal
     hit_point = ray_origin + ray_direction * t_hit
     normal = normalize(hit_point - sphere_center)
     
-    return True, t_hit, hit_point, normal
+    return (True, t_hit, hit_point, normal)
 ```
 
 **Edge Cases and Pitfalls**
-*   **Ray Origin Inside Sphere**: If $\mathbf{o}$ is inside the sphere, $C < 0$. The discriminant is positive, and one root will be negative (exit behind) and one positive (exit forward). The logic above handles this by selecting the smallest $t \ge t_{min}$. If $t_{min}=0$, it returns the exit point. For volume marching, both entry and exit are often needed; if the ray starts inside, entry is effectively $t_{min}$ or the negative root [S5, unofficial].
-*   **Precision Errors**: When the ray is tangent ($\Delta \approx 0$), floating-point errors can cause $\Delta$ to be slightly negative, resulting in a miss. A small epsilon tolerance may be applied to $\Delta$ [S6, unofficial].
-*   **Uninitialized Variables**: Incorrect implementations may reference the intersection distance $t$ before it is assigned when computing the normal, leading to garbage values [S6, unofficial].
-*   **Direction Normalization**: If $\mathbf{d}$ is not normalized, $A \neq 1$. The quadratic formula must use the computed $A$ [S5, unofficial].
+*   **Ray Origin Inside Sphere:** If the ray origin is inside the sphere, $c < 0$ and $\Delta > 0$. One root will be negative (behind the origin) and one positive. Standard filtering ($t \ge t_{min}$) handles this, returning the exit point if $t_{min}=0$ [S7, unofficial].
+*   **Tangent Ray:** $\Delta = 0$. The ray grazes the sphere. The hit point is valid, but the normal is well-defined [S6, unofficial].
+*   **Precision Errors:** Near-tangent rays or large coordinates can cause $\Delta$ to be slightly negative due to floating-point error, resulting in a false miss. A small epsilon tolerance on the discriminant check can mitigate this [G].
+*   **Unnormalized Direction:** If $\mathbf{d}$ is not normalized, $a \neq 1$. The formula still holds, but $t$ represents distance scaled by $|\mathbf{d}|^2$. Normalizing $\mathbf{d}$ is recommended for consistent $t$ values [S6, unofficial].
+*   **Quaternion Representation:** In quaternion-based formulations, the sphere equation is $\alpha_w(q\bar{q}) + \beta_w q + \bar{q}\bar{\beta}_w + \gamma_w = 0$. Substituting $q(t) = \tau + \omega t$ yields a quadratic in $t$ with coefficients derived from quaternion algebra [S4]. This is mathematically equivalent but computationally more expensive than vector algebra [S4].
 
 ## Subtopics
 
 ### [3-Sphere Intersection (Trilateration)](5144-3-sphere-intersection-trilateration.md)
-Computes the geometric points where the surfaces of three distinct spheres intersect. Used in sphere carving to generate new sample points on the boundary of a carved volume. It solves a system of three quadratic equations rather than a single ray-sphere intersection.
+Computes the intersection point of three spheres using trilateration, used for generating sample points in sphere carving.
 
-### [Sphere Intersection](1620-sphere-intersection.md)
-General term for finding points on a sphere satisfying specific constraints. In the context of this family, it often refers to point-sphere distance checks or other geometric queries distinct from the ray-parametric intersection.
+### [Ray-Splat Intersection (Sphere Approximation)](7123-ray-splat-intersection-sphere-approximation.md)
+Approximates Gaussian splats as spheres for faster intersection tests, trading geometric accuracy for performance.
+
+### [Spherical Medium Density Integration](9077-spherical-medium-density-integration.md)
+Analytically integrates density along a ray segment within a sphere with quadratic falloff, extending intersection to optical depth calculation.
+
+### [Pulsar Forward Pass (Sphere Intersection and Draw)](9396-pulsar-forward-pass-sphere-intersection-and-draw.md)
+GPU-accelerated method for differentiable sphere rendering, managing sphere draw info and priority queues for backward passes.
+
+### [Inverse Transforming Spheres](10196-inverse-transforming-spheres.md)
+Transforms sphere coefficients into kernel space (inverse Möbius transformation) to enable standard ray-sphere intersection tests on transformed distance fields.
 
 ## Operating characteristics
-*   **Time Complexity**: $O(1)$. The method involves a fixed number of arithmetic operations (dot products, square root) regardless of scene size [S5, S8, unofficial].
-*   **Memory Complexity**: $O(1)$. Requires storage for a few temporary vectors and scalars [S2, unofficial].
-*   **Performance**: Extremely fast. It is one of the fastest primitive intersection tests available, making it suitable for GPU execution in parallel threads [S8, unofficial].
-*   **Limitations**: Only applicable to spherical primitives. For complex volumes, the sphere must approximate the volume (e.g., bounding sphere), which can lead to overestimation of the marching distance and wasted samples if the sphere is much larger than the actual volume [S5, S7, unofficial].
-*   **When to Use**: When the volume or object is spherical or can be tightly bounded by a sphere. Ideal for early-outs in acceleration structures [S1, unofficial].
-*   **When Not to Use**: For non-spherical primitives or when tighter bounds are required (use [Ray-box intersection](776-ray-box-intersection.md) or [Ray-Tetrahedron Intersection](2525-ray-tetrahedron-intersection.md)).
+*   **Time Complexity:** $O(1)$ per sphere. The method involves a fixed number of arithmetic operations (dot products, square root) [S1, S6, unofficial].
+*   **Memory Complexity:** $O(1)$ auxiliary memory. No large data structures are required [S1, unofficial].
+*   **Performance:** Extremely fast compared to iterative methods like [Raymarching](1010-raymarching.md) or [Ray-Tetrahedron Intersection](2525-ray-tetrahedron-intersection.md). It is the preferred primitive for sphere-based scenes [S6, S9, unofficial].
+*   **Strengths:** Exact solution, no convergence issues, minimal branching [S1, S6, unofficial].
+*   **Limitations:** Only applicable to spherical primitives. Not suitable for complex geometries without decomposition [S1, unofficial].
+*   **When to Use:** When the scene contains spheres or when spheres are used as bounding volumes for other primitives [S1, S6, unofficial].
+*   **When Not to Use:** For non-spherical objects or when approximate intersection is acceptable and other primitives are more efficient [S10, unofficial].
 
 ## Background
-The analytical ray-sphere intersection is a fundamental technique in computer graphics. It is derived from substituting the parametric line equation into the implicit equation of a sphere [G]. It is widely used in volume rendering for determining marching bounds [S5, unofficial] and in path tracing for shading [S1, S3, unofficial]. The method is often implemented in local space to simplify calculations [S1, unofficial].
+Ray-sphere intersection is a fundamental technique in computer graphics, originating from the early days of ray tracing [S1, S6, unofficial]. It is widely used in volume rendering for determining marching bounds [S6, unofficial], in path tracing for shadow ray testing [S3, unofficial], and in real-time rendering for hit detection [S9, S10, unofficial]. The analytical solution is derived from substituting the parametric ray equation into the implicit sphere equation [S1, unofficial][S4]. Variations include quaternion-based formulations for conformal geometry [S4] and discrete raymarching approximations for hardware constraints [S10, unofficial].
 
 ## Sources
 [S1] ainagutierrez01/Volumetric-Path-Tracing-, https://github.com/ainagutierrez01/Volumetric-Path-Tracing-, fetched 2026-10-26 (unofficial)
 [S2] hexhowells/GoTracer, https://github.com/hexhowells/GoTracer, fetched 2026-10-26 (unofficial)
 [S3] Shibodd/volume_path_tracer, https://github.com/Shibodd/volume_path_tracer, fetched 2026-10-26 (unofficial)
-[S4] HectorArellanoDev/WebGPUVoxelConeTracing, https://github.com/HectorArellanoDev/WebGPUVoxelConeTracing, fetched 2026-10-26 (unofficial)
-[S5] erickTornero/realtime-volumetric-cloudscapes, https://github.com/erickTornero/realtime-volumetric-cloudscapes, fetched 2026-10-27 (unofficial)
-[S6] trimesh33/sdf, https://github.com/trimesh33/sdf, fetched 2026-10-27 (unofficial)
-[S7] ojaisnielsen/dtu-2010-cuda-volume-rendering, https://github.com/ojaisnielsen/dtu-2010-cuda-volume-rendering, fetched 2026-10-27 (unofficial)
-[S8] Ray Marching with Signed Distance Fields - Scribd, https://www.scribd.com/document/831412915/1-Ray-Marching-and-Signed-Distance-Fields, fetched 2026-10-27 (unofficial)
+[S4] Kernel-Reflection Sequences, https://doi.org/10.2312/stag.20161364, fetched 2026-10-26
+[S5] HectorArellanoDev/WebGPUVoxelConeTracing, https://github.com/HectorArellanoDev/WebGPUVoxelConeTracing, fetched 2026-10-26 (unofficial)
+[S6] erickTornero/realtime-volumetric-cloudscapes, https://github.com/erickTornero/realtime-volumetric-cloudscapes, fetched 2026-10-27 (unofficial)
+[S7] trimesh33/sdf, https://github.com/trimesh33/sdf, fetched 2026-10-27 (unofficial)
+[S8] ojaisnielsen/dtu-2010-cuda-volume-rendering, https://github.com/ojaisnielsen/dtu-2010-cuda-volume-rendering, fetched 2026-10-27 (unofficial)
+[S9] Ray Marching with Signed Distance Fields - Scribd, https://www.scribd.com/document/831412915/1-Ray-Marching-and-Signed-Distance-Fields, fetched 2026-10-27 (unofficial)
+[S10] Volumetric Rendering - Alan Zucconi, https://www.alanzucconi.com/2016/07/01/volumetric-rendering/, fetched 2026-10-30 (unofficial)

@@ -1,0 +1,518 @@
+OpenVDB - Sparse volume data structure and tools. Contribute to AcademySoftwareFoundation/openvdb development by creating an account on GitHub.
+
+Alternative stencil resolvers for VoxelBlockManager by swahtz · Pull Request #2263 · AcademySoftwareFoundation/openvdb · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+swahtz
+commented
+Jul 29, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Summary
+This PR focuses on two independent costs that are part of resolving a 3×3×3 stencil through the VoxelBlockManager: 27 root-down tree traversals (one per tap), and a 27-element per-thread index array to hold the result. This PR adds new resolver functions (alongside the existing computeBoxStencil) that address each cost, and one that addresses both.
+Each stencil shape comes in a plain and a Cached form, with a single convention stated on the class:
+<name> — resolves each tap by a root-down tree traversal. Thread-local like decodeInverseMap itself: no shared memory, no barrier, safe from divergent threads — the entire decode+resolve pipeline is.
+<name>Cached — the block cooperatively stages a per-leaf neighbour table in shared memory, so each tap is a direct in-leaf lookup. Substantially faster, but must be called by all threads (uses __syncthreads) and costs shared memory (the staged table only).
+Independently, compute<Name> materializes taps into a 27-slot array while forEach<Name> streams (tap, index) to a device-inlined callback, avoiding the per-thread array entirely.
+method
+shape
+resolution
+output
+computeBoxStencil (existing)
+27-tap
+tree walk
+materialized
+forEachBoxStencil
+27-tap
+tree walk
+streamed
+computeBoxStencilCached
+27-tap
+cached table
+materialized
+forEachBoxStencilCached
+27-tap
+cached table
+streamed
+computeCrossStencil
+7-tap
+tree walk
+materialized
+computeCrossStencilCached
+7-tap
+cached table
+materialized
+The cached resolvers exploit a structural property of the VBM: a block's voxels span few distinct, consecutive leaves, so the block cooperatively stages a per-leaf neighbour table in shared memory (built by all threads, not a leader) and each tap becomes a direct in-leaf lookup. A 3×3×3 stencil touches at most 7 neighbouring leaves, not 27 independent lookups. Blocks spanning more than MaxCachedLeaves fall back to per-tap traversal.
+Built on the register-decode API (#2258)
+This PR now stacks on #2258's consolidated thread-local decode (decodeInverseMap into registers; the shared-memory decodeInverseMaps is removed there). Every resolver takes the calling thread's decoded (leafIndex, voxelOffset) by value; the cached forms additionally take the block's firstLeafID and jumpMap and derive everything the staging needs from that metadata — the block's first leaf is firstLeafID, and the spanned-leaf count is 1 + popcount(jumpMap). Consequences:
+No materialized per-block maps exist anywhere: the leader election over smem_leafIndex[tID-1], its atomicMax span counter, and two of the three prologue barriers in the cached forms are gone (cachedLeafSpan is now a thread-local popcount).
+Shared memory is the resolver's table alone (ptxas -v, width 128): 3456 B for the cached box (down from 4228 B — the 512 B + 256 B map arrays and 4 B counter are gone), 896 B for the cached cross (down from 1668 B).
+The plain forms are divergent-safe end-to-end, decode included — previously the resolver was divergent-safe but the decode feeding it was cooperative.
+The one-thread-per-slot blockDim contract is dropped: resolvers operate on whatever slot the caller passes.
+#2258 should merge first; this branch includes its commits via merge.
+Measurements
+All six resolvers measured in one run, on one grid, against one baseline, with the same consumer: resolve the taps, then accumulate C interleaved sidecar channels per tap (box variants accumulate their 27, cross variants their 7). Sparse sphere shell: 1.29M active voxels across 9140 leaves, mean leaf occupancy 141/512. RTX PRO 6000 (sm_120), median of 50 iterations. Output is byte-exact within each stencil shape.
+One sidecar channel
+method
+shape
+resolution
+divergent-safe?
+smem
+output
+w128 ms
+w128 ×
+w512 ms
+w512 ×
+computeBoxStencil (existing)
+27-tap box
+tree walk
+yes
+none
+materialized
+0.1856
+1.00×
+0.2616
+1.00×
+forEachBoxStencil
+27-tap box
+tree walk
+yes
+none
+streamed
+0.1388
+1.34×
+0.1428
+1.83×
+computeBoxStencilCached
+27-tap box
+cached table
+no
+3456 B
+materialized
+0.1527
+1.22×
+0.1427
+1.83×
+forEachBoxStencilCached
+27-tap box
+cached table
+no
+3456 B
+streamed
+0.0844
+2.20×
+0.0875
+2.99×
+computeCrossStencil
+7-pt cross
+tree walk
+yes
+none
+materialized
+0.0434
+4.27×
+0.0474
+5.52×
+computeCrossStencilCached
+7-pt cross
+cached table
+no
+896 B
+materialized
+0.0318
+5.84×
+0.0394
+6.64×
+Speedups share the computeBoxStencil baseline — noting that the cross resolvers deliberately resolve 7 taps rather than 27, which is the point of matching the resolver to the stencil shape. Throughout, a pair like 2.20× / 2.99× means BlockWidth 128 / BlockWidth 512.
+What each technique contributes
+Streaming alone removes the 27-element index array; caching alone removes the tree walks. The costs are independent, so fusing them beats either — 2.20× / 2.99× versus 1.34× / 1.83× (streaming) and 1.22× / 1.83× (caching).
+Matching the resolver to the stencil shape is the largest single lever: the cross resolvers are 4.3–6.6×.
+Feature width erodes every margin
+At 8 sidecar channels the taps × C payload gather (identical for all resolvers) starts to dominate: forEachBoxStencilCached 1.47× / 2.12×, computeBoxStencilCached 1.22× / 1.48×, computeCrossStencilCached 4.37× / 4.59×. The ordering is unchanged.
+Register cost of materialization
+For the cached 27-tap consumer (ptxas -v, sm_120, one channel) the uint64_t st[27] array costs 22 registers and a 216-byte stack frame (62 → 40 registers, 216 B → 0 between computeBoxStencilCached and forEachBoxStencilCached; the 216 B is exactly 27 × sizeof(uint64_t)) — the relief the streaming variants capture.
+Validation
+Byte-exact within each stencil shape, at two levels: raw taps (all 27 slots of every thread materialized to global and compared bytewise — box resolvers vs computeBoxStencil, cross vs cross) and consumer output (the accumulated float channels compared bitwise), at block widths 128/512, on 16%–60% leaf-occupancy topology and at both feature widths measured. The resolvers change how a tap index is found, never which index.
+The TestNanoVDBCUDA.VoxelBlockManager_* unit tests pass on the merged branch.
+Notes
+The resolvers are additive; computeBoxStencil's move to by-value decoded slots is VBM select-based inverse-map decode #2258's API change, which this PR inherits. Callers choose between plain and cached forms on two axes that are genuinely theirs to weigh: whether the call site is uniform, and whether the block can spare the shared memory for the table (16 × 27 leaf pointers for the box, 16 × 7 for the cross — now the only shared memory in the pipeline).
+MaxCachedLeaves is 16.
+There is deliberately no forEachCrossStencil: a 7-element stencil is cheap enough to materialize that removing the array measured as a wash.
+This PR subsumes NanoVDB VBM: Streaming box-stencil #2262, left open for comparison until the design discussion concludes.
+swahtz
+added 11 commits
+July 23, 2026 04:38
+NanoVDB CUDA: select-based VoxelBlockManager inverse-map decode
+…
+6b2305e
+```
+Replace the O(nLeaves x 512) cooperative sweep in decodeInverseMaps with an
+O(1)-per-slot select: one thread per output slot ranks itself into its leaf via
+the jumpMap popcount, then locates its voxel with the leaf's 9-bit mPrefixSum plus
+an in-word __fns bit select. Same signature, byte-exact decode maps.
+
+Verified byte-exact on the VBM goldens for all consumers (decode/box/lap/weno) at
+widths 64/128/256/512, and faster for every consumer with no regression: decode-only
+2.17x/1.97x/1.62x/1.42x (w6/w7/w8/w9), 7-pt Laplacian -8.5..-15.4%, box/weno -4..-9%.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+NanoVDB: add pending changes entry for the select-based VBM decode
+…
+e564a47
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Additional explanatory comments and cleanup
+…
+ab56089
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+NanoVDB CUDA: streaming box-stencil callback API (forEachBoxStencil)
+…
+d28e977
+```
+Add VoxelBlockManager::forEachBoxStencil, which visits the 27 taps of the 3x3x3 box
+stencil and streams (tap, index) to a device-inlined callback in the same deterministic
+tap order as computeBoxStencil, without materializing the 27-element per-thread index
+array. Consumers that reduce or accumulate taps (looking each index up in the sidecar)
+avoid the stack frame and register pressure of the materialized form; callers needing
+random access to all 27 taps keep computeBoxStencil.
+
+Byte-exact with computeBoxStencil (identical output). Eliminating the st[27] index array
+saves 26 registers + a 216-byte per-thread stack frame (70->44 regs, 216B->0; ptxas -v,
+sm_120). On a real value-accumulating box filter the streaming path is 1.3-1.9x at 1 sidecar
+channel, tapering with feature width as the per-tap gather dominates (~1.07x at 16 channels,
+width 128; ~1.29x at 16 channels, width 512).
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+NanoVDB CUDA: consumer-matched cached-leaf stencil resolvers for Voxe…
+…
+b81f276
+```
+…lBlockManager
+
+Add computeCrossStencil (7-point cross) and computeBoxStencilCached (full 3x3x3 box).
+A block's voxels span few distinct, consecutive leaves, so the thread block cooperatively
+stages a per-spanned-leaf neighbor table in shared memory (built by ALL threads) and each
+stencil tap becomes a direct in-leaf lookup instead of a root-down tree traversal. Blocks
+spanning more than MaxCachedLeaves leaves fall back to per-tap traversal.
+
+Byte-exact with computeBoxStencil at block widths 64/128/256/512. Measured on Blackwell with
+value-accumulating filters over an Index-Grid sidecar (1-16 channels), on sparse and dense
+topology: the 7-tap cross filter is 4.1-6.8x at one channel (1.5-2.0x at 16), and the 27-tap
+cached box is 1.1-1.6x; both widen at larger block widths and narrow as the per-tap payload
+gather grows. Partial-tap consumers keep the naive computeBoxStencil, whose tap-level dead-code
+elimination already skips unread taps.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+NanoVDB CUDA: fused cached+streaming box-stencil resolver (forEachBox…
+…
+4b95465
+```
+…StencilCached)
+
+Combine the cached leaf table of computeBoxStencilCached with the streaming output of
+forEachBoxStencil: taps are resolved through the staged per-leaf neighbor table AND handed
+to a device-inlined callback, so a 27-tap consumer pays neither the 27 root-down traversals
+nor the 27-element per-thread array. The two costs are independent, so fusing them beats
+either technique alone.
+
+Byte-exact with computeBoxStencil at block widths 64/128/256/512. On a real value-
+accumulating filter over an Index-Grid sidecar: 1.85x (width 128) and 2.59x (width 512) over
+the naive resolution at one channel, versus 1.28x/1.54x for the cached table alone and
+1.33x/1.91x for streaming alone. Requires all threads in the block (cooperative table build),
+so plain forEachBoxStencil remains the option for divergent call sites.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+NanoVDB CUDA: add naive computeCrossStencil; rename cached form to co…
+…
+42bd941
+```
+…mputeCrossStencilCached
+
+Give the 7-point cross the same two forms as the box stencil, and state the naming
+convention on the class: <name> resolves each tap by a root-down traversal, uses no shared
+memory and is safe from divergent threads; <name>Cached stages a cooperative per-leaf table
+in shared memory, is substantially faster, and must be called by all threads.
+
+The naive cross is not merely an intent/symmetry API: resolving the 7 taps directly measured
+1.57x (width 128) and 1.75x (width 512) faster than calling computeBoxStencil and reading
+only the cross slots, i.e. the compiler does not fully eliminate the 20 unread taps. The
+cached form remains fastest at 2.13x/2.26x on the same consumer.
+
+Byte-exact with the naive box stencil for the cross slots at widths 64/128/256/512. No
+streaming (forEach) cross variant is provided: a 7-element stencil is cheap enough to
+materialize that removing the array measured as a wash.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+NanoVDB: add pending changes entry for the VBM stencil resolvers
+…
+47f83a9
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+NanoVDB CUDA: de-duplicate the cached VoxelBlockManager stencil resol…
+…
+821bd20
+```
+…vers
+
+The cached resolvers shared two pieces of copied code: the span-detection preamble
+(appearing three times) and, between computeBoxStencilCached and forEachBoxStencilCached,
+an entire table-staging and tap-resolution body that differed only in whether each tap was
+stored or handed to a callback.
+
+Extract the preamble as cachedLeafSpan(), and express computeBoxStencilCached as
+forEachBoxStencilCached with a storing callback. No behaviour change: registers, stack and
+shared memory are identical (74 regs / 216 B stack / 4228 B smem for a materialized cached
+box kernel; 38 / 16 / 1668 for the cross), timings are within +-0.3% run-to-run noise, and
+all VBM goldens still pass byte-exact.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+NanoVDB CUDA: share the neighbor-table staging loop between the cache…
+…
+62145d5
+```
+…d resolvers
+
+Both cached resolvers staged their per-spanned-leaf table with the same strided loop:
+decompose the flat entry index into (slot, entry), special-case the entry holding the leaf
+itself, probe for the rest, and barrier. Extract that as stageLeafTable(), parameterised on
+the table width, the self entry, and the shift from a leaf origin to its n-th neighbor's
+origin - so each resolver keeps the entry ordering its lookup expects and its own cheap
+offset arithmetic.
+
+No behaviour change and no codegen cost: the cross kernel is unchanged at 38 registers /
+16 B stack / 1668 B smem and the materialized cached box improves slightly to 73 registers
+(from 74) at the same stack and shared memory; timings match the pre-refactor baseline and
+all VBM goldens still pass byte-exact.
+
+An earlier attempt that unified the offset arithmetic too - mapping each entry onto a 3x3x3
+spoke id and decomposing that back into per-axis offsets - measured ~0.9% slower on the cross
+resolver, because it replaced a single-axis add with an encode/decode round trip.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+NanoVDB CUDA: spell out the abbreviated locals in the cached stencil …
+…
+76b32d3
+```
+…resolvers
+
+Rename the terse identifiers introduced with the cached resolvers to read as plain English,
+matching the naming used elsewhere in this file: c/slot/n -> entry/leafSlot/neighborID,
+nSpanned -> spannedLeafCount, firstSpanned -> firstLeaf, nl -> neighborLeaf,
+cached -> isCached, vi/vj/vk -> voxelX/Y/Z, li/lj/lk -> leafX/Y/Z, and sSpannedCount ->
+sSpannedLeafCount. Also note why the cross lookup tests (voxelOnAxis + dir) & ~7, i.e.
+whether the tap steps off the leaf on that axis.
+
+Comments and identifiers only. Registers, stack and shared memory are unchanged (38/16/1668
+for the cross kernel, 73/216/4228 for the materialized cached box) and all VBM goldens still
+pass byte-exact.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+self-assigned this
+Jul 29, 2026
+swahtz
+added
+the
+nanovdb
+label
+Jul 29, 2026
+swahtz
+and others
+added 3 commits
+July 31, 2026 02:28
+NanoVDB CUDA: assert the one-thread-per-slot contract in the stencil …
+…
+d084783
+```
+…resolvers
+
+Every stencil resolver resolves the taps of the decoded slot with its own thread index
+(smem_leafIndex[tID]), so the block must be launched with blockDim.x == BlockWidth. That
+requirement was neither documented nor checked: a smaller block silently skipped the slots
+past blockDim.x, and a larger one read smem_leafIndex past the end of a BlockWidth-sized
+array and could then index an out-of-range leaf.
+
+Add NANOVDB_ASSERT(blockDim.x == BlockWidth) to the five resolvers and state the contract on
+the class, noting that decodeInverseMaps is deliberately more permissive - it strides over
+the slots, so it fills the maps correctly for any blockDim.x.
+
+Debug-build only. Verified that a deliberate blockDim.x = BlockWidth/2 launch now trips the
+assertion, that the correct launch still passes the VoxelBlockManager_ValueOnIndex unit-test
+path (250047 comparisons, zero mismatches), and that all VBM goldens still pass.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+NanoVDB CUDA: consolidate VBM decode to a thread-local per-slot API
+…
+0adc072
+```
+Replace the cooperative shared-memory decodeInverseMaps with decodeInverseMap:
+a per-slot decode into registers (no shared memory or synchronization; callable
+from divergent threads), factored into jumpMapRank + selectVoxelInLeaf helpers.
+computeBoxStencil now takes the decoded (leafIndex, voxelOffset) by value.
+Block-level facts formerly read from the materialized maps derive directly from
+the VBM metadata: the block's first leaf is firstLeafID, slot p starts a new
+leaf iff jumpMap bit p is set, and the spanned-leaf count is 1 + the jumpMap
+popcount.
+
+Decode maps and all 27 box-stencil taps verified byte-exact against the prior
+select decode at widths 64/128/512 across 16-86% leaf occupancy. Decode-only
++14..17% at width 128 and +8..13% at width 512 over the prior select, neutral
+at width 64; vs master's sweep: 1.56-2.08x (w7) and 1.24-1.68x (w9) across the
+sparsity range.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Merge branch 'nanovdb-vbm-select-decode': rework resolvers to the reg…
+…
+abe1982
+```
+…ister decode
+
+Resolve the semantic conflict between the consolidated thread-local decode
+(decodeInverseMap into registers; shared-memory decodeInverseMaps removed) and
+the stencil resolvers, which consumed the materialized per-block maps:
+
+- Every resolver now takes the calling thread's decoded (leafIndex, voxelOffset)
+  by value; the plain forms (forEachBoxStencil, computeCrossStencil) become
+  end-to-end thread-local - no shared memory or barrier anywhere in the
+  decode+resolve pipeline, safe from divergent threads.
+- The cached forms take the block's firstLeafID and jumpMap and derive the
+  spanned-leaf count as 1 + the jumpMap popcount (cachedLeafSpan is now a
+  thread-local popcount; the shared counter, atomicMax leader election, and two
+  of the three prologue barriers are gone). Shared memory drops to the staged
+  table alone: 4228 -> 3456 B for the cached box at width 128, 1668 -> 896 B
+  for the cached cross.
+- The one-thread-per-slot blockDim asserts are dropped: resolvers operate on
+  whatever slot the caller passes.
+
+All six resolvers verified byte-exact within their stencil shape (box vs box,
+cross vs cross, all 27 taps compared) at widths 128/512 on 16% and 60% leaf
+occupancy; VoxelBlockManager unit tests pass.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+marked this pull request as ready for review
+August 18, 2026 00:23
+swahtz
+requested review from
+Idclip,
+apradhana,
+danrbailey,
+jmlait,
+kmuseth and
+richhones
+as code owners
+August 18, 2026 00:23
+swahtz
+added 2 commits
+August 21, 2026 10:22
+NanoVDB CUDA: preserve decodeInverseMaps as a wrapper over the per-sl…
+…
+52d6ab0
+```
+…ot decode
+
+Restore the cooperative decodeInverseMaps with its pre-existing signature as a
+thin wrapper that materializes all BlockWidth slots via decodeInverseMap
+(grid-striding over the slots, ending in __syncthreads), so existing callers
+keep compiling and behaving unchanged. The per-slot decodeInverseMap remains
+the preferred form for consumers that only read their own slot's result.
+
+The unit test decodes through the wrapper (which exercises decodeInverseMap
+internally) and resolves via the by-value computeBoxStencil; both
+VoxelBlockManager tests pass.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Merge branch 'nanovdb-vbm-select-decode': pick up the restored decode…
+…
+1964758
+```
+…InverseMaps wrapper
+
+decodeInverseMaps returns with its pre-existing signature as a thin cooperative
+wrapper over the per-slot decodeInverseMap. The stencil resolvers are unchanged:
+they continue to take the decoded (leafIndex, voxelOffset) by value, so nothing
+on this branch consumes the wrapper.
+
+All six resolvers re-verified byte-exact within their stencil shape at widths
+128/512; VoxelBlockManager unit tests pass (now decoding through the wrapper).
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+mentioned this pull request
+Aug 20, 2026
+NanoVDB: output-proportional CPU VBM inverse-map decode, sharing rank/select primitives with the CUDA decode
+#2290
+Open
+swahtz
+changed the base branch from
+master
+to
+develop/nanovdb
+October 28, 2026 03:03
+swahtz
+added 3 commits
+October 28, 2026 16:10
+Merge remote-tracking branch 'upstream/develop/nanovdb' into nanovdb-…
+…
+c16e4b0
+```
+…vbm-stencil-resolvers-merge
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+# Conflicts:
+#	nanovdb/nanovdb/tools/cuda/VoxelBlockManager.cuh
+```
+NanoVDB CUDA: test the VoxelBlockManager stencil resolvers
+…
+b31025b
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+NanoVDB CUDA: fix unused-lambda warning in the VBM stencil resolver test
+…
+376b6c2
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+nanovdb
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

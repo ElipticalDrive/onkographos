@@ -2,7 +2,7 @@
 Also called: 2D Image Processing for NPR, G-buffer approach, Intermediate geometric buffers, Pixel-Based Geometric Buffer Approach
 
 ## Overview
-Geometric Buffers (G-buffers) is a Non-Photorealistic Rendering (NPR) technique that decouples geometric analysis from shading by storing per-pixel geometric properties (e.g., depth, normals) in intermediate 2D images [S1, unofficial]. It solves the problem of efficiently generating illustrative effects for complex 3D volumes by leveraging fast 2D image processing algorithms instead of expensive 3D analytic computations [S1, unofficial]. Unlike sibling methods that may compute shading or illumination directly in 3D space, G-buffers provide hidden surface elimination for free and allow NPR parameters to be tweaked interactively without re-traversing the volume [S1, unofficial]. Builds on [Illustrative and non-photorealistic volume rendering](40-illustrative-and-non-photorealistic-volume-rendering.md).
+Geometric Buffers (G-buffers) is a Non-Photorealistic Rendering (NPR) technique that decouples geometric analysis from shading by storing per-pixel geometric properties (e.g., depth, normals) in intermediate 2D images [S1, unofficial]. It solves the problem of efficiently generating illustrative effects for complex 3D volumes by leveraging fast 2D image processing algorithms instead of expensive 3D analytic computations [S1, unofficial]. Unlike sibling methods that may compute shading or illumination directly in 3D space, G-buffers provide hidden surface elimination for free and allow NPR parameters to be tweaked interactively without re-traversing the volume [S1, unofficial].
 
 ## How it works
 **Inputs:** A 3D volume dataset, camera position, and camera orientation [S1, unofficial].
@@ -36,10 +36,10 @@ Geometric Buffers (G-buffers) is a Non-Photorealistic Rendering (NPR) technique 
 ## Subtopics
 
 ### Reconstruction and Interpolation
-Addresses the mismatch between low-resolution volume data and high-resolution NPR output. It is chosen when source volumes are significantly smaller than the target image to mitigate Nyquist limit artifacts. See [Reconstruction and Interpolation](link).
+Addresses the mismatch between low-resolution volume data and high-resolution NPR output [S1, unofficial]. It is chosen when source volumes are significantly smaller than the target image to mitigate Nyquist limit artifacts [S1, unofficial]. See [Reconstruction and Interpolation](link) [S1, unofficial].
 
 ### Extensions for Transparency
-Modifies the opaque assumption to handle semi-transparent or reflective surfaces. It is chosen when the scene requires rendering of non-opaque objects. See [Extensions for Transparency](link).
+Modifies the opaque assumption to handle semi-transparent or reflective surfaces [S1, unofficial]. It is chosen when the scene requires rendering of non-opaque objects [S1, unofficial].
 
 ## Operating characteristics
 *   **Time Complexity:** Dominated by the single 3D volume traversal [S1, unofficial]. Subsequent NPR effect generation is fast since much of the processing is done in 2D rather than 3D [S1, unofficial].

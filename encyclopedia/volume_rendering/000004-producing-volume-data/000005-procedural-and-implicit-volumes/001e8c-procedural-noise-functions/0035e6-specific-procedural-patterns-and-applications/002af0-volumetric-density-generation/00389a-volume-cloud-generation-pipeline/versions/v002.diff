@@ -1,0 +1,270 @@
+--- v001.md
++++ v002.md
+@@ -1,91 +1,197 @@
+ # Volume Cloud Generation Pipeline
+ 
+-Also called: Noise-Cloud Pipeline, Procedural Cloud Volume Generation
++Also called: Procedural Cloud Volume Generation, Noise-Based Cloud Density Field
+ 
+ ## Overview
+-The Volume Cloud Generation Pipeline generates a patchy, volumetric density field for cloud rendering by applying procedural noise functions with domain warping and specific boundary envelopes. It solves the problem of creating realistic or stylized cloud patches with coherent vertical structure and soft, non-rectangular edges. It differs from its parent [Volumetric Density Generation](4894-volumetric-density-generation.md) by incorporating multi-scale fractal noise, domain warping for organic texture, and explicit boundary handling for layer clouds, rather than relying solely on a power function and threshold on a single noise field.
++The Volume Cloud Generation Pipeline generates a 3D volumetric density field representing clouds by applying procedural noise functions with domain warping, boundary envelopes, and style-specific shaping. It solves the problem of creating physically plausible, non-repeating cloud patches with controlled edge softness and vertical structure. It differs from its parent [Volumetric Density Generation](4894-volumetric-density-generation.md) by incorporating multi-scale domain warping, specific boundary fade functions, and distinct "realistic" vs. "cartoon" style pipelines, rather than relying solely on a power function and threshold on a single noise field [S1, unofficial].
+ 
+ ## How it works
+-The pipeline generates two 3D arrays: `density` (uint8, 0-255) and `disturbance` (uint8, 0-255), both of size `size x size x size` where `size` is `params.resolution`. It also produces a metadata dictionary. The process is divided into initialization, per-slice noise generation, boundary application, and final encoding.
++**Inputs:**
++- `params`: A configuration object containing:
++  - `resolution` (int): The cubic dimension $N$ of the output volume.
++  - `seed` (int): Random seed for noise generation.
++  - `cloud_type_id` (int): Identifier for cloud type (e.g., cumulus, stratus).
++  - `style` (str): Either "realistic" or "cartoon".
++  - `disturbance_strength` (float): Controls flow/noise intensity.
++  - `detail` (float): Controls high-frequency noise contribution.
++  - `resolved_allow_boundary_overlap` (bool): Determines boundary handling strategy.
++- `cloud`: A cloud definition object containing:
++  - `default_allow_boundary_overlap` (bool).
++  - `LAYER_CLOUD_TYPE_IDS` (set of ints): Cloud types that support natural finite edges.
+ 
+-### Inputs and Outputs
+-- **Inputs**: `params` (resolution, seed, cloud_type_id, style, disturbance_strength, resolved_allow_boundary_overlap), `cloud` (default_allow_boundary_overlap), `seed` (int).
+-- **Outputs**: `density` (3D uint8 array), `disturbance` (3D uint8 array), `metadata` (dict).
++**Outputs:**
++- `density`: A 3D `uint8` array of shape $(N, N, N)$, where $N = \text{params.resolution}$. Values represent density scaled to $[0, 255]$.
++- `disturbance`: A 3D `uint8` array of shape $(N, N, N)$, representing flow or disturbance vectors.
++- `metadata`: A dictionary containing encoding details, dimensions, tile layout, axis order (Z, Y, X), and channel meanings (R=density, G=flow, B=0, A=255).
+ 
+-### Data Structures
+-- `density`: `np.ndarray` of shape `(size, size, size)`, dtype `uint8`.
+-- `disturbance`: `np.ndarray` of shape `(size, size, size)`, dtype `uint8`.
+-- `metadata`: Dictionary with keys: `encoding_version`, `dimensions` (size), `tile_layout` (cols=size, rows=1), `axis_order` ("Z,Y,X"), `cloud_type_id`, `parameters`, `style`, `noise_profile`, `channel_meanings` (R=density, G=flow, B=0, A=255), `edge_profiles`.
++**Data Structures:**
++- **Noise Lattice**: A 3D `float32` array of shape $(F, F, F)$, where $F$ is a frequency integer. Values are uniformly distributed in $[0, 1]$.
++- **Coordinate Grids**: 2D `float32` arrays `x` and `y` of shape $(N, N)$, generated via `np.linspace(-1.0, 1.0, N)`.
++- **Cartoon Noise Set**: A container holding four tuples of noise lattices (macro, body, edge, flow).
+ 
+-### Noise Lattice Initialization
+-Three sets of periodic 3D value noise lattices are created using `_make_noise_lattices(seed, frequencies)`, which generates `frequency x frequency x frequency` arrays of random floats in [0,1] using `np.random.default_rng(seed)`.
+-1. `density_lattices`: Seed `seed + 101`, scales `(2, 3, 5, 8, 13)`.
+-2. `flow_lattices`: Seed `seed + 7919`, scales `(2, 4, 7, 11)`.
+-3. `boundary_lattices`: Seed `seed + 12113`, scales `(1, 2, 3, 5)`.
++**Core Functions:**
++1.  **`_smoothstep(t)`**: Returns $t^2(3 - 2t)$, clamped to $[0, 1]$.
++2.  **`_safe_edge_fade(distance, empty_border, fade_width)`**: Returns `_smoothstep(max(distance - empty_border, 0.0) / fade_width)`. Ensures the outermost voxels are zero while providing a smooth fade.
++3.  **`_fade(t)`**: Returns $t^2(3 - 2t)$? No, the source defines `_fade` as the Perlin quintic smoothstep: $t^6 - 15t^5 + 10t^4 + 1$? Let's check the source: `value * value * value * (value * (value * 6.0 - 15.0) + 10.0)`. This is $t^2(t(t(6t-15)+10)) = t^2(6t^2 - 15t + 10) = 6t^4 - 15t^3 + 10t^2$. This is the standard quintic interpolation function $6t^5 - 15t^4 + 10t^3$.
++4.  **`_value_noise_slice(lattice, x, y, z)`**: Samples periodic 3D value noise.
++    -   $px = (x + 1.0) \cdot 0.5 \cdot F$
++    -   $py = (y + 1.0) \cdot 0.5 \cdot F$
++    -   $pz = (z + 1.0) \cdot 0.5 \cdot F$
++    -   Integer indices $ix, iy, iz$ are floor of $px, py, pz$ modulo $F$.
++    -   Fractional parts $fx, fy, fz$ are passed through `_fade`.
++    -   Trilinear interpolation using `_fade` weights.
++5.  **`_fractal_value_noise(lattices, x, y, z, detail)`**: Generates multi-scale noise with domain warping.
++    -   Warp strength: $w = 0.12 + 0.08 \cdot \text{clip}(\text{detail}, 0, 1)$.
++    -   Warp fields $W_x, W_y, W_z$ are generated from the first three lattices using transformed coordinates:
++        -   $W_x = \text{noise}(L_0, x+y, y-z, z+x) - 0.5$
++        -   $W_y = \text{noise}(L_1, 2x-y, x+z, y+z) - 0.5$
++        -   $W_z = \text{noise}(L_2, x-z, 2y+z, x+y-z) - 0.5$
++    -   Warped coordinates: $X' = x + w W_x$, $Y' = y + w W_y$, $Z' = z + w W_z$.
++    -   Five transform sets are applied to $(X', Y', Z')$ to sample the lattices.
++    -   Weights: $w_0 = 1.0$, $w_i = (0.52 + \text{detail} \cdot 0.16)^i$ for $i > 0$.
++    -   Result: $\text{clip}(\sum w_i \cdot \text{sample}_i / \sum w_i, 0, 1)$.
+ 
+-If `style` is "cartoon", a `cartoon_noise_set` is generated from `seed` using `_make_cartoon_noise_set`, which creates macro, body, edge, and flow lattices with specific seeds and scales. A `shape_variation` is also generated from `seed` and `cloud_type_id`.
++**Algorithm Steps:**
+ 
+-### Coordinate Grids
++1.  **Initialization**:
++    -   Allocate `density` and `disturbance` as $(N, N, N)$ `uint8` arrays.
++    -   Generate coordinate grids `x`, `y` from `linspace(-1.0, 1.0, N)`.
++    -   Initialize lattices:
++        -   `density_lattices`: Seed `seed+101`, scales `(2, 3, 5, 8, 13)`.
++        -   `flow_lattices`: Seed `seed+7919`, scales `(2, 4, 7, 11)`.
++        -   `boundary_lattices`: Seed `seed+12113`, scales `(1, 2, 3, 5)`.
++    -   If `style == "cartoon"`:
++        -   Generate `cartoon_noise_set` from `seed`.
++        -   Generate `shape_variation` from `seed` and `cloud_type_id`.
++
++2.  **Boundary Setup**:
++    -   Determine `uses_natural_finite_edge`: True if `not params.resolved_allow_boundary_overlap` AND `cloud.default_allow_boundary_overlap` AND `cloud_type_id` in `LAYER_CLOUD_TYPE_IDS`.
++    -   If `uses_natural_finite_edge`:
++        -   Generate `top_surface_noise`, `bottom_surface_noise`, `thickness_noise` using `boundary_lattices` at Z offsets `-0.61`, `0.27`, `0.83` respectively, scaled by `detail_strength * 0.22/0.26/0.18`.
++    -   Calculate `xy_distance` as $\min(x+1, 1-x, y+1, 1-y)$.
++    -   Calculate `discrete_cloud_edge_guard` using `_safe_edge_fade(xy_distance, 0.0, 0.045)`.
++
++3.  **Volume Generation Loop** (for $z$ from $0$ to $N-1$):
++    -   Calculate $z_{coord} = 2 \cdot \frac{z}{N-1} - 1$ (mapping index to $[-1, 1]$). *Note: The source uses `z` in noise functions directly as a float coordinate, likely normalized. The coordinate grids `x, y` are in $[-1, 1]$. The noise functions expect inputs in $[-1, 1]$.*
++    -   **Style Branch**:
++        -   **Realistic**:
++            -   Generate `density_noise` = `_fractal_value_noise(density_lattices, x, y, z_coord, detail)`.
++            -   Generate `flow_noise` = `_fractal_value_noise(flow_lattices, x, y, z_coord, detail)`.
++            -   `raw_density` = `_density_slice(density_noise, z_coord)` (Implementation detail: likely applies a threshold/power function or direct mapping. The source notes say "Call `_density_slice` to get raw density". We assume this maps the noise to $[0,1]$ density).
++            -   `flow` = $0.5 + (\text{flow\_noise} - 0.5) \cdot \text{params.disturbance\_strength}$.
++        -   **Cartoon**:
++            -   Call `_cartoon_noise_fields` to get `macro`, `body`, `edge`, `flow`.
++            -   `raw_density` = `_cartoon_density_slice(macro, body, edge, z_coord)`.
++            -   `flow` = `_cartoon_flow_noise(flow, z_coord)`.
++    -   **Edge and Boundary Application**:
++        -   Calculate `z_distance` = $\min(z_{coord} + 1, 1 - z_{coord})$.
++        -   `z_fade` = `_safe_edge_fade(z_distance, SAFE_EMPTY_BORDER_Z, SAFE_FADE_WIDTH_Z)`.
++        -   If `uses_natural_finite_edge`:
++            -   Calculate `side_edge_noise` using `boundary_lattices` with offset coordinates $(x + z_{coord} \cdot 0.16, y - z_{coord} \cdot 0.11, z_{coord} \cdot 1.75 + 0.19)$.
++            -   Calculate `natural_xy_edge` via `_natural_xy_edge_envelope`.
++            -   Calculate `vertical_envelope` via `_finite_layer_vertical_envelope`.
++            -   Calculate `fixed_vertical` via `_fixed_layer_vertical_profile` (min 0.075).
++            -   `raw_density` *= `natural_xy_edge` * (`vertical_envelope` / `fixed_vertical`).
++        -   Else if `not params.resolved_allow_boundary_overlap`:
++            -   `raw_density` *= `discrete_cloud_edge_guard`.
++        -   Apply Z fade: `raw_density` *= `z_fade`.
++    -   **Storage**:
++        -   `density[z]` = `uint8(rint(clamp(raw_density, 0, 1) * 255))`.
++        -   `disturbance[z]` = `uint8(rint(clamp(flow, 0, 1) * 255))`.
++
++4.  **Metadata Construction**:
++    -   Create dictionary with encoding version, dimensions $(N, N, N)$, tile layout (cols=N, rows=1), axis order (Z, Y, X), cloud type info, parameters, style, noise profile, and channel meanings.
++
++5.  **Return**:
++    -   `VolumeResult(density, disturbance, metadata)`.
++
++**Pseudocode:**
++
+ ```python
+-axis = np.linspace(-1.0, 1.0, size, dtype=np.float32)
+-x, y = np.meshgrid(axis, axis, indexing="xy")
++import numpy as np
++
++def volume_cloud_generation_pipeline(params, cloud):
++    N = params.resolution
++    density = np.zeros((N, N, N), dtype=np.uint8)
++    disturbance = np.zeros((N, N, N), dtype=np.uint8)
++    
++    axis = np.linspace(-1.0, 1.0, N, dtype=np.float32)
++    x, y = np.meshgrid(axis, axis, indexing="xy")
++    
++    # Initialize lattices
++    density_lattices = _make_noise_lattices(params.seed + 101, (2, 3, 5, 8, 13))
++    flow_lattices = _make_noise_lattices(params.seed + 7919, (2, 4, 7, 11))
++    boundary_lattices = _make_noise_lattices(params.seed + 12113, (1, 2, 3, 5))
++    
++    cartoon_noise_set = None
++    shape_variation = None
++    if params.style == "cartoon":
++        cartoon_noise_set = _make_cartoon_noise_set(params.seed)
++        shape_variation = _generate_shape_variation(params.seed, params.cloud_type_id)
++        
++    uses_natural_finite_edge = (not params.resolved_allow_boundary_overlap and 
++                                cloud.default_allow_boundary_overlap and 
++                                params.cloud_type_id in cloud.LAYER_CLOUD_TYPE_IDS)
++    
++    xy_distance = np.minimum.reduce([x + 1.0, 1.0 - x, y + 1.0, 1.0 - y])
++    discrete_cloud_edge_guard = _safe_edge_fade(xy_distance, 0.0, 0.045)
++    
++    for z_idx in range(N):
++        z_coord = axis[z_idx]
++        
++        if params.style == "realistic":
++            density_noise = _fractal_value_noise(density_lattices, x, y, z_coord, params.detail)
++            flow_noise = _fractal_value_noise(flow_lattices, x, y, z_coord, params.detail)
++            raw_density = _density_slice(density_noise, z_coord)
++            flow = 0.5 + (flow_noise - 0.5) * params.disturbance_strength
++        else: # cartoon
++            macro, body, edge, flow_noise = _cartoon_noise_fields(cartoon_noise_set, x, y, z_coord, params.detail, params.disturbance_strength)
++            raw_density = _cartoon_density_slice(macro, body, edge, z_coord)
++            flow = _cartoon_flow_noise(flow_noise, z_coord)
++            
++        z_distance = np.minimum(z_coord + 1.0, 1.0 - z_coord)
++        z_fade = _safe_edge_fade(z_distance, 0.0, 0.045) # Assuming SAFE_EMPTY_BORDER_Z and SAFE_FADE_WIDTH_Z are 0.0 and 0.045 based on edge guard logic
++        
++        if uses_natural_finite_edge:
++            # Boundary noise generation omitted for brevity as per source complexity
++            # raw_density *= natural_xy_edge * (vertical_envelope / fixed_vertical)
++            pass
++        elif not params.resolved_allow_boundary_overlap:
++            raw_density *= discrete_cloud_edge_guard
++            
++        raw_density *= z_fade
++        
++        density[z_idx] = np.rint(np.clip(raw_density, 0.0, 1.0) * 255.0).astype(np.uint8)
++        disturbance[z_idx] = np.rint(np.clip(flow, 0.0, 1.0) * 255.0).astype(np.uint8)
++        
++    metadata = {
++        "encoding_version": 1,
++        "dimensions": (N, N, N),
++        "tile_layout": {"cols": N, "rows": 1},
++        "axis_order": "Z,Y,X",
++        "cloud_type_id": params.cloud_type_id,
++        "style": params.style,
++        "channels": {"R": "density", "G": "flow", "B": 0, "A": 255}
++    }
++    
++    return VolumeResult(density, disturbance, metadata)
+ ```
+ 
+-### Per-Slice Processing (Z Loop)
+-For each `z_index` from 0 to `size - 1`:
+-1. Calculate `z` coordinate: `z = axis[z_index]`.
+-2. **Style-Specific Noise Generation**:
+-   - **Cartoon**:
+-     - Call `_cartoon_noise_fields` with `cartoon_noise_set`, `x`, `y`, `z`, `detail`, `disturbance` to get `macro`, `body`, `edge`, `flow`.
+-     - Call `_cartoon_density_slice` with these fields to get `raw_density`.
+-     - Call `_cartoon_flow_noise` to get `flow_noise`.
+-   - **Realistic**:
+-     - Call `_fractal_value_noise` with `density_lattices`, `x`, `y`, `z`, `detail` to get `density_noise`.
+-     - Call `_fractal_value_noise` with `flow_lattices`, `x`, `y`, `z`, `detail` to get `flow_noise`.
+-     - `raw_density = density_noise`.
+-     - `flow = 0.5 + (flow_noise - 0.5) * params.disturbance_strength`.
+-3. **Z Fade**:
+-   - `z_distance = min(float(z + 1.0), float(1.0 - z))`.
+-   - `z_fade = _safe_edge_fade(z_distance, SAFE_EMPTY_BORDER_Z, SAFE_FADE_WIDTH_Z)`.
+-4. **Boundary Handling**:
+-   - Determine `uses_natural_finite_edge`: `True` if `not params.resolved_allow_boundary_overlap` AND `cloud.default_allow_boundary_overlap` AND `params.cloud_type_id in LAYER_CLOUD_TYPE_IDS`.
+-   - If `uses_natural_finite_edge`:
+-     - Generate `top_surface_noise`, `bottom_surface_noise`, `thickness_noise` using `boundary_lattices` at z offsets -0.61, 0.27, 0.83, scaled by `detail_strength * 0.22/0.26/0.18`.
+-     - Calculate `side_edge_noise` using `boundary_lattices` with offset `x + z*0.16, y - z*0.11, z*1.75+0.19`.
+-     - Calculate `natural_xy_edge` via `_natural_xy_edge_envelope`.
+-     - Calculate `vertical_envelope` via `_finite_layer_vertical_envelope`.
+-     - Calculate `fixed_vertical` via `_fixed_layer_vertical_profile` (min 0.075).
+-     - `raw_density *= natural_xy_edge * (vertical_envelope / fixed_vertical)`.
+-   - Else if `not params.resolved_allow_boundary_overlap`:
+-     - Calculate `xy_distance = np.minimum.reduce((x + 1.0, 1.0 - x, y + 1.0, 1.0 - y))`.
+-     - `discrete_cloud_edge_guard = _safe_edge_fade(xy_distance, 0.0, 0.045)`.
+-     - `raw_density *= discrete_cloud_edge_guard`.
+-5. **Apply Z Fade**:
+-   - `raw_density *= z_fade`.
+-6. **Store Results**:
+-   - `density[z_index] = np.rint(np.clip(raw_density, 0.0, 1.0) * 255.0).astype(np.uint8)`.
+-   - `disturbance[z_index] = np.rint(np.clip(flow, 0.0, 1.0) * 255.0).astype(np.uint8)`.
++## Subtopics
+ 
+-### Helper Functions
+-- `_smoothstep(t)`: `t * t * (3.0 - 2.0 * t)`.
+-- `_safe_edge_fade(distance, empty_border, fade_width)`: `_smoothstep(np.maximum(distance - empty_border, 0.0) / fade_width)`.
+-- `_fade(v)`: `v * v * v * (v * (v * 6.0 - 15.0) + 10.0)`.
+-- `_value_noise_slice(lattice, x, y, z)`: Periodic 3D value noise sampling using `_fade` for interpolation.
+-- `_fractal_value_noise(lattices, x, y, z, detail)`: Multi-scale noise with domain warping. Warp strength `0.12 + 0.08 * clip(detail, 0, 1)`. Warps are calculated from first three lattices. Samples are combined with weights `(0.52 + detail * 0.16)^i`.
+-
+-### Edge Cases and Pitfalls
+-- **MemoryError**: Raise `VolumeMemoryPressureError` if array allocation fails.
+-- **Division by Zero**: Use `max(lobe_z_radius, 0.001)` and `max(half_height, 0.001)` in vertical profiles.
+-- **Boundary Overlap**: If `resolved_allow_boundary_overlap` is True, boundary fades are skipped for layer clouds, potentially causing hard edges if not handled by the renderer.
++### [Redshift Clouds Object](10707-redshift-clouds-object.md)
++The Redshift Clouds Object generates entire procedural skies, serving as a dedicated tool for volumetric cloud rendering within the Redshift renderer. It distinguishes itself from general procedural noise functions by providing a complete sky generation pipeline that supports both a fast, non-volumetric background mode and a fully volumetric mode where geometry (such as skyscrapers or aircraft) can pierce the cloud layer and interact with its lighting. It operates as a child of the Volume Cloud Generation Pipeline, building upon procedural density generation techniques.
+ 
+ ## Operating characteristics
+-- **Time Complexity**: O(size^3) for noise generation and boundary application.
+-- **Memory Complexity**: O(size^3) for density and disturbance arrays.
+-- **Performance**: Depends on `size` and noise lattice sizes. Domain warping adds overhead.
+-- **Strengths**: Produces organic, non-repeating cloud shapes with soft edges. Supports both realistic and cartoon styles.
+-- **Limitations**: High memory usage for large resolutions. Domain warping can introduce artifacts if not tuned.
++- **Time Complexity**: $O(N^3)$ per slice, where $N$ is the resolution. The cost is dominated by the noise sampling and domain warping for each voxel.
++- **Memory Complexity**: $O(N^3)$ for the density and disturbance arrays.
++- **Performance**: The method is CPU-bound due to the iterative noise generation. The use of `uint8` output reduces memory bandwidth compared to `float32` volumes.
++- **Strengths**: Produces non-repeating, organic cloud structures with controlled boundaries. Supports distinct artistic styles (realistic vs. cartoon).
++- **Limitations**: Computationally expensive for high resolutions. The domain warping can introduce artifacts if not tuned correctly. The "natural finite edge" logic is complex and specific to layer clouds.
++- **When to use**: When procedural, non-tiled cloud volumes are needed for offline rendering or pre-computed volumes.
++- **When not to use**: For real-time rendering where GPU-based ray marching or texture-based approaches are preferred.
+ 
+ ## Background
+-The pipeline is based on the "Noise-Cloud" project by mingtu149411 [S1, unofficial]. It uses periodic 3D value noise with domain warping to generate cloud-like structures, avoiding directional artifacts common in simpler noise functions. The boundary handling is tailored for layer clouds to ensure natural finite edges.
++The Volume Cloud Generation Pipeline is derived from procedural noise techniques used in computer graphics for generating natural phenomena. The specific implementation described here is from the `Noise-Cloud` project by mingtu149411 [S1, unofficial]. It builds upon the principles of fractal Brownian motion (fBm) and domain warping to create volumetric density fields. The pipeline is designed to be a child of the general [Volumetric Density Generation](4894-volumetric-density-generation.md) method, adding specific boundary handling and style variations.
+ 
+ ## Sources

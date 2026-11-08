@@ -1,0 +1,92 @@
+# Priority Queue MIP with Min/Max Grids
+
+Also called: Maximum Intensity Projection (MIP) with Priority Queue, Min/Max Grid MIP, Min/Max Multilevel Grid MIP, Parker et al. MIP, Priority Queue MIP
+
+## Overview
+Priority Queue MIP with Min/Max Grids is an image-order ray casting technique that efficiently computes the Maximum Intensity Projection by combining a hierarchical min/max grid with a priority queue to skip empty or low-intensity regions [S1]. It differs from standard MIP by using the grid's maximum values to prune the traversal order, and from [Local Maximum Intensity Projection](6054-local-maximum-intensity-projection.md) by focusing on the global maximum along the entire ray rather than local peaks [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A volume dataset stored in a min/max multilevel grid (or similar hierarchical structure where each node stores the min and max values of its contained voxels) [S1].
+- Input: A set of rays, one per pixel.
+- Output: The maximum intensity value encountered along each ray, mapped to color [S1].
+
+**Data Structures:**
+- **Min/Max Multilevel Grid:** A hierarchical tree structure (e.g., octree) where each node contains:
+  - `min_val`: The minimum voxel value in the node's bounding box.
+  - `max_val`: The maximum voxel value in the node's bounding box.
+  - `children`: Pointers to child nodes (if not a leaf).
+  - `bounds`: Bounding box of the node.
+- **Priority Queue:** A max-heap storing nodes/macro-cells ordered by their `max_val` [S1]. Each entry in the queue contains:
+  - `node`: Reference to the grid node or macro-cell.
+  - `max_val`: The maximum value associated with this node/cell.
+
+**Algorithm Steps:**
+1. **Initialization:** For each ray, initialize the priority queue with the root node of the min/max grid and its `max_val` [S1][S2, unofficial].
+2. **Iteration:** While the priority queue is not empty:
+   a. Extract the node/cell with the highest `max_val` from the queue [S1][S2, unofficial].
+   b. If the extracted item is a leaf node of the grid, initiate **Leaf Traversal** (see below). If the leaf cell appears at the head of the queue, terminate the algorithm for this ray, as the maximum has been found [S1][S2, unofficial].
+   c. If the extracted item is an internal node, insert its children into the priority queue with their respective `max_val` [S1][S2, unofficial].
+3. **Leaf Traversal:** When a leaf node is processed:
+   a. Perform a macro-cell traversal along the ray through the leaf cells [S1][S2, unofficial].
+   b. At each pierced cell-face, perform bi-linear interpolation assuming a linear function along the ray segment within the cell [S1][S2, unofficial].
+   c. Calculate the maximum value encountered along the ray segment through the macro-cell [S1].
+   d. Store this maximum value back into the priority queue as a new entry [S1].
+   e. If this leaf cell (with its computed max) appears at the head of the priority queue, terminate the algorithm [S1][S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def priority_queue_mip(ray, grid_root):
+    # Priority queue stores tuples: (max_val, node_or_macro_cell)
+    # Max-heap: highest max_val at top
+    pq = MaxHeap()
+    
+    # Initialization: Add root node
+    pq.push((grid_root.max_val, grid_root))
+    
+    while not pq.is_empty():
+        current_max, current_item = pq.pop()
+        
+        # Check if this is the best candidate so far
+        # If it's a leaf node and at the head, we are done
+        if current_item.is_leaf():
+            # Leaf Traversal
+            local_max = compute_leaf_max(ray, current_item)
+            
+            # Store the max value encountered along the ray segment through the macro-cell
+            # back into the priority queue
+            pq.push((local_max, current_item))
+            
+            # The algorithm terminates if one of these leaf cells appears at the head
+            # Since we just pushed it, we need to check if it's still the max
+            # In practice, this means if the newly computed max is >= any other 
+            # pending node's max, we can stop.
+            if pq.is_empty() or local_max >= pq.peek().max_val:
+                return local_max
+        else:
+            # Internal node: insert children
+            for child in current_item.children:
+                pq.push((child.max_val, child))
+                
+    return None
+```
+
+**Parameters and Edge Cases:**
+- **Bi-linear Interpolation:** Assumes a linear function along the ray within a cell, meaning no extremal value exists strictly inside the cell [S1][S2, unofficial].
+- **Precision:** Floating-point precision in interpolation may affect accuracy in thin structures [S1].
+- **Empty Regions:** The min/max grid effectively skips empty regions if their max value is below the current threshold [S1].
+
+## Operating characteristics
+- **Time Complexity:** Depends on the distribution of high-intensity values. In the best case (high-intensity structure near the front), it is fast due to early termination. In the worst case, it may traverse many nodes.
+- **Memory Complexity:** Requires storage for the min/max grid and the priority queue. The grid size is proportional to the volume resolution, and the queue size depends on the branching factor and traversal depth.
+- **Strengths:** Efficient for visualizing thin structures like blood vessels or contrast-enhanced tissues by skipping low-intensity regions [S1].
+- **Limitations:** Assumes linear interpolation within cells, which may miss extrema inside cells [S1][S2, unofficial]. Performance degrades if high-intensity values are distributed throughout the volume.
+
+## Background
+This technique was suggested by Parker et al. in [PPL* 99] and is mainly used in real-world medical imaging applications [S1]. It is part of the broader field of interactive volume rendering with ray tracing [S1].
+
+## Sources
+[S1] Interactive Volume Rendering with Ray Tracing, https://doi.org/10.2312/egst.20061055, fetched 2026-10-24
+[S2] Interactive Volume Rendering Techniques, https://www.scribd.com/document/479714183/Interactive-Volume-Rendering-with-Ray-Tracing, fetched 2026-10-25 (unofficial)

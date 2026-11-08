@@ -3,85 +3,72 @@
 Also called: RayCast.fx transferFunction, Transfer Function Application
 
 ## Overview
-Transfer Function and Opacity Mapping defines the mechanism by which scalar volume data values are converted into RGBA color and opacity attributes for each sample point along a ray [S2, unofficial][S5, unofficial]. It maps raw numerical data (e.g., CT Hounsfield units or density fields) to visual properties, allowing users to specify which data ranges correspond to visible structures and which should be transparent [S2, unofficial]. What sets this family apart from its siblings is that it operates at the per-sample level within the ray casting loop, distinct from methods that pre-compute the entire volume into an RGBA texture (like [Pre-integrated Volume Rendering](5327-pre-integrated-volume-rendering.md)) or methods that derive opacity from geometric primitives like SDFs (like [SDF-based Opacity Derivation via Logistic CDF](3233-sdf-based-opacity-derivation-via-logistic-cdf.md)) [G].
+Transfer Function and Opacity Mapping is the classification stage in direct volume ray casting that maps sampled scalar volume data to optical properties (color and opacity) [S2, S2789]. It solves the problem of visualizing specific features within a scalar field by assigning distinct visual attributes to different data ranges, enabling the separation of tissues or structures [S2, unofficial]. It differs from [Pre-integrated Volume Rendering](5327-pre-integrated-volume-rendering.md) by operating on discrete samples rather than integrating over segments, and from [Neural volume rendering](1576-neural-volume-rendering.md) by using explicit, user-defined or heuristic mappings rather than learned latent representations.
 
 ## Shared principles
-The family relies on the parent's discretized volume rendering integral [G]. For each sample $i$ along the ray $r(t)$, the scalar value $d_i$ is obtained via interpolation [S2, unofficial][S5, unofficial]. The transfer function $T(d_i)$ maps this scalar to a color vector $C_i$ and a scalar opacity $\alpha_i$ [S2, unofficial][S5, unofficial]. These values are then used in the front-to-back compositing equations provided in the parent article [G]. The mapping can be defined analytically, piecewise, or via lookup tables [G]. Common analytical forms include polynomial functions [S1, unofficial] and power functions [S4]. Piecewise definitions often use control points to define intervals [Direct Volume Rendering with Interactive Piecewise Transfer Function](2068-direct-volume-rendering-with-interactive-piecewise-transfer-.md). The opacity $\alpha_i$ is strictly bounded within $[0, 1]$ for standard compositing, though some implementations may output intermediate values that are clamped [G].
+All methods in this family map a scalar input $d$ (the interpolated volume value at a sample point) to a color vector $C$ and an opacity scalar $\alpha$ [S2, S5, S13, unofficial]. The mapping is defined by a transfer function $T(d) \rightarrow (C, \alpha)$ [S2, S2789]. The opacity $\alpha$ is typically bounded to $[0, 1]$ [G]. The resulting opacity is often corrected for the discretization step size $\Delta t$ before compositing to ensure physical consistency, using the relation $\alpha' = 1 - (1 - \alpha)^{\Delta t}$ or similar approximations [S11, S32, unofficial]. The color $C$ is usually independent of the step size [G].
 
 ## Subtopics
 
 ### [Piecewise Density Approximation for Reparameterized Sampling](1139-piecewise-density-approximation-for-reparameterized-sampling.md)
-This method enables reparameterized sampling in volume rendering by approximating the density field $\sigma_r(t)$ along a ray as either piecewise constant or piecewise linear on a predefined grid. It differs from standard fixed-step ray casting by providing differentiable, distribution-aware sample locations, and from SDF-based methods by relying on explicit density queries rather than implicit surface boundaries. Choose this when high accuracy for thin features is required and computational cost of analytical integration is acceptable [G].
+Enables reparameterized sampling by approximating density as piecewise constant or linear to compute cumulative opacity analytically, allowing distribution-aware sample generation.
 
 ### [Opacity Correction for Slice Count Invariance](1277-opacity-correction-for-slice-count-invariance.md)
-This technique ensures the final image intensity remains constant regardless of the number of samples taken along a ray. It solves the problem of brightness artifacts that occur when sampling density changes: standard compositing accumulates opacity linearly with sample count, so fewer samples result in a darker image, while more samples result in a brighter one. It scales the per-sample opacity inversely with the slice count. Choose this when adaptive or variable sampling rates are used and visual consistency is critical [G].
-
-### [Piecewise Linear Opacity Mapping with Gradient Scaling](1335-piecewise-linear-opacity-mapping-with-gradient-scaling.md)
-This method maps voxel scalar values to opacity using piecewise linear functions defined by tissue types, then scales the resulting opacity by the magnitude of the local gradient vector to suppress tissue interiors and enhance bounding surfaces. It differs from binary classification techniques by mapping all voxels to non-zero opacity, thereby rendering thin, wispy structures that would otherwise appear as holes, and by using gradient scaling to create semi-transparent surface overlays rather than solid opaque surfaces. Choose this for medical imaging where tissue boundaries need emphasis and interior homogeneity needs suppression [G].
+Scales per-sample opacity by the ratio of reference to current slice count to maintain constant image intensity regardless of sampling density.
 
 ### [Direct Volume Rendering with Interactive Piecewise Transfer Function](2068-direct-volume-rendering-with-interactive-piecewise-transfer-.md)
-This method is a CPU-based direct volume rendering technique that maps scalar voxel values to RGBA colors using a piecewise linear transfer function defined by 5 control points, then composites the resulting 3D volume along the depth axis using front-to-back alpha blending. It separates the transfer function application and compositing into two distinct passes: first generating a 4D RGBA volume, then iterating through slices to accumulate the final image. Choose this for interactive CPU-based exploration where pre-computation of RGBA volumes is feasible [G].
+A CPU-based technique using a piecewise linear transfer function with 5 control points to map scalars to RGBA, followed by front-to-back compositing along slices.
 
 ### [Alpha-to-Weight Computation (Forward)](2373-alpha-to-weight-computation-forward.md)
-This method calculates the per-sample rendering weights and cumulative transmittance values required for front-to-back volume compositing. It solves the problem of converting per-sample opacity values ($\alpha_i$) into the weighted contributions ($w_i$) and intermediate transmittance states ($T_i$) that allow a renderer to accumulate color and depth along a ray. It is distinguished from its siblings by optimizing batch processing of variable-length rays and handling early termination for numerical stability. Choose this when implementing high-performance GPU kernels for volume compositing [G].
+Converts per-sample opacity into rendering weights and cumulative transmittance for front-to-back compositing, handling variable-length rays and early termination.
 
 ### [SDF-based Opacity Derivation via Logistic CDF](3233-sdf-based-opacity-derivation-via-logistic-cdf.md)
-This method computes the discrete opacity $\alpha_i$ for a ray segment $[t_i, t_{i+1}]$ in volume rendering by integrating a density function derived from a signed distance function (SDF) and the logistic distribution's cumulative distribution function (CDF). It solves the problem of correctly modeling surface opacity by ensuring the weight function peaks at the surface intersection, thereby avoiding the bias inherent in naive SDF-to-density mappings. Unlike piecewise density methods, this method analytically integrates the logistic CDF to ensure the opacity accumulates only when the ray enters the surface. Choose this when rendering implicit surfaces or SDF-based volumes [G].
+Derives opacity from Signed Distance Functions using the logistic CDF to ensure unbiased surface reconstruction by peaking weight at the surface intersection.
 
-### [Direct Volume Rendering with Phong Shading](3686-direct-volume-rendering-with-phong-shading.md)
-This method projects 3D scalar volume data onto a 2D image plane by casting rays through the volume, mapping scalar values to RGBA components via transfer functions, and applying the Phong lighting model to enhance depth perception and reveal occluded structures. It distinguishes itself from sibling methods like Cel shading by using continuous specular highlights to clearly visualize encircled or occluded regions, and from isosurface extraction by displaying the entire scalar field's internal structure without slicing. Choose this for scientific visualization of fluid dynamics or pressure fields where surface-like shading cues enhance depth perception [G].
-*   **Formula:** Color Transfer Function (CTF) control points for thermal data: $s_{min} \rightarrow (0.0, 0.0, 1.0)$, $s_{min} + 0.25\Delta s \rightarrow (0.0, 1.0, 1.0)$, $s_{min} + 0.50\Delta s \rightarrow (0.0, 1.0, 0.0)$, $s_{min} + 0.75\Delta s \rightarrow (1.0, 1.0, 0.0)$, $s_{max} \rightarrow (1.0, 0.0, 0.0)$. Opacity Transfer Function (OTF) control points: $s_{min} \rightarrow 0.4$, $s_{min} + 0.25\Delta s \rightarrow 0.15$, $s_{min} + 0.50\Delta s \rightarrow 0.08$, $s_{min} + 0.75\Delta s \rightarrow 0.15$, $s_{max} \rightarrow 0.4$.
-*   **Parameters:** Phong Shading: Ambient $k_a=0.5$, Diffuse $k_d=0.5$, Specular $k_s=0.5$, Shininess $n=60$.
-
-### [Programmable Transfer Function DVR](8220-programmable-transfer-function-dvr.md)
-This method replaces traditional texture-based transfer function lookups with a function call at every sample location to compute color and opacity. It trades memory fetches for computation, allowing real-time parameter modification without CPU-GPU data transfer bottlenecks. It sets itself apart from standard DVR by enabling swift, interactive customization of the transfer function through parameter modification rather than texture swapping. Choose this for interactive applications requiring frequent runtime adjustments to transfer function parameters [G].
+### [Classified Volume Rendering](3590-classified-volume-rendering.md)
+Precomputes a run-length encoded volume with fixed color and opacity based on a static transfer function, trading flexibility for high rendering speed.
 
 ### [Silhouette Shading](8222-silhouette-shading.md)
-A technique to accentuate the boundaries of isosurfaces by modifying color and opacity based on the dot-product of the isosurface normal vector and the view direction, producing a bubble-like shading effect. It differs from standard opacity mapping by explicitly enhancing edge visibility through view-dependent opacity modulation. Choose this when clear object boundaries and silhouettes are required for spatial orientation [G].
+Modifies opacity and color based on the alignment between the surface normal and view direction to accentuate boundaries, implemented efficiently within a Programmable Transfer Function.
+
+### [Piecewise Linear Mapping and Integration](9000-piecewise-linear-mapping-and-integration.md)
+Defines opacity as a piecewise linear function of scalar data between control points, offering computational simplicity and intuitive user control.
 
 ### Illustrative Transparency
-A transparency model combining uniform opacity ($\alpha_u$) from the transfer function and directional opacity ($\alpha_d$) from the style map, modulated by curvature and gradient magnitude to simulate the 100-percent-rule [S3]. It differs from standard opacity mapping by making opacity dependent on the view vector and surface curvature, enhancing the perception of transparent structures [S3]. Choose this for illustrative rendering where artistic control over transparency based on geometry is required [G].
-*   **Formula:** $\alpha = \alpha_d \cdot \alpha_u \cdot \frac{0.5 + \max(0, |n \cdot v| - \sqrt{T \kappa_v (2 - T \kappa_v)}) \cdot (1 - |g|)}{1}$, where $g$ is gradient magnitude, $n$ is normal, $v$ is view vector, and $T \kappa_v (2 - T \kappa_v)$ is the contour threshold term [S3].
-*   **Parameters:** $\alpha_u$ (uniform opacity), $\alpha_d$ (directional opacity tuple), constant 0.5 [S3].
+A transparency model combining uniform opacity ($\alpha_u$) from the transfer function and directional opacity ($\alpha_d$) from a style map, modulated by curvature and gradient magnitude to simulate the 100-percent-rule [S3]. If $\alpha_u = 1$, opacity is solely determined by $\alpha_d$; if $\alpha_u = 0$, the sample is transparent [S3]. The overall opacity is computed as:
+$$
+\alpha = \alpha_d \cdot \alpha_u \cdot \frac{0.5 + \max(0, |n \cdot v| - \sqrt{T \kappa_v (2 - T \kappa_v)}) \cdot (1 - |g|)}{1}
+$$
+where $g$ is gradient magnitude, $n$ is normal, $v$ is view vector, and $T \kappa_v (2 - T \kappa_v)$ is the contour threshold term [S3]. The constant 0.5 restricts maximum opacity enhancement [S3].
 
 ### Power Function Opacity Transfer
-A simple power function used to map voxel values to opacity before enhancement [S4]. It differs from piecewise linear methods by providing a smooth, continuous mapping controlled by a scalar and an exponent, often used as a preprocessing step for gradient-based enhancements [S4]. Choose this for non-photorealistic rendering or when subtle feature enhancement is needed via gradient calculation on the transferred values [G].
-*   **Formula:** $o_v = (k_{os}v_i)^{k_{oe}}$, where $v_i$ is the volume sample value, $k_{os}$ is the scalar controlling maximum opacity, and $k_{oe}$ is the exponent [S4].
-*   **Parameters:** $k_{os}$ (scalar), $k_{oe}$ (exponent; $<1$ softens differences, $>1$ increases contrast) [S4].
-
-### [Linear Opacity Interpolation](7016-linear-opacity-interpolation.md)
-Maps scalar volume data values to opacity using linear interpolation between two threshold values. It differs from analytical functions by using discrete thresholds to define opacity ranges. Choose this for simple, fast opacity mapping where abrupt transitions between opacity levels are acceptable [G].
-*   **Formula:** $\alpha = \begin{cases} 0.0 & i < oa \lor i > ob \\ foa + (fob - foa) \frac{i - oa}{ob - oa} & \text{otherwise} \end{cases}$.
-*   **Parameters:** `oa`, `ob` (lower and upper thresholds, UINT16); `foa`, `fob` (opacity values at thresholds, float, typically 0.0-1.0).
-
-### Piecewise Linear Transfer Function Integration
-A rendering technique that integrates piecewise linear transfer functions using a 2D texture map to compute correct exponential per-pixel opacity [S6, unofficial]. It differs from standard per-sample mapping by precomputing the integration of opacity over thickness, allowing hardware-accelerated lookup. Choose this when rendering unstructured grids or tetrahedral meshes where cell thickness varies significantly [G].
-*   **Parameter:** Texture Map: A 2D texture map parameterized by opacity and thickness [S6, unofficial].
+A simple power function mapping voxel values to opacity: $o_v = (k_{os}v_i)^{k_{oe}}$, where $v_i$ is the sample value, $k_{os}$ controls maximum opacity, and $k_{oe}$ controls contrast [S4]. Values of $k_{oe} < 1$ soften differences; $> 1$ increase contrast [S4]. The gradient for enhancement is calculated after this transfer function is applied [S4].
 
 ### Palette-based Alpha Cutoff
-Applies a hard cutoff to sampled volume values before palette mapping, discarding values outside a specified range and scaling the remaining alpha [S7, unofficial]. It differs from continuous transfer functions by using step functions to define valid data ranges. Choose this for visualization tasks requiring strict data filtering and palette-driven color mapping [G].
-*   **Formula:** $\alpha = \text{clamp}(\text{step}(minCutoffValue, meanValue) \times \text{step}(meanValue, maxCutoffValue) \times alphaMultiplier, 0.0, 1.0)$, where minCutoffValue and maxCutoffValue define the valid range, meanValue is the sampled volume value, and alphaMultiplier scales the result [S7, unofficial].
-*   **Parameters:** minCutoffValue (default: 1e-3), maxCutoffValue (default: 1.0 - 1e-3), alphaMultiplier (default: 1.0), normalizedMean (UV coordinate for palette lookup) [S7, unofficial].
+Applies a hard cutoff to sampled values before palette mapping [S5, unofficial]. Alpha is computed as:
+$$
+\alpha = \text{clamp}(\text{step}(minCutoffValue, meanValue) \times \text{step}(meanValue, maxCutoffValue) \times alphaMultiplier, 0.0, 1.0)
+$$
+where $minCutoffValue$ and $maxCutoffValue$ define the valid range, and $alphaMultiplier$ scales the result [S5, unofficial]. RGB is sampled from a horizontal palette texture at $vec2(normalizedMean, 0.5)$ [S5, unofficial].
+
+### VNetL-16-4
+An architecture creating 16 semantic channels in the encoder, mapped to color and opacity via an MLP-based TF [S6, unofficial]. The encoder (VNetLight) produces 16 channels. The color TF MLP takes 16-channel input, passes through a 16-channel hidden layer with ReLU, and outputs 3 channels (RGB) via sigmoid [S6, unofficial].
 
 ### Dynamic Opacity via Specular Highlights
-A technique using a dynamic opacity approach as a function of specular highlights to allow additional information to be shown in partially transparent parts, leveraging the human visual system's ability to complete shapes [S8, unofficial]. It differs from static opacity models by modulating transparency based on lighting response. Choose this for interactive exploration where revealing inner structures through transparent outer layers is desired [G].
-*   **Parameters:** Specularity/Transparency Ratio (tunes ratio between specularity and transparency), Depth (determines fuzzy clipping depth) [S8, unofficial].
+Uses dynamic opacity as a function of specular highlights to show additional information in partially transparent parts, leveraging the human visual system's shape completion ability [S7, unofficial]. It allows excluding certain data-value ranges from transparency modulation to view inner structures [S7, unofficial]. Parameters include the Specularity/Transparency Ratio and Depth (fuzzy clipping) [S7, unofficial].
 
 ### Specular Highlight Augmentation
-A technique that selectively boosts opacity in regions of high specular highlight to mitigate the loss of specular contribution due to low opacity, helping users orient themselves and discern surface curvature [S9]. It differs from traditional volume rendering where specular highlights are diluted by transparency, by using programmable transfer functions to selectively increase opacity where significant specular effects exist. Choose this when surface curvature and highlight visibility are critical for analysis [G].
-*   **Formula:** $\alpha_{sample} \leftarrow \alpha_{base} + spec \times \mu_{spec}$, where $spec$ is the specular highlight contribution and $\mu_{spec}$ is a tunable augmentation parameter [S9].
-*   **Parameters:** $\mu_{spec}$ (tunable parameter depending on surface thickness, base opacity, and ray-stepping size) [S9].
+Selectively boosts opacity in regions of high specular highlight to mitigate loss due to low opacity [S8]. For each sample, $\alpha_{sample} = \alpha_{base} + spec \cdot \mu_{spec}$, where $spec$ is the specular highlight contribution [S8]. The parameter $\mu_{spec}$ depends on surface thickness, base opacity, and ray-stepping size [S8].
 
 ## Background
-The concept of transfer functions in volume rendering originated with early direct volume rendering research, where scalar values were mapped to color and opacity to visualize 3D datasets [S2, unofficial]. Early implementations used simple polynomial mappings [S1, unofficial] or piecewise linear functions defined by control points [Direct Volume Rendering with Interactive Piecewise Transfer Function](2068-direct-volume-rendering-with-interactive-piecewise-transfer-.md). The introduction of GPU-based ray casting allowed for real-time application of these functions [S2, unofficial][S3]. Subsequent developments included gradient-based scaling to enhance surfaces [Piecewise Linear Opacity Mapping with Gradient Scaling](1335-piecewise-linear-opacity-mapping-with-gradient-scaling.md), SDF-based opacity for implicit surfaces [SDF-based Opacity Derivation via Logistic CDF](3233-sdf-based-opacity-derivation-via-logistic-cdf.md), and illustrative techniques like style transfer functions [S3] and power function enhancements [S4]. The family has evolved to support interactive UIs [S2, Direct Volume Rendering with Interactive Piecewise Transfer Function](2068-direct-volume-rendering-with-interactive-piecewise-transfer-.md) and integration with complex lighting models like Phong shading [Direct Volume Rendering with Phong Shading](3686-direct-volume-rendering-with-phong-shading.md).
+The concept of transfer functions in volume rendering was introduced by Levoy [S2789]. Early implementations used 1D lookup tables [S2, unofficial]. The term "Programmable Transfer Function" (PTF) emerged with the advent of GPU shaders, allowing complex, non-linear mappings and real-time interaction [S8220, S8, unofficial]. The family has expanded to include neural approaches [S6, unofficial] and illustrative styles [S3, S4][S7, unofficial][S8].
 
 ## Sources
 [S1] pengliu916/DynamicVolumeRayCasting, https://github.com/pengliu916/DynamicVolumeRayCasting, fetched 2026-10-26 (unofficial)
 [S2] jose-villegas/VolumeRendering, https://github.com/jose-villegas/VolumeRendering, fetched 2026-10-27 (unofficial)
 [S3] Style Transfer Functions for Illustrative Volume Rendering, https://doi.org/10.1111/j.1467-8659.2007.01095.x, fetched 2026-10-26
 [S4] PDF Volume illustration: nonphotorealistic rendering of volume models ..., https://www.csee.umbc.edu/~rheingan/pubs/volillus.tvcg01.pdf, fetched 2026-10-27
-[S5] besnik/parallel-volume-rendering, https://github.com/besnik/parallel-volume-rendering, fetched 2026-10-27 (unofficial)
-[S6] A Survey of GPU-Based Volume Rendering of Unstructured Grids., https://www.researchgate.net/publication/220162223_A_Survey_of_GPU-Based_Volume_Rendering_of_Unstructured_Grids, fetched 2026-10-28 (unofficial)
-[S7] here, https://github.com/Donitzo/three.js-volume-renderer, fetched 2026-10-28 (unofficial)
-[S8] Illustrative Visualization for Medicine and Science, https://doi.org/10.2312/egt.20061068, fetched 2026-10-26 (unofficial)
-[S9] Visualization of WiFi Signals Using Programmable Transfer Functions, https://doi.org/10.3390/info13050224, fetched 2026-10-27
+[S5] here, https://github.com/Donitzo/three.js-volume-renderer, fetched 2026-10-28 (unofficial)
+[S6] Deep Direct Volume Rendering: Learning Visual Feature Mappings From Exemplary Images, https://doi.org/10.48550/arxiv.2106.05429, fetched 2026-10-26 (unofficial)
+[S7] Illustrative Visualization for Medicine and Science, https://doi.org/10.2312/egt.20061068, fetched 2026-10-26 (unofficial)
+[S8] Visualization of WiFi Signals Using Programmable Transfer Functions, https://doi.org/10.3390/info13050224, fetched 2026-10-27

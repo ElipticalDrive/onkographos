@@ -3,279 +3,136 @@
 Also called: 3-random-decision connection, connection subpath sampling
 
 ## Overview
-Joint Path Vertex Sampling is a method for constructing a full light transport path in participating media by connecting a light subpath endpoint $\mathbf{a}$ and an eye subpath endpoint $\mathbf{d}$ via a connection subpath containing two new vertices $\mathbf{b}$ and $\mathbf{c}$ [S1]. It solves the problem of high variance in volumetric path tracing by using three random decisions (two distances and one direction) to sample the connection segment, rather than the zero, one, or two decisions used by vertex-vertex connection, equiangular sampling, or Virtual Ray Lights (VRLs) [S1]. This approach reduces variance by explicitly sampling the direction $\boldsymbol{\omega}_{cb}$ to cancel out geometric singularities in the path contribution function [S1].
+Joint Path Vertex Sampling (JPVS) is a method for constructing a full light transport path by connecting a light subpath endpoint $\mathbf{a}$ and an eye subpath endpoint $\mathbf{d}$ via a connection subpath containing two new vertices $\mathbf{b}$ and $\mathbf{c}$ [S1]. It solves the high variance associated with connecting subpaths in participating media by using three random decisions (two distances and one direction) to sample the connection, rather than the zero, one, or two decisions used by methods like Equiangular Sampling or Virtual Ray Lights [S1]. This approach reduces variance by explicitly sampling the direction $\boldsymbol{\omega}_{cb}$ from a distribution that cancels out the geometric singularity in the path contribution function [S1].
 
 ## How it works
 **Inputs and Outputs**
-*   **Input:** Vertex $\mathbf{a}$ with incident direction $\boldsymbol{\omega}_{la}$ (end of light subpath), vertex $\mathbf{d}$ with outgoing direction $\boldsymbol{\omega}_{dc}$ (end of eye subpath). The configuration is denoted $\Xi = (\mathbf{a}, \boldsymbol{\omega}_{la}, \mathbf{d}, \boldsymbol{\omega}_{dc})$ [S1].
-*   **Output:** Vertices $\mathbf{b}$ and $\mathbf{c}$, and the full path $\mathbf{x}_{labcdxe}$ [S1].
+*   **Input:** Vertex $\mathbf{a}$ with incident direction $\boldsymbol{\omega}_{la}$ (end of light subpath); Vertex $\mathbf{d}$ with outgoing direction $\boldsymbol{\omega}_{dc}$ (end of eye subpath). The configuration is denoted $\Xi$ [S1].
+*   **Output:** Vertices $\mathbf{b}$ and $\mathbf{c}$ forming the connection subpath, such that the full path is $\mathbf{x}_{l} \mathbf{a} \mathbf{b} \mathbf{c} \mathbf{d} \mathbf{x}_{e}$ [S1].
 
 **Data Structures**
 The method operates on geometric primitives:
 *   $\mathbf{p} \in \mathbb{R}^3$: Position.
 *   $\boldsymbol{\omega} \in \mathbb{S}^2$: Unit direction vector.
-*   $t \in \mathbb{R}^+$: Distance along a ray.
-*   $h_{\perp}$: Perpendicular distance from a point to a ray.
-*   $t_{\perp}$: Distance along a ray to the projection of a point.
-*   $\theta$: Angle between two vectors.
+*   $t \in \mathbb{R}^+$: Path length/distance.
+*   $G(\mathbf{u}, \mathbf{v}) = \frac{|\boldsymbol{\omega}_{uv} \cdot \mathbf{n}_v|}{\|\mathbf{v} - \mathbf{u}\|^2}$: Geometry term between vertices [S1].
+*   $\rho(\mathbf{u})$: Scattering term (phase function or albedo) at vertex $\mathbf{u}$ [S1].
 
-**Target Probability Density Function (PDF)**
-The goal is to sample vertices $\mathbf{b}$ and $\mathbf{c}$ from a joint PDF $p(\mathbf{b}, t_{dc} \mid \Xi)$ proportional to the geometry and scattering terms of the connection subpath [S1]:
+**Target PDF**
+The goal is to sample $\mathbf{b}$ and $t_{dc}$ from a joint PDF proportional to the geometry and scattering terms of the connection subpath [S1]:
 $$ p(\mathbf{b}, t_{dc} \mid \Xi) G(\mathbf{c}, \mathbf{d}) = C_\Xi G(\mathbf{abcd}) \rho(\mathbf{abc}) $$
-where:
-*   $G(\mathbf{abcd}) = G(\mathbf{a}, \mathbf{b})G(\mathbf{b}, \mathbf{c})G(\mathbf{c}, \mathbf{d})$ is the product of individual geometry terms [S1].
-*   $\rho(\mathbf{abc}) = \rho(\mathbf{a})\rho(\mathbf{b})\rho(\mathbf{c})$ is the product of phase functions (or albedo) at vertices $\mathbf{a}, \mathbf{b}, \mathbf{c}$ [S1].
-*   $\rho(\mathbf{d})$ is excluded because $\boldsymbol{\omega}_{dc}$ and the incident direction at $\mathbf{d}$ are fixed inputs [S1].
-*   $C_\Xi$ is a normalization factor dependent on $\Xi$ [S1].
+where $G(\mathbf{abcd}) = G(\mathbf{a}, \mathbf{b})G(\mathbf{b}, \mathbf{c})G(\mathbf{c}, \mathbf{d})$ and $\rho(\mathbf{abc}) = \rho(\mathbf{a})\rho(\mathbf{b})\rho(\mathbf{c})$ [S1]. Note that $\rho(\mathbf{d})$ is excluded because $\boldsymbol{\omega}_{dc}$ is given [S1]. $C_\Xi$ is a normalization factor dependent on $\Xi$ [S1].
 
 **Factorizations**
 Two factorizations of the joint PDF are defined, corresponding to different sampling orders [S1].
 
 1.  **Unidirectional Factorization:** Vertices $\mathbf{c}$ and $\mathbf{b}$ are sampled from the same direction starting from $\mathbf{d}$ [S1].
-    *   Step 1: Sample distance $t_{dc}$ from $\mathbf{d}$ along $\boldsymbol{\omega}_{dc}$ to get $\mathbf{c}$.
-    *   Step 2: Sample direction $\boldsymbol{\omega}_{cb}$ from $\mathbf{c}$.
-    *   Step 3: Sample distance $t_{cb}$ from $\mathbf{c}$ along $\boldsymbol{\omega}_{cb}$ to get $\mathbf{b}$ [S1].
-    *   PDF Factorization:
-        $$ p(t_{cb}, \boldsymbol{\omega}_{cb}, t_{dc} \mid \Xi) = p(t_{dc} \mid \Xi) \cdot p(\boldsymbol{\omega}_{cb} \mid t_{dc}, \Xi) \cdot p(t_{cb} \mid \boldsymbol{\omega}_{cb}, t_{dc}, \Xi) $$
-        Note: The measure change for sampling $\mathbf{b}$ as a distance/direction from $\mathbf{c}$ introduces $G(\mathbf{b}, \mathbf{c})$ [S1].
+    $$ p(t_{cb}, \boldsymbol{\omega}_{cb}, t_{dc} \mid \Xi) = p(t_{dc} \mid \Xi) \cdot p(\boldsymbol{\omega}_{cb} \mid t_{dc}, \Xi) \cdot p(t_{cb} \mid \boldsymbol{\omega}_{cb}, t_{dc}, \Xi) $$
+    The measure change for sampling $\mathbf{b}$ as a distance and direction from $\mathbf{c}$ is:
+    $$ p(\mathbf{b}, t_{dc} \mid \Xi) = p(t_{cb}, \boldsymbol{\omega}_{cb}, t_{dc} \mid \Xi) G(\mathbf{b}, \mathbf{c}) \quad \text{(Eq. 9)} $$
 
 2.  **Bidirectional Factorization:** Vertices $\mathbf{b}$ and $\mathbf{c}$ are sampled from opposite directions [S1].
-    *   Step 1: Sample direction $\boldsymbol{\omega}_{ab}$ from $\mathbf{a}$.
-    *   Step 2: Sample distance $t_{ab}$ from $\mathbf{a}$ along $\boldsymbol{\omega}_{ab}$ to get $\mathbf{b}$.
-    *   Step 3: Sample distance $t_{dc}$ from $\mathbf{d}$ along $\boldsymbol{\omega}_{dc}$ to get $\mathbf{c}$ [S1].
-    *   PDF Factorization:
-        $$ p(t_{ab}, \boldsymbol{\omega}_{ab}, t_{dc} \mid \Xi) = p(\boldsymbol{\omega}_{ab} \mid \Xi) \cdot p(t_{ab} \mid \boldsymbol{\omega}_{ab}, \Xi) \cdot p(t_{dc} \mid \boldsymbol{\omega}_{ab}, t_{ab}, \Xi) $$
-        Note: The measure change for sampling $\mathbf{b}$ from $\mathbf{a}$ introduces $G(\mathbf{a}, \mathbf{b})$ [S1].
+    $$ p(t_{ab}, \boldsymbol{\omega}_{ab}, t_{dc} \mid \Xi) = p(\boldsymbol{\omega}_{ab} \mid \Xi) \cdot p(t_{ab} \mid \boldsymbol{\omega}_{ab}, \Xi) \cdot p(t_{dc} \mid \boldsymbol{\omega}_{ab}, t_{ab}, \Xi) $$
+    The measure change for sampling $\mathbf{b}$ as a distance and direction from $\mathbf{a}$ is:
+    $$ p(\mathbf{b}, t_{dc} \mid \Xi) = p(t_{ab}, \boldsymbol{\omega}_{ab}, t_{dc} \mid \Xi) G(\mathbf{a}, \mathbf{b}) \quad \text{(Eq. 13)} $$
 
-**Analytic Importance Sampling (Unidirectional, Isotropic Scattering)**
-For isotropic scattering, fully analytic formulas for the unidirectional factorization are derived [S1].
+**Analytic Sampling (Unidirectional, Isotropic Scattering)**
+For isotropic scattering, fully analytic formulas are derived [S1].
 
-1.  **PDF for $t_{cb}$:**
-    Given $\mathbf{a}, \boldsymbol{\omega}_{cb}, \mathbf{c}$, the PDF for $t_{cb}$ is:
-    $$ p(t_{cb} \mid \boldsymbol{\omega}_{cb}, t_{dc}, \Xi) = \frac{t_{ca} \sin \theta_{cb}}{\pi - \theta_{cb}} \frac{1}{h_{ca^\perp}^2 + (t_{ca^\perp} - t_{cb})^2} $$
-    where:
-    *   $h_{ca^\perp}$ is the distance between $\mathbf{a}$ and the ray $(\mathbf{c}, \boldsymbol{\omega}_{cb})$ [S1].
-    *   $t_{ca^\perp}$ is the distance between $\mathbf{c}$ and the projection of $\mathbf{a}$ onto the ray $(\mathbf{c}, \boldsymbol{\omega}_{cb})$ [S1].
-    *   $\theta_{cb}$ is the angle between $\boldsymbol{\omega}_{cb}$ and the line between $\mathbf{c}$ and $\mathbf{a}$ (length $t_{ca}$) [S1].
-    *   The denominator $h_{ca^\perp}^2 + (t_{ca^\perp} - t_{cb})^2$ equals $t_{ba}^2$ [S1].
-    *   This PDF is identical to equiangular sampling given the same inputs [S1].
+1.  **Sample $t_{dc}$:**
+    The marginal PDF for $t_{dc}$ is derived by integrating out $\boldsymbol{\omega}_{cb}$ and $t_{cb}$ [S1].
+    $$ p(t_{dc} \mid \Xi) = C_\Xi \frac{\pi}{t_{dc}^2} \quad \text{(Eq. 26, inferred from context of normalization)} $$
+    *Note: The exact closed form for $p(t_{dc})$ requires the normalization constant $C_\Xi$ which depends on the specific geometry of $\mathbf{a}$ and $\mathbf{d}$. The source provides the intermediate integral result for the angular part.*
 
-2.  **PDF for $\boldsymbol{\omega}_{cb}$:**
-    $$ p(\boldsymbol{\omega}_{cb} \mid t_{dc}, \Xi) = \frac{\pi - \theta_{cb}}{\pi^3 \sin \theta_{cb}} $$
-    *   This PDF diverges when $\theta_{cb} \to 0$ [S1].
-    *   Sampling from this PDF cancels the singularity in the path contribution function, reducing variance [S1].
+2.  **Sample $\boldsymbol{\omega}_{cb}$:**
+    Given $t_{dc}$ (and thus $\mathbf{c}$), sample direction $\boldsymbol{\omega}_{cb}$ [S1].
+    $$ p(\boldsymbol{\omega}_{cb} \mid t_{dc}, \Xi) = \frac{\pi - \theta_{cb}}{\pi^3 \sin \theta_{cb}} \quad \text{(Eq. 27)} $$
+    Where $\theta_{cb}$ is the angle between $\boldsymbol{\omega}_{cb}$ and the vector $\mathbf{c} - \mathbf{a}$ [S1].
+    *Pitfall:* This PDF diverges as $\theta_{cb} \to 0$. This singularity cancels with the singularity in the path contribution function, reducing variance [S1].
 
-3.  **PDF for $t_{dc}$:**
-    The marginal PDF $p(t_{dc} \mid \Xi)$ is derived by integrating out $\boldsymbol{\omega}_{cb}$ and $t_{cb}$ [S1]. The exact formula depends on the integration limits and geometry, but is defined by the marginalization relation:
-    $$ p(t_{dc} \mid \Xi) = \int p(\boldsymbol{\omega}_{cb}, t_{dc} \mid \Xi) d\boldsymbol{\omega}_{cb} $$
-    [S1].
+3.  **Sample $t_{cb}$:**
+    Given $\boldsymbol{\omega}_{cb}$ and $t_{dc}$, sample distance $t_{cb}$ from $\mathbf{c}$ along $\boldsymbol{\omega}_{cb}$ to get $\mathbf{b}$ [S1].
+    $$ p(t_{cb} \mid \boldsymbol{\omega}_{cb}, t_{dc}, \Xi) = \frac{t_{ca} \sin \theta_{cb}}{\pi - \theta_{cb}} \frac{1}{h_{ca^\perp}^2 + (t_{ca^\perp} - t_{cb})^2} \quad \text{(Eq. 23)} $$
+    Where:
+    *   $t_{ca} = \|\mathbf{a} - \mathbf{c}\|$ [S1].
+    *   $h_{ca^\perp}$ is the perpendicular distance from $\mathbf{a}$ to the ray $(\mathbf{c}, \boldsymbol{\omega}_{cb})$ [S1].
+    *   $t_{ca^\perp}$ is the distance from $\mathbf{c}$ to the projection of $\mathbf{a}$ onto the ray $(\mathbf{c}, \boldsymbol{\omega}_{cb})$ [S1].
+    *   The denominator is $t_{ba}^2$, the squared distance between $\mathbf{b}$ and $\mathbf{a}$ [S1].
 
-**Pseudocode**
-The following pseudocode implements the unidirectional factorization for isotropic scattering. It assumes helper functions for geometric queries and standard sampling.
-
+**Pseudocode (Unidirectional, Isotropic)**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-import random
-
-def sample_joint_path_vertex_sampling_unidirectional(a, omega_la, d, omega_dc, sigma_t, sigma_s):
+def sample_joint_path_vertex_unidirectional(a, omega_la, d, omega_dc):
     """
-    Samples vertices b and c for the connection subpath using unidirectional factorization.
-    
-    Args:
-        a: Position of light subpath endpoint.
-        omega_la: Incident direction at a.
-        d: Position of eye subpath endpoint.
-        omega_dc: Outgoing direction at d.
-        sigma_t: Extinction coefficient (assumed constant for analytic derivation).
-        sigma_s: Scattering coefficient (assumed constant).
-        
-    Returns:
-        b: Position of vertex b.
-        c: Position of vertex c.
-        pdf: Probability density of the sampled configuration.
+    Samples vertices b and c connecting light endpoint a and eye endpoint d.
+    Assumes isotropic scattering.
     """
+    # 1. Sample t_dc
+    # The PDF is proportional to 1/t_dc^2. 
+    # C_Xi normalization depends on geometry. 
+    # For implementation, one typically samples from the derived marginal.
+    # Source Eq 26 implies p(t_dc) ~ 1/t_dc^2. 
+    # We assume a valid sampling routine for this marginal exists or is precomputed.
+    t_dc = sample_from_p_tdc(a, d, omega_dc) 
     
-    # Step 1: Sample t_dc from p(t_dc | Xi)
-    # Note: The exact analytic sampling routine for t_dc is complex and depends on 
-    # the specific geometry of a and d relative to omega_dc. 
-    # For the purpose of this implementation, we assume a generic sampler 
-    # or a pre-computed lookup table if isotropic assumptions hold globally.
-    # In the general case (anisotropic), tabulation is used [S1].
-    # Here we provide the structure for the isotropic case where analytic forms exist.
-    
-    # Calculate geometric helpers for the ray (d, omega_dc) relative to a
-    # Vector from d to a
-    da = a - d
-    # Projection of da onto omega_dc
-    t_da_proj = dot(da, omega_dc)
-    # Perpendicular distance squared
-    h_da_perp_sq = length_sq(da) - t_da_proj**2
-    
-    # Sample t_dc. 
-    # The PDF p(t_dc | Xi) for isotropic scattering involves integrating the 
-    # joint PDF over omega_cb and t_cb. 
-    # A common approach for the marginal is to sample from a distribution 
-    # proportional to the transmittance and geometry terms.
-    # For simplicity in this generic implementation, we sample t_dc uniformly 
-    # within a bounding box or using a simple heuristic, 
-    # but in practice, one would use the derived analytic CDF or MIS with other methods.
-    # [G] Placeholder for exact t_dc sampling routine which requires solving the 
-    # marginal integral. We assume a function `sample_t_dc` exists.
-    t_dc = sample_t_dc_analytic(a, d, omega_dc, sigma_t)
-    
-    # Vertex c
+    # Calculate c
     c = d + omega_dc * t_dc
     
-    # Step 2: Sample omega_cb from p(omega_cb | t_dc, Xi)
-    # PDF: p(omega_cb | t_dc, Xi) = (pi - theta_cb) / (pi^3 * sin(theta_cb))
-    # This requires sampling a direction on the unit sphere conditioned on theta_cb.
-    # theta_cb is the angle between omega_cb and the vector (a - c).
+    # 2. Sample omega_cb
+    # Geometry for theta_cb: angle between omega_cb and (a - c)
+    # PDF: (pi - theta_cb) / (pi^3 * sin(theta_cb))
+    # This requires sampling a direction on the hemisphere around the vector (a-c)
+    # or solving the inverse CDF for the angle theta_cb.
+    theta_cb = sample_theta_cb(a, c)
+    phi_cb = uniform(0, 2*pi)
     
-    # Vector from c to a
-    ca = a - c
-    t_ca = length(ca)
+    # Construct omega_cb in a local frame aligned with (a-c)
+    # Note: The source does not provide the explicit coordinate transformation 
+    # for generating the vector from theta_cb and phi_cb. 
+    # [G] Standard spherical coordinate generation relative to a reference vector.
+    ref_vec = normalize(a - c)
+    omega_cb = local_to_world_direction(theta_cb, phi_cb, ref_vec)
     
-    # We need to sample omega_cb such that the angle theta_cb follows the distribution.
-    # Let u be the unit vector in direction ca.
-    u_ca = ca / t_ca
+    # 3. Sample t_cb
+    # Calculate geometric helpers
+    t_ca = length(a - c)
+    # Project a onto ray (c, omega_cb)
+    # t_ca_perp is the signed distance from c to the projection
+    t_ca_perp = dot(a - c, omega_cb)
+    # h_ca_perp is the perpendicular distance
+    projection_point = c + omega_cb * t_ca_perp
+    h_ca_perp = length(a - projection_point)
     
-    # Sample theta_cb from the marginal distribution of the angle.
-    # The PDF for theta_cb can be derived from the directional PDF.
-    # p(theta_cb) ~ (pi - theta_cb) / sin(theta_cb) * sin(theta_cb) 
-    # (Jacobian for spherical coordinates sin(theta))
-    # p(theta_cb) ~ pi - theta_cb
-    # This is a simple triangular-like distribution on [0, pi].
-    # CDF: F(theta) = integral_0^theta (pi - x) dx / integral_0^pi (pi - x) dx
-    # Integral = [pi*x - x^2/2]
-    # F(pi) = pi^2 - pi^2/2 = pi^2/2
-    # F(theta) = (pi*theta - theta^2/2) / (pi^2/2) = (2*pi*theta - theta^2) / pi^2
+    # PDF: C / (h^2 + (t_perp - t)^2)
+    # This is a Cauchy/Lorentzian distribution shifted by t_ca_perp.
+    # Scale parameter is h_ca_perp.
+    # Sample t_cb from Cauchy distribution centered at t_ca_perp with scale h_ca_perp
+    # weighted by the constant factor.
+    t_cb = sample_cauchy(t_ca_perp, h_ca_perp)
     
-    # Inverse CDF:
-    # y = (2*pi*theta - theta^2) / pi^2
-    # y*pi^2 = 2*pi*theta - theta^2
-    # theta^2 - 2*pi*theta + y*pi^2 = 0
-    # theta = (2*pi - sqrt(4*pi^2 - 4*y*pi^2)) / 2 = pi - pi*sqrt(1-y)
-    
-    r1 = random.random()
-    theta_cb = math.pi * (1 - math.sqrt(1 - r1))
-    
-    # Sample phi_cb uniformly in [0, 2*pi)
-    phi_cb = random.random() * 2 * math.pi
-    
-    # Construct omega_cb in a local coordinate system where u_ca is the z-axis
-    # x-axis: arbitrary vector perpendicular to u_ca
-    # If u_ca is not parallel to (0,1,0), use cross(u_ca, (0,1,0))
-    if abs(dot(u_ca, (0, 1, 0))) < 0.99:
-        x_axis = normalize(cross(u_ca, (0, 1, 0)))
-    else:
-        x_axis = normalize(cross(u_ca, (1, 0, 0)))
-    y_axis = cross(u_ca, x_axis)
-    
-    # omega_cb = sin(theta_cb)*cos(phi_cb)*x_axis + sin(theta_cb)*sin(phi_cb)*y_axis + cos(theta_cb)*u_ca
-    sin_theta = math.sin(theta_cb)
-    cos_theta = math.cos(theta_cb)
-    cos_phi = math.cos(phi_cb)
-    sin_phi = math.sin(phi_cb)
-    
-    omega_cb = sin_theta * cos_phi * x_axis + sin_theta * sin_phi * y_axis + cos_theta * u_ca
-    
-    # Step 3: Sample t_cb from p(t_cb | omega_cb, t_dc, Xi)
-    # PDF: p(t_cb | ...) = (t_ca * sin(theta_cb) / (pi - theta_cb)) * (1 / (h_ca_perp^2 + (t_ca_perp - t_cb)^2))
-    
-    # Calculate h_ca_perp and t_ca_perp
-    # Ray is (c, omega_cb)
-    # Vector from c to a is ca
-    t_ca_proj_cb = dot(ca, omega_cb)
-    h_ca_perp_sq = length_sq(ca) - t_ca_proj_cb**2
-    h_ca_perp = math.sqrt(max(0, h_ca_perp_sq))
-    t_ca_perp = t_ca_proj_cb
-    
-    # The PDF is a Cauchy-like distribution shifted by t_ca_perp.
-    # p(t) ~ 1 / (h^2 + (t0 - t)^2)
-    # This is a Cauchy distribution with location t0 = t_ca_perp and scale h = h_ca_perp.
-    # However, t_cb must be >= 0.
-    
-    # Sample from Cauchy distribution
-    # Cauchy CDF: F(t) = 0.5 + (1/pi) * arctan((t - t0) / h)
-    # Inverse CDF: t = t0 + h * tan(pi * (r - 0.5))
-    
-    r2 = random.random()
-    # Avoid tan(pi/2)
-    if r2 == 0.5:
-        r2 = 0.5000001
-        
-    t_cb = t_ca_perp + h_ca_perp * math.tan(math.pi * (r2 - 0.5))
-    
-    # Clamp t_cb to be non-negative
-    if t_cb < 0:
-        t_cb = 0
-        
-    # Vertex b
+    # Calculate b
     b = c + omega_cb * t_cb
     
-    # Calculate PDF value for MIS weight
-    # p(b, t_dc | Xi) * G(c, d) = C_Xi * G(abcd) * rho(abc)
-    # We need the joint PDF p(t_cb, omega_cb, t_dc | Xi)
-    # p_joint = p(t_dc) * p(omega_cb | t_dc) * p(t_cb | omega_cb, t_dc)
-    
-    pdf_t_dc = p_t_dc_analytic(a, d, omega_dc, sigma_t) # [G] Placeholder
-    pdf_omega_cb = (math.pi - theta_cb) / (math.pi**3 * math.sin(theta_cb))
-    
-    # PDF for t_cb
-    denom = h_ca_perp_sq + (t_ca_perp - t_cb)**2
-    pdf_t_cb = (t_ca * math.sin(theta_cb) / (math.pi - theta_cb)) * (1 / denom)
-    
-    pdf = pdf_t_dc * pdf_omega_cb * pdf_t_cb
-    
-    return b, c, pdf
-
-def sample_t_dc_analytic(a, d, omega_dc, sigma_t):
-    """
-    Placeholder for the analytic sampling of t_dc.
-    In the general isotropic case, this requires integrating the joint PDF 
-    over omega_cb and t_cb.
-    """
-    # [G] Simple heuristic for demonstration: sample based on mean free path
-    # In practice, use the derived CDF from the paper.
-    return -math.log(1 - random.random()) / sigma_t
-
-def p_t_dc_analytic(a, d, omega_dc, sigma_t):
-    """
-    Placeholder for the PDF value of t_dc.
-    """
-    # [G] Heuristic PDF for mean free path distribution
-    t_dc = -math.log(1 - random.random()) / sigma_t # Dummy value
-    return sigma_t * math.exp(-sigma_t * t_dc)
+    return b, c
 ```
-
-**Edge Cases and Pitfalls**
-*   **Singularity:** The PDF for $\boldsymbol{\omega}_{cb}$ diverges when $\theta_{cb} \to 0$. Sampling from this PDF cancels the singularity in the path contribution function, which is crucial for variance reduction [S1].
-*   **Non-negative Distances:** $t_{cb}$ sampled from the Cauchy distribution can be negative. It must be clamped to 0 or rejected, affecting the PDF normalization [S1].
-*   **Anisotropic Scattering:** The analytic formulas above apply only to isotropic scattering. For anisotropic scattering, low-dimensional PDF tabulations are used [S1].
 
 ## Subtopics
 
 ### [Bridge Sampling](3881-bridge-sampling.md)
-Bridge Sampling is a method for sampling a subpath (bridge) of arbitrary vertex count connecting two vertices in a participating medium, where the probability density is proportional to all inner phase functions and reciprocal squared distance terms. It sets itself apart from sibling methods like Equiangular Sampling and MVNEE by fixing the endpoint via rotation and uniform scaling of a preliminary path, which preserves angles and handles highly-peaked forward scattering more robustly. Unlike Path Guiding, it does not use memory to store sampling densities or handle visibility explicitly during construction.
+Bridge Sampling is a method for sampling a subpath (bridge) of arbitrary vertex count connecting two vertices in a participating medium, where the probability density is proportional to all inner phase functions and reciprocal squared distance terms. It sets itself apart from sibling methods like Equiangular Sampling and MVNEE by fixing the endpoint via rotation and uniform scaling of a preliminary path, which preserves angles and handles highly-peaked forward scattering more robustly. Unlike Path Guiding, it does not use memory to store sampling densities or handle visibility explicitly during the sampling construction.
 
 ### [Bidirectional Path Tracing](6666-bidirectional-path-tracing.md)
-Bidirectional Path Tracing constructs a full light transport path by independently generating a light subpath and an eye subpath, then connecting their endpoints with a deterministic segment. It sets itself apart from unidirectional path tracing by including both emitted radiance and sensor importance in the path probability density function (PDF), which improves convergence rates for scenes with refractive boundaries.
-
-### Virtual ray lights (VRLs)
-Virtual Ray Lights (VRLs) are a many-light method reinterpreted as a bidirectional segment-segment connection technique that samples propagation distances from a joint conditional distribution proportional to the scattering and geometry terms [S1]. VRLs use 2 random decisions (distances $t_{ab}$ and $t_{dc}$) and are combined with other techniques using Multiple Importance Sampling (MIS) [S1].
+Bidirectional Path Tracing (BPT) is a light transport algorithm that constructs a full path by combining a light subpath and a camera subpath, connecting their endpoints with a deterministic segment. It solves the high variance of unidirectional sampling by including both emitted radiance and sensor importance in the path PDF, which is particularly effective for scenes with refractive boundaries or complex light transport. Unlike its sibling [Bridge Sampling](3881-bridge-sampling.md), which uses probabilistic connections, BPT connects subpath endpoints deterministically, yielding $k+2$ different sampling techniques for a $k$-length path.
 
 ## Operating characteristics
-*   **Time Complexity:** The unidirectional factorization with isotropic scattering involves analytic sampling, which is $O(1)$ per connection. For anisotropic scattering, tabulation lookup is required, which is also $O(1)$ but with higher constant factors [S1].
-*   **Memory Complexity:** Minimal memory for isotropic case. Anisotropic case requires storage for PDF tables [S1].
-*   **Performance:** Reduces variance significantly compared to vertex-vertex connection, equiangular sampling, and VRLs by using 3 random decisions [S1].
-*   **Strengths:** Handles singularities in geometry terms effectively; robust for forward scattering [S1].
-*   **Limitations:** Analytic formulas are complex and limited to isotropic scattering; anisotropic case requires tabulation [S1].
+*   **Complexity:** The unidirectional analytic sampling requires $O(1)$ operations for isotropic scattering [S1]. For anisotropic scattering, tabulation is used, increasing complexity based on table resolution [S1].
+*   **Variance:** Uses 3 random decisions (direction and distance from $\mathbf{d}$, direction from $\mathbf{c}$) compared to 0, 1, or 2 for Equiangular Sampling and VRLs, significantly reducing variance [S1].
+*   **Singularity Handling:** The sampling of $\boldsymbol{\omega}_{cb}$ cancels the geometric singularity in the path contribution function [S1].
+*   **Limitations:** The analytic formulas are derived for isotropic scattering; anisotropic cases require tabulation or numerical integration [S1].
 
 ## Background
-Joint Path Vertex Sampling was introduced by Kulla and Fajardo in 2012 [S1]. It extends previous methods like equiangular sampling and VRLs by adding a direction sampling step to reduce variance in volumetric path tracing [S1].
+Joint Path Vertex Sampling was introduced by Kulla and Fajardo in 2012 [S1]. It extends earlier work on equiangular sampling and Virtual Ray Lights (VRLs) [S1]. VRLs were originally a many-light method reinterpreted as a bidirectional segment-segment connection technique [S1]. JPVS generalizes this by adding a direction sampling step to reduce variance further [S1].
 
 ## Sources
 [S1] Joint importance sampling of low-order volumetric scattering, https://doi.org/10.1145/2508363.2508411, fetched 2026-10-28
-[S2] Bidirectional Path Tracing, https://doi.org/10.1145/1198555.1198561, fetched 2026-10-28

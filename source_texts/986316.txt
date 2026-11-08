@@ -1,0 +1,86 @@
+Observation Expert arenas (40 × LayerExpertCache, each owning an ExpertArena of real MTLBuffers — ExpertArena.swift:16-30) are per-backend, never held by the shared engine: makeFusedStreaming allocates a fresh 40-layer set unless existin...
+
+serialize: expert arenas are never released — bolt's outlives its request, and the segmented path rebuilds one per segment with no clearCache · Issue #165 · penta2himajin/qwisp · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+serialize: expert arenas are never released — bolt's outlives its request, and the segmented path rebuilds one per segment with no clearCache #165
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+serialize: expert arenas are never released — bolt's outlives its request, and the segmented path rebuilds one per segment with no clearCache#165
+Copy link
+Labels
+bugSomething isn't workingSomething isn't working
+Description
+penta2himajin
+opened on Aug 1, 2026
+Issue body actions
+Observation
+Expert arenas (40 × LayerExpertCache, each owning an ExpertArena of real MTLBuffers — ExpertArena.swift:16-30) are per-backend, never held by the shared engine: makeFusedStreaming allocates a fresh 40-layer set unless existingProviders is passed (SeedlessEngine.swift:194-217). Cost is linear and documented — estRSS(C) = 2.4 + C/64 × 4.5 GB (DeviceCalibration.swift:44; notes/02-device-matrix.md:66), i.e. ≈4.5 GB per 64 units of C.
+Three owners exist. None is released in normal operation:
+owner
+C
+released?
+boltServe → BoltServe.providers (BoltServe.swift:53, built :264-267)
+cfg.c (128 on 16GB)
+never — assigned once at LLMBackend.swift:355, no = nil anywhere
+LLMBackend.prefixProviders (:174, built :486-492)
+strictC (64 on 16GB)
+never in normal operation — only the test hook resetPrefixCache() (:630)
+segmented generate() (:381-382)
+strictC
+not stored on self — rebuilt every segment of the while produced < ceiling loop
+Two distinct problems
+(a) Guaranteed coexistence defeats the #69 fit rule. One greedy request followed by one --lossless prefix-cache-eligible request leaves two permanently-resident arenas: 9.0 GB (C=128) + 4.5 GB (C=64) = 13.5 GB of expert arenas on a machine whose recommendedMaxWorkingSetSize is ~10.9 GB. strictStreamingC correctly shrinks the strict arena to C=64 (PR #70) and is then defeated by the C=128 arena beside it, which the rule cannot see.
+This also means every community benchtest strict row on a streaming tier was measured with bolt's arena resident — Benchtest.swift:236-241 flips losslessForced on the same backend instance after three bolt rows, and the code comment already says so (:233-234). #69 has been open waiting for community rows that this harness structurally cannot produce.
+(b) Per-segment rebuild with no clearCache. The segmented path drops a 40-layer arena unreferenced every segment. The analogous rebuild inside generateCached explicitly does not trust that (LLMBackend.swift:473-476):
+Release the OLD arena before building the new one: otherwise both coexist at peak, and MLX's buffer pool keeps the freed one cached indefinitely (observed 2026-07-22: 39GB IOAccelerator after growth rebuilds on a 64GB box → swap thrash, prefill 1 tok/s).
+No Memory.clearCache() exists on the segmented path. Whether those bytes come back is not determinable from source — it is the thing to measure, not to assert. Note that sampling requests are structurally excluded from generateCached (:232) and therefore always take this path: an agent harness sending temperature > 0 hits it on every request.
+Step 0
+qwisp simulate at the 16GB tier, one process, QWISP_PREFILL_MEMDBG=1 (mode 2 perturbs — #150), footprint <pid> never ps rss:
+one bolt request → 2. then one --lossless request → 3. then a long sampling request spanning several segments.
+(a) confirmed if footprint after step 2 shows two arenas' growth rather than one.
+(b) confirmed if footprint after step 3 grows monotonically with segment count at fixed token count.
+Kill criteria, fixed before looking: if step 2 shows only one arena's worth of growth, (a) is wrong — something reclaims or shares below the source level — and this closes. If step 3 is flat in segment count, (b) is wrong and only (a) proceeds.
+If confirmed
+Cheapest first, none of it touching the frozen forward path: release boltServe (+ clearCache()) when a request needs the other mode, and/or pass existingProviders on the segmented path so the arena is built once per process rather than per segment. Sizing is not the lever here — that is #164.
+Refs
+#86 (field report: 16GB + OpenCode, swap growth) · #69 / PR #70 (strictStreamingC, the budget-fit rule this defeats) · #162 (MLX pool bound, serialize path) · #163 (unattributed IOAccelerator growth — bounds what any of this can claim) · #164 (sizing from free RAM) · LLMBackend.swift:105,174,232,355,381-382,473-476,486-492,630 · BoltServe.swift:53,264-267 · SeedlessEngine.swift:194-217 · ExpertArena.swift:16-30 · Benchtest.swift:233-241
+Activity
+penta2himajin
+added
+enhancementNew feature or requestNew feature or request
+bugSomething isn't workingSomething isn't working
+and removed
+enhancementNew feature or requestNew feature or request
+on Aug 1, 2026
+penta2himajin commented on Oct 6, 2026
+penta2himajin
+on Oct 6, 2026
+OwnerAuthor
+More actions
+Tracking the close order for this + siblings in #185 (this is Wave 1 root #1 — the first code work).
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+bugSomething isn't workingSomething isn't working
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

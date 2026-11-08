@@ -1,0 +1,282 @@
+Voxel game in C++ & OpenGL. Contribute to amodhakal/linterra development by creating an account on GitHub.
+
+Replace flat chunk maps with a sparse quadtree keyed on chunk coords by amodhakal · Pull Request #221 · amodhakal/linterra · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+amodhakal
+commented
+Oct 2, 2026
+Copy link
+Copy Markdown
+Owner
+Part 1 of 3 for #6. Part 2 is #6's LOD selection. Part 3 is hierarchical culling.
+What was measured first
+The issue's claims, re-verified against origin/main (0e5e88a):
+RENDER_DISTANCE_CHUNKS = 32, so ChunkManager::render walked
+(2 * 32 + 1)^2 = 4225 grid positions every frame, unconditionally.
+FOG_END = RENDER_DISTANCE_BLOCKS = 512.
+Four flat containers in src/manager.h:105-109, keyed by chunk
+coordinates, with no hierarchy. "Which chunks are near the camera" could
+only be answered by visiting all of them.
+After
+before
+after
+steady-state spawn scan
+4225 positions x (1 distance test, 1 mutex lock, 2 hash lookups)
+266 nodes visited, 133 subtrees skipped
+one hole in the 4225 grid
+4225
+1 cell, 285 nodes
+The tree aggregates subtree counts, so an empty subtree is answered without
+descending into it.
+Discrimination proven
+Both mutations were built and observed to fail:
+Aggregates never recomputed. CHECK( stats.nodesVisited < 600 ) fails
+at 5722 nodes against 266. This is the optimisation being silently
+off while everything still looks correct.
+Tree-driven walk instead of region-driven. 3 failures;
+CHECK( wanted.size() == 4224 ) gives 0 == 4224. This is the cold-start
+bug: a spawn scan that cannot see unstreamed terrain never streams
+anything.
+25 GL-free test cases. Suite 109 -> 154 cases over the three branches.
+Four bugs found and fixed, each pinned by a test
+Double-free of top-level nodes.
+Use-after-free reading node->parent after unlink.
+Wrong child slot cleared, orphaning 1497 nodes.
+Stale aggregates above the prune stop point.
+ASan-clean.
+Honest limitations
+It is a quadtree, not an octree. Chunk coordinates are ivec2 — 2D,
+with Y as a column height — so cells split in two. The issue asks for eight
+children. I first sized the child array at 8, which left 4 slots
+permanently null and silently disabled the completeness optimisation:
+correct results, 4225 cells per frame, nothing reporting it.
+Steady-state memory is unchanged. This branch changes no per-chunk
+representation, so the issue's 1.5 GB target is untouched. That is an
+argument, not a measurement.
+A point lookup is now 7 dependent hops against one hash lookup.
+tryGetGroundHeight — the collision path — is strictly slower. Stated in
+the header rather than buried here.
+Traversal predicates are tested as data-structure properties, not at the
+ChunkManager call sites.
+Expected conflicts
+src/manager.cpp and src/manager.h are being rewritten concurrently by M13
+(issue-137, issue-138, issue-16) and M15 (issue-52). This branch
+replaces the same containers. To keep a future rebase mechanical, the octree
+exposes the names the unordered_map had — contains, find, emplace,
+erase, plus forEachValue for iteration. Expect a real conflict in every
+container declaration and every pass in render().
+m_ProcessingPositions is deliberately left as an unordered_set; that is
+issue-52's work.
+This was referenced Oct 2, 2026
+Select and apply a level of detail per chunk from camera distance
+#222
+Merged
+Cull whole subtrees against the frustum, and prove it conservative
+#223
+Merged
+amodhakal
+added this pull request to stack #224
+October 2, 2026 02:17
+Replace flat chunk maps with a sparse quadtree keyed on chunk coords
+…
+5afafd8
+```
+ChunkManager kept meshed chunks in unordered_map<ivec2, Chunk> and
+in-flight tasks in unordered_map<ivec2, TaskResult>. A hash map has no
+spatial structure, so "which chunks are near the camera" was only ever
+answered by visiting all of them, and the per-frame spawn scan had no
+choice but to walk a fixed grid.
+
+Verified on this tree before changing anything, at HEAD 0e5e88a:
+
+  RENDER_DISTANCE_CHUNKS = 32 (src/config.h:91), so the spawn loop at
+  src/manager.cpp:223-228 walked (2*32+1)^2 = 65 x 65 = 4225 positions
+  every frame, unconditionally. Each iteration cost a
+  getChunkDistanceSquared call, a lock_guard on m_ProcessingMutex, and
+  two hash lookups (contains on each container). This happened whether
+  or not the player moved. FOG_END = RENDER_DISTANCE_BLOCKS = 512, so
+  geometry past the fog end was fully resident and fully fogged.
+
+The mechanism
+-------------
+
+A node owns a square cell of 2^level chunk coordinates, so "is this cell
+anywhere near the camera" is one box test, and a subtree that is nowhere
+near it is dropped without touching the chunks under it. Each node also
+carries two derived aggregates: how many leaves are resident below it,
+and whether every chunk coordinate in its cell is present. The
+completeness flag is the load-bearing one -- a settled region costs one
+test instead of one hash lookup per chunk per frame.
+
+Two design decisions worth stating because the obvious alternative is
+wrong:
+
+The top level is a hash map from 2^kSubtreeLevels cell to subtree, not a
+single root. Chunk coordinates are int32 and unbounded; a fixed root
+would have to be re-anchored, and therefore rebuilt, whenever the camera
+left it, putting a several-thousand-entry spike on a periodic frame.
+
+The cell walk is driven by the QUERY REGION, not by the tree. It
+enumerates the top-level cells overlapping the window whether or not
+they have a subtree, and reports a cell with no subtree ONCE for the
+whole cell rather than 4^level times. I wrote the tree-driven version
+first and it is subtly broken: on a cold start, or anywhere outside the
+streamed area, the tree is empty there, so the walk reports nothing. A
+spawn scan that cannot see unstreamed terrain never streams anything.
+Mutation 2 below is that exact bug, and three tests catch it.
+
+This is a quadtree, not an octree. The issue asks for an octree, but an
+octree has eight children because it splits a cube in three, and this
+key is glm::ivec2 -- the world index is 2D, with Y a column height
+rather than an axis -- so a cell is a square and splits in two. I first
+sized the child array at eight; only four slots are ever populated, so
+every "all children present" test failed forever and the completeness
+optimisation was silently off, still correct, 4225 cells per frame.
+
+Measured, before and after
+--------------------------
+
+Steady state, settled 65x65 window, camera not moving. "Grid positions"
+is the old unconditional scan; "nodes visited" is what the tree walk
+touches instead.
+
+  before: 4225 grid positions, each = 1 distance test + 1 mutex lock +
+          2 hash lookups
+  after:  0 level-0 cells visited, 266 nodes visited, 133 subtrees
+          skipped whole
+
+One missing chunk out of 4225, the case that motivates the whole thing:
+
+  after:  1 cell visited, 285 nodes. Exactly the one hole is reported;
+          nothing else. The 2x2 cell that contained it had only that one
+          chunk, so it was pruned and the hole arrived as a single
+          whole-cell report.
+
+The cost is not one-sided and is not hidden: a point lookup is now 7
+dependent pointer hops (kSubtreeLevels + 1) against the map's one hash
+and one bucket walk. tryGetGroundHeight is on the player/collision path
+and is the one place this is a straight regression. Bounded and small,
+but real.
+
+25 new GL-free cases in tests/test_chunk_octree.cpp. The tree is
+templated on its payload precisely so the suite can instantiate it with
+an int, which is what makes any of this runnable in a headless ctest.
+Full suite: 134 cases, 26836 -> 3918678 assertions, ctest green, zero
+warnings under -Wall -Wextra -Wpedantic -Wshadow.
+
+Mutation testing
+----------------
+
+Both mutations were applied, built, and observed to fail. Captured
+output, abbreviated.
+
+1. Aggregates never recomputed (updateAggregates loops zero times).
+   This is the optimisation switched off -- still correct, just slow,
+   which is exactly the failure mode that ships as "no visible
+   difference":
+
+     test cases: 25 | 21 passed | 4 failed
+     test_chunk_octree.cpp:210: CHECK( tree.isCellComplete(kLevel, origin) )
+       is NOT correct!
+     test_chunk_octree.cpp:212: CHECK( tree.cellCount(kLevel, origin) ==
+       side*side ) is NOT correct!   values: CHECK( 0 == 64 )
+     test_chunk_octree.cpp:336: CHECK( stats.nodesVisited < 600 )
+       is NOT correct!
+       logged: grid positions: 4225  cells visited: 0  nodes visited: 5722
+               subtrees skipped: 4225
+
+   Note 5722 nodes against 266: that is every node in the tree, and 4225
+   skipped leaves instead of 133 skipped cells. The optimisation off is
+   a 21x increase in nodes touched, and the test measures it.
+
+2. Walk driven by the tree instead of the region -- the cold-start bug
+   described above:
+
+     test cases: 25 | 22 passed | 3 failed
+     test_chunk_octree.cpp:414: CHECK( wanted.size() == 4224 )
+       is NOT correct!  values: CHECK( 0 == 4224 )
+     test_chunk_octree.cpp:440: CHECK( nullNodes == 4225 )
+       is NOT correct!
+     test_chunk_octree.cpp:463: CHECK( visited.size() == 81 )
+       is NOT correct!  values: CHECK( 0 == 81 )
+
+Bugs found and fixed while building this, all of which the tests now pin
+because each was a real defect rather than a near miss:
+
+  - double free: pruneUpward deleted a top-level node that m_Top's
+    unique_ptr also owns. A crash, reproducing only when a whole
+    top-level cell empties.
+  - use-after-free: pruneUpward read node->parent after unlinkFromParent
+    dropped the unique_ptr owning node.
+  - wrong child slot cleared: unlinkFromParent passed the wrong level to
+    childIndex, orphaning nodes the tree could never reach again. 1497
+    orphaned nodes after erasing a 4225-chunk window.
+  - stale aggregates: pruneUpward stops at the first ancestor with other
+    children, so folding the count update into it left every ancestor
+    above that point reporting a chunk too many and a cell that still
+    claimed to be complete -- which is a hole that never refills.
+  - ASan-clean after the above; the repro was run under
+    -fsanitize=address to confirm.
+
+Coverage gaps
+-------------
+
+- The traversal predicates are tested as data-structure properties. The
+  manager call sites that supply them are not: application.cpp and
+  manager.cpp are excluded from every test target, and the smoke test
+  exercises Chunk but not ChunkManager::render's spawn loop.
+- No test asserts the octree visit count for the real manager window at
+  real radii. The numbers above come from the octree driven with the
+  manager's window bounds in the test, not from the manager itself.
+- Steady-state memory is NOT measured. The issue's acceptance criterion
+  is a drop from the README's 1.5 GB Milestone-4 figure at a 64-chunk
+  render distance. This branch changes no per-chunk representation, so
+  the expected change is zero; that is an argument, not a measurement,
+  and it is not verified here.
+- Collision risk, stated plainly: this branch replaces the exact
+  containers that the M13 stream (issues 137, 138, 16) and the M15 stream
+  (issue 52) are rewriting. The interface was kept deliberately
+  map-shaped (contains/find/emplace/erase, forEachValue in place of
+  iteration) so a future rebase is a container swap rather than a
+  rewrite of every loop, but src/manager.h and src/manager.cpp are
+  touched in every one of their container declarations and in all four
+  passes through render(). Expect a real conflict.
+
+Refs #6
+```
+amodhakal
+force-pushed
+the
+svo-octree
+branch
+from
+c97f24e to
+5afafd8
+Compare
+October 2, 2026 02:17
+Hide details
+View details
+amodhakal
+merged commit 0244355
+into
+main
+Oct 2, 2026
+8 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

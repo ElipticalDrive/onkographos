@@ -1,0 +1,429 @@
+Repo: https://github.com/farisyahz/Project5-WebGPU-Gaussian-Splat-Viewer
+Demo: https://farisyahz.github.io/Project5-WebGPU-Gaussian-Splat-Viewer/
+Completed:
+
+Point-cloud MVP transform and Gaussian splat renderer
+Tile-based sorting and compute rasterizer
+f16 preprocessing
+Tight splat bounds, GPU profiling, and debug views
+Performance analysis, screenshots, and a 70-second feature video
+
+Feedback: N/A
+
+Project 5: Faris Rafie Syahzani by farisyahz · Pull Request #11 · CIS5650-Fall-2026/Project5-WebGPU-Gaussian-Splat-Viewer · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Project 5: Faris Rafie Syahzani
+#11
+New issue
+Have a question about this project? Sign up for a free GitHub account to open an issue and contact its maintainers and the community.
+Sign up for GitHub
+By clicking “Sign up for GitHub”, you agree to our terms of service and
+privacy statement. We’ll occasionally send you account related emails.
+Already on GitHub?
+Sign in
+to your account
+Open
+farisyahz
+wants to merge
+11
+commits into
+CIS5650-Fall-2026:main
+base:
+main
+Branches
+Tags
+Loading
+Loading
+from
+farisyahz:main
+Uh oh!
+There was an error while loading. Please reload this page.
+Open
+Project 5: Faris Rafie Syahzani
+#11
+Show file tree
+Hide file tree
+Changes from 1 commit
+Commits
+Show all changes
+11 commits
+Select commit
+Hold shift + click to select a range
+942a892
+Part 1: add MVP transform to point cloud shader
+farisyahz Oct 26, 2026
+48bebd7
+Part 2: gaussian splat renderer (preprocess, sort, indirect quad draw)
+farisyahz Oct 26, 2026
+96599f7
+Extra credit: tile-based sorting and compute rasterizer, GPU profiling
+farisyahz Oct 26, 2026
+0f727d8
+Extra credit: f16 preprocess compute shader
+farisyahz Oct 26, 2026
+ad9a1e3
+Optimization: opacity-aware axis-aligned splat bounds
+farisyahz Oct 26, 2026
+29df7e6
+Add partial benchmark results to dev notes
+farisyahz Oct 26, 2026
+1c511c5
+Add debug views for intermediate pipeline stages
+farisyahz Oct 27, 2026
+8880f06
+Fix f16 opacity overflow; tune debug view scales
+farisyahz Oct 27, 2026
+d884927
+Add benchmark harness, raw measurements and plotting script
+farisyahz Oct 27, 2026
+d95270c
+Write README with pipeline walkthrough, extra credit and performance …
+farisyahz Oct 27, 2026
+002e00b
+Prepare to submit
+farisyahz Oct 27, 2026
+File filter
+Clear filters
+Conversations
+Failed to load comments. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Jump to
+Jump to file
+Failed to load files. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Diff view
+Diff view
+Prev
+Previous commit
+Next
+Next commit
+Optimization: opacity-aware axis-aligned splat bounds
+```
+Shrinks quads/tile rects to the box where alpha >= 1/255 and culls gaussians that can
+never reach it. Toggleable via the tight_bounds GUI option.
+```
+Loading branch information
+Uh oh!
+There was an error while loading. Please reload this page.
+farisyahz
+committed
+Oct 26, 2026
+commit ad9a1e3d467368ba693971b12303f77b47e05c6a
+There are no files selected for viewing
+17 changes: 17 additions & 0 deletions
+17
+DEV_NOTES.md
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -108,3 +108,20 @@ First numbers (bonsai, preset 3, 1280×800, RTX 4050 Laptop GPU, headless Chrome
+Need a proper benchmark sweep to quantify.
+Machine: AMD Ryzen 7 8845HS, NVIDIA GeForce RTX 4050 Laptop GPU (driver 616.56), Chrome 155 (adapter = nvidia/lovelace).
+## Optimization — tight, opacity-aware splat bounds (`tight_bounds`, default on)
+- Reference: square around the 3σ circle of the major axis (radius = 3·sqrt(λ_max)).
+- Tight: axis-aligned box of the ellipse region where alpha ≥ 1/255 (everything else is discarded anyway):
+k = min(3, sqrt(2·ln(255·opacity))) standard deviations, per axis sqrt(Σ'xx), sqrt(Σ'yy)
+(exact bounding box of the ellipse). Gaussians with 255·opacity ≤ 1 are culled entirely.
+- Used for both the quad size and the tile rect.
+- Bicycle, default camera, 1280×800:
+| | tight off | tight on |
+|---|---|---|
+| visible gaussians | 1,063,091 | 974,698 (−8%) |
+| quad render pass | 9.78 ms | 2.11 ms (4.6×) |
+| quad gpu total | 14.13 ms | 6.04 ms |
+| tile keys | 5.58 M | 2.30 M |
+| tile sort / raster | 12.70 / 6.31 ms | 6.79 / 3.48 ms |
+| tile gpu total | 20.05 ms | 11.20 ms |
+| PSNR vs off | – | 75.6 dB (quad), 70.3 dB (tile) |
+11 changes: 8 additions & 3 deletions
+11
+src/renderers/gaussian-renderer.ts
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -16,6 +16,7 @@ export type PreprocessPrecision = 'f32' | 'f16';
+export interface GaussianRenderer extends Renderer {
+set_gaussian_multiplier: (value: number) => void,
+set_frustum_culling: (enabled: boolean) => void,
+set_tight_bounds: (enabled: boolean) => void,
+set_workgroup_size: (size: number) => void,
+set_mode: (mode: GaussianRenderMode) => void,
+// returns false when f16 is requested but the device lacks `shader-f16`
+Expand All
+@@ -37,7 +38,7 @@ const createBuffer = (
+// keep in sync with `Splat` in the shaders
+const c_size_splat = 8 * 4;
+const c_size_render_settings = 4 * 4;
+const c_size_render_settings = 8 * 4;
+const c_max_workgroups_per_dim = 65535;
+const c_tile_size = 16;
+const c_sort_keys_per_dispatch = C.histogram_wg_size * c_histogram_block_rows;
+Expand Down
+Expand Up
+@@ -73,8 +74,8 @@ export default function get_renderer(
+new Uint32Array([4, pc.num_points, 0, 0]),
+);
+// gaussian_scaling, sh_deg, frustum_culling, key_capacity
+const render_settings = new Float32Array([1.0, pc.sh_deg, 1.0, 0.0]);
+// gaussian_scaling, sh_deg, frustum_culling, key_capacity, tight_bounds, padding
+const render_settings = new Float32Array([1.0, pc.sh_deg, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
+const render_settings_buffer = createBuffer(
+device, 'render settings', c_size_render_settings,
+GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+Expand Down
+Expand Up
+@@ -476,6 +477,10 @@ export default function get_renderer(
+render_settings[2] = enabled ? 1.0 : 0.0;
+update_render_settings();
+},
+set_tight_bounds: (enabled: boolean) => {
+render_settings[4] = enabled ? 1.0 : 0.0;
+update_render_settings();
+},
+set_workgroup_size: (size: number) => {
+workgroup_size = size;
+rebuild_preprocess_pipelines();
+Expand Down
+8 changes: 8 additions & 0 deletions
+8
+src/renderers/renderer.ts
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -55,6 +55,7 @@ export default async function init(
+gaussian_mode: 'quad' as GaussianRenderMode,
+gpu_stats: '',
+frustum_culling: true,
+tight_bounds: true,
+workgroup_size: 256,
+precision: 'f32' as PreprocessPrecision,
+ply_file: '',
+Expand All
+@@ -65,6 +66,7 @@ export default async function init(
+function apply_gaussian_params(r: GaussianRenderer) {
+r.set_gaussian_multiplier(params.gaussian_multiplier);
+r.set_frustum_culling(params.frustum_culling);
+r.set_tight_bounds(params.tight_bounds);
+r.set_workgroup_size(params.workgroup_size);
+r.set_mode(params.gaussian_mode);
+r.set_precision(params.precision);
+Expand Down
+Expand Up
+@@ -161,6 +163,12 @@ export default async function init(
+gaussian_renderer?.set_frustum_culling(e.value);
+});
+}
+{
+// opacity aware, axis aligned splat bounds instead of the 3 sigma circle
+pane.addInput(params, 'tight_bounds').on('change', (e) => {
+gaussian_renderer?.set_tight_bounds(e.value);
+});
+}
+{
+pane.addInput(params, 'workgroup_size', {
+options: { '32': 32, '64': 64, '128': 128, '256': 256 },
+Expand Down
+10 changes: 7 additions & 3 deletions
+10
+src/shaders/preprocess.wgsl
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -151,17 +151,21 @@ fn project_gaussian(idx: u32) -> Projected {
+let det_inv = 1.0 / det;
+let mid = 0.5 * (cov2d.x + cov2d.z);
+let lambda1 = mid + sqrt(max(0.1, mid * mid - det));
+let radius = ceil(3.0 * sqrt(lambda1));
+let opacity = sigmoid(z_op.y);
+let extent = splat_extent(cov2d, lambda1, opacity);
+if extent.x <= 0.0 {
+return p;
+}
+let cam_pos = camera.view_inv[3].xyz;
+let dir = normalize(pos - cam_pos);
+p.visible = true;
+p.ndc = ndc;
+p.view_z = view_pos.z;
+p.radius = radius;
+p.extent = extent;
+p.conic = vec3<f32>(cov2d.z * det_inv, -cov2d.y * det_inv, cov2d.x * det_inv);
+p.color = computeColorFromSH(dir, idx, u32(render_settings.sh_deg));
+p.opacity = sigmoid(z_op.y);
+p.opacity = opacity;
+return p;
+}
+25 changes: 23 additions & 2 deletions
+25
+src/shaders/preprocess_common.wgsl
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -37,6 +37,10 @@ struct RenderSettings {
+sh_deg: f32,
+frustum_culling: f32, // > 0.5 => cull gaussians outside 1.2x the view frustum
+key_capacity: f32, // tile renderer: number of sort keys that fit into the sort buffers
+tight_bounds: f32, // > 0.5 => opacity aware, axis aligned splat bounds (see splat_extent)
+_pad0: f32,
+_pad1: f32,
+_pad2: f32,
+}
+struct Gaussian {
+Expand All
+@@ -62,7 +66,7 @@ struct Projected {
+visible: bool,
+ndc: vec2<f32>,
+view_z: f32,
+radius: f32, // pixels
+extent: vec2<f32>, // quad half extent in pixels
+conic: vec3<f32>,
+color: vec3<f32>,
+opacity: f32,
+Expand Down
+Expand Up
+@@ -104,6 +108,23 @@ fn sigmoid(x: f32) -> f32 {
+return 1.0 / (1.0 + exp(-x));
+}
+// Half extent (pixels) of the screen space quad of a splat.
+// Default: a square around the 3 sigma circle of the major axis, like the reference implementation.
+// Tight bounds: the axis aligned box of the ellipse outside of which alpha < 1/255 (those fragments are
+// discarded anyway): k sigma with k = sqrt(2 ln(255 opacity)), capped at 3 sigma, using the per axis
+// standard deviations sqrt(cov_xx), sqrt(cov_yy). Returns 0 when the splat can never reach alpha 1/255.
+fn splat_extent(cov2d: vec3<f32>, lambda1: f32, opacity: f32) -> vec2<f32> {
+if render_settings.tight_bounds > 0.5 {
+let op = 255.0 * opacity;
+if op <= 1.0 {
+return vec2<f32>(0.0);
+}
+let k = min(3.0, sqrt(2.0 * log(op)));
+return ceil(k * sqrt(vec2<f32>(cov2d.x, cov2d.z)));
+}
+return vec2<f32>(ceil(3.0 * sqrt(lambda1)));
+}
+fn ndc_to_pixel(ndc: vec2<f32>) -> vec2<f32> {
+// WebGPU framebuffer y points down, NDC y points up
+return vec2<f32>((ndc.x * 0.5 + 0.5) * camera.viewport.x, (0.5 - ndc.y * 0.5) * camera.viewport.y);
+Expand All
+@@ -114,7 +135,7 @@ fn make_splat(p: Projected) -> Splat {
+s.pos_ndc = p.ndc;
+s.conic_xy = p.conic.xy;
+s.conic_z = p.conic.z;
+s.size = pack2x16float(vec2<f32>(p.radius) * 2.0 / camera.viewport);
+s.size = pack2x16float(p.extent * 2.0 / camera.viewport);
+s.color_rg = pack2x16float(p.color.rg);
+s.color_b_opacity = pack2x16float(vec2<f32>(p.color.b, p.opacity));
+return s;
+Expand Down
+4 changes: 2 additions & 2 deletions
+4
+src/shaders/preprocess_entries.wgsl
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -66,8 +66,8 @@ fn preprocess_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_
+let center = ndc_to_pixel(p.ndc);
+let tile_f = f32(tileSize);
+let tiles_f = vec2<f32>(tiles);
+let rect_min = vec2<u32>(clamp(floor((center - p.radius) / tile_f), vec2<f32>(0.0), tiles_f));
+let rect_max = vec2<u32>(clamp(ceil((center + p.radius) / tile_f), vec2<f32>(0.0), tiles_f));
+let rect_min = vec2<u32>(clamp(floor((center - p.extent) / tile_f), vec2<f32>(0.0), tiles_f));
+let rect_max = vec2<u32>(clamp(ceil((center + p.extent) / tile_f), vec2<f32>(0.0), tiles_f));
+let extent = rect_max - rect_min;
+let num_keys = extent.x * extent.y;
+if num_keys == 0u {
+Expand Down
+10 changes: 7 additions & 3 deletions
+10
+src/shaders/preprocess_f16.wgsl
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -166,17 +166,21 @@ fn project_gaussian(idx: u32) -> Projected {
+let det_inv = 1.0 / det;
+let mid = 0.5 * (cov2d.x + cov2d.z);
+let lambda1 = mid + sqrt(max(0.1, mid * mid - det));
+let radius = ceil(3.0 * sqrt(lambda1));
+let opacity = f32(1.0h / (1.0h + exp(-z_op.y)));
+let extent = splat_extent(cov2d, lambda1, opacity);
+if extent.x <= 0.0 {
+return p;
+}
+let cam_pos = camera.view_inv[3].xyz;
+let dir = vec3<f16>(normalize(pos - cam_pos));
+p.visible = true;
+p.ndc = ndc;
+p.view_z = view_pos.z;
+p.radius = radius;
+p.extent = extent;
+p.conic = vec3<f32>(cov2d.z * det_inv, -cov2d.y * det_inv, cov2d.x * det_inv);
+p.color = vec3<f32>(computeColorFromSH(dir, idx, u32(render_settings.sh_deg)));
+p.opacity = f32(1.0h / (1.0h + exp(-z_op.y)));
+p.opacity = opacity;
+return p;
+}
+Toggle all file notes
+Toggle all file annotations
+Add this suggestion to a batch that can be applied as a single commit.
+This suggestion is invalid because no changes were made to the code.
+Suggestions cannot be applied while the pull request is closed.
+Suggestions cannot be applied while viewing a subset of changes.
+Only one suggestion per line can be applied in a batch.
+Add this suggestion to a batch that can be applied as a single commit.
+Applying suggestions on deleted lines is not supported.
+You must change the existing code in this line in order to create a valid suggestion.
+Outdated suggestions cannot be applied.
+This suggestion has been applied or marked resolved.
+Suggestions cannot be applied from pending reviews.
+Suggestions cannot be applied on multi-line comments.
+Suggestions cannot be applied while the pull request is queued to merge.
+Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

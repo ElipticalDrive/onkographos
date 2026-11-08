@@ -1,0 +1,248 @@
+C# ported version of hl2 sdk map tools vrad, vbsp, vvis - Rooms nav v2: shared clearance grid, baked traversal, derived adjacency, dynamic obstacles by muflub · Pull Request #75 · muflub/source-sdk-sharp-map-tools
+
+Rooms nav v2: shared clearance grid, baked traversal, derived adjacency, dynamic obstacles by muflub · Pull Request #75 · muflub/source-sdk-sharp-map-tools · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+muflub
+commented
+Sep 28, 2026
+Copy link
+Copy Markdown
+Owner
+This implements the owner's answers on #68.
+What changes
+One shared clearance grid replaces the per-agent octrees.
+Voxels stay 16×16×16. Each placed cell's columns hold runs of voxels with the same clearance key.
+A record is a staircase of (R, T) corners: a box of half-width r and height h is blocked in a voxel whose top is z1 exactly when r > R+ε and z1+h > T+ε.
+Axis-aligned and upward-widening sloped brushes give exact thresholds. A brush with a downward-facing sloped face (an overhang) can't be stated as a corner, so the record names the brush and the reader runs the direct box test.
+Only corners that no other corner dominates are kept, so nothing is approximated.
+The exactness argument, seams included, is in docs/nav3d-format.md §5 and §17.4.
+Masks: there is one record per clip class (player clip or monster clip), stored once when the two are equal.
+nav_agents becomes optional size presets. The data doesn't depend on them, so the game can test any model size.
+Baked traversal data:
+floor height and a walkable flag per class, with step height 18;
+jump links, 56 up and 100 across;
+ladders from CONTENTS_LADDER, info_ladder and func_useableladder;
+water;
+8.8 fixed-point costs (water 2, ladder 1.5).
+All of these are adjustable with worldspawn keys (nav_step_height, nav_jump_height, nav_jump_distance, nav_cost_water, nav_cost_ladder).
+Derived at load: the file stores no adjacency. Nav3dReader derives neighbours, per-preset components, the leaf of each point of interest, each obstacle's leaves and each leaf's jumps, deterministically. Hot queries don't allocate (fact).
+Map first, navigation after:
+LevelNavFromPack.Plan derives the ids and refuses a bad point of interest before anything is written.
+Then the map is written, then LevelNavPlan.BuildAsync (cancellable, can be rerun) and WriteAsync, which replaces the file whole.
+A navigation failure leaves the map in place, and ssmap link says so and exits non-zero.
+Dynamic obstacles: func_door*, prop_door_rotating, movers, toggles, breakables, physics and dynamic props are open space in the grid, with their corners stored apart.
+Each gets an obstacle record named through the room-local resolver (e.g. c2r0_gate).
+The host passes one bool per obstacle, and ObstacleLeaves says which leaves to invalidate.
+A door that is also a doorway is tagged when the doorway is joined and gone when it is capped.
+A point of interest in a capped doorway is refused, naming the room, cell, entity id, name, type and socket (all four turns).
+Compression:
+The .nav3d defaults to Brotli 5, because the owner said to compress it when that matters: −93.6% on the stress level, and it opens in 17 ms.
+The pack's navigation sections stay raw by default, per the owner's rule that link speed beats disk size. They read in 21 ms raw against 35 ms from Brotli. -nav-codec still offers Brotli or Deflate.
+Format versions: file format version 2, NVR revision 2. An old pack reads as having no navigation, and the link warns. NavBrush moves to MapFormats.
+Size and time (main → this PR)
+main
+v2
+3x3 roompack
+772 KB
+517 KB raw (223 KB Brotli)
+3x3 .nav3d
+717–941 KB
+3.5–4.5 KB
+stress (256 rooms) roompack
+40.3 MB
+27.1 MB raw (11.9 MB Brotli)
+stress .nav3d
+28.3 MB
+117 KB
+stress link
+1.43–1.59 s
+1.11–1.25 s
+stress room compile
+7.9 s
+10.2–11.4 s
+Room compile is slower because each doorway's capped state is rebuilt in full. That is ahead-of-time work, and it can be made cheaper later by merging a caps-only build into the open grid.
+Evidence
+Flatten equivalence: on all 16 3x3 levels, the stitched grid equals the flattened level's grid, run for run and record for record. That includes floors, flags, costs, dynamic corners and brushes.
+Exactness: every voxel matches a direct box sweep for five sizes: standing, flyer, tall (24×150), wide (90×40) and tiny (6×10).
+Components: equal to v1's face adjacency of swept voxels, as a partition match both ways.
+Rotation: bit-exact at all 4 turns. Determinism: pack, .nav3d and map are identical at 1 and 4 threads and run to run.
+Edge cases: a step of exactly 18 walks while 18+ε needs a jump; the jump gap at its limit and one column past it; a door that is also a doorway.
+Pinned bytes: a .nav3d sample and a pack section, under all three codecs.
+Byte identity (my run, Microsoft SDK):
+ssmap link -no-nav on all 8 samples/rooms-3x3/levels gives .bsp files byte-identical to main.
+With navigation on, seed_9 writes a 3,505-byte .nav3d (1472 leaves, 2 presets, 25 points of interest).
+Replaced v1 facts (none loosened):
+NavVoxeliserTests → NavClearanceBuilderTests, with random-box exactness against a direct sweep.
+NavOctreeTests → run and record facts in RoomNavBuilderTests / Nav3dFileTests.
+Portal and cap facts → doorway-fit and cap-composition facts.
+Door-link and per-agent POI facts → derived-neighbour, component and point-leaf facts.
+The per-agent voxel comparison → the record-level comparison plus the multi-size sweep.
+Two production bugs the new facts caught, fixed here: entity vectors (origin, angles, ladder points) weren't being parsed, and two cached lambdas broke the no-mutable-statics rule.
+Full suite (my run, Microsoft SDK): 8206 passed, 288 skipped, 5 failed. The 5 are the radv-pinned VulkanRayTracerFacts, which can't pass on the llvmpipe container.
+Build: 0 warnings.
+Decisions beyond the brief
+Door points of interest: one per door, with a mask covering every preset, rather than one per door per agent.
+Point lookup: a point's leaf is looked up in its own cell, so door points on east and north faces resolve inside their own room.
+Jump defaults: 56 up (crouch jump), 100 across (190 u/s × 0.53 s), in both directions, for both classes.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01BfUmBXSBPBvLCioaaWnozk
+Generated by Claude Code
+claude
+added 9 commits
+September 28, 2026 20:26
+Nav v2 (WIP): format constants, clearance records, level model and wr…
+…
+8420232
+```
+…iter; NavBrush moves to MapFormats
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BfUmBXSBPBvLCioaaWnozk
+```
+Merge origin/main (#68, #70, #72 merged) into claude/rooms-nav-v2
+…
+d9c6977
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BfUmBXSBPBvLCioaaWnozk
+```
+Nav v2 (WIP): shared clearance grid, reader-derived adjacency, traver…
+…
+67b27a1
+```
+…sal data, map-first link
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BfUmBXSBPBvLCioaaWnozk
+```
+Nav v2: facts for the clearance grid, traversal, map-first link and r…
+…
+9988e1e
+```
+…eader
+
+Rewrites the version 1 navigation facts for the shared clearance grid:
+flatten equivalence and direct-sweep exactness on every 3x3 case, components
+against version 1's face adjacency, rotation, traversal limits, obstacles,
+the map-first link and the reader's derived data. Fixes entity vector
+parsing for props and ladders, finds a point's leaf in its own cell, and
+drops two cached lambdas the no-mutable-statics rule counts.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BfUmBXSBPBvLCioaaWnozk
+```
+Nav v2: store room navigation sections with Brotli 5 by default
+…
+6fc9ec0
+```
+Measured on the 256-room stress library: the sections shrink from 16.2 MB
+to 0.98 MB and the link time is unchanged within noise, so the pack
+default follows the .nav3d's.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BfUmBXSBPBvLCioaaWnozk
+```
+Nav v2: rewrite the .nav3d specification for the clearance grid
+…
+4d05c24
+```
+Layout, clearance records and the exactness argument, derived data,
+traversal, dynamic obstacles, the map-first link, a C++ walk-through, a C#
+example, a byte-level worked example and the measurements behind the
+defaults. README's navigation paragraphs follow.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BfUmBXSBPBvLCioaaWnozk
+```
+Nav v2: store the pack's navigation sections raw by default again
+…
+b35e275
+```
+The owner's rule for the pack is that link speed beats disk size, and raw
+sections read faster (21 ms against 35 ms for the stress library's 1,024).
+-nav-codec still chooses a codec, and the measurements stay in the doc.
+The .nav3d keeps its Brotli 5 default.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BfUmBXSBPBvLCioaaWnozk
+```
+Merge origin/main (#73 incremental ssmap room) into claude/rooms-nav-v2
+…
+ca027eb
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BfUmBXSBPBvLCioaaWnozk
+```
+Rooms: replay navigation warnings for reused rooms
+…
+a73c256
+```
+The merge of #73 (incremental ssmap room) broke the build: nav v2's
+per-room report printed compiled.Nav?.Base.Warnings, but the report now
+consumes a RoomBuildOutcome that is either compiled or reused from the
+cache, so there is no compiled room object to read them from.
+
+Carry the navigation warnings the way the naming warnings already travel:
+RoomBuildOutcome.NavWarnings, RoomCacheHit.NavWarnings, a navWarnings
+argument to RoomCompileCache.Add, the Pending record, and the row's meta
+blob. The meta layout moves to revision 2, which appends the navigation
+warning list; a revision-1 blob reads as a miss, so an old row's room
+compiles again rather than being served with its warnings dropped.
+ssmap room prints outcome.NavWarnings after the name warnings, in nav
+v2's format, so a reused room prints the lines its compile printed.
+
+Facts: a compiled room with a missing-model prop prints its nav warning
+and a second -incremental run reuses it and prints the same line; the
+library build carries the same list on reuse; a revision-1 meta blob and
+a row holding one are misses; the meta round trip carries nav warnings
+(empty, several, non-ASCII). Key coverage: every NavSettings property
+(step, jump height and reach, water and ladder cost included), every
+agent preset field, and every nav_* worldspawn key changes the room key.
+The fold already covered them; no new types need rooting for the trimmer.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BfUmBXSBPBvLCioaaWnozk
+```
+Hide details
+View details
+muflub
+merged commit 49c8ab9
+into
+main
+Sep 29, 2026
+8 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+muflub
+deleted the
+claude/rooms-nav-v2
+branch
+September 29, 2026 00:12
+muflub
+pushed a commit
+that referenced
+this pull request
+Sep 29, 2026
+Merge origin/main (#75, #76) into claude/perf-vis-flow-2
+…
+2c840ec
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BfUmBXSBPBvLCioaaWnozk
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

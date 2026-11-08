@@ -1,0 +1,622 @@
+OpenVDB - Sparse volume data structure and tools. Contribute to AcademySoftwareFoundation/openvdb development by creating an account on GitHub.
+
+NanoVDB: support single-space device buffers in GridHandle (CUDA) by harrism · Pull Request #2288 · AcademySoftwareFoundation/openvdb · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+harrism
+commented
+Aug 19, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+What this PR is, and why
+Grids on the GPU currently require a dual-space buffer: a host allocation mirrored by a device allocation, even in pipelines where the host copy is never read — doubling memory for device-resident workflows and pinning allocation to NanoVDB's built-in allocator instead of the application's pool. This PR (step 3 of #2232, part 1 of 3) adds a device-only alternative: GridHandle<cuda::Buffer<std::byte, R>>, a grid owned by a single device allocation made through any injected memory resource (an RMM-style pool, or downstream wrappers like fvdb's Torch caching allocator — the consumers the #2232 seam work exists for). Host mirror: gone. Host-facing APIs on such a handle: compile-time errors by design.
+Dual-space handles are untouched by this PR — today they're still the only way to move grids between host and device. That changes in part 2, which will add explicit cross-space transfers (per-direction copy() between host-space and device-space handles, currently a named compile error). Once those cover the dual buffers' use cases, the dual buffers themselves will be deprecated and then removed: the end state is one buffer template class, with on type per memory space and explicit transfers between them.
+What
+A new (detected) hasDeviceSingle buffer trait selects a constructor in cuda/GridHandle.cuh that parses grid metadata through the device — validated header walk, metadata scratch through the buffer's own resource, kernel, and readback all ordered on the buffer's retained stream.
+Device accessors work; host paths are compile-time errors. deviceData()/deviceGrid<T>() are available; data(), grid<T>(), gridData(), gridMetaData() are SFINAE-removed; the read/write I/O members and splitGrids/mergeGrids stay addressable (the python bindings take write's address via overload_cast) and instead fail with explanatory static_asserts when instantiated for a single-space handle. The python module (PyGridHandle.h bindings included) is compiled as part of the local gate.
+copy() dispatches on the traits: host buffers keep the memcpy path; a single-space handle deep-copies device-to-device through its own resource on the retained stream and reuses the host-resident metadata instead of re-parsing. cuda::Buffer gains ElementType/ResourceType, resource(), and a no-arg copy() for stream-ordered resources (= copy(stream())).
+Hardening shared with the legacy path: the device parse now validates the entire grid chain (per-header bounds checks) before launching the metadata kernel, so truncated buffers and forged mGridCount/mGridSize headers throw instead of reading out of bounds — the pre-existing dual-space parse had the same hole and now uses the same helper. Its scratch runs on MallocResource, so the long-standing GridHandle<DeviceBuffer> device parse keeps working on devices without memory-pool support. Six raw allocation sites in cuda/GridHandle.cuh (one an unchecked cudaMalloc) are replaced with resource-aware buffers.
+Host accessibility is a resource property: the new is_host_accessible_resource trait detects a HOST_ACCESSIBLE marker (on PinnedResource, forwarded through ResourceRef/AsyncFromSync). A pinned-resource cuda::Buffer handle is a named compile error for now — GridHandle's host paths need an allocation interface cuda::Buffer doesn't yet provide (the create mapping, scheduled for the step-3 completion PR) — rather than a half-working host path.
+Compatibility: both new trait members are detected, not required — BufferHasDeviceSingle/BufferHasHostSingle default to false when a BufferTraits specialization omits them, so pre-existing specializations in tree (PoolBuffer examples, DeviceBuffer, UnifiedBuffer) and out of tree compile unchanged. Every existing call site of the re-gated members was traced; none changes overload resolution.
+Tests
+Seven new tests + compile-time classification asserts in TestBuffer.cu: device meta parse and typed/wrong-type deviceGrid; exact allocation accounting through a counting resource (grid bytes + meta scratch, freed via reset()); deep D2D copy with byte comparison; empty-handle and empty-copy; invalid-grid throw with leak check; synchronous-resource (MallocResource) construction and copy; multi-grid parse with a stream-recording resource proving every allocation lands on the retained (non-blocking) stream; forged-mGridCount rejection with an unpoisoned CUDA context.
+Verification
+Zero warnings under the default --Werror=all-warnings; full build (tests, tools, examples) at CMAKE_CUDA_ARCHITECTURES=80; 7/7 ctests on a GPU runner, plus g++ -fsyntax-only on GridHandle.h proving the header stays CUDA-free.
+Reviewed by an agent audit (consumer trace over every call site, two-phase-lookup check, stream/exception-path analysis) and four Codex review rounds — findings included the pinned-resource misclassification, the chain-validation P1, and a trait-query regression, all addressed; final round clean with the reviewer independently building and running the tests.
+🤖 Generated with Claude Code
+harrism
+requested a review
+from kmuseth
+as a code owner
+August 19, 2026 23:24
+harrism
+force-pushed
+the
+nanovdb-gridhandle-single-space
+branch
+4 times, most recently
+from
+e270bf0 to
+2380d21
+Compare
+August 20, 2026 01:15
+swahtz
+added
+the
+nanovdb
+label
+Aug 20, 2026
+harrism
+force-pushed
+the
+nanovdb-gridhandle-single-space
+branch
+from
+2380d21 to
+e705df9
+Compare
+August 20, 2026 02:01
+NanoVDB: support single-space device buffers in GridHandle (CUDA)
+…
+c927ae7
+```
+GridHandle can now own a nanovdb::cuda::Buffer<std::byte, R>: a new
+hasDeviceSingle buffer trait selects a constructor (implemented in
+cuda/GridHandle.cuh) that parses the grid metadata through the device,
+with every operation -- the validated header walk, metadata scratch
+allocation through the buffer's resource, the copy kernel and the
+readback -- ordered on the buffer's retained stream.
+deviceData()/deviceGrid() work on such handles. The host accessors
+(data, grid, gridData, gridMetaData) are SFINAE-removed for them,
+since the handle owns no host-readable bytes; the read/write I/O
+members and splitGrids/mergeGrids stay addressable (the python
+bindings take write's address via overload_cast) and fail instead
+with an explanatory static_assert when instantiated for a
+single-space handle.
+
+The device parse validates the whole grid chain (per-header bounds
+checks against the allocation) before launching the metadata kernel,
+so truncated buffers and forged mGridCount/mGridSize headers are
+rejected with an exception instead of an out-of-bounds device read;
+the pre-existing dual-space parse had the same hole and now shares the
+validation helper. Its metadata scratch uses MallocResource so that
+long-standing path keeps working on devices without memory-pool
+support, and the dirty-flag scratch in splitGridHandles and
+mergeGridHandles is a resource-aware buffer as well -- together
+replacing the file's six raw cudaMalloc/mallocAsync sites, one of
+which was missing its cudaCheck.
+
+copy() dispatches on the traits: host buffers keep the memcpy path,
+single-space buffers deep-copy device-to-device through their own
+resource on the retained stream and reuse the host-resident metadata
+instead of re-parsing. Buffer gains ElementType/ResourceType typedefs,
+a resource() accessor, and a no-argument copy() for stream-ordered
+resources that orders the copy on the retained stream.
+
+Host accessibility is a property of the resource, not the element
+type: the new is_host_accessible_resource trait detects a
+HOST_ACCESSIBLE marker (declared by PinnedResource and forwarded by
+ResourceRef and AsyncFromSync). A cuda::Buffer over a host-accessible
+resource is rejected at handle scope with a named error for now --
+GridHandle's host paths require an allocation interface cuda::Buffer
+does not yet provide -- and non-byte element types fail loudly in the
+single-space constructor. Both hasDeviceSingle and hasHostSingle are
+detected rather than required, so pre-existing BufferTraits
+specializations in and out of tree compile unchanged.
+
+Part of AcademySoftwareFoundation#2232 (step 3).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+harrism
+force-pushed
+the
+nanovdb-gridhandle-single-space
+branch
+from
+e705df9 to
+c927ae7
+Compare
+August 20, 2026 05:06
+swahtz
+requested changes
+Aug 20, 2026
+View reviewed changes
+swahtz
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Reviewed with a VBM follow-up as part of #2232 in mind. The design lands the right conventions — the detected traits, the named compile errors instead of half-working host paths, and never requiring default-constructible buffers are all things the next handle types can build on directly. Two issues inline: a correctness regression where the hardened chain validation now throws on addBlindData output from multi-grid sources, and the O(N) stream syncs the validation adds to the long-standing GridHandle constructor (with two possible shapes for fixing it). The rest are non-blocking polish.
+Comment thread
+nanovdb/nanovdb/cuda/GridHandle.cuh
+Outdated
+/// the device-side metadata walk that follows can never read out of
+/// bounds from a truncated buffer or a forged header.
+/// @return the validated grid count
+inline uint32_t validGridChainCount(const GridData *d_head, uint64_t bytes, cudaStream_t stream)
+swahtz
+Aug 20, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🚩 issue: I traced the consumers of the device-parse path, and I believe this new validation breaks tools::cuda::addBlindData for grids that came out of a multi-grid handle. addBlindData copies the source grid's GridData header verbatim (including mGridIndex/mGridCount) into its new single-grid buffer and never normalizes them before constructing GridHandle<BufferT> (AddBlindData.cuh:131, a device-only buffer, so it takes this path). With a source grid from handle.deviceGrid<T>(n) of a multi-grid handle: for n > 0 the first iteration throws "inconsistent grid index/count" (mGridIndex != 0), and for n == 0 with mGridCount > 1 the walk runs past the single-grid buffer and throws "grid chain exceeds the device buffer". The old parse accepted these buffers (albeit with OOB metadata reads — which is exactly the hole this validation fixes).
+I think the fix belongs in addBlindData rather than in weakening the validation: normalize the header to index 0 / count 1 before constructing the handle, the way splitGridHandles does with detail::updateGridCount<<<1,1>>>. Might also be worth a quick audit for any other tool that constructs a device-parse handle from a copied header.
+harrism
+Aug 20, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Fixed in 5ea0b9e — normalized to index 0 / count 1 inside the existing header-fixup kernel (ahead of the tool's checksum recompute, which covers the change). Your audit hunch was right: indexToGrid copies the source header the same way (*dstGrid.data() = *srcGrid.data() and then patches only mGridType/mData1), fixed in the same commit. The other handle-returning tools are clean — the topology ops and MeshToGrid normalize in TopologyBuilder, and the point builders initialize fresh headers via GridData::init. Regression tests run grids 0 and 1 of a merged two-grid handle through both tools; verified failing before the fix with exactly the two throws you predicted.
+Comment thread
+nanovdb/nanovdb/cuda/GridHandle.cuh
+Outdated
+mMetaData.resize(tmp.mGridCount);
+cudaCheck(cudaMemcpy(mMetaData.data(), d_metaData,tmp.mGridCount*sizeof(GridHandleMetaData), cudaMemcpyDeviceToHost));
+cudaCheck(cudaFree(d_metaData));
+const uint32_t count = cuda::detail::validGridChainCount(d_data, mBuffer.size(), cudaStream_t(0));
+swahtz
+Aug 20, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🚩 issue: This long-standing constructor previously did a single header read; it now does one cudaMemcpyAsync + full cudaStreamSynchronize per grid header inside validGridChainCount. cuda::mergeGridHandles ends by constructing exactly this handle, so merging hundreds of grids now issues hundreds of serialized 672-byte D2H copies, each draining the stream, where the old code did one memcpy plus one kernel.
+Two shapes that would fix it, either of which I'd be happy with: (a) since the validation walk already copies every full GridData header to the host, accumulate mMetaData directly in the walk — that deletes the scratch allocation, the cpyGridHandleMeta<<<1,1>>> launch, the second D2H copy, and the final sync in both constructors, so the validation replaces the old parse machinery instead of adding to it (the round trips stay O(N), but the whole second phase disappears); or (b) move the validation into a single device-side kernel with one status readback, restoring O(1) round trips for the multi-grid case.
+harrism
+Aug 20, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Fixed in 0f4395d with shape (b) plus the deletion from (a): one host read of the head header (still needed to size the metadata scratch and bound a forged mGridCount before allocating), then a single kernel that validates the chain and fills the metadata scratch, one readback, one sync. So the whole second phase — the cpyGridHandleMeta launch, its D2H copy, and the final sync — is gone from both constructors, and constructing the handle mergeGridHandles returns costs two round trips regardless of grid count.
+Comment thread
+nanovdb/nanovdb/GridHandle.h
+Outdated
+/// or if the template parameter does not match the specified grid.
+template<typename ValueT, typename U = BufferT>
+typename util::enable_if<BufferHasDeviceSingle<U>::value, const NanoGrid<ValueT>*>::type
+deviceGrid(uint32_t n=0) const {
+swahtz
+Aug 20, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💅 polish: This body is a token-for-token copy of grid() and the dual-space deviceGrid() — the same null/index/gridType checks and util::PtrAdd, differing only in the base pointer (mBuffer.data() vs mBuffer.deviceData()). A private ungated helper taking the base pointer (e.g. gridAt<ValueT>(const void* base, uint32_t n)) would serve all three, so a future change to the lookup contract doesn't need three edits — this inline copy sits far from the two out-of-line definitions and would be the one that gets missed.
+harrism
+Aug 20, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Fixed in e86e55e — a private gridAt<ValueT>(base, n) now backs grid() and both deviceGrid() families.
+Comment thread
+nanovdb/nanovdb/GridHandle.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+nanovdb/nanovdb/GridHandle.h
+Outdated
+/// BufferTraits specializations (in or out of tree) that only define
+/// hasDeviceDual keep compiling unchanged.
+template<typename BufferT, typename = void>
+struct BufferHasDeviceSingle { static constexpr bool value = false; };
+swahtz
+Aug 20, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 suggestion: Could we move BufferHasDeviceSingle/BufferHasHostSingle next to the BufferTraits primary in HostBuffer.h (or a small shared traits header)? They aren't GridHandle-specific — they're companions to the trait protocol itself — and there's a concrete second consumer lined up: VoxelBlockManagerHandle needs exactly the same dispatch to map deviceFirstLeafID()/deviceJumpMap() onto data() for single-space buffers (the VBM follow-up to this PR under #2232), and it shouldn't have to include GridHandle.h, or duplicate the detectors, to get it.
+harrism
+Aug 20, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Fixed in e86e55e — both detectors now sit beside the BufferTraits primary in HostBuffer.h, so VoxelBlockManagerHandle gets them without GridHandle.h.
+Comment thread
+nanovdb/nanovdb/cuda/Buffer.h
+/// (stream-ordered resources), and the (stream, resource, count, noInit)
+/// constructor shape.
+template<typename T, typename R>
+struct BufferTraits<cuda::Buffer<T, R>>
+swahtz
+Aug 20, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 suggestion: This @note is effectively the definition of a "single-space buffer concept" — it lists exactly the members a buffer must provide for hasDeviceSingle to be honored. Since other handle types will consume the same contract (VoxelBlockManagerHandle is next, per the #2232 plan), could we phrase it as such — name the concept, and state that any consumer of hasDeviceSingle may rely on exactly this interface? That lets the follow-up PRs cite it instead of reverse-engineering the GridHandle constructor.
+harrism
+Aug 20, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Fixed in e86e55e — the @note now defines the single-space device-buffer concept and enumerates the exact interface a consumer of hasDeviceSingle may rely on. It also got tighter while writing it down: the metadata scratch now allocates through resource() as a cuda::Buffer, so the constructor shape is no longer part of the contract — a conforming buffer never needs to be constructible by a consumer.
+Comment thread
+nanovdb/nanovdb/cuda/Buffer.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+harrism
+and others
+added 3 commits
+August 20, 2026 07:58
+NanoVDB: validate and parse the device grid chain in one kernel pass
+…
+0f4395d
+```
+Replace the per-header device-to-host walk in the GridHandle constructors
+with a single host read of the head header (which sizes the metadata
+scratch) followed by one kernel that validates every header and fills the
+metadata scratch in the same pass, plus one readback and one
+synchronization regardless of the grid count. The previous walk issued one
+synchronizing copy per header, so constructing the handle that
+cuda::mergeGridHandles returns cost O(N) stream drains for N grids; it now
+costs the same two round trips as a single-grid buffer, and the separate
+metadata kernel launch, its scratch copy and final synchronization are
+gone. Bounds are still checked before every header read, on the host for
+the head and on the device for the rest, so a truncated buffer or forged
+header can never read out of bounds.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+NanoVDB: normalize grid index/count in addBlindData and indexToGrid o…
+…
+5ea0b9e
+```
+…utput
+
+Both tools copy the source grid's header verbatim into a new single-grid
+buffer, so a source grid taken from a multi-grid handle left a stale
+mGridIndex/mGridCount in the output. The returned handle's metadata parse
+then walked a grid chain that is not there: past the end of the buffer for
+index 0 of a multi-grid source, or starting at a nonzero index. The output
+header is now normalized to index 0 / count 1 in the same kernels that
+already patch its other fields, before each tool's existing checksum
+update. The other handle-returning GPU tools were audited: the topology
+ops and MeshToGrid normalize in TopologyBuilder, and the point builders
+initialize fresh headers via GridData::init.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+NanoVDB: share the buffer trait detectors and deduplicate GridHandle …
+…
+e86e55e
+```
+…lookups
+
+BufferHasDeviceSingle/BufferHasHostSingle move next to the BufferTraits
+primary in HostBuffer.h: they are companions to the trait protocol, not
+GridHandle-specific, so other handle types can consume them without
+including GridHandle.h. The three identical grid-lookup bodies behind
+grid() and both deviceGrid() families collapse into one private gridAt()
+helper, and the supported-combination guard for GridHandle::copy() now
+lives solely in the no-arg overload, so the two spellings cannot drift
+apart when cross-space transfers relax it. cuda::Buffer documents the
+single-space device-buffer concept on its BufferTraits specialization --
+naming exactly the interface a consumer of hasDeviceSingle may rely on --
+and gains a rebind alias for generic code that constructs sibling buffers.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+swahtz
+approved these changes
+Aug 20, 2026
+View reviewed changes
+swahtz
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Great, thanks for addressing my comments
+kmuseth
+approved these changes
+Aug 21, 2026
+View reviewed changes
+kmuseth
+commented
+Aug 21, 2026
+Copy link
+Copy Markdown
+Contributor
+[Claude assisted in this review.]
+Five findings, ranked by severity:
+GridHandle.h:446 — copy(pool) silently discards pool for single-space handles (CONFIRMED)
+The pool-argument overload immediately does (void)other and delegates to the no-arg path. A caller passing a custom allocator/pool gets a valid copy but the allocation silently came from the wrong resource. The docstring says "ignored" but there's no static_assert or [[deprecated]] to surface this at the call site for generic template code that doesn't read comments. At minimum, a static_assert(false, "pool argument is ignored for single-space handles") on the specialisation would make this impossible to misuse.
+cuda/GridHandle.cuh:590 — cudaMemcpyAsync to pageable host memory on a non-default stream (PLAUSIBLE)
+validGridChainHead and parseGridChain copy GridData/ChainStatus into stack variables and std::vector storage via async copies on the retained (potentially non-default) stream. CUDA 12.2 deprecated async D→H copies to pageable memory on non-default streams; a future driver is not required to honour cudaStreamSynchronize as a visibility fence. The fix is a small pinned scratch buffer (e.g. cuda::Buffer<std::byte, cuda::PinnedResource>) for the readbacks.
+cuda/Buffer.h:430 — hasDeviceSingle SFINAE fires before the actionable static_assert (CONFIRMED)
+BufferTraits<cuda::Buffer<T,R>>::hasDeviceSingle is true for any non-host-accessible T, not just std::byte. When a user writes GridHandle<cuda::Buffer<int,DeviceResource>> and calls handle.data(), SFINAE removes the overload and the compiler emits a confusing "no matching member function" error. The helpful static_assert(sizeof(ElementType)==1) in the constructor is never reached. Narrowing the trait to sizeof(T)==1 && !is_host_accessible would make it fire correctly.
+cuda/GridHandle.cuh:613 — chain error messages omit the failing grid index (CONFIRMED)
+ChainStatus has a gridIndex field populated by parseGridChainKernel, but none of the throw sites in the switch on ChainError include it in the message. A corrupt grid at index 14 in a 20-grid buffer throws the same generic message as a corrupt grid at index 0. Adding " at grid index " + std::to_string(status.gridIndex) to each message costs nothing and makes debugging large merged buffers tractable.
+GridHandle.h:131 — copy() doc promises non-default-constructible support, else branch requires it (CONFIRMED)
+The no-arg copy() docstring says it "also works for buffers that are not default-constructible" but the non-single-space else branch calls this->copy(OtherBufferT()), which requires OtherBufferT to be default-constructible. The claim is only true for the single-space path. The doc should either be corrected or the else branch should be constrained with a static_assert(std::is_default_constructible_v) with a clear message.
+kmuseth
+approved these changes
+Aug 21, 2026
+View reviewed changes
+kmuseth
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Please address review comments (none are blocking but I'd like a response)
+NanoVDB: fail loudly on misused GridHandle copy() and non-byte buffers
+…
+70fe676
+```
+The pool-argument copy() overload is now a compile error for single-space
+handles instead of silently discarding the argument: a single-space copy
+always allocates through the source buffer's resource, so accepting a
+caller-supplied pool invites allocations from the wrong resource. The
+byte-element requirement moves from the single-space move constructor to
+class scope, backed by a detector that treats buffers exposing no
+ElementType as byte-addressed: GridHandle over e.g. cuda::Buffer<int, R>
+now fails with the actionable message instead of a confusing
+removed-overload error at the first accessor use. The chain-validation
+exceptions name the failing grid index and the chain's grid count, and the
+no-arg copy() doc states which path requires a default-constructible
+buffer instead of overpromising.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+harrism
+commented
+Aug 21, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Thanks Ken — responses per finding, fixes in 70fe676:
+1. copy(pool) silently discards the pool — fixed as proposed. The pool-argument overload is now a compile error for single-space handles (static_assert naming the no-arg overload). Bonus: that makes the overload statically host-only, so its if constexpr forward disappears — which also finishes the guard-consolidation from the earlier review round. The place where a caller-supplied allocation target becomes meaningful is the upcoming explicit copyTo, which takes a prototype buffer on purpose.
+2. Async D→H to pageable memory — I believe this one is incorrect. I could not find any such deprecation in the CUDA 12.2 release notes or the runtime API docs, and cudaStreamSynchronize is contractually a completion barrier ("blocks until stream has completed all operations") — completion of a D2H copy means the bytes are in the destination. Copies to pageable memory are documented to stage through the driver's internal pinned buffer, which costs overlap, not correctness. Two data points: this exact idiom (async D2H into a stack variable + stream sync) appears at 28 sites in the NanoVDB tree, including the splitGridHandles dirty readback that long predates this PR; and a pinned scratch here would add a synchronizing cudaMallocHost to a path that reads ~700 bytes twice — strictly worse. Happy to revisit with a doc citation if you have one.
+3. Confusing SFINAE error for non-byte buffers — confirmed, fixed with a different shape. Narrowing the trait to sizeof(T)==1 would be worse than the disease: GridHandle<cuda::Buffer<int,R>> would then classify as neither single-space nor dual nor host-single, fall through to the host constructor path, and dereference a device pointer on the host — the confusing compile error becomes a runtime crash. Instead the byte requirement moved to class scope (static_assert(!hasDeviceSingle || byte-elements), with a detector that treats buffers exposing no ElementType as byte-addressed), so the actionable message fires at instantiation, before any accessor SFINAE.
+4. Error messages omit the grid index — fixed as proposed. All chain-validation throws now carry "(grid i of N)".
+5. copy() doc overpromise — fixed. The doc now states plainly that the host path default-constructs the pool argument and therefore requires a default-constructible OtherBufferT; the non-default-constructible freedom is (and was) the single-space path only. I skipped the suggested static_assert: the compiler error at OtherBufferT() already names the missing default constructor, and GridHandle.h stays free of <type_traits>.
+NanoVDB: explicitly instantiate the DeviceBuffer GridHandle constructor
+…
+d93b4bc
+```
+Host-only translation units (e.g. an example's .cc file) construct
+GridHandle<cuda::DeviceBuffer> against the declaration alone and rely on a
+CUDA translation unit to provide the constructor at link time. The header
+forced that instantiation through an unused anonymous-namespace function,
+which is not a guarantee: at -O3 clang drops the dead function and with it
+the complete-object constructor, leaving only the base-object variant, and
+the example fails to link (undefined reference to GridHandle<DeviceBuffer,
+0>). An explicit instantiation definition emits both constructor variants
+as weak symbols in every CUDA translation unit, which the linker merges.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+harrism
+commented
+Aug 21, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+CI note: linux-nanovdb:cxx:clang++-Release failed on 70fe676 — ex_nodemanager_cuda hit an undefined reference to the GridHandle<cuda::DeviceBuffer> move constructor. Root cause (reproduced locally with a two-TU test): host-only .cc files construct that handle against the declaration alone and depend on a CUDA TU to provide the instantiation, which the header forced through an unused anonymous-namespace function — at -O3 clang dead-strips the function and the complete-object constructor with it, leaving only the base-object variant. A latent fragility this PR's header churn happened to expose, not a semantic change. Fixed in d93b4bc by replacing the dummy function with an explicit instantiation definition, which emits both constructor variants as weak symbols in every CUDA TU (verified: the failing clang link now succeeds, two CUDA TUs merge cleanly, g++ unaffected).
+Hide details
+View details
+kmuseth
+merged commit e679862
+into
+AcademySoftwareFoundation:master
+Aug 23, 2026
+15 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+This was referenced Aug 23, 2026
+NanoVDB: cuda::copyTo cross-space transfers and pinned-buffer GridHandles (CUDA)
+#2292
+Merged
+NanoVDB: handle reset() via destroy(), single-space NodeManager, GridStats resource routing (CUDA)
+#2293
+Merged
+swahtz
+mentioned this pull request
+Aug 23, 2026
+Update NanoVDB for single-space GridHandle and widen Torch-pool coverage
+openvdb/fvdb-core#752
+Closed
+harrism
+mentioned this pull request
+Sep 10, 2026
+NanoVDB: injectable CUDA memory resources — design & roadmap
+#2232
+Open
+3 of 4 tasks
+swahtz
+mentioned this pull request
+Sep 11, 2026
+Finish adopting NanoVDB's injectable CUDA memory resources (openvdb #2232): move grid storage off the dual-space TorchDeviceBuffer
+openvdb/fvdb-core#770
+Closed
+JaeHyunLee94
+pushed a commit
+to sifakis/openvdb
+that referenced
+this pull request
+Sep 27, 2026
+NanoVDB: support single-space device buffers in GridHandle (CUDA) (Ac…
+…
+aaefc20
+```
+…ademySoftwareFoundation#2288)
+
+* NanoVDB: support single-space device buffers in GridHandle (CUDA)
+
+GridHandle can now own a nanovdb::cuda::Buffer<std::byte, R>: a new
+hasDeviceSingle buffer trait selects a constructor (implemented in
+cuda/GridHandle.cuh) that parses the grid metadata through the device,
+with every operation -- the validated header walk, metadata scratch
+allocation through the buffer's resource, the copy kernel and the
+readback -- ordered on the buffer's retained stream.
+deviceData()/deviceGrid() work on such handles. The host accessors
+(data, grid, gridData, gridMetaData) are SFINAE-removed for them,
+since the handle owns no host-readable bytes; the read/write I/O
+members and splitGrids/mergeGrids stay addressable (the python
+bindings take write's address via overload_cast) and fail instead
+with an explanatory static_assert when instantiated for a
+single-space handle.
+
+The device parse validates the whole grid chain (per-header bounds
+checks against the allocation) before launching the metadata kernel,
+so truncated buffers and forged mGridCount/mGridSize headers are
+rejected with an exception instead of an out-of-bounds device read;
+the pre-existing dual-space parse had the same hole and now shares the
+validation helper. Its metadata scratch uses MallocResource so that
+long-standing path keeps working on devices without memory-pool
+support, and the dirty-flag scratch in splitGridHandles and
+mergeGridHandles is a resource-aware buffer as well -- together
+replacing the file's six raw cudaMalloc/mallocAsync sites, one of
+which was missing its cudaCheck.
+
+copy() dispatches on the traits: host buffers keep the memcpy path,
+single-space buffers deep-copy device-to-device through their own
+resource on the retained stream and reuse the host-resident metadata
+instead of re-parsing. Buffer gains ElementType/ResourceType typedefs,
+a resource() accessor, and a no-argument copy() for stream-ordered
+resources that orders the copy on the retained stream.
+
+Host accessibility is a property of the resource, not the element
+type: the new is_host_accessible_resource trait detects a
+HOST_ACCESSIBLE marker (declared by PinnedResource and forwarded by
+ResourceRef and AsyncFromSync). A cuda::Buffer over a host-accessible
+resource is rejected at handle scope with a named error for now --
+GridHandle's host paths require an allocation interface cuda::Buffer
+does not yet provide -- and non-byte element types fail loudly in the
+single-space constructor. Both hasDeviceSingle and hasHostSingle are
+detected rather than required, so pre-existing BufferTraits
+specializations in and out of tree compile unchanged.
+
+Part of AcademySoftwareFoundation#2232 (step 3).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+* NanoVDB: validate and parse the device grid chain in one kernel pass
+
+Replace the per-header device-to-host walk in the GridHandle constructors
+with a single host read of the head header (which sizes the metadata
+scratch) followed by one kernel that validates every header and fills the
+metadata scratch in the same pass, plus one readback and one
+synchronization regardless of the grid count. The previous walk issued one
+synchronizing copy per header, so constructing the handle that
+cuda::mergeGridHandles returns cost O(N) stream drains for N grids; it now
+costs the same two round trips as a single-grid buffer, and the separate
+metadata kernel launch, its scratch copy and final synchronization are
+gone. Bounds are still checked before every header read, on the host for
+the head and on the device for the rest, so a truncated buffer or forged
+header can never read out of bounds.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+* NanoVDB: normalize grid index/count in addBlindData and indexToGrid output
+
+Both tools copy the source grid's header verbatim into a new single-grid
+buffer, so a source grid taken from a multi-grid handle left a stale
+mGridIndex/mGridCount in the output. The returned handle's metadata parse
+then walked a grid chain that is not there: past the end of the buffer for
+index 0 of a multi-grid source, or starting at a nonzero index. The output
+header is now normalized to index 0 / count 1 in the same kernels that
+already patch its other fields, before each tool's existing checksum
+update. The other handle-returning GPU tools were audited: the topology
+ops and MeshToGrid normalize in TopologyBuilder, and the point builders
+initialize fresh headers via GridData::init.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+* NanoVDB: share the buffer trait detectors and deduplicate GridHandle lookups
+
+BufferHasDeviceSingle/BufferHasHostSingle move next to the BufferTraits
+primary in HostBuffer.h: they are companions to the trait protocol, not
+GridHandle-specific, so other handle types can consume them without
+including GridHandle.h. The three identical grid-lookup bodies behind
+grid() and both deviceGrid() families collapse into one private gridAt()
+helper, and the supported-combination guard for GridHandle::copy() now
+lives solely in the no-arg overload, so the two spellings cannot drift
+apart when cross-space transfers relax it. cuda::Buffer documents the
+single-space device-buffer concept on its BufferTraits specialization --
+naming exactly the interface a consumer of hasDeviceSingle may rely on --
+and gains a rebind alias for generic code that constructs sibling buffers.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+---------
+
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+Co-authored-by: Claude Fable 5 <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+nanovdb
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

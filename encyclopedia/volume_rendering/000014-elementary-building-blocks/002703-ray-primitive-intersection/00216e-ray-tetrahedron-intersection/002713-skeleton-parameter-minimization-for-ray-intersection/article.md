@@ -16,8 +16,8 @@ This method computes the intersection of a ray with a Scale-Invariant Integral S
 *   The skeleton parameter $s_{min} \in [0, L]$ where the minimum occurs [S1].
 
 **Data Structures:**
-*   Vectors $\mathbf{m}, \mathbf{u}, \mathbf{d}$ are 3D floating-point vectors [S1].
-*   Scalars $b, c, s_{cand}$ are floating-point numbers [S1].
+*   Vectors $\mathbf{m}, \mathbf{u}, \mathbf{d}, \mathbf{m}_{\perp}, \mathbf{u}_{\perp}$ are 3D floating-point vectors [S1].
+*   Scalars $b, c, s_{cand}, s_{min}, t_{min}, \tau(s)$ are floating-point numbers [S1].
 
 **Definitions:**
 *   $\mathbf{u} = \mathbf{p}_1 - \mathbf{p}_0$ is the skeleton direction vector [S1].
@@ -54,12 +54,12 @@ This method computes the intersection of a ray with a Scale-Invariant Integral S
     Evaluate $f(s)$ at:
     *   $s=0$
     *   $s=L$
-    *   $s=s_{cand}$ (only if $0 \le s_{cand} \le L$)
+    *   $s=s_{cand}$ (only if $0 \le s_{cand} \le L$) [S1].
     
     Select the $s$ value that yields the minimum $f(s)$ [S1]. Let this be $s_{min}$.
 
 5.  **Compute Ray Intersection Parameter:**
-    The closest point on the skeleton is $\mathbf{p}(s_{min})$. The ray parameter $t_{min}$ is found by projecting $\mathbf{p}(s_{min})$ onto the ray:
+    The closest point on the skeleton is $\mathbf{p}(s_{min})$ [S1]. The ray parameter $t_{min}$ is found by projecting $\mathbf{p}(s_{min})$ onto the ray:
     $$ t_{min} = (\mathbf{p}(s_{min}) - \mathbf{o}) \cdot \mathbf{d} $$
     [S1].
 
@@ -93,7 +93,7 @@ def skeleton_param_minimization(ray_o, ray_d, p0, p1, tau0, tau1):
     """
     L = norm(p1 - p0)
     if L < 1e-9:
-        # Degenerate skeleton (point)
+        # Degenerate skeleton (point) [G]
         m = p0 - ray_o
         proj = dot(m, ray_d)
         return proj, 0.0
@@ -125,7 +125,7 @@ def skeleton_param_minimization(ray_o, ray_d, p0, p1, tau0, tau1):
     def eval_f(s):
         tau_s = tau0 + (s / L) * delta_tau
         if tau_s < 1e-9:
-            return float('inf')
+            return float('inf') [G]
         p_s = p0 + (s / L) * u
         m_s = p_s - ray_o
         m_s_perp = m_s - dot(m_s, ray_d) * ray_d
@@ -157,19 +157,19 @@ def skeleton_param_minimization(ray_o, ray_d, p0, p1, tau0, tau1):
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Degenerate Skeleton:** If $L \approx 0$, the skeleton is a point. The method should fall back to a point-ray intersection test [G].
-*   **Zero Radius:** If $\tau(s) \approx 0$, the objective function diverges. The implementation must guard against division by zero [G].
+*   **Degenerate Skeleton:** If $L \approx 0$, the skeleton is a point [G].
+*   **Zero Radius:** If $\tau(s) \approx 0$, the objective function diverges [G].
 *   **Numerical Stability:** The source notes that this approach is more numerically stable than solving the implicit equation directly, which involves finding scaling factors for sphere-cone intersections [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per primitive. The method involves a constant number of vector operations and a single linear solve [S1].
-*   **Memory Complexity:** $O(1)$ auxiliary space.
-*   **Strengths:** Avoids iterative root-finding or complex geometric primitives (spheres/cones). It is analytically exact for linear skeletons and radii [S1].
-*   **Limitations:** Assumes linear skeleton segments and linearly varying radii. End-point corrections may be needed for integral field accuracy near skeleton endpoints due to divergence in field variations [S1].
-*   **When to use:** When rendering SCALIS fields with linear skeleton primitives. It is preferred over direct implicit surface solving for its stability and speed [S1].
+*   **Time Complexity:** $O(1)$ per primitive [S1].
+*   **Memory Complexity:** $O(1)$ auxiliary space [G].
+*   **Strengths:** Avoids iterative root-finding or complex geometric primitives (spheres/cones) [S1].
+*   **Limitations:** Assumes linear skeleton segments and linearly varying radii [S1].
+*   **When to use:** When rendering SCALIS fields with linear skeleton primitives [S1].
 
 ## Background
-This method was introduced in the context of ray tracing Scale-Invariant Integral Surfaces (SCALIS) [S1]. SCALIS fields are defined by a skeleton curve and a radius field, representing smooth, tubular structures. The method inverts the order of minimization: instead of finding the ray parameter $t$ for a fixed skeleton parameter $s$, it finds the skeleton parameter $s$ that minimizes the normalized distance, then derives $t$ [S1]. This avoids the complexity of handling sphere-cone intersections inherent in the direct formulation [S1].
+This method was introduced in the context of ray tracing Scale-Invariant Integral Surfaces (SCALIS) [S1]. SCALIS fields are defined by a skeleton curve and a radius field, representing smooth, tubular structures [S1]. The method inverts the order of minimization: instead of finding the ray parameter $t$ for a fixed skeleton parameter $s$, it finds the skeleton parameter $s$ that minimizes the normalized distance, then derives $t$ [S1]. This avoids the complexity of handling sphere-cone intersections inherent in the direct formulation [S1].
 
 ## Sources
 [S1] Fast Ray Tracing of Scale‐Invariant Integral Surfaces, https://doi.org/10.1111/cgf.14208, fetched 2026-10-26

@@ -1,0 +1,571 @@
+Hardware textures, steps T2a–T2d of the texture plan: every image the materials read becomes a GPU texture. On CUDA that is a cuArray with texture objects; on Vulkan, a bindless VkImage. Linear reads are filtered in hardware.
+The stack renders 7–9% faster than main on both backends. Every step before T2d is exact.
+Commits
+
+
+
+Commit
+Step
+Lines
+
+
+
+
+feat(textures): pipe each image the materials read apart from the texels
+T2a
++56 / −37
+
+
+chore(test): find each image the materials read apart from the texels, by its index
+T2a test
++4
+
+
+feat(textures): read each image the materials read from a texture
+T2b+c
++181 / −28
+
+
+feat(textures): look each image read's texture up once, in its filter, and its closest texel only for closest reads
+lookup
++22 / −19
+
+
+feat(textures): filter each image the materials read linearly in hardware
+T2d
++93 / −49
+
+
+
+T2a: images apart
+
+Each image the materials read is piped as its own array and found through a table, by its index (bit 31 of the texture's height).
+The SCENE header gains an eleventh count, the number of images, after instancing's ten. The record grows to 608 bytes (RECORD_STRIDE).
+An empty texel entry, such as a UV-space bake's empty tile list, shares its first slot with the next entry. It is classed as no image.
+
+T2b+c: textures
+
+CUDA: one cuArray and texture object per image: FLOAT×4 or UNSIGNED_INT8×4, read as integers, point-filtered and clamped. texel() fetches the texel at its centre and decodes it as main does.
+Vulkan: the shim stands in for the same driver calls with a VkImage per array (R32G32B32A32_UINT or R8G8B8A8_UINT), uploaded through the staging buffer.
+
+One bindless descriptor set holds up to 65536 sampled images.
+renderer.slang reads them with an exact Load through NonUniformResourceIndex.
+Device creation requires runtimeDescriptorArray, shaderSampledImageArrayNonUniformIndexing and descriptorBindingPartiallyBound, and fails plainly without them.
+
+
+The exporter pipes each image's width and height; the loader frees textures with the scene and counts them in the memory stats.
+
+Lookup
+
+An image read looks its texture up once, in its filter, instead of once per tap.
+Linear and cubic reads no longer fetch the closest texel first. Main fetched it and then overwrote it.
+
+T2d: hardware linear
+
+CUDA: each image gets a second texture object, filtering linearly with normalized coordinates and an address mode by its extension (wrap, clamp, border, mirror). RGBA8 is read normalized, and decoded from sRGB in hardware before filtering where the image is sRGB.
+Vulkan: mutable-format images get a float view (UNORM or SRGB for RGBA8, SFLOAT for floats) in a second bindless array, with four immutable samplers by extension.
+Both: linear reads of images take one hardware fetch. Tables and bake-only images keep the software path.
+Test change: make test's node check 'Image Texture' reads a 1×1 image linearly under CLIP and compares it with Cycles. The hardware's 8-bit filter weights give 0.3203125 where the exact value is 0.4 × 0.8 = 0.32. Its four linear reads of that test image are now compared at 2^-8, one step of those weights; nothing else was loosened.
+
+Speed
+Main aacfc42, so Classroom is from before #54. ABBA against main, with viewport_bench at 480×270, 10 redraws, ReSTIR on and 7 bounces. A warm-up hold compiles each build's pipelines first. Classroom rows are 4 + 4 runs, tokyo 2 + 2, and every pair of ranges is apart.
+
+
+
+Scene
+Device
+main
+this stack
+change
+
+
+
+
+Classroom
+OptiX
+81.50 ms
+74.33 ms
+−8.8%
+
+
+Classroom
+Vulkan
+134.47 ms
+123.97 ms
+−7.8%
+
+
+tokyo
+OptiX
+43.30 ms
+40.20 ms
+−7.2%
+
+
+tokyo
+Vulkan
+75.45 ms
+70.50 ms
+−6.6%
+
+
+
+On their own, T2a and T2b+c were slower than main: up to +2.5% and +5.6%. The lookup commit recovered most of that, and T2d turns it into a gain.
+Exactness
+Run on main aacfc42 and 2da60fc, before this rebase onto f249ca4. #54 and #55 change only the exporter's emitted keys and Jacobian memos, not image piping. The verifier reruns the gates on f249ca4. Classroom's results are from before #54, which changed its programs (227 bakes instead of 230).
+Every comparison renders at 240×135 and 16 spp, with Blender on one thread. Blender's threads change MikkTSpace tangents in their last bits from run to run; with one thread, renders repeat bit for bit on both backends.
+
+
+
+Step
+Vulkan
+OptiX
+
+
+
+
+T2a
+identical on the showcase scene, tokyo, Classroom, Monster and BMW27
+identical on the same five
+
+
+T2b+c, lookup
+identical on all five
+the default builds differ by FMA contraction only: with --fmad=false in both builds, all five are identical
+
+
+
+Contraction differences fall under Bendik's standing compiler-rounding rule.
+Flat Archviz is no byte gate. Its export varies even on one thread: UVs by 1–2 ulps on 2202 triangles, and tangents reversed on some. Two runs of main differ there by 30017 pixels. T2a's and T2b+c's renders are byte-identical to a main run whose export coincided.
+Quality of T2d
+1024 spp, against main aacfc42 (Classroom from before #54), beside a seed build of main whose random numbers differ (per-pixel p99):
+
+
+
+Scene
+OptiX: stack / seed floor
+Vulkan: stack / seed floor
+
+
+
+
+the showcase scene
+0.171 / 0.805
+0.228 / 1.252
+
+
+tokyo
+0.063 / 0.087
+0.075 / 0.104
+
+
+Classroom
+0.018 / 0.042
+0.023 / 0.043
+
+
+Monster
+0.117 / 0.220
+0.117 / 0.220
+
+
+
+The stack is under the floor everywhere.
+Gates
+
+make test passes on each step's tip on f249ca4: T2a, T2b+c, lookup and T2d.
+On main with T2a's test alone, make test fails at 'images apart' (measured on bd31c64).
+Intel iGPU: not a test target (Bendik).
+
+Evidence: ws1 .agent/evidence/ (stack/, t2a/, t2bc/, t2d/, fmad/, determinism/findings.md).
+
+feat(textures): read each image the materials read from a hardware texture, filtered linearly in hardware by arbobendik · Pull Request #56 · arbobendik/FlexCudaPT · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+feat(textures): read each image the materials read from a hardware texture, filtered linearly in hardware
+#56
+New issue
+Have a question about this project? Sign up for a free GitHub account to open an issue and contact its maintainers and the community.
+Sign up for GitHub
+By clicking “Sign up for GitHub”, you agree to our terms of service and
+privacy statement. We’ll occasionally send you account related emails.
+Already on GitHub?
+Sign in
+to your account
+Merged
+arbobendik
+merged 5 commits into
+main
+from
+feat/hardware-textures
+Nov 1, 2026
+Uh oh!
+There was an error while loading. Please reload this page.
+Merged
+feat(textures): read each image the materials read from a hardware texture, filtered linearly in hardware
+#56
+Show file tree
+Hide file tree
+Changes from 1 commit
+Commits
+Show all changes
+5 commits
+Select commit
+Hold shift + click to select a range
+5ff68db
+feat(textures): pipe each image the materials read apart from the tex…
+arbobendik Oct 30, 2026
+4dd2bd5
+chore(test): find each image the materials read apart from the texels…
+arbobendik Oct 30, 2026
+b74aab3
+feat(textures): read each image the materials read from a texture, a …
+arbobendik Oct 31, 2026
+189450b
+feat(textures): look each image read's texture up once, in its filter…
+arbobendik Oct 31, 2026
+31e0ab7
+feat(textures): filter each image the materials read linearly in hard…
+arbobendik Oct 31, 2026
+File filter
+Clear filters
+Conversations
+Failed to load comments. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Jump to
+Jump to file
+Failed to load files. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Diff view
+Diff view
+Prev
+Next
+Next commit
+feat(textures): pipe each image the materials read apart from the tex…
+```
+…els, into its own array the shaders read by its index
+```
+Loading branch information
+Uh oh!
+There was an error while loading. Please reload this page.
+arbobendik
+committed
+Nov 1, 2026
+commit 5ff68db5511ff9976fcf665b8dbab04f1da35489
+There are no files selected for viewing
+37 changes: 21 additions & 16 deletions
+37
+src/__init__.py
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -1514,13 +1514,15 @@ def info(k): # Its object's info per triangle, as a scene's
+materials.append([(*world[:2], 0, 1, 0, world[1])])
+shape = [op[0] for op in ops + aside[0]], [(row[1], row[2], row[0] > 0, *row[3:]) for layers in rows.values()
+for row in layers], textures
+if not shaded: # The texels the materials' programs read first, then those only bakes read, flagged in bit 30
+starts = numpy.cumsum([0, *map(len, texels)])[:-1] // 4
+read = {texel for code, texel, _, height in ops if [*OPS][code] in READS and not height >> 28 & 1}
+apart = [k > 0 and first not in read for k, first in enumerate(starts)]
+at, counts = {}, [0, 0]
+if not shaded: # The texels the materials' programs read first, then those only bakes read, flagged in bit 30;
+starts = numpy.cumsum([0, *map(len, texels)])[:-1] // 4 # the images they read apart, by their index,
+read = {texel for code, texel, _, height in ops if [*OPS][code] in READS and not height >> 28 & 1} # in 31
+image = {entry[0] for key, entry in textures.items() if isinstance(key, tuple)}
+apart = [1 if k > 0 and first not in read else 2 if first in image and len(entry) else 0 # An empty entry
+for k, (first, entry) in enumerate(zip(starts, texels))] # shares its first with the next: no image
+at, counts = {}, [0, 0, 0]
+for first, entry, side in zip(starts, texels, apart):
+at[first], counts[side] = (counts[side], side), counts[side] + len(entry) // 4
+at[first], counts[side] = (counts[side], side), counts[side] + (len(entry) // 4 if side < 2 else 1)
+def relocated(ops): # Of their reads' and tiles' firsts, those piped apart flagged
+return [(code, at[texel][0], width, height | at[texel][1] << 30) if (code == 0 or [*OPS][code] in READS)
+and not height >> 28 & 1 else (code, texel, width, height) for code, texel, width, height in ops]
+Expand All
+@@ -1529,8 +1531,9 @@ def relocated(ops): # Of their reads' and tiles' firsts, those piped apart flag
+for tile, key, unit, (hint, steps), value in placed]
+textures.update({key: (*at[entry[0]][:1], entry[1], entry[2] | at[entry[0]][1] << 30, entry[3])
+for key, entry in textures.items() if not isinstance(key, Bake)})
+images = [entry for entry, side in zip(texels, apart) if side == 2]
+texels = [entry for entry, side in zip(texels, apart) if not side] + [
+entry for entry, side in zip(texels, apart) if side]
+entry for entry, side in zip(texels, apart) if side == 1]
+piped, rows = self.piped if shaded else counts[0], len(ops)
+bakes, again = [k + rows for k in bakes], [k + rows for k in again] # The bakes' steps after the materials'
+ops = [(code, texel + piped, width, height & ~(1 << 28)) if (code == 0 or [*OPS][code] in READS)
+Expand Down
+Expand Up
+@@ -1569,16 +1572,18 @@ def anew(key): # An image only bakes read, read again as piped
+self.cuts, self.placed, self.piped = cuts, placed, piped
+materials = numpy.concatenate(materials)
+# Scene on stdin: triangle, step, texel, baked texel and bake counts, the steps of the materials' programs and
+# the texels only bakes read, mesh triangle and instance counts; per instance its mesh's first triangle, count
+# and whether in world space, its 12 transform, 9 adjugate and 19 info floats; per triangle of the meshes 9
+# vertex, 9 normal, 9 generated, 9 object, 6 UV, 12 color and 12 tangent floats, its material's pass index, a
+# the texels only bakes read, mesh triangle, instance and image counts; per instance its mesh's first triangle,
+# count and whether in world space, its 12 transform, 9 adjugate and 19 info floats; per triangle of the meshes
+# 9 vertex, 9 normal, 9 generated, 9 object, 6 UV, 12 color and 12 tangent floats, its material's pass index, a
+# material of its emission, program, hidden flag, layer count, opaque flag and emission program (then the
+# world's); then the steps of 4 integers, the texels and the programs of the bakes.
+self.requests.writelines((struct.pack('<10I', SCENE, firsts[-1], len(ops), piped, baked[0], len(bakes), rows,
+counts[1], sum(map(len, columns[0])), len(instances)), *(part for first, count, world, values in instances
+for part in (numpy.array((first, count, world), 'I'), values)), *(numpy.concatenate(column, dtype='f') for
+column in columns), numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))),
+numpy.array(ops, 'I'), *texels, numpy.array(bakes, 'I')))
+# world's); then the steps of 4 integers, the texels and the programs of the bakes;
+# then each image's float4 count and its texels
+self.requests.writelines((struct.pack('<11I', SCENE, firsts[-1], len(ops), piped, baked[0], len(bakes), rows,
+counts[1], sum(map(len, columns[0])), len(instances), counts[2]), *(part for first, count, world, values
+in instances for part in (numpy.array((first, count, world), 'I'), values)), *(numpy.concatenate(column,
+dtype='f') for column in columns), numpy.hstack((materials[:, :1].astype('f').view('I'),
+materials[:, 1:].astype('I'))), numpy.array(ops, 'I'), *texels, numpy.array(bakes, 'I'),
+numpy.array([len(i) // 4 for i in images], 'I'), *images))
+# Samples launched, then radiance sums and sample count per pixel, rows bottom to top, after up to launches more
+# samples, at most the first of sampling's samples or, reusing the last view's reservoirs, the second, of the view
+Expand Down
+16 changes: 12 additions & 4 deletions
+16
+src/loader.h
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -266,15 +266,16 @@ template <typename T> T* upload(const std::vector<T>& data) {
+}
+// Scene piped in by the extension into scene, in place of the one of arrays: triangle, step, texel, baked texel, bake,
+// mesh triangle and instance counts, the meshes' arrays, the instances, then the steps, the texels and the programs of
+// its bakes, which the bake pass fills the baked texels after those piped with. Its instances' triangles are the
+// mesh triangle, instance and image counts, the meshes' arrays, the instances, then the steps, the texels, the
+// programs of its bakes, which the bake pass fills the baked texels after those piped with, and each image's float4
+// count and its texels. Its instances' triangles are the
+// scene's in world space. The vertices last denoised stay the previous ones while the triangle count does, others are
+// freed.
+inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) {
+for (CUdeviceptr array : loaded.arrays) release(array);
+float3* const last = scene.vertices;
+const unsigned count = scene.count;
+struct { unsigned count, ops, texels, baked, bakes, rows, only, triangles, instances; } header;
+struct { unsigned count, ops, texels, baked, bakes, rows, only, triangles, instances, images; } header;
+std::fread(&header, sizeof(header), 1, stdin);
+const size_t meshes = header.triangles;
+std::vector<Instance> instances(header.instances);
+Expand Down
+Expand Up
+@@ -309,14 +310,21 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded)
+scene.bakeTexels = (float4*)allocate(only.size() * sizeof(float4), only.data());
+loaded.bakes.resize(header.bakes);
+std::fread(loaded.bakes.data(), sizeof(unsigned), header.bakes, stdin);
+std::vector<unsigned> sizes(header.images); // Each image in its own array, found by its index
+std::fread(sizes.data(), sizeof(unsigned), header.images, stdin);
+std::vector<float4*> images(header.images);
+for (unsigned k = 0; k < header.images; ++k) images[k] = load<float4>(sizes[k]);
+scene.images = (float4**)allocate(header.images * sizeof(float4*), images.data());
+scene.handle = buildBVH(context, (CUdeviceptr)scene.vertices, header.count, OPTIX_BUILD_OPERATION_BUILD,
+loaded.temp, loaded.output);
+if (last != scene.previousVertices) release((CUdeviceptr)last);
+if (header.count != count) release((CUdeviceptr)scene.previousVertices), scene.previousVertices = scene.vertices;
+loaded.arrays = {(CUdeviceptr)scene.normals, (CUdeviceptr)scene.generated, (CUdeviceptr)scene.objects,
+(CUdeviceptr)scene.uvs, (CUdeviceptr)scene.colors, (CUdeviceptr)scene.tangents, (CUdeviceptr)scene.infos,
+(CUdeviceptr)scene.materials,
+(CUdeviceptr)scene.lights, (CUdeviceptr)scene.trails, (CUdeviceptr)scene.ops, (CUdeviceptr)scene.texels, loaded.temp, loaded.output};
+(CUdeviceptr)scene.lights, (CUdeviceptr)scene.trails, (CUdeviceptr)scene.ops, (CUdeviceptr)scene.texels,
+loaded.temp, loaded.output, (CUdeviceptr)scene.images};
+for (float4* image : images) loaded.arrays.push_back((CUdeviceptr)image);
+}
+// The steps of all programs anew, piped in by the extension as their count, the same, then the steps, as when only
+Expand Down
+7 changes: 4 additions & 3 deletions
+7
+src/shaders/renderer.cu
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -473,9 +473,10 @@ __device__ float4 texel(const Scene& scene, const Op& op, int x, int y) {
+if (extension == 3)
+x = (x % (2 * width) + 2 * width) % (2 * width), y = (y % (2 * height) + 2 * height) % (2 * height),
+x = x < width ? x : 2 * width - 1 - x, y = y < height ? y : 2 * height - 1 - y;
+const float4* texels = op.height >> 30 & 1 ? scene.bakeTexels : scene.texels; // Bit 30: of only bakes' texels
+if (!(op.height >> 26 & 1)) return texels[op.texel + y * width + x];
+const unsigned word = ((const unsigned*)(texels + op.texel))[y * width + x];
+const float4* texels = op.height >> 31 ? scene.images[op.texel] // Bit 31: an image by its index; 30: of only bakes'
+: (op.height >> 30 & 1 ? scene.bakeTexels : scene.texels) + op.texel;
+if (!(op.height >> 26 & 1)) return texels[y * width + x];
+const unsigned word = ((const unsigned*)texels)[y * width + x];
+const float level = 1.0f / 255;
+const float4 c = make_float4((word & 255) * level, (word >> 8 & 255) * level, (word >> 16 & 255) * level,
+(word >> 24) * level);
+Expand Down
+3 changes: 2 additions & 1 deletion
+3
+src/shaders/renderer.h
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -25,7 +25,7 @@ constexpr const char* PROGRAMS[] = {"__raygen__initial", "__raygen__temporal", "
+"__raygen__duplicates", "__raygen__bake", "__raygen__lights", "__raygen__denoise"};
+// Bytes from one SBT record to the next: OptiX's header, then the scene, aligned as main.cpp asserts. The table holds
+// the anchor's record first, then the passes', so a pass finds it its program's number and one records back
+constexpr unsigned RECORD_STRIDE = 592;
+constexpr unsigned RECORD_STRIDE = 608;
+// Launch parameters, bound at compile time: per step code whether the scene's programs take it
+struct Params { unsigned long long ops[2]; };
+// What a material's program leaves on the stack, from the bottom
+Expand Down
+Expand Up
+@@ -96,4 +96,5 @@ struct Scene {
+unsigned long long anchorHandle; float3 *anchorVertices, *anchorNormals; LightNode* anchorLights;
+unsigned long long* anchorTrails;
+float4* bakeTexels; // Of the texels only bakes read, images and tiles: in the bake pass alone, then freed
+float4** images; // Of each image the materials read, by its index
+};
+10 changes: 6 additions & 4 deletions
+10
+src/shaders/renderer.slang
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -42,6 +42,7 @@ struct Scene {
+uint64_t anchorHandle; float3* anchorVertices; float3* anchorNormals; LightNode* anchorLights;
+uint64_t* anchorTrails;
+uint4* bakeTexels; // Of the texels only bakes read, images and tiles: in the bake pass alone, then freed
+uint4** images; // Of each image the materials read, by its index
+};
+static const int STACK = 64;
+Expand Down
+Expand Up
+@@ -498,9 +499,10 @@ float4 texel(Scene* scene, Op op, int x, int y) {
+x = x < width ? x : 2 * width - 1 - x; y = y < height ? y : 2 * height - 1 - y;
+}
+const uint i = y * width + x;
+uint4* texels = (asuint(op.value.z) >> 30 & 1) != 0 ? scene.bakeTexels : scene.texels; // Bit 30: only bakes'
+if ((asuint(op.value.z) >> 26 & 1) == 0) return asfloat(texels[asuint(op.value.x) + i]);
+const uint word = texels[asuint(op.value.x) + i / 4][i % 4];
+uint4* texels = asuint(op.value.z) >> 31 != 0 ? scene.images[asuint(op.value.x)] // Bit 31: an image by its index
+: ((asuint(op.value.z) >> 30 & 1) != 0 ? scene.bakeTexels : scene.texels) + asuint(op.value.x); // 30: bakes'
+if ((asuint(op.value.z) >> 26 & 1) == 0) return asfloat(texels[i]);
+const uint word = texels[i / 4][i % 4];
+const float4 c = float4(word & 255, word >> 8 & 255, word >> 16 & 255, word >> 24) * (1.0f / 255);
+return (asuint(op.value.z) >> 29 & 1) != 0 ? float4(decode(c.x), decode(c.y), decode(c.z), c.w) : c;
+}
+Expand Down
+Expand Up
+@@ -1721,7 +1723,7 @@ void duplicates(uint3 p, uint3 size, Scene* scene) {
+// What OptiX's header holds: the number the Vulkan host's optixSbtRecordPackHeader gives the raygen program of a pass,
+// by its place in renderer.h's PROGRAMS
+struct Record { uint program; uint header[7]; Scene scene; };
+static const uint RECORD_STRIDE = 592; // As renderer.h's, from one record to the next
+static const uint RECORD_STRIDE = 608; // As renderer.h's, from one record to the next
+struct Launch { Record* record; uint width, height, depth; };
+[[vk::push_constant]] Launch launch;
+Expand Down
+20 changes: 11 additions & 9 deletions
+20
+src/test.py
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -795,9 +795,9 @@ def node_matches(socket):
+exporter.visible, exporter.requests = (), io.BytesIO()
+Viewport.engine.start(exporter, depsgraph)
+def generated_of(piped, i): # Generated coordinates of the mesh entry of instance i, by the scene's instance table
+header, k = numpy.frombuffer(piped, 'I', count=10), [*exporter.slots].index(i)
+first, count = numpy.frombuffer(piped, 'I', count=2, offset=40 + 172 * k)
+return numpy.frombuffer(piped, 'f', count=9 * count, offset=40 + 172 * header[9] + 36 * (2 * header[8]
+header, k = numpy.frombuffer(piped, 'I', count=11), [*exporter.slots].index(i)
+first, count = numpy.frombuffer(piped, 'I', count=2, offset=44 + 172 * k)
+return numpy.frombuffer(piped, 'f', count=9 * count, offset=44 + 172 * header[9] + 36 * (2 * header[8]
++ first)).reshape(-1, 3)
+generated = generated_of(exporter.requests.getvalue(), next(i for i, item in enumerate(depsgraph.object_instances)
+if item.object.original == twisted))
+Expand Down
+Expand Up
+@@ -946,11 +946,13 @@ def generated_of(piped, i): # Generated coordinates of the mesh entry of instan
+assert numpy.percentile(numpy.abs(render() - baked).max(-1), 99) < 0.0018, 'baked uv'
+# Once baked, what only bakes read is freed: the image the power reads through its bake alone isn't among the texels the
+# renderer keeps, but read live as well, as a base color, its 4 MiB of RGBA8 are
+def resident(): # The texels the export pipes for the renderer to keep once baked, in MiB, of the scene
+bpy.context.window.scene, exporter = scene, types.SimpleNamespace(visible=(), requests=io.BytesIO())
+scene.update_tag() # Its settings as last set
+def resident(): # The texels the export pipes for the renderer to keep once baked, in MiB, of the scene: those with
+bpy.context.window.scene, exporter = scene, types.SimpleNamespace(visible=(), requests=io.BytesIO()) # the steps
+scene.update_tag() # Its settings as last set; and each image's apart, four RGBA8 texels a float4
+Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+return struct.unpack('<6I', exporter.requests.getvalue()[:24])[3] * 16 / 2 ** 20
+images = sum(-(-width * (height & 0xFFFFFF) // (4 if height >> 26 & 1 else 1)) for key, (_, width, height, _) in
+exporter.shape[2].items() if isinstance(key, tuple) and height >> 31)
+return (struct.unpack('<11I', exporter.requests.getvalue()[:44])[3] + images) * 16 / 2 ** 20
+module['BAKE_TOLERANCE'] = tolerance # As the planner has it again
+alone = resident()
+power.links.new(image.outputs['Color'], power.nodes['Principled BSDF'].inputs['Base Color'])
+Expand Down
+Expand Up
+@@ -1217,8 +1219,8 @@ def render_on(device):
+exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
+Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+piped = exporter.requests.getvalue()
+header = numpy.frombuffer(piped, 'I', count=10) # Mesh triangles, after the instances and four columns before UVs
+assert numpy.all(numpy.frombuffer(piped, 'f', count=6 * header[8], offset=40 + 172 * header[9] + 36 * 4 * header[8])
+header = numpy.frombuffer(piped, 'I', count=11) # Mesh triangles, after the instances and four columns before UVs
+assert numpy.all(numpy.frombuffer(piped, 'f', count=6 * header[8], offset=44 + 172 * header[9] + 36 * 4 * header[8])
+== 0.25), 'render uv map'
+# A chain of mixes, each multiplying the last into itself at a factor of a half, which keeps it in both of the mix's
+Expand Down
+Toggle all file notes
+Toggle all file annotations
+Add this suggestion to a batch that can be applied as a single commit.
+This suggestion is invalid because no changes were made to the code.
+Suggestions cannot be applied while the pull request is closed.
+Suggestions cannot be applied while viewing a subset of changes.
+Only one suggestion per line can be applied in a batch.
+Add this suggestion to a batch that can be applied as a single commit.
+Applying suggestions on deleted lines is not supported.
+You must change the existing code in this line in order to create a valid suggestion.
+Outdated suggestions cannot be applied.
+This suggestion has been applied or marked resolved.
+Suggestions cannot be applied from pending reviews.
+Suggestions cannot be applied on multi-line comments.
+Suggestions cannot be applied while the pull request is queued to merge.
+Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

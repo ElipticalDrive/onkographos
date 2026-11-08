@@ -12,11 +12,11 @@ The method operates on a list of "staged splats" (visible 3D Gaussians projected
 - `splat_list`: An array of $N$ visible splats. Each splat $i$ contains:
   - `depth`: Camera-space depth value ($z_i$).
   - `tile_ids`: A list of tile IDs touched by the splat.
-  - `tile_count`: The number of tiles touched ($k_i = \text{len}(tile\_ids)$).
+  - `tile_count`: The number of tiles touched ($k_i = \text{len}(tile\_ids)$) [S1].
   - `index`: The original index in the unsorted list (used as the sort value) [S1].
 
 **Outputs:**
-- `fragment_list`: An array of tile fragments. The total size is $\sum_{i=0}^{N-1} k_i$. Fragments are stored such that fragments from splat $i$ occupy a contiguous block in the array, and these blocks are ordered by the depth of splat $i$ [S1].
+- `fragment_list`: An array of tile fragments. The total size is $\sum_{i=0}^{N-1} k_i$ [S1]. Fragments are stored such that fragments from splat $i$ occupy a contiguous block in the array, and these blocks are ordered by the depth of splat $i$ [S1].
 
 **Data Structures:**
 - **Splat Item**: Contains `depth` (float32), `tile_ids` (array of integers), `tile_count` (integer), `index` (integer) [S1].
@@ -24,17 +24,17 @@ The method operates on a list of "staged splats" (visible 3D Gaussians projected
 
 **Steps:**
 
-1. **Sort Splats by Depth**: Perform a stable 32-bit radix sort on the `splat_list` using `depth` as the key and `index` as the value [S1]. This produces a permutation of splats ordered from nearest to farthest.
-2. **Compute Exclusive Prefix Sum**: Calculate the exclusive prefix sum of the `tile_counts` from the sorted splats to determine storage offsets for fragments [S1]. Let $k_i$ be the number of tiles touched by the $i$-th splat in the sorted list. Let $O_i$ be the offset for the $i$-th splat's fragments.
+1. **Sort Splats by Depth**: Perform a stable 32-bit radix sort on the `splat_list` using `depth` as the key and `index` as the value [S1]. This produces a permutation of splats ordered from nearest to farthest [S1].
+2. **Compute Exclusive Prefix Sum**: Calculate the exclusive prefix sum of the `tile_counts` from the sorted splats to determine storage offsets for fragments [S1]. Let $k_i$ be the number of tiles touched by the $i$-th splat in the sorted list [S1]. Let $O_i$ be the offset for the $i$-th splat's fragments [S1].
    $$ O_0 = 0 $$
    $$ O_i = \sum_{j=0}^{i-1} k_j \quad \text{for } i > 0 $$
-3. **Create Fragments**: Iterate through the sorted splats and their corresponding offsets. For each splat $i$:
+3. **Create Fragments**: Iterate through the sorted splats and their corresponding offsets [S1]. For each splat $i$:
    - Let $O_i$ be the computed offset.
    - For each tile ID $t$ in `splat.tile_ids` at index $j$:
      - Create a fragment object.
      - Set `fragment.tile_id = t`.
-     - Set `fragment.splat_index = splat.index`.
-     - Copy necessary attributes from the splat to the fragment.
+     - Set `fragment.splat_index = splat.index` [S1].
+     - Copy necessary attributes from the splat to the fragment [G].
      - Store the fragment at `fragment_list[O_i + j]` [S1].
 
 **Edge Cases and Pitfalls:**
@@ -48,7 +48,7 @@ The method operates on a list of "staged splats" (visible 3D Gaussians projected
 
 ```python
 def depth_first_splat_sort(splat_list):
-    # Step 1: Perform 32-bit radix sort on splats by depth, using index as value [S1]
+    # Step 1: Stable 32-bit radix sort by depth, using original index as value [S1]
     sorted_splats = sorted(splat_list, key=lambda s: s['depth'])
     
     # Step 2: Compute exclusive prefix sum of tile counts

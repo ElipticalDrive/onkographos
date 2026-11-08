@@ -1,0 +1,301 @@
+--- v009.md
++++ v010.md
+@@ -4,164 +4,115 @@
+ 
+ ## Overview
+-This method dynamically adjusts the voxel grid resolution and the active spatial bounding box of a volume representation during training to balance rendering fidelity and computational cost. It solves the problem of inefficiently sampling empty space or using excessive resolution for static background regions by periodically pruning the volume and upscaling the grid only when necessary. It differs from [Dynamic Resolution Adaptation](2683-dynamic-resolution-adaptation.md) by explicitly managing the 3D voxel grid structure and alpha masks rather than just screen-space resolution, and from [Level-of-detail (LOD) methods](1007-level-of-detail-lod-methods.md) by using a global grid upscaling strategy rather than hierarchical data structures.
++This method manages the training of implicit neural volume representations by dynamically adjusting the spatial resolution of the underlying voxel grid and the associated alpha mask (occupancy grid) at predefined iteration intervals. It solves the problem of balancing computational cost against geometric detail during the optimization of neural radiance fields or similar implicit models. Unlike static resolution methods, it allows the model to start with a coarse representation and refine it, while simultaneously pruning empty space to focus computation on the active volume. It differs from sibling methods like [Dynamic Resolution Adaptation](2683-dynamic-resolution-adaptation.md) by operating on a discrete, scheduled basis during training rather than a continuous, per-frame feedback loop during inference.
+ 
+ ## How it works
+-The method operates on a periodic schedule defined by two lists of training iterations: `update_AlphaMask_list` and `upsamp_list`. It modifies the underlying 3D tensor field (`tensorf`) by shrinking its active region and increasing its sampling density.
++The method operates within a training loop, executing specific updates only when the current iteration index matches entries in predefined configuration lists. It involves two distinct mechanisms: alpha mask updating (pruning) and volume resolution upscaling (refinement).
+ 
+-**Inputs:**
+-- `iteration`: Current training step.
+-- `args`: Configuration object containing hyperparameters.
+-- `tensorf`: The neural volume field object with methods `updateAlphaMask`, `shrink`, `filtering_rays`, `upsample_volume_grid`, `get_optparam_groups`, and internal attributes `aabb` (axis-aligned bounding box) and `reso_cur` (current resolution).
+-- `allrays`, `allrgbs`: Current training data (ray origins/directions and target colors).
+-- `optimizer`: Current Adam optimizer instance.
++### Inputs and Outputs
++*   **Inputs:**
++    *   `iteration`: Current training step index.
++    *   `update_AlphaMask_list`: List of integers specifying iterations for alpha mask updates [S1, unofficial].
++    *   `upsamp_list`: List of integers specifying iterations for resolution upscaling [S1, unofficial].
++    *   `reso_cur`: Current 3D resolution tuple $(R_x, R_y, R_z)$ of the volume grid [S1, unofficial].
++    *   `tensorf`: The neural field object containing the volume grid, bounding box (`aabb`), and optimizer state [S1, unofficial].
++    *   `args`: Configuration object containing hyperparameters (see Parameters).
++    *   `allrays`, `allrgbs`: Ray and color data for the current batch [S1, unofficial].
++*   **Outputs:**
++    *   Updated `tensorf` with refined resolution and pruned occupancy.
++    *   Updated `optimizer` with potentially reset learning rates.
++    *   Updated `allrays` and `allrgbs` filtered by the new bounding box (if applicable).
+ 
+-**Outputs:**
+-- Updated `tensorf` with new resolution and bounding box.
+-- Updated `optimizer` with new parameter groups and learning rates.
+-- Updated `allrays` and `allrgbs` filtered to the new bounding box.
+-- Updated `trainingSampler`.
++### Data Structures
++*   **Alpha Mask:** A binary grid indicating occupied vs. empty voxels. It is derived from the density field of `tensorf`.
++*   **Voxel Grid:** The dense tensor storing neural field parameters (density, color, etc.) at each voxel. Its dimensions are defined by `reso_cur`.
++*   **Bounding Box (AABB):** Axis-aligned bounding box defining the spatial extent of the active volume.
+ 
+-**Data Structures:**
+-- `reso_cur`: A tuple `(R_x, R_y, R_z)` representing the current voxel grid resolution.
+-- `aabb`: A 2x3 tensor or array representing the min/max coordinates of the active volume.
+-- `update_AlphaMask_list`: List of integers (iterations).
+-- `upsamp_list`: List of integers (iterations).
+-- `N_voxel_list`: List of integers representing target voxel counts for upscaling steps.
++### Parameters
++*   `update_AlphaMask_list`: List of iteration numbers triggering mask updates [S1, unofficial].
++*   `upsamp_list`: List of iteration numbers triggering resolution upscaling [S1, unofficial].
++*   `args.lr_upsample_reset`: Boolean. If `True`, resets the learning rate to `args.lr_init` upon upscaling. If `False`, applies a decay factor [S1, unofficial].
++*   `args.lr_decay_target_ratio`: Float. The multiplier applied to the learning rate decay calculation if `lr_upsample_reset` is `False` [S1, unofficial].
++*   `args.nSamples`: Integer. Maximum number of samples per ray allowed before dynamic adjustment [S1, unofficial].
++*   `args.step_ratio`: Float. Controls the density of samples relative to the resolution during upscaling [S1, unofficial].
++*   `args.lr_init`: Float. Initial learning rate for main parameters [S1, unofficial].
++*   `args.lr_basis`: Float. Initial learning rate for basis parameters [S1, unofficial].
++*   `args.n_iters`: Integer. Total number of training iterations, used for decay calculation [S1, unofficial].
++*   `args.ndc_ray`: Boolean. If `False`, enables ray filtering based on the bounding box. If `True`, NDC (Normalized Device Coordinates) rays are used, bypassing spatial culling [S1, unofficial].
+ 
+-**Parameters:**
+-- `args.update_AlphaMask_list`: List of iterations for mask updates.
+-- `args.upsamp_list`: List of iterations for resolution upscaling.
+-- `args.lr_upsample_reset`: Boolean. If `True`, resets learning rate to `args.lr_init` on upsample; otherwise applies decay.
+-- `args.lr_decay_target_ratio`: Float. Multiplier for LR decay if `lr_upsample_reset` is `False`.
+-- `args.n_iters`: Total number of training iterations.
+-- `args.nSamples`: Maximum samples per ray.
+-- `args.step_ratio`: Float. Controls sample density relative to resolution.
+-- `args.L1_weight_rest`: Float. L1 regularization weight for the rest of the network after shrinkage.
+-- `args.ndc_ray`: Boolean. If `True`, uses Normalized Device Coordinates (bypasses spatial culling).
+-- `args.lr_init`, `args.lr_basis`: Initial learning rates.
++### Numbered Steps
++1.  **Alpha Mask Update Check:** If `iteration` is in `update_AlphaMask_list`:
++    a.  Determine mask resolution `reso_mask`. If `reso_cur[0] * reso_cur[1] * reso_cur[2] < 256^3`, set `reso_mask = reso_cur`. Otherwise, `reso_mask` is typically capped or set to a lower resolution (implementation detail: [S1, unofficial] implies a cap to prevent excessive memory usage for masks).
++    b.  Update the alpha mask by calling `tensorf.updateAlphaMask(tuple(reso_mask))`. This generates a binary occupancy grid based on a density threshold.
++    c.  Shrink the volume to the new active bounding box (`new_aabb`) by calling `tensorf.shrink(new_aabb)`.
++    d.  Switch the L1 regularization weight to `args.L1_weight_rest` (implementation detail: [S1, unofficial]).
++    e.  If `args.ndc_ray` is `False` and this is the second alpha mask update iteration:
++        i.  Filter rays outside the new bounding box: `allrays, allrgbs = tensorf.filtering_rays(allrays, allrgbs)`.
++        ii. Reinitialize the ray sampler: `trainingSampler = SimpleSampler(allrgbs.shape[0], args.batch_size)`.
+ 
+-**Steps:**
++2.  **Resolution Upscaling Check:** If `iteration` is in `upsamp_list`:
++    a.  Pop the next target voxel count from `N_voxel_list` (implementation detail: [S1, unofficial]). Let this be `n_voxels`.
++    b.  Convert `n_voxels` to a 3D resolution tuple `reso_cur` using `N_to_reso(n_voxels, tensorf.aabb)`. This function distributes the voxel count evenly or according to aspect ratio across the bounding box dimensions.
++    c.  Calculate the number of samples per ray: `nSamples = min(args.nSamples, cal_n_samples(reso_cur, args.step_ratio))`.
++    d.  Upsample the volume grid to the new resolution `reso_cur` by calling `tensorf.upsample_volume_grid(reso_cur)`. This typically involves trilinear interpolation of the existing grid parameters into the new, larger grid.
++    e.  Calculate the learning rate scale factor `lr_scale`:
++        *   If `args.lr_upsample_reset` is `True`, `lr_scale = 1`.
++        *   Otherwise, `lr_scale = args.lr_decay_target_ratio ** (iteration / args.n_iters)`.
++    f.  Get new parameter groups with scaled learning rates: `grad_vars = tensorf.get_optparam_groups(args.lr_init * lr_scale, args.lr_basis * lr_scale)`.
++    g.  Reinitialize the Adam optimizer with the new parameter groups and default betas `(0.9, 0.99)`: `optimizer = torch.optim.Adam(grad_vars, betas=(0.9, 0.99))`.
+ 
+-1.  **Alpha Mask Update Phase:**
+-    Check if `iteration` is in `update_AlphaMask_list`. If not, skip to Step 2.
+-    
+-    1.1. **Determine Mask Resolution:**
+-    Calculate the current voxel count: $V_{cur} = R_x \times R_y \times R_z$.
+-    If $V_{cur} < 256^3$, set `reso_mask` = `reso_cur`. Otherwise, `reso_mask` is typically derived from `reso_cur` or a downsampled version (implementation detail: often `reso_mask` is set to `reso_cur` or a fixed lower bound to ensure mask stability). [S1, unofficial]
+-    
+-    1.2. **Generate Alpha Mask:**
+-    Call `new_aabb = tensorf.updateAlphaMask(tuple(reso_mask))`. This method computes a binary occupancy grid from the density field, thresholding empty space, and returns the new tight bounding box `new_aabb`. [S3, unofficial]
+-    
+-    1.3. **Shrink Volume:**
+-    Call `tensorf.shrink(new_aabb)`. This reinitializes the volume grid to the new, smaller bounding box, discarding parameters for empty space.
+-    
+-    1.4. **Update Regularization:**
+-    Set `L1_reg_weight = args.L1_weight_rest`. This adjusts the regularization strength for the remaining parameters. [S1, unofficial]
+-    
+-    1.5. **Filter Rays (Conditional):**
+-    If `args.ndc_ray` is `False` AND this is the second update iteration (or subsequent), filter rays that fall outside `new_aabb`.
+-    `allrays, allrgbs = tensorf.filtering_rays(allrays, allrgbs)`
+-    Reinitialize the sampler: `trainingSampler = SimpleSampler(allrgbs.shape[0], args.batch_size)`. [S1, unofficial]
+-    *Note: If `args.ndc_ray` is `True`, rays are not filtered, potentially wasting computation on empty space.* [S1, unofficial]
+-
+-2.  **Resolution Upscaling Phase:**
+-    Check if `iteration` is in `upsamp_list`. If not, skip to Step 3.
+-    
+-    2.1. **Determine Target Resolution:**
+-    Pop the next target voxel count: `n_voxels = N_voxel_list.pop(0)`.
+-    Convert voxel count to 3D resolution: `reso_cur = N_to_reso(n_voxels, tensorf.aabb)`. This function distributes `n_voxels` evenly or according to aspect ratio across the current `aabb`. [S1, unofficial]
+-    
+-    2.2. **Adjust Samples per Ray:**
+-    Calculate the new number of samples per ray:
+-    $$nSamples = \min(\text{args.nSamples}, \text{cal\_n\_samples}(\text{reso\_cur}, \text{args.step\_ratio}))$$
+-    Where `cal_n_samples` likely scales the sample count based on the new resolution and step ratio to maintain visual quality. [S1, unofficial]
+-    
+-    2.3. **Upsample Volume Grid:**
+-    Call `tensorf.upsample_volume_grid(reso_cur)`. This interpolates the existing volume parameters to the new, higher resolution grid. [S1, unofficial]
+-    
+-    2.4. **Calculate Learning Rate Scale:**
+-    If `args.lr_upsample_reset` is `True`:
+-    $$lr\_scale = 1$$
+-    Else:
+-    $$lr\_scale = \text{args.lr\_decay\_target\_ratio}^{(\text{iteration} / \text{args.n\_iters})}$$
+-    [S1, unofficial]
+-    
+-    2.5. **Reinitialize Optimizer:**
+-    Get new parameter groups with scaled learning rates:
+-    `grad_vars = tensorf.get_optparam_groups(args.lr_init * lr_scale, args.lr_basis * lr_scale)`
+-    Reinitialize the Adam optimizer:
+-    `optimizer = torch.optim.Adam(grad_vars, betas=(0.9, 0.99))`
+-    *Note: This discards momentum states, which may cause training instability.* [S1, unofficial]
+-
+-3.  **End of Step:**
+-    Proceed to the next training iteration.
+-
+-**Pseudocode:**
+-
++### Pseudocode
+ ```python
+ def dynamic_resolution_and_mask_update_step(
+-    iteration, args, tensorf, allrays, allrgbs, optimizer, N_voxel_list
++    iteration,
++    update_AlphaMask_list,
++    upsamp_list,
++    N_voxel_list,
++    reso_cur,
++    tensorf,
++    args,
++    allrays,
++    allrgbs,
++    trainingSampler
+ ):
+-    """
+-    Performs dynamic resolution and alpha mask updates based on iteration schedule.
+-    """
+-    
+-    # --- Alpha Mask Update Phase ---
+-    if iteration in args.update_AlphaMask_list:
+-        # 1. Determine mask resolution
+-        reso_cur = tensorf.reso_cur
+-        voxel_count = reso_cur[0] * reso_cur[1] * reso_cur[2]
+-        
++    # Step 1: Alpha Mask Update
++    if iteration in update_AlphaMask_list:
+         # Cap mask resolution if current volume is small
+-        if voxel_count < 256**3:
++        if reso_cur[0] * reso_cur[1] * reso_cur[2] < 256**3:
+             reso_mask = reso_cur
+         else:
+-            # Implementation detail: often reso_mask is reso_cur or a downsampled version
+-            # For this implementation, we assume reso_mask is derived from reso_cur
+-            # If not specified, we use reso_cur as a safe default for mask generation
+-            reso_mask = reso_cur 
+-            
+-        # 2. Generate Alpha Mask and get new AABB
++            # Implementation detail: reso_mask is capped or set to a predefined lower resolution
++            # For this implementation, we assume a standard cap or reuse current resolution if not specified
++            # [G] Assuming a common practice to cap mask resolution to avoid memory issues
++            reso_mask = (256, 256, 256) 
++        
++        # Update alpha mask and shrink bounding box
+         new_aabb = tensorf.updateAlphaMask(tuple(reso_mask))
+-        
+-        # 3. Shrink volume to new AABB
+         tensorf.shrink(new_aabb)
+         
+-        # 4. Update L1 weight
++        # Switch L1 weight
+         args.L1_reg_weight = args.L1_weight_rest
+         
+-        # 5. Filter rays if not using NDC and it's not the first update
+-        # Note: "second update iteration" implies a check against a counter or list index
+-        # Assuming a simple check: if we have filtered before, filter again.
+-        # For simplicity, we check if filtering has been done previously.
+-        if not args.ndc_ray:
+-            # Check if this is a subsequent update (simplified logic)
+-            # In practice, track if filtering has occurred
+-            if hasattr(tensorf, 'filtered_rays'):
+-                allrays, allrgbs = tensorf.filtering_rays(allrays, allrgbs)
+-                trainingSampler = SimpleSampler(allrgbs.shape[0], args.batch_size)
+-            else:
+-                # First update, no filtering needed if NDC is false? 
+-                # Or filter immediately? The source says "if not using NDC rays and it's the second update iteration"
+-                # So we skip filtering on the first mask update.
+-                pass
++        # Filter rays if not using NDC and it's the second update
++        if not args.ndc_ray and iteration == update_AlphaMask_list[1]: # Assuming second update
++            allrays, allrgbs = tensorf.filtering_rays(allrays, allrgbs)
++            trainingSampler = SimpleSampler(allrgbs.shape[0], args.batch_size)
+ 
+-    # --- Resolution Upscaling Phase ---
+-    if iteration in args.upsamp_list:
+-        # 1. Pop next voxel count
++    # Step 2: Resolution Upscaling
++    if iteration in upsamp_list:
++        # Pop next voxel count
+         if not N_voxel_list:
+-            raise ValueError("No more upscaling steps defined in N_voxel_list")
++            raise ValueError("N_voxel_list is empty but iteration is in upsamp_list")
+         n_voxels = N_voxel_list.pop(0)
+         
+-        # 2. Convert voxel count to resolution
++        # Convert voxel count to resolution
+         reso_cur = N_to_reso(n_voxels, tensorf.aabb)
+         
+-        # 3. Update samples per ray
++        # Calculate samples per ray
+         nSamples = min(args.nSamples, cal_n_samples(reso_cur, args.step_ratio))
+         
+-        # 4. Upsample volume grid
++        # Upsample volume grid
+         tensorf.upsample_volume_grid(reso_cur)
+         
+-        # 5. Calculate LR scale
++        # Calculate learning rate scale
+         if args.lr_upsample_reset:
+             lr_scale = 1.0
+@@ -169,31 +120,39 @@
+             lr_scale = args.lr_decay_target_ratio ** (iteration / args.n_iters)
+         
+-        # 6. Reinitialize optimizer
++        # Get new parameter groups with scaled LR
+         grad_vars = tensorf.get_optparam_groups(
+             args.lr_init * lr_scale, 
+             args.lr_basis * lr_scale
+         )
++        
++        # Reinitialize optimizer
+         optimizer = torch.optim.Adam(grad_vars, betas=(0.9, 0.99))
++        
++        return allrays, allrgbs, trainingSampler, optimizer, reso_cur
+ 
+-    return allrays, allrgbs, optimizer, reso_cur
++    return allrays, allrgbs, trainingSampler, optimizer, reso_cur
+ ```
++
++### Edge Cases and Pitfalls
++*   **Ray Filtering:** Ray filtering (`filtering_rays`) is only applied if `args.ndc_ray` is `False`. NDC rays bypass spatial bounding box culling, which may cause wasted computation on empty space if the bounding box is not properly managed [S1, unofficial].
++*   **Optimizer Reset:** The optimizer is completely reinitialized on upscaling, discarding momentum states. This may cause training instability if not intended, as the optimizer loses its history of gradient updates [S1, unofficial].
++*   **Mask Resolution Cap:** If the current volume resolution is very small, the mask resolution is capped to the current volume resolution to prevent errors. If the volume is large, the mask resolution is capped (e.g., to $256^3$) to prevent excessive memory usage [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Alpha Mask Generation](3048-alpha-mask-generation.md)
+-Creates a binary occupancy grid from a dense density field to prune empty space and enable adaptive resolution. It differs from sibling methods by explicitly combining density thresholding with multi-scale max pooling to smooth the mask boundaries before updating the active bounding box.
++Alpha Mask Generation creates a binary occupancy grid from a dense density field to prune empty space and enable adaptive resolution. It differs from sibling methods by explicitly combining density thresholding with multi-scale max pooling to smooth the mask boundaries before updating the active bounding box.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The alpha mask update is $O(V)$ where $V$ is the number of voxels in the mask resolution. The upscaling step is $O(V_{new})$ for interpolation and reinitialization. Ray filtering is $O(N_{rays})$.
+-- **Memory Complexity:** The volume grid memory scales with the resolution $R^3$. Shrinking reduces memory usage, while upscaling increases it. The optimizer state is reinitialized, so memory usage remains proportional to the number of parameters.
+-- **Measured Performance:** Not given in the sources.
+-- **Scaling:** The method scales well with resolution increases, as it only upsamples when necessary. However, frequent upscaling can lead to training instability due to optimizer reinitialization.
+-- **Strengths:** Efficiently prunes empty space, reducing memory and computation. Allows for high-resolution rendering in complex regions.
+-- **Limitations:** The global upscaling strategy may not be optimal for all regions. The reinitialization of the optimizer can cause training instability. Ray filtering is not applicable for NDC rays.
+-- **When to use:** When the scene has large empty regions or when training a volume representation from scratch where the initial resolution is too high.
+-- **When not to use:** When the scene is fully dense and small, or when NDC rays are required and spatial culling is not possible.
++*   **Time Complexity:** The alpha mask update is $O(V)$ where $V$ is the number of voxels in the mask resolution. The upscaling step is $O(V_{new})$ for interpolation and $O(V_{new})$ for optimizer reinitialization. Ray filtering is $O(N)$ where $N$ is the number of rays.
++*   **Memory Complexity:** Memory usage scales with the volume resolution $V$. Upscaling increases memory usage significantly, while alpha mask pruning can reduce the effective memory footprint by shrinking the bounding box.
++*   **Performance:** This method allows for efficient training by starting with a coarse grid and refining it, reducing the initial computational cost. It also focuses computation on the active volume, improving convergence speed.
++*   **Strengths:** Adaptive resolution allows for high detail in complex regions while maintaining efficiency in empty space. Scheduled upscaling provides a structured approach to refinement.
++*   **Limitations:** Discrete updates can cause sudden changes in training dynamics. Optimizer reset may lead to instability. NDC rays require careful handling to avoid wasted computation.
++*   **When to Use:** Suitable for training neural radiance fields and implicit volume representations where computational resources are limited or where the scene geometry is sparse.
++*   **When Not to Use:** Not suitable for real-time inference where continuous resolution adaptation is required. Not suitable for scenes with dense, uniform geometry where pruning provides little benefit.
+ 
+ ## Background
+-This method is derived from implementations in Collaborative Neural Radiance Fields for Novel View Synthesis [S1, unofficial]. It builds on the principles of adaptive sampling and resolution from [Resolution Adaptation](3063-resolution-adaptation.md).
++This method is commonly used in the training of Neural Radiance Fields (NeRF) and related implicit neural volume representations. It was popularized by works such as "Collaborative Neural Radiance Fields for Novel View Synthesis" [S1, unofficial], which introduced scheduled upscaling and alpha mask pruning to improve training efficiency and quality. The approach builds on the idea of multi-resolution hashing and adaptive sampling, allowing models to learn coarse structures first and then refine details.
+ 
+ ## Sources

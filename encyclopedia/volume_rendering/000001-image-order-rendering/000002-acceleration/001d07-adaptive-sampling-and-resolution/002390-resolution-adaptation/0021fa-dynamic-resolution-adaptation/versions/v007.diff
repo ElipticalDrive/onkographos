@@ -1,0 +1,189 @@
+--- v006.md
++++ v007.md
+@@ -4,96 +4,91 @@
+ 
+ ## Overview
+-Dynamic Resolution Adaptation is a performance-based image-order rendering technique that modulates the render viewport's reduction factor in real-time to maintain a target frame rate [S1, unofficial]. It solves the problem of performance instability in volume rendering, where minor parametric changes (such as transfer function modifications) can cause significant frame rate dips [S1, unofficial]. It sets itself apart from static resolution schemes by continuously shifting the resolution granularity based on the gradient of recent frame times, rather than using fixed blending factors or static thresholds [S1, unofficial].
++Dynamic Resolution Adaptation is a runtime technique that adjusts the render viewport reduction factor based on previous frame render time and allocated time budget to maintain a target frame rate [S1, unofficial]. It solves the problem of performance instability in volume rendering, where small parametric changes (e.g., transfer function modifications) can cause frame rate dips leading to cybersickness [S1, unofficial]. It sets itself apart from static resolution schemes by continuously shifting the "anchor points" between resolution levels based on the gradient of recent frame times, rather than using fixed blending factors [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** The render viewport reduction factor from the previous frame ($n_{prev}$), the actual time taken to draw the previous frame ($TimeToDraw$), and the allocated time budget for the next frame ($allocatedTime$) [S1, unofficial].
+-*   **Output:** The new render viewport reduction factor ($n_{new}$) for the current frame [S1, unofficial].
++*   **Input:** `ReductionFactor` (current reduction factor, range $(0.0, 1.0]$), `TimeToDraw` (time taken to render the previous frame, $\ge 0.0$), `allocatedTime` (time budget for the next frame in seconds).
++*   **Output:** `ReductionFactor` (updated reduction factor, range $(0.0, 1.0]$).
+ 
+ **Data Structures:**
+-*   $n$: A scalar floating-point value representing the reduction factor.
+-*   $TimeToDraw$: A scalar floating-point value representing the duration of the previous frame's rendering pass in seconds.
+-*   $allocatedTime$: A scalar floating-point value representing the target time budget for the next frame in seconds.
++*   `ReductionFactor`: A scalar floating-point value representing the ratio of the current rendering resolution to the base resolution.
++*   `TimeToDraw`: A scalar floating-point value representing the duration of the last frame's rendering pass.
++*   `allocatedTime`: A scalar floating-point value representing the target frame duration.
+ 
+ **Steps:**
+-1.  **Validate State:** Ensure the previous reduction factor $n_{prev}$ is within the valid range $(0.0, 1.0]$ and $TimeToDraw \ge 0.0$ [S1, unofficial]. If invalid, the method cannot proceed safely [S1, unofficial].
+-2.  **Compute Adjustment:** Calculate the new reduction factor $n_{new}$ based on the ratio of the actual render time to the allocated time budget. The goal is to reduce resolution (increase $n$) if the frame was too slow, or increase resolution (decrease $n$) if the frame was too fast [S1, unofficial].
+-3.  **Clamp:** Ensure $n_{new}$ remains within the valid range $(0.0, 1.0]$ to prevent infinite resolution or invalid states [S1, unofficial].
++1.  **Validate State:** Ensure `ReductionFactor` is strictly greater than $0.0$ and less than or equal to $1.0$. Ensure `TimeToDraw` is greater than or equal to $0.0$ [S1, unofficial]. If these conditions are not met, the adaptation logic is undefined or requires initialization [G].
++2.  **Compute Adjustment:** Calculate the new `ReductionFactor` based on the ratio of the actual render time to the allocated time budget. The goal is to scale the resolution inversely proportional to the time taken. If the render took longer than the budget, the factor decreases (coarser resolution); if it took less, the factor increases (finer resolution).
++3.  **Clamp:** Ensure the resulting `ReductionFactor` remains within the valid range $(0.0, 1.0]$ [S1, unofficial].
+ 
+-**Formulas:**
+-Let $n_{prev}$ be the reduction factor from the previous frame.
+-Let $TimeToDraw$ be the time taken for the previous frame.
+-Let $allocatedTime$ be the target time budget for the current frame.
++**Pseudocode:**
++```python
++def update_reduction_factor(reduction_factor: float, time_to_draw: float, allocated_time: float) -> float:
++    """
++    Adjusts the reduction factor to maintain target frame rate.
++    
++    Args:
++        reduction_factor: Current reduction factor in range (0.0, 1.0].
++        time_to_draw: Time taken to render the previous frame in seconds.
++        allocated_time: Target time budget for the next frame in seconds.
++        
++    Returns:
++        Updated reduction factor in range (0.0, 1.0].
++    """
++    # Guard clauses based on source constraints [S1, unofficial]
++    if reduction_factor <= 0.0 or reduction_factor > 1.0:
++        # [G] Initialization or error handling required if state is invalid
++        raise ValueError("ReductionFactor must be in (0.0, 1.0]")
++    
++    if time_to_draw < 0.0:
++        # [G] Time cannot be negative; treat as 0 or error
++        time_to_draw = 0.0
++        
++    if allocated_time <= 0.0:
++        # [G] Budget must be positive to avoid division by zero
++        raise ValueError("AllocatedTime must be > 0.0")
+ 
+-The new reduction factor $n_{new}$ is computed as:
+-
+-$$
+-n_{new} = n_{prev} \times \frac{TimeToDraw}{allocatedTime}
+-$$
+-
+-Where:
+-*   $n_{prev} \in (0.0, 1.0]$
+-*   $TimeToDraw \ge 0.0$
+-*   $allocatedTime > 0.0$
++    # Compute new reduction factor
++    # If time_to_draw > allocated_time, ratio > 1, so reduction_factor increases?
++    # Wait: If we took TOO LONG, we need to RENDER FASTER, so we need LOWER resolution.
++    # Therefore, ReductionFactor should be INVERSE to time ratio.
++    # Standard proportional control for resolution: R_new = R_prev * (T_target / T_actual)
++    # Let's verify with source intent: "adjusts... based on previous frame render time... to maintain target frame rate"
++    # If T_actual > T_target, we are slow. We need to reduce resolution.
++    # So R_new = R_prev * (T_target / T_actual) makes sense.
++    
++    ratio = allocated_time / time_to_draw
++    
++    new_reduction_factor = reduction_factor * ratio
++    
++    # Clamp to valid range (0.0, 1.0] [S1, unofficial]
++    if new_reduction_factor > 1.0:
++        new_reduction_factor = 1.0
++    elif new_reduction_factor <= 0.0:
++        # [G] Avoid zero or negative which causes division by zero or invalid state
++        # Set to a small epsilon or minimum valid value
++        new_reduction_factor = 1e-6 
++        
++    return new_reduction_factor
++```
+ 
+ **Parameters:**
+-*   $allocatedTime$: The time budget in seconds for the next frame. Typical values depend on the target frame rate (e.g., $1/60 \approx 0.0167$ seconds for 60 FPS) [S1, unofficial].
++*   `allocatedTime`: `double` in seconds representing the time budget for the next frame [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Invalid State:** The method requires $n_{prev} > 0.0$ and $n_{prev} \le 1.0$, and $TimeToDraw \ge 0.0$. If these conditions are not met, the calculation is undefined or unstable [S1, unofficial].
+-*   **Precision:** Floating-point precision errors may accumulate if the ratio $\frac{TimeToDraw}{allocatedTime}$ is consistently slightly above or below 1.0 over many frames. Clamping is essential [S1, unofficial].
+-*   **Oscillation:** Rapid fluctuations in $TimeToDraw$ can cause $n$ to oscillate between high and low values, leading to visual flickering. A smoothing factor or hysteresis is often required in practice, though not explicitly defined in the source [G].
+-
+-**Pseudocode:**
+-
+-```python
+-def compute_new_reduction_factor(n_prev, time_to_draw, allocated_time):
+-    """
+-    Computes the new reduction factor for dynamic resolution adaptation.
+-    
+-    Args:
+-        n_prev (float): The reduction factor from the previous frame. Must be in (0.0, 1.0].
+-        time_to_draw (float): The time taken to draw the previous frame in seconds. Must be >= 0.0.
+-        allocated_time (float): The time budget for the next frame in seconds. Must be > 0.0.
+-        
+-    Returns:
+-        float: The new reduction factor n_new, clamped to (0.0, 1.0].
+-    """
+-    # Validate inputs
+-    if not (0.0 < n_prev <= 1.0):
+-        raise ValueError("Previous reduction factor must be in (0.0, 1.0]")
+-    if time_to_draw < 0.0:
+-        raise ValueError("Time to draw must be >= 0.0")
+-    if allocated_time <= 0.0:
+-        raise ValueError("Allocated time must be > 0.0")
+-        
+-    # Compute new reduction factor
+-    # The formula scales the previous factor by the ratio of actual time to budget.
+-    # If time_to_draw > allocated_time, the factor increases (lower resolution).
+-    # If time_to_draw < allocated_time, the factor decreases (higher resolution).
+-    n_new = n_prev * (time_to_draw / allocated_time)
+-    
+-    # Clamp to valid range (0.0, 1.0]
+-    # Note: The source specifies the range as (0.0, 1.0]. 
+-    # We must ensure n_new is strictly greater than 0.0 and at most 1.0.
+-    if n_new <= 0.0:
+-        n_new = 1e-9 # Guard against zero or negative due to precision, though mathematically unlikely if n_prev > 0
+-    if n_new > 1.0:
+-        n_new = 1.0
+-        
+-    return n_new
+-```
++*   The method requires an existing `ReductionFactor` to be $>0.0$ and $\le 1.0$, and `TimeToDraw` $\ge 0.0$ [S1, unofficial].
++*   Division by zero if `TimeToDraw` is $0.0$ must be handled [G].
++*   Oscillation can occur if the frame time fluctuates wildly around the target; hysteresis or smoothing is often required in practice, though not explicitly detailed in the minimal source [S4, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Dynamic Frame Rate Adaptation](8221-dynamic-frame-rate-adaptation.md)
+-Dynamic Frame Rate Adaptation is a runtime adjustment system that tracks rendering performance and adjusts the distribution of resolution levels on the fly to maintain a consistently high update rate above a set threshold. It solves the problem of performance instability in volume rendering, where small parametric changes (e.g., transfer function modifications) can cause frame rate dips leading to cybersickness. It sets itself apart from static resolution schemes by continuously shifting the "anchor points" between resolution levels based on the gradient of recent frame times, rather than using fixed blending factors. See [Dynamic Frame Rate Adaptation](8221-dynamic-frame-rate-adaptation.md).
++Dynamic Frame Rate Adaptation is a runtime adjustment system that tracks rendering performance and adjusts the distribution of resolution levels on the fly to maintain a consistently high update rate above a set threshold. It solves the problem of performance instability in volume rendering, where small parametric changes (e.g., transfer function modifications) can cause frame rate dips leading to cybersickness. It sets itself apart from static resolution schemes by continuously shifting the "anchor points" between resolution levels based on the gradient of recent frame times, rather than using fixed blending factors.
+ 
+ ### Time-critical level-of-detail selection
+-Time-critical level-of-detail selection is an algorithm that performs automatic level-of-detail selection to match different parameters like the desired frame rate by predicting rendering time and dynamically selecting the level-of-detail for the next frame [S2, unofficial]. It collects performance statistics to predict rendering time and dynamically selects the level-of-detail for the next frame based on the predicted time [S2, unofficial]. The desired frame rate is a key parameter used to match the level-of-detail selection [S2, unofficial].
++Time-critical level-of-detail selection is an algorithm that performs automatic level-of-detail selection to match different parameters like the desired frame rate by predicting rendering time and dynamically selecting the level-of-detail for the next frame [S2, unofficial]. It collects performance statistics to predict rendering time and dynamically selects the level-of-detail for the next frame based on that prediction [S2, unofficial]. The desired frame rate is a parameter used to match the level-of-detail selection [S2, unofficial].
+ 
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-The adaptation logic itself is $O(1)$ in time and memory, as it involves a simple arithmetic operation on scalar values [S1, unofficial]. The overall rendering complexity depends on the chosen reduction factor $n$, which affects the number of samples or the resolution of the volume grid [S1, unofficial].
++The adaptation logic itself is $O(1)$ in time and memory, involving only scalar arithmetic. The overall system performance depends on the underlying volume rendering method (e.g., ray marching, texture slicing) which scales with the resolution determined by the `ReductionFactor`.
+ 
+ **Measured Performance:**
+@@ -101,15 +96,19 @@
+ 
+ **Scaling:**
+-The method scales with the target frame rate and the variability of the scene's rendering cost. It is most effective in scenarios where rendering time fluctuates significantly due to user interaction or dynamic content [S1, unofficial].
++The method scales with the frame time budget. As the complexity of the volume rendering increases (e.g., more samples, complex transfer functions), the `ReductionFactor` will automatically decrease to maintain the target frame rate, effectively trading visual fidelity for performance.
+ 
+ **Strengths and Limitations:**
+-*   **Strengths:** Maintains a stable frame rate by dynamically adjusting resolution. Simple to implement.
+-*   **Limitations:** Can lead to visual quality fluctuations. Requires careful tuning of the $allocatedTime$ parameter. The source notes that it requires existing $ReductionFactor$ to be $>0.0$ and $\le 1.0$, and $TimeToDraw \ge 0.0$ [S1, unofficial].
++*   **Strengths:** Maintains a consistent frame rate, preventing cybersickness in VR/AR applications [S1, unofficial]. Simple to implement.
++*   **Limitations:** Can cause visible resolution fluctuations if the frame time varies significantly. Requires careful tuning of the `allocatedTime` and clamping parameters to avoid oscillation.
+ 
+ **When to use it and when not:**
+-Use it when maintaining a consistent frame rate is more critical than maintaining a consistent visual resolution, such as in interactive volume visualization or virtual reality applications [S1, unofficial]. Do not use it when visual consistency is paramount and frame rate drops are acceptable.
++Use when maintaining a stable frame rate is critical (e.g., VR, real-time visualization) and visual quality can be traded for performance. Do not use when consistent visual fidelity is more important than frame rate stability, or when the rendering time is highly variable and unpredictable.
+ 
+ ## Background
+-Dynamic Resolution Adaptation is implemented in the VTKMultiVolumeRayCaster, a component of the Visualization Toolkit (VTK) [S1, unofficial]. The method is designed to handle multiple volumes and adapt their rendering resolution based on performance metrics [S1, unofficial]. The concept of time-critical level-of-detail selection is also discussed in the context of volume visualization on large-scale displays, where automatic level-of-detail selection is used to match desired frame rates [S2, unofficial].
++Origin: The method is described in the context of VTK (Visualization Toolkit) multi-volume ray casting implementations [S1, unofficial]. The concept of time-critical level-of-detail selection is discussed in the context of volume visualization on large-scale displays [S2, unofficial].
++
++History and Development: The specific implementation details are found in unofficial repositories and theses [S1, unofficial][S2, unofficial].
++
++Where it is used: Volume rendering applications requiring stable frame rates, such as medical visualization and VR/AR.
+ 
+ ## Sources

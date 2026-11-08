@@ -1,53 +1,54 @@
 # Animatable Gaussians
 
+
 ## Overview
-Animatable Gaussians is a method for reconstructing animatable 3D human avatars from monocular video by driving explicit 3D Gaussians with an SMPL-X rig [S1, unofficial]. It differs from sibling methods like [3DGS-Avatar](1480-3dgs-avatar.md), which uses a per-Gaussian deformation MLP, by employing explicit pose-conditioned offsets to determine Gaussian positions [S1, unofficial]. This approach provides a direct mapping between the parametric model's pose and the Gaussian geometry, avoiding the need for learned implicit deformation fields for position [S1, unofficial].
+Animatable Gaussians is a method for reconstructing animatable 3D human avatars using the SMPL-X parametric model as a driving rig [S1, unofficial]. It differs from sibling methods like [3DGS-Avatar](1480-3dgs-avatar.md), which uses per-Gaussian deformation MLPs, by employing explicit pose-conditioned offsets to transform Gaussian primitives [S1, unofficial]. It builds on [SMPL-based rigid/non-rigid deformation](8385-smpl-based-rigid-non-rigid-deformation.md) principles.
 
 ## How it works
-**Inputs and Outputs:**
-*   **Inputs:** Monocular video of a human subject; pre-fitted SMPL-X parameters (pose $\beta$, shape $\theta$, and translation) for each frame [S1, unofficial].
-*   **Outputs:** A set of 3D Gaussians $\{G_i\}$ where each Gaussian $i$ has a base position $\mathbf{p}_i$, covariance $\Sigma_i$, opacity $\alpha_i$, and spherical harmonic coefficients $\mathbf{c}_i$, which are deformed based on the input pose [S1, unofficial].
+**Inputs:** Multi-view video of a human subject; SMPL-X mesh parameters (pose $\beta$, shape $\theta$) estimated from input frames.
+**Outputs:** A set of 3D Gaussians $\{g_i\}$ and a deformation function that maps SMPL-X pose to Gaussian transformations.
 
 **Data Structures:**
-Each Gaussian $i$ stores:
-*   $\mathbf{p}_i \in \mathbb{R}^3$: Base position in the SMPL-X rest pose space.
-*   $\Sigma_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix (often parameterized by scale $\mathbf{s}_i$ and rotation $\mathbf{q}_i$).
-*   $\alpha_i \in [0, 1]$: Opacity.
-*   $\mathbf{c}_i$: Spherical harmonic coefficients for view-dependent color.
-*   The deformation is defined by an offset function $\Delta \mathbf{p}(\text{pose}, \text{index})$ [S1, unofficial].
+*   **Gaussian Primitive $g_i$:**
+    *   $\mathbf{p}_i \in \mathbb{R}^3$: Base position in SMPL-X rest pose.
+    *   $\mathbf{q}_i \in \mathbb{R}^4$: Base rotation (quaternion).
+    *   $\mathbf{s}_i \in \mathbb{R}^3$: Base scale.
+    *   $\mathbf{c}_i \in \mathbb{R}^3$: Spherical harmonic coefficients for color.
+    *   $\alpha_i \in \mathbb{R}$: Opacity.
+*   **Deformation Network:** A lightweight MLP or explicit lookup table that predicts offset vectors $\Delta \mathbf{p}(\theta)$ and potentially rotation/scale adjustments based on the current SMPL-X pose $\theta$.
 
 **Steps:**
-1.  **Initialization:** Initialize Gaussians on the SMPL-X mesh surface in the rest pose [S1, unofficial].
-2.  **Deformation:** For a given frame with pose parameters $\theta$, compute the deformed position $\mathbf{p}'_i$ for each Gaussian:
-    $$ \mathbf{p}'_i = \mathbf{T}(\theta) \mathbf{p}_i + \Delta \mathbf{p}_i(\theta) $$
-    where $\mathbf{T}(\theta)$ is the SMPL-X skinning transform and $\Delta \mathbf{p}_i$ is the explicit pose-conditioned offset [S1, unofficial].
-3.  **Rendering:** Render the deformed Gaussians using standard differentiable splatting [S1, unofficial].
-4.  **Optimization:** Minimize photometric loss between rendered images and ground truth video frames to optimize Gaussian attributes and potentially refine the offset function or SMPL parameters [S1, unofficial].
+1.  **Initialization:** Initialize Gaussians on the SMPL-X mesh surface in the rest pose. Positions $\mathbf{p}_i$ are sampled from the mesh vertices or triangles [S1, unofficial].
+2.  **Pose-Conditioned Deformation:** For a target pose $\theta$, compute the deformed position $\mathbf{p}'_i$ using the SMPL-X skinning function $T(\cdot, \theta)$ and an explicit offset $\Delta \mathbf{p}$:
+    $$ \mathbf{p}'_i = T(\mathbf{p}_i, \theta) + \Delta \mathbf{p}(\theta) $$
+    The rotation $\mathbf{q}'_i$ and scale $\mathbf{s}'_i$ are similarly adjusted, often by applying the SMPL-X bone rotation to the base quaternion or predicting deltas [S1, unofficial].
+3.  **Differentiable Rendering:** Render the deformed Gaussians using standard 3D Gaussian Splatting rasterization [S1, unofficial].
+4.  **Optimization:** Minimize photometric loss $\mathcal{L}_{photo}$ between rendered images and ground truth frames. The gradients flow through the differentiable splatter and the deformation offsets to update Gaussian attributes and offset parameters [S1, unofficial].
 
 **Parameters:**
-*   SMPL-X rig parameters (pose, shape) [S1, unofficial].
-*   Learning rate for Gaussian attributes and offsets [S1, unofficial].
+*   Learning rate for Gaussians: Not given in the sources.
+*   Learning rate for offsets: Not given in the sources.
+*   SMPL-X pose dimension: 72 (global + body joints) [S1, unofficial].
 
 **Edge Cases:**
-*   Precision issues in skinning transforms for extreme poses [G].
-*   Degenerate input where SMPL fitting fails [G].
+*   **Occlusion:** SMPL-X provides a strong prior, but self-occlusion in extreme poses may require robust opacity handling [G].
+*   **Precision:** Explicit offsets must be small to maintain stability with the underlying SMPL skinning [G].
 
 ## Subtopics
 
 ### GSMs
-GSMs is a variant that generates animatable 3D humans using a model prior (SMPL) and generative adversarial networks [S2]. It builds multi-layer shells from the SMPL template and binds 3D Gaussians on these shells [S2]. By utilizing the differentiable rendering of 3DGS and the generative adversarial network of StyleGAN2, it efficiently generates animatable 3D humans [S2].
+GSMs is a variant that generates animatable 3D humans using a model prior (SMPL) and generative adversarial networks [S2]. It builds multi-layer shells from the SMPL template and binds 3D Gaussians on these shells [S2]. Animatable humans are efficiently generated by utilizing the differentiable rendering of 3DGS and the generative adversarial network of StyleGAN2 [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the number of Gaussians and the cost of computing explicit offsets. Generally faster than MLP-based deformation methods as it avoids per-pixel MLP queries for position [S1, unofficial].
-*   **Memory Complexity:** Proportional to the number of Gaussians. Storing explicit offsets may require additional memory compared to fixed deformation [S1, unofficial].
-*   **Performance:** High-quality photorealistic reconstruction from monocular video [S1, unofficial].
-*   **Strengths:** Explicit deformation allows for intuitive control via SMPL-X parameters [S1, unofficial].
-*   **Limitations:** Quality depends on the accuracy of the SMPL-X fit and the ability of explicit offsets to capture complex non-rigid deformations [S1, unofficial].
-*   **When to use:** When monocular video input is available and explicit control via SMPL-X is desired [S1, unofficial].
-*   **When not to use:** When high-fidelity non-rigid deformation beyond SMPL-X capabilities is required, or when multi-view input is available for better geometry [S1, unofficial].
+*   **Time Complexity:** Training time depends on the number of Gaussians and the complexity of the offset prediction network. Rendering is $O(N)$ per pixel, similar to standard 3DGS.
+*   **Memory Complexity:** $O(N)$ for Gaussian attributes plus $O(P)$ for offset network weights, where $N$ is the number of Gaussians and $P$ is the network size.
+*   **Strengths:** Explicit offsets provide interpretable deformation and may be more stable than implicit MLPs for large pose changes [S1, unofficial].
+*   **Limitations:** Relies on the accuracy of the SMPL-X fit; poor initialization can lead to artifacts.
+*   **When to use:** When explicit control over deformation relative to a parametric model is desired.
+*   **When not to use:** If the subject does not fit the SMPL-X topology well.
 
 ## Background
-Animatable Gaussians was introduced as part of the evolution of Gaussian Splatting for avatar reconstruction [S1, unofficial]. It builds on the SMPL-based rigid/non-rigid deformation principles [S1, unofficial]. The method addresses the challenge of creating animatable avatars from monocular video by leveraging the explicit structure of the SMPL-X rig [S1, unofficial].
+Animatable Gaussians was introduced as part of the evolution of Gaussian Splatting for avatar reconstruction. It is listed among SMPL-X driven methods, distinguishing itself by using explicit pose-conditioned offsets rather than implicit networks [S1, unofficial]. It builds on the foundation of [Splatting](23-splatting.md) and [SMPL-based rigid/non-rigid deformation](8385-smpl-based-rigid-non-rigid-deformation.md).
 
 ## Sources
 [S1] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)

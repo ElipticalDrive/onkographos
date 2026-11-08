@@ -1,0 +1,441 @@
+Procedural World: 2011
+Thursday, December 29, 2011
+Another two screenshots
+10 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+Mesh Compresion,
+Sputnik
+Wednesday, December 28, 2011
+More Sputnik screenshots
+Here are some other screenshots so you can see the mesh compression results
+8 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+Mesh Compresion,
+Sputnik
+Friday, December 23, 2011
+Distant Mounts
+This is a screenshot taken from the Sputnik LOD viewer. I photoshoped the sky in the background, but the rest of the image is realtime. This shows some mountains on the distance which are all compressed using the method I described in my earlier post. Keep in mind I still need to work on the lighting and the actual textures. The textures will bring additional detail. This can get a lot better. This image is about the polygons in the distance.
+13 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+Mesh Compresion,
+Mesh Simplification,
+Sputnik
+Through the Eye of the Needle
+I remember this short science fiction story: A group of very wealthy men were attempting to make a camel go through the eye of a needle so they could get into heaven. They tried all sort of things short of melting the camel. The biggest challenge was to have the camel back in one piece and alive.
+Sending complex meshes over a network will leave you the same feeling. For my world to be experienced over HTTP, I needed to compress terrain cells down to 10K average.
+If you remember from earlier posts, I had broken the terrain into chunks. A LOD system builds cells around the camera position. In the first LOD cells are 12x12x12 meters, the next is 24x24x24m, then 48x48x48m and so on. The highest LOD in my scenes is 7, where each cell covers 1.5 kilometers approximately. No matter which LOD, all cells should be around 10K.
+This is a challenge. 10K is not much. In vanilla form you need to store three coordinates for each vertex in a mesh, one for each axis (x, y, z). Then you have to store the actual triangles that make up the mesh. Each triangle requires three indices. If you used floats for the coordinates and 16 bit integers for the indices, it would require 12 bytes per vertex, 6 bytes per triangle. Odds are you also need texture coordinates, which are 2D points in texture space. Each triangle takes 3 of these pairs, one for each corner. If you store them as floats, it adds 24 bytes per triangle. A typical mesh has twice the number of triangles compared to faces. Each vertex is approximately costing 72 bytes. 10K would store only 142 vertices.
+It helps to cut on the number of bits used to represent each component. You could use 10 bits for each vertex coordinate, 12 bits for face indices and 8 bits for texture coordinates. Each vertex would be 30 bits, each triangle 78 bits. A mesh taking 10K this way would contain 440 vertices. It is an improvement but still very far from my target.
+The naive approach is not enough. Something different must be done.
+One very interesting approach to mesh compression is Geometry Images. This was developed by our granddaddy Hoppes. The idea is to store the mesh as two images: one for the vertex positions and one for the normal map. The main advantage is you can compress these images using traditional compression techniques, even use lossy compression like JPEG.
+The problem with it is you will need to flatten your mesh. Depending on mesh topology, you will need to cut it and create charts. This is not for the faint of hart. Also you need to make sure the image compression produces consistent results for the boundaries of these charts. If you use lossy compression you could get cracks in the reconstructed mesh. Like any 3D to 2D mapping, there can be stretch issues, and since you are storing geometry in a map, aliasing may be very noticeable in some places.
+For these reasons I decided to wait a little bit on the geometry images. I chose a more traditional approach to compression, here is what I did.
+The first step is to simplify the original mesh. This can be considered as some form of lossy compression. I described the method I used in an earlier post. At the end of this stage I have a simplified mesh for the cell which ranges from 200 to 2000 triangles.
+The next step is to recover most of the original detail in a normal map. Using a normal map allows you to crank up the mesh compression. Many of the smaller features of the mesh will be gone in the compressed mesh but will appear in the normal map.
+At this point I had a mesh with 2000 triangles and a normal map of 256x256 pixels. Both had to fit in 10K. To make things worse, there was some additional information I needed to store for each face corner. I needed to somehow describe which materials were present. The least I could pack was two materials and a blending factor between them.
+I decided I would worry first about the mesh, then deal with the normal map.
+As we saw before, just cutting the number of bits used to express components helped, but was far from enough. I needed some sort of compression scheme. Compression is about finding redundant data and taking it out. Redundancy is not always evident, for this reason you need to reshuffle your data, transform it in a way that redundancy will show. Here is a very simple way to illustrate this.
+Let's say you need to describe the sizes of these dolls:
+You could just list each doll and specify how big it is. What if you reorder the series?
+Then you could just say how big the first one is and the rate at which their sizes will decrease. That is a lot less data to convey the same amount of information.
+I did the same for the vertex positions in my meshes. I sorted vertices so the next vertex in the list would be the closet to the preceding one. The following image shows this list as a series of arrows:
+The advantage of sorting is that you could use less bits to express the difference between one position and the next.
+This approach does not guarantee you end up with minimal distances between vertices. The blue arrow shows one clear case. Often the best fitting configuration is not a list, but rather a tree. Using a list all the time has one advantage, you don't need to waste bits coding whether the next element is in the current branch of if it goes back to a previous point in the tree. Results may depend on the nature of your meshes, I advise you test with a lot of data to see what will do best.
+So using a list you will get you a few bad cases. These bad apples really hurt. To avoid this, I created two buckets. Most increments will be small and can be coded with just a few bits. Those go into the first bucket. Then the bad cases go into the second bucket. For each mesh you can find out at runtime how many bits you need for each bucket. Then you need only one bit to express which bucket it is.
+The bit map for a single channel of coordinates ends up looking like:
+For the first item:
+Store origin coordinate: 12 bits
+Store length of bucket A: 4 bits
+Store length of bucket B: 4 bits
+For each next value:
+Store bucket selector: 1 bit
+Store difference from previous: variable bits as determined by bucket
+If difference is different than zero, write sign: 1 bit
+In most of my meshes the first bucket can be represented with 4 to 5 bits. The second bucket is usually around 10 bits. 90% of the items fall in the first bucket. 1000 vertices stored at 10 bits each component would take 3,750 bytes. With sorting and buckets it would take around 2,436. This does not only save space, in most cases you get better precision.
+To compress triangle indices, it is probably best to use triangle strips. For each strip run you only need to add one additional index to get a new triangle. This does require you to re-sort your triangle data. I did not want to sort triangles just for this, cause I feared I needed to sort them to compress a different type of information in the future. For the triangles, I had to compress their vertex indices some other way.
+Each triangle has three different indices to vertices in the mesh. I found that in most cases these indices were very close. It does make sense since the closer two vertices were in space, the closer their position in the sorted vertex list. I could then store the first index of the three and save bits in the next two by only storing their difference with the first.
+Then I had the texture mapping coordinates. This is was entirely redundant. For my meshes, texture coordinates are created by an algorithm, they are not tweaked by hand. This meant the same algorithm could run on the receiving end and come up with the same data, without having to send anything. The tricky part was to make sure the results were consistent. If you think having running the same algorithms on two very different machines, at different moments in time and produce exactly the same results is easy, you may be surprised. There are many things that can go wrong. Comparisons you may do with floats or doubles could go any way. Numeric error may build up in different ways. But it is possible if you know what to look for. The savings in mesh size are great.
+The material information that augmented each triangle was easier to compress. There was a lot of regularity there. I saw the blending channel could do very well with just four bits. Also the materials present on each cell could go into a palette. For most cells it would be below 3 bits.
+While doing all this I made sure each channel of information was stored continuously. For instance, the material blending information for all triangles was written sequentially. This was to help the last phase, which was to feed the entire bit soup to traditional ZIP compression. For most meshes ZIP was not able to compress the resulting data anymore, but some times I could see a gain of up to 5%.
+At this point the meshes alone were taking around 4 to 5K. I still needed to fit the 256x256 normal map into a budget of 5K. I tried loss-less compression similar to PNG, but only storing two components for the normal. Since the normal vector is expected to have length equal to 1.0, you can skip one of the coordinates and reconstruct it later. Loss-less would not do it. It could not compress the map enough. So I decided to test how bad it would look if I used lossy compression. To my surprise it was not bad at all. The reason is that my meshes were very organic and noisy, so the errors in the compression were hard to spot.
+I looked at different codecs but ended up picking the new WebP by Google. It had the best compression I found. But I did not try JPEG2000.
+So I had done it. My rich, bloated original meshes were down to 10K average. A lot of detail was lost in the process, but there was no choice. I think that somehow relates to the ending of that sci-fi story. The wealthy mean got into heaven after all. Their failed camel compression and teleportation schemes were so expensive they became poor in the process.
+9 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+Mesh Baking,
+Mesh Compresion,
+Mesh Simplification,
+Sputnik
+Thursday, December 8, 2011
+A Procedural Universe
+You may think building one procedural world is a daunting task. How about a procedural universe? This is what John Whigham is trying to do. Take a look at his blog:
+http://johnwhigham.blogspot.com/
+I like his rendition of stars and gas giant planets. Here is one screenshot:
+I'm determined to steal some of his ideas for the night sky of my little world.
+4 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+John Whigham,
+Planet,
+Star,
+Universe
+Friday, December 2, 2011
+The fine art of motion sickness
+I have a new video of the streaming and LOD system in action. This one is guaranteed to make you sick, so watch at your own risk.
+I managed to push LOD switches a lot further, now it does not change under your feet unless the streaming lags behind for too long. The amount of detail on screen increased a lot too. Still, the required download rate remains pretty much the same. It is interesting how I did it, this will be the topic of a future post.
+Your suggestions and comments for the earlier iteration of the LOD/Streaming were on the money. Please keep them coming.
+Here is the video:
+28 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+HTTP,
+LOD,
+Sputnik,
+Streaming
+Monday, November 28, 2011
+Streaming LOD
+If you remember an earlier post, I had built a little program called Sputnik to test mesh streaming over HTTP. Over the weekend I had some time and made it stream multiple levels. Here you can see some results. Please be forgiving, I did not spend any time on the texturing, lighting or anything but streaming.
+LOD transitions are smoothed now whenever possible. I do it by gradually blending the changes into the scene. There are a couple of bugs in the normals which make popping more noticeable than what it should.
+I capped download speed at 200 KBytes per second. Often the downloading lags behind the camera position. The scene shows with less resolution until the download catches up. I think 200 KBytes per second may not do it once I add large trees and buildings. I will also reduce the amount of mesh simplification, the rock profiles are too straight on this one.
+16 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+Sputnik,
+Streaming
+Friday, November 25, 2011
+Material World
+I often get questions about the texturing in the screenshots and videos I have posted so far. There is nothing really new in what I do, still it may help to discuss it.
+The material system I devised shares the same core philosophy as the voxel system. It is all based on my hope that if you put enough layers into something it will eventually look good. I know this is an awfully technocratic approach to art and design, it is just the way I found to compensate my lacking skills. I also hope this system is flexible enough for true artists when the time comes.
+The volumetric world definition is a set of layers. Each new layer adds or subtracts to the layers before. If you look at a cliff formation, there is one base layer for the main volume of the cliff, then other layers on top of it, each one adding a different type of rock.
+Each volumetric layer has a different material assigned to it. The material system defines the look of each layer, and very important, how transitions between different materials are rendered.
+Let's look first at how material boundaries work.
+Once voxels are converted into a triangle mesh, each triangle ends up having a material assigned to it. A change of material happens because the predominant voxel layer changes too. Very often the material boundaries align perfectly with sharp features in the geometry.
+This is what you want in some cases. Imagine where the foundation of a building goes under the rock. You don't want the rock and the wall materials to blend, it would look weird. In other cases you do want different materials to blend. For instance where snow ends and bare rock starts. A clean line would not be right.
+This behavior had to be controlled by a material setting. The engine then looks at all the triangles contributing to each vertex and compiles a list of materials for the vertex. Material boundaries form based on these blend settings.
+At some point I was alpha-blending materials at the boundaries and baking the resulting image into a texture. I would later use this texture for rendering. This alpha-blending turned to be a problem when I moved all material rendering to realtime shaders. As you will see next, each material is a also collection of layers. Rendering a single material means all these layers must be evaluated and blended together. Now, imagine a point where three different materials overlap: I would need to evaluate all the layers for all materials there. It was often worse than that, in some spots I could find up to seven or eight different materials.
+I knew rendering a single set of layers was fast enough, so what I did was pick one of the materials and render just that one. Materials already have an alpha value. Picking the one with the highest alpha does the trick. This still creates sharp transition lines, but they can be fixed by offsetting the alpha by a noise function. The transitions become more natural that way.
+The following screenshot shows several transition areas as produced by the shader:
+Then there is the other half of the material system: how each material is defined. As I mentioned before, it is just a set of layers. Each layer has defines several properties that control how it looks and how and where it is applied. Here are some of them:
+Diffuse map: A texture with the color information for the layer
+Normal map: A texture that describes additional orientation changes in the surface of the layer
+Start and Bottom angles: These angles determine where the texture appears based on the orientation of the geometry. They are based on the world's up vector. This is what you would use to put moss on the top of rocks for instance
+Mask noise: A noise definition that determines the intensity of the layer at any point in world space.
+I have some other properties, but the ones listed above do most of the work.
+I leave you with a screenshot of Buddha, where you can see the angle properties used to place some grass in the horizontal areas. It does not make sense in this case, this is just so you can see it in action:
+5 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+Materials,
+Normal Map,
+Texturing
+Thursday, November 17, 2011
+Streaming Meshes
+Here is a quick video I did over the weekend. It shows a new program which connects to a web server and downloads chunks of terrain as you move.
+I had posted similar videos in the past, but there is a radical difference. In earlier videos the meshes were loaded from the hard-drive. This baby you could run from your home. I actually plan to put it out for everyone to try it early next year. Since it will be the fist foray of this technology out there, I called it Sputnik.
+It is only the first level of the clipmap, but I have expanded it so the load it generates is similar to a full scene spanning several kilometers. I capped the download speed to one megabyte per second to see if the downloading can cope with the camera movement.
+The meshes are not textured in this video, but the all the information required for the final rendering is being downloaded. So this is really it. The chunks average 20K. They contain the mesh, normal maps and material information. I tried hard to make them smaller than that, but the loss in quality was not acceptable.
+Using HTTP for transfer is a gamble, I'm still not sure about it. So far the results are encouraging, but I'm still weary of the worst case scenario happening too often. With HTTP it is not really about the transfer speed, it is the overhead of starting requests what worries me.
+If you have any experience on this field, I would really appreciate your insight.
+27 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+HTTP,
+Mesh,
+Mesh Simplification,
+Sputnik,
+Streaming
+Thursday, October 27, 2011
+Playing Dice with Mesh Simplification
+Mesh simplification is as old as polygon meshes. Even then, it is still a hot topic. There are plenty of methods out there, picking the right one is the tricky part. It is not only about the quality of the resulting mesh, but also how fast can you do it.
+I had decided not to use progressive meshes at all and chose clipmaps instead. That meant I had to deliver each cell of the clipmap in a single shot. My plan was to use a very simplified mesh and keep most of the detail in a series of maps: normal map, material map, etc. In this post I will describe the method I used for mesh simplification.
+Here you can see some results:
+The voxel countouring phase was churning out huge meshes. A single cubic cell of 6 meters side would easily take a few hundred thousand polygons. I needed to fit that into a budget of one or two thousand polygons.
+Hitting this budget was the first problem. Removing so many faces from the mesh could severely alter its appearance. It was necessary that the simplification introduced the least amount of error possible.
+There are two main classic approaches to mesh simplification: Vertex Clustering and Greedy Serial simplification. I had used some vertex clustering methods before, but disliked their boxy artifacts.
+One of the best methods for minimizing error is one described by Hoppes in 1993, which is a greedy serial approach. It uses Quadratic Error metrics to minimize errors. The algorithm can be described like this: For all edges in the mesh, find the one edge that when collapsed introduces the least error. Then repeat until the desired polygon count is reached.
+This method produces beautiful results, but it is very slow. It sequentially visits each edge in the mesh to discover which one to collapse. If your mesh has to be compressed from 100,000 triangles to 1,000 that's a lot of iterations for every collapse. It can be optimized so errors are pre-computed in one initial phase and kept in a sorted list, having the smallest error edge on top. As long as the list is properly sorted, you can get the edge at the top and collapse it. Still, every time an edge collapses, several other edges need their collapse error to be recomputed and their place updated in the sorted list. This comes at some cost.
+Then I found this paper which opened my eyes to a technique called Multiple Choice Algorithms. These guys apply it to mesh simplification, but it is a very general and powerful way to solve a big family of problems. Load balancing and network routing are some typical applications.
+This is how the method is usually explained: Imagine you have 100 large odd-shaped containers and a tube that continuously ejects a ping-pong ball. Your task is to fill the containers evenly with balls. The catch is that someone else will remove balls behind your back, so the only way to know how many balls you have in any given container is to count them. You cannot just keep track of how many balls you have put since some may have been removed already.
+The naive approach would be to count the number of balls in each container and then place the ball in the one having the least amount. That would work, but it is an awful lot of work and it would take a lot of time.
+Now, instead of that, imagine you just pick 5 random containers, count the number of balls in them and place the new ball in the one having the least amount of balls. Would it work in the long run? If it did, it would be great, you have reduced the number of containers to count from 100 to just 5.
+The question of whether this really works depends on the total number of balls. For small numbers it won't be good, but when the balls start to pile up the randomness evens out and so do the containers.
+Applied to mesh simplification, the method means you pick only a few edges randomly, let's say 10, and you collapse the one introducing the smallest error.
+Does this create noticeable differences with the sequential greedy method? Again it is a matter of how many times you perform this operation. These are huge meshes and most edges in the original mesh will be gone. This is the equivalent of having a large number of balls.
+You can actually estimate the chances of it making an error. A compression from 100,000 triangles to 1,000 means only 1% of the edges will remain. An error happens when the best edge collapse in the set of 10 random edges belongs to the 1% that should never collapse. This means that the other nine candidates are also in the 1%, otherwise one of them would have been picked for the collapse. So the probability of picking the wrong edge is 0.01 at the tenth power: 0.00000000000000000001. This is what in engineering we like to call never.
+I implemented this method and the speedup was considerable. It also made the whole algorithm a lot simpler. In the serial greedy method you need to do a lot of housekeeping to avoid recomputing edge collapse errors. Also when a collapse actually happens, you need to recompute the error metric for the adjacent edges. In the multiple choice method it is OK to recompute the error metrics for the small set of edges every time, the optimization structures of the serial greedy approach are not needed anymore.
+What is truly remarkable about the multiple choice optimization is that it lends very well to parallelization. You can have thousands of simultaneous threads, each one looking at one different bucket of random candidates. Each thread would output the result of the collapse operation for its bucket and the resulting mesh would be the input for the next iteration. A single iteration could collapse thousands of edges in one shot.
+Remember, this can be used in many other things than just meshes. Like the scan algorithm, this is one tool you may want to keep in your set for the future. As for myself I'll keep walking with this hammer in my hand, I'll let you know if I find another nail.
+16 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+MCA,
+Mesh Simplification,
+Multiple Choice Algorithms,
+Vertex Clustering
+Friday, October 7, 2011
+Popping Detail
+I have added two new videos where you can see the popping of new detail.
+It is very noticeable when the camera is close to a boundary and the new mesh comes right in front of it.
+In these videos the clipmap loader is always trying to catch up with the moving view. In most cases it drags behind, as it really needs to load and process nearly 50 Megs worth of new meshes for each new scene. These meshes won't be used by the clients. Clients will receive very simplified meshes with all the detail projected. They will load a lot faster, but some of them will have to come from the network, so it is essentially the same problem.
+Adding some degree of prediction should help. A prediction logic would load the clipmap scene for where the camera will be, at least a second ahead.
+These videos are from some kind of weird terrain I was testing. I still need to go back and improve the terrain definition and materials. Right now it is a bit crazy.
+If you look carefully you will notice both videos end in the same spot of terrain, but they start in very different places. Enjoy!
+21 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Clipmaps
+After playing with some ideas on how to send the world to viewers, I ended up choosing Clipmaps.
+Clipmaps have been around for a while, so I won't spend much time explaining what they are, how they work. It is about breaking the world around the viewer into concentric rings. Each ring has roughly the same amount of information, but the further they are from the viewer, the larger they become. The perspective projection makes distant objects appear smaller on screen, so you end up having a fairly constant distribution of information for the entire view.
+In most implementations clipmap rings are square. This is mostly because Euclidean spaces have affinity with square things, but rings could be spherical, pyramidal, etc. Spherical rings provide the best ratio between information and the size at which it appers on screen. With square clipmaps three will be some areas where you have more information than what you actually need. This error is the difference between the Manhattan and the Euclidian distance, but it is not very noticeable. It is very hard for the viewer to perceive the axes of the clipmap system.
+Clipmaps were quite easy to implement in my case. I already had the world information stored in an octree. The leaf cells were 6m by 6m by 6m. It is not hard to see that octree cells can be arranged around any point in space so cells are increasingly subdivided as they get closer to this point. The following image shows this in a quadtree:
+Something nice about this approach is that a given cell is always the same regardless of the point from where its is being observed. Once a cell is downloaded from the server it can be cached and reused any time later, no matter if the viewer has now moved to a different position.
+Clipmaps are very simple to manage. The cells can be stored as files and served over HTTP. No server-side programming is necessary. Cloud services like Amazon's S3 make it dirt cheap to store and serve arrays of files like these clipmap cells. They also provide caching at multiple points if your files don't change often. As a solution it is fast, reliable and scales very well.
+In principle clipmaps are a way to manage information for a scene from a point of view. Some of the shortcomings we usually attribute to clipmaps do not really come from the method, rather from the way it is used.
+A landmark limitation of clipmaps is the noticeable popping of higher detail cells into the view. This is not the clipmap's fault. It is caused by the way information is stored. For instance, if the higher detail cells contained progressive mesh operations to be performed over the lower resolution, it would be possible to smoothly transition into the higher detail geometry and topology.
+One real hairy issue with clipmaps is managing the seams between rings at different resolution. Some engines do a lot of stitching. Some other engines create "skirts" on the seams so any holes would be covered by the skirts.
+How am I dealing with popping and seams? For now I'm just waiting to see how bad of a problem this is in my case. Right now seams are hidden by some overlap between cells. Since the texturing matches, they are hard to see. I like this solution since it is very parallel, one cell does not depend on its neighbors. The popping will depend on the mesh simplification and projection for the final meshes. In the high resolution mesh explorer program I did the popping is very noticeable, but this may be misleading at this point.
+Here are a couple of videos. Again, they are taken from the mesh explorer, so please disregard texturing, illumination. The clipmap shows nicely in the wireframe at some point in the first video. The second video shows high frequency meshes, where the popping is most noticeable.
+9 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+Clipmaps,
+Sputnik
+Wednesday, September 28, 2011
+Streaming Meshes
+At this point I was considering different methods to stream this huge world to users. I was looking for an approach that featured great compression, but also could be selective about what information to send. There is no point in sending very compressed information if it's not needed anyway.
+Polygons, actually triangles, are a very efficient way to compress 3D models. You can think of it as some form of lossy compression. A very irregular surface can be approximated by a series of triangles. Depending on how many triangles you use, the resulting surface becomes closer to the original.
+The beauty of this is you can do it progressively: you start with a coarse approximation and then, if needed, you can increase the amount of triangles until the approximation is satisfactory.
+Progressive meshes are quite old. The classic approach is to simplify a mesh and record all the compression operations. If you reverse this process, that is, start from the simplified mesh and play back the recording, it is like you were adding detail.
+This principle has been extended so playback only happens for the polygons that are visible, making it view-depending. Detail outside the view is not refined. This property suits very well for streaming from a server. You can be very selective about what details are sent to clients. For instance, if the user cannot see the back of a mountain or a house, there is no need to stream any detail there.
+Now, if you use a simplification method that is able to change mesh topology, it means the playback can increase the "genus" of your mesh. For instance a house in the distance would not have a hole in the chimney, but if you get close enough, this hole would appear. This is a game changer.
+An octree-based mesh simplification method can do this for you:
+This method works very well over a network. TCP/IP is a streaming protocol. Not only it makes sure all bits of info arrive, it makes them arrive in the same order as they were sent. This is actually an overkill. For traditional progressive meshes it was required that playback occurred in the exact same order as simplification ocurred. You needed something like TCP/IP for them. With an octree-based progressive mesh this is not necessary all the time. For instance, cells at the same level can be refined in any order. In this case it makes sense to use UDP, since in many cases you won't matter if packets arrive out of order.
+A big problem with traditional polygonal approaches is texturing. Each vertex requires some UV parametrization that links the 3D model with the 2D texture space. It is a problem because a progressive mesh evolves in a way that may break its texture mapping. Often the solution was to create charts that were shared both by the model and the 2D space, and then constrain simplification to within the charts. This was too limiting, and it did not do well with massive topology changes.
+What if I dumped 2D parametrization altogether? I could use the actual vertices to store all the information I needed, like material, illumination, etc. The mesh itself acted as a compression structure. If I had enough vertices, the results could be very detailed, same as if I was using conventional 2D mapping to store materials and lightmaps. Then the concept of material kicks in. A material is more than a texture, it can include displacement maps for tessellation, wang-tiles of very detailed geometry for instancing, instructions for procedural generators, etc.
+I did some quick tests and saw this method was within what the current hardware generation can do. I did not like a couple of things about it. First, it required to render a lot of polygons. Newer systems could take it, but older ones did not do so well. And second, I would need to run some streaming logic on the server-side, making sure only those packets needed by the client were sent. I don't have the budget for running UDP-streaming servers right now.
+So I did not choose this direction, but I think it has a lot of potential. I may come back to it later. As I see it, this method is an alternative to sparse voxel octrees. Voxels make most sense when polygons are too small. They don't require a 2D parametrization of your world anymore. And they can deal with topology simplification in a beautiful way. Progressive octree meshes does pretty much the same, as long as you don't allow your polygons to become very small on screen. The advantage is you may still use all the polygon hardware.
+11 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+Compression,
+Mesh Simplification,
+Sputnik,
+SVO,
+Triangle Mesh
+Friday, September 23, 2011
+How much data?
+While we are in the subject of big data, I wanted to show how much detail these algorithms are able to generate. It may give you an idea of the amount of information that needs to be delivered to clients, one way or another.
+Before anything else a disclaimer: the following images (and video) are taken from a mesh preview explorer program I have built. The quality of the texturing is very poor, this is actually textured in realtime using shaders. There are a lot of shorcuts, especially in the noise functions I use. Also the lighting is flat, no shadows, no radiosity. But it is good enough to illustrate my point about these datasets.
+Take a look at the following screenshot:
+Nothing fancy here, it is just some rock outcrops. In the next two screenshots you can see how many polygons are generated for this scene:
+This is how meshes are output from the dual-contouring stage. If you look carefully you will see there is some mesh optimization. The dual contouring is adaptive, which means it can produce larger polygons if the detail is not there. Problem is, with this type of procedural functions there is always detail. This is actually good, you want to keep all the little cracks and waves in the surface. It adds character to the models.
+Here is another example of the same:
+These scenes are about 60x60x60 meters. Now extrapolate this amount of detail to a 12km by 12km island. Are you sweating yet?
+I leave you with a screen capture of the mesh preview program flying over a small portion of this island. It is the same 60m x 60m x 60m view moving around, detail outside this view is clipped. The meshes loading here are a bit more optimized, but they still retain a lot of detail. I apologize for the motion sickness this may cause. I did not spend any time smoothing camera movement over the terrain.
+4 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Monday, September 12, 2011
+Big Data
+The terms "Big Data" are frequently thrown around these days. I don't know about you, but this is what comes to mind:
+Big Data is when you have so much information that traditional storage and management techniques begin to lose their edge.
+One of the promises of Procedural Generation is to cut the amount of data required to render virtual worlds. In theory it sounds perfect. Just describe the world by a few classes, pick a few seeds and let everything grow from there. It is storing metadata instead of data. The actual generation is done by the player's system, data is created on-demand.
+The problem is how to generate compelling content. The player's machine may not be powerful enough for this. Odds are you will end up targeting the lowest common denominator and your options will become seriously limited. For instance, Minecraft generates the entire world locally. This limits its complexity. Blocks are huge and there is little diversity. For Minecraft it works, but not many games could get away with it. If you want some kind of realistic graphics it is probably out of the question.
+As it seems, data must be generated away from the user`s system. One possible approach is to use procedural techniques to create a static world. Whatever data constraints we may have can be built in as parameters to the procedural generation. For instance we could make it sure the entire world definition fits on a DVD.
+On the other hand, procedural techniques can produce huge datasets of very unique features. If you don`t really need to fit on a DVD, Bluray or any type of media you can keep around your house, you could create very large worlds. This is not new, Google Earth already does that. You don't need to download the entire dataset to start browsing, it all comes on-demand. A game world would not be as large as our real planet, but it would be a lot more complex and detailed. The world's topology for sure will be more than just a sphere.
+Then it becomes about Big Data. While generation and storage may be simple and affordable, moving that much data becomes a real challenge. What is the point of becoming so big when you cannot fit through the door anymore?
+One option is not to move any data and render the user's point of view on the server. You would stream these views down to the player's machine pretty much like you would stream a movie. This is what the OnLive service does for conventional games. It is appealing because you can deal with bandwidth using generic techniques that are not really related to the type of content you produce, like the magic codecs from OnLive and their competition. But there are a few issues with this. Every user will create some significant load on the servers. Bandwidth costs may also be high, every frame experienced by the users must go down your wires.
+The other option is to do it like Google Earth: send just enough data to the client so the virtual world can be rendered there. This approach requires you to walk a thin line. You must decide which portions of data to send over the wire and which ones can be still be created on the client at runtime. Then, whatever you choose to send, you must devise ways to compress it the most.
+It is not only about network bandwidth. In some cases data will be so big, traditional polygon rendering may not make sense anymore. When you start having large amounts of triangles becoming smaller than actual pixels after they are projected into screen, it is best to consider other forms of rendering like ray-tracing. For instance this is what these guys found:
+This is taken from their realtime terrain engine. This dataset covers a 56 km × 85 km area of the Alps at a resolution of 1 m and 12.5 cm for the DEM and the photo texture, respectively. It amounts to over 860 GB of data
+I am a hobbyist, having dedicated servers to render the world for users is not even an option. I rather pay my mortgage. If I want anyone to experience the virtual world I'm creating, I will need to stream data to end-users and render there. I have not figured out a definitive solution, but I have something I think will work. My next post will be about how I'm dealing with my big data.
+22 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+Compression,
+Streaming
+Thursday, August 18, 2011
+The case for procedural generation
+John Carmack recently said procedural techniques are nothing more than a crappy form of compression. This is while he was asked about the Unlimited Detail tech. To be fair, this should be taken only in the context of that question and runtime-engines, which is anyway a bit strange since Unlimited Detail is not really using anything procedural, it is mostly tiling instances of unique detail. Still, is he right about that? Is procedural generation just crappy compression?
+Others have said that procedural generation in games inevitably leads to large, bland scenarios. Or maddening repetitive dungeons and corridors. As they put it, humans can only be engaged by content that was created by other humans.
+I actually agree with them. And yes, you are still reading Procedural World.
+Despite of what we naysayers may believe, procedural techniques have seen a lot of success already. It is not really in your face, not a household name, but it has been instrumental producing content that otherwise would simply not exist.
+Take a look at this image:
+Well thanks, it does looks like the shinny things I'm trying to do, but this is Pandora from the Avatar movie. Now, do you think this was entirely handcrafted?
+Pandora is mostly procedural. They have synthetic noises everywhere, L-systems for plants and ground cover, it is actually a textbook example for procedural techniques. A lot of people went to visit it, and it made heaps of money. If you define success on those terms, this baby takes the cake. And it is thanks to procedural generation. Without it Pandora would have looked like this:
+So clearly proceduralism can help creating appealing content. As Carmack says, it is some form of compression. What got compressed in this case was not information over the wire, or over the bus to the graphics card, it is the amount of work artists needed to do. Instead of worrying about every little fern, they could spend their effort somewhere else.
+What is wrong with this? Now imagine it was a game and you were marooned in this huge Pandora place. You would probably get bored after a while, besides staying alive there is not much to do. If there is a thing we humans can do is we can get bored anywhere, all the time.
+We need this sort of battle-is-brewing, storm-is-coming thing lurking in the horizon. We need a sense of purpose and destiny, or a mystery for the lack of it. Is this something that only other humans can create for us?
+At this point it becomes about Artificial Intelligence. Think of a variation of the Turing Test, where a human player would not be able to tell whether a game was designed by another human or by a computer. This is the real frontier for pure Procedural Content generation.
+In the field of physics there are two theories that are very successful in explaining the two halves of the real world: Quantum Physics and General Relativity. They don't get along at all. There is a discontinuity where one theory ends and the other starts.
+A similar scenario can be found in Procedural generation. On one side you have the Roguelike-Dwarf Fortress type of games which can generate compelling experiences, but lack any visual appeal. These games use text or ASCII screens. It is like never jacking into the Matrix and keep staring at the floating text. Can you see the woman in the red dress?
+Then any attempt to visualize the worlds they describe, the magic dies. You realize it was better when it was all ASCII, which is sad cause only weirdos play ASCII games.
+The other side is rich visual worlds like Pandora. With the advent of computing as a commodity -the cloud- bigger and richer worlds will become available, even for devices with limited power like mobiles and tablets. But they lack the drama. Even a Pocahontas remix is beyond what they can do.
+Triple A studios have realized this. It is better to use procedural techniques at what they do best: terrain filler, trees, texturing, and leave the creative work for the humans. They do not have a reason to invest in this type of AI, they won't push this front if it was up to them.
+I do believe it is possible to marry these two opposed ends. Someone with an unique vision into both fields will be able to come up with a unified theory of procedural generation. And I think it will be the Unlimited Detail guys.
+(EDIT: OK, OK. I'm kidding about Unlimited Detail. Their next bogus claim could be they made procedural content generation 100,000 times better. It is surprising to me they still can be taken seriously.)
+61 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+Procedural
+Saturday, August 13, 2011
+More Ruins
+Another two screenshots of the same set of ruins:
+25 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+Procedural Architecture,
+Ruins
+Ruins
+The nicest part about creating buildings is to make them fall apart:
+Some ruins near a cliff. I still need to do a lot of work for the ruin generator. So far there is no rubble. Also a lot of floating chunks.
+I will post more screenshots of ruins shortly.
+11 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+Procedural Architecture,
+Ruins
+Friday, August 12, 2011
+Ribbed Vault
+I had some time and added some columns and ribbed vaults:
+The way it works, actual architectural elements can be swapped at generation time. This means different types of vaulting, columns and ornaments can be used without having to change the grammar.
+The grammars are modular. What you see here is the result of one particular module that is able to fill up any space with vaults and columns.
+I still have some issues in the radiosity solution. There is some light at the top of one vault I cannot really explain.
+The mood in this screenshot is set by post-processing tone mapping. This is not something I can do in realtime yet. I plan to cover it as soon as I start working on the client.
+EDIT
+A few minutes later I found the bug in the radiosity. Here is the same vault with improved lighting now:
+That was quick.
+5 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+Columns,
+Grammar,
+Procedural Architecture,
+Ribbed Vaults
+Tuesday, August 9, 2011
+Staircraft
+The staircase grammars are turning out nicely. Here is a screenshot:
+This is taken from the low-resolution model. Please ignore the texturing for now, since it is the same brick texture everywhere. I did not bother yet to apply any materials to the architecture. It is only about the shapes and how they connect to each other.
+The columns in the image are part of the staircase, which is in the middle of a large building. I will show more of this later.
+21 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Friday, August 5, 2011
+Back Indoors
+I got the city lots so I'm back to working in the architecture. I still have a long way to go, especially now that I need to write building grammars that also produce believable interiors. Writing staircases can give you a headache like nothing else in this world.
+Before going too far, I wanted to test how the buildings blended with the environment.
+Some of the buildings I'm planning rest on top of large pillars. This is so their base is level with the terrain. The player will be able to get under those pillars. I wanted to see how they would feel. Here is a render:
+Here is another scene I did to test how the outside world be seen from inside:
+As cities start emerging, I hope to have soon a lot more of this.
+10 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+L-System,
+Procedural Architecture
+Tuesday, August 2, 2011
+Unlimited Detail
+My baloney meter went off the chart last night while watching this:
+It is actually a nice piece of software once you consider what it really is. My problem is what they claim it to be.
+If you look closely at the video, they only have a few blocks of data they display in different positions. They claim this is to bypass artwork, that is just copy & paste. Well, it is not copy & paste. It is instancing. It is what makes this demo possible in today's generation of hardware.
+They can zoom-in to a grain of dirt, but they do not tell you it is the same grain of dirt over and over. If they had to show really unique "atoms", this demo would not be possible today. The challenge is data management. They chose the best compression possible, which is to not have information at all.
+Something similar is done in this video by the Gigavoxel guys:
+In this case you see some fractal volume coming out of the repetition of the same blocks, but it is essentially the same the Unlimited Detail guys have done. Impressive, yes, but no real applications for it at this stage.
+Here is another example from NVIDIA research:
+Also the classic Jon Olick's SVO demo:
+And then you have the very promising Atomontage Engine:
+None of these people claim they have revolutionized graphics, that they have made them 100,000 times better. Why? They know better. The problems to tackle are still too big, we are still generations of hardware away.
+You see for many years we have known of this Prophesy. There is this One Engine that will come and replace polygons forever. And there is no question this engine will come, maybe in just a few years. Meanwhile, whoever claims to be this Messiah will get a lot of attention. As usual the Messiah scenario has only three possible solutions:
+1. It is really the Messiah
+2. It is crazy
+3. It is just plain dishonest
+I'm not sure about anything, but I have a very strong feeling about which one to pick.
+33 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+Baloney,
+Euclideon,
+SVO,
+Unlimited Detail,
+Voxel
+Tuesday, July 26, 2011
+Screenshots of Building Scopes
+As promised here are a few screenshots of building scopes over the terrain.
+This is only a bunch of boxes now, eventually buildings will appear there. Also the density may be too high for the type of game I have in mind. So be aware this is work in progress.
+The first image includes a previous rendering of the same area so you can get a feeling of the scale of these towns.
+33 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+City
+Sunday, July 24, 2011
+City Lots
+Last week's post showed a practical way to create countries and provinces. The next logical step was to split the resulting regions even more and produce cities and even lots for individual buildings.
+My approach as usual was to find a sweet-spot between effort and realism. I made geography the main influence to city location and layout, with some hints from cultural properties.
+First I subdivided the regions I had found before. I added a new set of points and computed the resulting Voronoi for it:
+Yes, it is quite messy, but it will clean up very nicely later. Each patch in the previous image is a few hundred meters diameter. They are roughly the size of a real-life city block.
+Two things about this Voronoi phase: Seed points were placed where the slope was maximum. This is so the boundaries would end up in places where the slope was not too high.
+Also the distance function is warped in the Y coordinate, which is up/down in the world. The warp makes a difference in the vertical axis weight more than a difference in the horizontal axis. This has an interesting effect on the resulting Voronoi cells. They are not convex anymore in Euclidian space, and they tend to be constrained to areas of similar altitude. Later you will see why this helps.
+It is time for clean up. First I removed patches in the frontier with another province. I wanted some undeveloped space between cities.
+Then I removed patches that were in steep terrain. This is controlled by a cultural parameter, since some cultures are better building on the slopes.
+Here you can see the results:
+It is harder to see in just a screenshot, but the resulting cities end up in mostly flat locations. They still make use of interesting places like some mountain tops or the border of a cliff. This is thanks to the peculiar characteristics of the earlier Voronoi phase.
+Next I extended the roads so the city blocks would be connected to the main road system:
+At this point I had the city mapped out. The next step was to break down each block and determine the location of individual buildings.
+There was one hairy problem. All this generation so far was done in two dimensional arrays, where each cell of the array was roughly 5 meters wide. My architecture system, on the other hand, is based on vector shapes. Somehow I needed to convert the 2D maps into shapes before I could feed building locations and sizes to the architecture layer.
+The first step was to clean the 2D map. I filtered it to make sure there were no weird pixel configurations ending in non-manifold shapes. I also made it all just two values: 0 for empty and 1 for taken. The following image shows the resulting bitmap for one area:
+So it was about converting a map of bits into polygonal shapes. I wonder where did I hear that before?
+At the beginning of this project I considered representing voxels just as bits and then produce smooth polygonal surfaces by using mesh relaxation. I did not use that method for the virtual world at the end, but all the work I did back then became really helpful for this task. It was pretty much the same problem, only in 2D.
+The first step was to create a Lattice of points, but only for those cells in the boundaries; that is, when the 1 became a 0 or the other way around:
+Next I applied my old smoothing algorithm to the lattice grid. For each point a new position is computed based on the two other points that are connected to it. After enough iterations it not only becomes smooth, it actually flattens out and sharp features appear.
+Even if sharp and flat, there were a lot of vertices in the resulting polygons. I used some form of greedy simplification to take them out:
+Not bad. While it is all polygons now, this is still far from what the architecture system can take.
+In this system, buildings start from what it's called a "scope", which is pretty much a 3D box with some orientation. Even round buildings start from a scope. Some buildings may span from one scope to another, like a castle for instance, which may be composed of many scopes bound together by hallways, flying bridges, etc.
+I devised several methods of cutting these polygons into boxes. Each method produces a different feel, and each one can be controlled by some parameters. All this is determined by the culture settings of the city.
+These methods work in two phases. First they subdivide polygons until they are roughly square:
+And then they output actual boxes for building scopes:
+In this last image the boxes appear in black. This is where the buildings will be.
+As you can see, the buildings closely follow the roads and make good use of the space available. Not every block has to be filled with buildings. Depending on cultural or even random factors, there could be parks or entirely undeveloped lots. Some further blocks could be marked as agriculture, if the climate and culture allows for it.
+At this point you may be curious about how these lots would look over the terrain. It is quite cool actually, I will post soon about it. As usual I look forward to you comments and ideas.
+25 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+City,
+Relaxation,
+Roads
+Wednesday, July 13, 2011
+Political Landscape
+I was on my way to create the first city. How would I do it? Should I start from a street layout, key landmark locations and fill up the gaps? Soon I faced a simpler if not bigger question: Where should I build this city?
+Cities do not happen just anywhere. Geography is key, but it is more than that. Even social and political factors have a lot to do. For instance, it is unlikely that two large cities will end up being too close. Somehow people in the middle will gravitate to either one and leave a gap in the middle.
+This post is not about cities but rather about everything that is around them. As usual my goal was to have an algorithm that required little or no human input but still produce believable results. I saw that modeling some form of historic development was the simplest way. This is how it works:
+The first step is to identify suitable locations for a new settlement. Obviously the slope of the terrain had a lot to do. Both valleys and mesas make for nice locations, so I just placed points where the derivative of the terrain height was close to zero. I also made sure these points would not end up being too close from one another. The following screenshot shows the results:
+The slope intensity is shown in red, the settlement points appear as green dots.
+The people (or smart things) in each settlement would naturally expand. That is the second step. They expand as much as possible considering the geography and most important, the expansion of neighboring settlements.
+This results in something close to a Voronoi graph:
+Each colored patch shows the area of a different settlement.
+The next step is conquest. Settlements conquer their neighbors. For any two neighboring settlements the odds of a conquest is computed. This depends on how much of a border they share, how steep the terrain is at the border. And there is also a cultural element. Each settlement has a culture value, which mainly comes from bio-geological factors. For instance a settlement that covers mostly fertile land will have trouble conquering a settlement that is mostly on desertic terrain.
+When two settlements merge, a country appears. Countries are allowed to grow in this phase, but only up to certain point. As a country grows it becomes less aggressive, nearby settlements may be snatched first by a more motivated smaller country.
+The following image shows a newly formed set of countries:
+As you can see the original settlement lines still persist, but they became sub-divisions inside a country: provinces, states, counties, any way you may call it.
+Each country needs a capital. That is the next step. A capital usually should be as far from neighboring countries as possible, but as close to all other provinces as possible too. It is a delicate balance, and it can be tweaked towards either extreme. I picked a balance that made sense to me:
+Here the province containing the capital appears highlighted and its location circled in red.
+The last step is to create the main road system. Neighboring cities should be connected, but not every time. The cost of building roads in steep terrain had to be factored. Also, existing roads should be leveraged instead of building new ones. And last, roads should avoid crossing country lines unless absolutely necessary.
+I used A* path-finding to bring all these factors together, here you can see the results:
+Note that not every province is connected to its neighbor. This usually happens when mountains make a new road too expensive and it is better to just go around the mountains.
+So far I am happy with the results. The political divisions match the landscape and terrain types. The roads make sense, but also leave place for exploration.
+The next phase is to break down each province and build a large city starting from each green dot. I'm already working on this and it is quite interesting. As soon as I have some results I'll post about it.
+35 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+Capital,
+City,
+Country,
+County,
+Politics,
+Province,
+Roads,
+State
+Newer Posts
+Older Posts
+Home
+Subscribe to:
+Posts (Atom)

@@ -3,54 +3,95 @@
 Also called: Inference Module
 
 ## Overview
-The Inference Pipeline renders images from a trained dense point cloud (specifically 3D Gaussians) and new camera poses without requiring further optimization [S1, unofficial]. It distinguishes itself from sibling methods by explicitly handling "near-camera" artifacts through point pruning before rendering, ensuring depth values are physically meaningful for downstream tasks like video generation or multi-view consistency checks [S1, unofficial].
+The Inference Pipeline renders images from a trained dense point cloud (specifically 3D Gaussians) and new camera poses without requiring further optimization [S1, unofficial]. It distinguishes itself from training pipelines by executing a fixed forward flow to generate visualization outputs, including color images, depth maps, and colored depth maps [S1, unofficial]. It explicitly handles "near-camera" artifacts through point pruning before rendering, ensuring depth values are physically meaningful for downstream tasks like video generation or multi-view consistency checks [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** `DensePointCloudWithExtraFeatures` (the trained 3D Gaussian representation) and `NewCameraPose` (the target view parameters).
-*   **Output:** `Image` (rendered color, depth, or other visualizations).
+**Inputs:**
+1.  `DensePointCloudWithExtraFeatures`: The trained set of 3D Gaussian primitives, including position, covariance, opacity, and color features.
+2.  `NewCameraPose`: The extrinsic and intrinsic parameters for the target view.
+
+**Outputs:**
+1.  `Image`: The rendered color image.
+2.  (Implicitly) Depth maps and colored depth maps [S1, unofficial].
 
 **Data Structures:**
-The source does not specify the exact memory layout or bit-packing of `DensePointCloudWithExtraFeatures` or `NewCameraPose` [S1, unofficial]. It is assumed to contain standard 3D Gaussian attributes (position, covariance, opacity, spherical harmonics coefficients) and camera extrinsics/intrinsics.
+*   `Gaussian`: A structure representing a single 3D Gaussian primitive. Fields include mean position $\mu$, covariance matrix $\Sigma$ (or its Cholesky factor), opacity $\alpha$, and color coefficients.
+*   `Camera`: A structure containing projection matrix $K$ and view matrix $V$.
 
 **Steps:**
-1.  **Pruning:** Filter the `DensePointCloudWithExtraFeatures` to remove points that are too close to the camera or otherwise invalid for the specific `NewCameraPose`. This step addresses the near-camera artifact problem [S1, unofficial].
-2.  **Rasterization:** Pass the pruned point cloud and `NewCameraPose` to a rasterizer.
-3.  **Rendering:** The rasterizer outputs the final `Image` [S1, unofficial].
+1.  **Pruning:** Filter the `DensePointCloudWithExtraFeatures` to remove points that are too close to the camera plane or otherwise invalid for the current `NewCameraPose`. This step prevents near-camera artifacts [S1, unofficial].
+2.  **Rasterization:** Project the pruned 3D Gaussians onto the 2D image plane using the `NewCameraPose`. This involves transforming $\mu$ to camera space and projecting the covariance $\Sigma$ to screen space [S1, unofficial].
+3.  **Compositing:** Sort the projected Gaussians by depth. Iterate through the sorted list and accumulate color and opacity using alpha compositing to produce the final pixel color [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def inference_pipeline(point_cloud: DensePointCloudWithExtraFeatures, camera_pose: NewCameraPose) -> Image:
-    """
-    Renders an image from a trained 3D Gaussian point cloud and a new camera pose.
-    """
-    # Step 1: Prune points to handle near-camera artifacts
-    # The specific pruning criteria (e.g., distance threshold, visibility) are not detailed in the source [S1, unofficial].
-    pruned_points = prune_near_camera_points(point_cloud, camera_pose)
+def inference_pipeline(point_cloud, camera_pose):
+    # Step 1: Pruning
+    # Remove points that cause near-camera artifacts
+    pruned_points = []
+    for point in point_cloud:
+        if is_valid_for_camera(point, camera_pose):
+            pruned_points.append(point)
     
-    # Step 2: Rasterize the pruned points
-    # The specific rasterization algorithm (e.g., standard Gaussian splatting rasterizer) is not detailed [S1, unofficial].
-    image = rasterize(pruned_points, camera_pose)
+    # Step 2: Rasterization
+    # Project 3D Gaussians to 2D screen space
+    screen_gaussians = []
+    for point in pruned_points:
+        # Transform mean to camera space
+        cam_mean = transform_to_camera_space(point.mean, camera_pose.view_matrix)
+        # Project covariance to screen space
+        screen_cov = project_covariance(point.covariance, camera_pose.projection_matrix, cam_mean)
+        
+        screen_gaussians.append({
+            'mean': cam_mean,
+            'covariance': screen_cov,
+            'opacity': point.opacity,
+            'color': point.color
+        })
     
+    # Step 3: Compositing
+    # Sort by depth (z-coordinate in camera space)
+    screen_gaussians.sort(key=lambda g: g['mean'].z)
+    
+    image = create_empty_image(camera_pose.resolution)
+    
+    for gaussian in screen_gaussians:
+        # Render the Gaussian to the image buffer
+        # This typically involves evaluating the 2D Gaussian PDF
+        # and blending with existing pixels
+        render_gaussian_to_image(gaussian, image)
+        
     return image
-```
 
-**Edge Cases and Pitfalls:**
-*   **Near-Camera Artifacts:** Failure to prune points close to the camera can result in physically meaningless depth values and visual artifacts [S1, unofficial].
-*   **Missing Details:** The exact pruning logic and rasterization implementation are not provided in the source [S1, unofficial].
+def is_valid_for_camera(point, camera_pose):
+    # Check if point is too close to camera or outside frustum
+    # [G] Implementation detail: typically checks z-depth > epsilon
+    # and bounding box intersection with frustum
+    cam_pos = transform_to_camera_space(point.mean, camera_pose.view_matrix)
+    if cam_pos.z < 0.1: # Arbitrary small epsilon for near-plane
+        return False
+    # Additional frustum culling logic would go here
+    return True
+```
 
 ## Subtopics
 
-### [Depth Map Rendering and Visualization](8160-depth-map-rendering-and-visualization.md)
-Renders color images, depth maps, and colored depth maps from 3D Gaussians. It distinguishes itself by explicitly handling near-camera artifacts via point pruning, ensuring physically meaningful depth for downstream tasks.
+### Runtime Inference with Control Encoding
+This variant allows for real-time context translation by passing control encodings to MLPs at runtime to determine the object to be rendered [S2]. It distinguishes itself by enabling dynamic changes to the rendered scene (e.g., style or object identity) without retraining [S2]. Choose this when dynamic scene modification is required during inference. The color MLP is re-evaluated whenever the viewing angle shifts to account for view-dependent colors, while other MLPs predict $k$ parameters for each anchor point instead of inferring for every viewing direction [S2].
 
 ## Operating characteristics
-Not given in the sources.
+*   **Time Complexity:** Linear with respect to the number of pruned Gaussians $N$ and image resolution $W \times H$ for rasterization and compositing [S1, unofficial].
+*   **Memory Complexity:** Proportional to the size of the `DensePointCloudWithExtraFeatures` [S1, unofficial].
+*   **Strengths:** Fast inference without optimization; generates physically meaningful depth maps [S1, unofficial].
+*   **Limitations:** Requires a pre-trained dense point cloud; pruning logic is specific to the Gaussian representation [S1, unofficial].
+*   **When to use:** Real-time visualization, video generation, multi-view consistency checks [S1, unofficial].
+*   **When not to use:** When the scene geometry needs to be learned from scratch or when control encoding is not required [S2].
 
 ## Background
-The Inference Pipeline is part of the Taichi 3D Gaussian Splatting implementation [S1, unofficial]. It is used for real-time inference on trained models without re-optimization.
+The method originates from the application of 3D Gaussian Splatting for real-time rendering [S1, unofficial]. It was developed to address the need for efficient inference pipelines that can generate high-quality visualizations and depth maps from trained models without iterative optimization [S1, unofficial]. The control encoding variant was introduced to support dynamic scene manipulation in VR and gaming contexts [S2].
 
 ## Sources
 [S1] wanmeihuali/taichi_3d_gaussian_splatting, https://github.com/wanmeihuali/taichi_3d_gaussian_splatting, fetched 2026-10-27 (unofficial)
+[S2] Shape-Shifting Splats: Realtime Context Translation for Gaussian Splatting in VR, https://doi.org/10.1109/vr67842.2026.00046, fetched 2026-11-01

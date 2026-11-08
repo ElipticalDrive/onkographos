@@ -1,0 +1,194 @@
+Hi, I tried to use the same approach in "Object pose estimation" and "Projective sampling integrators" on an area light pose/aiming estimation. I got the error at the step dr.backward(loss): init_indirect_silhouette_octree(): Failed to b...
+
+Failed to build the Octree guiding distribution with Projective sampling integrators · Issue #1538 · mitsuba-renderer/mitsuba3 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Failed to build the Octree guiding distribution with Projective sampling integrators #1538
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Failed to build the Octree guiding distribution with Projective sampling integrators#1538
+Copy link
+Assignees
+Description
+XiaomingY
+opened on Mar 28, 2025
+Issue body actions
+Hi, I tried to use the same approach in "Object pose estimation" and "Projective sampling integrators" on an area light pose/aiming estimation. I got the error at the step dr.backward(loss):
+init_indirect_silhouette_octree(): Failed to build the Octree guiding distribution! No guiding distibution for indirect visibility discontinuities will be used. 2025-03-28 23:06:21 WARN main [projective.py:510] The original error message from the octree construction: 2025-03-28 23:06:21 WARN main [projective.py:510] OcSpaceDistr: Number of leaf nodes exceeds 'max_leaf_count'. Please increase 'max_leaf_count' or increase 'mass_contruction_thres'.
+Is there anything wrong with the setup?
+My test is as follow:
+```
+import drjit as dr
+import mitsuba as mi
+mi.set_variant('cuda_ad_rgb')
+
+integrator = mi.load_dict({
+    'type': 'prb_projective',
+    'max_depth':2,
+    'sppc': 0,
+    'sppp': 0,
+    'sppi': 1024,
+    'guiding': 'octree',
+    'guiding_proj': True,
+    'guiding_rounds': 1,
+})
+
+scene_xml = {
+    'type': 'scene',
+    # The keys below correspond to object IDs and can be chosen arbitrarily
+    'integrator': integrator,
+    'sensor': {
+        'type': 'perspective',
+        'fov': 120,
+        'to_world': mi.ScalarTransform4f().look_at(
+            origin=[4, 0, 0],
+            target=[0, 0, 0],
+            up=[0, 1, 0]
+        ),
+        'film': {
+            'type': 'hdrfilm',
+            'width': 256,
+            'height': 256,
+            'sample_border': True,
+            'filter': { 'type': 'box' }
+        },
+        'sampler': {
+            'type': 'independent',
+            'sample_count': 256
+        }
+    },
+    'arealight': {
+        'type': 'disk',
+        'to_world': mi.ScalarTransform4f().look_at(
+                origin=[5, 0, 0],
+                target=[0, 0, 0],
+                up=[0, 1, 0]
+        ),
+        'emitter': {
+            'type': 'area',
+            'radiance': {
+                'type': 'rgb',
+                'value': 10.0,
+            }
+        }
+    },
+    'plane': {
+        'type': 'rectangle',
+        'to_world': mi.ScalarTransform4f().scale([10, 10, 10]).rotate(axis=[0, 1, 0], angle=90),
+        'bsdf': {
+            'type': 'twosided',
+            'material': {
+                'type': 'diffuse',
+                'reflectance': {
+                    'type': 'rgb',
+                    'value': [0.5, 0.5, 0.5]
+                }
+            }
+        },
+    }
+}
+
+scene = mi.load_dict(scene_xml)
+img_ref = mi.render(scene, seed=0, spp=1024)
+
+#mi.util.convert_to_bitmap(img_ref)
+
+params = mi.traverse(scene)
+
+opt = mi.ad.Adam(lr=0.025)
+opt['angle'] = mi.Float(-0.95)
+opt['trans'] = mi.Point2f(5, 0)
+
+def apply_transformation(params, opt):
+    opt['trans'] = dr.clip(opt['trans'], 0, 5)
+    opt['angle'] = dr.clip(opt['angle'], -1, 1)
+
+    trafo = mi.Transform4f().translate([opt['trans'].x, opt['trans'].y, 0.0]).rotate([0, 1, 0], opt['angle'] * 180.0)
+
+    params['arealight.to_world'] = trafo
+    params.update()
+
+apply_transformation(params, opt)
+
+img_init  = mi.render(scene, seed=0, spp=1024)
+#mi.util.convert_to_bitmap(img_init)
+
+iteration_count = 100
+spp = 2048
+apply_transformation(params, opt)
+img = mi.render(scene, params, seed=1, spp=spp)
+loss = dr.sum(dr.square(img - img_ref)) / len(img.array)
+dr.backward(loss)
+```
+Activity
+ziyi-zhang
+self-assigned this
+on Apr 1, 2025
+ziyi-zhang commented on Apr 1, 2025
+ziyi-zhang
+on Apr 1, 2025
+Contributor
+More actions
+Hi @XiaomingY,
+We can specify a smaller proj_seed_spp to avoid running out of memory in the guiding initialization stage.
+```
+integrator.proj_seed_spp = 128  # or even 4
+```
+Internally, we have some hardcoded hyperparameters for the octree data structure. In this simple scene, where all primal rays are projected as valid and high-contribution boundary rays, the default parameter leads to excessive storage usage.
+Sorry for the misleading error message.
+Aside:
+It's a bit overkill to run projective / PSDR algorithms on this scene.
+To optimize a moving emitter, we can apply a change of variable to avoid the discontinuity issue. That is, with some small changes, we can make a normal direct integrator unbiased for such optimization.
+The main challenge of the discontinuity problem lies in the occluded background from visibility changes --- in the case of an evolving emitter, the background is simply dark (0 radiance).
+XiaomingY commented on Apr 29, 2025
+XiaomingY
+on Apr 29, 2025
+Author
+More actions
+@ziyi-zhang Thank you so much for your help. I followed your suggestions, and it does run without error. There seems to be some issues on the learning rate, the reference has a rotation of -0.5, initial value is -0.95. Over the 100 steps, the rotation changed from -0.95 to about -0.8.
+Are there any other parameters I should change?
+ziyi-zhang commented on Aug 28, 2025
+ziyi-zhang
+on Aug 28, 2025
+Contributor
+More actions
+Hi @XiaomingY,
+Following up on our conversation at SIGGRAPH -- I will write a small specialized integrator for this. But I am a bit occupied recently so it won't be immediate. Sorry for the inconvenience.
+XiaomingY commented on Sep 2, 2025
+XiaomingY
+on Sep 2, 2025
+Author
+More actions
+Hi @ziyi-zhang,
+It was great talking to you at Siggraph. Sorry for the late reply. Many projects to catch up after the conference.
+It would be amazing if you could help on the integrator, any help is very much appreciated.
+I believe the inverse rendering functions have great potentials for lighting design. We would love to explore the possibilities.
+Thank you!
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+ziyi-zhang
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

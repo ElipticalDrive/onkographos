@@ -3,7 +3,7 @@
 Also called: Signed Distance Field (SDF) Torus Primitive, Signed Distance Function (SDF) for Torus, Torus SDF, Torus Scalar Field, Torus distance, sdTorus
 
 ## Overview
-The Torus Implicit Function computes the signed distance from a query point to a torus surface defined by a major radius and a minor radius [S1, unofficial][S6]. It is distinguished from [Metaball Field Evaluation](1017-metaball-field-evaluation.md) by providing a single, non-blending primitive, and from [Superelliptic Blends](2051-superelliptic-blends.md) by its specific geometric derivation for a ring shape rather than a generalized superquadric [S6].
+The Torus Implicit Function computes the signed distance from a query point to a torus surface defined by a major radius and a minor radius [S1, unofficial][S6]. It solves the problem of evaluating a smooth, continuous scalar field for ray marching and volume rendering of toroidal geometry without polygonal approximation [S5, unofficial]. It is distinguished from [Metaball Field Evaluation](1017-metaball-field-evaluation.md) by providing a single, non-blending primitive, and from [Superelliptic Blends](2051-superelliptic-blends.md) by its specific geometric derivation for a ring shape rather than a generalized superquadric [S6].
 
 ## How it works
 **Inputs and Outputs:**
@@ -14,12 +14,12 @@ The Torus Implicit Function computes the signed distance from a query point to a
 *   Output: Signed distance $d$. Negative if inside, positive if outside, zero on the surface [S5, unofficial].
 
 **Data Structures:**
-The function is stateless and evaluates per-point [G]. Parameters are typically stored as two floats representing the major and minor radii [S5, unofficial].
+No complex data structures are required. The function is stateless and evaluates per-point. Parameters are typically stored as two floats (major/minor radii or diameter/thickness) [S5, unofficial].
 
 **Steps:**
 The exact signed distance function is derived by projecting the point onto the plane of the torus ring and computing the distance to the center of the tube [S6].
 
-1.  Compute the radial distance of the point from the axis of revolution. For a torus aligned with the Y-axis (ring in the XZ plane), this is $\rho = \sqrt{p_x^2 + p_z^2}$ [S1, S5, unofficial].
+1.  Compute the radial distance of the point from the axis of revolution. For a torus aligned with the Y-axis (ring in the XZ plane), this is $\rho = \sqrt{p_x^2 + p_z^2}$ [S1, S3, S5, unofficial].
 2.  Construct a 2D vector $q$ representing the point's position relative to the center of the tube's cross-section in the radial-vertical plane:
     $$ q = (\rho - R, p_y) $$
     If using diameter/thickness parameters:
@@ -35,7 +35,7 @@ The exact signed distance function is derived by projecting the point onto the p
     [S1, S5, unofficial].
 
 **Approximation Note:**
-Some sources describe a first-order Taylor approximation for generic quadrics, computing $f_0/f_1$ where $f_1$ is the gradient magnitude [S2, unofficial]. This approximation fails or becomes inaccurate near the torus center or when the gradient magnitude approaches zero [S2, unofficial]. The exact geometric derivation is standard for tori [S1, unofficial][S6].
+Some sources describe a "first-order approximation" or gradient-based evaluation for quadric surfaces [S2, unofficial]. This involves computing the implicit function value $f_0$ and its gradient magnitude $f_1$, returning $f_0/f_1$ [S2, unofficial]. However, for the torus, the exact geometric derivation described above is standard and preferred for accuracy [S1, S5, unofficial][S6]. The approximation method is generally used for generic quadrics where an exact closed-form SDF is complex [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -45,7 +45,7 @@ import math
 
 def sd_torus(p_x, p_y, p_z, major_radius, minor_radius):
     """
-    Computes the signed distance from point p to a torus aligned with the Y-axis.
+    Computes the signed distance from point p to a torus.
     
     Args:
         p_x, p_y, p_z: Coordinates of the query point.
@@ -55,10 +55,12 @@ def sd_torus(p_x, p_y, p_z, major_radius, minor_radius):
     Returns:
         Signed distance. Negative inside, positive outside.
     """
-    # 1. Compute radial distance from the Y-axis
+    # 1. Compute radial distance from the Y-axis (assuming torus is in XZ plane)
     rho = math.sqrt(p_x * p_x + p_z * p_z)
     
     # 2. Construct 2D vector q in the radial-vertical plane
+    # q_x is the distance from the major radius circle
+    # q_y is the height from the center plane
     q_x = rho - major_radius
     q_y = p_y
     
@@ -71,8 +73,6 @@ def sd_torus(p_x, p_y, p_z, major_radius, minor_radius):
 def sd_torus_diameter_thickness(p_x, p_y, p_z, diameter, thickness):
     """
     Computes signed distance using diameter and thickness parameters.
-    Note: Source [S5, unofficial] labels these as diameter/thickness but uses them directly 
-    as radii in the distance formula.
     """
     rho = math.sqrt(p_x * p_x + p_z * p_z)
     q_x = rho - diameter
@@ -82,16 +82,17 @@ def sd_torus_diameter_thickness(p_x, p_y, p_z, diameter, thickness):
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Singularity at Axis:** When $p_x = 0$ and $p_z = 0$, $\rho = 0$. The distance formula remains well-defined, but gradient-based normal computation requires a guard to avoid division by zero [S3, unofficial].
-*   **Gradient Division:** If using the first-order approximation method ($f_0/f_1$), the gradient magnitude $f_1$ approaches zero near the torus center or specific singularities, causing instability [S2, unofficial].
+*   **Singularity at Axis:** When $p_x = 0$ and $p_z = 0$, $\rho = 0$. The formula remains numerically stable as $\rho - R$ is well-defined. However, if computing the normal via gradient, division by zero can occur if not handled [S3, unofficial].
+*   **Gradient Division:** If using the first-order approximation method ($f_0/f_1$), the gradient magnitude $f_1$ approaches zero near the torus center or specific singularities, causing instability [S2, unofficial]. The exact geometric method avoids this division [S1, S5, unofficial].
+*   **Parameter Convention:** Confusion between radius and diameter/thickness is common. $t_x$ is often the full diameter, not the major radius [S5, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per point [G].
-*   **Memory Complexity:** $O(1)$ [G].
-*   **Strengths:** Provides an exact signed distance suitable for sphere tracing and ray marching [S5, unofficial][S6].
-*   **Limitations:** Only applies to toroidal shapes [S6].
-*   **When to use:** Rendering toroidal geometry via ray marching [S5, unofficial].
-*   **When not to use:** Complex boolean operations without blending [S6].
+*   **Time Complexity:** $O(1)$ per point. Requires a few square roots and arithmetic operations [S5, unofficial].
+*   **Memory Complexity:** $O(1)$. No auxiliary data structures [S5, unofficial].
+*   **Strengths:** Exact signed distance (smooth, continuous derivative), efficient evaluation, suitable for sphere tracing/ray marching [S5, unofficial][S6].
+*   **Limitations:** Only applies to toroidal shapes. Not suitable for complex boolean operations without blending (see [Superelliptic Blends](2051-superelliptic-blends.md)) [S6].
+*   **When to use:** When rendering a single torus or combining tori with other primitives via blending [S5, unofficial].
+*   **When not to use:** When high-performance rendering of many tori is required and bounding volume hierarchies are needed (though the SDF itself is cheap, traversal overhead may dominate) [S5, unofficial].
 
 ## Background
 The signed distance function for a torus is a standard primitive in ray marching and implicit surface rendering [S5, unofficial]. It is derived from the geometric definition of a torus as a surface of revolution [S6]. The exact formulation is widely attributed to Inigo Quilez's work on distance functions [S5, unofficial]. The first-order approximation method for quadrics is discussed in general implicit surface rendering contexts [S2, unofficial].

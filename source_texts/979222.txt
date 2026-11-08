@@ -1,0 +1,162 @@
+Motivation: Looking at some of the large-ish model input for parallel MODFLOW 6, it's clear that delayed execution is generating enormous IO overhead. Generally we chunk in the time dimension, and generally all data is kept out of RAM. T...
+
+Order topology by space filling curve (e.g. Hilbert or Morton curve) · Issue #389 · Deltares/xugrid · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Order topology by space filling curve (e.g. Hilbert or Morton curve) #389
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Order topology by space filling curve (e.g. Hilbert or Morton curve)#389
+Copy link
+Description
+Huite
+opened on Sep 23, 2025
+Issue body actions
+Motivation:
+Looking at some of the large-ish model input for parallel MODFLOW 6, it's clear that delayed execution is generating enormous IO overhead. Generally we chunk in the time dimension, and generally all data is kept out of RAM. There are generally at least three to five steps where we actually need to look at the data, and need to move the spatial data into RAM. Unfortunately, with chunking over time, this means the entire domain is loaded into memory, for each partition -- because in terms of logic, it is intuitive to deal with a single partition at a time.
+Anyway, for structured data, this is trivial: just chunk by x and y. Let's say we have chunks of 100 x by 100 y; if the partitions are sized 250 by 250; we have reasonable efficiency; each first/last chunk on the x and y is wasted, 225/625 is about 36%.
+Compare this with no chunking; for 10 equal partitions, we waste a guaranteed 90% of IO!
+We need some measure of "closeness"; I'm currently thinking of using a Hilbert or Morton space filling curve. We use the coordinates (node/edge/face). This should have the nice property that it should work reasonably well regardless of the number of chunks / partitions (that we don't know in advance); the space filling curve is continuous.
+Activity
+Huite commented on Sep 25, 2025
+Huite
+on Sep 25, 2025
+CollaboratorAuthor
+More actions
+Morton curve is easy and pretty cheap, seems to look alright:
+```
+def morton_encode_2d(x, y):
+    """
+    Encode 2D coordinates to Morton codes.
+    Uses 32 bits per dimension for 64-bit Morton codes.
+    
+    Parameters
+    ----------
+    x: np.ndarray of floats
+    y: np.ndarray of floats
+        
+    Returns
+    -------
+    codes: np.ndarray
+        Morton codes as uint64
+    """
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    
+    # Ensure x and y have the same shape
+    x, y = np.broadcast_arrays(x, y)
+    
+    min_x, max_x = np.min(x), np.max(x)
+    min_y, max_y = np.min(y), np.max(y)
+    
+    # Add small padding to avoid edge cases
+    x_range = max_x - min_x
+    y_range = max_y - min_y
+    padding = 1e-12  # Smaller padding for maximum resolution
+    
+    if x_range == 0:
+        x_range = 1.0
+        padding = 0.5
+    if y_range == 0:
+        y_range = 1.0
+        padding = 0.5
+        
+    min_x -= x_range * padding
+    max_x += x_range * padding
+    min_y -= y_range * padding
+    max_y += y_range * padding
+    
+    # Scale coordinates to [0, 2^32 - 1] for maximum resolution
+    max_coord = 0xFFFFFFFF  # 2^32 - 1
+    
+    x_scaled = ((x - min_x) / (max_x - min_x) * max_coord).astype(np.uint64)
+    y_scaled = ((y - min_y) / (max_y - min_y) * max_coord).astype(np.uint64)
+    
+    # Clamp to valid range
+    x_scaled = np.clip(x_scaled, 0, max_coord)
+    y_scaled = np.clip(y_scaled, 0, max_coord)
+    
+    # Dilate bits for 32-bit values - maximum resolution bit interleaving
+    def dilate_bits_32(vals):
+        """Dilate 32-bit values by inserting zeros between bits"""
+        vals = vals & 0xFFFFFFFF  # Ensure 32-bit
+        vals = (vals | (vals << 32)) & 0x00000000FFFFFFFF
+        vals = (vals | (vals << 16)) & 0x0000FFFF0000FFFF
+        vals = (vals | (vals << 8))  & 0x00FF00FF00FF00FF
+        vals = (vals | (vals << 4))  & 0x0F0F0F0F0F0F0F0F
+        vals = (vals | (vals << 2))  & 0x3333333333333333
+        vals = (vals | (vals << 1))  & 0x5555555555555555
+        return vals
+    
+    # Dilate and interleave: x gets odd positions, y gets even positions
+    x_dilated = dilate_bits_32(x_scaled)
+    y_dilated = dilate_bits_32(y_scaled)
+    
+    # Interleave by shifting y left by 1 and OR-ing with x
+    morton_codes = x_dilated | (y_dilated << 1)
+    
+    return morton_codes
+```
+Reordering by the morton codes, then setting as data range(0, nface) gives:
+Which looks good enough.
+An arbitrary 500 faces are then generally close:
+```
+new.isel(mesh2d_nFaces=slice(3000, 3500)).ugrid.plot()
+```
+Huite commented on Sep 26, 2025
+Huite
+on Sep 26, 2025
+CollaboratorAuthor
+More actions
+Reverse Cuthill McKee (RCM) is also a re-ordering method. I'm thinking we should consider deprecating the RCM method and subsume it under a general reorder method. We could add a Hilbert curve method as well; could look something like this:
+```
+def reorder(self, method="morton", facet=None)
+      grid = self.ugrid.grid
+      if facet is None:
+           dim = grid.core_dimension
+      else:
+           dim = grid.facets[facet]
+      if method in ("morton", "z_order"):
+           coordinates = grid.get_coordinates(dim)
+           order = morton_encode_2d(*coordinates.T)
+      elif method in ("rcm", "reverse_cuthill_mckee"):
+           connectivity = grid.get_connectivity_matrix(dim)
+           order = reverse_cuthill_mckee(
+               graph=self.face_face_connectivity,
+               symmetric_mode=True,
+          )
+      elif method == "hilbert": 
+           ...
+      else:
+           raise ValueError()
+      return self.isel({dim: order}
+```
+However, a better approach is likely to just define reorder_morton, reorder_hilbert, reorder_cuthill_mckee and utilize shared logic inside.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.
