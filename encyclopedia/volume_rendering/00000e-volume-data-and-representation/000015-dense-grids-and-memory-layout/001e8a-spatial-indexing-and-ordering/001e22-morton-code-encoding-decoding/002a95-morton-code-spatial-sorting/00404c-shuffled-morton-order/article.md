@@ -3,7 +3,7 @@
 Also called: Morton-shuffled vertex order, Optimized vertex order, Shuffled Morton, Shuffled Morton Order Vertex Reordering
 
 ## Overview
-Shuffled Morton Order is a vertex reordering policy for point clouds that combines Morton code sorting with batch shuffling to improve GPU cache locality and load balancing across Graphics Processing Clusters (GPCs) [S1, unofficial]. It solves the problem of performance instability and contention inherent in pure spatial sorting by ensuring uniform distribution of localized groups, providing high rendering performance with low sensitivity to viewpoint changes [S1, unofficial]. Unlike pure Morton order which may cause excessive locality, or pure shuffled order which causes cache thrashing, this hybrid approach balances spatial coherence with hardware utilization [S1, unofficial].
+Shuffled Morton Order is a vertex reordering policy for point clouds that combines Morton code sorting with batch shuffling to improve GPU cache locality and load balancing across Graphics Processing Clusters (GPCs) [S1]. It solves the problem of performance instability and contention inherent in pure spatial sorting by ensuring uniform distribution of localized groups, providing high rendering performance with low sensitivity to viewpoint changes [S1]. Unlike pure Morton order which may cause excessive locality, or pure shuffled order which causes cache thrashing, this hybrid approach balances spatial coherence with hardware utilization [S1].
 
 ## How it works
 **Inputs and Outputs**
@@ -18,11 +18,11 @@ Shuffled Morton Order is a vertex reordering policy for point clouds that combin
 **Steps**
 1. **Morton Code Calculation**: For each point $(x, y, z)$, compute its Morton code (Z-order curve index). This maps the 3D coordinate to a 1D integer that preserves spatial locality.
 2. **Morton Sorting**: Sort all $N$ points in the point cloud according to their computed Morton codes. This groups spatially close points together in the buffer.
-3. **Batch Division**: Divide the sorted sequence into contiguous batches of size $B$. The standard batch size is $B = 128$ points [S1, unofficial].
-4. **Batch Shuffling**: Shuffle the positions of these batches within the vertex buffer. The internal order of points within each batch is preserved. This moves spatially close groups to random locations in memory, preventing excessive locality that leads to contention or imbalanced workload across GPCs [S1, unofficial].
+3. **Batch Division**: Divide the sorted sequence into contiguous batches of size $B$. The standard batch size is $B = 128$ points [S1].
+4. **Batch Shuffling**: Shuffle the positions of these batches within the vertex buffer. The internal order of points within each batch is preserved. This moves spatially close groups to random locations in memory, preventing excessive locality that leads to contention or imbalanced workload across GPCs [S1].
 
 **Parameters**
-- Batch size $B$: 128 points [S1, unofficial].
+- Batch size $B$: 128 points [S1].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -88,14 +88,14 @@ Pure random shuffling of points. Shuffled Morton Order improves upon this by pre
 ## Operating characteristics
 - **Time Complexity**: Sorting takes $O(N \log N)$ time. Shuffling batches takes $O(N/B)$ time. Overall complexity is dominated by sorting, $O(N \log N)$.
 - **Memory Complexity**: $O(N)$ to store the reordered points.
-- **Performance**: Boosts the efficiency of `GL_POINTS` by a factor of 5x compared to other orderings in cases where hardware rendering is compulsory [S1, unofficial]. Achieves rates of 62-64 fps for 796 million points on an RTX 3090 [S1, unofficial].
-- **Strengths**: High rendering performance, low sensitivity to viewpoint changes, reduced fluctuations across different compute-based methods [S1, unofficial].
+- **Performance**: Boosts the efficiency of `GL_POINTS` by a factor of 5x compared to other orderings in cases where hardware rendering is compulsory [S1]. Achieves rates of 62-64 fps for 796 million points on an RTX 3090 [S1].
+- **Strengths**: High rendering performance, low sensitivity to viewpoint changes, reduced fluctuations across different compute-based methods [S1].
 - **Limitations**: Requires pre-processing to reorder points. Not suitable for dynamic point clouds where points move frequently, as reordering overhead may outweigh benefits.
 - **When to Use**: Static or slowly changing point clouds rendered with `GL_POINTS` on hardware pipelines.
 - **When Not to Use**: Dynamic point clouds with frequent updates, or when using compute-based rendering where other optimizations may be more effective.
 
 ## Background
-Shuffled Morton Order was introduced in "Rendering Point Clouds with Compute Shaders and Vertex Order Optimization" [S1, unofficial]. It addresses the limitations of pure Morton sorting, which can cause contention or imbalanced workload due to excessive locality, and pure shuffled order, which causes cache thrashing. The method was developed to optimize hardware rendering of large point clouds, particularly for `GL_POINTS` primitives. It has been evaluated on NVIDIA RTX 3090 and RTX 2070 Super GPUs, demonstrating significant performance improvements over baseline orderings.
+Shuffled Morton Order was introduced in "Rendering Point Clouds with Compute Shaders and Vertex Order Optimization" [S1]. It addresses the limitations of pure Morton sorting, which can cause contention or imbalanced workload due to excessive locality, and pure shuffled order, which causes cache thrashing. The method was developed to optimize hardware rendering of large point clouds, particularly for `GL_POINTS` primitives. It has been evaluated on NVIDIA RTX 3090 and RTX 2070 Super GPUs, demonstrating significant performance improvements over baseline orderings.
 
 ## Sources
-[S1] Rendering Point Clouds with Compute Shaders and Vertex Order Optimization, https://doi.org/10.1111/cgf.14345, fetched 2026-10-26 (unofficial)
+[S1] Rendering Point Clouds with Compute Shaders and Vertex Order Optimization, https://doi.org/10.1111/cgf.14345, fetched 2026-10-26

@@ -3,46 +3,56 @@
 Also called: Ren et al. Spherical Harmonical Exponentiation
 
 ## Overview
-Spherical Harmonical Exponentiation is a technique for encoding directional volumetric visibility and occlusion using spherical harmonic (SH) basis functions [S1, unofficial]. It solves the problem of efficiently computing soft shadows and ambient occlusion in dynamic scenes by representing the visibility function as a vector in SH space [S1, unofficial]. Unlike traditional rasterization which ignores global visibility or Monte Carlo ray tracing which is computationally expensive due to sampling, this method uses fast SH multiplications (via logarithmic summation) to combine visibility functions, making it suitable for real-time rendering and differentiable inverse problems [S2]. It sets itself apart from siblings like [Spherical Harmonics AO](6294-spherical-harmonics-ao.md) by specifically leveraging the exponentiation property of SH functions to accumulate occlusion, and from [Spherical Harmonic Volumetric Visibility](1225-spherical-harmonic-volumetric-visibility.md) by focusing on the specific mathematical operation of exponentiation for visibility accumulation.
+Spherical Harmonical Exponentiation is a technique for encoding directional volumetric visibility using spherical harmonic (SH) basis functions [S1, unofficial]. It solves the problem of real-time dynamic directional occlusion by representing the visibility function as a vector of SH coefficients, allowing for efficient combination of visibility contributions [S1, unofficial]. Unlike [Spherical Harmonics Irradiance Encoding](4336-spherical-harmonics-irradiance-encoding.md) which typically encodes incoming light, this method encodes the *absence* of light (occlusion) in the frequency domain [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A set of spherical harmonic coefficients representing the visibility or occlusion contribution of scene geometry (e.g., blockers). The precision of the visibility encoding increases with the number of spherical harmonic bands used [S1, unofficial].
-*   **Output:** A combined spherical harmonic vector representing the total directional occlusion at a point.
+**Inputs:**
+- A set of $K$ posed camera observations.
+- For each camera $k$, the camera center $o_k$, the normalized direction vector $d_k$ pointing from the camera to the target point $v$, and the observed color $c_{v,d_k}$ [S2].
+- The density field $\sigma$ along the ray from $o_k$ to $v$ [S2].
+
+**Outputs:**
+- A set of spherical harmonic coefficients $\hat{h}_\ell^m$ representing the directional occlusion at point $v$ [S2].
 
 **Data Structures:**
-*   Spherical Harmonic coefficients are stored as vectors. These can be stored in textures, mesh vertices, or volumes [S1, unofficial].
-*   The order of the SH expansion determines the number of bands. Higher orders provide more precise directional information but increase computational cost.
+- SH Coefficients: A vector of size $(L+1)^2$ for order $L$, storing real-valued coefficients $\hat{h}_\ell^m$ where $0 \le \ell \le L$ and $-\ell \le m \le \ell$ [S1, unofficial][S2].
 
 **Steps:**
-1.  **Representation:** Represent the occlusion contribution of individual geometry elements (or blockers) as spherical harmonic vectors. Let $V_i$ be the SH vector for the $i$-th blocker.
-2.  **Combination:** Combine the visibility contributions. The key insight is that occlusion is multiplicative in the radiance domain (transmittance). In the SH domain, multiplication is complex. However, Ren et al. utilize an approximation or specific property where visibility functions can be combined via exponentiation in the SH coefficient space, or by converting to a domain where multiplication is simpler (e.g., using the logarithmic summation approach mentioned in the context of SH AO [S2]).
-    *   *Note:* The specific formula for "Spherical Harmonical Exponentiation" is not explicitly detailed in the provided sources beyond the name and the general concept of encoding visibility in SH vectors [S1, unofficial]. The sources mention that "if more than one spherical harmonic band is used, it will provide directional occlusion" [S1, unofficial].
-    *   *Implementation Detail [G]:* Typically, SH multiplication involves convolution of coefficients. Exponentiation in SH space is non-trivial. The method likely involves approximating the product of visibility functions by operating on the SH coefficients directly, possibly via a Taylor expansion or a specific basis transformation, to avoid expensive spatial domain operations. The source [S2] mentions "fast SH multiplications (via logarithmic summation)" in the context of SH AO, which may be the underlying mechanism for the exponentiation or combination step.
-3.  **Evaluation:** Evaluate the combined SH vector at the desired viewing direction to obtain the occlusion factor.
+1. **Calculate Transmittance:** For each observation $k$, compute the transmittance $T_{v,k}$ from the camera center $o_k$ to the target point $v$ along the ray $r(s; v, d_k) = v + s d_k$ [S2].
+   $$ T_{v,k} = \exp \left( - \int_0^{\|o_k - v\|} \sigma(r(s; v, d_k)) \, ds \right) $$
+   [S2]
+
+2. **Estimate SH Coefficients:** Compute the coefficients $\hat{h}_\ell^m$ using transmittance-weighted Monte Carlo integration over the observed directions [S2]. The probability density function $p_d(d)$ is assumed uniform over the sphere: $p_d(d) \equiv \frac{1}{4\pi}$ [S2].
+
+   $$ \hat{h}_\ell^m = \frac{\sum_{k=1}^K T_{v,k} c_{v,d_k} Y_\ell^m(d_k)}{\sum_{k=1}^K T_{v,k}} $$
+   [S2]
+
+   *Note: The source [S2] presents Eq. (7) with a denominator $\sum T_{v,k}$ and numerator terms involving $c_{v,d_k}$. The standard SH projection usually involves dividing by the integral of the basis squared or the PDF. The source text implies a weighted average where the weights are transmittance. The formula in [S2] Eq. (7) is:*
+   $$ \hat{h}_\ell^m = \frac{\sum_{k=1}^K T_{v,k} c_{v,d_k} Y_\ell^m(d_k)}{\sum_{k=1}^K T_{v,k}} $$
+   *However, Eq. (5) in [S2] shows the integral approximation as $\sum \frac{c F Y}{p_d}$. Eq. (7) modifies this with transmittance. The exact denominator in Eq. (7) of [S2] is written as $\sum_{k=1}^K T_{v,k}$. This acts as a normalization for the weighted sum.*
+
+3. **Handle Non-Uniform Views (Residual):** If views are not uniformly distributed (e.g., half-sphere coverage), the orthogonality of SH bases is violated, causing bias. A residual estimation step is required to correct for this non-uniformity [S2].
 
 **Parameters:**
-*   **SH Order/Bands:** The number of spherical harmonic bands used. Higher bands increase precision [S1, unofficial]. Not given in the sources.
+- **SH Order ($L$):** Determines the precision of the visibility encoding. Higher $L$ provides more precise directional occlusion but increases computational cost [S1, unofficial].
 
-**Edge Cases and Pitfalls:**
-*   **Precision:** Low SH orders may result in inaccurate directional occlusion, appearing as blurry or incorrect shadows [S1, unofficial].
-*   **Boundary Conditions:** Handling the boundaries of the volume or scene where visibility changes abruptly can be challenging with global basis functions like SH [G].
+**Pitfalls:**
+- **Occlusion Blur:** Without transmittance weighting, observations from cameras where the target point $v$ is occluded by nearer surfaces will contribute incorrect color data, blurring the SH estimation [S2].
+- **View Distribution Bias:** Non-uniformly distributed views (e.g., limited camera angles) lead to biased SH coefficient estimation due to the loss of orthogonality [S2].
 
 ## Subtopics
 
-### [Spherical Harmonics AO](6294-spherical-harmonics-ao.md)
-Spherical Harmonics AO approximates scene geometry with a collection of sphere blockers to model visibility in spherical harmonics (SH) space, enabling efficient computation of soft shadows and ambient occlusion. Unlike traditional rasterization which ignores global visibility or Monte Carlo ray tracing which is computationally expensive due to sampling, this method uses fast SH multiplications (via logarithmic summation) to combine visibility functions, making it suitable for real-time rendering and differentiable inverse problems.
+### Transmittance-weighted SH Estimation
+A weighting scheme that uses transmittance to exclude occluded observations when estimating SH coefficients [S2]. It prevents blurred results caused by surface points nearer to the camera than the target point contributing incorrect color data [S2]. It assumes a uniform probability density function $p_d(d) \equiv \frac{1}{4\pi}$ for direction sampling [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the SH order. Multiplication of SH vectors is generally $O(N^3)$ or $O(N^2)$ depending on the implementation, where $N$ is the number of coefficients. The use of "fast SH multiplications" suggests optimizations [S2].
-*   **Memory Complexity:** Proportional to the number of SH coefficients stored per point/vertex. Storing coefficients in textures, mesh vertices, or volumes [S1, unofficial].
-*   **Strengths:** Real-time performance, handles dynamic scenes, provides directional occlusion [S1, unofficial][S2].
-*   **Limitations:** Precision is limited by the SH order. High orders are computationally expensive. Approximations may introduce artifacts [S1, unofficial].
-*   **When to use:** Real-time rendering of dynamic scenes with soft shadows and ambient occlusion [S2].
-*   **When not to use:** When high-fidelity, exact shadow boundaries are required, or when the scene geometry is extremely complex and requires very high SH orders [S1, unofficial].
+- **Complexity:** Depends on the number of cameras $K$ and the SH order $L$. Each coefficient requires a sum over $K$ observations.
+- **Strengths:** Provides directional occlusion information efficiently, suitable for real-time rendering [S1, unofficial].
+- **Limitations:** Sensitive to non-uniform view distributions without residual correction [S2]. Requires accurate density/transmittance calculation [S2].
 
 ## Background
-The method is attributed to Ren et al. [S1, unofficial]. It is part of the broader field of real-time global illumination and ambient occlusion techniques. The specific paper by Ren et al. is cited as [49] in the source [S1, unofficial], but the full citation is not provided in the notes. The technique is used in the context of voxel-based global illumination and real-time rendering [S1, unofficial].
+The method was introduced by Ren et al. [S1, unofficial]. It is used in the context of real-time ray-traced voxel global illumination and dynamic directional occlusion [S1, unofficial].
 
 ## Sources
 [S1] Real-Time Ray Traced Voxel Global Illumination, https://doi.org/10.34626/0vdq-7m27, fetched 2026-10-26 (unofficial)
+[S2] Reducing Shape-Radiance Ambiguity in Radiance Fields with a Closed-Form Color Estimation Method, https://doi.org/10.52202/075280-2570, fetched 2026-10-26

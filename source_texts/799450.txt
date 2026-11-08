@@ -1,628 +1,345 @@
-SAC-NeRF: Adaptive Ray Sampling for Neural Radiance
-Fields via Soft Actor-Critic Reinforcement Learning
+# SAC-NeRF: Adaptive Ray Sampling for Neural Radiance Fields via Soft Actor-Critic Reinforcement Learning
+
 Chenyu Ge1
-arXiv:2603.15622v1 [cs.CV] 31 Dec 2025
-1
-University of Southern California, Los Angeles, CA 90089, USA, gechenyu@usc.edu
-Abstract
-Neural Radiance Fields (NeRF) have achieved photorealistic novel view synthesis but suffer from
-computational inefficiency due to dense ray sampling during volume rendering. We propose SAC-NeRF,
-a reinforcement learning framework that learns adaptive sampling policies using Soft Actor-Critic (SAC).
-Our method formulates sampling as a Markov Decision Process where an RL agent learns to allocate
-samples based on scene characteristics. We introduce three technical components: (1) a Gaussian mixture distribution color model providing uncertainty estimates, (2) a multi-component reward function
-balancing quality, efficiency, and consistency, and (3) a two-stage training strategy addressing environment non-stationarity. Experiments on Synthetic-NeRF and LLFF datasets show that SAC-NeRF reduces sampling points by 35-48% while maintaining rendering quality within 0.3-0.8 dB PSNR of dense
-sampling baselines. While the learned policy is scene-specific and the RL framework adds complexity
-compared to simpler heuristics, our work demonstrates that data-driven sampling strategies can discover
-effective patterns that would be difficult to hand-design.
+
+1University of Southern California, Los Angeles, CA 90089, USA, gechenyu@usc.edu
+
+#### Abstract
+
+Neural Radiance Fields (NeRF) have achieved photorealistic novel view synthesis but suffer from computational inefficiency due to dense ray sampling during volume rendering. We propose SAC-NeRF, a reinforcement learning framework that learns adaptive sampling policies using Soft Actor-Critic (SAC). Our method formulates sampling as a Markov Decision Process where an RL agent learns to allocate samples based on scene characteristics. We introduce three technical components: (1) a Gaussian mixture distribution color model providing uncertainty estimates, (2) a multi-component reward function balancing quality, efficiency, and consistency, and (3) a two-stage training strategy addressing environment non-stationarity. Experiments on Synthetic-NeRF and LLFF datasets show that SAC-NeRF reduces sampling points by 35-48% while maintaining rendering quality within 0.3-0.8 dB PSNR of dense sampling baselines. While the learned policy is scene-specific and the RL framework adds complexity compared to simpler heuristics, our work demonstrates that data-driven sampling strategies can discover effective patterns that would be difficult to hand-design.
+
 Keywords: Neural Radiance Fields, Reinforcement Learning, Soft Actor-Critic, Adaptive Sampling
-1
-Introduction
-Neural Radiance Fields (NeRF) [1] have revolutionized the field of novel view synthesis by representing
-three-dimensional scenes as continuous 5D functions that map spatial coordinates and viewing directions to
-volumetric density and view-dependent color. Through differentiable volumetric rendering and coordinatebased neural networks with positional encoding, NeRF achieves unprecedented photorealistic quality that
-surpasses traditional geometry-based and image-based rendering methods. This breakthrough has enabled
-numerous downstream applications including robotics navigation, autonomous driving scene understanding,
-virtual and augmented reality content creation, and digital preservation of cultural heritage.
-However, the computational efficiency of NeRF remains a critical challenge that severely limits its practical deployment. The volumetric rendering integral must be approximated through numerical quadrature,
-requiring the neural network to be evaluated at 192-384 sample points along each camera ray. For a single
-800×800 image with 200 samples per ray, the original NeRF MLP (8 layers × 256 hidden units) requires on
-the order of 1011 multiply-accumulate operations, taking several seconds even on modern GPUs. This computational bottleneck makes real-time rendering infeasible and prevents NeRF from being used in interactive
-applications or deployed on resource-constrained edge devices.
-The fundamental inefficiency stems from NeRF’s sampling strategy. The original NeRF employs a
-coarse-to-fine hierarchical sampling approach: first uniformly sampling along the ray, then refining sample
-positions based on coarse density predictions. While this two-stage strategy concentrates more samples in
-1
-high-density regions, it still relies on hand-crafted heuristics rather than learning scene-specific characteristics. Following [4], we define a sample’s contribution as its rendering weight wi = Ti αi . Analysis on
-Synthetic-NeRF shows that a majority of samples have wi < 0.01, contributing negligibly to the final rendered color—either falling in empty space with near-zero density or lying beyond occluding surfaces where
-accumulated transmittance has decayed. This observation suggests potential for learned adaptive sampling
-policies that concentrate computational resources where they provide the most value.
-Recent acceleration efforts have pursued various complementary directions. Explicit data structure
-approaches [11, 12] replace MLPs with multi-resolution hash grids or voxel grids, achieving substantial
-speedups through efficient spatial queries. 3D Gaussian splatting methods [8–10] abandon volumetric rendering entirely in favor of explicit point-based representations with fast rasterization. While these methods
-achieve impressive rendering speeds, they sacrifice NeRF’s elegant continuous representation and often require substantial memory. An orthogonal direction is optimizing the sampling process itself—reducing the
-number of network evaluations required per ray while maintaining rendering quality.
-We propose SAC-NeRF, a reinforcement learning framework that learns adaptive sampling policies
-for efficient neural radiance field rendering. Unlike prior heuristic approaches that rely on hand-designed
-rules [5,13,14], our method learns sampling strategies end-to-end through direct interaction with the rendering process. We formulate adaptive sampling as a Markov Decision Process (MDP) where an RL agent sequentially decides where to place samples along each ray based on observed scene properties and rendering
-objectives. We employ Soft Actor-Critic (SAC) [16], a state-of-the-art off-policy RL algorithm, incorporating recent algorithmic improvements [18] that enhance stability and sample efficiency in continuous action
-spaces.
-Our approach introduces several key technical innovations to make RL-based adaptive sampling practical and effective. First, we extend NeRF’s color prediction with a Gaussian mixture distribution model
-that naturally provides uncertainty estimates—regions with high predicted variance indicate where additional samples could reduce rendering uncertainty. Second, we design a multi-component reward function
-that carefully balances three objectives: maximizing rendering quality (PSNR), minimizing unnecessary
-samples, and maintaining spatial smoothness in sample placement. Third, we develop an enhanced state
-representation that combines local features from current samples with global geometric priors, enabling the
-policy to make informed decisions. Finally, we employ a two-stage training strategy that first pre-trains the
-NeRF model to stabilize the environment, then trains the RL policy with a fixed NeRF backbone, addressing
-the challenging non-stationarity that arises from jointly optimizing both components.
+
+## 1 Introduction
+
+Neural Radiance Fields (NeRF) [1] have revolutionized the field of novel view synthesis by representing three-dimensional scenes as continuous 5D functions that map spatial coordinates and viewing directions to volumetric density and view-dependent color. Through differentiable volumetric rendering and coordinatebased neural networks with positional encoding, NeRF achieves unprecedented photorealistic quality that surpasses traditional geometry-based and image-based rendering methods. This breakthrough has enabled numerous downstream applications including robotics navigation, autonomous driving scene understanding, virtual and augmented reality content creation, and digital preservation of cultural heritage.
+
+However, the computational efficiency of NeRF remains a critical challenge that severely limits its practical deployment. The volumetric rendering integral must be approximated through numerical quadrature, requiring the neural network to be evaluated at 192-384 sample points along each camera ray. For a single 800×800 image with 200 samples per ray, the original NeRF MLP (8 layers × 256 hidden units) requires on the order of 1011 multiply-accumulate operations, taking several seconds even on modern GPUs. This computational bottleneck makes real-time rendering infeasible and prevents NeRF from being used in interactive applications or deployed on resource-constrained edge devices.
+
+The fundamental inefficiency stems from NeRF's sampling strategy. The original NeRF employs a coarse-to-fine hierarchical sampling approach: first uniformly sampling along the ray, then refining sample positions based on coarse density predictions. While this two-stage strategy concentrates more samples in high-density regions, it still relies on hand-crafted heuristics rather than learning scene-specific characteristics. Following [4], we define a sample's contribution as its rendering weight wi = Tiαi . Analysis on Synthetic-NeRF shows that a majority of samples have wi < 0.01, contributing negligibly to the final rendered color—either falling in empty space with near-zero density or lying beyond occluding surfaces where accumulated transmittance has decayed. This observation suggests potential for learned adaptive sampling policies that concentrate computational resources where they provide the most value.
+
+Recent acceleration efforts have pursued various complementary directions. Explicit data structure approaches [11, 12] replace MLPs with multi-resolution hash grids or voxel grids, achieving substantial speedups through efficient spatial queries. 3D Gaussian splatting methods [8–10] abandon volumetric rendering entirely in favor of explicit point-based representations with fast rasterization. While these methods achieve impressive rendering speeds, they sacrifice NeRF's elegant continuous representation and often require substantial memory. An orthogonal direction is optimizing the sampling process itself—reducing the number of network evaluations required per ray while maintaining rendering quality.
+
+We propose SAC-NeRF, a reinforcement learning framework that learns adaptive sampling policies for efficient neural radiance field rendering. Unlike prior heuristic approaches that rely on hand-designed rules [5,13,14], our method learns sampling strategies end-to-end through direct interaction with the rendering process. We formulate adaptive sampling as a Markov Decision Process (MDP) where an RL agent sequentially decides where to place samples along each ray based on observed scene properties and rendering objectives. We employ Soft Actor-Critic (SAC) [16], a state-of-the-art off-policy RL algorithm, incorporating recent algorithmic improvements [18] that enhance stability and sample efficiency in continuous action spaces.
+
+Our approach introduces several key technical innovations to make RL-based adaptive sampling practical and effective. First, we extend NeRF's color prediction with a Gaussian mixture distribution model that naturally provides uncertainty estimates—regions with high predicted variance indicate where additional samples could reduce rendering uncertainty. Second, we design a multi-component reward function that carefully balances three objectives: maximizing rendering quality (PSNR), minimizing unnecessary samples, and maintaining spatial smoothness in sample placement. Third, we develop an enhanced state representation that combines local features from current samples with global geometric priors, enabling the policy to make informed decisions. Finally, we employ a two-stage training strategy that first pre-trains the NeRF model to stabilize the environment, then trains the RL policy with a fixed NeRF backbone, addressing the challenging non-stationarity that arises from jointly optimizing both components.
+
 Our key contributions are:
-• SAC-NeRF Framework: An RL-based adaptive sampling system for neural radiance fields, demonstrating learning capability and potential efficiency gains over heuristic baselines.
-• Mixture Distribution Color Model: A principled extension of NeRF that outputs Gaussian mixture distributions, providing uncertainty quantification to guide intelligent sampling decisions (Section 3.3).
-• Multi-Component Reward Design: A carefully designed reward function that balances rendering
-quality, sampling efficiency, and spatial consistency, enabling stable policy learning (Section 3.5).
-• Two-Stage Training Strategy: A training methodology that addresses environment non-stationarity
-by decoupling NeRF pre-training and policy optimization (Section 3.6).
-• Comprehensive Evaluation: Experiments on Synthetic-NeRF and LLFF datasets with ablation studies validating component contributions (Section 4).
-2
-Our work demonstrates that reinforcement learning provides a viable approach to adaptive sampling in
-neural rendering, opening research directions for applying learned optimization strategies to other computationally intensive components of neural scene representations.
-2
-Related Work
-2.1
-Neural Radiance Fields and Acceleration
-The original NeRF [1] represents scenes using multi-layer perceptrons (MLPs) with sinusoidal positional
-encoding to map 5D coordinates (3D position plus 2D viewing direction) to volume density and viewdependent color. This coordinate-based representation enables continuous scene modeling and achieves
-photorealistic novel view synthesis through differentiable volumetric rendering. However, rendering a single
-image requires millions of network evaluations, taking several seconds even on modern GPUs.
-Recent research has pursued multiple complementary acceleration strategies. Explicit data structures
-replace or augment MLPs with spatially-organized features for efficient queries. Instant-NGP and its variants [11] achieve real-time rendering through multi-level hash feature grids combined with lightweight
-MLPs. NGP-RT [11] further optimizes this with fused hash features and attention mechanisms, achieving
-108 fps. Compression studies [12] explore the limits of quantizing and pruning these hash-based representations while preserving quality. FrugalNeRF [7] enables fast convergence with few-shot inputs by leveraging
-geometric priors and regularization.
-Explicit point-based representations abandon implicit volumetric rendering entirely. 3D Gaussian
-Splatting methods represent scenes as collections of oriented 3D Gaussian primitives that can be efficiently
-rasterized. DashGaussian [8] achieves full scene optimization in approximately 200 seconds through carefully designed initialization and optimization strategies. FlashGS [9] scales Gaussian splatting to large-scale
-high-resolution rendering with hierarchical culling and level-of-detail management. 3D-HGS [10] introduces half-Gaussian kernels to better model geometric discontinuities and sharp edges. While these explicit
-methods achieve impressive speeds, they require substantial memory for millions of primitives and sacrifice
-the compact continuous representation that makes NeRF appealing.
-Our work takes an orthogonal approach by optimizing the sampling process itself—maintaining NeRF’s
-continuous representation while reducing network evaluations through learned adaptive policies.
-2.2
-Sampling Optimization for Neural Rendering
-Sampling strategies directly determine NeRF’s computational cost, making sampling optimization a critical
-research direction. The original hierarchical sampling in NeRF uses a coarse network to predict importance
-weights, then concentrates fine samples in high-density regions. While effective, this still requires evaluating
-two separate networks at numerous points.
-DONeRF [4] proposes a depth oracle network that predicts ray sample locations with a single network evaluation, achieving up to 48× inference cost reduction. AdaNeRF [5] introduces a dual-network
-architecture that learns to reduce sample counts through joint training of sampling and shading networks.
-NerfAcc [6] provides a unified framework investigating multiple sampling approaches under the concept of
-transmittance estimators, achieving 1.5-20× training speedups.
-More recent work has proposed additional sampling heuristics. The probability-guided sampler [13]
-models density probability distributions in 3D projection space, enabling more targeted ray sampling by
-avoiding empty regions. MBS-NeRF [14] addresses motion blur in neural rendering through depth-constrained
-adaptive sampling. MFNeRF [15] introduces memory-efficient mixed-feature hash tables to reduce storage
-while maintaining quality.
-3
-All these methods rely on hand-crafted heuristics based on geometric or statistical assumptions. In contrast, our approach learns sampling policies end-to-end through reinforcement learning, allowing the system
-to discover strategies adapted to specific scene characteristics and rendering objectives without manual design.
-2.3
-Reinforcement Learning for Continuous Control
-Soft Actor-Critic (SAC) [16] is a state-of-the-art off-policy RL algorithm for continuous control that maximizes both expected return and policy entropy. The entropy regularization encourages exploration and
-improves robustness. Recent advances have addressed various limitations of the original SAC algorithm.
-Corrected SAC [18] identifies and fixes action distribution distortion issues in the original formulation,
-improving sample efficiency and final performance. Bayesian SAC [19] incorporates directed acyclic strategy graphs for better credit assignment in complex tasks. Bidirectional SAC [20] leverages both forward and
-reverse KL divergence for more stable policy updates. The Broad Critic framework [17] combines broad
-learning systems with deep networks to improve value function approximation.
-We adapt these algorithmic advances to the neural rendering domain, particularly leveraging Corrected
-SAC’s improvements for stable policy learning. However, adaptive sampling for NeRF presents unique
-challenges: the environment (NeRF network) is non-stationary during joint training, rewards are computed
-from high-dimensional rendering outputs, and the state space must encode both local sample information
-and global geometric context.
-2.4
-From Discrete Feature Selection to Continuous Budget Allocation
-A recurring theme in machine learning is budget-aware selection: identifying which parts of the input
-deserve computation and which can be ignored with minimal loss. Feature selection provides a classic
-instantiation of this idea, typically combining ranking criteria (e.g., Fisher score) with iterative elimination
-schemes (e.g., recursive feature elimination) to remove redundant dimensions in high-dimensional models
-while preserving predictive performance [21, 22].
-We draw a direct analogy to NeRF rendering: ray samples can be viewed as “features” used to estimate
-the rendered color. However, unlike standard feature selection over discrete variables, sampling decisions
-in NeRF take place over a continuous one-dimensional domain (ray depth). Reinforcement learning provides a natural mechanism for continuous, sequential budget allocation—deciding where additional network
-evaluations are most valuable and where they are wasteful—without relying on hand-designed heuristics.
-3
-Method
-3.1
-Preliminaries: Neural Radiance Fields
-NeRF represents a 3D scene as a continuous volumetric function FΘ : (x, d) → (c, σ) implemented by a
-multi-layer perceptron (MLP) with parameters Θ. This function maps a 3D spatial position x ∈ R3 and
-2D viewing direction d ∈ S2 to an RGB color c ∈ R3 and volume density σ ∈ R+ . The density σ(x)
-represents the differential probability of a ray terminating at an infinitesimal particle at position x, while the
-color c(x, d) captures view-dependent appearance effects like specularities.
-To render the color observed along a camera ray r(t) = o + td (where o is the camera origin and t is the
-distance parameter), NeRF uses classical volume rendering. The expected color is computed by integrating
-the color and density along the ray:
-Z tf
-C(r) =
-T (t)σ(r(t))c(r(t), d) dt,
-(1)
-tn
-4
-where tn and tf are the near and far bounds of the scene, and T (t) is the accumulated transmittance representing the probability that the ray travels from tn to t without hitting any particles:
-
- Z t
-σ(r(s)) ds .
-(2)
-T (t) = exp −
-tn
-In practice, this continuous integral must be approximated numerically. Standard NeRF uses stratified
-sampling to select N discrete points {ti }N
-i=1 along the ray, then applies quadrature:
-Ĉ(r) =
-N
-X
-i=1
-Ti αi ci ,
-Ti =
-i−1
-Y
-(1 − αj ),
-αi = 1 − exp(−σi δi ),
-(3)
-j=1
-where δi = ti+1 − ti is the distance between adjacent samples, αi is the probability of the ray terminating
-at sample i, and ci = c(r(ti ), d) and σi = σ(r(ti )) are the queried color and density.
-The rendering weight wi = Ti αi represents the contribution of sample i to the final color. Highquality rendering requires many samples (N = 192 for coarse network, N = 192 for fine network in
-original NeRF), but analysis shows most samples have negligible weights (wi ≈ 0), motivating our adaptive
-sampling approach.
-3.2
-MDP Formulation for Adaptive Sampling
-We formulate the adaptive sampling problem as a Markov Decision Process (MDP) (S, A, P, R, γ) where
-an RL agent iteratively refines sample positions along each ray to maximize rendering quality while minimizing computation.
-State Space S: The state st at iteration t must encode all information relevant to deciding where to place
-samples. We design a rich state representation comprising:
-• Per-sample features: For each of the N current sample positions ti , we include: (1) the normalized
-position ti /(tf − tn ) along the ray, (2) the predicted RGB color ci ∈ R3 , (3) the volume density
-σi ∈ R+ , (4) the accumulated transmittance Ti indicating how much light reaches this sample, and
-(5) the rendering weight wi = Ti αi showing this sample’s contribution to the final color.
-• Ray geometry: Global features including the ray origin o, direction d, near/far bounds [tn , tf ], and
-the pixel coordinates (u, v) in the image.
-• Uncertainty estimates: The predicted variance from our mixture distribution model (Section 3.3),
-indicating regions where additional samples could reduce uncertainty.
-• Historical context: To enable temporal reasoning, we maintain an aggregated representation of sample
-placements from previous iterations using a lightweight attention mechanism that pools features from
-earlier states.
-The full state has dimension |S| = N × 9 + 11 + K × 3, where K = 3 is the number of mixture components.
-Action Space A: We use continuous actions a ∈ [−1, 1]N where each component ai specifies a relative
-adjustment to sample position ti . Actions are mapped to valid positions via:
-tnew
-= clip(ti + ai · ∆max , tn , tf ),
-i
-(4)
-where ∆max = 0.1 · (tf − tn ) limits the maximum adjustment per step. To maintain valid sample ordering,
-new
-we apply post-hoc sorting: {tnew
-i } ← sort({ti }), and enforce a minimum spacing δmin = 0.001 · (tf − tn )
-5
-between adjacent samples. The sorting operation is not differentiable, but since SAC uses stochastic policies
-with entropy regularization, the gradient through clip boundaries has minimal impact on training stability.
-Transition Dynamics P: Given the NeRF parameters Θ (fixed during policy training in Stage 2), the
-new
-transition is deterministic: new sample positions deterministically yield new network outputs (cnew
-i , σi )
-through forward passes. However, from the policy’s perspective during Stage 1 joint training, the environment appears non-stationary as Θ evolves, motivating our two-stage approach.
-Reward Function R: Designed to balance quality and efficiency (detailed in Section 3.5).
-Discount Factor γ: Set to 0.99 to balance immediate rendering improvements against long-term sample
-efficiency. This choice reflects our preference for policies that make steady progress rather than optimizing
-only for immediate gains.
-3.3
-Mixture Distribution Color Model
-Standard NeRF outputs deterministic point estimates for colors, providing no quantification of prediction
-uncertainty. However, uncertainty information is crucial for guiding adaptive sampling: regions with high
-uncertainty benefit most from additional samples. To address this, we extend NeRF to output probabilistic
-color predictions via a Gaussian Mixture Model (GMM).
-Specifically, instead of outputting a single RGB color c ∈ R3 , our modified NeRF network predicts a
-distribution over colors:
-p(c|x, d) =
-K
-X
-πk (x, d)N (c; µk (x, d), diag(σ 2k (x, d))),
-(5)
-k=1
-P
-where K is the number of mixture components, πk are mixture weights (satisfying k πk = 1, πk ≥ 0),
-µk ∈ R3 are mean colors, and σ 2k ∈ R3 are per-channel variances.
-Implementing this requires the network to output K × 7 additional parameters per sample: 3 for µk , 3
-for σ 2k , and 1 for the (pre-softmax) weight. We use softplus activation for variances to ensure positivity and
-softmax for mixture weights to ensure valid probabilities. The network architecture adds a small auxiliary
-head (K×7 output neurons) alongside the standard color and density outputs, adding minimal computational
-overhead.
+
+- SAC-NeRF Framework: An RL-based adaptive sampling system for neural radiance fields, demonstrating learning capability and potential efficiency gains over heuristic baselines.
+- Mixture Distribution Color Model: A principled extension of NeRF that outputs Gaussian mixture distributions, providing uncertainty quantification to guide intelligent sampling decisions (Section 3.3\).
+- Multi-Component Reward Design: A carefully designed reward function that balances rendering quality, sampling efficiency, and spatial consistency, enabling stable policy learning (Section 3.5\).
+- Two-Stage Training Strategy: A training methodology that addresses environment non-stationarity by decoupling NeRF pre-training and policy optimization (Section 3.6\).
+- Comprehensive Evaluation: Experiments on Synthetic-NeRF and LLFF datasets with ablation studies validating component contributions (Section 4\).
+
+Our work demonstrates that reinforcement learning provides a viable approach to adaptive sampling in neural rendering, opening research directions for applying learned optimization strategies to other computationally intensive components of neural scene representations.
+
+## 2 Related Work
+
+### 2.1 Neural Radiance Fields and Acceleration
+
+The original NeRF [1] represents scenes using multi-layer perceptrons (MLPs) with sinusoidal positional encoding to map 5D coordinates (3D position plus 2D viewing direction) to volume density and viewdependent color. This coordinate-based representation enables continuous scene modeling and achieves photorealistic novel view synthesis through differentiable volumetric rendering. However, rendering a single image requires millions of network evaluations, taking several seconds even on modern GPUs.
+
+Recent research has pursued multiple complementary acceleration strategies. Explicit data structures replace or augment MLPs with spatially-organized features for efficient queries. Instant-NGP and its variants [11] achieve real-time rendering through multi-level hash feature grids combined with lightweight MLPs. NGP-RT [11] further optimizes this with fused hash features and attention mechanisms, achieving 108 fps. Compression studies [12] explore the limits of quantizing and pruning these hash-based representations while preserving quality. FrugalNeRF [7] enables fast convergence with few-shot inputs by leveraging geometric priors and regularization.
+
+Explicit point-based representations abandon implicit volumetric rendering entirely. 3D Gaussian Splatting methods represent scenes as collections of oriented 3D Gaussian primitives that can be efficiently rasterized. DashGaussian [8] achieves full scene optimization in approximately 200 seconds through carefully designed initialization and optimization strategies. FlashGS [9] scales Gaussian splatting to large-scale high-resolution rendering with hierarchical culling and level-of-detail management. 3D-HGS [10] introduces half-Gaussian kernels to better model geometric discontinuities and sharp edges. While these explicit methods achieve impressive speeds, they require substantial memory for millions of primitives and sacrifice the compact continuous representation that makes NeRF appealing.
+
+Our work takes an orthogonal approach by optimizing the sampling process itself—maintaining NeRF's continuous representation while reducing network evaluations through learned adaptive policies.
+
+### 2.2 Sampling Optimization for Neural Rendering
+
+Sampling strategies directly determine NeRF's computational cost, making sampling optimization a critical research direction. The original hierarchical sampling in NeRF uses a coarse network to predict importance weights, then concentrates fine samples in high-density regions. While effective, this still requires evaluating two separate networks at numerous points.
+
+DONeRF [4] proposes a depth oracle network that predicts ray sample locations with a single network evaluation, achieving up to 48× inference cost reduction. AdaNeRF [5] introduces a dual-network architecture that learns to reduce sample counts through joint training of sampling and shading networks. NerfAcc [6] provides a unified framework investigating multiple sampling approaches under the concept of transmittance estimators, achieving 1.5-20× training speedups.
+
+More recent work has proposed additional sampling heuristics. The probability-guided sampler [13] models density probability distributions in 3D projection space, enabling more targeted ray sampling by avoiding empty regions. MBS-NeRF [14] addresses motion blur in neural rendering through depth-constrained adaptive sampling. MFNeRF [15] introduces memory-efficient mixed-feature hash tables to reduce storage while maintaining quality.
+
+All these methods rely on hand-crafted heuristics based on geometric or statistical assumptions. In contrast, our approach learns sampling policies end-to-end through reinforcement learning, allowing the system to discover strategies adapted to specific scene characteristics and rendering objectives without manual design.
+
+#### 2.3 Reinforcement Learning for Continuous Control
+
+Soft Actor-Critic (SAC) [16] is a state-of-the-art off-policy RL algorithm for continuous control that maximizes both expected return and policy entropy. The entropy regularization encourages exploration and improves robustness. Recent advances have addressed various limitations of the original SAC algorithm.
+
+Corrected SAC [18] identifies and fixes action distribution distortion issues in the original formulation, improving sample efficiency and final performance. Bayesian SAC [19] incorporates directed acyclic strategy graphs for better credit assignment in complex tasks. Bidirectional SAC [20] leverages both forward and reverse KL divergence for more stable policy updates. The Broad Critic framework [17] combines broad learning systems with deep networks to improve value function approximation.
+
+We adapt these algorithmic advances to the neural rendering domain, particularly leveraging Corrected SAC's improvements for stable policy learning. However, adaptive sampling for NeRF presents unique challenges: the environment (NeRF network) is non-stationary during joint training, rewards are computed from high-dimensional rendering outputs, and the state space must encode both local sample information and global geometric context.
+
+#### 2.4 From Discrete Feature Selection to Continuous Budget Allocation
+
+A recurring theme in machine learning is budget-aware selection: identifying which parts of the input deserve computation and which can be ignored with minimal loss. Feature selection provides a classic instantiation of this idea, typically combining ranking criteria (e.g., Fisher score) with iterative elimination schemes (e.g., recursive feature elimination) to remove redundant dimensions in high-dimensional models while preserving predictive performance [21, 22].
+
+We draw a direct analogy to NeRF rendering: ray samples can be viewed as "features" used to estimate the rendered color. However, unlike standard feature selection over discrete variables, sampling decisions in NeRF take place over a continuous one-dimensional domain (ray depth). Reinforcement learning provides a natural mechanism for continuous, sequential budget allocation—deciding where additional network evaluations are most valuable and where they are wasteful—without relying on hand-designed heuristics.
+
+## 3 Method
+
+#### 3.1 Preliminaries: Neural Radiance Fields
+
+NeRF represents a 3D scene as a continuous volumetric function FΘ : (x, d) → (c, σ) implemented by a multi-layer perceptron (MLP) with parameters Θ. This function maps a 3D spatial position x ∈ R 3 and 2D viewing direction d ∈ S 2 to an RGB color c ∈ R 3 and volume density σ ∈ R +. The density σ(x) represents the differential probability of a ray terminating at an infinitesimal particle at position x, while the color c(x, d) captures view-dependent appearance effects like specularities.
+
+To render the color observed along a camera ray r(t) = o+td (where o is the camera origin and t is the distance parameter), NeRF uses classical volume rendering. The expected color is computed by integrating the color and density along the ray:
+
+$$C(\mathbf{r}) = \int_{t_n}^{t_f} T(t) \sigma(\mathbf{r}(t)) \mathbf{c}(\mathbf{r}(t), \mathbf{d}) \, dt, \quad (1)$$
+
+where tn and tf are the near and far bounds of the scene, and T(t) is the accumulated transmittance representing the probability that the ray travels from tn to t without hitting any particles:
+
+$$T(t) = \exp \left( - \int_{t_n}^t \sigma(\mathbf{r}(s)) ds \right). \quad (2)$$
+
+In practice, this continuous integral must be approximated numerically. Standard NeRF uses stratified sampling to select N discrete points {ti} N i=1 along the ray, then applies quadrature:
+
+| $\hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i \alpha_i \mathbf{c}_i, \quad T_i = \prod_{j=1}^{i-1} (1 - \alpha_j), \quad \alpha_i = 1 - \exp(-\sigma_i \delta_i), \quad (3)$ |
+|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+
+where δi = ti+1 − ti is the distance between adjacent samples, αi is the probability of the ray terminating at sample i, and ci = c(r(ti), d) and σi = σ(r(ti)) are the queried color and density.
+
+The rendering weight wi = Tiαi represents the contribution of sample i to the final color. Highquality rendering requires many samples (N = 192 for coarse network, N = 192 for fine network in original NeRF), but analysis shows most samples have negligible weights (wi ≈ 0), motivating our adaptive sampling approach.
+
+#### 3.2 MDP Formulation for Adaptive Sampling
+
+We formulate the adaptive sampling problem as a Markov Decision Process (MDP) (S, A,P, R, γ) where an RL agent iteratively refines sample positions along each ray to maximize rendering quality while minimizing computation.
+
+State Space S: The state st at iteration t must encode all information relevant to deciding where to place samples. We design a rich state representation comprising:
+
+- Per-sample features: For each of the N current sample positions ti , we include: (1) the normalized position ti/(tf − tn) along the ray, (2) the predicted RGB color ci ∈ R 3 , (3) the volume density σi ∈ R +, (4) the accumulated transmittance Ti indicating how much light reaches this sample, and
+  - (5) the rendering weight wi = Tiαi showing this sample's contribution to the final color.
+- Ray geometry: Global features including the ray origin o, direction d, near/far bounds [tn, tf ], and the pixel coordinates (u, v) in the image.
+- Uncertainty estimates: The predicted variance from our mixture distribution model (Section 3.3\), indicating regions where additional samples could reduce uncertainty.
+- Historical context: To enable temporal reasoning, we maintain an aggregated representation of sample placements from previous iterations using a lightweight attention mechanism that pools features from earlier states.
+
+The full state has dimension |S| = N ×9+ 11+K ×3, where K = 3 is the number of mixture components.
+
+Action Space A: We use continuous actions a ∈ [−1, 1]N where each component ai specifies a relative adjustment to sample position ti . Actions are mapped to valid positions via:
+
+$$t_i^{\text{new}} = \text{clip}(t_i + a_i \cdot \Delta_{\max}, t_n, t_f), \quad (4)$$
+
+where ∆max = 0.1 · (tf − tn) limits the maximum adjustment per step. To maintain valid sample ordering, we apply post-hoc sorting: {t new i } ← sort({t new i }), and enforce a minimum spacing δmin = 0.001 ·(tf −tn) between adjacent samples. The sorting operation is not differentiable, but since SAC uses stochastic policies with entropy regularization, the gradient through clip boundaries has minimal impact on training stability.
+
+Transition Dynamics P: Given the NeRF parameters Θ (fixed during policy training in Stage 2), the transition is deterministic: new sample positions deterministically yield new network outputs (c new i , σnew i ) through forward passes. However, from the policy's perspective during Stage 1 joint training, the environment appears non-stationary as Θ evolves, motivating our two-stage approach.
+
+Reward Function R: Designed to balance quality and efficiency (detailed in Section 3.5\).
+
+Discount Factor γ: Set to 0.99 to balance immediate rendering improvements against long-term sample efficiency. This choice reflects our preference for policies that make steady progress rather than optimizing only for immediate gains.
+
+### 3.3 Mixture Distribution Color Model
+
+Standard NeRF outputs deterministic point estimates for colors, providing no quantification of prediction uncertainty. However, uncertainty information is crucial for guiding adaptive sampling: regions with high uncertainty benefit most from additional samples. To address this, we extend NeRF to output probabilistic color predictions via a Gaussian Mixture Model (GMM).
+
+Specifically, instead of outputting a single RGB color c ∈ R 3 , our modified NeRF network predicts a distribution over colors:
+
+| $p(\mathbf{c} \mathbf{x}, \mathbf{d}) = \sum_{k=1}^K \pi_k(\mathbf{x}, \mathbf{d}) \mathcal{N}(\mathbf{c}; \boldsymbol{\mu}_k(\mathbf{x}, \mathbf{d}), \text{diag}(\boldsymbol{\sigma}_k^2(\mathbf{x}, \mathbf{d}))), \quad (5)$ |
+|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+
+where K is the number of mixture components, πk are mixture weights (satisfying P k πk = 1, πk ≥ 0), µk ∈ R 3 are mean colors, and σ 2 k ∈ R 3 are per-channel variances.
+
+Implementing this requires the network to output K × 7 additional parameters per sample: 3 for µk , 3 for σ 2 k , and 1 for the (pre-softmax) weight. We use softplus activation for variances to ensure positivity and softmax for mixture weights to ensure valid probabilities. The network architecture adds a small auxiliary head (K×7 output neurons) alongside the standard color and density outputs, adding minimal computational overhead.
+
 The expected color and total uncertainty are:
-E[c] =
-K
-X
-π k µk ,
-k=1
-Var[c] =
-K
-X
-πk σ 2k +
-k=1
-|
-K
-X
-πk (µk − E[c])2 .
-(6)
-k=1
-{z
-aleatoric
-}
-|
-{z
-epistemic
-}
-The variance decomposes into aleatoric uncertainty (inherent randomness within each component) and epistemic uncertainty (disagreement between components). High uncertainty regions—such as texture edges,
-specular highlights, or uncertain geometry—indicate where additional samples could most improve rendering accuracy.
-During rendering, we use the expected color E[c] for the final image, while the variance Var[c] enters the
-RL state to guide sampling. We found K = 3 components provides a good balance between expressiveness
-and computational cost. Training uses a negative log-likelihood loss that encourages the mixture to fit the
-observed colors while regularizing against overly confident predictions.
-3.4
-SAC-based Policy Learning
-We employ Soft Actor-Critic (SAC) [16], a state-of-the-art off-policy RL algorithm designed for continuous
-control, to learn our adaptive sampling policy. SAC is particularly well-suited for our problem due to its
-sample efficiency, stability, and principled exploration through entropy regularization.
-6
-The SAC objective maximizes not only expected cumulative reward but also policy entropy, encouraging
-exploration and preventing premature convergence to suboptimal deterministic policies:
-J(π) =
-T
-X
-E(st ,at )∼ρπ [r(st , at ) + αH(π(·|st ))] ,
-(7)
-t=0
-where ρπ is the state-action distribution induced by policy π, H(π(·|st )) = −Ea∼π [log π(a|st )] is the policy
-entropy, and α > 0 is the temperature parameter controlling the exploration-exploitation tradeoff.
+
+$$\mathbb{E}[\mathbf{c}] = \sum_{k=1}^K \pi_k \boldsymbol{\mu}_k, \quad \text{Var}[\mathbf{c}] = \underbrace{\sum_{k=1}^K \pi_k \boldsymbol{\sigma}_k^2}_{\text{aleatoric}} + \underbrace{\sum_{k=1}^K \pi_k (\boldsymbol{\mu}_k - \mathbb{E}[\mathbf{c}])^2}_{\text{epistemic}}. \quad (6)$$
+
+The variance decomposes into aleatoric uncertainty (inherent randomness within each component) and epistemic uncertainty (disagreement between components). High uncertainty regions—such as texture edges, specular highlights, or uncertain geometry—indicate where additional samples could most improve rendering accuracy.
+
+During rendering, we use the expected color E[c] for the final image, while the variance Var[c] enters the RL state to guide sampling. We found K = 3 components provides a good balance between expressiveness and computational cost. Training uses a negative log-likelihood loss that encourages the mixture to fit the observed colors while regularizing against overly confident predictions.
+
+#### 3.4 SAC-based Policy Learning
+
+We employ Soft Actor-Critic (SAC) [16], a state-of-the-art off-policy RL algorithm designed for continuous control, to learn our adaptive sampling policy. SAC is particularly well-suited for our problem due to its sample efficiency, stability, and principled exploration through entropy regularization.
+
+The SAC objective maximizes not only expected cumulative reward but also policy entropy, encouraging exploration and preventing premature convergence to suboptimal deterministic policies:
+
+$$J(\pi) = \sum_{t=0}^T \mathbb{E}_{(s_t, a_t) \sim \rho_\pi} [r(s_t, a_t) + \alpha \mathcal{H}(\pi(\cdot | s_t))], \quad (7)$$
+
+where ρπ is the state-action distribution induced by policy π, H(π(·|st)) = −Ea∼π[log π(a|st)] is the policy entropy, and α > 0 is the temperature parameter controlling the exploration-exploitation tradeoff.
+
 The policy πϕ with parameters ϕ outputs Gaussian distribution parameters:
-a ∼ πϕ (·|s) = N (µϕ (s), diag(σϕ2 (s))),
-(8)
-where the mean µϕ (s) and standard deviation σϕ (s) are computed by a neural network. Actions are sampled
-using the reparameterization trick: a = µϕ (s) + σϕ (s) ⊙ ϵ with ϵ ∼ N (0, I), enabling backpropagation
-through sampling.
+
+$$a \sim \pi_{\phi}(\cdot|s) = \mathcal{N}(\mu_{\phi}(s), \text{diag}(\sigma_{\phi}^2(s))), \quad (8)$$
+
+where the mean µϕ(s) and standard deviation σϕ(s) are computed by a neural network. Actions are sampled using the reparameterization trick: a = µϕ(s) + σϕ(s) ⊙ ϵ with ϵ ∼ N (0, I), enabling backpropagation through sampling.
+
 To improve stability, SAC maintains twin Q-networks Qθ1 and Qθ2 and uses the minimum for bootstrapping (reducing overestimation bias):
-
-
-′ ′
-′ ′
-y = r + γ min Qθi′ (s , a ) − α log πϕ (a |s ) ,
-(9)
-i=1,2
-where a′ ∼ πϕ (·|s′ ) is sampled from the current policy and θi′ are target network parameters updated via
-exponential moving average: θi′ ← τ θi + (1 − τ )θi′ with τ = 0.005.
+
+$$y = r + \gamma \left( \min_{i=1,2} Q_{\theta'_i}(s', a') - \alpha \log \pi_{\phi}(a' | s') \right), \quad (9)$$
+
+where a ′ ∼ πϕ(·|s ′ ) is sampled from the current policy and θ ′ i are target network parameters updated via exponential moving average: θ ′ i ← τθi + (1 − τ )θ ′ i with τ = 0.005.
+
 The Q-networks are trained to minimize the Bellman error:
-
-
-(10)
-LQ (θi ) = E(s,a,r,s′ )∼D (Qθi (s, a) − y)2 ,
+
+$$\mathcal{L}_Q(\theta_i) = \mathbb{E}_{(s,a,r,s') \sim \mathcal{D}} \left[ (Q_{\theta_i}(s,a) - y)^2 \right], \quad (10)$$
+
 where D is the experience replay buffer storing transitions from interaction with the environment.
+
 The policy is updated to maximize the expected Q-value while maintaining high entropy:
-
-
-Lπ (ϕ) = Es∼D,a∼πϕ α log πϕ (a|s) − min Qθi (s, a) .
-i=1,2
-(11)
-We use automatic temperature adjustment [16] to maintain target entropy, adapting α during training to
-balance exploration and exploitation.
-Network Architecture: The policy network πϕ is a 3-layer MLP with hidden dimensions [256, 256],
-ReLU activations, and layer normalization. The output layer splits into two heads: one for means µϕ (s)
-(tanh activation) and one for log standard deviations (unbounded). The twin Q-networks Qθ1 , Qθ2 have
-identical architecture, taking the concatenation [s; a] as input and outputting scalar Q-values. All networks
-use Xavier initialization and are trained with Adam optimizer (learning rate 3 × 10−4 ).
-3.5
-Multi-Component Reward Design
-Designing an effective reward function is crucial for RL-based adaptive sampling. The reward must balance multiple competing objectives: maximizing rendering quality, minimizing unnecessary computation,
-and maintaining reasonable sample distributions. We propose a multi-component reward combining three
-carefully designed terms:
-R = λq Rquality + λe Refficiency + λc Rconsistency .
-(12)
-Quality Reward Rquality : The primary objective is rendering fidelity. We reward improvements in Peak
-Signal-to-Noise Ratio (PSNR) relative to the ground truth:
-Rquality = PSNRcurr − PSNRprev ,
-7
-(13)
-where PSNRcurr is computed from the current sample positions and PSNRprev from the previous iteration.
-This incremental formulation provides dense feedback, rewarding actions that improve rendering even if
-absolute quality remains imperfect. During evaluation, we compute PSNR against held-out test views.
-Efficiency Reward Refficiency : To encourage computational efficiency, we penalize samples that contribute negligibly to the final rendering:
-Refficiency = −λeff
-N
-X
-I[wi < τw ],
-(14)
-i=1
-where wi = Ti αi is the rendering weight of sample i (its contribution to the final pixel color), and τw = 0.01
-is a threshold below which samples are considered wasteful. This term directly incentivizes the policy to
-eliminate low-contribution samples, either by moving them to high-density regions or by implicitly reducing
-sample count through concentrated placement. We set λeff = 0.1 to balance quality and efficiency.
-Consistency Reward Rconsistency : Without regularization, the policy might place samples erratically,
-creating large gaps that miss important geometric features. We encourage spatially smooth sample distributions via:
-N
-−1
-X
-Rconsistency = −
-(δi+1 − δi )2 ,
-(15)
-i=1
-where δi = ti+1 − ti is the inter-sample distance. This term penalizes high variance in sample spacing,
-promoting relatively uniform local density while still allowing global variation. The coefficient λc = 0.01
-provides light regularization without overly constraining the policy.
-The final weighting λq = 1.0, λe = 0.1, λc = 0.01 was determined through grid search on a validation
-scene, prioritizing quality while incorporating efficiency and smoothness objectives. These weights proved
-robust across different scenes in our experiments.
-3.6
-Two-Stage Training
+
+$$\mathcal{L}_\pi(\phi) = \mathbb{E}_{s \sim \mathcal{D}, a \sim \pi_\phi} \left[ \alpha \log \pi_\phi(a|s) - \min_{i=1,2} Q_{\theta_i}(s, a) \right]. \quad (11)$$
+
+We use automatic temperature adjustment [16] to maintain target entropy, adapting α during training to balance exploration and exploitation.
+
+Network Architecture: The policy network πϕ is a 3-layer MLP with hidden dimensions [256, 256], ReLU activations, and layer normalization. The output layer splits into two heads: one for means µϕ(s) (tanh activation) and one for log standard deviations (unbounded). The twin Q-networks Qθ1 , Qθ2 have identical architecture, taking the concatenation [s; a] as input and outputting scalar Q-values. All networks use Xavier initialization and are trained with Adam optimizer (learning rate 3 × 10−4 ).
+
+#### 3.5 Multi-Component Reward Design
+
+Designing an effective reward function is crucial for RL-based adaptive sampling. The reward must balance multiple competing objectives: maximizing rendering quality, minimizing unnecessary computation, and maintaining reasonable sample distributions. We propose a multi-component reward combining three carefully designed terms:
+
+$$R = \lambda_{\epsilon} R_{\text{quality}} + \lambda_{\epsilon} R_{\text{efficiency}} + \lambda_{\epsilon} R_{\text{consistency}}. \quad (12)$$
+
+Quality Reward Rquality: The primary objective is rendering fidelity. We reward improvements in Peak Signal-to-Noise Ratio (PSNR) relative to the ground truth:
+
+| $R_{\text{quality}} = \text{PSNR}_{\text{curr}} - \text{PSNR}_{\text{prev}}$ | (13) |
+|------------------------------------------------------------------------------|------|
+|------------------------------------------------------------------------------|------|
+
+where PSNRcurr is computed from the current sample positions and PSNRprev from the previous iteration. This incremental formulation provides dense feedback, rewarding actions that improve rendering even if absolute quality remains imperfect. During evaluation, we compute PSNR against held-out test views.
+
+Efficiency Reward Refficiency: To encourage computational efficiency, we penalize samples that contribute negligibly to the final rendering:
+
+$$R_{\text{efficiency}} = -\lambda_{\text{eff}} \sum_{i=1}^N \mathbb{I}[w_i < \tau_w], \quad (14)$$
+
+where wi = Tiαi is the rendering weight of sample i (its contribution to the final pixel color), and τw = 0.01 is a threshold below which samples are considered wasteful. This term directly incentivizes the policy to eliminate low-contribution samples, either by moving them to high-density regions or by implicitly reducing sample count through concentrated placement. We set λeff = 0.1 to balance quality and efficiency.
+
+Consistency Reward Rconsistency: Without regularization, the policy might place samples erratically, creating large gaps that miss important geometric features. We encourage spatially smooth sample distributions via:
+
+| $R_{\text{consistency}} = - \sum_{i=1}^{N-1} (\delta_{i+1} - \delta_i)^2, \quad (15)$ |
+|---------------------------------------------------------------------------------------|
+|---------------------------------------------------------------------------------------|
+
+where δi = ti+1 − ti is the inter-sample distance. This term penalizes high variance in sample spacing, promoting relatively uniform local density while still allowing global variation. The coefficient λc = 0.01 provides light regularization without overly constraining the policy.
+
+The final weighting λq = 1.0, λe = 0.1, λc = 0.01 was determined through grid search on a validation scene, prioritizing quality while incorporating efficiency and smoothness objectives. These weights proved robust across different scenes in our experiments.
+
+#### 3.6 Two-Stage Training
+
 To address environment non-stationarity, we adopt a two-stage training procedure:
-Stage 1 (NeRF Pre-training): Train NeRF with mixture model for 100K iterations using standard
-photometric loss plus distribution regularization:
-LNeRF = ∥Ĉ(r) − Cgt ∥2 + λreg KL(p∥pprior ).
-(16)
-Stage 2 (Policy Optimization): Freeze the NeRF backbone and train only the SAC policy for 200K
-iterations with experience replay (buffer size 106 , batch size 256). This decoupling ensures the RL agent
-learns in a stationary environment.
-Training-Inference Gap: During training, the quality reward Rquality is computed using ground truth
-images from the training set only. The policy learns to identify high-contribution regions based on density patterns and geometric features. At inference, the learned policy generalizes to novel views without
-requiring ground truth—it has learned a sampling heuristic from the supervised training signal.
-4
-Experiments
-4.1
-Experimental Setup
+
+Stage 1 (NeRF Pre-training): Train NeRF with mixture model for 100K iterations using standard photometric loss plus distribution regularization:
+
+$$\mathcal{L}_{\text{NeRF}} = \|\hat{C}(\mathbf{r}) - C_{\text{gt}}\|^2 + \lambda_{\text{regKL}} (p\|p_{\text{prior}}). \quad (16)$$
+
+Stage 2 (Policy Optimization): Freeze the NeRF backbone and train only the SAC policy for 200K iterations with experience replay (buffer size 106 , batch size 256). This decoupling ensures the RL agent learns in a stationary environment.
+
+Training-Inference Gap: During training, the quality reward Rquality is computed using ground truth images from the training set only. The policy learns to identify high-contribution regions based on density patterns and geometric features. At inference, the learned policy generalizes to novel views without requiring ground truth—it has learned a sampling heuristic from the supervised training signal.
+
+## 4 Experiments
+
+### 4.1 Experimental Setup
+
 Datasets:
-• Synthetic-NeRF [1]: 8 synthetic scenes, 800 × 800 resolution, 100 train / 200 test views
-8
+
+- Synthetic-NeRF [1]: 8 synthetic scenes, 800 × 800 resolution, 100 train / 200 test views
+
 Table 1: Sampling efficiency comparison on Synthetic-NeRF (averaged over 8 scenes). Speedup is theoretical, based on sample count reduction.
-Method
-NeRF [1]
-DONeRF [4]
-NerfAcc [6]
-AdaNeRF [5]
-SAC-NeRF (Ours)
-Samples/Ray
-Reduction
-Effective Rate
-Theoretical Speedup
-192
-48
-32
-64
-75%
-83%
-67%
-18.3%
-34.7%
-41.2%
-38.5%
-1.0×
-2.1×
-2.8×
-1.9×
-100-125
-35-48%
-52.3%
-1.5-1.9×
+
+| Method NeRF | [1]    | Samples/Ray 192 | Reduction | Effective Rate 18.3% | Theoretical | Speedup 1.0 × |
+|-------------|--------|-----------------|-----------|----------------------|-------------|---------------|
+| DONeRF      | [4]    | 48              | 75%       | 34.7%                | 2.1         | ×             |
+| NerfAcc     | [6]    | 32              | 83%       | 41.2%                | 2.8         | ×             |
+| AdaNeRF     | [5]    | 64              | 67%       | 38.5%                | 1.9         | ×             |
+| SAC-NeRF    | (Ours) | 100-125         | 35-48%    | 52.3%                | 1.5-1.9     | ×             |
+
 Table 2: Rendering quality comparison. ↑: higher is better; ↓: lower is better.
-Method
-Synthetic-NeRF
-PSNR↑ SSIM↑ LPIPS↓
-PSNR↑
-LLFF
-SSIM↑
-LPIPS↓
-NeRF
-DONeRF
-NerfAcc
-AdaNeRF
-31.01
-29.85
-30.21
-30.45
-0.947
-0.931
-0.938
-0.940
-0.050
-0.068
-0.061
-0.058
-26.50
-25.72
-26.01
-26.18
-0.811
-0.789
-0.798
-0.802
-0.250
-0.285
-0.268
-0.260
-SAC-NeRF
-30.68
-0.943
-0.054
-26.22
-0.805
-0.258
-• LLFF [2]: 8 real forward-facing scenes
-Baselines: NeRF [1], DONeRF [4], NerfAcc [6], AdaNeRF [5]. For fair comparison, all methods use
-the same NeRF backbone architecture (8-layer MLP, 256 hidden units). NerfAcc uses 1283 occupancy
-grid with update frequency 16. AdaNeRF and DONeRF use their official implementations with default
-hyperparameters.
-Metrics: PSNR, SSIM, LPIPS for rendering quality; samples/ray for sampling efficiency. Speedup is
-measured as theoretical speedup based on sample count reduction, as actual wall-clock time depends on
-implementation details. The policy network forward pass adds approximately 0.8ms overhead per 1024 rays
-on RTX 3090.
+
+| Method   | PSNR  | Synthetic-NeRF ↑ SSIM | ↑ LPIPS | ↓ PSNR | LLFF ↑ SSIM | ↑ LPIPS ↓ |
+|----------|-------|-----------------------|---------|--------|-------------|-----------|
+| NeRF     | 31.01 | 0.947                 | 0.050   | 26.50  | 0.811       | 0.250     |
+| DONeRF   | 29.85 | 0.931                 | 0.068   | 25.72  | 0.789       | 0.285     |
+| NerfAcc  | 30.21 | 0.938                 | 0.061   | 26.01  | 0.798       | 0.268     |
+| AdaNeRF  | 30.45 | 0.940                 | 0.058   | 26.18  | 0.802       | 0.260     |
+| SAC-NeRF | 30.68 | 0.943                 | 0.054   | 26.22  | 0.805       | 0.258     |
+
+- LLFF [2]: 8 real forward-facing scenes
+
+Baselines: NeRF [1], DONeRF [4], NerfAcc [6], AdaNeRF [5]. For fair comparison, all methods use the same NeRF backbone architecture (8-layer MLP, 256 hidden units). NerfAcc uses 1283 occupancy grid with update frequency 16. AdaNeRF and DONeRF use their official implementations with default hyperparameters.
+
+Metrics: PSNR, SSIM, LPIPS for rendering quality; samples/ray for sampling efficiency. Speedup is measured as theoretical speedup based on sample count reduction, as actual wall-clock time depends on implementation details. The policy network forward pass adds approximately 0.8ms overhead per 1024 rays on RTX 3090.
+
 Implementation: PyTorch on NVIDIA RTX 3090. NeRF: Adam optimizer, lr=5 × 10−4 , 100K iterations. SAC: lr=3 × 10−4 , 200K iterations, batch 256, replay buffer size 106 .
-Training Protocol: Each scene requires independent training (scene-specific policy). Total training
-time: ∼8 hours per scene (5h NeRF pre-training + 3h policy optimization).
-4.2
-Sampling Efficiency Results
-Table 1 shows sampling efficiency results. SAC-NeRF achieves 35-48% sample reduction with 52.3%
-effective sampling rate (vs. 18.3% baseline). While more aggressive methods like NerfAcc achieve higher
-reduction through explicit occupancy grids, our learned policy generalizes without such explicit structures.
-4.3
-Rendering Quality
-Table 2 shows rendering quality results. SAC-NeRF achieves 30.68 dB on Synthetic-NeRF (0.33 dB below baseline) and 26.22 dB on LLFF (0.28 dB below), demonstrating competitive performance with other
-sampling optimization methods while using fewer samples.
-9
+
+Training Protocol: Each scene requires independent training (scene-specific policy). Total training time: ∼8 hours per scene (5h NeRF pre-training + 3h policy optimization).
+
+#### 4.2 Sampling Efficiency Results
+
+Table 1 shows sampling efficiency results. SAC-NeRF achieves 35-48% sample reduction with 52.3% effective sampling rate (vs. 18.3% baseline). While more aggressive methods like NerfAcc achieve higher reduction through explicit occupancy grids, our learned policy generalizes without such explicit structures.
+
+#### 4.3 Rendering Quality
+
+Table 2 shows rendering quality results. SAC-NeRF achieves 30.68 dB on Synthetic-NeRF (0.33 dB below baseline) and 26.22 dB on LLFF (0.28 dB below), demonstrating competitive performance with other sampling optimization methods while using fewer samples.
+
 Table 3: Ablation study on Synthetic-NeRF (Lego scene).
-Configuration
-PSNR (dB)
-Samples/Ray
-Convergence
-Full SAC-NeRF
-30.82
-108
-Stable
-w/o Mixture Model
-w/o Refficiency
-w/o Rconsistency
-w/o Two-stage Training
-30.65 (-0.17)
-30.79 (-0.03)
-30.58 (-0.24)
-30.12 (-0.70)
-118
-152
-95
-125
-Stable
-Stable
-Unstable
-Unstable
-PPO instead of SAC
-TD3 instead of SAC
-30.51 (-0.31)
-30.72 (-0.10)
-115
-112
-Moderate
-Stable
-Figure 1: Qualitative comparison showing SAC-NeRF maintains visual quality while reducing samples.
-From left to right: Ground Truth, NeRF (192 samples), SAC-NeRF (108 samples). The proposed method
-achieves comparable visual quality with 44% fewer samples, with only slight edge softening visible in the
-SAC-NeRF result.
-4.4
-Ablation Studies
+
+
+
+| Configuration |               |          | PSNR  | (dB)    | Samples/Ray | Convergence |
+|---------------|---------------|----------|-------|---------|-------------|-------------|
+| Full          | SAC-NeRF      |          |       | 30.82   | 108         | Stable      |
+| w/o           | Mixture       | Model    | 30.65 | (-0.17) | 118         | Stable      |
+| w/o           | R efficiency  |          | 30.79 | (-0.03) | 152         | Stable      |
+| w/o           | R consistency |          | 30.58 | (-0.24) | 95          | Unstable    |
+| w/o           | Two-stage     | Training | 30.12 | (-0.70) | 125         | Unstable    |
+| PPO           | instead       | of SAC   | 30.51 | (-0.31) | 115         | Moderate    |
+| TD3           | instead       | of SAC   | 30.72 | (-0.10) | 112         | Stable      |
+
+Figure 1: Qualitative comparison showing SAC-NeRF maintains visual quality while reducing samples. From left to right: Ground Truth, NeRF (192 samples), SAC-NeRF (108 samples). The proposed method achieves comparable visual quality with 44% fewer samples, with only slight edge softening visible in the SAC-NeRF result.
+
+### 4.4 Ablation Studies
+
 Table 3 presents ablation results validating our design choices:
-• Mixture Model: Provides +0.17 dB and 10 fewer samples through uncertainty guidance
-• Efficiency Reward: Critical for sample reduction (152 vs. 108 without)
-• Consistency Reward: Prevents sampling gaps, improves stability
-• Two-stage Training: Essential for convergence (+0.70 dB)
-• SAC vs. alternatives: SAC provides best quality-stability trade-off
-Reward Weight Sensitivity: We vary λe ∈ {0.05, 0.1, 0.2, 0.5} while fixing λq = 1.0, λc = 0.01.
-Results show the method is robust for λe ∈ [0.05, 0.2], with PSNR varying by only 0.14 dB. Setting λe > 0.3
-causes excessive sample reduction and quality degradation.
-4.5
-Qualitative Results
-Figures 1 and 2 illustrate qualitative results. SAC-NeRF learns to concentrate samples near surfaces while
-reducing density in empty regions, achieving efficiency without sacrificing visual quality.
-10
-Figure 2: Learned sampling distributions showing adaptive concentration near scene geometry. Top: uniform sampling baseline. Bottom: learned adaptive sampling by SAC-NeRF, which concentrates samples
-near surfaces (high density regions) and reduces samples in empty regions.
-Figure 3: Training curve showing stable convergence of the RL policy. The reward signal improves over
-200K iterations, demonstrating successful policy learning. The converged policy achieves stable rendering
-quality while gradually reducing samples per ray.
-4.6
-Training Analysis
+
+- Mixture Model: Provides +0.17 dB and 10 fewer samples through uncertainty guidance
+- Efficiency Reward: Critical for sample reduction (152 vs. 108 without)
+- Consistency Reward: Prevents sampling gaps, improves stability
+- Two-stage Training: Essential for convergence (+0.70 dB)
+- SAC vs. alternatives: SAC provides best quality-stability trade-off
+
+Reward Weight Sensitivity: We vary λe ∈ {0.05, 0.1, 0.2, 0.5} while fixing λq = 1.0, λc = 0.01. Results show the method is robust for λe ∈ [0.05, 0.2], with PSNR varying by only 0.14 dB. Setting λe > 0.3 causes excessive sample reduction and quality degradation.
+
+#### 4.5 Qualitative Results
+
+Figures 1 and 2 illustrate qualitative results. SAC-NeRF learns to concentrate samples near surfaces while reducing density in empty regions, achieving efficiency without sacrificing visual quality.
+
+
+
+Figure 2: Learned sampling distributions showing adaptive concentration near scene geometry. Top: uniform sampling baseline. Bottom: learned adaptive sampling by SAC-NeRF, which concentrates samples near surfaces (high density regions) and reduces samples in empty regions.
+
+
+
+Figure 3: Training curve showing stable convergence of the RL policy. The reward signal improves over 200K iterations, demonstrating successful policy learning. The converged policy achieves stable rendering quality while gradually reducing samples per ray.
+
+#### 4.6 Training Analysis
+
 Figure 3 shows training dynamics. The reward signal converges over 200K iterations, demonstrating successful policy learning. PSNR stabilizes while samples/ray gradually decreases.
-5
-Discussion
-Methodological Positioning: SAC-NeRF uses reinforcement learning to learn a sampling heuristic from
-supervised signals (ground truth images). While framed as RL, the learned policy essentially encodes a
-data-driven sampling strategy. The advantage over hand-crafted heuristics is automatic adaptation to scenespecific characteristics; the limitation is the need for per-scene training.
-Comparison to Heuristic Methods: Unlike probability-guided samplers [13] or depth oracle approaches [4]
-that use auxiliary networks with fixed architectures, SAC-NeRF learns sampling behavior end-to-end. However, methods like NerfAcc [6] with occupancy grids achieve higher sample reduction with simpler implementations.
+
+## 5 Discussion
+
+Methodological Positioning: SAC-NeRF uses reinforcement learning to learn a sampling heuristic from supervised signals (ground truth images). While framed as RL, the learned policy essentially encodes a data-driven sampling strategy. The advantage over hand-crafted heuristics is automatic adaptation to scenespecific characteristics; the limitation is the need for per-scene training.
+
+Comparison to Heuristic Methods: Unlike probability-guided samplers [13] or depth oracle approaches [4] that use auxiliary networks with fixed architectures, SAC-NeRF learns sampling behavior end-to-end. However, methods like NerfAcc [6] with occupancy grids achieve higher sample reduction with simpler implementations.
+
 Generalization: Current policies are scene-specific, requiring 3 hours of policy training per scene
-11
-after NeRF pre-training. Cross-scene transfer shows degraded performance (approximately 2 dB PSNR
-drop), suggesting the policy overfits to scene-specific density distributions. Future work could explore
-meta-learning for rapid adaptation.
-Computational Trade-offs: The policy network adds ∼0.8ms overhead per 1024 rays. For a full 800 ×
-800 image, this amounts to ∼500ms total policy overhead, partially offsetting the gains from reduced NeRF
-evaluations.
-Limitations: (1) Scene-specific training limits practical deployment; (2) The RL framework adds complexity compared to simpler heuristics; (3) Sample reduction is more modest than explicit acceleration
-structures; (4) The method requires ground truth for training rewards.
-6
-Conclusion
-We presented SAC-NeRF, a reinforcement learning framework that learns adaptive sampling policies for
-efficient Neural Radiance Field rendering. By formulating adaptive sampling as a Markov Decision Process
-and employing Soft Actor-Critic with carefully designed components, our method achieves computational
-savings while preserving rendering quality.
-Our key technical contributions include: (1) a Gaussian mixture distribution color model that provides
-uncertainty quantification to guide sampling decisions, (2) a multi-component reward function balancing
-quality, efficiency, and spatial consistency, (3) an enhanced state representation encoding both local sample
-features and global geometric context, and (4) a two-stage training strategy that addresses environment
-non-stationarity by decoupling NeRF pre-training from policy optimization.
-Experiments on Synthetic-NeRF and LLFF datasets demonstrate that SAC-NeRF reduces sampling
-points by 35-48% while maintaining rendering quality within 0.3-0.8 dB PSNR of dense sampling baselines.
-Our work demonstrates the viability of RL-based adaptive sampling for neural rendering, showing that
-learned policies can discover efficient strategies that would be difficult to encode through manual heuristics.
-This opens research directions for applying learning-based optimization to other computationally intensive
-aspects of neural scene representations.
-Future work could explore: (1) cross-scene generalization through meta-learning, (2) integration with
-modern NeRF variants such as hash-based representations or 3D Gaussian splatting, (3) extension to dynamic scenes, and (4) application to other rendering modalities.
-References
-[1] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi, and R. Ng, “NeRF: Representing scenes as neural radiance fields for view synthesis,” in Proc. European Conference on Computer Vision (ECCV), 2020, pp. 405–421.
-[2] B. Mildenhall, P. P. Srinivasan, R. Ortiz-Cayon, N. K. Kalantari, R. Ramamoorthi, R. Ng, and A. Kar,
-“Local light field fusion: Practical view synthesis with prescriptive sampling guidelines,” ACM Trans.
-Graph., vol. 38, no. 4, pp. 1–14, 2019.
-[3] A. Dai, A. X. Chang, M. Savva, M. Halber, T. Funkhouser, and M. Nießner, “ScanNet: Richlyannotated 3D reconstructions of indoor scenes,” in Proc. IEEE Conference on Computer Vision and
-Pattern Recognition (CVPR), 2017, pp. 5828–5839.
-12
-[4] T. Neff, P. Stadlbauer, M. Parger, A. Kurz, J. H. Mueller, C. R. A. Chaitanya, A. Kaplanyan, and M.
-Steinberger, “DONeRF: Towards real-time rendering of compact neural radiance fields using depth
-oracle networks,” Computer Graphics Forum, vol. 40, no. 4, pp. 45–59, 2021.
-[5] A. Kurz, T. Neff, Z. Lv, M. Zollhöfer, and M. Steinberger, “AdaNeRF: Adaptive sampling for real-time
-rendering of neural radiance fields,” in Proc. European Conference on Computer Vision (ECCV), 2022,
-pp. 254–270.
-[6] R. Li, H. Gao, M. Tancik, and A. Kanazawa, “NerfAcc: Efficient sampling accelerates NeRFs,” in
-Proc. IEEE/CVF International Conference on Computer Vision (ICCV), 2023, pp. 18537–18546.
-[7] C.-Y. Lin, C.-H. Wu, C.-H. Yeh, S.-H. Yen, C. Sun, and Y.-L. Liu, “FrugalNeRF: Fast convergence
-for extreme few-shot novel view synthesis without learned priors,” in Proc. IEEE/CVF Conference on
-Computer Vision and Pattern Recognition (CVPR), 2025, pp. 11227–11238.
-[8] Y. Chen, J. Jiang, K. Jiang, X. Tang, Z. Li, X. Liu, and Y. Nie, “DashGaussian: Optimizing 3D
-Gaussian splatting in 200 seconds,” in Proc. IEEE/CVF Conference on Computer Vision and Pattern
-Recognition (CVPR), 2025, pp. 11146–11155.
-[9] G. Feng, S. Chen, R. Fu, Z. Liao, Y. Wang, T. Liu, Z. Pei, H. Li, X. Zhang, and B. Dai, “FlashGS:
-Efficient 3D Gaussian splatting for large-scale and high-resolution rendering,” in Proc. IEEE/CVF
-Conference on Computer Vision and Pattern Recognition (CVPR), 2025, pp. 26652–26662.
-[10] H. Li, J. Liu, M. Sznaier, and O. Camps, “3D-HGS: 3D half-Gaussian splatting,” in Proc. IEEE/CVF
-Conference on Computer Vision and Pattern Recognition (CVPR), 2025.
-[11] Y. Hu, X. Guo, Y. Xiao, J. Huang, and Y.-J. Liu, “NGP-RT: Fusing multi-level hash features with
-lightweight attention for real-time novel view synthesis,” in Proc. European Conference on Computer
-Vision (ECCV), 2024, pp. 153–170.
-[12] Y. Chen, Q. Wu, W. Zheng, and J. Cai, “How far can we compress Instant-NGP-based NeRF?,” in Proc.
-IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2024, pp. 10349–10358.
-[13] G. D. Pais, M. Chatterjee, and P. Miraldo, “A probability-guided sampler for neural implicit surface
-rendering,” in Proc. European Conference on Computer Vision (ECCV), LNCS 15080, 2024, pp. 164–
-181.
-[14] C. Gao, Q. Sun, and J. Zhu, “MBS-NeRF: Reconstruction of sharp neural radiance fields from motionblurred sparse images,” Scientific Reports, vol. 15, p. 5275, 2025.
-[15] Y. Lee, L. Yang, and D. Fan, “MFNeRF: Memory efficient NeRF with mixed-feature hash table,” in
-Proc. IEEE/CVF Winter Conference on Applications of Computer Vision (WACV), 2025, pp. 2686–
-2695.
-[16] T. Haarnoja, A. Zhou, P. Abbeel, and S. Levine, “Soft actor-critic: Off-policy maximum entropy deep
-reinforcement learning with a stochastic actor,” in Proc. International Conference on Machine Learning (ICML), 2018, pp. 1861–1870.
-[17] S. Thalagala, P. K. Wong, X. Wang, and T. Sun, “Broad critic deep actor reinforcement learning for
-continuous control,” arXiv preprint arXiv:2411.15806, 2024.
-[18] Y. Chen, X. Zhang, X. Wang, Z. Xu, X. Shen, and W. Zhang, “Corrected soft actor critic for continuous
-control,” arXiv preprint arXiv:2410.16739, 2024.
-13
-[19] Q. Yang, “Bayesian soft actor-critic: A directed acyclic strategy graph based deep reinforcement learning,” in Proc. ACM/SIGAPP Symposium on Applied Computing (SAC), 2024, pp. 1–8.
-[20] Y. Zhang, H. Tang, C. Wei, and W. Ding, “Bidirectional soft actor-critic: Leveraging forward and
-reverse KL divergence for efficient reinforcement learning,” arXiv preprint arXiv:2506.01639, 2025.
-[21] C. Ge, L. Luo, J. Zhang, X. Meng, and Y. Chen, “FRL: An integrative feature selection algorithm
-based on the Fisher score, recursive feature elimination, and logistic regression to identify potential
-genomic biomarkers,” BioMed Research International, vol. 2021, p. 4312850, 2021.
-[22] C. Ge, “Selection of potential cancer biomarkers based on feature selection method,” in Proc. Third
-International Conference on Intelligent Computing and Human-Computer Interaction (ICHCI), 2023,
-pp. 1–5.
-[23] C. Ge, “Research on medical image classification based on active learning and vision-language models,” Master’s thesis, Shandong University, Shandong, 2025.
-14
+
+after NeRF pre-training. Cross-scene transfer shows degraded performance (approximately 2 dB PSNR drop), suggesting the policy overfits to scene-specific density distributions. Future work could explore meta-learning for rapid adaptation.
+
+Computational Trade-offs: The policy network adds ∼0.8ms overhead per 1024 rays. For a full 800 × 800 image, this amounts to ∼500ms total policy overhead, partially offsetting the gains from reduced NeRF evaluations.
+
+Limitations: (1) Scene-specific training limits practical deployment; (2) The RL framework adds complexity compared to simpler heuristics; (3) Sample reduction is more modest than explicit acceleration structures; (4) The method requires ground truth for training rewards.
+
+## 6 Conclusion
+
+We presented SAC-NeRF, a reinforcement learning framework that learns adaptive sampling policies for efficient Neural Radiance Field rendering. By formulating adaptive sampling as a Markov Decision Process and employing Soft Actor-Critic with carefully designed components, our method achieves computational savings while preserving rendering quality.
+
+Our key technical contributions include: (1) a Gaussian mixture distribution color model that provides uncertainty quantification to guide sampling decisions, (2) a multi-component reward function balancing quality, efficiency, and spatial consistency, (3) an enhanced state representation encoding both local sample features and global geometric context, and (4) a two-stage training strategy that addresses environment non-stationarity by decoupling NeRF pre-training from policy optimization.
+
+Experiments on Synthetic-NeRF and LLFF datasets demonstrate that SAC-NeRF reduces sampling points by 35-48% while maintaining rendering quality within 0.3-0.8 dB PSNR of dense sampling baselines.
+
+Our work demonstrates the viability of RL-based adaptive sampling for neural rendering, showing that learned policies can discover efficient strategies that would be difficult to encode through manual heuristics. This opens research directions for applying learning-based optimization to other computationally intensive aspects of neural scene representations.
+
+Future work could explore: (1) cross-scene generalization through meta-learning, (2) integration with modern NeRF variants such as hash-based representations or 3D Gaussian splatting, (3) extension to dynamic scenes, and (4) application to other rendering modalities.
+
+## References
+
+[1] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi, and R. Ng, "NeRF: Representing scenes as neural radiance fields for view synthesis," in Proc. European Conference on Computer Vision (ECCV), 2020, pp. 405–421. [2] B. Mildenhall, P. P. Srinivasan, R. Ortiz-Cayon, N. K. Kalantari, R. Ramamoorthi, R. Ng, and A. Kar, "Local light field fusion: Practical view synthesis with prescriptive sampling guidelines," ACM Trans. Graph., vol. 38, no. 4, pp. 1–14, 2019. [3] A. Dai, A. X. Chang, M. Savva, M. Halber, T. Funkhouser, and M. Nießner, "ScanNet: Richlyannotated 3D reconstructions of indoor scenes," in Proc. IEEE Conference on Computer Vision and Pattern Recognition (CVPR), 2017, pp. 5828–5839.
+
+- [4] T. Neff, P. Stadlbauer, M. Parger, A. Kurz, J. H. Mueller, C. R. A. Chaitanya, A. Kaplanyan, and M. Steinberger, "DONeRF: Towards real-time rendering of compact neural radiance fields using depth oracle networks," Computer Graphics Forum, vol. 40, no. 4, pp. 45–59, 2021. [5] A. Kurz, T. Neff, Z. Lv, M. Zollhöfer, and M. Steinberger, "AdaNeRF: Adaptive sampling for real-time rendering of neural radiance fields," in Proc. European Conference on Computer Vision (ECCV), 2022, pp. 254–270. [6] R. Li, H. Gao, M. Tancik, and A. Kanazawa, "NerfAcc: Efficient sampling accelerates NeRFs," in Proc. IEEE/CVF International Conference on Computer Vision (ICCV), 2023, pp. 18537–18546. [7] C.-Y. Lin, C.-H. Wu, C.-H. Yeh, S.-H. Yen, C. Sun, and Y.-L. Liu, "FrugalNeRF: Fast convergence for extreme few-shot novel view synthesis without learned priors," in Proc. IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2025, pp. 11227–11238. [8] Y. Chen, J. Jiang, K. Jiang, X. Tang, Z. Li, X. Liu, and Y. Nie, "DashGaussian: Optimizing 3D Gaussian splatting in 200 seconds," in Proc. IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2025, pp. 11146–11155. [9] G. Feng, S. Chen, R. Fu, Z. Liao, Y. Wang, T. Liu, Z. Pei, H. Li, X. Zhang, and B. Dai, "FlashGS: Efficient 3D Gaussian splatting for large-scale and high-resolution rendering," in Proc. IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2025, pp. 26652–26662. [10] H. Li, J. Liu, M. Sznaier, and O. Camps, "3D-HGS: 3D half-Gaussian splatting," in Proc. IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2025. [11] Y. Hu, X. Guo, Y. Xiao, J. Huang, and Y.-J. Liu, "NGP-RT: Fusing multi-level hash features with lightweight attention for real-time novel view synthesis," in Proc. European Conference on Computer Vision (ECCV), 2024, pp. 153–170. [12] Y. Chen, Q. Wu, W. Zheng, and J. Cai, "How far can we compress Instant-NGP-based NeRF?," in Proc. IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2024, pp. 10349–10358. [13] G. D. Pais, M. Chatterjee, and P. Miraldo, "A probability-guided sampler for neural implicit surface rendering," in Proc. European Conference on Computer Vision (ECCV), LNCS 15080, 2024, pp. 164–
+- 181. [14] C. Gao, Q. Sun, and J. Zhu, "MBS-NeRF: Reconstruction of sharp neural radiance fields from motionblurred sparse images," Scientific Reports, vol. 15, p. 5275, 2025. [15] Y. Lee, L. Yang, and D. Fan, "MFNeRF: Memory efficient NeRF with mixed-feature hash table," in Proc. IEEE/CVF Winter Conference on Applications of Computer Vision (WACV), 2025, pp. 2686– 2695. [16] T. Haarnoja, A. Zhou, P. Abbeel, and S. Levine, "Soft actor-critic: Off-policy maximum entropy deep reinforcement learning with a stochastic actor," in Proc. International Conference on Machine Learning (ICML), 2018, pp. 1861–1870. [17] S. Thalagala, P. K. Wong, X. Wang, and T. Sun, "Broad critic deep actor reinforcement learning for continuous control," arXiv preprint arXiv:2411.15806, 2024. [18] Y. Chen, X. Zhang, X. Wang, Z. Xu, X. Shen, and W. Zhang, "Corrected soft actor critic for continuous control," arXiv preprint arXiv:2410.16739, 2024.
+
+[19] Q. Yang, "Bayesian soft actor-critic: A directed acyclic strategy graph based deep reinforcement learning," in Proc. ACM/SIGAPP Symposium on Applied Computing (SAC), 2024, pp. 1–8. [20] Y. Zhang, H. Tang, C. Wei, and W. Ding, "Bidirectional soft actor-critic: Leveraging forward and reverse KL divergence for efficient reinforcement learning," arXiv preprint arXiv:2506.01639, 2025. [21] C. Ge, L. Luo, J. Zhang, X. Meng, and Y. Chen, "FRL: An integrative feature selection algorithm based on the Fisher score, recursive feature elimination, and logistic regression to identify potential genomic biomarkers," BioMed Research International, vol. 2021, p. 4312850, 2021. [22] C. Ge, "Selection of potential cancer biomarkers based on feature selection method," in Proc. Third International Conference on Intelligent Computing and Human-Computer Interaction (ICHCI), 2023, pp. 1–5. [23] C. Ge, "Research on medical image classification based on active learning and vision-language models," Master's thesis, Shandong University, Shandong, 2025.

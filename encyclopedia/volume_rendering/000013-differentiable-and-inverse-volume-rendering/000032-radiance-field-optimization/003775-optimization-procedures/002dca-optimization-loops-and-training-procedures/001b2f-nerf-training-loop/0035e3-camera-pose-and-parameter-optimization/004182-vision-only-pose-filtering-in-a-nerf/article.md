@@ -3,28 +3,28 @@
 Also called: Optimization-based Pose Filter for NeRF, Recursive SE(3) Optimization
 
 ## Overview
-This method is an optimization-based filtering approach that estimates the 6 Degrees of Freedom (6DoF) pose and velocities of a robot within a Neural Radiance Field (NeRF) using only onboard RGB camera images [S1, unofficial]. It addresses the limitation of single-image pose estimation methods, which are highly sensitive to initialization and fail in low-gradient regions, by treating pose estimation as a recursive Bayesian estimation problem [S1, unofficial]. Unlike standard joint optimization or single-shot NeRF-based localization, this filter balances a NeRF-based photometric loss with a process loss derived from system dynamics, providing robustness and outputting state covariance for downstream robotics tasks [S1, unofficial].
+This method is an optimization-based filtering approach that estimates the 6 Degrees of Freedom (6DoF) pose and velocities of a robot within a Neural Radiance Field (NeRF) using only onboard RGB camera images [S1]. It addresses the limitation of single-image pose estimation methods, which are highly sensitive to initialization and fail in low-gradient regions, by treating pose estimation as a recursive Bayesian estimation problem [S1]. Unlike standard joint optimization or single-shot NeRF-based localization, this filter balances a NeRF-based photometric loss with a process loss derived from system dynamics, providing robustness and outputting state covariance for downstream robotics tasks [S1].
 
 ## How it works
-The method operates as a recursive filter at each timestep $t$. It takes a noisy image $I_t$, the previous action $u_t$, and the previous state estimate (mean $\mu_{t-1}$ and covariance $\Sigma_{t-1}$) as inputs, and outputs the updated state mean $\mu_t$ and covariance $\Sigma_t$ [S1, unofficial].
+The method operates as a recursive filter at each timestep $t$. It takes a noisy image $I_t$, the previous action $u_t$, and the previous state estimate (mean $\mu_{t-1}$ and covariance $\Sigma_{t-1}$) as inputs, and outputs the updated state mean $\mu_t$ and covariance $\Sigma_t$ [S1].
 
 ### Data Structures and State Representation
-The state $\mu_t$ represents the full dynamic state of the robot, including position, orientation, and velocities. The pose $T_t$ is constructed from the position and rotation elements of $\mu_t$ [S1, unofficial]. The covariance $\Sigma_t$ is a matrix representing the uncertainty of the state estimate [S1, unofficial].
+The state $\mu_t$ represents the full dynamic state of the robot, including position, orientation, and velocities. The pose $T_t$ is constructed from the position and rotation elements of $\mu_t$ [S1]. The covariance $\Sigma_t$ is a matrix representing the uncertainty of the state estimate [S1].
 
 ### Algorithm Steps
 
 1.  **State Propagation (Prediction):**
-    Using the previous state mean $\mu_{t-1}$, the previous action $u_t$, and a dynamics model $f$, compute the predicted mean $\mu_{t|t-1}$ and the Jacobian of the dynamics $A_{t-1}$ [S1, unofficial].
+    Using the previous state mean $\mu_{t-1}$, the previous action $u_t$, and a dynamics model $f$, compute the predicted mean $\mu_{t|t-1}$ and the Jacobian of the dynamics $A_{t-1}$ [S1].
     $$ \mu_{t|t-1} = f(\mu_{t-1}, u_t) $$
     $$ A_{t-1} = \left. \frac{\partial f(x, u_t)}{\partial x} \right|_{x=\mu_{t-1}} $$
-    Propagate the covariance using the process noise covariance $Q_{t-1}$ [S1, unofficial]:
+    Propagate the covariance using the process noise covariance $Q_{t-1}$ [S1]:
     $$ \Sigma_{t|t-1} = A_{t-1} \Sigma_{t-1} A_{t-1}^T + Q_{t-1} $$
 
 2.  **Pixel Selection:**
-    Select a subset of pixels $I$ from the current image $I_t$ using an image feature detector (e.g., ORB) to identify points of interest. This biases sampling toward areas with higher gradient information [S1, unofficial].
+    Select a subset of pixels $I$ from the current image $I_t$ using an image feature detector (e.g., ORB) to identify points of interest. This biases sampling toward areas with higher gradient information [S1].
 
 3.  **Optimization (Update):**
-    Minimize the cost function $J(\mu_t)$ with respect to the state $\mu_t$. The cost function combines a photometric loss and a process loss [S1, unofficial]:
+    Minimize the cost function $J(\mu_t)$ with respect to the state $\mu_t$. The cost function combines a photometric loss and a process loss [S1]:
     $$ J(\mu_t) = \| C_I(T_t) - I_t(I) \|_{S_t^{-1}}^2 + \| \mu_{t|t-1} - \mu_t \|_{\Sigma_{t|t-1}^{-1}}^2 $$
     Where:
     *   $C_I(T_t)$ are the predicted pixel colors via the projected NeRF scene using the current pose estimate $T_t$ derived from $\mu_t$.
@@ -32,17 +32,17 @@ The state $\mu_t$ represents the full dynamic state of the robot, including posi
     *   $S_t$ is the measurement noise covariance.
     *   $\| x \|_M^2 = x^T M x$ denotes the weighted $L_2$ norm.
     *   The first term is the photometric loss.
-    *   The second term is the process loss, weighting the deviation from the predicted state $\mu_{t|t-1}$ [S1, unofficial].
+    *   The second term is the process loss, weighting the deviation from the predicted state $\mu_{t|t-1}$ [S1].
 
     **Optimization Details:**
-    *   **Manifold Optimization:** The optimization is performed on the SE(3) manifold. Unlike methods that optimize w.r.t. a reference pose and project once, this method projects back onto the manifold after *every* gradient step (Recursive SE(3)) [S1, unofficial]. This is necessary because the multiplication of skew-symmetric matrices in the exponential map does not commute:
+    *   **Manifold Optimization:** The optimization is performed on the SE(3) manifold. Unlike methods that optimize w.r.t. a reference pose and project once, this method projects back onto the manifold after *every* gradient step (Recursive SE(3)) [S1]. This is necessary because the multiplication of skew-symmetric matrices in the exponential map does not commute:
         $$ \exp(\delta_1) \exp(\delta_2) \cdots T \neq \exp(\delta_1 + \delta_2 + \cdots) T $$
-        where $T$ is the reference homogeneous transformation matrix [S1, unofficial]. This recursive projection converges quicker and more smoothly on the noisy photometric loss landscape [S1, unofficial].
-    *   **Implementation:** The manifold optimization is implemented using the LieTorch library [S1, unofficial].
-    *   **Outlier Rejection:** Outlier rejection is performed on the per-pixel loss to reduce variance [S1, unofficial].
+        where $T$ is the reference homogeneous transformation matrix [S1]. This recursive projection converges quicker and more smoothly on the noisy photometric loss landscape [S1].
+    *   **Implementation:** The manifold optimization is implemented using the LieTorch library [S1].
+    *   **Outlier Rejection:** Outlier rejection is performed on the per-pixel loss to reduce variance [S1].
 
 4.  **Covariance Update:**
-    Compute the posterior covariance $\Sigma_t$ using the Hessian of the loss function at the optimized mean $\mu_t$ [S1, unofficial]:
+    Compute the posterior covariance $\Sigma_t$ using the Hessian of the loss function at the optimized mean $\mu_t$ [S1]:
     $$ \Sigma_t = \left( \left. \frac{\partial^2 J(x)}{\partial x^2} \right|_{x=\mu_t} \right)^{-1} $$
 
 ### Pseudocode
@@ -164,26 +164,26 @@ def vision_only_pose_filter(
 ```
 
 ### Parameters
-*   **Feature Detector:** ORB is used to select pixels for photometric evaluation [S1, unofficial].
-*   **Measurement Noise Covariance ($S_t$):** Weighting for the photometric loss [S1, unofficial].
-*   **Process Noise Covariance ($Q_{t-1}$):** Weighting for the dynamics model uncertainty [S1, unofficial].
+*   **Feature Detector:** ORB is used to select pixels for photometric evaluation [S1].
+*   **Measurement Noise Covariance ($S_t$):** Weighting for the photometric loss [S1].
+*   **Process Noise Covariance ($Q_{t-1}$):** Weighting for the dynamics model uncertainty [S1].
 *   **Learning Rate:** Step size for the gradient descent on the manifold [G].
 
 ### Edge Cases and Pitfalls
-*   **SE(3) Manifold Optimization:** Optimizing with respect to a reference pose and projecting once is mathematically distinct from projecting after every step due to the non-commutativity of skew-symmetric matrix multiplication in the exponential map. The recursive projection method is required for smooth convergence on the noisy photometric loss landscape [S1, unofficial].
-*   **Low Gradient Regions:** The process loss term is critical for robustness when the robot travels through regions with low photometric gradient information, allowing the filter to rely more on the dynamics model [S1, unofficial].
-*   **Initialization:** While more robust than single-shot methods, the filter still relies on the previous state estimate. Poor initial estimates or large disturbances may require careful tuning of the process noise covariance [S1, unofficial].
+*   **SE(3) Manifold Optimization:** Optimizing with respect to a reference pose and projecting once is mathematically distinct from projecting after every step due to the non-commutativity of skew-symmetric matrix multiplication in the exponential map. The recursive projection method is required for smooth convergence on the noisy photometric loss landscape [S1].
+*   **Low Gradient Regions:** The process loss term is critical for robustness when the robot travels through regions with low photometric gradient information, allowing the filter to rely more on the dynamics model [S1].
+*   **Initialization:** While more robust than single-shot methods, the filter still relies on the previous state estimate. Poor initial estimates or large disturbances may require careful tuning of the process noise covariance [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** The method involves rendering via NeRF (which is computationally expensive) and optimization steps. The complexity depends on the number of pixels sampled (via feature detector) and the number of optimization iterations. The use of feature detectors reduces the number of pixels evaluated compared to full-image rendering [S1, unofficial].
-*   **Memory Complexity:** Requires storing the NeRF model, the state mean and covariance, and intermediate rendering buffers. The covariance update requires computing and inverting the Hessian, which scales with the square of the state dimension [S1, unofficial].
-*   **Strengths:** Provides robust pose estimation in low-gradient regions by incorporating dynamics. Outputs state covariance, which is useful for downstream robotics algorithms like collision avoidance. Integrates seamlessly into an online replanning loop [S1, unofficial].
-*   **Limitations:** Computationally intensive due to NeRF rendering and optimization. Requires a pre-trained NeRF of the environment. Performance depends on the quality of the dynamics model and noise covariances [S1, unofficial].
-*   **When to Use:** Online robot navigation where only monocular RGB images are available, and a NeRF representation of the environment is already trained. Particularly useful when traditional SLAM fails due to textureless regions or when covariance estimates are needed for safety-critical planning [S1, unofficial].
-*   **When Not to Use:** When real-time performance is critical and NeRF rendering is too slow, or when a ground truth pose or other sensor modalities (LiDAR, IMU) are available and preferred [S1, unofficial].
+*   **Time Complexity:** The method involves rendering via NeRF (which is computationally expensive) and optimization steps. The complexity depends on the number of pixels sampled (via feature detector) and the number of optimization iterations. The use of feature detectors reduces the number of pixels evaluated compared to full-image rendering [S1].
+*   **Memory Complexity:** Requires storing the NeRF model, the state mean and covariance, and intermediate rendering buffers. The covariance update requires computing and inverting the Hessian, which scales with the square of the state dimension [S1].
+*   **Strengths:** Provides robust pose estimation in low-gradient regions by incorporating dynamics. Outputs state covariance, which is useful for downstream robotics algorithms like collision avoidance. Integrates seamlessly into an online replanning loop [S1].
+*   **Limitations:** Computationally intensive due to NeRF rendering and optimization. Requires a pre-trained NeRF of the environment. Performance depends on the quality of the dynamics model and noise covariances [S1].
+*   **When to Use:** Online robot navigation where only monocular RGB images are available, and a NeRF representation of the environment is already trained. Particularly useful when traditional SLAM fails due to textureless regions or when covariance estimates are needed for safety-critical planning [S1].
+*   **When Not to Use:** When real-time performance is critical and NeRF rendering is too slow, or when a ground truth pose or other sensor modalities (LiDAR, IMU) are available and preferred [S1].
 
 ## Background
-This method was introduced in the paper "Vision-Only Robot Navigation in a Neural Radiance World" [S1, unofficial]. It builds upon previous work on single-image camera pose estimation using pre-trained NeRFs [19] (cited in [S1, unofficial]), extending it from a single-shot maximum likelihood estimation to a recursive Bayesian estimation framework. The work demonstrates the method in simulation environments including a jungle gym, a church, and Stonehenge, using both quadrotor and omnidirectional ground robot models [S1, unofficial]. It is implemented using the LieTorch library [S1, unofficial].
+This method was introduced in the paper "Vision-Only Robot Navigation in a Neural Radiance World" [S1]. It builds upon previous work on single-image camera pose estimation using pre-trained NeRFs [19] (cited in [S1]), extending it from a single-shot maximum likelihood estimation to a recursive Bayesian estimation framework. The work demonstrates the method in simulation environments including a jungle gym, a church, and Stonehenge, using both quadrotor and omnidirectional ground robot models [S1]. It is implemented using the LieTorch library [S1].
 
 ## Sources
-[S1] Vision-Only Robot Navigation in a Neural Radiance World, https://doi.org/10.1109/lra.2022.3150497, fetched 2026-10-26 (unofficial)
+[S1] Vision-Only Robot Navigation in a Neural Radiance World, https://doi.org/10.1109/lra.2022.3150497, fetched 2026-10-26

@@ -3,7 +3,7 @@
 Also called: Periodic Implicit Generative Adversarial Networks, π-GAN
 
 ## Overview
-pi-GAN is a generative adversarial approach for unsupervised 3D representation learning from 2D images, synthesizing view-consistent images by conditioning an implicit radiance field on a noise vector [S1, unofficial]. It differs from standard 2D GANs by outputting a 5D spatio-angular radiance field rendered via volume rendering, and from other implicit GANs (like GRAF) by using a StyleGAN-inspired mapping network with Feature-wise Linear Modulation (FiLM) for conditioning and a progressive growing strategy to stabilize training [S1, unofficial].
+pi-GAN is a generative adversarial approach for unsupervised 3D representation learning from 2D images, synthesizing view-consistent images by conditioning an implicit radiance field on a noise vector [S1]. It differs from standard 2D GANs by outputting a 5D spatio-angular radiance field rendered via volume rendering, and from other implicit GANs (like GRAF) by using a StyleGAN-inspired mapping network with Feature-wise Linear Modulation (FiLM) for conditioning and a progressive growing strategy to stabilize training [S1].
 
 ## How it works
 **Inputs and Outputs:**
@@ -19,7 +19,7 @@ The core data structure is the implicit radiance field parameterized by a SIREN 
 
 **Numbered Steps:**
 
-1.  **Latent Mapping:** The noise vector $\mathbf{z}$ is passed through the mapping network $M$ to produce the conditioning parameters $\gamma_i$ and $\beta_i$ for all layers $i=0 \dots n-1$ [S1, unofficial].
+1.  **Latent Mapping:** The noise vector $\mathbf{z}$ is passed through the mapping network $M$ to produce the conditioning parameters $\gamma_i$ and $\beta_i$ for all layers $i=0 \dots n-1$ [S1].
 2.  **SIREN Forward Pass:** For a query 3D coordinate $\mathbf{x} = (x, y, z)$, compute the SIREN output $\Phi(\mathbf{x})$ using the conditioned parameters:
     $$
     \Phi(\mathbf{x}) = \phi_{n-1} \circ \phi_{n-2} \circ \dots \circ \phi_0(\mathbf{x})
@@ -28,7 +28,7 @@ The core data structure is the implicit radiance field parameterized by a SIREN 
     $$
     \phi_i(\mathbf{x}_i) = \sin(\gamma_i \cdot (\mathbf{W}_i \mathbf{x}_i + \mathbf{b}_i) + \beta_i)
     $$
-    Here, $\mathbf{x}_0 = \mathbf{x}$, and $\mathbf{x}_{i+1} = \phi_i(\mathbf{x}_i)$ [S1, unofficial].
+    Here, $\mathbf{x}_0 = \mathbf{x}$, and $\mathbf{x}_{i+1} = \phi_i(\mathbf{x}_i)$ [S1].
 3.  **Radiance Field Query:** Compute volume density $\sigma(\mathbf{x})$ and view-dependent color $\mathbf{c}(\mathbf{x}, \mathbf{d})$:
     $$
     \sigma(\mathbf{x}) = \mathbf{W}_\sigma \Phi(\mathbf{x}) + \mathbf{b}_\sigma
@@ -36,9 +36,9 @@ The core data structure is the implicit radiance field parameterized by a SIREN 
     $$
     \mathbf{c}(\mathbf{x}, \mathbf{d}) = \mathbf{W}_c \phi_c \left( [\Phi(\mathbf{x}), \mathbf{d}]^T \right) + \mathbf{b}_c
     $$
-    where $[\Phi(\mathbf{x}), \mathbf{d}]^T$ denotes the concatenation of the SIREN output $\Phi(\mathbf{x})$ and the viewing direction $\mathbf{d}$, and $\phi_c$ is the activation function of the color head (typically ReLU or linear, as specified by the source's general MLP definition, though the source explicitly writes $\phi_c$ in Eq. 4) [S1, unofficial].
-4.  **Volume Rendering:** Cast rays from the camera origin $\mathbf{o}$ with direction $\mathbf{d}$ defined by pose $\boldsymbol{\xi}$. Sample points $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ along the ray between near bound $t_n$ and far bound $t_f$. Compute pixel color $\mathbf{C}$ using the standard volume rendering integral (as defined in the parent article) [S1, unofficial].
-5.  **Adversarial Training:** The generated image is fed to a traditional convolutional discriminator. The generator $G_\theta$ is trained to minimize the adversarial loss, while the discriminator is trained to distinguish real from generated images [S1, unofficial].
+    where $[\Phi(\mathbf{x}), \mathbf{d}]^T$ denotes the concatenation of the SIREN output $\Phi(\mathbf{x})$ and the viewing direction $\mathbf{d}$, and $\phi_c$ is the activation function of the color head (typically ReLU or linear, as specified by the source's general MLP definition, though the source explicitly writes $\phi_c$ in Eq. 4) [S1].
+4.  **Volume Rendering:** Cast rays from the camera origin $\mathbf{o}$ with direction $\mathbf{d}$ defined by pose $\boldsymbol{\xi}$. Sample points $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ along the ray between near bound $t_n$ and far bound $t_f$. Compute pixel color $\mathbf{C}$ using the standard volume rendering integral (as defined in the parent article) [S1].
+5.  **Adversarial Training:** The generated image is fed to a traditional convolutional discriminator. The generator $G_\theta$ is trained to minimize the adversarial loss, while the discriminator is trained to distinguish real from generated images [S1].
 
 **Pseudocode:**
 
@@ -101,38 +101,38 @@ def pi_gan_training_step(real_images, z, camera_pose):
 ```
 
 **Parameters:**
-*   $\gamma_i$: Frequency parameter for the sine activation in layer $i$. Output by the mapping network. [S1, unofficial]
-*   $\beta_i$: Phase shift parameter for the sine activation in layer $i$. Output by the mapping network. [S1, unofficial]
-*   $\mathbf{W}_i, \mathbf{b}_i$: Weights and biases of the SIREN layers. [S1, unofficial]
-*   $\mathbf{W}_\sigma, \mathbf{b}_\sigma$: Weights and biases for the density head. [S1, unofficial]
-*   $\mathbf{W}_c, \mathbf{b}_c$: Weights and biases for the color head. [S1, unofficial]
+*   $\gamma_i$: Frequency parameter for the sine activation in layer $i$. Output by the mapping network. [S1]
+*   $\beta_i$: Phase shift parameter for the sine activation in layer $i$. Output by the mapping network. [S1]
+*   $\mathbf{W}_i, \mathbf{b}_i$: Weights and biases of the SIREN layers. [S1]
+*   $\mathbf{W}_\sigma, \mathbf{b}_\sigma$: Weights and biases for the density head. [S1]
+*   $\mathbf{W}_c, \mathbf{b}_c$: Weights and biases for the color head. [S1]
 
 **Edge Cases and Pitfalls:**
-*   **Local Overfitting:** SIREN is prone to local overfitting to the last batch if sufficient coverage of the space is not maintained. This is why pi-GAN does not employ a patch-based discriminator (unlike GRAF) [S1, unofficial].
-*   **Conditioning:** Concatenation-based conditioning was found less expressive than FiLM conditioning, leading to lower image quality [S1, unofficial].
+*   **Local Overfitting:** SIREN is prone to local overfitting to the last batch if sufficient coverage of the space is not maintained. This is why pi-GAN does not employ a patch-based discriminator (unlike GRAF) [S1].
+*   **Conditioning:** Concatenation-based conditioning was found less expressive than FiLM conditioning, leading to lower image quality [S1].
 
 ## Subtopics
 
 ### SIREN Backbone
-Uses periodic sine activations to represent high-frequency details. Sets it apart from ReLU-based implicit representations. Choose when high-frequency detail recovery is needed. [S1, unofficial]
+Uses periodic sine activations to represent high-frequency details. Sets it apart from ReLU-based implicit representations. Choose when high-frequency detail recovery is needed. [S1]
 
 ### FiLM Conditioning
-Maps latent noise to layer-specific frequencies and phase shifts. Sets it apart from concatenation or additive conditioning. Choose for better expressivity in generative models. [S1, unofficial]
+Maps latent noise to layer-specific frequencies and phase shifts. Sets it apart from concatenation or additive conditioning. Choose for better expressivity in generative models. [S1]
 
 ### Progressive Growing
-Training strategy starting from low resolution and increasing. Sets it apart from fixed-resolution training. Choose to stabilize 3D GAN training and accelerate convergence. [S1, unofficial]
+Training strategy starting from low resolution and increasing. Sets it apart from fixed-resolution training. Choose to stabilize 3D GAN training and accelerate convergence. [S1]
 
 ## Operating characteristics
-*   **Time Complexity:** Training is computationally expensive due to the 3D nature of the representation and volume rendering. Progressive growing helps offset this complexity [S1, unofficial].
-*   **Memory Complexity:** High, as it stores a large MLP for the radiance field and requires sampling points in 3D space for every training step [S1, unofficial].
-*   **Performance:** Achieves state-of-the-art results on CelebA, Cats, and CARLA datasets for 3D-aware image synthesis [S1, unofficial].
-*   **Strengths:** View-consistent image synthesis; interpretable 3D proxy shapes can be extracted via marching cubes [S1, unofficial].
-*   **Limitations:** Proxy shapes may not be as high quality as those from explicit single-view reconstruction methods; prone to local overfitting if batch coverage is insufficient [S1, unofficial].
+*   **Time Complexity:** Training is computationally expensive due to the 3D nature of the representation and volume rendering. Progressive growing helps offset this complexity [S1].
+*   **Memory Complexity:** High, as it stores a large MLP for the radiance field and requires sampling points in 3D space for every training step [S1].
+*   **Performance:** Achieves state-of-the-art results on CelebA, Cats, and CARLA datasets for 3D-aware image synthesis [S1].
+*   **Strengths:** View-consistent image synthesis; interpretable 3D proxy shapes can be extracted via marching cubes [S1].
+*   **Limitations:** Proxy shapes may not be as high quality as those from explicit single-view reconstruction methods; prone to local overfitting if batch coverage is insufficient [S1].
 *   **When to use:** Unsupervised 3D-aware image generation from 2D images.
 *   **When not to use:** When explicit high-quality 3D geometry is required without post-processing, or when computational resources are severely limited.
 
 ## Background
-pi-GAN was introduced in 2021 by Tewari et al. as a novel generative model for high-quality 3D-aware image synthesis [S1, unofficial]. It builds on the success of SIREN (Sinusoidal Representation Networks) and StyleGAN, adapting them for 3D implicit representations. The method addresses the lack of photorealistic 3D training data and the view-inconsistency of traditional 2D GANs [S1, unofficial]. It is used for novel view synthesis and 3D-aware image generation [S1, unofficial].
+pi-GAN was introduced in 2021 by Tewari et al. as a novel generative model for high-quality 3D-aware image synthesis [S1]. It builds on the success of SIREN (Sinusoidal Representation Networks) and StyleGAN, adapting them for 3D implicit representations. The method addresses the lack of photorealistic 3D training data and the view-inconsistency of traditional 2D GANs [S1]. It is used for novel view synthesis and 3D-aware image generation [S1].
 
 ## Sources
-[S1] pi-GAN: Periodic Implicit Generative Adversarial Networks for 3D-Aware Image Synthesis, https://doi.org/10.1109/cvpr46437.2021.00574, fetched 2026-10-26 (unofficial)
+[S1] pi-GAN: Periodic Implicit Generative Adversarial Networks for 3D-Aware Image Synthesis, https://doi.org/10.1109/cvpr46437.2021.00574, fetched 2026-10-26

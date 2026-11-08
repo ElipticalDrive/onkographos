@@ -52,18 +52,18 @@ Adaptive Rendering Loss Regularization (AR-NeRF) is a method for few-shot Neural
 - **Step**: Supervise cache diffuse color $c_{\text{cache}}(\mathbf{x})$ and specular color $c_{\text{cache}}(\mathbf{x}, \omega_i)$ to match physically-based model colors $c_{\text{phys}}(\mathbf{x})$ and $c_{\text{phys}}(\mathbf{x}, \omega_i)$. Predict an additional output from the cache $c_{\text{irradiance}}(\mathbf{x}, \omega_o)$ and supervise it to match irradiance from the physically-based model (computed by setting BRDF to perfectly Lambertian with $a(\mathbf{x}) = 1$) [S3].
 
 ### Indirect Depth Supervision (KL Loss)
-- **Definition**: A regularization technique that uses depth priors to constrain the NeRF weights by aligning the probability distribution of rendering weights with the depth prior, specifically using KL divergence [S4, unofficial].
-- **Formula**: $L_{KL} = \sum_{i}^{N_r} \sum_{t=t_n}^{t_f} D(r_i) - \epsilon \log w_k \exp(-\frac{(t - D(r_i))^2}{2\hat{\sigma}^2}) \Delta t_k$, where $w_k$ are rendering weights, $t_k$ are sampled points, $\Delta t_k$ are distances, $D(r_i)$ is ground truth depth, $\epsilon$ is a kernel parameter, and $\hat{\sigma}$ is a variance parameter [S4, unofficial].
-- **Parameter**: $\epsilon(x)$: A kernel that integrates to one (a distribution) with a bounded domain parameterized by $\epsilon$ [S4, unofficial].
-- **Pitfall**: The URF loss (Urban-NeRF) has no open-source implementation, so KL loss is selected as the representative for indirect supervision [S4, unofficial].
+- **Definition**: A regularization technique that uses depth priors to constrain the NeRF weights by aligning the probability distribution of rendering weights with the depth prior, specifically using KL divergence [S4].
+- **Formula**: $L_{KL} = \sum_{i}^{N_r} \sum_{t=t_n}^{t_f} D(r_i) - \epsilon \log w_k \exp(-\frac{(t - D(r_i))^2}{2\hat{\sigma}^2}) \Delta t_k$, where $w_k$ are rendering weights, $t_k$ are sampled points, $\Delta t_k$ are distances, $D(r_i)$ is ground truth depth, $\epsilon$ is a kernel parameter, and $\hat{\sigma}$ is a variance parameter [S4].
+- **Parameter**: $\epsilon(x)$: A kernel that integrates to one (a distribution) with a bounded domain parameterized by $\epsilon$ [S4].
+- **Pitfall**: The URF loss (Urban-NeRF) has no open-source implementation, so KL loss is selected as the representative for indirect supervision [S4].
 
 ### Emptiness Loss on Weights
-- **Definition**: A ray regularization technique that applies emptiness loss to the NeRF weight $w_i$ [S5, unofficial].
-- **Pitfall**: Fails because $w_i$ in NeRF is a biased geometry proxy [S5, unofficial].
-- **Number**: Achieves 19.33 PSNR on DTU 3-view, performing worse than Model-C (20.01) and AR-NeRF (20.07) [S5, unofficial].
+- **Definition**: A ray regularization technique that applies emptiness loss to the NeRF weight $w_i$ [S5].
+- **Pitfall**: Fails because $w_i$ in NeRF is a biased geometry proxy [S5].
+- **Number**: Achieves 19.33 PSNR on DTU 3-view, performing worse than Model-C (20.01) and AR-NeRF (20.07) [S5].
 
 ### URF Loss
-- **Pitfall**: No open-source implementation exists for this loss [S4, unofficial].
+- **Pitfall**: No open-source implementation exists for this loss [S4].
 
 ## Background
 The problem of optimizing NeRFs from sparse or noisy data has been a central focus since the original NeRF paper [S1]. Early work identified that standard photometric loss alone leads to "floaters" and overfitting in unobserved regions [S1]. RegNeRF [8582-regnerf.md] was among the first to introduce explicit regularization terms (smoothness and normalizing flow priors) to constrain the MLP outputs [S1]. Subsequent works like Geometric Baseline Regularization [7475-geometric-baseline-regularization.md] and Diffusion-Regularized NeRF Training [7381-diffusion-regularized-nerf-training.md] expanded this by incorporating geometric consistency and generative priors, respectively. The field has since diversified into specialized losses for occlusion [8653-occlusion-eliminating-nerf-variant.md], multi-GPU scalability [10377-nerf-xl-multi-gpu-distortion-loss.md], and adaptive frequency alignment [10454-adaptive-rendering-loss-regularization.md].
@@ -72,5 +72,5 @@ The problem of optimizing NeRFs from sparse or noisy data has been a central foc
 [S1] AligNeRF: High-Fidelity Neural Radiance Fields via Alignment-Aware Training, https://doi.org/10.1109/cvpr52729.2023.00013, fetched 2026-10-26
 [S2] Simple-RF: Regularizing Sparse Input Radiance Fields with Simpler Solutions, https://arxiv.org/abs/2404.19015v5, fetched 2026-10-27
 [S3] Flash Cache: Reducing Bias in Radiance Cache Based Inverse Rendering, https://doi.org/10.1007/978-3-031-73390-1_2, fetched 2026-10-27
-[S4] Digging into Depth Priors for Outdoor Neural Radiance Fields, https://doi.org/10.1145/3581783.3612306, fetched 2026-10-30 (unofficial)
-[S5] Few-shot NeRF by Adaptive Rendering Loss Regularization, https://core.ac.uk/download/708671746.pdf, fetched 2026-10-30 (unofficial)
+[S4] Digging into Depth Priors for Outdoor Neural Radiance Fields, https://doi.org/10.1145/3581783.3612306, fetched 2026-10-30
+[S5] Few-shot NeRF by Adaptive Rendering Loss Regularization, https://core.ac.uk/download/708671746.pdf, fetched 2026-10-30

@@ -35,7 +35,7 @@ The optimization redesigns the thread organization and memory layout of the back
 ## Subtopics
 
 ### Backward Pass Optimization for Gaussian Splatting
-This variant, introduced in FaCT-GS, reformulates the backward pass in a per-Gaussian manner to eliminate write conflicts and warp stalls caused by per-pixel backward pass calculations [S2, unofficial]. It constrains the range of Gaussian splats using axis-aligned, rectangular bounding boxes with factored-in density to replace square bounding boxes, reducing overestimation for anisotropic/transparent Gaussians [S2, unofficial]. It also coalesces function parameters into compact `float4` structs, combining conics (projected covariances) with $\mu$ in the rasterizer to reduce memory traffic [S2, unofficial]. This approach achieves a 22x acceleration on an RTX 4070 Ti SUPER, reducing rasterization time from 210 ms to 9.3 ms for a 2K image [S2, unofficial].
+This variant, introduced in FaCT-GS, reformulates the backward pass in a per-Gaussian manner to eliminate write conflicts and warp stalls caused by per-pixel backward pass calculations [S2]. It constrains the range of Gaussian splats using axis-aligned, rectangular bounding boxes with factored-in density to replace square bounding boxes, reducing overestimation for anisotropic/transparent Gaussians [S2]. It also coalesces function parameters into compact `float4` structs, combining conics (projected covariances) with $\mu$ in the rasterizer to reduce memory traffic [S2]. This approach achieves a 22x acceleration on an RTX 4070 Ti SUPER, reducing rasterization time from 210 ms to 9.3 ms for a 2K image [S2].
 
 ## Operating characteristics
 *   **Time Complexity:** The optimization reduces the constant factor of the backward pass execution time by minimizing memory access overhead [S1, unofficial].
@@ -51,4 +51,4 @@ This method was introduced in "Loss-Guided Density Control and Efficient Backwar
 
 ## Sources
 [S1] Loss-Guided Density Control and Efficient Backward Optimisation for Compact Gaussian Splatting, https://doi.org/10.21203/rs.3.rs-10572680/v1, fetched 2026-10-26 (unofficial)
-[S2] FaCT-GS: Fast and Scalable CT Reconstruction with Gaussian Splatting, https://doi.org/10.1007/978-3-032-37464-6_13, fetched 2026-10-26 (unofficial)
+[S2] FaCT-GS: Fast and Scalable CT Reconstruction with Gaussian Splatting, https://doi.org/10.1007/978-3-032-37464-6_13, fetched 2026-10-26

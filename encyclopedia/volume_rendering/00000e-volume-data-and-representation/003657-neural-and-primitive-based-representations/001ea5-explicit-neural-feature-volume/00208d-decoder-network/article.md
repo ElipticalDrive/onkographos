@@ -1,0 +1,173 @@
+# Decoder Network
+
+Also called: Feature-to-Density Decoder, Neural Feature Decoder
+
+## Overview
+A neural network component that transforms a low-dimensional feature vector into a single scalar density value, acting as a regularizer to improve reconstruction quality in ill-posed or difficult conditions [S1]. It distinguishes itself from sibling methods by explicitly mapping a stored tensor feature to output via a learnable non-linear function, whereas [Density Activation](2421-density-activation.md) may use fixed or simpler activation functions, and [Explicit Neural Feature Volume](1838-explicit-neural-feature-volume.md) defines the storage mechanism rather than the decoding logic.
+
+## How it works
+**Inputs and Outputs:**
+- Input: A feature vector $\mathbf{f} \in \mathbb{R}^d$. In the standard implementation, $d=8$ [S1]. In the Octree variant, the input is a 4D feature vector [S2].
+- Output: A scalar density value $\rho \in [0, 1]$ (or unbounded depending on activation) [S1, S2].
+
+**Data Structures:**
+- **Standard Decoder:** A multi-layer perceptron (MLP) or small neural network. The specific architecture is not detailed in [S1], but it maps 8 inputs to 1 output.
+- **Octree Node Decoder:** A 3D convolutional layer for the current node and 8 convolutional layers for its children, followed by batch normalization [S2].
+- **Octree Leaf Decoder:** Stacked transposed 3D convolutional layers [S2].
+
+**Steps:**
+1. **Standard Decoder Mapping:**
+   - Take the 8-element feature vector $\mathbf{f}$ [S1].
+   - Pass $\mathbf{f}$ through the decoder network layers.
+   - Output the resulting scalar density value [S1].
+
+2. **Octree Node Decoder (Recursive):**
+   - Input: 4D feature vector for a node [S2].
+   - If the node is an **interior node**:
+     - Apply a 3D convolutional layer to the node's feature to produce features for the node itself.
+     - Apply a separate convolutional layer for each of the 8 child nodes to produce their features.
+     - Apply batch normalization to the outputs [S2].
+     - Recursively apply the node decoder to each child node [S2].
+   - If the node is a **leaf node**:
+     - If the leaf is "empty" or "full", skip decoding [S2].
+     - If the leaf is "mixed", apply the leaf decoder [S2].
+
+3. **Octree Leaf Decoder:**
+   - Input: Feature vector for a mixed leaf node [S2].
+   - Apply stacked transposed 3D convolutional layers with kernel size 4, stride 2, and padding 1 [S2].
+   - After each layer (except the last), apply batch normalization and ELU activation [S2].
+   - The final layer uses sigmoid activation without batch normalization [S2].
+   - Output: Explicit binary occupancy voxel grid of dimension $k \times k \times k$ [S2].
+
+**Parameters:**
+- **Feature Vector Size:** 8 elements for the standard decoder [S1].
+- **Leaf Dimension ($k$):** The output voxel size enlarged from 4 to $k$ by the leaf decoder operations [S2].
+- **Octree Weights:** Node decoders for different depths do *not* share weights [S2].
+
+**Pitfalls:**
+- **Blurry Artifacts:** Without the decoder network, blurry artifacts appear in the reconstruction, similar to those seen in iterative reconstruction methods [S1].
+- **Weight Sharing:** In the Octree variant, failing to recognize that node decoders for different depths do not share weights can lead to incorrect implementation or memory overestimation [S2].
+- **Leaf Classification:** Incorrectly classifying a leaf as "mixed" when it is empty or full leads to unnecessary computation; conversely, skipping a mixed leaf loses detail [S2].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+
+class StandardDecoder(nn.Module):
+    """
+    Standard decoder mapping 8-element feature vector to density.
+    Architecture inferred from [S1]: MLP mapping 8 -> 1.
+    Specific layer sizes not given in sources.
+    """
+    def __init__(self):
+        super().__init__()
+        # Placeholder for actual architecture not specified in [S1]
+        # Typically: Linear(8, hidden), Activation, Linear(hidden, 1)
+        self.decoder = nn.Sequential(
+            nn.Linear(8, 16),
+            nn.ReLU(),
+            nn.Linear(16, 1)
+        )
+
+    def forward(self, features):
+        # features: (N, 8)
+        density = self.decoder(features)
+        return density
+
+class OctreeNodeDecoder(nn.Module):
+    """
+    Node decoder for interior nodes.
+    Applies conv layers for self and 8 children.
+    """
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        # Conv for the node itself
+        self.conv_self = nn.Conv3d(in_channels, out_channels, kernel_size=1)
+        # Conv layers for 8 children
+        self.conv_children = nn.ModuleList([
+            nn.Conv3d(in_channels, out_channels, kernel_size=1) for _ in range(8)
+        ])
+        self.bn = nn.BatchNorm3d(out_channels)
+
+    def forward(self, features):
+        # features: (N, in_channels, D, H, W)
+        self_feat = self.conv_self(features)
+        child_feats = []
+        for conv in self.conv_children:
+            child_feats.append(conv(features))
+        
+        # Stack self and children? Or process separately?
+        # [S2] says "convolutional layer for the node itself and a convolutional 
+        # layer for each its 8 child nodes followed by a batch normalization layer"
+        # Assuming batch norm is applied to each output.
+        
+        self_feat = self.bn(self_feat)
+        self_feat = torch.relu(self_feat) # Activation implied by standard practice, 
+                                          # though [S2] only specifies BN for node decoder.
+                                          # [S2] mentions ELU for leaf decoder specifically.
+                                          # We assume ReLU or similar for intermediate.
+        
+        decoded_children = []
+        for child_feat in child_feats:
+            child_feat = self.bn(child_feat)
+            child_feat = torch.relu(child_feat)
+            decoded_children.append(child_feat)
+            
+        return self_feat, decoded_children
+
+class OctreeLeafDecoder(nn.Module):
+    """
+    Leaf decoder for mixed leaves.
+    Transposed convs: kernel=4, stride=2, padding=1.
+    """
+    def __init__(self, in_channels, out_channels, leaf_dim_k):
+        super().__init__()
+        # Determine number of transposed conv layers to go from 4 to k
+        # Each transposed conv with stride 2 doubles size.
+        # 4 -> 8 -> 16 ... -> k
+        # Number of steps = log2(k/4)
+        num_layers = int(np.log2(leaf_dim_k / 4))
+        
+        layers = []
+        curr_in = in_channels
+        curr_out = out_channels
+        
+        for i in range(num_layers):
+            layers.append(nn.ConvTranspose3d(curr_in, curr_out, kernel_size=4, stride=2, padding=1))
+            if i < num_layers - 1:
+                layers.append(nn.BatchNorm3d(curr_out))
+                layers.append(nn.ELU(inplace=True))
+            else:
+                # Final layer: sigmoid, no BN
+                pass
+        
+        self.decoder = nn.Sequential(*layers)
+        self.final_act = nn.Sigmoid()
+
+    def forward(self, features):
+        x = self.decoder(features)
+        x = self.final_act(x)
+        return x
+```
+
+## Subtopics
+
+### Octree Node Decoder
+A recursive decoder applied to octree nodes to transform 4D feature vectors back to explicit binary occupancy voxel grids or intermediate features, distinguishing between interior nodes and leaf nodes [S2]. It uses 3D convolutional layers for the node and its 8 children, followed by batch normalization [S2]. Choose this when using an octree-based representation to efficiently decode sparse structures. It differs from the standard decoder by operating on spatially structured 3D features and recursively generating child features [S2].
+
+## Operating characteristics
+- **Complexity:** The standard decoder is $O(1)$ with respect to spatial resolution, as it processes a fixed-size feature vector (8 elements) [S1]. The Octree Node Decoder complexity depends on the depth of the octree and the number of non-empty nodes, with weight sharing disabled across depths [S2].
+- **Performance:** The decoder variant allows for a coarser grid resolution (e.g., $8 \times 173$) compared to a no-decoder variant ($1 \times 333$) while maintaining the same total number of variables, yet achieving better reconstruction accuracy [S1].
+- **Strengths:** Regularizes reconstruction, reducing blurry artifacts common in iterative methods or low-resolution feature grids [S1].
+- **Limitations:** Requires training a neural network component; without it, quality degrades significantly in difficult conditions [S1].
+
+## Background
+The decoder network was introduced in the context of Neural Adaptive Tomography (NeAT) to analyze the usefulness of neural feature volumes with respect to reconstruction quality and regularization [S1]. It was used to compare explicit feature storage against iterative reconstruction methods, demonstrating that the decoder acts as a regularizer [S1]. The Octree variant was introduced in RocNet for efficient 3D deep representation using recursive octree networks [S2].
+
+## Sources
+[S1] NeAT: Neural Adaptive Tomography, https://doi.org/10.48550/arxiv.2202.02171, fetched 2026-10-26
+[S2] RocNet: Recursive Octree Network for Efficient 3D Deep Representation, https://doi.org/10.1109/3dv50981.2020.00051, fetched 2026-10-26

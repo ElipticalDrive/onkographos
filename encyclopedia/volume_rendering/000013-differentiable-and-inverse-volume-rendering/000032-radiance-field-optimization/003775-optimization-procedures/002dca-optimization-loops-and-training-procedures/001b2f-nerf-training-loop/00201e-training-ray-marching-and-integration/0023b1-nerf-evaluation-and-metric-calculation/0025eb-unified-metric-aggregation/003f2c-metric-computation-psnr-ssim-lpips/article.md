@@ -2,7 +2,7 @@
 Also called: Image quality metrics, PSNR, SSIM, LPIPS Computation, Photorealistic Metrics, Rendering Quality Metrics
 
 ## Overview
-Computes evaluation metrics (PSNR, SSIM, LPIPS) between the ground truth and predicted images [S1, unofficial]. These metrics compare synthesized views at testing viewpoints with the ground truth [S2, unofficial]. Unlike [Unified Metric Aggregation](3644-unified-metric-aggregation.md) which averages scores, this method calculates the raw per-pixel or per-tensor values for each image pair.
+Computes evaluation metrics (PSNR, SSIM, LPIPS) between the ground truth and predicted images [S1, unofficial]. These metrics compare synthesized views at testing viewpoints with the ground truth [S2]. Unlike [Unified Metric Aggregation](3644-unified-metric-aggregation.md) which averages scores, this method calculates the raw per-pixel or per-tensor values for each image pair.
 
 ## How it works
 **Inputs:**
@@ -26,9 +26,9 @@ Computes evaluation metrics (PSNR, SSIM, LPIPS) between the ground truth and pre
 6. **Compute LPIPS:** Calculate Learned Perceptual Image Patch Similarity between the reshaped ground truth and predicted images.
 
 **Formulas:**
-- **PSNR:** $PSNR = 10 \cdot \log_{10}\left(\frac{MAX_I^2}{MSE}\right)$, where $MAX_I$ is the maximum possible pixel value (1.0 for normalized, 255 for 8-bit) and $MSE$ is the Mean Squared Error between the two images [S2, unofficial].
-- **SSIM:** Calculated using the standard SSIM index formula involving luminance, contrast, and structure comparisons between local windows of the images [S2, unofficial].
-- **LPIPS:** Calculated using a learned perceptual metric based on deep network features [S2, unofficial].
+- **PSNR:** $PSNR = 10 \cdot \log_{10}\left(\frac{MAX_I^2}{MSE}\right)$, where $MAX_I$ is the maximum possible pixel value (1.0 for normalized, 255 for 8-bit) and $MSE$ is the Mean Squared Error between the two images [S2].
+- **SSIM:** Calculated using the standard SSIM index formula involving luminance, contrast, and structure comparisons between local windows of the images [S2].
+- **LPIPS:** Calculated using a learned perceptual metric based on deep network features [S2].
 
 **Parameters:**
 - `MAX_I`: 1.0 for normalized images, 255 for 8-bit images.
@@ -117,8 +117,8 @@ Defines the specific protocol for LPIPS evaluation, including network backbone a
 - **When to use:** Use PSNR/SSIM for quick checks and LPIPS for final evaluation.
 
 ## Background
-Originated in the context of novel view synthesis and neural radiance fields (NeRF) evaluation [S2, unofficial]. Commonly used in computer vision for comparing synthesized views with ground truth [S2, unofficial].
+Originated in the context of novel view synthesis and neural radiance fields (NeRF) evaluation [S2]. Commonly used in computer vision for comparing synthesized views with ground truth [S2].
 
 ## Sources
 [S1] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)
-[S2] Digging into Depth Priors for Outdoor Neural Radiance Fields, https://doi.org/10.1145/3581783.3612306, fetched 2026-10-30 (unofficial)
+[S2] Digging into Depth Priors for Outdoor Neural Radiance Fields, https://doi.org/10.1145/3581783.3612306, fetched 2026-10-30

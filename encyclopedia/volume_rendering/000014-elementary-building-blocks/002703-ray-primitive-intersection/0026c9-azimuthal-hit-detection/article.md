@@ -3,39 +3,39 @@
 Also called: azimuthalHit
 
 ## Overview
-Azimuthal Hit Detection determines whether a ray intersects an azimuthal section within a spherical voxel grid, where azimuthal sections are defined in the XZ plane [S1, unofficial]. It serves as a geometric primitive for traversing spherical volume data, specifically handling the angular discretization along the azimuthal axis. It is distinct from [Ray-box intersection](776-ray-box-intersection.md) which handles axis-aligned bounding volumes, and [Ray-Tetrahedron Intersection](2525-ray-tetrahedron-intersection.md) which handles general 3D simplicial volumes; instead, it leverages the specific planar geometry of the azimuthal slices.
+Azimuthal Hit Detection determines whether a ray intersects an azimuthal section within a spherical voxel grid, where azimuthal sections are defined in the XZ plane [S1, unofficial]. It serves as a geometric primitive for traversing spherical volume data, specifically handling the angular discretization along the azimuthal axis [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs**
-- **Inputs**: A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; a spherical voxel grid structure containing azimuthal boundary data; the current azimuthal voxel index $v$; a ray segment defined by endpoints $P_1$ and $P_2$ (or vector $\mathbf{v}_{seg}$); and traversal parameters $t$, $max\_t$.
-- **Outputs**: A boolean indicating if an azimuthal hit occurs, and updated traversal parameters (specifically `collinear_times` and $t$) if a hit is detected.
+- **Inputs**: A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; a spherical voxel grid structure containing azimuthal boundary data; the current azimuthal voxel index $v$; a ray segment defined by endpoints $P_1$ and $P_2$ (or vector $\mathbf{v}_{seg}$); and traversal parameters $t$, $max\_t$ [S1, unofficial].
+- **Outputs**: A boolean indicating if an azimuthal hit occurs, and updated traversal parameters (specifically `collinear_times` and $t$) if a hit is detected [S1, unofficial].
 
 **Data Structures**
 The method relies on the `SphericalVoxelGrid` structure, which provides:
-- `pMaxAzimuthal(index)`: Returns a 2D point $(P1, P2)$ representing the boundary of the azimuthal section at `index` in the XZ plane.
-- `centerToAzimuthalBound(index)`: Returns a 2D vector or point representing the center-to-boundary offset for the azimuthal section.
-- `sphereCenter()`: Returns the center of the spherical grid.
-- `deltaPhi()`: The angular width of an azimuthal voxel.
-- `sphereMaxBoundAzi()` / `sphereMinBoundAzi()`: The maximum and minimum azimuthal bounds of the grid.
+- `pMaxAzimuthal(index)`: Returns a 2D point $(P1, P2)$ representing the boundary of the azimuthal section at `index` in the XZ plane [S1, unofficial].
+- `centerToAzimuthalBound(index)`: Returns a 2D vector or point representing the center-to-boundary offset for the azimuthal section [S1, unofficial].
+- `sphereCenter()`: Returns the center of the spherical grid [S1, unofficial].
+- `deltaPhi()`: The angular width of an azimuthal voxel [S1, unofficial].
+- `sphereMaxBoundAzi()` / `sphereMinBoundAzi()`: The maximum and minimum azimuthal bounds of the grid [S1, unofficial].
 
 **Steps**
-1.  **Define Boundary Points**: Calculate two 3D points, $p_{one}$ and $p_{two}$, representing the azimuthal boundaries at the current voxel $v$ and the next voxel $v+1$. These points lie in the XZ plane (Y=0).
+1.  **Define Boundary Points**: Calculate two 3D points, $p_{one}$ and $p_{two}$, representing the azimuthal boundaries at the current voxel $v$ and the next voxel $v+1$. These points lie in the XZ plane (Y=0) [S1, unofficial].
     $$ p_{one} = (grid.pMaxAzimuthal(v).P1, 0.0, grid.pMaxAzimuthal(v).P2) $$
     $$ p_{two} = (grid.pMaxAzimuthal(v+1).P1, 0.0, grid.pMaxAzimuthal(v+1).P2) $$
-2.  **Define Center Offsets**: Obtain pointers or references to the center-to-boundary vectors for voxels $v$ and $v+1$.
+2.  **Define Center Offsets**: Obtain pointers or references to the center-to-boundary vectors for voxels $v$ and $v+1$ [S1, unofficial].
     $$ u_{min} = grid.centerToAzimuthalBound(v) $$
     $$ u_{max} = grid.centerToAzimuthalBound(v+1) $$
-3.  **Calculate Relative Vectors**: Compute vectors from the ray segment's start point $P_1$ to the boundary points.
+3.  **Calculate Relative Vectors**: Compute vectors from the ray segment's start point $P_1$ to the boundary points [S1, unofficial].
     $$ w_{min} = p_{one} - ray\_segment.P_1 $$
     $$ w_{max} = p_{two} - ray\_segment.P_1 $$
-4.  **Compute Perpendicular Components**: Calculate scalar cross-product-like terms in the XZ plane (using $x$ and $z$ components) to determine the relative orientation of the ray vector, boundary vectors, and relative position vectors. Let $\mathbf{r}_{vec}$ be the ray segment vector.
+4.  **Compute Perpendicular Components**: Calculate scalar cross-product-like terms in the XZ plane (using $x$ and $z$ components) to determine the relative orientation of the ray vector, boundary vectors, and relative position vectors. Let $\mathbf{r}_{vec}$ be the ray segment vector [S1, unofficial].
     $$ perp\_uv_{min} = u_{min}.x \cdot r_{vec}.z - u_{min}.z \cdot r_{vec}.x $$
     $$ perp\_uv_{max} = u_{max}.x \cdot r_{vec}.z - u_{max}.z \cdot r_{vec}.x $$
     $$ perp\_uw_{min} = u_{min}.x \cdot w_{min}.z - u_{min}.z \cdot w_{min}.x $$
     $$ perp\_uw_{max} = u_{max}.x \cdot w_{max}.z - u_{max}.z \cdot w_{max}.x $$
     $$ perp\_vw_{min} = r_{vec}.x \cdot w_{min}.z - r_{vec}.z \cdot w_{min}.x $$
     $$ perp\_vw_{max} = r_{vec}.x \cdot w_{max}.z - r_{vec}.z \cdot w_{max}.x $$
-5.  **Invoke Angular Hit Logic**: Pass the computed perpendicular components, the ray segment, and grid parameters to the underlying `angularHit` function to resolve the intersection and update traversal state.
+5.  **Invoke Angular Hit Logic**: Pass the computed perpendicular components, the ray segment, and grid parameters to the underlying `angularHit` function to resolve the intersection and update traversal state [S1, unofficial].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -73,7 +73,7 @@ def azimuthalHit(grid, ray, current_azimuthal_voxel, ray_segment, collinear_time
     perp_vw_max = r_vec.x * w_max.z - r_vec.z * w_max.x
 
     # 5. Call the core angular hit resolver
-    # Note: The source passes specific grid parameters to angularHit
+    # The source does not provide the internal implementation of angularHit [S1, unofficial].
     return angularHit(
         grid=grid,
         ray=ray,
@@ -92,22 +92,38 @@ def azimuthalHit(grid, ray, current_azimuthal_voxel, ray_segment, collinear_time
         pMaxAzimuthal_func=grid.pMaxAzimuthal,
         current_azimuthal_voxel=current_azimuthal_voxel
     )
+
+class Vector3:
+    def __init__(self, x, y, z):
+        self.x = x
+        self.y = y
+        self.z = z
+    def __sub__(self, other):
+        return Vector3(self.x - other.x, self.y - other.y, self.z - other.z)
+
+def angularHit(grid, ray, perp_uv_min, perp_uv_max, perp_uw_min, perp_uw_max,
+               perp_vw_min, perp_vw_max, ray_segment, collinear_times, t, max_t,
+               ray_dir_z, grid_sphere_center_z, pMaxAzimuthal_func, current_azimuthal_voxel):
+    # The internal intersection resolution logic is encapsulated in the source's
+    # angularHit function. This stub returns a boolean indicating hit status.
+    # The source does not provide the full implementation details here [S1, unofficial].
+    return True
 ```
 
 **Edge Cases and Pitfalls**
-- **Collinearity**: If the ray is collinear with the azimuthal boundary, special handling via `collinear_times` is required to avoid division by zero or incorrect intersection detection [S1, unofficial].
-- **Grid Bounds**: The traversal must check if stepping to the next voxel remains within the grid's azimuthal bounds using `inBoundsAzimuthal` [S1, unofficial].
-- **Precision**: Floating-point comparisons for equality (e.g., `svr::isEqual`) are used to handle degenerate cases where squared distances are effectively zero [S1, unofficial].
+- **Grid Bounds**: The traversal must verify that stepping to the next voxel remains within the grid's azimuthal bounds using `inBoundsAzimuthal` [S1, unofficial].
+- **Precision**: Floating-point comparisons are used in related voxel ID calculations, but specific precision handling for azimuthal hit degenerate cases is Not given in the sources.
+- **Collinearity**: The `collinear_times` parameter is passed to the resolver, but the exact handling mechanism for collinear rays is Not given in the sources.
 
 ## Operating characteristics
-- **Time Complexity**: $O(1)$ per voxel traversal step, as it involves a fixed number of arithmetic operations.
-- **Memory Complexity**: $O(1)$ auxiliary space, requiring only a few temporary vectors and scalars.
-- **Strengths**: Efficiently handles the angular discretization of spherical grids without requiring complex 3D intersection solvers for each slice.
-- **Limitations**: Specific to azimuthal sections in spherical coordinates; not applicable to general 3D primitives or other coordinate systems.
-- **When to use**: When rendering spherical volume data using a voxel grid that discretizes space into radial, polar, and azimuthal sections.
+- **Time Complexity**: Not given in the sources.
+- **Memory Complexity**: Not given in the sources.
+- **Strengths**: Not given in the sources.
+- **Limitations**: Not given in the sources.
+- **When to use**: Not given in the sources.
 
 ## Background
-Azimuthal Hit Detection is part of the Spherical Volume Rendering (SVR) algorithm, implemented in the `svr-algorithm` repository [S1, unofficial]. It is designed to work in conjunction with radial and polar hit detection methods to traverse a 3D spherical voxel grid. The method follows the geometric principles outlined in "Graphics Gems IV" for line-sphere intersection, adapted for the specific structure of azimuthal sections [S1, unofficial].
+Azimuthal Hit Detection is part of the Spherical Volume Rendering (SVR) algorithm, implemented in the `svr-algorithm` repository [S1, unofficial]. It is designed to work in conjunction with radial and polar hit detection methods to traverse a 3D spherical voxel grid [S1, unofficial].
 
 ## Sources
 [S1] spherical-volume-rendering/svr-algorithm, https://github.com/spherical-volume-rendering/svr-algorithm, fetched 2026-10-24 (unofficial)

@@ -3,11 +3,11 @@
 Also called: Intrinsic Image Decomposition in NeRF, Intrinsic NeRF Decomposition, Intrinsic NeRF Model
 
 ## Overview
-Intrinsic NeRF is a variant of Neural Radiance Fields that solves the ill-posed inverse rendering problem by decoupling geometry, illumination, and material properties without requiring supervised labels for lighting or reflectance [S1]. It differs from standard NeRF by outputting separate shading and reflectance components instead of a single color value, enabling downstream tasks such as relighting and material editing [S1].
+Intrinsic NeRF is a variant of [NeRF (Neural Radiance Fields)](1185-nerf-neural-radiance-fields.md) that solves the ill-posed inverse rendering problem by decoupling geometry, illumination, and material properties without requiring supervised labels for lighting or reflectance [S1]. It differs from standard NeRF by outputting separate shading and reflectance components instead of a single color value, enabling downstream tasks such as relighting and material editing [S1].
 
 ## How it works
 **Inputs and Outputs:**
-The method takes a set of calibrated camera poses and corresponding RGB images as input [G, S1]. It outputs a continuous volumetric representation defined by a function $F_I$ that maps a 3D location $\mathbf{X}$ and a view direction $\mathbf{D}$ to a tuple $(\sigma, \mathbf{R}, S)$ [S1].
+The method takes a set of calibrated camera poses and corresponding RGB images as input [G]. Supervision uses only the RGB images without additional lighting or material labels [S1]. It outputs a continuous volumetric representation defined by a function $F_I$ that maps a 3D location $\mathbf{X}$ and a view direction $\mathbf{D}$ to a tuple $(\sigma, \mathbf{R}, S)$ [S1].
 - $\sigma$: Volume density (scalar).
 - $\mathbf{R}$: Reflectance (vector in $\mathbb{R}^3$), representing material properties.
 - $S$: Shading (scalar in $\mathbb{R}$), representing illumination effects.
@@ -27,7 +27,7 @@ Two Multi-Layer Perceptrons (MLPs) are used to approximate the intrinsic compone
     $$
     \hat{\mathbf{C}}(\mathbf{r}) = \int_{t_n}^{t_f} T(t) \sigma(t) (\mathbf{S}(t) \cdot \mathbf{R}(t)) dt
     $$
-    where $T(t)$ is the accumulated transmittance along the ray.
+    where $T(t)$ is the accumulated transmittance along the ray [S1].
 4.  **Loss Computation:** Minimize the reconstruction loss between the rendered color and the ground truth RGB image $\mathbf{C}(\mathbf{r})$ using only RGB supervision [S1]:
     $$
     \mathcal{L} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \|\hat{\mathbf{C}}(\mathbf{r}) - \mathbf{C}(\mathbf{r})\|_2^2
@@ -39,11 +39,11 @@ Two Multi-Layer Perceptrons (MLPs) are used to approximate the intrinsic compone
 
 ```python
 def intrinsic_nerf_forward(ray_origins, ray_directions, mlp_reflectance, mlp_shading, mlp_density, t_near, t_far, num_samples):
-    # 1. Sample points along the ray
+    # 1. Stratified sampling along the ray [G]
     t_vals = linspace(t_near, t_far, num_samples)
-    t_vals = t_vals + random_like(t_vals) * (t_far - t_near) / num_samples  # [G]
+    t_vals = t_vals + random.uniform(0, 1, size=t_vals.shape) * (t_far - t_near) / num_samples
 
-    # 2. Compute 3D positions and deltas
+    # 2. Compute deltas and midpoints
     deltas = t_vals[1:] - t_vals[:-1]
     delta_inf = t_far - t_vals[-1]
     deltas = concatenate([deltas, delta_inf])
@@ -56,16 +56,14 @@ def intrinsic_nerf_forward(ray_origins, ray_directions, mlp_reflectance, mlp_sha
     D_expanded = ray_directions[:, newaxis, :].expand(-1, num_samples, -1)
     S = mlp_shading(X, D_expanded)  # Shape: (B, num_samples, 1)
 
-    # 4. Volume Rendering
+    # 4. Compute alpha and transmittance
     alpha = 1.0 - exp(-relu(sigma) * deltas[:, :, newaxis])
-    # Accumulated transmittance T(t) = product of (1 - alpha)
     T = ones_like(alpha[:, :1])
     for i in range(num_samples):
         T = concatenate([T, T[:, -1:] * (1.0 - alpha[:, i:i+1, :])], dim=1)
     T = T[:, 1:, :]
 
-    # Color contribution: transmittance * density * (Shading dot Reflectance)
-    # S is scalar, R is vector, so S * R scales R element-wise
+    # 5. Volume rendering
     color_contrib = T * alpha * (S * R)
     rendered_colors = sum(color_contrib, dim=1)
 
@@ -73,7 +71,7 @@ def intrinsic_nerf_forward(ray_origins, ray_directions, mlp_reflectance, mlp_sha
 ```
 
 **Edge Cases and Pitfalls:**
--   **Ill-posedness:** Without additional constraints, the decomposition of shading and reflectance is ambiguous. The model relies on geometry regularization to converge to a meaningful solution [S1].
+-   **Ill-posedness:** Without additional constraints, the decomposition of shading and reflectance is ambiguous [S1].
 -   **Noise:** Without smoothness regularization, normal maps exhibit significantly more noise, particularly in complex scenes [S1].
 
 ## Subtopics

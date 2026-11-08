@@ -3,97 +3,74 @@
 Also called: Normal Rendering, Normal Shader, SDF Normal Integrator, sdf-normal
 
 ## Overview
-The Normal Integrator is a visualization technique that renders the surface normal vector of a geometry as an RGB color image. It solves the problem of debugging or inspecting surface orientation by mapping the normal components from the range $[-1, 1]$ to the color channel range $[0, 1]$ (or $[0, 255]$) [S1, S3, unofficial]. It is distinct from the parent [Normal Shading](1831-normal-shading.md) method, which visualizes normals by taking the absolute value of components and clamping to $[0, 1]$, whereas the Normal Integrator preserves the sign information of the normal vector through a linear shift-and-scale mapping [S1, S3, unofficial].
+The Normal Integrator is a visualization technique that renders the surface normal vector of a geometry as an RGB color image [S1, S2, S3, unofficial]. It maps the normal components from the range $[-1, 1]$ to the color channel range $[0, 1]$ or $[0, 255]$ for debugging or artistic purposes [S1, S2, S3, unofficial]. It is distinct from the parent [Normal Shading](1831-normal-shading.md), which visualizes normals by taking the absolute value of each component and clamping to $[0, 1]$, whereas the Normal Integrator preserves the sign information through a linear shift-and-scale mapping [S1, S3, unofficial].
 
 ## How it works
 
 ### Inputs and Outputs
-*   **Input**: A ray $r(t) = o + t \cdot d$ for each pixel, and a scene representation (SDF or voxel/octree structure) capable of providing surface normal vectors at intersection points.
-*   **Output**: An image buffer where each pixel stores an RGB color representing the surface normal.
+*   **Input**: A ray $r(t) = o + t \cdot d$ for each pixel, and a scene representation (SDF, voxel, or mesh list) capable of providing surface normal vectors at intersection points [S1, S2, S3, unofficial].
+*   **Output**: An image buffer or radiance accumulator where each pixel stores an RGB color representing the surface normal [S1, S3, unofficial].
 
 ### Data Structures
-The implementation relies on the intersection data structure returned by the scene's ray intersection routine. Based on the sources, this structure (`SurfaceInteraction3f` or similar) contains:
-*   `n`: A 3D vector representing the surface normal at the intersection point.
-*   `valid_primary` (or similar flag): A boolean indicating if a valid primary intersection was found.
+The implementation relies on the intersection data structure returned by the scene's ray intersection routine [S3, unofficial]. Based on the sources, this structure contains:
+*   `n`: A 3D vector representing the surface normal at the intersection point [S1, S3, unofficial].
+*   `valid_primary`: A boolean or flag indicating if a valid primary intersection was found [S3, unofficial].
 
 ### Steps
-1.  **Ray Intersection**: For each pixel, cast a ray into the scene. Perform ray intersection against the SDF or voxel structure to find the closest surface intersection [S2, S3, unofficial].
-    *   If using an octree/voxel structure, traverse the tree until a leaf node with data is found [S1, unofficial].
-    *   If no intersection is found, return the background color (typically black) [S2, S3, unofficial].
+1.  **Ray Intersection**: For each pixel, cast a ray into the scene and perform intersection against the scene representation to find the closest surface intersection [S1, S2, S3, unofficial]. If no intersection is found, return the background color (typically black) [S2, S3, unofficial].
 2.  **Normal Retrieval**: Extract the normal vector $\mathbf{n}$ from the intersection result [S1, S3, unofficial].
-3.  **Normal Orientation**: Ensure the normal points against the ray direction (i.e., the dot product of the normal and ray direction is negative). If $\mathbf{n} \cdot \mathbf{d} > 0$, negate the normal: $\mathbf{n} = -\mathbf{n}$ [S3, unofficial].
-4.  **Coordinate System Adjustment**: Some implementations negate the X and Z components of the normal to align with specific coordinate system conventions (e.g., converting from a right-handed to left-handed system or matching a specific shader expectation):
-    $$ \mathbf{n}' = (-n_x, n_y, -n_z) $$
-    [S3, unofficial]. Note: This step is specific to certain implementations (like the one in [S3, unofficial]) and may not be universal. The core mapping logic remains the same regardless of this rotation.
-5.  **Color Mapping**: Map the normal components from $[-1, 1]$ to $[0, 1]$ using the formula:
-    $$ C = \frac{\mathbf{n}' + 1}{2} $$
-    where $C$ is the color vector $(R, G, B)$ [S2, S3, unofficial].
-    *   Alternatively, for 8-bit integer output:
-        $$ R = \lfloor 255 \cdot \frac{n'_x + 1}{2} \rfloor $$
-        $$ G = \lfloor 255 \cdot \frac{n'_y + 1}{2} \rfloor $$
-        $$ B = \lfloor 255 \cdot \frac{n'_z + 1}{2} \rfloor $$
-    [S1, unofficial].
-6.  **Write Output**: Store the resulting color in the image buffer [S1, S3, unofficial].
+3.  **Normal Orientation**: Ensure the normal points against the ray direction. If $\mathbf{n} \cdot \mathbf{d} > 0$, negate the normal: $\mathbf{n} = -\mathbf{n}$ [S3, unofficial].
+4.  **Coordinate System Adjustment**: Some implementations negate the X and Z components of the normal to align with specific coordinate system conventions: $\mathbf{n}' = (-n_x, n_y, -n_z)$ [S3, unofficial].
+5.  **Color Mapping**: Map the normal components from $[-1, 1]$ to $[0, 1]$ using the formula: $C = \frac{\mathbf{n}' + 1}{2}$, where $C$ is the color vector $(R, G, B)$ [S2, S3, unofficial]. For 8-bit integer output: $R = \lfloor 255 \cdot \frac{n'_x + 1}{2} \rfloor$, $G = \lfloor 255 \cdot \frac{n'_y + 1}{2} \rfloor$, $B = \lfloor 255 \cdot \frac{n'_z + 1}{2} \rfloor$ [S1, unofficial].
+6.  **Write Output**: Store or accumulate the resulting color in the image buffer or radiance accumulator [S1, S3, unofficial].
 
 ### Pseudocode
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def normal_integrator(ray, scene):
-    """
-    Renders the surface normal as an RGB color.
-    
-    Args:
-        ray: Ray object with origin 'o' and direction 'd'.
-        scene: Scene object with method 'ray_intersect' returning SurfaceInteraction.
-        
-    Returns:
-        tuple: (R, G, B) color values in range [0, 1].
-    """
+def normal_integrator(ray_origin, ray_direction, scene):
     # 1. Ray Intersection
-    itx = scene.ray_intersect(ray)
-    
-    # 2. Handle No Intersection
+    itx = scene.ray_intersect(ray_origin, ray_direction)
     if not itx.valid:
-        return (0.0, 0.0, 0.0)  # Black background
-    
-    # 3. Retrieve Normal
-    n = itx.n
-    
-    # 4. Orient Normal Against Ray
-    # If normal points in the same direction as the ray, flip it
-    if dot(n, ray.d) > 0:
-        n = -n
-        
-    # 5. Coordinate Adjustment (Specific to some implementations like [S3, unofficial])
-    # Negate X and Z components
-    n = Vector3f(-n.x, n.y, -n.z)
-    
-    # 6. Map to Color Space [-1, 1] -> [0, 1]
-    # Formula: (n + 1) / 2
-    color = (n + Vector3f(1.0, 1.0, 1.0)) / 2.0
-    
-    # Clamp to [0, 1] to handle any precision errors or out-of-bounds normals
-    color = clamp(color, 0.0, 1.0)
-    
-    return color
+        return (0.0, 0.0, 0.0)  # Black background [S2, S3, unofficial]
+
+    # 2. Retrieve Normal
+    n = itx.n  # Assume n is a 3-tuple or object with .x, .y, .z [S1, S3, unofficial]
+
+    # 3. Orient Normal Against Ray
+    if n[0] * ray_direction[0] + n[1] * ray_direction[1] + n[2] * ray_direction[2] > 0:
+        n = (-n[0], -n[1], -n[2])
+
+    # 4. Coordinate System Adjustment
+    n = (-n[0], n[1], -n[2])  # Negate X and Z components [S3, unofficial]
+
+    # 5. Map to Color Space [-1, 1] -> [0, 1]
+    r = (n[0] + 1.0) / 2.0
+    g = (n[1] + 1.0) / 2.0
+    b = (n[2] + 1.0) / 2.0
+
+    # Clamp to [0, 1] to handle precision errors [G]
+    r = max(0.0, min(1.0, r))
+    g = max(0.0, min(1.0, g))
+    b = max(0.0, min(1.0, b))
+
+    return (r, g, b)
 ```
 
 ### Parameters
 *   **Background Color**: Typically black $(0, 0, 0)$ [S2, S3, unofficial].
-*   **Normalization**: Normals are assumed to be unit length. If not, they should be normalized before mapping [S1, unofficial].
+*   **Normalization**: Normals are assumed to be unit length; if not, they should be normalized before mapping [S1, unofficial].
 
 ### Edge Cases and Pitfalls
 *   **No Intersection**: Rays that do not hit any geometry must return a defined background color, usually black [S2, S3, unofficial].
-*   **Normal Orientation**: Failing to orient the normal against the ray direction can result in incorrect visualization for back-facing surfaces or inconsistent debugging [S3, unofficial].
-*   **Coordinate System Mismatch**: Negating X and Z components (as seen in [S3, unofficial]) is a specific convention. If the scene's coordinate system differs from the renderer's expectation, this step may need to be adjusted or omitted. Without this step, the visualization may appear rotated relative to expectations [S3, unofficial].
+*   **Normal Orientation**: Failing to orient the normal against the ray direction can result in incorrect visualization for back-facing surfaces [S3, unofficial].
+*   **Coordinate System Mismatch**: Negating X and Z components is a specific convention [S3, unofficial]. If the scene's coordinate system differs, this step may need adjustment.
 *   **Precision**: When mapping to 8-bit integers, ensure proper rounding or truncation to avoid banding artifacts [S1, unofficial].
 
 ## Operating characteristics
 
 ### Time and Memory Complexity
-*   **Time**: $O(N)$ where $N$ is the number of pixels, assuming constant-time ray intersection. If the intersection requires tree traversal, it is $O(\log M)$ per ray where $M$ is the number of nodes [S1, unofficial].
+*   **Time**: $O(N)$ for $N$ pixels, with intersection cost depending on the scene representation [S1, S2, S3, unofficial].
 *   **Memory**: $O(1)$ auxiliary memory per pixel, plus the storage for the scene structure.
 
 ### Measured Performance
@@ -101,11 +78,11 @@ def normal_integrator(ray, scene):
 
 ### Strengths and Limitations
 *   **Strengths**: Simple to implement, provides immediate visual feedback on surface orientation, useful for debugging SDFs and voxel structures [S1, S2, S3, unofficial].
-*   **Limitations**: Only visualizes normals, not lighting or material properties. Does not account for shading models like Lambertian or Phong [S3, unofficial].
+*   **Limitations**: Only visualizes normals, not lighting or material properties.
 
 ### When to Use
-*   Debugging surface normals generated by SDFs or voxelizers.
-*   Visualizing the orientation of surfaces in a scene.
+*   Debugging surface normals generated by SDFs or voxelizers [S2, unofficial].
+*   Visualizing the orientation of surfaces in a scene [S2, unofficial].
 *   Artistic purposes where normal-based coloring is desired [S2, unofficial].
 
 ### When Not to Use
@@ -115,19 +92,13 @@ def normal_integrator(ray, scene):
 ## Background
 
 ### Origin
-The Normal Integrator is a common technique in computer graphics for debugging and visualization. The specific implementation details in the sources come from:
-*   [S1, unofficial]: An early CPU-based voxel raycaster implementation by Forceflow (2012), which mapped normals to 8-bit colors.
-*   [S2, unofficial]: A volumetric path tracing project by ainagutierrez01, which uses the normal shader for debugging.
-*   [S3, unofficial]: A differentiable SDF rendering project by zichenwang01, which includes normal visualization as part of the rendering pipeline.
+The technique appears in multiple independent implementations: an early CPU-based voxel raycaster by Forceflow (2012) mapping normals to 8-bit colors [S1, unofficial], a volumetric path tracing project using a normal shader for debugging [S2, unofficial], and a differentiable SDF rendering pipeline [S3, unofficial].
 
 ### History
-The technique of visualizing normals as colors has been used since the early days of computer graphics for debugging purposes. The specific mapping $(n+1)/2$ is a standard convention.
+The specific mapping $(n+1)/2$ is a standard convention in computer graphics for visualizing normals.
 
 ### Usage
-It is used in:
-*   Voxel raycasting debuggers [S1, unofficial].
-*   SDF rendering pipelines for debugging surface orientation [S3, unofficial].
-*   Volumetric path tracing debuggers [S2, unofficial].
+It is used in voxel raycasting debuggers [S1, unofficial], SDF rendering pipelines for debugging surface orientation [S3, unofficial], and general visualization shaders [S2, unofficial].
 
 ## Sources
 

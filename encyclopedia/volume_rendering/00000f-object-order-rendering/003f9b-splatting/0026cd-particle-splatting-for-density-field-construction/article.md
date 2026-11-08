@@ -1,0 +1,115 @@
+# Particle Splatting for Density Field Construction
+
+Also called: 3D Density Field Construction via Splatting, CPU splatting, wax density field
+
+## Overview
+This method constructs a 3D density field representing a volumetric surface (such as wax) on the CPU every frame by splatting interpolated particles into a 3D grid aligned with a container [S1, unofficial]. It solves the problem of visualizing dynamic particle simulations as a continuous surface without the resolution limits of object-space uniform grids, serving as a precursor to volume ray-marching [S1, unofficial]. It is distinguished from GPU-based splatting by performing the density accumulation on the CPU, allowing for precise control over the grid layout and temporal smoothing before uploading the result to the GPU [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of particles with positions and attributes (e.g., temperature), interpolated between fixed time steps.
+*   **Output:** A 3D texture (Data3DTexture) containing the density field, uploaded to the GPU for subsequent ray-marching.
+
+**Data Structures:**
+*   **Grid:** A 3D voxel grid aligned with the container boundaries.
+    *   **Dimensions:** 48×94×48 voxels [S1, unofficial].
+    *   **Layout:** Two channels per voxel:
+        1.  Density ($\rho$)
+        2.  Temperature $\times$ Density ($T \cdot \rho$) [S1, unofficial].
+*   **GPU Texture Format:** `Data3DTexture` with RG channel layout.
+    *   **Internal Format:** `RG32F` (float32) [S1, unofficial].
+    *   **Fallback:** `RG16F` if the GPU does not support filtering of 32-bit floats [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Particle Interpolation:** Interpolate particle positions between two fixed time steps to ensure temporal continuity [S1, unofficial].
+2.  **Grid Initialization:** Clear the 3D grid to zero.
+3.  **Splatting:** For each particle $k$ at position $\mathbf{p}_k$ with density contribution $g_k$:
+    *   Determine the bounding box of the kernel footprint within the grid.
+    *   For each voxel $v$ in the footprint at grid coordinates $(i,j,k)$:
+        *   Calculate the normalized distance $u$ from the particle center to the voxel center.
+        *   Compute the kernel weight $w$ using the separable kernel function:
+            $$ w = (1 - u^2)^3 $$
+        *   Update the voxel channels:
+            $$ \rho_{new} = \rho_{old} + w \cdot g_k $$
+            $$ (T \cdot \rho)_{new} = (T \cdot \rho)_{old} + w \cdot g_k \cdot T_k $$
+4.  **Temporal Smoothing:** Apply in-place temporal smoothing to the density field to reduce flickering. The update rule is:
+    $$ \rho_{smoothed} = \rho_{current} \cdot \text{exp}(-dt/\tau) $$
+    where $\tau = 0.04$ seconds [S1, unofficial].
+5.  **Normalization:** Normalize the density values so that the density is approximately 1 at the core of the wax [S1, unofficial].
+6.  **Upload:** Upload the resulting 3D texture to the GPU as a `Data3DTexture` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def construct_density_field(particles, grid_dimensions, dt, tau):
+    # Initialize grid with two channels: density and temp_density
+    grid = zeros(grid_dimensions, channels=2)
+    
+    # Define kernel function
+    def kernel(u):
+        if u < 1.0:
+            return (1.0 - u**2)**3
+        return 0.0
+    
+    # Splat particles into grid
+    for particle in particles:
+        # Determine voxel bounds for particle
+        voxel_bounds = get_voxel_bounds(particle.position, kernel_radius)
+        
+        for voxel in voxel_bounds:
+            # Calculate normalized distance u
+            u = distance(particle.position, voxel.center) / kernel_radius
+            
+            # Calculate weight
+            w = kernel(u)
+            
+            # Update density channel
+            grid[voxel].density += w * particle.density
+            
+            # Update temperature * density channel
+            grid[voxel].temp_density += w * particle.density * particle.temperature
+            
+    # Temporal smoothing
+    for voxel in grid:
+        decay = exp(-dt / tau)
+        voxel.density *= decay
+        voxel.temp_density *= decay
+        
+    # Normalize density
+    max_density = max(voxel.density for voxel in grid)
+    for voxel in grid:
+        voxel.density /= max_density
+        
+    return grid
+```
+
+**Parameters:**
+*   **Grid Dimensions:** 48×94×48 [S1, unofficial].
+*   **Kernel:** Separable kernel $(1 - u^2)^3$ [S1, unofficial].
+*   **Temporal Smoothing Time Constant ($\tau$):** 0.04 seconds [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Use `RG32F` for best quality; `RG16F` is a fallback if 32-bit float filtering is unsupported, potentially introducing quantization artifacts [S1, unofficial].
+*   **Boundary Conditions:** The grid is aligned with the container, so particles near the boundary must be handled to avoid out-of-bounds writes [S1, unofficial].
+*   **Temporal Stability:** The smoothing factor $\tau$ must be tuned to balance responsiveness and flicker reduction [S1, unofficial].
+
+## Subtopics
+
+### [Image-Space Particle Splatting for Density Field Construction](10567-image-space-particle-splatting-for-density-field-constructio.md)
+A method to visualize dynamic particle simulations by reconstructing a density field in image space using splatting and ray casting, avoiding the resolution limits of object-space uniform grids.
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of particles and the kernel footprint size.
+*   **Memory Complexity:** Proportional to the grid volume ($48 \times 94 \times 48$ voxels) and channel count (2) [S1, unofficial].
+*   **Measured Performance:** CPU splatting takes 1.1 to 1.25 ms median, and 1.3 to 1.9 ms p95, measured on a Xeon 2.1 GHz processor [S1, unofficial].
+*   **Strengths:** Precise control over density field construction; allows for temporal smoothing and normalization on CPU; avoids GPU rasterization overhead for density accumulation.
+*   **Limitations:** CPU-bound; performance scales with particle count and grid resolution; not suitable for real-time rendering of very large particle systems without optimization.
+*   **When to Use:** When a continuous density field is required for volume ray-marching and the particle count is moderate enough for CPU processing.
+*   **When Not to Use:** For real-time rendering of massive particle systems where GPU-based splatting is preferred.
+
+## Background
+This method was used in the "Lava Lamp" project to replace spheres with a real wax surface, constructed on the CPU every frame and ray-marched in the volume of the glass [S1, unofficial]. It is part of a broader effort to simulate realistic wax and liquid dynamics in a virtual lava lamp.
+
+## Sources
+[S1] Étape 4 : surface de cire raymarchée et liquide volumique, https://github.com/nathanddrl/lava-lamp/pull/4, fetched 2026-10-27 (unofficial)

@@ -3,7 +3,7 @@
 Also called: no cache, voxel cache
 
 ## Overview
-Random Access Decompression (CSGV-R) is a rendering mode for Compressed Segmentation Volumes that leverages the true random access capabilities of the CSGV-R compression format to decode voxel labels on demand without decoding entire bricks serially [S1, unofficial]. It solves the memory overhead and latency issues inherent in the standard CSGV brick cache approach, allowing for immediate, artifact-free rendering in the first frame [S1, unofficial]. Unlike its sibling methods that rely on pre-decoded brick caches, CSGV-R offers three distinct access strategies: direct "no cache" access, a "voxel cache" using hash-based storage, and an optimized "voxel cache (es)" that incorporates an empty space bit vector to skip invisible labels [S1, unofficial].
+Random Access Decompression (CSGV-R) is a rendering mode for Compressed Segmentation Volumes that leverages the true random access capabilities of the CSGV-R compression format to decode voxel labels on demand without decoding entire bricks serially [S1]. It solves the memory overhead and latency issues inherent in the standard CSGV brick cache approach, allowing for immediate, artifact-free rendering in the first frame [S1]. Unlike its sibling methods that rely on pre-decoded brick caches, CSGV-R offers three distinct access strategies: direct "no cache" access, a "voxel cache" using hash-based storage, and an optimized "voxel cache (es)" that incorporates an empty space bit vector to skip invisible labels [S1].
 
 ## How it works
 **Inputs and Outputs**
@@ -12,18 +12,18 @@ Random Access Decompression (CSGV-R) is a rendering mode for Compressed Segmenta
 
 **Data Structures**
 1.  **CSGV-R Structure:** The compressed volume data, including the wavelet matrix and operation list, stored in GPU memory.
-2.  **Voxel Hash Table:** A custom hash table using Cuckoo hashing to store recently decoded voxel labels [S1, unofficial].
-3.  **Empty Space Bit Vector:** An optional bit vector tracking which palette indices are currently visible or accessed, filled on-the-fly during rendering [S1, unofficial].
+2.  **Voxel Hash Table:** A custom hash table using Cuckoo hashing to store recently decoded voxel labels [S1].
+3.  **Empty Space Bit Vector:** An optional bit vector tracking which palette indices are currently visible or accessed, filled on-the-fly during rendering [S1].
 
 **Algorithm Steps**
 The decompression process for a single voxel access follows these steps:
 
-1.  **Cache Check:** If a "voxel cache" or "voxel cache (es)" mode is active, check if the target voxel $(x, y, z)$ exists in the voxel hash table. If found, return the cached label immediately [S1, unofficial].
-2.  **Empty Space Check (Optional):** If "voxel cache (es)" is active, check the empty space bit vector for the label associated with the current traversal path. If the label is marked as invisible/empty, skip further processing or return a default background value [S1, unofficial].
-3.  **Operation Chase:** Traverse the CSGV-R operation list sequentially from the start until a **palette operation** is encountered. This operation defines the mapping for the current segment of the volume [S1, unofficial].
-4.  **Wavelet Traversal:** For the identified segment, traverse the wavelet matrix to determine the specific coefficient value corresponding to the target voxel coordinates. This involves navigating the hierarchical structure of the wavelet transform [S1, unofficial].
-5.  **Palette Index Rank Query:** Perform a rank query on the palette indices to resolve the final segmentation label from the wavelet coefficient [S1, unofficial].
-6.  **Cache Update:** If caching is enabled, insert the decoded label and its coordinates into the voxel hash table using the custom Cuckoo hashing scheme [S1, unofficial].
+1.  **Cache Check:** If a "voxel cache" or "voxel cache (es)" mode is active, check if the target voxel $(x, y, z)$ exists in the voxel hash table. If found, return the cached label immediately [S1].
+2.  **Empty Space Check (Optional):** If "voxel cache (es)" is active, check the empty space bit vector for the label associated with the current traversal path. If the label is marked as invisible/empty, skip further processing or return a default background value [S1].
+3.  **Operation Chase:** Traverse the CSGV-R operation list sequentially from the start until a **palette operation** is encountered. This operation defines the mapping for the current segment of the volume [S1].
+4.  **Wavelet Traversal:** For the identified segment, traverse the wavelet matrix to determine the specific coefficient value corresponding to the target voxel coordinates. This involves navigating the hierarchical structure of the wavelet transform [S1].
+5.  **Palette Index Rank Query:** Perform a rank query on the palette indices to resolve the final segmentation label from the wavelet coefficient [S1].
+6.  **Cache Update:** If caching is enabled, insert the decoded label and its coordinates into the voxel hash table using the custom Cuckoo hashing scheme [S1].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -79,13 +79,13 @@ def decompress_voxel_csgv_r(volume_data, x, y, z, cache_mode='no_cache', empty_s
 ```
 
 **Parameters and Typical Values**
-*   **Cache Size:** The voxel cache size can be chosen freely and does not need to fit all visible areas, unlike the fixed brick cache [S1, unofficial].
-*   **Empty Space Bit Vector:** Filled on-the-fly during rendering [S1, unofficial].
+*   **Cache Size:** The voxel cache size can be chosen freely and does not need to fit all visible areas, unlike the fixed brick cache [S1].
+*   **Empty Space Bit Vector:** Filled on-the-fly during rendering [S1].
 
 **Edge Cases and Pitfalls**
-*   **Performance Cost:** Direct "no cache" access incurs high performance costs due to multiple traversals of the operation list and wavelet matrix for each voxel [S1, unofficial].
-*   **Empty Space Vector Overhead:** For large datasets like H01, the empty space bit vector can cause significant performance degradation. This is due to many distant memory reads in the longer bit vector and the high cost of querying $2^3$ voxels in the finest/least expensive LOD, whereas common accesses are to coarser, faster LODs [S1, unofficial].
-*   **Small Label Regions:** For datasets with small label regions and few stop bits (e.g., CELLS), frame times can almost double in "no cache" mode compared to cached modes [S1, unofficial].
+*   **Performance Cost:** Direct "no cache" access incurs high performance costs due to multiple traversals of the operation list and wavelet matrix for each voxel [S1].
+*   **Empty Space Vector Overhead:** For large datasets like H01, the empty space bit vector can cause significant performance degradation. This is due to many distant memory reads in the longer bit vector and the high cost of querying $2^3$ voxels in the finest/least expensive LOD, whereas common accesses are to coarser, faster LODs [S1].
+*   **Small Label Regions:** For datasets with small label regions and few stop bits (e.g., CELLS), frame times can almost double in "no cache" mode compared to cached modes [S1].
 
 ## Subtopics
 
@@ -94,11 +94,11 @@ A GPU shader stage where a single wavefront cooperatively decompresses one brick
 
 ## Operating characteristics
 **Time and Memory Complexity**
-*   **Time Complexity:** Direct "no cache" access has high latency due to per-voxel traversal of operations and wavelet matrices. Caching reduces this significantly, with performance improvements up to a factor of 5 [S1, unofficial].
-*   **Memory Complexity:** "No cache" uses minimal memory. "Voxel cache" uses memory proportional to the number of cached voxils. "Voxel cache (es)" adds memory for the empty space bit vector, which scales with the number of labels and LOD levels [S1, unofficial].
+*   **Time Complexity:** Direct "no cache" access has high latency due to per-voxel traversal of operations and wavelet matrices. Caching reduces this significantly, with performance improvements up to a factor of 5 [S1].
+*   **Memory Complexity:** "No cache" uses minimal memory. "Voxel cache" uses memory proportional to the number of cached voxils. "Voxel cache (es)" adds memory for the empty space bit vector, which scales with the number of labels and LOD levels [S1].
 
 **Measured Performance**
-Performance is measured in milliseconds per frame (ms) for local shading on different datasets [S1, unofficial]:
+Performance is measured in milliseconds per frame (ms) for local shading on different datasets [S1]:
 
 | Mode | CELLS | FIBER | H01 | AZBA |
 | :--- | :--- | :--- | :--- | :--- |
@@ -106,17 +106,17 @@ Performance is measured in milliseconds per frame (ms) for local shading on diff
 | **Voxel Cache** | 9.7 | 6.3 | 1.2 | 8.8 |
 | **Voxel Cache (es)** | 6.1 | 7.1 | 75.8 | 8.1 |
 
-*   **Scaling:** The voxel cache does not need to fit all visible areas, allowing for flexible scaling based on available memory [S1, unofficial].
-*   **Strengths:** Produces artifact-free images in the first frame, unlike CSGV which has latency [S1, unofficial].
-*   **Limitations:** "No cache" mode is slow. "Voxel cache (es)" can be significantly slower on large datasets like H01 due to memory access patterns [S1, unofficial].
+*   **Scaling:** The voxel cache does not need to fit all visible areas, allowing for flexible scaling based on available memory [S1].
+*   **Strengths:** Produces artifact-free images in the first frame, unlike CSGV which has latency [S1].
+*   **Limitations:** "No cache" mode is slow. "Voxel cache (es)" can be significantly slower on large datasets like H01 due to memory access patterns [S1].
 
 **When to Use**
 *   Use "no cache" for small datasets or when memory is extremely constrained, accepting higher latency.
 *   Use "voxel cache" for general cases to balance performance and memory, especially when label regions are small.
-*   Use "voxel cache (es)" for datasets with many invisible labels and moderate dimensions, but avoid for very large datasets like H01 where the bit vector overhead dominates [S1, unofficial].
+*   Use "voxel cache (es)" for datasets with many invisible labels and moderate dimensions, but avoid for very large datasets like H01 where the bit vector overhead dominates [S1].
 
 ## Background
-Random Access Decompression (CSGV-R) was introduced as part of the Compressed Segmentation Volume Random Access (CSGV-R) compression method, which allows random access to voxel labels without decoding the entire brick serially [S1, unofficial]. It addresses the limitations of the original CSGV brick cache, which suffered from memory overhead and one-frame latency [S1, unofficial]. The method was developed to enable interactive volume rendering of segmentation volumes with minimal preprocessing and immediate visual feedback.
+Random Access Decompression (CSGV-R) was introduced as part of the Compressed Segmentation Volume Random Access (CSGV-R) compression method, which allows random access to voxel labels without decoding the entire brick serially [S1]. It addresses the limitations of the original CSGV brick cache, which suffered from memory overhead and one-frame latency [S1]. The method was developed to enable interactive volume rendering of segmentation volumes with minimal preprocessing and immediate visual feedback.
 
 ## Sources
-[S1] Random Access Segmentation Volume Compression for Interactive Volume Rendering, https://doi.org/10.1111/cgf.70116, fetched 2026-10-28 (unofficial)
+[S1] Random Access Segmentation Volume Compression for Interactive Volume Rendering, https://doi.org/10.1111/cgf.70116, fetched 2026-10-28

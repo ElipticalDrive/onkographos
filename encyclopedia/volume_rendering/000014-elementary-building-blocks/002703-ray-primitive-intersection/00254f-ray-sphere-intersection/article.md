@@ -1,13 +1,13 @@
 # Ray-Sphere Intersection
-Also called: Analytical ray-sphere intersection, Quadratic Ray-Sphere Intersection, Sphere Hit Test, Sphere Ray Intersection, Sphere-Ray Intersection Check
+Also called: Analytical ray-sphere intersection, Quadratic Ray-Sphere Intersection, Quaternion-based Ray-Sphere Intersection, Ray-Sphere Intersection in Quaternion Space, Raymarching Sphere Hit Test, Sphere Hit Test, Sphere Ray Intersection, Sphere-Ray Intersection Check
 
 ## Overview
-Ray-sphere intersection computes the entry and exit points (or the nearest hit distance) where a parametric ray intersects a sphere defined by a center and radius. In volume rendering, this operation is primarily used to determine the marching bounds for ray-marching algorithms, ensuring samples are only taken within the volume's extent, and to perform early-outs in hierarchical traversal [S5, S7, unofficial]. It is distinct from [Sphere Intersection](1620-sphere-intersection.md) in that it solves for the intersection of a line (the ray) with a surface, whereas the latter typically refers to finding points on a sphere's surface satisfying other constraints (such as the 3-sphere trilateration variant). It is analytically exact and generally faster than iterative methods like [Implicit Surface and SDF Intersection](2795-implicit-surface-and-sdf-intersection.md) for simple spherical primitives [S8, unofficial].
+Ray-sphere intersection computes the entry and exit points (or the nearest hit distance) where a parametric ray intersects a sphere defined by a center and radius [S5, S6, unofficial]. In volume rendering, this operation is primarily used to determine the marching bounds for ray-marching algorithms, ensuring samples are only taken within the volume's extent [S5, S6, unofficial]. It is distinct from [Sphere Intersection](1620-sphere-intersection.md) in that it solves for the intersection of a line (the ray) with a surface, whereas the latter typically refers to finding points on a sphere's surface satisfying other constraints (such as the 3-sphere trilateration variant) [G]. It is analytically exact and generally faster than iterative methods like [Implicit Surface and SDF Intersection](2795-implicit-surface-and-sdf-intersection.md) for simple spherical primitives [S8, unofficial].
 
 ## How it works
 **Inputs and Outputs**
 *   **Input**: Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$ (typically normalized), sphere center $\mathbf{c}$, sphere radius $r$, and optionally a ray segment $[t_{min}, t_{max}]$ [S1, S5, S6, unofficial].
-*   **Output**: Boolean hit status, intersection distance $t$, entry point $\mathbf{p}_{in}$, exit point $\mathbf{p}_{out}$, and surface normal $\mathbf{n}$ [S5, S6, unofficial].
+*   **Output**: Boolean hit status, intersection distance $t$, entry point $\mathbf{p}_{in}$, exit point $\mathbf{p}_{out}$, and surface normal $\mathbf{n}$ [S5, S6, S7, unofficial].
 
 **Data Structures**
 The sphere is typically stored as a struct containing:
@@ -16,16 +16,16 @@ The sphere is typically stored as a struct containing:
 *   `Material`: Optional metadata [S2, unofficial].
 
 **Method Steps**
-The standard analytical approach transforms the problem into local space or solves the quadratic equation directly in world space. The direct world-space method is preferred for performance to avoid matrix multiplications per ray [S5, S6, unofficial].
+The standard analytical approach transforms the ray to local space or solves the quadratic equation directly in world space [S1, S6, unofficial].
 
 1.  **Compute Vector $L$**: Calculate the vector from the ray origin to the sphere center:
     $$ \mathbf{L} = \mathbf{c} - \mathbf{o} $$
-    [S4, S5, unofficial]
+    [S5, unofficial]
 
 2.  **Compute Quadratic Coefficients**:
-    The ray is defined as $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$. Substituting into the sphere equation $|\mathbf{r}(t) - \mathbf{c}|^2 = r^2$ yields $At^2 + Bt + C = 0$.
+    The ray is defined as $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ [G]. Substituting into the sphere equation $|\mathbf{r}(t) - \mathbf{c}|^2 = r^2$ yields $At^2 + Bt + C = 0$ [G].
     *   $A = \mathbf{d} \cdot \mathbf{d}$ (Squared length of direction) [S1, S5, unofficial]. If $\mathbf{d}$ is normalized, $A=1$.
-    *   $B = 2 (\mathbf{L} \cdot \mathbf{d})$ [S1, S5, unofficial]. Note: Some implementations use $b = \mathbf{L} \cdot \mathbf{d}$ and adjust the quadratic formula denominator to $A$ instead of $2A$ [S2, unofficial]. We use the standard $B$ form here.
+    *   $B = 2 (\mathbf{L} \cdot \mathbf{d})$ [S6, unofficial]. Note: Some implementations use $b = \mathbf{L} \cdot \mathbf{d}$ and adjust the quadratic formula denominator to $A$ instead of $2A$ [S2, unofficial]. We use the standard $B$ form here.
     *   $C = \mathbf{L} \cdot \mathbf{L} - r^2$ [S1, S5, unofficial].
 
 3.  **Compute Discriminant**:
@@ -44,13 +44,13 @@ The standard analytical approach transforms the problem into local space or solv
 
 6.  **Filter Roots**:
     *   If both $t_1$ and $t_2$ are outside $[t_{min}, t_{max}]$, return false [S1, unofficial].
-    *   If $t_1 < t_{min}$, use $t_2$ if $t_2 \in [t_{min}, t_{max}]$, else miss [S1, unofficial].
+    *   If $t_1 < t_{min}$, use $t_2$ as the hit distance if it is within bounds, else miss [S1, unofficial].
     *   If $t_1 \ge t_{min}$, use $t_1$ as the entry point [S5, unofficial].
     *   *Note*: Some implementations clamp negative $t$ values to 0.0, effectively treating intersections behind the camera as hits at the origin, which is generally incorrect for strict ray tracing but may be used in specific volume marching contexts [S5, unofficial].
 
 7.  **Compute Output Values**:
     *   Entry point: $\mathbf{p}_{in} = \mathbf{o} + t_1 \mathbf{d}$ (if hit) [S5, unofficial].
-    *   Exit point: $\mathbf{p}_{out} = \mathbf{o} + t_2 \mathbf{d}$ (if hit) [S5, unofficial].
+    *   Exit point: $\mathbf{p}_{out} = \mathbf{o} + t_2 \mathbf{d}$ (if hit) [S5, S6, unofficial].
     *   Normal at hit point $\mathbf{p}$: $\mathbf{n} = \text{normalize}(\mathbf{p} - \mathbf{c})$ [S6, S8, unofficial].
 
 **Pseudocode**
@@ -62,14 +62,8 @@ def ray_sphere_intersect(ray_origin, ray_direction, sphere_center, sphere_radius
     oc = ray_origin - sphere_center
     
     # 2. Quadratic coefficients
-    # A = dot(d, d). Assuming normalized direction, A=1. 
-    # We compute it explicitly for generality.
     a = dot(ray_direction, ray_direction)
-    
-    # B = 2 * dot(oc, d)
     b = 2.0 * dot(oc, ray_direction)
-    
-    # C = dot(oc, oc) - r^2
     c = dot(oc, oc) - sphere_radius * sphere_radius
     
     # 3. Discriminant
@@ -124,13 +118,12 @@ General term for finding points on a sphere satisfying specific constraints. In 
 *   **Time Complexity**: $O(1)$. The method involves a fixed number of arithmetic operations (dot products, square root) regardless of scene size [S5, S8, unofficial].
 *   **Memory Complexity**: $O(1)$. Requires storage for a few temporary vectors and scalars [S2, unofficial].
 *   **Performance**: Extremely fast. It is one of the fastest primitive intersection tests available, making it suitable for GPU execution in parallel threads [S8, unofficial].
-*   **Strengths**: Analytical solution (no iteration), robust, simple to implement [S5, unofficial].
 *   **Limitations**: Only applicable to spherical primitives. For complex volumes, the sphere must approximate the volume (e.g., bounding sphere), which can lead to overestimation of the marching distance and wasted samples if the sphere is much larger than the actual volume [S5, S7, unofficial].
 *   **When to Use**: When the volume or object is spherical or can be tightly bounded by a sphere. Ideal for early-outs in acceleration structures [S1, unofficial].
 *   **When Not to Use**: For non-spherical primitives or when tighter bounds are required (use [Ray-box intersection](776-ray-box-intersection.md) or [Ray-Tetrahedron Intersection](2525-ray-tetrahedron-intersection.md)).
 
 ## Background
-The analytical ray-sphere intersection is a fundamental technique in computer graphics, dating back to the early days of ray tracing. It is derived from substituting the parametric line equation into the implicit equation of a sphere. It is widely used in volume rendering for determining marching bounds [S5, unofficial] and in path tracing for shading [S1, S3, unofficial]. The method is often implemented in local space to simplify calculations, but world-space direct solving is common in modern GPU implementations to avoid transformation overhead [S1, S5, unofficial].
+The analytical ray-sphere intersection is a fundamental technique in computer graphics. It is derived from substituting the parametric line equation into the implicit equation of a sphere [G]. It is widely used in volume rendering for determining marching bounds [S5, unofficial] and in path tracing for shading [S1, S3, unofficial]. The method is often implemented in local space to simplify calculations [S1, unofficial].
 
 ## Sources
 [S1] ainagutierrez01/Volumetric-Path-Tracing-, https://github.com/ainagutierrez01/Volumetric-Path-Tracing-, fetched 2026-10-26 (unofficial)

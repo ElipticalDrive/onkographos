@@ -3,7 +3,7 @@
 Also called: Concurrent Forward/Backward Pass, Sparse gradRec Gradient Storage
 
 ## Overview
-This method is a differentiable rendering technique that executes forward and backward passes concurrently to compute gradients for density field optimization [S1]. It solves the high memory cost of standard reverse-mode automatic differentiation by storing gradients only along active sampled ray paths in a sparse structure, rather than the entire volume grid [S1]. It sets itself apart from naive differentiable rendering by avoiding a separate backward pass or recomputation of the forward ray march; instead, it relies on gradient records stored during the forward pass to scatter gradients directly to neighboring voxels [S1].
+This method is a differentiable rendering technique that executes forward and backward passes concurrently to compute gradients for density field optimization [S1]. It solves the high memory cost of standard reverse-mode automatic differentiation by storing gradients only along active sampled ray paths in a sparse structure, rather than the entire volume grid [S1]. It sets itself apart from standard reverse-mode automatic differentiation by executing forward and backward passes concurrently to reuse the Jacobian term $J_{ss}$, and by storing gradients only along active sampled ray paths in a sparse structure rather than the entire volume grid [S1].
 
 ## How it works
 **Inputs and Outputs:**
@@ -29,27 +29,29 @@ This method is a differentiable rendering technique that executes forward and ba
 
 ```python
 def dual_pass_render_and_optimize(volume_grid, rays, target_image, lights):
-    # Initialize sparse gradient recorder
-    gradRec = Stack()
+    # Initialize sparse gradient recorder as a list acting as a stack
+    gradRec = []
     
-    # Initialize density field gradients
-    density_gradients = zeros_like(volume_grid)
+    # Initialize density field gradients with zeros matching the grid shape
+    density_gradients = [[0.0 for _ in range(volume_grid.shape[1])] for _ in range(volume_grid.shape[0])]
     
     # Concurrent Forward and Backward Passes
     for ray in rays:
         # 1. Forward Pass: Render radiance
-        radiance = 0.0
+        # Initialize as vec3 to prevent type mismatch with color vectors
+        radiance = [0.0, 0.0, 0.0]
         transmittance = 1.0
-        accumulated_gradients = []
         
         for sample in ray.march(volume_grid):
             density = sample.density
-            color = sample.color
+            color = sample.color  # vec3
             step_size = sample.step_size
             
             # Standard volume rendering contribution
             alpha = 1.0 - exp(-density * step_size)
-            radiance += transmittance * alpha * color
+            radiance[0] += transmittance * alpha * color[0]
+            radiance[1] += transmittance * alpha * color[1]
+            radiance[2] += transmittance * alpha * color[2]
             transmittance *= (1.0 - alpha)
             
             # 2. Record gradients along the ray path
@@ -57,33 +59,46 @@ def dual_pass_render_and_optimize(volume_grid, rays, target_image, lights):
             # Note: Exact derivative formula depends on the specific rendering equation
             # used in the parent method, but here we store the necessary terms
             local_grad = compute_gradient_contribution(sample, target_image)
-            gradRec.push(local_grad)
+            gradRec.append(local_grad)
             
         # 3. Backward Pass: Propagate gradients using stored records
         # The concurrent nature allows reuse of J_ss computed during forward pass
         # J_ss calculation depends on illumination type
-        if ray.illumination_type == ENVIRONMENT_MAP:
+        if ray.illumination_type == "ENVIRONMENT_MAP":
             J_ss = importance_sampling_integration(ray, lights)
         else:
             J_ss = direct_computation_integration(ray, lights)
             
         # Scatter gradients from gradRec to volume grid
-        while not gradRec.is_empty():
+        while gradRec:
             grad_record = gradRec.pop()
             # Scatter gradient to the corresponding voxel(s)
-            density_gradients.scatter(grad_record.position, grad_record.value)
+            density_gradients[grad_record.position[0]][grad_record.position[1]] += grad_record.value
             
     return density_gradients
+
+def compute_gradient_contribution(sample, target_image):
+    # Compute local gradient contribution for this sample
+    # Exact formula depends on the analytical radiance derivatives from the parent method
+    return {"position": sample.position, "value": 0.0}
+
+def importance_sampling_integration(ray, lights):
+    # Returns Jacobian term J_ss using importance sampling for environment maps
+    return 1.0
+
+def direct_computation_integration(ray, lights):
+    # Returns Jacobian term J_ss using direct computation for point/parallel lights
+    return 1.0
 ```
 
 **Parameters:**
 *   **R:** Number of rays.
 *   **N:** Length of each ray (number of samples per ray).
-*   **Illumination Type:** Determines the integration method for $J_{ss}$ [S1].
+*   **Illumination Type:** Determines the integration method for $J_{ss}$ (importance sampling for environment maps, direct computation for point/parallel lights) [S1].
 
 **Edge Cases and Pitfalls:**
 *   **Sphere Integration Cost:** Straightforward Monte Carlo integration for sphere integration is computationally expensive [S1]. Mitigated by using importance sampling for environment maps and direct computation for point/parallel lights [S1].
-*   **Memory Management:** Failure to pop the `gradRec` stack after density field update leads to memory leaks [S1].
+*   **Memory Management:** The `gradRec` stack must be popped after each density field update to release memory [S1].
 
 ## Subtopics
 
@@ -97,7 +112,7 @@ Density Reconstruction via Differentiable Rendering is the optimization step tha
 *   **Limitations:** Requires careful management of the `gradRec` stack; specialized integration techniques are needed for different illumination types [S1].
 
 ## Background
-This method was proposed in the context of physics-based differentiable rendering for fluid modeling [S1]. It addresses the challenges of efficient and plausible fluid modeling from monocular video by optimizing the density field through differentiable rendering [S1].
+This method was introduced in a framework for efficient and plausible fluid modeling from monocular video [S1]. It addresses the challenges of optimizing the density field through differentiable rendering to reconstruct fluid dynamics from single-view observations [S1].
 
 ## Sources
 [S1] Physics-Based Differentiable Rendering for Efficient and Plausible Fluid Modeling from Monocular Video, https://doi.org/10.3390/e25091348, fetched 2026-10-26

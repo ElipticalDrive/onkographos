@@ -27,7 +27,7 @@ The method consists of two primary optimizations: a batched update schedule for 
 2.  **Differentiable SSIM Loss Computation**:
     -   **Separable Convolution**: The 11×11 Gaussian kernel used for SSIM is separable. The 2D convolution is performed via two consecutive 1D convolutions using optimized CUDA kernels [S1].
     -   **Fused Kernel**: A fused CUDA kernel evaluates the SSIM metric from the convolved results, reducing memory traffic and launch overhead [S1].
-    -   **3D Extension (Variant)**: For 3D SSIM loss, a fused CUDA kernel processes the depth dimension using a ring buffer, with each thread operating on a single Z-axis row to avoid excessive shared memory usage [S2, unofficial].
+    -   **3D Extension (Variant)**: For 3D SSIM loss, a fused CUDA kernel processes the depth dimension using a ring buffer, with each thread operating on a single Z-axis row to avoid excessive shared memory usage [S2].
 
 ### Pseudocode
 
@@ -83,18 +83,18 @@ def update_gaussians(gaussians, optimizer_state, rendered_image, gt_image, itera
 -   **SSIM Kernel Size**: 11×11 Gaussian kernel [S1].
 
 ### Edge Cases and Pitfalls
--   **Precision**: Fused kernels may introduce slight numerical differences compared to standard PyTorch operations due to reduced intermediate memory writes [S2, unofficial].
--   **Memory**: The 3D SSIM variant uses a ring buffer to manage shared memory; insufficient buffer size may cause incorrect depth processing [S2, unofficial].
+-   **Precision**: Fused kernels may introduce slight numerical differences compared to standard PyTorch operations due to reduced intermediate memory writes [S2].
+-   **Memory**: The 3D SSIM variant uses a ring buffer to manage shared memory; insufficient buffer size may cause incorrect depth processing [S2].
 -   **Degenerate Input**: If the number of Gaussians is very low, the overhead of kernel launches may dominate; however, the method is particularly impactful in this regime [S1].
 
 ## Subtopics
 
 ### Fused Loss Kernels
-Replaces standard 2D/3D SSIM and Total Variation (TV) loss calculations with custom fused CUDA kernels. For 2D SSIM, it uses the `fused-ssim` implementation, achieving 5–8x acceleration [S2, unofficial]. For 3D SSIM, it processes the depth dimension with a ring buffer to avoid excessive shared memory, achieving 11x acceleration [S2, unofficial]. It also implements a custom fused kernel for 3D TV loss, achieving 3x acceleration for a $32^3$ volume [S2, unofficial].
+Replaces standard 2D/3D SSIM and Total Variation (TV) loss calculations with custom fused CUDA kernels. For 2D SSIM, it uses the `fused-ssim` implementation, achieving 5–8x acceleration [S2]. For 3D SSIM, it processes the depth dimension with a ring buffer to avoid excessive shared memory, achieving 11x acceleration [S2]. It also implements a custom fused kernel for 3D TV loss, achieving 3x acceleration for a $32^3$ volume [S2].
 
 ## Operating characteristics
--   **Time Complexity**: Reduces the dominant cost of Adam updates for SH coefficients by skipping 15 out of 16 iterations for higher bands. Accelerates SSIM loss computation by 5–8x (2D) and 11x (3D) [S1][S2, unofficial].
--   **Memory Complexity**: Reduces memory traffic by fusing operations and avoiding intermediate tensor allocations for SSIM [S1][S2, unofficial].
+-   **Time Complexity**: Reduces the dominant cost of Adam updates for SH coefficients by skipping 15 out of 16 iterations for higher bands. Accelerates SSIM loss computation by 5–8x (2D) and 11x (3D) [S1][S2].
+-   **Memory Complexity**: Reduces memory traffic by fusing operations and avoiding intermediate tensor allocations for SSIM [S1][S2].
 -   **Performance**: Significant reduction in training time, especially when the number of optimized Gaussians is low compared to image resolution [S1].
 -   **Strengths**: Effective for budget-constrained training scenarios; scalable to large Gaussian counts.
 -   **Limitations**: Requires custom CUDA kernels; may introduce minor numerical differences.
@@ -102,8 +102,8 @@ Replaces standard 2D/3D SSIM and Total Variation (TV) loss calculations with cus
 -   **When Not to Use**: When exact numerical reproducibility with standard PyTorch operations is required, or when hardware lacks efficient CUDA support.
 
 ## Background
-Originated from the "Taming 3DGS" paper [S1] and "FaCT-GS" [S2, unofficial], addressing the computational inefficiencies of the original 3DGS implementation [Kerbl et al. 2023]. The original 3DGS implementation combined SH bands into a single tensor and used standard convolution for SSIM, leading to significant overhead. These optimizations were introduced to make high-quality radiance field reconstruction feasible with limited resources and hardware.
+Originated from the "Taming 3DGS" paper [S1] and "FaCT-GS" [S2], addressing the computational inefficiencies of the original 3DGS implementation [Kerbl et al. 2023]. The original 3DGS implementation combined SH bands into a single tensor and used standard convolution for SSIM, leading to significant overhead. These optimizations were introduced to make high-quality radiance field reconstruction feasible with limited resources and hardware.
 
 ## Sources
 [S1] Taming 3DGS: High-Quality Radiance Fields with Limited Resources, https://doi.org/10.1145/3680528.3687694, fetched 2026-10-30
-[S2] FaCT-GS: Fast and Scalable CT Reconstruction with Gaussian Splatting, https://doi.org/10.1007/978-3-032-37464-6_13, fetched 2026-10-26 (unofficial)
+[S2] FaCT-GS: Fast and Scalable CT Reconstruction with Gaussian Splatting, https://doi.org/10.1007/978-3-032-37464-6_13, fetched 2026-10-26

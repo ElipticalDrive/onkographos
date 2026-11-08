@@ -3,36 +3,36 @@
 Also called: Reparameterized SGD, Reparameterized Stochastic Gradient Descent for Parameter Optimization
 
 ## Overview
-Reparameterized Stochastic Gradient Descent (Reparameterized SGD) is an optimization technique for inverse volume rendering that minimizes the error between a rendered image and a target image by altering scattering parameters ($g, \sigma_s$) [S1, unofficial]. It solves the problem of optimization getting trapped in local minima under low-frequency lighting by reparameterizing the search space to regularize the error surface [S1, unofficial]. Unlike standard SGD on original parameters, which fails to generalize to high-frequency lighting due to ambiguity-induced flat regions, this method uses a non-linear warp to ensure the solution matches ground truth under varying lighting conditions [S1, unofficial].
+Reparameterized Stochastic Gradient Descent (Reparameterized SGD) is an optimization technique for inverse volume rendering that minimizes the error between a rendered image and a target image by altering scattering parameters ($g, \sigma_s$) [S1]. It solves the problem of optimization getting trapped in local minima under low-frequency lighting by reparameterizing the search space to regularize the error surface [S1]. Unlike standard SGD on original parameters, which fails to generalize to high-frequency lighting due to ambiguity-induced flat regions, this method uses a non-linear warp to ensure the solution matches ground truth under varying lighting conditions [S1].
 
 ## How it works
 **Inputs:**
-- Target image $I_0$ [S1, unofficial].
-- Initial guess for scattering parameters: asymmetry factor $g$ and scattering coefficient $\sigma_s$ [S1, unofficial].
-- Error function $d(g, \sigma_s)$ measuring difference between rendered image and $I_0$ [S1, unofficial].
+- Target image $I_0$ [S1].
+- Initial guess for scattering parameters: asymmetry factor $g$ and scattering coefficient $\sigma_s$ [S1].
+- Error function $d(g, \sigma_s)$ measuring difference between rendered image and $I_0$ [S1].
 
 **Outputs:**
-- Optimized parameters $g^*, \sigma_s^*$ that minimize $d$ [S1, unofficial].
+- Optimized parameters $g^*, \sigma_s^*$ that minimize $d$ [S1].
 
 **Data Structures:**
-- Parameter vector $\mathbf{p} = [g, \sigma_s]$ [S1, unofficial].
-- Reparameterized vector $\tilde{\mathbf{p}} = [\tilde{\sigma}_s, \sigma_s]$ where $\tilde{\sigma}_s$ is the reduced scattering coefficient [S1, unofficial].
+- Parameter vector $\mathbf{p} = [g, \sigma_s]$ [S1].
+- Reparameterized vector $\tilde{\mathbf{p}} = [\tilde{\sigma}_s, \sigma_s]$ where $\tilde{\sigma}_s$ is the reduced scattering coefficient [S1].
 
 **Formulas:**
 The reparameterization replaces the horizontal axis with the reduced scattering coefficient:
 $$ \tilde{\sigma}_s := (1 - g)\sigma_s $$
-This ensures both axes ($\tilde{\sigma}_s$ and $\sigma_s$) have the same units [S1, unofficial].
+This ensures both axes ($\tilde{\sigma}_s$ and $\sigma_s$) have the same units [S1].
 
 **Steps:**
-1. **Reparameterize:** Transform the search space from $(g, \sigma_s)$ to $(\tilde{\sigma}_s, \sigma_s)$ using the formula above [S1, unofficial].
+1. **Reparameterize:** Transform the search space from $(g, \sigma_s)$ to $(\tilde{\sigma}_s, \sigma_s)$ using the formula above [S1].
 2. **First 1D SGD (Class Selection):**
    - Fix $\sigma_s$.
-   - Perform stochastic gradient descent on $\tilde{\sigma}_s$ to minimize $d(\tilde{\sigma}_s, \sigma_s)$ [S1, unofficial].
-   - This step selects an equivalence class based on the order-1 similarity relation [S1, unofficial].
+   - Perform stochastic gradient descent on $\tilde{\sigma}_s$ to minimize $d(\tilde{\sigma}_s, \sigma_s)$ [S1].
+   - This step selects an equivalence class based on the order-1 similarity relation [S1].
 3. **Second 1D SGD (Refinement):**
    - Fix the optimized $\tilde{\sigma}_s$ from the previous step.
-   - Perform stochastic gradient descent on $\sigma_s$ to minimize $d(\tilde{\sigma}_s, \sigma_s)$ [S1, unofficial].
-   - This finds the best parameter point within the selected equivalence class [S1, unofficial].
+   - Perform stochastic gradient descent on $\sigma_s$ to minimize $d(\tilde{\sigma}_s, \sigma_s)$ [S1].
+   - This finds the best parameter point within the selected equivalence class [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -88,25 +88,25 @@ def reparameterized_sgd(target_image, initial_g, initial_sigma_s, learning_rate,
 ```
 
 **Edge Cases and Pitfalls:**
-- Low-frequency lighting creates large regions where the error function is close to zero with very small gradients, causing SGD to get trapped in local minima that generalize poorly to high-frequency lighting [S1, unofficial].
-- Division by zero when calculating $g$ from $\tilde{\sigma}_s$ and $\sigma_s$ if $\sigma_s$ is zero [S1, unofficial].
+- Low-frequency lighting creates large regions where the error function is close to zero with very small gradients, causing SGD to get trapped in local minima that generalize poorly to high-frequency lighting [S1].
+- Division by zero when calculating $g$ from $\tilde{\sigma}_s$ and $\sigma_s$ if $\sigma_s$ is zero [S1].
 
 ## Subtopics
 
 ### Similarity-Based Inverse Rendering
-A proof-of-concept optimization technique that warps the non-linear parameter space of translucent materials to resolve ambiguities caused by similarity equivalence classes, making gradient descent more effective [S1, unofficial]. It identifies ambiguity locations using similarity theory, applies a non-linear warp to the search space, and runs gradient descent in the warped space [S1, unofficial]. Inverse rendering is ill-conditioned because different parameters in the same equivalence class produce very similar appearances, creating ambiguities that stall standard optimization [S1, unofficial].
+A proof-of-concept optimization technique that warps the non-linear parameter space of translucent materials to resolve ambiguities caused by similarity equivalence classes, making gradient descent more effective [S1]. It identifies ambiguity locations using similarity theory, applies a non-linear warp to the search space, and runs gradient descent in the warped space [S1]. Inverse rendering is ill-conditioned because different parameters in the same equivalence class produce very similar appearances, creating ambiguities that stall standard optimization [S1].
 
 ## Operating characteristics
 - **Time Complexity:** Not given in the sources.
 - **Memory Complexity:** Not given in the sources.
-- **Measured Performance:** The method finds solutions that generalize better to high-frequency lighting compared to standard SGD, which gets trapped in local minima under low-frequency lighting [S1, unofficial].
-- **Strengths:** Regularizes the error surface by ensuring both axes have the same units; avoids local minima associated with similarity equivalence classes [S1, unofficial].
-- **Limitations:** Requires two sequential 1D searches; sensitive to noise in gradient estimation from Monte Carlo simulations [S1, unofficial].
-- **When to use:** When optimizing scattering parameters for translucent media under low-frequency lighting conditions where standard SGD fails to generalize [S1, unofficial].
-- **When not to use:** When high-frequency lighting is not a concern and standard SGD converges sufficiently [S1, unofficial].
+- **Measured Performance:** The method finds solutions that generalize better to high-frequency lighting compared to standard SGD, which gets trapped in local minima under low-frequency lighting [S1].
+- **Strengths:** Regularizes the error surface by ensuring both axes have the same units; avoids local minima associated with similarity equivalence classes [S1].
+- **Limitations:** Requires two sequential 1D searches; sensitive to noise in gradient estimation from Monte Carlo simulations [S1].
+- **When to use:** When optimizing scattering parameters for translucent media under low-frequency lighting conditions where standard SGD fails to generalize [S1].
+- **When not to use:** When high-frequency lighting is not a concern and standard SGD converges sufficiently [S1].
 
 ## Background
-Originated in the paper "High-order similarity relations in radiative transfer" by Gkioulekas et al. (2014) [S1, unofficial]. The work focuses on forward rendering of translucent media and proposes an inverse rendering approach that exploits similarity relations to improve gradient descent efficiency [S1, unofficial]. The method addresses the ill-conditioned nature of inverse rendering caused by equivalence classes in the parameter space [S1, unofficial].
+Originated in the paper "High-order similarity relations in radiative transfer" by Gkioulekas et al. (2014) [S1]. The work focuses on forward rendering of translucent media and proposes an inverse rendering approach that exploits similarity relations to improve gradient descent efficiency [S1]. The method addresses the ill-conditioned nature of inverse rendering caused by equivalence classes in the parameter space [S1].
 
 ## Sources
-[S1] High-order similarity relations in radiative transfer, https://doi.org/10.1145/2601097.2601104, fetched 2026-10-26 (unofficial)
+[S1] High-order similarity relations in radiative transfer, https://doi.org/10.1145/2601097.2601104, fetched 2026-10-26

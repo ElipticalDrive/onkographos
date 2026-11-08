@@ -18,7 +18,7 @@ $$
 where $H_{ij}$ are functions derived from the integrals over the segments $[t_j, t_{j+1}]$. The specific structure of $H_{ij}$ depends on the integral being computed.
 
 ### Properties
-The family exhibits closure under certain operations, which allows complex integrals to be proven as breakable by decomposing them into simpler breakable components [S1, unofficial]:
+The family exhibits closure under certain operations, which allows complex integrals to be proven as breakable by decomposing them into simpler breakable components [S1]:
 
 1.  **Property 1 (Algebraic Closure):** If $\mathcal{F}$ and $\mathcal{G}$ are breakable integrals, then their sum $\mathcal{F} + \mathcal{G}$, difference $\mathcal{F} - \mathcal{G}$, and product $\mathcal{F} \cdot \mathcal{G}$ are also breakable integrals.
 2.  **Property 2 (Integration Closure):** If $\mathcal{F}(t_1 \rightarrow t)$ is a breakable integral with respect to the upper limit $t$, then the integral $\mathcal{A}(t_1 \rightarrow t_{N+1}) = \int_{t_1}^{t_{N+1}} \mathcal{F}(t_1 \rightarrow t) f(t) dt$ is also a breakable integral.
@@ -58,14 +58,14 @@ where the inner component $S$ is:
 $$
 S(t_1 \rightarrow u) = \int_{t_1}^u T(t_1 \rightarrow v) \sigma(v) (u - v) dv
 $$
-The proof of breakability proceeds as follows [S1, unofficial]:
+The proof of breakability proceeds as follows [S1]:
 1.  $T(t_1 \rightarrow v)$ is breakable.
 2.  By Property 2, $S(t_1 \rightarrow u)$ is a breakable integral.
 3.  By Property 1, the product $T(t_1 \rightarrow u) S(t_1 \rightarrow u)$ is a breakable integral.
 4.  By Property 2 again, the outer integral $\mathcal{L}_{dist}$ is a breakable integral.
 
 #### Decomposition of Volume Rendering
-The volume rendering integral can be explicitly decomposed into two parts, $\mathcal{A}_1$ and $\mathcal{A}_2$, to facilitate parallel accumulation [S1, unofficial]:
+The volume rendering integral can be explicitly decomposed into two parts, $\mathcal{A}_1$ and $\mathcal{A}_2$, to facilitate parallel accumulation [S1]:
 
 $$
 \mathcal{A}_1(t_1 \rightarrow t_{N+1}) = \sum_{k=1}^N \sum_{i=1}^{k-1} \prod_{j=1}^{k-1} H_{ij}(t_j \rightarrow t_{j+1}) \cdot \hat{H}_{ik}(t_k \rightarrow t_{k+1})
@@ -90,7 +90,7 @@ This is the primary application of breakable integrals in the context of scaling
 The distortion loss, critical for anti-aliasing in NeRFs, is also distributed using breakable integrals. The nested integral structure of the distortion loss is decomposed into segments, allowing the inner and outer integrals to be computed in parallel across GPUs. This ensures that the regularization term can be scaled without prohibitive memory or communication costs. See [Distortion Loss Distribution](link_to_child_if_exists) for implementation details.
 
 ## Background
-The concept of breakable integrals was introduced in the context of scaling Neural Radiance Fields (NeRFs) to large-scale scenes using multiple GPUs. The term "breakable integrals" and the associated mathematical framework were presented in the paper "NeRF-XL: Scaling NeRFs with Multiple GPUs" by Barron et al. [S1, unofficial]. The work demonstrated that not only the volume rendering equation but also the distortion loss, which is more complex due to its nested integral structure, could be distributed across GPUs by exploiting the mathematical properties of these integrals. This approach avoids the need for global sorting or complex synchronization, relying instead on the algebraic decomposability of the integrals.
+The concept of breakable integrals was introduced in the context of scaling Neural Radiance Fields (NeRFs) to large-scale scenes using multiple GPUs. The term "breakable integrals" and the associated mathematical framework were presented in the paper "NeRF-XL: Scaling NeRFs with Multiple GPUs" by Barron et al. [S1]. The work demonstrated that not only the volume rendering equation but also the distortion loss, which is more complex due to its nested integral structure, could be distributed across GPUs by exploiting the mathematical properties of these integrals. This approach avoids the need for global sorting or complex synchronization, relying instead on the algebraic decomposability of the integrals.
 
 ## Sources
-[S1] NeRF-XL: Scaling NeRFs with Multiple GPUs, https://doi.org/10.1007/978-3-031-73195-2_6, fetched 2026-10-26 (unofficial)
+[S1] NeRF-XL: Scaling NeRFs with Multiple GPUs, https://doi.org/10.1007/978-3-031-73195-2_6, fetched 2026-10-26

@@ -3,7 +3,7 @@
 Also called: Distributed Distortion Loss, NeRF-XL Distortion Aggregation
 
 ## Overview
-The NeRF-XL Multi-GPU Distortion Loss is a distributed regularization term designed to enforce geometric consistency in large-scale NeRF training by penalizing weight ambiguity along rays [S1, unofficial]. It extends the standard distortion loss to a multi-GPU setting where a single ray is sampled across segments distributed among different GPUs [S1, unofficial]. Unlike single-GPU distortion losses that operate on a contiguous set of samples, this method aggregates local density and transmittance statistics from all participating GPUs to compute a global distortion penalty, ensuring that the learned radiance field remains unambiguous even when the scene is partitioned across hardware [S1, unofficial].
+The NeRF-XL Multi-GPU Distortion Loss is a distributed regularization term designed to enforce geometric consistency in large-scale NeRF training by penalizing weight ambiguity along rays [S1]. It extends the standard distortion loss to a multi-GPU setting where a single ray is sampled across segments distributed among different GPUs [S1]. Unlike single-GPU distortion losses that operate on a contiguous set of samples, this method aggregates local density and transmittance statistics from all participating GPUs to compute a global distortion penalty, ensuring that the learned radiance field remains unambiguous even when the scene is partitioned across hardware [S1].
 
 ## How it works
 **Inputs and Outputs:**
@@ -34,7 +34,7 @@ The algorithm maintains global accumulators for the ray:
     a. Let $i$ be the GPU index $I[s]$.
     b. **Data Gathering:**
         *   If $i \neq k$ (the current GPU is not processing this segment), gather the local transmittance $T_{i \to i+1}$ and color $C_{i \to i+1}$ from GPU $i$ with automatic differentiation disabled.
-        *   Gather the local auxiliary $A_{i \to k+1}$, local distortion $D_{i \to i+1}$, and local loss $L_{i \to i+1}$ from GPU $i$ using a communication primitive `gather_loss(i)`. Note: The source notation $A_{i \to k+1}$ in the gather step appears to be a typo for $A_{i \to i+1}$ based on the update rule and standard definitions; the algorithm uses $A_{i \to i+1}$ in the update step [S1, unofficial].
+        *   Gather the local auxiliary $A_{i \to k+1}$, local distortion $D_{i \to i+1}$, and local loss $L_{i \to i+1}$ from GPU $i$ using a communication primitive `gather_loss(i)`. Note: The source notation $A_{i \to k+1}$ in the gather step appears to be a typo for $A_{i \to i+1}$ based on the update rule and standard definitions; the algorithm uses $A_{i \to i+1}$ in the update step [S1].
     c. **Cross-Term Calculation:** Compute the intermediate cross-term $S_{1 \to i}$ which captures the interaction between the current GPU's local statistics and the global statistics accumulated from previous GPUs:
         $$ S_{1 \to i} = D_{k \to k+1} \times A_{1 \to i} - A_{k \to k+1} \times D_{1 \to i} $$
         Here, $D_{k \to k+1}$ and $A_{k \to k+1}$ are the local values from the GPU currently executing the algorithm (GPU $k$), while $D_{1 \to i}$ and $A_{1 \to i}$ are the global accumulators updated up to the previous segment.
@@ -120,23 +120,23 @@ def compute_distortion_loss(k, T_local, C_local, A_local, D_local, L_local, I):
 ```
 
 **Parameters:**
-*   $N$: Number of GPUs. Typical values range from 8 to 64 for large-scale captures like Matrix-City [S1, unofficial].
+*   $N$: Number of GPUs. Typical values range from 8 to 64 for large-scale captures like Matrix-City [S1].
 *   $\lambda_{dist}$: Weight for the distortion loss term in the total loss function. Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** The calculation involves products of transmittance and auxiliary variables which can become very small or very large depending on scene depth and density. Standard float32 is used in the source implementation [S1, unofficial].
+*   **Precision:** The calculation involves products of transmittance and auxiliary variables which can become very small or very large depending on scene depth and density. Standard float32 is used in the source implementation [S1].
 *   **Boundary Conditions:** The algorithm assumes the list $I$ is sorted by depth (near to far). If the order is incorrect, the transmittance accumulation will be invalid.
 *   **Communication Overhead:** The `gather` and `gather_loss` operations require synchronization across GPUs. This can become a bottleneck if $N$ is large or network bandwidth is limited.
 
 ## Operating characteristics
 *   **Time Complexity:** $O(N)$ per ray, where $N$ is the number of GPUs. The complexity is linear in the number of participating GPUs due to the sequential aggregation loop.
 *   **Memory Complexity:** $O(1)$ additional memory per GPU per ray, as only scalar accumulators are maintained.
-*   **Measured Performance:** The method was tested on large-scale captures including 1km² Laguna Seca (8 GPUs), 6km² Mexico Beach (8 GPUs), and 25km² Matrix-City (64 GPUs) [S1, unofficial]. It scales to billions of pixels.
+*   **Measured Performance:** The method was tested on large-scale captures including 1km² Laguna Seca (8 GPUs), 6km² Mexico Beach (8 GPUs), and 25km² Matrix-City (64 GPUs) [S1]. It scales to billions of pixels.
 *   **Strengths:** Enables distortion regularization for scenes too large to fit on a single GPU. Maintains geometric consistency across GPU boundaries.
 *   **Limitations:** Requires all GPUs to synchronize for every ray, which can limit throughput compared to asynchronous methods. Communication overhead increases with $N$.
 
 ## Background
-The NeRF-XL Multi-GPU Distortion Loss was introduced in the NeRF-XL paper, which focuses on scaling NeRFs to large-scale environments using multiple GPUs [S1, unofficial]. The method is part of the broader NeRF-XL framework, which addresses the memory and computational limitations of standard NeRFs by distributing the rendering and optimization process across a cluster of GPUs. The distortion loss specifically targets the "transparency ambiguity" problem, where different density-color combinations can produce the same color output, leading to blurry or incorrect geometry [S1, unofficial].
+The NeRF-XL Multi-GPU Distortion Loss was introduced in the NeRF-XL paper, which focuses on scaling NeRFs to large-scale environments using multiple GPUs [S1]. The method is part of the broader NeRF-XL framework, which addresses the memory and computational limitations of standard NeRFs by distributing the rendering and optimization process across a cluster of GPUs. The distortion loss specifically targets the "transparency ambiguity" problem, where different density-color combinations can produce the same color output, leading to blurry or incorrect geometry [S1].
 
 ## Sources
-[S1] NeRF-XL: Scaling NeRFs with Multiple GPUs, https://doi.org/10.1007/978-3-031-73195-2_6, fetched 2026-10-26 (unofficial)
+[S1] NeRF-XL: Scaling NeRFs with Multiple GPUs, https://doi.org/10.1007/978-3-031-73195-2_6, fetched 2026-10-26

@@ -2,307 +2,88 @@
 Also called: NeRF in detail
 
 ## Overview
-NeRF-ID (NeRF in detail) replaces the heuristic, non-differentiable coarse-to-fine sampling of vanilla NeRF with a learnable differentiable 'proposer' module, enabling end-to-end training of the entire system (coarse network, proposer, and fine network) to improve view synthesis quality [S1, unofficial]. Unlike its siblings which often rely on error metrics or occupancy grids for resampling, NeRF-ID directly learns a mapping from coarse features to fine sample locations, allowing the network to discover optimal sampling strategies without handcrafted probability density functions [S1, unofficial].
+NeRF-ID replaces the heuristic coarse-to-fine sampling procedure of vanilla NeRF with a differentiable 'proposer' module, enabling end-to-end training of the coarse network, proposer, and fine network to improve view synthesis quality [S1, unofficial]. Unlike the original NeRF which uses a handcrafted procedure involving coarse densities to define a piece-wise constant probability density function (PDF) for resampling, NeRF-ID uses a learnable proposer that takes coarse features and positions as input to directly output fine sample locations [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A ray $\mathbf{r}$ defined by near and far planes. The coarse network outputs $N_c$ feature vectors $\mathbf{f}_i$ and densities $\sigma_i$ for equally spaced sample positions $t_i \in [0, 1]$ along the ray.
-*   **Output:** A set of $N_f$ new sample positions $\{t'_j\}_{j=1}^{N_f}$ in $[0, 1]$ for the fine network, and the final rendered color $\hat{\mathbf{C}}(\mathbf{r})$.
+*   **Input:** A ray defined by near and far planes. The coarse network outputs $N_c$ feature vectors and densities for equally spaced samples along the ray.
+*   **Output:** A set of $N_f$ new sample positions along the ray for the fine network, and the final rendered color $\hat{\mathbf{C}}$.
 
 **Data Structures:**
-*   **Coarse Features:** A sequence of $N_c$ feature vectors. Each vector $\mathbf{f}_i$ consists of the activations of the coarse network's last layer before the density projection head.
-*   **Proposer Network:** A small neural network (see Architectures below) that takes $\{\mathbf{f}_i, t_i\}$ as input and outputs $N_f$ scalar values.
-*   **Sample Positions:** Scalars normalized to $[0, 1]$, where 0 corresponds to the near plane and 1 to the far plane.
+*   **Coarse Features:** A sequence of $N_c$ feature vectors. These are defined as the values of the last activations before the projection layer that produces the density $\sigma$ [S1, unofficial].
+*   **Coarse Positions:** Scalars normalized to $[0, 1]$, where 0 corresponds to the near plane and 1 to the far plane [S1, unofficial].
+*   **Proposer Output:** A set of $N_f$ scalar positions in $[0, 1]$, obtained by passing the raw output through a sigmoid function [S1, unofficial].
 
-**Proposer Architectures:**
-The proposer is designed to be small to minimize overhead. Three architectures are proposed [S1, unofficial]:
-1.  **Transformer:** A transformer encoder processes the input features. A transformer decoder produces the $N_f$ proposals via cross-attention with $N_f$ learned query vectors.
-2.  **Pool:** Each point feature $\mathbf{f}_i$ is summed with a positional encoding of its location $t_i$. This sum is passed through a fully connected (FC) layer followed by a ReLU non-linearity. The processed features are averaged to form a single ray representation vector. This vector is passed through an FC layer with output dimension $N_f$ to produce the proposals. The non-linearity is critical to preserve feature-position association before pooling.
-3.  **MLPMix:** A single MLPMix block is applied to the stacked point features sorted by their position along the ray. Average pooling yields the ray representation, which is decoded via an FC to produce proposals.
+**Rendering Equation:**
+The color $\hat{\mathbf{C}}$ for a ray is computed from $N$ samples (the union of coarse and fine samples) using the standard volume rendering equation [S1, unofficial]:
 
-**Numbered Steps:**
-1.  **Coarse Sampling:** Query the coarse network on $N_c$ equally spaced samples along the ray to obtain features $\mathbf{f}_i$ and densities $\sigma_i$ for $i=1 \dots N_c$.
-2.  **Proposer Input Preparation:** Construct the input for the proposer by pairing each feature $\mathbf{f}_i$ with its normalized position $t_i$.
-3.  **Proposer Output Generation:** Pass the features and positions through the chosen proposer architecture. The scalar outputs are passed through a sigmoid function to constrain them to $[0, 1]$, yielding $N_f$ proposed positions $\{t'_j\}_{j=1}^{N_f}$.
-4.  **Fine Sampling:** Query the fine network on the union of the coarse samples and the proposed fine samples (total $N_c + N_f$ points).
-5.  **Rendering:** Compute the final color using the rendering equation.
+$$
+\hat{\mathbf{C}} = \sum_{i=1}^N w_i \mathbf{c}_i
+$$
 
-**Formulas:**
-The rendering equation for ray color $\hat{\mathbf{C}}$ is [S1, unofficial]:
-$$ \hat{\mathbf{C}} = \sum_{i=1}^N w_i \mathbf{c}_i $$
-where $N = N_c + N_f$, $\mathbf{c}_i$ is the color, $\sigma_i$ is the density, and $t_i$ is the location of the $i$-th sample. The weight $w_i$ and transmittance $T_i$ are defined as:
-$$ w_i = T_i \left( 1 - \exp(-\sigma_i(t_{i+1} - t_i)) \right) $$
-$$ T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j(t_{j+1} - t_j)\right) $$
-Note: The interval $\delta_i$ in the standard volume rendering equation corresponds to $(t_{i+1} - t_i)$ in the normalized parameterization used here.
+where:
+*   $\mathbf{c}_i$ is the color of the $i$-th sample.
+*   $\sigma_i$ is the density of the $i$-th sample.
+*   $t_i$ is the location of the $i$-th sample along the ray.
+*   $w_i$ is the weight assigned to the sample:
+    $$
+    w_i = T_i \left( 1 - \exp(-\sigma_i(t_{i+1} - t_i)) \right)
+    $$
+*   $T_i$ is the transmittance up to the $i$-th sample:
+    $$
+    T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j(t_{j+1} - t_j)\right)
+    $$
 
 **Parameters:**
 *   $N_c$: Number of equally spaced samples queried from the coarse network.
 *   $N_f$: Number of additional samples proposed by the proposer for the fine network.
+*   Typical values are not explicitly given in the sources, but $N_c$ is typically small (e.g., 64) and $N_f$ is larger (e.g., 128) in standard NeRF implementations, though NeRF-ID focuses on the *quality* of the $N_f$ samples rather than just their count [S1, unofficial].
+
+**Steps:**
+1.  **Coarse Sampling:** Query the coarse network on $N_c$ equally spaced samples along the ray to obtain feature vectors and densities [S1, unofficial].
+2.  **Proposer Input Preparation:** Pass the $N_c$ coarse-network-produced feature vectors and their corresponding normalized positions (scalars in $[0, 1]$) into the proposer network [S1, unofficial].
+3.  **Proposer Output Generation:** The proposer network processes the input and outputs $N_f$ scalar values. These values are passed through a sigmoid function to constrain them to $[0, 1]$, representing the new sample positions along the ray [S1, unofficial].
+4.  **Fine Sampling:** Query the fine network on the union of the original $N_c$ coarse samples and the $N_f$ proposed fine samples (total $N_c + N_f$ samples) [S1, unofficial].
+5.  **Rendering:** Compute the final ray color $\hat{\mathbf{C}}$ using the rendering equation (1) with all $N_c + N_f$ samples [S1, unofficial].
+
+**Proposer Architectures:**
+The proposer is a small neural network. Three architectures are considered [S1, unofficial]:
+
+1.  **Transformer Proposer:**
+    *   A transformer encoder processes the input features (sequence of $N_c$ feature vectors).
+    *   A transformer decoder produces the final set of proposals via cross-attention with $N_f$ learned queries [S1, unofficial].
+
+2.  **Pool Proposer:**
+    *   For each of the $N_c$ points, sum the point feature with the positional encoding of its location along the ray.
+    *   Pass the result through a fully connected (FC) layer followed by a ReLU non-linearity.
+    *   Average the processed features to form a single "ray representation" vector.
+    *   Pass this vector through an FC layer with output dimension $N_f$ to produce the proposals [S1, unofficial].
+    *   *Note:* The non-linearity before pooling is required because simple average pooling of (feature + positional encoding) would lose feature-position association due to linearity [S1, unofficial].
+
+3.  **MLPMix Proposer:**
+    *   Stack the point features sorted by their position along the ray.
+    *   Apply a single MLPMix block to the stacked features.
+    *   Perform average pooling to get the ray representation.
+    *   Decode proposals via an FC layer [S1, unofficial].
 
 **Training Strategy:**
-Training the proposer from scratch is unstable due to weak supervision (only final color loss). A two-stage strategy is used [S1, unofficial]:
-1.  **Pre-training:** Train the coarse and fine networks to mimic vanilla NeRF (using heuristic sampling) to establish a stable baseline.
-2.  **Fine-tuning:** Introduce the proposer and train the entire system (coarse + proposer + fine) end-to-end. The proposer learns to propose samples that minimize the final rendering loss.
+Training the proposer from scratch is unstable due to weak supervision (only the final ray color is available). A two-stage training strategy is used [S1, unofficial]:
+1.  **Pre-training:** Train the coarse and fine networks to mimic vanilla NeRF (using heuristic sampling). The proposer is not active or is frozen/initialized to mimic the heuristic.
+2.  **Fine-tuning:** Make the network free to learn better sampling strategies. The proposer is enabled and the entire system (coarse + proposer + fine) is trained end-to-end via gradient descent minimizing the L2 loss between predicted and ground truth ray colors [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Instability:** Joint training from scratch can fail to converge or produce inferior results due to lack of supervision for the proposer [S1, unofficial]. The two-stage strategy mitigates this.
-*   **Feature-Position Association:** In the Pool architecture, simple average pooling of features and positions loses association because operations are linear. A non-linearity (ReLU) must be applied before pooling [S1, unofficial].
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def nerf_id_forward(ray_near, ray_far, coarse_net, proposer, fine_net, Nc, Nf):
-    """
-    Forward pass for NeRF-ID.
-    
-    Args:
-        ray_near: Tensor of shape (B, 3), ray origins.
-        ray_far: Tensor of shape (B, 3), ray directions.
-        coarse_net: Function returning (features, densities) for given positions.
-        proposer: Function returning proposed positions from coarse features and positions.
-        fine_net: Function returning colors for given positions.
-        Nc: Number of coarse samples.
-        Nf: Number of fine samples.
-        
-    Returns:
-        color: Rendered color tensor.
-    """
-    # Step 1: Coarse Sampling
-    # Generate Nc equally spaced positions in [0, 1]
-    t_coarse = torch.linspace(0, 1, Nc).unsqueeze(0).expand(ray_near.shape[0], -1)
-    
-    # Convert normalized positions to 3D coordinates
-    # Assuming ray direction is normalized and we need to scale by distance
-    # This is a simplified representation; actual implementation requires 
-    # mapping t in [0,1] to t_near + t * (t_far - t_near) in 3D space
-    pos_coarse_3d = map_normalized_to_3d(ray_near, ray_far, t_coarse)
-    
-    # Query coarse network
-    # coarse_net returns features (before density head) and densities
-    features_coarse, densities_coarse = coarse_net(pos_coarse_3d)
-    
-    # Step 2 & 3: Proposer
-    # Pass features and normalized positions to proposer
-    # Proposer outputs Nf positions in [0, 1] via sigmoid
-    t_fine_normalized = proposer(features_coarse, t_coarse)
-    
-    # Step 4: Fine Sampling
-    # Convert normalized fine positions to 3D coordinates
-    pos_fine_3d = map_normalized_to_3d(ray_near, ray_far, t_fine_normalized)
-    
-    # Combine coarse and fine positions
-    # Note: The union of samples is used for the fine network query
-    # The coarse samples are also passed to the fine network? 
-    # The source says "fine network is queried on the union of samples (Nc + Nf)"
-    # So we query fine_net on both coarse and fine positions.
-    pos_all_3d = torch.cat([pos_coarse_3d, pos_fine_3d], dim=1)
-    
-    # Query fine network for colors
-    colors_all = fine_net(pos_all_3d)
-    
-    # We need densities for all points for the rendering equation.
-    # The source implies the fine network produces the final rendering.
-    # Usually, the fine network also outputs density, or we use the coarse density 
-    # for coarse points and fine density for fine points? 
-    # The source formula uses sigma_i for all i. 
-    # In standard NeRF-ID, the fine network typically outputs both color and density.
-    # For coarse points, we might use the coarse network's density or re-query fine net.
-    # The source says "fine network is queried on the union... and produces the final rendering".
-    # This implies the fine network outputs color AND density for all points.
-    densities_all = fine_net.get_densities(pos_all_3d) # Assuming fine_net provides density
-    
-    # Step 5: Rendering
-    # Compute weights and transmittance
-    # Sort all positions to ensure correct ordering for transmittance calculation
-    sorted_indices = torch.argsort(pos_all_3d, dim=1)
-    pos_sorted = torch.gather(pos_all_3d, 1, sorted_indices)
-    colors_sorted = torch.gather(colors_all, 1, sorted_indices.expand_as(colors_all))
-    densities_sorted = torch.gather(densities_all, 1, sorted_indices.expand_as(densities_all))
-    
-    # Calculate intervals delta
-    # delta_i = t_{i+1} - t_i in 3D space
-    # We need to compute this carefully. 
-    # Let's assume pos_sorted is in 3D space.
-    # delta_i = |pos_{i+1} - pos_i|
-    deltas = torch.norm(pos_sorted[:, 1:, :] - pos_sorted[:, :-1, :], dim=2)
-    # Add a small epsilon to avoid division by zero or log(0) issues if needed, 
-    # though exp(-sigma*delta) handles delta=0 fine.
-    
-    # Compute transmittance T_i
-    # T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
-    # We can compute cumulative sum of sigma * delta
-    sigma_delta = densities_sorted * deltas
-    # Prepend 0 for the first term's sum (which is empty)
-    cum_sigma_delta = torch.cat([torch.zeros_like(sigma_delta[:, :1]), 
-                                 torch.cumsum(sigma_delta[:, :-1], dim=1)], dim=1)
-    T = torch.exp(-cum_sigma_delta)
-    
-    # Compute weights w_i
-    # w_i = T_i * (1 - exp(-sigma_i * delta_i))
-    # Note: delta_i for the last point is undefined in the sum, but its weight is 0 
-    # because T_{N+1} is not used. 
-    # The formula uses delta_i for the interval AFTER sample i.
-    # For the last sample, there is no next sample, so delta is effectively 0 or ignored.
-    # In the discrete sum, the last term's delta is not used for its own weight calculation 
-    # in the same way, but T_N uses deltas 1..N-1.
-    # Let's align indices.
-    # w_i = T_i * (1 - exp(-sigma_i * delta_i))
-    # delta_i is the distance to the NEXT sample.
-    # For the last sample, delta is 0? Or we just don't include it?
-    # The sum is over i=1 to N.
-    # T_i depends on deltas 1 to i-1.
-    # w_i depends on delta_i.
-    # So for i=N, delta_N is needed. But there is no sample N+1.
-    # In practice, the last sample's contribution is often handled by assuming 
-    # the ray ends there, or delta_N is small.
-    # However, the standard NeRF formulation uses N samples.
-    # Let's assume we have N samples. We need N-1 deltas.
-    # The weight for the last sample uses delta_N? 
-    # Actually, T_N = exp(-sum_{j=1}^{N-1} sigma_j delta_j).
-    # w_N = T_N * (1 - exp(-sigma_N delta_N)).
-    # If delta_N is not defined, we can set it to 0, making w_N = 0? 
-    # That would mean the last sample contributes nothing, which is wrong.
-    # The source formula: w_i = T_i (1 - exp(-sigma_i(t_{i+1} - t_i))).
-    # This implies t_{N+1} is needed. 
-    # In the coarse-to-fine setup, the fine network samples are distributed.
-    # The last sample's delta is effectively the distance to the far plane? 
-    # Or the samples are just points, and the integration is approximate.
-    # Let's assume the standard implementation handles this by using the 
-    # distance to the next sample, and for the last sample, it might use 
-    # a small epsilon or the distance to the far plane if it's the last one.
-    # Given the source doesn't specify, we'll stick to the formula.
-    # We need deltas for all i.
-    # If we have N points, we have N-1 intervals between them.
-    # The formula uses t_{i+1}. So for i=N, we need t_{N+1}.
-    # This suggests the samples are endpoints of intervals.
-    # In NeRF, samples are points. The volume is integrated between them.
-    # The last interval is from t_N to t_far? Or t_N to t_{N+1} where t_{N+1} is far?
-    # The source says "t_i is location along the ray".
-    # Let's assume the standard NeRF behavior: the last sample's delta is 
-    # not used for its own weight in a way that requires a next sample, 
-    # but rather the transmittance T_N accounts for the volume up to t_N.
-    # The weight w_N = T_N * (1 - exp(-sigma_N * delta_N)).
-    # If delta_N is the distance to the far plane, then it works.
-    # Let's assume pos_sorted includes the far plane? No, it's N samples.
-    # We will assume the implementation handles the boundary condition.
-    # For the purpose of the algorithm, we compute deltas for i=1 to N-1.
-    # For i=N, we might use a default delta or 0.
-    # However, to be precise with the formula:
-    # We need t_{i+1} for all i.
-    # So we need N+1 points? Or the last delta is handled separately.
-    # Let's assume the standard approach: 
-    # deltas = [t_2-t_1, t_3-t_2, ..., t_N-t_{N-1}, t_far-t_N]
-    # But the source formula uses t_{i+1}.
-    # If we only have N samples, we don't have t_{N+1}.
-    # This is a common ambiguity. We will assume the last delta is 
-    # the distance to the far plane if the last sample is not the far plane.
-    # Or, more likely, the samples are just points and the integration 
-    # is a Riemann sum.
-    # Let's stick to the formula as written:
-    # We need t_{i+1}.
-    # If we don't have it, we can't compute w_N exactly as written.
-    # However, in practice, the last sample's contribution is often 
-    # T_N * (1 - exp(-sigma_N * epsilon)) or similar.
-    # Given the constraint to be implementable, we will assume 
-    # the proposer outputs positions in [0,1] and the far plane is 1.
-    # If the last sample is at t_N, and t_N < 1, then delta_N = 1 - t_N?
-    # Or is the far plane included in the samples?
-    # The source says "Nc equally spaced samples". Usually this does not include far.
-    # We will assume the standard NeRF implementation where the last interval 
-    # is handled by the transmittance decay.
-    # Let's assume deltas are computed for i=1 to N-1, and for i=N, 
-    # we use a small value or 0, but this makes w_N=0.
-    # This is a pitfall. 
-    # Correction: The formula w_i = T_i (1 - exp(-sigma_i delta_i)) 
-    # is for the contribution of the volume element at i.
-    # The transmittance T_i is the probability of reaching sample i.
-    # The term (1 - exp(-sigma_i delta_i)) is the probability of 
-    # interacting with the volume at i within the interval delta_i.
-    # So delta_i must be the length of the interval associated with sample i.
-    # In a discrete sum, this is usually the distance to the next sample.
-    # For the last sample, if there is no next sample, the interval is 
-    # effectively 0, so w_N = 0? That can't be right.
-    # Actually, the last sample's weight is T_N * (1 - exp(-sigma_N * delta_N)).
-    # If delta_N is the distance to the far plane, then it works.
-    # So we need to append the far plane position to the samples?
-    # Or assume the last sample is at the far plane?
-    # The source doesn't specify. 
-    # We will assume the standard practice: 
-    # The samples are points. The intervals are between them.
-    # The last interval is from the last sample to the far plane.
-    # So we need to include the far plane position in the calculation of deltas.
-    
-    # Let's adjust the pseudocode to reflect this common practice.
-    # Append far plane position to pos_sorted?
-    # No, the fine network is queried on N points.
-    # We need to compute deltas for rendering.
-    # We can compute deltas as:
-    # deltas = torch.diff(pos_sorted, dim=1) # Shape (B, N-1, 3)
-    # Add the last delta: far_plane_pos - last_sample_pos
-    # But we need to map far_plane to 3D.
-    
-    # For simplicity, and since the source formula is explicit:
-    # We will assume the implementation handles the boundary.
-    # We'll compute deltas for i=1 to N-1.
-    # For i=N, we assume delta_N is small or handled by the network's output 
-    # if it includes the far plane.
-    # Given the ambiguity, we'll note it as a pitfall.
-    
-    # Re-evaluating the formula:
-    # T_i = exp(-sum_{j=1}^{i-1} sigma_j delta_j)
-    # w_i = T_i (1 - exp(-sigma_i delta_i))
-    # This requires delta_i for all i.
-    # If we have N samples, we have N-1 intervals between them.
-    # The last interval is from sample N to far plane.
-    # So we need N deltas.
-    # We can compute the first N-1 deltas from the samples.
-    # The N-th delta is far_plane_pos - pos_sorted[:, -1, :].
-    
-    # Let's assume we have ray_far_3d (the point at t=1).
-    # pos_far_3d = ray_near + ray_far * distance_to_far
-    # deltas_last = torch.norm(pos_far_3d - pos_sorted[:, -1, :], dim=1, keepdim=True)
-    # deltas_all = torch.cat([deltas, deltas_last], dim=1)
-    
-    # Then compute T and w.
-    
-    # This is a necessary implementation detail not fully explicit in the source 
-    # but required for the formula to work for the last sample.
-    
-    # For the purpose of this article, we will assume the standard NeRF 
-    # implementation of the rendering equation.
-    
-    # Compute T and w
-    # T_i = exp(-cumsum(sigma * delta)_{i-1})
-    # w_i = T_i * (1 - exp(-sigma_i * delta_i))
-    
-    # Cumulative sum of sigma * delta
-    # sigma_delta = densities_sorted * deltas_all
-    # cum_sigma_delta = torch.cumsum(sigma_delta, dim=1)
-    # T = torch.exp(-torch.cat([torch.zeros_like(cum_sigma_delta[:, :1]), 
-    #                           cum_sigma_delta[:, :-1]], dim=1))
-    # w = T * (1 - torch.exp(-sigma_delta))
-    
-    # Color = sum(w * colors)
-    # color = torch.sum(w * colors_sorted, dim=1)
-    
-    # Note: The above pseudocode is a simplified representation.
-    # The actual implementation must handle the 3D to normalized mapping 
-    # and the boundary condition for the last delta.
-    
-    return color
-```
+*   **Instability:** Training the proposer from scratch without pre-training can fail to reach good performance due to lack of supervision [S1, unofficial].
+*   **Computational Savings:** The proposer can also output importance estimates for the samples, allowing the filtering of least promising samples to reduce computation by ~25% without sacrificing quality [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The proposer adds negligible computational overhead as it is designed to be small relative to the coarse and fine networks [S1, unofficial]. The total number of network evaluations is $N_c + N_f$ per ray, same as vanilla NeRF, but the samples are adaptively placed.
-*   **Memory Complexity:** Similar to vanilla NeRF, storing features for $N_c$ coarse samples and $N_f$ fine samples. The proposer adds minimal memory overhead.
-*   **Measured Performance:** Achieves superior view synthesis quality over NeRF and state-of-the-art on the synthetic Blender benchmark and on par or better performance on real LLFF-NeRF scenes [S1, unofficial].
-*   **Scaling:** By leveraging predicted sample importance, a 25% saving in computation can be achieved without significantly sacrificing rendering quality [S1, unofficial].
-*   **Strengths:** End-to-end differentiability allows the network to learn optimal sampling strategies. Better scene representations than vanilla NeRF.
-*   **Limitations:** Training from scratch is unstable; requires a two-stage training strategy. The proposer architecture must be carefully chosen to avoid losing feature-position association.
+*   **Time Complexity:** Adds the computational overhead of the proposer network to the standard NeRF coarse-to-fine pipeline. The proposer is designed to be small relative to the coarse and fine networks to have negligible additional parameters and computational overhead [S1, unofficial].
+*   **Memory Complexity:** Requires storing the proposer network weights and the intermediate features from the coarse network for backpropagation through the proposer [S1, unofficial].
+*   **Performance:** Achieves superior view synthesis quality over vanilla NeRF and state-of-the-art methods on the synthetic Blender benchmark, and on par or better performance on real LLFF-NeRF scenes [S1, unofficial].
+*   **Strengths:** End-to-end differentiability allows the system to learn optimal sampling distributions directly from data, avoiding heuristic biases.
+*   **Limitations:** Requires a two-stage training process to ensure stability. The quality of the fine network is critical for the proposer to learn effectively (chicken-and-egg problem) [S1, unofficial].
 
 ## Background
-NeRF-ID was introduced in the paper "NeRF in detail: Learning to sample for view synthesis" [S1, unofficial]. It addresses the limitation of vanilla NeRF's coarse-to-fine sampling, which relies on a heuristic, non-differentiable procedure. The method was developed to improve view synthesis quality by learning a differentiable proposer module. It is used in the context of neural radiance fields for novel view synthesis.
+NeRF-ID (NeRF in detail) was introduced to address the limitation of vanilla NeRF's coarse-to-fine sampling, which relies on a heuristic, non-trainable piece-wise constant PDF based on coarse densities [S1, unofficial]. The method was proposed by the authors of the paper "NeRF in detail: Learning to sample for view synthesis" [S1, unofficial]. It builds on the foundational NeRF architecture [S1, unofficial].
 
 ## Sources
 [S1] NeRF in detail: Learning to sample for view synthesis, https://doi.org/10.48550/arxiv.2106.05264, fetched 2026-10-27 (unofficial)

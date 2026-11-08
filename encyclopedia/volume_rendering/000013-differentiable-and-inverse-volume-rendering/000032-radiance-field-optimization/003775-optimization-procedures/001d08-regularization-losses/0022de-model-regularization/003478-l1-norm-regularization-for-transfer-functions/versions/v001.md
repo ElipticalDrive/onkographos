@@ -24,7 +24,7 @@ The L1 norm is computed as the integral of the absolute value of the opacity fun
 6.  Add the resulting scalar to the loss function.
 
 **Formula:**
-The L1 regularization term for opacity is defined as [S2, unofficial]:
+The L1 regularization term for opacity is defined as [S2]:
 
 $$
 R_{L1}(\Theta) = \int_{[-1,1]^3} |\sigma_\Theta(\mathbf{x})| \, d\mathbf{x} \approx \sum_{i=1}^N \sum_{j=1}^N \sum_{k=1}^N |\sigma_\Theta(\delta i, \delta j, \delta k)| \delta^3
@@ -48,7 +48,7 @@ Where:
 ## Subtopics
 
 ### L1 Sparsity Regularization
-This variant explicitly refers to the application of the L1 norm to promote sparsity in the transfer function's output or parameters. As defined in [S2, unofficial], it is calculated by integrating the absolute value of the opacity field. It is chosen when the goal is to enforce a sparse representation of the volume's density or to simplify the TF structure by penalizing non-zero values. It differs from L2 regularization by being less sensitive to outliers and more likely to drive coefficients to exactly zero, resulting in piecewise constant or simplified TFs.
+This variant explicitly refers to the application of the L1 norm to promote sparsity in the transfer function's output or parameters. As defined in [S2], it is calculated by integrating the absolute value of the opacity field. It is chosen when the goal is to enforce a sparse representation of the volume's density or to simplify the TF structure by penalizing non-zero values. It differs from L2 regularization by being less sensitive to outliers and more likely to drive coefficients to exactly zero, resulting in piecewise constant or simplified TFs.
 
 ## Operating characteristics
 *   **Time Complexity:** $O(N^3)$ where $N$ is the number of grid points per dimension, as it requires evaluating the TF at every grid point. This is significantly cheaper than ray-marching but adds overhead to each optimization step.
@@ -63,4 +63,4 @@ This method was introduced in the context of text-based transfer function design
 
 ## Sources
 [S1] Text-based transfer function design for semantic volume rendering, https://doi.org/10.1109/vis55277.2024.00047, fetched 2026-10-26
-[S2] Aug-NeRF: Training Stronger Neural Radiance Fields with Triple-Level Physically-Grounded Augmentations, https://doi.org/10.1109/cvpr52688.2022.01476, fetched 2026-10-26 (unofficial)
+[S2] Aug-NeRF: Training Stronger Neural Radiance Fields with Triple-Level Physically-Grounded Augmentations, https://doi.org/10.1109/cvpr52688.2022.01476, fetched 2026-10-26

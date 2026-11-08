@@ -3,35 +3,35 @@
 Also called: CSGV-R, CSGV-R Random Access Decoding, Random Access Compressed Segmentation Volumes, Random Access Segmentation Volume Compression
 
 ## Overview
-Random Access Compressed Segmentation Volumes (CSGV-R) is a lossless compression method for segmentation volumes that provides true per-voxel random access without brick-level caching [S1, unofficial]. It solves the memory overhead and latency issues inherent in standard Compressed Segmentation Volume (CSGV) decoding, which requires serial decoding of entire bricks to access individual voxels [S1, unofficial]. Unlike CSGV, which uses serial Asymmetric Numerical Systems (ANS) encoding, CSGV-R leverages Huffman-shaped wavelet trees to allow direct access to any node's operation and label lookup in constant time relative to the alphabet size, enabling rendering in the compression domain with optional voxel caching [S1, unofficial].
+Random Access Compressed Segmentation Volumes (CSGV-R) is a lossless compression method for segmentation volumes that provides true per-voxel random access without brick-level caching [S1]. It solves the memory overhead and latency issues inherent in standard Compressed Segmentation Volume (CSGV) decoding, which requires serial decoding of entire bricks to access individual voxels [S1]. Unlike CSGV, which uses serial Asymmetric Numerical Systems (ANS) encoding, CSGV-R leverages Huffman-shaped wavelet trees to allow direct access to any node's operation and label lookup in constant time relative to the alphabet size, enabling rendering in the compression domain with optional voxel caching [S1].
 
 ## How it works
-**Inputs:** A compressed CSGV-R brick containing the wavelet matrix bit vector $W$, stop bit vector $S$, flat rank structure, palette of uncompressed labels (stored in reverse order), and LOD operation start indices $T_{\bar{l}}$ [S1, unofficial].
-**Outputs:** The label value for a specific voxel identified by its Morton code $n$ and Level of Detail (LOD) $\bar{l}$ [S1, unofficial].
+**Inputs:** A compressed CSGV-R brick containing the wavelet matrix bit vector $W$, stop bit vector $S$, flat rank structure, palette of uncompressed labels (stored in reverse order), and LOD operation start indices $T_{\bar{l}}$ [S1].
+**Outputs:** The label value for a specific voxel identified by its Morton code $n$ and Level of Detail (LOD) $\bar{l}$ [S1].
 
 **Data Structures:**
-1.  **Operation Stream ($T$):** Encoded implicitly via the Huffman-shaped wavelet matrix. The alphabet $\Sigma$ is constant with size $|\Sigma|=6$, consisting of operations: Parent ($\uparrow$), Neighbor X ($X$), Neighbor Y ($Y$), Neighbor Z ($Z$), Palette ($\mathcal{P}$), and Back Reference ($\delta=1$) [S1, unofficial]. The general back reference operation with distance $\delta > 1$ is omitted to reduce alphabet size [S1, unofficial].
-2.  **Wavelet Matrix ($W$):** A bit vector encoding the operation stream. It is structured in levels $l=0 \dots 4$. The levels of the wavelet tree are distinct from the CSGV multi-resolution grid LODs; queries for all CSGV LODs start within the first wavelet tree level [S1, unofficial].
-3.  **Stop Bit Vector ($S$):** A bit vector where $S[i]=1$ indicates that the region covered by node $i$ is missing in the operation stream on all finer levels [S1, unofficial].
-4.  **LOD Starts ($T_{\bar{l}}$):** An array storing the operation stream index $i$ of the first grid node in each LOD $\bar{l}$ [S1, unofficial].
-5.  **Palette:** A flat array of uncompressed uint32_t labels, stored in reverse order [S1, unofficial].
+1.  **Operation Stream ($T$):** Encoded implicitly via the Huffman-shaped wavelet matrix. The alphabet $\Sigma$ is constant with size $|\Sigma|=6$, consisting of operations: Parent ($\uparrow$), Neighbor X ($X$), Neighbor Y ($Y$), Neighbor Z ($Z$), Palette ($\mathcal{P}$), and Back Reference ($\delta=1$) [S1]. The general back reference operation with distance $\delta > 1$ is omitted to reduce alphabet size [S1].
+2.  **Wavelet Matrix ($W$):** A bit vector encoding the operation stream. It is structured in levels $l=0 \dots 4$. The levels of the wavelet tree are distinct from the CSGV multi-resolution grid LODs; queries for all CSGV LODs start within the first wavelet tree level [S1].
+3.  **Stop Bit Vector ($S$):** A bit vector where $S[i]=1$ indicates that the region covered by node $i$ is missing in the operation stream on all finer levels [S1].
+4.  **LOD Starts ($T_{\bar{l}}$):** An array storing the operation stream index $i$ of the first grid node in each LOD $\bar{l}$ [S1].
+5.  **Palette:** A flat array of uncompressed uint32_t labels, stored in reverse order [S1].
 
 **Algorithm Steps:**
 
-1.  **Compute Operation Stream Index:** Given a grid node's Morton code $n$ and LOD $\bar{l}$, compute the index $i$ in the operation stream $T$ using the function $idx(\mathbf{n}, \bar{l})$. This accounts for nodes removed by stop bits on coarser levels [S1, unofficial].
+1.  **Compute Operation Stream Index:** Given a grid node's Morton code $n$ and LOD $\bar{l}$, compute the index $i$ in the operation stream $T$ using the function $idx(\mathbf{n}, \bar{l})$. This accounts for nodes removed by stop bits on coarser levels [S1].
     $$i = idx(\mathbf{n}, \bar{l}) = T_{\bar{l}} + \mathbf{n} - \sum_{l < \bar{l}} rank_1^S(\mathbf{P}_l(\mathbf{n}, \bar{l})) \cdot 2^{3(\bar{l}-l)}$$
     Where:
     *   $T_{\bar{l}}$ is the stream index of the first grid node in LOD $\bar{l}$.
     *   $\mathbf{P}_l(\mathbf{n}, \bar{l})$ is the index of the (grand-)parent node of $n$ in LOD $l$.
     *   $rank_1^S(k)$ returns the number of 1 bits (stop bits) before index $k$ in vector $S$.
-    *   The term $\mathbf{P}_l(\mathbf{n}, \bar{l})$ and the inner sum are computed iteratively to avoid recursion, running in $O(L)$ time where $L$ is the number of LOD levels [S1, unofficial].
+    *   The term $\mathbf{P}_l(\mathbf{n}, \bar{l})$ and the inner sum are computed iteratively to avoid recursion, running in $O(L)$ time where $L$ is the number of LOD levels [S1].
 
-2.  **Decode Operation:** Access the operation $\omega = T[i]$ from the wavelet matrix using Algorithm 2. The Huffman-shaped wavelet matrix uses Canonical Huffman Codes (CHC) where the operation number corresponds to the number of zeros before the first 1 bit [S1, unofficial].
+2.  **Decode Operation:** Access the operation $\omega = T[i]$ from the wavelet matrix using Algorithm 2. The Huffman-shaped wavelet matrix uses Canonical Huffman Codes (CHC) where the operation number corresponds to the number of zeros before the first 1 bit [S1].
 
 3.  **Resolve Label:**
-    *   If $\omega$ is a Palette operation ($\mathcal{P}$), the label is retrieved directly from the palette. The palette index is determined by a rank query on the operation stream for previous palette operations [S1, unofficial].
-    *   If $\omega$ is a Parent ($\uparrow$) or Neighbor ($X, Y, Z$) operation, follow the indirection chain from the current grid node to the target node (parent or neighbor) until a Palette operation is reached. This involves recursively or iteratively computing the $idx$ for the target node and decoding its operation [S1, unofficial].
-    *   If $\omega$ is a Back Reference ($\delta=1$), it refers to the immediately preceding node in the stream [S1, unofficial].
+    *   If $\omega$ is a Palette operation ($\mathcal{P}$), the label is retrieved directly from the palette. The palette index is determined by a rank query on the operation stream for previous palette operations [S1].
+    *   If $\omega$ is a Parent ($\uparrow$) or Neighbor ($X, Y, Z$) operation, follow the indirection chain from the current grid node to the target node (parent or neighbor) until a Palette operation is reached. This involves recursively or iteratively computing the $idx$ for the target node and decoding its operation [S1].
+    *   If $\omega$ is a Back Reference ($\delta=1$), it refers to the immediately preceding node in the stream [S1].
 
 **Pseudocode:**
 
@@ -174,14 +174,14 @@ def idx(n, l_bar, brick):
 ```
 
 **Parameters:**
-*   Brick size $b = 64$ [S1, unofficial].
-*   Back reference distance $\delta=1$ only [S1, unofficial].
-*   Alphabet size $|\Sigma| = 6$ [S1, unofficial].
+*   Brick size $b = 64$ [S1].
+*   Back reference distance $\delta=1$ only [S1].
+*   Alphabet size $|\Sigma| = 6$ [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** The $idx$ function involves sums of rank queries and powers of 2. Ensure integer arithmetic is used to avoid precision loss [S1, unofficial].
-*   **Boundaries:** The Morton code of the parent of node $n$ is $\lfloor n/2^d \rfloor$ where $d=3$ in 3D (source mentions $d=2$ in 2D context, but CSGV is for 3D volumes) [S1, unofficial].
-*   **Stop Bits:** Nodes marked with stop bits in $S$ are removed from the operation stream on finer levels. The $idx$ function correctly accounts for this by subtracting the offset caused by these removed nodes [S1, unofficial].
+*   **Precision:** The $idx$ function involves sums of rank queries and powers of 2. Ensure integer arithmetic is used to avoid precision loss [S1].
+*   **Boundaries:** The Morton code of the parent of node $n$ is $\lfloor n/2^d \rfloor$ where $d=3$ in 3D (source mentions $d=2$ in 2D context, but CSGV is for 3D volumes) [S1].
+*   **Stop Bits:** Nodes marked with stop bits in $S$ are removed from the operation stream on finer levels. The $idx$ function correctly accounts for this by subtracting the offset caused by these removed nodes [S1].
 
 ## Subtopics
 
@@ -189,16 +189,16 @@ def idx(n, l_bar, brick):
 A rendering mode for CSGV-R that leverages true random access to decode voxel labels on demand. It offers three access strategies: direct "no cache", "voxel cache" with hash-based storage, and "voxel cache (es)" with an empty space bit vector. It solves memory overhead and latency issues of standard CSGV brick caching.
 
 ## Operating characteristics
-*   **Time Complexity:** The $idx$ function runs in $O(L) = O(\log_b n)$ time, where $L$ is the number of LOD levels and $b$ is the branching factor [S1, unofficial]. Access and rank queries on the wavelet matrix are constant time given the constant alphabet size [S1, unofficial].
-*   **Memory Complexity:** The compressed brick stores bit vectors $W$ and $S$ with a flat rank structure. The palette is stored in reverse order [S1, unofficial].
-*   **Performance:** CSGV-R outperforms Neuroglancer with 2× to 4× smaller data sets at rates between 0.648% and 4.411% of the original volume sizes [S1, unofficial]. It has slightly lower compression rates than CSGV but faster render times [S1, unofficial].
-*   **Strengths:** True per-voxel random access without brick-level caching; GPU-friendly due to elimination of serial ANS decoding; no decompression artifacts from caching [S1, unofficial].
-*   **Limitations:** Slightly lower compression rates compared to serial CSGV; requires implementation of Huffman-shaped wavelet trees [S1, unofficial].
-*   **When to use:** Real-time visualization of large segmentation volumes on GPUs where random access to individual voxels is required without high memory overhead for brick caching [S1, unofficial].
-*   **When not to use:** When maximum compression ratio is the primary goal and serial access patterns are dominant (use standard CSGV) [S1, unofficial].
+*   **Time Complexity:** The $idx$ function runs in $O(L) = O(\log_b n)$ time, where $L$ is the number of LOD levels and $b$ is the branching factor [S1]. Access and rank queries on the wavelet matrix are constant time given the constant alphabet size [S1].
+*   **Memory Complexity:** The compressed brick stores bit vectors $W$ and $S$ with a flat rank structure. The palette is stored in reverse order [S1].
+*   **Performance:** CSGV-R outperforms Neuroglancer with 2× to 4× smaller data sets at rates between 0.648% and 4.411% of the original volume sizes [S1]. It has slightly lower compression rates than CSGV but faster render times [S1].
+*   **Strengths:** True per-voxel random access without brick-level caching; GPU-friendly due to elimination of serial ANS decoding; no decompression artifacts from caching [S1].
+*   **Limitations:** Slightly lower compression rates compared to serial CSGV; requires implementation of Huffman-shaped wavelet trees [S1].
+*   **When to use:** Real-time visualization of large segmentation volumes on GPUs where random access to individual voxels is required without high memory overhead for brick caching [S1].
+*   **When not to use:** When maximum compression ratio is the primary goal and serial access patterns are dominant (use standard CSGV) [S1].
 
 ## Background
-CSGV-R was introduced by the authors of the source paper [S1, unofficial] as an extension of Fast Compressed Segmentation Volumes (CSGV) [PD24]. CSGV provided strong brick-wise compression and brick-level random access but required serial decoding within bricks. CSGV-R adapts Huffman-shaped wavelet trees, previously used in text indexing, to the rendering context for the first time, enabling true multi-resolution random access on a per-voxel level [S1, unofficial]. It is used in domains such as connectomics, machine learning, and natural sciences for visualizing large-scale segmentation volumes [S1, unofficial].
+CSGV-R was introduced by the authors of the source paper [S1] as an extension of Fast Compressed Segmentation Volumes (CSGV) [PD24]. CSGV provided strong brick-wise compression and brick-level random access but required serial decoding within bricks. CSGV-R adapts Huffman-shaped wavelet trees, previously used in text indexing, to the rendering context for the first time, enabling true multi-resolution random access on a per-voxel level [S1]. It is used in domains such as connectomics, machine learning, and natural sciences for visualizing large-scale segmentation volumes [S1].
 
 ## Sources
-[S1] Random Access Segmentation Volume Compression for Interactive Volume Rendering, https://doi.org/10.1111/cgf.70116, fetched 2026-10-28 (unofficial)
+[S1] Random Access Segmentation Volume Compression for Interactive Volume Rendering, https://doi.org/10.1111/cgf.70116, fetched 2026-10-28

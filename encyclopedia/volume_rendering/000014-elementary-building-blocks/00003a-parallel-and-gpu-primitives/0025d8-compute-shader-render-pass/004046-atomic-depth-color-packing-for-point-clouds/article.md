@@ -3,7 +3,7 @@
 Also called: Atomic point rendering, Basic Approach, Basic Compute Shader Point Cloud Rendering, Basic Compute Shader Point Rendering, Compute-based point rendering, Single-pass atomicMin rendering
 
 ## Overview
-This method renders point clouds using compute shaders by replacing the hardware pipeline's `GL_POINTS` primitive with a custom storage buffer acting as a framebuffer [S1, unofficial]. It resolves visibility and color simultaneously by encoding depth and color into a single 64-bit integer and using 64-bit `atomicMin` to select the point with the lowest depth for each pixel [S1, unofficial]. Unlike Günther et al. [GKLR13], which uses a busy-loop to wait for a pixel to be free and locks it with atomic compare-and-swap, this method updates an interleaved depth and color buffer with a single atomic instruction, improving performance [S1, unofficial].
+This method renders point clouds using compute shaders by replacing the hardware pipeline's `GL_POINTS` primitive with a custom storage buffer acting as a framebuffer [S1]. It resolves visibility and color simultaneously by encoding depth and color into a single 64-bit integer and using 64-bit `atomicMin` to select the point with the lowest depth for each pixel [S1]. Unlike Günther et al. [GKLR13], which uses a busy-loop to wait for a pixel to be free and locks it with atomic compare-and-swap, this method updates an interleaved depth and color buffer with a single atomic instruction, improving performance [S1].
 
 ## How it works
 **Inputs and Outputs:**
@@ -26,23 +26,23 @@ This method renders point clouds using compute shaders by replacing the hardware
         $$ pos = M_{wvp} \times position $$
     2.  Calculate the pixel ID from the screen position. Assuming $pos$ is in normalized device coordinates (NDC) where $x, y \in [-1, 1]$, and the image has width $W$ and height $H$:
         $$ pixelID = \left\lfloor \frac{pos.x + 1}{2} \times W \right\rfloor + \left\lfloor \frac{pos.y + 1}{2} \times H \right\rfloor \times W $$
-        *Note: The source uses a helper `toPixelID(pos)` [S1, unofficial]. The exact mapping depends on the coordinate system, but standard NDC to pixel conversion is implied.*
-    3.  Extract the linear depth from the $w$-component of the clip-space position. The source uses `pos.w` directly as the linear depth [S1, unofficial]. Convert this floating-point depth to an integer for packing:
+        *Note: The source uses a helper `toPixelID(pos)` [S1]. The exact mapping depends on the coordinate system, but standard NDC to pixel conversion is implied.*
+    3.  Extract the linear depth from the $w$-component of the clip-space position. The source uses `pos.w` directly as the linear depth [S1]. Convert this floating-point depth to an integer for packing:
         $$ depth = \text{floatBitsToInt}(pos.w) $$
-        *Note: `floatBitsToInt` interprets the bit pattern of the float as an integer. Since `atomicMin` compares integers, and depth increases with distance, this relies on the monotonicity of the float-to-int bit representation for positive depths or specific depth ranges. The source explicitly states using linear depth `pos.w` [S1, unofficial].*
+        *Note: `floatBitsToInt` interprets the bit pattern of the float as an integer. Since `atomicMin` compares integers, and depth increases with distance, this relies on the monotonicity of the float-to-int bit representation for positive depths or specific depth ranges. The source explicitly states using linear depth `pos.w` [S1].*
     4.  Pack the depth and RGB color into a 64-bit integer. The RGB value is assumed to be an integer where R is in the lowest 8 bits, G in the next 8, and B in the highest 8 of the 24-bit color field (or packed similarly).
         $$ point = (depth \ll 24) \mid rgb $$
-        Here, `rgb` is the 24-bit color integer. `depth` is shifted left by 24 bits [S1, unofficial].
+        Here, `rgb` is the 24-bit color integer. `depth` is shifted left by 24 bits [S1].
     5.  Perform an atomic minimum update on the framebuffer storage buffer at `pixelID`:
         $$ \text{atomicMin}(\text{framebuffer}[pixelID], point) $$
-        This ensures that only the point with the smallest depth value (closest to the camera) updates the buffer for that pixel [S1, unofficial].
+        This ensures that only the point with the smallest depth value (closest to the camera) updates the buffer for that pixel [S1].
 
 2.  **Resolve Pass:** For each pixel $(x, y)$ in the image:
     1.  Calculate the linear index in the storage buffer:
         $$ pixelID = x + y \times W $$
     2.  Read the 64-bit integer from the framebuffer:
         $$ packed = \text{framebuffer}[pixelID] $$
-    3.  Extract the RGB color component. The source uses `colorAt(pixelID)` which implies extracting the lower 24 bits [S1, unofficial]:
+    3.  Extract the RGB color component. The source uses `colorAt(pixelID)` which implies extracting the lower 24 bits [S1]:
         $$ rgb = packed \ \& \ 0xFFFFFF $$
     4.  Write the RGB color to the output OpenGL texture:
         $$ \text{imageStore}(\text{texture}, \text{ivec2}(x, y), \text{uvec4}(rgb, 1.0)) $$
@@ -116,37 +116,37 @@ def resolve_pass():
 ```
 
 **Parameters:**
-*   **Storage Buffer Format:** Interleaved depth and color buffer, one 64-bit integer per pixel [S1, unofficial].
-*   **Depth Representation:** Linear depth value (`pos.w`) is used directly [S1, unofficial].
+*   **Storage Buffer Format:** Interleaved depth and color buffer, one 64-bit integer per pixel [S1].
+*   **Depth Representation:** Linear depth value (`pos.w`) is used directly [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** Using linear depth (`pos.w`) avoids the precision loss associated with standard hardware depth buffers, which use hyperbolic transformations [S1, unofficial].
-*   **Dense Point Clouds:** The method is thread-safe and handles dense point clouds without artifacts, unlike Lukac et al. [Lpa14] which is not thread-safe [S1, unofficial].
-*   **Holes:** If point density is not high enough, holes may appear as the method renders at most one pixel per point [S1, unofficial].
-*   **Atomic Contention:** High contention on `atomicMin` can occur if many points map to the same pixel. Optimizations like subgroup-based deduplication can mitigate this [S1, unofficial].
+*   **Precision:** Using linear depth (`pos.w`) avoids the precision loss associated with standard hardware depth buffers, which use hyperbolic transformations [S1].
+*   **Dense Point Clouds:** The method is thread-safe and handles dense point clouds without artifacts, unlike Lukac et al. [Lpa14] which is not thread-safe [S1].
+*   **Holes:** If point density is not high enough, holes may appear as the method renders at most one pixel per point [S1].
+*   **Atomic Contention:** High contention on `atomicMin` can occur if many points map to the same pixel. Optimizations like subgroup-based deduplication can mitigate this [S1].
 
 ## Subtopics
 
 ### High-Quality Rendering (HQS)
-Extends the basic approach by adding a depth map pass and blending overlapping points to reduce aliasing, similar to mipmapping [S1, unofficial].
+Extends the basic approach by adding a depth map pass and blending overlapping points to reduce aliasing, similar to mipmapping [S1].
 
 ### Early-Z Optimization
-Uses early-z culling to discard points that are occluded by previously rendered points, reducing the number of atomic operations [S1, unofficial].
+Uses early-z culling to discard points that are occluded by previously rendered points, reducing the number of atomic operations [S1].
 
 ### Subgroup Deduplication
-Uses warp-level primitives to reduce contention by ensuring only one thread per subgroup updates a pixel if multiple threads target the same pixel [S1, unofficial].
+Uses warp-level primitives to reduce contention by ensuring only one thread per subgroup updates a pixel if multiple threads target the same pixel [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N + P)$, where $N$ is the number of points and $P$ is the number of pixels. The render pass processes each point once, and the resolve pass processes each pixel once [S1, unofficial].
-*   **Memory Complexity:** $O(P)$ for the framebuffer storage buffer, where $P$ is the number of pixels [S1, unofficial].
-*   **Performance:** Faster than `GL_POINTS` for dense point clouds due to reduced overhead and efficient use of atomic operations [S1, unofficial].
-*   **Strengths:** Thread-safe, handles dense point clouds, avoids hardware depth buffer precision issues, simple implementation [S1, unofficial].
-*   **Limitations:** Aliasing artifacts if points are sparse, potential atomic contention in dense regions, requires 64-bit atomic support [S1, unofficial].
-*   **When to Use:** When rendering large, dense point clouds on hardware with compute shader support and 64-bit atomics [S1, unofficial].
-*   **When Not to Use:** When sparse point clouds are used (holes may appear) or when hardware lacks 64-bit atomic support [S1, unofficial].
+*   **Time Complexity:** $O(N + P)$, where $N$ is the number of points and $P$ is the number of pixels. The render pass processes each point once, and the resolve pass processes each pixel once [S1].
+*   **Memory Complexity:** $O(P)$ for the framebuffer storage buffer, where $P$ is the number of pixels [S1].
+*   **Performance:** Faster than `GL_POINTS` for dense point clouds due to reduced overhead and efficient use of atomic operations [S1].
+*   **Strengths:** Thread-safe, handles dense point clouds, avoids hardware depth buffer precision issues, simple implementation [S1].
+*   **Limitations:** Aliasing artifacts if points are sparse, potential atomic contention in dense regions, requires 64-bit atomic support [S1].
+*   **When to Use:** When rendering large, dense point clouds on hardware with compute shader support and 64-bit atomics [S1].
+*   **When Not to Use:** When sparse point clouds are used (holes may appear) or when hardware lacks 64-bit atomic support [S1].
 
 ## Background
-This method was introduced in "Rendering Point Clouds with Compute Shaders and Vertex Order Optimization" [S1, unofficial]. It builds on earlier work by Günther et al. [GKLR13] and Lukac et al. [Lpa14], improving upon their approaches by using a single atomic instruction instead of a busy-loop or non-thread-safe methods [S1, unofficial].
+This method was introduced in "Rendering Point Clouds with Compute Shaders and Vertex Order Optimization" [S1]. It builds on earlier work by Günther et al. [GKLR13] and Lukac et al. [Lpa14], improving upon their approaches by using a single atomic instruction instead of a busy-loop or non-thread-safe methods [S1].
 
 ## Sources
-[S1] Rendering Point Clouds with Compute Shaders and Vertex Order Optimization, https://doi.org/10.1111/cgf.14345, fetched 2026-10-26 (unofficial)
+[S1] Rendering Point Clouds with Compute Shaders and Vertex Order Optimization, https://doi.org/10.1111/cgf.14345, fetched 2026-10-26

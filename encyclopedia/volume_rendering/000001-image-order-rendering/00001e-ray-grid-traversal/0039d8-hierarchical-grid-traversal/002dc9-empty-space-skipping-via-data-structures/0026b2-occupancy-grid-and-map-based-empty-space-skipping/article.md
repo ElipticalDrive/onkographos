@@ -2,7 +2,7 @@
 
 
 ## Overview
-This family of methods accelerates volumetric ray casting by using a secondary, lower-resolution grid (occupancy map) to identify inactive regions of the volume, allowing rays to skip sampling points in empty space [S1, unofficial]. It differs from hierarchical methods by using a flat, regular grid structure, and from distance-based methods by relying on binary occupancy flags rather than distance-to-nearest-occupied-voxel metrics [G].
+This family of methods accelerates volumetric ray casting by using a secondary, lower-resolution grid (occupancy map) to identify inactive regions of the volume, allowing rays to skip sampling points in empty space [S1]. It differs from hierarchical methods by using a flat, regular grid structure, and from distance-based methods by relying on binary occupancy flags rather than distance-to-nearest-occupied-voxel metrics [G].
 
 ## Shared principles
 All methods in this family share the core mechanism of using a secondary data structure to represent the spatial distribution of active volume data, allowing rays to skip over inactive regions without sampling the primary volume texture [G].
@@ -30,10 +30,10 @@ A preprocessing and runtime optimization for dynamic neural volume rendering tha
 A real-time rendering implementation as a Javascript 3D (three.js) web application, orchestrated by a single GLSL fragment shader, using a multi-resolution hierarchy of occupancy grids for efficient ray marching.
 
 ### Ray Marching with Occupancy Grid (Instant-NGP style)
-An acceleration strategy that maintains an occupancy grid marking voxels as empty or non-empty to prevent sampling in empty spaces, updated periodically based on SDF values [S1, unofficial]. It maintains an occupancy grid that marks each voxel grid as empty or non-empty to guide the marching process, periodically updates the occupancy grid based on the SDF value predicted by the model, and updates the occupancy grid using the calculated density value in the same manner as Instant-NGP [S1, unofficial]. It samples 90% of rays on foreground pixels and 10% of rays on background pixels to achieve faster convergence [S1, unofficial].
+An acceleration strategy that maintains an occupancy grid marking voxels as empty or non-empty to prevent sampling in empty spaces, updated periodically based on SDF values [S1]. It maintains an occupancy grid that marks each voxel grid as empty or non-empty to guide the marching process, periodically updates the occupancy grid based on the SDF value predicted by the model, and updates the occupancy grid using the calculated density value in the same manner as Instant-NGP [S1]. It samples 90% of rays on foreground pixels and 10% of rays on background pixels to achieve faster convergence [S1].
 
 ## Background
-The method is widely used in real-time volumetric rendering and, more recently, in the training and inference of Neural Radiance Fields (NeRFs) to reduce computational load in empty space [S1, unofficial]. NeuS2 adopts a ray marching acceleration strategy used in Instant-NGP, maintaining an occupancy grid that roughly marks each voxel grid as empty or non-empty to guide the marching process and prevent sampling in empty spaces [S1, unofficial]. The occupancy grid is periodically updated based on the SDF value predicted by the model, using a logistic density distribution to calculate density values for each grid [S1, unofficial].
+The method is widely used in real-time volumetric rendering and, more recently, in the training and inference of Neural Radiance Fields (NeRFs) to reduce computational load in empty space [S1]. NeuS2 adopts a ray marching acceleration strategy used in Instant-NGP, maintaining an occupancy grid that roughly marks each voxel grid as empty or non-empty to guide the marching process and prevent sampling in empty spaces [S1]. The occupancy grid is periodically updated based on the SDF value predicted by the model, using a logistic density distribution to calculate density values for each grid [S1].
 
 ## Sources
-[S1] NeuS2: Fast Learning of Neural Implicit Surfaces for Multi-view Reconstruction, https://doi.org/10.1109/iccv51070.2023.00305, fetched 2026-10-26 (unofficial)
+[S1] NeuS2: Fast Learning of Neural Implicit Surfaces for Multi-view Reconstruction, https://doi.org/10.1109/iccv51070.2023.00305, fetched 2026-10-26

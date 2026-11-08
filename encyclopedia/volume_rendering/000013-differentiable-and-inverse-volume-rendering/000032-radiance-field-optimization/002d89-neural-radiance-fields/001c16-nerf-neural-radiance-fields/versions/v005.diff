@@ -1,0 +1,457 @@
+--- v004.md
++++ v005.md
+@@ -1,233 +1,264 @@
+ # NeRF (Neural Radiance Fields)
+ 
+-Also called: NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis, Neural Radiance Field, Neural Radiation Field, Original NeRF
++Also called: NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis, Neural Radiance Field, Neural Radiation Field, Original NeRF, Radiance Fields (NeRF)
+ 
+ ## Overview
+-NeRF represents a 3D scene as a continuous volumetric function that maps 3D spatial coordinates and 2D viewing directions to emitted RGB color and volume density [S1][S5][S10, unofficial]. It solves the problem of novel view synthesis by replacing explicit geometric primitives (meshes or point clouds) with an implicit neural representation encoded in network weights, enabling photorealistic rendering of complex scenes with view-dependent effects like specularities and transparency [S1][S2, unofficial][S14, unofficial]. It distinguishes itself from its parent method [Neural Radiance Fields](4972-neural-radiance-fields.md) by introducing a specific asymmetric MLP architecture that injects viewing direction near the output layer, and a two-stage hierarchical sampling strategy (coarse and fine networks) to efficiently allocate samples to opaque regions [S2, unofficial][S4, unofficial][S7, unofficial].
++
++NeRF represents a static 3D scene as a continuous volumetric function that maps 3D spatial coordinates and 2D viewing directions to emitted RGB color and volume density [S1][S5][S12, unofficial]. It solves the problem of novel view synthesis by training an implicit neural network to reproduce input views, enabling the generation of photorealistic new viewpoints from a sparse set of calibrated images [S1][S9, unofficial]. It distinguishes itself from earlier implicit methods by explicitly modeling view-dependent appearance (specularity, transparency) via a specific MLP architecture that treats position and direction asymmetrically, and by using hierarchical sampling to efficiently resolve the scene geometry [S2, unofficial][S8, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** A set of $N$ calibrated images $\{I_i\}$ with known camera poses (extrinsics $R_i, t_i$ and intrinsics $K_i$) [S15, unofficial].
+-*   **Outputs:** A rendered image $\hat{C}(\mathbf{r})$ for a new camera pose, and a trained neural network parameterizing the radiance field [S1][S3, unofficial].
+-
+-**Data Structures:**
+-The scene is represented by two Multi-Layer Perceptrons (MLPs), often sharing weights or architecture:
+-1.  **Coarse Network ($f_\theta$):** Maps encoded position to intermediate features and density.
+-2.  **Fine Network ($f'_\theta$):** Maps encoded position, intermediate features, and encoded direction to color.
+-*   **Positional Encoding ($\gamma$):** A fixed Fourier feature mapping applied to inputs [S9, unofficial].
+-*   **Ray Parameters:** For each pixel, a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ is defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ [S5].
+-
+-**Positional Encoding:**
+-Inputs are mapped to high-frequency features to enable the MLP to represent high-frequency details [S1][S9, unofficial]. For an input component $p$, the encoding $\gamma(p)$ is:
+-$$
+-\gamma(p) = (\sin(2^0 \pi p), \cos(2^0 \pi p), \sin(2^1 \pi p), \cos(2^1 \pi p), \dots, \sin(2^{L-1} \pi p), \cos(2^{L-1} \pi p))
+-$$
+-where $L$ is the number of frequency bands [S9, unofficial][S19, unofficial].
+-*   Position $\mathbf{x} \in \mathbb{R}^3$: $L_x = 10$, resulting in $3 + 3 \times 2 \times 10 = 63$ dimensions [S6, unofficial][S12, unofficial].
+-*   Direction $\mathbf{d} \in \mathbb{R}^3$: $L_d = 4$, resulting in $3 + 3 \times 2 \times 4 = 27$ dimensions [S6, unofficial][S12, unofficial].
+-
+-**Network Architecture:**
+-The standard architecture consists of two networks [S6, unofficial][S20]:
+-1.  **Density/Feature Network:**
+-    *   Input: $\gamma(\mathbf{x})$ (63-dim).
+-    *   Layers: 8 linear layers with 256 hidden units and ReLU activation.
+-    *   Skip Connections: The original input $\gamma(\mathbf{x})$ is concatenated to the output of layers 4, 5, 6, and 7 (indices 0-based: 3, 4, 5, 6) [S2, unofficial][S6, unofficial][S12, unofficial].
+-    *   Output: Intermediate feature vector $\mathbf{h} \in \mathbb{R}^{256}$ and raw density $\sigma' \in \mathbb{R}$.
+-2.  **Color Network:**
+-    *   Input: $\mathbf{h}$, $\gamma(\mathbf{d})$ (27-dim).
+-    *   Layers: 1 linear layer (or 2 in some implementations) with ReLU.
+-    *   Output: Raw color $\mathbf{c}' \in \mathbb{R}^3$.
+-
+-**Sampling Strategy:**
+-1.  **Ray Generation:** For each pixel $(u,v)$, compute direction $\mathbf{d}_c = K^{-1}[u, v, 1]^T$, normalize, rotate to world space $\mathbf{d}_w = R \mathbf{d}_c$, and set origin $\mathbf{o} = t$ [S7, unofficial][S12, unofficial].
+-2.  **Coarse Sampling:** Divide the interval $[t_n, t_f]$ into $N_c$ bins (typically 64). Sample one point uniformly at random from each bin (stratified sampling) [S7, unofficial][S10, unofficial]. If `perturb=True`, add uniform noise within each bin [S4, unofficial].
+-3.  **Fine Sampling (Importance Sampling):** Compute weights from coarse samples to form a PDF. Sample $N_f$ additional points (typically 128) using inverse-CDF sampling, concentrating samples where coarse density is high [S7, unofficial][S10, unofficial].
+-
+-**Volume Rendering:**
+-For a ray with samples $t_1, \dots, t_N$ (sorted), let $\delta_i = t_{i+1} - t_i$ (with $\delta_N$ large or handled via transmittance) [S4, unofficial][S7, unofficial].
+-1.  **Density:** $\sigma_i = \text{Softplus}(\sigma'_i)$ or $\text{ReLU}(\sigma'_i)$ [S6, unofficial][S12, unofficial]. (Note: Original paper uses Softplus for smoother gradients, but ReLU is common in implementations) [S6, unofficial][S12, unofficial].
+-2.  **Alpha (Opacity):** $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ [S7, unofficial][S12, unofficial].
+-3.  **Transmittance:** $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) = \prod_{j=1}^{i-1} (1 - \alpha_j)$ [S7, unofficial][S19, unofficial].
+-4.  **Weight:** $w_i = T_i \alpha_i$ [S7, unofficial].
+-5.  **Color:** $\hat{C}(\mathbf{r}) = \sum_{i=1}^N w_i \mathbf{c}_i$, where $\mathbf{c}_i = \text{Sigmoid}(\mathbf{c}'_i)$ [S7, unofficial][S12, unofficial].
+-6.  **Background:** If `white_bkgd=True`, add $(1 - \sum w_i) \times 1.0$ to the RGB result [S4, unofficial][S7, unofficial].
+-
+-**Training:**
+-Minimize the Mean Squared Error (MSE) between rendered color $\hat{C}(\mathbf{r})$ and ground truth $C(\mathbf{r})$ [S3, unofficial][S19, unofficial]:
+-$$
+-\mathcal{L} = \sum_{\mathbf{r}} \left[ \|\hat{C}_{\text{coarse}}(\mathbf{r}) - C(\mathbf{r})\|_2^2 + \|\hat{C}_{\text{fine}}(\mathbf{r}) - C(\mathbf{r})\|_2^2 \right]
+-$$
+-The coarse loss is often weighted by 0.5 [S6, unofficial]. Optimization uses Adam ($\beta_1=0.9, \beta_2=0.999$) with learning rate decaying from $5 \times 10^{-4}$ to $5 \times 10^{-5}$ [S6, unofficial].
+-
+-**Pseudocode:**
++
++**Inputs and Outputs**
++*   **Inputs:** A set of $N$ posed 2D images $\{I_i\}$ with known camera poses (extrinsics $R_i, t_i$ and intrinsics $K_i$).
++*   **Outputs:** A trained Multi-Layer Perceptron (MLP) representing the radiance field, and rendered novel view images.
++
++**Data Structures**
++The core data structure is the MLP, parameterized by weights $\theta$. The network is split into two parts:
++1.  **Density Network ($f_\theta^{density}$):** Takes encoded 3D position $\gamma(\mathbf{x})$ as input. Outputs an intermediate feature vector $\mathbf{h} \in \mathbb{R}^{256}$ and volume density $\sigma \in \mathbb{R}^+$.
++2.  **Color Network ($f_\theta^{color}$):** Takes the feature vector $\mathbf{h}$ and encoded viewing direction $\gamma(\mathbf{d})$ as input. Outputs RGB color $\mathbf{c} \in \mathbb{R}^3$.
++
++**Positional Encoding**
++Inputs are mapped to high-dimensional Fourier features to enable the MLP to represent high-frequency details [S1][S10, unofficial]. For an input component $p$, the encoding $\gamma(p)$ is:
++$$ \gamma(p) = (\sin(2^0 \pi p), \cos(2^0 \pi p), \dots, \sin(2^{L-1} \pi p), \cos(2^{L-1} \pi p)) $$
++Typical parameters: $L_{pos}=10$ for position (resulting in 63 dimensions), $L_{dir}=4$ for direction (resulting in 27 dimensions) [S7, unofficial]. The total input dimension to the density network is $3 + 2 \cdot 3 \cdot L_{pos} = 39$ [S14, unofficial].
++
++**Numbered Steps**
++
++1.  **Ray Generation:** For each pixel $(u,v)$ in a target image, compute the ray origin $\mathbf{o}$ and direction $\mathbf{d}$ in world coordinates using the camera pose and intrinsic matrix $K$ [S8, unofficial][S13, unofficial].
++    $$ \mathbf{d}_{cam} = K^{-1} \begin{bmatrix} u - c_x \\ v - c_y \\ f \end{bmatrix}, \quad \mathbf{d}_{world} = R \mathbf{d}_{cam} $$
++2.  **Sampling:** Sample $N$ points along the ray within the interval $[t_n, t_f]$.
++    *   **Coarse Sampling:** Stratified uniform sampling. Divide $[t_n, t_f]$ into $N_c$ bins and draw one sample uniformly from each bin [S12, unofficial].
++    *   **Fine Sampling:** Importance sampling. Use the coarse network's density predictions to form a probability distribution, then resample $N_f$ points concentrated in high-density regions [S8, unofficial][S18, unofficial].
++3.  **Network Query:** For each sample point $\mathbf{x}_i$ and direction $\mathbf{d}$:
++    *   Compute $\mathbf{h}_i, \sigma_i = f_\theta^{density}(\gamma(\mathbf{x}_i))$.
++    *   Compute $\mathbf{c}_i = f_\theta^{color}(\mathbf{h}_i, \gamma(\mathbf{d}))$ [S22, unofficial].
++    *   Apply activation functions: $\sigma_i = \text{Softplus}(\sigma_i)$ or $\text{ReLU}(\sigma_i)$ to ensure non-negativity; $\mathbf{c}_i = \text{Sigmoid}(\mathbf{c}_i)$ to bound color to $[0,1]$ [S7, unofficial][S14, unofficial].
++4.  **Volume Rendering:** Compute the rendered color $\hat{C}(\mathbf{r})$ using the discrete volume rendering equation [S1][S5]:
++    $$ \hat{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i \alpha_i \mathbf{c}_i $$
++    Where:
++    *   $\delta_i = t_{i+1} - t_i$ is the distance between adjacent samples.
++    *   $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ is the opacity of segment $i$ [S5][S8, unofficial].
++    *   $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) = \prod_{j=1}^{i-1} (1 - \alpha_j)$ is the accumulated transmittance [S5][S8, unofficial].
++    *   If white background is assumed, add $(1 - T_{N+1}) \cdot \mathbf{1}$ to the result [S4, unofficial].
++5.  **Optimization:** Minimize the Mean Squared Error (MSE) between the rendered color $\hat{C}(\mathbf{r})$ and the ground truth pixel color $C(\mathbf{r})$ over a batch of rays [S3, unofficial][S5]:
++    $$ \mathcal{L} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \| \hat{C}(\mathbf{r}) - C(\mathbf{r}) \|_2^2 $$
++    The total loss includes both coarse and fine rendering losses, typically weighted (e.g., coarse weight 0.5, fine weight 1.0) [S7, unofficial].
++
++**Pseudocode**
+ 
+ ```python
+ import torch
++import torch.nn as nn
+ import torch.nn.functional as F
+ 
+-def positional_encoding(x, num_freq_bands):
+-    """
+-    Applies positional encoding to input tensor x.
+-    x: (..., D)
+-    Returns: (..., D + D * 2 * num_freq_bands)
+-    """
+-    freq_bands = 2.0 ** torch.arange(num_freq_bands, device=x.device).float() * torch.pi
+-    # Expand x for broadcasting: (..., D) -> (..., 1, D)
+-    # Expand freq_bands: (B,) -> (1, B, 1)
+-    scaled_x = x.unsqueeze(-2) * freq_bands.unsqueeze(-1) # (..., B, D)
+-    encoded = torch.cat([torch.sin(scaled_x), torch.cos(scaled_x)], dim=-2) # (..., 2*B, D)
+-    return torch.cat([x, encoded.flatten(start_dim=-2)], dim=-1)
+-
+-class NeRFMLP(torch.nn.Module):
+-    def __init__(self, in_dim_xyz, in_dim_dir, hidden_dim=256, skips=[4]):
++class NeRF(nn.Module):
++    def __init__(self, L_pos=10, L_dir=4, hidden_dim=256):
+         super().__init__()
+-        self.skips = skips
+-        # Density/Feature Network
+-        self.linears_xyz = torch.nn.ModuleList([torch.nn.Linear(in_dim_xyz, hidden_dim)])
+-        for _ in range(7): # 8 layers total
+-            self.linears_xyz.append(torch.nn.Linear(hidden_dim, hidden_dim))
+-        
+-        # Color Network
+-        self.linear_feat = torch.nn.Linear(hidden_dim, hidden_dim)
+-        self.linear_color = torch.nn.Linear(hidden_dim + in_dim_dir, 3)
+-
+-    def forward(self, xyz_encoded, dir_encoded):
+-        # Process position
+-        h = xyz_encoded
+-        for i, linear in enumerate(self.linears_xyz):
+-            h = linear(h)
+-            if i < 7: # ReLU for all except last if needed, but standard is ReLU then concat
++        self.L_pos = L_pos
++        self.L_dir = L_dir
++        # Input dims: 3 coords + 2*L_pos*3 coords = 39
++        self.input_dim_pos = 3 + 2 * L_pos * 3
++        # Input dims: 256 features + 2*L_dir*3 dirs = 256 + 24 = 280
++        self.input_dim_color = hidden_dim + 2 * L_dir * 3
++        
++        # Density Network: 8 layers, skip connection at layer 4
++        self.linear_density = nn.ModuleList([nn.Linear(self.input_dim_pos, hidden_dim)])
++        for _ in range(7):
++            self.linear_density.append(nn.Linear(hidden_dim, hidden_dim))
++            
++        # Color Network: 2 layers
++        self.linear_color = nn.ModuleList([
++            nn.Linear(self.input_dim_color, hidden_dim),
++            nn.Linear(hidden_dim, 3) # RGB
++        ])
++        
++        # Density output layer
++        self.linear_sigma = nn.Linear(hidden_dim, 1)
++
++    def positional_encoding(self, x, L):
++        """
++        x: (..., D)
++        Returns: (..., D + 2*L*D)
++        """
++        shape = x.shape
++        x = x.view(-1, shape[-1])
++        freq_bands = 2.0 ** torch.linspace(0, L-1, L).to(x.device)
++        # sin(2^i * pi * x), cos(2^i * pi * x)
++        sines = torch.sin(x.unsqueeze(-1) * freq_bands * torch.pi)
++        cosines = torch.cos(x.unsqueeze(-1) * freq_bands * torch.pi)
++        out = torch.cat([x, sines.flatten(1), cosines.flatten(1)], dim=-1)
++        return out.view(*shape[:-1], -1)
++
++    def forward_density(self, x):
++        """
++        x: (..., 3)
++        Returns: h (..., 256), sigma (..., 1)
++        """
++        emb_x = self.positional_encoding(x, self.L_pos)
++        h = emb_x
++        for i, layer in enumerate(self.linear_density):
++            h = layer(h)
++            if i < 7: # ReLU for hidden layers
+                 h = F.relu(h)
+-            if i in self.skips:
+-                h = torch.cat([h, xyz_encoded], dim=-1)
+-        
+-        # Intermediate feature h is output of last linear (index 7)
+-        # Note: In standard NeRF, h is passed to color network. 
+-        # The density is predicted from h before direction injection.
+-        raw_density = self.linears_xyz[-1](h) # This is actually the output of the 8th layer
+-        
+-        # Actually, standard implementation predicts density from the feature vector 
+-        # before the final color layer. Let's follow the specific structure:
+-        # Layer 0-7 produce h. Density is predicted from h.
+-        # Then h is passed to color network.
+-        
+-        # Re-implementation of standard 8-layer MLP for density/feature:
+-        # Input -> L0 -> ReLU -> L1 -> ReLU -> ... -> L3 -> ReLU -> Concat(x) -> L4 -> ... -> L7 -> h
+-        # Density = Linear(h)
+-        # Color Input = Concat(h, dir)
+-        
+-        # Let's stick to the provided code structure [S12, unofficial] which is slightly different 
+-        # but functionally equivalent for the purpose of this article's "standard" definition.
+-        # We will use the explicit structure from [S6, unofficial][S20].
+-        
+-        return h, raw_density
+-
+-def render_ray(rays_o, rays_d, near, far, n_coarse, n_fine, network_coarse, network_fine, perturb=True):
+-    """
+-    Renders a single ray using coarse and fine sampling.
+-    """
+-    # 1. Coarse Sampling
+-    if perturb:
+-        t_vals = torch.linspace(0., 1., n_coarse + 1)
+-        t_vals = t_vals[:-1]
+-        t_rand = torch.rand_like(t_vals)
+-        t_samples = near * (1.0 - t_vals) + far * t_vals + (t_rand - 0.5) * (far - near) / n_coarse
+-    else:
+-        t_vals = torch.linspace(0., 1., n_coarse + 1)[1:] # Stratified without jitter logic simplified
+-        t_samples = near * (1.0 - t_vals) + far * t_vals
+-        
+-    # Query Coarse Network
+-    # xyz_encoded = positional_encoding(t_samples, 10) # Shape: (n_coarse, 63)
+-    # dir_encoded = positional_encoding(rays_d, 4) # Shape: (3, 27) - broadcasted
+-    # h_coarse, raw_sigma_coarse = network_coarse(xyz_encoded, dir_encoded) # dir not used in coarse for sigma
+-    
+-    # For simplicity, assume network takes (xyz_enc, dir_enc) but coarse ignores dir for sigma
+-    # In practice, coarse network outputs sigma and feature h.
+-    
+-    # 2. Compute Coarse Weights for Importance Sampling
+-    # sigma_coarse = softplus(raw_sigma_coarse)
+-    # dists = t_samples[1:] - t_samples[:-1]
+-    # alpha_coarse = 1.0 - torch.exp(-sigma_coarse * dists)
+-    # T_coarse = torch.cumprod(1.0 - alpha_coarse + 1e-10, dim=0)
+-    # weights_coarse = alpha_coarse * T_coarse
+-    
+-    # 3. Fine Sampling (Importance)
+-    # Use weights_coarse to sample n_fine points
+-    # t_fine = inverse_cdf_sampling(weights_coarse, t_samples, n_fine)
+-    
+-    # 4. Query Fine Network
+-    # h_fine, raw_sigma_fine = network_fine(xyz_fine_enc, dir_fine_enc)
+-    # c_fine = sigmoid(network_color(h_fine, dir_fine_enc))
+-    
+-    # 5. Volume Rendering
+-    # sigma_fine = softplus(raw_sigma_fine)
+-    # dists_fine = t_fine[1:] - t_fine[:-1]
+-    # alpha_fine = 1.0 - torch.exp(-sigma_fine * dists_fine)
+-    # T_fine = torch.cumprod(1.0 - alpha_fine + 1e-10, dim=0)
+-    # weights_fine = alpha_fine * T_fine
+-    # color = torch.sum(weights_fine[..., None] * c_fine, dim=0)
+-    
+-    # Handle background
+-    # acc = torch.sum(weights_fine, dim=0)
+-    # color = color + (1.0 - acc[..., None]) * 1.0 # White background
+-    
+-    return color
++            if i == 3: # Skip connection
++                h = torch.cat([h, emb_x], dim=-1)
++        sigma = self.linear_sigma(h)
++        return h, sigma
++
++    def forward_color(self, h, d):
++        """
++        h: (..., 256)
++        d: (..., 3)
++        Returns: rgb (..., 3)
++        """
++        emb_d = self.positional_encoding(d, self.L_dir)
++        input_color = torch.cat([h, emb_d], dim=-1)
++        out = input_color
++        for i, layer in enumerate(self.linear_color):
++            out = layer(out)
++            if i == 0:
++                out = F.relu(out)
++        return out
++
++    def forward(self, rays_o, rays_d, near, far, N_coarse=64, N_fine=128, perturb=True):
++        """
++        rays_o: (B, 3)
++        rays_d: (B, 3)
++        near, far: scalar
++        """
++        # 1. Coarse Sampling
++        t_vals = torch.linspace(0., 1., N_coarse).to(rays_o.device)
++        if perturb:
++            # Stratified sampling
++            mids = .5 * (t_vals[..., 1:] + t_vals[..., :-1])
++            upper = torch.cat([mids, t_vals[..., -1:]], -1)
++            lower = torch.cat([t_vals[..., :1], mids], -1)
++            t_rand = torch.rand_like(t_vals)
++            t_vals = lower + (upper - lower) * t_rand
++        else:
++            t_vals = t_vals.expand(rays_o.shape[0], -1)
++            
++        # Map to depth interval [near, far]
++        # Note: Original NeRF often uses linear depth or inverse depth. 
++        # Standard implementation: t_vals * (far - near) + near
++        # However, some variants use 1/z. We stick to linear depth for basic NeRF unless lindisp=True
++        # The source [S4, unofficial] uses: z_vals = near * (1.0 - interval_values) + far * interval_values
++        # which is equivalent to linear interpolation if interval_values is [0, 1]
++        z_vals = near * (1.0 - t_vals) + far * t_vals
++        
++        # 2. Query Coarse Network
++        pts = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * z_vals.unsqueeze(-1) # (B, N, 3)
++        h_coarse, sigma_coarse = self.forward_density(pts)
++        rgb_coarse = self.forward_color(h_coarse, rays_d.unsqueeze(1).expand_as(pts))
++        
++        # 3. Compute Coarse Weights for Importance Sampling
++        # alpha = 1 - exp(-sigma * delta)
++        dists = z_vals[..., 1:] - z_vals[..., :-1]
++        dists = torch.cat([dists, torch.tensor([1e10]).to(z_vals.device)], dim=-1) # Last segment
++        dists = dists * torch.norm(rays_d, dim=-1, keepdim=True) # Physical distance
++        sigma_coarse_clamped = F.relu(sigma_coarse) # Ensure non-negative
++        alpha_coarse = 1.0 - torch.exp(-sigma_coarse_clamped * dists)
++        
++        # Transmittance
++        transmittance_coarse = torch.cumprod(1.0 - alpha_coarse + 1e-10, dim=-1)
++        weights_coarse = alpha_coarse * transmittance_coarse[..., :-1]
++        
++        # 4. Fine Sampling (Importance Sampling)
++        # Resample based on weights_coarse
++        # This step involves inverse CDF sampling. For simplicity in pseudocode, 
++        # we assume a helper function or direct resampling logic.
++        # In practice: sample N_fine points using the PDF defined by weights_coarse
++        # z_vals_fine = ... (implementation of inverse CDF sampling)
++        # For the sake of this article, we denote the resampled z_vals as z_vals_fine
++        # and query the fine network.
++        
++        # 5. Query Fine Network
++        # pts_fine = ...
++        # h_fine, sigma_fine = self.forward_density(pts_fine)
++        # rgb_fine = self.forward_color(h_fine, rays_d.unsqueeze(1).expand_as(pts_fine))
++        
++        # 6. Render
++        # Combine coarse and fine samples, recompute weights and render
++        # C = sum(T * alpha * c)
++        pass
+ ```
+ 
++**Parameters**
++*   **Network Depth:** 8 layers for density network, 2 layers for color network [S23].
++*   **Hidden Units:** 256 [S7, unofficial].
++*   **Sampling:** $N_{coarse}=64$, $N_{fine}=128$ [S7, unofficial].
++*   **Learning Rate:** Adam optimizer, initial LR $5 \times 10^{-4}$, decaying to $5 \times 10^{-5}$ [S7, unofficial].
++*   **Batch Size:** 4096 rays per step [S14, unofficial].
++*   **Near/Far:** Scene-dependent bounds (e.g., 2.0/6.0 for Blender) [S13, unofficial].
++
++**Edge Cases and Pitfalls**
++*   **Symmetry Artifacts:** Without perturbation, uniform sampling can cause aliasing artifacts. Stratified sampling with jitter (`perturb=True`) is required [S8, unofficial].
++*   **View-Dependent Artifacts:** If the viewing direction is injected too early in the network, it can cause view-dependent artifacts in the geometry (opacity). The direction should be injected only in the final layers [S18, unofficial].
++*   **Spectral Bias:** Raw coordinates are hard for MLPs to learn high-frequency details. Positional encoding is mandatory [S1].
++
+ ## Subtopics
+ 
+ ### [NeRF Training Configuration](1203-nerf-training-configuration.md)
+-Defines the optimization loop, data handling, and regularization strategies. It focuses on the standard MLP architecture and training dynamics, distinguishing itself from [NeuS Training Loss](2535-neus-training-loss.md) by relying on volumetric opacity rather than explicit surface constraints.
++Defines the optimization loop, data handling, and regularization strategies. It focuses on the standard MLP architecture and training dynamics, distinguishing itself from variants like [NeRF-SH](1348-nerf-sh.md) which modify the output representation.
+ 
+ ### [NeRF-SH](1348-nerf-sh.md)
+-Replaces direct RGB output with spherical harmonic (SH) coefficients, eliminating viewing direction as a network input. This enables efficient storage in a sparse octree (PlenOctree) and faster rendering.
++Replaces direct RGB output with spherical harmonic coefficients, enabling efficient storage in octrees and real-time rendering. It differs from the original NeRF by eliminating viewing direction as a network input for color.
+ 
+ ### [Recursive-NeRF](3029-recursive-nerf.md)
+-Routes query points through a hierarchy of branch networks based on predicted uncertainty, allowing dynamic network growth and early termination for simple regions.
++Uses a hierarchy of branch networks based on uncertainty, allowing dynamic network depth. It differs from standard NeRF by early-terminating simple regions to reduce computation.
+ 
+ ### [Mip-NeRF](3381-mip-nerf.md)
+-Renders anti-aliased conical frustums instead of infinitesimal rays using Integrated Positional Encoding (IPE), reducing aliasing artifacts.
++Renders anti-aliased conical frustums instead of rays to handle multi-scale details. It differs from standard NeRF by integrating positional encoding over the volume of the frustum.
+ 
+ ### [NeMF (Neural Microflake Field)](3387-nemf-neural-microflake-field.md)
+-Models light transportation via microflake normals and roughness, handling complex geometry and translucency better than standard NeRF.
++Models light transportation via microflake normals and roughness. It differs from standard NeRF by explicitly modeling physical attributes rather than just radiance.
+ 
+ ### [EgoNeRF](4096-egonerf.md)
+-Adapts NeRF for large-scale unbounded scenes using a balanced spherical feature grid, sharing a single density grid for coarse and fine sampling.
++Uses a spherical feature grid for large-scale egocentric scenes. It differs from standard NeRF by using a spherical coordinate system to match capture geometry.
+ 
+ ### [Intrinsic NeRF](4623-intrinsic-nerf.md)
+-Decouples geometry, illumination, and material properties by outputting separate shading and reflectance components.
++Decouples geometry, illumination, and material. It differs from standard NeRF by outputting separate shading and reflectance components.
+ 
+ ### [Sparse Neural Volume Representation](7055-sparse-neural-volume-representation.md)
+-Uses a sparse 3D grid of per-voxel neural features to improve memory efficiency and scalability for large scenes.
++Uses a sparse 3D grid of per-voxel features. It differs from standard NeRF by using explicit voxel features for memory efficiency.
++
++### [Instant Neural Graphics Primitives (Instant NGP)](8637-instant-neural-graphics-primitives-instant-ngp.md)
++Replaces the MLP with a Multi-resolution Hash Encoding. It differs from standard NeRF by drastically reducing training time and enabling real-time rendering.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training is slow, typically requiring 10–20 hours on a single NVIDIA A100 GPU for synthetic scenes [S1][S6, unofficial]. Rendering a single novel view takes approximately 30 seconds [S1].
+-*   **Memory Complexity:** The MLP weights are small (~5 MB) [S4, unofficial], but rendering requires storing intermediate transmittance and alpha values for all samples along all rays, leading to high GPU memory usage during training (mitigated by chunking rays into batches of 4096) [S6, unofficial][S12, unofficial].
+-*   **Performance:** On the NeRF Synthetic (Blender) dataset, NeRF achieves a PSNR of ~31.0 dB [S1]. It is slower than [Instant-NGP](8539-graf.md) (which trains in minutes) and [3D Gaussian Splatting](6569-point-nerf.md) (real-time), but provides higher quality than early hash-grid methods [S1].
+-*   **Strengths:** High-quality novel view synthesis with accurate view-dependent effects (specularities, transparency) and robust handling of complex geometry without explicit mesh extraction [S1][S2, unofficial].
+-*   **Limitations:** Slow training and rendering speeds; prone to aliasing artifacts at varying resolutions (addressed by [Mip-NeRF](3381-mip-nerf.md)); density field does not explicitly represent surfaces, making mesh extraction difficult [S1].
++
++*   **Time Complexity:** Training is slow, typically taking 10-20 hours on a single GPU for a single scene [S1]. Rendering is also slow, taking ~30 seconds per image [S1].
++*   **Memory Complexity:** The MLP weights are small (~5MB), but the training process requires storing intermediate activations for backpropagation, leading to high memory usage during optimization [S5].
++*   **Performance:** On the NeRF Synthetic (Blender) dataset, NeRF achieves a PSNR of ~31.0 dB [S1]. It provides high-quality novel view synthesis but suffers from long training times and slow rendering speeds compared to later methods like Instant-NGP or 3D Gaussian Splatting [S1].
++*   **Strengths:** High photorealism, handles complex view-dependent effects (specularity, transparency), and produces smooth continuous representations.
++*   **Limitations:** Slow training and rendering, poor surface reconstruction accuracy (density is not a true SDF), and requires careful tuning of sampling and encoding parameters [S1].
+ 
+ ## Background
+-NeRF was introduced by Mildenhall et al. in 2020 [S1][S3, unofficial]. It established the field of neural radiance fields by demonstrating that a simple MLP, optimized via differentiable volume rendering, could synthesize photorealistic novel views from sparse input images. The method builds on earlier neural implicit representations [S5] and positional encoding techniques [S9, unofficial]. It is widely used in virtual reality, film production, and 3D asset creation [S1].
++
++NeRF was introduced by Mildenhall et al. in 2020 [S1][S3, unofficial]. It established the field of neural radiance fields by representing a scene as a continuous 5D function (3D position + 2D viewing direction) mapping to color and density. The method was trained to reproduce input views and rendered novel views through differentiable ray marching. Prior to NeRF, implicit representations struggled with view-dependent effects and high-frequency details. NeRF's key innovations were the asymmetric MLP architecture for view-dependent color and the use of positional encoding combined with hierarchical sampling [S1][S3, unofficial].
+ 
+ ## Sources
++
+ [S1] Neural Rendering Techniques, https://doi.org/10.5281/zenodo.19614729, fetched 2026-10-26
+ [S2] Fourier Feature Networks and Neural Volume Rendering, https://github.com/matajoh/fourier_feature_nets, fetched 2026-10-26 (unofficial)
+ [S3] NeRF++: Analyzing and Improving Neural Radiance Fields, https://doi.org/10.48550/arxiv.2010.07492, fetched 2026-10-26 (unofficial)
+ [S4] yenchenlin/nerf-pytorch, https://github.com/yenchenlin/nerf-pytorch, fetched 2026-10-26 (unofficial)
+-[S5] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
+-[S6] emmanueladutwum123/nerf-from-scratch, https://github.com/emmanueladutwum123/nerf-from-scratch, fetched 2026-10-26 (unofficial)
+-[S7] yashtmy/nerf-3d-vision, https://github.com/yashtmy/nerf-3d-vision, fetched 2026-10-26 (unofficial)
+-[S8] PDF Volume Rendering - faculty.cc.gatech.edu, https://faculty.cc.gatech.edu/~hays/compvision2025spring/lectures/26.pdf, fetched 2026-10-26 (unofficial)
+-[S9] GRAF: Generative Radiance Fields for 3D-Aware Image Synthesis, https://doi.org/10.48550/arxiv.2007.02442, fetched 2026-10-26 (unofficial)
+-[S10] NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis | Takuma Yoneda, https://takuma.yoneda.xyz/posts/nerf, fetched 2026-10-27 (unofficial)
+-[S11] charan2598/NeRF-PyTorch, https://github.com/charan2598/NeRF-PyTorch, fetched 2026-10-27 (unofficial)
+-[S12] sr-bang/NeRF, https://github.com/sr-bang/NeRF, fetched 2026-10-27 (unofficial)
+-[S13] Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, https://github.com/Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, fetched 2026-10-27 (unofficial)
+-[S14] Generalizing Neural Radiance Fields - BAIR Commons, https://bcommons.berkeley.edu/generalizing-neural-radiance-fields, fetched 2026-10-28 (unofficial)
+-[S15] Taichi NeRF (Part 1): Develop and Deploy Instant NGP without writing CUDA | Taichi Docs, https://docs.taichi-lang.org/blog/taichi-instant-ngp, fetched 2026-10-29 (unofficial)
+-[S16] A Visual Exploration of Neural Radiance Fields, https://djrhails.github.io/post--radiance-fields/, fetched 2026-10-29 (unofficial)
+-[S17] Methods and Strategies for Improving the Novel View Synthesis Quality of Neural Radiation Field, https://doi.org/10.1109/access.2024.3382997, fetched 2026-10-30
+-[S18] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)
+-[S19] ニューラル放射輝度場 NeRF 入門, https://zenn.dev/abist_inno/articles/353f36119d6b39, fetched 2026-10-30 (unofficial)
+-[S20] Overview of NeRF technology and applications, https://www.jcad.cn/en/article/doi/10.3724/SP.J.1089.2023-00759, fetched 2026-10-31+[S5] Radar Fields: An Extension of Radiance Fields to SAR, https://doi.org/10.1109/cvprw63382.2024.00061, fetched 2026-10-26
++[S6] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
++[S7] emmanueladutwum123/nerf-from-scratch, https://github.com/emmanueladutwum123/nerf-from-scratch, fetched 2026-10-26 (unofficial)
++[S8] yashtmy/nerf-3d-vision, https://github.com/yashtmy/nerf-3d-vision, fetched 2026-10-26 (unofficial)
++[S9] PDF Volume Rendering - faculty.cc.gatech.edu, https://faculty.cc.gatech.edu/~hays/compvision2025spring/lectures/26.pdf, fetched 2026-10-26 (unofficial)
++[S10] GRAF: Generative Radiance Fields for 3D-Aware Image Synthesis, https://doi.org/10.48550/arxiv.2007.02442, fetched 2026-10-26 (unofficial)
++[S11] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)
++[S12] NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis | Takuma Yoneda, https://takuma.yoneda.xyz/posts/nerf, fetched 2026-10-27 (unofficial)
++[S13] charan2598/NeRF-PyTorch, https://github.com/charan2598/NeRF-PyTorch, fetched 2026-10-27 (unofficial)
++[S14] sr-bang/NeRF, https://github.com/sr-bang/NeRF, fetched 2026-10-27 (unofficial)
++[S15] Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, https://github.com/Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, fetched 2026-10-27 (unofficial)
++[S16] Generalizing Neural Radiance Fields - BAIR Commons, https://bcommons.berkeley.edu/generalizing-neural-radiance-fields, fetched 2026-10-28 (unofficial)
++[S17] Taichi NeRF (Part 1): Develop and Deploy Instant NGP without writing CUDA | Taichi Docs, https://docs.taichi-lang.org/blog/taichi-instant-ngp, fetched 2026-10-29 (unofficial)
++[S18] A Visual Exploration of Neural Radiance Fields, https://djrhails.github.io/post--radiance-fields/, fetched 2026-10-29 (unofficial)
++[S19] HyperNeRFGAN: Hypernetwork approach to 3D NeRF GAN, https://doi.org/10.48550/arxiv.2301.11631, fetched 2026-10-29 (unofficial)
++[S20] Methods and Strategies for Improving the Novel View Synthesis Quality of Neural Radiation Field, https://doi.org/10.1109/access.2024.3382997, fetched 2026-10-30
++[S21] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)
++[S22] ニューラル放射輝度場 NeRF 入門, https://zenn.dev/abist_inno/articles/353f36119d6b39, fetched 2026-10-30 (unofficial)
++[S23] Overview of NeRF technology and applications, https://www.jcad.cn/en/article/doi/10.3724/SP.J.1089.2023-00759, fetched 2026-10-31

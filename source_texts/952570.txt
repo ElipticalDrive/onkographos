@@ -1,0 +1,208 @@
+## Category
+
+Other — MatterViz GUI / isosurface resolution and export quality.
+
+## Summary
+
+File-backed Cube volumes can be resampled to a fixed 500,000-point rendering budget without an explicit quality choice, while an equivalent typed volume with a geometry-memory budget can retain its original samples. The representation of the same field therefore depends on its loading/resource-management path.
+
+This was discovered while evaluating 3D figure styles and direct publication export. It needs a resolution-policy discussion before further appearance work: more output pixels, different lighting or a smoother-looking material cannot restore geometric detail discarded before isosurface extraction.
+
+**Version distinction:** the severe `532,440 → 66,555` block-averaging result below was measured in the older **r23** package. Current `main` uses **r25.freq1**, whose endpoint-aligned preparation fixes that particular near-threshold collapse and includes the grid-preservation policy in the cache key. The remaining current issue is the fixed cap and its dependence on whether a geometry-memory budget was supplied. This report does **not** claim the old eightfold collapse still occurs in the current normal preparation path.
+
+## Operating system
+
+- macOS 27.0.1, build 26A434, arm64.
+- Node.js v26.3.0; existing frontend Vite 8.1.4 environment.
+- Test date: 2026-11-06.
+- Real-data observations came from the local browser frontend. The reproducible grid/mesh comparisons below invoke the actual vendored functions through Vite SSR. They are not native WebView/GPU benchmarks, and current `main` has not been built and visually retested end to end in this investigation.
+
+## Package or commit tested
+
+1. Original local baseline: commit [`13611f0e67ecc90d93b6826e069d9cf4defb5d8d`](https://github.com/Stardust0831/Multiwfn/commit/13611f0e67ecc90d93b6826e069d9cf4defb5d8d), with `matterviz-0.4.2-multiwfn.d8719d12.r23.tgz`.
+2. Current upstream source/package checked separately: [`dca4c37b43ec252ecd0c7e0c623eee7434b5e155`](https://github.com/Stardust0831/Multiwfn/commit/dca4c37b43ec252ecd0c7e0c623eee7434b5e155), with [`matterviz-0.4.2-multiwfn.d8719d12.r25.freq1.tgz`](https://github.com/Stardust0831/Multiwfn/blob/dca4c37b43ec252ecd0c7e0c623eee7434b5e155/frontend/matterviz-viewer/vendor/matterviz-0.4.2-multiwfn.d8719d12.r25.freq1.tgz).
+
+The local worktree contains unpublished figure-style/export experiments. The original numeric comparison uses unmodified r23 dependency functions; the current-policy comparison uses functions extracted from the exact r25.freq1 archive above. A local trial supplying a fixed 256 MiB budget is **not** a reviewed fix and is not required by the reproducer.
+
+## Steps to reproduce
+
+The executable reproducer in the next section needs no wavefunction, native calculation, private file or GUI changes.
+
+For the affected GUI workflow:
+
+1. Start a fresh MatterViz session with a non-periodic Cube loaded through a file/manifest entry, with more than 500,000 samples, unit tiling and no halo.
+2. Display positive and negative isosurfaces at fixed isovalues. Keep the camera, field and material unchanged when comparing quality.
+3. Trace the prepared grid dimensions before marching cubes. On current `main`, a plain Cube supplies no `geometryBudget`, so its default preparation is capped.
+4. Compare the same typed volume through the resource-managed path. With a finite nonnegative `geometry_memory_budget_bytes`, unit tiling and no halo/range expansion, preparation keeps the original grid.
+5. Saving/rerendering the already prepared scene at a larger raster size does not itself regenerate the surface from the original samples.
+
+Use a fresh Cube-only session to avoid a previously obtained native-volume budget affecting the comparison.
+
+## Input file and reproducer
+
+### Small public reproducer: deterministic synthetic scalar field
+
+This is an analytic test field for rendering, not a replacement chemical calculation. It exercises the vendored grid-preparation functions directly and requires no redistribution of course/example data.
+
+In a checkout of the current commit above, install the existing locked frontend dependencies if necessary, then run from the repository root:
+
+```sh
+cd frontend/matterviz-viewer
+pnpm install --frozen-lockfile
+node --input-type=module <<'JS'
+import assert from 'node:assert/strict';
+import { createServer } from 'vite';
+
+const server = await createServer({
+  configFile: false,
+  server: { middlewareMode: true, watch: null },
+  appType: 'custom',
+  optimizeDeps: { noDiscovery: true },
+});
+try {
+  const base = '/node_modules/matterviz/dist/isosurface';
+  const types = await server.ssrLoadModule(`${base}/types.js`);
+  const sampling = await server.ssrLoadModule(`${base}/sampling.js`);
+  for (const dims of [[58, 102, 90], [160, 160, 160]]) {
+    const [nx, ny, nz] = dims;
+    const data = new Float64Array(nx * ny * nz);
+    for (let i = 0; i < nx; i++) for (let j = 0; j < ny; j++)
+      for (let k = 0; k < nz; k++) {
+        const x = 6 * i / (nx - 1) - 3;
+        const y = 6 * j / (ny - 1) - 3;
+        const z = 6 * k / (nz - 1) - 3;
+        data[k + nz * (j + ny * i)] = x * Math.exp(-(x*x + y*y + z*z));
+      }
+    const grid = { data, dimensions: dims, order: 'z-fastest' };
+    const volume = {
+      grid, grid_dims: dims, lattice: [[6,0,0], [0,6,0], [0,0,6]],
+      origin: [-3,-3,-3], periodic: false,
+    };
+    const legacy = types.downsample_grid(grid, dims);
+    const result = {
+      input: dims, points: data.length,
+      legacy: legacy.dims, legacy_points: legacy.grid.data.length,
+    };
+    if (sampling.prepare_geometry_grid) {
+      for (const preserve_grid of [false, true]) {
+        const prepared = sampling.prepare_geometry_grid(volume, null, { preserve_grid });
+        result[preserve_grid ? 'managed' : 'default'] = {
+          dimensions: types.grid_dimensions(prepared.grid),
+          points: prepared.grid.data.length,
+          same_buffer: prepared.grid === grid,
+        };
+      }
+      assert.equal(result.managed.same_buffer, true);
+      assert.ok(result.default.points <= 500000);
+    }
+    console.log(JSON.stringify(result));
+  }
+} finally {
+  await server.close();
+}
+JS
+```
+
+The conditional also permits running the helper comparison against r23, which does not export `prepare_geometry_grid`. Calling the retained `downsample_grid` helper on r25 is **not** evidence that the current normal rendering path still uses that helper.
+
+### Original real-data case
+
+- Multiwfn-generated `orb000025.cub`, from the `Keinsci/9WFN/file/procgrid` teaching example collection available locally.
+- 14 atoms; `58 × 102 × 90` samples; voxel vectors of length `0.224648` Bohr along orthogonal axes; non-periodic molecular field.
+- Isovalues `+0.03` and `−0.03` in the stored field's units.
+- Original input was left unchanged. The source file is not uploaded here; the public synthetic reproducer above demonstrates the policy independently.
+
+## Current behavior
+
+### Remaining behavior in current main / r25.freq1
+
+The actual current-package preparation functions produced:
+
+| Input | Source points | Default preparation, no preservation flag | Managed preparation, preservation enabled |
+| --- | ---: | --- | --- |
+| `58 × 102 × 90` | 532,440 | `56 × 99 × 88` = 487,872 points; new grid | Original 532,440 points; same grid object |
+| `160 × 160 × 160` | 4,096,000 | `79 × 79 × 79` = 493,039 points; new grid | Original 4,096,000 points; same grid object |
+
+For the larger case, only about 12.04% of the sample count remains in the default prepared grid. This fraction is **not** a numerical error estimate: the impact depends on the field and chosen isovalue.
+
+The current source explains the path difference:
+
+- [`App.svelte`: file parsing and budget collection](https://github.com/Stardust0831/Multiwfn/blob/dca4c37b43ec252ecd0c7e0c623eee7434b5e155/frontend/matterviz-viewer/src/App.svelte#L672-L736): native binary responses can supply a geometry budget; the plain text Cube parsing branch returns volumes without one. Cube-only replacement leaves `geometry_memory_budget_bytes` undefined. This is broader native-binary support than the older r23 application, which only set it on its native orbital-request path.
+- [`reps.ts`: surface settings](https://github.com/Stardust0831/Multiwfn/blob/dca4c37b43ec252ecd0c7e0c623eee7434b5e155/frontend/matterviz-viewer/src/reps.ts#L137-L148) forwards the optional budget; [`RepVolume.svelte`](https://github.com/Stardust0831/Multiwfn/blob/dca4c37b43ec252ecd0c7e0c623eee7434b5e155/frontend/matterviz-viewer/src/RepVolume.svelte#L33-L38) renders with the vendored `VolumetricIsosurface`.
+- Inside the pinned r25.freq1 archive, `dist/isosurface/Isosurface.svelte:141–143` makes `preserve_source_grid` depend on a finite nonnegative budget and a typed grid.
+- `dist/isosurface/sampling.js:246–266` keeps the source buffer only for `preserve_grid`, unit tiling, no range and no halo. Otherwise it calls `extract_volume_range`, whose default `max_points` is the fixed 500,000 cap. Expanded periodic/range paths therefore need consideration too; their full GUI behavior has not been benchmarked here.
+- `dist/isosurface/types.js:76–78` documents the cap as an interactive-performance heuristic targeting sub-200 ms marching cubes. That comment is not a measurement of the current machine or a scientific-accuracy guarantee.
+
+### Historical severity in the tested r23 application
+
+The old `ceil(cbrt(total / max_points))` block-averaging path selected a factor of 2 for 532,440 points, although this is only 6.49% over the limit. Halving each axis yielded 66,555 points, or 12.5% of the source count.
+
+Actual extraction from the real Cube, using identical ±0.03 isovalues:
+
+| Quantity | Original grid | r23 prepared grid |
+| --- | ---: | ---: |
+| Dimensions | 58 × 102 × 90 | 29 × 51 × 45 |
+| Samples | 532,440 | 66,555 |
+| +0.03 triangles | 9,704 | 2,400 |
+| −0.03 triangles | 9,384 | 2,316 |
+| Total triangles | 19,088 | 4,716 |
+| Field minimum | −0.223070 | −0.19688125 |
+| Field maximum | 0.252903 | 0.2275005 |
+
+These field extrema are diagnostics of block averaging, not a claim that input files or Multiwfn's scientific results were modified. The r23 code also lacked the preservation-policy cache key; r25 already fixes that omission. Neither historical defect should be presented as an unaddressed current-main defect.
+
+## Expected behavior
+
+- Make grid-resolution policy explicit and consistent across file-backed Cube and native-volume paths. Supplying an unrelated resource-budget header should not silently decide scientific display fidelity.
+- Preserve the supplied grid for final-quality rendering/export when resources permit. If a reduced preview is needed, identify it as a preview and expose original versus effective dimensions and the reduction reason.
+- On insufficient resources, report the limitation clearly and offer an explicit reduced-quality choice; do not silently claim a full-resolution export.
+- Define equivalent behavior for finite molecules, periodic data, expanded ranges/halos and multiple simultaneous surfaces.
+- Preserve the original field values, units, origins, lattice and isovalues. This concerns rendering/resource management, not changing Multiwfn calculations or synthesizing a finer scientific field.
+
+## Logs
+
+There is no required exception or crash: the issue is silent quality reduction. Exact output for the current r25.freq1 preparation functions:
+
+```json
+{"input":[58,102,90],"points":532440,"legacy":[29,51,45],"legacy_points":66555,"default":{"dimensions":[56,99,88],"points":487872,"same_buffer":false},"managed":{"dimensions":[58,102,90],"points":532440,"same_buffer":true}}
+{"input":[160,160,160],"points":4096000,"legacy":[54,54,54],"legacy_points":157464,"default":{"dimensions":[79,79,79],"points":493039,"same_buffer":false},"managed":{"dimensions":[160,160,160],"points":4096000,"same_buffer":true}}
+```
+
+## Screenshots or comparisons
+
+The numerical comparisons above isolate preparation from camera, transparency and material choices. Coarser geometry can contribute to faceting, but this investigation does not establish it as the sole cause of unsatisfactory 3D appearance.
+
+For the r23 real-data case:
+
+- Original `Float64Array`: 4,259,520 bytes, approximately 4.06 MiB.
+- Renderer preflight estimate for both full-grid signed surfaces: 4,732,084 bytes, approximately 4.51 MiB. This combines the renderer's working/GPU estimates, not measured total process peak RAM or a device VRAM query.
+- One local Node/Vite SSR run: approximately 127 ms for both full-grid extractions, plus 119 ms for preflights. Cold/JIT effects are included; these figures do not establish production browser/WebView frame rate or performance on other machines.
+
+The local high-DPI export experiment rerendered the already prepared scene, so it retained the coarse r23 geometry. On current main, [`scene_to_png_blob`](https://github.com/Stardust0831/Multiwfn/blob/dca4c37b43ec252ecd0c7e0c623eee7434b5e155/frontend/matterviz-viewer/src/scene-export.ts#L6-L9) likewise hands the current scene/camera to the PNG exporter; its caller does not request full-grid geometry preparation. Current-main export behavior should be verified end to end as part of the resolution-policy work.
+
+## Discussion scope and proposed acceptance checks
+
+Following `CONTRIBUTING.md`, this is an issue for agreement on scope before a larger GUI change.
+
+1. Should preview and final/export quality be separate explicit policies, with native-resolution export as the default when feasible?
+2. How should file-backed volumes acquire a resource budget? The native host already has memory admission; a standalone browser also needs a defined fallback. A fixed 256 MiB bypass or simply increasing 500,000 would leave path differences and expanded-range behavior unresolved.
+3. Which limits should apply to source samples, temporary resampling buffers, active surface geometry and periodic instances? The grid point count alone does not describe actual surface complexity.
+4. Which changes belong in the generic vendored MatterViz renderer versus Multiwfn's host/application adapter? Prefer a reusable upstream change and a reproducible pinned vendor update over a one-off patch in `node_modules`.
+
+Suggested acceptance checks:
+
+- Execute the complete file/native preparation routes, not just source-pattern assertions or direct helper tests; compare equivalent fields at fixed isovalues.
+- Cover just below/above the former threshold, multi-million-point inputs, small anisotropic axes, finite/periodic grids, ranges/halos and multiple visible layers.
+- Keep full-quality geometry stable across loading paths; verify vertex/triangle counts and spatial placement against the same source field. Report any deliberate resampling.
+- Verify quality-policy/cache transitions and resource rejection without dropping or mutating the original source buffer.
+- Export at two raster sizes and verify that final-quality geometry follows the requested grid policy, not whichever preview mesh happened to be cached. Include native WebView checks.
+- Measure representative preparation time and actual peak memory separately from estimates; use these results to choose any preview policy.
+
+**Process boundary and dependencies:** Multiwfn remains the scientific producer → existing file/native transport → host/application resource policy → generic MatterViz geometry preparation/Worker → display/export. Proposed scope is the renderer, frontend/host adapter, tests and documentation. No root-level Fortran, `ext/` or `libreta_hybrid/` changes, additional mandatory runtime, or changes to ordinary noGUI builds are proposed. If the optional GUI is unavailable, existing Multiwfn/noGUI workflows should continue unchanged. Style presets should remain a separate concern.
+
+Related discussion: #11 covers rendering-engine correctness and export quality. #74 concerns cross-resolution ESP coloring; this issue is about preparation of the source isosurface grid, not grid-pair compatibility.
+
+## Before submitting
+
+- [x] I searched for an existing issue describing the same problem.
+- [x] I have included enough information to reproduce the issue.

@@ -1,0 +1,326 @@
+--- v004.md
++++ v005.md
+@@ -4,195 +4,128 @@
+ 
+ ## Overview
+-Adaptive Subdivision in DiffTetVR is a training strategy that refines a tetrahedral mesh by subdividing vertices with high color gradients to increase resolution in regions of high-frequency detail, solving the issue of wasted resolution in empty or smooth regions [S1, unofficial]. It differs from its sibling [Recursive Subdivision](1304-recursive-subdivision.md) by relying on gradient-based selection of vertices for refinement rather than a fixed geometric bisection sequence, and from [Differentiable Mesh Refinement](984-differentiable-mesh-refinement.md) by operating on a volumetric tetrahedral mesh rather than a parametric surface [S1, unofficial][S2, unofficial].
++Adaptive Subdivision in DiffTetVR is a coarse-to-fine training strategy that refines a tetrahedral mesh by locally subdividing vertices with high accumulated color gradients, aiming to increase resolution in regions of high-frequency detail while avoiding wasted resolution in empty regions [S1, unofficial]. It differs from its sibling [Recursive Subdivision](1304-recursive-subdivision.md) by relying on gradient-based selection of refinement sites rather than a deterministic state-driven bisection sequence, and from [Differentiable Mesh Refinement](984-differentiable-mesh-refinement.md) by operating directly on tetrahedral topology via prism splitting rather than adjusting parametric surface vertices [S1, unofficial][S2, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-*   Initial tetrahedral mesh (generated via regular grid conversion, fTetWild, TetGen, or Delaunay triangulation of SfM points) [S1, unofficial].
+-*   Set of training images and camera poses.
+-*   Target number of tetrahedra or refinement iterations.
+-
+-**Outputs:**
+-*   Refined tetrahedral mesh with optimized vertex positions and colors.
++**Inputs and Outputs:**
++*   **Input:** A tetrahedral mesh (initially a regular grid or Delaunay triangulation of SfM points [S1, unofficial]), a set of training images with known camera poses, and a target tetrahedron count.
++*   **Output:** A refined tetrahedral mesh with updated vertex positions and colors, optimized to minimize rendering error against the input images.
+ 
+ **Data Structures:**
+-*   **Mesh:** Unstructured collection of tetrahedra defined by vertex indices. Each tetrahedron has 4 vertices.
+-*   **Vertex Data:** Position ($\mathbf{v}$) and Color ($\mathbf{c}$) for each vertex.
+-*   **Gradient Accumulator:** Absolute color gradient magnitude stored per vertex.
++The mesh is stored as an unstructured collection of tetrahedra. Each tetrahedron is defined by 4 vertex indices. Adjacency information is required to identify incident tetrahedra for a given vertex and to resolve conflicts between adjacent prisms during splitting [S1, unofficial]. The implementation uses a structure similar to `OpenVolumeMesh` [S1, unofficial], where cells reference vertices and neighbors [S2, unofficial].
+ 
+-**Parameters:**
+-*   $\hat{N}$: Number of vertices selected for subdivision. Typically 5% of total vertices [S1, unofficial].
+-*   Learning rates: Color learning rate ($\eta_c$), Position learning rate ($\eta_p$). Position optimization is unstable; $\eta_p$ must be very low (e.g., $10^{-6}$) if used [S1, unofficial].
+-*   Regularization strength ($\lambda$) and softplus parameter ($\beta$) for vertex position stability (e.g., $\lambda=10, \beta=100$) [S1, unofficial].
++**Algorithm Steps:**
++The refinement process is iterative, repeating until a target number of tetrahedra is reached. Each iteration consists of the following phases:
+ 
+-**Steps:**
+-1.  **Initialization:** Generate initial tetrahedral mesh. Initialize vertex colors and positions.
+-2.  **Epoch Loop:** Repeat until target tetrahedra count is reached:
+-    1.  **Color Optimization:** Optimize only vertex colors for one epoch (e.g., 800 renderings) [S1, unofficial].
+-    2.  **Joint Optimization:** Optimize vertex colors and positions jointly for one epoch [S1, unofficial].
+-    3.  **Gradient Accumulation:** Accumulate absolute color gradients at every vertex without performing optimization steps [S1, unofficial].
+-    4.  **Vertex Selection:** Identify the $\hat{N}$ vertices with the highest absolute color gradient magnitudes [S1, unofficial].
+-    5.  **Subdivision:** For each selected vertex, split all incident edges by inserting a new vertex at the midpoint. Split the incident tetrahedra using the newly inserted vertices.
+-    6.  **Prism Splitting & CSP:** Split the resulting triangular prisms into tetrahedra. Solve the Constraint Satisfaction Problem (CSP) to ensure compatible splits on shared quad faces [S1, unofficial].
+-3.  **Final Optimization:** Optimize only vertex colors to produce the final result [S1, unofficial].
+-
+-**Subdivision Geometry:**
+-When a vertex $\mathbf{a}$ is split, the incident tetrahedra are modified. For a tetrahedron incident to $\mathbf{a}$ with other vertices $\mathbf{b}, \mathbf{c}, \mathbf{d}$:
+-1.  New vertices $\mathbf{b}', \mathbf{c}', \mathbf{d}'$ are created at the midpoints of edges $\mathbf{ab}, \mathbf{ac}, \mathbf{ad}$ respectively.
+-2.  A new tetrahedron $\{\mathbf{a}, \mathbf{b}', \mathbf{c}', \mathbf{d}'\}$ is formed incident to $\mathbf{a}$.
+-3.  The remaining volume forms a triangular prism with vertices $\mathbf{b}, \mathbf{c}, \mathbf{d}$ (base) and $\mathbf{b}', \mathbf{c}', \mathbf{d}'$ (top) [S1, unofficial].
++1.  **Color Optimization:** Optimize only vertex colors for one epoch (defined as training with 800 renderings for the Tooth dataset [S1, unofficial]).
++2.  **Joint Optimization:** Optimize both vertex colors and positions jointly for one epoch.
++3.  **Gradient Accumulation:** Accumulate absolute color gradients at every vertex without performing optimization steps for one epoch. Absolute gradients are used as they were found to result in better outcomes compared to other gradient metrics [S1, unofficial].
++4.  **Vertex Selection:** Identify the $\hat{N}$ vertices with the highest absolute color gradient magnitudes. In the source implementation, $\hat{N}$ corresponds to the top 5% of vertices [S1, unofficial].
++5.  **Edge Splitting:** For each selected vertex $v$, split all incident edges by inserting a new vertex at the midpoint of each edge. Let the selected vertex be $a$ and its neighbors be $b, c, d$. New vertices $b', c', d'$ are created at the midpoints of edges $ab, ac, ad$ respectively:
++    $$ b' = \frac{a + b}{2}, \quad c' = \frac{a + c}{2}, \quad d' = \frac{a + d}{2} $$
++6.  **Tetrahedron Splitting (Prism Formation):** The incident tetrahedra are split. For a tetrahedron incident to vertex $a$ with other vertices $b, c, d$, the split results in:
++    *   A new tetrahedron incident with the splitting vertex $a$: $\{a, b', c', d'\}$.
++    *   A truncated pyramid in the form of a triangular prism formed by vertices $b, c, d, b', c', d'$ [S1, unofficial].
++7.  **Prism Decomposition:** Each triangular prism is split into exactly three tetrahedra. The split direction of the quad faces of the prism is determined by a Constraint Satisfaction Problem (CSP) to ensure compatibility with adjacent prisms [S1, unofficial].
++8.  **Final Optimization:** In the final iteration, optimize only vertex colors to produce the final result [S1, unofficial].
+ 
+ **Prism Splitting and CSP:**
+-Each triangular prism is split into exactly three tetrahedra. The split direction on the quad faces of the prism is determined by a CSP to ensure compatibility with adjacent prisms [S1, unofficial].
+-*   **Split Types:** Split edges are categorized as 'Rising' (R) or 'Falling' (F) based on the direction of the tessellation edge relative to the extruded prism face in a counter-clockwise manner [S1, unofficial].
+-*   **Compatibility:** Two adjacent prisms sharing a quad face are compatible if one uses an R split and the other uses an F split [S1, unofficial].
+-*   **CSP Constraints:**
+-    1.  The splits for one prism may not be FFF or RRR [S1, unofficial].
+-    2.  Two adjacent prisms must split a shared quad face using exactly one F and one R split [S1, unofficial].
+-*   **Solver:** The CSP is solved using a specialized algorithm (e.g., `FlipSolver.cpp`) [S1, unofficial].
++When splitting a prism, the quad faces must be split by a diagonal. The split edges are categorized as 'Rising' (R) or 'Falling' (F) based on the direction of the tessellation edge relative to the extruded prism face in a counter-clockwise manner [S1, unofficial]. Two adjacent prisms sharing a quad face are compatible if one uses an R split and the other uses an F split [S1, unofficial].
++
++The CSP constraints are:
++1.  The splits for one prism may not be FFF or RRR.
++2.  Two adjacent prisms must split a shared quad face using exactly one F and one R split [S1, unofficial].
++
++A specialized algorithm for solving this CSP is implemented in `FlipSolver.cpp` [S1, unofficial]. A lookup table for tessellation patterns based on vertex indices is provided in the source [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def adaptive_subdivision(mesh, images, cameras, target_tets, gradient_percent=0.05):
++def adaptive_subdivision(mesh, images, poses, target_tet_count):
+     """
+-    Performs adaptive subdivision on a tetrahedral mesh based on color gradients.
++    mesh: TetrahedralMesh object with vertices and cells
++    images: List of training images
++    poses: List of camera poses corresponding to images
++    target_tet_count: Integer, maximum number of tetrahedra
++    """
++    # Initial mesh generation (either regular grid or Delaunay from SfM)
++    # mesh = generate_initial_mesh(scene_bounds, point_cloud) 
+     
+-    Args:
+-        mesh: Initial tetrahedral mesh object with vertices and cells.
+-        images: List of training images.
+-        cameras: List of camera poses corresponding to images.
+-        target_tets: Target number of tetrahedra.
+-        gradient_percent: Percentage of vertices to subdivide (default 5%).
++    while mesh.num_tetrahedra() < target_tet_count:
++        # Phase 1: Color Optimization
++        optimize_colors(mesh, images, poses)
+         
+-    Returns:
+-        Refined mesh with optimized colors and positions.
+-    """
+-    # Initialize vertex colors and positions
+-    mesh.vertices.colors = initialize_colors(mesh.vertices)
+-    mesh.vertices.positions = initialize_positions(mesh.vertices)
+-    
+-    # Hyperparameters
+-    lr_color = 1e-3  # Example learning rate
+-    lr_pos = 1e-6    # Must be very low for stability
+-    lambda_reg = 10
+-    beta_softplus = 100
+-    
+-    while mesh.num_tetrahedra() < target_tets:
+-        # Epoch 1: Optimize only vertex colors
+-        optimize_colors(mesh, images, cameras, lr_color)
++        # Phase 2: Joint Optimization (Colors and Positions)
++        optimize_colors_and_positions(mesh, images, poses)
+         
+-        # Epoch 2: Jointly optimize vertex colors and positions
+-        optimize_joint(mesh, images, cameras, lr_color, lr_pos, lambda_reg, beta_softplus)
++        # Phase 3: Gradient Accumulation
++        accumulate_gradients(mesh, images, poses)
+         
+-        # Epoch 3: Accumulate absolute color gradients without optimization
+-        accumulate_gradients(mesh, images, cameras)
++        # Phase 4: Select Vertices
++        # Calculate gradient magnitude for each vertex
++        vertex_gradients = [abs(v.color_gradient) for v in mesh.vertices]
++        # Select top 5% (or N_hat) vertices
++        num_to_refine = int(0.05 * len(mesh.vertices))
++        sorted_indices = argsort(vertex_gradients, descending=True)
++        selected_vertices = [mesh.vertices[i] for i in sorted_indices[:num_to_refine]]
+         
+-        # Select vertices with highest gradients
+-        num_to_subdivide = int(gradient_percent * mesh.num_vertices())
+-        top_vertices = get_top_gradient_vertices(mesh, num_to_subdivide)
++        # Phase 5 & 6: Split Edges and Tetrahedra
++        new_vertices = []
++        for v in selected_vertices:
++            # Get incident edges
++            incident_edges = get_incident_edges(mesh, v)
++            for edge in incident_edges:
++                # Insert midpoint
++                midpoint = create_midpoint_vertex(edge)
++                new_vertices.append(midpoint)
++            
++            # Split incident tetrahedra
++            incident_tets = get_incident_tetrahedra(mesh, v)
++            for tet in incident_tets:
++                # Identify vertices: a is the splitting vertex, b,c,d are others
++                a, b, c, d = tet.vertices
++                # Find midpoints on edges ab, ac, ad
++                b_prime = get_midpoint_vertex(edge_ab)
++                c_prime = get_midpoint_vertex(edge_ac)
++                d_prime = get_midpoint_vertex(edge_ad)
++                
++                # Create new tetrahedron incident to a
++                new_tet_a = create_tetrahedron([a, b_prime, c_prime, d_prime])
++                mesh.add_tetrahedron(new_tet_a)
++                
++                # Create prism from b, c, d, b', c', d'
++                prism = create_prism([b, c, d, b_prime, c_prime, d_prime])
++                
++                # Phase 7: Split Prism via CSP
++                # Determine split directions for quad faces to satisfy CSP
++                # This requires solving the CSP for the local neighborhood
++                split_directions = solve_csp_for_prism(prism, mesh)
++                
++                # Decompose prism into 3 tetrahedra based on split_directions
++                tets = decompose_prism(prism, split_directions)
++                for t in tets:
++                    mesh.add_tetrahedron(t)
++                
++                # Remove old tetrahedron
++                mesh.remove_tetrahedron(tet)
+         
+-        # Subdivide incident tetrahedra
+-        for v in top_vertices:
+-            split_vertex(mesh, v)
+-            
+-        # Resolve prism splits using CSP
+-        solve_prism_csp(mesh)
++        # Update mesh connectivity and data structures
++        mesh.rebuild_adjacency()
+         
+-    # Final optimization: Only vertex colors
+-    optimize_colors(mesh, images, cameras, lr_color)
+-    
++    # Final Color Optimization
++    optimize_colors(mesh, images, poses)
+     return mesh
++```
+ 
+-def split_vertex(mesh, vertex_index):
+-    """
+-    Splits a vertex by inserting midpoints on incident edges and splitting incident tetrahedra.
+-    """
+-    incident_tets = mesh.get_incident_tetrahedra(vertex_index)
+-    new_vertices = {}
+-    
+-    for tet in incident_tets:
+-        vertices = tet.get_vertex_indices()
+-        # Identify the splitting vertex 'a' and others 'b', 'c', 'd'
+-        a_idx = vertex_index
+-        b_idx, c_idx, d_idx = [v for v in vertices if v != a_idx]
+-        
+-        # Create midpoints if not already created
+-        edge_ab = tuple(sorted((a_idx, b_idx)))
+-        edge_ac = tuple(sorted((a_idx, c_idx)))
+-        edge_ad = tuple(sorted((a_idx, d_idx)))
+-        
+-        if edge_ab not in new_vertices:
+-            new_vertices[edge_ab] = mesh.add_vertex(midpoint(mesh.vertices[a_idx], mesh.vertices[b_idx]))
+-        if edge_ac not in new_vertices:
+-            new_vertices[edge_ac] = mesh.add_vertex(midpoint(mesh.vertices[a_idx], mesh.vertices[c_idx]))
+-        if edge_ad not in new_vertices:
+-            new_vertices[edge_ad] = mesh.add_vertex(midpoint(mesh.vertices[a_idx], mesh.vertices[d_idx]))
+-            
+-        b_prime = new_vertices[edge_ab]
+-        c_prime = new_vertices[edge_ac]
+-        d_prime = new_vertices[edge_ad]
+-        
+-        # Remove old tetrahedron
+-        mesh.remove_tetrahedron(tet)
+-        
+-        # Add new tetrahedron incident to 'a'
+-        mesh.add_tetrahedron([a_idx, b_prime, c_prime, d_prime])
+-        
+-        # Add prism vertices for later splitting
+-        # Prism base: b, c, d; Prism top: b', c', d'
+-        prism = Prism(b_idx, c_idx, d_idx, b_prime, c_prime, d_prime)
+-        mesh.add_prism(prism)
++**Parameters:**
++*   **Learning Rate for Vertex Positions ($\eta_p$):** Must be very low (e.g., $10^{-6}$ or $5 \times 10^{-6}$) to maintain stability [S1, unofficial].
++*   **Regularization Strength ($\lambda$):** Used in vertex position optimization (e.g., $\lambda = 10$) [S1, unofficial].
++*   **Softplus Parameter ($\beta$):** Used in regularization (e.g., $\beta = 100$) [S1, unofficial].
++*   **Refinement Percentage:** Typically 5% of vertices with highest gradients [S1, unofficial].
+ 
+-def solve_prism_csp(mesh):
+-    """
+-    Solves the Constraint Satisfaction Problem for prism splitting.
+-    Ensures compatible splits on shared quad faces.
+-    """
+-    prisms = mesh.get_prisms()
+-    
+-    # Build adjacency graph of prisms
+-    adjacency = build_prism_adjacency(prisms)
+-    
+-    # Initialize split types (R or F) for each prism face
+-    split_types = {}
+-    
+-    # Solve CSP using specialized algorithm (e.g., FlipSolver)
+-    # Constraints:
+-    # 1. No prism can have FFF or RRR splits
+-    # 2. Adjacent prisms must have complementary splits (F and R) on shared faces
+-    solved_splits = solve_csp(prisms, adjacency)
+-    
+-    # Apply splits to prisms
+-    for prism, splits in solved_splits.items():
+-        prism.apply_splits(splits)
+-        # Remove prism and add resulting tetrahedra
+-        mesh.remove_prism(prism)
+-        mesh.add_tetrahedra(prism.split_into_tetrahedra(splits))
+-
+-def midpoint(v1, v2):
+-    """Calculate midpoint between two vertices."""
+-    return (v1.position + v2.position) / 2.0
+-
+-def optimize_colors(mesh, images, cameras, lr):
+-    """Optimize vertex colors using differentiable rendering."""
+-    # Standard gradient descent on vertex colors
+-    pass
+-
+-def optimize_joint(mesh, images, cameras, lr_color, lr_pos, lambda_reg, beta_softplus):
+-    """Optimize vertex colors and positions jointly."""
+-    # Gradient descent on colors and positions
+-    # Apply regularization to prevent inversion
+-    pass
+-
+-def accumulate_gradients(mesh, images, cameras):
+-    """Accumulate absolute color gradients at each vertex."""
+-    for img, cam in zip(images, cameras):
+-        grads = compute_rendering_gradients(mesh, img, cam)
+-        mesh.vertices.abs_gradients += grads.abs()
+-
+-def get_top_gradient_vertices(mesh, k):
+-    """Return indices of k vertices with highest absolute gradients."""
+-    return mesh.vertices.argsort_by_gradient(descending=True)[:k]
+-```
++**Edge Cases and Pitfalls:**
++*   **Mesh Inversion:** Optimization of vertex positions is unstable, especially as the mesh becomes more subdivided and tetrahedra get smaller, increasing the chance of inversion [S1, unofficial].
++*   **Recursive Subdivision:** Subdivision does not sufficiently lower local error, causing recursive subdivision of the same regions. This eventually halts optimization progress as CSP solving and data structure updates dominate computation time [S1, unofficial].
++*   **Incompatible Splits:** If adjacent prisms choose the same split direction (e.g., both R or both F) on a shared face, it leads to infinitesimally thin holes in the tet mesh [S1, unofficial].
++*   **Interpolation Error:** Prolongated tetrahedra generated during subdivision may have interpolation errors that prevent local error reduction [S1, unofficial].
+ 
+ ## Subtopics
+@@ -207,15 +140,18 @@
+ 3-root-2 subdivision is a hierarchical volume representation scheme that refines a mesh by doubling the total number of vertices per step, theoretically increasing vertex density by a factor of $\sqrt{2}$ in each spatial dimension. It solves the problem of coarse granularity in standard octree refinement, which multiplies vertex counts by 8 per step, by providing finer resolution control for multiresolution rendering. It is distinguished from its siblings by its specific geometric insertion sequence (centroid, then face centers, then edge midpoints) and its reliance on B-spline wavelets for data value updates.
+ 
++### Bey's Red-Refinement Tetrahedron Subdivision
++Bey's Red-Refinement Tetrahedron Subdivision is a method for dividing a parent tetrahedron into eight child tetrahedra, four outer and four inner, each having one-eighth of the parent's volume [S2, unofficial]. It identifies four unique vertices of the parent tetrahedron: T (top), L (left), R (right), B (back). It calculates midpoints of the parent vertices: $TL = (T + L) / 2$, $TR = (T + R) / 2$, $TB = (T + B) / 2$, $LB = (L + B) / 2$, $LR = (L + R) / 2$, $RB = (R + B) / 2$. The eight child tetrahedra are defined as: Top Outer = $\{ T, TL, TR, TB \}$, Top Inner = $\{LB, TB, TR, TL\}$, Left Outer = $\{ L, TL, LB, LR \}$, Left Inner = $\{TR, LR, LB, TL\}$, Right Outer = $\{ R, RB, TR, LR \}$, Right Inner = $\{LB, LR, TR, RB\}$, Back Outer = $\{ B, RB, LB, TB \}$, Back Inner = $\{TR, TB, LB, RB\}$ [S2, unofficial].
++
+ ## Operating characteristics
+-*   **Time Complexity:** The subdivision process involves gradient accumulation, vertex selection, and CSP solving. CSP solving and data structure updates can dominate computation time after many iterations [S1, unofficial].
+-*   **Memory Complexity:** Memory usage increases with the number of tetrahedra. The unstructured nature requires storing neighbor relationships and prism data during subdivision [S1, unofficial].
+-*   **Performance:** Color-only optimization achieves a peak PSNR of 33.5 on the Tooth dataset [S1, unofficial]. Joint optimization of colors and positions is unstable and achieves a lower PSNR of approx. 26.9, even with very low learning rates ($10^{-6}$) [S1, unofficial].
+-*   **Strengths:** Adapts resolution to high-frequency details, reducing wasted computation in empty regions [S1, unofficial].
+-*   **Limitations:** Vertex position optimization is unstable, especially as tetrahedra get smaller, increasing the chance of inversion [S1, unofficial]. Subdivision may not sufficiently lower local error, leading to recursive subdivision of the same regions and halting optimization progress [S1, unofficial]. Incompatible splits on shared quad faces can lead to infinitesimally thin holes if CSP is not solved correctly [S1, unofficial].
+-*   **When to Use:** When the scene has varying frequency details and empty regions, and when differentiable surface fitting is not suitable.
+-*   **When Not to Use:** When vertex position optimization stability is critical, or when the mesh becomes too dense for efficient CSP solving.
++*   **Time Complexity:** The CSP solving and data structure updates (adding/removing tetrahedra, rebuilding adjacency) become dominant as the mesh refines, potentially halting optimization progress [S1, unofficial].
++*   **Memory Complexity:** Increases linearly with the number of tetrahedra. The mesh structure must store vertex positions, colors, gradients, and adjacency information [S1, unofficial][S2, unofficial].
++*   **Performance:** Color-only optimization achieves a peak PSNR of 33.5 on the Tooth dataset. Joint optimization of vertex positions and colors is significantly less stable and achieves a lower PSNR of approx. 26.9, even with very low learning rates [S1, unofficial].
++*   **Strengths:** Allows for higher resolution in detailed regions without increasing the total number of vertices globally, potentially improving rendering quality where it matters most [S1, unofficial].
++*   **Limitations:** Unstable vertex position optimization, risk of mesh inversion, recursive subdivision of same regions, and high computational cost of CSP solving [S1, unofficial].
++*   **When to use:** When the scene has high-frequency details in specific regions and empty space elsewhere, and when the mesh topology can be managed effectively.
++*   **When not to use:** When stability is critical, or when the computational cost of CSP solving and data structure updates is prohibitive. Also not suitable if vertex position optimization is required for high accuracy, as it yields lower PSNR than color-only optimization [S1, unofficial].
+ 
+ ## Background
+-DiffTetVR was introduced by Chris Mile et al. in 2026 [S1, unofficial]. The method builds on DiffDVR by Weiss and Westermann [S1, unofficial]. The prism splitting algorithm is based on Erleben et al. [S1, unofficial]. The initial mesh generation can use fTetWild or TetGen [S1, unofficial]. The CSP solver is implemented in `FlipSolver.cpp` [S1, unofficial].
++DiffTetVR was introduced in a preprint by Chris Mile et al. in 2026 [S1, unofficial]. The adaptive subdivision strategy builds on the principles of differentiable volume rendering and tetrahedral mesh representation. The prism splitting algorithm is based on work by Erleben et al. [S1, unofficial]. The initial mesh can be generated using regular grids or Delaunay triangulation of SfM points (e.g., from COLMAP) [S1, unofficial]. The method is part of the DiffTetVR framework, which extends DiffDVR [S1, unofficial].
+ 
+ ## Sources

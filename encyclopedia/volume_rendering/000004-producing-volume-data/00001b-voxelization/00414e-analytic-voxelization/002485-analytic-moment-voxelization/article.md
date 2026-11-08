@@ -1,179 +1,240 @@
 # Analytic Moment Voxelization
-Also called: GPU Polyhedral Voxelization with Analytic Moments, R3D Voxelization, Cur3d Voxelization
+
+Also called: GPU Polyhedral Voxelization with Analytic Moments
 
 ## Overview
-Analytic Moment Voxelization is a GPU-based technique that voxelize a 3D polyhedron by computing analytic moments of a polynomial density field over its volume, using geometric clipping and simplicial decomposition [S1, unofficial]. It differs from binary occupancy methods by storing continuous moment data, allowing for higher-order reconstruction of the density field within each voxel. It builds on [Analytic Voxelization](4969-analytic-voxelization.md) by extending the occupancy determination to moment calculation.
+Analytic Moment Voxelization is a GPU-based technique for converting 3D polyhedra into digital volume representations by computing analytic moments of a polynomial density field over the polyhedron's volume [S1, unofficial]. It solves the problem of high-fidelity voxelization for arbitrary convex shapes by using geometric clipping and simplicial decomposition to derive exact moment integrals, rather than relying on sampling or rasterization [S1, unofficial]. It differs from [Monte Carlo 2D Voxelization](1734-monte-carlo-voxelization.md) and [Differentiable Voxelization (MC/CF)](1742-differentiable-voxelization-mc-cf.md) by providing deterministic, analytic results for polynomial fields, and from [Analytic Tetrahedron Voxelization](3724-analytic-tetrahedron-voxelization.md) by handling general polyhedra through a clipping-based decomposition rather than pre-defined tetrahedral primitives.
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D polyhedron defined by vertices and faces, a bounding box defined by integer grid indices `ibox[2]` (min and max), a voxel size `d` (physical dimension per axis), and a polynomial order `polyorder`.
-*   **Output:** A dense grid `dest_grid` storing the computed moments for each voxel in the bounding box.
+*   **Input:** A 3D polyhedron defined by vertices and faces; a bounding box defined by integer grid indices `ibox[0]` and `ibox[1]`; a voxel size vector `d`; and a polynomial order `polyorder`.
+*   **Output:** A flattened array `dest_grid` storing the computed moments for each voxel in the bounding box.
 
 **Data Structures:**
-The implementation uses specific C-like structures defined in the source [S1, unofficial]:
+The implementation uses specific C-style structures defined in the source [S1, unofficial]:
 
-*   `r3d_rvec3`: A union of `struct { r3d_real x, y, z; }` and `r3d_real xyz[3]`. `r3d_real` is `float` if compiled with `-DSINGLE_PRECISION`, else `double`.
-*   `r3d_dvec3`: A union of `struct { r3d_int i, j, k; }` and `r3d_int ijk[3]`. `r3d_int` is `int32_t`.
-*   `r3d_plane`: `struct { r3d_rvec3 n; r3d_real d; }`. `n` is a unit-length normal vector, `d` is the signed perpendicular distance to the origin.
-*   `r3d_orientation`: `struct { r3d_real fdist[4]; unsigned char fflags; }`. `fdist` stores signed distances to clip planes, `fflags` stores bit flags for inside (1) or outside (0).
-*   `r3d_vertex`: `struct { r3d_int pnbrs[3]; r3d_rvec3 pos; r3d_orientation orient; }`. `pnbrs` stores neighbor indices.
-*   `r3d_poly`: `struct { r3d_vertex verts[R3D_MAX_VERTS]; r3d_int nverts; }`. `R3D_MAX_VERTS` is 64.
+1.  `r3d_poly`: Represents the polyhedron.
+    ```c
+    struct r3d_poly {
+        r3d_vertex verts[R3D_MAX_VERTS]; // Max 64 vertices
+        r3d_int nverts;                  // Current number of vertices
+    };
+    ```
+2.  `r3d_vertex`: Represents a vertex with neighbor links and orientation flags.
+    ```c
+    struct r3d_vertex {
+        r3d_int pnbrs[3];       // Indices of 3 connected neighbors
+        r3d_rvec3 pos;          // Position (x, y, z)
+        r3d_orientation orient; // Clip plane distances and flags
+    };
+    ```
+3.  `r3d_rvec3`: A union for 3D coordinates.
+    ```c
+    union r3d_rvec3 {
+        struct { r3d_real x, y, z; };
+        r3d_real xyz[3];
+    };
+    // r3d_real is float if -DSINGLE_PRECISION, else double.
+    ```
+4.  `r3d_dvec3`: A union for integer grid indices.
+    ```c
+    union r3d_dvec3 {
+        struct { r3d_int i, j, k; };
+        r3d_int ijk[3];
+    };
+    // r3d_int is int32_t.
+    ```
+5.  `r3d_plane`: Defines a clipping plane.
+    ```c
+    struct r3d_plane {
+        r3d_rvec3 n; // Unit-length normal vector
+        r3d_real d;  // Signed perpendicular distance to origin
+    };
+    ```
+6.  `r3d_orientation`: Stores clip plane state for a vertex.
+    ```c
+    struct r3d_orientation {
+        r3d_real fdist[4];   // Signed distances to 4 clip planes
+        unsigned char fflags; // Bit flags: 1 if outside, 0 if inside
+    };
+    ```
+
+**Moment Ordering and Count:**
+The moments are stored in row-major order corresponding to monomials $x^a y^b z^c$ where $a+b+c \le polyorder$. The total number of moments $M$ is:
+$$ M = \frac{(polyorder+1)(polyorder+2)(polyorder+3)}{6} $$
+The ordering sequence begins: $1, x, y, z, x^2, xy, xz, y^2, yz, z^2, x^3, \dots$ [S1, unofficial].
 
 **Algorithm Steps:**
-
-1.  **Validation:** Check if the polyhedron is valid. The vertices must form a 3-vertex-connected graph (Steinitz' theorem) for `r3d_is_good` to pass [S1, unofficial]. This validation runs in $O(n_{verts}^2)$ time [S1, unofficial].
-2.  **Bounding Box Determination:** Determine the integer grid indices `ibox[0]` and `ibox[1]` that bound the polyhedron.
-3.  **Simplicial Decomposition:** Decompose the polyhedron into tetrahedra. For each tetrahedron:
-    a.  Ensure correct orientation (positive volume). If volume is negative, swap two vertices to flip orientation [S1, unofficial].
-    b.  Compute the faces of the tetrahedron from its vertices.
-4.  **Voxel Intersection and Clipping:** For each voxel in the bounding box:
-    a.  Define the 8 corners of the voxel.
-    b.  Evaluate the signed distance of each corner to each of the tetrahedron's 4 faces. Store these distances in `orient.fdist` and flags in `orient.fflags` (1 if outside, 0 if inside) [S1, unofficial].
-    c.  Perform geometric clipping of the tetrahedron against the voxel boundaries. This involves iterating through active clip faces and computing intersection points using a weighted average of perpendicular distances to the plane [S1, unofficial].
-    d.  Maintain a vertex buffer with doubly linked neighbors to handle the topology of the clipped polytope [S1, unofficial].
-5.  **Moment Calculation:** For the clipped polytope within the voxel, compute the analytic moments.
-    a.  The number of moments required is $M = \frac{(polyorder+1)(polyorder+2)(polyorder+3)}{6}$ [S1, unofficial].
-    b.  Moments are stored in row-major order: $1, x, y, z, x^2, xy, xz, y^2, yz, z^2, x^3, x^2y, \dots$ [S1, unofficial].
-    c.  The moments are accumulated into the `dest_grid`.
+1.  **Validation:** Check if the polyhedron is valid using `r3d_is_good`. This requires the vertex graph to be 3-vertex-connected (Steinitz' theorem) [S1, unofficial]. This check runs in $O(n_{verts}^2)$ time [S1, unofficial].
+2.  **Initialization:** Initialize the `r3d_poly` structure with the input vertices.
+3.  **Bounding Box Clipping (Coarse):** For each voxel in the bounding box `ibox`, determine which vertices are inside/outside relative to the voxel's 6 faces. This is done by computing signed distances from vertices to the voxel planes.
+4.  **Geometric Clipping:** Iteratively clip the polyhedron against the active faces of the voxel.
+    *   Identify the first face `f` where `andcmp & (1 << f)` is true (vertex is outside).
+    *   Traverse the vertex ring. For each edge `(vprev, vcur)`:
+        *   If `vcur` is outside the current face `f` and `vprev` is inside (or vice versa), compute the intersection point.
+        *   The intersection point `P` is calculated using a weighted average of the perpendicular distances to the plane:
+            $$ P = \frac{-dist_{prev} \cdot pos_{cur} + dist_{cur} \cdot pos_{prev}}{dist_{cur} - dist_{prev}} $$
+            where $dist_{prev}$ and $dist_{cur}$ are the signed distances of the previous and current vertices to the clipping plane [S1, unofficial].
+        *   Insert the new vertex into the vertex buffer, updating neighbor links (`pnbrs`) to maintain the doubly-linked ring structure.
+        *   Update the orientation flags (`fflags`) and distances (`fdist`) for the new vertex against remaining clip planes.
+    *   Repeat until all faces are processed or the polyhedron is fully clipped.
+5.  **Simplicial Decomposition:** Decompose the clipped polyhedron into tetrahedra. The source code snippet shows processing tetrahedra (`cur3d_element`), implying the clipped polyhedron is triangulated and then split into tetrahedra for integration [S1, unofficial].
+6.  **Moment Integration:** For each tetrahedron, compute the analytic moments of the polynomial density field over its volume. The moments are accumulated into the `dest_grid` array at the corresponding voxel index.
+7.  **Reduction:** Use `cur3d_reduce` to aggregate the moments from the tetrahedral contributions into the final voxel grid [S1, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Constants
-R3D_MAX_VERTS = 64
+# Pseudocode for the core clipping and voxelization logic
+# Note: This is a simplified representation of the GPU kernel logic found in r3d.cu
 
-def compute_moments(poly, ibox, d, polyorder):
+def r3d_voxelize(poly: R3DPoly, ibox: R3DVec3Array, dest_grid: FloatArray, d: R3DVec3, polyorder: int):
     """
-    Voxelize a polyhedron by computing analytic moments.
-    poly: r3d_poly structure
-    ibox: array of 2 r3d_dvec3 (min, max grid indices)
-    d: r3d_rvec3 (voxel size)
-    polyorder: int (order of polynomial density field)
+    poly: The polyhedron to voxelize.
+    ibox: Bounding box [min_idx, max_idx] in integer grid coordinates.
+    dest_grid: Output array of size (max_idx.min_idx) * (max_idx.j - min_idx.j) * (max_idx.k - min_idx.k) * M.
+    d: Voxel dimensions (dx, dy, dz).
+    polyorder: Order of the polynomial density field.
     """
+    M = (polyorder + 1) * (polyorder + 2) * (polyorder + 3) // 6
+    
     # Validate polyhedron
     if not r3d_is_good(poly):
         raise ValueError("Polyhedron is not 3-vertex-connected")
 
-    # Initialize destination grid
-    # Size: (ibox[1].i - ibox[0].i) * (ibox[1].j - ibox[0].j) * (ibox[1].k - ibox[0].k) * M
-    M = (polyorder + 1) * (polyorder + 2) * (polyorder + 3) // 6
-    dest_grid = [0.0] * ((ibox[1].i - ibox[0].i) * (ibox[1].j - ibox[0].j) * (ibox[1].k - ibox[0].k) * M)
+    # Iterate over each voxel in the bounding box
+    for i in range(ibox[0].i, ibox[1].i):
+        for j in range(ibox[0].j, ibox[1].j):
+            for k in range(ibox[0].k, ibox[1].k):
+                
+                # Initialize voxel moments to zero
+                voxel_moments = [0.0] * M
+                
+                # Create a temporary polyhedron for clipping
+                temp_poly = copy_poly(poly)
+                
+                # Clip against the 6 faces of the voxel
+                # The voxel faces are defined by the grid indices and voxel size d
+                voxel_faces = get_voxel_faces(i, j, k, d)
+                
+                for face in voxel_faces:
+                    temp_poly = clip_poly_against_plane(temp_poly, face)
+                    if temp_poly.nverts == 0:
+                        break # Polyhedron is completely outside this voxel
+                
+                if temp_poly.nverts > 0:
+                    # Decompose clipped polyhedron into tetrahedra
+                    tetrahedra = decompose_into_tetrahedra(temp_poly)
+                    
+                    for tet in tetrahedra:
+                        # Compute analytic moments for this tetrahedron
+                        # This involves integrating the polynomial basis functions over the tet volume
+                        tet_moments = compute_tet_moments(tet, polyorder)
+                        
+                        # Accumulate moments
+                        for m in range(M):
+                            voxel_moments[m] += tet_moments[m]
+                
+                # Write accumulated moments to the global grid
+                voxel_idx = get_voxel_index(i, j, k, ibox[0], ibox[1])
+                dest_grid[voxel_idx * M : (voxel_idx + 1) * M] = voxel_moments
 
-    # Decompose polyhedron into tetrahedra
-    # Note: The source code implies processing tetrahedra directly.
-    # For a general polyhedron, triangulation into tetrahedra is required.
-    tetrahedra = decompose_into_tetrahedra(poly)
-
-    for tet in tetrahedra:
-        # Ensure positive volume
-        tetvol = cur3du_orient(tet)
-        if tetvol < 0.0:
-            # Swap vertices 2 and 3
-            temp_pos = tet.pos[2]
-            tet.pos[2] = tet.pos[3]
-            tet.pos[3] = temp_pos
-            tetvol = -tetvol
-
-        # Compute faces from vertices
-        faces = r3d_tet_faces_from_verts(tet.pos)
-
-        # Iterate over voxels in bounding box
-        for i in range(ibox[0].i, ibox[1].i):
-            for j in range(ibox[0].j, ibox[1].j):
-                for k in range(ibox[0].k, ibox[1].k):
-                    # Define voxel corners
-                    voxel_corners = []
-                    for ii in [0, 1]:
-                        for jj in [0, 1]:
-                            for kk in [0, 1]:
-                                corner = r3d_rvec3(
-                                    (i + ii) * d.x,
-                                    (j + jj) * d.y,
-                                    (k + kk) * d.z
-                                )
-                                voxel_corners.append(corner)
-
-                    # Evaluate distances to tet faces
-                    poly_temp = r3d_poly()
-                    poly_temp.nverts = 8
-                    for v_idx, corner in enumerate(voxel_corners):
-                        poly_temp.verts[v_idx].pos = corner
-                        poly_temp.verts[v_idx].orient.fflags = 0
-                        poly_temp.verts[v_idx].orient.fdist = [0.0] * 4
-                        for f_idx in range(4):
-                            gor = faces[f_idx].d + dot(corner, faces[f_idx].n)
-                            poly_temp.verts[v_idx].orient.fdist[f_idx] = gor
-                            if gor > 0.0:
-                                poly_temp.verts[v_idx].orient.fflags |= (1 << f_idx)
-
-                    # Clip tetrahedron against voxel
-                    # This step involves complex geometric clipping logic
-                    # to determine the intersection polytope within the voxel.
-                    # The source code uses a vertex stack and neighbor linking.
-                    clipped_poly = clip_tetrahedron_to_voxel(poly_temp, faces)
-
-                    # Compute moments for the clipped polytope
-                    moments = compute_analytic_moments(clipped_poly, polyorder)
-
-                    # Store moments in dest_grid
-                    grid_idx = (i - ibox[0].i) * (ibox[1].j - ibox[0].j) * (ibox[1].k - ibox[0].k) + \
-                               (j - ibox[0].j) * (ibox[1].k - ibox[0].k) + \
-                               (k - ibox[0].k)
-                    for m in range(M):
-                        dest_grid[grid_idx * M + m] = moments[m]
-
-    return dest_grid
-
-def clip_tetrahedron_to_voxel(poly, faces):
+def clip_poly_against_plane(poly: R3DPoly, plane: R3DPlane) -> R3DPoly:
     """
-    Clip the tetrahedron against the voxel boundaries.
-    This is a simplified representation of the complex clipping logic in r3d.cu.
+    Clips a polyhedron against a single plane.
+    Returns a new polyhedron with vertices inside the plane.
     """
-    # The source code iterates through active clip faces and computes intersections.
-    # It uses a vertex buffer and doubly linked neighbors.
-    # For implementation, one would need to replicate the exact clipping algorithm
-    # from r3d.cu which handles the topology changes.
-    # This is a placeholder for the complex geometric operation.
-    pass
+    new_verts = []
+    nverts = poly.nverts
+    
+    # Compute orientation for all vertices
+    for v in range(nverts):
+        dist = dot(plane.n, poly.verts[v].pos) + plane.d
+        poly.verts[v].orient.fdist[0] = dist # Assuming single plane clip for simplicity
+        poly.verts[v].orient.fflags = 1 if dist > 0 else 0 # 1 if outside
+        
+    # Sutherland-Hodgman style clipping for 3D
+    # Iterate over edges
+    for v_prev in range(nverts):
+        v_curr = (v_prev + 1) % nverts
+        
+        curr_outside = poly.verts[v_curr].orient.fflags
+        prev_outside = poly.verts[v_prev].orient.fflags
+        
+        if not curr_outside:
+            # Current vertex is inside, add it
+            new_verts.append(poly.verts[v_curr])
+            
+        if curr_outside != prev_outside:
+            # Edge crosses the plane, compute intersection
+            dist_curr = poly.verts[v_curr].orient.fdist[0]
+            dist_prev = poly.verts[v_prev].orient.fdist[0]
+            
+            # Weighted average intersection
+            # P = (dist_prev * P_curr - dist_curr * P_prev) / (dist_prev - dist_curr)
+            # Note: Source uses -dist_prev * pos_curr + dist_curr * pos_prev
+            # This implies dist is defined such that inside is negative? 
+            # Standard plane equation: n.P + d = 0. Inside if < 0.
+            # Intersection t = -dist_prev / (dist_curr - dist_prev)
+            # P_int = P_prev + t * (P_curr - P_prev)
+            
+            t = -dist_prev / (dist_curr - dist_prev)
+            p_int = poly.verts[v_prev].pos + t * (poly.verts[v_curr].pos - poly.verts[v_prev].pos)
+            
+            new_vert = R3DVertex()
+            new_vert.pos = p_int
+            new_vert.pnbrs = [0, 0, 0] # To be linked later
+            new_vert.orient.fflags = 0
+            new_verts.append(new_vert)
+            
+    # Re-link neighbors
+    n_new = len(new_verts)
+    for i in range(n_new):
+        new_verts[i].pnbrs[0] = new_verts[(i + 1) % n_new]
+        new_verts[i].pnbrs[1] = new_verts[(i - 1) % n_new]
+        # Third neighbor depends on geometry, simplified here
+        
+    return R3DPoly(verts=new_verts, nverts=n_new)
 
-def compute_analytic_moments(poly, polyorder):
+def compute_tet_moments(tet: R3DTet, polyorder: int) -> FloatArray:
     """
-    Compute analytic moments for a polytope.
+    Computes analytic moments for a tetrahedron.
     """
-    # The source code uses cur3d_reduce to accumulate moments.
-    # The exact formula for analytic moments of a polytope is complex
-    # and involves integrating polynomial functions over the volume.
-    # This is a placeholder for the moment calculation.
-    pass
+    # This function would contain the specific analytic integration formulas
+    # for monomials x^a y^b z^c over the tetrahedron volume.
+    # The source code references cur3du_orient and cur3d_reduce,
+    # implying a library function handles the heavy lifting.
+    # Placeholder for the actual analytic integration logic.
+    return [0.0] * ((polyorder + 1) * (polyorder + 2) * (polyorder + 3) // 6)
 ```
 
 **Parameters:**
 *   `polyorder`: Order of the polynomial density field. 0 for constant (1 moment), 1 for linear (4 moments), 2 for quadratic (10 moments) [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   The `dest_grid` buffer must be at least `(ibox[1].i-ibox[0].i)*(ibox[1].j-ibox[0].j)*(ibox[1].k-ibox[0].k)*R3D_NUM_MOMENTS(polyorder)` in size [S1, unofficial].
-*   Polyhedron vertices must form a 3-vertex-connected graph (Steinitz' theorem) for `r3d_is_good` to pass, which is required for valid polyhedral operations [S1, unofficial].
+*   **Buffer Size:** The `dest_grid` buffer must be at least `(ibox[1].i-ibox[0].i)*(ibox[1].j-ibox[0].j)*(ibox[1].k-ibox[0].k)*R3D_NUM_MOMENTS(polyorder)` in size [S1, unofficial].
+*   **Validity:** Polyhedron vertices must form a 3-vertex-connected graph for `r3d_is_good` to pass [S1, unofficial].
+*   **Precision:** The type of `r3d_real` depends on compilation flags (`-DSINGLE_PRECISION` for float, else double) [S1, unofficial].
 
 ## Subtopics
 
 ### [Polynomial Field Integration via Coordinate Moments](3791-polynomial-field-integration-via-coordinate-moments.md)
-This method computes the integral of arbitrary scalar fields (or component-wise vector fields) over a voxel by evaluating coordinate moments and combining them via polynomial coefficients. It allows the simultaneous integration of multiple fields without re-clipping voxels, distinguishing it from methods that require per-field geometric intersection tests. It builds on [Analytic Moment Voxelization](3307-analytic-moment-voxelization.md).
+Computes integrals of scalar/vector fields over voxels using coordinate moments, allowing simultaneous integration of multiple fields without re-clipping.
 
 ### [R3D Polytope Splitting and Moment Reduction](3809-r3d-polytope-splitting-and-moment-reduction.md)
-R3D Polytope Splitting and Moment Reduction is a voxelization technique that computes exact coordinate moments of the intersection between a 3D polytope and a Cartesian grid by recursively splitting the polytope along grid axes until it fits within a single voxel, then reducing the polytope's moments to that voxel. It builds on [Analytic Moment Voxelization](3307-analytic-moment-voxelization.md) by providing the specific geometric splitting and moment accumulation logic required to handle arbitrary convex polyhedra. It differs from [Polynomial Field Integration via Coordinate Moments](3791-polynomial-field-integration-via-coordinate-moments.md) by focusing on the spatial decomposition of the domain (voxels) rather than the integration of a field over a fixed domain.
+Recursively splits 3D polytopes along grid axes to compute exact coordinate moments, focusing on spatial decomposition.
 
 ## Operating characteristics
-*   **Time Complexity:** The validation step `r3d_is_good` runs in $O(n_{verts}^2)$ time [S1, unofficial]. The overall complexity depends on the number of voxels, the number of tetrahedra, and the complexity of the clipping and moment calculation.
-*   **Memory Complexity:** The output grid size is proportional to the number of voxels and the number of moments per voxel.
-*   **Strengths:** Provides continuous, high-order representation of density fields. Efficient on GPU due to parallel processing of voxels and tetrahedra.
-*   **Limitations:** Requires valid 3-vertex-connected polyhedra. Complex geometric clipping logic.
-*   **When to use:** When high-fidelity reconstruction of density fields from polyhedral meshes is required, especially in scientific simulations like SPH.
-*   **When not to use:** For simple binary occupancy or when computational resources are limited and lower-order approximations are sufficient.
+*   **Time Complexity:** The validation step `r3d_is_good` runs in $O(n_{verts}^2)$ time [S1, unofficial]. The overall complexity depends on the number of voxels, the complexity of the polyhedron, and the polynomial order.
+*   **Memory Complexity:** Requires storage for the polyhedron vertices (up to 64) and the output grid. The output grid size scales with the bounding box volume and the number of moments $M$ [S1, unofficial].
+*   **Performance:** Implemented on GPU using CUDA, leveraging parallel processing for voxel-wise clipping and integration [S1, unofficial].
+*   **Strengths:** Provides exact analytic moments for polynomial fields; handles arbitrary convex polyhedra; deterministic results.
+*   **Limitations:** Requires 3-vertex-connected polyhedra; complexity increases with polynomial order; clipping logic can be intricate for complex geometries.
+*   **Usage:** Used in `mainVoxel.py` to process Gadget files (SPH simulation data) [S1, unofficial].
 
 ## Background
-The method was developed by Devon Powell at Los Alamos National Laboratory (LANL) in 2015 [S1, unofficial]. It is part of the R3D/Cur3d library, which is used for voxelizing 3D polyhedra. The library is used in mainVoxel.py to process Gadget files (SPH simulation data) by reading particle positions and calling the voxelization library via ctypes [S1, unofficial].
+The method is part of the R3D (Real-time Ray Tracing for Volumetric Data) library, developed by Los Alamos National Laboratory (LANL) [S1, unofficial]. The code was prepared by Devon Powell on 31 August 2015 [S1, unofficial]. It is designed for high-performance voxelization of volumetric data, particularly for scientific simulations like SPH (Smoothed Particle Hydrodynamics) [S1, unofficial].
 
 ## Sources
 [S1] PabloRS89/Voxelization_GPU, https://github.com/PabloRS89/Voxelization_GPU, fetched 2026-10-26 (unofficial)

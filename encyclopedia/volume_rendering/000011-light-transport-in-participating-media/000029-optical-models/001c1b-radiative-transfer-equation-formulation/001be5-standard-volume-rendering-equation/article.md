@@ -13,7 +13,7 @@ The standard volume rendering equation (VRE) computes the final pixel color by i
 *   Background color $\mathbf{C}_{bg}$ (optional, default white or black) [S14, S27, unofficial].
 
 **Outputs:**
-*   Final pixel color $\mathbf{C}(\mathbf{r})$ (RGB vector) [S9, S27, unofficial].
+*   Final pixel color $\mathbf{C}(\mathbf{r})$ (RGB vector) [S9][S27, unofficial].
 *   (Optional) Accumulated depth or weights for auxiliary losses [S14, unofficial].
 
 **Data Structures:**
@@ -22,11 +22,11 @@ The standard volume rendering equation (VRE) computes the final pixel color by i
 *   **Color Tensor:** $\mathbf{c} \in \mathbb{R}^{N \times 3}$, RGB radiance values at each sample [S27, unofficial].
 
 **Formulas:**
-1.  **Segment Length:** $\delta_i = t_{i+1} - t_i$ (with $t_{N+1}$ often assumed or $\delta_N$ defined by the last step) [S9, S14, unofficial].
-2.  **Sample Opacity:** $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ [S7][S9, S14, unofficial]. This represents the probability that the ray interacts with the medium at sample $i$ [S23, unofficial].
-3.  **Transmittance:** $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) = \prod_{j=1}^{i-1} (1 - \alpha_j)$ [S7][S9, S14, unofficial]. $T_i$ is the probability that light survives from the ray origin to the start of sample $i$ [S11, unofficial]. Note: $T_1 = 1$.
-4.  **Weight:** $w_i = T_i \alpha_i$ [S9, S14, unofficial].
-5.  **Color Accumulation:** $\mathbf{C} = \sum_{i=1}^N w_i \mathbf{c}_i$ [S9, S14, S23, unofficial].
+1.  **Segment Length:** $\delta_i = t_{i+1} - t_i$ (with $t_{N+1}$ often assumed or $\delta_N$ defined by the last step) [S9][S14, unofficial].
+2.  **Sample Opacity:** $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ [S7][S9][S14, unofficial]. This represents the probability that the ray interacts with the medium at sample $i$ [S23, unofficial].
+3.  **Transmittance:** $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) = \prod_{j=1}^{i-1} (1 - \alpha_j)$ [S7][S9][S14, unofficial]. $T_i$ is the probability that light survives from the ray origin to the start of sample $i$ [S11, unofficial]. Note: $T_1 = 1$.
+4.  **Weight:** $w_i = T_i \alpha_i$ [S9][S14, unofficial].
+5.  **Color Accumulation:** $\mathbf{C} = \sum_{i=1}^N w_i \mathbf{c}_i$ [S9][S14, S23, unofficial].
 6.  **Background Compositing:** $\mathbf{C}_{final} = \mathbf{C} + (1 - \sum_{i=1}^N w_i) \mathbf{C}_{bg}$ [S27, unofficial]. If $T_{N+1} = 1 - \sum w_i$, this is $\mathbf{C}_{final} = \mathbf{C} + T_{N+1} \mathbf{C}_{bg}$ [S26, S29, unofficial].
 
 **Parameters:**
@@ -160,7 +160,7 @@ Distance sampling is a Monte Carlo technique to estimate the VRE by importance s
 *   **Limitations:** Requires many samples for high accuracy in dense media. Sensitive to sampling strategy (stratified vs. uniform) [S14, unofficial]. Early termination is possible when transmittance drops below a threshold, but this breaks differentiability if not handled carefully [S2, unofficial].
 
 ## Background
-The Volume Rendering Equation is the integral form of the Radiative Transfer Equation (RTE), derived by integrating the first-order non-homogeneous linear differential equation describing light transport in participating media [S3, unofficial][S18]. It was formalized in computer graphics by Kajiya and Von Herzen (1984) and later popularized by Max (1995) for discrete quadrature [S9, S11, unofficial]. It is the foundational equation for modern neural rendering techniques like NeRF (Mildenhall et al., 2020) [S11, S23, unofficial].
+The Volume Rendering Equation is the integral form of the Radiative Transfer Equation (RTE), derived by integrating the first-order non-homogeneous linear differential equation describing light transport in participating media [S3, unofficial][S18]. It was formalized in computer graphics by Kajiya and Von Herzen (1984) and later popularized by Max (1995) for discrete quadrature [S9][S11, unofficial]. It is the foundational equation for modern neural rendering techniques like NeRF (Mildenhall et al., 2020) [S11, S23, unofficial].
 
 ## Sources
 [S1] An Introduction to Volume Rendering, https://scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers/intro-volume-rendering.html, fetched 2026-10-25 (unofficial)
@@ -171,7 +171,7 @@ The Volume Rendering Equation is the integral form of the Radiative Transfer Equ
 [S6] VIDILabs/instantvnr, https://github.com/VIDILabs/instantvnr, fetched 2026-10-26 (unofficial)
 [S7] Plenoxels: Radiance Fields without Neural Networks, https://doi.org/10.1109/cvpr52688.2022.00542, fetched 2026-10-26
 [S8] Interactive Volume-Rendering Techniques for Medical Data Visualization, https://doi.org/10.2312/diss.20018138, fetched 2026-10-26 (unofficial)
-[S9] MERF: Memory-Efficient Radiance Fields for Real-time View Synthesis in Unbounded Scenes, https://doi.org/10.1145/3592426, fetched 2026-10-26 (unofficial)
+[S9] MERF: Memory-Efficient Radiance Fields for Real-time View Synthesis in Unbounded Scenes, https://doi.org/10.1145/3592426, fetched 2026-10-26
 [S10] Efficient Encoding of Graphics Primitives with Simplex-based Structures, https://doi.org/10.48550/arxiv.2311.15439, fetched 2026-10-26 (unofficial)
 [S11] Improving Robustness for Joint Optimization of Camera Poses and Decomposed Low-Rank Tensorial Radiance Fields, https://doi.org/10.48550/arxiv.2402.13252, fetched 2026-10-26 (unofficial)
 [S12] Real-Time Mono- and Multi-Volume Rendering of Large Medical Datasets on Standard PC Hardware, https://doi.org/10.2312/diss.20058170, fetched 2026-10-26 (unofficial)

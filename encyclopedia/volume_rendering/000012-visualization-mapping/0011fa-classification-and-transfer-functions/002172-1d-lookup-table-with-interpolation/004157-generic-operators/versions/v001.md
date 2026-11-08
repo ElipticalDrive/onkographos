@@ -56,7 +56,7 @@ Applies filtering operations as defined in Equations 3 and 4 of the source. Used
 Transforms grey values based on 2D distance from the boundary within a slice. Used for edge enhancement or shading.
 
 ## Background
-The generic operators were introduced by Kindlmann et al. in their work on "Imaging transforms for visualizing surfaces and volumes" [S1, unofficial]. The paper presents a framework for robust structure rendering, where these operators are combined in various configurations (e.g., R1-R6) to handle different types of volume data (binary, grey, robust, frail). The operators address specific challenges in volume visualization, such as slicing artifacts, inaccurate surface normals, and the need for sub-voxel boundary detection. The family is particularly relevant for techniques that rely on explicit surface extraction or normal-based shading within a volume rendering context.
+The generic operators were introduced by Kindlmann et al. in their work on "Imaging transforms for visualizing surfaces and volumes" [S1]. The paper presents a framework for robust structure rendering, where these operators are combined in various configurations (e.g., R1-R6) to handle different types of volume data (binary, grey, robust, frail). The operators address specific challenges in volume visualization, such as slicing artifacts, inaccurate surface normals, and the need for sub-voxel boundary detection. The family is particularly relevant for techniques that rely on explicit surface extraction or normal-based shading within a volume rendering context.
 
 ## Sources
-[S1] Imaging transforms for visualizing surfaces and volumes, https://doi.org/10.1007/bf03168529, fetched 2026-10-29 (unofficial)
+[S1] Imaging transforms for visualizing surfaces and volumes, https://doi.org/10.1007/bf03168529, fetched 2026-10-29

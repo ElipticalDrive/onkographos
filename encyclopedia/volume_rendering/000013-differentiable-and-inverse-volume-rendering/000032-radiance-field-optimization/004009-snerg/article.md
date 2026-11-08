@@ -2,7 +2,7 @@
 Also called: Deferred Shading NeRF, SNeRG (Deferred Shading NeRF), Sparse Neural Radiance Fields with View-dependent Effects
 
 ## Overview
-SNeRG reduces the computational cost of Neural Radiance Fields (NeRF) by decomposing the radiance field into a 3D field of densities, diffuse RGB colors, and feature vectors, using a deferred shading model to limit MLP evaluations to one per ray [S1, unofficial]. Unlike standard NeRF which queries a single MLP for both density and view-dependent color at every sample point, SNeRG separates these concerns, caching diffuse color and using a small network only for view-dependent effects [S1, unofficial].
+SNeRG reduces the computational cost of Neural Radiance Fields (NeRF) by decomposing the radiance field into a 3D field of densities, diffuse RGB colors, and feature vectors, using a deferred shading model to limit MLP evaluations to one per ray [S1]. Unlike standard NeRF which queries a single MLP for both density and view-dependent color at every sample point, SNeRG separates these concerns, caching diffuse color and using a small network only for view-dependent effects [S1].
 
 ## How it works
 **Inputs and Outputs:**
@@ -28,7 +28,7 @@ SNeRG reduces the computational cost of Neural Radiance Fields (NeRF) by decompo
 **Formulas:**
 The final color $\hat{C}(\mathbf{r})$ for a ray $\mathbf{r}$ is:
 $$ \hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_{vd,i} $$
-where $\mathbf{c}_{vd,i} = f_{\theta}(\mathbf{c}_{d,i}, \mathbf{v})$, $\mathbf{c}_{d,i}$ is the baked diffuse color, and $\mathbf{v}$ is the view direction [S1, unofficial].
+where $\mathbf{c}_{vd,i} = f_{\theta}(\mathbf{c}_{d,i}, \mathbf{v})$, $\mathbf{c}_{d,i}$ is the baked diffuse color, and $\mathbf{v}$ is the view direction [S1].
 
 **Parameters:**
 - Grid resolution: Not given in the sources.
@@ -45,8 +45,8 @@ where $\mathbf{c}_{vd,i} = f_{\theta}(\mathbf{c}_{d,i}, \mathbf{v})$, $\mathbf{c
 - **Limitations:** May struggle with complex view-dependent effects if the small network is too simple. Requires a baking step during training.
 
 ## Background
-SNeRG was introduced by Hedman et al. in "Baking Neural Radiance Fields for Real-Time View Synthesis" (ICCV 2021) [S1, unofficial]. It builds on the NeRF framework by addressing its high computational cost through deferred shading and caching techniques.
+SNeRG was introduced by Hedman et al. in "Baking Neural Radiance Fields for Real-Time View Synthesis" (ICCV 2021) [S1]. It builds on the NeRF framework by addressing its high computational cost through deferred shading and caching techniques.
 
 ## Sources
-[S1] MERF: Memory-Efficient Radiance Fields for Real-time View Synthesis in Unbounded Scenes, https://doi.org/10.1145/3592426, fetched 2026-10-26 (unofficial)
+[S1] MERF: Memory-Efficient Radiance Fields for Real-time View Synthesis in Unbounded Scenes, https://doi.org/10.1145/3592426, fetched 2026-10-26
 [S2] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)

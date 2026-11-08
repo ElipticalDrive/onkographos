@@ -2,7 +2,7 @@
 Also called: Primitive Decomposition, Geometric Primitive Decomposition
 
 ## Overview
-Decomposition is an image-order volume rendering technique that converts a volumetric data set into a collection of explicit geometric primitives, such as spheres or slices, which are then placed, scaled, and colored based on a transfer function mapping [S1, unofficial][S2, unofficial]. It distinguishes itself from ray-casting and standard splatting by explicitly treating the volume as a set of discrete geometric objects rather than a continuous scalar field or a set of splatted footprints, making it particularly suitable for applications requiring further geometric processing like segmentation [S1, unofficial][S2, unofficial].
+Decomposition is an image-order volume rendering technique that converts a volumetric data set into a collection of explicit geometric primitives, such as spheres or slices, which are then placed, scaled, and colored based on a transfer function mapping [S1][S2, unofficial]. It distinguishes itself from ray-casting and standard splatting by explicitly treating the volume as a set of discrete geometric objects rather than a continuous scalar field or a set of splatted footprints, making it particularly suitable for applications requiring further geometric processing like segmentation [S1][S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
@@ -49,8 +49,8 @@ Curve-Skeleton Decomposition is a proxy geometry technique that represents a vol
 *   **When Not to Use:** When high-fidelity continuous volume visualization is required; when the data has complex internal structures that are not well-represented by simple primitives.
 
 ## Background
-Decomposition methods were identified as one of the five main image-order volume rendering techniques in early surveys of interactive volume rendering [S1, unofficial][S2, unofficial]. The approach leverages the explicit nature of geometric primitives to bridge the gap between volume data and traditional computer graphics pipelines.
+Decomposition methods were identified as one of the five main image-order volume rendering techniques in early surveys of interactive volume rendering [S1][S2, unofficial]. The approach leverages the explicit nature of geometric primitives to bridge the gap between volume data and traditional computer graphics pipelines.
 
 ## Sources
-[S1] Interactive Volume Rendering with Ray Tracing, https://doi.org/10.2312/egst.20061055, fetched 2026-10-24 (unofficial)
+[S1] Interactive Volume Rendering with Ray Tracing, https://doi.org/10.2312/egst.20061055, fetched 2026-10-24
 [S2] Interactive Volume Rendering Techniques, https://www.scribd.com/document/479714183/Interactive-Volume-Rendering-with-Ray-Tracing, fetched 2026-10-25 (unofficial)

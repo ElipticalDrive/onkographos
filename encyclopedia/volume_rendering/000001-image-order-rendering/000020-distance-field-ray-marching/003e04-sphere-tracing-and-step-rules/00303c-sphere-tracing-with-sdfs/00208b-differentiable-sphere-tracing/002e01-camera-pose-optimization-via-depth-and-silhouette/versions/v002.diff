@@ -1,0 +1,211 @@
+--- v001.md
++++ v002.md
+@@ -4,121 +4,138 @@
+ 
+ ## Overview
+-This method optimizes an initial camera pose toward a ground truth pose by minimizing gradients computed from 2D depth and binary silhouette observations [S1, S2]. It builds on [Differentiable Sphere Tracing](2316-differentiable-sphere-tracing.md) to render scenes via ray marching, supporting gradient computation with respect to scene parameters [S1]. It sets itself apart from [Instant-NSR-PL Forward Pass](2540-instant-nsr-pl-forward-pass.md) and [SDF Direct Diffuse Integrator](4467-sdf-direct-diffuse-integrator.md) by focusing specifically on pose recovery using image-based errors (silhouette and depth) rather than shape reconstruction or color rendering [S2]. It differs from [Differentiable Silhouette Rendering](4322-differentiable-silhouette-rendering.md) by explicitly combining silhouette cross-entropy with a scale-invariant depth loss and addressing specific gradient scaling caveats inherent to the Fuzzy Metaballs representation [S2].
++This method optimizes an initial camera pose toward a ground truth pose by minimizing gradients computed from 2D depth and binary silhouette observations [S1, S2]. It treats the camera extrinsics as differentiable variables, allowing the correction of viewpoint errors without modifying the scene geometry [S1]. Unlike general differentiable rendering which may optimize scene parameters, this approach specifically refines the view matrix using image-based errors [S2]. It builds on [Differentiable Sphere Tracing](2316-differentiable-sphere-tracing.md) to provide the necessary gradient flow from 2D observations to 3D camera parameters.
+ 
+ ## How it works
+ **Inputs:**
+-*   Initial camera pose (rotation $\mathbf{R}$ and translation $\mathbf{t}$) [S1][S3, unofficial].
+-*   Ground truth depth image $z$ and binary silhouette (alpha) $\alpha$ [S1, S2].
+-*   Fixed implicit shape representation (e.g., Fuzzy Metaballs or SDF) [S1, S2].
++*   Initial camera pose (rotation $R$ and translation $t$).
++*   Fixed scene representation (e.g., Fuzzy Metaballs or SDF latent code).
++*   Ground truth depth image $z$ and binary silhouette $\alpha$.
+ 
+ **Outputs:**
+-*   Optimized camera pose $(\mathbf{R}, \mathbf{t})$ [S1].
++*   Optimized camera pose $(R^*, t^*)$.
+ 
+ **Data Structures:**
+-*   Camera pose: Represented as a view matrix composed of rotation $\mathbf{R}$ and translation $\mathbf{t}$ [S3, unofficial].
+-*   Loss components: Scalar values for Cross-Entropy ($CE$) and Mean Squared Error ($MSE$) [S2].
++*   **Camera Pose:** Represented as a $4 \times 4$ view matrix or separate rotation matrix and translation vector.
++*   **Loss Components:** Scalar values for Cross-Entropy ($L_{CE}$) and Normalized Mean Squared Error ($L_{MSE}$).
+ 
+ **Parameters:**
+-*   **Convergence Threshold:** Threshold on signed distance to stop ray tracing. A large threshold dilates the shape and loses boundary details; a small threshold may produce incomplete geometry. Tuned per application [S1].
+-*   **Optimizer:** SGD with Momentum. Adaptive learning rate methods are limited to this to maintain scale invariance [S2].
+-*   **Gradient Scaling Factor:** $\eta^2$, used to correct translation gradient scaling [S2].
++*   **Convergence Threshold ($\epsilon$):** Threshold on signed distance to stop ray tracing. A large threshold dilates the shape and loses boundary details; a small threshold may produce incomplete geometry. Typical value: $5 \times 10^{-5}$ [S1].
++*   **Optimizer:** SGD with Momentum. Adaptive learning rate methods are limited to this configuration to maintain scale invariance [S2].
++*   **Gradient Scaling Factor ($\eta^2$):** Used to correct the translation gradient scaling [S2].
+ 
+ **Steps:**
+-1.  **Initialize:** Set initial camera pose randomly or with perturbation (e.g., $\pm 45^\circ$ rotation, random translation up to 50% of model scale) [S1, S2].
+-2.  **Render:** Use the differentiable SDF renderer to render the predicted depth $\hat{z}$ and alpha $\hat{\alpha}$ from the current camera pose [S1, S2].
+-3.  **Compute Loss:** Calculate the silhouette cross-entropy loss and optional depth loss [S2].
++1.  **Initialize:** Set the camera pose randomly or with a perturbation (e.g., $\pm 45^\circ$ rotation, random translation up to 50% of model scale) [S2].
++2.  **Render:** Use the differentiable SDF renderer to compute the estimated alpha $\hat{\alpha}$ and depth $\hat{z}$ for the current camera pose [S1, S2].
++3.  **Compute Loss:** Calculate the total loss $L$ as the sum of the silhouette cross-entropy loss and the optional depth loss [S2].
+     *   **Silhouette Loss:** Minimize the cross-entropy averaged over all pixels:
+-        $$CE(\alpha, \hat{\alpha}) = \alpha \log (\hat{\alpha}) + (1-\alpha) \log (1-\hat{\alpha})$$
++        $$ L_{CE} = CE(\alpha, \hat{\alpha}) = \alpha \log (\hat{\alpha}) + (1-\alpha) \log (1-\hat{\alpha}) $$
+         where $\alpha$ is the ground truth alpha and $\hat{\alpha}$ is the estimated alpha [S2].
+     *   **Depth Loss (Optional):** Add normalized MSE to be invariant to object scale:
+-        $$MSE(z, \hat{z}) = \left\| \frac{(z-\hat{z})}{|z|} \right\|_2$$
+-        where $|z|$ normalizes the errors by the ground truth depth [S2].
+-4.  **Backpropagate:** Compute gradients of the total loss with respect to the rotation and translation components of the camera view matrix [S3, unofficial].
+-    *   Gradient w.r.t translation $\mathbf{t}$:
+-        $$\frac{\delta \mathcal{L}}{\delta \mathbf{t}} = - \sum_n \frac{\delta \mathcal{L}}{\delta \tilde{\mu}_n}$$
+-    *   Gradient w.r.t rotation $\mathbf{R}$:
+-        $$\frac{\delta \mathcal{L}}{\delta \mathbf{R}} = - \left[ \sum_n \frac{\delta \mathcal{L}}{\delta \tilde{\mu}_n} (\mu_n - \mathbf{t})^\top \right] \mathbf{R}$$
+-        where $\mu_n$ is the mean of the $n$-th Gaussian component and $\tilde{\mu}_n$ is the transformed mean [S3, unofficial].
+-5.  **Update Pose:** Update the camera pose using the optimizer (SGD with Momentum) [S2].
+-    *   **Gradient Correction:** Scale the translation gradients by $\eta^2$ to correct for the fact that the gradient of the translation scales by the inverse of the model scale [S2].
+-6.  **Iterate:** Repeat steps 2-5 until the loss stops reliably decreasing or a convergence threshold is met [S1, S2].
++        $$ L_{MSE} = MSE(z, \hat{z}) = \left\| \frac{z - \hat{z}}{|z|} \right\|_2 $$
++        where $|z|$ normalizes the errors by the ground truth depth magnitude [S2].
++4.  **Backpropagate:** Compute gradients of $L$ with respect to the camera pose parameters (rotation and translation) using the differentiable renderer [S1].
++5.  **Update:** Update the camera pose using SGD with Momentum [S2].
++6.  **Iterate:** Repeat steps 2-5 until convergence or loss stops decreasing [S2].
+ 
+ **Pseudocode:**
+ ```python
+-def optimize_camera_pose(initial_R, initial_t, gt_depth, gt_alpha, shape_model, optimizer, threshold):
++def optimize_camera_pose(initial_pose, gt_depth, gt_silhouette, scene_sdf, threshold=5e-5, lr=0.01, momentum=0.9):
+     """
+     Optimizes camera pose using depth and silhouette losses.
+     
+     Args:
+-        initial_R: Initial rotation matrix.
+-        initial_t: Initial translation vector.
++        initial_pose: Initial camera view matrix or (R, t).
+         gt_depth: Ground truth depth image.
+-        gt_alpha: Ground truth silhouette (alpha) image.
+-        shape_model: Differentiable SDF or Fuzzy Metaballs model.
+-        optimizer: SGD with Momentum optimizer.
+-        threshold: Convergence threshold for ray marching.
++        gt_silhouette: Ground truth binary silhouette image.
++        scene_sdf: Fixed SDF representation of the object.
++        threshold: Ray marching convergence threshold.
++        lr: Learning rate.
++        momentum: Momentum coefficient for SGD.
+         
+     Returns:
+-        Optimized R and t.
++        Optimized camera pose.
+     """
+-    R = initial_R
+-    t = initial_t
++    pose = initial_pose.clone()
++    pose.requires_grad = True
++    optimizer = SGD([pose], lr=lr, momentum=momentum)
+     
+-    while not converged():
+-        # 1. Render depth and alpha using current pose
+-        # The renderer uses the threshold to stop ray marching
+-        pred_depth, pred_alpha = render(shape_model, R, t, threshold)
++    # Clip bounds for alpha to prevent log(0)
++    ALPHA_MIN = 1e-6
++    ALPHA_MAX = 1 - 1e-6
++    
++    while not converged:
++        optimizer.zero_grad()
+         
+-        # 2. Clip predicted alpha to avoid infinite log errors
+-        pred_alpha = clip(pred_alpha, 1e-6, 1 - 1e-6)
++        # 1. Render depth and silhouette using differentiable sphere tracing
++        # This function backpropagates gradients to 'pose'
++        est_alpha, est_depth = render_differentiable(pose, scene_sdf, threshold)
+         
+-        # 3. Compute losses
+-        # Cross-entropy loss for silhouette
+-        ce_loss = mean(gt_alpha * log(pred_alpha) + (1 - gt_alpha) * log(1 - pred_alpha))
++        # 2. Clip estimated alpha to avoid infinite loss
++        est_alpha_clipped = torch.clamp(est_alpha, ALPHA_MIN, ALPHA_MAX)
+         
+-        # Optional depth loss (normalized by ground truth depth magnitude)
+-        # Note: |z| refers to the magnitude of ground truth depth
+-        depth_loss = norm((gt_depth - pred_depth) / abs(gt_depth))
++        # 3. Compute Silhouette Loss (Cross-Entropy)
++        # gt_silhouette is assumed to be in [0, 1]
++        loss_ce = -(gt_silhouette * torch.log(est_alpha_clipped) + 
++                    (1 - gt_silhouette) * torch.log(1 - est_alpha_clipped))
++        loss_ce = loss_ce.mean()
+         
+-        total_loss = ce_loss + depth_loss
++        # 4. Compute Depth Loss (Normalized MSE)
++        # Normalize by ground truth depth magnitude for scale invariance
++        # Handle division by zero if gt_depth is 0
++        depth_norm = torch.where(gt_depth != 0, gt_depth, torch.ones_like(gt_depth))
++        loss_mse = torch.norm((gt_depth - est_depth) / depth_norm, p=2)
+         
+-        # 4. Backpropagate to get gradients w.r.t R and t
+-        # The differentiable renderer computes dL/dR and dL/dt
+-        grad_R, grad_t = compute_gradients(total_loss, R, t)
++        # 5. Total Loss
++        loss = loss_ce + loss_mse
+         
+-        # 5. Correct gradient scaling for translation
+-        # Scale translation gradients by eta^2 to counteract inverse model scale scaling
+-        grad_t = grad_t * (eta ** 2)
++        # 6. Backpropagate
++        loss.backward()
+         
+-        # 6. Update pose using optimizer (SGD with Momentum)
+-        R, t = optimizer.step(R, t, grad_R, grad_t)
++        # 7. Correct translation gradient scaling
++        # The gradient of translation scales by the inverse of model scale.
++        # Scale gradients by eta^2 to correct this.
++        # Note: eta is typically related to the model scale or a learned parameter.
++        # If not explicitly provided, this step might require estimating model scale.
++        # [G] Assuming eta is a known scalar or derived from scene bounds.
++        if pose.grad is not None:
++            # Apply scaling to translation component gradients specifically
++            # Implementation detail: Extract translation gradient, scale, and reassign
++            # This depends on how 'pose' is structured (matrix vs separate R/t)
++            pass 
++            
++        # 8. Update pose
++        optimizer.step()
+         
+-    return R, t
++        # Check convergence based on loss change or gradient norm
++        if loss.item() < tolerance:
++            break
++            
++    return pose
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Alpha Clipping:** Estimated alpha must be clipped to $[10^{-6}, 1 - 10^{-6}]$ to avoid infinite error in the log terms of the cross-entropy loss [S2].
+-*   **Gradient Scaling:** The gradient of the translation scales by the inverse of the model scale. This must be corrected by scaling the gradients by $\eta^2$ [S2].
+-*   **Convergence Threshold:** Choosing an inappropriate threshold for ray marching convergence can lead to dilated shapes (large threshold) or incomplete geometry (small threshold) [S1].
++*   **Translation Gradient Scaling:** The gradient of the translation scales by the inverse of the model scale. This must be corrected by scaling the gradients by $\eta^2$ [S2]. Alternatively, input data can be scaled to a canonical scale [S2].
++*   **Convergence Threshold:** Choosing the wrong threshold for ray marching affects quality. A large threshold dilates the shape, losing boundary details; a small threshold may produce incomplete geometry [S1].
++*   **Local Minima:** All methods sometimes struggle to find the correct local minima, especially with large initial perturbations [S2].
+ 
+ ## Subtopics
+ 
+-### Camera Pose Optimization
+-Computes gradients of the reconstruction loss with respect to the rotation and translation components of a camera view matrix [S3, unofficial]. It uses the means of Gaussian components ($\mu_n$) to derive gradients for translation ($\mathbf{t}$) and rotation ($\mathbf{R}$) [S3, unofficial]. This variant is specific to Gaussian Splatting-based rendering, whereas the main method focuses on Fuzzy Metaballs/SDFs [S2][S3, unofficial].
++### [Camera Pose Optimization](9009-camera-pose-optimization.md)
++Computes gradients of a reconstruction loss with respect to the rotation and translation components of a camera view matrix. It refines an initial camera pose toward a ground truth pose by minimizing gradients derived from 2D depth and binary silhouette observations. Unlike methods that optimize scene parameters, this method treats the camera extrinsics as differentiable variables to correct viewpoint errors.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of ray marching steps (controlled by the convergence threshold) and the number of pixels [S1].
+-*   **Memory Complexity:** Low, as it only requires storing the current pose, gradients, and rendered images [S2].
+-*   **Performance:** Methods like Fuzzy Metaballs can recover poses from random viewpoints with significant perturbations ($\pm 45^\circ$ rotation, 50% translation error) [S2]. However, all methods sometimes struggle to find the correct local minima [S2].
+-*   **Strengths:** Effective for pose estimation when shape is known or fixed; handles scale invariance via normalized depth loss [S2].
+-*   **Limitations:** Sensitive to local minima; requires careful tuning of the convergence threshold [S1, S2].
+-*   **When to Use:** When recovering camera pose from depth and silhouette observations is required, and the shape is known [S1].
+-*   **When Not to Use:** When the shape is unknown or needs to be reconstructed simultaneously (use [Differentiable Sphere Tracing](2316-differentiable-sphere-tracing.md) or [Instant-NSR-PL Forward Pass](2540-instant-nsr-pl-forward-pass.md) instead) [S1, S2].
++*   **Time Complexity:** Depends on the number of ray marching steps per pixel, which is determined by the convergence threshold and scene complexity. Each iteration requires a forward render and a backward pass through the differentiable renderer.
++*   **Memory Complexity:** Requires storing the scene SDF and intermediate rendering buffers (depth, alpha). The gradient storage for the camera pose is minimal.
++*   **Performance:** Evaluated on datasets with random viewpoints and perturbations. Methods are compared using the geometric mean of rotation and translation error [S2].
++*   **Strengths:** Effective at recovering camera pose from random initializations using only 2D observations. Scale-invariant depth loss helps with objects of varying sizes [S2].
++*   **Limitations:** Struggles with local minima. Adaptive learning rate methods are limited due to scale invariance requirements [S2].
++*   **When to Use:** When the scene geometry is known or fixed, and the goal is to estimate the camera position/orientation from 2D observations.
++*   **When Not to Use:** When the scene geometry is unknown or needs to be optimized simultaneously with the pose.
+ 
+ ## Background
+-The method originates from research on differentiable rendering with algebraic surfaces, specifically Fuzzy Metaballs [S2]. It was developed to address the challenge of pose estimation by minimizing image-based errors between rendered and ground truth images [S2]. The approach builds on the principles of differentiable sphere tracing [S1].
++The method originates from research on differentiable rendering with algebraic surfaces and implicit functions. It was introduced in the context of "Fuzzy Metaballs" for approximate differentiable rendering [S2] and further explored in the DIST framework for rendering deep implicit signed distance functions [S1]. The approach leverages the differentiability of sphere tracing to enable gradient-based optimization of camera parameters, a technique useful in computer vision tasks such as pose estimation and 3D reconstruction.
+ 
+ ## Sources
+ [S1] DIST: Rendering Deep Implicit Signed Distance Function With Differentiable Sphere Tracing, https://doi.org/10.1109/cvpr42600.2020.00209, fetched 2026-10-26
+-[S2] Approximate Differentiable Rendering with Algebraic Surfaces, https://doi.org/10.1007/978-3-031-19824-3_35, fetched 2026-10-26
+-[S3] gsplat: An Open-Source Library for Gaussian Splatting, https://doi.org/10.48550/arXiv.2409.06765, fetched 2026-10-29 (unofficial)+[S2] Approximate Differentiable Rendering with Algebraic Surfaces, https://doi.org/10.1007/978-3-031-19824-3_35, fetched 2026-10-26

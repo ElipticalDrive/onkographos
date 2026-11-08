@@ -3,7 +3,7 @@
 Also called: Latent Regularization, Phi_f Regularization
 
 ## Overview
-Neural Latent Regularization is a technique that uses a small auxiliary neural network to reconstruct grid features from canonical coordinates and timestamps, preventing overfitting of the radiance field without affecting inference speed [S1, unofficial]. It distinguishes itself from sibling methods like L1 Norm Regularization for Transfer Functions by regularizing the *grid feature representation* itself rather than the transfer function or output colors, ensuring the spatial-temporal encoding remains smooth and consistent during optimization [S1, unofficial].
+Neural Latent Regularization is a technique that uses a small auxiliary neural network to reconstruct grid features from canonical coordinates and timestamps, preventing overfitting of the radiance field without affecting inference speed [S1]. It distinguishes itself from sibling methods like L1 Norm Regularization for Transfer Functions by regularizing the *grid feature representation* itself rather than the transfer function or output colors, ensuring the spatial-temporal encoding remains smooth and consistent during optimization [S1].
 
 ## How it works
 **Inputs and Outputs:**
@@ -12,12 +12,12 @@ Neural Latent Regularization is a technique that uses a small auxiliary neural n
 *   **Target:** The actual grid feature $\gamma_{grid}(x')$ retrieved from the radiance field's grid representation.
 
 **Data Structures:**
-*   **Latent Regulator $\Phi_f$:** A 1-layer Multi-Layer Perceptron (MLP) with a hidden width of 64 [S1, unofficial].
-*   **Grid Representation:** The underlying feature grid (e.g., Instant-NGP hash grid) storing $\gamma_{grid}(x')$ [S1, unofficial].
-*   **Positional Encoding $\gamma$:** Applied to both $x'$ and $t$ before input to $\Phi_f$ [S1, unofficial].
+*   **Latent Regulator $\Phi_f$:** A 1-layer Multi-Layer Perceptron (MLP) with a hidden width of 64 [S1].
+*   **Grid Representation:** The underlying feature grid (e.g., Instant-NGP hash grid) storing $\gamma_{grid}(x')$ [S1].
+*   **Positional Encoding $\gamma$:** Applied to both $x'$ and $t$ before input to $\Phi_f$ [S1].
 
 **Parameters:**
-*   **Loss Weight $\xi$:** Balances reconstruction loss and regularization loss. Typical values are 0.001 for synthetic scenes and 1 for real-world scenes [S1, unofficial].
+*   **Loss Weight $\xi$:** Balances reconstruction loss and regularization loss. Typical values are 0.001 for synthetic scenes and 1 for real-world scenes [S1].
 
 **Algorithm:**
 1.  For each training step, obtain the deformed canonical coordinate $x'$ and the current timestamp $t$.
@@ -31,11 +31,11 @@ Neural Latent Regularization is a technique that uses a small auxiliary neural n
 **Formulas:**
 The regularization loss is defined as:
 $$ L_f = \| \Phi_f(\gamma(x'), \gamma(t)) - \gamma_{grid}(x') \| $$
-where $\Phi_f$ is the latent regulator, $\gamma(x')$ and $\gamma(t)$ are positional encodings, and $\gamma_{grid}(x')$ is the encoding feature of the grid representation [S1, unofficial].
+where $\Phi_f$ is the latent regulator, $\gamma(x')$ and $\gamma(t)$ are positional encodings, and $\gamma_{grid}(x')$ is the encoding feature of the grid representation [S1].
 
 The total training objective is:
 $$ L = L_{rec} + \xi L_f $$
-where $L_{rec}$ is the reconstruction loss and $\xi$ is the hyper-parameter balancing the two terms [S1, unofficial].
+where $L_{rec}$ is the reconstruction loss and $\xi$ is the hyper-parameter balancing the two terms [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -86,9 +86,9 @@ def neural_latent_regularization_step(
     # 5. Backpropagation
     # Gradients from L_f propagate back to phi_f and grid parameters.
     # Gradients from L_f also propagate to the deformation network 
-    # to promote precise coordinate estimation [S1, unofficial].
+    # to promote precise coordinate estimation [S1].
     # However, gradients from the deformation distance norm (Eq 10 in source) 
-    # are halted to prevent maximizing the norm [S1, unofficial].
+    # are halted to prevent maximizing the norm [S1].
     
     total_loss.backward()
     
@@ -96,21 +96,21 @@ def neural_latent_regularization_step(
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Gradient Flow Control:** Gradients from $L_f$ are permitted to propagate back to the deformation network to promote precise coordinate estimation in initial training phases. However, gradients from the deformation distance norm in the time attenuation formula must be halted to prevent the network from maximizing the norm to increase time feature frequency [S1, unofficial].
-*   **Overfitting:** Inaccurate or noisy grid features can cause overfitting of the radiance field, resulting in the failure to generate novel views. This method specifically targets this by regulating the grid feature during training [S1, unofficial].
+*   **Gradient Flow Control:** Gradients from $L_f$ are permitted to propagate back to the deformation network to promote precise coordinate estimation in initial training phases. However, gradients from the deformation distance norm in the time attenuation formula must be halted to prevent the network from maximizing the norm to increase time feature frequency [S1].
+*   **Overfitting:** Inaccurate or noisy grid features can cause overfitting of the radiance field, resulting in the failure to generate novel views. This method specifically targets this by regulating the grid feature during training [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Adds minimal overhead per training step due to the small size of $\Phi_f$ (1-layer MLP, width 64) [S1, unofficial].
-*   **Memory Complexity:** Negligible additional memory for $\Phi_f$ parameters compared to the grid representation [S1, unofficial].
-*   **Inference Speed:** No additional computation during inference; rendering speed is not compromised [S1, unofficial].
-*   **Strengths:** Prevents overfitting of the radiance field by ensuring the grid representation is smooth and consistent across spatial and temporal dimensions. Effective for both synthetic and real-world dynamic scenes [S1, unofficial].
-*   **Limitations:** Requires careful tuning of $\xi$ (0.001 for synthetic, 1 for real-world) [S1, unofficial]. Relies on the quality of the underlying grid representation (e.g., Instant-NGP) [S1, unofficial].
-*   **When to Use:** When training dynamic radiance fields with grid-based representations (like Instant-NGP) and observing overfitting or noisy reconstructions, particularly in monocular settings where time features might be noisy [S1, unofficial].
+*   **Time Complexity:** Adds minimal overhead per training step due to the small size of $\Phi_f$ (1-layer MLP, width 64) [S1].
+*   **Memory Complexity:** Negligible additional memory for $\Phi_f$ parameters compared to the grid representation [S1].
+*   **Inference Speed:** No additional computation during inference; rendering speed is not compromised [S1].
+*   **Strengths:** Prevents overfitting of the radiance field by ensuring the grid representation is smooth and consistent across spatial and temporal dimensions. Effective for both synthetic and real-world dynamic scenes [S1].
+*   **Limitations:** Requires careful tuning of $\xi$ (0.001 for synthetic, 1 for real-world) [S1]. Relies on the quality of the underlying grid representation (e.g., Instant-NGP) [S1].
+*   **When to Use:** When training dynamic radiance fields with grid-based representations (like Instant-NGP) and observing overfitting or noisy reconstructions, particularly in monocular settings where time features might be noisy [S1].
 *   **When Not to Use:** If inference speed is critically constrained and even minimal overhead is unacceptable (though overhead is small). If the grid representation is not used (e.g., pure MLP-based NeRF).
 
 ## Background
-Neural Latent Regularization was proposed in the paper "Ced-NeRF: A Compact and Efficient Method for Dynamic Neural Radiance Fields" presented at the Thirty-Eighth AAAI Conference on Artificial Intelligence (AAAI-24) [S1, unofficial]. The method builds upon the Instant-NGP backbone and Nerfacc framework [S1, unofficial]. It addresses the issue of overfitting in dynamic radiance fields caused by noisy grid features, which can lead to failure in generating novel views [S1, unofficial]. The authors note that while time features help explain illumination changes, they can result in noisy reconstructions in monocular settings; this regularization helps guide the deformation network to learn correct deformations rather than relying solely on time features [S1, unofficial].
+Neural Latent Regularization was proposed in the paper "Ced-NeRF: A Compact and Efficient Method for Dynamic Neural Radiance Fields" presented at the Thirty-Eighth AAAI Conference on Artificial Intelligence (AAAI-24) [S1]. The method builds upon the Instant-NGP backbone and Nerfacc framework [S1]. It addresses the issue of overfitting in dynamic radiance fields caused by noisy grid features, which can lead to failure in generating novel views [S1]. The authors note that while time features help explain illumination changes, they can result in noisy reconstructions in monocular settings; this regularization helps guide the deformation network to learn correct deformations rather than relying solely on time features [S1].
 
 ## Sources
 
-[S1] Ced-NeRF: A Compact and Efficient Method for Dynamic Neural Radiance Fields, https://doi.org/10.1609/aaai.v38i4.28138, fetched 2026-10-26 (unofficial)
+[S1] Ced-NeRF: A Compact and Efficient Method for Dynamic Neural Radiance Fields, https://doi.org/10.1609/aaai.v38i4.28138, fetched 2026-10-26

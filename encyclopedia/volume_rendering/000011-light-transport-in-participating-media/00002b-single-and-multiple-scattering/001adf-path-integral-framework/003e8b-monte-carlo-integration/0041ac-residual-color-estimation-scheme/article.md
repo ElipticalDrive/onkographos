@@ -1,0 +1,126 @@
+# Residual Color Estimation Scheme
+
+Also called: Bias-reducing Monte Carlo estimator, Residual Fourier coefficient estimation
+
+## Overview
+The Residual Color Estimation Scheme is a Monte Carlo integration technique designed to reduce estimation bias in Fourier coefficient calculation caused by nonuniform sampling [S1, unofficial]. It sets itself apart from the standard [Monte Carlo Integration](9784-monte-carlo-integration.md) by explicitly subtracting the estimated direct current (DC) component from the signal before integration, and from the [Monte Carlo Estimator of Edge Integrals](10285-monte-carlo-estimator-of-edge-integrals.md) by focusing on spectral coefficient bias rather than edge integral estimation [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- Input: A signal function $f(x)$, a set of $T$ nonuniformly sampled points $\{x_t\}_{t=1}^T$, and a target frequency index $k$.
+- Output: An unbiased estimate of the Fourier coefficient $a_k$.
+
+**Data Structures**
+- Sample points: Array of size $T$ containing $x_t$.
+- Estimated DC component: Scalar $\hat{A}_0$.
+- Estimated coefficients: Array of size $k_{max}$ containing $\hat{a}_n$ and $\hat{b}_n$ for $n < k$.
+
+**Formulas**
+The standard Monte Carlo estimator for the $k$-th Fourier coefficient $a_k$ is biased under nonuniform sampling due to the leakage from the DC component $A_0$ [S1, unofficial]:
+$$ \hat{a}_k = \frac{1}{T} \sum_{t=1}^{T} f(x_t) \cos(k x_t) $$
+The residual scheme subtracts the DC component $A_0$ from the signal before integration [S1, unofficial]:
+$$ a_k = \frac{1}{\pi} \int_{-\pi}^{\pi} (f(x) - A_0) \cos(kx) dx $$
+Since $A_0$ is unknown, it is first estimated using the Monte Carlo method [S1, unofficial]:
+$$ \hat{A}_0 = \frac{1}{T} \sum_{t=1}^{T} f(x_t) $$
+The final residual estimator substitutes $\hat{A}_0$ for $A_0$ [S1, unofficial]:
+$$ \hat{a}'_k = \frac{1}{T} \sum_{t=1}^{T} (f(x_t) - \hat{A}_0) \cos(k x_t) $$
+
+**Parameters**
+- $T$: Number of samples. Typical values in experiments: 10, 20, ..., 100 [S1, unofficial].
+- $k_{max}$: Maximum degree of the Fourier series or spherical harmonics. Typical value: 3 [S1, unofficial].
+
+**Steps**
+1. Estimate the DC component $\hat{A}_0$ by averaging the signal values at all $T$ samples:
+   $$ \hat{A}_0 = \frac{1}{T} \sum_{t=1}^{T} f(x_t) $$
+2. For the target coefficient $k$, compute the residual estimate:
+   $$ \hat{a}'_k = \frac{1}{T} \sum_{t=1}^{T} (f(x_t) - \hat{A}_0) \cos(k x_t) $$
+3. **Iterative Refinement (Optional)**: If estimating multiple coefficients $k=1 \dots k_{max}$, perform estimation iteratively. In round 1, subtract components $1$ to $k-1$ when estimating $a_k$. In subsequent rounds, subtract all other estimated components until the difference between adjacent rounds is small enough [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def residual_color_estimation(f, samples, k, k_max=3, max_iterations=5, tolerance=1e-6):
+    """
+    Estimate Fourier coefficient a_k using residual color estimation.
+    
+    Args:
+        f: Callable function f(x).
+        samples: List of T sample points x_t.
+        k: Target frequency index.
+        k_max: Maximum degree of Fourier series.
+        max_iterations: Max iterations for refinement.
+        tolerance: Convergence threshold.
+        
+    Returns:
+        Estimated coefficient a_k.
+    """
+    T = len(samples)
+    
+    # Step 1: Estimate DC component
+    # [G] Ensure f is evaluated at all sample points
+    f_values = [f(x) for x in samples]
+    A0_hat = sum(f_values) / T
+    
+    # Step 2: Initial estimate for coefficient k
+    # Subtract DC component from signal before integration
+    a_k_prev = 0.0
+    for t in range(T):
+        a_k_prev += (f_values[t] - A0_hat) * cos(k * samples[t])
+    a_k_prev /= T
+    
+    # Step 3: Iterative refinement if k > 1
+    # Subtract previously estimated lower frequency components to further reduce bias
+    if k > 1:
+        a_k_curr = a_k_prev
+        for iteration in range(1, max_iterations):
+            a_k_prev = a_k_curr
+            residual_sum = 0.0
+            for t in range(T):
+                # Subtract contributions of estimated lower coefficients n < k
+                signal_residual = f_values[t] - A0_hat
+                for n in range(1, k):
+                    # [G] Assuming b_n are zero or handled similarly; 
+                    # source focuses on a_n subtraction for cosine terms.
+                    # If b_n exists, subtract b_n * sin(n*x_t) as well.
+                    signal_residual -= a_n_estimates[n] * cos(n * samples[t])
+                residual_sum += signal_residual * cos(k * samples[t])
+            a_k_curr = residual_sum / T
+            
+            if abs(a_k_curr - a_k_prev) < tolerance:
+                break
+        return a_k_curr
+    else:
+        return a_k_prev
+```
+
+**Edge Cases and Pitfalls**
+- If $A_0$ is not subtracted, nonuniform sampling causes the positive and negative values of the DC term to not cancel out, leading to a bias proportional to the magnitude of $A_0$ [S1, unofficial].
+- The method assumes the signal can be decomposed into Fourier components. For spherical harmonics, the same scheme applies due to orthogonal completeness [S1, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity**
+- Time: The method adds one pass over the samples to compute $\hat{A}_0$ and one pass for the coefficient estimation. Computational cost is slightly higher than standard Monte Carlo. On an Intel i7-9700 CPU with $T=100$, the cost is $1.196 \times 10^{-4}$ s for Residual Method vs $0.978 \times 10^{-4}$ s for Original Monte Carlo [S1, unofficial].
+- Memory: $O(T)$ to store sample values and $O(k_{max})$ for coefficient storage [S1, unofficial].
+
+**Measured Performance**
+- On an Intel i7-9700 CPU with $T=100$ samples: Residual Method: $1.196 \times 10^{-4}$ s, Least Squares: $1.052 \times 10^{-4}$ s, Original Monte Carlo: $0.978 \times 10^{-4}$ s [S1, unofficial].
+- The method effectively reduces estimation biases with acceptable computational overhead [S1, unofficial].
+
+**Strengths and Limitations**
+- Strengths: Eliminates bias from the DC component $A_0$ under nonuniform sampling. Maintains robustness under sparse sampling (e.g., $T=10$), whereas Least Squares degrades sharply [S1, unofficial].
+- Limitations: Slightly higher computational cost than standard Monte Carlo. Performance depends on the accuracy of $\hat{A}_0$ [S1, unofficial].
+
+**When to Use**
+- Use when sampling is nonuniform and bias from the DC component is significant.
+- Use when sparse sampling is present, as it outperforms Least Squares methods [S1, unofficial].
+
+**When Not to Use**
+- Avoid if computational budget is extremely tight and bias is negligible (use standard Monte Carlo).
+- Avoid if uniform sampling is guaranteed and bias is not a concern.
+
+## Background
+The Residual Color Estimation Scheme was introduced in the context of reducing shape-radiance ambiguity in radiance fields with closed-form color estimation [S1, unofficial]. It addresses the issue that standard Monte Carlo integration of Fourier coefficients suffers from bias when sampling is nonuniform, particularly due to the leakage from the DC component [S1, unofficial].
+
+## Sources
+[S1] Reducing Shape-Radiance Ambiguity in Radiance Fields with a Closed-Form Color Estimation Method, https://doi.org/10.52202/075280-2570, fetched 2026-10-26 (unofficial)

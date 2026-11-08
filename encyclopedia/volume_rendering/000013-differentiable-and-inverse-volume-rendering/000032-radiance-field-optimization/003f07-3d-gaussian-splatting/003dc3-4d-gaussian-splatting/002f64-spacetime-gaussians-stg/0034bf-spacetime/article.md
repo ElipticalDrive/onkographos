@@ -36,15 +36,15 @@ Where:
 *   $\gamma(t)$ is the original time feature.
 *   $\Delta x$ is the norm of the deformation distance.
 *   $\lambda$ is the attenuation strength hyperparameter.
-*   $L(\gamma(t))$ is a term related to the feature magnitude (source text garbled, interpreted as feature norm or loss contribution) [S3, unofficial].
+*   $L(\gamma(t))$ is a term related to the feature magnitude (source text garbled, interpreted as feature norm or loss contribution) [S3].
 
 **Parameters:**
-*   $\lambda$ (Attenuation strength): Set to 60 [S3, unofficial].
+*   $\lambda$ (Attenuation strength): Set to 60 [S3].
 *   Time step denominator: Typically 4 for the Torf scene type [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
 *   **Boundary Conditions:** At frame boundaries (multiples of 4), the interpolation weight shifts entirely to the current frame. The code must handle `view.frame_id % 4 == 0` explicitly to avoid querying non-existent future frames or using stale data [S2, unofficial].
-*   **Noisy Reconstructions:** If the deformation distance $\Delta x$ is large, the time feature can dominate the coordinate information, leading to noisy novel view synthesis. The attenuation formula mitigates this [S3, unofficial].
+*   **Noisy Reconstructions:** If the deformation distance $\Delta x$ is large, the time feature can dominate the coordinate information, leading to noisy novel view synthesis. The attenuation formula mitigates this [S3].
 *   **Precision:** Linear interpolation assumes smooth motion. Rapid, non-linear motion between keyframes may result in artifacts if the keyframe density is insufficient [S2, unofficial].
 
 **Pseudocode:**
@@ -107,7 +107,7 @@ def attenuate_time_feature(gamma_t, delta_x_norm, lambda_param=60):
 A variant that interpolates dynamic Gaussian transformations ($d_{xyz}$) across time steps for specific scene types (e.g., Torf) to ensure smooth motion between discrete keyframes [S2, unofficial]. It sets itself apart by explicitly querying deformation deltas at discrete intervals (every 4 frames) and linearly blending them. Choose this when rendering scenes with known, discrete motion keyframes where smooth interpolation is required without training a continuous flow field. It relies on the `query_dmlp` interface to fetch deformation data [S2, unofficial].
 
 ### Attenuating Time Feature
-A method to reduce the frequency of the time feature for deforming parts of the scene to prevent the radiance field from relying solely on time features instead of coordinates, which causes noisy novel view synthesis [S3, unofficial]. It sets itself apart by using the norm of the deformation distance ($\Delta x$) to modulate the time feature's influence. Choose this when dealing with monocular or sparse-view dynamic reconstruction where the network might overfit to time indices rather than learning geometric deformation. It uses an exponential attenuation factor controlled by $\lambda=60$ [S3, unofficial].
+A method to reduce the frequency of the time feature for deforming parts of the scene to prevent the radiance field from relying solely on time features instead of coordinates, which causes noisy novel view synthesis [S3]. It sets itself apart by using the norm of the deformation distance ($\Delta x$) to modulate the time feature's influence. Choose this when dealing with monocular or sparse-view dynamic reconstruction where the network might overfit to time indices rather than learning geometric deformation. It uses an exponential attenuation factor controlled by $\lambda=60$ [S3].
 
 ## Operating characteristics
 *   **Time Complexity:** Rendering remains $O(N)$ with respect to the number of Gaussians, as interpolation is a constant-time operation per Gaussian or batch. Querying the deformation MLP/grid adds a small constant overhead.
@@ -119,9 +119,9 @@ A method to reduce the frequency of the time feature for deforming parts of the 
 *   **When not to use:** Scenes with highly complex, non-linear, or chaotic motion that cannot be approximated by linear interpolation between keyframes.
 
 ## Background
-Spacetime feature extension originated in the context of dynamic 3D Gaussian Splatting and Neural Radiance Fields. It builds on the idea that time can be treated as an additional input dimension to the feature field, similar to how spatial coordinates are used [S1, unofficial]. The specific implementations of temporal interpolation and time feature attenuation were developed to address artifacts in dynamic reconstruction, such as those found in the Torf dataset and monocular dynamic scenes [S2, unofficial][S3, unofficial]. The method is part of the broader evolution of 4D Gaussian Splatting, moving from static rendering to real-time dynamic synthesis.
+Spacetime feature extension originated in the context of dynamic 3D Gaussian Splatting and Neural Radiance Fields. It builds on the idea that time can be treated as an additional input dimension to the feature field, similar to how spatial coordinates are used [S1, unofficial]. The specific implementations of temporal interpolation and time feature attenuation were developed to address artifacts in dynamic reconstruction, such as those found in the Torf dataset and monocular dynamic scenes [S2, unofficial][S3]. The method is part of the broader evolution of 4D Gaussian Splatting, moving from static rendering to real-time dynamic synthesis.
 
 ## Sources
 [S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
 [S2] brownvc/gftorf, https://github.com/brownvc/gftorf, fetched 2026-10-27 (unofficial)
-[S3] Ced-NeRF: A Compact and Efficient Method for Dynamic Neural Radiance Fields, https://doi.org/10.1609/aaai.v38i4.28138, fetched 2026-10-26 (unofficial)
+[S3] Ced-NeRF: A Compact and Efficient Method for Dynamic Neural Radiance Fields, https://doi.org/10.1609/aaai.v38i4.28138, fetched 2026-10-26

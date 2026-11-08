@@ -91,35 +91,35 @@ Used for 3D Gaussian splatting, particularly in monocular settings.
     $$
     where $\lambda_l, \lambda_s$ are loss weights [S3, unofficial].
 
-#### Variant 4: Inverse Rendering with Neural SDF [S4, unofficial]
+#### Variant 4: Inverse Rendering with Neural SDF [S4]
 Used for optimizing neural SDF and material parameters from multi-view photometric images.
 
-1.  **Image Fidelity Loss:** L2 loss on Gaussian pyramids of predicted image $\hat{I}$ and ground truth $I$ [S4, unofficial].
+1.  **Image Fidelity Loss:** L2 loss on Gaussian pyramids of predicted image $\hat{I}$ and ground truth $I$ [S4].
     $$
     \mathcal{L}_{\text{img}} = L_2(\text{pyramid}(\hat{I}), \text{pyramid}(I))
     $$
-2.  **Structural Similarity Loss:** $1 - \text{SSIM}(\hat{I}, I)$ [S4, unofficial].
-3.  **Eikonal Loss:** Enforces SDF validity by ensuring gradient magnitude is 1 [S4, unofficial].
+2.  **Structural Similarity Loss:** $1 - \text{SSIM}(\hat{I}, I)$ [S4].
+3.  **Eikonal Loss:** Enforces SDF validity by ensuring gradient magnitude is 1 [S4].
     $$
     \mathcal{L}_{\text{eikonal}} = \| \nabla_x S - 1 \|_2^2
     $$
-4.  **Roughness Range Loss:** Encourages estimated roughness to stay below 0.5 [S4, unofficial]. Specific formula not provided, described as Eq. 13 in source.
+4.  **Roughness Range Loss:** Encourages estimated roughness to stay below 0.5 [S4]. Specific formula not provided, described as Eq. 13 in source.
 
 5.  **Total Loss:**
     $$
     \mathcal{L} = L_2(\text{pyramid}(\hat{I}), \text{pyramid}(I)) + (1 - \text{SSIM}(\hat{I}, I)) + \lambda_1 \cdot \| \nabla_x S - 1 \|_2^2 + \lambda_2 \cdot \text{Loss}_{\text{roughness}}
     $$
-    where $\lambda_1, \lambda_2$ are loss weights [S4, unofficial].
+    where $\lambda_1, \lambda_2$ are loss weights [S4].
 
 ### Parameters
-*   **Weights ($w_k, \lambda, \beta_k, \lambda_l, \lambda_s, \lambda_1, \lambda_2$):** Hyperparameters balancing the components. Specific values are often detailed in supplementary materials or ablation studies [S2][S3, S4, unofficial].
+*   **Weights ($w_k, \lambda, \beta_k, \lambda_l, \lambda_s, \lambda_1, \lambda_2$):** Hyperparameters balancing the components. Specific values are often detailed in supplementary materials or ablation studies [S2][S3, unofficial][S4].
 *   **Thresholds ($T_s, T_r$):** Used in scaling regularization for Gaussians. $T_s$ is the threshold for length, $T_r$ is the threshold for thinness ratio [S3, unofficial].
-*   **Pyramid Levels:** The number of levels in the Gaussian pyramid for image loss [S4, unofficial].
+*   **Pyramid Levels:** The number of levels in the Gaussian pyramid for image loss [S4].
 
 ### Edge Cases and Pitfalls
 *   **Precision:** In $\mathcal{L}_s$, the inverse norm $\| \cdot \|^{-1}$ can lead to numerical instability if the triangle area approaches zero. [G] A small epsilon should be added to the denominator or the term should be clamped.
 *   **Boundaries:** The scaling regularization $\mathcal{L}_{\text{scaling}}$ is only active when specific conditions on max/min scaling are met; otherwise, it is zero, which may lead to unregularized growth if thresholds are not tuned [S3, unofficial].
-*   **Degenerate Input:** For SDF methods, if the gradient $\nabla_x S$ does not converge to 1, the Eikonal loss may fail to enforce a valid signed distance function, leading to incorrect surface extraction [S4, unofficial].
+*   **Degenerate Input:** For SDF methods, if the gradient $\nabla_x S$ does not converge to 1, the Eikonal loss may fail to enforce a valid signed distance function, leading to incorrect surface extraction [S4].
 
 ## Subtopics
 
@@ -130,7 +130,7 @@ The MPF Training Objective is a composite loss function designed to optimize the
 A variant for Gaussian Splatting that introduces a scaling regularization term to prevent Gaussians from growing long and thin, particularly useful in monocular video settings with limited viewing angles [S3, unofficial]. It also employs background mixing, where a random background color is generated every iteration to mix with the rendered and ground truth images to provide silhouette cues [S3, unofficial]. The scaling loss is conditional on the max scaling being both long and thin relative to thresholds [S3, unofficial].
 
 ### Inverse Rendering Loss Function
-A composite loss function used to optimize neural SDF and material parameters from multi-view photometric images, combining image fidelity, structural similarity, SDF validity, and material constraints [S4, unofficial]. It specifically includes an Eikonal loss to enforce SDF gradient magnitude and a roughness range loss to constrain material properties [S4, unofficial].
+A composite loss function used to optimize neural SDF and material parameters from multi-view photometric images, combining image fidelity, structural similarity, SDF validity, and material constraints [S4]. It specifically includes an Eikonal loss to enforce SDF gradient magnitude and a roughness range loss to constrain material properties [S4].
 
 ## Operating characteristics
 *   **Time Complexity:** Depends on the number of rays sampled per batch $|\mathcal{R}|$ and the complexity of the regularization terms (e.g., total variation computation). Photometric terms are $O(|\mathcal{R}|)$. Total variation is typically $O(N)$ where $N$ is the number of voxels or points.
@@ -151,10 +151,10 @@ A composite loss function used to optimize neural SDF and material parameters fr
 *   **When Not to Use:** When ground truth geometry is available and explicit supervision is preferred, or when computational resources are extremely limited and hyperparameter tuning is infeasible.
 
 ## Background
-The concept of combining photometric and regularization losses in volume rendering and neural implicit representations has evolved through several key papers. The use of photometric loss (L1, MSE) is standard in NeRF [S2]. The addition of opacity loss, distortion loss, and normal loss is detailed in Triangle Splatting [S2]. The use of total variation regularization for density and flow in dynamic scenes is described in Forward Flow for Novel View Synthesis of Dynamic Scenes [S1]. The scaling regularization for Gaussians is introduced in SplattingAvatar [S3, unofficial]. The inverse rendering loss with Eikonal and roughness constraints is presented in IRON [S4, unofficial]. The MPF training objective is described in the context of metric-phase field networks [S1].
+The concept of combining photometric and regularization losses in volume rendering and neural implicit representations has evolved through several key papers. The use of photometric loss (L1, MSE) is standard in NeRF [S2]. The addition of opacity loss, distortion loss, and normal loss is detailed in Triangle Splatting [S2]. The use of total variation regularization for density and flow in dynamic scenes is described in Forward Flow for Novel View Synthesis of Dynamic Scenes [S1]. The scaling regularization for Gaussians is introduced in SplattingAvatar [S3, unofficial]. The inverse rendering loss with Eikonal and roughness constraints is presented in IRON [S4]. The MPF training objective is described in the context of metric-phase field networks [S1].
 
 ## Sources
 [S1] Forward Flow for Novel View Synthesis of Dynamic Scenes, https://doi.org/10.1109/iccv51070.2023.01468, fetched 2026-10-26
 [S2] Triangle Splatting for Real-Time Radiance Field Rendering, https://doi.org/10.1109/3DV69130.2026.00123, fetched 2026-10-27
 [S3] SplattingAvatar, https://arxiv.org/abs/2403.05087, fetched 2026-10-27 (unofficial)
-[S4] IRON: Inverse Rendering by Optimizing Neural SDFs and Materials from Photometric Images, https://doi.org/10.1109/cvpr52688.2022.00548, fetched 2026-10-26 (unofficial)
+[S4] IRON: Inverse Rendering by Optimizing Neural SDFs and Materials from Photometric Images, https://doi.org/10.1109/cvpr52688.2022.00548, fetched 2026-10-26

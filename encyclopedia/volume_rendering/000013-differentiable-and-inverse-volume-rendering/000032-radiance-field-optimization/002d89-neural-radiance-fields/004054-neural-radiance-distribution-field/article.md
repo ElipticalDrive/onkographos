@@ -2,10 +2,10 @@
 
 
 ## Overview
-Neural Radiance Distribution Field (NeRDF) is a neural representation for efficient novel view synthesis that models the parametric radiance distribution along a camera ray rather than sampling discrete 3D points [S1, unofficial]. It combines the single-evaluation speed of NeLF-based methods with the 3D prior consistency of NeRF-based methods, enabling high-quality rendering with significantly smaller network capacities [S1, unofficial]. Unlike its siblings, NeRDF maps a ray directly to Fourier coefficients for opacity and color, which are then integrated via volume rendering, achieving a trade-off between speed, memory, and quality that outperforms both direct ray-to-pixel mapping and standard volumetric querying [S1, unofficial].
+Neural Radiance Distribution Field (NeRDF) is a neural representation for efficient novel view synthesis that models the parametric radiance distribution along a camera ray rather than sampling discrete 3D points [S1]. It combines the single-evaluation speed of NeLF-based methods with the 3D prior consistency of NeRF-based methods, enabling high-quality rendering with significantly smaller network capacities [S1]. Unlike its siblings, NeRDF maps a ray directly to Fourier coefficients for opacity and color, which are then integrated via volume rendering, achieving a trade-off between speed, memory, and quality that outperforms both direct ray-to-pixel mapping and standard volumetric querying [S1].
 
 ## How it works
-NeRDF takes a camera ray $\mathbf{r}$ as input and outputs a set of coefficients defining the opacity $\sigma(t)$ and color $C(t)$ distributions along the ray distance $t$. These distributions are parameterized by trigonometric functions (TrigF). The final pixel color is synthesized by evaluating these distributions at sampled points and performing volume rendering integration [S1, unofficial].
+NeRDF takes a camera ray $\mathbf{r}$ as input and outputs a set of coefficients defining the opacity $\sigma(t)$ and color $C(t)$ distributions along the ray distance $t$. These distributions are parameterized by trigonometric functions (TrigF). The final pixel color is synthesized by evaluating these distributions at sampled points and performing volume rendering integration [S1].
 
 ### Inputs and Outputs
 *   **Input:** A camera ray $\mathbf{r}$, defined by origin $o$ and direction $d$.
@@ -15,7 +15,7 @@ NeRDF takes a camera ray $\mathbf{r}$ as input and outputs a set of coefficients
 The core data structure is the output of the neural network $F_{\text{NeRDF}}$, which consists of two sets of coefficients:
 *   $\mathbf{w}^\sigma$: A vector of $2K$ coefficients for the opacity distribution.
 *   $\mathbf{w}^C$: A vector of $2K$ coefficients for the color distribution.
-*   Total output channels: $4K$ (scalar coefficients) or $8K$ if complex/2D components are implied by the source's specific channel count description [S1, unofficial]. The source explicitly states "output with 8K channels" for $K=12$, suggesting a specific internal mapping or component structure not fully detailed in the scalar equations [S1, unofficial].
+*   Total output channels: $4K$ (scalar coefficients) or $8K$ if complex/2D components are implied by the source's specific channel count description [S1]. The source explicitly states "output with 8K channels" for $K=12$, suggesting a specific internal mapping or component structure not fully detailed in the scalar equations [S1].
 
 ### Network Architecture
 *   **Type:** Multi-Layer Perceptron (MLP).
@@ -29,11 +29,11 @@ The core data structure is the output of the neural network $F_{\text{NeRDF}}$, 
     *   Concatenation: Encoded origin, direction, and path points form the final input vector.
 
 ### Numbered Steps
-1.  **Ray Sampling:** Sample $N$ points along the ray $\mathbf{r}$ using stratified sampling to capture path information [S1, unofficial].
-2.  **Input Encoding:** Encode the ray origin $o$, direction $d$, and the $N$ sampled points using their respective encodings (positional for $o$ and points, SH for $d$) and concatenate them [S1, unofficial].
-3.  **Network Forward Pass:** Pass the encoded input through the 8-layer MLP to predict the coefficients $\mathbf{w}^\sigma$ and $\mathbf{w}^C$ [S1, unofficial].
-4.  **Distribution Evaluation:** Evaluate the opacity distribution $\sigma(t)$ and color distribution $C(t)$ at $M$ uniform sample points $t_i$ along the ray using the predicted coefficients and the trigonometric basis functions [S1, unofficial].
-5.  **Volume Rendering:** Compute the final pixel color $\hat{C}(\mathbf{r})$ by integrating the evaluated distributions using the standard emission-absorption volume rendering equation [S1, unofficial].
+1.  **Ray Sampling:** Sample $N$ points along the ray $\mathbf{r}$ using stratified sampling to capture path information [S1].
+2.  **Input Encoding:** Encode the ray origin $o$, direction $d$, and the $N$ sampled points using their respective encodings (positional for $o$ and points, SH for $d$) and concatenate them [S1].
+3.  **Network Forward Pass:** Pass the encoded input through the 8-layer MLP to predict the coefficients $\mathbf{w}^\sigma$ and $\mathbf{w}^C$ [S1].
+4.  **Distribution Evaluation:** Evaluate the opacity distribution $\sigma(t)$ and color distribution $C(t)$ at $M$ uniform sample points $t_i$ along the ray using the predicted coefficients and the trigonometric basis functions [S1].
+5.  **Volume Rendering:** Compute the final pixel color $\hat{C}(\mathbf{r})$ by integrating the evaluated distributions using the standard emission-absorption volume rendering equation [S1].
 
 ### Formulas
 The mapping from ray to coefficients is:
@@ -69,20 +69,20 @@ $$
 where $\hat{\sigma}_1(t)$ is the density from NeRDF, $\hat{\sigma}_2(\mathbf{r}(t))$ is the density from a teacher NeRF, and $\lambda$ is the weight.
 
 ### Parameters
-*   $K$ (Fourier frequencies): 12 (optimal), range 4-24 shows robust performance [S1, unofficial].
-*   $N$ (Path points for encoding): 16 [S1, unofficial].
-*   $M$ (Rendering samples): 64 uniform samples [S1, unofficial].
-*   SH Degrees: 8 (for direction encoding) [S1, unofficial].
-*   Positional Encoding Frequencies: 10 [S1, unofficial].
-*   Batch Size: 1 view origin and 2,048 directions [S1, unofficial].
-*   Learning Rate: $5 \times 10^{-4}$ [S1, unofficial].
-*   Iterations: 400k-600k [S1, unofficial].
-*   VDC Weight $\lambda$: 0.1 [S1, unofficial].
+*   $K$ (Fourier frequencies): 12 (optimal), range 4-24 shows robust performance [S1].
+*   $N$ (Path points for encoding): 16 [S1].
+*   $M$ (Rendering samples): 64 uniform samples [S1].
+*   SH Degrees: 8 (for direction encoding) [S1].
+*   Positional Encoding Frequencies: 10 [S1].
+*   Batch Size: 1 view origin and 2,048 directions [S1].
+*   Learning Rate: $5 \times 10^{-4}$ [S1].
+*   Iterations: 400k-600k [S1].
+*   VDC Weight $\lambda$: 0.1 [S1].
 
 ### Edge Cases and Pitfalls
 *   **Ray Length $T$:** The basis functions depend on $T$. Incorrect estimation of ray length can distort the frequency basis.
-*   **High-Frequency Details:** While robust for $K \in [4, 24]$, extremely high-frequency scene details may require careful tuning of $K$ or additional encoding strategies, as the method is not explicitly designed for 360-degree high-fidelity scenes [S1, unofficial].
-*   **Teacher Dependency:** The training relies on a teacher NeRF for pseudo-data and VDC. Inconsistencies in the teacher model can propagate to the student NeRDF [S1, unofficial].
+*   **High-Frequency Details:** While robust for $K \in [4, 24]$, extremely high-frequency scene details may require careful tuning of $K$ or additional encoding strategies, as the method is not explicitly designed for 360-degree high-fidelity scenes [S1].
+*   **Teacher Dependency:** The training relies on a teacher NeRF for pseudo-data and VDC. Inconsistencies in the teacher model can propagate to the student NeRDF [S1].
 
 ### Pseudocode
 

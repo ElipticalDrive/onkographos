@@ -1,0 +1,193 @@
+# PLY Splat Publishing
+
+Also called: PLY Splat Loading and Publishing
+
+## Overview
+PLY Splat Publishing is a ROS 2 node that loads 3D Gaussian Splat data from a PLY file, reconstructs the full Gaussian parameters (including covariance matrices and spherical harmonics), and publishes them as a custom `SplatArray` message for visualization in tools like RViz. It builds on [Gaussian Splat PLY Loader](3254-gaussian-splat-ply-loader.md) by handling the specific ROS message serialization and QoS configuration required for real-time rendering pipelines.
+
+## How it works
+**Inputs:** A PLY file path (`ply_path`), a target spherical harmonics degree (`sh_degree`), a ROS timestamp (`stamp`), and a frame ID (`frame_id`, default 'map').
+**Outputs:** A ROS 2 `SplatArray` message published to the topic `/gaussian_splats`.
+
+### Data Structures
+The output is a `SplatArray` message containing a list of `Splat` messages. Each `Splat` message contains:
+- `pose`: A `PoseWithCovarianceStamped` message. The `pose` field contains a `Pose` with position $(x, y, z)$ and orientation $(w, x, y, z)$ quaternion, plus a $3 \times 3$ covariance matrix.
+- `opacity`: An 8-bit unsigned integer (`uint8`).
+- `harmonics_deg`: An integer indicating the degree of spherical harmonics used.
+- `spherical_harmonics`: A list of floats representing the SH coefficients.
+
+### Steps
+1. **Load PLY Data:** Read the PLY file vertices. Identify properties starting with `f_rest_` to count `nrc` (rest SH coefficients per channel).
+2. **Determine SH Degree:** Calculate `file_degree`:
+   - 3 if `nrc >= 15`
+   - 2 if `nrc >= 8`
+   - 1 if `nrc >= 3`
+   - 0 otherwise.
+   Calculate `actual_degree = min(sh_degree, file_degree)`. Calculate `nrc_to_use = (actual_degree + 1)^2 - 1`.
+3. **Extract Position:** Read positions $x, y, z$ as float64.
+4. **Extract and Normalize Rotation:** Read quaternions $rot_0 \dots rot_3$ (w, x, y, z). Normalize by dividing by the norm if the norm is greater than $10^{-6}$.
+5. **Compute Covariance:**
+   - Square scales: $s^2 = \text{scales}^2$.
+   - Construct rotation matrix $R$ from the normalized quaternion.
+   - Compute scaled rotation: $A = R \cdot s^2[:, \text{np.newaxis}, :]$.
+   - Compute covariance: $\text{cov3} = \text{einsum}('nrk, nck \rightarrow nrc', A, R)$.
+   - Flatten $\text{cov3}$ to $\text{cov36}$ of shape $(n, 36)$ by iterating $r, c \in 0 \dots 2$ and setting $\text{cov36}[:, r \cdot 6 + c] = \text{cov3}[:, r, c]$.
+6. **Convert Opacity:** Apply sigmoid to raw opacity, scale to 0-255, and clip to `uint8`:
+   $$ \text{opacity\_u8} = \text{clip}(\sigma(\text{raw\_opacity}) \cdot 255.0, 0, 255).astype(\text{uint8}) $$
+7. **Extract SH Coefficients:**
+   - DC term: Extract from `f_dc_0..2`.
+   - Higher order terms: Extract from `f_rest_` properties. Interleave R, G, B columns for each coefficient index $ci$ from $0$ to $nrc\_to\_use - 1$.
+   - Concatenate to `sh_all` of shape $(n, 3(1 + nrc\_to\_use))$.
+8. **Build and Publish:** Iterate $i$ from $0$ to $n-1$. Create `Splat` messages with pose, covariance, opacity, and SH data. Assemble into `SplatArray`. Publish to `/gaussian_splats` with QoS: depth=1, durability=TRANSIENT_LOCAL, reliability=RELIABLE.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+import math
+
+def quaternion_to_rotation_matrix(q):
+    """Convert quaternion [w, x, y, z] to 3x3 rotation matrix."""
+    w, x, y, z = q
+    return np.array([
+        [1 - 2*(y**2 + z**2), 2*(x*y - w*z), 2*(x*z + w*y)],
+        [2*(x*y + w*z), 1 - 2*(x**2 + z**2), 2*(y*z - w*x)],
+        [2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x**2 + y**2)]
+    ])
+
+def load_and_publish(ply_path, sh_degree=3, stamp=None, frame_id='map'):
+    # 1. Load PLY
+    # Assume ply_data is a structured array or dict of arrays loaded from ply_path
+    # If file not found, raise FileNotFoundError [S1, unofficial]
+    
+    # 2. Determine SH Degree
+    # Count properties starting with 'f_rest_'
+    nrc = count_f_rest_properties(ply_data)
+    if nrc >= 15:
+        file_degree = 3
+    elif nrc >= 8:
+        file_degree = 2
+    elif nrc >= 3:
+        file_degree = 1
+    else:
+        file_degree = 0
+        
+    actual_degree = min(sh_degree, file_degree)
+    nrc_to_use = (actual_degree + 1)**2 - 1
+    
+    # 3. Extract Position
+    positions = ply_data['x'].astype(np.float64), ply_data['y'].astype(np.float64), ply_data['z'].astype(np.float64)
+    n = len(positions[0])
+    
+    # 4. Extract and Normalize Rotation
+    quats = np.column_stack([ply_data['rot_0'], ply_data['rot_1'], ply_data['rot_2'], ply_data['rot_3']])
+    norms = np.linalg.norm(quats, axis=1, keepdims=True)
+    # Guard: if norm <= 1e-6, handle appropriately (e.g., identity or skip) [G]
+    valid_norms = np.maximum(norms, 1e-6)
+    quats_normalized = quats / valid_norms
+    
+    # 5. Compute Covariance
+    scales = np.column_stack([ply_data['scale_0'], ply_data['scale_1'], ply_data['scale_2']])
+    s2 = scales**2
+    
+    cov36 = np.zeros((n, 36))
+    for i in range(n):
+        R = quaternion_to_rotation_matrix(quats_normalized[i])
+        A = R * s2[i, np.newaxis, :]
+        cov3 = A @ R.T
+        # Flatten cov3 (3x3) to 36 elements (6x6 symmetric? No, source says iterate r,c 0..2 and set cov36[:, r*6+c])
+        # Note: Source formula implies a specific flattening order. 
+        # "cov36[:, r*6+c] = cov3[:, r, c]" suggests filling a 6x6 matrix row by row? 
+        # Actually, cov3 is (n, 3, 3). The loop iterates r, c in 0..2.
+        # r*6+c maps (0,0)->0, (0,1)->1... (0,2)->2, (1,0)->6...
+        # This creates a sparse mapping if cov36 is 36 wide. 
+        # Standard Gaussian Splatting covariance is 3x3. The source likely intends a 6x6 representation 
+        # or a specific ROS message layout. We follow the source instruction exactly.
+        for r in range(3):
+            for c in range(3):
+                cov36[i, r*6+c] = cov3[i, r, c]
+                
+    # 6. Convert Opacity
+    raw_opacity = ply_data['opacity']
+    sigmoid_opacity = 1.0 / (1.0 + np.exp(-raw_opacity))
+    opacity_u8 = np.clip(sigmoid_opacity * 255.0, 0, 255).astype(np.uint8)
+    
+    # 7. Extract SH Coefficients
+    # DC term from f_dc_0..2
+    dc_coeffs = np.column_stack([ply_data['f_dc_0'], ply_data['f_dc_1'], ply_data['f_dc_2']])
+    
+    # Higher order from f_rest_
+    # Interleave R, G, B columns for each ci
+    sh_rest = []
+    for ci in range(nrc_to_use):
+        r_col = ply_data[f'f_rest_{ci}_0']
+        g_col = ply_data[f'f_rest_{ci}_1']
+        b_col = ply_data[f'f_rest_{ci}_2']
+        sh_rest.append(np.column_stack([r_col, g_col, b_col]))
+        
+    if sh_rest:
+        rest_coeffs = np.concatenate(sh_rest, axis=1)
+        sh_all = np.concatenate([dc_coeffs, rest_coeffs], axis=1)
+    else:
+        sh_all = dc_coeffs
+        
+    # 8. Build Message
+    splat_array = SplatArray()
+    for i in range(n):
+        splat = Splat()
+        splat.pose.header.stamp = stamp
+        splat.pose.header.frame_id = frame_id
+        splat.pose.pose.position.x = positions[0][i]
+        splat.pose.pose.position.y = positions[1][i]
+        splat.pose.pose.position.z = positions[2][i]
+        splat.pose.pose.orientation.w = quats_normalized[i, 0]
+        splat.pose.pose.orientation.x = quats_normalized[i, 1]
+        splat.pose.pose.orientation.y = quats_normalized[i, 2]
+        splat.pose.pose.orientation.z = quats_normalized[i, 3]
+        # Fill covariance matrix in pose.covariance (row-major 3x3)
+        # ROS covariance is 1D array of 36 elements.
+        # We populated cov36[i, r*6+c]. This matches ROS covariance layout if we interpret 
+        # the index r*6+c as the linear index in the 36-element array.
+        splat.pose.covariance = cov36[i].tolist()
+        
+        splat.opacity = opacity_u8[i]
+        splat.harmonics_deg = actual_degree
+        splat.spherical_harmonics = sh_all[i].tolist()
+        splat_array.splats.append(splat)
+        
+    # Publish to /gaussian_splats with QoS: depth=1, durability=TRANSIENT_LOCAL, reliability=RELIABLE
+    publish(splat_array, topic='/gaussian_splats')
+```
+
+### Parameters
+- `ply_path`: File path to the PLY file. Default is 'splats/only_bonsai.ply' within the package share directory if not provided [S1, unofficial].
+- `sh_degree`: The spherical harmonics degree, clamped between 0 and 3. Default is 3 [S1, unofficial].
+
+### Pitfalls
+- If the PLY file is not found, the publisher raises a `FileNotFoundError` [S1, unofficial].
+- If a color key (e.g., `g_key`, `b_key`) is not in the property names, it defaults to zeros instead of raising an error [S1, unofficial].
+- Precision issues may arise if quaternion norms are very small; a guard of $10^{-6}$ is used [S1, unofficial].
+
+## Subtopics
+
+### Gaussian Splat PLY Loader
+- **What it is:** The component responsible for reading the raw PLY file structure.
+- **Difference:** Handles file I/O and basic parsing, whereas Publishing handles ROS message construction.
+- **When to choose:** Use when you need to decouple file loading from ROS communication.
+- **Link:** [Gaussian Splat PLY Loader](3254-gaussian-splat-ply-loader.md)
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of splats $n$ for loading, covariance computation, and message construction.
+- **Memory Complexity:** Linear with respect to $n$. The covariance matrix flattening creates an $(n, 36)$ array.
+- **Performance:** Depends on the size of the PLY file and the efficiency of the numpy operations. Publishing is asynchronous via ROS 2.
+- **Strengths:** Standardized ROS message format allows integration with existing RViz plugins and other ROS nodes.
+- **Limitations:** Requires ROS 2 environment. The covariance flattening logic is specific to the ROS message layout and may not be directly portable to other formats without modification.
+- **When to use:** When visualizing 3D Gaussian Splatting results in ROS-based robotics or simulation environments.
+- **When not:** When not using ROS 2 or when real-time performance is critical and the overhead of ROS message serialization is unacceptable.
+
+## Background
+PLY Splat Publishing is part of the `gsplat_rviz_plugin` ecosystem, specifically the `splat-ros` project. It enables the visualization of 3D Gaussian Splatting outputs in RViz, a popular 3D visualization tool for ROS. The method was developed to bridge the gap between offline Gaussian Splatting training outputs (PLY files) and real-time ROS-based visualization pipelines.
+
+## Sources
+[S1] splat-ros/RVizSplat, https://github.com/splat-ros/RVizSplat, fetched 2026-10-27 (unofficial)

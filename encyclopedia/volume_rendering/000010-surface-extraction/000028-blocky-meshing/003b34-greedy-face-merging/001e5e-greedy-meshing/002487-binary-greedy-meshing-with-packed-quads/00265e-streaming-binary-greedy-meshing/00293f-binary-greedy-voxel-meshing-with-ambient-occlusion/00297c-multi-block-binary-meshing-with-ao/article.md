@@ -1,30 +1,33 @@
 # Multi-Block Binary Meshing with AO
+
+
 ## Overview
-Multi-Block Binary Meshing with AO generates mesh vertices for a specific face direction within a voxel chunk by iterating over all block types and axes, packing ambient occlusion (AO) values into a vertex index (`p_index`) [S1, unofficial]. It builds on [Binary Greedy Voxel Meshing with Ambient Occlusion](4465-binary-greedy-voxel-meshing-with-ambient-occlusion.md) [G]. Unlike its sibling [Binary Greedy Voxel Meshing without Ambient Occlusion](4536-binary-greedy-voxel-meshing-without-ambient-occlusion.md), which treats all non-air blocks as opaque and outputs vertices with `ao=0`, this method preserves per-vertex AO values derived from surrounding voxel solidity [S1, unofficial].
+Multi-Block Binary Meshing with AO generates mesh vertices for a specific face direction by iterating over all block types and axes, handling ambient occlusion (AO) by packing it into the `p_index` [S1, unofficial]. It builds on [Binary Greedy Voxel Meshing with Ambient Occlusion](4465-binary-greedy-voxel-meshing-with-ambient-occlusion.md) by extending the meshing logic to support multiple block types within the same binary greedy framework, where each block type is processed separately but shares the same underlying binary plane representation [S1, unofficial]. It differs from [Greedy Quad Vertex Generation with AO and Anisotropy](4535-greedy-quad-vertex-generation-with-ao-and-anisotropy.md) by using a binary greedy approach for quad generation rather than a direct vertex generation approach [S1, unofficial].
+
 ## How it works
 **Inputs:**
-- `lod`: Voxel chunk data structure containing binary voxel states.
-- `face_dir`: Direction of the face being extracted.
-- `MESHABLE_BLOCK_TYPES`: List of block types requiring meshing.
+- `lod`: The voxel data structure containing the binary representation of the world.
+- `face_dir`: The direction of the face being meshed (e.g., +X, -Y).
+- `MESHABLE_BLOCK_TYPES`: A list of block types that should be meshed.
 
 **Outputs:**
-- `vertices`: Vector of mesh vertices containing position, AO value, and block type.
+- `vertices`: A vector of mesh vertices.
 
 **Data Structures:**
-- `p_index`: 32-bit integer packing vertex metadata. Lower 9 bits store `ao` (`p_index & 0b111111111`), and bits 9 and above store `block_type` (`p_index >> 9`) [S1, unofficial].
-- `x_data`: HashMap or array mapping `p_index` to a `[u32; 32]` array representing the binary plane data for that specific block type and AO combination. If a `p_index` is not present, it is initialized with `[0u32; 32]` [S1, unofficial].
+- `x_data`: A HashMap or array mapping `p_index` to `[u32; 32]`. The `p_index` encodes both the block type and the AO value. The array `[u32; 32]` represents the binary data for a specific slice of the voxel grid for that `p_index`.
+- `GreedyQuad`: A structure representing a merged quad, containing position and size information.
 
 **Steps:**
 1. Initialize an empty `vertices` vector.
-2. Iterate over each axis from 0 to `size` (dimension of the chunk) [S1, unofficial].
-3. Iterate over each `block_type` in `MESHABLE_BLOCK_TYPES` [S1, unofficial].
-4. For each axis and block type, initialize `x_data` as a HashMap mapping `p_index` to `[u32; 32]` [S1, unofficial].
+2. Iterate over each axis from 0 to `size` (the dimension of the voxel grid).
+3. Iterate over each `block_type` in `MESHABLE_BLOCK_TYPES`.
+4. Initialize `x_data` as a HashMap or array mapping `p_index` to `[u32; 32]`. If `p_index` is not present, insert `[0u32; 32]`.
 5. For each `p_index` and `data` in `x_data`:
-   a. Extract `ao` from `p_index` using bitwise AND: `ao = p_index & 0b111111111` [S1, unofficial].
-   b. Extract `block_type` from `p_index` using bitwise shift: `block_type = p_index >> 9` [S1, unofficial].
-   c. Call `greedy_mesh_binary_plane(data, lod.size())` to get a list of `GreedyQuad` objects [S1, unofficial].
-   d. For each `quad` in the result:
-      i. Call `append_vertices(vertices, face_dir, axis, lod, ao, block_type)` to generate and add the mesh vertices [S1, unofficial].
+   a. Extract `ao` from `p_index` using `p_index & 0b111111111`.
+   b. Extract `block_type` from `p_index` using `p_index >> 9`.
+   c. Call `greedy_mesh_binary_plane(data, lod.size())` to get a list of `GreedyQuad` objects.
+   d. For each `quad` in the list:
+      i. Call `append_vertices(vertices, face_dir, axis, lod, ao, block_type)` to add the vertices for the quad to the `vertices` vector.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -32,82 +35,113 @@ Multi-Block Binary Meshing with AO generates mesh vertices for a specific face d
 ```python
 def multi_block_binary_meshing_with_ao(lod, face_dir, meshable_block_types):
     vertices = []
-    lod_size = lod.size()
-    for axis in range(3):
+    size = lod.size()
+    
+    for axis in range(size):
         for block_type in meshable_block_types:
             x_data = {}
-            # x_data is populated from voxel traversal; source iterates over its items
-            for p_index, data in x_data.items():
+            
+            # Iterate over all possible p_indices for this block type and axis
+            # Note: The exact iteration over p_indices is not fully specified in the source.
+            # It is implied that p_indices are generated based on the voxel data and AO calculations.
+            # [G] Assuming p_indices are derived from the voxel data and AO values.
+            for p_index in generate_p_indices(lod, axis, block_type):
+                if p_index not in x_data:
+                    x_data[p_index] = [0] * 32
+                
+                # Extract ao and block_type from p_index
                 ao = p_index & 0b111111111
-                current_block_type = p_index >> 9
-                quads = greedy_mesh_binary_plane(data, lod_size)
+                extracted_block_type = p_index >> 9
+                
+                # Get the binary data for this p_index
+                data = x_data[p_index]
+                
+                # Generate quads using the binary greedy meshing algorithm
+                quads = greedy_mesh_binary_plane(data, size)
+                
+                # Append vertices for each quad
                 for quad in quads:
-                    append_vertices(vertices, face_dir, axis, lod, ao, current_block_type)
+                    append_vertices(vertices, face_dir, axis, lod, ao, extracted_block_type)
+                    
     return vertices
 
 def greedy_mesh_binary_plane(data, lod_size):
-    quads = []
+    greedy_quads = []
     for row in range(len(data)):
         y = 0
         while y < lod_size:
-            shifted = data[row] >> y
-            if shifted == 0:
-                y = lod_size
-                break
-            tz = (shifted & -shifted).bit_length() - 1
-            y += tz
+            # Find first solid voxel
+            trailing_zeros = (data[row] >> y).trailing_zeros()
+            y += trailing_zeros
             if y >= lod_size:
-                break
-            ones = shifted >> tz
-            h = 0
-            while ones & (1 << h):
-                h += 1
-            quads.append((row, y, h))
+                continue
+            
+            # Find height of solid run
+            h = (data[row] >> y).trailing_ones()
+            
+            # Convert height to mask
+            h_as_mask = u32::checked_shl(1, h) - 1 # [G] Assuming this is the intended mask generation
+            
+            # Create quad and add to list
+            quad = GreedyQuad(row, y, h)
+            greedy_quads.append(quad)
+            
+            # Move y past the solid run
             y += h
-    return quads
+            
+    return greedy_quads
 
 def append_vertices(vertices, face_dir, axis, lod, ao, block_type):
-    # Generate 4 corner vertices for the quad in the current plane [G]
-    v0, v1, v2, v3, v4 = generate_quad_vertices(axis, lod)
-    v1ao, v3ao = ao, ao
+    # Generate vertex positions and attributes for the quad
+    # The exact implementation of vertex generation is not fully specified in the source.
+    # [G] Assuming standard vertex generation based on quad position and size.
+    v1, v2, v3, v4 = generate_quad_vertices(face_dir, axis, lod, ao, block_type)
+    
     new_vertices = [v1, v2, v3, v4]
+    
+    # Adjust vertex order based on face direction
     if face_dir.reverse_order():
         new_vertices = [new_vertices[0]] + new_vertices[1:][::-1]
-    if (v1ao > 0) ^ (v3ao > 0):
-        new_vertices = new_vertices[1:] + [new_vertices[0]]
+        
+    # Anisotropy flip
+    if (v1.ao > 0) ^ (v3.ao > 0):
+        new_vertices = [new_vertices[-1]] + new_vertices[:-1]
+        
     vertices.extend(new_vertices)
-
-def generate_quad_vertices(axis, lod):
-    # Returns 4 corner vertices for the current quad based on axis and lod dimensions [G]
-    return [(0,0,0), (1,0,0), (1,1,0), (0,1,0), (0,0,0)]
 ```
 
 **Parameters:**
-- `lod.size()`: The dimension of the voxel chunk (e.g., 16, 32) [S1, unofficial].
-- `MESHABLE_BLOCK_TYPES`: List of block types to process [S1, unofficial].
+- `lod_size`: The size of the LOD (Level of Detail) grid. Typical value: Not given in the sources.
+- `MESHABLE_BLOCK_TYPES`: A list of block types to mesh. Typical value: Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-- **Boundaries:** The loop `y += (data[row] >> y).trailing_zeros()` must handle cases where `data[row]` is 0 to avoid infinite loops or undefined behavior [S1, unofficial].
-- **Degenerate Input:** Empty chunks or chunks with no meshable blocks should return an empty vertex list [G].
-- **Precision:** AO values are packed into 9 bits. Ensure AO calculations fit within this range [S1, unofficial].
+- Precision: The AO value is packed into the lower 9 bits of `p_index`. Ensure that AO values do not exceed 511.
+- Boundaries: Ensure that the iteration over axes and block types covers all necessary data.
+- Degenerate Input: Handle cases where `lod_size` is 0 or `MESHABLE_BLOCK_TYPES` is empty.
+
 ## Subtopics
 
 ### [Binary Greedy Voxel Meshing without Ambient Occlusion](4536-binary-greedy-voxel-meshing-without-ambient-occlusion.md)
-This method generates mesh vertices for a specific face direction in a voxel chunk without computing ambient occlusion (AO) values. It iterates over all block types and axes, using a fixed-size array for spatial data to drive the greedy meshing process. Unlike its sibling [Binary Greedy Voxel Meshing with Ambient Occlusion](4536-binary-greedy-voxel-meshing-with-ambient-occlusion.md), which packs AO data into the vertex index, this variant treats all non-air blocks as opaque for culling purposes and outputs vertices with `ao=0` and `block_type=0`. It serves as the foundational geometry generation step before AO or transparency extensions are applied.
+This method generates mesh vertices for a face direction without ambient occlusion, iterating over block types and axes, using a fixed array for `x_data`. It outputs vertices with `ao=0` and `block_type=0`. It is chosen when AO is not required, simplifying the vertex data and potentially improving performance.
+
+### [Greedy Lighting (AO Reconstruction)](10571-greedy-lighting-ao-reconstruction.md)
+Greedy Lighting is a post-merge lighting computation method that reconstructs per-vertex ambient occlusion (AO) and light map values for large merged quads. It solves the problem of lighting artifacts that arise when multiple small blocks are merged into a single large face, ensuring that the lighting appearance remains correct by sampling neighboring block states. It differs from [Binary Greedy Voxel Meshing without Ambient Occlusion](4536-binary-greedy-voxel-meshing-without-ambient-occlusion.md) by explicitly calculating and blending AO values for each vertex of the merged quad based on the surrounding environment.
 
 ### Minecraft-style Voxel Meshing with AO and Flip
-This variant calculates AO values for the four corners of each face using `get_ao` [S2, unofficial]. It determines a `flip_id` boolean: `flip_id = ao[1] + ao[3] > ao[0] + ao[2]` [S2, unofficial]. Vertex data for the four corners is packed into `v0, v1, v2, v3` using `pack_data`, which includes world coordinates, `voxel_id`, a face identifier (e.g., 4 for top, 5 for front), AO value, and `flip_id` [S2, unofficial]. If `flip_id` is true, vertices are added to the index buffer in the order `v3, v1, v0, v3, v2, v1`; if false, they are added in the order `v0, v2, v1, v0, v3, v2` [S2, unofficial]. Vertex data is packed into a buffer via `add_data` [S2, unofficial].
+This variant calculates ambient occlusion (AO) values for the four corners of each voxel face using a `get_ao` function. It determines a `flip_id` boolean based on the AO values (`flip_id = ao[1] + ao[3] > ao[0] + ao[2]`). Vertex data for the four corners is packed into `v0, v1, v2, v3` using a `pack_data` function, which includes world coordinates, `voxel_id`, a face identifier, AO value, and `flip_id`. If `flip_id` is true, vertices are added to the index buffer in the order `v3, v1, v0, v3, v2, v1` (or `v3, v0, v1, v3, v1, v2` for the top face). If false, they are added in the order `v0, v2, v1, v0, v3, v2` (or `v0, v1, v2, v0, v2, v3` for the top face) [S2, unofficial]. The face identifier is an integer passed to `pack_data` to distinguish faces (e.g., 4 for top, 5 for front) [S2, unofficial]. The vertex data is packed into a buffer via `add_data`, with the specific layout defined by `pack_data` (implied to contain position, voxel_id, face_id, ao, flip_id) [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Linear with respect to the number of voxels and block types [G].
-- **Memory Complexity:** Proportional to the number of unique `p_index` values, as each requires a `[u32; 32]` array in `x_data` [G].
-- **Performance:** Efficient for sparse voxel worlds due to binary plane representation and greedy meshing [G].
-- **Strengths:** Supports multiple block types, preserves AO information, and reduces overdraw via flip optimization [G].
-- **Limitations:** Complex packing of AO and block type into `p_index` may limit the range of AO values or block types [G].
-- **Measured Performance:** Not given in the sources.
-- **Scaling:** Not given in the sources.
+Time and memory complexity: Not given in the sources.
+Measured performance with its hardware, resolution and scene: Not given in the sources.
+Scaling: Not given in the sources.
+Strengths and limitations: Not given in the sources.
+When to use it and when not: Not given in the sources.
+
 ## Background
-Multi-Block Binary Meshing with AO is an extension of binary greedy meshing techniques used in voxel-based games [S1, unofficial]. It was developed to support multiple block types while maintaining the performance benefits of binary plane representation and AO [S1, unofficial]. The method is commonly used in voxel engines that require detailed surface rendering with ambient occlusion [S1, unofficial].
+Origin (who, when, which paper): Not given in the sources.
+History and development: Not given in the sources.
+Where it is used: Not given in the sources.
+
 ## Sources
 [S1] Binary Greedy Voxel Meshing Algorithm, https://github.com/TanTanDev/binary_greedy_mesher_demo, fetched 2026-10-26 (unofficial)
 [S2] StanislavPetrovV/Minecraft, https://github.com/StanislavPetrovV/Minecraft, fetched 2026-10-26 (unofficial)

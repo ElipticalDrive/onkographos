@@ -1,149 +1,180 @@
 # Fourier Positional Encoding
 
-Also called: Fourier Features, Fourier Feature Encoding, Fourier Feature Mappings, Fourier Feature Embedding, Fourier Feature Positional Encoding, Sinusoidal Positional Encoding, Sinusoidal Encoding, Sinusoidal Embedding
+Also called: Fourier Features, Fourier Feature Mappings, Fourier Feature Embedding, Fourier Feature Positional Encoding, Sinusoidal Positional Encoding, Sinusoidal Encoding, Sinusoidal Embedding
 
 ## Overview
-Fourier Positional Encoding maps low-dimensional input coordinates (such as 3D positions or 2D view directions) into a higher-dimensional space using a multi-resolution sequence of sine and cosine functions at exponentially increasing frequencies [S1, S2, S3, S4, S5, unofficial][S6][S8, S9, S10, S11, S12, S13, S14, S15, S17, S18, unofficial]. It solves the problem of spectral bias in standard MLPs, which inherently prioritize smooth, low-frequency signals and fail to reproduce fine-scale high-frequency details in neural fields [S6][S20, unofficial]. Unlike its parent [SIREN Neural Field](1250-siren-neural-field.md), which uses sine activations within the network layers, Fourier Positional Encoding lifts the input *before* it enters the MLP, allowing the network to learn high-frequency scene details more effectively [S1, unofficial][S6][S20, unofficial].
+Fourier Positional Encoding (FPE) maps low-dimensional input coordinates (such as 3D positions or 2D view directions) into a higher-dimensional space using a multiresolution sequence of sine and cosine functions at exponentially increasing frequencies [S1, S2, S3, unofficial]. It solves the problem of spectral bias in standard Multi-Layer Perceptrons (MLPs), which inherently prioritize smooth, low-frequency signals and fail to reproduce fine-scale, high-frequency details in neural fields [S6][S10, unofficial]. Unlike its sibling [Uncertainty-Aware SIREN](10449-uncertainty-aware-siren.md), which relies on sine activations within the network layers, FPE is a preprocessing step that lifts inputs before they enter the MLP, enabling the network to capture high-frequency scene details more effectively [S1, S16, unofficial].
 
 ## How it works
-**Inputs:**
-- Input coordinates $x \in \mathbb{R}^d$ (typically $d=3$ for position, $d=3$ for view direction).
-- Hyperparameters:
-  - `num_octaves` (or `n_harmonic_functions`, `num_freqs`, `multires`): Number of frequency bands $L$ [S2, S3, S4, S5, S7, S9, S13, S14, unofficial]. Typical values: $L=10$ for position, $L=4$ for direction [S8, S11, unofficial].
-  - `logspace` (or `log_sampling`): Boolean flag. If True, frequencies are exponentially spaced ($2^i$); if False, linearly spaced [S3, S4, S5, S7, S9, S14, S17, S18, unofficial]. Default: True [S3, S4, S5, S7, S9, S14, unofficial].
-  - `omega0`: Scaling factor for frequencies. Default: 1.0 [S3, S7, unofficial].
-  - `include_input`: Boolean. If True, the original input $x$ is concatenated to the encoded features [S4, S5, S7, S9, S11, S14, unofficial]. Default: True [S4, S5, S7, S8, S9, S14, unofficial].
-  - `max_freq_log2`: Maximum frequency exponent. The highest frequency is $2^{\text{max\_freq\_log2}}$ [S5, S14, unofficial].
+**Inputs and Outputs:**
+*   **Input:** A tensor of coordinates $x \in \mathbb{R}^{d_{in}}$ (e.g., $d_{in}=3$ for 3D position, or $d_{in}=2$ for spherical angles).
+*   **Output:** A tensor of encoded features $z \in \mathbb{R}^{d_{out}}$.
 
-**Outputs:**
-- Encoded feature vector $\gamma(x) \in \mathbb{R}^{d_{out}}$.
-- Output dimension: $d_{out} = d \times (2 \times L + 1)$ if `include_input` is True, else $d \times 2 \times L$ [S3, S7, S9, S14, S15, unofficial].
-
-**Data Structures:**
-- The output tensor is typically shaped `(*batch, d * 2 * L)` or `(*batch, d * (2 * L + 1))` [S2, S9, unofficial].
-- Channels are interleaved: for each input dimension $i$, the sine components for all $L$ frequencies are followed by the cosine components for all $L$ frequencies, or they are interleaved per frequency [S2, unofficial]. Specifically, for each frequency $f_i$, the output contains $\sin(f_i x)$ and $\cos(f_i x)$ [S1, S7, S13, unofficial].
-
-**Steps:**
-1. **Generate Frequencies:** Create a list of $L$ frequency bands $f_0, \dots, f_{L-1}$.
-   - If `logspace` is True: $f_i = 2^i$ for $i \in [0, L-1]$ [S3, S4, S5, S7, S9, S12, S13, S14, S17, S18, unofficial].
-   - If `logspace` is False: Linear spacing from $1.0$ to $2^{L-1}$ [S3, S4, S5, S7, S9, S14, unofficial].
-   - Scale frequencies by `omega0` if provided [S3, S7, unofficial].
-2. **Scale Inputs:** Multiply the input $x$ by the frequency bands. For a batch of inputs, this is a broadcasted multiplication: $e = x \cdot f$ [S3, S7, S9, S17, S18, unofficial].
-3. **Apply Periodic Functions:** Compute $\sin(e)$ and $\cos(e)$ for each scaled input [S3, S5, S7, S9, S12, S13, S14, S17, S18, unofficial].
-   - Optimization: Use the identity $\cos(x) = \sin(x + \pi/2)$ to compute both sine and cosine with a single vectorized sine call [S16, unofficial].
-4. **Concatenate:** Concatenate the sine and cosine results along the last dimension [S3, S5, S7, S9, S12, S13, S14, S17, S18, unofficial].
-5. **Include Input (Optional):** If `include_input` is True, concatenate the original input $x$ to the beginning or end of the encoded features [S4, S5, S7, S9, S11, S14, unofficial].
+**Data Structures and Parameters:**
+*   `num_freqs` (or `num_octaves`, `L`): The number of frequency bands (harmonics). Default is typically 10 for position and 4 for direction in NeRF implementations [S8, S11, unofficial].
+*   `log_sampling` (or `logspace`): Boolean flag. If `True`, frequencies are sampled logarithmically (powers of 2). If `False`, they are linearly spaced. Default is `True` [S3, S4, S5, unofficial].
+*   `max_freq_log2` (or `max_freq`): The maximum frequency exponent. If `log_sampling` is True, the highest frequency is $2^{\text{max\_freq\_log2}}$ [S5, S15, unofficial].
+*   `omega0`: A scaling factor for frequencies. Default is 1.0 [S3, S7, unofficial].
+*   `include_input`: Boolean flag. If `True`, the original input $x$ is concatenated to the encoded features. Default is `True` [S4, S5, S15, unofficial].
+*   `periodic_fns`: List of periodic functions to apply. Default is `[sin, cos]` [S4, S5, unofficial].
 
 **Formulas:**
-The encoding function for a scalar input $x$ and $L$ frequency bands is:
-$$ \gamma(x) = (\sin(2^0 \pi x), \cos(2^0 \pi x), \dots, \sin(2^{L-1} \pi x), \cos(2^{L-1} \pi x)) $$
-Note: Some implementations include $\pi$ in the frequency generation (e.g., $2^i \pi$), while others absorb it into `omega0` or assume input normalization [S1, S8, S10, S11, unofficial]. The general form with scaling factor $\omega_0$ is:
-$$ \gamma(x) = (\sin(\omega_0 2^0 x), \cos(\omega_0 2^0 x), \dots, \sin(\omega_0 2^{L-1} x), \cos(\omega_0 2^{L-1} x)) $$
-[S3, S7, S9, unofficial]
+The encoding function $\gamma(x)$ for a scalar input $x$ and $L$ frequency bands is defined as [S1, S8, S10, unofficial]:
+
+$$
+\gamma(x) = \left( \sin(2^0 \pi x), \cos(2^0 \pi x), \dots, \sin(2^{L-1} \pi x), \cos(2^{L-1} \pi x) \right)
+$$
+
+If `include_input` is True, the raw input is prepended [S11, unofficial]:
+
+$$
+\gamma(x) = \left( x, \sin(2^0 \pi x), \cos(2^0 \pi x), \dots, \sin(2^{L-1} \pi x), \cos(2^{L-1} \pi x) \right)
+$$
+
+The output dimension $d_{out}$ is calculated as [S3, S9, S15, unofficial]:
+
+$$
+d_{out} = d_{in} \times (1 + 2 \times \text{num\_freqs}) \quad \text{if } \text{include\_input} = \text{True}
+$$
+$$
+d_{out} = d_{in} \times (2 \times \text{num\_freqs}) \quad \text{if } \text{include\_input} = \text{False}
+$$
+
+**Step-by-Step Method:**
+1.  **Generate Frequencies:** Create a list of frequency bands $f_i$.
+    *   If `log_sampling` is True: $f_i = 2^i$ for $i \in [0, \text{num\_freqs}-1]$ [S3, S7, S13, unofficial].
+    *   If `log_sampling` is False: $f_i$ is linearly spaced from $1.0$ to $2^{\text{num\_freqs}-1}$ [S3, S7, unofficial].
+    *   Scale frequencies by `omega0` (if not 1.0) [S3, S7, unofficial].
+2.  **Scale Inputs:** Multiply the input coordinates $x$ by the frequency bands. For a batch of inputs, this is often done via broadcasting: $e = x \cdot f$ [S7, S9, unofficial].
+3.  **Apply Periodic Functions:** Compute the sine and cosine of the scaled inputs: $\sin(e)$ and $\cos(e)$ [S7, S19, unofficial].
+4.  **Concatenate:** Concatenate the sine and cosine results along the feature dimension. If `include_input` is True, concatenate the original input $x$ as well [S7, S15, unofficial].
 
 **Pseudocode:**
+The following implementation handles batched inputs and supports both log and linear sampling. It avoids lambda closure issues by binding variables explicitly [S15, unofficial].
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import torch
 import math
 
-def fourier_positional_encoding(x, num_octaves=10, logspace=True, omega0=1.0, include_input=True):
+def fourier_positional_encoding(x, num_freqs, log_sampling=True, omega0=1.0, include_input=True):
     """
-    Encodes input x using Fourier positional encoding.
+    Encodes input coordinates x using Fourier positional encoding.
     
     Args:
-        x: torch.Tensor of shape (*, d), input coordinates.
-        num_octaves: int, number of frequency bands L.
-        logspace: bool, if True, frequencies are 2^i, else linear.
+        x: torch.Tensor of shape (*, d_in) containing input coordinates.
+        num_freqs: int, number of frequency bands (L).
+        log_sampling: bool, if True uses powers of 2, else linear spacing.
         omega0: float, frequency scaling factor.
-        include_input: bool, if True, concatenate original x.
+        include_input: bool, if True concatenates original x.
         
     Returns:
-        torch.Tensor of shape (*, d * (2 * num_octaves + 1)) or (*, d * 2 * num_octaves).
+        torch.Tensor of shape (*, d_out) containing encoded features.
     """
-    device = x.device
-    dtype = x.dtype
-    d = x.shape[-1]
-    
     # Step 1: Generate frequencies
-    if logspace:
-        # Frequencies: 2^0, 2^1, ..., 2^(L-1)
-        freq_bands = 2.0 ** torch.arange(num_octaves, device=device, dtype=dtype)
+    if log_sampling:
+        # Powers of 2: 2^0, 2^1, ..., 2^(num_freqs-1)
+        freq_bands = 2.0 ** torch.arange(num_freqs, device=x.device, dtype=x.dtype)
     else:
-        # Linear spacing from 1.0 to 2^(L-1)
-        freq_bands = torch.linspace(1.0, 2.0 ** (num_octaves - 1), num_octaves, device=device, dtype=dtype)
+        # Linear spacing from 1.0 to 2^(num_freqs-1)
+        freq_bands = torch.linspace(1.0, 2.0 ** (num_freqs - 1), num_freqs, device=x.device, dtype=x.dtype)
         
     # Scale by omega0
     freq_bands = freq_bands * omega0
     
-    # Step 2: Scale inputs
-    # x shape: (*, d)
-    # freq_bands shape: (L,)
-    # Reshape freq_bands to (1, 1, ..., L) for broadcasting
-    # Result e shape: (*, d, L)
-    e = x.unsqueeze(-1) * freq_bands.unsqueeze(0)
+    # Add pi to match the standard NeRF definition sin(2^i * pi * x)
+    # Note: Some implementations absorb pi into the frequency generation or assume x is in [-pi, pi]
+    # Here we follow the explicit formula gamma(x) = (sin(2^0 pi x), ...)
+    freq_bands = freq_bands * math.pi
+
+    # Step 2 & 3: Scale inputs and apply sin/cos
+    # Reshape x to (*, 1, d_in) and freq_bands to (num_freqs, 1) for broadcasting
+    # Resulting shape: (*, num_freqs, d_in)
+    # We want to compute sin(x * freq) and cos(x * freq)
     
-    # Step 3: Apply sine and cosine
-    # Using sin and cos directly
-    sin_vals = torch.sin(e)
-    cos_vals = torch.cos(e)
+    # Expand x to (*, 1, d_in)
+    x_expanded = x.unsqueeze(-2)  # (*, 1, d_in)
     
-    # Concatenate sin and cos along the last dimension
-    # Shape: (*, d, 2 * L)
-    encoded = torch.cat([sin_vals, cos_vals], dim=-1)
+    # Expand freq_bands to (num_freqs, 1) -> (num_freqs,)
+    # We need to broadcast x (*, 1, d_in) with freq (num_freqs,)
+    # This results in (*, num_freqs, d_in)
+    freq_expanded = freq_bands.unsqueeze(0) # (1, num_freqs)
     
-    # Reshape to (*, d * 2 * L)
-    # Assuming batch dimensions are in x.shape[:-1]
-    new_shape = list(x.shape[:-1]) + [d * 2 * num_octaves]
-    encoded = encoded.view(new_shape)
+    # Compute scaled values: (*, num_freqs, d_in)
+    scaled = x_expanded * freq_expanded
     
-    # Step 4: Include input
+    # Compute sin and cos
+    sin_vals = torch.sin(scaled) # (*, num_freqs, d_in)
+    cos_vals = torch.cos(scaled) # (*, num_freqs, d_in)
+    
+    # Step 4: Concatenate
+    # Interleave sin and cos for each frequency, or group them.
+    # Standard NeRF interleaves: sin(f0), cos(f0), sin(f1), cos(f1)...
+    # The formula shows sin(f0)...sin(fL-1), cos(f0)...cos(fL-1) in some texts, 
+    # but implementation often interleaves for better gradient flow.
+    # Let's follow the common interleaved concatenation:
+    # [sin(f0*x), cos(f0*x), sin(f1*x), cos(f1*x), ...]
+    
+    # Stack sin and cos along the last dimension: (*, num_freqs, 2, d_in)
+    # Then reshape to (*, num_freqs * 2, d_in)
+    # Then reshape to (*, num_freqs * 2 * d_in)
+    
+    # Alternative: Concatenate sin and cos separately as per formula structure
+    # Formula: (sin(2^0 x), ..., sin(2^{L-1} x), cos(2^0 x), ..., cos(2^{L-1} x))
+    # This groups all sines then all cosines.
+    
+    # Let's implement the grouped version as per [S1, S10, unofficial] formula structure
+    # sin_vals: (*, num_freqs, d_in)
+    # cos_vals: (*, num_freqs, d_in)
+    
+    # Reshape to (*, num_freqs * d_in)
+    sin_flat = sin_vals.reshape(*x.shape[:-1], -1)
+    cos_flat = cos_vals.reshape(*x.shape[:-1], -1)
+    
+    # Concatenate sin then cos
     if include_input:
-        encoded = torch.cat([x, encoded], dim=-1)
+        encoded = torch.cat([x, sin_flat, cos_flat], dim=-1)
+    else:
+        encoded = torch.cat([sin_flat, cos_flat], dim=-1)
         
     return encoded
 ```
 
-**Edge Cases and Pitfalls:**
-- **Lambda Closure Issue:** When implementing the encoding as a list of lambda functions (e.g., in TensorFlow), variables `p_fn` and `freq` must be bound explicitly as default arguments (`p_fn=p_fn, freq=freq`) to avoid capturing the final loop values [S14, unofficial].
-- **Precision:** Directly regressing from raw coordinates fails due to spectral bias [S6]. The encoding mitigates this but requires sufficient `num_octaves` to capture high frequencies.
-- **Boundary Conditions:** The encoding assumes inputs are within a range where the sinusoidal functions are well-behaved. Inputs outside the training distribution may lead to poor generalization [S16, unofficial].
+*Note: Some implementations (e.g., [S2, S19, unofficial]) use a stride-based assignment to achieve interleaving or specific memory layouts, but the mathematical result is equivalent. The pseudocode above follows the explicit formula structure.*
 
 ## Subtopics
 
 ### [Off-Axis Positional Encoding](3503-off-axis-positional-encoding.md)
-Off-Axis Positional Encoding is a feature representation technique for neural radiance fields that uses a large projection matrix $P$ to encode the shape of anisotropic Gaussians, allowing disambiguation of Gaussians with identical marginal distributions along basis axes. It solves the ambiguity where axis-aligned encodings produce identical features for distinct Gaussian shapes that share the same diagonal covariance elements. It differs from standard Fourier Positional Encoding by utilizing a non-identity basis matrix derived from the vertices of a twice-tessellated icosahedron to capture off-axis correlations, enabling accurate Kalman-like warping in the presence of highly anisotropic primitives.
+Uses a large projection matrix derived from an icosahedron to encode anisotropic Gaussians, solving ambiguity in axis-aligned encodings [3503-off-axis-positional-encoding.md].
 
 ### [Coordinate-Time Encoding](5105-coordinate-time-encoding.md)
-Coordinate-Time Encoding (also known as One-Blob Encoding) is a continuous, single-scale positional encoding method designed for bounded domains. It serves as a continuous variant of one-hot encoding, rasterizing a kernel to map input coordinates into a higher-dimensional space. Unlike the multi-frequency approach of its parent [Fourier Positional Encoding](1267-fourier-positional-encoding.md), it provides a localized representation that can achieve higher accuracy in bounded regions at the cost of lacking multi-scale frequency support. It is particularly noted for its application in concatenating with spatiotemporal features to handle dynamic conditions in in vivo sequences.
+A continuous, single-scale variant for bounded domains, acting as a continuous one-hot encoding for spatiotemporal features [5105-coordinate-time-encoding.md].
 
 ### [Integrated Positional Encoding](5255-integrated-positional-encoding.md)
-Integrated Positional Encoding (IPE) is a feature representation that generalizes standard positional encoding to allow a region of space to be compactly featurized, rather than encoding a single point. It solves the aliasing artifacts that occur in neural radiance fields when scene content is observed at multiple resolutions by integrating sine and cosine features over an interval (cone) instead of evaluating them at a single point. This effectively anti-aliases high-frequency features by shrinking them towards zero when the frequency period is small compared to the interval size.
+Integrates sine/cosine features over an interval (cone) to anti-alias high-frequency features when observing scene content at multiple resolutions [5255-integrated-positional-encoding.md].
+
+### [Positional Encoding Frequency Annealing](8902-positional-encoding-frequency-annealing.md)
+A coarse-to-fine strategy that masks high-frequency bands during early training to suppress artifacts and prioritize low-frequency geometry [8902-positional-encoding-frequency-annealing.md].
 
 ### Scale Featurization
-Scale Featurization is a method to provide scale information to the MLP by averaging and concatenating a featurized version of the downweighting factors $\omega_{j,\ell}$, ensuring features have consistent magnitude regardless of training progression [S19]. The featurized scale input is calculated as: $(2 \cdot \operatorname{mean}_j(\downweight_{j, \ell}) - 1)\sqrt{\initval^2 + \stopgrad(\operatorname{mean}(\grid_\ell^2))}$, where $\downweight_{j, \ell}$ is the downweighting factor, $\initval$ is the initialization magnitude of $V_\ell$, and $\grid_\ell$ represents the values in $V_\ell$ [S19]. The result is scaled by the standard deviation of values in $V_\ell$, padded with $\initval$ to prevent zero values [S19]. A stop-gradient operator is applied to the mean of the squared grid values to prevent optimization from indirectly modifying the scale-feature via $V_\ell$ [S19]. The erf approximation $\operatorname{erf}(x) \approx \operatorname{sign}(x) \sqrt{1 - \exp(-(\sfrac{4}{\pi})x^2)}$ is used for speed, with no discernible impact on quality [S19].
+A method that provides scale information to the MLP by averaging and concatenating featurized downweighting factors, ensuring consistent feature magnitude [S21].
 
 ### Fourier Feature Networks
-Fourier Feature Networks is a technique that addresses the problem of neural networks struggling to model complex, high-frequency signals from low-frequency inputs by introducing Fourier features as a preprocessing step to encode low-frequency inputs, thereby introducing higher-frequency information [S20, unofficial]. Fourier features replace the featurizer or kernel that the neural net would otherwise need to learn, allowing the network to predict signals (1D, 2D, or 3D radiance fields) more effectively than standard MLPs which suffer from spectral bias [S20, unofficial]. It is used to predict 1-D signals from time, image pixel values from position, and color/opacity from 3D position and view direction to model radiance fields for neural avatars and view-dependent effects [S20, unofficial].
+A general technique addressing spectral bias by preprocessing low-frequency inputs with Fourier features, used for 1D signals, images, and radiance fields [S22, unofficial].
 
 ### Conditional Positional Encoding
-Conditional Positional Encoding is a positional encoding technique that applies phase shifts based on time index to sampled features, inspired by Fourier transformation phase information retention [S21]. It applies positional encoding to 6D attributes (x, y, z, t, θ, ϕ) and to sampled features (Fden, Ftex) [S21]. It explicitly assigns phase shift to different frequencies using time index t and calculates CPE using formula (2) for texture features only [S21]. The frequency order L is typically 5 [S21]. CPE is not applied to density field features to maintain zero initialization for correct volume rendering [S21].
-
-### Positional Encoding Frequency Annealing
-Positional Encoding Frequency Annealing is a coarse-to-fine strategy that constrains Fourier positional encoding to low dimensions initially to suppress high-frequency artifacts and self-occlusions [S22, unofficial]. The annealing equation is $\alpha(t) = mt/K$, where $m$ is number of encoding frequencies, $t$ is iteration step, and $K$ is a hyper-parameter [S22, unofficial]. The hyper-parameter $K$ is typically set to 15k (15,000) [S22, unofficial].
+Applies phase shifts based on time index to sampled features, inspired by Fourier transformation phase retention, used for dynamic 4D scenes [S23].
 
 ## Operating characteristics
-- **Time Complexity:** The encoding itself is $O(d \cdot L)$ per sample, where $d$ is input dimension and $L$ is the number of frequency bands. This is negligible compared to the MLP evaluation [S5, unofficial].
-- **Memory Complexity:** The output dimension is $d \times (2 \times L + 1)$ if `include_input` is True, else $d \times 2 \times L$ [S5, S15, unofficial]. For $d=3, L=10$, this is 63 features per coordinate [S8, S11, unofficial].
-- **Measured Performance:** In NeRF, using Fourier encoding with $L=10$ for position and $L=4$ for direction results in 189 features for position and 81 for direction [S11, unofficial]. It trains slower and requires a larger network to achieve similar quality compared to Multiresolution Hash Encoding [S1, unofficial]. However, it is more efficient than geometric approaches like octrees or subdomain grids, which require heavy refactoring [S15, unofficial].
-- **Strengths:** Effectively overcomes spectral bias, allowing MLPs to learn high-frequency details [S6][S20, unofficial]. Simple to implement and integrate [S14, unofficial].
-- **Limitations:** Requires careful tuning of `num_octaves` and `omega0`. Can suffer from aliasing if not integrated over intervals (solved by Integrated Positional Encoding) [S1, unofficial]. Trains slower than some alternative encodings [S1, unofficial].
-- **When to Use:** When representing high-frequency details in neural fields is critical and spectral bias is a concern [S6][S20, unofficial].
-- **When Not to Use:** When computational efficiency is paramount and lower-frequency details suffice, or when using alternative encodings like Hash Encoding that offer better scalability [S1, unofficial].
+*   **Time Complexity:** The encoding step is $O(d_{in} \cdot \text{num\_freqs})$ per sample. It is computationally cheap compared to the MLP evaluation but adds overhead to the forward pass.
+*   **Memory Complexity:** The output dimension is $d_{in} \times (2 \cdot \text{num\_freqs} + 1)$. For $d_{in}=3$ and $\text{num\_freqs}=10$, this results in 63 features per point [S8, S11, unofficial].
+*   **Performance:** Requires a larger network (e.g., 8 hidden layers, 256 wide) compared to hash encoding to achieve similar quality and trains slower [S1, unofficial][S18]. However, it provides continuous derivatives, allowing for second-order derivative computations like curvature regularization, which hash encodings may struggle with due to gradient locality [S12].
+*   **Strengths:** Simple to implement, differentiable, and effective at overcoming spectral bias in ReLU MLPs [S6][S10, unofficial].
+*   **Limitations:** Can suffer from aliasing when rendering views at varying resolutions if not integrated [S6]. Requires careful tuning of `num_freqs` and `omega0` [S3, S5, unofficial].
 
 ## Background
-Fourier Positional Encoding was introduced in the NeRF paper (Mildenhall et al., ECCV 2020) [S8, unofficial]. It was inspired by positional encoding in natural language processing [Vaswani et al. 2017] [S1, unofficial][S6]. The method was later extended to randomly oriented parallel wavefronts [Tancik et al. 2020] and level-of-detail filtering [Barron et al. 2021a] [S1, unofficial]. It is widely used in neural radiance fields and other neural implicit representations to help MLPs learn high-frequency scene details [S1, S2, S3, S4, S5, unofficial][S6][S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S20, unofficial].
+Fourier Positional Encoding was adopted in computer graphics for the NeRF algorithm (Mildenhall et al., ECCV 2020) to encode the spatiodirectionally varying light field and volume density [S1, S8, unofficial]. It was inspired by positional encoding in natural language processing (Vaswani et al., 2017) [S1, unofficial][S6]. The method lifts low-dimensional queries into a higher-dimensional space, allowing the neural network to better capture high-frequency details [S6]. It has been extended to randomly oriented parallel wavefronts (Tancik et al., 2020) and level-of-detail filtering (Barron et al., 2021a) [S1, unofficial].
 
 ## Sources
 [S1] Nvidia – learning representations of positions in a 3D scene [pdf], https://nvlabs.github.io/instant-ngp/assets/mueller2022instant.pdf, fetched 2026-10-26 (unofficial)
@@ -157,14 +188,15 @@ Fourier Positional Encoding was introduced in the NeRF paper (Mildenhall et al.,
 [S9] Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)
 [S10] damn8daniel/nerf-from-scratch, https://github.com/damn8daniel/nerf-from-scratch, fetched 2026-10-26 (unofficial)
 [S11] yashtmy/nerf-3d-vision, https://github.com/yashtmy/nerf-3d-vision, fetched 2026-10-26 (unofficial)
-[S12] rigved-sanku/NeRF-Implementation-for-Efficient-3D-Scene-Reconstruction, https://github.com/rigved-sanku/NeRF-Implementation-for-Efficient-3D-Scene-Reconstruction, fetched 2026-10-27 (unofficial)
-[S13] suvadityamuk/NeRF-Experiments, https://github.com/suvadityamuk/NeRF-Experiments, fetched 2026-10-27 (unofficial)
-[S14] dgsmith7/nerf-mlp, https://github.com/dgsmith7/nerf-mlp, fetched 2026-10-27 (unofficial)
-[S15] NeuralVDB: High-resolution Sparse Volume Representation using Hierarchical Neural Networks | NVIDIA, https://www.youtube.com/watch?v=IfgeduMv_ns, fetched 2026-11-04 (unofficial)
-[S16] brandonyzhao/rtnf, https://github.com/brandonyzhao/rtnf, fetched 2026-10-27 (unofficial)
-[S17] GitHub - apchenstu/TensoRF: [ECCV 2022] Tensorial Radiance Fields, a ..., https://github.com/apchenstu/TensoRF, fetched 2026-10-29 (unofficial)
-[S18] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)
-[S19] Zip-NeRF: Anti-Aliased Grid-Based Neural Radiance Fields, https://doi.org/10.1109/iccv51070.2023.01804, fetched 2026-10-26
-[S20] Fourier Feature Networks and Neural Volume Rendering, https://github.com/matajoh/fourier_feature_nets, fetched 2026-10-26 (unofficial)
-[S21] V4D: Voxel for 4D Novel View Synthesis, https://doi.org/10.1109/tvcg.2023.3312127, fetched 2026-10-26
-[S22] GeCoNeRF: Few-Shot Neural Radiance Fields via Geometric Consistency, https://core.ac.uk/works/309257742, fetched 2026-11-01 (unofficial)
+[S12] Neuralangelo: High-Fidelity Neural Surface Reconstruction, https://doi.org/10.1109/cvpr52729.2023.00817, fetched 2026-10-26
+[S13] rigved-sanku/NeRF-Implementation-for-Efficient-3D-Scene-Reconstruction, https://github.com/rigved-sanku/NeRF-Implementation-for-Efficient-3D-Scene-Reconstruction, fetched 2026-10-27 (unofficial)
+[S14] suvadityamuk/NeRF-Experiments, https://github.com/suvadityamuk/NeRF-Experiments, fetched 2026-10-27 (unofficial)
+[S15] dgsmith7/nerf-mlp, https://github.com/dgsmith7/nerf-mlp, fetched 2026-10-27 (unofficial)
+[S16] NeuralVDB: High-resolution Sparse Volume Representation using Hierarchical Neural Networks | NVIDIA, https://www.youtube.com/watch?v=IfgeduMv_ns, fetched 2026-11-04 (unofficial)
+[S17] brandonyzhao/rtnf, https://github.com/brandonyzhao/rtnf, fetched 2026-10-27 (unofficial)
+[S18] Instant Neural Graphics Primitives with a Multiresolution ..., https://www.cs.jhu.edu/~misha/ReadingSeminar/Papers/Mueller22.pdf, fetched 2026-10-28
+[S19] GitHub - apchenstu/TensoRF: [ECCV 2022] Tensorial Radiance Fields, a ..., https://github.com/apchenstu/TensoRF, fetched 2026-10-29 (unofficial)
+[S20] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)
+[S21] Zip-NeRF: Anti-Aliased Grid-Based Neural Radiance Fields, https://doi.org/10.1109/iccv51070.2023.01804, fetched 2026-10-26
+[S22] Fourier Feature Networks and Neural Volume Rendering, https://github.com/matajoh/fourier_feature_nets, fetched 2026-10-26 (unofficial)
+[S23] V4D: Voxel for 4D Novel View Synthesis, https://doi.org/10.1109/tvcg.2023.3312127, fetched 2026-10-26

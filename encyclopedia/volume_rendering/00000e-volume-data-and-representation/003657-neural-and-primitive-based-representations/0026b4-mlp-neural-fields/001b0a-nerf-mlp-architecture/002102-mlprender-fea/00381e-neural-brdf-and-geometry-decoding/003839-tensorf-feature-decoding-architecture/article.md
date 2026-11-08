@@ -1,0 +1,88 @@
+# TensoRF Feature Decoding Architecture
+
+Also called: TensoRF Feature Decoding Ablation
+
+## Overview
+The TensoRF Feature Decoding Architecture is the multi-layer perceptron (MLP) responsible for mapping compressed feature vectors to final radiance values (color) and volume density (sigma) in the TensoRF framework. It solves the problem of efficiently decoding high-dimensional scene representations into observable pixel values. It is distinguished from its parent, [Neural BRDF and Geometry Decoding](8139-neural-brdf-and-geometry-decoding.md), by its specific focus on standard radiance fields (color and density) rather than explicit BRDF or normal outputs, and from [Neural Surface Rendering](9960-neural-surface-rendering.md) by its volumetric integration approach. The architecture is notably shallow and parameter-efficient, achieving performance comparable to deeper NeRF variants with significantly faster training times [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A feature vector of dimension $mlpC$ (often denoted as $featureC$ in the context of the MLP's internal width). This vector is derived from the tensor decomposition of the scene representation.
+*   **Output:** A vector of size 4. The first 3 components represent the RGB color values, and the 4th component represents the volume density ($\sigma$).
+
+**Data Structures:**
+The architecture consists of a sequence of linear layers with ReLU activations. The specific layout for the default configuration is:
+1.  **Layer 1:** Linear transformation from $mlpC$ to $featureC$.
+2.  **Activation:** ReLU.
+3.  **Layer 2:** Linear transformation from $featureC$ to $featureC$.
+4.  **Activation:** ReLU.
+5.  **Layer 3:** Linear transformation from $featureC$ to 3 (for color).
+*Note: The density ($\sigma$) is typically computed in a parallel or separate branch with similar structure, or concatenated, but the ablation study specifically details the color decoding path. The sources describe the "sigma and color MLP layers" generally having this structure [S1, unofficial].*
+
+**Parameters:**
+*   $mlpC$: Input feature dimension.
+*   $featureC$: Hidden layer dimension. In the default configuration, this is consistent across hidden layers.
+*   Activation: Rectified Linear Unit (ReLU).
+
+**Steps:**
+1.  Receive input feature vector $x \in \mathbb{R}^{mlpC}$.
+2.  Apply first linear layer: $h_1 = \text{ReLU}(W_1 x + b_1)$, where $W_1 \in \mathbb{R}^{featureC \times mlpC}$.
+3.  Apply second linear layer: $h_2 = \text{ReLU}(W_2 h_1 + b_2)$, where $W_2 \in \mathbb{R}^{featureC \times featureC}$.
+4.  Apply third linear layer: $c = W_3 h_2 + b_3$, where $W_3 \in \mathbb{R}^{3 \times featureC}$.
+5.  Output color $c$. The density $\sigma$ is computed via an analogous MLP structure.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def decode_feature(input_vector, mlpC, featureC):
+    """
+    Decodes a feature vector into color (and implicitly sigma via parallel structure).
+    Based on the default 3-layer architecture from TensoRF ablation study.
+    """
+    # Layer 1: Linear(in mlpC, featureC) -> ReLU
+    h1 = relu(linear(input_vector, mlpC, featureC))
+    
+    # Layer 2: Linear(featureC, featureC) -> ReLU
+    h2 = relu(linear(h1, featureC, featureC))
+    
+    # Layer 3: Linear(featureC, 3)
+    # Note: In the full model, a parallel branch or concatenation handles sigma.
+    # This function returns the color component.
+    color = linear(h2, featureC, 3)
+    
+    return color
+
+def relu(x):
+    return max(0, x)
+
+def linear(x, in_features, out_features):
+    # Standard matrix multiplication and bias addition
+    # Weights and biases are assumed to be initialized and loaded
+    # x shape: (in_features,)
+    # Returns shape: (out_features,)
+    pass # Implementation details of weight matrix multiplication omitted as per standard math operations
+```
+
+**Edge Cases and Pitfalls:**
+*   **Depth Sensitivity:** Adding or removing linear layers (e.g., testing 5 layers with sizes 64, 32, 16, 8) did not yield significant improvements in PSNR [S1, unofficial].
+*   **Residual Connections:** Adding residual connections from the initial input to each layer (Variation 2) or from 2 layers prior (Variation 3) was tested but the default shallow architecture remained competitive [S1, unofficial].
+*   **Convolutional Layers:** Replacing linear layers with 1D convolutional layers was attempted to reduce parameters and speed up training, but the linear architecture was retained as the baseline [S1, unofficial].
+
+## Subtopics
+
+### [Deformation Network Architecture](9393-deformation-network-architecture.md)
+Handles the spatial deformation of the feature grid to support dynamic scenes. It is chosen when the scene contains moving objects or non-rigid deformations, whereas the feature decoding architecture remains static in its topology.
+
+## Operating characteristics
+*   **Time Complexity:** The shallow nature (3 linear layers) allows for very fast training. In ablation studies, the model trained in less than 10 minutes on downsampled data, achieving PSNR comparable to NeRF which required significantly more iterations (30,000 vs 2,500) [S1, unofficial].
+*   **Memory Complexity:** Low parameter count due to the shallow depth and linear layers. This allows fitting within memory budgets even with downsampled data [S1, unofficial].
+*   **Performance:** On the synthetic Lego scene (100 train, 200 test views), the default architecture achieved a Test PSNR of 31.297 in 2,500 iterations on downsampled data [S1, unofficial].
+*   **Strengths:** Fast training, low memory footprint, sufficient reconstruction quality for static scenes.
+*   **Limitations:** Deeper architectures or residual connections did not significantly improve PSNR, suggesting the bottleneck is not the decoder depth but potentially the feature encoding or tensor decomposition itself.
+
+## Background
+The TensoRF Feature Decoding Architecture was introduced in the context of the TensoRF paper, which proposed low-cost neural radiance fields using tensor decomposition. The specific ablation study on the decoding architecture was documented in an unofficial source analyzing the TensoRF implementation [S1, unofficial]. The work builds upon the original NeRF MLP architecture [4] but optimizes for efficiency through tensor factorization and a shallow decoder.
+
+## Sources
+[S1] Low-Cost Neural Radiance Fields, https://doi.org/10.48550/arxiv.2605.09312, fetched 2026-10-26 (unofficial)

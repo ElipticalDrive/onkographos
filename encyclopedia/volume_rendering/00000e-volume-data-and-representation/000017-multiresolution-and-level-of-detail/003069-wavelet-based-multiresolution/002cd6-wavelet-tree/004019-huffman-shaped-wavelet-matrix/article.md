@@ -3,36 +3,36 @@
 Also called: CSGV-R Wavelet Matrix, CSGV-R compression structure, Huffman-shaped wavelet tree, Wavelet Tree Implementation for CSGV-R, Wavelet matrix
 
 ## Overview
-The Huffman-shaped Wavelet Matrix is a compressed index data structure used to provide random access to a stream of node operations in segmentation volume bricks [S1, unofficial]. It maps symbols from a small alphabet to bit patterns using bit-wise negated Canonical Huffman Codes (CHC), stored in a level-wise concatenated bit vector acting as a wavelet matrix [S1, unofficial]. It enables variable bit-length compression and random access, solving the limitation of the parent CSGV method which uses ANS stream compression and requires serial decoding [S1, unofficial]. It sets itself apart from general wavelet matrices by exploiting the specific structure of the CHC to eliminate branching and interval tracking during access queries [S1, unofficial].
+The Huffman-shaped Wavelet Matrix is a compressed index data structure used to provide random access to a stream of node operations in segmentation volume bricks [S1]. It maps symbols from a small alphabet to bit patterns using bit-wise negated Canonical Huffman Codes (CHC), stored in a level-wise concatenated bit vector acting as a wavelet matrix [S1]. It enables variable bit-length compression and random access, solving the limitation of the parent CSGV method which uses ANS stream compression and requires serial decoding [S1]. It sets itself apart from general wavelet matrices by exploiting the specific structure of the CHC to eliminate branching and interval tracking during access queries [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A stream of node operations $T$ derived from encoding a label multi-grid (coarsest to finest level) of a volume brick. The alphabet $\Sigma$ consists of 6 symbols: $\{ \text{copy\_parent}, \text{copy\_X}, \text{copy\_Y}, \text{copy\_Z}, \text{copy\_palette}, \text{back\_ref\_1} \}$ [S1, unofficial]. The $\delta$ operation is omitted; back reference distance $\delta=1$ is encoded as a specific symbol [S1, unofficial].
-*   **Output:** A compressed representation consisting of the Wavelet Matrix bit vector $W$, level start indices, a flat rank structure for $W$, a separate Stop Bit vector $S$, and its rank structure [S1, unofficial].
+*   **Input:** A stream of node operations $T$ derived from encoding a label multi-grid (coarsest to finest level) of a volume brick. The alphabet $\Sigma$ consists of 6 symbols: $\{ \text{copy\_parent}, \text{copy\_X}, \text{copy\_Y}, \text{copy\_Z}, \text{copy\_palette}, \text{back\_ref\_1} \}$ [S1]. The $\delta$ operation is omitted; back reference distance $\delta=1$ is encoded as a specific symbol [S1].
+*   **Output:** A compressed representation consisting of the Wavelet Matrix bit vector $W$, level start indices, a flat rank structure for $W$, a separate Stop Bit vector $S$, and its rank structure [S1].
 
 **Data Structures and Layout:**
-1.  **Wavelet Matrix $W$:** A level-wise concatenated bit vector storing the CHC of the operations. The maximum CHC length is 5, resulting in 5 levels ($l=0$ to $4$) [S1, unofficial].
-2.  **Level Start Indices:** An array $W_0 \dots W_4$ storing the starting bit index of each level within $W$ [S1, unofficial].
-3.  **Flat Rank Structure:** Stored next to $W$ to support constant-time rank queries. It uses approximately 5% space overhead [S1, unofficial].
-4.  **Stop Bit Vector $S$:** A separate bit vector $S[i] : i \to \{0,1\}$ indicating if a node's region is constant in all finer levels. Stored after the operation list with its own flat rank structure [S1, unofficial].
-5.  **Brick Header:** Contains start offsets for each LOD in the operation/stop bit lists ($T_0 \dots T_L$), palette size, and wavelet query info including $Z_1[l] = \text{rank}_1^W(W_l)$ (number of 1 bits before each level) [S1, unofficial].
-6.  **Storage Format:** Bit vectors and flat ranks are stored as arrays of 64-bit words. Bit index order inside a word goes from least significant bit (LSB) to most significant bit (MSB) [S1, unofficial].
+1.  **Wavelet Matrix $W$:** A level-wise concatenated bit vector storing the CHC of the operations. The maximum CHC length is 5, resulting in 5 levels ($l=0$ to $4$) [S1].
+2.  **Level Start Indices:** An array $W_0 \dots W_4$ storing the starting bit index of each level within $W$ [S1].
+3.  **Flat Rank Structure:** Stored next to $W$ to support constant-time rank queries. It uses approximately 5% space overhead [S1].
+4.  **Stop Bit Vector $S$:** A separate bit vector $S[i] : i \to \{0,1\}$ indicating if a node's region is constant in all finer levels. Stored after the operation list with its own flat rank structure [S1].
+5.  **Brick Header:** Contains start offsets for each LOD in the operation/stop bit lists ($T_0 \dots T_L$), palette size, and wavelet query info including $Z_1[l] = \text{rank}_1^W(W_l)$ (number of 1 bits before each level) [S1].
+6.  **Storage Format:** Bit vectors and flat ranks are stored as arrays of 64-bit words. Bit index order inside a word goes from least significant bit (LSB) to most significant bit (MSB) [S1].
 
 **Canonical Huffman Codes (CHC):**
-The CHCs are bit-wise negated codes derived from operation frequencies [S1, unofficial]. Shorter codes are lexicographically greater, placing shorter levels on the right-hand side of the tree [S1, unofficial]. The codes follow a RICE-coding-like layout where the number of consecutive 0 bits determines the operation [S1, unofficial]. Consequently, any 1 bit terminates a symbol, and no right children exist in the conceptual tree [S1, unofficial].
+The CHCs are bit-wise negated codes derived from operation frequencies [S1]. Shorter codes are lexicographically greater, placing shorter levels on the right-hand side of the tree [S1]. The codes follow a RICE-coding-like layout where the number of consecutive 0 bits determines the operation [S1]. Consequently, any 1 bit terminates a symbol, and no right children exist in the conceptual tree [S1].
 
 **Construction Steps:**
-1.  Encode the label multi-grid from coarsest to finest level into a list of operations $T$, omitting $\delta$ and using `back_ref_1` [S1, unofficial].
-2.  Compress $T$ as a Huffman-shaped wavelet tree using the hard-coded CHCs [S1, unofficial].
-3.  Store the result as wavelet matrix $W$ using the prefix counting algorithm [S1, unofficial].
-4.  Construct and store the flat rank structure next to $W$ [S1, unofficial].
-5.  Store stop bits $S$ separately with its own rank structure [S1, unofficial].
+1.  Encode the label multi-grid from coarsest to finest level into a list of operations $T$, omitting $\delta$ and using `back_ref_1` [S1].
+2.  Compress $T$ as a Huffman-shaped wavelet tree using the hard-coded CHCs [S1].
+3.  Store the result as wavelet matrix $W$ using the prefix counting algorithm [S1].
+4.  Construct and store the flat rank structure next to $W$ [S1].
+5.  Store stop bits $S$ separately with its own rank structure [S1].
 
 **Access Query:**
-To access $T[i]$, the algorithm traverses the wavelet matrix. Due to the CHC structure, the direction bit $\alpha$ at level $l$ is the $l$-th bit of the code. Because any 1 bit terminates a symbol, the operation number is simply the number of zeros before the first 1 bit [S1, unofficial]. This eliminates branch tracking and interval start tracking [S1, unofficial].
+To access $T[i]$, the algorithm traverses the wavelet matrix. Due to the CHC structure, the direction bit $\alpha$ at level $l$ is the $l$-th bit of the code. Because any 1 bit terminates a symbol, the operation number is simply the number of zeros before the first 1 bit [S1]. This eliminates branch tracking and interval start tracking [S1].
 
 **Rank Query:**
-For rank queries, the character's CHC (e.g., `00001`) can be hardcoded to remove branching. A single interval exists per level (prefix of 0s) starting at $W_l$ [S1, unofficial].
+For rank queries, the character's CHC (e.g., `00001`) can be hardcoded to remove branching. A single interval exists per level (prefix of 0s) starting at $W_l$ [S1].
 
 **Pseudocode:**
 
@@ -60,7 +60,7 @@ def rank_W(W_words, W_flat_rank, W_start_indices, alpha, i):
     i: Index.
     Returns: Count.
     """
-    # Implementation details for flat rank are abstracted as per [Kur22] cited in [S1, unofficial].
+    # Implementation details for flat rank are abstracted as per [Kur22] cited in [S1].
     # In practice, this involves block-based precomputed counts.
     # Not given in the sources.
     pass
@@ -104,7 +104,7 @@ def idx(n, l_bar, T_l_offsets, S_words, S_flat_rank, S_start_indices):
         
         # Update offset based on stop bits in the range [T_l_prime, T_l_prime + n_parent)
         # offset += rank_1^S(T_l_prime + n_parent) - rank_1^S(T_l_prime)
-        # Note: The formula in [S1, unofficial] uses rank_1^S. 
+        # Note: The formula in [S1] uses rank_1^S. 
         # Assuming S_flat_rank supports rank_1.
         
         idx_end = T_l_offsets[l_prime] + n_parent - offset
@@ -119,7 +119,7 @@ def idx(n, l_bar, T_l_offsets, S_words, S_flat_rank, S_start_indices):
         # The offset is in terms of "nodes", but needs to be converted to bit/stream index adjustment?
         # The source says: offset <- 8 * offset. This likely accounts for the 8 children per node 
         # or a specific stride in the stop bit vector relative to the operation stream.
-        # However, Algorithm 1 in [S1, unofficial] shows:
+        # However, Algorithm 1 in [S1] shows:
         # offset <- offset + rank...
         # offset <- 8 * offset
         # return (T_l_bar + n - offset)
@@ -191,19 +191,19 @@ def access_T(W_words, W_start_indices, W_flat_rank, Z1, i):
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Stop Bit Offsets:** Stop bits on coarser levels in earlier Z-curve regions remove $2^d \Delta L$ node index predecessors. Nodes in removed regions must use the parent's index [S1, unofficial].
-*   **Negative Offset:** The offset calculation in `idx` must correctly handle the subtraction of stop bit counts to map Morton codes to stream indices [S1, unofficial].
-*   **Bit Order:** Bit index order inside 64-bit words is LSB to MSB [S1, unofficial].
+*   **Stop Bit Offsets:** Stop bits on coarser levels in earlier Z-curve regions remove $2^d \Delta L$ node index predecessors. Nodes in removed regions must use the parent's index [S1].
+*   **Negative Offset:** The offset calculation in `idx` must correctly handle the subtraction of stop bit counts to map Morton codes to stream indices [S1].
+*   **Bit Order:** Bit index order inside 64-bit words is LSB to MSB [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Access and rank queries take $O(\log \sigma)$ time, where $\sigma = 6$ is the alphabet size [S1, unofficial]. The `idx` function takes $O(L) = O(\log_b)$ time [S1, unofficial].
-*   **Space Complexity:** The wavelet matrix uses $|T| \lceil H_0(T) \rceil (1+o(1))$ bits [S1, unofficial]. The flat rank structure adds ~5% overhead [S1, unofficial].
-*   **Performance:** Optimized for GPU implementation using Vulkan buffer addresses [S1, unofficial]. Eliminates branching and interval tracking compared to general wavelet matrices [S1, unofficial].
-*   **Strengths:** Enables random access to compressed segmentation volumes, unlike the serial CSGV [S1, unofficial]. Efficient for GPU rendering pipelines [S1, unofficial].
-*   **Limitations:** Limited to the specific CHC structure of CSGV-R. Alphabet size is fixed to 6 symbols in this implementation [S1, unofficial].
+*   **Time Complexity:** Access and rank queries take $O(\log \sigma)$ time, where $\sigma = 6$ is the alphabet size [S1]. The `idx` function takes $O(L) = O(\log_b)$ time [S1].
+*   **Space Complexity:** The wavelet matrix uses $|T| \lceil H_0(T) \rceil (1+o(1))$ bits [S1]. The flat rank structure adds ~5% overhead [S1].
+*   **Performance:** Optimized for GPU implementation using Vulkan buffer addresses [S1]. Eliminates branching and interval tracking compared to general wavelet matrices [S1].
+*   **Strengths:** Enables random access to compressed segmentation volumes, unlike the serial CSGV [S1]. Efficient for GPU rendering pipelines [S1].
+*   **Limitations:** Limited to the specific CHC structure of CSGV-R. Alphabet size is fixed to 6 symbols in this implementation [S1].
 
 ## Background
-The Huffman-shaped Wavelet Matrix was introduced in the context of Random Access Segmentation Volume Compression for Interactive Volume Rendering [S1, unofficial]. It builds on the CSGV compression method, replacing its ANS stream compression with a wavelet-based structure to enable random access [S1, unofficial]. It generalizes wavelet trees [GGV03] and wavelet matrices [CNP15] to a specific application domain using bit-wise negated Canonical Huffman Codes [DEF* 21].
+The Huffman-shaped Wavelet Matrix was introduced in the context of Random Access Segmentation Volume Compression for Interactive Volume Rendering [S1]. It builds on the CSGV compression method, replacing its ANS stream compression with a wavelet-based structure to enable random access [S1]. It generalizes wavelet trees [GGV03] and wavelet matrices [CNP15] to a specific application domain using bit-wise negated Canonical Huffman Codes [DEF* 21].
 
 ## Sources
-[S1] Random Access Segmentation Volume Compression for Interactive Volume Rendering, https://doi.org/10.1111/cgf.70116, fetched 2026-10-28 (unofficial)
+[S1] Random Access Segmentation Volume Compression for Interactive Volume Rendering, https://doi.org/10.1111/cgf.70116, fetched 2026-10-28

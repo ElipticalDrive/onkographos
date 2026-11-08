@@ -67,11 +67,11 @@ This method is an optimization-based filtering approach that estimates the 6 Deg
 
 ### Online Receding Horizon Replanning
 #### definition
-- An online navigation loop that combines trajectory planning and pose estimation. It replans the trajectory at each step using the updated state belief from the pose filter, allowing the robot to respond to disturbances and dynamic changes [S3, unofficial].
+- An online navigation loop that combines trajectory planning and pose estimation. It replans the trajectory at each step using the updated state belief from the pose filter, allowing the robot to respond to disturbances and dynamic changes [S3].
 #### step
-- Inputs: Initial state prior $(\mu_0, \Sigma_0)$, goal state $x_{goal}$, trained NeRF. Initialize waypoints $W$ using A* between current state and goal. While not at goal: a) Optimize trajectory $W$ using trajOpt. b) Get states/actions $x, u$ from $W$. c) Get camera image $I$. d) Update pose belief $(\mu_t, \Sigma_t)$ using poseFilter with image $I$, previous state, and first action $u[0]$. e) Update $W$ by replacing the first waypoint with the new mean $\mu_t$ and keeping the rest ($W[2:end]$) [S3, unofficial].
+- Inputs: Initial state prior $(\mu_0, \Sigma_0)$, goal state $x_{goal}$, trained NeRF. Initialize waypoints $W$ using A* between current state and goal. While not at goal: a) Optimize trajectory $W$ using trajOpt. b) Get states/actions $x, u$ from $W$. c) Get camera image $I$. d) Update pose belief $(\mu_t, \Sigma_t)$ using poseFilter with image $I$, previous state, and first action $u[0]$. e) Update $W$ by replacing the first waypoint with the new mean $\mu_t$ and keeping the rest ($W[2:end]$) [S3].
 #### comparison
-- Allows the robot to change homotopy classes around obstacles in response to disturbances, which is difficult for existing differential flatness-based planners that use static waypoints [S3, unofficial].
+- Allows the robot to change homotopy classes around obstacles in response to disturbances, which is difficult for existing differential flatness-based planners that use static waypoints [S3].
 
 ## Background
 The problem of optimizing camera poses alongside NeRF representations emerged as a critical bottleneck for applying NeRF to real-world scenarios where accurate COLMAP poses are unavailable or noisy. The seminal work on BARF (Bundle-Adjusting Neural Radiance Fields) introduced the concept of frequency annealing to stabilize this joint optimization [6872-barf-bundle-adjusting-neural-radiance-fields.md]. Subsequent works like NeRF-- extended this to unknown intrinsics [7405-nerf-with-unknown-camera-parameters.md], while others introduced geometric priors (NoPe-NeRF, AltNeRF) or multi-stage alignment (L2G-NeRF, CBARF) to handle larger errors. The field has also expanded to robotic applications, where pose filtering within NeRFs enables vision-only navigation [10501-vision-only-pose-filtering-in-a-nerf.md].
@@ -79,4 +79,4 @@ The problem of optimizing camera poses alongside NeRF representations emerged as
 ## Sources
 [S1] VF-NeRF: Viewshed Fields for Rigid NeRF Registration, https://doi.org/10.1007/978-3-031-73027-6_10, fetched 2026-10-26
 [S2] GeCoNeRF: Few-Shot Neural Radiance Fields via Geometric Consistency, https://core.ac.uk/works/309257742, fetched 2026-11-01 (unofficial)
-[S3] Vision-Only Robot Navigation in a Neural Radiance World, https://doi.org/10.1109/lra.2022.3150497, fetched 2026-10-26 (unofficial)
+[S3] Vision-Only Robot Navigation in a Neural Radiance World, https://doi.org/10.1109/lra.2022.3150497, fetched 2026-10-26

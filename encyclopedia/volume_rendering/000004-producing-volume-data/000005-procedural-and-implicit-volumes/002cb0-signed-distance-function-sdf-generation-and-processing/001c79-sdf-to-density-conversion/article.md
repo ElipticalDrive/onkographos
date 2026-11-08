@@ -3,7 +3,7 @@
 Also called: Glass Ball IOR Distribution, Implicit Surface Density Construction, SDF to Density/Feature Volume, SDF-based Density, SDFVolume, signed distance to density conversion
 
 ## Overview
-SDF to Density Conversion maps a continuous Signed Distance Function (SDF) $d(\mathbf{x})$ into a volumetric density field $\sigma(\mathbf{x})$ suitable for differentiable volume rendering [S4, unofficial][S5, unofficial]. It solves the problem of rendering implicit surfaces as volumes by ensuring that the probability of absorption along a ray segment matches the geometric proximity to the zero-level set [S9, unofficial]. Unlike standard volume rendering which accepts density directly, this method derives density from the distance to the implicit surface, enabling the representation of open surfaces and varying thickness through a Laplace-distribution-based CDF [S1][S9, unofficial]. It differs from [VolSDF Volume Rendering](2551-volsdf-volume-rendering.md) primarily in its specific parameterization of the density transition and its integration with analytic or neural SDF backends [S3].
+SDF to Density Conversion maps a continuous Signed Distance Function (SDF) $d(\mathbf{x})$ into a volumetric density field $\sigma(\mathbf{x})$ suitable for differentiable volume rendering [S4, unofficial][S5, unofficial]. It solves the problem of rendering implicit surfaces as volumes by ensuring that the probability of absorption along a ray segment matches the geometric proximity to the zero-level set [S9]. Unlike standard volume rendering which accepts density directly, this method derives density from the distance to the implicit surface, enabling the representation of open surfaces and varying thickness through a Laplace-distribution-based CDF [S1][S9]. It differs from [VolSDF Volume Rendering](2551-volsdf-volume-rendering.md) primarily in its specific parameterization of the density transition and its integration with analytic or neural SDF backends [S3].
 
 ## How it works
 **Inputs:**
@@ -106,7 +106,7 @@ def compute_volumetric_density(signed_distance, deltas, alpha, beta):
 **Edge Cases and Pitfalls:**
 - **Ray Termination:** The last segment's delta must be padded with a large value (e.g., $10^{10}$) to prevent division by zero or undefined behavior when the ray exits the sampling volume [S4, unofficial].
 - **Numerical Stability:** Ensure $\rho < 1.0$ before applying $\ln(1-\rho)$ to avoid domain errors [G].
-- **Sharpness vs. Opacity:** In some formulations (e.g., NeuS), the sharpness parameter $s$ (analogous to $1/\beta$) globally ties the magnitude of volume density to its sharpness, which can be restrictive [S9, unofficial].
+- **Sharpness vs. Opacity:** In some formulations (e.g., NeuS), the sharpness parameter $s$ (analogous to $1/\beta$) globally ties the magnitude of volume density to its sharpness, which can be restrictive [S9].
 
 ## Subtopics
 
@@ -129,13 +129,13 @@ Converts object/surface description to scene density volume. Defines density bas
 - **Time Complexity:** $O(N)$ where $N$ is the number of sample points along rays. The conversion is element-wise and parallelizable [S4, unofficial].
 - **Memory Complexity:** $O(N)$ for storing intermediate densities and final densities [S4, unofficial].
 - **Performance:** Efficient on GPU due to vectorized operations. Resolution independence is achieved via $\Delta t$ normalization [S4, unofficial].
-- **Strengths:** Resolution-independent density, differentiable, supports open surfaces and varying thickness [S1][S9, unofficial].
-- **Limitations:** Requires careful tuning of $\alpha$ and $\beta$. Sharpness parameter can globally tie density magnitude to sharpness in some formulations [S9, unofficial]. Numerical stability requires clamping $\rho$ [G].
+- **Strengths:** Resolution-independent density, differentiable, supports open surfaces and varying thickness [S1][S9].
+- **Limitations:** Requires careful tuning of $\alpha$ and $\beta$. Sharpness parameter can globally tie density magnitude to sharpness in some formulations [S9]. Numerical stability requires clamping $\rho$ [G].
 - **When to Use:** When rendering implicit surfaces as volumes, especially in neural rendering pipelines like NeRF or VolSDF [S4, unofficial][S5, unofficial].
 - **When Not to Use:** When explicit mesh extraction is preferred, or when density is known a priori from volumetric data [S1].
 
 ## Background
-Originated in neural rendering research to enable differentiable volume rendering of implicit surfaces [S4, unofficial][S5, unofficial]. Key developments include VolSDF [S5, unofficial] and NeuS [S9, unofficial], which formalized the mapping from SDF to density using exponential and sigmoid functions respectively. The method is widely used in 3D reconstruction from multi-view images [S1].
+Originated in neural rendering research to enable differentiable volume rendering of implicit surfaces [S4, unofficial][S5, unofficial]. Key developments include VolSDF [S5, unofficial] and NeuS [S9], which formalized the mapping from SDF to density using exponential and sigmoid functions respectively. The method is widely used in 3D reconstruction from multi-view images [S1].
 
 ## Sources
 [S1] Moment Bounds are Differentiable: Efficiently Approximating Measures in Inverse Rendering, https://doi.org/10.1145/3730899, fetched 2026-10-27
@@ -146,4 +146,4 @@ Originated in neural rendering research to enable differentiable volume renderin
 [S6] Fast sphere tracing of procedural volumetric noise for very large and detailed scenes, https://doi.org/10.1111/cgf.70072, fetched 2026-10-26
 [S7] cgibson/Mr-Voxel, https://github.com/cgibson/Mr-Voxel, fetched 2026-10-27 (unofficial)
 [S8] DCCVT: Differentiable Clipped Centroidal Voronoi Tessellation, https://arxiv.org/abs/2601.13603v1, fetched 2026-10-26
-[S9] Alpha Invariance: On Inverse Scaling Between Distance and Volume Density in Neural Radiance Fields, https://www.youtube.com/watch?v=YQhBEXC464w, fetched 2026-10-31 (unofficial)
+[S9] Alpha Invariance: On Inverse Scaling Between Distance and Volume Density in Neural Radiance Fields, https://www.youtube.com/watch?v=YQhBEXC464w, fetched 2026-10-31

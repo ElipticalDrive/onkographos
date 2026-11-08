@@ -1,26 +1,26 @@
 # FastFDK
 
-Also called: FDK, Cone-Beam FDK, FDK Algorithm, Feldkamp-Davis-Kress
+Also called: FDK, Feldkamp-Davis-Kress, Cone-Beam FDK, FDK Algorithm, FDK Backprojection, Feldkamp-Davis-Kress backprojection
 
 ## Overview
-FastFDK is a CPU-optimized implementation of the Feldkamp-Davis-Kress (FDK) algorithm, an analytical method for reconstructing a 3D volume from a stack of 2D cone-beam projection images [S1, unofficial]. It solves the tomographic reconstruction problem by applying a specific convolution filter to weighted projections and back-projecting them into a 3D grid [S1, unofficial]. It sets itself apart from its siblings by precomputing geometric weights and using a direct spatial-domain convolution filter to avoid the overhead of FFTs during the main reconstruction loop, prioritizing speed and memory locality on CPU architectures [S1, unofficial].
+FastFDK is a CPU-optimized implementation of the Feldkamp-Davis-Kress (FDK) algorithm, an analytical method for reconstructing a 3D volume from a stack of 2D cone-beam projection images [S2, unofficial]. It solves the tomographic reconstruction problem by applying a specific convolution filter to weighted projections and back-projecting them into a 3D grid [S2, unofficial]. It sets itself apart from its siblings by precomputing geometric weights and using a direct spatial-domain convolution filter to avoid the overhead of FFTs during the main reconstruction loop, prioritizing speed and memory locality on CPU architectures [S2, unofficial].
 
 ## How it works
-**Inputs:** A stack of `m_id` projection images of size `m_iw` x `m_ih`, and scanner geometry parameters: pixel size `m_ps`, source-to-origin distance `m_sd`, origin-to-detector distance `m_yd`, volume dimensions `m_vw` x `m_vw` x `m_vd`, voxel size `m_vs`, and angular span `m_na` in degrees.
-**Outputs:** A 3D volume `m_vol` of type `float` with dimensions `m_vw` x `m_vw` x `m_vd` [S1, unofficial].
+**Inputs:** A stack of `m_id` projection images of size `m_iw` x `m_ih`, and scanner geometry parameters: pixel size `m_ps`, source-to-origin distance `m_sd`, origin-to-detector distance `m_yd`, volume dimensions `m_vw` x `m_vw` x `m_vd`, voxel size `m_vs`, and angular span `m_na` in degrees [S2, unofficial].
+**Outputs:** A 3D volume `m_vol` of type `float` with dimensions `m_vw` x `m_vw` x `m_vd` [S2, unofficial].
 
 **Data Structures:**
-*   `m_vol`: Output volume array, size `m_vw * m_vw * m_vd` [S1, unofficial].
-*   `m_cyl`: Boolean mask array, size `m_vw * m_vw`. `m_cyl[i + m_vw*j]` is true if the voxel `(i,j)` lies within the cylinder defined by the volume width [S1, unofficial].
-*   `m_flt`: Float array, size `m_nf = m_iw / 2`. Stores the odd-indexed coefficients of the convolution filter [S1, unofficial].
-*   `m_w0`: Float array, size `m_iw * m_ih`. Precomputed initial image weighting factors [S1, unofficial].
-*   `m_buf`: Float array, size `m_iw`. Temporary buffer for processing image rows during filtering [S1, unofficial].
-*   `m_img`: Float array, size `m_iw * m_ih * m_id`. Storage for all filtered projection images [S1, unofficial].
+*   `m_vol`: Output volume array, size `m_vw * m_vw * m_vd` [S2, unofficial].
+*   `m_cyl`: Boolean mask array, size `m_vw * m_vw`. `m_cyl[i + m_vw*j]` is true if the voxel `(i,j)` lies within the cylinder defined by the volume width [S2, unofficial].
+*   `m_flt`: Float array, size `m_nf = m_iw / 2`. Stores the odd-indexed coefficients of the convolution filter [S2, unofficial].
+*   `m_w0`: Float array, size `m_iw * m_ih`. Precomputed initial image weighting factors [S2, unofficial].
+*   `m_buf`: Float array, size `m_iw`. Temporary buffer for processing image rows during filtering [S2, unofficial].
+*   `m_img`: Float array, size `m_iw * m_ih * m_id`. Storage for all filtered projection images [S2, unofficial].
 
 **Parameters:**
-*   `m_ps`: Adjusted pixel size. The constructor scales the input pixel size: `m_ps *= m_sd / (m_sd + m_yd)` [S1, unofficial].
-*   `m_k`: Filter center value, `1 / (4 * m_ps^2)` [S1, unofficial].
-*   `angStep`: Angle step in radians, `-m_na * M_PI / (m_id * 180)` [S1, unofficial].
+*   `m_ps`: Adjusted pixel size. The constructor scales the input pixel size: `m_ps *= m_sd / (m_sd + m_yd)` [S2, unofficial].
+*   `m_k`: Filter center value, `1 / (4 * m_ps^2)` [S2, unofficial].
+*   `angStep`: Angle step in radians, `-m_na * M_PI / (m_id * 180)` [S2, unofficial].
 
 **Algorithm Steps:**
 
@@ -30,21 +30,21 @@ FastFDK is a CPU-optimized implementation of the Feldkamp-Davis-Kress (FDK) algo
         $$ v = (m_{ih}/2 - 0.5 - j) \cdot m_{ps} $$
         $$ k_1 = m_{sd}^2 + v^2 $$
         $$ u = (i + 0.5 - m_{iw}/2) \cdot m_{ps} $$
-        $$ m_{w0}[i + m_{iw} \cdot j] = \frac{m_{sd}}{\sqrt{u^2 + k_1}} $$
+        $$ m_{w0}[i + m_{iw} \cdot j] = \frac{m_{sd}}{\sqrt{u^2 + k_1}} $$ [S2, unofficial]
     *   Precompute `m_flt`:
-        $$ m_k = \frac{1}{4 \cdot m_{ps}^2} $$
+        $$ m_k = \frac{1}{4 \cdot m_{ps}^2} $$ [S2, unofficial]
         For `k` from `0` to `m_nf - 1`:
         $$ j = 2k + 1 $$
         $$ tmp = \pi \cdot m_{ps} \cdot j $$
-        $$ m_{flt}[k] = -\frac{1}{tmp^2} $$
+        $$ m_{flt}[k] = -\frac{1}{tmp^2} $$ [S2, unofficial]
     *   Precompute `m_cyl`: For `i, j` from `0` to `m_vw - 1`:
-        $$ m_{cyl}[i + m_{vw} \cdot j] = ((2i - m_{vw})^2 + (2j - m_{vw})^2) < m_{vw}^2 $$
+        $$ m_{cyl}[i + m_{vw} \cdot j] = ((2i - m_{vw})^2 + (2j - m_{vw})^2) < m_{vw}^2 $$ [S2, unofficial]
 
 2.  **Filtering:**
     For each projection image `img` in the input stack:
     *   For each row `j` from `0` to `m_ih - 1`:
         *   Copy row `img[:, j]` to `m_buf`.
-        *   Apply weighting: `m_buf[i] *= m_w0[i + m_iw * j]` for all `i`.
+        *   Apply weighting: `m_buf[i] *= m_w0[i + m_iw * j]` for all `i` [S2, unofficial].
         *   Apply convolution filter to `m_buf`:
             For each pixel `i` from `0` to `m_iw - 1`:
             $$ v_0 = m_{buf}[i] \cdot m_k $$
@@ -60,54 +60,53 @@ FastFDK is a CPU-optimized implementation of the Feldkamp-Davis-Kress (FDK) algo
                 Else:
                     Break loop.
             $$ outImg[i] = v_0 $$
-        *   Store filtered row in `m_img`.
+        *   Store filtered row in `m_img` [S2, unofficial].
 
 3.  **Backprojection:**
-    Initialize `ang = 0`.
+    Initialize `ang = 0` [S2, unofficial].
     For each filtered projection `img` (index `n` from `1` to `m_id`):
-    *   Compute trigonometric values: $ca = \cos(ang)$, $sa = \sin(ang)$.
-    *   Compute projection scaling: $k_1 = m_{sd} / m_{ps}$.
+    *   Compute trigonometric values: $ca = \cos(ang)$, $sa = \sin(ang)$ [S2, unofficial].
+    *   Compute projection scaling: $k_1 = m_{sd} / m_{ps}$ [S2, unofficial].
     *   For each volume row `j` from `0` to `m_vw - 1`:
-        *   Compute $vy = (m_{vw}/2 - 0.5 - j) \cdot m_{vs}$.
+        *   Compute $vy = (m_{vw}/2 - 0.5 - j) \cdot m_{vs}$ [S2, unofficial].
         *   For each volume column `i` from `0` to `m_vw - 1`:
             *   Let $l = j \cdot m_{vw} + i$.
-            *   If `!m_cyl[l]`, continue (skip voxels outside the cylinder).
-            *   Compute $vx = (i + 0.5 - m_{vw}/2) \cdot m_{vs}$.
+            *   If `!m_cyl[l]`, continue (skip voxels outside the cylinder) [S2, unofficial].
+            *   Compute $vx = (i + 0.5 - m_{vw}/2) \cdot m_{vs}$ [S2, unofficial].
             *   Apply volume rotation:
                 $$ vvx = vx \cdot ca - vy \cdot sa $$
-                $$ vvy = vy \cdot ca + vx \cdot sa $$
+                $$ vvy = vy \cdot ca + vx \cdot sa $$ [S2, unofficial]
             *   Compute detector projection scaling:
-                $$ k_2 = \frac{k_1}{vvy + m_{sd}} $$
+                $$ k_2 = \frac{k_1}{vvy + m_{sd}} $$ [S2, unofficial]
             *   Compute detector coordinates:
-                $$ u = vvx \cdot k_2 + \frac{m_{iw}}{2} - 0.5 $$
-                $$ v = \frac{m_{ih}}{2} - vz \cdot k_2 - 0.5 $$
-                *(Note: $vz$ is computed inside the depth loop below)*
+                $$ u = vvx \cdot k_2 + \frac{m_{iw}}{2} - 0.5 $$ [S2, unofficial]
+                *(Note: $v$ coordinate is computed inside the depth loop below)*
             *   Compute integer indices and remainders for `u`:
                 $$ iu = \lfloor u \rfloor $$
                 If $u < 0$, $iu = iu - 1$.
-                $$ du = u - iu $$
+                $$ du = u - iu $$ [S2, unofficial]
             *   For each volume depth `k` from `0` to `m_vd - 1`:
-                *   Compute $vz = (m_{vd}/2 - 0.5 - k) \cdot m_{vs}$.
+                *   Compute $vz = (m_{vd}/2 - 0.5 - k) \cdot m_{vs}$ [S2, unofficial].
                 *   Compute detector `v` coordinate:
-                    $$ v = \frac{m_{ih}}{2} - vz \cdot k_2 - 0.5 $$
+                    $$ v = \frac{m_{ih}}{2} - vz \cdot k_2 - 0.5 $$ [S2, unofficial]
                 *   Compute integer indices and remainders for `v`:
                     $$ iv = \lfloor v \rfloor $$
                     If $v < 0$, $iv = iv - 1$.
-                    $$ dv = v - iv $$
+                    $$ dv = v - iv $$ [S2, unofficial]
                 *   Perform bilinear interpolation of `img` at `(iu, iv)` with remainders `(du, dv)`:
                     $$ val = (v_1 + du \cdot (v_2 - v_1)) + dv \cdot ((v_3 + du \cdot (v_4 - v_3)) - (v_1 + du \cdot (v_2 - v_1))) $$
-                    Where $v_1 = img[iu, iv]$, $v_2 = img[iu+1, iv]$, $v_3 = img[iu, iv+1]$, $v_4 = img[iu+1, iv+1]$. Out-of-bounds pixels return 0.
+                    Where $v_1 = img[iu, iv]$, $v_2 = img[iu+1, iv]$, $v_3 = img[iu, iv+1]$, $v_4 = img[iu+1, iv+1]$. Out-of-bounds pixels return 0 [S2, unofficial].
                 *   Compute post-projection weighting:
                     $$ k_3 = \frac{m_{sd}}{m_{sd} + vvy} $$
-                    $$ val = val \cdot k_3^2 $$
+                    $$ val = val \cdot k_3^2 $$ [S2, unofficial]
                 *   Accumulate into volume with averaging:
-                    $$ m\_vol[i, j, k] = m\_vol[i, j, k] + \frac{val - m\_vol[i, j, k]}{n} $$
-    *   Update angle: $ang += angStep$.
+                    $$ m\_vol[i, j, k] = m\_vol[i, j, k] + \frac{val - m\_vol[i, j, k]}{n} $$ [S2, unofficial]
+    *   Update angle: $ang += angStep$ [S2, unofficial].
 
 4.  **Normalization:**
     For each voxel `p` in `m_vol`:
     *   If $|p| < \epsilon$ and $p \neq 0$, set $p = 0$.
-    *   Else, $p = p / 2$.
+    *   Else, $p = p / 2$ [S2, unofficial].
 
 **Pseudocode:**
 
@@ -144,12 +143,11 @@ def fastfdk_reconstruct(images, iw, ih, id, ps, yd, sd, vw, vd, vs, na):
         m_flt[k] = -1.0 / (tmp * tmp)
         
     # Precompute m_cyl
-    m_cyl = [[False for _ in range(vw)] for _ in range(vw)]
+    m_cyl = [False] * (vw * vw)
     for i in range(vw):
         for j in range(vw):
             if ((2 * i - vw) ** 2 + (2 * j - vw) ** 2) < (vw * vw):
-                m_cyl[j][i] = True # Note: source uses linear index i + vw*j, mapped here to [j][i] for row-major logic if needed, 
-                                    # but source code: m_cyl[i + m_vw*j]. Let's stick to source indexing logic in loop.
+                m_cyl[i + vw * j] = True
 
     # 2. Filtering
     filtered_images = []
@@ -189,17 +187,9 @@ def fastfdk_reconstruct(images, iw, ih, id, ps, yd, sd, vw, vd, vs, na):
         for j in range(vw):
             vy = (vw / 2 - 0.5 - j) * vs
             for i in range(vw):
-                if not m_cyl[j][i]: # Assuming m_cyl is accessed as [j][i] or mapped correctly
-                    # Source: m_cyl[i + m_vw*j]. If we iterate j then i, index is i + vw*j.
-                    # Let's use linear index logic for clarity or assume 2D array matches source layout.
-                    # Source loop: for j... for i... l = j*m_vw + i. m_cyl[l].
-                    # So m_cyl is 1D or accessed via l.
-                    pass 
-                
-                # Re-doing loop structure to match source exactly
                 l = j * vw + i
-                if not m_cyl[l]: # Assuming m_cyl is 1D array in source, here we simulate check
-                     continue # Skip if not in cylinder
+                if not m_cyl[l]:
+                    continue
 
                 vx = (i + 0.5 - vw / 2) * vs
                 vvx = vx * ca - vy * sa
@@ -226,7 +216,7 @@ def fastfdk_reconstruct(images, iw, ih, id, ps, yd, sd, vw, vd, vs, na):
                     # getPixel returns 0 if out of bounds
                     def get_pixel(img, u, v):
                         if 0 <= u < iw and 0 <= v < ih:
-                            return img[v][u] # Source: img[u + iw*v] -> row v, col u
+                            return img[v][u]
                         return 0.0
 
                     v1 = get_pixel(img, iu, iv)
@@ -245,7 +235,7 @@ def fastfdk_reconstruct(images, iw, ih, id, ps, yd, sd, vw, vd, vs, na):
         ang += ang_step
 
     # 4. Normalization
-    epsilon = 1e-9 # Not given, assumed small positive
+    epsilon = 1e-9 # Not given in the sources.
     for j in range(vw):
         for i in range(vw):
             for k in range(vd):
@@ -264,19 +254,22 @@ def fastfdk_reconstruct(images, iw, ih, id, ps, yd, sd, vw, vd, vs, na):
 A technique that reconstructs density values and gradients at arbitrary sample points along a ray directly from 2D projections, avoiding the intermediate step of creating a 3D rectilinear grid. It sets itself apart from grid-based Direct Volume Rendering (DVR) by eliminating interpolation errors associated with voxel sampling, thereby producing higher visual quality for thin structures. It builds on FastFDK by utilizing the FBP reconstruction formula not just for grid generation, but as a direct resampling scheme for arbitrary ray positions.
 
 ## Operating characteristics
-*   **Time Complexity:** The filtering step is $O(m_{id} \cdot m_{ih} \cdot m_{iw} \cdot m_{nf})$ where $m_{nf} \approx m_{iw}/2$. The backprojection step is $O(m_{id} \cdot m_{vw}^2 \cdot m_{vd})$. Overall complexity is linear with respect to the number of voxels and projections.
-*   **Memory Complexity:** $O(m_{vw}^2 \cdot m_{vd})$ for the volume, plus $O(m_{iw} \cdot m_{ih} \cdot m_{id})$ for storing filtered projections and auxiliary arrays [S1, unofficial].
-*   **Performance:** The algorithm is computationally much less expensive than iterative algorithms, making it suitable for clinical environments [S3, unofficial]. The specific FastFDK implementation optimizes for CPU cache locality by precomputing weights and using spatial convolution instead of FFTs for the ramp filter [S1, unofficial].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** The algorithm is computationally much less expensive than iterative algorithms, making it suitable for clinical environments [S6, unofficial]. The specific FastFDK implementation optimizes for CPU cache locality by precomputing weights and using spatial convolution instead of FFTs for the ramp filter [S2, unofficial].
 *   **Strengths:** Fast, analytical, single-pass reconstruction.
-*   **Limitations:** Introduces artifacts and noise compared to iterative methods, especially with sparse data or limited angles [S3, unofficial]. Assumes ideal geometry and linear attenuation.
-*   **When to use:** When speed is critical and data quality is sufficient for analytical reconstruction (e.g., clinical CT, high-quality sinograms).
-*   **When not to use:** When dealing with sparse data, significant noise, or when higher accuracy via iterative refinement is required [S3, unofficial].
+*   **Limitations:** Introduces artifacts and noise compared to iterative methods [S6, unofficial]. Assumes ideal geometry and linear attenuation [G].
+*   **When to use:** When speed is critical and data quality is sufficient for analytical reconstruction (e.g., clinical CT, high-quality sinograms) [S6, unofficial].
+*   **When not to use:** When dealing with sparse data, significant noise, or when higher accuracy via iterative refinement is required [S6, unofficial].
 
 ## Background
-The FDK algorithm was described as the most fundamental algorithm for high-precision CT reconstructions [S3, unofficial]. It is an analytical method that transforms acquired projection data from detector space back to image space [S3, unofficial]. It is widely used in clinical environments due to its computational efficiency compared to iterative algorithms [S3, unofficial]. The "FastFDK" implementation specifically refers to a CPU-based reference implementation optimized for speed using precomputed geometric weights and spatial convolution [S1, unofficial].
+The Filtered Backprojection (FBP) algorithm is described as the most fundamental algorithm still widely used for high-precision CT reconstructions [S6, unofficial]. FastFDK is a specific CPU-based reference implementation optimized for speed using precomputed geometric weights and spatial convolution [S2, unofficial].
 
 ## Sources
-[S1] chmike/FastFDK, https://github.com/chmike/FastFDK, fetched 2026-10-26 (unofficial)
-[S2] adler-j/learned_gradient_tomography, https://github.com/adler-j/learned_gradient_tomography, fetched 2026-10-27 (unofficial)
-[S3] Differential Rendering for Computed Tomography ..., https://www.cg.tuwien.ac.at/research/publications/2022/Vucenovic_2022/Vucenovic_2022-Bachelor%20thesis.pdf, fetched 2026-10-27 (unofficial)
-[S4] hardik0001/ct-reconstruction-gpu, https://github.com/hardik0001/ct-reconstruction-gpu, fetched 2026-10-27 (unofficial)
+[S1] Dynamic Tomographic Reconstruction of Deforming Volumes, https://doi.org/10.3390/ma11081395, fetched 2026-10-26
+[S2] chmike/FastFDK, https://github.com/chmike/FastFDK, fetched 2026-10-26 (unofficial)
+[S3] The Adaption of Recent New Concepts in Neural Radiance Fields and Their Role for High-Fidelity Volume Reconstruction in Medical Images., https://doi.org/10.3390/s24185923, fetched 2026-10-26
+[S4] itu-biai/torchtomo, https://github.com/itu-biai/torchtomo, fetched 2026-10-27 (unofficial)
+[S5] adler-j/learned_gradient_tomography, https://github.com/adler-j/learned_gradient_tomography, fetched 2026-10-27 (unofficial)
+[S6] Differential Rendering for Computed Tomography ..., https://www.cg.tuwien.ac.at/research/publications/2022/Vucenovic_2022/Vucenovic_2022-Bachelor%20thesis.pdf, fetched 2026-10-27 (unofficial)
+[S7] hardik0001/ct-reconstruction-gpu, https://github.com/hardik0001/ct-reconstruction-gpu, fetched 2026-10-27 (unofficial)

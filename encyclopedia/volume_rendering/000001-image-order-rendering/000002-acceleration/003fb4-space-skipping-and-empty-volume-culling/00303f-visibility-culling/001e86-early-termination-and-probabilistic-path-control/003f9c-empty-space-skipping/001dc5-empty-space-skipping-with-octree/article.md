@@ -3,7 +3,7 @@
 Also called: Octree-based Empty Space Skipping, Min-Max Octree Empty Space Skipping, Empty space leaping
 
 ## Overview
-Empty Space Skipping with Octree is an acceleration technique for semi-transparent volume rendering that reduces the number of reconstruction samples by skipping regions of the volume that are completely transparent [S1, unofficial]. It employs hierarchical data structures to precompute minimum and maximum scalar values within volume segments, allowing rays to leap over intervals where the maximum value is less than the specified isovalue or opacity threshold [S2]. Unlike sibling methods that may rely on brick-level classifications or view-dependent working sets, this method embeds the acceleration structure directly within the volume data container, allowing for interactive transfer function changes by recomputing classification based on stored scalar ranges [S1, unofficial][S4, unofficial]. It builds on [Empty-space skipping](1002-empty-space-skipping.md).
+Empty Space Skipping with Octree is an acceleration technique for semi-transparent volume rendering that reduces the number of reconstruction samples by skipping regions of the volume that are completely transparent [S1]. It employs hierarchical data structures to precompute minimum and maximum scalar values within volume segments, allowing rays to leap over intervals where the maximum value is less than the specified isovalue or opacity threshold [S2]. Unlike sibling methods that may rely on brick-level classifications or view-dependent working sets, this method embeds the acceleration structure directly within the volume data container, allowing for interactive transfer function changes by recomputing classification based on stored scalar ranges [S1][S4, unofficial]. It builds on [Empty-space skipping](1002-empty-space-skipping.md).
 
 ## How it works
 **Inputs:**
@@ -19,21 +19,21 @@ Empty Space Skipping with Octree is an acceleration technique for semi-transpare
 The volume is recursively subdivided into an octree where each node stores the scalar range of its subtree [S2].
 *   **Node Structure:** Each node contains `min_val` and `max_val` representing the conservative estimate of the minimum and maximum scalar values appearing in its subtree [S3].
 *   **Leaf Nodes:** Each leaf corresponds to a group of $b^3$ adjacent polynomials (or voxels), where $b$ is a trade-off factor between efficient empty space skipping and memory requirement [S3].
-*   **Histograms (Pre-classification):** For pre-classification applications, quantized binary histograms are used to avoid false classification [S1, unofficial]. The histogram is a list of size $s$ (e.g., 255 for 8-bit voxels). To save memory, this list is quantized into buckets of size 32 [S1, unofficial]. A similar histogram is built for opacity values [S1, unofficial].
+*   **Histograms (Pre-classification):** For pre-classification applications, quantized binary histograms are used to avoid false classification [S1]. The histogram is a list of size $s$ (e.g., 255 for 8-bit voxels). To save memory, this list is quantized into buckets of size 32 [S1]. A similar histogram is built for opacity values [S1].
 
 **Algorithm Steps:**
 
 1.  **Pre-processing (Octree Construction):**
     *   For each cubic cell (leaf), estimate min/max values. If using B-splines, use the convex combination property of the basis functions [S3]. If using polynomial pieces, construct Bernstein-Bézier (BB) forms of the tetrahedral pieces and set the cell's min/max to the min/max of those BB-coefficients [S5].
     *   Propagate min/max values from leaves towards the root of the tree [S3].
-    *   For pre-classification: Iterate over each brick's voxels. Set a flag in the histogram list at index $v$ for every voxel value $v$. Quantize the histogram into buckets of size 32 [S1, unofficial].
+    *   For pre-classification: Iterate over each brick's voxels. Set a flag in the histogram list at index $v$ for every voxel value $v$. Quantize the histogram into buckets of size 32 [S1].
 
 2.  **Ray Traversal (Empty Space Skipping):**
     *   Start traversal at the coarsest level of the octree [S4, unofficial].
     *   Intersect the ray with the current node's bounding box.
     *   **Pruning Condition:** Check if the node is empty relative to the transfer function.
-        *   For **post-classification**: Look up `min_val` and `max_val` in the Summed Area Table (SAT) of the transfer function's opacity. If the opacity at `min_val` and `max_val` indicates full transparency, the node is empty [S1, unofficial].
-        *   For **pre-classification**: Iterate over all buckets in the quantized binary histograms for both scalar values and opacity. If all buckets are classified as transparent, the node is empty [S1, unofficial]. Note: This scheme is conservative; a transparent region may be classified as opaque, but never vice versa [S1, unofficial].
+        *   For **post-classification**: Look up `min_val` and `max_val` in the Summed Area Table (SAT) of the transfer function's opacity. If the opacity at `min_val` and `max_val` indicates full transparency, the node is empty [S1].
+        *   For **pre-classification**: Iterate over all buckets in the quantized binary histograms for both scalar values and opacity. If all buckets are classified as transparent, the node is empty [S1]. Note: This scheme is conservative; a transparent region may be classified as opaque, but never vice versa [S1].
     *   **Leap:** If the node is empty, skip it completely. Update the ray's entry and exit points to the exit point of the current node [S2][S4, unofficial].
     *   **Recurse:** If the node is non-empty and has children, traverse the finer levels [S4, unofficial]. If it is a leaf, perform standard volume rendering (ray marching) within the leaf's bounds [S3].
 
@@ -106,12 +106,12 @@ def render_ray_octree(ray_origin, ray_direction, octree_root, transfer_function)
 
 **Parameters:**
 *   $b$: Trade-off factor for leaf size (group of $b^3$ polynomials/voxels). Not given in the sources.
-*   Bucket size: 32 (for quantized histograms) [S1, unofficial].
+*   Bucket size: 32 (for quantized histograms) [S1].
 *   Opacity threshold: Usually close to opaque for early termination, but distinct from skipping [S4, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Pre-classification False Positives:** In pre-classification, a color value of zero might be computed even if opacities are zero, or a non-zero color might be computed for a voxel with non-zero color. This can lead to false transparent/opaque classification if not handled with conservative histograms [S1, unofficial].
-*   **Conservatism:** The quantized binary histogram scheme is conservative. A transparent region can be classified as opaque, but not vice versa. This ensures no non-transparent regions are skipped, at the cost of potentially skipping fewer empty regions [S1, unofficial].
+*   **Pre-classification False Positives:** In pre-classification, a color value of zero might be computed even if opacities are zero, or a non-zero color might be computed for a voxel with non-zero color. This can lead to false transparent/opaque classification if not handled with conservative histograms [S1].
+*   **Conservatism:** The quantized binary histogram scheme is conservative. A transparent region can be classified as opaque, but not vice versa. This ensures no non-transparent regions are skipped, at the cost of potentially skipping fewer empty regions [S1].
 *   **Precision:** Conservative estimates of min/max values are required to avoid missing the isosurface or opaque regions [S3].
 
 ## Subtopics
@@ -133,10 +133,10 @@ A fast hardware-accelerated Space Carving method using texture mapping, optimize
 
 ## Operating characteristics
 *   **Time Complexity:** Depends on the sparsity of the volume and the depth of the octree. In sparse datasets, traversal time is significantly reduced due to skipping.
-*   **Memory Complexity:** Requires storing min/max values for every node in the octree. Leaf size $b$ affects memory usage; smaller $b$ increases memory overhead but improves skipping efficiency [S3]. Quantized histograms add additional memory overhead [S1, unofficial].
+*   **Memory Complexity:** Requires storing min/max values for every node in the octree. Leaf size $b$ affects memory usage; smaller $b$ increases memory overhead but improves skipping efficiency [S3]. Quantized histograms add additional memory overhead [S1].
 *   **Measured Performance:** Octree-based ESL provides speedups of up to 10x in sparse datasets like CT scans [S2].
-*   **Strengths:** Effective for semi-transparent rendering where large empty regions exist. Interactive transfer function changes are possible with min/max storage [S1, unofficial].
-*   **Limitations:** Pre-classification requires conservative histograms to avoid false negatives, potentially reducing skipping efficiency [S1, unofficial]. Construction of the octree and histograms adds preprocessing time.
+*   **Strengths:** Effective for semi-transparent rendering where large empty regions exist. Interactive transfer function changes are possible with min/max storage [S1].
+*   **Limitations:** Pre-classification requires conservative histograms to avoid false negatives, potentially reducing skipping efficiency [S1]. Construction of the octree and histograms adds preprocessing time.
 *   **When to use:** Sparse volumes with significant empty space, interactive applications requiring transfer function adjustments.
 *   **When not to use:** Dense volumes with little empty space, where the overhead of traversal outweighs the benefits.
 
@@ -144,7 +144,7 @@ A fast hardware-accelerated Space Carving method using texture mapping, optimize
 Empty space skipping with octrees was introduced as an optimization for volume visualization. Levoy proposed an empty-space skipping strategy based on a hierarchical spatial enumeration (an octree) to allow rays to advance more quickly through coherent regions of empty voxels [S4, unofficial]. This technique was further developed for accelerating volume animation and isosurface rendering [S2][S3]. The method exploits ray coherence and the hierarchical nature of octrees to prune empty branches during traversal [S4, unofficial]. It is widely used in medical imaging and scientific visualization applications where volumes often contain substantial empty regions [S2].
 
 ## Sources
-[S1] Interactive Volume Rendering with Ray Tracing, https://doi.org/10.2312/egst.20061055, fetched 2026-10-24 (unofficial)
+[S1] Interactive Volume Rendering with Ray Tracing, https://doi.org/10.2312/egst.20061055, fetched 2026-10-24
 [S2] Volume ray casting — Grokipedia, https://grokipedia.com/page/Volume_ray_casting, fetched 2026-10-26
 [S3] Wavelet-based Multiresolution Isosurface Rendering, https://doi.org/10.2312/vg/vg10/013-020, fetched 2026-10-26
 [S4] Volume Visualization and Compositing on Large-Scale Displays Using Handheld Touchscreen Interaction, https://doi.org/10.25781/kaust-d5m7l, fetched 2026-10-26 (unofficial)

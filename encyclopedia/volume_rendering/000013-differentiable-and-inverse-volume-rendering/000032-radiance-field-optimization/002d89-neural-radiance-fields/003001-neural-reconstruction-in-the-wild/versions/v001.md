@@ -44,24 +44,24 @@ The method builds on the standard volume rendering equation and differentiable r
 ## Subtopics
 
 ### Inverse Projection for Single-View Reconstruction
-A technique to perform single-view reconstruction by optimizing the periodic activation parameters (frequencies and phase shifts) of a frozen implicit radiance field generator to match a target image, without modifying the network weights [S2, unofficial]. This method, associated with $\pi$-GAN, freezes the MLP weights and optimizes the frequencies $\gamma_i$ and phase shifts $\beta_i$ for each layer $i$ [S2, unofficial].
+A technique to perform single-view reconstruction by optimizing the periodic activation parameters (frequencies and phase shifts) of a frozen implicit radiance field generator to match a target image, without modifying the network weights [S2]. This method, associated with $\pi$-GAN, freezes the MLP weights and optimizes the frequencies $\gamma_i$ and phase shifts $\beta_i$ for each layer $i$ [S2].
 
 **Steps:**
-1.  Freeze the parameters of the implicit representation (the MLP weights) [S2, unofficial].
-2.  Identify the learnable parameters: frequencies $\gamma_i$ and phase shifts $\beta_i$ for each MLP layer $i$ [S2, unofficial].
-3.  Initialize $\gamma_i$ and $\beta_i$ to $\bar{\gamma}_i$ and $\bar{\beta}_i$, the center of mass of frequencies and phase shifts for each layer [S2, unofficial].
-4.  Calculate $\bar{\gamma}_i$ and $\bar{\beta}_i$ by averaging the frequencies and phase shifts of 10,000 random noise vector inputs [S2, unofficial].
-5.  Run gradient descent to minimize the mean-squared-error (MSE) image reconstruction loss [S2, unofficial].
-6.  Apply an L2 penalty with weight 0.1 to prevent $\gamma_i$ and $\beta_i$ from straying too far from $\bar{\gamma}_i$ and $\bar{\beta}_i$ [S2, unofficial].
-7.  Optimize using the Adam optimizer over 700 iterations [S2, unofficial].
-8.  Initialize the learning rate to 0.01, decaying by a factor of 0.5 every 200 iterations [S2, unofficial].
+1.  Freeze the parameters of the implicit representation (the MLP weights) [S2].
+2.  Identify the learnable parameters: frequencies $\gamma_i$ and phase shifts $\beta_i$ for each MLP layer $i$ [S2].
+3.  Initialize $\gamma_i$ and $\beta_i$ to $\bar{\gamma}_i$ and $\bar{\beta}_i$, the center of mass of frequencies and phase shifts for each layer [S2].
+4.  Calculate $\bar{\gamma}_i$ and $\bar{\beta}_i$ by averaging the frequencies and phase shifts of 10,000 random noise vector inputs [S2].
+5.  Run gradient descent to minimize the mean-squared-error (MSE) image reconstruction loss [S2].
+6.  Apply an L2 penalty with weight 0.1 to prevent $\gamma_i$ and $\beta_i$ from straying too far from $\bar{\gamma}_i$ and $\bar{\beta}_i$ [S2].
+7.  Optimize using the Adam optimizer over 700 iterations [S2].
+8.  Initialize the learning rate to 0.01, decaying by a factor of 0.5 every 200 iterations [S2].
 
 **Parameters:**
-*   L2 penalty weight: 0.1 [S2, unofficial].
-*   Optimization iterations: 700 [S2, unofficial].
-*   Initial learning rate: 0.01 [S2, unofficial].
-*   Learning rate decay factor: 0.5 every 200 iterations [S2, unofficial].
-*   Number of random noise vectors for initialization: 10,000 [S2, unofficial].
+*   L2 penalty weight: 0.1 [S2].
+*   Optimization iterations: 700 [S2].
+*   Initial learning rate: 0.01 [S2].
+*   Learning rate decay factor: 0.5 every 200 iterations [S2].
+*   Number of random noise vectors for initialization: 10,000 [S2].
 
 ## Operating characteristics
 *   **Time Complexity:** Not given in the sources.
@@ -77,4 +77,4 @@ The method was introduced in the paper "Neural Reconstruction in the Wild" at SI
 
 ## Sources
 [S1] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)
-[S2] pi-GAN: Periodic Implicit Generative Adversarial Networks for 3D-Aware Image Synthesis, https://doi.org/10.1109/cvpr46437.2021.00574, fetched 2026-10-26 (unofficial)
+[S2] pi-GAN: Periodic Implicit Generative Adversarial Networks for 3D-Aware Image Synthesis, https://doi.org/10.1109/cvpr46437.2021.00574, fetched 2026-10-26

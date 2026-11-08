@@ -7,7 +7,7 @@ Hardware-Specific Optimization refers to the adaptation of ray-grid traversal an
 ## Shared principles
 The shared principles involve mapping the logical steps of ray traversal (index advancement, boundary crossing, data access) to hardware-specific constraints. Key mechanisms include:
 1.  **Instruction-Level Parallelism (ILP):** Using SIMD (Single Instruction, Multiple Data) instructions to process multiple rays or components of a ray simultaneously [S2, unofficial].
-2.  **Memory Hierarchy Awareness:** Organizing voxel data and traversal state to maximize cache hit ratios and minimize latency, often by altering memory layout or interleaving addresses [S3, unofficial].
+2.  **Memory Hierarchy Awareness:** Organizing voxel data and traversal state to maximize cache hit ratios and minimize latency, often by altering memory layout or interleaving addresses [S3].
 3.  **Explicit Memory Management:** In architectures lacking hardware caching (e.g., SPU local store), manually managing data movement between main memory and local store [S2, unofficial].
 4.  **Branch Divergence Mitigation:** Structuring traversal loops and data evaluation to minimize conditional branching, which stalls pipelines in SIMD or GPU warp execution [S1].
 
@@ -40,16 +40,16 @@ This variant targets the Cell Broadband Engine (SPE/SPU) architecture, leveragin
 ### UltraVis Cache Optimization
 This variant targets Intel Pentium III processors, addressing cache thrashing via memory layout and interleaved addressing.
 
-*   **Definition:** A highly optimized ray casting approach for semi-transparent volume rendering targeting Intel Pentium III, addressing cache thrashing via memory layout and interleaved addressing [S3, unofficial].
-*   **Step:** Alter the order of voxel values via a cubic interleaved address function to reduce cache thrashing [S3, unofficial].
-*   **Parameter:** Interleaving assumes $n$ is a power of two and $n^3$ is smaller than cache size, occupying $n \times n \times n$ cache locations [S3, unofficial].
-*   **Number:** Rendered UNC MRI-head (256x256x110) at 1.7 to 7.0 fps on PIII 500MHz with 256x256 image resolution [S3, unofficial].
+*   **Definition:** A highly optimized ray casting approach for semi-transparent volume rendering targeting Intel Pentium III, addressing cache thrashing via memory layout and interleaved addressing [S3].
+*   **Step:** Alter the order of voxel values via a cubic interleaved address function to reduce cache thrashing [S3].
+*   **Parameter:** Interleaving assumes $n$ is a power of two and $n^3$ is smaller than cache size, occupying $n \times n \times n$ cache locations [S3].
+*   **Number:** Rendered UNC MRI-head (256x256x110) at 1.7 to 7.0 fps on PIII 500MHz with 256x256 image resolution [S3].
 
 ## Background
-Hardware-specific optimizations have evolved alongside rendering hardware. Early CPU optimizations focused on cache-aware memory layouts, such as the UltraVis system for Pentium III processors, which used cubic interleaved addressing to mitigate cache thrashing [S3, unofficial]. As SIMD capabilities became standard, techniques emerged to vectorize ray traversal and intersection tests, notably on architectures like the Cell Broadband Engine, which required manual instruction scheduling and explicit memory management due to in-order execution and lack of hardware caching [S2, unofficial]. With the rise of GPUs, optimizations shifted towards minimizing branch divergence in shaders and using hierarchical data structures (like octrees) with specific traversal start points to improve coherence [S1]. More recently, GPU-specific optimizations for CSG rendering have introduced uniform grid indexing to avoid redundant full-scans of surface tokens, significantly reducing frame times [4098-gpu-csg-ray-tracing-with-uniform-grid-index.md].
+Hardware-specific optimizations have evolved alongside rendering hardware. Early CPU optimizations focused on cache-aware memory layouts, such as the UltraVis system for Pentium III processors, which used cubic interleaved addressing to mitigate cache thrashing [S3]. As SIMD capabilities became standard, techniques emerged to vectorize ray traversal and intersection tests, notably on architectures like the Cell Broadband Engine, which required manual instruction scheduling and explicit memory management due to in-order execution and lack of hardware caching [S2, unofficial]. With the rise of GPUs, optimizations shifted towards minimizing branch divergence in shaders and using hierarchical data structures (like octrees) with specific traversal start points to improve coherence [S1]. More recently, GPU-specific optimizations for CSG rendering have introduced uniform grid indexing to avoid redundant full-scans of surface tokens, significantly reducing frame times [4098-gpu-csg-ray-tracing-with-uniform-grid-index.md].
 
 ## Sources
 
 [S1] Residency Octree: A Hybrid Approach for Scalable Web ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC10840607/, fetched 2026-10-29
 [S2] Interactive Volume Rendering Techniques, https://www.scribd.com/document/479714183/Interactive-Volume-Rendering-with-Ray-Tracing, fetched 2026-10-25 (unofficial)
-[S3] Interactive Volume Rendering with Ray Tracing, https://doi.org/10.2312/egst.20061055, fetched 2026-10-24 (unofficial)
+[S3] Interactive Volume Rendering with Ray Tracing, https://doi.org/10.2312/egst.20061055, fetched 2026-10-24
