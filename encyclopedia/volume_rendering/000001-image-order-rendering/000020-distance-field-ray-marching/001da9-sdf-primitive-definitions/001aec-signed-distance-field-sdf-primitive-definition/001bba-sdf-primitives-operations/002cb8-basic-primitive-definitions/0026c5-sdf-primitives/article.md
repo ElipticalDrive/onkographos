@@ -7,65 +7,53 @@ SDF Primitives are analytical functions that compute the exact Euclidean signed 
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A query point $p \in \mathbb{R}^3$ and primitive-specific parameters (e.g., radius, half-extents).
-*   **Output:** A scalar signed distance $d \in \mathbb{R}$. $d < 0$ indicates the point is inside the primitive, $d > 0$ indicates it is outside, and $d = 0$ lies on the surface [S1, S9, unofficial].
+*   **Input:** Query point $p \in \mathbb{R}^3$ and primitive-specific parameters.
+*   **Output:** Scalar signed distance $d \in \mathbb{R}$. $d < 0$ indicates the point is inside the primitive, $d > 0$ indicates it is outside, and $d = 0$ lies on the surface [S1, S9, unofficial].
 
-**Data Structures:**
-Primitives are defined in a canonical orientation centered at the origin [SDF Primitives](1731-sdf-primitives.md). To place a primitive at a different location, orientation, or scale, the query point $p$ is transformed before evaluation:
-1.  **Translate:** Replace $p$ with $p - c$, where $c$ is the center [SDF Primitives](1731-sdf-primitives.md).
-2.  **Rotate:** Multiply $p$ by the inverse rotation matrix $R^{-1}$: $p' = R^{-1} p$ [SDF Primitives](1731-sdf-primitives.md).
-3.  **Scale:** Uniformly scale by $s$ using $d(p/s) \cdot s$ [SDF Primitives](1731-sdf-primitives.md).
+All primitives in this family adhere to the computational framework defined in [Basic Primitive Definitions](5346-basic-primitive-definitions.md), including canonical origin placement, inverse transformation of query points, and signed scalar output [S1, S9, unofficial].
 
-**Formulas and Steps:**
-The following implementations assume the primitive is centered at the origin and axis-aligned where applicable.
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-1.  **Sphere:**
-    *   Parameters: Radius $r$.
-    *   Formula: $d(p) = \|p\| - r$ [S1, S2, S5, S9, unofficial].
-    *   Implementation: `return length(p) - r;` [S5, unofficial].
+```python
+def sd_sphere(p, r):
+    return length(p) - r
 
-2.  **Axis-Aligned Box (Cube):**
-    *   Parameters: Half-extents vector $b = (b_x, b_y, b_z)$ [S5, S10, unofficial].
-    *   Steps:
-        1.  Compute $q = |p| - b$ [S10, unofficial].
-        2.  Compute outside distance: $d_{out} = \| \max(q, 0) \|$ [S10, unofficial].
-        3.  Compute inside distance: $d_{in} = \min(\max(q_x, \max(q_y, q_z)), 0)$ [S10, unofficial].
-        4.  Result: $d(p) = d_{out} + d_{in}$ [S10, unofficial].
-    *   Formula: $d(p, b) = \|\max(q, 0)\| + \min(\max(q_x, \max(q_y, q_z)), 0)$ where $q = |p| - b$ [S1, S5, unofficial].
+def sd_box(p, b):
+    q = abs(p) - b
+    return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0)
 
-3.  **Torus:**
-    *   Parameters: Major radius $R$ (hole radius), minor radius $r$ (tube radius) [S2, S8, unofficial].
-    *   Steps:
-        1.  Compute $q = (\sqrt{p_x^2 + p_z^2} - R, p_y)$ [S1, S8, unofficial].
-        2.  Result: $d(p) = \|q\| - r$ [S1, S8, unofficial].
-    *   Implementation: `vec2 q = vec2(length(p.xz) - R, p.y); return length(q) - r;` [S10, unofficial].
+def sd_torus(p, R, r):
+    q = vec2(length(p.xz) - R, p.y)
+    return length(q) - r
 
-4.  **Infinite Plane:**
-    *   Parameters: Normalized normal vector $n$, offset $d$ (distance from origin) [S3, S10, unofficial].
-    *   Formula: $d(p) = \text{dot}(p, n) + d$ [S3, S10, unofficial].
-    *   Note: $n$ must be normalized [S3, unofficial].
+def sd_plane(p, n, d):
+    return dot(p, n) + d
 
-5.  **Cylinder (Capped):**
-    *   Parameters: Radius $r$, half-height $h$ [S10, unofficial].
-    *   Steps:
-        1.  Compute $d = (\text{abs}(\sqrt{p_x^2 + p_z^2}) - r, \text{abs}(p_y) - h)$ [S10, unofficial].
-        2.  Result: $d(p) = \min(\max(d_x, d_y), 0) + \|\max(d, 0)\|$ [S10, unofficial].
+def sd_cylinder(p, r, h):
+    d = vec2(abs(length(p.xz)) - r, abs(p.y) - h)
+    return min(max(d.x, d.y), 0.0) + length(max(d, 0.0))
 
-6.  **Capsule:**
-    *   Parameters: Endpoints $a, b$, radius $r$ [S10, unofficial].
-    *   Steps:
-        1.  Compute vector $ab = b - a$ and $ap = p - a$ [S10, unofficial].
-        2.  Compute projection parameter $t = \text{clamp}(\frac{\text{dot}(ap, ab)}{\text{dot}(ab, ab)}, 0, 1)$ [S10, unofficial].
-        3.  Result: $d(p) = \|ap - ab \cdot t\| - r$ [S10, unofficial].
+def sd_capsule(p, a, b, r):
+    ab = b - a
+    ap = p - a
+    t = clamp(dot(ap, ab) / dot(ab, ab), 0.0, 1.0)
+    return length(ap - ab * t) - r
 
-7.  **Octahedron:**
-    *   Parameters: Size parameter $s$ [S5, unofficial].
-    *   Formula: $d(p) = \frac{|p_x| + |p_y| + |p_z| - s}{\sqrt{3}}$ [S5, unofficial].
-    *   Implementation: `p = abs(p); return (p.x + p.y + p.z - s) * 0.57735027;` [S5, unofficial].
+def sd_octahedron(p, s):
+    p = abs(p)
+    return (p.x + p.y + p.z - s) / sqrt(3.0)
+```
+All implementations assume the primitive is centered at the origin and axis-aligned where applicable [S10, unofficial].
 
-8.  **L-Norm Shapes (Generalized):**
-    *   Helper: $len(v, n) = (|v_x|^n + |v_y|^n + |v_z|^n)^{1/n}$ [S7, unofficial].
-    *   Used to approximate shapes with sharp corners (e.g., N-norm Torus) [S7, unofficial].
+**Parameters:**
+*   Sphere: radius $r$ [S5, unofficial].
+*   Box: half-extents vector $b = (b_x, b_y, b_z)$ [S5, S10, unofficial].
+*   Torus: major radius $R$ (hole radius), minor radius $r$ (tube radius) [S2, S8, unofficial].
+*   Plane: normalized normal vector $n$, offset $d$ (distance from origin) [S3, S10, unofficial].
+*   Cylinder: radius $r$, half-height $h$ [S10, unofficial].
+*   Capsule: endpoints $a, b$, radius $r$ [S10, unofficial].
+*   Octahedron: size parameter $s$ [S5, unofficial].
 
 **Edge Cases and Pitfalls:**
 *   **Normalization:** The plane normal $n$ must be normalized for the distance calculation to be correct [S3, unofficial].
@@ -109,16 +97,16 @@ A Signed Distance Function for a Rhombic Triacontahedron crystal shape, construc
 A composite primitive constructed using standard SDF operations (union, difference) with specific radii ($r_a=5.0, r_b=2.0$) and depth ($d=6.0$), often animated with rotation [S12, unofficial].
 
 ### Spherical Signed Distance Field
-A structure used to represent visibility by encoding the signed distance to the boundary of the occluded region in a sphere, distinct from geometric primitives [S13, unofficial].
+A structure used to represent visibility by encoding the signed distance to the boundary of the occluded region in a sphere [S13, unofficial].
 
 ## Operating characteristics
 *   **Time Complexity:** $O(1)$ per primitive evaluation, as all basic primitives use closed-form algebraic expressions [S1, S10, unofficial].
-*   **Memory Complexity:** $O(1)$, requiring only the storage of primitive parameters (e.g., radius, center) [S4, S5, unofficial].
+*   **Memory Complexity:** Depends on the scene; implementations may store parameters for a fixed maximum number of shapes (e.g., 256) in a uniform buffer [S4, unofficial].
 *   **Performance:** Extremely efficient for simple scenes or when combined with CSG operations, as they avoid mesh traversal or rasterization overhead [S9, S10, unofficial].
-*   **Strengths:** Exact distance estimation allows for large, safe step sizes in ray marching (sphere tracing), reducing the number of iterations required for convergence [S1, S9, unofficial]. Smooth gradients facilitate anti-aliasing and ambient occlusion calculations [S12, S13, S14, unofficial].
-*   **Limitations:** Complex scenes require many primitive evaluations and CSG operations, which can become computationally expensive compared to rasterized meshes for highly detailed geometry [S8, unofficial]. Not suitable for non-convex or highly irregular shapes without decomposition into simpler primitives [S10, unofficial].
+*   **Strengths:** Exact distance estimation allows for large, safe step sizes in ray marching (sphere tracing), reducing the number of iterations required for convergence [S1, S9, unofficial]. Smooth gradients facilitate anti-aliasing and ambient occlusion calculations [S12, S13, unofficial].
+*   **Limitations:** Concave geometry requires smooth boolean approximations, which may introduce artifacts [S10, unofficial].
 *   **When to Use:** Ideal for procedural geometry, soft-body simulation, and real-time ray marching where simplicity and exact distance bounds are prioritized [S1, S5, unofficial].
-*   **When Not to Use:** Unsuitable for complex, organic, or highly detailed meshes that cannot be easily approximated by a combination of basic primitives [S8, unofficial].
+*   **When Not to Use:** Not suitable for geometry that cannot be decomposed into or approximated by basic primitives without excessive complexity [S10, unofficial].
 
 ## Background
 SDF primitives were popularized in computer graphics by Inigo Quilez, who published analytical distance functions for common geometric shapes in his article "Distances" [S8, S10, unofficial]. The technique of using these functions for ray marching, known as "sphere tracing," was introduced by John C. Williams in 1990 [S9, unofficial]. The method has since become a standard tool in creative coding, real-time rendering, and procedural generation due to its simplicity and visual fidelity [S8, S11, unofficial].

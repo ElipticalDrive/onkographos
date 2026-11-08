@@ -1,0 +1,92 @@
+# Voxel Grid to Triangle Mesh Conversion
+
+Also called: Open3D Voxel Grid to Triangle Mesh Conversion
+
+## Overview
+This method converts a discrete boolean voxel occupancy grid into a triangular mesh by generating a box primitive for every occupied voxel and merging them into a single geometry. It differs from surface extraction methods like [Marching Cubes](link) or [Blocky Surface Extraction](6418-blocky-surface-extraction.md) because it preserves the exact volumetric extent of the input data rather than approximating an isosurface, resulting in a "blocky" mesh that represents the union of all voxel cubes.
+
+## How it works
+**Inputs:** A voxel grid data structure (e.g., Open3D `VoxelGrid`) containing occupancy information and spatial metadata.
+**Outputs:** A `TriangleMesh` object containing the triangulated faces of all occupied voxels.
+
+**Data Structures:**
+*   **Voxel Grid:** Stores voxel occupancy. Accessors provide the list of voxels and their geometric properties.
+*   **TriangleMesh:** Accumulates vertices and triangle indices from individual box primitives.
+
+**Steps:**
+1.  Initialize an empty `TriangleMesh` object to serve as the container for the final mesh.
+2.  Retrieve the collection of all voxels from the input grid.
+3.  Determine the physical dimensions (size) of a single voxel in the grid.
+4.  For each voxel in the collection:
+    a.  Create a primitive box geometry.
+    b.  Scale the box dimensions to match the voxel size obtained in step 3.
+    c.  Determine the center coordinate of the voxel in world space.
+    d.  Translate the box so its center aligns with the voxel center.
+    e.  Merge the box's vertices and triangles into the `TriangleMesh` container.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def voxel_grid_to_triangle_mesh(voxel_grid):
+    # Step 1: Create an empty TriangleMesh object
+    mesh = TriangleMesh()
+
+    # Step 2: Extract all voxels from the grid
+    # Returns a list/array of voxel objects
+    voxels = voxel_grid.get_voxels()
+
+    # Step 3: Get the true size of the created voxels
+    # This returns the physical dimensions (width, height, depth) of one voxel
+    voxel_size = voxel_grid.get_voxel_size()
+
+    # Step 4: Iterate through voxels and build mesh
+    for voxel in voxels:
+        # Step 4a: Create an Open3D box primitive
+        # A unit box is typically created first
+        box = create_box_primitive()
+
+        # Step 4b: Scale the boxes to the size of the voxels
+        # Scale factors are the voxel dimensions
+        box.scale(voxel_size, origin=BoxOrigin.Center)
+
+        # Step 4c: Position the boxes at the voxel centers
+        # Get the world-space center coordinate of the current voxel
+        center = voxel_grid.get_voxel_center_coordinate(voxel)
+
+        # Translate the box to the center
+        box.translate(center)
+
+        # Step 4e: Add the created, scaled, and positioned box to the TriangleMesh object
+        # This merges vertices and indices into the main mesh
+        mesh.add_box(box)
+
+    return mesh
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The method relies on the accuracy of `get_voxel_center_coordinate()` and `get_voxel_size()`. Floating-point errors in large scenes may cause slight gaps or overlaps between adjacent boxes if not handled by the underlying geometry library's merge logic [G].
+*   **Memory:** The output mesh size is proportional to the number of occupied voxels multiplied by the number of faces per box (typically 12 triangles for a cube). This can lead to high memory usage for dense grids.
+
+## Subtopics
+
+### Simple Conversion
+A variant prioritizing speed over high-fidelity detail preservation, suitable when a mesh is needed ASAP or subtle details are not critical [S2].
+*   **Workflow:** Upload voxel data (DICOM, RAW, or TIFF), apply noise reduction (e.g., 'Change ISO' to isolate the region of interest), navigate to the 'Voxels to Mesh' tab, select 'Simple Conversion', and click 'Convert' [S2].
+*   **Parameters:** An optional 'Preserve Voxel Object' setting keeps the original voxel data in the scene, resulting in the simple mesh overlaying the original object [S2].
+*   **Comparison:** Unlike the Open3D method which constructs geometry from primitives, this variant is a software feature within MeshInspector that may involve preprocessing steps like noise reduction before conversion [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of occupied voxels, $O(N)$, where $N$ is the count of voxels. Each voxel requires constant-time geometry creation and merging.
+*   **Memory Complexity:** Linear with respect to the number of occupied voxels. The output mesh contains $6N$ vertices and $12N$ triangles (assuming non-merged faces).
+*   **Strengths:** Exact representation of the voxel volume; no artifacts from isosurface approximation; simple implementation.
+*   **Limitations:** High polygon count for dense grids; "blocky" appearance does not smooth the surface; not suitable for applications requiring smooth surfaces or collision detection on smooth boundaries.
+*   **When to use:** Visualization of voxel data, animation of voxel transitions, or when the exact volumetric boundary is required without smoothing.
+*   **When not to use:** When a smooth surface is needed (use [Marching Cubes](link) or [VoxelBodyMeshing](6947-voxelbodymeshing.md)); when memory is constrained.
+
+## Background
+This method is described in the context of the Open3D library, where it is used to transform voxel grids into meshes for visualization and animation, as voxel grids themselves cannot be directly rendered as meshes in some contexts [S1, unofficial]. The approach is attributed to Florent Poux, Ph.D. [S1, unofficial]. It serves as a basic conversion technique compared to more advanced surface extraction algorithms.
+
+## Sources
+[S1] How to Voxelize Meshes and Point Clouds in Python - Medium, https://medium.com/data-science/how-to-voxelize-meshes-and-point-clouds-in-python-ca94d403f81d, fetched 2026-10-28 (unofficial)
+[S2] How to convert voxel to mesh with MeshInspector, https://meshinspector.com/knowledge-base/voxel-ct/how-to-convert-voxel-to-mesh-with-meshinspector/, fetched 2026-10-30

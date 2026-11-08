@@ -3,202 +3,179 @@
 Also called: Implicit Surface Raycasting via Polynomial Composition, Polynomial Raycasting
 
 ## Overview
-Algebraic Surface Raycasting is an image-order rendering technique that computes the first intersection of a viewing ray with an isosurface defined by a trivariate polynomial function. It solves the problem of rendering implicit surfaces from volumetric data by transforming the 3D field evaluation into a 1D rootfinding problem along each ray. Unlike voxel-based marching methods that rely on discrete sampling and interpolation, this method constructs an exact univariate polynomial representation of the scalar field along the ray, allowing for analytical or high-precision numerical root isolation. It is distinguished from [Cell-Based First-Hit Ray Casting](1039-cell-based-first-hit-ray-casting.md) by its global polynomial composition approach rather than local cell traversal, and from [Upson-Keller Polygon Method](2041-upson-keller-polygon-method.md) by its use of general polynomial rootfinding rather than specific polygonal approximations.
+Algebraic Surface Raycasting is an image-order rendering technique for isosurfaces where the volumetric scalar field is represented as a trivariate polynomial. It solves the intersection problem by composing the trivariate field function with the ray equation to produce a univariate polynomial, then finding the roots of this polynomial to determine the hit point [S1]. It distinguishes itself from voxel-based marching methods by providing an exact analytical representation of the surface within each polynomial patch, avoiding discretization errors inherent in grid-based sampling, though it requires the field to be explicitly defined as a polynomial [S1].
 
 ## How it works
-The method consists of two core phases: composition (transforming the trivariate field into a univariate polynomial along the ray) and rootfinding (identifying the first positive root of the polynomial minus the isovalue).
+**Inputs and Outputs:**
+- **Input:** A trivariate polynomial function $f(x, y, z)$ of degree $d$ in each dimension (total degree $3d$), defined by coefficients $f_{ijk}$; a ray defined by origin $\mathbf{p}$ and direction $\mathbf{v}$; an isovalue $c$.
+- **Output:** The first intersection parameter $t^*_0$ along the ray where $f(\mathbf{r}(t)) = c$.
 
-### Inputs and Outputs
-- **Input**:
-  - Ray origin $\mathbf{p}$ and direction $\mathbf{v}$ (normalized).
-  - Scalar field function $f(x, y, z)$ defined as a trivariate polynomial of degree $d$ in each dimension.
-  - Isovalue $c$.
-  - Ray bounds $[t_{min}, t_{max}]$ (typically $t_{min}=0$).
-- **Output**:
-  - Intersection parameter $t^*_0$ (the smallest root $> t_{min}$).
-  - Intersection point $\mathbf{x}^* = \mathbf{p} + t^*_0 \mathbf{v}$.
+**Data Structures:**
+The field is stored as a 3D array of coefficients $f_{ijk}$ for $0 \leq i, j, k \leq d$. The ray is stored as two 3D vectors $\mathbf{p}$ and $\mathbf{v}$. The resulting univariate polynomial is stored as an array of coefficients $a_m$ for $m \in [0, 3d]$.
 
-### Data Structures
-The scalar field is represented by its coefficients in power basis form. For a polynomial of degree $d$ in $x, y, z$:
-$$ f(x, y, z) = \sum_{i=0}^{d} \sum_{j=0}^{d} \sum_{k=0}^{d} f_{ijk} x^i y^j z^k $$
-The coefficients $f_{ijk}$ are stored in a 3D array of size $(d+1) \times (d+1) \times (d+1)$. Common interpolation schemes (e.g., tri-linear, tri-cubic) map voxel grid values to these coefficients [S1].
+**Steps:**
+1.  **Ray Definition:** Define the ray $\mathbf{r}(t) = \mathbf{p} + t \cdot \mathbf{v}$, where $\mathbf{p} = (p_x, p_y, p_z)$ and $\mathbf{v} = (v_x, v_y, v_z)$ [S1].
+2.  **Composition:** Substitute the ray equation into the trivariate polynomial $f(x, y, z) = \sum_{0 \leq i, j, k \leq d} f_{ijk} x^i y^j z^k$ [S1].
+    The resulting expression is a univariate polynomial in $t$:
+    $$ (f \circ \mathbf{r})(t) = \sum_{m=0}^{3d} a_m t^m $$
+    The coefficients $a_m$ are derived by expanding $(p_x + t v_x)^i (p_y + t v_y)^j (p_z + t v_z)^k$ and summing the contributions weighted by $f_{ijk}$ [S1].
+3.  **Isovalue Subtraction:** Subtract the isovalue $c$ from the constant term of the univariate polynomial to form the root-finding function:
+    $$ P(t) = (f \circ \mathbf{r})(t) - c = \sum_{m=0}^{3d} a_m t^m - c $$
+    Note that the constant term becomes $a_0 - c$, where $a_0 = f(p_x, p_y, p_z)$ [S1].
+4.  **Root Finding:** Find the smallest positive real root $t^*_0$ of $P(t) = 0$.
+    - For degrees $\leq 4$, closed-form solutions (quadratic, cubic, quartic formulas) may be used [S1].
+    - For higher degrees, numerical methods such as Bézier clipping are employed to isolate and converge to the first root [S1].
+5.  **Hit Point Calculation:** Compute the intersection position $\mathbf{h} = \mathbf{p} + t^*_0 \cdot \mathbf{v}$ [S1].
+6.  **Shading:** Compute the surface normal $\mathbf{n} = \nabla f(\mathbf{h})$ using the gradient of the trivariate polynomial, then apply a lighting model (e.g., Phong) [S1, S3, S6].
 
-### Steps
-
-1. **Ray Definition**:
-   Define the ray equation:
-   $$ \mathbf{r}(t) = \mathbf{p} + t \cdot \mathbf{v} $$
-   where $\mathbf{p} = (p_x, p_y, p_z)$ and $\mathbf{v} = (v_x, v_y, v_z)$ [S1].
-
-2. **Composition**:
-   Substitute $\mathbf{r}(t)$ into $f(x, y, z)$ to obtain a univariate polynomial $P(t)$ of degree $D = 3d$ (for tri-linear, $d=1, D=3$; for tri-cubic, $d=3, D=9$):
-   $$ P(t) = f(p_x + t v_x, p_y + t v_y, p_z + t v_z) $$
-   $$ P(t) = \sum_{n=0}^{D} a_n t^n $$
-   The coefficients $a_n$ are computed by expanding the trivariate polynomial. A naive substitution is inefficient; optimized composition algorithms reduce the operation count [S1].
-
-3. **Isovalue Subtraction**:
-   Define the rootfinding polynomial $Q(t)$:
-   $$ Q(t) = P(t) - c = \sum_{n=0}^{D} a_n t^n - c $$
-   The constant term becomes $a_0 - c$.
-
-4. **Rootfinding**:
-   Find the smallest real root $t^*_0$ of $Q(t) = 0$ such that $t^*_0 > t_{min}$.
-   - For low degrees ($D \le 4$), closed-form solutions (quadratic, cubic, quartic formulas) can be used [S2].
-   - For higher degrees, numerical methods such as Bézier clipping or eigenvalue-based companion matrix solvers are required [S2].
-   - The rootfinder must isolate the first root within $[t_{min}, t_{max}]$.
-
-5. **Intersection Point**:
-   Compute $\mathbf{x}^* = \mathbf{p} + t^*_0 \mathbf{v}$.
-
-6. **Shading**:
-   Compute the surface normal $\mathbf{n} = \nabla f(\mathbf{x}^*)$ using the gradient of the trivariate polynomial, then apply lighting models [S3, unofficial][S1].
-
-### Pseudocode
-
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def algebraic_surface_cast(p, v, coeffs, c, t_min, t_max):
+def algebraic_surface_cast(p, v, coeffs, isovalue, max_degree):
     """
-    Cast a ray against an algebraic isosurface.
+    Cast a ray against an algebraic surface defined by polynomial coefficients.
     
     Args:
         p: Ray origin (vec3)
-        v: Ray direction (vec3, normalized)
+        v: Ray direction (vec3)
         coeffs: 3D array of shape (d+1, d+1, d+1) containing f_ijk
-        c: Isovalue
-        t_min: Minimum ray parameter
-        t_max: Maximum ray parameter
+        isovalue: Scalar isovalue c
+        max_degree: Degree d of the polynomial in each dimension
         
     Returns:
-        t_star: First intersection parameter, or infinity if no hit
+        t_hit: The first positive root t, or infinity if no hit
     """
-    d = coeffs.shape[0] - 1
+    d = max_degree
     
-    # Step 1: Composition
-    # Compute univariate polynomial coefficients a_n for P(t) = sum(a_n * t^n)
-    # P(t) = f(p + t*v)
-    # This involves expanding sum(f_ijk * (p_x + t*v_x)^i * (p_y + t*v_y)^j * (p_z + t*v_z)^k)
-    # Optimized composition is recommended [S1]
-    a = compose_univariate(p, v, coeffs, d)
+    # Step 1 & 2: Composition
+    # Initialize univariate polynomial coefficients a_m for m in 0..3d
+    a = [0.0] * (3 * d + 1)
     
-    # Step 2: Subtraction
-    # Q(t) = P(t) - c
-    # Only the constant term changes
-    a[0] = a[0] - c
-    
-    # Step 3: Rootfinding
-    # Find smallest real root t in [t_min, t_max]
-    # Degree D = 3*d
-    D = 3 * d
-    
-    if D <= 4:
-        # Use closed-form solver for low degrees
-        roots = solve_polynomial_closed_form(a, D)
-    else:
-        # Use numerical method (e.g., Bézier clipping or companion matrix)
-        roots = solve_polynomial_numerical(a, D)
-    
-    # Filter roots
-    valid_roots = [t for t in roots if t > t_min and t <= t_max]
-    
-    if not valid_roots:
-        return float('inf')
-    
-    # Return the first (smallest) intersection
-    return min(valid_roots)
-
-def compose_univariate(p, v, coeffs, d):
-    """
-    Compute coefficients a_n of the univariate polynomial P(t) = f(p + t*v).
-    f(x,y,z) = sum_{i,j,k} f_ijk * x^i * y^j * z^k
-    x = p_x + t*v_x, etc.
-    
-    Returns array a of size 3*d + 1
-    """
-    # Naive expansion is O(d^4). Optimized methods exist [S1].
-    # Here we outline the mathematical expansion:
-    # (p_x + t*v_x)^i = sum_{m=0}^i binom(i,m) * p_x^(i-m) * v_x^m * t^m
-    # Similarly for y and z.
-    # P(t) = sum_{i,j,k} f_ijk * [sum_m C(i,m) p_x^{i-m} v_x^m t^m] * ...
-    # Collect terms for each power of t.
-    
-    # Implementation detail: Use Horner's method or nested evaluation for efficiency [G]
-    # For correctness, we expand fully here for clarity
-    max_degree = 3 * d
-    a = [0.0] * (max_degree + 1)
-    
+    # Iterate over all trivariate coefficients
     for i in range(d + 1):
         for j in range(d + 1):
             for k in range(d + 1):
-                coeff = coeffs[i, j, k]
-                # Expand (p_x + t*v_x)^i
-                # Expand (p_y + t*v_y)^j
-                # Expand (p_z + t*v_z)^k
-                # Multiply and add to a
+                f_ijk = coeffs[i, j, k]
+                if f_ijk == 0:
+                    continue
                 
-                # This part is computationally expensive; optimized composition is critical [S1]
-                # Placeholder for optimized composition logic
-                pass 
+                # Expand (px + tx)^i * (py + ty)^j * (pz + tz)^k
+                # This results in a polynomial of degree i+j+k
+                # We need to add f_ijk * this_poly to the global sum a
                 
-    return a
+                # Precompute binomial coefficients or compute on fly
+                # For efficiency, one might use Horner's method or precomputed powers,
+                # but here we expand explicitly for clarity.
+                
+                # Term x^i: sum_{a=0}^i C(i,a) * px^(i-a) * vx^a * t^a
+                # Term y^j: sum_{b=0}^j C(j,b) * py^(j-b) * vy^b * t^b
+                # Term z^k: sum_{c=0}^k C(k,c) * pz^(k-c) * vz^c * t^c
+                
+                # Combine to get coefficient for t^(a+b+c)
+                for a_idx in range(i + 1):
+                    coeff_x = binomial(i, a_idx) * (p.x ** (i - a_idx)) * (v.x ** a_idx)
+                    for b_idx in range(j + 1):
+                        coeff_y = binomial(j, b_idx) * (p.y ** (j - b_idx)) * (v.y ** b_idx)
+                        for c_idx in range(k + 1):
+                            coeff_z = binomial(k, c_idx) * (p.z ** (k - c_idx)) * (v.z ** c_idx)
+                            
+                            power_t = a_idx + b_idx + c_idx
+                            term_val = coeff_x * coeff_y * coeff_z * f_ijk
+                            a[power_t] += term_val
 
-def solve_polynomial_closed_form(a, D):
-    """
-    Solve polynomial sum(a_n * t^n) = 0 for D <= 4.
-    """
-    if D == 1:
-        return [-a[1] / a[0]] if a[0] != 0 else []
-    elif D == 2:
-        # Quadratic formula
-        A, B, C = a[2], a[1], a[0]
-        disc = B*B - 4*A*C
-        if disc < 0: return []
-        sqrt_disc = sqrt(disc)
-        return [(-B - sqrt_disc)/(2*A), (-B + sqrt_disc)/(2*A)]
-    elif D == 3:
-        # Cubic formula (Cardano's)
-        return solve_cubic(a)
-    elif D == 4:
-        # Quartic formula
-        return solve_quartic(a)
-    return []
+    # Step 3: Subtraction
+    a[0] -= isovalue
+    
+    # Step 4: Root Finding
+    # Find smallest positive real root of sum(a[m] * t^m) = 0
+    t_hit = find_first_positive_real_root(a)
+    
+    return t_hit
 
-def solve_polynomial_numerical(a, D):
+def binomial(n, k):
+    """Compute binomial coefficient C(n, k)."""
+    if k < 0 or k > n:
+        return 0
+    if k == 0 or k == n:
+        return 1
+    if k > n // 2:
+        k = n - k
+    
+    res = 1
+    for i in range(k):
+        res = res * (n - i) // (i + 1)
+    return res
+
+def find_first_positive_real_root(coeffs):
     """
-    Solve polynomial for D > 4 using Bézier clipping or companion matrix.
+    Find the smallest positive real root of the polynomial defined by coeffs.
+    Uses closed-form for degree <= 4, else numerical method.
     """
-    # Bézier clipping iteratively refines the interval containing the root [S2]
-    # Companion matrix eigenvalues give all roots
-    # Return all real roots
-    pass
+    degree = len(coeffs) - 1
+    
+    if degree == 1:
+        # a1*t + a0 = 0 => t = -a0/a1
+        if abs(coeffs[1]) < 1e-9:
+            return float('inf')
+        t = -coeffs[0] / coeffs[1]
+        return t if t > 0 else float('inf')
+        
+    elif degree == 2:
+        # a2*t^2 + a1*t + a0 = 0
+        a, b, c = coeffs[2], coeffs[1], coeffs[0]
+        disc = b*b - 4*a*c
+        if disc < 0:
+            return float('inf')
+        sqrt_disc = math.sqrt(disc)
+        t1 = (-b - sqrt_disc) / (2*a)
+        t2 = (-b + sqrt_disc) / (2*a)
+        roots = [r for r in [t1, t2] if r > 0]
+        return min(roots) if roots else float('inf')
+        
+    elif degree == 3:
+        # Cubic formula implementation omitted for brevity, 
+        # but standard closed-form exists [S1].
+        return solve_cubic(coeffs)
+        
+    elif degree == 4:
+        # Quartic formula implementation omitted for brevity,
+        # standard closed-form exists [S1].
+        return solve_quartic(coeffs)
+        
+    else:
+        # Higher degrees: Use numerical method like Bézier clipping [S1]
+        return numerical_root_finding(coeffs)
 ```
 
-### Parameters and Edge Cases
-- **Degree $d$**: Typically 1 (tri-linear) or 3 (tri-cubic). Higher degrees increase composition cost significantly [S1].
-- **Precision**: Floating-point errors in composition can affect root accuracy. Use double precision for critical applications [G].
-- **Degenerate Input**: If $f_{ijk}$ are all zero, the field is constant. If $c=0$ and $f=0$, the entire space is the surface.
-- **No Root**: If $Q(t)$ has no real roots in $[t_{min}, t_{max}]$, the ray misses the isosurface.
+**Parameters:**
+- $d$: Polynomial degree. Typical values are $d=1$ (tri-linear) or $d=3$ (tri-cubic) for voxel data [S1].
+- $c$: Isovalue. Application-dependent.
+
+**Edge Cases and Pitfalls:**
+- **Precision:** High-degree polynomials can suffer from numerical instability during coefficient calculation and root finding [S1].
+- **Boundary Conditions:** The polynomial approximation is valid only within the support of the basis functions (e.g., within a voxel or wavelet node). Outside this domain, the field definition may be discontinuous or undefined [S1].
+- **Degenerate Input:** If the ray is tangent to the surface or misses it entirely, root finding may return no positive real roots or multiple roots requiring careful selection of the *first* hit [S1].
 
 ## Subtopics
 
-### Hermite Polynomial Approximation for Convolution Surfaces
-A method for rendering convolution surfaces (implicit surfaces defined by the summation of kernel functions around primitives) where the field is approximated by piecewise polynomials along the ray. It subdivides the ray interval intersecting a primitive, samples Hermite data (value and derivative) at boundaries, and constructs cubic polynomial approximations. Roots are computed analytically. It is chosen when rendering smooth, organic shapes defined by skeletal primitives. Pitfalls include poor approximation with few intervals and Runge's phenomenon with higher-degree approximations [S2].
+### [Polynomial Root Finding (Compact Kernel)](4022-polynomial-root-finding-compact-kernel.md)
+Polynomial Root Finding (Compact Kernel) is a variant that uses compact polynomial kernels to define the field function along a ray, resulting in a piecewise polynomial. It distinguishes itself by leveraging the specific algebraic structure of compact kernels to provide robust root-finding strategies, including closed-form solutions for low degrees and Bézier clipping for higher degrees. It is chosen when the underlying data is represented by point primitives with compact support, allowing for efficient local evaluation and robust root isolation. See [Polynomial Root Finding (Compact Kernel)](4022-polynomial-root-finding-compact-kernel.md).
 
-### Polynomial Root Finding (Compact Kernel)
-A technique for point primitives defined by compact polynomial kernels. The field along the ray is a piecewise polynomial. For degrees $\le 4$, closed-form roots are used. For higher degrees, the Bézier clipping algorithm is employed to iteratively converge to the first root or reject root-free intervals. It is chosen for efficient rendering of particle-based or point-sampled surfaces [S2].
+### Hermite Polynomial Approximation for Convolution Surfaces
+Hermite Polynomial Approximation for Convolution Surfaces builds polynomial approximations of the field value along the ray for convolution surfaces, allowing analytical computation of roots [S2]. It distinguishes itself by using Hermite data (field value and derivative) sampled at subinterval boundaries to construct cubic polynomial approximations on uniformly subdivided intervals [S2]. It is chosen for rendering scale-invariant integral surfaces (convolution surfaces) where the field is defined by the summation of primitive contributions [S2]. Pitfalls include the difficulty in choosing an adequate subdivision level: too few intervals cause poor approximation, while too many increase computational time and cause data coherence issues on GPU [S2]. Higher-degree approximations avoid subdivision but lose closed-form solutions and suffer from Runge's phenomenon oscillations [S2].
 
 ## Operating characteristics
-- **Time Complexity**: Composition is $O(d^3)$ or $O(d^4)$ depending on implementation, where $d$ is the polynomial degree per dimension. Rootfinding is $O(1)$ for closed-form (low degree) or $O(\log(1/\epsilon))$ for iterative methods. Overall per-pixel cost is dominated by composition for high degrees.
-- **Memory Complexity**: $O(d^3)$ to store coefficients.
-- **Performance**: Faster than marching cubes for high-resolution data as it avoids grid traversal and interpolation overhead. However, high-degree polynomials are expensive to compose.
-- **Strengths**: Exact intersection points (up to rootfinding precision), smooth shading via analytical gradients, no discretization artifacts from voxel grids.
-- **Limitations**: High computational cost for high-degree polynomials. Numerical instability in rootfinding for high degrees. Not suitable for non-polynomial fields without approximation.
-- **When to use**: High-quality offline rendering, medical visualization with tri-cubic interpolation, smooth implicit surfaces.
-- **When not to use**: Real-time rendering with very high degrees, non-polynomial fields, or when memory bandwidth is limited.
+- **Time Complexity:** Composition is $O(d^3)$ per ray if implemented naively by expanding all terms, but can be optimized. Root finding is $O(1)$ for low degrees (closed-form) or iterative for higher degrees.
+- **Memory Complexity:** $O(d^3)$ to store the polynomial coefficients $f_{ijk}$ [S1].
+- **Measured Performance:** The composition step is a bottleneck for higher-order surfaces [S1]. The method offers significant speedup over naive composition implementations [S1].
+- **Strengths:** Exact representation of the isosurface within the polynomial domain; no discretization artifacts from voxel marching; efficient for smooth, analytic fields [S1].
+- **Limitations:** Limited to polynomial representations; high-degree polynomials can be numerically unstable; subdivision required for complex primitives like convolution surfaces [S1, S2].
+- **When to use:** When the volumetric data can be accurately represented by polynomials (e.g., wavelet-based representations, compact kernels) and high visual fidelity is required [S1].
+- **When not to use:** For general voxel data without polynomial approximation, or when real-time performance is critical and the overhead of composition/root-finding is prohibitive compared to simpler marching methods [S1].
 
 ## Background
-The method originates from the need to render isosurfaces from volumetric data more accurately than voxel-based methods. It was formalized in the context of wavelet-based multiresolution rendering, where polynomial approximations of the field are used to enable efficient composition and rootfinding [S1]. The approach leverages the algebraic nature of polynomial interpolation (e.g., tri-linear, tri-cubic) to transform the 3D implicit surface query into a 1D polynomial root problem. Variants for convolution surfaces and compact kernels extend the method to point-based and skeletal implicit representations [S2].
+Algebraic Surface Raycasting originated from the need to render isosurfaces from volumetric data with higher accuracy than voxel-based methods [S1]. It was notably developed in the context of wavelet-based multiresolution rendering, where wavelet transforms allow selective removal of irrelevant data while maintaining a good approximation of the continuous domain [S1]. The method leverages the fact that common interpolation functions (tri-linear, tri-cubic) result in piecewise algebraic surfaces [S1]. It is used in medical visualization, engineering, and computer games for applications requiring precise isosurface extraction [S1].
 
 ## Sources
 [S1] Wavelet-based Multiresolution Isosurface Rendering, https://doi.org/10.2312/vg/vg10/013-020, fetched 2026-10-26

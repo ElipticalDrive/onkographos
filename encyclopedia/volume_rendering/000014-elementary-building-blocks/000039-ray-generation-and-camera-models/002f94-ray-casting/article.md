@@ -1,0 +1,102 @@
+# Ray Casting
+Also called: Primary Ray Tracing
+
+## Overview
+Ray casting is the fundamental image synthesis technique that generates primary rays through image pixels to determine visible geometry and accumulate light contributions, serving as the base layer for more complex ray tracing algorithms [S1, S2, unofficial]. It is distinguished from full ray tracing by its exclusive use of primary (viewing) rays, omitting secondary rays for shadows, reflections, or refractions [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A camera model defining the origin $\mathbf{o}$ and direction $\mathbf{d}$ for each pixel; a scene representation (primitives or volume data).
+*   **Output:** A 2D image where each pixel contains the accumulated color or intensity along its corresponding ray.
+
+**Data Structures**
+*   **Ray:** Defined by origin $\mathbf{o}$ and direction $\mathbf{d}$. The direction is typically normalized.
+*   **Scene:** A collection of primitives or a volumetric grid. The specific structure depends on the acceleration method (e.g., BVH for polygons, Voxel Grid for volumes), but the ray casting core assumes a method to enumerate or sample along the ray.
+
+**Algorithm Steps**
+1.  Iterate over all pixels in the image plane.
+2.  For each pixel, generate a primary ray $R(t)$ using the camera model.
+3.  Enumerate primitives or sample volume data along the ray $R(t)$.
+4.  Accumulate the contribution (color, opacity, etc.) from the intersected or sampled elements.
+5.  Store the accumulated result in the corresponding pixel buffer.
+
+**Formulas**
+The ray is defined parametrically as [S2, unofficial]:
+$$ R(t) = \mathbf{o} + \mathbf{d} \cdot t $$
+Where:
+*   $R(t)$ is the ray at parameter $t$.
+*   $\mathbf{o}$ is the ray origin (camera eye position).
+*   $\mathbf{d}$ is the ray direction vector.
+*   $t$ is the distance along the ray ($t \ge 0$).
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_cast(scene, camera, width, height):
+    # Initialize output image buffer
+    image = new float[width][height][3]
+    
+    # Iterate over all pixels
+    for y from 0 to height - 1:
+        for x from 0 to width - 1:
+            # Generate primary ray for this pixel
+            # Note: Exact pixel-to-ray mapping depends on camera model
+            # [G] Assuming a standard pinhole camera for this example
+            ray_origin = camera.eye_position
+            ray_direction = normalize(camera.get_ray_direction(x, y))
+            
+            # Enumerate primitives or sample volume along the ray
+            # [G] This step varies significantly by scene type (polygon vs volume)
+            # For a generic implementation, we assume a function that returns
+            # the closest intersection or accumulated transmittance.
+            color = accumulate_contribution(scene, ray_origin, ray_direction)
+            
+            # Store result
+            image[y][x] = color
+            
+    return image
+
+def accumulate_contribution(scene, origin, direction):
+    # Placeholder for scene-specific intersection or sampling logic
+    # [G] In volume rendering, this involves ray marching through a grid.
+    # In polygon rendering, this involves bounding volume hierarchy traversal.
+    # Since the core definition of Ray Casting is the *generation* and *accumulation*
+    # along the primary ray, the specific intersection math is delegated to the
+    # scene representation.
+    return [0.0, 0.0, 0.0] # Not given in the sources.
+```
+
+**Parameters**
+*   **Resolution:** Width and height of the image plane.
+*   **Ray Direction:** Determined by the camera model (e.g., perspective, orthographic).
+
+**Edge Cases and Pitfalls**
+*   **Degenerate Rays:** If $\mathbf{d}$ is not normalized, $t$ does not represent Euclidean distance, potentially causing incorrect sampling intervals in volume rendering.
+*   **Boundary Conditions:** Rays may miss the scene entirely; the algorithm must handle "no hit" cases by assigning a background color.
+
+## Subtopics
+
+### [Camera Ray Generation](7456-camera-ray-generation.md)
+Defines how specific camera parameters map to ray origins and directions.
+
+### [Grid Ray Sampler](3930-grid-ray-sampler.md)
+Optimizes the enumeration of volume data along the ray for voxel grids.
+
+### [Compute Shader Ray Marching Setup](3487-compute-shader-ray-marching-setup.md)
+Details the parallel execution structure for GPU-based ray casting.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the number of primitives or samples per ray.
+*   **Memory Complexity:** $O(N)$ for the image buffer, plus $O(P)$ for the scene representation, where $P$ is the number of primitives or voxels.
+*   **Strengths:** Simple implementation; excellent for basic visibility determination; serves as the foundation for global illumination.
+*   **Limitations:** Cannot handle complex lighting effects (shadows, reflections) without secondary rays; performance degrades with high scene complexity without acceleration structures.
+*   **When to use:** Basic visibility checks, simple volume rendering without global illumination, or as a base for more complex ray tracing algorithms.
+*   **When not to use:** When realistic lighting (shadows, reflections) is required; when performance is critical for highly complex scenes without acceleration.
+
+## Background
+Ray casting was introduced as the basic form of ray tracing, considering only primary rays [S1, unofficial]. It is a physically-based image synthesis technique known for excellent image quality [S2, unofficial]. While historically considered too slow for interactive applications, recent advances have enabled real-time frame rates for both polygonal scenes and volume data sets [S2, unofficial]. The technique is widely used in volume rendering, where it forms the core of interactive volume rendering techniques [S2, unofficial].
+
+## Sources
+[S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)
+[S2] Interactive Volume Rendering Techniques, https://www.scribd.com/document/479714183/Interactive-Volume-Rendering-with-Ray-Tracing, fetched 2026-10-25 (unofficial)

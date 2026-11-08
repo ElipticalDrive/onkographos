@@ -3,58 +3,54 @@
 Also called: Gaussian Avatar / 3DGS-Avatar, SMPL-based Gaussian Splatting Avatar
 
 ## Overview
-Gaussian Avatar is a method for reconstructing animatable full-body human avatars by leveraging the SMPL parametric model as a geometric prior [S1][S2, unofficial]. It differs from static [Gaussian Splatting](946-gaussian-splatting.md) by predicting Gaussian parameters (position, rotation, scale) as functions of the model's pose, and from [Gaussian Avatars](1477-gaussian-avatars.md) which typically focuses on head/face using FLAME [S3, unofficial]. It solves the problem of high-fidelity, real-time rendering of dynamic humans from video by combining differentiable splatting with pose-conditioned deformation [S1][S2, unofficial].
+Gaussian Avatar reconstructs animatable full-body human avatars by leveraging the SMPL parametric model as a geometric prior [S1][S2, unofficial]. It differs from static [Gaussian Splatting](946-gaussian-splatting.md) by predicting Gaussian parameters as functions of the model's pose, and from sibling methods like 3DGS-Avatar by using a feed-forward network for pose-conditioned deformation rather than explicit rigid/non-rigid transformation combinations [S1][S2, unofficial].
 
 ## How it works
-**Inputs:** A sequence of monocular or multi-view video frames of a human subject; the SMPL model definition (mesh topology, joint hierarchy) [S1][S2, unofficial].
+**Inputs:** A sequence of video frames of a human subject; the SMPL model definition (mesh topology, joint hierarchy) [S1][S2, unofficial].
 **Outputs:** A set of 3D Gaussians whose parameters are conditioned on the SMPL pose and shape parameters, enabling rendering of the avatar in arbitrary poses [S2, unofficial].
 
 **Data Structures:**
-1.  **SMPL Model:** Provides base mesh vertices $V_{base}$ and joint transformations based on pose $\theta$ and shape $\beta$ [S1].
-2.  **Gaussian Primitives:** A set of $N$ Gaussians initialized on the SMPL mesh surface [S2, unofficial]. Each Gaussian $i$ has:
-    *   Position $\mathbf{p}_i$ (3D)
-    *   Rotation $\mathbf{q}_i$ (quaternion, 4D)
-    *   Scale $\mathbf{s}_i$ (3D)
-    *   Opacity $\alpha_i$ (scalar)
-    *   Spherical Harmonics coefficients $\mathbf{c}_i$ (color/directionality) [S1]
-3.  **Pose Feature Network:** A feed-forward neural network (MLP) that takes pose features as input and outputs Gaussian parameter offsets or absolute values [S2, unofficial].
+1. **SMPL Model:** Provides base mesh vertices and joint transformations based on pose $\theta$ and shape $\beta$ [S1].
+2. **Gaussian Primitives:** A set of $N$ Gaussians initialized on the SMPL mesh surface [S2, unofficial]. Each Gaussian $i$ has:
+   * Position $\mathbf{p}_i$ (3D)
+   * Rotation $\mathbf{q}_i$ (quaternion, 4D) [G]
+   * Scale $\mathbf{s}_i$ (3D)
+   * Opacity $\alpha_i$ (scalar)
+   * Color/directionality coefficients $\mathbf{c}_i$ [G]
+3. **Pose Feature Network:** A feed-forward neural network (MLP) that takes pose features as input and outputs Gaussian parameter offsets or absolute values [S2, unofficial].
 
 **Steps:**
-1.  **Initialization:** Initialize $N$ Gaussians on the vertices or triangles of the SMPL base mesh [S2, unofficial].
-2.  **Pose Conditioning:** For a target pose $\theta$ and shape $\beta$:
-    *   Compute the SMPL mesh deformation to get deformed vertex positions [S1].
-    *   Extract pose features (e.g., joint angles, bone rotations) [S2, unofficial].
-    *   Pass pose features through the feed-forward network to predict Gaussian parameters (positions, rotations, scales) [S2, unofficial]. The network effectively learns the mapping $f(\theta, \beta) \rightarrow \{\mathbf{p}_i, \mathbf{q}_i, \mathbf{s}_i\}$ [S1].
-3.  **Differentiable Rendering:** Render the scene using object-order splatting [S1]. The Gaussians are projected to 2D, and their contributions are accumulated to form the final image [S2, unofficial].
-4.  **Optimization:** Minimize the photometric loss $\mathcal{L}_{photo} = ||I_{rendered} - I_{target}||_1$ between the rendered image and the input video frame [S1][S2, unofficial]. Gradients flow through the differentiable renderer and the pose-conditioned network to update the network weights and Gaussian parameters (opacity, SH coefficients) [S2, unofficial].
+1. **Initialization:** Initialize $N$ Gaussians on the vertices or triangles of the SMPL base mesh [S2, unofficial].
+2. **Pose Conditioning:** For a target pose $\theta$ and shape $\beta$:
+   * Extract pose features (e.g., joint angles, bone rotations) [S2, unofficial].
+   * Pass pose features through the feed-forward network to predict Gaussian parameters (positions, rotations, scales) [S2, unofficial]. The network effectively learns the mapping $f(\theta, \beta) \rightarrow \{\mathbf{p}_i, \mathbf{q}_i, \mathbf{s}_i\}$ [S1].
+3. **Differentiable Rendering:** Render the scene using object-order splatting [S1].
+4. **Optimization:** Minimize the photometric loss between the rendered image and the input video frame [S1][S2, unofficial]. Gradients flow through the differentiable renderer and the pose-conditioned network to update the network weights and Gaussian parameters [S2, unofficial].
 
 **Parameters:**
-*   Number of Gaussians $N$: Not given in the sources.
-*   Learning rate: Not given in the sources.
-*   SMPL parameters: Pose $\theta$ (72D for full rotation), Shape $\beta$ (10D) [S1].
+* Number of Gaussians $N$: Not given in the sources.
+* Learning rate: Not given in the sources.
+* SMPL parameters: Pose $\theta$, Shape $\beta$ [S1].
 
 **Edge Cases:**
-*   **Occlusion:** Monocular input may lead to ambiguities in depth; SMPL prior helps constrain geometry but may not resolve severe self-occlusion artifacts without multi-view data [S3, unofficial].
-*   **Precision:** Deformation network must handle extreme poses without producing degenerate Gaussians [S2, unofficial].
+* **Occlusion:** Monocular input may lead to ambiguities in depth; SMPL prior helps constrain geometry but may not resolve severe self-occlusion artifacts without multi-view data [S3].
 
 ## Subtopics
 
-### GoMAvatar
-A monocular video avatar method that uses the SMPL-X rig coupled with a mesh [S3, unofficial]. It is distinguished by its specific coupling of the Gaussian representation with the SMPL-X mesh structure for monocular reconstruction [S3, unofficial].
+### [GoMAvatar](6156-gomavatar.md)
+A monocular video avatar method that uses the SMPL-X rig coupled with a mesh. It is distinguished by its specific coupling of the Gaussian representation with the SMPL-X mesh structure for monocular reconstruction.
 
 ## Operating characteristics
-*   **Time Complexity:** Rendering is $O(N)$ per pixel, similar to standard Gaussian Splatting, but requires network inference for pose conditioning [S1].
-*   **Memory Complexity:** $O(N)$ for Gaussian parameters plus memory for the neural network weights [S2, unofficial].
-*   **Performance:** Enables real-time rendering of animatable avatars [S1].
-*   **Strengths:** High fidelity, real-time performance, leverages strong SMPL prior for plausible geometry [S1][S2, unofficial].
-*   **Limitations:** Relies on SMPL accuracy; may struggle with non-humanoid subjects or extreme deformations outside SMPL's training distribution [S1].
-*   **When to use:** When animatable full-body human avatars are needed from video data.
-*   **When not to use:** For static scenes or non-human subjects [S1].
+* Time and memory complexity: Not given in the sources.
+* Strengths: Leverages strong SMPL prior for plausible geometry [S1][S2, unofficial].
+* Limitations: Relies on SMPL accuracy [S1].
+* When to use: When animatable full-body human avatars are needed from video data [G].
+* When not to use: For static scenes or non-human subjects [G].
 
 ## Background
-Gaussian Avatar was introduced as a method to reconstruct full-body avatars using the SMPL model as a prior [S1][S2, unofficial]. It builds on the principles of Gaussian Splatting and parametric human models [S1]. The method uses pose features to predict Gaussian parameters through a feed-forward network [S2, unofficial]. It is part of the broader family of Gaussian Avatar Reconstruction methods [Parent](1575-gaussian-avatar-reconstruction.md).
+Gaussian Avatar was introduced as a method to reconstruct full-body avatars using the SMPL model as a prior [S1][S2, unofficial]. It builds on the principles of Gaussian Splatting and parametric human models [S1]. The method uses pose features to predict Gaussian parameters through a feed-forward network [S2, unofficial]. It is part of the broader family of Gaussian Avatar Reconstruction methods [Parent](8385-smpl-based-rigid-non-rigid-deformation.md).
 
 ## Sources
 [S1] From Volume Rendering to 3D Gaussian Splatting: Theory and Applications, https://doi.org/10.1109/sibgrapi67909.2025.11223276, fetched 2026-10-26
 [S2] From Volume Rendering to 3D Gaussian Splatting, https://www.visgraf.impa.br/Data/RefBib/PS_PDF/tutorial-sib2025/tutorial-sib2025.pdf, fetched 2026-10-28 (unofficial)
-[S3] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+[S3] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26

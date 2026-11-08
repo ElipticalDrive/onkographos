@@ -2,51 +2,36 @@
 
 
 ## Overview
-This family encompasses methods that bridge the gap between discrete volume data and the continuous optical model required for ray casting, specifically focusing on how input samples are reconstructed into a continuous field and how those fields are composited along rays. It addresses the problem of aliasing and accuracy loss during the sampling process and the efficient evaluation of complex transfer functions. It is distinguished from its siblings by its focus on the mathematical formulation of the signal reconstruction (convolution vs. spatial gathering) and the integration of validity metrics or polynomial approximations into the compositing loop, rather than just hardware-specific blending or post-processing.
+This family encompasses methods that bridge the gap between discrete volumetric data and the continuous optical model required for ray casting, specifically focusing on how input data is reconstructed into a continuous field and how that field is composited along rays. It addresses the problem of aliasing and interpolation errors during sampling, as well as advanced compositing strategies that incorporate reconstruction quality or specific physical approximations. It differs from standard compositing by explicitly modeling the reconstruction kernel's effect on the signal or by modifying the compositing equation with validity weights, rather than treating samples as point values [S1, unofficial][S2].
 
 ## Shared principles
-The core mechanism across all compositing methods is the sequential update of accumulated state variables as samples are traversed along a ray. The standard optical model assumes that light is emitted or scattered by the volume and attenuated by absorption [S1, unofficial][S2].
+The methods in this family share the fundamental premise that volume rendering is a signal processing task where discrete samples must be mapped to a continuous representation before or during integration along a ray.
 
-For a ray traversing $N$ samples, each sample $i$ provides a color $C_i$ and opacity $\alpha_i$. The state is maintained in two accumulators:
-1.  $C_{acc}$: The accumulated color.
-2.  $\alpha_{acc}$: The accumulated opacity (or transmittance).
-
-The standard **Front-to-Back** compositing equation updates these accumulators for each sample $i$ from front to back:
-$$
-C_{acc}^{(i)} = C_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) \alpha_i C_i
-$$
-$$
-\alpha_{acc}^{(i)} = \alpha_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) \alpha_i
-$$
-where $C_{acc}^{(0)} = 0$ and $\alpha_{acc}^{(0)} = 0$ [S12, S43, S50, unofficial]. The term $(1 - \alpha_{acc}^{(i-1)})$ represents the transmittance, i.e., the fraction of light reaching sample $i$ from the camera side [S1, S51, unofficial].
-
-Alternatively, **Back-to-Front** compositing can be used, particularly for specific hardware optimizations or depth-based sorting, where the accumulation order is reversed [S1, unofficial].
-
-Many implementations employ **Early Ray Termination (ERT)**. If the accumulated opacity $\alpha_{acc}$ exceeds a threshold close to 1.0 (e.g., $0.99$ or $1 - \epsilon$), the ray is terminated because subsequent samples are fully occluded [S9, S12, S27, unofficial].
+1.  **Continuous Representation:** Raw voxel data $X_j$ at positions $P_j$ is not used directly. Instead, a continuous function is estimated at ray positions $Q_i$ using a reconstruction kernel $K$. This transforms the discrete problem into a continuous one, allowing for analytical or semi-analytical integration [S1, unofficial].
+2.  **Ray-Centric Processing:** Whether using convolution-based polynomial evaluation or spatial-domain reconstruction, the computation is organized around the ray. Each ray defines a local coordinate system or parameterization $r(t) = p + t \cdot v$ along which the 3D field is evaluated [S1, unofficial].
+3.  **Accumulation Model:** The final image formation still relies on the standard front-to-back or back-to-front accumulation of color and opacity, but the source terms ($C_{src}, \alpha_{src}$) are derived from the reconstructed signal rather than simple trilinear interpolation [S2].
 
 ## Subtopics
 
 ### [Composition via Convolution (Power Form)](1591-composition-via-convolution-power-form.md)
-Evaluates the composition of a trivariate polynomial field with a linear ray parameterization, transforming a 3D function into a univariate function along a ray. It solves the problem of efficient numerical evaluation in direct volume ray casting by using convolution operators to reduce computation and register usage compared to naive substitution. It is distinguished from its sibling [Feed-Backward Reconstruction](2433-feed-backward-reconstruction.md) by its algebraic approach that computes ray coefficients incrementally, whereas the sibling uses explicit spatial gathering. Choose this when the transfer function or volume data is represented as low-degree polynomials and register pressure on the GPU is a constraint.
+Evaluates the composition of a trivariate polynomial field with a linear ray parameterization, transforming a 3D function into a univariate function along a ray. It solves the problem of efficient numerical evaluation in direct volume ray casting by using convolution operators to reduce computation and register usage compared to naive substitution. Choose this when the volume data is represented as piecewise polynomials (e.g., splines) and high numerical stability with low register pressure on GPUs is required.
 
 ### [Feed-Backward Reconstruction](2433-feed-backward-reconstruction.md)
-A method for mapping discrete volume data to a continuous function by gathering contributions from neighboring input samples for each output sample. It solves the problem of reconstructing a continuous signal from discrete samples by centering a reconstruction kernel at each output position and computing a weighted average of the input samples lying under that kernel. It is distinguished from its sibling [Composition via Convolution (Power Form)](1591-composition-via-convolution-power-form.md) by its explicit spatial gathering approach, which accesses each output sample once but reads each input sample multiple times depending on the kernel extent. Choose this for standard interpolation tasks (e.g., linear or cubic) where the transfer function is not a polynomial or when spatial locality is preferred over algebraic evaluation.
+A signal processing technique used in volume rendering to resample discrete input data onto a regular output grid (typically pixels or rays). It solves the problem of reconstructing a continuous signal from discrete samples by gathering contributions from neighboring input samples for each output position. It is distinguished from its sibling [Composition via Convolution (Power Form)](1591-composition-via-convolution-power-form.md) by its explicit spatial-domain gathering approach, which avoids Fourier transforms and is computationally preferred for small, limited-extent kernels typical in volume rendering. Unlike standard convolution implementations that might optimize for memory locality by spreading data, this method prioritizes output-centric calculation, making it conceptually aligned with the ray-casting paradigm where each ray (output) is processed independently.
 
 ### Source-Attenuation Reprojection
-A technique by Vannier et al. that assigns a source strength and an attenuation coefficient (opacity) to each voxel [S1, unofficial]. It solves the problem of depth shading and selective partial obscuration to produce informative images with better contrast [S1, unofficial]. The algorithm traces rays through the volume array until they hit a surface, defined as a significant change in opacity value (a threshold-based approach) [S1, unofficial]. It assigns an intensity inversely proportional to the distance traveled along the ray [S1, unofficial]. This approach is still threshold-based and suffers from associated artifacts [S1, unofficial].
+A technique by Vannier et al. that assigns a source strength and an attenuation coefficient (opacity) to each voxel [S1, unofficial]. It solves the problem of depth shading and selective obscuration by tracing rays through the volume array until they hit a surface, assigning an intensity inversely proportional to the distance traveled along the ray [S1, unofficial]. A surface is defined as a significant change in opacity value, making this approach threshold-based and susceptible to associated artifacts [S1, unofficial]. Choose this when explicit depth-based shading is required to enhance the perception of depth in translucent volumes, though it may introduce discontinuities at threshold boundaries [S1, unofficial].
 
 ### Reconstruction Validity Weighted Volume Rendering
-A volume rendering technique that uses a reconstruction validity metric $\Phi(x, f, \Omega)$ to weight the opacity accumulation during ray casting, improving classification visualization by accounting for reconstruction accuracy in different density regions [S2]. It solves the problem of blurred feature boundaries and inaccurate classification visualization caused by intermediate gray values in standard reconstruction [S2]. The method calculates reconstruction validity $\Phi(x, f, \Omega)$ for each feature $f$ at each reconstruction point $x$ [S2]. For each ray, it performs $K$ reconstructions (one for each feature class) to get source color $C_{src}$ and opacity $\alpha_{src}$ based on transfer functions [S2]. It performs back-to-front compositing along the ray, updating accumulated color $C_s$ and opacity $\alpha_s$ using the weighted opacity formula involving $\Phi(x, f, \Omega)$ [S2]. The compositing is repeated for all $K$ features, as $\Phi$ is feature-dependent [S2]. The update formula is:
-$$
-C_s = C_s + (1 - \alpha_s) C_{src}
-$$
-$$
-\alpha_s = \alpha_s + (1 - \alpha_s) \alpha_{src} \Phi(x, f, \Omega)
-$$
-where $C_s$ and $\alpha_s$ are accumulated color and opacity, $C_{src}$ and $\alpha_{src}$ are source color and opacity from the transfer function, and $\Phi$ is the reconstruction validity weight [S2].
+A volume rendering technique that uses a reconstruction validity metric $\Phi(x, f, \Omega)$ to weight the opacity accumulation during ray casting, improving classification visualization by accounting for reconstruction accuracy in different density regions [S2]. It solves the problem of blurred feature boundaries in standard classification visualization by down-weighting contributions from regions where the reconstruction is uncertain or inaccurate [S2]. Choose this when working with probabilistic classification models or kernel regression reconstructions where the reliability of the data varies spatially, and clear separation of heterogeneous features is critical [S2].
 
 ## Background
-The concept of assigning source strength and attenuation to voxels for depth shading was developed by Vannier et al. in the context of stereotactic neurosurgery planning [S1, unofficial]. The specific "Source-Attenuation Reprojection" technique is described in Vannier's work [S1, unofficial]. The "Reconstruction Validity Weighted Volume Rendering" approach was proposed by Zhang and Tang in 2019 to improve classification visualization by combining probabilistic classification models with kernel regression reconstruction [S2].
+The need for advanced reconstruction and compositing techniques arises from the limitations of simple trilinear interpolation and standard alpha blending, which can introduce aliasing, blurring, or incorrect opacity accumulation.
+
+*   **Convolution-based methods:** The use of convolution for polynomial composition in volume rendering was explored to optimize register usage on GPUs. The power form approach leverages the associative property of convolution to evaluate trivariate polynomials along rays efficiently [S1, unofficial].
+*   **Feed-Backward Reconstruction:** This approach aligns with the "gather" model common in modern rendering, where the output pixel/ray drives the memory access pattern. It is particularly relevant for adaptive resolution rendering or when mapping irregular data to regular grids [S1, unofficial].
+*   **Source-Attenuation Reprojection:** Developed by Vannier et al., this method was an early attempt to incorporate depth information directly into the volume rendering equation to enhance stereoscopic perception in medical imaging applications [S1, unofficial].
+*   **Reconstruction Validity Weighted Rendering:** Proposed by Zhang and Tang (2019), this method integrates probabilistic classification and kernel regression with volume rendering. It addresses the issue where standard transfer functions fail to distinguish between similar density values belonging to different features by weighting the compositing process based on the statistical confidence of the reconstruction [S2].
 
 ## Sources
 [S1] Volumetric rendering of medical data : applications to stereotactic neurosurgery planning, https://doi.org/10.82308/10070, fetched 2026-10-26 (unofficial)

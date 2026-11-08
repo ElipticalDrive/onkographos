@@ -3,137 +3,131 @@
 Also called: Sphere Tracing Stopping Criteria, Sphere Tracing Termination Conditions
 
 ## Overview
-Sphere Tracing Termination and Clipping defines the conditions under which a ray-marching loop halts, ensuring the algorithm converges to a surface intersection or correctly identifies a miss. It solves the problem of infinite loops and visual artifacts caused by premature stopping or self-intersection. It sets itself apart from sibling methods like [Standard Constant Step Ray Marching](1080-standard-constant-step-ray-marching.md) by explicitly handling the Lipschitz-constrained step sizes of sphere tracing, and from [Step Size Optimization](2054-step-size-optimization.md) by focusing on the *decision* to stop rather than the *size* of the step.
+Sphere Tracing Termination and Clipping defines the conditions under which the iterative ray-marching loop halts, ensuring the algorithm converges to a surface intersection or correctly identifies a miss. It solves the problem of infinite loops and geometric inaccuracies by combining convergence thresholds, oscillation detection, and spatial clipping. It distinguishes itself from sibling methods like [Standard Constant Step Ray Marching](1080-standard-constant-step-ray-marching.md) by strictly enforcing the Lipschitz safety constraint ($\Delta t \le f(\mathbf{p})$) for termination logic, and from [Sphere Tracing](1674-sphere-tracing.md) by explicitly handling edge cases such as oscillation and far-plane clipping to guarantee robustness in real-time rendering.
 
 ## How it works
-The method evaluates termination conditions at each iteration $i$ of the ray march $r(t) = \mathbf{o} + t\mathbf{d}$. The algorithm maintains the current distance to the surface $d_i = f(\mathbf{p}_i)$ and the accumulated distance $t_i$.
+The method operates on a ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, querying a Signed Distance Function (SDF) $f(\mathbf{p})$.
 
 **Inputs:**
-- Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ (normalized).
-- Signed Distance Field (SDF) function $f(\mathbf{p})$ with Lipschitz constant $\lambda$ (typically $\lambda=1$ for normalized SDFs).
-- Stopping threshold $\delta_b$ (distance tolerance).
-- Maximum iterations $k_{max}$.
-- Far plane clipping depth $t_{clip}$.
-- Oscillation detection factor $\alpha$ (typically 6).
+*   Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ (normalized).
+*   SDF function $f(\mathbf{p})$.
+*   Maximum iteration count $k_{max}$.
+*   Stopping distance threshold $\delta$.
+*   Far plane clipping depth $t_{clip}$.
+*   Oscillation tolerance factor $\alpha$ (typically 6).
 
 **Outputs:**
-- Intersection status (Hit/Miss).
-- Intersection distance $t_{hit}$ (if Hit).
-- Surface normal $\mathbf{n}$ (if Hit).
+*   Intersection distance $t_{hit}$ (if found).
+*   Boolean flag `hit` indicating success.
 
 **Data Structures:**
-- `history`: A buffer storing the last $N$ distance values $d_i$ to detect oscillation. Size $N=2$ is sufficient for the check $|d_{i} - d_{i-1}|$.
+*   `current_t`: Float, current ray parameter, initialized to 0.
+*   `prev_d`: Float, distance value from previous iteration, initialized to $f(\mathbf{o})$.
+*   `current_d`: Float, distance value at current position, $f(\mathbf{o} + \text{current\_t} \cdot \mathbf{d})$.
 
 **Parameters:**
-- $\delta_b = 0.0003$ [S1].
-- $k_{max} = 200$ [S1].
-- $t_{clip} = 5.0$ [S1].
-- $\alpha = 6$ [S1].
+*   $\delta = 0.0003$ [S1].
+*   $k_{max} = 200$ [S1].
+*   $t_{clip} = 5.0$ [S1].
 
 **Steps:**
-1. Initialize $t = 0$, $i = 0$.
-2. Evaluate $d = f(\mathbf{o} + t\mathbf{d})$.
-3. Check Termination Conditions:
-   - **Hit:** If $d < \delta_b$, terminate with Hit at $t$.
-   - **Miss (Far Plane):** If $t > t_{clip}$, terminate with Miss.
-   - **Resource Limit:** If $i \ge k_{max}$, terminate with Miss.
-   - **Oscillation:** If $i \ge 2$ and $|d_{i-1} - d_{i-2}| < \alpha \delta_b$, terminate with Miss (or fallback to bisection) [S1].
-4. Update Step: $t \leftarrow t + d$ (assuming $\lambda=1$).
-5. Increment $i$.
-6. Store $d$ in history.
-7. Repeat from Step 2.
+1.  Initialize `current_t` = 0.
+2.  Evaluate `current_d` = $f(\mathbf{o} + \text{current\_t} \cdot \mathbf{d})$.
+3.  Initialize `prev_d` = `current_d`.
+4.  Loop while `current_t` < $t_{clip}$ and `current_t` < $t_{max}$ (where $t_{max}$ is a global scene bound, often distinct from $t_{clip}$ but $t_{clip}$ acts as the hard stop for the trace):
+    a.  **Convergence Check:** If `current_d` < $\delta$, terminate loop and return `hit` = true, `t_hit` = `current_t`.
+    b.  **Oscillation Check:** Calculate oscillation metric $O = |\text{current\_d} - \text{prev\_d}|$. If $O < \alpha \cdot \delta$, terminate loop and return `hit` = false (treat as miss or error). This prevents infinite loops when the ray is stuck near a surface or in noise [S1].
+    c.  **Step Update:** Update `prev_d` = `current_d`.
+    d.  **Step Size Calculation:** Calculate step size $\Delta t = \text{current\_d}$ (assuming Lipschitz constant $\lambda=1$). [G] If $\lambda \neq 1$, $\Delta t = \text{current\_d} / \lambda$.
+    e.  **Ray Advance:** `current_t` = `current_t` + $\Delta t$.
+    f.  **Evaluation:** `current_d` = $f(\mathbf{o} + \text{current\_t} \cdot \mathbf{d})$.
+5.  If loop completes without convergence, return `hit` = false.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def sphere_trace_termination(o, d, f, delta_b=0.0003, k_max=200, t_clip=5.0, alpha=6):
-    t = 0.0
-    i = 0
-    d_prev = 0.0
-    d_curr = 0.0
-    
+def sphere_trace_termination(o, d, f, k_max=200, delta=0.0003, t_clip=5.0, alpha=6):
+    current_t = 0.0
     # Initial evaluation
-    p = o + t * d
-    d_curr = f(p)
+    current_d = f(o + current_t * d)
+    prev_d = current_d
     
-    while i < k_max:
-        # 1. Hit Condition
-        if d_curr < delta_b:
-            return Hit(t, p, compute_normal(f, p))
+    for i in range(k_max):
+        # 1. Convergence check
+        if current_d < delta:
+            return True, current_t
         
-        # 2. Far Plane Clipping
-        if t > t_clip:
-            return Miss()
+        # 2. Oscillation check
+        # If the change in distance is smaller than alpha * delta, 
+        # the ray is likely oscillating or stuck.
+        if abs(current_d - prev_d) < alpha * delta:
+            return False, current_t
+            
+        prev_d = current_d
         
-        # 3. Oscillation Detection
-        # Check if the change in distance is negligible relative to the threshold
-        if i >= 1:
-            if abs(d_curr - d_prev) < alpha * delta_b:
-                # Ray is stuck or oscillating near the surface
-                # Option A: Terminate as miss (conservative)
-                # Option B: Switch to bisection (see Subtopics)
-                return Miss() 
+        # 3. Step size (Lipschitz constant lambda=1 assumed)
+        step = current_d
         
-        # 4. Advance Ray
-        # Sphere tracing step size is exactly the distance value (Lipschitz 1)
-        t += d_curr
-        p = o + t * d
+        # 4. Advance ray
+        current_t += step
         
-        # 5. Prepare for next iteration
-        d_prev = d_curr
-        d_curr = f(p)
-        i += 1
+        # 5. Far plane clipping / Escape check
+        if current_t > t_clip:
+            return False, current_t
+            
+        # 6. Evaluate new position
+        current_d = f(o + current_t * d)
         
-    # 6. Max Iterations Reached
-    return Miss()
+    # Max iterations reached
+    return False, current_t
 ```
 
 **Edge Cases and Pitfalls:**
-- **Precision:** If $d$ is very small but positive, floating-point noise may cause oscillation between $d$ and $0$. The oscillation check $|d_{i} - d_{i-1}| < \alpha \delta_b$ mitigates this [S1].
-- **Self-Intersection:** Standard termination does not prevent self-intersection in secondary rays. This requires a separate mechanism like Dynamic Epsilon [S1, S2].
-- **Oscillation False Positives:** In noisy SDFs or near complex geometry, small variations in $d$ might trigger the oscillation check prematurely. The factor $\alpha$ must be tuned to the noise floor of the SDF evaluation [S1].
+*   **Oscillation:** Standard sphere tracing may fail to converge if the ray bounces between two points very close to the surface. The oscillation check $|d_k - d_{k-1}| < 6\delta$ is critical for stability [S1].
+*   **Precision:** The threshold $\delta$ must be chosen carefully relative to the scene scale. Too large causes "swimming" artifacts; too small causes excessive iterations or premature termination due to floating-point noise [S2].
+*   **Far Plane:** Clipping at a fixed depth (e.g., 5.0) prevents rays from marching indefinitely into empty space, but may clip valid intersections if the scene extends beyond this bound [S1].
 
 ## Subtopics
 
 ### [Affine Arithmetic Early Skip Test](4313-affine-arithmetic-early-skip-test.md)
-The Affine Arithmetic Early Skip Test is a constant-time heuristic used in distance-field ray marching to detect if a ray does not collide with an object within a specific working interval, thereby avoiding expensive root-finding operations. It distinguishes itself from sibling methods like Bracketed Newton Bisection (BNB) by providing immediate non-collision detection and a conservative starting point for subsequent searches, rather than searching for monotonic intervals of derivatives.
+Uses interval arithmetic to detect non-collision within a working interval, avoiding expensive root-finding.
 
 ### [Dynamic Epsilon for Self-Intersection Prevention](4318-dynamic-epsilon-for-self-intersection-prevention.md)
-Dynamic epsilon is a method for preventing self-intersection artifacts in secondary rays (e.g., refraction) during sphere tracing by computing a local offset $\varepsilon_{\text{dynamic}}$ at each intersection point, rather than using a global constant. It solves the problem where global epsilon values are inappropriate for sphere tracing with screen-space termination metrics because intersection distances from the surface exhibit large variations. Unlike global epsilon, dynamic epsilon adapts to the local surface distance, making it easier and more robust to tune than a single global value.
+Computes a local offset $\varepsilon_{\text{dynamic}}$ to prevent self-intersection in secondary rays, adapting to local surface distance variations.
 
 ### [Convex Object Optimization](4367-convex-object-optimization.md)
-Convex Object Optimization accelerates sphere tracing through objects represented by a signed distance bound enclosed by a convex bounding volume. It solves the problem of expensive interior traversal by avoiding costly marching through the inside of the object, which typically requires many iterations and gradient computations. It sets itself apart from standard sphere tracing by using the bounding volume to determine entry and exit points, thereby reducing the number of iterations required to find a ray-surface intersection.
+Accelerates interior traversal by using convex bounding volumes to determine entry and exit points, reducing iteration counts.
 
 ### [Discontinuity Reduction via Fixed-Point Iteration](4368-discontinuity-reduction-via-fixed-point-iteration.md)
-Discontinuity reduction via fixed-point iteration is a post-processing step applied to intersection points retrieved by sphere tracing to smooth out discontinuities in the signed distance function (SDF) $f(p)$ and reduce artifacts in procedural texturing. It sets itself apart from its siblings by trading a slight increase in average geometric error for significantly reduced visual discontinuities across the screen-space domain, whereas [Affine Arithmetic Early Skip Test](4313-affine-arithmetic-early-skip-test.md) focuses on skipping empty space and [Dynamic Epsilon for Self-Intersection Prevention](4318-dynamic-epsilon-for-self-intersection-prevention.md) focuses on preventing self-intersection artifacts.
+Post-processes intersection points to smooth SDF discontinuities, trading slight geometric error for visual stability.
 
 ### [Ray Intersection with Grazing Point Detection](4463-ray-intersection-with-grazing-point-detection.md)
-A ray intersection method that performs sphere tracing to find the primary intersection while simultaneously tracking the 'grazing point' (the point on the surface where the ray direction is tangent to the surface normal, indicated by a zero directional derivative). It returns the intersection time, validity, grazing point status, and the grazing point position. It sets itself apart from standard sphere tracing by explicitly identifying and refining grazing contacts, which are often missed or poorly resolved by standard termination rules.
+Tracks the grazing point (tangent contact) alongside the primary intersection to resolve grazing angles missed by standard rules.
 
 ### [Gradient Magnitude Windowing](8299-gradient-magnitude-windowing.md)
-Gradient Magnitude Windowing is a binary classification technique used in volume rendering to determine whether a ray sample lies on an object surface based on the magnitude of the volume gradient. It serves as a filter in contour rendering pipelines, discarding samples where the gradient magnitude $|g|$ is below a specified threshold $t_g$. It is distinct from its siblings in that it relies solely on the scalar magnitude of the gradient for a hard binary decision, whereas [Affine Arithmetic Early Skip Test](4313-affine-arithmetic-early-skip-test.md) uses interval arithmetic for early skipping, [Dynamic Epsilon for Self-Intersection Prevention](4318-dynamic-epsilon-for-self-intersection-prevention.md) adjusts step sizes to prevent self-intersection, and [Convex Object Optimization](4367-convex-object-optimization.md) exploits geometric convexity.
+Filters samples based on gradient magnitude $|g|$ for binary surface classification in contour rendering.
 
-#### Cone Tracing Error Threshold
-A method to determine the adaptive error threshold $\hat{\epsilon}$ based on the ray distance and pixel footprint, ensuring rays terminate when the pixel cone intersects the surface [S2]. It calculates the threshold as $\hat{\epsilon}(\hat{x}) = \hat{x} \hat{r}_p$, where $\hat{x}$ is the distance along the ray in undeformed space and $\hat{r}_p$ is the radius of one pixel in undeformed space [S2]. The pixel radius is calculated as $\hat{r}_p = s r_p J_D^{-1}$, where $s$ is the distance in deformed space, $r_p$ is the pixel radius in deformed space, and $J_D^{-1}$ is the inverse Jacobian determinant [S2]. If the threshold is too high, artifacts manifest as the surface 'swimming', appearing in different places depending on view direction [S2].
+### Cone Tracing Error Threshold
+A method to determine the adaptive error threshold $\hat{\epsilon}$ based on the ray distance and pixel footprint, ensuring rays terminate when the pixel cone intersects the surface [S2]. It calculates the threshold as $\hat{\epsilon}(\hat{x}) = \hat{x} \hat{r}_p$, where $\hat{x}$ is the distance in undeformed space and $\hat{r}_p$ is the pixel radius in undeformed space ($\hat{r}_p = s r_p J_D^{-1}$) [S2]. If the threshold is too high, artifacts manifest as the surface "swimming" [S2].
 
-#### Blend Mode
-A rendering mode that traverses voxels and sums their value until value accumulation results in enough content, either being opaque for early termination or containing greater than zero content for blending with a user-specified background [S3, unofficial]. The high cost of voxel access can shrink or invert performance gains of block walking and culling in this mode [S3, unofficial].
+### Blend Mode
+A rendering mode that traverses voxels and sums their value until accumulation results in enough content: either opaque for early termination or greater than zero for blending with a user-specified background [S3, unofficial]. The high cost of voxel access can shrink or invert performance gains of block walking and culling in this mode [S3, unofficial].
 
-#### Optimized Binary Search with Local Lipschitz Bounds
-A binary search method that recursively subdivides an interval, using local Lipschitz bounds to exclude intervals earlier and shrink sub-intervals asymmetrically [S4]. It shrinks the interval $e=[a,b]$ to $[e_a, e_b]$ using $e_a = a + |f(a)|/\lambda(e)$ and $e_b = b - |f(b)|/\lambda(e)$ to improve bisection efficiency [S4]. This method achieves similar field function query reduction and timing speed-ups compared to standard binary search [S4].
+### Optimized Binary Search with Local Lipschitz Bounds
+A binary search method that recursively subdivides an interval, using local Lipschitz bounds $\lambda(e)$ to exclude intervals earlier and shrink sub-intervals asymmetrically [S4]. It shrinks interval $e=[a,b]$ to $[e_a, e_b]$ using $e_a = a + |f(a)|/\lambda(e)$ and $e_b = b - |f(b)|/\lambda(e)$ [S4]. This achieves similar field function query reduction and timing speed-ups compared to standard binary search [S4].
 
 ## Operating characteristics
-- **Time Complexity:** $O(k)$ where $k$ is the number of iterations until termination. In the worst case (miss or oscillation), $k = k_{max}$.
-- **Memory Complexity:** $O(1)$ for the core algorithm. Oscillation detection requires storing the last two distance values.
-- **Measured Performance:** With $\delta_b = 0.0003$, $k_{max} = 200$, and $t_{clip} = 5.0$, the algorithm is robust for typical real-time rendering distances [S1].
-- **Strengths:** Prevents infinite loops via iteration limits and far-plane clipping. Oscillation detection handles precision issues near surfaces.
-- **Limitations:** Does not handle self-intersection (requires Dynamic Epsilon). Oscillation check may terminate valid rays in noisy fields if $\alpha$ is too low.
-- **When to use:** Standard sphere tracing for SDFs.
-- **When not to use:** When high-precision grazing angles are required (use Grazing Point Detection) or when self-intersection in secondary rays is critical (use Dynamic Epsilon).
+*   **Time Complexity:** $O(k)$, where $k$ is the number of iterations until termination. In practice, $k$ is bounded by $k_{max}$ (e.g., 200) [S1].
+*   **Memory Complexity:** $O(1)$ auxiliary memory, storing only current and previous distance values and ray parameters.
+*   **Measured Performance:** With $\delta=0.0003$ and $k_{max}=200$, the method provides stable real-time performance for implicit surfaces [S1].
+*   **Strengths:** Guarantees no overshooting (with $\lambda=1$), handles oscillation, and prevents infinite loops.
+*   **Limitations:** Fixed thresholds ($\delta$, $t_{clip}$) may not adapt well to varying scene scales. Oscillation detection may prematurely terminate valid but slow-converging rays.
+*   **When to use:** Real-time rendering of implicit surfaces where stability and bounded iteration counts are critical.
+*   **When not to use:** Scenes requiring sub-pixel accuracy without adaptive thresholds, or where the Lipschitz constant is significantly greater than 1 without proper scaling.
 
 ## Background
-The method originates from the foundational sphere tracing algorithm by John C. Hart (1996), which established the use of the distance function as the step size [S1]. The specific termination parameters ($\delta=0.0003$, $k=200$, $t_{clip}=5$) and oscillation check were detailed in the context of Neural Geometric Level of Detail (NVIDIA, 2021) [S1]. Cone tracing for adaptive error thresholds was introduced in the context of deformed SDFs (2020) [S2].
+The method originates from the foundational sphere tracing algorithm by John C. Hart (1996), which established the safety constraint for step size. The specific termination criteria involving oscillation detection ($|d_k - d_{k-1}| < 6\delta$) and fixed iteration limits ($k=200$) were formalized in the context of Neural Implicit Representations, specifically in the "Neural Geometric Level of Detail" paper (2021) [S1]. The concept of adaptive error thresholds based on pixel footprints (Cone Tracing) was introduced to handle deformed SDFs, addressing artifacts like surface swimming [S2]. Optimized binary search with local Lipschitz bounds was developed to improve efficiency in segment tracing [S4].
 
 ## Sources
 [S1] Neural Geometric Level of Detail: Real-time Rendering with Implicit 3D Shapes, https://doi.org/10.1109/cvpr46437.2021.01120, fetched 2026-10-26

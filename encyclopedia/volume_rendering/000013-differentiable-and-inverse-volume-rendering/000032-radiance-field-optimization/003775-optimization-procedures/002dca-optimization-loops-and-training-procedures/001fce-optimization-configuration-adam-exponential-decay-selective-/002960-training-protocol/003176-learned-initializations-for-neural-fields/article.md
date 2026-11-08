@@ -3,48 +3,53 @@
 Also called: Learned Initializations for Optimizing Coordinate-Based Neural Representations, Learned Weight Initialization, Meta-learning for Neural Field Initialization
 
 ## Overview
-This method addresses the inefficiency of optimizing coordinate-based neural networks from random weights for each new signal by applying meta-learning to discover optimal initial weight parameters [S1, unofficial]. It enables faster convergence and serves as a strong prior for a specific class of signals, improving generalization under partial observations [S1, unofficial]. It differs from standard random initialization by learning a shared starting point across a dataset, and from hard-coded inductive biases (like SDF inverted spheres) by relying on learned parameters rather than architectural constraints [S1, unofficial][S2].
+This method addresses the inefficiency of optimizing coordinate-based neural networks from random weights for each new signal by applying meta-learning to derive optimal initial weight parameters [S1, unofficial]. It sets itself apart from standard training protocols by decoupling the initialization phase from the specific instance optimization, allowing the network to start closer to the solution manifold of a target signal class (e.g., faces, 3D shapes) [S1, unofficial]. This results in faster convergence and improved generalization when only partial observations are available [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- **Input:** A dataset of signals belonging to a target class (e.g., 2D face images, 3D chair models, CT scans) [S1, unofficial].
+- **Input:** A dataset of signals belonging to a specific class (e.g., a collection of 3D models of chairs or 2D images of faces) [S1, unofficial].
 - **Output:** A set of initial weight parameters $\theta_0$ for a fully-connected neural network [S1, unofficial].
 
 **Data Structures:**
-- The network is a standard fully-connected MLP. The learned initialization consists of the initial values for all weight matrices and bias vectors in the network [S1, unofficial].
+- The network is a standard fully-connected multi-layer perceptron (MLP) [S1, unofficial].
+- The learned initialization is a fixed tensor of weights and biases corresponding to the network architecture [G].
 
 **Steps:**
-1. **Meta-Training Phase:** Apply standard meta-learning algorithms (e.g., MAML) to the dataset of signals [S1, unofficial].
-   - For each meta-batch, sample a set of tasks (individual signals) from the class.
-   - For each task, perform a few steps of gradient descent on the network parameters initialized at $\theta_0$ to obtain task-specific parameters $\theta_i'$ [S1, unofficial].
-   - Compute the loss on a held-out validation set for each task using $\theta_i'$ [S1, unofficial].
-   - Update the global initial parameters $\theta_0$ to minimize the sum of these validation losses [S1, unofficial].
-2. **Inference/Reconstruction Phase:** For a new target signal from the same class:
-   - Initialize the network weights with the learned $\theta_0$ [S1, unofficial].
-   - Optimize the network parameters using standard gradient descent (e.g., Adam) to fit the new signal [S1, unofficial].
+1. **Meta-Training Phase:**
+   - Define a meta-loss function that measures the performance of the network after a few steps of gradient descent on a support set (training signal) from the target class [G].
+   - Use standard meta-learning algorithms (such as MAML or first-order approximations) to update the initial weights $\theta_0$ such that they minimize this meta-loss [S1, unofficial].
+   - The goal is to find $\theta_0$ such that for any new signal $S$ from the class, a few gradient steps on $S$ starting from $\theta_0$ yield a good approximation [S1, unofficial].
+
+2. **Instance Optimization Phase:**
+   - For a new target signal (e.g., a specific 3D shape or image), initialize the network weights with the learned $\theta_0$ [S1, unofficial].
+   - Perform standard gradient descent (or Adam) to optimize the network parameters $\theta$ to fit the new signal's observations [S1, unofficial].
+
+**Formulas:**
+Let $\mathcal{D}_{meta}$ be the meta-training dataset. For a task $T_i \sim p(T)$ sampled from the task distribution:
+1. Sample a support set $\mathcal{D}_i^{train}$ and query set $\mathcal{D}_i^{val}$ from $T_i$.
+2. Compute task-specific parameters $\theta_i' = \theta - \alpha \nabla_\theta \mathcal{L}_{\mathcal{D}_i^{train}}(f_\theta)$ [G].
+3. Update $\theta$ to minimize $\mathcal{L}_{\mathcal{D}_i^{val}}(f_{\theta_i'})$ [G].
 
 **Parameters:**
-- The specific meta-learning algorithm and hyperparameters (learning rate, inner/outer loop steps) are not specified in the sources [S1, unofficial].
+- Learning rate $\alpha$ for the inner loop (task-specific optimization) [G].
+- Learning rate $\beta$ for the outer loop (meta-optimization) [G].
+- Number of inner loop steps [G].
 
 **Edge Cases and Pitfalls:**
-- The method assumes the new signal belongs to the same underlying class as the meta-training data [S1, unofficial].
-- Requires a representative dataset for meta-training [S1, unofficial].
+- **Class Mismatch:** If the new signal does not belong to the class used for meta-training, the initialization may not provide benefits and could hinder convergence [S1, unofficial].
+- **Overfitting to Meta-Training Data:** The learned initialization might overfit to the specific distribution of the meta-training set, reducing generalization to unseen variations within the class [G].
 
 ## Subtopics
-
-### SDF Initialization via Overfitting
-An initialization strategy for neural fields that do not take position as a direct MLP input, where the network is first trained to match a target SDF shape before beginning scene reconstruction [S2]. Unlike NeuS-facto and Neuralangelo, which hardcode the SDF inverted sphere directly into the MLP weights by leveraging position input, this method requires a dedicated pre-training phase [S2]. The model weights are initialized randomly, then overfitted for 1000 epochs to the required initialization scheme (inverted sphere) before beginning the true training on the scene [S2]. This approach is used when the network architecture does not support hard-coded inductive biases via position encoding [S2].
-
 ## Operating characteristics
-- **Time Complexity:** Meta-training requires significant upfront computational cost to learn the initialization [S1, unofficial]. However, per-signal optimization converges faster due to the informed starting point [S1, unofficial].
-- **Memory Complexity:** Requires storing the learned initial weights, which is negligible compared to the network weights themselves [S1, unofficial].
-- **Strengths:** Faster convergence, better generalization with partial data, strong prior for signal class [S1, unofficial].
-- **Limitations:** Requires a meta-training dataset, may not generalize well to out-of-distribution signals [S1, unofficial].
-- **When to use:** When optimizing many signals from the same class (e.g., faces, chairs) and computational efficiency per signal is critical [S1, unofficial].
+- **Time Complexity:** The meta-training phase is computationally expensive, requiring multiple gradient steps over many tasks [S1, unofficial]. However, the instance optimization phase is significantly faster than training from random initialization [S1, unofficial].
+- **Memory Complexity:** Requires storing the learned initialization weights, which is negligible compared to the network weights themselves [G].
+- **Strengths:** Faster convergence, better generalization with partial data, strong prior for the signal class [S1, unofficial].
+- **Limitations:** Requires a diverse and representative meta-training dataset; not suitable for out-of-distribution signals [S1, unofficial].
+- **When to Use:** When optimizing multiple instances from the same signal class (e.g., reconstructing multiple faces) [S1, unofficial].
+- **When Not to Use:** For single-instance optimization or when the signal class is unknown or highly diverse [S1, unofficial].
 
 ## Background
-Originated in the work by Mildenhall et al. (BAIR Commons, 2020) [S1, unofficial]. It was developed to improve the performance of MLPs for low-dimensional regression tasks in computer vision and graphics [S1, unofficial]. The method explores benefits across 2D images, CT scans, and 3D shape/scene recovery [S1, unofficial]. The SDF variant is discussed in the context of RING-NeRF, contrasting with NeuS-facto and Neuralangelo [S2].
+The method was proposed by Mildenhall et al. as part of their work on generalizing neural radiance fields and coordinate-based representations [S1, unofficial]. It builds on the observation that coordinate-based MLPs suffer from slow convergence when trained from scratch [S1, unofficial]. The approach leverages meta-learning to transfer knowledge across signals of the same class [S1, unofficial].
 
 ## Sources
 [S1] Generalizing Neural Radiance Fields - BAIR Commons, https://bcommons.berkeley.edu/generalizing-neural-radiance-fields, fetched 2026-10-28 (unofficial)
-[S2] RING-NeRF : Rethinking Inductive Biases for Versatile and Efficient Neural Fields, https://doi.org/10.1007/978-3-031-72761-0_9, fetched 2026-10-30

@@ -1,0 +1,105 @@
+# Grid Sphere Traversal
+
+
+## Overview
+Grid Sphere Traversal (GST) is a ray-grid traversal method that performs sphere tracing through a dense grid of Signed Distance Function (SDF) values [S1, unofficial]. It solves the problem of efficiently traversing empty regions in SDF-based rendering by using a hierarchy of SDF grids where lower-resolution levels encode larger SDF values to accelerate step sizes [S1, unofficial]. It is distinguished from its siblings by performing the entire traversal in shader code using dense grids, whereas alternatives like [Hierarchical Voxel Traversal](2204-hierarchical-voxel-traversal.md) or [XBrickMap](3116-xbrickmap.md) often rely on sparse structures or hardware-accelerated BVH traversal [S2, unofficial].
+
+## How it works
+**Inputs:** Ray origin, ray direction, SDF grid hierarchy (mipmap levels), grid resolution per level.
+**Outputs:** Intersection distance or null.
+
+**Data Structures:**
+*   **SDF Grid:** A 3D texture or array storing SDF values.
+*   **Value Encoding:** SDF values are clamped to $[-1, 1]$. A value of $1$ encodes a distance of $2.5$ interior voxel diagonals [S1, unofficial]. This allows storage as 8-bit signed normalized (snorm) integers [S1, unofficial].
+*   **Hierarchy:** A set of grid levels $L_0, L_1, \dots, L_n$. Level $L_0$ is the highest resolution. Lower-resolution levels (higher index) encode larger SDF values to represent empty space more coarsely [S1, unofficial].
+
+**Steps:**
+1.  **Initialize:** Start at the root level (lowest resolution, highest index) of the SDF hierarchy.
+2.  **Traverse Hierarchy:** For the current ray, determine the position in the current grid level.
+3.  **Sample SDF:** Sample the SDF value at the current ray position from the current grid level.
+4.  **Adaptive Resolution Selection:** Use the sampled SDF value to determine if the ray is in empty space. If the SDF value indicates sufficient empty space (larger distance), the algorithm may step forward by a larger amount or switch to a lower-resolution level to maximize step size safely [S1, unofficial]. If the ray is close to the surface (small SDF value), switch to a higher-resolution level for precision [S1, unofficial].
+5.  **Sphere Trace:** Perform sphere tracing steps. The step size is determined by the SDF value at the current position, scaled appropriately for the grid resolution and encoding [S1, unofficial].
+6.  **Intersection Check:** If the SDF value is below a threshold (surface hit), return the intersection distance. If the ray exits the grid or exceeds max distance, return null.
+7.  **Shader Execution:** The entire traversal logic is implemented in shader code (e.g., GLSL/HLSL) [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def grid_sphere_traversal(ray_origin, ray_direction, sdf_grids, max_steps):
+    # sdf_grids is a list of 3D textures, from lowest resolution (index 0) to highest (index n)
+    # Note: Source [S1, unofficial] states lower-resolution levels encode larger SDF values.
+    # We start at the lowest resolution level for coarse traversal.
+    current_level_idx = 0
+    current_pos = ray_origin
+    
+    for step in range(max_steps):
+        # Determine grid resolution for current level
+        # Let grid_size be the side length of the cubic grid at current_level_idx
+        # Let voxel_size be the physical size of a voxel at this level
+        
+        # Sample SDF value at current_pos
+        # Note: Coordinates must be normalized to [0, 1] or [-1, 1] depending on texture setup
+        # The value is read as 8-bit snorm, mapping [-1, 1] to physical distance
+        # A value of 1.0 corresponds to 2.5 * voxel_diagonal
+        sdf_value = sample_sdf(sdf_grids[current_level_idx], current_pos)
+        
+        # Convert snorm value to physical distance
+        # snorm 1.0 -> 2.5 * sqrt(3) * voxel_size
+        # snorm -1.0 -> -2.5 * sqrt(3) * voxel_size (though typically clamped to positive for empty space check)
+        physical_distance = sdf_value * 2.5 * sqrt(3) * voxel_size
+        
+        # If distance is very small, we are close to surface
+        if physical_distance < epsilon:
+            return current_pos # Intersection found
+            
+        # Adaptive step: use physical_distance as step size
+        # However, source [S1, unofficial] mentions adaptively selecting grid resolution to maximize step size.
+        # If physical_distance is large, we might want to jump further or switch to a coarser level.
+        # For simplicity, we step by the SDF value.
+        step_size = physical_distance
+        
+        # Check if we should switch levels
+        # If step_size is very large relative to voxel size, we might be in empty space.
+        # Switch to a lower resolution level (higher index) if available and if step_size > threshold
+        if current_level_idx < len(sdf_grids) - 1 and step_size > threshold:
+            current_level_idx += 1
+            # Re-evaluate position in new grid? Or just continue stepping?
+            # Source [S1, unofficial] implies the hierarchy is used to accelerate traversal of empty regions.
+            # We assume the position is valid in the new grid's coordinate system.
+            pass
+        
+        # Advance ray
+        current_pos = current_pos + ray_direction * step_size
+        
+    return null # No intersection
+```
+
+**Parameters:**
+*   **SDF Encoding:** 8-bit snorm, range $[-1, 1]$, mapping $1.0$ to $2.5$ interior voxel diagonals [S1, unofficial].
+*   **Max Steps:** Not given in the sources.
+*   **Epsilon:** Not given in the sources.
+
+**Edge Cases:**
+*   **Precision:** Using 8-bit snorm may introduce quantization errors. The mapping of $1.0$ to $2.5$ diagonals is a specific design choice to maximize the range of representable distances [S1, unofficial].
+*   **Boundaries:** Ray must be clamped to the grid bounds.
+*   **Degenerate Input:** Empty space far from surface may require many steps if the hierarchy is not deep enough or if the adaptive resolution selection is not optimal.
+
+## Subtopics
+
+### Grid Sphere-Tracing
+A grid traversal algorithm used in Claybook (Aaltonen, 2018) where every voxel is uniquely associated with a raytracing bounding box [S2, unofficial]. It performed best in open and simple scenes compared to sparse brick set and sparse voxel octree [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of steps in sphere tracing and the depth of the hierarchy. Adaptive resolution selection aims to reduce steps in empty space.
+*   **Memory Complexity:** Dense grid storage. All voxels are stored, including those without SDF surface. Lower-resolution levels store less data but still dense [S1, unofficial].
+*   **Performance:** Performed best in open and simple scenes [S2, unofficial]. Outperformed by sparse voxel set in general due to DXR hardware acceleration, but GST has better cache coherency due to compact data storage [S2, unofficial].
+*   **Strengths:** Simple implementation in shader code, good cache coherency, effective in open scenes [S1, unofficial][S2, unofficial].
+*   **Limitations:** Dense storage is memory-intensive, less effective in complex scenes compared to sparse methods [S2, unofficial].
+
+## Background
+Grid Sphere Traversal was evaluated in the context of ray tracing signed distance function grids [S1, unofficial]. It is similar to the technique used in Claybook by Aaltonen (2018) [S1, unofficial][S2, unofficial]. The method was compared against sparse voxel set, sparse brick set, and sparse voxel octree [S1, unofficial].
+
+## Sources
+[S1] Ray tracing of signed distance function grids, https://www.jcgt.org/published/0011/03/06/paper-lowres.pdf, fetched 2026-10-25 (unofficial)
+[S2] PDF Real-time Rendering and Construction of Signed Distance Fields, https://jambuttenshaw.github.io/devportfolio/Dissertation.pdf, fetched 2026-10-28 (unofficial)

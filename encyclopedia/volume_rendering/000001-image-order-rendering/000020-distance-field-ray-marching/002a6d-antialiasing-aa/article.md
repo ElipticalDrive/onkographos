@@ -3,90 +3,150 @@
 Also called: Aliasing Prevention, Procedural Texture Anti-Aliasing, Subpixel Sampling
 
 ## Overview
-Antialiasing (AA) in distance-field ray marching prevents moiré artifacts and aliasing caused by high-frequency noise octaves or fine geometric details on distant surfaces [S2]. It differs from standard rasterization AA by operating in the procedural or ray-marched domain, often using subpixel sampling or frequency-aware LOD culling rather than simple post-process blurring [S2].
+Antialiasing (AA) in distance-field ray marching prevents moiré artifacts and jagged edges caused by high-frequency noise octaves or fine geometric details aliasing against the pixel grid [S2]. It differs from standard supersampling by often integrating frequency-aware logic directly into the procedural evaluation or ray differential calculation, rather than relying solely on brute-force pixel subdivision [S2].
 
 ## How it works
-**Inputs:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, pixel coordinates $(u, v)$, scene SDF $f(\mathbf{p})$, maximum octaves $N_{max}$, and pixel size $s_{pix}$ (or derivative information).
-**Outputs:** Final pixel color $C$.
+The method addresses aliasing through two primary mechanisms: subpixel jittering for geometric edges and frequency capping for procedural textures.
 
-**Data Structures:**
-*   **Ray Offsets:** A set of 2D offset vectors $\{\mathbf{offset}_i\}_{i=0}^{N_s-1}$ representing subpixel positions within the pixel footprint.
-*   **Sample Accumulator:** A color buffer $C_{acc}$ initialized to zero.
+### Inputs and Outputs
+*   **Inputs**: Camera ray parameters ($\mathbf{o}, \mathbf{d}$), pixel coordinates, scene SDF, procedural noise parameters (octaves, frequency), and AA configuration (samples, mode).
+*   **Outputs**: Final pixel color, free of high-frequency aliasing artifacts.
 
-**Steps:**
-1.  **Calculate Subpixel Offsets:** Determine the ray direction perturbations for each sample. For a grid-based approach, offsets are derived from a grid spanning the pixel area [S1, unofficial].
-2.  **Determine Active Octaves:** Calculate the number of noise octaves to evaluate based on the pixel size to avoid sampling frequencies higher than the Nyquist limit [S2].
-    $$ N_{active} = \min(N_{max}, \lfloor \log_2(s_{pix}) \rfloor) $$
-    If $N_{active} < 0$, set $N_{active} = 0$ [S2].
-3.  **Loop Over Samples:** For each sample index $i$ from $0$ to $N_s-1$:
-    a. **Perturb Ray:** Adjust the ray direction $\mathbf{d}'$ by adding the subpixel offset $\mathbf{offset}_i$ to the ray origin or direction vector [S1, unofficial].
-    b. **Ray March:** Perform sphere tracing using $f(\mathbf{p})$ with $N_{active}$ octaves for procedural textures or standard SDF evaluation [S2].
-    c. **Shade:** Compute the color $C_i$ for the hit point or volume contribution.
-    d. **Accumulate:** Add $C_i$ to $C_{acc}$.
-4.  **Average:** Compute the final color by dividing the accumulator by the number of samples $N_s$ [S1, unofficial].
-    $$ C = \frac{1}{N_s} \sum_{i=0}^{N_s-1} C_i $$
+### Data Structures
+*   **Ray Offsets**: A 2D array or vector of $(xx, yy)$ offsets representing subpixel jitter positions within the pixel footprint.
+*   **LOD State**: Integer count of active noise octaves, derived from pixel size or ray differentials.
 
-**Parameters:**
-*   **AA Samples:** A 2x4 grid yields 8 samples per pixel [S1, unofficial].
-*   **Offset Range:** Offsets typically range from -0.25 to 0.75 or similar subpixel coordinates [S1, unofficial].
+### Steps
 
-**Edge Cases:**
-*   **Distant Surfaces:** When $s_{pix}$ is large, $\log_2(s_{pix})$ may exceed $N_{max}$, culling all but the coarsest octaves [S2].
-*   **Simple Patterns:** For non-noise patterns, analytical filtering using `smoothstep` with `fwidth` (derivative-based width) is preferred over sampling [S2].
+1.  **Determine Sampling Strategy**:
+    *   If procedural noise is present, calculate the effective frequency relative to the pixel size to determine the maximum useful octave count [S2].
+    *   If geometric AA is enabled, generate subpixel offset samples [S1, unofficial].
 
-**Pseudocode:**
+2.  **Procedural Frequency Capping (LOD)**:
+    *   Calculate the pixel size in world units, $s_{pixel}$ [S2].
+    *   Determine the maximum octave count:
+        $$ n_{oct} = \min(N_{max}, \lfloor \log_2(s_{pixel}) \rfloor) $$
+        where $N_{max}$ is the global maximum octaves [S2].
+    *   Evaluate the noise function using only $n_{oct}$ octaves. This skips frequencies finer than the pixel resolution, preventing moiré patterns [S2].
+    *   *Alternative Analytical Filtering*: For simple patterns, apply a smoothstep filter based on the derivative of the pattern coordinate $u$:
+        $$ f_{filtered} = \text{smoothstep}(-f_w, f_w, f(u)) $$
+        where $f_w = fwidth(u)$ is the rate of change of $u$ across the pixel [S2].
+
+3.  **Subpixel Jittering (SSAA-like)**:
+    *   Define a grid of jitter offsets. A common configuration uses 2 samples in $x$ and 4 samples in $y$, totaling 8 samples per pixel [S1, unofficial].
+    *   The offsets $xx$ and $yy$ are distributed within the pixel space, typically ranging from $-0.25$ to $0.75$ with a step of $0.5$ [S1, unofficial].
+    *   For each sample $(i, j)$:
+        a.  Adjust the ray direction $\mathbf{d}'$ by adding the offset $(xx_i, yy_j)$ to the ray's origin or direction vector, effectively shifting the ray's entry point into the pixel [S1, unofficial].
+        b.  Perform standard sphere tracing using the adjusted ray [S1, unofficial].
+        c.  Store the resulting color $C_{ij}$ [S1, unofficial].
+
+4.  **Aggregation**:
+    *   Average the colors from all samples:
+        $$ C_{final} = \frac{1}{N_{samples}} \sum_{i,j} C_{ij} $$
+    *   For 8 samples, multiply the sum by $0.125$ ($1/8$) [S1, unofficial].
+
+### Pseudocode
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_pixel_aa(ray_o, ray_d, pixel_size, max_octaves, sdf, noise_func):
-    # 1. Define subpixel offsets for 2x4 grid (8 samples)
-    # Offsets are relative to the pixel center or corner, scaled appropriately
-    offsets = []
-    for yy in [-0.75, -0.25, 0.25, 0.75]:
-        for xx in [-0.25, 0.25]:
-            offsets.append((xx, yy))
-            
-    num_samples = len(offsets)
-    acc_color = vec3(0.0)
+def render_pixel_aa(ray_o, ray_d, pixel_size, max_octaves, noise_func, use_aa=True):
+    """
+    Renders a single pixel with antialiasing.
+    :param ray_o: Camera origin (vec3)
+    :param ray_d: Normalized ray direction (vec3)
+    :param pixel_size: World units per pixel (float)
+    :param max_octaves: Maximum noise octaves (int)
+    :param noise_func: Function evaluating procedural noise (vec3 -> float)
+    :param use_aa: Boolean flag for subpixel sampling
+    :return: Final color (vec3)
+    """
     
-    # 2. Determine active octaves based on pixel size
-    # Skip octaves finer than the pixel size to prevent aliasing
+    # 1. Procedural LOD Calculation
+    # Skip octaves finer than pixel size to prevent moire
     if pixel_size > 0:
-        active_octaves = min(max_octaves, int(log2(pixel_size)))
+        lod_octaves = min(max_octaves, int(log2(pixel_size)))
     else:
-        active_octaves = max_octaves
-        
+        lod_octaves = max_octaves
+
+    if not use_aa:
+        # Single sample, no jitter
+        color = sphere_trace(ray_o, ray_d, lod_octaves, noise_func)
+        return color
+
+    # 2. Subpixel Sampling Configuration
+    # 2 samples in x, 4 samples in y -> 8 total samples
+    x_offsets = [-0.25, 0.25]
+    y_offsets = [-0.75, -0.25, 0.25, 0.75]
+    
+    total_samples = len(x_offsets) * len(y_offsets)
+    accumulated_color = vec3(0.0)
+
     # 3. Loop over samples
-    for xx, yy in offsets:
-        # Adjust ray direction by offsets [S1, unofficial]
-        # Note: Exact perturbation method depends on camera model.
-        # Here we assume a simple direction perturbation or origin shift.
-        perturbed_d = ray_d + vec3(xx, yy, 0.0) # Placeholder for specific camera math
-        perturbed_d = normalize(perturbed_d)
-        
-        # Ray march with limited octaves for procedural parts [S2]
-        color = ray_march_with_lod(ray_o, perturbed_d, sdf, noise_func, active_octaves)
-        acc_color += color
-        
+    for xx in x_offsets:
+        for yy in y_offsets:
+            # Adjust ray direction/origin based on offset
+            # Note: Exact adjustment depends on camera projection model.
+            # Here we assume a simple offset addition to direction for jittering
+            jittered_d = normalize(ray_d + vec3(xx, yy, 0.0))
+            
+            # Perform sphere trace with LOD-aware noise
+            sample_color = sphere_trace(ray_o, jittered_d, lod_octaves, noise_func)
+            accumulated_color += sample_color
+
     # 4. Average results
-    final_color = acc_color * (1.0 / num_samples)
+    final_color = accumulated_color * (1.0 / total_samples)
     return final_color
+
+def sphere_trace(ray_o, ray_d, lod_octaves, noise_func):
+    """
+    Standard sphere tracing loop.
+    """
+    t = 0.0
+    max_dist = 100.0
+    epsilon = 0.001
+    
+    while t < max_dist:
+        p = ray_o + t * ray_d
+        dist = noise_func(p, lod_octaves) # Noise function respects lod_octaves
+        
+        if dist < epsilon:
+            return shade_surface(p, ray_d)
+        if dist < 0: # Inside geometry
+            return shade_inside(p)
+            
+        t += dist
+        
+    return background_color()
 ```
+
+### Parameters
+*   **AA Samples**: 8 samples per pixel (2x4 grid) is a typical configuration [S1, unofficial].
+*   **LOD Octaves**: Determined dynamically by `int(log2(pixel_size))` [S2].
+*   **Jitter Range**: $xx \in [-0.25, 0.25]$, $yy \in [-0.75, 0.75]$ with step $0.5$ [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Zero Pixel Size**: If `pixel_size` is 0 or negative, `log2` is undefined. Guard against this by clamping `lod_octaves` to `max_octaves` or a minimum value [S2].
+*   **Derivative Calculation**: Analytical filtering requires accurate `fwidth` (derivative) computation. In ray marching, this requires computing ray differentials $\frac{\partial \mathbf{r}}{\partial u}$ and $\frac{\partial \mathbf{r}}{\partial v}$ manually, as standard texture derivatives may not apply to procedural SDFs [S2].
+*   **Performance**: Subpixel sampling increases cost linearly with sample count. 8 samples is a balance; higher counts (e.g., 16+) may be needed for high-frequency scenes but significantly reduce frame rate [S1, unofficial].
 
 ## Subtopics
 
 ### Super-Sampling Anti-Aliasing (SSAA)
-SSAA renders the scene at a higher resolution and downsamples to the target resolution [S3, unofficial]. It is chosen when full scene consistency is required across all buffers (albedo, depth, normals) rather than just procedural noise [S3, unofficial]. It involves computing high-res dimensions, rendering all buffers, and minifying using interpolation (e.g., bilinear/bicubic) [S3, unofficial].
+SSAA renders the entire scene at a higher resolution and downsamples to the target resolution [S3, unofficial]. It reduces aliasing by averaging multiple subpixel samples via interpolation [S3, unofficial].
+*   **When to choose**: When rendering complex scenes with multiple buffers (albedo, depth, normal) and hardware acceleration for interpolation is available. It is distinct from per-pixel jittering as it operates on the final image buffer.
+*   **Implementation**: Compute high-res dimensions $h = \text{make\_divisible}(h_0 \cdot ssaa, 8)$ and $w = \text{make\_divisible}(w_0 \cdot ssaa, 8)$ [S3, unofficial]. Render all buffers at $(h, w)$, then downsample using `torch.nn.functional.interpolate` with `mode='min'` (bilinear/bicubic minification) [S3, unofficial].
+*   **Parameters**: `ssaa` integer multiplier, default 1. Must be $>1$ to trigger [S3, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N_s \cdot N_{steps})$, where $N_s$ is the number of AA samples (e.g., 8) and $N_{steps}$ is the average ray march steps.
-*   **Memory Complexity:** $O(1)$ additional memory per pixel for accumulation.
-*   **Performance:** 8x slower than single-sample ray marching [S1, unofficial].
-*   **Strengths:** Effectively removes moiré from procedural noise and high-frequency details [S2].
-*   **Limitations:** Computationally expensive; SSAA requires storing and processing multiple buffers [S3, unofficial].
+*   **Time Complexity**: $O(N_{samples} \cdot N_{steps})$, where $N_{samples}$ is the number of AA samples and $N_{steps}$ is the average sphere tracing steps. LOD capping reduces $N_{steps}$ for distant objects by skipping noise evaluations [S2].
+*   **Memory Complexity**: $O(1)$ additional memory per pixel for jitter buffers, or $O(H \cdot W \cdot ssaa^2)$ for SSAA if rendering to a larger buffer [S3, unofficial].
+*   **Strengths**: Effectively eliminates moiré from procedural noise (LOD) and jagged edges from geometry (Jitter/SSAA) [S1, unofficial][S2].
+*   **Limitations**: SSAA increases memory bandwidth and VRAM usage quadratically with the AA factor [S3, unofficial]. Procedural LOD requires careful derivative management [S2].
+*   **When to use**: Use LOD capping for all procedural noise. Use subpixel jittering for geometric AA when performance allows. Use SSAA when post-processing downsampling is feasible and high-quality anti-aliasing is required for all buffers.
 
 ## Background
-Antialiasing in ray marching is critical for procedural textures where high-frequency noise (e.g., ridged noise, Voronoi) creates aliasing artifacts on distant surfaces [S2]. Techniques like LOD-based octave culling and subpixel sampling were developed to address these specific artifacts in real-time and offline rendering contexts [S2]. SSAA is a broader technique applied to ray-traced or ray-marched scenes to ensure spatial consistency [S3, unofficial].
+Antialiasing in ray marching evolved alongside procedural rendering. Early implementations used simple supersampling [S1, unofficial]. The integration of LOD-based octave capping for procedural noise was developed to address specific moiré artifacts in ridged noise and Voronoi patterns, which are particularly visible on axis-aligned surfaces [S2]. SSAA in the context of neural and implicit rendering (e.g., DreamGaussian) adapts traditional rasterization downsampling techniques to volume rendering pipelines [S3, unofficial].
 
 ## Sources
 [S1] a1k0n/asciitracing, https://github.com/a1k0n/asciitracing, fetched 2026-10-26 (unofficial)

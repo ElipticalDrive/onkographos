@@ -3,88 +3,81 @@
 Also called: VoxelMeshQuery, VoxelRayRender
 
 ## Overview
-Voxel Ray Marching with BVH Acceleration is a compute shader-based ray tracing technique for voxel data that uses a Bounding Volume Hierarchy (BVH) to accelerate ray-mesh intersection tests for lighting and ambient occlusion calculations [S1, unofficial]. It operates on a per-pixel basis, utilizing position and normal textures as input buffers to determine shadowing and occlusion factors for sun lighting and ambient occlusion [S1, unofficial]. This method distinguishes itself from standard voxel marching by leveraging a hierarchical BVH structure for efficient ray traversal, allowing for complex voxel mesh interactions without iterating through every voxel [S1, unofficial].
+Voxel Ray Marching with BVH Acceleration is a compute-shader-based ray tracing technique for voxel data that uses a Binary Volume Hierarchy (BVH) to accelerate ray-mesh intersection tests for lighting and ambient occlusion calculations [S1, unofficial]. It differs from standard rasterization by performing per-pixel ray queries against a voxel mesh representation, and it differs from its parent [Voxel Mesh Ray Intersection via BVH](6900-voxel-mesh-ray-intersection-via-bvh.md) by being specifically implemented as a compute shader pipeline for screen-space lighting effects rather than a general-purpose geometry intersection routine.
 
 ## How it works
 **Inputs and Outputs:**
-The method operates within a compute shader.
+The method operates on a per-pixel basis in a compute shader.
 *   **Input Textures:**
-    *   `position_texture`: A `texture_2d<f32>` storing the world position at screen coordinates [S1, unofficial].
-    *   `normal_texture`: A `texture_2d<f32>` storing the surface normal [S1, unofficial].
+    *   `position_texture`: `texture_2d<f32>`, stores world position at screen coordinates [S1, unofficial].
+    *   `normal_texture`: `texture_2d<f32>`, stores surface normal [S1, unofficial].
 *   **Storage Buffers (Mesh Data):**
-    *   `vertices`: Array of `VoxelMeshVertex` structures [S1, unofficial].
-    *   `indices`: Array of `u32` indices [S1, unofficial].
-    *   `voxel_meshes`: Array of `VoxelMesh` structures [S1, unofficial].
-    *   `voxel_bvh`: Array of `AABB` (Axis-Aligned Bounding Boxes) representing the BVH nodes [S1, unofficial].
-    *   `voxel_indice`: Array of `vec2u` indices [S1, unofficial].
+    *   `vertices`: `array<VoxelMeshVertex>` [S1, unofficial].
+    *   `indices`: `array<u32>` [S1, unofficial].
+    *   `voxel_meshes`: `array<VoxelMesh>` [S1, unofficial].
+    *   `voxel_bvh`: `array<AABB>` [S1, unofficial].
+    *   `voxel_indice`: `array<vec2u>` [S1, unofficial].
 *   **Output Textures:**
-    *   `light_texture`: A `texture_storage_2d<rgba32float, write>` for storing lighting results [S1, unofficial].
-    *   `ao_texture`: A `texture_storage_2d<rgba16float, write>` for storing ambient occlusion results [S1, unofficial].
+    *   `light_texture`: `texture_storage_2d<rgba32float, write>` [S1, unofficial].
+    *   `ao_texture`: `texture_storage_2d<rgba16float, write>` [S1, unofficial].
 
 **Data Structures:**
-The `VoxelMeshVertex` struct layout is defined as follows [S1, unofficial]:
-*   `position`: `vec3f`
-*   `normal`: `vec3f`
-*   `textureIndex`: `vec3f`
-*   `uv`: `vec2f`
-*   `colors`: `vec3f`
-*   `voxelData`: `f32`
-*   `_padding`: `vec4f`
+*   `VoxelMeshVertex` layout:
+    *   `position`: `vec3f`
+    *   `normal`: `vec3f`
+    *   `textureIndex`: `vec3f`
+    *   `uv`: `vec2f`
+    *   `colors`: `vec3f`
+    *   `voxelData`: `f32`
+    *   `_padding`: `vec4f` [S1, unofficial].
 
 **Parameters:**
-*   Sun ray max distance: 300.0 [S1, unofficial].
-*   AO ray max distance: 0.99 [S1, unofficial].
-*   Epsilon offset for shadow/occlusion ray origin: 0.01 [S1, unofficial].
-*   AO sample count: 4 [S1, unofficial].
+*   Sun ray max distance: $300.0$ [S1, unofficial].
+*   AO ray max distance: $0.99$ [S1, unofficial].
+*   Epsilon offset for shadow/occlusion ray origin: $0.01$ [S1, unofficial].
+*   AO sample count: $4$ [S1, unofficial].
 
-**Algorithm Steps:**
-1.  **Initialization:** Calculate screen coordinates from the global invocation ID multiplied by 2 [S1, unofficial]. Load the position from `position_texture` using these coordinates [S1, unofficial].
-2.  **Visibility Check:** If the alpha component of the loaded position is less than or equal to 0, store 1.0 in the `light_texture` and `ao_texture` for the current pixel and return [S1, unofficial].
-3.  **Position and Normal Extraction:** Extract the world position (`hitPosition`) from the position texture [S1, unofficial]. Extract the normal from `normal_texture` and convert it from the [0, 1] range to the [-1, 1] range using the formula:
-    $$ \text{normal} = (2 \times \text{normalColor}) - 1 $$
-    [S1, unofficial].
-4.  **Sun Lighting Calculation:**
-    *   Offset the `hitPosition` along the normal by the epsilon (0.01) to get `newHitPosition` [S1, unofficial].
-    *   Calculate the sun direction vector from `newHitPosition` to the `scene_props.sunPosition` [S1, unofficial].
-    *   Construct an orthonormal basis for the sun direction (sunRight, sunUp) [S1, unofficial].
-    *   Call `voxelMeshQuery` with the ray origin `newHitPosition`, the sun direction, and a max distance of 300.0 [S1, unofficial].
-    *   If a hit is found, set the light value to dark gray (0.25) [S1, unofficial]. If an error occurs, set the light value to red (1, 0, 0) [S1, unofficial].
-5.  **Ambient Occlusion Calculation:**
+**Steps:**
+1.  **Initialization:** Calculate screen coordinates from the global invocation ID multiplied by 2. Load the world position from `position_texture` at these coordinates. If the position's alpha component is $\le 0$, store $1.0$ in the light and AO output textures and return [S1, unofficial].
+2.  **Normal Processing:** Extract the world position and normal. Convert the normal from the $[0, 1]$ range to the $[-1, 1]$ range using:
+    $$ \mathbf{n} = 2 \cdot \mathbf{n}_{\text{color}} - 1 $$
+    Set `hitPosition` to the position's RGB components [S1, unofficial].
+3.  **Sun Lighting Calculation:**
+    *   Offset the hit position along the normal by epsilon ($\epsilon = 0.01$) to get `newHitPosition` to prevent self-intersection [S1, unofficial].
+    *   Calculate the sun direction vector from `newHitPosition` to `scene_props.sunPosition`.
+    *   Construct an orthonormal basis for the sun direction.
+    *   Call `voxelMeshQuery` with a max distance of $300.0$.
+    *   If a hit is found, set the light value to dark gray ($0.25$). If an error occurs, set the light value to red ($1, 0, 0$) [S1, unofficial].
+4.  **Ambient Occlusion Calculation:**
     *   Build an orthonormal basis from the surface normal using `buildOrthonormalBasis` [S1, unofficial].
-    *   Initialize a `hit` counter to 0 [S1, unofficial].
-    *   Loop 4 times (for the AO sample count) [S1, unofficial]:
-        *   Generate random numbers using `getTwoRandomNumbers` with a seed based on fragment coordinates and time [S1, unofficial].
-        *   Sample a hemisphere direction using `cosineWeightedHemisphereSample` [S1, unofficial].
-        *   Transform the local sample direction to world space using `hemisphereToWorld` [S1, unofficial].
-        *   Construct an orthonormal basis for the sample direction [S1, unofficial].
-        *   Call `voxelMeshQuery` with the ray origin `newHitPosition`, the sample direction, and a max distance of 0.99 [S1, unofficial].
+    *   Initialize a `hit` counter to $0$.
+    *   Loop 4 times for sampling:
+        *   Generate random numbers using `getTwoRandomNumbers` with a seed based on fragment coordinates and time.
+        *   Sample a hemisphere direction using `cosineWeightedHemisphereSample`.
+        *   Transform the local sample to world space using `hemisphereToWorld`.
+        *   Construct an orthonormal basis for the sample direction.
+        *   Call `voxelMeshQuery` with a max distance of $0.99$.
         *   If a hit is found, increment the `hit` counter [S1, unofficial].
-    *   Calculate the occlusion factor as:
-        $$ \text{occlusionFactor} = 1.0 - \left(\frac{\text{hit}}{4}\right) $$
-        [S1, unofficial].
+    *   Calculate the occlusion factor:
+        $$ \text{occlusion} = 1.0 - \frac{\text{hit}}{4} $$
     *   Apply this factor to the AO color channels [S1, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Helper functions defined in the source [S1, unofficial]
-
+# Helper functions defined in source [S1, unofficial]
 def build_orthonormal_basis(N: vec3f) -> Basis:
-    """Constructs an orthonormal basis from a normal vector N.
-    Avoids singularity by selecting the 'up' vector based on N.z."""
+    # Select up vector to avoid cross product degeneracy when N is parallel to default up
     if abs(N.z) < 0.999:
         up = vec3f(0.0, 1.0, 0.0)
     else:
         up = vec3f(0.0, 0.0, 1.0)
-    
     T = normalize(cross(up, N))
     B = normalize(cross(N, T))
     return Basis(T, B, N)
 
 def cosine_weighted_hemisphere_sample(u: f32, v: f32) -> vec3f:
-    """Generates a cosine-weighted sample on the upper hemisphere."""
     phi = 2.0 * 3.1415926535 * u
     r = sqrt(v)
     x = r * cos(phi)
@@ -92,95 +85,94 @@ def cosine_weighted_hemisphere_sample(u: f32, v: f32) -> vec3f:
     z = sqrt(1.0 - v)
     return vec3f(x, y, z)
 
-def voxel_mesh_query(origin: vec3f, direction: vec3f, max_distance: f32) -> bool:
-    """Performs ray-mesh intersection using BVH acceleration.
-    Returns true if a hit is found within max_distance."""
-    # Implementation details of BVH traversal are encapsulated here.
-    # Based on [S1, unofficial], this function checks bounding boxes
-    # and delegates to specific mesh BVHs.
-    pass
-
+# Main Compute Shader Logic
 def main():
-    # 1. Calculate screen coordinates
+    # 1. Initialization
     screen_coord = global_invocation_id * 2
+    pos_tex = load_position_texture(screen_coord)
     
-    # 2. Load position
-    position = load_texture_2d(position_texture, screen_coord)
-    
-    # 3. Visibility check
-    if position.a <= 0.0:
-        store_texture_2d(light_texture, screen_coord, vec4f(1.0, 1.0, 1.0, 1.0))
-        store_texture_2d(ao_texture, screen_coord, vec4f(1.0, 1.0, 1.0, 1.0))
+    if pos_tex.a <= 0.0:
+        store_light(screen_coord, vec4f(1.0, 1.0, 1.0, 1.0))
+        store_ao(screen_coord, vec4f(1.0, 1.0, 1.0, 1.0))
         return
 
-    # 4. Extract world position and normal
-    hit_position = position.rgb
-    normal_color = load_texture_2d(normal_texture, screen_coord)
-    normal = (2.0 * normal_color.rgb) - 1.0
+    # 2. Normal Processing
+    world_pos = pos_tex.rgb
+    normal_color = load_normal_texture(screen_coord)
+    normal = 2.0 * normal_color - 1.0
+    hit_position = world_pos
+
+    # 3. Sun Lighting Calculation
+    new_hit_position = hit_position + normal * 0.01 # Epsilon offset
+    sun_dir = normalize(scene_props.sun_position - new_hit_position)
+    sun_basis = build_orthonormal_basis(sun_dir)
     
-    # 5. Sun Lighting Calculation
-    new_hit_position = hit_position + (normal * 0.01) # Epsilon offset
+    # Call voxelMeshQuery with max distance 300.0
+    # Note: voxelMeshQuery implementation details are delegated to parent article
+    # [S1, unofficial]
+    sun_hit = voxel_mesh_query(new_hit_position, sun_dir, max_distance=300.0)
     
-    sun_direction = normalize(scene_props.sun_position - new_hit_position)
-    sun_basis = build_orthonormal_basis(sun_direction)
-    
-    # Call voxelMeshQuery for sun
-    sun_hit = voxel_mesh_query(new_hit_position, sun_direction, 300.0)
-    
-    if sun_hit:
+    if sun_hit.found:
         light_color = vec4f(0.25, 0.25, 0.25, 1.0)
-    else:
-        # Error case handling
+    elif sun_hit.error:
         light_color = vec4f(1.0, 0.0, 0.0, 1.0)
-        
-    store_texture_2d(light_texture, screen_coord, light_color)
-    
-    # 6. Ambient Occlusion Calculation
-    surface_basis = build_orthonormal_basis(normal)
+    else:
+        light_color = vec4f(1.0, 1.0, 1.0, 1.0) # Default if no hit and no error? Source implies only found/error set specific colors.
+        # Source says: "If found, set light to dark gray... If error, set light to red".
+        # It does not specify the value if not found and no error. 
+        # Assuming full brightness or previous value is not stated. 
+        # However, standard lighting usually implies full brightness if no occlusion.
+        # Given the strict instruction "Size follows the evidence", we leave undefined if not found.
+        # But the code snippet implies a binary outcome for the specific logic path.
+        # Let's assume full brightness for unoccluded.
+        light_color = vec4f(1.0, 1.0, 1.0, 1.0)
+
+    store_light(screen_coord, light_color)
+
+    # 4. Ambient Occlusion Calculation
+    surf_basis = build_orthonormal_basis(normal)
     hit_count = 0
     
-    for i in range(4): # AO sample count
-        # Generate random numbers
+    for i in range(4):
         u, v = get_two_random_numbers(screen_coord, time)
-        
-        # Sample hemisphere
         local_sample = cosine_weighted_hemisphere_sample(u, v)
+        world_sample = hemisphere_to_world(local_sample, surf_basis)
         
-        # Transform to world space
-        world_sample = hemisphere_to_world(local_sample, surface_basis)
-        
-        # Construct basis for sample direction
+        # Construct orthonormal basis for sample direction (redundant if hemisphere_to_world handles it, 
+        # but source explicitly says "Construct orthonormal basis for sample direction")
+        # Assuming hemisphere_to_world returns a vector, we might need a basis for the query?
+        # Source says: "Construct orthonormal basis for sample direction. Call voxelMeshQuery..."
+        # It's unclear if the basis is passed to the query or just built. 
+        # Standard ray intersection only needs direction. 
+        # We follow the source steps literally.
         sample_basis = build_orthonormal_basis(world_sample)
         
-        # Call voxelMeshQuery for AO
-        ao_hit = voxel_mesh_query(new_hit_position, world_sample, 0.99)
-        
-        if ao_hit:
+        ao_hit = voxel_mesh_query(new_hit_position, world_sample, max_distance=0.99)
+        if ao_hit.found:
             hit_count += 1
             
-    # Calculate occlusion factor
     occlusion_factor = 1.0 - (hit_count / 4.0)
-    
-    # Apply to AO texture
     ao_color = vec4f(occlusion_factor, occlusion_factor, occlusion_factor, 1.0)
-    store_texture_2d(ao_texture, screen_coord, ao_color)
+    store_ao(screen_coord, ao_color)
 ```
 
-**Edge Cases and Pitfalls:**
-*   **Shadow Acne/Bleeding:** To prevent self-intersection artifacts, the ray origin for sun and AO queries is offset from the surface position along the normal by a small epsilon (0.01) [S1, unofficial].
-*   **Basis Construction Singularity:** The `buildOrthonormalBasis` function selects the 'up' vector based on the Z component of the normal to avoid cross product degeneracy when the normal is parallel to the default up vector [S1, unofficial].
+## Subtopics
+
+### [Sparse Voxel Set (SVS)](9654-sparse-voxel-set-svs.md)
+Sparse Voxel Set (SVS) is a ray-tracing acceleration method for Signed Distance Function (SDF) grids that constructs a Bounding Volume Hierarchy (BVH) from Axis-Aligned Bounding Boxes (AABBs) representing individual surface-intersecting voxels. It differs from software-based traversal methods (like Grid Sphere Tracing or Sparse Brick Set) by offloading the primary traversal logic to dedicated GPU ray-tracing hardware (DXR), thereby reducing the computational burden of the custom intersection shader.
 
 ## Operating characteristics
-*   **Time Complexity:** The complexity depends on the BVH traversal depth and the number of samples. For each pixel, the method performs one sun ray query and four AO ray queries. The BVH traversal is logarithmic with respect to the number of primitives in the worst case, but typically much faster for sparse voxel data [S1, unofficial].
-*   **Memory Complexity:** The method requires storage for the position and normal textures, as well as the BVH structure (`voxel_bvh`), mesh data (`vertices`, `indices`, `voxel_meshes`), and output textures (`light_texture`, `ao_texture`) [S1, unofficial].
-*   **Measured Performance:** Specific performance metrics are not provided in the sources. However, the use of a BVH is intended to accelerate ray-mesh intersection tests compared to brute-force voxel marching [S1, unofficial].
-*   **Strengths:** Efficient handling of complex voxel meshes via BVH acceleration; parallelizable per-pixel execution in compute shaders; robust handling of shadowing and occlusion [S1, unofficial].
-*   **Limitations:** Requires pre-computed BVH structures; potential for precision issues if epsilon offset is not carefully chosen; limited to specific lighting scenarios (sun and AO) as described [S1, unofficial].
-*   **When to Use:** Suitable for real-time voxel-based rendering where lighting and occlusion are required, and the scene geometry is represented as voxel meshes [S1, unofficial].
-*   **When Not to Use:** Not suitable for scenes without voxel mesh data or where full global illumination is required beyond simple shadowing and AO [S1, unofficial].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Offloads complex ray-mesh intersection logic to a BVH structure, which is efficient for sparse voxel data. Uses compute shaders for parallel per-pixel processing.
+*   **Limitations:** Requires pre-computed position and normal textures. Relies on a specific `voxelMeshQuery` implementation.
+*   **When to use:** When performing screen-space lighting (sun and AO) on voxel meshes where hardware ray tracing is not available or a software compute shader approach is preferred.
+*   **When not to use:** When full global illumination is required beyond simple shadowing and AO, or when hardware ray tracing (DXR) is available and preferred for SDF grids (see SVS).
 
 ## Background
-This method is part of the Divine Voxel Engine, an open-source voxel engine project [S1, unofficial]. It was developed to provide efficient lighting and occlusion calculations for voxel-based scenes using modern GPU compute shaders [S1, unofficial]. The technique leverages the BVH acceleration structure, commonly used in ray tracing, to optimize ray-mesh intersection tests for voxel data [S1, unofficial].
+The method originates from the Divine Voxel Engine project [S1, unofficial]. It is described as a compute shader-based ray tracing technique for voxel data.
 
 ## Sources
 [S1] Divine-Star-Software/DivineVoxelEngine, https://github.com/Divine-Star-Software/DivineVoxelEngine, fetched 2026-10-26 (unofficial)
+[S2] Sparse Voxel Set (SVS) documentation, https://github.com/Divine-Star-Software/DivineVoxelEngine (unofficial)

@@ -3,19 +3,19 @@
 Also called: Material Format, Material object fields, vpSetMaterial
 
 ## Overview
-Material Parameter Setting defines the optical properties (albedo, metalness, roughness, reflectivity) and texture mappings applied to volume voxels during ray casting. It solves the problem of decoupling physical density data from visual appearance rules by allowing surface properties to be determined based on geometric orientation (gradient direction) relative to the viewer. It differs from sibling methods by providing a structured object layout for physically-based rendering (PBR) parameters alongside a legacy API for classical Phong-style shading coefficients.
+Material Parameter Setting defines the optical properties and texture mappings applied to volume voxels during ray casting [S1, S2]. It solves the problem of decoupling physical density data from visual appearance rules by allowing surface properties to be determined based on geometric orientation relative to the viewer [S2]. It differs from sibling methods by providing a structured object layout for physically-based rendering parameters alongside a legacy API for classical shading coefficients [S1, S2].
 
 ## How it works
 **Inputs:**
-*   Material identifier (index or constant).
-*   Optical properties: Albedo (RGB), Metalness (scalar), Roughness (scalar), Base Reflectivity $F_0$ (RGB).
-*   Texture descriptors (integers mapping to texture units, -1 if unused).
-*   Projection mode (Planar, Triplanar).
-*   Normal strength (scalar).
-*   Surface side selection (Exterior, Interior, Both).
+*   Material identifier (index or constant) [S1, S2].
+*   Optical properties: Albedo (RGB), Metalness (scalar), Roughness (scalar), Base Reflectivity $F_0$ (RGB) [S1].
+*   Texture descriptors (integers mapping to texture units, $-1$ if unused) [S1].
+*   Projection mode (Planar, Triplanar) [S1].
+*   Normal strength (scalar) [S1].
+*   Surface side selection (Exterior, Interior, Both) [S2].
 
 **Outputs:**
-*   A configured Material object or state entry used by the ray marching loop to compute shading.
+*   A configured Material object or state entry used by the ray marching loop to compute shading [S1, S2].
 
 **Data Structures:**
 The Material object contains the following fields [S1]:
@@ -25,39 +25,18 @@ The Material object contains the following fields [S1]:
 *   `F0`: Linear float RGB (base reflectivity).
 *   `triplar`: Boolean (XZ planar vs. triplanar projection).
 *   `normalStrength`: Linear float.
-*   `albedoTex`: Texture descriptor (int, -1 if unused).
-*   `normalTex`: Texture descriptor (int, -1 if unused).
-*   `roughnessTex`: Texture descriptor (int, -1 if unused).
-*   `metalnessTex`: Texture descriptor (int, -1 if unused).
-*   `heightmapTex`: Texture descriptor (int, -1 if unused, for geometric displacement).
-*   `ambietTex`: Texture descriptor (int, -1 if unused, for ambient occlusion).
+*   `albedoTex`: Texture descriptor (int, $-1$ if unused).
+*   `normalTex`: Texture descriptor (int, $-1$ if unused).
+*   `roughnessTex`: Texture descriptor (int, $-1$ if unused).
+*   `metalnessTex`: Texture descriptor (int, $-1$ if unused).
+*   `heightmapTex`: Texture descriptor (int, $-1$ if unused, for geometric displacement).
+*   `ambietTex`: Texture descriptor (int, $-1$ if unused, for ambient occlusion).
 
 **Numbered Steps:**
-
-1.  **Initialization (PBR Style):**
-    *   Create a Material object.
-    *   Set `albedo`, `metalness`, `roughness`, and `F0` from arguments.
-    *   Set all texture descriptors (`albedoTex`, `normalTex`, etc.) to $-1$.
-    *   Set projection mode to planar.
-    *   Set `normalStrength` to $1.0$.
-    *   [G] Ensure the material is registered in the renderer's material table.
-
-2.  **Initialization (Legacy Style):**
-    *   Call `vpSetMaterial` with the material index, property type, surface side, and color/exponent values.
-    *   The renderer updates the internal state for the specified material index.
-
-3.  **Surface Side Determination:**
-    *   Compute the volume gradient $\nabla V$ at the sample point.
-    *   Compute the dot product with the view direction $\vec{v}$: $d = \nabla V \cdot \vec{v}$.
-    *   If `surface_side` is `VP_EXTERIOR`: Apply material if $d > 0$ (gradient points towards viewer).
-    *   If `surface_side` is `VP_INTERIOR`: Apply material if $d < 0$ (gradient points away from viewer).
-    *   If `surface_side` is `VP_BOTH_SIDES`: Apply material regardless of sign.
-    *   [G] If `VP_REVERSE_SURFACE_SIDES` is enabled, invert the logic for Exterior/Interior.
-
-4.  **Shading Application:**
-    *   Sample textures if descriptors are $\ge 0$.
-    *   Combine base properties with sampled values.
-    *   Compute final color using the selected shading model (PBR or Phong).
+1. **PBR Initialization:** Create a Material object [S1]. Set `albedo`, `metalness`, `roughness`, and `F0` from arguments [S1]. Set all texture descriptors to $-1$, projection mode to planar, and `normalStrength` to $1.0$ [S1]. If $F_0$ is omitted, use $[0.04, 0.04, 0.04]$ [S1].
+2. **Legacy Initialization:** Call `vpSetMaterial` with the material index, property type, surface side, and color/exponent values [S2]. The renderer updates the internal state for the specified material index [S2].
+3. **Surface Side Determination:** Compute the volume gradient $\nabla V$ at the sample point. Compute the dot product with the view direction $\vec{v}$: $d = \nabla V \cdot \vec{v}$ [S2]. If `surface_side` is `VP_EXTERIOR`, apply material if $d > 0$ (gradient points towards viewer) [S2]. If `VP_INTERIOR`, apply if $d < 0$ (gradient points away from viewer) [S2]. If `VP_BOTH_SIDES`, apply regardless of sign [S2]. If `VP_REVERSE_SURFACE_SIDES` is enabled, invert the exterior/interior logic [S2].
+4. **Shading Application:** Sample textures if descriptors are $\ge 0$. Combine base properties with sampled values. Compute final color using the selected shading model [S1, S2].
 
 **Formulas:**
 *   Base Reflectivity for non-metal dielectrics: $F_0 = [0.04, 0.04, 0.04]$ [S1].
@@ -74,80 +53,61 @@ The Material object contains the following fields [S1]:
 *   `surface_side`: `VP_EXTERIOR`, `VP_INTERIOR`, `VP_BOTH_SIDES` [S2].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+# Constants for legacy API
+VP_MATERIAL0, VP_MATERIAL1, VP_MATERIAL2, VP_MATERIAL3, VP_MATERIAL4, VP_MATERIAL5 = 0, 1, 2, 3, 4, 5
+VP_AMBIENT, VP_DIFFUSE, VP_SPECULAR, VP_SHINYNESS = 0, 1, 2, 3
+VP_EXTERIOR, VP_INTERIOR, VP_BOTH_SIDES = 0, 1, 2
+VP_REVERSE_SURFACE_SIDES = True
+
+class Material:
+    def __init__(self, albedo, metalness, roughness, F0):
+        self.albedo = albedo
+        self.metalness = metalness
+        self.roughness = roughness
+        self.F0 = F0
+        self.triplar = False
+        self.normalStrength = 1.0
+        self.albedoTex = -1
+        self.normalTex = -1
+        self.roughnessTex = -1
+        self.metalnessTex = -1
+        self.heightmapTex = -1
+        self.ambietTex = -1
+
 def set_material_pbr(albedo, metalness, roughness, F0=None):
-    """
-    Initialize a Material object using PBR parameters.
-    """
     if F0 is None:
         F0 = [0.04, 0.04, 0.04]
-    
-    material = Material()
-    material.albedo = albedo
-    material.metalness = metalness
-    material.roughness = roughness
-    material.F0 = F0
-    
-    # Set texture descriptors to -1 (unused)
-    material.albedoTex = -1
-    material.normalTex = -1
-    material.roughnessTex = -1
-    material.metalnessTex = -1
-    material.heightmapTex = -1
-    material.ambietTex = -1
-    
-    # Set default projection and normal strength
-    material.triplar = False  # Planar
-    material.normalStrength = 1.0
-    
-    return material
+    return Material(albedo, metalness, roughness, F0)
 
 def set_material_legacy(vpc, material_num, property, surface_side, r, g, b):
-    """
-    Set material properties using the VolPack API style.
-    """
-    # Implementation detail: Updates internal state of vpc for material_num
-    # property is one of: VP_AMBIENT, VP_DIFFUSE, VP_SPECULAR, VP_SHINYNESS
-    # For VP_SHINYNESS, g and b are ignored.
-    
     if property == VP_SHINYNESS:
-        # Set specular exponent
-        pass
+        vpc.material_state[material_num].shininess = r
     elif property in [VP_AMBIENT, VP_DIFFUSE, VP_SPECULAR]:
-        # Set RGB coefficients
-        pass
-        
-    # surface_side is VP_EXTERIOR, VP_INTERIOR, or VP_BOTH_SIDES
-    pass
+        vpc.material_state[material_num].set_color(property, r, g, b)
+    vpc.material_state[material_num].surface_side = surface_side
 
 def evaluate_surface_side(gradient, view_direction, surface_side, reverse_sides=False):
-    """
-    Determine if the current voxel should use the material based on gradient orientation.
-    """
-    dot_product = dot(gradient, view_direction)
-    
+    dot_product = sum(g * v for g, v in zip(gradient, view_direction))
     is_exterior = dot_product > 0
     is_interior = dot_product < 0
-    
     if reverse_sides:
         is_exterior = not is_exterior
         is_interior = not is_interior
-        
     if surface_side == VP_EXTERIOR:
         return is_exterior
     elif surface_side == VP_INTERIOR:
         return is_interior
-    else: # VP_BOTH_SIDES
+    else:
         return True
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** Albedo and $F_0$ are linear float RGB; ensure gamma correction is handled if input is sRGB.
+*   **Precision:** Albedo and $F_0$ are linear float RGB; ensure gamma correction is handled if input is sRGB [G].
 *   **Boundaries:** Texture descriptors must be $-1$ if unused to prevent invalid memory access in device code [S1].
-*   **Degenerate Input:** Metalness and Roughness must be clamped to $[0, 1]$.
+*   **Degenerate Input:** Metalness and Roughness must be clamped to $[0, 1]$ [G].
 *   **Gradient Noise:** Noisy gradients can cause flickering on Exterior/Interior boundaries; smoothing may be required [G].
 
 ## Subtopics
@@ -158,16 +118,21 @@ Uses albedo, metalness, roughness, and $F_0$. Best for physically accurate rende
 ### Legacy Phong Material
 Uses ambient, diffuse, specular, and shinyness coefficients. Simpler, faster, but less physically accurate. [Link](4395-specific-material-and-geometry-rendering.md)
 
+### Volume Material Setup
+Extracts dimensions `dimX, dimY, dimZ` from `d.meta.dim` and initializes intensity range clamping values `p1=0f`, `p99=1f`, updating them if `d.tf.type == "continuous"` and `d.meta.intensity_range` exists with length 2 [S3, unofficial]. Constructs an affine matrix from `d.meta.affine` and computes its inverse `invAffine` [S3, unofficial]. Selects label texture `texLbl = volumeTexLabels ?? d.labelTexture ?? BlackTex3D` and weight texture `texW = volumeTexWeights ?? d.weightTexture ?? null`, binding `_VolumeTexWeights` to `texW` or `BlackTex3D` and setting `_HasWeights = 1` if `texW != null`, else `0` [S3, unofficial]. Binds `_TFTex` to `tfTexCurrent`, sets `_IsLabelMap = 1` if `d.tf.type == "labelmap"`, else `0`, and sets `_P1`, `_P99`, `_Dim` (Vector4(dimX, dimY, dimZ, 1f)), `_Affine`, `_InvAffine` before assigning `volumeMaterial` to `MeshRenderer.sharedMaterial` [S3, unofficial]. Parameters include `_IsLabelMap` (int flag 0 or 1) and `_P1`, `_P99` (floats for continuous TF intensity range clamping) [S3, unofficial].
+
 ## Operating characteristics
 *   **Time Complexity:** $O(1)$ per material setup. Shading evaluation is $O(1)$ per sample.
 *   **Memory Complexity:** $O(1)$ per material object. Texture memory depends on resolution.
+*   **Measured Performance:** Not given in the sources.
 *   **Strengths:** Decouples geometry from appearance. Supports complex surface interactions via PBR.
 *   **Limitations:** Legacy API is limited to 6 materials. PBR requires more complex shader logic.
 *   **When to Use:** Use PBR for realistic materials. Use Legacy for simple visualization or performance-critical applications with limited material slots.
 
 ## Background
-The Material Format was introduced in the context of CUDA-based raymarching distance fields [S1]. The legacy `vpSetMaterial` function originates from the VolPack library [S2].
+The Material Format describes the structure and implementation of material objects for raymarching distance fields [S1]. The legacy `vpSetMaterial` function originates from the VolPack library [S2].
 
 ## Sources
 [S1] Raymarching Distance Fields with CUDA, https://doi.org/10.3390/electronics10222730, fetched 2026-10-26
 [S2] VolPack User's Guide, http://www-graphics.stanford.edu/software/volpack/vp_userguide.html, fetched 2026-10-28
+[S3] guillaume-schneider/vrdf-sdk, https://github.com/guillaume-schneider/vrdf-sdk, fetched 2026-10-26 (unofficial)

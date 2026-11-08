@@ -1,0 +1,105 @@
+# Newton Surface Projection
+
+Also called: isosurface projection, vertex projection
+## Overview
+Newton Surface Projection is a post-processing step applied after Dual Contouring vertex placement to project all extracted vertices exactly onto the isosurface defined by the implicit function [S1, unofficial]. It achieves machine precision accuracy, ensuring that vertices in smooth regions lie precisely on the zero-level set rather than merely approximating it [S1, unofficial]. This distinguishes it from standard Dual Contouring variants which may leave vertices slightly off-surface due to the linearization inherent in the QEF solution [Parent](1424-dual-contouring-qef-solver.md).
+
+## How it works
+**Inputs and Outputs:**
+- Input: A set of vertex positions $V = \{v_0, v_1, \dots, v_{N-1}\}$ extracted by the Dual Contouring QEF Solver, and an implicit function $f: \mathbb{R}^3 \to \mathbb{R}$ defining the isosurface (typically $f(x)=0$) along with its gradient $\nabla f(x)$ [S1, unofficial].
+- Output: A set of projected vertex positions $V' = \{v'_0, v'_1, \dots, v'_{N-1}\}$ where $f(v'_i) \approx 0$ within machine precision [S1, unofficial].
+
+**Data Structures:**
+- Vertex positions: Array of shape $(N, 3)$, dtype float64 [S1, unofficial].
+- Implicit function: Callable accepting $(N, 3)$ array and returning values $(N,)$ and gradients $(N, 3)$ [S1, unofficial].
+
+**Algorithm Steps:**
+For each vertex $v_i$ in the extracted mesh:
+1. Initialize current position $p = v_i$.
+2. Evaluate the implicit function and its gradient at $p$:
+   $$ val = f(p) $$
+   $$ grad = \nabla f(p) $$
+3. Check for convergence or degenerate gradient:
+   - If $|val| < \epsilon$ (e.g., $10^{-10}$) or $\|grad\| < \epsilon$, stop; $p$ is sufficiently on the surface.
+   - If $\|grad\| \approx 0$, the vertex is in a flat region or singularity; retain $p$ as is [G].
+4. Compute the Newton step:
+   $$ \Delta p = - \frac{val}{\|grad\|^2} grad $$
+   This step moves $p$ along the negative gradient direction scaled by the function value and the inverse of the squared gradient magnitude, effectively performing one iteration of Newton's method for root finding in 3D [S1, unofficial].
+5. Update position:
+   $$ p \leftarrow p + \Delta p $$
+6. Repeat steps 2-5 for a fixed number of iterations (e.g., 3-5) or until $|val| < \epsilon$ [G].
+7. Store final $p$ as $v'_i$.
+
+**Parameters:**
+- $\epsilon$: Convergence threshold, typically $10^{-10}$ for float64 [G].
+- Max iterations: Typically 3-5 [G].
+
+**Edge Cases and Pitfalls:**
+- **Zero Gradient:** If $\nabla f(p) \approx 0$, the denominator in the Newton step becomes zero. Guard against division by zero by checking $\|grad\|$ [G].
+- **Oscillation:** In highly non-linear regions, Newton's method may oscillate. Limiting iterations or using a line search can mitigate this, though the sources indicate simple fixed iterations suffice for typical SDFs [S1, unofficial].
+- **Batch Evaluation:** For performance, the implicit function should be evaluated in batches (e.g., $(N, 3)$ arrays) rather than point-by-point [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def newton_surface_projection(vertices, implicit_func, max_iter=5, tol=1e-10):
+    """
+    Project vertices onto the isosurface f(x) = 0 using Newton's method.
+    
+    Args:
+        vertices: (N, 3) array of vertex positions.
+        implicit_func: Function that takes (N, 3) array and returns (values, gradients).
+        max_iter: Maximum number of Newton iterations.
+        tol: Convergence tolerance.
+        
+    Returns:
+        projected_vertices: (N, 3) array of projected positions.
+    """
+    projected = vertices.copy()
+    N = vertices.shape[0]
+    
+    for _ in range(max_iter):
+        # Batch evaluation of implicit function and gradient
+        values, gradients = implicit_func(projected)
+        
+        # Compute squared norm of gradients for each vertex
+        grad_norm_sq = np.sum(gradients**2, axis=1, keepdims=True)
+        
+        # Avoid division by zero
+        safe_grad_norm_sq = np.where(grad_norm_sq < 1e-20, 1e-20, grad_norm_sq)
+        
+        # Newton step: delta_p = - (val / ||grad||^2) * grad
+        # Reshape values for broadcasting
+        values_col = values.reshape(-1, 1)
+        deltas = - (values_col / safe_grad_norm_sq) * gradients
+        
+        # Update positions
+        projected = projected + deltas
+        
+        # Check convergence
+        if np.max(np.abs(values)) < tol:
+            break
+            
+    return projected
+```
+
+## Subtopics
+
+### [DCCVT Projection of 0-crossing Voronoi vertices](9893-dccvt-projection-of-0-crossing-voronoi-vertices.md)
+A robust projection strategy to project Voronoi vertices onto the SDF zero-level set by fitting a plane to the projected sites of the enclosing tetrahedron, avoiding the need to explicitly search for the containing tetrahedron or rely on barycentric interpolation which is unreliable when the circumcenter lies far from the tetrahedron.
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot I)$, where $N$ is the number of vertices and $I$ is the number of Newton iterations. Each iteration requires one evaluation of the implicit function and its gradient [S1, unofficial].
+- **Memory Complexity:** $O(N)$ for storing vertex positions and intermediate gradient/value arrays [S1, unofficial].
+- **Measured Performance:** The method is implemented in Rust with Python bindings for zero-copy numpy array exchange, enabling batch evaluation which significantly speeds up processing compared to point-by-point evaluation [S1, unofficial].
+- **Strengths:** Achieves machine precision accuracy on the isosurface, improving visual quality and geometric fidelity [S1, unofficial].
+- **Limitations:** Requires the implicit function to be differentiable and its gradient to be available. Performance depends on the cost of evaluating the implicit function [S1, unofficial].
+- **When to Use:** When high geometric accuracy is required, especially for smooth surfaces or when downstream applications (e.g., physics simulation, texturing) are sensitive to vertex position errors [S1, unofficial].
+- **When Not to Use:** When the implicit function is expensive to evaluate and performance is critical, or when the function is not differentiable [G].
+
+## Background
+Newton Surface Projection is used in modern isosurface extraction libraries such as `isomesh` to enhance the quality of meshes generated by Dual Contouring [S1, unofficial]. It addresses the limitation of standard Dual Contouring where vertices may not lie exactly on the isosurface due to the linear approximation in the QEF solver [Parent](1424-dual-contouring-qef-solver.md). The method leverages Newton's method for root finding to refine vertex positions iteratively [S1, unofficial].
+
+## Sources
+[S1] isomesh, https://github.com/narnia-ai-mason/isomesh, fetched 2026-10-27 (unofficial)

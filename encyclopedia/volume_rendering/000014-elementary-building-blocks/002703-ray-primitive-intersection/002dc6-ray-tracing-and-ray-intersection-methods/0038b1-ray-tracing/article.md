@@ -2,54 +2,97 @@
 Also called: Classic ray tracing, Whitted-style Ray Tracing
 
 ## Overview
-Ray tracing is a rendering technique that forms an image by tracing the path of light rays through an image plane and computing the color of each pixel based on interactions with scene geometry [S1, unofficial]. It solves the problem of accurately simulating global illumination effects such as shadows, specular reflections, and refractions, which are difficult to achieve with rasterization [S1, unofficial]. It is distinguished from simple ray casting by its native support for recursive secondary rays (reflections and refractions) and shadow testing, a model first proposed by Whitted [S2, unofficial].
+Classic ray tracing, also known as Whitted-style ray tracing, is a rendering model that captures shadows, reflection, refraction, and diffuse surface shading by recursively tracing light paths through an image plane [S1, unofficial]. It distinguishes itself from simple ray casting by the native support for secondary rays (shadows, reflections, refractions) spawned at intersection points, rather than just primary viewing rays [S2, unofficial].
 
 ## How it works
-**Inputs and Outputs**
-*   **Inputs**: A scene description containing geometric primitives (surfaces), light sources, and material properties (BRDF parameters); a camera model defining the image plane and ray origins; and a maximum recursion depth.
-*   **Outputs**: A 2D image where each pixel contains the computed radiance.
+**Inputs and Outputs:**
+- **Input:** A scene description containing geometric primitives, material properties (reflectance, refractive indices), light sources, and a camera model defining an image plane.
+- **Output:** A 2D image where each pixel color is computed by integrating light contributions along the ray path.
 
-**Data Structures**
-The method relies on a geometric representation of surfaces. While the specific acceleration structures (e.g., BVH, grid) are implementation details of the intersection engine, the core data required for the shading step includes:
-*   Intersection point $\mathbf{p}$: The 3D coordinates where the ray hits the surface.
-*   Surface normal $\mathbf{n}$: The normalized vector perpendicular to the surface at $\mathbf{p}$.
-*   Material properties: Diffuse color, specular exponent, reflectivity, and refractive index.
+**Data Structures:**
+- **Ray:** Defined by origin $\mathbf{o}$ and direction $\mathbf{d}$. The ray equation is $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$, where $t > 0$ represents distance along the ray.
+- **Intersection:** The closest positive $t$ value determines the visible surface. The intersection point is $\mathbf{p} = \mathbf{o} + t\mathbf{d}$.
+- **Material Model:** Uses a Bidirectional Reflectance Distribution Function (BRDF) to approximate how light scatters off micro-facets [S1, unofficial].
 
-**Numbered Steps**
-1.  **Primary Ray Generation**: For each pixel in the image plane, generate a primary ray $\mathbf{r}_0$ originating from the camera eye position $\mathbf{o}$ and passing through the pixel center. The direction $\mathbf{d}$ is normalized [G].
-2.  **Intersection Test**: Find the closest intersection between $\mathbf{r}_0$ and the scene geometry. Let the intersection point be $\mathbf{p}_0$ and the normal be $\mathbf{n}_0$. If no intersection exists, return the background color [G].
-3.  **Shadow Testing**: For each light source $\mathbf{L}_i$ in the scene:
-    *   Construct a shadow ray $\mathbf{r}_s$ from $\mathbf{p}_0$ toward $\mathbf{L}_i$.
-    *   Test for intersections between $\mathbf{r}_s$ and any scene geometry.
-    *   If an intersection occurs at a distance $t < \|\mathbf{L}_i - \mathbf{p}_0\|$, the point $\mathbf{p}_0$ is in shadow with respect to $\mathbf{L}_i$.
-4.  **Shading Calculation**: Compute the local illumination at $\mathbf{p}_0$ using the surface normal $\mathbf{n}_0$ and the visibility status from step 3. This typically involves a diffuse term (Lambertian) and potentially specular terms [S1, unofficial].
-5.  **Recursive Reflection**: If the material is reflective, compute the reflection direction $\mathbf{r}_{refl}$ using the law of reflection:
-    $$ \mathbf{r}_{refl} = \mathbf{d} - 2(\mathbf{d} \cdot \mathbf{n}_0)\mathbf{n}_0 $$
-    where $\mathbf{d}$ is the incoming ray direction (normalized). Recursively trace $\mathbf{r}_{refl}$ to obtain color $C_{refl}$.
-6.  **Recursive Refraction**: If the material is transparent/translucent, compute the refraction direction $\mathbf{r}_{refr}$ using Snell's Law:
-    $$ \eta_1 (\mathbf{d} \times \mathbf{n}_0) = \eta_2 (\mathbf{r}_{refr} \times \mathbf{n}_0) $$
-    where $\eta_1$ and $\eta_2$ are the refractive indices of the incident and transmitted media, respectively. Recursively trace $\mathbf{r}_{refr}$ to obtain color $C_{refr}$.
-7.  **Composition**: Combine the local illumination, reflection, and refraction contributions based on material weights (e.g., Fresnel equations or user-defined coefficients) to produce the final pixel color.
+**Algorithm Steps:**
+1. **Primary Ray Generation:** For each pixel in the image plane, generate a primary viewing ray $\mathbf{r}_0$ from the camera origin through the pixel center [S1, unofficial].
+2. **Intersection Test:** Find the closest intersection between the ray and scene primitives. If no intersection occurs, return background color.
+3. **Shading Calculation:** At the intersection point $\mathbf{p}$, calculate the direct illumination:
+   - **Shadow Rays:** For each light source, cast a shadow ray from $\mathbf{p}$ toward the light. If the ray intersects any object before reaching the light, the point is in shadow; otherwise, it receives direct light [S1, unofficial].
+   - **Diffuse Reflection:** Compute the diffuse component using the BRDF and the visible light sources [S1, unofficial].
+4. **Secondary Ray Spawning:** If the material supports reflection or refraction:
+   - **Reflection:** Generate a reflection ray $\mathbf{r}_{refl}$ based on the surface normal and incident direction.
+   - **Refraction:** Generate a refraction ray $\mathbf{r}_{refr}$ using Snell's Law, accounting for the refractive indices of the media [S1, unofficial].
+5. **Recursion:** Recursively trace the secondary rays ($\mathbf{r}_{refl}, \mathbf{r}_{refr}$) to gather indirect lighting contributions. The final color is a weighted sum of the direct shading and the recursive results.
+6. **Termination:** Recursion terminates when a maximum depth is reached, a ray escapes the scene, or the contribution becomes negligible.
 
-**Parameters**
-*   **Max Recursion Depth**: Limits the number of secondary rays. Typical values are 3–5 for real-time, higher for offline [G].
-*   **Refractive Indices**: Material-specific constants.
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-**Edge Cases and Pitfalls**
-*   **Precision Errors**: Intersection tests may fail due to floating-point inaccuracies near the surface. A small epsilon offset is often applied to the new ray origin in the direction of the normal [G].
-*   **Total Internal Reflection**: When Snell's Law yields no real solution, only reflection occurs.
-*   **Infinite Recursion**: Caused by perfect mirrors or transparent spheres with no absorption. The max depth parameter prevents this.
+```python
+def trace_ray(ray, scene, depth, max_depth):
+    # Step 1: Find closest intersection
+    hit = scene.find_closest_intersection(ray)
+    
+    # Base case: no intersection or max depth reached
+    if hit is None or depth >= max_depth:
+        return scene.background_color()
+    
+    # Step 2: Calculate direct illumination (shadows)
+    color = vec3(0.0, 0.0, 0.0)
+    for light in scene.lights:
+        # Shadow ray
+        shadow_ray_origin = hit.point + hit.normal * epsilon
+        shadow_ray_direction = light.position - hit.point
+        shadow_distance = length(shadow_ray_direction)
+        shadow_ray_direction = normalize(shadow_ray_direction)
+        
+        # Check if blocked
+        shadow_hit = scene.find_closest_intersection(
+            Ray(shadow_ray_origin, shadow_ray_direction)
+        )
+        
+        if shadow_hit is None or shadow_hit.distance > shadow_distance:
+            # Point is lit
+            color += light.intensity * hit.material.diffuse_shading(
+                hit.normal, shadow_ray_direction, light.position
+            )
+    
+    # Step 3: Recursive secondary rays (reflection/refraction)
+    if hit.material.has_reflection:
+        refl_direction = reflect(ray.direction, hit.normal)
+        refl_ray = Ray(hit.point + hit.normal * epsilon, refl_direction)
+        color += hit.material.reflectance * trace_ray(refl_ray, scene, depth + 1, max_depth)
+        
+    if hit.material.has_refraction:
+        # Snell's law implementation required here
+        refract_direction = refract(ray.direction, hit.normal, hit.material.ior)
+        refract_ray = Ray(hit.point - hit.normal * epsilon, refract_direction)
+        color += hit.material.transmittance * trace_ray(refract_ray, scene, depth + 1, max_depth)
+        
+    return color
+```
+
+**Parameters:**
+- **Max Depth:** Limits recursion depth to prevent infinite loops and control performance. Typical values: 3-10 [G].
+- **Epsilon:** A small offset added to intersection points to prevent self-intersection artifacts [G].
+
+**Edge Cases:**
+- **Self-Intersection:** Rays originating from a surface may intersect the same surface due to floating-point precision. Mitigated by offsetting the ray origin along the normal [G].
+- **Total Internal Reflection:** Occurs in refraction when the angle of incidence exceeds the critical angle. The ray should be reflected instead of refracted [G].
 
 ## Operating characteristics
-*   **Time Complexity**: Worst-case $O(N \cdot R)$ where $N$ is the number of pixels and $R$ is the average recursion depth, multiplied by the cost of intersection tests. With acceleration structures, intersection is $O(\log M)$ for $M$ primitives.
-*   **Memory Complexity**: Depends on the scene graph and acceleration structure size. Recursion depth adds stack space.
-*   **Strengths**: Physically accurate shadows, reflections, and refractions; handles complex geometry naturally.
-*   **Limitations**: Computationally expensive; requires acceleration structures for performance; difficult to implement soft shadows and motion blur without extensions.
-*   **When to use**: Offline rendering, visual effects, scenes requiring accurate specular and transparent effects.
-*   **When not to use**: Real-time applications with strict latency constraints (unless heavily optimized or simplified).
+- **Time Complexity:** Exponential in the worst case due to recursion depth and branching factor (reflections/refractions). In practice, bounded by max depth and scene complexity.
+- **Memory Complexity:** Linear in recursion depth and scene size.
+- **Strengths:** Physically plausible results for specular highlights, reflections, and refractions. Simple to implement for basic scenes.
+- **Limitations:** Computationally expensive for deep recursion. Does not handle diffuse inter-reflection (global illumination) natively without extensions like path tracing.
+- **When to use:** Scenes with glossy/specular materials, mirrors, and transparent objects where direct lighting and simple reflections are sufficient.
+- **When not to use:** Scenes requiring soft shadows, diffuse global illumination, or complex light transport.
 
 ## Background
-Ray tracing was first proposed by Turner Whitted in 1980 [S2, unofficial]. It extended earlier ray casting techniques (such as those by Appel) by introducing the recursive tracing of secondary rays for reflections and refractions, enabling the simulation of more complex lighting phenomena [S2, unofficial]. The model places an image plane in the scene and traces rays through each pixel to gather lighting information, capturing shadows, reflection, refraction, and diffuse surface shading [S1, unofficial].
+- **Origin:** First proposed by Turner Whitted in 1980 [S2, unofficial].
+- **History:** Whitted's algorithm extended Appel's ray casting [S2, unofficial] by introducing recursive secondary rays for shadows and refractions. It became the standard for realistic rendering in the 1980s and 1990s.
+- **Usage:** Widely used in offline rendering and early real-time graphics for effects like mirrors and glass.
 
 ## Sources
 [S1] Massive Data Management for Distributed Volume Visualization, http://hdl.handle.net/1951/47671, fetched 2026-10-26 (unofficial)

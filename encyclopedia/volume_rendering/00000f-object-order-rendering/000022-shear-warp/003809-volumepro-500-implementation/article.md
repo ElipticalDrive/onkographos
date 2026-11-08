@@ -1,131 +1,151 @@
 # VolumePro 500 Implementation
 
-Also called: Cube-4 Architecture Volume Rendering, VolumePro 500
+Also called: Cube-4 Architecture Volume Rendering, Cube-4 Shear Warp Architecture, Sub-volume partitioned Cube-4, VolumePro 500
 
 ## Overview
-The VolumePro 500 is a hardware-accelerated volume rendering system based on the Cube-4 architecture, designed to render high-resolution volumes (up to $256^3$) at interactive frame rates [S1, unofficial]. It extends the standard Shear-warp algorithm by integrating specialized hardware for 3D skewing, on-the-fly gradient estimation, and Phong shading, allowing it to process data independently of classification complexity [S1, unofficial]. Unlike software implementations, it uses a brute-force processing model where performance remains constant regardless of the volume's opacity or classification rules [S1, unofficial].
+The VolumePro 500 implementation is a hardware-accelerated volume rendering system based on the Cube-4 architecture, designed to render large volumetric datasets at interactive frame rates by processing sub-volumes in parallel [S1][S3, unofficial]. It distinguishes itself from general-purpose shear-warp implementations by integrating dedicated hardware for 3D skewed memory access, on-the-fly gradient estimation, and Phong shading via reflectance maps, while offloading classification and compositing to the host CPU [S1][S3, unofficial]. Unlike beam-partitioned variants, this specific implementation partitions the volume into sub-volumes processed by independent pipelines, trading global compositing connectivity for simplified memory access patterns [S1].
 
 ## How it works
-The VolumePro 500 implementation builds on the Shear-warp factorization [Parent]. It processes the volume through a fixed pipeline that includes memory skewing, interpolation, gradient estimation, classification, and shading.
+The method implements the shear-warp factorization using a sub-volume partitioned approach with eight parallel pipelines [S1]. The system accesses each voxel exactly once per projection using skewed memory addressing [S2, unofficial].
 
 ### Inputs and Outputs
-*   **Input:** A 3D volume dataset (typically $256^3$ or smaller), viewing parameters (camera position, orientation), and lighting parameters (light positions, eye vector).
-*   **Output:** A 2D image with 24-bit color and 12-bit alpha values.
+*   **Input:** A 3D volume dataset (e.g., $128^3$ voxels) stored in a skewed format.
+*   **Output:** A 2D rendered image composited on the host computer [S1].
 
 ### Data Structures
-*   **Volume Data:** Stored in a 3D grid. The hardware uses "3D skewing" [Kaufman and Bakalash 1988] to map object space to image coordinate space, enabling efficient access to axis-aligned voxel slices while storing only one copy of the data [S1, unofficial].
-*   **Classification Lookup Table (LUT):** A $4k \times 36$ bit table. It maps input scalar values to 24-bit color and 12-bit alpha values [S1, unofficial].
-*   **Reflectance Maps:** Pre-computed tables storing illumination from all light sources for diffuse and specular shading [S1, unofficial].
-*   **On-chip Slice Buffers:** Used to hold volume slices for coherent memory access during interpolation [S1, unofficial].
+**Skewed Volume Data:**
+The volume data is transformed by a software front-end into a file containing skewed sub-volumes in sequential order [S1]. The skewing allows conflict-free access to any axis-aligned slice [S3, unofficial].
+
+**Pipeline Buffers:**
+Each pipeline maintains three buffers to exploit data coherency during interpolation:
+1.  **Ahead Buffer:** Stores samples from the slice one step ahead in the viewing direction.
+2.  **Current Buffer:** Stores samples from the current slice.
+3.  **Behind Buffer:** Stores samples from the slice one step behind [S2, unofficial].
+
+**Classification Lookup Table (LUT):**
+A $4096 \times 36$ bit table mapping input voxel values to 24-bit color and 12-bit alpha values [S3, unofficial].
+
+**Reflectance Maps:**
+Pre-computed tables storing diffuse and specular illumination for all light sources, used for Phong shading [S3, unofficial].
 
 ### Steps
-1.  **Permutation and Shear:** The viewing transformation is decomposed into a permutation $P$, a shear $S$, and a 2D warp $M_{warp2D}$ [Parent]. The shear aligns the principal viewing axis with a coordinate axis, making viewing rays parallel to the Z-axis in the intermediate space [Parent].
-2.  **Memory Skewing and Resampling:**
-    *   The hardware performs 3D skewing to read volume slices efficiently [S1, unofficial].
-    *   Viewing rays start at sub-pixel locations to prevent popping artifacts during base plane switches and allow over-sampling [S1, unofficial].
-    *   Tri-linear interpolation is used between volume slices to prevent undersampling [S1, unofficial].
-    *   On-chip slice buffers ensure maximum memory coherent access [S1, unofficial].
-3.  **Gradient Estimation:**
-    *   Hardware computes central-difference gradients on-the-fly at each voxel [S1, unofficial].
-    *   Gradients are tri-linearly interpolated to the resampling locations [S1, unofficial].
-    *   Gradient magnitude is computed and mapped via a lookup table to a user-specified piece-wise linear function. This function highlights specific gradient values or attenuates modulation effects [S1, unofficial].
-    *   The lookup table automatically corrects gradient magnitudes for anisotropic volumes [S1, unofficial].
-4.  **Classification:**
-    *   Post-classification is performed using the $4k \times 36$ bit LUT [S1, unofficial].
-    *   The LUT outputs 24-bit color and 12-bit alpha values. The 12-bit alpha precision is necessary for high accuracy in low-opacity volumes [S1, unofficial].
-    *   Opacity correction is applied in software for each frame due to uniform sample spacing [S1, unofficial].
-    *   The LUTs are dynamically loaded using double buffering in hardware [S1, unofficial].
-5.  **Shading:**
-    *   Phong shading is implemented at each sample point at the rate of one illuminated sample per clock cycle [S1, unofficial].
-    *   Diffuse and specular illumination are looked up in pre-computed reflectance maps [S1, unofficial].
-    *   Reflectance maps are reloaded when object and light positions change relative to each other, or to correct the eye vector for anisotropic volumes [S1, unofficial].
-6.  **Compositing:**
-    *   Resampled slices are composited in front-to-back order into the intermediate image [Parent].
-    *   The Porter-Duff "over" operator is used [Parent].
-    *   Early ray termination is supported by skipping further slices for pixels where accumulated opacity exceeds a threshold (e.g., 0.95) [Parent].
-7.  **Warp:**
-    *   The intermediate image is warped to the final image space using $M_{warp2D}$ [Parent].
-8.  **Large Volume Handling:**
-    *   If the volume exceeds $256^3$, the driver software partitions it into smaller blocks [S1, unofficial].
-    *   Each block is rendered independently, and the resulting images are automatically combined to yield the final image [S1, unofficial].
+1.  **Data Preparation:** The host software transforms the raw volume data into a skewed format partitioned into sub-volumes [S1].
+2.  **Memory Access:** The hardware generates addresses for the skewed memory, allowing arbitrary viewing directions to be supported without re-encoding data [S1][S3, unofficial].
+3.  **Interpolation:** Tri-linear interpolation is performed between volume slices to prevent undersampling [S3, unofficial]. Viewing rays start at sub-pixel locations to prevent popping artifacts during base plane switches [S3, unofficial].
+4.  **Gradient Estimation:** On-the-fly central-difference gradient estimation is performed at each voxel [S3, unofficial]. Gradients are tri-linearly interpolated to resampling locations [S3, unofficial].
+5.  **Gradient Correction:** Gradient magnitudes are mapped via a LUT to a user-specified piece-wise linear function to highlight values or attenuate modulation effects [S3, unofficial]. This LUT also corrects for anisotropic volumes [S3, unofficial].
+6.  **Classification:** Post-classification is applied using the $4096 \times 36$ bit LUT, outputting 24-bit color and 12-bit alpha [S3, unofficial].
+7.  **Shading:** Phong shading is computed at each sample point at the rate of one illuminated sample per clock cycle [S3, unofficial]. Diffuse and specular components are looked up in reflectance maps [S3, unofficial].
+8.  **Transfer:** Sample values and gradient vectors are transferred to the host computer [S1].
+9.  **Compositing:** The host software performs compositing (e.g., front-to-back) and final image assembly [S1].
+
+### Formulas
+**Tri-linear Interpolation:**
+Standard tri-linear interpolation is used between adjacent slices [S3, unofficial].
+
+**Gradient Estimation:**
+Central differences are used to estimate gradients at each voxel [S3, unofficial].
+
+**Phong Shading:**
+Illumination is computed using pre-computed reflectance maps [S3, unofficial].
+
+**Opacity Correction:**
+Due to uniform sample spacing, opacity correction is applied in software for each frame [S3, unofficial].
+
+### Parameters
+*   **Number of Pipelines:** 8 (The Teramac prototype allowed for 16, but 8 were implemented) [S1].
+*   **Dataset Size:** $128^3$ voxels (Prototype); VolumePro 500 supports $256^3$ or smaller [S1][S3, unofficial].
+*   **Classification LUT Size:** $4096 \times 36$ bits [S3, unofficial].
+*   **Color Output:** 24-bit [S3, unofficial].
+*   **Alpha Output:** 12-bit [S3, unofficial].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# VolumePro 500 Hardware Pipeline Implementation
-# Assumes hardware handles 3D skewing, interpolation, and shading at 1 sample/cycle
+# Host Software: Data Preparation
+def prepare_volume(volume_data, dimensions):
+    """
+    Transforms raw volume data into skewed sub-volumes.
+    """
+    skewed_data = skew_volume(volume_data, dimensions)
+    partitioned_subvolumes = partition(skewed_data)
+    return partitioned_subvolumes
 
-def render_volume_pro_500(volume, view_params, light_params):
-    # 1. Decompose View Transformation
-    P, S, M_warp2D = decompose_view_matrix(view_params.M_view)
+# Hardware Pipeline (Parallel Execution)
+def pipeline_process(sub_volume, view_direction):
+    """
+    Processes a sub-volume through the Cube-4 hardware pipeline.
+    """
+    # 1. Memory Access
+    # Skewed memory access handles arbitrary viewing directions
+    voxels = skewed_memory_read(sub_volume, view_direction)
     
-    # 2. Initialize Output Image
-    image = create_image(view_params.resolution)
-    
-    # 3. Handle Large Volumes
-    if volume.size > 256**3:
-        blocks = partition_volume(volume, size=256**3)
-        block_images = []
-        for block in blocks:
-            block_img = render_block(block, view_params, light_params)
-            block_images.append(block_img)
-        return combine_images(block_images)
-    
-    # 4. Render Single Volume
-    return render_block(volume, view_params, light_params)
-
-def render_block(volume, view_params, light_params):
-    # 5. Setup Hardware State
-    load_classification_lut(volume.classification_lut) # 4k x 36 bit
-    load_reflectance_maps(light_params) # Diffuse and Specular
-    
-    # 6. Shear and Resample
-    # Hardware performs 3D skewing and tri-linear interpolation
+    # 2. Interpolation
+    # Tri-linear interpolation between slices
     # Rays start at sub-pixel locations
-    intermediate_image = shear_and_resample(volume, S, view_params)
+    interpolated_samples = tri_linear_interpolate(voxels)
     
-    # 7. Gradient Estimation and Correction
-    # Hardware computes central-difference gradients
-    # Interpolates gradients to resampling locations
-    # Maps gradient magnitude via LUT for anisotropic correction
-    intermediate_image = apply_gradient_correction(intermediate_image, volume.gradient_lut)
+    # 3. Gradient Estimation
+    # On-the-fly central difference
+    gradients = central_difference_gradient(voxels)
+    interpolated_gradients = tri_linear_interpolate(gradients)
     
-    # 8. Classification and Shading
-    # Hardware performs post-classification and Phong shading
-    # Rate: 1 illuminated sample per clock cycle
-    classified_image = classify_and_shade(intermediate_image, light_params)
+    # 4. Gradient Correction
+    # Map gradient magnitude via LUT
+    corrected_gradients = gradient_lut_lookup(interpolated_gradients)
     
-    # 9. Compositing
-    # Front-to-back compositing with early ray termination
-    final_image = composite_slices(classified_image, view_params)
+    # 5. Classification
+    # Post-classification LUT
+    classified_samples = classify(interpolated_samples, classification_lut)
     
-    # 10. Warp
-    # Apply 2D warp to final image space
-    output_image = warp_image(final_image, M_warp2D)
+    # 6. Shading
+    # Phong shading using reflectance maps
+    shaded_samples = phong_shading(classified_samples, gradients, reflectance_maps)
     
-    # 11. Opacity Correction (Software)
-    # Applied due to uniform sample spacing
-    output_image = apply_opacity_correction(output_image)
-    
-    return output_image
+    return shaded_samples
+
+# Host Software: Compositing
+def composite_results(pipeline_outputs):
+    """
+    Combines results from all pipelines.
+    """
+    final_image = empty_image()
+    for output in pipeline_outputs:
+        final_image = front_to_back_composite(final_image, output)
+    return final_image
 ```
 
-### Parameters and Edge Cases
-*   **Volume Size:** The hardware is optimized for $256^3$ or smaller volumes [S1, unofficial]. Larger volumes require software partitioning [S1, unofficial].
-*   **Alpha Precision:** 12-bit alpha is used to handle low-opacity volumes accurately [S1, unofficial].
-*   **Anisotropic Volumes:** Gradient magnitude correction is required and handled by the LUT [S1, unofficial]. Reflectance maps must be reloaded to correct the eye vector [S1, unofficial].
-*   **Performance:** Performance is independent of classification or data complexity due to brute-force processing [S1, unofficial].
+### Edge Cases and Pitfalls
+*   **Global Connectivity:** The sub-volume partitioned design requires global connectivity for partial result buffers in compositing units, which is a main drawback and limits scalability [S1].
+*   **Anisotropic Volumes:** Gradient magnitudes must be corrected for anisotropic volumes using the LUT [S3, unofficial].
+*   **Reflectance Map Updates:** Reflectance maps must be reloaded when object and light positions change relative to each other [S3, unofficial].
+
+## Subtopics
+
+### Beam Partitioning
+An alternative Cube-4 implementation that partitions beams instead of sub-volumes, implementing shading and compositing in hardware [S1].
+
+### Cube-1 Architecture
+The predecessor to Cube-4, focusing on memory organization [S2, unofficial].
+
+### Cube-2 Architecture
+A full-scale VLSI-based system based on Cube-1 technology [S2, unofficial].
+
+### Cube-3 Architecture
+Performs ray casting with various composition algorithms [S2, unofficial].
 
 ## Operating characteristics
-*   **Performance:** Renders $256^3$ volumes at 30 frames per second [S1, unofficial].
-*   **Complexity:** Performance is independent of classification or data complexity [S1, unofficial].
-*   **Strengths:** High frame rates, hardware-accelerated shading and gradient estimation, support for large volumes via partitioning [S1, unofficial].
-*   **Limitations:** Fixed volume size limit ($256^3$) for direct hardware rendering; requires software partitioning for larger volumes; opacity correction must be done in software [S1, unofficial].
-*   **When to use:** When high-performance, hardware-accelerated volume rendering is needed for volumes up to $256^3$ and interactive frame rates are required [S1, unofficial].
+*   **Performance:** Renders $256^3$ or smaller volumes at 30 frames per second [S3, unofficial].
+*   **Complexity:** Performance is independent of classification or data complexity due to brute-force processing [S3, unofficial].
+*   **Scalability:** Larger volumes are handled by partitioning into smaller blocks, rendering independently, and combining results [S3, unofficial].
+*   **Limitations:** The sub-volume partitioned design on Teramac had a drawback of global connectivity requirements for compositing [S1]. No further effort was put into this specific implementation due to this limitation [S1].
+*   **Hardware vs. Software:** Shading, classification, and compositing are done in software for the Teramac prototype, while the commercial VolumePro 500 integrates more hardware features [S1][S3, unofficial].
 
 ## Background
-The VolumePro 500 system [Pfister et al. 1999] is based on the Cube-4 architecture developed at SUNY Stony Brook [Pfister and Kaufman 1996]. Mitsubishi Electric licensed the technology, improved it [Osborne et al. 1997], and started production shipments of the VolumePro 500 in 1999 [Pfister et al. 1999]. It was one of the first commercial hardware-accelerated volume rendering systems [S1, unofficial].
+The Cube-4 architecture was developed at Stony Brook University [S2, unofficial]. It was licensed and produced by TeraRecon as the chip in the VolumePro 500 board [S2, unofficial]. Mitsubishi Electric licensed the technology, improved it, and started production shipments of the VolumePro 500 in 1999 [S3, unofficial]. The architecture uses skewed memory and local communication between processors to implement the shear-warp algorithm [S2, unofficial].
 
 ## Sources
-[S1] Hardware-Accelerated Volume Rendering, https://vcg.seas.harvard.edu/publications/20040101-hardware-accelerated-volume-rendering/paper, fetched 2026-10-27 (unofficial)
+[S1] Cube-4 Implementations on the Teramac Custom Computing Machine, https://doi.org/10.2312/eggh/eggh96/133-143, fetched 2026-10-26
+[S2] Massive Data Management for Distributed Volume Visualization, http://hdl.handle.net/1951/47671, fetched 2026-10-26 (unofficial)
+[S3] Hardware-Accelerated Volume Rendering, https://vcg.seas.harvard.edu/publications/20040101-hardware-accelerated-volume-rendering/paper, fetched 2026-10-27 (unofficial)

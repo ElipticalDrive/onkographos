@@ -68,20 +68,18 @@ def create_neural_volume_scene(
                 }
             }
         }
-        integrator = None
     elif integrator_type in ['rf_prb', 'rf_prb_rt', 'rf_prb_drt', 'rf_eikonal']:
         if integrator_type == 'rf_eikonal':
             print("Warning: rf_eikonal not implemented, falling back to RadianceFieldPRB")
             integrator_class = RadianceFieldPRB
         else:
             integrator_class = RadianceFieldPRB
-        integrator = integrator_class(
+        scene_dict['integrator'] = integrator_class(
             grid_res=grid_res,
             sh_degree=sh_degree,
             use_relu=use_relu,
             initial_density=initial_density
         )
-        scene_dict['integrator'] = integrator
         scene_dict['emitter'] = {'type': 'constant'}
     else:
         raise ValueError(f"Unsupported integrator_type: {integrator_type}")
@@ -97,12 +95,13 @@ class RadianceFieldPRB:
         self.initial_density = initial_density
 
 def load_scene(scene_dict):
+    """Abstracts Mitsuba's scene construction from the dictionary configuration."""
     return scene_dict
 ```
 
 ## Operating characteristics
-- **Time Complexity**: Not given in the sources.
-- **Memory Complexity**: Not given in the sources.
+- **Time Complexity**: Not given in the sources [S1, unofficial].
+- **Memory Complexity**: Not given in the sources [S1, unofficial].
 - **Strengths**: Provides a standardized way to initialize differentiable volume rendering scenes with configurable neural network parameters [S1, unofficial].
 - **Limitations**: Limited to specific integrator types; `'rf_eikonal'` is not functional [S1, unofficial].
 

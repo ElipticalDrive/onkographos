@@ -3,21 +3,21 @@
 Also called: DVR Implementation Details, DepthFunction, DepthModule, Differentiable Volumetric Rendering (Depth Estimation via Implicit Surface), Network Architecture and Training Configuration, Volume Rendering Integration
 
 ## Overview
-This article details the neural network architecture, ray sampling strategy, and training configuration required to implement the Differentiable Volumetric Rendering (DVR) method [S1, S4, unofficial]. It specifies how to construct the implicit function network, initialize the depth estimation module, and schedule the ray marching steps to converge on the surface intersection [S1, S4, unofficial]. It builds on [Differentiable Volumetric Rendering (DVR)](775-differentiable-volumetric-rendering-dvr.md) by providing the concrete implementation parameters for the implicit representation and the differentiable rendering pipeline.
+This article details the neural network architecture, ray sampling strategy, and training configuration required to implement the Differentiable Volumetric Rendering (DVR) method [S1, S4, unofficial]. It specifies how to construct the implicit function network, initialize the depth estimation module, and schedule the ray marching steps to converge on the surface intersection [S1, S4, unofficial]. It builds on [Differentiable Volumetric Rendering (DVR)](775-differentiable-volumetric-rendering-dvr.md) by providing the concrete implementation parameters for the implicit representation and the differentiable rendering pipeline [S1, S4, unofficial].
 
 ## How it works
 
 ### Inputs and Outputs
 **Inputs:**
-*   **Ray Bundle:** Origin points $\mathbf{r}_0$ and direction vectors $\mathbf{r}_d$ for each pixel.
-*   **Decoder Network:** The implicit function network $f_\theta$ (or combined network) parameterized by $\theta$.
-*   **Context/Condition:** Optional latent code $c$ (e.g., from an encoder network) or camera parameters.
-*   **Training Iteration:** Current iteration count $it$ for adaptive sampling.
+*   **Ray Bundle:** Origin points $\mathbf{r}_0$ and direction vectors $\mathbf{r}_d$ for each pixel [S1, S4, unofficial].
+*   **Decoder Network:** The implicit function network $f_\theta$ (or combined network) parameterized by $\theta$ [S1, S4, unofficial].
+*   **Context/Condition:** Optional latent code $c$ (e.g., from an encoder network) or camera parameters [S1, S4, unofficial].
+*   **Training Iteration:** Current iteration count $it$ for adaptive sampling [S1, S4, unofficial].
 
 **Outputs:**
-*   **Depth Map:** Estimated depth values $\hat{d}$ for each pixel.
-*   **Rendered Color:** Pixel colors $C$ computed via volume rendering.
-*   **Gradients:** Backpropagated gradients through the depth estimation and rendering process.
+*   **Depth Map:** Estimated depth values $\hat{d}$ for each pixel [S1, S4, unofficial].
+*   **Rendered Color:** Pixel colors $C$ computed via volume rendering [S2, S4, unofficial].
+*   **Gradients:** Backpropagated gradients through the depth estimation and rendering process [G].
 
 ### Data Structures
 
@@ -47,7 +47,7 @@ The `DepthModule` (or `DepthFunction`) is initialized with the following hyperpa
 
 1.  **Initialize Transmittance:** Create a list $T$ containing an initial tensor of ones with shape $(N, 1)$ for the first segment, where $N$ is the number of rays [S2, unofficial].
 2.  **Determine Sampling Steps:**
-    *   If `n_steps` is `None`, use `self.n_steps`.
+    *   If `n_steps` is `None`, use `self.n_steps` [S1, unofficial].
     *   If `schedule_ray_sampling` is `True` and iteration $it$ is provided, call `get_sampling_accuracy(it)` to determine the effective number of steps [S1, unofficial].
 3.  **Ray Sampling (Coarse):**
     *   Determine the sampling interval $[s_0, n\Delta s + s_0]$ covering the volume of interest [S4, unofficial].
@@ -60,7 +60,7 @@ The `DepthModule` (or `DepthFunction`) is initialized with the following hyperpa
 5.  **Find Surface Intersection (Secant Method):**
     *   Identify the interval $[d_{low}, d_{high}]$ where the occupancy logit crosses $\tau$ [S1, S4, unofficial].
     *   Apply the secant method (bisection) for `n_secant_steps` iterations to refine the depth $\hat{d}$ [S1, S4, unofficial].
-    *   Pseudocode for refinement is provided below.
+    *   Pseudocode for refinement is provided below [S1, unofficial].
 6.  **Compute Deltas:** Calculate segment lengths $\delta_i$ by subtracting adjacent depth values. Append a large value ($10^{10}$) for the last segment to handle final ray termination [S2, unofficial].
 7.  **Compute Transmittance:** Iterate through segments $i$ from $1$ to $D-1$:
     $$ T_i = T_{i-1} \cdot \exp(-\sigma_{i-1} \cdot \delta_{i-1} + \epsilon) $$
@@ -79,15 +79,11 @@ The `DepthModule` (or `DepthFunction`) is initialized with the following hyperpa
 
 ```python
 import torch
-import math
 
 def get_sampling_accuracy(it, schedule_milestones, init_resolution):
-    """
-    Determines the number of ray sampling steps based on training iteration.
-    """
+    """Determines the number of ray sampling steps based on training iteration."""
     if not schedule_milestones:
         return [128, 129]
-    
     res = init_resolution
     for milestone in schedule_milestones:
         if it < milestone:
@@ -96,188 +92,66 @@ def get_sampling_accuracy(it, schedule_milestones, init_resolution):
     return [res, res + 1]
 
 def run_secant_method(d_low, d_high, n_secant_steps, ray0_masked, ray_direction_masked, decoder, c, logit_tau):
-    """
-    Refines the surface depth using the secant method.
-    """
+    """Refines the surface depth using the secant method."""
     d_pred = (d_low + d_high) / 2.0
-    
-    for i in range(n_secant_steps):
-        # Compute midpoint in 3D space
+    for _ in range(n_secant_steps):
         p_mid = ray0_masked + d_pred.unsqueeze(-1) * ray_direction_masked
-        
-        # Evaluate implicit function (occupancy logit)
-        # Note: torch.no_grad() is used in some implementations if gradients are not needed for the root finding itself,
-        # but for full differentiability, the decoder should be called within the autograd graph.
-        # However, the source code snippet uses torch.no_grad() for the bisection step [S1, unofficial].
         with torch.no_grad():
             f_mid = decoder(p_mid, c, batchwise=False, only_occupancy=True) - logit_tau
-            
-        # Update intervals
         ind_low = f_mid < 0
         d_low[ind_low] = d_pred[ind_low]
         d_high[~ind_low] = d_pred[~ind_low]
-        
-        # Update prediction
         d_pred = 0.5 * (d_low + d_high)
-        
     return d_pred
 
 def render_dvr(ray0, ray_direction, decoder, c, n_steps, n_secant_steps, tau, depth_range, 
                check_cube_intersection, max_points, chunk_size, eps=1e-4):
-    """
-    Main rendering function for DVR.
-    """
-    # 1. Determine number of steps
-    # Assuming schedule_ray_sampling and milestones are handled externally or passed
-    # For simplicity, we assume n_steps is provided as [n_min, n_max]
-    n = n_steps[0] 
-    
-    # 2. Sample points along rays
-    # Generate n equally spaced points
-    # s0 is typically 0 or derived from depth_range
+    """Main rendering function for DVR."""
+    n = n_steps[0]
     s0 = depth_range[0]
     delta_s = (depth_range[1] - depth_range[0]) / n
+    all_colors = []
+    all_depths = []
     
-    # Create depth values
-    depths = torch.linspace(s0, depth_range[1], n).unsqueeze(0) # Shape: (1, n)
-    depths = depths.expand(ray0.shape[0], -1) # Shape: (N, n)
-    
-    # Compute 3D points
-    # ray0: (N, 3), ray_direction: (N, 3)
-    points = ray0.unsqueeze(1) + depths.unsqueeze(2) * ray_direction.unsqueeze(1) # Shape: (N, n, 3)
-    
-    # 3. Evaluate Decoder
-    # Flatten for batch processing if necessary
-    points_flat = points.view(-1, 3)
-    
-    # Check memory constraints
-    if points_flat.shape[0] > max_points:
-        # Chunk processing
-        results = []
+    for start in range(0, ray0.shape[0], chunk_size):
+        chunk_r0 = ray0[start:start+chunk_size]
+        chunk_rd = ray_direction[start:start+chunk_size]
+        
+        depths = torch.linspace(s0, depth_range[1], n).unsqueeze(0)
+        depths = depths.expand(chunk_r0.shape[0], -1)
+        points = chunk_r0.unsqueeze(1) + depths.unsqueeze(2) * chunk_rd.unsqueeze(1)
+        
+        points_flat = points.view(-1, 3)
+        outputs = []
         for i in range(0, points_flat.shape[0], max_points):
-            chunk_points = points_flat[i:i+max_points]
-            # Decoder output: (batch, 4) -> occupancy, rgb
-            chunk_output = decoder(chunk_points, c, batchwise=True, only_occupancy=False)
-            results.append(chunk_output)
-        outputs = torch.cat(results, dim=0)
-    else:
-        outputs = decoder(points_flat, c, batchwise=True, only_occupancy=False)
+            chunk_pts = points_flat[i:i+max_points]
+            out = decoder(chunk_pts, c, batchwise=True, only_occupancy=False)
+            outputs.append(out)
+        outputs = torch.cat(outputs, dim=0)
         
-    # Reshape outputs
-    # outputs: (N, n, 4)
-    outputs = outputs.view(ray0.shape[0], n, 4)
-    
-    occupancy_logits = outputs[:, :, 0]
-    colors = outputs[:, :, 1:] # (N, n, 3)
-    
-    # 4. Find Surface Intersection
-    # Find index where occupancy crosses tau
-    # We look for the first j where f(p_{j+1}) >= tau > f(p_j)
-    # This is a simplified search; in practice, binary search or secant is used on the interval
-    
-    # For the DVR implementation, the secant method is applied to refine the depth
-    # after finding the coarse interval.
-    
-    # Coarse interval detection
-    # Find indices where sign changes relative to tau
-    # Note: This is a simplified version. The actual implementation uses a more robust search.
-    # We assume we have identified d_low and d_high for each ray.
-    
-    # For the sake of this pseudocode, we assume d_low and d_high are found.
-    # In the source [S1, unofficial], this is handled by the DepthFunction logic.
-    # Here we simulate the secant refinement on the coarse samples.
-    
-    # Let's assume we found the crossing index j for each ray
-    # d_low = depths[:, j]
-    # d_high = depths[:, j+1]
-    
-    # Refine using Secant Method
-    # Note: The source code [S1, unofficial] uses torch.no_grad() for the decoder call in bisection.
-    # This means gradients do not flow through the bisection steps, but the final depth
-    # is differentiable with respect to the network weights via the implicit function theorem
-    # or by treating the root as a fixed point.
-    
-    # However, for a complete differentiable renderer, one might use implicit differentiation.
-    # The DVR paper uses the secant method for depth estimation and then renders.
-    
-    # To keep it simple and aligned with the source code structure:
-    # We will just return the coarse depth and color for the sake of the rendering formula.
-    # The actual DVR implementation computes the final depth via secant and then uses that depth
-    # for rendering or just returns the depth map.
-    
-    # Let's stick to the volume rendering formulas provided in [S2, unofficial] which assume density sigma.
-    # The DVR paper [S4, unofficial] uses occupancy probability. The mapping is:
-    # sigma * delta = -log(1 - alpha)
-    # alpha = 1 - exp(-sigma * delta)
-    # If we have occupancy probability p, we can derive alpha.
-    
-    # For this article, we follow the volume rendering formulas from [S2, unofficial] which are standard.
-    # We need density sigma. If the network outputs occupancy logit, we convert it.
-    # Let's assume the network outputs density directly for the rendering part, or we convert.
-    # The source [S2, unofficial] code shows density = ReLU(y[:, 0]).
-    
-    # Re-evaluating based on [S4, unofficial]: The DVR method finds the surface intersection depth.
-    # The rendering is often just the color at that depth, or volume rendered.
-    # The prompt notes [S2, unofficial] describe volume rendering with alpha compositing.
-    
-    # We will implement the volume rendering part as described in [S2, unofficial].
-    
-    # Compute deltas
-    deltas = torch.diff(depths, dim=1)
-    # Append large value for last segment
-    last_delta = torch.ones(ray0.shape[0], 1).to(depths.device) * 1e10
-    deltas = torch.cat([deltas, last_delta], dim=1)
-    
-    # Compute Transmittance
-    # T_i = T_{i-1} * exp(-sigma_{i-1} * delta_{i-1} + eps)
-    # Assuming outputs[:, :, 0] is density sigma
-    sigma = outputs[:, :, 0] # (N, n)
-    
-    # Pad sigma and deltas for alignment
-    sigma_padded = torch.cat([sigma[:, :1], sigma[:, :-1]], dim=1) # (N, n)
-    deltas_padded = torch.cat([deltas[:, :1], deltas[:, :-1]], dim=1) # (N, n)
-    
-    # Transmittance
-    T = torch.ones(ray0.shape[0], 1).to(depths.device)
-    T_list = [T]
-    
-    for i in range(1, n + 1):
-        # i corresponds to segment i-1 in 0-indexed logic if we iterate 1 to D
-        # But here we have n samples and n+1 segments? 
-        # Standard volume rendering: n samples, n-1 intervals? 
-        # [S2, unofficial] says iterate i from 1 to D-1.
-        # Let's assume n samples define n-1 intervals.
-        # The source [S2, unofficial] code is abstract.
+        outputs = outputs.view(chunk_r0.shape[0], n, 4)
+        sigma = outputs[:, :, 0]
+        colors = outputs[:, :, 1:]
         
-        # Let's use the formula directly.
-        # T_i = T_{i-1} * exp(-sigma_{i-1} * delta_{i-1})
-        pass
+        deltas = torch.diff(depths, dim=1)
+        last_delta = torch.ones(chunk_r0.shape[0], 1).to(depths.device) * 1e10
+        deltas = torch.cat([deltas, last_delta], dim=1)
         
-    # Simplified Volume Rendering
-    # Alpha = 1 - exp(-sigma * delta)
-    alpha = 1.0 - torch.exp(-sigma * deltas + eps)
-    
-    # Transmittance accumulation
-    # T_0 = 1
-    # T_i = T_{i-1} * (1 - alpha_{i-1})
-    T_acc = torch.ones(ray0.shape[0], 1).to(depths.device)
-    color_acc = torch.zeros(ray0.shape[0], 3).to(depths.device)
-    depth_acc = torch.zeros(ray0.shape[0], 1).to(depths.device)
-    
-    for i in range(n):
-        # Weight w_i = T_i * alpha_i
-        w = T_acc * alpha[:, i:i+1]
+        T = torch.ones(chunk_r0.shape[0], 1).to(depths.device)
+        color_acc = torch.zeros(chunk_r0.shape[0], 3).to(depths.device)
+        depth_acc = torch.zeros(chunk_r0.shape[0], 1).to(depths.device)
         
-        # Color contribution
-        color_acc += w * colors[:, i:i+1, :]
+        for i in range(n):
+            alpha = 1.0 - torch.exp(-sigma[:, i] * deltas[:, i] + eps)
+            w = T * alpha
+            color_acc += w * colors[:, i]
+            depth_acc += w * depths[:, i]
+            T = T * (1.0 - alpha)
+            
+        all_colors.append(color_acc)
+        all_depths.append(depth_acc)
         
-        # Depth contribution (using depth of sample i)
-        depth_acc += w * depths[:, i:i+1]
-        
-        # Update Transmittance
-        T_acc = T_acc * (1.0 - alpha[:, i:i+1])
-        
-    return color_acc, depth_acc
+    return torch.cat(all_colors, dim=0), torch.cat(all_depths, dim=0)
 ```
 
 ### Parameters with Typical Values
@@ -289,7 +163,7 @@ def render_dvr(ray0, ray_direction, decoder, c, n_steps, n_secant_steps, tau, de
 *   **White Background:** Boolean flag, default `False` [S2, unofficial].
 
 ### Edge Cases and Pitfalls
-*   **Precision:** The secant method uses `torch.no_grad()` in the reference implementation [S1, unofficial], which means gradients do not flow through the root-finding steps. This is a design choice to stabilize training but requires careful handling of the implicit differentiation if full end-to-end gradients are needed.
+*   **Precision:** The secant method uses `torch.no_grad()` in the reference implementation [S1, unofficial], which means gradients do not flow through the root-finding steps. This is a design choice to stabilize training but requires careful handling of the implicit differentiation if full end-to-end gradients are needed [G].
 *   **Boundaries:** The last segment delta is set to $10^{10}$ to ensure the ray terminates [S2, unofficial].
 *   **Numerical Stability:** A small constant $\epsilon$ is added to the exponentiation to prevent instability [S2, unofficial].
 *   **Memory:** `max_points` limits the number of points processed at once to avoid OOM errors [S1, unofficial].
@@ -304,16 +178,16 @@ Uses direct voxel grid lookup instead of MLPs. Differs from DVR by replacing the
 
 ## Operating characteristics
 
-*   **Time Complexity:** Depends on the number of ray samples $n$ and the number of secant steps. The secant method adds a constant factor overhead per ray.
+*   **Time Complexity:** Depends on the number of ray samples $n$ and the number of secant steps. The secant method adds a constant factor overhead per ray [S1, S4, unofficial].
 *   **Memory Complexity:** Proportional to the number of points processed in a chunk. `max_points` limits this to ~3.7 million points [S1, unofficial].
 *   **Performance:** Trained on a single NVIDIA V100 GPU [S3][S4, unofficial].
-*   **Strengths:** Differentiable depth estimation allows for gradient-based optimization of the implicit surface.
-*   **Limitations:** The secant method's lack of gradient flow through the root-finding steps (in the reference implementation) may limit the expressiveness of the depth supervision.
+*   **Strengths:** Differentiable depth estimation allows for gradient-based optimization of the implicit surface [S4, unofficial].
+*   **Limitations:** The secant method's lack of gradient flow through the root-finding steps (in the reference implementation) may limit the expressiveness of the depth supervision [S1, unofficial].
 
 ## Background
 
 *   **Origin:** Introduced by Niemeyer et al. in "Differentiable Volumetric Rendering: Learning Implicit 3D Representations without 3D Supervision" (CVPR 2020) [S4, unofficial].
-*   **Development:** Builds on Occupancy Networks [S1, unofficial]. The method enables learning 3D shape and texture from 2D images without explicit 3D supervision by making the rendering process differentiable with respect to the surface location.
+*   **Development:** Builds on Occupancy Networks [S1, unofficial]. The method enables learning 3D shape and texture from 2D images without explicit 3D supervision by making the rendering process differentiable with respect to the surface location [S4, unofficial].
 
 ## Sources
 

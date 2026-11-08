@@ -1,0 +1,143 @@
+--- v003.md
++++ v004.md
+@@ -4,39 +4,26 @@
+ 
+ ## Overview
+-Adaptive Sampling for Interaction is a performance optimization technique that dynamically lowers the sampling rate during user interaction (such as camera movement or transfer function adjustment) to maintain interactive frame rates, then restores the higher sampling rate once the interaction ceases [S1, S2]. It solves the problem of high computational cost in volume rendering, where high-quality results require dense sampling that exceeds real-time limits [S1, S2]. Unlike static adaptive methods that adjust sampling based on scene content, this method adjusts sampling based on user input state [S1, S2]. It builds on [Ray-Centric Adaptive Step and Termination](5938-ray-centric-adaptive-step-and-termination.md) by applying a global, state-driven reduction to the discretization density rather than local geometric metrics.
++Adaptive Sampling for Interaction is a performance optimization technique that dynamically lowers the sampling rate during user interaction (such as camera movement or transfer function editing) to maintain interactive frame rates, then restores the high sampling rate once the interaction is complete [S1][S2]. Unlike [Adaptive Sampling](1385-adaptive-sampling.md), which varies sampling based on local scene complexity or error estimates, this method varies sampling based on global user input state [S1][S2]. It builds on [Ray-Centric Adaptive Step and Termination](5938-ray-centric-adaptive-step-and-termination.md) by applying a coarse, uniform step size during interaction and a fine, potentially adaptive step size during idle rendering [S1][S2].
+ 
+ ## How it works
+-The method operates in two distinct phases: an interaction phase with reduced sampling and a post-interaction phase with full sampling.
+-
+ **Inputs and Outputs:**
+-- **Input:** User interaction state (active/inactive), current sampling parameters, volume data.
+-- **Output:** Rendered image with appropriate visual fidelity for the current phase.
++*   **Input:** User interaction state (active/inactive), current sampling parameters, volume data.
++*   **Output:** Rendered image with appropriate sampling density.
+ 
+ **Data Structures:**
+-- **Interaction State Flag:** A boolean or enum indicating if the user is currently interacting.
+-- **Sampling Rate Parameters:**
+-  - `high_sample_rate`: The target sampling density for high-fidelity rendering.
+-  - `low_sample_rate`: The reduced sampling density for interaction.
+-- **Timer:** Tracks the time since the last interaction event to determine when to restore high quality.
++*   **Interaction State:** A boolean flag or timestamp indicating if the user is currently interacting.
++*   **Sampling Rate Parameters:**
++    *   `high_sample_rate`: Samples per voxel during idle rendering. Typical value: 6–10 [S1][S2].
++    *   `low_sample_rate`: Samples per voxel during interaction. Not given in the sources.
++    *   `hold_time`: Delay in milliseconds before restoring high sampling rate after interaction stops. Typical value: 200 ms [S3, unofficial].
+ 
+ **Steps:**
+-1. **Detect Interaction:** Monitor user input events (mouse movement, parameter adjustment). Set `interaction_active = true` upon detection.
+-2. **Adjust Sampling Rate:**
+-   - If `interaction_active` is true, set the sampling rate to `low_sample_rate`.
+-   - If `interaction_active` is false, set the sampling rate to `high_sample_rate`.
+-3. **Render:** Perform volume rendering using the current sampling rate. This typically involves ray marching with step sizes inversely proportional to the sampling rate [G].
+-4. **Timer Management:**
+-   - Upon detecting interaction, reset a timer `last_interaction_time`.
+-   - If `interaction_active` is false, check if `current_time - last_interaction_time > hold_time`.
+-   - If the hold time has elapsed, set `interaction_active = false` and trigger a re-render at `high_sample_rate`.
+-
+-**Parameters:**
+-- **High Sampling Rate:** 6 to 10 samples per voxel [S1, S2].
+-- **Hold Time:** The duration to wait after interaction stops before restoring high quality. Not explicitly defined in [S1, S2], but implied by the need to "re-render at the higher sample rate once an action is completed" [S1, S2]. [S3, unofficial] uses a similar concept with `INTERACTION_HOLD_MS` (200ms) for resolution scaling, which serves as a proxy for typical hold times in interaction-aware rendering [S3, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-- **Precision:** Lower sampling rates may result in aliasing or loss of fine detail, but surface size and location remain apparent [S1, S2].
+-- **Boundaries:** Ensure smooth transitions between sampling rates to avoid visual popping. This may require interpolation or gradual adjustment of sampling density [G].
+-- **Degenerate Input:** If interaction is continuous, the system remains in low-quality mode indefinitely. The hold time mechanism prevents this.
++1.  **Detect Interaction:** Monitor user input events (mouse, keyboard, UI controls). Set `interaction_active = true` on event start.
++2.  **Select Sampling Rate:**
++    *   If `interaction_active` is true, set `current_sample_rate = low_sample_rate`.
++    *   If `interaction_active` is false, set `current_sample_rate = high_sample_rate`.
++3.  **Ray Marching:** Perform volume rendering using the selected `current_sample_rate`. The step size $\Delta t$ is derived from this rate. For a voxel of size $v$, $\Delta t = v / \text{current\_sample\_rate}$.
++4.  **Interaction Timeout:** If `interaction_active` is true, check if the time since the last interaction event exceeds `hold_time`. If so, set `interaction_active = false` to trigger the switch to `high_sample_rate` on the next frame.
++5.  **Compositing:** Use front-to-back compositing as defined in the parent method [Ray-Centric Adaptive Step and Termination](5938-ray-centric-adaptive-step-and-termination.md).
+ 
+ **Pseudocode:**
+@@ -45,7 +32,7 @@
+ interaction_active = False
+ last_interaction_time = 0
+-hold_time_ms = 200  # [S3, unofficial] proxy for typical hold time
+-high_sample_rate = 8  # [S1, S2] typical value (6-10)
+-low_sample_rate = 2   # [G] typical reduction factor; not explicitly given in [S1, S2]
++hold_time_ms = 200  # [S3, unofficial]
++high_sample_rate = 8  # Typical value from [S1][S2]
++low_sample_rate = 2   # Not given in the sources, assumed lower than high_sample_rate
+ 
+ def on_user_input():
+@@ -54,45 +41,43 @@
+     last_interaction_time = current_time_ms()
+ 
+-def render_loop():
+-    global interaction_active
++def get_sample_rate():
++    if interaction_active:
++        return low_sample_rate
++    else:
++        return high_sample_rate
++
++def render_frame():
++    # Check for interaction timeout
++    if interaction_active:
++        if current_time_ms() - last_interaction_time > hold_time_ms:
++            interaction_active = False
+     
+-    # Check if interaction has ended
+-    if not interaction_active:
+-        if current_time_ms() - last_interaction_time > hold_time_ms:
+-            # Restore high quality
+-            current_sample_rate = high_sample_rate
+-        else:
+-            # Still in hold period, keep low quality
+-            current_sample_rate = low_sample_rate
+-    else:
+-        # User is interacting, use low quality
+-        current_sample_rate = low_sample_rate
++    sample_rate = get_sample_rate()
++    step_size = voxel_size / sample_rate
++    
++    # Perform ray marching with step_size
++    # ... (see parent method for compositing details)
++```
+ 
+-    # Perform rendering with current_sample_rate
+-    # This involves ray marching with step size delta_t inversely proportional to current_sample_rate
+-    render_volume(current_sample_rate)
+-
+-def current_time_ms():
+-    # Returns current time in milliseconds
+-    pass
+-```
++**Edge Cases and Pitfalls:**
++*   **Visual Quality:** During interaction, the rendered surface appears coarser. However, surface size and location remain readily apparent, providing effective feedback for guiding user exploration [S1][S2].
++*   **Precision:** Using integer sample rates (e.g., 6 vs 10) is sufficient for this method [S1][S2].
+ 
+ ## Subtopics
+ 
+ ### Interaction Render Scale Damping
+-Dynamically reduces render resolution (not just sampling rate) during camera interaction to maintain frame rate, then restores it after interaction stops [S3, unofficial]. It sets `interactionRenderScale` to 0.25 to reduce resolution during camera movement and tracks `last_move_time` with an `INTERACTION_HOLD_MS` (200ms) delay before restoring `userRenderScale` [S3, unofficial]. `interactionRenderScale` is a multiplier (0–1) where 0 disables scaling [S3, unofficial]. This variant focuses on spatial resolution reduction rather than sampling density reduction, offering a coarser but faster feedback loop [S3, unofficial].
++Dynamically reduces render resolution (not just sampling rate) during camera interaction to maintain frame rate, then restores it after interaction stops [S3, unofficial]. It uses an `interactionRenderScale` multiplier (e.g., 0.25) to reduce resolution during movement and a `userRenderScale` for the target resolution [S3, unofficial]. A `INTERACTION_HOLD_MS` (200 ms) delay prevents flickering when the user pauses [S3, unofficial]. This is distinct from sampling rate reduction as it affects the output image dimensions directly [S3, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Rendering time is proportional to the number of samples. During interaction, the reduced sampling rate significantly decreases frame update time [S1, S2].
+-- **Memory Complexity:** No additional memory overhead beyond standard volume rendering buffers [S1, S2].
+-- **Measured Performance:** At high sampling rates (6-10 samples per voxel), frame updates take nearly two seconds on an Octane2 and nearly one second on a GeForce3 [S1, S2]. Lowering the sample rate during interaction reduces this time to maintain interactivity [S1, S2].
+-- **Scaling:** Performance improvement scales with the reduction factor of the sampling rate [G].
+-- **Strengths:** Maintains interactivity during user exploration; visual feedback (surface size/location) remains effective even with lower sampling rates [S1, S2].
+-- **Limitations:** Visual quality is coarser during interaction; requires careful tuning of hold time and sampling rates to balance quality and performance [S1, S2].
+-- **When to Use:** Interactive volume rendering applications where user exploration of transfer functions or camera views is frequent [S1, S2].
+-- **When Not to Use:** Applications requiring continuous high-fidelity visualization without user interaction [S1, S2].
++*   **Time Complexity:** Reduces rendering time during interaction by lowering the number of samples per ray. The exact speedup depends on the ratio of `high_sample_rate` to `low_sample_rate`.
++*   **Memory Complexity:** No additional memory overhead beyond storing the interaction state and timing variables.
++*   **Measured Performance:** At high sampling rates (6–10 samples per voxel), frame updates can take nearly two seconds on an Octane2 and nearly one second on a GeForce3 [S1][S2]. Lowering the sample rate during interaction significantly reduces this time, enabling interactivity.
++*   **Strengths:** Simple to implement; effective at maintaining interactivity during expensive operations like transfer function editing.
++*   **Limitations:** Visual quality degrades during interaction; requires a "hold" period to avoid premature restoration of high quality.
++*   **When to Use:** When user interaction (camera, transfer function) is frequent and expensive to render at full quality.
++*   **When Not to Use:** When visual fidelity during interaction is critical.
+ 
+ ## Background
+-Originating from the work on Interactive Volume Rendering Using Multi-Dimensional Transfer Functions by Kindlmann et al. (2001) [S1, S2], this technique was developed to address the computational demands of high-quality volume rendering in interactive settings. The authors noted that high sampling rates (6-10 samples per voxel) were necessary for smooth boundary rendering but resulted in frame times of nearly one to two seconds on contemporary hardware (GeForce3, Octane2) [S1, S2]. To enable real-time exploration of transfer functions, they proposed lowering the sample rate during interaction and restoring it afterward [S1, S2]. The method leverages the observation that even with coarser surfaces, the size and location of rendered volumes remain apparent, providing effective feedback for user guidance [S1, S2].
++This technique was introduced in the context of interactive volume rendering using multi-dimensional transfer functions [S1][S2]. The authors noted that high sampling rates (6–10 samples per voxel) were necessary for smooth boundary rendering but resulted in frame times of nearly one to two seconds on contemporary hardware (Octane2, GeForce3) [S1][S2]. To address this, they proposed lowering the sample rate during interaction and restoring it afterward [S1][S2]. The concept of dynamically adjusting resolution/sampling based on user activity has also been implemented in modern web-based volume renderers like Kiln [S3, unofficial].
+ 
+ ## Sources

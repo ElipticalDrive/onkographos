@@ -25,6 +25,7 @@ The network is a sequential stack of layers [S2, unofficial]. Each layer is defi
 * `last_layer_linear`: If `True`, the final layer is linear instead of sine (default: `False`) [S2, unofficial].
 * `first_omega_0`: Frequency parameter for the first layer (default: 20.0) [S2, unofficial].
 * `hidden_omega_0`: Frequency parameter for hidden layers (default: 20.0) [S2, unofficial].
+* `steps`: Number of training steps for fitting an image (default: 1000) [S2, unofficial].
 
 **Initialization:**
 The weights are initialized uniformly to ensure the sine activations operate in a regime where their derivative is non-zero and well-behaved [S2, unofficial].
@@ -102,15 +103,15 @@ class SIREN(nn.Module):
 Maps low-dimensional input coordinates into a higher-dimensional space using fixed sinusoidal bases. It sets itself apart from SIREN by providing explicit frequency bands as input features rather than relying on the network's internal sine layers. Choose it when you need to lift raw coordinates into a Fourier space before passing them to an MLP.
 
 ## Operating characteristics
-* **Time Complexity:** Training time is significantly faster than ReLU-MLPs for high-frequency signals. SIREN reaches sharp reconstruction in ~100 steps, whereas ReLU-MLPs do not converge in 2000 steps [S2, unofficial].
+* **Time Complexity:** Training time is significantly faster than ReLU-MLPs for high-frequency signals [S2, unofficial]. SIREN reaches sharp reconstruction in ~100 steps, whereas ReLU-MLPs do not converge in 2000 steps [S2, unofficial].
 * **Memory Complexity:** The method stores network parameters instead of explicit voxels, substantially cutting GPU memory usage compared to conventional explicit representations [S1].
 * **Strengths:** Well-behaved derivatives, ability to represent high-frequency details [S2, unofficial].
-* **Limitations:** Sensitive to initialization [S2, unofficial]. Not given in the sources for specific hardware performance metrics.
-* **When to use:** Not given in the sources.
-* **When not to use:** Not given in the sources.
+* **Limitations:** Sensitive to initialization [S2, unofficial]. Not given in the sources for specific hardware performance metrics [S2, unofficial].
+* **When to use:** Not given in the sources [S2, unofficial].
+* **When not to use:** Not given in the sources [S2, unofficial].
 
 ## Background
-The SIREN is a neural field method that addresses the limitations of standard MLPs in representing continuous signals, particularly in the context of neural fields for volume rendering and image representation [S2, unofficial]. The method leverages the properties of sine functions to overcome spectral bias, a common issue in deep learning where networks tend to learn low-frequency functions first [S2, unofficial]. It is employed in architectures for encoding volumetric data and super-resolution tasks [S1]. The specific origin paper, year, and detailed historical development are not given in the sources.
+The SIREN is a neural field method that addresses the limitations of standard MLPs in representing continuous signals, particularly in the context of neural fields for volume rendering and image representation [S2, unofficial]. The method leverages the properties of sine functions to overcome spectral bias, a common issue in deep learning where networks tend to learn low-frequency functions first [S2, unofficial]. It is employed in architectures for encoding volumetric data and super-resolution tasks [S1]. The specific origin paper, year, and detailed historical development are not given in the sources [S2, unofficial].
 
 ## Sources
 [S1] An end-to-end implicit neural representation architecture for medical volume data., https://doi.org/10.1371/journal.pone.0314944, fetched 2026-10-26
