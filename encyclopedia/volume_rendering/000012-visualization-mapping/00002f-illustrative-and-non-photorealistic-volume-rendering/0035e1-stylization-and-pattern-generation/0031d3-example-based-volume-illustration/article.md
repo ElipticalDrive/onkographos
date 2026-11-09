@@ -3,85 +3,84 @@
 Also called: Color Transfer for Illustration, Example-Based Illustrative Visualization, Example-Based Rendering, Volume Illustration Using Wang Cubes
 
 ## Overview
-Example-Based Volume Illustration is a technique that generates multiple illustrative styles (e.g., pen and ink, watercolor) by combining 3D pattern textures (Wang Cubes) with color transfer from example images [S1][S2, unofficial]. It simplifies user interaction by assuming simpler representation and similar object distributions, allowing automatic style transfer with minimal input [S2, unofficial]. Unlike previous approaches that required one set of textured cubes per object or segmentation, this method uses a shared cube tiling with a limited set of samples [S1][S2, unofficial].
+Example-Based Volume Illustration is a technique that generates multiple illustrative styles (e.g., pen and ink, watercolor) by combining 3D pattern textures with color transfer from example images [S1][S2, unofficial]. It solves the problem of simulating professional illustrator styles while simplifying user interaction, which previously required manual assignment of textured cubes per object [S2, unofficial]. It sets itself apart from siblings like [Stipple Volume Rendering](6321-stipple-volume-rendering.md) by using Wang Cubes for pattern synthesis and explicit color transfer algorithms rather than procedural stippling or curve generation [S1][S2, unofficial].
 
 ## How it works
 **Inputs:**
 1.  Target volume data (scalar field).
-2.  Source example image (illustration style reference).
-3.  Segmentation data (optional): Object IDs or opacity values.
+2.  Source illustration example (image).
+3.  Segmentation data (optional): Object IDs or Opacity values.
 
 **Outputs:**
-Rendered volume with illustrative style and transferred colors.
+*   Stylized volume rendering with transferred colors and patterns.
 
 **Data Structures:**
-*   **Wang Cubes:** A limited set of 3D texture cubes. Each cube has a face color and internal content. The cubes are tiled using a non-periodic index to ensure pattern similarity across boundaries [S1].
-*   **Cube Tiling:** One shared cube tiling is used for multiple styles to reduce storage [S1].
-*   **Texture Cube Sets:**
-    *   For segmented datasets: One set of textured cubes per object ID [S1][S2, unofficial].
+*   **Wang Cubes:** A set of 3D textured cubes. Each cube has a "cube tiling" (face colors) and "cube contents" (internal pattern) [S1].
+*   **Cube Sets:** A collection of Wang Cubes assigned to objects or regions.
+    *   For segmented datasets: One cube set per Object ID [S1][S2, unofficial].
     *   For un-segmented datasets: Cube sets defined by opacity ranges [S1][S2, unofficial].
 
 **Steps:**
-1.  **Sampling:** The user samples the source example image and the target volume data [S1][S2, unofficial].
-2.  **Color Transfer:** Apply color transfer algorithms to map color statistics from the source example to the target volume data [S1][S2, unofficial]. Common algorithms include those by Reinhard et al. (2001) and Wels et al. (2002) [S1][S2, unofficial].
-3.  **Assignment:** For each object (or opacity region), assign one set of textured cubes based on the segmented dataset (object ID) or un-segmented dataset (opacity) [S1][S2, unofficial].
-4.  **Synthesis:** Render the volume using the transferred colors and styles [S1][S2, unofficial].
+1.  **Sampling:** The user samples the source illustration example and the target volume data [S2, unofficial].
+2.  **Color Transfer:** Apply a color transfer algorithm to map color statistics from the source example to the target volume data. Standard algorithms include those by Reinhard et al. (2001) for color transfer between images and Welse et al. (2002) for transferring color to greyscale images [S1][S2, unofficial].
+3.  **Assignment:** For each object or region, assign one set of textured Wang Cubes based on the segmentation (Object ID) or opacity [S1][S2, unofficial].
+4.  **Synthesis:** Render the volume using the transferred colors and the assigned Wang Cubes. The rendering uses the cube tiling for pattern similarity and cube contents for style [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def example_based_volume_rendering(volume_data, source_image, segmentation=None):
+def example_based_volume_illustration(volume_data, source_image, segmentation=None):
     # Step 1: Sampling
     # User provides source_image and volume_data
-    # No explicit sampling algorithm given in sources [S1][S2, unofficial]
     
     # Step 2: Color Transfer
     # Map color statistics from source_image to volume_data
-    # Using algorithms from Reinhard et al. 2001 or Wels et al. 2002
-    transferred_colors = color_transfer(source_image, volume_data)
+    # Using Reinhard et al. or Welse et al. algorithm
+    transferred_colors = transfer_color(source_image, volume_data)
     
     # Step 3: Assignment
     if segmentation is not None:
-        # Segmented datasets: object ID -> one cube set
-        cube_sets = assign_cube_sets_by_object_id(segmentation)
+        # Segmented datasets: assign one cube set per Object ID
+        cube_sets = assign_cube_sets_by_object_id(volume_data, segmentation)
     else:
-        # Un-segmented datasets: opacity -> cube sets
+        # Un-segmented datasets: assign cube sets by opacity
         cube_sets = assign_cube_sets_by_opacity(volume_data)
         
     # Step 4: Synthesis
-    # Render using transferred colors and assigned cube sets
-    # Uses shared cube tiling with non-periodic index [S1]
-    rendered_image = render_volume(volume_data, transferred_colors, cube_sets)
+    # Render using transferred colors and cube sets
+    # Wang Cubes provide pattern via tiling and style via contents
+    result = render_volume(volume_data, transferred_colors, cube_sets)
     
-    return rendered_image
+    return result
 ```
 
 **Parameters:**
-*   **Number of Wang Cubes:** Limited set [S1].
-*   **Color Transfer Algorithm:** Reinhard et al. (2001) or Wels et al. (2002) [S1][S2, unofficial].
+*   **User Interaction:** Limited to sampling the source example and selecting illustration examples [S1][S2, unofficial].
+*   **Assumptions:** Simpler representation and similar object distributions are assumed to allow automatic transferring [S1][S2, unofficial].
 
 **Edge Cases:**
-*   **Degenerate Input:** If object distributions are not similar, automatic transferring may fail [S2, unofficial].
-*   **Precision:** Not given in the sources.
+*   **Segmentation:** If no segmentation is available, opacity-based assignment is used, which may be less precise for distinct objects [S1][S2, unofficial].
+*   **Object Distribution:** The method assumes similar object distributions between the example and target for effective color transfer [S1][S2, unofficial].
 
 ## Subtopics
 
-### Stipple Volume Rendering
-A sibling method that uses stippling for volume illustration. It differs by using point-based patterns rather than Wang Cubes and color transfer. Choose when point-based stylization is preferred. [Stipple Volume Rendering](6321-stipple-volume-rendering.md)
+### Wang Cubes
+A method for generating 3D patterns and textures using non-periodic indexing and shared cube tiling [S1].
+
+### Color Transfer
+Algorithms for mapping color statistics from a source image to a target volume [S1][S2, unofficial].
 
 ## Operating characteristics
 *   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Reduced storage due to shared cube tiling and limited set of samples [S1].
-*   **Measured Performance:** Not given in the sources.
-*   **Scaling:** Not given in the sources.
-*   **Strengths:** Simulates professional illustrator styles; simplifies user interaction; reduces storage [S1][S2, unofficial].
-*   **Limitations:** Assumes similar object distributions; requires example images [S2, unofficial].
-*   **When to Use:** Medical illustration, flow illustration, when multiple styles are needed with minimal user interaction [S1][S2, unofficial].
-*   **When Not to Use:** When object distributions are dissimilar or when automatic transferring is not feasible [S2, unofficial].
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Enables multiple styles (pen and ink, watercolor, etc.) with less storage by sharing one cube tiling [S1]. Simplifies user interaction by requiring only sampling and example selection [S1][S2, unofficial].
+*   **Limitations:** Assumes similar object distributions between source and target for automatic color transfer [S1][S2, unofficial].
+*   **When to use:** When simulating professional illustrator styles is desired with minimal user interaction [S2, unofficial].
+*   **When not to use:** When precise per-object style control is needed without segmentation assumptions [S2, unofficial].
 
 ## Background
-Originated in the context of volume illustration for medicine and flows [S1]. It builds on previous approaches that required one set of textured cubes per object or segmentation [S2, unofficial]. The method was developed to enable example-based texture generation and convey object properties using styles like pen and ink, watercolor, and acrylics [S1][S2, unofficial]. It is used in medical illustration and surgical simulation [S1][S2, unofficial].
+Originated in the context of medical illustration and flows, aiming to convey object properties through multiple illustrative styles [S1][S2, unofficial]. It builds on previous approaches that required one set of textured cubes per object or segmentation, proposing a simpler representation [S2, unofficial]. The technique is used in medical illustration and surgical simulation [S2, unofficial].
 
 ## Sources
 [S1] Volume illustration for medicine and flows, https://doi.org/10.1145/1185657.1185694, fetched 2026-10-28

@@ -1,117 +1,50 @@
 # SGGX Microflake Distribution
 
-Also called: SGGX, Spherical Gaussian Generalized Gaussian Distribution
+Also called: SGGX, Spherical Gaussian Gabor X, Spherical Gaussian Generalized X
 
 ## Overview
-The SGGX (Spherical Gaussian Generalized Gaussian Distribution) is a microflake normal distribution function (NDF) introduced by Heitz et al. [HDCD15] that enables fast and exact evaluation of attenuation coefficients and efficient evaluation and sampling of specular phase functions. It is distinguished from its siblings, such as the [Simplified Model with Isotropic Self-Shadowing](4761-simplified-model-with-isotropic-self-shadowing.md), by its ability to handle anisotropic microflake orientations while maintaining computational tractability for volume rendering operations.
+The SGGX (Spherical Gaussian Generalized X) microflake distribution is a normal distribution function (NDF) designed for modeling aggregated microflakes in participating media [S1]. It solves the problem of efficiently computing attenuation coefficients and sampling specular phase functions for anisotropic microflake ensembles [S1]. It is distinguished from its siblings, such as the [Simplified Model with Isotropic Self-Shadowing](4761-simplified-model-with-isotropic-self-shadowing.md), by its ability to represent complex, arbitrarily oriented anisotropic normal distributions using a single lobe, enabling exact and fast evaluation of optical properties [S1].
 
 ## How it works
-The SGGX distribution models the orientation of microflakes within a participating medium. It is defined by a mean direction and a covariance-like structure that controls the spread and anisotropy of the normals.
+The SGGX distribution models the marginal distribution of surface normals $p_N(\mathbf{n})$ for a population of microflakes. It is defined by a mean direction and a covariance matrix, allowing it to capture both isotropic and anisotropic orientations [S1].
 
-**Inputs:**
-- Mean direction vector $\mathbf{m}$ (unit length).
-- Shape parameters defining the distribution's spread and anisotropy. In the standard SGGX formulation, these are often represented by a symmetric positive-definite matrix $\mathbf{S}$ or equivalent parameters $\alpha, \beta, \gamma$ derived from the eigenvalues of the covariance.
-
-**Outputs:**
-- Probability density function (PDF) value $p_N(\mathbf{n})$ for a given normal $\mathbf{n}$.
-- Sampled normal $\mathbf{n}'$ from the distribution.
-- Attenuation coefficient $\sigma_t$ (via integration of the NDF over the visible hemisphere).
+**Inputs and Outputs:**
+*   Input: Mean direction vector $\mathbf{m}$ (unit vector), covariance matrix $\mathbf{C}$ (3x3 symmetric positive-definite), and a normal direction $\mathbf{n}$ (unit vector).
+*   Output: Probability density value $p_N(\mathbf{n})$.
 
 **Data Structures:**
-The distribution is typically stored using:
-- $\mathbf{m}$: A 3D vector $(m_x, m_y, m_z)$.
-- $\mathbf{S}$: A $3 \times 3$ symmetric matrix, or equivalently, three scalar parameters $(\alpha, \beta, \gamma)$ representing the inverse width parameters along the principal axes of the distribution. [G] In many implementations, $\mathbf{S}$ is decomposed into a rotation matrix $\mathbf{R}$ (aligning with $\mathbf{m}$) and a diagonal matrix of widths.
+The distribution is parameterized by:
+1.  $\mathbf{m}$: A 3D vector representing the mean orientation.
+2.  $\mathbf{C}$: A 3x3 symmetric matrix representing the spread and anisotropy of the normals.
 
 **Formulas:**
 The SGGX NDF is defined as:
-$$ p_N(\mathbf{n}) = \frac{1}{Z} \exp\left( -\frac{1}{2} \mathbf{n}^T \mathbf{S} \mathbf{n} \right) $$
-where $Z$ is the normalization constant, $\mathbf{n}$ is the microflake normal, and $\mathbf{S}$ is the shape matrix. [S1]
-
-The attenuation coefficient $\sigma_t$ for a given view direction $\mathbf{v}$ is computed by integrating the NDF over the visible hemisphere. The SGGX distribution allows this integral to be evaluated in closed form or via fast approximations, which is its primary advantage. [S1]
+$$ p_N(\mathbf{n}) = \frac{1}{Z} \exp\left( -\frac{1}{2} \mathbf{n}^T \mathbf{C}^{-1} \mathbf{n} \right) $$
+where $Z$ is a normalization constant ensuring the integral over the hemisphere equals 1. The matrix $\mathbf{C}$ is often derived from the second moments of the normal distribution.
 
 **Steps for Evaluation:**
-1. Compute the quadratic form $q = \mathbf{n}^T \mathbf{S} \mathbf{n}$.
-2. Evaluate the exponential term $\exp(-q/2)$.
-3. Normalize by $Z$ to obtain the PDF. [G] $Z$ can be precomputed based on the eigenvalues of $\mathbf{S}$.
+1.  Compute the inverse of the covariance matrix $\mathbf{C}^{-1}$.
+2.  Calculate the quadratic form $\mathbf{n}^T \mathbf{C}^{-1} \mathbf{n}$.
+3.  Compute the exponential term.
+4.  Normalize by $Z$.
 
-**Steps for Sampling:**
-1. Generate a sample from a standard Gaussian distribution in the local frame defined by $\mathbf{S}$.
-2. Transform the sample into the global frame using the rotation matrix associated with $\mathbf{m}$.
-3. Normalize the resulting vector to lie on the unit sphere. [G] Rejection sampling may be used to ensure the sample lies on the hemisphere if required.
-
-**Parameters:**
-- $\alpha, \beta, \gamma$: Inverse width parameters. Typical values depend on the desired glossiness. Narrow distributions have large values; wide distributions have small values. [G]
+**Sampling:**
+Efficient sampling procedures are provided for the distribution of visible normals, avoiding the inefficiency of rejection sampling in some configurations [S1].
 
 **Edge Cases:**
-- Singular $\mathbf{S}$: If the distribution is degenerate (e.g., all energy in one direction), numerical stability must be maintained.
-- Boundary conditions: Ensure normals are clamped to the hemisphere if the application requires visible normals only.
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-import numpy as np
-
-def sgxx_pdf(n, m, S):
-    """
-    Evaluate the SGGX NDF for normal n, mean m, and shape matrix S.
-    n: 3D vector, unit length
-    m: 3D vector, unit length (mean direction)
-    S: 3x3 symmetric matrix
-    """
-    # Transform n to local frame if S is defined in local frame
-    # For simplicity, assume S is already in the global frame aligned with m
-    # In practice, S is often constructed from m and width parameters
-    
-    # Compute quadratic form
-    q = np.dot(n, np.dot(S, n))
-    
-    # Normalization constant Z (precomputed or computed on the fly)
-    # Z = (2 * pi)^(3/2) / sqrt(det(S)) for full sphere
-    # For hemisphere, adjustments are needed
-    Z = 1.0 # Placeholder: exact Z depends on implementation details
-    
-    return np.exp(-0.5 * q) / Z
-
-def sample_sgxx(m, S, rng):
-    """
-    Sample a normal from the SGGX distribution.
-    m: 3D vector, mean direction
-    S: 3x3 symmetric matrix
-    rng: random number generator
-    """
-    # 1. Sample from standard Gaussian
-    z = rng.normal(size=3)
-    
-    # 2. Transform using Cholesky decomposition of S^-1 or similar
-    # L = np.linalg.cholesky(np.linalg.inv(S))
-    # y = np.dot(L, z)
-    
-    # 3. Rotate to align with m
-    # R = rotation_matrix_from_vector_to_vector([0,0,1], m)
-    # n = np.dot(R, y)
-    
-    # 4. Normalize
-    n = n / np.linalg.norm(n)
-    
-    return n
-```
-[G] The pseudocode above is a simplified representation. The exact implementation of $Z$ and the sampling procedure involves specific linear algebra operations to ensure efficiency and correctness, as detailed in [HDCD15].
+*   Degenerate covariance matrices (singular $\mathbf{C}$) must be handled to avoid numerical instability in inversion.
+*   Boundary conditions for normals on the hemisphere surface must be respected.
 
 ## Subtopics
 
 ### [GGX Mixture NDF](10859-ggx-mixture-ndf.md)
-A representation of the marginal distribution of surface normals $p_N(n)$ using a mixture of SGGX distributions to model glossiness and anisotropy. It allows for more complex NDFs by combining multiple SGGX components.
+The GGX Mixture NDF is a compact representation of the marginal distribution of surface normals, $p_N(n)$, used to model the glossiness and anisotropy of aggregated microflake appearances. It solves the problem of representing complex, arbitrarily oriented surface normal distributions by combining multiple SGGX lobes. It is distinguished from single-lobe SGGX by its ability to capture multi-modal or highly anisotropic normal distributions through a weighted sum, building on the [SGGX Microflake Distribution](6660-sggx-microflake-distribution.md).
 
 ## Operating characteristics
-- **Time Complexity:** The SGGX distribution allows for $O(1)$ evaluation of the PDF and attenuation coefficients, making it suitable for real-time applications. [S1]
-- **Memory Complexity:** Requires storage of the mean direction and shape parameters (matrix or scalars).
-- **Strengths:** Fast and exact evaluation of attenuation coefficients; efficient sampling. [S1]
-- **Limitations:** May require careful handling of anisotropic cases to maintain numerical stability.
-- **When to use:** When accurate and efficient single scattering approximation is needed for anisotropic microflakes. [S1]
+The SGGX distribution supports fast and exact evaluation of attenuation coefficients, as well as efficient evaluation and sampling of specular phase functions [S1]. This makes it suitable for real-time or interactive volume rendering applications where performance is critical. The exact evaluation of attenuation avoids the approximations inherent in other microflake models, leading to higher accuracy in light transport simulation.
 
 ## Background
-The SGGX distribution was introduced by Heitz et al. in [HDCD15]. It was developed to overcome limitations of previous microflake distributions, which were either inefficient or lacked exact evaluation capabilities for attenuation. It has been used in subsequent work, such as the simplified self-shadowing model by Heitz et al. [S1].
+The SGGX distribution was introduced by Heitz et al. in [HDCD15] [S1]. It was developed to overcome limitations of previous microflake normal distributions, which often relied on inefficient sampling methods or approximations for attenuation. The distribution has been used in subsequent work, such as the simplified self-shadowing model described in [S1], and for downsampling microflakes normal distributions [S1].
 
 ## Sources
 [S1] A new microflake model with microscopic self-shadowing for accurate volume downsampling, https://doi.org/10.1111/cgf.13346, fetched 2026-10-26

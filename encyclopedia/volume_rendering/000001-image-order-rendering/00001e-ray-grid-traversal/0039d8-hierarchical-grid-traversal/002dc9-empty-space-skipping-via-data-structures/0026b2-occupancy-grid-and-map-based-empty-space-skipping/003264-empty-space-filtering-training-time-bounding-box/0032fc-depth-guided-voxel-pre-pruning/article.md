@@ -7,108 +7,89 @@ Depth-guided voxel pre-pruning is a preprocessing strategy that removes voxels l
 
 ## How it works
 **Inputs:**
-*   Sparse multi-view images $I = \{I_n\}_{n=1}^S$.
-*   Camera intrinsics $K = \{K_n\}_{n=1}^S$ and extrinsics $P = \{P_n\}_{n=1}^S$.
-*   Voxel grid $V$ (either density grid $V_D$ or spherical harmonics grid $V_{SH}$) with resolution $[N_x, N_y, N_z]$.
-*   Scene bounding box defined by corners $(x_a, y_a, z_a)$ and $(x_b, y_b, z_b)$.
-*   Ray marching step size $s$.
-*   Threshold $\tau$ for confidence filtering.
+*   Sparse multi-view images $I = \{I_n\}_{n=1}^S$ [S1].
+*   Camera intrinsics $K = \{K_n\}_{n=1}^S$ and extrinsics $P = \{P_n\}_{n=1}^S$ [S1].
+*   Voxel grid $V$ (either density grid $V_D$ or spherical harmonics grid $V_{SH}$) with resolution $[N_x, N_y, N_z]$ [S1].
+*   Scene bounding box defined by corners $(x_a, y_a, z_a)$ and $(x_b, y_b, z_b)$ [S1].
+*   Ray marching step size $s$ [S1].
+*   Threshold $\tau$ for confidence filtering [S1].
 
 **Outputs:**
-*   Pruned voxel grid $V$.
+*   Pruned voxel grid $V$ [S1].
 
 **Data Structures:**
-*   **Grid Mask ($M_g$):** A boolean array of shape $[N_x, N_y, N_z]$. `True` indicates the voxel is active (to be kept/optimized); `False` indicates the voxel is pruned (free space). Initialized to all `True`.
+*   **Grid Mask ($M_g$):** A boolean array of shape $[N_x, N_y, N_z]$. `True` indicates the voxel is active (to be kept/optimized); `False` indicates the voxel is pruned (free space) [S1]. Initialized to all `True` [S1].
 *   **Ray Sets:**
-    *   World frame: Origin set $O_w$, Direction set $Q_w$.
-    *   Grid frame: Origin set $O_g$, Direction set $Q_g$.
-    *   Distance parameter $T$: Scalar values representing distance along the ray.
+    *   World frame: Origin set $O_w$, Direction set $Q_w$ [S1].
+    *   Grid frame: Origin set $O_g$, Direction set $Q_g$ [S1].
+    *   Distance parameter $T$: Array of scalar values representing distance along each ray [S1].
 *   **Depth Data:**
-    *   Depth maps $D = \{D_n\}_{n=1}^S$.
-    *   Confidence maps $E = \{E_n\}_{n=1}^S$.
-    *   Binary masks $M = \{M_n\}_{n=1}^S$.
+    *   Depth maps $D = \{D_n\}_{n=1}^S$ [S1].
+    *   Confidence maps $E = \{E_n\}_{n=1}^S$ [S1].
+    *   Binary masks $M = \{M_n\}_{n=1}^S$ [S1].
 
-**Algorithm Steps:**
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-1.  **Depth Acquisition and Filtering:**
-    Input images $I$ into a 3D vision foundation model (e.g., VGGT) to obtain depth maps $D$ and confidence maps $E$ [S1]. Filter low-confidence depths using threshold $\tau$ to generate binary masks $M = \{M_n\}_{n=1}^S$ [S1]:
-    $$
-    m = \begin{cases} \text{True} & e \geq \tau \\ \text{False} & e < \tau \end{cases}, \quad \text{where } m \in M_n, e \in E_n \quad (1)
-    $$
-    *Note: Depths predicted by the foundation model are aligned with sparse depths obtained by triangulating corresponding pixels using least squares, or by aligning predicted poses with known poses [S1].*
+```python
+# 1. Depth Acquisition and Filtering
+D, E = VGGT_forward(I)  # Obtain depths and confidences from foundation model [S1]
+M = [np.array(e >= tau, dtype=bool) for e in E]  # Filter low-confidence depths [S1]
 
-2.  **Ray Generation:**
-    Generate a set of rays $R_w = \{R_{w_n}\}_{n=1}^S$ in the world frame using camera intrinsics $K$ and extrinsics $P$. This consists of origin set $O_w$ and direction set $Q_w$ [S1].
+# 2. Ray Generation
+O_w, Q_w = generate_rays(K, P)  # Generate rays in world frame [S1]
 
-3.  **Masking and Aggregation:**
-    Filter the depth maps and rays using the binary masks $M$ [S1]:
-    $$
-    D \leftarrow \bigcup_{n=1}^S D_n[M_n], \quad R_w \leftarrow \bigcup_{n=1}^S R_{w_n}[M_n] \quad (2)
-    $$
-    Here, $D_n[M_n]$ denotes the depth values where the mask is true.
+# 3. Masking and Aggregation
+D_filtered = [Dn[Mn] for Dn, Mn in zip(D, M)]
+R_w_filtered = [Rw[Mn] for Rw, Mn in zip([O_w, Q_w], M)]  # Aggregate valid rays/depths [S1]
 
-4.  **Coordinate Transformation:**
-    Transform the filtered depth $D$ and rays $R_w$ into the grid frame to obtain $D_g$ and $R_g$ (origin $O_g$, direction $Q_g$) based on the grid resolution and scene bounding box [S1].
+# 4. Coordinate Transformation
+O_g, Q_g, D_g = transform_to_grid_frame(R_w_filtered, D_filtered, bounding_box, resolution) [S1]
 
-5.  **Ray-Grid Intersection:**
-    Compute the near-bound set $T_n$ and far-bound set $T_f$ of rays $R_g$ intersected with the voxel grid $V$ [S1].
-    Filter out rays that do not intersect the grid (where $T_n > T_f$) [S1]:
-    $$
-    R_g \leftarrow R_g[T_n \leq T_f], \quad D_g \leftarrow D_g[T_n \leq T_f]
-    $$
-    $$
-    T_n \leftarrow T_n[T_n \leq T_f], \quad T_f \leftarrow T_f[T_n \leq T_f] \quad (3)
-    $$
+# 5. Ray-Grid Intersection
+T_n, T_f = compute_ray_grid_intersection(O_g, Q_g, bounding_box)  # Near and far bounds [S1]
+valid = T_n <= T_f  # Filter non-intersecting rays [S1]
+O_g, Q_g, D_g, T_n, T_f = [arr[valid] for arr in [O_g, Q_g, D_g, T_n, T_f]]
 
-6.  **Initialization:**
-    Initialize the grid mask $M_g$ with resolution $[N_x, N_y, N_z]$ where all values are `True` [S1].
-    Initialize a ray mask $M_r$ with the same shape as $R_g$ where all values are `True` [S1].
-    Initialize the marching distance parameter $T \leftarrow T_n$ [S1].
+# 6. Initialization
+M_g = np.ones((Nx, Ny, Nz), dtype=bool)  # Grid mask [S1]
+M_r = np.ones(len(O_g), dtype=bool)      # Ray mask [S1]
+T = T_n.copy()                           # Current marching distance [S1]
 
-7.  **Iterative Pruning:**
-    While there exist elements in $M_r$ that are `True`:
-    a. Compute positions $P$ where all active rays reach during marching forward:
-       $$
-       P = O_g + T \times Q_g \quad (4)
-       $$
-    b. Determine the voxel indices $I, J, K$ occupied by positions $P$ [S1].
-    c. Mark these voxels as occupied (pruned) in the grid mask:
-       $$
-       M_g[I, J, K] = \text{False} \quad (5)
-       $$
-    d. Advance the marching distance:
-       $$
-       T \leftarrow T + s \quad (6)
-       $$
-    e. Mark rays that have reached or passed the depth prior as inactive:
-       $$
-       M_r[T \geq D_g] = \text{False} \quad (7)
-       $$
-    f. Filter active rays and their associated data using $M_r$:
-       $$
-       O_g \leftarrow O_g[M_r], \quad Q_g \leftarrow Q_g[M_r]
-       $$
-       $$
-       T \leftarrow T[M_r], \quad D_g \leftarrow D_g[M_r], \quad M_r \leftarrow M_r[M_r] \quad (8)
-       $$
+# 7. Iterative Pruning
+while np.any(M_r):
+    P = O_g + T[:, None, None] * Q_g    # Compute ray positions [S1]
+    I, J, K = voxel_indices(P)          # Determine occupied voxel indices [S1]
+    M_g[I, J, K] = False                # Mark occupied voxels as pruned [S1]
+    T = T + s                           # Advance marching distance [S1]
+    M_r[T >= D_g] = False               # Deactivate rays past depth prior [S1]
+    # Filter active rays and data
+    O_g, Q_g, D_g, T, M_r = [arr[M_r] for arr in [O_g, Q_g, D_g, T, M_r]]
 
-8.  **Finalization:**
-    Apply the grid mask to the voxel grid:
-    $$
-    V \leftarrow V[M_g] \quad (9)
-    $$
-    Return the pruned voxel grid $V$ [S1].
+# 8. Finalization
+V = V[M_g]  # Apply grid mask to voxel grid [S1]
+return V
+```
+
+**Parameters:**
+*   $\tau$: Manually set threshold for filtering low-confidence depths. If confidence $e < \tau$, the depth is discarded [S1].
+*   $s$: Ray marching step size used in the iterative voxel marking process [S1].
 
 **Pitfalls and Edge Cases:**
-*   **Overpruning:** If depth priors are larger than the ground truth, scene voxels may be incorrectly removed [S1]. This is mitigated by applying voxel dilation after pruning to restore some voxels potentially containing scene context [S1].
-*   **Discreteness Error:** Even with high-accuracy depths, voxels occupied by the scene surface might be pruned due to the discreteness of the voxel grid representation [S1].
-*   **Confidence Threshold:** The threshold $\tau$ is manually set. Improper selection may retain noisy depths or discard valid ones [S1].
+*   **Overpruning:** If depth priors are larger than ground truth, scene voxels may be incorrectly removed [S1].
+*   **Discreteness Error:** Voxels occupied by the scene surface might be pruned even with high-accuracy depths due to voxel grid discreteness [S1].
+*   **Confidence Threshold Selection:** The threshold $\tau$ is manually set; improper selection may retain noisy depths or discard valid ones [S1].
+
+## Subtopics
+
+### Voxel Dilation
+A morphological operation applied to a pruned voxel grid to restore voxels that were incorrectly removed due to artifacts in the depth prior [S1]. It is executed immediately after the depth-guided pre-pruning step to alleviate overpruning resulting from inevitable artifacts existing in the depth prior [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** The pruning process is highly efficient, completing in a matter of seconds using parallel computing [S1]. The iterative marching step depends on the number of active rays and the depth of the scene relative to the step size $s$.
-*   **Memory Complexity:** Requires storage for the grid mask $M_g$ ($N_x N_y N_z$), ray sets, and depth maps. The pruning reduces the final memory footprint of the voxel grid $V$.
-*   **Strengths:** Avoids the computational burden and imperfect data issues of explicit depth supervision [S1]. It reduces samples in free space and parameters to be optimized, accelerating training [S1]. It implicitly imposes geometric constraints without extra computational cost during training [S1].
-*   **Limitations:** Relies on the accuracy and density of the depth prior. Overpruning can occur if the depth prior is inaccurate or too large [S1]. Discreteness errors may lead to slight geometry loss at surfaces [S1].
+*   **Time Complexity:** Not given in the sources. The method is described as highly efficient, completing the necessary geometry initialization in a matter of seconds using parallel computing [S1].
+*   **Memory Complexity:** Requires storage for the grid mask $M_g$ ($N_x N_y N_z$), ray sets, and depth maps [S1]. The pruning reduces the final memory footprint of the voxel grid $V$ [S1].
+*   **Strengths:** Avoids the computational burden and imperfect data issues of explicit depth supervision [S1]. It reduces samples in free space and parameters to be optimized, accelerating training [S1]. It implicitly imposes geometric constraints without introducing extra computational cost during training [S1].
+*   **Limitations:** Relies on the accuracy and density of the depth prior [S1]. Overpruning can occur if the depth prior is inaccurate or too large [S1]. Discreteness errors may lead to slight geometry loss at surfaces [S1].
 *   **When to use:** When using explicit voxel radiance field representations (e.g., Plenoxels) and sparse multi-view inputs, particularly when training efficiency is critical and a 3D vision foundation model is available to provide dense depth priors [S1].
 *   **When not to use:** When high-precision geometry is required without post-processing dilation, or when depth priors are known to be significantly inaccurate or sparse [S1].
 

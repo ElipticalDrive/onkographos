@@ -2,32 +2,31 @@
 
 
 ## Overview
-Load Balanced Network Distribution (LBND) is a distributed volume rendering strategy that partitions volumetric data into bricks to minimize end-to-end rendering time on a cluster [S1, unofficial]. It solves the problem of uneven load distribution in sparse datasets, where traditional static partitions (like grids or octrees) assign disproportionate computational work to nodes processing dense regions while others process empty space [S1, unofficial]. LBND differs from siblings like [Scalable Distributed Volume Rendering (SDVR)](863-scalable-distributed-volume-rendering-sdvr.md) and [MPI Volume Rendering (1D/2D Decomposition)](2249-mpi-volume-rendering-1d-2d-decomposition.md) by explicitly modeling network communication costs and using dynamic programming to optimize brick grouping, rather than relying solely on geometric decomposition [S1, unofficial].
+LBND is an optimization framework for distributed volume rendering that partitions volumetric data to minimize end-to-end rendering time, defined as the maximum of the slowest render-node's computation time, image composition time, and network communication time [S1, unofficial]. It addresses the load balancing failure of traditional static space-subdivision methods (like grids or kd-trees) when data sparsity is non-uniform, by explicitly guiding partition boundaries based on empty space distribution and render costs while maintaining strict view-dependent precedence constraints [S1, unofficial].
 
 ## Shared principles
-The LBND family operates on the principle that the end-to-end rendering time is determined by the slowest render node, subject to strict view-dependent precedence constraints required for alpha compositing [S1, unofficial].
+The LBND family operates under the following shared constraints and mechanisms:
 
-1.  **Precedence Order:** The volume is partitioned such that the relative depth order of voxels with respect to the view direction is preserved across partitions [S1, unofficial]. This ensures that images rendered by different nodes can be correctly composited.
-2.  **Associative Compositing:** The alpha blending operation is associative. This allows each node to composite its local bricks into a single intermediate image before sending it to a central compositing node or another node for final blending [S1, unofficial]. This minimizes network bandwidth by transporting only one image per node rather than multiple partial images.
-3.  **Cost Minimization:** The partitioning problem is formulated as an optimization problem where the cost function includes rendering time, image composition time, and network communication time [S1, unofficial].
-4.  **Brick-Based Partitioning:** Data is divided into "bricks," which are sub-volumes sized for rendering hardware efficiency [S1, unofficial]. These bricks are grouped and assigned to nodes to balance the load.
+1.  **Objective Function:** The goal is to minimize the end-to-end rendering time $T_{total}$ [S1, unofficial]:
+    $$ T_{total} = \max(T_{render}, T_{compose}, T_{network}) $$
+    where $T_{render}$ is determined by the slowest node, $T_{compose}$ is the time to blend partial images, and $T_{network}$ is the time to transfer data or intermediate images [S1, unofficial].
+
+2.  **Precedence Constraint:** To allow associative alpha compositing, the partitioning must ensure that for any given view direction, the relative depth order of voxels is preserved across partitions [S1, unofficial]. Specifically, if a node renders a set of bricks, those bricks must have consecutive depth priorities relative to other nodes' contributions to the final image [S1, unofficial]. This allows each node to composite its local bricks into a single partial image before network transmission, minimizing bandwidth [S1, unofficial].
+
+3.  **Cost Model:** The partitioning algorithm takes as input the volumetric dataset, render cost information (computation per voxel/brick), and network cost information (bandwidth/latency) [S1, unofficial].
+
+4.  **Failure of Uniform Subdivision:** Traditional methods (grids, octrees, kd-trees) produce deterministic priority orders but fail to balance load when empty space is unevenly distributed, as they do not account for the computational cost of empty vs. dense regions [S1, unofficial].
 
 ## Subtopics
 
 ### Brick Grouping via Dynamic Programming
-This approach starts with a directed acyclic graph of segmented and cropped bricks. It uses dynamic programming to find an optimal grouping of bricks that minimizes the cost function (rendering + communication) while respecting precedence constraints [S1, unofficial]. It is chosen when the dataset has significant sparsity variations and network bandwidth is a limiting factor. See [Dynamic load balancing using kd-trees](9365-dynamic-load-balancing-using-kd-trees.md) for a related geometric approach.
+A specific LBND solution that starts with a directed acyclic graph of segmented and cropped bricks and uses dynamic programming to group them into partitions that minimize the cost function while respecting precedence [S1, unofficial].
 
 ### Flex-Block Partitioning
-A method where a local flex-block partition is used to create and schedule bricks within a render node. This adapts the static partitioning to the local hardware and data distribution [S1, unofficial]. It is useful when hardware capabilities vary across nodes. See [Scalable Distributed Volume Rendering (SDVR)](863-scalable-distributed-volume-rendering-sdvr.md) for broader scalability contexts.
+A partitioning strategy used in distributed ray casting where data bricks are sized for rendering hardware and distributed via a "flex-block" scheme to minimize inter-node communication while maintaining load balance [S1, unofficial].
 
 ## Background
-The LBND problem was introduced in the context of distributed ray casting on clusters [S1, unofficial]. Traditional space-subdivision methods (kd-trees, octrees, grids) produce deterministic priority orders but fail to balance load for datasets with large variations in sparsity because they do not account for the distribution of empty space [S1, unofficial]. Static partitions require large granularity to enforce consecutive depth priorities, leading to uneven assignments if empty space is not uniform [S1, unofficial].
-
-The LBND formulation addresses this by treating partitioning as an optimization problem. It considers the input as a volumetric dataset along with render and network cost information [S1, unofficial]. The precedence order is defined by the relative distance of each voxel to the view direction [S1, unofficial].
-
-Two dynamic programming solutions were developed for LBND: brick grouping and another method (details of the second are not provided in the source) [S1, unofficial]. The brick grouping method constructs a DAG of bricks and optimizes their assignment [S1, unofficial].
-
-The approach leverages the associative property of alpha compositing, demonstrated by Lombeyda et al. [71], which shows that a single ray casting composite computation is arithmetically equivalent to the combined result of smaller composite computations [S1, unofficial]. This allows for efficient hierarchical compositing.
+The LBND problem was formalized in the context of distributed volume visualization on clusters [S1, unofficial]. It emerged from the observation that while parallel ray casting benefits from SIMD graphics accelerators, the distribution of sparse volumetric data across networked nodes creates bottlenecks that static decomposition cannot solve [S1, unofficial]. The work cites Lombeyda et al. [71] for establishing the arithmetic equivalence and associativity of alpha compositing, which underpins the feasibility of local compositing in LBND [S1, unofficial]. The approach contrasts with GPU-centric image-space partitioning, focusing instead on data-space partitioning for cluster-based distributed rendering [S1, unofficial].
 
 ## Sources
 [S1] Massive Data Management for Distributed Volume Visualization, http://hdl.handle.net/1951/47671, fetched 2026-10-26 (unofficial)

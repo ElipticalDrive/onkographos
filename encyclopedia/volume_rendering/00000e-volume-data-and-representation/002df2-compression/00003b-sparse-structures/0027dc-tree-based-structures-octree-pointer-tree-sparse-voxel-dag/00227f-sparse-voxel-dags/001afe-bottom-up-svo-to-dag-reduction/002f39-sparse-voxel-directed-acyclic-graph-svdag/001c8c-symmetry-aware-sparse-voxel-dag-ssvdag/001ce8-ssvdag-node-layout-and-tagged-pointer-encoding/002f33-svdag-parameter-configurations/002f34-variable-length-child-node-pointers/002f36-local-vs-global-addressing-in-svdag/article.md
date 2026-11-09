@@ -12,16 +12,16 @@ This method defines two distinct schemes for interpreting node pointers within a
 *   **Output:** A mechanism for resolving node addresses during traversal or construction, determining whether the address space is global or local [S1].
 
 ### Data Structures
-The SVDAG consists of layers of nodes. Each node contains a Child Node Header Map (CHNM) and child node pointers (PT) [S1].
-*   **Pointer Length ($p_{ptl}$):** The bit length of the pointer. Rational values are 8b, 16b, and 32b [S1].
-*   **Addressing Word Length:** The bit length of the memory word used for addressing. Rational values are 8b, 16b, and 32b [S1].
-*   **Alignment:** The CHNM is padded with reserved bits to align with the addressing word length. For example, if $p_{ptl} = 32b$, an 8b CHNM is aligned to 32b using 24 reserved bits ($r=24$) [S1].
+The SVDAG consists of layers of nodes, where each node contains a Child Node Header Map (CHNM) and child node pointers (PT) [S1].
+*   **Pointer Length ($p_{ptl}$):** The bit length of the pointer [S1]. Rational values are 8b, 16b, and 32b [S1].
+*   **Addressing Word Length:** The bit length of the memory word used for addressing [S1]. Rational values are 8b, 16b, and 32b [S1].
+*   **Alignment:** The CHNM is padded with reserved bits to align with the addressing word length [S1]. For example, if $p_{ptl} = 32b$, an 8b CHNM is aligned to 32b using 24 reserved bits ($r=24$) [S1].
 
 ### Numbered Steps
 
 1.  **Determine Addressing Scheme:** Select either Global Addressing or Local Addressing based on scene size and memory constraints [S1].
 2.  **Global Addressing Interpretation:**
-    *   Assign a unique address to the root node.
+    *   Assign a unique address to the root node [S1].
     *   Allocate addresses for subsequent layers sequentially in a single global address space [S1].
     *   The pointer value represents the absolute address of the child node within this global space [S1].
     *   The entire SVDAG must fit within the addressable space defined by the pointer length and addressing word length [S1].
@@ -40,13 +40,11 @@ The maximum size of the addressable space depends on the pointer length ($p_{ptl
 | Pointer Length ($p_{ptl}$) | Addressing Word Length ($w_{addr}$) | Addressable Space Capacity |
 | :--- | :--- | :--- |
 | 8b | 8b | 256 B |
-| 8b | 16b | 512 B |
-| 8b | 32b | 1024 B |
+| 8b | 16b | 64 KB |
+| 8b | 32b | 4 GB |
 | 16b | 16b | 128 KB |
-| 16b | 32b | 256 KB |
+| 16b | 32b | 8 GB |
 | 32b | 32b | 16 GB |
-
-*Note: The source table [S1] lists specific combinations. For 8b pointers, capacities are 256B, 512B, and 1024B for 8b, 16b, and 32b words respectively. For 16b pointers, capacities are 128KB and 256KB for 16b and 32b words. For 32b pointers, the capacity is 16GB for 32b words.*
 
 **Pointer Address Space Limits:**
 *   8b pointer: $2^8 = 256$ addresses [S1].
@@ -71,17 +69,17 @@ def resolve_address(node_layer_start_address, pointer_value, addressing_mode):
         int: The absolute global address of the child node.
     """
     if addressing_mode == 'GLOBAL':
-        # In global addressing, the pointer value is the absolute address
+        # In global addressing, the pointer value is the absolute address [S1]
         return pointer_value
     elif addressing_mode == 'LOCAL':
-        # In local addressing, the pointer value is an offset from the layer start
+        # In local addressing, the pointer value is an offset from the layer start [S1]
         return node_layer_start_address + pointer_value
     else:
         raise ValueError("Invalid addressing mode")
 
 def check_feasibility_global(total_nodes, pointer_capacity):
     """
-    Checks if the entire SVDAG fits within the global address space.
+    Checks if the entire SVDAG fits within the global address space [S1].
     
     Args:
         total_nodes (int): Total number of nodes in the SVDAG.
@@ -94,7 +92,7 @@ def check_feasibility_global(total_nodes, pointer_capacity):
 
 def check_feasibility_local(max_layer_nodes, pointer_capacity):
     """
-    Checks if the largest node layer fits within the local address space.
+    Checks if the largest node layer fits within the local address space [S1].
     
     Args:
         max_layer_nodes (int): The number of nodes in the largest layer.
@@ -108,7 +106,7 @@ def check_feasibility_local(max_layer_nodes, pointer_capacity):
 
 ### Edge Cases and Pitfalls
 *   **Pointer Length Selection:** An 8b pointer is considered impractical even for very small 3D scenes [S1].
-*   **Word Length Correlation:** The addressing word length should correlate with the pointer length. For example, 32b pointers should use 32b addressing words, and 8b pointers should use 8b addressing words [S1].
+*   **Word Length Correlation:** The addressing word length should correlate with the pointer length [S1]. For example, 32b pointers should use 32b addressing words, and 8b pointers should use 8b addressing words [S1].
 *   **Layer Capacity:** In Local Addressing, the determining factor for feasibility is whether the largest node layer fits within the local address space, not the total number of nodes [S1].
 
 ## Subtopics

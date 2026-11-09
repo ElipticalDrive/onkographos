@@ -12,13 +12,13 @@ Sparse Gradient Optimization leverages the observation that during the early sta
 
 **Data Structures:**
 - **Voxel Grid:** A 3D grid storing density values ($\sigma$) for each voxel [G].
-- **Gradient Map:** A structure tracking which voxels have non-zero gradients. This is implicitly handled by the custom CUDA extension [S1].
+- **Gradient Map:** A structure tracking which voxels have non-zero gradients, implicitly managed by the custom CUDA extension [S1].
 
 **Numbered Steps:**
-1. **Ray Casting and Rendering:** For each training ray, compute the accumulated color and transmittance using differentiable volume rendering. This step is implemented via a custom PyTorch CUDA extension to handle sparse voxel structures efficiently [S1].
-2. **Gradient Computation:** Compute the gradients of the loss function with respect to the density values of the voxels along the ray. The gradients become sparse quickly during optimization [S1].
-3. **Sparsity Identification:** Identify the subset of voxels with non-zero gradients. Within the first 1-2 minutes of optimization (or first 12,800 batches for synthetic scenes), fewer than 10% of voxels have non-zero gradients, with as few as 1% updating per batch in synthetic cases [S1].
-4. **Parameter Update:** Update only the density values of the voxels with non-zero gradients using an optimizer. Voxels with zero gradients are skipped, saving computation [S1].
+1. **Ray Casting and Rendering:** For each training ray, compute the accumulated color and transmittance using differentiable volume rendering, implemented via a custom PyTorch CUDA extension for sparse voxel structures [S1].
+2. **Gradient Computation:** Compute the gradients of the loss function with respect to the density values of the voxels along the ray [G].
+3. **Sparsity Identification:** Identify the subset of voxels with non-zero gradients; within the first 1-2 minutes of optimization (or first 12,800 batches for synthetic scenes), fewer than 10% of voxels have non-zero gradients, with as few as 1% updating per batch in synthetic cases [S1].
+4. **Parameter Update:** Update only the density values of the voxels with non-zero gradients using an optimizer, skipping zero-gradient voxels to save computation [S1].
 
 **Formulas:**
 The core rendering equation for a ray $\mathbf{r}$ is:
@@ -31,7 +31,7 @@ where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the accumulated trans
 
 **Edge Cases and Pitfalls:**
 - **Precision:** The custom CUDA implementation must handle sparse data structures correctly to avoid missing updates or accessing invalid memory [G].
-- **Boundaries:** Voxels at the boundary of the active region may have non-zero gradients due to ray intersections, even if their density is zero. These must be handled correctly [G].
+- **Boundaries:** Voxels at the boundary of the active region may have non-zero gradients due to ray intersections, even if their density is zero, requiring careful handling [G].
 - **Degenerate Input:** If the scene is entirely empty or fully opaque, the gradient sparsity may not hold, potentially leading to inefficiencies or incorrect updates [G].
 
 **Pseudocode:**
@@ -82,7 +82,7 @@ def sparse_gradient_optimization_step(voxel_grid, rays, optimizer):
 
     # 3. Backward pass & Sparse gradient accumulation
     grad_accum = {}
-    for ray in rays:
+    for k, ray in enumerate(rays):
         o = ray['origin']
         d = ray['direction']
         dt = ray['step_size']
@@ -95,14 +95,13 @@ def sparse_gradient_optimization_step(voxel_grid, rays, optimizer):
                 alpha = 1.0 - math.exp(-sigma * dt)
                 # dC/dsigma = T * dt * color * exp(-sigma*dt)
                 dCdsigma = [T * dt * color[i] * math.exp(-sigma * dt) for i in range(3)]
-                # dL/dsigma = sum over rays of dL/dC * dC/dsigma
-                for k, r in enumerate(rays):
-                    for i in range(3):
-                        dLdC = -2.0 * (r['gt_color'][i] - rendered_colors[k][i]) / (len(rays) * 3)
-                        grad = dLdC * dCdsigma[i]
-                        if (gx, gy, gz) not in grad_accum:
-                            grad_accum[(gx, gy, gz)] = 0.0
-                        grad_accum[(gx, gy, gz)] += grad
+                # Accumulate gradient for this voxel from this ray
+                if (gx, gy, gz) not in grad_accum:
+                    grad_accum[(gx, gy, gz)] = 0.0
+                grad_accum[(gx, gy, gz)] += sum(
+                    dCdsigma[i] * (rendered_colors[k][i] - ray['gt_color'][i]) * 2.0 / (len(rays) * 3)
+                    for i in range(3)
+                )
                 T *= (1.0 - alpha)
             if T < 1e-4:
                 break
@@ -132,7 +131,7 @@ A regularization term added to the density gradient to encourage sparsity, using
 - **When Not to Use:** If custom CUDA implementation is not feasible, or for very small scenes where overhead is negligible [G].
 
 ## Background
-Plenoxels was introduced by [S1] as a method for radiance field representation without neural networks. The observation of gradient sparsity was a key insight that enabled efficient optimization [S1]. The method builds on earlier work in volume rendering and neural radiance fields [S1].
+Plenoxels was introduced by [S1] as a method for radiance field representation without neural networks. The observation of gradient sparsity was a key insight that enabled efficient optimization [S1]. The method builds on earlier work in volume rendering and neural radiance fields [G].
 
 ## Sources
 [S1] Plenoxels: Radiance Fields without Neural Networks, https://doi.org/10.1109/cvpr52688.2022.00542, fetched 2026-10-26

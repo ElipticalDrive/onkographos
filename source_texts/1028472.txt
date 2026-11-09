@@ -1,0 +1,237 @@
+Contribute to aether-bench/sentry__sentry__aether-v18__PR95633__20261010 development by creating an account on GitHub.
+
+feat(uptime): Add ability to use queues to manage parallelism by pranav100000 · Pull Request #1 · aether-bench/sentry__sentry__aether-v18__PR95633__20261010 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+pranav100000
+commented
+Oct 11, 2026
+Copy link
+Copy Markdown
+One potential problem we have with batch processing is that any one slow item will clog up the whole batch. This pr implements a queueing method instead, where we keep N queues that each have their own workers. There's still a chance of individual items backlogging a queue, but we can try increased concurrency here to reduce the chances of that happening
+wedamija
+added 8 commits
+July 16, 2025 12:42
+feat(uptime): Add ability to use queues to manage parallelism
+…
+eef04c7
+```
+One potential problem we have with batch processing is that any one slow item will clog up the whole batch. This pr implements a queueing method instead, where we keep N queues that each have their own workers. There's still a chance of individual items backlogging a queue, but we can try increased concurrency here to reduce the chances of that happening
+```
+fix test
+d84eb08
+guarantee calling complete_offset
+1ffbe69
+fix redundancy
+9cd3555
+use defaultdict for locks
+a42bcc8
+better way to create locks efficiently
+1ccdfbf
+add comment
+349d71b
+remove gap test
+9966ec5
+pranav100000
+commented
+Oct 11, 2026
+Copy link
+Copy Markdown
+Author
+aether review
+aether-agent
+Bot
+requested changes
+Oct 11, 2026
+View reviewed changes
+aether-agent
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🤖 Reviewer · Review PR #1: feat(uptime): Add ability to use queues to manage parallelism · codex · gpt-6-astra
+Reviewed exact head 9966ec5a13e331659c3ea00981f9b11b0faf821f with nine independent passes and complete statement ledgers for all 23 hunks; no unreached changed lines. Consolidated 31 distinct findings. The blocker is routine rebalance causing unprocessed results to be acknowledged.
+Focused Python 3.13 checks against the actual queue/factory code (external dependencies mocked) reproduced lifecycle, offset, configuration, and test failures; evidence is recorded at this head. The full suite was not run.
+Additional finding beyond the 30-inline limit:
+[nit] tests/sentry/uptime/consumers/test_results_consumer.py:2042 — Use the supported Kafka configuration helpers Directly indexing ["common"] bypasses the supported flat cluster format and per-client options. Trigger: run this new integration test with a valid legacy flat configuration; it raises KeyError("common") before producing (the consumer setups repeat the same assumption). Fix: use get_kafka_producer_cluster_options/get_kafka_consumer_cluster_options, matching the two-format warning in src/sentry/conf/server.py:3318-3322. (found by 1 of 9 reviewers)
+Comment thread
+src/sentry/remote_subscriptions/consumers/result_consumer.py
+commit(commit_data)
+return SimpleQueueProcessingStrategy(
+queue_pool=self.queue_pool,
+aether-agent
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+[P1] 🤖 Reviewer · codex · gpt-6-astra
+Create a fresh pool for each assignment
+The factory reuses this pool after strategy close() permanently shuts its queues and workers down; subsequent put() failures are swallowed and their unprocessed offsets marked complete (queue_consumer.py:317-325). Trigger: an ordinary Kafka revoke/reassign using the same factory; a focused Python 3.13 check reproduced dropped work becoming committable. Fix: give each assignment fresh workers/offset tracking, or separate factory lifetime from assignment draining, and test close/recreate/submit. (found by 9 of 9 reviewers)
+Comment thread
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+self.workers: list[OrderedQueueWorker[T]] = []
+for i in range(num_queues):
+work_queue: queue.Queue[WorkItem[T]] = queue.Queue()
+aether-agent
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+[P2] 🤖 Reviewer · codex · gpt-6-astra
+Bound accepted work and propagate backpressure
+Queue() is unbounded and submission never raises Arroyo MessageRejected, so slow work can exhaust memory with queued payloads and completed offsets retained behind an earlier outstanding record. Trigger: arrivals outpace a worker, or one bucket blocks while other buckets keep completing; a focused check accepted 1,000 queued items behind a blocked worker. Fix: bound queued plus uncommitted work, reject nonblockingly before accepting/tracking it, and do not swallow that rejection. (found by 9 of 9 reviewers)
+Comment thread
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+def shutdown(self) -> None:
+"""Gracefully shutdown all workers."""
+for worker in self.workers:
+worker.shutdown = True
+aether-agent
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+[P2] 🤖 Reviewer · codex · gpt-6-astra
+Drain accepted items before stopping workers
+Setting the worker flag first makes its loop exit after the current item, so q.shutdown(immediate=False) never gets to drain the remaining backlog. Trigger: close with one result executing and another queued; the focused check processed only the first and left the second queued. Fix: let graceful queue exhaustion end workers, reserving immediate abandonment for termination, and assert processing completion in the shutdown test. (found by 8 of 9 reviewers)
+Comment thread
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+)
+def close(self) -> None:
+self.shutdown_event.set()
+aether-agent
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+[P2] 🤖 Reviewer · codex · gpt-6-astra
+Collect final offsets after workers finish
+The commit thread exits before worker shutdown/join, and neither lifecycle method performs a post-worker commit scan. Trigger: a callback finishes after the close-triggered final scan; the focused check reproduced successful work whose offset never reached the commit callback. Fix: drain/join workers, collect their final completed offsets, and commit before releasing the assignment. (found by 9 of 9 reviewers)
+Comment thread
+src/sentry/remote_subscriptions/consumers/result_consumer.py
+def commit_offsets(offsets: dict[Partition, int]):
+# We add + 1 here because the committed offset should represent the next offset to read from
+commit_data = {partition: offset + 1 for partition, offset in offsets.items()}
+commit(commit_data)
+aether-agent
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+[P2] 🤖 Reviewer · codex · gpt-6-astra
+Preserve and use the final force-commit capability
+Arroyo Commit may only stage offsets when its policy throttles a write, but this adapter cannot pass force=True and the tracker immediately forgets those offsets. Trigger: close within the one-second commit interval; a focused check left completed work staged but not persisted, and Arroyo discards staged offsets on revocation. Fix: preserve the force argument and force-flush after draining, including an empty final flush when offsets were already staged. (found by 9 of 9 reviewers)
+Comment thread
+tests/sentry/uptime/consumers/test_results_consumer.py
+break
+time.sleep(0.1)
+assert mock_processor_call.call_count == 2
+aether-agent
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+[nit] 🤖 Reviewer · codex · gpt-6-astra
+Assert independent progress, not eventual call counts
+All new concurrency tests only count eventual results/groups, and their arbitrary keys may even hash to the same queue. Trigger: serialize all work onto one worker; these tests still pass despite losing the feature’s central behavior. Fix: choose keys known to map to different queues, block one callback, and require the other to progress before releasing it (also the queue tests at :137-173 and :314-325). (found by 8 of 9 reviewers)
+Comment thread
+tests/sentry/remote_subscriptions/consumers/test_queue_consumer.py
+self.strategy.submit(message)
+assert self.process_complete_event.wait(timeout=5.0), "Processing did not complete in time"
+assert len(self.processed_results) == 5
+aether-agent
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+[nit] 🤖 Reviewer · codex · gpt-6-astra
+Give the strategy ordering test distinguishable results
+This ordering test submits five identical decoded results and checks only their count, so it cannot detect reordering. Trigger: reverse same-group processing order; this test still passes, although other pool/uptime tests do compare order. Fix: preserve a unique sequence value in each decoded result and compare the observed sequence with submission order, or remove the false ordering claim. (found by 2 of 9 reviewers)
+Comment thread
+tests/sentry/remote_subscriptions/consumers/test_queue_consumer.py
+class MockFactory(ResultsStrategyFactory):
+@property
+def topic_for_codec(self):
+return Topic("test")
+aether-agent
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+[nit] 🤖 Reviewer · codex · gpt-6-astra
+Use the codec’s actual Topic type in the fixture
+This fixture returns arroyo.types.Topic, which has .name, whereas get_topic_codec reads the Sentry enum’s .value (src/sentry/conf/types/kafka_definition.py:150-154). Trigger: extend this construction-only integration test to submit a message; decoding logs an AttributeError and skips it. Fix: return a real Kafka-definition Topic and matching encoded payload, or explicitly provide a fake codec. (found by 1 of 9 reviewers)
+Comment thread
+tests/sentry/uptime/consumers/test_results_consumer.py
+committed[0].offset == 5
+), f"Expected committed offset 5, got {committed[0].offset}"
+verify_consumer.close()
+aether-agent
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+[nit] 🤖 Reviewer · codex · gpt-6-astra
+Release Kafka clients even when assertions fail
+Client/processor shutdown is confined to the success path; the outer finally only requests topic deletion. Trigger: _run_once() raises or a committed-offset assertion fails after client acquisition, leaving native clients and possibly queue/commit threads alive for subsequent tests. Fix: register each client, processor, and factory in independent cleanup/finally scopes immediately after creation. (found by 7 of 9 reviewers)
+Comment thread
+tests/sentry/uptime/consumers/test_results_consumer.py
+finally:
+try:
+admin_client.delete_topics([test_topic])
+aether-agent
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+[nit] 🤖 Reviewer · codex · gpt-6-astra
+Observe asynchronous topic-deletion results
+delete_topics() returns per-topic futures, so this try/except misses broker-side deletion failures and considers cleanup finished without observing them. Trigger: the broker rejects or times out the deletion after accepting the request, leaving a unique test topic behind. Fix: await each future with a bounded timeout and report cleanup failures, as src/sentry/testutils/pytest/kafka.py:35-49 already does. (found by 3 of 9 reviewers)
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

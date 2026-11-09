@@ -1,0 +1,186 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Level-wise texture merging minimizes texture memory overhead in hierarchical volume rendering by merging the texture data of adjacent bricks into single, larger texture maps [S1, S2]. It creates an octree-like hierarchy where the number of bricks sharing a single texture map is multiplied by a factor of 8 on each consecutive level [S1, S2]. This method sets itself apart from standard bricking by reducing the number of distinct texture objects managed by the GPU, thereby decreasing state-switching overhead and improving memory utilization for coarse levels of detail [S1, S2].
++Level-wise texture merging minimizes texture memory overhead in hierarchical volume rendering by merging the texture data of adjacent bricks into single, larger texture maps [S1, S2]. It creates an octree-like hierarchy where the number of bricks sharing a single texture map is multiplied by a factor of 8 on each consecutive level [S1, S2]. This method reduces the number of distinct texture objects required for coarse levels of detail compared to assigning individual textures to every brick [S1, S2].
+ 
+ ## How it works
+@@ -24,5 +24,5 @@
+ 
+ **Parameters**
+-*   **Number of Levels ($l$):** The depth of the hierarchy.
++*   **Number of Levels ($l$):** The depth of the hierarchy [S1, S2].
+ *   **Brick Count:** The starting number of bricks in every direction should match a power of two ($2^n$) to allow effective use of the hierarchy [S1, S2].
+ 
+@@ -36,81 +36,101 @@
+ class TextureManager:
+     def __init__(self, num_bricks_per_dim, levels):
+-        # num_bricks_per_dim: int, expected to be a power of 2
+-        # levels: int, l
+         self.num_bricks_per_dim = num_bricks_per_dim
+         self.levels = levels
+-        self.texture_hierarchy = {} # Maps (level, brick_id) -> texture_map_id
++        self.texture_hierarchy = {}  # Maps (level, brick_id) -> texture_id
+ 
+-    def build_hierarchy(self, bricks):
+-        """
+-        bricks: list of Brick objects at level 0.
+-        Each brick has a unique ID and spatial coordinates.
+-        """
++    def build_hierarchy(self, level_0_bricks):
++        # level_0_bricks: list of dicts with keys 'id', 'data', 'origin'
++        current_bricks = level_0_bricks
++        current_level = 0
++
+         # Level 0: Each brick gets its own texture
+-        current_level_bricks = bricks
+-        current_level = 0
+-        
+-        # Store level 0 textures
+-        for brick in current_level_bricks:
+-            tex_id = self._create_texture(brick.data)
+-            self.texture_hierarchy[(current_level, brick.id)] = tex_id
++        for brick in current_bricks:
++            tex_id = self._allocate_texture(brick['data'])  # [G] GPU texture allocation and upload
++            self.texture_hierarchy[(current_level, brick['id'])] = tex_id
+ 
+         # Build higher levels
+         for level in range(1, self.levels):
+-            next_level_bricks = []
+-            # Group 8 adjacent bricks from previous level
+-            # Assuming bricks are sorted or indexed such that 
+-            # bricks i, i+1, ... i+7 form a 2x2x2 group
+-            for i in range(0, len(current_level_bricks), 8):
+-                group = current_level_bricks[i:i+8]
+-                
+-                # Check if we have a full group of 8
++            next_bricks = []
++            # Group 8 adjacent bricks (2x2x2) from previous level
++            for i in range(0, len(current_bricks), 8):
++                group = current_bricks[i:i+8]
+                 if len(group) < 8:
+-                    # Edge case: fewer bricks than expected
+-                    # Store remaining textures individually at this coarsest level
++                    # Edge case: fewer bricks than expected for a full group
+                     for brick in group:
+-                        # Find the texture assigned to this brick in previous level
+-                        prev_tex_id = self.texture_hierarchy.get((level-1, brick.id))
+-                        # If it was already merged, we might need to handle differently
+-                        # But per source, if fewer bricks, reduce depth or store individually
+-                        # Here we assume we just keep the reference or create new if needed
+-                        self.texture_hierarchy[(level, brick.id)] = prev_tex_id 
++                        prev_tex = self.texture_hierarchy.get((level-1, brick['id']))
++                        self.texture_hierarchy[(level, brick['id'])] = prev_tex
+                     break
+-                
++
+                 # Merge 8 bricks into one texture
+-                merged_data = self._merge_bricks(group)
+-                merged_tex_id = self._create_texture(merged_data)
+-                
+-                # Assign the merged texture to all 8 bricks
++                merged_data = self._pack_bricks(group)  # [G] Interleave 8 brick arrays into one larger 3D array
++                merged_tex = self._allocate_texture(merged_data)
++
++                # Assign merged texture to all 8 bricks
+                 for brick in group:
+-                    self.texture_hierarchy[(level, brick.id)] = merged_tex_id
+-                
+-                # Create a virtual "parent" brick for the next iteration's grouping
+-                # This parent represents the merged volume
+-                parent_brick = Brick(
+-                    id=f"level_{level}_group_{i//8}",
+-                    data=merged_data,
+-                    children=group
+-                )
+-                next_level_bricks.append(parent_brick)
+-            
+-            current_level_bricks = next_level_bricks
++                    self.texture_hierarchy[(level, brick['id'])] = merged_tex
++
++                # Create parent brick for next iteration
++                parent = {
++                    'id': f"level_{level}_group_{i//8}",
++                    'data': merged_data,
++                    'origin': group[0]['origin'],
++                    'children': group
++                }
++                next_bricks.append(parent)
++            current_bricks = next_bricks
+             current_level = level
+ 
+-    def _create_texture(self, data):
+-        # [G] Implementation detail: Allocate GPU texture memory
+-        # and upload data. Returns a unique texture ID.
+-        pass
++    def compute_texture_coordinates(self, brick_origin, brick_size, level):
++        # Returns (scale, offset) for texture sampling
++        # At level k, brick size is 2^k * base_size.
++        # Texture coordinates must scale by 1/2^k to map to the shared texture.
++        scale = 1.0 / (2 ** level)
++        offset = brick_origin * scale
++        return scale, offset
+ 
+-    def _merge_bricks(self, bricks):
+-        # [G] Implementation detail: Interleave or pack the voxel data
+-        # from 8 bricks into a single larger 3D array.
+-        # The source notes that "appropriate texture coordinates" are used,
+-        # implying the data layout in the merged texture corresponds to
+-        # the spatial arrangement of the 8 bricks.
+-        pass
++    def trace_ray_to_brick(self, ray_origin, ray_direction, brick_size, grid_origin, grid_size, max_levels):
++        # Computes the first intersected brick and its hierarchy level for a given ray.
++        # Returns (level, bx, by) or None if ray misses grid.
++        # Handles zero/negative direction components and boundary clamping.
++        inv_dir = [1.0 / d if d != 0.0 else float('inf') for d in ray_direction]
++        
++        # Compute entry/exit t values for each slab
++        t_min = []
++        t_max = []
++        for axis in range(3):
++            o = ray_origin[axis]
++            d = ray_direction[axis]
++            if d == 0.0:
++                if o < grid_origin[axis] or o >= grid_origin[axis] + grid_size * brick_size:
++                    return None  # Ray parallel to axis and outside grid
++                t_min.append(float('-inf'))
++                t_max.append(float('inf'))
++            else:
++                t1 = (grid_origin[axis] - o) * inv_dir[axis]
++                t2 = (grid_origin[axis] + grid_size * brick_size - o) * inv_dir[axis]
++                t_min.append(min(t1, t2))
++                t_max.append(max(t1, t2))
++        
++        t_enter = max(t_min)
++        t_exit = min(t_max)
++        if t_enter > t_exit:
++            return None  # Ray misses grid
+ 
+-    def get_texture_for_brick(self, level, brick_id):
+-        return self.texture_hierarchy.get((level, brick_id))
++        # Compute initial brick indices at entry point
++        entry_point = [ray_origin[i] + t_enter * ray_direction[i] for i in range(3)]
++        bx = int((entry_point[0] - grid_origin[0]) // brick_size)
++        by = int((entry_point[1] - grid_origin[1]) // brick_size)
++        bz = int((entry_point[2] - grid_origin[2]) // brick_size)
++
++        # Clamp indices to grid bounds
++        bx = max(0, min(bx, grid_size - 1))
++        by = max(0, min(by, grid_size - 1))
++        bz = max(0, min(bz, grid_size - 1))
++
++        # Determine level based on distance to nearest brick boundary (simplified LOD selection)
++        # In practice, level is chosen to maintain screen-space error thresholds.
++        # Here we return the base level for the intersected brick.
++        return (0, bx, by)
+ ```
+ 
+@@ -127,5 +147,5 @@
+ 
+ ## Background
+-Level-wise texture merging was introduced in the context of Level-of-Detail (LOD) volume rendering via 3D textures [S1, S2]. The method was proposed to address the high memory overhead associated with managing many small 3D textures for hierarchical volume rendering [S1, S2]. It builds on the concept of bricking, where volumes are divided into smaller 3D texture bricks [S1, S2].
++Level-wise texture merging was introduced in the context of Level-of-Detail (LOD) volume rendering via 3D textures [S1, S2]. The method was proposed to address the high memory overhead associated with managing many small 3D textures for hierarchical volume rendering [S1, S2].
+ 
+ ## Sources

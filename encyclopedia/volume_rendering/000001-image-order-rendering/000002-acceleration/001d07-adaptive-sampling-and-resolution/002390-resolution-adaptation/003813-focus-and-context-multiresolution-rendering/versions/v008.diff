@@ -1,0 +1,175 @@
+--- v007.md
++++ v008.md
+@@ -1,76 +1,128 @@
+ # Focus and Context Multiresolution Rendering
++
+ Also called: Interactive lenses multiresolution, Time-critical multiresolution rendering
+ 
+ ## Overview
+-Focus and Context Multiresolution Rendering is a technique to balance processing capacity between a high-detail focus region and a lower-detail context region to improve interactivity in time-critical applications [S1, unofficial]. It sets itself apart from sibling methods like [Level-of-detail (LOD) methods](1007-level-of-detail-lod-methods.md) by explicitly separating the scene into two distinct rendering passes with different resolutions and rendering models, rather than adjusting a single global resolution or using hierarchical data structures. The goal is not seamless integration but a tradeoff between quality and speed [S1, unofficial].
++Focus and Context Multiresolution Rendering is a technique that balances processing capacity between a high-detail focus region and a lower-detail context region to improve interactivity in time-critical applications [S1, unofficial]. It sets itself apart from sibling methods by explicitly decoupling the rendering parameters (resolution, lighting, sampling) of the context from the focus, rather than relying on a single global metric or hierarchical data structure [S1, unofficial]. The goal is not seamless integration but a tradeoff between achievable quality and speed [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D volume dataset, a transfer function, a camera view, and a defined "focus" region (e.g., a data probe or specific spatial subset).
+-*   **Output:** A composite image where the focus region is rendered at high resolution and the context region at lower resolution.
++*   **Input:** A 3D volume dataset, a transfer function, a camera view, and a defined "focus" region (e.g., a data probe or specific object part).
++*   **Output:** A composite image where the focus is rendered at high fidelity and the context is rendered at reduced fidelity.
+ 
+-**Data Structures:**
+-The method utilizes two distinct rendering configurations for the same underlying volume data. The specific parameters used in the source evaluation are detailed below [S1, unofficial]:
++**Data Structures and Layout:**
++The method utilizes two distinct rendering configurations for the same volume data. The specific parameters used in the reference implementation are:
+ 
+ | Parameter | Focus Configuration | Context Configuration |
+ | :--- | :--- | :--- |
+-| **Axis Volume** | $4 \times 256^3$ | $1 \times 128^3$ |
++| **Volume Resolution** | $4 \times 256^3$ (subsampled blocks) | $1 \times 128^3$ (subsampled blocks) |
+ | **Lookup Table Size** | $5 \times 256^2$ | $4 \times 128^2$ |
+ | **Rendering Model** | Local lighting | Unshaded |
+ | **Sampling Rate** | 4 | 1 |
+-| **Viewport Size** | 100% | 50% |
++| **Viewport Size** | 100% (full resolution) | 50% (half resolution) |
+ 
+-*Note: All textures had 8-bit components [S1, unofficial].*
++*Note: The volume resolution indicates the use of subsampled data blocks to increase cache coherency [S1, unofficial].*
+ 
+ **Steps:**
+-1.  **Decomposition:** Divide the rendering task into two passes: one for the focus region and one for the context region. The focus is placed closest to the user, mimicking typical interface usage [S1, unofficial].
++1.  **Decomposition:** Split the rendering task into two passes: one for the focus and one for the context.
+ 2.  **Context Rendering:**
+-    *   Render the context volume into a smaller viewport (e.g., 50% of the full viewport dimensions) [S1, unofficial].
+-    *   Use a simpler rendering model (unshaded) and lower sampling rate (1) to reduce fragment count [S1, unofficial].
+-    *   If the context is transparent (used for orientation), it can be sampled sparsely if the transfer function contains only low-frequency components [S1, unofficial].
+-    *   Apply a Gaussian filter to the resulting context image to reduce aliasing artifacts caused by the upsampling [S1, unofficial].
+-3.  **Focus Rendering:**
+-    *   Render the focus volume into the full viewport (100%) or the remaining area.
+-    *   Use high-resolution data, a larger lookup table, local lighting, and a higher sampling rate (e.g., 4) [S1, unofficial].
+-4.  **Compositing:** Enlarge and composite the context image into the final frame, overlaying it with the high-resolution focus image. The integration does not need to be seamless [S1, unofficial].
++    *   Render the context volume into a smaller viewport (e.g., 50% of the screen dimensions) [S1, unofficial].
++    *   Use a simpler rendering model (e.g., unshaded) and lower sampling rate (e.g., 1) [S1, unofficial].
++    *   If the context is transparent (for orientation), sparse sampling is acceptable if the transfer function contains only low-frequency components [S1, unofficial].
++3.  **Context Post-Processing:** Apply a Gaussian filter to the rendered context image to reduce aliasing artifacts resulting from the viewport enlargement/compositing [S1, unofficial].
++4.  **Focus Rendering:** Render the focus volume into the full viewport (100%) using high-resolution data, local lighting, and higher sampling rates [S1, unofficial].
++5.  **Compositing:** Composite the high-resolution focus image over the enlarged, filtered context image. The focus is placed closest to the user [S1, unofficial].
+ 
+-**Parameters:**
+-*   **Context Rendering Mode:** Can be transparent (for orientation) or opaque (for external view) [S1, unofficial].
+-*   **Viewport Scaling:** The context viewport size is a reduction factor $n \in (0.0, 1.0]$. In the source, $n=0.5$ was used [S1, unofficial].
+-*   **Sampling Rate:** Focus uses a higher rate (4) than context (1) [S1, unofficial].
++**Pseudocode:**
++```python
++def render_focus_and_context(volume, transfer_function, camera, focus_region):
++    # 1. Setup Context Pass
++    # Render context into a smaller framebuffer (e.g., 50% width/height)
++    context_viewport_width = screen_width / 2
++    context_viewport_height = screen_height / 2
++    
++    # Use lower resolution volume data (e.g., 128^3) and unshaded model
++    context_image = render_volume(
++        volume=volume.downsample(level=1), 
++        tf=transfer_function, 
++        camera=camera,
++        viewport=(context_viewport_width, context_viewport_height),
++        sampling_rate=1,
++        shading_model="unshaded"
++    )
++    
++    # 2. Filter Context to reduce aliasing
++    context_image = gaussian_filter(context_image, sigma=1.0)
++    
++    # 3. Setup Focus Pass
++    # Render focus into full viewport
++    focus_viewport_width = screen_width
++    focus_viewport_height = screen_height
++    
++    # Use higher resolution volume data (e.g., 256^3) and local lighting
++    focus_image = render_volume(
++        volume=volume.downsample(level=0), 
++        tf=transfer_function, 
++        camera=camera,
++        viewport=(focus_viewport_width, focus_viewport_height),
++        sampling_rate=4,
++        shading_model="local_lighting"
++    )
++    
++    # 4. Composite
++    # Overlay focus on top of context
++    final_image = composite(focus_image, context_image)
++    
++    return final_image
++```
+ 
+-**Pitfalls:**
+-*   **Overhead:** Performance overhead comes from rendering slices multiple times and setting up clip textures and the depth buffer for each pass [S1, unofficial].
+-*   **Artifacts:** Without the Gaussian filter, aliasing artifacts may appear in the context region due to the resolution mismatch [S1, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Overhead:** The decomposition introduces overhead from rendering slices multiple times and setting up clip textures and depth buffers for each pass [S1, unofficial].
++*   **Seamlessness:** The method does not aim for seamless integration between focus and context; visible boundaries may exist [S1, unofficial].
++*   **Transfer Function Frequency:** Sparse sampling in the context is only valid if the transfer function has low-frequency components; otherwise, aliasing will be severe [S1, unofficial].
+ 
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-The method reduces the number of fragments processed in the fragment pipeline for the context region by rendering it at a lower resolution. The speedup depends on the reduction factor of the viewport and volume size.
++*   **Time:** The method achieves 2-6 times faster rendering rates than a single high-resolution mode by aggressively reducing focus fragments [S1, unofficial].
++*   **Memory:** Uses subsampled data blocks to increase cache coherency, reducing memory bandwidth pressure [S1, unofficial].
+ 
+ **Measured Performance:**
+-Tests were conducted on a 2.0GHz Pentium 4 with 2GB memory and an ATI Radeon 9800 Pro graphics card [S1, unofficial]. Acceleration techniques like early ray termination and empty space skipping were turned off to isolate the impact of the multiresolution decomposition [S1, unofficial].
++Tests were conducted on a 2.0GHz Pentium 4 with 2GB memory and an ATI Radeon 9800 Pro graphics card [S1, unofficial]. Acceleration techniques (early ray termination, empty space skipping) were turned off to isolate the impact of the decomposition [S1, unofficial].
+ 
+-*   **512^2 Viewport:**
+-    *   100% Focus Size: 3.39 FPS
+-    *   50% Volume Size: 4.22 FPS
+-    *   25% Volume Size: 7.55 FPS
+-    *   12.5% Volume Size: 12.99 FPS
+-    *   6.25% Volume Size: 20.87 FPS
+-*   **1024^2 Viewport:**
+-    *   100% Focus Size: 1.06 FPS
+-    *   50% Volume Size: 1.28 FPS
+-    *   25% Volume Size: 2.31 FPS
+-    *   12.5% Volume Size: 3.97 FPS
+-    *   6.25% Volume Size: 6.33 FPS
+-
+-**Scaling:**
+-Reducing the number of fragments required to render the focus more aggressively achieves 2-6 times faster rendering rates than using a single high-resolution mode [S1, unofficial]. The attainable speedup does not depend on the transfer functions, only on the rendering parameters used [S1, unofficial].
++| Viewport Size | Focus Size (Axis %) | Focus Size (Volume %) | FPS |
++| :--- | :--- | :--- | :--- |
++| $512^2$ | 100% | 100% | 3.39 |
++| $512^2$ | 50% | 79% | 4.22 |
++| $512^2$ | 25% | 63% | 7.55 |
++| $512^2$ | 12.5% | 50% | 12.99 |
++| $512^2$ | 6.25% | 40% | 20.87 |
++| $1024^2$ | 100% | 100% | 1.06 |
++| $1024^2$ | 50% | 79% | 1.28 |
++| $1024^2$ | 25% | 63% | 2.31 |
++| $1024^2$ | 12.5% | 50% | 3.97 |
++| $1024^2$ | 6.25% | 40% | 6.33 |
+ 
+ **Strengths and Limitations:**
+-*   **Strengths:** Effective for balancing limited hardware resources; improves interactivity in time-critical applications; simple to implement as a generic approach [S1, unofficial].
+-*   **Limitations:** Introduces overhead from multiple rendering passes and buffer setup; not designed for seamless visual integration; performance variability exists depending on slicing direction on certain hardware (e.g., ATI cards) [S1, unofficial].
++*   **Strengths:** Simple, generic approach; speedup depends only on rendering parameters, not transfer functions [S1, unofficial]. Effective for reducing clutter in multidimensional/multifield datasets [S1, unofficial].
++*   **Limitations:** Not suitable for applications requiring seamless visual continuity between focus and context; overhead from multiple render passes [S1, unofficial].
++
++**When to Use:**
++*   Time-critical interactive applications.
++*   Exploring multidimensional or multifield datasets where orientation is key.
++*   When the focus is attached to a data probe or specific object part.
++
++**When Not to Use:**
++*   When seamless integration between regions is required.
++*   When the transfer function has high-frequency components in the context region (requires full sampling).
+ 
+ ## Background
+-This technique was presented in the unpublished work "A Focus and Context Interface for Interactive Volume Rendering" by I. Kits et al. [S1, unofficial]. It addresses the limitations of hardware-accelerated volume rendering where performance depends on fragment count, work per fragment, and cache utilization. The method builds on the principle that multiresolution techniques can use subsampled data blocks to increase cache coherency and reduce sampling rates, but extends this by explicitly balancing resources between focus and context regions [S1, unofficial].
++**Origin:**
++The method was presented in "A Focus and Context Interface for Interactive Volume Rendering" [S1, unofficial].
++
++**History and Development:**
++The technique was developed to address the limited processing capacity of hardware-accelerated volume rendering. It builds on the principle that performance depends on the number of fragments processed, the work per fragment, and cache utilization [S1, unofficial].
++
++**Usage:**
++Used in interactive volume rendering applications, particularly for head CT scans and multidimensional data exploration [S1, unofficial].
+ 
+ ## Sources

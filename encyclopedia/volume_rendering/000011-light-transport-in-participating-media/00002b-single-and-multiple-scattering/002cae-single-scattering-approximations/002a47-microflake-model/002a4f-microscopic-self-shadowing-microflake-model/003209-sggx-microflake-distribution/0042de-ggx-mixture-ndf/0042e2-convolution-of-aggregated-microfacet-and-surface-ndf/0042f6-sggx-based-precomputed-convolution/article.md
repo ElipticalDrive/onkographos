@@ -1,0 +1,151 @@
+# SGGX-based Precomputed Convolution
+
+Also called: SGGX-GGX convolution fit, SGGX-SG convolution fit
+
+## Overview
+This method approximates the convolution of a SGGX microflake distribution with an isotropic spherical distribution (such as a GGX microfacet distribution or a Spherical Gaussian) as another SGGX distribution sharing the same eigenvectors. It solves the problem of efficiently computing the roughening effect of convolution in participating media by mapping the original roughness parameters to new parameters via a precomputed lookup table, avoiding expensive Monte Carlo integration at runtime. It builds on [Convolution of Aggregated Microfacet and Surface NDF](10871-convolution-of-aggregated-microfacet-and-surface-ndf.md).
+
+## How it works
+**Inputs:**
+1. An SGGX distribution defined by eigenbasis $R = (\omega_1, \omega_2, \omega_3)$ and projected areas $\sigma(\omega_1) \le \sigma(\omega_2) \le \sigma(\omega_3)$.
+2. A target isotropic distribution $g$ (either GGX with roughness $\alpha_{ggx}$ or Spherical Gaussian with sharpness $\kappa$).
+
+**Outputs:**
+A new SGGX distribution with the same eigenbasis $R$ but updated roughness parameters $\alpha^+ = (\alpha_x^+, \alpha_y^+)$.
+
+**Data Structures:**
+Two precomputed 3D lookup tables (LUTs) storing the additional roughness $\alpha^+$:
+1. **SGGX-GGX Mapping ($M_2$):** Resolution $50 \times 50 \times 50 \times 2$. Stores $\alpha^+$ as a function of $(\alpha_x, \alpha_y, \alpha_{ggx})$.
+2. **SGGX-SG Mapping ($M_1$):** Resolution $20 \times 20 \times 20 \times 2$. Stores $\alpha^+$ as a function of $(\alpha_x, \alpha_y, \kappa)$.
+
+**Steps:**
+
+1. **Normalize the SGGX Matrix:**
+   Scale the SGGX matrix $S$ by $1/\sigma^2(\omega_3)$ to obtain $S'$. This normalization ensures the third eigenvalue corresponds to a unit projected area, allowing the roughness parameters to be derived directly from the first two eigenvalues relative to the third.
+   $$ S' = \frac{1}{\sigma^2(\omega_3)} S = (\omega_1, \omega_2, \omega_3) \begin{bmatrix} \frac{\sigma^2(\omega_1)}{\sigma^2(\omega_3)} & 0 & 0 \\ 0 & \frac{\sigma^2(\omega_2)}{\sigma^2(\omega_3)} & 0 \\ 0 & 0 & 1 \end{bmatrix} (\omega_1, \omega_2, \omega_3)^T $$
+   [S1, unofficial]
+
+2. **Extract Original Roughness Parameters:**
+   Compute the initial roughness parameters $\alpha = (\alpha_x, \alpha_y)$ for the SGGX distribution. According to the source, these are derived from the normalized eigenvalues:
+   $$ \alpha_x = \frac{\sigma(\omega_1)}{\sigma(\omega_3)} $$
+   $$ \alpha_y = \frac{\sigma(\omega_1)}{\sigma(\omega_3)} $$
+   [S1, unofficial]
+   *Note: The source text explicitly states $\alpha_y = \sigma(\omega_1)/\sigma(\omega_3)$, which implies symmetry or a specific parameterization constraint where $\alpha_x = \alpha_y$ in this derivation step, or potentially a typo in the source for $\alpha_y$ involving $\omega_2$. However, the implementation must follow the source's explicit formula.* [G: In standard SGGX parameterizations, $\alpha_y$ typically involves $\sigma(\omega_2)$. If the source strictly defines both as $\sigma(\omega_1)$, the implementation should use that, but care should be taken if $\omega_2$ is intended for $\alpha_y$. Given the instruction to follow sources reliably, we use the explicit formula provided.]
+
+3. **Lookup Additional Roughness:**
+   Depending on the target distribution $g$:
+   - **For GGX:** Query the $M_2$ LUT with inputs $(\alpha_x, \alpha_y, \alpha_{ggx})$ to retrieve $\alpha^+ = M_2(\alpha, \alpha_{ggx})$.
+   - **For Spherical Gaussian:** Query the $M_1$ LUT with inputs $(\alpha_x, \alpha_y, \kappa)$ to retrieve $\alpha^+ = M_1(\alpha, \kappa)$.
+   [S1, unofficial]
+
+4. **Construct Resulting SGGX:**
+   The resulting distribution is $D_{sggx}(n; R, \alpha^+)$. The eigenbasis $R$ remains unchanged. The new projected areas can be reconstructed from $\alpha^+$ and the original $\sigma(\omega_3)$ if needed, or the matrix $S$ is updated directly using the new roughness values in the eigenbasis.
+   [S1, unofficial]
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def sggx_precomputed_convolution(sggx_matrix, target_dist_type, target_param):
+    """
+    Approximates the convolution of an SGGX distribution with a target isotropic distribution.
+    
+    Args:
+        sggx_matrix: A 3x3 matrix S representing the SGGX distribution.
+                     It is assumed to be decomposed into eigenbasis R and eigenvalues.
+                     S = R * diag(sigma1^2, sigma2^2, sigma3^2) * R^T
+                     where sigma1 <= sigma2 <= sigma3.
+        target_dist_type: 'GGX' or 'SG'
+        target_param: For GGX, the roughness alpha_ggx. For SG, the sharpness kappa.
+        
+    Returns:
+        new_sggx_matrix: The resulting SGGX matrix after convolution approximation.
+    """
+    # Step 1: Decompose SGGX matrix to get eigenbasis and projected areas
+    # Assuming a helper function to extract eigenvalues and eigenvectors
+    # and sort them such that sigma1 <= sigma2 <= sigma3
+    R, sigma1, sigma2, sigma3 = decompose_sggx(sggx_matrix)
+    
+    # Step 2: Normalize and extract roughness parameters
+    # Formula from source: alpha_x = sigma1 / sigma3, alpha_y = sigma1 / sigma3
+    # Note: Source explicitly defines both as sigma1/sigma3.
+    alpha_x = sigma1 / sigma3
+    alpha_y = sigma1 / sigma3
+    
+    # Step 3: Lookup additional roughness alpha_plus
+    if target_dist_type == 'GGX':
+        # M2 resolution: 50x50x50x2
+        # Inputs: alpha_x, alpha_y, alpha_ggx
+        alpha_plus = lookup_m2(alpha_x, alpha_y, target_param)
+    elif target_dist_type == 'SG':
+        # M1 resolution: 20x20x20x2
+        # Inputs: alpha_x, alpha_y, kappa
+        alpha_plus = lookup_m1(alpha_x, alpha_y, target_param)
+    else:
+        raise ValueError("Unsupported target distribution type")
+    
+    # alpha_plus is a tuple (alpha_x_plus, alpha_y_plus)
+    alpha_x_plus, alpha_y_plus = alpha_plus
+    
+    # Step 4: Reconstruct the new SGGX matrix
+    # The eigenbasis R remains the same.
+    # The new eigenvalues are derived from alpha_plus and sigma3.
+    # From source: alpha_x = sigma1 / sigma3 => sigma1_new = alpha_x_plus * sigma3
+    # Similarly for sigma2_new.
+    # However, the source defines alpha_y also as sigma1/sigma3 in the extraction step.
+    # If we assume standard SGGX where alpha_y corresponds to sigma2, we might need:
+    # sigma2_new = alpha_y_plus * sigma3
+    # But the source extraction formula was ambiguous/symmetric.
+    # To be safe and consistent with the "re-parameterize" statement:
+    # D_sggx(n; R, alpha) implies alpha defines the shape in the tangent frame.
+    
+    # Reconstruct sigma1_new and sigma2_new from alpha_plus
+    # Assuming alpha_x corresponds to the first eigenvalue direction and alpha_y to the second
+    sigma1_new = alpha_x_plus * sigma3
+    sigma2_new = alpha_y_plus * sigma3
+    
+    # Construct the new diagonal matrix
+    diag_new = [sigma1_new**2, sigma2_new**2, sigma3**2]
+    
+    # Reconstruct matrix: S_new = R * diag_new * R^T
+    new_sggx_matrix = reconstruct_sggx(R, diag_new)
+    
+    return new_sggx_matrix
+
+def decompose_sggx(S):
+    # Placeholder for eigen decomposition logic
+    # Returns R (3x3 matrix of eigenvectors) and sorted sigma1, sigma2, sigma3
+    # such that sigma1 <= sigma2 <= sigma3
+    pass
+
+def lookup_m2(ax, ay, aggx):
+    # Interpolate in 50x50x50x2 LUT
+    pass
+
+def lookup_m1(ax, ay, kappa):
+    # Interpolate in 20x20x20x2 LUT
+    pass
+
+def reconstruct_sggx(R, diag):
+    # S = R * diag(R) * R^T
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The LUTs are precomputed using nonlinear least-square fits against Monte Carlo ground truth. Accuracy depends on the resolution of the LUTs. The source provides RMSE plots to validate accuracy but does not specify a maximum error threshold. [S1, unofficial]
+- **Boundaries:** The method assumes the SGGX matrix is valid and the eigenvalues are sorted correctly. The normalization by $\sigma^2(\omega_3)$ requires $\sigma(\omega_3) > 0$.
+- **Degenerate Input:** If $\sigma(\omega_1) = \sigma(\omega_2) = \sigma(\omega_3)$, the distribution is isotropic, and the roughness parameters are zero. The LUTs should handle this case, but the source does not explicitly detail boundary conditions for the LUTs.
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per convolution, dominated by LUT lookups and interpolation. This is significantly faster than Monte Carlo integration.
+- **Memory Complexity:** Requires storing two LUTs: $50^3 \times 2$ floats for SGGX-GGX and $20^3 \times 2$ floats for SGGX-SG. This is a small, fixed memory overhead.
+- **Accuracy:** Validated against Monte Carlo ground truth. The source provides RMSE error plots for varying $\kappa$ (SGGX-SG) and $\alpha$ (SGGX-GGX) but does not give a single numerical error value. [S1, unofficial]
+- **Strengths:** Efficient approximation of convolution for microflake models; allows for precomputed roughening in real-time or LOD rendering.
+- **Limitations:** Approximation error exists; limited to isotropic target distributions (GGX, SG); requires precomputation.
+
+## Background
+This technique is part of the ABSDF (Aggregated Bidirectional Scattering Distribution Function) framework for efficient scene appearance aggregation. It was introduced by Yang Zhou, Tao Huang, Ravi Ramamoorthi, Pradeep Sen, and Ling-Qi Yan in their 2010 paper "Efficient Scene Appearance Aggregation for Level-of-Detail Rendering" presented at the Symposium on Interactive 3D Graphics (SI3D). The method leverages the properties of SGGX distributions and precomputed fits to accelerate the convolution of microflake distributions with other microfacet or spherical distributions. [S1, unofficial]
+
+## Sources
+[S1] Efficient Scene Appearance Aggregation for Level-of-Detail Rendering, https://core.ac.uk/works/391729893, fetched 2026-11-01 (unofficial)

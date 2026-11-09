@@ -1,0 +1,200 @@
+A conversational spatial workspace for people and agents, built with OpenXR and wgpu. - Point at the hand menu's rows by their rectangles in the menu's own plane, across its whole width. by ioquatix · Pull Request #171 · ioquatix/tomori
+
+Point at the hand menu's rows by their rectangles in the menu's own plane, across its whole width. by ioquatix · Pull Request #171 · ioquatix/tomori · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ioquatix
+commented
+Nov 5, 2026
+Copy link
+Copy Markdown
+Owner
+The hand menu's rows could be pointed at only along their first 20 cm, though they now fill the 42 cm panel, and by boxes aligned with the world, so a steep ray at a menu tilted back could catch the row above; now each row is its rectangle in the menu's own plane, from hand_menu::row_rect, met by intersecting the ray with that plane through the new shared panel module (Plane, Rect, Area, and pointing::Shape::Panel), and the renderer draws each row's marker and label in that same plane within that same rectangle, so hit areas and visuals come from one layout, while the hover highlight and hover tick are unchanged. The menu's labels are therefore coplanar rather than each turned to the head, the only visible change. The wrist transcript, the recording card and the status pill are not pointed at (the transcript uses stick focus), so the hand menu is the only panel this applies to, and any later pointable panel can use panel::Area. Tests cover tilts of 0°, 30° and 60° with rays from six angles, a row 40 characters wide out to its right edge, both sides of each edge between rows, rows that are only read, and every row's mesh lying inside its rectangle; swapping in axis-aligned boxes fails them at 30°. design/hand-menu.md and releases.md are updated. This needs an independent review, and checking on the headset that the far end of a long row highlights and that a menu held low at the chest picks the row aimed at.
+Point at the hand menu's rows by their rectangles in the menu's own p…
+…
+11275f3
+```
+…lane, the same rectangles they are drawn within, across the panel's whole width.
+```
+ioquatix
+commented
+Nov 5, 2026
+View reviewed changes
+ioquatix
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Independent review of 11275f3. I didn't push or change anything on the branch.
+Summary
+The plane hit-testing is correct and the tests are real. I found no blocking problem in what this PR changes. There is one pre-existing bug in the same code path that the headset check will run into. The PR doesn't cause it, and it isn't fixed by this PR either. Two claims in the docs and the PR body are slightly off.
+What I verified
+Ray–plane intersection (crates/scene/src/panel.rs:40):
+Parallel rays are rejected (|d·n| < 1e-6).
+Rays pointing away, or starting past the plane, are rejected (distance < 0).
+Rays from behind the panel do hit. That matches the old boxes, and only menu targets are live while the menu shows (scene.rs filter), so this is fine.
+Hits outside the rectangle miss.
+Rect is half-open, and row_rect builds each shared edge from one expression (hand_menu.rs:895), so neighbouring rows really tile: no gap, no double hit.
+Layout is unchanged. Plane::facing is the old basis closure. Marker positions and label anchors in HandMenu::objects are exactly the old ones. Only the drawing orientation changed.
+The tests fail on the old code, at every tilt, not only 30°. I swapped Shape::Panel back for the old axis-aligned box in a scratch copy and ran a_ray_aimed_at_a_row_meets_that_row_at_any_tilt per tilt.
+With the old 20 cm length, it fails at 0°, 30° and 60°.
+With a full-width (43.8 cm) axis-aligned box, it also fails at 0°, 30° and 60°.
+At 0° the failing ray is the steep one from beneath. The box's ±1 cm depth catches the next row.
+The PR body says the swap "fails them at 30°". It fails at all three.
+Behaviour elsewhere is unchanged. The hover highlight and hover tick (scene.rs:540-551) and choosing are untouched. Sections, environment and People rows, and Y pin/release all go through HandMenu::objects, and their existing tests pass. The hover ring is now drawn in the panel plane via orientation().
+Tooling:
+cargo fmt --check and cargo clippy --workspace --all-targets -D warnings pass.
+cargo test --workspace passes on lavapipe with TOMORI_REQUIRE_GPU=1.
+Coverage: see the end.
+Conflicts:
+Merges cleanly with main.
+#170 merges cleanly, and it builds no arrival::Object or Shape, so there is no hidden compile break.
+#167 conflicts only in crates/scene/src/lib.rs (the module list) and releases.md. Both are trivial.
+Public API: tomori-scene isn't on crates.io yet. So removing ROW_LENGTH, adding the new Shape variant and adding the pub Object::panel field don't break any published API.
+Findings
+1. Should fix, here or straight after (pre-existing): pointing at a mode with a description flickers
+hand_menu.rs:497 inserts the pointed mode's description rows beneath it. But the panel's origin is the top row, at base + up * (0.04 + ROW * rows.len()) (hand_menu.rs:851, :857). So adding D description rows lifts every row above them by D × ROW. The mode then moves out from under the ray, and pointed comes from last frame's hit (scene.rs:469-473).
+I simulated frames: Space section, owner, aiming at the non-current mode "plan".
+This PR, from the hand and from the head: plan, None, plan, None, …
+Old boxes, from the head: plan, long, plan, long, …. That was worse, because a trigger pull could choose long.
+Under the PR, a pull that starts on a None frame becomes Pull::Attracting and never chooses. So choosing a non-current mode works about half the time, and the hover tick repeats at HOVER_INTERVAL.
+This PR isn't the cause. But the headset check "the row aimed at is the one highlighted" will hit it in the Space section. Possible fixes:
+keep the pointed mode's row fixed and grow the menu downward, for example by sizing height without the description rows; or
+draw the description as further lines of the mode's own label, within its rectangle.
+A regression test would iterate objects → targets → nearest → model.pointed for a few frames.
+2. Minor: the hover ring isn't within the row's rectangle, despite the design doc
+design/hand-menu.md:9 and the render test's doc comment say each row's marker and label, "highlighted or not", are drawn within its rectangle. But the hover ring (arrival_graphics.rs:329) has radius size * 2.1 ≈ 18.9 mm. The row is ±12 mm tall and starts 18 mm left of the marker. So the ring spills about 7 mm into the rows above and below, and about 1.5 mm past the left edge.
+The test (arrival_graphics.rs:1131) only checks form() cubes and label quads. The ring comes from cubes(), so it isn't covered. The ring itself predates this PR. Either:
+shrink the ring below ROW/2, for example size * 1.2, which still clears the enlarged marker; or
+reword the doc to say the marker and label, and leave the ring out.
+Also, Cube.scale is a full extent: the mesh spans ±0.5 (graphics.rs:815). The test treats it as a half extent. That makes the test conservative, so it's harmless, but its comment "to its corners" isn't quite right.
+3. Note: labels in the panel plane rather than each facing the head
+No design doc asked for per-label head-facing.
+hand-menu.md §Showing and §Pinning specify that the menu faces the middle of the head, and the panel still does.
+wrist-transcript.md and the recording-card text are about their own panels.
+The doc text that described labels "tilted to face the head" (§Its text) was updated, and releases.md mentions the change.
+I don't expect a readability regression:
+Horizontally nothing changes. Before, each label faced the head from its left-hand anchor. Now the panel faces it from the marker column.
+Vertically, the top and bottom rows of a tall section are now coplanar rather than each turned up to about 20°. That's about 6% foreshortening at the extremes.
+Both before and after, the panel faces the head from its left edge, not from its horizontal middle. Now that the far end of a row can be chosen, it sits about 40° off-axis at 45 cm. If that reads poorly, aim the plane from x = PANEL / 2.
+For the headset:
+Is the top row of a tall section, such as People with many names or Space with a description, legible at steep tilts?
+Is the right end of a 40-character row legible with the menu held low?
+4. Minor test gaps
+Nothing tests a ray just above the top row or just below the last row. It works by construction, but it's one line each in a_ray_aimed_at_a_row_meets_that_row_at_any_tilt, next to "Past either end of the row" (hand_menu.rs:1841).
+Every ray in rays_at comes from the front side.
+Coverage
+The CI coverage gate (test (stable)) passes on this commit.
+Locally, every changed file is at 100% of its regions in cargo llvm-cov:
+File
+Regions covered
+panel.rs
+264/264
+pointing.rs
+628/628
+hand_menu.rs
+2597/2597
+arrival.rs
+1326/1326
+scene.rs
+2424/2424
+arrival_graphics.rs
+1753/1753
+The local Bake gate itself couldn't complete, for two reasons unrelated to the PR. This machine has Whisper small.en but not tiny.en, and Bake failed reading a std source path from the system Rust.
+For the headset
+The far end of a 40-character row highlights and chooses.
+With the menu held low at the chest and tilted back, the row aimed at is the one highlighted. Expect finding 1 when aiming at a non-current mode in Space.
+Labels are legible at steep tilts (finding 3).
+ioquatix
+marked this pull request as ready for review
+November 5, 2026 12:31
+Hide details
+View details
+ioquatix
+merged commit 6b1a5e3
+into
+main
+Nov 5, 2026
+6 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+ioquatix
+deleted the
+panel-hit-testing
+branch
+November 5, 2026 12:31
+ioquatix
+mentioned this pull request
+Nov 5, 2026
+Keep the hand menu's rows still while a mode is pointed at, so that its highlight holds and the trigger chooses it.
+#173
+Merged
+ioquatix
+added a commit
+that referenced
+this pull request
+Nov 5, 2026
+Keep the hand menu's rows still while a mode is pointed at, so that i…
+…
+eb21fd0
+```
+…ts highlight holds and the trigger chooses it. (#173)
+
+Pointing at a mode in the hand menu's Space section, found in review of
+#171, made its highlight alternate every frame, so a trigger pull chose
+it only about half the time. The description of the mode pointed at was
+inserted as rows beneath it, and the menu, laid out upwards from above
+the wrist, grew by those rows and raised every row, so that in the next
+frame the ray met another row, the description went away and the menu
+dropped back. The description now has a fixed block of rows beneath the
+modes, as many as the longest description takes. It shows the
+description of the mode pointed at, or else of the current one, which
+matches `interaction.md`'s list opening on the current mode, so that
+what is pointed at changes what the rows say and never where they are.
+No other row, such as an environment, the speech setting or the Sound
+section's levels, added rows, but tests now cover all of them.
+`pointing_at_a_row_moves_no_row` checks that pointing at any row of the
+top level, the Space section or the Sound section leaves every row's
+key, position and rectangle unchanged.
+`a_steady_ray_stays_on_a_menu_row_and_chooses_it` holds the ray through
+the frame step for 72 frames on modes above and below the current one, a
+non-current environment, the speech setting, Back, the Sound section and
+its Sounds and Vibration levels. It asserts the highlight every frame
+and the message or setting each trigger pull sends, and it fails at
+frame 1 on main. `design/hand-menu.md` (requirement, rationale and
+validation) and `releases.md` are updated. fmt, clippy, the workspace
+tests on lavapipe and the Android build pass locally. `hand_menu.rs` and
+`scene.rs` are at 100% region coverage under `cargo llvm-cov`, but
+bake's coverage task could not run locally, because Arch's Rust build
+puts std at paths it cannot read, and the local speech models lack
+Whisper tiny.en, so CI's gate is the authority. The design review was
+done by the implementer rather than independently, and the headset still
+needs checking that a non-current mode highlights steadily and is chosen
+at the first pull.
+```
+This was referenced Nov 5, 2026
+Keep each participant's display name with their identity on the server.
+#172
+Merged
+Add teleport, snap-turn and fly locomotion for environments that declare it.
+#181
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

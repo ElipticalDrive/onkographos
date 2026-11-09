@@ -1,100 +1,105 @@
 # Image-based rendering integration
-
 Also called: Image-Based Rendering with Impostors, Impostor rendering, Image-based volume rendering
 
 ## Overview
-This method integrates volume rendering into a polygonal virtual environment by treating rendered volume images as image-based primitives (impostors) within the scene [S1, unofficial]. It solves the problem of coupling high-latency volume rendering with interactive polygonal environments by decoupling the rendering computation from the display pipeline [S1, unofficial]. Unlike sibling methods that rasterize proxy geometry directly on the client GPU, this approach distributes the volume rendering to a separate server and transmits the resulting images to the client, where they are mapped onto quads [S1, unofficial].
+This method integrates volumetric data into a polygonal virtual environment by treating rendered volume images as 2D image-based primitives (impostors) [S1, unofficial]. It decouples the computationally expensive volume rendering from the client-side scene graph, distributing the rendering workload to a separate server and transmitting the resulting images over a network [S1, unofficial]. Unlike direct ray casting or proxy geometry methods that render volume data as 3D geometry on the client, this approach renders the volume as a 2D texture mapped onto a quad, allowing the volume to be seamlessly mixed with polygonal geometry in the virtual environment [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** 3D volume dataset, transfer function, camera parameters (two viewing directions for stereoscopic view), head-tracker position data.
-*   **Output:** Stereo pair of images rendered as textures on impostor quads within the virtual environment.
+*   **Input:** Volumetric data set (stored on server), user viewing directions (left and right eye for stereoscopy), user position/orientation from a head-tracker.
+*   **Output:** Stereo pair of images rendered as textures on impostor quads in the client's virtual environment.
 
 **Data Structures:**
-*   **Impostor:** A quad primitive. The size of the impostor does not need to be varied dynamically; standard perspective rendering of the quads handles the projection [S1, unofficial].
-*   **Server State:** Holds the volume data and rendering logic.
-*   **Client State:** Holds the polygonal virtual environment and the impostor quads [S1, unofficial].
+*   **Impostor:** A 2D quad primitive.
+*   **Texture:** The rendered volume image, mapped to the quad.
+*   **Network Protocol:** Asynchronous request/response for image data.
 
 **Steps:**
-1.  **Distribution:** The volume rendering process is distributed to a separate server (a fast PC with sufficient memory for the volume datasets) [S1, unofficial].
-2.  **Communication:** The server communicates with the client (implemented as a Studierstube application) via a Local Area Network (LAN) [S1, unofficial].
-3.  **View Acquisition:** The server receives two viewing directions, one for each eye of the user [S1, unofficial].
-4.  **Volume Rendering:** The server renders the volume data for the specified directions [S1, unofficial].
-5.  **Transmission:** The server sends the rendered images to the client [S1, unofficial].
-6.  **Impostor Orientation:** Two quads act as impostors, one for each stereoscopic view. The quads are rotated around their center so that their surface normal always faces the respective eye of the user [S1, unofficial].
-7.  **Integration:** The images sent from the server are used as textures on the quads, integrating the volume visualization into the polygon-based OpenGL rendering of the virtual environment [S1, unofficial].
-8.  **Interaction Update:** When the user moves, the head-tracker reports the change to the impostors. The impostors update their orientation accordingly and send a request for new volume renderings to the server [S1, unofficial].
-9.  **Asynchronous Update:** The update process happens asynchronously in a background thread to prevent the virtual environment from freezing during the rendering time [S1, unofficial].
+1.  **Server Setup:** A dedicated server (fast PC with sufficient memory) stores the volumetric data and runs the Real Time Volume Rendering Library (RTVR) [S1, unofficial].
+2.  **Client Request:** The client application (e.g., Studierstube) detects user movement via a 6DoF head-tracker [S1, unofficial]. It sends a request to the server containing the viewing directions for both eyes [S1, unofficial].
+3.  **Volume Rendering:** The server renders the volume data for the requested directions. The rendering mode (e.g., surface shaded, maximum intensity projection, non-photorealistic) affects performance [S1, unofficial].
+4.  **Impostor Orientation:** On the client, two impostor quads are created, one for each stereoscopic view. Each quad is rotated around its center so that its surface normal always faces the respective eye of the user [S1, unofficial]. The size of the impostors remains constant; perspective projection handles the scaling [S1, unofficial].
+5.  **Image Transmission:** The server sends the rendered images back to the client over a LAN [S1, unofficial].
+6.  **Texture Mapping:** The client receives the images and maps them as textures onto the respective impostor quads [S1, unofficial].
+7.  **Asynchronous Update:** The update process runs in a background thread to prevent the virtual environment from freezing during the rendering time (20ms to 500ms) [S1, unofficial]. The environment continues to update based on user interactions while waiting for the new images [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Server-side logic (running on separate PC)
-def server_render_loop():
+# Server Side
+def server_render_loop(volume_data, request_queue, response_queue):
     while True:
-        # Receive two viewing directions for stereoscopic view
-        left_view, right_view = receive_view_directions()
+        # Wait for request from client
+        left_view_dir, right_view_dir = request_queue.get()
         
-        # Render volume data for both directions
-        left_image = render_volume(left_view)
-        right_image = render_volume(right_view)
+        # Render volume for both eyes
+        # Rendering mode affects performance (e.g., surface shaded, MIP)
+        left_image = render_volume(volume_data, left_view_dir)
+        right_image = render_volume(volume_data, right_view_dir)
         
-        # Send images to client
-        send_images(left_image, right_image)
+        # Send images back to client
+        response_queue.put((left_image, right_image))
 
-# Client-side logic (running on Studierstube application)
+# Client Side
 class Impostor:
-    def __init__(self, quad):
-        self.quad = quad
-        self.texture_left = None
-        self.texture_right = None
-        
-    def update_orientation(self, head_tracker_data):
-        # Rotate quad so surface normal faces the respective eye
-        self.quad.rotate_to_face_eye(head_tracker_data.eye_position)
-        
-    def receive_images(self, left_img, right_img):
-        # Update textures with new volume renderings
-        self.texture_left = load_texture(left_img)
-        self.texture_right = load_texture(right_img)
-        
-    def draw(self):
-        # Bind textures and draw quads in polygonal environment
-        bind_and_draw(self.texture_left, self.quad_left)
-        bind_and_draw(self.texture_right, self.quad_right)
+    def __init__(self, head_tracker):
+        self.head_tracker = head_tracker
+        self.left_quad = create_quad()
+        self.right_quad = create_quad()
+        self.left_texture = None
+        self.right_texture = None
+        self.request_queue = create_queue()
+        self.response_queue = create_queue()
+        self.start_background_thread()
 
-def client_render_loop():
-    while True:
-        # Asynchronous background thread for updates
-        if request_pending():
-            left_img, right_img = receive_server_images()
-            impostor.receive_images(left_img, right_img)
+    def start_background_thread(self):
+        thread = Thread(target=self.update_loop)
+        thread.daemon = True
+        thread.start()
+
+    def update_loop(self):
+        while True:
+            # Get current user orientation
+            left_eye_dir, right_eye_dir = self.head_tracker.get_view_directions()
+            
+            # Send request to server
+            self.request_queue.put((left_eye_dir, right_eye_dir))
+            
+            # Wait for response (non-blocking in main loop, blocking here)
+            left_img, right_img = self.response_queue.get()
+            
+            # Update textures
+            self.left_texture = load_texture(left_img)
+            self.right_texture = load_texture(right_img)
+
+    def render(self, camera_position):
+        # Update impostor orientation to face respective eyes
+        # The quad's surface normal always faces the respective eye
+        self.left_quad.set_orientation(face_eye(camera_position, "left"))
+        self.right_quad.set_orientation(face_eye(camera_position, "right"))
         
-        # Main loop continues without freezing
-        update_environment()
-        draw_environment()
+        # Render quads with textures
+        render_quad(self.left_quad, self.left_texture)
+        render_quad(self.right_quad, self.right_texture)
 ```
 
-**Parameters:**
-*   **Rendering Time:** Varies from 20ms to 500ms depending on the complexity of the volume dataset and the rendering mode [S1, unofficial].
-*   **Network:** LAN connection between server and client [S1, unofficial].
-
 **Edge Cases and Pitfalls:**
-*   **Network Delay:** Network delay (lag) results in a delayed response when manipulating the volume data [S1, unofficial].
-*   **Quick Rotation:** Turning the volume object quickly reveals the disadvantage of decoupling image update and impostor display, as the static impostor textures may not match the new view instantly [S1, unofficial].
-*   **Freezing:** Without asynchronous updates, the virtual environment would freeze during the rendering time [S1, unofficial].
+*   **Network Delay:** Network lag can cause delayed response when manipulating volume data, leading to a decoupling between image update and impostor display [S1, unofficial].
+*   **Quick Rotation:** Turning the volume object quickly can expose the disadvantage of the decoupling, as the displayed image may not match the current view [S1, unofficial].
+*   **Rendering Time:** The update time can vary from 20ms to 500ms depending on data complexity and rendering mode [S1, unofficial].
 
 ## Operating characteristics
-*   **Performance:** Interactive frame (stereo pair) rates of up to 25fps for a resolution of $128^3$ or approximately 11fps for $256^3$, depending on complexity and rendering modes (e.g., surface shaded, maximum intensity projection, or non-photorealistic) [S1, unofficial].
+*   **Performance:** Interactive frame rates for stereo pairs are up to 25fps for a $128^3$ resolution and approximately 11fps for a $256^3$ resolution, depending on complexity and rendering modes (e.g., surface shaded, maximum intensity projection, non-photorealistic) [S1, unofficial].
 *   **Virtual Environment Performance:** The virtual environment itself delivers independently of the volume rendering at 60fps [S1, unofficial].
-*   **Strengths:** Adds flexibility and scalability to the system by distributing rendering; prevents the virtual environment from freezing during volume rendering updates; allows seamless integration of volume visualization and polygonal rendering [S1, unofficial].
-*   **Limitations:** Subject to network delay (lag); decoupling of image update and display causes visual artifacts when turning the volume object quickly; dependent on the rendering rate of the server [S1, unofficial].
-*   **When to Use:** When integrating volume rendering into a polygonal virtual environment with strict interactivity requirements for the polygonal scene, and when sufficient network bandwidth and low latency are available.
-*   **When Not to Use:** When real-time, low-latency interaction with the volume data itself is critical and network lag is unacceptable, or when the computational resources for a dedicated server are not available.
+*   **Scalability:** Distributing volume rendering to a separate server adds flexibility and scalability to the system [S1, unofficial].
+*   **Strengths:** Seamless integration of volume visualization and polygonal rendering; non-blocking updates for the virtual environment; support for stereoscopic displays and 6DoF interactions [S1, unofficial].
+*   **Limitations:** Network delay can cause lag; quick rotations can reveal the decoupling between image update and display; performance is limited by server rendering speed and network bandwidth [S1, unofficial].
+*   **When to Use:** When integrating volume data into a complex polygonal virtual environment with real-time interaction requirements, and when sufficient network bandwidth and server resources are available.
+*   **When Not to Use:** When low latency is critical and network conditions are poor, or when the volume data is too large for the server to render in real-time.
 
 ## Background
-This method was developed by A.L. Fuhrmann et al. and presented in the paper "Distributed Software-Based Volume Visualization in a Virtual Environment" [S1, unofficial]. It builds on previous VR techniques employed in visualization settings [FLS97, FG98] and applies experiences from those cases to the new distributed setting [S1, unofficial]. The system utilizes the Real Time Volume Rendering Library (RTVR) and the Studierstube virtual environment [SFH*02]. The approach was presented at the Eurographics conference in 2005 [S1, unofficial].
+This method was developed by A.L. Fuhrmann et al. and presented at the Eurographics Symposium on Virtual Environments (EGVE) in 2005 [S1, unofficial]. It builds on previous VR techniques employed in visualization settings [FLS97, FG98] and utilizes the Real Time Volume Rendering Library (RTVR) and the Studierstube virtual environment [SFH*02, S1, unofficial]. The approach addresses the challenge of providing volume rendering within virtual environments by leveraging image-based rendering techniques to mix volume and polygonal rendering [S1, unofficial].
 
 ## Sources
 [S1] Distributed Software-Based Volume Visualization in a Virtual Environment, https://doi.org/10.2312/egve/ipt_egve2005/129-140, fetched 2026-10-26 (unofficial)

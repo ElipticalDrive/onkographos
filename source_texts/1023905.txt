@@ -1,0 +1,166 @@
+Contribute to autowarefoundation/autoware_core development by creating an account on GitHub.
+
+feat(autoware_ndt_scan_matcher): index the voxel grid directly instead of searching a kd-tree by ikhann · Pull Request #1411 · autowarefoundation/autoware_core · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ikhann
+commented
+Aug 30, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Description
+The neighbour search in computeDerivatives() runs for every scan point on every optimisation iteration, and is roughly half the cost of align(). It is answered with a kd-tree radius search over every occupied voxel centroid.
+The voxels are a regular lattice and the search radius is the leaf size, so any voxel whose centroid lies within the radius must sit in the block of cells spanned by the query's coordinate range. Those cells can be enumerated arithmetically and read directly, with no search.
+This idea is not new, and I want to be precise about what is. PCL already provides it — VoxelGridCovariance::getNeighborhoodAtPoint(), including the 27-cell variant. But it is backed by std::map, so its "direct" lookup is 27 tree descents, which is plausibly why pcl::NormalDistributionsTransform calls radiusSearch() instead. And this class is a multi-grid: map segments are streamed in and out independently, each with its own bounding box, which a kd-tree over the union of centroids handles naturally.
+The observation that makes a direct index work here is that every segment shares leaf_size_, so all of them lie on one global integer lattice. A single index therefore covers every loaded segment at once. It is built as a dense array over the bounding box of the currently loaded voxels — the map is streamed around the vehicle, so that box is small — falling back to a hash map above a 12 M cell ceiling.
+radiusSearchDirect() applies the same acceptance test as the kd-tree path, so the neighbour set is identical, not approximated.
+Results
+Measured on the sample map, single-threaded, 250,000 query points at each size, with the loaded region grown from 1,169 to 11,487 occupied voxels. Both methods return identical voxel sets at every size. Raw numbers: scaling_measurements.txt.
+I want to be accurate about where the gain comes from. Over a 10× larger map the kd-tree cost rises only 2% and the direct index 33%, so within this range the advantage is a constant factor, not an asymptotic one — the kd-tree's cost here is dominated by fixed per-call overhead rather than by tree depth. The direct index rises because the dense array loses cache locality as it grows. The speedup narrows from 6.7× to 5.2× across that range and does not fall further.
+End to end, at the shipped parameters:
+before
+after
+neighbour lookup
+1,136.8 ns
+234.9 ns
+4.8×
+align(), 1,500-point scan
+8.59 ms
+4.23 ms
+2.0×
+The gap between the two is Amdahl — the search is ~46% of align(). The align() figure also holds across scan sizes (1.5k–15k), thread counts (1–8) and map tile sizes (20–500 m), with the aligned pose, transform probability and iteration count unchanged in every case.
+Why the results are identical
+The radius equals the leaf size, so any voxel centre within the radius lies in the enumerated block; the distance test that follows is the one the kd-tree applies. Nothing is pruned or approximated, which is why the new test asserts equality on every query rather than to a tolerance.
+The kd-tree is left in place: it is public API, it is what the new test compares against, and building it costs ~1.5 ms once per map update.
+Related links
+Parent Issue:
+(none — happy to open one if you would prefer this tracked separately)
+Complements #764 (nanoflann). That PR makes the tree faster; this one removes it from the hot path. They are independent, and I am happy to rebase on #764 whenever it lands — please treat that one as having priority.
+How was this PR tested?
+Built and tested in ghcr.io/autowarefoundation/autoware:core-devel-humble.
+```
+colcon test --packages-select autoware_ndt_scan_matcher && colcon test-result --all
+=> Summary: 64 tests, 0 errors, 0 failures, 31 skipped
+```
+Adds test_voxel_neighbour_search, which asserts the two methods return the same leaf set:
+near occupied surfaces, over 20,000 queries with several segments loaded;
+outside every segment's bounds;
+across segment removal and re-addition (the dynamic map path);
+on the radius boundary, at 0.999× and 1.001× the leaf size.
+pre-commit run --files <changed files> passes, including clang-format and cpplint.
+Notes for reviewers
+The dense array is ~4.3 MB on this map (2.1% occupancy). It scales with occupied voxels, not map points, and kMaxCells bounds it.
+I measured std::unordered_map (1.79× on align()) and a flat open-addressed table (slower than unordered_map, because a power-of-two mask needs a mixer that costs more per probe than libstdc++'s prime-modulo bucketing) before settling on the dense array.
+Timing scans are map-sampled points put through the shipped crop → voxel-grid → downsample chain. A scan decoded from sample-rosbag with the official VLS-128 calibration gives a larger figure (2.9×), but that scan is only approximately localised — the bag carries no ground-truth pose or sensor extrinsic — so I have kept the conservative number in the headline.
+This is my second contribution here (see fix(autoware_ekf_localizer): do not report gate failures when no measurement is examined #1410); please tell me if you would rather this were split or tracked under an issue first.
+Interface changes
+Adds one public method, MultiVoxelGridCovariance::radiusSearchDirect(). No topics, services or parameters change. No existing behaviour changes.
+ikhann
+requested review from
+a team,
+Motsu-san,
+TaikiYamada4 and
+YamatoAndo
+as code owners
+August 30, 2026 10:32
+github-actions
+Bot
+commented
+Aug 30, 2026
+Copy link
+Copy Markdown
+Thank you for contributing to the Autoware project!
+🚧 If your pull request is in progress, switch it to draft mode.
+Please ensure:
+You've checked our contribution guidelines.
+Your PR follows our pull request guidelines.
+All required CI checks pass before marking the PR ready for review.
+feat(autoware_ndt_scan_matcher): index the voxel grid directly instea…
+…
+c288daa
+```
+…d of searching a kd-tree
+
+The neighbour search runs for every scan point on every optimisation iteration and
+is roughly half of the cost of align(). It answers it with a kd-tree radius search
+over every occupied voxel centroid.
+
+The voxels are a regular lattice and the search radius is the leaf size, so every
+voxel whose centroid lies within the radius must sit in the block of cells spanned
+by the query's coordinate range. Those cells can be enumerated arithmetically, which
+makes the lookup O(1) instead of O(log N).
+
+PCL provides this idea already (VoxelGridCovariance::getNeighborhoodAtPoint), but it
+is backed by std::map and this class is a multi-grid: map segments are loaded and
+unloaded independently, each with its own bounding box, which is what a kd-tree over
+the union of centroids handles naturally. The observation that makes a direct index
+work here is that every segment shares leaf_size_, so all of them lie on one global
+integer lattice. A single index therefore covers every loaded segment at once, and
+it is built as a dense array over the bounding box of the currently loaded voxels
+(the map is streamed around the vehicle, so that box is small), falling back to a
+hash map above a 12 M cell ceiling.
+
+radiusSearchDirect() applies the same acceptance test as the kd-tree path, so the
+neighbour set is identical, not approximated. The kd-tree is left in place: it is
+public API, it is what the new test compares against, and building it costs ~1.5 ms
+once per map update.
+
+Measured on the sample map (326,867 points, 11,597 occupied voxels at 2.0 m) with a
+scan decoded from the sample rosbag, at the shipped parameters:
+
+  neighbour lookup   1,136.8 -> 234.9 ns/query   (4.8x, 400,000 queries,
+                                                  identical hit counts)
+  align()               8.59 -> 4.23 ms          (2.0x, 1,500-point scan)
+
+The speedup holds across scan sizes (1.5k-15k), thread counts (1-8) and map tile
+sizes (20-500 m), and the aligned pose, transform probability and iteration count
+are unchanged in every case.
+
+Tests: adds test_voxel_neighbour_search, which asserts the two methods return the
+same leaf set near surfaces, outside the map bounds, across segment removal and
+re-addition, and on the radius boundary.
+
+Signed-off-by: Daniil Khaninaev <khaninaev@yahoo.com>
+```
+ikhann
+force-pushed
+the
+feat/ndt-direct-voxel-index
+branch
+from
+6cac537 to
+c288daa
+Compare
+August 30, 2026 10:58
+YamatoAndo
+added
+the
+run:build-and-test-differential
+Mark to enable build-and-test-differential workflow. (used-by-ci)
+label
+Sep 7, 2026
+Merge branch 'main' into feat/ndt-direct-voxel-index
+71187a9
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+run:build-and-test-differential
+Mark to enable build-and-test-differential workflow. (used-by-ci)
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

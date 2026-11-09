@@ -3,119 +3,132 @@
 Also called: Dual Contouring Edge Normal, Edge Normal Calculation via Vertex Gradient Averaging
 
 ## Overview
-This method computes the surface normal for an edge intersecting an isosurface by averaging the vertex gradients of the edge's endpoints. It serves as a component in dual contouring pipelines where edge normals are required to construct the local constraint system for vertex placement. It differs from sibling methods like [MLS Projection](823-mls-projection.md) which fit a local polynomial, and [Surface Nets](921-surface-nets.md) which rely on centroid positions, by explicitly deriving orientation from the scalar field's discrete gradient at grid vertices.
+This method computes the surface normal for a grid edge intersected by an isosurface by averaging the vertex gradients at the edge's endpoints. It serves as a critical component in Dual Contouring, where accurate normals are required to define the local plane for projecting feature points [S1, S2, unofficial]. Unlike Marching Cubes, which derives normals from cell-centered gradients, this approach leverages the vertex-based gradient information inherent to the dual grid structure to maintain feature preservation [S1, S2, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A scalar field function $d(x, y, z)$ returning density values; an isosurface level $I$; two 3D grid vertices $P_0$ and $P_1$ defining an edge where the scalar field changes sign (straddles $I$).
-*   **Output:** A 3D normal vector $\mathbf{n}_{edge}$ representing the orientation of the surface at the edge intersection.
+**Inputs:**
+- Two 3D grid vertices $p_0$ and $p_1$ defining the edge.
+- A scalar density function $d(x, y, z)$ that returns a value (e.g., signed distance or occupancy) for any grid coordinate.
+- The isovalue (threshold) $isoLevel$.
+
+**Outputs:**
+- A 3D normal vector $\mathbf{n}_{edge}$ for the intersection point on the edge.
 
 **Data Structures:**
-The implementation assumes access to a scalar field lookup function `d` and basic vector arithmetic. No persistent data structures are required beyond temporary vectors for intermediate calculations.
+- `IsoData`: A structure or tuple containing the density values at $p_0$ ($d_0$), $p_1$ ($d_1$), and the $isoLevel$.
+- `Vector3`: A 3D vector type with components $x, y, z$.
 
 **Steps:**
-1.  **Retrieve Edge Vertex Densities:**
-    Calculate the scalar field values at the two endpoints of the edge:
-    $$ v_0 = d(P_0) $$
-    $$ v_1 = d(P_1) $$
-    Store these along with the isosurface level $I$ in a density data structure or tuple.
 
-2.  **Calculate Vertex Gradient at $P_0$:**
-    Compute the gradient $\mathbf{n}_0$ at vertex $P_0$ using forward differences. Let $P_0 = (x_0, y_0, z_0)$. The components are:
-    $$ \mathbf{n}_0 = \begin{bmatrix} d(x_0+1, y_0, z_0) - v_0 \\ d(x_0, y_0+1, z_0) - v_0 \\ d(x_0, y_0, z_0+1) - v_0 \end{bmatrix} $$
-    [G] If $P_0$ lies on the grid boundary where forward neighbors are undefined, use backward differences or clamp to the boundary neighbor.
+1.  **Sample Edge Densities:**
+    Retrieve the density values at the two vertices of the edge:
+    $$ d_0 = d(p_0) $$
+    $$ d_1 = d(p_1) $$
+    Store these along with the isovalue to form the interpolation data.
 
-3.  **Calculate Vertex Gradient at $P_1$:**
-    Compute the gradient $\mathbf{n}_1$ at vertex $P_1$ similarly. Let $P_1 = (x_1, y_1, z_1)$. The components are:
-    $$ \mathbf{n}_1 = \begin{bmatrix} d(x_1+1, y_1, z_1) - v_1 \\ d(x_1, y_1+1, z_1) - v_1 \\ d(x_1, y_1, z_1+1) - v_1 \end{bmatrix} $$
+2.  **Calculate Vertex Gradient at $p_0$:**
+    Compute the gradient (normal) at vertex $p_0$ using forward finite differences. Let $\mathbf{n}_0$ be the normal at $p_0$:
+    $$ \mathbf{n}_0.x = d(p_0.x + 1, p_0.y, p_0.z) - d_0 $$
+    $$ \mathbf{n}_0.y = d(p_0.x, p_0.y + 1, p_0.z) - d_0 $$
+    $$ \mathbf{n}_0.z = d(p_0.x, p_0.y, p_0.z + 1) - d_0 $$
+    *Note: This assumes a unit grid spacing. If spacing is $\Delta$, divide by $\Delta$.* [S1, S2, unofficial]
+
+3.  **Calculate Vertex Gradient at $p_1$:**
+    Compute the gradient (normal) at vertex $p_1$ similarly. Let $\mathbf{n}_1$ be the normal at $p_1$:
+    $$ \mathbf{n}_1.x = d(p_1.x + 1, p_1.y, p_1.z) - d_1 $$
+    $$ \mathbf{n}_1.y = d(p_1.x, p_1.y + 1, p_1.z) - d_1 $$
+    $$ \mathbf{n}_1.z = d(p_1.x, p_1.y, p_1.z + 1) - d_1 $$ [S1, S2, unofficial]
 
 4.  **Interpolate Edge Normal:**
-    Average the two vertex normals $\mathbf{n}_0$ and $\mathbf{n}_1$ weighted by the density values relative to the isosurface level. This is often implemented as a linear interpolation (`Lerp`) based on the density values $v_0, v_1$ and level $I$.
-    $$ \mathbf{n}_{edge} = \text{LerpByDensity}(\mathbf{n}_0, \mathbf{n}_1, v_0, v_1, I) $$
-    [G] A common implementation of `LerpByDensity` for normals is simple arithmetic averaging if the densities are symmetric, or weighted averaging:
-    $$ \mathbf{n}_{edge} = \frac{(I - v_1)\mathbf{n}_0 + (v_0 - I)\mathbf{n}_1}{(I - v_1) + (v_0 - I)} $$
-    If the denominator is zero (degenerate case), return $\mathbf{n}_0$ or $\mathbf{n}_1$.
+    Interpolate between $\mathbf{n}_0$ and $\mathbf{n}_1$ based on the density values. The specific interpolation function `LerpByDensity` typically performs a linear interpolation weighted by the distance to the isosurface relative to the edge length.
+    $$ \mathbf{n}_{edge} = \text{LerpByDensity}(\mathbf{n}_0, \mathbf{n}_1, d_0, d_1, isoLevel) $$
+    *Implementation Note:* If `LerpByDensity` is not explicitly defined, a standard linear interpolation using the ratio of the distance from $p_0$ to the intersection point ($t$) is used:
+    $$ t = \frac{isoLevel - d_0}{d_1 - d_0} $$
+    $$ \mathbf{n}_{edge} = (1 - t)\mathbf{n}_0 + t\mathbf{n}_1 $$
+    Finally, normalize $\mathbf{n}_{edge}$ to unit length. [S1, S2, unofficial]
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def calculate_edge_normal(p0, p1, d, iso_level):
+def calculate_edge_normal(p0, p1, density_func, iso_level):
     """
-    Calculate the normal for an edge between p0 and p1 using vertex gradient averaging.
+    Calculate the normal for an edge intersected by an isosurface.
     
     Args:
         p0: Tuple (x, y, z) of the first vertex.
         p1: Tuple (x, y, z) of the second vertex.
-        d: Function d(x, y, z) returning scalar density.
-        iso_level: The isosurface threshold value.
+        density_func: Function that takes (x, y, z) and returns a scalar density.
+        iso_level: The threshold value defining the surface.
         
     Returns:
-        Vector3: The interpolated edge normal.
+        A normalized 3D vector representing the edge normal.
     """
-    # 1. Get densities at vertices
-    v0 = d(p0[0], p0[1], p0[2])
-    v1 = d(p1[0], p1[1], p1[2])
+    # Step 1: Sample densities at vertices
+    d0 = density_func(p0[0], p0[1], p0[2])
+    d1 = density_func(p1[0], p1[1], p1[2])
     
-    # 2. Calculate gradient at p0 using forward differences
-    # n0.x = d(p0.x+1, p0.y, p0.z) - v0
-    # n0.y = d(p0.x, p0.y+1, p0.z) - v0
-    # n0.z = d(p0.x, p0.y, p0.z+1) - v0
-    n0 = Vector3(
-        d(p0[0] + 1, p0[1], p0[2]) - v0,
-        d(p0[0], p0[1] + 1, p0[2]) - v0,
-        d(p0[0], p0[1], p0[2] + 1) - v0
-    )
+    # Check for sign change or intersection validity
+    # If both are on the same side of iso_level, no intersection occurs on this edge.
+    if (d0 - iso_level) * (d1 - iso_level) > 0:
+        return None  # No intersection
+
+    # Step 2: Calculate gradient at p0 using forward differences
+    # d0_next_x = density at (p0.x + 1, p0.y, p0.z)
+    d0_next_x = density_func(p0[0] + 1, p0[1], p0[2])
+    d0_next_y = density_func(p0[0], p0[1] + 1, p0[2])
+    d0_next_z = density_func(p0[0], p0[1], p0[2] + 1)
     
-    # 3. Calculate gradient at p1 using forward differences
-    # n1.x = d(p1.x+1, p1.y, p1.z) - v1
-    # n1.y = d(p1.x, p1.y+1, p1.z) - v1
-    # n1.z = d(p1.x, p1.y, p1.z+1) - v1
-    n1 = Vector3(
-        d(p1[0] + 1, p1[1], p1[2]) - v1,
-        d(p1[0], p1[1] + 1, p1[2]) - v1,
-        d(p1[0], p1[1], p1[2] + 1) - v1
-    )
+    n0_x = d0_next_x - d0
+    n0_y = d0_next_y - d0
+    n0_z = d0_next_z - d0
     
-    # 4. Interpolate normals
-    # Using linear interpolation based on distance to iso-level
-    # Weight for n0 is proportional to (v1 - iso_level) ? No, standard lerp t is (iso - v0)/(v1 - v0)
-    # However, source code implies LerpByDensity uses density values directly.
-    # A robust average is simply (n0 + n1) / 2 if no specific weighting is mandated by the source's LerpByDensity.
-    # The source code snippet shows: this.normal = LerpByDensity(n0, n1, data)
-    # where data contains v0, v1, iso_level.
-    # Assuming standard density-weighted lerp for position, we apply similar logic to normals.
+    # Step 3: Calculate gradient at p1 using forward differences
+    # d1_next_x = density at (p1.x + 1, p1.y, p1.z)
+    d1_next_x = density_func(p1[0] + 1, p1[1], p1[2])
+    d1_next_y = density_func(p1[0], p1[1] + 1, p1[2])
+    d1_next_z = density_func(p1[0], p1[1], p1[2] + 1)
     
-    # Calculate interpolation factor t based on density
-    # t = 0 at p0, t = 1 at p1
-    denominator = v1 - v0
-    if denominator == 0:
-        t = 0.5 # Fallback
+    n1_x = d1_next_x - d1
+    n1_y = d1_next_y - d1
+    n1_z = d1_next_z - d1
+    
+    # Step 4: Interpolate normals
+    # Calculate interpolation factor t based on density values
+    # Avoid division by zero if d0 == d1
+    if d1 == d0:
+        t = 0.5
     else:
-        t = (iso_level - v0) / denominator
+        t = (iso_level - d0) / (d1 - d0)
         
-    # Interpolate normal
-    edge_normal = n0 + t * (n1 - n0)
+    # Linear interpolation of normals
+    n_edge_x = (1 - t) * n0_x + t * n1_x
+    n_edge_y = (1 - t) * n0_y + t * n1_y
+    n_edge_z = (1 - t) * n0_z + t * n1_z
     
-    # Normalize the result to ensure it is a unit vector
-    edge_normal = edge_normal.normalize()
-    
-    return edge_normal
+    # Normalize the resulting normal vector
+    magnitude = sqrt(n_edge_x**2 + n_edge_y**2 + n_edge_z**2)
+    if magnitude == 0:
+        return None # Degenerate case
+        
+    return (n_edge_x / magnitude, n_edge_y / magnitude, n_edge_z / magnitude)
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Boundary Conditions:** If $P_0$ or $P_1$ is on the grid boundary, forward differences may access out-of-bounds memory. Use backward differences or clamp to the nearest valid neighbor [G].
-*   **Degenerate Gradients:** If the scalar field is constant along an axis, the gradient component is zero. This is valid but may result in a zero vector if all components are zero.
-*   **Incorrect Normals:** Interpolating normals directly can result in incorrect orientations if the vertex gradients are not consistent with the surface topology. Calculating per-face normals is suggested as an alternative if triangle generation is available, though this requires additional steps [S1, S2, unofficial].
+- **Boundary Conditions:** Forward differences require accessing neighbors $(x+1, y, z)$, etc. If $p_0$ or $p_1$ lies on the boundary of the grid, these neighbors may be out of bounds. The implementation must handle boundary checks, typically by clamping coordinates or using one-sided differences [S1, S2, unofficial].
+- **Degenerate Normals:** If the density function is flat (constant) in a region, the gradient will be zero, resulting in a zero vector. Normalizing a zero vector is undefined. Guard against this by checking the magnitude before normalizing [S1, S2, unofficial].
+- **Incorrect Interpolation:** Simply averaging $\mathbf{n}_0$ and $\mathbf{n}_1$ without weighting by the intersection position $t$ can lead to inaccurate normals, especially if the intersection point is close to one vertex [S1, S2, unofficial].
+- **Normal Direction Consistency:** Ensure that the gradient direction points consistently (e.g., outward from the surface) across the volume. Inconsistent signs in the density function will flip normals.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per edge, as it involves a constant number of scalar field lookups and vector operations.
-*   **Memory Complexity:** $O(1)$ auxiliary space.
-*   **Strengths:** Simple to implement; leverages existing scalar field data; provides a smooth approximation of the surface normal.
-*   **Limitations:** Sensitive to grid resolution; may produce inaccurate normals in regions of high curvature or noise; forward difference approximation is first-order accurate.
+- **Time Complexity:** $O(1)$ per edge, as it involves a fixed number of density queries and arithmetic operations.
+- **Memory Complexity:** $O(1)$ auxiliary space.
+- **Strengths:** Simple to implement; uses local information only; compatible with sparse grid structures if density queries are efficient.
+- **Limitations:** Forward differences are only first-order accurate; sensitive to grid alignment; may produce noisy normals if the density field is noisy. The source notes that interpolating normals this way may result in incorrect normals and suggests calculating per-face normals instead, though this requires triangle generation first [S1, S2, unofficial].
 
 ## Background
-This method is derived from implementations of Dual Contouring where edge normals are needed to define the local coordinate system for feature point placement. It was discussed in the context of debugging normal calculation errors in Unity-based dual contouring implementations [S1, S2, unofficial].
+This method is derived from implementations of Dual Contouring for isosurface extraction, specifically as discussed in community forums regarding feature point calculation and normal estimation [S1, S2, unofficial]. It relies on the principle that the surface normal at an edge intersection can be approximated by interpolating the vertex gradients.
 
 ## Sources
 [S1] Dual Contouring - Finding the feature point, normals off, https://gamedev.stackexchange.com/questions/111387, fetched 2026-10-28 (unofficial)

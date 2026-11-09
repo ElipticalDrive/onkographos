@@ -7,13 +7,13 @@ An optimization for isosurface extraction on Adaptive Mesh Refinement (AMR) data
 
 ## How it works
 **Inputs and outputs:**
-- Input: AMR-KDTree structure, isovalue, cell-centered scalar field data.
-- Output: List of active octants encoded as 64-bit references, ready for ray tracing.
+- Input: AMR-KDTree structure, isovalue, cell-centered scalar field data [S1, unofficial].
+- Output: List of active octants encoded as 64-bit references, ready for ray tracing [S1, unofficial].
 
 **Data structures:**
 - **AMR-KDTree:** Hierarchical structure where leaf nodes store the value range of their finest level cells [S1, unofficial].
-- **Octant Reference:** A 64-bit integer encoding the octant identity.
-  - Bits 0–31: AMR-KDTree leaf index.
+- **Octant Reference:** A 64-bit integer encoding the octant identity [S1, unofficial].
+  - Bits 0–31: AMR-KDTree leaf index [S1, unofficial].
   - Bits 32–63: Octant ID within the leaf [S1, unofficial].
 
 **Steps:**
@@ -21,7 +21,7 @@ An optimization for isosurface extraction on Adaptive Mesh Refinement (AMR) data
 2. **Identify Inner Octants:** For remaining leaves, identify 'inner' octants within non-boundary regions. An 'inner' octant is defined as an octant that is also an octant of the corresponding dual cell [S1, unofficial].
 3. **Merge Octants:** Merge identified inner octants into dual cells. Do not merge octants touching a level boundary [S1, unofficial].
 4. **Set Vertex Values:** For merged dual cells, set vertex values to the cell values. The merged dual cell's vertices coincide with the cell centers [S1, unofficial].
-5. **Compute Active Octants:** Compute the list of active octants in parallel using TBB's `parallel_for` [S1, unofficial].
+5. **Compute Active Octants:** Compute the list of active octants in parallel [S1, unofficial].
 6. **Encode References:** Encode each active octant into a 64-bit reference for the VoxelSource using the layout defined above [S1, unofficial].
 
 **Pseudocode:**
@@ -30,59 +30,34 @@ An optimization for isosurface extraction on Adaptive Mesh Refinement (AMR) data
 ```python
 def optimized_octant_generation(amr_kd_tree, isovalue):
     active_octants = []
+    candidate_leaves = [leaf for leaf in amr_kd_tree.leaves if leaf.min_value <= isovalue <= leaf.max_value]
     
-    # Step 1: Filter leaves
-    candidate_leaves = []
-    for leaf in amr_kd_tree.leaves:
-        if leaf.min_value <= isovalue <= leaf.max_value:
-            candidate_leaves.append(leaf)
-            
-    # Step 5: Parallel computation
-    # Using a pseudo-parallel loop structure
-    def process_leaf(leaf):
-        leaf_octants = []
-        
-        # Step 2 & 3: Identify and merge inner octants
-        # Decompose finest brick into 8 octants
+    # Step 5: Compute active octants in parallel (conceptually using TBB parallel_for)
+    for leaf in candidate_leaves:
         for octant_id in range(8):
-            octant = decompose_octant(leaf, octant_id)
-            
-            # Check if octant touches a level boundary
-            if octant.touches_level_boundary:
-                # Step 4: Naive computation for boundary octants
-                # Vertex values must be computed explicitly to ensure continuity
-                vertex_values = compute_octant_vertices_naive(octant)
-                leaf_octants.append((leaf.index, octant_id, vertex_values))
+            # Determine if octant touches level boundary [G]
+            touches_boundary = False 
+            if touches_boundary:
+                # Compute vertex values for boundary octant using standard octant method [G]
+                vertex_values = [0.0] * 8
+                active_octants.append((leaf.index, octant_id, vertex_values))
             else:
                 # Inner octant: merge into dual cell
-                # Step 4: Set vertex values to cell values
-                # Vertices coincide with cell centers
                 cell_value = leaf.cell_value
-                # Vertices of the dual cell are set to this single value
-                # This avoids recomputing shared vertices 8 times
                 vertex_values = [cell_value] * 8
-                leaf_octants.append((leaf.index, octant_id, vertex_values))
+                active_octants.append((leaf.index, octant_id, vertex_values))
                 
-        return leaf_octants
-
-    # Parallel execution
-    results = parallel_for(candidate_leaves, process_leaf)
-    
-    # Step 6: Encode and collect
-    for leaf_results in results:
-        for leaf_idx, octant_id, vertex_values in leaf_results:
-            # Encode 64-bit reference
-            reference = (leaf_idx << 32) | octant_id
-            active_octants.append({
-                'reference': reference,
-                'vertex_values': vertex_values
-            })
-            
-    return active_octants
+    # Step 6: Encode references
+    encoded_octants = []
+    for leaf_idx, octant_id, vertex_values in active_octants:
+        # Bits 0-31: leaf index, Bits 32-63: octant ID
+        reference = leaf_idx | (octant_id << 32)
+        encoded_octants.append({'reference': reference, 'vertex_values': vertex_values})
+    return encoded_octants
 ```
 
 **Parameters:**
-- **Isosurface Value:** The scalar threshold for extraction.
+- **Isosurface Value:** The scalar threshold for extraction [S1, unofficial].
 - **Parallelism:** TBB `parallel_for` is used for computing active octants [S1, unofficial].
 
 **Edge cases and pitfalls:**
@@ -101,13 +76,13 @@ In the naïve approach, all leaves of the AMR-KDTree are traversed, ignoring tho
 
 **Strengths and limitations:**
 - **Strengths:** Eliminates redundant computation of shared vertex values for inner octants. Maintains crack-free continuity. Simple to implement within existing ray tracing frameworks like OSPRay [S1, unofficial].
-- **Limitations:** Requires careful handling of level boundaries to avoid cracks. Performance gain is dependent on the ratio of inner to boundary octants.
+- **Limitations:** Requires careful handling of level boundaries to avoid cracks. The optimization applies only to non-boundary regions; octants at level boundaries must be processed individually [S1, unofficial].
 
 **When to use:**
-- Use when extracting isosurfaces from large AMR datasets with significant internal regions (non-boundary areas) to reduce computational overhead.
+- Use when extracting isosurfaces from large AMR datasets with significant internal regions to reduce computational overhead [S1, unofficial].
 
 **When not to use:**
-- Not suitable if the dataset is dominated by level boundaries, as the optimization provides less benefit and adds complexity in handling boundary cases.
+- Not suitable if the dataset is dominated by level boundaries, as the optimization provides less benefit and adds complexity in handling boundary cases [S1, unofficial].
 
 ## Background
 Originated in the context of CPU isosurface ray tracing of AMR data, specifically within the OSPRay framework [S1, unofficial]. The method was developed to improve upon the naïve octant generation approach by leveraging the structure of dual cells in non-boundary regions [S1, unofficial]. It is evaluated on datasets such as LandingGear [S1, unofficial].

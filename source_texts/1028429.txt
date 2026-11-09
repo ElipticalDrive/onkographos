@@ -1,0 +1,120 @@
+blade-graphics is still going really strong at idno interactive! (https://idno.se/swap) and while our fork has diverged a little bit I still try to keep up with your fixes :) Anyway, we now have a pretty heavy compute task that runs befo...
+
+Support for multiple submission queues? (async compute) · Issue #329 · kvark/blade · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Support for multiple submission queues? (async compute) #329
+New issue
+Copy link
+New issue
+Copy link
+Open
+#339
+Open
+Support for multiple submission queues? (async compute)#329
+#339
+Copy link
+Labels
+type: featureNew feature or requestNew feature or request
+Description
+ErikWDev
+opened on Apr 10, 2026
+Issue body actions
+blade-graphics is still going really strong at idno interactive! (https://idno.se/swap) and while our fork has diverged a little bit I still try to keep up with your fixes :)
+Anyway, we now have a pretty heavy compute task that runs before our main rendering. I have setup a pair of resources that the compute and render tasks ping-pong.
+The compute task works on resources A, while rendering samples resources B. Next frame the compute works on resoures B while main samples from A and so on.
+I hoped the driver would be able to see this and schedule them better, but In blade on vulkan however, this gets encoded as a compute task with a full pipeline stall in the main queue and they always run sequentially and in sync. Even though the renderpass doesn't sample from the result of the compute, it still waits for it to finish.
+On Apple M1 and M4, the driver succesfully sees that there is no dependency in the current frame and can thus schedule the compute at the same time as the main fragment rendering.
+I don't know if we need any semaphores/MTLSharedEvent with cross-queue intra-frame synchronization (yet 😅), but if we every frame could submit one encoder on the main queue and one encoder on a secondary compute queue, we could still use blade's simple single submit syncpoints from the separate queue submissions to schedule this. I am not very familiar with multiple queues yet though so I really don't know.
+I will be experimenting in the next week to see if I can hack together a version on my fork that just has a second Context::submit_async() that (if the device supports more than one queue) will submit on a secondary queue and otherwise just fallback to the main queue. I will measure and come back with the results to see if the driver is able to figure it out.
+Just wanted to let you know and if you perhaps see a different approach that could solve our usecase I am all ears, and if you have any design suggestions before I potentially submit a PR.
+❤️React with ❤️1Reacted by Dzmitry Malyshau
+Activity
+kvark commented on Apr 13, 2026
+kvark
+on Apr 13, 2026
+Owner
+More actions
+How many passes do you have today in total? I believe the "full pipeline stall" is generally overrated. Any non-ancient hardware would just do an L2 cache flush plus other auxiliary things. It costs around 33us per barrier on NVidia. I'm currently doing heavy profiling for https://github.com/kvark/meganeura and looking at all those barriers closely. Moreover, Ampere-class Nvidia doesn't even get the benefit from multiple queues - the driver just schedules it serially anyway, and you pay extra cost for the driver context switches which you assume are not even happening (since using a separate queue).
+What is the hardware you run the Vulkan backend on?
+P.S. your game looks amazing! I joined your Discord server ("_kvark") - feel free to bug or notify me with anything related. Can't promise I'll be watching, but will be excited to see this shipping.
+ErikWDev commented on Apr 13, 2026
+ErikWDev
+on Apr 13, 2026
+Last edited by ErikWDev
+ContributorAuthor
+More actions
+We have maybe around 20 passes. Various transfers, compute tasks for gpu based culling and drawcall generation, then shadowmaps, fluid simulations in fragment shader, planar refletions, recursive portals and finally the main pass and postprocess with multipass bloom.
+The usecase here we have in the game is that we are rendering dynamic global illumination in realtime in a compute shader xD
+We construct our own BVH acceleration structure which we then raytrace from the probes and accumulate over time
+So while the small stall between passes is not that big, the fact that we cannot overlap the raytracing at all with other non-dependant passes means that we just leave a lot of raytracing on the table and have to have way longer time before convergence.
+On Metal on the other hand, when we structure it with ping-ponging, the driver is able to schedule it asyncrosly with the rest of all the pipelines allowing us to utilise the GPU much more during any downtime in vertex or fragment processing in the following stages
+Here is an old demo of the raytracer: https://youtu.be/qr0zhbsUGe4?is=DluYj6EnnmfiaXCl
+ErikWDev commented on Apr 13, 2026
+ErikWDev
+on Apr 13, 2026
+Last edited by ErikWDev
+ContributorAuthor
+More actions
+Interesting with the fake multiple queues just being scheduled serially.
+re hardware: The Hardware we run the Vulkan backend on will vary a lot as most players will be using windows. We are targeting 60 FPS in 1440p on a NVIDIA GTX 1050 on Windows, but we are also heavily developing on a Macbook Pro M1 and mini M4 as well as various other laptops with intel integrated, nvidia rtx 3060 laptop and an amd linux framework 13 laptop. My main computer has a Radeon RX 6600. We will most likely also be attempting to ship on a nintendo switch 1/2 and want it to run on the steamdeck xP We don't expect highest quality settings everywhere and some targets will ship with alternative solutions and settings..
+We pretty much look at what hardware Cocoon and The Witness run on and have a feeling that we can probably hit what they could but with realtime raytracing on the same hardware
+ErikWDev commented on Apr 13, 2026
+ErikWDev
+on Apr 13, 2026
+Last edited by ErikWDev
+ContributorAuthor
+More actions
+A frame from the game in Metal on a M4 mac mini
+Here running in xcode with a metal profile
+Forced Serial
+When I force the usage of a single probe texture, we can see the raytrace ends up serially after our shadow map rendering and before the reflection and main passes that sample the result
+With ping-pong per frame
+Here instead I have the A/B resources as described in the original issue above, the compute shader renders to A while main samples from B. Now metal is able to interleave the trace really nicely and simultaneously do vertex fragment and compute. WE basically save 3 ms
+It would be really nice to be able to get this on devices that truly support asynchronous compute in Vulkan as well
+ErikWDev commented on Apr 13, 2026
+ErikWDev
+on Apr 13, 2026
+Last edited by ErikWDev
+ContributorAuthor
+More actions
+Here on Radeon RX 6600 in Radeon GPU Profiler, the compute always gets scheduled serially after the shadowmap and before the rendering, even if there is no dependency since blade inserts the full pipeline barrier for all commands (is my guess)
+(ignore timestamps lol, I think something got bugged, the whole thing is about ~7ms in this scenario, but in our worst scenes we start getting closer to 16 ms, though now running on a 2k+ ultrawide monitor with full settings..)
+(also, I know that utilisation is not great xD We have lotss to do in ways of just optimizing the shaders we already have.. But we have had to reduce our ray budget a lot since it always happens serially, but I'd imagine we could have it scale much more nicely and dynamically if we can schedule it async)
+kvark
+added
+type: featureNew feature or requestNew feature or request
+on Apr 13, 2026
+kvark commented on Apr 14, 2026
+kvark
+on Apr 14, 2026
+Owner
+More actions
+How is #339 looking for you?
+ErikWDev commented on Apr 14, 2026
+ErikWDev
+on Apr 14, 2026
+ContributorAuthor
+More actions
+I'll check it out immediately!
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+type: featureNew feature or requestNew feature or request
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

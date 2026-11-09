@@ -1,0 +1,209 @@
+--- v005.md
++++ v006.md
+@@ -4,119 +4,115 @@
+ 
+ ## Overview
+-Vector Icon Volume Rendering is a 3D raster resampling technique that integrates vector field visualization into volume rendering by embedding small billboard images containing vector icons within the splat footprint of scalar data [S1, unofficial]. It solves the problem of visualizing flow direction and magnitude within a volumetric scalar field (such as density clouds) by creating an illusion of coherent flow through stochastic placement and orientation of these icons [S1, unofficial]. It sets itself apart from standard scalar volume rendering by modifying the volume integral to include the rendering of tiny cylinders or icons within the splat neighborhood, and from pure vector visualization by merging the flow representation with the underlying scalar field density [S1, unofficial].
++Vector Icon Volume Rendering is a 3D raster resampling technique that integrates vector field visualization into scalar volume rendering by embedding tiny cylinder-like icons within splat footprints [S1, unofficial]. It solves the problem of visualizing flow direction and magnitude within volumetric data by creating an illusion of coherent motion through stochastic placement and orientation of billboard textures [S1, unofficial]. It differs from standard scalar volume rendering by modifying the volume integral to include directional primitives, and from pure flow visualization by merging these icons with density clouds in a single back-to-front compositing pass [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A 3D scalar field (e.g., density), a 3D vector field (e.g., wind velocity), a transfer function mapping scalar values to RGBA, and a set of pre-defined billboard textures containing vector icons.
+-*   **Outputs:** A 2D image where scalar density is rendered via standard volume splatting, and vector flow is indicated by overlaid, oriented icons.
++*   **Inputs:** A 3D scalar field (e.g., density/altitude), a 3D vector field (e.g., wind velocity), a set of billboard textures containing vector icons, and camera parameters.
++*   **Outputs:** A 2D raster image where scalar volume is composited with directional vector icons.
+ 
+ **Data Structures:**
+-*   **Volume Data:** Stored as a 3D texture or stack of 2D textures on the GPU [S1, unofficial].
+-*   **Transfer Function:** A 1D texture mapping scalar values to color and opacity [S1, unofficial].
+-*   **Billboard Textures:** A set of 2D textures containing vector icons of varying sizes and orientations. These textures are cycled during rendering to simulate motion [S1, unofficial].
++*   **Billboard Textures:** A discrete set of 2D textures. Each texture contains a vector icon (e.g., an arrow or cylinder) and potentially a fading mask. The icons vary in size to indicate depth/orientation relative to the viewer [S1, unofficial].
++*   **Splat Grid:** A regular grid sampling defined on the current sheet parallel to the image plane [S1, unofficial].
+ 
+-**Method Steps:**
+-The method builds upon the slice-based proxy geometry rendering pipeline [Parent]. The specific modifications for vector icons are:
+-
+-1.  **Sheet Construction:** Build volume rendering in sheets oriented parallel to the image plane [S1, unofficial].
+-2.  **Grid Sampling:** Take a regular grid sampling on the current sheet [S1, unofficial].
+-3.  **Splat Placement:** Place an image reconstruction operator (splat) over each grid point [S1, unofficial].
+-4.  **Stochastic Icon Inclusion:** Use a stochastic heuristic to determine whether a specific splat should include a vector icon (cylinder) [S1, unofficial].
+-5.  **Icon Offset:** If the heuristic includes an icon, randomly offset the cylinder from the center of the splat [S1, unofficial].
+-6.  **Billboard Orientation:** Orient the billboard image such that it lies perpendicular to the viewing ray and parallel to the projected vector direction at the splat's center point [S1, unofficial].
+-7.  **Icon Selection:** Select the specific billboard texture based on the flow direction relative to the viewer:
+-    *   If the flow is parallel to the screen, choose the largest icon [S1, unofficial].
+-    *   If the flow is parallel to the viewer’s line of sight, reduce the icon to a small dot [S1, unofficial].
+-    *   Intermediate orientations use intermediate icon sizes to indicate direction into/out of the screen [S1, unofficial].
+-8.  **Color Mapping:** Assign color to the vector icons based on altitude (or another scalar attribute) [S1, unofficial].
+-9.  **Volume Integral Update:** Modify the standard volume integral to include the rendering contribution of the tiny cylinder/icon within the small neighborhood of the splat [S1, unofficial]. Add the volume integral for each pixel under both the scalar splat and the vector icon [S1, unofficial].
+-10. **Compositing:** Composite the sheets in a back-to-front order using alpha blending [S1, unofficial].
+-11. **Animation (Optional):** To alleviate the sparse and discrete representation of icons, cycle through a set of textures where icons move across the texture, fading in and out, to achieve the illusion of continuous motion [S1, unofficial].
++**Steps:**
++1.  **Sheet Generation:** Construct a sheet of proxy geometry oriented parallel to the image plane, intersecting the volume [S1, unofficial].
++2.  **Grid Sampling:** Sample the vector and scalar fields on a regular grid over the current sheet [S1, unofficial].
++3.  **Stochastic Placement:** For each grid point, apply a stochastic heuristic to determine if a vector icon (cylinder) should be rendered [S1, unofficial].
++4.  **Icon Selection and Orientation:**
++    *   Calculate the projected vector direction at the splat's center point [S1, unofficial].
++    *   Orient the billboard image such that it lies perpendicular to the viewing ray and parallel to the projected vector direction [S1, unofficial].
++    *   Select the specific billboard texture based on the flow angle:
++        *   If flow is parallel to the screen, choose the largest icon [S1, unofficial].
++        *   If flow is parallel to the viewer’s line of sight, reduce the icon to a small dot [S1, unofficial].
++    *   If the stochastic heuristic passes, randomly offset the cylinder from the grid center [S1, unofficial].
++5.  **Color Mapping:** Map the scalar value (e.g., altitude) to the color of the vector icon [S1, unofficial].
++6.  **Compositing:**
++    *   Render the scalar field splat (density cloud) for the grid point [S1, unofficial].
++    *   Render the vector icon billboard if selected [S1, unofficial].
++    *   Add the volume integral contributions for each pixel under both the splat and the cylinder [S1, unofficial].
++    *   Composite the results back-to-front [S1, unofficial].
++7.  **Animation (Optional):** To alleviate sparse representation and create motion, cycle through a set of textures where icons move across the texture, fading in and out, at rendering time [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def render_vector_icon_volume(volume_texture, vector_field, transfer_function, billboard_textures, camera):
+-    # Initialize back-to-front compositing buffer
+-    color_buffer = zeros(screen_width, screen_height, 4)
++def render_vector_icon_volume(scalar_field, vector_field, billboard_textures, camera):
++    # 1. Generate sheets parallel to image plane
++    sheets = generate_sheets_parallel_to_image_plane(scalar_field.bounding_box, camera)
+     
+-    # 1. Build sheets oriented parallel to image plane
+-    for sheet in volume_sheets:
+-        # 2. Regular grid sampling on current sheet
+-        for grid_point in sheet.grid:
+-            # 3. Place splat over grid point
+-            splat_footprint = get_splat_footprint(grid_point)
++    # 2. Sort sheets back-to-front
++    sheets.sort(key=lambda s: s.depth_from_camera, reverse=True)
++    
++    frame_buffer = initialize_frame_buffer()
++    
++    for sheet in sheets:
++        # 3. Regular grid sampling on the current sheet
++        grid_points = sample_regular_grid(sheet)
++        
++        for point in grid_points:
++            scalar_val = scalar_field.sample(point.position)
++            vector_val = vector_field.sample(point.position)
+             
+-            # Sample scalar value for standard volume rendering
+-            scalar_val = sample_volume(volume_texture, grid_point.position)
+-            scalar_rgba = sample_transfer_function(transfer_function, scalar_val)
+-            
+-            # 4. Stochastic heuristic for icon inclusion
+-            if stochastic_include_icon(scalar_val, grid_point.position):
+-                # 5. Random offset for icon
++            # 4. Stochastic heuristic for icon placement
++            if stochastic_heuristic(vector_val):
++                # 5. Determine orientation and size
++                projected_vector = project_vector(vector_val, camera)
++                billboard = select_billboard_texture(projected_vector, billboard_textures)
++                
++                # 6. Random offset from center
+                 offset = random_offset()
+-                icon_position = grid_point.position + offset
++                icon_position = point.position + offset
+                 
+-                # 6. Get vector direction at splat center
+-                vector_dir = sample_vector_field(vector_field, grid_point.position)
++                # 7. Orientation: Perpendicular to view ray, parallel to projected vector
++                billboard_orientation = compute_billboard_orientation(
++                    camera.view_direction, 
++                    projected_vector
++                )
+                 
+-                # 7. Determine billboard orientation and selection
+-                # Orient billboard perpendicular to viewing ray and parallel to projected vector
+-                billboard_transform = create_billboard_transform(vector_dir, camera.view_direction)
++                # 8. Color based on altitude/scalar value
++                icon_color = map_scalar_to_color(scalar_val)
+                 
+-                # Select icon size based on flow alignment
+-                if is_parallel_to_screen(vector_dir, camera):
+-                    icon_tex = billboard_textures[LARGEST_ICON]
+-                elif is_parallel_to_view(vector_dir, camera):
+-                    icon_tex = billboard_textures[SMALL_DOT]
+-                else:
+-                    icon_tex = interpolate_icon_size(vector_dir, camera, billboard_textures)
++                # 9. Render and composite
++                # Render scalar splat
++                render_splat(frame_buffer, point.position, scalar_val, billboard_textures[0]) # Assuming scalar is base splat
+                 
+-                # 8. Color icons by altitude
+-                icon_color = map_altitude_to_color(icon_position.y)
+-                
+-                # 9. Render icon into buffer (additive to scalar splat)
+-                render_billboard(icon_tex, icon_position, billboard_transform, icon_color, color_buffer)
+-            
+-            # Render scalar splat
+-            render_splat(splat_footprint, scalar_rgba, color_buffer)
+-            
+-        # 10. Composite sheet back-to-front (handled by depth sorting of sheets)
+-        composite_sheet(color_buffer)
++                # Render vector icon
++                render_billboard(
++                    frame_buffer, 
++                    icon_position, 
++                    billboard, 
++                    billboard_orientation, 
++                    icon_color
++                )
++    
++    return frame_buffer
+ 
+-    return color_buffer
++def select_billboard_texture(projected_vector, textures):
++    # Select largest icon if flow parallel to screen
++    if is_parallel_to_screen(projected_vector):
++        return textures.largest_icon
++    
++    # Reduce to small dot if flow parallel to line of sight
++    if is_parallel_to_view_direction(projected_vector):
++        return textures.smallest_dot
++    
++    # Intermediate sizes for other angles
++    return textures.get_icon_for_angle(projected_vector)
+ ```
+ 
+ **Parameters:**
+-*   **Stochastic Heuristic Threshold:** Not given in the sources. [G] Typically a random value compared against a probability derived from vector magnitude or density.
+-*   **Icon Size Scaling:** Not given in the sources. [G] Maps the angle between the vector and view direction to a discrete set of icon sizes.
+-*   **Texture Cycling Rate:** Not given in the sources. [G] Determines the speed of the motion illusion.
+-
+-**Edge Cases and Pitfalls:**
+-*   **Sparse Representation:** The discrete nature of icons can make flow difficult to understand in regions with low vector density [S1, unofficial].
+-*   **Occlusion:** Icons may be occluded by high-opacity scalar regions if not carefully composited.
+-*   **Precision:** Random offsetting requires careful handling of floating-point precision to avoid jittering artifacts in animation.
+-
+-## Subtopics
+-
+-### Billboard Vector Icons
+-A specific implementation where icons are rendered as 2D quads always facing the camera, embedded within the splat. Chosen when simple directional cues are sufficient. [S1, unofficial]
+-
+-### Vector Icon Splatting with Billboard Textures
+-Uses pre-rendered textures for icons to improve performance. Chosen when rendering speed is critical and icon variety is limited. [S1, unofficial]
+-
+-### Volume Rendering with Embedded Vector Icons
+-The general technique of modifying the splat footprint to include vector data. Chosen for merging scalar and vector visualization. [S1, unofficial]
++*   **Stochastic Heuristic Threshold:** Not given in the sources.
++*   **Grid Resolution:** Not given in the sources.
++*   **Icon Size Scaling:** Not given in the sources.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of grid points in the sheet and the number of splats. The stochastic check and icon selection add constant overhead per splat.
+-*   **Memory Complexity:** Requires storage for the 3D volume texture, 1D transfer function, and a set of billboard textures. The texture cycling mechanism requires storing multiple icon variations.
+-*   **Performance:** Efficient on standard rasterization hardware as it leverages the existing splatting pipeline. Performance degrades if the number of billboard textures is large or if complex blending is required.
+-*   **Strengths:** Intuitive visualization of flow direction and magnitude; merges well with scalar density; creates illusion of motion through animation.
+-*   **Limitations:** Sparse representation can obscure flow; stochastic placement may lead to inconsistent visual density; discrete icon sizes limit smooth directional representation.
+-*   **When to Use:** When visualizing wind fields, climate simulations, or other vector fields within a volumetric scalar context.
+-*   **When Not to Use:** When precise, continuous flow lines are required (use streamlines or line bundles instead) [S1, unofficial].
++*   **Time Complexity:** Linear with respect to the number of grid points and sheets. The stochastic check and texture selection are constant time per point.
++*   **Memory Complexity:** Depends on the number of billboard textures and the volume data. The discrete nature of icons reduces memory compared to dense ray casting but requires texture storage.
++*   **Strengths:** Provides clear directional cues; merges scalar and vector fields seamlessly; creates an illusion of coherent flow through animation and stochastic placement.
++*   **Limitations:** Sparse and discrete representation can make flow difficult to understand; relies on stochastic placement which may lead to visual noise or gaps.
++*   **When to use:** When visualizing time-varying wind or fluid flow fields where direction is critical and must be integrated with density information.
++*   **When not to use:** When dense, continuous flow lines are required, or when the vector field is too sparse for the stochastic method to provide meaningful coverage.
+ 
+ ## Background
+-The technique was developed by Crawfis and Max [S1, unofficial]. It was presented at the 9th International Symposium on Flow Visualization, Heriot-Watt University, Edinburgh, 2000 [S1, unofficial]. The work builds on earlier 3D raster resampling techniques where volume rendering was built up in sheets [S1, unofficial]. The authors also developed related techniques such as Line Bundles, which rely on rendering and compositing many semitransparent line segments [S1, unofficial].
++Originating from the work of Crawfis and Max, this technique was developed as a 3D raster resampling method for volume rendering [S1, unofficial]. It was applied to time-varying wind fields and global climate simulations, where white density clouds represented cloudiness and colored vector icons represented wind velocity [S1, unofficial]. The method was presented at the 9th International Symposium on Flow Visualization in 2000 [S1, unofficial]. It builds on the concept of embedding vector icons directly into the splat footprint to indicate flow direction and magnitude [S1, unofficial].
+ 
+ ## Sources

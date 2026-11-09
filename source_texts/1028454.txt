@@ -1,0 +1,236 @@
+Contribute to aether-bench/sentry__sentry__aether-v19__PR95633__20261011 development by creating an account on GitHub.
+
+feat(uptime): Add ability to use queues to manage parallelism by pranav100000 · Pull Request #1 · aether-bench/sentry__sentry__aether-v19__PR95633__20261011 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+pranav100000
+commented
+Oct 11, 2026
+Copy link
+Copy Markdown
+One potential problem we have with batch processing is that any one slow item will clog up the whole batch. This pr implements a queueing method instead, where we keep N queues that each have their own workers. There's still a chance of individual items backlogging a queue, but we can try increased concurrency here to reduce the chances of that happening
+wedamija
+added 8 commits
+July 16, 2025 12:42
+feat(uptime): Add ability to use queues to manage parallelism
+…
+eef04c7
+```
+One potential problem we have with batch processing is that any one slow item will clog up the whole batch. This pr implements a queueing method instead, where we keep N queues that each have their own workers. There's still a chance of individual items backlogging a queue, but we can try increased concurrency here to reduce the chances of that happening
+```
+fix test
+d84eb08
+guarantee calling complete_offset
+1ffbe69
+fix redundancy
+9cd3555
+use defaultdict for locks
+a42bcc8
+better way to create locks efficiently
+1ccdfbf
+add comment
+349d71b
+remove gap test
+9966ec5
+pranav100000
+commented
+Oct 11, 2026
+Copy link
+Copy Markdown
+Author
+aether review
+aether-agent
+Bot
+requested changes
+Oct 11, 2026
+View reviewed changes
+aether-agent
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🤖 Reviewer · Review PR #1: feat(uptime): Add ability to use queues to manage parallelism · codex · gpt-6-astra
+Reviewed exact head 9966ec5a13e331659c3ea00981f9b11b0faf821f: 29 deduplicated findings (1 p1, 9 p2, 19 nits). The normal-rebalance path can commit unprocessed results and blocks merging.
+Coverage: nine independent whole-diff reviews and twelve statement auditors; all 1,381 changed/context/deleted hunk entries covered twice (2,762 ledger entries). Unaudited lines: none. Every DEFECT/LATENT ledger row was read and merged.
+Verification recorded at this head: stock Semgrep p/default/p/security-audit, Ruff and Bandit, plus focused Python 3.13/Arroyo 2.28 probes reproducing lifecycle/filtering failures, sparse-offset behavior, a hash-seed test flake, and a conditional DLQ race. No full test suite was run; other findings are source-traced.
+Comment thread
+src/sentry/remote_subscriptions/consumers/result_consumer.py
+commit(commit_data)
+return SimpleQueueProcessingStrategy(
+queue_pool=self.queue_pool,
+aether-agent
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+[P1] 🤖 Reviewer · codex · gpt-6-astra
+The factory reuses one pool, but each assignment-scoped strategy permanently shuts that pool down in close(); Arroyo closes/recreates strategies during normal rebalances. The replacement therefore rejects every enqueue, and submit() marks those unprocessed messages complete, allowing permanent result loss.
+Trigger: a rebalance followed by another valid result; reproduced with the actual queue implementation. Fix: create a fresh pool/tracker per assignment, or correctly retain/drain factory-owned workers across strategy lifetimes, and never acknowledge failed admission. (found by 9 of 9 reviewers, 2 of 2 auditors)
+Comment thread
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+self.workers: list[OrderedQueueWorker[T]] = []
+for i in range(num_queues):
+work_queue: queue.Queue[WorkItem[T]] = queue.Queue()
+aether-agent
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+[P2] 🤖 Reviewer · codex · gpt-6-astra
+queue.Queue() has unlimited capacity, and this strategy never raises Arroyo's MessageRejected, so the promised backpressure does not exist. A slow or blocked group lets Kafka consumption retain decoded results, original payloads and offset sets until memory exhaustion.
+Trigger: arrivals outpace a queue's worker for a sustained interval. Fix: bound total admitted/uncommitted work and reject full-queue submissions nonblockingly without acknowledging them. (found by 9 of 9 reviewers, 2 of 2 auditors)
+Comment thread
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+def shutdown(self) -> None:
+"""Gracefully shutdown all workers."""
+for worker in self.workers:
+worker.shutdown = True
+aether-agent
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+[P2] 🤖 Reviewer · codex · gpt-6-astra
+Setting the worker stop flag before shutdown(immediate=False) makes the loop at line 129 exit instead of draining the queue. Already accepted results remain unprocessed; retained Kafka partitions can also continue from already-fetched positions after strategy recreation.
+Trigger: one executing item plus another queued item when shutdown starts; reproduced with a blocked first callback. Fix: stop accepting puts, let graceful workers consume until queue.ShutDown, then join; reserve immediate abandonment for termination. (found by 9 of 9 reviewers, 2 of 2 auditors)
+Comment thread
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+)
+def close(self) -> None:
+self.shutdown_event.set()
+aether-agent
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+[P2] 🤖 Reviewer · codex · gpt-6-astra
+The commit loop is stopped and joined before workers finish, with no final collection afterward. Results completing during the subsequent pool shutdown never reach the commit callback and are replayed after a clean restart/rebalance.
+Trigger: an in-flight callback finishes after the commit thread exits; reproduced. Fix: drain workers first, then collect and flush the final completed frontier before ending the strategy. (found by 9 of 9 reviewers, 2 of 2 auditors)
+Comment thread
+src/sentry/remote_subscriptions/consumers/result_consumer.py
+def commit_offsets(offsets: dict[Partition, int]):
+# We add + 1 here because the committed offset should represent the next offset to read from
+commit_data = {partition: offset + 1 for partition, offset in offsets.items()}
+commit(commit_data)
+aether-agent
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+[P2] 🤖 Reviewer · codex · gpt-6-astra
+This adapter never supplies force=True, and join() has no forced flush like the existing CommitOffsets.join(). Arroyo can merely stage this offset under its commit policy while the tracker considers it committed; partition revocation then deletes the staged offset.
+Trigger: shutdown's last callback occurs within the one-second policy interval after the previous broker commit, even if all work already finished. Fix: preserve the Commit force argument and force-flush the final frontier after draining. (found by 9 of 9 reviewers, 2 of 2 auditors)
+Comment thread
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+self.commit_function = commit_function
+self.shutdown_event = threading.Event()
+self.commit_thread = threading.Thread(target=self._commit_loop, daemon=True)
+aether-agent
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+[nit] 🤖 Reviewer · codex · gpt-6-astra
+LATENT: moving Commit to a background thread assumes its owner is thread-safe, which the contract does not establish; Arroyo's main-thread DLQ produce() and commit-time flush() both inspect/pop the same deque without locking. In a DLQ-enabled composition, interleaving those operations can remove a pending delivery future without waiting for it, losing the commit durability gate.
+Trigger: concurrent DLQ production and background commit with a completed head followed by a pending future; a focused probe against pinned Arroyo reproduced the lost pending future (current uptime registration has no DLQ policy). Fix: perform commits from the consumer's poll/join thread, or establish synchronization across all shared callback state. (found by 1 of 9 reviewers, 1 of 2 auditors)
+Comment thread
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+committable = self.queue_pool.offset_tracker.get_committable_offsets()
+if committable:
+aether-agent
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+[nit] 🤖 Reviewer · codex · gpt-6-astra
+LATENT: only invoking the commit callback for newly committable offsets assumes every successful call durably commits them, but Arroyo may merely stage them under a slower commit policy. Once mark_committed() removes that frontier, an idle consumer never calls the callback again to flush the staged batch.
+Trigger: compose this generic strategy with a commit interval longer than its one-second tick, process a final batch before the policy permits committing, then receive no more messages (the current CLI fixes a one-second policy). Fix: preserve periodic empty-offset commit polling, as CommitOffsets.poll() does, independently of new completions. (found by 1 of 9 reviewers, 0 of 2 auditors)
+Comment thread
+src/sentry/remote_subscriptions/consumers/result_consumer.py
+queue_pool=self.queue_pool,
+decoder=partial(self.decode_payload, self.topic_for_codec),
+grouping_fn=self.build_payload_grouping_key,
+commit_function=commit_offsets,
+aether-agent
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+[nit] 🤖 Reviewer · codex · gpt-6-astra
+Replacing the terminal CommitOffsets step removes its throttled arroyo.consumer.latency emission without an equivalent in the new strategy. Switching an existing uptime consumer to queue mode therefore silently removes its timestamp-to-completion latency signal; queue depth is not a replacement.
+Trigger: select the new mode for a consumer currently emitting that metric through any existing mode. Fix: preserve equivalent latency reporting using the retained message timestamp in the completion/commit path. (found by 1 of 9 reviewers, 0 of 2 auditors)
+Comment thread
+tests/sentry/uptime/consumers/test_results_consumer.py
+guid = result["guid"]
+expected_guids.append(guid)
+results.append(result)
+self.send_result(result, consumer=consumer)
+aether-agent
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+[nit] 🤖 Reviewer · codex · gpt-6-astra
+These new async tests reuse send_result(), which always sends partition 1/offset 1 (lines 98-99), although the strategy was assigned partition 0. Multiple in-flight results collapse into one tracker entry, and permissive mock commits hide both early completion and the unassigned partition.
+Trigger: this loop submits five results before processing finishes; completing the first can make their shared offset committable. Fix: use distinct monotonic offsets in the assigned partition for asynchronous fixtures and assert commits cannot pass outstanding work. (found by 1 of 9 reviewers, 0 of 2 auditors)
+Comment thread
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+if committable:
+metrics.incr(
+"remote_subscriptions.queue_pool.offsets_committed",
+aether-agent
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+[nit] 🤖 Reviewer · codex · gpt-6-astra
+The offsets_committed counter increments before the commit callback, so failed attempts are reported as successful progress. During a broker/commit failure it keeps rising on retries even though no offsets were committed.
+Trigger: the callback raises at line 287. Fix: distinguish attempts from successes and emit a success metric only after acknowledgement; name staging-only metrics accordingly if the throttled callback has not durably committed. (found by 1 of 9 reviewers, 0 of 2 auditors)
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

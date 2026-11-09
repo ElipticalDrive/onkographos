@@ -3,41 +3,46 @@
 Also called: Forced Sample Count MSAA Voxelization
 
 ## Overview
-This method enables Multi-Sample Anti-Aliasing (MSAA) rasterization behavior for voxelization without requiring the allocation and binding of an MSAA render target. By leveraging the DirectX 11.1 "Forced Sample Count" feature, it achieves the coverage benefits of MSAA rasterization while reducing video memory (vidmem) consumption compared to standard MSAA voxelization techniques [S1, S2, unofficial]. It serves as a memory-efficient alternative to binding an MSAA render target for conservative rasterization effects [S2, unofficial].
+This method leverages the DirectX 11.1 "Forced Sample Count" feature to perform Multi-Sample Anti-Aliasing (MSAA) rasterization without requiring a bound MSAA render target [S1, S2, unofficial]. It serves as a memory-efficient alternative to standard MSAA voxelization, which necessitates allocating an MSAA render target in video memory (vidmem) [S2, unofficial]. By decoupling the rasterization sample count from the render target format, it reduces vidmem overhead while providing coverage-based voxelization [S1, S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- **Input:** A mesh or primitive set to be voxelized; a target voxel grid (texture or buffer).
-- **Output:** Voxel occupancy data in the target grid.
+*   **Input:** A set of voxel primitives (typically cubes or quads representing occupied voxels) and a target voxel grid resolution.
+*   **Output:** A voxel grid (scalar field) populated with occupancy data.
 
 **Data Structures:**
-- **Render Target:** A standard single-sample render target (or depth/stencil buffer) is used. No MSAA render target is allocated [S1, S2, unofficial].
-- **Rasterizer State:** Configured with the `ForcedSampleCount` flag set to the desired number of samples (e.g., 4 or 8) [S1, S2, unofficial].
+*   **Render Target:** A standard single-sampled (non-MSAA) render target (e.g., `DXGI_FORMAT_R8G8B8A8_UNORM` or similar format suitable for the shader output).
+*   **Voxel Grid:** A 3D texture or structured buffer representing the voxel space, updated via the pixel shader.
 
 **Steps:**
-1. Configure the DirectX 11.1 rasterizer state to enable MSAA rasterization by setting the `ForcedSampleCount` parameter to $N$ samples, where $N > 1$ [S1, S2, unofficial].
-2. Bind a standard (non-MSAA) render target to the output merger stage [S1, S2, unofficial].
-3. Issue draw calls for the geometry. The GPU rasterizer evaluates coverage for each primitive against the $N$ subsamples per pixel [S1, S2, unofficial].
-4. In the pixel shader, write voxel data based on the rasterization coverage. Since no MSAA render target is bound, the shader writes to a single-sample location, but the rasterizer's coverage mask determines which pixels/subsamples are active [S1, S2, unofficial].
-5. Resolve or accumulate the results into the voxel grid [S1, S2, unofficial].
+1.  **Configure Rasterizer State:** Create a `D3D11_RASTERIZER_DESC` structure. Set `SampleDesc.Count` to the desired number of samples (e.g., 4 or 8) and `SampleDesc.Quality` to 0. Crucially, enable the `ForcedSampleCount` flag (or equivalent driver-specific extension/feature) if available, or rely on the DX11.1 capability to override sample counts during draw calls [S1, S2, unofficial].
+2.  **Bind Render Target:** Bind a standard, non-MSAA render target view (RTV) to the output merger stage [S1, S2, unofficial].
+3.  **Draw Primitives:** Issue draw calls for the voxel primitives. The rasterizer will generate fragments for each sample location defined by the MSAA sample mask, even though the final render target is single-sampled [S1, S2, unofficial].
+4.  **Pixel Shader Execution:** The pixel shader executes for each covered sample. Inside the shader, determine which voxel grid cell each sample falls into.
+5.  **Atomic Update:** Use atomic operations to update the voxel grid. For each sample, calculate the voxel index $(i, j, k)$ and perform an atomic OR or SET operation to mark the voxel as occupied [G].
+6.  **Resolve:** Since no MSAA render target is bound, no resolve pass is needed. The single-sampled target contains the final aggregated result (or the shader handles aggregation per sample directly into the voxel grid) [S1, S2, unofficial].
+
+**Formulas:**
+*   **Sample Coverage:** A primitive covers a sample if the sample point lies within the primitive's bounds. The rasterizer determines this coverage automatically [S1, S2, unofficial].
+*   **Voxel Index:** For a sample at screen position $(x, y)$, the corresponding voxel index is derived from the fragment's world-space position transformed into voxel space [G].
 
 **Parameters:**
-- **ForcedSampleCount:** The number of subsamples to use for rasterization coverage. Typical values are 4 or 8 [S1, S2, unofficial].
+*   **Sample Count:** Typically 4 or 8, depending on the desired anti-aliasing quality and performance trade-off [S1, S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Holes:** This method is not "genuine" conservative rasterization. Primitives that lie in-between subsamples may not be voxelized properly, leading to "holes" in the voxelization [S1, S2, unofficial].
-- **Mitigation:** To avoid holes, the voxel grid resolution must be sufficiently high (fine-grained) relative to the size of the voxelized primitives [S1, S2, unofficial].
-- **Precision:** Standard rasterization precision applies; this method relies on MSAA coverage rather than explicit conservative rasterization algorithms [S1, S2, unofficial].
+*   **Holes:** This method is described as "relatively aggressive" and is not "genuine conservative rasterization" [S1, S2, unofficial]. Primitives that lie in-between subsamples may not be voxelized properly, leading to "holes" in the voxel grid [S1, S2, unofficial].
+*   **Mitigation:** To avoid holes, ensure the voxel grid resolution is sufficiently high (fine-grained) relative to the size of the voxelized primitives [S1, S2, unofficial].
+*   **Precision:** Standard rasterization precision applies; sub-pixel precision is limited by the sample count [S1, S2, unofficial].
 
 ## Operating characteristics
-- **Memory:** Reduces vidmem cost compared to standard MSAA voxelization, which requires an MSAA render target [S2, unofficial]. The memory savings come from not allocating the multi-sample buffer [S1, S2, unofficial].
-- **Performance:** Performance impact depends on the forced sample count. MSAA rasterization is generally more expensive than single-sample rasterization but cheaper than full MSAA rendering with resolve [S1, S2, unofficial].
-- **Accuracy:** Less accurate than genuine conservative rasterization. It is described as a "relatively aggressive method" due to the potential for holes [S1, S2, unofficial].
-- **When to use:** When vidmem is constrained and a high-resolution voxel grid can mitigate coverage holes [S1, S2, unofficial].
-- **When not to use:** When strict conservative rasterization is required and holes are unacceptable, or when the voxel grid resolution is too low to prevent gaps [S1, S2, unofficial].
+*   **Memory:** Reduces vidmem cost compared to standard MSAA voxelization by avoiding the allocation of an MSAA render target [S2, unofficial].
+*   **Performance:** Performance depends on the number of samples and the complexity of the pixel shader. The overhead of MSAA rasterization is incurred, but the memory bandwidth cost of resolving an MSAA target is saved [S1, S2, unofficial].
+*   **Quality:** Provides better coverage than conventional rasterization but is less robust than true conservative rasterization [S1, S2, unofficial].
+*   **When to use:** When vidmem is constrained and a moderate level of coverage accuracy is acceptable, provided the voxel grid is high-resolution enough to mitigate holes [S1, S2, unofficial].
+*   **When not to use:** When strict conservative rasterization is required to prevent holes, or when the voxel grid resolution is too low to handle the aggressive nature of this method [S1, S2, unofficial].
 
 ## Background
-This technique was introduced in the context of GPU voxelization optimization, specifically addressing the memory overhead of MSAA-based voxelization. It leverages features available in DirectX 11.1 [S1, S2, unofficial].
+This technique was discussed in the context of GPU voxelization basics, highlighting the trade-offs between different rasterization methods [S1, S2, unofficial]. It was presented as a practical optimization for DirectX 11.1 hardware, allowing developers to utilize MSAA coverage benefits without the associated memory penalty [S1, S2, unofficial].
 
 ## Sources
 [S1] 【转】The Basics of GPU Voxelization - 竹庭, https://www.cnblogs.com/hustztz/p/7575729.html, fetched 2026-10-27 (unofficial)

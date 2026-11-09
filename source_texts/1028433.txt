@@ -1,0 +1,184 @@
+Contribute to dd-benchmarking/sentry__sentry__deputydev__PR95633__20261019 development by creating an account on GitHub.
+
+feat(uptime): Add ability to use queues to manage parallelism by rana381 · Pull Request #1 · dd-benchmarking/sentry__sentry__deputydev__PR95633__20261019 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+rana381
+commented
+Oct 18, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+One potential problem we have with batch processing is that any one slow item will clog up the whole batch. This pr implements a queueing method instead, where we keep N queues that each have their own workers. There's still a chance of individual items backlogging a queue, but we can try increased concurrency here to reduce the chances of that happening
+**
+DeputyDev generated PR summary:
+Size XXL: This PR changes include 1000+ lines and should take approximately 6+ hours to review, potentially spread across multiple sessions
+This PR adds an opt-in thread-queue-parallel mode for uptime result processing; the existing default remains serial.
+The consumer decodes each message, derives a grouping key (such as a subscription ID), and routes it to one of a fixed number of queues. --max-workers sets the number of queues and worker threads; if unset, it uses 20.
+Each queue has one worker, so messages for the same key are invoked in FIFO order. Different keys can be processed concurrently, although keys that hash to the same queue share a worker.
+It adds per-partition offset tracking and a background commit loop, plus queue-depth and commit metrics. Tests cover ordering, concurrency, offset handling, shutdown, and Kafka commits.
+A few implementation caveats: processing exceptions are still marked complete in the worker’s finally block, so failed messages can be committed; retry or dead-letter handling should happen before treating them as complete. Also, after committing a prefix, the offset tracker can lose the watermark for a missing offset—for example, it may commit 100 and later 103 when 101 was never tracked, despite the stated gap-blocking behavior. Finally, the queues are unbounded, so queue.put() does not provide the claimed natural backpressure.
+DeputyDev generated PR summary until 9966ec5
+wedamija
+added 8 commits
+July 16, 2025 12:42
+feat(uptime): Add ability to use queues to manage parallelism
+…
+eef04c7
+```
+One potential problem we have with batch processing is that any one slow item will clog up the whole batch. This pr implements a queueing method instead, where we keep N queues that each have their own workers. There's still a chance of individual items backlogging a queue, but we can try increased concurrency here to reduce the chances of that happening
+```
+fix test
+d84eb08
+guarantee calling complete_offset
+1ffbe69
+fix redundancy
+9cd3555
+use defaultdict for locks
+a42bcc8
+better way to create locks efficiently
+1ccdfbf
+add comment
+349d71b
+remove gap test
+9966ec5
+rana381
+commented
+Oct 21, 2026
+View reviewed changes
+Comment thread
+src/sentry/consumers/__init__.py
+click.Option(
+["--mode", "mode"],
+type=click.Choice(["serial", "parallel", "batched-parallel"]),
+type=click.Choice(["serial", "parallel", "batched-parallel", "thread-queue-parallel"]),
+rana381
+Oct 21, 2026
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+DOCUMENTATION: Please distinguish thread-queue-parallel in the CLI help. The current text only says that parallel modes use multithreading, but this mode consistently assigns groups to single-worker FIFO queues to preserve per-group ordering.
+Operators cannot infer the new mode's ordering and queue-assignment behavior from the existing generic help.
+```
+help="The processing mode. thread-queue-parallel assigns each grouping key to a single-worker FIFO queue to preserve per-group order.",
+```
+rana381
+commented
+Oct 21, 2026
+View reviewed changes
+Comment thread
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+except queue.ShutDown:
+break
+except Exception:
+logger.exception(
+rana381
+Oct 21, 2026
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+DOCUMENTATION: Include the consumer identifier and the failed item's partition and offset in this exception log. Logging only worker_id makes a processing failure difficult to correlate with the Kafka input, even though all three fields are available here.
+Concurrent worker failures cannot be tied to the consumer and input offset that failed.
+```
+logger.exception("Unexpected error in queue worker", extra={"identifier": self.identifier, "worker_id": self.worker_id, "partition": str(work_item.partition), "offset": work_item.offset})
+```
+rana381
+commented
+Oct 21, 2026
+View reviewed changes
+Comment thread
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+self.workers: list[OrderedQueueWorker[T]] = []
+for i in range(num_queues):
+work_queue: queue.Queue[WorkItem[T]] = queue.Queue()
+rana381
+Oct 21, 2026
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+CODE_MAINTAINABILTIY: Give these queues a configurable positive capacity. queue.Queue() is unbounded, so put() never applies the documented queue-full backpressure and sustained input above worker capacity can grow the backlog without limit. Each queued item also retains the otherwise unused original message, increasing the memory consumed by that backlog.
+The implementation cannot provide its claimed natural backpressure and can retain an unbounded number of payloads.
+```
+Create each queue with a configured capacity, such as `queue.Queue(maxsize=queue_capacity)`, and omit `WorkItem.message` if it is not needed.
+```
+rana381
+commented
+Oct 21, 2026
+View reviewed changes
+Comment thread
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+def shutdown(self) -> None:
+"""Gracefully shutdown all workers."""
+for worker in self.workers:
+worker.shutdown = True
+rana381
+Oct 21, 2026
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+ERROR: Do not set worker.shutdown before requesting non-immediate queue shutdown. A worker processing an item will see the flag on its next loop check and exit even if its queue still contains work, defeating shutdown(immediate=False) and leaving submitted items unprocessed. Let workers continue until get() raises queue.ShutDown, then join them.
+Graceful shutdown can abandon queued messages instead of draining them.
+```
+Remove the preemptive worker shutdown flag; call `q.shutdown(immediate=False)` and have workers loop until `work_queue.get()` raises `queue.ShutDown` before joining them.
+```
+rana381
+commented
+Oct 21, 2026
+View reviewed changes
+Comment thread
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+"Unexpected error in queue worker", extra={"worker_id": self.worker_id}
+)
+finally:
+self.offset_tracker.complete_offset(work_item.partition, work_item.offset)
+rana381
+Oct 21, 2026
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+ERROR: Only mark an offset complete after successful processing. This finally block completes the offset even when result_processor raises, and the submission exception path likewise completes offsets after decoding or grouping failures. The commit loop can then acknowledge those failed messages, contradicting the successful-processing guarantee and preventing redelivery.
+Processing and submission failures are converted into completed offsets that may be committed permanently.
+```
+Move `complete_offset` to the successful processing path. On processing, decoding, or grouping exceptions, retry, propagate, or apply an explicit dead-letter policy without completing the failed offset.
+```
+rana381
+commented
+Oct 21, 2026
+Copy link
+Copy Markdown
+Author
+DeputyDev has completed a review of your pull request for commit 9966ec5.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

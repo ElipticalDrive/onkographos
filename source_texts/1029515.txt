@@ -1,0 +1,262 @@
+This is a follow up based on #42  from  @sochowski
+Fairly confident the geometry shaders and texture sampling are working as they should at this point, next step is to add some intersection checks in the fragment shader and then sample along the ray within each fragment.
+Image from the current version of examples/amr_spherical_volume_rendering.py showing the radial component of a spherical dataset in the range of 0.5 to 1 in r, 0 to pi/4 in phi, pi/4 to pi/2 in theta.
+
+Spherical volume rendering by chrishavlin · Pull Request #64 · yt-project/yt_idv · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Spherical volume rendering
+#64
+New issue
+Have a question about this project? Sign up for a free GitHub account to open an issue and contact its maintainers and the community.
+Sign up for GitHub
+By clicking “Sign up for GitHub”, you agree to our terms of service and
+privacy statement. We’ll occasionally send you account related emails.
+Already on GitHub?
+Sign in
+to your account
+Closed
+chrishavlin
+wants to merge
+29
+commits into
+yt-project:main
+from
+chrishavlin:spherical_vol_rendering
+Uh oh!
+There was an error while loading. Please reload this page.
+Closed
+Spherical volume rendering
+#64
+Changes from 1 commit
+Commits
+Show all changes
+29 commits
+Select commit
+Hold shift + click to select a range
+f4e9c3b
+Adding temp PR for spherical rendering
+sochowski Dec 3, 2021
+ab78cab
+Merged grid_position and spherical_grid_position to switch vertex sha…
+sochowski Dec 8, 2021
+af7663d
+Temporary PR for spherical rendering 2
+sochowski Dec 20, 2021
+ba3ed48
+Update to do transformations in geometry shader
+matthewturk Dec 20, 2021
+ca6dbfb
+add constant color shader
+matthewturk Dec 20, 2021
+d840d3f
+Organized spherical ray-tracing
+sochowski Jan 21, 2022
+83d793f
+Merge remote-tracking branch 'upstream/main' into spherical_refactoring
+chrishavlin Aug 2, 2022
+4cd83b3
+[pre-commit.ci] auto fixes from pre-commit.com hooks
+pre-commit-ci[bot] Aug 2, 2022
+726aa82
+spherical example to its own, resetn cartesian
+chrishavlin Aug 2, 2022
+3cf8186
+experimenting...
+chrishavlin Dec 1, 2022
+c9a5bff
+working? now only converting to cartesian for GLpos, etc.
+chrishavlin Dec 1, 2022
+065eb6d
+add a shell fragment to the example, skipped linting
+chrishavlin Dec 1, 2022
+ddb69fd
+swap the angles in the transformation
+chrishavlin Dec 2, 2022
+0501c6f
+simplify the example
+chrishavlin Dec 2, 2022
+2cb14a8
+cleanup
+chrishavlin Dec 2, 2022
+ad96eb3
+Merge remote-tracking branch 'upstream/main' into spherical_vol_rende…
+chrishavlin Dec 2, 2022
+fb80cea
+bad merge: add back the constant color shader
+chrishavlin Dec 2, 2022
+65a6abf
+more cleaning
+chrishavlin Dec 2, 2022
+f43d577
+move the spherical uniforms to child
+chrishavlin Dec 6, 2022
+d9a9771
+add a bbox command line arg for example
+chrishavlin Dec 16, 2022
+1ffffb5
+Merge remote-tracking branch 'upstream/main' into spherical_vol_rende…
+chrishavlin Dec 21, 2022
+0474454
+in progress: spherical ray intersections
+chrishavlin Jan 6, 2023
+0031ee8
+vectorize normal plane calc, only do it if spherical
+chrishavlin Jan 9, 2023
+4e4fdec
+lingering changes, they look OK
+chrishavlin Apr 12, 2023
+dbd7240
+Merge remote-tracking branch 'upstream/main' into spherical_vol_rende…
+chrishavlin Jun 6, 2023
+afcef53
+add a simple test
+chrishavlin Jun 6, 2023
+4f73cdd
+only rescale for cartesian
+chrishavlin Jun 8, 2023
+ac9cd00
+move shader constants to include
+chrishavlin Jun 8, 2023
+3cef5b3
+Merge remote-tracking branch 'upstream/main' into spherical_vol_rende…
+chrishavlin Jun 8, 2023
+File filter
+Clear filters
+Conversations
+Failed to load comments. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Jump to
+Jump to file
+Failed to load files. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Diff view
+Diff view
+Prev
+Previous commit
+Next
+Next commit
+Organized spherical ray-tracing
+Loading branch information
+Uh oh!
+There was an error while loading. Please reload this page.
+sochowski
+committed
+Jan 21, 2022
+commit d840d3f80e6f5afb743f2eb9afce1f576645c731
+There are no files selected for viewing
+44 changes: 44 additions & 0 deletions
+44
+yt_idv/shaders/ray_tracing.frag.glsl
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -15,6 +15,20 @@ bool within_bb(vec3 pos)
+return all(left) && all(right);
+}
+vec3 transform_vec3(vec3 v) {
+if (is_spherical) {
+int theta = 2;
+int phi = 1;
+return vec3(
+v[0] * sin(v[phi]) * cos(v[theta]),
+v[0] * sin(v[phi]) * sin(v[theta]),
+v[0] * cos(v[phi])
+);
+} else {
+return v;
+}
+}
+vec3 get_offset_texture_position(sampler3D tex, vec3 tex_curr_pos)
+{
+ivec3 texsize = textureSize(tex, 0); // lod (mipmap level) always 0?
+Expand All
+@@ -30,6 +44,31 @@ vec4 cleanup_phase(in vec4 curr_color, in vec3 dir, in float t0, in float t1);
+// void (vec3 tex_curr_pos, inout vec4 curr_color, float tdelta, float t,
+// vec3 direction);
+void sph_main()
+{
+vec3 ray_position = v_model.xyz;
+vec3 p0 = camera_pos.xyz;
+vec4 curr_color = vec4(0.0);
+vec3 temp_left_edge = transform_vec3(left_edge);
+vec3 temp_right_edge = transform_vec3(right_edge);
+vec3 c_left_edge = min(temp_left_edge, temp_right_edge);
+vec3 c_right_edge = max(temp_left_edge, temp_right_edge);
+Comment thread
+matthewturk
+Jan 6, 2023
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+so once we have these, what do we do?
+chrishavlin
+Jan 6, 2023
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+all those t values are the intersections with the base geometries on which the faces of the spherical voxel lies, so we need to find the t values that actually intersect the voxel, not just the base geometries. Those would be the ray entry/exit points of the current voxel.
+I think those entry/exit points correspond to t_min and t_max of the standard cartesian tracing? So we'd similarly want to take n_samples of the current fragment between those min/max values?
+vec3 range = (c_right_edge + dx/2.0) - (c_left_edge - dx/2.0);
+vec3 nzones = range / dx;
+vec3 ndx = 1.0/nzones;
+vec3 tex_curr_pos = (ray_position - c_left_edge) / range;
+tex_curr_pos = (tex_curr_pos * (1.0 - ndx)) + ndx/2.0;
+bool sampled = sample_texture(tex_curr_pos, curr_color, 0.0, 0.0, vec3(0.0));
+if (sampled) {
+output_color = curr_color;
+} else {
+output_color = vec4(0.0);
+}
+}
+void main()
+{
+// Draws the block outline
+Expand All
+@@ -38,6 +77,11 @@ void main()
+// Obtain screen coordinates
+// https://www.opengl.org/wiki/Compute_eye_space_from_window_space#From_gl_FragCoord
+if (is_spherical) {
+sph_main();
+return;
+}
+vec3 ray_position = v_model.xyz;
+// Five samples
+Expand Down
+Toggle all file notes
+Toggle all file annotations
+Add this suggestion to a batch that can be applied as a single commit.
+This suggestion is invalid because no changes were made to the code.
+Suggestions cannot be applied while the pull request is closed.
+Suggestions cannot be applied while viewing a subset of changes.
+Only one suggestion per line can be applied in a batch.
+Add this suggestion to a batch that can be applied as a single commit.
+Applying suggestions on deleted lines is not supported.
+You must change the existing code in this line in order to create a valid suggestion.
+Outdated suggestions cannot be applied.
+This suggestion has been applied or marked resolved.
+Suggestions cannot be applied from pending reviews.
+Suggestions cannot be applied on multi-line comments.
+Suggestions cannot be applied while the pull request is queued to merge.
+Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

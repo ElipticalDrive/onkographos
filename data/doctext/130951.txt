@@ -1,0 +1,3091 @@
+# Medical Volume Renderer: CSE 528 Computer Graphics
+
+## Overview
+
+This Medical Volume Renderer is an advanced application designed for visualizing and analyzing 3D medical imaging data, with a focus on DICOM series. It offers a range of sophisticated rendering techniques and interactive controls to enhance the exploration of volumetric medical data.
+
+## Features
+
+- **Volume Rendering**: Utilizes ray marching for high-quality 3D visualization of medical data.
+- **Transfer Function Editor**: Customizable color and opacity mapping for highlighting specific structures.
+- **Multiple Rendering Modes**:
+  - Ray Marching
+  - Maximum Intensity Projection (MIP)
+  - Average Intensity Projection
+  - First Hit Projection
+  - Ambient Occlusion
+- **Advanced Shading Options**:
+  - Phong Shading
+  - Cel Shading
+  - PBR-inspired Shading
+  - Toon Shading
+- **Interactive Controls**: Real-time adjustment of rendering parameters.
+- **Spine Segmentation**: Automatic detection and highlighting of spine structures.
+- **Magic Lens**: Focal point for detailed examination of specific regions.
+- **Edge Enhancement**: Improved visibility of structural boundaries.
+- **Dynamic Clipping Planes**: For sectional views of the volume.
+
+## Technical Details
+
+### Dependencies
+
+- OpenGL 3.3+
+- GLFW
+- ImGui
+- NumPy
+- PyDICOM
+- scikit-image
+- SciPy
+
+### Key Components
+
+1. **App**: Main application class managing the rendering loop and user interface.
+2. **VolumeRenderer**: Handles the core volume rendering logic and texture management.
+3. **VolumeControls**: Manages user interface controls for adjusting rendering parameters.
+4. **Shader**: Custom GLSL shaders for volume rendering and post-processing effects.
+
+## Installation
+
+1. Ensure you have Python 3.7+ installed.
+
+2. Install required dependencies:
+   ```bash
+   pip install pyopengl glfw imgui numpy pydicom scikit-image scipy
+
+3. Clone the repository:
+
+   ```bash
+    git clone https://github.com/priscilla100/medical-volume-renderer.git
+4. Navigate to the project directory:
+    ```bash
+    cd medical-volume-renderer
+ 
+ Usage
+
+Place your DICOM series in the data directory.
+Run the application:
+-  ```bash
+   python main.py
+Use the on-screen controls to adjust rendering parameters.
+Navigate the volume using mouse and keyboard controls:
+
+- WASD: Move camera
+- Mouse: Rotate view
+- Arrow keys: Adjust clipping planes
+
+Here is the spine prior to rendering
+![IM000001](https://github.com/user-attachments/assets/68ed7230-dc72-40d5-a3a4-09044e7df9ef)
+
+Adjusting the volume control parameters achieves different volume rendering of the spinal imaging.
+![PBR+AMBIENT OCCLUSION+GS - Copy](https://github.com/user-attachments/assets/927e794d-1219-4136-916c-f85d4c1354ba)
+
+![EDetMax+maxstep+stepsize+densitythreshold+0 08+colorshift0 04+saturation1 63COPY](https://github.com/user-attachments/assets/471f0fac-d455-4bcf-8d93-f868ac3249e3)
+
+![AIP](https://github.com/user-attachments/assets/50bb2758-a400-434f-adc3-6c247ce97dde)
+## Customization
+Modify shader/volume.frag to experiment with different rendering techniques.
+Adjust default parameters in VolumeControls class for different initial visualizations.
+Extend VolumeRenderer class to add support for additional file formats or preprocessing steps.
+
+## Performance Considerations
+
+The application's performance heavily depends on the GPU capabilities.
+Large volume datasets may require significant memory. Consider downsampling for smoother performance on less powerful systems.
+Adjust the max_steps parameter in the shader for a balance between quality and performance.
+
+## Troubleshooting
+
+If the volume doesn't render, check the DICOM file compatibility and ensure the data directory is correctly set.
+For OpenGL-related issues, verify that your graphics drivers are up to date.
+If controls are not responsive, check the GLFW event handling in the App class.
+
+## Future Enhancements
+
+- Multi-volume rendering support
+- CUDA/OpenCL acceleration for preprocessing steps
+- VR/AR integration for immersive visualization
+- Machine learning-based automatic segmentation of additional anatomical structures
+
+Contributing
+Contributions to improve the Medical Volume Renderer are welcome. Please follow these steps:
+
+Fork the repository
+- Create a new branch for your feature
+- Commit your changes
+- Push to the branch
+- Create a new Pull Request
+
+References
+1. Kniss, J., et al. "Interactive Texture-Based Volume Rendering for Large Data Sets."
+2. Kim, S., et al. "Binary Volume Rendering Using Slice-Based Binary Shell."
+3. Zhang, Y., et al. "GPU-Based Visualization of High-Resolution Medical Images."
+
+### main.py
+```
+from app import App
+
+
+def main() -> None:
+    try:
+        app = App()
+        app.run()
+    except Exception as e:
+        raise e
+
+
+if __name__ == '__main__':
+    main()
+```
+
+### app/__init__.py
+```
+from .app import App
+```
+
+### app/app.py
+```
+import glfw
+from OpenGL.GL import *
+from glfw.GLFW import *
+import glm
+from util import Shader
+from shape.volume_renderer import VolumeRenderer
+import math
+import numpy as np
+from util.volume_controls import VolumeControls
+import imgui
+from imgui.integrations.glfw import GlfwRenderer
+import time
+import psutil
+
+class App:
+    def __init__(self, width=1280, height=1020, title="Medical Volume Renderer", dicom_path="data"):
+        self.frame_times = []
+        self.process = psutil.Process()
+        self.width = width
+        self.height = height
+        self.title = title
+        self.dicom_path = dicom_path
+        
+        # Initialize GLFW
+        if not glfw.init():
+            raise RuntimeError("Failed to initialize GLFW")
+        
+        glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
+        glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
+        glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
+        
+        # Create GLFW Window
+        self.window = glfw.create_window(self.width, self.height, self.title, None, None)
+        if not self.window:
+            glfw.terminate()
+            raise RuntimeError("Failed to create GLFW window")
+        
+        glfw.make_context_current(self.window)
+        glfw.swap_interval(1)
+        glfw.set_cursor_pos_callback(self.window, self.mouse_callback)
+        glfw.set_input_mode(self.window, glfw.CURSOR, glfw.CURSOR_DISABLED)
+        
+        # OpenGL Settings
+        glEnable(GL_DEPTH_TEST)
+        glClearColor(0.1, 0.1, 0.1, 1.0)
+        
+        # Initialize Shader
+        self.shader = Shader(
+            vert='shader/volume.vert',
+            tese=None,
+            tesc=None,
+            frag='shader/volume.frag'
+        )
+        self.volume_renderer = VolumeRenderer(dicom_path, self.shader)
+        self.volume_renderer.setup_textures()
+        self.volume_renderer.setup_geometry()
+        self.volume_renderer.spine_segmentation
+        
+        # Add print statements for debugging
+        print("Volume data shape:", self.volume_renderer.volume_data.shape)
+        print("Spine segmentation shape:", self.volume_renderer.spine_segmentation.shape)
+        print("Volume Texture Shape:", self.volume_renderer.volume_data.shape)
+        print("Spine Segmentation Shape:", self.volume_renderer.spine_segmentation.shape)
+        
+        self.controls = VolumeControls(self.volume_renderer, self.shader, self.window)
+        self.controls.apply_initial_parameters()
+        
+        self.imgui_renderer = GlfwRenderer(self.window)  # Initialize imgui renderer
+        
+        # Camera and Projection
+        self.camera_position = glm.vec3(0, 0, 3)
+        self.camera_target = glm.vec3(0, 0, 0)
+        self.camera_up = glm.vec3(0, 1, 0)
+        self.camera_front = glm.vec3(0.0, 0.0, -1.0)
+        self.camera_right = glm.vec3(1.0, 0.0, 0.0)
+        self.camera_speed = 0.08
+        self.yaw = -90.0
+        self.pitch = 0.0
+        glfw.set_input_mode(self.window, glfw.CURSOR, glfw.CURSOR_NORMAL)
+        
+        # Initialize mouse state
+        self.first_mouse = True
+        self.last_x = self.width / 2
+        self.last_y = self.height / 2
+
+    def run(self):
+        while not glfw.window_should_close(self.window):
+            glfw.poll_events()
+            self.imgui_renderer.process_inputs()  # Process ImGui inputs
+            
+            # Start new frame for ImGui
+            imgui.new_frame()
+            self.process_input()
+            self.render()
+            
+            # Render ImGui
+            imgui.render()
+            self.imgui_renderer.render(imgui.get_draw_data())
+            glfw.swap_buffers(self.window)
+        self.cleanup()
+
+    def render(self):
+        start_time = time.perf_counter()
+        
+        # Set default rendering parameters
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        view_matrix = glm.lookAt(self.camera_position, self.camera_target, self.camera_up)
+        projection_matrix = glm.perspective(glm.radians(45.0), self.width / self.height, 0.1, 100.0)
+        self.shader.use()
+        self.shader.setMat4("model", glm.mat4(1.0))
+        self.shader.setMat4("view", view_matrix)
+        self.shader.setMat4("projection", projection_matrix)
+        
+        # Set clipping boundaries
+        self.shader.setVec3("clipMin", glm.vec3(0.0))
+        self.shader.setVec3("clipMax", glm.vec3(1.0))
+        
+        # Update Shader Parameters from Controls
+        if self.controls.params_changed:
+            self.controls.update_shader_uniforms()
+            self.controls.update_transfer_function()  # Update transfer function
+            self.controls.params_changed = False
+        
+        if self.controls.has_changes():
+            params = self.controls.get_current_params()
+            print("Updating shader parameters:")
+            for key, value in params.items():
+                print(f"Setting uniform {key}: {value} (type: {type(value)})")
+                try:
+                    if key == 'spine_color':
+                        spine_color = self.controls.get_current_params()["spine_color"]
+                        self.shader.setVec3("spineColor", glm.vec3(*spine_color))
+                    else:
+                        self.controls.set_shader_uniform(key, value)
+                except Exception as e:
+                    print(f"Error setting parameter {key}: {e}")
+            self.controls.params_changed = False
+
+        # Bind and Draw Volume
+        self.volume_renderer.bind_textures(self.shader)
+        self.volume_renderer.draw()
+        
+        # Render Controls Panel
+        self.controls.render()
+        
+        end_time = time.perf_counter()
+        frame_time = end_time - start_time
+        self.frame_times.append(frame_time)
+        
+        if len(self.frame_times) >= 60:  # Calculate FPS every 60 frames
+            avg_frame_time = sum(self.frame_times) / len(self.frame_times)
+            fps = 1 / avg_frame_time
+            print(f"Average FPS: {fps:.2f}")
+            self.frame_times.clear()
+        memory_usage = self.process.memory_info().rss / (1024 * 1024)  # Convert to MB
+        print(f"Memory Usage: {memory_usage:.2f} MB")
+
+    def cleanup(self):
+        """Clean up OpenGL resources."""
+        self.volume_renderer.cleanup()
+        glfw.terminate()
+
+    def process_input(self):
+        # Camera movement
+        if glfw.get_key(self.window, glfw.KEY_W) == glfw.PRESS:
+            self.camera_position += self.camera_speed * self.camera_front
+        if glfw.get_key(self.window, glfw.KEY_S) == glfw.PRESS:
+            self.camera_position -= self.camera_speed * self.camera_front
+        if glfw.get_key(self.window, glfw.KEY_A) == glfw.PRESS:
+            self.camera_position -= self.camera_right * self.camera_speed
+        if glfw.get_key(self.window, glfw.KEY_D) == glfw.PRESS:
+            self.camera_position += self.camera_right * self.camera_speed
+
+        # Adjust clipping planes
+        if glfw.get_key(self.window, glfw.KEY_UP) == glfw.PRESS:
+            self.volume_renderer.clip_min[2] = min(self.volume_renderer.clip_min[2] + 0.01, 1.0)
+        if glfw.get_key(self.window, glfw.KEY_DOWN) == glfw.PRESS:
+            self.volume_renderer.clip_min[2] = max(self.volume_renderer.clip_min[2] - 0.01, 0.0)
+        if glfw.get_key(self.window, glfw.KEY_LEFT) == glfw.PRESS:
+            self.volume_renderer.clip_min[0] = min(self.volume_renderer.clip_min[0] + 0.01, 1.0)
+        if glfw.get_key(self.window, glfw.KEY_RIGHT) == glfw.PRESS:
+            self.volume_renderer.clip_min[0] = max(self.volume_renderer.clip_min[0] - 0.01, 0.0)
+
+        # Adjust transfer function dynamically
+        if glfw.get_key(self.window, glfw.KEY_T) == glfw.PRESS:
+            new_transfer_function = self.volume_renderer.create_transfer_function()
+            self.volume_renderer.update_transfer_function(new_transfer_function)
+
+    def mouse_callback(self, window, xpos, ypos):
+        if self.first_mouse:
+            self.last_x = xpos
+            self.last_y = ypos
+            self.first_mouse = False
+
+        xoffset = xpos - self.last_x
+        yoffset = self.last_y - ypos
+        self.last_x = xpos
+        self.last_y = ypos
+
+        sensitivity = 0.1
+        xoffset *= sensitivity
+        yoffset *= sensitivity
+
+        self.yaw += xoffset
+        self.pitch += yoffset
+
+        # Clamp pitch to prevent screen flip
+        self.pitch = max(-89.0, min(89.0, self.pitch))
+
+        # Update camera front vector
+        front = glm.vec3()
+        front.x = math.cos(glm.radians(self.yaw)) * math.cos(glm.radians(self.pitch))
+        front.y = math.sin(glm.radians(self.pitch))
+        front.z = math.sin(glm.radians(self.yaw)) * math.cos(glm.radians(self.pitch))
+        self.camera_front = glm.normalize(front)
+        self.camera_right = glm.normalize(glm.cross(self.camera_front, self.camera_up))
+        self.camera_up = glm.normalize(glm.cross(self.camera_right, self.camera_front))
+
+    def cleanup(self):
+        """Clean up resources."""
+        self.controls.cleanup()
+        self.volume_renderer.cleanup()
+        self.imgui_renderer.shutdown()  # Shutdown ImGui renderer
+        glfw.terminate()
+```
+
+### app/window.py
+```
+"""
+STOP. You should not modify this file unless you KNOW what you are doing.
+"""
+
+from glfw.GLFW import *
+from glfw import _GLFWwindow as GLFWwindow
+
+
+class Window:
+    def __init__(self, 
+                 width: int, 
+                 height: int, 
+                 title: str):
+        
+        glfwInit()
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4)
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1)
+        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE)
+        glfwWindowHint(GLFW_RESIZABLE, True)
+        
+        self.window: GLFWwindow = glfwCreateWindow(width, height, title, None, None)
+        
+        if self.window is None:
+            glfwTerminate()
+            raise RuntimeError("failed to create GLFW window")
+    
+        glfwMakeContextCurrent(self.window)
+    def mouse_drag_event(self, window, x, y):
+        pass
+
+    def mouse_scroll_event(self, window, x_offset, y_offset):
+        pass
+
+    def run(self):
+        while not glfw.window_should_close(self.window):
+            glfw.poll_events()
+            self.render(glfw.get_time(), 0)
+            glfw.swap_buffers(self.window)
+
+        glfw.terminate()
+
+    def render(self, time, frame_time):
+        pass
+
+    # def __del__(self):
+    #     glfwDestroyWindow(self.window)
+    #     glfwTerminate()
+```
+
+### shader/volume.frag
+```
+#version 330 core
+in vec3 TexCoords;
+out vec4 FragColor;
+
+// Texture Samplers
+uniform sampler3D volumeTexture;
+uniform sampler1D transferFunction;
+uniform sampler3D spineSegmentationTexture;
+
+// Clipping and Basic Rendering Parameters
+uniform vec3 clipMin;
+uniform vec3 clipMax;
+uniform float density;
+uniform float brightness;
+uniform float contrast;
+uniform float opacity_multiplier;
+uniform float density_threshold;
+uniform int color_map_type;
+uniform int debug_mode;
+
+// Ray Marching Parameters
+uniform int max_steps;
+uniform float step_size;
+
+// Lighting Parameters
+uniform vec3 lightPos[4];
+uniform vec3 viewPos;
+uniform float ambient_intensity;
+uniform float diffuse_intensity;
+uniform float specular_intensity;
+uniform float shininess;
+
+// Advanced Rendering Parameters
+uniform float translucency;
+uniform float zoom;
+uniform int shading_mode;
+uniform int rendering_mode;
+uniform float edge_weight;
+uniform float gradient_threshold;
+uniform float edge_enhancement;
+
+// Color manipulation
+uniform float color_shift;
+uniform float color_saturation;
+uniform vec3 spineColor;
+
+// Color point and opacity point uniforms (added for transfer function flexibility)
+uniform vec3 color_points[5];     // Up to 5 color points
+uniform float color_points_pos[5]; // Corresponding positions
+uniform int num_color_points;
+uniform float opacity_points[5];   // Opacity values
+uniform float opacity_points_pos[5]; // Corresponding positions
+uniform int num_opacity_points;
+
+// Advanced utility functions
+vec3 applySaturationAndShift(vec3 color, float saturation, float shift) {
+    // Convert to HSL
+    float maxVal = max(max(color.r, color.g), color.b);
+    float minVal = min(min(color.r, color.g), color.b);
+    float luminance = (maxVal + minVal) * 0.5;
+    
+    float sat = 0.0;
+    if (maxVal != minVal) {
+        float delta = maxVal - minVal;
+        sat = delta / (1.0 - abs(2.0 * luminance - 1.0));
+    }
+    
+    // Adjust saturation
+    sat *= saturation;
+    
+    // Apply color shift
+    luminance += shift;
+    luminance = clamp(luminance, 0.0, 1.0);
+    
+    return color;
+}
+
+vec3 applyColorMap(float value) {
+    // Enhanced color map with more interpolation and variety
+    switch (color_map_type) {
+        case 0: // Rainbow (Smooth interpolation)
+            return vec3(
+                0.5 + 0.5 * cos(6.28318 * (value + 0.0)),
+                0.5 + 0.5 * cos(6.28318 * (value + 0.33)),
+                0.5 + 0.5 * cos(6.28318 * (value + 0.67))
+            );
+        case 1: // Grayscale
+            return vec3(value);
+        case 2: // Blue-Red
+            return vec3(value, 0.0, 1.0 - value);
+        case 3: // Green-Magenta
+            return vec3(value, 1.0 - value, value);
+        case 4: // Plasma
+            return vec3(
+                value,
+                sin(value * 3.14159),
+                cos(value * 3.14159)
+            );
+        case 5: // Viridis
+            float r = clamp(0.16 * value + 0.5, 0.0, 1.0);
+            float g = clamp(0.14 * value + 0.5, 0.0, 1.0);
+            float b = clamp(0.35 * value + 0.5, 0.0, 1.0);
+            return vec3(r, g, b);
+        case 6: // Inferno
+            float r2 = clamp(1.16 * value, 0.0, 1.0);
+            float g2 = clamp(0.5 * value, 0.0, 1.0);
+            float b2 = clamp(0.2 * value + 0.5, 0.0, 1.0);
+            return vec3(r2, g2, b2);
+        default:
+            return vec3(value);
+    }
+}
+
+vec3 computeGradient(vec3 texCoord) {
+    float eps = gradient_threshold * 0.01;
+    return normalize(vec3(
+        texture(volumeTexture, texCoord + vec3(eps, 0, 0)).r - texture(volumeTexture, texCoord - vec3(eps, 0, 0)).r,
+        texture(volumeTexture, texCoord + vec3(0, eps, 0)).r - texture(volumeTexture, texCoord - vec3(0, eps, 0)).r,
+        texture(volumeTexture, texCoord + vec3(0, 0, eps)).r - texture(volumeTexture, texCoord - vec3(0, 0, eps)).r
+    ));
+}
+
+vec3 computePhongShading(vec3 normal, vec3 viewDir, vec3 lightDir, vec3 baseColor) {
+    vec3 ambient = ambient_intensity * baseColor;
+    float diff = max(dot(normal, lightDir), 0.0);
+    vec3 diffuse = diffuse_intensity * diff * baseColor;
+    vec3 reflectDir = reflect(-lightDir, normal);
+    float spec = pow(max(dot(viewDir, reflectDir), 0.0), shininess);
+    vec3 specular = specular_intensity * spec * vec3(1.0);
+    return ambient + diffuse + specular;
+}
+
+vec4 interpolateTransferFunction(float intensity) {
+    // Custom transfer function interpolation
+    vec4 color = vec4(1.0);
+    
+    // Color interpolation
+    for (int i = 0; i < num_color_points - 1; i++) {
+        if (intensity >= color_points_pos[i] && intensity <= color_points_pos[i+1]) {
+            float t = (intensity - color_points_pos[i]) / 
+                      (color_points_pos[i+1] - color_points_pos[i]);
+            color.rgb = mix(
+                color_points[i], 
+                color_points[i+1], 
+                t
+            );
+            break;
+        }
+    }
+    
+    // Opacity interpolation
+    for (int i = 0; i < num_opacity_points - 1; i++) {
+        if (intensity >= opacity_points_pos[i] && intensity <= opacity_points_pos[i+1]) {
+            float t = (intensity - opacity_points_pos[i]) / 
+                      (opacity_points_pos[i+1] - opacity_points_pos[i]);
+            color.a = mix(
+                opacity_points[i], 
+                opacity_points[i+1], 
+                t
+            );
+            break;
+        }
+    }
+    
+    return color;
+}
+float adjustBrightnessContrast(float intensity, float brightnessValue, float contrastValue) {
+    // Adjust contrast: 
+    // - When contrast < 1.0, the image becomes less contrasted
+    // - When contrast > 1.0, the image becomes more contrasted
+    float adjustedIntensity = (intensity - 0.5) * max(contrastValue, 0.0) + 0.5;
+    
+    // Adjust brightness: 
+    // - Positive values brighten the image
+    // - Negative values darken the image
+    adjustedIntensity += brightnessValue;
+    
+    return clamp(adjustedIntensity, 0.0, 1.0);
+}
+vec3 applyShading(int mode, vec3 normal, vec3 viewDir, vec3 lightDir, vec3 baseColor) {
+    if (mode == 0) { // Phong Shading
+        vec3 ambient = ambient_intensity * baseColor;
+        float diff = max(dot(normal, lightDir), 0.0);
+        vec3 diffuse = diffuse_intensity * diff * baseColor;
+        vec3 reflectDir = reflect(-lightDir, normal);
+        float spec = pow(max(dot(viewDir, reflectDir), 0.0), shininess);
+        vec3 specular = specular_intensity * spec * vec3(1.0);
+        return ambient + diffuse + specular;
+    } else if (mode == 1) { // Cel Shading
+        float celIntensity = floor(dot(normal, lightDir) * 4.0) / 4.0;
+        return baseColor * celIntensity;
+    } else if (mode == 2) { // PBR-inspired Shading
+        float roughness = 0.5;
+        float metallic = 0.2;
+        vec3 F0 = mix(vec3(0.04), baseColor, metallic);
+        vec3 H = normalize(viewDir + lightDir);
+        float NdotL = max(dot(normal, lightDir), 0.0);
+        float NdotV = max(dot(normal, viewDir), 0.0);
+        float NdotH = max(dot(normal, H), 0.0);
+        float HdotV = max(dot(H, viewDir), 0.0);
+        float D = pow(NdotH, roughness * 2.0);
+        float G = NdotL * NdotV / (NdotL + NdotV + 0.001);
+        vec3 F = mix(vec3(0.04), baseColor, pow(1.0 - HdotV, 5.0));
+        vec3 specular = (D * G * F) / (4.0 * NdotV * NdotL + 0.001);
+        return baseColor * (1.0 - metallic) + specular * metallic;
+    } else if (mode == 3) { // Toon Shading
+        float toonShade = smoothstep(0.4, 0.6, dot(normal, lightDir));
+        vec3 toonColor = baseColor * toonShade;
+        float rimLight = 1.0 - max(dot(normal, viewDir), 0.0);
+        rimLight = smoothstep(0.6, 1.0, rimLight);
+        return toonColor + rimLight * vec3(1.0);
+    }
+    return baseColor; // Default
+}
+void main() {
+    vec3 zoomedTexCoords = ((TexCoords - 0.5) * zoom) + 0.5;
+    
+    if (any(lessThan(zoomedTexCoords, clipMin)) || any(greaterThan(zoomedTexCoords, clipMax))) {
+        discard;
+    }
+
+    vec4 accumulatedColor = vec4(0.0);
+    float transmittance = 1.0;
+
+    for (int i = 0; i < max_steps; i++) {
+        vec3 samplingCoord = zoomedTexCoords + (float(i) * step_size * vec3(0, 0, 1));
+        
+        float intensity = texture(volumeTexture, samplingCoord).r;
+        
+        // Use the new brightness and contrast adjustment
+        intensity = adjustBrightnessContrast(intensity, brightness, contrast);
+        
+        if (intensity < density_threshold) continue;
+
+        vec4 transferColor = texture(transferFunction, intensity);
+        float opacity = transferColor.a * opacity_multiplier * density;
+        
+        vec3 gradient = computeGradient(samplingCoord);
+        
+        // Improved edge enhancement
+        float edgeMagnitude = length(gradient);
+        float edgeWeight = edge_weight * 2.0; // Scale to make more noticeable
+        
+        vec3 viewDir = normalize(viewPos - samplingCoord);
+        vec3 lightDir = normalize(lightPos[0] - samplingCoord);
+        
+        vec3 shadedColor = applyShading(shading_mode, gradient, viewDir, lightDir, transferColor.rgb);
+
+        // Smarter edge enhancement that doesn't just overlay white
+        shadedColor = mix(
+            shadedColor, 
+            shadedColor * (1.0 + edgeMagnitude * edgeWeight), 
+            clamp(edgeMagnitude * edge_enhancement, 0.0, 1.0)
+        );
+        // Color manipulation
+        shadedColor = mix(shadedColor, applyColorMap(intensity), color_saturation);
+        shadedColor = clamp(shadedColor + vec3(color_shift), 0.0, 1.0);
+        
+        // Spine color blending
+        vec3 spineSegColor = texture(spineSegmentationTexture, samplingCoord).rgb;
+        shadedColor = mix(shadedColor, spineColor, spineSegColor.r);
+
+        if (rendering_mode == 0) { // Ray Marching
+            accumulatedColor.rgb += shadedColor * opacity * transmittance;
+            transmittance *= (1.0 - opacity);
+        } else if (rendering_mode == 1) { // Maximum Intensity Projection
+            accumulatedColor = max(accumulatedColor, vec4(shadedColor, opacity));
+        } else if (rendering_mode == 2) { // Average Intensity Projection
+            accumulatedColor += vec4(shadedColor, opacity) / float(max_steps);
+        } else if (rendering_mode == 3) { // First Hit Projection
+            if (opacity > 0.1) {
+                accumulatedColor = vec4(shadedColor, opacity);
+                break;
+            }
+        } else if (rendering_mode == 4) { // Ambient Occlusion
+            float ao = 1.0 - (float(i) / float(max_steps));
+            accumulatedColor.rgb += shadedColor * opacity * ao * transmittance;
+            transmittance *= (1.0 - opacity);
+        }
+        
+        if (transmittance < 0.01) break;
+    }
+
+
+
+    FragColor = vec4(accumulatedColor.rgb, 1.0 - transmittance);
+    FragColor.rgb = mix(FragColor.rgb, vec3(1.0), translucency);
+}
+```
+
+### shader/volume.vert
+```
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aTexCoord;
+
+out vec3 TexCoords;
+out vec3 WorldPos;
+
+uniform mat4 model;
+uniform mat4 view;
+uniform mat4 projection;
+
+void main() {
+    TexCoords = aTexCoord;
+    WorldPos = vec3(model * vec4(aPos, 1.0));
+    gl_Position = projection * view * model * vec4(aPos, 1.0);
+}
+```
+
+### shape/__init__.py
+```
+from .glshape import GLShape
+from .renderable import Renderable
+from .volume import Volume
+```
+
+### shape/glshape.py
+```
+import numpy as np
+from OpenGL.GL import *
+
+class GLShape:
+    def __init__(self):
+        self.vao = None
+        self.vbo = None
+        self.shader = None
+        self.initialized = False
+
+    def init_gl(self):
+        """Initialize OpenGL buffers and vertex arrays"""
+        if self.initialized:
+            return
+
+        self.vao = glGenVertexArrays(1)
+        self.vbo = glGenBuffers(1)
+        self.initialized = True
+
+    def bind(self):
+        """Bind VAO and VBO for rendering"""
+        glBindVertexArray(self.vao)
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
+
+    def unbind(self):
+        """Unbind VAO and VBO"""
+        glBindVertexArray(0)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+    # def delete(self):
+    #     """Clean up OpenGL resources"""
+    #     if self.initialized:
+    #         glDeleteVertexArrays(1, [self.vao])
+    #         glDeleteBuffers(1, [self.vbo])
+    #         self.initialized = False
+    def delete(self):
+        if hasattr(self, 'vao') and self.vao is not None:
+            glDeleteVertexArrays(1, [self.vao])
+        if hasattr(self, 'vbo') and self.vbo is not None:
+            glDeleteBuffers(1, [self.vbo])
+
+    def draw(self):
+        """Abstract method for drawing the shape"""
+        raise NotImplementedError("Subclasses must implement draw()")
+```
+
+### shape/renderable.py
+```
+"""
+STOP. You should not modify this file unless you KNOW what you are doing.
+"""
+
+from abc import ABC, abstractmethod
+
+
+class Renderable(ABC):
+    """
+    Abstract class (interface) representing an object-to-render.
+    All shapes should inherit this class.
+    """
+    @abstractmethod
+    def render(self, timeElapsedSinceLastFrame: int) -> None:
+        pass
+```
+
+### shape/sbs.py
+```
+import numpy as np
+from concurrent.futures import ThreadPoolExecutor
+
+def sbs_projection_sheared(sheared_volume, output_image_size):
+    """
+    Optimized SBS projection with improved memory access patterns.
+    """
+    if sheared_volume is None:
+        print("Error: Sheared volume is None")
+        return np.zeros(output_image_size, dtype=np.float32)
+    
+    intermediate_image = np.zeros(output_image_size, dtype=np.float32)
+    depth, height, width = sheared_volume.shape
+
+    for z in range(depth):
+        for y in range(width):  # Access along the fastest axis first
+            for x in range(height):
+                intensity = sheared_volume[z, x, y]
+                if intensity > 0:  # Surface voxel
+                    pixel_intensity = intensity / 255.0
+                    if 0 <= x < output_image_size[0] and 0 <= y < output_image_size[1]:
+                        intermediate_image[x, y] = max(intermediate_image[x, y], pixel_intensity)
+                    break
+
+    return intermediate_image
+
+# def sbs_projection_sheared(sheared_volume, output_image_size):
+#     if sheared_volume is None:
+#         print("Error: Sheared volume is None")
+#         return np.zeros(output_image_size, dtype=np.float32)
+    
+#     intermediate_image = np.zeros(output_image_size, dtype=np.float32)
+#     depth, height, width = sheared_volume.shape
+#     for z in range(depth):
+#         for x in range(height):
+#             for y in range(width):
+#                 intensity = sheared_volume[z, x, y]
+#                 if intensity > 0:  # Surface voxel
+#                     # Compute intensity-based pixel value
+#                     pixel_intensity = intensity / 255.0
+#                     if 0 <= x < output_image_size[0] and 0 <= y < output_image_size[1]:
+#                         intermediate_image[x, y] = max(intermediate_image[x, y], pixel_intensity)
+#                     break
+#     return intermediate_image
+
+
+def create_surface_voxel_structure(volume_data):
+    surface_voxels = []
+    depth, height, width = volume_data.shape
+    volume_data = volume_data.astype(np.float32)
+
+    for z in range(depth):
+        for x in range(height):
+            for y in range(width):
+                if volume_data[z, x, y] > 0:
+                    gradient = np.array([
+                        volume_data[z, x + 1, y] - volume_data[z, x - 1, y] if 0 < x < height - 1 else 0,
+                        volume_data[z, x, y + 1] - volume_data[z, x, y - 1] if 0 < y < width - 1 else 0,
+                        volume_data[z + 1, x, y] - volume_data[z - 1, x, y] if 0 < z < depth - 1 else 0
+                    ])
+                    normal = gradient / (np.linalg.norm(gradient) + 1e-6)
+                    surface_voxels.append((z, x, y, {"gradient": gradient, "normal": normal}))
+                    break
+    print(f"Surface Voxels Count: {len(surface_voxels)}")
+    return surface_voxels
+
+
+def sbs_projection(surface_voxels, output_image_size):
+    intermediate_image = np.zeros(output_image_size, dtype=np.float32)
+
+    for voxel_data in surface_voxels:
+        z, x, y, attributes = voxel_data
+        gradient = attributes["gradient"]
+        normal = attributes["normal"]
+
+        pixel_intensity = np.linalg.norm(gradient)
+
+        if 0 <= x < output_image_size[0] and 0 <= y < output_image_size[1]:
+            intermediate_image[x, y] = max(intermediate_image[x, y], pixel_intensity)
+
+    return intermediate_image
+
+def shear_warp_transform(volume, shear_matrix, warp_matrix):
+    """
+    Efficient shear-warp transformation with minimized memory overhead.
+    """
+    depth, height, width = volume.shape
+    coords = np.mgrid[0:depth, 0:height, 0:width].reshape(3, -1).T  # More memory-efficient grid
+    coords = np.c_[coords, np.ones(coords.shape[0])]  # Homogeneous coordinates
+
+    sheared_coords = coords[:, :3] @ shear_matrix.T
+    warped_coords = sheared_coords @ warp_matrix.T
+
+    transformed_volume = np.zeros_like(volume)
+
+    for coord, value in zip(warped_coords.astype(int), volume.flat):
+        z, x, y = coord
+        if 0 <= z < depth and 0 <= x < height and 0 <= y < width:
+            transformed_volume[z, x, y] = value
+
+    return transformed_volume
+
+
+# def shear_warp_transform(volume, shear_matrix, warp_matrix):
+#     depth, height, width = volume.shape
+#     coords = np.array([[z, x, y, 1] for z in range(depth) for x in range(height) for y in range(width)])
+    
+#     sheared_coords = coords[:, :3].dot(shear_matrix.T)
+#     warped_coords = sheared_coords.dot(warp_matrix.T)
+
+#     transformed_volume = np.zeros_like(volume)
+
+#     for coord, value in zip(warped_coords.astype(int), volume.flat):
+#         z, x, y = coord
+#         if 0 <= z < depth and 0 <= x < height and 0 <= y < width:
+#             transformed_volume[int(z), int(x), int(y)] = value
+
+#     return transformed_volume
+```
+
+### shape/volume_renderer.py
+```
+import numpy as np
+from OpenGL.GL import *
+from OpenGL.GLUT import *
+from pydicom import dcmread
+from skimage import filters, measure
+from scipy.ndimage import binary_closing, binary_opening
+from shape import sbs
+import scipy.ndimage as ndimage
+import glm
+import time
+
+class VolumeRenderer:
+    def __init__(self, dicom_path, shader):
+        self.volume_texture = None
+        self.cube_vbo = None
+        self.cube_vao = None
+        self.shader = shader
+
+        # Load and preprocess DICOM data
+        start_time = time.perf_counter()
+        self.volume_data = self.load_dicom_series(dicom_path)
+        load_time = time.perf_counter() - start_time
+
+        start_time = time.perf_counter()
+        self.spine_segmentation = self.preprocess_dicom(self.volume_data)
+        segmentation_time = time.perf_counter() - start_time
+
+        print(f"Volume Loading Time: {load_time:.2f} seconds")
+        print(f"Segmentation Time: {segmentation_time:.2f} seconds")
+
+        self.surface_voxels = None
+        self.surface_voxel_texture = None
+        self.intermediate_image_texture = None
+
+        self.create_transfer_function()
+        self.setup_gradient_textures()
+
+        # Initialize clipping planes
+        self.clip_min = np.array([0.0, 0.0, 0.0])  # Min corner of the volume
+        self.clip_max = np.array([1.0, 1.0, 1.0])  # Max corner of the volume
+
+        self.setup_spine_segmentation_texture()
+
+        self.camera_position = glm.vec3(0.0, 0.0, 3.0)  # Default camera position
+        self.camera_target = glm.vec3(0.0, 0.0, 0.0)  # Default camera target (looking at the center)
+
+        self.lens = {
+            'active': False,
+            'position': glm.vec2(0.5, 0.5),  # Normalized screen coordinates
+            'size': glm.vec2(0.2, 0.2),  # Normalized size
+            'magnification': 2.0
+        }
+
+        self.setup_textures()
+
+    def update_lens(self, active, position, size, magnification):
+        self.shader.use()
+        self.shader.setInt("u_lens_active", int(active))
+        self.shader.setVec2("u_lens_position", glm.vec2(*position))
+        self.shader.setVec2("u_lens_size", glm.vec2(*size))
+        self.shader.setFloat("u_lens_magnification", magnification)
+
+    def load_dicom_series(self, dicom_directory):
+        """Load and normalize a series of DICOM files."""
+        dicom_files = [os.path.join(dicom_directory, f) for f in os.listdir(dicom_directory) if f.endswith('.dcm')]
+        if not dicom_files:
+            raise ValueError(f"No DICOM files found in {dicom_directory}")
+
+        # Load the first file to get the image dimensions
+        first_slice = dcmread(dicom_files[0])
+        volume_data = np.zeros((len(dicom_files), *first_slice.pixel_array.shape), dtype=np.float32)
+
+        for i, file_path in enumerate(dicom_files):
+            dicom_file = dcmread(file_path)
+            volume_data[i] = dicom_file.pixel_array.astype(np.float32)
+
+        # Normalize the entire volume
+        volume_data = (volume_data - volume_data.min()) / (volume_data.max() - volume_data.min())
+        volume_data = (volume_data * 255).astype(np.uint8)
+
+        print(f"DICOM volume shape: {volume_data.shape}")
+        return volume_data
+
+    def load_dicom(self, dicom_path):
+        """Load and normalize DICOM data."""
+        dicom_file = dcmread(dicom_path)
+        volume_data = dicom_file.pixel_array.astype(np.float32)
+        volume_data = (volume_data - volume_data.min()) / (volume_data.max() - volume_data.min())
+        volume_data = (volume_data * 255).astype(np.uint8)
+        print(f"DICOM volume shape: {volume_data.shape}")
+        return volume_data
+
+    def segment_spine(self, volume_data):
+        """
+        Segment the spine from the 3D DICOM volume_data.
+        Args:
+            volume_data (numpy array): 3D numpy array representing the DICOM volume.
+        Returns:
+            spine_segmentation (numpy array): 3D binary array (1 for spine, 0 for background).
+        """
+        # Apply thresholding to segment spine (Otsu's method for automatic thresholding)
+        threshold = filters.threshold_otsu(volume_data)
+        binary_segmentation = volume_data > threshold
+
+        # Label connected components and extract the largest connected component (assumed to be the spine)
+        labeled, _ = measure.label(binary_segmentation, connectivity=1, return_num=True)
+        properties = measure.regionprops(labeled)
+        largest_region_label = max(properties, key=lambda prop: prop.area).label
+
+        # Create binary mask for the largest connected component
+        spine_segmentation = (labeled == largest_region_label).astype(np.uint8)
+        return spine_segmentation
+
+    def refine_segmentation(self, segmentation):
+        """
+        Apply morphological operations to refine the binary segmentation.
+        Args:
+            segmentation (numpy array): 3D binary segmentation array.
+        Returns:
+            refined_segmentation (numpy array): 3D refined binary segmentation array.
+        """
+        # Apply morphological opening to remove small noise
+        opened_segmentation = binary_opening(segmentation, structure=np.ones((3, 3, 3)))
+
+        # Apply morphological closing to fill small holes
+        refined_segmentation = binary_closing(opened_segmentation, structure=np.ones((3, 3, 3)))
+        return refined_segmentation
+
+    def preprocess_dicom(self, volume_data):
+        """
+        Preprocess the DICOM volume data by segmenting the spine and refining the segmentation.
+        """
+        # Segment the spine
+        spine_segmentation = self.segment_spine(volume_data)
+
+        # Refine the segmentation
+        refined_spine_segmentation = self.refine_segmentation(spine_segmentation)
+
+        # Convert to uint8 and ensure it's compatible with texture creation
+        refined_spine_segmentation = (refined_spine_segmentation * 255).astype(np.uint8)
+        return refined_spine_segmentation
+
+    def create_transfer_function(self):
+        """
+        Create a transfer function that specifically highlights spine structures.
+        """
+        transfer_function = np.zeros((256, 4), dtype=np.float32)
+        for i in range(256):
+            intensity = i / 255.0
+            if intensity < 0.2:
+                # Background: Transparent
+                transfer_function[i] = [0.0, 0.0, 0.0, 0.0]
+            elif 0.2 <= intensity < 0.5:
+                transfer_function[i] = [
+                    0.6, 0.8, 0.9,  # Adjusted color for spine
+                    max(0.5, (intensity - 0.2) * 2.0)  # Ensure sufficient opacity
+                ]
+            elif 0.5 <= intensity < 0.8:
+                # Bone/Dense structures: White with high opacity
+                t = (intensity - 0.5) / 0.3
+                transfer_function[i] = [
+                    0.9 + t * 0.1,  # Transitioning to bright white
+                    0.9 + t * 0.1,
+                    0.9 + t * 0.1,
+                    0.3 + t * 0.3  # Lower opacity
+                ]
+            else:
+                # Very dense structures: Pure white, full opacity
+                transfer_function[i] = [1.0, 1.0, 1.0, 1.0]
+        return transfer_function
+
+    def setup_textures(self):
+        """
+        Unified method for setting up volume and transfer function textures.
+        """
+        # Setup Volume Texture
+        self.volume_texture = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_3D, self.volume_texture)
+
+        # Normalize volume data
+        normalized_volume_data = (self.volume_data - self.volume_data.min()) / (self.volume_data.max() - self.volume_data.min())
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_RED, self.volume_data.shape[2], self.volume_data.shape[1], self.volume_data.shape[0], 0, GL_RED, GL_FLOAT, normalized_volume_data)
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE)
+
+        # Setup Transfer Function Texture
+        self.transfer_function_texture = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_1D, self.transfer_function_texture)
+        transfer_function = self.create_transfer_function()
+        glTexImage1D(GL_TEXTURE_1D, 0, GL_RGBA32F, len(transfer_function), 0, GL_RGBA, GL_FLOAT, transfer_function)
+        glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+
+    def update_transfer_function(self, new_transfer_function):
+        glBindTexture(GL_TEXTURE_1D, self.transfer_function_texture)
+        glTexSubImage1D(GL_TEXTURE_1D, 0, 0, len(new_transfer_function), GL_RGBA, GL_FLOAT, new_transfer_function)
+        print("Transfer function texture updated.")
+
+    def setup_geometry(self):
+        """Create cube geometry for volume rendering."""
+        cube_vertices = np.array([
+            # Positions        # Texture Coords
+            -1, -1, -1,        0, 0, 0,
+             1, -1, -1,        1, 0, 0,
+             1,  1, -1,        1, 1, 0,
+            -1,  1, -1,        0, 1, 0,
+            -1, -1,  1,        0, 0, 1,
+             1, -1,  1,        1, 0, 1,
+             1,  1,  1,        1, 1, 1,
+            -1,  1,  1,        0, 1, 1
+        ], dtype=np.float32)
+
+        cube_indices = np.array([
+            0, 1, 2, 2, 3, 0,  # Front
+            4, 5, 6, 6, 7, 4,  # Back
+            0, 1, 5, 5, 4, 0,  # Bottom
+            2, 3, 7, 7, 6, 2,  # Top
+            0, 3, 7, 7, 4, 0,  # Left
+            1, 2, 6, 6, 5, 1   # Right
+        ], dtype=np.uint32)
+
+        # Generate VAO and VBO
+        self.cube_vao = glGenVertexArrays(1)
+        glBindVertexArray(self.cube_vao)
+
+        self.cube_vbo = glGenBuffers(1)
+        glBindBuffer(GL_ARRAY_BUFFER, self.cube_vbo)
+        glBufferData(GL_ARRAY_BUFFER, cube_vertices.nbytes, cube_vertices, GL_STATIC_DRAW)
+
+        self.cube_ebo = glGenBuffers(1)
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.cube_ebo)
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, cube_indices.nbytes, cube_indices, GL_STATIC_DRAW)
+
+        # Define vertex attributes
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * 4, ctypes.c_void_p(0))
+        glEnableVertexAttribArray(0)
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * 4, ctypes.c_void_p(3 * 4))
+        glEnableVertexAttribArray(1)
+
+        glBindVertexArray(0)
+
+    def update_surface_voxel_texture(self):
+        if self.surface_voxels is None:
+            self.surface_voxels = sbs.create_surface_voxel_structure(self.volume_data)
+            print(f"Surface Voxels create Count: {len(self.surface_voxels)}")
+
+        # Initialize the surface voxel texture if it doesn't exist
+        if not hasattr(self, 'surface_voxel_texture') or self.surface_voxel_texture is None:
+            self.surface_voxel_texture = glGenTextures(1)
+            glBindTexture(GL_TEXTURE_2D, self.surface_voxel_texture)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+
+        if self.surface_voxels:
+            # Convert surface voxel data to a format suitable for OpenGL texture
+            surface_data = np.array([(v[0], v[1], v[2], *v[3]['normal']) for v in self.surface_voxels], dtype=np.float32)
+
+            # Limit the width of the texture to a reasonable size
+            max_texture_size = glGetIntegerv(GL_MAX_TEXTURE_SIZE)
+            texture_width = min(surface_data.shape[0], max_texture_size)
+
+            # Upload texture data
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, texture_width, 1, 0, GL_RGBA, GL_FLOAT, surface_data[:texture_width])
+        else:
+            print("Warning: surface_voxels is empty")
+
+    def update_intermediate_image_texture(self, output_image_size):
+        if self.surface_voxels is None:
+            print("Warning: surface_voxels is None. Cannot create intermediate image.")
+            return
+        if not hasattr(self, 'intermediate_image_texture') or self.intermediate_image_texture is None:
+            print("Creating intermediate image texture.")
+            self.intermediate_image_texture = glGenTextures(1)
+        intermediate_image = sbs.sbs_projection(self.surface_voxels, output_image_size)
+        glBindTexture(GL_TEXTURE_2D, self.intermediate_image_texture)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, output_image_size[0], output_image_size[1], 0, GL_RED, GL_FLOAT, intermediate_image)
+
+    def compute_gradients(self, volume_data):
+        """
+        Compute gradients for each voxel using a 3x3x3 kernel.
+        """
+        grad_x = ndimage.sobel(volume_data, axis=0, mode='constant')
+        grad_y = ndimage.sobel(volume_data, axis=1, mode='constant')
+        grad_z = ndimage.sobel(volume_data, axis=2, mode='constant')
+        magnitude = np.sqrt(grad_x**2 + grad_y**2 + grad_z**2)
+        gradient_field = np.stack((grad_x, grad_y, grad_z), axis=-1)
+        return magnitude, gradient_field
+
+    def compute_two_level_gradients(self, volume_data):
+        """
+        Compute two-level gradients: smooth for base structures and sharp for fine details.
+        """
+        # Base structure gradients (smoothed)
+        smoothed_volume = ndimage.gaussian_filter(volume_data, sigma=1.0)
+        base_gradients = np.gradient(smoothed_volume)
+        
+        # Fine detail gradients (sharpened)
+        sharpened_volume = volume_data - smoothed_volume  # Residual highlighting fine details
+        detail_gradients = np.gradient(sharpened_volume)
+        return base_gradients, detail_gradients
+
+    def setup_gradient_textures(self):
+        """
+        Create and upload base and detail gradient textures to the GPU.
+        """
+        base_gradients, detail_gradients = self.compute_two_level_gradients(self.volume_data)
+        
+        # Ensure base gradients
+        if not hasattr(self, 'gradient_texture_base') or self.gradient_texture_base is None:
+            self.gradient_texture_base = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_3D, self.gradient_texture_base)
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_RGB32F, 
+                    self.volume_data.shape[2], self.volume_data.shape[1], self.volume_data.shape[0], 
+                    0, GL_RGB, GL_FLOAT, np.stack(base_gradients, axis=-1))
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        
+        # Ensure detail gradients
+        if not hasattr(self, 'gradient_texture_detail') or self.gradient_texture_detail is None:
+            self.gradient_texture_detail = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_3D, self.gradient_texture_detail)
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_RGB32F, 
+                    self.volume_data.shape[2], self.volume_data.shape[1], self.volume_data.shape[0], 
+                    0, GL_RGB, GL_FLOAT, np.stack(detail_gradients, axis=-1))
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+
+    def generate_transfer_function(self, brightness_factor=1.0):
+        """
+        Generate a simple transfer function dynamically with adjustable brightness.
+        """
+        transfer_function = np.zeros((256, 4), dtype=np.float32)
+        for i in range(256):
+            intensity = i / 255.0
+            transfer_function[i] = [
+                intensity * brightness_factor,  # Red
+                intensity * 0.5 * brightness_factor,  # Green
+                intensity * 0.2 * brightness_factor,  # Blue
+                intensity  # Alpha
+            ]
+        return transfer_function
+
+    def setup_spine_segmentation_texture(self):
+        self.spine_segmentation_texture = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_3D, self.spine_segmentation_texture)
+        glTexImage3D(
+            GL_TEXTURE_3D, 0, GL_RED,
+            self.spine_segmentation.shape[2],
+            self.spine_segmentation.shape[1],
+            self.spine_segmentation.shape[0],
+            0, GL_RED, GL_UNSIGNED_BYTE, self.spine_segmentation
+        )
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE)
+
+    def bind_textures(self, shader):
+        try:
+            # Ensure surface voxel texture is created
+            if not hasattr(self, 'surface_voxel_texture') or self.surface_voxel_texture is None:
+                self.update_surface_voxel_texture()
+
+            # Bind volume texture
+            glActiveTexture(GL_TEXTURE0)
+            glBindTexture(GL_TEXTURE_3D, self.volume_texture)
+            shader.setInt("volumeTexture", 0)
+            
+            # Bind surface voxel texture
+            glActiveTexture(GL_TEXTURE1)
+            glBindTexture(GL_TEXTURE_2D, self.surface_voxel_texture)
+            shader.setInt("surfaceVoxelTexture", 1)
+
+            # Bind intermediate image texture
+            glActiveTexture(GL_TEXTURE2)
+            if not hasattr(self, 'intermediate_image_texture') or self.intermediate_image_texture is None:
+                # Create a dummy texture if not exists
+                self.intermediate_image_texture = glGenTextures(1)
+                glBindTexture(GL_TEXTURE_2D, self.intermediate_image_texture)
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, 1, 1, 0, GL_RED, GL_FLOAT, np.zeros((1, 1), dtype=np.float32))
+
+            glBindTexture(GL_TEXTURE_2D, self.intermediate_image_texture)
+            shader.setInt("intermediateImageTexture", 2)
+
+            # Bind transfer function texture
+            glActiveTexture(GL_TEXTURE3)
+            glBindTexture(GL_TEXTURE_1D, self.transfer_function_texture)
+            shader.setInt("transferFunction", 3)
+
+            glActiveTexture(GL_TEXTURE2)
+            glBindTexture(GL_TEXTURE_3D, self.spine_segmentation_texture)
+            self.shader.setInt("spineSegmentationTexture", 2)
+
+            # Bind gradient textures
+            if hasattr(self, 'gradient_texture_base') and self.gradient_texture_base is not None:
+                glActiveTexture(GL_TEXTURE4)
+                glBindTexture(GL_TEXTURE_3D, self.gradient_texture_base)
+                shader.setInt("gradientTextureBase", 4)
+            else:
+                print("Warning: gradient_texture_base not found.")
+
+            if hasattr(self, 'gradient_texture_detail') and self.gradient_texture_detail is not None:
+                glActiveTexture(GL_TEXTURE5)
+                glBindTexture(GL_TEXTURE_3D, self.gradient_texture_detail)
+                shader.setInt("gradientTextureDetail", 5)
+            else:
+                print("Warning: gradient_texture_detail not found.")
+
+            shader.setFloat("density", 1.5)
+            shader.setFloat("brightness", 0.2)
+            shader.setFloat("contrast", 1.5)
+            shader.setFloat("opacity_multiplier", 0.8)
+            shader.setFloat("opacityThreshold", 0.5)  # Adjusted for better visibility
+            shader.setFloat("edgeThreshold", 0.2)  # Increased for more pronounced edges
+            shader.setVec3("edgeColor", glm.vec3(1.0, 0.9, 0.8))  # Bone-like edge color
+            shader.setFloat("ambientStrength", 0.3)
+            shader.setFloat("diffuseStrength", 0.7)
+            shader.setFloat("specularStrength", 0.4)
+            shader.setFloat("shininess", 16.0)
+            shader.setVec3("lightDirection", glm.vec3(0.0, -1.0, -1.0))  # Adjusted light direction
+            shader.setFloat("stepSize", 0.01)
+            shader.setInt("maxSteps", 500)
+            ray_direction = glm.normalize(self.camera_target - self.camera_position)
+            shader.setVec3("rayDirection", ray_direction)
+            # shader.setVec3("spineColor", glm.vec3(1.0, 0.5, 0.5))  # Example: reddish for the spine
+
+            # Set clipping planes
+            shader.setVec3("clipMin", self.clip_min)
+            shader.setVec3("clipMax", self.clip_max)
+
+            # Set debugging mode
+            self.shader.setInt("debugMode", 0)  # 0: Normal rendering, 1: Base gradients, 2: Detail gradients
+
+        except Exception as e:
+            print(f"Error in bind_textures: {e}")
+            import traceback
+            traceback.print_exc()        
+
+    def draw(self):
+        try:
+            self.shader.use()
+            self.bind_textures(self.shader)
+            
+            glBindVertexArray(self.cube_vao)
+            glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, None)
+            glBindVertexArray(0)
+            
+        except Exception as e:
+            print(f"Error in draw: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def detect_features(self):
+        # Simple edge detection using Sobel filter
+        edges = ndimage.sobel(self.volume_data)
+        threshold = edges.mean() * 2
+        feature_mask = edges > threshold
+        return feature_mask
+
+    def update_feature_adaptive_lens(self):
+        feature_mask = self.detect_features()
+        # Update lens position to center on the largest feature
+        labeled, num_features = ndimage.label(feature_mask)
+        largest_feature = ndimage.find_objects(labeled)[0]
+        center = [(s.start + s.stop) / 2 for s in largest_feature]
+        self.lens['position'] = glm.vec2(center[1] / self.volume_data.shape[1], center[0] / self.volume_data.shape[0])
+
+    def cleanup(self):
+        """Cleanup resources."""
+        if self.volume_texture:
+            glDeleteTextures([self.volume_texture])
+        if self.cube_vbo:
+            glDeleteBuffers(1, [self.cube_vbo])
+        if self.cube_vao:
+            glDeleteVertexArrays(1, [self.cube_vao])
+```
+
+### util/__init__.py
+```
+from .camera import Camera
+from .shader import Shader
+from .dicom_loader import DicomLoader
+```
+
+### util/camera.py
+```
+"""
+STOP. You should not modify this file unless you KNOW what you are doing.
+"""
+
+from enum import Enum
+import copy
+
+import glm
+
+
+class Camera:
+    class Movement(Enum):
+        kUp = 0,
+        kDown = 1,
+        kLeft = 2,
+        kRight = 3,
+        kForward = 4,
+        kBackWard = 5
+
+    # Default camera values
+    kDefaultYaw: float = -90.0
+    kDefaultPitch: float = 0.0
+    kDefaultSpeed: float = 2.5
+    kDefaultSensitivity: float = 0.1
+    kDefaultZoom: float = 45.0
+
+    def __init__(self, 
+                 position: glm.vec3 = glm.vec3(0.0, 0.0, 0.0),
+                 up: glm.vec3 = glm.vec3(0.0, 1.0, 0.0),
+                 yaw: float = kDefaultYaw,
+                 pitch: float = kDefaultPitch):
+        
+        self.position: glm.vec3 = copy.deepcopy(position)
+        self.front: glm.vec3 = glm.vec3()
+        self.up: glm.vec3 = copy.deepcopy(up)
+        self.right: glm.vec3 = glm.vec3()
+        self.worldUp: glm.vec3 = copy.deepcopy(up)
+        self.yaw: float = yaw
+        self.pitch: float = pitch
+
+        self.movementSpeed: glm.vec3 = copy.deepcopy(self.kDefaultSpeed)
+        self.mouseSensitivity: glm.vec3 = copy.deepcopy(self.kDefaultSensitivity)
+
+        self.zoom: glm.vec3 = copy.deepcopy(self.kDefaultZoom)
+
+        self.__updateCameraVectors()
+
+        self.debugCamera: bool = False
+
+        if self.debugCamera:
+            print(f'position = {self.position}')
+            print(f'   front = {self.front}')
+            print(f'   right = {self.right}')
+            print(f'      up = {self.up}')
+            print(f' worldUp = {self.worldUp}')
+
+    def getViewMatrix(self) -> glm.mat4:
+        """
+        Returns the view matrix calculated using Euler Angles and the LookAt Matrix.
+        """
+        return glm.lookAt(self.position, self.position + self.front, self.up)
+
+    
+    def processKeyboard(self, 
+                        direction: Movement, 
+                        deltaTime: float) -> None:
+        """
+        Processes input received from any keyboard-like input system.
+        Accepts input parameter in the form of camera defined ENUM (to abstract it from windowing systems).
+        """
+        displacement: float = self.movementSpeed * deltaTime
+
+        if direction == self.Movement.kUp:
+            self.position += self.up * displacement
+        elif direction == self.Movement.kDown:
+            self.position -= self.up * displacement
+        elif direction == self.Movement.kLeft:
+            self.position -= self.right * displacement
+        elif direction == self.Movement.kRight:
+            self.position += self.right * displacement
+        elif direction == self.Movement.kForward:
+            self.position += self.front * displacement
+        elif direction == self.Movement.kBackWard:
+            self.position -= self.front * displacement
+        else:
+            raise ValueError(f'unknown Camera.Movement enumerator {direction}')
+
+    def processMouseMovement(self, 
+                             xoffset: float, 
+                             yoffset: float, 
+                             constrainPitch: bool = True) -> None:
+        """
+        Processes input received from a mouse input system.
+        Expects the offset value in both the x and y direction.
+        """
+        self.yaw += xoffset * self.mouseSensitivity
+        self.pitch += yoffset * self.mouseSensitivity
+
+        # Make sure that when pitch is out of bounds, screen doesn't get flipped.
+        if constrainPitch:
+            if 89.0 < self.pitch:
+                self.pitch = 89.0
+            
+            if self.pitch < -89.0:
+                self.pitch = -89.0
+
+        # Update Front, Right and Up Vectors using the updated Euler angles.
+        # print(xoffset, yoffset, self.yaw, self.pitch)
+        self.__updateCameraVectors()
+    
+    def processMouseScroll(self, yoffset: float) -> None:
+        """
+        Processes input received from a mouse scroll-wheel event.
+        Only requires inputs on the vertical wheel-axis.
+        """
+        self.zoom -= yoffset
+
+        if self.zoom < 1.0:
+            self.zoom = 1.0
+
+        if 45.0 < self.zoom:
+            self.zoom = 45.0
+
+    def __updateCameraVectors(self) -> None:
+        """
+        Calculates the front vector from the Camera's (updated) Euler angles
+        """
+        self.front.x = glm.cos(glm.radians(self.yaw)) * glm.cos(glm.radians(self.pitch))
+        self.front.y = glm.sin(glm.radians(self.pitch))
+        self.front.z = glm.sin(glm.radians(self.yaw)) * glm.cos(glm.radians(self.pitch))
+        self.front = glm.normalize(self.front)
+
+        # Normalize the vectors,
+        # because their length gets closer to 0 
+        # the more you look up or down which results in slower movement.
+        self.right = glm.normalize(glm.cross(self.front, self.worldUp))
+        self.up = glm.normalize(glm.cross(self.right, self.front))
+```
+
+### util/controls.py
+```
+import imgui
+import numpy as np
+from OpenGL.GL import *
+from imgui.integrations.glfw import GlfwRenderer
+
+class VolumeControls:
+    def __init__(self, volume, shader_program, window):
+        self.volume = volume
+        self.shader_program = shader_program
+        self.window = window
+        self.imgui_context = None
+        self.impl = None
+
+        # Control state
+        self.show_transfer_function = True
+        self.show_edge_detection = True
+
+        # Transfer function editor state
+        self.selected_point = -1
+        self.tf_canvas_size = (200, 100)
+
+        # Initialize the params dictionary with more attributes
+        self.params = {
+            'max_steps': 256,
+            'step_size': 0.004,
+            'density_threshold': 0.01,
+            'opacity_multiplier': 0.5,
+            'color_map_type': 0,
+            'ambient_intensity': 0.3,
+            'diffuse_intensity': 0.7,
+            'specular_intensity': 0.2,
+            'shininess': 32.0,
+            'gradient_threshold': 0.5,
+            'edge_enhancement': 1.0,
+            'color_shift': 0.0,
+            'color_saturation': 1.0,
+            'shading_mode': 0,
+            'rendering_mode': 0,
+            'translucency': 0.3,
+            'zoom': 1.0,
+            'brightness': 0.1, # Default brightness value
+            'contrast': 1.2,   # Default contrast value
+            'light_positions': [[1.0, 1.0, 1.0], [-1.0, 1.0, 1.0], [1.0, -1.0, 1.0], [-1.0, -1.0, 1.0]],
+            'view_position': [0.0, 0.0, 3.0],
+            'density': 1.0,
+            'edge_weight': 0.5,
+            'color_points': [],
+            'opacity_points': [],
+        }
+
+        self.temp_params = self.params.copy()
+        self.params_changed = False
+
+        # Options for dropdowns
+        self.color_maps = ["Rainbow", "Grayscale", "Blue-Red", "Green-Magenta", "Plasma"]
+        self.shading_modes = ["Phong", "Cel Shading", "PBR-inspired"]
+        self.rendering_modes = ["Ray Marching", "Maximum Intensity Projection", "Average Intensity Projection"]
+
+        # Initialize ImGui
+        self.init_imgui(window)
+
+    def init_imgui(self, window):
+        """Initialize Dear ImGui"""
+        imgui.create_context()
+        self.impl = GlfwRenderer(window)
+
+    def render(self):
+        """Render the control panel"""
+        self.params_changed = False # Reset change flag
+
+        imgui.begin("Volume Rendering Controls")
+
+        changed = False
+
+        # Basic parameters for controlling volume rendering attributes.
+        _, self.temp_params['brightness'] = imgui.slider_float("Brightness", self.temp_params['brightness'], -1.0, 1.0)
+        changed |= _
+
+        _, self.temp_params['contrast'] = imgui.slider_float("Contrast", self.temp_params['contrast'], 0.5, 2.0)
+        changed |= _
+
+        _, self.temp_params['edge_weight'] = imgui.slider_float("Edge Weight", self.temp_params['edge_weight'], 0.0, 2.0)
+        changed |= _
+
+        if imgui.tree_node("Lighting"):
+            _, self.temp_params['ambient_intensity'] = imgui.slider_float("Ambient Intensity", self.temp_params['ambient_intensity'], 0.0, 1.0)
+            changed |= _
+            
+            _, self.temp_params['diffuse_intensity'] = imgui.slider_float("Diffuse Intensity", self.temp_params['diffuse_intensity'], 0.0, 1.0)
+            changed |= _
+            
+            _, self.temp_params['specular_intensity'] = imgui.slider_float("Specular Intensity", self.temp_params['specular_intensity'], 0.0, 1.0)
+            changed |= _
+            
+            _, self.temp_params['shininess'] = imgui.slider_float("Shininess", self.temp_params['shininess'], 1.0, 128.0)
+            changed |= _
+            
+            imgui.tree_pop()
+
+        if changed:
+            self.params_changed = True
+        
+        imgui.end()
+
+    def update_shader_uniforms(self):
+        """Update all shader uniforms with current parameter values."""
+        shader = self.shader_program
+        shader.use()
+
+        # Update shader uniforms
+        for param, value in self.params.items():
+            if param == 'light_positions':
+                for i, light_pos in enumerate(value):
+                    shader.setVec3(f"lightPos[{i}]", light_pos)
+                    
+            elif param == 'view_position':
+                shader.setVec3("viewPos", value)
+
+            elif isinstance(value, float):
+                shader.setFloat(param, value)
+
+            elif isinstance(value, int):
+                shader.setInt(param, value)
+
+    def has_changes(self):
+        """Check if parameters have changed."""
+        return self.params_changed
+
+    def get_current_params(self):
+        """Get current parameter values."""
+        return self.temp_params
+
+    def cleanup(self):
+       """Cleanup ImGui resources."""
+       if self.impl:
+           self.impl.shutdown()
+```
+
+### util/dicom_loader.py
+```
+import numpy as np
+import pydicom
+from pathlib import Path
+from scipy import ndimage
+
+class DicomLoader:
+    def __init__(self):
+        self.volume_data = None
+        self.metadata = {}
+
+    def load_series(self, directory_path):
+        """Load a series of DICOM files from a directory."""
+        directory = Path(directory_path)
+        dicom_files = sorted(list(directory.glob('*.dcm')))
+
+        if not dicom_files:
+            raise ValueError(f"No DICOM files found in {directory_path}")
+
+        # Load first slice to get metadata
+        first_slice = pydicom.dcmread(str(dicom_files[0]))
+        shape = (len(dicom_files), first_slice.Rows, first_slice.Columns)
+        self.volume_data = np.zeros(shape, dtype=np.int16)  # Use int16 for raw pixel values
+
+        # Store metadata
+        self.metadata = {
+            'patient_id': getattr(first_slice, 'PatientID', 'Unknown'),
+            'study_date': getattr(first_slice, 'StudyDate', 'Unknown'),
+            'pixel_spacing': getattr(first_slice, 'PixelSpacing', [1.0, 1.0]),
+            'slice_thickness': getattr(first_slice, 'SliceThickness', 1.0),
+        }
+
+        # Load all slices
+        for idx, file_path in enumerate(dicom_files):
+            slice_data = pydicom.dcmread(str(file_path))
+            self.volume_data[idx] = slice_data.pixel_array
+
+        # Normalize volume data to uint8 for rendering
+        self.volume_data = self._normalize_to_uint8(self.volume_data)
+
+        print(f"Loaded volume shape: {self.volume_data.shape}")
+        print(f"Value range: [{self.volume_data.min()}, {self.volume_data.max()}]")
+
+        return self.volume_data, self.metadata
+
+    def _normalize_to_uint8(self, array):
+        """Normalize volume data to uint8 (0-255)."""
+        min_val = np.percentile(array, 1)  # Lower percentile for robust normalization
+        max_val = np.percentile(array, 99)  # Upper percentile for robust normalization
+        normalized = np.clip(array, min_val, max_val)
+        normalized = ((normalized - min_val) / (max_val - min_val) * 255).astype(np.uint8)
+        return normalized
+    def apply_threshold(self, lower_threshold, upper_threshold):
+        """Apply binary thresholding to the volume"""
+        if self.volume_data is None:
+            raise ValueError("No volume data loaded")
+            
+        binary_volume = np.logical_and(
+            self.volume_data >= lower_threshold,
+            self.volume_data <= upper_threshold
+        ).astype(np.uint8) * 255
+        
+        return binary_volume
+
+    def segment_spine(self, lower_threshold=200, upper_threshold=1500, morphology_iterations=2):
+        if self.volume_data is None:
+            raise ValueError("No volume data loaded")
+
+        # Apply thresholding
+        spine_mask = np.logical_and(
+            self.volume_data >= lower_threshold,
+            self.volume_data <= upper_threshold
+        )
+
+        # Apply morphological operations
+        spine_mask = ndimage.binary_opening(spine_mask, iterations=morphology_iterations)
+        spine_mask = ndimage.binary_closing(spine_mask, iterations=morphology_iterations)
+
+        # Label connected components
+        labeled, num_features = ndimage.label(spine_mask)
+
+        if num_features > 0:
+            # Remove small disconnected regions
+            sizes = ndimage.sum(spine_mask, labeled, range(1, num_features + 1))
+            mask_sizes = sizes > 1000  # Adjust this value based on your data
+            remove_pixel = mask_sizes[labeled - 1]
+            spine_mask[remove_pixel] = False
+        else:
+            print("Warning: No structures detected in spine segmentation")
+
+        return spine_mask.astype(np.uint8) * 255
+
+    def apply_segmentation(self, spine_mask):
+        """
+        Apply the segmentation mask to the volume data.
+        
+        Args:
+        spine_mask (np.array): Binary mask of the segmented spine
+        
+        Returns:
+        np.array: Segmented volume data
+        """
+        if self.volume_data is None:
+            raise ValueError("No volume data loaded")
+
+        return self.volume_data * (spine_mask > 0)
+    
+    def extract_shell(self, binary_volume, thickness=1):
+        """Extract shell from binary volume using morphological operations"""
+        
+        # Erode the volume
+        kernel = np.ones((3, 3, 3))
+        eroded = ndimage.binary_erosion(binary_volume, kernel, iterations=thickness)
+        
+        # Shell is the difference between original and eroded volume
+        shell = binary_volume.astype(bool) ^ eroded
+        
+        return shell.astype(np.uint8) * 255
+```
+
+### util/dicom_viewer.py
+```
+import os
+import numpy as np
+import pydicom
+import moderngl
+import numpy as np
+from PIL import Image
+import glfw
+from OpenGL.GL import *
+from OpenGL.GLUT import *
+import cv2
+
+class DicomViewer:
+    def __init__(self, window_size=(800, 600)):
+        self.window_size = window_size
+        self.initialize_glfw()
+        self.current_slice = 0
+        self.window_title = "DICOM Viewer"
+        self.brightness = 1.0
+        self.contrast = 1.0
+        self.edge_detection = False
+        self.transfer_function_mode = 0  # 0: grayscale, 1: rainbow, 2: hot
+        
+    def initialize_glfw(self):
+        if not glfw.init():
+            raise Exception("GLFW initialization failed")
+            
+        # Create window with OpenGL context
+        self.window = glfw.create_window(
+            self.window_size[0], self.window_size[1], 
+            self.window_title, None, None
+        )
+        
+        if not self.window:
+            glfw.terminate()
+            raise Exception("Window creation failed")
+            
+        glfw.make_context_current(self.window)
+        
+        # Set callbacks
+        glfw.set_key_callback(self.window, self.key_callback)
+        glfw.set_scroll_callback(self.window, self.scroll_callback)
+        
+    def load_dicom_series(self, directory):
+        """Load all DICOM files from directory"""
+        self.dicom_files = []
+        for filename in os.listdir(directory):
+            if filename.endswith('.dcm'):
+                filepath = os.path.join(directory, filename)
+                ds = pydicom.dcmread(filepath)
+                self.dicom_files.append(ds)
+                
+        self.dicom_files.sort(key=lambda x: x.InstanceNumber)
+        self.current_slice = 0
+        print(f"Loaded {len(self.dicom_files)} DICOM files")
+        
+    def apply_edge_detection(self, image):
+        """Apply Sobel edge detection"""
+        sobelx = cv2.Sobel(image, cv2.CV_64F, 1, 0, ksize=3)
+        sobely = cv2.Sobel(image, cv2.CV_64F, 0, 1, ksize=3)
+        magnitude = np.sqrt(sobelx**2 + sobely**2)
+        return magnitude.astype(np.uint8)
+        
+    def apply_transfer_function(self, image):
+        """Apply different transfer functions to the image"""
+        if self.transfer_function_mode == 0:  # Grayscale
+            return cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+        elif self.transfer_function_mode == 1:  # Rainbow
+            colored = cv2.applyColorMap(image, cv2.COLORMAP_RAINBOW)
+            return cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
+        else:  # Hot
+            colored = cv2.applyColorMap(image, cv2.COLORMAP_HOT)
+            return cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
+            
+    def process_image(self):
+        """Process current DICOM slice with all effects"""
+        if not self.dicom_files:
+            return None
+            
+        # Get current slice
+        ds = self.dicom_files[self.current_slice]
+        image = ds.pixel_array.astype(float)
+        
+        # Apply brightness and contrast
+        image = image * self.contrast + self.brightness
+        image = np.clip(image, 0, 255).astype(np.uint8)
+        
+        # Apply edge detection if enabled
+        if self.edge_detection:
+            edges = self.apply_edge_detection(image)
+            image = cv2.addWeighted(image, 0.7, edges, 0.3, 0)
+            
+        # Apply transfer function
+        image = self.apply_transfer_function(image)
+        
+        return image
+        
+    def render(self):
+        """Main render loop"""
+        while not glfw.window_should_close(self.window):
+            glClear(GL_COLOR_BUFFER_BIT)
+            
+            # Process and display current image
+            image = self.process_image()
+            if image is not None:
+                # Convert to OpenGL texture
+                height, width = image.shape[:2]
+                glDrawPixels(width, height, GL_RGB, GL_UNSIGNED_BYTE, image)
+                
+            glfw.swap_buffers(self.window)
+            glfw.poll_events()
+            
+    def key_callback(self, window, key, scancode, action, mods):
+        """Handle keyboard inputs"""
+        if action == glfw.PRESS:
+            if key == glfw.KEY_ESCAPE:
+                glfw.set_window_should_close(window, True)
+            elif key == glfw.KEY_UP:
+                self.brightness += 10
+            elif key == glfw.KEY_DOWN:
+                self.brightness -= 10
+            elif key == glfw.KEY_RIGHT:
+                self.contrast += 0.1
+            elif key == glfw.KEY_LEFT:
+                self.contrast -= 0.1
+            elif key == glfw.KEY_E:
+                self.edge_detection = not self.edge_detection
+            elif key == glfw.KEY_T:
+                self.transfer_function_mode = (self.transfer_function_mode + 1) % 3
+                
+    def scroll_callback(self, window, xoffset, yoffset):
+        """Handle mouse scroll for slice navigation"""
+        if self.dicom_files:
+            self.current_slice = (self.current_slice + int(yoffset)) % len(self.dicom_files)
+            
+    def cleanup(self):
+        """Cleanup resources"""
+        glfw.terminate()
+
+# # Example usage
+# if __name__ == "__main__":
+#     viewer = DicomViewer()
+#     # Replace with your DICOM directory path
+#     viewer.load_dicom_series("./data")
+#     try:
+#         viewer.render()
+#     finally:
+#         viewer.cleanup()
+```
+
+### util/sbs_volume.py
+```
+import numpy as np
+from collections import defaultdict
+
+class SBSVolume:
+    def __init__(self, volume_data):
+        """
+        Initialize SBS structure from volume data
+        
+        Args:
+            volume_data: 3D numpy array of voxel data
+        """
+        self.volume_data = volume_data
+
+
+        self.original_shape = volume_data.shape
+        self.slices = {}  # Store non-empty slices
+        self.index_array = []  # Store indices of non-empty voxels
+        self.attribute_list = []  # Store voxel attributes
+        
+        # Convert to SBS structure
+        self._convert_to_sbs(volume_data)
+
+    def _convert_to_sbs(self, volume_data):
+        """Convert volume data to SBS structure"""
+        depth, height, width = volume_data.shape
+        
+        # Process each slice
+        for z in range(depth):
+            slice_data = volume_data[z]
+            non_zero_mask = slice_data > 0
+            
+            if np.any(non_zero_mask):
+                # Store indices of non-zero voxels in this slice
+                y_coords, x_coords = np.nonzero(non_zero_mask)
+                
+                # Create slice entry
+                slice_entry = {
+                    'indices': list(zip(y_coords, x_coords)),
+                    'values': slice_data[non_zero_mask]
+                }
+                
+                self.slices[z] = slice_entry
+                
+                # Update index array and attribute list
+                for y, x in zip(y_coords, x_coords):
+                    self.index_array.append((z, y, x))
+                    self.attribute_list.append(slice_data[y, x])
+        
+        # Convert to numpy arrays
+        self.index_array = np.array(self.index_array)
+        self.attribute_list = np.array(self.attribute_list)
+
+    def get_voxel(self, z, y, x):
+        """Get voxel value at given coordinates"""
+        if z in self.slices:
+            slice_entry = self.slices[z]
+            try:
+                idx = slice_entry['indices'].index((y, x))
+                return slice_entry['values'][idx]
+            except ValueError:
+                return 0
+        return 0
+
+    def get_slice(self, z):
+        """Get full slice at given depth"""
+        if z not in self.slices:
+            return np.zeros((self.original_shape[1], self.original_shape[2]), dtype=np.uint8)
+            
+        slice_data = np.zeros((self.original_shape[1], self.original_shape[2]), dtype=np.uint8)
+        slice_entry = self.slices[z]
+        
+        for (y, x), value in zip(slice_entry['indices'], slice_entry['values']):
+            slice_data[y, x] = value
+            
+        return slice_data
+
+    def get_shell(self):
+        """Extract shell voxels from the volume"""
+        shell_indices = []
+        shell_values = []
+        
+        # For each voxel, check if it's on the boundary
+        for i, (z, y, x) in enumerate(self.index_array):
+            # Check 6-neighborhood
+            is_boundary = False
+            neighbors = [
+                (z-1, y, x), (z+1, y, x),
+                (z, y-1, x), (z, y+1, x),
+                (z, y, x-1), (z, y, x+1)
+            ]
+            
+            for nz, ny, nx in neighbors:
+                if not self._has_voxel(nz, ny, nx):
+                    is_boundary = True
+                    break
+            
+            if is_boundary:
+                shell_indices.append((z, y, x))
+                shell_values.append(self.attribute_list[i])
+        
+        return np.array(shell_indices), np.array(shell_values)
+
+    def _has_voxel(self, z, y, x):
+        """Check if voxel exists at given coordinates"""
+        if z in self.slices:
+            return (y, x) in self.slices[z]['indices']
+        return False
+
+    def get_statistics(self):
+        """Get memory usage statistics"""
+        original_size = np.prod(self.original_shape)
+        compressed_size = len(self.attribute_list)
+        
+        return {
+            'original_voxels': original_size,
+            'stored_voxels': compressed_size,
+            'compression_ratio': original_size / max(compressed_size, 1),
+            'num_slices': len(self.slices)
+        }
+```
+
+### util/shader.py
+```
+"""
+STOP. You should not modify this file unless you KNOW what you are doing.
+"""
+
+from typing import Optional
+
+from OpenGL.GL import *
+import glm
+
+
+class Shader:
+    def __init__(self, 
+                 vert: str, 
+                 tesc: Optional[str], 
+                 tese: Optional[str], 
+                 frag: str):
+        
+        self.program: int = 0
+        
+        # 1. retrieve the vertShader/fragShader source code from filePath
+        
+        with open(vert, 'r') as fin:
+            vertShaderCode: str = fin.read()
+        
+        if tesc is not None:
+            with open(tesc, 'r') as fin:
+                tescShaderCode: str = fin.read()
+        
+        if tese is not None:
+            with open(tese, 'r') as fin:
+                teseShaderCode: str = fin.read()
+
+        with open(frag, 'r') as fin:
+            fragShaderCode: str = fin.read()
+
+        # 2. compile Shader
+
+        # vertex shader
+        vertShader: int = glCreateShader(GL_VERTEX_SHADER)
+        glShaderSource(vertShader, vertShaderCode)
+        glCompileShader(vertShader)
+        self.__checkCompileErrors(vertShader, 'VERTEX')
+
+        # tessellation control shader
+        if tesc is not None:
+            tescShader: int = glCreateShader(GL_TESS_CONTROL_SHADER)
+            glShaderSource(tescShader, tescShaderCode)
+            glCompileShader(tescShader)
+            self.__checkCompileErrors(tescShader, 'TESSELLATION CONTROL')
+
+        # tessellation evaluation shader
+        if tese is not None:
+            teseShader: int = glCreateShader(GL_TESS_EVALUATION_SHADER)
+            glShaderSource(teseShader, teseShaderCode)
+            glCompileShader(teseShader)
+            self.__checkCompileErrors(teseShader, 'TESSELLATION EVALUATION')
+
+        # fragment shader
+        fragShader: int = glCreateShader(GL_FRAGMENT_SHADER)
+        glShaderSource(fragShader, fragShaderCode)
+        glCompileShader(fragShader)
+        self.__checkCompileErrors(fragShader, 'FRAGMENT')
+
+        # shader program
+        self.program: int = glCreateProgram()
+        glAttachShader(self.program, vertShader)
+        
+        if tesc is not None:
+            glAttachShader(self.program, tescShader)
+        
+        if tese is not None:
+            glAttachShader(self.program, teseShader)
+        
+        glAttachShader(self.program, fragShader)
+        
+        glLinkProgram(self.program)
+        self.__checkCompileErrors(self.program, 'PROGRAM')
+
+        # delete the Shader as they're linked into our program now and no longer necessary
+        glDeleteShader(vertShader)
+        
+        if tesc:
+            glDeleteShader(tescShader)
+        
+        if tese:
+            glDeleteShader(teseShader)
+        
+        glDeleteShader(fragShader)
+        
+    def __del__(self):
+        try:
+            if self.program and bool(glDeleteProgram):
+                glDeleteProgram(self.program)
+        except:
+            pass  # Ignore errors during cleanup
+
+        
+    def use(self) -> None:
+        glUseProgram(self.program)
+    
+    def setBool(self, name: str, val: bool) -> None:
+        glUniform1i(glGetUniformLocation(self.program, name), val)
+        
+    def setInt(self, name: str, val: int) -> None:
+        glUniform1i(glGetUniformLocation(self.program, name), val)
+
+    def setFloat(self, name: str, val: float) -> None:
+        glUniform1f(glGetUniformLocation(self.program, name), val)
+    
+    def setVec2(self, name: str, *args) -> None:
+        if (len(args) == 1 and type(args[0]) == glm.vec2):
+            glUniform2fv(glGetUniformLocation(self.program, name), 1, glm.value_ptr(args[0]))
+        
+        elif (len(args) == 2 and all(map(lambda x: type(x) == float, args))):
+            glUniform2f(glGetUniformLocation(self.program, name), *args)
+    
+    def setVec3(self, name: str, *args) -> None:
+        if (len(args) == 1 and type(args[0]) == glm.vec3):
+            glUniform3fv(glGetUniformLocation(self.program, name), 1, glm.value_ptr(args[0]))
+        elif (len(args) == 3 and all(map(lambda x: type(x) == float, args))):
+            glUniform3f(glGetUniformLocation(self.program, name), *args)
+
+    def setVec4(self, name: str, *args) -> None:
+        if (len(args) == 1 and type(args[0]) == glm.vec4):
+            glUniform4fv(glGetUniformLocation(self.program, name), 1, glm.value_ptr(args[0]))
+        
+        elif (len(args) == 3 and all(map(lambda x: type(x) == float, args))):
+            glUniform4f(glGetUniformLocation(self.program, name), *args)
+    
+    def setMat2(self, name: str, mat: glm.mat2) -> None:
+        glUniformMatrix2fv(glGetUniformLocation(self.program, name), 1, GL_FALSE, glm.value_ptr(mat))
+    
+    def setMat3(self, name: str, mat: glm.mat3) -> None:
+        glUniformMatrix3fv(glGetUniformLocation(self.program, name), 1, GL_FALSE, glm.value_ptr(mat))
+    
+    def setMat4(self, name: str, mat: glm.mat4) -> None:
+        glUniformMatrix4fv(glGetUniformLocation(self.program, name), 1, GL_FALSE, glm.value_ptr(mat))
+    
+    @staticmethod
+    def __checkCompileErrors(shader: int, shaderType: str) -> None:
+        if (shaderType != 'PROGRAM'):
+            success = glGetShaderiv(shader, GL_COMPILE_STATUS)
+            if (not success):
+                infoLog = glGetShaderInfoLog(shader)
+                print('ERROR::SHADER_COMPILATION_ERROR of type: ' + shaderType + '\n' + infoLog.decode() + '\n -- --------------------------------------------------- -- ')
+        
+        else:
+            success = glGetProgramiv(shader, GL_LINK_STATUS)
+            if (not success):
+                infoLog = glGetProgramInfoLog(shader)
+                print('ERROR::PROGRAM_LINKING_ERROR of type: ' + shaderType + '\n' + infoLog.decode() + '\n -- --------------------------------------------------- -- ')
+```
+
+### util/shearwarp_renderer.py
+```
+import numpy as np
+import glm
+from OpenGL.GL import *
+from OpenGL.GL import shaders
+
+class ShearWarpRenderer:
+    def __init__(self, volume_data, width, height):
+        self.initialized = False
+        self.volume_data = volume_data
+        self.volume_dimensions = volume_data.shape
+        self.sbs_data = self._convert_to_sbs(volume_data)
+        self.volume_texture = None
+        self.index_texture = None
+        self.attribute_texture = None
+        self.gradient_texture = None
+        self.width = width
+        self.height = height
+
+        if volume_data is None or volume_data.size == 0:
+            raise ValueError("Invalid volume data")
+    
+        print(f"Volume dimensions: {self.volume_dimensions}")
+        if any(dim <= 0 for dim in self.volume_dimensions):
+            raise ValueError("Invalid volume dimensions")
+    
+
+        self.params = {
+            'density': 1.0,
+            'brightness': 1.0,
+            'contrast': 1.0,
+            'edge_weight': 0.5
+        }
+        self.view_matrix = None
+        self.projection_matrix = None
+        self.shear_matrix = None
+        self.warp_matrix = None
+        self.init_gl()
+
+    def _convert_to_sbs(self, volume_data):
+        """Convert volume data to Slice-Based Binary Shell structure"""
+        dims = volume_data.shape
+        
+        # Add validation
+        if len(dims) != 3:
+            raise ValueError(f"Volume must be 3D, got shape {dims}")
+        
+        sbs_data = {
+            'index_array': [],
+            'attribute_list': [],
+            'slice_offsets': np.zeros(dims[0], dtype=np.int32)
+        }
+            
+        # Process each slice
+        current_offset = 0
+        for z in range(dims[0]):
+            slice_data = volume_data[z]
+            
+            # Find non-empty voxels
+            non_empty = np.where(slice_data > 0)
+            
+            # Store indices
+            indices = np.stack([non_empty[0], non_empty[1]], axis=1)
+            sbs_data['index_array'].extend(indices)
+            
+            # Store attributes (voxel values)
+            attributes = slice_data[non_empty]
+            sbs_data['attribute_list'].extend(attributes)
+            
+            # Update slice offset
+            sbs_data['slice_offsets'][z] = current_offset
+            current_offset += len(indices)
+        
+        # Convert lists to numpy arrays
+        sbs_data['index_array'] = np.array(sbs_data['index_array'], dtype=np.int32)
+        sbs_data['attribute_list'] = np.array(sbs_data['attribute_list'], dtype=np.uint8)
+        
+        return sbs_data
+
+    def init_gl(self):
+        """Initialize OpenGL textures and validate data for volume rendering."""
+        if self.initialized:
+            return
+
+        try:
+            # Validate volume dimensions
+            if len(self.volume_dimensions) != 3:
+                raise ValueError(f"Invalid volume dimensions: {self.volume_dimensions}")
+
+            # Get OpenGL maximum texture size
+            max_texture_size = glGetIntegerv(GL_MAX_TEXTURE_SIZE)
+            if any(dim > max_texture_size for dim in self.volume_dimensions):
+                raise ValueError(f"Volume dimensions exceed OpenGL maximum texture size: {max_texture_size}")
+
+            # Optimize data type for memory efficiency
+            if self.volume_data.dtype != np.uint8:
+                self.volume_data = self.volume_data.astype(np.uint8)
+                print("Converted volume data to uint8 for memory optimization.")
+
+            # Generate OpenGL textures
+            if self.volume_texture:
+                glDeleteTextures([self.volume_texture])  # Clean up old texture
+            self.volume_texture = glGenTextures(1)
+
+            # Bind texture and set parameters
+            glBindTexture(GL_TEXTURE_3D, self.volume_texture)
+            self._setup_3d_texture_parameters()
+
+            # Attempt to initialize 3D texture
+            try:
+                print(f"Initializing 3D texture with dimensions: {self.volume_dimensions}")
+                glTexImage3D(GL_TEXTURE_3D, 0, GL_R8,
+                            self.volume_dimensions[2], self.volume_dimensions[1], self.volume_dimensions[0],
+                            0, GL_RED, GL_UNSIGNED_BYTE, self.volume_data)
+                glGenerateMipmap(GL_TEXTURE_3D)  # Generate mipmaps for better performance
+            except Exception as e:
+                print(f"Error initializing 3D texture: {e}. Falling back to smaller test volume.")
+                # Use a smaller test volume for fallback
+                test_volume = self.volume_data[:64, :64, :64]
+                glTexImage3D(GL_TEXTURE_3D, 0, GL_R8,
+                            test_volume.shape[2], test_volume.shape[1], test_volume.shape[0],
+                            0, GL_RED, GL_UNSIGNED_BYTE, test_volume)
+
+            # Initialize SBS textures (Index/Attribute Textures)
+            self.index_texture = glGenTextures(1)
+            glBindTexture(GL_TEXTURE_2D_ARRAY, self.index_texture)
+            glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
+            glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+
+            index_array = self.sbs_data['index_array']
+            if index_array.size > 0:
+                try:
+                    tex_depth = len(self.sbs_data['slice_offsets'])
+                    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RG32I,
+                                max(1, self.volume_dimensions[1]), max(1, self.volume_dimensions[2]), tex_depth,
+                                0, GL_RG_INTEGER, GL_INT, index_array)
+                except Exception as e:
+                    print(f"Error creating index texture: {e}. Skipping.")
+
+            # Mark as initialized
+            self.initialized = True
+            print("OpenGL textures initialized successfully.")
+
+        except Exception as e:
+            print(f"Error in init_gl: {e}")
+            self.initialized = False
+            # Provide a fallback rendering path
+            print("Falling back to standard rendering.")
+            self.volume_texture = glGenTextures(1)
+            glBindTexture(GL_TEXTURE_3D, self.volume_texture)
+            self._setup_3d_texture_parameters()
+            glTexImage3D(GL_TEXTURE_3D, 0, GL_R8,
+                        self.volume_dimensions[2], self.volume_dimensions[1], self.volume_dimensions[0],
+                        0, GL_RED, GL_UNSIGNED_BYTE, self.volume_data)
+
+    def _setup_3d_texture_parameters(self):
+        """Set up common 3D texture parameters"""
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER)
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER)
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_BORDER)
+
+
+    def _calculate_gradients(self):
+        # Calculate gradients for fine detail identification
+        gradients = np.gradient(self.volume_data)
+        self.gradients = np.stack(gradients, axis=-1).astype(np.float32)
+
+    def update_matrices(self, camera_pos, view_matrix, projection_matrix):
+        self.view_matrix = view_matrix
+        self.projection_matrix = projection_matrix
+        
+        view_direction = glm.normalize(camera_pos)
+        principal_axis = self._get_principal_axis(view_direction)
+        
+        self.shear_matrix = self._calculate_shear_matrix(view_direction, principal_axis)
+        self.warp_matrix = self._calculate_warp_matrix(view_direction, principal_axis)
+
+    def _get_principal_axis(self, view_direction):
+        """Determine principal viewing axis"""
+        abs_dir = glm.abs(view_direction)
+        if abs_dir.x >= abs_dir.y and abs_dir.x >= abs_dir.z:
+            return 'x'
+        elif abs_dir.y >= abs_dir.x and abs_dir.y >= abs_dir.z:
+            return 'y'
+        else:
+            return 'z'
+            
+    def _calculate_shear_matrix(self, view_direction, principal_axis):
+        """Calculate shear transformation matrix"""
+        shear = glm.mat4(1.0)
+        
+        if principal_axis == 'x':
+            shear[1][0] = -view_direction.y / view_direction.x
+            shear[2][0] = -view_direction.z / view_direction.x
+        elif principal_axis == 'y':
+            shear[0][1] = -view_direction.x / view_direction.y
+            shear[2][1] = -view_direction.z / view_direction.y
+        else:  # z axis
+            shear[0][2] = -view_direction.x / view_direction.z
+            shear[1][2] = -view_direction.y / view_direction.z
+            
+        return shear
+        
+    def _calculate_warp_matrix(self, view_direction, principal_axis):
+        """Calculate 2D warp matrix for final image transformation"""
+        # Create perspective matrix for principal axis
+        if principal_axis == 'x':
+            warp = glm.mat4(1.0)
+            warp[1][1] = 1.0 / (1.0 + view_direction.y * view_direction.y)
+            warp[2][2] = 1.0 / (1.0 + view_direction.z * view_direction.z)
+        elif principal_axis == 'y':
+            warp = glm.mat4(1.0)
+            warp[0][0] = 1.0 / (1.0 + view_direction.x * view_direction.x)
+            warp[2][2] = 1.0 / (1.0 + view_direction.z * view_direction.z)
+        else:  # z axis
+            warp = glm.mat4(1.0)
+            warp[0][0] = 1.0 / (1.0 + view_direction.x * view_direction.x)
+            warp[1][1] = 1.0 / (1.0 + view_direction.y * view_direction.y)
+            
+        return warp
+    
+    def _render_volume_slices(self, shader):
+        # Bind necessary textures and set uniforms
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_3D, self.volume_texture)
+        shader.setInt("volume_texture", 0)
+        
+        glActiveTexture(GL_TEXTURE1)
+        glBindTexture(GL_TEXTURE_2D_ARRAY, self.index_texture)
+        shader.setInt("index_texture", 1)
+        
+        glActiveTexture(GL_TEXTURE2)
+        glBindTexture(GL_TEXTURE_2D, self.attribute_texture)
+        shader.setInt("attribute_texture", 2)
+        
+        # Render slices
+        num_slices = self.volume_dimensions[0]  # Assuming Z is the first dimension
+        for i in range(num_slices):
+            # Set slice-specific uniforms
+            shader.setFloat("slice_index", i / float(num_slices))
+            
+            # Render a quad for each slice
+            self._render_slice_quad()
+
+    def update_volume_data(self, new_volume_data):
+        """Update volume data and recalculate necessary textures."""
+        self.volume_data = new_volume_data
+        self.volume_dimensions = new_volume_data.shape
+        self.sbs_data = self._convert_to_sbs(new_volume_data)
+        
+        # Update textures
+        glBindTexture(GL_TEXTURE_3D, self.volume_texture)
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_R8, 
+                    self.volume_dimensions[2], self.volume_dimensions[1], self.volume_dimensions[0],
+                    0, GL_RED, GL_UNSIGNED_BYTE, self.volume_data)
+        
+        # Recalculate gradients if needed
+        self._calculate_gradients()
+        
+        # Reinitialize OpenGL settings if necessary
+        if not self.initialized:
+            self.init_gl()
+
+    def _render_slice_quad(self):
+        # Define quad vertices
+        vertices = np.array([
+            -1.0, -1.0, 0.0,
+            1.0, -1.0, 0.0,
+            1.0,  1.0, 0.0,
+            -1.0,  1.0, 0.0
+        ], dtype=np.float32)
+        
+        # Create and bind VAO and VBO
+        vao = glGenVertexArrays(1)
+        vbo = glGenBuffers(1)
+        glBindVertexArray(vao)
+        glBindBuffer(GL_ARRAY_BUFFER, vbo)
+        glBufferData(GL_ARRAY_BUFFER, vertices.nbytes, vertices, GL_STATIC_DRAW)
+        
+        # Set vertex attribute pointers
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), None)
+        glEnableVertexAttribArray(0)
+        
+        # Draw quad
+        glDrawArrays(GL_TRIANGLE_FAN, 0, 4)
+        
+        # Clean up
+        glDeleteVertexArrays(1, [vao])
+        glDeleteBuffers(1, [vbo])
+
+    def render(self, shader):
+        if not self.initialized:
+            self.init_gl()
+        shader.use()
+        shader.setMat4("view_matrix", self.view_matrix)
+        shader.setMat4("projection_matrix", self.projection_matrix)
+        shader.setMat4("shear_matrix", self.shear_matrix)
+        shader.setMat4("warp_matrix", self.warp_matrix)
+        shader.setFloat("density", self.params['density'])
+        shader.setFloat("brightness", self.params['brightness'])
+        shader.setFloat("contrast", self.params['contrast'])
+        shader.setFloat("edge_weight", self.params['edge_weight'])
+        # shader.setInt("tex_width", tex_width)
+        # shader.setInt("tex_height", tex_height)
+        
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_3D, self.volume_texture)
+        shader.setInt("volume_texture", 0)
+        glActiveTexture(GL_TEXTURE1)
+        glBindTexture(GL_TEXTURE_2D_ARRAY, self.index_texture)
+        shader.setInt("index_texture", 1)
+        glActiveTexture(GL_TEXTURE2)
+        glBindTexture(GL_TEXTURE_2D, self.attribute_texture)
+        shader.setInt("attribute_texture", 2)
+        glActiveTexture(GL_TEXTURE3)
+        glBindTexture(GL_TEXTURE_3D, self.gradient_texture)
+        shader.setInt("gradient_texture", 3)
+
+        intermediate_texture = self._render_intermediate_buffer(shader)
+        self._apply_warp_transformation(shader, intermediate_texture)
+
+    def _render_fullscreen_quad(self):
+        # Define quad vertices for a fullscreen quad
+        vertices = np.array([
+            -1.0, -1.0, 0.0,
+            1.0, -1.0, 0.0,
+            1.0,  1.0, 0.0,
+            -1.0,  1.0, 0.0
+        ], dtype=np.float32)
+        
+        # Create and bind VAO and VBO
+        vao = glGenVertexArrays(1)
+        vbo = glGenBuffers(1)
+        glBindVertexArray(vao)
+        glBindBuffer(GL_ARRAY_BUFFER, vbo)
+        glBufferData(GL_ARRAY_BUFFER, vertices.nbytes, vertices, GL_STATIC_DRAW)
+        
+        # Set vertex attribute pointers
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), None)
+        glEnableVertexAttribArray(0)
+        
+        # Draw fullscreen quad
+        glDrawArrays(GL_TRIANGLE_FAN, 0, 4)
+        
+        # Clean up
+        glDeleteVertexArrays(1, [vao])
+        glDeleteBuffers(1, [vbo])
+    def _render_intermediate_buffer(self, shader):
+        """Render volume to intermediate buffer using shear transformation"""
+        # Set up framebuffer for intermediate rendering
+        fbo = glGenFramebuffers(1)
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo)
+        
+        # Create texture for intermediate result
+        intermediate_texture = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, intermediate_texture)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, self.width, self.height, 0, GL_RGBA, GL_FLOAT, None)
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, intermediate_texture, 0)
+        
+        # Render sheared slices
+        self._render_volume_slices(shader)
+        
+        # Clean up
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        glDeleteFramebuffers(1, [fbo])
+        
+        return intermediate_texture
+    
+    def _apply_warp_transformation(self, shader, intermediate_texture):
+        """Apply warp transformation to intermediate result"""
+        shader.use()
+        shader.setInt("intermediate_texture", 0)
+        shader.setMat4("warp_matrix", self.warp_matrix)
+        
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, intermediate_texture)
+        
+        # Render full-screen quad with warp transformation
+        self._render_fullscreen_quad()
+        
+        # Clean up
+        glDeleteTextures(1, [intermediate_texture])
+
+    def update_parameters(self, **params):
+        self.params.update(params)
+
+    def delete(self):
+        if self.volume_texture:
+            glDeleteTextures([self.volume_texture])
+        if self.index_texture:
+            glDeleteTextures([self.index_texture])
+        if self.attribute_texture:
+            glDeleteTextures([self.attribute_texture])
+        if self.gradient_texture:
+            glDeleteTextures([self.gradient_texture])
+        self.initialized = False
+```
+
+### util/volume_controls.py
+```
+import imgui
+import numpy as np
+from OpenGL.GL import *
+from imgui.integrations.glfw import GlfwRenderer
+import glm
+from shape.volume_renderer import VolumeRenderer
+
+class VolumeControls:
+    def __init__(self, volume, shader_program, window):
+        self.volume = volume
+        self.shader_program = shader_program
+        self.window = window
+        
+        # Control state
+        self.show_transfer_function = True
+        self.show_edge_detection = True
+        
+        # Transfer function editor state
+        self.selected_point = -1
+        self.tf_canvas_size = (300, 150)  # Increased canvas size
+        self.transfer_function_mode = 0  # 0: Color, 1: Opacity
+        
+        # Initialize the params dictionary with more comprehensive defaults
+        self.params = {
+            'max_steps': 256,
+            'step_size': 0.004,
+            'density_threshold': 0.05,
+            'color_map_type': 0,
+            'ambient_intensity': 0.3,
+            'diffuse_intensity': 0.7,
+            'specular_intensity': 0.2,
+            'shininess': 32.0,
+            'gradient_threshold': 0.05,
+            'edge_enhancement': 1.0,
+            'color_shift': 0.0,
+            'color_saturation': 1.0,
+            'shading_mode': 0,
+            'rendering_mode': 0,
+            'translucency': 0.18,
+            'zoom': 1.0,
+            'view_position': [0.0, 0.0, 3.0],
+            'edge_weight': 0.5,
+            'spine_color': [0.9, 0.8, 0.7],  # Bone-like color
+            'density': 1.0,
+            'brightness': 0.1,
+            'contrast': 1.20,
+            'opacity_multiplier': 1.0,
+
+            # Enhanced transfer function points
+            'color_points': [
+                (0.0, [0.2, 0.2, 0.8]),    # Start with a deeper blue
+                (0.5, [0.5, 0.5, 1.0]),    # Lighter blue in middle
+                (1.0, [0.8, 0.8, 1.0])     # Very light blue at end
+            ],
+            'opacity_points': [
+                (0.0, 0.1),  # Start with low opacity
+                (0.5, 0.5),  # Increase opacity in middle
+                (1.0, 0.8)   # Higher opacity at end
+            ]
+        }
+        
+        self.temp_params = self.params.copy()
+        self.params_changed = False
+        self.lens_active = False
+        self.lens_position = [0.5, 0.5]
+        self.lens_size = [0.2, 0.2]
+        self.lens_magnification = 2.0
+        
+        # Options for dropdowns with more comprehensive selections
+        self.color_maps = [
+            "Rainbow", "Grayscale", "Blue-Red", "Green-Magenta", "Plasma", "Viridis", "Inferno"
+        ]
+        self.shading_modes = [
+            "Phong", "Cel Shading", "PBR-inspired", "Toon Shading"  # "Metallic"
+        ]
+        self.rendering_modes = [
+            "Ray Marching", "Maximum Intensity Projection", "Average Intensity Projection", "First Hit Projection", "Ambient Occlusion"
+        ]
+        self.lens = {
+            'active': False,
+            'position': glm.vec2(0.5, 0.5),  # Normalized screen coordinates
+            'size': glm.vec2(0.2, 0.2),      # Normalized size
+            'magnification': 2.0
+        }
+        
+        # Initialize ImGui
+        self.init_imgui(window)
+
+    def init_imgui(self, window):
+        """Initialize Dear ImGui with enhanced styling"""
+        imgui.create_context()
+        self.impl = GlfwRenderer(window)
+        
+        # Advanced ImGui styling
+        style = imgui.get_style()
+        style.window_rounding = 5.0
+        style.frame_rounding = 3.0
+        style.grab_rounding = 3.0
+        style.alpha = 0.9
+        style.colors[imgui.COLOR_WINDOW_BACKGROUND] = (0.1, 0.1, 0.1, 0.9)
+        style.colors[imgui.COLOR_TEXT] = (0.9, 0.9, 0.9, 1.0)
+        style.colors[imgui.COLOR_HEADER] = (0.2, 0.2, 0.2, 1.0)
+        style.colors[imgui.COLOR_HEADER_ACTIVE] = (0.3, 0.3, 0.3, 1.0)
+
+    def render(self):
+        self.params_changed = False
+        imgui.begin("Volume Rendering Controls", True)
+        
+        if imgui.tree_node("Raycasting"):
+            changed, self.temp_params['edge_weight'] = imgui.slider_float("Edge Weight", self.temp_params['edge_weight'], 0.0, 1.0, format="%.2f")
+            self.params_changed |= changed
+            changed, self.temp_params['max_steps'] = imgui.slider_int("Max Steps", self.temp_params['max_steps'], 64, 512)
+            self.params_changed |= changed
+            changed, self.temp_params['step_size'] = imgui.slider_float("Step Size", self.temp_params['step_size'], 0.001, 0.01, format="%.3f")
+            self.params_changed |= changed
+            imgui.tree_pop()
+
+        if imgui.tree_node("Color Map"):
+            changed, self.temp_params['density_threshold'] = imgui.slider_float("Density Threshold", self.temp_params['density_threshold'], -1.0, 1.0, format="%.2f")
+            self.params_changed |= changed
+            changed, self.temp_params['color_shift'] = imgui.slider_float("Color Shift", self.temp_params['color_shift'], -1.0, 1.0, format="%.2f")
+            self.params_changed |= changed
+            changed, self.temp_params['color_saturation'] = imgui.slider_float("Color Saturation", self.temp_params['color_saturation'], -1.0, 2.0, format="%.2f")
+            self.params_changed |= changed
+            imgui.tree_pop()
+
+        if imgui.tree_node("Lighting"):
+            changed, self.temp_params['ambient_intensity'] = imgui.slider_float("Ambient", self.temp_params['ambient_intensity'], -1.0, 1.0, format="%.2f")
+            self.params_changed |= changed
+            changed, self.temp_params['diffuse_intensity'] = imgui.slider_float("Diffuse", self.temp_params['diffuse_intensity'], -1.0, 1.0, format="%.2f")
+            self.params_changed |= changed
+            changed, self.temp_params['specular_intensity'] = imgui.slider_float("Specular", self.temp_params['specular_intensity'], -1.0, 1.0, format="%.2f")
+            self.params_changed |= changed
+            changed, self.temp_params['shininess'] = imgui.slider_float("Shininess", self.temp_params['shininess'], 1.0, 128.0, format="%.1f")
+            self.params_changed |= changed
+            imgui.tree_pop()
+
+        if imgui.tree_node("Edge Detection"):
+            changed, self.temp_params['gradient_threshold'] = imgui.slider_float("Gradient Threshold", self.temp_params['gradient_threshold'], -1.0, 1.0, format="%.2f")
+            self.params_changed |= changed
+            changed, self.temp_params['edge_enhancement'] = imgui.slider_float("Edge Enhancement", self.temp_params['edge_enhancement'], -1.0, 2.0, format="%.2f")
+            self.params_changed |= changed
+            imgui.tree_pop()
+
+        if imgui.tree_node("Advanced Rendering"):
+            changed, self.temp_params['translucency'] = imgui.slider_float("Translucency", self.temp_params['translucency'], -1.0, 1.0, format="%.2f")
+            self.params_changed |= changed
+            changed, self.temp_params['zoom'] = imgui.slider_float("Zoom", self.temp_params['zoom'], 0.5, 2.0, format="%.2f")
+            self.params_changed |= changed
+            changed, self.temp_params['shading_mode'] = imgui.combo("Shading Mode", self.temp_params['shading_mode'], self.shading_modes)
+            self.params_changed |= changed
+            changed, self.temp_params['color_map_type'] = imgui.combo("Color Map", self.temp_params['color_map_type'], self.color_maps)
+            self.params_changed |= changed
+            changed, self.temp_params['rendering_mode'] = imgui.combo("Rendering Mode", self.temp_params['rendering_mode'], self.rendering_modes)
+            self.params_changed |= changed
+            imgui.tree_pop()
+
+        if imgui.tree_node("Spine Settings"):
+            changed, self.temp_params['spine_color'] = imgui.color_edit3("Spine Color", *self.temp_params['spine_color'])
+            if changed:
+                self.params_changed = True
+                self.update_transfer_function()
+            imgui.tree_pop()
+
+        imgui.end()
+
+        if self.params_changed:
+            self.update_shader_uniforms()
+            self.update_lens()
+
+        return self.params_changed
+
+    def update_lens(self):
+        self.shader_program.use()
+        self.shader_program.setInt("lens_active", int(self.lens['active']))
+        self.shader_program.setVec2("lens_position", glm.vec2(*self.lens['position']))
+        self.shader_program.setVec2("lens_size", glm.vec2(*self.lens['size']))
+        self.shader_program.setFloat("lens_magnification", self.lens['magnification'])
+
+    def _render_color_transfer_function_editor(self):
+        """Render color point editor for transfer function"""
+        draw_list = imgui.get_window_draw_list()
+        canvas_pos = imgui.get_cursor_screen_pos()
+        
+        # Draw canvas background
+        draw_list.add_rect_filled(
+            canvas_pos[0], canvas_pos[1],
+            canvas_pos[0] + self.tf_canvas_size[0],
+            canvas_pos[1] + self.tf_canvas_size[1],
+            imgui.get_color_u32_rgba(0.2, 0.2, 0.2, 1.0)
+        )
+        
+        # Draw color gradient
+        for i in range(len(self.temp_params['color_points']) - 1):
+            x1, color1 = self.temp_params['color_points'][i]
+            x2, color2 = self.temp_params['color_points'][i+1]
+            
+            # Interpolate colors
+            gradient = np.linspace(0, 1, 50)
+            for j in range(len(gradient) - 1):
+                t = gradient[j]
+                color = [
+                    color1[k] * (1-t) + color2[k] * t 
+                    for k in range(3)
+                ]
+                
+                x = canvas_pos[0] + (x1 * (1-t) + x2 * t) * self.tf_canvas_size[0]
+                draw_list.add_line(
+                    x, canvas_pos[1], 
+                    x, canvas_pos[1] + self.tf_canvas_size[1],
+                    imgui.get_color_u32_rgba(*color, 1.0)
+                )
+        
+        # Draw control points
+        for i, (value, color) in enumerate(self.temp_params['color_points']):
+            x = canvas_pos[0] + value * self.tf_canvas_size[0]
+            y = canvas_pos[1] + self.tf_canvas_size[1] / 2
+            
+            # Draw point
+            draw_list.add_circle_filled(
+                x, y, 6,
+                imgui.get_color_u32_rgba(*color, 1.0)
+            )
+            
+            # Color picker for each point
+            if imgui.is_mouse_hovering_rect(
+                canvas_pos[0] + value * self.tf_canvas_size[0] - 6, 
+                canvas_pos[1] + self.tf_canvas_size[1] / 2 - 6,
+                canvas_pos[0] + value * self.tf_canvas_size[0] + 6, 
+                canvas_pos[1] + self.tf_canvas_size[1] / 2 + 6
+            ):
+                if imgui.is_mouse_clicked(1):  # Right-click
+                    point_color = list(color)
+                    imgui.open_popup("Color Edit")
+                
+                if imgui.begin_popup("Color Edit"):
+                    _, point_color = imgui.color_edit3("Color", point_color)
+                    
+                    # Allow adding or removing points
+                    if imgui.button("Remove Point") and len(self.temp_params['color_points']) > 2:
+                        del self.temp_params['color_points'][i]
+                        imgui.close_current_popup()
+                    
+                    if imgui.button("Add Point"):
+                        # Insert new point midway
+                        new_x = min(max(0, value + 0.1), 1)
+                        new_color = point_color
+                        self.temp_params['color_points'].insert(i+1, (new_x, new_color))
+                    
+                    if imgui.button("Close"):
+                        self.temp_params['color_points'][i] = (value, point_color)
+                        imgui.close_current_popup()
+                    
+                    imgui.end_popup()
+
+    def _render_opacity_transfer_function_editor(self):
+        """Render opacity point editor for transfer function"""
+        # Similar structure to color editor, but focusing on opacity points
+        draw_list = imgui.get_window_draw_list()
+        canvas_pos = imgui.get_cursor_screen_pos()
+        
+        # Draw canvas background
+        draw_list.add_rect_filled(
+            canvas_pos[0], canvas_pos[1],
+            canvas_pos[0] + self.tf_canvas_size[0],
+            canvas_pos[1] + self.tf_canvas_size[1],
+            imgui.get_color_u32_rgba(0.2, 0.2, 0.2, 1.0)
+        )
+        
+        # Draw opacity gradient
+        for i in range(len(self.temp_params['opacity_points']) - 1):
+            x1, opacity1 = self.temp_params['opacity_points'][i]
+            x2, opacity2 = self.temp_params['opacity_points'][i+1]
+            
+            gradient = np.linspace(0, 1, 50)
+            for j in range(len(gradient) - 1):
+                t = gradient[j]
+                opacity = opacity1 * (1-t) + opacity2 * t
+                
+                x = canvas_pos[0] + (x1 * (1-t) + x2 * t) * self.tf_canvas_size[0]
+                draw_list.add_line(
+                    x, canvas_pos[1], 
+                    x, canvas_pos[1] + opacity * self.tf_canvas_size[1],
+                    imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0)
+                )
+    
+    # Similar point interaction logic as color editor...
+    def set_shader_uniform(self, key, value):
+        self.shader_program.use()
+        if isinstance(value, float):
+            self.shader_program.setFloat(key, value)
+        elif isinstance(value, int):
+            self.shader_program.setInt(key, value)
+        elif isinstance(value, (list, tuple)) and len(value) == 3:
+            self.shader_program.setVec3(key, glm.vec3(*value))
+        elif isinstance(value, glm.vec3):
+            self.shader_program.setVec3(key, value)
+        elif key == 'color_points':
+            self.update_color_points(value)  # Call method to update transfer function
+        elif key == 'opacity_points':
+            self.update_opacity_points(value)  # Call method to update opacity transfer function
+        else:
+            # Original logic for other parameters
+            super().set_shader_uniform(key, value)
+
+    def apply_initial_parameters(self):
+        initial_params = self.params
+        for key, value in initial_params.items():
+            try:
+                self.set_shader_uniform(key, value)
+            except Exception as e:
+                print(f"Error setting uniform {key}: {e}")
+
+    def update_shader_uniforms(self):
+        shader = self.shader_program
+        shader.use()
+        for key, value in self.temp_params.items():
+            try:
+                if key == 'spine_color':
+                    shader.setVec3("spineColor", glm.vec3(*value))
+                elif isinstance(value, float):
+                    shader.setFloat(key, value)
+                elif isinstance(value, int):
+                    shader.setInt(key, value)
+                elif isinstance(value, (list, tuple)) and len(value) == 3:
+                    shader.setVec3(key, glm.vec3(*value))
+            except Exception as e:
+                print(f"Error setting uniform {key}: {e}")
+        # Update lens uniforms
+        self.shader_program.setInt("lens_active", int(self.lens['active']))
+        self.shader_program.setVec2("lens_position", glm.vec2(*self.lens['position']))
+        self.shader_program.setVec2("lens_size", glm.vec2(*self.lens['size']))
+        self.shader_program.setFloat("lens_magnification", self.lens['magnification'])
+
+    def create_transfer_function(self):
+        tf_data = np.zeros((256, 4), dtype=np.float32)
+        # Update color points
+        for i in range(len(self.temp_params['color_points']) - 1):
+            x1, color1 = self.temp_params['color_points'][i]
+            x2, color2 = self.temp_params['color_points'][i + 1]
+            start = int(x1 * 255)
+            end = int(x2 * 255)
+            for j in range(start, end + 1):
+                t = (j - start) / (end - start)
+                tf_data[j, :3] = [c1 * (1 - t) + c2 * t for c1, c2 in zip(color1, color2)]
+                tf_data[j, 3] = 1.0  # Fully opaque
+        # Update opacity points
+        for i in range(len(self.temp_params['opacity_points']) - 1):
+            x1, opacity1 = self.temp_params['opacity_points'][i]
+            x2, opacity2 = self.temp_params['opacity_points'][i + 1]
+            start = int(x1 * 255)
+            end = int(x2 * 255)
+            for j in range(start, end + 1):
+                t = (j - start) / (end - start)
+                tf_data[j, 3] = opacity1 * (1 - t) + opacity2 * t
+        return tf_data
+
+    def update_transfer_function(self):
+        tf_data = np.zeros((256, 4), dtype=np.float32)
+        # Update color points
+        for i in range(len(self.temp_params['color_points']) - 1):
+            x1, color1 = self.temp_params['color_points'][i]
+            x2, color2 = self.temp_params['color_points'][i + 1]
+            start = int(x1 * 255)
+            end = int(x2 * 255)
+            for j in range(start, end + 1):
+                t = (j - start) / (end - start)
+                tf_data[j, :3] = [c1 * (1 - t) + c2 * t for c1, c2 in zip(color1, color2)]
+                tf_data[j, 3] = 1.0  # Set alpha to fully opaque
+        # Update opacity points
+        for i in range(len(self.temp_params['opacity_points']) - 1):
+            x1, opacity1 = self.temp_params['opacity_points'][i]
+            x2, opacity2 = self.temp_params['opacity_points'][i + 1]
+            start = int(x1 * 255)
+            end = int(x2 * 255)
+            for j in range(start, end + 1):
+                t = (j - start) / (end - start)
+                tf_data[j, 3] = opacity1 * (1 - t) + opacity2 * t
+        glBindTexture(GL_TEXTURE_1D, self.volume.transfer_function_texture)
+        glTexSubImage1D(GL_TEXTURE_1D, 0, 0, 256, GL_RGBA, GL_FLOAT, tf_data)
+        glTexSubImage1D(GL_TEXTURE_1D, 0, 0, 256, GL_RGBA, GL_FLOAT, tf_data)
+        print(f"Transfer function updated with {len(self.temp_params['color_points'])} color points and {len(self.temp_params['opacity_points'])} opacity points.")
+
+    def update_color_points(self, color_points):
+        # Update the transfer function texture for color points
+        tf_data = np.zeros((256, 4), dtype=np.float32)
+        for i in range(len(color_points) - 1):
+            x1, color1 = color_points[i]
+            x2, color2 = color_points[i + 1]
+            start = int(x1 * 255)
+            end = int(x2 * 255)
+            for j in range(start, end + 1):
+                t = (j - start) / (end - start)
+                tf_data[j, :3] = [c1 * (1 - t) + c2 * t for c1, c2 in zip(color1, color2)]
+                tf_data[j, 3] = 1.0  # Set alpha to 1.0
+        glBindTexture(GL_TEXTURE_1D, self.volume.transfer_function_texture)
+        glTexSubImage1D(GL_TEXTURE_1D, 0, 0, 256, GL_RGBA, GL_FLOAT, tf_data)
+
+    def update_opacity_points(self, opacity_points):
+        # Update the transfer function texture for opacity points
+        tf_data = np.zeros((256, 4), dtype=np.float32)
+        for i in range(len(opacity_points) - 1):
+            x1, y1 = opacity_points[i]
+            x2, y2 = opacity_points[i + 1]
+            start = int(x1 * 255)
+            end = int(x2 * 255)
+            for j in range(start, end + 1):
+                t = (j - start) / (end - start)
+                tf_data[j, 3] = y1 * (1 - t) + y2 * t
+        glBindTexture(GL_TEXTURE_1D, self.volume.transfer_function_texture)
+        glTexSubImage1D(GL_TEXTURE_1D, 0, 0, 256, GL_RGBA, GL_FLOAT, tf_data)
+
+    def has_changes(self):
+        """Check if parameters have changed"""
+        return self.params_changed
+
+    def get_current_params(self):
+        params = self.params.copy()
+        # Debugging: Check all parameter types and values
+        for key, value in params.items():
+            if key == 'spine_color' or key in ['view_position']:
+                if not (isinstance(value, (list, tuple)) and len(value) == 3):
+                    print(f"Invalid Vec3 parameter: {key} -> {value}")
+            elif key == 'color_points' or key == 'opacity_points':
+                if not isinstance(value, list):
+                    print(f"Invalid list parameter: {key} -> {value}")
+        return params
+
+    def cleanup(self):
+        """Cleanup ImGui resources"""
+        if self.impl:
+            self.impl.shutdown()
+```

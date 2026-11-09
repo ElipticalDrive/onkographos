@@ -1,97 +1,117 @@
 # Parametric Surface Voxelization
-
 Also called: Directional Sheet Buffer Voxelization, Parametric field rasterization
 
 ## Overview
-Parametric Surface Voxelization converts continuous parametric surfaces (such as NURBS or subdivision patches) into a discrete voxel grid by rasterizing the surface in 3D space using the GPU vertex shader [S1, S2, unofficial]. Unlike methods that operate in 3D object space or rely on pixel-shader-based ray casting, this approach treats points in the 2D parametric domain as vertices, transforming them directly into world-space coordinates and projecting them into the voxel grid [S1, S2, unofficial]. It is distinct from [Implicit Surface Voxelization](2379-implicit-surface-voxelization.md) because it explicitly evaluates the parametric function $S(u,v)$ rather than solving for zero-crossings of an implicit field, and from [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) by utilizing the vertex shader stage to generate the volumetric data directly from parametric samples [S1, S2, unofficial].
+Parametric Surface Voxelization converts a parametric surface (such as a subdivision surface or implicit field) into a voxel grid by rasterizing points in the 2D parameter domain directly into 3D space using the vertex shader [S1, S2, unofficial]. It differs from triangle-based rasterization by avoiding mesh tessellation; instead, it samples the parametric field to generate vertices that are immediately transformed into voxel coordinates [S1, S2, unofficial]. This approach is particularly suited for complex implicit or subdivision surfaces where explicit triangle meshes are unavailable or too dense [S1, S2, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A parametric surface defined by $S(u,v)$ where $(u,v) \in [0,1]^2$, and a target voxel grid defined by origin $O$, resolution $(N_x, N_y, N_z)$, and voxel size $s$.
-*   **Output:** A voxel grid (worksheet) where each voxel stores occupancy or attribute data derived from the surface intersection.
+**Inputs:**
+- A parametric surface definition $S(u, v)$ mapping 2D texture coordinates $(u, v)$ to 3D world space positions.
+- A target voxel grid resolution (dimensions $W \times H \times D$) and world-space bounds.
+- A sampling density for the parametric domain (number of points per unit area in $(u, v)$ space).
+
+**Outputs:**
+- A voxel grid (worksheet) where occupied voxels are marked, potentially with color or normal data derived from the surface evaluation.
 
 **Data Structures:**
-*   **Boodle of Points:** A 1D array or buffer of 2D texture coordinates $(u_i, v_i)$ covering the parametric domain. The density of points determines the sampling resolution of the surface.
-*   **Voxel Grid (Worksheet):** A 3D texture or buffer representing the voxel space. In the context of the source, this is referred to as a "worksheet" [S1, S2, unofficial].
+- **Boodle of Points:** A flat list of 2D vectors $(u, v)$ covering the parametric domain. The size is determined by the desired sampling density.
+- **Vertex Shader Output:** A stream of 3D positions $(x, y, z)$ and associated attributes (e.g., color, normal) corresponding to the sampled points.
+- **Worksheet (Voxel Grid):** A 3D texture or hash table storing voxel occupancy and attributes.
 
 **Steps:**
-1.  **Generate Parametric Samples:** Create a "boodle" (buffer) of 2D points $(u, v)$ that uniformly or adaptively cover the parametric domain $[0,1]^2$ [S1, S2, unofficial].
-2.  **Vertex Shader Processing:** For each point in the boodle:
-    a.  Evaluate the parametric surface function to compute the 3D world position $P = S(u,v)$ [S1, S2, unofficial].
-    b.  Transform $P$ into the voxel grid's coordinate system.
-    c.  Map the continuous position $P$ to discrete voxel indices $(i, j, k)$ using the coordinate mapping formula from the parent article:
-        $$ i = \lfloor \frac{P_x - O_x}{s} \rfloor, \quad j = \lfloor \frac{P_y - O_y}{s} \rfloor, \quad k = \lfloor \frac{P_z - O_z}{s} \rfloor $$
-    d.  Write the result to the voxel grid (worksheet) at $(i, j, k)$ [S1, S2, unofficial].
-3.  **Completion:** The process repeats for all points in the boodle. The resulting grid represents the voxelized surface.
+1. **Generate Parametric Samples:** Create a boodle of points $\{(u_i, v_i)\}$ that uniformly or adaptively cover the parametric domain of the surface. The number of points $N$ is chosen to ensure sufficient spatial resolution in 3D space relative to the voxel size [S1, S2, unofficial].
+2. **Vertex Shader Processing:** For each point $(u_i, v_i)$ in the boodle:
+   - Evaluate the parametric surface function to compute the 3D position: $\mathbf{p}_i = S(u_i, v_i)$ [S1, S2, unofficial].
+   - Transform $\mathbf{p}_i$ from world space to voxel grid coordinates. This involves scaling and translating $\mathbf{p}_i$ to map the world-space bounds to the voxel grid indices $(x_i, y_i, z_i)$ [S1, S2, unofficial].
+   - Compute any additional attributes (e.g., surface normal, color) at $(u_i, v_i)$ if required for the voxel content [G].
+3. **Rasterization/Transcoding:** "Transcode" the computed 3D positions into the voxel grid. This is typically implemented by rendering the points as single-pixel quads or using a point rasterizer that writes directly to the 3D texture (worksheet) at the calculated voxel indices $(x_i, y_i, z_i)$ [S1, S2, unofficial]. If multiple points map to the same voxel, a merge strategy (e.g., overwrite, average, or max) is applied [G].
+4. **Completion:** The worksheet now contains the voxelized representation of the parametric surface.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def parametric_surface_voxelization(surface_func, parametric_samples, grid_origin, grid_size, voxel_size):
+def parametric_surface_voxelization(surface_func, bounds, resolution, sample_density):
     """
-    Voxelize a parametric surface by rasterizing parametric samples in the vertex shader.
+    Voxelize a parametric surface S(u,v).
     
     Args:
-        surface_func: Function S(u, v) returning 3D world coordinates.
-        parametric_samples: List of (u, v) tuples covering [0,1]^2.
-        grid_origin: Tuple (ox, oy, oz) of the voxel grid's minimum corner.
-        grid_size: Tuple (nx, ny, nz) of the voxel grid resolution.
-        voxel_size: Float size of a single voxel.
+        surface_func: Function S(u, v) -> (x, y, z)
+        bounds: (min_x, min_y, min_z, max_x, max_y, max_z)
+        resolution: (W, H, D)
+        sample_density: Points per unit area in (u, v) domain
         
     Returns:
-        voxel_grid: 3D array of shape (nx, ny, nz) with occupancy/attributes.
+        voxel_grid: 3D array of shape (W, H, D)
     """
-    # Initialize empty voxel grid
-    voxel_grid = create_3d_array(grid_size, default=0)
+    # 1. Determine parametric domain bounds (assume [0,1]x[0,1] for simplicity)
+    u_min, u_max = 0.0, 1.0
+    v_min, v_max = 0.0, 1.0
     
-    for u, v in parametric_samples:
-        # Step 2a: Calculate 3D position from parametric coordinates
-        # This corresponds to the vertex shader evaluation of S(u,v)
-        p_world = surface_func(u, v)
-        
-        # Step 2b & 2c: Transcode to worksheet (voxel grid)
-        # Map world coordinates to grid indices
-        idx_x = floor((p_world.x - grid_origin.x) / voxel_size)
-        idx_y = floor((p_world.y - grid_origin.y) / voxel_size)
-        idx_z = floor((p_world.z - grid_origin.z) / voxel_size)
-        
-        # Check bounds to avoid out-of-bounds writes
-        if 0 <= idx_x < grid_size.x and \
-           0 <= idx_y < grid_size.y and \
-           0 <= idx_z < grid_size.z:
+    # 2. Generate boodle of points
+    # Calculate number of samples needed based on density
+    # Note: Exact formula for N depends on implementation; here we use a simple grid
+    num_samples_u = int(sample_density * (u_max - u_min))
+    num_samples_v = int(sample_density * (v_max - v_min))
+    
+    points = []
+    for i in range(num_samples_u):
+        for j in range(num_samples_v):
+            u = u_min + (i + 0.5) * (u_max - u_min) / num_samples_u
+            v = v_min + (j + 0.5) * (v_max - v_min) / num_samples_v
+            points.append((u, v))
             
-            # Step 2d: Write to worksheet
-            # In a real GPU implementation, this might be an atomic add or direct write
-            # depending on whether multiple samples hit the same voxel
-            voxel_grid[idx_x, idx_y, idx_z] = 1 
+    # 3. Initialize voxel grid
+    voxel_grid = np.zeros((resolution[0], resolution[1], resolution[2]))
+    
+    # 4. Process each point
+    for u, v in points:
+        # Evaluate surface
+        x, y, z = surface_func(u, v)
+        
+        # Transform to voxel coordinates
+        # Map world bounds to [0, resolution-1]
+        wx, wy, wz = x, y, z
+        min_x, min_y, min_z, max_x, max_y, max_z = bounds
+        
+        # Check if point is within bounds
+        if not (min_x <= wx <= max_x and min_y <= wy <= max_y and min_z <= wz <= max_z):
+            continue
             
+        vx = int((wx - min_x) / (max_x - min_x) * (resolution[0] - 1))
+        vy = int((wy - min_y) / (max_y - min_y) * (resolution[1] - 1))
+        vz = int((wz - min_z) / (max_z - min_z) * (resolution[2] - 1))
+        
+        # Write to voxel grid (overwrite or merge)
+        voxel_grid[vx, vy, vz] = 1.0 # Mark as occupied
+        
     return voxel_grid
 ```
 
 **Parameters:**
-*   **Parametric Sampling Density:** Not given in the sources. The source mentions building a "boodle of points that cover the parametric field" but does not specify the number of points or distribution [S1, S2, unofficial].
-*   **Voxel Size:** Determined by the target grid resolution and bounding box.
+- `sample_density`: Controls the resolution of the parametric sampling. Higher values yield more accurate surfaces but increase computation. Typical values depend on surface complexity and target voxel resolution. Not given in the sources.
 
-**Edge Cases and Pitfalls:**
-*   **Precision:** The source notes that handling very complex implicit surfaces requires shader programs with "enough long instruction slots" [S2, unofficial]. This implies that complex parametric evaluations may exceed hardware limits.
-*   **Boundaries:** The method assumes the parametric domain is well-defined. Degenerate patches or invalid $(u,v)$ ranges will produce invalid 3D positions.
-*   **Overlap:** Multiple parametric samples may map to the same voxel. The source does not specify how to handle collisions (e.g., atomic operations vs. last-write-wins) [S1, S2, unofficial].
+**Edge Cases:**
+- **Degenerate Surfaces:** If the surface function is undefined or singular at certain $(u, v)$, the shader must handle these gracefully (e.g., skip or clamp) [G].
+- **Boundary Conditions:** Points near the edge of the parametric domain may not cover the entire surface if the domain is not fully sampled. Ensure the sampling covers the full domain [G].
+- **Precision:** Floating-point precision in the vertex shader may cause jitter in voxel placement for very high-resolution grids [G].
 
 ## Subtopics
 
 ### [Recursive Parameter Space Voxelization for Catmull-Clark Subdivision Surfaces](2533-recursive-parameter-space-voxelization-for-catmull-clark-sub.md)
-Converts Catmull-Clark subdivision surfaces by recursively subdividing the 2D parameter space rather than 3D object space, ensuring leak-free results for closed objects.
+This method converts a free-form object represented by a Catmull-Clark subdivision surface (CCSS) into a voxel grid by recursively subdividing the 2D parameter space of surface patches and sampling 3D points, rather than subdividing 3D object space. It ensures leak-free results for closed objects when a 3D flooding operation is performed by guaranteeing that voxels generated from a single patch satisfy specific N-adjacency properties. Unlike 3D space subdivision techniques which are computationally expensive due to distance computations between 3D points, this method performs subdivision in 2D parameter space, avoiding expensive 3D distance computations.
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of parametric samples $N$. $O(N)$.
-*   **Memory Complexity:** $O(N_x N_y N_z)$ for the voxel grid.
-*   **Performance:** The method is described as "rapid" and suitable for "real-time voxelization" [S1, S2, unofficial]. By using the vertex shader, it leverages GPU parallelism for the transformation step.
-*   **Strengths:** Can handle complex parametric surfaces directly; avoids expensive 3D distance computations associated with 3D space subdivision [S1, unofficial].
-*   **Limitations:** Requires sufficient shader instruction length for complex surfaces [S2, unofficial]. The source does not provide specific performance metrics (FPS, voxel counts) [S1, S2, unofficial].
+- **Time Complexity:** Linear with respect to the number of sampled points $N$. $N$ is proportional to the surface area in parametric space and the sampling density. Evaluation of $S(u, v)$ is typically constant time per point.
+- **Memory Complexity:** Linear with respect to the voxel grid size $W \times H \times D$ for the output grid. The boodle of points requires $O(N)$ memory.
+- **Performance:** Fast for complex surfaces where tessellation would be expensive. Performance is limited by the vertex shader throughput and the cost of evaluating the parametric function.
+- **Strengths:** No need for explicit triangle mesh; handles implicit and subdivision surfaces directly; efficient on GPU due to vertex shader parallelism.
+- **Limitations:** Sampling artifacts if density is too low; requires efficient evaluation of the parametric function; may produce non-manifold or leaky results if not carefully implemented (though recursive variants address this) [S1, unofficial].
+- **When to use:** When voxelizing subdivision surfaces, implicit surfaces, or other parametric representations where mesh tessellation is impractical.
+- **When not to use:** For simple triangle meshes where standard rasterization-based voxelization is more efficient and robust.
 
 ## Background
-The method was introduced in the paper "Real-time Voxelization for Complex Models" [S1, S2, unofficial]. It is part of a broader effort to enable real-time voxelization for complex geometry, including CSG models and parametric surfaces, to facilitate applications like transparent illustration and navigation mesh generation [S1, S2, unofficial].
+Originated in the context of real-time voxelization for complex models, specifically for handling parametric surfaces and CSG models [S1, S2, unofficial]. The method leverages the GPU's vertex shader to bypass the need for explicit geometry tessellation, enabling rapid voxelization of complex shapes [S1, S2, unofficial]. It is part of a broader effort to enable real-time voxel-based rendering and processing, such as transparent illustration and CSG operations [S1, S2, unofficial].
 
 ## Sources
 [S1] Real-time Voxelization for Complex Models, https://wo1fsea.github.io/files/About_NavMesh/P2_Real-time_Voxelization_for_Complex_Models.pdf, fetched 2026-10-29 (unofficial)

@@ -1,50 +1,54 @@
 # Distributed computing and load balancing
 
-Also called: Parallel volume rendering, Cluster-based volume rendering
+Also called: Parallel volume rendering distribution, Cluster-based volume rendering, Load balancing strategies
 
 ## Overview
-Distributed computing and load balancing in volume rendering addresses the problem of rendering datasets too large to fit in the memory of a single machine or too computationally intensive for a single processor [S1, S2, unofficial]. It partitions the volume data or the rendering workload across multiple nodes in a cluster to achieve scalability [S1, S2, unofficial]. What sets this family apart from [Out-of-core, streaming and distributed data](8-out-of-core-streaming-and-distributed-data.md) is the explicit focus on parallel execution across a networked cluster rather than just managing disk I/O for a single node, and from [Hardware-Assisted Volume Streaming](2119-hardware-assisted-volume-streaming.md) by relying on general-purpose processors and network communication rather than specialized graphics hardware pipelines for data movement [S1, S2, unofficial].
+This family addresses the scalability limits of single-node volume rendering by distributing both volumetric data and rendering computation across multiple processors or nodes in a cluster. It solves the problem of rendering datasets that exceed the memory capacity or computational throughput of a single machine by partitioning the volume space or data cells among processors [S1, S2, S4, unofficial]. What sets this family apart from its siblings is the specific focus on **load balancing**—ensuring that all processors finish their assigned work simultaneously to minimize idle time—rather than just parallel execution. Unlike [Hardware-Assisted Volume Streaming](2119-hardware-assisted-volume-streaming.md) which optimizes for bandwidth on a single machine, or [Chunk-based spatial partitioning](3862-chunk-based-spatial-partitioning.md) which defines the data structure, these methods define how work is assigned to processors to handle non-uniform data density and view-dependent occlusion [S1, S2, unofficial].
 
 ## Shared principles
-The core mechanism involves decomposing the problem space (data or image) and distributing the resulting tasks to independent processing units (nodes or processes) that communicate via a message-passing interface (e.g., MPI) [S1, S2, unofficial].
+All methods in this family share the following core mechanisms and constraints:
 
-1.  **Decomposition:** The volume is partitioned into chunks, bricks, or subdomains. The decomposition strategy determines the granularity and spatial relationship of the data assigned to each processor [S1, S2, unofficial].
-2.  **Distribution:** Partitions are assigned to processors. This can be static (precomputed) or dynamic (runtime adjustment) [S1, S2, unofficial].
-3.  **Local Rendering:** Each processor renders its assigned partition independently. This typically involves ray casting or slice projection [S1, S2, unofficial].
-4.  **Compositing/Assembly:** The partial results (sub-images or intermediate volumes) are combined to form the final image. This requires handling the order of operations to preserve visual correctness, especially for alpha-blended volumes [S1, S2, unofficial].
+1.  **Decomposition Strategy**: The volume or dataset is partitioned into subdomains, bricks, or cells. This partitioning can be:
+    *   **Spatial**: Dividing the 3D space into rectangular blocks (e.g., 1D, 2D, or 3D grids) [S2, S4, unofficial].
+    *   **Data-Driven**: Dividing based on cell counts or resolution levels (e.g., adaptive grids) [S1, unofficial].
+    *   **Topology-Aware**: Dividing unstructured meshes based on connectivity [S2, unofficial].
 
-**Mathematical Constraints:**
-*   **Associativity:** For efficient distributed compositing, the blending operation must be associative. Alpha compositing is associative: $(A \otimes B) \otimes C = A \otimes (B \otimes C)$, allowing intermediate results to be composited locally before network transmission [S1, unofficial].
-*   **Precedence:** In non-associative or view-dependent scenarios, the relative depth order of voxels must be preserved across partitions to ensure correct blending [S1, unofficial].
+2.  **Work Assignment**: Each processor is assigned a subset of the partitioned data. The goal is to minimize the maximum workload across all processors:
+    $$ T_{max} = \max_{p \in Processors} (T_{compute, p} + T_{comm, p}) $$
+    Where $T_{compute}$ is the rendering time and $T_{comm}$ is the communication/compositing time [S1, unofficial].
+
+3.  **Compositing Order**: For correct alpha compositing, the relative depth order of rendered partitions must be preserved. If partitions are spatial, the compositing order is often determined by the view direction and the spatial position of the partitions [S1, S2, unofficial]. In distributed systems, partial images are often sent to a root node or composed in a tree-like structure [S2, unofficial].
+
+4.  **Communication Overhead**: Methods must account for the cost of transferring data to processors and transferring partial images for compositing. Load balancing algorithms often trade off spatial locality (which reduces communication) against computational balance (which reduces idle time) [S2, S4, unofficial].
 
 ## Subtopics
 
 ### [Scalable Distributed Volume Rendering (SDVR)](863-scalable-distributed-volume-rendering-sdvr.md)
-SDVR targets large unstructured grids on PC clusters using OpenGL and MPI. It partitions data into load-balanced "brick-shaped chunks" using an out-of-core modified k-d decomposition. It sets itself apart by handling unstructured data via object-space partitioning and supporting both hardware-accelerated and software rendering modes for portability.
+SDVR targets large unstructured datasets on PC clusters using OpenGL and MPI. It uses an out-of-core modified k-d decomposition to create load-balanced "brick-shaped chunks" during preprocessing. It is chosen when scalability is prioritized over peak performance, as it can run with or without graphics hardware. Unlike fixed-grid methods, it adapts to the data structure via k-d decomposition.
 
 ### [MPI Volume Rendering (1D/2D Decomposition)](2249-mpi-volume-rendering-1d-2d-decomposition.md)
-This method partitions a regular 3D scalar dataset spatially along the X and/or Y axes into contiguous subdomains. Each MPI process ray casts its subdomain and sends the resulting sub-image to a root process for assembly. It differs from SDVR by using static spatial decomposition of regular grids rather than dynamic object-space partitioning of unstructured data.
+This method partitions a 3D scalar volume into 1D (row-based) or 2D (block-based) subdomains along the X and/or Y axes, keeping the full Z-depth for each process. It is chosen for regular structured data where ray casting along the Z-axis allows local compositing without per-ray communication. It differs from 3D decomposition by eliminating inter-process communication during ray marching, but may suffer from load imbalance if density varies significantly along the partitioned axes.
 
 ### [Round-Robin Data Distribution](2667-round-robin-data-distribution.md)
-A static load balancing strategy where mesh cells are assigned to processors cyclically ($p_i = i \mod P$). It solves load imbalance in unstructured grids by scattering connected cells to average out computational costs. It sets itself apart by prioritizing computational balance over spatial locality, which destroys spatial relationships and requires additional structures for efficient compositing.
+A static load balancing strategy for unstructured grids where cells are assigned to processors cyclically ($p_i = i \mod P$). It is chosen to average out computational costs caused by varying cell sizes and opacities. It sets itself apart by prioritizing computational balance over spatial locality, which destroys spatial relationships and requires additional structures (like spatial partitioning trees) for efficient compositing.
 
 ### [Cell Count Algorithm for Adaptive-Resolution Load Balancing](6937-cell-count-algorithm-for-adaptive-resolution-load-balancing.md)
-A greedy algorithm for adaptive-resolution datasets that balances workload by ensuring each processor handles approximately the same total number of cells. It sorts blocks by cell count (descending) and assigns them to processors until the target load ($\lceil \text{Total Cells} / P \rceil$) is reached. It sets itself apart by explicitly targeting resolution heterogeneity through discrete block assignment rather than continuous spatial partitioning.
+This algorithm balances load for adaptive-resolution datasets by ensuring each processor handles approximately the same total number of voxels (cells). It is chosen when data resolution varies significantly across the volume. It sets itself apart by decoupling block assignment from spatial contiguity, using a greedy sorting approach to assign blocks to processors until their cell count quota is met.
 
 ### [Dynamic load balancing using kd-trees](9365-dynamic-load-balancing-using-kd-trees.md)
-Uses a kd-tree to dynamically redistribute rendering work based on runtime cost estimates or occlusion statistics. It sets itself apart from static methods by enabling runtime adaptation and from central queue approaches by maintaining a hierarchical spatial structure for efficient traversal and balancing.
+This method uses a hierarchical kd-tree to dynamically redistribute rendering work during rendering. It is chosen when load imbalance is caused by non-uniform data density or view-dependent occlusion that static methods cannot handle. It sets itself apart by allowing runtime adjustment of partitions based on load statistics stored in inner tree nodes, managing both spatial partitioning and compositing order.
 
 ### [Load Balanced Network Distribution (LBND)](9702-load-balanced-network-distribution-lbnd.md)
-Partitions volumetric data into bricks to minimize end-to-end rendering time by explicitly modeling network communication costs and using dynamic programming. It sets itself apart by optimizing for the slowest node (bottleneck) while respecting view-dependent precedence constraints for alpha compositing, unlike methods that only balance compute load.
+LBND is an optimization framework that partitions data to minimize the maximum of render, compose, and network times. It is chosen when network bandwidth is a bottleneck or when data sparsity is non-uniform. It sets itself apart by explicitly guiding partition boundaries based on empty space distribution and render costs while maintaining strict view-dependent precedence constraints.
 
-### Distributed Data Loader Creation
-A minor variant for integrating distributed volume rendering with deep learning pipelines. It evaluates the dataset string, retrieves world size and rank, and attempts to create a dataset-specific sampler. If that fails, it falls back to `torch.utils.data.DistributedSampler` (if distributed is initialized) or a random/sequential sampler [S1, unofficial].
+#### Distributed Data Loader Creation
+This variant focuses on the software infrastructure for loading data in a distributed manner. It evaluates the dataset string, attempts to create a dataset-specific sampler, and falls back to standard distributed or random/sequential samplers if unavailable. It is used in deep learning-based volume rendering pipelines to ensure efficient data distribution across workers [S1, unofficial].
 
-### MapReduce Rendering
-Utilizes a MapReduce API to handle communication and computation in parallel [S2, unofficial]. It employs an asynchronous streaming interface that allows network communication, CPU/GPU data transfers, disk access, and GPU kernel execution to happen concurrently [S2, unofficial].
+#### MapReduce Rendering
+This variant utilizes the MapReduce API to handle communication and computation in parallel. It employs an asynchronous streaming interface that allows network communication, CPU/GPU data transfers, disk access, and GPU kernel execution to happen concurrently. It is chosen for systems where overlapping I/O and computation is critical for performance [S2, unofficial].
 
 ## Background
-Distributed volume rendering emerged as a solution to the limitations of single-machine rendering when facing terabyte-scale datasets. Early work focused on MPI-based decomposition of regular grids [S2, S4, unofficial]. Later, systems like SDVR addressed the complexity of unstructured data [S1, S2, unofficial]. The field has evolved to include dynamic load balancing to handle heterogeneous workloads and network-aware partitioning (LBND) to optimize for cluster performance [S1, unofficial]. MapReduce approaches have been adapted for volume rendering to leverage massive parallelism in data centers [S2, unofficial].
+Distributed volume rendering emerged as a solution to the "memory wall" and "compute wall" encountered when visualizing teravoxel-scale datasets from scientific simulations and medical imaging. Early approaches relied on static spatial decomposition (grids) [S2, unofficial]. As datasets became larger and more heterogeneous, load imbalance became a critical issue, leading to the development of dynamic load balancing techniques using kd-trees and cell-count algorithms [S1, unofficial]. The use of MPI and cluster computing became standard for high-performance volume rendering [S1, S2, unofficial]. More recently, MapReduce paradigms have been adapted for volume rendering to handle massive parallelism and asynchronous I/O [S2, unofficial].
 
 ## Sources
 [S1] NVlabs/InstantSplat, https://github.com/NVlabs/InstantSplat, fetched 2026-10-27 (unofficial)
