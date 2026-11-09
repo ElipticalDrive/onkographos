@@ -2,7 +2,7 @@
 
 
 ## Overview
-Volume Normalization scales a volume tensor to the range $[0, 1]$ while preserving constant positive masks as full foreground ($1.0$) [S1, unofficial]. It builds on [Data Preprocessing and Normalization](6880-data-preprocessing-and-normalization.md).
+Volume Normalization scales a volume tensor to the range $[0, 1]$ while preserving constant positive masks as full foreground ($1.0$) [S1, unofficial]. It builds on [Data Preprocessing and Normalization](6880-data-preprocessing-and-normalization.md) [G].
 
 ## How it works
 **Inputs and Outputs:**
@@ -13,14 +13,11 @@ Volume Normalization scales a volume tensor to the range $[0, 1]$ while preservi
 Not given in the sources.
 
 **Steps:**
-1. Compute the global minimum and maximum of the input volume:
-   $$v_{\min} = \min(V)$$
-   $$v_{\max} = \max(V)$$
-2. Check for constant volumes. If the range $v_{\max} - v_{\min} \le 10^{-8}$, the volume is treated as constant:
-   - If $v_{\max} > 0.0$, set all elements of $V_{\text{norm}}$ to $1.0$.
-   - Otherwise, set all elements of $V_{\text{norm}}$ to $0.0$.
-3. For non-constant volumes, apply the linear transformation to each voxel $v \in V$:
-   $$v_{\text{norm}} = \frac{v - v_{\min}}{v_{\max} - v_{\min}}$$
+1. Compute the global minimum and maximum of the input volume: $v_{\min} = \min(V)$ and $v_{\max} = \max(V)$ [S1, unofficial].
+2. Check for constant volumes. If the range $v_{\max} - v_{\min} \le 10^{-8}$, the volume is treated as constant [S1, unofficial]:
+   - If $v_{\max} > 0.0$, set all elements of $V_{\text{norm}}$ to $1.0$ [S1, unofficial].
+   - Otherwise, set all elements of $V_{\text{norm}}$ to $0.0$ [S1, unofficial].
+3. For non-constant volumes, apply the linear transformation to each voxel $v \in V$: $v_{\text{norm}} = \frac{v - v_{\min}}{v_{\max} - v_{\min}}$ [S1, unofficial].
 
 **Pitfalls:**
 - **Constant Volumes:** If the range is near zero, division by zero occurs. The threshold $10^{-8}$ is used to detect this case [S1, unofficial].
@@ -64,7 +61,7 @@ def volume_normalization(volume: list[list[list[float]]], epsilon: float = 1e-8)
 ## Subtopics
 
 ### [Scalar Field Normalization](1842-scalar-field-normalization.md)
-Maps a volume's scalar values to a canonical range, typically $[0, 1]$, to ensure numerical stability and consistent contrast across datasets. It differs from [Power Transformation](2346-power-transformation.md) by preserving linear intensity relationships, and from [Scaling and Biasing](2888-scaling-and-biasing.md) by lacking an explicit bias term in its core definition. Choose it when linear scaling is required without offset adjustments.
+Maps a volume's scalar values to a canonical range, typically $[0, 1]$, to ensure numerical stability and consistent contrast across datasets. It differs from [Power Transformation](2346-power-transformation.md) by preserving linear intensity relationships, and from [Scaling and Biasing](2888-scaling-and-biasing.md) by lacking an explicit bias term in its core definition. Choose it when linear scaling is required without offset adjustments [G].
 
 ## Operating characteristics
 Not given in the sources.

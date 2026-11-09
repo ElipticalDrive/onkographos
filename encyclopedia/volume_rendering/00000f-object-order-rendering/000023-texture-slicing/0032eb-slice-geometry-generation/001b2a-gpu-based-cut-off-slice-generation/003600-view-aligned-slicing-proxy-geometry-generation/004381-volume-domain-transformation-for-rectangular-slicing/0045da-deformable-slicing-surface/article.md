@@ -1,0 +1,138 @@
+# Deformable Slicing Surface
+
+Also called: Slicing Surface Field
+
+## Overview
+Deformable Slicing Surface (DS) is a method for generating slice geometry in hyper-dimensional radiance fields that maps spatial positions to varying ambient coordinates, replacing fixed axis-aligned planes. It solves the problem of fading artifacts and inefficient representation capacity inherent in Axis-Aligned Slicing Plane (AP) methods by allowing different parts of the scene to reference distinct regions of the ambient template space, resulting in sharper details and smoother interpolations between states.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Observation-space sample point $x$, latent deformation code $\omega_i$ (shared with the spatial deformation field), and template NeRF $F$.
+*   **Output:** Ambient coordinate $w$ defining the cross-sectional subspace for the sample, which is used to query the template for color $c$ and density $\sigma$.
+
+**Data Structures:**
+The method relies on a Multi-Layer Perceptron (MLP) to define the mapping function $H$.
+*   **MLP Architecture for $H$:** Depth 6, Width 64.
+*   **Skip Connections:** A skip connection is present at the 5th layer.
+*   **Initialization:** The weights of the last layer are sampled from a normal distribution $\mathcal{N}(0, 10^{-5})$. [S1]
+
+**Positional Encoding:**
+Separate positional encodings are applied to the inputs $x$ and $w$. The method uses a windowed positional encoding $\gamma_\alpha$. [S1]
+*   **For input $x$ (spatial position):** Uses windowed positional encoding with $m=6$. [S1]
+*   **For input $w$ (hyper-coordinate):** Uses windowed positional encoding with $m=1$ and parameter $\beta$. [S1]
+    *   **Parameter $\beta$ Schedule:** $\beta$ is fixed at 0 for the first 1000 iterations, then linearly increased to 1 over the next 10,000 iterations. [S1]
+
+**Algorithm Steps:**
+The evaluation of the observation-space radiance field involves three sequential steps:
+
+1.  **Spatial Deformation:** The observation-space point $x$ is deformed using the spatial deformation field $T$ and the latent code $\omega_i$ to obtain the deformed spatial coordinate $x'$.
+    $$x' = T(x, \omega_i)$$
+2.  **Deformable Slicing Surface Mapping:** The original spatial point $x$ and latent code $\omega_i$ are passed through the deformable slicing surface field $H$ to determine the ambient coordinate $w$.
+    $$w = H(x, \omega_i)$$
+3.  **Template Query:** The deformed spatial coordinate $x'$, the computed ambient coordinate $w$, the viewing direction $d$, and the appearance code $\psi_i$ are queried from the template NeRF $F$ to retrieve color $c$ and density $\sigma$.
+    $$(c, \sigma) = F(x', w, d, \psi_i)$$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import jax.numpy as jnp
+from jax import nn
+
+def windowed_positional_encoding(x, m, alpha=1.0):
+    """
+    Applies windowed positional encoding to input x.
+    m: number of frequency bands.
+    alpha: scaling factor for frequencies.
+    """
+    # Implementation details of windowed PE are assumed standard or provided by framework
+    # This is a placeholder for the specific mathematical definition of gamma_alpha
+    # In practice, this expands x into a higher-dimensional representation
+    pass
+
+def deformable_slicing_surface_mlp(x, omega_i, weights, biases):
+    """
+    MLP defining the mapping H: (x, omega_i) -> w.
+    Depth 6, Width 64, skip connection at layer 5.
+    """
+    # Concatenate x and omega_i
+    input_vec = jnp.concatenate([x, omega_i], axis=-1)
+    
+    # Apply positional encoding to x before entering MLP
+    # Note: omega_i usually does not use positional encoding in this context
+    x_pe = windowed_positional_encoding(x, m=6)
+    input_vec = jnp.concatenate([x_pe, omega_i], axis=-1)
+    
+    # Layer 1
+    h = nn.relu(jnp.dot(input_vec, weights[0]) + biases[0])
+    # Layer 2
+    h = nn.relu(jnp.dot(h, weights[1]) + biases[1])
+    # Layer 3
+    h = nn.relu(jnp.dot(h, weights[2]) + biases[2])
+    # Layer 4
+    h = nn.relu(jnp.dot(h, weights[3]) + biases[3])
+    # Layer 5 (Skip connection source)
+    h5 = nn.relu(jnp.dot(h, weights[4]) + biases[4])
+    # Layer 6
+    h = nn.relu(jnp.dot(h, weights[5]) + biases[5])
+    
+    # Skip connection: add output of layer 5 to layer 6
+    h = h + h5
+    
+    # Output layer (Linear, no activation)
+    # Weights initialized from N(0, 10^-5)
+    w = jnp.dot(h, weights[6]) + biases[6]
+    
+    return w
+
+def evaluate_radiance_field(x, omega_i, psi_i, d, T, H, F):
+    """
+    Evaluates the radiance field using Deformable Slicing Surface.
+    """
+    # Step 1: Spatial Deformation
+    x_prime = T(x, omega_i)
+    
+    # Step 2: Deformable Slicing Surface
+    # H takes x and omega_i. Note: x must be processed with PE inside H or before.
+    # Based on source, H uses PE for x.
+    w = H(x, omega_i)
+    
+    # Step 3: Template Query
+    # F takes x', w, d, psi_i
+    c, sigma = F(x_prime, w, d, psi_i)
+    
+    return c, sigma
+```
+
+**Edge Cases and Pitfalls:**
+*   **Ambient Dimension Count:** The method uses 2 ambient dimensions ($W=2$) in the cited experiments. Increasing $W$ did not improve performance for the tested sequences. [S1]
+*   **Initialization Sensitivity:** The last layer weights are initialized with very small variance ($10^{-5}$) to ensure stable training start. [S1]
+*   **Beta Schedule:** The linear increase of $\beta$ for the $w$ encoding is critical for training stability; fixing it at 0 initially prevents high-frequency noise from dominating early gradients. [S1]
+
+## Operating characteristics
+**Time and Memory Complexity:**
+The method adds the computational cost of evaluating the MLP $H$ (depth 6, width 64) per sample point, in addition to the spatial deformation field $T$ and template query $F$. The positional encoding adds overhead proportional to the number of frequency bands ($m=6$ for $x$, $m=1$ for $w$). [S1]
+
+**Measured Performance:**
+*   **Hardware:** Evaluated on 4 TPU v4s. [S1]
+*   **Training Time:** 
+    *   Half 1080p (960x540), 128 samples/ray, batch size 6,144: ~8 hours for 250k iterations. [S1]
+    *   Full HD (~1920x1080), 256 samples/ray: ~64 hours for 1M iterations. [S1]
+*   **Comparison to Axis-Aligned Plane (AP):** DS provides sharper details and smoother interpolations between states compared to AP. AP forces all ray samples for an observation to share the same ambient coordinates, leading to fading artifacts in regions like eyes, mouth, and chin. DS allows different spatial positions to reference varying parts of the ambient space, improving reconstruction quality. [S1]
+
+**Strengths and Limitations:**
+*   **Strengths:** Efficient use of ambient dimensions; better reconstruction quality; smoother interpolation between topological states. [S1]
+*   **Limitations:** Increased model complexity due to the additional MLP $H$; sensitivity to the $\beta$ schedule; limited benefit from increasing ambient dimensions beyond 2 in tested scenarios. [S1]
+
+## Background
+**Origin:**
+The Deformable Slicing Surface method was introduced in the HyperNeRF paper by Mildenhall et al. (2021) as part of a higher-dimensional representation for topologically varying Neural Radiance Fields. [S1]
+
+**History and Development:**
+The method was developed to address limitations in previous hyper-NeRF approaches that used axis-aligned slicing planes. The authors implemented the method on top of JaxNeRF, a JAX implementation of NeRF. [S1]
+
+**Usage:**
+It is used in neural radiance field rendering for dynamic scenes with topological changes, such as facial expressions. [S1]
+
+## Sources
+[S1] HyperNeRF: A Higher-Dimensional Representation for Topologically Varying Neural Radiance Fields, https://doi.org/10.1145/3478513.3480487, fetched 2026-10-28

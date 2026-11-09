@@ -1,0 +1,242 @@
+--- v002.md
++++ v003.md
+@@ -8,169 +8,88 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A point $\mathbf{x}$ in 2D space, a starting level $l$ (typically the root of a forested mipmap structure), and a compressed tree structure where nodes store addresses and values.
+-*   **Output:** The interpolated signal value at $\mathbf{x}$.
++*   **Input:** A point $\mathbf{x} = (x, y)$ in 2D space, a starting level $l$ (typically the root of a forested mipmap structure), and a compressed tree structure where nodes store addresses and values [S1, unofficial].
++*   **Output:** The interpolated signal value at $\mathbf{x}$ [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Node:** Contains an address (pointer/offset to children) and a value.
++*   **Node:** Contains an address (pointer/offset to children) and a value [S1, unofficial].
+ *   **VQ Codebook:** A lookup table storing residual values for quantized node differences [S1, unofficial].
+ *   **Tree Topology:** Primal subdivision structure where children of a node at location $(x, y)$ in level $l$ have locations $(x, y)$, $(x + 2^l, y)$, $(x, y + 2^l)$, and $(x + 2^l, y + 2^l)$ [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  Identify the cell containing $\mathbf{x}$ at the starting level $l$ (the coarsest level of the forested mipmap) [S1, unofficial].
+-2.  For each of the four corners of this cell, retrieve the root node address and value [S1, unofficial].
+-3.  Re-express point $\mathbf{x}$ in the cell’s local coordinates [S1, unofficial].
+-4.  Loop until termination:
+-    1.  At point $\mathbf{x}$, bilinearly interpolate the four node values to get the current coarse value $v_C$ [S1, unofficial].
+-    2.  If $l < 1$ or all four node addresses are NULL, return the value at $\mathbf{x}$ linearly interpolated (lerped) with the value from the prior level using $l$ as the weight [S1, unofficial].
+-    3.  Set the new cell as the quadrant containing point $\mathbf{x}$ [S1, unofficial].
+-    4.  For each of the four new cell corners:
+-        1.  Predict the new node value using bilinear interpolation of the parent's children [S1, unofficial].
+-        2.  If the node parent address is non-NULL, access the VQ codebook to add the residual value to the predicted value [S1, unofficial].
+-    5.  Update the node address to the appropriate child for each corner [S1, unofficial].
+-    6.  Re-express point $\mathbf{x}$ in the new cell’s coordinates [S1, unofficial].
+-    7.  Decrement $l$ [S1, unofficial].
++1.  At point $\mathbf{x}$, bilinearly interpolate the four node values [S1, unofficial].
++2.  If depth $l < 1$ or all four node addresses are NULL, return the value at $\mathbf{x}$ linearly interpolated (lerped) with the value from the prior level using $l$ as the weight [S1, unofficial].
++3.  Set the new cell as the quadrant containing point $\mathbf{x}$ [S1, unofficial].
++4.  For each of the four new cell corners: Predict the new node value using bilinear interpolation [S1, unofficial].
++5.  If the node parent address is non-NULL, access the VQ codebook to add the residual value [S1, unofficial].
++6.  Update the node address to the appropriate child [S1, unofficial].
++7.  Re-express point $\mathbf{x}$ in the new cell’s coordinates [S1, unofficial].
+ 
+ **Pseudocode:**
+-The following pseudocode generalizes the 1D adaptive primal tree evaluation to the 2D bilinear case. Note that the 2D case requires handling four corners, but the logic per corner follows the 1D iterative refinement.
++The following pseudocode generalizes the 1D adaptive primal tree evaluation to the 2D bilinear case [S1, unofficial]. Note that the 2D case requires handling four corners, but the logic per corner follows the 1D iterative refinement [S1, unofficial].
+ 
+ ```python
+-def evaluate_2d_adaptive_tree(root_nodes, x, y, start_level):
++def evaluate_2d_adaptive_tree(x, y, start_level, nodes, codebook):
+     """
+     Evaluates signal at (x, y) using adaptive quadtree with VQ residuals.
+-    root_nodes: Array of 4 root nodes for the starting cell corners.
+-    x, y: Point coordinates.
++    nodes: List of 4 node objects with .addr and .val attributes.
++    codebook: Function that takes an address and returns a residual float.
+     start_level: Initial depth l.
+     """
+     l = start_level
+-    
+-    # Step 1 & 2: Retrieve initial corner nodes and values
+-    # Assuming root_nodes is a list of 4 node objects with .addr and .val
+-    nodes = [root_nodes[i] for i in range(4)]
+-    
+-    # Step 3: Re-express x, y in local cell coordinates
+-    # Assuming the cell spans [0,1]x[0,1] locally
+-    local_x = x
+-    local_y = y
++    v_prior = 0.0  # Value from the level above; initialized to 0 if unavailable
+     
+     while True:
+-        # Step 4.1: Bilinearly interpolate the four node values
+-        # nodes[0] is bottom-left, [1] bottom-right, [2] top-left, [3] top-right
+-        v00 = nodes[0].val
+-        v10 = nodes[1].val
+-        v01 = nodes[2].val
+-        v11 = nodes[3].val
++        # 1. Bilinearly interpolate the four node values
++        v00, v10, v01, v11 = nodes[0].val, nodes[1].val, nodes[2].val, nodes[3].val
++        v_c = bilinear(v00, v10, v01, v11, x, y)
+         
+-        # Bilinear interpolation
+-        v_top = lerp(v01, v11, local_x)
+-        v_bot = lerp(v00, v10, local_x)
+-        v_c = lerp(v_bot, v_top, local_y)
++        # 2. Termination check
++        if l < 1 or all(n.addr is None for n in nodes):
++            return lerp(v_c, v_prior, l)
+         
+-        # Step 4.2: Termination check
+-        if l < 1:
+-            # Blend with prior level value (v_c is current, need prior)
+-            # In the loop, v_c becomes the prior for the next iteration if we continue
+-            # But here we return. The source says "lerp'ed with that in the prior level using l"
+-            # Since we are at the end, we assume v_c is the best estimate or blend with a base.
+-            # Given the 1D code: return interp(vC, vF, level). 
+-            # In 2D, if we exit, v_c is the coarse value. 
+-            # We need the fine value from the previous iteration or a base.
+-            # For simplicity, if l<1, we return v_c as the final interpolated value 
+-            # or blend with a global base if available. 
+-            # Based on 1D code: if level <= 1.0 return interp(vC, vF, level).
+-            # Here, v_c is vC. vF would be the value from the next finer level if it existed.
+-            # Since we are terminating, we return v_c.
+-            return v_c
++        # 3. Set new cell as the quadrant containing point x
++        qx = 1 if x >= 0.5 else 0
++        qy = 1 if y >= 0.5 else 0
++        quad = qy * 2 + qx  # 0:BL, 1:BR, 2:TL, 3:TR
++        
++        # 4 & 5. Predict new node values and add VQ residuals
++        new_nodes = []
++        for i in range(4):
++            # Relative corner position in parent cell (0 or 1)
++            px = 1 if (i & 1) else 0
++            py = 1 if (i & 2) else 0
++            pred = bilinear(v00, v10, v01, v11, px, py)
+             
+-        # Check if all addresses are NULL
+-        all_null = all(n.addr is None for n in nodes)
+-        if all_null:
+-            return v_c
+-
+-        # Step 4.3: Set new cell as quadrant containing x, y
+-        # Determine which quadrant (0: BL, 1: BR, 2: TL, 3: TR)
+-        if local_x < 0.5 and local_y < 0.5:
+-            quad = 0 # BL
+-            local_x = (local_x - 0.0) * 2
+-            local_y = (local_y - 0.0) * 2
+-        elif local_x >= 0.5 and local_y < 0.5:
+-            quad = 1 # BR
+-            local_x = (local_x - 0.5) * 2
+-            local_y = (local_y - 0.0) * 2
+-        elif local_x < 0.5 and local_y >= 0.5:
+-            quad = 2 # TL
+-            local_x = (local_x - 0.0) * 2
+-            local_y = (local_y - 0.5) * 2
+-        else:
+-            quad = 3 # TR
+-            local_x = (local_x - 0.5) * 2
+-            local_y = (local_y - 0.5) * 2
+-            
+-        # Step 4.4: Update nodes for the new quadrant
+-        # The new corners are derived from the current nodes' children
+-        # We need to fetch children for the 4 new corners of the selected quadrant
++            child_addr = nodes[i].addr
++            if child_addr is not None:
++                residual = codebook(child_addr)
++                new_val = pred + residual
++                new_nodes.append(Node(addr=None, val=new_val))
++            else:
++                new_nodes.append(Node(addr=None, val=pred))
+         
+-        # Helper to get child node
+-        def get_child(node, child_idx):
+-            if node is None or node.addr is None:
+-                return None
+-            # Access VQ codebook if parent address is non-NULL (implies node exists)
+-            # Predict value using bilinear interpolation of siblings?
+-            # The source says: "Predict the new node value using bilinear interpolation."
+-            # Then "Access VQ codebook to add residual".
+-            # This implies the stored value is the residual.
+-            
+-            # For this step, we assume we have access to the child nodes via the address
+-            # In a real implementation, `node.addr` points to the child node data.
+-            child = fetch_node(node.addr, child_idx)
+-            
+-            if child is not None:
+-                # Predict value (from parent interpolation or sibling prediction)
+-                # The source is slightly abstract here: "Predict... using bilinear interpolation"
+-                # Then add residual.
+-                # Let's assume `child.val` is the residual.
+-                # We need the predicted value.
+-                # In primal trees, prediction often comes from coarser neighbors.
+-                # For simplicity, we assume the child node stores the residual.
+-                residual = child.val
+-                # We need the predicted value. 
+-                # In the 1D case, vm = interp(vl, vr, 0.5).
+-                # In 2D, prediction is more complex. 
+-                # However, the source states: "If the node parent address is non-NULL, Access the VQ codebook to add the residual value."
+-                # This implies the node value *is* the residual.
+-                # We need to reconstruct the value.
+-                # Let's assume we have a function `predict_value` based on context.
+-                predicted = predict_value_from_neighbors(node, child_idx)
+-                child.reconstructed_val = predicted + residual
+-                return child
+-            return None
+-
+-        # Fetch the 4 new corner nodes for the new cell
+-        # The new cell has 4 corners. Each corner's node is a child of one of the current nodes.
+-        # Mapping:
+-        # New BL (0) -> Child 0 of Old BL (0)
+-        # New BR (1) -> Child 1 of Old BR (1)
+-        # New TL (2) -> Child 2 of Old TL (2)
+-        # New TR (3) -> Child 3 of Old TR (3)
++        # 6. Update node addresses to appropriate children
++        nodes = new_nodes
+         
+-        new_nodes = [
+-            get_child(nodes[0], 0),
+-            get_child(nodes[1], 1),
+-            get_child(nodes[2], 2),
+-            get_child(nodes[3], 3)
+-        ]
++        # 7. Re-express point x in the new cell's coordinates
++        x = (x - qx * 0.5) * 2
++        y = (y - qy * 0.5) * 2
+         
+-        nodes = new_nodes
+-        l = l - 1
++        l -= 1
++        v_prior = v_c
+ 
+ def lerp(a, b, t):
+     return a + t * (b - a)
+ 
+-def fetch_node(addr, idx):
+-    # Placeholder for actual memory access
+-    return None
++def bilinear(v00, v10, v01, v11, px, py):
++    # px, py in [0, 1]
++    top = lerp(v01, v11, px)
++    bot = lerp(v00, v10, px)
++    return lerp(bot, top, py)
+ 
+-def predict_value_from_neighbors(node, idx):
+-    # Placeholder for prediction logic
+-    return 0.0
++class Node:
++    def __init__(self, addr, val):
++        self.addr = addr
++        self.val = val
+ ```
+ 
+@@ -188,5 +107,5 @@
+ 
+ ### Primal Subdivision Tree for Adaptive Mipmapping
+-In 2D, children of a node at location $(x, y)$ in level $l$ have locations $(x, y)$, $(x + 2^l, y)$, $(x, y + 2^l)$, and $(x + 2^l, y + 2^l)$ [S1, unofficial]. This 'slanting' causes some subtrees to fall outside the input domain (dangling links), which the compression scheme ignores [S1, unofficial]. The core loop for evaluating a 1D adaptive primal tree iteratively initializes $l$ and $r$ as the two current nodes, computes the coarse value $v_C$, and loops: if both pruned, return $v_C$; compute midpoint $v_m$; select left or right subtree based on $x$; update $l, r, v_l, v_r$; compute fine value $v_F$; if level $\le 1.0$, blend $v_C$ and $v_F$ and return; else update $v_C=v_F$, level--, and continue [S1, unofficial]. Dual subdivision requires 3 lookups per level and large support for pruned nodes (interpolating from next-coarser level), equivalent to multiquadratic B-splines. Primal subdivision requires only 2 lookups per level and simple multilinear interpolation when all 2 local nodes are pruned [S1, unofficial].
++In 2D, children of a node at location $(x, y)$ in level $l$ have locations $(x, y)$, $(x + 2^l, y)$, $(x, y + 2^l)$, and $(x + 2^l, y + 2^l)$ [S1, unofficial]. This 'slanting' causes some subtrees to fall outside the input domain (dangling links), which the compression scheme ignores [S1, unofficial]. The core loop for evaluating a 1D adaptive primal tree iteratively initializes $l$ and $r$ as the two current nodes, computes the coarse value $v_C$, and loops: if both pruned, return $v_C$; compute midpoint $v_m$; select left or right subtree based on $x$; update $l, r, v_l, v_r$; compute fine value $v_F$; if level $\le 1.0$, blend $v_C$ and $v_F$ and return; else update $v_C=v_F$, level--, and continue [S1, unofficial]. Dual subdivision requires 3 lookups per level and large support for pruned nodes (interpolating from next-coarser level), equivalent to multiquadratic B-splines [S1, unofficial]. Primal subdivision requires only 2 lookups per level and simple multilinear interpolation when all 2 local nodes are pruned [S1, unofficial].
+ 
+ ## Operating characteristics
+@@ -198,5 +117,5 @@
+ 
+ ## Background
+-The method originates from the work on Compressed Random-Access Trees for Spatially Coherent Data [S1, unofficial]. It builds on primal subdivision concepts from [FPRJ00] and [LKS*06], contrasting with dual-subdivision approaches like those in [ZS01] and [BD02]. The primal subdivision approach was highlighted for its efficiency in mipmap filtering compared to dual subdivision, which suffers from expensive interpolation in pruned areas [S1, unofficial].
++The method originates from the work on Compressed Random-Access Trees for Spatially Coherent Data [S1, unofficial]. It builds on primal subdivision concepts from [FPRJ00] and [LKS*06], contrasting with dual-subdivision approaches like those in [ZS01] and [BD02] [S1, unofficial]. The primal subdivision approach was highlighted for its efficiency in mipmap filtering compared to dual subdivision, which suffers from expensive interpolation in pruned areas [S1, unofficial].
+ 
+ ## Sources

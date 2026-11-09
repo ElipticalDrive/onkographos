@@ -1,46 +1,44 @@
 # Scene Representation and Partitioning
 
-Also called: Large-scale NeRF partitioning, Distributed NeRF training, Dynamic NeRF decomposition
+Also called: Large-scale NeRF partitioning, Distributed NeRF training, Dynamic scene decomposition
 
 ## Overview
-Scene Representation and Partitioning addresses the scalability limits of monolithic Neural Radiance Fields (NeRFs) by decomposing the 3D scene volume into smaller, independent sub-volumes, each modeled by a separate local network. This family of methods enables the training and rendering of large-scale static scenes [S1, S3], dynamic scenes with temporal coherence [S1], and distributed multi-GPU training workloads [S1]. It differs from [Specific Model Architectures](8585-specific-model-architectures.md) by focusing on spatial decomposition rather than network topology changes, and from [Specific Model Architectures and Extensions](10278-specific-model-architectures-and-extensions.md) by explicitly managing data parallelism and boundary continuity across spatial blocks.
+Scene Representation and Partitioning addresses the scalability limits of monolithic Neural Radiance Fields (NeRFs) by decomposing the 3D scene volume or the training data into manageable sub-regions or components. While the parent method [Scene Representation and Architecture](11368-scene-representation-and-architecture.md) approximates the radiance field with a single network, this family enables training and rendering of large-scale static scenes, distributed training workloads, and dynamic environments by using multiple specialized sub-networks or fields. It sets itself apart from siblings like [Specific Model Architectures](8585-specific-model-architectures.md) by focusing on the structural decomposition of the scene space or content type rather than the internal topology of a single network.
 
 ## Shared principles
-The core mechanism involves partitioning the scene volume $\mathcal{V}$ into $K$ non-overlapping sub-volumes (cells, blocks, or tiles) $\{V_k\}_{k=1}^K$. Each sub-volume $V_k$ is associated with an independent local model $\mathcal{M}_k$ (typically an MLP or a grid-based structure) that predicts density $\sigma$ and color $\mathbf{c}$ for points $\mathbf{x} \in V_k$.
+The family shares the mechanism of decomposing the global scene representation into $K$ independent or semi-independent components $\{\mathcal{M}_k\}_{k=1}^K$. Each component $\mathcal{M}_k$ is typically a standard NeRF MLP (density $\sigma$ and color $\mathbf{c}$) trained on a subset of the data or responsible for a subset of the spatial volume.
 
-**Data Partitioning:**
-Training data (pixels from images) is assigned to sub-volumes based on visibility. For each training image, rays are cast, and pixels are assigned to the training set of every sub-volume $V_k$ that the ray intersects. This ensures that each local model is trained only on data relevant to its spatial region [S1, S3].
+**Partitioning Strategies:**
+1.  **Spatial Partitioning:** The 3D volume $\mathcal{V}$ is divided into non-overlapping sub-volumes (blocks or cells) $\{V_k\}$. Training data (pixels/rays) is assigned to a submodule $\mathcal{M}_k$ if the corresponding ray intersects $V_k$ [S1, S3].
+2.  **Content/Temporal Partitioning:** The scene content is decomposed by nature (e.g., static vs. dynamic) rather than just space, allowing different fields to handle different temporal behaviors [S1].
 
 **Rendering Integration:**
-During inference, a query ray $\mathbf{r}$ is intersected with all sub-volumes. The ray is decomposed into segments $\{seg_k\}$ corresponding to the intersection with each $V_k$. These segments are sorted by distance from the ray origin. The volume rendering integral is computed by iterating through the sorted segments, maintaining a global accumulated transmittance $T$:
-$$
-T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)
-$$
+For a query ray $\mathbf{r}$, the rendering process intersects the ray with the partition boundaries. Samples $\mathbf{x}_i$ are queried from the specific submodule $\mathcal{M}_k$ corresponding to the partition containing $\mathbf{x}_i$. The final color is computed via the standard volumetric rendering integral, ensuring global transmittance $T$ is accumulated across all partitions:
 $$
 C(\mathbf{r}) = \sum_{i} T_i \left( 1 - \exp(-\sigma_i \delta_i) \right) \mathbf{c}_i
 $$
-where $\sigma_i, \mathbf{c}_i$ are obtained by querying the local model $\mathcal{M}_k$ corresponding to the segment containing sample point $\mathbf{x}_i$ [S1, S3].
+where $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ [S1, S3].
 
-**Boundary Continuity:**
-A critical shared challenge is ensuring seamless integration at block boundaries. Transmittance must accumulate continuously across block boundaries to prevent visual artifacts. Some methods employ appearance alignment techniques to smooth color/density discontinuities between adjacent blocks [S3].
+**Training:**
+Submodules are trained independently and in parallel using their assigned data partitions [S1, S3]. This enables data parallelism for large-scale training [S1].
 
 ## Subtopics
 
 ### [MegaNeRF](8580-meganerf.md)
-MegaNeRF is a framework for training large-scale static scenes (up to $1,300,000 \text{ m}^2$) using spatial Voronoi partitioning to enable data parallelism. It distinguishes itself by modeling the foreground as an ellipsoid and using altitude constraints to skip underground sampling. Unlike BlockNeRF, it focuses on scalable training for interactive fly-throughs.
+MegaNeRF is a framework for training large-scale 3D scenes (spanning $150,000$ to $1,300,000 \text{ m}^2$) that supports interactive human-in-the-loop fly-throughs from drone footage. It addresses the infeasibility of training a single monolithic NeRF on thousands of images with varying lighting and large capacities by decomposing the scene into spatial cells, each modeled by an independent NeRF submodule. Unlike siblings such as [BlockNeRF](8581-blocknerf.md) and [KiloNeRF](8581-blocknerf.md) which use spatial partitioning primarily to speed up inference of a pre-trained network, MegaNeRF uses partitioning to enable data parallelism for scalable training, as obtaining a pre-trained NeRF for such large scales is infeasible. It further improves upon [NeRF++](8581-blocknerf.md) by modeling the foreground with a tight ellipsoid enclosing camera poses and using camera altitude constraints to skip underground sampling.
 
 ### [BlockNeRF](8581-blocknerf.md)
-BlockNeRF decomposes the scene into non-overlapping spatial blocks, each modeled by an independent small MLP. It emphasizes the "total-part-total" approach for city-scale rendering and ensures seamless integration between adjacent blocks via appearance alignment. Unlike MegaNeRF, it prioritizes inference scalability and boundary continuity for static urban environments.
+BlockNeRF is a divide-and-conquer strategy for large-scale scene representation that decomposes the scene into non-overlapping blocks, each represented by an independent small Multi-Layer Perceptron (MLP). It solves the problem of high-frequency information loss and slow training/inference in large environments (e.g., city buildings) by decoupling rendering time from scene size. It is distinguished from its siblings by its specific "total-part-total" training approach and explicit appearance alignment mechanism to ensure seamless integration between adjacent blocks.
 
 ### [NeRFPlayer](9440-nerfplayer.md)
-NeRFPlayer extends spatial partitioning to dynamic scenes by decomposing the volume into stationary, deforming, and new areas using a decomposition field. It routes points to specialized local models (stationary MLP, deformation field, radiance field) to enable high-fidelity reconstruction of moving objects with low latency. Unlike the static methods, it explicitly models temporal dynamics.
+NeRFPlayer is a dynamic scene representation method that decomposes the spatiotemporal volume into stationary, deforming, and new (temporal) components to enable efficient streaming and rendering of dynamic scenes. It addresses the challenge of reconstructing dynamic environments from multi-view or single-view video data by separating static background geometry from moving foreground elements, allowing for high-fidelity temporal interpolation and reduced bandwidth requirements compared to monolithic dynamic NeRF approaches.
 
 ### [Spatial Partitioning for Distributed NeRF](10332-spatial-partitioning-for-distributed-nerf.md)
-This method partitions 3D space into non-overlapping tiles for distributed NeRF training by recursively splitting space based on a Probability Density Function (PDF) derived from a point cloud. It optimizes for cubic aspect ratios to balance GPU workloads. Unlike BlockNeRF, which partitions based on training cameras, this method partitions space directly, allowing for finer bounding boxes in regions with more content.
+This method partitions the 3D scene volume into non-overlapping tiles for distributed NeRF training by recursively splitting space based on a Probability Density Function (PDF) derived from a point cloud or ray samples, optimizing for cubic aspect ratios. Unlike Block-NeRF, which partitions based on training cameras, this method partitions space directly, allowing for finer bounding boxes in regions with more content or frequent capture (level-of-detail property).
 
 ## Background
-The need for scene partitioning arose from the memory and computational constraints of training monolithic NeRFs on large-scale datasets. Standard NeRF scales poorly with scene size, requiring excessive VRAM and training time [S1, S3]. Early large-scale approaches like BlockNeRF and MegaNeRF introduced spatial decomposition to decouple rendering time from scene size and enable parallel training [S1, S3]. Subsequent work extended these principles to dynamic scenes (NeRFPlayer) and distributed multi-GPU systems (Spatial Partitioning for Distributed NeRF) to address workload imbalance and temporal coherence [S1].
+The need for scene partitioning arose as NeRF was applied to large-scale environments (city-scale, drone footage) where a single MLP could not fit in memory or train efficiently [S1, S3]. Early large-scale approaches like [NeRF++](8581-blocknerf.md) introduced background/foreground splits. MegaNeRF [S1] and BlockNeRF [S3] formalized spatial decomposition for training scalability. NeRFPlayer [S1] extended this to dynamic scenes by decomposing content type. Distributed NeRF methods [S1] focused on algorithmic partitioning for multi-GPU training.
 
 ## Sources
-[S1] MegaNeRF, BlockNeRF, NeRFPlayer, and Distributed NeRF source notes.
-[S3] BlockNeRF and general NeRF principles source notes.
+[S1] MegaNeRF, BlockNeRF, NeRFPlayer, and Distributed NeRF notes provided in the prompt context.
+[S3] BlockNeRF notes provided in the prompt context.

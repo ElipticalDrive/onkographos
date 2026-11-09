@@ -1,64 +1,87 @@
 # NeRF-GT Baseline Training Setup
 Also called: NeRF-GT, HDR-NeRF Baseline
 ## Overview
-NeRF-GT is a baseline training procedure for synthesizing High Dynamic Range (HDR) novel views using Neural Radiance Fields. It addresses the problem of encoding high-dynamic-range scenes by training the radiance field directly on HDR input views, rather than Low Dynamic Range (LDR) inputs. It differs from standard NeRF training [NeRF Training Loop](970-nerf-training-loop.md) by operating in the HDR domain and differs from LDR-based variants [Training Configuration](2332-training-configuration.md) by requiring tone-mapping of predictions for loss computation to handle the high dynamic range.
+NeRF-GT is a baseline training protocol for Neural Radiance Fields that utilizes High Dynamic Range (HDR) input views to synthesize novel HDR imagery [S1]. It addresses the limitation of standard NeRF, which typically trains on Low Dynamic Range (LDR) images, by directly optimizing the radiance field against HDR ground truth [S1]. It differs from standard LDR-based training by explicitly handling high dynamic range data, though it faces challenges in encoding all scene areas uniformly due to the intensity variance [S1].
 ## How it works
-**Inputs and Outputs:**
-- Input: A set of $N$ HDR images $\{I_i^{HDR}\}_{i=1}^N$ with known camera poses.
-- Output: A trained NeRF model $\mathcal{F}$ capable of rendering HDR views.
+The method trains a NeRF model directly on HDR views, treating them as the upper bound for performance [S1]. The core procedure involves predicting HDR pixel values and mapping them to LDR space for loss computation against tone-mapped ground truth [S1].
+
+**Inputs:**
+*   HDR training views (rendered or captured).
+*   Camera poses and intrinsics for the training views.
+
+**Outputs:**
+*   Optimized NeRF model parameters (MLP weights, grid embeddings, etc.).
 
 **Data Structures:**
-The NeRF model $\mathcal{F}$ takes a 3D position $\mathbf{x}$ and viewing direction $\mathbf{d}$ as input and outputs a color $\mathbf{c}$ and density $\sigma$. The color $\mathbf{c}$ is assumed to be in HDR linear space.
+*   **NeRF Model:** Standard MLP-based radiance field representation [S1].
+*   **Training Data:** Set of HDR images $I_{hdr}$ and corresponding LDR ground truth $I_{ldr}^{gt}$ [S1].
 
 **Steps:**
-1. **Training Setup:** Initialize the NeRF model. Use the HDR images as the ground truth targets for the training rays.
-2. **Ray Marching:** For each training image, generate rays and compute the volume rendering integral to predict the HDR pixel color $\mathbf{C}_{pred}$.
-3. **Tone-Mapping:** Apply a tone-mapping operator $T(\cdot)$ to the predicted HDR color $\mathbf{C}_{pred}$ to convert it to LDR space: $\mathbf{C}_{pred}^{LDR} = T(\mathbf{C}_{pred})$.
-4. **Loss Computation:** Apply the same tone-mapping operator $T(\cdot)$ to the ground truth HDR image pixel $\mathbf{C}_{gt}^{HDR}$ to obtain $\mathbf{C}_{gt}^{LDR} = T(\mathbf{C}_{gt}^{HDR})$. Compute the loss $\mathcal{L}$ by comparing $\mathbf{C}_{pred}^{LDR}$ and $\mathbf{C}_{gt}^{LDR}$ (e.g., using L1 or L2 loss).
-5. **Optimization:** Update the NeRF parameters using gradient descent.
+1.  **Training Initialization:** Initialize the NeRF model parameters.
+2.  **Forward Pass:** For each training ray, query the NeRF to predict the HDR color value $C_{pred}^{hdr}$ [S1].
+3.  **Tone Mapping (Prediction):** Apply a tone-mapping operator $T(\cdot)$ to the predicted HDR value to obtain the LDR prediction:
+    $$ C_{pred}^{ldr} = T(C_{pred}^{hdr}) $$
+    [S1]
+4.  **Ground Truth Preparation:** Apply the same tone-mapping operator $T(\cdot)$ to the ground truth HDR image to obtain the LDR ground truth $C_{gt}^{ldr}$ [S1].
+5.  **Loss Computation:** Compute the loss by comparing the tone-mapped prediction to the tone-mapped ground truth:
+    $$ \mathcal{L} = \| C_{pred}^{ldr} - C_{gt}^{ldr} \| $$
+    [S1]
+6.  **Optimization:** Update NeRF parameters using gradient descent to minimize $\mathcal{L}$ [S1].
 
-**Pitfalls:**
-- Training directly on HDR views can fail to encode all scene areas well due to the high dynamic range, even when using tone-mapped colors for loss calculation [S1]. The vast range of intensities can make it difficult for the network to converge uniformly across bright and dark regions.
+**Parameters:**
+*   **Tone Mapping Operator:** The specific implementation of $T(\cdot)$ is not detailed in the sources, but consistency between prediction and ground truth is required [S1].
+*   **Exposure:** If using LDR views with consistent exposures, they can be treated similarly, but HDR views are the primary focus for this baseline [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Encoding Failure:** Training directly on HDR views can fail to encode all areas of a scene well due to the high dynamic range, even when using tone-mapped colors for loss calculation [S1]. This is a significant limitation of the baseline compared to methods that might use exposure blending or other HDR-specific techniques [S1].
+*   **Dataset Availability:** No standard dataset is appropriate for novel HDR view synthesis, requiring custom datasets (e.g., rendered from 3D models or captured with HDR cameras) [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def train_nerf_gt(hdr_images, camera_poses, nerf_model, tone_mapper, optimizer):
+def train_nerf_gt_baseline(nerf_model, hdr_dataset, optimizer, num_epochs):
     """
-    Train NeRF directly on HDR views.
+    Trains a NeRF model using HDR views as input.
+    
+    Args:
+        nerf_model: The NeRF model instance.
+        hdr_dataset: A dataset yielding (hdr_image, ldr_gt_image, camera_params) tuples.
+        optimizer: The optimizer for updating nerf_model parameters.
+        num_epochs: Number of training epochs.
     """
     for epoch in range(num_epochs):
-        for hdr_image, pose in zip(hdr_images, camera_poses):
-            # 1. Generate rays for the current image
-            rays = generate_rays(hdr_image.shape, pose)
+        for hdr_image, ldr_gt_image, camera_params in hdr_dataset:
+            # 1. Sample rays from the current view
+            rays = sample_rays_from_view(hdr_image, camera_params)
             
-            # 2. Predict HDR colors via volume rendering
-            # ray_marching returns HDR color C_pred
-            c_pred_hdr = ray_marching(rays, nerf_model)
+            # 2. Forward pass to predict HDR colors
+            # predict_hdr_color returns the predicted HDR color for each ray
+            pred_hdr_colors = nerf_model.forward(rays)
             
-            # 3. Tone-map prediction to LDR
-            c_pred_ldr = tone_mapper(c_pred_hdr)
+            # 3. Tone-map predicted HDR colors to LDR
+            # tone_map is a consistent tone-mapping operator
+            pred_ldr_colors = tone_map(pred_hdr_colors)
             
-            # 4. Tone-map ground truth HDR to LDR
-            c_gt_ldr = tone_mapper(hdr_image)
+            # 4. Get ground truth LDR colors (already tone-mapped in dataset or apply here)
+            # Assuming ldr_gt_image is the tone-mapped ground truth for the corresponding view
+            gt_ldr_colors = extract_ldr_from_gt(ldr_gt_image, rays)
             
             # 5. Compute loss
-            loss = compute_loss(c_pred_ldr, c_gt_ldr)
+            loss = compute_loss(pred_ldr_colors, gt_ldr_colors)
             
             # 6. Backpropagate and update
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 ```
+[G] `tone_map` and `extract_ldr_from_gt` are assumed to be consistent implementations of the tone-mapping operator $T(\cdot)$ mentioned in the source. The source does not specify the exact tone-mapping function, so a standard implementation (e.g., Reinhard, ACES) would be required for a complete implementation.
 ## Subtopics
 ## Operating characteristics
-- **Complexity:** Same as standard NeRF, $O(N \cdot M)$ per image where $N$ is rays and $M$ is samples.
-- **Strengths:** Provides an upper bound for HDR synthesis methods by utilizing full HDR information during training [S1].
-- **Limitations:** Difficult to ensure all areas of a scene are encoded well due to the high dynamic range [S1].
-- **When to use:** When HDR input data is available and a baseline for HDR synthesis performance is needed.
-- **When not to use:** When only LDR inputs are available, or when training stability is a primary concern without additional regularization.
+*   **Performance:** The method serves as an upper bound for performance when compared to vanilla NeRF trained on LDR images, as it utilizes more information (HDR) [S1].
+*   **Limitations:** It struggles to encode all scene areas uniformly due to the high dynamic range, leading to potential quality issues in certain regions [S1].
+*   **Data Requirements:** Requires HDR training data, which is not commonly available in standard datasets, necessitating custom data collection or rendering [S1].
 ## Background
-The NeRF-GT baseline was introduced in the context of HDR-NeRF [S1]. It serves as a comparison point for methods that train on LDR inputs or use other strategies to handle dynamic range. The authors note that while HDR views can be considered the upper bound, direct training presents challenges [S1].
+The NeRF-GT baseline is described in the context of "HDR-NeRF: High Dynamic Range Neural Radiance Fields" [S1]. The authors note that no existing dataset is appropriate for novel HDR view synthesis, leading them to collect a new dataset using Blender's Cycles path-tracer for 3D models and HDR captures for real-world scenes [S1]. The method is presented as a comparison point to evaluate the effectiveness of their proposed HDR-NeRF approach against a direct training baseline [S1].
 ## Sources
 [S1] HDR-NeRF: High Dynamic Range Neural Radiance Fields, https://xhuangcv.github.io/hdr-nerf/, fetched 2026-10-27

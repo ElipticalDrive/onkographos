@@ -1,0 +1,117 @@
+--- v001.md
++++ v002.md
+@@ -12,6 +12,6 @@
+ 
+ **Data Structures:**
+-*   **Matryoshka Layers:** One layer per isosurface. Each layer manages its own set of planes and active cells [S2, unofficial].
+-*   **Auxiliary Buffer:** A single buffer used to mark cells as "drawable" across all layers simultaneously [S2, unofficial].
++*   **Matryoshka Layers:** One layer per isosurface. All layers share the same set of corresponding planes for concurrent processing, but each maintains its own active cells [S2, unofficial].
++*   **Auxiliary Buffer:** A single 2D buffer matching the screen resolution, used to mark cells as "drawable" across all layers simultaneously [S2, unofficial].
+ 
+ **Steps:**
+@@ -23,40 +23,63 @@
+ **Pseudocode:**
+ ```python
+-def render_multi_isosurface(layers, camera):
++def render_multi_isosurface(layers, camera, step_size, grid_lookup):
+     """
+-    Render multiple isosurface layers concurrently.
+-    layers: List of MatryoshkaLayer objects, each with an opacity value.
+-    camera: Object providing view direction and projection parameters.
++    Render multiple isosurface layers concurrently using an auxiliary buffer.
++    layers: List of dicts with keys 'opacity' (float) and 'cells' (dict mapping plane_idx to list of cell objects).
++    camera: Dict with 'origin' (3D list), 'direction' (3D list), 'screen_res' (width, height).
++    step_size: Base sampling distance.
++    grid_lookup: Function(pos) -> (x, y) cell coordinates.
+     """
++    w, h = camera['screen_res']
++    aux_buffer = [[False] * w for _ in range(h)]
++    image = [[0.0, 0.0, 0.0, 0.0] for _ in range(w * h)]
++    
+     # 1. Identify corresponding planes across all layers
+-    # The planes are processed in an order determined by the camera
+-    plane_sets = get_corresponding_planes(layers, camera)
++    # Planes are processed in an order determined by the camera
++    plane_indices = sorted(set(p for layer in layers for p in layer['cells'].keys()))
+     
+-    # 2. Initialize auxiliary buffer
+-    # Size matches screen resolution (e.g., 512x512)
+-    aux_buffer = initialize_auxiliary_buffer()
+-    
+-    for plane_set in plane_sets:
+-        # 3. Mark all active cells from all layers as drawable
++    for p in plane_indices:
++        # 2. Mark all active cells from all layers as drawable
+         for layer in layers:
+-            # Get active cells for the current plane in this layer
+-            active_cells = layer.get_active_cells_for_plane(plane_set)
+-            
+-            # Mark these cells in the auxiliary buffer
+-            for cell in active_cells:
+-                aux_buffer.mark_drawable(cell)
++            for cell in layer['cells'].get(p, []):
++                aux_buffer[cell['y']][cell['x']] = True
+         
+-        # 4. Process the auxiliary buffer in front-to-back order
+-        # The order depends on the viewing camera
+-        render_order = get_front_to_back_order(aux_buffer, camera)
++        # 3. Compute front-to-back render order for marked cells
++        # Sort by depth relative to camera origin
++        render_order = sorted(
++            [(cell['x'], cell['y']) for y in range(h) for x in range(w) if aux_buffer[y][x]],
++            key=lambda c: (camera['origin'][0] - c[0]) * camera['direction'][0] +
++                          (camera['origin'][1] - c[1]) * camera['direction'][1] +
++                          (camera['origin'][2] - c[2]) * camera['direction'][2]
++        )
+         
+-        for cell in render_order:
+-            # Determine which layer(s) contributed to this cell
+-            # and render with the appropriate opacity
+-            for layer in layers:
+-                if layer.has_content_at(cell):
+-                    color = layer.get_color_at(cell)
+-                    opacity = layer.opacity
+-                    blend_into_image(cell, color, opacity)
++        # 4. Ray march and blend
++        for cx, cy in render_order:
++            ray_origin = camera['origin']
++            ray_dir = camera['direction']
++            # Normalize step to avoid division by zero and ensure consistent sampling
++            max_axis = max(abs(ray_dir[0]), abs(ray_dir[1]), abs(ray_dir[2]), 1e-8)
++            t_step = step_size / max_axis
++            accumulated_color = [0.0, 0.0, 0.0, 0.0]
++            t = 0.0
++            while t < 100.0:
++                pos = [ray_origin[i] + ray_dir[i] * t for i in range(3)]
++                cell_x, cell_y = grid_lookup(pos)
++                if aux_buffer[cell_y][cell_x]:
++                    for layer in layers:
++                        if any(c['x'] == cell_x and c['y'] == cell_y for c in layer['cells'].get(p, [])):
++                            new_color = [0.5, 0.5, 0.5] # Placeholder for actual cell color
++                            new_alpha = layer['opacity']
++                            # Front-to-back blending
++                            alpha_factor = new_alpha * (1.0 - accumulated_color[3])
++                            accumulated_color[0] += new_color[0] * alpha_factor
++                            accumulated_color[1] += new_color[1] * alpha_factor
++                            accumulated_color[2] += new_color[2] * alpha_factor
++                            accumulated_color[3] += alpha_factor
++                    if accumulated_color[3] >= 0.99:
++                        break
++                t += t_step
++            image[cy * w + cx] = accumulated_color
++    return image
+ ```
+ 
+@@ -85,9 +108,9 @@
+ *   **Strengths:** Allows concurrent visualization of multiple structures with different opacities; efficient recombination of segmented structures [S1, S2, unofficial].
+ *   **Limitations:** Performance tested on outdated hardware without acceleration; requires careful management of auxiliary buffers for correct ordering [S2, unofficial].
+-*   **When to use:** When visualizing multiple distinct structures from the same volume data simultaneously.
+-*   **When not:** When only a single isosurface is needed, or when hardware acceleration is available and other methods are more optimized.
++*   **When to use:** When visualizing multiple distinct structures from the same volume data simultaneously [S1, S2, unofficial].
++*   **When not:** Not given in the sources.
+ 
+ ## Background
+-Multi-Isosurface Visualization was introduced in the context of efficient volume rendering with enhanced isosurface rendering [S1, unofficial]. It builds on the Matryoshka Algorithm for speeding up isosurfacing [S2, unofficial]. The technique allows for the intuitive extraction of structures via user-selected seed voxels and their subsequent recombination into a single scene [S1, unofficial].
++Multi-Isosurface Visualization recombines surface structures extracted from different isosurfaces into a single scene for display [S1, unofficial]. It utilizes the Matryoshka Algorithm's layered plane processing to render multiple isosurfaces concurrently with correct front-to-back ordering [S2, unofficial]. The technique allows for the intuitive extraction of structures via user-selected seed voxels and their subsequent recombination into a single scene [S1, unofficial].
+ 
+ ## Sources

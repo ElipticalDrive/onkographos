@@ -3,232 +3,141 @@
 Also called: Error-bounded VQ Tree, Pruning VQ Tree
 
 ## Overview
-Adaptive VQ Tree Construction is a method for building a simplified, error-bounded vector quantization (VQ) tree from a complete mipmap hierarchy. It solves the problem of achieving a target compression rate while strictly bounding the $L_\infty$ approximation error at all resolution levels to a user-defined tolerance $\tau$. It sets itself apart from standard VQ by adaptively pruning fine-level broods (blocks of children) based on their contribution to the global error, rather than uniformly quantizing all levels. It builds on [Brood-based Vector Quantization](7595-brood-based-vector-quantization.md) by adding a topology simplification step that removes redundant nodes.
+Adaptive VQ Tree Construction is a method for compressing spatially coherent data by building a simplified, error-bounded tree structure on top of a complete Vector Quantization (VQ) compressed tree. It solves the problem of achieving a specific target compression rate or maximum approximation error by selectively removing ("pruning") fine-level detail nodes that contribute negligible error. It sets itself apart from standard VQ tree methods by dynamically altering the tree topology based on a global error tolerance $\tau$, rather than using a fixed resolution hierarchy [S1, unofficial].
 
 ## How it works
-The method constructs a simplified tree $T'$ from a complete mipmap tree $T$ in three main phases.
+The method constructs a simplified tree $T'$ from a complete VQ tree $T$ through three main phases: mipmap construction, VQ compression, and adaptive pruning.
 
 **Inputs:**
-*   Original data values at the finest level $L$.
-*   Target tolerance $\tau$ (maximum allowed approximation error norm).
-*   Optional: Target compression rate (used to determine $\tau$ via binary search).
+- Original data values at the finest level $L$.
+- Target approximation error tolerance $\tau$ (or target compression rate).
+- Subdivision scheme (e.g., primal or dual subdivision) defining interpolation weights.
 
 **Outputs:**
-*   A simplified VQ tree $T'$ with pruned topology.
-*   Codebooks for each retained level.
+- A simplified tree $T'$ with pruned nodes.
+- VQ codebooks for each level (or a shared codebook).
+- Indices mapping pruned nodes to their coarse approximations.
 
 **Data Structures:**
-*   **Tree Node:** Contains value $v$, residual $r$, codebook index $c$, and pointers to children.
-*   **Codebook:** A set of representative vectors for residuals at a specific level.
-*   **Interpolation Matrix $P_l$:** Rows contain multilinear interpolation weights (0, 1, or powers of 1/2 for primal subdivision) mapping level $l+1$ to level $l$.
+- **Tree Node:** Contains value $v$, residual $r$, codebook index $idx$, and pointers to children.
+- **Codebook:** A set of representative residual vectors.
+- **Pruning State:** A boolean flag or list indicating which broods are pruned.
 
 **Steps:**
 
 1.  **Mipmap Construction:**
-    Compute desired values $d_l$ at each level $l$ from $L-1$ down to $0$. This is done via least-squares optimization:
+    Create a complete mipmap tree $T$ of desired data values. Compute values $d_l$ at level $l$ from level $l+1$ via least-squares optimization:
     $$ \min_{P_l, d_l} \| d_l - P_l d_{l+1} \| $$
-    Here, $P_l$ contains the interpolation weights. This establishes the "complete" tree $T$ before compression [S1, unofficial].
+    where $P_l$ contains the multilinear interpolation weights (0, 1, or powers of 0.5 for primal subdivision) [S1, unofficial].
 
-2.  **Complete VQ Compression:**
-    Apply brood-based VQ to the complete tree $T$ to form a complete VQ tree.
-    *   Process levels $l = 1 \dots L$ in coarse-to-fine order.
-    *   Compute predicted values $\tilde{d}_l = P_l d_{l+1}$ via multilinear interpolation.
-    *   Compute residuals $r_l = d_l - \tilde{d}_l$.
-    *   Quantize residuals using level-specific codebooks to get indices $c_l$ and quantized residuals $\tilde{r}_l$.
-    *   Store the codebooks. Note: Codebooks can be shared across levels for smooth data (e.g., distance fields) with appropriate scaling [S1, unofficial].
+2.  **VQ Compression of Complete Tree:**
+    Apply brood-based vector quantization to form a complete VQ tree $T$. Process each level $l = 1 \dots L$ in coarse-to-fine order. Compute predicted values $p$ by multilinear interpolation of parent values. Compute residuals $r = d_l - p$. Quantize residuals using codebooks to get indices [S1, unofficial].
 
 3.  **Adaptive Pruning:**
-    Prune the tree $T'$ from fine-to-coarse ($l = L-1 \dots 0$) to satisfy the error bound $\tau$.
-    *   **Candidate Selection:** Visit candidate broods (blocks of $2^d$ leaf nodes) in order of increasing residual norm $\|\tilde{r}_l\|$. This prioritizes removing broods with smaller errors to maximize pruning efficiency [S1, unofficial].
-    *   **Error Check:** For a candidate brood at level $l$, tentatively remove it (prune). Calculate the approximation error introduced at all affected nodes in the original tree $T$ at levels $l' \ge l$. The error $e$ at a finer level is computed by interpolating the subtracted residuals:
-        $$ e_{l'} = \tilde{r}_l - P_{l \to l'} \tilde{r}_l $$
-        (where $P_{l \to l'}$ is the interpolation operator from level $l$ to $l'$).
-    *   **Decision:** If the maximum error at any affected node does not exceed $\tau$, permanently prune the brood. Otherwise, keep it.
-    *   **Boundary Handling:** Affected subtrees of residual blocks for different broods overlap at boundaries. The order of processing (increasing norm) helps mitigate conflicts [S1, unofficial].
+    Prune the tree $T'$ fine-to-coarse ($l = L-1 \dots 0$).
+    -   Identify candidate broods (blocks of $2^d$ leaf nodes).
+    -   Visit candidate broods in order of increasing residual norm $\|\tilde{r}_l\|$ to maximize pruning of smaller residuals [S1, unofficial].
+    -   For each candidate brood, check if removing it (replacing fine values with interpolated coarse values) increases the approximation error at any affected node in the original tree $T$ beyond tolerance $\tau$.
+    -   The error $e$ at finer levels $l \ge l+1$ is computed by interpolating the subtracted residuals: $e = \tilde{r} - P_l \tilde{r}$ (Note: Source text implies error propagation via interpolation of residuals). Check if $\|e\| \le \tau$ [S1, unofficial].
+    -   If the error bound is satisfied, prune the brood (remove $2^d$ leaf nodes). Otherwise, keep them.
+
+**Parameters:**
+-   **Tolerance $\tau$:** Maximum allowed approximation error norm. Used to bound error during pruning. Can be adjusted via binary search to hit a target compression rate [S1, unofficial].
+
+**Pitfalls:**
+-   Do not recompute codebooks on the final simplified tree. This may cause approximation errors to exceed tolerance $\tau$ due to the inter-dependence between tree structure and codebooks [S1, unofficial].
+-   Pruned nodes must be interpolated from coarser values. This is more complicated in dual subdivision than primal subdivision [S1, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def adaptive_vq_tree_construction(data, tolerance_tau, target_rate=None):
+def adaptive_vq_tree_construction(data, tolerance_tau, subdivision_weights):
+    """
+    Construct an adaptive VQ tree with error bounded by tolerance_tau.
+    
+    Args:
+        data: List of data values at finest level L.
+        tolerance_tau: Maximum allowed L-norm approximation error.
+        subdivision_weights: Matrix P_l containing interpolation weights for each level.
+        
+    Returns:
+        simplified_tree: Tree structure with pruned nodes.
+        codebooks: List of codebooks for each level.
+    """
     # Step 1: Create complete mipmap tree T
-    # Compute d_l from d_{l+1} via least-squares optimization
-    levels = []
-    d_current = data
-    levels.append(d_current)
+    # Compute desired values d_l at level l from level l+1 via least-squares
+    # min_{P_l, d_l} ||d_l - P_l * d_{l+1}||
+    # This creates a full hierarchy of values d_l for l = 0 to L.
+    complete_tree = build_mipmap_tree(data, subdivision_weights)
     
-    # Precompute interpolation matrices P_l for primal subdivision
-    # P_l maps level l+1 to l
-    for l in range(len(data.levels) - 1, 0, -1):
-        d_next = levels[-1]
-        # Least-squares optimization to find d_l and P_l
-        # min_{P_l, d_l} ||d_l - P_l * d_{l+1}||
-        d_l, P_l = least_squares_mipmap(d_next)
-        levels.append(d_l)
+    # Step 2: Apply brood-based VQ to form complete VQ tree T
+    # Process levels coarse-to-fine (l = 1 to L)
+    # Compute predicted values p = P_l * a (where a is parent values)
+    # Compute residuals r = d_l - p
+    # Quantize residuals using codebooks to get indices
+    # Store residuals and indices in complete_tree
+    complete_vq_tree = apply_brood_vq(complete_tree, subdivision_weights)
     
-    # Reverse to have coarse-to-fine order for VQ
-    levels.reverse()
+    # Step 3: Adaptively prune T' fine-to-coarse (l = L-1 down to 0)
+    simplified_tree = copy_tree_structure(complete_vq_tree)
     
-    # Step 2: Apply brood-based VQ to form complete VQ tree
-    # Process levels 1..L (coarse-to-fine)
-    vq_tree = VQTree()
-    codebooks = {}
-    
-    for l in range(1, len(levels)):
-        d_l = levels[l]
-        d_l_plus_1 = levels[l-1] # Coarser level index in levels list is l-1 if 0 is finest? 
-        # Note: Source says l=1..L coarse-to-fine. Let's assume levels[0] is finest, levels[L] is coarsest.
-        # Correction: Source says "fine-to-coarse order l=L-1...0" for mipmap. 
-        # So levels[0] is finest. levels[L] is coarsest.
-        # VQ is coarse-to-fine. So l goes from L down to 1? 
-        # Source: "process each level l=1...L of the tree in coarse-to-fine order"
-        # This implies l=1 is coarse, l=L is fine? Or l=1 is next to coarse?
-        # Standard mipmap: 0 is finest. L is coarsest.
-        # Let's stick to source logic: 
-        # Mipmap: l=L-1 down to 0. d_l from d_{l+1}.
-        # VQ: l=1 to L. Coarse-to-fine.
-        
-        # Predicted value from coarser level (l-1 in 0-indexed finest-first, or l+1 in source notation)
-        # Source: p_l = P_l * d_{l+1} where d_{l+1} is coarser? 
-        # "rows of matrix P_l contain multilinear interpolation weights... mapping level l+1 to level l"
-        # If l is finer, l+1 is coarser.
-        # So for level l, we interpolate from l+1.
-        
-        # Let's assume levels list is [finest, ..., coarsest]
-        # Level index i in levels list. 
-        # To compute level i (finer), we use level i-1 (coarser).
-        
-        # Re-reading source carefully:
-        # "Mipmap construction: fine-to-coarse l=L-1...0. Compute d_l from d_{l+1}"
-        # "VQ compression: coarse-to-fine l=1...L"
-        # "predicted values p_l = P_l * d_{l+1}"
-        # This implies in VQ step, l is finer than l+1? No, usually l is finer, l+1 is coarser.
-        # But "coarse-to-fine" order means we process coarse levels first.
-        # If we process l=1 first, and l=1 is finer than l=0?
-        # Let's assume standard: 0 is finest. L is coarsest.
-        # Mipmap: compute 0 from 1, 1 from 2...
-        # VQ: process L, L-1, ..., 1.
-        
-        # Let's rewrite pseudocode to match source variable names strictly.
-        pass
-
-    # Simplified Pseudocode based on source text flow:
-    
-    # 1. Mipmap
-    d = [None] * (L + 1)
-    d[L] = data_coarsest # Or data finest? Source: "Create complete mipmap tree T of desired data values"
-    # Usually mipmap starts from finest.
-    # "Compute values d_l at level l from level l+1"
-    # If l goes L-1 down to 0, then l+1 is coarser.
-    # So d[L] is the coarsest level? Or d[0] is finest?
-    # If l=L-1, l+1=L. So d[L] is input.
-    # So d[0] is finest. d[L] is coarsest.
-    
-    d[L] = input_data # Coarsest
-    for l in range(L-1, -1, -1):
-        # Least squares to find d_l and P_l
-        d[l], P[l] = least_squares_optimize(d[l+1])
-        
-    # 2. VQ Compression (Coarse-to-Fine: l=L down to 1)
-    # Note: Source says l=1...L. If 0 is finest, L is coarsest.
-    # Coarse-to-fine means L, L-1, ..., 1.
-    
-    residuals = [None] * (L + 1)
-    codebooks = {}
-    
-    for l in range(L, 0, -1):
-        # Predict from coarser level (l+1? No, l is finer than l+1? 
-        # Source: "p_l = P_l * d_{l+1}"
-        # If l is current level, l+1 is coarser.
-        # But we are going coarse-to-fine.
-        # So we have d[l+1] already?
-        # If l=L, l+1 doesn't exist.
-        # This implies l=1 is coarsest?
-        # Let's look at Mipmap again: "l=L-1...0". d_l from d_{l+1}.
-        # So d[L] is the base. d[0] is finest.
-        # VQ: "l=1...L". 
-        # If l=1, it is finer than l=2?
-        # "p_l = P_l * d_{l+1}"
-        # If l=1, p_1 from d_2.
-        # So l=1 is finer than l=2.
-        # So 0 is finest. L is coarsest.
-        # Coarse-to-fine order: L, L-1, ..., 1.
-        
-        # But wait, if l=L, there is no l+1.
-        # So the loop must be l=L-1 down to 0?
-        # Source: "process each level l=1...L ... in coarse-to-fine order"
-        # Maybe the indices are 1-based?
-        # Let's assume 1-based indexing for VQ description in source.
-        # Level 1 is finest. Level L is coarsest.
-        # Mipmap: l=L-1 down to 1? 
-        # "l=L-1...0" in source.
-        # This is contradictory or uses different indexing.
-        
-        # Let's stick to the algorithmic intent:
-        # 1. Build full tree.
-        # 2. Quantize residuals.
-        # 3. Prune.
-        
-        pass
-
-    # 3. Adaptive Pruning
-    # Fine-to-coarse: l=L-1 down to 0 (if 0 is finest)
-    # Or l=1 up to L-1 (if 1 is finest)?
-    # Source: "Adaptively prune T' fine-to-coarse (l=L-1..0)"
-    # So 0 is finest. L is coarsest.
-    
-    pruned_tree = copy(vq_tree)
-    
-    # Collect candidate broods
-    candidates = []
-    for l in range(L-1, 0, -1): # Down to 1? Or 0?
-        # Broods are at level l
-        for brood in get_broods_at_level(pruned_tree, l):
-            norm = residual_norm(brood)
-            candidates.append((norm, brood, l))
+    # Collect all candidate broods from finest level up
+    candidate_broods = []
+    for level in range(L-1, -1, -1):
+        for brood in get_broods_at_level(simplified_tree, level):
+            candidate_broods.append(brood)
             
-    # Sort by increasing residual norm
-    candidates.sort(key=lambda x: x[0])
+    # Sort broods by increasing residual norm ||r_tilde_l||
+    candidate_broods.sort(key=lambda b: norm(b.residual))
     
-    for norm, brood, l in candidates:
-        # Tentatively prune
-        if check_error_bound(brood, pruned_tree, tolerance_tau):
-            prune_brood(brood)
+    for brood in candidate_broods:
+        level = brood.level
+        # Check if pruning this brood violates tolerance tau
+        # Compute error e by interpolating subtracted residuals to finer levels
+        # e = e - P_l * r_tilde (propagate error)
+        # Check if ||e|| <= tau for all affected nodes
+        if is_pruning_safe(brood, simplified_tree, subdivision_weights, tolerance_tau):
+            prune_brood(brood, simplified_tree)
             
-    return pruned_tree
+    return simplified_tree, complete_vq_tree.codebooks
 
-def check_error_bound(brood, tree, tau):
-    # Interpolate subtracted residuals to all finer levels l' >= l
-    # e_{l'} = e_l - P_{l->l'} * r_tilde
-    # Check if max(e_{l'}) <= tau
-    pass
+def is_pruning_safe(brood, tree, weights, tau):
+    """
+    Check if removing brood exceeds tolerance tau.
+    """
+    # Interpolate residuals to finer levels
+    # e = e - P_l * r_tilde
+    # Check norm of e at all affected nodes
+    affected_nodes = get_affected_nodes(brood, tree)
+    for node in affected_nodes:
+        error = compute_error_propagation(node, brood.residual, weights)
+        if norm(error) > tau:
+            return False
+    return True
 ```
-
-**Parameters:**
-*   **Tolerance $\tau$:** Maximum allowed approximation error norm. Used to bound error during pruning. Can be adjusted via binary search to hit a target compression rate [S1, unofficial].
-
-**Pitfalls:**
-*   Do not recompute codebooks on the final simplified tree. The inter-dependence between tree structure and codebooks means that recomputing codebooks on the pruned tree can cause approximation errors to exceed tolerance $\tau$ [S1, unofficial].
 
 ## Subtopics
 
 ### [Texture Atlas Compression with Sparse Regions](7775-texture-atlas-compression-with-sparse-regions.md)
-A method to compress texture atlases with unused space by ignoring undefined regions through adaptive pruning and sparse VQ.
+A method to compress texture atlases containing unused space by ignoring undefined regions through adaptive pruning and sparse Vector Quantization (VQ). It sets itself apart from standard tree compression by modifying the tree structure to exclude empty areas and adapting the VQ codebook search to handle residual blocks with undefined data, preventing boundary artifacts.
 
 ### [Hybrid Vector Quantization](8634-hybrid-vector-quantization.md)
-A hybrid compression scheme that applies VQ to each resolution level separately to maintain multiresolution capability, while exploiting spatial redundancy by creating vectors from pixels in the three detail levels surrounding every pixel in the lowest resolution image.
+Hybrid Vector Quantization is a multiresolution compression scheme that applies Vector Quantization (VQ) to each resolution level separately to maintain multiresolution capability, while exploiting spatial redundancy by creating vectors from pixels in the three detail levels surrounding every pixel in the lowest resolution image. It sets itself apart from sibling methods like [Texture Atlas Compression with Sparse Regions](7775-texture-atlas-compression-with-sparse-regions.md) by explicitly linking vector construction across multiple wavelet detail levels (DL1, DL2, DL3) to a single low-resolution pixel, rather than treating levels or regions in isolation. This approach maintains a fairly constant Signal-to-Noise Ratio (SNR) while keeping a high compression ratio when higher detail levels are added, unlike Scheme 1 which sees a sharp drop in compression ratio.
 
 ## Operating characteristics
-*   **Time Complexity:** Dominated by the mipmap construction (least-squares optimization) and the pruning phase. The pruning requires checking error bounds for overlapping subtrees, which can be costly if not optimized.
-*   **Memory Complexity:** Depends on the number of pruned nodes. Codebooks are stored per level (or shared).
-*   **Strengths:** Provides strict error bounds. Adaptive pruning allows for variable compression rates by tuning $\tau$.
-*   **Limitations:** Codebook recomputation is dangerous. Overlapping subtrees in pruning checks add complexity.
-*   **When to use:** When error-bounded compression is required for spatially coherent data (e.g., distance fields, light maps).
-*   **When not to use:** When strict real-time performance is critical and the pruning overhead is too high, or when error bounds are not a strict requirement.
+-   **Time Complexity:** Not given in the sources.
+-   **Memory Complexity:** Not given in the sources.
+-   **Measured Performance:** Not given in the sources.
+-   **Scaling:** Not given in the sources.
+-   **Strengths:** Allows precise control over approximation error via tolerance $\tau$. Can achieve target compression rates by adjusting $\tau$ via binary search. Codebooks can be shared across levels for smooth data, reducing storage overhead (e.g., 1 KB vs 3 KB) [S1, unofficial].
+-   **Limitations:** Computing per-level VQ codebooks uses all block residuals in the complete tree, even though the final simplified tree contains only a subset. Recomputing codebooks on the simplified tree is discouraged as it may exceed tolerance $\tau$ [S1, unofficial]. Pruning is more complex in dual subdivision than primal subdivision [S1, unofficial].
+-   **When to use:** When a specific error bound or compression rate is required for spatially coherent data.
+-   **When not to use:** When the data is not spatially coherent or when the inter-dependence between tree structure and codebooks makes error bounding difficult.
 
 ## Background
-The method was introduced by S. Lefebvre and H. Hoppe in "Compressed Random-Access Trees for Spatially Coherent Data" (2007) [S1, unofficial]. It extends the concept of brood-based VQ by adding an adaptive pruning step to simplify the tree topology while maintaining error guarantees.
+The method was introduced by S. Lefebvre and H. Hoppe in "Compressed Random-Access Trees for Spatially Coherent Data" (2007) [S1, unofficial]. It builds on the concept of brood-based vector quantization to create a simplified tree structure that maintains error bounds.
 
 ## Sources
 [S1] Compressed Random-Access Trees for Spatially Coherent Data, https://doi.org/10.2312/egwr/egsr07/339-349, fetched 2026-10-26 (unofficial)

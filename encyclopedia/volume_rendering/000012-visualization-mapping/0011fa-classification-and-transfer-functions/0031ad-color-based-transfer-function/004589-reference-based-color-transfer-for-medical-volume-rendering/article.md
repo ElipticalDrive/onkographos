@@ -1,0 +1,170 @@
+# Reference Based Color Transfer for Medical Volume Rendering
+
+Also called: Deep Semantic Color Transfer, Reference Image Guided Colorization
+
+## Overview
+This method automates the colorization of monochromatic medical volume data (CT/MRI) by transferring color attributes from a database of semantically similar colored reference images, such as histological cryosections, thereby eliminating the need for manual transfer function tuning [S1, unofficial]. It distinguishes itself from traditional volume rendering by replacing user-defined color/opacity parameters with automatic deep semantic correspondence and luminance-based alpha mapping, and from other learning-based colorization methods by requiring only a small set of reference images rather than large-scale training datasets [S1, unofficial].
+
+## How it works
+**Inputs:**
+1.  A stack of monochromatic medical images (Target $T$), e.g., CT or MRI slices.
+2.  A database of colored reference images ($R$), e.g., cryosection slices [S1, unofficial].
+
+**Outputs:**
+A direct volume rendered 3D visualization where voxel color is derived from the reference image and opacity is derived from the target's luminance [S1, unofficial].
+
+**Data Structures:**
+*   **Target Image ($T$):** Grayscale 2D image stack.
+*   **Reference Image ($R$):** Colored 2D image.
+*   **Feature Map:** Multi-level feature vectors extracted from a pre-trained CNN (VGG-19) for both $T$ and $R$ [S1, unofficial].
+*   **Intermediate Image ($T'$):** Result of Deep Image Analogy, containing transferred visual attributes (color, texture, style) [S1, unofficial].
+*   **Colorized Image ($C$):** Final RGB image with transferred color only [S1, unofficial].
+*   **Volumetric Data:** RGBA stack where R,G,B come from $C$ and Alpha comes from $T$'s luminance [S1, unofficial].
+
+**Steps:**
+
+1.  **Reference Image Recommendation:**
+    For each target slice $T$, compute deep features using a pre-trained VGG-19 network [S1, unofficial]. Compare these features against the feature database of reference images $R$ to select the top $k$ semantically similar reference images [S1, unofficial].
+
+2.  **Deep Semantic Correspondence (Deep Image Analogy):**
+    For the selected reference image $R$ and target $T$:
+    a. Extract multi-level deep features from both $T$ and $R$ using the VGG-19 network [S1, unofficial].
+    b. Perform dense matching in the deep feature domain using the PatchMatch algorithm [S1, unofficial].
+    c. Construct an intermediate image $T'$ that is semantically similar to $T$ but contains the visual attributes (color, texture, style) of $R$ [S1, unofficial].
+
+3.  **Color Isolation (Guided Image Filtering):**
+    Apply guided image filters to $T'$ to preserve only the transferred color information while discarding other visual attributes like texture and style transferred from $R$ [S1, unofficial]. The result is the colorized image $C$ [S1, unofficial].
+
+4.  **Volumetric Data Construction:**
+    For each voxel in the target stack:
+    a. Assign the RGB components from the corresponding pixel in the colorized image $C$ [S1, unofficial].
+    b. Calculate the luminance of the corresponding voxel in the original target image $T$ [S1, unofficial].
+    c. Map this luminance directly to the alpha (opacity) channel [S1, unofficial].
+
+5.  **Direct Volume Rendering:**
+    Perform ray casting on the constructed RGBA volume stack [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from vgg19 import VGG19FeatureExtractor # Standard math/vector ops assumed for feature extraction
+from patchmatch import PatchMatchDeepCorrespondence
+from guided_filter import GuidedImageFilter
+
+def reference_recommendation(target_image, reference_database, vgg_extractor):
+    """
+    Selects the most semantically similar reference image for a target slice.
+    """
+    target_features = vgg_extractor.extract(target_image)
+    similarities = []
+    for ref_img in reference_database:
+        ref_features = vgg_extractor.extract(ref_img)
+        # Cosine similarity or Euclidean distance in feature space
+        sim = cosine_similarity(target_features, ref_features)
+        similarities.append((sim, ref_img))
+    
+    # Sort by similarity descending and pick top 1 (or k)
+    similarities.sort(key=lambda x: x[0], reverse=True)
+    return similarities[0][1]
+
+def deep_image_analogy(target_gray, reference_color, vgg_extractor):
+    """
+    Constructs intermediate image T' with visual attributes of R.
+    """
+    # Extract multi-level features
+    target_features = vgg_extractor.extract_multi_level(target_gray)
+    ref_features = vgg_extractor.extract_multi_level(reference_color)
+    
+    # PatchMatch in deep feature domain
+    # Returns intermediate image T'
+    intermediate_image = PatchMatchDeepCorrespondence(target_features, ref_features)
+    return intermediate_image
+
+def isolate_color(intermediate_image, target_gray):
+    """
+    Preserves only transferred color, discarding texture/style.
+    """
+    # Guided image filter using target_gray as guide to preserve structure
+    # but only keep color channels from intermediate_image
+    colorized_image = GuidedImageFilter(intermediate_image, target_gray)
+    return colorized_image
+
+def build_volume_stack(target_stack, reference_database, vgg_extractor):
+    """
+    Main pipeline to build RGBA volume from grayscale stack.
+    """
+    rgba_stack = []
+    
+    for target_slice in target_stack:
+        # Step 1: Recommend reference
+        ref_slice = reference_recommendation(target_slice, reference_database, vgg_extractor)
+        
+        # Step 2: Deep Image Analogy
+        intermediate = deep_image_analogy(target_slice, ref_slice, vgg_extractor)
+        
+        # Step 3: Isolate Color
+        colorized_slice = isolate_color(intermediate, target_slice)
+        
+        # Step 4: Construct RGBA
+        # RGB from colorized slice
+        rgb = colorized_slice[:, :, :3]
+        
+        # Alpha from luminance of target slice
+        # Luminance formula: 0.299*R + 0.587*G + 0.114*B (for grayscale, just the intensity)
+        luminance = target_slice # Assuming target_slice is already intensity/grayscale
+        alpha = luminance
+        
+        # Combine into RGBA
+        rgba_slice = np.dstack([rgb, alpha])
+        rgba_stack.append(rgba_slice)
+        
+    return rgba_stack
+
+def render_volume(rgba_stack):
+    """
+    Direct volume rendering (ray casting) on the RGBA stack.
+    """
+    # Standard ray casting implementation using the RGBA values
+    # Color is from RGB, Opacity is from Alpha
+    rendered_image = ray_cast(rgba_stack)
+    return rendered_image
+```
+
+**Parameters:**
+*   **Feature Extractor:** VGG-19 pre-trained on ImageNet [S1, unofficial].
+*   **Opacity Mapping:** Direct mapping of voxel luminance to alpha [S1, unofficial].
+*   **Reference Database:** Visible Human Project cryosections (e.g., 696 images for thorax/abdomen) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Opacity Determination:** The method does not address automatic determination of opacity parameters from a transfer function; it relies solely on voxel luminance for alpha, which may not be optimal for all anatomical structures [S1, unofficial].
+*   **Texture Leakage:** Without the guided image filter, the intermediate image $T'$ may retain unwanted texture or style from the reference image, degrading medical interpretability [S1, unofficial].
+*   **Semantic Mismatch:** If the reference image is not semantically similar to the target slice, the color transfer may produce anatomically incorrect colors [S1, unofficial].
+
+## Subtopics
+
+### Deep Image Analogy
+A dense correspondence algorithm that transfers visual attributes between images using deep features and PatchMatch. It sets itself apart by operating in feature space rather than pixel space, allowing for semantic alignment. Choose it when structural similarity is less important than semantic correspondence. [Link to Deep Image Analogy](deep-image-analogy.md)
+
+### Guided Image Filtering
+A filter that preserves edges while smoothing. In this context, it isolates color from texture. Choose it when you need to transfer color without transferring texture/style. [Link to Guided Image Filter](guided-image-filter.md)
+
+### VGG-19 Feature Extraction
+A CNN architecture used for extracting hierarchical features. It sets itself apart by providing robust semantic representations suitable for matching medical structures. Choose it for deep semantic correspondence. [Link to VGG-19](vgg19.md)
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the VGG-19 feature extraction and PatchMatch correspondence for each slice. The recommendation step adds overhead proportional to the size of the reference database.
+*   **Memory Complexity:** Requires storing the reference database features and the intermediate feature maps for each slice during processing.
+*   **Measured Performance:** Tested on Visible Human Project data (33 MRI head, 328 CT thorax/abdomen slices) [S1, unofficial].
+*   **Strengths:** Eliminates tedious manual transfer function interaction; requires smaller reference datasets compared to end-to-end learning methods; leverages existing high-quality histological references.
+*   **Limitations:** Opacity is fixed to luminance, lacking the flexibility of transfer functions; dependent on the availability of semantically similar reference images; may not generalize well to anatomies not represented in the reference database.
+*   **When to Use:** When rapid visualization of medical volumes is needed without expert tuning of transfer functions, and suitable reference images (e.g., cryosections) are available.
+*   **When Not to Use:** When precise control over opacity is required for diagnostic accuracy, or when the anatomy is not well-represented in the reference database.
+
+## Background
+The method was proposed by Devkota et al. in 2020/2022, extending the work of Liao et al. on Deep Image Analogy to the domain of medical imaging [S1, unofficial]. It addresses the pain point of manual transfer function tuning in volume rendering, which is described as tedious and time-consuming [S1, unofficial]. The approach leverages the Visible Human Project dataset, which provides paired cryosection, CT, and MRI images, allowing for the training of the recommendation engine and the validation of color transfer [S1, unofficial]. The core idea is that histological cryosections provide a rich source of color information that can be semantically mapped to radiological images.
+
+## Sources
+[S1] Reference Based Color Transfer for Medical Volume Rendering, https://doi.org/10.48550/arxiv.2210.08083, fetched 2026-10-26 (unofficial)

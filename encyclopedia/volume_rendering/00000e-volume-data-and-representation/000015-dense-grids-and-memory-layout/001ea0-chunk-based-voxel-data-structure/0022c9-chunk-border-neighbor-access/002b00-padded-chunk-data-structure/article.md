@@ -1,0 +1,141 @@
+# Padded Chunk Data Structure
+
+Also called: Chunk Padding, Extra padding layer, Halo Voxels, PaddedChunk, Padding chunk sizes
+
+## Overview
+The Padded Chunk Data Structure is a memory layout strategy for dense voxel grids that allocates a 1-voxel boundary shell around each chunk to store neighbor data [S1, S2, unofficial]. This allows neighbor lookups during mesh generation (such as greedy meshing) to proceed without bounds checks or explicit cross-chunk pointer dereferencing, treating chunk borders semantically identical to internal voxels [S1, S2, unofficial]. It differs from sibling methods like Chunk Neighbor Referencing, which maintain explicit links to adjacent chunks, by duplicating boundary data within the chunk's own memory space [S1, S2, unofficial].
+
+## How it works
+### Inputs and Outputs
+- **Input**: Unpadded chunk dimensions (typically a multiple of 2, e.g., $32^3$) [S2, unofficial].
+- **Output**: A flat memory array of size $(S+2)^3$ containing voxel data, where $S$ is the unpadded chunk size [S1, S2, unofficial].
+
+### Data Structures
+The core structure is a flat 1D array representing a 3D volume.
+- **Type**: Array of `VoxelBlock` (or equivalent voxel type).
+- **Dimensions**:
+  - Let $S$ be the unpadded chunk size (e.g., 32) [S2, unofficial].
+  - Let $P = 1$ be the padding thickness on each side [S1, unofficial].
+  - Padded size: $L = S + 2P = S + 2$ [S1, unofficial].
+  - Total volume: $V_{padded} = L^3$ [S1, unofficial].
+- **Layout**: The array is linearized in row-major order (X fastest, then Y, then Z) [S1, unofficial].
+
+### Steps
+1. **Allocation**: Allocate memory for a chunk of size $(S+2)^3$ [S2, unofficial].
+2. **Population (Inner)**: Populate the inner region $[1, S] \times [1, S] \times [1, S]$ with the chunk's local voxel data [S2, unofficial].
+3. **Population (Padding)**: Populate the outer 1-voxel shell (indices $0$ and $S+1$ along each axis) with data from the corresponding neighboring chunks [S2, unofficial].
+   - For example, the face at $x=0$ contains data from the chunk at chunk-coordinate $(-1, 0, 0)$ [S2, unofficial].
+4. **Meshing**: During mesh generation, iterate only over the inner region $[1, S] \times [1, S] \times [1, S]$ [S2, unofficial]. The padded voxels are ignored for mesh output but used for neighbor lookups [S2, unofficial].
+
+### Formulas
+**Linearization Index**:
+For a 3D coordinate $(x, y, z)$ within the padded chunk of size $L$:
+$$ \text{index} = x + L \cdot (y + L \cdot z) $$
+where $0 \le x, y, z < L$ [S1, unofficial].
+
+**Inner Region Bounds**:
+The valid voxel data for meshing lies in:
+$$ 1 \le x \le S, \quad 1 \le y \le S, \quad 1 \le z \le S $$
+where $S = L - 2$ [S2, unofficial].
+
+### Parameters
+- **Padding Size**: 1 voxel on each side, totaling 2 voxels added to each dimension [S2, unofficial].
+- **Unpadded Chunk Size**: Typically a multiple of 2 (e.g., $32^3$) [S2, unofficial].
+
+### Edge Cases and Pitfalls
+- **Consistency**: When a block value changes, the update must be propagated to the padding shells of all adjacent chunks that reference this block [S2, unofficial]. Failure to do so results in visual artifacts at chunk boundaries [S2, unofficial].
+- **Thread Safety**: In multi-threaded environments, padding population must be handled exclusively on worker threads to avoid race conditions with the main thread or other workers [S2, unofficial].
+- **Memory Overhead**: The memory usage increases by a factor of $(1 + 2/S)^3$ compared to unpadded chunks. For $S=32$, this is approximately 20% overhead [S2, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def allocate_padded_chunk(unpadded_size: int) -> list:
+    """
+    Allocates a flat array for a padded chunk.
+    unpadded_size: The dimension of the inner chunk (e.g., 32).
+    Returns: A flat list of size (unpadded_size + 2)^3.
+    """
+    padded_size = unpadded_size + 2
+    total_volume = padded_size ** 3
+    # Initialize with a default empty block type
+    return [EMPTY_BLOCK] * total_volume
+
+def populate_chunk(chunk_data: list, unpadded_size: int, neighbor_data: dict):
+    """
+    Populates the inner voxels and the padding shell.
+    chunk_data: The allocated padded chunk array.
+    unpadded_size: The inner dimension S.
+    neighbor_data: A dictionary mapping neighbor chunk coordinates (dx, dy, dz)
+                   to their unpadded voxel data arrays.
+    """
+    padded_size = unpadded_size + 2
+    
+    # 1. Populate inner region [1, S] x [1, S] x [1, S]
+    # Assuming chunk_data is passed as a flat array, we copy the local data.
+    # In practice, this step involves copying the specific chunk's local data
+    # into the center of the padded array.
+    # For this pseudocode, we assume 'local_voxels' is the unpadded data for this chunk.
+    local_voxels = get_local_voxels_for_chunk() # [G] Helper to retrieve local data
+    
+    for z in range(unpadded_size):
+        for y in range(unpadded_size):
+            for x in range(unpadded_size):
+                idx = linearize(x + 1, y + 1, z + 1, padded_size)
+                chunk_data[idx] = local_voxels[linearize(x, y, z, unpadded_size)]
+
+    # 2. Populate padding shell
+    # X- faces
+    copy_neighbor_face(chunk_data, unpadded_size, padded_size, neighbor_data, (-1, 0, 0), "x_min")
+    copy_neighbor_face(chunk_data, unpadded_size, padded_size, neighbor_data, (1, 0, 0), "x_max")
+    # Y- faces
+    copy_neighbor_face(chunk_data, unpadded_size, padded_size, neighbor_data, (0, -1, 0), "y_min")
+    copy_neighbor_face(chunk_data, unpadded_size, padded_size, neighbor_data, (0, 1, 0), "y_max")
+    # Z- faces
+    copy_neighbor_face(chunk_data, unpadded_size, padded_size, neighbor_data, (0, 0, -1), "z_min")
+    copy_neighbor_face(chunk_data, unpadded_size, padded_size, neighbor_data, (0, 0, 1), "z_max")
+
+def linearize(x: int, y: int, z: int, size: int) -> int:
+    """Linearizes 3D coordinates to 1D index."""
+    return x + size * (y + size * z)
+
+def copy_neighbor_face(chunk_data: list, unpadded_size: int, padded_size: int, 
+                       neighbor_data: dict, offset: tuple, face: str):
+    """
+    Copies a 2D face from a neighbor chunk into the padding shell.
+    offset: (dx, dy, dz) of the neighbor chunk.
+    face: Which face of the neighbor to copy ('x_min', 'x_max', etc.)
+    """
+    # Determine the target plane in the padded chunk
+    # e.g., if face is 'x_min', target x is 0
+    # The neighbor's corresponding face is at its boundary.
+    
+    # [G] Logic to map neighbor chunk coordinates and local face indices
+    # to the specific 2D slice in the padded chunk's flat array.
+    # This involves iterating over the 2D plane of the neighbor and copying
+    # to the correct 1D indices in chunk_data.
+    pass # Implementation details depend on specific neighbor data structure
+```
+
+## Subtopics
+
+### [Chunk Neighbor Referencing for Boundary Meshing](4171-chunk-neighbor-referencing-for-boundary-meshing.md)
+Maintains explicit pointers to adjacent chunks instead of duplicating data. Choose when memory is constrained and chunk management complexity is acceptable.
+
+### [Chunk Neighbor Retrieval](6783-chunk-neighbor-retrieval.md)
+Dynamically fetches neighbor data on demand. Choose when neighbor access is sparse or unpredictable.
+
+## Operating characteristics
+- **Time Complexity**: Mesh generation is $O(S^3)$ per chunk, with $O(1)$ neighbor lookups due to padding [S1, S2, unofficial].
+- **Memory Complexity**: $O((S+2)^3)$ per chunk, introducing ~20% overhead for $S=32$ [S2, unofficial].
+- **Performance**: Enables efficient greedy meshing in multi-threaded environments by eliminating bounds checks and cross-chunk synchronization during meshing [S2, unofficial].
+- **Strengths**: Simplifies meshing logic; no explicit neighbor management during rendering [S2, unofficial].
+- **Limitations**: Requires updating two chunks (original and neighbor) on block changes, increasing update complexity [S2, unofficial]. Not suitable for highly dynamic scenes with frequent block updates unless update propagation is optimized.
+
+## Background
+The technique is commonly referred to as "Chunk Padding" or "Halo Voxels" in the voxel game development community [S2, unofficial]. It was popularized in discussions on r/VoxelGameDev as a solution for culling inner faces without complex boundary handling [S2, unofficial]. It is used in multi-threaded voxel engines, such as those built with Unity, where padding is handled on worker threads [S2, unofficial]. The approach is also referenced in projects like Infinigen, which uses padded chunk structures for world generation [S1, unofficial].
+
+## Sources
+[S1] jameshiew/infinigen, https://github.com/jameshiew/infinigen, fetched 2026-10-27 (unofficial)
+[S2] Tips for culling inner faces? : r/VoxelGameDev, https://www.reddit.com/r/VoxelGameDev/comments/210u58/tips_for_culling_inner_faces/, fetched 2026-10-27 (unofficial)

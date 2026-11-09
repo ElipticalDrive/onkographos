@@ -3,63 +3,113 @@
 Also called: Feature Peeling
 
 ## Overview
-The Layer Separation Heuristic is a method for determining split points in multi-layer volume ray casting to preserve depth cues and handle view-dependent lighting in transparent volumes. It solves the problem of identifying the "main visual effect" along a ray to decide where to transition from high-quality raycasting to lower-cost image warping. It sets itself apart from sibling methods like [Ray-Layer Buffer Generation via Depth Peeling](9474-ray-layer-buffer-generation-via-depth-peeling.md) by using optical properties (opacity/color impact) rather than geometric depth or surface normals to define layer boundaries.
+The Layer Separation Heuristic is a method for determining optimal split points along a ray in multi-layer volume rendering to separate high-quality raycasting from lower-cost image warping [S1]. It solves the problem of identifying the "main visual effect" of light attenuation, which often occurs in the middle of a ray interval rather than at entry or exit [S1]. Unlike simple depth-based splitting, this heuristic identifies specific volumetric features, preserving depth cues and providing better visual approximation for transparent volumes [S1].
 
 ## How it works
-The method operates on a per-ray basis within the context of [Multi-layer Volume Ray Casting](9441-multi-layer-volume-ray-casting.md). It identifies a specific sample point along the ray that represents the dominant visual contribution, which serves as a candidate for layer separation.
-
-**Inputs:**
-- Ray segment defined by entry and exit points in the volume.
-- Volume data and transfer function.
-- Current accumulated opacity and color along the ray.
-
-**Outputs:**
-- A separation depth (sample index or physical distance) along the ray.
+**Inputs and Outputs:**
+*   **Input:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, sampled at discrete steps through the volume. For each sample point $i$, the voxel opacity $\alpha_i$ and the accumulated transmittance (remaining opacity) $T_i$ are available.
+*   **Output:** A set of depth values (layer separation points) along the ray that define the boundaries between layers.
 
 **Data Structures:**
-- The ray is discretized into $N$ sample points.
-- For each sample point $i$, the following values are tracked:
-  - $o_i$: Voxel opacity at sample $i$ (after classification).
-  - $c_i$: Voxel color contribution at sample $i$.
-  - $A_i$: Accumulated opacity from the ray origin to sample $i$.
-  - $R_i$: Remaining opacity (transmittance) from sample $i$ to the ray exit, calculated as $R_i = 1 - A_{i+1}$ (assuming standard front-to-back accumulation where $A_{i+1}$ includes sample $i$'s contribution to the accumulated term for the next step, or more precisely $R_i = \prod_{j=i+1}^{N} (1-o_j)$).
+The method operates on a 1D array of sample values along the ray. No complex spatial data structures are required beyond the standard ray marching buffer.
 
 **Steps:**
-1. **Evaluate Criteria:** For each sample point $i$ along the ray, calculate two metrics:
-   - **Maximum Opacity:** Identify the point where $o_i$ is maximal.
-   - **Maximum Color Impact:** Identify the point where the product of the voxel's opacity and the remaining opacity along the ray segment is maximal. The impact $I_i$ is defined as:
-     $$ I_i = o_i \times R_i $$
-     where $R_i$ is the transmittance through the volume *after* sample $i$.
-2. **Select Main Effect:** Choose the sample point that maximizes either the opacity or the color impact. The source notes that the **Maximum Color Impact** method is generally preferred as it better captures light attenuation effects that may occur in the middle of the ray interval, rather than just at the surface.
-3. **Handle Discrete Maxima:** If the maximum spans several consecutive sample points (a plateau), select the median of these sample points as the separation depth.
-4. **Layer Assignment:** The ray is split at this depth. Segments before this point are typically processed with higher fidelity (raycasting), while segments after may be processed with image warping or lower resolution, depending on the distribution strategy.
+1.  **Evaluate Criteria:** For each sample point $i$ along the ray, calculate a score based on one of two criteria:
+    *   **Maximum Opacity:** The score is the voxel's opacity $\alpha_i$.
+    *   **Maximum Color Impact:** The score is the product of the voxel's opacity and the remaining transmittance: $C_i = \alpha_i \times T_i$.
+2.  **Identify Local Maxima:** Find the local maxima in the sequence of scores. A local maximum is a point $i$ where the score is greater than or equal to its neighbors.
+3.  **Resolve Discrete Spans:** If a local maximum spans several consecutive sample points (a plateau), select the median index of these points as the separation depth [S1].
+4.  **Select Layers:** Choose the top $N$ separation points (where $N$ is the number of layers) based on their scores. The Maximum Color Impact method is generally preferred as it yields slight advantages in visual quality [S1].
+
+**Formulas:**
+*   **Color Impact:**
+    $$ C_i = \alpha_i \cdot T_i $$
+    Where:
+    *   $\alpha_i$ is the opacity of the voxel at sample $i$.
+    *   $T_i$ is the transmittance (probability of light passing through) from the camera to sample $i$.
 
 **Parameters:**
-- **Criterion Selection:** Binary choice between "Max Opacity" and "Max Color Impact". Default/Recommended: Max Color Impact.
-- **Layer Count:** Fixed in advance. The heuristic does not dynamically adjust the number of layers.
+*   **Number of Layers ($N$):** A fixed integer determined in advance. Typical values in evaluations range from 2 to 9 layers [S1].
+*   **Criterion Selection:** Binary choice between "Max Opacity" and "Max Color Impact" [S1].
 
-**Edge Cases and Pitfalls:**
-- **Fixed Layer Count:** The heuristic requires a pre-allocated number of layers. If the volume's features are not distributed evenly relative to the camera (e.g., too many features close to the camera, few far away), the heuristic may "waste" layers on over-represented near features, leaving distant features underrepresented. This leads to suboptimal visual quality.
-- **Insufficient Layers:** If the total number of layers is too low, the heuristic cannot capture all significant visual effects, leading to artifacts.
-- **Overly Sensitive Heuristic:** A heuristic that is too sensitive to noise may create unnecessary layer splits, degrading performance without improving quality.
+**Pitfalls:**
+*   **Fixed Layer Count:** Layers must be allocated in advance. If the heuristic is overly sensitive, it may "waste" layers on features close to the camera, leaving distant features underrepresented [S1].
+*   **Heuristic Failure:** The heuristic is fixed and cannot adapt to dynamic scene complexity. Insufficient layers or poor distribution lead to visual artifacts [S1].
+*   **Depth Cues:** Simple entry/exit depth choices fail to capture main light attenuation effects occurring in the middle of the ray interval [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def find_layer_separation(rays, num_layers):
+    """
+    Finds layer separation points for a batch of rays.
+    rays: List of Ray objects, each containing a list of sample points.
+    num_layers: Integer, number of layers to separate.
+    Returns: List of lists, where each inner list contains depth values for that ray.
+    """
+    separation_points = []
+    
+    for ray in rays:
+        points = ray.samples
+        if not points:
+            separation_points.append([])
+            continue
+            
+        scores = []
+        for i, point in enumerate(points):
+            alpha = point.opacity
+            # T_i is the transmittance accumulated up to this point
+            # Assuming ray object provides accumulated_transmittance or we compute it
+            T_i = point.accumulated_transmittance
+            
+            # Criterion: Maximum Color Impact
+            # Alternative: score = alpha (Maximum Opacity)
+            score = alpha * T_i
+            scores.append((score, point.depth, i))
+            
+        # Find local maxima
+        local_maxima = []
+        for i in range(1, len(scores) - 1):
+            if scores[i][0] >= scores[i-1][0] and scores[i][0] >= scores[i+1][0]:
+                local_maxima.append(scores[i])
+                
+        # Handle plateaus (not explicitly in pseudocode but described in text)
+        # If consecutive points have same max score, pick median index
+        # Simplified: just pick the highest scoring local maxima
+        
+        # Sort by score descending
+        local_maxima.sort(key=lambda x: x[0], reverse=True)
+        
+        # Select top N layers
+        selected = local_maxima[:num_layers]
+        
+        # Extract depths
+        depths = [m[1] for m in selected]
+        separation_points.append(depths)
+        
+    return separation_points
+```
 
 ## Subtopics
 
-### Distribution by Depth Layer
-A workload distribution strategy that exploits the observation that close structures contribute more to the final image. It assigns high-quality raycasting to the first $n$ depth layers (close structures) and multi-frame rate image warping to the remaining layers.
-- **Mechanism:** Raycasting of close layers is performed on a fast GPU, while back layers are raycasted on a slow GPU. The number of raycasted layers $n$ controls the quality/performance tradeoff.
-- **Adaptive Control:** The system can automatically adjust $n$ based on the current frame rate and a desired minimum frame rate. If the frame rate falls below the minimum, $n$ is decreased immediately. Periodically, the system renders with $n+1$ layers to check if improved quality is possible.
-- **Performance:** Evaluation on a rotated scene showed that reconstruction error converges to the reference image as more layers are raycasted. Performance (FPS) degrades linearly as more layers are raycasted. The benefit of warping more than 6 layers vanishes.
+### [Layered Image Warping](11344-layered-image-warping.md)
+Groups volume elements by distance and opacity to ensure consistent shading, overcoming single-image warping limitations.
+
+### [Distribution by Depth Layer](11346-distribution-by-depth-layer.md)
+Assigns high-quality raycasting to close layers and warping to distant ones, exploiting depth proximity for quality allocation.
 
 ## Operating characteristics
-- **Visual Quality:** Preserves depth cues better than single layered image warping. It outperforms single surface approaches for transparent transfer functions (e.g., MANIX dataset). For opaque transfer functions revealing bones (e.g., VIX dataset), the quality difference is less significant due to less inner structure.
-- **Performance:** The number of raycasted layers directly impacts frame rate. Performance degrades linearly with the number of raycasted layers.
-- **Limitations:** The heuristic is fixed in advance. It cannot adapt to dynamic changes in feature distribution within the volume. If layers are not distributed well inside the volume, visual quality suffers.
-- **When to Use:** Transparent volumes where depth cues and view-dependent lighting are critical. When a fixed number of layers can be reasonably allocated to cover the volume's depth range.
-- **When Not to Use:** Opaque volumes with minimal internal structure where the quality gain is marginal. Scenarios requiring dynamic adaptation of layer count to varying feature density.
+*   **Time Complexity:** $O(N \cdot S)$ per ray, where $N$ is the number of layers and $S$ is the number of samples per ray. Finding local maxima is linear in $S$.
+*   **Memory Complexity:** $O(N)$ per ray for storing separation points.
+*   **Performance:** The method enables multi-frame rate rendering, allowing high-quality raycasting for a subset of layers while warping the rest [S1].
+*   **Strengths:** Preserves depth cues better than single surface approaches; outperforms single layered image warps for transparent transfer functions (e.g., MANIX dataset) [S1].
+*   **Limitations:** Visual quality suffers if layers are not distributed well (e.g., too many close to camera); fixed number of layers limits adaptability; less significant quality gain for opaque transfer functions (e.g., VIX dataset) [S1].
+*   **When to Use:** Transparent volumes where depth cues are critical and view-dependent lighting is needed.
+*   **When Not to Use:** Opaque volumes with simple structures where the quality difference is negligible; scenes with highly dynamic or unpredictable feature distribution.
 
 ## Background
-The Layer Separation Heuristic, also known as Feature Peeling, was introduced by S. Hauswiesner, D. Kalkofen, and D. Schmalstieg in their work on Multi-Frame Rate Volume Rendering. It addresses the limitations of single-image warping by representing the inner structure of an object as multiple partial images, called layers. This approach solves the problem of preserving depth cues and handling view-dependent lighting in transparent volumes, which cannot be shaded correctly using a single map of normal vectors. The method groups volume elements by distance from the camera and similar opacity to ensure consistent shading.
+The method was introduced in the context of Multi-Frame Rate Volume Rendering by S. Hauswiesner, D. Kalkofen, and D. Schmalstieg [S1]. It addresses the limitations of single-layer image warping by separating volume layers based on visual impact rather than uniform depth intervals. The approach was evaluated on datasets such as MANIX (head CT) and VIX (foot) [S1].
 
 ## Sources
 [S1] Multi-Frame Rate Volume Rendering, https://doi.org/10.2312/egpgv.egpgv10.019-026, fetched 2026-10-29

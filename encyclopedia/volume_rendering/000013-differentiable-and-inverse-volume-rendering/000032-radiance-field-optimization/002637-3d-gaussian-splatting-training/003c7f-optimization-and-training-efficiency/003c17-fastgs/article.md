@@ -1,0 +1,128 @@
+# FastGS
+
+Also called: Fast Gradient Checkpointing and Dynamic Sparse Rasterization
+
+## Overview
+FastGS re-engineers the standard 3D Gaussian Splatting training loop to accelerate optimization by reducing computational overhead [S1, unofficial]. It achieves this speedup through two primary mechanisms: dynamic sparse rasterization, which skips rendering for tiles with negligible transmittance, and a fast gradient checkpointing scheme that minimizes memory usage by recomputing only necessary intermediate values [S1, unofficial]. Unlike sibling methods that focus on parameter-specific learning rates or fused backward passes, FastGS targets the fundamental rasterization and memory management bottlenecks of the training pipeline [S1, unofficial].
+
+## How it works
+FastGS modifies the forward and backward passes of the differentiable rasterizer to reduce redundant calculations and memory footprint.
+
+**Inputs and Outputs:**
+*   **Inputs:** A set of 3D Gaussians (defined by position $\mu$, covariance $\Sigma$, opacity $\alpha$, and spherical harmonic coefficients $\mathbf{c}$), camera parameters (view and projection matrices), and image resolution $(H, W)$.
+*   **Outputs:** Rendered image $\mathbf{I}$, depth map, and gradients $\frac{\partial \mathcal{L}}{\partial \theta}$ for all Gaussian parameters $\theta$.
+
+**Data Structures:**
+*   **Tile List:** A grid of tiles covering the image plane. Each tile tracks its current transmittance $T_{tile}$.
+*   **Gaussian List:** A list of 3D Gaussians sorted by depth for each camera view.
+*   **Checkpoint Buffer:** Stores intermediate values required for gradient recomputation, sized to hold only the essential state between major computational blocks rather than all activations.
+
+**Algorithm Steps:**
+
+1.  **Initialization:** Initialize the Gaussian list from Structure-from-Motion (SfM) points. Set initial covariance regularization parameter $s = 0.3$ [S2].
+2.  **Dynamic Sparse Rasterization (Forward Pass):**
+    *   Iterate through each tile in the image grid.
+    *   For each tile, identify the subset of Gaussians that intersect the tile's bounding box.
+    *   Sort these Gaussians by depth.
+    *   Perform alpha blending within the tile. If the accumulated transmittance $T_{tile}$ drops below a negligible threshold $\epsilon$ (e.g., $10^{-4}$), terminate processing for that tile early, skipping remaining Gaussians [S1, unofficial].
+    *   Compute the pixel color $\mathbf{c}$ using the standard alpha blending equation:
+        $$ \mathbf{c} = \sum_{i \in \mathcal{N}} \mathbf{c}_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+        where $\mathcal{N}$ is the set of Gaussians contributing to the pixel, $\mathbf{c}_i$ is the color of Gaussian $i$, and $\alpha_i$ is its opacity [S1, unofficial].
+3.  **Loss Computation:**
+    *   Compute the total loss $\mathcal{L}$ using the L1 loss, SSIM loss, and auxiliary losses [S2]:
+        $$ \mathcal{L} = (1 - \lambda_{SSIM})\mathcal{L}_1 + \lambda_{SSIM} \mathcal{L}_{D-SIM} + \lambda_m \mathcal{L}_m + \lambda_{sh} \mathcal{L}_{sh} $$
+    *   For $\mathcal{L}_{D-SIM}$, use two 1D Gaussian kernels instead of a single 2D kernel to accelerate convolution [S2].
+4.  **Fast Gradient Checkpointing (Backward Pass):**
+    *   Instead of storing all intermediate activations for backpropagation, store a subset of checkpoints [S1, unofficial].
+    *   During the backward pass, recompute the forward pass values for the segments between checkpoints to calculate gradients. This trades compute time for memory savings, allowing larger batch sizes or scenes [S1, unofficial].
+    *   Compute gradients $\frac{\partial \mathcal{L}}{\partial \mu}, \frac{\partial \mathcal{L}}{\partial \Sigma}, \frac{\partial \mathcal{L}}{\partial \alpha}, \frac{\partial \mathcal{L}}{\partial \mathbf{c}}$ using the chain rule through the differentiable rasterizer [S1, unofficial].
+5.  **Parameter Update:**
+    *   Update Gaussian parameters using an optimizer (e.g., Adam) [S1, unofficial].
+    *   Apply covariance regularization: $\Sigma' = \Sigma + s\mathbf{I}$, where $s$ is dynamically adjusted or fixed at 0.3 to prevent Gaussians from becoming smaller than a pixel [S2].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def fastgs_forward(Gaussians, Cameras, ImageSize):
+    # Initialize tile transmittance to 1.0
+    TileTransmittance = zeros(ImageSize)
+    RenderedImage = zeros(ImageSize)
+    
+    # Sort Gaussians by depth for each camera
+    SortedGaussians = sort_by_depth(Gaussians, Cameras)
+    
+    for tile in Tiles(ImageSize):
+        # Identify Gaussians intersecting this tile
+        CandidateGaussians = get_intersecting_gaussians(tile, SortedGaussians)
+        
+        # Dynamic sparse rasterization: skip if transmittance is negligible
+        if TileTransmittance[tile] < EPSILON:
+            continue
+            
+        T = TileTransmittance[tile]
+        ColorAccum = zeros(3)
+        
+        for g in CandidateGaussians:
+            # Project Gaussian to screen space
+            Cov2D, Alpha = project_gaussian(g, Cameras)
+            
+            # Check if Gaussian contributes significantly
+            if Alpha * T < EPSILON:
+                continue
+                
+            # Compute color contribution
+            Color = evaluate_sh(g.SH, Cameras)
+            Contribution = Color * Alpha * T
+            
+            # Update tile state
+            ColorAccum += Contribution
+            T *= (1 - Alpha)
+            
+            # Early exit if tile is fully opaque
+            if T < EPSILON:
+                break
+        
+        RenderedImage[tile] = ColorAccum
+        TileTransmittance[tile] = T
+        
+    return RenderedImage
+
+def fastgs_backward(Loss, Checkpoints):
+    # Recompute necessary forward values from checkpoints
+    # This is a conceptual representation of gradient checkpointing
+    Gradients = compute_gradients_via_recomputation(Loss, Checkpoints)
+    return Gradients
+```
+
+**Parameters:**
+*   $\epsilon$: Transmittance threshold for early termination. Not given in the sources.
+*   $s$: Covariance regularization constant. Default 0.3 [S2].
+*   $\lambda_{SSIM}$: Weight for SSIM loss. Not given in the sources.
+*   $\lambda_m, \lambda_{sh}$: Weights for auxiliary losses. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Gaussians:** If Gaussians become too small, they may cause artifacts. The regularization $s=0.3$ prevents this [S2].
+*   **Precision:** Early termination based on transmittance thresholds may introduce minor color inaccuracies in very transparent regions [S1, unofficial].
+
+## Subtopics
+
+### Accelerated Training for 3DGS
+A strategy to improve training time efficiency by separating higher SH bands from the 0th band within the rasterizer [S2]. This reduces the number of updates for higher SH bands compared to diffused colors, as SH bands only represent view-dependent variations [S2]. It is chosen when training time is the primary bottleneck and view-dependent effects are less critical for early convergence. It modifies the rasterizer to split SH bands, updating them every 16 iterations while updating diffused color at every step [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Reduced compared to standard 3DGS due to dynamic sparse rasterization skipping negligible tiles and optimized SSIM calculation [S1, unofficial][S2].
+*   **Memory Complexity:** Reduced due to gradient checkpointing, which stores fewer intermediate activations [S1, unofficial].
+*   **Performance:** MMGS, which builds on FastGS principles, achieves 10x accelerated training speed while maintaining rendering quality with only 10% of the primitives [S1, unofficial].
+*   **Strengths:** Significant reduction in training time and memory usage.
+*   **Limitations:** May introduce minor artifacts if transmittance thresholds are set too high; requires careful tuning of SH update frequency [S2].
+*   **When to use:** When training large scenes or when computational resources are limited.
+*   **When not to use:** When maximum rendering fidelity is required over training speed, or when view-dependent effects are critical from the start.
+
+## Background
+FastGS was introduced as part of the broader effort to optimize 3D Gaussian Splatting training [S1, unofficial]. It re-engineers the training loop to address the computational bottlenecks of dynamic sparse rasterization and memory-intensive backpropagation [S1, unofficial]. The method is cited in surveys of 3D Gaussian Splatting rasterization techniques [S1, unofficial].
+
+## Sources
+[S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+[S2] Trick-GS: A Balanced Bag of Tricks for Efficient Gaussian Splatting, https://doi.org/10.1109/icassp49660.2025.10889395, fetched 2026-10-30

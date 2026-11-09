@@ -7,7 +7,7 @@ Normal Shading is a visualization technique that maps surface normals to a color
 
 ## How it works
 **Inputs:**
-- $\mathbf{n}$: The surface normal vector at the hit point, typically normalized such that $|\mathbf{n}| = 1$ [S1, unofficial].
+- $\mathbf{n}$: The surface normal vector at the hit point [S1, unofficial].
 
 **Outputs:**
 - $N_{vis}$: A color vector (RGB) where each channel corresponds to the clamped absolute value of the respective normal component [S1, unofficial].
@@ -40,17 +40,11 @@ def normal_shading(surface_normals):
     Returns:
         An iterable of 3D vectors containing the visualized normal colors.
     """
-    result = []
-    for n in surface_normals:
-        abs_n = [abs(n[0]), abs(n[1]), abs(n[2])]
-        clamped_n = [max(0.0, min(1.0, v)) for v in abs_n]
-        result.append(clamped_n)
-    return result
+    return [[max(0.0, min(1.0, abs(v))) for v in n] for n in surface_normals]
 ```
 
 **Edge Cases and Pitfalls:**
-- **Non-unit normals:** If the input normal is not normalized, the absolute values may exceed 1 before clamping, causing saturation to 1 and distorting relative proportions.
-- **Zero normals:** If the normal is $(0, 0, 0)$, the output is $(0, 0, 0)$ (black). This may occur in degenerate geometry or at singularities.
+- Not given in the sources.
 
 ## Subtopics
 
@@ -61,7 +55,7 @@ The Spin Shader visualizes surface geometry by mapping surface normals and camer
 The Normal Integrator is a visualization technique that renders the surface normal vector of a geometry as an RGB color image. It solves the problem of debugging or inspecting surface orientation by mapping the normal components from the range $[-1, 1]$ to the color channel range $[0, 1]$ (or $[0, 255]$). It is distinct from the parent Normal Shading method, which visualizes normals by taking the absolute value of components and clamping to $[0, 1]$, whereas the Normal Integrator preserves the sign information of the normal vector through a linear shift-and-scale mapping.
 
 ### Laplacian Shading
-Laplacian Shading visualizes the surface Laplacian by normalizing to $[-1, 1]$, flipping sign, mapping to $[0, 1]$, and applying gamma correction [S1, unofficial]. It is used to inspect the curvature or smoothness of the SDF, as the Laplacian relates to the second derivative of the distance field.
+Laplacian Shading visualizes the surface Laplacian by normalizing to $[-1, 1]$, flipping sign, mapping to $[0, 1]$, and applying gamma correction [S1, unofficial].
 
 **Formula:**
 $$ L_{vis} = \left( \frac{-\frac{\Delta}{\max(|\Delta|)} + 1}{2} \right)^{1/2.33} $$
@@ -91,49 +85,54 @@ def laplacian_shading(laplacian_values):
 ```
 
 ### Tangent Space Visualization
-Tangent Space Visualization projects the surface normal onto the sensor plane and visualizes the resulting 2D vector using domain coloring techniques [S1, unofficial]. It is chosen when analyzing the tangential components of the normal relative to the camera view, which can reveal subtle geometric features or alignment issues.
+Tangent Space Visualization projects the surface normal onto the sensor plane and visualizes the resulting 2D vector using domain coloring techniques [S1, unofficial].
 
 **Steps:**
 1. Let $e_\alpha$ and $e_\beta$ be an orthonormal basis for the sensor plane, and $v_p$ be the unit vector from pixel $p$ to the focal point [S1, unofficial].
 2. Project the surface normal $N_p$ onto the sensor plane: $T_p = N_p - (N_p \cdot v_p)v_p$ [S1, unofficial].
-3. Express $T_p$ in the basis $e_\alpha, e_\beta$ as $T_p = \alpha e_\alpha + \beta e_\beta$. The result is a vector $(\alpha, \beta)$ where $\alpha^2 + \beta^2 \leq 1$ [S1, unofficial].
+3. Express $T_p$ in the basis $e_\alpha, e_\beta$ as $T_p = \alpha e_\alpha + \beta e_\beta$ [S1, unofficial]. The result is a vector $(\alpha, \beta)$ where $\alpha^2 + \beta^2 \leq 1$ [S1, unofficial].
 4. Treat $(\alpha, \beta)$ as a complex number $\alpha + i\beta$ and apply domain coloring techniques to visualize the result [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def tangent_space_visualization(surface_normals, ray_directions, cyclic_colourmap, degree):
     """
     Visualizes the tangent space projection of surface normals using domain coloring.
     """
-    import math
-    # v_p: unit vector from pixel to focal point
-    v_p = [d / max(abs(d[0]), abs(d[1]), abs(d[2])) for d in ray_directions]
-    # Project normal onto sensor plane: T_p = N_p - (N_p . v_p) * v_p
-    T_p = []
-    for n, v in zip(surface_normals, v_p):
-        dot = n[0]*v[0] + n[1]*v[1] + n[2]*v[2]
-        T_p.append((n[0] - dot*v[0], n[1] - dot*v[1], n[2] - dot*v[2]))
-    # Express T_p in basis e_alpha, e_beta
-    # Note: Construction of e_alpha and e_beta from camera orientation is not specified in sources [G]
-    # Assuming e_alpha and e_beta are available orthonormal vectors perpendicular to v_p
-    e_alpha = (1.0, 0.0, 0.0) # Placeholder for basis vector
-    e_beta = (0.0, 1.0, 0.0)  # Placeholder for basis vector
-    alpha = [t[0] for t in T_p] # Simplified projection for pseudocode
-    beta = [t[1] for t in T_p]
-    return domain_colouring(alpha, beta, cyclic_colourmap, degree)
+    def normalize(v):
+        mag = math.sqrt(sum(x*x for x in v))
+        return [x/mag for x in v] if mag > 0 else [0.0, 0.0, 0.0]
+    def cross(a, b):
+        return [a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]]
 
-def domain_colouring(real_part, imag_part, cyclic_colourmap, degree):
+    results = []
+    for n, rd in zip(surface_normals, ray_directions):
+        v_p = normalize(rd)
+        up = [0.0, 1.0, 0.0]
+        e_alpha = normalize(cross(v_p, up))
+        e_beta = cross(e_alpha, v_p)
+        dot = n[0]*v_p[0] + n[1]*v_p[1] + n[2]*v_p[2]
+        T_p = [n[i] - dot*v_p[i] for i in range(3)]
+        alpha = T_p[0]*e_alpha[0] + T_p[1]*e_alpha[1] + T_p[2]*e_alpha[2]
+        beta = T_p[0]*e_beta[0] + T_p[1]*e_beta[1] + T_p[2]*e_beta[2]
+        results.append((alpha, beta))
+    return domain_colouring(results, cyclic_colourmap, degree)
+
+def domain_colouring(complex_pairs, cyclic_colourmap, degree):
     """
     Applies domain coloring to a complex number represented by real and imaginary parts.
     """
-    import math
-    angles = [math.atan2(im, re) for re, im in zip(real_part, imag_part)]
-    normalized_angles = [(a / (2 * math.pi) + 0.5) % 1.0 for a in angles]
-    cmap_indices = [int(a * degree * len(cyclic_colourmap)) % len(cyclic_colourmap) for a in normalized_angles]
-    colours = [cyclic_colourmap[i] for i in cmap_indices]
-    brightness = [(re**2 + im**2)**0.5 for re, im in zip(real_part, imag_part)]
+    colours = []
+    for re, im in complex_pairs:
+        angle = math.atan2(im, re)
+        norm_angle = (angle / (2 * math.pi) + 0.5) % 1.0
+        cmap_idx = int(norm_angle * degree * len(cyclic_colourmap)) % len(cyclic_colourmap)
+        colours.append(cyclic_colourmap[cmap_idx])
+    brightness = [math.sqrt(re*re + im*im) for re, im in complex_pairs]
     return [(b * c[0], b * c[1], b * c[2]) for b, c in zip(brightness, colours)]
 ```
 
@@ -141,9 +140,9 @@ def domain_colouring(real_part, imag_part, cyclic_colourmap, degree):
 The Normals Shader converts surface normals (typically in $[-1, 1]$ range) to a visual representation (e.g., $[0, 1]$ range) for output [S2, unofficial]. It applies the shader to the computed normals to produce the final output [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per pixel, as it involves only element-wise absolute value and clamp operations.
-- **Memory Complexity:** $O(1)$ additional memory per pixel, as it does not require storing intermediate data structures beyond the input normal.
-- **Limitations:** Does not provide lighting information, so it is not suitable for final rendering. It only visualizes the absolute orientation, losing signed information about the normal direction.
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Limitations:** Not given in the sources.
 
 ## Background
 Normal Shading is part of a collection of geometrically motivated shaders used in ray marching algorithms for rendering signed distance fields (SDFs) [S1, unofficial]. The technique is implemented in the `kyle-rosa/ray_marching` repository, which provides a differentiable ray marching framework in PyTorch [S1, unofficial]. The repository includes a constructive geometry system for building SDFs, ray marching operations, and various shaders for visualizing geometric properties [S1, unofficial]. The use of PyTorch allows for differentiability, enabling gradient-based optimization of scene parameters based on rendered pixel values [S1, unofficial].

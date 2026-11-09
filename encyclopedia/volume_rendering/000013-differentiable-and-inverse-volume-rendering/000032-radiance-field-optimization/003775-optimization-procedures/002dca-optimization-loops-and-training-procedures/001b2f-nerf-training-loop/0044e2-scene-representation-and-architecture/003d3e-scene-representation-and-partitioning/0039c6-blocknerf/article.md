@@ -1,126 +1,121 @@
 # BlockNeRF
-
 Also called: Block-NeRF, Block-NeRF / Mega-NeRF, Block-based NeRF, Divided Scene NeRF
 
 ## Overview
-BlockNeRF is a divide-and-conquer strategy for large-scale scene representation that decomposes the scene into non-overlapping blocks, each represented by an independent small Multi-Layer Perceptron (MLP) [S1, S3]. It solves the problem of high-frequency information loss and slow training/inference in large environments (e.g., city buildings) by decoupling rendering time from scene size [S3]. It is distinguished from its siblings by its specific "total-part-total" training approach and explicit appearance alignment mechanism to ensure seamless integration between adjacent blocks [S3].
+BlockNeRF is a divide-and-conquer strategy for large-scale scene representation that decomposes the global volume into independent spatial blocks, each modeled by a separate small Multi-Layer Perceptron (MLP) [S1, S3]. It solves the scalability bottleneck of standard NeRF in large environments (e.g., cityscapes) by decoupling rendering time from scene size, allowing the method to scale to arbitrarily large environments [S3]. Unlike its sibling MegaNeRF, which focuses on scalable construction for virtual fly-throughs, BlockNeRF specifically emphasizes the "total-part-total" approach to ensure seamless integration of adjacent blocks through appearance alignment [S3].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A set of training images with camera poses for a large-scale scene.
-*   **Output:** A collection of local NeRF models $\{\mathcal{M}_k\}_{k=1}^K$, one for each block $V_k$, and a global scene structure defining the partition.
+- **Inputs:** A large-scale scene dataset (images, poses, intrinsics); a predefined or learned spatial partitioning of the 3D volume into $K$ non-overlapping blocks $\{V_k\}_{k=1}^K$.
+- **Outputs:** $K$ independent NeRF models $\{\mathcal{M}_k\}_{k=1}^K$, where each $\mathcal{M}_k$ maps 3D coordinates and viewing directions to density $\sigma$ and color $\mathbf{c}$.
 
 **Data Structures:**
-*   **Scene Partition:** The 3D volume $\mathcal{V}$ is divided into $K$ non-overlapping sub-volumes (blocks) $\{V_k\}_{k=1}^K$. The partition can be static (e.g., grid-based) or learned [S1].
-*   **Local Model $\mathcal{M}_k$:** A standard NeRF MLP architecture (typically two MLPs: one for density $\sigma$ and one for color $\mathbf{c}$) trained exclusively on data relevant to block $V_k$ [S1, S3].
-*   **Training Data Assignment:** For each training image, rays are cast. A pixel is assigned to the training set of block $V_k$ if the corresponding ray intersects $V_k$ [S1, S3].
+Each block $k$ maintains a standard NeRF MLP architecture. The network takes a 3D position $\mathbf{x}$ and viewing direction $\mathbf{d}$ as input.
+- **Position Encoding:** Standard positional encoding is applied to $\mathbf{x}$ and $\mathbf{d}$ [S1].
+- **MLP Layers:** The encoded vectors are passed through fully connected layers to predict $\sigma$ and $\mathbf{c}$ [S1, S3].
+- **Partition Assignment:** A ray $\mathbf{r}$ is intersected with the block boundaries. Samples $\mathbf{x}_i$ along the ray are queried from the specific submodule $\mathcal{M}_k$ such that $\mathbf{x}_i \in V_k$ [S1, S3].
 
-**Algorithm Steps:**
-1.  **Partitioning:** Divide the scene volume $\mathcal{V}$ into $K$ blocks $\{V_k\}$. This division can be learned to optimize efficiency [S1].
-2.  **Data Assignment:** Assign training pixels to blocks based on ray intersection visibility [S1, S3].
-3.  **Local Training:** Train each local model $\mathcal{M}_k$ independently using only the assigned training data [S3].
-4.  **Appearance Alignment:** Apply a program/loss to align the appearance (color/density) between adjacent NeRFs to ensure seamless integration at boundaries [S3].
-5.  **Rendering:** For a query ray $\mathbf{r}$:
-    *   Intersect $\mathbf{r}$ with all blocks $V_k$ to get segments $\{seg_k\}$.
-    *   Sort segments by distance from the ray origin.
-    *   Compute volume rendering using the global accumulated transmittance $T$, querying $\mathcal{M}_k$ for samples within $seg_k$ [S1, S3].
+**Training Procedure:**
+1. **Partitioning:** The scene volume is divided into blocks. The division can be static or learned [S1].
+2. **Data Assignment:** Training data (pixels/rays) is assigned to a submodule $\mathcal{M}_k$ if the corresponding ray intersects the block $V_k$ [S1, S3].
+3. **Parallel Training:** Submodules are trained independently and in parallel using their assigned data partitions [S1, S3].
+4. **Appearance Alignment:** A program is designed to align the appearance between adjacent NeRFs to ensure seamless integration [S3]. This step addresses discontinuities at block boundaries.
 
-**Rendering Formula:**
-$$
-T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)
-$$
+**Rendering:**
+For a query ray $\mathbf{r}$, the standard volumetric rendering integral is computed, accumulating global transmittance $T$ across all partitions:
 $$
 C(\mathbf{r}) = \sum_{i} T_i \left( 1 - \exp(-\sigma_i \delta_i) \right) \mathbf{c}_i
 $$
-where $\sigma_i, \mathbf{c}_i$ are obtained by querying the local model $\mathcal{M}_k$ corresponding to the segment containing sample point $\mathbf{x}_i$ [S1, S3].
-
-**Parameters:**
-*   $K$: Number of blocks. Not given in the sources.
-*   Block Size: Not given in the sources.
-
-**Edge Cases and Pitfalls:**
-*   **Boundary Artifacts:** Discontinuities in density or color at block boundaries if appearance alignment is not applied [S3].
-*   **Precision:** Standard NeRF precision issues apply; feature encoding may be used to increase efficiency and handle varying levels of detail [S1].
+where $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ [S1, S3]. The sample $\sigma_i$ and $\mathbf{c}_i$ are obtained from the block $\mathcal{M}_k$ containing $\mathbf{x}_i$.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def train_blocknerf(images, poses, num_blocks):
-    # 1. Partition scene into K blocks
-    blocks = partition_scene(num_blocks)
-    
-    # 2. Assign training data to blocks
-    training_data = {}
-    for k in range(num_blocks):
-        training_data[k] = []
-        
-    for img, pose in zip(images, poses):
-        rays = cast_rays(pose)
-        for i, ray in enumerate(rays):
-            # Find intersected blocks
-            intersected_blocks = find_intersected_blocks(ray, blocks)
-            for k in intersected_blocks:
-                training_data[k].append((ray, img[i]))
-                
-    # 3. Train local models
-    models = {}
-    for k in range(num_blocks):
-        models[k] = train_neRF(training_data[k])
-        
-    # 4. Align appearances between adjacent blocks
-    align_appearances(models, blocks)
-    
-    return models
+# BlockNeRF Rendering and Training Logic
+# Note: Specific appearance alignment loss formulation is not detailed in sources [S1, S3].
+# Standard NeRF MLP structure is assumed for each block.
 
-def render_blocknerf(ray, models, blocks):
-    # 1. Find segments
-    segments = []
-    for k, block in enumerate(blocks):
-        seg = intersect_ray_block(ray, block)
-        if seg is not None:
-            segments.append((seg, k))
-            
-    # 2. Sort by distance
-    segments.sort(key=lambda x: x[0].start_distance)
+def query_block_neRF(block_id, x, d):
+    """
+    Query a specific block's MLP for density and color.
+    """
+    # Apply positional encoding to position and direction
+    x_enc = positional_encoding(x)
+    d_enc = positional_encoding(d)
     
-    # 3. Volume rendering
-    T = 1.0
-    color = [0.0, 0.0, 0.0]
-    for seg, k in segments:
-        # Sample points along segment
-        samples = sample_segment(seg)
-        for x in samples:
-            sigma, c = models[k](x)
-            alpha = 1.0 - exp(-sigma * seg.step_size)
-            weight = T * alpha
-            color += weight * c
-            T *= (1.0 - alpha)
-            
-    return color
+    # Pass through the MLP specific to block_id
+    # The MLP architecture is standard NeRF (MLP)
+    sigma, color = block_mlp[block_id](x_enc, d_enc)
+    return sigma, color
+
+def render_ray_blocknerf(ray, blocks, block_boundaries):
+    """
+    Render a ray by querying the appropriate block for each sample.
+    """
+    # Intersect ray with block boundaries to determine sequence of blocks
+    block_sequence = intersect_ray_with_blocks(ray, block_boundaries)
+    
+    total_transmittance = 1.0
+    accumulated_color = [0.0, 0.0, 0.0]
+    
+    # Iterate through samples along the ray
+    for sample in ray_samples:
+        x = sample.position
+        d = ray.direction
+        delta = sample.distance
+        
+        # Determine which block this sample belongs to
+        block_id = get_block_id(x, block_boundaries)
+        
+        # Query the specific block
+        sigma, color = query_block_neRF(block_id, x, d)
+        
+        # Standard volume rendering step
+        alpha = 1.0 - exp(-sigma * delta)
+        weight = total_transmittance * alpha
+        accumulated_color += weight * color
+        total_transmittance *= (1.0 - alpha)
+        
+    return accumulated_color
+
+def train_block_neRF(blocks, training_data, block_boundaries):
+    """
+    Train blocks in parallel.
+    """
+    # Assign data to blocks based on ray intersection
+    data_per_block = assign_data_to_blocks(training_data, block_boundaries)
+    
+    # Parallel training loop
+    for block_id in range(num_blocks):
+        # Train the specific block's MLP on its assigned data
+        # Loss is typically MSE between predicted and ground truth colors
+        train_single_block(blocks[block_id], data_per_block[block_id])
+        
+    # Post-training or joint optimization step for appearance alignment
+    # Note: Specific alignment algorithm details are not provided in sources [S3]
+    align_adjacent_blocks(blocks, block_boundaries)
 ```
 
-## Subtopics
+**Parameters:**
+- **Number of Blocks ($K$):** Not given in the sources.
+- **MLP Size:** Small MLPs are used for each block [S1]. Exact dimensions are not given.
+- **Feature Encoding:** Can be used to increase efficiency [S1]. Specific encoding schemes are not detailed.
 
-### MegaNeRF
-Also divides scenes into regions with MLPs but focuses on scalable construction for virtual fly-throughs. [MegaNeRF](8580-meganerf.md)
-
-### NeRFPlayer
-Uses a progressive partitioning strategy with 3D Gaussians. [NeRFPlayer](9440-nerfplayer.md)
-
-### Spatial Partitioning for Distributed NeRF
-Focuses on distributed learning for large scenes. [Spatial Partitioning for Distributed NeRF](10332-spatial-partitioning-for-distributed-nerf.md)
+**Edge Cases and Pitfalls:**
+- **Boundary Discontinuities:** Without appearance alignment, adjacent blocks may exhibit visible seams [S3].
+- **Precision:** Standard NeRF precision issues apply; large scenes may require careful handling of coordinate scales [S3].
 
 ## Operating characteristics
-*   **Time Complexity:** Rendering time is decoupled from scene size, scaling to arbitrarily large environments [S3]. Training is parallelizable across blocks.
-*   **Memory Complexity:** Each block uses a small MLP, reducing memory footprint per block compared to a single global NeRF [S1].
-*   **Strengths:** Solves large-scale city building complex rendering problems; handles multi-scale data from satellite to ground level [S3].
-*   **Limitations:** Requires careful alignment at boundaries; partitioning strategy impacts performance [S1, S3].
-*   **When to use:** Large-scale urban scenes or environments with varying levels of detail [S1, S3].
-*   **When not to use:** Small-scale scenes where a single NeRF suffices.
+- **Time Complexity:** Rendering time is decoupled from scene size, scaling to arbitrarily large environments [S3]. Training is parallelizable across blocks [S1, S3].
+- **Memory Complexity:** Memory usage scales with the number of blocks $K$ and the size of each MLP. Since each block uses a "small MLP," memory per block is low, but total memory is $K \times \text{MLP\_size}$ [S1, S3].
+- **Strengths:** Solves the problem of high-frequency information loss and slow training/inference in large scenes (e.g., cityscapes) [S3]. Enables data parallelism for large-scale training [S1].
+- **Limitations:** Requires careful partitioning and alignment to avoid seams [S3]. The "total-part-total" approach adds complexity to the training pipeline [S3].
+- **When to use:** Large-scale urban scenes or environments with wide camera distance spans [S3].
+- **When not to use:** Small-scale scenes where standard NeRF is sufficient.
 
 ## Background
-BlockNeRF was proposed by Tancik et al. in 2022 to address the challenges of rendering large-scale city buildings [S3]. It introduced a "total-part-total" approach, decomposing the scene into blocks for separate NeRF training [S3]. It is cited alongside Mega-NeRF as a foundational method for large-scale neural field representation [S1].
+BlockNeRF was proposed by Tancik et al. in 2022 to address the challenges of rendering large-scale city buildings [S3]. It was introduced at CVPR 2022 [S2, unofficial][S3]. The method was developed to handle the multi-scale data challenges from satellite views to ground-level images, where standard NeRF fails due to compromised performance and slow processing [S1, S3]. It is part of a broader trend of divide-and-conquer strategies for neural fields [S1].
 
 ## Sources
 [S1] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26

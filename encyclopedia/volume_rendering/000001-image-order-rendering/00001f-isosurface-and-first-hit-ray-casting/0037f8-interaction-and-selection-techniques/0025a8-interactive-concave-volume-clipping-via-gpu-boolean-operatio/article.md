@@ -25,8 +25,6 @@ The method implements both the volume rendering and the Boolean logic on the gra
 6.  **Color Selection:** Allow users to select from pre-defined color schemes or specify their own to clarify inner anatomical structures [S1, unofficial].
 
 **Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
 ```python
 # Pseudocode for a single ray cast with Boolean clipping
 # Note: Specific 1D conversion formulas are not provided in the source [S1, unofficial].

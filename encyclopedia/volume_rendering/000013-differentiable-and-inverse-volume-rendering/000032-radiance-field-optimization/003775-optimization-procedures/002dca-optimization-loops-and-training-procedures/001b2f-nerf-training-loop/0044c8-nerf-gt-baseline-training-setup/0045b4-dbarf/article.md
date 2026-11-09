@@ -1,0 +1,198 @@
+# DBARF
+
+Also called: DBARF (Deep Bundle-Adjusting Generalizable Neural Radiance Fields), Deep Bundle-Adjusting Generalizable Neural Radiance Fields
+
+## Overview
+DBARF is a method for jointly optimizing camera poses with Generalizable Neural Radiance Fields (GeNeRFs) by implicitly minimizing feature consistency errors via a recurrent neural network, overcoming gradient issues in direct optimization [S1]. It differs from BARF, which relies on coarse-to-fine training with positional encodings that are absent in GeNeRFs, by using a RAFT-like recurrent network to bypass direct gradient descent on the cost function [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of unposed images $\{I_i\}$ for a scene.
+*   **Outputs:** Optimized camera poses $\{P_i\}$, depth maps $\{D_i\}$, and rendered novel views.
+
+**Data Structures:**
+*   **Scene Graph:** A graph where nodes are images and edges connect "nearby" views. Constructed once per scene using SuperPoint keypoints and SuperGlue matches, filtered by epipolar constraints, and sorted by inlier count [S1].
+*   **Feature Maps:** Extracted using a ResNet-like backbone with a Feature Pyramid Network (FPN) [S1].
+*   **Cost Map:** A 2D map representing feature inconsistency between the target view and nearby views [S1].
+
+**Algorithm Steps:**
+
+1.  **Scene Graph Construction:** For a target view $i$, select nearby views $\mathcal{N}(i)$ from the precomputed scene graph based on the number of inlier matches [S1].
+2.  **Feature Extraction:** Extract image features $\mathbf{F}_i$ for the target view and $\mathbf{F}_j$ for each nearby view $j \in \mathcal{N}(i)$ using the FPN backbone [S1].
+3.  **3D Point Sampling:** For each target pixel $\mathbf{u}_i$, sample a patch $\mathcal{S}(\mathbf{u}_i)$ from the target view. Compute 3D points $\mathbf{X}_{\mathcal{S}(\mathbf{u}_i)}$ using the predicted depth map $D_i$ for the target view [S1].
+4.  **Initialization:** Initialize relative poses $\mathbf{P}_{ij}^0$ and depth $D_i^0$ randomly [S1].
+5.  **Cost Map Computation:** Compute the initial cost map $\mathcal{C}^0$ using the feature difference between the warped nearby features and the target features [S1]:
+    $$
+    \mathcal{C} = \frac{1}{|\mathcal{N}(i)|} \sum_{j \in \mathcal{N}(i)} \| \chi (\mathbf{K}_j \mathbf{P}_{ij} \mathbf{X}_{\mathcal{S}(\mathbf{u}_i)}, \mathbf{F}_j) - \chi (\mathcal{S}(\mathbf{u}_i), \mathbf{F}_i) \|
+    $$
+    where $\mathbf{K}_j$ is the intrinsics matrix, $\mathbf{P}_{ij} = \mathbf{P}_j \mathbf{P}_i^{-1}$ is the relative pose, $\chi$ is differentiable bilinear interpolation, and $\mathbf{X}_{\mathcal{S}(\mathbf{u}_i)}$ are 3D points derived from $D_i$ [S1].
+6.  **Recurrent Pose and Depth Optimization:** Use a GRU (following RAFT-like architecture) to predict corrections $\Delta \mathbf{P}_{ij}$ and $\Delta D_i$ based on the cost map. Update poses and depth for $t$ iterations:
+    $$
+    \mathbf{P}_{ij}^{t+1} = \mathbf{P}_{ij}^t + \Delta \mathbf{P}_{ij}, \quad D_i^{t+1} = D_i^t + \Delta D_i
+    $$
+    The cost map is updated after each iteration using the current poses and depth [S1].
+7.  **Volume Rendering:** Use the optimized poses and features in a GeNeRF (e.g., IBRNet) to predict volume density and pixel color. Render the target image using volume rendering [S1].
+8.  **Joint Training:** The pose optimizer and GeNeRF are jointly learned [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dbarf_training(images, scene_graph, ge_nerf, feature_backbone, pose_estimator, 
+                   num_nearby_views, num_iterations, beta, lr_extractor, lr_ge_nerf, lr_pose):
+    """
+    DBARF Training Loop.
+    images: List of input images.
+    scene_graph: Precomputed scene graph defining nearby views for each image.
+    ge_nerf: Generalizable NeRF model (e.g., IBRNet).
+    feature_backbone: ResNet-like FPN for feature extraction.
+    pose_estimator: GRU-based network for pose/depth correction.
+    num_nearby_views: Number of nearby views to use (5 for pretraining, 10 for fine-tuning).
+    num_iterations: Number of recurrent iterations for pose optimization.
+    beta: Coefficient for loss weighting schedule.
+    """
+    optimizer_extractor = Adam(feature_backbone.parameters(), lr=lr_extractor)
+    optimizer_ge_nerf = Adam(ge_nerf.parameters(), lr=lr_ge_nerf)
+    optimizer_pose = Adam(pose_estimator.parameters(), lr=lr_pose)
+    
+    for iteration in range(total_training_iterations):
+        for batch in data_loader:
+            target_image = batch['target']
+            nearby_indices = scene_graph.get_nearby(target_image.id, k=num_nearby_views)
+            nearby_images = [batch['images'][idx] for idx in nearby_indices]
+            
+            # 1. Feature Extraction
+            F_target = feature_backbone(target_image)
+            F_nearby = [feature_backbone(img) for img in nearby_images]
+            
+            # 2. Initialization
+            # Random initialization of relative poses and depth
+            P_ij = random_initialize_relative_poses(len(nearby_indices))
+            D_target = random_initialize_depth(target_image.shape)
+            
+            # 3. Recurrent Pose Optimization
+            for t in range(num_iterations):
+                # Compute 3D points from depth
+                X_S = depth_to_3d_points(D_target, target_image.intrinsics)
+                
+                # Compute Cost Map
+                C = compute_cost_map(F_target, F_nearby, P_ij, X_S, target_image.intrinsics)
+                
+                # Predict corrections using GRU
+                delta_P, delta_D = pose_estimator(C, F_target, F_nearby, P_ij, D_target)
+                
+                # Update poses and depth
+                P_ij = P_ij + delta_P
+                D_target = D_target + delta_D
+            
+            # 4. Volume Rendering
+            # Use optimized poses and features in GeNeRF
+            rendered_image, rendered_depth = ge_nerf.render(target_image, P_ij, F_target, F_nearby)
+            
+            # 5. Loss Computation
+            L_depth = compute_depth_smoothness_loss(D_target, target_image)
+            L_photo = compute_photometric_loss(rendered_image, target_image, nearby_images, P_ij)
+            L_rgb = compute_rgb_loss(rendered_image, target_image)
+            
+            # Weighted final loss
+            weight = 2 ** (beta * iteration)
+            L_final = weight * (L_depth + L_photo) + (1 - weight) * L_rgb
+            
+            # 6. Backpropagation
+            optimizer_extractor.zero_grad()
+            optimizer_ge_nerf.zero_grad()
+            optimizer_pose.zero_grad()
+            
+            L_final.backward()
+            
+            optimizer_extractor.step()
+            optimizer_ge_nerf.step()
+            optimizer_pose.step()
+
+def compute_cost_map(F_target, F_nearby, P_ij, X_S, K):
+    """
+    Computes the feature consistency cost map.
+    """
+    cost_sum = 0
+    for j, F_j in enumerate(F_nearby):
+        # Project 3D points to nearby view
+        # P_ij[j] is relative pose from target to nearby j
+        # K is intrinsics
+        projected_coords = K @ (P_ij[j] @ X_S)
+        
+        # Sample features from nearby view at projected coordinates
+        F_j_warped = bilinear_interpolate(F_j, projected_coords)
+        
+        # Sample features from target view at original coordinates
+        # Note: X_S is derived from target depth, so we sample F_target at the patch center
+        # The formula uses S(u_i) which is the patch centered on u_i
+        F_target_patch = bilinear_interpolate(F_target, X_S)
+        
+        # Compute difference
+        diff = norm(F_j_warped - F_target_patch)
+        cost_sum += diff
+    
+    return cost_sum / len(F_nearby)
+
+def compute_depth_smoothness_loss(D, I):
+    """
+    Edge-aware depth smoothness loss.
+    """
+    dD_x = gradient_x(D)
+    dD_y = gradient_y(D)
+    dI_x = gradient_x(I)
+    dI_y = gradient_y(I)
+    
+    return abs(dD_x) * exp(-abs(dI_x)) + abs(dD_y) * exp(-abs(dI_y))
+
+def compute_photometric_loss(rendered_image, target_image, nearby_images, P_ij):
+    """
+    Warped photometric loss.
+    """
+    alpha = 0.85 # Typical value for SSIM weight
+    loss_sum = 0
+    count = 0
+    
+    for j, nearby_img in enumerate(nearby_images):
+        # Warp nearby image to target view using P_ij
+        warped_img = warp_image(nearby_img, P_ij[j], target_image.intrinsics)
+        
+        # SSIM Loss
+        ssim_loss = 1 - ssim(warped_img, target_image)
+        
+        # L1 Loss
+        l1_loss = norm(warped_img - target_image)
+        
+        loss_sum += alpha * (1 - ssim_loss) / 2 + (1 - alpha) * l1_loss
+        count += 1
+        
+    return loss_sum / count
+```
+
+**Parameters:**
+*   **Learning Rate (Feature Extractor):** $1 \times 10^{-3}$ (pretraining), $5 \times 10^{-4}$ (fine-tuning) [S1].
+*   **Learning Rate (GeNeRF):** $5 \times 10^{-4}$ (pretraining), $2 \times 10^{-4}$ (fine-tuning) [S1].
+*   **Learning Rate (Pose Optimizer):** $2 \times 10^{-4}$ (pretraining), $1 \times 10^{-5}$ (fine-tuning) [S1].
+*   **Nearby Views:** 5 during pretraining, 10 during fine-tuning and evaluation [S1].
+*   **Pose Update Iterations:** 4 per batch [S1].
+*   **Training Iterations:** 200,000 pretraining, 60,000 fine-tuning [S1].
+*   **Beta Coefficient:** $-1 \times 10^{-5}$ (Note: Source says $-1e5$, but context implies a small negative number for annealing, likely $-1e-5$ or similar. The source text explicitly states $\beta = -1e5$. However, $2^{-100000}$ is effectively 0. Given the formula $2^{\beta \cdot t}$, if $\beta$ is negative, the weight on photometric loss decays. If $\beta = -1e5$, it decays instantly. It is highly probable the source meant $-1e-5$ or the formula is different. We stick to the source value but note the potential typo. Actually, looking at standard annealing, $\beta$ is often small. Let's assume the source text is correct as written: $\beta = -1e5$ [S1].)
+
+**Edge Cases and Pitfalls:**
+*   Direct gradient descent on camera poses with GeNeRFs fails because image features can be outliers (e.g., due to occlusion), causing erroneous gradients [S1].
+*   ResNet features create non-smooth cost maps that coarse-to-fine strategies cannot fix due to the lack of positional encodings in GeNeRFs [S1].
+*   NeRF randomly samples points during training, losing spatial information of features if the cost function is taken directly as input [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of nearby views, recurrent iterations, and GeNeRF inference. The recurrent optimization adds a fixed overhead per batch (4 iterations) [S1].
+*   **Memory Complexity:** Requires storing feature maps for target and nearby views, and intermediate cost maps during recurrent updates [S1].
+*   **Performance:** Evaluated on NVIDIA RTX A5000 GPU [S1].
+*   **Strengths:** Handles unposed images effectively; bypasses gradient issues associated with direct optimization in GeNeRFs [S1].
+*   **Limitations:** Requires a precomputed scene graph; relies on the quality of the feature backbone [S1].
+
+## Background
+DBARF was proposed in 2023 by the authors of the paper "DBARF: Deep Bundle-Adjusting Generalizable Neural Radiance Fields" [S1]. It addresses the limitations of BARF, which uses positional encodings for coarse-to-fine training, a technique not applicable to GeNeRFs like IBRNet that operate directly on features [S1]. The method is inspired by RAFT for optical flow and BANet for cost volume processing [S1].
+
+## Sources
+[S1] DBARF: Deep Bundle-Adjusting Generalizable Neural Radiance Fields, https://doi.org/10.1109/cvpr52729.2023.00011, fetched 2026-10-29

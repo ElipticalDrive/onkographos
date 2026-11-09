@@ -47,7 +47,7 @@ def scale_sdf_uniform(sdf_func, point, scale_factor):
     
     Args:
         sdf_func: A function that takes a point and returns the signed distance.
-        point: The query point in world space (vector3).
+        point: The query point in world space (tuple or list of 3 floats).
         scale_factor: The uniform scaling factor (scalar > 0).
         
     Returns:
@@ -56,8 +56,8 @@ def scale_sdf_uniform(sdf_func, point, scale_factor):
     if scale_factor == 0:
         raise ValueError("Scaling factor must be non-zero.")
         
-    # Step 1: Inverse transform point
-    scaled_point = point / scale_factor
+    # Step 1: Inverse transform point (component-wise division)
+    scaled_point = (point[0] / scale_factor, point[1] / scale_factor, point[2] / scale_factor)
     
     # Step 2: Evaluate base SDF
     raw_distance = sdf_func(scaled_point)
@@ -74,12 +74,8 @@ def scale_sdf_uniform(sdf_func, point, scale_factor):
 Non-uniform scaling of Signed Distance Fields (SDFs) is a technique to transform an SDF primitive by scaling its axes by different factors, ensuring the ray marching algorithm does not overestimate the distance to the surface. Unlike uniform scaling, which allows for exact distance compensation, non-uniform scaling distorts distances anisotropically; this method uses the minimum scaling factor as a conservative correction multiplier to guarantee distance underestimation, which is safe for ray marching convergence.
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
 - **Strengths:** Exact distance preservation prevents overestimation, which would cause the ray marching algorithm to step past the surface and miss the object [S1, unofficial][S3, unofficial].
 - **Limitations:** Only applicable to uniform scaling. Non-uniform scaling requires different techniques [S1, unofficial].
-- **When to use:** Not given in the sources.
-- **When not to use:** Not given in the sources.
 
 ## Background
 The technique applies the inverse transformation to the query point before evaluating the base SDF, then scales the returned distance to compensate for non-rigid distortion [S1, unofficial][S3, unofficial].

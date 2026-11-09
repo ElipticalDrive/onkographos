@@ -1,0 +1,306 @@
+--- v004.md
++++ v005.md
+@@ -4,187 +4,151 @@
+ 
+ ## Overview
+-TetSplat Pre-processing and Data Layout is the final stage of the TetSplat pipeline, responsible for quantizing scalar field values, packing them into a compact binary format, and serializing the hierarchical Shell and Solid data structures to disk [S1, unofficial]. It solves the problem of efficiently storing large tetrahedral meshes with multiple scalar fields for interactive visualization, enabling fast top-down multi-resolution rendering via memory-mapped file access [S1, unofficial]. It differs from general volume compression by specifically targeting unbalanced octrees (Solid) and quadtrees (Shell) with embedded traversal pointers and hierarchical normal encoding, rather than using uniform grid quantization or standard wavelet transforms [S1, unofficial].
++This method defines the pre-processing pipeline for the TetSplat volume rendering system, specifically focusing on the quantization of scalar field values and the binary layout of hierarchical data structures (Shell and Solid) for efficient storage and traversal [S1, unofficial]. It solves the problem of efficiently encoding multi-field scalar data on unstructured tetrahedral meshes for real-time interactive visualization by mapping continuous values to discrete bitstrings and organizing them into unbalanced trees with embedded traversal pointers [S1, unofficial]. It is distinguished from general quantization methods by its specific integration into a hierarchical tetrahedral mesh representation (Shell/Solid split) and its use of fixed-size bit-packing for field values combined with hierarchical normal encoding for surface boundaries [S1, unofficial].
+ 
+ ## How it works
++**Inputs and Outputs:**
++*   **Input:** A tetrahedral mesh partitioned across multiple CPU nodes, containing multiple scalar field values per element.
++*   **Output:** A single binary data stream flushed to the filesystem, containing compressed hierarchical data structures for the Shell (surface) and Solid (volume) in breadth-first order.
+ 
+-### Inputs and Outputs
+-**Inputs:**
+-*   Partitioned tetrahedral mesh fragments (Shell and Solid components) [S1, unofficial].
+-*   Scalar field values associated with tetrahedra [S1, unofficial].
+-*   Normal vectors for Shell triangles [S1, unofficial].
++**Data Structures and Layout:**
++The data is organized into two primary hierarchical structures: the **Solid** (an unbalanced octree) and the **Shell** (an unbalanced quadtree).
+ 
+-**Outputs:**
+-*   A single binary data stream per mesh partition, containing the serialized Shell and Solid hierarchical structures [S1, unofficial].
++1.  **Solid Node Layout:**
++    *   **Base Size:** 6 bytes.
++    *   **Content:** Contains two scalar field values packed into a binary bitstring.
++    *   **Field Value Encoding:** Each field value is quantized to 15 bits. The 6-byte base layout accommodates two field values ($2 \times 15 = 30$ bits) plus overhead/alignment.
++    *   **Additional Fields:** Each additional field value adds 2 bytes (16 bits) to the bitstring.
++    *   **Pointer:** For unbalanced trees, a 4-byte integer pointer is inserted for each group of parents to the first node of their group of children to enable fast traversal [S1, unofficial].
+ 
+-### Data Structures and Layout
++2.  **Shell Node Layout:**
++    *   **Base Size:** 8 bytes (6 bytes base + 2 bytes extra).
++    *   **Content:** Inherits the field value packing of the Solid node.
++    *   **Normal Encoding:** The extra 2 bytes hierarchically encode the normal vector (14 bits) and the width of the normal cone (2 bits) [S1, unofficial].
++    *   **Pointer:** Includes the same 4-byte integer pointer structure as the Solid for unbalanced tree traversal [S1, unofficial].
+ 
+-#### Solid Node Layout
+-The Solid structure uses an unbalanced octree. Each node contains:
+-*   **Field Data:** A bitstring containing quantized scalar field values.
+-    *   Base size: 6 bytes (48 bits) for two field values.
+-    *   Expansion: Each additional field value adds 2 bytes (16 bits) to the bitstring [S1, unofficial].
+-*   **Traversal Pointers:** For unbalanced trees, a 4-byte integer pointer is inserted for each group of parents to the first node of their group of children [S1, unofficial].
++**Parameters:**
++*   **Quantization Precision:** 15 bits per scalar field value. This was found sufficient to represent all relevant field values for the studied datasets [S1, unofficial].
++*   **Pointer Size:** 4 bytes (32-bit integer) for tree traversal pointers [S1, unofficial].
+ 
+-#### Shell Node Layout
+-The Shell structure uses an unbalanced quadtree. Each node contains:
+-*   **Field Data:** Same bitstring layout as Solid (6 bytes base + 2 bytes per additional field) [S1, unofficial].
+-*   **Normal Encoding:** An extra 2 bytes (16 bits) hierarchically encoding:
+-    *   Normal vector: 14 bits [S1, unofficial].
+-    *   Width of normal cone: 2 bits [S1, unofficial].
+-*   **Traversal Pointers:** Same 4-byte integer pointer mechanism as Solid [S1, unofficial].
++**Numbered Steps:**
++1.  **Normalization:** Normalize each scalar field value to the range $[0, 1]$ [S1, unofficial].
++2.  **Quantization:** Quantize the normalized values using a lookup table to discrete levels [S1, unofficial].
++3.  **Bitstring Packing:** Pack the quantized values into a binary bitstring. The first two values occupy the base 6-byte layout; subsequent values are appended in 2-byte chunks [S1, unofficial].
++4.  **Parallel Pre-processing:** Partition the tetrahedral mesh onto multiple CPU nodes. Each node runs its own pre-processing on its mesh fragment [S1, unofficial].
++5.  **Cleanup and Boundary Update:** A cleanup process trims triangles from the Shell that are shared between fragments and adds them to the Solid. The boundary label assignment to tetrahedra and triangles in the Solid is updated accordingly [S1, unofficial].
++6.  **Tree Construction:** Construct the unbalanced octree (Solid) and quadtree (Shell). Insert 4-byte integer pointers from parent groups to the first child node in each group to support fast traversal [S1, unofficial].
++7.  **File Output:** Flush the compressed hierarchical data structures to the filesystem as a single binary data stream in breadth-first order [S1, unofficial].
+ 
+-### Parameters
+-*   **Quantization Precision:** 15 bits per scalar field value. This was found sufficient to represent all relevant field values for the studied datasets [S1, unofficial].
+-*   **Normalization:** Scalar field values are normalized to the range $[0, 1]$ before quantization [S1, unofficial].
+-*   **Lookup Table:** Quantization is performed using a lookup table [S1, unofficial].
+-
+-### Steps
+-
+-1.  **Parallel Partitioning:** Partition the tetrahedral mesh onto multiple CPU nodes. Each node runs its own pre-processing on its fragment [S1, unofficial].
+-2.  **Cleanup and Boundary Update:**
+-    *   Trim shared triangles from the Shell components of adjacent fragments.
+-    *   Add these trimmed triangles to the Solid components [S1, unofficial].
+-    *   Update the boundary label assignment for tetrahedra and triangles in the Solid [S1, unofficial].
+-3.  **Normalization and Quantization:**
+-    *   Normalize each scalar field value to $[0, 1]$.
+-    *   Quantize the normalized values using a lookup table with 15-bit precision [S1, unofficial].
+-4.  **Bitstring Packing:**
+-    *   Pack the quantized field values into a bitstring.
+-    *   Start with a 6-byte block for the first two field values.
+-    *   Append 2-byte blocks for each subsequent field value [S1, unofficial].
+-5.  **Normal Encoding (Shell only):**
+-    *   Encode the normal vector (14 bits) and normal cone width (2 bits) into an additional 2-byte block for each Shell node [S1, unofficial].
+-6.  **Pointer Insertion:**
+-    *   For unbalanced Shell (quadtree) and Solid (octree) nodes, insert a 4-byte integer pointer for each group of parents to the first node of their group of children to enable fast traversal [S1, unofficial].
+-7.  **Serialization:**
+-    *   Flush the compressed hierarchical data structures to the filesystem as a single binary data stream [S1, unofficial].
+-    *   Save trees in breadth-first order to facilitate fast top-down multi-resolution rendering [S1, unofficial].
+-
+-### Pseudocode
+-
++**Pseudocode:**
+ ```python
+-def preprocess_tetsplat(mesh_fragment, scalar_fields, num_fields):
++def preprocess_tetsplat(mesh, scalar_fields, num_fields):
+     """
+-    Pre-processes a partitioned tetrahedral mesh fragment for TetSplat.
++    Pre-processes a tetrahedral mesh for TetSplat rendering.
+     
+     Args:
+-        mesh_fragment: Tuple of (shell_triangles, solid_tetrahedra)
+-        scalar_fields: List of scalar field arrays, one per field
+-        num_fields: Number of scalar fields to quantize (default len(scalar_fields))
++        mesh: Tetrahedral mesh data structure.
++        scalar_fields: List of scalar field arrays, one per field.
++        num_fields: Number of scalar fields to quantize.
+         
+     Returns:
+-        binary_stream: Single binary data stream for the fragment
++        binary_stream: Single binary data stream for Shell and Solid.
+     """
+-    # Step 1-2: Cleanup and Boundary Update (Handled by orchestration layer)
+-    # Trim shared triangles from Shell, add to Solid, update boundary labels.
+-    # [G] Implementation detail: This requires communication between nodes 
+-    # to identify shared boundaries before local pre-processing.
++    # Step 1-3: Quantization and Packing
++    # Normalize and quantize each field value to 15 bits
++    quantized_fields = []
++    for field in scalar_fields:
++        normalized = normalize_to_0_1(field)
++        quantized = quantize_with_lookup_table(normalized, bits=15)
++        quantized_fields.append(quantized)
++        
++    # Pack into bitstring
++    # Base 6 bytes for first two fields
++    bitstring = pack_fields(quantized_fields[0], quantized_fields[1], bits_per_field=15)
+     
+-    # Step 3: Normalization and Quantization
+-    # Normalize scalar fields to [0, 1]
+-    normalized_fields = []
+-    for field in scalar_fields[:num_fields]:
+-        min_val = min(field)
+-        max_val = max(field)
+-        if max_val == min_val:
+-            normalized = [0.5] * len(field) # [G] Handle constant fields
+-        else:
+-            normalized = [(v - min_val) / (max_val - min_val) for v in field]
+-        normalized_fields.append(normalized)
++    # Append additional fields in 2-byte chunks
++    for i in range(2, num_fields):
++        bitstring += pack_fields(quantized_fields[i], bits_per_field=15)
+         
+-    # Quantize using lookup table (15 bits)
+-    # [G] The lookup table maps [0,1] to 15-bit integers. 
+-    # Assuming a standard uniform or perceptual mapping.
+-    quantized_bits = []
+-    for norm_val in normalized_fields:
+-        # Map [0,1] to 15-bit integer [0, 32767]
+-        int_val = int(norm_val * 32767)
+-        int_val = max(0, min(32767, int_val))
+-        quantized_bits.append(int_val)
++    # Step 4-5: Parallel Pre-processing and Cleanup
++    # Partition mesh and process fragments in parallel
++    fragments = partition_mesh(mesh)
++    processed_fragments = []
++    for fragment in fragments:
++        # Run pre-processing on fragment
++        shell_nodes, solid_nodes = process_fragment(fragment, bitstring)
+         
+-    # Step 4: Bitstring Packing
+-    # Base 6 bytes (48 bits) for two field values
+-    # Each additional field adds 2 bytes (16 bits)
+-    bitstring = bytearray()
++        # Cleanup: Trim shared triangles from Shell, add to Solid
++        shared_triangles = find_shared_triangles(shell_nodes)
++        for tri in shared_triangles:
++            shell_nodes.remove(tri)
++            solid_nodes.add(tri)
++            
++        # Update boundary labels in Solid
++        update_boundary_labels(solid_nodes)
++        
++        processed_fragments.append((shell_nodes, solid_nodes))
++        
++    # Step 6: Tree Construction with Pointers
++    shell_tree = build_unbalanced_quadtree(processed_fragments, node_type='shell')
++    solid_tree = build_unbalanced_octree(processed_fragments, node_type='solid')
+     
+-    # Pack first two fields into 6 bytes
+-    if len(quantized_bits) >= 2:
+-        # Pack 15 bits each, aligned to byte boundaries
+-        # Note: 15 bits * 2 = 30 bits. 6 bytes = 48 bits.
+-        # The source says "6 byte Solid node with two field values" and 
+-        # "2 extra bytes per field value". This implies a fixed block size 
+-        # per field after the first two, or a specific packing scheme.
+-        # We pack the first two into the first 6 bytes.
+-        bitstring.extend(pack_15bit(quantized_bits[0]))
+-        bitstring.extend(pack_15bit(quantized_bits[1]))
+-        # Pad remaining bits in the 6-byte block if necessary
+-        while len(bitstring) < 6:
+-            bitstring.append(0)
+-            
+-    # Pack additional fields (2 bytes each)
+-    for i in range(2, len(quantized_bits)):
+-        bitstring.extend(pack_16bit(quantized_bits[i]))
+-        
+-    # Step 5: Normal Encoding (Shell only)
+-    shell_normal_data = None
+-    if mesh_fragment.shell_triangles:
+-        # Encode normal vector (14 bits) and cone width (2 bits)
+-        # [G] Specific encoding of normal vector not detailed in source.
+-        # Assuming hierarchical encoding as per [20, 18].
+-        shell_normal_data = encode_normal_hierarchy(mesh_fragment.shell_triangles)
+-        
+-    # Step 6: Pointer Insertion
+-    # Insert 4-byte int pointer for each group of parents to first child
+-    solid_tree = build_octree(mesh_fragment.solid_tetrahedra)
+-    shell_tree = build_quadtree(mesh_fragment.shell_triangles)
++    # Insert 4-byte pointers for fast traversal
++    insert_traversal_pointers(shell_tree)
++    insert_traversal_pointers(solid_tree)
+     
+-    solid_with_pointers = insert_pointers(solid_tree)
+-    shell_with_pointers = insert_pointers(shell_tree)
++    # Step 7: File Output
++    binary_stream = flush_to_file(shell_tree, solid_tree, order='breadth_first')
+     
+-    # Step 7: Serialization
+-    # Save in breadth-first order
+-    solid_stream = serialize_bfs(solid_with_pointers, bitstring)
+-    shell_stream = serialize_bfs(shell_with_pointers, bitstring, shell_normal_data)
+-    
+-    return solid_stream + shell_stream
++    return binary_stream
+ 
+-def pack_15bit(value):
+-    """Pack a 15-bit integer into 2 bytes (16 bits), LSB first."""
+-    return value.to_bytes(2, byteorder='little')
++def normalize_to_0_1(values):
++    min_val = min(values)
++    max_val = max(values)
++    if max_val == min_val:
++        return [0.5] * len(values)
++    return [(v - min_val) / (max_val - min_val) for v in values]
+ 
+-def pack_16bit(value):
+-    """Pack a 16-bit integer into 2 bytes."""
+-    return value.to_bytes(2, byteorder='little')
++def quantize_with_lookup_table(values, bits=15):
++    # Implementation detail: Uses a pre-defined lookup table for 15-bit quantization
++    # [G] Assumes a standard uniform or perceptual lookup table is available
++    levels = 2 ** bits
++    quantized = [int(v * (levels - 1)) for v in values]
++    return quantized
+ 
+-def encode_normal_hierarchy(triangles):
+-    """
+-    Hierarchically encode normal vector (14 bits) and cone width (2 bits).
+-    [G] Specific algorithm not provided in source. Placeholder for hierarchical encoding.
+-    """
+-    # [G] This function would implement the hierarchical encoding described 
+-    # in references [20, 18].
+-    return bytearray(2) # Placeholder
++def pack_fields(field1, field2, bits_per_field=15):
++    # Pack two 15-bit values into 6 bytes (48 bits)
++    # [G] Exact bit-packing order (e.g., field1 in lower bits) is not specified
++    # Assuming field1 occupies lower 15 bits, field2 next 15 bits, rest padding
++    packed = (field1 & 0x7FFF) | ((field2 & 0x7FFF) << 15)
++    # Pad to 48 bits (6 bytes)
++    packed = packed & 0xFFFFFFFFFFFF
++    return packed.to_bytes(6, byteorder='little')
++
++def insert_traversal_pointers(tree):
++    # For unbalanced trees, insert 4-byte int pointer from parent group to first child
++    for node in tree.nodes:
++        if node.has_children():
++            # [G] Logic to identify "group of parents" and "first node of their group of children"
++            # is not fully specified. Assumes a standard parent-pointer insertion.
++            node.traversal_pointer = node.children[0].address
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Memory Overhead:** The relative memory overhead of 32-bit traversal pointers is much higher for the Shell than for the Solid. Although the Solid is typically larger, its average branching factor is twice as high, leading to fewer internal nodes and thus fewer pointers [S1, unofficial].
+-*   **Unbalanced Trees:** Pointers are only needed for unbalanced trees. Balanced trees do not require embedded pointers [S1, unofficial].
+-*   **Precision:** 15 bits is sufficient for the studied datasets, but may not be sufficient for all data types. Lower precision may lead to loss of relevant field information [S1, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Memory Overhead:** The relative memory overhead of 32-bit pointers is much less for the Solid than for the Shell. Although the Solid is typically several orders of magnitude larger than the Shell, its average branching factor is twice as high, leading to fewer internal nodes and thus fewer pointers [S1, unofficial].
++*   **Unbalanced Trees:** Since unbalanced trees are used, pointers are necessary for traversal. The 4-byte pointer is inserted for each group of parents to the first node of their group of children [S1, unofficial].
++*   **Shared Triangles:** Triangles shared between mesh fragments must be trimmed from the Shell and added to the Solid to avoid duplication and ensure correct boundary labeling [S1, unofficial].
+ 
+ ## Operating characteristics
+-
+-*   **Time Complexity:** Pre-processing is parallelizable across CPU nodes. The cleanup process requires synchronization to trim shared triangles [S1, unofficial].
+-*   **Memory Complexity:** The memory overhead of traversal pointers is significant for the Shell due to its lower branching factor. The Solid has lower relative overhead due to its higher branching factor [S1, unofficial].
+-*   **Performance:** Enables interactive visualization by allowing memory-mapped file access (`mmap`) to avoid loading the entire structure into physical memory [S1, unofficial].
+-*   **Strengths:** Compact storage, fast top-down rendering, parallelizable pre-processing [S1, unofficial].
+-*   **Limitations:** Requires unbalanced tree traversal logic, 15-bit precision may not be sufficient for all datasets [S1, unofficial].
++*   **Time Complexity:** Pre-processing is parallelizable across CPU nodes, with linear scaling relative to the number of mesh fragments [S1, unofficial].
++*   **Memory Complexity:** The Solid structure has lower relative pointer overhead due to its higher branching factor, despite its larger size [S1, unofficial].
++*   **Performance:** The breadth-first storage order facilitates fast top-down multi-resolution rendering [S1, unofficial].
++*   **Strengths:** Efficient storage via bit-packing, fast traversal with embedded pointers, and parallel pre-processing [S1, unofficial].
++*   **Limitations:** Fixed 15-bit quantization may not be sufficient for all datasets; unbalanced trees require pointer overhead [S1, unofficial].
++*   **When to Use:** Real-time interactive visualization of large tetrahedral meshes with multiple scalar fields [S1, unofficial].
++*   **When Not to Use:** When higher precision than 15 bits is required or when the mesh structure does not benefit from hierarchical decomposition [S1, unofficial].
+ 
+ ## Background
+-
+-*   **Origin:** TetSplat was introduced by Museth and Lombeyda in 2004 [S1, unofficial].
+-*   **History:** The method builds on QSplat's file layout strategy, adapting it for tetrahedral meshes with multiple scalar fields [S1, unofficial].
+-*   **Usage:** Used for interactive visualization and volume clipping of large tetrahedral meshes [S1, unofficial].
++The TetSplat method was introduced by Museth and Lombeyda in 2004 for real-time rendering and volume clipping of large tetrahedral meshes [S1, unofficial]. It builds on the QSplat file layout strategy, adapting it for unstructured tetrahedral data with multiple scalar fields [S1, unofficial]. The method is used in interactive visualization applications where efficient storage and fast traversal of complex volumetric data are critical [S1, unofficial].
+ 
+ ## Sources
+-
+ [S1] TetSplat: Real-time Rendering and Volume Clipping of Large ... - Museth, https://ken.museth.org/Publications_files/Museth-Lombeyda_VIS04.pdf, fetched 2026-10-28 (unofficial)

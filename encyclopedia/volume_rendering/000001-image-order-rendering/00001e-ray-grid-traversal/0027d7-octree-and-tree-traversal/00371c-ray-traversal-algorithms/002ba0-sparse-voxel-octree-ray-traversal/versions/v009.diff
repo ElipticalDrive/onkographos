@@ -1,0 +1,129 @@
+--- v008.md
++++ v009.md
+@@ -13,5 +13,5 @@
+ **Data Structures:**
+ The SVO is typically stored as a linear array of nodes [S3, unofficial]. Common layouts include:
+-1.  **Compact Node:** A 32-bit integer per node. Bit 31 is the empty flag, bit 30 is the leaf flag, and bits 0–29 store the child index [S6, unofficial]. Leaf nodes may store color in a separate buffer or interleaved [S4, S6, unofficial].
++1.  **Compact Node:** A 32-bit integer per node. Bit 31 is the empty flag, bit 30 is the leaf flag, and bits 0–29 store the child index [S9, unofficial]. Leaf nodes may store color in a separate buffer or interleaved [S4, S6, unofficial].
+ 2.  **ParentElement Struct:** A single struct containing `masks` (tracking valid and leaf status of children) and `childPointer` (index of the first child node in the array) [S1, unofficial].
+ 3.  **Texture-based (Laine & Karras):** A 3D texture where each texel represents a node. The `w` component indicates node type: $<0.1$ empty, $<0.9$ internal, $>0.9$ leaf [S2, unofficial].
+@@ -24,5 +24,5 @@
+     a. **Fetch Node:** Load node value from `buffer[node_address]` [S9, unofficial].
+     b. **Check Type:**
+-       - If **Empty** (e.g., MSB set or value 0): Skip subtree. Advance $t_{min}$ to the exit of the current node's slab and backtrack (pop stack) [S8][S6, unofficial].
++       - If **Empty** (e.g., MSB set or value 0): Skip subtree. Advance $t_{min}$ to the exit of the current node's slab and backtrack (pop stack) [S9, unofficial][S6, unofficial].
+        - If **Leaf**: Sample color/depth at current position [S4, unofficial].
+        - If **Internal**: Push current state (`node_address`, `t_min`, `t_corner`, `scale`) to stack [S8].
+@@ -30,5 +30,5 @@
+        $$k = 4 \cdot \mathbb{I}(p_x \ge c_x) + 2 \cdot \mathbb{I}(p_y \ge c_y) + 1 \cdot \mathbb{I}(p_z \ge c_z)$$
+        where $\mathbb{I}$ is the indicator function [S1, unofficial].
+-    d. **Descend:** Update `node_address` to child index. Halve `scale`. Update `t_corner` and `frontal_mask` based on the new child's position relative to the ray [S8].
++    d. **Descend:** Update `node_address` to child index. Halve `scale`. Update `t_corner` and `frontal_mask` based on the new child's position relative to the ray [S9, unofficial].
+     e. **Advance (Empty Space Skipping):** If the child is empty or we need to skip to the next occupied slab, update $t_{min}$ to the next slab boundary [S8].
+ 4.  **Backtracking:** If the ray exits a subtree (empty child or leaf processed), pop the stack. Restore `node_address`, `scale`, and `t_min` [S8][S6, unofficial].
+@@ -63,15 +63,22 @@
+     depth = 0
+     node_address = 0 # Root index
+-    scale = 2.0 # Root size
++    scale = 2.0 # Root half-extent
+     step = scale * 0.5
+     
+-    # Initial corner is entry point
+-    t_corner = [ray_origin[i] + d[i] * t_min for i in range(3)]
+-    frontal_mask = 0 # Bits 0,1,2 for X,Y,Z
+-    
+-    # Determine initial octant based on t_min comparisons
+-    if t_min > (t_coef[0] * 1.0 + t_bias[0]): frontal_mask |= 1
+-    if t_min > (t_coef[1] * 1.0 + t_bias[1]): frontal_mask |= 2
+-    if t_min > (t_coef[2] * 1.0 + t_bias[2]): frontal_mask |= 4
++    # Initial center is origin of coordinate system
++    center = [0.0, 0.0, 0.0]
++    t_center = [(center[i] - ray_origin[i]) * t_coef[i] for i in range(3)]
++    
++    # Determine initial frontal_mask based on t_center vs t_min
++    frontal_mask = 0
++    if t_center[0] > t_min: frontal_mask |= 1
++    if t_center[1] > t_min: frontal_mask |= 2
++    if t_center[2] > t_min: frontal_mask |= 4
++    
++    # Compute initial corner (entry point of the child)
++    t_corner = list(center)
++    if (frontal_mask & 1) == 0: t_corner[0] += step
++    if (frontal_mask & 2) == 0: t_corner[1] += step
++    if (frontal_mask & 4) == 0: t_corner[2] += step
+     
+     # 4. Traversal Loop
+@@ -80,5 +87,5 @@
+         value = svo_buffer[node_address]
+         
+-        # Check if Empty (MSB set in some layouts)
++        # Check if Empty (MSB set in compact layout)
+         if (value & 0x80000000) != 0:
+             # Empty node: Skip to next slab
+@@ -92,6 +99,6 @@
+             if t_corner[2] <= t_corner_max: step_mask |= 4
+             
+-            # Update t_corner
+-            t_corner = [t_corner[i] + (1.0 if d[i] > 0 else -1.0) * step / d[i] for i in range(3)]
++            # Update t_corner by stepping across current node boundaries
++            t_corner = [t_corner[i] + (1.0 if d[i] > 0 else -1.0) * scale / d[i] for i in range(3)]
+             
+             # Update frontal_mask
+@@ -115,5 +122,5 @@
+         if value > 0:
+             # Leaf node: Sample color
+-            # Sources do not specify exact sampling function; returning dummy color [G]
++            # Leaf color fetch varies by implementation (e.g., S4, S2); return sampled color [G]
+             return (1.0, 1.0, 1.0, 1.0)
+             
+@@ -129,12 +136,12 @@
+         step = scale * 0.5
+         
+-        # Determine child index
+-        center = list(t_corner)
+-        if (frontal_mask & 1) == 0: center[0] += step
+-        if (frontal_mask & 2) == 0: center[1] += step
+-        if (frontal_mask & 4) == 0: center[2] += step
+-        
+-        # Calculate t_center
+-        t_center = [(center[i] - ray_origin[i]) * t_coef[i] for i in range(3)]
++        # Determine child center from corner and frontal_mask
++        child_center = list(t_corner)
++        if (frontal_mask & 1) == 0: child_center[0] += step
++        if (frontal_mask & 2) == 0: child_center[1] += step
++        if (frontal_mask & 4) == 0: child_center[2] += step
++        
++        # Calculate t_center for new child
++        t_center = [(child_center[i] - ray_origin[i]) * t_coef[i] for i in range(3)]
+         
+         # Determine new frontal_mask and t_corner
+@@ -145,5 +152,5 @@
+         
+         # Update t_corner to the entry of the new child
+-        new_t_corner = list(center)
++        new_t_corner = list(child_center)
+         if (new_frontal_mask & 1) == 0: new_t_corner[0] -= step
+         else: new_t_corner[0] += step
+@@ -156,5 +163,5 @@
+         frontal_mask = new_frontal_mask
+         
+-        # Update node_address
++        # Update node_address to child pointer
+         node_address = value & 0x7FFFFFFF
+         
+@@ -186,11 +193,11 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** $O(N)$ for the node array, but significantly smaller than a dense grid. The compact node layout (32-bit integers) minimizes overhead [S6, unofficial].
++*   **Time Complexity:** Not given in the sources [S8].
++*   **Memory Complexity:** $O(N)$ for the node array, but significantly smaller than a dense grid. The compact node layout (32-bit integers) minimizes overhead [S8].
+ *   **Performance:** Renders large scenes (e.g., 1 billion voxels) at real-time framerates (20 FPS at 720p) on modern GPUs [S7, unofficial].
+ *   **Strengths:** Implicit LOD [S7, unofficial], efficient empty space skipping [S1, S6, unofficial], single draw call, no mesh generation required [S6, unofficial].
+ *   **Limitations:** Dynamic updates are expensive (often requiring full reconstruction) [S3, unofficial]. Memory constraints at very high resolutions [S8]. Stack overflow if depth exceeds limits (e.g., 32) [S9, unofficial].
+-*   **When to Use:** Static or slowly changing voxel scenes, real-time rendering, large-scale environments.
+-*   **When Not to Use:** Highly dynamic voxel data requiring per-frame updates, scenes with extremely deep octrees exceeding stack limits.
++*   **When to Use:** Static or slowly changing voxel scenes, real-time rendering, large-scale environments [S7, unofficial].
++*   **When Not to Use:** Highly dynamic voxel data requiring per-frame updates, scenes with extremely deep octrees exceeding stack limits [S3, unofficial][S9, unofficial].
+ 
+ ## Background

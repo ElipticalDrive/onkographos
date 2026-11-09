@@ -1,0 +1,168 @@
+# Triangular Matrix Data Redistribution
+
+Also called: Greedy Data Decomposition Algorithm, Greedy data redistribution, Range-based bucketing
+
+## Overview
+Triangular Matrix Data Redistribution is a deterministic greedy algorithm used to approximate the optimal data distribution for load balancing in parallel isosurface extraction [S1]. It addresses the NP-hard problem of minimizing workload differences among processors by categorizing volume data blocks into a triangular matrix of buckets based on their functional value ranges [S1]. Unlike [Fixed-Sized Buckets for Isosurface Extraction](1252-fixed-sized-buckets-for-isosurface-extraction.md), which sorts cells by intensity ranges into fixed-sized buckets, this method explicitly constructs a triangular matrix in the range space to handle blocks with varying spans, ensuring that blocks with similar range spans are distributed evenly across processors [S1].
+
+## How it works
+**Inputs:**
+- A set of $N$ volume data blocks.
+- Each block $b_i$ has a functional value range $[x_i, y_i]$ where $x_i$ is the minimum and $y_i$ is the maximum scalar value in the block.
+- The global dataset range $[V_{min}, V_{max}]$.
+- The number of processors $P$.
+- The number of segments $n$ for dividing the global range.
+- The bucket range interval size $a = (V_{max} - V_{min}) / n$.
+
+**Outputs:**
+- A mapping of each block to a specific processor $p_j$ ($0 \le j < P$).
+
+**Data Structures:**
+- **Triangular Matrix:** A 2D structure where each element $M[r, c]$ represents a bucket.
+  - $r$: The row index, corresponding to the start of the block's range.
+  - $c$: The column index, corresponding to the size (span) of the block's range.
+  - The matrix is "triangular" because for a valid block range $[x, y]$, the span $y-x$ is always non-negative, and the start index is bounded by the global minimum.
+- **Processor Lists:** Each processor maintains a list of blocks assigned to it.
+
+**Steps:**
+
+1. **Construct the Triangular Matrix:**
+   Divide the global function value range $[V_{min}, V_{max}]$ into $n$ segments: $[V_0, V_1], [V_1, V_2], \dots, [V_{n-1}, V_n]$, where $V_0 = V_{min}$ and $V_n = V_{max}$ [S1]. The bucket range interval size is $a = (V_{max} - V_{min}) / n$ [S1].
+
+2. **Assign Blocks to Buckets:**
+   For each block $b_i$ with range $[x_i, y_i]$, determine its matrix element $(r, c)$ [S1]:
+   $$ r = \lceil (x_i - V_{min}) / a \rceil $$
+   $$ c = \lceil (y_i - x_i) / a \rceil $$
+   The block is added to the list of blocks in matrix element $M[r, c]$ [S1]. Note: The source uses `min` in the formula, which corresponds to $V_{min}$ [S1].
+
+3. **Sort Blocks within Each Bucket:**
+   For each matrix element $e$ (i.e., each non-empty bucket $M[r, c]$):
+   - Every processor collects the blocks it holds that belong to element $e$.
+   - Each processor sorts its local collection of blocks for element $e$ in **decreasing order** of range size ($y_i - x_i$) [S1].
+
+4. **Round-Robin Assignment:**
+   For each matrix element $e$, distribute the sorted blocks to the $P$ processors in a round-robin fashion [S1].
+   Let the sorted list of blocks for element $e$ on processor $p_i$ be $(b_1, b_2, \dots, b_k)$ [S1].
+   The block $b_j$ (where $j$ is the 1-based index in the sorted list) is assigned to processor $p_{dest}$ where:
+   $$ dest = (i + j - 1) \pmod P $$
+   Here, $i$ is the index of the processor holding the block (0-based), and $j$ is the position in the sorted list (1-based) [S1]. This ensures that blocks with similar range spans are distributed evenly across all processors [S1].
+
+5. **Data Redistribution:**
+   Each processor collects all blocks it needs to send to other processors.
+   Transmits these blocks to the destination processors in rounds [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def triangular_matrix_redistribution(blocks, V_min, V_max, n, P):
+    """
+    blocks: List of tuples (block_id, x, y) where [x, y] is the functional range.
+    V_min: Global minimum value.
+    V_max: Global maximum value.
+    n: Number of segments.
+    P: Number of processors.
+    Returns: Dict mapping block_id to processor_id.
+    """
+    a = (V_max - V_min) / n
+    
+    # Step 1 & 2: Assign blocks to buckets
+    # Matrix element (r, c)
+    buckets = {} # Key: (r, c), Value: List of (block_id, x, y)
+    
+    for block_id, x, y in blocks:
+        # Calculate row index r
+        # Using ceil((x - V_min) / a). If x == V_min, r=0 (assuming 0-based indexing for buckets)
+        # Note: Source uses ceil. In integer arithmetic, ceil(a/b) = (a + b - 1) // b for positive integers.
+        # Here values are floats, so use math.ceil.
+        r = math.ceil((x - V_min) / a)
+        
+        # Calculate column index c (span)
+        span = y - x
+        c = math.ceil(span / a)
+        
+        if (r, c) not in buckets:
+            buckets[(r, c)] = []
+        buckets[(r, c)].append((block_id, x, y))
+        
+    # Step 3 & 4: Sort and Assign
+    processor_assignments = {} # block_id -> processor_id
+    
+    for (r, c), block_list in buckets.items():
+        # Sort by decreasing order of range size (y - x)
+        # If sizes are equal, order is not specified, so stable sort or arbitrary is fine.
+        block_list.sort(key=lambda b: b[2] - b[1], reverse=True)
+        
+        # Round-robin assignment
+        # The source describes a distributed scenario where each processor has a subset.
+        # For a centralized implementation (or if we assume all blocks are initially on one processor for distribution logic),
+        # we can simulate the round-robin.
+        # However, the source says: "Each processor initially has a collection... sorts... assigns to P processors".
+        # This implies a distributed sort and then a global round-robin across all processors for that bucket.
+        # To implement this from plain text, we assume we have the global list for the bucket.
+        
+        # The formula: b_j assigned to p_(i+j-1) mod P.
+        # This formula relies on 'i' being the processor that *originally* held the block.
+        # In a centralized redistribution phase, we need to know the original processor of each block.
+        # Let's assume blocks have an 'original_processor' field.
+        
+        # Re-fetch blocks with original processor info if not passed.
+        # For this pseudocode, let's assume blocks are passed with their original processor.
+        pass 
+
+    # Revised Pseudocode assuming blocks have 'orig_proc'
+    def redistribute(blocks_with_orig_proc, V_min, V_max, n, P):
+        a = (V_max - V_min) / n
+        buckets = {}
+        
+        for block_id, x, y, orig_proc in blocks_with_orig_proc:
+            r = math.ceil((x - V_min) / a)
+            span = y - x
+            c = math.ceil(span / a)
+            
+            if (r, c) not in buckets:
+                buckets[(r, c)] = []
+            buckets[(r, c)].append((block_id, x, y, orig_proc))
+            
+        assignments = {}
+        
+        for (r, c), block_list in buckets.items():
+            # Sort by decreasing range size
+            block_list.sort(key=lambda b: b[2] - b[1], reverse=True)
+            
+            for j, (block_id, x, y, orig_proc) in enumerate(block_list, start=1):
+                # j is 1-based index
+                # i is orig_proc (0-based)
+                dest_proc = (orig_proc + j - 1) % P
+                assignments[block_id] = dest_proc
+                
+        return assignments
+```
+
+**Parameters:**
+- $n$: Number of segments. Not given in the sources.
+- $a$: Bucket range interval size. Derived from $n$.
+- $P$: Number of processors.
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The use of `ceil` requires careful handling of floating-point precision. If $x$ is exactly $V_{min}$, $(x - V_{min})/a = 0$, and `ceil(0) = 0`. If $x$ is slightly less than $V_{min}$ due to error, it might map to a negative index. Guard against $x < V_{min}$ or $y > V_{max}$ [G].
+- **Empty Buckets:** Some matrix elements may be empty. The algorithm only processes non-empty elements [S1].
+- **Degenerate Input:** If a block has $x = y$ (zero span), $c = 0$. This is a valid bucket in the triangular matrix (the diagonal or edge depending on indexing) [S1].
+
+## Operating characteristics
+- **Time Complexity:** The dominant step is sorting the blocks within each bucket. If there are $N$ blocks and $B$ buckets, the complexity is roughly $O(N \log N)$ in the worst case (all blocks in one bucket) or $O(N)$ if buckets are small and sorting is fast. The redistribution step is $O(N)$ [S1].
+- **Memory Complexity:** $O(N)$ to store the blocks and the bucket structure [S1].
+- **Measured Performance:** Experimental results verify that the number of blocks loaded by each processor is approximately the same, ensuring good load balancing [S1].
+- **Strengths:** Deterministic, simple to implement, provides reasonably good load balancing for parallel isosurface extraction [S1].
+- **Limitations:** It is an approximation algorithm because finding the optimal distribution is NP-hard [S1]. It may not achieve perfect load balance in all cases.
+- **When to use:** When parallel isosurface extraction requires load balancing and the data blocks have varying functional ranges [S1].
+- **When not to use:** When exact optimal load balancing is required and computational resources allow for solving the NP-hard bin-packing problem [S1].
+
+## Background
+- **Origin:** The method was introduced in the paper "Scalable isosurface visualization of massive datasets on commodity off-the-shelf clusters" [S1].
+- **History:** It is part of a suite of data redistribution techniques for parallel and out-of-core isocontouring, including a randomized algorithm [S1].
+- **Usage:** Used in parallel isosurface extraction to balance the workload among processors [S1].
+
+## Sources
+[S1] Scalable isosurface visualization of massive datasets on commodity off-the-shelf clusters., https://doi.org/10.1016/j.jpdc.2008.07.006, fetched 2026-11-08

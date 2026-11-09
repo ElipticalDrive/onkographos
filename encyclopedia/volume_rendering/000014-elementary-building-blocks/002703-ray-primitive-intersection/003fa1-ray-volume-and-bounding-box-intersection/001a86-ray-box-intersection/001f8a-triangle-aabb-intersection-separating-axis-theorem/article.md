@@ -162,7 +162,7 @@ def triangle_aabb_overlap(v0, v1, v2, box_center, box_halfsize):
 ```
 
 **Parameters:**
-- None. The method is deterministic based on input geometry.
+- None.
 
 **Edge Cases and Pitfalls:**
 - **Degenerate Triangle:** If the triangle is degenerate (area zero), the normal $n$ will be zero. The plane test may fail or produce incorrect results. Guard against this by checking if $|n|$ is near zero [G].
@@ -186,22 +186,22 @@ An overlap test to determine if an axis-aligned box overlaps a triangle. For ful
 - The method is used in GPU execution, as seen in CUDA implementations [S1, unofficial]. The use of macros and avoiding vector allocations contributes to its speed [S1, unofficial][S6].
 
 **Strengths:**
-- Exact and robust (within floating-point limits).
-- No false positives.
-- Fast due to fixed number of tests.
+- Exact and robust (within floating-point limits) [G].
+- No false positives [G].
+- Fast due to fixed number of tests [G].
 - Suitable for GPU parallelization [S1, S5, unofficial][S6].
 
 **Limitations:**
-- Does not provide intersection points or depth information.
+- Does not provide intersection points or depth information [G].
 - Sensitive to degenerate triangles [G].
 
 **When to Use:**
-- Frustum culling.
-- Spatial partitioning (voxelization).
+- Frustum culling [S3, unofficial].
+- Spatial partitioning (voxelization) [S5, unofficial].
 - Collision detection where only overlap status is needed [S3, S5, unofficial].
 
 **When Not to Use:**
-- When precise intersection points are required (use [Ray-primitive intersection](769-ray-primitive-intersection.md) variants).
+- When precise intersection points are required (use [Ray-primitive intersection](769-ray-primitive-intersection.md) variants) [G].
 
 ## Background
 

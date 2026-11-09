@@ -1,0 +1,179 @@
+# Blocked Gather-GEMM-Scatter Sparse Convolution
+
+Also called: Shared memory blocked sparse convolution, SpConv v2 optimization
+
+## Overview
+Blocked Gather-GEMM-Scatter Sparse Convolution is an optimization for sparse convolution that minimizes wasted MAC operations and global memory traffic by blocking the gather-GEMM-scatter operation on contiguous subsequences of output indices from a VDB data structure, using shared memory for intermediate accumulation [S1]. It sets itself apart from standard sparse convolution by explicitly addressing the inefficiency of multiple streaming passes over input activations and suboptimal scattering to global memory, which are common pitfalls in straightforward gather-GEMM-scatter implementations [S1]. It improves upon [SpConv v2](9837-sparse-convolution.md) by leveraging the locality of the NanoVDB mapping to cluster geometric coordinates, thereby reducing global memory bandwidth pressure [S1].
+
+## How it works
+**Inputs:**
+- A minibatch of sparse voxel grids encoded in NanoVDB format, consisting of a `GridBatch` (containing `IndexGrid` leaf nodes) and a `JaggedTensor` (per-voxel features) [S1].
+- Convolution kernel weights.
+- Stencil offsets (typically 27 for a 3x3x3 neighborhood) [S1].
+
+**Outputs:**
+- Updated feature tensors for the active voxels in the output grid [S1].
+
+**Data Structures:**
+- **IndexGrid:** Maps active voxel coordinates to linear indices in the feature tensor. Indices are clustered geometrically [S1].
+- **Shared Memory Buffers:**
+  - `InputBuffers[27][N]`: Stores packed input feature vectors for each of the 27 stencil offsets. $N$ is the number of valid input indices for the current block, padded to the next multiple of 16.
+  - `OutputAccum[64][F]`: Temporary buffer in shared memory for accumulating output vectors for 64 output indices. $F$ is the feature length.
+  - `IndexPairs[27][N]`: Stores packed input/output index pairs linked by each stencil offset, padded to the next multiple of 16.
+
+**Parameters:**
+- **Block Size:** 64 output indices. This is the typical number of indices processed in a contiguous subsequence [S1].
+- **Stencil Offsets:** 27. The number of stencil offsets processed in the sparse convolution [S1].
+- **Padding Alignment:** Multiple of 16. Input/output index pairs are padded to this multiple to map to tensorcore-accelerated GEMM [S1].
+
+**Steps:**
+1. **Block Selection:** Select a contiguous subsequence of 64 output indices from the NanoVDB data structure. Due to the locality of the NanoVDB mapping, these indices correspond to highly clustered geometric coordinates from one or more `IndexGrid` leaf nodes [S1].
+2. **Index Pair Collection:** For each of the 27 stencil offsets, identify all input/output index pairs $(i, o)$ such that the output index $o$ is within the current block's range (0 to 63 relative to the block start). Pack these pairs contiguously in shared memory buffers `IndexPairs[offset]` [S1].
+3. **Padding:** Pad the packed collections of input/output index pairs in `IndexPairs` to the next multiple of 16. This ensures compatibility with tensorcore-accelerated GEMM operations. This padding is the only source of wasted MACs, limited to at most 15 MACs per block of 64 output indices (expected ~8 entries per 64 output indices) [S1].
+4. **Input Gathering:** For each stencil offset, gather the input feature vectors from global memory using the packed indices in `IndexPairs[offset]` and store them in `InputBuffers[offset]`. This benefits from locality across offsets [S1].
+5. **GEMM Computation:** Perform a GEMM operation for each stencil offset using `InputBuffers[offset]` and the kernel weights. The result is produced in packed format [S1].
+6. **Shared Memory Scattering:** Scatter the GEMM results purely in shared memory into the `OutputAccum` buffer, which stores all 64 output vectors. This avoids scattering to global memory during the accumulation phase [S1].
+7. **Global Memory Update:** After processing all 27 stencil offsets, sequentially copy the accumulated results from `OutputAccum` back to global memory at the corresponding output indices. This avoids the need for a scatter operation to global memory [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def blocked_gather_gemm_scatter_sparse_convolution(grid_batch, jagged_tensor, kernel_weights, stencil_offsets=27, block_size=64, padding_alignment=16):
+    """
+    Performs blocked gather-GEMM-scatter sparse convolution on NanoVDB data.
+    
+    Args:
+        grid_batch: GridBatch containing IndexGrid leaf nodes.
+        jagged_tensor: JaggedTensor encoding per-voxel features.
+        kernel_weights: Convolution kernel weights.
+        stencil_offsets: Number of stencil offsets (default 27).
+        block_size: Number of output indices per block (default 64).
+        padding_alignment: Padding multiple for tensorcore GEMM (default 16).
+        
+    Returns:
+        Updated JaggedTensor with convolved features.
+    """
+    # Initialize output JaggedTensor with zeros or copy from input if residual
+    output_jagged_tensor = JaggedTensor.zeros_like(jagged_tensor)
+    
+    # Iterate over each grid in the batch
+    for grid in grid_batch:
+        index_grid = grid.index_grid
+        features = jagged_tensor.features
+        
+        # Get all active output indices from the IndexGrid
+        all_output_indices = index_grid.get_active_indices()
+        
+        # Process indices in blocks of block_size
+        for block_start in range(0, len(all_output_indices), block_size):
+            block_end = min(block_start + block_size, len(all_output_indices))
+            block_output_indices = all_output_indices[block_start:block_end]
+            num_outputs = block_end - block_start
+            
+            # Initialize shared memory buffers
+            # InputBuffers[offset][padded_count][feature_dim]
+            # OutputAccum[block_size][feature_dim]
+            input_buffers = {}
+            output_accum = [[0.0] * features.shape[1] for _ in range(block_size)]
+            
+            # Step 2 & 3: Collect and pad index pairs for each stencil offset
+            for offset in range(stencil_offsets):
+                # Find input indices that contribute to this block's outputs via this offset
+                # An input index i contributes to output index o if o = i + offset
+                # We only care if o is in block_output_indices
+                input_indices_for_offset = []
+                output_indices_for_offset = []
+                
+                for local_out_idx, global_out_idx in enumerate(block_output_indices):
+                    # Calculate potential input index
+                    potential_input_idx = global_out_idx - offset
+                    # Check if potential_input_idx is active in the grid
+                    if index_grid.is_active(potential_input_idx):
+                        input_indices_for_offset.append(potential_input_idx)
+                        output_indices_for_offset.append(local_out_idx)
+                
+                # Pack index pairs
+                num_pairs = len(input_indices_for_offset)
+                padded_num_pairs = ((num_pairs + padding_alignment - 1) // padding_alignment) * padding_alignment
+                
+                # Store in shared memory structure (simulated here with lists)
+                input_buffers[offset] = {
+                    'input_indices': input_indices_for_offset + [-1] * (padded_num_pairs - num_pairs),
+                    'output_indices': output_indices_for_offset + [-1] * (padded_num_pairs - num_pairs),
+                    'padded_count': padded_num_pairs
+                }
+            
+            # Step 4: Gather input features from global memory
+            gathered_inputs = {}
+            for offset in range(stencil_offsets):
+                data = input_buffers[offset]
+                num_pairs = data['padded_count']
+                # Gather features for all input indices
+                # Features are stored in jagged_tensor.features
+                # Assuming jagged_tensor.features is indexed by global index
+                gathered_features = []
+                for i in range(num_pairs):
+                    idx = data['input_indices'][i]
+                    if idx != -1:
+                        gathered_features.append(features[idx])
+                    else:
+                        gathered_features.append([0.0] * features.shape[1]) # Pad with zeros
+                gathered_inputs[offset] = gathered_features
+            
+            # Step 5: Perform GEMM for each offset
+            # GEMM: Output = Input * Kernel
+            # Input shape: (padded_count, feature_dim)
+            # Kernel shape: (feature_dim, feature_dim) for pointwise, or (feature_dim, feature_dim) for spatial
+            # Assuming standard convolution where kernel is applied per offset
+            # For simplicity, assume kernel_weights[offset] is (feature_dim, feature_dim)
+            # If kernel is spatial, it would be (feature_dim, feature_dim, kernel_size)
+            # Here we assume a simplified case where we multiply gathered features by kernel
+            
+            for offset in range(stencil_offsets):
+                gathered = gathered_inputs[offset]
+                num_pairs = len(gathered)
+                kernel = kernel_weights[offset] # Shape: (feature_dim, feature_dim)
+                
+                # Perform matrix multiplication for each pair
+                for i in range(num_pairs):
+                    if gathered[i] != [0.0] * features.shape[1]: # Skip padding
+                        out_vec = [0.0] * features.shape[1]
+                        for f in range(features.shape[1]):
+                            for k in range(features.shape[1]):
+                                out_vec[f] += gathered[i][k] * kernel[k][f]
+                        
+                        # Step 6: Scatter to shared memory accumulation buffer
+                        out_idx = input_buffers[offset]['output_indices'][i]
+                        if out_idx != -1:
+                            for f in range(features.shape[1]):
+                                output_accum[out_idx][f] += out_vec[f]
+            
+            # Step 7: Copy accumulated results back to global memory
+            for local_out_idx, global_out_idx in enumerate(block_output_indices):
+                output_jagged_tensor.features[global_out_idx] = output_accum[local_out_idx]
+    
+    return output_jagged_tensor
+```
+
+**Edge Cases and Pitfalls:**
+- **Wasted MACs:** The padding to the next multiple of 16 introduces wasted MACs. However, this is limited to at most 15 MACs per block of 64 output indices, with an expected padding length of ~8 entries per 64 output indices [S1].
+- **Global Memory Traffic:** By scattering to shared memory and then copying sequentially to global memory, the method avoids the suboptimality of scattering results to global memory directly, which can cause bank conflicts and inefficient memory access patterns [S1].
+- **Multiple Streaming Passes:** The blocking strategy reduces the need for multiple independent streaming passes over input activations (one for each of the 27 stencil offsets) by packing and gathering data locally [S1].
+
+## Operating characteristics
+- **Time Complexity:** The method reduces the number of global memory accesses by blocking and using shared memory. The GEMM operation is accelerated by tensorcores due to padding alignment [S1].
+- **Memory Complexity:** Requires shared memory for input buffers, output accumulation, and index pairs. The size of shared memory depends on the block size (64) and feature length [S1].
+- **Measured Performance:** Benchmarks demonstrate a runtime that is approximately 25% faster than SpConv v2 for feature length 128 or higher on the SemanticKITTI single-scan point clouds [S1].
+- **Strengths:** Minimizes wasted MAC operations and global memory traffic. Leverages locality of NanoVDB mapping. Accelerated by tensorcores.
+- **Limitations:** Padding introduces some wasted MACs, though limited. Requires careful management of shared memory.
+- **When to Use:** Suitable for large-scale sparse voxel grids where global memory bandwidth is a bottleneck and tensorcores are available. Particularly effective for feature lengths 128 or higher [S1].
+- **When Not to Use:** For very small feature lengths or small block sizes where the overhead of blocking and shared memory management outweighs the benefits.
+
+## Background
+- **Origin:** This method is part of the fVDB deep learning framework for sparse, large-scale, and high-performance spatial intelligence [S1].
+- **Development:** It was developed to address the performance limitations of the traditional gather-GEMM-scatter paradigm in sparse convolution, specifically the inefficiencies caused by multiple streaming passes and suboptimal global memory scattering [S1].
+- **Usage:** Used in the fVDB framework for processing minibatches of sparse voxel grids, leveraging NanoVDB data structures for efficient memory access and computation [S1].
+
+## Sources
+[S1] fVDB: A Deep-Learning Framework for Sparse, Large-Scale, and High-Performance Spatial Intelligence, https://research.nvidia.com/labs/prl/publication/williams2024fvdb/, fetched 2026-10-30

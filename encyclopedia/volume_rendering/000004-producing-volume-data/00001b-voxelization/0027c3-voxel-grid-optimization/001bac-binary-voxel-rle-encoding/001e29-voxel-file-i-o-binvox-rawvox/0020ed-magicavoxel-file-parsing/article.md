@@ -18,18 +18,18 @@ The file is a tree of chunks where each chunk header consists of four 4-byte sig
 - `PACK`: Contains a single 4-byte uint32 indicating the count of `XYZI` chunks (models) [S2, unofficial].
 - `SIZE`: Contains three 4-byte uint32s defining the dimensions $(W, H, D)$ of the following `XYZI` chunk [S2, unofficial].
 - `XYZI`: Represents a single model. Contains a 4-byte `numVoxels` count followed by `numVoxels` entries, each 4 bytes: 3 bytes for coordinates $(x, y, z)$ and 1 byte for a color index [S2, unofficial].
-- `RGBA`: The color palette. Contains up to 256 colors. Each color is 4 bytes (RGBA, 8-bit per channel). Index 0 uses the default palette, indices 1–255 are overwritten from the file, and the unused color at the end is skipped [S3, unofficial].
+- `RGBA`: The color palette. Contains up to 256 colors. Each color is 4 bytes (RGBA, 8-bit per channel) [S2, unofficial]. Index 0 uses the default palette, indices 1–255 are overwritten from the file, and the unused color at the end is skipped [S3, unofficial].
 - `nTRN`: Transform node containing translation and rotation data. Child is `nGRP` or `nSHP` [S2, unofficial].
 - `nGRP`: Group node. Children are `nTRN` nodes [S2, unofficial].
 - `nSHP`: Shape node. Leaf node containing a reference to a model index [S2, unofficial].
 
 **Numbered Steps:**
 1. **Parse Header:** Read 4-byte magic ID (`'VOX '`) and 4-byte version (150) [S3, unofficial].
-2. **Parse Palette:** Initialize default palette. If `RGBA` chunk exists, overwrite indices 1–255 from file data, skipping the unused color at the end [S3, unofficial].
-3. **Parse Models:** Read `PACK` chunk for model count. For each model, read `SIZE` chunk for dimensions $(W, H, D)$, then read `XYZI` chunk containing `numVoxels` followed by voxel data (3 bytes coordinates + 1 byte color index) [S2, unofficial][S3, unofficial].
+2. **Parse Palette:** Initialize default palette [G]. If `RGBA` chunk exists, overwrite indices 1–255 from file data, skipping the unused color at the end [S3, unofficial].
+3. **Parse Models:** Read `PACK` chunk for model count [S2, unofficial]. For each model, read `SIZE` chunk for dimensions $(W, H, D)$, then read `XYZI` chunk containing `numVoxels` followed by voxel data (3 bytes coordinates + 1 byte color index) [S2, unofficial][S3, unofficial].
 4. **Parse Scene Graph:** Recursively parse `MAIN` children. `nTRN` nodes contain translation/rotation transforms and have one child (`nGRP` or `nSHP`). `nGRP` nodes group children (all `nTRN`). `nSHP` nodes are leaves referencing a model index [S2, unofficial].
-5. **Convert to Geometry:** For each model, iterate voxels. Determine visible faces (adjacent voxel is empty or transparent). Generate quad primitives [S1, unofficial].
-6. **Transform Coordinates:** Convert from MagicaVoxel's Z-up coordinate system to the renderer's Y-up system by applying instance transforms from `nTRN` nodes [S1, unofficial].
+5. **Convert to Geometry:** For each model, iterate voxels [S1, unofficial]. Determine visible faces (adjacent voxel is empty or transparent) [G]. Generate quad primitives.
+6. **Transform Coordinates:** Convert from MagicaVoxel's Z-up coordinate system to the renderer's Y-up system by applying instance transforms from `nTRN` nodes [S1, unofficial]. Internally, the Y and Z axes are swapped to match the renderer's coordinate space: `voxelSpriteSize = spriteSize(size.x, size.z, size.y)` [S3, unofficial].
 7. **Merge Glass:** Identify voxels with glass material properties and merge them into a single volume representation [S1, unofficial].
 8. **Mark Lights:** Identify emissive voxels and mark them as light sources [S1, unofficial].
 9. **Build BVH:** Insert all generated quads into a Bounding Volume Hierarchy for ray intersection testing [S1, unofficial].
@@ -55,8 +55,27 @@ The file is a tree of chunks where each chunk header consists of four 4-byte sig
 ```python
 import struct
 
+class Chunk:
+    def __init__(self, tag, content, children):
+        self.tag = tag
+        self.content = content
+        self.children = children
+
+def read_chunk(stream):
+    tag = stream.read(4)
+    content_size = int.from_bytes(stream.read(4), 'little')
+    children_size = int.from_bytes(stream.read(4), 'little')
+    end = int.from_bytes(stream.read(4), 'little')
+    content = stream.read(content_size)
+    children = []
+    if children_size > 0:
+        children_end = stream.tell() + children_size
+        while stream.tell() < children_end:
+            children.append(read_chunk(stream))
+    return Chunk(tag, content, children)
+
 def parse_vox(file_stream):
-    # 1. Read header and verify ID_VOX and VERSION
+    # 1. Parse Header
     header = file_stream.read(8)
     if header[:4] != b'VOX ': raise ValueError("Invalid VOX header")
     version = int.from_bytes(header[4:8], 'little')
@@ -66,23 +85,25 @@ def parse_vox(file_stream):
     main_chunk = read_chunk(file_stream)
 
     # 3. Parse Palette
-    palette = get_default_palette() # [G] Standard 256-color default palette initialization
-    rgba_chunk = find_chunk(main_chunk, 'RGBA')
+    palette = [(0, 0, 0, 0)] * 256  # [G] Default palette initialization
+    rgba_chunk = next((c for c in main_chunk.children if c.tag == b'RGBA'), None)
     if rgba_chunk:
         data = rgba_chunk.content
-        # RGBA chunk contains 255 colors (indices 1-255) + 1 unused
+        # RGBA chunk contains 255 colors (indices 1-255) + 1 unused color at the end
         for i in range(0, 255 * 4, 4):
             r, g, b, a = data[i], data[i+1], data[i+2], data[i+3]
             palette[i // 4 + 1] = (r, g, b, a)
 
     # 4. Parse Models
     models = []
-    pack_chunk = find_chunk(main_chunk, 'PACK')
+    pack_chunk = next((c for c in main_chunk.children if c.tag == b'PACK'), None)
     num_models = int.from_bytes(pack_chunk.content[:4], 'little') if pack_chunk else 0
+    child_idx = 0
     for _ in range(num_models):
-        size_chunk = find_child_chunk(main_chunk, 'SIZE')
-        xyz_chunk = find_child_chunk(main_chunk, 'XYZI')
-        if not size_chunk or not xyz_chunk: break
+        size_chunk = main_chunk.children[child_idx]
+        xyz_chunk = main_chunk.children[child_idx + 1]
+        child_idx += 2
+        if size_chunk.tag != b'SIZE' or xyz_chunk.tag != b'XYZI': break
         dims = struct.unpack('<III', size_chunk.content[:12])
         num_voxels = int.from_bytes(xyz_chunk.content[:4], 'little')
         if num_voxels < 0: raise ValueError("Negative voxel count")
@@ -98,14 +119,14 @@ def parse_vox(file_stream):
     glass_volume = []
 
     def traverse_node(node, parent_transform):
-        if node.tag == 'nTRN':
-            transform = parse_transform(node.content) # [G] Standard 4x4 matrix extraction from chunk data
+        if node.tag == b'nTRN':
+            transform = parse_transform(node.content)  # [G] Standard 4x4 matrix extraction
             new_transform = multiply_transforms(parent_transform, transform)
             traverse_node(node.children[0], new_transform)
-        elif node.tag == 'nGRP':
+        elif node.tag == b'nGRP':
             for child in node.children:
                 traverse_node(child, parent_transform)
-        elif node.tag == 'nSHP':
+        elif node.tag == b'nSHP':
             model_idx = int.from_bytes(node.content[:4], 'little')
             model = models[model_idx]
             model_quads = voxels_to_quads(model['voxels'], model['dims'], palette)
@@ -121,7 +142,7 @@ def parse_vox(file_stream):
         traverse_node(child, identity_transform())
 
     # 6. Build BVH
-    bvh = build_bvh(quads) # [G] Standard BVH construction algorithm (e.g., SAH or surface area heuristic)
+    bvh = build_bvh(quads)  # [G] Standard BVH construction algorithm
     return {'bvh': bvh, 'lights': lights, 'glass_volume': glass_volume, 'palette': palette}
 
 def voxels_to_quads(voxels, dims, palette):
@@ -146,33 +167,14 @@ def apply_transform(quad, transform):
     quad.center = (new_x, new_y, new_z)
     return quad
 
-def read_chunk(stream):
-    tag = stream.read(4)
-    content_size = int.from_bytes(stream.read(4), 'little')
-    children_size = int.from_bytes(stream.read(4), 'little')
-    end = int.from_bytes(stream.read(4), 'little')
-    content = stream.read(content_size)
-    children = []
-    for _ in range(children_size // 16): # Each chunk header is 16 bytes
-        children.append(read_chunk(stream))
-    return type('Chunk', (), {'tag': tag, 'content': content, 'children': children})()
-
-def find_chunk(parent, tag):
-    for child in parent.children:
-        if child.tag == tag: return child
-    return None
-
-def find_child_chunk(parent, tag):
-    return find_chunk(parent, tag)
-
-def get_default_palette(): return [(0,0,0,0)] * 256 # [G] Standard default palette
-def parse_transform(data): return None # [G] Standard matrix extraction
-def multiply_transforms(a, b): return None # [G] Standard matrix multiplication
-def identity_transform(): return None # [G] Standard identity matrix
-def is_glass(color): return False # [G] Standard material property check
-def is_emissive(color): return False # [G] Standard material property check
-def build_bvh(quads): return None # [G] Standard BVH construction
-def create_quad(x, y, z, dx, dy, dz, color): return type('Quad', (), {'center': (x,y,z)})() # [G] Standard primitive creation
+def get_default_palette(): return [(0,0,0,0)] * 256
+def parse_transform(data): return None  # [G] Standard matrix extraction
+def multiply_transforms(a, b): return None  # [G] Standard matrix multiplication
+def identity_transform(): return None  # [G] Standard identity matrix
+def is_glass(color): return False  # [G] Standard material property check
+def is_emissive(color): return False  # [G] Standard material property check
+def build_bvh(quads): return None  # [G] Standard BVH construction
+def create_quad(x, y, z, dx, dy, dz, color): return type('Quad', (), {'center': (x,y,z)})()  # [G] Standard primitive creation
 ```
 
 ## Subtopics
@@ -187,8 +189,8 @@ Parses PLY meshes. Use for polygonal meshes.
 General voxel I/O. Use for abstracting file formats.
 
 ## Operating characteristics
-- **Time Complexity:** Parsing is linear with respect to file size. Converting voxels to quads is $O(N)$ where $N$ is the number of voxels. Building the BVH is $O(N \log N)$ or $O(N)$ depending on the algorithm [G].
-- **Memory Complexity:** $O(N)$ to store voxels and quads. Palette is constant size (256 colors) [G].
+- **Time Complexity:** Parsing is linear with respect to file size [G]. Converting voxels to quads is $O(N)$ where $N$ is the number of voxels [G]. Building the BVH is $O(N \log N)$ or $O(N)$ depending on the algorithm [G].
+- **Memory Complexity:** $O(N)$ to store voxels and quads [G]. Palette is constant size (256 colors) [G].
 - **Strengths:** Supports complex scenes with transforms and groups. Efficient surface extraction for ray tracing [S1, unofficial].
 - **Limitations:** Single model coordinate limit of $256^3$. No explicit compression for voxel data (XYZI is raw) [S2, unofficial].
 - **When to Use:** When loading models created in MagicaVoxel for ray-traced rendering [S1, unofficial].

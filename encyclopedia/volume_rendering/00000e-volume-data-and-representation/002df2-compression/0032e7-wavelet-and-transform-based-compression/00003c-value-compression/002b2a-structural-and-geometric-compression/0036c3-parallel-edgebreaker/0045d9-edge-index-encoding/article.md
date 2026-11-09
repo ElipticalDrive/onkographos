@@ -1,0 +1,234 @@
+# Edge Index Encoding
+
+Also called: Compressed isosurface transmission, Isosurface compression
+
+## Overview
+Edge Index Encoding is a compression scheme for isosurfaces extracted from regular 3D volumes that exploits the geometric embedding of vertices in the underlying 3D mesh to reduce storage and transmission size, avoiding the explicit storage of $(x,y,z)$ coordinates [S1]. Unlike standard isosurface representations that store triangular meshes of vertex and face indices—thereby ignoring the 3D embedding and resulting in inefficiency—this method stores indices of valid cells and function values of relevant vertices, allowing coordinates to be reconstructed from edge indices and endpoint values [S1]. It is specifically designed for scenarios requiring the transmission of isosurfaces from computational nodes to rendering servers over networks or storage on disk, offering incremental encoding/decoding with low memory usage [S1].
+
+## How it works
+**Inputs:** A regular 3D volume $V$ of dimension $n_1 \times n_2 \times n_3$, an isovalue $p$, and a quantization scheme for function values.
+**Outputs:** A compressed bitstream containing encoded indices of relevant vertices, encoded function values, and encoded indices of valid cells.
+
+**Data Structures:**
+1.  **Relevant Vertex Bitmap:** A 2D bitmap for each slice where bit $r=1$ if the vertex is an intersection point on an edge of the volume (relevant), and $r=0$ otherwise.
+2.  **Valid Cell Bitmap:** A 2D bitmap for each layer (between two adjacent slices) where bit $i=1$ if the cell contains isosurface geometry (valid), and $i=0$ otherwise.
+3.  **Function Values:** Quantized values for relevant vertices.
+
+**Numbered Steps:**
+
+1.  **Initialization:** Read the first slice of the volume into main memory.
+2.  **Iteration:** For each layer $k$ in the volume (from $0$ to $n_2 - 2$):
+    a.  Read the next slice (slice $k+1$) into main memory as the second slice.
+    b.  **Mark Relevant Vertices:** March through all vertices on the current slice (slice $k$). For each vertex, determine if it lies on the isosurface (i.e., it is an intersection point on an edge of the regular 3D volume). Set bit $r=1$ if relevant, $r=0$ otherwise.
+    c.  **Mark Valid Cells:** March through all cells in the layer between slice $k$ and slice $k+1$. For each cell, determine if it is a "valid cell" (i.e., its 8 corners contain at least one vertex with value $> p$ and one with value $< p$). Set bit $i=1$ if valid, $i=0$ otherwise.
+    d.  **Encode Vertex Indices (Slice $k$):** Encode the indices of the relevant vertices on slice $k$ using an entropy encoding method. The 2D bitmap of relevant vertices is converted to a bit sequence using scan-line conversion.
+    e.  **Encode Function Values (Slice $k$):** Encode the quantized function values of the relevant vertices on slice $k$ using second-order difference prediction (see Formula below).
+    f.  **Encode Cell Indices (Layer $k$):** Encode the indices of the valid cells in the current layer using an entropy encoding method. The 2D bitmap of valid cells is converted to a bit sequence using scan-line conversion.
+    g.  **Output:** Output the encoded data for this step.
+    h.  **Shift Memory:** Remove slice $k$ from memory. Set slice $k+1$ as the new first slice.
+3.  **Final Slice:** Encode the last slice (slice $n_2 - 1$) similarly to step 2d and 2e, and output the encoded data.
+
+**Decoding Steps:**
+1.  For each layer of the volume:
+    a.  Receive the encoded indices of the valid cells in the layer and the encoded indices/function values of the relevant vertices on its bounding slices.
+    b.  Decode the data to reconstruct the bitmaps and function values.
+    c.  For every valid cell in the layer:
+        i.  Find its configuration by checking the signs of the 8 vertices relative to the isovalue $p$.
+        ii. Compute the intersection points on its edges using linear interpolation with the decoded function values.
+        iii. Get the triangulation inside the cell from the standard Marching Cubes table.
+        iv. Render the triangles.
+
+**Formulas:**
+For floating-point function values, they are first normalized to the range $[-0.5, 0.5]$. Let $x_0, \dots, x_n$ be the sequence of function values for relevant vertices on a slice. Let $p$ be the isovalue.
+
+1.  Encode the quantization of the first value $x_0$ and its sign relative to $p$. Let $\tilde{x}_0$ be the quantized value of $x_0$.
+2.  For $i = 0, \dots, n - 1$:
+    $$ \Delta_i = x_{i+1} - \tilde{x}_i $$
+    Encode $\Delta_i$ using the given quantization bits and the sign of $x_{i+1}$ relative to the isovalue $p$.
+    Update the predictor:
+    $$ \tilde{x}_{i+1} = \tilde{x}_i + \tilde{\Delta}_i $$
+    where $\tilde{\Delta}_i$ is the quantized value of $\Delta_i$.
+
+The correction term $\Delta_i = x_{i+1} - \tilde{x}_i$ is used instead of $x_{i+1} - x_i$ to prevent the accumulation of quantization errors [S1]. An extra sign bit is stored for every relevant vertex to indicate the sign of its function value $x$ relative to $p$. This handles quantization errors that might cause a sign flip (e.g., $x < p$ becomes $\tilde{x} > p$), which would alter the isosurface topology [S1].
+
+**Parameters:**
+*   **Entropy Coding:** Adaptive arithmetic coder [S1] or adaptive Z-Coder [S1]. Z-Coder runs faster with similar compression ratios.
+*   **Bitmap Conversion:** Scan-line conversion is used to convert 2D bitmaps into bit sequences. Size variations among conversion methods are insignificant [S1].
+*   **Quantization:** For float values, 32 bits are used for the first point and 14 bits for differences [S1]. For fixed-precision data (u_short, u_char), encoding can be lossless [S1].
+
+**Pitfalls and Edge Cases:**
+*   **Sign Flip:** Quantization error may cause the sign of a function value $x$ relative to the isovalue $p$ to flip (e.g., $x < p$ becomes $\tilde{x} > p$). This changes the isosurface topology. The method handles this by storing an extra sign bit per relevant vertex. During decoding, if a decompressed value has a sign flip against the isovalue, it is shifted by one quantization unit left or right to recover the correct sign [S1].
+*   **Memory Usage:** The algorithm requires only two slices and one layer in main memory at any time, enabling incremental processing [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def encode_edge_index_encoding(volume, isovalue, quantization_bits):
+    """
+    volume: 3D array of shape (n1, n2, n3)
+    isovalue: float or int
+    quantization_bits: int
+    """
+    n1, n2, n3 = volume.shape
+    output_stream = []
+    
+    # Read first slice
+    slice_prev = volume[:, 0, :]
+    
+    # Encode first slice relevant vertices and values
+    relevant_vertices_prev = get_relevant_vertices(slice_prev, isovalue)
+    encode_relevant_indices(relevant_vertices_prev, output_stream)
+    encode_function_values(slice_prev, relevant_vertices_prev, isovalue, quantization_bits, output_stream)
+    
+    for k in range(1, n2):
+        slice_curr = volume[:, k, :]
+        
+        # Mark valid cells in layer between slice_prev and slice_curr
+        valid_cells = get_valid_cells(slice_prev, slice_curr, isovalue)
+        
+        # Encode valid cell indices for the layer
+        encode_valid_cell_indices(valid_cells, output_stream)
+        
+        # Mark relevant vertices on current slice
+        relevant_vertices_curr = get_relevant_vertices(slice_curr, isovalue)
+        
+        # Encode relevant vertex indices for current slice
+        encode_relevant_indices(relevant_vertices_curr, output_stream)
+        
+        # Encode function values for current slice
+        encode_function_values(slice_curr, relevant_vertices_curr, isovalue, quantization_bits, output_stream)
+        
+        # Shift slices
+        slice_prev = slice_curr
+        
+    return output_stream
+
+def get_relevant_vertices(slice_data, isovalue):
+    """
+    Returns a list of (x, z) coordinates for vertices on the slice 
+    that are intersection points on edges of the regular 3D volume.
+    A vertex is relevant if it lies on the isosurface.
+    In the context of the source, this is determined by the Marching Cubes 
+    logic applied to the edges connected to the vertex in the volume grid.
+    """
+    # Implementation detail: Check if the vertex is part of any valid cell's 
+    # intersection set. Or simpler: mark vertices that are endpoints of 
+    # intersected edges.
+    # The source states: "For every vertex on a slice, a bit r is set to 1 
+    # if it is a relevant vertex".
+    # A vertex is relevant if it is an intersection point on an edge.
+    # This requires checking the edges connected to the vertex.
+    pass
+
+def get_valid_cells(slice_prev, slice_curr, isovalue):
+    """
+    Returns a 2D bitmap where bit i=1 if the cell in the layer is valid.
+    A cell is valid if it has vertices with values > isovalue and < isovalue.
+    """
+    pass
+
+def encode_relevant_indices(vertices, stream):
+    """
+    Converts the 2D bitmap of relevant vertices to a bit sequence 
+    using scan-line conversion and encodes it using entropy coding.
+    """
+    bitmap = create_bitmap(vertices)
+    bit_sequence = scan_line_convert(bitmap)
+    stream.append(entropy_encode(bit_sequence))
+
+def encode_function_values(slice_data, vertices, isovalue, q_bits, stream):
+    """
+    Encodes function values using second-order difference prediction.
+    """
+    values = [slice_data[v.x, v.y, v.z] for v in vertices]
+    normalized_values = normalize(values, isovalue)
+    
+    if not normalized_values:
+        return
+        
+    # Encode first value
+    x0 = normalized_values[0]
+    sign_x0 = 1 if x0 >= isovalue else -1
+    quantized_x0 = quantize(x0, q_bits)
+    stream.append(encode_quantized_value(quantized_x0))
+    stream.append(encode_sign(sign_x0))
+    
+    prev_quantized = quantized_x0
+    
+    for i in range(len(normalized_values) - 1):
+        x_curr = normalized_values[i]
+        x_next = normalized_values[i+1]
+        
+        # Correction term to prevent error accumulation
+        delta = x_next - prev_quantized
+        
+        sign_next = 1 if x_next >= isovalue else -1
+        quantized_delta = quantize(delta, q_bits)
+        
+        stream.append(encode_quantized_value(quantized_delta))
+        stream.append(encode_sign(sign_next))
+        
+        prev_quantized = prev_quantized + quantized_delta
+
+def decode_edge_index_encoding(encoded_stream, volume_dims, isovalue, quantization_bits):
+    """
+    Reconstructs the isosurface triangles from the encoded stream.
+    """
+    triangles = []
+    n1, n2, n3 = volume_dims
+    
+    # Decode first slice
+    relevant_vertices_prev = decode_relevant_indices(encoded_stream)
+    function_values_prev = decode_function_values(encoded_stream, isovalue, quantization_bits)
+    
+    # Map indices to actual coordinates and values
+    vertex_data_prev = map_indices_to_vertices(relevant_vertices_prev, function_values_prev)
+    
+    for k in range(1, n2):
+        # Decode valid cells for layer k-1
+        valid_cells = decode_valid_cell_indices(encoded_stream)
+        
+        # Decode current slice vertices
+        relevant_vertices_curr = decode_relevant_indices(encoded_stream)
+        function_values_curr = decode_function_values(encoded_stream, isovalue, quantization_bits)
+        vertex_data_curr = map_indices_to_vertices(relevant_vertices_curr, function_values_curr)
+        
+        # Combine vertex data for the layer
+        all_vertices = vertex_data_prev + vertex_data_curr
+        
+        # Process each valid cell
+        for cell in valid_cells:
+            # Find configuration from 8 vertices
+            config = get_marching_cubes_config(cell, all_vertices, isovalue)
+            
+            # Compute intersection points
+            intersections = compute_intersections(cell, all_vertices, isovalue)
+            
+            # Get triangulation
+            tris = get_triangulation(config, intersections)
+            triangles.extend(tris)
+            
+        # Shift
+        vertex_data_prev = vertex_data_curr
+        
+    return triangles
+```
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of cells and vertices in the volume, as it requires a single pass through the volume data during encoding and decoding [S1].
+*   **Memory Complexity:** Low. Only two slices and one layer of cells need to be held in main memory at any time, enabling incremental encoding and decoding [S1].
+*   **Measured Performance:**
+    *   **Hipip (float, isovalue 0.0):** Original 1,465,862 bytes, General Algorithm 129,068 bytes, Edge Index 88,804 bytes [S1].
+    *   **Foot (u_short, isovalue 600):** Original 7,536,227 bytes, General Algorithm 587,344 bytes, Edge Index 407,658 bytes [S1].
+    *   **Engine (u_char, isovalue 180):** Original 3,601,040 bytes, General Algorithm 224,893 bytes, Edge Index 121,504 bytes [S1] [S1].
+*   **Scaling:** The method scales well on commodity clusters (e.g., Compaq SP750 workstations) for datasets up to 16.5 GB, leveraging incremental processing to start rendering before full transmission [S1].
+*   **Strengths:** Better compression ratios than general surface compression (which uses 8 bits per coordinate per vertex); allows incremental encoding/decoding; low memory footprint; robust to quantization errors via sign bits [S1].
+*   **Limitations:** Specific to isosurfaces from regular 3D volumes; requires the Marching Cubes algorithm or similar for reconstruction; dependent on the quality of the entropy coder [S1].
+
+## Background
+Edge Index Encoding was introduced in the context of scalable isosurface visualization on commodity off-the-shelf clusters [S1]. It addresses the need for compact representation of isosurfaces transmitted from computational nodes to rendering servers via network or stored on disk for later examination [S1]. The method exploits the property that isosurfaces extracted from regular 3D volumes are embedded in the 3D mesh, allowing coordinate reconstruction from edge indices and endpoint values, thus avoiding explicit coordinate storage [S1]. It was compared against general surface compression algorithms (such as the one in [7]) and demonstrated superior compression ratios and lower memory requirements [S1].
+
+## Sources
+[S1] Scalable isosurface visualization of massive datasets on commodity off-the-shelf clusters., https://doi.org/10.1016/j.jpdc.2008.07.006, fetched 2026-11-08
