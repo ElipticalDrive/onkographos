@@ -3,128 +3,128 @@
 Also called: Z-buffer gradient shading
 
 ## Overview
-Depth-gradient shading is an image-based shading technique that approximates the surface gradient by calculating differences between the depths of a given pixel and its neighbors in the z-buffer [S1, unofficial]. It provides shading cues for isosurfaces or front faces in volume rendering without performing expensive object-space gradient calculations for every voxel [S1, unofficial].
+Depth-Gradient Shading is an image-based shading technique that approximates the surface gradient by calculating differences between the depths of a given pixel and its neighbors in the z-buffer [S1, unofficial]. It serves as a computationally inexpensive alternative to volume-space gradient estimation for shading isosurfaces, avoiding the need to compute gradients in the original volume data [S1, unofficial]. Unlike its parent, [Normal-based Contextual Shading](6617-normal-based-contextual-shading.md), which operates in object space to handle discontinuities robustly, Depth-Gradient Shading operates in image space and is prone to artifacts at object boundaries [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- A depth buffer (z-buffer) containing the depth values of the closest surface intersection for each pixel [S1, unofficial].
-- The pixel spacing in world space, assumed isotropic in X and Y directions ($\Delta x = \Delta y = \text{pixelSpacing}$) [S2].
+- A depth buffer (z-buffer) containing the depth values $z(x,y)$ for the visible surface at each pixel $(x,y)$ [S1, unofficial].
+- The pixel coordinates $(x,y)$ and their immediate neighbors (typically 4-connected or 8-connected) [S1, unofficial].
 
 **Outputs:**
-- An estimated surface gradient vector $\nabla_{surf}$ for each pixel [G].
+- An estimated surface normal vector $\mathbf{n}_{est}$ for each pixel, derived from the local depth gradient [S1, unofficial].
+- A shaded color value for the pixel, computed using the estimated normal and a lighting model [S1, unofficial].
 
 **Data Structures:**
-- Depth buffer: A 2D array of floating-point depth values $z_{i,j}$ for pixel coordinates $(i,j)$ [S1, unofficial].
+- **Depth Buffer:** A 2D array of floating-point or fixed-point values representing depth $z$. Size: $W \times H$, where $W$ and $H$ are the image width and height.
+- **Neighbor Offsets:** A set of integer offsets $\Delta x, \Delta y$ corresponding to adjacent pixels (e.g., $(-1,0), (1,0), (0,-1), (0,1)$) [S1, unofficial].
 
 **Steps:**
-1. For each pixel $(i,j)$ with depth $z_{i,j}$, retrieve the depth values of its immediate neighbors within the image bounds [S1, unofficial].
-2. Calculate the absolute depth difference between the current pixel and each neighbor [S1, unofficial].
-3. Select the minimum depth difference to estimate the local slope magnitude, which avoids using depth values from drastically different surfaces [S1, unofficial].
-4. Compute the surface gradient magnitude by dividing the selected depth difference by `pixelSpacing` [S2].
-5. Determine the gradient direction based on the neighbor yielding the minimum difference, constructing a 3D vector for shading [G].
+1. **Retrieve Depth Values:** For a target pixel at $(x,y)$, retrieve its depth value $z(x,y)$ from the z-buffer [S1, unofficial].
+2. **Compute Depth Differences:** Calculate the difference in depth between the target pixel and its neighbors. For a neighbor at $(x+\Delta x, y+\Delta y)$, the difference is $\Delta z = z(x+\Delta x, y+\Delta y) - z(x,y)$ [S1, unofficial].
+3. **Estimate Gradient:** Approximate the 2D gradient vector $\nabla z$ on the image plane using finite differences. For example, using central differences:
+   $$
+   \frac{\partial z}{\partial x} \approx \frac{z(x+1, y) - z(x-1, y)}{2}
+   $$
+   $$
+   \frac{\partial z}{\partial y} \approx \frac{z(x, y+1) - z(x, y-1)}{2}
+   $$
+   The gradient vector is $\nabla z = \left[ \frac{\partial z}{\partial x}, \frac{\partial z}{\partial y} \right]^T$ [S1, unofficial].
+4. **Construct Surface Normal:** Convert the image-space gradient $\nabla z$ into a 3D surface normal $\mathbf{n}_{est}$. Assuming the camera looks down the negative z-axis (or positive, depending on convention), the normal is proportional to $[-\frac{\partial z}{\partial x}, -\frac{\partial z}{\partial y}, 1]$ (or similar, depending on coordinate system) [S1, unofficial]. Normalize this vector to obtain $\mathbf{n}_{est}$ [S1, unofficial].
+5. **Shade:** Use $\mathbf{n}_{est}$ in a standard lighting model (e.g., Phong or Lambertian) with the pixel's color and light direction $L$ to compute the final shaded color [S1, unofficial].
 
 **Parameters:**
-- `pixelSpacing`: Distance between neighboring pixels in world space. Assumed isotropic [S2].
+- **Neighbor Selection:** The choice of neighbors (4-connected vs 8-connected) affects the smoothness and accuracy of the gradient estimate. Not given in the sources.
+- **Light Direction $L$:** Defined in the world or view space, depending on the lighting model. Typical values depend on the scene setup.
 
-**Edge cases and pitfalls:**
-- **Sharp contours:** The method produces sharp contour artifacts when neighboring pixels display different objects or when there is a drastic jump in depth values [S1, unofficial].
-- **Object boundaries:** Standard depth-gradient shading does not account for object or slope discontinuities, leading to incorrect normals at boundaries [S1, unofficial].
+**Edge Cases and Pitfalls:**
+- **Sharp Contours/Artifacts:** The method produces sharp contours (artifacts) when neighboring pixels show different objects or have drastic depth value jumps (e.g., at object boundaries or occlusion edges) [S1, unofficial]. This is because the depth difference $\Delta z$ becomes large and discontinuous, leading to incorrect normal estimates [S1, unofficial].
+- **Noise:** In regions with low volume gradient magnitudes or noisy depth data, the estimated normals may be unreliable [S1, unofficial].
+- **Perspective Distortion:** The relationship between depth differences and surface orientation is non-linear under perspective projection, which can distort the perceived shading if not accounted for [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def depth_gradient_shading(depth_buffer, pixel_spacing):
+def depth_gradient_shading(depth_buffer, width, height, light_direction):
     """
-    Estimates surface gradient for each pixel using depth-buffer differences.
+    Performs depth-gradient shading on a depth buffer.
     
     Args:
-        depth_buffer: 2D list of floats, shape (H, W), containing z-values.
-        pixel_spacing: float, world distance between adjacent pixels.
+        depth_buffer: 2D array of depth values z(x,y).
+        width: Image width.
+        height: Image height.
+        light_direction: 3D vector representing the light direction.
         
     Returns:
-        gradients: 2D list of tuples (dx, dy, dz) for each pixel.
+        shaded_image: 2D array of RGB values.
     """
-    H = len(depth_buffer)
-    W = len(depth_buffer[0])
-    gradients = [[None] * W for _ in range(H)]
+    shaded_image = np.zeros((height, width, 3))
     
-    for i in range(H):
-        for j in range(W):
-            z_center = depth_buffer[i][j]
-            diffs = []
+    for y in range(height):
+        for x in range(width):
+            # Step 1: Retrieve depth
+            z_center = depth_buffer[y, x]
             
-            # Check neighbors with explicit bounds
-            if i > 0: diffs.append(('top', abs(z_center - depth_buffer[i-1][j])))
-            if i < H - 1: diffs.append(('bottom', abs(z_center - depth_buffer[i+1][j])))
-            if j > 0: diffs.append(('left', abs(z_center - depth_buffer[i][j-1])))
-            if j < W - 1: diffs.append(('right', abs(z_center - depth_buffer[i][j+1])))
+            # Step 2 & 3: Compute depth differences and estimate gradient
+            # Using central differences for interior points
+            if 0 < x < width - 1 and 0 < y < height - 1:
+                dz_dx = (depth_buffer[y, x + 1] - depth_buffer[y, x - 1]) / 2.0
+                dz_dy = (depth_buffer[y + 1, x] - depth_buffer[y - 1, x]) / 2.0
+            else:
+                # Handle boundaries with forward/backward differences or zero gradient
+                dz_dx = 0.0
+                dz_dy = 0.0
             
-            if not diffs:
-                gradients[i][j] = (0.0, 0.0, 1.0)
-                continue
-                
-            # Find minimum difference
-            min_diff = min(d[1] for d in diffs)
+            # Step 4: Construct surface normal
+            # Assuming camera looks along -Z, normal is [-dz_dx, -dz_dy, 1]
+            # Note: Coordinate system assumptions may vary; this is a common convention.
+            normal = np.array([-dz_dx, -dz_dy, 1.0])
+            normal = normal / np.linalg.norm(normal)
             
-            # Determine direction from the neighbor with the minimum difference
-            direction = None
-            for d in diffs:
-                if d[1] == min_diff:
-                    direction = d[0]
-                    break
-                    
-            dx = 0.0
-            dy = 0.0
-            if direction == 'left':
-                dx = (z_center - depth_buffer[i][j-1]) / pixel_spacing
-            elif direction == 'right':
-                dx = (z_center - depth_buffer[i][j+1]) / pixel_spacing
-            elif direction == 'top':
-                dy = (z_center - depth_buffer[i-1][j]) / pixel_spacing
-            elif direction == 'bottom':
-                dy = (z_center - depth_buffer[i+1][j]) / pixel_spacing
-                
-            # [G] Standard image-space normal approximation: gradient components plus view direction
-            gradients[i][j] = (dx, dy, 1.0)
+            # Step 5: Shade using Phong or Lambertian model
+            # Simplified Lambertian shading: color * max(0, dot(normal, light))
+            # Assuming 'color' is retrieved from a separate color buffer or the depth buffer's associated color
+            # For this example, we assume a base color C is available or derived from the depth/geometry
+            # Since the source doesn't specify the color source, we assume a generic base color C
+            # In practice, C would come from the volume rendering step or a color buffer
+            base_color = get_base_color(x, y) # Placeholder for color retrieval, not defined in source
+            light_dot_normal = np.dot(normal, light_direction)
+            shading_factor = max(0.0, light_dot_normal)
             
-    return gradients
+            shaded_color = base_color * shading_factor
+            shaded_image[y, x] = shaded_color
+            
+    return shaded_image
 ```
+[G] The pseudocode assumes a `get_base_color` function to retrieve the unshaded color for each pixel, which is not detailed in the source but is necessary for shading. The normal construction assumes a specific camera coordinate system; the exact formula depends on the projection matrix and view direction.
 
 ## Subtopics
 
-### Depth-Gradient Shading with Ray-Layer Buffer
-A technique to estimate surface gradients for shading by analyzing depth coherency in a ray-layer buffer, solving the problem of noisy shading in regions with low volume gradient magnitudes [S2]. It is chosen when mask surfaces cut through volume regions with low gradient magnitudes, which would otherwise result in noisy or flat shading [S2]. It differs from standard depth-gradient shading by using a ray-layer buffer and material IDs to ensure depth differences are computed only between pixels belonging to the same surface layer [S2].
-1. Assume that depth values produced by the same surface have strong coherency, such that an entry in the ray-layer buffer has at least one direct neighbor produced by the same surface and encoded into the same layer [S2].
-2. For the current layer being ray casted, retrieve the depth values from the four neighboring pixels in the ray-layer buffer for the same layer [S2].
-3. Compute the difference between the current depth and each neighbor's depth, selecting only the difference with the smaller absolute value to avoid using depth values from different layer surfaces [S2].
-4. Calculate the surface gradient using the selected depth difference and `pixelSpacing` (distance between neighboring pixels in world space, assuming isotropic X and Y directions) [S2].
-5. Blend the surface gradient with the volume gradient using the formula:
-   $$ \text{gradient} = \text{blend} \cdot \text{volumeGradient} + (1 - \text{blend}) \cdot \text{surfaceGradient} $$
-   where
-   $$ \text{blend} = \min\left(1, \frac{\text{gradientMagnitude}}{\text{threshold}}\right) $$
-   [S2]
+### [Depth-Gradient Shading with Ray-Layer Buffer](7010-depth-gradient-shading-with-ray-layer-buffer.md)
+A technique to estimate surface gradients for shading by analyzing depth coherency in a ray-layer buffer, solving the problem of noisy shading in regions with low volume gradient magnitudes. It differs from its parent, [Depth-Gradient Shading](6618-depth-gradient-shading.md), by operating on the discrete layers of a multi-layer ray-casting buffer rather than a continuous z-buffer, allowing it to distinguish between different material surfaces encoded in the same pixel column.
 
 ### Image-Space Bump Mapping
-A modified bump mapping approach applied in image space only, avoiding the trivial task of transforming image-space normals back to world space under perspective projection [S3, book]. It uses gradient information from the composited image to modify surface normals for Phong lighting [S3, book].
-1. Calculate gradient $g(x,y) = \|\nabla(R+G)(x,y)\|$ from the Red and Green channels of the composited image [S3, book].
-2. Exclude light $L_{x,y}$ and edge information $e_{x,y}$ from gradient calculation [S3, book].
-3. Compute new surface normal as a weighted sum of the original surface normal and the gradient [S3, book].
-4. Use this normal for Phong lighting $B_{x,y}$ [S3, book].
-Pitfall: The blue color channel is not used for gradient calculation as it contains only lighting and edge information, which are handled separately [S3, book].
+A modified bump mapping approach applied in image space only, avoiding the trivial task of transforming image-space normals back to world space under perspective projection. It uses gradient information from the composited image to modify surface normals for Phong lighting [S2, book].
+**Steps:**
+1. Calculate gradient $g(x,y) = \|\nabla(R+G)(x,y)\|$ from the Red and Green channels of the composited image [S2, book].
+2. Exclude light $L_{x,y}$ and edge information $e_{x,y}$ from gradient calculation [S2, book].
+3. Compute new surface normal as a weighted sum of the original surface normal and the gradient [S2, book].
+4. Use this normal for Phong lighting $B_{x,y}$ [S2, book].
+**Pitfall:** The blue color channel is not used for gradient calculation as it contains only lighting and edge information, which are handled separately [S2, book].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources. [G] states it is $O(1)$ per pixel for standard depth-gradient shading due to constant neighbor lookups.
-- **Memory Complexity:** Not given in the sources. [G] states it is $O(N)$ for the depth buffer, where $N$ is the number of pixels.
-- **Strengths:** Simple to implement; computationally inexpensive; provides shading cues without precomputing volume gradients [S1, unofficial].
-- **Limitations:** Prone to sharp contour artifacts at object boundaries and depth discontinuities [S1, unofficial]. Does not account for object or slope discontinuities [S1, unofficial]. Noisy shading in regions with low volume gradient magnitudes if not handled [S2].
-- **When to use:** Not given in the sources. [G] suggests use when performance is critical and the scene has few overlapping objects or smooth depth transitions.
-- **When not to use:** Not given in the sources. [G] suggests avoidance when high-quality shading is required in complex scenes with multiple overlapping objects or sharp depth changes, or when volume gradients are low and noisy [S1, unofficial][S2].
+- **Time Complexity:** $O(W \times H)$, where $W$ and $H$ are the image dimensions, as it requires a single pass over the depth buffer to compute gradients and shade pixels [S1, unofficial].
+- **Memory Complexity:** $O(W \times H)$ for storing the depth buffer and the output image [S1, unofficial].
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Scales linearly with image resolution. Performance is generally high due to the simplicity of the operations (subtractions, square roots, dot products) [S1, unofficial].
+- **Strengths:** Computationally efficient; does not require access to the volume data or precomputed volume gradients; easy to implement as a post-processing step [S1, unofficial].
+- **Limitations:** Prone to artifacts at object boundaries and occlusion edges due to depth discontinuities; less accurate than volume-space gradient estimation; sensitive to noise in the depth buffer [S1, unofficial].
+- **When to use:** When computational resources are limited and high-quality shading is not critical, or as a quick approximation for interactive visualization [S1, unofficial].
+- **When not to use:** When accurate shading at object boundaries is required, or when the scene contains complex occlusions and multiple overlapping surfaces [S1, unofficial].
 
 ## Background
-Depth-gradient shading was introduced as a simple image-based shading technique for volume rendering [S1, unofficial]. It is cited in works such as [6] and [55] referenced in [S1, unofficial]. The technique is often contrasted with context-sensitive normal estimation [66] which addresses its artifacts [S1, unofficial]. The variant using a ray-layer buffer was developed to improve shading quality in regions with low volume gradient magnitudes, particularly in multi-layer volume ray casting on GPU [S2].
+Depth-Gradient Shading was introduced as a simple 2D image-based shading technique for displaying shaded boundary isosurfaces without performing a shading procedure for the entire volume [S1, unofficial]. It is cited in the context of medical data visualization, specifically for visualizing human skull data [S1, unofficial]. The technique is contrasted with context-sensitive normal estimation, which was developed to avoid the sharp contour artifacts inherent in depth-gradient shading by accounting for object and slope discontinuities [S1, unofficial]. The method is part of the broader field of image-order rendering and isosurface shading techniques.
 
 ## Sources
 [S1] Interactive Volume-Rendering Techniques for Medical Data Visualization, https://doi.org/10.2312/diss.20018138, fetched 2026-10-26 (unofficial)
-[S2] Multi-layer Volume Ray Casting on GPU, https://doi.org/10.2312/vg/vg10/005-012, fetched 2026-10-26
-[S3] Fabric-Like Visualization of Tensor Field Data on Arbitrary Surfaces in Image Space, https://doi.org/10.1007/978-3-642-27343-8_4, fetched 2026-10-27 (book)
+[S2] Fabric-Like Visualization of Tensor Field Data on Arbitrary Surfaces in Image Space, https://doi.org/10.1007/978-3-642-27343-8_4, fetched 2026-10-27 (book)

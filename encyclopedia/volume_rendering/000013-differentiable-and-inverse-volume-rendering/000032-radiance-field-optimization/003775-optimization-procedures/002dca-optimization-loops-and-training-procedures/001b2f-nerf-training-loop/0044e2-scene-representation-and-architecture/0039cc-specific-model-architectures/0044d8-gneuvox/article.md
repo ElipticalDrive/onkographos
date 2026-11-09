@@ -1,0 +1,57 @@
+# GNeuVox
+
+Also called: Generalizable Neural Voxels
+
+## Overview
+GNeuVox is a rendering framework for fast novel view synthesis of moving human bodies from monocular video, combining neural fields with explicit neural voxel representations [S1, unofficial]. It differs from implicit NeRF-based methods by using generalizable neural voxels for geometric priors and individual voxels for differential textures, significantly accelerating optimization while maintaining rendering quality [S1, unofficial].
+
+## How it works
+**Inputs:** Monocular video frames, initial human pose estimates $P$ (joint positions $J$ and rotation angles $\Omega$), and camera parameters.
+**Outputs:** Rendered pixel colors $\hat{C}(\mathbf{r})$ for novel views.
+
+**Data Structures:**
+1.  **General Voxels ($V_g$):** A 3D grid of features pretrained on various human bodies, representing basic skeleton geometry.
+2.  **Individual Voxels ($V_i$):** A 3D grid of features specific to the target human body, learning differential textures.
+3.  **Embedding ($Z$):** A learnable embedding vector mapped to a volume via 3D convolutional layers to produce blend weights $w^i$ [S1, unofficial].
+4.  **Pose ($P$):** Represented as $(J, \Omega)$, where $J$ are keypoint positions and $\Omega$ are joint rotations [S1, unofficial].
+
+**Steps:**
+1.  **Pose Refinement:** Adjust the initial pose $P$ to a corrected pose $P_c$ using a pose refinement network $\Phi_p$.
+    $$P_c = (J_c, \Omega_c) = (J, \Omega \otimes \Delta\Omega)$$
+    where $\otimes$ denotes $(R_i \cdot \Delta R_i, T_i + \Delta T_i)$, with $R_i, T_i$ and $\Delta R_i, \Delta T_i$ derived from $\Omega$ and $\Delta\Omega$ respectively [S1, unofficial].
+2.  **Coordinate Deformation:** Deform observation coordinates $(x_o, y_o, z_o)$ to canonical T-pose coordinates $(x_c, y_c, z_c)$ using the corrected pose $P_c$ and embedding $Z$.
+    $$(x_c, y_c, z_c) = \mathbf{F}_d((x_o, y_o, z_o), P_c)$$
+    The deformation network $\mathbf{F}_d$ uses the same structure as the skeletal deformation $T_{skel}$:
+    $$T_{skel}(x, P_c) = \sum_{i=1}^K w^i(x)(R_c^i x + T_c^i)$$
+    where $w^i$ are blend weights obtained by mapping $Z$ through 3D convolutions and trilinear interpolation [S1, unofficial].
+3.  **Feature Interpolation:** Interpolate features from individual voxels $V_i$ and general voxels $V_g$ using the canonical coordinates $(x_c, y_c, z_c)$ to obtain feature vectors $v_i$ and $v_g$ [S1, unofficial].
+4.  **Radiance Field Evaluation:** Feed $v_i$, $v_g$, original observation coordinates $(x_o, y_o, z_o)$, ray direction $\mathbf{d}$, and timestamp $t$ into a radiance field network to obtain color $\mathbf{c}$ and density $\sigma$. Positional encoding $\gamma$ is applied to $(x, y, z)$ and $\mathbf{d}$:
+    $$\gamma(x) = (\sin(2^0 x), \cos(2^0 x), \dots, \sin(2^{L-1} x), \cos(2^{L-1} x))$$
+    where $L$ controls the maximum frequency [S1, unofficial].
+5.  **Volume Rendering:** Accumulate colors and densities along ray $\mathbf{r}$ to produce pixel color:
+    $$\hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i(1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i$$
+    where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$, $\delta_i = t_{i+1} - t_i$, and $N$ is the number of sampled points [S1, unofficial].
+6.  **Optimization:** Minimize the loss function:
+    $$\mathcal{L} = \|\hat{C}(\mathbf{r}) - C(\mathbf{r})\|_2^2$$
+    where $C(\mathbf{r})$ is the ground truth pixel color [S1, unofficial].
+
+**Parameters:**
+*   $L$: Controls maximum frequency in positional encoding. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   Accuracy of initial pose estimation affects refinement quality [S1, unofficial].
+*   Precision in trilinear interpolation and 3D convolution operations may impact blend weight accuracy [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Significantly faster than implicit NeRF methods due to explicit voxel representation. Training takes approximately 5 minutes for a novel human body [S1, unofficial].
+*   **Memory Complexity:** Explicit voxel grids require memory proportional to grid resolution and feature dimensions. Not given in the sources.
+*   **Strengths:** Fast training, generalizable geometric priors, high rendering quality [S1, unofficial].
+*   **Limitations:** Requires monocular video input, relies on initial pose estimates [S1, unofficial].
+*   **When to Use:** Fast human body rendering from monocular video where training speed is critical [S1, unofficial].
+*   **When Not to Use:** When implicit representations are preferred for simplicity or when multi-view inputs are available [S1, unofficial].
+
+## Background
+GNeuVox was proposed to address the high training and rendering costs of existing NeRF-based methods for human body rendering [S1, unofficial]. It builds on HumanNeRF [86] by introducing generalizable neural voxels for geometric priors and individual voxels for differential textures [S1, unofficial]. The method was introduced in 2023 [S1, unofficial].
+
+## Sources
+[S1] Generalizable Neural Voxels for Fast Human Radiance Fields, https://doi.org/10.48550/arxiv.2303.15387, fetched 2026-10-26 (unofficial)

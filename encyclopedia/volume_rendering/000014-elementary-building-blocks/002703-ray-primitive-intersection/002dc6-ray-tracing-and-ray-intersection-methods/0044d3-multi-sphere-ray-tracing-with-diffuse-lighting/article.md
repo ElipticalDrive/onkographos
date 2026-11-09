@@ -1,0 +1,109 @@
+# Multi-Sphere Ray Tracing with Diffuse Lighting
+
+Also called: Primary Ray Tracing Loop, sphIntrAll
+
+## Overview
+This method casts a primary ray against a fixed set of spheres to find the closest intersection and computes unshadowed diffuse lighting from multiple point lights [S1, unofficial]. It differs from [Ray Tracing](8334-ray-tracing.md) by omitting recursive shadow rays and reflections, and from [Binary Search IsoSurface Extraction](1316-binary-search-isosurface-extraction.md) by using explicit geometric primitives rather than implicit field functions.
+
+## How it works
+**Inputs:** Ray origin `org`, ray direction `dir` (normalized), array of spheres `S` with count `sphCnt`, array of lights `L` with count `lightCnt`.
+**Outputs:** Final color `color` (vec4).
+
+**Data Structures:**
+*   `struct intr`: `bool is` (hit status), `float t` (distance to hit), `vec3 N` (surface normal at hit).
+*   `struct material`: `vec3 kd` (diffuse color coefficient), `float l` (unused/placeholder).
+*   `struct light`: `vec3 p` (position), `float intensiv` (intensity).
+*   `struct sph`: `float r` (radius), `vec3 c` (center), `material m` (material).
+
+**Steps:**
+1.  Initialize closest hit `mint` with `is=false`, `t=1000`, `N=vec3(0)`.
+2.  Loop over all spheres `i` from `0` to `sphCnt-1`.
+3.  Compute intersection of ray `(org, dir)` with sphere `S[i]` using `sphInt`.
+4.  If `intersect.is` is true and `intersect.t < mint.t`, update `mint = intersect`, store material `mm = S[i].m`, and initialize `color = vec4(mm.kd, 1)`.
+5.  If `mint.is` is true:
+    a. Initialize `difInt = 0`.
+    b. Loop over all lights `j` from `0` to `lightCnt-1`.
+    c. Compute hit point `P = org + dir * mint.t`.
+    d. Compute light direction `ld = normalize(L[j].p - P)`.
+    e. Accumulate diffuse contribution: `difInt += L[j].intensiv * max(0.0, dot(ld, mint.N))`.
+    f. Set final color: `color = vec4(mm.kd * difInt, 1)`.
+6.  Return `color`.
+
+**Formula:**
+The final color $C$ is calculated as:
+$$ C = \mathbf{k}_d \sum_{j=1}^{L} I_j \max(0, \mathbf{d}_j \cdot \mathbf{N}) $$
+Where:
+*   $\mathbf{k}_d$ is the diffuse color coefficient from the material at the hit point.
+*   $L$ is the number of lights.
+*   $I_j$ is the intensity of light $j$.
+*   $\mathbf{d}_j$ is the normalized direction vector from the hit point to light $j$.
+*   $\mathbf{N}$ is the surface normal at the hit point.
+
+**Parameters:**
+*   `sphCnt`: Number of spheres. Typical value: 3 [S1, unofficial].
+*   `lightCnt`: Number of lights processed. Typical value: 1 (though array may contain more) [S1, unofficial].
+*   `mint.t`: Initial maximum ray distance. Typical value: 1000 [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def multi_sphere_diffuse(org, dir, S, sphCnt, L, lightCnt):
+    # 1. Initialize closest hit
+    mint_is = False
+    mint_t = 1000.0
+    mint_N = vec3(0, 0, 0)
+    mm_kd = vec3(0, 0, 0)
+    
+    # 2. Find closest sphere intersection
+    for i in range(sphCnt):
+        intersect = sphInt(S[i], org, dir)
+        if intersect.is and intersect.t < mint_t:
+            mint_is = True
+            mint_t = intersect.t
+            mint_N = intersect.N
+            mm_kd = S[i].m.kd
+            
+    # 3. Compute diffuse lighting if hit
+    if mint_is:
+        difInt = 0.0
+        hit_point = org + dir * mint_t
+        for j in range(lightCnt):
+            # Light direction from hit point to light
+            ld = normalize(L[j].p - hit_point)
+            # Diffuse contribution
+            difInt += L[j].intensiv * max(0.0, dot(ld, mint_N))
+        
+        color = vec4(mm_kd * difInt, 1.0)
+    else:
+        color = vec4(0, 0, 0, 1) # Default background or no hit color
+        
+    return color
+```
+
+**Edge Cases:**
+*   **No Hit:** If no sphere is intersected, the method returns a default color (implementation dependent, often black or background) [G].
+*   **Precision:** Using a large initial `mint.t` (1000) may cause precision issues if the scene is scaled differently. [G]
+*   **Light Direction:** The light direction is computed from the hit point to the light position, not from the light to the hit point, to ensure correct dot product sign for diffuse shading [S1, unofficial].
+
+## Subtopics
+
+### Sphere Intersection
+The core primitive test. See [Ray Tracing and Ray Intersection Methods](5617-ray-tracing-and-ray-intersection-methods.md).
+
+### Diffuse Lighting Model
+The shading model used. See [Ray Tracing](8334-ray-tracing.md).
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot L)$, where $N$ is the number of spheres and $L$ is the number of lights. Each ray requires iterating over all spheres and all lights.
+*   **Memory Complexity:** $O(N + L)$ to store sphere and light data.
+*   **Strengths:** Simple to implement, no recursion, suitable for static scenes with few primitives.
+*   **Limitations:** No shadows, reflections, or refractions. Performance degrades linearly with the number of spheres and lights. Not suitable for complex scenes or real-time rendering with many objects.
+*   **When to Use:** Educational purposes, simple demos, or scenes with very few objects and lights.
+*   **When Not to Use:** Complex scenes, real-time rendering, or when accurate lighting (shadows, reflections) is required.
+
+## Background
+This method is a basic ray tracing technique often used in introductory computer graphics courses and simple renderers. It demonstrates the fundamental concepts of ray-primitive intersection and diffuse shading without the complexity of recursive ray tracing. The specific implementation details, including the data structures and loop structure, are derived from an unofficial source [S1, unofficial].
+
+## Sources
+[S1] trimesh33/sdf, https://github.com/trimesh33/sdf, fetched 2026-10-27 (unofficial)

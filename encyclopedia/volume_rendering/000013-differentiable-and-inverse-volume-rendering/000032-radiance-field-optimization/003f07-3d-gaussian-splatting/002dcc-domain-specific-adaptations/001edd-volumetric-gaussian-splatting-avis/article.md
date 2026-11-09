@@ -3,207 +3,86 @@
 Also called: Avis Gaussian Splatting, Volume-supervised 3DGS
 
 ## Overview
-Volumetric Gaussian Splatting (AVIS) is a method that adapts 3D Gaussian Splatting for volume-supervised training on 3D medical-style data (CT/MR) [S1, unofficial]. Unlike the original 3DGS which uses calibrated multi-view RGB images for novel-view synthesis, AVIS optimizes a 3D Gaussian representation against a target volume inside a mask region of interest (ROI), using volumetric and mask-aware supervision on rasterized voxel grids instead of photometric losses on rendered camera views [S1, unofficial]. It differs from [Gaussian Splatting for Microscopy](3301-gaussian-splatting-for-microscopy.md) by focusing on general medical volume supervision rather than specific microscopy constraints, and from [UltraGauss Rendering](5170-ultragauss-rendering.md) by its direct voxel-space rasterization supervision rather than ultra-high-resolution rendering optimizations [S1, unofficial].
+Volumetric Gaussian Splatting (AVIS) is a method that adapts 3D Gaussian Splatting for volume-supervised training on 3D medical-style data (CT/MR) [S1, unofficial]. It optimizes a 3D Gaussian representation against a target volume inside a mask region of interest (ROI), using volumetric and mask-aware supervision on rasterized voxel grids instead of photometric losses on rendered camera views [S1, unofficial]. Unlike the original 3DGS which uses calibrated multi-view RGB images for novel-view synthesis, AVIS uses a 3D volume plus aligned ROI mask as input, samples Gaussian initialization from voxels inside the mask (rather than sparse SfM points), and optimizes toward mask density/CT intensity via losses on rasterized voxel grids [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- **Input:** A target 3D volume (e.g., CT/MR) and an aligned ROI mask. Supported formats: `.nii`, `.nii.gz`, `.npy`, `.mhd` [S1, unofficial].
-- **Output:** A set of 3D Gaussians (positions, covariances, opacities, intensities) stored in a PLY file, optimized to match the volume inside the mask [S1, unofficial].
+- **Input:** A target 3D volume $V$ (format: `.nii`, `.nii.gz`, `.npy`, `.mhd`) and an aligned ROI mask $M$ [S1, unofficial].
+- **Output:** A set of $K$ 3D Gaussians parameterized by mean $\mu_k$, covariance $\Sigma_k$ (or Cholesky factor $L_k$), and scalar attributes (intensity $a_k$, opacity $\alpha_k$) [S1, unofficial].
 
 **Data Structures:**
-- **Volume Tensor:** Order is `[D, H, W] = [Z, Y, X]` [S1, unofficial].
-- **Gaussian Coordinates:** Normalized `[x, y, z]` positions in `[0, 1]^3` [S1, unofficial].
-- **Volume Normalization:** Volumes are normalized to `[0, 1]` by the loader. Hounsfield Units are not preserved unless the loading path is changed [S1, unofficial].
+- **Volume Tensor:** Order is $[D, H, W] = [Z, Y, X]$ [S1, unofficial].
+- **Gaussian Coordinates:** Normalized $[x, y, z]$ positions in $[0, 1]^3$ [S1, unofficial].
+- **Attributes:** Intensity and opacity can be `learned`, `sampled`, or `sampled_mean_covered` [S1, unofficial].
 
-**Algorithm Steps:**
-1. **Initialization:** Sample initial Gaussian centers from voxels inside the ROI mask. The number of points is controlled by `--init_n_points` [S1, unofficial].
-2. **Rasterization:** Rasterize the 3D Gaussians back into a voxel grid. This involves sampling the volume at Gaussian positions using trilinear interpolation via `F.grid_sample` [S1, unofficial].
-3. **Supervision:** Compute losses between the rasterized Gaussian output and the target volume/mask. The supervision target is selected via `--supervision_target` (`mask`, `ct`, or `joint`) [S1, unofficial].
-4. **Optimization:** Update Gaussian parameters (position, scale, rotation, opacity, intensity) using gradient descent. Densification and pruning can be enabled via `--enable_densification` [S1, unofficial].
-5. **Footprint Pooling (Optional):** If `enable_footprint_pooling=True` and `radius_scale > 0`, for points where `max(scale) >= max(voxel_norm)`, compute offsets in sigma units using a `[-1, 0, 1]^3` meshgrid scaled by `0.5 * radius_scale` [S1, unofficial]. Weights are Gaussian: `exp(-0.5 * offset^2)` [S1, unofficial]. Sample volume at `pts + scale * offsets`, clamp to `[0, 1]`, and average using weights [S1, unofficial].
+**Initialization:**
+1. Load volume $V$ and mask $M$.
+2. Normalize volume intensities to $[0, 1]$ using $(intensity - min) / (max - min)$ [S1, unofficial].
+   - **Pitfall:** If $(volume\_max - volume\_min) \le 10^{-8}$, return mid-gray ($0.5$ if normalized, else $volume\_min$) to avoid division by zero [S1, unofficial].
+3. Sample initial Gaussian centers from voxels inside the mask $M$. The number of points is controlled by `--init_n_points` [S1, unofficial].
 
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-import torch
-import torch.nn.functional as F
-
-def sample_volume_intensity(volume_tensor: torch.Tensor, gaussian_positions: torch.Tensor, padding_mode: str = "zeros") -> torch.Tensor:
-    """
-    Sample intensity from a 3D volume at given Gaussian positions using trilinear interpolation.
-    
-    Args:
-        volume_tensor: Tensor of shape [D, H, W].
-        gaussian_positions: Tensor of shape [N, 3] with normalized coordinates in [0, 1].
-        padding_mode: Padding mode for F.grid_sample. Default 'zeros'.
-        
-    Returns:
-        intensities: Tensor of shape [N, 1].
-    """
-    # Ensure volume is 5D for grid_sample: [1, 1, D, H, W]
-    volume_5d = volume_tensor.unsqueeze(0).unsqueeze(0)
-    
-    # Convert [0, 1] to [-1, 1] for grid_sample
-    grid = 2.0 * gaussian_positions - 1.0
-    
-    # Reshape grid for grid_sample: [1, 1, 1, N, 3]
-    grid = grid.view(1, 1, 1, -1, 3)
-    
-    # Perform trilinear interpolation (PyTorch uses "bilinear" string for 3D grids)
-    samples = F.grid_sample(
-        volume_5d,
-        grid,
-        mode="bilinear",
-        padding_mode=padding_mode,
-        align_corners=True
-    )
-    
-    # Reshape output to [N, 1]
-    intensities = samples.view(-1, 1)
-    
-    return intensities
-
-def compute_footprint_pooling(volume_tensor: torch.Tensor, gaussian_positions: torch.Tensor, 
-                              scales: torch.Tensor, radius_scale: float = 2.0, padding_mode: str = "zeros") -> torch.Tensor:
-    """
-    Optional footprint pooling for large Gaussians.
-    
-    Args:
-        volume_tensor: Tensor of shape [D, H, W].
-        gaussian_positions: Tensor of shape [N, 3] in [0, 1].
-        scales: Tensor of shape [N, 3] representing Gaussian scales.
-        radius_scale: Multiplier for standard deviations. Default 2.0.
-        padding_mode: Padding mode for F.grid_sample.
-        
-    Returns:
-        pooled_intensities: Tensor of shape [N, 1].
-    """
-    N = gaussian_positions.shape[0]
-    
-    # Create meshgrid for offsets: [-1, 0, 1]^3
-    offsets = torch.tensor([[-1, -1, -1], [-1, -1, 0], [-1, -1, 1],
-                            [-1, 0, -1], [-1, 0, 0], [-1, 0, 1],
-                            [-1, 1, -1], [-1, 1, 0], [-1, 1, 1],
-                            [0, -1, -1], [0, -1, 0], [0, -1, 1],
-                            [0, 0, -1], [0, 0, 0], [0, 0, 1],
-                            [0, 1, -1], [0, 1, 0], [0, 1, 1],
-                            [1, -1, -1], [1, -1, 0], [1, -1, 1],
-                            [1, 0, -1], [1, 0, 0], [1, 0, 1],
-                            [1, 1, -1], [1, 1, 0], [1, 1, 1]], 
-                           device=gaussian_positions.device, dtype=gaussian_positions.dtype)
-    
-    # Scale offsets by 0.5 * radius_scale
-    scaled_offsets = offsets * (0.5 * radius_scale)
-    
-    # Compute weights: exp(-0.5 * offset^2)
-    weights = torch.exp(-0.5 * scaled_offsets ** 2)
-    weights = weights / weights.sum(dim=1, keepdim=True)  # Normalize weights
-    
-    # Compute sampled positions: pts + scale * offsets
-    positions_expanded = gaussian_positions.unsqueeze(1)  # [N, 1, 3]
-    scales_expanded = scales.unsqueeze(1)                 # [N, 1, 3]
-    scaled_offsets_expanded = scaled_offsets.unsqueeze(0) # [1, 27, 3]
-    
-    sampled_positions = positions_expanded + scales_expanded * scaled_offsets_expanded  # [N, 27, 3]
-    
-    # Convert to [-1, 1] range for grid_sample
-    grid = 2.0 * sampled_positions - 1.0
-    grid = grid.view(1, 1, 1, -1, 3)  # [1, 1, 1, N*27, 3]
-    
-    # Volume tensor: [1, 1, D, H, W]
-    volume_5d = volume_tensor.unsqueeze(0).unsqueeze(0)
-    
-    # Sample
-    samples = F.grid_sample(
-        volume_5d,
-        grid,
-        mode="bilinear",
-        padding_mode=padding_mode,
-        align_corners=True
-    )
-    
-    # Reshape: [1, 1, 1, N*27, 1] -> [N, 27, 1]
-    samples = samples.view(N, 27, 1)
-    
-    # Weighted average
-    pooled_intensities = (samples * weights.unsqueeze(2)).sum(dim=1, keepdim=True)
-    
-    # Clamp to [0, 1]
-    pooled_intensities = torch.clamp(pooled_intensities, 0.0, 1.0)
-    
-    return pooled_intensities
-
-def handle_near_constant_volume(volume_tensor: torch.Tensor, normalize: bool = True) -> torch.Tensor:
-    """
-    Handle near-constant volume intensity to avoid division by zero.
-    
-    Args:
-        volume_tensor: Tensor of shape [D, H, W].
-        normalize: Whether to normalize intensity values to [0,1] range.
-        
-    Returns:
-        mid_gray: Tensor of shape [1] or volume_min.
-    """
-    volume_max = volume_tensor.max()
-    volume_min = volume_tensor.min()
-    
-    if (volume_max - volume_min) <= 1e-8:
-        if normalize:
-            return torch.tensor(0.5, device=volume_tensor.device)
-        else:
-            return volume_min
-    else:
-        return None
-```
+**Optimization Steps:**
+1. **Rasterization:** Project Gaussians onto a voxel grid. The internal working grid can be downscaled via `--volume_render_downscale_factor` [S1, unofficial].
+2. **Sampling:** Sample the Gaussian field at voxel centers. This uses trilinear interpolation via `F.grid_sample` [S1, unofficial]:
+   ```python
+   # Pseudocode for intensity sampling
+   # volume_5d shape: [1, 1, D, H, W]
+   # grid shape: [1, N, 1, 3] containing normalized [x, y, z] coordinates
+   volume_5d = volume.unsqueeze(0).unsqueeze(0)
+   samples = F.grid_sample(
+       volume_5d,
+       grid,
+       mode="bilinear",
+       padding_mode=padding_mode, # Default 'zeros'
+       align_corners=True,
+   )
+   intensities = samples.view(-1, 1)
+   ```
+   - **Footprint Pooling (Optional):** If `enable_footprint_pooling=True` and `radius_scale > 0`, for points where `max(scale) >= max(voxel_norm)`, compute offsets in sigma units using a $[-1, 0, 1]^3$ meshgrid scaled by $0.5 \times radius\_scale$ (default 2.0). Weights are Gaussian: $\exp(-0.5 \times offset^2)$. Sample volume at $pts + scale \times offsets$, clamp to $[0, 1]$, and average using weights [S1, unofficial].
+3. **Loss Computation:** Compute loss between predicted voxel intensities and target volume/mask.
+   - **Supervision Target (`--supervision_target`):**
+     - `'mask'`: Optimize against mask density.
+     - `'ct'`: Optimize against CT intensity.
+     - `'joint'`: Optimize against both.
+   - **Loss Types:**
+     - Mask loss: `mse`, `dice`, `tversky`, `kl` (`--volume_loss_type`) [S1, unofficial].
+     - CT loss: `mse`, `dice`, `tversky`, `kl` (`--ct_loss_type`) [S1, unofficial].
+   - **Weights:** `--mask_loss_weight` and `--ct_loss_weight` balance the losses in joint mode [S1, unofficial].
+4. **Densification/Pruning (Optional):** If `--enable_densification` is set, update topology based on `--densify_from_iter`, `--densification_interval`, `--densify_max_new_points`, and `--prune_min_opacity` [S1, unofficial].
+5. **Update:** Update Gaussian parameters using gradients from the loss.
 
 **Parameters:**
-- `--supervision_target`: Specifies the optimization target. Options are 'mask' (mask density), 'ct' (CT intensity), or 'joint' (both) [S1, unofficial].
-- `--volume_path`: Path to the target volume used for supervision [S1, unofficial].
-- `--mask_path`: Path to the aligned ROI mask used for initialization and masked losses [S1, unofficial].
-- `radius_scale`: Multiplier for standard deviations considered in footprint pooling. Default 2.0 [S1, unofficial].
-- `padding_mode`: Padding mode for `F.grid_sample`. Default 'zeros' [S1, unofficial].
-- `normalize`: Whether to normalize intensity values to `[0, 1]` range using `(intensity - min) / (max - min)`. Default True [S1, unofficial].
-- `--init_n_points`: Initial Gaussian count sampled from the mask. Default 250,000 [S1, unofficial].
-- `--iterations`: Number of optimization iterations. Default 1000 [S1, unofficial].
-- `--enable_densification`: Control topology updates. Default False [S1, unofficial].
-- `--densify_from_iter`: Start densification from this iteration. Default 100 [S1, unofficial].
-- `--densification_interval`: Interval between densification steps. Default 50 [S1, unofficial].
-- `--densify_max_new_points`: Max new points per iteration. Default 10,000 [S1, unofficial].
-- `--prune_min_opacity`: Prune Gaussians with opacity below this threshold. Default 0.001 [S1, unofficial].
-- `--volume_downscale_factor`: Downscales the loaded volume and mask. Default 1 [S1, unofficial].
-- `--volume_render_downscale_factor`: Downscales the internal working grid used for rasterization. Default 1 [S1, unofficial].
-- `--medical_mode`: Applies preset behavior. Options: `none`, `organ`, `vessel`, `vessel_anisotropy`. Default `none` [S1, unofficial].
-- `--intensity_mode`: Controls how per-Gaussian intensity is processed. Options: `learned`, `sampled`, `sampled_mean_covered`. Default `sampled` [S1, unofficial].
-- `--opacity_mode`: Controls how per-Gaussian opacity is processed. Options: `learned`, `sampled`. Default `sampled` [S1, unofficial].
-- `--mask_loss_weight`: Weight for mask loss in joint mode. Default 0.2 [S1, unofficial].
-- `--ct_loss_weight`: Weight for CT loss in joint mode. Default 1.0 [S1, unofficial].
-- `--volume_loss_type`: Loss for the mask branch. Options: `mse`, `dice`, `tversky`, `kl`. Default `mse` [S1, unofficial].
-- `--ct_loss_type`: Loss for the CT branch. Options: `mse`, `dice`, `tversky`, `kl`. Default `mse` [S1, unofficial].
+- `--supervision_target`: `'mask'`, `'ct'`, or `'joint'` [S1, unofficial].
+- `--volume_path`: Path to target volume [S1, unofficial].
+- `--mask_path`: Path to aligned ROI mask [S1, unofficial].
+- `--init_n_points`: Initial Gaussian count [S1, unofficial].
+- `--iterations`: Number of optimization steps [S1, unofficial].
+- `--radius_scale`: Multiplier for standard deviations in footprint pooling (default 2.0) [S1, unofficial].
+- `--padding_mode`: Padding mode for `F.grid_sample` (default 'zeros') [S1, unofficial].
+- `--normalize`: Whether to normalize intensity values to $[0, 1]$ (default True) [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
 - **GPU Nondeterminism:** GPU kernels can introduce small nondeterministic differences depending on hardware and library versions, even with seeds set [S1, unofficial].
-- **Near-Constant Volume:** If `(volume_max - volume_min) <= 1e-8`, return mid-gray (0.5 if `normalize`, else `volume_min`) to avoid division by zero or meaningless gradients [S1, unofficial].
-- **Volume Normalization:** Volumes are normalized to `[0, 1]` by the loader. Hounsfield Units are not preserved unless the loading path is changed [S1, unofficial].
-- **Reproducibility:** `train.py` seeds Python, NumPy, and PyTorch through `safe_state(...)`. Each run writes the resolved CLI namespace to `<model_path>/cfg_args` [S1, unofficial].
+- **Near-Constant Volume:** If $(volume\_max - volume\_min) \le 10^{-8}$, return mid-gray to avoid division by zero [S1, unofficial].
+- **Hounsfield Units:** Volumes are normalized to $[0, 1]$ by the loader. Hounsfield Units are not preserved unless the loading path is changed [S1, unofficial].
 
 ## Subtopics
 
 ### R2-Gaussian Training Paradigm
-A volume reconstruction method trained primarily from X-ray projections, using volumetric data only as a regularization signal, optimized to match projection consistency rather than direct volumetric fidelity [S2, unofficial]. It synthesizes X-ray projections from ground-truth volume using TIGRE toolbox, provides both synthetic projections and ground-truth volume to R2-Gaussian during reconstruction, and optimizes network to match X-ray projections [S2, unofficial]. It achieves higher 2D PSNR than volumetric methods because it is optimized for projection matching, but yields significantly lower 3D PSNR (e.g., 22.92 vs 51.54 on Aneurysm) due to lower 3D spatial fidelity [S2, unofficial]. R2-Gaussian demonstrates notably faster training times compared to AVIS [S2, unofficial]. Due to lack of support for large raw volumetric data, comparisons are limited to datasets up to the Neuron size [S2, unofficial].
+A volume reconstruction method trained primarily from X-ray projections, using volumetric data only as a regularization signal, optimized to match projection consistency rather than direct volumetric fidelity [S2, unofficial]. It synthesizes X-ray projections from ground-truth volume using TIGRE toolbox, provides both synthetic projections and ground-truth volume to R2-Gaussian during reconstruction, and optimizes the network to match X-ray projections [S2, unofficial]. It achieves higher 2D PSNR than volumetric methods because it is optimized for projection matching, but yields significantly lower 3D PSNR (e.g., 22.92 vs 51.54 on Aneurysm) due to lower 3D spatial fidelity [S2, unofficial]. Training time is notably faster [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources. R2-Gaussian demonstrates notably faster training times compared to AVIS [S2, unofficial]. AVIS training time scales with the number of iterations and densification steps [S1, unofficial].
-- **Memory Complexity:** Not given in the sources. VRAM usage is controlled by `--max_points_per_iter` [S1, unofficial].
-- **Measured Performance:** On the Aneurysm dataset, AVIS achieves a 3D PSNR of 51.54, compared to 22.92 for R2-Gaussian [S2, unofficial].
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** Not given in the sources.
 - **Scaling:** Not given in the sources.
-- **Strengths:** Direct optimization in voxel space for efficient medical data visualization; mask-aware supervision; supports various loss types (MSE, Dice, Tversky, KL) [S1, unofficial].
-- **Limitations:** GPU nondeterminism; near-constant volume handling required; Hounsfield Units not preserved by default [S1, unofficial].
-- **When to Use:** When optimizing 3D Gaussian representations against a target volume inside a mask region of interest for medical-style data (CT/MR) [S1, unofficial].
-- **When Not to Use:** When novel-view synthesis from multi-view RGB images is required (use original 3DGS) [S1, unofficial].
+- **Strengths:** Efficient medical data visualization; direct optimization in voxel space; mask-aware supervision [S1, unofficial].
+- **Limitations:** Not given in the sources.
+- **When to use:** When visualizing 3D medical data (CT/MR) and supervision from volumetric ground truth is available [S1, unofficial].
+- **When not to use:** When novel-view synthesis from multi-view RGB images is required (use original 3DGS) [S1, unofficial].
 
 ## Background
-Volumetric Gaussian Splatting (AVIS) is a research fork of 3D Gaussian Splatting adapted for volume-supervised training on 3D medical-style data (CT/MR) [S1, unofficial]. The original 3DGS paper, "3D Gaussian Splatting for Real-Time Radiance Field Rendering," focuses on novel-view synthesis from calibrated multi-view images [S1, unofficial]. AVIS retargets the Gaussian parameterization and optimization machinery to masked 3D reconstruction from medical volumes [S1, unofficial]. The method is implemented in the repository `ValentinKraft/vgs` [S1, unofficial].
+AVIS is a research fork of 3D Gaussian Splatting [S1, unofficial]. The original 3DGS paper, "3D Gaussian Splatting for Real-Time Radiance Field Rendering," targets novel-view synthesis from calibrated multi-view images [S1, unofficial]. AVIS retargets this to masked 3D reconstruction from medical volumes [S1, unofficial]. The corresponding paper is expected to be published in CGI conference proceedings [S1, unofficial].
 
 ## Sources
 [S1] ValentinKraft/vgs, https://github.com/ValentinKraft/vgs, fetched 2026-10-27 (unofficial)

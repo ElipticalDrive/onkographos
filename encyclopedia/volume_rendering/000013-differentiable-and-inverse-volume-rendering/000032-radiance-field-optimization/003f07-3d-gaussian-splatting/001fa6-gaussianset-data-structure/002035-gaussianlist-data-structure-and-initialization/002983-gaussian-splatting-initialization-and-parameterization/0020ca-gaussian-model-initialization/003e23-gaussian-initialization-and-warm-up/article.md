@@ -1,0 +1,193 @@
+# Gaussian Initialization and Warm-up
+
+Also called: Random initialization, Warm-up stage
+
+## Overview
+Gaussian Initialization and Warm-up establishes the initial state of Gaussian primitives and associated parameters before the main optimization loop begins. It solves the problem of poor convergence and incorrect placement (e.g., Gaussians floating in empty space or clustering incorrectly) that arises from random initialization in radiance-field optimization. It sets apart from sibling methods by focusing on heuristic biases (such as low-reflectivity bias) and static warm-up phases to guide Gaussians into useful positions early in training, rather than relying solely on learned initialization networks or asset generation pipelines.
+
+## How it works
+The method combines geometric initialization, parameter biasing, and a preliminary optimization phase.
+
+**Inputs:**
+*   Camera poses and intrinsics.
+*   Near and far plane distances of the camera frustum.
+*   Scene reflectivity characteristics (high vs. low).
+*   Optional: Color images (for color reconstruction loss).
+*   Optional: Deformation MLP (for dynamic scenes).
+
+**Outputs:**
+*   Initial set of Gaussians with positions, scales, rotations, opacities, and reflectivities.
+*   Initial weights for any associated neural networks (e.g., MLPs, feature grids).
+
+**Data Structures:**
+*   **Gaussian Set:** A list of $N$ Gaussians. Each Gaussian $i$ has:
+    *   Position $\mathbf{p}_i \in \mathbb{R}^3$
+    *   Scale $\mathbf{s}_i \in \mathbb{R}^3$
+    *   Rotation $\mathbf{q}_i \in \mathbb{R}^4$ (quaternion)
+    *   Opacity $\alpha_i \in [0, 1]$
+    *   Reflectivity $r_i \in [0, 1]$ (or complex phasor components for C-ToF)
+    *   Background signal $q_{bg}$ (optional, per iteration)
+
+**Steps:**
+
+1.  **Geometric Initialization:**
+    Initialize Gaussian positions $\mathbf{p}_i$ uniformly at random within the camera frustum, bounded by the near and far planes [S1].
+    *   *Note:* Positions are in real-world units.
+
+2.  **Reflectivity Initialization (Low-Reflectivity Bias):**
+    Initialize Gaussian reflectivity $r_i$ to a low value, typically between 0.01 and 0.1 [S1].
+    *   *Rationale:* High initial reflectivity (e.g., 0.5) causes Gaussians in low-reflectivity regions to be incorrectly placed far away from the camera due to inverse-square falloff terms in the loss, leading to multiple opacity peaks and interference from closer splats [S1]. Low initial reflectivity allows Gaussians in low-reflectivity regions to be placed more correctly (closer fit to true scene) [S1].
+    *   *Effect:* Gaussians in high-reflectivity regions are placed closer to the camera, occluding the scene and preventing interference, allowing more iterations to optimize their reflectivities and positions [S1].
+
+3.  **Coordinate Rescaling (for MLP-based methods):**
+    If a deformation MLP is used, rescale input coordinates to the MLP using the unambiguous depth range, ensuring most values lie within $[0, 1]$ [S1].
+    *   *MLP Weight Initialization:*
+        *   Biases initialized to zero.
+        *   Weights initialized with Xavier normal initialization.
+        *   Final linear layer weights (mapping to delta position) initialized from a normal distribution with standard deviation $10^{-5}$ to ensure stable optimization by starting Gaussian deformations from small $\delta \mathbf{x}_k$ values [S1].
+
+4.  **Random Background Signal (for C-ToF/Phasor methods):**
+    For sensitive low-reflectivity scene areas, randomly change the background signal $q_{bg}$ at each optimization iteration, uniformly between $-1$ and $1$ [S1].
+    *   *Rationale:* A low background contribution can lead to errors where Gaussians are not placed on a surface because the background already mostly reproduces the signal, resulting in only low-contributing Gaussians [S1]. Randomizing $q_{bg}$ forces Gaussians to contribute to the reconstruction [S1].
+
+5.  **Warm-up Stage:**
+    Run an initial optimization stage for 2,000 iterations assuming the scene is static [S1].
+    *   *Purpose:* This helps place many of the Gaussians into useful positions before dynamic or complex deformations are introduced [S1].
+    *   *Loss Function:* During warm-up, use a combination of raw quad reconstruction loss ($\mathcal{L}_q$), optional color reconstruction loss ($\mathcal{L}_c$), and frequency loss ($\mathcal{L}_f$) [S1]:
+        $$ \mathcal{L} = \alpha \mathcal{L}_q + \mathcal{L}_c + \beta \mathcal{L}_f $$
+        where $\mathcal{L}_q$ and $\mathcal{L}_c$ use L2 and SSIM metrics, and $\alpha = 5$ [S1].
+
+6.  **Neural Network Initialization (for Grid-based methods like APMGSRN):**
+    *   **Transformation Matrices:** Initialize to cover a near global domain with small random shears, rotations, and translations.
+        *   Diagonals sampled from $\mathcal{N}(1, 0.05)$.
+        *   Remaining entries in the first three rows sampled from $\mathcal{N}(0, 0.05)$ [S2].
+        *   *Pitfall:* This ensures each entry is non-zero, guaranteeing gradients can be used to update each entry [S2].
+    *   **Feature Grids:** Initialize from $\mathcal{U}(-0.0001, 0.0001)$, encouraging near-zero initial guesses with small randomness [S2].
+    *   **Decoder Network:** Initialize weights following Glorot and Bengio [S2].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def initialize_gaussians_and_warmup(cameras, scene_bounds, num_gaussians, use_mlp=False, use_grid=False):
+    """
+    Initialize Gaussian primitives and associated neural networks for radiance field optimization.
+    
+    Args:
+        cameras: List of camera objects with near/far planes and poses.
+        scene_bounds: Bounding box of the scene.
+        num_gaussians: Number of Gaussians to initialize.
+        use_mlp: Whether to use a deformation MLP.
+        use_grid: Whether to use feature grids (APMGSRN).
+        
+    Returns:
+        gaussians: List of initialized Gaussian parameters.
+        mlp: Initialized MLP (if use_mlp).
+        grids: Initialized feature grids (if use_grid).
+    """
+    gaussians = []
+    
+    # Step 1: Geometric Initialization
+    for i in range(num_gaussians):
+        # Sample position uniformly within camera frustum (near to far)
+        # Note: In practice, this requires projecting random points in camera space
+        # and transforming to world space using camera pose.
+        cam = cameras[i % len(cameras)]
+        p = sample_random_point_in_frustum(cam)
+        
+        # Step 2: Reflectivity Initialization (Low-Reflectivity Bias)
+        # Use low reflectivity (0.01 to 0.1) to prevent incorrect placement in low-reflectivity regions
+        reflectivity = random.uniform(0.01, 0.1)
+        
+        # Initialize other parameters (scales, rotations, opacity) to defaults or small random values
+        scale = [1.0, 1.0, 1.0]
+        rotation = [1.0, 0.0, 0.0, 0.0] # Identity quaternion
+        opacity = 0.5
+        
+        gaussians.append({
+            'position': p,
+            'scale': scale,
+            'rotation': rotation,
+            'opacity': opacity,
+            'reflectivity': reflectivity
+        })
+    
+    # Step 3: MLP Initialization (if applicable)
+    mlp = None
+    if use_mlp:
+        mlp = MLP(num_layers=8, hidden_size=256)
+        # Xavier normal initialization for weights
+        mlp.weights = xavier_normal_init(mlp.weights)
+        # Biases to zero
+        mlp.biases = [0.0] * len(mlp.biases)
+        # Final layer weights from N(0, 1e-5)
+        mlp.final_layer_weights = normal_init(std=1e-5)
+        
+    # Step 6: Grid Initialization (if applicable)
+    grids = None
+    if use_grid:
+        grids = FeatureGrids()
+        # Transformation matrices: Diagonals N(1, 0.05), others N(0, 0.05)
+        grids.transformation_matrices = init_transformation_matrices()
+        # Feature grids: U(-0.0001, 0.0001)
+        grids.feature_values = uniform_init(low=-0.0001, high=0.0001)
+        # Decoder weights: Glorot uniform/normal
+        grids.decoder_weights = glorot_init(grids.decoder_weights)
+        
+    return gaussians, mlp, grids
+
+def warmup_stage(gaussians, cameras, images, mlp=None, grids=None, num_iterations=2000):
+    """
+    Run a static warm-up phase to place Gaussians in useful positions.
+    """
+    for iteration in range(num_iterations):
+        # Step 4: Random Background Signal (for C-ToF)
+        # Randomly change background signal between -1 and 1
+        q_bg = random.uniform(-1, 1)
+        
+        # Render current Gaussians
+        rendered_images = render_gaussians(gaussians, cameras, q_bg=q_bg, mlp=mlp, grids=grids)
+        
+        # Compute Loss
+        # L = alpha * Lq + Lc + beta * Lf
+        # Lq: Raw quad reconstruction loss (L2 + SSIM)
+        # Lc: Color reconstruction loss (L2 + SSIM)
+        # Lf: Frequency loss
+        loss = compute_loss(rendered_images, images, alpha=5)
+        
+        # Backpropagate and update Gaussians and networks
+        update_parameters(gaussians, mlp, grids, loss)
+        
+    return gaussians, mlp, grids
+```
+
+## Subtopics
+
+### [Dense Initialization (DI)](10026-dense-initialization-di.md)
+An initialization strategy where matching networks are used to predict millions of small Gaussians densely covering all visible surfaces at the outset, instead of progressively refining a sparse set of large Gaussians [10026-dense-initialization-di.md].
+
+### [Recurrent Gaussian Update](10974-recurrent-gaussian-update.md)
+A recurrent network that iteratively refines initial Gaussian predictions by predicting incremental updates to Gaussian parameters and hidden states based on rendering errors from input views [10974-recurrent-gaussian-update.md].
+
+### Low-Reflectivity Bias
+A specific heuristic within Gaussian Initialization and Warm-up where initial reflectivity is set low (0.01 to 0.1) to prevent Gaussians in low-reflectivity regions from being incorrectly placed far away due to inverse-square falloff [S1]. This allows Gaussians in high-reflectivity regions to be placed closer to the camera, occluding the scene and preventing interference, which leads to more accurate placement and optimization of reflectivity and position [S1]. Combining this with occupancy bias is effective for both low and high reflectivity regions, whereas using only occupancy bias harms low-reflectivity regions [S1].
+
+### APMGSRN Initialization
+A specific initialization protocol for Adaptively Placed Multi-Grid Scene Representation Networks [S2]. It initializes transformation matrices to cover a near global domain with small random shears, rotations, and translations (diagonals from $\mathcal{N}(1, 0.05)$, other entries from $\mathcal{N}(0, 0.05)$) to ensure non-zero entries and gradient flow [S2]. Feature grids are initialized from $\mathcal{U}(-0.0001, 0.0001)$ and decoder weights follow Glorot and Bengio [S2].
+
+## Operating characteristics
+*   **Time Complexity:** The warm-up stage adds a fixed cost of 2,000 iterations [S1]. This is a small overhead compared to the total training time but significantly improves convergence speed and final quality.
+*   **Memory Complexity:** Initialization adds negligible memory overhead compared to the final Gaussian set. MLP and grid initializations add memory proportional to the network size, which is standard for neural radiance fields.
+*   **Performance:** Low-reflectivity bias and warm-up stages lead to more accurate placement of Gaussians, especially in low-reflectivity regions, reducing the number of iterations needed for convergence and improving final reconstruction quality [S1]. APMGSRN initialization reduces training time to as short as 40 seconds for large-scale data [S2].
+*   **Strengths:** Simple to implement, effective for both static and dynamic scenes, handles low-reflectivity regions well, ensures gradient flow in neural networks.
+*   **Limitations:** Requires careful tuning of hyperparameters (e.g., reflectivity range, warm-up iterations). Random background signal may introduce noise if not properly balanced.
+*   **When to use:** When initializing Gaussians for radiance field optimization, especially for dynamic scenes or scenes with varying reflectivity.
+*   **When not to use:** When using learned initialization networks (e.g., Dense Initialization) or when training time is extremely constrained and warm-up is not feasible.
+
+## Background
+Gaussian Initialization and Warm-up is a core component of 3D Gaussian Splatting and its variants, particularly in dynamic and time-of-flight (C-ToF) applications. The concept of warm-up stages and heuristic initialization biases was introduced to address the instability of random initialization in radiance field optimization. The low-reflectivity bias and random background signal techniques were specifically developed for optimizing depth indirectly in dynamic radiance fields using C-ToF data [S1]. The APMGSRN initialization was developed for large-scale data visualization using scene representation networks [S2].
+
+## Sources
+[S1] Time of the Flight of the Gaussians: Optimizing Depth Indirectly in Dynamic Radiance Fields, https://doi.org/10.1109/cvpr52734.2025.01958, fetched 2026-10-26
+[S2] Adaptively Placed Multi-Grid Scene Representation Networks for Large-Scale Data Visualization, https://doi.org/10.1109/tvcg.2023.3327194, fetched 2026-10-26

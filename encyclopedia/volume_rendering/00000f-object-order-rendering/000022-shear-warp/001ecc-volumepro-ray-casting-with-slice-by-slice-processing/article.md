@@ -1,136 +1,163 @@
 # VolumePro Ray-Casting with Slice-by-Slice Processing
 
-Also called: VolumePro rendering, VoxelBlaster rendering
+Also called: Raycasting Hardware (VolumePRO), VolumePro rendering, VoxelBlaster rendering
 
 ## Overview
-VolumePro is a specialized hardware architecture that implements object-space ray-casting with parallel slice-by-slice processing to achieve real-time frame rates on PC-class computers [S1, unofficial]. It differs from texture-mapping approaches by supporting gradient estimation and per-sample Phong illumination in real-time, and from pre-processing approaches by allowing immediate visual feedback during parameter changes without lengthy recomputation [S1, unofficial]. It builds on the Shear-warp method [24-shear-warp.md] by casting rays from the base plane (the volume face most parallel to the viewing plane) into the dataset, projecting the resulting base plane image onto the final image plane via a 3D transformation and 2D warping [S1, unofficial].
+VolumePro is a specialized hardware architecture that implements real-time volume rendering by combining object-space ray-casting with parallel slice-by-slice processing [S2, S1, unofficial]. It solves the performance bottleneck of traditional ray-casting by reading each voxel from memory exactly once per frame and recirculating data through a pipelined ASIC to achieve high frame rates on PC-class hardware [S2, unofficial]. Unlike texture-mapping approaches, it supports real-time gradient estimation and per-sample Phong illumination; unlike pre-processing methods, it allows immediate visual feedback during parameter changes without re-computation [S2, unofficial]. It builds on the Shear-warp method [24-shear-warp.md] to ensure uniform data access and a one-to-one mapping of ray-samples onto voxels [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Rectilinear isotropic or anisotropic volume data (8-bit or 12-bit scalar voxels), viewing parameters (parallel projection) [S1, unofficial].
-- Output: Final rendered image on the image plane [S1, unofficial].
+*   **Input:** Rectilinear isotropic or anisotropic volume data (8-bit or 12-bit scalar voxels), viewing parameters (parallel projection), and transfer function/illumination parameters.
+*   **Output:** A composited 2D image on the final image plane.
 
 **Data Structures:**
-The architecture relies on specific FIFOs and shift registers to recirculate voxel data so it is available precisely when needed, as each voxel is read from memory exactly once per frame [S1, unofficial].
-- **Voxel Memory:** Holds up to 128 MB of volume data [S1, unofficial]. Data is accessed in slice-by-slice, beam-by-beam order [S1, unofficial].
-- **Voxel Slice FIFO:** Stores input voxels to maintain neighborhood context for interpolation [S1, unofficial].
-- **Voxel Beam FIFO:** Stores voxels along the beam direction [S1, unofficial].
-- **Voxel Shift Register:** Stores individual voxels for immediate shift operations [S1, unofficial].
-- **Sample Slice FIFO / Sample Beam FIFO / Sample Shift Register:** Buffers for interpolated sample values and gradients, sized to hold two full slices, two full beams, and two extra samples to handle gradient estimation latency [S1, unofficial].
+The system relies on specific FIFOs and shift registers to manage data flow through the pipeline stages [S2, unofficial]:
+1.  **Voxel Memory:** Holds up to 128 MB of volume data. Accessed in slice-by-slice, beam-by-beam order [S2, unofficial].
+2.  **Voxel Slice FIFO:** Stores input voxels to provide the current slice's data to the Interpolation unit [S2, unofficial].
+3.  **Voxel Beam FIFO:** Stores voxels to provide the current beam's data to the Interpolation unit [S2, unofficial].
+4.  **Voxel Shift Register:** Stores individual voxels to provide the immediate neighborhood for trilinear interpolation [S2, unofficial].
+5.  **Sample Slice FIFO / Sample Beam FIFO / Sample Shift Register:** Buffer intermediate sample values for the Gradient Estimation unit [S2, unofficial].
 
-**Pipeline Structure:**
-The vg500 rendering chip contains four parallel rendering pipelines [S1, unofficial]. Each pipeline accepts a new voxel every cycle and forwards intermediate results every cycle without pipeline delays [S1, unofficial].
+**Pipeline Stages:**
+The vg500 ASIC contains four parallel rendering pipelines. Each pipeline processes data in the following order [S1, S2, unofficial]:
+1.  **Interpolation:** Converts voxel streams to sample streams.
+2.  **Gradient Estimation:** Estimates gradients for illumination.
+3.  **Classification/Shading:** Applies transfer functions and Phong shading.
+4.  **Compositing:** Accumulates samples using front-to-back blending.
 
-**Steps:**
+**Numbered Steps:**
 
-1.  **Ray Casting and Base Plane Projection:**
-    Rays are cast into the dataset from each pixel on the base plane (the face of the volume most parallel to the viewing plane) rather than in image space [S1, unofficial]. The resulting base plane image is projected onto the final image plane using a 3D transformation and a 2D image re-sampling operation (warp) [S1, unofficial]. VolumePro uses 2D texture mapping on a companion graphics card for this final warp [S1, unofficial].
+1.  **Ray Casting Setup (Object-Order):**
+    Instead of casting rays from image pixels, rays are cast from each pixel on the "base plane" (the face of the volume data most parallel to the viewing plane) into the dataset [S2, unofficial]. This aligns with the Shear-warp permutation step [24-shear-warp.md].
 
-2.  **Slice-by-Slice Traversal:**
-    Voxels are read from memory in planes (slices) parallel to the base plane [S1, unofficial]. Within a slice, voxels are read as a scanline (voxel beam) in top-to-bottom order [S1, unofficial]. This ensures regular, object-order data access [S1, unofficial].
+2.  **Weight Generation:**
+    For each slice, generate trilinear interpolation weights ($w_x, w_y, w_z$) using a Digital Differential Analyzer (DDA) algorithm [S2, unofficial].
+    *   Compute a new set of weights prior to the beginning of each slice based on the ray angle to the base plane and the initial offset between rays and voxels on the first slice [S2, unofficial].
+    *   Since rays are parallel and spaced identically to pixel/voxel positions, a single weight set suffices for all samples in a slice [S2, unofficial].
 
-3.  **Interpolation:**
-    Each sample value is derived from its eight nearest neighboring voxels using trilinear interpolation [S1, unofficial].
-    -   **Weights:** Trilinear weights $w_x, w_y, w_z$ are generated using a Digital Differential Analyzer (DDA) algorithm [S1, unofficial].
-    -   **Weight Generation:** A single set of weights is sufficient for all samples of a slice because rays are parallel and spaced identically to pixel positions on the base plane [S1, unofficial]. The Weight Generator computes a new set of weights prior to the beginning of each slice, based on the ray angle to the base plane and the initial offset between rays and voxels on the first slice [S1, unofficial].
-    -   **Precision:** Interpolated sample values are rounded to 12-bit precision [S1, unofficial]. Internal datapaths are 12-bits wide [S1, unofficial].
+3.  **Voxel Fetching and Interpolation:**
+    *   Read voxels from Voxel Memory in slice-by-slice, beam-by-beam order, one voxel per cycle [S2, unofficial].
+    *   Use the Voxel Slice FIFO, Voxel Beam FIFO, and Voxel Shift Register to hold the eight nearest neighboring voxels required for trilinear interpolation [S2, unofficial].
+    *   Calculate the sample value $S$ using trilinear interpolation:
+        $$ S = \sum_{i=0}^{1} \sum_{j=0}^{1} \sum_{k=0}^{1} w_x^i w_y^j w_z^k V(x+i, y+j, z+k) $$
+        where $V$ is the voxel value and $w$ are the weights generated in Step 2 [S2, unofficial].
+    *   Round the interpolated sample value to 12-bit precision [S2, unofficial].
 
 4.  **Gradient Estimation:**
-    Gradients are estimated using a central difference gradient filter [S1, unofficial].
-    -   **Hybrid Approach:** The estimation is divided. Z-gradients are estimated from voxel values and then interpolated to sample points. X- and Y-gradients are estimated from the interpolated sample points themselves [S1, unofficial].
-    -   **Latency Handling:** Because the gradient at a sample point depends on the previous, current, and next slices, and the next slice is not yet available when the current sample arrives, the Gradient Estimation unit operates one voxel, one beam, and one slice behind the Interpolation unit [S1, unofficial]. When sample $S(x+1, y+1, z+1)$ arrives, the unit completes the gradient estimation for $S(x, y, z)$ [S1, unofficial].
+    *   Estimate gradients using a central difference filter [S2, unofficial].
+    *   **Z-Gradient:** Estimated from voxel values directly, then interpolated to sample points [S2, unofficial].
+    *   **X- and Y-Gradients:** Estimated from the interpolated sample points themselves [S2, unofficial].
+    *   **Latency Handling:** The Gradient Estimation unit operates one voxel, one beam, and one slice behind the Interpolation unit. When sample $S(x+1, y+1, z+1)$ arrives, the unit has access to the previous, current, and next slices required to compute the gradient for $S(x,y,z)$ [S2, unofficial].
+    *   Maintain two full slices of buffering, plus two full beams, plus two extra samples in the Sample Slice/Beam FIFOs and Shift Registers [S2, unofficial].
 
-5.  **Shading and Compositing:**
-    The system supports per-sample Phong illumination and gradient magnitude modulation of opacity [S1, unofficial]. The pipeline composites samples as they are processed [S1, unofficial].
+5.  **Classification and Shading:**
+    *   Apply classification (transfer function) to map sample value to opacity $\alpha$ and color $C$.
+    *   Apply Phong illumination using the estimated gradient [S2, unofficial].
+
+6.  **Compositing:**
+    *   Composite the sample into the accumulating color and opacity using the front-to-back Porter-Duff "over" operator [S2, unofficial]:
+        $$ C_{new} = C_{slice} \cdot \alpha_{slice} + C_{accum} \cdot (1 - \alpha_{slice}) $$
+        $$ \alpha_{new} = \alpha_{slice} + \alpha_{accum} \cdot (1 - \alpha_{slice}) $$
+    *   Early ray termination is applied when $\alpha_{accum}$ exceeds a threshold (e.g., 0.95) [S2, unofficial][S11, abstract only, unofficial].
+
+7.  **Warping:**
+    *   Project the resulting base plane image onto the final image plane using a 3D transformation and a 2D image re-sampling operation (warp) [S2, unofficial].
+    *   This step uses 2D texture mapping on a companion graphics card [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def volumepro_render(volume, view_params, image_dims):
-    width, height = image_dims
-    # Initialize base plane image buffer for front-to-back compositing [S1, unofficial]
-    base_plane = [[(0.0, 0.0) for _ in range(width)] for _ in range(height)]
+# VolumePro Pipeline Simulation (Single Pipeline)
+# Assumes pre-computed shear-warp parameters and base plane mapping
+
+def volumepro_render(volume_data, view_params):
+    # 1. Setup
+    base_plane = get_base_plane_faces(volume_data, view_params)
+    # Initialize accumulators for the base plane image
+    base_color = zeros_like(base_plane)
+    base_alpha = zeros_like(base_plane)
     
-    # Pre-compute trilinear interpolation weights using DDA [S1, unofficial]
-    # Weights are constant for all samples in a slice due to parallel rays [S1, unofficial]
-    wx, wy, wz = generate_dda_weights(view_params.ray_angle, view_params.initial_offset)
-    
-    # Pipeline processes data slice-by-slice, beam-by-beam [S1, unofficial]
-    for z in range(volume.depth):
-        for y in range(volume.height):
-            # Read voxel beam from memory (once per frame) [S1, unofficial]
-            voxel_beam = read_volume_beam(volume, z, y)
-            
-            # Interpolation Unit: accesses 8 nearest neighbors via FIFOs [S1, unofficial]
-            sample_beam = []
-            for i, voxel in enumerate(voxel_beam):
-                neighbors = get_trilinear_neighborhood(voxel_beam, i)
-                sample = trilinear_interpolate(neighbors, wx, wy, wz)
-                sample = round_12bit(sample) # Internal datapaths are 12-bit [S1, unofficial]
-                sample_beam.append(sample)
-            
-            # Gradient Estimation Unit: operates 1 voxel/beam/slice behind interpolation [S1, unofficial]
-            # Buffers 2 slices, 2 beams, 2 samples in Sample FIFOs [S1, unofficial]
-            gradient_beam = []
-            for i, sample in enumerate(sample_beam):
-                # Z-gradient from voxel values, interpolated to sample points [S1, unofficial]
-                # X/Y gradients from interpolated sample points [S1, unofficial]
-                grad = central_difference_gradient(sample_beam, voxel_beam, i)
-                gradient_beam.append(grad)
-            
-            # Shading and Compositing into base plane [S1, unofficial]
-            for i in range(len(sample_beam)):
-                color, alpha = phong_shade(sample_beam[i], gradient_beam[i])
-                base_plane[y][i] = composite_porter_duff(base_plane[y][i], color, alpha)
-    
-    # Warp base plane image to final image plane via 2D texture mapping [S1, unofficial]
-    final_image = warp_2d_image(base_plane, view_params.warp_matrix, width, height)
+    # 2. Iterate over slices (perpendicular to principal axis)
+    for slice_idx in range(volume_data.depth):
+        # Generate weights for this slice based on ray angle and offset
+        wx, wy, wz = generate_dda_weights(view_params, slice_idx)
+        
+        # 3. Iterate over beams (scanlines within the slice)
+        for beam_idx in range(volume_data.height):
+            # 4. Iterate over voxels in the beam
+            # Note: In hardware, this is a stream of 1 voxel/cycle
+            for voxel_idx in range(volume_data.width):
+                # Fetch neighbors from FIFOs/Shift Registers
+                # Voxel Memory access pattern: slice-by-slice, beam-by-beam
+                neighbors = get_trilinear_neighbors(
+                    volume_data, slice_idx, beam_idx, voxel_idx
+                )
+                
+                # Interpolation
+                sample_value = trilinear_interpolate(neighbors, wx, wy, wz)
+                sample_value = round_to_12bit(sample_value)
+                
+                # Gradient Estimation (Delayed by 1 voxel/beam/slice)
+                # Requires previous, current, next slices
+                if has_enough_buffer_data():
+                    grad_z = estimate_z_gradient_from_voxels(
+                        volume_data, slice_idx, beam_idx, voxel_idx
+                    )
+                    grad_x, grad_y = estimate_xy_gradient_from_samples(
+                        sample_buffer, slice_idx, beam_idx, voxel_idx
+                    )
+                    gradient = (grad_x, grad_y, grad_z)
+                else:
+                    gradient = (0, 0, 0) # Placeholder for pipeline stall/initialization
+                
+                # Classification and Shading
+                alpha_slice, color_slice = classify_and_shade(
+                    sample_value, gradient, view_params.transfer_function
+                )
+                
+                # Compositing (Front-to-Back)
+                # Update base plane accumulator
+                base_color[slice_idx, beam_idx, voxel_idx] = (
+                    color_slice * alpha_slice + 
+                    base_color[slice_idx, beam_idx, voxel_idx] * (1 - alpha_slice)
+                )
+                base_alpha[slice_idx, beam_idx, voxel_idx] = (
+                    alpha_slice + 
+                    base_alpha[slice_idx, beam_idx, voxel_idx] * (1 - alpha_slice)
+                )
+                
+                # Early Ray Termination
+                if base_alpha[slice_idx, beam_idx, voxel_idx] > 0.95:
+                    break # Skip remaining samples for this ray
+                    
+    # 5. Warp to Final Image
+    final_image = warp_2d_texture_mapping(base_color, base_alpha, view_params.warp_matrix)
     return final_image
-
-# Self-contained helper definitions
-def generate_dda_weights(ray_angle, initial_offset):
-    # DDA algorithm generates weights based on ray angle and initial offset [S1, unofficial]
-    # Standard implementation computes fractional offsets for trilinear interpolation
-    return 0.5, 0.5, 0.5 # [G] DDA weight generation logic
-
-def get_trilinear_neighborhood(beam, idx):
-    # Returns 8 voxels surrounding the sample point using FIFO/Shift Register buffering [S1, unofficial]
-    return [beam[max(0, idx-1)], beam[idx], beam[min(len(beam)-1, idx+1)]] # [G] Simplified neighbor access
-
-def trilinear_interpolate(neighbors, wx, wy, wz):
-    # Standard trilinear interpolation formula
-    return sum(neighbors) * wx * wy * wz # [G] Placeholder for actual formula
-
-def round_12bit(value):
-    return round(value * 4095) / 4095 # [G] 12-bit precision scaling
-
-def central_difference_gradient(samples, voxels, idx):
-    # Z-gradient from voxels, X/Y from samples [S1, unofficial]
-    return (samples[idx+1] - samples[idx-1]) / 2.0 # [G] Central difference approximation
-
-def phong_shade(sample, gradient):
-    # Per-sample Phong illumination [S1, unofficial]
-    return sample, 1.0 # [G] Simplified shading
-
-def composite_porter_duff(current, new_color, new_alpha):
-    # Porter-Duff "over" operator
-    return (new_color * new_alpha + current[0] * (1 - new_alpha), current[1] + new_alpha * (1 - new_alpha))
-
-def warp_2d_image(image, matrix, w, h):
-    # 2D texture mapping warp to final image plane [S1, unofficial]
-    return image # [G] Standard affine warp
 ```
 
+**Parameters:**
+*   **Voxel Bit Depth:** 8-bit or 12-bit input; 12-bit internal datapaths [S2, unofficial].
+*   **Memory Capacity:** Up to 128 MB [S2, unofficial].
+*   **Performance:** >500 million interpolated, Phong illuminated, composited samples per second [S2, unofficial].
+*   **Resolution:** $256^3$ volume at 30 Hz (orthographic) [S1, S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Gradient Latency:** The next slice is not available when the current sample arrives. The system handles this by delaying gradient estimation by one voxel, one beam, and one slice relative to interpolation [S2, unofficial].
+*   **Precision:** Interpolated values are rounded to 12-bit precision [S2, unofficial].
+
 ## Operating characteristics
--   **Performance:** Renders more than 500 million interpolated, Phong illuminated, composited samples per second [S1, unofficial].
--   **Capacity:** Sufficient to render a $256 \times 256 \times 256$ volume at 30 frames per second [S1, unofficial].
--   **Memory:** Supports up to 128 MB of volume memory [S1, unofficial].
--   **Strengths:** Real-time performance on PC hardware; supports gradient-based shading and opacity modulation; immediate visual feedback for parameter changes [S1, unofficial].
--   **Limitations:** Hardware-specific implementation (vg500 chip); currently supports only parallel projections [S1, unofficial].
+*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as each voxel is read exactly once [S2, unofficial].
+*   **Memory Complexity:** $O(1)$ on-chip buffer requirements relative to volume size, due to the slice-by-slice processing and FIFO-based recirculation. Off-chip memory scales with volume size (up to 128 MB) [S2, unofficial].
+*   **Performance:** Renders $256^3$ volumes at 30 Hz [S2, unofficial]. Throughput exceeds 500 million samples/second [S2, unofficial].
+*   **Strengths:** Real-time gradient estimation and Phong shading (unlike texture mapping); immediate visual feedback for parameter changes (unlike pre-processing); high performance on PC hardware [S2, unofficial].
+*   **Limitations:** Specialized hardware (ASIC); limited to parallel projections in the described implementation [S2, unofficial].
+*   **When to use:** Real-time volume visualization on standard PCs where gradient-based shading is required.
+*   **When not to use:** When perspective projection with complex camera motion is the primary requirement without companion GPU warp support, or when software-only solutions are mandated.
 
 ## Background
-VolumePro is based on the Cube-4 volume rendering architecture developed by SUNY at Stony Brook and Enhanced Memory Cube-4 (EM-Cube) [S1, unofficial]. It was developed by Hanspeter Pfister, Jan Hardenbergh, Jim Knittel, Hugh Lauer, and Larry Seiler at Mitsubishi Electric Research Laboratories (MERL) [S1, unofficial]. The system was described in a technical report (TR-99-19) in April 1999 and submitted to SIGGRAPH '99 [S1, unofficial]. It is the world's first single-chip real-time volume rendering system for PC class computers [S1, unofficial].
+VolumePro was developed by Mitsubishi Electric Research Laboratories (MERL) and presented in 1999 [S1, S2, unofficial]. It is based on the Cube-4 architecture developed by SUNY at Stony Brook and Enhanced Memory Cube-4 (EM-Cube) [S2, unofficial]. The system consists of a PCI board containing the VoxelBlaster vg500 ASIC and up to 128 MB of memory, used in conjunction with a companion 3D graphics card for the final warp step [S2, unofficial].
 
 ## Sources
-[S1] The VolumePro Real-Time Ray-Casting System, https://www.merl.com/publications/docs/TR99-19.pdf, fetched 2026-10-26 (unofficial)
+[S1] Volume Ray Casting Techniques, https://www.scribd.com/document/102700078/03-raycasting, fetched 2026-10-25 (unofficial)
+[S2] The VolumePro Real-Time Ray-Casting System, https://www.merl.com/publications/docs/TR99-19.pdf, fetched 2026-10-26 (unofficial)

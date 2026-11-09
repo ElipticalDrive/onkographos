@@ -1,106 +1,31 @@
 # Affine-Transformations Method
+
 Also called: Hybrid method, Image warping method
 
 ## Overview
-The Affine-Transformations Method is a hybrid volume rendering technique that uses affine transformations to warp volume slices or the entire volume into the image plane so that data samples become pixel-aligned, after which the transformed data is composited to calculate visibility [S1, unofficial]. It is distinct from pure feed-backward (ray-casting) methods, which cast rays into the data set, and pure feed-forward (element-tossing) methods, which map data elements directly to the image plane [S1, unofficial]. By aligning samples with pixels before compositing, it bridges the gap between these two extremes, leveraging the efficiency of feed-forward warping while maintaining the visibility handling of feed-backward approaches [S1, unofficial].
+The Affine-Transformations Method is a hybrid volume rendering technique that uses affine transformations to warp volume slices or the entire volume into the image plane so that data samples become pixel-aligned, after which the transformed data is composited to calculate visibility [S1, unofficial]. It is distinct from pure feed-backward (ray-casting) methods, which cast rays into the data set, and pure feed-forward (element-tossing) methods, which map data elements directly to the image plane [S1, unofficial].
 
 ## Shared principles
-The method builds on [Shear-warp](24-shear-warp.md). The family shares the core mechanism of transforming volume data via affine operations to achieve pixel alignment before compositing [S1, unofficial]. This process generally involves two main phases: warping and compositing [S1, unofficial].
-1. **Warping (Resampling):** The volume data (or individual slices) is resampled using affine transformations [S1, unofficial]. The goal is to transform the data such that the voxel samples align with the pixel grid of the output image [S1, unofficial]. This often involves a two-pass image warping approach [S1, unofficial]. To avoid resampling artifacts, particularly information loss during minification, it is recommended to perform all magnification passes before minification passes [S1, unofficial].
-2. **Compositing:** Once the data is pixel-aligned, the renderer scans the depth columns of pixels to determine the final color [S1, unofficial]. This step typically involves compositing the transformed data, often using multiple data sets (such as substance, opacity, and gradient) to generate shaded slices before final composition [S1, unofficial].
-The method assumes that the viewing transformation can be approximated or decomposed into affine components suitable for this warping strategy [S1, unofficial]. While the parent Shear-warp method factorizes the view into shear and warp steps, the Affine-Transformations family focuses on the general application of affine warping to achieve pixel alignment, which can be applied to slices or the whole volume depending on the specific variant [S1, unofficial].
+The Affine-Transformations Method builds on [Shear-warp](24-shear-warp.md). While Shear-warp decomposes the view into permutation, shear, and 2D warp components to align rays with slice normals, the broader Affine-Transformations family generalizes this by applying arbitrary affine transformations to warp the volume data (or slices) into a space where they are pixel-aligned with the image plane [S1, unofficial]. Once the data is pixel-aligned, the renderer scans the depth columns to determine pixel color, typically using compositing [S1, unofficial].
 
 ## Subtopics
 
+### [Warp-Space Affine Mixture](4115-warp-space-affine-mixture.md)
+Warp-Space Affine Mixture is a warping method where affine mixture weights are computed in warped space, outperforming models with no warping, convolutional warps, or world-space mixture. It addresses the limitations of single affine warps and freely-varying template points by using a spatial mixture of affine transformations to produce an inverse warp field, effectively extending linear blend skinning to volumetric space.
+
 ### Drebin-Carpenter-Hanrahan Warping
-This is the foundational variant of the affine transformation method, introduced by Drebin, Carpenter, and Hanrahan in 1988 [S1, unofficial]. It is a feed-forward algorithm that uses conventional two-pass image warping to resample volume elements in each slice so the resulting slices are pixel-aligned [S1, unofficial]. The method converts the warped data set into multiple data sets: substance, opacity, gradient, and possibly a mask [S1, unofficial]. These multiple data sets are then used to generate shaded slices, which are composited together to form the final image [S1, unofficial].
+This variant, introduced by Drebin, Carpenter, and Hanrahan in 1988, uses conventional two-pass image warping to resample volume elements in each slice so the resulting slices are pixel-aligned [S1, unofficial]. The renderer then converts the warped data set into multiple data sets: substance, opacity, gradient, and possibly mask [S1, unofficial]. These multiple data sets are used to generate shaded slices, which are composited together to form the final image [S1, unofficial]. Hanrahan later extended this to a three-pass algorithm, developing affine-mapping equations and suggesting that making all magnification passes before minification passes avoids resampling artifacts where information is lost during minification [S1, unofficial].
 
 ### World-Space Affine Mixture
-A baseline warping variant where the affine mixture is performed in world space rather than warped space [S2]. In this model, the affine transform $A_i(\mathbf{x})$ and the normalized mixture weight $a_i(\mathbf{x})$ are defined as:
-$$ A_i(\mathbf{x}) = \mathbf{R}_i(\mathbf{s}_i \circ (\mathbf{x} - \mathbf{t}_i)) $$
-$$ a_i(\mathbf{x}) = \frac{w_i(\mathbf{x})}{\sum_j w_j(\mathbf{x})} $$
-where $\mathbf{R}_i$ is rotation, $\mathbf{s}_i$ is scale, $\mathbf{t}_i$ is translation, $w_i$ is the weight volume, and $a_i$ is the normalized mixture weight [S2]. The primary pitfall of this approach is that since mixture weights are not warped, the decoder must match any motion of the template by moving the mixture weights, which is less efficient than warping the weights in warp space [S2].
+A baseline warping variant where the affine mixture is performed in world space rather than warped space, meaning mixture weights are not warped before evaluation [S2]. The affine transform is defined as $A_i(\mathbf{x}) = \mathbf{R}_i(\mathbf{s}_i \circ (\mathbf{x} - \mathbf{t}_i))$ and the normalized mixture weight as $a_i(\mathbf{x}) = \frac{w_i(\mathbf{x})}{\sum_j w_j(\mathbf{x})}$, where $\mathbf{R}_i$ is rotation, $\mathbf{s}_i$ is scale, $\mathbf{t}_i$ is translation, and $w_i$ is the weight volume [S2]. A key pitfall is that since mixture weights are not warped, the decoder must match any motion of the template by moving the mixture weights, which is less efficient [S2].
 
-### [Warp-Space Affine Mixture](4115-warp-space-affine-mixture.md)
-A warping method where the affine mixture weights are computed in warped space [4115-warp-space-affine-mixture.md]. This variant outperforms models with no warping, convolutional warps, or world-space mixture [4115-warp-space-affine-mixture.md]. By computing weights in the warped space, the model better accounts for the geometric transformations, leading to higher quality results in dynamic scenes such as moving hands, swinging hair, and dry ice smoke [4115-warp-space-affine-mixture.md].
-
-## Algorithm
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-import numpy as np
-
-def affine_transform_render(volume, M_view, transfer_function, width, height):
-    # 1. Permutation: Determine principal axis (0:x, 1:y, 2:z)
-    # Extract view direction from M_view (assuming column 2 is view vector)
-    view_dir = M_view[:3, 2]
-    principal_axis = int(np.argmax(np.abs(view_dir)))
-    
-    # Construct permutation matrix P to align principal axis with Z
-    P = np.eye(4)
-    if principal_axis == 0: # X to Z
-        P[[0, 2], [0, 2]] = P[[2, 0], [2, 0]]
-    elif principal_axis == 1: # Y to Z
-        P[[1, 2], [1, 2]] = P[[2, 1], [2, 1]]
-        
-    # 2. Shear: Calculate shear coefficients
-    vo = view_dir / np.linalg.norm(view_dir)
-    sx = -vo[0] / vo[2]
-    sy = -vo[1] / vo[2]
-    
-    # Parallel projection shear matrix
-    S = np.array([
-        [1, 0, sx, 0],
-        [0, 1, sy, 0],
-        [0, 0, 1, 0],
-        [0, 0, 0, 1]
-    ])
-    
-    # Pre-compute RLE structures for the volume along the principal axis [G]
-    # Not given in the sources.
-    rle_data = None 
-    
-    num_slices = volume.shape[principal_axis]
-    intermediate_image = np.zeros((height, width, 4))
-    
-    # 3. Composite: Iterate through slices in front-to-back order
-    for slice_idx in range(num_slices):
-        # Retrieve slice data from RLE structure [G]
-        # Not given in the sources.
-        slice_data = None 
-        
-        # Resample slice into intermediate image using bilinear interpolation
-        # Forward shearing is typically used: project slice vertices to intermediate space [G]
-        # Not given in the sources.
-        resample_slice_to_intermediate(slice_data, S, intermediate_image, slice_idx)
-        
-        # Early ray termination check
-        # If accumulated opacity exceeds threshold (e.g., 0.95), stop processing further slices for that pixel [S1, unofficial]
-        if np.any(intermediate_image[:, :, 3] > 0.95):
-            break
-            
-    # 4. Warp: Compute warp matrix and transform to final screen
-    S_inv = np.linalg.inv(S)
-    P_inv = np.linalg.inv(P)
-    M_warp2D = M_view @ S_inv @ P_inv
-    
-    # Resample intermediate image using bilinear interpolation to produce the final image [S1, unofficial]
-    # Not given in the sources.
-    final_image = warp_image(intermediate_image, M_warp2D, width, height)
-    return final_image
-
-def resample_slice_to_intermediate(slice_data, S, intermediate_image, slice_idx):
-    # Not given in the sources.
-    pass
-
-def warp_image(image, M_warp2D, width, height):
-    # Not given in the sources.
-    pass
-```
+### Image Transformation Methods
+A forward projection method where volume data is transformed so rays can be projected into the volume and onto the image plane using a scan line method at any angle via Euler angle transformations [S3, unofficial]. The transformation is given by $T = P_z Z_e R_z(\phi) R_y(\theta) R_z(\psi)$, where $T$ is the transform, $P$ is the transformation, $R_z$ is perspective z rotation about the Z axis, and $R_y$ is rotation about the y axis [S3, unofficial]. Drebin uses a two-pass image transformation method, while Hanrahan generalized this into a three-pass image transformation method, which is claimed to be more efficient in time and produce higher quality results for general views than Drebin's two-pass technique [S3, unofficial].
 
 ## Background
-The Affine-Transformations Method emerged in the late 1980s as a hybrid approach to volume rendering [S1, unofficial]. The seminal work was presented by Drebin, Carpenter, and Hanrahan in 1988, introducing the feed-forward image warping technique [S1, unofficial]. This work was part of the earlier Pixar research into parallel volume rendering [S1, unofficial]. Hanrahan later extended the method in 1990 to a three-pass algorithm, developing the affine-mapping equations and addressing resampling artifacts by ordering magnification passes before minification passes [S1, unofficial]. The method has since been adapted in various forms, including modern neural volume rendering techniques that utilize affine mixture models for dynamic scene representation [S2].
+The method originated with Drebin, Carpenter, and Hanrahan in 1988, who presented an earlier Pixar work using feed-forward image warping [S1, unofficial]. Hanrahan extended this in 1990 with a three-pass algorithm [S1, unofficial]. The approach is cited in overviews of volume rendering as a representative hybrid method [S1, unofficial][S3, unofficial].
 
 ## Sources
 [S1] A Parallel, Feed-Forward Volume Rendering Algorithm, https://www.cs.unc.edu/techreports/91-029.pdf, fetched 2026-10-27 (unofficial)
 [S2] Neural Volumes: Learning Dynamic Renderable Volumes from Images, https://arxiv.org/abs/1906.07751, fetched 2026-10-26
+[S3] An Overview of Rendering from Volume Data --- including Surface and Volume Rendering, https://core.ac.uk/download/63614.pdf, fetched 2026-10-30 (unofficial)

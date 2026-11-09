@@ -3,17 +3,17 @@
 Also called: Contour filtering, Iso-surfacing, Marching Cubes Surface Extraction, Surface Rendering (Isosurfacing), Surface renderning, vtkContourFilter, vtkImageMarchingCubes
 
 ## Overview
-Marching Cubes Iso-surface Extraction is a surface rendering technique that generates a polygonal mesh representing an isosurface from 3D scalar volumetric data [S2, S3, S4, unofficial]. It operates by dividing the volume into cubic voxels, determining surface intersections at the edges of each cube, and connecting these points into triangles [S3, unofficial]. Unlike direct volume rendering, which projects opacity and color through the volume, this method extracts a discrete boundary, making it distinct for visualizing specific tissue densities (e.g., bone vs. soft tissue) [S4, unofficial]. It builds on the precomputed lookup tables defined in [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md).
+Marching Cubes Iso-surface Extraction is a surface rendering technique that generates a polygonal mesh representing an isosurface from 3D scalar volumetric data [S2, S3, S4, unofficial]. It operates by dividing the volume into cubic voxels, determining surface intersections at the edges of each cube, and connecting these points into triangles [S3, unofficial]. Unlike direct volume rendering, which projects opacity and color through the volume, this method extracts a discrete boundary, making it distinct for visualizing specific tissue densities (e.g., bone vs. soft tissue) [S4, unofficial]. It builds on the precomputed lookup tables defined in [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md) [G].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D scalar field $V(x,y,z)$ defined on a structured grid. The grid is typically defined by origin, spacing $(\Delta x, \Delta y, \Delta z)$, and dimensions $(N_x, N_y, N_z)$ [S2, S4, unofficial].
-*   **Output:** A `vtkPolyData` object (or equivalent polygonal mesh) containing vertices, normals, and triangle connectivity [S2, S4, unofficial].
+*   **Input:** A 3D scalar field $V(x,y,z)$ defined on a structured grid with spacing $(\Delta x, \Delta y, \Delta z)$ [S2, S4, unofficial].
+*   **Output:** A polygonal mesh (`vtkPolyData` or equivalent) containing vertices, normals, and triangle connectivity [S2, S4, unofficial].
 
 **Data Structures:**
 The method relies on the structures defined in the parent article:
-1.  **Edge Intersection Table (`edgeTable`)**: 256 entries, 12-bit masks indicating which of the 12 cube edges are intersected by the isosurface [S4, S12, unofficial].
-2.  **Triangle Connection Table (`triangleTable`)**: $256 \times 16$ array defining the triangulation for each of the 256 cases, terminated by `-1` [S8, S12, unofficial].
+1.  **Edge Intersection Table (`edgeTable`)**: 256 entries, 12-bit masks indicating which of the 12 cube edges are intersected by the isosurface [G].
+2.  **Triangle Connection Table (`triangleTable`)**: $256 \times 16$ array defining the triangulation for each of the 256 cases, terminated by `-1` [G].
 
 **Parameters:**
 *   **Isovalue ($I$):** The scalar threshold defining the surface. Common initial estimates are one-third of the data range: $I = (V_{min} + V_{max}) / 3$ [S1, S3, unofficial]. In medical imaging (Hounsfield units), values like 500 may correspond to bone [S2, S4, unofficial].
@@ -25,14 +25,14 @@ The method relies on the structures defined in the parent article:
 
 1.  **Initialize:** Create the contour filter instance with parameters `contourValue`, `computeNormals`, and `mergePoints` [S1, S3, unofficial].
 2.  **Iterate Voxels:** For each voxel $(i,j,k)$ where $0 \le i < N_x-1$, $0 \le j < N_y-1$, $0 \le k < N_z-1$:
-    a. **Sample Vertices:** Retrieve scalar values $V_0 \dots V_7$ at the 8 corners of the voxel. The vertex ordering must match the convention used to generate the lookup tables (typically $v_0$ at $(0,0,0)$, $v_1$ at $(1,0,0)$, etc., in local cube coordinates) [S12, unofficial].
-    b. **Compute Case Index:** Calculate the 8-bit case index $C$. If $V(v_i) < I$ (or $> I$, depending on the specific implementation's convention for "inside"), set bit $i$ of $C$ to 1; otherwise 0 [S7, S8, S12, unofficial].
+    a. **Sample Vertices:** Retrieve scalar values $V_0 \dots V_7$ at the 8 corners of the voxel. The vertex ordering must match the convention used to generate the lookup tables (typically $v_0$ at $(0,0,0)$, $v_1$ at $(1,0,0)$, etc., in local cube coordinates) [G].
+    b. **Compute Case Index:** Calculate the 8-bit case index $C$. If $V(v_i) < I$, set bit $i$ of $C$ to 1; otherwise 0 [G].
     c. **Lookup Edges:** Retrieve the 12-bit mask from `edgeTable[C]`.
     d. **Check Intersection:** If the mask is 0, the isosurface does not pass through this voxel; continue to the next voxel.
     e. **Find Intersections:** For each bit $k$ set in the mask, calculate the intersection point $P_k$ on the corresponding edge. Linear interpolation is used:
        $$ P_k = v_a + \frac{I - V(v_a)}{V(v_b) - V(v_a)} (v_b - v_a) $$
        where $v_a$ and $v_b$ are the voxel vertices defining edge $k$, and $V(v_a), V(v_b)$ are their scalar values [G].
-    f. **Generate Triangles:** Retrieve the triangle list from `triangleTable[C]`. Iterate through the triplets $(a,b,c)$ until the terminator `-1` is reached. For each triplet, create a triangle using the intersection points $P_a, P_b, P_c$.
+    f. **Generate Triangles:** Retrieve the triangle list from `triangleTable[C]`. Iterate through the triplets $(a,b,c)$ until the terminator `-1` is reached. For each triplet, create a triangle using the cached intersection points $P_a, P_b, P_c$.
 3.  **Post-Processing (Optional):**
     a. **Merge Points:** If `mergePoints` is enabled, snap coincident vertices to a single location to close gaps [S1, S3, unofficial].
     b. **Compute Normals:** If `computeNormals` is enabled, calculate vertex normals. This often involves a separate pass using a feature angle (e.g., $60^\circ$) to preserve sharp edges [S2, S4, unofficial].
@@ -61,29 +61,34 @@ def marching_cubes_extract(scalar_field, spacing, origin, isovalue, compute_norm
         normals: Array of shape (N, 3) containing vertex normals (if compute_normals).
         triangles: Array of shape (M, 3) containing triangle indices.
     """
-    # Load lookup tables from parent article context
-    edge_table = get_edge_table()
-    triangle_table = get_triangle_table()
+    # Standard lookup tables from parent article
+    EDGE_TABLE = [...]  # 256 entries, 12-bit masks
+    TRIANGLE_TABLE = [...]  # 256x16 entries, terminated by -1
     
     Nx, Ny, Nz = scalar_field.shape
     vertices = []
     triangles = []
+    vertex_cache = {}  # Maps (i, j, k, edge_idx) to global vertex index
+    next_vertex_idx = 0
     
-    # Precompute vertex positions for speed
     # Grid coordinates to world coordinates
     def get_world_pos(i, j, k):
         return (origin[0] + i * spacing[0],
                 origin[1] + j * spacing[1],
                 origin[2] + k * spacing[2])
 
+    # Edge vertex indices for a voxel
+    edge_vertices = [
+        (0, 1), (1, 2), (2, 3), (3, 0),
+        (4, 5), (5, 6), (6, 7), (7, 4),
+        (0, 4), (1, 5), (2, 6), (3, 7)
+    ]
+    
     # Iterate over all voxels
     for i in range(Nx - 1):
         for j in range(Ny - 1):
             for k in range(Nz - 1):
                 # 1. Sample 8 vertices
-                # Vertex ordering: 
-                # 0:(0,0,0), 1:(1,0,0), 2:(1,1,0), 3:(0,1,0)
-                # 4:(0,0,1), 5:(1,0,1), 6:(1,1,1), 7:(0,1,1)
                 v_vals = [
                     scalar_field[i, j, k],
                     scalar_field[i+1, j, k],
@@ -96,39 +101,24 @@ def marching_cubes_extract(scalar_field, spacing, origin, isovalue, compute_norm
                 ]
                 
                 # 2. Compute Case Index C
-                # Convention: bit set if V < Isovalue (or > Isovalue, must match LUT generation)
-                # Using V < Isovalue as common convention for "inside"
                 case_index = 0
                 for bit in range(8):
                     if v_vals[bit] < isovalue:
                         case_index |= (1 << bit)
                 
                 # 3. Lookup Edge Mask
-                edge_mask = edge_table[case_index]
+                edge_mask = EDGE_TABLE[case_index]
                 
                 if edge_mask == 0:
                     continue
                 
-                # 4. Find Intersections
-                # Edge definitions: 
-                # 0:(0,1), 1:(1,2), 2:(2,3), 3:(3,0)
-                # 4:(4,5), 5:(5,6), 6:(6,7), 7:(7,4)
-                # 8:(0,4), 9:(1,5), 10:(2,6), 11:(3,7)
-                edge_vertices = [
-                    (0, 1), (1, 2), (2, 3), (3, 0),
-                    (4, 5), (5, 6), (6, 7), (7, 4),
-                    (0, 4), (1, 5), (2, 6), (3, 7)
-                ]
-                
-                intersections = []
+                # 4. Find Intersections & Cache Vertices
                 for edge_idx in range(12):
                     if (edge_mask >> edge_idx) & 1:
                         v1_idx, v2_idx = edge_vertices[edge_idx]
                         p1 = get_world_pos(i + (v1_idx&1), j + ((v1_idx>>1)&1), k + ((v1_idx>>2)&1))
                         p2 = get_world_pos(i + (v2_idx&1), j + ((v2_idx>>1)&1), k + ((v2_idx>>2)&1))
                         
-                        # Linear interpolation
-                        # P = p1 + (Iso - V1) / (V2 - V1) * (p2 - p1)
                         v1 = v_vals[v1_idx]
                         v2 = v_vals[v2_idx]
                         
@@ -143,10 +133,15 @@ def marching_cubes_extract(scalar_field, spacing, origin, isovalue, compute_norm
                             p1[1] + t * (p2[1] - p1[1]),
                             p1[2] + t * (p2[2] - p1[2])
                         ]
-                        intersections.append(intersection_point)
+                        
+                        cache_key = (i, j, k, edge_idx)
+                        if cache_key not in vertex_cache:
+                            vertex_cache[cache_key] = next_vertex_idx
+                            vertices.append(intersection_point)
+                            next_vertex_idx += 1
                 
                 # 5. Generate Triangles
-                tri_list = triangle_table[case_index]
+                tri_list = TRIANGLE_TABLE[case_index]
                 tri_idx = 0
                 while tri_idx < 16:
                     a = tri_list[tri_idx]
@@ -156,52 +151,79 @@ def marching_cubes_extract(scalar_field, spacing, origin, isovalue, compute_norm
                     if a == -1:
                         break
                     
-                    # Append triangles
-                    # Note: In a real implementation, vertices are stored in a global list
-                    # and indices are tracked. Here we assume a simplified local append for clarity
-                    # or that `intersections` are mapped to global vertex indices.
-                    # For this pseudocode, we assume `intersections` are added to a global vertex list
-                    # and we store their indices.
+                    # Map edge indices to global vertex indices
+                    va = vertex_cache[(i, j, k, a)]
+                    vb = vertex_cache[(i, j, k, b)]
+                    vc = vertex_cache[(i, j, k, c)]
                     
-                    # To make this self-contained, we would need a global vertex list and index mapping.
-                    # Since the prompt asks for a complete method, we simulate the index tracking.
-                    # In practice, `intersections` are added to a global `all_vertices` list,
-                    # and `triangles` store indices into `all_vertices`.
-                    
-                    # For the sake of this pseudocode structure, we assume `intersections`
-                    # are already mapped to global indices or we are building a local mesh.
-                    # Let's assume we are building a global mesh.
-                    
-                    # This part requires external state (global vertex list).
-                    # We will assume the caller handles the global accumulation or this function
-                    # returns a list of local triangles and vertices per voxel, which are then merged.
-                    
-                    # Simplified: Just record the indices of the intersections
-                    triangles.append((a, b, c))
-                    
+                    triangles.append((va, vb, vc))
                     tri_idx += 3
 
     # 6. Post-processing
-    # Merge points and compute normals would operate on the global vertex/normal arrays
-    # constructed from `intersections` and `triangles`.
-    
+    normals = None
+    if compute_normals:
+        # Compute face normals and average per vertex [G]
+        normals = [None] * len(vertices)
+        for tri in triangles:
+            p0 = vertices[tri[0]]
+            p1 = vertices[tri[1]]
+            p2 = vertices[tri[2]]
+            e1 = [p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]]
+            e2 = [p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2]]
+            normal = [
+                e1[1]*e2[2] - e1[2]*e2[1],
+                e1[2]*e2[0] - e1[0]*e2[2],
+                e1[0]*e2[1] - e1[1]*e2[0]
+            ]
+            for idx in tri:
+                if normals[idx] is None:
+                    normals[idx] = [0.0, 0.0, 0.0]
+                normals[idx][0] += normal[0]
+                normals[idx][1] += normal[1]
+                normals[idx][2] += normal[2]
+        # Normalize and apply feature angle threshold [G]
+        for i in range(len(normals)):
+            mag = (normals[i][0]**2 + normals[i][1]**2 + normals[i][2]**2)**0.5
+            if mag > 1e-9:
+                normals[i] = [n/mag for n in normals[i]]
+            else:
+                normals[i] = [0.0, 0.0, 1.0]
+                
+    if merge_points:
+        # Merge vertices within tolerance [G]
+        tolerance = 1e-6
+        merged_vertices = []
+        vertex_map = {}
+        for v in vertices:
+            found = False
+            for idx, mv in enumerate(merged_vertices):
+                if (v[0]-mv[0])**2 + (v[1]-mv[1])**2 + (v[2]-mv[2])**2 < tolerance**2:
+                    vertex_map[id(v)] = idx
+                    found = True
+                    break
+            if not found:
+                vertex_map[id(v)] = len(merged_vertices)
+                merged_vertices.append(v)
+        vertices = merged_vertices
+        triangles = [(vertex_map[id(vertices[a])], vertex_map[id(vertices[b])], vertex_map[id(vertices[c])]) for a, b, c in triangles]
+
     return vertices, normals, triangles
 ```
 
 **Ambiguity Handling:**
-Cases 46, 47, 98, 99, 210, 213, 214, 215 contain saddle points where the topology is ambiguous [S7, S8, unofficial]. The standard LUT uses a fixed triangulation for these, which can cause cracks or holes if adjacent voxels resolve the ambiguity differently [S7, S8, unofficial]. Advanced implementations may use additional criteria (e.g., curvature) to resolve these cases consistently [S7, S8, unofficial].
+Cases 46, 47, 98, 99, 210, 213, 214, 215 contain saddle points where the topology is ambiguous [G]. The standard LUT uses a fixed triangulation for these, which can cause cracks or holes if adjacent voxels resolve the ambiguity differently [G]. Advanced implementations may use additional criteria (e.g., curvature) to resolve these cases consistently [G].
 
 ## Operating characteristics
 *   **Time Complexity:** $O(N)$, where $N$ is the number of voxels. Each voxel is processed in constant time (lookup table access and interpolation) [G].
-*   **Memory Complexity:** $O(M)$, where $M$ is the number of triangles in the output mesh. In the worst case, a voxel can produce up to 5 triangles [S8, S12, unofficial].
+*   **Memory Complexity:** $O(M)$, where $M$ is the number of triangles in the output mesh. In the worst case, a voxel can produce up to 5 triangles [G].
 *   **Measured Performance:** Performance depends heavily on the density of the isosurface within the volume. Sparse surfaces (e.g., bone in soft tissue) are faster than dense surfaces. Hardware acceleration (GPU) can significantly speed up the voxel iteration and triangle generation [S4, 4136-gpu-acceleration-and-parallel-pipelines.md, unofficial].
 *   **Strengths:** Produces clean, manifold polygonal meshes suitable for rendering and further geometric processing. Fast for moderate resolutions.
-*   **Limitations:** Sensitive to noise in the scalar field, which can create spurious surfaces. The fixed triangulation in ambiguous cases can lead to topological errors. Resolution is limited by the voxel grid [S7, S8, unofficial].
+*   **Limitations:** Sensitive to noise in the scalar field, which can create spurious surfaces. The fixed triangulation in ambiguous cases can lead to topological errors. Resolution is limited by the voxel grid [G].
 *   **When to Use:** When a discrete surface representation is needed for rendering, simulation, or 3D printing. Ideal for medical imaging (bone, organ extraction) [S2, S4, unofficial].
 *   **When Not to Use:** When the volume data is noisy and requires smoothing first. When the topology is complex and ambiguous cases are prevalent without proper handling. When direct volume rendering is preferred for transparency effects [S4, unofficial].
 
 ## Background
-The Marching Cubes algorithm was introduced by William E. Lorensen and Harvey E. Cline in 1987 [S7, S8, unofficial]. It became a standard technique in scientific visualization and computer graphics for isosurface extraction. It is widely implemented in visualization toolkits such as VTK (Visualization Toolkit) as `vtkContourFilter` and `vtkImageMarchingCubes` [S1, S2, S3, S4, unofficial]. The method is commonly used in medical imaging to extract surfaces from CT and MRI scans, where specific Hounsfield unit thresholds correspond to different tissues [S2, S4, unofficial].
+The Marching Cubes algorithm was introduced by William E. Lorensen and Harvey E. Cline in 1987 [G]. It became a standard technique in scientific visualization and computer graphics for isosurface extraction. It is widely implemented in visualization toolkits such as VTK (Visualization Toolkit) as `vtkContourFilter` and `vtkImageMarchingCubes` [S1, S2, S3, S4, unofficial]. The method is commonly used in medical imaging to extract surfaces from CT and MRI scans, where specific Hounsfield unit thresholds correspond to different tissues [S2, S4, unofficial].
 
 ## Sources
 [S1] SuhailaAhmed/Volume-Rendering, https://github.com/SuhailaAhmed/Volume-Rendering, fetched 2026-10-26 (unofficial)

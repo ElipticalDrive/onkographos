@@ -1,32 +1,32 @@
 # Face Subsampling
 
-Also called: Adaptive Face Subsampling, Internal Face Subsampling
+Also called: Adaptive Face Subsampling, Internal Face Subsampling [S1, unofficial]
 
 ## Overview
 Face Subsampling is a Level-of-Detail (LOD) technique for tetrahedral volume rendering that dynamically selects a subset of mesh faces to render, balancing visual fidelity against frame rate constraints [S1, unofficial]. It solves the problem of interactive rendering on large tetrahedral meshes by reducing the number of rasterized primitives without pre-aggregating data into voxels or bricks [S1, unofficial]. It differs from sibling methods like [Hierarchical Culling & Multi-resolution Approximation](2010-hierarchical-culling-multi-resolution-approximation.md) by operating directly on the unstructured mesh topology rather than a hierarchical grid, and from [Focus Point Based Brick LOD Selection](5282-focus-point-based-brick-lod-selection.md) by being primarily face-centric rather than brick-centric [S1, unofficial].
 
 ## How it works
-The method operates on a tetrahedral mesh where the domain $D$ is bounded by a set of unique faces $F$. The core mechanism separates $F$ into boundary faces $B$ and internal faces $I$, such that $B \cup I = F$ [S1, unofficial]. The boundary faces $B$ are kept constant to ensure the domain bounds are always rendered [S1, unofficial]. The internal faces $I$ are sampled adaptively to form the renderable set $B \cup I_{selected}$ [S1, unofficial].
+The method operates on a tetrahedral mesh where the domain $D$ is bounded by a set of unique faces $F$ [S1, unofficial]. The core mechanism separates $F$ into boundary faces $B$ and internal faces $I$, such that $B \cup I = F$ [S1, unofficial]. The boundary faces $B$ are kept constant to ensure the domain bounds are always rendered [S1, unofficial]. The internal faces $I$ are sampled adaptively to form the renderable set $B \cup I_{\text{selected}}$ [S1, unofficial].
 
 ### Inputs and Outputs
-*   **Input:** A tetrahedral mesh with unique faces $F$, boundary faces $B$, internal faces $I$, and a target frame time $T_{target}$ (typically 0.01 seconds for interactive viewing) [S1, unofficial].
-*   **Output:** A subset of internal faces $I_{selected}$ to be rendered alongside $B$ [S1, unofficial].
+*   **Input:** A tetrahedral mesh with unique faces $F$, boundary faces $B$, internal faces $I$, and a target frame time $T_{\text{target}}$ (typically 0.01 seconds for interactive viewing) [S1, unofficial].
+*   **Output:** A subset of internal faces $I_{\text{selected}}$ to be rendered alongside $B$ [S1, unofficial].
 
 ### Data Structures
-*   **Face List:** Each face contains vertex indices and scalar values. Internal faces store a reference to a neighboring face with identical vertices and scalar values to avoid redundant computation of zero-length inter-cell distances [S1, unofficial].
+*   **Face List:** Each face contains vertex indices and scalar values [S1, unofficial]. Internal faces store a reference to a neighboring face with identical vertices and scalar values to avoid redundant computation of zero-length inter-cell distances [S1, unofficial].
 *   **Layer List:** Used in Topology Sampling, faces are assigned an integer layer value during preprocessing [S1, unofficial].
 
 ### Adaptive Selection Formula
-The number of internal faces to select, $|I_{selected}|$, is determined dynamically based on the previous frame's render time $T_{render}$ [S1, unofficial]:
+The number of internal faces to select, $|I_{\text{selected}}|$, is determined dynamically based on the previous frame's render time $T_{\text{render}}$ [S1, unofficial]:
 
 $$
-|I_{selected}| = \left\lfloor |I| \times \frac{T_{target}}{T_{render}} \right\rfloor
+|I_{\text{selected}}| = \left\lfloor |I| \times \frac{T_{\text{target}}}{T_{\text{render}}} \right\rfloor
 $$
 
-If the calculated $|I_{selected}|$ exceeds the available internal face count, or if all layer faces cannot be drawn due to limits, a subset of layers is rendered by picking an even distribution of layers throughout the mesh until the target internal face count is reached [S1, unofficial].
+If the calculated $|I_{\text{selected}}|$ exceeds the available internal face count, or if all layer faces cannot be drawn due to limits, a subset of layers is rendered by picking an even distribution of layers throughout the mesh until the target internal face count is reached [S1, unofficial].
 
 ### Sampling Strategies
-Four strategies exist for selecting $I_{selected}$ from $I$. These are detailed in Subtopics.
+Four strategies exist for selecting $I_{\text{selected}}$ from $I$ [S1, unofficial]. These are detailed in Subtopics.
 
 ### Edge Cases and Pitfalls
 *   **Exceeding Limits:** If the required number of faces exceeds the limit for interactive rendering, the system must subsample the selected layers evenly [S1, unofficial].
@@ -39,13 +39,13 @@ Four strategies exist for selecting $I_{selected}$ from $I$. These are detailed 
 Topology Sampling assigns layers to faces by peeling the tetrahedral mesh from the outside in [S1, unofficial]. It selects faces that are topologically connected, resulting in images that look more continuous and lack obvious holes, though it may produce correlated regions in the image [S1, unofficial].
 
 **Preprocessing Steps:**
-1.  Initialize `CurrentLayer` to 0.
-2.  Mark all tetrahedra as unpeeled.
-3.  Loop while there exists an unpeeled tetrahedron $t$:
-    *   Identify all external faces $f$ of the unpeeled tetrahedra.
-    *   Assign `CurrentLayer` to these faces.
-    *   Mark tetrahedra sharing these faces as peeled.
-    *   Increment `CurrentLayer`.
+1.  Initialize `CurrentLayer` to 0 [S1, unofficial].
+2.  Mark all tetrahedra as unpeeled [S1, unofficial].
+3.  Loop while there exists an unpeeled tetrahedron $t$ [S1, unofficial]:
+    *   Identify all external faces $f$ of the unpeeled tetrahedra [S1, unofficial].
+    *   Assign `CurrentLayer` to these faces [S1, unofficial].
+    *   Mark tetrahedra sharing these faces as peeled [S1, unofficial].
+    *   Increment `CurrentLayer` [S1, unofficial].
 4.  Separate faces into the boundary face list (layer 0) and internal face list (layers > 0) [S1, unofficial].
 
 **Pseudocode:**
@@ -68,8 +68,6 @@ def extract_topology_layers(tetrahedra):
                     current_layer_faces.append(f)
         
         for f in current_layer_faces:
-            if f in boundary_faces:
-                continue
             if current_layer == 0:
                 boundary_faces.append(f)
             else:
@@ -95,8 +93,8 @@ Field Sampling assigns importance to a mesh face based on the average scalar val
 *   **Histogram Intervals:** Number of evenly spaced intervals for stratified sampling. Typical value: 128 [S1, unofficial].
 
 **Steps:**
-1.  Build a histogram of normalized scalar values at the mesh vertices.
-2.  Divide the histogram into 128 evenly spaced intervals.
+1.  Build a histogram of normalized scalar values at the mesh vertices [S1, unofficial].
+2.  Divide the histogram into 128 evenly spaced intervals [S1, unofficial].
 3.  Randomly pick the same number of faces from each interval to fill the internal face list [S1, unofficial].
 
 ### Area Sampling
@@ -112,13 +110,11 @@ $$
 where $A_i$ is the area of the $i$-th face in $\mathbb{R}^3$ and $\xi_i$ is a uniform random number [S1, unofficial].
 
 **Steps:**
-1.  Calculate the area $A_i$ for each internal face.
-2.  Generate a uniform random number $\xi_i$ for each face.
-3.  Sort faces by priority $P_i$ and select the top $|I_{selected}|$ faces [S1, unofficial].
+1.  Calculate the area $A_i$ for each internal face [S1, unofficial].
+2.  Generate a uniform random number $\xi_i$ for each face [S1, unofficial].
+3.  Sort faces by priority $P_i$ and select the top $|I_{\text{selected}}|$ faces [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Preprocessing (Topology/Field) is $O(N)$ where $N$ is the number of faces/tetrahedra. Adaptive selection is $O(1)$ per frame after preprocessing. View-aligned sampling (not detailed in notes but mentioned as a sibling strategy in the text) requires per-viewpoint computation [S1, unofficial].
-*   **Memory Complexity:** Requires storing the mesh topology, face lists, and potentially layer assignments or histograms. Internal faces store neighbor references [S1, unofficial].
 *   **Performance:** On the Fighter dataset (1.4 million tetrahedra), full quality rendered at 1.3 fps. At 15% LOD, it reached 4.5 fps. At 5% LOD, it reached 10.0 fps [S1, unofficial].
 *   **Strengths:** Natural representation for traversing LODs; no need for explicit simplification hierarchies like those required for cells; viewpoint-independent methods avoid flickering [S1, unofficial].
 *   **Limitations:** Field Sampling causes intensity discontinuities; Area Sampling increases fill rate; Topology Sampling may create correlated visual artifacts; View-aligned sampling causes frame-to-frame coherence issues [S1, unofficial].

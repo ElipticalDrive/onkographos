@@ -1,0 +1,187 @@
+# Dual Rendering Equation Optimization
+
+Also called: Deformable Radiance Field Optimization, Volume Rendering and Optimization, Volume and Surface Rendering Loss
+
+## Overview
+Dual Rendering Equation Optimization (DREO) is a differentiable inverse rendering technique that jointly optimizes scene parameters by minimizing a composite loss derived from two distinct rendering models: a volume rendering equation and a surface reflectance equation [S1, unofficial]. Unlike standard NeRF methods that rely solely on emission-absorption volume rendering, DREO explicitly supervises surface geometry and appearance by integrating a simplified reflectance model [S1, unofficial]. This approach is particularly suited for scenes where surface properties and volumetric structure are coupled, such as deformable tissues or scenes with complex lighting interactions [S1, unofficial][S2]. It builds on [Radiance-field optimization](44-radiance-field-optimization.md) by extending the differentiable forward operator to include surface integrals.
+
+## How it works
+The method optimizes a scene representation (typically a neural field or tensor) by alternating or combining gradients from two rendering passes.
+
+### Inputs and Outputs
+*   **Inputs:** Camera poses, viewing directions $\mathbf{d}$, and ground truth images $\mathbf{C}_{gt}$ (and optionally depth $\mathbf{D}_{gt}$ or normals $\mathbf{n}_{gt}$).
+*   **Outputs:** Optimized scene parameters (density $\sigma$, color $\mathbf{c}$, BRDF parameters, geometry) that minimize the combined loss.
+
+### Data Structures
+The scene is represented as a neural field or tensor. Key fields include:
+*   $\sigma(\mathbf{x})$: Density at point $\mathbf{x}$.
+*   $\mathbf{c}(\mathbf{x})$: Emissive color at point $\mathbf{x}$.
+*   $\mathbf{n}(\mathbf{x})$: Surface normal, often derived from the gradient of a signed distance function or occupancy field.
+*   $B_{dec}$: A BRDF decoder network that outputs a BRDF value $bval$ given material attributes [S1, unofficial].
+
+### Numbered Steps
+
+1.  **Ray Sampling:** For a given camera ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$, sample $N$ points $\mathbf{x}_i$ along the ray [S1, unofficial][S2]. In deformable contexts, points may be sampled via depth-cueing ray marching to concentrate samples near surfaces [S2].
+2.  **Volume Rendering Pass:**
+    *   Evaluate density $\sigma_i$ and color $\mathbf{c}_i$ at each sample point using the scene network [S1, unofficial][S2].
+    *   Compute transmittance $T_i$ and weights $w_i$:
+        $$
+        T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right), \quad w_i = T_i (1 - \exp(-\sigma_i \delta_i))
+        $$
+        where $\delta_i$ is the step size between samples [S1, unofficial][S2].
+    *   Compute the volume-rendered color $\hat{C}_{vl}(\mathbf{r})$:
+        $$
+        \hat{C}_{vl}(\mathbf{r}) = \sum_{i=1}^{N} w_i \mathbf{c}_i
+        $$
+    *   Optionally, compute the expected depth $\hat{D}(\mathbf{r})$:
+        $$
+        \hat{D}(\mathbf{r}) = \sum_{i=1}^{N} w_i s_i
+        $$
+        where $s_i$ is the depth of the $i$-th sample [S2].
+3.  **Surface Rendering Pass:**
+    *   Identify surface points (e.g., where density is high or via a separate SDF) [S1, unofficial].
+    *   Compute the surface normal $\mathbf{n}$ at the point $\mathbf{x}$ [S1, unofficial].
+    *   Evaluate the incident light field $L_i(\mathbf{x}, \mathbf{d})$ [S1, unofficial].
+    *   Decode the BRDF value $bval$ using the BRDF decoder $B_{dec}$ [S1, unofficial].
+    *   Compute the surface-rendered color $L(\mathbf{x}, \mathbf{d})$ using the simplified reflectance equation:
+        $$
+        L(\mathbf{x}, \mathbf{d}) = bval \cdot L_i(\mathbf{x}, \mathbf{d}) (\mathbf{n} \cdot \mathbf{d})
+        $$
+        This approximates the surface integral of the reflectance equation by using the incident light field and a dot-product term [S1, unofficial].
+4.  **Loss Computation:**
+    *   Compute the total loss $\mathcal{L}$ as a weighted sum of surface, volume, and normal consistency terms [S1, unofficial]:
+        $$
+        \mathcal{L} = \lambda_1 \| L(\mathbf{x}, \mathbf{d}) - \mathbf{C}_{gt} \|_2^2 + \lambda_2 \| \hat{C}_{vl}(\mathbf{r}) - \mathbf{C}_{gt} \|_2^2 + \lambda_3 \| \mathbf{n} - \mathbf{n}_{gt} \|_2^2
+        $$
+        If depth is available, the volume term may be replaced or augmented with a depth loss [S2]:
+        $$
+        \mathcal{L}_{depth} = \| \hat{D}(\mathbf{r}) - \mathbf{D}_{gt} \|_2^2
+        $$
+        The total loss becomes:
+        $$
+        \mathcal{L} = \| \hat{C}(\mathbf{r}) - \mathbf{I}[u, v] \|_2^2 + \lambda \| \hat{D}(\mathbf{r}) - \mathbf{D}_i[u, v] \|
+        $$
+        where $\lambda$ weights the depth loss [S2].
+5.  **Optimization:**
+    *   Backpropagate gradients through both rendering equations to update the scene parameters (density, color, BRDF, geometry) [S1, unofficial][S2].
+    *   Use an optimizer (e.g., Adam) to minimize $\mathcal{L}$ [S1, unofficial][S2].
+
+### Parameters
+*   $\lambda_1, \lambda_2, \lambda_3$: Loss weights for surface rendering, volume rendering, and normal consistency, respectively [S1, unofficial].
+*   $\lambda$: Hyperparameter weighting the depth loss in the total loss function [S2].
+*   $bval$: BRDF value decoded by $B_{dec}$ [S1, unofficial].
+*   $N, m$: Number of samples per ray [S1, unofficial][S2].
+
+### Edge Cases and Pitfalls
+*   **Surface Initialization:** The surface loss term ($\lambda_1$) should be set to zero initially, before the scene surface is well-defined. Once a threshold of iterations is reached, $\lambda_1$ is activated, and $\lambda_2$ may be gradually decreased [S1, unofficial].
+*   **Corrupt Depth:** In surgical or noisy scenes, stereo depth may contain artifacts (specular highlights, fuzzy pixels). Direct supervision can lead to overfitting and artifacts. Statistical depth refinement or smoothing may be required [S2].
+*   **Lighting Approximation:** The simplified surface equation $L(\mathbf{x}, \mathbf{d}) = bval \cdot L_i(\mathbf{x}, \mathbf{d}) (\mathbf{n} \cdot \mathbf{d})$ assumes a simplified incident light field. Complex indirect illumination may not be captured accurately [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dual_rendering_optimization(scene_network, camera, gt_image, gt_depth=None, gt_normal=None, 
+                                lambda1=0.0, lambda2=1.0, lambda3=0.0, lambda_depth=0.1, 
+                                num_samples=128, iteration=0, surface_threshold=1000):
+    """
+    Performs one iteration of Dual Rendering Equation Optimization.
+    
+    Args:
+        scene_network: Neural network representing the scene (density, color, BRDF).
+        camera: Camera pose and intrinsics.
+        gt_image: Ground truth RGB image.
+        gt_depth: Optional ground truth depth map.
+        gt_normal: Optional ground truth normal map.
+        lambda1: Weight for surface rendering loss.
+        lambda2: Weight for volume rendering loss.
+        lambda3: Weight for normal consistency loss.
+        lambda_depth: Weight for depth loss.
+        num_samples: Number of samples per ray.
+        iteration: Current training iteration.
+        surface_threshold: Iteration after which surface loss is enabled.
+        
+    Returns:
+        loss: Total loss value.
+    """
+    # 1. Ray Sampling
+    rays = generate_rays(camera, gt_image.shape)
+    points = sample_points_along_rays(rays, num_samples)
+    
+    # 2. Evaluate Scene Properties
+    densities, colors, normals, brdf_values = scene_network.evaluate(points)
+    
+    # 3. Volume Rendering
+    transmittances = compute_transmittance(densities)
+    weights = compute_weights(densities, transmittances)
+    volume_color = sum(weights * colors)
+    
+    # Optional: Volume Depth
+    if gt_depth is not None:
+        volume_depth = sum(weights * points.depth)
+    
+    # 4. Surface Rendering
+    # Identify surface points (e.g., highest density or specific threshold)
+    surface_points = identify_surface_points(points, densities)
+    
+    if len(surface_points) > 0:
+        # Simplified reflectance equation
+        incident_light = compute_incident_light(surface_points, scene_network)
+        surface_color = brdf_values * incident_light * dot_product(surface_points.normals, rays.directions)
+    else:
+        surface_color = volume_color # Fallback or zero
+    
+    # 5. Loss Computation
+    loss = 0.0
+    
+    # Surface Loss (only after surface is established)
+    if iteration > surface_threshold:
+        # Adjust weights as per [S1, unofficial]: lambda1 active, lambda2 may decrease
+        surface_loss = lambda1 * mse(surface_color, gt_image)
+        loss += surface_loss
+    
+    # Volume Loss
+    volume_loss = lambda2 * mse(volume_color, gt_image)
+    loss += volume_loss
+    
+    # Normal Consistency Loss
+    if gt_normal is not None:
+        normal_loss = lambda3 * mse(surface_points.normals, gt_normal)
+        loss += normal_loss
+        
+    # Depth Loss
+    if gt_depth is not None:
+        depth_loss = lambda_depth * mse(volume_depth, gt_depth)
+        loss += depth_loss
+        
+    # 6. Backpropagation
+    gradients = compute_gradients(loss, scene_network.parameters)
+    update_scene_network(scene_network, gradients)
+    
+    return loss
+```
+
+## Subtopics
+
+### Dual Rendering for Multi-View Optimization
+This variant applies the dual rendering concept to multi-view optimization using Gaussian Splatting. It renders Gaussians twice using a differentiable rasterizer: once for the C-ToF (Color-of-Time-of-Flight) view to compute a quad loss, and once for the RGB view to compute the color loss [S3]. This allows for joint optimization of depth and color in dynamic scenes [S3].
+
+### Heterogeneous Volume Reconstruction with DRT
+This variant uses Dual Rendering Techniques (DRT) with control variates for heterogeneous volume reconstruction. It processes full images instead of randomly sampled subsets, using 8-10 reference views per task [S4]. Control variates reduce primal rendering overhead by alleviating the need for large sample counts required by L1 loss to mitigate loss function bias [S4]. Plain DRT without control variates requires ~4-8 times more samples to reach similar quality, while the adjoint phase runtime remains identical [S4].
+
+## Operating characteristics
+*   **Time Complexity:** The method requires two rendering passes (volume and surface), potentially doubling the forward pass cost compared to single-equation methods. The surface pass involves additional BRDF decoding and lighting evaluation [S1, unofficial].
+*   **Memory Complexity:** Similar to standard NeRF, memory usage depends on the number of samples and the size of the scene representation. The adjoint method can be used to reduce memory usage for gradient computation [44-radiance-field-optimization.md].
+*   **Performance:** The method is computationally intensive due to the dual rendering and BRDF decoding. However, it provides more accurate surface and geometry reconstruction compared to volume-only methods [S1, unofficial][S4].
+*   **Strengths:** Explicitly models surface properties and geometry, leading to better reconstruction of surfaces and deformable objects [S1, unofficial][S2]. Can incorporate depth and normal supervision [S1, unofficial][S2].
+*   **Limitations:** Requires careful tuning of loss weights ($\lambda_1, \lambda_2, \lambda_3$) and initialization strategies [S1, unofficial]. The simplified surface model may not capture complex lighting effects [S1, unofficial]. Sensitive to corrupt depth data [S2].
+
+## Background
+Dual Rendering Equation Optimization was introduced in the context of tensorial relighting radiance fields for single-tensor scene representation [S1, unofficial]. It combines volume rendering (as in NeRF) with surface reflectance models to optimize scene tensors [S1, unofficial]. The method has been applied to deformable radiance fields for robotic surgery reconstruction [S2] and multi-view optimization with C-ToF data [S3]. The use of control variates in DRT for heterogeneous volume reconstruction was proposed by Nimier-David et al. [S4].
+
+## Sources
+[S1] STensoRRF:Tensorial able Relighting Radiance Field for Single-Tensor Scene Representation, https://doi.org/10.20944/preprints202401.1085.v1, fetched 2026-10-30 (unofficial)
+[S2] Neural Rendering for Stereo 3D Reconstruction of Deformable Tissues in Robotic Surgery, https://doi.org/10.1007/978-3-031-16449-1_41, fetched 2026-10-26
+[S3] Time of the Flight of the Gaussians: Optimizing Depth Indirectly in Dynamic Radiance Fields, https://doi.org/10.1109/cvpr52734.2025.01958, fetched 2026-10-26
+[S4] Recursive Control Variates for Inverse Rendering, https://research.nvidia.com/labs/rtr/publication/nicolet2023recursive/, fetched 2026-11-08

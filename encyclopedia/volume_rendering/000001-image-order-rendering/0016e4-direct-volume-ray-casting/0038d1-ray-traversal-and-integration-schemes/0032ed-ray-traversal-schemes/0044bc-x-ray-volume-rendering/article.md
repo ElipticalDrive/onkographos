@@ -2,86 +2,88 @@
 Also called: Linear Accumulation Volume Rendering
 
 ## Overview
-X-Ray Volume Rendering is a ray traversal scheme that computes a linear accumulation of voxel intensity values along a ray, producing an image similar to a projectional X-ray or CT scan [S1, unofficial]. Unlike standard direct volume rendering which uses alpha compositing to simulate transparency and occlusion, this method sums the sampled values to highlight dense structures without depth-based occlusion [S1, unofficial]. It differs from its sibling [Average](6890-ray-traversal-schemes.md) rendering by explicitly normalizing the sum by the total number of steps to maintain intensity invariance relative to step size, whereas Average typically divides by the count of *valid* or *non-background* samples [S1, unofficial].
+X-Ray Volume Rendering is a direct volume ray casting technique that computes a pixel color by linearly summing voxel intensity values along a ray, mimicking the physics of a Computed Tomography (CT) scan [S1, unofficial]. Unlike standard alpha compositing which models occlusion and transparency, this method treats the volume as a projection where all samples contribute to the final intensity regardless of depth [S1, unofficial]. It is distinguished from its sibling [Pixel Intensity Evaluation with Scene Aggregates](10890-pixel-intensity-evaluation-with-scene-aggregates.md) by its specific implementation of linear accumulation normalized by step count, rather than generic aggregation functions [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs**
-*   **Input**: A 3D texture (volume) containing scalar or vector data (color/intensity and alpha); ray parameters (origin, direction, length); rendering parameters (`MAX_STEPS`, `alphaCorrection`, `alphaScaleFactor`).
-*   **Output**: A single color value per pixel representing the accumulated intensity.
+*   **Input:** A 3D texture (volume) containing color/alpha samples, ray parameters (origin, direction, length), and scalar parameters `alphaCorrection`, `alphaScaleFactor`, and `MAX_STEPS`.
+*   **Output:** A single fragment color $C_{pixel}$ representing the integrated intensity along the ray.
 
 **Data Structures**
-*   `colorSample`: A vector (e.g., RGBA) returned by texture sampling.
-*   `accumulatedColor`: A vector accumulator, initialized to zero.
-*   `accumulatedAlpha`: A scalar accumulator, initialized to zero.
-*   `currentPosition`: A 3D vector tracking the ray's current location.
-*   `accumulatedLength`: A scalar tracking the distance traveled along the ray.
+The method operates on the sample sequence $(C_i, \alpha_i)$ retrieved from the volume at positions $t_i$ along the ray segment $[t_{start}, t_{end}]$ [S5, S10, unofficial].
+*   `accumulatedColor`: A vector (RGB or RGBA) initialized to $(0, 0, 0, 0)$.
+*   `accumulatedAlpha`: A scalar initialized to $0.0$.
+*   `currentPosition`: A 3D vector initialized to the ray origin.
+*   `accumulatedLength`: A scalar initialized to $0.0$.
 
 **Parameters**
-*   `MAX_STEPS`: The total number of discrete steps to traverse the volume [S1, unofficial].
+*   `MAX_STEPS`: The total number of discrete steps to traverse the ray [S1, unofficial].
 *   `alphaCorrection`: A multiplier applied to the sampled alpha value [S1, unofficial].
 *   `alphaScaleFactor`: A multiplier applied to `alphaSample` to make the final color invariant to step size [S1, unofficial].
+*   `deltaDirection`: The vector increment per step (direction normalized or scaled by step size) [S1, unofficial].
+*   `deltaDirectionLength`: The scalar length added per step [S1, unofficial].
+*   `rayLength`: The total length of the ray segment to traverse [S1, unofficial].
 
-**Algorithm**
-The method iterates through a fixed number of steps. Although it retains the alpha accumulation logic from standard ray casting, this alpha is not used in the final color calculation for the X-ray mode [S1, unofficial].
-
-1.  Initialize `accumulatedColor` to $(0, 0, 0, 0)$ and `accumulatedAlpha` to $0.0$.
-2.  Initialize `currentPosition` to the ray origin and `accumulatedLength` to $0.0$.
-3.  For $i$ from $0$ to $MAX\_STEPS - 1$:
-    a. Sample the 3D texture at `currentPosition` to obtain `colorSample` [S1, unofficial].
-    b. Calculate `alphaSample` as:
-       $$ \text{alphaSample} = \text{colorSample}.a \times \text{alphaCorrection} $$
-    c. Modulate `alphaSample` by the remaining transparency:
-       $$ \text{alphaSample} = \text{alphaSample} \times (1.0 - \text{accumulatedAlpha}) $$
-    d. Scale `alphaSample` for step-size invariance:
-       $$ \text{alphaSample} = \text{alphaSample} \times \text{alphaScaleFactor} $$
-    e. Update `accumulatedColor` by adding the current color sample normalized by the total steps:
-       $$ \text{accumulatedColor} = \text{accumulatedColor} + \frac{\text{colorSample}}{MAX\_STEPS} $$
-    f. Update `accumulatedAlpha`:
-       $$ \text{accumulatedAlpha} = \text{accumulatedAlpha} + \text{alphaSample} $$
-    g. Advance the ray:
-       $$ \text{currentPosition} = \text{currentPosition} + \text{deltaDirection} $$
-       $$ \text{accumulatedLength} = \text{accumulatedLength} + \text{deltaDirectionLength} $$
-    h. If `accumulatedLength` $\ge$ `rayLength` or `accumulatedAlpha` $\ge$ $1.0$, break the loop [S1, unofficial].
-4.  Output `accumulatedColor` as the fragment color [S1, unofficial].
+**Algorithm Steps**
+1.  Initialize `accumulatedColor` to zero and `accumulatedAlpha` to zero.
+2.  Loop $i$ from $0$ to $MAX\_STEPS - 1$:
+    a.  Sample the 3D texture at `currentPosition` to obtain `colorSample` $(C_s, \alpha_s)$ [S1, unofficial].
+    b.  Calculate `alphaSample` as $\alpha_s \times \text{alphaCorrection}$ [S1, unofficial].
+    c.  Modulate `alphaSample` by the remaining transparency: $\text{alphaSample} \leftarrow \text{alphaSample} \times (1.0 - \text{accumulatedAlpha})$ [S1, unofficial].
+    d.  Scale `alphaSample` by `alphaScaleFactor`: $\text{alphaSample} \leftarrow \text{alphaSample} \times \text{alphaScaleFactor}$ [S1, unofficial].
+    e.  Update `accumulatedColor` by adding the current color sample divided by the total number of steps:
+        $$ \text{accumulatedColor} \leftarrow \text{accumulatedColor} + \frac{\text{colorSample}}{\text{MAX\_STEPS}} $$
+        [S1, unofficial].
+    f.  Update `accumulatedAlpha` by adding the calculated `alphaSample`:
+        $$ \text{accumulatedAlpha} \leftarrow \text{accumulatedAlpha} + \text{alphaSample} $$
+        [S1, unofficial].
+    g.  Advance the ray position:
+        $$ \text{currentPosition} \leftarrow \text{currentPosition} + \text{deltaDirection} $$
+        $$ \text{accumulatedLength} \leftarrow \text{accumulatedLength} + \text{deltaDirectionLength} $$
+        [S1, unofficial].
+    h.  If $\text{accumulatedLength} \ge \text{rayLength}$ or $\text{accumulatedAlpha} \ge 1.0$, break the loop [S1, unofficial].
+3.  Output `accumulatedColor` as the fragment color [S1, unofficial].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def xray_volume_rendering(ray_origin, ray_direction, ray_length, volume_texture, max_steps, alpha_correction, alpha_scale_factor):
+def x_ray_rendering(ray_origin, ray_direction, ray_length, volume_texture, max_steps, alpha_correction, alpha_scale_factor):
     accumulated_color = vec4(0.0, 0.0, 0.0, 0.0)
     accumulated_alpha = 0.0
     current_position = ray_origin
     accumulated_length = 0.0
     
-    # Pre-calculate step increments
-    delta_direction = ray_direction * (ray_length / max_steps)
+    # Pre-calculate delta direction and length based on max_steps and ray_length
+    # Note: deltaDirectionLength is typically ray_length / max_steps if uniform sampling
+    delta_direction = ray_direction # Assuming ray_direction is already scaled or normalized appropriately for the step
     delta_direction_length = ray_length / max_steps
-    
+
     for i in range(max_steps):
         # Sample the 3D texture at the current ray position
         color_sample = volume_texture.sample(current_position)
         
-        # Calculate alpha sample with correction
+        # Allow the alpha correction customization
         alpha_sample = color_sample.a * alpha_correction
         
-        # Modulate by remaining transparency (retained from standard ray casting)
-        alpha_sample *= (1.0 - accumulated_alpha)
+        # Applying this effect to both the color and alpha accumulation results in more realistic transparency
+        # Note: This alpha modulation is computed but not used for the final color in X-Ray mode
+        alpha_sample = alpha_sample * (1.0 - accumulated_alpha)
         
-        # Scale alpha for step-size invariance
-        alpha_sample *= alpha_scale_factor
+        # Scaling alpha by the number of steps makes the final color invariant to the step size
+        alpha_sample = alpha_sample * alpha_scale_factor
         
-        # Linear accumulation: add color sample divided by total steps
-        accumulated_color = accumulated_color + (color_sample / max_steps)
+        # Perform the composition: Linear accumulation normalized by step count
+        accumulated_color = accumulated_color + (color_sample / float(max_steps))
         
-        # Update accumulated alpha (not used in final color output for X-ray mode)
-        accumulated_alpha += alpha_sample
+        # Store the alpha accumulated so far
+        accumulated_alpha = accumulated_alpha + alpha_sample
         
-        # Advance ray
-        current_position += delta_direction
-        accumulated_length += delta_direction_length
+        # Advance the ray
+        current_position = current_position + delta_direction
+        accumulated_length = accumulated_length + delta_direction_length
         
-        # Termination conditions
+        # If the length traversed is more than the ray length, or if the alpha accumulated reaches 1.0 then exit
         if accumulated_length >= ray_length or accumulated_alpha >= 1.0:
             break
             
@@ -89,19 +91,29 @@ def xray_volume_rendering(ray_origin, ray_direction, ray_length, volume_texture,
 ```
 
 **Edge Cases and Pitfalls**
-*   **Unused Computation**: The alpha accumulation logic (steps 3-4 and 7 in the algorithm) is retained from the original Ray Casting method but is not used in the final color output for X-Ray mode, potentially wasting computation [S1, unofficial].
-*   **Step Size Invariance**: The `alphaScaleFactor` and division by `MAX_STEPS` are critical for ensuring the visual result does not change if the number of sampling steps changes [S1, unofficial].
+*   **Unused Alpha Computation:** The alpha accumulation logic (steps 3-4 and 7 in the algorithm) is retained from the original Ray Casting method but is not used in the final color output for X-Ray mode, potentially wasting computation [S1, unofficial].
+*   **Step Size Invariance:** The division by `MAX_STEPS` in the color accumulation ensures the result is invariant to the number of steps, assuming uniform sampling [S1, unofficial].
+*   **Early Termination:** The loop may terminate early if `accumulatedAlpha` reaches 1.0, which can lead to inconsistent results if the alpha values are not properly scaled or if the volume has high opacity regions [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity**: $O(N)$ per pixel, where $N$ is the number of steps (`MAX_STEPS`).
-*   **Memory Complexity**: $O(1)$ auxiliary memory per pixel (excluding the volume texture storage).
-*   **Strengths**: Produces a clear, projection-like view of internal structures similar to medical X-rays or CT scans; simple to implement; highlights high-intensity regions without occlusion from front layers.
-*   **Limitations**: Lacks depth cues and transparency effects; the alpha calculation is computationally wasted if strictly X-ray mode is desired; sensitive to the choice of `MAX_STEPS` if normalization is not handled correctly (though the division by `MAX_STEPS` mitigates this).
-*   **When to use**: When a projectional view of density/intensity is required, such as in medical imaging previews or when depth occlusion is undesirable.
-*   **When not to use**: When realistic transparency, lighting, or depth perception is needed; use [Accumulate](6890-ray-traversal-schemes.md) or [Ray Casting](6890-ray-traversal-schemes.md) instead.
+**Time and Memory Complexity**
+*   **Time:** $O(N)$ where $N$ is the number of steps (`MAX_STEPS`) per ray. The complexity is linear with respect to the sampling density.
+*   **Memory:** $O(1)$ auxiliary memory per ray, excluding the volume texture storage.
+
+**Measured Performance and Scaling**
+*   Performance depends heavily on the texture sampling cost and the number of steps. Since the alpha accumulation is performed but not used for the final color, there is a computational overhead compared to a pure sum without alpha modulation [S1, unofficial].
+*   Scaling is linear with resolution (number of rays) and depth (number of steps).
+
+**Strengths and Limitations**
+*   **Strengths:** Provides a clear, unoccluded view of internal structures, similar to medical X-rays or CT projections [S1, unofficial]. Simple to implement as a modification of standard ray casting.
+*   **Limitations:** Does not model occlusion, making it difficult to distinguish overlapping structures of similar intensity. The retained alpha computation is inefficient [S1, unofficial].
+
+**When to Use**
+*   Use when a projection-like view is desired, such as in medical imaging visualization or when transparency is not a primary concern.
+*   Avoid when occlusion cues are necessary for depth perception.
 
 ## Background
-X-Ray Volume Rendering is derived from standard Direct Volume Ray Casting techniques. It was adapted from the Simple Ray Casting method by modifying the accumulation step to sum raw color samples divided by the total number of steps, rather than using alpha compositing [S1, unofficial]. This approach mimics the physics of X-ray attenuation where intensities add up linearly through the medium.
+X-Ray Volume Rendering was introduced as a modification to standard Simple Ray Casting to achieve a CT-scan-like appearance [S1, unofficial]. It differs from Simple Ray Casting in the accumulation step: Simple Ray Casting uses alpha compositing ($accumulatedColor += colorSample \times alphaSample$), while X-Ray Rendering sums the raw color samples divided by the total number of steps ($accumulatedColor = accumulatedColor + colorSample/float(MAX\_STEPS)$) [S1, unofficial]. The technique was popularized in online forums and tutorials discussing the conversion of Lebarba's volume rendering code to X-ray mode [S1, unofficial].
 
 ## Sources
 [S1] Convert from Simple Ray Casting to X-Ray Rendering, https://stackoverflow.com/questions/48757096/convert-from-simple-ray-casting-to-x-ray-rendering, fetched 2026-10-26 (unofficial)

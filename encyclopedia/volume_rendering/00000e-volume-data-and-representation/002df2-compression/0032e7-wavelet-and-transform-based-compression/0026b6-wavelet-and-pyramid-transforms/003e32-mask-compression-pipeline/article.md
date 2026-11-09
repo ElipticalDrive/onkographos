@@ -1,0 +1,228 @@
+# Mask Compression Pipeline
+
+Also called: Learnable Mask Compression, Mask Encoding Pipeline
+
+## Overview
+The Mask Compression Pipeline is a multi-stage lossless compression method designed to minimize the storage footprint of binarized learnable masks used in neural field representations (such as TensoRF and TriPlane) [S1]. It addresses the problem of storing sparse binary masks that indicate which grid coefficients are active, ensuring that the sparsity pattern learned during training is preserved with minimal overhead [S1]. It distinguishes itself from general volume compression by operating specifically on the binary mask structure derived from wavelet transforms, utilizing 8-bit casting and level-wise separation to exploit the high sparsity of high-pass coefficients [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A binarized learnable mask $M$ of size $N \times N$ (or $N \times N \times N$ for 3D volumes, though the source primarily details 2D planar masks for TriPlane/TensoRF) derived from a Discrete Wavelet Transform (DWT) decomposition. The mask elements are binary (0 or 1).
+*   **Output:** A compressed bitstream representing the mask.
+
+**Data Structures:**
+*   **Binarized Mask:** A 2D or 3D array of bits. In the implementation, it is treated as a sequence of integers for processing.
+*   **RLE Pairs:** A list of tuples `(value, count)`.
+*   **Huffman Tree:** A static or dynamic tree mapping symbols to bit codes.
+
+**Parameters:**
+*   $\lambda_m$: Mask regularization parameter controlling sparsity. Typical values tested: $1e-10$, $5e-11$, $2.5e-11$ [S1]. Lower values yield higher sparsity and smaller compressed sizes [S1].
+
+**Steps:**
+
+1.  **8-bit Casting:**
+    Pack the binarized mask values into groups of 8 bits. This assumes most elements are zeros. This step shortens the RLE code length by treating a block of 8 zeros as a single unit for counting purposes. For example, 1000 zeros are represented as $(0, 125)$ instead of three $(0, 255)$ and one $(0, 235)$ [S1].
+    *   *Note:* The source implies this is done on the raw binary stream before RLE.
+
+2.  **Scanning Order (Optional):**
+    Flatten the 2D/3D mask into a 1D sequence using a scanning order. Tested orders include zigzag, Morton, spiral, or no scan. The source notes that scanning order does not noticeably affect output size [S1].
+
+3.  **Run-Length Encoding (RLE):**
+    Apply RLE to the 8-bit casted sequence. Encode repeating numbers as a pair of `(number, count)` [S1].
+    *   *Formula:* If the sequence is $s_1, s_2, \dots, s_k$, RLE produces pairs $(v_i, c_i)$ where $v_i$ is the value and $c_i$ is the count of consecutive occurrences.
+
+4.  **Huffman Encoding:**
+    Apply Huffman encoding to the RLE output pairs. Adaptive arithmetic coding was evaluated but discarded due to higher computational cost and no meaningful size improvement [S1].
+
+5.  **Level-wise Encoding:**
+    The mask is separated by DWT level. Each level is compressed separately.
+    *   For the final DWT level, the mask is split into two parts:
+        *   **Upper-left part (LL):** The approximation subband.
+        *   **Precincts (LH, HL, HH):** The detail subbands.
+    *   These two parts are compressed separately because the LL part has significantly fewer zeros (lower sparsity) than the detail parts [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compress_mask(mask_2d, levels):
+    """
+    Compress a binarized learnable mask using the Mask Compression Pipeline.
+    
+    Args:
+        mask_2d: 2D numpy array of binary values (0 or 1).
+        levels: Number of DWT levels applied to generate the mask.
+        
+    Returns:
+        compressed_data: Dictionary containing compressed segments for each level.
+    """
+    compressed_data = {}
+    
+    # Step 1: Separate mask by DWT level
+    # Note: In practice, the mask is generated per level during the DWT process.
+    # Here we assume mask_2d is the full mask or we iterate through level-specific masks.
+    # For the purpose of this pipeline, we process the final level's components separately.
+    
+    # Assuming we have access to level-specific masks or we split the final level mask
+    # The source describes separating the mask at each level.
+    
+    for level in range(levels):
+        # Get mask for current level
+        level_mask = get_level_mask(mask_2d, level) # [G] Helper to extract level-specific mask
+        
+        # Step 2: For the last level, split into LL and Precincts
+        if level == levels - 1:
+            ll_part, precincts = split_final_level(level_mask)
+            
+            # Compress LL part
+            compressed_ll = _compress_segment(ll_part)
+            compressed_data[f"level_{level}_LL"] = compressed_ll
+            
+            # Compress Precincts (LH, HL, HH)
+            compressed_precincts = _compress_segment(precincts)
+            compressed_data[f"level_{level}_precincts"] = compressed_precincts
+        else:
+            # Compress other levels as a single segment
+            compressed_segment = _compress_segment(level_mask)
+            compressed_data[f"level_{level}"] = compressed_segment
+            
+    return compressed_data
+
+def _compress_segment(segment_2d):
+    """
+    Apply 8-bit casting, RLE, and Huffman encoding to a 2D segment.
+    """
+    # Step 1: 8-bit Casting
+    # Pack binary values into 8-bit groups.
+    # Assuming the segment is a flat array of bits or integers 0/1.
+    flat_bits = segment_2d.flatten() # [G] Flatten to 1D
+    
+    # Cast to 8-bit groups. 
+    # If the source means packing 8 bits into one byte for RLE counting:
+    # We treat each byte as a symbol? No, the source says "packing... before applying RLE".
+    # Example: 1000 zeros -> (0, 125). This implies we count 8-bit blocks of identical values.
+    
+    # Let's interpret "8-bit casting" as grouping consecutive identical values into chunks of 8 bits?
+    # Or simply that the RLE counts are based on 8-bit units?
+    # The source example: "1000 zeros become (0, 125)". 1000 / 8 = 125.
+    # This implies we count the number of 8-bit blocks of zeros.
+    
+    # Implementation:
+    # 1. Identify runs of identical values.
+    # 2. For each run, calculate the number of 8-bit blocks.
+    
+    rle_pairs = []
+    if len(flat_bits) == 0:
+        return rle_pairs
+        
+    current_val = flat_bits[0]
+    current_count = 1
+    
+    for i in range(1, len(flat_bits)):
+        if flat_bits[i] == current_val:
+            current_count += 1
+        else:
+            # Calculate 8-bit blocks for the run
+            # The source implies we divide the count by 8?
+            # "1000 zeros ... (0, 125)". 1000/8 = 125.
+            # So the RLE count is count // 8?
+            # But what if count is not divisible by 8?
+            # The source doesn't specify remainder handling. 
+            # Standard RLE would keep the remainder. 
+            # However, "8-bit casting" might imply padding or truncation.
+            # Given "shortens the RLE code length", it likely means we encode in units of 8.
+            
+            # Let's assume we encode the number of 8-bit blocks.
+            # If there's a remainder, it might be handled by a separate small RLE or ignored?
+            # The source says "assuming most elements are zeros".
+            # Let's assume standard RLE on the *blocks*.
+            
+            # Actually, a simpler interpretation:
+            # The input to RLE is the 8-bit casted array.
+            # If we cast 8 bits to 1 byte, we have an array of bytes.
+            # But the values are 0 or 1.
+            # If we pack 8 bits into a byte, the byte value is 0-255.
+            # This doesn't match "RLE encodes repeating numbers as a pair of the number and its count".
+            
+            # Re-reading: "Packing the binarized mask values by 8 bits before applying RLE".
+            # "1000 zeros become (0, 125)".
+            # This strongly suggests that the "value" in the RLE pair is the bit value (0 or 1),
+            # and the "count" is the number of 8-bit blocks.
+            
+            blocks = current_count // 8
+            if blocks > 0:
+                rle_pairs.append((current_val, blocks))
+            
+            # Handle remainder?
+            remainder = current_count % 8
+            if remainder > 0:
+                # Start new run with remainder
+                current_val = flat_bits[i]
+                current_count = remainder
+            else:
+                current_val = flat_bits[i]
+                current_count = 1
+                
+    # Process last run
+    blocks = current_count // 8
+    if blocks > 0:
+        rle_pairs.append((current_val, blocks))
+    # Remainder of last run?
+    remainder = current_count % 8
+    if remainder > 0:
+        rle_pairs.append((current_val, remainder)) # [G] Assuming remainder is encoded as is
+
+    # Step 2: Huffman Encoding
+    # Build Huffman tree from rle_pairs
+    huffman_tree = build_huffman_tree(rle_pairs)
+    
+    # Encode pairs
+    bitstream = encode_huffman(rle_pairs, huffman_tree)
+    
+    return bitstream
+
+def split_final_level(mask_2d):
+    """
+    Split the final DWT level mask into LL (upper-left) and Precincts (LH, HL, HH).
+    """
+    # [G] Assuming standard DWT decomposition where LL is top-left quadrant
+    h, w = mask_2d.shape
+    mid_h, mid_w = h // 2, w // 2
+    
+    ll_part = mask_2d[:mid_h, :mid_w]
+    # The rest are LH, HL, HH. The source treats them as a single group "precincts".
+    # We can concatenate them or keep as a list.
+    lh_part = mask_2d[:mid_h, mid_w:]
+    hl_part = mask_2d[mid_h:, :mid_w]
+    hh_part = mask_2d[mid_h:, mid_w:]
+    
+    precincts = np.concatenate([lh_part.flatten(), hl_part.flatten(), hh_part.flatten()])
+    # Reshape back to 2D if needed for consistency, but RLE works on 1D.
+    # Let's return them as 2D arrays for the caller to flatten.
+    return ll_part, np.concatenate([lh_part, hl_part, hh_part], axis=1) # [G] Approximate concatenation
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The method relies on the assumption that most elements are zeros. If sparsity is low, 8-bit casting may not provide significant benefits.
+*   **Boundaries:** The handling of remainders in 8-bit casting (when the total count is not divisible by 8) is not explicitly detailed in the source. The pseudocode assumes remainders are encoded as standard RLE counts.
+*   **Degenerate Input:** Empty masks or masks with no zeros should be handled gracefully, though the source assumes high sparsity.
+
+## Operating characteristics
+*   **Time Complexity:** The compression involves linear passes for RLE and Huffman encoding. Huffman encoding is $O(N \log N)$ or $O(N)$ depending on implementation. The source notes that Huffman is chosen over adaptive arithmetic coding for lower computational cost [S1].
+*   **Memory Complexity:** The compressed size is significantly reduced. On the NeRF synthetic dataset, the average size is 0.28 MB, which is 7.39 times smaller than the original mask [S1].
+*   **Measured Performance:**
+    *   RLE alone reduces mask size by a factor of 1.75 [S1].
+    *   Adding Huffman raises the compression ratio to 4.62 [S1].
+    *   Adding 8-bit casting increases the ratio to 6.24 [S1].
+    *   Level-wise encoding results in an average size of 0.28 MB (7.39x smaller than original) [S1].
+*   **Strengths:** High compression ratio for sparse binary masks; low computational cost; preserves sparsity pattern.
+*   **Limitations:** Specific to binarized masks; scanning order has negligible impact, so optimization efforts there are wasted; adaptive arithmetic coding offers no benefit over Huffman.
+*   **When to use:** When compressing learnable masks in neural field representations like TensoRF or TriPlane where sparsity is high and storage is a bottleneck [S1].
+*   **When not to use:** For dense data or when adaptive arithmetic coding is required for specific entropy characteristics (though the source found no benefit).
+
+## Background
+The Mask Compression Pipeline was introduced in the context of compact neural radiance fields, specifically to compress the learnable masks used in TensoRF and TriPlane architectures [S1]. The method was proposed to reduce the storage size of the model without significant loss in reconstruction quality (PSNR) [S1]. The source paper is "Masked Wavelet Representation for Compact Neural Radiance Fields" [S1].
+
+## Sources
+[S1] Masked Wavelet Representation for Compact Neural Radiance Fields, https://doi.org/10.1109/cvpr52729.2023.01981, fetched 2026-10-26

@@ -2,14 +2,12 @@
 
 
 ## Overview
-Index-Based Upsampling with Recalibration is a technique to upsample low-resolution tensors to high resolution using an index map and a recalibration map, specifically for depth values [S1, unofficial]. It gathers values from the low-resolution tensor using the index map [S1, unofficial]. It multiplies the gathered values by the recalibration map to adjust for resolution changes [S1, unofficial].
+Index-Based Upsampling with Recalibration upsamples low-resolution tensors to high resolution by gathering values via an index map and scaling them with a recalibration map, specifically designed for depth values [S1, unofficial]. It differs from sibling methods like Depth-Aware Upsampling by relying on explicit index and scaling tensors rather than depth-weighted interpolation [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-The method takes a low-resolution tensor $T_{\text{low}}$, an `index_map`, and a `recalib_map` as inputs [S1, unofficial], and produces a high-resolution tensor $T_{\text{high}}$ as output [S1, unofficial].
+**Inputs and Outputs:** The method takes a low-resolution tensor $T_{\text{low}}$, an `index_map`, and a `recalib_map` as inputs [S1, unofficial], and produces a high-resolution tensor $T_{\text{high}}$ as output [S1, unofficial].
 
-**Data Structures:**
-The `index_map` is a tensor of shape $(H \times W, 2)$ containing integer indices mapping high-resolution pixels to low-resolution pixels [S1, unofficial]. The `recalib_map` is a tensor of shape $(H \times W)$ containing scaling factors for recalibration [S1, unofficial]. $H$ and $W$ denote the height and width of the high-resolution output [G].
+**Data Structures:** The `index_map` is a tensor of shape $(H \times W, 2)$ containing integer indices mapping high-resolution pixels to low-resolution pixels [S1, unofficial]. The `recalib_map` is a tensor of shape $(H \times W)$ containing scaling factors for recalibration [S1, unofficial]. $H$ and $W$ denote the height and width of the high-resolution output [G].
 
 **Steps:**
 1. **Gather:** For each pixel $(y, x)$ in the high-resolution grid, retrieve the corresponding low-resolution coordinates from `index_map` [S1, unofficial].
@@ -18,17 +16,15 @@ The `index_map` is a tensor of shape $(H \times W, 2)$ containing integer indice
 **Formula:**
 $$T_{\text{high}}[y, x] = T_{\text{low}}[\text{index\_map}[y \times W + x, 0], \text{index\_map}[y \times W + x, 1]] \times \text{recalib\_map}[y \times W + x]$$ [S1, unofficial].
 
-**Parameters:**
-Typical values for `ratio` (resolution scaling) are around 1.5 [S1, unofficial]. Thresholds for rendering steps may be set to $5 \times 10^{-5}$ [S1, unofficial].
+**Parameters:** Typical values for `ratio` (resolution scaling) are around 1.5 [S1, unofficial]. Thresholds for rendering steps may be set to $5 \times 10^{-5}$ [S1, unofficial].
 
-**Edge Cases and Pitfalls:**
-Boundary conditions for `index_map` must be handled to avoid out-of-bounds access [G]. Precision issues may arise if index mapping is not integer-accurate [G].
+**Edge Cases and Pitfalls:** Boundary conditions for `index_map` must be handled to avoid out-of-bounds access [G]. Precision issues may arise if index mapping is not integer-accurate [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def index_based_upsampling_with_recalibration(T_low, index_map, recalib_map):
+def index_based_upsampling_with_recalibration(T_low, index_map, recalib_map, H_high, W_high):
     """
     Upsamples low-resolution tensor T_low to high resolution using index_map and recalib_map.
     
@@ -36,37 +32,36 @@ def index_based_upsampling_with_recalibration(T_low, index_map, recalib_map):
         T_low: Low-resolution tensor of shape (H_low, W_low, C).
         index_map: Tensor of shape (H_high * W_high, 2) with integer indices.
         recalib_map: Tensor of shape (H_high * W_high) with scaling factors.
+        H_high, W_high: Height and width of the high-resolution output.
         
     Returns:
         T_high: High-resolution tensor of shape (H_high, W_high, C).
     """
-    H_high, W_high = recalib_map.shape
     C = T_low.shape[2] if len(T_low.shape) > 2 else 1
-    T_high = [[0.0] * C for _ in range(H_high)]
-    
-    for y in range(H_high):
-        for x in range(W_high):
-            idx = y * W_high + x
-            u, v = index_map[idx]
-            s = recalib_map[idx]
-            for c in range(C):
-                T_high[y][x][c] = T_low[u][v][c] * s
-                
+    T_high = [[[0.0] * C for _ in range(W_high)] for _ in range(H_high)]
+    N = index_map.shape[0]
+    for idx in range(N):
+        y = idx // W_high
+        x = idx % W_high
+        u, v = index_map[idx]
+        s = recalib_map[idx]
+        for c in range(C):
+            T_high[y][x][c] = T_low[u][v][c] * s
     return T_high
 ```
 
 ## Subtopics          
 
 ### [Depth-Aware Upsampling](2777-depth-aware-upsampling.md)
-Depth-aware upsampling reduces blue noise and performance costs in volumetric rendering by rendering clouds to a low-resolution RGBA texture and a distance buffer, then upsampling to high resolution using the depth buffer. It sets itself apart from standard bilinear upsampling by weighting the interpolation of low-resolution samples based on the depth difference between the high-resolution fragment and the low-resolution depth values, ensuring that samples from similar depth planes contribute more to the final color.
+Depth-aware upsampling reduces blue noise and performance costs in volumetric rendering by rendering clouds to a low-resolution RGBA texture and a distance buffer, then upsampling to high resolution using the depth buffer. It sets itself apart from standard bilinear upsampling by weighting interpolation based on depth differences rather than using explicit index and recalibration maps. Choose it when depth continuity is critical and computational budget allows for depth buffer passes [G].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Strengths:** Not given in the sources.
-*   **Limitations:** Not given in the sources.
-*   **When to use:** Not given in the sources.
-*   **When not to use:** Not given in the sources.
+* **Time Complexity:** Not given in the sources [S1, unofficial].
+* **Memory Complexity:** Not given in the sources [S1, unofficial].
+* **Strengths:** Not given in the sources [S1, unofficial].
+* **Limitations:** Not given in the sources [S1, unofficial].
+* **When to use:** Not given in the sources [S1, unofficial].
+* **When not to use:** Not given in the sources [S1, unofficial].
 
 ## Background
 The implementation referenced in the sources is derived from the DeepSDF repository, which was directly copied into the DIST-Renderer project [S1, unofficial]. The technique is used within a multiresolution rendering pipeline [S1, unofficial].

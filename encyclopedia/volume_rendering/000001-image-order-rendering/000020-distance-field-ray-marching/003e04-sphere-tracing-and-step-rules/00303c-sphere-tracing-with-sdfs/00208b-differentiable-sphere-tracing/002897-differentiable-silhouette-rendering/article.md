@@ -1,110 +1,76 @@
 # Differentiable Silhouette Rendering
 
-Also called: Soft Silhouette Rendering, Minimum Absolute SDF Silhouette
 
 ## Overview
-Differentiable Silhouette Rendering is a technique to render binary silhouettes of 3D shapes represented by Signed Distance Functions (SDFs) in a way that allows gradient back-propagation to scene parameters. It solves the non-differentiability of standard binary silhouette detection (e.g., ray termination at infinity) by computing a "soft" silhouette value based on the minimum absolute SDF encountered along a ray. It sets itself apart from its parent [Differentiable Sphere Tracing](2316-differentiable-sphere-tracing.md) by focusing specifically on the silhouette supervision signal rather than full photometric or geometric rendering, and from siblings like [Instant-NSR-PL Forward Pass](2540-instant-nsr-pl-forward-pass.md) by relying on the minimum absolute distance query rather than normal-based edge detection.
+Differentiable Silhouette Rendering is a technique to render binary silhouettes of 3D shapes represented by Signed Distance Functions (SDFs) in a way that allows gradient back-propagation to scene parameters [S1]. It solves the non-differentiability of standard binary silhouette detection (e.g., ray termination at infinity) by computing a "soft" silhouette value based on the minimum absolute SDF encountered along a ray [S1]. It sets itself apart from its parent [Differentiable Sphere Tracing](2316-differentiable-sphere-tracing.md) by focusing specifically on the silhouette supervision signal rather than full photometric or geometric rendering, and from siblings like [Instant-NSR-PL Forward Pass](2540-instant-nsr-pl-forward-pass.md) by relying on the minimum absolute distance query rather than normal-based edge detection [S1].
 
 ## How it works
 **Inputs:**
-*   Camera ray origin $\mathbf{o}$ and direction $\mathbf{d}$.
-*   SDF function $f(\mathbf{p})$ (e.g., neural network or analytical).
-*   Convergence threshold $\epsilon$ (typically small positive value, e.g., $10^{-4}$ m [S1]).
-*   Unit sphere radius $R_{unit}=1.0$ for background handling.
+*   Camera ray origin $\mathbf{o}$ and direction $\mathbf{d}$ [S1].
+*   SDF function $f(\mathbf{p})$ [S1].
+*   Convergence threshold $\epsilon$ [S1].
+*   Unit sphere radius $R_{unit}=1.0$ for background handling [S1].
 
 **Outputs:**
-*   Soft silhouette value $S_r$ per pixel.
-*   Binary silhouette (derived from sign of $S_r$).
+*   Soft silhouette value $S_r$ per pixel [S1].
+*   Binary silhouette (derived from sign of $S_r$) [S1].
 
 **Data Structures:**
-*   No complex structures required. The method operates per-pixel during ray marching.
+*   No complex structures required. The method operates per-pixel during ray marching [S1].
 
 **Steps:**
-1.  **Deep Sphere Tracing:** Perform sphere tracing along the ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ for a maximum number of steps or until a max distance is reached. Record the SDF values $f(\mathbf{p}_i)$ at each sample point $\mathbf{p}_i$.
-2.  **Minimum Absolute SDF:** Compute the minimum absolute SDF value encountered along the ray:
-    $$ S_{min} = \min_i |f(\mathbf{p}_i)| $$
-    This step identifies the closest surface to the camera along the ray, leveraging the property that SDFs are nearest-surface sensitive [S1].
-3.  **Background Handling:** Check if the ray intersects the unit sphere (or the bounding volume of interest).
-    *   If the ray does **not** intersect the unit sphere (i.e., it misses the object entirely), set the soft silhouette value to the distance from the origin to the ray minus 1.0. This ensures the value is always $> 0$, consistently marking it as background [S1].
-    *   If the ray intersects, proceed to step 4.
-4.  **Soft Silhouette Calculation:** Subtract the convergence threshold $\epsilon$ from the minimum absolute SDF:
-    $$ S_{soft} = S_{min} - \epsilon $$
-    This produces a tight differentiable approximation of the silhouette [S1].
-5.  **Binary Silhouette Determination:**
-    *   If $S_{soft} < 0$, the pixel is foreground.
-    *   If $S_{soft} > 0$, the pixel is background.
+1.  **Deep Sphere Tracing:** Perform sphere tracing along the ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ for a maximum number of steps [S1]. Record the SDF values $f(\mathbf{p}_i)$ at each sample point $\mathbf{p}_i$ [S1].
+2.  **Minimum Absolute SDF:** Compute the minimum absolute SDF value encountered along the ray: $S_{min} = \min_i |f(\mathbf{p}_i)|$ [S1]. This identifies the closest surface to the camera, leveraging the nearest-surface property of SDFs [S1].
+3.  **Background Handling:** Check if the ray intersects the unit sphere [S1]. If the ray does not intersect the unit sphere, set the soft silhouette value to the distance from the origin to the camera ray minus $1.0$, ensuring the value is always $> 0$ and consistently marks the pixel as background [S1]. If the ray intersects, proceed to step 4.
+4.  **Soft Silhouette Calculation:** Subtract the convergence threshold $\epsilon$ from the minimum absolute SDF: $S_r = S_{min} - \epsilon$ [S1]. This produces a tight differentiable approximation of the silhouette [S1].
+5.  **Binary Silhouette Determination:** If $S_r < 0$, the pixel is foreground; if $S_r > 0$, the pixel is background [S1].
+
+**Formulas:**
+*   Minimum absolute SDF: $S_{min} = \min_i |f(\mathbf{p}_i)|$, where $f(\mathbf{p}_i)$ is the SDF value at sample point $\mathbf{p}_i$ [S1].
+*   Soft silhouette: $S_r = S_{min} - \epsilon$, where $\epsilon$ is the convergence threshold [S1].
+*   Silhouette loss: $\mathcal{L}_s = S_{gt} \max(0, S_r) + (1 - S_{gt}) \max(0, -S_r)$, where $S_{gt}$ is the ground truth binary silhouette (1 for foreground, 0 for background) [S1].
+
+**Parameters:**
+*   Convergence threshold $\epsilon$ (typically a small positive value) [S1].
+
+**Edge Cases and Pitfalls:**
+*   Directly checking if the ray marches to infinity is not differentiable [S1].
+*   Rays missing the unit sphere are handled by setting $S_r$ to the distance from the origin to the ray minus $1.0$, ensuring consistent background marking [S1].
+*   Using the minimum absolute query ensures the nearest surface to the camera is optimized, leveraging the property of SDFs where the nearest surface is the correct one [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def differentiable_silhouette_rendering(ray_origin, ray_direction, sdf_function, epsilon=1e-4, max_steps=50):
-    """
-    Renders a differentiable soft silhouette for a single ray.
-    
-    Args:
-        ray_origin: 3D vector, camera ray origin.
-        ray_direction: 3D vector, camera ray direction (normalized).
-        sdf_function: Callable, returns SDF value for a 3D point.
-        epsilon: float, convergence threshold.
-        max_steps: int, maximum number of sphere tracing steps.
-        
-    Returns:
-        soft_silhouette: float, the differentiable silhouette value.
-    """
-    # Step 1: Deep Sphere Tracing to find minimum absolute SDF
-    min_abs_sdf = float('inf')
-    t = 0.0
-    hit_unit_sphere = False
-    
-    # Check intersection with unit sphere for background handling
-    # Ray-sphere intersection: |o + t*d|^2 = 1
-    # t^2 + 2*o.d*t + |o|^2 - 1 = 0
+    # Step 3: Check unit sphere intersection for background handling
     a = dot(ray_direction, ray_direction)
     b = 2.0 * dot(ray_origin, ray_direction)
     c = dot(ray_origin, ray_origin) - 1.0
     discriminant = b*b - 4*a*c
     
-    if discriminant >= 0:
-        hit_unit_sphere = True
-        # We don't strictly need the intersection point, just the flag
-        # However, for robustness, we might want to ensure we are inside/outside correctly
-        # The source implies checking intersection is sufficient to distinguish foreground/background rays
-        pass
+    if discriminant < 0:
+        # Ray misses unit sphere: distance from origin to ray minus 1.0
+        # Distance from origin to ray is |o x d| for unit d [G]
+        dist_to_ray = length(cross(ray_origin, ray_direction))
+        return dist_to_ray - 1.0
 
-    # Perform sphere tracing
-    for i in range(max_steps):
-        # Sample point
+    # Step 1: Deep sphere tracing
+    min_abs_sdf = float('inf')
+    t = 0.0
+    for _ in range(max_steps):
         point = ray_origin + t * ray_direction
-        
-        # Query SDF
         dist = sdf_function(point)
-        
-        # Track minimum absolute SDF
         abs_dist = abs(dist)
         if abs_dist < min_abs_sdf:
             min_abs_sdf = abs_dist
-        
-        # Advance along ray
         t += dist
-        
-        # Safety break if t becomes too large (avoiding infinity check)
-        if t > 100.0: # Arbitrary large bound
+        # Safety break to avoid infinity check [G]
+        if t > 100.0:
             break
-            
-    # Step 2 & 3: Background Handling and Soft Silhouette Calculation
-    if not hit_unit_sphere:
-        # Ray misses the unit sphere. 
-        # Set soft silhouette to distance from origin to ray minus 1.0.
-        # Distance from origin to ray is |o x d| since d is normalized.
-        dist_to_ray = length(cross(ray_origin, ray_direction))
-        soft_silhouette = dist_to_ray - 1.0
-    else:
-        # Ray hits the unit sphere (foreground candidate)
-        # Subtract threshold
-        soft_silhouette = min_abs_sdf - epsilon
-        
-    return soft_silhouette
+
+    # Step 2 & 4: Soft silhouette calculation
+    return min_abs_sdf - epsilon
 ```
 
 **Loss Function:**
@@ -118,15 +84,15 @@ This formulation allows the silhouette error to back-propagate differentiably to
 Volumetric Silhouette Rendering is a technique to render silhouettes of volumetric data by detecting edges where the view vector is perpendicular to the surface normal, using a 3D normal map and a pre-computed cube map for view vector normalization. It sets itself apart from geometry-based silhouette extraction by operating directly on volumetric representations via rasterization of normal fields, allowing interactive rendering of complex volumetric datasets.
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of sphere tracing steps per ray. The method adds minimal overhead to standard sphere tracing (one absolute value and min operation per step) [S1].
-*   **Memory Complexity:** $O(1)$ per ray, as it only tracks the minimum absolute SDF value.
-*   **Strengths:** Fully differentiable with respect to SDF parameters and camera extrinsics. It leverages the nearest-surface property of SDFs to optimize the correct surface [S1]. It avoids the non-differentiability of checking for ray termination at infinity [S1].
-*   **Limitations:** The accuracy depends on the resolution of the sphere tracing (number of steps). Aggressive marching strategies may reduce quality [S1]. It only provides silhouette supervision, not color or texture.
-*   **When to use:** When optimizing 3D shape from 2D silhouette masks is required, and the shape is represented by an SDF.
-*   **When not to use:** When full photometric rendering or texture optimization is needed.
+*   **Time Complexity:** Linear with respect to the number of sphere tracing steps per ray [S1].
+*   **Memory Complexity:** $O(1)$ per ray, as it only tracks the minimum absolute SDF value [S1].
+*   **Strengths:** Fully differentiable with respect to SDF parameters and camera extrinsics [S1]. It leverages the nearest-surface property of SDFs to optimize the correct surface [S1]. It avoids the non-differentiability of checking for ray termination at infinity [S1].
+*   **Limitations:** The accuracy depends on the resolution of the sphere tracing (number of steps) [S1]. Aggressive marching strategies may reduce quality [S1]. It only provides silhouette supervision, not color or texture [S1].
+*   **When to use:** When optimizing 3D shape from 2D silhouette masks is required, and the shape is represented by an SDF [S1].
+*   **When not to use:** When full photometric rendering or texture optimization is needed [S1].
 
 ## Background
-The method was introduced in the context of rendering deep implicit signed distance functions with differentiable sphere tracing. It addresses the need for differentiable silhouette supervision in 3D shape prediction and optimization. The approach was presented in the paper "DIST: Rendering Deep Implicit Signed Distance Function With Differentiable Sphere Tracing" [S1].
+The method was introduced in the context of rendering deep implicit signed distance functions with differentiable sphere tracing [S1]. It addresses the need for differentiable silhouette supervision in 3D shape prediction and optimization [S1]. The approach was presented in the paper "DIST: Rendering Deep Implicit Signed Distance Function With Differentiable Sphere Tracing" [S1].
 
 ## Sources
 [S1] DIST: Rendering Deep Implicit Signed Distance Function With Differentiable Sphere Tracing, https://doi.org/10.1109/cvpr42600.2020.00209, fetched 2026-10-26

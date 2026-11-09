@@ -1,0 +1,588 @@
+--- v001.md
++++ v002.md
+@@ -4,299 +4,327 @@
+ 
+ ## Overview
+-RING-NeRF is a neural field architecture that introduces two inductive biases: a continuous multi-scale representation of the scene and an invariance of the decoder’s latent space over spatial and scale domains [S1]. It solves the problem of rendering quality degradation at varying observation distances and resolutions by providing intrinsic continuous Level of Detail (LOD) without explicit LOD-specific supervision [S1]. Unlike sibling methods such as [AdaNeRF](6195-adanerf.md) or [Zip-NeRF](8875-multiplanenerf.md) which require explicit supervision for LOD or modify features based on scale, RING-NeRF encodes LOD exclusively in the grid hierarchy and uses a distance-aware forward mapping to adapt to observation distance, avoiding aliasing artifacts [S1].
++RING-NeRF (Residual Implicit Neural Grids) is a neural field architecture for 3D scene representation that introduces two primary inductive biases: a continuous multi-scale representation of the scene and an invariance of the decoder’s latent space over spatial and scale domains [S1]. It solves the problem of achieving intrinsic, continuous Level of Detail (LOD) without explicit LOD-specific supervision, enabling robust reconstruction across varying observation distances and supporting dynamic resolution extension [S1]. Unlike sibling architectures such as [AdaNeRF](6195-adanerf.md) or [SinNeRF](6199-sinnerf.md) which may rely on explicit supervision or fixed hierarchies, RING-NeRF derives LOD from the geometry of the ray-casting cone and the recursive grid structure, allowing it to adapt to unbounded scenes and novel view synthesis with anti-aliasing properties [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Camera pose (origin $\mathbf{o}$, direction $\mathbf{d}$), image resolution parameters (pixel size $c$ at distance 1), grid hierarchy parameters (base resolution $b$, growth factor $f$), and contraction function Jacobian $J$.
+-*   **Outputs:** Rendered pixel color $\hat{C}(\mathbf{r})$.
++*   **Inputs:** A set of $M$ training images with known camera poses and intrinsics; optionally, depth maps for SDF-based reconstruction.
++*   **Outputs:** A rendered image $\hat{C}(r)$ for a given ray $r$, and a trained scene representation consisting of a hierarchical grid structure and a decoder MLP.
+ 
+ **Data Structures:**
+-*   **Unbounded Hierarchical 3D Grid:** A pyramid of $N$ grids. The resolution of grid $i$ is $f^i b$. Each grid stores latent features of size $D$ (typically 8).
+-*   **Decoder:** A small Multi-Layer Perceptron (MLP) and linear layers.
++1.  **Unbounded Hierarchical 3D Grid:** A pyramid of $N$ grids.
++    *   Grid $G_0$ has resolution $b \times b \times b$.
++    *   Grid $G_i$ has resolution $(f^i b) \times (f^i b) \times (f^i b)$, where $f$ is the growth factor.
++    *   Each grid stores latent feature vectors of size $D_{feat}$ (typically 8).
++    *   The grids are stored as dense tensors or hash tables depending on implementation, but logically form a hierarchy where $G_N$ refines $G_{N-1}$.
++2.  **Decoder:**
++    *   A linear layer (Random Fourier Feature mapping) followed by a normalization layer.
++    *   A 3-layer MLP for radiance prediction.
+ 
+ **Numbered Steps:**
+ 
+-1.  **Scene Representation (Grid Construction):**
+-    The scene is represented by a recursive multi-scale mapping function. The latent feature grid $G_N$ at level $N$ is defined recursively [S1]:
+-    $$
+-    G_0 \leftarrow \delta_0
+-    $$
+-    $$
+-    G_N \leftarrow S(G_{N-1}) + \delta_N
+-    $$
+-    where $\delta_i$ is the latent feature grid at level $i$, and $S$ is a subdivision scheme that increases the resolution of $G_{N-1}$ to the resolution of $G_N$ via tri-linear interpolation. The latent vector for a point at level $N$ is obtained by linearly interpolating the point in the cell for each level $k \le N$ and summing the results [S1]. This summation acts as a residual connection.
+-
+-2.  **Continuous LOD:**
+-    To allow continuous LOD $L \in [N-1, N]$, a weighting factor $\alpha = L - (N-1)$ is applied [S1]:
+-    $$
+-    G_L \leftarrow S(G_{N-1}) + \alpha \delta_N
+-    $$
+-
+-3.  **Distance-Aware Forward Mapping (LOD Selection):**
+-    For a sample at distance $d$ from the camera, the LOD $L$ is calculated by equating the cone volume in contracted space to the virtual grid cell volume [S1].
+-    *   Compute the cone volume in world space: $V = (dc)^3$, where $c$ is the pixel size at distance 1.
+-    *   Contract the volume using the Jacobian $J(p)$ of the contraction function at sample location $p$: $V_{contract} = V \det(J(p))$.
+-    *   Equate to the virtual grid cell volume $(\frac{1}{f^L b})^3$ and solve for $L$ [S1]:
+-        $$
+-        L = - \frac {\log \left (dcb \sqrt [3]{\operatorname {det}(J(p))}\right )}{\log (f)}
+-        $$
+-    *   Clamp $L$ to the maximum available grid level during training if using coarse-to-fine optimization.
+-
+-4.  **Feature Extraction:**
+-    Interpolate the latent features from all grid levels $k \le L$ (or all levels if $L$ exceeds max grid, though typically clamped) and sum them to form the combined latent feature vector $\mathbf{f}_{combined}$ [S1].
+-    *   *Note:* Use summation, not concatenation, to maintain spatial and scale invariance of the decoder [S1].
+-
+-5.  **Normalization:**
+-    Apply standard, non-learnable normalization to $\mathbf{f}_{combined}$ to improve convergence stability [S1].
+-
+-6.  **Frequency Encoding:**
+-    Project the normalized feature into a higher dimension space using a Random Fourier Feature (RFF) mapping with a sinus filter [S1]:
+-    $$
+-    \mathbf{f}_{rff} = \sin(\mathbf{W} \mathbf{f}_{norm})
+-    $$
+-    where $\mathbf{W}$ is a learnable linear matrix (no bias) [S1].
+-
+-7.  **Density/SDF and Color Feature Prediction:**
+-    Pass $\mathbf{f}_{rff}$ through a linear layer to produce a density (or SDF) value $\sigma$ and a single color feature vector $\mathbf{f}_{color}$ [S1].
+-    *   *SDF Mode:* If reconstructing SDF, convert $\sigma$ to density using a NEUS-like approach before volume rendering [S1].
+-
+-8.  **View Direction Encoding:**
+-    Encode the view direction $\mathbf{d}$ using Spherical Harmonics (S.H.) [S1].
+-
+-9.  **Radiance Prediction:**
+-    Concatenate $\mathbf{f}_{color}$ with the S.H. encoded direction. Feed this combined vector into a 3-layer MLP to predict the final radiance $\mathbf{c}$ [S1].
+-
+-10. **Volume Rendering:**
+-    Compute the pixel color using the standard volume rendering integral [S1]:
+-    $$
+-    \hat{C}(\mathbf{r}) = \sum_{i=0}^{N-1} T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
+-    $$
+-    where $T_i = \exp(\sum_{j=0}^{i-1} \sigma_j \delta_j)$ and $\delta_i$ is the distance between samples.
++1.  **Ray Casting and Sampling:**
++    For a pixel corresponding to ray $r$, cast a cone (or ray) through the scene. Sample $N_{samples}$ points $p_i$ along the ray. For SDF-based reconstruction, compute the Signed Distance Function (SDF) value $s_i$ at each point. For density-based, compute density $\sigma_i$ directly. [S1]
++
++2.  **Distance-Aware Forward Mapping (LOD Calculation):**
++    For each sample point $p_i$ at distance $d_i$ from the camera origin:
++    a. Compute the Jacobian determinant $\det(J(p_i))$ of the scene contraction function at $p_i$. [S1]
++    b. Calculate the Level of Detail $L_i$ using the formula:
++       $$ L_i = - \frac {\log \left (d_i c b \sqrt [3]{\operatorname {det}(J(p_i))}\right )}{\log (f)} $$
++       where:
++       *   $c$ is the pixel size at distance 1 (derived from image resolution and FOV).
++       *   $b$ is the base grid resolution.
++       *   $f$ is the grid growth factor.
++       *   $J(p_i)$ is the Jacobian of the contraction function. [S1]
++    c. The LOD $L_i$ is a continuous real number. Let $N = \lfloor L_i \rfloor$ and $\alpha = L_i - N$. [S1]
++
++3.  **Feature Aggregation (Residual Implicit Grid):**
++    Compute the latent feature vector $F_i$ for sample $p_i$ by combining features from the grid hierarchy up to level $N$:
++    a. For each level $k \in \{0, \dots, N\}$, retrieve the feature vector $\delta_k$ from grid $G_k$ at position $p_i$ using tri-linear interpolation.
++    b. The feature for level $N$ is combined with the continuous weight $\alpha$ for the next level. The recursive definition implies that the feature at continuous LOD $L$ is:
++       $$ F_i = \sum_{k=0}^{N-1} \delta_k(p_i) + \alpha \delta_N(p_i) $$
++       *Note: The sources describe this as a "weighted sum" or "linear interpolation... and sum the results" comparable to a residual connection. Specifically, $G_L \leftarrow S(G_{N-1}) + \alpha \delta_N$. In practice, this means summing the interpolated features of all coarser grids and the weighted feature of the finest relevant grid.* [S1]
++    c. Pass $F_i$ through a standard, non-learnable normalization layer (e.g., LayerNorm or InstanceNorm) to improve convergence stability. [S1]
++    d. Apply Random Fourier Feature (RFF) mapping: $y_i = \sin(W F_i)$, where $W$ is a learnable linear matrix (sinus filter). [S1]
++    e. Transform $y_i$ via a linear layer to produce a density/SDF feature and a color feature. [S1]
++
++4.  **Radiance Prediction:**
++    a. Encode the view direction $v_i$ using Spherical Harmonics (S.H.) Encoding. [S1]
++    b. Concatenate the color feature from step 3 with the S.H. encoded view direction.
++    c. Feed the concatenated vector into a 3-layer MLP to predict the radiance $c_i$. [S1]
++    d. If using SDF, convert the SDF output $s_i$ to density $\sigma_i$ using a NEUS-like approach (e.g., $\sigma = \text{softplus}(s / \beta)$ or similar differentiable conversion) before volume rendering. [S1]
++
++5.  **Volume Rendering:**
++    Compute the rendered color $\hat{C}(r)$ using standard volume rendering:
++    $$ \hat{C}(r) = \sum_{i=0}^{N_{samples}-1} T_i (1 - \exp(-\sigma_i \delta_i)) c_i $$
++    where $T_i = \exp(\sum_{j=0}^{i-1} \sigma_j \delta_j)$, $\delta_i$ is the distance between samples $i$ and $i+1$, $\sigma_i$ is the density, and $c_i$ is the predicted radiance. [S1]
++
++6.  **Optimization (Continuous Coarse-To-Fine):**
++    a. Initialize the maximal optimized LOD $l$ to $l_0$.
++    b. For each training epoch $n$, update $l$:
++       $$ l = l_0 + n_{ctf}^n $$
++       where $n_{ctf}$ is a hyperparameter controlling the speed of refinement. [S1]
++    c. During cone casting, clamp the calculated LOD $L_i$ for each sample to $l$. If $L_i > l$, treat the sample as if it belongs to level $l$ (or ignore finer grids).
++    d. Grids at levels $> l$ are set to zero and their gradients are not backpropagated.
++    e. Minimize the Mean Squared Error (MSE) loss:
++       $$ \mathcal{L} = ||\hat{C}(r) - C(r)||_2 $$
++       where $C(r)$ is the ground truth pixel color. For SDF, add an Eikonal loss. [S1]
++    f. **LOD Inductive Bias:** Gradients are backpropagated through the residual connections. The architecture naturally aggregates gradients such that coarser levels (influencing larger volumes) receive more uniform supervision, while finer levels are only updated when gradients diverge significantly, indicating higher frequency detail is needed. [S1]
+ 
+ **Pseudocode:**
+ 
+ ```python
+-import math
+ import torch
+ import torch.nn as nn
+-import torch.nn.functional as F
++import math
+ 
+ class RINGNeRF:
+-    def __init__(self, num_grids, base_resolution, growth_factor, feature_dim=8, 
+-                 rff_dim=256, mlp_hidden_dim=128, contraction_jacobian_func=None):
+-        """
+-        Initialize RING-NeRF.
+-        :param num_grids: Number of grid levels N.
+-        :param base_resolution: Resolution of the coarsest grid b.
+-        :param growth_factor: Growth factor f.
+-        :param feature_dim: Dimension of latent features in grids D.
+-        :param rff_dim: Dimension of RFF output.
+-        :param mlp_hidden_dim: Hidden dimension of the radiance MLP.
+-        :param contraction_jacobian_func: Function returning det(J(p)) for a point p.
+-        """
++    def __init__(self, b=16, f=2, num_grids=9, feat_dim=8, hidden_dim=256):
++        """
++        b: Base grid resolution
++        f: Growth factor
++        num_grids: Number of grids in the hierarchy
++        feat_dim: Dimension of latent features per grid
++        hidden_dim: Hidden dimension for the final MLP
++        """
++        self.b = b
++        self.f = f
+         self.num_grids = num_grids
+-        self.b = base_resolution
+-        self.f = growth_factor
+-        self.D = feature_dim
+-        self.rff_dim = rff_dim
+-        self.contraction_jacobian_func = contraction_jacobian_func
+-        
+-        # Grids: List of nn.Embedding or similar structure for each level
+-        # Resolution of level i is f^i * b
++        self.feat_dim = feat_dim
++        
++        # Initialize grid features. In practice, these might be hash grids or dense tensors.
++        # Here we assume dense tensors for clarity of the recursive structure.
++        # Grid k has resolution (f^k * b)
+         self.grids = nn.ModuleList([
+-            nn.Embedding(int(f**i * b)**3, feature_dim) for i in range(num_grids)
++            nn.Parameter(torch.randn(f**k * b, f**k * b, f**k * b, feat_dim))
++            for k in range(num_grids)
+         ])
+         
+-        # Linear layer for RFF -> Density/Color
+-        self.linear_rff_to_feat = nn.Linear(rff_dim, feature_dim + 1) # 1 for density/SDF
+-        
+-        # RFF Matrix W (learnable)
+-        self.W = nn.Parameter(torch.randn(rff_dim, feature_dim))
++        # RFF Matrix
++        self.W_rff = nn.Parameter(torch.randn(feat_dim, 256)) # 256 is RFF dimension
++        
++        # Linear layer for density/color features
++        self.linear_feat = nn.Linear(256, 2) # Outputs density feature and color feature
++        
++        # Normalization
++        self.norm = nn.LayerNorm(256)
++        
++        # View direction encoder (Spherical Harmonics)
++        # Simplified: using a fixed SH encoding function or learned embedding
++        self.sh_degree = 3
++        self.sh_dim = (self.sh_degree + 1)**2 * 3
+         
+         # Radiance MLP
+         self.radiance_mlp = nn.Sequential(
+-            nn.Linear(feature_dim + 32, mlp_hidden_dim), # 32 from SH encoding
++            nn.Linear(2 + self.sh_dim, hidden_dim),
+             nn.ReLU(),
+-            nn.Linear(mlp_hidden_dim, mlp_hidden_dim),
++            nn.Linear(hidden_dim, hidden_dim),
+             nn.ReLU(),
+-            nn.Linear(mlp_hidden_dim, 3) # RGB
++            nn.Linear(hidden_dim, 3) # RGB
+         )
+         
+-        # Spherical Harmonics coefficients for view direction (order 4 -> 32 coeffs)
+-        # Simplified: using a fixed linear projection for SH if not implementing full SH
+-        self.sh_encoder = nn.Linear(3, 32) 
+-
+-    def get_lod(self, distance, det_jacobian):
+-        """
+-        Calculate LOD L for a sample at given distance and Jacobian determinant.
+-        """
+-        # L = - log(d * c * b * det(J)^(1/3)) / log(f)
+-        # Note: c (pixel size at dist 1) is assumed to be 1.0 or passed in. 
+-        # Here we assume c=1 for simplicity or it's part of the distance scaling.
+-        # The formula in source: L = - log(dcb * det(J)^(1/3)) / log(f)
+-        # We need c. Let's assume c is passed or fixed.
+-        # For implementation, c is typically derived from image resolution and FOV.
+-        # We will assume c is a constant passed to the forward pass or set to 1.0 for normalized coords.
+-        # Let's assume c=1.0 for the formula derivation in the source context of contracted space.
+-        c = 1.0 
+-        numerator = math.log(distance * c * self.b * (det_jacobian ** (1/3)))
+-        denominator = math.log(self.f)
+-        return -numerator / denominator
+-
+-    def interpolate_and_sum(self, point_coords, lod):
+-        """
+-        Interpolate features from all grids up to lod and sum them.
+-        point_coords: (N, 3) normalized coordinates in [-1, 1] or [0, 1] depending on grid setup.
+-        lod: (N,) float LOD values.
+-        """
+-        total_feature = torch.zeros_like(point_coords[:, :self.D])
+-        
+-        for i in range(self.num_grids):
+-            # Determine if this grid level contributes
+-            # If lod >= i, this grid contributes. 
+-            # If lod is continuous, we might weight it, but the source says:
+-            # "interpolating linearly the point in the cell for each level inferior or equal to N, and summing"
+-            # And for continuous LOD: G_L = S(G_{N-1}) + alpha * delta_N
+-            # This implies we sum all levels <= floor(lod) and partially the next?
+-            # Actually, the source says: "latent vector ... for a level of detail N is simply obtained by 
+-            # interpolating ... for each level inferior or equal to N, and summing".
+-            # For continuous L, we use the weighted residual connection.
+-            
+-            # Simplified implementation: Sum all grids up to floor(lod), and add partial for ceil(lod)
+-            # However, the source formula G_L = S(G_{N-1}) + alpha * delta_N suggests a recursive structure.
+-            # In practice, for a query point, we interpolate at each grid resolution and sum.
+-            
+-            # Let's implement the sum of interpolated features for all levels k <= L
+-            # If L is continuous, we interpolate at level floor(L) and ceil(L) and weight?
+-            # The source says: "G_L <- S(G_{N-1}) + alpha * delta_N".
+-            # This means the feature at LOD L is the feature at LOD N-1 (upsampled) plus alpha times the residual at N.
+-            # So we sum: Feature(0) + (Feature(1) - Feature(0)_upsampled) + ... 
+-            # Which simplifies to sum of interpolated residuals?
+-            # The source explicitly says: "interpolating linearly the point in the cell for each level inferior or equal to N, and summing the results."
+-            # This refers to the delta_i grids.
+-            
+-            # So, for a continuous LOD L:
+-            # Sum features from grids 0 to floor(L).
+-            # Add alpha * feature from grid ceil(L).
+-            
+-            level_idx = int(lod[i])
+-            alpha = lod[i] - level_idx
+-            
+-            # Interpolate at level_idx
+-            # Assuming grid indices are mapped from coords. 
+-            # This requires a trilinear interpolation function.
+-            feat_i = self.interpolate_grid(self.grids[level_idx], point_coords, resolution=int(self.f**level_idx * self.b))
+-            total_feature += feat_i
+-            
+-            if level_idx + 1 < self.num_grids and alpha > 0:
+-                feat_next = self.interpolate_grid(self.grids[level_idx + 1], point_coords, resolution=int(self.f**(level_idx + 1) * self.b))
+-                total_feature += alpha * feat_next
+-                
+-        return total_feature
+-
+-    def interpolate_grid(self, grid, coords, resolution):
+-        # Placeholder for trilinear interpolation from grid embeddings
+-        # In a real implementation, this maps coords to grid indices and interpolates
+-        pass
+-
+-    def forward(self, rays_o, rays_d, image_res, fov):
+-        """
+-        rays_o: (N, 3) ray origins
+-        rays_d: (N, 3) ray directions
+-        image_res: (H, W)
+-        fov: float
++        # SDF to Density conversion parameters (if using SDF)
++        self.beta = nn.Parameter(torch.tensor(0.1))
++
++    def get_grid_resolution(self, level):
++        return int(self.f ** level * self.b)
++
++    def interpolate_grid(self, grid_tensor, points):
++        """
++        Trilinear interpolation of grid_tensor at points.
++        grid_tensor: (H, W, D, C)
++        points: (N, 3) in normalized coordinates [0, 1]
++        """
++        # Scale points to grid dimensions
++        H, W, D, C = grid_tensor.shape
++        scaled_points = points * torch.tensor([H-1, W-1, D-1], device=points.device)
++        
++        # Use grid_sample or custom trilinear interpolation
++        # For simplicity, assuming a helper function exists or using PyTorch's grid_sample
++        # Note: grid_sample expects (N, C, H, W) or similar. 
++        # This is a placeholder for the actual interpolation logic.
++        return grid_sample_3d(grid_tensor, scaled_points)
++
++    def compute_lod(self, distance, det_jacobian):
++        """
++        Compute LOD L based on distance and contraction Jacobian.
++        c: pixel size at distance 1. Assumed known or computed from camera intrinsics.
++        """
++        # c depends on image resolution and FOV. 
++        # For a square image of size R x R and FOV theta, c = tan(theta/2) / (R/2)
++        # We assume c is passed or computed externally.
++        c = 0.01 # Placeholder, should be computed from camera params
++        b = self.b
++        f = self.f
++        
++        # Formula: L = - log(d * c * b * det(J)^(1/3)) / log(f)
++        term = distance * c * b * (det_jacobian ** (1/3))
++        # Handle log domain errors
++        term = torch.clamp(term, min=1e-6)
++        L = - torch.log(term) / torch.log(torch.tensor(f))
++        return L
++
++    def forward(self, rays, camera_intrinsics, contraction_jacobian_func):
++        """
++        rays: (N, 3) origin, (N, 3) direction
++        camera_intrinsics: used to compute 'c'
++        contraction_jacobian_func: function to compute det(J(p))
+         """
+         # 1. Sample points along rays
+-        # Standard NeRF sampling: N samples per ray
++        # Assume N_samples = 128
+         N_samples = 128
+-        t_vals = torch.linspace(0., 1., N_samples)
+-        z_vals = 0.1 * t_vals + 0.9 * (t_vals ** 2) # Example stratified sampling
+-        # Expand to (N_rays, N_samples, 3)
+-        points = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * z_vals.unsqueeze(2)
++        t_vals = torch.linspace(0.0, 1.0, N_samples, device=rays.device)
++        # Assuming rays are normalized or have known near/far. 
++        # Simplified: points = origin + direction * t
++        points = rays[:, :3] + rays[:, 3:6] * t_vals.unsqueeze(1)
++        distances = torch.norm(points - rays[:, :3], dim=1)
+         
+         # 2. Compute LOD for each point
+-        # Need pixel size c at distance 1. 
+-        # c = tan(fov/2) * 2 / image_res (approx)
+-        # Let's assume c is computed.
+-        c = 1.0 # Placeholder, should be calculated from fov and res
+-        
+-        # Compute det(J(p)) for contraction
+-        # Assuming a standard contraction function like in Mip-NeRF 360
+-        # det(J) is computed analytically.
+-        det_j = self.contraction_jacobian_func(points)
+-        
+-        distances = torch.norm(points - rays_o.unsqueeze(1), dim=2)
+-        lod = self.get_lod(distances, det_j)
+-        
+-        # 3. Extract Features
+-        features = self.interpolate_and_sum(points, lod)
+-        
+-        # 4. Normalize
+-        features = F.normalize(features, dim=-1)
+-        
+-        # 5. RFF
+-        rff = torch.sin(features @ self.W.T) # W is (rff_dim, D) or (D, rff_dim)? Source: y=sin(Wx). W is linear matrix.
+-        # If W is (D, rff_dim), then features @ W.T
+-        
+-        # 6. Linear to Density/Color Feature
+-        # Linear layer transforms RFF output into density and one color feature
+-        linear_out = self.linear_rff_to_feat(rff)
+-        density = linear_out[:, :1]
+-        color_feat = linear_out[:, 1:]
+-        
+-        # 7. View Direction Encoding
+-        sh_feat = self.sh_encoder(rays_d)
+-        
+-        # 8. Radiance MLP
+-        concat = torch.cat([color_feat, sh_feat], dim=-1)
+-        radiance = self.radiance_mlp(concat)
+-        
+-        # 9. Volume Rendering
+-        # Convert density to alpha
+-        # delta_i is distance between samples
+-        deltas = z_vals[:, 1:] - z_vals[:, :-1]
+-        deltas = torch.cat([deltas, torch.tensor([1e10]).to(deltas.device)], dim=-1)
+-        
+-        alpha = 1.0 - torch.exp(-torch.relu(density) * deltas)
+-        transmittance = torch.cumprod(torch.cat([torch.ones_like(alpha[:, :1]), 1.0 - alpha + 1e-10], dim=-1), dim=-1)[:, :-1]
+-        
+-        weights = alpha * transmittance
+-        color = torch.sum(weights.unsqueeze(-1) * radiance, dim=1)
+-        
+-        return color
++        # Compute Jacobian determinant for each point
++        det_J = contraction_jacobian_func(points)
++        
++        # Compute 'c' from camera intrinsics (simplified)
++        # c = pixel_size_at_dist_1
++        c = compute_pixel_size(camera_intrinsics)
++        
++        Ls = self.compute_lod(distances, det_J)
++        
++        # 3. Feature Aggregation
++        features = torch.zeros(points.shape[0], self.feat_dim, device=points.device)
++        
++        for k in range(self.num_grids):
++            # Get grid resolution
++            res = self.get_grid_resolution(k)
++            grid_tensor = self.grids[k]
++            
++            # Interpolate feature at this level
++            # Clamp LOD to current level for summation
++            # The recursive definition implies we sum contributions.
++            # For a continuous LOD L, we sum all levels < floor(L) and weighted level floor(L)
++            
++            # However, the forward pass computes L for each point.
++            # We need to sum the features of all grids up to the integer part of L,
++            # plus the fractional part of the next grid.
++            
++            # Simplified implementation: Sum all grids, but weight the finest one?
++            # The paper says: "interpolating linearly the point in the cell for each level inferior or equal to N, and summing the results."
++            # And "G_L <- S(G_{N-1}) + alpha * delta_N"
++            
++            # Let's implement the summation of all coarser grids + weighted finest
++            N = Ls.int()
++            alpha = Ls - N.float()
++            
++            # Interpolate all grids
++            feats = []
++            for j in range(self.num_grids):
++                # Interpolate grid j
++                feat_j = self.interpolate_grid(self.grids[j], points)
++                feats.append(feat_j)
++            
++            # Sum them up with weights
++            # For levels < N, weight is 1. For level N, weight is alpha.
++            # Levels > N are ignored (or zero).
++            
++            current_feat = torch.zeros_like(feats[0])
++            for j in range(self.num_grids):
++                if j < N:
++                    current_feat += feats[j]
++                elif j == N:
++                    current_feat += alpha.unsqueeze(1) * feats[j]
++                else:
++                    break # Higher levels not included
++            
++            # Note: The paper describes a recursive structure G_N = S(G_{N-1}) + delta_N.
++            # This implies the feature at level N is the upsampled feature of N-1 PLUS the residual delta_N.
++            # Summing all deltas is equivalent to the final value.
++            features = current_feat
++            break # We only need the final aggregated feature for the point
++        
++        # 4. Normalization and RFF
++        # Normalize the aggregated feature
++        # The paper says "final feature after multi-resolution combination is passed into a normalization layer"
++        # But the feature dim is feat_dim. RFF maps to higher dim.
++        # Let's normalize the feat_dim vector first? Or after RFF?
++        # "Standard, non-learnable normalization is used over the feature to improve convergence stability."
++        # Likely over the feat_dim vector before RFF or after. 
++        # Given RFF is a linear transform, normalizing before might be better for stability.
++        features_norm = self.norm(features) # Assuming norm works on last dim
++        
++        # RFF
++        rff_out = torch.sin(features_norm @ self.W_rff.T) # (N, 256)
++        
++        # Linear layer to density/color features
++        feat_linear = self.linear_feat(rff_out) # (N, 2)
++        density_feat = feat_linear[:, 0]
++        color_feat = feat_linear[:, 1]
++        
++        # 5. Radiance Prediction
++        # View direction encoding
++        # Directions are rays[:, 3:6]
++        directions = rays[:, 3:6]
++        sh_enc = spherical_harmonics_encoding(directions, self.sh_degree)
++        
++        # Concatenate color feature and SH
++        # color_feat is scalar per point? No, linear layer output was 2.
++        # Wait, "linear layer transforms the filter output into both density (or SDF) and one color feature."
++        # So color_feat is a vector? Or scalar?
++        # "This feature, concatenated with the direction... fed to a 3-layer MLP"
++        # If color_feat is 1D, we repeat it or treat it as a scalar bias?
++        # Usually, color feature is a vector. Let's assume linear_feat outputs a vector of size D_color.
++        # Re-reading: "linear layer transforms... into ... one color feature."
++        # If it's one feature, it's a scalar. But MLP needs a vector.
++        # Likely, the "color feature" is a vector of size D, and "density" is a scalar or vector.
++        # Let's assume the linear layer outputs a vector of size D_feat for color.
++        
++        # Correction: "A linear layer transforms the RFF filter output into both density (or SDF) and one color feature."
++        # If RFF is 256, linear might output 1 (density) + D (color).
++        # Let's assume D=8 for color feature to match grid dim.
++        
++        # Re-defining linear_feat output
++        # feat_linear: (N, 1 + D_color)
++        # density_val = feat_linear[:, 0]
++        # color_vec = feat_linear[:, 1:]
++        
++        # Concatenate color_vec and SH
++        input_mlp = torch.cat([color_vec, sh_enc], dim=1)
++        radiance = self.radiance_mlp(input_mlp) # (N, 3)
++        
++        # 6. Density Conversion (if SDF)
++        # If using SDF, density_feat is SDF. Convert to sigma.
++        # sigma = softplus(density_feat / beta)
++        # If using density directly, sigma = density_feat
++        
++        # Volume Rendering
++        # Compute deltas
++        deltas = distances[:, 1:] - distances[:, :-1]
++        deltas = torch.cat([deltas, torch.tensor([1e10], device=points.device)], dim=1)
++        
++        # Alpha and Transmittance
++        # sigma = torch.relu(density_feat) # Or softplus if SDF
++        alpha = 1.0 - torch.exp(-sigma * deltas)
++        T = torch.cumprod(torch.cat([torch.ones_like(alpha[:, :1]), 1.0 - alpha + 1e-10], dim=1), dim=1)[:, :-1]
++        
++        weights = alpha * T
++        color_rendered = torch.sum(weights.unsqueeze(2) * radiance, dim=1)
++        
++        return color_rendered
+ ```
+ 
+-**Parameters:**
+-*   $c$: Pixel size at distance 1. Depends on image resolution and camera FOV [S1].
+-*   $J$: Jacobian of the contraction function at sample location $p$ [S1].
+-*   $f$: Growth factor for grid hierarchy resolution (e.g., 2) [S1].
+-*   $l_0$: Initial number of grids used in coarse-to-fine optimization [S1].
+-*   $n_{ctf}$: Hyperparameter for the speed of the coarse-to-fine process [S1].
+-*   Feature size: 8 [S1].
+-*   MLP hidden dimension: 64 (few-view setup) or 128 (NVS) [S1].
+-*   Number of samples per ray: 128 [S1].
+-*   Hashgrid configuration: Pyramid of 9 grids with growth factor 2 (in some experiments) [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Concatenation vs Summation:** Using concatenation instead of summation for multi-resolution features leads to decreased performance in generalization to novel unseen observation distances [S1].
+-*   **Decoder Latent Space:** Unlike I-NGP-based architectures, RING-NeRF keeps supervising all dimensions of the decoder latent space even when grids are zeroed out in coarse-to-fine training, preventing global refinement of decoder weights when new grids are activated [S1].
+-*   **Unobserved Samples:** During novel view rendering, discard samples not observed by any training view to remove noise [S1].
+-
+ ## Operating characteristics
+-*   **Time Complexity:** Training time is significantly faster than many dedicated architectures. On the 360 Dataset Mono-Scale setup, RING-NeRF achieves 28.09 PSNR with a training time of 0.45 hours on one Nvidia-A100 GPU [S1].
+-*   **Memory Complexity:** The unbounded hierarchical grid allows dynamic resolution increase. The '3+1+1 levels' configuration results in the same rendering quality as the '5 levels' configuration, demonstrating efficient memory usage by only activating necessary grids [S1].
+-*   **Performance:**
+-    *   360 Dataset Mono-Scale, Full Res: PSNR 28.09, SSIM 0.799, LPIPS 0.157 [S1].
+-    *   360 Dataset Mono-Scale, 1/2 Res: PSNR 27.18, SSIM 0.804, LPIPS 0.138 [S1].
+-    *   360 Dataset Mono-Scale, 1/4 Res: PSNR 25.82, SSIM 0.786, LPIPS 0.142 [S1].
+-    *   360 Dataset Mono-Scale, 1/8 Res: PSNR 24.38, SSIM 0.737, LPIPS 0.167 [S1].
+-    *   With Distance-Aware Coarse-To-Fine: PSNR 28.26, SSIM 0.803, LPIPS 0.155 [S1].
+-*   **Strengths:** Intrinsic continuous LOD without explicit supervision; robust to varying observation distances; dynamic resolution extensibility; fast training [S1].
+-*   **Limitations:** Requires careful tuning of the contraction function and LOD calculation; performance may degrade if the grid hierarchy is not sufficiently deep for very high-resolution novel views [S1].
+-*   **When to use:** When anti-aliasing across multiple resolutions is required, or when the observation distance varies significantly between training and novel views [S1].
+-*   **When not to use:** If the scene is bounded and observation distances are fixed, simpler methods like [AdaNeRF](6195-adanerf.md) might suffice.
++*   **Time Complexity:** The feature aggregation involves interpolating from $N$ grids. With $N$ grids and $S$ samples, the cost is $O(N \cdot S)$. The decoder is a small MLP, $O(S)$. Total per-ray cost is dominated by grid lookups.
++*   **Memory Complexity:** $O(\sum_{i=0}^{N} (f^i b)^3 \cdot D_{feat})$. For a pyramid of 9 grids with $f=2, b=16, D=8$, this is manageable but grows exponentially with $N$.
++*   **Measured Performance:** On the 360 Dataset Mono-Scale setup, RING-NeRF achieved PSNR 28.09, SSIM 0.799, LPIPS 0.157 at Full Res, with a training time of 0.45 hours on one Nvidia-A100 GPU [S1]. At 1/2 Res, PSNR 27.18; at 1/4 Res, PSNR 25.82; at 1/8 Res, PSNR 24.38 [S1].
++*   **Strengths:**
++    *   **Intrinsic Continuous LOD:** No explicit supervision needed for LOD; adapts to observation distance [S1].
++    *   **Dynamic Resolution:** Can add grids to a trained model without retraining the decoder or existing grids ("3+1+1 levels" matches "5 levels" quality) [S1].
++    *   **Robustness:** Performs well with few viewpoints and SDF reconstruction without scene-specific initialization [S1].
++    *   **Anti-aliasing:** Distance-aware mapping reduces aliasing artifacts at varying resolutions compared to methods like Nerfacto [S1].
++*   **Limitations:**
++    *   **Concatenation Pitfall:** Using concatenation instead of summation for multi-resolution features decreases performance in generalization to novel unseen observation distances [S1].
++    *   **Decoder Invariance:** The decoder latent space invariance means it does not explicitly encode position or scale, which is a strength for generalization but requires the grid to handle all spatial variations [S1].
++*   **When to Use:** Suitable for applications requiring adaptive resolution, few-view reconstruction, or SDF-based surface reconstruction where explicit LOD supervision is unavailable or undesirable.
++*   **When Not to Use:** If per-LOD specific tuning is required or if the scene has extreme anisotropy that breaks the cone-volume assumption.
+ 
+ ## Background
+-RING-NeRF was proposed by D. Petit et al. in the paper "RING-NeRF: Rethinking Inductive Biases for Versatile and Efficient Neural Fields" [S1]. It addresses limitations of vanilla NeRF and I-NGP regarding adaptability to various scene natures, robustness to varying observation distances, and reconstruction extensibility [S1]. It builds on the concept of implicit neural representations and grid-based acceleration [S1].
++RING-NeRF was proposed by D. Petit et al. in the paper "RING-NeRF: Rethinking Inductive Biases for Versatile and Efficient Neural Fields" [S1]. It addresses limitations of classic NeRF and grid-based models (like I-NGP) regarding extensibility and adaptability to varying observation distances. It builds on the concept of Neural Sparse Voxel Fields for dynamic allocation but improves upon it by maintaining decoder supervision across all dimensions [S1]. The architecture is designed to be simple and generic, allowing coupling with specific solutions like SDF reconstruction [S1].
+ 
+ ## Sources

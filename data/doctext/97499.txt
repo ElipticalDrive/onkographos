@@ -1,0 +1,3340 @@
+# Sparse Octree
+
+[![CI](https://github.com/vanruesc/sparse-octree/actions/workflows/ci.yml/badge.svg)](https://github.com/vanruesc/sparse-octree/actions/workflows/ci.yml)
+[![Version](https://badgen.net/npm/v/sparse-octree?color=green)](https://www.npmjs.com/package/sparse-octree)
+
+A sparse, pointer-based octree data structure. For a linear implementation see [linear-octree](https://github.com/vanruesc/linear-octree).
+
+*[Demo](https://vanruesc.github.io/sparse-octree/demo)&ensp;&middot;&ensp;[Sandbox](https://codesandbox.io/s/sparse-octree-3yn8o)&ensp;&middot;&ensp;[Documentation](https://vanruesc.github.io/sparse-octree/docs)*
+
+## Installation
+
+This library requires the peer dependency [three](https://github.com/mrdoob/three.js/).
+
+```sh
+npm install three sparse-octree
+``` 
+
+## Usage
+
+##### Points
+
+```js
+import { Vector3 } from "three";
+import { PointOctree } from "sparse-octree";
+
+const min = new Vector3(-1, -1, -1);
+const max = new Vector3(1, 1, 1);
+
+const octree = new PointOctree(min, max);
+
+const myData = {};
+const p1 = new Vector3(0, 0, 0);
+const p2 = new Vector3(0, 0, 0.5);
+
+octree.set(p1, myData);
+octree.move(p1, p2);
+octree.get(p2); // => myData
+
+octree.remove(p2);
+octree.get(p2); // => null
+```
+
+##### Custom Octrees
+
+```js
+import { Octree, CubicOctant } from "sparse-octree";
+
+export class CubicOctree extends Octree {
+
+	constructor(min, size) {
+
+		this.root = new CubicOctant(min, size);
+
+	}
+
+}
+```
+
+## Features
+
+- Pointer-based structure
+  - Handles octant splitting
+  - Supports cubic octrees for reduced memory usage
+  - Dynamic depth
+- Adheres to a [common octant layout](https://vanruesc.github.io/sparse-octree/docs/variables/layout.html)
+- Supports raycasting
+- Supports culling
+- Can be extended to manage any data
+- Provides a point management implementation
+
+## Contributing
+
+Maintain the existing coding style. Add unit tests for any new or changed functionality. Lint and test your code.
+
+### esbuild.js
+```
+import pkg from "./package.json" with { type: "json" };
+import esbuild from "esbuild";
+
+const watch = process.argv.includes("-w");
+const date = new Date();
+const banner = `/**
+ * ${pkg.name} v${pkg.version} build ${date.toDateString()}
+ * ${pkg.homepage}
+ * Copyright 2016 ${pkg.author.name}
+ * @license ${pkg.license}
+ */`;
+
+const lib = {
+	entryPoints: ["./src/index.ts"],
+	outfile: "./dist/index.js",
+	banner: { js: banner },
+	external: ["three"],
+	logLevel: "info",
+	format: "esm",
+	bundle: true
+};
+
+const demo = {
+	entryPoints: ["./demo/src/index.ts"],
+	outdir: "./public/demo",
+	logLevel: "info",
+	format: "iife",
+	target: "es6",
+	minify: !watch,
+	bundle: true
+};
+
+if(watch) {
+
+	const ctxDemo = await esbuild.context(demo);
+	await ctxDemo.watch();
+
+} else {
+
+	await esbuild.build(lib);
+	await esbuild.build(demo);
+
+}
+```
+
+### eslint.config.js
+```
+export { default } from "eslint-config-aether";
+```
+
+### src/index.ts
+```
+export * from "./core/index.js";
+export * from "./points/index.js";
+export * from "./raycasting/index.js";
+```
+
+### demo/src/index.ts
+```
+import {
+	Box3,
+	BufferGeometry,
+	BufferAttribute,
+	FogExp2,
+	Group,
+	Object3D,
+	PerspectiveCamera,
+	Points,
+	PointsMaterial,
+	Scene,
+	Vector3,
+	WebGLRenderer
+} from "three";
+
+import { Pane } from "tweakpane";
+import { calculateVerticalFoV, OctreeRaycaster, FrustumCuller } from "./utils/index.js";
+import { ControlMode, SpatialControls } from "spatial-controls";
+import { OctreeHelper, PointOctree } from "sparse-octree";
+
+function createParticlePlane(particles: number, n: number, zBase: number, zBias: number): BufferGeometry {
+
+	const geometry = new BufferGeometry();
+	const positions = new Float32Array(particles * 3);
+	const halfN = n / 2;
+
+	for(let i = 0, l = positions.length; i < l; i += 3) {
+
+		const x = Math.random() * n - halfN;
+		const y = Math.random() * n - halfN;
+		const z = zBase + (Math.random() * zBias * 2 - zBias);
+
+		positions[i] = x;
+		positions[i + 1] = y;
+		positions[i + 2] = z;
+
+	}
+
+	geometry.setAttribute("position", new BufferAttribute(positions, 3));
+	return geometry;
+
+}
+
+window.addEventListener("load", () => {
+
+	document.querySelector(".loading")?.classList.add("hidden");
+
+	// Renderer
+
+	const renderer = new WebGLRenderer({
+		powerPreference: "high-performance",
+		antialias: true,
+		stencil: false,
+		depth: true
+	});
+
+	renderer.debug.checkShaderErrors = (window.location.hostname === "localhost");
+	renderer.setClearColor(0x000000, 0);
+
+	const container = document.querySelector(".viewport")!;
+	container.append(renderer.domElement);
+
+	// Scene
+
+	const scene = new Scene();
+	scene.fog = new FogExp2(0x0d0d0d, 0.025);
+	renderer.setClearColor(scene.fog.color);
+
+	// Camera & Controls
+
+	const camera = new PerspectiveCamera();
+	const { position, quaternion } = camera;
+	const controls = new SpatialControls(position, quaternion, renderer.domElement);
+	const settings = controls.settings;
+	settings.general.mode = ControlMode.THIRD_PERSON;
+	settings.zoom.setRange(1e-6, 60);
+	settings.rotation.sensitivity = 2.2;
+	settings.rotation.damping = 0.05;
+	settings.translation.sensitivity = 0.25;
+	settings.translation.damping = 0.1;
+	settings.zoom.sensitivity = 1;
+	settings.zoom.damping = 0.1;
+	controls.position.set(10, 6, 10);
+
+	camera.updateMatrixWorld(); // Update for the first raycast operation.
+
+	// Objects
+
+	const points = new Group();
+
+	let d = 8;
+	const size = 6;
+	const zStep = size / (d - 1);
+	const w = 256, h = 256;
+	let z = size * -0.5;
+
+	console.log("Generating %d points", w * h * d);
+	console.time("Point cloud creation");
+
+	while(d-- > 0) {
+
+		points.add(new Points(
+			createParticlePlane(w * h, size, z, 0.25),
+			new PointsMaterial({
+				color: 0xc00000,
+				sizeAttenuation: false
+			})
+		));
+
+		z += zStep;
+
+	}
+
+	console.timeEnd("Point cloud creation");
+	scene.add(points);
+
+	// Octree
+
+	const v = new Vector3();
+	const bbox = new Box3();
+	bbox.setFromObject(scene);
+
+	const octree = new PointOctree<Object3D>(bbox.min, bbox.max, 0.0, 8, 5);
+
+	console.time("Octree creation");
+
+	for(let i = points.children.length - 1; i >= 0; --i) {
+
+		const p = points.children[i] as Points;
+		const array = p.geometry.getAttribute("position").array;
+
+		for(let j = 0, l = array.length; j < l; j += 3) {
+
+			octree.set(v.fromArray(array, j), p);
+
+		}
+
+	}
+
+	console.timeEnd("Octree creation");
+	console.log(octree);
+
+	// Octree Helper
+
+	console.time("Octree helper");
+
+	const octreeHelper = new OctreeHelper(octree);
+	octreeHelper.visible = false;
+
+	console.timeEnd("Octree helper");
+	console.log(octreeHelper);
+
+	scene.add(octreeHelper);
+
+	// Raycasting
+
+	const octreeRaycaster = new OctreeRaycaster(octree, camera, points, renderer.domElement);
+	scene.add(octreeRaycaster.cursor);
+
+	// Frustum culling
+
+	const frustumCuller = new FrustumCuller(octree);
+	scene.add(frustumCuller.getCameraHelper());
+	scene.add(frustumCuller.getMesh());
+
+	// Settings
+
+	const pane = new Pane({ container: container.querySelector<HTMLElement>(".tp")! });
+
+	octreeRaycaster.registerOptions(pane);
+	frustumCuller.registerOptions(pane);
+
+	const params = {
+		"level mask": octreeHelper.children.length
+	};
+
+	let folder = pane.addFolder({ title: "Points" });
+	folder.addBinding(points, "visible");
+
+	folder = pane.addFolder({ title: "Octree Helper", expanded: false });
+	folder.addBinding(octreeHelper, "visible");
+
+	folder.addBinding(params, "level mask", { min: 0, max: octreeHelper.children.length, step: 1 }).on("change", () => {
+
+		for(let i = 0, l = octreeHelper.children.length; i < l; ++i) {
+
+			octreeHelper.children[i].visible = (
+				params["level mask"] === octreeHelper.children.length ||
+				params["level mask"] === i
+			);
+
+		}
+
+	});
+
+	// Resize Handler
+
+	function onResize() {
+
+		const width = container.clientWidth, height = container.clientHeight;
+		camera.aspect = width / height;
+		camera.fov = calculateVerticalFoV(90, Math.max(camera.aspect, 16 / 9));
+		camera.updateProjectionMatrix();
+		renderer.setSize(width, height);
+
+	}
+
+	window.addEventListener("resize", onResize);
+	onResize();
+
+	// Render Loop
+
+	requestAnimationFrame(function render(timestamp: number): void {
+
+		controls.update(timestamp);
+		renderer.render(scene, camera);
+		requestAnimationFrame(render);
+
+	});
+
+});
+```
+
+### src/core/BoxIntersector.ts
+```
+import { Box3 } from "three";
+
+/**
+ * Describes objects that can intersect with a 3D box.
+ */
+
+export interface BoxIntersector {
+
+	/**
+	 * Determines whether this object intersects the given box.
+	 *
+	 * @param box - A 3D box.
+	 * @return True if this object intersects the box. Otherwise false.
+	 */
+
+	intersectsBox(box: Box3): boolean;
+
+}
+```
+
+### src/core/CubicOctant.ts
+```
+import { Vector3 } from "three";
+import { DataContainer } from "./DataContainer.js";
+import { Node } from "./Node.js";
+import { layout } from "./layout.js";
+
+const c = /* @__PURE__ */ new Vector3();
+
+/**
+ * A cubic octant.
+ *
+ * @param T - The type of the data.
+ */
+
+export class CubicOctant<T = unknown> implements Node, DataContainer<T> {
+
+	min: Vector3;
+	children: CubicOctant<T>[] | null;
+	data: T | null;
+
+	/**
+	 * The size of this octant.
+	 */
+
+	size: number;
+
+	/**
+	 * Constructs a new cubic octant.
+	 *
+	 * @param min - The lower bounds.
+	 * @param size - The size of the octant.
+	 */
+
+	constructor(min = new Vector3(), size = 0) {
+
+		this.min = min;
+		this.size = size;
+		this.children = null;
+		this.data = null;
+
+	}
+
+	/**
+	 * The upper bounds of this octant.
+	 *
+	 * Attention: Accessing this property creates a new vector!
+	 */
+
+	get max(): Vector3 {
+
+		return this.min.clone().addScalar(this.size);
+
+	}
+
+	/**
+	 * Computes the center of this octant.
+	 *
+	 * @param target - A target vector.
+	 * @return The center.
+	 */
+
+	getCenter(target: Vector3): Vector3 {
+
+		return target.copy(this.min).addScalar(this.size * 0.5);
+
+	}
+
+	/**
+	 * Returns the size of this octant as a vector.
+	 *
+	 * @param target - A target vector.
+	 * @return The size.
+	 */
+
+	getDimensions(target: Vector3): Vector3 {
+
+		return target.set(this.size, this.size, this.size);
+
+	}
+
+	/**
+	 * Splits this octant into eight smaller ones.
+	 */
+
+	split(): void {
+
+		const min = this.min;
+		const mid = this.getCenter(c);
+		const halfSize = this.size * 0.5;
+
+		const children: CubicOctant<T>[] = [];
+		this.children = children;
+
+		for(let i = 0; i < 8; ++i) {
+
+			const combination = layout[i];
+			const child = new (this.constructor as typeof CubicOctant<T>)();
+
+			child.min.set(
+				(combination[0] === 0) ? min.x : mid.x,
+				(combination[1] === 0) ? min.y : mid.y,
+				(combination[2] === 0) ? min.z : mid.z
+			);
+
+			child.size = halfSize;
+			children[i] = child;
+
+		}
+
+	}
+
+}
+```
+
+### src/core/DataContainer.ts
+```
+/**
+ * A generic data container.
+ *
+ * @param T - The type of the data.
+ */
+
+export interface DataContainer<T = unknown> {
+
+	/**
+	 * The data.
+	 */
+
+	data: T | null;
+
+}
+```
+
+### src/core/Node.ts
+```
+import { Vector3 } from "three";
+
+/**
+ * A tree node.
+ */
+
+export interface Node {
+
+	/**
+	 * The lower bounds of this node.
+	 */
+
+	min: Vector3;
+
+	/**
+	 * The upper bounds of the node.
+	 */
+
+	max: Vector3;
+
+	/**
+	 * The children of this node.
+	 */
+
+	children?: Node[] | null;
+
+	/**
+	 * Calculates the center of this node.
+	 *
+	 * @param result - A vector to store the result in.
+	 * @return A vector that describes the center of this node.
+	 */
+
+	getCenter(result: Vector3): Vector3;
+
+	/**
+	 * Calculates the size of this node.
+	 *
+	 * @param result - A vector to store the result in.
+	 * @return A vector that describes the size of this node.
+	 */
+
+	getDimensions(result: Vector3): Vector3;
+
+}
+```
+
+### src/core/Octant.ts
+```
+import { Vector3 } from "three";
+import { DataContainer } from "./DataContainer.js";
+import { Node } from "./Node.js";
+import { layout } from "./layout.js";
+
+const c = /* @__PURE__ */ new Vector3();
+
+/**
+ * An octant.
+ *
+ * @param T - The type of the data.
+ */
+
+export class Octant<T = unknown> implements Node, DataContainer<T> {
+
+	min: Vector3;
+	max: Vector3;
+	children: Octant<T>[] | null;
+	data: T | null;
+
+	/**
+	 * Constructs a new octant.
+	 *
+	 * @param min - The lower bounds.
+	 * @param max - The upper bounds.
+	 */
+
+	constructor(min = new Vector3(), max = new Vector3()) {
+
+		this.min = min;
+		this.max = max;
+		this.children = null;
+		this.data = null;
+
+	}
+
+	getCenter(result: Vector3): Vector3 {
+
+		return result.addVectors(this.min, this.max).multiplyScalar(0.5);
+
+	}
+
+	getDimensions(result: Vector3): Vector3 {
+
+		return result.subVectors(this.max, this.min);
+
+	}
+
+	/**
+	 * Splits this octant into eight smaller ones.
+	 */
+
+	split(): void {
+
+		const min = this.min;
+		const max = this.max;
+		const mid = this.getCenter(c);
+
+		const children: Octant<T>[] = [];
+		this.children = children;
+
+		for(let i = 0; i < 8; ++i) {
+
+			const combination = layout[i];
+			const child = new (this.constructor as typeof Octant<T>)();
+
+			child.min.set(
+				(combination[0] === 0) ? min.x : mid.x,
+				(combination[1] === 0) ? min.y : mid.y,
+				(combination[2] === 0) ? min.z : mid.z
+			);
+
+			child.max.set(
+				(combination[0] === 0) ? mid.x : max.x,
+				(combination[1] === 0) ? mid.y : max.y,
+				(combination[2] === 0) ? mid.z : max.z
+			);
+
+			children[i] = child;
+
+		}
+
+	}
+
+}
+```
+
+### src/core/Octree.ts
+```
+import { Box3, Raycaster, Vector3 } from "three";
+import { OctreeRaycaster } from "../raycasting/index.js";
+import { BoxIntersector } from "./BoxIntersector.js";
+import { Node } from "./Node.js";
+import { OctreeIterator } from "./OctreeIterator.js";
+import { Tree } from "./Tree.js";
+
+const b = /* @__PURE__ */ new Box3();
+
+/**
+ * Recursively calculates the depth of the given node.
+ *
+ * @param node - A node.
+ * @return The depth.
+ */
+
+function getDepth(node: Node): number {
+
+	const children = node.children;
+
+	let result = 0;
+
+	if(children !== undefined && children !== null) {
+
+		for(let i = 0, l = children.length; i < l; ++i) {
+
+			const d = 1 + getDepth(children[i]);
+
+			if(d > result) {
+
+				result = d;
+
+			}
+
+		}
+
+	}
+
+	return result;
+
+}
+
+/**
+ * Recursively collects octants that lie inside the specified region.
+ *
+ * @param node - An octant.
+ * @param region - A region.
+ * @param result - A list to be filled with nodes that intersect with the region.
+ */
+
+function cull(node: Node, region: BoxIntersector, result: Node[]): void {
+
+	const children = node.children;
+
+	b.min = node.min;
+	b.max = node.max;
+
+	if(region.intersectsBox(b)) {
+
+		if(children !== undefined && children !== null) {
+
+			for(let i = 0, l = children.length; i < l; ++i) {
+
+				cull(children[i], region, result);
+
+			}
+
+		} else {
+
+			result.push(node);
+
+		}
+
+	}
+
+}
+
+/**
+ * Recursively fetches all octants with the specified depth level.
+ *
+ * @param node - A node.
+ * @param level - The target depth level.
+ * @param depth - The current depth level.
+ * @param result - A list to be filled with the identified octants.
+ */
+
+function findNodesByLevel(node: Node, level: number, depth: number, result: Node[]): void {
+
+	const children = node.children;
+
+	if(depth === level) {
+
+		result.push(node);
+
+	} else if(children !== undefined && children !== null) {
+
+		++depth;
+
+		for(let i = 0, l = children.length; i < l; ++i) {
+
+			findNodesByLevel(children[i], level, depth, result);
+
+		}
+
+	}
+
+}
+
+/**
+ * A pointer-based octree that subdivides space for fast spatial searches.
+ *
+ * @param T - The type of the octants.
+ */
+
+export class Octree<T extends Node = Node> implements Tree<T>, Iterable<T> {
+
+	/**
+	 * The root octant.
+	 */
+
+	protected root: T;
+
+	/**
+	 * Constructs a new octree.
+	 *
+	 * @param root - The root node.
+	 */
+
+	constructor(root: T) {
+
+		this.root = root;
+
+	}
+
+	get min(): Vector3 {
+
+		return this.root.min;
+
+	}
+
+	get max(): Vector3 {
+
+		return this.root.max;
+
+	}
+
+	get children(): T[] | null {
+
+		return (this.root.children ?? null) as T[] | null;
+
+	}
+
+	getCenter(result: Vector3): Vector3 {
+
+		return this.root.getCenter(result);
+
+	}
+
+	getDimensions(result: Vector3): Vector3 {
+
+		return this.root.getDimensions(result);
+
+	}
+
+	/**
+	 * Recursively collects nodes that intersect with the specified region.
+	 *
+	 * @param region - A region.
+	 * @return The nodes.
+	 */
+
+	cull(region: BoxIntersector): T[] {
+
+		const result: T[] = [];
+		cull(this.root, region, result);
+		return result;
+
+	}
+
+	/**
+	 * Calculates the current depth of this octree.
+	 *
+	 * @return The depth.
+	 */
+
+	getDepth(): number {
+
+		return getDepth(this.root);
+
+	}
+
+	/**
+	 * Fetches all nodes of a specific depth level.
+	 *
+	 * @param level - The depth level.
+	 * @return The nodes.
+	 */
+
+	findNodesByLevel(level: number): T[] {
+
+		const result: T[] = [];
+		findNodesByLevel(this.root, level, 0, result);
+		return result;
+
+	}
+
+	/**
+	 * Finds nodes that intersect with the given ray. The intersecting nodes are sorted by distance, closest first.
+	 *
+	 * @param raycaster - A raycaster.
+	 * @return The intersecting nodes.
+	 */
+
+	getIntersectingNodes(raycaster: Raycaster): T[] {
+
+		return OctreeRaycaster.intersectOctree(this.root, raycaster.ray) as T[];
+
+	}
+
+	/**
+	 * Returns an iterator that traverses the octree and returns leaf nodes.
+	 *
+	 * When a cull region is provided, the iterator will only return leaves that intersect with that region.
+	 *
+	 * @param region - A cull region.
+	 * @return An iterator.
+	 */
+
+	leaves(region: BoxIntersector | null = null): OctreeIterator<T> {
+
+		return new OctreeIterator<T>(this.root, region);
+
+	}
+
+	/**
+	 * Returns an iterator that traverses the octree and returns all leaf nodes.
+	 *
+	 * @return An iterator.
+	 */
+
+	[Symbol.iterator](): Iterator<T> {
+
+		return new OctreeIterator<T>(this.root);
+
+	}
+
+}
+```
+
+### src/core/OctreeHelper.ts
+```
+import { BufferAttribute, BufferGeometry, Group, LineSegments, LineBasicMaterial } from "three";
+import { edges, layout, Node, Tree } from "../core/index.js";
+
+/**
+ * An octree helper.
+ */
+
+export class OctreeHelper extends Group {
+
+	/**
+	 * The octree.
+	 */
+
+	octree: Tree | null;
+
+	/**
+	 * Constructs a new octree helper.
+	 *
+	 * @param octree - An octree.
+	 */
+
+	constructor(octree: Tree | null = null) {
+
+		super();
+
+		this.name = "OctreeHelper";
+		this.octree = octree;
+
+		this.update();
+
+	}
+
+	/**
+	 * Creates the octant geometry.
+	 *
+	 * @param octants - An octree iterator.
+	 * @param octantCount - The size of the given sequence.
+	 */
+
+	private createLineSegments(octants: Node[], octantCount: number): void {
+
+		const iterator = octants[Symbol.iterator]();
+		const maxOctants = (Math.pow(2, 16) / 8) - 1;
+		const group = new Group();
+
+		const material = new LineBasicMaterial({
+			color: 0xffffff * Math.random()
+		});
+
+		// Create geometry in multiple runs to limit the amount of vertices.
+		for(let i = 0, l = 0, n = Math.ceil(octantCount / maxOctants); n > 0; --n) {
+
+			l += (octantCount < maxOctants) ? octantCount : maxOctants;
+			octantCount -= maxOctants;
+
+			const vertexCount = l * 8;
+			const indices = new Uint16Array(vertexCount * 3);
+			const positions = new Float32Array(vertexCount * 3);
+
+			// Continue where the previous run left off.
+			for(let c = 0, d = 0, result = iterator.next(); result.done !== true && i < l;) {
+
+				const octant = result.value;
+				const min = octant.min;
+				const max = octant.max;
+
+				// Create line connections based on the current vertex count.
+				for(let j = 0; j < 12; ++j) {
+
+					const edge = edges[j];
+					indices[d++] = c + edge[0];
+					indices[d++] = c + edge[1];
+
+				}
+
+				// Create the vertices.
+				for(let j = 0; j < 8; ++j, ++c) {
+
+					const corner = layout[j];
+					positions[c * 3] = (corner[0] === 0) ? min.x : max.x;
+					positions[c * 3 + 1] = (corner[1] === 0) ? min.y : max.y;
+					positions[c * 3 + 2] = (corner[2] === 0) ? min.z : max.z;
+
+				}
+
+				if(++i < l) {
+
+					result = iterator.next();
+
+				}
+
+			}
+
+			const geometry = new BufferGeometry();
+			geometry.setIndex(new BufferAttribute(indices, 1));
+			geometry.setAttribute("position", new BufferAttribute(positions, 3));
+			group.add(new LineSegments(geometry, material));
+
+		}
+
+		this.add(group);
+
+	}
+
+	/**
+	 * Updates the helper geometry.
+	 */
+
+	update(): void {
+
+		// Remove existing geometry.
+		this.dispose();
+
+		const depth = (this.octree !== null) ? this.octree.getDepth() : -1;
+
+		for(let level = 0; level <= depth; ++level) {
+
+			const result = this.octree?.findNodesByLevel(level) ?? [];
+			this.createLineSegments(result, result.length);
+
+		}
+
+	}
+
+	/**
+	 * Destroys the helper geometry.
+	 */
+
+	dispose(): void {
+
+		const groups = this.children;
+
+		for(let i = 0, il = groups.length; i < il; ++i) {
+
+			const group = groups[i];
+			const children = group.children;
+
+			for(let j = 0, jl = children.length; j < jl; ++j) {
+
+				const lineSegments = children[j] as LineSegments;
+				lineSegments.geometry.dispose();
+
+				if(Array.isArray(lineSegments.material)) {
+
+					for(const m of lineSegments.material) {
+
+						m.dispose();
+
+					}
+
+				} else {
+
+					lineSegments.material.dispose();
+
+				}
+
+			}
+
+			while(children.length > 0) {
+
+				group.remove(children[0]);
+
+			}
+
+		}
+
+		while(groups.length > 0) {
+
+			this.remove(groups[0]);
+
+		}
+
+	}
+
+}
+```
+
+### src/core/OctreeIterator.ts
+```
+import { Box3 } from "three";
+import { Node } from "./Node.js";
+import { BoxIntersector } from "./BoxIntersector.js";
+
+const b = /* @__PURE__ */ new Box3();
+
+/**
+ * An octree iterator.
+ *
+ * @param T - The type of the octants.
+ */
+
+export class OctreeIterator<T extends Node = Node> implements Iterator<T>, Iterable<T> {
+
+	/**
+	 * The root node.
+	 */
+
+	private root: T;
+
+	/**
+	 * A region used for octree culling.
+	 */
+
+	private region: BoxIntersector | null;
+
+	/**
+	 * An iterator result.
+	 */
+
+	private result!: IteratorResult<T>;
+
+	/**
+	 * A node trace.
+	 */
+
+	private trace!: Node[];
+
+	/**
+	 * Iteration indices.
+	 */
+
+	private indices!: number[];
+
+	/**
+	 * Constructs a new octree iterator.
+	 *
+	 * @param root - The root node.
+	 * @param region - A cull region.
+	 */
+
+	constructor(root: T, region: BoxIntersector | null = null) {
+
+		this.root = root;
+		this.region = region;
+		this.reset();
+
+	}
+
+	/**
+	 * Resets this iterator.
+	 *
+	 * @return This iterator.
+	 */
+
+	reset(): this {
+
+		const root = this.root;
+
+		this.trace = [];
+		this.indices = [];
+
+		if(root !== null) {
+
+			b.min = root.min;
+			b.max = root.max;
+
+			if(this.region === null || this.region.intersectsBox(b)) {
+
+				this.trace.push(root);
+				this.indices.push(0);
+
+			}
+
+		}
+
+		this.result = {
+			done: false
+		} as IteratorResult<T>;
+
+		return this;
+
+	}
+
+	next(): IteratorResult<T> {
+
+		const region = this.region;
+		const indices = this.indices;
+		const trace = this.trace;
+
+		let octant = null;
+		let depth = trace.length - 1;
+
+		while(octant === null && depth >= 0) {
+
+			const index = indices[depth]++;
+			const children = trace[depth].children;
+
+			if(index < 8) {
+
+				if(children !== undefined && children !== null) {
+
+					const child = children[index];
+
+					if(region !== null) {
+
+						b.min = child.min;
+						b.max = child.max;
+
+						if(!region.intersectsBox(b)) {
+
+							// Cull this octant.
+							continue;
+
+						}
+
+					}
+
+					trace.push(child);
+					indices.push(0);
+
+					++depth;
+
+				} else {
+
+					octant = trace.pop();
+					indices.pop();
+
+				}
+
+			} else {
+
+				trace.pop();
+				indices.pop();
+
+				--depth;
+
+			}
+
+		}
+
+		this.result.value = octant;
+		this.result.done = (octant === null);
+
+		return this.result;
+
+	}
+
+	[Symbol.iterator](): Iterator<T> {
+
+		return this;
+
+	}
+
+}
+```
+
+### src/core/Tree.ts
+```
+import { Node } from "./Node.js";
+
+/**
+ * A tree data structure.
+ */
+
+export interface Tree<T extends Node = Node> extends Node {
+
+	/**
+	 * Calculates the depth of this tree.
+	 *
+	 * @return The depth.
+	 */
+
+	getDepth(): number;
+
+	/**
+	 * Fetches all nodes of a specific depth level.
+	 *
+	 * @param level - The depth level.
+	 * @return The nodes.
+	 */
+
+	findNodesByLevel(level: number): T[];
+
+}
+```
+
+### src/core/edges.ts
+```
+/**
+ * Describes all possible octant corner connections.
+ */
+
+export const edges = [
+
+	// X-Axis.
+	new Uint8Array([0, 4]),
+	new Uint8Array([1, 5]),
+	new Uint8Array([2, 6]),
+	new Uint8Array([3, 7]),
+
+	// Y-Axis.
+	new Uint8Array([0, 2]),
+	new Uint8Array([1, 3]),
+	new Uint8Array([4, 6]),
+	new Uint8Array([5, 7]),
+
+	// Z-Axis.
+	new Uint8Array([0, 1]),
+	new Uint8Array([2, 3]),
+	new Uint8Array([4, 5]),
+	new Uint8Array([6, 7])
+
+];
+```
+
+### src/core/index.ts
+```
+export * from "./edges.js";
+export * from "./layout.js";
+
+export * from "./BoxIntersector.js";
+export * from "./DataContainer.js";
+export * from "./Node.js";
+export * from "./Tree.js";
+
+export * from "./CubicOctant.js";
+export * from "./Octant.js";
+export * from "./Octree.js";
+export * from "./OctreeHelper.js";
+export * from "./OctreeIterator.js";
+```
+
+### src/core/layout.ts
+```
+/**
+ * A binary pattern that describes the standard octant layout:
+ *
+ * ```text
+ *    3____7
+ *  2/___6/|
+ *  | 1__|_5
+ *  0/___4/
+ * ```
+ *
+ * This common layout is crucial for positional assumptions.
+ */
+
+export const layout = [
+
+	new Uint8Array([0, 0, 0]),
+	new Uint8Array([0, 0, 1]),
+	new Uint8Array([0, 1, 0]),
+	new Uint8Array([0, 1, 1]),
+
+	new Uint8Array([1, 0, 0]),
+	new Uint8Array([1, 0, 1]),
+	new Uint8Array([1, 1, 0]),
+	new Uint8Array([1, 1, 1])
+
+];
+```
+
+### src/points/PointContainer.ts
+```
+import { Vector3 } from "three";
+import { DataContainer } from "../core/DataContainer.js";
+
+/**
+ * A container for a single point and its data.
+ *
+ * @param T - The type of the data.
+ */
+
+export class PointContainer<T = unknown> implements DataContainer<T> {
+
+	data: T | null;
+
+	/**
+	 * The point.
+	 */
+
+	point: Vector3 | null;
+
+	/**
+	 * A contextual distance to another reference point.
+	 *
+	 * - (Nearest) point search: Distance to the search point or center.
+	 * - Raycasting: Distance to the origin of the ray.
+	 */
+
+	distance: number;
+
+	/**
+	 * Constructs a new point.
+	 *
+	 * @param point - The point.
+	 * @param data - The data.
+	 * @param distance - A distance.
+	 */
+
+	constructor(point: Vector3 | null = null, data: T | null = null, distance = 0.0) {
+
+		this.point = point;
+		this.data = data;
+		this.distance = distance;
+
+	}
+
+}
+```
+
+### src/points/PointData.ts
+```
+import { Raycaster, Vector3 } from "three";
+import { RayPointIntersection } from "./RayPointIntersection.js";
+
+/**
+ * A collection of many points and associated data entries.
+ *
+ * @param T - The type of the data.
+ */
+
+export class PointData<T = unknown> {
+
+	/**
+	 * The points.
+	 */
+
+	points: Vector3[];
+
+	/**
+	 * The data entries.
+	 */
+
+	data: T[];
+
+	/**
+	 * Constructs new point data.
+	 */
+
+	constructor() {
+
+		this.points = [];
+		this.data = [];
+
+	}
+
+	/**
+	 * Collects points that intersect with the given ray.
+	 *
+	 * @param raycaster - The raycaster.
+	 * @param result - An array to be filled with intersecting points.
+	 */
+
+	testPoints(raycaster: Raycaster, result: RayPointIntersection<T>[]): void {
+
+		const threshold = (raycaster.params.Points !== undefined) ? raycaster.params.Points.threshold : 0;
+		const thresholdSq = threshold * threshold;
+		const ray = raycaster.ray;
+
+		const points = this.points;
+		const data = this.data;
+
+		for(let i = 0, l = points.length; i < l; ++i) {
+
+			const point = points[i];
+			const distanceToRaySq = ray.distanceSqToPoint(point);
+
+			if(distanceToRaySq < thresholdSq) {
+
+				const closestPoint = ray.closestPointToPoint(point, new Vector3());
+				const distance = ray.origin.distanceTo(closestPoint);
+
+				if(distance >= raycaster.near && distance <= raycaster.far) {
+
+					result.push(new RayPointIntersection<T>(distance, Math.sqrt(distanceToRaySq), closestPoint, data[i]));
+
+				}
+
+			}
+
+		}
+
+	}
+
+}
+```
+
+### src/points/PointOctant.ts
+```
+import { Vector3 } from "three";
+import { Octant } from "../core/Octant.js";
+import { PointData } from "./PointData.js";
+
+const p = /* @__PURE__ */ new Vector3();
+
+/**
+ * An octant that contains points.
+ *
+ * @param T - The type of the data.
+ */
+
+export class PointOctant<T = unknown> extends Octant<PointData<T>> {
+
+	/**
+	 * Constructs a new point octant.
+	 *
+	 * @param min - The lower bounds.
+	 * @param max - The upper bounds.
+	 */
+
+	constructor(min: Vector3, max: Vector3) {
+
+		super(min, max);
+
+	}
+
+	/**
+	 * Calculates the squared distance from this octant to the given point.
+	 *
+	 * @param point - A point.
+	 * @return The distance squared.
+	 */
+
+	distanceToSquared(point: Vector3): number {
+
+		const clampedPoint = p.copy(point).clamp(this.min, this.max);
+		return clampedPoint.sub(point).lengthSq();
+
+	}
+
+	/**
+	 * Calculates the squared distance from the center of this octant to the given point.
+	 *
+	 * @param point - A point.
+	 * @return The distance squared.
+	 */
+
+	distanceToCenterSquared(point: Vector3): number {
+
+		const center = this.getCenter(p);
+
+		const dx = point.x - center.x;
+		const dy = point.y - center.x;
+		const dz = point.z - center.z;
+
+		return dx * dx + dy * dy + dz * dz;
+
+	}
+
+	/**
+	 * Checks if the given point lies inside this octant's boundaries.
+	 *
+	 * This method can also be used to check if this octant intersects a sphere by providing a radius as bias.
+	 *
+	 * @param point - A point.
+	 * @param bias - A padding that extends the boundaries temporarily.
+	 * @return Whether the given point lies inside this octant.
+	 */
+
+	contains(point: Vector3, bias: number): boolean {
+
+		const min = this.min;
+		const max = this.max;
+
+		return (
+			point.x >= min.x - bias &&
+			point.y >= min.y - bias &&
+			point.z >= min.z - bias &&
+			point.x <= max.x + bias &&
+			point.y <= max.y + bias &&
+			point.z <= max.z + bias
+		);
+
+	}
+
+	/**
+	 * Redistributes the points of this octant to its children.
+	 *
+	 * Has no effect if there are no points or if this octant has no children.
+	 *
+	 * @param bias - A proximity threshold.
+	 */
+
+	redistribute(bias: number): void {
+
+		const children = this.children;
+		const pointData = this.data;
+
+		if(children !== null && pointData !== null) {
+
+			const points = pointData.points;
+			const data = pointData.data;
+
+			for(let i = 0, il = points.length; i < il; ++i) {
+
+				const point = points[i];
+				const entry = data[i];
+
+				for(let j = 0, jl = children.length; j < jl; ++j) {
+
+					const child = children[j] as PointOctant<T>;
+
+					if(child.contains(point, bias)) {
+
+						child.data ??= new PointData<T>();
+
+						const childData = child.data;
+						childData.points.push(point);
+						childData.data.push(entry);
+
+						break;
+
+					}
+
+				}
+
+			}
+
+			this.data = null;
+
+		}
+
+	}
+
+	/**
+	 * Deletes all child nodes and collects their points.
+	 */
+
+	merge(): void {
+
+		const children = this.children;
+
+		if(children !== null) {
+
+			const pointData = new PointData<T>();
+
+			for(let i = 0, l = children.length; i < l; ++i) {
+
+				const childData = children[i].data;
+
+				if(childData !== null) {
+
+					pointData.points = pointData.points.concat(childData.points);
+					pointData.data = pointData.data.concat(childData.data);
+
+				}
+
+			}
+
+			this.children = null;
+			this.data = pointData;
+
+		}
+
+	}
+
+}
+```
+
+### src/points/PointOctree.ts
+```
+import { Raycaster, Vector3 } from "three";
+import { Octree } from "../core/Octree.js";
+import { PointContainer } from "./PointContainer.js";
+import { PointData } from "./PointData.js";
+import { PointOctant } from "./PointOctant.js";
+import { RayPointIntersection } from "./RayPointIntersection.js";
+
+/**
+ * Recursively counts the points that are in the given octant.
+ *
+ * @param octant - An octant.
+ * @return The amount of points.
+ */
+
+function countPoints<T>(octant: PointOctant<T>): number {
+
+	const children = octant.children;
+	let result = 0;
+
+	if(children !== null) {
+
+		for(let i = 0, l = children.length; i < l; ++i) {
+
+			result += countPoints(children[i] as PointOctant<T>);
+
+		}
+
+	} else if(octant.data !== null) {
+
+		const pointData = octant.data;
+		result = pointData.points.length;
+
+	}
+
+	return result;
+
+}
+
+/**
+ * Recursively adds a point to the octree.
+ *
+ * @param point - A point.
+ * @param data - The data that belongs to the point.
+ * @param octree - The octree.
+ * @param octant - The current octant.
+ * @param depth - The current depth.
+ * @return Whether the operation was successful.
+ */
+
+function set<T>(point: Vector3, data: T, octree: PointOctree<T>, octant: PointOctant<T> | null,
+	depth: number): boolean {
+
+	let exists = false;
+	let done = false;
+
+	if(octant !== null && octant.contains(point, octree.getBias())) {
+
+		let children = octant.children;
+
+		if(children === null) {
+
+			let index = 0;
+
+			if(octant.data === null) {
+
+				octant.data = new PointData<T>();
+
+			} else {
+
+				const pointData = octant.data;
+				const points = pointData.points;
+
+				for(let i = 0, l = points.length; !exists && i < l; ++i) {
+
+					exists = points[i].equals(point);
+					index = i;
+
+				}
+
+			}
+
+			const pointData = octant.data;
+
+			if(exists) {
+
+				pointData.data[index] = data;
+				done = true;
+
+			} else if(pointData.points.length < octree.getMaxPoints() || depth === octree.getMaxDepth()) {
+
+				pointData.points.push(point.clone());
+				pointData.data.push(data);
+				done = true;
+
+			} else {
+
+				octant.split();
+				octant.redistribute(octree.getBias());
+				children = octant.children;
+
+			}
+
+		}
+
+		if(children !== null) {
+
+			++depth;
+
+			for(let i = 0, l = children.length; !done && i < l; ++i) {
+
+				done = set(point, data, octree, children[i] as PointOctant<T>, depth);
+
+			}
+
+		}
+
+	}
+
+	return done;
+
+}
+
+/**
+ * Recursively finds a point in the octree and removes it.
+ *
+ * @param point - A point.
+ * @param octree - The octree.
+ * @param octant - The current octant.
+ * @param parent - The parent of the current octant.
+ * @return The data entry of the removed point, or null if it didn't exist.
+ */
+
+function remove<T>(point: Vector3, octree: PointOctree<T>, octant: PointOctant<T>,
+	parent: PointOctant<T> | null): T | null {
+
+	const children = octant.children;
+	let result = null;
+
+	if(octant.contains(point, octree.getBias())) {
+
+		if(children !== null) {
+
+			for(let i = 0, l = children.length; result === null && i < l; ++i) {
+
+				result = remove(point, octree, children[i] as PointOctant<T>, octant);
+
+			}
+
+		} else if(octant.data !== null) {
+
+			const pointData = octant.data;
+			const points = pointData.points;
+			const data = pointData.data;
+
+			for(let i = 0, l = points.length; i < l; ++i) {
+
+				if(points[i].equals(point)) {
+
+					const last = l - 1;
+					result = data[i];
+
+					// If the point is NOT the last one in the array:
+					if(i < last) {
+
+						// Overwrite with the last point and data entry.
+						points[i] = points[last];
+						data[i] = data[last];
+
+					}
+
+					// Drop the last entry.
+					points.pop();
+					data.pop();
+
+					if(parent !== null && countPoints(parent) <= octree.getMaxPoints()) {
+
+						parent.merge();
+
+					}
+
+					break;
+
+				}
+
+			}
+
+		}
+
+	}
+
+	return result;
+
+}
+
+/**
+ * Recursively finds a point in the octree and fetches the associated data.
+ *
+ * @param point - A point.
+ * @param octree - The octree.
+ * @param octant - The current octant octant.
+ * @return The data entry that is associated with the given point, or null if it doesn't exist.
+ */
+
+function get<T>(point: Vector3, octree: PointOctree<T>, octant: PointOctant<T>): T | null {
+
+	const children = octant.children;
+	let result = null;
+
+	if(octant.contains(point, octree.getBias())) {
+
+		if(children !== null) {
+
+			for(let i = 0, l = children.length; result === null && i < l; ++i) {
+
+				result = get(point, octree, children[i] as PointOctant<T>);
+
+			}
+
+		} else if(octant.data !== null) {
+
+			const pointData = octant.data;
+			const points = pointData.points;
+			const data = pointData.data;
+
+			for(let i = 0, l = points.length; result === null && i < l; ++i) {
+
+				if(point.equals(points[i])) {
+
+					result = data[i];
+
+				}
+
+			}
+
+		}
+
+	}
+
+	return result;
+
+}
+
+/**
+ * Recursively moves an existing point to a new position.
+ *
+ * @param point - The point.
+ * @param position - The new position.
+ * @param octree - The octree.
+ * @param octant - The current octant.
+ * @param parent - The parent of the current octant.
+ * @param depth - The current depth.
+ * @return The data entry of the updated point, or null if it didn't exist.
+ */
+
+function move<T>(point: Vector3, position: Vector3, octree: PointOctree<T>,
+	octant: PointOctant<T>, parent: PointOctant<T> | null, depth: number): T | null {
+
+	const children = octant.children;
+	let result = null;
+
+	if(octant.contains(point, octree.getBias())) {
+
+		if(octant.contains(position, octree.getBias())) {
+
+			// The point and the new position both fall into the current octant.
+			if(children !== null) {
+
+				++depth;
+
+				for(let i = 0, l = children.length; result === null && i < l; ++i) {
+
+					const child = children[i] as PointOctant<T>;
+					result = move(point, position, octree, child, octant, depth);
+
+				}
+
+			} else if(octant.data !== null) {
+
+				// No divergence - the point can be updated in place.
+				const pointData = octant.data;
+				const points = pointData.points;
+				const data = pointData.data;
+
+				for(let i = 0, l = points.length; i < l; ++i) {
+
+					if(point.equals(points[i])) {
+
+						// The point exists! Update its position.
+						points[i].copy(position);
+						result = data[i];
+						break;
+
+					}
+
+				}
+
+			}
+
+		} else {
+
+			// Retrieve the point and remove it.
+			result = remove(point, octree, octant, parent);
+
+			// Go back to the parent octant and add the updated point.
+			set(position, result, octree, parent, depth - 1);
+
+		}
+
+	}
+
+	return result;
+
+}
+
+/**
+ * Recursively finds the closest point to the given one.
+ *
+ * @param point - The point.
+ * @param maxDistance - The maximum distance.
+ * @param skipSelf - Whether a point that is exactly at the given position should be skipped.
+ * @param octant - The current octant.
+ * @return The nearest point, or null if there is none.
+ */
+
+function findNearestPoint<T>(point: Vector3, maxDistance: number,
+	skipSelf: boolean, octant: PointOctant<T>): PointContainer<T> | null {
+
+	interface SortableOctant<T> {
+
+		octant: PointOctant<T>;
+		distance: number;
+
+	}
+
+	let result = null;
+	let bestDistance = maxDistance;
+
+	if(octant.children !== null) {
+
+		// Sort the children: smallest distance to the point first, ASC.
+		const sortedChildren: SortableOctant<T>[] = octant.children.map((child) => {
+
+			// Precompute distances.
+			const octant = child as PointOctant<T>;
+
+			return {
+				distance: octant.distanceToCenterSquared(point),
+				octant
+			};
+
+		}).sort((a, b) => a.distance - b.distance);
+
+		// Traverse from closest to furthest.
+		for(let i = 0, l = sortedChildren.length; i < l; ++i) {
+
+			const child = sortedChildren[i].octant;
+
+			if(child.contains(point, bestDistance)) {
+
+				const intermediateResult = findNearestPoint(
+					point, bestDistance, skipSelf, child
+				);
+
+				if(intermediateResult !== null) {
+
+					bestDistance = intermediateResult.distance;
+					result = intermediateResult;
+
+					if(bestDistance === 0.0) {
+
+						break;
+
+					}
+
+				}
+
+			}
+
+		}
+
+	} else if(octant.data !== null) {
+
+		const pointData = octant.data;
+		const points = pointData.points;
+		const data = pointData.data;
+
+		let index = -1;
+
+		for(let i = 0, l = points.length; i < l; ++i) {
+
+			if(points[i].equals(point)) {
+
+				if(!skipSelf) {
+
+					bestDistance = 0.0;
+					index = i;
+					break;
+
+				}
+
+			} else {
+
+				const distance = point.distanceTo(points[i]);
+
+				if(distance < bestDistance) {
+
+					bestDistance = distance;
+					index = i;
+
+				}
+
+			}
+
+		}
+
+		if(index >= 0) {
+
+			result = new PointContainer(points[index], data[index], bestDistance);
+
+		}
+
+	}
+
+	return result;
+
+}
+
+/**
+ * Recursively finds points within a specific radius around a given point.
+ *
+ * @param point - The point.
+ * @param radius - The radius.
+ * @param skipSelf - Whether a point that is exactly at the given position should be skipped.
+ * @param octant - The current octant.
+ * @param result - An array to be filled with points.
+ */
+
+function findPoints<T>(point: Vector3, radius: number, skipSelf: boolean,
+	octant: PointOctant<T>, result: PointContainer<T>[]): void {
+
+	const children = octant.children;
+
+	if(children !== null) {
+
+		for(let i = 0, l = children.length; i < l; ++i) {
+
+			const child = children[i] as PointOctant<T>;
+
+			if(child.contains(point, radius)) {
+
+				findPoints(point, radius, skipSelf, child, result);
+
+			}
+
+		}
+
+	} else if(octant.data !== null) {
+
+		const pointData = octant.data;
+		const points = pointData.points;
+		const data = pointData.data;
+
+		for(let i = 0, l = points.length; i < l; ++i) {
+
+			const p = points[i];
+
+			if(p.equals(point)) {
+
+				if(!skipSelf) {
+
+					result.push(new PointContainer(p.clone(), data[i], 0.0));
+
+				}
+
+			} else {
+
+				const rSq = radius * radius;
+				const dSq = p.distanceToSquared(point);
+
+				if(dSq <= rSq) {
+
+					result.push(new PointContainer(p.clone(), data[i], Math.sqrt(dSq)));
+
+				}
+
+			}
+
+		}
+
+	}
+
+}
+
+/**
+ * An octree that manages points.
+ *
+ * @param T - The type of the data.
+ */
+
+export class PointOctree<T = unknown> extends Octree<PointOctant<T>> {
+
+	/**
+	 * An octant boundary bias.
+	 */
+
+	private bias: number;
+
+	/**
+	 * The number of points per octant before a split occurs.
+	 *
+	 * This value works together with the maximum depth as a secondary limiting factor. Smaller values cause splits to
+	 * occur earlier which results in a faster and deeper tree growth.
+	 */
+
+	private maxPoints: number;
+
+	/**
+	 * The maximum tree depth level.
+	 *
+	 * Infinity is a valid value, but allowing infinitely small octants can result in poor performance.
+	 */
+
+	private maxDepth: number;
+
+	/**
+	 * Constructs a new point octree.
+	 *
+	 * @param min - The lower bounds of the tree.
+	 * @param max - The upper bounds of the tree.
+	 * @param bias - An octant boundary bias. The octree is considered "loose" with a bias greater than 0.
+	 * @param maxPoints - The maximum amount of distinct points per leaf octant.
+	 * @param maxDepth - The maximum tree depth level, starting at 0.
+	 */
+
+	constructor(min: Vector3, max: Vector3, bias = 0.0, maxPoints = 8, maxDepth = 8) {
+
+		super(new PointOctant<T>(min, max));
+
+		this.bias = Math.max(0.0, bias);
+		this.maxPoints = Math.max(1, Math.round(maxPoints));
+		this.maxDepth = Math.max(0, Math.round(maxDepth));
+
+	}
+
+	/**
+	 * Returns the octree bias.
+	 *
+	 * @return The bias.
+	 */
+
+	getBias(): number {
+
+		return this.bias;
+
+	}
+
+	/**
+	 * Returns the maximum amount of points per leaf octant.
+	 *
+	 * @return The maximum amount of points per leaf octant.
+	 */
+
+	getMaxPoints(): number {
+
+		return this.maxPoints;
+
+	}
+
+	/**
+	 * Returns the maximum tree depth.
+	 *
+	 * @return The maximum tree depth.
+	 */
+
+	getMaxDepth(): number {
+
+		return this.maxDepth;
+
+	}
+
+	/**
+	 * Counts the points in the given octant.
+	 *
+	 * @param octant - An octant. Defaults to the root octant.
+	 * @return The amount of points.
+	 */
+
+	countPoints(octant: PointOctant<T> = this.root): number {
+
+		return countPoints(octant);
+
+	}
+
+	/**
+	 * Inserts a point into the octree.
+	 *
+	 * If the point exists in the tree already, the data entry will be replaced.
+	 *
+	 * @param point - The point.
+	 * @param data - Data that belongs to the point.
+	 * @return Whether the operation was successful.
+	 */
+
+	set(point: Vector3, data: T): boolean {
+
+		return set(point, data, this, this.root, 0);
+
+	}
+
+	/**
+	 * Removes a point from the tree.
+	 *
+	 * @param point - The point.
+	 * @return The data entry of the removed point or null if it didn't exist.
+	 */
+
+	remove(point: Vector3): T | null {
+
+		return remove(point, this, this.root, null);
+
+	}
+
+	/**
+	 * Retrieves the data of the specified point.
+	 *
+	 * @param point - A position.
+	 * @return The data that belongs to the given point, or null if it doesn't exist.
+	 */
+
+	get(point: Vector3): T | null {
+
+		return get(point, this, this.root);
+
+	}
+
+	/**
+	 * Moves an existing point to a new position. Has no effect if the point doesn't exist.
+	 *
+	 * @param point - The point.
+	 * @param position - The new position.
+	 * @return The data of the updated point, or null if it didn't exist.
+	 */
+
+	move(point: Vector3, position: Vector3): T | null {
+
+		return move(point, position, this, this.root, null, 0);
+
+	}
+
+	/**
+	 * Finds the closest point to the given one.
+	 *
+	 * @param point - A point.
+	 * @param maxDistance - An upper limit for the distance between the points.
+	 * @param skipSelf - Whether a point that is exactly at the given position should be skipped.
+	 * @return The nearest point, or null if there is none.
+	 */
+
+	findNearestPoint(point: Vector3, maxDistance = Number.POSITIVE_INFINITY, skipSelf = false): PointContainer<T> | null {
+
+		const result = findNearestPoint(point, maxDistance, skipSelf, this.root);
+
+		if(result !== null && result.point !== null) {
+
+			result.point = result.point.clone();
+
+		}
+
+		return result;
+
+	}
+
+	/**
+	 * Finds points within a specific radius around a given point.
+	 *
+	 * @param point - A position.
+	 * @param radius - A radius.
+	 * @param skipSelf - Whether a point that is exactly at the given position should be skipped.
+	 * @return A list of points.
+	 */
+
+	findPoints(point: Vector3, radius: number, skipSelf = false): PointContainer<T>[] {
+
+		const result: PointContainer<T>[] = [];
+		findPoints(point, radius, skipSelf, this.root, result);
+		return result;
+
+	}
+
+	/**
+	 * Finds the points that intersect with the given ray.
+	 *
+	 * @param raycaster - The raycaster.
+	 * @return The intersecting points.
+	 */
+
+	raycast(raycaster: Raycaster): RayPointIntersection<T>[] {
+
+		const result: RayPointIntersection<T>[] = [];
+		const octants = super.getIntersectingNodes(raycaster);
+
+		if(octants.length > 0) {
+
+			for(let i = 0, l = octants.length; i < l; ++i) {
+
+				const octant = octants[i];
+				const pointData = octant.data;
+
+				if(pointData !== null) {
+
+					pointData.testPoints(raycaster, result);
+
+				}
+
+			}
+
+		}
+
+		return result;
+
+	}
+
+}
+```
+
+### src/points/RayPointIntersection.ts
+```
+import { Vector3 } from "three";
+import { PointContainer } from "./PointContainer.js";
+
+/**
+ * A collection of ray-point intersection data.
+ *
+ * @param T - The type of the data.
+ */
+
+export class RayPointIntersection<T = unknown> extends PointContainer<T> {
+
+	/**
+	 * The shortest distance from the point to the ray.
+	 */
+
+	distanceToRay: number;
+
+	/**
+	 * Constructs new ray-point intersection data.
+	 *
+	 * @param distanceToOrigin - The distance from the origin of the ray to the point.
+	 * @param distanceToRay - The distance from the point to the ray.
+	 * @param point - The point.
+	 * @param data - The point's data.
+	 */
+
+	constructor(distanceToOrigin: number, distanceToRay: number, point: Vector3, data: T | null = null) {
+
+		super(point, data, distanceToOrigin);
+		this.distanceToRay = distanceToRay;
+
+	}
+
+}
+```
+
+### src/points/index.ts
+```
+export * from "./PointContainer.js";
+export * from "./PointData.js";
+export * from "./PointOctant.js";
+export * from "./PointOctree.js";
+export * from "./RayPointIntersection.js";
+```
+
+### src/raycasting/OctreeRaycaster.ts
+```
+import { Ray } from "three";
+import { Node } from "../core/index.js";
+import { RaycastingFlags } from "./RaycastingFlags.js";
+import { findEntryOctant } from "./findEntryOctant.js";
+import { findNextOctant } from "./findNextOctant.js";
+import { intersectOctree } from "./intersectOctree.js";
+
+const flags = /* @__PURE__ */ new RaycastingFlags();
+
+/**
+ * Finds all octants that intersect with the given ray.
+ *
+ * @param node - The current node.
+ * @param tx0 - A ray projection parameter.
+ * @param ty0 - A ray projection parameter.
+ * @param tz0 - A ray projection parameter.
+ * @param tx1 - A ray projection parameter.
+ * @param ty1 - A ray projection parameter.
+ * @param tz1 - A ray projection parameter.
+ * @param result - An array to be filled with the intersecting octants.
+ */
+
+function raycastOctant(node: Node, tx0: number, ty0: number, tz0: number,
+	tx1: number, ty1: number, tz1: number, result: Node[]): void {
+
+	if(tx1 >= 0.0 && ty1 >= 0.0 && tz1 >= 0.0) {
+
+		const c = node.children;
+
+		if(c === null || c === undefined) {
+
+			// Leaf.
+			result.push(node);
+
+		} else {
+
+			// Calculate mean values.
+			const txm = 0.5 * (tx0 + tx1);
+			const tym = 0.5 * (ty0 + ty1);
+			const tzm = 0.5 * (tz0 + tz1);
+
+			const f = flags.value;
+			let currentOctant = findEntryOctant(tx0, ty0, tz0, txm, tym, tzm);
+
+			/* The possibilities for the next node are passed in the same respective
+			order as the t-values. Hence, if the first value is found to be the
+			greatest, the fourth one will be returned. If the second value is the
+			greatest, the fifth one will be returned, etc. */
+
+			while(currentOctant < 8) {
+
+				switch(currentOctant) {
+
+					case 0:
+						raycastOctant(c[f], tx0, ty0, tz0, txm, tym, tzm, result);
+						currentOctant = findNextOctant(currentOctant, txm, tym, tzm);
+						break;
+
+					case 1:
+						raycastOctant(c[f ^ 1], tx0, ty0, tzm, txm, tym, tz1, result);
+						currentOctant = findNextOctant(currentOctant, txm, tym, tz1);
+						break;
+
+					case 2:
+						raycastOctant(c[f ^ 2], tx0, tym, tz0, txm, ty1, tzm, result);
+						currentOctant = findNextOctant(currentOctant, txm, ty1, tzm);
+						break;
+
+					case 3:
+						raycastOctant(c[f ^ 3], tx0, tym, tzm, txm, ty1, tz1, result);
+						currentOctant = findNextOctant(currentOctant, txm, ty1, tz1);
+						break;
+
+					case 4:
+						raycastOctant(c[f ^ 4], txm, ty0, tz0, tx1, tym, tzm, result);
+						currentOctant = findNextOctant(currentOctant, tx1, tym, tzm);
+						break;
+
+					case 5:
+						raycastOctant(c[f ^ 5], txm, ty0, tzm, tx1, tym, tz1, result);
+						currentOctant = findNextOctant(currentOctant, tx1, tym, tz1);
+						break;
+
+					case 6:
+						raycastOctant(c[f ^ 6], txm, tym, tz0, tx1, ty1, tzm, result);
+						currentOctant = findNextOctant(currentOctant, tx1, ty1, tzm);
+						break;
+
+					case 7:
+						raycastOctant(c[f ^ 7], txm, tym, tzm, tx1, ty1, tz1, result);
+						// Far top right octant. No other octants can be reached from here.
+						currentOctant = 8;
+						break;
+
+				}
+
+			}
+
+		}
+
+	}
+
+}
+
+/**
+ * A raycaster for pointer-based octrees.
+ *
+ * Reference:
+ *  "An Efficient Parametric Algorithm for Octree Traversal"
+ *  by J. Revelles et al. (2000)
+ */
+
+export class OctreeRaycaster {
+
+	/**
+	 * Finds (pseudo) leaf octants that intersect with the given ray.
+	 *
+	 * @param node - An octree node.
+	 * @param ray - A ray.
+	 * @return The intersecting octants. Sorted by distance, closest first.
+	 */
+
+	static intersectOctree(node: Node, ray: Ray): Node[] {
+
+		const result: Node[] = [];
+		const t = intersectOctree(node, ray, flags);
+
+		if(t !== null) {
+
+			raycastOctant(node, t[0], t[1], t[2], t[3], t[4], t[5], result);
+
+		}
+
+		return result;
+
+	}
+
+}
+```
+
+### src/raycasting/RaycastingFlags.ts
+```
+/**
+ * A container for raycasting flags.
+ */
+
+export class RaycastingFlags {
+
+	/**
+	 * The current flags.
+	 */
+
+	value: number;
+
+	/**
+	 * Creates a new container for raycasting flags.
+	 */
+
+	constructor() {
+
+		this.value = 0;
+
+	}
+
+}
+```
+
+### src/raycasting/findEntryOctant.ts
+```
+/**
+ * Finds the entry plane of the first octant that a ray travels through.
+ *
+ * Determining the first octant requires knowing which of the t0s is the largest. The tms of the other axes must also be
+ * compared against that largest t0.
+ *
+ * @param tx0 - Ray projection parameter.
+ * @param ty0 - Ray projection parameter.
+ * @param tz0 - Ray projection parameter.
+ * @param txm - Ray projection parameter mean.
+ * @param tym - Ray projection parameter mean.
+ * @param tzm - Ray projection parameter mean.
+ * @return The index of the first octant that the ray travels through.
+ */
+
+export function findEntryOctant(tx0: number, ty0: number, tz0: number, txm: number, tym: number, tzm: number): number {
+
+	let entry = 0;
+
+	// Find the entry plane.
+	if(tx0 > ty0 && tx0 > tz0) {
+
+		// YZ-plane.
+		if(tym < tx0) {
+
+			entry |= 2;
+
+		}
+
+		if(tzm < tx0) {
+
+			entry |= 1;
+
+		}
+
+	} else if(ty0 > tz0) {
+
+		// XZ-plane.
+		if(txm < ty0) {
+
+			entry |= 4;
+
+		}
+
+		if(tzm < ty0) {
+
+			entry |= 1;
+
+		}
+
+	} else {
+
+		// XY-plane.
+		if(txm < tz0) {
+
+			entry |= 4;
+
+		}
+
+		if(tym < tz0) {
+
+			entry |= 2;
+
+		}
+
+	}
+
+	return entry;
+
+}
+```
+
+### src/raycasting/findNextOctant.ts
+```
+/**
+ * A lookup-table containing octant ids. Used to determine the exit plane from an octant.
+ */
+
+const octantTable = [
+
+	new Uint8Array([4, 2, 1]),
+	new Uint8Array([5, 3, 8]),
+	new Uint8Array([6, 8, 3]),
+	new Uint8Array([7, 8, 8]),
+	new Uint8Array([8, 6, 5]),
+	new Uint8Array([8, 7, 8]),
+	new Uint8Array([8, 8, 7]),
+	new Uint8Array([8, 8, 8])
+
+];
+
+/**
+ * Finds the next octant that intersects with the ray based on the exit plane of the current one.
+ *
+ * @param currentOctant - The index of the current octant.
+ * @param tx1 - Ray projection parameter.
+ * @param ty1 - Ray projection parameter.
+ * @param tz1 - Ray projection parameter.
+ * @return The index of the next octant that the ray travels through.
+ */
+
+export function findNextOctant(currentOctant: number, tx1: number, ty1: number, tz1: number): number {
+
+	let min: number;
+	let exit: number;
+
+	// Find the exit plane.
+	if(tx1 < ty1) {
+
+		min = tx1;
+		exit = 0; // YZ-plane.
+
+	} else {
+
+		min = ty1;
+		exit = 1; // XZ-plane.
+
+	}
+
+	if(tz1 < min) {
+
+		exit = 2; // XY-plane.
+
+	}
+
+	return octantTable[currentOctant][exit];
+
+}
+```
+
+### src/raycasting/index.ts
+```
+export * from "./RaycastingFlags.js";
+export * from "./findEntryOctant.js";
+export * from "./findNextOctant.js";
+export * from "./intersectOctree.js";
+export * from "./OctreeRaycaster.js";
+```
+
+### src/raycasting/intersectOctree.ts
+```
+import { Box3, Ray, Vector3 } from "three";
+import { Node } from "../core/Node.js";
+import { RaycastingFlags } from "./RaycastingFlags.js";
+
+const v = /* @__PURE__ */ new Vector3();
+const b = /* @__PURE__ */ new Box3();
+const d = /* @__PURE__ */ new Box3();
+const r = /* @__PURE__ */ new Ray();
+
+/**
+ * Calculates ray projection parameters for the given octree and ray setup.
+ *
+ * @param octree - The octree.
+ * @param ray - A ray.
+ * @param flags - Raycasting flags.
+ * @return The ray parameters `[tx0, ty0, tz0, tx1, ty1, tz1]`, or null if the ray doesn't hit the octree.
+ */
+
+export function intersectOctree(octree: Node, ray: Ray, flags: RaycastingFlags): number[] | null {
+
+	// Translate the octant extents to the scene origin.
+	const min = b.min.set(0, 0, 0);
+	const max = b.max.subVectors(octree.max, octree.min);
+
+	const dimensions = octree.getDimensions(d.min);
+	const halfDimensions = d.max.copy(dimensions).multiplyScalar(0.5);
+
+	const origin = r.origin.copy(ray.origin);
+	const direction = r.direction.copy(ray.direction);
+
+	// Translate the ray to the center of the octant.
+	origin.sub(octree.getCenter(v)).add(halfDimensions);
+
+	// Reset all flags.
+	flags.value = 0;
+
+	// Handle rays with negative directions and prevent division by zero.
+	if(direction.x < 0.0) {
+
+		origin.x = dimensions.x - origin.x;
+		direction.x = -direction.x;
+		flags.value |= 4;
+
+	} else if(direction.x === 0.0) {
+
+		direction.x = Number.EPSILON;
+
+	}
+
+	if(direction.y < 0.0) {
+
+		origin.y = dimensions.y - origin.y;
+		direction.y = -direction.y;
+		flags.value |= 2;
+
+	} else if(direction.y === 0.0) {
+
+		direction.y = Number.EPSILON;
+
+	}
+
+	if(direction.z < 0.0) {
+
+		origin.z = dimensions.z - origin.z;
+		direction.z = -direction.z;
+		flags.value |= 1;
+
+	} else if(direction.z === 0.0) {
+
+		direction.z = Number.EPSILON;
+
+	}
+
+	// Improve IEEE double stability.
+	const invDirX = 1.0 / direction.x;
+	const invDirY = 1.0 / direction.y;
+	const invDirZ = 1.0 / direction.z;
+
+	// Project the ray to the octant's boundaries.
+	const tx0 = (min.x - origin.x) * invDirX;
+	const tx1 = (max.x - origin.x) * invDirX;
+	const ty0 = (min.y - origin.y) * invDirY;
+	const ty1 = (max.y - origin.y) * invDirY;
+	const tz0 = (min.z - origin.z) * invDirZ;
+	const tz1 = (max.z - origin.z) * invDirZ;
+
+	// Check if the ray hits the octree.
+	const hit = (Math.max(tx0, ty0, tz0) < Math.min(tx1, ty1, tz1));
+	return hit ? [tx0, ty0, tz0, tx1, ty1, tz1] : null;
+
+}
+```
+
+### demo/src/utils/CameraUtils.ts
+```
+const DEG2RAD = Math.PI / 180.0;
+const RAD2DEG = 180.0 / Math.PI;
+
+/**
+ * Converts horizontal FoV to vertical FoV.
+ *
+ * @param horizontalFoV - The horizontal field of view.
+ * @param aspect - The aspect ration.
+ * @return The vertical field of view.
+ */
+
+export function calculateVerticalFoV(horizontalFoV: number, aspect = 16 / 9): number {
+
+	return Math.atan(Math.tan(horizontalFoV * DEG2RAD * 0.5) / aspect) * RAD2DEG * 2.0;
+
+}
+
+/**
+ * Converts vertical FoV to horizontal FoV.
+ *
+ * @param verticalFoV - The vertical field of view.
+ * @param aspect - The aspect ration.
+ * @return The horizontal field of view.
+ */
+
+export function calculateHorizontalFoV(verticalFoV: number, aspect = 16 / 9): number {
+
+	return Math.atan(Math.tan(verticalFoV * DEG2RAD * 0.5) * aspect) * RAD2DEG * 2.0;
+
+}
+```
+
+### demo/src/utils/FrustumCuller.ts
+```
+import {
+	BoxGeometry,
+	Camera,
+	CameraHelper,
+	Frustum,
+	InstancedMesh,
+	Material,
+	Matrix4,
+	Mesh,
+	MeshBasicMaterial,
+	PerspectiveCamera,
+	Quaternion,
+	Spherical,
+	Vector3
+} from "three";
+
+import { Pane } from "tweakpane";
+import { Octree } from "sparse-octree";
+
+const frustum = new Frustum();
+const m = new Matrix4();
+const s = new Vector3();
+const p = new Vector3();
+const q = new Quaternion();
+
+/**
+ * A frustum-based octree culling helper.
+ */
+
+export class FrustumCuller {
+
+	/**
+	 * An octree.
+	 */
+
+	private octree: Octree;
+
+	/**
+	 * A camera.
+	 */
+
+	private cullCamera: Camera;
+
+	/**
+	 * Spherical coordinates.
+	 */
+
+	private s: Spherical;
+
+	/**
+	 * A camera helper.
+	 */
+
+	private cameraHelper: CameraHelper;
+
+	/**
+	 * A mesh that represents intersecting octants.
+	 */
+
+	private mesh: InstancedMesh;
+
+	/**
+	 * Indicates whether the frustum culling is active.
+	 */
+
+	enabled: boolean;
+
+	/**
+	 * The measured processing time.
+	 */
+
+	time: string;
+
+	/**
+	 * Constructs a new octree culler.
+	 *
+	 * @param octree - An octree.
+	 */
+
+	constructor(octree: Octree) {
+
+		this.octree = octree;
+		this.cullCamera = new PerspectiveCamera(20, 1.77, 0.5, 5);
+		this.s = new Spherical(5, Math.PI / 3, Math.PI * 1.75);
+		this.cameraHelper = new CameraHelper(this.cullCamera);
+
+		this.mesh = new InstancedMesh(
+			new BoxGeometry(1, 1, 1),
+			new MeshBasicMaterial({
+				transparent: true,
+				color: 0xccff00,
+				opacity: 0.75
+			}),
+			2500
+		);
+
+		this.mesh.visible = false;
+		this.cameraHelper.visible = false;
+		this.enabled = false;
+		this.time = "";
+
+	}
+
+	/**
+	 * Returns a mesh that represents intersecting octants.
+	 *
+	 * @return The mesh.
+	 */
+
+	getMesh(): Mesh {
+
+		return this.mesh;
+
+	}
+
+	/**
+	 * Returns the camera helper.
+	 *
+	 * @return The camera helper.
+	 */
+
+	getCameraHelper(): CameraHelper {
+
+		return this.cameraHelper;
+
+	}
+
+	/**
+	 * Updates the cull camera.
+	 */
+
+	private updateCamera(): void {
+
+		const cullCamera = this.cullCamera;
+		cullCamera.position.setFromSpherical(this.s.makeSafe());
+		cullCamera.lookAt(p.set(0, 0, 0));
+		cullCamera.updateMatrixWorld(true);
+
+		frustum.setFromProjectionMatrix(
+			m.multiplyMatrices(
+				cullCamera.projectionMatrix,
+				cullCamera.matrixWorldInverse
+			)
+		);
+
+	}
+
+	/**
+	 * Culls the octree.
+	 */
+
+	cull(): void {
+
+		const mesh = this.mesh;
+
+		if(this.enabled) {
+
+			this.updateCamera();
+
+			const t0 = performance.now();
+			const intersections = this.octree.cull(frustum);
+			this.time = (performance.now() - t0).toFixed(2) + " ms";
+
+			mesh.count = intersections.length;
+
+			if(intersections.length > 0) {
+
+				for(let i = 0, l = intersections.length; i < l; ++i) {
+
+					const x = intersections[i];
+					x.getCenter(p);
+					x.getDimensions(s);
+					mesh.setMatrixAt(i, m.compose(p, q, s));
+
+				}
+
+				mesh.instanceMatrix.needsUpdate = true;
+
+			}
+
+		}
+
+	}
+
+	/**
+	 * Registers configuration options.
+	 *
+	 * @param pane - A settings pane.
+	 */
+
+	registerOptions(pane: Pane): void {
+
+		const folder = pane.addFolder({ title: "Frustum Culling" });
+
+		folder.addBinding(this, "enabled").on("change", (e) => {
+
+			this.cameraHelper.visible = e.value;
+			this.mesh.visible = e.value;
+			this.cull();
+
+		});
+
+		folder.addBinding(this, "time", { readonly: true });
+
+		const subfolder = folder.addFolder({ title: "Camera Adjustment" });
+		subfolder.addBinding(this.s, "radius", { min: 0.1, max: 10.0, step: 0.1 })
+			.on("change", (e) => this.cull());
+		subfolder.addBinding(this.s, "phi", { min: 1e-6, max: Math.PI - 1e-6, step: 0.0001 })
+			.on("change", (e) => this.cull());
+		subfolder.addBinding(this.s, "theta", { min: 0.0, max: Math.PI * 2.0, step: 0.0001 })
+			.on("change", (e) => this.cull());
+
+	}
+
+	/**
+	 * Deletes this frustum culler.
+	 */
+
+	dispose(): void {
+
+		const geometry = this.mesh.geometry;
+		const material = this.mesh.material as Material;
+
+		geometry.dispose();
+		material.dispose();
+
+	}
+
+}
+```
+
+### demo/src/utils/OctreeRaycaster.ts
+```
+import {
+	Camera,
+	Group,
+	Material,
+	Mesh,
+	MeshBasicMaterial,
+	Object3D,
+	Points,
+	PointsMaterial,
+	Raycaster,
+	SphereGeometry,
+	Vector2
+} from "three";
+
+import { Pane } from "tweakpane";
+import { PointOctree } from "sparse-octree";
+
+const pointer = new Vector2();
+
+/**
+ * An octree raycasting helper.
+ */
+
+export class OctreeRaycaster extends Raycaster implements EventListenerObject {
+
+	/**
+	 * An octree.
+	 */
+
+	private octree: PointOctree<Object3D>;
+
+	/**
+	 * A DOM element.
+	 */
+
+	private domElement: HTMLElement;
+
+	/**
+	 * A group of points.
+	 */
+
+	private group: Group;
+
+	/**
+	 * The selected mesh.
+	 */
+
+	private selectedPoints: Points | null;
+
+	/**
+	 * @see {@link cursor}
+	 */
+
+	private _cursor: Mesh;
+
+	/**
+	 * Indicates whether this raycaster is active.
+	 */
+
+	enabled: boolean;
+
+	/**
+	 * The measured processing time.
+	 */
+
+	time: string;
+
+	/**
+	 * Constructs a new octree raycaster.
+	 *
+	 * @param octree - An octree.
+	 * @param camera - A camera.
+	 * @param group - A group of points.
+	 * @param domElement - A DOM element.
+	 */
+
+	constructor(octree: PointOctree<Object3D>, camera: Camera, group: Group, domElement: HTMLElement) {
+
+		super();
+
+		if(this.params.Points !== undefined) {
+
+			this.params.Points.threshold = 1e-1;
+
+		}
+
+		this.octree = octree;
+		this.camera = camera;
+		this.group = group;
+		this.domElement = domElement;
+		this.enabled = true;
+		this.time = "";
+		this.selectedPoints = null;
+
+		this._cursor = new Mesh(
+			new SphereGeometry(0.2, 16, 16),
+			new MeshBasicMaterial({
+				transparent: true,
+				color: 0x00ccff,
+				opacity: 0.75
+			})
+		);
+
+		this._cursor.visible = false;
+
+		domElement.addEventListener("pointermove", this, { passive: true });
+
+	}
+
+	/**
+	 * Returns a mesh that represents the selected point.
+	 */
+
+	get cursor(): Mesh {
+
+		return this._cursor;
+
+	}
+
+	/**
+	 * Raycasts the octree.
+	 *
+	 * @param event - An event.
+	 */
+
+	raycast(event: PointerEvent): void {
+
+		pointer.x = (event.clientX / window.innerWidth) * 2 - 1;
+		pointer.y = -(event.clientY / window.innerHeight) * 2 + 1;
+		this.setFromCamera(pointer, this.camera);
+
+		if(this.selectedPoints !== null) {
+
+			const material = this.selectedPoints.material as PointsMaterial;
+			material.color.setHex(0xc00000);
+			this.selectedPoints = null;
+			this.cursor.visible = false;
+
+		}
+
+		const t0 = performance.now();
+		let x, selectedPoints, point;
+
+		if(this.enabled) {
+
+			const intersections = this.octree.raycast(this);
+
+			if(intersections.length > 0) {
+
+				x = intersections[0];
+				selectedPoints = x.data;
+				point = x.point;
+
+			}
+
+		} else {
+
+			const intersections = this.intersectObjects(this.group.children);
+
+			if(intersections.length > 0) {
+
+				x = intersections[0];
+				selectedPoints = x.object;
+				point = x.point;
+
+			}
+
+		}
+
+		this.time = (performance.now() - t0).toFixed(2) + " ms";
+
+		if(x !== undefined && point !== null && point !== undefined &&
+			selectedPoints !== null && selectedPoints !== undefined) {
+
+			this.selectedPoints = selectedPoints as Points;
+			this.cursor.visible = (selectedPoints.parent === null) ? false : selectedPoints.parent.visible;
+			this.cursor.position.copy(point);
+
+			const material = this.selectedPoints.material as PointsMaterial;
+			material.color.setHex(0xccff00);
+
+		}
+
+	}
+
+	/**
+	 * Registers configuration options.
+	 *
+	 * @param pane - A settings pane.
+	 */
+
+	registerOptions(pane: Pane): void {
+
+		const folder = pane.addFolder({ title: "Rayasting" });
+		folder.addBinding(this, "enabled");
+		folder.addBinding(this, "time", { readonly: true });
+
+	}
+
+	handleEvent(event: Event): void {
+
+		switch(event.type) {
+
+			case "pointermove":
+				this.raycast(event as PointerEvent);
+				break;
+
+		}
+
+	}
+
+	/**
+	 * Deletes this raycaster.
+	 */
+
+	dispose(): void {
+
+		const domElement = this.domElement;
+		domElement.removeEventListener("pointermove", this);
+
+		const geometry = this._cursor.geometry;
+		const material = this._cursor.material as Material;
+
+		geometry.dispose();
+		material.dispose();
+
+	}
+
+}
+```
+
+### demo/src/utils/index.ts
+```
+export * from "./CameraUtils.js";
+export { FrustumCuller } from "./FrustumCuller.js";
+export { OctreeRaycaster } from "./OctreeRaycaster.js";
+```

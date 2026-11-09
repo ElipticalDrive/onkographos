@@ -3,7 +3,7 @@
 Also called: Silhouette tracing
 
 ## Overview
-Volumetric Silhouette Rendering is a technique to render silhouettes of volumetric data by detecting edges where the view vector is perpendicular to the surface normal, using a 3D normal map and a pre-computed cube map for view vector normalization [S1, unofficial]. It sets itself apart from geometry-based silhouette extraction by operating directly on volumetric representations via rasterization of normal fields, allowing interactive rendering of complex volumetric datasets [S1, unofficial].
+Volumetric Silhouette Rendering is a technique to render silhouettes of volumometric data by detecting edges where the view vector is perpendicular to the surface normal, using a 3D normal map and a pre-computed cube map for view vector normalization [S1, unofficial]. It sets itself apart from geometry-based silhouette extraction by operating directly on volumetric representations via rasterization of normal fields, allowing interactive rendering of complex volumetric datasets [S1, unofficial].
 
 ## How it works
 **Inputs:**
@@ -20,12 +20,12 @@ Volumetric Silhouette Rendering is a technique to render silhouettes of volumetr
 2. **Cube Map:** A cube map texture where each face stores pre-normalized view vectors [S1, unofficial]. The coordinates used to fetch from this map are the interpolated, un-normalized view vector directions [S1, unofficial].
 
 **Steps:**
-1. **Render Normal Map:** Render the 3D normal map. At each vertex of the rendered polygons, issue the normalized view vector as an additional texture coordinate [S1, unofficial].
+1. **Render Normal Map:** Render the 3D normal map [S1, unofficial]. At each vertex of the rendered polygons, issue the normalized view vector as an additional texture coordinate [S1, unofficial].
 2. **Interpolate:** During rasterization, interpolate the texture coordinates (including the view vector components) on a per-fragment basis [S1, unofficial].
 3. **Re-normalize View Vector:** Because normalization is not preserved by linear interpolation, the interpolated view vector components are used as coordinates to fetch texture values from the pre-computed cube map, returning the correctly normalized view vector $V_{norm}$ for the fragment [S1, unofficial].
 4. **Compute Dot Product:** Use register combiners (or equivalent hardware shader logic) to compute the dot product between the normalized view vector $V_{norm}$ and the normal vector $N$ fetched from the 3D normal map: $D = N \cdot V_{norm}$ [S1, unofficial].
 5. **Square Result:** Square the dot product result to obtain a positive value: $S = D^2$ [S1, unofficial].
-6. **Trigger Multiplexer:** Use the squared value $S$ to trigger a multiplexer. Depending on the dot product between view vector and normal, the multiplexer outputs black or white [S1, unofficial].
+6. **Trigger Multiplexer:** Use the squared value $S$ to trigger a multiplexer [S1, unofficial]. Depending on the dot product between view vector and normal, the multiplexer outputs black or white [S1, unofficial].
 7. **Merge:** Merge the silhouette result (black/white) with the colors produced by the toon-shader [S1, unofficial].
 
 **Formula:**
@@ -35,21 +35,21 @@ where $N_1, N_2$ are face normals, $V_1, V_2$ are points on the faces, and $C$ i
 
 For the volumetric implementation, the condition is approximated by the dot product between the surface normal $N$ and the view vector $V$:
 $$ D = N \cdot V_{norm} $$
-The silhouette is highlighted when $D \approx 0$. The squared value $D^2$ is used to trigger the output [S1, unofficial].
+The silhouette is highlighted when $D \approx 0$ [G]. The squared value $D^2$ is used to trigger the output [S1, unofficial].
 
 **Parameters:**
-- Threshold for silhouette detection: Not given in the sources.
-- Cube map resolution: Not given in the sources.
+- Threshold for silhouette detection: Not given in the sources [S1, unofficial].
+- Cube map resolution: Not given in the sources [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
 - **Interpolation Error:** Normalization is not preserved by interpolation, necessitating the cube map lookup [S1, unofficial].
 - **Hardware Dependency:** The method relies on "register combiners" and specific hardware features like 3D texture support and cube maps, which may not be available on modern hardware without shader equivalents [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
+- **Time Complexity:** Not given in the sources [S1, unofficial].
 - **Memory Complexity:** Requires storage for a 3D normal map and a cube map [S1, unofficial].
 - **Measured Performance:** Experiments were run on a Pentium4 processor at 1.5 GHz and a GeForce4 graphics unit with 128 MB local memory and 3D texture support [S1, unofficial].
-- **Scaling:** Not given in the sources.
+- **Scaling:** Not given in the sources [S1, unofficial].
 - **Strengths:** Allows interactive rendering of silhouettes for volumetric data sets [S1, unofficial].
 - **Limitations:** Hardware-dependent (register combiners, 3D textures); relies on pre-computed cube maps which may consume significant memory [S1, unofficial].
 

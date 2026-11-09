@@ -1,0 +1,108 @@
+# NeRDi
+
+
+## Overview
+NeRDi is a single-view synthesis model that leverages general image priors from a pre-trained 2D diffusion model to optimize a Neural Radiance Field (NeRF) [S2]. It solves the problem of novel view synthesis from a single input image by minimizing the diffusion loss of rendered views under input view constraints [S2]. Unlike traditional NeRF variants that rely on multi-view consistency or explicit geometric supervision alone, NeRDi uses a pre-trained diffusion model as a regularizer, supplemented by semantic language guides and geometric depth losses to ensure multi-view consistency and 3D structural integrity [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A single input image of a scene.
+*   **Output:** A trained NeRF model capable of rendering novel views of the scene.
+
+**Data Structures:**
+*   **NeRF Model:** Standard MLP-based radiance field representation mapping 3D coordinates and viewing directions to color and density [S2].
+*   **Visual Language Model (VLM):** A pre-trained model used to extract text embeddings from the input image [S1].
+*   **Diffusion Model:** A pre-trained 2D image diffusion model used for computing the diffusion loss [S2].
+*   **Depth Estimator:** A module used to estimate depth maps from rendered views for geometric loss calculation [S2].
+
+**Parameters:**
+*   **Learning Rate:** Not given in the sources.
+*   **Diffusion Model Steps:** Not given in the sources.
+*   **Loss Weights:** Not given in the sources.
+
+**Numbered Steps:**
+1.  **Semantic Guidance Extraction:** Given the input image, use a pre-trained visual language model to generate two language guides [S1].
+    *   $s_0$: Represents the image title containing overall semantics [S1].
+    *   $s^*$: The text embedding extracted from the input image, capturing visual clues [S1].
+2.  **NeRF Rendering:** Render views from the current NeRF model parameters at arbitrary camera poses [S2].
+3.  **Diffusion Loss Calculation:** Compute the diffusion loss by conditioning the pre-trained 2D diffusion model on the rendered views [S2]. The diffusion model is conditioned on the semantic guides $s_0$ and $s^*$ to ensure multi-view content consistency [S2].
+4.  **Geometric Loss Calculation:** Estimate depth maps from the rendered views and compute a geometric loss based on these estimated depth maps [S2]. This loss regularizes the underlying 3D geometric structure of the NeRF [S2].
+5.  **Optimization:** Update the NeRF model parameters by minimizing the combined diffusion loss and geometric loss [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_nerdi(input_image, neRF_model, diffusion_model, vlm_model, depth_estimator):
+    # Step 1: Extract semantic guidance
+    # s0: Image title/overall semantics
+    s0 = vlm_model.get_image_title(input_image)
+    # s*: Text embedding capturing visual clues
+    s_star = vlm_model.extract_text_embedding(input_image)
+    
+    # Initialize optimizer for NeRF parameters
+    optimizer = Adam(neRF_model.parameters())
+    
+    for iteration in range(num_iterations):
+        # Step 2: Render arbitrary view
+        # Assume camera pose is sampled or fixed for training
+        camera_pose = sample_camera_pose()
+        rendered_image = neRF_model.render(camera_pose)
+        
+        # Step 3: Compute Diffusion Loss
+        # Condition diffusion model on semantic guides and rendered image
+        # The diffusion loss encourages the rendered image to be consistent
+        # with the prior distribution of real images given the semantics
+        diffusion_loss = compute_diffusion_loss(
+            rendered_image, 
+            s0, 
+            s_star, 
+            diffusion_model
+        )
+        
+        # Step 4: Compute Geometric Loss
+        # Estimate depth from the rendered image
+        estimated_depth = depth_estimator.estimate(rendered_image)
+        # Compute loss based on estimated depth to regularize 3D geometry
+        geometric_loss = compute_geometric_loss(estimated_depth)
+        
+        # Step 5: Optimize
+        total_loss = diffusion_loss + geometric_loss
+        optimizer.zero_grad()
+        total_loss.backward()
+        optimizer.step()
+        
+    return neRF_model
+```
+
+**Edge Cases and Pitfalls:**
+*   **Single View Ambiguity:** Since only one view is provided, the model relies heavily on the diffusion prior and geometric regularization to resolve ambiguities in unseen areas [S2].
+*   **Semantic Misalignment:** If the visual language model extracts inaccurate semantics, the diffusion guidance may lead to hallucinated details inconsistent with the input image [S1].
+*   **Depth Estimation Errors:** Inaccurate depth estimation can lead to incorrect geometric regularization, potentially distorting the 3D structure [S2].
+
+## Subtopics
+
+### Single-View Synthesis
+NeRDi is designed for synthesizing novel views from a single input image, distinguishing it from multi-view NeRF variants [S2].
+
+### Diffusion-Based Regularization
+It uses a pre-trained 2D diffusion model as a prior, setting it apart from methods using only photometric or geometric losses [S2].
+
+### Semantic Guidance
+The integration of language guides ($s_0$ and $s^*$) from a VLM provides semantic consistency, a feature not present in standard NeRF [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** On the DTU dataset, the PSNR is twice as high as that of traditional NeRF [S1].
+*   **Strengths:** Suitable for zero-shot NeRF synthesis; improves multi-view content consistency; handles single-view input effectively [S2].
+*   **Limitations:** Relies on the quality of pre-trained models (VLM, Diffusion, Depth Estimator); computational cost of diffusion model inference [S2].
+*   **When to Use:** When only a single image is available for novel view synthesis and high perceptual quality is required [S2].
+*   **When Not to Use:** When multi-view images are available and traditional NeRF or multi-view variants are sufficient; when computational resources for diffusion model inference are limited [S2].
+
+## Background
+NeRDi was proposed by Deng et al. in 2023 [S2]. It is inspired by classic multi-view stereo methods and aims to provide a general image prior for NeRF optimization [S2]. The method addresses the limitations of NeRF in single-view scenarios by incorporating diffusion models and geometric constraints [S2].
+
+## Sources
+[S1] Methods and Strategies for Improving the Novel View Synthesis Quality of Neural Radiation Field, https://doi.org/10.1109/access.2024.3382997, fetched 2026-10-30
+[S2] Overview of NeRF technology and applications, https://www.jcad.cn/en/article/doi/10.3724/SP.J.1089.2023-00759, fetched 2026-10-31
