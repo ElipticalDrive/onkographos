@@ -1,117 +1,63 @@
 # Ced-NeRF
 
-Also called: Compact and Efficient Method for Dynamic Neural Radiance Fields
+Also called: Compact and Efficient Dynamic Neural Radiance Fields
 
 ## Overview
-Ced-NeRF is a method for rendering dynamic scenes using a hybrid representation that combines a high-resolution voxel grid with a canonical space deformation model [S1]. It solves the problem of overfitting artifacts (floaters, noisy geometry) common in dynamic hybrid representations by using a compact auxiliary network to predict scene deformations, enabling rapid convergence without the training difficulty of separated static/dynamic fields [S1]. It sets itself apart from siblings like [AdaNeRF](6195-adanerf.md) and [Sparse and Efficient Representations](9326-sparse-and-efficient-representations.md) by avoiding low-resolution grids or sparse voxel structures in favor of high-resolution grids for fast convergence, while eschewing separated models to maintain rendering speed [S1].
+Ced-NeRF is a method for reconstructing dynamic scenes using neural radiance fields that combines a high-resolution voxel grid with a canonical space deformation model [S1]. It solves the problem of overfitting artifacts (floaters, noisy geometry) common in hybrid representations of dynamic scenes, which typically arise when the grid converges faster than the motion prediction [S1]. It sets itself apart from siblings like [AdaNeRF](6195-adanerf.md) and [Sparse and Efficient Representations](9326-sparse-and-efficient-representations.md) by eschewing sparse voxel grids or separated static/dynamic fields in favor of a single high-resolution grid that enables rapid convergence and fast rendering [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** 3D spatial coordinate $\mathbf{x} = (x, y, z)$, viewing direction $\mathbf{d} = (\theta, \phi)$, and timestamp $t$.
-*   **Outputs:** Volume density $\sigma \in \mathbb{R}$ and RGB color $\mathbf{c} \in \mathbb{R}^3$.
+*   **Inputs:** A set of training images with known camera poses and timestamps $t$.
+*   **Outputs:** A predicted color $\bar{C}(\mathbf{r})$ for a camera ray $\mathbf{r}$, and implicitly, the learned deformation field $\Phi_d$ and radiance field $\Phi_r$.
 
 **Data Structures:**
-*   **Grid $G$:** A set of grid cells storing features. For a coordinate $(x, y, z)$, the eight closest grid cells are selected for linear interpolation [S1].
-*   **Deformation Network $\Phi_d$:** A compact auxiliary network mapping encoded coordinates and timestamp to a deformation vector.
-*   **Radiance Field Network $\Phi_r$:** A network predicting density and color from grid features and direction features.
+*   **Grid $G$:** A 3D voxel grid storing feature vectors. The specific dimensionality of the feature vectors is not given in the sources [S1]. The grid is indexed by 3D coordinates.
+*   **Deformation Network $\Phi_d$:** A neural network mapping encoded spatial coordinates and time to a displacement vector.
+*   **Radiance Network $\Phi_r$:** A neural network mapping encoded deformed spatial coordinates and viewing direction to density $\sigma$ and color $\mathbf{c}$.
 
-**Positional Encoding:**
-Frequency encoding $\gamma(\cdot)$ is applied to spatial coordinates $\mathbf{x}$ and timestamp $t$ to capture high-frequency information [S1]:
-$$
-\gamma(\mathbf{p}) = (\sin(2^0 \pi \mathbf{p}), \cos(2^0 \pi \mathbf{p}), \dots, \sin(2^{L-1} \pi \mathbf{p}), \cos(2^{L-1} \pi \mathbf{p}))
-$$
-where $\mathbf{p}$ is either $\mathbf{x}$ or $t$, and $L$ is the number of frequency bands [S1].
-
-**Grid Encoding:**
-Grid encoding $\gamma_{grid}(\cdot)$ retrieves features from $G$ by interpolating between the eight closest grid cells to the coordinate [S1]:
-$$
-\gamma_{grid}(\mathbf{x}) = \text{interp}(\mathbf{x}, G)
-$$
-
-**Numbered Steps:**
-1.  **Encode Inputs:** Compute frequency encodings $\gamma(\mathbf{x})$ and $\gamma(t)$ for the spatial position and time. Compute grid encoding $\gamma_{grid}(\mathbf{x})$ for the position. Encode viewing direction $\mathbf{d}$ using frequency encoding $\gamma(\mathbf{d})$ [S1].
-2.  **Deform Coordinate:** Pass $\gamma(\mathbf{x})$ and $\gamma(t)$ into the deformation network $\Phi_d$ to predict a deformation vector. Add this to the original coordinate to obtain the deformed canonical coordinate $\mathbf{x}'$ [S1]:
+**Position Encoding:**
+Ced-NeRF uses two types of encoding [S1]:
+1.  **Frequency Encoding $\gamma(\cdot)$:** Used for raw spatial coordinates $\mathbf{x}$ and viewing direction $\mathbf{d}$. For a coordinate $\mathbf{p}$ and $L$ frequency bands:
     $$
-    \mathbf{x}' = \Phi_d(\gamma(\mathbf{x}), \gamma(t)) + \mathbf{x}
+    \gamma(\mathbf{p}) = (\sin(2^0 \pi \mathbf{p}), \cos(2^0 \pi \mathbf{p}), \dots, \sin(2^{L-1} \pi \mathbf{p}), \cos(2^{L-1} \pi \mathbf{p}))
     $$
-3.  **Retrieve Grid Features:** Encode the deformed coordinate $\mathbf{x}'$ using grid encoding $\gamma_{grid}(\mathbf{x}')$ to retrieve features from the grid $G$ [S1].
-4.  **Predict Radiance:** Pass the grid features (from $\mathbf{x}'$) and direction features (from $\gamma(\mathbf{d})$) into the radiance field network $\Phi_r$ to predict density $\sigma$ and color $\mathbf{c}$ [S1].
-5.  **Volume Rendering:** Sample points $\mathbf{r}_i = \mathbf{o} + s_i \mathbf{d}$ along a camera ray $\mathbf{r} = \mathbf{o} + s\mathbf{d}$. Compute the final color $\bar{C}(\mathbf{r})$ via volumetric rendering [S1]:
+2.  **Grid Encoding $\gamma_{grid}(\cdot)$:** Used for the deformed spatial coordinate $\mathbf{x}'$. It retrieves features from the grid $G$ via linear interpolation of the 8 closest grid cells [S1]:
     $$
-    \bar{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - e^{-\sigma_i \delta_i}) \mathbf{c}_i, \quad \text{where } T_i = \prod_{j=1}^{i-1} e^{-\sigma_j \delta_j}
+    \gamma_{grid}(\mathbf{x}') = \text{interp}(\mathbf{x}', G)
     $$
-    where $\delta_i$ is the distance between samples $s_i$ and $s_{i+1}$, and $N$ is the number of samples [S1].
 
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def ced_nerf_render(ray_origin, ray_direction, timestamp, grid, deformation_net, radiance_net, num_samples):
-    # 1. Sample points along the ray
-    # Not given in the sources: specific sampling strategy (e.g., uniform, stratified)
-    # Assuming uniform sampling between near and far bounds
-    t_vals = linspace(near_bound, far_bound, num_samples)
-    points = ray_origin + t_vals[:, None] * ray_direction
-    
-    # 2. Encode inputs
-    # Frequency encoding for position and time
-    x_freq = frequency_encoding(points)
-    t_freq = frequency_encoding(timestamp)
-    
-    # Grid encoding for position (requires interpolation in grid)
-    # Not given in the sources: specific interpolation implementation details
-    x_grid = grid_encoding(points, grid)
-    
-    # Frequency encoding for viewing direction
-    d_freq = frequency_encoding(ray_direction)
-    
-    # 3. Deform coordinate
-    # Deformation network takes frequency-encoded position and time
-    deformation = deformation_net(concat(x_freq, t_freq))
-    deformed_points = points + deformation
-    
-    # 4. Retrieve grid features from deformed points
-    # Grid encoding for deformed position
-    deformed_x_grid = grid_encoding(deformed_points, grid)
-    
-    # 5. Predict density and color
-    # Radiance network takes grid features and direction features
-    # Not given in the sources: exact concatenation or fusion method of deformed_x_grid and d_freq
-    density, color = radiance_net(concat(deformed_x_grid, d_freq))
-    
-    # 6. Volume rendering
-    deltas = t_vals[1:] - t_vals[:-1]
-    # Not given in the sources: handling of the last delta or boundary conditions
-    deltas = append(deltas, 0.0) # Placeholder for boundary handling
-    
-    alphas = 1.0 - exp(-density * deltas)
-    transmittance = exp(-cumsum(density * deltas))
-    transmittance = prepend(transmittance, 1.0)
-    
-    weights = alphas * transmittance
-    final_color = sum(weights * color)
-    
-    return final_color
-```
+**Algorithm Steps:**
+1.  **Ray Sampling:** For a camera ray $\mathbf{r} = \mathbf{o} + s\mathbf{d}$, sample $N$ points $\mathbf{r}_i = \mathbf{o} + s_i \mathbf{d}$ along the ray [S1].
+2.  **Deformation Prediction:** For each sample point $\mathbf{r}_i$ with timestamp $t$:
+    a. Encode the spatial coordinate $\mathbf{x} = \mathbf{r}_i$ and timestamp $t$ using frequency encoding $\gamma(\cdot)$ [S1].
+    b. Compute the displacement using the deformation network: $\Delta \mathbf{x} = \Phi_d(\gamma(\mathbf{x}), \gamma(t))$ [S1].
+    c. Calculate the deformed coordinate in canonical space: $\mathbf{x}' = \Delta \mathbf{x} + \mathbf{x}$ [S1].
+3.  **Feature Retrieval:** Encode the deformed coordinate $\mathbf{x}'$ using grid encoding $\gamma_{grid}(\mathbf{x}')$ to retrieve features from $G$ [S1].
+4.  **Direction Encoding:** Encode the viewing direction $\mathbf{d}$ using frequency encoding $\gamma(\mathbf{d})$ [S1].
+5.  **Radiance Prediction:** Pass the grid features and direction features into the radiance network $\Phi_r$ to predict density $\sigma_i$ and color $\mathbf{c}_i$ [S1].
+6.  **Volume Rendering:** Compute the final pixel color $\bar{C}(\mathbf{r})$ using standard volume rendering [S1]:
+    $$
+    \bar{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
+    $$
+    where $\delta_i$ is the distance between samples $s_i$ and $s_{i+1}$, and $T_i = \prod_{j=1}^{i-1} \exp(-\sigma_j \delta_j)$ is the accumulated transmittance [S1].
 
 **Parameters:**
-*   **Grid Cells:** Instant-NGP style selection of eight closest grid cells for linear interpolation [S1].
-*   **Frequency Bands ($L$):** Not given in the sources.
+*   **Grid Resolution:** High-resolution grid (specific dimensions not given) [S1].
+*   **Frequency Bands $L$:** Not given in the sources [S1].
+*   **Number of Samples $N$:** Not given in the sources [S1].
 
-**Edge Cases and Pitfalls:**
-*   **Overfitting:** Hybrid representations for dynamic scenes may overfit due to fast convergence before accurate motion prediction, causing artifacts like floaters and noisy geometry on novel views [S1]. Ced-NeRF mitigates this via the compact deformation network and canonical space modeling [S1].
+**Pitfalls:**
+*   **Overfitting:** Hybrid representations for dynamic scenes often overfit due to the grid converging faster than the motion prediction, leading to floaters and noisy geometry on novel views [S1]. Ced-NeRF mitigates this by using a compact auxiliary network for deformation [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Fast convergence and rendering speeds are claimed, with training times reported as low as 4 minutes on certain datasets [S1].
-*   **Memory Complexity:** Uses a high-resolution grid, which requires more memory than sparse voxel grids but allows for faster convergence [S1].
-*   **Measured Performance:** On HyperNeRF scenes, 9 min training time / 24.4 dB PSNR; on DyNeRF scenes, 21 min training time / 30.6 dB PSNR [S1].
-*   **Strengths:** Fast rendering speeds, high-quality results, rapid convergence (4 minutes) [S1].
-*   **Limitations:** High-resolution grid usage may increase memory consumption compared to sparse methods [S1].
-*   **When to use:** When fast training and rendering of dynamic scenes are required, and high-quality results are needed without the complexity of separated static/dynamic models [S1].
-*   **When not to use:** When memory is extremely constrained and sparse representations are preferred, or when static scenes are being modeled (standard NeRF is sufficient) [S1].
+*   **Training Speed:** Fast convergence; reported to train in approximately 4 minutes on certain datasets [S1].
+*   **Rendering Speed:** Fast rendering speeds due to the high-resolution grid lookup [S1].
+*   **Quality:** Maintains high-quality rendering results, outperforming state-of-the-art methods in quality on dynamic scene datasets [S1].
+*   **Comparison:** Outperforms HyperNeRF (9 min / 24.4 dB) and DyNeRF (21 min / 30.6 dB) on specific benchmarks, achieving 4 min / 34.2 dB [S1].
+*   **Limitations:** Relies on a high-resolution grid, which may consume significant memory compared to sparse representations, though the sources claim it avoids the slow rendering of separated fields [S1].
 
 ## Background
-Ced-NeRF was proposed in the paper "Ced-NeRF: A Compact and Efficient Method for Dynamic Neural Radiance Fields" published at the AAAI Conference on Artificial Intelligence (AAAI-24) [S1]. It builds on the idea of using deformation networks to model dynamic scenes, as seen in DNeRF (Pumarola et al. 2021), and incorporates hybrid representations like those in Instant-NGP (Müller et al. 2022) to accelerate training and rendering [S1]. It addresses the specific issue of overfitting in dynamic hybrid representations [S1].
+Ced-NeRF was proposed to address the limitations of existing hybrid methods for dynamic neural radiance fields. While explicit-based methods like voxel grids accelerate training, they suffer from overfitting artifacts in dynamic scenes [S1]. The method builds on the canonical space approach introduced in DNeRF [S1] and utilizes the high-resolution grid encoding strategy from Instant-NGP [S1]. It was published in the 38th AAAI Conference on Artificial Intelligence (AAAI-24) [S1].
 
 ## Sources
 [S1] Ced-NeRF: A Compact and Efficient Method for Dynamic Neural Radiance Fields, https://doi.org/10.1609/aaai.v38i4.28138, fetched 2026-10-26

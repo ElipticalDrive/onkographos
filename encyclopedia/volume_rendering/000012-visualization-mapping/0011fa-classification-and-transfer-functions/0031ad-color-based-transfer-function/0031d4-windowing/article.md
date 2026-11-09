@@ -1,0 +1,129 @@
+# Windowing
+
+Also called: Window Specification, Window/Level
+
+## Overview
+Windowing is a scalar-to-color mapping technique that restricts the visualization of a volume dataset to a specific range of data values, known as the "window," while mapping values outside this range to boundary colors (typically black or white) [S1, unofficial]. It solves the problem of low contrast in data where the relevant features occupy only a small subset of the total dynamic range, allowing users to isolate specific tissue types or material densities [S1, unofficial]. Unlike sibling methods such as [Colormap Application for Visualization](7714-colormap-application-for-visualization.md) which may map the full data range to a complex color spectrum, windowing focuses on linear intensity ramps within a defined interval, often guided by histograms to identify constituent distributions like fat, tissue, or bone [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   Input: A scalar data value $x$ from the volume dataset.
+*   Parameters: Window center $c$, window width $w$ (where $w \ge 1$), and a boolean clamping flag.
+*   Output: A normalized color value $C \in [0, 1]$.
+
+**Data Structures:**
+No complex data structures are required for the core windowing calculation itself, though it is often implemented within a `ColorTransferFunction` object that stores the clamping state and potentially multiple nodes for more complex mappings [S2].
+
+**Steps:**
+1.  Determine the lower bound $L$ and upper bound $U$ of the window based on center $c$ and width $w$.
+2.  Compare the input value $x$ against these bounds.
+3.  If clamping is disabled (default behavior in simple windowing):
+    *   If $x$ is below the lower bound, output $0$ (black).
+    *   If $x$ is above the upper bound, output $1$ (white).
+    *   Otherwise, linearly interpolate $x$ between the bounds to produce $C$.
+4.  If clamping is enabled (as per VTK implementation):
+    *   If $x$ is below the lower bound, output the first node color (typically black or the start of the ramp).
+    *   If $x$ is above the upper bound, output the last node color (typically white or the end of the ramp).
+
+**Formulas:**
+The bounds are defined relative to the center $c$ and width $w$. The specific pseudo-code provided in the source uses a formulation that shifts the center by $0.5$ and scales by $w-1$ [S1, unofficial]:
+
+$$
+\text{Lower Threshold} = c - 0.5 - \frac{w-1}{2}
+$$
+$$
+\text{Upper Threshold} = c - 0.5 + \frac{w-1}{2}
+$$
+
+The output color $C$ is calculated as:
+
+$$
+C = \begin{cases} 
+0 & \text{if } x \le c - 0.5 - \frac{w-1}{2} \\
+1 & \text{if } x > c - 0.5 + \frac{w-1}{2} \\
+\frac{x - (c - 0.5)}{w - 1} + 0.5 & \text{otherwise}
+\end{cases}
+$$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def windowing(x, c, w, clamp=False, first_color=0.0, last_color=1.0):
+    """
+    Maps scalar value x to color C using window center c and width w.
+    
+    Args:
+        x: Input scalar data value.
+        c: Center of the window.
+        w: Width of the window (w >= 1).
+        clamp: Boolean flag for clamping behavior.
+        first_color: Color value for clamped low end (default 0.0/black).
+        last_color: Color value for clamped high end (default 1.0/white).
+        
+    Returns:
+        C: Output color value in [0, 1].
+    """
+    # Calculate thresholds based on source [S1, unofficial]
+    lower_bound = c - 0.5 - (w - 1) / 2
+    upper_bound = c - 0.5 + (w - 1) / 2
+    
+    if clamp:
+        if x < lower_bound:
+            return first_color
+        elif x > upper_bound:
+            return last_color
+        else:
+            # Linear interpolation within the window
+            # Note: Source [S1, unofficial] formula yields 0.5 at center c.
+            # We must ensure the interpolation maps the window range [lower, upper]
+            # to the full [0, 1] range or the specific ramp defined.
+            # The source formula: C = (x - (c - 0.5)) / (w - 1) + 0.5
+            # Let's verify: if x = lower_bound:
+            # x = c - 0.5 - (w-1)/2
+            # C = (c - 0.5 - (w-1)/2 - (c - 0.5)) / (w - 1) + 0.5
+            # C = (-(w-1)/2) / (w - 1) + 0.5 = -0.5 + 0.5 = 0. Correct.
+            # if x = upper_bound:
+            # x = c - 0.5 + (w-1)/2
+            # C = (c - 0.5 + (w-1)/2 - (c - 0.5)) / (w - 1) + 0.5
+            # C = ((w-1)/2) / (w - 1) + 0.5 = 0.5 + 0.5 = 1. Correct.
+            return (x - (c - 0.5)) / (w - 1) + 0.5
+    else:
+        # Standard windowing: outside values map to black (0) or white (1)
+        if x <= lower_bound:
+            return 0.0
+        elif x > upper_bound:
+            return 1.0
+        else:
+            return (x - (c - 0.5)) / (w - 1) + 0.5
+```
+
+**Parameters:**
+*   $c$ (center): The midpoint of the data range to be visualized. Typical values depend on the dataset (e.g., CT Hounsfield units).
+*   $w$ (width): The span of data values included in the linear ramp. Must be $\ge 1$ [S1, unofficial].
+*   Clamping: A boolean switch. If `True`, values outside the window are mapped to the boundary colors of the transfer function rather than strictly black/white [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Division by Zero:** If $w=1$, the denominator $(w-1)$ becomes zero. The source specifies $w \ge 1$, but implementation must handle $w=1$ as a special case (likely mapping the single center value to 0.5 and others to boundaries, or preventing $w=1$) [S1, unofficial].
+*   **Precision:** Floating-point comparisons for boundary conditions ($x \le$ lower, $x >$ upper) should be consistent to avoid gaps or overlaps in the mapping [S1, unofficial].
+*   **Clamping vs. Black/White:** The behavior differs significantly between VTK's clamping (mapping to node colors) and the theoretical "black/white" mapping described in the lecture notes [S1, unofficial][S2]. Implementers must check which behavior is required by the application context.
+
+## Subtopics
+
+### [Channel Window and Transfer Function Initialization](8807-channel-window-and-transfer-function-initialization.md)
+Initializes transfer function parameters for multi-material rendering by hardcoding material-specific opacity ramps based on fixed thresholds (e.g., 122–142) rather than dynamic user-defined maps. Choose this when consistent segmentation of specific tissues (background, tumor, vessel, bone) is required without user interaction.
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per voxel, as it involves simple arithmetic comparisons and linear interpolation.
+*   **Memory Complexity:** $O(1)$ for the calculation itself; $O(N)$ if storing a lookup table for the entire transfer function [S1, unofficial].
+*   **Strengths:** Extremely fast; effectively enhances contrast for specific features by ignoring irrelevant data ranges; simple to understand and implement [S1, unofficial].
+*   **Limitations:** Only linear ramps are supported in the basic form; does not handle multi-material opacity blending inherently without extension; sensitive to the choice of $c$ and $w$ [S1, unofficial].
+*   **When to use:** When visualizing data with high dynamic range where only a specific subset (e.g., soft tissue in CT) is of interest.
+*   **When not to use:** When the full data distribution needs to be visualized simultaneously or when non-linear relationships between data values and appearance are required.
+
+## Background
+Windowing originated as a fundamental technique in digital image processing and computer graphics for visualizing scalar fields [S1, unofficial]. It is widely used in medical imaging (e.g., CT and MRI) to adjust the contrast and brightness of displayed images by selecting specific tissue windows (e.g., "brain window," "tissue window") [S1, unofficial]. The concept is implemented in standard visualization libraries such as VTK, which provides `SetClamping` methods to control boundary behavior [S2].
+
+## Sources
+[S1] PDF Direct Volume Rendering - KTH, https://www.kth.se/social/files/565e35dff27654457fb84363/08_VolumeRendering.pdf, fetched 2026-10-27 (unofficial)
+[S2] vtkColorTransferFunctions, http://www.vtk.org/doc/nightly/html/classvtkColorTransferFunction.html, fetched 2026-10-29

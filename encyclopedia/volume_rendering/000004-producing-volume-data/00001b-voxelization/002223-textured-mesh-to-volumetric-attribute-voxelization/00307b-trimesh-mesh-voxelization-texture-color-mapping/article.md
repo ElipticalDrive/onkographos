@@ -1,0 +1,103 @@
+# Trimesh Mesh Voxelization & Texture Color Mapping
+
+Also called: Proximity-based Texture Mapping to Voxels, Schwarz and Seidel Voxelization, Voxelization and Attribute Creation
+
+## Overview
+This method voxelizes a triangle mesh into a hollow grid and maps the mesh's vertex texture colors to the resulting voxels using proximity queries [S2, unofficial]. It builds on [Textured Mesh to Volumetric Attribute Voxelization](2760-textured-mesh-to-volumetric-attribute-voxelization.md) by providing a specific implementation strategy for attribute assignment via nearest-vertex distance rather than barycentric projection [S1][S2, unofficial]. It differs from [Surface-aligned Texture Field (TexF)](10067-surface-aligned-texture-field-texf.md) by assigning a single color per voxel based on the closest vertex, rather than interpolating across a surface-aligned field.
+
+## How it works
+**Inputs:** A triangle mesh with vertex colors or texture maps; a target voxel grid resolution $(X, Y, Z)$.
+**Outputs:** A voxel grid (or sparse structure) where each occupied voxel is assigned an RGBA color value.
+
+**Data Structures:**
+1.  **Voxel Grid:** A 3D array of dimensions $X \times Y \times Z$. In the hollow representation, only surface-adjacent voxels are stored or marked as active.
+2.  **Color Array:** A 4D array of shape $(X, Y, Z, 4)$ storing RGBA components for each voxel [S2, unofficial].
+3.  **Proximity Query Object:** A spatial index (e.g., KD-tree or brute-force distance matrix) mapping voxel centers to mesh vertices [S2, unofficial].
+
+**Steps:**
+1.  **Voxelization:** Generate a hollow voxel grid from the input mesh at the specified resolution. This creates a set of voxel centers (points) representing the surface shell [S2, unofficial].
+2.  **Proximity Calculation:** Compute the distance between each voxel center and all mesh vertices. Identify the closest mesh vertex for each voxel center [S2, unofficial].
+3.  **Color Extraction:** Retrieve the color of the closest mesh vertex for each voxel. If the mesh has vertex colors, use them directly. If it has texture maps, the vertex color must be pre-computed or interpolated from the texture at the vertex's UV coordinates [S2, unofficial].
+4.  **Mapping:** Assign the extracted color to the corresponding entry in the $(X, Y, Z, 4)$ color array [S2, unofficial].
+5.  **Output Generation:** Convert the voxel grid and color array into a final mesh or volume representation (e.g., using `as_boxes`) [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+import trimesh
+
+def voxelize_mesh_with_color(mesh, resolution):
+    """
+    Voxelizes a mesh into a hollow grid and maps vertex colors to voxels.
+    
+    Args:
+        mesh: A trimesh.Trimesh object with vertex_colors or texture.
+        resolution: Integer, the number of voxels along the longest axis.
+        
+    Returns:
+        voxel_mesh: A trimesh.Trimesh object representing the voxelized mesh with colors.
+    """
+    # Step 1: Create a hollow voxel grid
+    # The resolution parameter determines the grid density.
+    # 'hollow=True' ensures only surface-adjacent voxels are created.
+    voxel_grid = mesh.voxelized(dim=resolution, method='hollow')
+    
+    # Step 2: Get voxel centers
+    # voxel_grid.points contains the center coordinates of all active voxels.
+    voxel_centers = voxel_grid.points
+    
+    # Step 3: Extract vertex colors from the mesh
+    # If the mesh has vertex colors, use them. Otherwise, this step may fail
+    # or require texture sampling (not handled in this basic proximity method).
+    if mesh.vertex_colors is not None:
+        vertex_colors = mesh.vertex_colors
+    else:
+        raise ValueError("Mesh must have vertex colors for proximity-based mapping.")
+        
+    # Step 4: Compute proximity
+    # Create a proximity query object to find the closest vertex for each voxel center.
+    # This computes distances between all voxel centers and all mesh vertices.
+    proximity_query = trimesh.proximity.ProximityQuery(mesh)
+    
+    # Find the index of the closest vertex for each voxel center.
+    # closest_vertices_indices has shape (N_voxels,)
+    closest_vertices_indices, _ = proximity_query.vertex(voxel_centers)
+    
+    # Step 5: Map colors to voxels
+    # Retrieve the color of the closest vertex for each voxel.
+    mapped_colors = vertex_colors[closest_vertices_indices]
+    
+    # Ensure colors are in RGBA format (shape N_voxels x 4)
+    # If the mesh has RGB, append alpha channel (e.g., 255 for opaque)
+    if mapped_colors.shape[1] == 3:
+        alpha = np.full((mapped_colors.shape[0], 1), 255, dtype=np.uint8)
+        mapped_colors = np.hstack([mapped_colors, alpha])
+        
+    # Step 6: Convert voxel grid to a mesh with colors
+    # The as_boxes method creates a mesh where each voxel is a box colored by the mapped color.
+    voxel_mesh = voxel_grid.as_boxes(colors=mapped_colors)
+    
+    return voxel_mesh
+```
+
+**Edge Cases and Pitfalls:**
+*   **Watertightness:** Voxelized meshes may exhibit holes if the input mesh is not perfectly watertight. This is common with meshes reconstructed via Structure from Motion [S2, unofficial].
+*   **Vertex Color Availability:** This method relies on vertex colors. If the mesh only has texture maps, the vertex colors must be pre-computed. The source notes that direct mapping of mesh colors to voxels is not built into Trimesh, requiring this manual proximity step [S2, unofficial].
+*   **Performance:** Computing distances between all voxel centers and all mesh vertices can be expensive for high-resolution grids and complex meshes. Using efficient spatial data structures (like KD-trees) within the proximity query is recommended.
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the proximity query. If $N_v$ is the number of voxels and $N_m$ is the number of mesh vertices, a brute-force approach is $O(N_v N_m)$. With spatial indexing, it approaches $O(N_v \log N_m)$.
+*   **Memory Complexity:** $O(N_v)$ for the voxel grid and color array. The proximity query may require $O(N_m)$ or $O(N_v + N_m)$ depending on implementation.
+*   **Strengths:** Simple to implement using standard libraries like Trimesh. Directly maps vertex attributes.
+*   **Limitations:** Does not handle texture interpolation directly (requires pre-computed vertex colors). Sensitive to mesh quality (holes in non-watertight meshes).
+*   **When to use:** When vertex colors are available and a quick, approximate color mapping is sufficient.
+*   **When not to use:** When high-fidelity texture mapping is required (use barycentric projection instead [S1]) or when the mesh is not watertight and hole-filling is critical.
+
+## Background
+The method is associated with Schwarz and Seidel [2010] in the context of GPU-based voxelization [S1]. However, the specific implementation described in the notes uses the Trimesh library in Python [S2, unofficial]. The Schwarz and Seidel method typically involves parallel stream compaction and Morton indexing for efficient GPU voxelization [S1], whereas the Trimesh approach is a CPU-based proximity query. The notes indicate that attribute creation can occur simultaneously with voxelization in the Schwarz and Seidel method, using barycentric coordinates for texture lookup [S1]. The Trimesh method described here is a simpler, post-processing step.
+
+## Sources
+[S1] Grid-free out-of-core voxelization to sparse voxel octrees on GPU, https://doi.org/10.1145/2790060.2790067, fetched 2026-11-05
+[S2] How to Voxelize Meshes and Point Clouds in Python - Medium, https://medium.com/data-science/how-to-voxelize-meshes-and-point-clouds-in-python-ca94d403f81d, fetched 2026-10-28 (unofficial)

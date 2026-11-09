@@ -1,0 +1,152 @@
+# Lightness-Controlled Color Harmonization
+
+Also called: Lightness-Preserving Harmonic Colorization, Lightness-preserving color harmonization
+
+## Overview
+Lightness-Controlled Color Harmonization is a technique for volume visualization that transforms a transfer function’s color distribution to fit a specific harmonic template while strictly preserving the original lightness values [S1]. It solves the problem that standard hue-based harmonization (e.g., Cohen et al.) alters lightness, thereby destroying the perceptual contrast and "pop-out" effects critical for highlighting density intervals [S1]. It sets itself apart from [Windowing](6611-windowing.md) and [Colormap Application for Visualization](7714-colormap-application-for-visualization.md) by operating in the perceptually uniform CIE LAB space to decouple hue shifts from lightness changes, ensuring that visual salience is maintained during colorization [S1].
+
+## How it works
+The method maps RGB transfer function values through HSV to CIE LAB space to find a target hue that matches a harmonic template while retaining the source lightness.
+
+**Inputs and Outputs:**
+*   **Input:** An RGB transfer function (TF) defined over scalar density values; a target harmonic hue template (e.g., from the 8 Itten/Matsuda types).
+*   **Output:** A harmonized RGB transfer function where hues follow the template but lightness $L^*$ is preserved from the input.
+
+**Data Structures:**
+*   **Transfer Function:** A set of $N$ triples $(r_i, g_i, b_i)$ representing color at specific density intervals.
+*   **Harmonic Template:** One of 8 predefined hue distributions (I, V, L, I, T, Y, X, N) [S1]. The N-type consists only of grey hues. Templates can be rotated by an arbitrary angle $\theta$ but cannot be resized [S1].
+
+**Steps:**
+1.  **Convert to HSV:** Transform each RGB triple $(r_i, g_i, b_i)$ of the transfer function into HSV coordinates $(H_i, S_i, V_i)$ [S1].
+2.  **Map to CIE LAB:** Convert each HSV triple to CIE XYZ, then to CIE LAB $(L^*_i, a^*_i, b^*_i)$ [S1]. This requires a prior sRGB conversion step using the monitor’s white point [S1].
+3.  **Determine Target Hue:** Identify the target hue $H_{target}$ from the chosen harmonic template. The template defines valid hue sectors; the algorithm finds the closest rotated harmonic template [S1].
+4.  **Locate Harmonized LAB Value:** For each pixel/TF entry, locate the LAB triple $(L^*_{new}, a^*_{new}, b^*_{new})$ such that:
+    *   The lightness $L^*_{new}$ equals the source lightness $L^*_i$.
+    *   The hue corresponds to $H_{target}$.
+    *   The saturation/lightness trade-off is resolved using iso-lightness curves derived from CIE LAB mapped onto HSV hue slices [S1].
+    *   *Constraint Handling:* If increasing lightness to match the target hue is impossible without sacrificing saturation, the algorithm prefers to reduce saturation over lightness to maintain the target lightness value [S1].
+5.  **Convert to RGB:** Convert the resulting LAB triple $(L^*_{new}, a^*_{new}, b^*_{new})$ back to XYZ, then to sRGB, and finally to the output RGB transfer function [S1].
+
+**Formulas and Definitions:**
+*   **CIE LAB to HSV Iso-lightness:** The method relies on the observation that iso-lightness curves in CIE LAB, when plotted in HSV hue slices, are monitor-specific and non-linear [S1]. Let $C_{LAB}(H, L^*)$ be the chroma achievable at hue $H$ and lightness $L^*$. The algorithm searches for the point on the iso-lightness curve $L^* = L^*_i$ that aligns with the target hue sector [S1].
+*   **Saturation Priority:** When the target hue requires a lightness $L^*_{req} > L^*_i$ (which is often the case for vivid colors), the algorithm does not force $L^*$ up. Instead, it keeps $L^* = L^*_i$ and reduces saturation/chroma to fit the hue [S1].
+
+**Parameters:**
+*   **Color Space:** CIE LAB (CIE L*a*b*) is the mandatory perceptual space for lightness preservation [S1].
+*   **Harmonic Templates:** 8 types (I, V, L, I, T, Y, X, N) based on Itten/Matsuda schemes [S1].
+*   **Rotation:** Arbitrary angle $\theta$ for template alignment [S1].
+
+**Pitfalls:**
+*   **Lightness-Saturation Trade-off:** It is not always possible to increase lightness without sacrificing saturation. The algorithm must prioritize lightness preservation, potentially resulting in less saturated colors if the target hue demands higher lightness than the source [S1].
+*   **Monitor Dependency:** The mapping from HSV to LAB iso-lightness curves is monitor-specific and requires accurate sRGB conversion using the monitor’s white point [S1].
+*   **Grey Hues:** The N-type template contains only grey hues; applying this may result in desaturated outputs if the source has high chroma [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def lightness_controlled_harmonization(tf_rgb, target_hue_template, rotation_angle):
+    """
+    Harmonizes the RGB transfer function to match a target hue template
+    while preserving lightness in CIE LAB space.
+    
+    Args:
+        tf_rgb: List of (r, g, b) tuples for the transfer function.
+        target_hue_template: One of 8 harmonic hue distributions (I, V, L, I, T, Y, X, N).
+        rotation_angle: Angle in degrees to rotate the template.
+        
+    Returns:
+        List of (r, g, b) tuples for the harmonized transfer function.
+    """
+    tf_harmonized = []
+    
+    # Precompute the valid hue ranges for the rotated template
+    template_hue_ranges = get_template_hue_ranges(target_hue_template, rotation_angle)
+    
+    for (r, g, b) in tf_rgb:
+        # Step 1: Convert RGB to HSV
+        hsv = rgb_to_hsv(r, g, b)
+        h_src, s_src, v_src = hsv
+        
+        # Step 2: Convert HSV to CIE LAB
+        # Requires sRGB conversion and white point adaptation
+        xyz = hsv_to_xyz(hsv)
+        lab = xyz_to_lab(xyz)
+        l_src, a_src, b_src = lab
+        
+        # Step 3: Determine target hue from template
+        # Find the closest hue in the rotated template ranges
+        h_target = find_closest_template_hue(h_src, template_hue_ranges)
+        
+        # Step 4: Locate LAB triple with target hue and source lightness
+        # Use iso-lightness curves to find valid (a*, b*) for h_target and l_src
+        # If exact match is impossible due to gamut limits, prioritize lightness
+        # over saturation.
+        lab_new = find_lab_for_hue_and_lightness(h_target, l_src, lab)
+        
+        # Step 5: Convert LAB back to RGB
+        xyz_new = lab_to_xyz(lab_new)
+        rgb_new = xyz_to_srgb(xyz_new)
+        
+        tf_harmonized.append(rgb_new)
+        
+    return tf_harmonized
+
+def find_lab_for_hue_and_lightness(h_target, l_src, lab_source):
+    """
+    Finds the LAB coordinates for a specific hue and lightness.
+    Uses iso-lightness curves in CIE LAB space.
+    """
+    # Convert target hue to CIE XYZ/LAB direction
+    # This involves mapping the hue angle to the a*/b* plane
+    # while maintaining the lightness L*
+    
+    # In CIE LAB, hue is defined by atan2(b*, a*)
+    # We need to find the chroma C* such that the point lies on the
+    # iso-lightness curve for L* = l_src.
+    
+    # Since CIE LAB is perceptually uniform, we can interpolate
+    # or solve for the chroma that corresponds to the target hue
+    # at the given lightness.
+    
+    # Note: The source lightness l_src is fixed.
+    # The algorithm prefers reducing saturation (chroma) if the
+    # target hue requires a lightness higher than l_src to be vivid.
+    # Thus, we simply set L* = l_src and calculate a*, b* from h_target.
+    
+    # Calculate a* and b* from h_target and l_src
+    # This requires knowing the maximum chroma at l_src for h_target
+    # or using a standard conversion assuming a reference white.
+    
+    # For implementation, we convert h_target (in HSV) to a standard
+    # hue angle, then map to CIE LAB a*/b* plane at L* = l_src.
+    # This step assumes the existence of a function that maps
+    # (Hue, L*) -> (a*, b*) in CIE LAB space.
+    
+    a_new, b_new = hue_to_lab_ab(h_target, l_src)
+    
+    return (l_src, a_new, b_new)
+```
+
+## Subtopics
+
+### [Iso-lightness Curve Mapping](10797-iso-lightness-curve-mapping.md)
+Iso-lightness curve mapping is a technique that uses iso-lightness curves derived from the CIE LAB color space, mapped onto HSV hue slices, to determine the correct saturation/lightness trade-off when shifting hues in volume visualization. It addresses the limitation of hue-only harmonization by preserving existing lightness contrasts and salience, which are critical for highlighting and contrast enhancement. Unlike standard HSV manipulation, this method accounts for the non-perceptual nature of HSV by grounding color adjustments in the perceptually uniform CIE LAB space.
+
+### Harmonic Color Harmonization
+Harmonic Color Harmonization is a method that transforms a given image with a non-harmonic hue distribution into one that fits a specific harmonic hue template, using optimization to re-colorize the image while preserving lightness [S1]. It accepts an image with a possibly non-harmonic hue distribution, finds the closest (rotated) harmonic hue template, and uses an optimization algorithm to re-colorize the image to have a hue distribution that fits the nearest harmonic template [S1]. Pixels with higher saturation receive more weight in the template matching procedure because their hue is perceptually more salient [S1]. The eight harmonic hue wheel templates (I, V, L, I, T, Y, X, N) define grey sectors where the hue histogram must occupy; the N-type is composed only of grey hues. Templates can be rotated by an arbitrary angle but cannot be resized [S1]. A limitation is that the base algorithm only considers hue, not saturation or lightness, which is a drawback for volume visualization where lightness preservation is critical [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of transfer function entries or pixels, as each entry undergoes a fixed sequence of color space conversions (RGB $\to$ HSV $\to$ LAB $\to$ RGB) [S1].
+*   **Memory Complexity:** Constant per entry, requiring storage for intermediate HSV and LAB values [S1].
+*   **Performance:** The method preserves contrast and details significantly better than Cohen et al.'s method, as observed in volume renderings of the Buckyball and human silhouettes [S1].
+*   **Strengths:** Maintains lightness channel to support the pop-out effect; preserves contrast relationships between density intervals; perceptually uniform adjustments via CIE LAB [S1].
+*   **Limitations:** Monitor-specific mapping requires accurate sRGB conversion and white point adaptation; cannot always increase lightness without sacrificing saturation; N-type templates may result in desaturated outputs [S1].
+*   **When to use:** When harmonic color schemes are desired but visual salience and density contrast must be preserved.
+*   **When not to use:** When monitor-independent color reproduction is critical without calibration; when the N-type (grey) template is used and chroma is needed.
+
+## Background
+The method originates from the work of Wang and Mueller (2008) on "Harmonic Colormaps for Volume Visualization" [S1]. It builds upon Itten’s color wheel and Matsuda’s 80 harmonic color schemes, which were the basis for Cohen et al.'s automated image color harmonization system [S1]. Cohen et al.'s method allowed users to transform ill-chosen scene colorizations into harmonious ones but only shifted hue in HSV space, changing lightness and destroying visual salience [S1]. Wang and Mueller extended this by introducing CIE LAB-based iso-lightness curves to preserve lightness during hue harmonization, addressing the specific needs of volume visualization where lightness contrasts guide the viewer [S1].
+
+## Sources
+[S1] Harmonic Colormaps for Volume Visualization, https://doi.org/10.2312/vg/vg-pbg08/033-039, fetched 2026-10-26

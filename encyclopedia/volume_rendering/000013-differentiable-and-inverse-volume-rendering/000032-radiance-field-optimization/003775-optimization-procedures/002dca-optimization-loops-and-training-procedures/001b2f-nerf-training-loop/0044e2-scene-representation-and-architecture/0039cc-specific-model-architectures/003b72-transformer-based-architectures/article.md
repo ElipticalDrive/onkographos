@@ -1,25 +1,44 @@
 # Transformer-based Architectures
-Also called: Transformer NeRF, ViT-based Radiance Fields
+
+Also called: Transformer NeRF, ViT-NeRF, Generalizable NeRF with Transformers
+
 ## Overview
-This family replaces or augments the canonical multi-layer perceptron (MLP) radiance field with transformer architectures to model long-range spatial dependencies and global context. Unlike sibling MLP-based methods that rely on local positional encoding and hierarchical skip connections, transformer-based approaches compute pairwise attention over input tokens, enabling the recovery of large-scale structures and global consistency that local convolutions or shallow networks may miss [S3, unofficial]. They are primarily chosen for tasks requiring global scene understanding, such as super-resolution, denoising, or generalizable synthesis from sparse views [S2][S3, unofficial].
+This family replaces or augments the standard Multi-Layer Perceptron (MLP) in radiance field optimization with Transformer architectures to model long-range spatial dependencies and aggregate multi-view information. Unlike sibling MLP-based methods that rely on local positional encoding and feed-forward processing, Transformer-based methods utilize self-attention mechanisms to capture global context, which is particularly effective for generalizable rendering from sparse views or for super-resolution tasks where large-scale structures must be recovered [S2][S3, unofficial].
+
 ## Shared principles
-The family shares the core radiance field formulation defined in [Specific Model Architectures](8585-specific-model-architectures.md), mapping 3D position $\mathbf{x}$ and viewing direction $\mathbf{d}$ to density $\sigma$ and color $\mathbf{c}$. However, the feature extraction mechanism differs: instead of a fixed MLP, the representation utilizes self-attention mechanisms to aggregate information across spatial tokens or view features. The rendering integration remains the standard volumetric rendering equation, but the inputs to the final density and color heads are derived from attended feature vectors rather than raw positional encodings alone [S3, unofficial].
+The core mechanism remains the parametric function $F_\Theta$ that maps a 3D position $\mathbf{x} \in \mathbb{R}^3$ and a viewing direction $\mathbf{d} \in \mathbb{R}^3$ to a volume density $\sigma \in \mathbb{R}$ and an RGB color $\mathbf{c} \in \mathbb{R}^3$. This function is implemented as one or more neural networks, typically utilizing positional encoding $\gamma(\mathbf{x})$ to map raw coordinates to a higher-dimensional space using sinusoidal functions at increasing frequencies [Parent].
+
+**Rendering Integration:**
+During training, rays are sampled at points $\mathbf{x}_i$ along the ray. The networks predict $\sigma_i$ and $\mathbf{c}_i$. The pixel color $C(\mathbf{r})$ is computed via volumetric rendering:
+$$
+C(\mathbf{r}) = \sum_{i=1}^N T_i \alpha_i \mathbf{c}_i, \quad \text{where } \alpha_i = 1 - \exp(-\sigma_i \delta_i), \quad T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)
+$$
+and $\delta_i$ is the distance between samples [Parent].
+
+**Input Representation:**
+Raw coordinates are rarely used directly. They are mapped to a higher-dimensional space using positional encoding $\gamma(\mathbf{x})$. For a coordinate $\mathbf{x}$, the encoding includes the original value and sinusoidal functions at increasing frequencies:
+$$
+\gamma(\mathbf{x}) = (\sin(2^0 \pi \mathbf{x}), \cos(2^0 \pi \mathbf{x}), \dots, \sin(2^{L-1} \pi \mathbf{x}), \cos(2^{L-1} \pi \mathbf{x}))
+$$
+where $L$ is the number of frequency bands [Parent].
+
 ## Subtopics
 
 ### Transformer Proposer Architecture
-A proposer network designed to reduce computational cost in hierarchical sampling. It constrains the transformer to a single encoder block and a single decoder block, each using a single attention head, with features projected to 16-D [S1, unofficial]. This lightweight design allows it to process coarse samples efficiently without the overhead of full-scale transformers, serving as a cost-effective alternative to pooling-based proposers [S1, unofficial].
+A proposer network designed to reduce computational cost by using a single transformer block for both encoder and decoder with a single attention head [S1, unofficial]. Features are projected down to 16-D to keep the cost reasonable, as the lack of pooling operations makes the transformer somewhat more expensive than fully connected layers [S1, unofficial]. It is used in conjunction with coarse and fine networks, where the proposer handles a subset of samples (e.g., $N_c=64$) to guide sampling, adding negligible overhead to the total vector processing load [S1, unofficial].
 
 ### Generalizable Radiance Fields via Transformer Attention
-A generalizable approach that uses a transformer-based attention module to aggregate information from source views. This allows the model to learn geometric priors from a set of training images and apply them to unseen scenes, addressing the limitation of standard NeRF which requires per-scene optimization [S2].
+A generalizable approach that uses a transformer-based attention module to aggregate source view information, enabling the learning of geometric priors from source images [S2]. This allows the model to generalize to unseen objects or scenes, often leveraging deep multiview stereo (MVS) strategies to compute cost volumes or perform feature matching using attention mechanisms [S2]. These methods are designed to work effectively with very sparse inputs (as few as two images) by leveraging geometric cues from similarities across different views [S2].
 
 ### Masked Auto Encoder (MAE) for Generalizable NeRF
-Combines Masked Auto Encoder (MAE) with a 3D transformer-based architecture to learn a generalized representation. This method enables the reconstruction of unseen scenes and supports transfer learning, leveraging the self-supervised nature of MAE to capture robust 3D geometry and appearance from limited input views [S2].
+A method that combines Masked Auto Encoder (MAE) with a 3D transformer-based architecture to learn a generalized representation capable of reconstructing unseen scenes [S2]. This approach facilitates transfer learning and self-supervised NeRF training, although it requires significant time on high-performance GPUs (usually several days) to learn the correspondence between 3D geometry and 2D views in advance [S2].
 
 ### Transformers and Vision Transformers (ViT)
-The Transformer computes pairwise attention over input tokens, capturing long-range dependencies that convolutions miss. The Vision Transformer (ViT) adapts this for images by treating fixed-size patches as tokens. In volume rendering, these architectures appear in super-resolution and denoising tasks, where their ability to attend across the full spatial extent of a subvolume helps recover large-scale structures that local convolutions miss [S3, unofficial].
+The Transformer computes pairwise attention over input tokens, capturing long-range dependencies that convolutions miss [S3, unofficial]. The Vision Transformer (ViT) adapts this for images by treating fixed-size patches as tokens [S3, unofficial]. In volume rendering, these architectures appear in volume super-resolution (SR) and denoising, where their ability to attend across the full spatial extent of a subvolume helps recover large-scale structures that local convolutions miss [S3, unofficial].
 
 ## Background
-The application of transformers to volume rendering emerged as a response to the limitations of local receptive fields in convolutional networks and the limited global context in standard MLPs. The foundational Transformer architecture [S3, unofficial] was adapted for visual data via Vision Transformers (ViT) [S3, unofficial]. In the context of 3D representations, transformers were first introduced as efficient proposers for hierarchical sampling [S1, unofficial] and later expanded to generalizable radiance fields to handle sparse view synthesis [S2]. Recent trends include integrating MAE for self-supervised generalization [S2] and applying ViTs to scientific volume super-resolution and denoising [S3, unofficial].
+Transformer architectures originated in natural language processing but have been adapted for 3D vision tasks. In the context of volume rendering, they were introduced to address limitations of MLPs in capturing global context and to enable generalization from sparse views. The application of ViTs to volume data specifically targets super-resolution and denoising, where global attention is beneficial for recovering large-scale structures [S3, unofficial]. Generalizable NeRF methods using transformers emerged to allow rendering from unseen scenes without per-scene optimization, often requiring pre-training on large datasets [S2].
+
 ## Sources
 [S1] NeRF in detail: Learning to sample for view synthesis, https://doi.org/10.48550/arxiv.2106.05264, fetched 2026-10-27 (unofficial)
 [S2] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26

@@ -1,0 +1,116 @@
+# Slice-guided Semiautomatic Multivariate Volume Exploration
+
+Also called: GuideME
+
+## Overview
+Slice-guided Semiautomatic Multivariate Volume Exploration (GuideME) is an interactive volume visualization workflow that replaces trial-and-error transfer function tuning with a guided, uncertainty-aware region selection process on 2D slices [S1, unofficial]. It solves the problem of exploring high-dimensional, multivariate volumetric data by allowing users to define Regions of Interest (ROIs) via a lasso that snaps to detected feature boundaries, automatically extracting features to generate a probabilistic transfer function [S1, unofficial]. Unlike its parent [Image-based TF Design](7807-image-based-tf-design.md), which relies on Random Forest classification of user scribbles, GuideME utilizes edge detection and shortest-path algorithms for boundary-aware selection and direct response function optimization for transfer function generation [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   Multivariate volume dataset (e.g., seismic amplitude with derived attributes, or multimodal MR brain scans) [S1, unofficial].
+*   User domain knowledge regarding the feature of interest [S1, unofficial].
+
+**Outputs:**
+*   A multivariate transfer function (TF) mapping input attributes to opacity and color [S1, unofficial].
+*   Volume rendered image of the selected feature [S1, unofficial].
+
+**Data Structures:**
+*   **Boundary Confidence Image:** A 2D image aligned with the slice, storing confidence values for feature boundaries [S1, unofficial].
+*   **Focus Window Overlay:** A sub-region of the slice view used to inspect attribute values [S1, unofficial].
+
+**Parameters:**
+*   Edge detection sensitivity: Not given in the sources.
+*   Dijkstra algorithm weights: Not given in the sources.
+*   Response function optimization criteria: Not given in the sources.
+
+**Steps:**
+1.  **Browse and Detect:** The user browses through the volume slices to detect a feature of interest using domain knowledge [S1, unofficial].
+2.  **Inspect Attributes:** A focus window is placed over the feature. The user inspects other attributes within this window to determine which attributes best describe the boundaries of the feature [S1, unofficial].
+3.  **Generate Confidence Map:** A boundary confidence image is computed based on the selected attributes and blended with the current slice to provide uncertainty information [S1, unofficial].
+4.  **Select Region (Guided Lasso):** The user selects the region using a guided uncertainty-aware lasso. This selection process automatically snaps to the detected feature boundaries using edge detection and Dijkstra shortest path algorithms [S1, unofficial].
+    *   *Note:* The specific mathematical formulation of the "response function" optimized during this step is not provided in the sources [S1, unofficial].
+5.  **Extract Features:** The selected 2D region is used as input for automated feature extraction [S1, unofficial].
+6.  **Generate Transfer Function:** A multivariate transfer function is automatically fine-tuned given the lasso selection, based on the optimization of a response function [S1, unofficial].
+7.  **Render and Edit:** The feature is volume rendered. The user may optionally edit the result directly in the 3D view [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def guide_me_workflow(volume_data, user_domain_knowledge):
+    """
+    Main workflow for Slice-guided Semiautomatic Multivariate Volume Exploration.
+    """
+    # Step 1: Browse and Detect
+    # User browses slices to find feature of interest
+    slice_index = user_browse_slices(volume_data)
+    feature_roi_2d = None
+    
+    # Step 2: Inspect Attributes
+    # User places focus window and selects attributes
+    focus_window = create_focus_window(slice_index)
+    selected_attributes = user_inspect_attributes(volume_data, focus_window)
+    
+    # Step 3: Generate Confidence Map
+    # Compute boundary confidence based on selected attributes
+    boundary_confidence = compute_boundary_confidence(volume_data, slice_index, selected_attributes)
+    
+    # Step 4: Select Region with Guided Lasso
+    # User draws lasso; algorithm snaps to boundaries
+    # The lasso uses edge detection and Dijkstra shortest path
+    user_lasso_path = user_draw_lasso(boundary_confidence)
+    snapped_path = guided_lasso_snapping(user_lasso_path, boundary_confidence)
+    feature_roi_2d = extract_region_from_path(snapped_path)
+    
+    # Step 5 & 6: Feature Extraction and TF Generation
+    # Automated feature extraction from the 2D region
+    extracted_features = extract_features(volume_data, feature_roi_2d)
+    
+    # Optimize response function to generate TF
+    transfer_function = optimize_response_function(extracted_features)
+    
+    # Step 7: Render
+    rendered_volume = volume_render(volume_data, transfer_function)
+    
+    return rendered_volume, transfer_function
+
+def guided_lasso_snapping(user_path, confidence_map):
+    """
+    Snaps user-drawn lasso to detected feature boundaries.
+    Uses edge detection and Dijkstra shortest path algorithms.
+    Implementation details of the specific graph construction and edge weights
+    are not given in the sources [S1, unofficial].
+    """
+    # [G] Placeholder for the specific graph construction based on edge detection
+    # and Dijkstra optimization as described in the source.
+    # The source mentions the algorithm exists but does not provide the code.
+    raise NotImplementedError("Specific implementation of guided lasso snapping not provided in sources.")
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The method relies on the accuracy of edge detection and the boundary confidence image. Poor boundary definition in the data may lead to incorrect snapping [S1, unofficial].
+*   **Multivariate Complexity:** The method is designed for high-dimensional data, but the user must correctly identify attributes that describe boundaries. Misidentification leads to poor TF generation [S1, unofficial].
+*   **Memory:** For very large datasets (e.g., gigabyte-scale seismic data), memory constraints on standard PCs may be an issue, though the method aims for efficiency [S1, unofficial].
+
+## Subtopics
+
+### Guided Uncertainty-Aware Lasso
+A region selection tool that snaps to feature boundaries using edge detection and Dijkstra shortest path algorithms, reducing manual precision requirements [S1, unofficial].
+
+### Automated Feature Extraction
+A technique to derive transfer function parameters from the selected 2D region, optimizing a response function to fine-tune the multivariate TF [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources. The source claims the approach is "efficient" [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources. The source notes that multivariate datasets can exceed GPU and main memory capacity, implying the method may require careful memory management or streaming [S1, unofficial].
+*   **Measured Performance:** The method was tested on a highly complex real-world seismic dataset and multimodal MR brain scans. It produced results comparable to previous methods and ground-truth segmentations [S1, unofficial].
+*   **Strengths:** Simple and intuitive exploration process; replaces tedious trial-and-error; reduces reliance on unfamiliar parameter space views; handles multivariate data effectively [S1, unofficial].
+*   **Limitations:** Requires user domain knowledge to detect features and select appropriate attributes; dependent on the quality of edge detection and boundary confidence estimation [S1, unofficial].
+*   **When to Use:** When exploring complex, multivariate volumetric data (e.g., seismic, medical) where manual TF tuning is tedious and user domain knowledge can guide feature selection [S1, unofficial].
+*   **When Not to Use:** When fully automatic segmentation is required without user interaction; when the data lacks clear boundaries that can be detected by edge detection [S1, unofficial].
+
+## Background
+GuideME was proposed by Zhou et al. as part of a dissertation on multivariate transfer function design [S1, unofficial]. It addresses the challenges of interpreting large-scale, multivariate volumetric data, such as 3D seismic surveys and multimodal MR brain scans, where traditional interactive methods become inefficient due to the high dimensionality of the parameter space [S1, unofficial]. The method was developed to provide a simple, intuitive workflow that leverages user expertise while automating the complex task of transfer function generation [S1, unofficial].
+
+## Sources
+[S1] MULTIVARIATE TRANSFER FUNCTION DESIGN, https://www.sci.utah.edu/~lzhou/dissertation_final_zhoul.pdf, fetched 2026-10-27 (unofficial)

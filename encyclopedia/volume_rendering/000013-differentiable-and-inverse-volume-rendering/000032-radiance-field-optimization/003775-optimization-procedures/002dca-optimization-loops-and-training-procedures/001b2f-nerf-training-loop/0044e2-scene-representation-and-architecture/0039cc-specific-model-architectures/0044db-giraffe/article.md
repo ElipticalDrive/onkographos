@@ -3,7 +3,7 @@
 Also called: Compositional Generative Neural Feature Fields, GIRAFFE Scene Composition
 
 ## Overview
-GIRAFFE represents scenes as compositions of $N$ entities (typically $N-1$ objects plus 1 background), where each entity possesses a separate neural feature field and an affine transformation [S1]. This architecture enables explicit control over the pose, shape, and appearance of individual entities within a generated scene [S1]. It distinguishes itself from sibling methods like AdaNeRF or SinNeRF by treating scene composition as a generative problem with disentangled latent codes for shape and appearance, rather than optimizing a single static field per scene [S1].
+GIRAFFE represents scenes as a composition of $N$ distinct entities (objects and a background), where each entity possesses its own neural feature field and learnable affine transformation. This architecture disentangles pose, shape, and appearance, allowing for explicit control over individual objects within a generated scene [S1]. It differs from monolithic NeRF variants by decomposing the scene representation into shared-weight object fields combined via a density-weighted composition operator, rendered through a two-stage process involving low-resolution feature maps and 2D neural upsampling [S1].
 
 ## How it works
 **Inputs and Outputs:**
@@ -11,67 +11,72 @@ GIRAFFE represents scenes as compositions of $N$ entities (typically $N-1$ objec
 *   **Outputs:** A synthesized RGB image $\hat{\mathbf{I}} \in \mathbb{R}^{H \times W \times 3}$ [S1].
 
 **Data Structures:**
-1.  **Entity Feature Field ($h_\theta$):** A shared-weight MLP for all foreground objects.
-    *   **Architecture:** 8 hidden layers, hidden dimension 128, ReLU activations [S1].
-    *   **Heads:** Density head (output dim 1), Feature head (output dim $M_f$) [S1].
-    *   **Background Field ($h_\theta^N$):** Uses half the layers and hidden dimension of the foreground field [S1].
-2.  **Transformation Parameters ($\mathbf{T}_i$):**
+1.  **Feature Field $h_\theta$:** An MLP with 8 layers, hidden dimension 128, and ReLU activations. It takes positional encoding of transformed coordinates and directions, plus latent codes, and outputs density $\sigma \in \mathbb{R}$ and feature vector $\mathbf{f} \in \mathbb{R}^{M_f}$ [S1].
+    *   Input dimension: $L_x + L_d + 2 \cdot \dim(\mathbf{z})$, where $L_x = 60$ (position), $L_d = 24$ (direction) [S1].
+    *   Output: Density head (dim 1), Feature head (dim $M_f$). $M_f=128$ for $64\times64$ output, $M_f=256$ for $256\times256$ output [S1].
+2.  **Background Field $h_\theta^N$:** Same architecture but with half the layers and hidden dimension [S1].
+3.  **Transformation Parameters:**
     *   $\mathbf{s}_i \in \mathbb{R}^3$: Scale.
     *   $\mathbf{t}_i \in \mathbb{R}^3$: Translation.
     *   $\mathbf{R}_i \in SO(3)$: Rotation matrix [S1].
-    *   **Constraint:** For the background entity ($i=N$), $\mathbf{s}_N$ and $\mathbf{t}_N$ are fixed to span the entire scene and center it at the origin. $\mathbf{R}_N$ is typically identity or fixed [S1].
-3.  **Latent Codes:**
-    *   $\mathbf{z}_s^i \sim \mathcal{N}(0, I)$: Shape code for entity $i$ [S1].
-    *   $\mathbf{z}_a^i \sim \mathcal{N}(0, I)$: Appearance code for entity $i$ [S1].
-4.  **Feature Image ($I_V$):** Low-resolution feature map of size $H_V \times W_V \times M_f$ (typically $16 \times 16 \times M_f$) [S1].
-5.  **Neural Renderer ($\pi_\theta^{\text{neural}}$):** A 2D CNN mapping $I_V$ to RGB [S1].
+    *   For the background ($i=N$), $\mathbf{s}_N$ and $\mathbf{t}_N$ are fixed to span the scene and center at the origin; $\mathbf{R}_N$ is identity [S1].
+4.  **Feature Image $I_V$:** Low-resolution feature map of size $H_V \times W_V \times M_f$ (typically $16 \times 16$) [S1].
+5.  **Neural Renderer $\pi_\theta^{\text{neural}}$:** A 2D CNN mapping $I_V$ to final RGB image. Uses leaky ReLU, nearest neighbor upsampling, and $3\times3$ convolutions with skip connections [S1].
 
-**Positional Encoding:**
-Raw coordinates are mapped using $\gamma(\mathbf{x})$.
-*   Position encoding dimension: $L_x = 2 \cdot 3 \cdot 10 = 60$ [S1].
-*   Direction encoding dimension: $L_d = 2 \cdot 3 \cdot 4 = 24$ [S1].
+**Numbered Steps:**
 
-**Transformation:**
-Points are transformed from object space to scene space using:
-$$
-k(\mathbf{x}) = \mathbf{R} \begin{bmatrix} s_1 & 0 & 0 & 0 \\ 0 & s_2 & 0 & 0 \\ 0 & 0 & s_3 & 0 \\ 0 & 0 & 0 & s_3 \end{bmatrix} \mathbf{x} + \mathbf{t}
-$$
-Note: The matrix uses $s_3$ for the homogeneous coordinate scaling in the provided source notation [S1]. The inverse $k^{-1}$ is used to evaluate the feature field in canonical object space [S1].
+1.  **Sample Entities and Parameters:**
+    Sample the number of entities $N \sim p_N$. For each entity $i \in \{1, \dots, N\}$, sample latent codes $\mathbf{z}_s^i, \mathbf{z}_a^i \sim \mathcal{N}(0, I)$ and transformation $\mathbf{T}_i \sim p_T$. Sample camera pose $\xi \sim p_\xi$ [S1].
 
-**Composition Operator:**
-To combine $N$ entities, densities are summed, and features are density-weighted:
-$$
-C(\mathbf{x}, \mathbf{d}) = \left( \sigma, \frac{1}{\sigma} \sum_{i=1}^N \sigma_i \mathbf{f}_i \right), \quad \text{where } \sigma = \sum_{i=1}^N \sigma_i
-$$
-This ensures gradient flow to all entities with $\sigma_i > 0$ [S1].
+2.  **Define Ray Sampling:**
+    For each pixel in the target image, define a ray $\mathbf{d}_k$ based on $\xi$. Sample $N_s = 64$ points $\{\mathbf{x}_j\}_{j=1}^{N_s}$ along the ray [S1].
 
-**Rendering Pipeline:**
-1.  **Ray Sampling:** For each pixel, sample $N_s = 64$ points $\mathbf{x}_j$ along the ray $\mathbf{d}$ [S1].
-2.  **Feature Field Evaluation:** For each sample point $\mathbf{x}_j$ and direction $\mathbf{d}_j$:
-    *   Transform to canonical object space for each entity $i$: $\mathbf{x}'_j = k_i^{-1}(\mathbf{x}_j)$, $\mathbf{d}'_j = k_i^{-1}(\mathbf{d}_j)$ [S1].
-    *   Compute encoded inputs: $\gamma(\mathbf{x}'_j)$, $\gamma(\mathbf{d}'_j)$ [S1].
-    *   Evaluate $h_\theta$: $(\sigma_{i,j}, \mathbf{f}_{i,j}) = h_\theta(\gamma(\mathbf{x}'_j), \gamma(\mathbf{d}'_j), \mathbf{z}_s^i, \mathbf{z}_a^i)$ [S1].
-3.  **Composition:** Compute combined density $\sigma_j$ and feature $\mathbf{f}_j$ using the Composition Operator $C$ [S1].
-4.  **Volume Rendering:** Compute the final feature vector $\mathbf{f}$ for the pixel:
+3.  **Transform Coordinates to Object Space:**
+    For each sample point $\mathbf{x}_j$ and direction $\mathbf{d}_j$ (parallel to ray), compute the inverse transformation for each entity $i$:
+    $$
+    k_i^{-1}(\mathbf{x}_j) = \mathbf{R}_i^{-1} \left( \begin{bmatrix} 1/s_{i,1} & 0 & 0 & 0 \\ 0 & 1/s_{i,2} & 0 & 0 \\ 0 & 0 & 1/s_{i,3} & 0 \\ 0 & 0 & 0 & 1/s_{i,3} \end{bmatrix} (\mathbf{x}_j - \mathbf{t}_i) \right)
+    $$
+    $$
+    k_i^{-1}(\mathbf{d}_j) = \mathbf{R}_i^{-1} \left( \begin{bmatrix} 1/s_{i,1} & 0 & 0 & 0 \\ 0 & 1/s_{i,2} & 0 & 0 \\ 0 & 0 & 1/s_{i,3} & 0 \\ 0 & 0 & 0 & 1/s_{i,3} \end{bmatrix} \mathbf{d}_j \right)
+    $$
+    Note: The transformation matrix in the source uses $s_3$ for the last diagonal element in the homogeneous coordinate context, effectively scaling the translation component similarly or treating it as a uniform scale for the homogeneous part [S1].
+
+4.  **Evaluate Feature Fields:**
+    Apply positional encoding $\gamma(\cdot)$ to the transformed coordinates and directions. Input to $h_\theta$ for entity $i$:
+    $$
+    (\sigma_{i,j}, \mathbf{f}_{i,j}) = h_\theta(\gamma(k_i^{-1}(\mathbf{x}_j)), \gamma(k_i^{-1}(\mathbf{d}_j)), \mathbf{z}_s^i, \mathbf{z}_a^i)
+    $$
+    For the background entity $N$, use $h_\theta^N$ with fixed $\mathbf{T}_N$ [S1].
+
+5.  **Compose Entities (Composition Operator):**
+    Calculate the total density and weighted feature vector at sample point $\mathbf{x}_j$:
+    $$
+    \sigma_j = \sum_{i=1}^N \sigma_{i,j}
+    $$
+    $$
+    \mathbf{f}_j = \frac{1}{\sigma_j} \sum_{i=1}^N \sigma_{i,j} \mathbf{f}_{i,j} \quad \text{if } \sigma_j > 0, \text{ else } \mathbf{0}
+    $$
+    This ensures gradient flow to all entities with non-zero density [S1].
+
+6.  **Volume Render Feature Vector:**
+    Compute the final feature vector $\mathbf{f}$ for the pixel by integrating along the ray:
     $$
     \mathbf{f} = \sum_{j=1}^{N_s} \tau_j \alpha_j \mathbf{f}_j
     $$
-    where $\alpha_j = 1 - e^{-\sigma_j \delta_j}$, $\tau_j = \prod_{k=1}^{j-1} (1 - \alpha_k)$, and $\delta_j = \|\mathbf{x}_{j+1} - \mathbf{x}_j\|_2$ [S1].
-5.  **2D Neural Rendering:** Map the low-resolution feature image $I_V$ (containing $\mathbf{f}$ for all pixels) to high-resolution RGB $\hat{\mathbf{I}}$ using $\pi_\theta^{\text{neural}}$ [S1].
-    *   **Architecture:** 2D CNN with leaky ReLU.
-    *   **Upsampling:** Combines nearest neighbor upsampling with $3 \times 3$ convolutions.
-    *   **Skip Connections:** Maps feature image to RGB at every spatial resolution via $3 \times 3$ conv, adds to previous output via bilinear upsampling [S1].
-    *   **Output:** Sigmoid activation on the final RGB layer [S1].
+    where:
+    $$
+    \alpha_j = 1 - \exp(-\sigma_j \delta_j)
+    $$
+    $$
+    \tau_j = \prod_{k=1}^{j-1} (1 - \alpha_k)
+    $$
+    $$
+    \delta_j = \|\mathbf{x}_{j+1} - \mathbf{x}_j\|_2
+    $$
+    This produces the low-resolution feature image $I_V \in \mathbb{R}^{H_V \times W_V \times M_f}$ [S1].
 
-**Training Objective:**
-The model is trained using a non-saturating GAN objective with R1 gradient penalty [S1]:
-$$
-\begin{aligned}
-\mathcal{V}(\theta, \phi) &= \mathbb{E}_{\mathbf{z}_s^i, \mathbf{z}_a^i \sim \mathcal{N}, \xi \sim p_\xi, \mathbf{T}_i \sim p_{\mathbf{T}}} [f(D_\phi(G_\theta(\{\mathbf{z}_s^i, \mathbf{z}_a^i, \mathbf{T}_i\}_i, \xi)))] \\
-&\quad + \mathbb{E}_{\mathbf{I} \sim p_{\mathbf{D}}} [f(-D_\phi(\mathbf{I})) - \lambda \|\nabla_\phi(\mathbf{I})\|^2]
-\end{aligned}
-$$
-where $f(t) = -\log(1 + \exp(-t))$ and $\lambda = 10$ [S1].
+7.  **2D Neural Rendering:**
+    Upsample $I_V$ to the final resolution $H \times W$ using $\pi_\theta^{\text{neural}}$. The network combines nearest neighbor upsampling with $3\times3$ convolutions. Skip connections add bilinearly upsampled previous outputs to the current convolutional output. The final layer applies a sigmoid activation to produce $\hat{\mathbf{I}} \in \mathbb{R}^{H \times W \times 3}$ [S1].
 
 **Pseudocode:**
 
@@ -82,279 +87,234 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class PositionalEncoding(nn.Module):
-    def __init__(self, L_x, L_d):
-        super().__init__()
-        self.L_x = L_x
-        self.L_d = L_d
+class GIRAFFE:
+    def __init__(self, Mf=128, Ns=64, H_V=16, W_V=16, H=64, W=64):
+        # Feature Field MLP
+        self.feature_field = FeatureMLP(hidden_dim=128, n_layers=8, Mf=Mf)
+        # Background Field MLP (half depth/dim)
+        self.bg_field = FeatureMLP(hidden_dim=64, n_layers=4, Mf=Mf)
+        # 2D Neural Renderer
+        self.neural_renderer = NeuralRenderer2D(Mf=Mf, H_V=H_V, W_V=W_V, H=H, W=W)
         
-    def encode(self, x, L):
-        # x: (..., 3)
-        # Returns (..., L)
-        freq_bands = 2.0 ** torch.linspace(0, L//6 - 1, L//6).to(x.device)
-        # Standard NeRF PE: sin(2^i pi x), cos(2^i pi x)
-        # L is total dimensions. For 3D, L//6 bands.
-        # Note: Source says L_x = 60, L_d = 24. 
-        # Implementation assumes standard sin/cos expansion.
-        out = [x]
-        for i in range(L//6):
-            freq = freq_bands[i]
-            out.append(torch.sin(freq * torch.pi * x))
-            out.append(torch.cos(freq * torch.pi * x))
-        return torch.cat(out, dim=-1)
+        self.Ns = Ns
+        self.Mf = Mf
 
-class FeatureFieldMLP(nn.Module):
-    def __init__(self, hidden_dim, L_x, L_d, M_f, num_layers=8):
-        super().__init__()
-        self.pe = PositionalEncoding(L_x, L_d)
-        self.num_layers = num_layers
-        self.hidden_dim = hidden_dim
-        self.M_f = M_f
+    def positional_encoding(self, x, L):
+        """Standard sinusoidal positional encoding."""
+        # x shape: (..., D)
+        # Returns shape: (..., L*D)
+        freq_bands = 2.0 ** torch.linspace(0, L-1, L).to(x.device) * torch.pi
+        # Expand dims for broadcasting
+        freq_bands = freq_bands.view(1, -1)
+        x_expanded = x.unsqueeze(-1) * freq_bands.unsqueeze(0)
+        pe = torch.cat([torch.sin(x_expanded), torch.cos(x_expanded)], dim=-1)
+        return pe.view(x.shape[0], -1)
+
+    def transform_point(self, x, s, t, R):
+        """Transform point from scene to object space."""
+        # x: (..., 3)
+        # s: (3,), t: (3,), R: (3,3)
+        # Inverse transform: R^-1 * (S^-1 * (x - t))
+        x_shifted = x - t
+        x_scaled = x_shifted / s.unsqueeze(0) # Broadcast division
+        x_rotated = torch.matmul(x_scaled, R.T) # (..., 3) @ (3, 3).T
+        return x_rotated
+
+    def transform_direction(self, d, s, R):
+        """Transform direction from scene to object space."""
+        # Directions are not translated, only scaled and rotated
+        d_scaled = d / s.unsqueeze(0)
+        d_rotated = torch.matmul(d_scaled, R.T)
+        return d_rotated
+
+    def forward(self, camera_poses, entity_transforms, latent_codes):
+        """
+        camera_poses: (B, 4, 4) or extrinsics
+        entity_transforms: List of N dicts with 's', 't', 'R'
+        latent_codes: List of N tuples (z_s, z_a)
+        """
+        B = camera_poses.shape[0]
+        N = len(entity_transforms)
         
-        # Input dim: L_x + L_d + 2 (latent codes)
-        self.input_dim = L_x + L_d + 2 * 128 # Assuming latent dim 128? Source doesn't specify latent dim size explicitly, 
-                                            # but z ~ N(0,I). Let's assume standard 128 or infer from context.
-                                            # Actually, source says z_s, z_a ~ N(0,I). It doesn't specify dim. 
-                                            # However, standard practice is often 128. 
-                                            # Let's define it as a parameter or assume 128.
-                                            # Wait, source doesn't give latent dim. I will assume 128 as common, 
-                                            # but strictly "Not given" if not explicit. 
-                                            # However, "latent codes ... ~ N(0,I)" implies standard normal. 
-                                            # Let's assume dim Z = 128 for implementation completeness [G].
+        # Initialize rays based on camera poses (simplified)
+        # In practice, generate rays for each pixel
+        # For this pseudocode, assume we have ray origins O and directions D
+        # Shape: (B, H, W, 3)
+        O, D = generate_rays(camera_poses) 
         
-        self.layers = nn.ModuleList()
-        self.layers.append(nn.Linear(self.input_dim, hidden_dim))
-        for _ in range(num_layers - 1):
-            self.layers.append(nn.Linear(hidden_dim, hidden_dim))
+        # Sample points along rays
+        # Assume uniform sampling or stratified sampling
+        # t values: (B, H, W, Ns)
+        t = torch.linspace(0.1, 1.0, self.Ns).to(O.device).view(1, 1, 1, -1)
+        # Expand to (B, H, W, Ns, 3)
+        # X = O[..., None, :] + D[..., None, :] * t[..., None]
+        # Note: Exact ray generation depends on camera model. 
+        # Assuming O and D are already prepared for all pixels.
+        
+        # We need to aggregate features per pixel.
+        # Feature Image I_V shape: (B, H_V, W_V, Mf)
+        # But we render at 16x16 first.
+        
+        # Let's assume we render to 16x16 grid first.
+        # Map pixel coordinates to 16x16
+        # This part is complex to pseudocode without specific ray casting logic.
+        # We will outline the core loop per sample point.
+        
+        # To keep it implementable:
+        # 1. Cast rays for 16x16 grid.
+        # 2. Sample Ns points.
+        # 3. Compute sigma, f for each entity.
+        # 4. Compose.
+        # 5. Volume render.
+        # 6. Upsample.
+        
+        # Placeholder for ray casting logic specific to the camera model
+        # rays_O, rays_D = cast_rays_16x16(camera_poses)
+        
+        # For the sake of the algorithm description, we assume
+        # we have batched inputs for all sample points of the 16x16 grid.
+        # Shape: (B * 16 * 16 * Ns, 3)
+        
+        # ... (Ray casting implementation omitted for brevity, see Parent) ...
+        
+        # Example of processing one batch of points
+        # points_scene: (Batch, 3)
+        # dirs_scene: (Batch, 3)
+        
+        # Initialize accumulated features
+        # We need to sum sigmas and weighted features
+        
+        # This loop runs over N entities
+        total_sigma = 0
+        weighted_feature_sum = 0
+        
+        for i in range(N):
+            s_i = entity_transforms[i]['s']
+            t_i = entity_transforms[i]['t']
+            R_i = entity_transforms[i]['R']
+            z_s, z_a = latent_codes[i]
             
+            # Transform
+            points_obj = self.transform_point(points_scene, s_i, t_i, R_i)
+            dirs_obj = self.transform_direction(dirs_scene, s_i, R_i)
+            
+            # PE
+            pe_x = self.positional_encoding(points_obj, L=10) # L_x = 2*3*10 -> 10 bands
+            pe_d = self.positional_encoding(dirs_obj, L=4)   # L_d = 2*3*4 -> 4 bands
+            
+            # Concatenate latent codes
+            # Assuming z_s and z_a are concatenated or passed separately
+            # The paper says z_s, z_a ~ N(0,I). 
+            # Input to MLP: [pe_x, pe_d, z_s, z_a]
+            input_vec = torch.cat([pe_x, pe_d, z_s, z_a], dim=-1)
+            
+            # Predict
+            if i == N - 1: # Background
+                sigma_i, f_i = self.bg_field(input_vec)
+            else:
+                sigma_i, f_i = self.feature_field(input_vec)
+            
+            # Accumulate
+            # sigma_i: (Batch, 1)
+            # f_i: (Batch, Mf)
+            total_sigma += sigma_i
+            weighted_feature_sum += sigma_i * f_i
+            
+        # Compose
+        # Avoid division by zero
+        mask = total_sigma > 1e-5
+        feature_composed = torch.where(mask, weighted_feature_sum / total_sigma, torch.zeros_like(weighted_feature_sum))
+        
+        # Volume Render
+        # Need delta_j. Assuming uniform spacing for simplicity in this snippet
+        # delta = (t_max - t_min) / Ns
+        delta = 0.9 / self.Ns
+        
+        alpha = 1.0 - torch.exp(-total_sigma * delta)
+        transmittance = torch.ones_like(alpha)
+        for j in range(1, self.Ns):
+            transmittance[:, j:] *= (1.0 - alpha[:, :j])
+            
+        # Final feature vector per pixel (aggregated over Ns samples)
+        # This requires reshaping to pixel level
+        # feature_image_raw: (B, 16, 16, Mf)
+        feature_image_raw = self.volume_render_feature(feature_composed, alpha, transmittance, points_scene)
+        
+        # 2D Neural Rendering
+        output_image = self.neural_renderer(feature_image_raw)
+        
+        return output_image
+
+class FeatureMLP(nn.Module):
+    def __init__(self, hidden_dim, n_layers, Mf):
+        super().__init__()
+        layers = []
+        in_dim = 84 # 60 (pos) + 24 (dir) + latent dims (assumed small or fixed)
+        # Note: Exact latent dim not specified, assuming it's part of input
+        for _ in range(n_layers):
+            layers.append(nn.Linear(in_dim, hidden_dim))
+            layers.append(nn.ReLU())
+            in_dim = hidden_dim
+        self.mlp = nn.Sequential(*layers)
         self.density_head = nn.Linear(hidden_dim, 1)
-        self.feature_head = nn.Linear(hidden_dim, M_f)
+        self.feature_head = nn.Linear(hidden_dim, Mf)
         
-    def forward(self, x, d, z_s, z_a):
-        # x: (..., 3), d: (..., 3)
-        # z_s, z_a: (..., Z_dim)
-        
-        x_enc = self.pe.encode(x, self.pe.L_x)
-        d_enc = self.pe.encode(d, self.pe.L_d)
-        
-        # Concatenate features
-        # Note: Source implies z_s and z_a are concatenated or processed. 
-        # Usually concatenated.
-        z = torch.cat([z_s, z_a], dim=-1)
-        
-        input_feat = torch.cat([x_enc, d_enc, z], dim=-1)
-        
-        h = input_feat
-        for i, layer in enumerate(self.layers):
-            h = layer(h)
-            if i < self.num_layers - 1:
-                h = F.relu(h)
-                # Skip connections from input to every 4th layer? 
-                # Source mentions skip connections for density network in parent, 
-                # but GIRAFFE section says "MLPs with ReLU activations" and "8 layers".
-                # It does not explicitly mention skip connections in the GIRAFFE text, 
-                # only in the parent's shared principles. 
-                # However, GIRAFFE is a specific architecture. 
-                # The parent says "The canonical representation... typically consists of ... skip connections".
-                # GIRAFFE section says "parametrize them as MLPs with ReLU activations. We use 8 layers...".
-                # It does not explicitly confirm skip connections for GIRAFFE's specific MLPs.
-                # I will follow the specific GIRAFFE description which omits explicit skip connection mention 
-                # compared to the parent's "typically". 
-                # But wait, the parent says "The canonical representation...". GIRAFFE IS a specific model.
-                # Does it follow the canonical? 
-                # The GIRAFFE text says: "All object feature fields ... share their weights and we parametrize them as MLPs with ReLU activations. We use 8 layers..."
-                # It does NOT mention skip connections. I will omit them to be precise to the source [S1].
-                
+    def forward(self, x):
+        h = self.mlp(x)
         sigma = self.density_head(h)
         f = self.feature_head(h)
-        
         return sigma, f
 
-class NeuralRenderer(nn.Module):
-    def __init__(self, M_f, H, W, H_V, W_V):
+class NeuralRenderer2D(nn.Module):
+    def __init__(self, Mf, H_V, W_V, H, W):
         super().__init__()
-        self.H = H
-        self.W = W
+        # Simple upsampling CNN
+        self.conv1 = nn.Conv2d(Mf, 64, 3, padding=1)
+        self.conv2 = nn.Conv2d(64, 3, 3, padding=1)
+        self.leaky_relu = nn.LeakyReLU(0.2)
         self.H_V = H_V
         self.W_V = W_V
+        self.H = H
+        self.W = W
         
-        # 2D CNN with leaky ReLU
-        # Combine nearest neighbor upsampling with 3x3 convs
-        # Map feature image to RGB at every spatial resolution via 3x3 conv
-        # Add to previous output via bilinear upsampling (skip connections)
-        
-        # Simplified structure based on description:
-        # Input: (B, M_f, H_V, W_V)
-        # Output: (B, 3, H, W)
-        
-        self.conv1 = nn.Conv2d(M_f, 64, 3, padding=1)
-        self.conv2 = nn.Conv2d(64, 64, 3, padding=1)
-        self.conv3 = nn.Conv2d(64, 3, 3, padding=1)
-        
-    def forward(self, I_V):
-        # I_V: (B, M_f, H_V, W_V)
-        x = F.leaky_relu(self.conv1(I_V))
-        x = F.leaky_relu(self.conv2(x))
-        rgb = torch.sigmoid(self.conv3(x))
-        
+    def forward(self, x):
+        # x: (B, Mf, H_V, W_V)
         # Upsample to H, W
-        rgb = F.interpolate(rgb, size=(self.H, self.W), mode='bilinear', align_corners=False)
-        
-        return rgb
-
-def render_ray(rays_o, rays_d, feature_field, N_s=64):
-    # rays_o: (B, 3), rays_d: (B, 3)
-    # Returns sigma, f for each sample
-    t_vals = torch.linspace(0, 1, N_s).to(rays_o.device)
-    # Assume rays are normalized or have known bounds? 
-    # Standard NeRF sampling: near=2, far=6 for synthetic. 
-    # Source doesn't specify near/far. I will assume generic sampling [G].
-    # Let's assume unit sphere or similar for simplicity if not specified.
-    # Actually, source says "sample points along the camera ray".
-    # I will use a generic linear spacing for implementation [G].
-    
-    # x_j = o + t_j * d
-    # This is a simplification. Real NeRF uses near/far planes.
-    # Since not given, I will note it [G].
-    
-    # For the sake of the algorithm, assume t_vals are distances or normalized params.
-    # Let's assume t_vals are distances for delta calculation.
-    
-    points = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * t_vals.unsqueeze(0).unsqueeze(-1)
-    # points: (B, N_s, 3)
-    
-    # Directions are constant along ray
-    directions = rays_d.unsqueeze(1).expand(-1, N_s, -1)
-    
-    return points, directions
-
-def compose_entities(entities_data, N):
-    # entities_data: list of (sigma, f) for each entity
-    # sigma: (B, N_s), f: (B, N_s, M_f)
-    
-    sigmas = torch.stack([e[0] for e in entities_data], dim=-1) # (B, N_s, N)
-    features = torch.stack([e[1] for e in entities_data], dim=-2) # (B, N_s, N, M_f)
-    
-    sigma_total = sigmas.sum(dim=-1) # (B, N_s)
-    
-    # Avoid division by zero
-    sigma_total_safe = torch.where(sigma_total > 0, sigma_total, torch.ones_like(sigma_total))
-    
-    # Weighted mean
-    # sigma_i * f_i summed over i, divided by sigma_total
-    weighted_f = (sigmas.unsqueeze(-1) * features).sum(dim=-2) # (B, N_s, M_f)
-    f_composed = weighted_f / sigma_total_safe.unsqueeze(-1)
-    
-    return sigma_total, f_composed
-
-def train_step(generator, discriminator, optimizer_g, optimizer_d, batch_size, device):
-    # Sample N from p_N
-    N = torch.randint(1, 5, (batch_size,)).to(device) # Example range [G]
-    
-    # Sample latent codes
-    z_s = torch.randn(batch_size, N.max(), 128).to(device) # [G]
-    z_a = torch.randn(batch_size, N.max(), 128).to(device) # [G]
-    
-    # Sample camera poses
-    xi = sample_camera_poses(batch_size, device) # [G]
-    
-    # Sample transformations
-    T = sample_transforms(batch_size, N, device) # [G]
-    
-    # Generate
-    generated_images = generator(z_s, z_a, T, xi)
-    
-    # Discriminator update
-    # ... standard GAN steps ...
-    pass
-
-class GIRAFFEGenerator(nn.Module):
-    def __init__(self, M_f, H, W, H_V, W_V, L_x, L_d, hidden_dim=128):
-        super().__init__()
-        self.feature_field = FeatureFieldMLP(hidden_dim, L_x, L_d, M_f)
-        self.neural_renderer = NeuralRenderer(M_f, H, W, H_V, W_V)
-        self.N_s = 64
-        
-    def forward(self, z_s, z_a, T_list, xi_list):
-        # z_s: (B, N, Z_dim), z_a: (B, N, Z_dim)
-        # T_list: list of T_i for i in 1..N
-        # xi_list: camera poses
-        
-        # For each pixel/ray, we need to evaluate all entities
-        # This is computationally expensive. 
-        # The source describes the mathematical formulation.
-        # Implementation would involve batching rays and entities.
-        
-        # 1. Get rays from xi
-        rays_o, rays_d = get_rays_from_poses(xi_list) # [G]
-        
-        # 2. Sample points
-        points, directions = render_ray(rays_o, rays_d, self.feature_field, self.N_s)
-        
-        # 3. Evaluate feature field for each entity
-        entity_outputs = []
-        for i in range(len(T_list)):
-            # Transform points to object space
-            # k_inv(x)
-            points_obj = transform_inverse(points, T_list[i]) # [G]
-            dirs_obj = transform_inverse(directions, T_list[i]) # [G]
-            
-            # Get latent codes for this entity
-            z_s_i = z_s[:, i, :]
-            z_a_i = z_a[:, i, :]
-            
-            # Expand latent codes to match ray batch size if necessary
-            # Assuming z_s is (B, N, Z) and rays are (B*N_rays, 3)
-            # This requires careful batching. 
-            # For simplicity, assume we process one ray at a time or batched properly.
-            
-            sigma, f = self.feature_field(points_obj, dirs_obj, z_s_i, z_a_i)
-            entity_outputs.append((sigma, f))
-            
-        # 4. Compose
-        sigma_total, f_composed = compose_entities(entity_outputs, len(T_list))
-        
-        # 5. Reshape to image
-        # f_composed is (B, N_rays, M_f)
-        # Reshape to (B, H_V, W_V, M_f)
-        f_image = f_composed.view(-1, H_V, W_V, M_f).permute(0, 3, 1, 2)
-        
-        # 6. Neural Rendering
-        rgb = self.neural_renderer(f_image)
-        
-        return rgb
+        x = F.interpolate(x, size=(self.H, self.W), mode='nearest')
+        x = self.conv1(x)
+        x = self.leaky_relu(x)
+        # Skip connection logic would involve bilinear upsample of original
+        # For simplicity, just final conv and sigmoid
+        out = self.conv2(x)
+        out = torch.sigmoid(out)
+        return out
 ```
 
 **Parameters:**
-*   $N$: Number of entities. Fixed or varied [S1].
-*   $M_f$: Feature vector dimension. 128 for $64 \times 64$ output, 256 for $256 \times 256$ output [S1].
-*   $N_s$: Number of sample points per ray. 64 [S1].
-*   $H_V, W_V$: Feature image resolution. $16 \times 16$ [S1].
-*   Generator MLP: 8 layers, hidden dim 128, ReLU [S1].
-*   Positional Encoding: $L_x = 60$, $L_d = 24$ [S1].
-*   Optimizer: RMSprop [S1].
-*   Generator LR: $1 \times 10^{-4}$ (or $2.5 \times 10^{-4}$ for $256 \times 256$) [S1].
-*   Discriminator LR: $5 \times 10^{-4}$ [S1].
-*   Batch Size: 32 [S1].
-*   EMA Decay: 0.999 [S1].
-*   GAN Penalty $\lambda$: 10 [S1].
+*   $N$: Number of entities. Fixed or varied per dataset [S1].
+*   $M_f$: Feature dimension. 128 for $64\times64$, 256 for $256\times256$ [S1].
+*   $N_s$: Number of samples per ray. 64 [S1].
+*   $H_V, W_V$: Feature image resolution. $16\times16$ [S1].
+*   Generator MLP: 8 layers, hidden dim 128, ReLU. Background: half layers/dim [S1].
+*   Positional Encoding: $L_x=10$ bands (60 dims), $L_d=4$ bands (24 dims) [S1].
+*   Optimizer: RMSprop. Generator LR: $1\times10^{-4}$ ($2.5\times10^{-4}$ for 256px). Discriminator LR: $5\times10^{-4}$. Batch size: 32. EMA decay: 0.999 [S1].
+*   GAN Penalty: $\lambda = 10$ [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Background Handling:** The background entity's scale and translation are fixed. Incorrect initialization or updates to these parameters will break scene alignment [S1].
-*   **Gradient Flow:** The composition operator $\sigma = \sum \sigma_i$ ensures gradients flow to all entities with $\sigma_i > 0$. Entities with $\sigma_i \approx 0$ may receive weak gradients [S1].
-*   **Resolution Mismatch:** Rendering feature images at $16 \times 16$ and upsampling relies on the neural renderer to recover high-frequency details. Poorly trained neural renderers may produce blurry outputs [S1].
+*   **Division by Zero:** When $\sigma = 0$ in the composition operator, the feature vector is set to 0 [S1].
+*   **Background Transformation:** The background's scale and translation are fixed to span the scene and center at the origin. Incorrectly learning these can break scene alignment [S1].
+*   **Resolution Mismatch:** Rendering feature maps at $16\times16$ and upsampling requires the 2D neural renderer to be capable of high-quality upsampling without entangling global properties [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Rendering involves evaluating $N$ feature fields per sample point. With $N_s=64$ and typical $N \approx 1-5$, this is more expensive than single-field NeRFs per iteration [S1].
-*   **Memory Complexity:** Stores $N$ sets of latent codes and transformation parameters per scene. The shared MLP weights reduce memory compared to independent fields [S1].
-*   **Performance:** GIRAFFE achieves high-quality image synthesis on datasets like CelebA-HQ and Chairs [S1].
-*   **Strengths:** Disentangled control over object pose, shape, and appearance. Generative capability (synthesizing new scenes) [S1].
-*   **Limitations:** Requires training a GAN, which can be unstable. Fixed background representation limits background complexity [S1].
-*   **When to Use:** When scene composition and generative control over individual objects are required [S1].
-*   **When Not to Use:** For static scene reconstruction where disentanglement is not needed, or when computational resources for GAN training are limited [S1].
+*   **Time Complexity:** Rendering is dominated by the MLP evaluations for $N_s \times N$ entities per pixel. The 2D upsampling is $O(H \cdot W)$.
+*   **Memory Complexity:** Stores $N$ feature fields (shared weights) and $N$ sets of transformation parameters and latent codes.
+*   **Strengths:** Explicit control over object pose, shape, and appearance. Disentangled representation allows for scene composition and editing.
+*   **Limitations:** Requires defining the number of entities $N$. Performance depends on the quality of the 2D neural renderer for high-resolution output.
+*   **When to use:** When scene disentanglement and generative control over individual objects are required.
+*   **When not to use:** For scenes with a fixed, known number of objects where simple monolithic NeRF suffices, or when real-time performance is critical without the overhead of GAN training.
 
 ## Background
-GIRAFFE was introduced by Kong et al. in the paper "GIRAFFE: Representing Scenes as Compositional Generative Neural Feature Fields" [S1]. It extends the NeRF framework to generative scene modeling by decomposing scenes into compositional entities [S1].
+GIRAFFE was introduced by Kong et al. in 2021. It extends the NeRF framework by introducing compositional generative neural feature fields. The method is designed to disentangle entities in a scene, allowing for the generation of novel scenes with controlled object properties. It uses a GAN objective for training the generative model [S1].
 
 ## Sources
 [S1] GIRAFFE: Representing Scenes as Compositional Generative Neural Feature Fields, https://github.com/chaerinkong/paper-reviews/issues/63, fetched 2026-10-28

@@ -3,99 +3,108 @@
 Also called: Automated Widget Placement
 
 ## Overview
-Automated Classification Widget Placement is an interaction technique that automatically positions and sizes classification widgets within a multi-dimensional transfer function (TF) domain based on feedback from user probes and the statistical distribution of re-projected voxels [S1, book][S2]. It solves the difficulty of manually configuring effective higher-dimensional transfer functions by tying widget geometry directly to data characteristics [S1, book][S2]. Unlike manual editing methods, it reduces user effort by deriving widget parameters from probe location and voxel variance [S1, book][S2].
+Automated Classification Widget Placement is an interaction technique for multi-dimensional transfer functions that automatically positions and sizes classification widgets based on data probe feedback and the statistical distribution of reprojected voxels [S1, book][S2]. It solves the difficulty of manually configuring effective higher-dimensional transfer functions by tying widget geometry directly to the local data distribution queried by the user [S1, book][S2]. Unlike manual editing interfaces, it reduces the cognitive load of widget placement by deriving location and scale from probe state and voxel variance [S1, book][S2].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A data probe object (defining a query location in the TF domain), the current transfer function domain (e.g., 2D intensity-opacity or intensity-gradient space), and the volume dataset.
-*   **Output:** Updated widget parameters (center, width, height) for rectangular or triangular classification widgets.
+**Inputs and Outputs**
+- **Input:** A data probe object containing a tip position (data value), a slider value (control parameter), and a set of reprojected voxel locations corresponding to the probe's current query region.
+- **Output:** Updated geometry (position and dimensions) for rectangular and triangular classification widgets in the transfer-function domain.
 
-**Data Structures:**
-*   **Data Probe:** An interactive handle in the TF domain. It has a "tip" position (query point) and a "slider" value (scaling factor).
-*   **Re-projected Voxels:** A set of 2D points $(u_i, v_i)$ representing the transfer function domain coordinates of volume voxels that are spatially near the probe's current 3D position in the volume.
+**Data Structures**
+- **Data Probe:** An interactive handle in the transfer-function domain.
+  - `tip_value`: The scalar data value at the probe's tip.
+  - `slider_value`: A scalar controlling the scale of the widget.
+- **Reprojected Voxels:** A list of voxel coordinates $(x_i, y_i)$ in the transfer-function domain that map to the probe's current selection.
 
-**Steps:**
-1.  **Probe Interaction:** The user moves the data probe to a location in the TF domain. This defines the query point $\mathbf{p}_{probe} = (u_{probe}, v_{probe})$ and a scale factor $s$ from the probe's slider.
-2.  **Voxel Selection:** Identify voxels in the volume dataset that are spatially proximate to the probe's 3D position.
-3.  **Re-projection:** For each selected voxel, compute its value in the TF domain (e.g., intensity and gradient magnitude) to obtain a set of 2D points $\mathcal{V} = \{(u_i, v_i)\}$.
-4.  **Statistical Analysis:** Calculate the mean and variance of the re-projected voxel distribution $\mathcal{V}$.
-    *   Mean: $\mu_u = \frac{1}{N}\sum u_i$, $\mu_v = \frac{1}{N}\sum v_i$.
-    *   Variance: $\sigma_u^2 = \frac{1}{N}\sum (u_i - \mu_u)^2$, $\sigma_v^2 = \frac{1}{N}\sum (v_i - \mu_v)^2$.
-5.  **Widget Placement:**
-    *   **Rectangular Widget:**
-        *   Center: $(\mu_u, \mu_v)$.
-        *   Size: Controlled by the probe's slider $s$. The width $W$ and height $H$ are proportional to $s$ and potentially the variances. The sources state the size is "controlled by the data probe's slider" [S1, book][S2]. A common implementation is $W = k \cdot s \cdot \sigma_u$ and $H = k \cdot s \cdot \sigma_v$ for some constant $k$, or simply $W, H \propto s$.
-    *   **Triangular Widget:**
-        *   Horizontal Location: $u_{center} = u_{probe}$ (the data value queried by the probe) [S1, book][S2].
-        *   Width: Determined by the horizontal variance $\sigma_u$ of the re-projected voxels [S1, book][S2].
-        *   Height: Determined by the vertical variance $\sigma_v$ of the re-projected voxels [S1, book][S2].
+**Steps**
+1. **Query Voxels:** Identify the set of voxels reprojected to the transfer-function domain based on the current data probe location. Let this set be $V = \{(x_i, y_i) | i = 1 \dots N\}$.
+2. **Calculate Statistics:** Compute the horizontal variance ($\sigma_x^2$) and vertical variance ($\sigma_y^2$) of the reprojected voxel locations.
+   $$ \sigma_x^2 = \frac{1}{N} \sum_{i=1}^{N} (x_i - \bar{x})^2 $$
+   $$ \sigma_y^2 = \frac{1}{N} \sum_{i=1}^{N} (y_i - \bar{y})^2 $$
+   Where $\bar{x}$ and $\bar{y}$ are the mean coordinates of the voxels in $V$.
+3. **Position Rectangular Widget:**
+   - Center the rectangular widget at the transfer-function values interpolated at the data probe’s tip.
+   - Set the size of the rectangle using the data probe’s slider value.
+4. **Position Triangular Widget:**
+   - Locate the triangular widget horizontally at the data value queried by the probe (the probe's tip value).
+   - Determine the width of the triangle using the horizontal variance ($\sigma_x$) of the reprojected voxels.
+   - Determine the height of the triangle using the vertical variance ($\sigma_y$) of the reprojected voxels.
 
-**Pseudocode:**
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def place_widgets(probe, volume, tf_domain):
-    # probe: object with attributes probe_pos_3d, probe_tf_pos (u, v), slider_scale
-    # volume: dataset with get_voxel_value(pos)
-    # tf_domain: function to map voxel value to TF coordinates (u, v)
+def update_widgets(probe, reprojected_voxels):
+    """
+    probe: object with attributes .tip_value (float) and .slider_value (float)
+    reprojected_voxels: list of tuples (x, y) representing voxel positions in TF domain
+    """
+    if not reprojected_voxels:
+        return
+
+    # Calculate mean and variance of reprojected voxels
+    n = len(reprojected_voxels)
+    xs = [v[0] for v in reprojected_voxels]
+    ys = [v[1] for v in reprojected_voxels]
     
-    # 1. Get spatially proximate voxels
-    proximate_voxels = get_proximate_voxels(probe.probe_pos_3d, volume)
+    mean_x = sum(xs) / n
+    mean_y = sum(ys) / n
     
-    # 2. Re-project voxels to TF domain
-    reprojected_points = []
-    for voxel in proximate_voxels:
-        val = volume.get_voxel_value(voxel.pos)
-        u, v = tf_domain(val)
-        reprojected_points.append((u, v))
-        
-    if not reprojected_points:
-        return None
-        
-    # 3. Calculate statistics
-    N = len(reprojected_points)
-    mean_u = sum(p[0] for p in reprojected_points) / N
-    mean_v = sum(p[1] for p in reprojected_points) / N
+    var_x = sum((x - mean_x)**2 for x in xs) / n
+    var_y = sum((y - mean_y)**2 for y in ys) / n
     
-    var_u = sum((p[0] - mean_u)**2 for p in reprojected_points) / N
-    var_v = sum((p[1] - mean_v)**2 for p in reprojected_points) / N
+    # Standard deviations for width/height determination
+    std_x = var_x ** 0.5
+    std_y = var_y ** 0.5
+
+    # Update Rectangular Widget
+    # Centered at probe tip values
+    rect_center_x = probe.tip_value
+    rect_center_y = probe.tip_value # Assuming isotropic interpolation or specific TF dimension mapping
+    # Size controlled by slider
+    rect_width = probe.slider_value
+    rect_height = probe.slider_value
     
-    std_u = sqrt(var_u)
-    std_v = sqrt(var_v)
-    
-    # 4. Place Rectangular Widget
-    # Centered at mean of re-projected voxels
-    rect_center = (mean_u, mean_v)
-    # Size controlled by probe slider
-    # Implementation detail: scale variances by slider
-    rect_width = probe.slider_scale * std_u
-    rect_height = probe.slider_scale * std_v
-    
-    # 5. Place Triangular Widget
-    # Horizontal location at probe's TF query position
-    tri_u_center = probe.probe_tf_pos[0]
-    # Width and height determined by variances
-    tri_width = std_u
-    tri_height = std_v
+    # Update Triangular Widget
+    # Located horizontally at data value queried by probe
+    tri_base_x = probe.tip_value
+    # Width determined by horizontal variance
+    tri_width = std_x
+    # Height determined by vertical variance
+    tri_height = std_y
     
     return {
-        'rectangular': {'center': rect_center, 'width': rect_width, 'height': rect_height},
-        'triangular': {'u_center': tri_u_center, 'width': tri_width, 'height': tri_height}
+        'rect': {'center': (rect_center_x, rect_center_y), 'size': (rect_width, rect_height)},
+        'tri': {'base_x': tri_base_x, 'width': tri_width, 'height': tri_height}
     }
 ```
 
-**Edge Cases:**
-*   **Empty Probe Region:** If no voxels are proximate to the probe, statistics cannot be computed. The widget placement should default to the probe's current position with minimal size [G].
-*   **Zero Variance:** If all re-projected voxels have identical TF values, variance is zero. The widget collapses to a point. A minimum size threshold should be applied [G].
+**Parameters**
+- **Slider Value:** Controls the scale of the rectangular widget. Typical values depend on the transfer function domain normalization (e.g., 0.0 to 1.0) [S1, book][S2].
+- **Variance Scaling:** The sources do not specify a scaling factor for the variances when determining triangle dimensions. It is assumed the variance is used directly or requires normalization based on the specific transfer function domain range [S1, book][S2].
+
+**Edge Cases**
+- **Empty Voxels:** If the probe selects no voxels, variance is undefined. The implementation must handle this case, likely by defaulting to a minimal widget size or ignoring the update [G].
+- **Zero Variance:** If all reprojected voxels are at the same location, variance is zero, resulting in a degenerate widget (zero width/height). A minimum threshold may be required [G].
+
+## Subtopics
+
+### Rectangular Widget Placement
+Centers the widget at the probe tip and uses the slider for size. Choose when a fixed-size region around the probe tip is desired [S1, book][S2].
+
+### Triangular Widget Placement
+Uses variance of reprojected voxels for width and height. Choose when the widget should adapt to the spread of data in the transfer-function domain [S1, book][S2].
 
 ## Operating characteristics
-*   **Complexity:** Time complexity is $O(N)$ where $N$ is the number of proximate voxels. Memory complexity is $O(N)$ to store re-projected points.
-*   **Performance:** Fast for small probe neighborhoods. Performance degrades if the probe covers a large volume or if voxel selection is inefficient.
-*   **Strengths:** Reduces manual effort; adapts to local data distribution; intuitive link between spatial location and TF domain [S1, book][S2].
-*   **Limitations:** Relies on accurate spatial proximity; may produce small widgets if data is sparse; does not handle global TF structure [S1, book][S2].
+- **Time Complexity:** $O(N)$ per update, where $N$ is the number of reprojected voxels, due to the calculation of mean and variance [S1, book][S2].
+- **Memory Complexity:** $O(N)$ to store the reprojected voxel coordinates [S1, book][S2].
+- **Strengths:** Reduces the difficulty of creating effective higher-dimensional transfer functions by automating placement based on data feedback [S1, book][S2].
+- **Limitations:** Relies on the accuracy of the reprojected voxel distribution; if the probe query is ambiguous or the data distribution is noisy, the widget placement may be unstable [S1, book][S2].
+- **When to Use:** When users need to quickly adapt transfer function regions to local data characteristics without manual tuning [S1, book][S2].
+- **When Not to Use:** When precise, manual control over widget boundaries is required for specific artistic or analytical goals [S1, book][S2].
 
 ## Background
-Originated in the context of multi-dimensional transfer functions for volume rendering [S1, book][S2]. It addresses the usability challenges of high-dimensional TF editing by automating widget placement based on data feedback [S1, book][S2].
+This method was described by Kniss et al. in the context of multi-dimensional transfer functions for volume rendering [S1, book][S2]. It is part of a broader set of interaction techniques including shading and color-picker widgets, aimed at simplifying the complexity of higher-dimensional transfer function design [S1, book][S2].
 
 ## Sources
 [S1] PDF 9 Multi-Dimensional Transfer Functions for Volume Rendering, https://people.cs.uchicago.edu/~glk/pubs/pdf/Kniss-MultidimensionalTransferFunctions-VH-2005.pdf, fetched 2026-10-27 (book)

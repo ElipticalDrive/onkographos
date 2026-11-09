@@ -13,6 +13,7 @@ The method takes a volumetric tensor and a set of 3D points, interpolates the vo
 - `max_val`: Optional scalar for the maximum volume value. If `None`, computed from `volume` [S1, unofficial].
 - `normalize`: Boolean flag. If `True`, intensities are normalized to `[0, 1]` (default `False`) [S1, unofficial].
 - `enable_footprint_pooling`: Boolean flag. If `True`, aggregates values from a local voxel neighborhood around each point (default `False`) [S1, unofficial].
+- `padding_mode`: String specifying padding behavior for grid sampling (default `"zeros"`) [G].
 
 **Outputs:**
 - `intensities`: Tensor of shape `[N]` containing the sampled and processed intensity values [S1, unofficial].
@@ -46,7 +47,7 @@ The method takes a volumetric tensor and a set of 3D points, interpolates the vo
 import torch
 import torch.nn.functional as F
 
-def point_cloud_density_evaluation(volume, points, scale=None, min_val=None, max_val=None, normalize=False, enable_footprint_pooling=False):
+def point_cloud_density_evaluation(volume, points, scale=None, min_val=None, max_val=None, normalize=False, enable_footprint_pooling=False, padding_mode="zeros"):
     # 1. Empty Check
     if points.numel() == 0:
         return torch.empty(0), volume.min(), volume.max()
@@ -73,7 +74,7 @@ def point_cloud_density_evaluation(volume, points, scale=None, min_val=None, max
         volume_f,
         grid_large,
         mode="bilinear",
-        padding_mode="zeros", # [G]
+        padding_mode=padding_mode,
         align_corners=True
     ).view(points_f.shape[0], -1)
     intensities = samples_large[:, 0]  # Assume single channel intensity
@@ -81,8 +82,8 @@ def point_cloud_density_evaluation(volume, points, scale=None, min_val=None, max
     # 5. Footprint Pooling
     if enable_footprint_pooling and scale is not None:
         D, H, W = volume_f.shape[2], volume_f.shape[3], volume_f.shape[4]
-        # Convert points to voxel coordinates
-        voxel_coords = points_f * torch.tensor([D, H, W], device=points_f.device).float()
+        # Convert points to voxel coordinates (x->W, y->H, z->D)
+        voxel_coords = points_f * torch.tensor([W, H, D], device=points_f.device).float()
         
         # Compute scale_cov
         if scale.dim() == 1:
@@ -100,8 +101,9 @@ def point_cloud_density_evaluation(volume, points, scale=None, min_val=None, max
         max_idx = torch.ceil(voxel_coords + extent_zyx).long()
         
         # Clamp to volume dimensions
-        min_idx = torch.clamp(min_idx, 0, torch.tensor([D-1, H-1, W-1], device=points_f.device))
-        max_idx = torch.clamp(max_idx, 0, torch.tensor([D-1, H-1, W-1], device=points_f.device))
+        dim_limits = torch.tensor([D - 1, H - 1, W - 1], device=points_f.device)
+        min_idx = torch.clamp(min_idx, 0, dim_limits)
+        max_idx = torch.clamp(max_idx, 0, dim_limits)
         
         # Iterate and compute mean
         new_intensities = torch.zeros_like(intensities)
@@ -156,23 +158,23 @@ The Probabilistic Occupancy Policy determines the occupancy status of a point cl
 Computes the Bhattacharyya distance between histograms of voxel values inside and outside the target object to measure distribution overlap.
 
 ### Poisson Distribution Lookup for Feature Points
-Given a uniformly distributed random number, returns the number of feature points in a given cube based on Poisson distribution thresholds [S2, unofficial]. If the value is less than 0.0915781944272058, return 1. If less than 0.238103305510735, return 2. If less than 0.433470120288774, return 3. If less than 0.628836935299644, return 4. If less than 0.785130387122075, return 5. If less than 0.889326021747972, return 6. If less than 0.948866384324819, return 7. If less than 0.978636565613243, return 8 [S2, unofficial].
+Given a uniformly distributed random number, returns the number of feature points in a given cube based on Poisson distribution thresholds [S2, unofficial]. If the value is less than 0.0915781944272058, return 1 [S2, unofficial]. If less than 0.238103305510735, return 2 [S2, unofficial]. If less than 0.433470120288774, return 3 [S2, unofficial]. If less than 0.628836935299644, return 4 [S2, unofficial]. If less than 0.785130387122075, return 5 [S2, unofficial]. If less than 0.889326021747972, return 6 [S2, unofficial]. If less than 0.948866384324819, return 7 [S2, unofficial]. If less than 0.978636565613243, return 8 [S2, unofficial].
 
 ### Point Cloud Size Ablation
-An evaluation of the trade-off between point cloud density and performance metrics (training time, rendering speed, model size, and PSNR) [S3]. The chosen number of points for experiments is 45k, balancing quality and performance [S3]. For 15k points: Train time 16 min, Render 35 fps, Model size 37 MB, PSNR 32.2 dB. For 30k points: Train time 20 min, Render 32 fps, Model size 73 MB, PSNR 33.6 dB. For 45k points: Train time 30 min, Render 25 fps, Model size 110 MB, PSNR 34.6 dB. For 60k points: Train time 41 min, Render 16 fps, Model size 146 MB, PSNR 34.8 dB. For 100k points: Train time 76 min, Render 10 fps, Model size 244 MB, PSNR 34.2 dB [S3].
+An evaluation of the trade-off between point cloud density and performance metrics (training time, rendering speed, model size, and PSNR) [S3]. The chosen number of points for experiments is 45k, balancing quality and performance [S3]. For 15k points: Train time 16 min, Render 35 fps, Model size 37 MB, PSNR 32.2 dB [S3]. For 30k points: Train time 20 min, Render 32 fps, Model size 73 MB, PSNR 33.6 dB [S3]. For 45k points: Train time 30 min, Render 25 fps, Model size 110 MB, PSNR 34.6 dB [S3]. For 60k points: Train time 41 min, Render 16 fps, Model size 146 MB, PSNR 34.8 dB [S3]. For 100k points: Train time 76 min, Render 10 fps, Model size 244 MB, PSNR 34.2 dB [S3].
 
 ### Plane Standard Deviation (Pσ) Calculation
-Extract the filtered LiDAR point cloud and the corresponding NeRF point cloud for a semantic group representing a single plane. Split both point clouds into patches of size 3 × 3 square meters. Calculate the standard deviation of the NeRF patch points along the estimated normal direction [S4].
+Extract the filtered LiDAR point cloud and the corresponding NeRF point cloud for a semantic group representing a single plane [S4]. Split both point clouds into patches of size 3 × 3 square meters [S4]. Calculate the standard deviation of the NeRF patch points along the estimated normal direction [S4].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ for base sampling, where $N$ is the number of points. Footprint pooling adds complexity proportional to the number of points times the volume of the footprint region [S1, unofficial].
+- **Time Complexity:** $O(N)$ for base sampling, where $N$ is the number of points [S1, unofficial]. Footprint pooling adds complexity proportional to the number of points times the volume of the footprint region [S1, unofficial].
 - **Memory Complexity:** $O(N)$ for storing intensities [S1, unofficial].
-- **Performance:** The method is efficient for dense point clouds due to vectorized grid sampling. Footprint pooling can be slower if not optimized [S1, unofficial].
+- **Performance:** The method is efficient for dense point clouds due to vectorized grid sampling [S1, unofficial]. Footprint pooling can be slower if not optimized [S1, unofficial].
 - **Strengths:** Direct interpolation, flexible footprint pooling, easy integration with PyTorch [S1, unofficial].
-- **Limitations:** Requires regular volume grid. Footprint pooling implementation in pseudocode is naive (loop-based) [S1, unofficial].
+- **Limitations:** Requires regular volume grid [S1, unofficial]. Footprint pooling implementation in pseudocode is naive (loop-based) [S1, unofficial].
 
 ## Background
-This method is part of the 3D Gaussian Splatting acceleration workflow, specifically for volume-based supervision. It builds on the original 3D Gaussian Splatting work by Kerbl et al. [S1, unofficial].
+This method is part of the 3D Gaussian Splatting acceleration workflow, specifically for volume-based supervision [S1, unofficial]. It builds on the original 3D Gaussian Splatting work by Kerbl et al. [S1, unofficial].
 
 ## Sources
 [S1] ValentinKraft/vgs, https://github.com/ValentinKraft/vgs, fetched 2026-10-27 (unofficial)

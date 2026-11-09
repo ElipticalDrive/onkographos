@@ -1,0 +1,120 @@
+# Distribution by Depth Layer
+
+Also called: Adaptive Layer Distribution, Quality/Performance Tradeoff via Layer Count
+
+## Overview
+Distribution by Depth Layer is a workload distribution method that assigns high-quality raycasting to the first $n$ depth layers (representing close structures) and multi-frame rate image warping to the remaining layers [S1]. It exploits the observation that close structures contribute more to the final image than distant ones [S1]. It sets itself apart from sibling methods by using depth proximity as the primary heuristic for quality allocation, whereas [Layered Image Warping](11344-layered-image-warping.md) focuses on the warping mechanism itself [S1].
+
+## How it works
+**Inputs:**
+*   Volume dataset.
+*   Camera position and orientation.
+*   Target minimum frame rate ($FPS_{min}$).
+*   Hardware configuration: a fast GPU and a slow GPU [S1].
+
+**Outputs:**
+*   Final rendered image.
+*   Dynamic number of raycasted layers ($n$) [S1].
+
+**Data Structures:**
+*   **Layer List:** An ordered list of depth layers extracted from the volume. The list is sorted by distance from the camera, with index 0 being the closest [S1].
+*   **Frame Rate Monitor:** Tracks current frame rate ($FPS_{curr}$) [S1].
+
+**Parameters:**
+*   $n$: The number of front layers to raycast. [S1]
+*   $FPS_{min}$: The desired minimum frame rate. [S1]
+
+**Steps:**
+1.  **Initial Setup:** Determine the total number of layers $N$ in the volume dataset. Initialize $n$ to a starting value (e.g., a small integer or based on initial performance estimates) [S1].
+2.  **Layer Assignment:**
+    *   Assign layers $0$ to $n-1$ (the closest $n$ layers) to be rendered via raycasting on the fast GPU [S1].
+    *   Assign layers $n$ to $N-1$ (the remaining back layers) to be rendered via multi-frame rate image warping on the slow GPU [S1].
+3.  **Rendering:**
+    *   Perform raycasting for the front $n$ layers.
+    *   Perform image warping for the back $N-n$ layers.
+    *   Composite the results into the final image [S1].
+4.  **Performance Monitoring:** Measure the current frame rate $FPS_{curr}$ [S1].
+5.  **Adaptive Adjustment:**
+    *   **If $FPS_{curr} < FPS_{min}$:** Immediately decrease $n$ by 1 (i.e., $n \leftarrow n - 1$). This reduces the workload on the fast GPU by moving one layer from raycasting to warping [S1].
+    *   **Periodic Check:** Periodically attempt to render with $n+1$ layers. If the frame rate remains above $FPS_{min}$, accept the higher quality by keeping or increasing $n$; otherwise, revert to the previous $n$ [S1].
+6.  **Repeat:** Return to Step 2 for the next frame or update cycle [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def distribution_by_depth_layer(volume, camera, fast_gpu, slow_gpu, fps_min):
+    # Get all depth layers sorted by distance from camera (closest first)
+    layers = get_sorted_depth_layers(volume, camera)
+    total_layers = len(layers)
+    
+    # Initial guess for n (number of raycasted layers)
+    # [G] A reasonable initial guess might be derived from a single frame test
+    n = estimate_initial_n(layers, fast_gpu, slow_gpu)
+    
+    while rendering_active:
+        # 1. Assign layers
+        raycast_layers = layers[0:n]
+        warp_layers = layers[n:total_layers]
+        
+        # 2. Render
+        # Raycast close layers on fast GPU
+        front_image = raycast(fast_gpu, raycast_layers, camera)
+        
+        # Warp back layers on slow GPU
+        # [G] Image warping typically requires a reference image or depth buffer
+        # from the previous frame or a coarse approximation.
+        back_image = image_warp(slow_gpu, warp_layers, camera, front_image)
+        
+        # Composite
+        final_image = composite(front_image, back_image)
+        
+        # 3. Monitor Frame Rate
+        current_fps = measure_frame_rate()
+        
+        # 4. Adaptive Adjustment
+        if current_fps < fps_min:
+            # Decrease n immediately to improve performance
+            if n > 0:
+                n = n - 1
+        else:
+            # Periodically check if higher quality is possible
+            # [G] "Periodically" implies a timer or counter; here simplified
+            if should_try_higher_quality():
+                # Try rendering with n+1 layers
+                if n + 1 <= total_layers:
+                    test_front_image = raycast(fast_gpu, layers[0:n+1], camera)
+                    test_back_image = image_warp(slow_gpu, layers[n+1:total_layers], camera, test_front_image)
+                    test_fps = measure_frame_rate()
+                    
+                    if test_fps >= fps_min:
+                        n = n + 1
+                    # Else: keep n as is
+        
+        yield final_image
+```
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Input:** If $n=0$, all layers are warped, potentially losing all high-frequency detail from close structures. If $n=N$, all layers are raycasted, potentially missing the performance benefit of warping [S1].
+*   **Precision:** The transition between raycasting and warping at layer $n$ may introduce visible seams if the warping accuracy is insufficient for the depth discontinuity [S1].
+*   **Boundary:** The number of raycasted layers cannot exceed the total number of layers $N$ [S1].
+
+## Subtopics
+
+### [Advanced Workload Distribution Schemes](11581-advanced-workload-distribution-schemes.md)
+Extends this concept by distributing workload between GPUs to replace some image warping with raycasting for higher quality beyond strict node assignment.
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of raycasted layers $n$. Performance (FPS) degrades linearly as $n$ increases [S1].
+*   **Memory Complexity:** Depends on the storage of the volume dataset and intermediate buffers for raycasting and warping. Not given in the sources.
+*   **Measured Performance:** Evaluation on a scene rotated 90 degrees showed that reconstruction error converges to the reference image as more layers are raycasted. The benefit of warping more than 6 layers vanishes [S1].
+*   **Strengths:** Automatically adjusts quality/performance tradeoff based on current frame rate. Exploits the perceptual importance of close structures [S1].
+*   **Limitations:** Requires two GPUs (fast and slow) for optimal implementation as described. The "vanishing benefit" after 6 layers suggests diminishing returns for high layer counts [S1].
+*   **When to Use:** When a fast GPU and a slow GPU are available, and the scene has distinct depth layers where close structures are visually more important.
+*   **When Not to Use:** When only a single GPU is available, or when the volume lacks distinct depth layers (e.g., uniform density).
+
+## Background
+Originated in the paper "Multi-Frame Rate Volume Rendering" by S. Hauswiesner, D. Kalkofen, and D. Schmalstieg (2010) [S1]. The method is part of a broader framework for multi-frame rate rendering, aiming to provide the best quality for a given maximum latency by dynamically adjusting the rendering workload [S1].
+
+## Sources
+[S1] Multi-Frame Rate Volume Rendering, https://doi.org/10.2312/egpgv.egpgv10.019-026, fetched 2026-10-29

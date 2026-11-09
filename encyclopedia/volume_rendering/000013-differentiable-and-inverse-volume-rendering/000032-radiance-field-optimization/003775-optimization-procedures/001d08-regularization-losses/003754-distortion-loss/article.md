@@ -3,19 +3,19 @@
 Also called: Background Distortion Loss, Distortion Regularizer, Efficient O(N) Distortion Loss, Linear-time Distortion Loss, MipNeRF360 Distortion Loss, O(N) Distortion Loss
 
 ## Overview
-Distortion Loss is a regularization term for differentiable volume rendering that prevents "floaters" (small, disconnected regions of dense volume) and "background collapse" (distant surfaces modeled as semi-transparent clouds near the camera) by minimizing the expected distance between two independent samples drawn from the ray's weight distribution [S1][S2, S4, unofficial]. Unlike NeRF's noise injection regularizer, which partially eliminates these artifacts at the cost of reconstruction quality, Distortion Loss effectively suppresses them while maintaining high fidelity [S1]. It is distinguished from sibling losses by its focus on the geometric compactness of the depth distribution along rays rather than pixel-space photometric errors or spatial smoothness [S1][S4, unofficial].
+Distortion Loss is a regularization term for differentiable volume rendering that prevents "floaters" (small, disconnected regions of dense volume) and "background collapse" (distant surfaces modeled as semi-transparent clouds near the camera) by minimizing the expected distance between two independent samples drawn from the ray's weight distribution [S1][S2, unofficial][S4, unofficial]. Unlike NeRF's noise injection regularizer, which partially eliminates these artifacts at the cost of reconstruction quality, Distortion Loss effectively suppresses them while maintaining high fidelity [S1]. It is distinguished from sibling losses by its focus on the geometric compactness of the depth distribution along rays rather than pixel-space photometric errors or spatial smoothness [S1].
 
 ## How it works
 **Inputs and Outputs:**
 *   **Inputs:**
-    *   $\mathbf{s}$: Array of normalized ray distances (interval boundaries) with shape $(R, N+1)$, where $R$ is the number of rays and $N$ is the number of samples per ray. Values are in $[0, 1]$ [S1][S2, unofficial].
-    *   $\mathbf{w}$: Array of sample weights with shape $(R, N)$, where $w_i$ is the weight for the $i$-th interval [S1][S2, unofficial].
+    *   $\mathbf{s}$: Array of normalized ray distances (interval boundaries) [S1][S2, unofficial].
+    *   $\mathbf{w}$: Array of sample weights, where $w_i$ is the weight for the $i$-th interval [S1][S2, unofficial].
     *   $\lambda$: Scalar hyperparameter balancing the distortion loss against the reconstruction loss (typically 0.01) [S1][S5, unofficial].
 *   **Output:**
     *   $\mathcal{L}_{\text{dist}}$: Scalar tensor representing the total distortion loss for the batch [S1][S5, unofficial].
 
 **Data Structures:**
-*   The implementation assumes batched processing. The core efficient algorithm relies on prefix and suffix sums to reduce complexity from $O(N^2)$ to $O(N)$ per ray [S2, unofficial].
+*   The implementation assumes batched processing [G]. The core efficient algorithm relies on prefix and suffix sums to reduce complexity from $O(N^2)$ to $O(N)$ per ray [S2, unofficial].
 
 **Formulas:**
 The distortion loss is defined as the integral of distances between all pairs of points along the 1D step function parameterized by $\mathbf{s}$ and $\mathbf{w}$ [S1]:
@@ -52,13 +52,13 @@ $$
 \mathcal{L}_{\text{inter}} = 2 \sum_{i=1}^{N-1} w_i m_i \sum_{j=0}^{i-1} w_j - 2 \sum_{i=1}^{N-1} w_i \sum_{j=0}^{i-1} w_j m_j
 $$
 
-This requires computing prefix sums for $w$ and $w \odot m$. Let $P_w[k] = \sum_{j=0}^{k-1} w_j$ and $P_{wm}[k] = \sum_{j=0}^{k-1} w_j m_j$. Then:
+This requires computing prefix sums for $w$ and $w \odot m$ [S2, unofficial]. Let $P_w[k] = \sum_{j=0}^{k-1} w_j$ and $P_{wm}[k] = \sum_{j=0}^{k-1} w_j m_j$ [G]. Then:
 
 $$
 \mathcal{L}_{\text{inter}} = 2 \sum_{i=1}^{N-1} w_i m_i P_w[i] - 2 \sum_{i=1}^{N-1} w_i P_{wm}[i]
 $$
 
-The gradient with respect to $w_k$ is required for backpropagation. Using prefix sums $P_w, P_{wm}$ and suffix sums $S_w[k] = \sum_{i=k+1}^{N-1} w_i$ and $S_{wm}[k] = \sum_{i=k+1}^{N-1} w_i m_i$ [S2, unofficial]:
+The gradient with respect to $w_k$ is required for backpropagation [G]. Using prefix sums $P_w, P_{wm}$ and suffix sums $S_w[k] = \sum_{i=k+1}^{N-1} w_i$ and $S_{wm}[k] = \sum_{i=k+1}^{N-1} w_i m_i$ [S2, unofficial]:
 
 $$
 \frac{\partial \mathcal{L}_{\text{inter}}}{\partial w_k} = 2 m_k P_w[k] - 2 P_{wm}[k] + 2 S_{wm}[k] - 2 m_k S_w[k]
@@ -92,58 +92,21 @@ def compute_distortion_loss(s: torch.Tensor, w: torch.Tensor, lambda_dist: float
     delta_s = s[:, 1:] - s[:, :-1]
     loss_intra = (w ** 2 * delta_s).sum(dim=1) / 3.0
     
-    # 3. Compute Inter-interval Loss efficiently using prefix/suffix sums
-    # We need to compute: 2 * sum_i (w_i * m_i * sum_{j<i} w_j) - 2 * sum_i (w_i * sum_{j<i} w_j * m_j)
+    # 3. Compute Inter-interval Loss efficiently using prefix sums
+    # L_inter = 2 * sum_{i=1}^{N-1} w_i * m_i * (sum_{j=0}^{i-1} w_j) - 2 * sum_{i=1}^{N-1} w_i * (sum_{j=0}^{i-1} w_j * m_j)
     
     # Prefix sums of w and w*m
-    # pad with 0 at the beginning to align indices: P[k] = sum_{j=0}^{k-1} ...
+    # pad with 0 at the beginning: P[k] = sum_{j=0}^{k-1} ...
     # w shape: (R, N) -> prefix_w shape: (R, N+1)
     prefix_w = torch.cat([torch.zeros(w.shape[0], 1, device=w.device), torch.cumsum(w, dim=1)], dim=1)
     prefix_wm = torch.cat([torch.zeros(w.shape[0], 1, device=w.device), torch.cumsum(w * m, dim=1)], dim=1)
     
-    # Suffix sums of w and w*m
-    # S[k] = sum_{j=k+1}^{N-1} ...
-    # Reverse cumsum
-    suffix_w = torch.cat([torch.flip(torch.cumsum(torch.flip(w, dims=[1]), dim=1), dims=[1]), torch.zeros(w.shape[0], 1, device=w.device)], dim=1)
-    suffix_wm = torch.cat([torch.flip(torch.cumsum(torch.flip(w * m, dims=[1]), dim=1), dims=[1]), torch.zeros(w.shape[0], 1, device=w.device)], dim=1)
+    # Compute terms for all i from 0 to N-1
+    # For i=0, prefix sums are 0, so terms are 0. Correct.
+    term1 = 2.0 * w * m * prefix_w[:, :-1]
+    term2 = 2.0 * w * prefix_wm[:, :-1]
     
-    # Calculate terms for sum_i=1 to N-1
-    # Note: indices 0 and N-1 in the summation range need care. 
-    # The formula sums i from 1 to N-1.
-    # For i=0, the inner sum j<0 is empty (0). For i=N-1, the suffix sum is empty (0).
-    # We can compute the full sum and subtract boundary terms if necessary, 
-    # but direct indexing is clearer.
-    
-    # Term 1: 2 * sum_{i=1}^{N-1} w_i * m_i * prefix_w[i]
-    # prefix_w[i] is sum_{j=0}^{i-1} w_j.
-    # We slice w, m, and prefix_w to exclude i=0 (where prefix_w[0]=0 anyway, so term is 0)
-    # and i=N-1? No, i goes up to N-1.
-    
-    # Let's compute element-wise for all i, then sum.
-    # For i=0: prefix_w[0]=0, so term1 is 0. Correct.
-    # For i=N-1: suffix terms are 0.
-    
-    term1 = 2.0 * w * m * prefix_w[:, :-1] # shape (R, N)
-    # Note: prefix_w[:, :-1] corresponds to prefix_w[0...N-1]. 
-    # For i=0, prefix_w[0]=0. For i=N-1, prefix_w[N-1] = sum_{j=0}^{N-2} w_j.
-    
-    term2 = 2.0 * w * prefix_wm[:, :-1] # shape (R, N)
-    
-    term3 = 2.0 * w * suffix_wm[:, 1:] # shape (R, N). suffix_wm[:, 1:] is sum_{j=i+1}^{N-1} w_j m_j
-    # For i=N-1, suffix_wm[N] = 0. Correct.
-    
-    term4 = 2.0 * w * m * suffix_w[:, 1:] # shape (R, N)
-    
-    # Combine: L_inter = sum_i (term1 - term2 + term3 - term4)
-    # Wait, the formula is:
-    # 2 sum_i w_i m_i (sum_{j<i} w_j) - 2 sum_i w_i (sum_{j<i} w_j m_j)
-    # + 2 sum_i w_i (sum_{j>i} w_j m_j) - 2 sum_i w_i m_i (sum_{j>i} w_j)
-    # The second part comes from swapping i and j in the absolute value sum for j > i.
-    # |m_i - m_j| = m_j - m_i for j > i.
-    # Sum_{j>i} w_i w_j (m_j - m_i) = sum_{j>i} w_i w_j m_j - sum_{j>i} w_i w_j m_i
-    # = w_i sum_{j>i} w_j m_j - w_i m_i sum_{j>i} w_j
-    
-    loss_inter = (term1 - term2 + term3 - term4).sum(dim=1)
+    loss_inter = (term1 - term2).sum(dim=1)
     
     total_loss = loss_inter + loss_intra
     return total_loss * lambda_dist
@@ -152,7 +115,18 @@ def compute_distortion_loss(s: torch.Tensor, w: torch.Tensor, lambda_dist: float
 **Edge Cases and Pitfalls:**
 *   **Normalization:** Ray distances $s$ must be normalized to $[0, 1]$ (typically via non-linear sampling from near-far clipping) [S1][S2, unofficial]. Using unnormalized distances $t$ significantly upweights distant intervals, causing nearby intervals to be ignored and leading to incorrect gradients [S1].
 *   **Memory:** The naive $O(N^2)$ implementation creates an $N \times N$ distance matrix, consuming excessive GPU memory (e.g., >3GB for 4,096 rays with 256 samples) [S2, unofficial]. The efficient $O(N)$ implementation using prefix/suffix sums is required for large $N$ [S2, unofficial].
-*   **Background Collapse:** The loss encourages weights to concentrate. If background modeling is enabled, a separate background distortion loss may be computed using background-specific weights and intervals [S5, unofficial].
+*   **Background Collapse:** The loss encourages weights to concentrate [S1]. If background modeling is enabled, a separate background distortion loss may be computed using background-specific weights and intervals [S5, unofficial].
+
+## Subtopics
+
+### Depth Distortion Loss
+A variant for 3D Gaussian Splatting that computes the sum over all pairs of Gaussians $k, l$ of the squared distance between their depths $d_k, d_l$, weighted by $\omega_k \omega_l$ [S6]. It implicitly assumes an opaque surface, which reduces the ability to model complex light transport and tends to produce oversmoothed depth reconstructions [S6].
+
+### Occupancy Bias
+A heuristic used alongside distortion loss in 3D Gaussian Splatting that decreases the learning rate for scene reflectivity by a factor of 10× compared to other parameters (position, opacity) [S6]. Unlike Depth Distortion Loss which forces Gaussians to be close to each other, Occupancy Bias better encourages Gaussians to conform to true scene structure from the outset without forcing proximity [S6].
+
+### 2D-GS Loss Configuration
+In 2D Gaussian Splatting, the distortion loss is configured as $L_d = \sum_{i,j} \omega_i \omega_j |z_i - z_j|$ with a weight of 0.01, often combined with a normal loss $L_n = \sum_i \omega_i (1 - \mathbf{n}_i^T \mathbf{N})$ weighted at 0.05 [S7].
 
 ## Operating characteristics
 *   **Complexity:** The efficient implementation runs in $O(N)$ time and $O(N)$ memory per ray, where $N$ is the number of samples [S2, unofficial]. The naive implementation is $O(N^2)$ time and memory [S2, unofficial].
@@ -162,7 +136,7 @@ def compute_distortion_loss(s: torch.Tensor, w: torch.Tensor, lambda_dist: float
 *   **When to use:** Use when training unbounded or large-scale scenes (e.g., MipNeRF 360, Instant-NSR-PL) where floaters and background artifacts are prevalent [S1][S5, unofficial]. Not necessary for small, bounded scenes with few samples [S2, unofficial].
 
 ## Background
-Distortion Loss was introduced in the MipNeRF 360 paper (Barron et al., 2022) as a regularizer to address artifacts in unbounded, anti-aliased neural radiance fields [S1]. It was motivated by the observation that standard NeRF's noise injection regularizer was insufficient for preventing background collapse and floaters in complex scenes [S1]. An efficient $O(N)$ implementation was later provided by Yu et al. (2022) in the context of Direct Voxel Grid Optimization (DVGO), enabling its use in methods with higher sample counts [S2, unofficial]. It is widely adopted in modern differentiable volume rendering frameworks such as Instant-NSR-PL and Nerfstudio-based pipelines [S5, S4, unofficial].
+Distortion Loss was introduced in the MipNeRF 360 paper (Barron et al., 2022) as a regularizer to address artifacts in unbounded, anti-aliased neural radiance fields [S1]. It was motivated by the observation that standard NeRF's noise injection regularizer was insufficient for preventing background collapse and floaters in complex scenes [S1]. An efficient $O(N)$ implementation was later provided by Yu et al. (2022) in the context of Direct Voxel Grid Optimization (DVGO), enabling its use in methods with higher sample counts [S2, unofficial]. It is widely adopted in modern differentiable volume rendering frameworks such as Instant-NSR-PL and Nerfstudio-based pipelines [S5, unofficial][S4, unofficial].
 
 ## Sources
 [S1] Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.00539, fetched 2026-10-26
@@ -170,3 +144,5 @@ Distortion Loss was introduced in the MipNeRF 360 paper (Barron et al., 2022) as
 [S3] NVlabs/InstantSplat, https://github.com/NVlabs/InstantSplat, fetched 2026-10-27 (unofficial)
 [S4] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)
 [S5] bennyguo/instant-nsr-pl, https://github.com/bennyguo/instant-nsr-pl, fetched 2026-10-27 (unofficial)
+[S6] Time of the Flight of the Gaussians: Optimizing Depth Indirectly in Dynamic Radiance Fields, https://doi.org/10.1109/cvpr52734.2025.01958, fetched 2026-10-26
+[S7] Octree-GS: Towards Consistent Real-time Rendering with LOD-Structured 3D Gaussians, https://doi.org/10.1109/tpami.2025.3568201, fetched 2026-10-27

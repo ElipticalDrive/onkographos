@@ -3,85 +3,71 @@
 Also called: CPU-only cutout path, Portable CPU-sort path
 
 ## Overview
-The CPU Fallback Sort Path is a rendering strategy for volume splatting that executes the sorting of splats on the CPU rather than the GPU. It is designed for environments where GPU compute shaders are unavailable, disabled, or insufficient, allowing the GPU to focus exclusively on rasterization and blending [S1, unofficial]. It differs from GPU-based sorting methods (like bitonic sort) by avoiding the overhead of complex GPU sorting algorithms and instead relying on CPU-side sorting algorithms (such as radix sort or $O(n \log n)$ sorts) to produce a sorted order buffer [S1, unofficial][S2, unofficial].
+The CPU Fallback Sort Path is a rendering strategy for volume splatting that executes splat sorting on the CPU rather than the GPU [S1, unofficial][S2, unofficial]. It provides a CPU-side sorting and rendering fallback when GPU compute sorting is disabled or unavailable, using a shader-readable structured buffer instead of append or UAV buffers [S1, unofficial]. It differs from GPU-based sorting methods by relying on CPU-side sorting algorithms to produce a sorted order buffer, which is necessary on platforms like the Android Filament Java API that lack compute shader support [S2, unofficial].
 
 ## How it works
-The method involves preparing a sorted list of splats on the CPU and uploading this order to a buffer readable by the GPU vertex or fragment shader. The specific implementation details vary depending on the target platform and the sorting algorithm chosen (e.g., Radix Sort vs. Painter's Sort).
+The method prepares a sorted list of splats on the CPU and uploads this order to a buffer readable by the GPU vertex or fragment shader [S1, unofficial]. The specific implementation details vary depending on the target platform and the sorting algorithm chosen [S2, unofficial].
 
 ### Inputs and Outputs
-*   **Inputs**: Unsorted splat data (positions, centroids, or keys), scene parameters (view direction), and a boolean flag `CpuFallbackEnabled`.
-*   **Outputs**: A sorted `OrderBuffer` containing indices or keys, and optionally an `OrderSizeBuffer` and `BoundsBuffer` for indirect drawing or culling.
+*   **Inputs**: Unsorted splat data and a boolean flag `CpuFallbackEnabled` [S1, unofficial].
+*   **Outputs**: A sorted `OrderBuffer` containing indices or keys, and optionally an `OrderSizeBuffer` and `BoundsBuffer` for indirect drawing or culling [S1, unofficial].
 
 ### Data Structures
-1.  **OrderBuffer**:
-    *   If `CpuFallbackEnabled` is true: `GraphicsBuffer.Target.Structured` [S1, unofficial].
-    *   If `CpuFallbackEnabled` is false: `GraphicsBuffer.Target.Append` [S1, unofficial].
-2.  **OrderSizeBuffer** (Allocated only if `CpuFallbackEnabled` is false): `IndirectArguments` buffer of size 1 [S1, unofficial].
-3.  **BoundsBuffer** (Allocated only if `CpuFallbackEnabled` is false): `Structured` buffer of size 6 [S1, unofficial].
+1.  **OrderBuffer**: `GraphicsBuffer.Target.Structured` if `CpuFallbackEnabled` is true, or `GraphicsBuffer.Target.Append` if false [S1, unofficial].
+2.  **OrderSizeBuffer**: `IndirectArguments` buffer of size 1, allocated only if `CpuFallbackEnabled` is false [S1, unofficial].
+3.  **BoundsBuffer**: `Structured` buffer of size 6, allocated only if `CpuFallbackEnabled` is false [S1, unofficial].
 
 ### Steps
-1.  **Check Configuration**: Evaluate `GsplatSorter.Instance.CpuFallbackEnabled` [S1, unofficial].
-2.  **Allocate OrderBuffer**:
-    *   If `CpuFallbackEnabled` is true, allocate `OrderBuffer` as `GraphicsBuffer.Target.Structured` [S1, unofficial].
-    *   If `CpuFallbackEnabled` is false, allocate `OrderBuffer` as `GraphicsBuffer.Target.Append` [S1, unofficial].
-3.  **Allocate Auxiliary Buffers (Conditional)**:
-    *   If `CpuFallbackEnabled` is false, additionally allocate:
-        *   `OrderSizeBuffer` as `IndirectArguments` with size 1 [S1, unofficial].
-        *   `BoundsBuffer` as `Structured` with size 6 [S1, unofficial].
-4.  **Perform CPU Sort**:
-    *   Execute the chosen CPU sorting algorithm (e.g., Radix Sort for face centroids or Painter's Sort for Gaussian splats) to generate the sorted order [S1, unofficial][S2, unofficial].
-    *   *Note*: For Gaussian splats on Android/Filament, this involves an $O(n \log n)$ sort on a `LongArray` using `SplatBuffers.sortBackToFront` on a background thread [S2, unofficial].
-5.  **Upload Data**:
-    *   Upload the sorted order data to the `OrderBuffer` [S1, unofficial][S2, unofficial].
-    *   If using the Append buffer path, update `OrderSizeBuffer` with the count of sorted splats [S1, unofficial].
-6.  **Render**:
-    *   Bind the `OrderBuffer` to the GPU shader for reading [S1, unofficial].
-    *   Execute draw calls using the sorted order [S1, unofficial][S2, unofficial].
+1.  Check `GsplatSorter.Instance.CpuFallbackEnabled` [S1, unofficial].
+2.  If true, create `OrderBuffer` as `GraphicsBuffer.Target.Structured` [S1, unofficial].
+3.  If false, create `OrderBuffer` as `GraphicsBuffer.Target.Append` [S1, unofficial].
+4.  If false, additionally allocate `OrderSizeBuffer` (`IndirectArguments`, size 1) and `BoundsBuffer` (`Structured`, size 6) [S1, unofficial].
+5.  Execute the platform-specific CPU sorting algorithm to generate the sorted order [S2, unofficial].
+6.  Upload the sorted order data to the `OrderBuffer` or texture buffers [S1, unofficial][S2, unofficial].
+7.  Bind the buffer to the GPU shader for reading and execute draw calls [S1, unofficial][S2, unofficial].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def execute_cpu_fallback_sort_path(splats, cpu_fallback_enabled):
-    # Step 1: Check Configuration
     if cpu_fallback_enabled:
         # Step 2: Allocate Structured Buffer
-        order_buffer = create_graphics_buffer(target=GraphicsBuffer.Target.Structured)
-        
-        # Step 4: Perform CPU Sort (Generic)
-        sorted_indices = cpu_sort_splats(splats)
-        
-        # Step 5: Upload Data
-        upload_to_buffer(order_buffer, sorted_indices)
-        
-        # Step 6: Render
-        bind_buffer(order_buffer)
-        execute_render_pass()
-        
+        order_buffer = {"target": "Structured", "data": []}
+        # Step 5: Perform CPU Sort
+        sorted_indices = sorted(range(len(splats)), key=lambda s: s.depth, reverse=True)
+        # Step 6: Upload Data
+        order_buffer["data"] = sorted_indices
+        # Step 7: Render
+        bind_shader_resource(order_buffer)
+        execute_draw_calls()
     else:
-        # Step 2: Allocate Append Buffer
-        order_buffer = create_graphics_buffer(target=GraphicsBuffer.Target.Append)
-        
-        # Step 3: Allocate Auxiliary Buffers
-        order_size_buffer = create_graphics_buffer(target=GraphicsBuffer.Target.IndirectArguments, size=1)
-        bounds_buffer = create_graphics_buffer(target=GraphicsBuffer.Target.Structured, size=6)
-        
-        # Step 4: Perform CPU Sort (Generic)
-        sorted_indices = cpu_sort_splats(splats)
-        
-        # Step 5: Upload Data
-        upload_to_buffer(order_buffer, sorted_indices)
-        update_indirect_arguments(order_size_buffer, len(sorted_indices))
-        
-        # Step 6: Render
-        bind_buffer(order_buffer)
-        bind_buffer(order_size_buffer)
-        bind_buffer(bounds_buffer)
-        execute_indirect_render_pass()
+        # Step 3: Allocate Append Buffer
+        order_buffer = {"target": "Append", "data": []}
+        # Step 4: Allocate Auxiliary Buffers
+        order_size_buffer = {"target": "IndirectArguments", "data": [0]}
+        bounds_buffer = {"target": "Structured", "data": [0.0] * 6}
+        # Step 5: Perform CPU Sort
+        sorted_indices = sorted(range(len(splats)), key=lambda s: s.depth, reverse=True)
+        # Step 6: Upload Data
+        order_buffer["data"] = sorted_indices
+        order_size_buffer["data"][0] = len(sorted_indices)
+        # Step 7: Render
+        bind_shader_resource(order_buffer)
+        bind_shader_resource(order_size_buffer)
+        bind_shader_resource(bounds_buffer)
+        execute_indirect_draw_calls()
 
-def cpu_sort_splats(splats):
-    # Implementation depends on variant (Radix Sort or Painter's Sort)
-    # [G] Placeholder for specific sorting logic defined in child articles
+def bind_shader_resource(buffer):
+    # [G] Maps buffer to GPU shader input slot
+    pass
+
+def execute_draw_calls():
+    # [G] Issues standard draw call
+    pass
+
+def execute_indirect_draw_calls():
+    # [G] Issues indirect draw call using bound buffers
     pass
 ```
 
@@ -89,23 +75,23 @@ def cpu_sort_splats(splats):
 *   `CpuFallbackEnabled`: Boolean flag determining the active path. True uses Structured buffers; False uses Append buffers [S1, unofficial].
 
 ### Edge Cases and Pitfalls
-*   **Performance Bottleneck**: On mid-range mobile devices, the CPU sort and subsequent data upload can dominate performance. For example, at 233k splats, a single re-sort transfers approximately 5.6 MB of data, which is significant for fill rate and overdraw [S2, unofficial].
-*   **Capacity Limits**: CPU sorting is generally acceptable up to 300,000–500,000 splats. Beyond this, LOD or pruning is required to maintain performance [S2, unofficial].
+*   **Performance Bottleneck**: On mid-range mobile devices, the CPU sort and subsequent data upload can dominate performance [S2, unofficial]. At 233k splats, a single re-sort transfers approximately 5.6 MB of data, which is significant for fill rate and overdraw [S2, unofficial].
+*   **Capacity Limits**: CPU sorting is generally acceptable up to 300,000–500,000 splats [S2, unofficial]. Beyond this, LOD or pruning is required to maintain performance [S2, unofficial].
 *   **Platform Constraints**: On Android with Filament, the lack of compute shader support in the Java API necessitates this CPU-based approach [S2, unofficial].
 
 ## Subtopics
 
 ### [CPU Radix Sort for Face Centroids](6216-cpu-radix-sort-for-face-centroids.md)
-This method provides a CPU-side fallback for sorting face centroids in volume splatting when GPU compute sorting is unavailable. It achieves linear time complexity by converting IEEE 754 floating-point numbers to signed integers and performing a Least Significant Digit (LSD) radix sort using counting sort on 8-bit blocks. It is chosen over general-purpose sorts (quicksort, heapsort) or re-sorting-optimized algorithms (mergesort) because viewing direction changes significantly alter centroid ordering, making the overhead of adaptive sorts inefficient compared to the raw speed of radix sort.
+This method sorts face centroids on the CPU using an out-of-place algorithm that achieves linear time complexity at the expense of auxiliary memory. It converts IEEE 754 floating-point numbers to 32-bit unsigned integers and performs a Least Significant Digit (LSD) radix sort using counting sort on 8-bit blocks. It is chosen over general-purpose sorts or re-sorting-optimized algorithms like mergesort because viewing direction changes significantly alter the ordering, making frequent full re-sorting more efficient than adaptive re-sorting overhead.
 
 ### CPU Painter's Sort for Gaussian Splats
 A sorting algorithm executed on the CPU to order splats back-to-front for correct alpha blending, necessitated by the lack of compute shader support in the Android Filament Java API [S2, unofficial]. It performs an $O(n \log n)$ sort on a `LongArray` using `SplatBuffers.sortBackToFront` on a background thread and re-uploads the sorted data to texture buffers after every re-sort [S2, unofficial]. It is considered acceptable up to approximately 300,000–500,000 splats; beyond this, LOD or pruning is required [S2, unofficial]. The primary pitfall is the performance bottleneck caused by data transfer: at 233k splats, a single re-sort transfers approximately 5.6 MB of data, dominating performance on mid-range phones due to fill rate and overdraw [S2, unofficial]. The memory bandwidth cost is approximately 16 bytes per splat re-uploaded (24 bytes if a third texture is used) [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity**: Depends on the underlying CPU sort algorithm. Radix sort offers linear time complexity $O(n)$ for fixed-width keys [S1, unofficial]. Painter's sort offers $O(n \log n)$ per re-sort [S2, unofficial].
+*   **Time Complexity**: $O(n \log n)$ per re-sort for Painter's Sort [S2, unofficial]. Radix Sort offers linear time complexity $O(n)$ for fixed-width keys [S1, unofficial].
 *   **Memory Complexity**: Linear with respect to the number of splats, plus overhead for auxiliary buffers if using the Append path [S1, unofficial].
 *   **Measured Performance**: On mid-range phones, the CPU sort and data upload (approx. 5.6 MB for 233k splats) can become the dominant performance bottleneck [S2, unofficial].
-*   **Strengths**: Works on platforms without GPU compute support (e.g., Android Filament Java API) [S2, unofficial]. Avoids the overhead of GPU sorting algorithms [S1, unofficial].
+*   **Strengths**: Works on platforms without GPU compute support (e.g., Android Filament Java API) [S2, unofficial].
 *   **Limitations**: Performance degrades significantly with high splat counts (>500k) due to CPU sorting time and data upload bandwidth [S2, unofficial].
 *   **When to Use**: When GPU compute is unavailable, disabled, or when the scene complexity is within the acceptable CPU sort limit (300k–500k splats) [S1, unofficial][S2, unofficial].
 *   **When Not to Use**: For scenes with millions of splats where CPU sorting and upload would cause frame rate drops [S2, unofficial].

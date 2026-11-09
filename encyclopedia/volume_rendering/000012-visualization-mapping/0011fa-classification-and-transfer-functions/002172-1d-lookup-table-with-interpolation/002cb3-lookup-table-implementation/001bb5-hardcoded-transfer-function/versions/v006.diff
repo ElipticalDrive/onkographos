@@ -1,0 +1,220 @@
+--- v005.md
++++ v006.md
+@@ -4,137 +4,101 @@
+ 
+ ## Overview
+-The Hardcoded Transfer Function (HTF) is a volume rendering classification method that maps a single scalar input value directly to a fixed color and opacity tuple $(R, G, B, \alpha)$ using a static lookup table or closed-form function [S1, unofficial][S2, S4]. It solves the problem of assigning visual properties to volume data based solely on intensity, providing the simplest possible classification mechanism [S2, S4]. Unlike [2D Transfer Function Volume Rendering](1295-2d-transfer-function-volume-rendering.md), which uses gradient magnitude to disambiguate features with identical intensities, the HTF cannot distinguish between samples that share the same data value but differ in context or structure [S2, S4]. It is distinguished from other [Lookup Table Implementation](5347-lookup-table-implementation.md) variants by its static, non-parametric nature in its purest form, though parametric closed-form variants exist [S1, S6, unofficial].
++The Hardcoded Transfer Function (HTF) is a classification method that maps scalar volume data values directly to color and opacity using a static, pre-defined lookup table [S1, unofficial][S2][S4]. It solves the problem of visualizing scalar fields by assigning RGBA values based solely on intensity, serving as the baseline reference for transfer function complexity [S2]. It is distinguished from its siblings by its complete lack of parameterization or runtime generation; the color/opacity mapping is fixed in memory, requiring no user interaction or mathematical derivation during rendering [S2]. Unlike [2D Transfer Function Volume Rendering](1295-2d-transfer-function-volume-rendering.md), it cannot distinguish between features with identical scalar values but different structural contexts [S2][S4].
+ 
+ ## How it works
+-The HTF operates by defining a mapping $tf: x \in \mathbb{R} \rightarrow (R, G, B, \alpha) \in [0, 1]^4$, where $x$ is the normalized scalar intensity [S4]. The implementation relies on the shared principles of the parent [Lookup Table Implementation](5347-lookup-table-implementation.md), specifically data representation as 4-component vectors, scalar domain mapping to $[0, 1]$, boundary clamping, and linear interpolation [S2][S3, unofficial][S4][S5, S6, S7, S8, unofficial].
++**Inputs and Outputs:**
++*   **Input:** A scalar volume dataset with values $v \in [x_{min}, x_{max}]$.
++*   **Output:** A 4-component vector $(R, G, B, \alpha)$ for each sample point.
+ 
+-### Inputs and Outputs
+-*   **Input**: A scalar value $x$ from the volume dataset, normalized to $[0, 1]$ using the volume's minimum ($x_{min}$) and range ($x_{max} - x_{min}$) [S2][S3, unofficial][S4][S5, S6, S8, unofficial].
+-*   **Output**: A 4-component vector $(R, G, B, \alpha)$ representing the color and opacity for the sample point [S1, unofficial][S2][S3, unofficial][S4][S5, S6, S8, unofficial].
++**Data Structures:**
++The transfer function is stored as a static array of 4-component vectors.
++*   **Layout:** An array of `float` or `vec4` elements.
++*   **Size:** Commonly 256 entries (mapping 8-bit indices 0–255) or 4096 entries (for higher precision or 12-bit internal representations) [S1, unofficial][S3, unofficial].
++*   **Content:** Each entry $i$ contains $(R_i, G_i, B_i, \alpha_i)$ where components are in $[0, 1]$ [S1, unofficial][S3, unofficial]. In some hardware implementations (e.g., VolumePro), RGB components are 8-bit repeating-fraction numbers and alpha is a 12-bit repeating-fraction number, totaling 36 bits per entry [S3, unofficial].
++*   **GPU Storage:** Uploaded to GPU memory as a 1D texture (for hardware interpolation) or a raw device array/SSBO (for direct lookup) [S5, unofficial].
+ 
+-### Data Structures
+-The transfer function is stored as a static array of 4-component vectors.
+-*   **Layout**: An array of size $N$ (typically a power of two, e.g., 256, 1024, 4096) where each entry contains $(R, G, B, \alpha)$ [S1, S3, S5, S6, S7, S8, unofficial].
+-*   **Bit Packing**: In hardware-accelerated implementations (e.g., VolumePro), the output may be packed into 36 bits: 8 bits for R, 8 bits for G, 8 bits for B, and 12 bits for $\alpha$, all representing repeating-fraction numbers in $[0, 1]$ [S3, unofficial].
+-*   **GPU Storage**: On CUDA architectures, the table is stored in device memory as a `float4` array (`m_device_table`) and/or bound as a 1D CUDA array (`m_array`) for texture sampling [S5, unofficial].
++**Steps:**
++1.  **Normalization:** Map the input scalar value $v$ to a normalized domain $x \in [0, 1]$:
++    $$ x = \frac{v - x_{min}}{x_{max} - x_{min}} $$
++    [S2][S3, unofficial][S4][S5, S6, S8, unofficial]
++2.  **Index Calculation:** Compute the integer index $idx$ into the lookup table of size $N$:
++    $$ idx = \text{clamp}(\lfloor x \cdot (N-1) \rfloor, 0, N-1) $$
++    [S3, S5, S8, unofficial]
++    *Note: If using hardware texture sampling, the texture object is configured with `normalizedCoords = 1` and `addressMode = Clamp` to handle this automatically [S5, unofficial].*
++3.  **Lookup:** Retrieve the RGBA value from the table.
++    *   **Direct Lookup:** Return `table[idx]` [S5, unofficial].
++    *   **Interpolated Lookup:** If the table is stored as a linear-filtered texture, sample at coordinate $x$ to get a weighted average of adjacent entries [S5, unofficial].
++4.  **Output:** Return the retrieved $(R, G, B, \alpha)$.
+ 
+-### Steps
+-1.  **Normalization**: Map the raw scalar value $v$ to the normalized domain $x \in [0, 1]$:
+-    $$ x = \frac{v - x_{min}}{x_{max} - x_{min}} $$
+-    Clamp $x$ to $[0, 1]$ to handle out-of-bounds values [S2][S3, unofficial][S4][S5, S6, S7, S8, unofficial].
+-2.  **Lookup/Computation**: Retrieve or compute the RGBA values based on $x$.
+-    *   **Table Lookup**: If using a static LUT, compute the index $idx = \lfloor x \cdot (N-1) \rfloor$ and retrieve the pre-defined RGBA tuple [S3, S5, S8, unofficial].
+-    *   **Closed-Form**: If using a parametric hardcoded function (e.g., exponential decay), compute the values directly using the defined formulas [S6, S8, unofficial].
+-3.  **Gradient Modulation (Optional)**: If gradient information is available and the specific HTF variant supports it (e.g., VolumePro's `Gmom=1`), modulate the opacity $\alpha$ by a gradient lookup:
+-    $$ \alpha = \text{GmLUT}[\text{Gradient}] \cdot \alpha_{\text{base}} $$
+-    If `Gmom=0`, $\alpha = \alpha_{\text{base}}$ [S3, unofficial].
+-4.  **Output**: Return the final $(R, G, B, \alpha)$ tuple for compositing [S2, S4][S5, S6, S8, unofficial].
++**Pseudocode (Direct Lookup):**
++```python
++def hardcoded_transfer_function_lookup(value, x_min, x_max, table, N):
++    """
++    value: float, scalar input from volume
++    x_min: float, minimum scalar value in volume
++    x_max: float, maximum scalar value in volume
++    table: list of vec4, static RGBA lookup table of size N
++    N: int, length of table
++    """
++    # 1. Normalize
++    if x_max == x_min:
++        x = 0.0
++    else:
++        x = (value - x_min) / (x_max - x_min)
++    
++    # 2. Clamp to [0, 1]
++    x = max(0.0, min(1.0, x))
++    
++    # 3. Calculate Index
++    idx = int(x * (N - 1))
++    idx = max(0, min(N - 1, idx))
++    
++    # 4. Lookup and Return
++    return table[idx]
++```
+ 
+-### Formulas
+-**Standard Table Lookup**:
+-$$ \text{RGBA}(x) = \text{LUT}[\text{clamp}(\lfloor x \cdot (N-1) \rfloor, 0, N-1)] $$
++**Parameters:**
++*   **Table Content:** The specific RGBA values are hardcoded. Typical pitfalls include opacity values being mostly 0.0 or 0.1, with limited dynamic range [S1, unofficial].
++*   **Domain:** $x_{min}$ and $x_{max}$ define the scalar range mapped to the table [S5, unofficial].
+ 
+-**Exponential Color Transfer Function (Parametric Variant)**:
+-Defined by [S6, S8, unofficial]:
+-$$ \alpha = \frac{e^{k_i \cdot x} - 1}{e^{k_i} - 1} $$
+-$$ \text{Color} = x \cdot \mathbf{C}_{high} + (1 - x) \cdot \mathbf{C}_{low} $$
+-Where $\mathbf{C}_{high} = (1.0, 1.0, 1.0)$ and $\mathbf{C}_{low} = (0.0, 0.0, 0.0)$ [S6, S8, unofficial].
+-
+-**Gradient Attenuation (if applicable)**:
+-$$ \alpha_{final} = \alpha \cdot \left( 1.0 - \frac{1.0}{1.0 + k_g \cdot |\nabla f|} \right) $$
+-Where $k_g$ controls the attenuation strength [S6, S8, unofficial].
+-
+-### Parameters
+-*   $N$: Table size. Typical values: 256, 1024, 4096 [S1, S3, S5, S6, S7, S8, unofficial].
+-*   $k_i$: Constant controlling exponential opacity decay. Not given in the sources.
+-*   $k_g$: Constant controlling gradient-based attenuation. Not given in the sources.
+-*   Color Keys: Specific RGB values defining the gradient (e.g., Gray, DarkGray, Red, Orange, Yellow in the Fire Palette variant) [S7, unofficial].
+-
+-### Edge Cases and Pitfalls
+-*   **Indistinguishability**: The primary limitation is that the HTF maps all voxels with the same intensity to the same color/opacity, regardless of their spatial context or gradient [S2, S4]. Features with identical grey levels cannot be differentiated [S2].
+-*   **Precision**: In hardware implementations, 12-bit alpha precision may limit smooth opacity transitions compared to full floating-point representations [S3, unofficial].
+-*   **Static Nature**: Pure hardcoded tables lack explicit scalar-to-index mapping documentation and may have opacity values clustered at 0.0 or 0.1, limiting dynamic range [S1, unofficial].
+-*   **Out-of-Bounds**: Values outside $[0, 1]$ must be clamped to prevent memory access errors [S2][S3, S5, S7, S8, unofficial].
+-
+-### Pseudocode
+-```python
+-# Hardcoded Transfer Function Implementation
+-# Supports both static table lookup and parametric exponential variant
+-
+-def hardcoded_transfer_function(intensity, gradient=0.0, use_gradient=False, 
+-                                table=None, ki=1.0, kg=1.0):
+-    """
+-    Maps a normalized intensity to RGBA.
+-    
+-    Args:
+-        intensity: Normalized scalar value in [0, 1].
+-        gradient: Local gradient magnitude (optional).
+-        use_gradient: Boolean flag to apply gradient attenuation.
+-        table: Optional static LUT array of shape (N, 4). If None, uses parametric.
+-        ki: Exponential decay constant for alpha.
+-        kg: Gradient attenuation constant.
+-        
+-    Returns:
+-        vec4: (R, G, B, Alpha)
+-    """
+-    # 1. Clamp input
+-    x = max(0.0, min(1.0, intensity))
+-    
+-    # 2. Compute Base RGBA
+-    if table is not None:
+-        # Table Lookup Variant
+-        # Assuming table is pre-loaded and N is len(table)
+-        idx = int(x * (len(table) - 1))
+-        idx = max(0, min(idx, len(table) - 1))
+-        r, g, b, alpha = table[idx]
+-    else:
+-        # Parametric Exponential Variant (S6, S8)
+-        # High color: (1,1,1), Low color: (0,0,0)
+-        r = x * 1.0 + (1.0 - x) * 0.0
+-        g = x * 1.0 + (1.0 - x) * 0.0
+-        b = x * 1.0 + (1.0 - x) * 0.0
+-        
+-        # Exponential alpha decay
+-        denom = exp(ki) - 1.0
+-        if denom == 0:
+-            alpha = x # Fallback for ki=0
+-        else:
+-            alpha = (exp(ki * x) - 1.0) / denom
+-            
+-    # 3. Gradient Modulation (Optional, S3, S6)
+-    if use_gradient:
+-        # Gradient attenuation factor
+-        grad_factor = 1.0 - (1.0 / (1.0 + kg * gradient))
+-        alpha = alpha * grad_factor
+-        
+-    # 4. Return Result
+-    return (r, g, b, alpha)
+-```
++**Edge Cases and Pitfalls:**
++*   **Identical Values:** The method cannot differentiate between samples with the same scalar value, even if they represent different materials or boundaries [S2][S4].
++*   **Precision:** Using a small table size (e.g., 256) may cause banding if the input data has higher precision [S3, unofficial].
++*   **Out-of-Bounds:** Values outside $[x_{min}, x_{max}]$ must be clamped to prevent memory errors [S2][S3, unofficial][S4][S5, S6, S7, S8, unofficial].
+ 
+ ## Subtopics
+ 
+-### [2D Transfer Function Volume Rendering](1295-2d-transfer-function-volume-rendering.md)
+-Extends the 1D LUT by mapping both scalar value $f$ and gradient magnitude $|\nabla f|$ to color and opacity. It solves the problem of overlapping data-value intervals in 1D TFs, where different materials share similar scalar values but differ in local structure. It provides superior tissue differentiation and boundary visualization compared to the Hardcoded Transfer Function.
+-
+-### [Tent Alpha Transfer Function](3031-tent-alpha-transfer-function.md)
+-A hardcoded 1D RGBA transfer texture generation method for fluorescence microscopy data that maps 8-bit scalar values to color and opacity using a tent-shaped alpha curve and gamma corrections. It provides a parametric opacity profile centered on a user-defined peak value. It builds on the Hardcoded Transfer Function by defining the color and opacity as a static float array generated from a closed-form mathematical profile rather than a manually edited lookup table.
+-
+ ### Fire Color Palette
+-A piecewise linear color mapping function that maps a value in $[0, 1]$ to a gradient from gray to dark gray to red to orange to yellow [S7, unofficial]. It is defined by specific color keys: Gray $(0.4, 0.4, 0.4)$, DarkGray $(0.2, 0.2, 0.2)$, Red $(1.0, 0.0, 0.0)$, Orange $(1.0, 0.6, 0.0)$, and Yellow $(1.7, 1.3, 1.0)$ [S7, unofficial]. The mapping clamps the input $d$ to $[0, 1]$ and interpolates between these keys based on intervals of $0.25$ [S7, unofficial]. Note that the Yellow component can exceed 1.0 [S7, unofficial].
++A hardcoded 1D color mapping function that maps a normalized value $d \in [0, 1]$ to a gradient from gray to yellow [S7, unofficial]. It is used for aesthetic or specific thermal-like visualization [S7, unofficial].
++*   **Definition:** Piecewise linear interpolation between five color stops: `gray` (0.4, 0.4, 0.4), `darkgray` (0.2, 0.2, 0.2), `red` (1.0, 0.0, 0.0), `orange` (1.0, 0.6, 0.0), and `yellow` (1.7, 1.3, 1.0) [S7, unofficial]. Note that yellow components can exceed 1.0 [S7, unofficial].
++*   **Steps:**
++    1.  Clamp input $x$ to $[0.0, 1.0]$.
++    2.  If $x < 0.25$, lerp `gray` to `darkgray` using $t = x \cdot 4.0$.
++    3.  If $0.25 \le x < 0.5$, lerp `darkgray` to `red` using $t = x \cdot 4.0 - 1.0$.
++    4.  If $0.5 \le x < 0.75$, lerp `red` to `orange` using $t = x \cdot 4.0 - 2.0$.
++    5.  If $x \ge 0.75$, lerp `orange` to `yellow` using $t = x \cdot 4.0 - 3.0$.
++*   **When to choose:** When a specific "fire" aesthetic is required without runtime parameterization [S7, unofficial].
+ 
+ ### Exponential Color Transfer Function
+-Maps volume intensity to color and alpha using an exponential function for alpha and linear interpolation for color [S8, unofficial]. It defines high color as white $(1.0, 1.0, 1.0)$ and low color as black $(0.0, 0.0, 0.0)$ [S8, unofficial]. The alpha is computed as $\alpha = \frac{e^{intensity} - 1}{e^1 - 1}$ [S8, unofficial].
++A hardcoded method that maps intensity to color and alpha using an exponential alpha curve and linear color interpolation [S8, unofficial].
++*   **Definition:** Maps intensity to a grayscale color (black to white) with exponential opacity decay [S8, unofficial].
++*   **Steps:**
++    1.  Define `high = vec3(1.0, 1.0, 1.0)` and `low = vec3(0.0, 0.0, 0.0)`.
++    2.  Compute color: `color = intensity * high + (1.0 - intensity) * low`.
++    3.  Compute alpha: $\alpha = \frac{e^{intensity} - 1}{e^1 - 1}$.
++    4.  Return `vec4(color, alpha)`.
++*   **When to choose:** When a simple, non-parameterized exponential fade-out for opacity is desired for single-channel data [S8, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(1)$ per sample for table lookup or closed-form evaluation [S2][S5, S6, S8, unofficial].
+-*   **Memory Complexity**: $O(N)$ for the lookup table, where $N$ is the table size (e.g., 256–4096 entries) [S1, S3, S5, S6, S7, S8, unofficial]. This is the lowest memory usage among compared TF types [S2].
+-*   **Performance**: Requires the lowest amount of computation power and memory compared to gradient-based or texture-based TFs [S2].
+-*   **Strengths**: High safety regarding errors that lead to misinterpretation; little user interaction required; simple to implement and fast [S2].
+-*   **Limitations**: Cannot distinguish features with identical grey levels/intensities; fails to capture correlations in multi-channel data or distinguish boundaries based on context [S2, S4].
+-*   **When to Use**: When computational resources are limited, or when the volume data has distinct, non-overlapping intensity ranges for different materials [S2].
+-*   **When Not to Use**: When visualizing complex structures with overlapping intensity ranges (e.g., soft tissue boundaries in medical imaging) where gradient or texture information is necessary [S2, S4].
++*   **Time Complexity:** $O(1)$ per sample. The lookup is a direct array access or texture fetch [S2].
++*   **Memory Complexity:** $O(N)$, where $N$ is the table size (e.g., 256 or 4096 entries) [S2][S3, unofficial]. This is the lowest memory footprint among transfer function types [S2].
++*   **Performance:** Lowest computation power requirement [S2].
++*   **Strengths:** High safety against misinterpretation errors due to simplicity; little user interaction required [S2].
++*   **Limitations:** Cannot distinguish features with identical scalar values but different contexts (e.g., boundaries, textures) [S2][S4]. Cannot handle multi-channel data natively [S4].
++*   **When to use:** Quick visualization, scalar-only data where intensity is the sole distinguishing feature, or as a baseline for comparison [S2].
++*   **When not to use:** When differentiating materials with similar intensities is required, or when multi-channel data is present [S2][S4].
+ 
+ ## Background
+-The 1D data-based transfer function (1dTF) is the foundational classification method in volume rendering, serving as a reference point for more complex TF types [S2]. It was formalized in early volume rendering literature, with comparisons to gradient-based and texture-based TFs appearing in surveys such as "A Survey of Transfer Functions Suitable for Volume Rendering" [S2]. Hardware implementations, such as the VolumePro system, utilized pre-computed 4096-entry LUTs for real-time ray-casting [S3, unofficial]. The method is widely used in applications requiring simple intensity-based segmentation, such as basic CT visualization or educational ray-casting demos [S1, S6, S8, unofficial].
++The 1D data-based transfer function (1dTF) is the foundational type of transfer function in volume rendering [S2]. It was formally compared against other TF types (gradient-based, curvature-based, etc.) in a survey by [S2] (2010), establishing it as the reference point for simplicity and low resource usage. Early hardware implementations, such as the VolumePro system, utilized large pre-computed 1D LUTs (4096 entries) for real-time ray-casting [S3, unofficial]. The concept is widely cited in educational and open-source implementations as the starting point for transfer function design [S1, unofficial][S5, unofficial][S6, unofficial][S8, unofficial].
+ 
+ ## Sources

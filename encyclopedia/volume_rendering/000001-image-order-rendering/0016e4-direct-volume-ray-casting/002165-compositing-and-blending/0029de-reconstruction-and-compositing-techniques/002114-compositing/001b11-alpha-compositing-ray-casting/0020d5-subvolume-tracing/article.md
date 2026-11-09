@@ -20,17 +20,17 @@ Subvolume Tracing renders a localized region of a volume by walking a fixed numb
 *   `numLoops`: Number of sampling steps. Typical value is `10` (can be `400` on high-end PCs) [S1].
 
 **Algorithm Steps:**
-1.  **Coordinate Transformation:** Calculate the object's position in volume space using a `_WorldToVolume` matrix. Calculate the camera's position in volume space using the same matrix [S1].
+1.  **Coordinate Transformation:** Calculate the camera's position in volume space using a `_WorldToVolume` matrix [S1].
 2.  **Boundary Calculation:** Determine the front and back coordinates of the subvolume segment. `frontCoord` is `objPosStart`. `backCoord` is calculated as `frontCoord + (normalized camera direction * maxDepth)` [S1]. The camera direction is `normalize(cameraPosVolSpace - frontCoord)` [S1].
 3.  **Step Vector Calculation:** Compute the step vector:
     $$stepCoord = \frac{frontCoord - backCoord}{numLoops}$$
     [S1]
 4.  **Initialization:** Set `curCoord` to `backCoord` [S1].
-5.  **Aliasing Prevention:** Add a per-pixel random offset to `curCoord` to avoid layer aliasing. The offset is `stepCoord * RandomFromPositionFast(objPosStart)` [S1].
-6.  **Loop:** Iterate `numLoops` times:
-    *   Sample the volume at `curCoord` to get intensity.
-    *   Shade the intensity to get a `src` color/alpha pair.
-    *   Composite `src` into `curColor` using alpha blending.
+5.  **Aliasing Prevention:** Add a per-pixel random offset to `curCoord` to avoid layer aliasing [S1]. The offset is `stepCoord * RandomFromPositionFast(objPosStart)` [S1].
+6.  **Loop:** Iterate `numLoops` times [S1]:
+    *   Sample the volume at `curCoord` to get intensity [S1].
+    *   Shade the intensity to get a `src` color/alpha pair [S1].
+    *   Composite `src` into `curColor` using alpha blending [S1].
     *   Increment `curCoord` by `stepCoord` [S1].
 7.  **Return:** Return `curColor` [S1].
 
@@ -53,12 +53,11 @@ def random_from_position_fast(pos):
     return (n - int(n)) % 1
 
 def sample_vol(coord):
-    # Standard 3D texture fetch operation [G]
-    # Returns a scalar intensity value for the given volume coordinate
-    return 0.5 + 0.5 * math.sin(coord[0] + coord[1] + coord[2])
+    # The sources do not specify the volume sampling implementation [G]
+    return 0.0
 
 def shade_vol(intensity):
-    # Standard transfer function mapping intensity to RGBA [G]
+    # The sources do not specify the transfer function implementation [G]
     return (intensity, intensity, intensity, intensity)
 
 def alpha_blend(dst, src):
@@ -120,7 +119,7 @@ where `maxSamples` is typically `400` to keep within bounds [S1].
 
 ## Operating characteristics
 *   **Time Complexity:** Linear with respect to `numLoops` [S1].
-*   **Memory Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources [S1].
 *   **Performance:** Typical settings use `numLoops=10` for interactive performance, scalable to `400` on high-end PCs [S1].
 *   **Strengths:** Fast rendering of local details; avoids aliasing with random offset [S1].
 *   **Limitations:** Does not render the full volume; depth is fixed by `maxDepth` rather than volume bounds [S1].

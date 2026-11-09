@@ -3,37 +3,18 @@
 Also called: BARF, Unposed images methods
 
 ## Overview
-Joint Pose Optimization refers to methods that simultaneously optimize camera poses and the neural scene representation to eliminate the dependency on pre-computed, external Structure-from-Motion (SfM) pipelines [S1]. This approach solves the problem of pose estimation failure in texture-less regions or when image overlap is insufficient, allowing novel-view synthesis from unposed images [S1]. It is distinguished from sibling methods like [InstantSplat](6136-instantsplat.md) and [pixelSplat](6464-pixelsplat.md) by its explicit formulation of the joint optimization problem between pose parameters and scene geometry/appearance, often relying on photometric loss alone for static scenes [S1].
+Joint Pose Optimization (JPO) refers to methods that simultaneously optimize camera poses and the scene representation (neural or geometric) to eliminate the dependency on pre-computed, external Structure-from-Motion (SfM) pipelines [S1]. It solves the problem of novel-view synthesis and 3D reconstruction from unposed image collections where camera parameters are unknown or unreliable [S1]. Unlike sibling methods that may rely on incremental depth priors or temporal continuity, JPO typically treats pose and scene as coupled variables optimized via differentiable rendering [S1].
 
 ## Shared principles
 The methods in this family share the fundamental mechanism of treating volumetric data as a set of parametric primitives that are transformed and rasterized [S1][S2, unofficial]. All variants rely on differentiable rendering to compute gradients from the rendered image to the Gaussian parameters (position, covariance, opacity, spherical harmonics) and/or network weights [S1, 6136-instantsplat.md, 6464-pixelsplat.md]. The rendering process remains differentiable with respect to the scene representation [S1, 6136-instantsplat.md, 6464-pixelsplat.md]. Loss functions typically combine photometric reconstruction error, such as $\mathcal{L}_{L1}$ or $\mathcal{L}_{MSE}$, with perceptual or structural metrics like $\mathcal{L}_{MS-SSIM}$ or $\mathcal{L}_{LPIPS}$ [6136-instantsplat.md][6464-pixelsplat.md].
 
 ## Subtopics
 
-### InstantSplat
-[Link to sibling article](6136-instantsplat.md).
-
-### pixelSplat
-[Link to sibling article](6464-pixelsplat.md).
-
-### 1D Signal Alignment for Joint Optimization Analysis
-A simplified 1D counterpart to 3D joint camera pose and scene reconstruction optimization, used to analyze the effect of signal spectrum on convergence [S2, unofficial]. It defines a target ground truth 1D signal $f_{GT}$ (continuous, bounded, finite support) and given randomly translated versions $f_1, f_2$ where $f_1 = W_{1d}(f_{GT}, p_1)$, $f_2 = W_{1d}(f_{GT}, p_2)$ with $W_{1d}(f, p)(x) = f(x - p)$ [S2, unofficial]. The method estimates signal $g$ and translation values $q_1, q_2$ via iterative gradient-based optimization on the reconstruction loss:
-$$
-L_{1d}(g, q_1, q_2) = \sum_{i \in [1,2]} \int \|W_{1d}(g, q_i)(x) - f_i(x)\|^2 dx = \sum_{i \in [1,2]} \int \|g(x) - f_{GT}(x - p_i + q_i)\|^2 dx
-$$
-[S2, unofficial]. The gradient with respect to the relative displacement $u = (p_1 - p_2) - (q_1 - q_2)$ is given by:
-$$
-\frac{dL_{1d}}{du} = \int \|F[f_{GT}]\|^2 \cdot H(u, k) dk, \quad \text{where } H(u, k) = 4\pi k \sin(2\pi k u)
-$$
-[S2, unofficial], where $F[f_{GT}]$ is the Fourier transform of $f_{GT}$ and $k$ is the wavenumber. Applying a Gaussian kernel $N$ with variance 4 modulates this gradient:
-$$
-\frac{d\tilde{L}_{1d}}{du} = \int \|F[f_{GT}]\|^2 \cdot \tilde{H}(u, k) dk, \quad \text{where } \tilde{H}(u, k) = \|F[N]\|^2 \cdot H(u, k)
-$$
-[S2, unofficial]. $L_{1d}$ achieves the optimum whenever $q_1 - q_2 = p_1 - p_2$ and $g = W_{1d}(f_{GT}, p_1 - q_1)$ [S2, unofficial]. High-frequency signals cause $H(u,k)$ sign to alternate as $k$ increases, leading to large/noisy gradients and local optima traps [S2, unofficial]. Gradient descent converges to $u=0$ if the initial magnitude of $u$ is less than 6.0 [S2, unofficial].
+### [1D Signal Alignment for Joint Optimization Analysis](8423-1d-signal-alignment-for-joint-optimization-analysis.md)
+A simplified analytical framework used to study the convergence behavior of joint camera pose and scene reconstruction optimization. It reduces the complex 3D joint optimization problem into a 1D signal alignment task to analyze how the signal spectrum affects the gradient landscape. Unlike the full 3D method, this approach isolates the "local phenomenon" of joint alignment, revealing that high-frequency signals cause gradient noise and local optima, which can be mitigated by Gaussian filtering.
 
 ## Background
-Joint pose optimization was introduced to address the limitations of relying on off-the-shelf pose estimation methods, which increase inference time and may fail in texture-less regions or when images lack overlap [S1]. Early works proposed jointly optimizing camera poses and neural representations for both static [HJS∗ 23, WWX∗ 21, CL23a, LMTL21, SCW∗ 25] and dynamic settings [LGM∗ 23] [S1]. However, these methods still require rough pose initialization and are limited to small motions [S1]. Alternative solutions follow incremental approaches, leveraging mono-depth prior [BWL∗ 23] or temporal continuity [FLK∗ 24] to optimize camera parameters [S1]. Several works have extended this idea to obtain generalizable representations [CL23b, HJS∗ 23, XLC∗ 25], enabling joint pose prediction and representation learning from sparse image collections [S1]. Ye et al. [YLX∗ 25] demonstrated that it was possible to efficiently estimate pose and perform novel-view synthesis from unposed images and intrinsic camera parameters using only photometric loss, though it is limited to static scenes [S1]. The 1D signal alignment analysis [S2, unofficial] provides theoretical grounding for the convergence behavior of such joint optimizations, linking it to coarse-to-fine training schedules.
+Joint Pose Optimization emerged as a response to the limitations of traditional pipelines that depend on off-the-shelf pose estimation methods, which increase inference time and fail in texture-less regions or when images lack overlap [S1]. Early works proposed jointly optimizing camera poses and neural representations for both static [HJS∗ 23, WWX∗ 21, CL23a, LMTL21, SCW∗ 25] and dynamic settings [LGM∗ 23] [S1]. However, these initial methods required rough pose initialization and were limited to small motions [S1]. Alternative solutions followed incremental approaches, leveraging mono-depth priors [BWL∗ 23] or temporal continuity [FLK∗ 24] to optimize camera parameters [S1]. More recent extensions have enabled generalizable representations [CL23b, HJS∗ 23, XLC∗ 25] for joint pose prediction from sparse collections [S1]. Notably, Ye et al. [YLX∗ 25] demonstrated efficient pose estimation and novel-view synthesis from unposed images using only photometric loss, though this remains limited to static scenes [S1].
 
 ## Sources
 [S1] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
-[S2] Improving Robustness for Joint Optimization of Camera Poses and Decomposed Low-Rank Tensorial Radiance Fields, https://doi.org/10.48550/arxiv.2402.13252, fetched 2026-10-26 (unofficial)

@@ -19,7 +19,7 @@ Shell-based Voxelization identifies and marks all voxels in a grid that lie with
 - `mask`: Bitset with bits set for all voxels within the shell radius of any primitive [S1, unofficial].
 
 **Data Structures:**
-- `Extent<N>`: Struct with `uint32_t extents[N]`. Index 0 is width, 1 is height, 2 is depth [S1, unofficial].
+- `Extent<N>`: Struct with `uint32_t extents[N]` storing width at index 0, height at index 1, and depth at index 2 [S1, unofficial].
 - `AABB<Float, N>`: Axis-Aligned Bounding Box with `min` and `max` vectors of type `Vector<Float, N>` [S1, unofficial].
 - `Bitset`: A dynamic array of bits supporting `set(index)` operations [S1, unofficial].
 
@@ -41,26 +41,24 @@ Shell-based Voxelization identifies and marks all voxels in a grid that lie with
 ```python
 import math
 
-def mark_boundary_voxels(vertices, simplices, num_simplices, grid_width, grid_height, grid_depth, voxel_size, shell_radius):
+def mark_boundary_voxels(vertices, simplices, num_simplices, grid_extents, voxel_size, shell_radius):
     """
     Marks all voxels within shell_radius of any primitive.
     vertices: list of [x, y, z] floats
     simplices: list of [v0, v1, v2] uint32 indices
-    grid_width, grid_height, grid_depth: integer extents
+    grid_extents: list of [width, height, depth] integers
     voxel_size: float
     shell_radius: float
     Returns: set of linear voxel indices
     """
     mask = set()
-    N = 3
-    grid_extents = [grid_width, grid_height, grid_depth]
-
+    N = len(grid_extents)
+    
     for i in range(num_simplices):
         # 1. Construct AABB
         aabb_min = [float('inf')] * N
         aabb_max = [float('-inf')] * N
-        simplex_indices = simplices[i]
-        for v_idx in simplex_indices:
+        for v_idx in simplices[i]:
             v = vertices[v_idx]
             for d in range(N):
                 if v[d] < aabb_min[d]:
@@ -78,16 +76,23 @@ def mark_boundary_voxels(vertices, simplices, num_simplices, grid_width, grid_he
         max_int = [math.floor((aabb_max[d] + 1) / voxel_size) for d in range(N)]
 
         # 4. Iterate and mark
-        for x in range(max(0, min_int[0]), min(grid_extents[0], max_int[0] + 1)):
-            for y in range(max(0, min_int[1]), min(grid_extents[1], max_int[1] + 1)):
-                for z in range(max(0, min_int[2]), min(grid_extents[2], max_int[2] + 1)):
-                    idx = x + y * grid_extents[0] + z * grid_extents[0] * grid_extents[1]
+        # Note: The source implementation uses hardcoded loops for N=2 and N=3 [S1, unofficial]
+        if N == 3:
+            for x in range(max(0, min_int[0]), min(grid_extents[0], max_int[0] + 1)):
+                for y in range(max(0, min_int[1]), min(grid_extents[1], max_int[1] + 1)):
+                    for z in range(max(0, min_int[2]), min(grid_extents[2], max_int[2] + 1)):
+                        idx = x + y * grid_extents[0] + z * grid_extents[0] * grid_extents[1]
+                        mask.add(idx)
+        elif N == 2:
+            for x in range(max(0, min_int[0]), min(grid_extents[0], max_int[0] + 1)):
+                for y in range(max(0, min_int[1]), min(grid_extents[1], max_int[1] + 1)):
+                    idx = x + y * grid_extents[0]
                     mask.add(idx)
     return mask
 ```
 
 **Parameters:**
-- `shell_radius`: Determines the thickness of the boundary shell. Typical values are not given in the sources.
+- `shell_radius`: Determines the thickness of the boundary shell. Typical values are not given in the sources [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
 - The implementation uses hardcoded loops for N=2 and N=3, limiting scalability to higher dimensions [S1, unofficial].
@@ -95,12 +100,12 @@ def mark_boundary_voxels(vertices, simplices, num_simplices, grid_width, grid_he
 - Precision issues may arise if `voxel_size` is very small or `shell_radius` is very large relative to the grid extent [G].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Strengths:** Not given in the sources.
-- **Limitations:** Not given in the sources.
-- **When to use:** Not given in the sources.
-- **When not to use:** Not given in the sources.
+- **Time Complexity:** Not given in the sources [S1, unofficial].
+- **Memory Complexity:** Not given in the sources [S1, unofficial].
+- **Strengths:** Not given in the sources [S1, unofficial].
+- **Limitations:** Not given in the sources [S1, unofficial].
+- **When to use:** Not given in the sources [S1, unofficial].
+- **When not to use:** Not given in the sources [S1, unofficial].
 
 ## Background
 Shell-based Voxelization originates from the Differentiable Voxelization of Surface Representations framework [S1, unofficial]. It is implemented in the `dvx` namespace of the corresponding repository [S1, unofficial].

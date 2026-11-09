@@ -3,124 +3,111 @@
 Also called: Inverse Rendering by Optimizing Neural SDFs and Materials
 
 ## Overview
-IRON is a neural inverse rendering pipeline that reconstructs high-quality 3D triangle meshes and spatially varying material textures from photometric images captured with a collocated flashlight and moving camera [S1]. It solves the problem of jointly optimizing geometry and appearance by using a hybrid optimization scheme: it first recovers correct object topology using volumetric radiance field rendering, then refines geometry and disentangles materials from lighting using edge-aware physics-based surface rendering [S1]. This approach distinguishes IRON from methods that optimize surface rendering directly, which often diverge or get stuck in local minima with incorrect topology [S1].
+IRON is a neural inverse rendering pipeline that reconstructs high-quality 3D geometry and spatially varying materials from photometric images captured with a collocated flashlight and moving camera [S1]. It outputs triangle meshes and material textures by optimizing neural Signed Distance Fields (SDFs) and material parameters [S1]. It distinguishes itself from sibling architectures like [AdaNeRF](6195-adanerf.md) or [SinNeRF](6199-sinnerf.md) by employing a hybrid optimization scheme: it first uses volumetric radiance field rendering to recover correct object topology, then refines geometry and disentangles materials from lighting using edge-aware physics-based surface rendering [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A set of photometric images captured with a flashlight co-located with the camera. Assumptions: opaque objects, no ambient light, shadows and global illumination (interreflections) are ignored [S1].
+*   **Input:** A set of photometric images. These are captured with a static scene, a moving camera, and a flashlight co-located with the camera [S1].
 *   **Output:** A triangle mesh and material textures (diffuse albedo, specular albedo, roughness) [S1].
 
+**Assumptions:**
+*   Objects are opaque [S1].
+*   Input images are captured without ambient light [S1].
+*   Shadows and global illumination effects (e.g., interreflections) are ignored for efficiency [S1].
+
 **Data Structures:**
-The method uses four Multi-Layer Perceptrons (MLPs) with positional encoding [S1, S3].
-1.  **Neural SDF ($S_{\Theta_s}$):**
-    *   Input: 3D position $\mathbf{x} \in \mathbb{R}^3$.
-    *   Output: Tuple $(S, \mathbf{f})$, where $S \in \mathbb{R}$ is the signed distance field value and $\mathbf{f} \in \mathbb{R}^{256}$ is a local geometric feature descriptor [S1].
-2.  **Neural Diffuse Albedo ($\beta_{\Theta_\beta}$):**
-    *   Input: Position $\mathbf{x}$, surface normal $\mathbf{n}$, view direction $\mathbf{v}$ (or normal in Stage 2), and feature descriptor $\mathbf{f}$.
-    *   Output: Diffuse albedo $\beta \in \mathbb{R}^3$ [S1].
-3.  **Neural Specular Albedo ($\kappa_{\Theta_\kappa}$):**
-    *   Input: Position $\mathbf{x}$, surface normal $\mathbf{n}$, and feature descriptor $\mathbf{f}$.
-    *   Output: Specular albedo $\kappa \in \mathbb{R}^3$ [S1].
-4.  **Neural Roughness ($\alpha_{\Theta_\alpha}$):**
-    *   Input: Position $\mathbf{x}$, surface normal $\mathbf{n}$, and feature descriptor $\mathbf{f}$.
-    *   Output: Roughness scalar $\alpha \in \mathbb{R}$ [S1].
+The method uses four Multi-Layer Perceptrons (MLPs) with positional encoding $\gamma(\mathbf{x})$ [S1, Parent].
+
+1.  **Neural SDF $S_{\Theta_s}$**:
+    *   **Input:** 3D location $\mathbf{x} \in \mathbb{R}^3$.
+    *   **Output:** Tuple $(S, \mathbf{f})$.
+    *   $S \in \mathbb{R}$: Signed distance value.
+    *   $\mathbf{f} \in \mathbb{R}^{256}$: Local geometric feature descriptor [S1].
+
+2.  **Neural Diffuse Albedo $\beta_{\Theta_\beta}$**:
+    *   **Input:** Tuple $(\mathbf{x}, \mathbf{n}, \mathbf{n}', \mathbf{f})$.
+        *   $\mathbf{x} \in \mathbb{R}^3$: 3D location.
+        *   $\mathbf{n} \in \mathbb{R}^3$: Surface normal.
+        *   $\mathbf{n}' \in \mathbb{R}^3$: Second normal vector (used as view direction $-\mathbf{d}$ in Stage 1, or surface normal in Stage 2).
+        *   $\mathbf{f} \in \mathbb{R}^{256}$: Feature descriptor from $S_{\Theta_s}$.
+    *   **Output:** $\beta \in \mathbb{R}^3$: Diffuse albedo color [S1].
+
+3.  **Neural Specular Albedo $\kappa_{\Theta_\kappa}$**:
+    *   **Input:** Tuple $(\mathbf{x}, \mathbf{n}, \mathbf{f})$.
+    *   **Output:** $\kappa \in \mathbb{R}^3$: Spatially-varying specular albedo [S1].
+
+4.  **Neural Roughness $\alpha_{\Theta_\alpha}$**:
+    *   **Input:** Tuple $(\mathbf{x}, \mathbf{n}, \mathbf{f})$.
+    *   **Output:** $\alpha \in \mathbb{R}$: Spatially-varying specular roughness. Small values indicate shiny surfaces; large values indicate less shiny surfaces [S1].
 
 **Light Model:**
-The flashlight is modeled as a point light source. The incident light $L_i$ at surface location $\mathbf{x}$ from light/camera position $\mathbf{o}$ with intensity $L$ is:
+The flashlight is modeled as a point light source [S1]. The incident light intensity $L_i$ at surface location $\mathbf{x}$ from light/camera position $\mathbf{o}$ is:
 $$
 L_i(\mathbf{o}; \mathbf{x}) = \frac{L}{\|\mathbf{x} - \mathbf{o}\|^2}
 $$
-[S1]
+where $L$ is the scalar light intensity parameter [S1].
 
 **Optimization Procedure:**
-The optimization is performed in two stages.
+The method uses a two-stage hybrid optimization scheme to optimize MLP weights $\Theta_s, \Theta_\beta, \Theta_\kappa, \Theta_\alpha$ and light intensity $L$ [S1].
 
 **Stage 1: Volumetric Radiance Field Rendering**
-Goal: Recover correct object topology (number and location of holes) [S1].
-1.  Treat $\beta_{\Theta_\beta}$ as a view-dependent neural radiance field by substituting the view direction $-\mathbf{d}$ for the second normal input: $\beta_{\Theta_\beta}(\mathbf{x}, \mathbf{n}, -\mathbf{d}, \mathbf{f})$ [S1].
-2.  Perform volumetric rendering of the neural SDF $S_{\Theta_s}$ and colors $\beta_{\Theta_\beta}$ [S1].
-3.  Optimize $\Theta_s$ and $\Theta_\beta$ [S1].
-*Note:* Skipping this stage causes optimization to diverge or get stuck in local minima with incorrect topology unless segmentation masks are provided [S1].
+*   **Goal:** Recover correct object topology (number and location of holes) [S1].
+*   **Method:** Treat $\beta_{\Theta_\beta}$ as a view-dependent neural radiance field. Substitute the view direction $-\mathbf{d}$ for the second normal $\mathbf{n}'$ in the input to $\beta_{\Theta_\beta}$.
+*   **Rendering:** Perform volumetric rendering of $S_{\Theta_s}$ and colors $\beta_{\Theta_\beta}(\mathbf{x}, \mathbf{n}, -\mathbf{d}, \mathbf{f})$ [S1].
+*   **Note:** Skipping this stage and optimizing surface rendering from scratch causes divergence or convergence to local minima with incorrect topology, unless segmentation masks are provided [S1].
 
 **Stage 2: Edge-aware Physics-based Surface Rendering**
-Goal: Refine geometric details and factorize materials from lighting [S1].
-1.  Jointly optimize $\Theta_s$, $\Theta_\beta$, $\Theta_\kappa$, $\Theta_\alpha$, and light intensity $L$ [S1].
-2.  Use the edge sampling algorithm (Algorithm 1) to generate unbiased gradient estimates at depth discontinuities [S1].
-3.  Render using physics-based surface rendering [S1].
+*   **Goal:** Refine geometric details and factorize materials from lighting [S1].
+*   **Method:** Jointly optimize $S_{\Theta_s}$, $\beta_{\Theta_\beta}$, $\kappa_{\Theta_\kappa}$, $\alpha_{\Theta_\alpha}$, and $L$ using physics-based surface rendering [S1].
+*   **Edge Sampling:** To handle depth discontinuities, a novel edge sampling algorithm is used to generate unbiased gradient estimates [S1].
 
-**Edge Sampling Algorithm (Algorithm 1):**
-This algorithm locates edge points on the neural SDF to compute accurate gradients at occlusion boundaries [S1].
+**Edge Sampling Algorithm:**
+This algorithm locates edge points on the neural SDF surface [S1].
 
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def locate_edge_points(x_hat, o, K, epsilon, delta):
-    """
-    Locate edge points for neural SDF rendering.
-    
-    Args:
-        x_hat: Ray-surface intersection point.
-        o: Light/Camera position.
-        K: Maximum number of steps.
-        epsilon: Step size.
-        delta: Threshold for edge detection.
-        
-    Returns:
-        An edge point or 'NOT FOUND'.
-    """
-    x_t = x_hat
-    for i in range(1, K + 1):
-        # Calculate vector from light to current point
-        vec = x_t - o
-        dist = np.linalg.norm(vec)
-        if dist == 0:
-            return "NOT FOUND"
-        
-        # Unit vector from light to current point
-        light_dir = vec / dist
-        
-        # Get surface normal at x_t from SDF
-        # Note: In practice, n_t is the gradient of S at x_t
-        n_t = get_sdf_normal(x_t) 
-        
-        # Check if the light direction is grazing the surface (edge condition)
-        # The condition (xt-o)/||xt-o||_2 dot n_t < delta implies the light 
-        # is coming from behind or grazing the surface relative to the normal.
-        if np.dot(light_dir, n_t) < delta:
-            return x_t
-        else:
-            # Project n_t onto the plane perpendicular to light_dir
-            # and step in that direction
-            # Formula: xt = xt + epsilon * (nt - o_xt (o_xt)^T nt)
-            # where o_xt is the unit vector from light to xt
-            projection = n_t - np.dot(light_dir, n_t) * light_dir
-            x_t = x_t + epsilon * projection
-            
-    return "NOT FOUND"
-```
-[S1]
+**Algorithm 1: Locate Edge Points**
+*   **Input:** Ray-surface intersection point $\hat{\mathbf{x}}$.
+*   **Output:** An edge point $\mathbf{x}_t$ or `NOT FOUND`.
+*   **Hyperparameters:**
+    *   $K$: Maximum number of steps.
+    *   $\epsilon$: Step size.
+    *   $\delta$: Threshold for edge detection.
+*   **Steps:**
+    1.  Initialize $\mathbf{x}_t \leftarrow \hat{\mathbf{x}}$.
+    2.  For $i$ from 1 to $K$:
+        3.  Compute surface normal $\mathbf{n}_t$ at $\mathbf{x}_t$ (via gradient of $S_{\Theta_s}$).
+        4.  Compute vector from light/camera to point: $\mathbf{v} = \mathbf{x}_t - \mathbf{o}$.
+        5.  Normalize: $\hat{\mathbf{v}} = \mathbf{v} / \|\mathbf{v}\|_2$.
+        6.  Check condition: If $\hat{\mathbf{v}}^T \mathbf{n}_t < \delta$:
+            7.  Return $\mathbf{x}_t$.
+        8.  Else:
+            9.  Update position: $\mathbf{x}_t \leftarrow \mathbf{x}_t + \epsilon \cdot (\mathbf{n}_t - \hat{\mathbf{v}} (\hat{\mathbf{v}}^T \mathbf{n}_t))$.
+                *   *Note:* The term $(\mathbf{n}_t - \hat{\mathbf{v}} (\hat{\mathbf{v}}^T \mathbf{n}_t))$ projects the normal onto the plane perpendicular to the view direction, effectively moving the sample along the surface tangent towards the edge [S1].
+    10. Return `NOT FOUND` if the loop completes without finding an edge [S1].
 
 **Parameters:**
-*   $K$: Max steps for edge search. Not given in the sources.
-*   $\epsilon$: Step size for edge search. Not given in the sources.
-*   $\delta$: Threshold for edge detection. Not given in the sources.
-*   $L$: Light intensity scalar. Optimized.
+*   Positional encoding frequencies: As defined in [Parent].
+*   Feature dimension: 256 [S1].
+*   Light intensity $L$: Optimized scalar [S1].
 
 **Pitfalls:**
-*   If Stage 1 is skipped, optimization frequently diverges unless object segmentation masks are provided, and often gets stuck in local minima with incorrect topology [S1].
-*   The method assumes opaque objects, no ambient light, and ignores shadows and global illumination effects [S1].
+*   **Topology Errors:** If Stage 1 is skipped, the optimization frequently diverges or gets stuck in local minima with incorrect topology (e.g., wrong number of holes) [S1].
+*   **Ambiguity:** Without the collocated flashlight assumption, shadows and global illumination would complicate the light model, but these are ignored in this method [S1].
 
 ## Operating characteristics
-*   **Time and Memory Complexity:** Not given in the sources.
-*   **Measured Performance:** Not given in the sources.
-*   **Scaling:** Not given in the sources.
-*   **Strengths:** Produces high-quality 3D content in the format of triangle meshes and material textures; significantly better inverse rendering quality compared to prior works; handles spatially varying materials; robust topology recovery via hybrid optimization [S1].
-*   **Limitations:** Limited to opaque objects; requires photometric images with collocated flashlight; ignores shadows and global illumination; optimization can be unstable without the two-stage approach [S1].
-*   **When to use:** When reconstructing shape and appearance from photometric images (flashlight + camera) and needing mesh-compatible outputs [S1].
-*   **When not:** For scenes with transparent/translucent objects, significant ambient light, or complex global illumination effects [S1].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** IRON achieves significantly better inverse rendering quality compared to prior works [S1].
+*   **Strengths:**
+    *   Recovers correct topology via volumetric initialization [S1].
+    *   Produces deployable mesh and texture outputs [S1].
+    *   Edge sampling improves reconstruction quality around depth discontinuities [S1].
+*   **Limitations:**
+    *   Restricted to opaque objects [S1].
+    *   Restricted to photometric images with collocated flashlight and no ambient light [S1].
+    *   Ignores shadows and global illumination [S1].
 
 ## Background
-IRON was proposed by Kai Zhang, Fujun Luan, Zhengqi Li, and Noah Snavely from Cornell University, Adobe Research, and Google Research [S1]. It was published in CVPR 2022 [S1]. The method addresses the third capture scenario of inverse rendering: static scene, flashlight illumination co-located with moving camera [S1]. It builds on prior works using neural SDFs [30, 34, 39] and neural radiance fields [23, 34, 38] [S1].
+IRON was proposed by Kai Zhang, Fujun Luan, Zhengqi Li, and Noah Snavely from Cornell University, Adobe Research, and Google Research [S1]. It was published in 2022 [S1]. The method addresses the problem of inverse rendering for photometric images, a capture scenario where a flashlight is co-located with a moving camera [S1]. It builds on prior works using neural SDFs [30, 34, 39] and neural radiance fields [23, 34, 38] [S1].
 
 ## Sources
 [S1] IRON: Inverse Rendering by Optimizing Neural SDFs and Materials from Photometric Images, https://doi.org/10.1109/cvpr52688.2022.00548, fetched 2026-10-26

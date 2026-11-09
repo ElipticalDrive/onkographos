@@ -1,0 +1,322 @@
+--- v002.md
++++ v003.md
+@@ -1,182 +1,160 @@
+ # Differentiable Volume Rendering via Box Splines
+ 
+-Also called: Differentiable X-ray Transform with Ray-Trace Gradients, Differentiable X-ray transform, Differentiable XRT Forward Projection, xrt_ad_t (Geometry Gradient w.r.t. Ray Anchor)
++Also called: Differentiable X-ray Transform with Ray-Trace Gradients, Differentiable X-ray transform, Differentiable XRT Forward Projection, xrt_ad_t (Geometry Gradient w.r.t Ray Anchor)
+ 
+ ## Overview
+-This method computes the differentiable X-ray transform (forward projection) of a volume defined on a uniform grid using box spline interpolation, providing exact gradients with respect to ray origins $\mathbf{t}$, ray directions $\mathbf{n}$, and volume coefficients [S1, unofficial]. It solves the problem of back-propagating gradients through the ray-tracing integral in tomography and geometry calibration by implementing Algorithms 1-2 of the reference implementation as a vector-Jacobian product within an automatic differentiation framework [S1, unofficial]. It differs from finite-difference or implicit autodiff approaches by explicitly computing ray-traced geometry gradients for anchors and directions alongside standard adjoint transforms for volume coefficients [S1, unofficial].
++This method computes the forward projection of a volume defined by box splines and its analytical gradients with respect to ray parameters (origin $\mathbf{t}$ and direction $\mathbf{n}$) and volume coefficients. It implements a differentiable X-ray transform operator that supports 2D and 3D uniform grids with interpolation orders 0, 1, and 2. Unlike standard differentiable renderers that rely on finite differences or implicit automatic differentiation through the entire ray march, this method explicitly computes ray-traced geometry gradients for anchors and directions using specific adjoint functions, while using the standard adjoint transform for volume coefficients. It is primarily used in geometry calibration in tomography.
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:**
+-    *   `ray_spec`: A tuple `(t_spec, n_spec)` containing ray anchors $\mathbf{t} \in \mathbb{R}^L$ and directions $\mathbf{n} \in \mathbb{R}^L$, where $L$ is the number of rays [S1, unofficial].
+-    *   `knot_spec`: A `UniformSpec` object containing the volume grid properties: start $\mathbf{x}_0$, step $\mathbf{\Delta}$, and dimensions $\mathbf{Q}$ (num) [S1, unofficial].
+-    *   `data`: Flattened volume weights $f_{\mathbf{q}}$ of shape $(Q_1 \times \dots \times Q_D)$, where $D \in \{2, 3\}$ [S1, unofficial].
+-    *   `order`: Integer specifying interpolation order (0, 1, or 2) [S1, unofficial].
+-    *   `mode`: String for automatic differentiation mode, typically `'symbolic'` [S1, unofficial].
+-*   **Outputs:**
+-    *   `proj`: Array of shape `(L,)` containing the projection values $\mathcal{R}[f](\mathbf{n}, \mathbf{t})$ [S1, unofficial].
+-    *   Gradients w.r.t. `data`, `t_spec`, and `n_spec` are computed during the backward pass [S1, unofficial].
++The method computes samples of the projection integral $\xrt[f](\mathbf{n}, \mathbf{t}) = \int_{\mathbb{R}} f(\mathbf{t} + \tau \mathbf{n}) d\tau$ for a volume defined on a uniform grid. The volume is represented as $f(\mathbf{x}) = \sum_{\mathbf{q} \in \text{discreteRange}(\mathbf{0}, \mathbf{Q}-1)} f_{\mathbf{q}} \psi(\mathbf{x} - \mathbf{x}_{\mathbf{q}})$, where $\psi$ is a box spline basis function determined by the interpolation order and direction vectors $\mathbf{E}$.
+ 
+-**Data Structures:**
+-*   `ArrayNf`: Ray type (e.g., `drjit.Array3f`) [S1, unofficial].
+-*   `ArrayNi`: Integer type (`int32`) [S1, unofficial].
+-*   `ArrayNu`: Unsigned integer type (`uint32`) [S1, unofficial].
+-*   `Float`: Scalar value type [S1, unofficial].
+-*   `Bool`: Mask type [S1, unofficial].
+-*   `stride`: Linear indexing stride. For 2D: `ArrayNu(knot_num.y, 1)`. For 3D: `ArrayNu(knot_num.y * knot_num.z, knot_num.z, 1)` [S1, unofficial].
++### Inputs and Outputs
++**Inputs:**
++- `ray_spec`: Tuple `(t_spec, n_spec)` where `t_spec` and `n_spec` are arrays of shape `(L,)` representing ray anchors and directions.
++- `knot_spec`: `UniformSpec` object containing volume properties: start $\mathbf{x}_0$, step $\mathbf{\Delta}$, and dimensions $\mathbf{Q}$.
++- `data`: Flattened volume weights of shape $(Q_1, \dots, Q_D)$ for $D$ dimensions.
++- `order`: Integer specifying interpolation order (0, 1, or 2). For 3D projections, only order 0 is supported in the closed-form variant; orders 1 and 2 are supported for 2D.
++- `mode`: String for automatic differentiation mode, typically `'symbolic'`.
+ 
+-**Algorithm Steps:**
+-1.  **Initialization:** Determine dimension $D$ from `ray_t` (2 or 3) [S1, unofficial]. Compute bounding box: $\mathbf{bbox}_{ll} = \mathbf{x}_0 - \frac{\mathbf{\Delta}}{2}$ and $\mathbf{bbox}_{ur} = \mathbf{x}_0 - \frac{\mathbf{\Delta}}{2} + (\mathbf{Q} \odot \mathbf{\Delta})$ [S1, unofficial]. Initialize state: for order 0, `state = (buffer,)`; for order 1 (2D) and order > 0 (3D), `state = (buffer, index_prev)` with `index_prev = ArrayNi(-1)` [S1, unofficial].
+-2.  **Ray Bounding Box Intersection:** Compute intersection `active, t1, t2 = ray_bbox_intersect(bbox_ll, bbox_ur, ray_t, ray_n)` [S1, unofficial]. Compute `t_min = minimum(t1, t2)` [S1, unofficial]. Adjust ray origin: `ray_t = select(active & bbox_contains(bbox_ll, bbox_ur, ray_t), ray_t + (t_min - 1) * ray_n, ray_t)` [S1, unofficial].
+-3.  **DDA Traversal:** Execute Digital Differential Analyzer (DDA) loop traversing the grid intersection [S1, unofficial]. The `project` callback is invoked for each cell intersected by the ray, receiving `index` (cell index), `p_a` (entry point in $[0,1]^D$), `p_b` (exit point in $[0,1]^D$), and `active` mask [S1, unofficial].
+-4.  **Projection Weight Calculation (`project` callback):** The calculation depends on dimension and order [S1, unofficial].
+-    *   **3D Order 0 (Voxel Case):** Compute offset `offset = dot(index, stride)` [S1, unofficial]. Gather weight `fq = gather(Float, data, offset, active)` [S1, unofficial]. Compute length $L = \|\mathbf{p}_b - \mathbf{p}_a\| \cdot \|\mathbf{\Delta}\| \cdot \frac{1}{\prod \mathbf{\Delta}}$ [S1, unofficial]. Accumulate `accum += fq * L` [S1, unofficial].
+-    *   **2D Order 1 or 2:** Compute perpendicular vector $\mathbf{n}_{\perp} = \text{normalize}(-n_y, n_x)$ [S1, unofficial]. Compute box spline parameters `E, E_mask = box_spline_1d_E(order, knot_step, n_perp)` [S1, unofficial]. Determine movement direction: `direction = ray_n / knot_step`, `look_lr = abs(direction.x) >= abs(direction.y)`, `mv_dir = (1, 0) if look_lr else (0, 1)`, `shift_l = (-mv_dir[0], -mv_dir[1])`, `shift_m = (0, 0)`, `shift_r = (mv_dir[0], mv_dir[1])` [S1, unofficial]. For each shift $s \in \{\text{shift}_l, \text{shift}_m, \text{shift}_r\}$: compute `index_s = index + shift`, check bounds `active_s = all((0 <= index_s) & (index_s < knot_num))`, gather `fq`, compute cell center $\mathbf{c} = (0.5, 0.5) + \text{shift}$, compute position $x = \mathbf{n}_{\perp} \cdot (\mathbf{\Delta} \odot (\mathbf{c} - \mathbf{p}_a))$, compute length $L = \text{box\_spline\_1d\_dr}(E, E\_mask, x)$ [S1, unofficial]. Handle displacement logic to avoid double-counting: `displacement = index - index_prev`, select `fq_lmr` based on `dot(displacement, mv_dir) != 0`, accumulate `accum += dot(fq_lmr, (L_l, L_m, L_r))`, update `index_prev = index` [S1, unofficial].
+-    *   **3D Order > 0:** Normalize ray direction $\mathbf{n} = \text{normalize}(\mathbf{ray\_n})$ [S1, unofficial]. Compute direction magnitudes $\mathbf{d} = |\mathbf{ray\_n} \odot \mathbf{\Delta}^{-1}|$ [S1, unofficial]. Compute dominant axis $\mathbf{a} = \lfloor \mathbf{d} / \max(\mathbf{d}) + 10^{-6} \rfloor$ [S1, unofficial]. Compute shifts: `shift_x = ArrayNf(a.y, a.z, a.x)`, `shift_y = cross(a, shift_x)`, `shift_m = ArrayNi(0, 0, 0)` [S1, unofficial]. Compute perpendiculars: `n_perp_x = normalize(shift_x - dot(shift_x, n) * n)`, `n_perp_y = cross(n, n_perp_x)` [S1, unofficial]. Define shifts: $\text{shift}_m$, $\pm \text{shift}_x$, $\pm \text{shift}_y$, $\pm \text{shift}_x \pm \text{shift}_y$ [S1, unofficial]. For each shift, compute `index_s`, gather `fq`, compute cell center $\mathbf{c} = (0.5, 0.5, 0.5) + \text{shift}$, and coordinates $x = \mathbf{n}_{\perp_y} \cdot (\mathbf{\Delta} \odot (\mathbf{c} - \mathbf{p}_a))$, $y = \mathbf{n}_{\perp_x} \cdot (\mathbf{\Delta} \odot (\mathbf{c} - \mathbf{p}_a))$ [S1, unofficial]. Compute length using neural network: $L = \text{spline\_3d\_dr}(\text{net}, x, y, \mathbf{n})$ [S1, unofficial]. Accumulate with displacement logic to handle corner weights and avoid double counting [S1, unofficial].
+-5.  **Backward Pass (Gradients):** Retrieve output gradient `g = self.grad_out()` [S1, unofficial]. Gradient w.r.t. Volume (`x`): compute adjoint transform `rx.xrt_adjoint(rs, knot_spec, order, g)` and set as gradient for `x` [S1, unofficial]. Gradient w.r.t. Ray Anchors (`t`): for 2D compute `gt[0] = g * rx.xrt_ad_t_x(...)`, `gt[1] = g * rx.xrt_ad_t_y(...)`; for 3D additionally `gt[2] = g * rx.xrt_ad_t_z(...)`; set `gt` as gradient for `t_spec` [S1, unofficial]. Gradient w.r.t. Ray Directions (`n`): for 2D compute `gn[0] = g * rx.xrt_ad_n_x(...)`, `gn[1] = g * rx.xrt_ad_n_y(...)`; for 3D additionally `gn[2] = g * rx.xrt_ad_n_z(...)`; set `gn` as gradient for `n_spec` [S1, unofficial].
++**Outputs:**
++- `proj`: Array of shape `(L,)` containing projection values.
++- Gradients with respect to `data`, `t_spec`, and `n_spec` (computed during backward pass).
+ 
+-**Formulas:**
+-*   Bounding box: $\mathbf{bbox}_{ll} = \mathbf{x}_0 - \frac{\mathbf{\Delta}}{2}$, $\mathbf{bbox}_{ur} = \mathbf{x}_0 - \frac{\mathbf{\Delta}}{2} + (\mathbf{Q} \odot \mathbf{\Delta})$ [S1, unofficial].
+-*   Voxel length: $L = \|\mathbf{p}_b - \mathbf{p}_a\| \cdot \|\mathbf{\Delta}\| \cdot \frac{1}{\prod \mathbf{\Delta}}$ [S1, unofficial].
+-*   3D Order 0 gradient component (w.r.t. ray anchor $t_{idx}$): $\sigma = \mathbb{I}(p_a[idx] < \epsilon) + \mathbb{I}(p_b[idx] < \epsilon) - \mathbb{I}(p_a[idx] > 1.0 - \epsilon) - \mathbb{I}(p_b[idx] > 1.0 - \epsilon)$, $n_{abs} = |n[idx]|$, $g = \mathbb{I}(n_{abs} > \epsilon) \cdot \frac{\sigma}{n_{abs}}$ [S1, unofficial]. When $n[idx]=0$, the ray never crosses $idx$-faces and $\sigma=0$, so return 0 to avoid division by zero [S1, unofficial].
++### Data Structures
++- `ArrayNf`: Ray type (e.g., `drjit.Array3f`).
++- `ArrayNi`: Integer type (`int32`).
++- `ArrayNu`: Unsigned integer type (`uint32`).
++- `Float`: Scalar value type.
++- `Bool`: Mask type.
++- `stride`: Linear indexing stride. For 2D: `ArrayNu(Q_y, 1)`. For 3D: `ArrayNu(Q_y * Q_z, Q_z, 1)`.
++
++### Algorithm Steps
++
++1. **Initialization**:
++   - Compute bounding box: `bbox_ll = knot_start - (knot_step / 2)`, `bbox_ur = knot_start - (knot_step / 2) + (knot_num * knot_step)`.
++   - Compute `stride` based on dimension $D$.
++   - Initialize `buffer` of shape `(L,)` to zero.
++   - Initialize state: For order 0, `state = (buffer,)`. For order 1 (2D) and order > 0 (3D), `state = (buffer, index_prev)` with `index_prev = ArrayNi(-1)`.
++
++2. **Ray Bounding Box Intersection**:
++   - Compute `active, t1, t2 = ray_bbox_intersect(bbox_ll, bbox_ur, ray_t, ray_n)`.
++   - Compute `t_min = minimum(t1, t2)`.
++   - Adjust ray origin: `ray_t = select(active & bbox_contains(bbox_ll, bbox_ur, ray_t), ray_t + (t_min - 1) * ray_n, ray_t)`.
++
++3. **DDA Traversal**:
++   - Execute DDA loop: `dda(ray_o=ray_t, ray_d=ray_n, ray_max=inf, grid_res=knot_num, grid_min=bbox_ll, grid_max=bbox_ur, func=project, state=state, active=active, mode=mode, max_iterations=-1)`.
++
++4. **Project Callback (Forward Pass)**:
++   The `project` callback is invoked for each cell intersection. It depends on dimension $D$ and `order`.
++
++   **Case 1: 3D Order 0 (Voxel)**
++   - Compute offset: `offset = dot(index, stride)`.
++   - Gather weight: `fq = gather(Float, data, offset, active)`.
++   - Compute length: `L = norm((p_b - p_a) * knot_step) * rcp(prod(knot_step))`.
++   - Accumulate: `accum += fq * L`.
++
++   **Case 2: 2D or 3D Non-Voxel (Box Spline)**
++   - Determine movement direction: `direction = ray_n * rcp(knot_step)`.
++   - Determine look direction: `look_lr = abs(direction.x) >= abs(direction.y)`.
++   - Set move direction: `mv_dir = select(look_lr, (+1, 0), (0, +1))`.
++   - Define shifts: `shift_l = reverse(-mv_dir)`, `shift_m = (0, 0)`, `shift_r = reverse(+mv_dir)`.
++   - For each shift `s` in `{shift_l, shift_m, shift_r}`:
++     - Compute `index_s = index + shift`.
++     - Check bounds: `active_s = all((0 <= index_s) & (index_s < knot_num))`.
++     - Compute `offset = dot(index_s, stride)`.
++     - Gather `fq = gather(Float, data, offset, active_s)`.
++     - Compute `cell_center = (0.5, 0.5) + shift`.
++     - Enable gradients on local copies: `n_local = ArrayNf(ray_n)`, `p_local = ArrayNf(p_a)`. `enable_grad(n_local, p_local)`.
++     - Define contribution function:
++       ```python
++       def contribution(p_a_, ray_n_):
++           n_perp = normalize((-ray_n_.y, ray_n_.x))
++           E, E_mask = box_spline_1d_E(order, knot_step, n_perp)
++           x = dot(n_perp, knot_step * (cell_center - p_a_))
++           return box_spline_1d_dr(E, E_mask, x)
++       ```
++     - Run backward pass: `backward(contribution(p_local, n_local), flags=ADFlag.Default | ADFlag.AllowNoGrad)`.
++     - Compute gradient `g = n_local.grad[idx] + fac_t * p_local.grad[idx]`. (Note: `fac_t` is computed as described in gradient section).
++     - Compute length `L = box_spline_1d_dr(E, E_mask, x)`.
++     - Handle displacement logic to select `fq_lmr` and `L_lmr` based on `dot(displacement, mv_dir)`.
++     - Accumulate: `accum += dot(fq_lmr, (L_l, L_m, L_r))`.
++     - Update `index_prev = index`.
++
++   **Case 3: 3D Order > 0 (Neural Network Spline)**
++   - Normalize ray direction: `n = normalize(ray_n)`.
++   - Compute direction: `direction = abs(ray_n * rcp(knot_step))`.
++   - Compute dominant axis: `dominant_axis = floor(direction / max(direction) + 1e-6)`.
++   - Compute shifts: `shift_x`, `shift_y`, `shift_m = (0,0,0)`.
++   - Compute perpendiculars: `n_perp_x = normalize(shift_x - dot(shift_x, n) * n)`, `n_perp_y = cross(n, n_perp_x)`.
++   - For each shift in `{shift_m, shift_x, -shift_x, shift_y, -shift_y, shift_x + shift_y, -shift_x - shift_y, shift_x - shift_y, -shift_x + shift_y}`:
++     - Compute `index_s`, gather `fq`.
++     - Compute `cell_center = (0.5, 0.5, 0.5) + shift`.
++     - Compute `x = dot(n_perp_y, knot_step * (cell_center - p_a))`, `y = dot(n_perp_x, knot_step * (cell_center - p_a))`.
++     - Compute `L = spline_3d_dr(net, x, y, n)`.
++   - Accumulate using complex logic involving `displacement` to handle corner weights and avoid double counting.
++
++5. **Gradient Computation (Backward Pass)**:
++   - Retrieve output gradient `g = self.grad_out()`.
++   - Determine dimension `D`.
++   - Initialize gradient accumulators for `t` and `n` as zero arrays.
++   - **Gradient w.r.t. volume (`x`)**: If `want_x`, compute adjoint transform using `xrt_adjoint(rs, knot_spec, order, g)` and set as gradient for `x`.
++   - **Gradient w.r.t. ray anchors (`t`)**: If `want_t`, compute partial derivatives.
++     - For 2D: `gt[0] = g * xrt_ad_t_x(...)`, `gt[1] = g * xrt_ad_t_y(...)`.
++     - For 3D: Additionally `gt[2] = g * xrt_ad_t_z(...)`.
++     - Set `gt` as gradient for `t_spec`.
++   - **Gradient w.r.t. ray directions (`n`)**: If `want_n`, compute partial derivatives.
++     - For 2D: `gn[0] = g * xrt_ad_n_x(...)`, `gn[1] = g * xrt_ad_n_y(...)`.
++     - For 3D: Additionally `gn[2] = g * xrt_ad_n_z(...)`.
++     - Set `gn` as gradient for `n_spec`.
++
++### Formulas and Parameters
++
++**Box Spline Direction Vectors $\mathbf{E}$:**
++- Order 0: $\mathbf{E} = [\mathbf{\Delta}]$.
++- Order 1 (2D): $\mathbf{E} = [\mathbf{\Delta}_1, 0, \mathbf{\Delta}_1, 0, \mathbf{\Delta}_2, \mathbf{\Delta}_2]$.
++- Order 2 (2D): $\mathbf{E} = [\mathbf{\Delta}_1, 0, \mathbf{\Delta}_1, \mathbf{\Delta}_1, 0, \mathbf{\Delta}_2, \mathbf{\Delta}_2, -\mathbf{\Delta}_2]$.
++
++**Gradient w.r.t. Ray Anchor (3D Order 0 Closed-Form):**
++For dimension `idx`:
++$$ \sigma = \mathbb{I}(p_a[idx] < \epsilon) + \mathbb{I}(p_b[idx] < \epsilon) - \mathbb{I}(p_a[idx] > 1.0 - \epsilon) - \mathbb{I}(p_b[idx] > 1.0 - \epsilon) $$
++$$ n_{abs} = |n[idx]| $$
++$$ g = \begin{cases} \sigma / n_{abs} & \text{if } n_{abs} > \epsilon \\ 0 & \text{otherwise} \end{cases} $$
++The gradient contribution is `fq * g`.
++
++**Gradient w.r.t. Ray Anchor (General):**
++$$ g_s = \begin{cases} \sigma / n_{abs} & \text{if } n_{abs} > \epsilon \\ 0 & \text{otherwise} \end{cases} $$
++$$ \sigma_{out} = \mathbb{I}(p_b[idx] < \epsilon) - \mathbb{I}(p_b[idx] > 1.0 - \epsilon) $$
++$$ L_{fw} = \frac{\|(p_b - p_a) \mathbf{\Delta}\|}{\prod \mathbf{\Delta}} $$
++$$ local\_g_d = \begin{cases} L_{fw} \cdot \sigma_{out} / n_{abs} & \text{if } n_{abs} > \epsilon \\ 0 & \text{otherwise} \end{cases} $$
++$$ p_{a\_phys} = \mathbf{x}_0 + (\text{index} + p_a) \mathbf{\Delta} $$
++$$ fac_t = \begin{cases} \frac{\dot(p_{a\_phys} - \mathbf{t}_{init}, \mathbf{n})}{\|\mathbf{n}\|^2} & \text{if } \|\mathbf{n}\|^2 > \epsilon^2 \\ 0 & \text{otherwise} \end{cases} $$
++$$ g = local\_g_d + fac_t \cdot g_s $$
+ 
+ **Parameters:**
+-*   `order`: Integer specifying data interpolation order (0, 1, or 2) [S1, unofficial]. Order 0 uses $\mathbf{E} = \mathbf{\Delta}$. Order 1 (2D) uses $\mathbf{E} = [\mathbf{\Delta}_1, 0, \mathbf{\Delta}_1, 0, \mathbf{\Delta}_2, \mathbf{\Delta}_2]$. Order 2 (2D) uses $\mathbf{E} = [\mathbf{\Delta}_1, 0, \mathbf{\Delta}_1, \mathbf{\Delta}_1, 0, \mathbf{\Delta}_2, \mathbf{\Delta}_2, -\mathbf{\Delta}_2]$ [S1, unofficial].
+-*   `mode`: String for automatic differentiation mode, typically `'symbolic'` [S1, unofficial].
++- `order`: 0, 1, or 2.
++- `eps`: Small constant for numerical stability (e.g., $10^{-6}$).
+ 
+ **Edge Cases and Pitfalls:**
+-*   When $n[idx]=0$, the ray never crosses $idx$-faces; $\sigma=0$ too, so return 0 to avoid division by zero [S1, unofficial].
+-*   Enabling gradients on loop-external `ray_n` breaks symbolic tracing; must use local copies `n_local` and `p_local` [S1, unofficial].
+-*   Forward-mode differentiation is not implemented; only reverse-mode (backward) differentiation is supported via the `backward` method [S1, unofficial].
+-
+-**Pseudocode:**
+-```python
+-def xrt_apply(ray_t, ray_n, knot_spec, data, order, mode='symbolic'):
+-    # Types
+-    Float = type(ray_t)
+-    ArrayNi = int32_array_t(Float)
+-    ArrayNu = uint32_array_t(Float)
+-    Bool = mask_t(Float)
+-    
+-    D = size_v(ray_t)
+-    knot_start = ArrayNf(*knot_spec.start)
+-    knot_step = ArrayNf(*knot_spec.step)
+-    knot_num = ArrayNu(*knot_spec.num)
+-    bbox_ll = knot_start - (knot_step / 2)
+-    bbox_ur = knot_start - (knot_step / 2) + (knot_num * knot_step)
+-    
+-    if D == 2:
+-        stride = ArrayNu(knot_num.y, 1)
+-    else:
+-        stride = ArrayNu(knot_num.y * knot_num.z, knot_num.z, 1)
+-        
+-    L = max(ray_t.shape[1], ray_n.shape[1])
+-    buffer = zeros(Float, L)
+-    
+-    # State initialization
+-    if order == 0:
+-        state = (buffer,)
+-    else:
+-        index_prev = ArrayNi(-1)
+-        state = (buffer, index_prev)
+-        
+-    # Ray-bbox intersection
+-    active, t1, t2 = ray_bbox_intersect(bbox_ll, bbox_ur, ray_t, ray_n)
+-    t_min = minimum(t1, t2)
+-    ray_t = select(active & bbox_contains(bbox_ll, bbox_ur, ray_t),
+-                   ray_t + (t_min - 1) * ray_n, ray_t)
+-                   
+-    # DDA Traversal
+-    dda(ray_o=ray_t, ray_d=ray_n, ray_max=Float(inf),
+-        grid_res=knot_num, grid_min=bbox_ll, grid_max=bbox_ur,
+-        func=project, state=state, active=active, mode=mode,
+-        max_iterations=-1)
+-    return buffer
+-
+-def project(state, index, p_a, p_b, active):
+-    if order == 0:
+-        (accum,) = state
+-        offset = dot(index, stride)
+-        fq = gather(Float, data, offset, active)
+-        L = norm((p_b - p_a) * knot_step) * rcp(prod(knot_step))
+-        accum += fq * L
+-        return (accum,), Bool(True)
+-        
+-    elif D == 2:
+-        (accum, index_prev) = state
+-        n_perp = normalize(ArrayNf(-ray_n.y, ray_n.x))
+-        E, E_mask = box_spline_1d_E(order, knot_step, n_perp)
+-        
+-        direction = ray_n * rcp(knot_step)
+-        look_lr = abs(direction.x) >= abs(direction.y)
+-        mv_dir = select(look_lr, ArrayNi(+1, 0), ArrayNi(0, +1))
+-        shift_l = reverse(-mv_dir)
+-        shift_m = ArrayNi(0, 0)
+-        shift_r = reverse(+mv_dir)
+-        
+-        fq_l, L_l = process_shift(shift_l)
+-        fq_m, L_m = process_shift(shift_m)
+-        fq_r, L_r = process_shift(shift_r)
+-        
+-        displacement = ArrayNi(index) - index_prev
+-        fq_lmr = if_stmt((fq_l, fq_m, fq_r),
+-                         dot(displacement, mv_dir) != 0,
+-                         lambda l, m, r: Array3f(l, m, r),
+-                         lambda l, m, r: select(dot(displacement, reverse(mv_dir)) == -1,
+-                                                Array3f(l, 0, 0), Array3f(0, 0, r)))
+-        accum += dot(fq_lmr, Array3f(L_l, L_m, L_r))
+-        return (accum, ArrayNi(index)), Bool(True)
+-        
+-    else: # D == 3, order > 0
+-        (accum, index_prev) = state
+-        n = normalize(ray_n)
+-        direction = abs(ray_n * rcp(knot_step))
+-        dominant_axis = floor(direction / max(direction) + 1e-6)
+-        shift_x = ArrayNf(dominant_axis.y, dominant_axis.z, dominant_axis.x)
+-        shift_y = cross(dominant_axis, shift_x)
+-        shift_m = ArrayNi(0, 0, 0)
+-        n_perp_x = normalize(shift_x - dot(shift_x, n) * n)
+-        n_perp_y = cross(n, n_perp_x)
+-        
+-        # Process all 9 shifts, gather fq, compute L via spline_3d_dr
+-        # Accumulate with displacement logic for corner weights
+-        # (Full logic follows evidence structure for 3D order > 0)
+-        return (accum, ArrayNi(index)), Bool(True)
+-
+-def process_shift(shift):
+-    index_s = index + shift
+-    offset = dot(index_s, stride)
+-    in_bounds = all((0 <= index_s) & (index_s < knot_num))
+-    fq = gather(Float, data, offset, in_bounds)
+-    cell_center = ArrayNf(0.5, 0.5) + shift
+-    p_local = ArrayNf(p_a)
+-    enable_grad(p_local)
+-    def contribution(p_a_, ray_n_):
+-        n_perp = normalize(ArrayNf(-ray_n_.y, ray_n_.x))
+-        E, E_mask = box_spline_1d_E(order, knot_step, n_perp)
+-        x = dot(n_perp, knot_step * (cell_center - p_a_))
+-        return box_spline_1d_dr(E, E_mask, x)
+-    backward(contribution(p_local, ray_n), flags=ADFlag.Default | ADFlag.AllowNoGrad)
+-    g = p_local.grad[idx]
+-    disable_grad(p_local)
+-    return fq, g
+-```
++- When $n[idx]=0$, the ray never crosses `idx`-faces; $\sigma=0$ too, so return 0 to avoid division by zero.
++- Enabling grad on loop-external `ray_n` breaks symbolic tracing; must use local copies `n_local` and `p_local`.
++- Forward-mode differentiation is not implemented. Only reverse-mode (backward) differentiation is supported.
+ 
+ ## Subtopics
+ 
+ ### Neural Network Spline Evaluation
+-A neural network used to evaluate the 3D box spline projection for orders > 0 [S1, unofficial]. It takes inputs related to position and direction and outputs the spline value [S1, unofficial]. Weights are loaded from `spline_weights.npz` file [S1, unofficial]. The network architecture is `dnn.Sequential` with layers: `dnn.Linear(4, 16)`, `dnn.ReLU()`, `dnn.Linear(16, 16)`, `dnn.ReLU()`, `dnn.Linear(16, 16)`, `dnn.ReLU()`, `dnn.Linear(16, 16)`, `dnn.ReLU()`, `dnn.Linear(16, 1)` [S1, unofficial]. Weights are stored in `TensorXf16` format [S1, unofficial]. It is called as `spline_3d_dr(net, x, y, n)` where `x` and `y` are projected coordinates and `n` is the normalized ray direction [S1, unofficial].
++A neural network used to evaluate the 3D box spline projection for orders > 0. It takes inputs related to position and direction and outputs the spline value. Weights are loaded from `spline_weights.npz` file. The network architecture is `dnn.Sequential` with layers: `dnn.Linear(4, 16)`, `dnn.ReLU()`, `dnn.Linear(16, 16)`, `dnn.ReLU()`, `dnn.Linear(16, 16)`, `dnn.ReLU()`, `dnn.Linear(16, 16)`, `dnn.ReLU()`, `dnn.Linear(16, 1)`. Weights are stored in `TensorXf16` format. It is called as `spline_3d_dr(net, x, y, n)` where `x` and `y` are projected coordinates and `n` is the normalized ray direction.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear in the number of rays and the number of cells intersected by each ray [S1, unofficial].
+-*   **Memory Complexity:** Linear in the number of rays and the volume size [S1, unofficial].
+-*   **Performance:** Measured performance depends on hardware and resolution [S1, unofficial].
+-*   **Strengths:** Exact gradients for ray parameters; supports 2D and 3D grids; handles multiple interpolation orders [S1, unofficial].
+-*   **Limitations:** 3D projections only support order 0 (closed-form) or require a neural network for higher orders; forward-mode differentiation is not implemented [S1, unofficial].
+-*   **When to use:** Geometry calibration in tomography, differentiable ray-based models where gradients w.r.t. ray parameters are needed [S1, unofficial].
+-*   **When not to use:** When forward-mode differentiation is required; when 3D higher-order interpolation is needed without a pre-trained neural network [S1, unofficial].
++- **Time Complexity**: Linear in the number of rays and the number of cells intersected by each ray. The DDA traversal is efficient for uniform grids.
++- **Memory Complexity**: Linear in the number of rays and the volume size.
++- **Measured Performance**: Not given in the sources.
++- **Scaling**: Scales well with the number of rays due to parallelization in Dr.Jit.
++- **Strengths**: Analytical gradients for ray parameters allow for efficient optimization in tomography and geometry calibration. Supports multiple interpolation orders.
++- **Limitations**: 3D projections only support order 0 in the closed-form variant. Orders 1 and 2 for 3D require neural network evaluation, which may be slower and less precise than analytical methods. Forward-mode differentiation is not supported.
++- **When to use**: Geometry calibration in tomography, differentiable ray-based models.
++- **When not to use**: When forward-mode differentiation is required, or when high-order 3D analytical gradients are needed without neural network approximation.
+ 
+ ## Background
+-Originated in the `differentiable_xrt` library by HaouchatY, implementing Algorithms 1-2 of the reference paper as a vector-Jacobian product within Dr.Jit's automatic differentiation framework [S1, unofficial]. It is used in geometry calibration in tomography, specifically for differentiable ray-based models [S1, unofficial].
++The method originates from the paper "Differentiable X-ray Transform with Ray-Trace Gradients" by Haouchat et al. [S1, unofficial]. It is implemented as part of the `differentiable_xrt` library using Dr.Jit's automatic differentiation framework. The method explicitly differentiates the projection integral with respect to ray parameters, providing a robust alternative to finite differences or implicit autodiff through the entire ray march.
+ 
+ ## Sources

@@ -1,0 +1,154 @@
+# ReSplat
+
+Also called: Learning Recurrent Gaussian Splatting
+
+## Overview
+ReSplat is a feed-forward recurrent Gaussian splatting model that iteratively refines 3D Gaussian primitives without explicitly computing gradients, using rendering error as a feedback signal to guide updates [S1]. It operates in a compact subsampled 3D space to reduce the Gaussian count while improving performance and generalization [S1]. Unlike single-step feed-forward models, ReSplat leverages a weight-sharing recurrent network for multi-step refinement, enabling robust generalization across diverse datasets, view counts, and resolutions [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** $N$ input images $\{I_i\}_{i=1}^N$ (where $I_i \in \mathbb{R}^{H \times W \times 3}$), intrinsic matrices $\{K_i\}_{i=1}^N$ ($K_i \in \mathbb{R}^{3 \times 3}$), and extrinsic matrices $\{(R_i, t_i)\}_{i=1}^N$ (where $R_i \in SO(3), t_i \in \mathbb{R}^3$) [S1].
+*   **Output:** A set of $M$ 3D Gaussian primitives $G = \{(\mu_j, \alpha_j, \Sigma_j, sh_j)\}_{j=1}^M$, where $\mu_j$ is position, $\alpha_j$ is opacity, $\Sigma_j$ is covariance, and $sh_j$ represents spherical harmonics coefficients [S1].
+
+**Data Structures:**
+*   **Point Cloud:** A set of $M$ points $\{(p_j, f_j)\}_{j=1}^M$, where $p_j \in \mathbb{R}^3$ is the 3D position and $f_j \in \mathbb{R}^{C_0}$ is the feature vector [S1].
+*   **Context-Aggregated Features:** $\{f_j^*\}_{j=1}^M$, where $f_j^* \in \mathbb{R}^{C_0}$ [S1].
+*   **Gaussian Parameters:** $g_j \in \mathbb{R}^{C_1}$, where $C_1 = 59$ is the concatenation of all Gaussian parameters ($\mu_j, \alpha_j, \Sigma_j, sh_j$) for the $j$-th Gaussian [S1].
+*   **Hidden State:** $z_j \in \mathbb{R}^{C_0}$, representing the latent state for the $j$-th Gaussian [S1].
+
+**Parameters:**
+*   **Subsampling Factor:** 16. The initial reconstruction operates in a 16x subsampled 3D space [S1].
+*   **Feature Dimension ($C_0$):** 256 for the small model, 512 for the base model [S1].
+*   **Number of Attention Blocks:** Six alternating blocks of kNN attention and global attention [S1].
+*   **Number of Recurrent Steps ($T$):** The total number of refinement iterations [S1].
+*   **Input Views ($N$):** Tested with 2, 8, 16, and 32 views [S1].
+*   **Image Resolution:** Tested from 256x256 to 540x960 [S1].
+
+**Algorithm Steps:**
+
+1.  **Initialization (Iteration 0): Point Cloud Generation**
+    Predict per-view depth maps at 1/4 resolution. Unproject and transform them into a point cloud with image features $\{(p_j, f_j)\}_{j=1}^M$, where $M = N \times H \times W / 16$ is the number of points [S1].
+    $$ \{I_i, K_i, R_i, t_i\}_{i=1}^N \rightarrow \{(p_j, f_j)\}_{j=1}^M \quad (1) $$
+    [S1]
+
+2.  **Context Aggregation**
+    Use six alternating blocks of kNN attention and global attention to model local and global 3D contexts. This produces context-aggregated features $f_j^* \in \mathbb{R}^{C_0}$ with increased expressiveness [S1].
+    $$ \{(p_j, f_j)\}_{j=1}^M \rightarrow \{(p_j, f_j^*)\}_{j=1}^M \quad (2) $$
+    [S1]
+
+3.  **Initial Gaussian Prediction**
+    Reconstruct an initial set of 3D Gaussians $\{(g_j^0, z_j^0)\}_{j=1}^M$ in the 16x subsampled 3D space. The point cloud $\{p_j\}_{j=1}^M$ serves as the Gaussian centers. Other Gaussian parameters are decoded using a lightweight Gaussian head (two-layer MLP) from the context-aggregated features $\{f_j^*\}_{j=1}^M$ [S1].
+
+4.  **Recurrent Update Step $t$ (for $t = 1$ to $T$):**
+    a.  **Rendering:** Render the input views using the current Gaussian prediction $G_t = \{(g_j^t, z_j^t)\}_{j=1}^M$.
+    b.  **Error Computation:** Compute the rendering errors $\hat{E}_t$ between the rendered views and the ground-truth input views. Derive the rendering error vector $e_j^t$ for each Gaussian [S1].
+    c.  **Error Propagation:** Apply global attention on the rendering error to propagate these errors to the 3D Gaussians [S1].
+    d.  **Parameter Update:** A kNN attention-based update module takes as input the concatenation of the current Gaussian parameters $g_j^t$, the hidden state $z_j^t$, and the rendering error $e_j^t$. It predicts the incremental updates $\Delta g_j^t$ and $\Delta z_j^t$ [S1].
+    e.  **State Update:** Update the Gaussian parameters and hidden state:
+        $$ g_j^{t+1} = g_j^t + \Delta g_j^t $$
+        $$ z_j^{t+1} = z_j^t + \Delta z_j^t $$
+        [S1]
+
+5.  **Iteration:**
+    Iterate the recurrent update process for a total of $T$ steps [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def resplat(input_images, intrinsics, extrinsics, num_views, height, width, 
+            feature_dim, num_recurrent_steps, subsampling_factor=16):
+    """
+    ReSplat: Learning Recurrent Gaussian Splatting
+    
+    Args:
+        input_images: List of N images, shape (H, W, 3)
+        intrinsics: List of N intrinsic matrices, shape (3, 3)
+        extrinsics: List of N extrinsic matrices (R, t), shape (3, 3) and (3,)
+        num_views: N
+        height: H
+        width: W
+        feature_dim: C0 (256 or 512)
+        num_recurrent_steps: T
+        
+    Returns:
+        Gaussians: List of M Gaussian primitives
+    """
+    
+    # Step 1: Initialization - Point Cloud Generation
+    # Predict depth maps at 1/4 resolution
+    # Unproject and transform to 3D points
+    # Extract features from input images
+    # M = N * H * W / 16
+    M = num_views * height * width // (subsampling_factor ** 2)
+    
+    points = [] # List of M points, each (3,)
+    features = [] # List of M features, each (C0,)
+    
+    for i in range(num_views):
+        # Predict depth map at 1/4 resolution
+        depth_map = predict_depth(input_images[i]) # Shape (H/4, W/4)
+        
+        # Unproject to 3D points
+        # Transform using extrinsics
+        # Extract features from input image at corresponding locations
+        # This results in M points total
+        pass # Implementation detail: unprojection and feature extraction
+    
+    # Step 2: Context Aggregation
+    # Use 6 alternating blocks of kNN and global attention
+    context_features = apply_context_aggregation(points, features) # Shape (M, C0)
+    
+    # Step 3: Initial Gaussian Prediction
+    # Decode Gaussian parameters from context features
+    # Centers are points
+    gaussian_params = decode_gaussians(points, context_features) # Shape (M, C1) where C1=59
+    hidden_states = context_features # Initial hidden state z_j^0 = f_j^*
+    
+    # Step 4: Recurrent Update
+    for t in range(num_recurrent_steps):
+        # Render input views using current Gaussians
+        rendered_images = render_gaussians(gaussian_params, points, intrinsics, extrinsics)
+        
+        # Compute rendering errors
+        # Compare rendered_images with input_images
+        rendering_errors = compute_rendering_error(rendered_images, input_images)
+        
+        # Propagate errors to Gaussians
+        # Apply global attention on rendering errors
+        error_features = propagate_errors(rendering_errors, points) # Shape (M, C0)
+        
+        # Parameter Update
+        # Concatenate current params, hidden state, and error features
+        input_to_update = concatenate(gaussian_params, hidden_states, error_features)
+        
+        # Predict incremental updates using kNN attention-based update module
+        delta_params, delta_states = update_module(input_to_update) # Shape (M, C1) and (M, C0)
+        
+        # Update Gaussians and hidden states
+        gaussian_params = gaussian_params + delta_params
+        hidden_states = hidden_states + delta_states
+        
+    return gaussian_params, points
+```
+
+**Edge Cases and Pitfalls:**
+*   **Naive Prediction:** Naively predicting Gaussian parameters from subsampled point features leads to considerable performance loss. This is compensated by using kNN and global attention layers to encode 3D context [S1].
+*   **Unbounded Scenes:** Unlike SplatFormer, which relies on Point Transformer V3 requiring a proper grid size for point cloud serialization (challenging for unbounded scenes), ReSplat handles diverse scene-level datasets without this limitation [S1].
+*   **Initialization:** ReSplat predicts initial Gaussians directly from posed images, without requiring any initial 3D points, unlike G3R which requires well-covered 3D points for initialization [S1].
+
+## Operating characteristics
+*   **Time Complexity:** ReSplat is 100x faster than optimization-based 3DGS due to its feed-forward design [S1]. Rendering speed is 4x faster than per-pixel baselines like MVSplat and DepthSplat due to the 16x fewer Gaussians [S1]. It is 20x faster than LVSM due to the explicit 3D Gaussian representation [S1].
+*   **Memory Complexity:** Uses 1/16 of the Gaussians compared to per-pixel baselines [S1].
+*   **Performance:** On DL3DV with 8 input views at 512x960 resolution, ReSplat improves PSNR by 3.5dB, uses 1/16 of the Gaussians, and achieves 4x faster rendering speed compared to baselines [S1]. On DL3DV with 16 input views at 540x960 resolution, it outperforms Long-LRM by 0.8dB PSNR while using 4x fewer Gaussians [S1]. On DL3DV with 8 input views at 256x448 resolution, full ReSplat achieves PSNR 29.07, SSIM 0.902, LPIPS 0.105 [S1].
+*   **Strengths:** Feed-forward design, iterative refinement without explicit gradients, robust generalization across datasets/view counts/resolutions, handles scene-level datasets, explicit 3D Gaussian representation for fast rendering [S1].
+*   **Limitations:** Requires posed input images [S1]. Performance depends on the quality of the initial depth prediction and feature extraction [S1].
+*   **When to use:** Sparse view synthesis, scene-level reconstruction, when computational efficiency and generalization are prioritized over per-scene optimization [S1].
+*   **When not to use:** When unposed images are available (requires pose estimation), when extremely dense point clouds are needed for specific applications [S1].
+
+## Background
+ReSplat was introduced by Haofei Xu, Daniel Barath, Andreas Geiger, and Marc Pollefeys in the paper 'ReSplat: Learning Recurrent Gaussian Splatting' [S1]. It addresses the limitations of existing feed-forward Gaussian splatting models, which are constrained by relying on a single forward pass for inference [S1]. The method builds on the concept of learning to optimize, but differs from approaches like G3R by being gradient-free and from SplatFormer by being recurrent and handling scene-level datasets [S1].
+
+## Sources
+[S1] ReSplat: Learning Recurrent Gaussian Splatting, https://arxiv.org/abs/2510.08575v4, fetched 2026-10-26
