@@ -42,13 +42,13 @@ McGrids is an iso-surface extraction method that constructs adaptive, non-unifor
     2.2. **Weighted Random Sampling:**
     *   Sample a uniform random number $u \sim U[0, 1]$ [S1].
     *   Select a Voronoi region $\Omega_i$ based on the cumulative distribution $p'(i)$ [S1].
-    *   **Tessellate $\Omega_i$ into tetrahedra.**
-    *   Calculate the volume of each tetrahedron within $\Omega_i$ to form a discrete cumulative distribution.
-    *   Sample a uniform number to select a specific tetrahedron $T_{sel} \subset \Omega_i$.
-    *   Sample a new point $\mathbf{x}_{new}$ uniformly within $T_{sel}$.
+    *   **Tessellate $\Omega_i$ into tetrahedra.** [S1]
+    *   Calculate the volume of each tetrahedron within $\Omega_i$ to form a discrete cumulative distribution. [S1]
+    *   Sample a uniform number to select a specific tetrahedron $T_{sel} \subset \Omega_i$. [S1]
+    *   Sample a new point $\mathbf{x}_{new}$ uniformly within $T_{sel}$. [S1]
 
     2.3. **CVT Relaxation:**
-    *   Compute the centroid of the Voronoi region $\Omega_{new}$ corresponding to $\mathbf{x}_{new}$.
+    *   Compute the centroid of the Voronoi region $\Omega_{new}$ corresponding to $\mathbf{x}_{new}$. [S1]
     *   Move $\mathbf{x}_{new}$ to this centroid position. This is Lloyd's method for stable CVT [S1].
 
     2.4. **Insertion and Update:**
@@ -115,14 +115,15 @@ def mcgrids_extraction(implicit_field, alpha, bounding_box, threshold, max_itera
         region_index = bisect_right(cum_probs, r)
         target_vertex = vertices[region_index]
         
-        region_tets = get_adjacent_tetrahedra(target_vertex, tetrahedra)
+        # Tessellate the selected Voronoi region into tetrahedra [S1]
+        region_tets = tessellate_voronoi_region(target_vertex, vertices, tetrahedra)
         tet_probs = [compute_tet_volume(t) for t in region_tets]
         tet_cum_probs = [sum(tet_probs[:i+1]) / sum(tet_probs) for i in range(len(tet_probs))]
         r_tet = random.uniform(0, 1)
         tet_index = bisect_right(tet_cum_probs, r_tet)
         selected_tet = region_tets[tet_index]
         
-        # Sample uniformly within tetrahedron using barycentric coordinates
+        # Sample uniformly within tetrahedron using barycentric coordinates [G]
         r1, r2, r3 = random.random(), random.random(), random.random()
         if r1 + r2 + r3 > 1:
             r1, r2, r3 = 1 - r1, 1 - r2, 1 - r3
@@ -182,27 +183,27 @@ def mcgrids_extraction(implicit_field, alpha, bounding_box, threshold, max_itera
 
 # Helper functions [G]
 def compute_voronoi_volume(vertex, vertices, tetrahedra):
-    # Computes volume of the Voronoi cell dual to the vertex
+    # Sources do not provide implementation; standard Voronoi cell volume computation [G]
     pass
 
 def rebuild_delaunay(vertices):
-    # Incrementally inserts points into Delaunay tessellation [S1]
+    # Sources do not provide implementation; incremental Delaunay insertion [S1]
     pass
 
 def bisect_right(a, x):
-    # Binary search to find insertion point for x in sorted list a
+    # Binary search to find insertion point for x in sorted list a [G]
     pass
 
 def get_adjacent_tetrahedra(vertex, tetrahedra):
-    # Returns list of tetrahedra sharing the vertex
+    # Returns list of tetrahedra sharing the vertex [G]
     pass
 
 def compute_tet_volume(tet):
-    # Computes volume of a tetrahedron from its vertices
+    # Computes volume of a tetrahedron from its vertices [G]
     pass
 
 def compute_voronoi_centroid(point, vertices, tetrahedra):
-    # Computes centroid of the Voronoi cell for the given point
+    # Computes centroid of the Voronoi cell for the given point [G]
     pass
 
 def update_pdf_from_volumes(tetrahedra, voronoi_volumes):

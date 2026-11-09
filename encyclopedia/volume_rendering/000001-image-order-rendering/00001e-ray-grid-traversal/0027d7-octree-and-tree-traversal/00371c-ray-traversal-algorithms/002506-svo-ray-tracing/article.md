@@ -1,127 +1,95 @@
 # SVO Ray Tracing
 
-Also called: Sparse Voxel Octree Ray Tracing, SVO Walk
 
 ## Overview
-SVO Ray Tracing is a method for rendering volumetric data stored in a Sparse Voxel Octree (SVO) by traversing the tree structure to sample only occupied regions, thereby skipping empty space. It differs from uniform grid ray marching by using hierarchical node pointers to jump over empty voxels, and from BVH-based approaches by operating directly on the octree structure without an intermediate bounding volume hierarchy [S1, unofficial]. The method typically involves building an SVO from a voxel grid, constructing a traversal-friendly representation (often a BVH or linearized SVO), and executing a depth-first ray traversal that visits nodes in eye-order to perform volume compositing [S1, unofficial].
+SVO Ray Tracing renders volumetric data stored in a Sparse Voxel Octree (SVO) by traversing the tree structure to sample only occupied regions, thereby skipping empty space [S1, unofficial]. It differs from uniform grid ray marching by using hierarchical node pointers to jump over empty voxels, and from BVH-based approaches by operating directly on the octree structure without an intermediate bounding volume hierarchy [S1, unofficial]. The implementation in the primary source converts the SVO into a BVH-like structure for efficient ray intersection, executing a depth-first traversal to perform volume compositing [S1, unofficial].
 
 ## How it works
 The implementation described in the primary source [S1, unofficial] uses a hybrid approach where the SVO is converted into a BVH-like structure for efficient ray intersection, or traversed directly via a stack-based walk. The following details the specific implementation from [S1, unofficial], which builds a BVH from the SVO leaves for traversal.
 
 **Inputs:**
-- A voxel grid loaded from a CSV file (or similar sparse representation).
-- Camera parameters: origin, rotation (4x4 matrix), width, height, aspect ratio, and field of view (stored as $\tan(\text{fov}/2)$).
-- Scene objects (optional, if rendering geometry alongside volume).
+- A voxel grid loaded from a CSV file (or similar sparse representation) [S1, unofficial].
+- Camera parameters: origin, rotation (4x4 matrix), width, height, aspect ratio, and field of view (stored as $\tan(\text{fov}/2)$) [S1, unofficial].
+- Scene objects (optional, if rendering geometry alongside volume) [G].
 
 **Outputs:**
-- A rendered image (framebuffer).
+- A rendered image (framebuffer) [S1, unofficial].
 
 **Data Structures:**
 1.  **RaytracerShaderUniforms:** A uniform buffer containing:
-    -   `camera_rotation`: `[[f32; 4]; 4]` (4x4 matrix).
-    -   `camera_origin`: `[f32; 4]` (vec4).
-    -   `width`: `u32`.
-    -   `height`: `u32`.
-    -   `aspect_ratio`: `f32`.
-    -   `fov`: `f32` (value is $\tan(\text{fov}_{rad}/2)$).
-    -   `bvh_root`: `u32` (index of the root node).
-2.  **SVO Buffer:** A storage buffer for the SVO node pool.
-3.  **BVH Node Buffer:** A storage buffer for BVH nodes.
+    -   `camera_rotation`: `[[f32; 4]; 4]` (4x4 matrix) [S1, unofficial].
+    -   `camera_origin`: `[f32; 4]` (vec4) [S1, unofficial].
+    -   `width`: `u32` [S1, unofficial].
+    -   `height`: `u32` [S1, unofficial].
+    -   `aspect_ratio`: `f32` [S1, unofficial].
+    -   `fov`: `f32` (value is $\tan(\text{fov}_{rad}/2)$) [S1, unofficial].
+    -   `bvh_root`: `u32` (index of the root node) [S1, unofficial].
+2.  **SVO Buffer:** A storage buffer for the SVO node pool [S1, unofficial].
+3.  **BVH Node Buffer:** A storage buffer for BVH nodes [S1, unofficial].
     -   `BVHNode` layout:
-        -   `center`: `[f32; 4]` (x, y, z, w).
-        -   `radius`: `f32`.
-        -   `left_child`: `u32` (index with MSB set if leaf, otherwise internal node index).
-        -   `right_child`: `u32` (index with MSB set if leaf, otherwise internal node index).
-4.  **BVH Leaf Buffer:** A storage buffer for BVH leaves.
+        -   `center`: `[f32; 4]` (x, y, z, w) [S1, unofficial].
+        -   `radius`: `f32` [S1, unofficial].
+        -   `left_child`: `u32` (index with MSB set if leaf, otherwise internal node index) [S1, unofficial].
+        -   `right_child`: `u32` (index with MSB set if leaf, otherwise internal node index) [S1, unofficial].
+4.  **BVH Leaf Buffer:** A storage buffer for BVH leaves [S1, unofficial].
     -   `BVHLeaf` layout:
-        -   `model_address`: `u32`.
-        -   `inv_model`: `[f32; 4]` (flattened inverse transformation matrix).
+        -   `model_address`: `u32` [S1, unofficial].
+        -   `inv_model`: `[f32; 4]` (flattened inverse transformation matrix) [S1, unofficial].
 
 **Algorithm Steps:**
 
 1.  **SVO Construction:**
-    -   Load the voxel grid from the source data (e.g., CSV).
+    -   Load the voxel grid from the source data (e.g., CSV) [S1, unofficial].
     -   Convert the voxel grid into a `SparseVoxelOctree` structure. This involves encoding 3D positions into Morton codes to sort leaves spatially [S1, unofficial].
 
 2.  **BVH Construction (from SVO Leaves):**
-    -   Extract all leaf nodes from the SVO.
-    -   For each leaf, compute its center and radius (bounding sphere).
-    -   Sort leaves by their Morton code.
+    -   Extract all leaf nodes from the SVO [S1, unofficial].
+    -   For each leaf, compute its center and radius (bounding sphere) [S1, unofficial].
+    -   Sort leaves by their Morton code [S1, unofficial].
     -   Build a BVH bottom-up:
-        -   Group leaves in pairs.
-        -   For each pair, compute the bounding sphere of the two leaves.
-        -   Create a `BVHNode` with the combined center, radius, and children indices.
-        -   If a leaf is the last one (odd number of leaves), its right child is an `empty_node_idx` (0).
+        -   Group leaves in pairs [S1, unofficial].
+        -   For each pair, compute the bounding sphere of the two leaves [S1, unofficial].
+        -   Create a `BVHNode` with the combined center, radius, and children indices [S1, unofficial].
+        -   If a leaf is the last one (odd number of leaves), its right child is an `empty_node_idx` (0) [S1, unofficial].
         -   Store children indices with the MSB set to 1 if they refer to leaves, to distinguish from internal nodes [S1, unofficial].
-        -   Use a queue to process internal nodes until a single root remains.
-    -   Max sizes: 65,536 leaves ($2^{16}$), 131,071 nodes ($2 \times 65,536 - 1$) [S1, unofficial].
+        -   Use a queue to process internal nodes until a single root remains [S1, unofficial].
+    -   Buffer initialization specifies max sizes of 16,384 leaves and 32,767 nodes, while notes mention a theoretical maximum of 65,536 leaves and 131,071 nodes [S1, unofficial].
 
 3.  **Initialization:**
-    -   Create GPU buffers for Uniforms, SVO, BVH Nodes, and BVH Leaves.
-    -   Copy the constructed BVH data to the GPU buffers.
-    -   Update the Uniform buffer with current camera parameters.
+    -   Create GPU buffers for Uniforms, SVO, BVH Nodes, and BVH Leaves [S1, unofficial].
+    -   Copy the constructed BVH data to the GPU buffers [S1, unofficial].
+    -   Update the Uniform buffer with current camera parameters [S1, unofficial].
 
 4.  **Ray Traversal (Shader):**
-    -   For each pixel, generate a ray from the camera origin through the pixel center.
+    -   For each pixel, generate a ray from the camera origin through the pixel center [G].
     -   Traverse the BVH/SVO:
-        -   Start at the root node.
-        -   Check ray intersection with the node's bounding sphere.
-        -   If intersected, traverse children (left then right, or based on depth-first order).
-        -   If a leaf is reached, sample the volume data or apply the object's transformation [S1, unofficial].
-    -   Perform volume compositing (front-to-back or back-to-front) to compute the final color.
+        -   Start at the root node [G].
+        -   Check ray intersection with the node's bounding sphere [G].
+        -   If intersected, traverse children (left then right, or based on depth-first order) [G].
+        -   If a leaf is reached, switch to a fixed-step traversal (like DDA) within the leaf's voxel grid to sample the volume data [S1, S6, S8, unofficial][G].
+    -   Perform volume compositing (front-to-back or back-to-front) to compute the final color [G].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# BVH Node Structure
-struct BVHNode:
-    center: vec4  # xyzw
-    radius: f32
-    left_child: u32
-    right_child: u32
+class BVHNode:
+    def __init__(self, center, radius, left_child, right_child):
+        self.center = center  # vec4
+        self.radius = radius  # f32
+        self.left_child = left_child  # u32
+        self.right_child = right_child  # u32
 
-# BVH Leaf Structure
-struct BVHLeaf:
-    model_address: u32
-    inv_model: vec4  # Flattened inverse matrix
+class BVHLeaf:
+    def __init__(self, model_address, inv_model):
+        self.model_address = model_address  # u32
+        self.inv_model = inv_model  # vec4
 
-# Ray Traversal Function
-function traverse_ray(ray_origin, ray_direction, bvh_nodes, bvh_leaves, svo_buffer):
-    stack = [0]  # Start with root node index
-    color = vec4(0.0, 0.0, 0.0, 0.0)
-    
-    while stack is not empty:
-        node_idx = stack.pop()
-        node = bvh_nodes[node_idx]
-        
-        # Check intersection with bounding sphere
-        if not intersect_sphere(ray_origin, ray_direction, node.center, node.radius):
-            continue
-            
-        # Check if leaf
-        if is_leaf(node.left_child):
-            leaf_idx = node.left_child & 0x7FFFFFFF
-            leaf = bvh_leaves[leaf_idx]
-            
-            # Sample volume or apply transformation
-            # Note: Specific sampling logic depends on the volume data format
-            # For geometry, use inv_model to transform ray
-            sample_color = sample_volume(ray_origin, ray_direction, leaf, svo_buffer)
-            color = compositing_step(color, sample_color)
-        else:
-            # Push children to stack (order matters for depth-first)
-            # Right child first so left is processed first
-            stack.push(node.right_child)
-            stack.push(node.left_child)
-            
-    return color
-
-function is_leaf(child_idx):
+def is_leaf(child_idx):
     return (child_idx & 0x80000000) != 0
 
-function intersect_sphere(origin, direction, center, radius):
+def intersect_sphere(origin, direction, center, radius):
     oc = origin - center
     b = dot(oc, direction)
     c = dot(oc, oc) - radius * radius
@@ -131,17 +99,47 @@ function intersect_sphere(origin, direction, center, radius):
     if disc < 0.0:
         return False
     return True
+
+def traverse_ray(ray_origin, ray_direction, bvh_nodes, bvh_leaves, svo_buffer, step_size=0.5):
+    stack = [0]  # Start with root node index
+    color = vec4(0.0, 0.0, 0.0, 0.0)
+    t_max = 1000.0  # Maximum ray distance [G]
+    
+    while stack:
+        node_idx = stack.pop()
+        node = bvh_nodes[node_idx]
+        
+        if not intersect_sphere(ray_origin, ray_direction, node.center, node.radius):
+            continue
+            
+        if is_leaf(node.left_child):
+            leaf_idx = node.left_child & 0x7FFFFFFF
+            leaf = bvh_leaves[leaf_idx]
+            # Leaf handling: switch to fixed-step DDA within the leaf's voxel grid [G]
+            t = 0.0
+            while t < t_max:
+                voxel_pos = ray_origin + ray_direction * t
+                sample = sample_volume(voxel_pos, leaf, svo_buffer)  # Not given in the sources [G]
+                color = compositing_step(color, sample)  # Not given in the sources [G]
+                t += step_size
+        else:
+            # Push children to stack (right first so left is processed first)
+            stack.append(node.right_child)
+            stack.append(node.left_child)
+            
+    return color
 ```
 
 **Parameters:**
--   `max_leaves`: 65,536 ($2^{16}$) [S1, unofficial].
--   `max_nodes`: 131,071 ($2 \times 65,536 - 1$) [S1, unofficial].
+-   `max_leaves`: 16,384 (implementation buffer size), theoretical max 65,536 ($2^{16}$) [S1, unofficial].
+-   `max_nodes`: 32,767 (implementation buffer size), theoretical max 131,071 ($2 \times 65,536 - 1$) [S1, unofficial].
 -   `fov`: Stored as $\tan(\text{fov}_{rad}/2)$ [S1, unofficial].
+-   `step_size`: 0.5 (typical for fixed-step leaf traversal) [G].
 
 **Edge Cases:**
 -   **Odd number of leaves:** The last leaf is paired with an `empty_node_idx` (0) [S1, unofficial].
 -   **Precision:** Use `f32` for coordinates and radii. Morton encoding uses `u64` for position components [S1, unofficial].
--   **Empty Space:** The BVH structure inherently skips empty space by not creating nodes for empty regions, but the traversal must handle the `empty_node_idx` correctly [S1, unofficial].
+-   **Empty Space:** The BVH structure does not inherently skip empty space by omitting nodes; instead, it creates nodes for every pair of leaves (or leaf + empty placeholder) and uses an `empty_node_idx` placeholder to maintain tree structure [S1, unofficial].
 
 ## Subtopics
 
@@ -149,14 +147,14 @@ function intersect_sphere(origin, direction, center, radius):
 A depth-first traversal algorithm that visits nodes in eye-order using an explicit stack, differing from pure SVO traversal by managing visitation order explicitly and from BVH by operating directly on the octree.
 
 ## Operating characteristics
--   **Time Complexity:** $O(N)$ for building the BVH from $N$ leaves, where $N$ is the number of occupied voxels. Traversal time depends on the tree depth and the number of occupied nodes intersected by the ray. In the worst case (fully occupied), it is $O(\log M)$ where $M$ is the total number of voxels in the grid.
--   **Memory Complexity:** $O(N)$ for storing the BVH nodes and leaves. The source specifies max sizes of 65,536 leaves and 131,071 nodes [S1, unofficial].
--   **Performance:** The method is efficient for sparse volumes as it skips empty space. The BVH construction adds overhead but allows for efficient ray intersection testing. The use of a stack-based traversal on the GPU requires careful management of stack size to avoid overflow.
--   **Strengths:** Efficient handling of sparse data, no need for uniform grid traversal, flexible resolution.
--   **Limitations:** BVH construction overhead, potential stack overflow on GPU if not managed, complexity in handling dynamic updates.
+-   **Time Complexity:** $O(N)$ for building the BVH from $N$ leaves, where $N$ is the number of occupied voxels [G]. Traversal time depends on the tree depth and the number of occupied nodes intersected by the ray [G]. In the worst case (fully occupied), it is $O(\log M)$ where $M$ is the total number of voxels in the grid [G].
+-   **Memory Complexity:** $O(N)$ for storing the BVH nodes and leaves [G]. The implementation buffer specifies max sizes of 16,384 leaves and 32,767 nodes, while notes mention a theoretical maximum of 65,536 leaves and 131,071 nodes [S1, unofficial].
+-   **Performance:** The method is efficient for sparse volumes as it skips empty space [G]. The BVH construction adds overhead but allows for efficient ray intersection testing [G]. The use of a stack-based traversal on the GPU requires careful management of stack size to avoid overflow [G].
+-   **Strengths:** Efficient handling of sparse data, no need for uniform grid traversal, flexible resolution [G].
+-   **Limitations:** BVH construction overhead, potential stack overflow on GPU if not managed, complexity in handling dynamic updates [G].
 
 ## Background
-The method is based on an implementation by `mxbrt` [S1, unofficial]. The code demonstrates building an SVO from a voxel grid, converting it to a BVH, and rendering it using a ray tracer. The implementation uses Rust and wgpu for GPU rendering. The approach is similar to other SVO ray tracing methods but uses a BVH for traversal instead of a direct SVO walk.
+The method is based on an implementation by `mxbrt` [S1, unofficial]. The code demonstrates building an SVO from a voxel grid, converting it to a BVH, and rendering it using a ray tracer [S1, unofficial]. The implementation uses Rust and wgpu for GPU rendering [S1, unofficial]. The approach is similar to other SVO ray tracing methods but uses a BVH for traversal instead of a direct SVO walk [S1, unofficial].
 
 ## Sources
 [S1] mxbrt/svo, https://github.com/mxbrt/svo, fetched 2026-10-26 (unofficial)

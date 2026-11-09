@@ -3,89 +3,139 @@
 Also called: Sphere Light Shading with Importance Surface Area Sampling, getSampleImportanceSolidAngle
 
 ## Overview
-Estimates direct illumination from a spherical light by sampling points on its visible surface area, with a probability density function proportional to the projected area of the light as seen from the shading point [S1, unofficial]. It differs from [Importance Solid Angle Sampling](2236-sphere-light-shading-with-importance-solid-angle-sampling.md) by explicitly generating points on the sphere's geometry rather than in solid angle space [S1, unofficial].
+This method estimates direct illumination from a spherical light source by sampling points uniformly on the visible surface area of the sphere, ensuring the probability density function (PDF) is proportional to the projected area [S1, unofficial]. It differs from [Importance Sampling for Sphere Surface Area](2236-sphere-light-shading-with-importance-solid-angle-sampling.md) (Importance Solid Angle), which samples uniformly in solid angle, by accounting for the foreshortening effect of the sphere's curvature relative to the shading point, which reduces variance when the light is close or large [S1, unofficial]. It builds on [Sphere Light Sampling with Multiple Strategies](2207-sphere-light-sampling-with-multiple-strategies.md) by providing a specific strategy for area-based sampling.
 
 ## How it works
 **Inputs:**
-*   Shading point $X$ (3D vector) [S1, unofficial].
-*   Surface normal at $X$, $\mathbf{n}$ (3D vector, normalized) [S1, unofficial].
-*   Sphere light center $C$ (3D vector) [S1, unofficial].
-*   Sphere light radius $R$ (scalar) [S1, unofficial].
-*   Two uniform random numbers $\eta_1, \eta_2 \in [0, 1)$ [S1, unofficial].
+- Shading point $X$ (3D vector).
+- Surface normal at $X$, $\mathbf{n}$ (3D vector, normalized).
+- Sphere light center $C$ (3D vector).
+- Sphere light radius $R$ (scalar).
+- Two uniform random numbers $\eta_1, \eta_2 \in [0, 1)$.
 
 **Outputs:**
-*   Sample direction $\mathbf{d}$ (3D vector, normalized) pointing from $X$ to a point on the sphere surface [S1, unofficial].
+- Sample direction $\mathbf{d}$ (3D vector, normalized) pointing from $X$ to a point on the sphere surface.
+- The contribution to the radiance estimator, including shadow testing.
 
 **Data Structures:**
-*   Local coordinate system basis $(\mathbf{U}, \mathbf{V}, \mathbf{W})$ constructed from $\mathbf{n}$ and the vector to the light center [S1, unofficial].
+- Local coordinate system basis vectors $\mathbf{U}, \mathbf{V}, \mathbf{W}$ forming an orthonormal frame at $X$.
 
 **Steps:**
-1.  Compute the vector from the shading point to the light center: $\mathbf{XC} = C - X$ [S1, unofficial].
-2.  Compute the squared distance: $d^2 = \|\mathbf{XC}\|^2$ [S1, unofficial].
-3.  Construct a local orthonormal basis:
-    *   $\mathbf{W} = \mathbf{XC} / \|\mathbf{XC}\|$ (normalized vector to center) [S1, unofficial].
-    *   $\mathbf{V} = \mathbf{n} \times \mathbf{W}$, then normalize $\mathbf{V}$ [S1, unofficial].
-    *   $\mathbf{U} = \mathbf{V} \times \mathbf{W}$ [S1, unofficial].
-4.  Calculate the maximum half-angle $\theta_{max}$ of the sphere as seen from $X$:
-    $$ \sin \theta_{max} = \frac{R}{\sqrt{d^2}} $$
+
+1.  **Compute Geometry:**
+    Calculate the vector from the shading point to the sphere center:
+    $$ \mathbf{XC} = C - X $$
+    Calculate the squared distance:
+    $$ d^2 = \|\mathbf{XC}\|^2 $$
+    Calculate the half-angle of the light cone $\theta_{max}$:
+    $$ \sin \theta_{max} = \frac{R}{\|\mathbf{XC}\|} $$
     $$ \cos \theta_{max} = \sqrt{1 - \sin^2 \theta_{max}} $$
-    [S1, unofficial]
-5.  Generate sample angles $\Theta$ and $\Phi$ using $\eta_1$ and $\eta_2$:
-    $$ \Theta = \arccos(1 - \eta_1 + \eta_1 \sqrt{1 - \frac{R^2}{d^2}}) $$
+    [G] If $d^2 \le R^2$, the point is inside the light; handle as a special case or return zero/ambient depending on scene requirements.
+
+2.  **Construct Local Basis:**
+    Define the local coordinate system:
+    $$ \mathbf{W} = \frac{\mathbf{XC}}{\|\mathbf{XC}\|} $$
+    $$ \mathbf{V} = \frac{\mathbf{W} \times \mathbf{n}}{\|\mathbf{W} \times \mathbf{n}\|} $$
+    [G] If $\mathbf{W}$ and $\mathbf{n}$ are parallel (cross product is zero), choose an arbitrary perpendicular vector for $\mathbf{V}$ (e.g., if $|W_x| < 0.9$, $\mathbf{V} = (1,0,0)$, else $\mathbf{V} = (0,1,0)$), then recompute $\mathbf{U}$.
+    $$ \mathbf{U} = \mathbf{V} \times \mathbf{W} $$
+
+3.  **Sample Angles:**
+    Generate two uniform random numbers $\eta_1, \eta_2 \in [0, 1)$.
+    Compute the polar angle $\Theta$ and azimuthal angle $\Phi$:
+    $$ \Theta = \arccos\left(1 - \eta_1 + \eta_1 \sqrt{1 - \frac{R^2}{d^2}}\right) $$
     $$ \Phi = 2 \pi \eta_2 $$
-    [S1, unofficial]
-6.  Construct the sample direction in the local coordinate system:
+    [G] The formula for $\Theta$ ensures uniform sampling over the spherical cap defined by the visible surface area. The term $\sqrt{1 - R^2/d^2}$ is equivalent to $\cos \theta_{max}$. Thus, $\Theta = \arccos(1 - \eta_1(1 - \cos \theta_{max}))$.
+
+4.  **Construct Direction:**
+    Compute the sample direction in the local coordinate system:
     $$ \mathbf{d}_{local} = \mathbf{U} (\cos \Phi \sin \Theta) + \mathbf{V} (\sin \Phi \sin \Theta) + \mathbf{W} \cos \Theta $$
-    [S1, unofficial]
-7.  Normalize $\mathbf{d}_{local}$ and return $\mathbf{d}$ [S1, unofficial].
+    Normalize $\mathbf{d}_{local}$ to get $\mathbf{d}$.
+
+5.  **Trace and Estimate:**
+    Trace a ray from $X$ in direction $\mathbf{d}$ to determine if the light is occluded.
+    Let $inShadow$ be a boolean indicating occlusion (true if hit by another object).
+    Calculate the projected area factor for the estimator:
+    $$ \text{Area} = \frac{2 \pi R^2 (1 - \sin \theta_{max})}{d^2} $$
+    [G] This area term represents the projected solid angle scaled by distance squared, effectively handling the PDF normalization for the surface area sampling strategy.
+    Update the radiance estimator $L_r$:
+    $$ L_r += f_r(\mathbf{d}, \mathbf{d}_{out}) L_i \frac{1 - inShadow}{N} \cos \theta_i \cos \theta_o \cdot \text{Area} $$
+    [G] $\cos \theta_i$ is the dot product of the surface normal and the light direction. $\cos \theta_o$ is the dot product of the view direction and the surface normal. $L_i$ is the radiance of the light source. $N$ is the number of samples.
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def sample_sphere_surface_area(X, normal, C, R, eta1, eta2):
+    # 1. Geometry
     XC = C - X
-    distance2 = dot(XC, XC)
-    sin_theta_max = R / sqrt(distance2)
+    d_sq = dot(XC, XC)
+    d = sqrt(d_sq)
+    
+    # Edge case: inside light
+    if d <= R:
+        return None, 0.0
+        
+    sin_theta_max = R / d
     cos_theta_max = sqrt(1.0 - sin_theta_max * sin_theta_max)
+    
+    # 2. Local Basis
     W = normalize(XC)
-    V = normalize(cross(W, normal))
+    
+    # Handle degenerate case where W and normal are parallel
+    cross_WN = cross(W, normal)
+    if length(cross_WN) < 1e-6:
+        # Choose arbitrary V perpendicular to W
+        if abs(W.x) < 0.9:
+            V = normalize(cross(W, Vector3(1, 0, 0)))
+        else:
+            V = normalize(cross(W, Vector3(0, 1, 0)))
+    else:
+        V = normalize(cross_WN)
+        
     U = cross(V, W)
-    theta = acos(1.0 - eta1 + eta1 * sqrt(1.0 - R * R / distance2))
+    
+    # 3. Sample Angles
+    # Theta = acos(1 - eta1 * (1 - cos_theta_max))
+    # Derived from: 1 - eta1 + eta1 * sqrt(1 - R^2/d^2)
+    # Note: sqrt(1 - R^2/d^2) is cos_theta_max
+    theta = acos(1.0 - eta1 * (1.0 - cos_theta_max))
     phi = 2.0 * PI * eta2
-    d_local = U * (cos(phi) * sin(theta)) + V * (sin(phi) * sin(theta)) + W * cos(theta)
-    return normalize(d_local), sin_theta_max, cos_theta_max
+    
+    # 4. Construct Direction
+    sin_theta = sin(theta)
+    cos_phi = cos(phi)
+    sin_phi = sin(phi)
+    cos_theta = cos(theta)
+    
+    d_local = Vector3(
+        U.x * (cos_phi * sin_theta) + V.x * (sin_phi * sin_theta) + W.x * cos_theta,
+        U.y * (cos_phi * sin_theta) + V.y * (sin_phi * sin_theta) + W.y * cos_theta,
+        U.z * (cos_phi * sin_theta) + V.z * (sin_phi * sin_theta) + W.z * cos_theta
+    )
+    d = normalize(d_local)
+    
+    # 5. Area Factor for Estimator
+    # Area = 2 * pi * R^2 * (1 - sin_theta_max) / d^2
+    area_factor = 2.0 * PI * R * R * (1.0 - sin_theta_max) / d_sq
+    
+    return d, area_factor
 ```
-[S1, unofficial]
-
-**Estimator Update:**
-When used in a path tracer, the radiance contribution is updated using a geometric area term [S1, unofficial]. The implementation computes the area as:
-$$ \text{Area} = 2 \pi (1 - \sin \theta_{max}) \frac{R^2}{d^2} $$
-[S1, unofficial]
-The radiance estimator updates as:
-$$ L_r += f_r L_i (1 - \text{inShadow}) \cos \theta_i \cos \theta_o \text{Area} $$
-[S1, unofficial]
-This term is multiplied by $f_r L_i (1-\text{inShadow}) \cos \theta_i \cos \theta_o$ [S1, unofficial]. The source code applies this area term directly without an explicit PDF division, implying the PDF is handled implicitly within the geometric formulation [S1, unofficial].
-
-**Edge Cases:**
-*   If $X$ is inside the sphere, the method is invalid for external lighting [S1, unofficial].
-*   If $d < R$, the point is inside the light [S1, unofficial].
-*   Precision issues occur when $d \approx R$ due to grazing angles [S1, unofficial].
 
 ## Subtopics
 
 ### Importance Surface Area Sampling
-This variant uses rejection sampling to generate points on the sphere surface [S1, unofficial]. It loops to generate $\theta = \arccos(1 - 2\eta_1)$ and $\phi = 2\pi\eta_2$ on a unit sphere, scales by $R$, adds center $C$ to get $Y$, computes the normal at $Y$, and checks if $\mathbf{n}_Y \cdot (X - Y) \le \epsilon$ [S1, unofficial]. If the condition fails, it rejects and resamples [S1, unofficial]. The parameter $\epsilon$ is a floating-point threshold for the dot product test [S1, unofficial].
+A variant that explicitly samples points on the sphere surface geometry rather than directions. It generates $\theta = \arccos(1 - 2\eta_1)$ and $\phi = 2\pi\eta_2$ in a local frame, computes a point $Y$ on the sphere, and checks if the normal at $Y$ faces the shading point $X$ via $\mathbf{n}_Y \cdot (X - Y) \le \epsilon$. If not, it rejects and resamples. This rejection sampling approach ensures the sampled point is on the visible hemisphere of the sphere relative to $X$, but may be less efficient than the direct direction sampling method described in the main algorithm [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per sample for the analytical method [S1, unofficial]. The rejection-based variant has expected $O(1)$ but can be slower due to rejection loops [S1, unofficial].
-*   **Memory Complexity:** $O(1)$ [S1, unofficial].
-*   **Strengths:** Intuitive geometric interpretation and direct surface sampling [S1, unofficial].
-*   **Limitations:** The rejection sampling variant can be inefficient if the sphere is small or far away [S1, unofficial]. The analytical method relies on a specific geometric area term that bypasses explicit PDF normalization in the provided implementation [S1, unofficial].
-*   **When to use:** When the light is a sphere and direct surface sampling is preferred over solid angle sampling for variance reduction in specific BRDFs [S1, unofficial].
+- **Time Complexity:** $O(1)$ per sample for direction generation. Shadow tracing is $O(N_{objects})$ or $O(\log N_{objects})$ with acceleration structures.
+- **Memory Complexity:** $O(1)$.
+- **Performance:** Reduces variance compared to uniform solid angle sampling for large or close lights because it concentrates samples on the visible surface area [S1, unofficial].
+- **Limitations:** Requires computing the local basis and trigonometric functions. The rejection-based variant is inefficient if the light is small or far away, as most samples may be rejected [S1, unofficial].
+- **When to use:** When the light is a sphere and direct illumination is being computed, especially if the light is large relative to the scene or close to the shading point.
 
 ## Background
-The method is implemented in the `VolumeSingleScattering` ray tracer project as one of several sampling strategies for spherical light sources [S1, unofficial]. It is grouped alongside Importance Solid Angle Sampling, Uniform Solid Angle Sampling, and Cosine-weighted Hemispherical Importance Sampling [S1, unofficial].
+Originated in the implementation of a simple ray tracer by wangyuehi, which included multiple sampling strategies for spherical lights [S1, unofficial]. The method is part of a broader family of importance sampling techniques for light sources in path tracing.
 
 ## Sources
 [S1] wangyuehi/VolumeSingleScattering, https://github.com/wangyuehi/VolumeSingleScattering, fetched 2026-10-26 (unofficial)

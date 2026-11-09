@@ -1,79 +1,79 @@
 # NeRF-based Mesh Extraction with Color Fusion
 
-Also called: NeRF mesh extraction, color average method, vertex normal color method
+Also called: Mesh Extraction from NeRF, NeRF mesh extraction, color average method, vertex normal color method
 
 ## Overview
-This method extracts a textured 3D mesh from a trained Neural Radiance Field (NeRF) by combining isosurface extraction with a color fusion strategy that aggregates information from multiple training views. It solves the problem of generating a watertight, color-accurate mesh from a volumetric representation that lacks explicit geometry and consistent surface color. It differs from basic NeRF mesh extraction [Parent](4104-nerf-density-field-mesh-extraction.md) by replacing simple vertex shading with a multi-view color fusion process that weights colors by occlusion and depth, or by using vertex normals to query the NeRF, thereby reducing artifacts from single-view sampling.
+This method extracts a textured 3D mesh from a trained Neural Radiance Field (NeRF) by combining isosurface extraction with a color fusion strategy that aggregates information from multiple training views [S1, unofficial]. It solves the problem of generating a watertight, color-accurate mesh from a volumetric representation that lacks explicit geometry and consistent surface color [S1, unofficial]. It differs from basic NeRF mesh extraction [Parent](4104-nerf-density-field-mesh-extraction.md) by replacing simple vertex shading with a multi-view color fusion process that weights colors by occlusion and depth, or by using vertex normals to query the NeRF, thereby reducing artifacts from single-view sampling [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- A trained NeRF model (specifically the `nerf_fine` checkpoint) containing embeddings for position ($\mathbb{R}^3 \to \mathbb{R}^{10}$) and direction ($\mathbb{R}^3 \to \mathbb{R}^4$) and a neural network predicting RGB and density $\sigma$.
-- Training dataset images, camera poses ($P_{c2w}$), and intrinsics ($K$).
-- Parameters: $N_{grid}$ (grid resolution), $x\_range, y\_range, z\_range$ (bounding box), $\sigma_{threshold}$ (marching cubes threshold), $N_{samples}$ (coarse samples), $N_{importance}$ (fine samples), $chunk$ (batch size for inference), $occ\_threshold$ (occlusion threshold), $use\_vertex\_normal$ (boolean flag for coloring method).
+- A trained NeRF model (specifically the `nerf_fine` checkpoint) containing embeddings for position ($\mathbb{R}^3 \to \mathbb{R}^{10}$) and direction ($\mathbb{R}^3 \to \mathbb{R}^4$) and a neural network predicting RGB and density $\sigma$ [S1, unofficial].
+- Training dataset images, camera poses ($P_{c2w}$), and intrinsics ($K$) [S1, unofficial].
+- Parameters: $N_{grid}$ (grid resolution), $x\_range, y\_range, z\_range$ (bounding box), $\sigma_{threshold}$ (marching cubes threshold), $N_{samples}$ (coarse samples), $N_{importance}$ (fine samples), $chunk$ (batch size for inference), $occ\_threshold$ (occlusion threshold), $use\_vertex\_normal$ (boolean flag for coloring method) [S1, unofficial].
 
 **Outputs:**
-- A PLY mesh file containing vertex positions (float32) and face indices (int32). If color fusion is used, vertex colors (RGB) are included.
+- A PLY mesh file containing vertex positions (float32) and face indices (int32) [S1, unofficial]. If color fusion is used, vertex colors (RGB) are included [S1, unofficial].
 
 **Data Structures:**
-- `xyz_`: Tensor of shape $(N^3, 3)$ containing all grid points.
-- `dir_`: Tensor of shape $(N^3, 3)$, initialized to zeros for density query.
-- `sigma`: 3D array of shape $(N, N, N)$ containing density values.
-- `vertices`: Array of shape $(V, 3)$ from Marching Cubes.
-- `triangles`: Array of shape $(F, 3)$ from Marching Cubes.
-- `v_color_sum`: Array of shape $(V, 3)$, accumulates weighted colors.
-- `non_occluded_sum`: Array of shape $(V, 1)$, accumulates weights.
+- `xyz_`: Tensor of shape $(N^3, 3)$ containing all grid points [S1, unofficial].
+- `dir_`: Tensor of shape $(N^3, 3)$, initialized to zeros for density query [S1, unofficial].
+- `sigma`: 3D array of shape $(N, N, N)$ containing density values [S1, unofficial].
+- `vertices`: Array of shape $(V, 3)$ from Marching Cubes [S1, unofficial].
+- `triangles`: Array of shape $(F, 3)$ from Marching Cubes [S1, unofficial].
+- `v_color_sum`: Array of shape $(V, 3)$, accumulates weighted colors [S1, unofficial].
+- `non_occluded_sum`: Array of shape $(V, 1)$, accumulates weights [S1, unofficial].
 
 **Steps:**
 
 1.  **Initialize Model and Grid:**
-    Load the `nerf_fine` checkpoint. Initialize `embedding_xyz` (size 10) and `embedding_dir` (size 4). Define the 3D grid using `np.linspace` for $x, y, z$ within the specified ranges with $N_{grid}$ points. Create `xyz_` tensor of shape $(N^3, 3)$ and `dir_` tensor of zeros.
+    Load the `nerf_fine` checkpoint. Initialize `embedding_xyz` (size 10) and `embedding_dir` (size 4) [S1, unofficial]. Define the 3D grid using `np.linspace` for $x, y, z$ within the specified ranges with $N_{grid}$ points [S1, unofficial]. Create `xyz_` tensor of shape $(N^3, 3)$ and `dir_` tensor of zeros [S1, unofficial].
 
 2.  **Query Density Field:**
-    Batch query the NeRF model to predict $\sigma$. For each chunk of size `chunk`:
+    Batch query the NeRF model to predict $\sigma$ [S1, unofficial]. For each chunk of size `chunk`:
     - Embed `xyz` and `dir`.
     - Concatenate embeddings.
     - Pass through `nerf_fine`.
-    - Extract the last channel (density) from the output.
-    - Clamp values to non-negative: $\sigma = \max(\sigma, 0)$.
-    - Reshape to $(N, N, N)$.
+    - Extract the last channel (density) from the output [S1, unofficial].
+    - Clamp values to non-negative: $\sigma = \max(\sigma, 0)$ [S1, unofficial].
+    - Reshape to $(N, N, N)$ [S1, unofficial].
 
 3.  **Extract Isosurface:**
-    Run the Marching Cubes algorithm on the $\sigma$ volume using $\sigma_{threshold}$ (default 20.0) to retrieve `vertices` and `triangles`.
+    Run the Marching Cubes algorithm on the $\sigma$ volume using $\sigma_{threshold}$ (default 20.0) to retrieve `vertices` and `triangles` [S1, unofficial].
 
 4.  **Coordinate Transformation:**
-    Transform vertices from grid coordinates to world coordinates. Invert $x$ and $y$ coordinates (to correct for Marching Cubes axis conventions), then scale and shift using the defined ranges $(x\_range, y\_range, z\_range)$.
+    Transform vertices from grid coordinates to world coordinates. Invert $x$ and $y$ coordinates (to correct for Marching Cubes axis conventions), then scale and shift using the defined ranges $(x\_range, y\_range, z\_range)$ [S1, unofficial].
 
 5.  **Noise Removal:**
-    Identify the largest connected cluster of triangles. Remove all triangles not in this cluster and remove unreferenced vertices.
+    Identify the largest connected cluster of triangles. Remove all triangles not in this cluster and remove unreferenced vertices [S1, unofficial].
 
 6.  **Color Fusion (if `use_vertex_normal` is False):**
-    This is the "color average method".
-    - Initialize `v_color_sum` $(V, 3)$ and `non_occluded_sum` $(V, 1)$ to zero.
-    - Define camera intrinsics $K$ (3x3 matrix) using focal length and image dimensions $W, H$.
-    - Convert vertices to homogeneous coordinates: `vertices_homo` $(V, 4)$ by appending 1s.
+    This is the "color average method" [S1, unofficial].
+    - Initialize `v_color_sum` $(V, 3)$ and `non_occluded_sum` $(V, 1)$ to zero [S1, unofficial].
+    - Define camera intrinsics $K$ (3x3 matrix) using focal length and image dimensions $W, H$ [S1, unofficial].
+    - Convert vertices to homogeneous coordinates: `vertices_homo` $(V, 4)$ by appending 1s [S1, unofficial].
     - For each training image $i$:
-        - Load image and resize to `img_wh`.
-        - Get camera-to-world pose $P_{c2w}$, invert to get $P_{w2c}$ (3x4).
-        - Project vertices to camera coordinates: $v_{cam} = P_{w2c} \cdot v_{homo}^T$. Flip $y$ and $z$ axes ($v_{cam}[1:] *= -1$) to match 'right down forward' convention.
-        - Project to pixel coordinates: $v_{img} = (K \cdot v_{cam})^T$. Divide by depth $z + \epsilon$.
-        - Clip $x, y$ to $[0, W-1]$ and $[0, H-1]$.
-        - Sample colors from the image at projected coordinates using bilinear interpolation (e.g., `cv2.remap`). Split into chunks of 30,000 pixels if necessary.
-        - Predict occlusion: Construct rays from camera origin to vertices. Set near bound to dataset bounds min and far bound to vertex depth. Query NeRF fine model for accumulated opacity.
-        - Calculate non-occluded weight: $w = 1 - \text{accumulated\_opacity}$. If $w > occ\_threshold$, the pixel is considered valid.
+        - Load image and resize to `img_wh` [S1, unofficial].
+        - Get camera-to-world pose $P_{c2w}$, invert to get $P_{w2c}$ (3x4) [S1, unofficial].
+        - Project vertices to camera coordinates: $v_{cam} = P_{w2c} \cdot v_{homo}^T$. Flip $y$ and $z$ axes ($v_{cam}[1:] *= -1$) to match 'right down forward' convention [S1, unofficial].
+        - Project to pixel coordinates: $v_{img} = (K \cdot v_{cam})^T$. Divide by depth $z + \epsilon$ [S1, unofficial].
+        - Clip $x, y$ to $[0, W-1]$ and $[0, H-1]$ [S1, unofficial].
+        - Sample colors from the image at projected coordinates using bilinear interpolation (e.g., `cv2.remap`). Split into chunks of 30,000 pixels if necessary [S1, unofficial].
+        - Predict occlusion: Construct rays from camera origin to vertices. Set near bound to dataset bounds min and far bound to vertex depth. Query NeRF fine model for accumulated opacity [S1, unofficial].
+        - Calculate non-occluded weight: $w = 1 - \text{accumulated\_opacity}$. If $w > occ\_threshold$, the pixel is considered valid [S1, unofficial].
         - Update sums:
           $$ v\_color\_sum += \text{color} \times w $$
           $$ non\_occluded\_sum += w $$
-    - Final vertex color: $C_v = v\_color\_sum / \max(non\_occluded\_sum, \epsilon)$.
+    - Final vertex color: $C_v = v\_color\_sum / \max(non\_occluded\_sum, \epsilon)$ [S1, unofficial].
 
 7.  **Vertex Normal Coloring (if `use_vertex_normal` is True):**
-    - Compute vertex normals from the mesh geometry.
-    - For each vertex, construct a ray starting at the vertex position along the normal direction.
-    - Set near bound factor $near\_t$ (default 1.0) to offset the ray start slightly from the surface.
-    - Query the NeRF for color and density along this ray.
-    - Use the accumulated color from the first hit or the average along the ray as the vertex color. [G] *Note: The source code snippet for this branch is truncated, but the parameter `use_vertex_normal` and `near_t` imply this standard approach.*
+    - Compute vertex normals from the mesh geometry [G].
+    - For each vertex, construct a ray starting at the vertex position along the normal direction [G].
+    - Set near bound factor $near\_t$ (default 1.0) to offset the ray start slightly from the surface [S1, unofficial].
+    - Query the NeRF for color and density along this ray [S1, unofficial].
+    - Use the accumulated color from the first hit or the average along the ray as the vertex color [G].
 
 8.  **Save Mesh:**
-    Save the mesh to a PLY file with vertex positions, face indices, and colors (if computed).
+    Save the mesh to a PLY file with vertex positions, face indices, and colors (if computed) [S1, unofficial].
 
 **Pseudocode:**
 
@@ -84,6 +84,7 @@ import numpy as np
 import torch
 import mcubes
 import cv2
+import open3d as o3d
 
 def extract_mesh_with_color_fusion(nerf_fine, embedding_xyz, embedding_dir, dataset, args):
     # 1. Initialize Grid
@@ -95,7 +96,7 @@ def extract_mesh_with_color_fusion(nerf_fine, embedding_xyz, embedding_dir, data
     xyz_ = torch.FloatTensor(xyz_grid).cuda()
     dir_ = torch.zeros_like(xyz_).cuda()
 
-    # 2. Query Density
+    # 2. Query Density Field
     sigma_chunks = []
     with torch.no_grad():
         for i in range(0, xyz_.shape[0], args.chunk):
@@ -104,39 +105,40 @@ def extract_mesh_with_color_fusion(nerf_fine, embedding_xyz, embedding_dir, data
             out = nerf_fine(torch.cat([xyz_emb, dir_emb], 1))
             sigma_chunks.append(out[:, -1])
     sigma = torch.cat(sigma_chunks, 0).cpu().numpy()
-    sigma = np.maximum(sigma, 0).reshape(N, N, N)
+    sigma = np.maximum(sigma, 0).reshape(N, N, N).astype(np.float32)
 
-    # 3. Marching Cubes
+    # 3. Extract Isosurface
     vertices, triangles = mcubes.marching_cubes(sigma, args.sigma_threshold)
     vertices = vertices.astype(np.float32)
 
-    # 4. Transform Coordinates
-    # Invert x, y and scale/shift based on ranges
-    # Note: Exact transformation depends on mcubes output convention
-    # Assuming standard inverse mapping:
+    # 4. Coordinate Transformation
+    # Invert x and y coordinates first, then scale and shift
+    vertices[:, 0] = (N - 1) - vertices[:, 0]
+    vertices[:, 1] = (N - 1) - vertices[:, 1]
     vertices[:, 0] = (vertices[:, 0] / (N - 1)) * (args.x_range[1] - args.x_range[0]) + args.x_range[0]
     vertices[:, 1] = (vertices[:, 1] / (N - 1)) * (args.y_range[1] - args.y_range[0]) + args.y_range[0]
     vertices[:, 2] = (vertices[:, 2] / (N - 1)) * (args.z_range[1] - args.z_range[0]) + args.z_range[0]
-    # Invert x and y if required by specific MC implementation
-    vertices[:, 0] = -vertices[:, 0]
-    vertices[:, 1] = -vertices[:, 1]
 
     # 5. Noise Removal (Largest Connected Component)
-    # Implementation depends on library (e.g., open3d)
-    # mesh = o3d.geometry.TriangleMesh()
-    # mesh.vertices = o3d.utility.Vector3dVector(vertices)
-    # mesh.triangles = o3d.utility.Vector3iVector(triangles)
-    # mesh.remove_unreferenced_vertices()
-    # ... cluster logic ...
-    # vertices, triangles = cleaned vertices/triangles
+    mesh = o3d.geometry.TriangleMesh()
+    mesh.vertices = o3d.utility.Vector3dVector(vertices)
+    mesh.triangles = o3d.utility.Vector3iVector(triangles)
+    mesh.remove_unreferenced_vertices()
+    triangle_clusters, cluster_n_triangles, _ = mesh.cluster_connected_triangles()
+    cluster_n_triangles = np.asarray(cluster_n_triangles)
+    max_cluster_idx = np.argmax(cluster_n_triangles)
+    triangles_to_remove = [i for i in range(len(triangles)) if triangle_clusters[i] != max_cluster_idx]
+    mesh.remove_triangles_by_index(triangles_to_remove)
+    mesh.remove_unreferenced_vertices()
+    vertices = np.asarray(mesh.vertices).astype(np.float32)
+    triangles = np.asarray(mesh.triangles)
 
-    # 6. Color Fusion
+    # 6. Color Fusion (Color Average Method)
     if not args.use_vertex_normal:
         W, H = args.img_wh
         K = np.array([[dataset.focal, 0, W/2],
                       [0, dataset.focal, H/2],
                       [0, 0, 1]]).astype(np.float32)
-        
         N_vertices = len(vertices)
         vertices_homo = np.concatenate([vertices, np.ones((N_vertices, 1))], 1)
         v_color_sum = np.zeros((N_vertices, 3))
@@ -144,89 +146,124 @@ def extract_mesh_with_color_fusion(nerf_fine, embedding_xyz, embedding_dir, data
 
         for i in range(len(dataset)):
             sample = dataset[i]
-            img = sample['rgb'] # Load and resize to img_wh
-            P_c2w = sample['pose'] # Camera to world
-            P_w2c = np.linalg.inv(P_c2w)[:3, :] # 3x4
-            
-            # Project to camera coords
-            vertices_cam = P_w2c @ vertices_homo.T # (3, N)
-            vertices_cam[1:] *= -1 # Flip y, z
-            
-            # Project to pixel coords
-            vertices_img = (K @ vertices_cam).T # (N, 3)
+            img = cv2.resize(sample['rgb'], (W, H))
+            P_c2w = sample['pose']
+            P_w2c = np.linalg.inv(P_c2w)[:3, :]
+
+            vertices_cam = P_w2c @ vertices_homo.T
+            vertices_cam[1:] *= -1
+
+            vertices_img = (K @ vertices_cam).T
             depth = vertices_img[:, 2]
             u = vertices_img[:, 0] / (depth + 1e-6)
             v = vertices_img[:, 1] / (depth + 1e-6)
-            
-            # Clip to image bounds
+
             valid = (u >= 0) & (u < W-1) & (v >= 0) & (v < H-1) & (depth > 0)
-            
             if not np.any(valid):
                 continue
-                
-            # Sample colors
-            # Use cv2.remap or similar for bilinear interpolation
-            # Split into chunks of 30,000
-            colors = sample_colors_from_image(img, u[valid], v[valid])
-            
-            # Predict occlusion
-            # Construct rays from camera origin to vertices
-            # Query NeRF for accumulated opacity
-            # near = dataset.bounds.min(), far = depth
-            # opacity = query_nerf_opacity(rays, args.N_samples, args.N_importance, args.chunk)
-            
-            # For simplicity, assuming a function `get_occlusion` exists
-            # occlusion = get_occlusion(vertices_cam[:, valid], depth[valid], dataset, nerf_fine, args)
-            
-            # Weighted accumulation
-            # non_occluded = 1 - occlusion
-            # valid_non_occluded = non_occluded > args.occ_threshold
-            # v_color_sum[valid] += colors * non_occluded[valid_non_occluded]
-            # non_occluded_sum[valid] += non_occluded[valid_non_occluded]
 
-        # Normalize
+            u_valid, v_valid = u[valid], v[valid]
+            colors = np.zeros((np.sum(valid), 3))
+            for chunk_start in range(0, len(u_valid), 30000):
+                chunk_end = min(chunk_start + 30000, len(u_valid))
+                chunk_u = u_valid[chunk_start:chunk_end].astype(np.float32)
+                chunk_v = v_valid[chunk_start:chunk_end].astype(np.float32)
+                colors[chunk_start:chunk_end] = cv2.remap(img, chunk_u, chunk_v, cv2.INTER_LINEAR)
+
+            # Predict occlusion
+            rays_origins = vertices_cam[:, valid].T
+            rays_dirs = vertices_cam[:, valid].T - rays_origins
+            rays_dirs = rays_dirs / np.linalg.norm(rays_dirs, axis=0, keepdims=True)
+            opacity = query_accumulated_opacity(rays_origins, rays_dirs, nerf_fine, embedding_xyz, embedding_dir, args)
+
+            non_occluded = 1.0 - opacity
+            valid_non_occluded = non_occluded > args.occ_threshold
+            v_color_sum[valid] += colors * non_occluded[valid_non_occluded, np.newaxis]
+            non_occluded_sum[valid] += non_occluded[valid_non_occluded, np.newaxis]
+
         non_occluded_sum = np.maximum(non_occluded_sum, 1e-6)
         vertex_colors = v_color_sum / non_occluded_sum
     else:
-        # Vertex normal method
-        # Compute normals, ray cast, query NeRF
-        vertex_colors = compute_vertex_normal_colors(vertices, triangles, nerf_fine, args)
+        vertex_colors = compute_vertex_normal_colors(vertices, triangles, nerf_fine, embedding_xyz, embedding_dir, args)
 
     return vertices, triangles, vertex_colors
+
+def query_accumulated_opacity(origins, directions, nerf_fine, embedding_xyz, embedding_dir, args):
+    N = origins.shape[1]
+    origins_t = torch.FloatTensor(origins).cuda()
+    dirs_t = torch.FloatTensor(directions).cuda()
+    t_vals = np.linspace(0.0, 1.0, args.N_samples + args.N_importance)
+    z_vals = np.sort(np.concatenate([t_vals[:-1], t_vals[1:]]), axis=-1)
+    points = origins_t[:, np.newaxis, :] + dirs_t[:, np.newaxis, :] * torch.FloatTensor(z_vals).cuda()
+    with torch.no_grad():
+        chunk = args.chunk
+        opacity_chunks = []
+        for i in range(0, points.shape[0], chunk):
+            xyz_emb = embedding_xyz(points[i:i+chunk])
+            dir_emb = embedding_dir(dirs_t[i:i+chunk])
+            out = nerf_fine(torch.cat([xyz_emb, dir_emb], 1))
+            sigma = torch.clamp(out[:, -1], min=0)
+            delta = z_vals[1:] - z_vals[:-1]
+            alpha = 1.0 - torch.exp(-sigma * delta)
+            T = torch.cumprod(1.0 - alpha + 1e-10, dim=1)
+            opacities = alpha * T
+            opacity_chunks.append(torch.sum(opacities, dim=1).cpu().numpy())
+    return np.concatenate(opacity_chunks, axis=0)
+
+def compute_vertex_normal_colors(vertices, triangles, nerf_fine, embedding_xyz, embedding_dir, args):
+    mesh = o3d.geometry.TriangleMesh()
+    mesh.vertices = o3d.utility.Vector3dVector(vertices)
+    mesh.triangles = o3d.utility.Vector3iVector(triangles)
+    mesh.compute_vertex_normals()
+    normals = np.asarray(mesh.vertex_normals)
+    origins = vertices + normals * args.near_t
+    origins_t = torch.FloatTensor(origins).cuda()
+    dirs_t = torch.FloatTensor(normals).cuda()
+    with torch.no_grad():
+        chunk = args.chunk
+        color_chunks = []
+        for i in range(0, origins_t.shape[0], chunk):
+            xyz_emb = embedding_xyz(origins_t[i:i+chunk])
+            dir_emb = embedding_dir(dirs_t[i:i+chunk])
+            out = nerf_fine(torch.cat([xyz_emb, dir_emb], 1))
+            color_chunks.append(out[:, :3].cpu().numpy())
+    return np.concatenate(color_chunks, axis=0)
 ```
 
 **Parameters:**
-- `N_samples`: Number of coarse samples. Default: 64.
-- `N_importance`: Number of fine samples. Default: 64.
-- `chunk`: Chunk size for inference. Default: 32*1024.
-- `N_grid`: Grid resolution. Default: 256.
-- `sigma_threshold`: Marching Cubes threshold. Default: 20.0.
-- `occ_threshold`: Occlusion threshold. Default: 0.2.
-- `near_t`: Near bound factor for vertex normals. Default: 1.0.
+- `N_samples`: Number of coarse samples. Default: 64 [S1, unofficial].
+- `N_importance`: Number of fine samples. Default: 64 [S1, unofficial].
+- `chunk`: Chunk size for inference. Default: 32*1024 [S1, unofficial].
+- `N_grid`: Grid resolution. Default: 256 [S1, unofficial].
+- `sigma_threshold`: Marching Cubes threshold. Default: 20.0 [S1, unofficial].
+- `occ_threshold`: Occlusion threshold. Default: 0.2 [S1, unofficial].
+- `near_t`: Near bound factor for vertex normals. Default: 1.0 [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Precision:** Clamping $\sigma$ to non-negative is critical to prevent invalid Marching Cubes results.
-- **Boundaries:** Vertices projected outside image bounds must be discarded or handled to avoid interpolation errors.
-- **Occlusion:** Incorrect occlusion estimation leads to dark or ghostly colors. The `occ_threshold` filters out pixels where the NeRF predicts the vertex is behind other geometry.
-- **Memory:** Large `N_grid` or many training views can cause OOM. Use `chunk` and pixel chunking (30,000) to manage memory.
+- **Precision:** Clamping $\sigma$ to non-negative is critical to prevent invalid Marching Cubes results [S1, unofficial].
+- **Boundaries:** Vertices projected outside image bounds must be discarded or handled to avoid interpolation errors [S1, unofficial].
+- **Occlusion:** Incorrect occlusion estimation leads to dark or ghostly colors. The `occ_threshold` filters out pixels where the NeRF predicts the vertex is behind other geometry [S1, unofficial].
+- **Memory:** Large `N_grid` or many training views can cause OOM. Use `chunk` and pixel chunking (30,000) to manage memory [S1, unofficial].
 
 ## Subtopics
 
 ### TSDF Estimation via NeRF Occupancy
-A method to estimate the Truncated Signed Distance Field (TSDF) by exploiting NeRF occupancy aggregated along rays to determine points inside and outside the surface. It computes the median depth $\hat{z}_{i,p,50}$ (first index where accumulated transmittance > 50%) and estimates points outside the surface at the 16th percentile $\hat{z}_{i,p,16}$ and inside at the 84th percentile $\hat{z}_{i,p,84}$. These 3D points are fed into a Signed Distance Approximation Network (SSAN) $\phi$ to estimate SDFs, normals, and features: $[\hat{t}_{50}, \hat{n}_{50}, \hat{f}_{50}] = \phi(r_{i,p}(\hat{z}_{i,p,50}))$, $[\hat{t}_{16}, \hat{n}_{16}, \hat{f}_{16}] = \phi(r_{i,p}(\hat{z}_{i,p,16}))$, $[\hat{t}_{84}, \hat{n}_{84}, \hat{f}_{84}] = \phi(r_{i,p}(\hat{z}_{i,p,84}))$ [S2]. This approach is chosen when geometric accuracy and smoothness are prioritized over direct color fusion, allowing for better mesh regularization [S2].
+A method to estimate the Truncated Signed Distance Field (TSDF) by exploiting NeRF occupancy aggregated along rays to determine points inside and outside the surface [S3]. It computes the median depth $\hat{z}_{i,p,50}$ (first index where accumulated transmittance > 50%) and estimates points outside the surface at the 16th percentile $\hat{z}_{i,p,16}$ and inside at the 84th percentile $\hat{z}_{i,p,84}$ [S3]. These 3D points are fed into a Signed Distance Approximation Network (SSAN) $\phi$ to estimate SDFs, normals, and features: $[\hat{t}_{50}, \hat{n}_{50}, \hat{f}_{50}] = \phi(r_{i,p}(\hat{z}_{i,p,50}))$, $[\hat{t}_{16}, \hat{n}_{16}, \hat{f}_{16}] = \phi(r_{i,p}(\hat{z}_{i,p,16}))$, $[\hat{t}_{84}, \hat{n}_{84}, \hat{f}_{84}] = \phi(r_{i,p}(\hat{z}_{i,p,84}))$ [S3].
 
 ## Operating characteristics
-- **Time Complexity:** Dominated by the NeRF queries. Density query is $O(N^3 \cdot C)$ where $C$ is chunk size. Color fusion is $O(V \cdot M)$ where $M$ is the number of training views.
-- **Memory Complexity:** $O(N^3)$ for the density grid and $O(V \cdot M)$ for intermediate color accumulation buffers.
-- **Performance:** High resolution requires large $N_{grid}$, increasing memory usage quadratically/cubically. Color fusion is slower than vertex normal shading due to multiple view projections and occlusion queries.
-- **Strengths:** Produces textured meshes with consistent colors across views. Handles complex geometry well via Marching Cubes.
-- **Limitations:** Sensitive to $\sigma_{threshold}$. Color artifacts if occlusion is poorly estimated. Not suitable for real-time extraction without optimization.
-- **When to use:** When a textured mesh is required from a NeRF and single-view shading is insufficient.
-- **When not to use:** When real-time extraction is needed or when the NeRF density field is noisy/unreliable.
+- **Time Complexity:** Dominated by the NeRF queries. Density query is $O(N^3 \cdot C)$ where $C$ is chunk size. Color fusion is $O(V \cdot M)$ where $M$ is the number of training views [S1, unofficial].
+- **Memory Complexity:** $O(N^3)$ for the density grid and $O(V \cdot M)$ for intermediate color accumulation buffers [S1, unofficial].
+- **Performance:** High resolution requires large $N_{grid}$, increasing memory usage quadratically/cubically. Color fusion is slower than vertex normal shading due to multiple view projections and occlusion queries [S1, unofficial].
+- **Strengths:** Produces textured meshes with consistent colors across views. Handles complex geometry well via Marching Cubes [S1, unofficial].
+- **Limitations:** Sensitive to $\sigma_{threshold}$. Color artifacts if occlusion is poorly estimated. Not suitable for real-time extraction without optimization [S1, unofficial].
+- **When to use:** When a textured mesh is required from a NeRF and single-view shading is insufficient [S1, unofficial].
+- **When not to use:** When real-time extraction is needed or when the NeRF density field is noisy/unreliable [S1, unofficial].
 
 ## Background
-Originating from the `nerf_pl` repository [S1, unofficial], this method extends the basic NeRF mesh extraction pipeline by adding a robust color assignment strategy. It addresses the limitation of basic extraction which often results in untextured or poorly colored meshes. The color fusion approach aggregates multi-view information to ensure color consistency. The TSDF variant [S2] further refines geometry by using NeRF occupancy to supervise a signed distance field, improving mesh quality.
+Originating from the `nerf_pl` repository [S1, unofficial], this method extends the basic NeRF mesh extraction pipeline by adding a robust color assignment strategy. It addresses the limitation of basic extraction which often results in untextured or poorly colored meshes. The color fusion approach aggregates multi-view information to ensure color consistency. The TSDF variant [S3] further refines geometry by using NeRF occupancy to supervise a signed distance field, improving mesh quality.
 
 ## Sources
 [S1] kwea123/nerf_pl, https://github.com/kwea123/nerf_pl, fetched 2026-10-26 (unofficial)
-[S2] NeRFMeshing: Distilling Neural Radiance Fields into Geometrically-Accurate 3D Meshes, https://doi.org/10.1109/3dv62453.2024.00093, fetched 2026-10-29
+[S2] Points2NeRF: Generating Neural Radiance Fields from 3D point cloud, https://doi.org/10.1016/j.patrec.2024.07.002, fetched 2026-10-29
+[S3] NeRFMeshing: Distilling Neural Radiance Fields into Geometrically-Accurate 3D Meshes, https://doi.org/10.1109/3dv62453.2024.00093, fetched 2026-10-29
+[S4] Vision through Obstacles—3D Geometric Reconstruction and Evaluation of Neural Radiance Fields (NeRFs), https://doi.org/10.3390/rs16071188, fetched 2026-10-30

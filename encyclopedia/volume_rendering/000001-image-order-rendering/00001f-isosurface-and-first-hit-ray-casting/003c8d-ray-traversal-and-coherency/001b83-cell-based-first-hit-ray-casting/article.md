@@ -1,118 +1,215 @@
 # Cell-Based First-Hit Ray Casting
 
-Also called: Macro-cell based first-hit ray casting
 
 ## Overview
-Cell-based first-hit ray casting is a volume rendering technique that accelerates isosurface extraction by dividing the volume into cubic sub-volumes called macro-cells, storing them in a min-max octree, and projecting only those containing iso-surface portions to the image plane [S1, unofficial][S2]. It differs from conventional ray casting by drastically reducing average ray path lengths through early termination and local ray casting within trimmed macro-cells, and from surface-fitting methods by supporting interactive threshold adjustment without dedicated acceleration hardware [S1, unofficial].
+Cell-based first-hit ray casting is a volume rendering technique that accelerates iso-surface extraction by dividing the volume into cubic sub-volumes called macro-cells [S1, unofficial][S2]. It solves the performance bottleneck of conventional ray casting by avoiding empty space traversal and reducing the average ray path length to only a few steps per pixel [S1, unofficial]. It sets itself apart from its siblings by using a min-max octree to cull macro-cells and projecting only those containing iso-surface portions to the screen, where local rays are cast [S1, unofficial][S2]. Unlike [Hybrid Strategy for Interactive High Resolution Isosurface Ray Tracing](3697-hybrid-strategy-for-interactive-high-resolution-isosurface-r.md) or [Interactive High Resolution Isosurface Ray Tracing](4093-interactive-high-resolution-isosurface-ray-tracing.md), it does not rely on dedicated acceleration hardware or surface fitting techniques that lack interactive threshold adjustment [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A 3D scalar volume dataset, a camera position and orientation, an image resolution (e.g., $512 \times 512$), and one or more isovalue thresholds $\tau$ [S1, unofficial].
-*   **Output:** A 2D image where each pixel contains the color of the first iso-surface intersection along the corresponding view ray [S1, unofficial].
+**Inputs:**
+*   Volume data $V$ with dimensions $D_x \times D_y \times D_z$.
+*   One or more iso-value thresholds $\tau$.
+*   Camera parameters (eye position, view direction, projection matrix).
+*   Macro-cell dimension parameter $n$ (typically 4–10) [S1, unofficial][S2].
+
+**Outputs:**
+*   Color image buffer $C$ of resolution $W \times H$.
+*   A "hit" mask to prevent re-rendering pixels that have already found an intersection [S2].
 
 **Data Structures:**
 1.  **Min-Max Octree:**
-    *   The volume is divided into cubic sub-volumes called **macro-cells**.
-    *   Each macro-cell consists of $n^3$ data cells (where $n$ is typically between 3 and 10) [S1, unofficial][S2].
-    *   The octree nodes store the minimum ($min$) and maximum ($max$) data values of the sub-space they represent [S1, unofficial][S2].
-    *   Leaf nodes represent the macro-cells [S1, unofficial][S2].
-2.  **Pixel Buffer:**
-    *   Stores the final color for each pixel.
-    *   Tracks which pixels have already been assigned a color to enable early termination [S1, unofficial][S2].
-3.  **Inter-Ray Coherency Buffer (Optional Optimization):**
-    *   Stores cells encountered along the last ray and a flag indicating if an iso-surface portion is contained there [S1, unofficial].
-    *   Avoids unnecessary intersection tests for rays visiting the same cells [S1, unofficial].
-    *   *Note:* Distance coding is not used as it would require recomputation for each new iso-value [S1, unofficial].
+    *   Each node stores `min_val` and `max_val` representing the minimum and maximum data values in the sub-volume it covers [S1, unofficial][S2].
+    *   Leaf nodes represent **macro-cells**.
+    *   A macro-cell consists of $n^3$ data cells (defined by $(n+1)^3$ voxel grid points) [S2].
+2.  **Ray History Buffer:**
+    *   Stores cells encountered along the last ray and a flag indicating if an iso-surface portion is contained there [S1, unofficial]. This exploits inter-ray coherency to skip intersection tests for rays visiting the same cells [S1, unofficial].
+3.  **Pixel Hit Mask:**
+    *   Boolean array of size $W \times H$. If `mask[y][x]` is true, no more local rays are cast at this pixel [S2].
 
 **Algorithm Steps:**
 
-1.  **Octree Construction:**
-    *   Divide the volume into macro-cells of size $n^3$ [S1, unofficial].
-    *   Build the min-max octree. For each node, compute $min$ and $max$ of the data values in its sub-space [S1, unofficial][S2].
+1.  **Build Min-Max Octree:**
+    *   Recursively subdivide the volume.
+    *   For each node, compute `min_val` and `max_val` of the contained data [S1, unofficial][S2].
+    *   Leaf nodes correspond to macro-cells of size $n \times n \times n$ cells [S1, unofficial][S2].
 
-2.  **Octree Traversal and Macro-Cell Selection:**
-    *   Traverse the octree starting from the root [S1, unofficial][S2].
-    *   For a current node, check if any isovalue $\tau$ satisfies:
-        $$min \le \tau \le max$$
-    *   If the condition is false, prune the node (the iso-surface does not pass through this sub-space) [S1, unofficial][S2].
-    *   If true, process the 8 child nodes [S1, unofficial].
-    *   **Viewing Order:** To ensure correct visibility (first-hit), child nodes must be processed in viewing order. A representative ray direction vector intersecting all sub-volumes is used to sort the 8 children of the current node [S1, unofficial][S2].
+2.  **Traverse Octree in Viewing Order:**
+    *   Start at the root.
+    *   For a current node, check if any threshold $\tau$ satisfies: $\text{min\_val} \le \tau \le \text{max\_val}$ [S1, unofficial][S2].
+    *   If the condition fails, cull the entire subtree [S1, unofficial][S2].
+    *   If the condition passes, sort the 8 child nodes based on the viewing vector to ensure correct front-to-back processing order [S1, unofficial][S2]. This is done using a representative ray direction that intersects all sub-volumes [S1, unofficial].
+    *   Recursively process children.
 
-3.  **Macro-Cell Trimming and Projection:**
-    *   When a leaf node (macro-cell) passes the min-max check, it contains part of the iso-surface [S2].
-    *   **Trimming:** Trim the macro-cell to the smallest cuboid containing its portions of the iso-surfaces [S2]. This reduces the projection area [S1, unofficial].
-    *   **Projection:** Project the trimmed macro-cell onto the screen plane [S1, unofficial][S2].
-    *   **Rasterization:** Rasterize the projection to identify all pixels covered by the macro-cell [S1, unofficial][S2].
+3.  **Process Leaf Nodes (Macro-Cells):**
+    *   When a leaf node (macro-cell) is reached, it contains potential iso-surface portions.
+    *   **Trimming:** Trim the macro-cell to the smallest cuboid containing the portions of the iso-surfaces [S2]. This reduces the projection area [S1, unofficial].
+    *   **Projection:** Project the trimmed macro-cell onto the screen plane [S2].
+    *   **Rasterization:** Rasterize the projection to identify all pixels $(x, y)$ covered by the macro-cell [S2].
 
-4.  **Local Ray Casting:**
-    *   For each pixel covered by the projection that has **not** yet been assigned a color:
-        *   Cast a **local ray** through the macro-cell [S1, unofficial][S2].
-        *   The ray starts at the entry point into the macro-cell and stops when it leaves the macro-cell or hits an iso-surface [S1, unofficial].
-        *   Use a fast voxel traversal algorithm (e.g., Amanatides and Woo) to detect cells pierced by the ray [S1, unofficial][S2].
-        *   For each intersected cell, determine if it is a **boundary cell** (contains data values both above and below $\tau$) [S1, unofficial].
-        *   If it is a boundary cell, perform a **ray-surface intersection test** [S1, unofficial][S2].
+4.  **Cast Local Rays:**
+    *   For each covered pixel $(x, y)$:
+        *   If `mask[y][x]` is true, skip this pixel [S2].
+        *   Construct a local ray originating from the camera eye, passing through $(x, y)$, and clipped to the entry and exit points of the macro-cell [S1, unofficial][S2].
+        *   **Early Scanline Termination (Optional Optimization):** If the pixel is likely to not find an intersection (e.g., based on neighboring pixels or previous history), skip the ray cast to save time [S1, unofficial].
+        *   **Voxel Traversal:** Use a fast voxel traversal algorithm (e.g., Amanatides and Woo) to iterate through cells pierced by the local ray within the macro-cell [S1, unofficial][S2].
+        *   **Boundary Check:** For each cell, determine if it is a "boundary cell" (contains data values both above and below $\tau$) [S1, unofficial].
+        *   **Intersection Test:** If a boundary cell is found, perform a ray-surface intersection test [S1, unofficial][S2].
+            *   *Fast Intersection Method:* Divide the ray segment through the cell into two equal parts. Evaluate density at endpoints. If signs differ, linearly interpolate the intersection point [S1, unofficial].
+            *   *Exact Intersection Method (Alternative):* Invert trilinear interpolation to find exact intersection points [S1, unofficial].
+        *   **Shading:** If an intersection is found:
+            *   Calculate the gradient $\nabla f$ at the intersection point using trilinear interpolation of the gradient components [S1, unofficial][S2].
+            *   Compute color using shading model (e.g., Phong) [S1, unofficial][S2].
+            *   Assign color to $C[y][x]$ [S1, unofficial].
+            *   Set `mask[y][x] = true` [S2].
+        *   **Coherency Check:** Use the Ray History Buffer to skip intersection tests if the current ray visits the same cells as the previous ray and the buffer indicates no surface was found [S1, unofficial].
 
-5.  **Ray-Surface Intersection:**
-    *   **Fast Intersection Method:**
-        *   Divide the ray segment passing through the surface cell into two equal parts [S1, unofficial].
-        *   Calculate density values at the endpoints of each part [S1, unofficial].
-        *   If an iso-surface intersection exists in a part, approximate the intersection point using linear interpolation [S1, unofficial].
-        *   *Note:* This is computationally cheaper than exact inversion of trilinear interpolation but yields slightly less accurate results, though differences are often not visible [S1, unofficial].
-    *   **Exact Intersection Method (Alternative):**
-        *   Invert trilinear interpolation to find all points on the ray with density $\tau$ [S1, unofficial].
-        *   Select the first point inside the cell [S1, unofficial].
+**Pseudocode:**
 
-6.  **Shading and Termination:**
-    *   If an intersection is found:
-        *   Calculate the gradient vector $\nabla f$ at the intersection point using trilinear interpolation [S1, unofficial][S2].
-        *   Compute the color using a local lighting model (e.g., Phong) based on the gradient [S1, unofficial][S2].
-        *   Assign the color to the pixel [S1, unofficial][S2].
-        *   If the iso-surface is opaque, mark the pixel as "done" so no more local rays are cast at this pixel during the current frame [S2].
-    *   **Early Scanline Termination (Optimization):**
-        *   If a ray leaves the macro-cell without hitting an iso-surface, and the pixel is not yet colored, it may still be processed. However, early scanline termination can eliminate local rays that are highly probable not to find intersections, further reducing ray counts [S1, unofficial].
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cell_based_first_hit_ray_casting(volume, thresholds, camera, n, width, height):
+    # 1. Build Min-Max Octree
+    octree = build_min_max_octree(volume, n)
+    
+    # 2. Initialize Output Structures
+    color_buffer = zeros((height, width, 3))
+    hit_mask = zeros((height, width), dtype=bool)
+    ray_history_buffer = {} # Maps cell_id -> has_surface (bool)
+    
+    # 3. Traverse Octree
+    traverse_node(octree.root, camera, thresholds, color_buffer, hit_mask, 
+                  ray_history_buffer, n, width, height)
+    
+    return color_buffer
+
+def traverse_node(node, camera, thresholds, color_buffer, hit_mask, 
+                  ray_history_buffer, n, width, height):
+    # Culling: Check if any threshold is within node's min/max range
+    cull = True
+    for tau in thresholds:
+        if node.min_val <= tau <= node.max_val:
+            cull = False
+            break
+            
+    if cull:
+        return
+
+    # If leaf node (macro-cell)
+    if node.is_leaf:
+        process_macro_cell(node, camera, thresholds, color_buffer, hit_mask, 
+                           ray_history_buffer, n, width, height)
+        return
+
+    # Internal node: Sort children by viewing order
+    # Use representative ray direction to determine order
+    children = sorted(node.children, key=lambda child: 
+                      distance_to_plane(child.center, camera.eye, camera.direction))
+    
+    for child in children:
+        traverse_node(child, camera, thresholds, color_buffer, hit_mask, 
+                      ray_history_buffer, n, width, height)
+
+def process_macro_cell(node, camera, thresholds, color_buffer, hit_mask, 
+                       ray_history_buffer, n, width, height):
+    # 1. Trim macro-cell to smallest cuboid containing iso-surfaces
+    trimmed_cuboid = trim_macro_cell(node, thresholds)
+    
+    # 2. Project trimmed cuboid to screen
+    screen_rect = project_to_screen(trimmed_cuboid, camera)
+    
+    # 3. Rasterize and cast local rays
+    for y in range(screen_rect.y_min, screen_rect.y_max):
+        for x in range(screen_rect.x_min, screen_rect.x_max):
+            # Skip if pixel already hit
+            if hit_mask[y, x]:
+                continue
+                
+            # Construct local ray clipped to macro-cell
+            ray = create_local_ray(camera, x, y, node.bounds)
+            
+            # 4. Voxel Traversal within macro-cell
+            cells = fast_voxel_traversal(ray, node.bounds, n)
+            
+            intersection_found = False
+            for cell in cells:
+                # Check coherency
+                cell_id = get_cell_id(cell, node)
+                if cell_id in ray_history_buffer and not ray_history_buffer[cell_id]:
+                    continue # Skip intersection test based on history
+                
+                # Check if boundary cell
+                if is_boundary_cell(cell, thresholds):
+                    # Perform intersection test
+                    hit_point, hit_normal = ray_surface_intersection(ray, cell, thresholds)
+                    
+                    if hit_point is not None:
+                        # Shading
+                        gradient = compute_gradient(cell, hit_point)
+                        color = shade(hit_point, hit_normal, gradient, camera)
+                        
+                        # Update output
+                        color_buffer[y, x] = color
+                        hit_mask[y, x] = True
+                        intersection_found = True
+                        
+                        # Update history buffer for this cell
+                        ray_history_buffer[cell_id] = True
+                        break # First hit wins
+            
+            if not intersection_found:
+                # Mark cells visited in this ray as 'no surface' for coherency
+                for cell in cells:
+                    cell_id = get_cell_id(cell, node)
+                    if cell_id not in ray_history_buffer:
+                        ray_history_buffer[cell_id] = False
+
+def ray_surface_intersection(ray, cell, thresholds):
+    # Fast intersection method: divide segment into two, check signs, interpolate
+    p1 = ray.origin + ray.direction * cell.entry_t
+    p2 = ray.origin + ray.direction * cell.exit_t
+    
+    d1 = sample_volume(p1)
+    d2 = sample_volume(p2)
+    
+    for tau in thresholds:
+        if (d1 - tau) * (d2 - tau) < 0:
+            # Linear interpolation
+            t = cell.entry_t + (tau - d1) / (d2 - d1) * (cell.exit_t - cell.entry_t)
+            hit_point = ray.origin + ray.direction * t
+            hit_normal = compute_gradient_at_point(hit_point)
+            return hit_point, hit_normal
+            
+    return None, None
+```
 
 **Parameters:**
-*   $n$: Macro-cell dimension parameter. Typical values: 3 to 10 [S1, unofficial][S2].
-*   $\tau$: Iso-value threshold. Example: 0 HU (soft tissue) to 1100 HU (stent) [S1, unofficial].
-*   Image Resolution: Example: $512 \times 512$ [S1, unofficial].
+*   $n$: Macro-cell dimension. Typical values: 3–10 [S1, unofficial][S2].
+*   Thresholds: Iso-values. Example: 0 HU (soft tissue) to 1100 HU (stent) [S1, unofficial].
+*   Image Resolution: 512x512 in reported experiments [S1, unofficial].
 
-**Edge Cases and Pitfalls:**
-*   **Macro-Cell Size:**
-    *   Small $n$: Increases octree traversal and projection time, splits rays into more segments, increases local rays, and increases expensive ray initialization steps for rays traveling along iso-surfaces without intersecting [S1, unofficial].
-    *   Large $n$: Reduces the effectiveness of early scanline termination because small critical regions are less likely to be detected [S1, unofficial].
+**Pitfalls:**
+*   **Macro-cell Size:** Small $n$ increases octree traversal and projection overhead, splits rays into more segments, and increases expensive ray initialization steps for rays traveling along iso-surfaces without intersecting [S1, unofficial]. Large $n$ reduces early termination effectiveness because small critical regions are less likely to be detected [S1, unofficial].
 *   **Viewing Order:** Ray segments must be processed in correct viewing order to ensure the first intersection determines the final pixel color. Failure to sort child nodes by viewing vector causes visibility artifacts [S1, unofficial][S2].
-*   **Low Thresholds:** When soft tissue (low threshold) hides deeper structures, conventional ray casting may be faster because ray-surface distances are short. Cell-based methods suffer because almost all macro-cells must be processed, and fine-structured tissue creates "peep holes" that delay termination [S1, unofficial].
+*   **Distance Coding:** Not used because it would require recomputation for each new iso-value [S1, unofficial].
+*   **Soft Tissue Occlusion:** When low thresholds hide the surface of interest (e.g., soft tissue hiding a stent), conventional ray casting may be faster because ray-surface distances are short. Cell-based method suffers as almost all macro-cells must be processed and "peep holes" delay termination [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the number of macro-cells intersecting the iso-surface and the local ray casting cost. Generally faster than conventional ray casting for high thresholds or when the iso-surface is sparse [S1, unofficial].
-*   **Memory Complexity:** Requires storage for the min-max octree and the volume data. The octree size is proportional to the number of macro-cells [S1, unofficial].
+*   **Time Complexity:** Depends on the number of macro-cells intersecting the iso-surface and the local ray path length. Significantly faster than conventional ray casting when the iso-surface is sparse or occluded by empty space.
 *   **Measured Performance:**
-    *   **Virtual Angioscopy (Stented Aorta):**
-        *   Minimum frame time: 1.103s (Cell-based) vs 1.783s (Conventional) [S1, unofficial].
-        *   Average frame time: 1.291s (Cell-based) vs 2.119s (Conventional) [S1, unofficial].
-    *   **Stent Visualization (450 HU threshold):**
-        *   Cell-based: 1.953s, Conventional: 8.563s (Speedup: 4.38x) [S1, unofficial].
-    *   **Stent Visualization (1100 HU threshold):**
-        *   Cell-based: 0.609s, Conventional: 12.781s (Speedup: 20.98x) [S1, unofficial].
-*   **Ray Path Reduction:**
-    *   Conventional: 262,144 rays, 1 ray/pixel, 35.494 steps/pixel [S1, unofficial].
-    *   Cell-based: 1,147,347 rays, 4.376 rays/pixel, 15.626 steps/pixel [S1, unofficial].
-    *   Cell-based with trimming and early termination: 396,808 rays, 1.513 rays/pixel, 3.932 steps/pixel [S1, unofficial].
-*   **Strengths:**
-    *   Significantly faster than conventional ray casting for sparse iso-surfaces or high thresholds [S1, unofficial].
-    *   Exploits cache coherency by accessing each macro-cell only once per frame [S1, unofficial].
-    *   Supports interactive threshold adjustment [S1, unofficial].
-*   **Limitations:**
-    *   Slower than conventional ray casting when the iso-surface is dense and close to the camera (e.g., low threshold hiding deep structures) [S1, unofficial].
-    *   Requires careful tuning of macro-cell size $n$ [S1, unofficial].
-    *   Does not support distance coding for inter-ray coherency due to iso-value dependency [S1, unofficial].
+    *   Virtual angioscopy (stented aorta): Average frame time 1.291s vs 2.119s for conventional [S1, unofficial].
+    *   450 HU threshold (bones/stent): 1.953s vs 8.563s (4.38x speedup) [S1, unofficial].
+    *   1100 HU threshold (stent only): 0.609s vs 12.781s (20.98x speedup) [S1, unofficial].
+*   **Ray Path Reduction:** Reduces average steps per pixel from ~35.5 (conventional) to ~15.6 (cell-based), and further to ~3.9 with optimizations (trimming, early termination) [S1, unofficial].
+*   **Strengths:** Short average ray path lengths; cache-coherent access (each macro-cell processed once); supports interactive threshold adjustment; no dedicated hardware required [S1, unofficial].
+*   **Limitations:** Performance degrades when low thresholds cause extensive macro-cell processing due to fine-structured tissue ("peep holes"); small macro-cells increase overhead; large macro-cells reduce culling efficiency [S1, unofficial].
+*   **When to Use:** Fast perspective iso-surfacing, virtual endoscopy, interactive threshold adjustment [S1, unofficial][S2].
+*   **When Not to Use:** Low-resolution previews (use conventional ray casting or progressive rendering); scenarios with very low thresholds where soft tissue occludes the surface of interest [S1, unofficial].
 
 ## Background
 *   **Origin:** Proposed by André Neubauer, Lukas Mroz, H. Hauser, and R. Wegenkittl in 2002 [S1, unofficial].
-*   **History:** Developed as part of the AlVis project for visualization of aluminium foam samples from high-resolution industrial CT and for virtual angioscopy (post-implantation assessment of stent placement) [S1, unofficial].
-*   **Context:** It addresses the limitations of surface-fitting techniques (which lack interactive threshold adjustment and require dedicated hardware) and conventional ray casting (which is slow for large empty spaces) [S1, unofficial].
+*   **Development:** Developed as part of the AlVis project for visualization of high-resolution industrial CT data (aluminum foam) and tested for virtual angioscopy (stent placement assessment) [S1, unofficial].
+*   **Comparison:** Contrasted with Surface Fitting techniques (e.g., Hietala et al.) which require dedicated hardware and lack interactive threshold adjustment [S1, unofficial]. Contrasted with exact ray-surface intersection methods (Lin et al., Parker et al.) which are more accurate but computationally expensive; this method uses a faster, slightly less accurate approximation [S1, unofficial].
 
 ## Sources
-
 [S1] (PDF) Cell-Based First-Hit Ray Casting, https://www.researchgate.net/publication/2521319_Cell-Based_First-Hit_Ray_Casting, fetched 2026-10-27 (unofficial)
 [S2] Cell-Based First-Hit Ray Casting, https://old.cescg.org/CESCG-2002/ANeubauer/node5.html, fetched 2026-10-29

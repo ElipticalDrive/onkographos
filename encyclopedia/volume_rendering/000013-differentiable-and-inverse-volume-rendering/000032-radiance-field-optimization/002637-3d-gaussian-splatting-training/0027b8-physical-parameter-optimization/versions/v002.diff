@@ -1,0 +1,272 @@
+--- v001.md
++++ v002.md
+@@ -4,11 +4,11 @@
+ 
+ ## Overview
+-Physical Parameter Optimization replaces the standard spherical harmonic (SH) color and empirical opacity attributes of 3D Gaussian Splatting with a set of physical quantities representing a participating medium [S1, unofficial]. This allows for real-time rendering and dynamic relighting (arbitrary sun direction) by solving the radiative transfer equation through the Gaussian primitives rather than approximating lighting with SH coefficients [S1, unofficial]. It is distinct from standard 3DGS training by optimizing extinction, albedo, and scattering asymmetry instead of color and opacity [S1, unofficial].
++Physical Parameter Optimization replaces the standard spherical harmonic (SH) color and empirical opacity attributes of 3D Gaussian Splatting with a set of physical quantities representing a participating medium [S1, unofficial]. This substitution enables real-time rendering and dynamic relighting under arbitrary sun directions by solving the radiative transfer equation directly through the Gaussian primitives [S1, unofficial]. It differs from standard 3DGS training by optimizing extinction, albedo, and scattering asymmetry rather than approximating lighting with empirical color coefficients [S1, unofficial].
+ 
+ ## How it works
+ ### Inputs and Outputs
+ **Inputs:**
+-- A dataset of images with known camera poses and sun directions (Stage 1: sun-only, black background; Stage 2: environment lighting) [S1, unofficial].
+-- Initial 3D Gaussian point cloud (position, scale, rotation, and initial physical parameters) [S1, unofficial].
++- A dataset of images with known camera poses and sun directions, split into Stage 1 (sun-only, black background) and Stage 2 (environment lighting) [S1, unofficial].
++- An initial 3D Gaussian point cloud containing position, scale, rotation, and initialized physical parameters [S1, unofficial].
+ 
+ **Outputs:**
+@@ -17,5 +17,5 @@
+ 
+ ### Data Structures
+-Each Gaussian primitive stores the following physical parameters in addition to standard geometric attributes (position $\mathbf{x}$, scale $\mathbf{s}$, rotation $\mathbf{q}$):
++Each Gaussian primitive stores the following physical parameters alongside standard geometric attributes (position $\mathbf{x}$, scale $\mathbf{s}$, rotation $\mathbf{q}$):
+ 
+ 1.  **Extinction Coefficient ($\sigma_t$):**
+@@ -33,31 +33,31 @@
+ 4.  **Multiple Scattering Octave Weights ($w_n$):**
+     -   **Type:** Array of 6 learnable scalars.
+-    -   **Meaning:** Energy weights for the 6th-order multiple scattering octave approximation (based on Frostbite/Wrenninge) [S1, unofficial].
++    -   **Meaning:** Energy weights for the 6th-order multiple scattering octave approximation based on Frostbite/Wrenninge [S1, unofficial].
+     -   **Activation:** `softplus` [S1, unofficial].
+ 
+ ### Optimization Steps
+-The training process is divided into two stages [S1, unofficial]:
++The training process is divided into two distinct stages [S1, unofficial]:
+ 
+ **Stage 1: Physical Parameter Training**
+ 1.  **Initialization:** Initialize Gaussians with standard 3DGS geometry and initial physical parameters [S1, unofficial].
+-2.  **Rendering:** For each training iteration, render the scene using the physical volume rendering equation. The radiance $L$ is computed by integrating the extinction, albedo, and phase function along the ray [S1, unofficial].
+-3.  **Loss Calculation:** Compute the loss $L$ as a weighted sum of L1 and DSSIM:
++2.  **Rendering:** For each training iteration, render the scene by integrating the radiative transfer equation along each ray using the physical parameters [S1, unofficial].
++3.  **Loss Calculation:** Compute the total loss as a weighted sum of L1 and DSSIM:
+     $$ L = 0.8 \cdot L1 + 0.2 \cdot DSSIM $$
+     where the DSSIM weight $\lambda_{dssim} = 0.2$ [S1, unofficial].
+-4.  **Regularization:** Apply Soft Anisotropy Regularization if the log-ratio of scales exceeds `aniso_ratio_max`:
++4.  **Regularization:** Apply Soft Anisotropy Regularization if the log-ratio of scale dimensions exceeds `aniso_ratio_max`:
+     $$ L_{aniso} = \lambda_{aniso} \cdot (\log(\text{ratio}))^2 $$
+-    with $\lambda_{aniso} = 0.001$ [S1, unofficial].
+-5.  **Optimization:** Update all parameters using Adam optimizer with specific learning rates (see Parameters).
++    with $\lambda_{aniso} = 0.001$ [S1, unofficial]. Hard anisotropy constraints are enforced via needle surgery [S1, unofficial].
++5.  **Optimization:** Update all parameters using Adam with stage-specific learning rates [S1, unofficial].
+ 6.  **Densification and Pruning:**
+-    -   **Interval:** Iterations 500 to 15,000, every 100 iterations [S1, unofficial].
+-    -   **Densification:** Use adaptive densification with `densify_top_frac=0.005` and absolute lower bound $5 \times 10^{-5}$ [S1, unofficial]. Incorporate scale gradients if $> 10^{-6}$ [S1, unofficial].
+-    -   **Pruning:** Remove Gaussians with mean contribution $\sum (\alpha \cdot T) < 10^{-4}$ [S1, unofficial].
+-    -   **Post-Densify Pruning:** Extra pruning every 1,000 iterations during densification phase [S1, unofficial].
+-    -   **Resurrection:** Every 3,000 iterations (during densification phase), reset the lowest contribution 5% of $\sigma_t$ Gaussians to 0.1 [S1, unofficial].
+-7.  **Tonemapping:** Apply fixed ACES tonemapping by default. If `tonemap_learnable` is enabled, optimize 4 ACES coefficients with a monotonicity penalty $\lambda_{tonemap\_mono} = 10^{-2}$ to prevent curve inversion in [0, 8] [S1, unofficial].
++    -   **Interval:** Iterations 500 to 15,000, executed every 100 iterations [S1, unofficial].
++    -   **Densification:** Uses adaptive densification with `densify_top_frac=0.005` and an absolute lower bound of $5 \times 10^{-5}$ [S1, unofficial]. Scale gradients exceeding $10^{-6}$ are incorporated into the densification criteria [S1, unofficial].
++    -   **Pruning:** Removes Gaussians with mean contribution $\sum (\alpha \cdot T) < 10^{-4}$ [S1, unofficial].
++    -   **Post-Densify Pruning:** Executes an extra pruning pass every 1,000 iterations during the densification phase [S1, unofficial].
++    -   **Resurrection:** Every 3,000 iterations (only during the densification period), resets the lowest contribution 5% of $\sigma_t$ Gaussians to 0.1 to prevent net destruction loops [S1, unofficial].
++7.  **Tonemapping:** Applies fixed ACES tonemapping by default [S1, unofficial]. If `tonemap_learnable` is enabled, optimizes 4 ACES coefficients with a learning rate of $10^{-3}$ decaying to 0.1×, plus a monotonicity penalty $\lambda_{tonemap\_mono} = 10^{-2}$ to prevent curve inversion in the [0, 8] range [S1, unofficial].
+ 
+ **Stage 2: Environment Light Optimization**
+-1.  **Freeze:** Freeze all Stage 1 geometric and physical parameters [S1, unofficial].
+-2.  **Train:** Optimize a global environment light network (MLP for sun direction $T_{sun}$ and SH coefficients for sky irradiance $E_{lm}$ and visibility $V_{lm}$) using the `env_lr` learning rate [S1, unofficial].
++1.  **Freeze:** Freezes all Stage 1 geometric and physical parameters [S1, unofficial].
++2.  **Train:** Optimizes a global environment light network (MLP for sun direction $T_{sun}$ and SH coefficients for sky irradiance $E_{lm}$ and visibility $V_{lm}$) using the environment learning rate [S1, unofficial].
+ 
+ ### Parameters
+@@ -77,69 +77,126 @@
+ ### Pseudocode
+ ```python
++import torch
++import math
++
++# Standard metrics
++def l1_loss(pred, target):
++    return torch.mean(torch.abs(pred - target))
++
++def dssim_loss(pred, target):
++    return 1.0 - torch.mean((2 * pred * target + 1e-8) / (pred**2 + target**2 + 1e-8))
++
++# Activations
++def softplus(x):
++    return torch.log(1 + torch.exp(x))
++
++def sigmoid(x):
++    return 1.0 / (1.0 + torch.exp(-x))
++
++# Optimizer
++class Optimizer:
++    def __init__(self, params, lr):
++        self.params = params
++        self.lr = lr
++    def step(self):
++        for p in self.params:
++            if p.grad is not None:
++                p.data -= self.lr * p.grad
++    def zero_grad(self):
++        for p in self.params:
++            if p.grad is not None:
++                p.grad.zero_()
++
++# LR decay: exponential to 1/10 over max_steps
++def update_learning_rates(optimizer, current_iter, max_steps, initial_lr):
++    optimizer.lr = initial_lr * (0.1 ** (current_iter / max_steps))
++
++# Anisotropy penalty
++ANISO_RATIO_MAX = 3.0
++def check_and_add_anisotropy_penalty(gaussians, loss, lambda_aniso=0.001):
++    log_ratio = torch.log(gaussians.scale[:, 0] / gaussians.scale[:, 1])
++    if torch.any(torch.abs(log_ratio) > ANISO_RATIO_MAX):
++        loss += lambda_aniso * torch.mean(torch.square(log_ratio))
++    return loss
++
++# Densification
++def densify_gaussians(gaussians, opt_pos, opt_scale, threshold=5e-5, top_frac=0.005, scale_grad_thresh=1e-6):
++    pos_grad_norm = opt_pos.param_groups[0]['params'][0].grad.norm(dim=1)
++    scale_grad_norm = opt_scale.param_groups[0]['params'][0].grad.norm(dim=1)
++    combined_grad = torch.maximum(pos_grad_norm, scale_grad_norm)
++    grad_threshold = torch.topk(combined_grad, k=int(len(combined_grad) * top_frac))[0].max()
++    grad_threshold = max(grad_threshold, threshold)
++    # Standard 3DGS densification: split/duplicate Gaussians exceeding grad_threshold
++    pass
++
++# Pruning
++def prune_gaussians(gaussians, threshold=1e-4):
++    contribution = torch.mean(gaussians.alpha * gaussians.transmittance)
++    mask = contribution < threshold
++    # Standard 3DGS pruning: remove Gaussians in mask
++    pass
++
++# Resurrection
++def resurrect_gaussians(gaussians, fraction=0.05, value=0.1):
++    sigma_t_sorted, indices = torch.sort(gaussians.sigma_t)
++    reset_count = int(len(sigma_t_sorted) * fraction)
++    gaussians.sigma_t[indices[:reset_count]] = value
++
++# Tonemap
++def apply_aces_tonemap(image):
++    a, b, c, d, e, f = 2.51, 0.03, 2.43, 0.59, 0.14, 1.0
++    return torch.clamp((image * (a * image + b)) / (image * (c * image + d) + e), 0.0, 1.0)
++
++# Physical volume renderer
++def render_physical_volume(gaussians, cam, sun):
++    # Ray marching integration of radiative transfer equation
++    # Uses sigma_t, omega, g, w_n to compute transmittance and emitted radiance
++    pass
++
+ def train_stage1(gaussians, dataset, iterations=30000):
+-    # Initialize optimizers with specific learning rates
+-    opt_pos = Adam(gaussians.position, lr=1.6e-4, delay_mult=0.01)
+-    opt_sigma_t = Adam(gaussians.sigma_t, lr=0.025)
+-    opt_omega = Adam(gaussians.omega, lr=0.0025)
+-    opt_g = Adam(gaussians.g, lr=0.0025)
+-    opt_w = Adam(gaussians.w, lr=0.0025)
+-    opt_scale = Adam(gaussians.scale, lr=0.005)
+-    opt_rot = Adam(gaussians.rotation, lr=0.001)
++    opt_pos = Optimizer(gaussians.position, lr=1.6e-4)
++    opt_sigma_t = Optimizer(gaussians.sigma_t, lr=0.025)
++    opt_omega = Optimizer(gaussians.omega, lr=0.0025)
++    opt_g = Optimizer(gaussians.g, lr=0.0025)
++    opt_w = Optimizer(gaussians.w, lr=0.0025)
++    opt_scale = Optimizer(gaussians.scale, lr=0.005)
++    opt_rot = Optimizer(gaussians.rotation, lr=0.001)
+     
+     for iter in range(iterations):
+-        # 1. Sample camera and sun direction
+         cam, sun = dataset.sample()
+-        
+-        # 2. Render physical volume
+-        # Integrate extinction, albedo, and HG phase function
+         rendered_image = render_physical_volume(gaussians, cam, sun)
+-        
+-        # 3. Compute Loss
+         gt_image = dataset.get_gt(cam)
+-        l1_loss = L1(rendered_image, gt_image)
+-        dssim_loss = DSSIM(rendered_image, gt_image)
+-        loss = 0.8 * l1_loss + 0.2 * dssim_loss
+-        
+-        # 4. Regularization
+-        if check_anisotropy(gaussians):
+-            loss += 0.001 * anisotropy_penalty(gaussians)
+-            
+-        # 5. Backpropagate and Update
++        
++        l1_loss_val = l1_loss(rendered_image, gt_image)
++        dssim_loss_val = dssim_loss(rendered_image, gt_image)
++        loss = 0.8 * l1_loss_val + 0.2 * dssim_loss_val
++        
++        loss = check_and_add_anisotropy_penalty(gaussians, loss)
++        
+         loss.backward()
+         
+-        opt_pos.step()
+-        opt_sigma_t.step()
+-        opt_omega.step()
+-        opt_g.step()
+-        opt_w.step()
+-        opt_scale.step()
+-        opt_rot.step()
+-        
+-        opt_pos.zero_grad()
+-        opt_sigma_t.zero_grad()
+-        opt_omega.zero_grad()
+-        opt_g.zero_grad()
+-        opt_w.zero_grad()
+-        opt_scale.zero_grad()
+-        opt_rot.zero_grad()
+-        
+-        # 6. Densification and Pruning (Iter 500-15000, step 100)
++        opt_pos.step(); opt_pos.zero_grad()
++        opt_sigma_t.step(); opt_sigma_t.zero_grad()
++        opt_omega.step(); opt_omega.zero_grad()
++        opt_g.step(); opt_g.zero_grad()
++        opt_w.step(); opt_w.zero_grad()
++        opt_scale.step(); opt_scale.zero_grad()
++        opt_rot.step(); opt_rot.zero_grad()
++        
+         if 500 <= iter <= 15000 and iter % 100 == 0:
+-            densify_gaussians(gaussians, opt_pos, opt_scale, threshold=5e-5, top_frac=0.005)
+-            prune_gaussians(gaussians, threshold=1e-4)
+-            
+-            # Resurrection every 3000 iterations
++            densify_gaussians(gaussians, opt_pos, opt_scale)
++            prune_gaussians(gaussians)
+             if iter % 3000 == 0:
+-                resurrect_gaussians(gaussians, fraction=0.05, value=0.1)
++                resurrect_gaussians(gaussians)
++            if iter % 1000 == 0:
++                prune_gaussians(gaussians)
+                 
+-            # Post-densify pruning every 1000 iterations
+-            if iter % 1000 == 0:
+-                prune_gaussians(gaussians, threshold=1e-4)
+-                
+-        # 7. Decay Learning Rates
+-        decay_learning_rates(opt_pos, opt_sigma_t, opt_omega, opt_g, opt_w, iter, max_steps=30000)
++        update_learning_rates(opt_pos, iter, 30000, 1.6e-4)
++        update_learning_rates(opt_sigma_t, iter, 30000, 0.025)
++        update_learning_rates(opt_omega, iter, 30000, 0.0025)
++        update_learning_rates(opt_g, iter, 30000, 0.0025)
++        update_learning_rates(opt_w, iter, 30000, 0.0025)
+ 
+ def train_stage2(gaussians, env_network, dataset, iterations=30000):
+-    # Freeze Stage 1 parameters
+     gaussians.position.requires_grad = False
+     gaussians.scale.requires_grad = False
+@@ -150,17 +207,17 @@
+     gaussians.w.requires_grad = False
+     
+-    opt_env = Adam(env_network.parameters(), lr=1e-3)
++    opt_env = Optimizer(env_network.parameters(), lr=1e-3)
+     
+     for iter in range(iterations):
+         cam, sun = dataset.sample()
+-        rendered_image = render_physical_volume_with_env(gaussians, env_network, cam, sun)
++        rendered_image = render_physical_volume(gaussians, cam, sun)
+         gt_image = dataset.get_gt(cam)
+         
+-        loss = 0.8 * L1(rendered_image, gt_image) + 0.2 * DSSIM(rendered_image, gt_image)
++        loss = 0.8 * l1_loss(rendered_image, gt_image) + 0.2 * dssim_loss(rendered_image, gt_image)
+         loss.backward()
+         opt_env.step()
+         opt_env.zero_grad()
+         
+-        decay_learning_rates(opt_env, iter, max_steps=30000)
++        update_learning_rates(opt_env, iter, 30000, 1e-3)
+ ```
+ 

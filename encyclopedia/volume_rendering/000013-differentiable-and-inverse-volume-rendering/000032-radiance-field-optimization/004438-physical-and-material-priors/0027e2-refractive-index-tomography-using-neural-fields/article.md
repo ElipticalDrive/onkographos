@@ -11,10 +11,8 @@ Refractive Index Tomography using Neural Fields (RNTF) is a method to recover a 
 *   **Outputs:** A trained neural network representing the refractive index field $\eta(\mathbf{x})$ and optionally a luminance field $L(\mathbf{x})$ [S1, unofficial].
 
 **Data Structures:**
-*   **Ray Input Array:** Shape `[batch_size, 6 + num_aux]`. The first 3 elements are the ray position $(x, y, z)$, the next 3 are the ray direction $(dx, dy, dz)$, and the remaining elements are auxiliary data [S1, unofficial].
-*   **ODE State $y$:** Shape `[batch_size, state_dim]`.
-    *   For path-only tracing: `state_dim = 6` (position + direction) [S1, unofficial].
-    *   For luminance tracing: `state_dim = 7` (position + direction + luminance) [S1, unofficial].
+*   **Ray Input Array:** Shape `[batch_size, 6 + num_aux]` [S1, unofficial]. The first 3 elements are the ray position $(x, y, z)$, the next 3 are the ray direction $(dx, dy, dz)$, and the remaining elements are auxiliary data [S1, unofficial].
+*   **ODE State $y$:** Shape `[batch_size, state_dim]` [S1, unofficial]. `state_dim` is 6 for path-only tracing (position + direction) or 7 for luminance tracing (position + direction + luminance) [S1, unofficial].
 *   **Neural Field:** A Multi-Layer Perceptron (MLP) taking 3D coordinates as input and outputting the refractive index $\eta$ (and optionally its gradient $\nabla \eta$) [S1, unofficial].
 
 **Numbered Steps:**
@@ -22,16 +20,14 @@ Refractive Index Tomography using Neural Fields (RNTF) is a method to recover a 
 1.  **Ray Initialization:** Initialize rays with starting positions (`ap_pts`) and directions (`rays_d`) derived from camera parameters (`fov_angle`, `res`) [S1, unofficial]. The ray direction is normalized and scaled by the initial refractive index $n_{init}$ at the starting position to ensure correct physical propagation, as the ODE uses `ray_dir / eta` [S1, unofficial].
 2.  **Define ODE State:** Construct the initial state $y_0$ by concatenating ray position, ray direction, and auxiliary data (e.g., initial luminance) [S1, unofficial].
 3.  **Define ODE Function:** Define the derivative function $f(y, s)$ which computes the derivatives with respect to path length $s$:
-    *   $\frac{d}{ds}\mathbf{r}_{pos} = \frac{\mathbf{r}_{dir}}{\eta(\mathbf{r}_{pos})}$
-    *   $\frac{d}{ds}\mathbf{r}_{dir} = \nabla \eta(\mathbf{r}_{pos})$
-    *   $\frac{d}{ds}L = L_{emission}(\mathbf{r}_{pos})$ (for luminance tracing) [S1, unofficial].
-    *   Note: For radiance adjustment, the luminance integrand is divided by $\eta^2$, i.e., $\frac{d}{ds}L = \frac{L_{emission}}{\eta^2}$ [S1, unofficial].
+    *   $\frac{d}{ds}\mathbf{r}_{pos} = \frac{\mathbf{r}_{dir}}{\eta(\mathbf{r}_{pos})}$ [S1, unofficial].
+    *   $\frac{d}{ds}\mathbf{r}_{dir} = \nabla \eta(\mathbf{r}_{pos})$ [S1, unofficial].
+    *   $\frac{d}{ds}L = L_{emission}(\mathbf{r}_{pos})$ for path-only tracing, or $\frac{d}{ds}L = \frac{L_{emission}}{\eta^2}$ for radiance adjustment [S1, unofficial].
 4.  **Integrate ODE:** Integrate the ODE using an ODE solver (e.g., `jax.experimental.ode.odeint`) over specified path length values `s_vals` [S1, unofficial].
 5.  **Extract Results:** Extract the final ray positions (`ray_trace`) and integrated luminance (`ray_lum`) from the integration result $y$ [S1, unofficial].
 6.  **Optimize:** Optimize the neural field parameters using gradient descent via automatic differentiation (e.g., `jax.value_and_grad` and `apply_gradients`) to minimize the difference between rendered and target images [S1, unofficial].
 
 **Formulas:**
-
 The ODE derivatives are defined as:
 $$
 \frac{d}{ds}\mathbf{r}_{pos} = \frac{\mathbf{r}_{dir}}{\eta}
@@ -117,7 +113,8 @@ def renderfn_rad(rays, predict_eta_grad_fn, predict_lum, s_vals):
     # First 3: pos, Next 3: dir, Rest: aux
     ray_pos = rays[..., :3]
     ray_dir = rays[..., 3:6]
-    ray_lum_init = jnp.zeros_like(ray_pos[..., :1]) # Initialize luminance to 0 or appropriate value
+    # Initialize luminance to 0; source does not specify exact initialization [G]
+    ray_lum_init = jnp.zeros_like(ray_pos[..., :1])
     
     y_0 = jnp.concatenate([ray_pos, ray_dir, ray_lum_init], axis=-1)
     
@@ -138,12 +135,10 @@ def renderfn_rad(rays, predict_eta_grad_fn, predict_lum, s_vals):
 ```
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the number of ODE integration steps and the complexity of the neural network evaluation per step. Tight tolerances (e.g., `rtol=1e-10`) increase the number of steps and thus computation time [S1, unofficial].
-*   **Memory Complexity:** Requires storing intermediate states for ODE integration and gradients during backpropagation. JAX's automatic differentiation handles this, but memory usage can be high for large batches or fine-grained `s_vals` [S1, unofficial].
+*   **Time Complexity:** Depends on the number of ODE integration steps and the complexity of the neural network evaluation per step [S1, unofficial]. Tight tolerances (e.g., `rtol=1e-10`, `atol=1e-10`) increase the number of steps and thus computation time [S1, unofficial].
 *   **Strengths:** Physically accurate modeling of light propagation in refractive media; capable of recovering smooth refractive index fields and luminance fields from single views [S1, unofficial].
-*   **Limitations:** Requires careful tuning of ODE solver tolerances; sensitive to initial conditions and camera parameters; computationally expensive due to ODE integration [S1, unofficial].
+*   **Limitations:** Requires careful tuning of ODE solver tolerances [S1, unofficial].
 *   **When to use:** Gas flow recovery, smooth refractive field recovery, and dark matter halo recovery simulations [S1, unofficial].
-*   **When not to use:** Scenes with complex scattering or non-refractive media where standard volumetric rendering is sufficient.
 
 ## Background
 Refractive Index Tomography using Neural Fields was introduced by Brandon Zhao et al. in the paper "Single-View Refractive Index Tomography using Neural Fields" (arXiv:2309.04437) [S1, unofficial]. The method leverages JAX for automatic differentiation and efficient ODE integration to optimize neural fields representing the refractive index and luminance fields [S1, unofficial]. It is used for applications such as gas flow visualization, smooth refractive field reconstruction, and simulating dark matter halos [S1, unofficial].

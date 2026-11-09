@@ -3,216 +3,94 @@
 Also called: Simple Radiance Fields
 
 ## Overview
-Simple-RF is a regularization framework for sparse-input radiance field optimization that mitigates artifacts (floaters and duplication) by supervising a high-capability "main" model with depth estimates from lower-capability "augmented" models [S1]. It differs from standard NeRF variants by introducing a reliability-gated depth supervision mechanism that ensures only accurate depth estimates from the simplified models are used to constrain the main model, without adding inference overhead [S1]. Unlike methods requiring separate initialization studies (e.g., 3DGS), Simple-RF is applicable to various explicit (TensoRF, ZipNeRF) and implicit (NeRF) models [S1].
+Simple-RF is a regularization framework for sparse-input radiance fields that constrains the main model to learn simpler solutions by supervising it with depth estimates from augmented, lower-capacity versions of itself [S1]. It sets itself apart from sibling methods like [3D Gaussian Splatting](1795-3d-gaussian-splatting.md) by being applicable to various explicit models (TensoRF, iNGP, ZipNeRF) and implicit models (NeRF) without modifying the inference pipeline or requiring separate initialization studies [S1]. Unlike view-hallucination methods that simulate dense sampling, Simple-RF uses reduced-capacity models to provide explicit depth supervision, mitigating floaters and duplication artifacts common in few-shot settings [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A sparse set of input views (images and camera poses); a main radiance field model $F$ (high capacity); an augmented radiance field model $F_{aug}$ (low capacity); a threshold for reprojection error.
-*   **Outputs:** A trained main radiance field model $F$; novel view synthesis images.
+*   **Inputs:** A sparse set of $M$ input images with known camera poses.
+*   **Outputs:** A trained main radiance field model $F_{main}$ capable of novel view synthesis. Augmented models are discarded after training [S1].
 
 **Data Structures:**
-*   **Main Model $F$:** Composed of $F_1$ (geometry/density) and $F_2$ (color/radiance). For NeRF, $F_1$ uses high-degree positional encoding; $F_2$ uses view-dependent features. For TensoRF, $F$ uses high-resolution factorized tensor components. For ZipNeRF, $F$ uses a large hash table.
-*   **Augmented Model $F_{aug}$:** Structurally similar to $F$ but with reduced capacity:
-    *   *Simple-NeRF:* Reduced positional encoding degree; disabled view-dependent radiance (Lambertian).
-    *   *Simple-TensoRF:* Reduced number and resolution of decomposed tensor components.
-    *   *Simple-ZipNeRF:* Reduced hash table size.
-*   **Ray Sampling:** $N$ 3D points $p_1, \dots, p_N$ sampled along a ray, where $p_1$ is closest and $p_N$ farthest from the camera.
+The method relies on the standard radiance field decomposition $F = F_1 \bullet F_2$ [S1]:
+*   $F_1$: A network (or tensor decomposition) mapping 3D position $p_i$ to view-independent volume density $\tilde{\tau}_i$ and latent feature $h_i$.
+*   $F_2$: A network mapping latent feature $h_i$ and viewing direction $v$ to view-dependent color $c_i$.
+*   **Augmented Models:** Variants of $F_{main}$ with reduced capacity (e.g., reduced positional encoding degree, disabled view-dependent features, reduced tensor components, or smaller hash tables) [S1].
 
-**Formulas:**
-1.  **Radiance Field Query:** At point $p_i$, the model outputs density $\sigma_i$ and latent feature $h_i$ via $F_1$, and color $c_i$ via $F_2$ using viewing direction $v$ [S1]:
-    $$
-    \sigma_i, h_i = F_1 (p_i), \quad c_i = F_2 (h_i, v)
-    $$
-    *(Note: In the source text, $\tilde{\tau}_i$ is used for density, equivalent to $\sigma_i$ in standard notation [S1]).*
-
-2.  **Volume Rendering Weight:** The weight $w_i$ for sample $i$ is computed as [S1]:
-    $$
-    w_i = \exp \left( -\sum_{j=1}^{i-1} \delta_j \sigma_j \right) \cdot (1 - \exp (-\delta_i \sigma_i))
-    $$
-    where $\delta_i$ is the distance between $p_i$ and $p_{i+1}$.
-
-3.  **Rendered Color:**
-    $$
-    \hat{C} = \sum_{i=1}^N w_i c_i
-    $$
-
-4.  **Expected Depth:** The expected ray termination length (depth) $z$ is [S1]:
+**Numbered Steps:**
+1.  **Model Initialization:** Define a main radiance field model $F_{main}$ and one or more augmented models $F_{aug}$ with reduced capacity. The augmented models are designed to mitigate specific artifacts (floaters, duplication) caused by overfitting on sparse inputs [S1].
+2.  **Simultaneous Training:** Train $F_{main}$ and $F_{aug}$ in tandem on the sparse input views using the standard photometric loss $\mathcal{L}_{pix} = \| \hat{C} - C \|^2$ [S1].
+3.  **Depth Estimation:** For each ray, compute the expected ray termination length (depth) $z$ using the volume rendering weights $w_i$ [S1]:
     $$
     z = \sum_{i=1}^N w_i z_i
     $$
-    where $z_i$ is the depth of $p_i$.
+    where $z_i$ is the depth of sample $p_i$ [S1].
+4.  **Reliability Gauge:** Reproject pixels from the current view using the estimated depth $z$ onto a different nearest training view. Compare the reprojected pixel colors with the corresponding images in that nearest training view to determine accuracy [S1].
+5.  **Depth Supervision:** If the reprojection error is low (indicating accurate depth), apply a depth supervision loss $\mathcal{L}_{aug}$ from the more reliable model (either $F_{main}$ or $F_{aug}$) to the other model [S1]. Specifically, supervise the less reliable model with the depth estimates of the more reliable one [S1].
+6.  **Inference:** Discard all augmented models. Use only $F_{main}$ for novel view synthesis [S1].
 
-5.  **Photometric Loss:** Standard L2 loss between rendered color $\hat{C}$ and ground truth $C$ [S1]:
+**Formulas:**
+*   **Radiance Field Query:** At point $p_i$, obtain density $\tilde{\tau}_i$ and latent feature $h_i$, then color $c_i$ using viewing direction $v$ [S1]:
     $$
-    L_{ph} = \| C - \hat{C} \|^2
+    \tilde{\tau}_i, h_i = F_1 (p_i), \quad c_i = F_2 (h_i, v)
     $$
-
-6.  **Augmentation Loss ($L_{aug}$):** Applied only if the augmented model's depth is deemed reliable (see Steps). This loss supervises the main model using the depth from the more reliable model (main or augmented) [S1].
+*   **Volume Rendering Weight:** For sample $i$ along a ray, where $\delta_j$ is the distance between $p_j$ and $p_{j+1}$ [S1]:
+    $$
+    w_i = \exp \left( -\sum_{j=1}^{i-1} \delta_j \tilde{\tau}_j \right) \cdot (1 - \exp (-\delta_i \tilde{\tau}_i))
+    $$
+*   **Rendered Color:**
+    $$
+    \hat{C} = \sum_{i=1}^N w_i c_i
+    $$
+*   **Depth:**
+    $$
+    z = \sum_{i=1}^N w_i z_i
+    $$
 
 **Parameters:**
-*   $N$: Number of 3D points sampled along a ray [S1].
-*   $v$: Viewing direction [S1].
-*   $c_i$: View-dependent color at point $p_i$ [S1].
-
-**Numbered Steps:**
-1.  **Initialize Models:** Construct the main model $F$ and the corresponding augmented model $F_{aug}$ with reduced capacity based on the specific architecture (NeRF, TensoRF, or ZipNeRF) [S1].
-2.  **Simultaneous Training:** Train $F$ and $F_{aug}$ in tandem on the sparse input views using photometric loss $L_{ph}$ [S1].
-3.  **Depth Estimation:** For each ray, compute the expected depth $z_{aug}$ from $F_{aug}$ and $z_{main}$ from $F$ [S1].
-4.  **Reliability Gauge (Reprojection):**
-    a. Select a different nearest training view distinct from the current ray's source view.
-    b. Reproject pixels from the current view onto the nearest training view using the estimated depth $z_{aug}$ (or $z_{main}$) [S1].
-    c. Compare the reprojected pixels with the corresponding images in the nearest training view to calculate reprojection error [S1].
-5.  **Accuracy Determination:** Determine which model (main or augmented) provides more accurate depth based on the reprojection error. If the augmented model's reprojection error is lower, its depth is considered reliable [S1].
-6.  **Supervision:**
-    a. If the augmented model's depth is reliable, apply the augmentation loss $L_{aug}$ from the augmented model to the main model [S1].
-    b. If the main model is more reliable, no augmentation loss is applied (or potentially vice versa, though the text emphasizes using the *more reliable* model to supervise the *other* [S1]).
-    c. *Note:* The text states "use the more reliable depth to supervise the other" [S1].
-7.  **Inference:** Discard the augmented model $F_{aug}$. Use only the main model $F$ for novel view synthesis [S1].
-
-**Pseudocode:**
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def train_simple_rf(main_model, aug_model, input_views, num_iterations):
-    """
-    Trains the main radiance field model using depth supervision from an augmented model.
-    """
-    for iteration in range(num_iterations):
-        # 1. Sample a random input view and generate rays
-        current_view = random_sample(input_views)
-        rays = generate_rays(current_view)
-        
-        # 2. Forward pass through both models
-        # Main model
-        main_densities, main_latents, main_colors = main_model.query(rays)
-        main_depths = compute_expected_depth(main_densities, rays)
-        main_rendered_colors = volume_render(main_densities, main_colors, rays)
-        
-        # Augmented model
-        aug_densities, aug_latents, aug_colors = aug_model.query(rays)
-        aug_depths = compute_expected_depth(aug_densities, rays)
-        aug_rendered_colors = volume_render(aug_densities, aug_colors, rays)
-        
-        # 3. Compute Photometric Loss for both
-        loss_ph_main = l2_loss(main_rendered_colors, current_view.images)
-        loss_ph_aug = l2_loss(aug_rendered_colors, current_view.images)
-        
-        # 4. Reliability Check via Reprojection
-        # Find nearest training view different from current_view
-        nearest_view = find_nearest_training_view(current_view, exclude=current_view)
-        
-        # Reproject augmented depth to nearest view
-        reprojected_aug_pixels = reproject_pixels(aug_depths, rays, nearest_view.pose)
-        reprojection_error_aug = l2_loss(reprojected_aug_pixels, nearest_view.images)
-        
-        # Reproject main depth to nearest view
-        reprojected_main_pixels = reproject_pixels(main_depths, rays, nearest_view.pose)
-        reprojection_error_main = l2_loss(reprojected_main_pixels, nearest_view.images)
-        
-        # 5. Determine Reliability
-        # The model with lower reprojection error is more reliable
-        if reprojection_error_aug < reprojection_error_main:
-            reliable_depth = aug_depths
-            reliable_model = aug_model
-            unreliable_model = main_model
-        else:
-            reliable_depth = main_depths
-            reliable_model = main_model
-            unreliable_model = aug_model
-            
-        # 6. Compute Augmentation Loss
-        # Supervise the unreliable model with the reliable depth
-        # Note: The source implies supervising the main model if aug is reliable,
-        # or vice versa. We apply depth consistency loss between reliable and unreliable.
-        loss_aug = depth_consistency_loss(unreliable_model.query_depth(rays), reliable_depth)
-        
-        # 7. Total Loss and Backprop
-        # Main model always has photometric loss. Augmented model has photometric loss.
-        # Only the main model receives augmentation loss if aug is reliable.
-        # If main is reliable, we might not apply aug loss to aug (self-supervision is trivial),
-        # or apply it to aug if the logic is symmetric. The text says "supervise the other".
-        
-        total_loss_main = loss_ph_main
-        if reprojection_error_aug < reprojection_error_main:
-            total_loss_main += loss_aug
-            
-        total_loss_aug = loss_ph_aug
-        # If main is reliable, we could supervise aug with main's depth, but 
-        # the primary goal is to fix the main model's artifacts. 
-        # The text emphasizes using the augmented model to supervise the main.
-        # We assume symmetric supervision for stability if needed, but core is main.
-        
-        # Backpropagate
-        gradients_main = compute_gradients(total_loss_main, main_model)
-        gradients_aug = compute_gradients(total_loss_aug, aug_model)
-        
-        update_parameters(main_model, gradients_main)
-        update_parameters(aug_model, gradients_aug)
-
-def compute_expected_depth(densities, rays):
-    """
-    Computes expected depth z = sum(w_i * z_i)
-    """
-    # Compute transmittance and weights
-    # T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
-    # w_i = T_i * (1 - exp(-sigma_i * delta_i))
-    transmittances = compute_transmittance(densities, rays.step_sizes)
-    weights = transmittances * (1 - exp(-densities * rays.step_sizes))
-    
-    # Depth is weighted sum of sample depths
-    depths = rays.sample_depths
-    expected_depth = sum(weights * depths)
-    return expected_depth
-
-def reproject_pixels(depths, rays, target_pose):
-    """
-    Reprojects 3D points estimated by depths onto a target view.
-    """
-    # 1. Convert ray origins and directions to 3D points using depths
-    # p_i = origin + depth_i * direction
-    points_3d = rays.origins + depths * rays.directions
-    
-    # 2. Project 3D points to target view using target_pose
-    # This involves inverse camera projection and then forward projection
-    # Assuming standard pinhole camera model
-    projected_pixels = project_to_image(points_3d, target_pose)
-    
-    # 3. Sample color from target view image at projected_pixels
-    # (Bilinear interpolation)
-    sampled_colors = sample_image(target_view_image, projected_pixels)
-    return sampled_colors
-```
+*   $N$: The number of 3D points sampled along a ray for volume rendering [S1].
+*   $c_i$: The view-dependent color at point $p_i$ [S1].
+*   $v$: The viewing direction used to compute color from the latent feature [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Inference Overhead:** Augmented models are discarded during inference, ensuring no performance penalty for novel view synthesis [S1].
-*   **Sub-optimal Regions:** Naïvely reducing model capacity can lead to sub-optimal solutions in complex regions; hence, the main model is retained and only supervised where the augmented model is reliable [S1].
-*   **Sharp Discontinuities:** Augmented models (learning smooth depth) may fail to learn sharp depth discontinuities at object boundaries. The reliability check prevents using these inaccurate depths to supervise the main model in such regions [S1].
-*   **Shape-Radiance Ambiguity:** In sparse settings, NeRF may learn random geometry and adjust color to fit views. Disabling view-dependent radiance in the augmented model (Lambertian augmentation) mitigates this [S1].
+*   **Augmented Model Accuracy:** Augmented models may fail to learn sharp depth discontinuities at object boundaries because they are constrained to learn only smooth depth transitions [S1]. Therefore, their depth estimates must be validated via reprojection before being used for supervision [S1].
+*   **Inference Overhead:** Augmented models are strictly for training; they are not used during inference, ensuring no performance overhead for novel view synthesis [S1].
+*   **Artifact Mitigation:** High positional encoding degrees in NeRF lead to undesired depth discontinuities (floaters), while view-dependent radiance features lead to shape-radiance ambiguity (duplication artifacts) [S1]. Augmentations must address these specific shortcomings [S1].
 
 ## Subtopics
 
 ### [NeRF with Softplus Activation and Importance Sampling](3524-nerf-with-softplus-activation-and-importance-sampling.md)
 This method adapts the original NeRF architecture to enable stable optimization via a reparameterized volume sampling technique. It replaces the standard ReLU density activation with Softplus to ensure non-zero gradients and employs importance-sampling reparameterization for color estimation. It differs from full NeRF by using uniform weights for samples rather than a second "fine" network for re-weighting.
 
+### [Gradient Scaling for Near-Camera Training](7379-gradient-scaling-for-near-camera-training.md)
+Gradient scaling is a technique for differentiable volume rendering optimization that prevents background collapse and near-camera floaters by counter-balancing the sampling density imbalance close to cameras. It sets itself apart from alternatives like near-plane clipping or occlusion losses by addressing the root cause (gradient magnitude imbalance) directly during backpropagation, rather than imposing priors on density distribution or restricting ray origins.
+
 ### PlaNeRF
-An unsupervised 3D plane regularization method for NeRF that improves large-scale urban scene reconstruction by appending two regularization terms to the standard L2 photometric loss: a patch-based SSIM term for initialization and an SVD-based plane regularization term for geometry [S1].
+PlaNeRF is an unsupervised 3D plane regularization method for Neural Radiance Fields (NeRF) designed to improve large-scale urban scene reconstruction [S1]. It addresses the geometric instability of NeRF in low-texture, flat-surface environments by appending two regularization terms to the standard L2 photometric loss: a patch-based SSIM term for geometry initialization and an SVD-based plane regularization term for enforcing planar geometry [S1]. Unlike sibling methods such as [RegNeRF](link-to-regnerf) which enforce a plane orthogonal to the center ray, PlaNeRF targets the least-squares plane approximation of a patch, allowing the surface normal to converge in an unsupervised manner [S1].
 
 ### [Hard Sample Mining for NeRF Optimization](7722-hard-sample-mining-for-nerf-optimization.md)
-A method to optimize Neural Radiance Fields (NeRF) by identifying and backpropagating gradients only for 'hard' samples (those contributing significantly to loss), while skipping the expensive backward pass for 'easy' samples to save compute and memory.
+Hard Sample Mining for NeRF Optimization is a training acceleration technique that reduces memory and compute costs by identifying and backpropagating gradients only for "hard" samples (those contributing significantly to the loss), while skipping the expensive backward pass for "easy" samples. It sets itself apart from sibling methods like [NeRF with Softplus Activation and Importance Sampling](3524-nerf-with-softplus-activation-and-importance-sampling.md) and [PlaNeRF](7394-planerf.md) by pruning samples based on their gradient contribution to the pixel loss rather than density or occupancy weights, and by using a two-forward-one-backward pass structure to bypass standard deep learning framework overheads associated with masked gradients.
+
+### GeCoNeRF
+GeCoNeRF is a regularization framework for few-shot Neural Radiance Field (NeRF) optimization that enforces geometric consistency across views using depth-guided warping and feature-level consistency modeling to overcome under-constrained optimization and overfitting [S1]. It sets itself apart from pixel-level photometric consistency methods (e.g., NeuralWarp, StructNeRF) by operating at the feature level, which preserves view-dependent specular effects that pixel-level losses would suppress [S1]. Unlike pre-training-based few-shot methods (e.g., PixelNeRF, MVSNeRF), it optimizes NeRF from scratch without requiring extensive multi-scene dataset priors [S1].
+
+### Lambertian Augmentation
+An augmentation that disables view-dependent radiance in the coarse NeRF to mitigate shape-radiance ambiguity and duplication artifacts caused by the NeRF varying color based on viewing direction [S1]. The color is computed based on position alone: $\sigma_i, h_i = N_{1l}(\gamma(p_i, 0, l_p)); c_i = N_{2l}(h_i)$ [S1].
+
+### SinNeRF Loss and Annealing Strategy
+A training strategy for NeRF that anneals loss weights during training [S2]. The overall loss function is $\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{pix}} + \lambda_1 \mathcal{L}_{\text{geo}} + \lambda_2 \mathcal{L}_{\text{adv}} + \lambda_3 \mathcal{L}_{\text{cls}}$, where $\lambda_1, \lambda_2, \lambda_3$ are weighting factors [S2]. Initial weights are $\lambda_1 = 8$, $\lambda_2 = 0.1$, $\lambda_3 = 0$ [S2]. During training, $\lambda_2$ is gradually decreased to 0 and $\lambda_3$ is increased to 0.1 with a linear function [S2]. In early stages, global structure prior ($\lambda_3$) has large weight; as training proceeds and stride reduces, $\lambda_3$ is reduced and $\lambda_2$ is increased to focus on high-frequency details [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** Training time increases due to the simultaneous training of two models (main and augmented) and the reprojection reliability check per iteration. The reprojection step adds a constant overhead per ray batch.
-*   **Memory Complexity:** Memory usage increases by the size of the augmented model's parameters and the storage of intermediate states for both models during backpropagation.
-*   **Measured Performance:** Simple-RF achieves significant improvement in performance on datasets with sparse inputs (NeRF-LLFF, RealEstate-10K, MipNeRF360, NeRF-Synthetic) compared to standard NeRF, TensoRF, and ZipNeRF [S1].
-*   **Scaling:** The method scales to various radiance field architectures (implicit NeRF, explicit TensoRF/ZipNeRF) by modifying the capacity-reduction strategy for each [S1].
-*   **Strengths:** Mitigates floaters and duplication artifacts in sparse input settings; no inference overhead; applicable to multiple model families.
-*   **Limitations:** Requires careful tuning of the augmented model's capacity reduction; reprojection reliability check adds computational cost; may not fully resolve sharp depth discontinuities if the augmented model is too smooth.
-*   **When to Use:** Sparse input novel view synthesis where artifacts are prevalent.
-*   **When Not to Use:** Dense input settings where standard NeRF performs well; real-time inference applications where training time is critical (though inference is unaffected).
+*   **Time and Memory Complexity:** Training requires maintaining multiple models (main and augmented) in memory, increasing memory usage compared to single-model training. However, inference uses only the main model, so inference time and memory are identical to the base model [S1].
+*   **Measured Performance:** Simple-RF achieves significant improvement in performance on datasets including forward-facing scenes (NeRF-LLFF), unbounded forward-facing scenes (RealEstate-10K), unbounded 360° scenes (MipNeRF360), and bounded 360° scenes (NeRF-Synthetic) [S1].
+*   **Scaling:** The method is applicable to various explicit models (TensoRF, iNGP, ZipNeRF) and implicit models (NeRF) [S1].
+*   **Strengths:** Mitigates floaters and duplication artifacts in sparse input settings; no inference overhead; applicable to multiple radiance field architectures [S1].
+*   **Limitations:** Requires careful design of augmented models for each architecture; augmented models may fail to learn sharp depth discontinuities [S1].
+*   **When to use:** Sparse input radiance field optimization where floaters and duplication artifacts are prevalent.
+*   **When not to use:** When inference efficiency is critical and the base model is already well-regularized; when the scene contains significant non-Lambertian surfaces and the augmented model disables view-dependent features (though the main model retains this capability) [S1].
 
 ## Background
-Simple-RF was introduced in the paper "Simple-RF: Regularizing Sparse Input Radiance Fields with Simpler Solutions" by Nagabhushan Somraj, Sai Harsha Mupparaju, Adithyan Karanayil, and Rajiv Soundararajan [S1]. The work is motivated by the Occam’s razor principle, regularizing radiance fields to choose simpler solutions over complex ones when possible. It addresses the shortcomings of sparse input radiance fields, such as floaters caused by high-frequency positional encodings (NeRF) or large hash tables (ZipNeRF), and shape-radiance ambiguity (NeRF) [S1].
+Simple-RF was introduced by Nagabhushan Somraj, Sai Harsha Mupparaju, Adithyan Karanayil, and Rajiv Soundararajan in the paper "Simple-RF: Regularizing Sparse Input Radiance Fields with Simpler Solutions" [S1]. The method is based on Occam’s razor principle, regularizing radiance fields to choose simpler solutions over complex ones [S1]. It addresses the shortcomings of sparse input views, such as depth discontinuities and shape-radiance ambiguity, by using augmented models with reduced capacity [S1].
 
 ## Sources
 [S1] Simple-RF: Regularizing Sparse Input Radiance Fields with Simpler Solutions, https://arxiv.org/abs/2404.19015v5, fetched 2026-10-27
+[S2] SinNeRF: Training Neural Radiance Fields on Complex Scenes from a Single Image, https://doi.org/10.1007/978-3-031-20047-2_42, fetched 2026-10-26

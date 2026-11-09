@@ -1,0 +1,153 @@
+# Spherical Harmonic Projection
+
+Also called: SH Compression, SH Integration, Spherical Harmonic (SH) Projection for Volume Rendering
+
+## Overview
+Spherical Harmonic (SH) Projection is a technique used within Volumetric Rendering with Spherical Harmonics to compress complex spherical functions—such as lighting, material properties, and in-scattering—into a compact set of coefficients. It solves the problem of expensive, high-dimensional integration during ray casting by projecting these functions onto the SH basis set [S1]. Unlike direct Monte Carlo integration, which is noisy and slow, SH projection enables efficient, differentiable computation of light transport via dot products of coefficient vectors, leveraging the orthonormality of the basis [S1]. It sets itself apart from general SH Approximation by focusing specifically on the projection mechanics and the subsequent efficient integration of these projected coefficients in the context of direct volume ray casting [S1].
+
+## How it works
+**Inputs:** A spherical function $f(\omega)$ defined over the unit sphere $S$ (e.g., environmental lighting, material BRDF, or in-scattering radiance).
+**Outputs:** A vector of SH coefficients $\mathbf{c} = [c_0, c_1, \dots, c_N]^T$.
+
+**Data Structures:**
+The coefficients are stored as a flat array or vector. The size of the vector is determined by the maximum SH band order $L$.
+*   **Band Order ($L$):** The maximum frequency component retained.
+*   **Coefficient Count ($N$):** The total number of coefficients is $(L + 1)^2$.
+*   **Indexing:** Coefficients are typically indexed by degree $l$ and order $m$, where $0 \le l \le L$ and $-l \le m \le l$. The linear index $j$ maps to $(l, m)$ pairs.
+
+**Parameters:**
+*   **$L$:** Maximum SH band order. In the primary implementation, $L=3$ is used, resulting in $(3+1)^2 = 16$ coefficients per channel [S1].
+*   **$\alpha$:** Below-surface angle (used in adaptive variants), proportional to voxel transparency, ranging from $0$ to $\pi/2$ [S1].
+
+**Formulas:**
+The SH coefficients $c_j$ are computed via least-squares projection, which minimizes the squared error between the approximation and the original function $f$ [S1]. Due to the orthonormality of the SH basis functions $Y_j(s)$, the coefficients are calculated as:
+
+$$ c_j = \int_S Y_j(s) f(s) \, ds $$
+
+where $s$ represents a direction on the unit sphere [S1].
+
+The integration of two SH-projected functions $\tilde{f}$ and $\tilde{g}$ with coefficients $\mathbf{c}$ and $\mathbf{d}$ respectively is computed as the dot product of their coefficient vectors:
+
+$$ I(\tilde{f}, \tilde{g}) = \sum_i c_i d_i $$
+
+This property allows integration to be performed efficiently on the GPU using a single dot product operation, avoiding the reconstruction and integration of the original high-dimensional functions [S1].
+
+**Steps:**
+1.  **Define Band Order:** Select the maximum SH band order $L$. For standard implementations, set $L=3$ [S1].
+2.  **Initialize Coefficients:** Create a vector $\mathbf{c}$ of size $(L+1)^2$ initialized to zero.
+3.  **Compute Coefficients:** For each basis function index $j$ corresponding to degree $l$ and order $m$:
+    *   Evaluate the integral $c_j = \int_S Y_j(s) f(s) \, ds$.
+    *   This is typically done via numerical integration (e.g., Monte Carlo sampling) depending on the specific variant (Standard or Adaptive) [S1].
+4.  **Store Coefficients:** Store the computed $c_j$ values in the output vector.
+
+**Pseudocode:**
+The following pseudocode implements the standard SH projection for a given function $f$ using Monte Carlo integration. It assumes a helper function `sample_sphere()` that returns a uniform random direction on the unit sphere, and `sh_basis(l, m, omega)` that returns the value of the SH basis function $Y_{lm}$ at direction $\omega$.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def spherical_harmonic_projection(f, L, num_samples):
+    """
+    Projects function f onto SH basis up to band order L.
+    
+    Args:
+        f: Function taking a direction vector omega and returning a scalar value.
+        L: Maximum SH band order (integer).
+        num_samples: Number of Monte Carlo samples for integration.
+        
+    Returns:
+        c: List of SH coefficients of size (L + 1)^2.
+    """
+    # Total number of coefficients for band order L
+    num_coeffs = (L + 1) ** 2
+    c = [0.0] * num_coeffs
+    
+    # Accumulate integrals via Monte Carlo estimation
+    # Integral over sphere S is approximated by (Area / N) * sum(f(s) * Y(s))
+    # Area of unit sphere is 4*pi
+    area_factor = 4.0 * 3.141592653589793 / num_samples
+    
+    for _ in range(num_samples):
+        # Sample a random direction on the unit sphere
+        omega = sample_sphere()
+        
+        # Evaluate the function at this direction
+        f_val = f(omega)
+        
+        # Accumulate contribution to each SH coefficient
+        for l in range(L + 1):
+            for m in range(-l, l + 1):
+                # Get the linear index for (l, m)
+                # Mapping: j = l^2 + l + m
+                j = l * l + l + m
+                
+                # Evaluate SH basis function Y_lm(omega)
+                y_val = sh_basis(l, m, omega)
+                
+                # Add to accumulator
+                c[j] += f_val * y_val
+                
+    # Normalize by the area factor
+    for j in range(num_coeffs):
+        c[j] *= area_factor
+        
+    return c
+
+def integrate_sh_functions(c, d):
+    """
+    Computes the integral of two SH-projected functions via dot product.
+    
+    Args:
+        c: Coefficients of the first function.
+        d: Coefficients of the second function.
+        
+    Returns:
+        The scalar integral value.
+    """
+    # Ensure vectors are of same length
+    assert len(c) == len(d)
+    
+    dot_product = 0.0
+    for i in range(len(c)):
+        dot_product += c[i] * d[i]
+        
+    return dot_product
+```
+
+**Edge Cases and Pitfalls:**
+*   **Three-Function Integration:** Integrating three functions (Material $M$, In-scattering $L_{mi}^0$, and Light $L_i$) is complex. Standard SH dot products only handle two functions. The authors approximate this using a simpler, non-physical equation for performance reasons, rather than using techniques like those in [Sny06] [S1].
+*   **Precision:** The accuracy depends on the band order $L$. Higher $L$ captures more detail but increases computational cost and memory. $L=3$ is a practical compromise [S1].
+*   **Boundary Conditions:** The projection assumes the function is defined over the entire sphere. For surface-like structures, the effective integration domain may be restricted (see Adaptive Monte-Carlo SH Projection) [S1].
+
+## Subtopics
+
+### Adaptive Monte-Carlo SH Projection
+A variant that adapts the integration domain based on local material properties (transparency and gradient) to improve efficiency and accuracy for translucent and surface-like structures [S1].
+*   **What it is:** It determines the integration domain dynamically. If transparency $\tau(f(\vec{x}))$ is high and gradient $|\nabla \tau(f(\vec{x}))|$ is small, the whole unit sphere is used. If transparency is low (opaque) and gradient is large, only the front-facing hemisphere is used [S1].
+*   **Mechanism:** It uses a below-surface angle $\alpha$ (proportional to transparency, $0 \le \alpha \le \pi/2$) to define a sampling region. During Monte Carlo sampling, only rays with an angle $\le \pi/2 + \alpha$ relative to the gradient $\nabla \tau(f(\vec{x}))$ are considered [S1].
+*   **Formula:** The coefficient calculation is reformulated as an expected value $E$ of a random variable $r$ using a probability density function $p(r)$:
+    $$ c_j = \int_\Omega \frac{f(s)Y_j(s)}{p(r)} \, ds = E(r) $$
+    The normalization factor for $p(r)$ is $2\pi(\sin \alpha + 1)$, which equals $2\pi$ for $\alpha=0$ (hemisphere) and $4\pi$ for $\alpha=\pi/2$ (full sphere) [S1].
+*   **When to choose:** Use when rendering scenes with significant variations in material opacity and surface-like boundaries, to avoid unnecessary sampling in occluded or opaque regions [S1].
+
+### Local Material Effects via SH
+A technique for projecting material BRDFs onto SH basis functions to handle complex material interactions in volume rendering [S1].
+*   **What it is:** It projects material functions $M$ (e.g., from the MERL BRDF library) onto SH coefficients to describe surface-like structures with high reflectance [S1].
+*   **Parameters:** Uses 1250 samples distributed over the hemisphere for BRDF projection [S1].
+*   **Pitfall:** To simplify the rendering pipeline, the same number of SH bands is used for material projection as for other SH projections, even though increasing samples could improve approximation quality [S1].
+*   **When to choose:** Use when rendering materials with complex, non-diffuse reflectance properties that need to be integrated efficiently with lighting [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The projection step is $O(N \cdot S)$, where $N$ is the number of SH coefficients ($(L+1)^2$) and $S$ is the number of samples. The integration step is $O(N)$ due to the dot product property [S1].
+*   **Memory Complexity:** $O(N)$ per voxel or per light/material source to store the coefficients [S1].
+*   **Performance:** SH integration is significantly faster than direct Monte Carlo integration during ray casting because it replaces complex integrals with simple dot products [S1].
+*   **Strengths:** Efficient integration via dot products; rotational invariance allows easy rotation of lighting/material coefficients; compact representation [S1].
+*   **Limitations:** Approximation error increases with higher frequencies if $L$ is too low; integration of three or more functions requires approximations that may be non-physical [S1].
+*   **When to use:** When real-time or interactive rendering of complex lighting and material interactions in volume data is required, and the functions can be well-approximated by low-order SH bands [S1].
+*   **When not to use:** When extremely high-frequency details in lighting or materials are critical and cannot be captured by $L=3$ or similar low band orders, or when physical accuracy of multi-function integration is mandatory [S1].
+
+## Background
+The method originates from the work of Lindemann and Ropinski, presented in "Advanced Light Material Interaction for Direct Volume Rendering" (2010) [S1]. It builds upon the foundational work on Spherical Harmonics in computer graphics, leveraging the orthonormality and rotational invariance properties of SH basis functions to enable efficient light transport computation in volume rendering. The approach was integrated into a GPU-based volume ray-caster implemented in C++ using OpenGL and GLSL [S1].
+
+## Sources
+[S1] Advanced Light Material Interaction for Direct Volume Rendering, https://doi.org/10.2312/vg/vg10/101-108, fetched 2026-10-26

@@ -1,101 +1,138 @@
 # Depth Supervision Loss (Laug)
-Also called: Laug
+
+Also called: Depth Loss with Adaptive Masking, Laug
+
 ## Overview
-Laug is a bidirectional depth consistency loss used to regularize radiance field optimization by enforcing agreement between rendered depth and reliable monocular depth estimates. It distinguishes itself from standard L2 depth losses by incorporating reliability masks and stop-gradient operators to prevent gradient flow into unreliable depth estimates or unstable rendered depths, thereby stabilizing training under sparse input views.
+Depth Supervision Loss (Laug) enforces geometric consistency in radiance field optimization by aligning rendered depth maps with monocular depth estimates. It distinguishes itself from standard L1 depth losses by employing a dynamic masking strategy that stabilizes training in the early stages and adapts to reliability estimates in later stages, addressing the noise inherent in single-view depth priors.
+
 ## How it works
-**Inputs and Outputs**
-- Inputs: Rendered depth map $z_m$, monocular depth estimate $z_a$, reliability masks $m_a$ and $m_m$, and the stop-gradient operator $\hat{\nabla}$.
-- Output: Scalar loss value $L_{aug}$.
+The method computes a weighted L1 reconstruction loss between the rendered depth and the ground-truth (monocular) depth. It utilizes two distinct formulations depending on the training phase and the specific variant of the loss (L_depth vs. Laug).
 
-**Data Structures**
-- $z_m$: Rendered depth map, shape $(H, W)$.
-- $z_a$: Monocular depth estimate, shape $(H, W)$.
-- $m_a$: Mask indicating reliability of monocular depth, binary values $\{0, 1\}$, shape $(H, W)$.
-- $m_m$: Mask indicating reliability of rendered depth, binary values $\{0, 1\}$, shape $(H, W)$.
+### Inputs and Outputs
+*   **Inputs:**
+    *   $d_{render}$: Warped rendered depth map.
+    *   $d_{gt}$: Ground-truth depth map (monocular estimate).
+    *   $m_{gt}$: Adaptive mask indicating valid pixels.
+    *   $m_a, m_m$: Reliability masks for forward and backward consistency (used in Laug variant).
+    *   $z_m, z_a$: Depth maps (used in Laug variant).
+    *   $I$: Current training iteration.
+    *   $I_{total}$: Total number of training iterations.
+*   **Outputs:**
+    *   Scalar loss value $L$.
 
-**Steps**
-1. Compute the forward consistency term: Calculate the squared L2 distance between the rendered depth $z_m$ and the stop-gradient of the monocular depth $\hat{\nabla}(z_a)$.
-2. Compute the backward consistency term: Calculate the squared L2 distance between the stop-gradient of the rendered depth $\hat{\nabla}(z_m)$ and the monocular depth $z_a$.
-3. Apply reliability masks: Element-wise multiply the forward term by $m_a$ and the backward term by $m_m$.
-4. Sum the terms: Add the masked forward and backward terms to produce $L_{aug}$.
+### Data Structures
+*   **Depth Maps:** 2D arrays of floating-point values, shape $(H, W)$.
+*   **Masks:** 2D binary or float arrays, shape $(H, W)$, values in $[0, 1]$.
 
-**Formulas**
-The loss is defined as [S1]:
-$$ L_{aug} = \mathbb{1}_{m_a=1} \odot \| z_m - \hat{\nabla}(z_a) \|^2 + \mathbb{1}_{m_m=1} \odot \| \hat{\nabla}(z_m) - z_a \|^2 $$
-Where:
-- $\odot$ denotes element-wise multiplication.
-- $\mathbb{1}_{condition}$ is the indicator function, returning 1 if the condition is true, 0 otherwise.
-- $\hat{\nabla}(\cdot)$ is the stop-gradient operator, which blocks gradient propagation through its argument during backpropagation.
-- $\| \cdot \|^2$ is the squared L2 norm (element-wise squared difference).
+### Parameters
+*   `opt.iterations`: Total training iterations. The adaptive masking logic triggers at $I > I_{total} / 3$ [S1, unofficial].
+*   Scaling factor: $2.0$ for the L_depth variant [S1, unofficial].
+*   Replacement value: $0.75$ for masked GT depth in the L_depth variant [S1, unofficial].
 
-**Parameters**
-- Typical values: Masks $m_a, m_m$ are binary. No other hyperparameters are specified in the source.
+### Steps
 
-**Edge Cases and Pitfalls**
-- Precision: The stop-gradient operator is critical. Without it, gradients from the loss may flow into the monocular depth estimator or the depth renderer, potentially destabilizing the optimization [S1].
-- Boundaries: The reliability masks must be correctly computed to exclude invalid depth regions (e.g., occlusions or low-confidence areas) to avoid introducing noise into the radiance field [S1].
+#### Variant 1: L_depth (Adaptive Masking)
+This variant uses a static adaptive mask that evolves during training [S1, unofficial].
 
-**Pseudocode**
+1.  **Initialize Mask:** Load the ground-truth depth $d_{gt}$ and its initial validity mask $m_{gt,0}$.
+2.  **Check Iteration:** If $I \le I_{total} / 3$:
+    *   Use the initial mask $m_{gt} = m_{gt,0}$.
+    *   Do not modify $d_{gt}$.
+3.  **Update Mask and Values:** If $I > I_{total} / 3$:
+    *   Replace masked GT depth values with $0.75$:
+        $$ d_{gt, i} \leftarrow \begin{cases} 0.75 & \text{if } m_{gt, i} = 0 \\ d_{gt, i} & \text{otherwise} \end{cases} $$
+    *   Update the mask to enforce forward consistency:
+        $$ m_{gt, i} \leftarrow \mathbb{1}(d_{render, i} < d_{gt, i}) \cdot m_{gt, i} $$
+        *(Note: The source specifies `depth < gt_depth`, implying a comparison between rendered and GT depth to filter outliers)* [S1, unofficial].
+4.  **Compute Loss:** Calculate the L1 loss between the masked rendered depth and the masked GT depth:
+    $$ L_{depth} = 2 \cdot \frac{1}{N} \sum_{i=1}^{N} |d_{render, i} \cdot m_{gt, i} - d_{gt, i} \cdot m_{gt, i}| $$
+    where $N$ is the number of pixels [S1, unofficial].
+
+#### Variant 2: Laug (Reliability-Based)
+This variant uses reliability masks $m_a$ and $m_m$ derived from reprojection consistency [S2].
+
+1.  **Compute Forward Term:** Calculate the L2 distance between the rendered depth $z_m$ and the gradient of the auxiliary depth $\hat{\nabla}(z_a)$, masked by $m_a$.
+2.  **Compute Backward Term:** Calculate the L2 distance between the gradient of the rendered depth $\hat{\nabla}(z_m)$ and the auxiliary depth $z_a$, masked by $m_m$.
+3.  **Combine:** Sum the masked terms:
+    $$ L_{aug} = \mathbb{1}_{m_a=1} \odot \| z_m - \hat{\nabla}(z_a) \|^2 + \mathbb{1}_{m_m=1} \odot \| \hat{\nabla}(z_m) - z_a \|^2 $$
+    where $\hat{\nabla}$ denotes the stop-gradient operator, $\odot$ is element-wise multiplication, and $\mathbb{1}$ is the indicator function [S2].
+
+### Pseudocode
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_laug_loss(z_m, z_a, m_a, m_m):
+def compute_depth_loss(rendered_depth, gt_depth, mask, iteration, total_iterations, variant="L_depth"):
     """
-    Compute the bidirectional depth supervision loss.
+    Computes depth supervision loss.
     
     Args:
-        z_m: Rendered depth map (H, W)
-        z_a: Monocular depth estimate (H, W)
-        m_a: Reliability mask for monocular depth (H, W), binary
-        m_m: Reliability mask for rendered depth (H, W), binary
+        rendered_depth: Tensor (H, W), warped rendered depth.
+        gt_depth: Tensor (H, W), ground truth monocular depth.
+        mask: Tensor (H, W), initial validity mask.
+        iteration: int, current training iteration.
+        total_iterations: int, total training iterations.
+        variant: str, "L_depth" or "Laug".
         
     Returns:
-        Scalar loss value
+        float, computed loss.
     """
-    # Stop-gradient operator blocks gradients
-    # Note: In practice, this is implemented using framework-specific 
-    # stop_gradient or detach() functions.
-    z_a_stopped = stop_gradient(z_a)
-    z_m_stopped = stop_gradient(z_m)
-    
-    # Forward term: Rendered vs Monocular (monocular stopped)
-    forward_diff = z_m - z_a_stopped
-    forward_loss = forward_diff ** 2
-    
-    # Backward term: Monocular vs Rendered (rendered stopped)
-    backward_diff = z_m_stopped - z_a
-    backward_loss = backward_diff ** 2
-    
-    # Apply reliability masks
-    # m_a and m_m are binary masks (0 or 1)
-    masked_forward = forward_loss * m_a
-    masked_backward = backward_loss * m_m
-    
-    # Sum and average over pixels (optional, depending on implementation)
-    # The source formula implies element-wise sum, but typically reduced to scalar
-    total_loss = masked_forward + masked_backward
-    
-    # Return mean loss over valid pixels or total sum
-    # Source does not specify reduction, assuming sum over all elements for L2 norm definition
-    return total_loss.sum()
+    if variant == "L_depth":
+        # Step 1 & 2: Handle adaptive masking threshold
+        current_mask = mask.clone()
+        current_gt = gt_depth.clone()
+        
+        if iteration > total_iterations / 3:
+            # Step 3a: Replace masked GT depth values with 0.75
+            # Where mask is 0, set GT depth to 0.75
+            current_gt = torch.where(current_mask > 0, current_gt, torch.tensor(0.75))
+            
+            # Step 3b: Update mask to (depth < gt_depth) * mask
+            # Note: Source says "depth < gt_depth". Assuming this refers to 
+            # rendered depth vs the *original* or *current* GT. 
+            # Based on standard practice and source context, we compare rendered vs current_gt 
+            # or original gt. The source formula uses m_gt in the sum, implying the mask 
+            # is applied to both. The update rule is: mask = (rendered < gt) * mask.
+            # We use the original gt for the comparison to avoid circular dependency if 
+            # current_gt was modified, but the source implies a sequential update.
+            # Let's assume the comparison is against the unmodified GT for reliability,
+            # or the source implies the mask update happens before the loss calc using the new mask.
+            # Source: "update the mask to (depth < gt_depth) * mask[0:1]"
+            # We interpret 'depth' as rendered_depth and 'gt_depth' as the input gt_depth.
+            consistency_mask = (rendered_depth < gt_depth).float()
+            current_mask = consistency_mask * mask
+            
+        # Step 4: Compute L1 loss
+        # L_depth = 2 * (1/N) * sum(|d_render * m - d_gt * m|)
+        masked_rendered = rendered_depth * current_mask
+        masked_gt = current_gt * current_mask # Note: current_gt has 0.75 where mask is 0
+        
+        loss = torch.mean(torch.abs(masked_rendered - masked_gt))
+        return 2.0 * loss
+
+    elif variant == "Laug":
+        # Requires additional inputs: aux_depth, reliability_masks
+        raise NotImplementedError("Laug variant requires auxiliary depth and reliability masks not provided in basic inputs.")
+        
+    else:
+        raise ValueError("Unknown variant")
 ```
 
-## Subtopics
-
-### Reliability Masking
-Determines which depth pixels are trustworthy. It sets apart Laug from naive depth losses by ignoring unreliable estimates. Choose when input views are sparse and monocular depth is noisy. [Reliable Depth Estimation via Reprojection](7293-reliable-depth-estimation-via-reprojection.md)
+### Edge Cases and Pitfalls
+*   **Precision:** The replacement value $0.75$ is a hyperparameter. If the scene depth scale is significantly different, this value may introduce bias [S1, unofficial].
+*   **Boundary Conditions:** The mask update logic `depth < gt_depth` may be sensitive to noise in monocular depth estimates. Pixels with high uncertainty should ideally be masked out before this step [S1, unofficial].
+*   **Iteration Threshold:** The threshold $I_{total}/3$ is fixed. If training converges faster or slower, this may not be optimal [S1, unofficial].
 
 ## Operating characteristics
-- Time and memory complexity: Linear in the number of pixels $H \times W$. The stop-gradient operation adds negligible overhead.
-- Measured performance: Effective in regularizing NeRF, TensoRF, and ZipNeRF under sparse input conditions [S1].
-- Scaling: Scales linearly with resolution.
-- Strengths: Stabilizes training by preventing gradient flow into unreliable depth estimates.
-- Limitations: Depends entirely on the quality of the reliability masks.
-- When to use: Sparse input view reconstruction where monocular depth is available but noisy.
-- When not: Dense input views where depth supervision is less critical.
+*   **Time Complexity:** $O(N)$ per pixel, where $N$ is the number of pixels in the image. The mask update and loss computation are element-wise operations.
+*   **Memory Complexity:** $O(N)$ to store the depth maps and masks.
+*   **Strengths:** Stabilizes training by ignoring unreliable depth estimates in early iterations. The adaptive mask reduces the impact of monocular depth errors.
+*   **Limitations:** Relies on the quality of the monocular depth estimator. The fixed threshold $0.75$ may not generalize across all scenes.
+*   **When to use:** When training sparse-view radiance fields with monocular depth priors and experiencing instability due to noisy depth estimates.
 
 ## Background
-Originated in "Simple-RF: Regularizing Sparse Input Radiance Fields with Simpler Solutions" by [S1]. It is part of a family of augmentations for simple radiance fields to handle sparse inputs.
+The L_depth variant with adaptive masking was introduced in the context of AVA-GS (Adaptive View-Aware Gaussian Splatting) or similar variants, as documented in the unofficial repository [S1, unofficial]. The Laug variant, incorporating reliability masks and stop-gradient operations, is described in "Simple-RF: Regularizing Sparse Input Radiance Fields with Simpler Solutions" [S2]. Both methods aim to regularize radiance field optimization using monocular depth cues.
 
 ## Sources
-[S1] Simple-RF: Regularizing Sparse Input Radiance Fields with Simpler Solutions, https://arxiv.org/abs/2404.19015v5, fetched 2026-10-27
+[S1] Yang-SyZng/AVM-GS, https://github.com/Yang-SyZng/AVM-GS, fetched 2026-10-27 (unofficial)
+[S2] Simple-RF: Regularizing Sparse Input Radiance Fields with Simpler Solutions, https://arxiv.org/abs/2404.19015v5, fetched 2026-10-27

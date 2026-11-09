@@ -1,9 +1,9 @@
 # Hardware-Accelerated and GPU Implementations
 
-Also called: GPU Ray Casting, Hardware-Accelerated Volume Rendering
+Also called: GPU Ray Casting, Hardware-Accelerated DVR
 
 ## Overview
-This family encompasses methods that offload the computationally intensive ray-marching and compositing operations of direct volume rendering to the GPU, leveraging parallel fragment processors and hardware texture units to achieve real-time or near-real-time frame rates [5616-hardware-accelerated-volume-rendering.md]. It solves the performance bottleneck of CPU-based software ray casting by utilizing fixed-function texture interpolation for sample evaluation and programmable shaders for the optical model [5616-hardware-accelerated-volume-rendering.md]. It differs from [Direct Volume Rendering](1184-direct-volume-rendering.md) by explicitly leveraging the graphics pipeline's rasterization and texture units, and from [Neural volume rendering](1576-neural-volume-rendering.md) by relying on explicit voxel data and deterministic ray traversal rather than implicit neural field representations.
+This family encompasses techniques that offload the computationally intensive ray-marching and compositing operations of direct volume rendering to the GPU's parallel architecture, utilizing texture hardware for sampling and fragment shaders for the optical model [5616-hardware-accelerated-volume-rendering.md]. It solves the performance bottleneck of software-based ray casting by leveraging fixed-function texture interpolation and programmable shaders to achieve real-time frame rates [5616-hardware-accelerated-volume-rendering.md]. It differs from [Direct Volume Rendering](1184-direct-volume-rendering.md) by explicitly relying on the graphics pipeline's rasterization and texture units, and from [GPU Multi-Volume Ray Casting Mapper](2461-gpu-multi-volume-ray-casting-mapper.md) by focusing on single-volume or specific multi-GPU strategies rather than multi-input data management.
 
 ## Shared principles
 All methods in this family implement the emission-absorption optical model defined in [Direct volume ray casting](19-direct-volume-ray-casting.md). The core pipeline for each pixel consists of ray generation, hardware-accelerated sampling, classification, and compositing [5616-hardware-accelerated-volume-rendering.md].
@@ -33,12 +33,6 @@ Hardware-Accelerated Volume Rendering is a direct volume rendering technique tha
 ### [WebGL Multi-pass Ray-casting with 3D Geometry Intersection](6575-webgl-multi-pass-ray-casting-with-3d-geometry-intersection.md)
 This method enables interactive volume rendering of 3D volumetric datasets coexisting with 3D triangular meshes within the constraints of the WebGL API. It solves the problem of rendering hybrid scenes (volumes + geometry) on web platforms that lack native 3D texture support and often lack robust depth texture support. Unlike standard ray-casting which only samples volume data, this method integrates 3D surface occlusion and color by using a multi-pass pipeline to pre-compute depth and color information for both the volume bounding box and the 3D meshes, allowing the final ray-casting pass to correctly handle intersections and alpha blending. It is distinguished from single-pass WebGL ray-casting by its explicit handling of 3D geometry occlusion through depth buffering.
 
-### [Volume Ray-Casting on Graphics Hardware](7443-volume-ray-casting-on-graphics-hardware.md)
-This method implements direct volume ray casting on programmable graphics hardware (specifically DirectX 9-level architectures like the ATI 9700) using a multi-pass stream model. It solves the performance bottleneck of CPU-based volume rendering by exploiting the intrinsic parallelism of fragment processors and efficient inter-pass communication via texture render targets. Unlike single-pass rasterization, this approach iteratively accumulates optical properties across multiple rendering passes, enabling effective early ray termination and empty-space skipping through hardware-supported early z-tests.
-
-### [WebGL Path Tracing Volume Rendering](8592-webgl-path-tracing-volume-rendering.md)
-This method implements an interactive voxel volume renderer using path tracing that runs in modern browsers via WebGL 2.0. It renders 3D scalar fields by casting rays from the camera through the volume, accumulating color and opacity along the ray, and applying lighting and shadowing effects. It is distinguished from standard hardware-accelerated ray casting by its implementation of soft shadows via light tracing and its use of a linear search for non-uniform opacity/color maps rather than texture sampling.
-
 ### [GPU-based Tiled Ray Casting with Depth Peeling](9631-gpu-based-tiled-ray-casting-with-depth-peeling.md)
 This method is a hardware-accelerated ray casting algorithm for volume rendering of time-varying scalar fields on unstructured tetrahedral meshes. It solves the problem of rendering non-convex meshes on GPUs by combining screen tiling for performance with depth peeling to correctly handle ray re-entry into the mesh. It sets itself apart from its sibling [Hardware-Accelerated Volume Rendering](5616-hardware-accelerated-and-gpu-implementations.md) by explicitly addressing non-convexity without convexification, and from [WebGL Path Tracing Volume Rendering](8592-webgl-path-tracing-volume-rendering.md) by using deterministic ray casting on unstructured grids rather than path tracing on regular grids.
 
@@ -54,14 +48,15 @@ GPU Based Single-Pass Raycasting is a volume rendering technique where the volum
 ### [NeRF-XL Joint Training](10947-nerf-xl-joint-training.md)
 NeRF-XL is a method for distributing Neural Radiance Fields across multiple GPUs by allocating NeRF parameters across a disjoint set of spatial regions and training them jointly, enabling arbitrarily large capacity without the redundancy and blending artifacts of independent training. Unlike sibling methods such as BlockNeRF and MegaNeRF which rely on overlapping regions and post-hoc blending, NeRF-XL uses 0% overlap and a single unified optimization process, eliminating train-test discrepancies and per-camera embedding inconsistencies.
 
-### Brick Boundary Clamping
-#### definition
-- [S1] A technique to clamp the last ray sample position to the volume or brick extents to prevent artifacts like holes in isosurfaces caused by tri-linear interpolation at brick boundaries.
-#### step
-- [S1] Clip each ray against the boundaries of the volume/brick using a method similar to Sutherland-Hodgman polygon clipping to find the intersection with the back face.
-- [S1] Repeat the clipping process for the y- and z-axes to yield the final intersection of the ray and the back face.
-#### code
-- [S1] The following fragment program code clamps the last ray sample position to the volume or brick extents for the x-axis:
+#### Brick Boundary Clamping
+**Definition**
+A technique to clamp the last ray sample position to the volume or brick extents to prevent artifacts like holes in isosurfaces caused by tri-linear interpolation at brick boundaries [S1].
+
+**Steps**
+Clip each ray against the boundaries of the volume/brick using a method similar to Sutherland-Hodgman polygon clipping to find the intersection with the back face [S1]. Repeat the clipping process for the y- and z-axes to yield the final intersection of the ray and the back face [S1].
+
+**Code**
+The following fragment program code clamps the last ray sample position to the volume or brick extents for the x-axis [S1]:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```assembly
@@ -77,11 +72,34 @@ ABS temp.x, temp.x;
 # Move back to max/min x-axis extent
 MAD pos, -temp.x, offset, pos;
 ```
-#### pitfall
-- [S1] Using one voxel overlap between bricks and correct last sampling points is insufficient when using pre-integration because different sampling distances occur. This is overcome by using incremental pre-integration tables as presented by Weiler et al. [WKME03].
+
+**Pitfalls**
+Using one voxel overlap between bricks and correct last sampling points is insufficient when using pre-integration because different sampling distances occur. This is overcome by using incremental pre-integration tables as presented by Weiler et al. [WKME03] [S1].
+
+#### Multi-GPU Volume Rendering
+**Definition**
+A strategy to increase model capacity with multiple GPUs by partitioning 3D space into non-overlapping tiles, where each GPU owns a single tile's NeRF. Rendering and training avoid blending by ensuring sample intervals do not extend beyond tile boundaries [S2].
+
+**Steps**
+Distribute ray samples among GPUs based on the bounding box of the tiles, ensuring sample intervals do not extend beyond tile boundaries [S2]. Query sample attributes (color and density) on each respective GPU [S2]. Perform volume rendering through a global gather operation, consolidating information across all GPUs onto a single GPU to compute the final pixel color [S2]. During training forward pass, each GPU performs a global gather (broadcast) to obtain color and density from all other GPUs [S2]. Each GPU computes the loss locally and back-propagates gradients to its own parameters. No gradient communication is required [S2].
+
+**Complexity**
+Requires synchronizing $O(SK^2)$ data across GPUs, where $K$ is the number of GPUs and $S$ is the average number of samples per-ray per-GPU [S2].
+
+#### GPU Implementation Architecture
+**Steps**
+Generate SH coefficient volumes using framebuffer objects (FBOs) in conjunction with multiple render targets (MRT) [S3]. Perform actual ray marching in a fragment shader, rendering slice by slice [S3].
+
+**Parameters**
+Implementation language: C++ with OpenGL and GLSL [S3].
+
+**Layout**
+SH coefficients for $L_{mi}$ and $L_{mi}^0$ are stored in 3D coefficient volumes [S3].
 
 ## Background
-The shift from CPU-based to GPU-based volume rendering began in the early 2000s with the advent of programmable graphics hardware. Early implementations, such as those on DirectX 9-level architectures like the ATI 9700, utilized multi-pass stream models to exploit the intrinsic parallelism of fragment processors [7443-volume-ray-casting-on-graphics-hardware.md]. These methods relied on hardware features like per-fragment texture fetches, texture render targets, and depth replace capabilities to manage accumulation and early termination [7443-volume-ray-casting-on-graphics-hardware.md]. Subsequent developments addressed specific challenges such as multi-volume rendering [2461-gpu-multi-volume-ray-casting-mapper.md], unstructured meshes [9631-gpu-based-tiled-ray-casting-with-depth-peeling.md], and web-based rendering constraints [6575-webgl-multi-pass-ray-casting-with-3d-geometry-intersection.md]. More recently, the field has expanded to include distributed neural rendering techniques like NeRF-XL, which leverage GPU parallelism for large-scale scene representation [10947-nerf-xl-joint-training.md].
+The shift from software-based ray casting to hardware-accelerated implementations was driven by the need for real-time interaction with large volumetric datasets. Early hardware-accelerated approaches leveraged the fixed-function pipeline's texture units for interpolation, while modern implementations utilize programmable fragment shaders for complex compositing, lighting, and deformation [5616-hardware-accelerated-volume-rendering.md]. The field has expanded to include multi-GPU strategies for neural volume rendering (NeRFs) and specialized handling for unstructured meshes and AMR data [S1, S2, S3].
 
 ## Sources
 [S1] Optimized volume raycasting for graphics-hardware-based cluster systems, https://doi.org/10.2312/EGPGV/EGPGV06/059-066, fetched 2026-10-27
+[S2] NeRF-XL: Scaling NeRFs with Multiple GPUs, https://doi.org/10.1007/978-3-031-73195-2_6, fetched 2026-10-26
+[S3] Advanced Light Material Interaction for Direct Volume Rendering, https://doi.org/10.2312/vg/vg10/101-108, fetched 2026-10-26

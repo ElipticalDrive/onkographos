@@ -1,86 +1,98 @@
 # Continuous (Progressive) Levels of Detail
 
-Also called: Progressive Levels of Detail, View-Dependent Levels of Detail
+Also called: Hierarchical Level-of-Detail Representation, LOD representation, Multi-resolution hierarchies, Progressive Levels of Detail, View-Dependent Levels of Detail
 
 ## Overview
-Continuous (Progressive) Levels of Detail is a multiresolution technique that precomputes a continuous-resolution representation of a dataset, allowing smooth transitions between approximations rather than selecting from discrete steps [S1, S2, unofficial]. This method eliminates popping artifacts common in discrete LOD systems by interpolating detail levels, providing fine-grained control over resource usage and rendering quality [S1, unofficial]. It is distinct from static LODs by offering higher fidelity for a given budget at the cost of increased computation and runtime overhead [S2, unofficial].
+Continuous (Progressive) Levels of Detail (LoD) is a technique for generating multi-resolution hierarchies for 3D data volumes or scenes by creating a continuous-resolution representation that allows smooth transitions between approximations [S1, S3, unofficial][S2, unofficial]. Unlike discrete LoD systems that switch abruptly between fixed resolution steps, this method enables fine-grained control over detail levels, eliminating popping artifacts and allowing the renderer to fall back to lower resolutions if rendering time exceeds allotted limits [S1, unofficial][S2, unofficial]. It is distinguished from its sibling [Scene Contraction Function](8533-scene-contraction-function.md) by its focus on precomputing a continuous spectrum of detail rather than geometric simplification via contraction.
 
 ## How it works
-The method constructs a continuous memory-quality curve from a single trained model, exposing a budget parameter that sweeps through different LOD levels without retraining [S3, unofficial].
+The method constructs a hierarchy where every level of detail is derived directly from the original high-resolution dataset, preventing the error accumulation seen in recursive approaches like 3D mipmaps [S1, unofficial].
 
 **Inputs and Outputs:**
-*   **Input:** A pre-trained scene representation (e.g., Gaussian Splatting model) and a continuous budget parameter $c$.
-*   **Output:** A pruned or scaled subset of primitives (Gaussians) optimized for the specified budget, rendered at the target quality.
+*   **Input:** Original high-resolution dataset (volume or scene representation).
+*   **Output:** A continuous-resolution representation (hierarchy) allowing interpolation of detail levels.
 
 **Data Structures:**
-*   **Primitive Set:** The full set of scene primitives (e.g., Gaussians) with attributes (position, covariance, color, opacity).
-*   **Budget Parameter ($c$):** A scalar value controlling the trade-off between memory usage and reconstruction quality.
+The hierarchy is typically structured as a set of resolutions or a continuous parameter space. In Gaussian Splatting contexts, this may involve a continuous budget parameter $c$ that sweeps a memory-quality curve [S4, unofficial]. The data structure must support querying the appropriate resolution or Gaussian count based on a continuous LoD value.
 
 **Steps:**
-1.  **Precomputation:** Train a full-resolution model of the scene. This model serves as the base for the continuous LOD ladder [S3, unofficial].
-2.  **Parameter Sweep:** Define a range of budget parameters $c$. For each $c$, determine the target number of primitives or memory footprint [S3, unofficial].
-3.  **Pruning/Selection:** Apply a pruning strategy to the full model to retain the most important primitives according to $c$. The specific pruning metric is not detailed in the sources, but the result is a subset that maintains quality within the budget [S3, unofficial].
-4.  **Rendering:** Render the pruned subset using a standard renderer. The system allows re-rendering through different LOD tiers by simply changing $c$ [S3, unofficial].
+1.  **Low-Pass Filtering:** The input dataset is sampled and low-pass filtered to create lower-resolution versions [S1, unofficial].
+2.  **Filter Support Mapping:** Establish a direct correspondence between the size of the low-pass filter support and the resulting resolution [S1, unofficial].
+3.  **Hierarchy Construction:** Create every detail in the hierarchy by convolving the *original* dataset with a low-pass filter of the appropriate support [S1, unofficial]. This ensures that each level is an independent approximation of the original, not of the previous level.
+4.  **Continuous Interpolation:** At runtime, interpolate between precomputed levels or adjust properties (e.g., Gaussian count) continuously based on the view-dependent or time-budget LoD parameter [S2, unofficial][S4, unofficial].
 
 **Formulas and Parameters:**
-*   **Memory-Quality Curve:** The relationship between the budget parameter $c$ and the resulting PSNR (Peak Signal-to-Noise Ratio) and memory usage is continuous [S3, unofficial].
-*   **Operating Point:** A specific example is an operating point at ~20.8 dB PSNR, which costs 110.6 MB, compared to the full model's 1926 MB (a 17x reduction) [S3, unofficial].
-*   **Lossless Point:** $c=4$ is identified as a lossless point under both the proposed method and the baseline GPS renderer [S3, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **Tessellation Limits:** If the underlying geometry is already tessellated at the training viewing distance, sub-pixel redundancy is exhausted at small $c$, leading to super-pixel collapse rather than smooth scaling [S3, unofficial].
-*   **Renderer Consistency:** Re-rendering tiers through a different renderer (e.g., GPS) reproduces the memory-quality curve within 0.5 dB, indicating robustness but potential minor discrepancies [S3, unofficial].
+*   **Filtering:** $D_{res} = \text{LowPassFilter}(D_{original}, \sigma)$, where $\sigma$ corresponds to the desired resolution [S1, unofficial].
+*   **Error Propagation:** Errors from non-ideal filters do not accumulate because $D_{level_i}$ is computed from $D_{original}$, not $D_{level_{i-1}}$ [S1, unofficial].
+*   **Continuous Budget ($c$):** In specific implementations like Budgeted-GS, a parameter $c$ controls the trade-off between memory and quality [S4, unofficial]. For example, $c=4$ may be lossless, while lower values reduce memory usage significantly (e.g., 110.6 MB vs 1926 MB at ~20.8 dB) [S4, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def continuous_lod_render(model, budget_param_c):
+def build_continuous_lod(original_dataset):
     """
-    Render a scene using continuous LOD.
+    Builds a continuous LoD hierarchy by convolving the original dataset
+    with low-pass filters of varying support sizes.
+    """
+    hierarchy = {}
     
-    Args:
-        model: Pre-trained scene model (e.g., Gaussian Splatting).
-        budget_param_c: Continuous budget parameter controlling LOD level.
+    # Define a range of filter supports corresponding to desired resolutions
+    # Note: Resolutions need not be powers of two [S1, unofficial]
+    filter_supports = [1.0, 1.5, 2.0, 3.0, 4.0] 
+    
+    for support in filter_supports:
+        # Convolve the ORIGINAL dataset, not the previous level
+        # This prevents error accumulation [S1, unofficial]
+        filtered_dataset = low_pass_filter(original_dataset, support)
         
-    Returns:
-        Rendered image and memory usage statistics.
+        # Store with the support/resolution as key
+        hierarchy[support] = filtered_dataset
+        
+    return hierarchy
+
+def render_continuous_lod(hierarchy, lod_parameter):
     """
-    # Step 1: Determine target primitive count or memory budget based on c
-    # The exact mapping from c to primitive count is not specified in sources [S3, unofficial]
-    target_budget = map_budget_param_to_memory(c=budget_param_c)
+    Renders using continuous interpolation between precomputed levels.
+    lod_parameter: A continuous value (e.g., memory budget or distance)
+    mapping to a specific resolution in the hierarchy.
+    """
+    # Find the two bounding filter supports in the hierarchy
+    # Interpolate between them to get the final dataset
+    # Implementation detail: Specific interpolation method (e.g., linear)
+    # depends on the data type (volume values, Gaussian properties) [S2, unofficial]
     
-    # Step 2: Prune the model to fit the budget
-    # The specific pruning algorithm is not detailed, but it selects 
-    # the most important primitives to maintain quality [S3, unofficial]
-    pruned_model = prune_model(model, target_budget)
+    # Example: Linear interpolation of Gaussian counts or volumes
+    # This avoids popping artifacts [S2, unofficial]
+    dataset = interpolate_datasets(hierarchy, lod_parameter)
     
-    # Step 3: Render the pruned model
-    # Uses standard rendering pipeline for the primitive type
-    image = render(pruned_model)
-    
-    # Step 4: Return results
-    memory_usage = calculate_memory_usage(pruned_model)
-    return image, memory_usage
+    return render(dataset)
 ```
+
+**Edge Cases and Pitfalls:**
+*   **Filter Non-Ideality:** While errors do not accumulate, a non-ideal filter can still introduce artifacts at individual levels [S1, unofficial].
+*   **Resolution Granularity:** The resolution difference between adjacent levels should be small to ensure smooth quality changes [S1, unofficial].
+*   **Runtime Overhead:** Continuous LoD has higher runtime overhead and computation time compared to static LODs [S3, unofficial].
 
 ## Subtopics
 
 ### Continuous LOD Parameter (c)
-A continuous budget parameter used to sweep a memory-quality curve, allowing the same model to be rendered at different LOD levels without retraining [S3, unofficial]. Across the full ladder, a single model sweeps a continuous memory-quality curve; re-rendering through the GPS renderer reproduces it within 0.5 dB [S3, unofficial]. At ~20.8 dB operating point, the method costs 110.6 MB against GPS's full 1926 MB (17x reduction) [S3, unofficial]. $c=4$ is lossless under both renderers [S3, unofficial].
+A specific implementation detail found in Budgeted-GS where a continuous budget parameter $c$ is used to sweep a memory-quality curve [S4, unofficial]. This allows the same model to be rendered at different LOD levels without retraining [S4, unofficial]. Across the full ladder, a single model sweeps a continuous memory-quality curve; re-rendering through the GPS renderer reproduces it within 0.5 dB [S4, unofficial]. At an operating point of ~20.8 dB, the method costs 110.6 MB against GPS's full 1926 MB (17x reduction) [S4, unofficial]. The value $c=4$ is lossless under both renderers [S4, unofficial].
 
 ## Operating characteristics
-*   **Time and Memory Complexity:** The method requires higher runtime overhead and longer precomputation times compared to static LODs [S2, unofficial]. Memory usage scales continuously with the budget parameter $c$ [S3, unofficial].
-*   **Measured Performance:** At a 20.8 dB operating point, memory usage is 110.6 MB, a 17x reduction from the full 1926 MB model [S3, unofficial]. Quality degradation is smooth, with no significant popping artifacts [S1, unofficial].
-*   **Strengths:** Smooth quality transitions, elimination of popping artifacts, high fidelity for a given budget, and renderer-agnostic post-hoc construction [S1, S2, S3, unofficial].
-*   **Limitations:** Higher computational cost for precomputation and runtime compared to static LODs [S2, unofficial]. Performance may degrade if the scene is already tessellated at the training distance [S3, unofficial].
-*   **When to Use:** When smooth visual transitions are critical and higher fidelity is required for a given resource budget [S2, unofficial].
-*   **When Not to Use:** When strict real-time performance with minimal overhead is required, or when precomputation time is prohibitive [S2, unofficial].
+*   **Time Complexity:** Higher computation time for precomputing the hierarchy compared to static LODs, as each level is derived from the original via convolution [S1, unofficial][S3, unofficial].
+*   **Memory Complexity:** Depends on the number of precomputed levels or the continuous parameter range. Can be optimized via caching (e.g., reusing Gaussians from previous frames) [S2, unofficial].
+*   **Performance:** Produces images with higher fidelity for a given polygon budget compared to static LODs [S3, unofficial]. Eliminates popping artifacts associated with discrete switching [S2, unofficial].
+*   **Strengths:** Smooth quality transitions, no error accumulation between levels, flexible resolution (not limited to powers of two) [S1, unofficial][S2, unofficial].
+*   **Limitations:** Higher runtime overhead, more complex to implement than discrete LOD, requires careful tuning of filter supports and interpolation mechanisms [S1, unofficial][S3, unofficial].
+*   **When to Use:** When smooth visual transitions are critical, or when rendering time is variable and needs to be adaptively managed [S1, unofficial].
+*   **When Not to Use:** When memory or precomputation time is extremely constrained, or when discrete, predictable LOD switching is sufficient [S3, unofficial].
 
 ## Background
-Continuous LOD systems were introduced as an alternative to static LODs, which can cause disturbing artifacts when switching levels [S2, unofficial]. The concept is rooted in out-of-core visualization techniques for large datasets, where continuous-resolution representations allow for smooth transitions between approximations [S2, unofficial]. Recent applications include Gaussian Splatting, where continuous LOD is used to manage memory and quality in large-scale scenes [S1, S3, unofficial].
+The concept of hierarchical level-of-detail representation for 3D volumes was introduced in the context of time-critical volume rendering, where gradual elimination of high-frequency features allows fallback to lower resolutions if rendering exceeds allotted time [S1, unofficial]. The approach was highlighted for its robustness and applicability, particularly in avoiding the error propagation issues of 3D mipmaps [S1, unofficial]. Later, the concept was extended to continuous-resolution representations in out-of-core visualization systems [S3, unofficial]. In recent years, continuous LoD has been adapted for Gaussian Splatting, where it enables fine-grained control over Gaussian counts and memory usage without retraining [S2, unofficial][S4, unofficial].
 
 ## Sources
-[S1] A LoD of Gaussians: Unified Training and Rendering for Ultra-Large Scale Reconstruction with External Memory, https://doi.org/10.48550/arXiv.2507.01110, fetched 2026-10-28 (unofficial)
-[S2] New Techniques for Out-Of-Core Visualization of Large Datasets, https://ctsilva.github.io/thesis/wagner-correa-thesis.pdf, fetched 2026-10-30 (unofficial)
-[S3] Budgeted-GS: Real-Time Large-Scale Gaussian Splatting via Factoring LOD, https://arxiv.org/abs/2610.03162, fetched 2026-10-29 (unofficial)
+[S1] NASA Technical Reports Server (NTRS) 19990040407: Time-Critical Volume Rendering, https://archive.org/details/NASA_NTRS_Archive_19990040407, fetched 2026-10-26 (unofficial)
+[S2] A LoD of Gaussians: Unified Training and Rendering for Ultra-Large Scale Reconstruction with External Memory, https://doi.org/10.48550/arXiv.2507.01110, fetched 2026-10-28 (unofficial)
+[S3] New Techniques for Out-Of-Core Visualization of Large Datasets, https://ctsilva.github.io/thesis/wagner-correa-thesis.pdf, fetched 2026-10-30 (unofficial)
+[S4] Budgeted-GS: Real-Time Large-Scale Gaussian Splatting via Factoring LOD, https://arxiv.org/abs/2610.03162, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,176 @@
+# Lighting Fast Querier
+
+Also called: PointNeRF Voxel Querier, World-to-Grid Point Indexer
+
+## Overview
+The Lighting Fast Querier is a CUDA-accelerated module that maps 3D world coordinates to discrete voxel grid indices for ray marching in neural radiance fields. It solves the problem of efficiently determining which voxels contain point cloud data for a given set of camera rays, handling coordinate transformations, bounding box clamping, and super-resolution scaling. It differs from generic voxel indexing by integrating ray generation, jittered sampling for training, and specific kernel-based query logic optimized for point cloud density.
+
+## How it works
+**Inputs:**
+- `point_xyz_w_tensor`: Tensor of 3D point coordinates in world space.
+- `pixel_idx`: Tensor of pixel coordinates (u, v) for ray origins.
+- `raydir`: Tensor of ray directions.
+- `opt`: Configuration object containing hyperparameters (`vsize`, `vscale`, `kernel_size`, `query_size`, `radius_limit_scale`, `inverse`, `SR`, `random_sample`).
+- `ranges`: Optional bounding box constraints `[min_x, min_y, min_z, max_x, max_y, max_z]`.
+- `w2pers`: World-to-perspective transformation matrix.
+
+**Outputs:**
+- `sample_point_indices`: Indices of the queried voxels.
+- `sample_locations`: World coordinates of the sampled points.
+- `ray_mask`: Boolean mask indicating valid rays.
+- `ray_directions`: Expanded ray directions for the sampled points.
+
+**Data Structures:**
+- `min_xyz`, `max_xyz`: 3D vectors defining the voxel grid bounds.
+- `vdim_np`, `scaled_vdim_np`: Integer dimensions of the voxel grid.
+- `radius_limit_np`: Float scalar for query radius.
+
+**Steps:**
+
+1.  **Compute Bounding Box:**
+    Calculate the initial bounding box from the point cloud:
+    $$ \text{min\_xyz} = \min(\text{point\_xyz\_w\_tensor}, \text{axis}=0) $$
+    $$ \text{max\_xyz} = \max(\text{point\_xyz\_w\_tensor}, \text{axis}=0) $$
+    If `ranges` is provided, clamp the bounds:
+    $$ \text{min\_xyz} = \max(\text{min\_xyz}, \text{ranges}[0:3]) $$
+    $$ \text{max\_xyz} = \min(\text{max\_xyz}, \text{ranges}[3:6]) $$
+
+2.  **Expand Bounds:**
+    Expand the bounding box by half the scaled voxel size times the kernel size to ensure coverage:
+    $$ \text{min\_xyz} \leftarrow \text{min\_xyz} - \frac{\text{scaled\_vsize} \times \text{kernel\_size}}{2} $$
+    $$ \text{max\_xyz} \leftarrow \text{max\_xyz} + \frac{\text{scaled\_vsize} \times \text{kernel\_size}}{2} $$
+    [G] `scaled_vsize` is derived from `opt.vsize` and potentially `opt.vscale`.
+
+3.  **Calculate Grid Dimensions:**
+    Compute the voxel dimensions in world units and scale them:
+    $$ \text{vdim} = \frac{\text{max\_xyz} - \text{min\_xyz}}{\text{vsize}} $$
+    $$ \text{scaled\_vdim} = \lceil \frac{\text{vdim}}{\text{vscale}} \rceil $$
+    Convert `scaled_vdim` to `int32`.
+
+4.  **Generate Rays:**
+    Determine ray positions and origins. If `opt.inverse > 0`, use `near_far_disparity_linear_ray_generation`; otherwise, use `near_far_linear_ray_generation`. Apply jitter if training mode is active.
+
+5.  **Query Grid Indices (CUDA):**
+    Call the CUDA extension `query_worldcoords_cuda.woord_query_grid_point_index` with the following arguments:
+    - `pixel_idx`: Pixel indices.
+    - `ray_pos`: Ray positions/origins.
+    - `world_coords`: World coordinates (from points or rays).
+    - `point_count`: Number of points.
+    - `kernel_size`: Kernel size.
+    - `query_size`: Query size.
+    - `vscale`: Scaling factors.
+    - `ranges`: Clamping ranges.
+    - `radius_limit_np`: Calculated as `opt.radius_limit_scale * max(opt.vsize[0], opt.vsize[1])`.
+
+    The CUDA kernel returns:
+    - `sample_point_indices`: Indices of the voxels containing points.
+    - `sample_locations`: World coordinates of the found points.
+    - `ray_mask`: Mask of valid queries.
+
+6.  **Extract and Transform Directions:**
+    Filter `raydir` using `ray_mask` to get directions for valid rays. Expand these directions if super-resolution (`opt.SR`) is enabled.
+
+7.  **Perspective Transformation:**
+    Transform world coordinates to perspective coordinates using `w2pers`:
+    $$ \mathbf{p}_{pers} = \text{w2pers} \times \mathbf{p}_{world} $$
+    This involves shifting by camera position, rotating by camera rotation transpose, and perspective division ($x/z, y/z$).
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+import torch
+
+def lighting_fast_querier(point_xyz_w_tensor, pixel_idx, raydir, opt, ranges=None, w2pers=None):
+    """
+    Query voxel grid indices for ray marching.
+    """
+    # 1. Compute Bounding Box
+    min_xyz = torch.min(point_xyz_w_tensor, dim=0).values
+    max_xyz = torch.max(point_xyz_w_tensor, dim=0).values
+    
+    if ranges is not None:
+        min_xyz = torch.max(min_xyz, ranges[:3])
+        max_xyz = torch.min(max_xyz, ranges[3:6])
+        
+    # 2. Expand Bounds
+    # Assuming scaled_vsize is computed from opt.vsize and opt.vscale
+    scaled_vsize = compute_scaled_vsize(opt) 
+    kernel_size = opt.kernel_size
+    
+    min_xyz = min_xyz - (scaled_vsize * kernel_size / 2.0)
+    max_xyz = max_xyz + (scaled_vsize * kernel_size / 2.0)
+    
+    # 3. Calculate Grid Dimensions
+    vdim = (max_xyz - min_xyz) / opt.vsize
+    vscale = opt.vscale
+    scaled_vdim = torch.ceil(vdim / vscale).to(torch.int32)
+    
+    # 4. Generate Rays
+    # Placeholder for ray generation logic depending on opt.inverse
+    if opt.inverse > 0:
+        ray_pos = near_far_disparity_linear_ray_generation(pixel_idx, opt)
+    else:
+        ray_pos = near_far_linear_ray_generation(pixel_idx, opt)
+        
+    # Apply jitter if training
+    if opt.training:
+        ray_pos = apply_jitter(ray_pos)
+        
+    # 5. Query Grid Indices
+    radius_limit = opt.radius_limit_scale * torch.max(opt.vsize[0], opt.vsize[1])
+    
+    # Call CUDA extension
+    # Note: In a real implementation, this would be a custom CUDA kernel call
+    # sample_point_indices, sample_locations, ray_mask = query_worldcoords_cuda.woord_query_grid_point_index(...)
+    
+    # Simulating the return values for the sake of the algorithm description
+    # In reality, these are returned from the CUDA kernel
+    sample_point_indices, sample_locations, ray_mask = query_worldcoords_cuda_kernel(
+        pixel_idx, ray_pos, point_xyz_w_tensor, 
+        len(point_xyz_w_tensor), kernel_size, opt.query_size,
+        vscale, ranges, radius_limit
+    )
+    
+    # 6. Extract and Transform Directions
+    valid_raydir = raydir[ray_mask]
+    if opt.SR:
+        valid_raydir = expand_for_super_resolution(valid_raydir, opt.SR)
+        
+    # 7. Perspective Transformation
+    if w2pers is not None:
+        # Transform sample_locations to perspective space
+        # w2pers is a 4x4 matrix
+        # p_homo = torch.cat([sample_locations, torch.ones_like(sample_locations[:, :1])], dim=1)
+        # p_pers = torch.matmul(p_homo, w2pers.T)
+        # p_pers = p_pers[:, :3] / p_pers[:, 3:]
+        pass # Transformation logic depends on specific w2pers structure
+        
+    return sample_point_indices, sample_locations, ray_mask, valid_raydir
+
+def compute_scaled_vsize(opt):
+    # Implementation detail: how scaled_vsize is derived from opt.vsize and vscale
+    # Not fully specified in sources, assuming simple scaling
+    return opt.vsize[0] # Placeholder
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Floating point errors in bounding box expansion may cause off-by-one errors in voxel indexing. Use epsilon guards if necessary.
+- **Empty Point Cloud:** If `point_xyz_w_tensor` is empty, `min_xyz` and `max_xyz` will be undefined. Handle this by returning empty tensors or a default grid.
+- **Degenerate Input:** If `opt.vsize` is zero, division by zero occurs. Ensure `opt.vsize` is positive.
+- **Boundary Clamping:** If `ranges` are tighter than the point cloud bounds, the expanded bounds may still exclude points. Ensure `ranges` are consistent with the point cloud distribution.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ for bounding box computation, where $N$ is the number of points. The CUDA query is $O(R \times K)$, where $R$ is the number of rays and $K$ is the kernel size.
+- **Memory Complexity:** $O(V)$ for the voxel grid, where $V$ is the number of voxels.
+- **Performance:** Optimized for GPU execution via CUDA. Performance scales with the number of rays and the density of the point cloud.
+- **Strengths:** Fast querying of point cloud data for ray marching; handles super-resolution; integrates jitter for training stability.
+- **Limitations:** Requires CUDA; dependent on specific configuration parameters; may suffer from precision issues with large bounding boxes.
+
+## Background
+The Lighting Fast Querier is part of the PointNeRF framework, which combines point clouds with neural radiance fields for efficient 3D reconstruction. It was introduced in the PointNeRF project by Xharlie.
+
+## Sources
+[S1] Xharlie/pointnerf, https://github.com/Xharlie/pointnerf, fetched 2026-10-26 (unofficial)

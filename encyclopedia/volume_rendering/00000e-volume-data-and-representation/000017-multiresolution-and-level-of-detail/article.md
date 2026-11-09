@@ -1,117 +1,106 @@
 # Multiresolution and level of detail
 
+Also called: Multiresolution representations, hierarchical volume rendering, LOD for volumes
 
 ## Overview
-Multiresolution and level of detail (LOD) techniques provide a hierarchical framework for interpreting volumetric data, allowing the system to use the most economical resolution for each feature based on spatial hierarchy and available memory bandwidth [S1, unofficial][S2, unofficial]. This family solves the problem of rendering large-scale volumetric datasets interactively by replacing high-resolution data with lower-resolution approximations for distant or less important regions, thereby reducing GPU memory usage and rendering latency [S2, unofficial]. It is distinguished from sibling methods like [Compression](4-compression.md) (which focuses on storage efficiency) and [Dense grids](3-dense-grids-and-memory-layout.md) (which focus on memory layout) by explicitly organizing data into multiple resolution levels that can be selected or blended during rendering [S2, unofficial].
+Multiresolution and level of detail (LOD) techniques represent volumetric data at multiple spatial resolutions to optimize rendering performance and memory usage [S2, unofficial]. By allowing low-resolution data to replace high-resolution data for distant or less important regions, these methods reduce the amount of data residing in GPU memory without severely affecting rendering quality [S2, unofficial]. Unlike sibling methods that focus on static storage or compression, this family dynamically selects resolution levels based on view-dependent criteria such as distance, screen footprint, or error metrics [S1, S2, unofficial].
 
 ## Shared principles
-The core mechanism of this family involves generating a hierarchy of data representations at different spatial resolutions [S2, unofficial]. Common mathematical and structural operations include:
+All methods in this family share the core mechanism of generating a hierarchy of data representations at different spatial resolutions [S2, unofficial]. This hierarchy is typically constructed using one of two approaches:
+1.  **Spatial Hierarchies:** Structures like Octrees or Bricks that partition the volume domain into sub-regions of varying sizes [S2, unofficial].
+2.  **Frequency-Domain Transforms:** Methods like Wavelets that decompose data into coefficients representing different spatial frequencies [S2, unofficial].
 
-1.  **Scaling Factors:** Defining an integer or float scale factor $s$ such that the new resolution $N_{new}$ relates to the previous resolution $N_{prev}$ by $N_{new} = s \times N_{prev}$ or $N_{new} / N_{prev} = s$ [S1, unofficial][S5, unofficial].
-2.  **Hierarchical Structures:** Using spatial structures (like Octrees or Bricks) or frequency-domain transforms (like Wavelets) to represent data at multiple scales [S2, unofficial].
-3.  **Interpolation and Filtering:** Using interpolation or filtering kernels to estimate values at new grid points or to generate coarser levels from finer ones [S1, S2, unofficial].
-4.  **Selection and Culling:** Dynamically choosing which resolution level to render based on spatial hierarchy (distant or less important regions) and hardware constraints [S1, S2, unofficial].
+Common mathematical and structural operations include:
+*   **Scaling Factors:** Defining a scale factor $s$ such that the new resolution $N_{new}$ relates to the previous resolution $N_{prev}$ by $N_{new} = s \times N_{prev}$ or $N_{new} / N_{prev} = s$ [S1, S5, unofficial].
+*   **Interpolation and Filtering:** Using interpolation kernels (e.g., trilinear) or filtering to estimate values at new grid points or to generate coarser levels from finer ones [S1, S2, unofficial].
+*   **Selection and Culling:** Dynamically choosing which resolution level to render based on spatial hierarchy (distant or less important regions) and hardware constraints [S1, S2, unofficial].
 
 ## Subtopics
 
-### [VoxelGrid Down Sample](1014-voxelgrid-down-sample.md)
-Reduces voxel grid resolution by a specified integer factor using max pooling. It is distinguished by its simplicity and deterministic nature, relying on block-wise maximum operations rather than learned parameters or complex geometric decompositions. Choose this when a fast, lossy (for MIP) downsampling of regular grids is required.
-
 ### [Mesh Simplification](1032-mesh-simplification.md)
-Reduces triangle count of surface meshes via iterative edge collapses, typically using Quadric Error Metrics (QEM). It differs from siblings by operating on explicit polygonal meshes rather than voxel grids, serving as a post-processing step for surfaces derived from volumetric data. Choose this when rendering extracted isosurfaces rather than the volume itself.
+Reduces triangle count of surface meshes via edge collapses. Distinct from frequency-domain methods like Wavelets or tetrahedral frameworks by operating on triangular topology.
 
 ### [Wavelet-based Volume Rendering](1052-wavelet-based-volume-rendering.md)
-Encodes volumetric data into a multiresolution wavelet coefficient hierarchy, allowing for on-demand or block-wise reconstruction during rendering. It solves high memory bandwidth requirements by exploiting spatial coherence and sparsity in the frequency domain. Choose this for efficient lossy/lossless compression and adaptive resolution selection based on error metrics.
+Encodes data into frequency-domain coefficients (DWT) for on-demand reconstruction. Preserves spatial locality in the frequency domain, unlike simple downsampling.
 
 ### [Multi-Tetra Framework](1183-multi-tetra-framework.md)
-Approximates regular volume data using tetrahedra of varying detail levels, generated through recursive subdivision and stored in a binary tree. It solves the crack problem between LODs by ensuring subdivision uses existing vertex indices without interpolation. Choose this for smooth, crack-free LOD transitions in regular grids.
-
-### [Morphological Pyramid](1641-morphological-pyramid.md)
-Uses morphological erosion/dilation combined with dyadic downsampling to create a hierarchy of approximations and detail signals. It exploits the commutativity of MIP with morphological dilation to allow coarse approximations during interaction. Choose this for interactive MIP rendering with progressive refinement.
+Approximates regular volume data using tetrahedra of varying LODs in a binary tree. Solves crack problems by using existing vertex indices without interpolation.
 
 ### [Multi-Resolution Volume Visualization (Split-and-Collapse)](1692-multi-resolution-volume-visualization-split-and-collapse.md)
-Dynamically adjusts resolution of volume areas based on memory bandwidth and user interaction using a greedy split/collapse algorithm. Unlike static LOD, it continuously updates the representation during interaction. Choose this for interactive exploration where hardware constraints vary.
-
-### [Level-of-Detail Volume Rendering via 3D Textures](1706-level-of-detail-volume-rendering-via-3d-textures.md)
-Provides adaptive LOD selection for multi-resolution rendering using 3D texture mapping, guaranteeing consistent interpolation and fixing boundary artifacts via polygon clipping. Choose this for GPU-accelerated rendering of large datasets with smooth LOD transitions.
-
-### [Streaming MIP Implementation (Basic)](1803-streaming-mip-implementation-basic.md)
-Approximates MIP by projecting pre-sorted detail coefficients from a morphological pyramid directly to the frame buffer. It streams coefficients by L1-error contribution, allowing progressive refinement. Choose this for real-time MIP with limited memory bandwidth.
+Interactive method using a greedy algorithm to split/collapse bricks based on error metrics and memory constraints. Dynamically updates representation frame-to-frame.
 
 ### [Multiresolution Decomposed Volume Rendering](2277-multiresolution-decomposed-volume-rendering.md)
-A general framework for rendering decomposed volume data (e.g., Wavelet/Fourier coefficients) directly without full reconstruction. It supports adaptive rendering and error bounds checking. Choose this for progressive rendering and error-bounded visualization of transformed data.
+General framework for rendering decomposed data (Fourier, Wavelet, DCT) directly without full reconstruction. Supports progressive refinement and error bounds.
 
-### [Downscaled Grid Map Generation](2338-downscaled-grid-map-generation.md)
-Creates a low-resolution coordinate grid and an index map to map high-resolution coordinates to low-resolution locations. It differs from [Mipmap Generation](2602-mipmap-generation.md) by focusing on coordinate indexing rather than value aggregation. Choose this for differentiable rendering pipelines requiring coordinate transformations.
+### [iNGP Hierarchy Configuration](2404-ingp-hierarchy-configuration.md)
+Configures hash grids for neural radiance fields. Uses 10 levels, 4 channels, and powers-of-2 scale spacing to balance memory and speed.
 
 ### [Level of Detail for Volumetric Terrain](2459-level-of-detail-for-volumetric-terrain.md)
-A fast, GPU-friendly LOD algorithm for real-time rendering of volumetric terrain using arbitrary density functions. It generates geometry on the fly, avoiding preprocessing costs. Choose this for procedural or large-scale terrain visualization.
-
-### [Mipmap Generation](2602-mipmap-generation.md)
-Creates a hierarchy of downscaled volume data to enable multi-resolution rendering and faster traversal. It explicitly organizes data into a structured mip-chain accessible via texture sampling. Choose this as a standard preprocessing step for texture-based volume rendering.
+GPU-friendly LOD for real-time volumetric terrain. Generates geometry on the fly using hexahedral blocks ($16^3$) and marching cubes, avoiding preprocessing costs.
 
 ### [Window/Level Volume Raycasting with Bricking](2775-window-level-volume-raycasting-with-bricking.md)
-Combines spatial decomposition (bricking) with intensity-based transfer function mapping (window/level) to accelerate visualization of large medical datasets. It differs from [Wavelet-based Volume Rendering](1052-wavelet-based-volume-rendering.md) by using spatial tiling rather than frequency-domain compression. Choose this for cache-friendly raycasting with dynamic transfer functions.
+Combines spatial bricking with window/level intensity mapping. Uses CPU-side brick traversal and explicit window/level mapping rather than hardware mipmaps.
 
 ### [Active Cut Management](3380-active-cut-management.md)
-Maintains a set of nodes whose cells cover the model space exactly once, balancing visual quality and frame time. Choose this for managing active regions in adaptive rendering.
+View-dependent LOD using an "active cut" of octree nodes. Maintains exactly one coverage of model space, merging/splitting nodes based on screen-space error metrics.
 
 ### [LOD Selection and Culling](5338-lod-selection-and-culling.md)
-Algorithms for selecting the optimal LOD and culling low-detail regions to save bandwidth. Choose this for optimizing data management, streaming, and hysteresis when switching resolutions.
+Family of techniques optimizing performance by selecting resolution for visible subregions and culling invisible ones. Operates on volumetric structures (bricks, octrees) rather than meshes.
 
 ### [Upsampling and Super-Resolution](5339-upsampling-and-super-resolution.md)
-Addresses increasing spatial resolution to recover fine details or correct discrete positioning errors. Distinguished from siblings by its goal of generating higher-fidelity representations from lower-resolution inputs. Choose this for detail recovery or performance optimization via upscaling.
+Increases spatial resolution via interpolation or learning to mitigate aliasing. Focuses on upscaling rather than downsampling or simplification.
+
+### [Level-of-Detail Selection](6114-level-of-detail-selection.md)
+Uses image-based quality metrics to guide LOD selection, ensuring higher detail only where necessary. Distinguishes itself from purely geometric culling strategies.
 
 ### [Wavelet-based Multiresolution](6266-wavelet-based-multiresolution.md)
-Uses wavelet transforms to decompose volume data into frequency subbands for multiresolution representation. Choose this for frequency-domain compression and error-bounded traversal.
+Decomposes data into spatial-frequency components using wavelets. Preserves high-frequency details at coarse resolutions, unlike spatial averaging.
 
 ### [Adaptive Resolution Data Management](8131-adaptive-resolution-data-management.md)
-Manages data at varying resolutions to optimize memory usage and rendering performance. Choose this for dynamic resource allocation in large-scale visualization.
+Organizes data into multi-resolution structures based on LOD rather than strict spatial location. Groups blocks by resolution level to reduce storage, introducing interpolation challenges.
 
 ### [Adaptive-FAM](8156-adaptive-fam.md)
-A functional approximation multi-resolution representation that uses adaptive encoding to dynamically compress micro-blocks based on their content, designed for out-of-core interactive visualization of large-scale volumetric datasets. Choose this for memory-constrained environments requiring content-aware compression.
+Out-of-core pipeline using functional approximation with Normalized Control Points (NCP). Minimizes model size while maintaining accuracy, optimized for I/O caching.
 
-#### Patch Merging Layer
-Downsamples spatial resolution by half while doubling channels by concatenating four overlapping spatial patches [S3, unofficial].
-- **Step:** Verify input dimensions are even (`assert H % 2 == 0 and W % 2 == 0`). Reshape to spatial: `x = x.reshape(B, H, W, C)`. Extract four overlapping patches: `x0 = x[:, 0::2, 0::2, :]`, `x1 = x[:, 1::2, 0::2, :]`, `x2 = x[:, 0::2, 1::2, :]`, `x3 = x[:, 1::2, 1::2, :]`. Concatenate along channel dimension: `x = concatenate_along_last_dim([x0, x1, x2, x3])`. Reshape to sequence: `x = x.reshape(B, -1, 4 * C)`. Apply normalization: `x = self.norm(x)`. Apply linear reduction to halve channels: `x = self.reduction(x)` [S3, unofficial].
-- **Parameter:** `input_resolution` (tuple of H, W), `dim` (input channels), `norm_layer` (default `nn.LayerNorm`) [S3, unofficial].
-- **Layout:** Input tensor `x`: shape `(B, H*W, C)`. Output tensor `x`: shape `(B, H/2*W/2, 2*dim)` [S3, unofficial].
-- **Code:**
-  ```python
-  def patch_merging(x, H, W, C):
-      assert H % 2 == 0 and W % 2 == 0
-      x_spatial = x.reshape(B, H, W, C)
-      x0 = x_spatial[:, 0::2, 0::2, :]
-      x1 = x_spatial[:, 1::2, 0::2, :]
-      x2 = x_spatial[:, 0::2, 1::2, :]
-      x3 = x_spatial[:, 1::2, 1::2, :]
-      # Concatenate along channel dimension
-      x_concat = concatenate_along_last_dim([x0, x1, x2, x3])
-      # Reshape to sequence
-      new_H, new_W = H // 2, W // 2
-      x_seq = x_concat.reshape(B, new_H * new_W, 4 * C)
-      return x_seq
-  ```
-  [S3, unofficial]
+### [Pyramid and Downsampling Structures](9527-pyramid-and-downsampling-structures.md)
+Generates hierarchy of decreasing resolutions. Operates on spatial grid structures, preserving voxel-based nature, unlike frequency-domain methods.
 
-#### iNGP Hierarchy Configuration
-Uses 10 grid scales spaced by powers of 2 from 16 to 8192, with 4 channels per level. Grid sizes $n_l > 128$ are parameterized using a hash of size $128^3$. This configuration works slightly better and faster than iNGP's similar approach (2 channels, spacing by $\sqrt{2}$) [S4].
+### [Multiresolution Volume Sampling: Intrablock](11149-multiresolution-volume-sampling-intrablock.md)
+Handles sampling within single multiresolution blocks, managing boundaries and resolution differences.
 
-#### World Dimension Constants and Hierarchy
-Defines constants for a specific implementation: `BRICK_DIM`: 4, `BRICK_VOXELS`: 64. `WORLD_BRICKS_X`: 128, `WORLD_BRICKS_Y`: 64, `WORLD_BRICKS_Z`: 128 (Total: 1,048,576 bricks). `WORLD_VOXELS_X`: 512, `WORLD_VOXELS_Y`: 256, `WORLD_VOXELS_Z`: 512. `WORLD_TILES_X`: 32, `WORLD_TILES_Y`: 16, `WORLD_TILES_Z`: 32 (Total: 16,384 tiles). `WORLD_CHUNKS_X`: 8, `WORLD_CHUNKS_Y`: 4, `WORLD_CHUNKS_Z`: 8 (Total: 256 chunks). `WORLD_L4_X`: 2, `WORLD_L4_Y`: 1, `WORLD_L4_Z`: 2 (Total: 4 L4 nodes). `PROBE_SPACING`: 8 voxels. `PROBE_DIM_X`: 64, `PROBE_DIM_Y`: 32, `PROBE_DIM_Z`: 64 (Total: 131,072 probes). `STORAGE_CHUNK_BRICKS`: 8. `STORAGE_CHUNK_VOXELS`: 32. `WORLD_STORE_CX`: 16, `WORLD_STORE_CY`: 8, `WORLD_STORE_CZ`: 16 (Total: 2,048 storage chunks) [S5, unofficial].
+### World Dimension Constants and Hierarchy
+*   **Definition:** Specific parameterization for a hierarchical volume representation system [S3, unofficial].
+*   **Parameters:**
+    *   `BRICK_DIM`: 4. `BRICK_VOXELS`: 64 ($4^3$) [S3, unofficial].
+    *   `WORLD_BRICKS_X`: 128, `WORLD_BRICKS_Y`: 64, `WORLD_BRICKS_Z`: 128. Total: 1,048,576 bricks [S3, unofficial].
+    *   `WORLD_VOXELS_X`: 512, `WORLD_VOXELS_Y`: 256, `WORLD_VOXELS_Z`: 512 [S3, unofficial].
+    *   `WORLD_TILES_X`: 32, `WORLD_TILES_Y`: 16, `WORLD_TILES_Z`: 32. Total: 16,384 tiles [S3, unofficial].
+    *   `WORLD_CHUNKS_X`: 8, `WORLD_CHUNKS_Y`: 4, `WORLD_CHUNKS_Z`: 8. Total: 256 chunks [S3, unofficial].
+    *   `WORLD_L4_X`: 2, `WORLD_L4_Y`: 1, `WORLD_L4_Z`: 2. Total: 4 L4 nodes. Covers $256^3$ voxel region per bit [S3, unofficial].
+    *   `PROBE_SPACING`: 8 voxels. `PROBE_DIM_X`: 64, `PROBE_DIM_Y`: 32, `PROBE_DIM_Z`: 64. Total: 131,072 probes [S3, unofficial].
+    *   `STORAGE_CHUNK_BRICKS`: 8. `STORAGE_CHUNK_VOXELS`: 32. `WORLD_STORE_CX`: 16, `WORLD_STORE_CY`: 8, `WORLD_STORE_CZ`: 16. Total: 2,048 storage chunks [S3, unofficial].
 
-#### Parallel Multiresolution
-A parallel multiresolution technique proposed by Gao et al. to accelerate large dataset visualization [S6].
+### Parallel Multiresolution
+*   **Definition:** A parallel multiresolution technique proposed by Gao et al. to accelerate large dataset visualization [S4].
+*   **Step:** Proposes a parallel multiresolution technique to accelerate large dataset visualization [S4].
+
+### Importance-based MIP Compositing
+*   **Definition:** A compositing model that selects the current valid level of sparseness based on the associated volume object's importance [S5, unofficial].
+*   **Step:** Determine the valid level of sparseness for the volume object [S5, unofficial].
+
+### Dynamic Isosurface and Level of Detail (DYNAISOLOD)
+*   **Step:** Represent different LODs as differently sized hexahedral "virtual voxels" [S6, unofficial]. Join adjacent voxel cells in the volumetric data grid to create larger virtual voxels [S6, unofficial]. Store the resolution value as a third dimension of the kd-tree [S6, unofficial]. Create the LODTree file (3D kd-tree with associated data) in parallel using MPI [S6, unofficial]. At visualization time, execute search, geometry-creation, and rendering algorithms [S6, unofficial].
+*   **Layout:** LODTree file: 3D kd-tree with associated data, where the third dimension encodes resolution/LOD level [S6, unofficial].
+*   **Comparison:** Operates in voxel space rather than geometry space, avoiding the assumption of stable underlying surface geometry and eliminating the need for recalculation when thresholds change [S6, unofficial].
+*   **Usage:** Core component of Sandia's EIGENNR project; applied to structured rectilinear grid data from the CTH simulation code [S6, unofficial].
 
 ## Background
-Multiresolution representations in image processing and computer vision provide a simple hierarchical framework for interpreting image information [S1, unofficial]. At different resolutions, details generally characterize different physical structures of the scene, allowing the most economical resolution to be used for each feature [S1, unofficial]. Large volumetric data rendering algorithms rely on hierarchical data structures to improve processing, with Octrees and Wavelet transformations being the most popular methods to transform original data into multi-resolution representations [S2, unofficial]. These methods allow low-resolution data to replace original data during rendering to reduce GPU memory usage, with minimal impact on visual quality for distant regions [S2, unofficial].
+Multiresolution representations provide a hierarchical framework for interpreting image information, where details at different resolutions characterize different physical structures [S1, unofficial]. This approach allows the most economical resolution to be used for each feature, making hierarchical structures more explicit [S1, unofficial]. In volume rendering, hierarchical data structures (spatial or frequency domain) are used to represent data at different resolutions, allowing low-resolution data to replace high-resolution data for distant or less important regions to reduce GPU memory usage [S2, unofficial]. Spatial hierarchies (like Octrees) explore spatial structure, while frequency domain analysis (like Wavelets) transforms data into coefficients for multi-resolution representation [S2, unofficial].
 
 ## Sources
 [S1] Direct rendering of multiresolution decomposed volume data., https://doi.org/10.82465/4870, fetched 2026-10-26 (unofficial)
 [S2] A system for real-time rendering of compressed time-varying volume data, https://doi.org/10.7939/r3041m, fetched 2026-10-26 (unofficial)
-[S3] ApaarRaina/DiffTomo, https://github.com/ApaarRaina/DiffTomo, fetched 2026-10-27 (unofficial)
-[S4] Zip-NeRF: Anti-Aliased Grid-Based Neural Radiance Fields, https://doi.org/10.1109/iccv51070.2023.01804, fetched 2026-10-26
-[S5] mstampfli/voxelG, https://github.com/mstampfli/voxelG, fetched 2026-10-24 (unofficial)
-[S6] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27
-[S7] Fast Voxelization and Level of Detail for Microgeometry Rendering, https://doi.org/10.48550/arxiv.2604.13191, fetched 2026-10-26
-[S8] Implementation of Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2005/Thurner-2005-IVR/Thurner-2005-IVR-paper.pdf, fetched 2026-10-29 (unofficial)
+[S3] mstampfli/voxelG, https://github.com/mstampfli/voxelG, fetched 2026-10-24 (unofficial)
+[S4] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27
+[S5] Implementation of Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2005/Thurner-2005-IVR/Thurner-2005-IVR-paper.pdf, fetched 2026-10-29 (unofficial)
+[S6] Dynamic isosurface extraction and level-of-detail in voxel space, https://digital.library.unt.edu/ark:/67531/metadc707496/?q=marching cubes, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,384 @@
+--- v004.md
++++ v005.md
+@@ -7,224 +7,189 @@
+ 
+ ## How it works
+-
+ ### Inputs and Outputs
+ **Inputs:**
+-*   Triangle mesh geometry (for voxelization).
+-*   Camera position and viewing frustum.
+-*   Octree structure containing node pointers and brick references.
+-*   Brick pool: a large 3D texture memory region containing color, normal, and light data for voxels [S1, unofficial].
++* Triangle mesh geometry for voxelization [S2, unofficial].
++* Camera position and viewing frustum.
++* Octree structure containing node pointers and brick references [S2, unofficial].
++* Brick pool: a large 3D texture memory region containing color, normal, and light data for voxels [S1, unofficial].
+ 
+ **Outputs:**
+-*   Final pixel color with accumulated lighting and material properties.
++* Final pixel color with accumulated lighting and material properties [S2, unofficial].
+ 
+ ### Data Structures
+-
+ **Octree Node Layout:**
+-The octree is implemented in a linear buffer. Each node is stored as a 64-bit value (represented as `uvec4` in GLSL, though only specific bits are used) [S2, unofficial]. The layout is:
+-*   **Bits 0-29 (30 bits):** Pointer to the first child node. The other seven children are accessed via offsets from this pointer [S2, unofficial].
+-*   **Bits 30-59 (30 bits):** Pointer to the brick in the brick pool.
+-*   **Bits 60-63 (4 bits):** Status flags (e.g., constant value flag, brick loaded flag) [S2, unofficial].
++The octree is implemented in a linear buffer [S2, unofficial]. Each node is stored as a 64-bit value (represented as `uvec4` in GLSL, though only specific bits are used) [S2, unofficial]. The layout is:
++* Bits 0-29 (30 bits): Pointer to the first child node. The other seven children are accessed via offsets from this pointer [S2, unofficial].
++* Bits 30-59 (30 bits): Pointer to the brick in the brick pool [S2, unofficial].
++* Bits 60-63 (4 bits): Status flags (e.g., constant value flag, brick loaded flag) [S2, unofficial].
+ 
+ **Brick Pool:**
+-*   A 3D texture (`BrickSampler`) storing voxel data.
+-*   Each brick contains a region of voxels (e.g., $3 \times 3 \times 3$ or $8 \times 8 \times 8$) [S2, unofficial].
+-*   Bricks include border voxels (neighbors) to allow hardware texture interpolation, as neighboring bricks are not necessarily adjacent in memory [S2, unofficial].
++* A 3D texture (`BrickSampler`) storing voxel data [S1, unofficial].
++* Each brick contains a region of voxels (e.g., $3 \times 3 \times 3$ or $8 \times 8 \times 8$) [S2, unofficial].
++* Bricks include border voxels (neighbors) to allow hardware texture interpolation, as neighboring bricks are not necessarily adjacent in memory [S2, unofficial].
+ 
+ **Parameters:**
+-*   `RayStepSize`: Step size of the ray in world coordinates [S1, unofficial].
+-*   `BrickStepVector`: Step size of the ray in brick pool coordinates [S1, unofficial].
+-*   `BrickDimension`: Number of texels in a brick [S1, unofficial].
+-*   `RootVoxelHalfSize`: Size of the voxel in the root node [S1, unofficial].
+-*   `BrickPoolDimension`: Dimensions of the brick pool texture [S1, unofficial].
+-*   `OctTreeDepthMinusOne`: Tree depth minus one [S1, unofficial].
+-*   `MaxTreeTraversals`: Maximum number of tree traversals allowed per ray [S1, unofficial].
+-*   `MaxNodesToPushThisFrame`: Maximum nodes to push onto the node usage list per frame [S1, unofficial].
+-*   `LodScalar`: Scalar used for LOD calculations [S1, unofficial].
++* `RayStepSize`: Step size of the ray in world coordinates [S1, unofficial].
++* `BrickStepVector`: Step size of the ray in brick pool coordinates [S1, unofficial].
++* `BrickDimension`: Number of texels in a brick [S1, unofficial].
++* `RootVoxelHalfSize`: Size of the voxel in the root node [S1, unofficial].
++* `BrickPoolDimension`: Dimensions of the brick pool texture [S1, unofficial].
++* `OctTreeDepthMinusOne`: Tree depth minus one [S1, unofficial].
++* `MaxTreeTraversals`: Maximum number of tree traversals allowed per ray [S1, unofficial].
++* `MaxNodesToPushThisFrame`: Maximum nodes to push onto the node usage list per frame [S1, unofficial].
++* `LodScalar`: Scalar used for LOD calculations [S1, unofficial].
+ 
+ ### Algorithm Steps
+-
+-1.  **Voxelization (Preprocessing):**
+-    *   Convert triangles to voxels in a two-step process [S2, unofficial]:
+-        1.  Check if the triangle's plane intersects the voxel.
+-        2.  Rasterize the triangle along its dominant axis (largest projected area) and check if fragments intersect the 2D projection of the voxel [S2, unofficial].
+-    *   Insert passing voxels into the octree. If a region is empty or constant, the node points to no children or brick [S2, unofficial].
+-    *   Static objects are voxelized once; dynamic objects every frame, differentiated by a flag preventing overwrites [S2, unofficial].
+-
+-2.  **Octree Filtering (LOD Generation):**
+-    *   Initially, only leaf nodes contain material information [S2, unofficial].
+-    *   Fill higher octree levels by averaging material properties of child bricks. This is done in separate passes for each level [S2, unofficial].
+-    *   For global illumination, lights rasterize the scene, writing direction/intensity to leaf nodes, which are then filtered up the octree [S2, unofficial].
+-
+-3.  **Ray Traversal and Cone Tracing (Rendering):**
+-    *   For each pixel, shoot a ray. The ray performs a top-down traversal of the octree to find the lowest node containing the ray [S2, unofficial].
+-    *   **Cone Tracing:** The sampling cone width adapts to distance. Close to the camera, the cone is thin, sampling leaf nodes (high detail). Far away, the cone widens, sampling higher octree levels (blurred/averaged data) [S2, unofficial].
+-    *   **LOD Interpolation:** Perform linear interpolation between adjacent octree levels to get precise LOD, mimicking quadrilinear interpolation [S2, unofficial].
+-    *   **Brick Sampling:** Sample the brick associated with the current octree node. Use border voxels for hardware interpolation [S2, unofficial].
+-
+-4.  **Ray Marching and Blending:**
+-    *   Compute minimum ray-box intersection time ($t_{Min}$) by iterating over 6 planes of the node extent. Update plane D values based on `nodeExtentMin/Max`. Only consider intersections where `dirDotN > 0` [S1, unofficial].
+-    *   Calculate `numSteps = int(distToNodeBoundary / rayStepSize) + 1` [S1, unofficial].
+-    *   Advance ray position: `rayWorldPosition += rayDir * (numSteps * rayStepSize)` [S1, unofficial].
+-    *   **Front-to-Back Blending:**
+-        *   If the node is constant (`constValue.a < 0.005f`), advance ray to exit and return [S1, unofficial].
+-        *   Loop `numSteps` times:
+-            1.  Advance `rayWorldPosition` by `worldRayStep` [S1, unofficial].
+-            2.  If `dst.a > 0.995f`, advance remaining steps and return [S1, unofficial].
+-            3.  Sample source color/alpha (`src`).
+-            4.  Update source alpha: $src.a = 1.0 - (1.0 - src.a)^{sampleRatio}$ [S1, unofficial].
+-            5.  Update source color: $src.rgb *= sampleRatio$ [S1, unofficial].
+-            6.  Update destination: $dst = (1.0 - dst.a) * src + dst$ [S1, unofficial].
++1. **Voxelization (Preprocessing):**
++   * Convert triangles to voxels in a two-step process [S2, unofficial]:
++     1. Check if the triangle's plane intersects the voxel [S2, unofficial].
++     2. Rasterize the triangle along its dominant axis (largest projected area) and check if fragments intersect the 2D projection of the voxel [S2, unofficial].
++   * Insert passing voxels into the octree [S2, unofficial]. If a region of space is empty or has a constant value, the node in the octree does not point to a brick or any children [S2, unofficial].
++   * Static objects are voxelized once; dynamic objects every frame, differentiated by a flag preventing overwrites [S2, unofficial].
++
++2. **Octree Filtering (LOD Generation):**
++   * Initially, only leaf nodes contain material information [S2, unofficial].
++   * Fill higher octree levels by averaging material properties of child bricks. This is done in separate passes for each level [S2, unofficial].
++   * For global illumination, lights rasterize the scene, writing direction/intensity to leaf nodes, which are then filtered up the octree [S2, unofficial].
++
++3. **Ray Traversal and Cone Tracing (Rendering):**
++   * For each pixel, shoot a ray. The ray performs a top-down traversal of the octree to find the lowest node containing the ray [S2, unofficial].
++   * **Cone Tracing:** The sampling cone width adapts to distance. Close to the camera, the cone is thin, sampling leaf nodes (high detail). Far away, the cone widens, sampling higher octree levels (blurred/averaged data) [S2, unofficial].
++   * **LOD Interpolation:** Perform linear interpolation between adjacent octree levels to get precise LOD, mimicking quadrilinear interpolation [S2, unofficial].
++   * **Brick Sampling:** Sample the brick associated with the current octree node. Use border voxels for hardware interpolation [S2, unofficial].
++
++4. **Ray Marching and Blending:**
++   * Compute minimum ray-box intersection time ($t_{Min}$) by iterating over 6 planes of the node extent. Update plane D values based on `nodeExtentMin/Max`. Only consider intersections where `dirDotN > 0` [S1, unofficial].
++   * Calculate `numSteps = int(distToNodeBoundary / rayStepSize) + 1` [S1, unofficial].
++   * Advance ray position: `rayWorldPosition += rayDir * (numSteps * rayStepSize)` [S1, unofficial].
++   * **Front-to-Back Blending:**
++     * If the node is constant (`constValue.a < 0.005f`), advance ray to exit and return [S1, unofficial].
++     * Loop `numSteps` times:
++       1. Advance `rayWorldPosition` by `worldRayStep` [S1, unofficial].
++       2. If `dst.a > 0.995f`, advance remaining steps and return [S1, unofficial].
++       3. Sample source color/alpha (`src`).
++       4. Update source alpha: $src.a = 1.0 - (1.0 - src.a)^{sampleRatio}$ [S1, unofficial].
++       5. Update source color: $src.rgb *= sampleRatio$ [S1, unofficial].
++       6. Update destination: $dst = (1.0 - dst.a) * src + dst$ [S1, unofficial].
+ 
+ ### Pseudocode
+-
+-```glsl
+-// GLSL-like pseudocode for GigaVoxels rendering
+-
+-// Constants
+-uniform int BrickPoolDimension;
+-uniform int OctTreeDepthMinusOne;
+-uniform float RayStepSize;
+-uniform float LodScalar;
+-
+-// Helper functions from source [S1, unofficial]
+-bool NodeIsConstant(uvec4 octTreeNode) {
+-    uint nodeTypeBits = octTreeNode.r;
+-    return (nodeTypeBits & 0x40000000u) != 0u;
+-}
+-
+-uvec3 GetChildNodePointer(uvec4 octTreeNode) {
+-    uint childNodePtrBits = octTreeNode.r;
+-    return uvec3(
+-        ((childNodePtrBits >> 20u) & 0x000003FFu),
+-        ((childNodePtrBits >> 10u) & 0x000003FFu),
+-        (childNodePtrBits & 0x000003FFu)
+-    );
+-}
+-
+-bool BrickIsLoaded(uvec4 octTreeNode) {
+-    uint brickIsLoadedBits = octTreeNode.r;
+-    return (brickIsLoadedBits & 0x80000000u) != 0u;
+-}
+-
+-vec3 GetBrickPointer(uvec4 octTreeNode) {
+-    uint brickPtrBits = octTreeNode.g;
+-    uint uiS = (brickPtrBits >> 20u) & 0x000003FFu;
+-    uint uiT = (brickPtrBits >> 10u) & 0x000003FFu;
+-    uint uiR = brickPtrBits & 0x000003FFu;
+-    return vec3(float(uiS) / float(BrickPoolDimension), 
+-                float(uiT) / float(BrickPoolDimension), 
+-                float(uiR) / float(BrickPoolDimension));
+-}
+-
+-vec4 GetConstantValue(uvec4 octTreeNode) {
+-    uint constValueBits = octTreeNode.g;
+-    uint red = constValueBits & 0x000000FFu;
+-    constValueBits >>= 8u;
+-    uint green = constValueBits & 0x000000FFu;
+-    constValueBits >>= 8u;
+-    uint blue = constValueBits & 0x000000FFu;
+-    constValueBits >>= 8u;
+-    uint alpha = constValueBits & 0x000000FFu;
+-    return vec4(float(red), float(green), float(blue), float(alpha)) / 255.0f;
+-}
+-
+-// Main traversal and rendering step
+-vec4 RenderGigaVoxels(vec3 rayOrigin, vec3 rayDir, uvec4 rootOctreeNode) {
+-    vec4 dst = vec4(0.0, 0.0, 0.0, 0.0);
+-    vec3 currentRayPos = rayOrigin;
++```python
++def node_is_constant(oct_tree_node):
++    """Check if node type bits indicate a constant value."""
++    node_type_bits = oct_tree_node[0]
++    return (node_type_bits & 0x40000000) != 0
++
++def get_child_node_pointer(oct_tree_node):
++    """Extract 30-bit child pointer split into 3 10-bit indices."""
++    child_ptr_bits = oct_tree_node[0]
++    return (
++        ((child_ptr_bits >> 20) & 0x3FF),
++        ((child_ptr_bits >> 10) & 0x3FF),
++        (child_ptr_bits & 0x3FF)
++    )
++
++def brick_is_loaded(oct_tree_node):
++    """Check if brick loaded flag is set."""
++    brick_loaded_bits = oct_tree_node[0]
++    return (brick_loaded_bits & 0x80000000) != 0
++
++def get_brick_pointer(oct_tree_node, brick_pool_dimension):
++    """Extract 30-bit brick pointer and normalize to [0, 1]."""
++    brick_ptr_bits = oct_tree_node[1]
++    ui_s = (brick_ptr_bits >> 20) & 0x3FF
++    ui_t = (brick_ptr_bits >> 10) & 0x3FF
++    ui_r = brick_ptr_bits & 0x3FF
++    return (ui_s / brick_pool_dimension[0],
++            ui_t / brick_pool_dimension[1],
++            ui_r / brick_pool_dimension[2])
++
++def get_constant_value(oct_tree_node):
++    """Extract 32-bit constant color/alpha value."""
++    const_bits = oct_tree_node[1]
++    red = const_bits & 0xFF
++    const_bits >>= 8
++    green = const_bits & 0xFF
++    const_bits >>= 8
++    blue = const_bits & 0xFF
++    const_bits >>= 8
++    alpha = const_bits & 0xFF
++    return (red / 255.0, green / 255.0, blue / 255.0, alpha / 255.0)
++
++def render_giga_voxels(ray_origin, ray_dir, root_oct_tree_node, brick_pool_dimension, ray_step_size, sample_ratio):
++    dst = (0.0, 0.0, 0.0, 0.0)
++    current_ray_pos = ray_origin
++    current_node = root_oct_tree_node
+     
+-    // Simplified traversal: assume we have a function to find the correct node
+-    // based on ray position and LOD. In practice, this involves cone tracing.
+-    uvec4 currentNode = rootOctreeNode;
+-    
+-    while (currentRayPos is within bounds) {
+-        // Check if node is constant
+-        if (NodeIsConstant(currentNode)) {
+-            vec4 constVal = GetConstantValue(currentNode);
+-            if (constVal.a < 0.005f) {
+-                // Empty or transparent, skip
+-                break; 
+-            }
+-            // Apply constant value blending
+-            // Note: sampleRatio depends on distance to exit
+-            float sampleRatio = 1.0; // Placeholder for actual calculation
+-            float srcA = 1.0 - pow(1.0 - constVal.a, sampleRatio);
+-            vec3 srcRGB = constVal.rgb * sampleRatio;
+-            dst = (1.0 - dst.a) * vec4(srcRGB, srcA) + dst;
+-            if (dst.a > 0.995f) break;
+-            break; // Constant nodes usually don't have children to traverse deeper
+-        }
++    while True:
++        if node_is_constant(current_node):
++            const_val = get_constant_value(current_node)
++            if const_val[3] < 0.005:
++                break
++            src_a = 1.0 - (1.0 - const_val[3]) ** sample_ratio
++            src_rgb = (const_val[0] * sample_ratio, const_val[1] * sample_ratio, const_val[2] * sample_ratio)
++            dst = ((1.0 - dst[3]) * src_rgb[0] + dst[0],
++                   (1.0 - dst[3]) * src_rgb[1] + dst[1],
++                   (1.0 - dst[3]) * src_rgb[2] + dst[2],
++                   (1.0 - dst[3]) * src_a + dst[3])
++            if dst[3] > 0.995:
++                break
++            break
++            
++        if not brick_is_loaded(current_node):
++            # The sources do not specify the brick loading mechanism.
++            break
++            
++        brick_ptr = get_brick_pointer(current_node, brick_pool_dimension)
++        # Standard texture fetch operation
++        src = texture_sample(brick_ptr)
+         
+-        // Check if brick is loaded
+-        if (!BrickIsLoaded(currentNode)) {
+-            // Handle brick loading or skip
+-            // [G] In a full implementation, this would trigger a texture fetch or async load
+-            break; 
+-        }
++        src_a = 1.0 - (1.0 - src[3]) ** sample_ratio
++        src_rgb = (src[0] * sample_ratio, src[1] * sample_ratio, src[2] * sample_ratio)
++        dst = ((1.0 - dst[3]) * src_rgb[0] + dst[0],
++               (1.0 - dst[3]) * src_rgb[1] + dst[1],
++               (1.0 - dst[3]) * src_rgb[2] + dst[2],
++               (1.0 - dst[3]) * src_a + dst[3])
++               
++        if dst[3] > 0.995:
++            break
++            
++        current_ray_pos = current_ray_pos + ray_dir * ray_step_size
++        # The sources do not specify the exact next-node selection logic for traversal.
++        # current_node = get_next_oct_tree_node(current_node, current_ray_pos)
+         
+-        // Get brick pointer and sample
+-        vec3 brickPtr = GetBrickPointer(currentNode);
+-        // [G] Sample brick texture at current ray position relative to brick
+-        // This requires mapping world position to brick local coordinates
+-        vec4 src = texture(BrickSampler, brickPtr); 
+-        
+-        // Front-to-back blending
+-        float sampleRatio = 1.0; // Placeholder for actual step-based calculation
+-        float srcA = 1.0 - pow(1.0 - src.a, sampleRatio);
+-        vec3 srcRGB = src.rgb * sampleRatio;
+-        dst = (1.0 - dst.a) * vec4(srcRGB, srcA) + dst;
+-        
+-        if (dst.a > 0.995f) break;
+-        
+-        // Advance ray
+-        // [G] Calculate numSteps and advance position based on node boundary
+-        // This is a simplified step; actual code uses distToNodeBoundary
+-        currentRayPos += rayDir * RayStepSize;
+-        
+-        // Traverse to next node (child or sibling)
+-        // [G] Logic to determine next node based on ray direction and octree structure
+-        // This is complex and depends on the specific traversal algorithm (e.g., ray-octree intersection)
+-        // For this article, we assume a valid next node is found
+-        currentNode = GetNextOctreeNode(currentNode, currentRayPos);
+-    }
+-    
+-    return dst;
+-}
++    return dst
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Slow Octree Traversal:** The octree is an indirect mechanism. Traversing down to find the correct node before sampling the brick can be slow [S2, unofficial].
+-*   **Non-automatic LOD Interpolation:** Since bricks of different LODs are in the same memory pool, hardware quadrilinear interpolation cannot be used directly. Linear interpolation between levels must be implemented manually [S2, unofficial].
+-*   **Redundant Memory:** Bricks contain neighbor voxels for interpolation, increasing memory usage by ~33% for $8 \times 8 \times 8$ bricks [S2, unofficial].
+-*   **Filtering Complexity:** Determining shared neighbors among bricks during the filtering process is encumbered [S2, unofficial].
+-*   **Precision:** Boundary checks and ray advancement must handle floating-point precision issues, especially near node boundaries [S1, unofficial].
++* **Slow Octree Traversal:** The octree is an indirect mechanism. Traversing down to find the correct node before sampling the brick can be slow [S2, unofficial].
++* **Non-automatic LOD Interpolation:** Since bricks of different LODs are in the same memory pool, hardware quadrilinear interpolation cannot be used directly. Linear interpolation between levels must be implemented manually [S2, unofficial].
++* **Redundant Memory:** Bricks contain neighbor voxels for interpolation, increasing memory usage by ~33% for $8 \times 8 \times 8$ bricks [S2, unofficial].
++* **Filtering Complexity:** Determining shared neighbors among bricks during the filtering process is encumbered [S2, unofficial].
+ 
+ ## Operating characteristics
+-
+ **Time Complexity:**
+-*   Traversal time depends on the depth of the octree and the number of nodes visited per ray. Cone tracing allows for larger step sizes at distance, reducing samples [S2, unofficial].
+-*   Global illumination adds cost due to multiple cone bounces (5 for diffuse, 1 for specular) [S2, unofficial].
++* Traversal time depends on the depth of the octree and the number of nodes visited per ray [S2, unofficial]. Cone tracing allows for larger step sizes at distance, reducing samples [S2, unofficial].
++* Global illumination adds cost due to multiple cone bounces (5 for diffuse, 1 for specular) [S2, unofficial].
+ 
+ **Memory Complexity:**
+-*   Proportional to the number of non-empty/constant voxels.
+-*   Brick pool size is determined by `BrickPoolDimension` and `BrickDimension`.
+-*   Overhead from neighbor voxels in bricks [S2, unofficial].
++* Proportional to the number of non-empty/constant voxels [S2, unofficial].
++* Brick pool size is determined by `BrickPoolDimension` and `BrickDimension` [S1, unofficial].
++* Overhead from neighbor voxels in bricks [S2, unofficial].
+ 
+ **Performance:**
+-*   Enables real-time rendering of large sparse scenes [S2, unofficial].
+-*   Performance degrades if the octree traversal is not optimized or if too many bricks are loaded/unloaded [S2, unofficial].
++* Enables real-time rendering of large sparse scenes [S2, unofficial].
++* Performance degrades if the octree traversal is not optimized or if too many bricks are loaded/unloaded [S2, unofficial].
+ 
+ **Strengths:**
+-*   Sparsity: Does not store empty space.
+-*   Adaptive LOD: Automatic detail selection based on distance.
+-*   Global Illumination: Supports one-bounce GI efficiently [S2, unofficial].
++* Sparsity: Does not store empty space.
++* Adaptive LOD: Automatic detail selection based on distance.
++* Global Illumination: Supports one-bounce GI efficiently [S2, unofficial].
+ 
+ **Limitations:**
+-*   Indirect sampling overhead.
+-*   Manual LOD interpolation.
+-*   Memory overhead from neighbor voxels [S2, unofficial].
++* Indirect sampling overhead.
++* Manual LOD interpolation.
++* Memory overhead from neighbor voxels [S2, unofficial].
+ 
+ ## Background
+-
+ **Origin:**
+ GigaVoxels was introduced by Cyril Crassin et al. in 2011 [S2, unofficial]. It is a key component of the rendering technology behind Unreal Engine 4 [S2, unofficial].
+@@ -237,5 +202,4 @@
+ 
+ ## Sources
+-
+ [S1] apecoraro/VoxVizThesis, https://github.com/apecoraro/VoxVizThesis, fetched 2026-10-27 (unofficial)
+ [S2] http://realtimevoxels.blogspot.fr/2012/09/introduction-to-gigavoxels-and-sparse.html, http://realtimevoxels.blogspot.fr/2012/09/introduction-to-gigavoxels-and-sparse.html, fetched 2026-10-28 (unofficial)

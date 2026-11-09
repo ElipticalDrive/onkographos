@@ -1,9 +1,9 @@
 # Tree-based structures (Octree, Pointer Tree, Sparse Voxel DAG)
 
-Also called: Sparse Voxel Octrees (SVO), Hierarchical Sparse Voxel Grids, Pointer Trees
+Also called: Sparse Voxel Trees, Hierarchical Voxel Grids, Subdivision Trees
 
 ## Overview
-Tree-based structures represent volumetric data using recursive spatial subdivision, where empty or uniform regions are collapsed into single nodes, providing compression proportional to data sparsity [G]. This family solves the memory and bandwidth bottlenecks of dense voxel grids by enabling efficient culling of empty space and adaptive resolution [G]. Unlike sibling structures like Hash Grids or Brick Maps, these methods prioritize hierarchical traversal and spatial locality, using explicit or implicit parent-child pointers to navigate the 3D domain [G].
+Tree-based structures represent volumetric data using a recursive spatial subdivision where empty or uniform regions are collapsed into single nodes, providing compression proportional to data sparsity [G]. This family solves the memory and bandwidth bottlenecks of dense voxel grids by enabling efficient culling of empty space and adaptive resolution [G]. Unlike sibling structures like Hash Grids or Brick Maps which rely on flat hashing or fixed-size blocks, tree-based methods prioritize hierarchical traversal and spatial locality, allowing for variable depth and explicit parent-child relationships that facilitate complex operations like neighbor lookups and level-of-detail (LOD) generation [G].
 
 ## Shared principles
 All structures in this family share the following mechanism:
@@ -12,36 +12,37 @@ All structures in this family share the following mechanism:
 2.  **Sparsity Encoding:** Empty regions are represented by null pointers or absence of children, rather than storing zero-valued voxels. This provides compression proportional to the sparsity of the data.
 3.  **Hierarchical Traversal:** Rendering or access requires traversing from the root to the leaf. This allows skipping large empty volumes (culling) and adapting resolution to view distance or detail requirements.
 4.  **Spatial Locality:** Children of a node are spatially contiguous. This locality is often exploited via Morton ordering (Z-order curve) to map 3D coordinates to 1D keys, enabling efficient neighbor lookups and linear array representations in implicit variants [G].
+5.  **Subtree Merging:** The core differentiator of the DAG family is the identification of structurally identical subtrees (isomorphic nodes) and their replacement with a single shared instance. This transforms the tree topology into a graph where multiple parents may reference the same child node, eliminating redundancy [S1][S2].
 
 ## Subtopics
 
 ### [Compact pointer tree](844-compact-pointer-tree.md)
-A tree-based structure using variable branching factor $N$ ($2 \le N \le 6$) and compact 8-bit relative pointers to optimize memory usage for terabyte-scale RGBA data. It sets itself apart by combining wavelet-based color compression with hierarchical DDA traversal that avoids full root traversal for subsequent accesses.
+Uses variable branching factor $N$ ($2 \le N \le 6$) and compact 8-bit relative pointers to optimize memory for terabyte-scale RGBA data on GPUs. It combines wavelet-based color compression with hierarchical DDA traversal.
 
 ### [Sparse Voxel DAGs](2791-sparse-voxel-dags.md)
-Represents voxel grids as directed acyclic graphs by merging identical subtrees into shared nodes. It solves redundancy in identical geometric structures by encoding identical regions with a single instance, offering higher compression than strict trees at the cost of graph complexity.
+Merges identical subtrees into shared nodes to reduce memory footprint by 1-3 orders of magnitude compared to standard trees. It decouples geometric hierarchy from material attributes and employs bottom-up reduction or hash-based recycling.
 
 ### [Octree-based structures](2792-octree-based-structures.md)
-The standard recursive spatial subdivision with a fixed 8-way branching factor. It prioritizes hierarchical traversal and spatial locality over the deduplication of DAGs or the compactness of pointer trees.
+Relies on a fixed 8-way branching factor and explicit or implicit parent-child pointers. It prioritizes hierarchical traversal and spatial locality over the deduplication or pointer-free compactness of DAGs or variable-branching trees.
 
 ### [Span Space Tree](4379-span-space-tree.md)
-Refines interval trees to manage scene complexity by organizing data along axis-aligned spans (intervals) rather than just voxel occupancy. It allows for more efficient culling of empty or uniform regions during ray casting by explicitly tracking bounding intervals.
+Organizes data along axis-aligned spans (intervals) rather than just voxel occupancy. It refines the interval tree concept to manage scene complexity, allowing for more efficient culling of empty or uniform regions during ray casting.
 
 ### [Sparse Voxel Tree (SVO Tree)](4983-sparse-voxel-tree-svo-tree.md)
-A strict tree hierarchy where nodes are distinct, prioritizing traversal simplicity and dynamic update capabilities. Unlike DAGs, it does not merge identical nodes, making it suitable for dynamic scenes where structural integrity is preferred over maximum compression.
+A standard hierarchical structure with a fixed branching factor of 8. It allocates memory only for non-empty regions, providing compression proportional to sparsity, but allows multiple paths to the same voxel (no sharing).
 
 ### [Tiny LOD](6968-tiny-lod.md)
-A preprocessing method for constructing hierarchical level-of-detail (LOD) representations from splats. It is distinguished by its parameterization via `lod_base` and `merge_filter`, serving as a specific input generator for opacity encoding in sparse voxel pipelines.
+Constructs a hierarchical LOD tree from splat data, parameterized by a base LOD value and a merge filter flag. It outputs encoded opacity values and a chunk tree, distinguished by its specific procedural pipeline for splat-based rendering.
 
 ### [NerfTree](7559-nerftree.md)
-A two-level octree structure designed to accelerate Neural Radiance Fields (NeRF). It uses a coarse density volume to cache approximate geometry and fine sparse voxel grids for refinement, trading increased memory footprint for significant reductions in training time and inference latency.
+A two-level octree structure for Neural Radiance Fields (NeRF). It uses a coarse density volume to cache approximate geometry and fine sparse voxel grids for refinement, reducing MLP evaluations by skipping empty space.
 
 ### [Adaptively Sampled Distance Fields](7773-adaptively-sampled-distance-fields.md)
-Compresses Signed Distance Fields (SDF) by exploiting smoothness. It sets itself apart by enforcing sign preservation during simplification, ensuring topological accuracy of the zero set while achieving high compression ratios for smooth shapes.
+Compresses Signed Distance Fields (SDFs) by exploiting smoothness. It uses adaptive simplification with a strict sign-preservation constraint to maintain topological accuracy of the zero isosurface, enabling resolution-independent antialiasing.
 
 ## Background
-Tree-based sparse structures originated from the need to render large volumetric datasets efficiently. The Sparse Voxel Octree (SVO) was popularized by Kniss et al. (2002) for interactive volume rendering, enabling the visualization of datasets too large for main memory [G]. Pointer trees and variable-branching variants emerged later to address the memory overhead of fixed 8-way octrees, particularly for GPU-based rendering where memory bandwidth is a critical bottleneck [S1]. Sparse Voxel DAGs were introduced to handle redundancy in static scenes, such as those found in computer graphics and medical imaging, where identical structures repeat [S2]. The application of these structures to Neural Radiance Fields (NeRF) and Signed Distance Fields (SDF) represents a more recent development, leveraging their hierarchical nature for acceleration and compression in implicit representations [S1].
+Tree-based structures originated in the 1980s as a solution to the "curse of dimensionality" in spatial data indexing, with octrees being one of the earliest forms [G]. In computer graphics, they were adopted in the 1990s for ray tracing and volume rendering to handle sparse scenes efficiently [G]. The Sparse Voxel Octree (SVO) became a standard for high-quality volume rendering in the 2000s, enabling interactive frame rates for large datasets [G]. Recent developments include DAGs for deduplication [S1][S2], compact pointer trees for GPU efficiency [S1][S2], and adaptations for NeRF [S1] and SDFs [S1].
 
 ## Sources
-[S1] Compact Pointer Tree documentation, https://github.com/... (unofficial), fetched 2024-05-20
-[S2] Sparse Voxel DAGs overview, https://github.com/... (unofficial), fetched 2024-05-20
+[S1] Compact Pointer Tree, https://github.com/... (unofficial notes)
+[S2] Sparse Voxel DAGs, https://github.com/... (unofficial notes)

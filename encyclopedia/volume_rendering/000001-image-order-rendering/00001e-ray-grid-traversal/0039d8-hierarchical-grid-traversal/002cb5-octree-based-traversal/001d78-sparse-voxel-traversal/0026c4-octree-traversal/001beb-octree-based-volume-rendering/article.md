@@ -1,143 +1,175 @@
 # Octree-based Volume Rendering
 
-Also called: Chamberlain's algorithm, LaMar's algorithm, Octree Approach (Baseline), Weiler's smoothing
+Also called: Chamberlain's algorithm, LaMar's algorithm, Octal tree structure for volume rendering, Octree Approach (Baseline), Octree on a GPU, Octree-based Volume Rendering with Adaptive Sampling, Weiler's smoothing
 
 ## Overview
-Octree-based Volume Rendering is a baseline image-order rendering method that uses a one-to-one mapping of data bricks to octree nodes for spatial subdivision and empty-space culling [S2]. It solves the problem of efficiently rendering volumetric data by recursively traversing an octree hierarchy to skip empty regions and adaptively select levels of detail based on projected size or field-of-view criteria [S1, unofficial]. It is distinguished from its siblings by its explicit use of LOD selection criteria (Chamberlain/LaMar) and smoothing extensions (Weiler) to manage visual artifacts at detail boundaries, whereas other methods may focus purely on traversal optimization or specific data structures like hash grids [S1, unofficial][S2].
+Octree-based volume rendering accelerates the visualization of volumetric datasets by using a hierarchical octree structure to skip invisible voxels and reduce sampling in uniform areas [S2, unofficial][S3]. It solves the problem that only a small percentage of voxels contribute to the final image, while the rest remain invisible [S2, unofficial]. It is distinguished from its siblings, such as [Hierarchical Traversal](896-hierarchical-traversal.md) and [Residency Octree Traversal](3073-residency-octree-traversal.md), by its specific use of a one-to-one mapping of bricks to octree nodes for culling and spatial subdivision, often relying on CPU-side or unified memory traversal logic rather than specialized GPU residency caches [S3].
 
 ## How it works
-**Inputs:** Volumetric dataset (organized into bricks or uniform blocks), camera parameters (position, view frustum, field-of-view), transfer functions (defining opacity/density thresholds for "empty" space), and a predefined LOD threshold for projected size.
-**Outputs:** Rendered image.
+**Inputs and Outputs:**
+*   **Input:** A volumetric dataset (scalar field), a transfer function mapping scalar values to RGBA, and camera parameters (position, orientation, field of view).
+*   **Output:** A 2D image with accumulated color and opacity.
 
 **Data Structures:**
-*   **Octree:** A hierarchical tree where each internal node has up to 8 children.
-*   **Bricks:** Uniform blocks of volumetric data mapped one-to-one to octree nodes [S2].
-*   **Cache:** A memory structure holding resident bricks. The method requires entire subtrees to be resident for high-resolution regions [S2].
+*   **Octree:** A hierarchical tree where each parent node contains 0 or 8 children, achieving a 2x2x2 regular subdivision of the parent node into 8 equal parts or 'leaves' [Parent].
+*   **Node Metadata:** Each node stores a `visibility_ratio`, defined as the ratio of visible data to the total amount of data in the cube [S2, unofficial].
+    *   At the leaf level, a node represents one cell that is either completely filled or empty.
+    *   For higher levels, `visibility_ratio` is calculated by averaging the ratios of its 8 children [S2, unofficial].
+*   **Empty Cell Condition:** A cell is considered completely empty only if its eight angular (corner) values are completely transparent after applying the transfer function [S2, unofficial].
 
-**Steps:**
+**Parameters:**
+*   **Adaptive Sampling Threshold:** A predefined threshold for projected size or angular difference to trigger additional sampling points [S1, S2, unofficial].
+*   **LaMar's FOV Threshold:** Nodes are selected if their projected angle is less than half the field-of-view angle [S1, unofficial].
+*   **Early Stopping (PlenOctree variant):** Accumulated transmittance $T_i < \gamma = 0.01$ [S4, unofficial].
 
-1.  **Preprocessing:** Perform octree subdivision of the volumetric data. Assign bricks to octree nodes [S1, unofficial][S2].
-2.  **Initialization:** Start traversal at the third level of the octree (not the root) to optimize performance. Resume traversal from the parent node of the last visited sample's node for the next sample [S2].
-3.  **Ray Traversal & Selection:** For each ray (or pixel), traverse the octree recursively. At each node, apply selection criteria to determine if the node should be expanded or approximated:
-    *   **Chamberlain's Criterion:** Compute the projected size of the octree node on the image plane on the fly. If the projected size is smaller than a predefined threshold, consider the node sufficiently accurate to approximate all nodes below it (stop recursion) [S1, unofficial].
-    *   **LaMar's Criterion:** Use two filters:
-        1.  **Distance:** Similar to Chamberlain, based on projected size.
-        2.  **Field-of-View:** Discard nodes that do not intersect the view frustum. Select nodes whose projected angle is less than half the field-of-view angle [S1, unofficial].
-4.  **Rendering:** If a node is selected for expansion, render its contents (bricks). If a node is approximated, use the aggregated data of the node to render the region [S1, unofficial].
-5.  **Smoothing (Optional):** Apply Weiler's smoothing technique to reduce discontinuity artifacts at the boundaries of different levels of detail caused by inconsistencies of the view-plane at different LODs [S1, unofficial].
-6.  **Multi-Channel Handling:** For multi-channel rendering, traverse the octree separately for each channel. This ensures that all required subtrees remain cache resident for all channels, even if the visibility differs per channel [S2].
+**Algorithm Steps:**
+
+1.  **Preprocessing:**
+    *   Perform octree subdivision of the volumetric data [S1, unofficial].
+    *   Calculate the `visibility_ratio` for each node. This calculation depends on the transfer function and must be recalculated if the transfer function changes [S2, unofficial].
+    *   For multi-channel rendering, this preprocessing is performed per channel or requires ensuring all required subtrees remain cache resident [S3].
+
+2.  **Traversal Initialization:**
+    *   Start traversal at the third level of the octree (or from the parent node of the last visited sample's node) to optimize performance [S1, unofficial][S3].
+    *   For each ray, determine intersections with the octree structure [S4, unofficial].
+
+3.  **Node Selection and Culling:**
+    *   **Chamberlain's Criterion:** Compute the projected size of each octree node on the fly. If the size is smaller than a predefined threshold, consider the node sufficiently accurate to approximate all nodes below it [S1, unofficial].
+    *   **LaMar's Criterion:** Use two criteria: distance (similar to Chamberlain) and field-of-view. Discard nodes that do not intersect the view frustum. Select nodes whose projected angle is less than half the field-of-view angle [S1, unofficial].
+    *   **Empty Space Skipping:** If a node's `visibility_ratio` indicates it is empty (all corners transparent), skip the node entirely [S2, unofficial][S3].
+
+4.  **Adaptive Sampling:**
+    *   Perform adaptive sampling along the ray segment within the node [S2, unofficial].
+    *   Take a large step between selection points when the beam passes through uniform areas.
+    *   If there is a large difference in values between two neighboring selection points, select an additional point between them [S2, unofficial].
+    *   This reduces sample size in areas where opacity makes a small contribution or where the volume is uniform [S2, unofficial].
+
+5.  **Rendering and Blending:**
+    *   **Trilinear Interpolation:** Define a cell as a cube whose eight corners are adjacent to voxel values. The intensity value for each position inside the cell is defined as a trilinear interpolation of angular values [S2, unofficial].
+    *   **Sorting:** During traversal, sort children of a node in front-to-back order [S2, unofficial].
+    *   **Rasterization:** While a node is to be drawn, slice the cuboid box corresponding to this node. Rasterize the slices and blend them into the previously drawn slices [S2, unofficial].
+    *   **PlenOctree Variant:** For each ray, produce a sequence of segments between voxel boundaries with constant density and color, of lengths $\{\delta_i\}$. Apply NeRF's volume rendering model:
+        $$ C(r) = \sum_{i=0}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) c_i $$
+        where $T_i = \exp(-\sum_{j=0}^{i-1} \sigma_j \delta_j)$ [S4, unofficial].
+    *   **Early Stopping:** Stop rendering when the accumulated transmittance $T_i$ is less than $\gamma = 0.01$ [S4, unofficial].
+
+6.  **Smoothing (Optional):**
+    *   Apply an extension (Weiler's smoothing) to smooth discontinuity artifacts at LOD boundaries caused by inconsistencies of the view-plane at different levels of detail [S1, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_octree_volume(camera, octree, cache, transfer_functions):
-    """
-    Renders volume using octree traversal with LOD selection.
-    camera: object with get_ray(), get_fov(), get_frustum()
-    octree: root node of the octree structure
-    cache: memory cache for bricks
-    transfer_functions: list of TFs, one per channel
-    """
-    # Start traversal at level 3 as per optimization [S2]
-    start_level = 3
+def render_octree_volume(ray_origin, ray_direction, octree_root, transfer_function, camera):
+    # Start traversal from a cached node or third level if available, else root
+    current_node = get_cached_parent_node(ray_origin, ray_direction) or octree_root
     
-    for pixel in image_pixels:
-        ray = camera.get_ray(pixel)
-        last_node = octree
+    accumulated_color = vec3(0.0)
+    accumulated_transmittance = 1.0
+    
+    # Traverse nodes along the ray
+    nodes_to_process = [current_node]
+    
+    while nodes_to_process:
+        node = nodes_to_process.pop()
         
-        # Traverse from parent of last visited node [S2]
-        current_node = get_parent_of(last_node) 
-        if current_node is None:
-            current_node = get_node_at_level(octree, start_level)
+        # 1. Culling: Check if node intersects view frustum and ray
+        if not intersects_frustum(node, camera) or not intersects_ray(node, ray_origin, ray_direction):
+            continue
             
-        render_ray(ray, current_node, cache, transfer_functions, accumulated_transmittance=1.0)
-        last_node = current_node # Update for next pixel optimization
-
-def render_ray(ray, node, cache, transfer_functions, transmittance):
-    """
-    Recursive traversal and rendering of an octree node.
-    """
-    # Check if node is in cache; if not, load required subtree [S2]
-    if not is_in_cache(node):
-        load_subtree(node, cache)
+        # 2. Empty Space Skipping
+        if is_empty(node, transfer_function):
+            continue
+            
+        # 3. Selection Criteria (Chamberlain/LaMar)
+        projected_size = compute_projected_size(node, camera)
+        if projected_size > threshold:
+            # Node is too large/complex, push children
+            children = get_children(node)
+            # Sort children front-to-back
+            children.sort_by_depth(ray_origin, ray_direction)
+            nodes_to_process.extend(children)
+            continue
+        else:
+            # Node is small enough to approximate or render directly
+            pass
+            
+        # 4. Adaptive Sampling within Node
+        samples = generate_adaptive_samples(node, ray_origin, ray_direction, transfer_function)
         
-    # Selection Criteria: Chamberlain/LaMar [S1, unofficial]
-    projected_size = compute_projected_size(node, ray.camera)
-    projected_angle = compute_projected_angle(node, ray.camera)
-    fov = ray.camera.get_fov()
-    
-    # Chamberlain: stop if projected size < threshold
-    # LaMar: stop if projected angle < fov/2 AND intersects frustum
-    is_leaf_approximation = False
-    
-    if node.is_leaf():
-        is_leaf_approximation = True
-    else:
-        # LaMar's Field-of-View check
-        intersects_frustum = ray.camera.get_frustum().intersects(node.bounding_box)
-        if not intersects_frustum:
-            return # Cull node
+        # 5. Rendering
+        for sample in samples:
+            # Trilinear interpolation of corner values
+            value = trilinear_interpolate(node, sample.position)
+            rgba = transfer_function(value)
             
-        if projected_angle < fov / 2.0:
-            is_leaf_approximation = True
-            
-    if is_leaf_approximation:
-        # Render using aggregated node data (approximation)
-        color = render_node_aggregate(node, ray, transmittance)
-        apply_smoothing(color, node) # Weiler's smoothing [S1, unofficial]
-        accumulate_pixel(pixel, color, transmittance)
-    else:
-        # Recurse into children
-        for child in node.children:
-            render_ray(ray, child, cache, transfer_functions, transmittance)
+            # Volume rendering integration
+            if rgba.a > 0:
+                color_contribution = rgba.rgb * rgba.a * accumulated_transmittance
+                accumulated_color += color_contribution
+                accumulated_transmittance *= (1.0 - rgba.a)
+                
+            # Early stopping
+            if accumulated_transmittance < 0.01:
+                break
+                
+    return accumulated_color
 
-def apply_smoothing(color, node):
-    """
-    Applies Weiler's smoothing to reduce LOD boundary artifacts [S1, unofficial].
-    Implementation detail: Not given in the sources. [G]
-    """
-    pass
+def is_empty(node, transfer_function):
+    # A cell is completely empty only if its eight angular values are completely transparent
+    corners = get_node_corners(node)
+    for corner in corners:
+        value = sample_voxel(corner)
+        if transfer_function(value).a > 0:
+            return False
+    return True
+
+def generate_adaptive_samples(node, origin, direction, transfer_function):
+    # Take large step between selection points
+    step_size = compute_large_step(node)
+    samples = []
+    t = 0.0
+    while t < node.depth:
+        pos = origin + direction * t
+        # Check difference with previous point
+        if len(samples) > 0:
+            prev_val = sample_voxel(samples[-1].pos)
+            curr_val = sample_voxel(pos)
+            if abs(prev_val - curr_val) > threshold_diff:
+                # Insert additional point
+                mid_pos = (samples[-1].pos + pos) / 2
+                samples.append(Sample(mid_pos))
+        samples.append(Sample(pos))
+        t += step_size
+    return samples
 ```
-
-**Parameters:**
-*   **LOD Threshold:** Predefined threshold for projected size (Chamberlain) or angle (LaMar). Typical value: Not given in the sources.
-*   **Start Level:** Level to begin traversal. Value: 3 [S2].
-*   **Gamma (Early Stopping):** Not explicitly defined for this baseline method in the provided notes, though common in ray marching. [G]
-
-**Edge Cases and Pitfalls:**
-*   **Visual Artifacts:** Substantial visual artifacts appear at the boundaries of different levels of detail due to inconsistencies of the view-plane at different LODs [S1, unofficial].
-*   **Memory Overhead:** Rendering high-resolution regions requires entire subtrees to be resident in cache. This increases memory overhead, especially for anisotropic volumes or 2D downsampling, where the overhead ratio can be 1/3 vs 1/7 for isotropic data [S2].
-*   **Multi-Channel Cost:** In multi-channel scenarios, the octree must be traversed separately for each channel to guarantee all required subtrees remain cache resident, leading to higher computational cost and memory footprint [S2].
-*   **Memory Limit:** The method has an inability to reduce the volumetric data size in main memory, limiting the ability to render datasets larger than main memory size [S1, unofficial].
 
 ## Subtopics
 
 ### [Octree-based Volume Rendering with Wavelet Leaves](6683-octree-based-volume-rendering-with-wavelet-leaves.md)
-This method renders volumetric data by combining an octree for spatial subdivision with a multi-resolution wavelet representation stored in leaf nodes. It solves the problem of rendering large-scale datasets (gigabytes) on distributed clusters with limited per-node texture memory by enabling early termination of traversal in empty space and progressive refinement of detail. It is distinguished from standard Octree-based Volume Rendering by the specific use of 3D non-standard Haar wavelets in leaves to support incremental loading and frustum-clipping-based memory management.
+Combines an octree for spatial subdivision with 3D non-standard Haar wavelets in leaf nodes. Distinguished by enabling incremental loading and frustum-clipping-based memory management for large-scale datasets on distributed clusters.
 
 ### [Hierarchical Volume Rendering for Cloud Surface](9989-hierarchical-volume-rendering-for-cloud-surface.md)
-This method renders cloud surfaces in regimes where the diffusion approximation is invalid, specifically at cloud edges where single scattering and low-order multiple scattering break directional independence. It solves this by using hierarchical volume rendering with opacities $\rho(X)\sigma_t$ and voxel colors $I_0(X)$, selecting view-dependent octree cubes based on projected area-weighted approximation errors. It is distinguished from standard octree volume rendering by its specific use of least-squares approximations for color and opacity combined with a hardware cell-projection compositing step.
+Renders cloud surfaces using opacities $\rho(X)\sigma_t$ and voxel colors $I_0(X)$ with view-dependent octree cubes based on projected area-weighted approximation errors. Distinguished by its use of least-squares approximations and hardware cell-projection compositing.
 
 ### PlenOctree Rendering
-PlenOctree Rendering converts a trained NeRF-SH model into a sparse octree representation for real-time rendering [S3, unofficial]. For each ray, it determines ray-voxel intersections in the octree structure, producing a sequence of segments between voxel boundaries with constant density and color, of lengths $\{\delta_i\}$ [S3, unofficial]. It applies NeRF's volume rendering model:
-$$ C(r) = \sum_{i=0}^N T_i (1 - \exp(-\sigma_i \delta_i)) c_i $$
-where $T_i = \exp(-\sum_{j=0}^{i-1} \sigma_j \delta_j)$ [S3, unofficial]. At test-time, it employs early-stopping by stopping rendering when the accumulated transmittance $T_i$ is less than $\gamma = 0.01$ [S3, unofficial].
+Converts a trained NeRF-SH model into a sparse octree representation for real-time rendering. Uses NeRF's volume rendering model with early stopping at transmittance < 0.01 [S4, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the sparsity of the volume and the LOD selection criteria. For dense volumes, the overhead of traversing the tree is not compensated by empty space skipping, leading to higher computational cost compared to methods that skip more aggressively [S2].
-*   **Memory Complexity:** Requires storing the octree structure and resident bricks. For high-resolution regions, entire subtrees must be resident, increasing memory usage [S2]. Anisotropic volumes or 2D downsampling increase this overhead (ratio 1/3 vs 1/7) [S2].
-*   **Measured Performance:** In benchmarks using a 4 GB cache and 323 bricks, the octree approach achieved frame rates comparable to residency-based methods for single-channel data but suffered performance penalties for multi-channel data due to per-channel traversal [S2]. It performs best on sparse volumes (e.g., Kingsnake, Beechnut, 3DNeurons) where empty space skipping is effective [S2].
-*   **Strengths:** Effective empty-space skipping for sparse volumes; adaptive LOD reduces rendering cost for distant/small features; simple one-to-one brick mapping [S1, unofficial][S2].
-*   **Limitations:** High memory overhead for dense/high-res regions; visual artifacts at LOD boundaries; poor performance on dense volumes; inability to handle datasets larger than main memory [S1, unofficial][S2].
-*   **When to Use:** Sparse volumetric datasets where empty space skipping provides significant performance gains; single-channel rendering; scenarios where adaptive LOD is beneficial.
-*   **When Not to Use:** Dense volumetric datasets; multi-channel rendering where memory bandwidth is a bottleneck; datasets larger than available main memory; applications requiring seamless LOD transitions without smoothing artifacts.
+*   **Time Complexity:** Depends on the depth of the octree and the sparsity of the data. In sparse volumes, it achieves significant speedups by skipping empty space [S3]. In dense volumes, the overhead of tree traversal may not be compensated by empty space skipping [S3].
+*   **Memory Complexity:** Requires storing the octree structure in main memory or cache. For multi-channel rendering, entire subtrees must be resident in cache, leading to higher memory overhead (overhead ratio 1/3 for anisotropic volumes vs 1/7 for others) [S3].
+*   **Measured Performance:** On an Intel Core 2 CPU E8400 3.0 GHz and GeForce 8800 GTX with $512^3$ scenes, the optimized version achieved 80 frames per second compared to 9 frames per second for the non-optimized version [S2, unofficial].
+*   **Strengths:** Eliminates rasterization as a bottleneck by skipping invisible data; effective for sparse datasets [S2, unofficial][S3].
+*   **Limitations:** Substantial visual artifacts at LOD boundaries due to view-plane inconsistencies [S1, unofficial]; inability to reduce volumetric data size in main memory limits rendering of datasets larger than available memory [S1, unofficial]; high computational cost and memory footprint in multi-channel scenarios due to per-channel tree traversal [S3].
+*   **When to use:** Sparse volumetric data where empty space skipping provides significant gains; interactive applications requiring adaptive sampling [S2, unofficial].
+*   **When not to use:** Dense volumes where traversal overhead dominates; scenarios with limited main memory for large datasets [S1, unofficial][S3].
 
 ## Background
-The octree spatial hierarchy was first proposed for volume rendering by Chamberlain et al. [S1, unofficial]. They initially applied it to surface (polygonal) geometry rendering, using octree subdivision in preprocessing and recursive traversal during rendering, with on-the-fly projected size computation for LOD selection [S1, unofficial]. LaMar et al. later developed a similar technique, adding distance and field-of-view criteria to improve speed [S1, unofficial]. Weiler et al. proposed an extension to smooth the discontinuity artifacts that appeared at LOD boundaries in these early methods [S1, unofficial]. A common problem identified in these early algorithms was the inability to reduce volumetric data size in main memory, limiting scalability [S1, unofficial].
+The octree spatial hierarchy was first proposed by Chamberlain et al. for rendering surface geometry, later adapted for volume rendering [S1, unofficial]. LaMar et al. developed a similar technique with improved selection criteria (distance and field-of-view) [S1, unofficial]. Weiler et al. proposed extensions to smooth discontinuity artifacts at LOD boundaries [S1, unofficial]. The method is widely used in GPU-accelerated volume rendering pipelines to optimize performance by leveraging spatial coherence and transfer function-based culling [S2, unofficial].
 
 ## Sources
 [S1] A system for real-time rendering of compressed time-varying volume data, https://doi.org/10.7939/r3041m, fetched 2026-10-26 (unofficial)
-[S2] Residency Octree: A Hybrid Approach for Scalable Web ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC10840607/, fetched 2026-10-29
-[S3] PlenOctrees For Real-time Rendering of Neural Radiance Fields (NeRFs), http://alexyu.net/plenoctrees/, fetched 2026-10-28 (unofficial)
+[S2] Optimized volume rendering using octree on a GPU, https://ir.lib.vntu.edu.ua/bitstream/123456789/30555/1/%d0%a2%d0%b5%d0%b7%d0%b8_%d0%9c%d0%9a%d0%9c%d0%9c_2020-53-54.pdf, fetched 2026-10-26 (unofficial)
+[S3] Residency Octree: A Hybrid Approach for Scalable Web ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC10840607/, fetched 2026-10-29
+[S4] PlenOctrees For Real-time Rendering of Neural Radiance Fields (NeRFs), http://alexyu.net/plenoctrees/, fetched 2026-10-28 (unofficial)

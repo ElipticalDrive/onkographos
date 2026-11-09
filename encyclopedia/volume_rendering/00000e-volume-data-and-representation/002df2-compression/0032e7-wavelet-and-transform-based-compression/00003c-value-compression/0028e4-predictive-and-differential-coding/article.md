@@ -1,17 +1,23 @@
 # Predictive and Differential Coding
 
-Also called: Predictive Coding, Differential Pulse Code Modulation (DPCM), Residual Coding
+Also called: Differential Pulse Code Modulation (DPCM), Linear Predictive Coding (LPC), Residual Coding
 
 ## Overview
-Predictive and Differential Coding compresses volumetric data by exploiting spatial, temporal, or directional coherence to store only the difference (residual) between a predicted value and the actual value, rather than the absolute values [S1, unofficial][S2]. This method solves the problem of high redundancy in datasets where voxel values change little between time steps, vary progressively across a heightfield, or exhibit strong local correlation [S1, unofficial][S2]. Unlike sibling methods that use complex linear transforms or block-based quantization, predictive coding relies on local neighbor estimation to generate residuals that are often zero or small, allowing for efficient entropy coding [S1, unofficial][S2].
+Predictive and Differential Coding compresses volumetric data by exploiting spatial or temporal coherence to predict voxel values, storing only the difference (residual) between the prediction and the actual value. This method solves the problem of high redundancy in datasets where values change little between time steps or vary progressively across space, converting correlated data into residuals that are often zero or small, which compress efficiently with entropy coding [S1, unofficial][S2]. Unlike transform-based methods that decompose the entire volume into frequency coefficients, predictive coding operates directly on the spatial domain (or transform coefficients) using local neighbor dependencies, often achieving higher compression ratios for smooth or slowly varying data [S1, unofficial][S2]. It sets itself apart from siblings like [Triadic frequency band decomposition](828-triadic-frequency-band-decomposition.md) by focusing on local prediction errors rather than multi-resolution subband structures, and from [Vector Quantization](907-vector-quantization.md) by encoding residuals individually rather than grouping them into codebooks.
 
 ## Shared principles
-All methods in this family share the mechanism of estimating a current sample value $\hat{v}$ from previously processed neighbors or reference frames, computing a residual $d = v - \hat{v}$, and encoding $d$ [S1, unofficial][S2].
+All methods in this family share the mechanism of estimating a current sample value $\hat{v}$ from previously encoded or reconstructed neighbors, computing a residual $d = v - \hat{v}$, and encoding $d$ using entropy coding.
 
-1.  **Prediction Model:** The core of the method is the predictor $\hat{v}$. This can be a simple identity (previous value), a linear combination of spatial neighbors, or a transform-domain reference. The predictor must be causal (using only already-encoded data) for lossless streaming or use a closed-loop reference for temporal consistency [S1, unofficial][S2].
-2.  **Residual Generation:** The residual $d$ represents the error of the prediction. If the data is smooth or coherent, $d$ will have low variance or be zero, which is highly compressible [S1, unofficial][S2].
-3.  **Entropy Encoding:** The residuals are encoded using entropy coding (e.g., Huffman, Arithmetic, Run-Length) [S1, unofficial][S2]. The efficiency depends on the accuracy of the prediction; better prediction yields smaller residuals and higher compression ratios [S1, unofficial][S2].
-4.  **Reconstruction:** The decoder applies the same prediction model to the already-reconstructed neighbors to generate $\hat{v}$, then adds the decoded residual $d$ to recover $v$: $v_{reconstructed} = \hat{v} + d$ [S1, unofficial][S2].
+1.  **Prediction Model:** The predictor $\hat{v}$ is a function of previously visited neighbors. Common models include:
+    *   **Identity/Temporal:** $\hat{v}_t = v_{t-1}$ (for time-varying data) [S1, unofficial].
+    *   **Spatial Linear:** $\hat{v} = \sum a_i v_i$, where $v_i$ are spatial neighbors and $a_i$ are coefficients [S1, unofficial].
+    *   **Isotropic:** Using all $2^n - 1$ neighbors in an $n$-dimensional grid [S1, unofficial].
+    *   **Directional:** Selecting a scan direction that minimizes residual entropy [S1, unofficial].
+2.  **Residual Calculation:** The residual is the difference between the actual value $v$ and the prediction $\hat{v}$:
+    $$ d = v - \hat{v} $$
+    [S1, unofficial][S3]
+3.  **Entropy Encoding:** The residuals $d$ are encoded using entropy coding (e.g., Huffman, Arithmetic, Range Coding). The efficiency depends on the variance of $d$; lower variance leads to higher compression [S1, unofficial].
+4.  **Causality:** Predictors must be causal, using only values already encoded or reconstructed to avoid lookahead dependencies [S1, unofficial].
 
 ## Subtopics
 
@@ -30,17 +36,20 @@ This method is a lossless compression algorithm for 3D volume data that exploits
 ### [Lorenz Predictor with Arithmetic Coding](8070-lorenz-predictor-with-arithmetic-coding.md)
 The Lorenz Predictor with Arithmetic Coding is a predictive compression method for $n$-dimensional scalar fields that estimates a sample value from its $2^n - 1$ immediate neighbors in a regular grid to generate residuals, which are then encoded using arithmetic coding. It is distinguished from anisotropic scanline predictors by exploiting data coherence in all dimensions isotropically and is the simplest isotropic predictor capable of exactly reconstructing all polynomials of degree less than $n$.
 
+### [RDLS-SS-DWT+Pred](11251-rdls-ss-dwt-pred.md)
+RDLS-SS-DWT+Pred is a lossless volumetric compression method that constructs a hybrid transform by applying predictive coding to the final subbands of a Reversible Denoising Lifting Steps with Step Skipping Discrete Wavelet Transform (RDLS-SS-DWT). It solves the problem of high entropy in transformed volumetric data by reducing residual variance through spatial prediction, specifically leveraging the characteristics of subbands generated when Null filters are used in the RDLS stage. It sets itself apart from its parent [Predictive and Differential Coding](4393-predictive-and-differential-coding.md) by integrating prediction into a multi-level 3D wavelet hierarchy rather than applying it directly to raw voxels, and from its sibling [SS-DWT+Pred](5256-residual-updates-in-transform-domain.md) by optionally including reversible denoising lifting steps, though sources indicate the denoising steps may be omitted without significant bitrate loss.
+
 ### Directional Linear Predictive Coding
 - **Definition:** Compresses hologram interference patterns losslessly by exploiting directional correlation using DPCM and linear prediction [S1, unofficial].
 - **Steps:**
-    1. Segment interference patterns into blocks [S1, unofficial].
-    2. Scan the pixels in eight directions for each block [S1, unofficial].
-    3. Calculate entropy in each direction [S1, unofficial].
-    4. Determine the direction with minimum entropy [S1, unofficial].
-    5. Encode the difference by DPCM in the determined direction [S1, unofficial].
-    6. Calculate prediction coefficients for the determined direction [S1, unofficial].
-    7. Use DPCM only to determine the prediction direction for the original pixel [S1, unofficial].
-    8. Calculate the difference between the predicted and the original pixel [S1, unofficial].
+    1.  Segment interference patterns into blocks [S1, unofficial].
+    2.  Scan the pixels in eight directions for each block [S1, unofficial].
+    3.  Calculate entropy in each direction [S1, unofficial].
+    4.  Determine the direction with minimum entropy [S1, unofficial].
+    5.  Encode the difference by DPCM in the determined direction [S1, unofficial].
+    6.  Calculate prediction coefficients for the determined direction [S1, unofficial].
+    7.  Use DPCM only to determine the prediction direction for the original pixel [S1, unofficial].
+    8.  Calculate the difference between the predicted and the original pixel [S1, unofficial].
 - **Performance:** The first process (directional DPCM) achieved a compression rate of 26.7% [S1, unofficial].
 
 ### JPEG-LS
@@ -54,7 +63,7 @@ The Lorenz Predictor with Arithmetic Coding is a predictive compression method f
 - **Definition:** An approach similar to inter-frame delta encoding but encoding data with a functional representation based on spherical ellipsoids [S3].
 
 ## Background
-Predictive coding has been widely applied to volumetric data compression, particularly in medical imaging and time-varying datasets. Early work included the application of 3-D/2-D MLZC and JPEG-LS for medical data, where JPEG-LS showed strong performance for specific datasets like ANGIO [S2]. For time-varying volumes, methods such as inter-frame delta encoding with Haar wavelets and functional representations using spherical ellipsoids have been proposed to exploit temporal coherence [S3]. More recent applications include lossless linear predictive coding for holographic display of volume data, which exploits directional correlation in interference patterns [S1, unofficial]. The method is fundamental to many modern compression standards and custom codecs for GPU-based direct volume rendering.
+Predictive coding has been a fundamental technique in image and video compression for decades, adapted for volumetric data to handle the increased dimensionality and correlation. Early applications in volume rendering focused on lossless compression of medical datasets, where spatial smoothness is high [S2]. The method gained prominence in GPU-based direct volume rendering systems to reduce memory bandwidth and storage requirements [S3]. Specific adaptations, such as the Lorenz predictor, were developed to handle isotropic coherence in $n$-dimensional data [S1, unofficial]. More recent variants integrate predictive coding with wavelet transforms (e.g., RDLS-SS-DWT+Pred) to handle both global frequency structure and local spatial redundancy [S1, unofficial].
 
 ## Sources
 [S1] Holographic display method for volume data by volume rendering, https://www.researchgate.net/publication/330223296_Holographic_display_method_for_volume_data_by_volume_rendering, fetched 2026-10-27 (unofficial)
