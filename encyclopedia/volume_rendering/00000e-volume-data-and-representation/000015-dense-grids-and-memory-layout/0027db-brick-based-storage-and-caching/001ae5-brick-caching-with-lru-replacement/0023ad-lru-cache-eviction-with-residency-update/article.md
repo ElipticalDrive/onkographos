@@ -1,6 +1,5 @@
 # LRU Cache Eviction with Residency Update
 
-
 ## Overview
 This method couples LRU brick cache eviction with hierarchical residency octree updates [S1]. When the cache lacks a free slot, it evicts the least recently accessed brick and resets bitmask entries in affected leaf and non-leaf nodes to reflect the loss of resident data [S1]. It differs from standard LRU caches by synchronizing cache state with octree metadata after each eviction [S1].
 
@@ -23,6 +22,7 @@ This method couples LRU brick cache eviction with hierarchical residency octree 
   - `children`: Array of child nodes (for non-leaf nodes) [G].
   - `spatial_extent`: AABB defining the node's 3D volume [G].
   - `parent`: Pointer to the parent node (for upward propagation) [G].
+  - `resident_bricks`: List of bricks currently cached under this node's spatial extent [G].
 
 **Algorithm Steps:**
 1. **Eviction Trigger:** If no cache slot is available, evict the least recently accessed brick using an LRU scheme [S1].
@@ -44,7 +44,6 @@ def evict_lru_and_update_residency(cache, lru_list, octree_root, evicted_brick):
         return
 
     # Step 3: Identify affected leaf nodes
-    # Standard octree traversal to find leaves overlapping the evicted brick's extent [G]
     affected_leaves = []
     def collect_leaves(node):
         if node.is_leaf():
@@ -57,17 +56,11 @@ def evict_lru_and_update_residency(cache, lru_list, octree_root, evicted_brick):
 
     # Step 4: Update leaf node bitmasks
     for leaf in affected_leaves:
-        resolution_level = evicted_brick.resolution_level
+        level = evicted_brick.resolution_level
         # Check if any other brick at this resolution level is resident in this leaf
-        is_resident = False
-        for brick in cache.entries:
-            if brick.resolution_level == resolution_level and leaf.spatial_extent.contains(brick.spatial_extent):
-                is_resident = True
-                break
-
-        # Reset bit if not resident
+        is_resident = any(brick.level == level for brick in leaf.resident_bricks)
         if not is_resident:
-            leaf.bitmask &= ~(1 << resolution_level)
+            leaf.bitmask &= ~(1 << level)
             propagate_update(leaf)
 
 def propagate_update(node):
@@ -83,11 +76,10 @@ def propagate_update(node):
     if new_parent_bitmask != parent.bitmask:
         parent.bitmask = new_parent_bitmask
         propagate_update(parent)
-    # Termination: if unchanged, stop propagating [S1]
 ```
 
 **Parameters:**
-- Cache capacity: Not given in the sources.
+- Cache capacity: Not given in the sources. [G]
 - Bitmask size: Determined by the maximum number of resolution levels in the octree [S1].
 
 **Edge Cases:**
@@ -101,12 +93,12 @@ def propagate_update(node):
 A variant addressing memory pile-up in WebGL2 environments by setting a 1.25 GB residency budget, deliberately below the plan budget, to ensure LRU evicts old bricks during refocus [S2, unofficial]. Previous behavior allowed an 8 GB GPU residency request against a 2 GB plan budget, causing the LRU to never evict and pile bricks on top of old ones (e.g., 1.67 GB across 177 bricks on `hoa_heart` L0) [S2, unofficial]. This fix forces eviction by capping the total resident data size [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
+- **Time Complexity:** Not given in the sources. [G]
+- **Memory Complexity:** Not given in the sources. [G]
 - **Strengths:** Maintains strict consistency between cache state and rendering metadata by resetting bitmask entries only when necessary [S1].
 - **Limitations:** Requires checking leaf nodes for spatial overlap and propagating bitmask updates up the tree after each eviction [S1].
 - **When to use:** Mixed-resolution multi-volume rendering requiring accurate residency tracking for ray-guided traversal [S1].
-- **When not to use:** Not given in the sources.
+- **When not to use:** Not given in the sources. [G]
 
 ## Background
 Developed as part of the Residency Octree approach for scalable web volume rendering, this method integrates LRU cache management with hierarchical residency tracking [S1]. It supports mixed-resolution multi-volume rendering where ray-guided traversal relies on accurate bitmask information to skip empty regions or access resident data [S1]. The GPU Residency Budget Fix variant addresses specific implementation issues in WebGL2 environments, as documented in unofficial repository updates [S2, unofficial].

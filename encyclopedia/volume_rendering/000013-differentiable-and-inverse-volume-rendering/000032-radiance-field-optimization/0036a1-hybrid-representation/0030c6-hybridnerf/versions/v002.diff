@@ -1,0 +1,404 @@
+--- v001.md
++++ v002.md
+@@ -4,59 +4,52 @@
+ 
+ ## Overview
+-HybridNeRF is a neural rendering method that combines the efficiency of surface-based representations with the flexibility of volumetric rendering to achieve high-fidelity novel-view synthesis at real-time frame rates. It solves the trade-off between the slow sampling required by pure volumetric NeRFs and the inability of pure surface methods to model thin, semi-opaque, or translucent structures. Unlike siblings such as [Surface NeRF](7385-surface-nerf.md) which use a global surfaceness parameter, HybridNeRF learns a spatially-varying surfaceness field $\beta(\mathbf{x})$, allowing it to render most of the scene as thin surfaces (using few samples) while modeling challenging regions volumetrically [S1].
++HybridNeRF is a radiance field optimization method that combines explicit surface representations with implicit volumetric modeling to achieve high-fidelity novel-view synthesis at real-time frame rates [S1]. It addresses the computational expense of pure implicit NeRFs and the reconstruction limitations of pure surface-based methods by rendering most of the scene as thin surfaces while modeling challenging regions (thin structures, semi-opaque areas) volumetrically using spatially-varying surfaceness parameters $\beta(\mathbf{x})$ [S1]. Unlike prior work that treats surfaceness as a global parameter, HybridNeRF learns $\beta$ in a spatially adaptive manner, allowing it to improve error rates by 15–30% compared to state-of-the-art baselines while achieving at least 36 FPS for 2K×2K virtual-reality resolutions [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** A set of calibrated images with known camera poses.
+-*   **Outputs:** A scene representation consisting of a Signed Distance Field (SDF) network, a color network, and a surfaceness grid. The method renders pixel colors $\hat{C}(\mathbf{r})$ for new camera viewpoints.
++**Inputs:** A set of calibrated images with known camera poses.
++**Outputs:** A rendered image for a target camera pose, and trained model parameters (SDF MLP, color MLP, surfaceness grid).
+ 
+ **Data Structures:**
+-1.  **SDF Network:** A neural network (MLP) taking 3D coordinates $\mathbf{x}$ as input, outputting a scalar signed distance $f(\mathbf{x})$.
+-2.  **Color Network:** A neural network taking 3D coordinates $\mathbf{x}$ and a view direction $\mathbf{d}$ as input, outputting a color vector $\mathbf{c}$.
+-3.  **Surfaceness Grid:** A 3D grid of size $512 \times 512 \times 512$ storing scalar values $\beta(\mathbf{x})$. Values are queried via nearest-neighbor interpolation [S1].
+-4.  **Feature Grids:** Dense multi-resolution 3D feature grids and multi-resolution triplanes are used to featurize 3D sample locations before passing them to the SDF and Color networks [S1].
+-5.  **Proposal Network:** A small network used to improve sampling efficiency, similar to Nerfacto [S1].
+-
+-**Numbered Steps:**
+-
+-1.  **Phase 1: Global Surfaceness Training.**
+-    Train a VolSDF-like model [S1] where the surfaceness parameter $\beta$ is a single global scalar. The SDF is regularized using a distance-adjusted Eikonal loss to model the background and general geometry.
+-    
+-2.  **Phase 2: Spatially-Varying Surfaceness Fine-tuning.**
+-    Transition from the global $\beta$ to a position-dependent field $\beta(\mathbf{x})$. Initialize the $512^3$ grid with the global $\beta$ value. Allow the grid values to diverge spatially during fine-tuning. This enables the model to treat most of the scene as thin surfaces (high $\beta$) while maintaining volumetric flexibility (lower $\beta$) near fine structures, semi-opaque areas, or thin wires [S1].
+-
+-3.  **Rendering (Sphere Tracing).**
+-    For a given ray $\mathbf{r}$, use sphere tracing to identify sample locations. This leverages the fact that the model behaves as a valid SDF in $>95\%$ of the scene [S1].
+-    *   Iterate to find intersections with the zero-level set of $f(\mathbf{x})$.
+-    *   Evaluate the density $\sigma_{\text{SDF}}(\mathbf{x})$ and color $\mathbf{c}$ at the sampled points.
+-    *   Compute the transmittance and accumulated color using the standard volume rendering equation.
+-
+-**Formulas:**
+-
+-The density $\sigma_{\text{SDF}}(\mathbf{x})$ is derived from the SDF output $f(\mathbf{x})$ and the local surfaceness $\beta(\mathbf{x})$:
+-
+-$$
+-\sigma_{\text{SDF}}(\mathbf{x}) := \beta(\mathbf{x})\Psi(f(\mathbf{x})\beta(\mathbf{x}))
+-$$
+-
+-where $\Psi$ is the Cumulative Distribution Function (CDF) of a standard Laplace distribution:
+-
+-$$
+-\Psi(s) = \begin{cases} \frac{1}{2} \exp(-s) & \text{if } s > 0 \\ 1 - \frac{1}{2} \exp(s) & \text{if } s \leq 0. \end{cases}
+-$$
+-
+-The Eikonal loss regularization ensures the gradient of the SDF has unit norm:
+-
+-$$
+-\mathcal{L}_{\text{Eik}}(\mathbf{r}) := \sum_{i=0}^{N-1} \eta_i (\|\nabla f(\mathbf{x}_i)\| - 1)^2
+-$$
+-
+-where $\eta_i$ is a per-sample loss weight, typically set to 1 [S1].
++1.  **SDF and Color Networks:** Two separate multi-layer perceptrons (MLPs). The SDF network takes 3D coordinates and features as input and outputs a signed distance value $f(\mathbf{x})$. The color network takes 3D coordinates, features, and viewing direction as input and outputs color $\mathbf{c}$.
++2.  **Feature Grids:** Dense multi-resolution 3D feature grids and multi-resolution triplanes [S1]. These store features for 3D sample locations.
++3.  **Surfaceness Grid:** A 3D grid of size $512^3$ storing scalar values for $\beta(\mathbf{x})$ [S1].
++4.  **Proposal Network:** A small network similar to Nerfacto [S1] used to improve sampling efficiency by predicting likely surface locations.
+ 
+ **Parameters:**
+-*   **Surfaceness Grid Resolution:** $512^3$ [S1].
+-*   **Interpolation:** Nearest-neighbor [S1].
+-*   **Eikonal Weight ($\eta_i$):** 1 [S1].
+-*   **Rendering Resolution:** Tested at 2K×2K (VR resolution) [S1].
++*   $\beta(\mathbf{x})$: Surfaceness parameter. Initially uniform, then spatially varying.
++*   $\eta_i$: Per-sample loss weight for Eikonal regularization, typically set to 1 [S1].
++
++**Algorithm Steps:**
++
++1.  **Initialization:** Initialize the SDF network, color network, feature grids, and the surfaceness grid. Set all values in the surfaceness grid to a uniform constant $\beta$ [S1].
++
++2.  **Phase 1: Global Surfaceness Training:**
++    Train the model using a VolSDF-like approach [S1].
++    *   Sample points along rays.
++    *   Compute the Eikonal loss to regularize the SDF gradient magnitude to 1:
++        $$ \mathcal{L}_{\text{Eik}}(\mathbf{r}) := \sum_{i=0}^{N-1} \eta_i (\|\nabla f(\mathbf{x}_i)\| - 1)^2 $$
++        where $\mathbf{x}_i$ are sample points along ray $\mathbf{r}$, and $\eta_i = 1$ [S1].
++    *   Convert SDF $f(\mathbf{x})$ to density $\sigma_{\text{SDF}}(\mathbf{x})$ using the global $\beta$:
++        $$ \sigma_{\text{SDF}}(\mathbf{x}) := \beta \Psi(f(\mathbf{x})\beta) $$
++    *   Render the image using standard volume rendering integration.
++    *   Optimize network weights and the uniform $\beta$ value [S1].
++
++3.  **Phase 2: Spatially-Varying Surfaceness Transition:**
++    Transition from the global $\beta$ to position-dependent $\beta(\mathbf{x})$ values [S1].
++    *   Initialize the $512^3$ surfaceness grid with the converged global $\beta$ value.
++    *   Enable gradient updates for the surfaceness grid values.
++    *   Continue training with the same loss functions, but now $\beta$ is queried from the grid at each sample location $\mathbf{x}_i$:
++        $$ \beta(\mathbf{x}_i) = \text{GridQuery}(\mathbf{x}_i) $$
++    *   The surfaceness grid is queried via nearest-neighbor interpolation [S1].
++    *   This allows the model to maintain high surfaceness (thin surfaces) in most of the scene while lowering $\beta$ (more volumetric) in regions with thin structures or semi-opaque areas to preserve quality [S1].
++
++4.  **Rendering:**
++    *   For a given camera ray, use sphere tracing to identify sample locations, leveraging the fact that the model behaves as a valid SDF in >95% of the scene [S1].
++    *   At each sample point $\mathbf{x}_i$:
++        *   Query features from the multi-resolution grids.
++        *   Query $\beta(\mathbf{x}_i)$ from the $512^3$ grid using nearest-neighbor interpolation [S1].
++        *   Compute density: $\sigma_{\text{SDF}}(\mathbf{x}_i) = \beta(\mathbf{x}_i) \Psi(f(\mathbf{x}_i)\beta(\mathbf{x}_i))$.
++        *   Compute color $\mathbf{c}(\mathbf{x}_i)$ from the color network.
++    *   Perform volume rendering integration using the computed densities and colors [S1].
+ 
+ **Pseudocode:**
+@@ -68,136 +61,180 @@
+     """
+     Computes the CDF of a standard Laplace distribution.
+-    Args:
+-        s: Scalar or array of scalars.
+-    Returns:
+-        CDF values.
+-    """
+-    result = np.zeros_like(s)
+-    pos_mask = s > 0
+-    neg_mask = ~pos_mask
+-    result[pos_mask] = 0.5 * np.exp(-s[pos_mask])
+-    result[neg_mask] = 1.0 - 0.5 * np.exp(s[neg_mask])
+-    return result
++    """
++    if s > 0:
++        return 0.5 * np.exp(-s)
++    else:
++        return 1.0 - 0.5 * np.exp(s)
+ 
+ def compute_density(sdf_value, surfaceness):
+     """
+-    Computes density from SDF and surfaceness.
+-    Args:
+-        sdf_value: Signed distance value f(x).
+-        surfaceness: Surfaceness parameter beta(x).
+-    Returns:
+-        Density sigma.
++    Converts SDF value and surfaceness to density.
+     """
+     scaled_sdf = sdf_value * surfaceness
+-    cdf_val = laplace_cdf(scaled_sdf)
+-    return surfaceness * cdf_val
+-
+-def sphere_trace_sdf(sdf_network, ray_origin, ray_direction, max_steps=64, step_size=0.01):
+-    """
+-    Performs sphere tracing on an SDF network.
+-    Args:
+-        sdf_network: Function returning f(x).
+-        ray_origin: 3D point.
+-        ray_direction: Normalized 3D vector.
+-        max_steps: Maximum number of steps.
+-        step_size: Base step size.
+-    Returns:
+-        List of sample points and their distances.
+-    """
+-    points = []
+-    current_pos = ray_origin
+-    distance_along_ray = 0.0
+-    
+-    for _ in range(max_steps):
+-        # Query SDF
+-        dist_to_surface = sdf_network(current_pos)
++    return surfaceness * laplace_cdf(scaled_sdf)
++
++def query_surfaceness_grid(x, surfaceness_grid):
++    """
++    Queries the surfaceness grid using nearest-neighbor interpolation.
++    x: 3D coordinates (x, y, z)
++    surfaceness_grid: 512x512x512 numpy array
++    """
++    # Normalize coordinates to grid indices [0, 511]
++    # Assuming grid covers a unit cube [-0.5, 0.5] or similar, 
++    # exact normalization depends on scene bounds. 
++    # For implementation, map x to [0, 511] range.
++    idx = np.round((x + 0.5) * 511).astype(int)
++    # Clamp indices to valid range
++    idx = np.clip(idx, 0, 511)
++    return surfaceness_grid[idx[0], idx[1], idx[2]]
++
++def train_hybrid_nerf(images, poses, num_epochs_phase1, num_epochs_phase2):
++    """
++    Training loop for HybridNeRF.
++    """
++    # Initialize models
++    sdf_mlp = initialize_sdf_mlp()
++    color_mlp = initialize_color_mlp()
++    feature_grids = initialize_feature_grids()
++    proposal_network = initialize_proposal_network()
++    
++    # Phase 1: Global Surfaceness
++    beta_global = 100.0 # Initial guess, optimized during training
++    surfaceness_grid = np.full((512, 512, 512), beta_global)
++    
++    for epoch in range(num_epochs_phase1):
++        for image, pose in zip(images, poses):
++            # Sample rays
++            rays = sample_rays_from_image(image, pose)
++            
++            # Use proposal network to get initial samples
++            sample_points = proposal_network.sample(rays, sdf_mlp, feature_grids)
++            
++            # Evaluate SDF and Color
++            sdf_values = sdf_mlp(sample_points, feature_grids)
++            colors = color_mlp(sample_points, feature_grids, rays.directions)
++            
++            # Compute density with global beta
++            densities = compute_density(sdf_values, beta_global)
++            
++            # Volume rendering
++            rendered_image = volume_render(rays, densities, colors)
++            
++            # Compute losses
++            loss_rgb = mse_loss(rendered_image, image)
++            
++            # Eikonal loss
++            eikonal_loss = 0.0
++            for i, point in enumerate(sample_points):
++                grad = compute_gradient(sdf_mlp, point)
++                eikonal_loss += (np.linalg.norm(grad) - 1)**2
++            
++            total_loss = loss_rgb + eikonal_loss
++            
++            # Update weights
++            update_weights(sdf_mlp, color_mlp, feature_grids, total_loss)
++            update_parameter(beta_global, total_loss) # Optimize global beta
++            
++    # Phase 2: Spatially-Varying Surfaceness
++    # Initialize grid with converged global beta
++    surfaceness_grid = np.full((512, 512, 512), beta_global)
++    
++    for epoch in range(num_epochs_phase2):
++        for image, pose in zip(images, poses):
++            rays = sample_rays_from_image(image, pose)
++            sample_points = proposal_network.sample(rays, sdf_mlp, feature_grids)
++            
++            sdf_values = sdf_mlp(sample_points, feature_grids)
++            colors = color_mlp(sample_points, feature_grids, rays.directions)
++            
++            # Query spatially varying beta
++            betas = np.array([query_surfaceness_grid(p, surfaceness_grid) for p in sample_points])
++            
++            # Compute density with local beta
++            densities = compute_density(sdf_values, betas)
++            
++            rendered_image = volume_render(rays, densities, colors)
++            
++            loss_rgb = mse_loss(rendered_image, image)
++            
++            # Eikonal loss with per-sample weight eta_i = 1
++            eikonal_loss = 0.0
++            for i, point in enumerate(sample_points):
++                grad = compute_gradient(sdf_mlp, point)
++                eikonal_loss += (np.linalg.norm(grad) - 1)**2
++            
++            total_loss = loss_rgb + eikonal_loss
++            
++            # Update weights and surfaceness grid
++            update_weights(sdf_mlp, color_mlp, feature_grids, total_loss)
++            update_grid(surfaceness_grid, total_loss) # Optimize grid values
++
++def render_hybrid_nerf(camera_pose, surfaceness_grid, sdf_mlp, color_mlp, feature_grids):
++    """
++    Renders an image using sphere tracing.
++    """
++    rays = generate_rays_from_camera(camera_pose)
++    rendered_image = np.zeros_like(rays.origin)
++    
++    for i, ray in enumerate(rays):
++        # Sphere tracing
++        t = 0.0
++        samples = []
++        while t < max_distance:
++            point = ray.origin + t * ray.direction
++            sdf_val = sdf_mlp(point, feature_grids)
++            
++            # If SDF is very small, we are close to surface
++            if abs(sdf_val) < epsilon:
++                samples.append(point)
++                break
++            
++            # Advance by SDF value
++            t += sdf_val
++            
++            # Query beta for this point
++            beta = query_surfaceness_grid(point, surfaceness_grid)
++            density = compute_density(sdf_val, beta)
++            
++            samples.append((point, density))
++            
++            # Check for termination (e.g., opacity threshold)
++            if t > max_distance:
++                break
+         
+-        # If close to zero level set, stop or record hit
+-        if abs(dist_to_surface) < 1e-4:
+-            points.append((current_pos, distance_along_ray))
+-            break
+-            
+-        # Advance along ray
+-        current_pos = ray_origin + ray_direction * (distance_along_ray + dist_to_surface)
+-        distance_along_ray += dist_to_surface
++        # Volume rendering with samples
++        color = volume_render_ray(ray, samples)
++        rendered_image[i] = color
+         
+-        # Boundary check [G]
+-        if distance_along_ray > 10.0: # Arbitrary large bound
+-            break
+-            
+-    return points
+-
+-def render_hybrid_neurf(ray_origin, ray_direction, sdf_network, color_network, surfaceness_grid, grid_bounds):
+-    """
+-    Renders a single ray using HybridNeRF.
+-    Args:
+-        ray_origin: 3D point.
+-        ray_direction: Normalized 3D vector.
+-        sdf_network: Function f(x).
+-        color_network: Function c(x, d).
+-        surfaceness_grid: 512^3 numpy array.
+-        grid_bounds: Bounding box for grid lookup.
+-    Returns:
+-        Rendered color.
+-    """
+-    # 1. Get sample points via sphere tracing
+-    samples = sphere_trace_sdf(sdf_network, ray_origin, ray_direction)
+-    
+-    if not samples:
+-        return np.array([0.0, 0.0, 0.0]) # Background color [G]
+-        
+-    accumulated_color = np.zeros(3)
+-    accumulated_transmittance = 1.0
+-    
+-    for point, dist in samples:
+-        # 2. Query surfaceness beta(x)
+-        # Map point to grid coordinates and use nearest neighbor
+-        beta = query_surfaceness_grid(point, surfaceness_grid, grid_bounds)
+-        
+-        # 3. Compute density
+-        sdf_val = sdf_network(point)
+-        sigma = compute_density(sdf_val, beta)
+-        
+-        # 4. Compute transmittance and opacity for this segment
+-        # Assuming uniform step size delta for simplicity in this abstract step
+-        # In practice, delta is the distance to the next sample or infinity
+-        delta = 0.01 # Placeholder for actual step size calculation [G]
+-        alpha = 1.0 - np.exp(-sigma * delta)
+-        
+-        # 5. Accumulate color
+-        color = color_network(point, ray_direction)
+-        weight = accumulated_transmittance * alpha
+-        accumulated_color += weight * color
+-        accumulated_transmittance *= (1.0 - alpha)
+-        
+-        if accumulated_transmittance < 1e-4:
+-            break
+-            
+-    return accumulated_color
+-
+-def query_surfaceness_grid(point, grid, bounds):
+-    """
+-    Queries the surfaceness grid using nearest-neighbor interpolation.
+-    """
+-    # Normalize point to grid coordinates [0, 511]
+-    # Clamp to bounds
+-    # Return grid value
+-    pass # Implementation details for grid indexing omitted
++    return rendered_image
+ ```
+ 
+-**Subtopics:**
+-*   **VolSDF:** A foundational method that interprets MLP outputs as SDFs and uses a global $\beta$ to convert SDF to density. HybridNeRF builds on this by making $\beta$ spatially adaptive [S1].
+-*   **Surface NeRF:** Methods that rely purely on surface representations. HybridNeRF differs by retaining volumetric capabilities in specific regions via $\beta(\mathbf{x})$ [S1].
++**Edge Cases and Pitfalls:**
++*   **Precision:** Sphere tracing relies on the SDF property $\|\nabla f(\mathbf{x})\| \approx 1$. If the Eikonal loss is not properly enforced, sphere tracing may skip surfaces or converge slowly [S1].
++*   **Boundaries:** The surfaceness grid is finite ($512^3$). Points outside the grid bounds must be handled, typically by clamping or assuming a default $\beta$ [S1].
++*   **Degenerate Input:** Thin structures and semi-opaque areas require lower $\beta$ values. If $\beta$ is too high globally, these structures may be lost or rendered incorrectly [S1].
++
++## Subtopics
++
++### VolSDF
++A method that interprets MLP outputs as a signed distance field (SDF) and regularizes the gradient norm to 1 using Eikonal loss [S1]. It serves as the foundation for the SDF representation in HybridNeRF.
++
++### Nerfacto
++A method that uses a proposal network to improve sampling efficiency in neural radiance fields [S1]. HybridNeRF uses a similar proposal network.
++
++### Multi-resolution Triplanes
++A technique for featurizing 3D locations using 2D planes [S1]. HybridNeRF uses this for feature storage.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering is significantly faster than standard NeRF because sphere tracing allows the use of far fewer samples per ray for the $>95\%$ of the scene that behaves as a surface [S1].
+-*   **Memory Complexity:** The surfaceness grid requires memory for a $512^3$ grid of floats. The neural networks (SDF, Color, Feature Grids) also consume memory, but the reduction in sampling count reduces the computational load per pixel [S1].
+-*   **Measured Performance:** Achieves real-time framerates of at least 36 FPS for virtual-reality resolutions (2K×2K) [S1].
+-*   **Accuracy:** Improves error rates by 15–30% compared to state-of-the-art baselines, including rasterization-based approaches, on datasets like Eyeful Tower [S1].
+-*   **Strengths:** High rendering speed, high fidelity for thin structures and semi-opaque areas, real-time capability.
+-*   **Limitations:** Requires careful tuning of the surfaceness grid initialization and training phases. Sphere tracing assumes the SDF is well-behaved, which may not hold in all volumetric regions if $\beta$ is too low [S1].
++*   **Time Complexity:** Rendering is accelerated by sphere tracing, which requires far fewer samples per ray than uniform volumetric sampling, as the model behaves as a valid SDF in >95% of the scene [S1].
++*   **Memory Complexity:** The model uses dense multi-resolution 3D feature grids, multi-resolution triplanes, and a $512^3$ surfaceness grid [S1].
++*   **Measured Performance:** HybridNeRF improves error rates by 15–30% compared to state-of-the-art baselines, including rasterization-based approaches, while achieving real-time framerates (at least 36 FPS) for virtual-reality resolutions (2K×2K) [S1].
++*   **Strengths:** High rendering efficiency due to surface-like behavior in most of the scene; high fidelity in challenging regions (thin structures, semi-opaque areas) due to volumetric modeling; real-time performance.
++*   **Limitations:** Requires careful tuning of the surfaceness grid and Eikonal loss; may struggle with highly complex view-dependent effects if not properly modeled [S1].
++*   **When to use:** When real-time rendering is required and the scene contains a mix of solid surfaces and thin/semi-opaque structures.
++*   **When not to use:** For scenes that are entirely volumetric (e.g., smoke, fire) or entirely solid without thin structures, pure volumetric or pure surface methods may be more appropriate.
+ 
+ ## Background
+-HybridNeRF was introduced by Haithem Turki et al. in 2024 [S1]. It addresses the limitations of pure surface-based neural fields, which struggle with thin structures and view-dependent effects like refraction and translucency, and pure volumetric NeRFs, which are slow to render. The method was developed to enable efficient rendering for immersive applications such as augmented reality and virtual teleconferencing [S1].
++HybridNeRF was proposed by Haithem Turki et al. in 2024 [S1]. It builds on previous work in surface-based neural fields, such as VolSDF [S1], which interprets MLP outputs as SDFs. The key innovation is the introduction of spatially-varying surfaceness parameters $\beta(\mathbf{x})$, replacing the global $\beta$ used in prior work [S1]. The method was evaluated on the Eyeful Tower dataset [S1] and other commonly used view synthesis datasets.
+ 
+ ## Sources

@@ -11,15 +11,15 @@ Biorthogonal Wavelet Compression compresses volumetric data by applying a multil
 *   **Output:** A compressed bitstream containing quantized/entropy-encoded wavelet coefficients.
 
 **Data Structures:**
-The method operates on blocks of the volume. Each block is decomposed into subbands. The coefficients are stored in a structure that allows for thresholding. In multiresolution variants, an octree structure is used where each node stores its wavelet transform coefficients [S2].
+The method operates on blocks of the volume [S2]. Each block is decomposed into subbands. The coefficients are stored in a structure that allows for thresholding [S1]. In multiresolution variants, an octree structure is used where each node stores its wavelet transform coefficients [S2].
 
 **Parameters:**
 *   **Wavelet Basis:** The biorthogonal 9/7 wavelet is the standard choice, as used in JPEG 2000 [S1]. Biorthogonal spline wavelets are also used [S2].
-*   **Threshold:** Coefficients below a certain magnitude are set to zero. The threshold value determines the compression ratio.
+*   **Threshold:** Coefficients below a certain magnitude are set to zero. The threshold value determines the compression ratio [S1].
 
 **Steps:**
 1.  **Block Partitioning:** Partition the input volume $V$ into independent blocks [S2].
-2.  **Transform:** Apply a multilevel wavelet decomposition to each block using the chosen biorthogonal filter bank (e.g., 9/7-tap Daubechies) [S1][S2]. This results in approximation and detail coefficients.
+2.  **Transform:** Apply a multilevel wavelet decomposition to each block using the chosen biorthogonal filter bank (e.g., 9/7-tap Daubechies) [S1][S2]. This results in approximation and detail coefficients [G].
 3.  **Thresholding:** Identify the least significant coefficients. Threshold these coefficients to zero to discard information that contributes least to visual quality [S1].
 4.  **Encoding:** Apply lossless encoding (e.g., Run-Length Encoding, Huffman coding, or Arithmetic coding) to the remaining non-zero coefficients and their positions to produce the compressed bitstream [S1].
 5.  **Reconstruction:** To render, decode the bitstream, inverse threshold (restore zeros), and apply the inverse wavelet transform to reconstruct the volume [S1].
@@ -29,68 +29,64 @@ The method operates on blocks of the volume. Each block is decomposed into subba
 
 ```python
 def biorthogonal_wavelet_compress(volume, wavelet_basis='bior9_7', threshold=0.0):
-    """
-    Compress a 3D volume using biorthogonal wavelet transform and thresholding.
-    
-    Args:
-        volume: 3D numpy array representing the volumetric data.
-        wavelet_basis: String specifying the filter (e.g., 'bior9_7').
-        threshold: Float value; coefficients with absolute magnitude < threshold are zeroed.
-        
-    Returns:
-        compressed_data: A structure containing the non-zero coefficients and their indices,
-                         ready for entropy encoding.
-    """
-    # Step 1: Partition volume into blocks (implementation detail depends on block size)
-    # For simplicity, assume the transform function handles block boundaries or padding.
-    
-    # Step 2: Apply Multilevel Wavelet Decomposition
-    # The transform is separable along each axis.
-    # Let V be the volume.
-    # Level 1:
-    #   Approximation A1 = LowPass(LowPass(LowPass(V)))
-    #   Details D1_x, D1_y, D1_z, etc. = HighPass combinations
-    # Recursive decomposition on A1...
-    coefficients = apply_wavelet_transform(volume, wavelet_basis)
-    
-    # Step 3: Thresholding
-    # Identify least significant coefficients
+    # Step 1: Partition volume into independent blocks
+    blocks = [volume[i:i+BLOCK_SIZE] for i in range(0, volume.shape[0], BLOCK_SIZE)]
     significant_coefficients = {}
-    for key, value in coefficients.items():
-        if abs(value) >= threshold:
-            significant_coefficients[key] = value
-        else:
-            significant_coefficients[key] = 0 # Discard
-            
-    # Step 4: Encoding (Placeholder for specific entropy coder)
-    # In practice, this involves run-length encoding or arithmetic coding
-    # of the sparse coefficient array.
-    compressed_data = entropy_encode(significant_coefficients)
     
-    return compressed_data
+    for block_idx, block in enumerate(blocks):
+        # Step 2: Apply Multilevel Wavelet Decomposition
+        # Separable 1D filter bank applied along each axis [S1]
+        coeffs = apply_separable_wavelet_transform(block, wavelet_basis)
+        
+        # Step 3: Thresholding
+        for key, value in coeffs.items():
+            if abs(value) >= threshold:
+                significant_coefficients[f"{block_idx}_{key}"] = value
+            # Coefficients below threshold are discarded (set to zero) [S1]
+            
+    # Step 4: Encoding
+    # Lossless entropy coding (RLE, Huffman, Arithmetic) applied to sparse coefficients [S1]
+    compressed_bitstream = entropy_encode_sparse(significant_coefficients)
+    return compressed_bitstream
 
-def biorthogonal_wavelet_decompress(compressed_data, volume_shape, wavelet_basis='bior9_7'):
-    """
-    Reconstruct volume from compressed wavelet data.
-    """
+def biorthogonal_wavelet_decompress(compressed_bitstream, volume_shape, wavelet_basis='bior9_7'):
     # Step 4 (Inverse): Decode
-    coefficients = entropy_decode(compressed_data, volume_shape)
+    coefficients = entropy_decode_sparse(compressed_bitstream, volume_shape)
     
     # Step 5: Inverse Transform
-    reconstructed_volume = apply_inverse_wavelet_transform(coefficients, wavelet_basis)
-    
+    reconstructed_volume = apply_inverse_separable_wavelet_transform(coefficients, wavelet_basis)
     return reconstructed_volume
+
+def apply_separable_wavelet_transform(data, basis):
+    # Standard separable 1D filter bank: low-pass and high-pass filtering followed by downsampling
+    # along each axis to produce approximation and detail subbands [G]
+    pass # Exact filter coefficients and downsampling logic not specified in sources [G]
+
+def apply_inverse_separable_wavelet_transform(coeffs, basis):
+    # Standard inverse separable filter bank: upsampling followed by high-pass and low-pass filtering
+    # along each axis to reconstruct the data [G]
+    pass # Exact filter coefficients and upsampling logic not specified in sources [G]
+
+def entropy_encode_sparse(coeff_dict):
+    # Lossless entropy encoding of sparse coefficient dictionary
+    pass # Specific encoder implementation not provided in sources [G]
+
+def entropy_decode_sparse(bitstream, shape):
+    # Lossless entropy decoding of sparse coefficient dictionary
+    pass # Specific decoder implementation not provided in sources [G]
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Boundary Effects:** Since the transform is applied to blocks, boundary artifacts may occur at block edges if not handled with appropriate padding or overlap-add techniques [S2].
 *   **Precision:** Thresholding introduces loss. The choice of threshold must balance compression ratio and reconstruction quality [S1].
-*   **Degenerate Input:** Very small volumes may not support multiple decomposition levels.
+*   **Degenerate Input:** Very small volumes may not support multiple decomposition levels [G].
 
 ## Subtopics
 
 ### Wavelet Octree Multiresolution
 A multiresolution approach that builds an octree where each node stores its wavelet transform coefficients, computed using biorthogonal filters (e.g., as in [GWGS02]) [S2]. This structure allows for run-time decoding via an FPGA hardware decoder, enabling efficient adaptive resolution rendering [S2].
+
+### JPEG 2000 9x7 Wavelet Kernel
+A biorthogonal cubic B-spline variation with vanishing moments (6 and 2) divided equally between analysis and synthesis sides, offering nearly orthogonal basis functions [S4]. It has four vanishing moments per wavelet filter and a higher factorization order than the 5x3 kernel, offering improved energy compaction performance for lossy compression [S4]. The JPEG committee selected the 9x7 kernel for lossy compression in JPEG 2000 [S4].
 
 ## Operating characteristics
 *   **Compression Ratio:** Achieves high compression ratios while maintaining good reconstruction quality. On a dental enamel dataset, compression ratios of ~13%, ~2%, ~0.4%, and ~0.1% were reported [S1].
@@ -99,8 +95,10 @@ A multiresolution approach that builds an octree where each node stores its wave
 *   **Hardware Support:** Can be accelerated using FPGA hardware decoders in multiresolution variants [S2].
 
 ## Background
-Biorthogonal Wavelet Compression is based on the principles of wavelet theory and has been applied to volume rendering to enable efficient storage and transmission of volumetric data. The use of biorthogonal 9/7 wavelets is standard in image compression (JPEG 2000) and has been adapted for 3D volumes [S1]. Variants involving octree structures and FPGA decoding have been proposed to support real-time multiresolution rendering [S2].
+The method compresses volumetric data by applying a multilevel wavelet transform and discarding the least significant coefficients to achieve variable compression ratios while preserving reconstruction quality [S1]. It partitions the volume into blocks and transforms them independently using biorthogonal filters, such as the 9/7-tap Daubechies wavelet or biorthogonal spline wavelets [S2]. Variants involving octree structures and FPGA decoding have been proposed to support real-time multiresolution rendering [S2].
 
 ## Sources
 [S1] State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
 [S2] A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+[S3] 体数据压缩技术综述, https://www.jcad.cn/article/id/9d3ce9cd-c97c-4fab-9291-a72fbe7ba37e, fetched 2026-10-30 (unofficial)
+[S4] Wavelet based volumetric medical image compression, https://doi.org/10.1016/j.image.2014.12.007, fetched 2026-10-26

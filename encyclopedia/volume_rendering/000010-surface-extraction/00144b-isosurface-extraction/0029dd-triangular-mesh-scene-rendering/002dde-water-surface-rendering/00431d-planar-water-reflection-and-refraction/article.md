@@ -1,0 +1,181 @@
+# Planar Water Reflection and Refraction
+
+Also called: FT-Minecraft Water, WaterRenderer
+
+## Overview
+A technique that renders a voxel water surface by generating separate reflection and refraction textures via Framebuffer Objects (FBOs), which are then blended on a water surface shader. It handles both planar ocean water and placed water blocks by separating them into distinct rendering buckets. It differs from non-planar methods by using fixed horizontal clip planes and a single sea-level reference for geometric culling, optimizing performance for voxel environments where water surfaces are typically axis-aligned [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Camera position ($P_{eye}$), camera orientation (yaw $\theta$, pitch $\phi$), sea level height ($H_{sea}$), time step ($dt$), water surface geometry (vertices at $y=0$ relative to sea level, i.e., $(x, 0, y)$ in local space), and texture resources (dudv map, normal map).
+*   **Outputs:** Two FBO textures (reflection texture, refraction texture) and a final composited water surface image.
+
+**Data Structures:**
+*   **FBOs:** Two Framebuffer Objects, `fbo_reflection` and `fbo_refraction`, each containing a color attachment and a depth attachment.
+*   **Textures:**
+    *   `tex_dudv`: 2D texture, minification filter `GL_LINEAR_MIPMAP_LINEAR`, magnification `GL_LINEAR`, anisotropy up to 8x.
+    *   `tex_normal`: 2D normal map texture.
+*   **Clip Planes:** OpenGL clip plane 0 (`GL_CLIP_DISTANCE0`).
+
+**Parameters:**
+*   `refractionResolutionScale`: Float, clamped $[0.1, 1.0]$. Scales refraction FBO resolution relative to display.
+*   `seaLevel`: Float. Y-coordinate of the water plane.
+*   `dudvTiling`: Float. Tiling frequency of the dudv texture.
+*   `waterMoveFactor`, `waterMoveFactor2`: Float. Speed factors for wave animation.
+*   `waveStrength`: Float. Amplitude factor for Gerstner waves.
+*   `twilightLow`, `twilightHigh`: Float. Sun elevation range $[0.235, 0.315]$ for specular fade band.
+
+**Steps:**
+
+1.  **Initialization:**
+    *   Create `fbo_reflection` and `fbo_refraction`.
+    *   Load `tex_dudv` and `tex_normal`. Configure `tex_dudv` with trilinear filtering and anisotropy $A = \min(8.0, A_{max})$.
+    *   Initialize wave time $T = 0$.
+
+2.  **Time Update:**
+    *   Advance wave time: $T \leftarrow T + dt$.
+    *   Wrap $T$ to maintain float precision: if $T \ge 2\pi \times 1024$, then $T \leftarrow T \pmod{2\pi \times 1024}$. This preserves periodicity while preventing precision loss at large time values [S1, unofficial].
+
+3.  **Reflection Pass:**
+    *   Bind `fbo_reflection`. Clear color and depth buffers.
+    *   Enable clip plane 0.
+    *   Calculate reflected camera position $P_{ref}$:
+        $$ P_{ref}.y = P_{eye}.y - 2.0 \times (P_{eye}.y - H_{sea}) $$
+        $$ P_{ref}.x = P_{eye}.x $$
+        $$ P_{ref}.z = P_{eye}.z $$
+    *   Construct reflected view matrix $V_{ref}$:
+        *   Invert camera pitch: $\phi_{ref} = -\phi$.
+        *   Keep yaw: $\theta_{ref} = \theta$.
+        *   Compute front vector $F_{ref}$ from $\theta_{ref}, \phi_{ref}$.
+        *   $V_{ref} = \text{lookAt}(P_{ref}, P_{ref} + F_{ref}, (0, 1, 0))$.
+    *   Set clip plane equation $C_0 = (0, 1, 0, -H_{sea})$. This culls geometry below the water surface.
+    *   Render sky using a fixed view matrix $V_{sky} = -I$ (identity with inverted axes) and the projection matrix $P$, passing $P_{ref}$ for correct parallax.
+    *   Render scene geometry using $V_{ref}$ and $P$.
+
+4.  **Refraction Pass:**
+    *   Bind `fbo_refraction`. Clear color and depth buffers.
+    *   Enable clip plane 0.
+    *   Set clip plane equation $C_0 = (0, -1, 0, H_{sea})$. This culls geometry above the water surface, keeping only underwater fragments.
+    *   Disable shadows, SSAO, and caustics. Caustics are disabled because without shadow occlusion, they would incorrectly appear on terrain not reached by the sun [S1, unofficial].
+    *   Render scene geometry using the main camera's view matrix $V_{eye}$ and projection matrix $P$.
+
+5.  **Water Surface Rendering:**
+    *   Bind the water surface shader.
+    *   Setup uniforms:
+        *   Anchor dudv texture coordinates to prevent UV drift at large world coordinates. Snap camera position to the texture tiling period:
+            $$ P_{anchor} = \text{floor}(P_{eye} / \text{period}) \times \text{period} $$
+            where period is derived from `dudvTiling`.
+        *   Pass Gerstner wave parameters, anchoring wave calculation to $P_{anchor}$ to maintain float precision.
+    *   Render the water surface geometry (triangle fan or mesh) using the reflection and refraction textures.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_planar_water(camera, scene, sea_level, dt, textures):
+    # 1. Time Update
+    global wave_time
+    wave_time += dt
+    # Wrap to 2*pi*1024 to maintain float precision
+    period_time = 2.0 * 3.141592653589793 * 1024.0
+    if wave_time >= period_time:
+        wave_time = wave_time % period_time
+
+    # 2. Reflection Pass
+    reflection_fbo.bind()
+    reflection_fbo.clear()
+    
+    # Calculate reflected camera position
+    ref_eye_y = camera.pos.y - 2.0 * (camera.pos.y - sea_level)
+    ref_eye_pos = vec3(camera.pos.x, ref_eye_y, camera.pos.z)
+    
+    # Construct reflected view matrix (invert pitch)
+    ref_pitch = -camera.pitch
+    ref_yaw = camera.yaw
+    ref_front = vec3(
+        cos(ref_pitch) * sin(ref_yaw),
+        sin(ref_pitch),
+        cos(ref_pitch) * cos(ref_yaw)
+    )
+    ref_view_mat = look_at(ref_eye_pos, ref_eye_pos + ref_front, vec3(0, 1, 0))
+    
+    # Set clip plane: cull below sea level
+    clip_plane = vec4(0, 1, 0, -sea_level)
+    gl_enable_clip_plane(0)
+    gl_load_clip_plane(0, clip_plane)
+    
+    # Render Sky
+    sky_shader.use()
+    sky_shader.set_uniform("view", -mat4(1.0)) # Inverted identity
+    sky_shader.set_uniform("projection", camera.proj_mat)
+    sky_shader.set_uniform("camera_pos", ref_eye_pos)
+    render_sky()
+    
+    # Render Scene
+    scene_shader.use()
+    scene_shader.set_uniform("view", ref_view_mat)
+    scene_shader.set_uniform("projection", camera.proj_mat)
+    render_scene_geometry(scene)
+    
+    gl_disable_clip_plane(0)
+
+    # 3. Refraction Pass
+    refraction_fbo.bind()
+    refraction_fbo.clear()
+    
+    # Set clip plane: cull above sea level
+    clip_plane_ref = vec4(0, -1, 0, sea_level)
+    gl_enable_clip_plane(0)
+    gl_load_clip_plane(0, clip_plane_ref)
+    
+    # Disable shadows, SSAO, caustics
+    scene_shader.set_uniform("shadows_enabled", False)
+    scene_shader.set_uniform("ssao_enabled", False)
+    scene_shader.set_uniform("caustics_enabled", False)
+    
+    # Render Scene with main camera
+    scene_shader.set_uniform("view", camera.view_mat)
+    scene_shader.set_uniform("projection", camera.proj_mat)
+    render_scene_geometry(scene)
+    
+    gl_disable_clip_plane(0)
+
+    # 4. Water Surface Rendering
+    water_shader.use()
+    
+    # Anchor UVs to camera position to prevent drift
+    tiling_period = 1.0 / textures.dudv_tiling
+    anchor_pos = floor(camera.pos / tiling_period) * tiling_period
+    
+    water_shader.set_uniform("reflection_tex", reflection_fbo.color_attachment)
+    water_shader.set_uniform("refraction_tex", refraction_fbo.color_attachment)
+    water_shader.set_uniform("dudv_tex", textures.dudv)
+    water_shader.set_uniform("normal_tex", textures.normal)
+    water_shader.set_uniform("camera_pos_anchor", anchor_pos)
+    water_shader.set_uniform("wave_time", wave_time)
+    water_shader.set_uniform("water_move_factor", water_move_factor)
+    water_shader.set_uniform("wave_strength", wave_strength)
+    
+    render_water_surface(scene.water_faces)
+```
+
+## Subtopics
+
+### Water Bucket Separation
+Separates water faces into two rendering buckets based on Y-coordinate relative to sea level to optimize reflection/refraction passes. Faces at $Y = \text{seaLevel}$ (default 65) are routed to the ocean bucket, which uses the planar reflection/refraction FBOs. All other water faces (side faces of sea-level blocks, placed/spread water, deeper top faces) are routed to the placed bucket, which uses a sky-reflection shader independent of global planes. Planar reflection/refraction passes only apply to ocean water; placed water does not require them [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of visible fragments, as it requires two full scene renders (reflection and refraction) plus one water surface render.
+*   **Memory Complexity:** $O(W \times H)$ for the two FBOs, where $W, H$ are the resolution of the FBOs. Refraction resolution is scaled by `refractionResolutionScale`.
+*   **Performance:** The method is computationally expensive due to the double rendering of the scene. However, it is efficient for voxel engines where geometry is highly structured and culling is effective. The use of clip planes reduces the number of fragments processed in each pass.
+*   **Strengths:** Simple implementation, works well for flat water surfaces, provides realistic reflections and refractions for planar water.
+*   **Limitations:** Only suitable for planar water. Not suitable for complex, non-planar water surfaces. Precision issues at large world coordinates require UV anchoring.
+*   **When to use:** When rendering flat, horizontal water surfaces in a voxel or low-poly environment.
+*   **When not to use:** For non-planar water, or when performance is critical and reflections/refractions are not required.
+
+## Background
+This method is implemented in the `ft_minecraft` voxel engine, a from-scratch project inspired by Minecraft, built as a follow-up to the `ft_vox` project at 42. The engine emphasizes procedural generation and rendering quality, using OpenGL 4.6 and C++20. The water rendering technique is part of the engine's feature set, which includes dynamic flow, spreading, and transparent water with reflection/refraction framebuffers [S1, unofficial].
+
+## Sources
+[S1] ldominiq/ft_minecraft, https://github.com/ldominiq/ft_minecraft, fetched 2026-10-27 (unofficial)

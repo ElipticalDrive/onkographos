@@ -3,86 +3,70 @@
 Also called: Synchronized Tracing of Primitive-based Implicit Volumes
 
 ## Overview
-Synchronized-tracing is a tile-based rendering pipeline for implicit volumes (blobtrees) that synchronizes GPU threads within a subfrustum to enable coherent field evaluation [S1, unofficial][S2, abstract only, unofficial]. It sets itself apart from standard sphere tracing by decoupling evaluation complexity from the full tree size through sparse bottom-up traversal and thread synchronization via a low-resolution A-buffer, allowing interactive modeling without preprocessing [S1, unofficial][S2, abstract only, unofficial].
+Synchronized-tracing is a tile-based rendering pipeline for implicit volumes (blobtrees) that synchronizes threads within a subfrustum to allow coherent field evaluation [S1, unofficial][S2, abstract only, unofficial]. It sets itself apart from standard sphere tracing by decoupling evaluation complexity from the full blobtree size through sparse bottom-up traversal and thread synchronization via a low-resolution A-buffer [S1, unofficial][S2, abstract only, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- **Input:** A blobtree representing implicit surfaces, composed of thousands of primitives [S1, unofficial][S2, abstract only, unofficial].
-- **Output:** Rendered image of the implicit volume [S1, unofficial][S2, abstract only, unofficial].
+*   **Input:** A blobtree representing implicit surfaces composed of thousands of primitives [S1, unofficial][S2, abstract only, unofficial].
+*   **Output:** Rendered image of the implicit volume.
 
 **Data Structures:**
-- **Low-resolution A-buffer:** Stores the primitives of interest for a given screen tile [S1, unofficial][S2, abstract only, unofficial]. This buffer is used during ray processing to synchronize threads within a subfrustum [S1, unofficial][S2, abstract only, unofficial].
-- **Blobtree:** Hierarchical structure of primitives [S1, unofficial][S2, abstract only, unofficial].
+*   **Blobtree:** Hierarchical structure of primitives combined via CSG operators [S2, abstract only, unofficial].
+*   **Low-resolution A-buffer:** Stores the primitives of interest for a given screen tile [S1, unofficial][S2, abstract only, unofficial].
 
-**Algorithm Steps:**
-1. **Tile Partitioning:** The screen is divided into tiles. For each tile, a low-resolution A-buffer is initialized to store primitives of interest [S1, unofficial][S2, abstract only, unofficial].
-2. **Bounding Volume Computation:** Compute a tight augmented bounding volume (or volume of interest) for all primitives of the blobtree [S1, unofficial][S2, abstract only, unofficial].
-    - When using approximate signed distance fields (fields with Lipschitz bound close to 1), compact, smooth CSG operators extended from standard bounded operators are used [S1, unofficial][S2, abstract only, unofficial].
-3. **A-buffer Population:** Store the primitives of interest for the given screen tile in the low-resolution A-buffer [S1, unofficial][S2, abstract only, unofficial].
-4. **Thread Synchronization:** Use the A-buffer during ray processing to synchronize threads within a subfrustum [S1, unofficial][S2, abstract only, unofficial]. This synchronization allows coherent field evaluation within workgroups [S1, unofficial][S2, abstract only, unofficial].
-5. **Sparse Bottom-up Traversal:** Perform sparse bottom-up tree traversal to prune the blobtree on-the-fly [S1, unofficial][S2, abstract only, unofficial]. This decorrelates field evaluation complexity from the full blobtree size [S1, unofficial][S2, abstract only, unofficial].
-6. **Ray Processing:** Execute ray processing using the sphere tracing algorithm [S1, unofficial][S2, abstract only, unofficial]. This builds on [Sphere Tracing with SDFs](6223-sphere-tracing-with-sdfs.md).
+**Steps:**
+1.  **Bounding Volume Computation:** Compute a tight augmented bounding volume (or volume of interest) for all primitives of the blobtree using compact, smooth CSG operators extended from standard bounded operators [S1, unofficial][S2, abstract only, unofficial]. This is particularly relevant when using approximate signed distance fields with a Lipschitz bound close to 1 [S1, unofficial].
+2.  **Tile Processing:** For each screen tile, populate the low-resolution A-buffer with the primitives of interest [S1, unofficial][S2, abstract only, unofficial].
+3.  **Thread Synchronization:** Use the A-buffer during ray processing to synchronize threads within a subfrustum [S1, unofficial][S2, abstract only, unofficial]. This synchronization enables coherent field evaluation within workgroups [S1, unofficial][S2, abstract only, unofficial].
+4.  **Sparse Traversal and Pruning:** Perform a sparse bottom-up tree traversal to prune the blobtree on-the-fly [S1, unofficial][S2, abstract only, unofficial]. This step decorrelates field evaluation complexity from the full blobtree size [S1, unofficial][S2, abstract only, unofficial].
+5.  **Ray Processing:** Execute ray processing using the sphere tracing algorithm [S1, unofficial][S2, abstract only, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def synchronized_tracing(blobtree, screen_width, screen_height, tile_size):
-    # Initialize A-buffer for the current tile
-    # The A-buffer stores primitives of interest for the tile
-    a_buffer = initialize_a_buffer(tile_size)
-    
-    # Compute tight bounding volume for all primitives
-    # Uses compact, smooth CSG operators if approximate SDFs are used
-    bounding_volume = compute_tight_bounding_volume(blobtree)
-    
-    # Populate A-buffer with primitives of interest for the tile
-    populate_a_buffer(a_buffer, blobtree, bounding_volume, tile_coordinates)
-    
-    # Launch threads for the tile
-    # Threads are synchronized via the A-buffer within the subfrustum
-    launch_tile_threads(a_buffer, blobtree, tile_coordinates)
+def synchronized_tracing(blobtree, screen_tiles):
+    # Step 1: Compute tight bounding volume for the entire blobtree
+    # Uses compact, smooth CSG operators extended from standard bounded operators
+    # [S1, unofficial][S2, abstract only, unofficial]
+    global_bounding_volume = compute_tight_augmented_bounding_volume(blobtree)
 
-def launch_tile_threads(a_buffer, blobtree, tile_coordinates):
-    # Synchronize threads within the subfrustum using the A-buffer
-    # This ensures coherent field evaluation within workgroups
-    synchronize_threads_in_subfrustum(a_buffer)
-    
-    # Perform sparse bottom-up traversal to prune the blobtree
-    # This decorrelates complexity from the full tree size
-    pruned_tree = sparse_bottom_up_traversal(blobtree, a_buffer)
-    
-    # Execute sphere tracing for each ray in the tile
-    for pixel in tile_coordinates:
-        ray = generate_ray(pixel)
-        hit = sphere_tracing(ray, pruned_tree)
-        render_pixel(pixel, hit)
+    for tile in screen_tiles:
+        # Step 2: Populate low-resolution A-buffer with primitives of interest for this tile
+        # [S1, unofficial][S2, abstract only, unofficial]
+        a_buffer = populate_a_buffer(tile, global_bounding_volume)
 
-def synchronize_threads_in_subfrustum(a_buffer):
-    # Implementation detail: Use A-buffer to coordinate access
-    # to primitives among threads in the same workgroup/subfrustum
-    # [G] Specific synchronization primitives (e.g., barriers, atomics)
-    # are not detailed in sources, but implied by "synchronize threads"
-    pass
+        # Step 3: Synchronize threads within the subfrustum defined by the tile
+        # using the A-buffer to enable coherent field evaluation
+        # [S1, unofficial][S2, abstract only, unofficial]
+        synchronize_threads_in_subfrustum(tile, a_buffer)
+
+        # Step 4: Perform sparse bottom-up tree traversal to prune the blobtree
+        # This decorrelates evaluation complexity from the full blobtree size
+        # [S1, unofficial][S2, abstract only, unofficial]
+        pruned_subtree = sparse_bottom_up_traversal(blobtree, tile, a_buffer)
+
+        # Step 5: Execute ray processing using sphere tracing on the pruned subtree
+        # [S1, unofficial][S2, abstract only, unofficial]
+        render_tile(tile, pruned_subtree)
 ```
 
 **Parameters:**
-- **Tile Size:** Not given in the sources.
-- **Lipschitz Bound:** Close to 1 for approximate signed distance fields [S1, unofficial][S2, abstract only, unofficial].
+*   **Lipschitz Bound:** Relevant when using approximate signed distance fields; should be close to 1 [S1, unofficial].
+*   **Threshold:** Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-- **Approximate SDFs:** When using approximate signed distance fields, the Lipschitz bound must be close to 1 to ensure the tight bounding volume computation is valid [S1, unofficial][S2, abstract only, unofficial].
-- **Preprocessing:** The method is designed for scenarios where no preprocessing is required when primitive parameters are updated [S1, unofficial][S2, abstract only, unofficial].
+*   **Approximate SDFs:** When using approximate signed distance fields, the Lipschitz bound must be considered for the correctness of the bounding volume computation [S1, unofficial].
+*   **Primitive Count:** The method is designed to scale well to surfaces consisting of thousands of primitives [S1, unofficial][S2, abstract only, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** The method decorrelates field evaluation complexity from the full blobtree size through sparse bottom-up traversal [S1, unofficial][S2, abstract only, unofficial].
-- **Memory Complexity:** Uses a low-resolution A-buffer per tile [S1, unofficial][S2, abstract only, unofficial].
-- **Performance:** Scales well to surfaces consisting of thousands of primitives [S1, unofficial][S2, abstract only, unofficial].
-- **Strengths:** Enables interactive modeling without preprocessing; coherent field evaluation within workgroups [S1, unofficial][S2, abstract only, unofficial].
-- **Limitations:** Relies on approximate signed distance fields with Lipschitz bound close to 1 for optimal bounding volume computation [S1, unofficial][S2, abstract only, unofficial].
+*   **Complexity:** The method decorrelates field evaluation complexity from the full blobtree size [S1, unofficial][S2, abstract only, unofficial].
+*   **Performance:** Scales well to surfaces consisting of thousands of primitives [S1, unofficial][S2, abstract only, unofficial].
+*   **Strengths:** No preprocessing is required when primitive parameters are updated, making it well suited for modeling scenarios [S1, unofficial][S2, abstract only, unofficial]. Coherent field evaluation is achieved through thread synchronization [S1, unofficial][S2, abstract only, unofficial].
+*   **Limitations:** Not given in the sources.
 
 ## Background
-Synchronized-tracing was introduced in the context of accelerating sphere tracing for implicit surfaces represented by blobtrees [S1, unofficial][S2, abstract only, unofficial]. It addresses the need for efficient rendering of implicit volumes in interactive modeling scenarios where primitive parameters may be updated frequently [S1, unofficial][S2, abstract only, unofficial].
+The method was introduced in the context of implicit surfaces represented by blobtrees, which allow for smooth objects of arbitrary topology through hierarchical combinations of primitives [S2, abstract only, unofficial]. It was presented as a new tile-based rendering pipeline well suited for modeling scenarios where no preprocessing is required upon primitive parameter updates [S1, unofficial][S2, abstract only, unofficial].
 
 ## Sources
 [S1] Accelerating Sphere Tracing, https://www.researchgate.net/publication/329152815_Accelerating_Sphere_Tracing, fetched 2026-11-04 (unofficial)

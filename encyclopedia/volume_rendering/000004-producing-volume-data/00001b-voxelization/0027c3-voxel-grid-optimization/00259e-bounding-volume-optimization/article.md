@@ -3,160 +3,133 @@
 Also called: Adaptive Voxel-Array-Größe, BV Optimisation, Bounding Volume Optimisation, Bounding-Volume-Optimierung, SDF Bounding Volume Culling, Volumen-Größenanpassung
 
 ## Overview
-Bounding Volume Optimization reduces the computational cost of volume rendering by adapting the dimensions of the 3D voxel array to the actual spatial extent of the data, thereby eliminating empty regions and false positives during traversal [S1, unofficial]. Additionally, it minimizes the cost of the map function (e.g., Signed Distance Field evaluations) by skipping computations for objects that do not contribute to the minimal distance field, using bounding volumes to cull expensive primitives [S2]. It sets itself apart from sibling methods like [3D Voxel Grid Smoothing](833-3d-voxel-grid-smoothing.md) by focusing on spatial extent and culling rather than noise reduction, and from [Binary Voxel RLE Encoding](1071-binary-voxel-rle-encoding.md) by maintaining a dense grid structure within the optimized bounds rather than compressing the data representation itself.
+Bounding Volume Optimization reduces the computational cost of volume rendering by eliminating evaluations in empty space or for primitives that do not contribute to the final image [S1, unofficial][S2]. It achieves this by either adapting the dimensions of the voxel array to the actual data extent or by using bounding volumes to cull Signed Distance Field (SDF) evaluations [S1, unofficial][S2]. Unlike sibling methods that focus on data compression or grid smoothing, this method specifically targets the reduction of false positives and redundant map function calls during traversal [S1, unofficial][S2].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A discrete 3D voxel grid (or sparse structure) representing the scene, where each cell $(i, j, k)$ holds scalar, vector, or binary data [G]. The grid is initially defined by a fixed bounding box, often a power-of-two cube (e.g., $512^3$) [S1, unofficial].
-*   **Output:** An optimized voxel array with reduced dimensions matching the tightest bounding box of the occupied data, and/or a set of bounding volumes (AABBs) associated with scene primitives to cull SDF evaluations [S1, unofficial][S2].
+**Inputs and Outputs**
+*   **Input:** A discrete voxel grid or a set of geometric primitives with their associated SDFs.
+*   **Output:** An optimized rendering state where empty regions are skipped or bounding volumes are used to gate expensive SDF evaluations.
 
-**Data Structures:**
-1.  **Optimized Voxel Grid:** A 3D array with dimensions $W \times H \times D$, where $W, H, D$ are the minimum and maximum extents of occupied voxels along each axis.
-2.  **Bounding Volumes (AABBs):** For each primitive or object in the scene, an Axis-Aligned Bounding Box defined by minimum $(x_{min}, y_{min}, z_{min})$ and maximum $(x_{max}, y_{max}, z_{max})$ coordinates.
+**Data Structures**
+1.  **Adaptive Voxel Array:** A 3D texture or array where dimensions $(W, H, D)$ are set to the minimal bounding box of the non-empty voxels. For example, if a landscape occupies $512 \times 321 \times 512$ voxels within a $512^3$ space, the array is resized to $512 \times 321 \times 512$ [S1, unofficial].
+2.  **Bounding Volumes:** Axis-Aligned Bounding Boxes (AABBs) or similar primitives enclosing expensive geometric objects [S2].
 
-**Numbered Steps:**
-1.  **Analyze Occupancy:** Scan the initial voxel grid to identify the minimum and maximum indices $(i_{min}, i_{max}), (j_{min}, j_{max}), (k_{min}, k_{max})$ that contain non-empty data [S1, unofficial].
-2.  **Compute Bounding Box:** Calculate the tightest bounding box enclosing all occupied voxels. For example, if a landscape occupies a $512 \times 321 \times 512$ region within a $512^3$ grid, the new dimensions are $512 \times 321 \times 512$ [S1, unofficial].
-3.  **Reallocate Memory:** Create a new voxel array with the optimized dimensions. Copy the occupied data from the original grid to the new grid, preserving relative coordinates [S1, unofficial].
-4.  **Associate Bounding Volumes (Optional/Advanced):** For each primitive contributing to the voxel data, compute or retrieve its AABB [S2].
-5.  **Cull During Rendering:** During raymarching or traversal, check if the current ray segment or voxel block intersects with the bounding volumes of primitives [S2]. If a primitive's bounding volume does not intersect the ray or the current voxel block, skip the evaluation of its SDF or contribution [S2].
+**Steps**
+1.  **Determine Extent:** Calculate the minimum and maximum coordinates of all non-empty voxels or the bounding box of all primitives in the scene [S1, unofficial][S2].
+2.  **Resize or Cull:**
+    *   *For Voxel Arrays:* Resize the texture memory allocation to match the calculated extent, discarding the padding required for power-of-two or fixed-size constraints [S1, unofficial].
+    *   *For SDFs:* Construct bounding volumes around expensive primitives [S2].
+3.  **Traversal with Culling:**
+    *   During ray marching, check if the current ray segment intersects the adaptive volume or the bounding volumes [S1, unofficial][S2].
+    *   If the ray is outside the adaptive volume, skip voxel lookups [S1, unofficial].
+    *   If the ray is outside a primitive's bounding volume, skip the evaluation of that primitive's SDF [S2].
+4.  **Evaluate Map Function:** Compute the SDF only for voxels/primitives within the active bounds [S1, unofficial][S2].
 
-**Formulas:**
-*   **Optimized Dimensions:**
-    $$ W = i_{max} - i_{min} + 1 $$
-    $$ H = j_{max} - j_{min} + 1 $$
-    $$ D = k_{max} - k_{min} + 1 $$
-    Where $i, j, k$ are the voxel indices along the x, y, and z axes, respectively [S1, unofficial].
+**Formulas**
+Let $V_{min}$ and $V_{max}$ be the minimum and maximum coordinates of the active voxel data. The effective volume $V_{eff}$ is:
+$$ V_{eff} = (V_{max} - V_{min}) $$
+The memory saved compared to a fixed size $V_{fixed}$ is:
+$$ \Delta M = |V_{fixed}| - |V_{eff}| $$
+For SDF culling, let $B_i$ be the bounding volume of primitive $i$ and $SDF_i(p)$ be its distance function. The combined distance $d(p)$ at point $p$ is:
+$$ d(p) = \min_{i \in \text{Active}} SDF_i(p) $$
+where $i \in \text{Active}$ if the ray intersects $B_i$ [S2].
 
-*   **Bounding Volume Intersection Test (AABB vs Ray):**
-    A ray $R(t) = O + tD$ intersects an AABB defined by $[x_{min}, x_{max}] \times [y_{min}, y_{max}] \times [z_{min}, z_{max}]$ if:
-    $$ t_{min} = \max\left(\frac{x_{min} - O_x}{D_x}, \frac{y_{min} - O_y}{D_y}, \frac{z_{min} - O_z}{D_z}\right) $$
-    $$ t_{max} = \min\left(\frac{x_{max} - O_x}{D_x}, \frac{y_{max} - O_y}{D_y}, \frac{z_{max} - O_z}{D_z}\right) $$
-    Intersection occurs if $t_{min} \le t_{max}$ and $t_{max} \ge 0$ [G].
+**Parameters**
+*   **Resolution:** Dependent on the scene. Example: 720p resolution used in benchmarks [S2].
+*   **Primitive Count:** Benchmarks used 20 expensive primitives [S2].
 
-**Parameters:**
-*   **Initial Grid Size:** Often a power-of-two cube (e.g., $512^3$) for memory alignment [S1, unofficial].
-*   **Bounding Volume Type:** Axis-Aligned Bounding Boxes (AABBs) are standard [S1, unofficial].
+**Edge Cases and Pitfalls**
+*   **Precision:** Adaptive resizing requires careful handling of texture coordinates to map ray positions correctly to the new smaller grid [S1, unofficial].
+*   **Boundaries:** Fixed-size arrays (e.g., $512^3$) load unnecessary data into GPU memory, causing false positives during traversal [S1, unofficial].
+*   **Hardware Behavior:** Modern GPUs are MIMD (Multiple Instruction, Multiple Data), not pure SIMD. This allows different Streaming Multiprocessors (SMs) to handle different instruction streams, helping distribute expensive threads after cheaper culling checks finish early [S2].
 
-**Edge Cases and Pitfalls:**
-*   **Empty Scene:** If no voxels are occupied, the optimized dimensions are zero. Handle by falling back to a default grid or skipping rendering [G].
-*   **Precision:** Ensure that the conversion from world coordinates to voxel indices and back does not introduce significant errors, especially when resizing [G].
-*   **Dynamic Scenes:** If the scene geometry changes, the bounding box and voxel array must be recomputed, which can be costly. Consider incremental updates or hierarchical structures [G].
-
-**Pseudocode:**
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def optimize_bounding_volume(voxel_grid):
-    """
-    Optimizes the bounding volume of a voxel grid by resizing it to the tightest
-    bounding box of occupied voxels.
-    
-    Args:
-        voxel_grid: A 3D numpy array or similar structure representing the voxel data.
-                    Shape is (W, H, D).
-    
-    Returns:
-        optimized_grid: A new 3D array with reduced dimensions.
-        bounds: A tuple (i_min, i_max, j_min, j_max, k_min, k_max) representing
-                the original indices of the occupied region.
-    """
-    # Find indices of non-empty voxels
-    # Assuming 0 represents empty space
-    occupied_indices = np.argwhere(voxel_grid != 0)
-    
-    if occupied_indices.size == 0:
-        # No occupied voxels; return empty grid or handle as edge case
-        return np.empty((0, 0, 0)), (0, 0, 0, 0, 0, 0)
-    
-    # Compute min and max indices for each axis
-    i_min, j_min, k_min = np.min(occupied_indices, axis=0)
-    i_max, j_max, k_max = np.max(occupied_indices, axis=0)
-    
-    # Calculate new dimensions
-    new_w = i_max - i_min + 1
-    new_h = j_max - j_min + 1
-    new_d = k_max - k_min + 1
-    
-    # Extract the sub-grid
-    optimized_grid = voxel_grid[i_min:i_max+1, j_min:j_max+1, k_min:k_max+1]
-    
-    bounds = (i_min, i_max, j_min, j_max, k_min, k_max)
-    
-    return optimized_grid, bounds
+# Pseudocode for Bounding Volume Optimization in Ray Marching
 
-def cull_primitive_with_aabb(ray_origin, ray_direction, primitive_aabb):
-    """
-    Checks if a ray intersects an Axis-Aligned Bounding Box.
+def ray_march_optimized(ray_origin, ray_direction, scene):
+    # 1. Determine active bounds (pre-computed or dynamic)
+    # For voxel array optimization
+    voxel_bounds_min = scene.get_voxel_bounds_min()
+    voxel_bounds_max = scene.get_voxel_bounds_max()
     
-    Args:
-        ray_origin: (x, y, z) tuple
-        ray_direction: (x, y, z) tuple (assumed normalized)
-        primitive_aabb: Tuple of ((x_min, y_min, z_min), (x_max, y_max, z_max))
+    # For SDF primitive optimization
+    bounding_volumes = scene.get_bounding_volumes()
     
-    Returns:
-        bool: True if the ray intersects the AABB, False otherwise.
-    """
-    x_min, y_min, z_min = primitive_aabb[0]
-    x_max, y_max, z_max = primitive_aabb[1]
+    t = 0.0
+    max_steps = 100
+    step_size = 0.01
     
-    ox, oy, oz = ray_origin
-    dx, dy, dz = ray_direction
-    
-    # Calculate t_min and t_max for each axis
-    try:
-        t1 = (x_min - ox) / dx
-        t2 = (x_max - ox) / dx
-        t_min_x = min(t1, t2)
-        t_max_x = max(t1, t2)
+    for step in range(max_steps):
+        current_pos = ray_origin + ray_direction * t
         
-        t3 = (y_min - oy) / dy
-        t4 = (y_max - oy) / dy
-        t_min_y = min(t3, t4)
-        t_max_y = max(t3, t4)
+        # Check against adaptive voxel array bounds
+        if not is_inside_bounds(current_pos, voxel_bounds_min, voxel_bounds_max):
+            # Skip voxel lookup, potentially skip SDF evaluation if no primitives overlap
+            t += step_size
+            continue
+            
+        # Check against primitive bounding volumes
+        min_dist = infinity
+        active_primitives = []
         
-        t5 = (z_min - oz) / dz
-        t6 = (z_max - oz) / dz
-        t_min_z = min(t5, t6)
-        t_max_z = max(t5, t6)
-    except ZeroDivisionError:
-        # Handle parallel rays (dx, dy, or dz is 0)
-        # If ray is parallel to an axis, check if origin is within bounds
-        if dx == 0 and (ox < x_min or ox > x_max): return False
-        if dy == 0 and (oy < y_min or oy > y_max): return False
-        if dz == 0 and (oz < z_min or oz > z_max): return False
-        # If parallel and within bounds, continue with other axes
-        # Simplified: assume intersection if other axes allow it
-        # For robustness, handle each axis separately
-        return False # Placeholder for robust parallel handling
-
-    # Compute overall t_min and t_max
-    t_min = max(t_min_x, t_min_y, t_min_z)
-    t_max = min(t_max_x, t_max_y, t_max_z)
-    
-    # Intersection if t_min <= t_max and the intersection is in front of the ray
-    return t_min <= t_max and t_max >= 0
+        for prim in scene.primitives:
+            if intersects_bounding_volume(current_pos, prim.bounding_volume):
+                # Evaluate SDF only if inside bounding volume
+                dist = evaluate_sdf(current_pos, prim.sdf)
+                if dist < min_dist:
+                    min_dist = dist
+                active_primitives.append(prim)
+        
+        # If no active primitives or voxels contribute, continue
+        if min_dist == infinity:
+            t += step_size
+            continue
+            
+        # Advance by the minimum distance found
+        t += min_dist
+        
+        if t > scene.max_distance:
+            break
+            
+    return t
 ```
 
 ## Subtopics
 
-### Adaptive Voxel-Array-Größe
-Focuses on resizing the entire voxel grid to fit the data, reducing memory and traversal cost. Choose when the scene has a large empty volume. Link: [Bounding Volume Optimization](52-bounding-volume-optimization.md).
+### 3D Voxel Grid Smoothing
+Smooths voxel boundaries to reduce aliasing; does not address empty space culling. [Link](833-3d-voxel-grid-smoothing.md)
 
-### SDF Bounding Volume Culling
-Focuses on culling individual primitives during SDF evaluation. Choose when the scene has many complex primitives. Link: [Bounding Volume Optimization](52-bounding-volume-optimization.md).
+### Binary Voxel RLE Encoding
+Compresses voxel data using Run-Length Encoding; reduces memory but does not inherently cull traversal. [Link](1071-binary-voxel-rle-encoding.md)
+
+### Coordinate Grid Generation
+Generates the underlying coordinate system for voxels; a prerequisite for defining bounds. [Link](1273-coordinate-grid-generation.md)
+
+### Occupancy Voxel Creation
+Determines which voxels are occupied; provides the data needed to calculate adaptive bounds. [Link](2628-occupancy-voxel-creation.md)
+
+### Grid Resolution Calculation
+Determines the optimal voxel size; affects the granularity of the bounding volume. [Link](2908-grid-resolution-calculation.md)
+
+### Voxelization Optimization
+General techniques for faster voxel generation; distinct from post-generation volume optimization. [Link](3191-voxelization-optimization.md)
+
+### Bucket-based LBVH construction
+Builds a Linear Bounding Volume Hierarchy; a more complex hierarchical alternative to simple AABB culling. [Link](5163-bucket-based-lbvh-construction.md)
 
 ## Operating characteristics
-*   **Time Complexity:** Reducing the grid size from $N^3$ to $W \times H \times D$ reduces traversal time from $O(N^3)$ to $O(W \times H \times D)$ [S1, unofficial]. Culling primitives reduces the number of SDF evaluations, localizing expensive computations to areas with complex geometry [S2].
-*   **Memory Complexity:** Memory usage is reduced from $O(N^3)$ to $O(W \times H \times D)$ [S1, unofficial].
-*   **Measured Performance:** In a scene with 20 expensive primitives at 720p, enabling BV optimization reduced average frame duration from 41 ms (24 fps) to 21 ms (48 fps) [S2].
-*   **Strengths:** Reduces false positives in traversal, saves memory, and localizes expensive computations [S1, unofficial][S2].
-*   **Limitations:** Requires preprocessing to compute bounds. Dynamic scenes may require frequent updates [G].
-*   **When to Use:** When the voxel data occupies a small fraction of the initial grid, or when the scene contains many expensive primitives [S1, unofficial][S2].
-*   **When Not to Use:** When the scene is dense and fills the grid, or when the overhead of computing bounds exceeds the savings [G].
+*   **Time Complexity:** Reduces the number of SDF evaluations and voxel lookups. In a scene with 20 expensive primitives at 720p, frame duration dropped from 41 ms (24 fps) to 21 ms (48 fps) [S2].
+*   **Memory Complexity:** Reduces memory footprint by allocating only the necessary volume dimensions (e.g., $512 \times 321 \times 512$ instead of $512^3$) [S1, unofficial].
+*   **Strengths:** Eliminates false positives in empty space; localizes expensive computations to areas with complex geometry [S1, unofficial][S2].
+*   **Limitations:** Requires pre-computation of bounds; AABBs may not fit complex geometry tightly, leading to some overestimation [S1, unofficial][S2].
+*   **When to use:** When the scene has significant empty space or when primitives are expensive to evaluate [S1, unofficial][S2].
+*   **When not to use:** When the scene is uniformly dense or primitives are cheap to evaluate [S2].
 
 ## Background
-Bounding Volume Optimization originated in the context of raycasting-based voxel rendering and SDF raymarching. It was discussed in the context of optimizing voxel landscapes and rigid body physics simulations [S1, unofficial]. The technique was also explored in CUDA-based raymarching engines to improve performance by culling SDF evaluations [S2]. Modern GPUs, being MIMD (Multiple Instruction, Multiple Data) rather than pure SIMD, can benefit from this optimization by distributing expensive threads across Streaming Multiprocessors (SMs) after cheaper parts finish early [S2].
+Originating from research into raycasting-based voxel rendering and CUDA-based SDF raymarching, this technique addresses the inefficiency of fixed-size voxel arrays and uniform SDF evaluation [S1, unofficial][S2]. It is used in real-time voxel engines to separate game worlds from entities and to enable physics simulations using voxel models as bounding boxes [S1, unofficial].
 
 ## Sources
 [S1] Raycasting-basiertes Voxelrendering, https://serwiss.bib.hs-hannover.de/frontdoor/index/index/docId/2250, fetched 2026-10-25 (unofficial)

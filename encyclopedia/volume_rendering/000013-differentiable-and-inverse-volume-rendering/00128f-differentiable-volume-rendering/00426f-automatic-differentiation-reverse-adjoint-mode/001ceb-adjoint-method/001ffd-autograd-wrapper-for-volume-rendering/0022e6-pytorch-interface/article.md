@@ -1,37 +1,32 @@
 # PyTorch Interface
 
-Also called: Projector class, Differentiable Forward Projector PyTorch binding
+Also called: Projector class
 
 ## Overview
-The PyTorch Interface provides a high-level Python API for differentiable volume rendering, specifically targeting X-ray computed tomography (CT) forward and back projections. It wraps custom C++/CUDA extensions within a `torch.nn.Module` to enable end-to-end automatic differentiation via PyTorch's autograd engine [S1, unofficial]. It solves the problem of integrating differentiable projection operations into deep learning pipelines without manual gradient implementation, allowing gradients to flow from 2D projection losses back to 3D volume parameters and scanner poses [S1, unofficial]. It differs from lower-level C++ implementations by handling device placement and tensor management automatically, serving as the primary entry point for users [S1, unofficial].
+The PyTorch Interface exposes differentiable forward and back projection operations for X-ray computed tomography as a `torch.nn.Module` subclass [S1, unofficial]. It wraps custom C++/CUDA extensions to enable end-to-end automatic differentiation without manual gradient coding [S1, unofficial]. It solves the problem of integrating differentiable projection operations into deep learning pipelines [S1, unofficial].
 
 ## How it works
-The interface is implemented as a Python class `Projector` inheriting from `torch.nn.Module` [S1, unofficial]. It exposes forward and back projection operations as differentiable functions.
-
 **Inputs and Outputs:**
-- **Forward Projection:** Input is a 3D volume tensor (voxel grid) and a set of projection parameters (angles, geometry). Output is a 2D projection image tensor.
-- **Back Projection:** Input is a 2D projection image tensor and projection parameters. Output is a 3D volume tensor (gradient approximation or reconstructed volume).
+- **Forward Projection:** Input is a 3D volume tensor (voxel grid) and projection parameters; output is a 2D projection image tensor [G].
+- **Back Projection:** Input is a 2D projection image tensor and projection parameters; output is a 3D volume tensor containing gradients [G].
 
 **Data Structures:**
-The `Projector` class encapsulates CT scanner parameters. These include:
-- Scanner geometry type
-- Number of projections
-- Angular range or list of projection angles
-- Detector pixel width and height
-- Source-to-detector distance (SDD)
-- Source-to-object distance (SOD)
-- Horizontal/vertical detector shift
-- Number of voxels in each dimension
-- Voxel sizes
-- Volume center position
-
-These parameters are stored as attributes or configuration objects within the module [S1, unofficial].
+The `Projector` class stores CT scanner parameters as module attributes: scanner geometry type, number of projections, angular range or list of projection angles, detector pixel width and height, source-to-detector distance, source-to-object distance, horizontal/vertical detector shift, number of voxels in each dimension, voxel sizes, and volume center position [S1, unofficial]. These parameters are configured via set functions or a configuration file [S1, unofficial].
 
 **Steps:**
-1. **Initialization:** The `Projector` class is instantiated with CT parameters. Parameters can be set via configuration files or setter functions [S1, unofficial].
-2. **Device Management:** If the input volume is not on the GPU but GPU computation is requested, the interface automatically copies the data to the GPU, performs the calculation, and copies the result back to the CPU if necessary [S1, unofficial].
-3. **Forward Pass:** The `forward` method is called. It invokes the underlying C++/CUDA extension for forward projection. The extension computes the line integrals through the volume based on the specified geometry and angles.
-4. **Backward Pass:** PyTorch's autograd engine triggers the backward pass. The C++/CUDA extension provides the gradient computation for the back projection, allowing gradients to flow to the input volume and potentially to learnable parameters if they are part of the computational graph [S1, unofficial].
+1. **Initialization:** Instantiate `Projector` with the CT parameter configuration [S1, unofficial].
+2. **Device Management:** If the input volume resides on the CPU but GPU computation is requested, the interface copies the data to the GPU, executes the operation, and copies the result back to the CPU [S1, unofficial].
+3. **Forward Pass:** The `forward` method is called, which invokes the underlying C++/CUDA extension binding for forward projection [S1, unofficial].
+4. **Backward Pass:** PyTorch's autograd engine automatically triggers the backward pass, routing gradients through the C++/CUDA extension to update the input volume [S1, unofficial].
+
+**Formulas:**
+Not given in the sources.
+
+**Parameters:**
+Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- **Device Mismatch:** The interface handles CPU/GPU transfers automatically, but users must ensure input tensors are compatible with the requested device configuration [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -42,71 +37,39 @@ from torch import nn
 
 class Projector(nn.Module):
     def __init__(self, config):
-        super(Projector, self).__init__()
-        # Initialize CT parameters from config
-        # config contains: geometry_type, num_projections, angles, 
-        # detector_width, detector_height, sdd, sod, shift_x, shift_y,
-        # voxels_per_dim, voxel_size, volume_center
+        super().__init__()
+        # CT scanner parameters stored as module attributes
         self.config = config
-        # Register custom C++/CUDA extension functions
-        # These are assumed to be available in the environment
-        self.forward_proj = custom_cpp_cuda_forward
-        self.backward_proj = custom_cpp_cuda_backward
 
     def forward(self, volume, angles=None):
-        """
-        Perform differentiable forward projection.
-        
-        Args:
-            volume (torch.Tensor): 3D volume tensor (e.g., [1, D, H, W])
-            angles (torch.Tensor, optional): Projection angles. If None, uses self.config.
-            
-        Returns:
-            torch.Tensor: 2D projection images
-        """
-        # Ensure volume is on the correct device
+        # Device management: copy to GPU if requested and not already there
         if volume.device.type == 'cpu' and self.config.use_gpu:
             volume = volume.cuda()
-            
-        # Get angles if not provided
         if angles is None:
             angles = self.config.angles
-            
-        # Call C++/CUDA forward projection
-        projections = self.forward_proj(volume, angles, self.config)
-        
-        return projections
+        # Calls custom C++/CUDA extension for forward projection
+        # [G] Standard CT forward projection signature
+        return self._forward_proj(volume, angles)
 
-    def backward(self, grad_output):
-        """
-        Perform differentiable back projection for gradient computation.
-        
-        Args:
-            grad_output (torch.Tensor): Gradient of the loss w.r.t. projections
-            
-        Returns:
-            torch.Tensor: Gradient of the loss w.r.t. volume
-        """
-        # Call C++/CUDA back projection
-        grad_volume = self.backward_proj(grad_output, self.config.angles, self.config)
-        
-        return grad_volume
+    def _forward_proj(self, volume, angles):
+        # External C++/CUDA binding call
+        # [G] Implementation details not provided in sources
+        pass
 ```
-
-**Edge Cases and Pitfalls:**
-- **Device Mismatch:** The interface handles CPU/GPU transfers, but users must ensure input tensors are compatible with the requested device [S1, unofficial].
-- **Parameter Consistency:** CT parameters must be consistent between forward and back projections to ensure correct gradient flow [S1, unofficial].
 
 ## Subtopics
 
+### [Projective Spatial Transformer (ProST)](3391-projective-spatial-transformer-prost.md)
+A differentiable volume rendering module that generalizes spatial transformers to projective geometry for volumetric rendering of transmission images. It enables end-to-end differentiable projection of voxelized data onto 2D planes, essential for 2D/3D registration where gradients must flow from 2D metrics to 3D pose. Unlike mesh-based differentiable renderers, it operates directly on voxel grids via cone-beam ray casting, making it suitable for medical imaging.
+
 ## Operating characteristics
-- **Time Complexity:** Depends on the number of voxels, number of projections, and detector resolution. The C++/CUDA implementation is optimized for performance [S1, unofficial].
-- **Memory Complexity:** Requires memory for the volume, projections, and intermediate buffers for gradient computation [S1, unofficial].
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
 - **Strengths:** Seamless integration with PyTorch; automatic differentiation; handles device placement [S1, unofficial].
 - **Limitations:** Requires custom C++/CUDA extensions; limited to specific CT geometries defined in the configuration [S1, unofficial].
 
 ## Background
-The PyTorch Interface is part of a differentiable forward projector library for X-ray CT. It was developed to enable end-to-end differentiable projection of voxelized data, facilitating tasks like 2D/3D registration and volume reconstruction [S1, unofficial]. The implementation leverages PyTorch's autograd system and custom C++/CUDA extensions for performance [S1, unofficial].
+The PyTorch Interface is part of a differentiable forward projector library for X-ray CT [S1, unofficial]. It leverages PyTorch's autograd system and custom C++/CUDA extensions for performance [S1, unofficial].
 
 ## Sources
 [S1] Differentiable Forward Projector for X-ray Computed Tomography, https://differentiable.xyz/papers-2023/paper_48.pdf, fetched 2026-10-29 (unofficial)

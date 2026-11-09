@@ -1,0 +1,158 @@
+--- v001.md
++++ v002.md
+@@ -4,51 +4,125 @@
+ 
+ ## Overview
+-Cutting Plane Integration is an interactive clipping technique that renders a semi-transparent plane mesh and normal arrow to dynamically slice a volume, revealing internal structures [S1, unofficial]. It differs from standard ray casting by modifying the ray integration bounds in real-time based on a user-controlled geometric plane, rather than integrating through the entire volume extent [S1, unofficial].
++Cutting Plane Integration is an interactive clipping technique that renders a semi-transparent plane mesh and normal arrow to dynamically slice a volume, revealing internal structures by updating raycasting uniforms [S1, unofficial]. It differs from sibling methods like [Customization Volume Integration](5291-customization-volume-integration.md) or [TVAM Integrator](6814-tvam-integrator.md) by explicitly visualizing the clipping boundary as a geometric entity within the scene, rather than merely excluding data or modulating transfer functions [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D volume dataset (typically stored as a `Float32Array` of normalized values), camera parameters, and user controls for plane position (`planeHeight`), rotation (`planeRotX`, `planeRotY`), and orientation (`renderAbove`) [S1, unofficial].
+-*   **Output:** A 2D image where the volume is rendered up to the cutting plane, with the plane itself rendered as a semi-transparent geometric object [S1, unofficial].
++*   **Input:** A 3D volume dataset (typically stored as a normalized float array), camera parameters, and user interaction controls for plane position and orientation.
++*   **Output:** A 2D image where the volume is rendered with a visible cut plane intersecting the data.
+ 
+ **Data Structures:**
+-The volume data is loaded from a binary format where the first three `uint16` values define dimensions, and subsequent values are normalized voxel intensities [S1, unofficial]:
+-*   `width`: `uint16` at index 0.
+-*   `height`: `uint16` at index 1.
+-*   `depth`: `uint16` at index 2.
+-*   `voxels`: `Float32Array` of size `width * height * depth`, where each value is `uint16 / 4095.0` [S1, unofficial].
++*   **Volume Data:** A `Float32Array` of voxel values normalized to $[0, 1]$. The source structure maps a `uint16Array` where the first three elements are width, height, and depth, and subsequent elements are voxel intensities scaled by $1/4095.0$ [S1, unofficial].
++*   **Plane Geometry:** A mesh representing the cutting plane, positioned in world space.
++*   **Normal Arrow:** A geometric helper (e.g., `ArrowHelper`) indicating the plane's normal direction, rendered with depth testing disabled to ensure visibility [S1, unofficial].
++
++**Parameters:**
++*   `planeHeight`: A normalized float in $[0, 1]$ mapping to the Z-axis position [S1, unofficial].
++*   `planeRotX`, `planeRotY`: Rotation angles in degrees around the X and Y axes [S1, unofficial].
++*   `renderAbove`: A boolean flag that flips the plane 180° around the Y-axis when true [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Plane Position Calculation:** Map the normalized user input `planeHeight` ($h \in [0, 1]$) to a world Z-coordinate ($z_p$). The plane moves between $Z=200$ (at $h=0$) and $Z=-200$ (at $h=1$) [S1, unofficial]:
+-    $$ z_p = 200 - 400 \cdot h $$
+-2.  **Plane Orientation:** Calculate the rotation matrix for the plane. The Y-rotation ($\theta_y$) is derived from `planeRotY` in degrees, converted to radians. If `renderAbove` is true, an offset of $\pi$ is added to flip the plane 180° around the Y-axis [S1, unofficial]:
+-    $$ \theta_y = \text{radians}(\text{planeRotY}) + (\text{renderAbove} ? \pi : 0) $$
+-    The X-rotation ($\theta_x$) is derived directly from `planeRotX` [S1, unofficial].
+-3.  **Ray Casting with Clipping:** For each pixel, generate a ray. Clip the ray against the cutting plane defined by position $z_p$ and orientation $(\theta_x, \theta_y)$. The integration stops at the intersection point with the plane [S1, unofficial].
+-4.  **Rendering the Plane:** Render the cutting plane as a semi-transparent mesh and a normal arrow (origin at center, direction along local Z-axis, length 35, color red) to visualize the cut surface [S1, unofficial]. The arrow disables depth testing to ensure it remains visible [S1, unofficial].
++1.  **Map Height to Position:** Calculate the world Z-position of the plane using the normalized height. The formula maps `planeHeight` from $[0, 1]$ to a Z-range of $[200, -200]$ (assuming a center at 0 and range of 400):
++    $$ z_{plane} = 200 - 400 \times \text{planeHeight} $$
++    Set the plane mesh's Z-position to $z_{plane}$ [S1, unofficial].
++2.  **Apply Rotation:** Convert `planeRotY` from degrees to radians. If `renderAbove` is true, add $\pi$ to the rotation angle to flip the plane orientation:
++    $$ \theta_{final} = \text{planeRotY}_{rad} + (\text{renderAbove} ? \pi : 0) $$
++    Apply the rotation to the plane mesh [S1, unofficial].
++3.  **Render Plane and Arrow:** Render the semi-transparent plane mesh. Render the normal arrow originating from the plane center, pointing along the local Z-axis (initially), with depth testing disabled (`depthTest = false`, `depthWrite = false`) to ensure it appears on top [S1, unofficial].
++4.  **Raycasting with Clipping:** During the volume ray casting loop (as defined in [Direct volume ray casting](19-direct-volume-ray-casting.md)), use the plane's world-space position and orientation to clip the ray. Samples are only integrated if they lie on the correct side of the plane (or within a defined thickness, if applicable). The plane's uniform is updated each frame to reflect the current `planeHeight` and rotation [S1, unofficial].
+ 
+-**Parameters:**
+-*   `planeHeight`: Normalized float $[0, 1]$. Controls Z-position [S1, unofficial].
+-*   `planeRotX`, `planeRotY`: Floats in degrees. Control rotation around X and Y axes [S1, unofficial].
+-*   `renderAbove`: Boolean. Flips plane orientation by $\pi$ around Y [S1, unofficial].
++**Pseudocode:**
++```python
++def update_cutting_plane(plane_mesh, normal_arrow, plane_height, plane_rot_x, plane_rot_y, render_above):
++    # Map normalized height to world Z position
++    # Range: 200 (top) to -200 (bottom)
++    z_position = 200.0 - 400.0 * plane_height
++    plane_mesh.position.z = z_position
+ 
+-**Edge Cases:**
+-*   **Precision:** Voxel values are normalized from `uint16` (0-4095) to floats. Loss of precision occurs if the original data had higher bit-depth [S1, unofficial].
+-*   **Boundaries:** The plane position is clamped to the range $[-200, 200]$ in world space by the linear mapping [S1, unofficial].
++    # Convert degrees to radians
++    rot_y_rad = math.radians(plane_rot_y)
++    
++    # Apply rotation offset if rendering above
++    if render_above:
++        rot_y_rad += math.pi
++        
++    # Apply rotations to the plane mesh
++    plane_mesh.rotation.x = math.radians(plane_rot_x)
++    plane_mesh.rotation.y = rot_y_rad
++
++    # Update normal arrow to reflect plane orientation
++    # The arrow originates at the plane center and points along the local Z-axis
++    normal_arrow.position.copy(plane_mesh.position)
++    # Note: The arrow's direction is typically handled by the graphics API's 
++    # coordinate system transformation relative to the plane mesh.
++    # Ensure it renders on top
++    normal_arrow.line.material.depth_test = False
++    normal_arrow.line.material.depth_write = False
++
++def render_volume_with_cutting_plane(volume_texture, camera, plane_mesh, transfer_function):
++    # Initialize raycasting loop as per Direct Volume Ray Casting
++    for each pixel (x, y):
++        ray = camera.generate_ray(x, y)
++        color = vec3(0.0)
++        alpha = 0.0
++        
++        # Clip ray against the cutting plane
++        # Calculate intersection of ray with plane
++        plane_normal = plane_mesh.get_world_normal() # Vector pointing in local Z direction
++        plane_origin = plane_mesh.position
++        
++        # Ray-plane intersection: t = (plane_origin - ray_origin) . normal / (ray_direction . normal)
++        denom = dot(ray.direction, plane_normal)
++        if abs(denom) > 1e-6:
++            t = dot(plane_origin - ray.origin, plane_normal) / denom
++            if t > 0:
++                intersection_point = ray.origin + ray.direction * t
++                # Determine which side of the plane is visible
++                # Assuming we want to render the side "behind" the normal or "in front"
++                # This logic depends on the specific 'renderAbove' or clipping convention
++                # For this implementation, we clip the ray segment to be within the volume
++                # and potentially stop integration at the plane if it's a hard cut
++                # Or integrate only up to the plane if it's a "slice" view
++                
++                # Simplified: Integrate along the ray, but mask contributions based on plane
++                for sample_pos along ray:
++                    if is_inside_volume(sample_pos):
++                        # Check if sample is on the visible side of the cutting plane
++                        # Vector from plane origin to sample
++                        vec_to_sample = sample_pos - plane_origin
++                        # Project onto normal
++                        dist = dot(vec_to_sample, plane_normal)
++                        
++                        # Example: Render only if dist < 0 (behind the plane normal)
++                        # Adjust inequality based on desired visibility
++                        if dist < 0: 
++                            density = volume_texture.sample(sample_pos)
++                            color_val, alpha_val = transfer_function(density)
++                            color, alpha = composite(color, alpha, color_val, alpha_val)
++        else:
++            # Ray parallel to plane, no intersection
++            pass
++            
++    return color
++```
+ 
+ ## Subtopics
+ 
+ ### Region of Interest (ROI) Rendering
+-A technique to visualize internal features by defining a specific region and rendering only that portion of the dataset [S2, book]. It differs from simple cutting planes by supporting arbitrary geometric definitions (e.g., six orthographic planes, closed objects, or binary masks) rather than a single infinite plane [S2, book]. For image-order ray casting, the ray is clipped against all geometric definitions as a preprocessing step, and the ray function is evaluated only along segments within the ROI [S2, book]. For object-order methods, samples are tested against the ROI before contribution [S2, book]. Hardware clipping planes may be used to support this [S2, book].
++A technique to visualize internal features by defining a region of interest and rendering only that portion of the dataset [S2, book]. It differs from basic cutting planes by supporting complex geometric definitions beyond a single plane [S2, book].
++*   **Definition:** Define a region using camera near/far clipping planes, six orthographic clipping planes (rectangular subvolume), arbitrarily oriented half-space clipping planes, closed geometric objects, or an auxiliary binary mask volume [S2, book].
++*   **Implementation:**
++    *   **Image-order:** Clip the ray against all geometric region definitions as a preprocessing step. Evaluate the ray function only along segments within the ROI. Consult mask values at each sample to include/exclude contributions [S2, book].
++    *   **Object-order:** Determine for each sample if it is within the ROI before incorporating its contribution. Use hardware clipping planes if utilizing texture mapping [S2, book].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of pixels and the average ray length within the volume. The clipping operation adds a constant overhead per ray [S1, unofficial][S2, book].
+-*   **Memory Complexity:** Proportional to the volume size ($W \times H \times D$) for storing voxel data [S1, unofficial].
+-*   **Strengths:** Interactive exploration of internal structures; simple implementation using standard graphics primitives [S1, unofficial].
+-*   **Limitations:** Limited to planar cuts (in the base method); performance degrades with very large volumes if not optimized with spatial acceleration structures [S1, unofficial].
+-*   **When to use:** Interactive medical or scientific visualization where users need to slice through data to see internal features [S1, unofficial][S2, book].
+-*   **When not to use:** When non-planar or complex ROI definitions are required (use ROI Rendering variants) or when full-volume integration is needed [S2, book].
++*   **Time Complexity:** $O(N)$ per pixel, where $N$ is the number of samples along the ray within the volume and ROI. The clipping check adds negligible overhead per sample [S2, book].
++*   **Memory Complexity:** $O(V)$ for the volume data, plus $O(1)$ for the plane geometry and uniforms [S1, unofficial].
++*   **Strengths:** Interactive performance for exploring internal structures; visual feedback via the plane mesh and arrow [S1, unofficial].
++*   **Limitations:** Limited to planar or simple geometric clipping unless extended with ROI techniques [S2, book]. Precision issues may arise if the plane is parallel to the ray direction (denominator near zero) [S1, unofficial].
++*   **When to use:** Interactive exploration of volumetric data where the user needs to see the cutting boundary.
++*   **When not to use:** When complex, non-planar regions of interest are required (use ROI Rendering instead) [S2, book].
+ 
+ ## Background
+-The technique is implemented in educational and open-source projects such as the SubairProject1 Volume Rendering Visualization Project, which demonstrates interactive clipping using WebGL/Three.js [S1, unofficial]. The concept of using clipping planes for region-of-interest visualization is documented in standard computer graphics literature, such as the VTK Book, which discusses geometric and volumetric techniques for isolating internal features [S2, book].
++Cutting Plane Integration is a standard technique in interactive volume visualization, often implemented in educational or lightweight visualization projects [S1, unofficial]. It builds on the foundational ray casting loop defined in [Direct volume ray casting](19-direct-volume-ray-casting.md). The concept of using clipping planes to define regions of interest is discussed in advanced computer graphics literature, such as the VTK Book [S2, book].
+ 
+ ## Sources

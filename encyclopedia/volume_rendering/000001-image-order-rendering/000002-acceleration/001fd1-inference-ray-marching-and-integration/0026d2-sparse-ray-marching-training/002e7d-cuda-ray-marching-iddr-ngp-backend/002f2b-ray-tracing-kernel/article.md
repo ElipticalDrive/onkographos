@@ -1,6 +1,5 @@
 # Ray Tracing Kernel
 
-
 ## Overview
 The Ray Tracing Kernel is a CUDA kernel implementation for forward and backward ray tracing through a sparse grid volume, handling spherical harmonic (SH) evaluation and ray bounds [S1, unofficial]. It distinguishes itself by organizing computation per-warp for SH evaluation and using shared memory for ray specification caching to minimize global memory traffic [S1, unofficial].
 
@@ -26,7 +25,7 @@ The Ray Tracing Kernel is a CUDA kernel implementation for forward and backward 
 3.  **Synchronization:** Synchronize warps to ensure SH values are ready: `__syncwarp((1U << grid.sh_data_dim) - 1)` [S1, unofficial].
 4.  **Ray Bounds:** Find the intersection bounds of the ray with the sparse grid volume: `ray_find_bounds(ray_spec[ray_blk_id], grid, opt, ray_id)` [S1, unofficial].
 5.  **Ray Tracing:** Call the core tracing function `trace_ray_cuvol` with the grid, ray spec, options, lane ID, SH values, temp storage, output pointer, and optional log transmit output [S1, unofficial].
-6.  **Backward Pass:** For gradients, the kernel takes `grad_output`, `color_cache`, `log_transmit_in`, `beta_loss`, `sparsity_loss`, and `grads` as inputs. It sets up the ray spec and calls `trace_ray_cuvol` (interpreted as handling backward logic internally or invoking a backward trace variant) [S1, unofficial].
+6.  **Backward Pass:** For gradients, the kernel takes `grad_output`, `color_cache`, `log_transmit_in`, `beta_loss`, `sparsity_loss`, and `grads` as inputs. It sets up the ray spec and calls `trace_ray_cuvol` to handle backward logic internally [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -34,7 +33,7 @@ The Ray Tracing Kernel is a CUDA kernel implementation for forward and backward 
 ```python
 import math
 
-def evaluate_sh(coeffs, direction):
+def calc_sphfunc(grid, lane_id, ray_id, direction, sphfunc_val):
     # Standard 2nd-order spherical harmonic evaluation [G]
     x, y, z = direction
     sh = [0.0] * 9
@@ -47,10 +46,11 @@ def evaluate_sh(coeffs, direction):
     sh[6] = 0.546274 * y * z
     sh[7] = 0.546274 * x * z
     sh[8] = 0.546274 * (x * x - y * y)
-    return sum(c * s for c, s in zip(coeffs, sh))
+    sphfunc_val[ray_id][lane_id] = sum(c * s for c, s in zip(grid.sh_coeffs[ray_id], sh))
 
-def ray_find_bounds(origin, direction, grid, opt):
+def ray_find_bounds(ray_spec, grid, opt, ray_id):
     # Standard ray-AABB intersection [G]
+    origin, direction = ray_spec[ray_id].origin, ray_spec[ray_id].dir
     t_min, t_max = 0.0, 1000.0
     for i in range(3):
         if abs(direction[i]) > 1e-6:
@@ -74,41 +74,21 @@ def render_ray_kernel(grid, ray_spec, opt, lane_id, ray_id, output_ptr, log_tran
 
     # Step 2: SH Evaluation
     if lane_id < grid.sh_data_dim:
-        shared_sphfunc_val[ray_id][lane_id] = evaluate_sh(grid.sh_coeffs[ray_id], shared_ray_spec[ray_id].dir)
+        calc_sphfunc(grid, lane_id, ray_id, shared_ray_spec[ray_id].dir, shared_sphfunc_val)
 
     # Step 3: Synchronize warps
     # __syncwarp((1U << grid.sh_data_dim) - 1)
-    # (In Python simulation, execution proceeds sequentially)
 
     # Step 4: Find ray bounds
-    t_min, t_max = ray_find_bounds(shared_ray_spec[ray_id].origin, shared_ray_spec[ray_id].dir, grid, opt)
+    t_min, t_max = ray_find_bounds(shared_ray_spec, grid, opt, ray_id)
 
-    # Step 5: Ray Marching & Integration (Standard volumetric rendering [G])
-    t = t_min
-    transmittance = 1.0
-    color = [0.0, 0.0, 0.0]
-    log_transmit = 0.0
-
-    while t < t_max:
-        pos = [shared_ray_spec[ray_id].origin[i] + t * shared_ray_spec[ray_id].dir[i] for i in range(3)]
-        density = grid.sample_density(pos)
-        if density > 0.0:
-            sh_vals = shared_sphfunc_val[ray_id]
-            radiance = evaluate_sh(sh_vals, shared_ray_spec[ray_id].dir)
-            alpha = 1.0 - math.exp(-density * opt.step_size)
-            color = [color[i] + radiance * alpha * transmittance for i in range(3)]
-            transmittance *= (1.0 - alpha)
-            log_transmit += math.log(1.0 - alpha)
-        t += opt.step_size
-
-    output_ptr[ray_id] = color
-    if log_transmit_out is not None:
-        log_transmit_out[ray_id] = log_transmit
+    # Step 5: Ray Tracing
+    # trace_ray_cuvol(grid, ray_spec, opt, lane_id, shared_sphfunc_val, shared_temp, output_ptr, log_transmit_out)
+    # The sources do not give the exact implementation of trace_ray_cuvol [S1, unofficial].
 
 def render_ray_backward_kernel(grid, ray_spec, opt, grad_output, color_cache, log_transmit_in, beta_loss, sparsity_loss, grads):
     # The sources do not give the exact gradient propagation steps for the backward kernel [S1, unofficial].
-    # Standard adjoint equations would iterate backwards from t_max to t_min,
-    # accumulating gradients for density, SH coefficients, and ray parameters.
+    # It sets up the ray spec and calls trace_ray_cuvol to handle backward logic internally.
     pass
 ```
 
@@ -117,14 +97,9 @@ def render_ray_backward_kernel(grid, ray_spec, opt, grad_output, color_cache, lo
 *   **Precision:** Floating-point precision in SH evaluation and ray marching can accumulate errors, especially for long rays or high-order SH [G].
 *   **Boundary Conditions:** `ray_find_bounds` must correctly handle rays that do not intersect the grid or are entirely outside [G].
 
-## Subtopics
-
-### CUDA Ray Marching (IDDR-NGP Backend)
-The parent method that provides the sparse grid volume and adaptive step sizes. The Ray Tracing Kernel operates on this grid. [CUDA Ray Marching (IDDR-NGP Backend)](5788-cuda-ray-marching-iddr-ngp-backend.md)
-
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources. Likely linear with respect to the number of samples along the ray, which depends on grid density and ray length [G].
-*   **Memory Complexity:** Shared memory usage is proportional to `TRACE_RAY_CUDA_RAYS_PER_BLOCK`. Global memory usage depends on the sparse grid size and SH coefficients [S1, unofficial].
+*   **Time Complexity:** Not given in the sources [S1, unofficial].
+*   **Memory Complexity:** Shared memory usage is proportional to `TRACE_RAY_CUDA_RAYS_PER_BLOCK` [S1, unofficial].
 *   **Performance:** Optimized for GPU execution using warp-level parallelism for SH evaluation and shared memory for ray spec caching [S1, unofficial].
 *   **Strengths:** Efficient handling of SH evaluation and ray bounds; supports both forward and backward passes for training [S1, unofficial].
 *   **Limitations:** Limited by warp size (32 threads) for SH evaluation; requires careful management of shared memory [S1, unofficial].

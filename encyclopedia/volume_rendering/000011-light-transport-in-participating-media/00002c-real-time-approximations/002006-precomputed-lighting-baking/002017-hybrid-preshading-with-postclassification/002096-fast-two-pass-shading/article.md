@@ -3,7 +3,7 @@
 Also called: P-buffer shading, Two-pass shading
 
 ## Overview
-Fast Two-Pass Shading is a rendering optimization that avoids redundant per-fragment computations—specifically volume texture access, classification, and lighting—by sharing intermediate results between pixels covered by the same splat [S1, unofficial][S2]. It improves rendering performance by 5%–10% on typical hardware, distinguishing itself from sibling methods like Congradient Shading by explicitly decoupling the classification/illumination step from the geometric filtering step via a P-buffer [S1, unofficial][S2].
+Fast Two-Pass Shading is a rendering optimization that avoids redundant per-fragment computations—specifically volume texture access, classification, and lighting—by sharing intermediate results between pixels covered by the same splat [S1, unofficial][S2]. It decouples the classification and illumination steps from the geometric filtering step by storing intermediate results in a render target (P-buffer) [S1, unofficial][S2].
 
 ## How it works
 **Inputs and Outputs:**
@@ -12,79 +12,96 @@ Fast Two-Pass Shading is a rendering optimization that avoids redundant per-frag
 *   **Intermediate Data:** A P-buffer (render target) storing intermediate results for each splat.
 
 **Data Structures:**
-The P-buffer stores one entry per splat. The exact layout is not specified in the sources, but it must contain the results of:
-1.  Volume texture access.
-2.  Voxel classification (via lookup table).
-3.  Illumination computation [S1, unofficial][S2].
+The P-buffer stores one entry per splat. Each entry contains the results of volume texture access, voxel classification (via lookup table), and illumination computation [S1, unofficial][S2].
 
 **Numbered Steps:**
-
-1.  **First Pass (P-buffer Generation):**
-    *   Project each voxel of the current slice as a single-pixel point [S1, unofficial][S2].
-    *   For each point splat, compute:
-        *   Volume texture access.
-        *   Voxel classification.
-        *   Illumination [S1, unofficial][S2].
-    *   Store these intermediate results in the P-buffer (render target) [S1, unofficial][S2].
-
-2.  **Second Pass (Splat Rendering):**
-    *   Project the full splat geometry (covering multiple pixels, e.g., 2×2 up to 40×40 pixels depending on viewpoint) [S1, unofficial][S2].
-    *   For each fragment covered by the splat:
-        *   Perform per-fragment lighting.
-        *   Apply EWA (Elliptical Weighted Average) filtering [S1, unofficial][S2].
-        *   Reuse the intermediate results from the P-buffer via lookup [S1, unofficial][S2].
-
-3.  **Final Composition:**
-    *   Composite all splats from the slice into the final image [S1, unofficial][S2].
+1.  **First Pass (P-buffer Generation):** Project each voxel of the current slice as a single-pixel point [S1, unofficial][S2]. For each point splat, compute volume texture access, voxel classification, and illumination [S1, unofficial][S2]. Store these intermediate results in the P-buffer (render target) [S1, unofficial][S2].
+2.  **Second Pass (Splat Rendering):** Project the full splat geometry (covering multiple pixels, e.g., 2×2 to 40×40 pixels depending on viewpoint) [S1, unofficial][S2]. For each fragment covered by the splat, perform per-fragment lighting and EWA filtering while reusing the intermediate results from the P-buffer via lookup [S1, unofficial][S2].
+3.  **Final Composition:** Composite all splats from the slice into the final image [S1, unofficial][S2].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def fast_two_pass_shading(slice_of_voxels):
-    # Initialize P-buffer render target
-    p_buffer = create_render_target()
+def fast_two_pass_shading(slice_of_voxels, view_matrix, splat_radius):
+    # Initialize P-buffer render target as a dictionary mapping screen coords to intermediates
+    p_buffer = {}
 
     # Pass 1: Compute intermediate results for each splat
     for voxel in slice_of_voxels:
-        # Project as single-pixel point
-        point_splat = project_as_point(voxel)
-        
+        # Project voxel center to screen as a single-pixel point
+        screen_x, screen_y = project_to_screen(voxel.center, view_matrix)
+        key = (int(screen_x), int(screen_y))
+
         # Compute intermediate results
-        texture_sample = access_volume_texture(voxel)
+        texture_sample = sample_volume(voxel.position)
         classification = classify_voxel(texture_sample)
-        illumination = compute_illumination(classification, voxel)
-        
+        illumination = compute_illumination(classification, voxel.position)
+
         # Store in P-buffer
-        store_in_p_buffer(p_buffer, point_splat, {
+        p_buffer[key] = {
             'texture_sample': texture_sample,
             'classification': classification,
             'illumination': illumination
-        })
+        }
 
     # Pass 2: Render full splats with filtering
+    final_image = initialize_image()
     for voxel in slice_of_voxels:
         # Project full splat geometry
-        full_splat = project_full_splat(voxel)
-        
-        # Render fragments
-        for fragment in full_splat.fragments:
-            # Lookup intermediate results from P-buffer
-            intermediate = lookup_p_buffer(p_buffer, fragment.position)
-            
-            # Apply per-fragment lighting and EWA filtering
-            # Note: The sources state "per-fragment lighting" is reused,
-            # but also mention "EWA filtering". The exact combination
-            # of lighting vs filtering in pass 2 is described as
-            # "per-fragment lighting and EWA filtering" [S1, unofficial][S2].
-            final_color = apply_ewa_filtering(intermediate, fragment)
-            
-            # Composite
-            composite_into_image(final_color, fragment)
+        splat_center_x, splat_center_y = project_to_screen(voxel.center, view_matrix)
+        radius = splat_radius  # Varies from 2 to 40 pixels depending on viewpoint [S1, unofficial][S2]
 
-    # Final composition of all splats from each slice is handled by the
-    # standard alpha blending/compositing of the fragments [S1, unofficial][S2].
+        # Render fragments covered by the splat
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                frag_x, frag_y = splat_center_x + dx, splat_center_y + dy
+                if not in_image_bounds(frag_x, frag_y, final_image):
+                    continue
+
+                # Lookup intermediate results from P-buffer
+                p_key = (int(splat_center_x), int(splat_center_y))
+                intermediate = p_buffer.get(p_key)
+                if intermediate is None:
+                    continue
+
+                # Apply per-fragment lighting and EWA filtering
+                weight = compute_ewa_weight(dx, dy, radius)
+                final_color = apply_ewa_filtering(intermediate, weight, frag_x, frag_y)
+
+                # Composite into image
+                composite_into_image(final_color, frag_x, frag_y, final_image)
+
+    return final_image
+
+def project_to_screen(position, view_matrix):
+    # Standard perspective projection
+    projected = transform(position, view_matrix)
+    return projected.x / projected.w, projected.y / projected.w
+
+def sample_volume(position):
+    # Trilinear interpolation from volume texture
+    return volume_texture.sample(position)
+
+def classify_voxel(texture_value):
+    # Lookup table classification
+    return classification_lut[texture_value]
+
+def compute_illumination(classification, position):
+    # Standard lighting model using classification and position
+    return lighting_model(classification, position)
+
+def compute_ewa_weight(dx, dy, radius):
+    # Elliptical Weighted Average weight calculation
+    return exp(-(dx*dx + dy*dy) / (2 * radius * radius))
+
+def apply_ewa_filtering(intermediate, weight, frag_x, frag_y):
+    # Reuse intermediate results with EWA weight
+    return intermediate['illumination'] * weight
+
+def composite_into_image(color, x, y, image):
+    # Alpha blending into final image
+    image[y][x] = blend(image[y][x], color)
 ```
 
 **Edge Cases and Pitfalls:**
@@ -96,8 +113,6 @@ def fast_two_pass_shading(slice_of_voxels):
 *   **Hardware:** Measured on a 2.4 GHz P4 system with 2 GB memory and an ATI 9800 Pro video card (256 MB local memory) using DirectX 9.0 SDK [S1, unofficial][S2].
 *   **Strengths:** Reduces redundant computation for pixels covered by the same splat [S1, unofficial][S2].
 *   **Limitations:** Increased context switches due to the extra pass [S1, unofficial][S2].
-*   **When to Use:** When rendering large splats (up to 40×40 pixels) where redundant texture access and classification are significant [S1, unofficial][S2].
-*   **When Not to Use:** When splats are very small (e.g., 1×1 pixel) or when context switch overhead dominates [S1, unofficial][S2].
 
 ## Background
 *   **Origin:** Proposed in "Hardware-Accelerated Adaptive EWA Volume Splatting" by Wei Chen et al. [S1, unofficial][S2].

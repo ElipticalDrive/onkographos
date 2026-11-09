@@ -3,96 +3,95 @@
 Also called: BVH Building, Bvh constructor, Fernandes and Walter LBVH construction
 
 ## Overview
-Bucket-based LBVH construction builds a Linear Bounding Volume Hierarchy (LBVH) from a discrete voxel grid by grouping voxels into spatial buckets rather than using a uniform grid with fixed brick sizes [S2, unofficial]. This approach is particularly effective for sparse volumes, offering two to three times higher frame rates than methods that do not skip empty space [S2, unofficial]. It sets itself apart from sibling methods like [3D Voxel Grid Smoothing](833-3d-voxel-grid-smoothing.md) by preserving high-frequency geometric detail through discrete bucketing, and from [Bounding Volume Optimization](3583-bounding-volume-optimization.md) by utilizing a bucket-based spatial abstraction instead of uniform bricks [S2, unofficial].
+Bucket-based LBVH construction builds a Bounding Volume Hierarchy (BVH) from a voxel model by grouping voxels into dynamic buckets rather than using a uniform grid with a fixed brick size [S2, unofficial]. This approach is designed to handle sparse volumes more efficiently than fixed-brick methods [S2, unofficial]. It sets itself apart from siblings like [Bounding Volume Optimization](3583-bounding-volume-optimization.md) by utilizing compute shaders for neighbor finding, cluster merging, and prefix scans to construct the hierarchy [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A discrete 3D voxel grid (scalar, vector, or binary data) [G].
-*   **Output:** A Linear Bounding Volume Hierarchy (LBVH) structure suitable for ray traversal.
+*   **Input:** A voxel model (discrete voxel grid).
+*   **Output:** A constructed BVH structure.
 
 **Data Structures:**
-*   **Voxel Grid:** A 3D array where each cell $(i, j, k)$ represents a voxel [G].
-*   **BVH Nodes:** Standard LBVH node structure (bounding box, child indices) [G].
-*   **Compute Shader Buffers:**
-    *   `volatileGPUData`: Intermediate storage for cluster merging and neighbor finding.
-    *   `SSBO` (Shader Storage Buffer Object): Used for aggregate data management during the build process.
+*   `volatileGPUData`: A temporary storage structure used during the construction process, likely containing voxel positions and cluster information.
+*   **BVH Nodes:** Hierarchical bounding volumes enclosing clusters of voxels.
 
 **Parameters:**
-*   `BVH_BUILDING_RADIUS`: A static constant defining the search radius for neighbor finding. Typical value: 100 [S1, unofficial].
+*   `BVH_BUILDING_RADIUS`: A static constant set to 100 [S1, unofficial]. This likely defines the search radius for neighbor finding or cluster merging.
 
 **Steps:**
-1.  **Aggregate Data:** Call `aggregateSSBOData(volatileGPUData)` to prepare data for compute shader execution [S1, unofficial].
-2.  **Neighbor Finding:** Execute the `FIND_BEST_NEIGHBOR` compute shader. This step identifies neighboring voxels within the `BVH_BUILDING_RADIUS` to establish spatial relationships [S1, unofficial].
-3.  **Cluster Merging:** Execute the `CLUSTER_MERGING` compute shader. Voxels are grouped into clusters based on spatial proximity, forming the basis of the bucket structure [S1, unofficial].
-4.  **Reallocate Clusters:** Execute the `REALLOCATE_CLUSTERS` compute shader to optimize cluster distribution and ensure balanced bucket sizes [S1, unofficial].
-5.  **Prefix Scan (Up-Sweep):** Execute the `REDUCE_PREFIX_SCAN` compute shader. This performs a parallel reduction to compute prefix sums, essential for determining bucket boundaries and node offsets [S1, unofficial].
-6.  **Prefix Scan (Down-Sweep):** Execute the `DOWN_SWEEP_PREFIX_SCAN` compute shader. This completes the prefix scan operation, finalizing the indices for bucket assignments [S1, unofficial].
-7.  **Reset Last Position:** Execute the `RESET_LAST_POSITION_PREFIX_SCAN` compute shader to reset tracking variables for the next iteration or finalization [S1, unofficial].
-8.  **End Loop Computations:** Execute the `END_LOOP_COMPUTATIONS` compute shader to finalize the LBVH structure and release temporary resources [S1, unofficial].
+1.  **Aggregate Data:** Call `aggregateSSBOData(volatileGPUData)` to prepare voxel data for GPU processing [S1, unofficial].
+2.  **Neighbor Finding:** Execute the `FIND_BEST_NEIGHBOR` compute shader to identify adjacent voxels or clusters [S1, unofficial].
+3.  **Cluster Merging:** Execute the `CLUSTER_MERGING` compute shader to combine neighboring voxels into larger clusters [S1, unofficial].
+4.  **Reallocation:** Execute the `REALLOCATE_CLUSTERS` compute shader to adjust cluster boundaries or memory layout [S1, unofficial].
+5.  **Prefix Scan (Up-sweep):** Execute the `REDUCE_PREFIX_SCAN` compute shader to perform a parallel reduction [S1, unofficial].
+6.  **Prefix Scan (Down-sweep):** Execute the `DOWN_SWEEP_PREFIX_SCAN` compute shader to complete the prefix sum operation [S1, unofficial].
+7.  **Reset Position:** Execute the `RESET_LAST_POSITION_PREFIX_SCAN` compute shader to finalize position tracking [S1, unofficial].
+8.  **End Loop:** Execute the `END_LOOP_COMPUTATIONS` compute shader to finalize the construction step [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def build_bucket_lbvh(voxel_grid, bvh_building_radius=100):
-    # Initialize intermediate data structures
-    volatile_gpu_data = allocate_volatile_data(voxel_grid)
+def build_bucket_lbvhe(voxel_model):
+    # Initialize volatile GPU data structure
+    volatileGPUData = aggregateSSBOData(voxel_model)
     
-    # Step 1: Aggregate data for compute shaders
-    aggregate_ssbo_data(volatile_gpu_data)
+    # Define compute shader programs
+    shaders = {
+        "FIND_BEST_NEIGHBOR": ...,
+        "CLUSTER_MERGING": ...,
+        "REALLOCATE_CLUSTERS": ...,
+        "END_LOOP_COMPUTATIONS": ...,
+        "REDUCE_PREFIX_SCAN": ...,
+        "DOWN_SWEEP_PREFIX_SCAN": ...,
+        "RESET_LAST_POSITION_PREFIX_SCAN": ...
+    }
     
-    # Step 2: Find best neighbors within radius
-    # Uses compute shader FIND_BEST_NEIGHBOR
-    find_best_neighbor(volatile_gpu_data, bvh_building_radius)
+    # Step 1: Find best neighbors for each voxel/cluster
+    # Uses BVH_BUILDING_RADIUS (100) for search scope
+    shaders["FIND_BEST_NEIGHBOR"].dispatch(volatileGPUData)
     
-    # Step 3: Merge voxels into clusters (buckets)
-    # Uses compute shader CLUSTER_MERGING
-    cluster_merging(volatile_gpu_data)
+    # Step 2: Merge clusters based on neighbor relationships
+    shaders["CLUSTER_MERGING"].dispatch(volatileGPUData)
     
-    # Step 4: Reallocate clusters for balance
-    # Uses compute shader REALLOCATE_CLUSTERS
-    reallocate_clusters(volatile_gpu_data)
+    # Step 3: Reallocate clusters in memory
+    shaders["REALLOCATE_CLUSTERS"].dispatch(volatileGPUData)
     
-    # Step 5: Parallel reduction (Up-Sweep)
-    # Uses compute shader REDUCE_PREFIX_SCAN
-    reduce_prefix_scan(volatile_gpu_data)
+    # Step 4: Perform parallel reduction (prefix scan up-sweep)
+    shaders["REDUCE_PREFIX_SCAN"].dispatch(volatileGPUData)
     
-    # Step 6: Parallel reduction (Down-Sweep)
-    # Uses compute shader DOWN_SWEEP_PREFIX_SCAN
-    down_sweep_prefix_scan(volatile_gpu_data)
+    # Step 5: Perform parallel prefix scan (down-sweep)
+    shaders["DOWN_SWEEP_PREFIX_SCAN"].dispatch(volatileGPUData)
     
-    # Step 7: Reset tracking positions
-    # Uses compute shader RESET_LAST_POSITION_PREFIX_SCAN
-    reset_last_position_prefix_scan(volatile_gpu_data)
+    # Step 6: Reset last position tracking
+    shaders["RESET_LAST_POSITION_PREFIX_SCAN"].dispatch(volatileGPUData)
     
-    # Step 8: Finalize LBVH
-    # Uses compute shader END_LOOP_COMPUTATIONS
-    end_loop_computations(volatile_gpu_data)
+    # Step 7: Finalize loop computations
+    shaders["END_LOOP_COMPUTATIONS"].dispatch(volatileGPUData)
     
-    return extract_lbvh(volatile_gpu_data)
+    return volatileGPUData.bvh_structure
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** Floating-point precision in bounding box calculations may lead to overlaps or gaps in sparse regions [G].
-*   **Boundaries:** Voxels on the grid boundary must be handled correctly during neighbor finding to avoid out-of-bounds accesses [G].
-*   **Degenerate Input:** Empty volumes or volumes with no occupied voxels should return an empty LBVH or a single root node [G].
+*   **Precision:** GPU-based parallel reductions require careful handling of atomic operations and memory synchronization to avoid race conditions [S1, unofficial].
+*   **Boundaries:** The `BVH_BUILDING_RADIUS` of 100 must be sufficient to capture relevant neighbors but not so large as to cause excessive memory usage or computation [S1, unofficial].
+*   **Sparse Volumes:** The bucket-based approach is specifically beneficial for sparse volumes where fixed-brick methods waste memory on empty regions [S2, unofficial].
 
 ## Subtopics
 
 ### [Bucket Size Computation](8964-bucket-size-computation.md)
-Computes the Bucket Texture storing the index of the last voxel of each bucket. It splits computation into fragment and vertex shader steps to avoid inefficient vertex shader texture fetches. Choose this when GPU efficiency for boundary identification is critical.
+Computes the bucket texture storing the position of the last voxel of each bucket. It splits computation into fragment and vertex shader steps to avoid inefficient vertex shader texture fetches.
 
 ## Operating characteristics
-*   **Time Complexity:** Parallel compute shader execution suggests $O(N)$ or $O(N \log N)$ depending on the prefix scan implementation, where $N$ is the number of voxels.
-*   **Memory Complexity:** Requires storage for the voxel grid, intermediate SSBOs, and the final LBVH. Memory usage scales with the number of voxels and clusters.
-*   **Performance:** Offers 2-3x higher frame rates compared to methods without empty-space skipping [S2, unofficial].
-*   **Strengths:** Efficient for sparse volumes; leverages GPU parallelism via compute shaders.
-*   **Limitations:** Requires significant GPU memory for intermediate buffers; complex shader implementation.
-*   **When to Use:** Sparse volumetric data where empty space skipping is beneficial.
-*   **When Not to Use:** Dense volumes where uniform grid methods might be simpler; CPU-only environments.
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Efficient for sparse volumes by avoiding fixed brick sizes [S2, unofficial]. Parallelizable on GPU using compute shaders [S1, unofficial].
+*   **Limitations:** Requires complex compute shader implementation for neighbor finding and prefix scans [S1, unofficial].
+*   **When to Use:** Sparse voxel volumes where memory efficiency and traversal speed are critical [S2, unofficial].
+*   **When Not to Use:** Dense volumes where fixed-brick methods might be simpler and equally effective [S2, unofficial].
 
 ## Background
-The method was introduced by Fernandes and Walter [FW20] as an alternative to uniform grid-based LBVH construction (e.g., Zellmann et al. [ZHL19]). It addresses the inefficiency of fixed brick sizes in sparse volumes by using dynamic bucketing. The implementation described here is based on the `VoxelFragmentML` project [S1, unofficial], which adapts these principles for procedural meshing and volume rendering.
+The method is attributed to Fernandes and Walter [S2, unofficial]. It was developed as an alternative to Zellmann et al.'s fixed-brick LBVH construction [S2, unofficial]. The implementation described in [S1, unofficial] is part of a procedural soft mesher tool.
 
 ## Sources
 [S1] AlfonsoLRz/VoxelFragmentML, https://github.com/AlfonsoLRz/VoxelFragmentML, fetched 2026-10-26 (unofficial)

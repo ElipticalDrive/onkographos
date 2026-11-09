@@ -36,18 +36,18 @@ This method renders regular volumetric grids by leveraging 3D texture mapping ha
 *   **Phong Shading:** The intensity $I$ at a sample point is calculated as:
     $$ I = I_a k_a + \sum_{j} I_{l_j} \left( k_d (\mathbf{n} \cdot \mathbf{l}_j) + k_s (\mathbf{r}_j \cdot \mathbf{v})^{\alpha_{spec}} \right) $$
     Where:
-    *   $I_a$ is ambient light intensity, $k_a$ is ambient reflectivity [G].
-    *   $I_{l_j}$ is the intensity of the $j$-th light, $\mathbf{l}_j$ is the light direction vector [G].
-    *   $k_d$ is diffuse reflectivity [G].
-    *   $k_s$ is specular reflectivity, $\alpha_{spec}$ is the specular exponent [G].
-    *   $\mathbf{n}$ is the surface normal (derived from gradient) [G].
-    *   $\mathbf{r}_j$ is the reflection vector of the light [G].
-    *   $\mathbf{v}$ is the view direction vector [G].
-    *   *Note:* The source explicitly states a "full Phong lighting equation" is used for software classification and shading [S1]. The standard equation is provided here as a standard implementation gap [G].
+    *   $I_a$ is ambient light intensity, $k_a$ is ambient reflectivity.
+    *   $I_{l_j}$ is the intensity of the $j$-th light, $\mathbf{l}_j$ is the light direction vector.
+    *   $k_d$ is diffuse reflectivity.
+    *   $k_s$ is specular reflectivity, $\alpha_{spec}$ is the specular exponent.
+    *   $\mathbf{n}$ is the surface normal (derived from gradient).
+    *   $\mathbf{r}_j$ is the reflection vector of the light.
+    *   $\mathbf{v}$ is the view direction vector.
+    *   The source explicitly states a "full Phong lighting equation" is used for software classification and shading [S1]. The standard equation is provided here as a standard implementation gap.
 *   **Compositing (Back-to-Front):**
     $$ C_{out} = C_{in} (1 - \alpha_{sample}) + C_{sample} \alpha_{sample} $$
     $$ \alpha_{out} = \alpha_{in} (1 - \alpha_{sample}) + \alpha_{sample} $$
-    Where $C_{sample}$ is the shaded color and $\alpha_{sample}$ is the opacity derived from the transfer function [G].
+    Where $C_{sample}$ is the shaded color and $\alpha_{sample}$ is the opacity derived from the transfer function.
 
 **Parameters:**
 *   **Texture Memory Size:** Typical high-end graphics systems have 64 MB of texture memory, which can hold volumes up to $256^3$ with 32-bits per voxel [S1].
@@ -56,7 +56,7 @@ This method renders regular volumetric grids by leveraging 3D texture mapping ha
 **Edge Cases and Pitfalls:**
 *   **Interpolation Artifacts:** If RGB values are interpolated by texture hardware directly (as in traditional architectures), non-linear mappings from density to RGB produce incorrect interpolated samples [S1]. This method avoids this by interpolating raw density and gradients, then applying non-linear shading in software [S1].
 *   **Memory Limits:** The volume data must fit in the texture memory of the graphics system. If the volume is larger than physical texture memory, hardware paging may be used, but performance may degrade [S1].
-*   **Gradient Accuracy:** The quality of shading depends on the accuracy of the pre-computed gradients stored in the texture. Poor gradient estimation leads to incorrect normals and shading artifacts [S1].
+*   **Gradient Storage:** The method requires pre-computed gradients for each voxel, which are stored in the texture and interpolated by hardware [S1].
 
 ## Operating characteristics
 *   **Time Complexity:** The rendering time is dominated by the texture resampling (hardware accelerated) and the CPU shading/compositing. On a four Raster Manager SGI RealityEngine Onyx with one 150MHz CPU, a $512 \times 512 \times 64$ volume rendered into a $512 \times 512$ window in 0.1 seconds [S1].

@@ -1,0 +1,204 @@
+--- v001.md
++++ v002.md
+@@ -4,113 +4,120 @@
+ 
+ ## Overview
+-Reprojection with Temporal Accumulation stabilizes voxel rendering over time by blending the current frame's color with the accumulated color from the previous frame, using camera motion vectors to align pixels [S1, unofficial]. It differs from sibling methods like [Inter-Ray Coherency](1030-inter-ray-coherency.md) or [Exploiting Temporal Coherence (C-Buffer)](5560-exploiting-temporal-coherence-c-buffer.md), which track state changes in volume data or buffers, by operating in image space to amortize rendering costs and reduce noise/aliasing through temporal history [S1, unofficial].
++Reprojection with Temporal Accumulation stabilizes voxel rendering over time by blending the current frame's color with an accumulated color buffer from the previous frame, using camera motion vectors to align pixels [S1, unofficial]. It differs from sibling methods like [Inter-Ray Coherency](1030-inter-ray-coherency.md) by operating in image space to reduce temporal flicker rather than accelerating ray traversal, and from [Temporal Differential Rendering](5499-temporal-differential-rendering.md) by using a simple weighted blend rather than differential updates. It addresses the problem of temporal instability in direct volume rendering (DVR) where high-frequency details and camera motion cause visible jitter [S1, unofficial][S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Current frame color (`colour_attachment`), current frame world position (`position_attachment`), previous frame accumulation buffer (`accumulation_attachment`), camera matrices (`trace_uniforms.last_camera`), and parameters `reprojection_factor` and `indirect_lighting`.
+-*   **Outputs:** Final output color.
++*   **Inputs:** Current frame color buffer, current frame world position buffer, previous frame accumulation buffer, camera transformation matrices for current and previous frames, and uniform parameters `reprojection_factor` and `indirect_lighting`.
++*   **Outputs:** Final blended color buffer.
+ 
+ **Data Structures:**
+-*   `colour_attachment`: `texture_2d<f32>`, binding 3.
+-*   `position_attachment`: `texture_storage_2d<rgba32float, read_write>`, binding 3.
+-*   `accumulation_attachment`: `texture_storage_2d<rgba16float, read_write>`, binding 1.
++The method relies on three specific attachment layouts [S1, unofficial]:
++1.  `colour_attachment`: `texture_2d<f32>` at binding 3. Stores the current frame's color.
++2.  `position_attachment`: `texture_storage_2d<rgba32float, read_write>` at binding 3. Stores the world position of the ray-marched sample for each pixel.
++3.  `accumulation_attachment`: `texture_storage_2d<rgba16float, read_write>` at binding 1. Stores the accumulated color from previous frames.
+ 
+-**Steps:**
+-1.  Load the current frame's color $C_{curr}$ from `colour_attachment` at `sample_pos`.
+-2.  Load the current frame's world position $P_{curr}$ from `position_attachment` at `sample_pos`.
+-3.  If `indirect_lighting` is non-zero AND `reprojection_factor` > 0.0, proceed with reprojection; otherwise, output $C_{curr}$ directly [S1, unofficial].
+-4.  Compute local color bounds to detect edges:
+-    *   Sample the current color at `sample_pos` and its 8 neighbors ($S_0$ to $S_8$).
+-    *   Calculate `min_col` as the average of the 'plus' bounds (cross pattern: center, up, down, left, right).
+-    *   Calculate `max_col` as the average of the 'square' bounds (3x3 pattern: all 9 samples).
+-    *   These bounds define the acceptable range for the accumulated color to prevent bleeding [S1, unofficial].
+-5.  Transform $P_{curr}$ to the previous frame's clip space using `trace_uniforms.last_camera`.
+-6.  Convert clip space coordinates to Normalized Device Coordinates (NDC) and then to texture coordinates `last_texture` for the accumulation buffer.
+-7.  Check validity: If the projected previous position is outside the NDC range $[-1, 1]$, the pixel is invalid (e.g., newly visible or occluded). In this case, skip blending and output $C_{curr}$ [S1, unofficial].
+-8.  Load the accumulated color $C_{prev}$ from `accumulation_attachment` at `last_texture`.
+-9.  Blend the colors:
+-    $$ C_{mixed} = C_{curr} \times (1.0 - \text{reprojection\_factor}) + C_{prev} \times \text{reprojection\_factor} $$
+-10. Clamp $C_{mixed}$ to the local bounds [`min_col`, `max_col`] to prevent ghosting and bleeding across edges [S1, unofficial].
+-11. Return the clamped $C_{mixed}$ as the final output.
++**Parameters:**
++*   `reprojection_factor`: Float uniform controlling the blend weight between the current frame and the accumulation buffer. Typical values are not specified, but it acts as the mixing amount [S1, unofficial].
++*   `indirect_lighting`: Unsigned integer uniform. Reprojection is only performed if this value is non-zero [S1, unofficial].
+ 
+-**Accumulation Shader:**
+-A separate pass simply stores the current frame's color into `accumulation_attachment` for use in the next frame [S1, unofficial].
++**Algorithm Steps:**
++1.  **Load Current State:** Read the current frame's color $C_{curr}$ from `colour_attachment` and the world position $P_{world}$ from `position_attachment` at the current sample position $(u, v)$ [S1, unofficial].
++2.  **Guard Check:** If `indirect_lighting` is zero or `reprojection_factor` $\le 0.0$, output $C_{curr}$ directly and skip reprojection [S1, unofficial].
++3.  **Edge Detection (Local Bounds):** Compute local color bounds to detect edges and prevent ghosting across high-frequency details [S1, unofficial]:
++    *   Sample the current color at the current pixel and its 8 neighbors (indices 0 to 8).
++    *   Calculate `min_col` as the average of the minimum color values in the 'plus' pattern (cross shape: center, up, down, left, right).
++    *   Calculate `max_col` as the average of the maximum color values in the 'square' pattern (3x3 neighborhood) [S1, unofficial].
++4.  **Reprojection:**
++    *   Transform $P_{world}$ into the previous frame's clip space using `trace_uniforms.last_camera` [S1, unofficial].
++    *   Convert clip space coordinates to Normalized Device Coordinates (NDC) by dividing by $w$.
++    *   Map NDC coordinates $[-1, 1]$ to texture coordinates $[0, 1]$ for the accumulation buffer:
++        $$ u_{prev} = \frac{NDC_x + 1}{2}, \quad v_{prev} = \frac{NDC_y + 1}{2} $$
++    *   Check validity: If $NDC_x$ or $NDC_y$ is outside $[-1, 1]$, the pixel is invalid (e.g., newly visible or occluded). In this case, do not blend; output $C_{curr}$ [S1, unofficial].
++    *   Load the accumulated color $C_{acc}$ from `accumulation_attachment` at $(u_{prev}, v_{prev})$ [S1, unofficial].
++5.  **Blending:**
++    *   Compute the mixed color:
++        $$ C_{mixed} = C_{curr} \times (1.0 - \text{reprojection\_factor}) + C_{acc} \times \text{reprojection\_factor} $$
++    *   Clamp $C_{mixed}$ to the local bounds $[\text{min\_col}, \text{max\_col}]$ to prevent bleeding across edges [S1, unofficial].
++6.  **Output:** Return the clamped $C_{mixed}$ as the final color [S1, unofficial].
++7.  **Accumulation Update:** In a separate pass or subsequent step, store the final output color into `accumulation_attachment` for use in the next frame [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def reprojection_pass(sample_pos, colour_attachment, position_attachment, accumulation_attachment, last_camera, reprojection_factor, indirect_lighting):
+-    # 1. Load current data
+-    colour = colour_attachment.sample(sample_pos)
+-    world_pos = position_attachment.sample(sample_pos)
+-    
+-    # 3. Check if reprojection is enabled
++def reprojection_pass(u, v, colour_attachment, position_attachment, accumulation_attachment, last_camera, reprojection_factor, indirect_lighting):
++    # 1. Load current state
++    colour = colour_attachment.read(u, v)
++    pos_world = position_attachment.read(u, v)
++
++    # 2. Guard check
+     if indirect_lighting == 0 or reprojection_factor <= 0.0:
+         return colour
++
++    # 3. Edge detection
++    # Sample 3x3 neighborhood
++    samples = []
++    for dy in [-1, 0, 1]:
++        for dx in [-1, 0, 1]:
++            samples.append(colour_attachment.read(u + dx, v + dy))
+     
+-    # 4. Compute local bounds for clamping
+-    # Sample 3x3 neighborhood
+-    samples = [colour_attachment.sample(sample_pos + offset) for offset in [-1, 0, 1] in both x and y]
++    # Calculate min/max for square (3x3) and plus (cross) patterns
++    # Plus pattern indices: center(4), up(1), down(7), left(3), right(5) assuming row-major 3x3
++    # Square pattern indices: all 9
++    min_col_plus = min(samples[1], samples[3], samples[4], samples[5], samples[7])
++    max_col_plus = max(samples[1], samples[3], samples[4], samples[5], samples[7])
++    min_col_square = min(samples)
++    max_col_square = max(samples)
+     
+-    # Plus pattern (center, up, down, left, right)
+-    plus_indices = [4, 1, 7, 3, 5] # Assuming row-major 3x3: 012, 345, 678
+-    min_col = min(samples[i] for i in plus_indices)
+-    max_col = max(samples[i] for i in plus_indices)
++    min_col = (min_col_plus + min_col_square) / 2.0
++    max_col = (max_col_plus + max_col_square) / 2.0
++
++    # 4. Reprojection
++    # Transform world position to previous clip space
++    pos_clip = last_camera.transform(pos_world)
+     
+-    # Square pattern (all 9)
+-    min_col_sq = min(samples)
+-    max_col_sq = max(samples)
++    # Convert to NDC
++    ndc_x = pos_clip.x / pos_clip.w
++    ndc_y = pos_clip.y / pos_clip.w
+     
+-    # Average of plus and square bounds as per source description
+-    # Note: Source says "average of the 'plus' bounds ... and 'square' bounds"
+-    # This likely means averaging the min/max values or the sets. 
+-    # Interpreting as averaging the bounds themselves for robustness:
+-    final_min = (min_col + min_col_sq) / 2.0
+-    final_max = (max_col + max_col_sq) / 2.0
++    # Check validity
++    if ndc_x < -1.0 or ndc_x > 1.0 or ndc_y < -1.0 or ndc_y > 1.0:
++        return colour
+ 
+-    # 5. Transform to previous frame
+-    clip_pos = last_camera.transform(world_pos)
++    # Convert to texture coordinates
++    u_prev = (ndc_x + 1.0) / 2.0
++    v_prev = (ndc_y + 1.0) / 2.0
+     
+-    # 6. Convert to NDC and texture coordinates
+-    ndc = clip_pos / clip_pos.w
+-    last_texture = ndc.xy * 0.5 + 0.5 # Standard NDC to UV conversion
++    # Load accumulated color
++    acc_colour = accumulation_attachment.read(u_prev, v_prev)
++
++    # 5. Blending
++    mix_amount = reprojection_factor
++    mixed = colour * (1.0 - mix_amount) + acc_colour * mix_amount
+     
+-    # 7. Check validity
+-    if not (-1.0 <= ndc.x <= 1.0 and -1.0 <= ndc.y <= 1.0):
+-        return colour
+-        
+-    # 8. Load previous accumulation
+-    prev_colour = accumulation_attachment.sample(last_texture)
+-    
+-    # 9. Blend
+-    mix_amount = reprojection_factor
+-    mixed = colour * (1.0 - mix_amount) + prev_colour * mix_amount
+-    
+-    # 10. Clamp to local bounds
+-    # Assuming component-wise clamp
+-    output = clamp(mixed, final_min, final_max)
+-    
+-    return output
++    # Clamp to local bounds
++    final_colour = clamp(mixed, min_col, max_col)
++
++    return final_colour
++
++def accumulation_pass(u, v, accumulation_attachment, final_colour):
++    # 7. Store current frame color for next frame
++    accumulation_attachment.write(u, v, final_colour)
+ ```
+-
+-**Parameters:**
+-*   `reprojection_factor`: Float uniform controlling blend weight. Typical values are not specified, but it must be $> 0.0$ for reprojection to occur [S1, unofficial].
+-*   `indirect_lighting`: Uint uniform. Reprojection is skipped if this is 0 [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Alpha-Max Quasi-Depth Motion Vector
+-A method to compute screen-space motion vectors for direct volume rendering (DVR) by using the 3D position of the point with maximum alpha along the ray as a proxy for depth, enabling temporal reprojection despite the lack of a single surface depth value [S2]. It is chosen when standard depth buffers are unavailable or unreliable for volumetric data. The step involves: for each pixel $(u, v)$, identifying the world space point $p$ where alpha is maximum along the ray; reprojecting $p$ to the previous frame's coordinates $(u', v')$ using previous camera matrices; and calculating the motion vector as $(u - u', v - v')$ [S2].
++A method to compute screen-space motion vectors for direct volume rendering (DVR) by using the 3D position of the point with maximum alpha along the ray as a proxy for depth, enabling temporal reprojection despite the lack of a single surface depth value [S2]. It is chosen when standard depth buffers are unavailable or unreliable for volumetric data. The process involves identifying the world-space point $p$ where alpha is maximum along the ray for pixel $(u, v)$, reprojecting $p$ to the previous frame's coordinates $(u', v')$ using previous camera matrices, and defining the motion vector as $(u - u', v - v')$ [S2]. This provides an acceptable approximation for motion estimation because the maximum alpha point contributes most to the final accumulated sample [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ per pixel for the reprojection pass, assuming constant-time texture sampling and arithmetic.
+-*   **Memory Complexity:** Requires storage for the accumulation buffer (`rgba16float`) and position buffer (`rgba32float`) in addition to the color buffer.
+-*   **Performance:** Reduces noise and aliasing by leveraging temporal coherence, effectively amortizing the cost of high-quality rendering over multiple frames [S1, unofficial].
+-*   **Strengths:** Effective at stabilizing images during camera movement; reduces flickering in noisy renders.
+-*   **Limitations:** Prone to ghosting artifacts if disocclusion is not handled (mitigated by clamping to local bounds) [S2]. Requires accurate motion vectors or position buffers.
+-*   **When to use:** When rendering dynamic volumes with camera movement and noise reduction is desired.
+-*   **When not to use:** When `indirect_lighting` is zero or `reprojection_factor` is $\le 0.0$, or when strict per-frame accuracy is required without temporal history.
++*   **Time Complexity:** $O(1)$ per pixel for the reprojection pass, assuming constant-time texture lookups and neighbor sampling. The accumulation pass is also $O(1)$ per pixel.
++*   **Memory Complexity:** Requires storage for the accumulation buffer (`rgba16float`), which is typically half the precision of the color buffer to save memory, plus the position buffer (`rgba32float`) [S1, unofficial].
++*   **Performance:** Adds a post-processing compute shader pass to the DVR pipeline [S2]. Performance impact depends on the cost of the additional pass and memory bandwidth for reading/writing the accumulation buffer.
++*   **Strengths:** Effectively reduces temporal flicker and jitter in volume rendering [S1, unofficial][S2]. Simple to implement as a post-process [S2].
++*   **Limitations:** Prone to ghosting artifacts if disocclusion is not handled correctly (mitigated by edge clamping) [S2]. Relies on accurate motion vectors; inaccurate vectors (e.g., from complex volume deformation) can cause blurring or artifacts. The `indirect_lighting` flag restricts its use to specific lighting scenarios [S1, unofficial].
++*   **When to use:** When temporal stability is critical and the scene has small camera movements between frames. Suitable for real-time voxel rendering where ray marching is expensive and TAA is desired.
++*   **When not to use:** When high-frequency temporal changes occur that exceed the blending capacity, or when `indirect_lighting` is zero and reprojection is disabled by design [S1, unofficial].
+ 
+ ## Background
+-The technique is implemented in the `bevy-voxel-engine` project, an unofficial voxel engine for the Bevy game engine [S1, unofficial]. It is also discussed in the context of medical volume visualization, where it is used to stabilize Direct Volume Rendering (DVR) by incorporating temporal anti-aliasing via a post-processing pass using history color buffers and motion vectors [S2].
++The technique is implemented in the `bevy-voxel-engine` project, an unofficial voxel engine for the Bevy game engine [S1, unofficial]. It is also discussed in the context of medical volume visualization, specifically in "Deep Learning Based Super-Resolution for Medical Volume Visualization with Direct Volume Rendering," where it is used to stabilize DVR rendering [S2]. The approach builds on the general principle of temporal coherence and caching, adapting it for volumetric data which lacks a single depth value [S2].
+ 
+ ## Sources

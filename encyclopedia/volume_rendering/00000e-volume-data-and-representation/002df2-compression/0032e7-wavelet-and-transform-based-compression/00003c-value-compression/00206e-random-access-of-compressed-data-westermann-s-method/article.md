@@ -1,0 +1,117 @@
+# Random Access of Compressed Data (Westermann's Method)
+Also called: Mask and Offset Layout for Wavelets, Westermann's Method
+
+## Overview
+This method enables random access to wavelet coefficients stored in compressed linear arrays, overcoming the sequential decoding requirement of variable-length codes like Huffman coding [S1, unofficial]. It achieves this by introducing fixed-size data structures with leading masks and offset arrays, trading memory efficiency for speed [S1, unofficial].
+
+## How it works
+**Inputs:** Wavelet coefficient volumes at each resolution level.
+**Outputs:** Linear arrays of coefficients supporting $O(1)$ random access.
+
+**Data Structures:**
+1.  **Linear Array:** Stores entries per level. Each entry consists of:
+    *   **Mask:** A leading byte/field defining which coefficients were removed or are significant.
+    *   **Coefficients:** The quantized wavelet values.
+2.  **Offset Arrays:** `OFFx`, `OFFy`, `OFFz` arrays storing byte distances between streams to facilitate traversal [S1, unofficial].
+3.  **Run-Length Coding:** Applied to entries containing only zero coefficients [S1, unofficial].
+
+**Steps:**
+1.  **Quantization:** Quantize wavelet coefficients (which are concentrated around zero) into 2 or 3 bits using non-uniform quantization [S1, unofficial]. Typical values: 2-3 bits per coefficient [S1, unofficial].
+2.  **Packing:** Pack the quantized values into bytes. For 2-bit quantization, 4 coefficients fit in one byte, achieving a 4:1 compression ratio [S1, unofficial].
+3.  **Masking:** Prepend a mask to each entry to indicate which coefficients are present/removed [S1, unofficial].
+4.  **Offset Calculation:** Compute offset information indicating the byte distance from one stream to another to speed up traversal [S1, unofficial].
+5.  **Zero Handling:** Apply run-length coding to entries with only zero coefficients [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def westermann_layout(wavelet_volumes):
+    """
+    Creates a layout for random access of wavelet coefficients.
+    wavelet_volumes: List of 3D arrays, one per resolution level.
+    Returns: Linear arrays with masks, offsets, and packed coefficients.
+    """
+    # Step 1: Quantize coefficients to 2-3 bits
+    # Non-uniform quantization centered around zero
+    quantized_volumes = []
+    for vol in wavelet_volumes:
+        # Quantize values to 2 bits (range -1 to 2 or similar)
+        # Implementation depends on specific non-uniform table
+        q_vol = quantize_non_uniform(vol, bits=2)
+        quantized_volumes.append(q_vol)
+
+    # Step 2: Pack into bytes
+    # 4 coefficients per byte for 2-bit quantization
+    packed_volumes = []
+    for q_vol in quantized_volumes:
+        # Pack 4 2-bit values into 1 byte
+        # Example: (c0, c1, c2, c3) -> byte
+        packed = pack_bits(q_vol, bits_per_val=2)
+        packed_volumes.append(packed)
+
+    # Step 3: Create masks and handle zeros
+    # Mask indicates which coefficients are removed/zero
+    # Run-length coding for all-zero entries
+    final_arrays = []
+    for packed_vol in packed_volumes:
+        # Determine mask for each entry
+        masks = create_masks(packed_vol)
+        # Apply run-length coding for zero-only entries
+        rlc_data, rlc_masks = apply_rlc(packed_vol, masks)
+        final_arrays.append((rlc_data, rlc_masks))
+
+    # Step 4: Compute offsets
+    # OFFx, OFFy, OFFz arrays for byte distances
+    offsets = compute_offsets(final_arrays)
+
+    return final_arrays, offsets
+
+def quantize_non_uniform(vol, bits=2):
+    # Placeholder for specific non-uniform quantization logic
+    # Concentrates values around zero
+    # Returns array of 2-bit integers
+    pass
+
+def pack_bits(vol, bits_per_val):
+    # Packs N bits_per_val integers into bytes
+    # Returns byte array
+    pass
+
+def create_masks(packed_vol):
+    # Generates mask indicating removed/zero coefficients
+    pass
+
+def apply_rlc(data, masks):
+    # Run-length coding for zero-only entries
+    pass
+
+def compute_offsets(arrays):
+    # Calculate byte distances between streams
+    pass
+```
+
+**Edge Cases:**
+*   **Precision:** Non-uniform quantization must preserve image quality; 2-3 bits are sufficient for CT data [S1, unofficial].
+*   **Boundaries:** Offset arrays must correctly handle boundary conditions between streams [S1, unofficial].
+*   **Degenerate Input:** All-zero entries are handled via run-length coding [S1, unofficial].
+
+## Subtopics
+
+### [Hierarchical Block Significance Map with Offset Arrays](8731-hierarchical-block-significance-map-with-offset-arrays.md)
+A hierarchical data structure for storing significant wavelet coefficients and their significance maps, designed for fast random access. It splits slices into quadratic blocks of size B=32, then into sub-blocks of size 8, then into lines, using bitmaps and offset arrays to locate data in streams without variable-length decoding overhead.
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ random access due to fixed-size packing and offset arrays [S1, unofficial].
+*   **Memory Complexity:** Introduces overhead from masks and offset arrays [S1, unofficial].
+*   **Compression Ratio:** 4:1 with 2-bit quantization [S1, unofficial].
+*   **Strengths:** Fast random access, simple bit-wise extraction [S1, unofficial].
+*   **Limitations:** Memory overhead from masks and offsets [S1, unofficial].
+*   **When to Use:** When random access speed is critical and memory overhead is acceptable [S1, unofficial].
+*   **When Not to Use:** When memory efficiency is paramount and sequential access is sufficient [S1, unofficial].
+
+## Background
+Originated by Westermann [51] in the context of direct rendering of multiresolution decomposed volume data [S1, unofficial]. It addresses the limitation of Huffman coding requiring sequential decoding for random access [S1, unofficial].
+
+## Sources
+[S1] Direct rendering of multiresolution decomposed volume data., https://doi.org/10.82465/4870, fetched 2026-10-26 (unofficial)

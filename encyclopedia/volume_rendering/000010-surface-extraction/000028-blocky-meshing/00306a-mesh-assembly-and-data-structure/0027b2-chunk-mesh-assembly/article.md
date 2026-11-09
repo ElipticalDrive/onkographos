@@ -1,253 +1,209 @@
 # Chunk Mesh Assembly
 
-Also called: Chunk Mesh Generation, Mesh Assembly, Mesh Buffer Packing, PackedMeshBuffers, Procedural Voxel Mesh Generation, Section-based Mesh Building, Unity Mesh Configuration
+Also called: Mesh Assembly, Mesh Buffer Packing, PackedMeshBuffers, Procedural Voxel Mesh Generation, Section-based Mesh Building, Unity Mesh Configuration
 
 ## Overview
-Chunk Mesh Assembly aggregates mesh data generated from multiple voxel layers (e.g., opaque, water, transparentSolid, fluids) into contiguous typed arrays for efficient GPU submission [S2, unofficial]. It solves the problem of managing fragmented geometry data from parallel or multi-pass meshing by packing it into a single `Mesh` structure [S2, unofficial]. Unlike [Mesh Plugin Architecture](4921-mesh-plugin-architecture.md), which defines an interface for mesh generation, or [Block Render Data Structure & Instance Generation](6209-block-render-data-structure-instance-generation.md), which focuses on instance culling, Chunk Mesh Assembly handles the final consolidation of vertex/index buffers and material assignment [S1, unofficial][S2, unofficial][S3, unofficial].
+Chunk Mesh Assembly aggregates mesh data generated from multiple voxel layers (e.g., opaque, water, transparent solid) into contiguous typed arrays for efficient GPU submission [S2, unofficial]. It solves the problem of fragmented geometry by consolidating per-layer mesh data into a single renderable structure, distinct from sibling methods that focus on plugin architecture [4921-mesh-plugin-architecture.md] or instance generation [6209-block-render-data-structure-instance-generation.md].
 
 ## How it works
-**Inputs:**
-- `chunkProperties`: Contains `HasChanges` flag, `ChunkCoordinate`, and references to `MeshFilter`, `MeshCollider`, `MeshRenderer` [S1, unofficial].
-- `VoxelWorld.VoxelMesher`: Interface providing `CreateMesh` which returns prepared mesh sections [S1, unofficial][S3, unofficial].
-- `BlockMaterials`: Map of block types to materials [S2, unofficial][S3, unofficial].
-- `MESH_BUFFER_LAYERS`: List of layer types to process (e.g., opaque, water, transparentSolid) [S2, unofficial].
-
-**Outputs:**
-- A populated Unity `Mesh` object assigned to the chunk's `MeshFilter` and `MeshCollider` [S1, unofficial].
-- `OutChunk`: Metadata including `MeshComp`, `CollisionSectionIndex`, and shadow/collision flags [S3, unofficial].
+**Inputs and Outputs:**
+*   **Input:** Voxel data store, color store, chunk coordinate, and a map of block types to materials [S1, S3, unofficial].
+*   **Output:** A unified `Mesh` object (or equivalent engine structure) containing positions, normals, indices, and attributes, assigned to the chunk's renderer and collider [S1, S3, unofficial].
 
 **Data Structures:**
-- `PackedMeshBuffers`: Contains `positions` (Float32Array), `normals` (Int8Array), `blockIds` (Uint16Array), `ambientOcclusion` (Uint8Array), `blockLight` (Uint8Array), `skyLight` (Uint8Array), `indices` (Uint32Array), and `groups` (`MeshBufferGroup[]`) [S2, unofficial].
-- `MeshBufferGroup`: `{ layer: MeshBufferLayer, vertexOffset: number, vertexCount: number, indexOffset: number, indexCount: number }` [S2, unofficial].
-- `FPreparedChunkMesh` (C++): Holds `ChunkIndex`, `SizeX`, `SizeY`, `Sections` (map of `EBlockType` to `FChunkMeshSection`), and `CollisionSection` [S3, unofficial].
-- `FChunkMeshSection`: Contains `Vertices` (`TArray<FVector>`), `Triangles` (`TArray<int32>`), `Normals` (`TArray<FVector>`), `UVs` (`TArray<FVector2D>`) [S3, unofficial].
-- `FActiveChunk` (C++): Tracks `MeshComp`, `PendingCollision`, `CollisionSectionIndex`, `bHasCollision`, `bCastsShadow` [S3, unofficial].
+*   **PackedMeshBuffers:** Contains contiguous arrays for `positions` (Float32), `normals` (Int8), `blockIds` (Uint16), `ambientOcclusion` (Uint8), `blockLight` (Uint8), `skyLight` (Uint8), `indices` (Uint32), and `groups` (array of `MeshBufferGroup`) [S2, unofficial].
+*   **MeshBufferGroup:** `{ layer: MeshBufferLayer, vertexOffset: number, vertexCount: number, indexOffset: number, indexCount: number }` [S2, unofficial].
+*   **FChunkMeshSection:** Stores per-block-type mesh data: `Vertices` (TArray<FVector>), `Triangles` (TArray<int32>), `Normals` (TArray<FVector>), `UVs` (TArray<FVector2D>) [S3, unofficial].
+*   **FActiveChunk:** Tracks runtime state: `MeshComp` (ProceduralMeshComponent), `PendingCollision`, `CollisionSectionIndex`, `bHasCollision`, `bCastsShadow` [S3, unofficial].
 
 **Parameters:**
-- `BlockSize`: World units per voxel edge. Default: 100.f [S3, unofficial].
-- `NO_AMBIENT_OCCLUSION`: Constant 0 [S2, unofficial].
-- `NO_LIGHT`: Constant 0 [S2, unofficial].
-- `FallbackMat`: First non-null material in `BlockMaterials` [S2, unofficial][S3, unofficial].
+*   `BlockSize`: World units per voxel edge. Default: 100.f [S3, unofficial].
+*   `NO_AMBIENT_OCCLUSION`: Constant 0 when AO is unavailable [S2, unofficial].
+*   `NO_LIGHT`: Constant 0 when light data is unavailable [S3, unofficial].
+*   `FallbackMat`: First non-null material in `BlockMaterials` map, used if a block type is missing [S3, unofficial].
 
 **Steps:**
-1. Check `chunkProperties.HasChanges`. If false, skip [S1, unofficial].
-2. Call `VoxelWorld.VoxelMesher.CreateMesh` with voxel data, color data, and chunk coordinate. If result is null, return [S1, unofficial].
-3. Calculate total quad count across all `MESH_BUFFER_LAYERS` [S2, unofficial].
-4. Clear existing mesh sections on the component [S1, unofficial].
-5. Allocate output arrays:
-   - Positions/Normals: `quadCount * 4 * 3` elements [S2, unofficial].
-   - Indices: `quadCount * 6` elements [S2, unofficial].
-   - Other attributes (blockIds, AO, etc.): `quadCount * 4` elements [S2, unofficial].
-6. Iterate over `Prepared.Sections`. Skip sections where `Section.Vertices.Num() == 0` to avoid empty mesh sections [S3, unofficial].
-7. Calculate `vertexCount` as `job.VertexCountCounter.Count * 3`. Dispose the counter [S1, unofficial].
-8. Initialize writer with offsets (`indexOffset: 0`, `vertexOffset: 0`) and output arrays [S1, unofficial].
-9. Configure Unity Mesh:
-   - Set vertex buffer params with `vertexCount` and `MeshingVertexData.VertexBufferMemoryLayout` [S1, unofficial].
-   - Set index buffer params with `vertexCount` and `IndexFormat.UInt16` [S1, unofficial].
-10. For each layer in `MESH_BUFFER_LAYERS`:
-    - Record current offsets [S2, unofficial].
-    - Append quads for that layer [S2, unofficial].
-    - Record new offsets in `MeshBufferGroup` [S2, unofficial].
-    - Look up material for block type. If not found, use `FallbackMat` [S3, unofficial].
+1.  Check if the chunk has changes (`chunkProperties.HasChanges`). If true, proceed to `GenerateMeshImmediate` [S1, unofficial].
+2.  Calculate total quad count across all layers in `MESH_BUFFER_LAYERS` [S2, unofficial].
+3.  Clear existing mesh sections on the component [S3, unofficial].
+4.  Call `VoxelWorld.VoxelMesher.CreateMesh` with voxel data, color store, and chunk coordinate. If result is null, return [S1, unofficial].
+5.  Allocate output arrays:
+    *   Positions/Normals: `quadCount * 4 * 3` elements [S2, unofficial].
+    *   Indices: `quadCount * 6` elements [S2, unofficial].
+    *   Attributes: `quadCount * 4` elements [S2, unofficial].
+6.  Iterate over `Prepared.Sections` map. Skip sections where `Section.Vertices.Num() == 0` to avoid empty mesh sections [S3, unofficial].
+7.  Calculate `vertexCount` as `job.VertexCountCounter.Count * 3`. Dispose the counter [S1, unofficial].
+8.  Initialize writer with offsets (`indexOffset: 0`, `vertexOffset: 0`) and output arrays [S2, unofficial].
+9.  For each layer in `MESH_BUFFER_LAYERS`:
+    *   Record current offsets.
+    *   Append quads for that layer.
+    *   Record new offsets in `MeshBufferGroup` [S2, unofficial].
+10. Look up material for the block type. If not found, use `FallbackMat` [S3, unofficial].
 11. Set vertex and index buffer data from job outputs (`job.OutputVertices`, `job.OutputTriangles`). Dispose job output arrays [S1, unofficial].
 12. For opaque/water/transparentSolid layers:
-    - Iterate quads [S2, unofficial].
-    - Compute vertices from quad bounds [S2, unofficial].
-    - Write vertex data (position, normal, blockId, ao, lights) [S2, unofficial].
-    - Write 6 indices per quad (triangle fan: 0-1-2, 0-2-3) [S2, unofficial].
-    - Update offsets [S2, unofficial].
-13. Set submesh count to 1. Create `SubMeshDescriptor` with index count `vertexCount` and set as submesh 0. Recalculate bounds [S1, unofficial].
-14. Create mesh section using `CreateMeshSection` with vertices, triangles, normals, UVs, empty color/tangent arrays, and `bUpdateBounds=false` [S1, unofficial].
-15. Assign component and metadata to `OutChunk`: `MeshComp`, `CollisionSectionIndex` (points to next available section), `PendingCollision`, `bHasCollision=false`, `bCastsShadow=false` [S3, unofficial].
-16. Assign mesh to chunk's `MeshFilter` and `MeshCollider`. Enable collider and renderer [S1, unofficial].
-17. Reset `HasChanges` to false and set `IsMeshGenerated` to true [S1, unofficial].
+    *   Iterate quads.
+    *   Compute vertices from quad bounds.
+    *   Write vertex data (position, normal, blockId, ao, lights).
+    *   Write 6 indices (triangle fan: 0-1-2, 0-2-3).
+    *   Update offsets [S2, S3, unofficial].
+13. Create mesh section using `CreateMeshSection` with vertices, triangles, normals, UVs, empty color/tangent arrays, and `bUpdateBounds=false` [S3, unofficial].
+14. Increment `SectionIndex` after each successfully created section [S3, unofficial].
+15. Configure Unity Mesh:
+    *   Set vertex buffer params with `vertexCount` and `MeshingVertexData.VertexBufferMemoryLayout` [S1, unofficial].
+    *   Set index buffer params with `vertexCount` and `IndexFormat.UInt16` [S1, unofficial].
+    *   Set submesh count to 1. Create `SubMeshDescriptor` with index count `vertexCount` and set as submesh 0. Recalculate bounds [S1, unofficial].
+16. Assign component and metadata to `OutChunk`: `MeshComp`, `CollisionSectionIndex` (points to next available section), `PendingCollision`, `bHasCollision=false`, `bCastsShadow=false` [S3, unofficial].
+17. Assign the mesh to the chunk's `MeshFilter` and `MeshCollider`. Enable collider and renderer. Reset `HasChanges` to false and set `IsMeshGenerated` to true [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import struct
-
-NO_AMBIENT_OCCLUSION = 0
-NO_LIGHT = 0
-
-class SubMeshDescriptor:
-    def __init__(self, indexStart, indexCount, vertexCount):
-        self.indexStart = indexStart
-        self.indexCount = indexCount
-        self.vertexCount = vertexCount
-
-def compute_quad_vertices(quad, block_size):
-    # Standard operation: compute 4 corner positions from quad bounds and block size
-    return (quad.min_x, quad.min_y, quad.min_z), (quad.max_x, quad.min_y, quad.min_z), \
-           (quad.max_x, quad.max_y, quad.min_z), (quad.min_x, quad.max_y, quad.min_z)
-
-def write_floats(arr, offset, v):
-    arr[offset:offset+12] = struct.pack('<fff', *v)
-
-def write_bytes(arr, offset, v):
-    arr[offset:offset+3] = struct.pack('bbb', *v)
-
-def write_uint16(arr, offset, val):
-    arr[offset:offset+2] = struct.pack('<H', val)
-
-def write_uint8(arr, offset, val):
-    arr[offset] = val
-
-def assemble_chunk_mesh(chunk_properties, voxel_mesher, block_materials, mesh_buffer_layers):
-    if not chunk_properties.has_changes:
+def ChunkMeshAssembly(chunk_properties, voxel_data, color_store, chunk_coordinate, block_materials):
+    if not chunk_properties.HasChanges:
         return
 
-    prepared_mesh = voxel_mesher.create_mesh(
-        voxel_data=chunk_properties.voxel_data,
-        color_data=chunk_properties.color_data,
-        chunk_coordinate=chunk_properties.chunk_coordinate
-    )
+    # 1. Generate Mesh Data
+    mesh_result = VoxelMesher.CreateMesh(voxel_data, color_store, chunk_coordinate)
+    if mesh_result is None:
+        return
+
+    # 2. Calculate Totals
+    total_quads = 0
+    for layer in MESH_BUFFER_LAYERS:
+        total_quads += layer.quad_count
+
+    # 3. Allocate Buffers
+    # Positions: Float32, Normals: Int8, Indices: Uint32, Attributes: Uint8/Uint16
+    positions = allocate_array(total_quads * 4 * 3)
+    normals = allocate_array(total_quads * 4 * 3, type=Int8)
+    indices = allocate_array(total_quads * 6, type=Uint32)
+    attributes = allocate_array(total_quads * 4)
+
+    # 4. Prepare Sections
+    sections = mesh_result.Prepared.Sections
+    valid_sections = [s for s in sections if s.Vertices.Num() > 0]
     
-    if prepared_mesh is None:
-        return
+    vertex_count = mesh_result.job.VertexCountCounter.Count * 3
+    mesh_result.job.VertexCountCounter.Dispose()
 
-    # Calculate total quads across all layers
-    total_quad_count = sum(prepared_mesh.layer_quad_count(layer) for layer in mesh_buffer_layers)
-
-    # Clear existing mesh sections
-    chunk_properties.mesh_filter.mesh.clear()
-
-    # Allocate arrays
-    # Positions: 3 floats per vertex, 4 vertices per quad
-    positions = bytearray(total_quad_count * 4 * 3 * 4)
-    # Normals: 3 signed bytes per vertex
-    normals = bytearray(total_quad_count * 4 * 3)
-    # Indices: 6 indices per quad (2 triangles)
-    indices = bytearray(total_quad_count * 6 * 4)
-    # Other attributes: 4 elements per vertex (blockId, AO, light, etc.)
-    block_ids = bytearray(total_quad_count * 4 * 2)
-    ao_data = bytearray(total_quad_count * 4)
-    light_data = bytearray(total_quad_count * 4)
-
-    # Find fallback material
-    fallback_mat = None
-    for mat in block_materials.values():
-        if mat is not None:
-            fallback_mat = mat
-            break
-
-    vertex_offset = 0
+    # 5. Write Data
     index_offset = 0
-    mesh_buffer_groups = []
+    vertex_offset = 0
+    section_index = 0
+    mesh_groups = []
 
-    # Iterate over prepared sections
-    for section in prepared_mesh.sections:
-        if len(section.vertices) == 0:
-            continue
+    for layer in MESH_BUFFER_LAYERS:
+        layer_start_index = index_offset
+        layer_start_vertex = vertex_offset
+        
+        for quad in layer.quads:
+            # Resolve material
+            mat = block_materials.get(quad.block_type)
+            if mat is None:
+                mat = FallbackMat # First non-null in BlockMaterials
 
-        # Determine material for this section
-        block_type = section.block_type
-        material = block_materials.get(block_type, fallback_mat)
-        if material is None:
-            material = fallback_mat
-
-        # Record offsets for this layer/section
-        start_vertex_offset = vertex_offset
-        start_index_offset = index_offset
-
-        # Write vertices and indices for this section
-        for quad in section.quads:
-            # Compute vertex positions from quad bounds
-            v0, v1, v2, v3 = compute_quad_vertices(quad, block_size=100.0)
+            # Compute vertices from quad bounds
+            verts = compute_quad_vertices(quad, BlockSize)
             
-            # Write positions (3 floats each)
-            write_floats(positions, vertex_offset, v0)
-            write_floats(positions, vertex_offset + 12, v1)
-            write_floats(positions, vertex_offset + 24, v2)
-            write_floats(positions, vertex_offset + 36, v3)
-            vertex_offset += 48
+            # Write positions (3 floats per vertex)
+            for v in verts:
+                positions[vertex_offset] = v.x
+                positions[vertex_offset + 1] = v.y
+                positions[vertex_offset + 2] = v.z
+                vertex_offset += 3
 
-            # Write normals (3 signed bytes each)
-            write_bytes(normals, vertex_offset - 48, quad.normal)
-            write_bytes(normals, vertex_offset - 36, quad.normal)
-            write_bytes(normals, vertex_offset - 24, quad.normal)
-            write_bytes(normals, vertex_offset - 12, quad.normal)
+            # Write normals (3 signed bytes per vertex)
+            for v in verts:
+                normals[vertex_offset - 3] = v.nx
+                normals[vertex_offset - 2] = v.ny
+                normals[vertex_offset - 1] = v.nz
 
-            # Write attributes (blockId, AO, Light, etc.)
-            write_uint16(block_ids, vertex_offset - 48, block_type)
-            write_uint8(ao_data, vertex_offset - 48, NO_AMBIENT_OCCLUSION)
-            write_uint8(light_data, vertex_offset - 48, NO_LIGHT)
+            # Write attributes (blockId, ao, lights)
+            attributes[vertex_offset // 3] = quad.block_id
+            attributes[vertex_offset // 3 + 1] = quad.ao if quad.ao else NO_AMBIENT_OCCLUSION
+            attributes[vertex_offset // 3 + 2] = quad.light if quad.light else NO_LIGHT
 
-            # Write indices (triangle fan: 0-1-2, 0-2-3)
-            base_idx = index_offset // 4
-            indices[index_offset] = base_idx
-            indices[index_offset + 1] = base_idx + 1
-            indices[index_offset + 2] = base_idx + 2
-            indices[index_offset + 3] = base_idx
-            indices[index_offset + 4] = base_idx + 2
-            indices[index_offset + 5] = base_idx + 3
-            index_offset += 24
+            # Write indices (6 per quad, triangle fan 0-1-2, 0-2-3)
+            indices[index_offset] = vertex_offset - 12
+            indices[index_offset + 1] = vertex_offset - 9
+            indices[index_offset + 2] = vertex_offset - 6
+            indices[index_offset + 3] = vertex_offset - 12
+            indices[index_offset + 4] = vertex_offset - 6
+            indices[index_offset + 5] = vertex_offset - 3
+            index_offset += 6
 
-        # Store group info
-        mesh_buffer_groups.append({
-            "layer": section.layer,
-            "vertexOffset": start_vertex_offset,
-            "vertexCount": vertex_offset - start_vertex_offset,
-            "indexOffset": start_index_offset,
-            "indexCount": index_offset - start_index_offset
-        })
+        # Record group
+        mesh_groups.append(MeshBufferGroup(
+            layer=layer.name,
+            vertexOffset=layer_start_vertex,
+            vertexCount=(vertex_offset - layer_start_vertex) // 3,
+            indexOffset=layer_start_index,
+            indexCount=index_offset - layer_start_index
+        ))
 
-    # Set mesh data
-    mesh = chunk_properties.mesh_filter.mesh
-    mesh.vertices = positions
-    mesh.normals = normals
-    mesh.triangles = indices
+    # 6. Create Mesh Section
+    # CreateMeshSection(vertices, triangles, normals, uvs, colors, tangents, bUpdateBounds)
+    CreateMeshSection(
+        vertices=positions,
+        triangles=indices,
+        normals=normals,
+        uvs=[], # Empty UVs as per source
+        colors=[], # Empty colors
+        tangents=[], # Empty tangents
+        bUpdateBounds=False
+    )
 
-    # Configure submeshes
-    mesh.submeshCount = 1
-    mesh.SetSubMesh(0, SubMeshDescriptor(indexStart=0, indexCount=index_offset // 4, vertexCount=vertex_offset // 12))
-
-    # Recalculate bounds
+    # 7. Configure Unity Mesh
+    mesh = GetComponent(Mesh)
+    mesh.Clear()
+    
+    # Set buffer params
+    mesh.SetVertexBufferParams(vertex_count, MeshingVertexData.VertexBufferMemoryLayout)
+    mesh.SetIndexBufferParams(vertex_count, IndexFormat.UInt16) # Note: Source says UInt16 for index buffer params, but indices array is Uint32. Using UInt16 as per source [S1, unofficial].
+    
+    # Set submesh
+    submesh = SubMeshDescriptor(indexCount=vertex_count) # Source says indexCount=vertexCount, likely a typo for indexCount=index_offset or similar, but following source [S1, unofficial]
+    mesh.SetSubMesh(0, submesh)
     mesh.RecalculateBounds()
 
-    # Assign to collider
-    if chunk_properties.mesh_collider is not None:
-        chunk_properties.mesh_collider.sharedMesh = mesh
-        chunk_properties.mesh_collider.enabled = True
+    # 8. Assign to Chunk
+    out_chunk = OutChunk()
+    out_chunk.MeshComp = GetComponent(ProceduralMeshComponent)
+    out_chunk.CollisionSectionIndex = section_index + 1
+    out_chunk.PendingCollision = None
+    out_chunk.bHasCollision = False
+    out_chunk.bCastsShadow = False
 
-    # Update renderer
-    if chunk_properties.mesh_renderer is not None:
-        chunk_properties.mesh_renderer.enabled = True
-        chunk_properties.mesh_renderer.material = fallback_mat
+    # Assign to GameObject
+    GetComponent(MeshFilter).mesh = mesh
+    GetComponent(MeshCollider).mesh = mesh
+    GetComponent(MeshRenderer).enabled = True
+    GetComponent(MeshCollider).enabled = True
 
-    # Reset state
-    chunk_properties.has_changes = False
-    chunk_properties.is_mesh_generated = True
-
-    return {
-        "mesh_comp": chunk_properties.mesh_filter,
-        "collision_section_index": len(mesh_buffer_groups),
-        "pending_collision": None,
-        "b_has_collision": False,
-        "b_casts_shadow": False
-    }
+    chunk_properties.HasChanges = False
+    chunk_properties.IsMeshGenerated = True
 ```
 
 ## Subtopics
 
 ### [Section-based Mesh Generation](4220-section-based-mesh-generation.md)
-Section-based mesh generation is a method for constructing surface meshes from large voxel chunks by dividing the volume into smaller, manageable vertical slabs (sections). It solves the performance bottleneck of regenerating an entire large chunk mesh when only a small portion of voxels changes. By isolating geometry generation to specific vertical ranges, the method allows for efficient partial rebuilds, where only the affected sections and their immediate neighbors are regenerated. It differs from full-chunk regeneration by limiting computational scope to a fraction of the total volume, and from region-based dirty-flagging by operating on fixed vertical slices rather than arbitrary 3D bounding boxes.
+Renders a large voxel chunk as a vertical stack of smaller, independent sections to enable efficient partial rebuilds when voxels change. It differs from full-chunk rebuilds by limiting computation to the minimal set of sections intersecting the modified voxel, and from adjacency-based chunk rebuilding by operating at the sub-chunk section level within a single chunk.
 
 ### [Chunk Region Meshing with Dirty Regions](4402-chunk-region-meshing-with-dirty-regions.md)
-Chunk Region Meshing with Dirty Regions generates geometry for a specific chunk by processing only "dirty" cells within a defined region, while consulting the complete chunk and its neighbors for visibility, ambient occlusion, and fluid data. It differs from full-chunk meshing by returning an `ownedRegion` that includes a 1-cell halo around the dirty region for face culling, AO, and fluid corner reads, clamped at chunk boundaries. This allows incremental updates without regenerating the entire chunk mesh, maintaining compatibility with the standard `meshChunk` API by returning empty buffers for empty regions.
+Incremental surface extraction that generates geometry for a voxel chunk by processing only a specified subset of "dirty" cells, while consulting the complete chunk and its neighbors for visibility, ambient occlusion (AO), and fluid data. It solves the problem of expensive full-chunk remeshing by allowing partial updates, ensuring that only changed geometry is regenerated. Unlike Section-based Mesh Generation, which processes the entire chunk layer by layer, this method restricts computation to a local `dirtyRegion`, significantly reducing work for sparse updates.
 
 ## Operating characteristics
-- **Time Complexity:** Linear with respect to the number of exposed quads. The assembly step itself is $O(Q)$ where $Q$ is the total quad count, involving array allocations and writes [S2, unofficial].
-- **Memory Complexity:** $O(Q)$ for vertex and index buffers, where $Q$ is the total quad count [S2, unofficial].
-- **Performance:** The assembly step is deterministic and byte-identical across runs for the same input [S2, unofficial]. It is optimized to avoid polymorphic calls in the inner loop [S2, unofficial].
-- **Strengths:** Efficient packing of multi-layer data; handles material fallbacks; prevents empty mesh sections [S2, unofficial][S3, unofficial].
-- **Limitations:** Requires full chunk rebuild if `HasChanges` is true; does not handle partial updates within a chunk (handled by [Section-based Mesh Generation](4220-section-based-mesh-generation.md)) [S1, unofficial][S2, unofficial].
-- **When to use:** When a complete chunk mesh needs to be generated or regenerated after voxel changes [S1, unofficial].
-- **When not to use:** For incremental updates within a chunk; use [Section-based Mesh Generation](4220-section-based-mesh-generation.md) or [Chunk Region Meshing with Dirty Regions](4402-chunk-region-meshing-with-dirty-regions.md) instead [S2, unofficial][S3, unofficial].
+*   **Time Complexity:** Linear with respect to the number of exposed quads across all layers. The assembly step itself is $O(Q)$ where $Q$ is the total quad count, involving buffer writes and offset calculations.
+*   **Memory Complexity:** $O(Q)$ for contiguous buffers. Positions and normals take $12 \times Q$ bytes each (Float32/Int8), indices take $24 \times Q$ bytes (Uint32), and attributes take $4 \times Q$ bytes.
+*   **Performance:** The contiguous buffer layout minimizes GPU draw call overhead and state changes. However, the method requires a full rebuild if `HasChanges` is true, which can be expensive for large chunks with frequent updates.
+*   **Strengths:** Simple data structure, efficient GPU submission, clear separation of layers.
+*   **Limitations:** Not incremental by default (relies on `HasChanges` flag). Empty sections must be explicitly skipped to avoid invalid mesh creation. Missing block types require fallback handling.
+*   **When to use:** Static or semi-static chunks where full rebuilds are acceptable, or when combined with dirty region/section-based strategies for updates.
+*   **When not to use:** Highly dynamic scenes requiring per-voxel updates without chunk rebuilds, unless combined with [Chunk Region Meshing with Dirty Regions](4402-chunk-region-meshing-with-dirty-regions.md).
 
 ## Background
-Chunk Mesh Assembly is a core component of procedural voxel terrain systems, particularly those using Unity [S1, unofficial] or Unreal Engine [S3, unofficial]. It aggregates mesh data from multiple layers (opaque, water, transparent, fluids) into contiguous arrays for GPU submission [S2, unofficial]. The method is often paired with greedy meshing to reduce quad counts [S2, unofficial]. It handles material assignment, fallback logic, and mesh configuration for rendering and collision [S1, unofficial][S3, unofficial].
+Chunk Mesh Assembly is a method used in voxel terrain rendering systems, particularly within Unity-based engines, to aggregate mesh data from multiple voxel layers into a single renderable mesh. It is part of the broader "Mesh Assembly and Data Structure" family, which focuses on efficient buffer management and GPU submission. The method is implemented in projects such as Eldemarkki's Marching-Cubes-Terrain [S1, unofficial], nerima-games' mc-meshing [S2, unofficial], and HawkDev15's VoxelWorld [S3, unofficial].
 
 ## Sources
 [S1] Eldemarkki/Marching-Cubes-Terrain, https://github.com/Eldemarkki/Marching-Cubes-Terrain, fetched 2026-10-26 (unofficial)

@@ -1,224 +1,177 @@
 # Boolean Voxel Meshing
 
-Also called: Voxel-to-Cube Mesh Generation, VoxelGrid to Mesh, voxel-to-mesh
+Also called: VoxelGrid to Mesh, VoxelGrid To Mesh Hull, VoxelGrid Mesh Hull Generation, voxel-to-mesh, VoxMeshHull
 
 ## Overview
-Boolean Voxel Meshing converts a discrete boolean voxel occupancy grid into a triangular mesh by detecting faces and vertices at voxel boundaries [S1, unofficial]. It explicitly generates the vertex and face connectivity required for rendering, rather than just culling or merging blocks [G].
+Boolean Voxel Meshing converts a 3D boolean voxel occupancy grid into a triangular mesh by detecting faces and vertices at voxel boundaries [S1, unofficial]. It solves the problem of generating a closed, watertight surface representation from discrete occupancy data, specifically by sharing vertices and faces across adjacent voxels to minimize redundancy [S6, unofficial]. It differs from [Blocky meshing](31-blocky-meshing.md) variants like [Cuberille Method](1718-cuberille-method.md) by explicitly constructing a shared-vertex mesh rather than independent quads, and from [VoxelGrid Mesh Generation](2714-voxelgrid-mesh-generation.md) by ensuring topological connectivity (no T-junctions) through boundary detection rather than instantiating independent blocks [G].
 
 ## How it works
-**Inputs:**
-- `occ`: A 3D boolean array of shape `(nx, ny, nz)` representing the voxel occupancy grid. `True` indicates an occupied voxel, `False` indicates empty space [S1, unofficial].
-- `loc`: A 3D vector `(x, y, z)` representing the world-space origin of the voxel grid [S1, unofficial].
-- `scale`: A scalar representing the world-space size of one voxel unit [S1, unofficial].
-- `desiredStep`: Target voxel edge length used to compute optimal grid dimensions (default `0.2` in UI contexts) [S3, unofficial].
-- `Fake Shadow`: Boolean flag to add a fake shadow visualization (default `false`) [S4, unofficial].
-- `Light Direction`: Fixed vector for fake shadow calculation, e.g., `(-0.495633, 0.142501, 0.856762)` [S4, unofficial].
-- `Shadow Colors`: Colors for highlight and shadow, typically `White` and `Black` [S4, unofficial].
-- `color`: RGBA array specifying mesh color (default `null`) [S5, unofficial].
-- `convertToTriangles`: Boolean flag to convert output quads to triangles (default `true`) [S5, unofficial].
-- `flatten`: Boolean flag for mesh flattening (default `true`) [S5, unofficial].
-
-**Outputs:**
-- `vertices`: Array of shape `(N, 3)` containing 3D coordinates in world space [S1, unofficial].
-- `faces`: Array of shape `(M, 4)` containing vertex indices for quad faces, or `(M, 3)` if `convertToTriangles` is enabled [S1, unofficial][S5, unofficial].
+**Inputs and Outputs:**
+*   **Input:** A 3D boolean occupancy grid `occ` of dimensions $(N_x, N_y, N_z)$.
+*   **Output:** A mesh defined by a vertex array `vertices` and an index array `faces`.
 
 **Data Structures:**
-- `occ`: Boolean grid [S1, unofficial].
-- `v`: Boolean grid of shape `(nx+1, ny+1, nz+1)` indicating which vertices are part of the surface [S1, unofficial].
-- `v_idx`: Integer grid of shape `(nx+1, ny+1, nz+1)` mapping vertex grid coordinates to unique vertex indices, initialized to `-1` [S1, unofficial].
-- `faces_marked`: Tracking structure for added faces per axis (X, Y, Z) [S2, unofficial].
+*   `occ`: 3D boolean array.
+*   `v`: 3D boolean array of shape $(N_x+1, N_y+1, N_z+1)$ representing vertex existence.
+*   `v_idx`: 3D integer array of shape $(N_x+1, N_y+1, N_z+1)$ mapping grid coordinates to linear vertex indices. Initialized to -1.
+*   `vertices`: List of 3D coordinates.
+*   `faces`: List of 4-element integer arrays (quads) or 6-element integer arrays (triangles).
 
 **Steps:**
 
-1. **Padding:** Pad the occupancy grid `occ` with a 1-voxel constant boundary of `False` (empty) to handle boundary conditions uniformly [S1, unofficial].
-   $$ \text{occ}_{\text{pad}} = \text{pad}(\text{occ}, \text{pad\_width}=1, \text{mode}=\text{'constant'}, \text{constant\_values}=0) $$
-   The shape becomes `(nx+2, ny+2, nz+2)` [S1, unofficial].
+1.  **Padding:** Pad the occupancy grid with a constant boundary of `False` (empty) to handle edge cases cleanly.
+    ```python
+    occ = np.pad(occ, 1, 'constant', constant_values=False)
+    ```
+    Let the padded dimensions be $(N_x+2, N_y+2, N_z+2)$. The internal grid indices $x \in [1, N_x+1]$, $y \in [1, N_y+1]$, $z \in [1, N_z+1]$ correspond to the original voxels.
 
-2. **Face Detection:** Compute boolean masks for faces on the boundaries between occupied and empty voxels for each of the three axes. A face exists if one side is occupied and the other is empty [S1, unofficial].
-   - **X-axis faces (f1):**
-     $$ f1_r = \text{occ}_{\text{pad}}[:-1, 1:-1, 1:-1] \land \neg \text{occ}_{\text{pad}}[1:, 1:-1, 1:-1] $$
-     $$ f1_l = \neg \text{occ}_{\text{pad}}[:-1, 1:-1, 1:-1] \land \text{occ}_{\text{pad}}[1:, 1:-1, 1:-1] $$
-     $$ f1 = f1_r \lor f1_l $$
-     Shape: `(nx+1, ny, nz)` [S1, unofficial].
-   - **Y-axis faces (f2):**
-     $$ f2_r = \text{occ}_{\text{pad}}[1:-1, :-1, 1:-1] \land \neg \text{occ}_{\text{pad}}[1:-1, 1:, 1:-1] $$
-     $$ f2_l = \neg \text{occ}_{\text{pad}}[1:-1, :-1, 1:-1] \land \text{occ}_{\text{pad}}[1:-1, 1:, 1:-1] $$
-     $$ f2 = f2_r \lor f2_l $$
-     Shape: `(nx, ny+1, nz)` [S1, unofficial].
-   - **Z-axis faces (f3):**
-     $$ f3_r = \text{occ}_{\text{pad}}[1:-1, 1:-1, :-1] \land \neg \text{occ}_{\text{pad}}[1:-1, 1:-1, 1:] $$
-     $$ f3_l = \neg \text{occ}_{\text{pad}}[1:-1, 1:-1, :-1] \land \text{occ}_{\text{pad}}[1:-1, 1:-1, 1:] $$
-     $$ f3 = f3_r \lor f3_l $$
-     Shape: `(nx, ny, nz+1)` [S1, unofficial].
+2.  **Boundary Face Detection:** Compute the boolean masks for faces on the boundaries between occupied and unoccupied voxels. A face exists if one adjacent voxel is occupied and the other is not.
+    *   **X-faces (Normals $\pm \hat{x}$):**
+        $$f1\_r = occ[:-1, 1:-1, 1:-1] \ \& \ \sim occ[1:, 1:-1, 1:-1]$$
+        $$f1\_l = \sim occ[:-1, 1:-1, 1:-1] \ \& \ occ[1:, 1:-1, 1:-1]$$
+        $$f1 = f1\_r \ | \ f1\_l$$
+        Shape: $(N_x+1, N_y, N_z)$.
+    *   **Y-faces (Normals $\pm \hat{y}$):**
+        $$f2\_r = occ[1:-1, :-1, 1:-1] \ \& \ \sim occ[1:-1, 1:, 1:-1]$$
+        $$f2\_l = \sim occ[1:-1, :-1, 1:-1] \ \& \ occ[1:-1, 1:, 1:-1]$$
+        $$f2 = f2\_r \ | \ f2\_l$$
+        Shape: $(N_x, N_y+1, N_z)$.
+    *   **Z-faces (Normals $\pm \hat{z}$):**
+        $$f3\_r = occ[1:-1, 1:-1, :-1] \ \& \ \sim occ[1:-1, 1:-1, 1:]$$
+        $$f3\_l = \sim occ[1:-1, 1:-1, :-1] \ \& \ occ[1:-1, 1:-1, 1:]$$
+        $$f3 = f3\_r \ | \ f3\_l$$
+        Shape: $(N_x, N_y, N_z+1)$.
 
-3. **Vertex Identification:** Initialize a vertex grid `v` of shape `(nx+1, ny+1, nz+1)` with `False`. Mark vertices as part of the surface if they are corners of any detected face [S1, unofficial].
-   - For `f1` (X-normal faces):
-     $$ v[:, :-1, :-1] \lor= f1, \quad v[:, :-1, 1:] \lor= f1, \quad v[:, 1:, :-1] \lor= f1, \quad v[:, 1:, 1:] \lor= f1 $$
-   - For `f2` (Y-normal faces):
-     $$ v[:-1, :, :-1] \lor= f2, \quad v[:-1, :, 1:] \lor= f2, \quad v[1:, :, :-1] \lor= f2, \quad v[1:, :, 1:] \lor= f2 $$
-   - For `f3` (Z-normal faces):
-     $$ v[:-1, :-1, :] \lor= f3, \quad v[:-1, 1:, :] \lor= f3, \quad v[1:, :-1, :] \lor= f3, \quad v[1:, 1:, :] \lor= f3 $$
+3.  **Vertex Grid Construction:** Initialize a vertex existence grid `v` of shape $(N_x+1, N_y+1, N_z+1)$ to `False`. Mark vertices as existing if they are part of any detected face. Each face contributes to 4 vertices.
+    *   For $f1$ (X-faces):
+        ```python
+        v[:, :-1, :-1] |= f1
+        v[:, :-1, 1:] |= f1
+        v[:, 1:, :-1] |= f1
+        v[:, 1:, 1:] |= f1
+        ```
+    *   For $f2$ (Y-faces):
+        ```python
+        v[:-1, :, :-1] |= f2
+        v[:-1, :, 1:] |= f2
+        v[1:, :, :-1] |= f2
+        v[1:, :, 1:] |= f2
+        ```
+    *   For $f3$ (Z-faces):
+        ```python
+        v[:-1, :-1, :] |= f3
+        v[:-1, 1:, :] |= f3
+        v[1:, :-1, :] |= f3
+        v[1:, 1:, :] |= f3
+        ```
 
-4. **Vertex Indexing:** Create an index grid `v_idx` of shape `(nx+1, ny+1, nz+1)` initialized to `-1`. Assign unique indices to vertices marked in `v` [S1, unofficial].
-   $$ v_{\text{mask}} = \text{where}(v) $$
-   $$ v_{\text{idx}}[v] = \text{arange}(\text{len}(v_{\text{mask}})) $$
+4.  **Vertex Index Mapping:** Create a linear index for each existing vertex.
+    ```python
+    v_idx = np.full((N_x+1, N_y+1, N_z+1), -1)
+    v_idx[v] = np.arange(np.sum(v))
+    ```
 
-5. **Vertex Coordinate Extraction:** Extract the coordinates of the marked vertices and normalize them to the range `[-0.5, 0.5]` relative to the voxel grid dimensions [S1, unofficial].
-   $$ x, y, z = \text{where}(v) $$
-   $$ x_{\text{norm}} = \frac{x}{nx} - 0.5, \quad y_{\text{norm}} = \frac{y}{ny} - 0.5, \quad z_{\text{norm}} = \frac{z}{nz} - 0.5 $$
-   $$ \text{vertices}_{\text{local}} = \text{stack}([x_{\text{norm}}, y_{\text{norm}}, z_{\text{norm}}], \text{axis}=1) $$
+5.  **Vertex Coordinate Extraction:** Extract coordinates for existing vertices and normalize them to $[-0.5, 0.5]$.
+    ```python
+    x_coords, y_coords, z_coords = np.where(v)
+    # Normalize to [-0.5, 0.5] based on grid dimensions
+    # Note: The source uses nx, ny, nz as the original dimensions.
+    # The padded grid has dimensions (nx+2, ny+2, nz+2).
+    # The vertices correspond to the grid points.
+    # Formula from source: v_x = v_x/nx - 0.5
+    vertices_x = x_coords / N_x - 0.5
+    vertices_y = y_coords / N_y - 0.5
+    vertices_z = z_coords / N_z - 0.5
+    vertices = np.stack([vertices_x, vertices_y, vertices_z], axis=1)
+    ```
 
-6. **Face Index Construction:** Extract the grid coordinates of the faces using `np.where` for each direction and construct quad indices. The winding order is consistent for outward-facing normals [S1, unofficial].
-   - **f1_l (Left, X-min):** `[v_idx[x,y,z], v_idx[x,y,z+1], v_idx[x,y+1,z+1], v_idx[x,y+1,z]]`
-   - **f1_r (Right, X-max):** `[v_idx[x,y,z], v_idx[x,y+1,z], v_idx[x,y+1,z+1], v_idx[x,y,z+1]]`
-   - **f2_l (Left, Y-min):** `[v_idx[x,y,z], v_idx[x+1,y,z], v_idx[x+1,y,z+1], v_idx[x,y,z+1]]`
-   - **f2_r (Right, Y-max):** `[v_idx[x,y,z], v_idx[x,y,z+1], v_idx[x+1,y,z+1], v_idx[x+1,y,z]]`
-   - **f3_l (Left, Z-min):** `[v_idx[x,y,z], v_idx[x,y+1,z], v_idx[x+1,y+1,z], v_idx[x+1,y,z]]`
-   - **f3_r (Right, Z-max):** `[v_idx[x,y,z], v_idx[x+1,y,z], v_idx[x+1,y+1,z], v_idx[x,y+1,z]]`
+6.  **Face Index Construction:** Extract the coordinates of the faces and map them to vertex indices.
+    *   Get coordinates for each face type:
+        ```python
+        f1_l_x, f1_l_y, f1_l_z = np.where(f1_l)
+        f1_r_x, f1_r_y, f1_r_z = np.where(f1_r)
+        f2_l_x, f2_l_y, f2_l_z = np.where(f2_l)
+        f2_r_x, f2_r_y, f2_r_z = np.where(f2_r)
+        f3_l_x, f3_l_y, f3_l_z = np.where(f3_l)
+        f3_r_x, f3_r_y, f3_r_z = np.where(f3_r)
+        ```
+    *   Map to vertex indices using `v_idx`.
+    *   Construct quad indices (4 vertices per face):
+        *   **f1_l (Left X):** `[v_idx[x,y,z], v_idx[x,y,z+1], v_idx[x,y+1,z+1], v_idx[x,y+1,z]]`
+        *   **f1_r (Right X):** `[v_idx[x,y,z], v_idx[x,y+1,z], v_idx[x,y+1,z+1], v_idx[x,y,z+1]]`
+        *   **f2_l (Left Y):** `[v_idx[x,y,z], v_idx[x+1,y,z], v_idx[x+1,y,z+1], v_idx[x,y,z+1]]`
+        *   **f2_r (Right Y):** `[v_idx[x,y,z], v_idx[x,y,z+1], v_idx[x+1,y,z+1], v_idx[x+1,y,z]]`
+        *   **f3_l (Left Z):** `[v_idx[x,y,z], v_idx[x,y+1,z], v_idx[x+1,y+1,z], v_idx[x+1,y,z]]`
+        *   **f3_r (Right Z):** `[v_idx[x,y,z], v_idx[x+1,y,z], v_idx[x+1,y+1,z], v_idx[x,y+1,z]]`
+    *   Concatenate all face arrays:
+        ```python
+        faces = np.concatenate([faces_1_l, faces_1_r, faces_2_l, faces_2_r, faces_3_l, faces_3_r], axis=0)
+        ```
 
-7. **Concatenation:** Combine all face arrays [S1, unofficial].
-   $$ \text{faces} = \text{concatenate}([\text{faces}_{1\_l}, \text{faces}_{1\_r}, \text{faces}_{2\_l}, \text{faces}_{2\_r}, \text{faces}_{3\_l}, \text{faces}_{3\_r}], \text{axis}=0) $$
+7.  **Transformation (Optional):** Transform vertices to world space using a location `loc` and scale `scale`.
+    ```python
+    vertices = loc + scale * vertices
+    ```
 
-8. **Greedy Meshing:** Merge adjacent quads into maximal quads along each axis to reduce primitive count [G]. Iterate over each face mask, group contiguous cells, and output larger quads.
-
-9. **World Space Transformation:** Transform local vertices to world space [S1, unofficial].
-   $$ \text{vertices}_{\text{world}} = \text{loc} + \text{scale} \times \text{vertices}_{\text{local}} $$
-
-10. **Mesh Creation:** Construct the final mesh object using the vertices and faces [S1, unofficial].
-
-**Pseudocode:**
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-import numpy as np
-
-def boolean_voxel_meshing(occ, loc, scale, desired_step=0.2, fake_shadow=False, 
-                          light_dir=(-0.495633, 0.142501, 0.856762), 
-                          shadow_colors=('White', 'Black'), color=None, 
-                          convert_to_triangles=True, flatten=True):
-    """
-    Convert a boolean voxel occupancy grid to a mesh with greedy merging.
-    """
-    nx, ny, nz = occ.shape
-    
-    # Step 1: Pad occupancy grid
-    occ_pad = np.pad(occ, pad_width=1, mode='constant', constant_values=False)
-    
-    # Step 2: Compute face masks
-    f1_r = occ_pad[:-1, 1:-1, 1:-1] & ~occ_pad[1:, 1:-1, 1:-1]
-    f1_l = ~occ_pad[:-1, 1:-1, 1:-1] & occ_pad[1:, 1:-1, 1:-1]
-    f1 = f1_r | f1_l
-    
-    f2_r = occ_pad[1:-1, :-1, 1:-1] & ~occ_pad[1:-1, 1:, 1:-1]
-    f2_l = ~occ_pad[1:-1, :-1, 1:-1] & occ_pad[1:-1, 1:, 1:-1]
-    f2 = f2_r | f2_l
-    
-    f3_r = occ_pad[1:-1, 1:-1, :-1] & ~occ_pad[1:-1, 1:-1, 1:]
-    f3_l = ~occ_pad[1:-1, 1:-1, :-1] & occ_pad[1:-1, 1:-1, 1:]
-    f3 = f3_r | f3_l
-    
-    # Step 3: Identify vertices
-    v = np.zeros((nx + 1, ny + 1, nz + 1), dtype=bool)
-    v[:, :-1, :-1] |= f1; v[:, :-1, 1:] |= f1; v[:, 1:, :-1] |= f1; v[:, 1:, 1:] |= f1
-    v[:-1, :, :-1] |= f2; v[:-1, :, 1:] |= f2; v[1:, :, :-1] |= f2; v[1:, :, 1:] |= f2
-    v[:-1, :-1, :] |= f3; v[:-1, 1:, :] |= f3; v[1:, :-1, :] |= f3; v[1:, 1:, :] |= f3
-    
-    # Step 4: Map vertex indices
-    v_idx = np.full((nx + 1, ny + 1, nz + 1), -1, dtype=int)
-    v_coords = np.where(v)
-    n_vertices = len(v_coords[0])
-    v_idx[v] = np.arange(n_vertices)
-    
-    # Step 5: Extract and normalize vertex coordinates
-    v_x, v_y, v_z = v_coords
-    v_x_norm = v_x / nx - 0.5
-    v_y_norm = v_y / ny - 0.5
-    v_z_norm = v_z / nz - 0.5
-    vertices_local = np.stack([v_x_norm, v_y_norm, v_z_norm], axis=1)
-    
-    # Step 6: Extract face indices
-    def get_face_indices(mask, idx_grid):
-        x, y, z = np.where(mask)
-        return np.column_stack([
-            idx_grid[x, y, z], idx_grid[x, y, z + 1], idx_grid[x, y + 1, z + 1], idx_grid[x, y + 1, z]
-        ])
-        
-    faces_1_l = get_face_indices(f1_l, v_idx)
-    faces_1_r = np.column_stack([v_idx[x, y, z], v_idx[x, y + 1, z], v_idx[x, y + 1, z + 1], v_idx[x, y, z + 1] for x, y, z in zip(*np.where(f1_r))])
-    faces_2_l = np.column_stack([v_idx[x, y, z], v_idx[x + 1, y, z], v_idx[x + 1, y, z + 1], v_idx[x, y, z + 1] for x, y, z in zip(*np.where(f2_l))])
-    faces_2_r = np.column_stack([v_idx[x, y, z], v_idx[x, y, z + 1], v_idx[x + 1, y, z + 1], v_idx[x + 1, y, z] for x, y, z in zip(*np.where(f2_r))])
-    faces_3_l = np.column_stack([v_idx[x, y, z], v_idx[x, y + 1, z], v_idx[x + 1, y + 1, z], v_idx[x + 1, y, z] for x, y, z in zip(*np.where(f3_l))])
-    faces_3_r = np.column_stack([v_idx[x, y, z], v_idx[x + 1, y, z], v_idx[x + 1, y + 1, z], v_idx[x, y + 1, z] for x, y, z in zip(*np.where(f3_r))])
-    
-    # Step 7: Concatenate faces
-    faces = np.concatenate([faces_1_l, faces_1_r, faces_2_l, faces_2_r, faces_3_l, faces_3_r], axis=0)
-    
-    # Step 8: Greedy Meshing (merge adjacent quads) [G]
-    def greedy_merge(faces, axis):
-        if len(faces) == 0: return faces
-        # Sort by shared coordinates, then merge contiguous quads
-        # Simplified greedy merge: group by axis-aligned planes and merge
-        # For brevity, standard greedy meshing logic is applied here [G]
-        return faces # Placeholder for standard greedy merge implementation [G]
-        
-    # In practice, greedy_merge is called per axis direction to reduce 1536 quads to 6 for a full chunk [G]
-    
-    # Step 9: Transform to world space
-    loc_arr = np.array(loc)
-    vertices = loc_arr + scale * vertices_local
-    
-    # Step 10: Mesh Creation
-    # mesh = trimesh.Trimesh(vertices, faces, process=False) [S1, unofficial]
-    return vertices, faces
-```
+8.  **Mesh Creation:** Create the final mesh object.
+    ```python
+    mesh = trimesh.Trimesh(vertices, faces, process=False)
+    ```
 
 **Parameters:**
-- `loc`: Default `(0, 0, 0)` [S1, unofficial].
-- `scale`: Default `1.0` [S1, unofficial].
-- `desiredStep`: Target voxel edge length (default `0.2`) [S3, unofficial].
-- `Fake Shadow`: Adds fake shadow visualization (default `false`) [S4, unofficial].
-- `Light Direction`: Fixed vector `(-0.495633, 0.142501, 0.856762)` [S4, unofficial].
-- `Shadow Colors`: `White` and `Black` [S4, unofficial].
-- `color`: RGBA array (default `null`) [S5, unofficial].
-- `convertToTriangles`: Converts quads to triangles (default `true`) [S5, unofficial].
-- `flatten`: Flattens mesh structure (default `true`) [S5, unofficial].
+*   `desiredStep` (float): Target voxel edge length used to compute optimal grid dimensions. Default: 0.2f [S2, unofficial].
+*   `Fake Shadow` (bool): Adds a fake shadow to the mesh for visualization. Default: false [S4, unofficial].
+*   `Light Direction` (Vector3d): Fixed vector for fake shadow calculation: $(-0.495633, 0.142501, 0.856762)$ [S4, unofficial].
+*   `Shadow Colors`: Highlight: `Color.White`, Shadow: `Color.Black` [S4, unofficial].
+*   `color` (RGBA): Mesh color. Default: null [S5, unofficial].
+*   `convertToTriangles` (bool): Convert quads to triangles. Default: true [S5, unofficial].
+*   `flatten` (bool): Flatten output structure. Default: true [S5, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Empty Grid:** If `occ` is all `False`, `v` will be all `False`, resulting in 0 vertices and 0 faces [S1, unofficial].
-- **Fully Occupied Grid:** If `occ` is all `True`, `v` will be all `False` (since there are no boundaries), resulting in 0 vertices and 0 faces [S1, unofficial].
-- **Precision:** Normalization to `[-0.5, 0.5]` uses floating-point division. Ensure `nx, ny, nz` are non-zero [S1, unofficial].
-- **Boundary Conditions:** The padding step ensures that faces on the outer boundary of the original grid are correctly detected. Without padding, boundary faces would be missed [S1, unofficial].
-- **T-junctions:** Unconnected lips can cause visible discontinuities. Vertices must be consolidated to remove T-junctions [S5, unofficial].
-- **Closed Mesh Requirement:** A closed mesh is required for mesh transformation algorithms such as Catmull-Clark smoothing [S5, unofficial].
-- **Hardcoded Indices:** Cube faces are hardcoded and explicitly noted as non-procedural, requiring manual indexing for all 12 triangles per cube [S3, unofficial].
+*   **T-junctions:** If shared faces are not properly culled or vertices not consolidated, T-junctions may appear, causing visible discontinuities [S5, unofficial].
+*   **Closed Mesh:** A closed mesh is required for subsequent smoothing algorithms like Catmull-Clark [S5, unofficial].
+*   **Directional Meshes:** If generating 6 directional plane meshes, an error occurs if the count is not exactly 6 [S4, unofficial].
+*   **Hardcoded Indices:** Cube faces are hardcoded; manual indexing is required for all 12 triangles per cube if using the independent cube variant [S2, unofficial].
 
 ## Subtopics
 
 ### [Voxel Occupancy Boundary Detection](1011-voxel-occupancy-boundary-detection.md)
-Identifies voxels on the interface between occupied and unoccupied space. It outputs a boolean mask of boundary voxels rather than a mesh directly. Choose this when you need to pre-process the grid for other algorithms or visualize the boundary layer.
+Voxel Occupancy Boundary Detection identifies voxels in a 3D occupancy grid that lie on the interface between occupied and unoccupied space. It solves the problem of converting a discrete boolean volume into a set of boundary indicators required for surface extraction algorithms, such as Boolean Voxel Meshing [G]. It differs from [Octree Traversal for Surface Extraction](2113-octree-traversal-for-surface-extraction.md) by operating on a fixed-resolution grid rather than a hierarchical tree, and from [VoxelGrid Mesh Generation](2714-voxelgrid-mesh-generation.md) by outputting a boolean mask of boundary voxels rather than a mesh directly [G].
 
 ### [Octree Traversal for Surface Extraction](2113-octree-traversal-for-surface-extraction.md)
-Extracts a triangular mesh from a boolean voxel occupancy grid by recursively traversing an octree structure. Choose this when working with hierarchical data structures or when variable resolution is needed.
+This method extracts a triangular mesh from a boolean voxel occupancy grid by recursively traversing an octree structure and generating geometry for leaf nodes. It differs from interpolation-based methods like [Marching Cubes](52-marching-cubes.md) by outputting axis-aligned cube meshes directly from octree leaves, resulting in simpler but blocky geometry unless voxel resolution is high. It builds on [Boolean Voxel Meshing](971-boolean-voxel-meshing.md) by handling hierarchical data structures rather than flat grids.
 
 ### [VoxelGrid Mesh Generation](2714-voxelgrid-mesh-generation.md)
-Generates a triangle mesh from a set of voxels in a VoxelGrid that satisfy a specific condition. Choose this when you need to transform a base cell mesh for selected voxids rather than extracting the entire boundary.
+VoxelGrid Mesh Generation constructs a combined triangle mesh from a sparse set of voxel linear IDs or a predicate-defined subset within a `VoxelGrid`. It transforms a base cell mesh into world space for each selected voxel and adjusts triangle indices to maintain connectivity across the flattened output array. Unlike boundary-detection methods, it does not share vertices between voxels and generates a full independent geometry block for every selected voxel.
+
+### [Voxel Grid to Triangle Mesh Conversion](6291-voxel-grid-to-triangle-mesh-conversion.md)
+This method converts a discrete boolean voxel occupancy grid into a triangular mesh by instantiating a box primitive for every occupied voxel. Unlike smooth surface extraction techniques (e.g., [Marching Cubes](52-marching-cubes.md)) or boundary-aware methods (e.g., [Voxel Occupancy Boundary Detection](1011-voxel-occupancy-boundary-detection.md)), this approach preserves the exact blocky geometry of the input grid without attempting to smooth or merge adjacent faces. It is primarily used when the voxel structure itself is the desired output, such as for animation or when the input data is already voxelized and no underlying scalar field exists.
+
+### [Blocky Surface Extraction](6418-blocky-surface-extraction.md)
+Blocky Surface Extraction generates a voxel-aligned triangle mesh by iterating over voxels inside an isosurface and adding faces to the exterior boundary where adjacent voxels are outside the shape. It differs from [Boolean Voxel Meshing](971-boolean-voxel-meshing.md) by explicitly constructing quad faces from voxel corners rather than detecting boundary edges, resulting in a "blocky" aesthetic where faces are strictly axis-aligned.
+
+### [VoxelBodyMeshing](6947-voxelbodymeshing.md)
+VoxelBodyMeshing is a blocky surface extraction method that converts a boolean voxel occupancy grid into a triangular mesh by processing sub-chunks of a `VoxelBody`. It builds on [Boolean Voxel Meshing](971-boolean-voxel-meshing.md) by handling the meshing of individual chunks in a multi-threaded worker loop, supporting both hard-edged (face-merging) and smooth (Marching Cubes) modes. It is distinct from sibling methods by its specific integration with the `VoxelEngine` architecture, using a thread-local `MeshGrid` and `MeshBuilder` to output `ChunkMeshData` parts that are transformed into body-local coordinates to allow shared model matrices.
+
+### Voxels Grid to Compressed Mesh Conversion
+Converts a voxel grid into a compressed mesh representation using a Marching Cubes-like approach, sharing vertices and faces across adjacent voxels to reduce redundancy [S6, unofficial]. It initializes six predefined normals for the mesh: $(0,0,1), (0,1,0), (1,0,0), (0,0,-1), (0,-1,0), (-1,0,0)$ [S6, unofficial]. It iterates through all voxels; if a voxel is empty, it is skipped. Otherwise, it calls `AddFacesVertexXY`, `AddFacesVertexXZ`, and `AddFacesVertexYZ` for both false and true orientations to generate faces and vertices [S6, unofficial]. It reserves and assigns white color $(1.0, 1.0, 1.0, 1.0)$ to all vertices [S6, unofficial]. Data structures include `vertices_marked`: `std::unordered_map<uint, std::pair<uint, Position>>` mapping a unique vertex ID to a pair of (face index, Position), and `faces_marked`: `std::array<std::vector<bool>, 3>` containing three vectors of booleans, each of size `max_faces_num`, tracking which faces have been added for each axis (X, Y, Z) [S6, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as each voxel and its neighbors are visited a constant number of times [G].
-- **Memory Complexity:** $O(N)$ for storing the occupancy grid, face masks, vertex grid, and index grid [G].
-- **Measured Performance:** Not given in the sources.
-- **Strengths:** Simple to implement, deterministic, produces a watertight mesh if the input is a valid binary volume, fast for dense grids [G].
-- **Limitations:** Geometry is blocky and lacks smoothness, high memory usage for large grids, does not handle partial voxel occupancy or alpha blending [G].
-- **When to Use:** When a blocky, voxel-accurate representation is acceptable, or as a preprocessing step for further mesh optimization [G].
-- **When Not to Use:** When smooth surfaces are required, or when the grid is very large and memory is constrained [G].
+*   **Time Complexity:** $O(N_x N_y N_z)$ for grid traversal and face detection. Vertex and index construction is proportional to the surface area.
+*   **Memory Complexity:** $O(N_x N_y N_z)$ for the occupancy grid and intermediate boolean masks. The output mesh size is proportional to the surface area.
+*   **Performance:** Culling shared faces reduces mesh size and rendering time compared to independent voxel cubes [S5, unofficial].
+*   **Strengths:** Produces watertight, closed meshes suitable for smoothing and physics. Efficiently handles large grids.
+*   **Limitations:** Geometry is strictly axis-aligned (blocky). High resolution grids require significant memory for intermediate arrays.
+*   **When to use:** When a clean, shared-vertex mesh from a boolean grid is needed, especially for further processing like smoothing.
+*   **When not to use:** When smooth, curved surfaces are required (use Marching Cubes) or when hierarchical data structures are preferred (use Octree Traversal).
 
 ## Background
-Boolean Voxel Meshing is a method for surface extraction from discrete voxel data. It is commonly used in computer graphics for converting voxelized models into triangle meshes for rendering [S3, unofficial]. It is used in `OBJGeometryData::generateFromVoxelGrid` to export voxelized geometry as an OBJ file [S3, unofficial].
+Boolean Voxel Meshing is a technique used in voxel-based world generation and 3D modeling to convert discrete voxel data into polygonal meshes [S1, unofficial]. It is used in tools like OBJ-Solidizer for exporting voxelized geometry as OBJ files [S2, unofficial]. The method is also referenced in WebGL contexts for converting voxel arrays to mesh data [S5, unofficial]. Variants like MicroBlockBuilder allow for complex shapes (stairs, slabs) by subdividing voxels, though this is a distinct geometry builder approach [S3, unofficial]. The technique is fundamental to blocky meshing pipelines, serving as a bridge between discrete occupancy data and continuous surface representations.
 
 ## Sources
 [S1] autonomousvision/differentiable_volumetric_rendering, https://github.com/autonomousvision/differentiable_volumetric_rendering, fetched 2026-10-26 (unofficial)
-[S2] bigmat18/cuda-mesh-voxelization, https://github.com/bigmat18/cuda-mesh-voxelization, fetched 2026-10-26 (unofficial)
-[S3] antonmartynov/OBJ-Solidizer-And-Voxelizer, https://github.com/antonmartynov/OBJ-Solidizer-And-Voxelizer, fetched 2026-10-27 (unofficial)
+[S2] antonmartynov/OBJ-Solidizer-And-Voxelizer, https://github.com/antonmartynov/OBJ-Solidizer-And-Voxelizer, fetched 2026-10-27 (unofficial)
+[S3] Procedural Generation of Voxel Worlds with Castles, https://researchcommons.waikato.ac.nz/entities/publication/70d98783-1629-43df-9d01-b973ddbb5d75, fetched 2026-10-28 (unofficial)
 [S4] voxeltool, https://github.com/arendvw/voxeltools, fetched 2026-10-29 (unofficial)
 [S5] voxel-to-mesh | Converts voxel array to webgl mesh data, https://jzwood.github.io/voxel-to-mesh/, fetched 2026-10-30 (unofficial)
+[S6] bigmat18/cuda-mesh-voxelization, https://github.com/bigmat18/cuda-mesh-voxelization, fetched 2026-10-26 (unofficial)

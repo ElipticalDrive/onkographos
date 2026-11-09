@@ -3,40 +3,35 @@
 Also called: Index-based Isosurface Extraction, Range-based Isosurface Extraction
 
 ## Overview
-Search Data Structure Based Isosurface Extraction is a family of methods that utilize external search structures (indices) to accelerate isosurface extraction for multiple queries on the same dataset [S1]. By creating an index that allows the algorithm to disregard regions containing only non-active cells, these methods achieve significant performance gains over brute-force traversal when repeated queries are required [S1]. This approach is distinct from single-pass methods because the overhead of index construction must be amortized over multiple queries; it is not feasible if the dataset is examined only once or if the index transfer overhead is prohibitive [S1].
+Search Data Structure Based Isosurface Extraction is a family of methods that accelerates isosurface extraction for multiple queries by constructing external indices to disregard regions containing only non-active cells [S1]. Unlike simple traversal, these methods trade upfront index construction time for faster subsequent queries, making them distinct from single-pass techniques [S1].
 
 ## Shared principles
-The core principle of this family is the pre-computation of a spatial or value-based index to filter out inactive cells during the query phase [S1].
+The core mechanism involves building a data structure that maps spatial or value-based ranges to cells (voxels) in the volume. This allows the extraction algorithm to query for active cells (those intersecting the isosurface) without visiting every cell in the domain [S1].
 
-**Index Construction:**
-The dataset is analyzed to build a data structure that maps spatial locations or value ranges to the cells within the volume. The structure must support efficient range queries or spatial lookups to identify which cells intersect with a specific isovalue $q$ [S1].
+The general workflow is:
+1.  **Index Construction**: Analyze the scalar field $f(p)$ over each cell $c$ (or group of cells) to determine bounds.
+2.  **Query**: Given an isovalue $q$, traverse the search structure to enumerate only cells $c$ where the isovalue falls within the stored bounds.
+3.  **Extraction**: Apply a standard surface extraction algorithm (e.g., Marching Cubes) only to the enumerated active cells [S1].
 
-**Query Mechanism:**
-For a given isovalue $q$, the search structure is queried to enumerate only the "active" cells $c$ where the isosurface might exist. Cells that are definitively inactive (where $q$ falls outside the cell's value range or spatial bounds) are skipped [S1].
-
-**Performance Trade-off:**
-The total execution time is the sum of index creation time and extraction time [S1]. This method is only beneficial when:
-1.  Multiple isosurfaces or isovalue queries are performed on the same static dataset.
-2.  The dataset is large enough that skipping non-active cells saves more time than the index lookup overhead.
-
-**Limitations:**
-The method is not feasible if:
-1.  The dataset is examined only once (e.g., medical examination results, CFD simulation snapshots) [S1].
-2.  The data must be transferred to another resource, as the download overhead of the index may exceed the computation savings [S1].
+The feasibility of this approach depends on the cost of index creation versus the number of queries. If the dataset is examined only once, the total time (index creation + extraction) typically exceeds simple linear traversal [S1]. Similarly, if the data must be transferred to another resource, the download overhead of the index may negate performance gains [S1].
 
 ## Subtopics
 
 ### Range-based Techniques
-Cells (or fixed-size groups of cells) are associated with a continuous value range $R(c) = [\min_{p \in C} f(p), \max_{p \in C} f(p)]$, where $f(p)$ is the scalar field value at vertex $p$ [S1]. A query for isovalue $q$ enumerates all cells $c$ such that $q \in R(c)$ [S1]. Common structures include kd-trees and interval trees [S1]. See [Standard Interval Tree for Isosurface Extraction](1230-standard-interval-tree-for-isosurface-extraction.md) and [Fixed-Sized Buckets for Isosurface Extraction](1252-fixed-sized-buckets-for-isosurface-extraction.md).
+Range-based techniques associate each cell $c$ with the continuous set of values $R(c) = [\min_{p \in C} f(p), \max_{p \in C} f(p)]$ [S1]. The query enumerates all cells $c$ such that the isovalue $q \in R(c)$ [S1]. Common structures include kd-trees and interval trees [S1].
 
 ### Domain-based Techniques
-The spatial domain of the dataset is hierarchically partitioned to disregard parts of the volume that do not contain active cells for a given isovalue [S1]. The primary structure used is the octree [S1]. See [Octree-based Isosurfacing](1229-octree-based-isosurfacing.md).
+Domain-based techniques hierarchically partition the spatial domain to disregard parts of the volume not containing active cells for a given isovalue [S1]. The primary search data structure adopted is the octree [S1].
 
 ### Contour Propagation
-Based on the continuity of the scalar field, an active "seed cell" is determined for each connected component of each possible isosurface [S1]. Seed cells are grouped by isovalue. The isosurface is traced via breadth-first traversal through face-adjacencies starting from the seed cells corresponding to the required isovalue [S1]. See [Contour Propagation Isosurfacing](1231-contour-propagation-isosurfacing.md).
+Contour propagation determines an active 'seed cell' for each connected component of each possible isosurface based on the continuity of the scalar field [S1]. Seed cells are grouped by isovalue. The isosurface is traced by breadth-first traversal through face-adjacencies starting from the seed cells corresponding to the required isovalue [S1].
+
+### NOISE (Near Optimal IsoSurface Extraction)
+NOISE is a rapid isosurface extraction algorithm for structured and unstructured grids that enables interactive, real-time changes to the isosurface threshold without full recalculation [S2, S2, unofficial]. It constructs a multi-dimensional search tree (kd-tree) storing the minimum and maximum scalar values for each voxel [S2, S2, unofficial]. The algorithm searches the resulting "span space" of the kd-tree for a user-specified isosurface threshold [S2, S2, unofficial]. It outputs only those voxels whose stored min/max ranges bracket the threshold, indicating potential intersection [S2, S2, unofficial]. These voxels are then triangulated using the marching cubes algorithm and rendered [S2, S2, unofficial]. A kd-tree node stores two scalar values per voxel: minimum and maximum [S2, S2, unofficial]. A known pitfall is that standard marching cubes ambiguous cases require neighbor data or complex logic, which slows real-time frame rates or bloats file size [S2, S2, unofficial]. It was implemented at Sandia National Laboratories as a baseline for DYNAISOLOD [S2, S2, unofficial].
 
 ## Background
-This approach was investigated to achieve high performance levels in isosurface extraction, particularly in the context of parallelization and distributed environments [S1]. The use of external search structures for speeding up isosurface extraction is widely demonstrated in literature [S1]. The classification into range-based, domain-based, and contour propagation methods provides a framework for comparing different indexing strategies [S1].
+The use of external search structures to speed up isosurface extraction for multiple queries was widely demonstrated in literature [S1]. The approach allows disregarding large regions containing only non-active cells for a given isovalue [S1]. The classification into range-based, domain-based, and contour propagation methods is attributed to the analysis in [S1]. The NOISE algorithm was proposed by Y. Livnat et al. [S2, S2, unofficial].
 
 ## Sources
 [S1] Parallel Isosurface Extraction for 3D Data Analysis Workflows in Distributed Environments, https://doi.org/10.1002/cpe.1710, fetched 2026-10-26
+[S2] Dynamic isosurface extraction and level-of-detail in voxel space, https://digital.library.unt.edu/ark:/67531/metadc707496/?q=marching cubes, fetched 2026-10-28 (unofficial)

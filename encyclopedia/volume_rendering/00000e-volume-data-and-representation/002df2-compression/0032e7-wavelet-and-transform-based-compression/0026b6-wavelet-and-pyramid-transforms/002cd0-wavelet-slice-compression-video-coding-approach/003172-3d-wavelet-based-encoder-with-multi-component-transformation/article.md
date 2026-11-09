@@ -1,63 +1,63 @@
 # 3D Wavelet-based Encoder with Multi-Component Transformation
 
-Also called: JPEG2000 Part-2 multi-component wavelet transform, Lifting-based 3D wavelet transform, JPEG 2000 DWT, Lifting Scheme DWT, Lifting-based Discrete Wavelet Transform (DWT)
+Also called: JPEG2000 Part-2 multi-component wavelet transform, Lifting-based 3D wavelet transform, JPEG 2000 DWT, Lifting Scheme DWT, Lifting-based Discrete Wavelet Transform (DWT), 小波方法
 
 ## Overview
-This method compresses volumetric data by treating the volume as a multi-component signal (e.g., YUV color space) and applying a lifting-based Discrete Wavelet Transform (DWT) along the component axis to remove inter-component correlations, followed by spatial decomposition. It differs from standard 3D volumetric transforms (like [3D Wavelet-based Volumetric Compression](52-3d-wavelet-based-volumetric-compression.md)) by explicitly separating the component-wise correlation removal from spatial compression, leveraging the JPEG2000 Part-2 multi-component transformation framework. It builds on [Wavelet Slice Compression (Video Coding Approach)](5379-wavelet-slice-compression-video-coding-approach.md) by applying wavelet transforms across the depth/component dimension rather than just treating slices as temporal frames.
+This method compresses volumetric data by treating the volume as a multi-component signal (e.g., YUV color space) and applying a lifting-based Discrete Wavelet Transform (DWT) along the component axis to remove inter-component correlations, followed by spatial decomposition [S2]. It differs from standard 3D volumetric transforms by explicitly separating the component-wise correlation removal from spatial compression, leveraging the JPEG2000 Part-2 multi-component transformation framework [S2]. It builds on [Wavelet Slice Compression (Video Coding Approach)](5379-wavelet-slice-compression-video-coding-approach.md) by applying wavelet transforms across the depth/component dimension rather than just treating slices as temporal frames [S2].
 
 ## How it works
 
 ### Inputs and Outputs
-*   **Input:** A 3D volume $\mathbf{S}$ defined on a 3D orthogonal sampling grid $\Pi = (l_x, l_y, l_z) \in \mathbb{Z}^3$, where each sample $\mathbf{S}[\mathbf{l}]$ consists of $C$ components (typically $C=3$ for Y, U, V).
-*   **Output:** A set of wavelet coefficients for each subband, ready for entropy coding (e.g., EBCOT).
+*   **Input:** A 3D volume $\mathbf{S}$ defined on a 3D orthogonal sampling grid $\Pi = (l_x, l_y, l_z) \in \mathbb{Z}^3$, where each sample $\mathbf{S}[\mathbf{l}]$ consists of $C$ components (typically $C=3$ for Y, U, V) [S1, S2].
+*   **Output:** A set of wavelet coefficients for each subband, ready for entropy coding (e.g., EBCOT) [S2].
 
 ### Data Structures
 The method operates on poly-phase sub-grids. The input grid $\Pi$ is divided into eight distinct sub-grids $\Pi_{pqr}$ based on the parity of the coordinates:
 $$ \Pi_{pqr} = \{ (l_x, l_y, l_z) \in \Pi \mid p = l_x \bmod 2, q = l_y \bmod 2, r = l_z \bmod 2 \} $$
-where $p, q, r \in \{0, 1\}$.
+where $p, q, r \in \{0, 1\}$ [S1].
 
 For any dimension $D \in \{H, V, A\}$ (Horizontal, Vertical, Axial), two poly-phase sub-grids are defined using grid-union operations:
 $$ \Pi_{D0} = \bigcup_{q,r \in \mathbb{B}} \Pi_{0qr} \quad \text{(Even)} $$
 $$ \Pi_{D1} = \bigcup_{q,r \in \mathbb{B}} \Pi_{1qr} \quad \text{(Odd)} $$
-where $\mathbb{B}=\{0,1\}$. Note: The specific indices for the union depend on the dimension. For Horizontal ($H$), the split is on $l_x$. For Vertical ($V$), on $l_y$. For Axial ($A$), on $l_z$.
+where $\mathbb{B}=\{0,1\}$ [S1]. The specific indices for the union depend on the dimension: for Horizontal ($H$), the split is on $l_x$; for Vertical ($V$), on $l_y$; for Axial ($A$), on $l_z$ [S1].
 
 ### Parameters
-*   **Direction vectors:** $\mathbf{d}_H = (1,0,0)$, $\mathbf{d}_V = (0,1,0)$, $\mathbf{d}_A = (0,0,1)$.
-*   **Lifting Steps ($M$):** Total number of prediction/update pairs.
+*   **Direction vectors:** $\mathbf{d}_H = (1,0,0)$, $\mathbf{d}_V = (0,1,0)$, $\mathbf{d}_A = (0,0,1)$ [S1].
+*   **Lifting Steps ($M$):** Total number of prediction/update pairs [S1].
 *   **Filter Kernels:**
-    *   **Luminance (Y):** Haar wavelet lifting scheme.
-    *   **Chrominance (U, V):** 5/3 wavelet lifting scheme (CDF 5/3).
-*   **Scaling Factors ($G_L, G_H$):** Normalization factors computed from synthesis wavelet filters to ensure the transform is unitary (preserving total noise energy).
+    *   **Luminance (Y):** Haar wavelet lifting scheme [S2].
+    *   **Chrominance (U, V):** 5/3 wavelet lifting scheme (CDF 5/3) [S2].
+*   **Scaling Factors ($G_L, G_H$):** Normalization factors computed from synthesis wavelet filters to ensure the transform is unitary (preserving total noise energy) [S1].
 
 ### Algorithm Steps
 
 1.  **Multi-Component Transformation (Component Axis):**
-    Apply a 1D lifting-based DWT along the component axis (depth) for each spatial location $(x, y)$.
-    *   For the Luminance component $Y$, use the Haar lifting scheme.
-    *   For Chrominance components $U$ and $V$, use the 5/3 lifting scheme.
-    *   This decomposes the volume into subbands: Low-Low-Low (LLL), Low-Low-High (LLH), Low-High (LH), and High (H) relative to the component axis. *Note: The source [S2] describes this as decomposing along the component axis into LLL, LLH, LH, and H frames.*
+    Apply a 1D lifting-based DWT along the component axis (depth) for each spatial location $(x, y)$ [S2].
+    *   For the Luminance component $Y$, use the Haar lifting scheme [S2].
+    *   For Chrominance components $U$ and $V$, use the 5/3 lifting scheme [S2].
+    *   This decomposes the volume into subbands: Low-Low-Low (LLL), Low-Low-High (LLH), Low-High (LH), and High (H) relative to the component axis [S2].
 
 2.  **Spatial Decomposition:**
-    Apply a 2D spatial wavelet lifting scheme to each of the generated subband frames.
-    *   The 2D DWT is implemented as a tensor product of 1D DWTs along the Horizontal ($H$) and Vertical ($V$) dimensions.
-    *   For a given subband, apply 1D-DWT along $H$, then along $V$ (or vice versa).
-    *   This yields four spatial sub-bands per component subband: $L_H L_V, L_H H_V, H_H L_V, H_H H_V$.
-    *   The decomposition can be iterative (Mallat scheme), where only the low-pass sub-band ($L_{LLL}$) is further decomposed, or applied uniformly. [S2] illustrates examples where high-pass components may be transformed fewer levels or not at all.
+    Apply a 2D spatial wavelet lifting scheme to each of the generated subband frames [S2].
+    *   The 2D DWT is implemented as a tensor product of 1D DWTs along the Horizontal ($H$) and Vertical ($V$) dimensions [S1].
+    *   For a given subband, apply 1D-DWT along $H$, then along $V$ (or vice versa) [S1].
+    *   This yields four spatial sub-bands per component subband: $L_H L_V, L_H H_V, H_H L_V, H_H H_V$ [S1].
+    *   The decomposition can be iterative (Mallat scheme), where only the low-pass sub-band ($L_{LLL}$) is further decomposed, or applied uniformly [S1]. [S2] illustrates examples where high-pass components may be transformed fewer levels or not at all.
 
 3.  **Coding:**
-    Code the spatially decomposed frames using EBCOT coding (JPEG2000 Part-1 standard).
+    Code the spatially decomposed frames using EBCOT coding (JPEG2000 Part-1 standard) [S2].
 
 ### Lifting Scheme Formulas
 
-The lifting scheme separates the signal into even ($\mathbf{S}^{(0)}_0$) and odd ($\mathbf{S}^{(0)}_1$) poly-phase components along a dimension $D$.
+The lifting scheme separates the signal into even ($\mathbf{S}^{(0)}_0$) and odd ($\mathbf{S}^{(0)}_1$) poly-phase components along a dimension $D$ [S1].
 
 **Prediction Step ($i$-th stage):**
 $$ \mathbf{S}^{(i)}_1[\mathbf{l}_1] = \mathbf{S}^{(i-1)}_1[\mathbf{l}_1] - P_{d,(i)}[\mathbf{l}_1](\mathbf{S}^{(i-1)}_0) $$
-where $\mathbf{l}_1 \in \Pi_{D1}$.
+where $\mathbf{l}_1 \in \Pi_{D1}$ [S1].
 
 **Update Step ($i$-th stage):**
 $$ \mathbf{S}^{(i)}_0[\mathbf{l}_0] = \mathbf{S}^{(i-1)}_0[\mathbf{l}_0] + U_{d,(i)}[\mathbf{l}_0](\mathbf{S}^{(i)}_1) $$
-where $\mathbf{l}_0 \in \Pi_{D0}$.
+where $\mathbf{l}_0 \in \Pi_{D0}$ [S1].
 
 **Prediction Function:**
 $$ P_{d,(i)}[\mathbf{l}_1](\mathbf{S}^{(i-1)}_0) = K_P \sum_{k=-K_P}^{K_P} c_{P,i,k} \mathbf{S}^{(i-1)}_0[\mathbf{l}_1 - (2k+1)\mathbf{d}] $$
@@ -80,196 +80,65 @@ $$ \hat{U}_{d,(i)}[\mathbf{l}_0](\mathbf{S}^{(i)}_1) = \left\lfloor K_U \sum_{k=
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def lifting_predict_update(signal_even, signal_odd, direction, kernel_type, num_levels):
+import math
+
+def lifting_transform(signal_even, signal_odd, direction, kernel_params, num_levels):
     """
     Performs lifting-based DWT along a specific direction.
     
     Args:
-        signal_even: Array of values on even poly-phase grid.
-        signal_odd: Array of values on odd poly-phase grid.
-        direction: Tuple (dx, dy, dz) indicating the axis.
-        kernel_type: 'haar' or '5/3'.
+        signal_even: dict mapping coordinate tuple to float value (even poly-phase grid).
+        signal_odd: dict mapping coordinate tuple to float value (odd poly-phase grid).
+        direction: tuple (dx, dy, dz) indicating the axis.
+        kernel_params: dict with 'K_P', 'c_P', 'K_U', 'c_U', 'G_L', 'G_H'.
         num_levels: Number of lifting steps M.
         
     Returns:
-        low_pass: Array of low-pass coefficients.
-        high_pass: Array of high-pass coefficients.
+        low_pass: dict mapping coordinate tuple to float value.
+        high_pass: dict mapping coordinate tuple to float value.
     """
-    # Initialize current states
-    S_even = signal_even.copy()
-    S_odd = signal_odd.copy()
+    S_even = dict(signal_even)
+    S_odd = dict(signal_odd)
     
-    # Define kernel parameters based on type
-    if kernel_type == 'haar':
-        # Haar lifting: Predict = average of neighbors, Update = add to predict
-        # Standard Haar lifting steps (1 level):
-        # P: S_odd[i] -= (S_even[i-1] + S_even[i+1]) / 2  -> Integer: floor(...)
-        # U: S_even[i] += (S_odd[i] + S_odd[i+1]) / 2    -> Integer: floor(...) + 0.5
-        # Note: The general formula uses summation. For Haar, K=0, c=0.5.
-        K_P = 0
-        c_P = [0.5] # Simplified for Haar
-        K_U = 0
-        c_U = [0.5]
-        G_L = 1.0 / 2.0 # Normalization for Haar
-        G_H = 1.0
-    elif kernel_type == '5/3':
-        # 5/3 Lifting steps (1 level)
-        # P: S_odd[i] -= floor((S_even[i-1] + S_even[i+1] + 2) / 4)
-        # U: S_even[i] += floor((S_odd[i-1] + S_odd[i+1]) / 2)
-        K_P = 1
-        c_P = [0.25, 0.5, 0.25] # Coefficients for 5/3 prediction
-        K_U = 1
-        c_U = [0.5, 1.0, 0.5]   # Coefficients for 5/3 update
-        G_L = 1.0 / 2.0
-        G_H = 1.0
-    else:
-        raise ValueError("Unknown kernel type")
-
+    K_P = kernel_params['K_P']
+    c_P = kernel_params['c_P']
+    K_U = kernel_params['K_U']
+    c_U = kernel_params['c_U']
+    G_L = kernel_params['G_L']
+    G_H = kernel_params['G_H']
+    
     for i in range(1, num_levels + 1):
-        # Prediction Step
-        # S_odd_new[l1] = S_odd[l1] - floor( sum(c_P * S_even[l1 - (2k+1)d]) )
-        # Note: The source formula uses floor for integer arithmetic.
-        # We assume S_even and S_odd are aligned such that we can access neighbors.
-        
-        new_S_odd = np.zeros_like(S_odd)
-        for idx, l1 in enumerate(S_odd.indices): # Iterate over valid odd indices
-            prediction_val = 0
+        new_S_odd = {}
+        for l1, val in S_odd.items():
+            pred_sum = 0.0
             for k in range(-K_P, K_P + 1):
-                neighbor_idx = l1 - (2*k + 1) * direction
-                # Check bounds and get value from S_even
-                val_even = S_even.get(neighbor_idx, 0) # [G] Placeholder for grid lookup
-                prediction_val += c_P[k + K_P] * val_even
+                neighbor = (l1[0] - (2*k + 1)*direction[0], 
+                            l1[1] - (2*k + 1)*direction[1], 
+                            l1[2] - (2*k + 1)*direction[2])
+                val_even = S_even.get(neighbor, 0.0)
+                pred_sum += c_P[k + K_P] * val_even
             
-            # Apply floor for integer arithmetic
-            pred = floor(K_P * prediction_val) # [G] K_P in formula is a scalar multiplier, 
-                                               # but in standard lifting it's often absorbed in coeffs.
-                                               # Source [S1] defines P with K_P sum. 
-                                               # For Haar, K_P=0? No, K_P is the limit. 
-                                               # Let's stick to the source formula structure.
-                                               # Source: P = K_P * sum(...). 
-                                               # If K_P is a scalar constant, we multiply.
-            
-            new_S_odd[idx] = S_odd[idx] - pred
+            pred = math.floor(K_P * pred_sum)
+            new_S_odd[l1] = val - pred
         S_odd = new_S_odd
-
-        # Update Step
-        # S_even_new[l0] = S_even[l0] + floor( sum(c_U * S_odd[l0 - (2k+1)d]) + 0.5 )
-        new_S_even = np.zeros_like(S_even)
-        for idx, l0 in enumerate(S_even.indices):
-            update_val = 0
+        
+        new_S_even = {}
+        for l0, val in S_even.items():
+            upd_sum = 0.0
             for k in range(-K_U, K_U + 1):
-                neighbor_idx = l0 - (2*k + 1) * direction
-                val_odd = S_odd.get(neighbor_idx, 0) # [G] Placeholder
-                update_val += c_U[k + K_U] * val_odd
+                neighbor = (l0[0] - (2*k + 1)*direction[0], 
+                            l0[1] - (2*k + 1)*direction[1], 
+                            l0[2] - (2*k + 1)*direction[2])
+                val_odd = S_odd.get(neighbor, 0.0)
+                upd_sum += c_U[k + K_U] * val_odd
             
-            # Apply floor with 0.5 offset
-            upd = floor(K_U * update_val + 0.5)
-            new_S_even[idx] = S_even[idx] + upd
+            upd = math.floor(K_U * upd_sum + 0.5)
+            new_S_even[l0] = val + upd
         S_even = new_S_even
-
-    # Scaling
-    low_pass = S_even * G_L
-    high_pass = S_odd * G_H
-    
+        
+    low_pass = {idx: val * G_L for idx, val in S_even.items()}
+    high_pass = {idx: val * G_H for idx, val in S_odd.items()}
     return low_pass, high_pass
-
-def compress_volume(volume_data):
-    """
-    Main compression pipeline.
-    """
-    # 1. Multi-Component Transform (Component Axis)
-    # Assume volume is (X, Y, Z, C) or (X, Y, C, Z) depending on layout.
-    # Source [S2] implies transforming along component axis.
-    # Let's assume components are the last dimension.
-    
-    Y = volume_data[..., 0]
-    U = volume_data[..., 1]
-    V = volume_data[..., 2]
-    
-    # Apply Haar to Y, 5/3 to U and V along the component axis (depth)
-    # Note: The component axis is the 3rd dimension in a 3D volume if stored as (X,Y,Z,C)?
-    # Or is it a 4D tensor? Source [S2] says "3D volume... one sample is composed of multiple components".
-    # This implies the volume is effectively 4D or the components are treated as a separate dimension.
-    # We treat the component axis as a 1D signal for each (x,y,z) location? 
-    # No, "along the component axis" usually means across the color channels for each spatial pixel.
-    # But it's a volume. So for each (x,y,z), we have a vector [Y, U, V].
-    # We apply 1D-DWT along this vector.
-    
-    Y_coeffs = []
-    U_coeffs = []
-    V_coeffs = []
-    
-    for x in range(X_dim):
-        for y in range(Y_dim):
-            for z in range(Z_dim):
-                # Extract component vector
-                comp_vec = np.array([Y[x,y,z], U[x,y,z], V[x,y,z]])
-                
-                # Transform Y (Haar)
-                # Since Y is scalar, this step might be trivial or applied to neighbors?
-                # Source [S2]: "Along the component axis, the Haar and 5/3 wavelet lifting schemes 
-                # are applied to remove correlations among consecutive components of the luminance Y 
-                # and chrominance U and V".
-                # This implies we treat Y, U, V as a sequence.
-                # But Y is one component. U and V are two.
-                # Usually, multi-component transform applies to the vector [Y, U, V].
-                # However, the source specifies different filters for Y vs U/V.
-                # This suggests a specific decomposition:
-                # 1. Transform Y? Or is Y the low-pass of something?
-                # Let's follow the subband description: LLL, LLH, LH, H.
-                # This implies a 3-level decomposition in the component domain?
-                # Or is it a 2-component transform (Y vs UV)?
-                # Source [S2] says: "decompose the volume along the component axis into subbands: 
-                # LLL, LLH, LH, and H". This sounds like a 3-level 1D DWT on the component axis.
-                # But there are only 3 components.
-                # Let's assume the "component axis" has length 3.
-                
-                # If we apply 1D-DWT on [Y, U, V]:
-                # Level 1: Split into Even [Y, V] and Odd [U]? Or [Y, U] and [V]?
-                # Standard lifting splits into even/odd indices.
-                # Indices 0,1,2 -> Even: 0,2 (Y,V); Odd: 1 (U).
-                # Predict U from Y,V?
-                
-                # The source specifies: Haar for Y, 5/3 for U,V.
-                # This is ambiguous. It likely means:
-                # Apply a transform that separates Y from UV.
-                # Let's assume the standard JPEG2000 Part-2 multi-component transform logic:
-                # It applies a linear transform (like KLT or DWT) to the components.
-                # Here, it uses Lifting.
-                
-                # Implementation detail:
-                # We will apply the lifting scheme along the component dimension.
-                # For a vector [Y, U, V]:
-                # Step 1: Predict U from Y (Haar? No, Haar is for Y).
-                # Let's stick to the high-level description:
-                # Apply 1D-DWT along component axis.
-                # Use Haar for Y-related operations?
-                # Use 5/3 for U/V-related operations?
-                
-                # Given the ambiguity, we implement the generic lifting on the component vector.
-                # We will use 5/3 for the whole vector as a fallback, or split.
-                # Source [S2] explicitly says: "Haar ... for luminance Y", "5/3 ... for chrominance U and V".
-                # This implies Y is processed separately or as a specific part of the tree.
-                
-                # Let's assume the decomposition tree is:
-                # Root: [Y, U, V]
-                # Split: Y vs [U, V]?
-                # If we use Haar for Y, maybe Y is the low-pass?
-                
-                # For the purpose of the article, we state the method:
-                # Apply lifting-based DWT along component axis.
-                # Use Haar filter for Y component processing.
-                # Use 5/3 filter for U, V component processing.
-                
-                pass 
-
-    # 2. Spatial Decomposition
-    # For each subband (LLL, LLH, LH, H) generated from step 1:
-    # Apply 2D DWT spatially.
-    
-    # 3. Coding
-    # Apply EBCOT.
-    pass
 ```
 
 ### Edge Cases and Pitfalls
@@ -289,7 +158,7 @@ def compress_volume(volume_data):
 
 *   **Origin:** The method is based on the lifting scheme formulation of the DWT as applied in JPEG2000 [S1]. It extends this to volumetric data by treating the volume as a multi-component signal, leveraging JPEG2000 Part-2 (multi-component transformation) and Part-1 (EBCOT) [S2].
 *   **Development:** The lifting scheme allows for perfect reversibility and integer-to-integer transforms, which is crucial for lossless compression of medical and volumetric data [S1]. The specific application to 3D volumes with multi-component transformation was proposed to improve compression efficiency by removing correlations among consecutive components (e.g., Y, U, V) [S2].
-*   **Usage:** Used in compression of volumetric medical image data and realistic view synthesis applications [S1, S2].
+*   **Usage:** Used in compression of volumetric medical image data [S1] and realistic view synthesis applications [S2].
 
 ## Sources
 

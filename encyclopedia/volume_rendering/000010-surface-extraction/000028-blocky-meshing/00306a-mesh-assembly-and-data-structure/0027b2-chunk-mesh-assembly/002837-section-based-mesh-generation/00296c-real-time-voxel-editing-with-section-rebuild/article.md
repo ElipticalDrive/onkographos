@@ -3,124 +3,89 @@
 Also called: Incremental Section Mesh Update, Section Rebuild
 
 ## Overview
-This method enables immediate visual feedback for voxel placement and removal by regenerating mesh data for the affected 16x16x16 section and any adjacent sections if the edit occurs on a section boundary [S1, unofficial]. It differs from full-chunk rebuilds by limiting computation to the minimal set of sections intersecting the modified voxel, and from adjacency-based chunk rebuilding by operating at the sub-chunk section level within a single chunk [S1, S2, unofficial].
+This method enables immediate visual feedback for voxel placement and removal by regenerating mesh geometry only for the affected 16x16x16 section and any adjacent sections if the edit occurs on a section boundary [S1, unofficial]. It solves the latency issue of full-chunk regeneration by limiting updates to the immediate neighborhood of a block change, ensuring real-time responsiveness during voxel editing [S1, unofficial]. Unlike full rebuilds, it relies on boundary detection to determine which neighboring sections require recalculation [S1, unofficial].
 
 ## How it works
-**Inputs:**
-- The 3D coordinates of the edited voxel $(i, j, k)$ within the chunk [S1, unofficial].
-- The new block type (e.g., AIR, STONE) [S1, unofficial].
-- The chunk's section side length $mSectionSide$ (typically 16) [S1, unofficial].
-- The chunk's total section count $sectionCount$ [S1, unofficial].
-- The current voxel data array `mBlocks` [S1, unofficial].
-
-**Outputs:**
-- Updated GPU vertex/index buffers for the affected section(s) [S1, unofficial].
-- Updated voxel data in `mBlocks` [S1, unofficial].
+**Inputs and Outputs:**
+*   **Input:** The 3D coordinates $(i, j, k)$ of the modified voxel within the chunk, the new `BlockType` (e.g., AIR, STONE), and the chunk's internal voxel array `mBlocks`.
+*   **Output:** Updated vertex and index buffers for the affected mesh sections, uploaded to the GPU.
 
 **Data Structures:**
-- `mBlocks`: A 1D array storing block types. Access is calculated via a standard 3D-to-1D mapping [S1, unofficial].
-- `MeshData`: Contains vertex and index data for a single section [S1, unofficial].
-- `TMap<int32, TFuture<...>*>`: Tracks in-flight chunk generation tasks to prevent duplicate work [S1, unofficial].
+*   `mBlocks`: A 1D `TArray` (or equivalent linear array) storing voxel types. The size is $(mSectionSide \times mSectionSide \times mSectionSide) + \text{boundary padding}$.
+*   `mSectionSide`: The side length of a section in voxels (typically 16).
+*   `mChunkX`, `mChunkY`: The chunk's position in the world grid.
 
-**Steps:**
-1. **Calculate Array Index:** Compute the linear index of the voxel in `mBlocks` using the section side length [S1, unofficial].
-2. **Update Voxel Data:** Set `mBlocks[index]` to the new block type. If the block type is unchanged, terminate [S1, unofficial].
-3. **Determine Affected Sections:**
-   - Calculate the primary section index: $section = \lfloor i / mSectionSide \rfloor$ [S1, unofficial].
-   - Check for boundary conditions: If $i \pmod{mSectionSide} == 0$ or $(i + 1) \pmod{mSectionSide} == 0$, the edit lies on a section boundary [S1, unofficial].
-   - If on boundary, identify the adjacent section:
-     - If at the bottom of a section ($i \pmod{mSectionSide} == 0$), include $section - 1$ [S1, unofficial].
-     - If at the top of a section ($(i + 1) \pmod{mSectionSide} == 0$), include $section + 1$ [S1, unofficial].
-4. **Clear Existing Data:** Call `ClearMeshSection` for each affected section index to free GPU resources [S1, unofficial].
-5. **Regenerate Mesh Data:** For each affected section, call `GetMeshData` to generate new vertices and indices based on the updated voxel state [S1, unofficial].
-6. **Upload to GPU:** Call `CreateMeshSection_LinearColor` with the new mesh data for each affected section [S1, unofficial].
-7. **Handle Inter-Chunk Updates:** If the edit occurs on a chunk boundary (e.g., $j==0$ or $k==0$ in the global coordinate system), notify the adjacent chunk to update its edge voxels [S1, unofficial].
+**Numbered Steps:**
+1.  **Validate Edit:** Calculate the linear index `positionInTArray` for $(i, j, k)$. If `mBlocks[positionInTArray]` already equals `blockType`, return immediately [S1, unofficial].
+2.  **Update Voxel Data:** Set `mBlocks[positionInTArray] = blockType` [S1, unofficial].
+3.  **Identify Affected Sections:**
+    *   Calculate the primary section index: $section = \lfloor i / mSectionSide \rfloor$ [S1, unofficial].
+    *   Check for boundary conditions: If $i \pmod{mSectionSide} == 0$ or $(i + 1) \pmod{mSectionSide} == 0$, the edit lies on a section boundary [S1, unofficial].
+    *   If on boundary, identify the adjacent section:
+        *   If at the bottom edge ($i \pmod{mSectionSide} == 0$), include $section - 1$ [S1, unofficial].
+        *   If at the top edge ($(i + 1) \pmod{mSectionSide} == 0$), include $section + 1$ [S1, unofficial].
+4.  **Clear Existing Data:** For each affected section index, clear the existing mesh data using `ClearMeshSection` [S1, unofficial].
+5.  **Regenerate Mesh:** For each affected section, call `GetMeshData` to generate vertices and indices, then upload via `CreateMeshSection_LinearColor` [S1, unofficial].
+6.  **Handle Inter-Chunk Updates:** If the edit occurs on a chunk boundary ($j==0$ or $k==0$), notify the adjacent chunk to update its edge voxels [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def UpdateVoxel(i, j, k, new_block_type, mSectionSide, sectionCount, mBlocks, mesh_manager):
-    # 1. Calculate linear index and check for no-op
-    index = i + j * mSectionSide + k * mSectionSide * mSectionSide
-    if mBlocks[index] == new_block_type:
+def UpdateVoxel(chunk, i, j, k, blockType):
+    # 1. Validate and Update
+    pos = GetPositionInTArray(i, j, k, chunk.mSectionSide)
+    if chunk.mBlocks[pos] == blockType:
         return
 
-    # 2. Update voxel data
-    mBlocks[index] = new_block_type
+    chunk.mBlocks[pos] = blockType
 
-    # 3. Determine affected sections
-    section = i // mSectionSide
-    affected_sections = [section]
+    # 2. Identify Sections
+    section = i // chunk.mSectionSide
+    sections_to_rebuild = [section]
 
     # Check boundary conditions
-    if i % mSectionSide == 0 and section > 0:
-        affected_sections.append(section - 1)
-    if (i + 1) % mSectionSide == 0 and section < sectionCount - 1:
-        affected_sections.append(section + 1)
+    if i % chunk.mSectionSide == 0:
+        if section > 0:
+            sections_to_rebuild.append(section - 1)
+    if (i + 1) % chunk.mSectionSide == 0:
+        if section < chunk.mSectionCount - 1:
+            sections_to_rebuild.append(section + 1)
 
-    # 4. Clear and regenerate mesh for each affected section
-    for sec in affected_sections:
-        mesh_manager.ClearMeshSection(sec)
-        new_mesh_data = GenerateSectionMesh(sec, mBlocks, mSectionSide, sectionCount)
-        mesh_manager.CreateMeshSection_LinearColor(sec, new_mesh_data)
+    # 3. Rebuild Sections
+    for sec in sections_to_rebuild:
+        chunk.ClearMeshSection(sec)
+        mesh_data = chunk.GetMeshData(sec)
+        chunk.CreateMeshSection_LinearColor(sec, mesh_data)
 
-    # 5. Handle inter-chunk updates
+    # 4. Inter-Chunk Notification
     if j == 0 or k == 0:
-        mesh_manager.NotifyAdjacentChunkToUpdateEdges()
-
-def GenerateSectionMesh(section_idx, mBlocks, mSectionSide, sectionCount):
-    mesh_data = MeshData()
-    base_i = section_idx * mSectionSide
-    for i in range(base_i, base_i + mSectionSide):
-        for j in range(mSectionSide):
-            for k in range(mSectionSide):
-                idx = i + j * mSectionSide + k * mSectionSide * mSectionSide
-                if mBlocks[idx] == BlockType.AIR:
-                    continue
-                for d in range(6):
-                    if IsNeighborAir(i, j, k, d, mBlocks, mSectionSide, sectionCount):
-                        mesh_data.AddVoxelFace(d, mBlocks[idx])
-    return mesh_data
-
-def IsNeighborAir(i, j, k, direction, mBlocks, mSectionSide, sectionCount):
-    offsets = [(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)]
-    dx, dy, dz = offsets[direction]
-    ni, nj, nk = i + dx, j + dy, k + dz
-    if ni < 0 or ni > mSectionSide * sectionCount: return False
-    if nj < 0 or nj > mSectionSide: return False
-    if nk < 0 or nk > mSectionSide: return False
-    if j == mSectionSide and nj == mSectionSide: return False
-    if k == mSectionSide and nk == mSectionSide: return False
-    nidx = ni + nj * mSectionSide + nk * mSectionSide * mSectionSide
-    return mBlocks[nidx] == BlockType.AIR
+        NotifyAdjacentChunk(chunk, i, j, k, blockType)
 ```
 
 **Parameters:**
-- $mSectionSide$: Typically 16. Determines the granularity of partial rebuilds [S1, unofficial].
+*   `mSectionSide`: Typically 16. This value determines the granularity of rebuilds.
+*   `mSectionCount`: Total number of sections in the chunk (e.g., 16 for a 256-high chunk with section size 16).
 
 **Edge Cases and Pitfalls:**
-- **Boundary Precision:** The condition $(i + 1) \pmod{mSectionSide} == 0$ must be checked to ensure the section above is rebuilt if the voxel is at the top of the current section [S1, unofficial].
-- **Inter-chunk Consistency:** Edits on chunk boundaries require coordination between adjacent chunks to avoid visual seams [S1, unofficial].
-- **Duplicate Generation:** Use a tracking map (e.g., `TMap`) to prevent multiple threads from rebuilding the same chunk simultaneously [S1, unofficial].
+*   **Boundary Checks:** The code must handle indices carefully. The chunk includes extra columns/rows for inter-chunk rendering, so `newI`, `newJ`, `newK` checks must account for padding [S1, unofficial].
+*   **Duplicate Generation:** In-flight chunks are tracked in a `TMap<int32, TFuture<...>*>` to prevent duplicate generation tasks if multiple edits occur rapidly [S1, unofficial].
+*   **Precision:** Integer division and modulo operations are used for section indexing; ensure no off-by-one errors occur at exact boundaries.
 
 ## Subtopics
 
-### Adjacency-Based Mesh Rebuilding
-A method that rebuilds entire chunk meshes only when a voxel is added or removed, specifically targeting adjacent chunks that share a face with the modified voxel [S2, unofficial]. It identifies the local voxel position $(lx, ly, lz)$ and world position $(wx, wy, wz)$, then rebuilds the mesh of the chunk containing the modified voxel and any adjacent chunk if the voxel is on a chunk boundary (e.g., $lx == 0$ triggers rebuild of chunk at $(wx-1, wy, wz)$) [S2, unofficial].
+### [Adjacency-Based Mesh Rebuilding](4817-adjacency-based-mesh-rebuilding.md)
+An optimization that regenerates mesh geometry only for chunks adjacent to a modified voxel, further limiting updates to the immediate neighborhood of a block change.
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Performance:** Not given in the sources.
-- **Strengths:** Immediate visual feedback for voxel placement and removal [S1, unofficial].
-- **Limitations:** Requires careful handling of section boundaries and inter-chunk updates [S1, unofficial].
-- **When to Use:** Real-time voxel editing where immediate feedback is critical [S1, unofficial].
-- **When Not to Use:** Not given in the sources.
+*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the affected section(s) (typically $16^3$ or $2 \times 16^3$). This is significantly faster than full-chunk regeneration $O(M)$ where $M$ is the total chunk size.
+*   **Memory Complexity:** $O(1)$ additional memory per rebuild, as it reuses existing mesh buffers.
+*   **Performance:** Provides immediate visual feedback for voxel editing. Performance degrades only if edits occur frequently on section boundaries, requiring multiple section rebuilds.
+*   **Strengths:** Real-time responsiveness, low latency for user input.
+*   **Limitations:** Does not handle inter-chunk boundary updates automatically without explicit notification logic. Requires careful management of in-flight tasks to avoid race conditions.
 
 ## Background
-This method is implemented in Unreal Engine 5 Minecraft clone projects, specifically in the `AChunk::UpdateVoxel` function [S1, unofficial]. It builds on the section-based mesh generation approach to allow efficient partial rebuilds [S1, unofficial].
+This method is implemented in the Unreal Engine 5 Minecraft Clone project by Manolo94 [S1, unofficial]. It is part of a larger architecture that includes blueprint-driven world generation and thread-pooled chunk generation. The approach is designed for real-time voxel editing in a game context, prioritizing user interaction speed over global optimization.
 
 ## Sources
 [S1] Manolo94/UE5MinecraftClone, https://github.com/Manolo94/UE5MinecraftClone, fetched 2026-10-26 (unofficial)
-[S2] StanislavPetrovV/Minecraft, https://github.com/StanislavPetrovV/Minecraft, fetched 2026-10-26 (unofficial)

@@ -8,25 +8,22 @@ A simplified NeRF-style integrator that accumulates emission along a ray through
 ## How it works
 **Inputs:**
 - Ray origin $o$ and direction $d$.
-- Scene intersection $si$ (providing entry point $t_{entry}$ and exit point $t_{exit}$).
-- Grid data structure containing density $\sigma$ and emission $L_e$.
-- Parameters: `queries_per_ray` ($N$), `density_noise_std`, `jittering_enabled`, `activation`, `hide_emitters`.
+- Scene intersection $si$ (providing entry point $t_{entry}$ and exit point $t_{exit}$) [S1, unofficial].
+- Grid data structure containing density $\sigma$ and emission $L_e$ [S1, unofficial].
+- Parameters: `queries_per_ray` ($N$), `density_noise_std`, `jittering_enabled`, `activation`, `hide_emitters` [S1, unofficial].
 
 **Outputs:**
 - Accumulated radiance $L$.
 
 **Data Structures:**
 - **Grid:** Dense 3D array storing $\sigma$ and $L_e$. Access is via trilinear interpolation or nearest neighbor depending on implementation details not fully specified in sources [S1, unofficial].
-- **Active Mask:** Boolean array indicating which rays are still valid (have not exited the medium or reached max steps).
+- **Active Mask:** Boolean array indicating which rays are still valid (have not exited the medium or reached max steps) [S1, unofficial].
 
 **Steps:**
 
 1. **Initialization:**
-   - Initialize accumulated radiance $L = 0$.
-   - Initialize throughput $\alpha_{through} = 1.0$.
-   - Initialize weight sum $W_{sum} = 0$.
-   - Initialize step counter $j = 0$.
-   - Determine primal mode (for gradient direction).
+   - Initialize accumulated radiance $L = 0$, throughput $\alpha_{through} = 1.0$, weight sum $W_{sum} = 0$, step counter $j = 0$, and previous position $t_a = 0$ [S1, unofficial].
+   - Determine primal mode (for gradient direction) [S1, unofficial].
 
 2. **Ray Intersection:**
    - Intersect ray with scene to find medium exit $t_{exit}$ [S1, unofficial].
@@ -40,9 +37,8 @@ A simplified NeRF-style integrator that accumulates emission along a ray through
    - While `still_walking` (mask is true) AND $j < N$:
      a. **Calculate Next T:**
         - $t_b = \text{query\_t\_for\_step}(j + 1, \text{step\_size}, s_{jitter}, \text{jittering\_enabled})$ [S1, unofficial].
-        - $t_a$ is the previous $t_b$ (initially $si.t$).
+        - $t_a$ is the previous $t_b$ (initially $0$) [S1, unofficial].
         - $\Delta t = t_b - t_a$.
-
      b. **Calculate Alpha and Weight:**
         - If $j + 1 < N$:
           - $\alpha_{recip} = \exp(-\sigma \cdot \Delta t)$ [S1, unofficial].
@@ -50,12 +46,10 @@ A simplified NeRF-style integrator that accumulates emission along a ray through
           - $\alpha_{recip} = 1.0$ [S1, unofficial].
         - Add safety epsilon: $\alpha_{recip} \leftarrow \alpha_{recip} + 10^{-10}$ [S1, unofficial].
         - $weight = (1.0 - \alpha_{recip}) \cdot \alpha_{through}$ [S1, unofficial].
-
      c. **Accumulate Radiance:**
         - Sample emission $L_e$ at $t_a$ (or midpoint, depending on specific grid query implementation not fully detailed, but typically at sample point) [S1, unofficial].
         - If primal mode: $L \leftarrow L + weight \cdot L_e$ [S1, unofficial].
         - Else (dual mode): $L \leftarrow L - weight \cdot L_e$ [S1, unofficial].
-
      d. **Update State:**
         - $j \leftarrow j + 1$.
         - $t_a \leftarrow t_b$.
@@ -75,76 +69,75 @@ A simplified NeRF-style integrator that accumulates emission along a ray through
 ```python
 def nerf_integrator(ray_o, ray_d, scene, grid, params):
     # Parameters
-    N = params['queries_per_ray']  # Default 128
-    noise_std = params['density_noise_std']  # Default 0
-    jitter = params['jittering_enabled']  # Default True
-    activation = params['activation']  # Default 'identity'
-    hide_emitters = params['hide_emitters']  # Default False
+    N = params['queries_per_ray']  # Default 128 [S1, unofficial]
+    noise_std = params['density_noise_std']  # Default 0 [S1, unofficial]
+    jitter = params['jittering_enabled']  # Default True [S1, unofficial]
+    activation = params['activation']  # Default 'identity' [S1, unofficial]
+    hide_emitters = params['hide_emitters']  # Default False [S1, unofficial]
     
-    # Initialization
+    # Initialization [S1, unofficial]
     L = 0.0
-    alpha_through = 1.0
+    throughput = 1.0
     W_sum = 0.0
-    j = 0
-    primal_mode = True  # Assumed default, check scene context
+    step_j = 0
+    t_a = 0.0
+    primal_mode = True  # Determined by scene context [G]
     
-    # Ray Intersection
+    # Ray Intersection [S1, unofficial]
     si = scene.intersect(ray_o, ray_d)
     if not si.hit:
-        return 0.0  # Or background color
+        return 0.0
+    t_exit = si.t_exit
+    still_walking = t_exit > si.t_entry
     
-    t_exit = si.t  # Assuming si.t is the exit point for the medium
-    active_mask = True  # Simplified for single ray
+    # Step Size Calculation [S1, unofficial]
+    # step_size_for_marching computes uniform step size over the medium
+    step_size = (t_exit - si.t_entry) / N
+    jitter_sample = uniform(0.0, 1.0) if jitter else 0.0
     
-    # Step Size
-    step_size = step_size_for_marching(N, 0, si.t, jitter)
-    jitter_sample = sampler.sample()
-    
-    t_a = si.t
-    
-    while active_mask and j < N:
-        # Calculate next t
-        t_b = query_t_for_step(j + 1, step_size, jitter_sample, jitter)
-        delta_t = t_b - t_a
+    while still_walking and step_j < N:
+        # query_t_for_step computes absolute t for the next sample [S1, unofficial]
+        t_b = (step_j + 1) * step_size + jitter_sample * step_size
         
-        # Calculate alpha_recip
-        if j + 1 < N:
-            # Sample density at t_a or midpoint? Sources imply using sigma at step
-            sigma = grid.sample_density(t_a)  # Implementation detail [G]
-            # Apply noise
-            if noise_std > 0:
-                sigma += noise_std * random_noise()
-            # Apply activation
-            if activation == 'relu':
-                sigma = max(0.0, sigma)
-            alpha_recip = exp(-sigma * delta_t)
+        actual_step = t_b - t_a
+        
+        # Sample density and apply activation/noise [G]
+        t_mid = t_a + actual_step / 2.0
+        sigma = grid.sample_density(si.t_entry + t_mid)
+        if noise_std > 0:
+            sigma += noise_std * uniform(-1.0, 1.0)
+        if activation == 'relu':
+            sigma = max(0.0, sigma)
+            
+        # Calculate alpha_recip [S1, unofficial]
+        if step_j + 1 < N:
+            alpha_recip = exp(-sigma * actual_step)
         else:
             alpha_recip = 1.0
             
-        # Safety epsilon
+        # Safety epsilon [S1, unofficial]
         alpha_recip += 1e-10
         
-        # Weight
-        weight = (1.0 - alpha_recip) * alpha_through
+        # Weight [S1, unofficial]
+        weight = (1.0 - alpha_recip) * throughput
         
-        # Accumulate
-        emission = grid.sample_emission(t_a)  # Implementation detail [G]
+        # Accumulate Radiance [S1, unofficial]
+        emission = grid.sample_emission(si.t_entry + t_mid)
         if primal_mode:
             L += weight * emission
         else:
             L -= weight * emission
             
-        # Update state
-        j += 1
+        # Update State [S1, unofficial]
+        step_j += 1
         t_a = t_b
-        alpha_through *= alpha_recip
+        throughput *= alpha_recip
         W_sum += weight
         
-        # Update mask
-        if j >= N:
-            active_mask = False
-            
-    # Background
+        # Update mask [S1, unofficial]
+        still_walking = (step_j < N) and (t_b < t_exit)
+        
+    # Background Contribution [S1, unofficial]
     if hide_emitters and W_sum == 0:
         L_bg = 0.0
     else:
@@ -170,11 +163,11 @@ def nerf_integrator(ray_o, ray_d, scene, grid, params):
 - **Time Complexity:** $O(N)$ per ray, where $N$ is `queries_per_ray` [S1, unofficial].
 - **Memory Complexity:** $O(V)$ for the dense grid, where $V$ is the volume size [S1, unofficial].
 - **Performance:** Depends on grid resolution and $N$. Higher $N$ improves accuracy but increases cost [S1, unofficial].
-- **Strengths:** Simple, differentiable, suitable for inverse rendering [S1, unofficial].
+- **Strengths:** Simple, suitable for inverse rendering [S1, unofficial].
 - **Limitations:** Dense grid memory usage, no direction-dependent emission [S1, unofficial].
 
 ## Background
-Originated from NeRF (Neural Radiance Fields) but adapted for unbiased inverse volume rendering using dense grids [S1, unofficial]. Developed by EPFL researchers [S1, unofficial].
+Originated from NeRF (Neural Radiance Fields) but adapted for unbiased inverse volume rendering using dense grids [S1, unofficial].
 
 ## Sources
 [S1] https://github.com/rgl-epfl/unbiased-inverse-volume-rendering, https://github.com/rgl-epfl/unbiased-inverse-volume-rendering, fetched 2026-10-26 (unofficial)

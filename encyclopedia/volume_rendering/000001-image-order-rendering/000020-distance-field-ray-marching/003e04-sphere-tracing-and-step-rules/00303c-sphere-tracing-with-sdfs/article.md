@@ -1,83 +1,76 @@
 # Sphere Tracing with SDFs
 
-Also called: Raymarched SDF Rendering, Implicit Surface Ray Marching
+Also called: Raymarched SDFs, Implicit Surface Ray Marching
 
 ## Overview
-Sphere Tracing with SDFs renders 3D geometry defined by analytic Signed Distance Functions (SDFs) by casting rays from the camera and stepping along them until they intersect the surface [S1, unofficial][S2]. Unlike traditional rasterization or mesh-based raycasting, this method constructs the image directly from equations, allowing for complex, continuous geometry without explicit polygonal meshes [S1, unofficial][S2]. It differs from its sibling [FBM Sphere Tracing with BVH Acceleration](1728-fbm-sphere-tracing-with-bvh-acceleration.md) by relying on analytic distance bounds rather than hierarchical acceleration structures for traversal, and from [Coarse-to-Fine Sphere Tracing](4615-coarse-to-fine-sphere-tracing.md) by using a single-resolution distance field rather than mipmapped volumes for step-size adaptation.
+Sphere Tracing with Signed Distance Functions (SDFs) is a ray-marching technique that renders implicit geometry by iteratively stepping along a ray using the distance to the nearest surface as the step size [S1, S2, S9643]. It solves the problem of rendering complex, continuous geometry without explicit polygonal meshes by leveraging the mathematical guarantee that no geometry exists within the distance value returned by the SDF [S1, S2, S9643]. It differs from its siblings, such as [FBM Sphere Tracing with BVH Acceleration](1728-fbm-sphere-tracing-with-bvh-acceleration.md) and [Coarse-to-Fine Sphere Tracing](4615-coarse-to-fine-sphere-tracing.md), by relying on the exact Lipschitz property of the SDF for step sizing rather than hierarchical acceleration structures or multi-resolution sampling strategies.
 
 ## Shared principles
-The method operates on the principle that a Signed Distance Function (SDF) $f(\mathbf{p})$ returns the shortest Euclidean distance from a query point $\mathbf{p} \in \mathbb{R}^3$ to the nearest surface of the scene geometry [S2, S5, S6, unofficial]. The sign of the result indicates the point's position relative to the surface:
-- $f(\mathbf{p}) < 0$: The point is inside the primitive.
-- $f(\mathbf{p}) = 0$: The point lies exactly on the surface.
-- $f(\mathbf{p}) > 0$: The point is outside the primitive.
+The method relies on the mathematical property of the Signed Distance Function (SDF). An SDF $f(\mathbf{p})$ maps a 3D point $\mathbf{p}$ to the shortest Euclidean distance to the nearest surface of the scene geometry [S2][S5, unofficial]. The sign indicates position: $f(\mathbf{p}) < 0$ inside, $f(\mathbf{p}) = 0$ on the surface, and $f(\mathbf{p}) > 0$ outside [S2, S5, S9643].
 
-The core algorithm iteratively advances a ray $r(t) = \mathbf{o} + t\mathbf{d}$ along its direction $\mathbf{d}$ by querying the SDF at the current position $\mathbf{p}_i$. The step size $\Delta t$ is set to the distance value returned by the SDF: $\Delta t = f(\mathbf{p}_i)$ [S2, S7, S14, unofficial][S26][S33, S48, unofficial]. This step size is "safe" because, by the definition of the distance field, no geometry exists closer than $f(\mathbf{p}_i)$ to $\mathbf{p}_i$; thus, the ray cannot overshoot or penetrate a surface [S8, S27, S49, unofficial]. The position is updated as $\mathbf{p}_{i+1} = \mathbf{p}_i + f(\mathbf{p}_i)\mathbf{d}$ [S14, S33, unofficial].
+The core algorithm, often called sphere tracing, proceeds as follows for each pixel:
+1.  **Ray Definition**: A ray $r(t) = \mathbf{o} + t\mathbf{d}$ is defined, where $\mathbf{o}$ is the camera origin and $\mathbf{d}$ is the normalized direction vector [G].
+2.  **Initialization**: The accumulated distance $t$ is initialized to 0 (or a near-plane value) [S1, unofficial][S3, abstract only, unofficial].
+3.  **Marching Loop**:
+    *   Evaluate the scene SDF at the current ray position $\mathbf{p} = \mathbf{o} + t\mathbf{d}$ to get the distance $d = f(\mathbf{p})$ [S1, S34, unofficial].
+    *   **Termination Check**: If $d < \epsilon$ (a small convergence threshold, e.g., $0.001$), the ray has hit the surface [S1, S39, unofficial]. If $t > t_{max}$ (maximum ray distance), the ray has escaped [S1, S34, unofficial].
+    *   **Step**: Advance the ray by the distance $d$: $t \leftarrow t + d$ [S1, S33, unofficial]. This step is "safe" because the SDF guarantees no geometry exists within distance $d$ of $\mathbf{p}$ [S50, unofficial].
+4.  **Shading**: Upon hit, the surface normal $\mathbf{n}$ is estimated, typically via finite differences of the SDF: $\mathbf{n} = \frac{\nabla f(\mathbf{p})}{\|\nabla f(\mathbf{p})\|}$ [S2055, S4619]. Lighting is then computed [S1, unofficial].
 
-The loop terminates when one of the following conditions is met:
-1.  **Surface Hit:** The distance value $f(\mathbf{p}_i)$ falls below a small convergence threshold $\epsilon$ (e.g., $0.001$), indicating the ray is sufficiently close to the surface [S1, S2, S14, S34, S39, unofficial].
-2.  **Escape:** The accumulated distance $t$ exceeds a maximum travel distance $t_{max}$, indicating the ray has exited the scene or bounding volume without hitting geometry [S1, S2, S34, unofficial].
-3.  **Max Steps:** A predefined maximum number of iterations is reached, preventing infinite loops in case of non-convergence [S1, S2, S39, unofficial].
-
-Scene composition is achieved by combining primitive SDFs using Boolean operations. The union of two shapes with SDFs $f_1$ and $f_2$ is $\min(f_1(\mathbf{p}), f_2(\mathbf{p}))$ [S1, S38, unofficial]. The intersection is $\max(f_1(\mathbf{p}), f_2(\mathbf{p}))$ [S38, unofficial]. Subtraction (difference) is $\max(-f_1(\mathbf{p}), f_2(\mathbf{p}))$ [S38, unofficial]. Smooth blending between shapes can be achieved using smooth minimum functions, such as Inigo Quilez's `smoothMin(a, b, k)`: $h = \text{clamp}(k - |a-b|, 0, k) / k$; $\text{result} = \min(a,b) - h \cdot h \cdot k / 6$ [S9, S24, unofficial].
-
-Transformations are applied to the query point before evaluation. Translation by vector $\mathbf{t}$ uses $f'(\mathbf{p}) = f(\mathbf{p} - \mathbf{t})$ [S35, unofficial]. Scaling by factor $s$ uses $f'(\mathbf{p}) = s \cdot f(\mathbf{p}/s)$ [S35, unofficial]. Domain repetition (tiling) is achieved by taking the modulo of the point coordinates: $f'(\mathbf{p}) = f(\mathbf{p} \pmod 1)$ [S35, unofficial].
-
-Surface normals $\mathbf{n}$ at the hit point $\mathbf{p}$ are estimated via the gradient of the SDF: $\mathbf{n} = \frac{\nabla f(\mathbf{p})}{\|\nabla f(\mathbf{p})\|}$ [S1, S10, unofficial]. Since analytical gradients are often unavailable or expensive, they are typically approximated using central finite differences with a small offset $\epsilon$ (e.g., $0.001$):
-$$ \nabla f(\mathbf{p}) \approx \begin{bmatrix} f(\mathbf{p} + \epsilon \hat{x}) - f(\mathbf{p} - \epsilon \hat{x}) \\ f(\mathbf{p} + \epsilon \hat{y}) - f(\mathbf{p} - \epsilon \hat{y}) \\ f(\mathbf{p} + \epsilon \hat{z}) - f(\mathbf{p} - \epsilon \hat{z}) \end{bmatrix} $$
-[S1, S35, S39, S45, S46, unofficial].
+Scene composition is achieved by combining primitive SDFs using Boolean operations: Union is $\min(d_1, d_2)$, Intersection is $\max(d_1, d_2)$, and Subtraction is $\max(-d_1, d_2)$ [S35, S38, unofficial]. Transformations (rotation, translation, scaling) are applied to the query point $\mathbf{p}$ before evaluation or to the SDF function itself [S3850].
 
 ## Subtopics
 
 ### [Zeno Implementation](1544-zeno-implementation.md)
-The Zeno Implementation is a sphere tracing method designed for rapid prototyping of implicit surfaces. It simplifies geometry definition by requiring only a signed distance bound function, while optionally replacing explicit surface normal functions with a numerical gradient approximation.
+A rapid prototyping variant that simplifies geometry definition by requiring only a distance bound function and optionally replacing explicit normals with numerical gradient approximation.
 
 ### [Differentiable Sphere Tracing](2316-differentiable-sphere-tracing.md)
-Differentiable Sphere Tracing (DIST) is a rendering algorithm for implicit Signed Distance Functions (SDFs) represented by neural networks, enabling efficient forward and backward passes for inverse graphics optimization. It solves the computational prohibitive nature of naive sphere tracing in deep learning frameworks by optimizing the rendering pipeline for GPU efficiency. It enables inverse graphics optimization over scene parameters like latent codes and camera poses.
+An optimization for neural SDFs that enables efficient forward and backward passes for inverse graphics, avoiding prohibitive computational graphs.
 
 ### [Raymarched SDF Volume Rendering](3663-raymarched-sdf-volume-rendering.md)
-Raymarched SDF Volume Rendering renders 3D geometry defined by analytic Signed Distance Functions (SDFs) by casting rays from the camera and stepping along them until they intersect the surface. Unlike traditional rasterization or mesh-based raycasting, this method constructs the image directly from equations, allowing for complex, continuous geometry without explicit polygonal meshes. It differs from its parent [Sphere Tracing with SDFs](6223-sphere-tracing-with-sdfs.md) by often incorporating specific shading, lighting, and fog calculations within the raymarching loop to produce the final pixel color, rather than just returning a binary hit/miss or surface normal.
+Extends the method to incorporate shading, lighting, and fog calculations within the loop to produce final pixel color, rather than just binary hit/miss.
 
 ### [Sphere Tracing with Composite SDF and Adaptive Sampling](3867-sphere-tracing-with-composite-sdf-and-adaptive-sampling.md)
-This method extends standard sphere tracing by rendering scenes composed of primitive shapes, character segments (letters), and arcs using a unified Signed Distance Function (SDF) framework. It differs from sibling methods by explicitly handling non-solid geometric primitives (lines and arcs) as distance fields and employing variance-based adaptive sampling to converge pixel luminance. It builds on [Sphere Tracing with SDFs](6223-sphere-tracing-with-sdfs.md) for the core ray-marching loop and integrates path tracing for global illumination.
+Handles non-solid primitives (lines, arcs) and uses variance-based adaptive sampling for global illumination convergence.
 
 ### [Uniform Sphere Tracing](4406-uniform-sphere-tracing.md)
-Uniform Sphere Tracing renders volumetric media by advancing a ray through a scene using fixed step sizes derived from a Signed Distance Function (SDF) or geometric bounds, accumulating optical depth to compute transmission and scattering. Unlike adaptive methods that vary step size based on local density gradients or error estimates, this approach uses a uniform or SDF-derived constant step rule, making it simple to implement but potentially inefficient for sparse or highly heterogeneous media. It builds on [Sphere Tracing with SDFs](6223-sphere-tracing-with-sdfs.md) by applying the SDF step rule specifically to volume integration rather than just surface intersection.
+Applies fixed SDF-derived step sizes to volume integration (Beer's Law) rather than surface intersection, suitable for uniform density media.
 
 ### [Menger Sponge Raymarching](4875-menger-sponge-raymarching.md)
-Menger Sponge Raymarching is a specific application of sphere tracing that renders the Menger sponge fractal by evaluating a recursive Signed Distance Function (SDF). It differs from general SDF rendering by employing a domain repetition technique (modulo arithmetic) combined with iterative scaling to generate the fractal's self-similar voids, rather than relying on a fixed set of Boolean unions.
+Uses domain repetition (modulo arithmetic) and iterative scaling to generate fractal voids, differing from fixed Boolean unions.
 
 ### [Sphere Tracing with Represent Hit](6684-sphere-tracing-with-represent-hit.md)
-Sphere Tracing with Represent Hit is a deferred rendering technique that extends standard sphere tracing by tracking two distinct hit points per ray: a primary **surface hit** and a secondary **represent hit** (a proxy for the surface at the pixel radius) to handle transparency and aliasing at object edges. It differs from standard sphere tracing by maintaining a parallel "represent" state that captures geometry potentially occluded or aliased by the primary surface, allowing for more robust visibility and occlusion calculations in deferred pipelines.
+A deferred technique tracking a secondary "represent hit" proxy to handle transparency and aliasing at object edges.
 
 ### [Synchronized-tracing](8552-synchronized-tracing.md)
-Synchronized-tracing is a tile-based rendering pipeline for implicit volumes (blobtrees) that synchronizes GPU threads within a subfrustum to enable coherent field evaluation. It sets itself apart from standard sphere tracing by decoupling evaluation complexity from the full tree size through sparse bottom-up traversal and thread synchronization via a low-resolution A-buffer, allowing interactive modeling without preprocessing.
+A tile-based pipeline for implicit volumes (blobtrees) that synchronizes GPU threads via a low-resolution A-buffer to enable coherent field evaluation.
 
 ### [Cone-Traced Supersampling](9466-cone-traced-supersampling.md)
-Cone-Traced Supersampling (CTSS) is an efficient spatial antialiasing technique for Signed Distance Function (SDF) rendering that performs supersampling along the traced ray near surfaces with partial visibility. It identifies object contours by evaluating cone intersections within a pixel's view frustum, avoiding the need for casting additional rays per pixel or offline prefiltering. Unlike conventional supersampling, it minimizes shading computations, and unlike post-processing filters, it avoids blurriness and ghosting.
+An antialiasing technique that identifies contours via cone intersections and performs supersampling along the ray to minimize shading computations.
 
 ### [Kernel-Reflection Sequences](10186-kernel-reflection-sequences.md)
-Kernel-Reflection Sequences (KRS) are a procedural modeling technique for generating complex, fractal-like geometries using Signed Distance Functions (SDFs) and reflection transformations. Unlike standard Iterated Function Systems (IFS) that require recursive traversal, KRS evaluates a global distance function via a fixed, non-recursive algorithm, enabling efficient real-time sphere tracing on parallel hardware. It sets itself apart from sibling methods by providing a closed-form iterative evaluation of reflected SDFs without recursion, allowing for continuous level-of-detail and automatic minification filtering.
+Generates fractal geometries using a fixed, non-recursive iterative evaluation of reflected SDFs, enabling continuous LOD.
 
 ### [Trace-based SDF Rendering](10785-trace-based-sdf-rendering.md)
-Trace-based SDF Rendering is a method for rendering sparse voxel models by tracing rays through a Signed Distance Field (SDF) to determine hit depth and voxel ID, then retrieving color from the hit voxel's spherical harmonic (SH) coefficients. It differs from standard raymarching by explicitly returning discrete voxel identifiers alongside depth, enabling direct attribute lookup rather than continuous volume integration.
+Renders sparse voxel models by returning discrete voxel IDs alongside depth, enabling direct attribute lookup from spherical harmonic coefficients.
 
 ### Cube-tracing
-An algorithm using the chessboard metric (or Manhattan metric) for distance computation, potentially resulting in more efficiently computed distances and ray intersection [S2]. Left as further research [S2].
+An algorithm using the chessboard metric (or Manhattan metric) for distance computation, potentially resulting in more efficiently computed distances and ray intersection. This variant is noted as further research [S2].
 
 ### Acceleration Structures for SDF Evaluation
-A set of optimization nodes embedded directly in hierarchical construction trees to reduce the computational cost of field function evaluation while preserving Lipschitz or conservative properties [S3, abstract only, unofficial]. Avoid external accompanying data structures such as octrees by embedding acceleration nodes directly in the construction tree [S3, abstract only, unofficial]. Use proxy and continuous level of detail nodes to reduce the overall evaluation cost [S3, abstract only, unofficial]. Apply a normal warping technique to enhance surface details with negligible computational overhead [S3, abstract only, unofficial]. Speeds up signed distance field evaluation by up to three orders of magnitude compared to standard evaluation [S3, abstract only, unofficial]. Applies to both ray-surface intersection computation in sphere tracing applications and polygonization algorithms [S3, abstract only, unofficial].
+A set of optimization nodes embedded directly in hierarchical construction trees to reduce the computational cost of field function evaluation while preserving Lipschitz or conservative properties. It avoids external data structures like octrees by using proxy and continuous level of detail nodes, and applies normal warping to enhance surface details. This speeds up evaluation by up to three orders of magnitude and applies to both ray-surface intersection and polygonization [S3, abstract only, unofficial].
 
 ### Harnack Tracing
-A method for visualizing surfaces encoded by harmonic functions (including angle-valued functions and those with singularities) by using conservative Harnack bounds on the growth of harmonic functions to determine step sizes, avoiding numerical issues common to generic root finding methods [S4, unofficial]. Use conservative Harnack bounds on the growth of harmonic functions to determine the step size for each iteration, ensuring the step does not cross a level set boundary [S4, unofficial]. Perform pointwise evaluation of the harmonic function at the current position to check for convergence to the target level set [S4, unofficial]. Unlike sphere tracing which uses distance bounds, Harnack tracing uses bounds on the growth of harmonic functions; it avoids numerical issues common to generic root finding methods and can visualize surfaces directly from point clouds or polygon soup without linear solves or mesh extraction [S4, unofficial].
+A method for visualizing surfaces encoded by harmonic functions (including angle-valued functions and those with singularities) by using conservative Harnack bounds on the growth of harmonic functions to determine step sizes. It avoids numerical issues common to generic root finding methods and can visualize surfaces directly from point clouds or polygon soup without linear solves or mesh extraction [S4, unofficial].
 
 ### Claybook SDF Construction
-A method for fully real-time deformable SDF-based worlds, using a global dense SDF with mip levels for acceleration [S5, unofficial]. Construct global SDF [S5, unofficial]. Build 5 mip levels, where each level encodes distance values twice as great as the previous [S5, unofficial]. Use sphere-tracing, sampling coarser mip levels to travel greater distances conservatively [S5, unofficial]. Ascend/descend mip levels based on sampled distance magnitude [S5, unofficial]. Modification: Apply pre-defined 'brushes' to the world SDF [S5, unofficial]. Only nearby affected areas are re-evaluated due to brush locality [S5, unofficial]. Global SDF volume of resolution 1024x1024x512 [S5, unofficial]. Five mip levels are constructed [S5, unofficial]. The volume is dense (empty and non-empty regions stored alike) [S5, unofficial]. Compact data structures (like SVOs) are incompatible with this modification method because surface-intersecting voxel counts are not static, requiring slow insertions and indirection tables [S5, unofficial]. Dense volumes allow direct spatial indexing [S5, unofficial]. Used in Claybook (Aaltonen, 2018) [S5, unofficial].
+A method for fully real-time deformable SDF-based worlds, using a global dense SDF with mip levels for acceleration. It constructs five mip levels where each encodes distance values twice as great as the previous, using coarser levels for conservative travel. Modification is performed via 'brushes' applied to the dense volume, which allows locality-based re-evaluation. Compact data structures are incompatible due to static voxel count requirements [S5, unofficial].
 
 ### Aeva Analytical SDF Rendering
-An approach that avoids discretization by sphere-tracing analytical SDFs at render time, using offline compilation of CSG trees into optimized shaders [S5, unofficial]. Offline: Analyze CSG tree [S5, unofficial]. Offline: Compile a large set of shaders, each correctly rendering a portion of the scene with minimum SDF evaluations per ray [S5, unofficial]. Not suited for real-time modification because continuously recompiling shaders at runtime is not feasible or effective for GPU hardware [S5, unofficial]. Presented by Aeva (2022) [S5, unofficial].
+An approach that avoids discretization by sphere-tracing analytical SDFs at render time, using offline compilation of CSG trees into optimized shaders. Each shader correctly renders a portion of the scene with minimum SDF evaluations. It is not suited for real-time modification due to the infeasibility of runtime shader recompilation [S5, unofficial].
 
 ## Background
-Sphere tracing was introduced by John Hart in 1996 [S1, unofficial]. It is used in real-time rendering, implicit surface modeling, and differentiable graphics [S1, unofficial][S2][S5, unofficial].
+The method was introduced by John Hart in 1996 as "Sphere Tracing: A Geometric Method for the Antialiased Ray Tracing of Implicit Surfaces" [S2]. It optimized the earlier ray-marching technique by utilizing the Lipschitz property of SDFs to guarantee safe step sizes, thereby accelerating convergence [S1, unofficial]. The technique has since been extended to differentiable rendering for neural networks [S1, unofficial], volume rendering [S1, unofficial][S2], and complex procedural geometries like fractals [S1, unofficial] and blobtrees [S1, unofficial][S2].
 
 ## Sources
 [S1] Sculpting procedural noise: real-time rendering of interstellar dust clouds and solar flares, https://openalex.org/W4293584834, fetched 2026-10-26 (unofficial)

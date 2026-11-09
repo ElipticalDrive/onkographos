@@ -1,0 +1,337 @@
+# VoxelTerrainJob Pipeline
+
+Also called: Chunk processing phases, Voxel chunk processing job system, VoxelPropJob execution
+
+## Overview
+The VoxelTerrainJob Pipeline is a multi-phase, resumable job system used in the Voxelman engine module to process voxel chunks. It handles mesh generation, collider creation, lighting baking, and physics assignment by executing a sequence of defined phases [S1, unofficial]. It distinguishes itself from simpler meshing routines by its explicit support for yielding back to the main thread between phases (via `should_return()` checks) to prevent frame drops, and its integration with Godot's `PhysicsServer` and material caching systems [S1, unofficial].
+
+## How it works
+The pipeline processes a single `VoxelChunk` through a series of phases. Each phase may be interrupted and resumed later using metadata stored on the chunk to track loop indices.
+
+### Inputs and Outputs
+*   **Input**: A `VoxelChunk` object containing voxel data, build flags (`BUILD_FLAG_CREATE_COLLIDER`, `BUILD_FLAG_USE_LIGHTING`), and a list of `VoxelMesher` and `VoxelLiquidMesher` instances.
+*   **Output**: Updated chunk meshes, physics colliders (RID references), and baked vertex colors if lighting is enabled.
+
+### Data Structures
+*   **VoxelChunk**: Contains build flags, mesh data resources, and metadata keys for resumption.
+    *   Metadata keys (strings):
+        *   `tms_m`: Terrain mesh setup index.
+        *   `tms_lm`: Liquid mesh setup index.
+        *   `bpc_aa`: Collider build index (terrain).
+        *   `bpc_laa`: Collider build index (liquid).
+        *   `bptm_ulm`: Unlit terrain mesh index.
+        *   `bptm_ullm`: Unlit liquid mesh index.
+        *   `bptm_mm`: Merged terrain mesh index.
+        *   `bptm_lmm`: Merged liquid mesh index.
+*   **VoxelMesher**: Base class for meshing algorithms. Inherits from `SurfaceTool`-like interface (sets colors, UVs, calls `add_vertex`).
+*   **VoxelMesherJobStep**: Defines specific processing steps (e.g., `TYPE_NORMAL`, `TYPE_SIMPLIFY_MESH`).
+
+### Numbered Steps
+The pipeline executes phases in the following order. If `should_return()` is true at any point, the current phase saves its state to chunk metadata and returns control to the caller. The next call resumes from the saved state.
+
+1.  **Phase: Library Setup**
+    *   Check `should_return()`.
+    *   Get the `VoxelLibrary` from the chunk.
+    *   If `lib->supports_caching()` is true and the chunk lacks a material cache key (`!_chunk->material_cache_key_has()`), generate the key via `lib->material_cache_get_key(_chunk)`.
+    *   If a cache exists, retrieve it.
+    *   While `!cache->get_initialized()`, yield by calling `OS::get_singleton()->delay_usec(100)` and checking `should_return()` again.
+    *   Iterate over mesh data resources and update their UV rectangles using `cache->additional_texture_get_uv_rect(tex)`.
+    *   Call `next_phase()`.
+
+2.  **Phase: Terrain Mesh Setup**
+    *   Resume index from meta `tms_m` (default 0).
+    *   Loop over `_meshers`:
+        *   Call `mesher->add_chunk(_chunk)`.
+        *   If `should_return()`, save index to `tms_m` and return.
+    *   Repeat for `_liquid_meshers` using meta `tms_lm`.
+    *   Remove metas `tms_m` and `tms_lm`.
+    *   Call `next_phase()`.
+
+3.  **Phase: Collider Build**
+    *   If `(chunk->get_build_flags() & VoxelChunkDefault::BUILD_FLAG_CREATE_COLLIDER) == 0`, skip to next phase.
+    *   Resume index from meta `bpc_aa` (default 0).
+    *   Loop over `_meshers`:
+        *   Call `mesher->build_collider()`.
+        *   Append result to `temp_arr_collider`.
+        *   If `should_return()`, save index to `bpc_aa` and return.
+    *   If `is_editor_hint()`:
+        *   Resume index from meta `bpc_laa` (default 0).
+        *   Loop over `_liquid_meshers`:
+            *   Append to `temp_arr_collider_liquid`.
+            *   If `should_return()`, save index to `bpc_laa` and return.
+    *   Remove metas `bpc_aa` and `bpc_laa`.
+    *   If both `temp_arr_collider` and `temp_arr_collider_liquid` are empty, call `reset_stages()` and skip to next phase.
+    *   Set build phase type to `BUILD_PHASE_TYPE_PHYSICS_PROCESS`.
+    *   Call `next_phase()`.
+
+4.  **Phase: Physics Process**
+    *   If `temp_arr_collider` is not empty:
+        *   If `!chunk->meshes_has(VoxelChunkDefault::MESH_INDEX_TERRAIN, VoxelChunkDefault::MESH_TYPE_INDEX_BODY)`, call `chunk->colliders_create(VoxelChunkDefault::MESH_INDEX_TERRAIN)`.
+        *   Call `PhysicsServer::get_singleton()->shape_set_data(chunk->mesh_rid_get(VoxelChunkDefault::MESH_INDEX_TERRAIN, VoxelChunkDefault::MESH_TYPE_INDEX_SHAPE), temp_arr_collider)`.
+        *   Clear `temp_arr_collider`.
+    *   If in editor and `temp_arr_collider_liquid` is not empty, repeat the above for liquid colliders.
+    *   Set build phase type to `BUILD_PHASE_TYPE_NORMAL`.
+    *   Call `next_phase()`.
+
+5.  **Phase: Terrain Mesh (Lighting & Merge)**
+    *   If `(chunk->get_build_flags() & VoxelChunkDefault::BUILD_FLAG_USE_LIGHTING) != 0`:
+        *   Resume index from meta `bptm_ulm`.
+        *   Loop over meshers:
+            *   Call `mesher->bake_colors(_chunk)`.
+            *   If `should_return()`, save index to `bptm_ulm` and return.
+        *   Resume index from meta `bptm_ullm` for liquid meshers.
+        *   Resume index from meta `bptm_mm`.
+        *   Merge meshers into a single mesher using `add_mesher`, assigning material index 0.
+        *   Repeat for liquids with meta `bptm_lmm`.
+    *   If both merged meshers have 0 vertices:
+        *   Clear metas.
+        *   Call `reset_stages()` and skip to next phase.
+    *   Call `next_phase()`.
+
+6.  **Phase: Job Steps (Prop/Advanced Processing)**
+    *   Validate prop mesher.
+    *   If vertex count is 0, reset stages and complete.
+    *   Count required meshes by iterating `_job_steps` and summing based on job type:
+        *   `NORMAL`, `NORMAL_LOD`, `DROP_UV2`, `MERGE_VERTS`, `BAKE_TEXTURE`: add 1.
+        *   `SIMPLIFY_MESH`: add `step->get_simplification_steps()`.
+    *   Allocate meshes via `chunk->meshes_create(...)` or clear existing ones.
+    *   Loop through `job_steps`:
+        *   Switch on `step->get_job_type()`:
+            *   `TYPE_NORMAL`: Standard meshing.
+            *   `TYPE_DROP_UV2`: Get mesh RID. Clear UV2 array (`temp_mesh_arr[VisualServer::ARRAY_TEX_UV2] = Variant()`). Add surface from arrays. Retrieve and set material.
+            *   `TYPE_SIMPLIFY_MESH`: Requires `MESH_UTILS_PRESENT` macro.
+            *   `TYPE_NORMAL_LOD`: Explicitly non-functional for `VoxelPropJob`; prints error.
+        *   Increment `_current_job_step`.
+        *   Check `should_return()` to yield.
+    *   Reset stages and complete.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def process_chunk(chunk, job):
+    """
+    Executes the VoxelTerrainJob pipeline for a single chunk.
+    Returns True if the job is complete, False if it yielded.
+    """
+    # State tracking for resumption
+    phase = job.get_current_phase()
+    
+    # Phase 1: Library Setup
+    if phase == 0:
+        if not job.should_return():
+            lib = chunk.get_library()
+            if lib.supports_caching() and not chunk.has_material_cache_key():
+                chunk.set_material_cache_key(lib.get_material_cache_key(chunk))
+            
+            cache = lib.get_material_cache(chunk)
+            while not cache.is_initialized():
+                if job.should_return():
+                    return False
+                OS.delay_usec(100)
+            
+            for tex in chunk.get_mesh_data_resources():
+                cache.additional_texture_get_uv_rect(tex)
+        
+        job.next_phase()
+
+    # Phase 2: Terrain Mesh Setup
+    elif phase == 1:
+        idx = chunk.get_meta('tms_m', 0)
+        for i in range(idx, len(job.meshers)):
+            mesher = job.meshers[i]
+            mesher.add_chunk(chunk)
+            if job.should_return():
+                chunk.set_meta('tms_m', i)
+                return False
+        
+        idx = chunk.get_meta('tms_lm', 0)
+        for i in range(idx, len(job.liquid_meshers)):
+            mesher = job.liquid_meshers[i]
+            mesher.add_chunk(chunk)
+            if job.should_return():
+                chunk.set_meta('tms_lm', i)
+                return False
+        
+        chunk.remove_meta('tms_m')
+        chunk.remove_meta('tms_lm')
+        job.next_phase()
+
+    # Phase 3: Collider Build
+    elif phase == 2:
+        if not (chunk.get_build_flags() & VoxelChunkDefault.BUILD_FLAG_CREATE_COLLIDER):
+            job.next_phase()
+            return True # Skip phase logic but continue pipeline
+        
+        temp_collider = []
+        temp_liquid_collider = []
+        
+        idx = chunk.get_meta('bpc_aa', 0)
+        for i in range(idx, len(job.meshers)):
+            mesher = job.meshers[i]
+            collider = mesher.build_collider()
+            temp_collider.append(collider)
+            if job.should_return():
+                chunk.set_meta('bpc_aa', i)
+                return False
+        
+        if OS.is_editor_hint():
+            idx = chunk.get_meta('bpc_laa', 0)
+            for i in range(idx, len(job.liquid_meshers)):
+                mesher = job.liquid_meshers[i]
+                collider = mesher.build_collider()
+                temp_liquid_collider.append(collider)
+                if job.should_return():
+                    chunk.set_meta('bpc_laa', i)
+                    return False
+        
+        chunk.remove_meta('bpc_aa')
+        chunk.remove_meta('bpc_laa')
+        
+        if not temp_collider and not temp_liquid_collider:
+            job.reset_stages()
+            job.next_phase()
+            return True
+        
+        job.set_build_phase_type(BUILD_PHASE_TYPE_PHYSICS_PROCESS)
+        job.next_phase()
+
+    # Phase 4: Physics Process
+    elif phase == 3:
+        if temp_collider:
+            if not chunk.meshes_has(VoxelChunkDefault.MESH_INDEX_TERRAIN, VoxelChunkDefault.MESH_TYPE_INDEX_BODY):
+                chunk.colliders_create(VoxelChunkDefault.MESH_INDEX_TERRAIN)
+            
+            rid = chunk.mesh_rid_get(VoxelChunkDefault.MESH_INDEX_TERRAIN, VoxelChunkDefault.MESH_TYPE_INDEX_SHAPE)
+            PhysicsServer.shape_set_data(rid, temp_collider)
+            temp_collider.clear()
+        
+        if OS.is_editor_hint() and temp_liquid_collider:
+            # Repeat physics setup for liquid colliders
+            pass # Implementation details omitted for brevity, follows terrain pattern
+        
+        job.set_build_phase_type(BUILD_PHASE_TYPE_NORMAL)
+        job.next_phase()
+
+    # Phase 5: Terrain Mesh (Lighting & Merge)
+    elif phase == 4:
+        if chunk.get_build_flags() & VoxelChunkDefault.BUILD_FLAG_USE_LIGHTING:
+            idx = chunk.get_meta('bptm_ulm', 0)
+            for i in range(idx, len(job.meshers)):
+                job.meshers[i].bake_colors(chunk)
+                if job.should_return():
+                    chunk.set_meta('bptm_ulm', i)
+                    return False
+            
+            idx = chunk.get_meta('bptm_ullm', 0)
+            for i in range(idx, len(job.liquid_meshers)):
+                job.liquid_meshers[i].bake_colors(chunk)
+                if job.should_return():
+                    chunk.set_meta('bptm_ullm', i)
+                    return False
+            
+            idx = chunk.get_meta('bptm_mm', 0)
+            merged_mesher = Mesher()
+            for i in range(idx, len(job.meshers)):
+                merged_mesher.add_mesher(job.meshers[i])
+            merged_mesher.set_material_index(0)
+            
+            # Repeat for liquids with bptm_lmm
+            pass
+        
+        # Check for empty meshes
+        if merged_terrain_mesh.get_vertex_count() == 0 and merged_liquid_mesh.get_vertex_count() == 0:
+            chunk.clear_metas()
+            job.reset_stages()
+            job.next_phase()
+            return True
+        
+        job.next_phase()
+
+    # Phase 6: Job Steps
+    elif phase == 5:
+        prop_mesher = job.get_prop_mesher()
+        if prop_mesher and prop_mesher.get_vertex_count() == 0:
+            job.reset_stages()
+            return True
+        
+        # Count steps
+        total_steps = 0
+        for step in job.job_steps:
+            jtype = step.get_job_type()
+            if jtype in [VoxelMesherJobStep.TYPE_NORMAL, VoxelMesherJobStep.TYPE_NORMAL_LOD, 
+                         VoxelMesherJobStep.TYPE_DROP_UV2, VoxelMesherJobStep.TYPE_MERGE_VERTS, 
+                         VoxelMesherJobStep.TYPE_BAKE_TEXTURE]:
+                total_steps += 1
+            elif jtype == VoxelMesherJobStep.TYPE_SIMPLIFY_MESH:
+                total_steps += step.get_simplification_steps()
+        
+        chunk.meshes_create(total_steps)
+        
+        current_step_idx = 0
+        for step in job.job_steps:
+            jtype = step.get_job_type()
+            
+            if jtype == VoxelMesherJobStep.TYPE_NORMAL:
+                # Standard meshing logic
+                pass
+            elif jtype == VoxelMesherJobStep.TYPE_DROP_UV2:
+                mesh_rid = step.get_mesh_rid()
+                temp_mesh_arr = step.get_arrays()
+                temp_mesh_arr[VisualServer.ARRAY_TEX_UV2] = Variant()
+                step.add_surface_from_arrays(temp_mesh_arr)
+                step.set_material(step.get_material())
+            elif jtype == VoxelMesherJobStep.TYPE_SIMPLIFY_MESH:
+                # Requires MESH_UTILS_PRESENT
+                pass
+            elif jtype == VoxelMesherJobStep.TYPE_NORMAL_LOD:
+                # Non-functional, prints error
+                print("TYPE_NORMAL_LOD not supported for VoxelPropJob")
+            
+            current_step_idx += 1
+            if job.should_return():
+                job.set_current_step(current_step_idx)
+                return False
+        
+        job.reset_stages()
+        return True
+
+    return True
+```
+
+### Parameters
+*   `BUILD_FLAG_CREATE_COLLIDER`: Bit flag on `VoxelChunkDefault`. Controls whether collider generation is enabled.
+*   `BUILD_FLAG_USE_LIGHTING`: Bit flag on `VoxelChunkDefault`. Controls whether vertex color baking is performed.
+*   `MESH_UTILS_PRESENT`: Preprocessor macro. Enables `TYPE_SIMPLIFY_MESH` job step support and includes `fast_quadratic_mesh_simplifier.h`.
+
+### Edge Cases and Pitfalls
+*   **Threaded Cache Initialization**: If the material cache is being merged on another thread, the job must wait. This is handled by polling `cache->get_initialized()` with a 100µs delay loop [S1, unofficial].
+*   **Empty Mesh Generation**: If both terrain and liquid merged meshers have 0 vertices, the pipeline skips mesh allocation and physics setup by clearing metas, resetting stages, and advancing phases [S1, unofficial].
+*   **Job Resumption**: Long-running phases use meta keys to store loop indices. On return, the index is saved; on restart, it's loaded. Metas are removed after completion [S1, unofficial].
+*   **Non-functional LOD Step**: `step_type_normal_lod` is explicitly non-functional for `VoxelPropJob` and prints an error instead of processing [S1, unofficial].
+*   **Physics API Differences**: Godot 3 uses `body_create(PhysicsServer::BODY_MODE_STATIC)`, while Godot 4 requires `body_create()` followed by `body_set_mode(body, PhysicsServer::BODY_MODE_STATIC)` [S1, unofficial].
+
+## Subtopics
+
+### [VoxelMesher](52-voxel-mesher.md)
+Base class for meshing algorithms.
+
+### [VoxelChunk](53-voxel-chunk.md)
+Storage for terrain data, prop data, and mesh generation jobs.
+
+### [VoxelLibrary](54-voxel-library.md)
+Manages material caching and texture UV rectangles.
+
+## Operating characteristics
+*   **Time Complexity**: Linear with respect to the number of meshers and job steps. Resumable nature allows O(1) per frame execution for long phases.
+*   **Memory Complexity**: O(N) where N is the number of vertices/faces in the chunk. Temporary arrays (`temp_arr_collider`) scale with chunk size.
+*   **Strengths**: Prevents frame drops by yielding between phases; integrates tightly with Godot's physics and rendering servers; supports complex post-processing steps (simplification, UV2 baking).
+*   **Limitations**: Complex state management via metadata; Godot version-specific API calls; `TYPE_NORMAL_LOD` is non-functional.
+*   **When to use**: When building voxel terrain in a real-time engine (Godot) where frame rate stability is critical and physics integration is required.
+*   **When not to use**: For offline mesh generation where yieldability is unnecessary, or for non-Godot engines.
+
+## Background
+The VoxelTerrainJob Pipeline is part of the Voxelman engine module for Godot, developed by Péter Magyar (Relintai). It was designed to provide editor integration, gameplay-related features, and extendability from GDScript without sacrificing speed [S1, unofficial]. It relies on the `thread_pool` module for multi-threaded chunk generation [S1, unofficial].
+
+## Sources
+[S1] Relintai/voxelman, https://github.com/Relintai/voxelman, fetched 2026-10-26 (unofficial)

@@ -1,119 +1,242 @@
 # Perspective Shear-Warp
 
-Also called: Perspective S-W, Perspective Projection Shear-Warp Rendering, Shear-warp factorization for perspective projection
+Also called: Perspective Projection Shear-Warp Rendering, Perspective S-W, Shear-Based Slice Rendering (SBS), Shear-warp factorization for perspective projection
 
 ## Overview
-Perspective Shear-Warp is a volume rendering algorithm that extends the parallel Shear-warp method to handle perspective projections by introducing a distance-dependent scale factor during the shear step [S2, S3]. It solves the problem of diverging viewing rays in perspective projection by ensuring that sampling rates remain uniform within each volume slice, thereby avoiding the need for complex multirate filters or per-voxel filter footprint recomputation [S2][S1, unofficial]. Unlike parallel Shear-warp, it is more computationally expensive due to the additional resampling required for scaling, but it remains significantly more efficient than general ray-casting for large datasets by leveraging the associative nature of the compositing operator [S2, S3].
+Perspective Shear-Warp is an object-order volume rendering algorithm that extends the parallel Shear-warp method to handle perspective projections by introducing a distance-dependent scaling factor during the shear transformation [S2, S4]. It solves the problem of diverging viewing rays in perspective projection, which prevents the uniform sampling rates required for efficient fixed-weight interpolation [S1, unofficial][S2]. Unlike parallel Shear-warp, which uses only translation, this method scales slices to maintain uniform sampling within each slice, allowing the use of simple box reconstruction and low-pass filters [S2]. It is more computationally expensive than parallel Shear-warp due to the additional resampling and complex control flow, but remains significantly faster than general ray-casting for large datasets [S2, S4].
 
 ## How it works
-The method builds on [Shear-warp](24-shear-warp.md) by modifying the shear transformation to account for perspective divergence. The core difference from parallel projection is that each volume slice is transformed by both translation and a uniform scale [S2].
+The method decomposes the viewing transformation into a permutation, a shear (including scaling), and a 2D warp, building on the principles of [Shear-warp](24-shear-warp.md).
 
 ### Inputs and Outputs
-- **Input**: 3D volume data $V$, transfer function $T$, camera parameters (view direction, position, field of view), and image resolution $(W, H)$.
-- **Output**: 2D color and opacity image $(C, \alpha)$ of size $W \times H$.
+- **Input:** 3D volume data $V$, view direction vector $v_o$, camera position, image resolution $(W, H)$.
+- **Output:** 2D color and opacity image buffer.
 
 ### Data Structures
-- **Volume Data**: Typically stored in a 3D array or optimized structure (e.g., RLE-encoded) [S2, S3].
-- **Intermediate Image Buffer**: A 2D buffer storing accumulated color and opacity for the sheared space. Size depends on the chosen resolution for the intermediate step [S3].
-- **Resampling Weights**: Precomputed or computed on-the-fly for the box reconstruction and low-pass filters [S2].
+The implementation typically utilizes the following textures and buffers [S3, unofficial]:
+1.  **Volume Texture:** `GL_TEXTURE_3D`, internal format `GL_R8`, dimensions $(D_z, D_y, D_x)$, data type `GL_UNSIGNED_BYTE`, format `GL_RED`.
+2.  **Index Texture:** `GL_TEXTURE_2D_ARRAY`, internal format `GL_RG32I`, dimensions $(\max(1, D_y), \max(1, D_z), N_{slices})$, data type `GL_INT`, format `GL_RG_INTEGER`. This stores slice offsets for efficient access.
+3.  **Intermediate Framebuffer:** A texture attachment (e.g., `GL_RGBA32F`) used to store the sheared and composited slices before the final warp.
 
 ### Steps
-1.  **Factorization**: Compute the viewing transformation factorization $M_{view} = M_{warp2D} \cdot S \cdot P$ [S2, S12]. The permutation $P$ aligns the principal viewing axis with a coordinate axis (typically Z) [S2, S12].
-2.  **Shear with Scaling**: Transform each volume slice into sheared object space. Unlike parallel projection, this step includes a distance-dependent uniform scale factor [S2, S3].
-    -   The scale factor ensures that the slice closest to the viewer is scaled by a factor of one, and no slice is enlarged [S2].
-    -   This scaling compensates for the diverging rays: farther slices are smaller, effectively causing each ray to sample a larger portion of the volume as it gets farther away (adaptive area sampling) [S1, unofficial].
-    -   The shear coefficients $s_x, s_y$ are derived from the view direction, but the scaling factor $k$ is distance-dependent [S2, S3].
-3.  **Resampling**: Resample the scaled and sheared volume slices into the intermediate image buffer.
-    -   Within each slice, the sampling rate is uniform [S2].
-    -   Use a box reconstruction filter and a box low-pass filter [S2].
-    -   For unity scaling (closest slice), this reduces to bilinear interpolation [S2].
-    -   Because of the scaling, more than two voxel scanlines may be traversed simultaneously to produce a single intermediate image scanline, and voxel scanlines may not be traversed at the same rate as image scanlines [S2].
-4.  **Compositing**: Composite the resampled slices into the intermediate image using front-to-back compositing with the Porter-Duff "over" operator [S2, S12].
-    -   Early ray termination can be applied if accumulated opacity exceeds a threshold [S2, S11].
-5.  **Warp**: Apply the 2D warp transformation $M_{warp2D}$ to the intermediate image to produce the final perspective image [S2, S12].
+
+1.  **Determine Principal Axis:**
+    Compare the absolute values of the view direction components $v_o = (v_x, v_y, v_z)$.
+    - If $|v_x|$ is largest, principal axis is $x$.
+    - Else if $|v_y|$ is largest, principal axis is $y$.
+    - Else, principal axis is $z$ [S3, unofficial].
+
+2.  **Calculate Shear Matrix ($S$):**
+    The shear matrix includes translation and a distance-dependent scale factor. The scale factor ensures the slice closest to the viewer is scaled by 1.0, and no slice is enlarged [S2]. The shear components align the viewing rays with the principal axis [S3, unofficial].
+    
+    For principal axis $x$:
+    $$ S_{1,0} = -\frac{v_y}{v_x}, \quad S_{2,0} = -\frac{v_z}{v_x} $$
+    
+    For principal axis $y$:
+    $$ S_{0,1} = -\frac{v_x}{v_y}, \quad S_{2,1} = -\frac{v_z}{v_y} $$
+    
+    For principal axis $z$:
+    $$ S_{0,2} = -\frac{v_x}{v_z}, \quad S_{1,2} = -\frac{v_y}{v_z} $$
+    
+    The diagonal elements represent the scaling. For perspective, the scaling is uniform per slice but varies with depth. The exact diagonal values depend on the specific factorization chosen to ensure the nearest slice has scale 1.0 [S2].
+
+3.  **Calculate Warp Matrix ($M_{warp2D}$):**
+    This 2D matrix corrects the perspective distortion in the intermediate image space [S3, unofficial].
+    
+    For principal axis $x$:
+    $$ M_{warp2D}[1][1] = \frac{1}{1 + v_y^2}, \quad M_{warp2D}[2][2] = \frac{1}{1 + v_z^2} $$
+    
+    For principal axis $y$:
+    $$ M_{warp2D}[0][0] = \frac{1}{1 + v_x^2}, \quad M_{warp2D}[2][2] = \frac{1}{1 + v_z^2} $$
+    
+    For principal axis $z$:
+    $$ M_{warp2D}[0][0] = \frac{1}{1 + v_x^2}, \quad M_{warp2D}[1][1] = \frac{1}{1 + v_y^2} $$
+    
+    (Note: These specific warp formulas appear to be simplified or specific to a particular implementation detail found in [S3, unofficial]; standard derivation usually involves the inverse of the shear's projection component. The source [S3, unofficial] provides these exact values.)
+
+4.  **Resample and Composite:**
+    - Iterate through volume slices perpendicular to the principal axis.
+    - Transform each slice to sheared object space using translation and uniform scale [S2].
+    - Resample the sheared slice into the intermediate image buffer. Because of the perspective scaling, more than two voxel scanlines may contribute to a single intermediate image scanline, and they may not be traversed at the same rate [S2].
+    - Use a box reconstruction filter and a box low-pass filter. For unity scaling, this reduces to bilinear interpolation [S2].
+    - Composite the slice into the intermediate buffer using front-to-back alpha blending:
+      $$ C_{new} = C_{slice} \cdot \alpha_{slice} + C_{accum} \cdot (1 - \alpha_{slice}) $$
+      $$ \alpha_{new} = \alpha_{slice} + \alpha_{accum} \cdot (1 - \alpha_{slice}) $$
+    - Apply early ray termination if $\alpha_{accum}$ exceeds a threshold (e.g., 0.95) [S2].
+
+5.  **Warp to Final Image:**
+    - Render a fullscreen quad using the intermediate texture.
+    - Apply the 2D warp matrix $M_{warp2D}$ as a uniform in the fragment shader.
+    - The result is the final perspective image [S3, unofficial].
 
 ### Pseudocode
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def perspective_shear_warp(volume, transfer_function, camera, width, height):
-    # 1. Factorization
-    # P: Permutation matrix aligning view direction to Z-axis
-    # S: Shear matrix with distance-dependent scaling
-    # M_warp2D: 2D warp matrix
-    P, S, M_warp2D = factorize_view_matrix(camera)
+def perspective_shear_warp(volume_data, view_direction, image_width, image_height):
+    """
+    Renders a volume using the Perspective Shear-Warp algorithm.
     
-    # Initialize intermediate image buffer
-    # Resolution can be chosen to trade off quality and speed [S3]
-    intermediate_color = zeros((width, height, 3))
-    intermediate_alpha = zeros((width, height))
+    Args:
+        volume_data: 3D numpy array (D_z, D_y, D_x)
+        view_direction: glm.vec3 (normalized)
+        image_width: int
+        image_height: int
+        
+    Returns:
+        final_image: 2D numpy array (image_height, image_width, 4)
+    """
+    # 1. Determine Principal Axis
+    vx, vy, vz = view_direction.x, view_direction.y, view_direction.z
+    abs_vx, abs_vy, abs_vz = abs(vx), abs(vy), abs(vz)
     
-    # 2. Shear and Resample Slices
-    # Iterate through volume slices along the principal axis (Z)
-    for z in range(volume.depth):
-        slice_data = volume[z]
+    if abs_vx >= abs_vy and abs_vx >= abs_vz:
+        principal_axis = 'x'
+    elif abs_vy >= abs_vx and abs_vy >= abs_vz:
+        principal_axis = 'y'
+    else:
+        principal_axis = 'z'
         
-        # Calculate scale factor for this slice based on distance from viewer
-        # Ensure closest slice has scale factor 1.0 [S2]
-        scale_factor = compute_distance_dependent_scale(z, camera)
-        
-        # Apply shear and scaling to map slice to intermediate image coordinates
-        # This involves translation and uniform scaling [S2]
-        sheared_slice = apply_shear_and_scale(slice_data, S, scale_factor)
-        
-        # Resample sheared slice into intermediate image
-        # Use box reconstruction and box low-pass filters [S2]
-        # Within slice, sampling is uniform [S2]
-        resampled_color, resampled_alpha = resample_slice(sheared_slice, transfer_function)
-        
-        # 3. Composite into Intermediate Image
-        # Front-to-back compositing [S2, S12]
-        for y in range(height):
-            for x in range(width):
-                if intermediate_alpha[y, x] < 0.95: # Early termination threshold [S2]
-                    c_new = resampled_color[y, x] * resampled_alpha[y, x]
-                    a_new = resampled_alpha[y, x]
-                    
-                    c_accum = intermediate_color[y, x]
-                    a_accum = intermediate_alpha[y, x]
-                    
-                    # Porter-Duff Over operator [S2, S12]
-                    intermediate_color[y, x] = c_new + c_accum * (1 - a_new)
-                    intermediate_alpha[y, x] = a_new + a_accum * (1 - a_new)
+    # 2. Calculate Shear Matrix Components
+    # Note: The diagonal scaling factors are implementation-dependent to ensure 
+    # the nearest slice has scale 1.0. We assume a generic scale function S(z).
+    shear_matrix = calculate_shear_matrix(principal_axis, view_direction)
     
-    # 4. Warp to Final Image
-    final_image = warp_2d(intermediate_color, intermediate_alpha, M_warp2D)
+    # 3. Calculate Warp Matrix
+    warp_matrix = calculate_warp_matrix(principal_axis, view_direction)
+    
+    # 4. Initialize Intermediate Buffer
+    # Using float32 for accumulation
+    intermediate_buffer = np.zeros((image_height, image_width, 4), dtype=np.float32)
+    
+    # 5. Process Slices
+    # Iterate slices along the principal axis. 
+    # The order must be front-to-back relative to the viewer.
+    slice_indices = get_slice_indices(principal_axis, volume_data.shape, view_direction)
+    
+    for z_idx in slice_indices:
+        # Extract slice
+        if principal_axis == 'x':
+            slice_data = volume_data[z_idx, :, :]
+        elif principal_axis == 'y':
+            slice_data = volume_data[:, z_idx, :]
+        else:
+            slice_data = volume_data[:, :, z_idx]
+            
+        # Apply Shear and Scale
+        # The slice is transformed to sheared object space.
+        # In a GPU implementation, this is done via vertex transformation.
+        # Here we simulate the resampling step.
+        
+        # Resample slice into intermediate buffer
+        # Due to perspective, the mapping from slice coordinates to image coordinates
+        # involves scaling. We use box filters.
+        resample_slice_to_buffer(slice_data, shear_matrix, warp_matrix, 
+                                 intermediate_buffer, z_idx, principal_axis)
+        
+        # Early Ray Termination check could be applied here if alpha is fully opaque
+        if np.max(intermediate_buffer[:,:,3]) > 0.95:
+            break
+            
+    # 6. Warp to Final Image
+    final_image = apply_warp(intermediate_buffer, warp_matrix, image_width, image_height)
     
     return final_image
+
+def calculate_shear_matrix(principal_axis, view_direction):
+    """
+    Calculates the 4x4 shear matrix based on the principal axis.
+    """
+    shear = np.eye(4)
+    vx, vy, vz = view_direction.x, view_direction.y, view_direction.z
+    
+    if principal_axis == 'x':
+        shear[1, 0] = -vy / vx
+        shear[2, 0] = -vz / vx
+    elif principal_axis == 'y':
+        shear[0, 1] = -vx / vy
+        shear[2, 1] = -vz / vy
+    else: # z
+        shear[0, 2] = -vx / vz
+        shear[1, 2] = -vy / vz
+        
+    return shear
+
+def calculate_warp_matrix(principal_axis, view_direction):
+    """
+    Calculates the 2D warp matrix for perspective correction.
+    Returns a 3x3 matrix for homogeneous 2D coordinates.
+    """
+    vx, vy, vz = view_direction.x, view_direction.y, view_direction.z
+    warp = np.eye(3)
+    
+    if principal_axis == 'x':
+        warp[1, 1] = 1.0 / (1.0 + vy * vy)
+        warp[2, 2] = 1.0 / (1.0 + vz * vz)
+    elif principal_axis == 'y':
+        warp[0, 0] = 1.0 / (1.0 + vx * vx)
+        warp[2, 2] = 1.0 / (1.0 + vz * vz)
+    else: # z
+        warp[0, 0] = 1.0 / (1.0 + vx * vx)
+        warp[1, 1] = 1.0 / (1.0 + vy * vy)
+        
+    return warp
+
+def resample_slice_to_buffer(slice_data, shear_matrix, warp_matrix, 
+                             intermediate_buffer, z_idx, principal_axis):
+    """
+    Simulates the resampling of a sheared slice into the intermediate buffer.
+    In practice, this is a GPU shader operation.
+    """
+    # Placeholder for the actual resampling logic which involves
+    # traversing voxel scanlines and mapping to image scanlines
+    # with appropriate scaling and filtering.
+    pass
+
+def apply_warp(intermediate_buffer, warp_matrix, width, height):
+    """
+    Applies the 2D warp to the intermediate buffer to produce the final image.
+    """
+    # Render fullscreen quad with warp matrix
+    # This step corrects the distortion and applies perspective
+    pass
 ```
 
-### Parameters and Edge Cases
--   **Scale Factor**: Must be chosen such that the closest slice is scaled by 1.0 to prevent enlargement [S2].
--   **Filter Choice**: Box reconstruction and box low-pass filters are appropriate for decimation and unity scaling [S2].
--   **Performance**: The many-to-one mapping from voxels to pixels complicates control flow and increases computation time compared to parallel projection [S2].
--   **Resolution**: The resolution of the intermediate image can be adjusted to provide a coarser, faster rendering during interaction [S3].
+### Parameters
+- **Density:** Float parameter passed to the shader for opacity transfer function [S3, unofficial].
+- **Brightness:** Float parameter passed to the shader [S3, unofficial].
+- **Contrast:** Float parameter passed to the shader [S3, unofficial].
+- **Edge Weight:** Float parameter passed to the shader [S3, unofficial].
+
+### Edge Cases and Pitfalls
+- **Diverging Rays:** Perspective rays diverge, making uniform sampling difficult. The scaling step mitigates this but increases computational cost [S1, unofficial].
+- **Texture Size Limits:** If volume dimensions exceed OpenGL maximum texture size, the renderer may fall back to a smaller test volume (e.g., 64x64x64) [S3, unofficial].
+- **Performance:** The scaling operation produces an intermediate image, which is slower than parallel Shear-warp due to additional resampling [S4].
+- **Complex Control Flow:** The many-to-one mapping from voxels to pixels complicates the control flow compared to parallel projection [S2].
 
 ## Subtopics
 
 ### [Stereo Rendering via Similarity Utilization](6077-stereo-rendering-via-similarity-utilization.md)
-Stereo Rendering via Similarity Utilization accelerates the generation of stereo volume images by exploiting the geometric similarity between left and right eye views, reducing redundant computation. Unlike standard stereo rendering which treats each eye independently, this method leverages the shared structure of the volume data to optimize the compositing step, particularly within the context of the Perspective Shear-Warp algorithm.
+Stereo Rendering via Similarity Utilization accelerates the generation of stereo volume images by exploiting the geometric similarity between left and right eye views, reducing redundant computation. Unlike standard stereo rendering which treats each eye independently, this method leverages the shared structure of the volume data to optimize the compositing step, particularly within the context of the Perspective Shear-Warp algorithm. See [Stereo Rendering via Similarity Utilization](6077-stereo-rendering-via-similarity-utilization.md).
 
 ### Distributed-Data Volume Rendering Architecture
-A system architecture that distributes sub-volumes of 3D images to leaf nodes of a cluster for independent rendering, then composites the resulting sub-images at junction nodes to form the final view [S3]. Previous parallel S-W implementations (VolPack, volsh, Virvo) require all nodes to know all data, limiting them to volumes fitting in a single node's memory. This distributed implementation allows rendering of datasets exceeding single-node memory (e.g., >1GB) [S3]. Performance benchmark: A 512x512x512 data volume (worst-case) is rendered in less than four seconds using 16 rendering nodes and 15 compositing nodes [S3]. Cluster topology: Leaf nodes (rendering nodes) hold subsets of the data volume. Junction nodes (compositing nodes) receive rendered images from child nodes, composite them using the associative over operator, and pass the result to parent nodes or display [S3].
+A system architecture that distributes sub-volumes of 3D images to leaf nodes of a cluster for independent rendering, then composites the resulting sub-images at junction nodes to form the final view [S4]. Previous parallel S-W implementations (VolPack, volsh, Virvo) require all nodes to know all data, limiting them to volumes fitting in a single node's memory. This distributed implementation allows rendering of datasets exceeding single-node memory (e.g., >1GB) [S4]. Performance benchmark: A 512x512x512 data volume is rendered in less than four seconds using 16 rendering nodes and 15 compositing nodes [S4]. Cluster topology: Leaf nodes (rendering nodes) hold subsets of the data volume. Junction nodes (compositing nodes) receive rendered images from child nodes, composite them using the associative over operator, and pass the result to parent nodes or display [S4].
 
 ## Operating characteristics
--   **Time Complexity**: More expensive than parallel projection due to extra time for resampling weight computation and complex control flow from many-to-one voxel-to-pixel mapping [S2]. The scaling operation produces an intermediate image, which is slower than parallel shear-warp due to additional resampling [S3].
--   **Memory Complexity**: Requires storage for the volume data and the intermediate image buffer. Distributed implementations reduce per-node memory requirements by distributing sub-volumes [S3].
--   **Measured Performance**: A 512x512x512 data volume can be rendered in less than four seconds using 16 rendering nodes and 15 compositing nodes in a distributed setup [S3].
--   **Strengths**: Efficient for large datasets; handles perspective projection without per-voxel filter recomputation; supports distributed rendering; allows quality/performance trade-off via intermediate image resolution [S2, S3].
--   **Limitations**: Slower than parallel shear-warp; complex control flow; requires associative compositing operator [S2, S3].
--   **When to Use**: When perspective projection is required for large volumes that do not fit in a single node's memory, or when high frame rates are needed during interaction by adjusting intermediate image resolution [S3].
--   **When Not to Use**: When parallel projection is sufficient and performance is critical; when non-associative operators are required [S3].
+- **Time Complexity:** More expensive than parallel projection due to extra time for resampling weight computation and complex control flow from many-to-one voxel-to-pixel mapping [S2]. The scaling operation adds overhead compared to parallel Shear-warp [S4].
+- **Memory Complexity:** Requires storage for the volume texture, index texture, and intermediate framebuffer. Distributed implementations reduce per-node memory requirements by splitting the volume [S4].
+- **Measured Performance:** A 512x512x512 data volume can be rendered in less than four seconds using 16 rendering nodes and 15 compositing nodes on a Beowulf-class cluster [S4].
+- **Strengths:** Efficient for large datasets, especially when distributed. Handles perspective correctly. Allows quality adjustment by changing the resolution of the intermediate image [S4].
+- **Limitations:** Slower than parallel Shear-warp. Complex control flow. Requires careful handling of perspective scaling [S2, S4].
+- **When to use:** When perspective projection is required and performance is critical for large volumes, especially in distributed environments.
+- **When not to use:** When parallel projection is sufficient, or when real-time performance on a single node with very large volumes is needed without distributed infrastructure.
 
 ## Background
-The shear-warp factorization was first applied to volume rendering by Lacroute & Levoy (1994) [S3]. The perspective extension was described by Lacroute & Levoy (1995) [S2]. The distributed-data implementation for large astronomical cubes was described by Beeson et al. (2003) [S3]. The method is used in the Virvo system (Schulze & Lang 2002) and extended for distributed-data implementation on Beowulf-class clusters [S3].
+The Shear-warp factorization was first applied to volume rendering by Lacroute & Levoy (1994) [S4]. The Perspective Shear-Warp extension was developed to handle perspective projections by adding a distance-dependent scaling factor [S4]. It was used in the Virvo system (Schulze & Lang 2002) and extended for distributed-data implementation on Beowulf-class clusters for large astronomical cubes [S4]. The method is a halfway point between pixel-order and voxel-order rendering, suitable for distributed data rendering with associative operators [S4].
 
 ## Sources
 [S1] PDF Shear-Warp Volume Rendering - Computer Science, https://www.cs.unh.edu/~cs880/lectureNotes/ShearWarp.color.pdf, fetched 2026-10-27 (unofficial)
 [S2] PDF Fast Volume Rendering Using a Shear-warp Factorization of The Viewing ..., http://i.stanford.edu/pub/cstr/reports/csl/tr/95/678/CSL-TR-95-678.pdf, fetched 2026-11-04
-[S3] "A Distributed-Data Implementation of the Perspective Shear-Warp Volume Rendering Algorithm for Visualisation of Large Astronomical Cubes", http://web.eng.ucsd.edu/~jschulze/projects/Beeson2003.pdf, fetched 2026-10-29
+[S3] GitHub - priscilla100/medical_volume_renderer, https://github.com/priscilla100/medical_volume_renderer/, fetched 2026-10-29 (unofficial)
+[S4] "A Distributed-Data Implementation of the Perspective Shear-Warp Volume Rendering Algorithm for Visualisation of Large Astronomical Cubes", http://web.eng.ucsd.edu/~jschulze/projects/Beeson2003.pdf, fetched 2026-10-29

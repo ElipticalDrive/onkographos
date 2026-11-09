@@ -1,250 +1,127 @@
 # Density Marching
 
-Also called: Simple Ray Marching
+Also called: Front-to-Back Ray Marching, Simple Ray Marching, Standard Ray Casting
 
 ## Overview
-Density Marching is a direct volume ray casting technique that samples a 3D texture along a ray cast from the camera through a volume bounding box, accumulating color and opacity using front-to-back blending [S1, unofficial]. It is distinguished from its siblings by its reliance on a fixed number of steps (`STEPS`) rather than adaptive or distance-based stepping, and its specific implementation of procedural noise (Worley and Perlin) combined with boundary fading for cloud-like volumes [S1, S2, unofficial]. Unlike [Ray Evaluation Stepping DVR](3461-ray-evaluation-stepping-dvr.md) which may use variable step sizes, Density Marching uses a uniform discretization of the ray path [S1, unofficial].
+Density Marching is a direct volume rendering technique that samples a 3D density field along rays cast from the camera, accumulating color and opacity using front-to-back blending to produce the final pixel color [S1, S2, unofficial]. It differs from adaptive or hierarchical traversal methods by using a fixed number of sampling steps per ray, making it simple to implement but potentially inefficient for sparse volumes [S1, S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-The method operates in a fragment shader. Inputs include a vertex attribute `vUVW` (vec3), uniform data containing `viewProj` (mat4) and `globalCameraPos` (vec4), a 3D texture sampler `volumeTex` (binding 1), and push constants containing `model` (mat4) and `localCameraPos` (vec4) [S1, unofficial]. The output is `outColor` (vec4) [S1, unofficial].
+The method takes a 3D volume texture (density field), camera parameters (position, direction), and a bounding box defining the volume extent [S1, S2, unofficial]. It outputs a 2D image buffer where each pixel contains the accumulated color and transmittance [S1, S2, unofficial].
 
 **Data Structures:**
-*   `rayOrigin`: vec3, camera position.
-*   `rayDirection`: vec3, normalized direction vector.
-*   `accum`: vec4, accumulates RGB color and Alpha opacity.
-*   `currentPos`: vec3, current position along the ray.
-*   `deltaStep`: vec3, step vector.
-*   `densityTotal`: float, integrated density for transmittance.
-*   `brightness`: float, accumulated scattered light.
-
-**Numbered Steps:**
-
-1.  **Ray Direction Calculation:** Compute the ray direction by normalizing the difference between the interpolated vertex attribute and the local camera position:
-    $$ \vec{rayDir} = \text{normalize}(\vec{vUVW} - \vec{localCameraPos}) $$
-    [S1, unofficial]
-
-2.  **Ray-Box Intersection:** Intersect the ray with the volume bounding box (defined as `boxMin = vec3(0.0)` and `boxMax = vec3(1.0)` in the source, though other sources use explicit min/max bounds [S2, unofficial]) using the slab method to obtain entry and exit distances `tNear` and `tFar` [S1, unofficial].
-    [S1, unofficial]
-
-3.  **Ray Segment Validation:** Calculate `tStart = max(tNear, 0.0)` and `tEnd = max(tFar, 0.0)`. Compute `totalDist = tEnd - tStart`. If `totalDist <= 0.0`, discard the fragment [S1, unofficial].
-
-4.  **Ray Initialization:** Calculate the starting ray position at the box entry point:
-    $$ \vec{rayPosition} = \vec{rayOrigin} + \vec{rayDir} \times tStart $$
-    [S1, unofficial]
-    Initialize `densityTotal = 0.0` and `brightness = 0.0` [S2, unofficial].
-
-5.  **Wind Scrolling (Optional):** Apply wind scrolling to the ray position if time-based animation is enabled:
-    $$ \vec{scrollPosition} = \vec{rayPosition} + (\vec{windTime}, 0, 0) $$
-    [S2, unofficial]
-
-6.  **Boundary Fading (Optional):** Calculate fade factors for the top and bottom boundaries to prevent abrupt cutoffs [S2, unofficial].
-    $$ \text{distToBot} = \frac{\vec{rayPosition}.y - \text{boxMin}.y}{\text{boxMax}.y - \text{boxMin}.y} $$
-    $$ \text{botFizzle} = \text{clamp}(\text{distToBot} \times 10.0, 0, 1) $$
-    $$ \text{topFizzle} = \text{clamp}((1.0 - \text{distToBot}) \times 10.0, 0, 1) $$
-    $$ \text{totalFizzle} = \text{botFizzle} \times \text{topFizzle} $$
-    [S2, unofficial]
-
-7.  **Step Calculation:** Compute the step size:
-    $$ \text{stepSize} = \frac{\text{totalDist}}{\text{STEPS}} $$
-    Initialize `currentPos = \vec{localCameraPos} + \vec{rayDir} \times tStart` and `deltaStep = \vec{rayDir} \times \text{stepSize}` [S1, unofficial].
-    [S1, unofficial]
-
-8.  **Procedural Density Generation (Optional):** If using procedural noise instead of a 3D texture, compute Worley density using Fractal Brownian Motion (FBM) [S2, unofficial]:
-    *   Initialize `amplitude = 1.0`, `frequency = 1.0`, `amplitudeTotal = 0.0`, `worleyDensity = 0.0`.
-    *   Loop `_OctaveCount` times:
-        *   `worleyDensity += ProceduralWorley(\vec{scrollPosition} \times \text{frequency}, 1.0 / \text{CloudScale}) \times \text{amplitude}`
-        *   `amplitudeTotal += amplitude`
-        *   `amplitude /= 2.0`
-        *   `frequency *= 2.0`
-    *   `worleyDensity /= amplitudeTotal`
-    [S2, unofficial]
-    Additionally, compute Perlin density:
-    $$ \text{perlinDensity} = \text{ProceduralPerlin}(\vec{scrollPosition}, \text{CloudScale} \times 0.8) $$
-    [S2, unofficial]
-    Combine densities:
-    $$ \text{density} = \text{worleyDensity} \times \text{perlinDensity} \times \text{totalFizzle} $$
-    [S2, unofficial]
-
-9.  **Marching Loop:** Loop `i` from `0` to `STEPS - 1`:
-    *   **Sample Density:**
-        *   If using texture: `density = texture(volumeTex, currentPos).r` [S1, unofficial].
-        *   If using procedural: Use the calculated `density` from Step 8 [S2, unofficial].
-    *   **Threshold Check:** If `density > 0.01` (texture) or `density > _DensityThreshold` (procedural), proceed; otherwise, skip accumulation for this step [S1, S2, unofficial].
-    *   **Accumulate Opacity and Color (Texture Path):**
-        *   `color = vec3(density)` [S1, unofficial].
-        *   `alpha = density \times \text{DENSITY\_MULTIPLIER} \times \text{stepSize}` [S1, unofficial].
-        *   Update accumulation:
-            $$ \vec{accum}.rgb += (1.0 - \vec{accum}.a) \times \vec{color} \times \alpha $$
-            $$ \vec{accum}.a += (1.0 - \vec{accum}.a) \times \alpha $$
-        [S1, unofficial]
-    *   **Accumulate Light (Procedural Path):**
-        *   Update `densityTotal += density \times \text{stepSize}` [S2, unofficial].
-        *   Calculate `sunTransmittance` using a `MarchLight` function [S2, unofficial].
-        *   Calculate `cameraTransmittance = \exp(-\text{densityTotal} \times \text{AbsorptionCoefficient})` [S2, unofficial].
-        *   Calculate `scatter` using Henyey-Greenstein (HG) phase function [S2, unofficial].
-        *   Add to brightness:
-            $$ \text{brightness} += \text{density} \times \text{sunTransmittance} \times \text{cameraTransmittance} \times \text{scatter} \times \text{stepSize} \times 0.5 $$
-        [S2, unofficial]
-    *   **Advance Position:**
-        $$ \vec{currentPos} += \vec{deltaStep} $$
-        [S1, unofficial]
-        If using procedural path, increment `distanceTravelled` by `stepSize` [S2, unofficial].
-
-10. **Final Output:** If `accum.a < 0.001`, discard the fragment [S1, unofficial]. Otherwise, output `outColor = accum` [S1, unofficial].
+*   **Image Buffer:** A 2D array of shape `[height, width, 3]` with `uint8` data type, storing the final RGB color [S1, unofficial].
+*   **Ray Data:** For each pixel, a ray origin (camera position) and ray direction (normalized vector from camera to pixel) [S1, S2, unofficial].
+*   **Accumulators:** Per-pixel variables for `render_color` (RGB), `T_` (transmittance, scalar), and optionally `accum` (RGBA) [S1, S2, unofficial].
 
 **Parameters:**
-*   `STEPS`: Integer, number of samples per ray. Typical value: 128 [S1, unofficial].
-*   `DENSITY_MULTIPLIER`: Float, scales sampled density to alpha. Typical value: 5.0 [S1, unofficial].
-*   `_StepSize`: Float, step size for marching (derived from `totalDist / STEPS`) [S2, unofficial].
-*   `_StepLimit`: Integer, maximum number of steps [S2, unofficial].
-*   `_WindTime`: Float, time variable for scrolling [S2, unofficial].
-*   `_CloudScale`: Float, scale factor for procedural noise [S2, unofficial].
-*   `_OctaveCount`: Integer, number of FBM octaves for Worley noise [S2, unofficial].
-*   `_DensityThreshold`: Float, minimum density for contribution [S2, unofficial].
-*   `_AbsorptionCoefficient`: Float, absorption coefficient for transmittance [S2, unofficial].
+*   `num_points` or `STEPS`: The number of sampling steps along each ray. Typical values are 128 [S1, S2, unofficial].
+*   `DENSITY_MULTIPLIER`: Scales sampled density to produce alpha. Value: 5.0 [S2, unofficial].
+*   `background_color`: Color for non-intersecting rays. Value: `[157., 204., 224.]` [S1, unofficial].
+*   `cell_color`: Color of volume cells. Value: `[255, 255, 255]` (white) [S1, unofficial].
+*   `tmin`, `tmax`: Entry and exit distances of the ray within the bounding box [S1, S2, unofficial].
 
-**Edge Cases and Pitfalls:**
-*   **Precision:** The slab method for ray-box intersection must handle cases where the ray is parallel to a slab boundary [S1, unofficial].
-*   **Boundaries:** Without `totalFizzle`, volumes may exhibit hard edges at the top and bottom of the bounding box [S2, unofficial].
-*   **Degenerate Input:** If `totalDist <= 0.0`, the ray does not intersect the volume, and the fragment should be discarded to avoid undefined behavior [S1, unofficial].
+**Algorithm Steps:**
+
+1.  **Initialization:** For each pixel, initialize `render_color` to `[0., 0., 0.]` and transmittance `T_` to `1.` [S1, unofficial].
+2.  **Ray Setup:** Calculate the ray direction by normalizing the vector from the camera position to the pixel's world position [S1, unofficial].
+3.  **Bounding Box Intersection:** Intersect the ray with the volume's Axis-Aligned Bounding Box (AABB) using the slab method to determine entry (`tNear`) and exit (`tFar`) distances [S1, S2, unofficial]. If the ray does not intersect, discard the pixel [S2, unofficial].
+4.  **Step Size Calculation:** Compute the step size $\delta = \frac{t_{max} - t_{min}}{N}$, where $N$ is the number of steps (`num_points` or `STEPS`) [S1, S2, unofficial].
+5.  **Marching Loop:** Iterate $i$ from $0$ to $N-1$:
+    a.  **Sample Position:** Calculate the current position along the ray: $p_i = \text{rayOrigin} + (t_{min} + i \cdot \delta) \cdot \text{rayDirection}$ [S1, S2, unofficial].
+    b.  **Density Sampling:** Read the density value $\rho_i$ from the 3D texture at $p_i$ [S1, S2, unofficial].
+    c.  **Alpha Calculation:** Compute the alpha for the current step: $\alpha_i = 1 - e^{-\rho_i \cdot \delta}$ [S1, unofficial]. Note: Some implementations use a linear approximation $\alpha_i = \rho_i \cdot \text{DENSITY\_MULTIPLIER} \cdot \delta$ [S2, unofficial].
+    d.  **Transmittance Update:** Update the accumulated transmittance: $T_{new} = T_{old} \cdot e^{-\rho_i \cdot \delta}$ [S1, unofficial].
+    e.  **Color Accumulation:** Calculate the contribution weight. *Note: Standard front-to-back blending uses the transmittance **before** the current step ($T_{old}$). However, some implementations update $T$ first and then use the new $T$ for weighting, which is non-standard [S1, unofficial]. The standard formula is:*
+        $$ w_i = T_{old} \cdot \alpha_i $$
+        $$ \text{render\_color} += w_i \cdot \text{cell\_color} $$
+        $$ T_{old} = T_{new} $$
+    f.  **Boundary Fading (Optional):** Apply fade factors at the top and bottom boundaries of the box to prevent abrupt cutoffs [S3, unofficial].
+6.  **Final Compositing:** Composite the accumulated color with the background:
+    $$ \text{final\_color} = T_{final} \cdot \text{background\_color} + \text{render\_color} $$
+    [S1, unofficial]. If the accumulated alpha is below a threshold (e.g., 0.001), discard the fragment [S2, unofficial].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Inputs
-vUVW: vec3
-localCameraPos: vec3
-boxMin: vec3 = vec3(0.0)
-boxMax: vec3 = vec3(1.0)
-STEPS: int = 128
-DENSITY_MULTIPLIER: float = 5.0
-AbsorptionCoefficient: float = 1.0
-CloudScale: float = 1.0
-WindTime: float = 0.0
-OctaveCount: int = 4
-DensityThreshold: float = 0.01
-
-# 1. Ray Direction
-rayDir = normalize(vUVW - localCameraPos)
-
-# 2. Ray-Box Intersection (Slab Method)
-# Simplified for unit box [0,1]^3
-invDir = 1.0 / rayDir
-tNear = (boxMin - localCameraPos) * invDir
-tFar = (boxMax - localCameraPos) * invDir
-tMin = max(min(tNear), min(tFar))
-tMax = min(max(tNear), max(tFar))
-tStart = max(tMin.x, 0.0) # Assuming tMin is vec3 of entry times, taking max component for entry
-tEnd = tMax.x # Assuming tMax is vec3 of exit times, taking min component for exit? 
-# Note: Standard slab method returns tNear/tFar as scalars. 
-# Re-interpreting S1: "vec2(tNear, tFar)". 
-# Correct slab logic for axis-aligned box:
-t0 = (boxMin - localCameraPos) / rayDir
-t1 = (boxMax - localCameraPos) / rayDir
-tNear = max(max(t0.x, t0.y), t0.z)
-tFar = min(min(t1.x, t1.y), t1.z)
-
-# 3. Validation
-totalDist = tFar - tNear
-if totalDist <= 0.0:
-    discard_fragment()
-
-# 4. Initialization
-rayPosition = localCameraPos + rayDir * tNear
-densityTotal = 0.0
-brightness = 0.0
-accum = vec4(0.0)
-
-# 5. Wind Scrolling
-scrollPosition = rayPosition + vec3(WindTime, 0.0, 0.0)
-
-# 6. Boundary Fizzle
-distToBot = (rayPosition.y - boxMin.y) / (boxMax.y - boxMin.y)
-botFizzle = clamp(distToBot * 10.0, 0.0, 1.0)
-topFizzle = clamp((1.0 - distToBot) * 10.0, 0.0, 1.0)
-totalFizzle = botFizzle * topFizzle
-
-# 7. Step Calculation
-stepSize = totalDist / STEPS
-currentPos = localCameraPos + rayDir * tNear
-deltaStep = rayDir * stepSize
-
-# 8. Procedural Density (Optional Path)
-# If using procedural noise instead of texture sampling:
-worleyDensity = 0.0
-amplitude = 1.0
-frequency = 1.0
-amplitudeTotal = 0.0
-for i in range(OctaveCount):
-    worleyDensity += ProceduralWorley(scrollPosition * frequency, 1.0 / CloudScale) * amplitude
-    amplitudeTotal += amplitude
-    amplitude /= 2.0
-    frequency *= 2.0
-worleyDensity /= amplitudeTotal
-
-perlinDensity = ProceduralPerlin(scrollPosition, CloudScale * 0.8)
-density = worleyDensity * perlinDensity * totalFizzle
-
-# 9. Marching Loop
-for i in range(STEPS):
-    # Determine density source
-    if use_texture:
-        density = texture(volumeTex, currentPos).r
-        threshold = 0.01
-    else:
-        threshold = DensityThreshold
+def density_marching(camera_pos, ray_dir, t_min, t_max, num_points, volume_texture, background_color, cell_color):
+    """
+    Performs density marching for a single ray.
+    """
+    # 1. Initialization
+    render_color = [0.0, 0.0, 0.0]
+    T = 1.0
     
-    if density > threshold:
-        if use_texture:
-            color = vec3(density)
-            alpha = density * DENSITY_MULTIPLIER * stepSize
-            accum.rgb += (1.0 - accum.a) * color * alpha
-            accum.a += (1.0 - accum.a) * alpha
-        else:
-            densityTotal += density * stepSize
-            # Placeholder for MarchLight and HG scatter calculation as per S2
-            # sunTransmittance = MarchLight(...)
-            # cameraTransmittance = exp(-densityTotal * AbsorptionCoefficient)
-            # scatter = HG(...)
-            # brightness += density * sunTransmittance * cameraTransmittance * scatter * stepSize * 0.5
+    # 2. Step Size
+    delta = (t_max - t_min) / num_points
+    
+    # 3. Marching Loop
+    for i in range(num_points):
+        # Sample Position
+        t = t_min + i * delta
+        pos = camera_pos + ray_dir * t
+        
+        # Density Sampling
+        density = volume_texture.sample(pos)
+        
+        # Alpha Calculation (Exponential Absorption)
+        alpha = 1.0 - math.exp(-density * delta)
+        
+        # Transmittance Update (Standard: Update T after calculating weight using old T)
+        # Note: Some implementations update T first, which is incorrect for standard DVR.
+        # Correct order:
+        weight = T * alpha
+        render_color += weight * cell_color
+        T *= math.exp(-density * delta)
+        
+        # Early Exit Optimization
+        if T < 0.001:
+            break
             
-    currentPos += deltaStep
-
-# 10. Output
-if accum.a < 0.001:
-    discard_fragment()
-outColor = accum
+    # 4. Final Compositing
+    final_color = T * background_color + render_color
+    return final_color
 ```
+
+**Edge Cases and Pitfalls:**
+*   **Transmittance Order:** Updating transmittance before calculating the weight for the current step leads to incorrect lighting and opacity accumulation [S1, unofficial].
+*   **Boundary Artifacts:** Abrupt cutoffs at the volume boundaries can be mitigated by applying fade factors based on distance to the box edges [S3, unofficial].
+*   **Precision:** Using fixed step sizes may lead to aliasing or missing thin structures if the step size is too large relative to the volume features [S1, S2, unofficial].
 
 ## Subtopics
 
-### Ray Marching Volume Rendering
-A broader category of techniques using ray marching for volume rendering. Density Marching is a specific implementation within this category. [Link](1735-ray-marching-volume-rendering.md)
+### [Ray Marching Volume Rendering](1735-ray-marching-volume-rendering.md)
+A general overview of ray marching techniques for volume rendering.
 
-### Ray Evaluation Stepping DVR
-Uses variable step sizes based on density evaluation. Density Marching uses fixed steps. [Link](3461-ray-evaluation-stepping-dvr.md)
+### [Ray Evaluation Stepping DVR](3461-ray-evaluation-stepping-dvr.md)
+A variant that may use adaptive stepping or different evaluation strategies.
 
-### Discrete Volume Rendering Integral (VRI)
-Focuses on the discrete integration of the volume rendering integral. Density Marching is a numerical approximation of this. [Link](3552-discrete-volume-rendering-integral-vri.md)
+### [Discrete Volume Rendering Integral (VRI)](3552-discrete-volume-rendering-integral-vri.md)
+Focuses on the discrete integration of the volume rendering integral.
 
-### Volumetric Light Shafts (URP Raymarching)
-Specifically targets light shafts (god rays) using raymarching. Density Marching targets general volume density. [Link](3873-volumetric-light-shafts-urp-raymarching.md)
+### [Volumetric Light Shafts (URP Raymarching)](3873-volumetric-light-shafts-urp-raymarching.md)
+Specialized for light shafts, often using screen-space techniques.
+
+### [Cloud Volume Rendering](4877-cloud-volume-rendering.md)
+Optimized for cloud-like volumes, often using specific noise functions.
+
+### [Ray Marching Volume Rendering (GLSL)](5184-ray-marching-volume-rendering-glsl.md)
+GLSL-specific implementation details.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot R)$, where $N$ is the number of pixels (fragments) and $R$ is the number of steps (`STEPS`). Since `STEPS` is fixed (e.g., 128), it is linear with respect to pixel count [S1, unofficial].
-*   **Memory Complexity:** $O(1)$ per fragment, plus the memory for the 3D texture or procedural noise state [S1, S2, unofficial].
-*   **Measured Performance:** Not given in the sources.
-*   **Scaling:** Performance scales linearly with resolution and step count. Increasing `STEPS` improves quality but increases cost proportionally [S1, unofficial].
-*   **Strengths:** Simple to implement; fixed step count ensures predictable performance; procedural noise allows for infinite resolution without texture memory [S1, S2, unofficial].
-*   **Limitations:** Fixed step size may lead to aliasing or slow convergence in sparse volumes; no adaptive stepping for efficiency [S1, S2, unofficial].
-*   **When to use:** Real-time rendering of cloud-like volumes where performance predictability is key and high-frequency detail is generated via procedural noise [S1, S2, unofficial].
-*   **When not to use:** When high accuracy in sparse volumes is required without excessive steps, or when texture memory is limited and procedural noise is too expensive [S1, S2, unofficial].
+*   **Time Complexity:** $O(N \cdot P)$, where $N$ is the number of pixels and $P$ is the number of steps per ray [S1, S2, unofficial].
+*   **Memory Complexity:** $O(V)$ for the volume texture, where $V$ is the number of voxels [S1, S2, unofficial].
+*   **Strengths:** Simple to implement, predictable memory usage, easy to parallelize [S1, S2, unofficial].
+*   **Limitations:** Inefficient for sparse volumes due to fixed step size, potential aliasing artifacts [S1, S2, unofficial].
+*   **When to Use:** Suitable for dense volumes or when simplicity is prioritized over performance [S1, S2, unofficial].
+*   **When Not to Use:** Unsuitable for sparse volumes or high-resolution requirements where adaptive methods are preferred [S1, S2, unofficial].
 
 ## Background
-Density Marching originates from early direct volume ray casting techniques. The specific implementation described here is found in unofficial repositories for volume rendering tutorials and cloud shaders [S1, S2, unofficial]. It builds on the foundational work of [Fixed Step Ray Marching](3136-fixed-step-ray-marching.md) [S1, unofficial].
+Density Marching is a fundamental technique in direct volume rendering, originating from the early days of computer graphics [S1, S2, unofficial]. It is widely used in scientific visualization and real-time applications due to its simplicity [S1, S2, unofficial].
 
 ## Sources
-[S1] vis-magnus-2018, https://github.com/GitThirteen/vis-magnus-2018, fetched 2026-10-26 (unofficial)
-[S2] volumetric-cloud-renderer, https://github.com/ldarnbr/volumetric-cloud-renderer, fetched 2026-10-27 (unofficial)
+[S1] Rintarooo/volume_rendering_plot, https://github.com/Rintarooo/volume_rendering_plot, fetched 2026-10-26 (unofficial)
+[S2] GitThirteen/vis-magnus-2018, https://github.com/GitThirteen/vis-magnus-2018, fetched 2026-10-26 (unofficial)
+[S3] ldarnbr/volumetric-cloud-renderer, https://github.com/ldarnbr/volumetric-cloud-renderer, fetched 2026-10-27 (unofficial)

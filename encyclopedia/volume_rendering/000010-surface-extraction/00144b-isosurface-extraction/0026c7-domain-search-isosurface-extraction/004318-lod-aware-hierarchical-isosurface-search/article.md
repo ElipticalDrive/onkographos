@@ -1,0 +1,106 @@
+# LOD-Aware Hierarchical Isosurface Search
+
+Also called: DYNAISOLOD Search Algorithm, Dynamic isosurface extraction search, Isosurface search in LODTree, LOD-aware isosurface search, LODTree search, Run-time Search and Rendering Algorithm
+
+## Overview
+LOD-Aware Hierarchical Isosurface Search is a recursive algorithm that traverses a hierarchical voxel tree (LODTree) to identify cells containing an isosurface at a specific isovalue and desired level-of-detail (LOD) [S1, unofficial]. It solves the problem of efficiently extracting isosurfaces from large volumetric datasets by pruning search branches based on min/max data values and LOD keys, avoiding the generation of geometry for cells that do not intersect the isovalue or do not match the target resolution [S1, unofficial]. It sets itself apart from static extraction methods by allowing dynamic isovalue and LOD specification at runtime, and from other hierarchical methods by its specific three-key cyclic search strategy (min, max, LOD) [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** An LODTree data structure (loaded from file), an isovalue (scalar threshold), and a desired LOD (integer or scalar resolution level) [S1, unofficial].
+*   **Output:** A list of cells (nodes) that contain the isosurface and match the desired LOD [S1, unofficial].
+
+**Data Structures:**
+The LODTree is a hierarchical structure where each node (cell) stores:
+*   `min_value`: The minimum scalar value within the cell [S1, unofficial].
+*   `max_value`: The maximum scalar value within the cell [S1, unofficial].
+*   `lod`: The level-of-detail (size/resolution) of the cell [S1, unofficial].
+*   `left_child`, `right_child`: Pointers to child nodes [S1, unofficial].
+*   The tree is sorted such that children are ordered by the current search key [S1, unofficial].
+
+**Algorithm Steps:**
+The search is recursive and cycles through three keys: `min_value`, `max_value`, and `lod` [S1, unofficial]. The root node is searched using the `min_value` key [S1, unofficial]. Each descent into a lower level of the tree causes the current search key to cycle to the next key in the sequence: min $\rightarrow$ max $\rightarrow$ lod $\rightarrow$ min [S1, unofficial].
+
+1.  **Search Minimum (`search-minimum`):**
+    *   If `cell.min_value > isovalue`: The isosurface does not intersect this cell or its left branch (assuming left branch has smaller min values). Recursively call `search-maximum` on the `left_child` [S1, unofficial].
+    *   Else (`cell.min_value <= isovalue`):
+        *   If `cell.max_value > isovalue` AND `cell.lod == desired_lod`: Add `cell` to the result list [S1, unofficial].
+        *   Recursively call `search-maximum` on the `right_child` [S1, unofficial].
+
+2.  **Search Maximum (`search-maximum`):**
+    *   If `cell.max_value < isovalue`: The isosurface does not intersect this cell or its right branch (assuming right branch has larger max values). Recursively call `search-lod` on the `right_child` [S1, unofficial].
+    *   Else (`cell.max_value >= isovalue`):
+        *   If `cell.min_value < isovalue` AND `cell.lod == desired_lod`: Add `cell` to the result list [S1, unofficial].
+        *   Recursively call `search-lod` on the `left_child` [S1, unofficial].
+
+3.  **Search LOD (`search-lod`):**
+    *   If `cell.lod > desired_lod`: The cell is too coarse. Recursively call `search-minimum` on the `left_child` (assuming left branch has smaller LODs) [S1, unofficial].
+    *   Else If `cell.lod < desired_lod`: The cell is too fine. Recursively call `search-minimum` on the `right_child` (assuming right branch has larger LODs) [S1, unofficial].
+    *   Else (`cell.lod == desired_lod`):
+        *   If `cell.min_value < isovalue` AND `cell.max_value > isovalue`: Add `cell` to the result list [S1, unofficial].
+        *   Recursively call `search-minimum` on the `right_child` [S1, unofficial].
+        *   Recursively call `search-minimum` on the `left_child` [S1, unofficial].
+
+**Optimizations:**
+*   If `cell.min_value < isovalue`, this condition is true for all cells on the left branch (smaller key). Therefore, minimum key testing can be skipped for the left branch [S1, unofficial].
+*   Similarly, if `cell.max_value > isovalue`, this condition is true for all cells on the right branch (larger key). Maximum key testing can be skipped for the right branch [S1, unofficial].
+*   If the `desired_lod` is the greatest or least possible LOD, LOD key testing can be optimized. If searching the left (smaller) subtree of an already minimum LOD node, stop testing LOD keys [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def search_minimum(cell, isovalue, desired_lod):
+    if cell.min_value > isovalue:
+        # Isosurface does not intersect cell or left branch
+        search_maximum(cell.left_child, isovalue, desired_lod)
+    else:
+        if cell.max_value > isovalue and cell.lod == desired_lod:
+            add_cell_to_list(cell)
+        search_maximum(cell.right_child, isovalue, desired_lod)
+
+def search_maximum(cell, isovalue, desired_lod):
+    if cell.max_value < isovalue:
+        # Isosurface does not intersect cell or right branch
+        search_lod(cell.right_child, isovalue, desired_lod)
+    else:
+        if cell.min_value < isovalue and cell.lod == desired_lod:
+            add_cell_to_list(cell)
+        search_lod(cell.left_child, isovalue, desired_lod)
+
+def search_lod(cell, isovalue, desired_lod):
+    if cell.lod > desired_lod:
+        search_minimum(cell.left_child, isovalue, desired_lod)
+    elif cell.lod < desired_lod:
+        search_minimum(cell.right_child, isovalue, desired_lod)
+    else:
+        if cell.min_value < isovalue and cell.max_value > isovalue:
+            add_cell_to_list(cell)
+        search_minimum(cell.right_child, isovalue, desired_lod)
+        search_minimum(cell.left_child, isovalue, desired_lod)
+```
+
+**Vertex and Normal Handling:**
+*   Vertices are calculated by linear interpolation along cell edges [S1, unofficial].
+*   To avoid redundant calculations, vertices are stored in a hash table keyed to the edge they lie on, as the isosurface intersects each cell edge at most once [S1, unofficial].
+*   Normals are computed via cross-product and stored in the same hash table for later averaging with normals of other triangles sharing the same vertex [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The search time complexity is $O(\log N)$, where $N$ is the number of cells [S1, unofficial].
+*   **Memory Overhead:** The LODTree file overhead is approximately 1.77 times the size of the original simulation volume data set [S1, unofficial].
+*   **Performance:**
+    *   On a 27 million cell dataset (Small Data Set):
+        *   LOD 1: Search 0.35s, Geometry Creation 10.29s, Rendering 0.96s [S1, unofficial].
+        *   LOD 4: Search 0.02s, Geometry Creation 2.42s, Rendering 0.54s [S1, unofficial].
+    *   On a 54 million cell dataset (Medium Data Set):
+        *   LOD 1: Search 0.25s, Geometry Creation 6.16s, Rendering 3.01s [S1, unofficial].
+    *   On a 100 million cell dataset (Large Data Set):
+        *   LOD 1: Search 0.23s, Geometry Creation 1.44s, Rendering 3.68s [S1, unofficial].
+*   **Strengths:** Scalable to interactive and immediate rendering times by using lower LODs for navigation. Dynamic isovalue and LOD specification allows for flexible analysis [S1, unofficial].
+*   **Limitations:** Static geometry creation yields higher quality triangulation because neighborhood information is preserved, which this dynamic method may lack [S1, unofficial].
+
+## Background
+The algorithm was developed as part of the DYNAISOLOD method, a component of the NOISE algorithm for volume rendering [S1, unofficial]. It was used in Sandia's EIGENNR visualization tool, which combines dynamically-specified isovalue/LOD with statically generated geometry for different analysis needs [S1, unofficial]. The method was designed to handle large simulation volume data sets, such as those from materials simulations, where a static isosurface threshold of 0.55 might be satisfactory, but dynamic capabilities are needed for other analyses [S1, unofficial].
+
+## Sources
+[S1] Dynamic isosurface extraction and level-of-detail in voxel space, https://digital.library.unt.edu/ark:/67531/metadc707496/?q=marching cubes, fetched 2026-10-28 (unofficial)

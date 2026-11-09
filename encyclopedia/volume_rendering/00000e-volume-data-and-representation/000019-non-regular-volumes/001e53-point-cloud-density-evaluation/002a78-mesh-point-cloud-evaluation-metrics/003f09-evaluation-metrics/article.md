@@ -1,135 +1,163 @@
 # Evaluation Metrics
+
 Also called: PSNR and SSIM Calculation, Rendering Quality Assessment
+
 ## Overview
-Computes Peak Signal-to-Noise Ratio (PSNR) and Structural Similarity Index Measure (SSIM) to quantitatively assess rendering quality against ground truth images [S2, unofficial]. It differs from mesh-centric metrics (e.g., Chamfer Distance) by operating on pixel-space image data rather than geometric point clouds or meshes [S1][S2, unofficial].
+Computes quantitative assessment of rendering quality against ground truth using Peak Signal-to-Noise Ratio (PSNR) and Structural Similarity Index Measure (SSIM) [S2, unofficial]. Additionally, it assesses mesh quality using Chamfer Distance (CD), F1 score, and Normal Consistency (NC) to evaluate geometric fidelity [S1]. It differs from the [Evaluation Pipeline](9358-evaluation-pipeline.md) by focusing specifically on the mathematical computation of these scalar metrics rather than the orchestration of data loading and training loops.
+
 ## How it works
-### Inputs and Outputs
-- **Inputs**: Rendered image tensor $I_{render}$ and ground truth image tensor $I_{gt}$. Both are assumed to be normalized to $[0, 1]$ with shape $(H, W, C)$ where $C=3$ for RGB [S2, unofficial].
-- **Outputs**: Scalar PSNR value (dB) and scalar SSIM value ($[-1, 1]$ or $[0, 1]$ depending on implementation, typically $[0, 1]$ for normalized inputs).
+**Inputs:**
+1.  Rendered image tensor $I_{render}$ and Ground Truth image tensor $I_{gt}$ [S2, unofficial].
+2.  Reconstructed mesh $M$ and input point cloud $P$ for mesh evaluation [S1].
 
-### Data Structures
-- **Image Tensors**: Floating-point arrays.
-- **Sliding Window**: For SSIM, a local window of size $K \times K$ (typically $11 \times 11$) is used to compute local statistics [S2, implied by standard SSIM definition, unofficial].
+**Outputs:**
+1.  Scalar values for PSNR, SSIM, CD, F1, and NC [S1][S2, unofficial].
 
-### Steps
-1. **Preprocessing**: Ensure both images are in the range $[0, 1]$. If inputs are in $[0, 255]$, divide by 255.0 [S2, unofficial].
-2. **PSNR Calculation**:
-   - Compute the Mean Squared Error (MSE) between $I_{render}$ and $I_{gt}$:
-     $$ MSE = \frac{1}{N} \sum_{i=1}^{N} (I_{render}(i) - I_{gt}(i))^2 $$
-     where $N = H \times W \times C$.
-   - Compute PSNR:
-     $$ PSNR = 10 \cdot \log_{10} \left( \frac{MAX_I^2}{MSE} \right) $$
-     where $MAX_I = 1.0$ for normalized data [S2, unofficial].
-3. **SSIM Calculation**:
-   - For each pixel, compute local means ($\mu_x, \mu_y$), variances ($\sigma_x^2, \sigma_y^2$), and covariance ($\sigma_{xy}$) within the window [S2, implied, unofficial].
-   - Compute SSIM index for the window:
-     $$ SSIM(x, y) = \frac{(2\mu_x\mu_y + C_1)(2\sigma_{xy} + C_2)}{(\mu_x^2 + \mu_y^2 + C_1)(\sigma_x^2 + \sigma_y^2 + C_2)} $$
-     where $C_1 = (0.01 \cdot MAX_I)^2$ and $C_2 = (0.03 \cdot MAX_I)^2$ are stability constants [S2, implied standard values, unofficial].
-   - Average SSIM values over all windows to get the final SSIM score.
+**Data Structures:**
+*   Image tensors: Shape $(H, W, C)$ or $(B, H, W, C)$, values normalized to $[0, 1]$ [S2, unofficial].
+*   Point cloud: Set of 3D coordinates $\{p_i\}$ [S1].
+*   Mesh: Set of faces $F$ and vertices $V$ [S1].
 
-### Parameters
-- **data_range**: Set to $1.0$ for normalized $[0, 1]$ image data [S2, unofficial].
-- **channel_axis**: Set to $-1$ for RGB channels in the last dimension [S2, unofficial].
-- **MAX_I**: $1.0$ (derived from data_range) [S2, unofficial].
+**Parameters:**
+*   `channel_axis`: Set to $-1$ for RGB channels in the last dimension [S2, unofficial].
+*   `data_range`: Set to $1.0$ for normalized $[0,1]$ image data [S2, unofficial].
+*   F1 threshold $\tau$: Set to $0.003$ to ensure sensitivity to fine details [S1].
+*   CD scaling factor: All reported Chamfer distances are scaled by $10^5$ [S1].
+*   Sampling count: $1,000,000$ points sampled for mesh evaluation [S1].
 
-### Edge Cases and Pitfalls
-- **Division by Zero**: If MSE is exactly 0, PSNR is infinite. Handle by capping or returning a large finite value (e.g., 100 dB) [G].
-- **Boundary Effects**: SSIM windowing may cause boundary artifacts if not handled (e.g., padding or excluding edge windows) [G].
-- **Dynamic Range**: If images are not normalized, $MAX_I$ must match the actual maximum value (e.g., 255.0) [S2, unofficial].
+**Steps:**
 
-### Pseudocode
+1.  **Image Quality Assessment (PSNR/SSIM):**
+    *   Ensure $I_{render}$ and $I_{gt}$ are aligned in shape and data type [S2, unofficial].
+    *   Compute Mean Squared Error (MSE) between $I_{render}$ and $I_{gt}$:
+        $$ \text{MSE} = \frac{1}{N} \sum_{i=1}^{N} (I_{render, i} - I_{gt, i})^2 $$
+        where $N$ is the total number of pixels.
+    *   Compute PSNR:
+        $$ \text{PSNR} = 10 \cdot \log_{10} \left( \frac{\text{MAX}_I^2}{\text{MSE}} \right) $$
+        where $\text{MAX}_I = 1.0$ given the normalized range [S2, unofficial].
+    *   Compute SSIM using a sliding window approach (typically $11 \times 11$) comparing luminance, contrast, and structure between local windows of $I_{render}$ and $I_{gt}$ [S2, unofficial].
+
+2.  **Mesh Quality Assessment (CD, F1, NC):**
+    *   Sample $N_{sample} = 1,000,000$ points $P_{sample}$ uniformly from the surface of the reconstructed mesh $M$ [S1].
+    *   Perform face-to-point projection using the Fast Closest Point with Weights (FCPW) method [S1, S30]. For each point $p \in P_{sample}$, find the closest point $q$ on the input point cloud $P$ and the closest face on $M$ [S1].
+    *   Compute Chamfer Distance (CD):
+        $$ \text{CD} = \frac{1}{N_{sample}} \sum_{p \in P_{sample}} \min_{q \in P} \|p - q\|^2 + \frac{1}{|P|} \sum_{q \in P} \min_{p \in P_{sample}} \|q - p\|^2 $$
+        Scale the final CD value by $10^5$ [S1].
+    *   Compute F1 Score:
+        *   Calculate the distance from each point in $P_{sample}$ to $P$.
+        *   Count points where distance $< \tau$ ($0.003$) as True Positives (TP).
+        *   Count points in $P$ where distance to $P_{sample} < \tau$ as True Positives for the reverse direction.
+        *   Compute Precision and Recall based on these thresholds.
+        *   $F1 = 2 \cdot \frac{\text{Precision} \cdot \text{Recall}}{\text{Precision} + \text{Recall}}$ [S1].
+    *   Compute Normal Consistency (NC):
+        *   Compare the normal vector of the mesh face at the projection point with the normal vector of the input point cloud (if available) or the estimated normal from the local neighborhood [S1].
+        *   Average the dot product of corresponding normals.
+
+**Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import numpy as np
+import torch
 
-def compute_psnr(rendered: np.ndarray, ground_truth: np.ndarray, data_range: float = 1.0) -> float:
+def compute_psnr_ssim(rendered: torch.Tensor, ground_truth: torch.Tensor) -> tuple:
     """
-    Compute PSNR between two images.
-    :param rendered: np.ndarray, shape (H, W, C), values in [0, 1]
-    :param ground_truth: np.ndarray, shape (H, W, C), values in [0, 1]
-    :param data_range: float, maximum possible value of the image (1.0 for normalized)
-    :return: float, PSNR in dB
+    Computes PSNR and SSIM for rendered vs ground truth images.
+    Assumes inputs are in [0, 1] range with shape (H, W, C) or (B, H, W, C).
     """
-    # Ensure inputs are float32/64
-    rendered = rendered.astype(np.float64)
-    ground_truth = ground_truth.astype(np.float64)
+    # MSE Calculation
+    mse = torch.mean((rendered - ground_truth) ** 2)
     
-    # Compute MSE
-    mse = np.mean((rendered - ground_truth) ** 2)
+    # PSNR Calculation
+    # MAX_I is 1.0 for normalized data
+    psnr = 10 * torch.log10(1.0 / mse)
     
-    # Handle zero MSE
-    if mse == 0:
-        return 100.0  # Arbitrary large value for perfect match
-        
-    # Compute PSNR
-    psnr = 10 * np.log10((data_range ** 2) / mse)
-    return psnr
+    # SSIM Calculation
+    # Using a standard implementation for SSIM with window size 11
+    # This requires a helper function for SSIM which is standard in libraries like skimage
+    # Here we assume a generic ssim function exists or is implemented
+    ssim_val = compute_ssim(rendered, ground_truth, channel_axis=-1, data_range=1.0)
+    
+    return psnr, ssim_val
 
-def compute_ssim(rendered: np.ndarray, ground_truth: np.ndarray, data_range: float = 1.0, window_size: int = 11) -> float:
+def compute_mesh_metrics(mesh_points: torch.Tensor, input_points: torch.Tensor) -> dict:
     """
-    Compute SSIM between two images.
-    :param rendered: np.ndarray, shape (H, W, C)
-    :param ground_truth: np.ndarray, shape (H, W, C)
-    :param data_range: float, maximum possible value of the image
-    :param window_size: int, size of the sliding window (must be odd)
-    :return: float, mean SSIM
+    Computes CD, F1, and NC for mesh quality.
+    mesh_points: Sampled points from mesh surface (1M points).
+    input_points: Ground truth point cloud.
     """
     # Constants
-    C1 = (0.01 * data_range) ** 2
-    C2 = (0.03 * data_range) ** 2
+    threshold = 0.003
+    scale_factor = 1e5
     
-    # Convert to float64 for precision
-    rendered = rendered.astype(np.float64)
-    ground_truth = ground_truth.astype(np.float64)
+    # 1. Chamfer Distance
+    # Compute pairwise distances or use efficient nearest neighbor search
+    # dist_mesh_to_gt: min distance from each mesh point to input_points
+    # dist_gt_to_mesh: min distance from each input point to mesh_points
+    dist_mesh_to_gt = compute_min_distance(mesh_points, input_points)
+    dist_gt_to_mesh = compute_min_distance(input_points, mesh_points)
     
-    # Pad images to handle boundaries
-    pad = window_size // 2
-    rendered_padded = np.pad(rendered, ((pad, pad), (pad, pad), (0, 0)), mode='reflect')
-    ground_truth_padded = np.pad(ground_truth, ((pad, pad), (pad, pad), (0, 0)), mode='reflect')
+    cd = torch.mean(dist_mesh_to_gt**2) + torch.mean(dist_gt_to_mesh**2)
+    cd_scaled = cd * scale_factor
     
-    h, w, c = rendered.shape
-    ssim_map = np.zeros((h, w))
+    # 2. F1 Score
+    # Precision: fraction of mesh points close to input points
+    precision_mask = dist_mesh_to_gt < threshold
+    precision = torch.sum(precision_mask) / len(precision_mask)
     
-    # Compute SSIM for each pixel
-    for i in range(h):
-        for j in range(w):
-            # Extract windows
-            y1, y2 = i, i + window_size
-            x1, x2 = j, j + window_size
-            
-            win_x = rendered_padded[y1:y2, x1:x2, :]
-            win_y = ground_truth_padded[y1:y2, x1:x2, :]
-            
-            # Compute local means
-            mu_x = np.mean(win_x)
-            mu_y = np.mean(win_y)
-            
-            # Compute local variances and covariance
-            sigma_x2 = np.var(win_x)
-            sigma_y2 = np.var(win_y)
-            sigma_xy = np.cov(win_x.flatten(), win_y.flatten())[0, 1]
-            
-            # Compute SSIM index
-            num = (2 * mu_x * mu_y + C1) * (2 * sigma_xy + C2)
-            den = (mu_x ** 2 + mu_y ** 2 + C1) * (sigma_x2 + sigma_y2 + C2)
-            
-            ssim_map[i, j] = num / den
-            
-    # Return mean SSIM
-    return np.mean(ssim_map)
+    # Recall: fraction of input points close to mesh points
+    recall_mask = dist_gt_to_mesh < threshold
+    recall = torch.sum(recall_mask) / len(recall_mask)
+    
+    if precision + recall == 0:
+        f1 = 0.0
+    else:
+        f1 = 2 * (precision * recall) / (precision + recall)
+        
+    # 3. Normal Consistency
+    # Assuming normals are available or estimated
+    # This step requires access to mesh normals and point cloud normals
+    # Placeholder for specific NC implementation details not fully provided in source
+    # Typically: mean(dot_product(mesh_normals, gt_normals))
+    nc = compute_normal_consistency(mesh_points, input_points) 
+    
+    return {
+        "cd_scaled": cd_scaled.item(),
+        "f1": f1.item(),
+        "nc": nc.item()
+    }
+
+def compute_min_distance(points_a: torch.Tensor, points_b: torch.Tensor) -> torch.Tensor:
+    """
+    Computes minimum distance from each point in points_a to any point in points_b.
+    Uses efficient nearest neighbor search (e.g., KDTree or CUDA-based).
+    """
+    # Implementation detail: Use a library like scipy.spatial.cKDTree or torch_cluster
+    # For pure Python/NumPy without external libs, this would be O(N*M) which is slow.
+    # Given the context of "capable programmer", we assume access to efficient NN search.
+    # Here we describe the logic:
+    # 1. Build spatial index for points_b.
+    # 2. Query nearest neighbor for each point in points_a.
+    # 3. Return distances.
+    pass # Implementation depends on specific efficient NN library used in the pipeline
 ```
+
+## Subtopics
+
+### Real-world Dataset Evaluation
+Evaluates the method on real-world scenes from the BlendedMVS and Bag of Chips datasets, which provide images and depth maps reconstructed by MVS methods or RGBD cameras [S3]. For BlendedMVS, the last ten images are used as the test set; for Bag of Chips, the last 1/5 of the images are used [S3]. Performance degrades on this data due to varying exposures, rough geometry, and insufficient background in original images for ambient illumination reconstruction [S3].
+
 ## Operating characteristics
-- **Time Complexity**: PSNR is $O(N)$ where $N$ is the number of pixels. SSIM is $O(N \cdot K^2)$ where $K$ is the window size, due to local window operations.
-- **Memory Complexity**: $O(N)$ for storing intermediate arrays (MSE, SSIM map).
-- **Strengths**: Standard, widely understood metrics for image quality. PSNR is sensitive to pixel-wise errors; SSIM correlates better with human perception.
-- **Limitations**: PSNR is not always correlated with perceived quality. SSIM is computationally more expensive. Both are pixel-aligned, so they are sensitive to registration errors between rendered and ground truth images [G].
-- **When to Use**: When pixel-perfect alignment is guaranteed and quantitative comparison of rendering fidelity is needed.
-- **When Not to Use**: When comparing geometric meshes (use Chamfer Distance, F1, NC) or when images are misaligned [S1][S2, unofficial].
+*   **Time Complexity:** Image metrics (PSNR/SSIM) are $O(N)$ where $N$ is the number of pixels. Mesh metrics (CD/F1/NC) depend on the efficiency of the nearest neighbor search between the sampled points and the input cloud, typically $O(N \log N)$ with spatial indexing [S1].
+*   **Memory Complexity:** Requires storing the sampled points ($10^6$ points) and the input point cloud [S1].
+*   **Strengths:** Provides standardized, quantitative comparison for both rendering quality (PSNR/SSIM) and geometric accuracy (CD/F1/NC) [S1][S2, unofficial].
+*   **Limitations:** Sensitive to fine details via the F1 threshold ($0.003$) [S1]. Real-world evaluation is limited by dataset artifacts like exposure variation and lack of background information [S3].
 
 ## Background
-Originated from image processing literature. PSNR is a standard metric for lossy compression. SSIM was introduced by Wang et al. (2004) to address limitations of MSE/PSNR. In the context of 3D rendering and Gaussian Splatting, these metrics are used to evaluate the visual quality of rendered images against ground truth [S2, unofficial]. The provided notes also mention mesh evaluation metrics (CD, F1, NC) which are distinct and used for geometric accuracy, not rendering quality [S1].
+The mesh evaluation metrics (CD, F1, NC) are described in the context of DCCVT (Differentiable Clipped Centroidal Voronoi Tessellation) [S1]. The image quality metrics (PSNR, SSIM) are standard in 3D Gaussian Splatting evaluation pipelines [S2, unofficial]. Real-world dataset evaluation is discussed in the context of Neural Illumination Fields (NeIF) [S3].
 
 ## Sources
 [S1] DCCVT: Differentiable Clipped Centroidal Voronoi Tessellation, https://arxiv.org/abs/2601.13603v1, fetched 2026-10-26
 [S2] Fhz2346/3D-Gaussian-Splatting, https://github.com/Fhz2346/3D-Gaussian-Splatting, fetched 2026-10-27 (unofficial)
+[S3] A Pre-convolved Representation for Plug-and-Play Neural Illumination Fields, https://doi.org/10.1609/aaai.v38i7.28618, fetched 2026-10-29

@@ -1,0 +1,152 @@
+# Sparse Domain Decomposition with Expert Networks
+
+Also called: Neural Sparse Volume Representation, NeuralVDB MoE
+
+## Overview
+Sparse Domain Decomposition with Expert Networks (NeuralVDB) is a lossy compression method for sparse volumetric data that replaces explicit voxel values and lower-level tree structures with a Mixture of Experts (MoE) architecture, aiming for high memory efficiency and fast random access while maintaining compatibility with existing VDB pipelines [S1, unofficial]. Unlike standard sparse grids or pure neural implicit representations, it deliberately "over-fits" to the input volume to memorize data rather than learning generalizable statistical features, trading off generalization for the flexibility to handle arbitrary inputs [S1, unofficial]. It sets itself apart from sparsely-gated MoE models by using non-learnable gate functions based on spatial locality, and from standard VDB by approximating values with neural networks, which results in "blobby" reconstruction errors on iso-surfaces but significantly reduces memory footprint [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A standard VDB tree (typically a Hash grid structure) containing sparse voxel data (scalar, vector, or binary mask values) and its topology [S1, unofficial].
+- Output: A compressed NeuralVDB structure consisting of the top-level sparse tree (preserving topology) and a set of expert neural networks (MLPs) with associated gate functions for the leaf nodes or lower levels [S1, unofficial].
+
+**Data Structures:**
+1.  **VDB Tree Structure:** Retained from the input. The root is a sparse Hash grid. The notation `[Hash, L1, L2, ...]` indicates the number of levels and their densities. For example, `[Hash, 5, 4, NN(3)]` implies a Hash root, followed by dense levels with logarithmic sizes (e.g., domains of $4096^3$, $128^3$, $8^3$) [S1, unofficial].
+2.  **Expert Networks (MLPs):** One MLP per subdomain.
+    -   **Regression MLPs:** Used for scalar and vector values. Maps floating-point voxel coordinates $(x, y, z)$ to the target value.
+    -   **Classifier MLPs:** Used for binary masks (indicating active value/child status).
+    -   **Architecture:** Multi-Layer Perceptrons. The specific configuration is denoted by `[Hash, L1, L2, NN(k)]` where $k$ is the output neuron count or hidden layer configuration. For example, `NN(3)` might imply 3 output neurons or a specific hidden layer size depending on the variant [S1, unofficial].
+    -   **Activation:** Fourier Feature Mappings (FFM) are used for the examples in the source [S1, unofficial].
+3.  **Gate Functions:** Non-learnable functions that determine the contribution of each expert network. Defined as a clamped tent function with a maximum value of 1, covering the subdomain including its halo [S1, unofficial].
+
+**Numbered Steps:**
+
+1.  **Domain Decomposition:** Partition the entire coordinate span of the sparse volume into partially overlapping subdomains. Each subdomain has a dedicated bounding box and a halo region [S1, unofficial].
+2.  **Gate Function Assignment:** For each subdomain $k$, define a gate function $G(\mathbf{x})_k$. This function is a clamped tent function centered on the subdomain, ensuring it covers the subdomain and its halo. The gate function is **not learnable** [S1, unofficial].
+3.  **Expert Network Training:**
+    -   For each subdomain, train an MLP to map input coordinates $\mathbf{x}$ to the target values (scalar/vector) or mask (binary) of the original VDB data within that subdomain.
+    -   **Loss Function:**
+        -   For scalar/vector values, use Mean Squared Error (MSE):
+            $$L_{MSE}(f, \hat{f}) = \frac{1}{N} \sum_{i=1}^N (f - \hat{f}_i)^2$$
+            where $f$ is the target value and $\hat{f}_i$ is the predicted value. Target values are scaled to $[-1, 1]$ for SDFs and kept in $[0, 1]$ for density volumes [S1, unofficial].
+        -   For binary masks, use Cross-Entropy loss [S1, unofficial].
+    -   **Training Strategy:**
+        -   Train concurrently on multiple GPUs. Assign groups of subdomains to each GPU.
+        -   Use a target error metric: Intersection of Union (IoU) > 99% for SDFs, or Root Mean Squared Error (RMSE) < 0.1 for density volumes [S1, unofficial].
+        -   For animated sequences, use **Temporal Warm-Starting**: Initialize the encoder for the current frame using the converged weights from the previous frame. If a new domain is added, encode it with a target learning rate, then a smaller learning rate [S1, unofficial].
+4.  **Inference (Decoding/Random Access):**
+    -   Given a query coordinate $\mathbf{x}$:
+    -   Evaluate the gate functions $G(\mathbf{x})_k$ for all relevant subdomains.
+    -   Identify active experts: Only compute for networks where $G(\mathbf{x})_k > 0$. Due to overlapping halos, up to eight gate functions can be active for a single coordinate [S1, unofficial].
+    -   Compute the output $\hat{y}$ as the weighted sum of expert outputs:
+        $$\hat{y} = \sum_{k=1}^n G(\mathbf{x})_k E_k(\mathbf{x})$$
+        where $n$ is the number of subdomains, $G(\mathbf{x})_k$ is the gate value, and $E_k(\mathbf{x})$ is the output of the expert network $k$ [S1, unofficial].
+    -   **Pruning:** If the query point falls into a tile (non-voxel) in the VDB tree structure, it is pruned, and no neural network inference is performed [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def gate_function(x, subdomain_center, subdomain_radius, halo_radius):
+    """
+    Non-learnable clamped tent gate function.
+    Returns 1 if x is within the subdomain core, linearly decays to 0 at the halo boundary, 0 otherwise.
+    """
+    dist = abs(x - subdomain_center)
+    if dist <= subdomain_radius:
+        return 1.0
+    elif dist <= subdomain_radius + halo_radius:
+        # Linear decay from 1 to 0
+        return 1.0 - (dist - subdomain_radius) / halo_radius
+    else:
+        return 0.0
+
+def query_neural_vdb(x, subdomains, vdb_tree):
+    """
+    Query the NeuralVDB structure for a value at coordinate x.
+    subdomains: List of dicts, each containing 'center', 'radius', 'halo_radius', 'expert_network'
+    vdb_tree: The sparse VDB structure used for pruning tiles.
+    """
+    # 1. Pruning: Check if x is in a tile (non-voxel) in the VDB tree
+    if not vdb_tree.is_voxel(x):
+        return 0.0 # Or appropriate default for empty space
+
+    # 2. Identify active experts
+    active_experts = []
+    for subdomain in subdomains:
+        # Assuming 1D for simplicity; extend to 3D by checking each axis or using Euclidean distance
+        # The source implies overlapping halos in 3D space.
+        # We assume subdomain defines a bounding box.
+        if is_in_subdomain_halo(x, subdomain):
+            gate_val = gate_function(x, subdomain['center'], subdomain['radius'], subdomain['halo_radius'])
+            if gate_val > 0:
+                expert_output = subdomain['expert_network'].forward(x)
+                active_experts.append((gate_val, expert_output))
+
+    # 3. Weighted Sum
+    if not active_experts:
+        return 0.0
+
+    total_weight = 0.0
+    weighted_sum = 0.0
+    for gate_val, expert_output in active_experts:
+        weighted_sum += gate_val * expert_output
+        total_weight += gate_val
+
+    # Average evaluated values weighted by gate functions
+    # Note: The formula sums G(x)_k * E_k(x). If gates don't sum to 1, this is a weighted sum.
+    # The text says "average the evaluated values weighted by the gate functions".
+    # This implies normalization by the sum of gate values if they are not normalized.
+    # However, the formula (3) is a direct sum. The text "average" might refer to the visual result
+    # or imply that the gates are normalized. Given "clamped tent... max value 1", they don't necessarily sum to 1.
+    # We will follow the formula (3) directly as it is explicit.
+    return weighted_sum
+
+def is_in_subdomain_halo(x, subdomain):
+    """Check if x is within the subdomain's halo region."""
+    # Implementation depends on specific geometry (box vs sphere).
+    # Source mentions "overlapping halos" and "up to eight" activations, suggesting a grid-based overlap.
+    # We assume a simple bounding box check for the halo.
+    min_bound = subdomain['center'] - (subdomain['radius'] + subdomain['halo_radius'])
+    max_bound = subdomain['center'] + (subdomain['radius'] + subdomain['halo_radius'])
+    return all(min_bound[i] <= x[i] <= max_bound[i] for i in range(3))
+```
+
+**Parameters:**
+-   **Max Active Gates:** 8 per coordinate [S1, unofficial].
+-   **Target IoU:** > 99% for SDFs [S1, unofficial].
+-   **Target RMSE:** < 0.1 for density volumes [S1, unofficial].
+-   **Blocked Range Size:** $512^3$ for multi-GPU job distribution [S1, unofficial].
+-   **GPU Heuristic:** Use multiple GPUs if `average_active_voxels * number_of_blocked_ranges >= 200 * number_of_GPUs` [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+-   **Overlapping Halos:** Multiple gate functions can activate for a single coordinate. This is handled by the weighted sum formula [S1, unofficial].
+-   **Load Balancing:** Sub-linear strong-scaling in multi-GPU encoding/decoding due to sequential steps (I/O, decomposition, gathering) and imbalanced subdomains [S1, unofficial].
+-   **Reconstruction Error:** The method is lossy. Errors manifest as "blobby" patterns on iso-surfaces [S1, unofficial].
+-   **Small Volumes:** If the volume is smaller than the configured subdomain size or has too few blocked ranges, using multiple GPUs is not beneficial [S1, unofficial].
+
+## Subtopics
+
+### [Offline Sequential Reconstruction](8790-offline-sequential-reconstruction.md)
+A reconstruction method for applications prioritizing low memory footprint over fast reconstruction time, using a single sequential pass over compressed data to reconstruct a standard VDB tree.
+
+## Operating characteristics
+-   **Time Complexity:** Random access time is a combination of VDB tree traversal (identical to NanoVDB) and neural network inference for a subset of points. It is more expensive than NanoVDB's nearest neighbor and tri-linear interpolation, similar to third-order (tri-cubic) interpolation, and cheaper than pure neural network predictions [S1, unofficial].
+-   **Memory Complexity:** Significantly reduced compared to standard VDB. Compression ratios up to 61.2 for SDF models and 140.9 for density volumes (e.g., Chameleon model) were achieved with the `[Hash, 5, NN(4), NN(3)]` variant [S1, unofficial].
+-   **Measured Performance:**
+    -   **Compression:** `[Hash, 5, NN(4), NN(3)]` reduced size to 6.268% of original VDB for some models [S1, unofficial].
+    -   **Rendering:** Bunny model ray-marching: 1316 ms for NeuralVDB `[Hash, 5, 4, NN(3)]` vs 75 ms (zeroth-order), 97 ms (first-order), and 1660 ms (third-order) for standard VDB [S1, unofficial].
+    -   **Encoding Speedup:** Temporal warm-starting boosted performance by 1.2x to 3.1x across various test cases (LeVeque's Test, Smoke Plume, etc.) [S1, unofficial].
+-   **Strengths:** High memory efficiency, compatibility with existing VDB pipelines, fast random access (compared to pure neural nets), support for multi-GPU training.
+-   **Limitations:** Lossy compression with "blobby" errors, sub-linear scaling with GPUs due to load balancing issues, slower than basic interpolation methods.
+-   **When to Use:** Applications requiring high-resolution sparse volume storage with low memory footprint and compatibility with VDB tools, where slight lossy artifacts are acceptable.
+-   **When Not to Use:** Applications requiring exact lossless reconstruction, or where ultra-fast nearest-neighbor access is critical and memory is not a constraint.
+
+## Background
+NeuralVDB was introduced as a hybrid method combining explicit sparse tree structures (VDB) with implicit neural representations. It builds on concepts from NanoVDB and OpenVDB, implemented in C++17 using CUDA and PyTorch [S1, unofficial]. It addresses the limitations of previous neural-implicit representations (like DeepSDF) which require normalized input spaces, by "over-fitting" to the input volume to allow arbitrary inputs [S1, unofficial]. It differs from sparsely-gated MoE by using non-learnable gates [S1, unofficial].
+
+## Sources
+[S1] NeuralVDB: High-resolution Sparse Volume Representation using Hierarchical Neural Networks | NVIDIA, https://www.youtube.com/watch?v=IfgeduMv_ns, fetched 2026-11-04 (unofficial)
