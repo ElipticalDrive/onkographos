@@ -3,132 +3,156 @@
 Also called: Integrating Real-Time Fluid Simulation with a Voxel Engine, Poxels Fluid Integration
 
 ## Overview
-This method integrates real-time incompressible fluid simulation with sparse voxel-based rasterization on graphics hardware, specifically using Direct3D geometry shaders for rendering and compute shaders for simulation [S1]. It solves the problem of efficiently visualizing dynamic fluid volumes in voxel engines by bypassing CPU-GPU data transfer bottlenecks. Unlike sibling methods that may rely on CPU-side voxel activation or different rendering primitives, this approach moves voxel activation and color ramping directly into the geometry shader, using stream-out to guarantee deterministic ordering of rendered primitives [S1].
+This method integrates real-time incompressible fluid simulation with sparse voxel-based rasterization on graphics hardware, specifically leveraging Direct3D geometry shaders for rendering and compute shaders for simulation [S1]. It solves the problem of efficiently visualizing fluid dynamics within a voxel engine by avoiding CPU-GPU data transfer bottlenecks through a fully GPU-resident pipeline [S1]. It differs from its parent method, [Simulation output](15-simulation-output.md), by defining specific numerical kernels (advection, divergence, Jacobi solve, projection) and data layouts required to perform simulation steps on the GPU [S1]. It differs from [Stable Fluids (GPU Implementation)](7906-stable-fluids-gpu-implementation.md) by explicitly coupling the simulation output to a voxel rendering engine using stream amplification and geometry shaders, rather than focusing solely on the solver mechanics [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D simulation domain (chunk) defined by resolution $(N_x, N_y, N_z)$. External forces (static or dynamic bodies) and initial velocity/pressure fields.
-*   **Output:** A rendered voxel scene representing the fluid. The simulation outputs a 3D speed grid texture. The rendering outputs a vertex buffer of active voxels rasterized as triangles.
+*   **Input:** A 3D simulation domain defined as a "Chunk" with resolution $(N_x, N_y, N_z)$, typically a cube. External forces (static or dynamic) and initial velocity/pressure fields.
+*   **Output:** A 3D speed grid texture (single precision floats) representing the fluid state, which is rendered as active voxels.
 
 **Data Structures:**
-The simulation uses GPU compute textures composed of single-precision float 4 types (`float4`) [S1].
-*   **Velocity Textures:** Three textures are used for velocity (current, previous, and temporary storage for advection/forces) [S1].
-*   **Pressure Textures:** Two textures are used for pressure (current and temporary storage for Jacobi iteration) [S1].
-*   **Speed Grid Texture:** The final result of the simulation, a 3D texture filled with single-precision floats representing the velocity field [S1].
-*   **Non-Zero Texture:** An optimization texture containing only non-zero velocity values, used to determine active voxels in the geometry shader [S1].
-*   **Staging Texture:** Used only in the CPU approach to transfer data from GPU memory to CPU memory [S1].
-
-**Algorithm Steps:**
-The simulation updates the velocity field at each time step by performing three main computations: advection, diffusion, and force application. Pressure is computed separately and subtracted from the velocity field [S1].
-
-1.  **Advection:** Advect the velocity field using a semi-Lagrangian method. This involves backward tracing and pre-correction [S1].
-2.  **Diffusion:** Diffuse momentum resulting from fluid resistance. This typically involves solving a linear system (e.g., via Jacobi iteration) [S1].
-3.  **Force Application:** Apply external forces (e.g., gravity, user input) to the velocity field [S1].
-4.  **Pressure Projection:**
-    a. Calculate the divergence of the velocity field [S1].
-    b. Solve the Poisson equation for pressure using an iterative solver (e.g., Jacobi iteration) [S1].
-    c. Subtract the pressure gradient from the velocity field to enforce incompressibility [S1].
-5.  **Voxel Activation (GPU-Optimized Approach):**
-    a. In the fluid simulation compute shader, identify non-zero velocity values.
-    b. Store these non-zero values in a dedicated texture [S1].
-    c. Dispatch the geometry shader with stream amplification.
-    d. The geometry shader reads the non-zero texture. If a voxel is active (non-zero), it generates vertex data for the voxel [S1].
-    e. Apply a color ramp function directly in the geometry shader. The function takes a float value (concentration/speed) between 0 and 1 and returns an RGB color [S1].
-    f. Use stream-out to continuously output vertex data to a cached vertex buffer, ensuring deterministic ordering [S1].
-6.  **Rasterization:** Rasterize the generated vertex buffer using regular triangle geometry [S1].
-
-**CPU Approach (Legacy/Comparison):**
-1.  Read the speed grid texture back to CPU memory via a staging texture [S1].
-2.  Map the staging texture in CPU memory and copy the 3D float array [S1].
-3.  Iterate through the dense 3D array. If a value is non-zero, activate the corresponding voxel [S1].
-4.  Apply a color ramp function to the value and pass the RGB color to the geometry shader [S1].
-5.  Dispatch geometry shader stream amplification with stream-out to the cached vertex buffer [S1].
-6.  Rasterize the generated vertex buffer [S1].
+The simulation uses GPU compute textures composed of single-precision float 4 types (`float4`).
+*   **Velocity Textures:** Three textures are used to store velocity fields (current, previous, and temporary) [S1].
+*   **Pressure Textures:** Two textures are used for pressure values (current and temporary) [S1].
+*   **Speed Grid Texture:** The final result of the five GPU compute stages, filled with single-precision floats, serving as the source fluid field for the voxel engine [S1].
+*   **Non-Zero Texture:** A texture containing only non-zero values, used by the geometry shader to determine voxel activation [S1].
+*   **Staging Texture:** Used only in the CPU approach to transfer data from GPU to CPU memory [S1].
 
 **Parameters:**
-*   **Simulation Grid Size:** Must match the size of the 3D voxel staging texture (in the CPU approach) or the input to the geometry shader (in the GPU approach) [S1].
-*   **Memory Alignment:** CPU memory buffers require appropriate memory address alignment [S1].
-*   **Typical Values:** Tested on chunk sizes of $32^3$, $64^3$, $96^3$, and $128^3$ [S1].
+*   **Chunk Size:** The simulation domain size. Typical tested sizes include $32^3$, $64^3$, $96^3$, and $128^3$ blocks [S1].
+*   **Alignment:** CPU memory buffers require appropriate memory address alignment when mapping staging textures [S1].
+*   **Color Ramp:** A function mapping a float value between 0 and 1 to an RGB color [S1].
 
-**Pseudocode (GPU-Optimized Simulation & Rendering):**
+**Numbered Steps:**
+1.  **Define Processing Stages:** Establish the Navier–Stokes processing stages: advection of the velocity field, acceleration caused by pressure, diffusion of momentum, and external forces [S1].
+2.  **Update Velocity:** Perform three computations to update the velocity at each time step: advection, diffusion, and force application [S1].
+3.  **Compute Pressure:** Calculate the pressure field and subtract the pressure gradient from the velocity field to enforce incompressibility [S1].
+4.  **Output Speed Grid:** The final result of the five GPU compute stages is output in a 3D speed grid texture [S1].
+5.  **Voxel Activation (CPU Approach):**
+    *   Read the speed grid texture back to CPU memory via a staging texture [S1].
+    *   Map the staging texture in CPU memory and copy the result from the 3D float array [S1].
+    *   Activate voxels if the corresponding value in the dense 3D array is not zero [S1].
+    *   Apply a color ramp function to the float value to return an RGB color passed to the geometry shader [S1].
+6.  **Voxel Activation (GPU Optimization):**
+    *   Move voxel activation logic from CPU to the geometry shader [S1].
+    *   Add a texture in the fluid simulation compute shader containing only non-zero values [S1].
+    *   Dispatch to geometry shader stream amplification with stream-out to a cached vertex buffer [S1].
+    *   Apply the color ramp directly in the geometry shader [S1].
+    *   Regular triangle geometry rasterization with the generated vertex buffer [S1].
+
+**Pseudocode:**
+The following pseudocode illustrates the GPU-optimized pipeline, as the CPU approach involves explicit memory copying and mapping which is platform-specific.
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Simulation Compute Shader Stage
-def simulate_fluid_step(velocity_textures, pressure_textures, forces, dt):
+# GPU Compute Shader Stage
+def compute_fluid_state(chunk_size, velocity_textures, pressure_textures, forces):
+    """
+    Performs Navier-Stokes simulation steps on GPU.
+    """
     # 1. Advection
-    advected_velocity = advect(velocity_textures.current, velocity_textures.previous, dt)
+    advected_velocity = advect(velocity_textures.current, velocity_textures.previous, chunk_size)
     
     # 2. Diffusion
-    diffused_velocity = diffuse(advected_velocity, dt)
+    diffused_velocity = diffuse(advected_velocity, chunk_size)
     
     # 3. Force Application
-    forced_velocity = diffused_velocity + forces * dt
+    forced_velocity = diffused_velocity + forces
     
     # 4. Pressure Projection
-    divergence = calculate_divergence(forced_velocity)
-    pressure = solve_poisson(divergence, pressure_textures)
-    velocity = forced_velocity - gradient(pressure)
+    divergence = calculate_divergence(forced_velocity, chunk_size)
+    pressure = solve_jacobi(divergence, pressure_textures.current, chunk_size)
+    pressure_gradient = calculate_gradient(pressure, chunk_size)
     
-    # 5. Output
-    velocity_textures.current = velocity
-    return velocity
+    # 5. Final Velocity
+    final_velocity = forced_velocity - pressure_gradient
+    
+    # 6. Output Speed Grid
+    speed_grid_texture = final_velocity
+    
+    # 7. Create Non-Zero Mask for Rendering
+    non_zero_texture = create_non_zero_mask(final_velocity, chunk_size)
+    
+    return speed_grid_texture, non_zero_texture
 
-# Geometry Shader Stage (Voxel Activation)
-@geometry_shader
-def render_voxels(non_zero_texture, vertex_buffer):
+def render_voxels(non_zero_texture, color_ramp_function):
+    """
+    Geometry Shader Stage for Voxel Rendering.
+    """
+    # Dispatch geometry shader with stream amplification
     for each voxel in non_zero_texture:
         if voxel.value != 0:
-            # Determine voxel position and size based on grid coordinates
-            pos = voxel.position
-            size = voxel.size
-            
-            # Generate vertices for the voxel (e.g., 6 faces of a cube)
-            vertices = generate_cube_vertices(pos, size)
+            # Determine voxel position and size
+            voxel_pos = get_voxel_position(voxel)
+            voxel_size = get_voxel_size(voxel)
             
             # Apply color ramp
-            concentration = abs(voxel.value) # Normalize or scale as needed
-            color = color_ramp(concentration)
+            intensity = normalize(voxel.value)
+            color = color_ramp_function(intensity)
             
-            # Attach color to vertices
-            for v in vertices:
-                v.color = color
+            # Generate vertex data for the voxel (e.g., a cube)
+            vertices = generate_cube_vertices(voxel_pos, voxel_size)
             
-            # Stream-out to vertex buffer
-            vertex_buffer.append(vertices)
-
-# Rasterization Stage
-def rasterize(vertex_buffer):
-    draw_triangles(vertex_buffer)
+            # Stream-out to cached vertex buffer
+            stream_out(vertices, color)
+            
+    # Rasterize the generated vertex buffer
+    rasterize_vertex_buffer()
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Obstacles:** The described simulation does not detect or respond to obstacles [S1].
+*   **Obstacle Detection:** The described simulation does not detect or respond to obstacles [S1].
 *   **Single Chunk:** The simulation is based on a single chunk and needs extension to multiple chunks for larger scenes [S1].
-*   **Precision:** Single-precision floats are used for textures [S1].
-*   **Memory Alignment:** CPU memory buffers must be properly aligned when using the CPU approach [S1].
+*   **Precision:** The use of single-precision floats is specified; precision issues may arise in large-scale simulations [S1].
+*   **Memory Alignment:** In the CPU approach, inappropriate memory address alignment for the CPU buffer can cause errors [S1].
 
 ## Subtopics
 
 ### [Stable Fluids (GPU Implementation)](7906-stable-fluids-gpu-implementation.md)
-A method for computing fluid velocity by discretizing the momentum equation on a fixed Eulerian grid and solving for velocity via advection, external forces, and pressure projection. Choose this when you need a robust, general-purpose fluid solver that can be integrated into the simulation stage of this method.
+A method for computing incompressible fluid velocity by discretizing the momentum equation on a fixed Eulerian grid and solving for velocity via advection, external forces, and pressure projection. It solves the problem of real-time fluid simulation on graphics hardware by leveraging 3D textures and slice-based rasterization to execute computational kernels. It differs from its parent method, [GPU-based Fluid Simulation with Voxel Rendering](7400-gpu-based-fluid-simulation-with-voxel-rendering.md), by specifically defining the numerical kernels (advection, divergence, Jacobi solve, projection) and data layouts required to perform the simulation steps on the GPU.
 
 ## Operating characteristics
-*   **Time Complexity:** The simulation steps (advection, diffusion, pressure solve) are generally $O(N)$ where $N$ is the number of voxels, assuming iterative solvers converge in a constant number of steps. The rendering complexity depends on the number of active voxels.
-*   **Memory Complexity:** $O(N)$ for storing velocity and pressure fields.
-*   **Measured Performance:**
-    *   **CPU Approach (GTX 950M, $64^3$ chunk):** 100 FPS (10.000 ms frame time). The "Copy from staging texture to CPU" step took 23,088,969 ns, while "Activate voxels and render" took 976,276 ns [S1].
-    *   **GPU-Only Approach (GTX 950M, $64^3$ chunk):** 180 FPS (5.556 ms frame time) [S1].
-    *   **GPU-Only Approach (GT 540M, $64^3$ chunk):** 180 FPS (5.556 ms frame time) [S1].
-    *   **Performance Improvement:** The GPU-only method improved performance from 30 FPS (original method, unspecified hardware) to 1100 FPS for a $64^3$ chunk [S1].
-*   **Strengths:** High performance due to elimination of CPU-GPU data transfer bottlenecks. Deterministic ordering of primitives via stream-out.
-*   **Limitations:** Does not handle obstacles. Limited to single-chunk simulations in the described implementation.
-*   **When to Use:** When real-time fluid visualization in a voxel engine is required and obstacle interaction is not a primary concern.
-*   **When Not to Use:** When obstacle collision detection is required or when simulating across multiple large chunks without additional extension.
+**Time and Memory Complexity:**
+*   The simulation scales linearly with the number of voxels in the chunk [S1].
+*   Memory usage is proportional to the chunk size, requiring multiple textures (3 velocity, 2 pressure) of single-precision float 4 types [S1].
+
+**Measured Performance:**
+*   **Hardware:** NVIDIA GeForce GTX 950M (GTX950M) and NVIDIA GeForce GT540M [S1].
+*   **CPU Approach (GTX950M, 64x64x64 chunk):**
+    *   FPS: 100 FPS (10.000 ms frame time) [S1].
+    *   Copy from staging texture to CPU: 23,088,969 ns [S1].
+    *   Activate voxels and render: 976,276 ns [S1].
+    *   Other steps (Advect, Backward advect, etc.) are significantly faster, taking < 35,000 ns each [S1].
+*   **GPU-Only Approach (GT540M, 64x64x64 chunk):**
+    *   FPS: 180 FPS (5.556 ms frame time) [S1].
+    *   Performance improvement: Up to 1100 FPS observed on GT540M with GPU-only method for 64x64x64 chunk [S1].
+    *   Original method (CPU approach) on GT540M: 30 FPS [S1].
+*   **Scaling (GTX950M, CPU Approach):**
+    *   32x32x32 (32,768 blocks): 401 FPS (2.494 ms) [S1].
+    *   64x64x64 (262,144 blocks): 100 FPS (10.000 ms) [S1].
+    *   96x96x96 (884,736 blocks): 20 FPS (50.000 ms) [S1].
+    *   128x128x128 (2,097,152 blocks): 14 FPS (71.429 ms) [S1].
+*   **Scaling (GT540M, GPU Approach):**
+    *   32x32x32 (32,768 blocks): 652 FPS (1.534 ms) [S1].
+    *   64x64x64 (262,144 blocks): 180 FPS (5.556 ms) [S1].
+    *   96x96x96 (884,736 blocks): 58 FPS (17.241 ms) [S1].
+    *   128x128x128 (2,097,152 blocks): 25 FPS (40.000 ms) [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** Significant performance improvement by avoiding CPU-GPU data transfer (GPU-only method). Deterministic ordering of rendered primitives via stream-out [S1].
+*   **Limitations:** Does not handle obstacles. Single-chunk limitation. Performance degrades with increasing chunk size, though GPU-only method is significantly faster than CPU approach [S1].
+
+**When to Use:**
+*   Use when real-time fluid visualization in a voxel engine is required and CPU-GPU bandwidth is a bottleneck.
+*   Use when obstacle interaction is not required or can be handled separately.
+
+**When Not to Use:**
+*   Do not use if obstacle collision detection is required within the simulation.
+*   Do not use if multi-chunk scalability is needed without further optimization.
 
 ## Background
-This method was proposed by Miller et al. (2014) and Vlietinck (2009) as an integration of GPU voxel-based rendering with Navier-Stokes fluid simulation [S1]. It builds on recent results in GPU-accelerated fluid simulation (Crane et al. 2007, Harris 2004) and voxel-based rendering (Miller et al. 2014) [S1]. The fluid simulation is based on the Navier-Stokes differential equations (Stam 2003) [S1]. The rendering engine used is Poxels (Miller et al. 2014) [S1]. The method was published in the *Computational Game Journal* in 2016 [S1].
+This method was proposed by Vlietinck in 2016, integrating recent results in GPU-accelerated fluid simulation (Crane et al. 2007 and Harris 2004) with voxel-based rendering (Miller et al. 2014) [S1]. It is based on the Navier–Stokes differential equations (Stam 2003) [S1]. The method was implemented using Direct3D, leveraging geometry shaders for rendering and compute shaders for simulation [S1]. It addresses the hurdles of integrating these technologies efficiently, specifically the performance cost of copying data between CPU and GPU [S1].
 
 ## Sources
 [S1] Integrating Real-Time Fluid Simulation with a Voxel Engine, https://doi.org/10.1007/s40869-016-0020-5, fetched 2026-10-26

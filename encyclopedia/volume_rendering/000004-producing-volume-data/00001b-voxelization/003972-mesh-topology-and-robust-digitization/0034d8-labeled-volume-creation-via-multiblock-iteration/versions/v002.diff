@@ -1,0 +1,206 @@
+--- v001.md
++++ v002.md
+@@ -4,79 +4,139 @@
+ 
+ ## Overview
+-This method generates a single `RectilinearGrid` volume from a `MultiBlock` mesh where each voxel is labeled with the integer ID of the specific sub-mesh block it intersects, rather than a binary inside/outside flag [S1, unofficial]. It sets itself apart from sibling methods like [Polygon Mesh Voxelization via Union of Sets](4605-polygon-mesh-voxelization-via-union-of-sets.md) by preserving block identity through iterative enclosed-point testing, and from [Improved Tetrahedral Mesh Generation for Voxelization](7476-improved-tetrahedral-mesh-generation-for-voxelization.md) by operating directly on polygonal surfaces without tetrahedralization [S1, unofficial].
++This method produces a single `RectilinearGrid` volume from a `MultiBlock` mesh input, where each voxel is labeled with the integer ID of the specific sub-mesh block it intersects, rather than a binary inside/outside flag [S1, unofficial]. It differs from sibling methods like [Relaxed Connectivity Voxelization](2481-relaxed-connectivity-voxelization.md) by providing explicit block attribution per voxel through iterative enclosed-point testing or data sampling, ensuring that the resulting volume preserves the topological identity of each mesh component [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- `mesh`: A `pyvista.MultiBlock` dataset containing multiple sub-meshes.
+-- `density`: Voxel size. Can be a single scalar (uniform) or a sequence of three scalars `(density_x, density_y, density_z)` [S1, unofficial].
+-- `check_surface`: Boolean flag (default `True`) to validate surface closure and manifoldness [S1, unofficial].
++The method supports two distinct implementation strategies: an iterative geometric approach using `select_enclosed_points` and a data-driven approach using `voxelize` combined with `sample` and `split_values`. Both produce a labeled volume but differ in computational strategy and data handling.
+ 
+-**Outputs:**
+-- `voi`: A `pyvista.RectilinearGrid` where the cell data array `InsideMesh` contains the 1-based index of the sub-mesh block that encloses each voxel. Voxels outside all blocks are labeled `0` [S1, unofficial].
++### Inputs and Outputs
++- **Input**: A `pyvista.MultiBlock` mesh containing multiple sub-meshes. Each sub-mesh should ideally be watertight or manifold for robust enclosed-point testing [S1, unofficial].
++- **Output**: A `pyvista.RectilinearGrid` where the `cell_data` array `InsideMesh` (or equivalent label array) contains integer IDs corresponding to the sub-mesh index (1-based) of the voxel's containing block [S1, unofficial].
+ 
+-**Data Structures:**
+-- `voi`: `RectilinearGrid` defined by coordinate arrays `x`, `y`, `z`.
+-- `InsideMesh`: 1D integer array of size `voi.n_cells`, initialized to zeros.
+-- `mask_vol`: Boolean array of size `voi.n_points`, indicating which grid points are enclosed by a specific sub-mesh.
+-- `cell_ids`: 1D integer array of unique voxel indices identified as enclosed.
++### Data Structures
++- **`RectilinearGrid`**: Defined by coordinate arrays `x`, `y`, `z`.
++- **`InsideMesh`**: A 1D integer array of size `voi.n_cells`, initialized to zeros.
++- **`mask_vol`**: A boolean array of size `voi.n_points`, indicating which grid points are enclosed by the current sub-mesh surface.
+ 
+-**Steps:**
+-1.  **Wrap and Validate:** Wrap the input `mesh` using `pyvista.wrap(mesh)`. If `density` is `None`, set it to `mesh.length / 100` [S1, unofficial].
+-2.  **Parse Density:**
+-    - If `density` is a scalar (`int`, `float`, or `np.number`), set `density_x = density_y = density_z = density` [S1, unofficial].
+-    - If `density` is a sequence or `np.ndarray`, unpack it into `density_x`, `density_y`, `density_z`.
+-    - Otherwise, raise `TypeError` [S1, unofficial].
+-3.  **Define Grid:**
+-    - Retrieve bounds: `x_min, x_max, y_min, y_max, z_min, z_max = mesh.bounds` [S1, unofficial].
+-    - Create coordinate arrays:
+-      $$x = \text{np.arange}(x_{min}, x_{max}, density_x)$$
+-      $$y = \text{np.arange}(y_{min}, y_{max}, density_y)$$
+-      $$z = \text{np.arange}(z_{min}, z_{max}, density_z)$$
+-    - Initialize `voi` as `pyvista.RectilinearGrid(x, y, z)` [S1, unofficial].
+-    - Initialize `voi['InsideMesh']` with zeros of length `voi.n_cells` [S1, unofficial].
+-4.  **Iterate Blocks:** For each `sub_mesh` in `mesh` with index `i` (starting from 0):
+-    a.  Set `sub_mesh_number = i + 1` [S1, unofficial].
+-    b.  Extract surface geometry: `surface = sub_mesh.extract_geometry()` [S1, unofficial].
+-    c.  **Pre-process Surface:**
+-        - If `surface.faces.size` is 0, raise `ValueError: 'Input mesh must have faces for voxelization.'` [S1, unofficial].
+-        - If `not surface.is_all_triangles`, call `surface.triangulate(inplace=True)` to reduce artifacts [S1, unofficial].
+-    d.  **Select Enclosed Points:**
+-        - Call `selection = voi.select_enclosed_points(surface, tolerance=0.0, check_surface=check_surface)` [S1, unofficial].
+-        - Extract boolean mask: `mask_vol = selection.point_data['SelectedPoints'].view(np.bool_)` [S1, unofficial].
+-    e.  **Identify Voxels:**
+-        - Get indices of true points: `point_indices = np.argwhere(mask_vol)` [S1, unofficial].
+-        - Extract points from `voi` at these indices and retrieve their original cell IDs:
+-          `cell_ids = np.unique(voi.extract_points(point_indices)['vtkOriginalCellIds'])` [S1, unofficial].
+-    f.  **Label Voxels:**
+-        - Assign the block ID to the volume: `voi['InsideMesh'][cell_ids] = sub_mesh_number` [S1, unofficial].
+-5.  **Return:** Return `voi` [S1, unofficial].
++### Parameters
++- **`mesh`**: The input `pyvista.DataSet` (specifically a `MultiBlock`) [S1, unofficial].
++- **`density`**: Float or array-like of floats. Defines voxel size. If `None`, defaults to `mesh.length / 100` [S1, unofficial].
++- **`check_surface`**: Boolean, default `True`. If `True`, raises a `RuntimeError` if the surface is not closed and manifold [S1, unofficial].
+ 
+-**Alternative Implementation (Sample and Split):**
+-An alternative approach, noted as potentially "hacky" due to double interpolation, uses `voxelize`, `sample`, `ptc`, and `split_values` [S1, unofficial]:
+-1.  Load mesh and add cell data labels (e.g., `mesh['labels'] = labels`) [S1, unofficial].
+-2.  Voxelize: `vox = pv.voxelize(mesh, density=0.01)` [S1, unofficial].
+-3.  Sample: `sampled = vox.sample(target=mesh, tolerance=1)`. Note: `tolerance` must be sufficiently large (e.g., 1 or `inf`) [S1, unofficial].
+-4.  Set active scalars: `sampled.set_active_scalars('labels')` [S1, unofficial].
+-5.  Convert point data to cell data: `sampled = sampled.ptc()` [S1, unofficial].
+-6.  Round labels: `sampled['labels'] = np.round(sampled['labels'])` [S1, unofficial].
+-7.  Split: `multiblock = sampled.split_values()` (requires `pyvista>=0.44.0`) [S1, unofficial].
++### Algorithm: Iterative Enclosed-Point Method
++This method iterates over each sub-mesh, determines which voxels are enclosed by its surface, and assigns a unique label.
+ 
+-**Pitfalls:**
+-- **Empty Mesh:** If the input mesh has no faces, the method raises a `ValueError` [S1, unofficial].
+-- **Non-Triangular Faces:** Non-triangular faces should be triangulated in-place to avoid artifacts [S1, unofficial].
+-- **Interpolation Artifacts:** In the alternative method, `sample` operates on point data, interpolating cell data. This requires `ptc` conversion and rounding, which may introduce inaccuracies [S1, unofficial].
+-- **Tolerance:** The `sample` filter requires a large tolerance to ensure correct data transfer [S1, unofficial].
++1.  **Wrap and Validate**: Wrap the input mesh using `pyvista.wrap(mesh)`. If `density` is `None`, set `density = mesh.length / 100`. Parse `density` into `density_x`, `density_y`, `density_z` (uniform if scalar, separate if sequence) [S1, unofficial].
++2.  **Grid Initialization**: Extract mesh bounds `(x_min, x_max, y_min, y_max, z_min, z_max)`. Create coordinate arrays:
++    $$ x = \text{np.arange}(x_{min}, x_{max}, density_x) $$
++    $$ y = \text{np.arange}(y_{min}, y_{max}, density_y) $$
++    $$ z = \text{np.arange}(z_{min}, z_{max}, density_z) $$
++    Initialize `voi` as `pyvista.RectilinearGrid(x, y, z)`. Initialize `voi['InsideMesh']` with zeros of size `voi.n_cells` [S1, unofficial].
++3.  **Iteration**: For each `sub_mesh` in `mesh` with index `i`:
++    a. Set `sub_mesh_number = i + 1`.
++    b. Extract geometry: `surface = sub_mesh.extract_geometry()`.
++    c. **Pre-processing**: If `surface.faces.size` is 0, raise `ValueError` ("Input mesh must have faces for voxelization."). If `not surface.is_all_triangles`, call `surface.triangulate(inplace=True)` to reduce artifacts [S1, unofficial].
++    d. **Enclosure Test**: Call `selection = voi.select_enclosed_points(surface, tolerance=0.0, check_surface=check_surface)`.
++    e. **Mask Extraction**: Get boolean mask from `selection.point_data['SelectedPoints']` viewed as `np.bool_`: `mask_vol = selection.point_data['SelectedPoints'].view(np.bool_)`.
++    f. **Cell ID Mapping**: Identify voxels (cells) corresponding to selected points. Extract points where `mask_vol` is true, retrieve their `vtkOriginalCellIds`, and take unique values:
++       $$ \text{cell\_ids} = \text{np.unique}(\text{voi.extract\_points}(\text{np.argwhere}(mask\_vol))['\text{vtkOriginalCellIds}']) $$
++    g. **Label Assignment**: Assign the label to the volume: `voi['InsideMesh'][cell_ids] = sub_mesh_number` [S1, unofficial].
++4.  **Return**: Return `voi` [S1, unofficial].
++
++### Algorithm: Sample and Split Method
++This method voxelize the entire mesh first, then samples cell data from the original mesh onto the voxel grid, and splits the result into a multi-block structure based on label values.
++
++1.  **Label Assignment**: Assign integer labels to the original mesh cells. For example, `labels = np.zeros((mesh.n_cells,))`; `labels[:700] = 1`; `mesh['labels'] = labels` [S1, unofficial].
++2.  **Voxelization**: Voxelize the mesh: `vox = pv.voxelize(mesh, density=0.01)` [S1, unofficial].
++3.  **Sampling**: Sample the voxelized mesh against the original mesh to transfer labels: `sampled = vox.sample(target=mesh, tolerance=1)`. Note: `tolerance` must be sufficiently large (e.g., 1 or `inf`) to ensure coverage [S1, unofficial].
++4.  **Data Conversion**: Set active scalars to `'labels'`: `sampled.set_active_scalars('labels')`. Convert point data to cell data: `sampled = sampled.ptc()`. Round labels to integers: `sampled['labels'] = np.round(sampled['labels'])` [S1, unofficial].
++5.  **Splitting**: Split the sampled data into a `MultiBlock` based on unique label values: `multiblock = sampled.split_values()`. Note: `split_values` is available in `pyvista>=0.44.0` [S1, unofficial].
++
++### Pseudocode: Iterative Enclosed-Point Method
++```python
++import numpy as np
++import pyvista as pv
++import collections
++
++def voxelize_volume_multiblock_label(mesh, density=None, check_surface=True):
++    """
++    Voxelize a MultiBlock mesh into a single RectilinearGrid volume.
++    Each voxel is labeled with the integer ID of the sub-mesh block it intersects.
++    """
++    # 1. Wrap and prepare density
++    mesh = pv.wrap(mesh)
++    if density is None:
++        density = mesh.length / 100
++    
++    if isinstance(density, (int, float, np.number)):
++        density_x, density_y, density_z = [density] * 3
++    elif isinstance(density, (collections.abc.Sequence, np.ndarray)):
++        density_x, density_y, density_z = density
++    else:
++        raise TypeError(f"Invalid density {density!r}, expected number or array-like.")
++
++    # 2. Initialize Grid
++    x_min, x_max, y_min, y_max, z_min, z_max = mesh.bounds
++    x = np.arange(x_min, x_max, density_x)
++    y = np.arange(y_min, y_max, density_y)
++    z = np.arange(z_min, z_max, density_z)
++    
++    voi = pv.RectilinearGrid(x, y, z)
++    voi['InsideMesh'] = np.zeros(voi.n_cells, dtype=int)
++
++    # 3. Iterate over sub-meshes
++    for i, sub_mesh in enumerate(mesh):
++        sub_mesh_number = i + 1
++        
++        # Extract geometry
++        surface = sub_mesh.extract_geometry()
++        
++        # Pre-processing: Check for empty mesh
++        if not surface.faces.size:
++            raise ValueError("Input mesh must have faces for voxelization.")
++        
++        # Pre-processing: Triangulate if necessary
++        if not surface.is_all_triangles:
++            surface.triangulate(inplace=True)
++        
++        # Enclosed points test
++        selection = voi.select_enclosed_points(
++            surface, tolerance=0.0, check_surface=check_surface
++        )
++        
++        # Get boolean mask of selected points
++        mask_vol = selection.point_data['SelectedPoints'].view(np.bool_)
++        
++        # Map selected points to cell IDs
++        # Extract points where mask is true, get their original cell IDs, and unique them
++        selected_indices = np.argwhere(mask_vol)
++        # Handle case where no points are selected
++        if selected_indices.size == 0:
++            continue
++            
++        extracted_points = voi.extract_points(selected_indices)
++        cell_ids = np.unique(extracted_points['vtkOriginalCellIds'])
++        
++        # Assign label
++        voi['InsideMesh'][cell_ids] = sub_mesh_number
++
++    return voi
++```
++
++### Edge Cases and Pitfalls
++- **Non-Triangular Faces**: If the surface contains non-triangular faces, artifacts may occur. Triangulate in-place before enclosed-point testing [S1, unofficial].
++- **Empty Mesh**: If `surface.faces.size` is 0 (point cloud), raise `ValueError` [S1, unofficial].
++- **Tolerance in Sample Method**: The `sample` filter only operates on point data. The `tolerance` parameter must be sufficiently large (e.g., 1 or `inf`) to ensure that voxel points are correctly associated with mesh cells [S1, unofficial].
++- **Point vs Cell Data**: The `sample` filter interpolates data as point data. If cell data is required, a `ptc` (point-to-cell) conversion is necessary, which involves double interpolation and may be considered "hacky" [S1, unofficial].
++- **Surface Closure**: If `check_surface=True` and the surface is not closed and manifold, a `RuntimeError` is raised [S1, unofficial].
+ 
+ ## Operating characteristics
+-**Time Complexity:** $O(B \cdot (V + P))$, where $B$ is the number of blocks, $V$ is the number of voxels, and $P$ is the number of grid points. The dominant cost is the `select_enclosed_points` operation for each block [S1, unofficial].
+-**Memory Complexity:** $O(V + P)$ for the volume and point data structures [S1, unofficial].
+-**Performance:** Performance scales linearly with the number of blocks and voxel resolution. The iterative approach is robust for small to medium numbers of blocks but may become slow for very high-resolution grids with many blocks [S1, unofficial].
+-**Strengths:** Produces a single labeled volume; handles arbitrary block IDs; robust surface checking [S1, unofficial].
+-**Limitations:** Iterative nature can be slow for many blocks; requires closed, manifold surfaces for accurate enclosed point detection [S1, unofficial].
+-**When to use:** When block identity is required in the voxelized output and the mesh consists of closed, manifold sub-meshes [S1, unofficial].
+-**When not to use:** For open surfaces or when performance is critical for very high-resolution grids with many blocks [S1, unofficial].
++- **Time Complexity**: The iterative method is $O(N \cdot M)$, where $N$ is the number of sub-meshes and $M$ is the number of voxels, due to the enclosed-point test per sub-mesh. The sample method is dominated by the voxelization and sampling steps, which are generally efficient but depend on mesh complexity and voxel resolution.
++- **Memory Complexity**: $O(V)$, where $V$ is the number of voxels, for storing the `RectilinearGrid` and label arrays.
++- **Strengths**: Provides explicit block attribution. The iterative method is robust for watertight meshes. The sample method is concise for transferring existing cell data.
++- **Limitations**: The iterative method requires each sub-mesh to be individually processed. The sample method relies on `split_values` which may not be available in older PyVista versions and involves interpolation artifacts [S1, unofficial].
++- **When to Use**: Use when the goal is to preserve the identity of each mesh component in the voxelized volume. Use the iterative method for watertight meshes and the sample method when cell data is already available and needs to be transferred.
+ 
+ ## Background
+-This method was discussed in the context of PyVista development to support labeled volume creation for MultiBlock meshes [S1, unofficial]. It was proposed as a solution to create voxel volumes where each cell is labeled with the ID of the intersecting sub-mesh block, addressing a gap in standard voxelization tools that typically produce binary or scalar fields [S1, unofficial]. The alternative "Sample and Split" method was also discussed as a workaround using existing filters, though it was noted to have interpolation drawbacks [S1, unofficial].
++This method originates from discussions in the PyVista GitHub repository regarding the creation of labeled volumes for `MultiBlock` meshes [S1, unofficial]. It was proposed as a solution to extend the standard `voxelize` functionality to handle multiple mesh blocks with distinct labels, leveraging existing filters like `select_enclosed_points`, `sample`, and `split_values` [S1, unofficial].
+ 
+ ## Sources

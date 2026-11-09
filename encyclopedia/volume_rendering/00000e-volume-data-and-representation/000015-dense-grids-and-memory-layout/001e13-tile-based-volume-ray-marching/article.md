@@ -1,231 +1,208 @@
 # Tile-based Volume Ray Marching
 
+Also called: Tiled Volume Ray Marching, Z-Tiled Volume Rendering
 
 ## Overview
-Tile-based volume ray marching is a dense grid rendering technique that stores 3D volume data in a 1D texture array organized into tiles, using ray marching to sample the volume and composite the result using front-to-back accumulation [S1, unofficial]. It solves the problem of mapping large 3D scalar fields onto 2D texture hardware by decomposing the Z-axis into discrete tiles, allowing efficient sampling via linear interpolation between adjacent tile slices [S1, unofficial]. It is distinguished from standard 3D texture sampling by its explicit tile-indexing arithmetic and from bricking by its reliance on a 1D texture array layout with linear interpolation rather than discrete brick selection [S1, unofficial].
+Tile-based volume ray marching is a GPU-accelerated volume rendering technique that partitions the 3D volume domain into a 1D texture array organized by Z-tiles, using front-to-back ray marching to sample and composite the result [S1, unofficial]. It solves the problem of inefficient memory access and cache misses in large dense volumes by aligning texture storage with the traversal order of rays along the Z-axis, thereby improving spatial locality [S1, unofficial]. It is distinguished from standard 3D texture sampling by its explicit 1D array indexing scheme for Z-tiles, which allows for finer control over tile dimensions and memory layout, and from brick-based storage by its simpler, non-hierarchical tiling structure [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs**
-*   **Input:** A 3D volume defined by normalized coordinates $(x, y, z) \in [0, 1]^3$ [S1, unofficial].
-*   **Input:** Volume data stored in a 1D texture array `uVolData`, where each slice corresponds to a 2D texture of size $uDimension \times uDimension$ [S1, unofficial].
-*   **Input:** Ray entry and exit coordinates provided as `frontColor` (entry point) and `backColor` (exit point) in screen space [S1, unofficial].
-*   **Output:** Final accumulated color `gl_FragColor` [S1, unofficial].
+**Inputs and Outputs:**
+- **Input:** 3D volume scalar data stored in a 1D texture array (`uVolData`), back-color buffer (`uBackCoord`), ray origin and direction encoded in `frontColor` (varying), and uniform parameters for tile geometry and normalization.
+- **Output:** Final composited color in `gl_FragColor`.
 
-**Data Structures**
-The volume data is stored in a 1D texture array `uVolData` [S1, unofficial]. The array is conceptually divided into $uTiles$ slices along the Z-axis [S1, unofficial]. Each slice is a 2D texture of dimensions $uDimension \times uDimension$ [S1, unofficial]. The total number of texels in the 1D array is $uTiles \times uDimension \times uDimension$ [S1, unofficial].
+**Data Structures:**
+- `uVolData`: A 1D texture array where each "slice" corresponds to a Z-tile. The total number of Z-tiles is `uTiles`. Each tile has dimensions `uTileWidth` x `uTileHeight`. The underlying 2D texture sub-images have dimension `uDimension` x `uDimension`.
+- `uBackCoord`: A 2D texture storing the background color for each pixel.
+- `frontColor`: A varying vector4 passed from the vertex shader, containing the ray origin (xyz) and potentially other ray parameters. In the fragment shader, it is used as the initial ray position `vpos`.
+- `backColor`: Sampled from `uBackCoord` using the projected texture coordinate.
 
-**Parameters**
-*   $uTiles$: Number of tiles along the Z-axis [S1, unofficial].
-*   $uTileWidth$: Width of each tile in pixels [S1, unofficial].
-*   $uTileHeight$: Height of each tile in pixels [S1, unofficial].
-*   $uDimension$: Dimension (width/height) of the 2D texture sub-images [S1, unofficial].
-*   $uMinimum$: Minimum scalar value in the volume [S1, unofficial].
-*   $uMaximum$: Maximum scalar value in the volume [S1, unofficial].
-*   $uRange$: Normalization range, $uMaximum - uMinimum$ [S1, unofficial].
-*   $uOpacity$: Global opacity multiplier [S1, unofficial].
-*   $uLight$: Global lighting intensity multiplier [S1, unofficial].
-*   $MAXSTEPS$: Constant integer representing the maximum number of ray marching steps [S1, unofficial].
+**Parameters:**
+- `uTiles`: Number of tiles along the Z-axis [S1, unofficial].
+- `uTileWidth`: Width of each tile in pixels [S1, unofficial].
+- `uTileHeight`: Height of each tile in pixels [S1, unofficial].
+- `uDimension`: Dimension of the 2D texture sub-images [S1, unofficial].
+- `uMinimum`: Minimum scalar value in the volume [S1, unofficial].
+- `uMaximum`: Maximum scalar value in the volume [S1, unofficial].
+- `uRange`: Normalization range, `uMaximum - uMinimum` [S1, unofficial].
+- `uOpacity`: Global opacity multiplier [S1, unofficial].
+- `uLight`: Global lighting intensity multiplier [S1, unofficial].
+- `MAXSTEPS`: Constant integer, number of ray marching steps per pixel [S1, unofficial].
 
-**Algorithm Steps**
+**Algorithm Steps:**
 
-1.  **Ray Initialization**:
-    *   Compute normalized screen texture coordinates from the varying `position`:
-        $$textureCoord = \frac{position.xy}{position.w}$$
-        $$textureCoord.x = 0.5 \cdot textureCoord.x + 0.5$$
-        $$textureCoord.y = 0.5 \cdot textureCoord.y + 0.5$$
-    *   Fetch the back color (exit point) from `uBackCoord` at `textureCoord`:
-        $$backColor = \text{texture2D}(uBackCoord, textureCoord)$$
-    *   The entry point is stored in the varying `frontColor` [S1, unofficial].
-    *   Compute the ray step vector:
-        $$step = \frac{backColor.rgb - frontColor.rgb}{MAXSTEPS}$$
-    *   Initialize the current position $vpos$ to `frontColor` and accumulators `accum` and `sample` to zero [S1, unofficial].
+1.  **Ray Setup:**
+    - Calculate normalized texture coordinates from the varying `position`:
+      $$ \text{textureCoord} = \frac{\text{position.xy}}{\text{position.w}} $$
+      $$ \text{textureCoord.x} = 0.5 \times \text{textureCoord.x} + 0.5 $$
+      $$ \text{textureCoord.y} = 0.5 \times \text{textureCoord.y} + 0.5 $$
+    - Sample the background color:
+      $$ \text{backColor} = \text{texture2D}(uBackCoord, \text{textureCoord}) $$
+    - Extract ray origin from `frontColor` (varying):
+      $$ \text{vpos} = \text{frontColor} $$
+    - Compute the step vector:
+      $$ \text{step} = \frac{\text{backColor.rgb} - \text{frontColor.rgb}}{\text{MAXSTEPS}} $$
+    - Initialize accumulation variables:
+      $$ \text{accum} = (0.0, 0.0, 0.0, 0.0) $$
+      $$ \text{sample} = (0.0, 0.0, 0.0, 0.0) $$
 
-2.  **Volume Sampling (`getTextureValue`)**:
-    For a given volume position $P = (x, y, z)$:
-    *   Calculate the Z-tile indices for the current position and the next slice:
-        $$zp1 = \lfloor z \cdot uTiles \rfloor$$
-        $$zp2 = zp1 + 1$$
-    *   Calculate the X and Y pixel coordinates within the tile:
-        $$xp = \lfloor x \cdot uTileWidth \rfloor$$
-        $$yp = \lfloor y \cdot uTileHeight \rfloor$$
-    *   Calculate the 1D array indices for the two Z-slices:
-        $$index1 = zp1 \cdot uTileWidth \cdot uTileHeight + yp \cdot uTileWidth + xp$$
-        $$index2 = zp2 \cdot uTileWidth \cdot uTileHeight + yp \cdot uTileWidth + xp$$
-    *   Convert 1D indices to 2D texture coordinates $(xt, yt)$ for the 2D sub-textures:
-        $$xt1 = \text{mod}(index1, uDimension)$$
-        $$yt1 = \lfloor index1 / uDimension \rfloor$$
-        $$xt2 = \text{mod}(index2, uDimension)$$
-        $$yt2 = \lfloor index2 / uDimension \rfloor$$
-    *   Normalize to $[0, 1]$ range:
-        $$texPos1 = \left( \frac{xt1}{uDimension}, \frac{yt1}{uDimension} \right)$$
-        $$texPos2 = \left( \frac{xt2}{uDimension}, \frac{yt2}{uDimension} \right)$$
-    *   Sample the volume data:
-        $$val1 = \text{texture2D}(uVolData, texPos1).x$$
-        $$val2 = \text{texture2D}(uVolData, texPos2).x$$
-    *   Normalize values to $[0, 1]$:
-        $$norm1 = \frac{val1 - uMinimum}{uRange}$$
-        $$norm2 = \frac{val2 - uMinimum}{uRange}$$
-    *   Interpolate based on the fractional Z position within the tile:
-        $$t = (z \cdot uTiles) - zp1$$
-        $$\text{return mix}(norm1, norm2, t)$$
+2.  **Ray Marching Loop:**
+    For $i$ from $0$ to $\text{MAXSTEPS} - 1$:
+    - Get the volume value at the current position $\text{vpos.xyz}$ by calling `getTextureValue`.
+    - Set up transfer function input:
+      $$ \text{transferPosition.x} = \text{getTextureValue}(\text{vpos.xyz}) $$
+      $$ \text{transferPosition.y} = 0.5 $$
+    - Convert to sample value:
+      $$ \text{value} = \text{vec4}(\text{transferPosition.x}) $$
+    - Compute sample alpha:
+      $$ \text{sample.a} = \text{value.a} \times \text{uOpacity} \times \frac{1.0}{\text{MAXSTEPS}} $$
+    - Compute sample RGB:
+      $$ \text{sample.rgb} = \text{value.rgb} \times \text{sample.a} \times \text{uLight} $$
+    - Accumulate color (front-to-back):
+      $$ \text{accum.rgb} += (1.0 - \text{accum.a}) \times \text{sample.rgb} $$
+    - Accumulate alpha:
+      $$ \text{accum.a} += \text{sample.a} $$
+    - Advance ray position:
+      $$ \text{vpos.xyz} += \text{step} $$
+    - Break if $\text{vpos.x} > 1.0$ or $\text{vpos.y} > 1.0$ or $\text{vpos.z} > 1.0$ or $\text{accum.a} \ge 1.0$.
 
-3.  **Ray Marching Loop**:
-    Iterate $i$ from $0$ to $MAXSTEPS - 1$:
-    *   Sample the volume at current position $vpos.xyz$ using `getTextureValue`. Let the result be $v$ [S1, unofficial].
-    *   Set transfer function input:
-        $$transferPosition.x = v$$
-        $$transferPosition.y = 0.5$$
-    *   Compute sample alpha and RGB:
-        $$sample.a = v \cdot uOpacity \cdot \frac{1.0}{MAXSTEPS}$$
-        $$sample.rgb = v \cdot sample.a \cdot uLight$$
-    *   Front-to-back accumulation:
-        $$accum.rgb += (1.0 - accum.a) \cdot sample.rgb$$
-        $$accum.a += sample.a$$
-    *   Advance position:
-        $$vpos.xyz += step$$
-    *   **Termination**: Break if $vpos.x > 1.0$, $vpos.y > 1.0$, $vpos.z > 1.0$, or $accum.a \ge 1.0$ [S1, unofficial].
+3.  **Output:**
+    - Set `gl_FragColor = accum`.
 
-4.  **Output**:
-    *   Set `gl_FragColor = accum` [S1, unofficial].
+**`getTextureValue` Function:**
+This function maps a 3D volume position to a normalized scalar value using the tiled 1D texture array layout.
 
-**Pseudocode**
+1.  Calculate Z-tile indices:
+    $$ \text{zp1} = \lfloor \text{volumePosition.z} \times \text{uTiles} \rfloor $$
+    $$ \text{zp2} = \text{zp1} + 1.0 $$
+2.  Calculate X and Y pixel coordinates within the tile:
+    $$ \text{xp} = \lfloor \text{uTileWidth} \times \text{volumePosition.x} \rfloor $$
+    $$ \text{yp} = \lfloor \text{uTileHeight} \times \text{volumePosition.y} \rfloor $$
+3.  Calculate 1D array indices for the two Z-tiles:
+    $$ \text{index1} = \text{zp1} \times \text{uTileWidth} \times \text{uTileHeight} + \text{yp} \times \text{uTileWidth} + \text{xp} $$
+    $$ \text{index2} = \text{zp2} \times \text{uTileWidth} \times \text{uTileHeight} + \text{yp} \times \text{uTileWidth} + \text{xp} $$
+4.  Convert 1D indices to 2D texture coordinates for the underlying 2D texture sub-images:
+    $$ \text{xt1} = \text{mod}(\text{index1}, \text{uDimension}) $$
+    $$ \text{yt1} = \lfloor \text{index1} / \text{uDimension} \rfloor $$
+    $$ \text{xt2} = \text{mod}(\text{index2}, \text{uDimension}) $$
+    $$ \text{yt2} = \lfloor \text{index2} / \text{uDimension} \rfloor $$
+5.  Normalize to [0, 1]:
+    $$ \text{texturePosition1} = (\frac{\text{xt1}}{\text{uDimension}}, \frac{\text{yt1}}{\text{uDimension}}) $$
+    $$ \text{texturePosition2} = (\frac{\text{xt2}}{\text{uDimension}}, \frac{\text{yt2}}{\text{uDimension}}) $$
+6.  Sample the volume data:
+    $$ \text{value1} = \text{texture2D}(uVolData, \text{texturePosition1}).x $$
+    $$ \text{value2} = \text{texture2D}(uVolData, \text{texturePosition2}).x $$
+7.  Normalize values:
+    $$ \text{value1} = \frac{\text{value1} - \text{uMinimum}}{\text{uRange}} $$
+    $$ \text{value2} = \frac{\text{value2} - \text{uMinimum}}{\text{uRange}} $$
+8.  Interpolate between the two Z-tiles based on the fractional Z position within the tile:
+    $$ \text{fraction} = (\text{volumePosition.z} \times \text{uTiles}) - \text{zp1} $$
+    $$ \text{return mix}(\text{value1}, \text{value2}, \text{fraction}) $$
+
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def tile_based_volume_ray_march(front_color, back_color, uTiles, uTileWidth, uTileHeight, uDimension, uMinimum, uRange, uOpacity, uLight, MAXSTEPS, texture_sampler):
-    """
-    Renders a volume using tile-based ray marching.
-    
-    Args:
-        front_color: tuple/list of 4 floats, ray origin (xyz) and initial color (rgba).
-        back_color: tuple/list of 4 floats, ray exit point (xyz) and background color (rgba).
-        uTiles: float, number of tiles along Z.
-        uTileWidth: float, width of tile in pixels.
-        uTileHeight: float, height of tile in pixels.
-        uDimension: float, dimension of 2D texture sub-images.
-        uMinimum: float, min volume value.
-        uRange: float, volume value range (max - min).
-        uOpacity: float, global opacity multiplier.
-        uLight: float, global light multiplier.
-        MAXSTEPS: int, max steps.
-        texture_sampler: function, samples a 2D texture at normalized (u, v) coordinates.
-        
-    Returns:
-        list of 4 floats, final accumulated color [r, g, b, a].
-    """
-    # Initialize accumulators
-    accum = [0.0, 0.0, 0.0, 0.0]
-    sample = [0.0, 0.0, 0.0, 0.0]
-    
-    # Ray setup: vpos starts at front_color.xyz
-    vpos = [front_color[0], front_color[1], front_color[2]]
-    
-    # Compute step vector
-    step = [(back_color[0] - front_color[0]) / MAXSTEPS, 
-            (back_color[1] - front_color[1]) / MAXSTEPS, 
-            (back_color[2] - front_color[2]) / MAXSTEPS]
-    
-    for _ in range(MAXSTEPS):
-        # Sample volume
-        v = get_texture_value(vpos, uTiles, uTileWidth, uTileHeight, uDimension, uMinimum, uRange, texture_sampler)
-        
-        # Compute sample properties
-        sample_a = v * uOpacity * (1.0 / MAXSTEPS)
-        # Source scales all RGB channels equally by the scalar value
-        sample_rgb = [v * sample_a * uLight, v * sample_a * uLight, v * sample_a * uLight]
-        
-        # Accumulate
-        accum[0] += (1.0 - accum[3]) * sample_rgb[0]
-        accum[1] += (1.0 - accum[3]) * sample_rgb[1]
-        accum[2] += (1.0 - accum[3]) * sample_rgb[2]
-        accum[3] += sample_a
-        
-        # Advance
-        vpos = [vpos[0] + step[0], vpos[1] + step[1], vpos[2] + step[2]]
-        
-        # Termination checks
-        if vpos[0] > 1.0 or vpos[1] > 1.0 or vpos[2] > 1.0 or accum[3] >= 1.0:
-            break
-            
-    return accum
+# Pseudocode for the fragment shader logic
+# Inputs: position (vec4), frontColor (vec4), uBackCoord (sampler2D), uVolData (sampler2D)
+# Uniforms: uTiles, uTileWidth, uTileHeight, uDimension, uMinimum, uRange, uOpacity, uLight
+# Constant: MAXSTEPS
 
-def get_texture_value(volume_position, uTiles, uTileWidth, uTileHeight, uDimension, uMinimum, uRange, texture_sampler):
-    """
-    Samples the tiled volume data.
+def get_texture_value(volume_position, uTiles, uTileWidth, uTileHeight, uDimension, uMinimum, uRange, uVolData):
+    # Calculate Z-tile indices
+    zp1 = floor(volume_position.z * uTiles)
+    zp2 = zp1 + 1.0
     
-    Args:
-        volume_position: tuple/list of 3 floats, normalized (0-1) coordinates.
-        uTiles: float.
-        uTileWidth: float.
-        uTileHeight: float.
-        uDimension: float.
-        uMinimum: float.
-        uRange: float.
-        texture_sampler: function, samples a 2D texture at normalized coordinates.
-        
-    Returns:
-        float, normalized volume value.
-    """
-    z, x, y = volume_position
+    # Calculate X and Y pixel coordinates within the tile
+    xp = floor(uTileWidth * volume_position.x)
+    yp = floor(uTileHeight * volume_position.y)
     
-    # Z-tile indices
-    zp1 = int(z * uTiles)  # floor
-    zp2 = zp1 + 1
-    
-    # X/Y pixel coordinates
-    xp = int(x * uTileWidth)
-    yp = int(y * uTileHeight)
-    
-    # 1D array indices
+    # Calculate 1D array indices for the two Z-tiles
     index1 = zp1 * uTileWidth * uTileHeight + yp * uTileWidth + xp
     index2 = zp2 * uTileWidth * uTileHeight + yp * uTileWidth + xp
     
-    # 2D texture coordinates
-    xt1 = index1 % uDimension
-    yt1 = index1 // uDimension
+    # Convert 1D indices to 2D texture coordinates for the underlying 2D texture sub-images
+    xt1 = mod(index1, uDimension)
+    yt1 = floor(index1 / uDimension)
     
-    xt2 = index2 % uDimension
-    yt2 = index2 // uDimension
+    xt2 = mod(index2, uDimension)
+    yt2 = floor(index2 / uDimension)
     
-    # Normalized coordinates
-    tex_pos1 = (xt1 / uDimension, yt1 / uDimension)
-    tex_pos2 = (xt2 / uDimension, yt2 / uDimension)
+    # Normalize to [0, 1]
+    texture_position1 = vec2(xt1 / uDimension, yt1 / uDimension)
+    texture_position2 = vec2(xt2 / uDimension, yt2 / uDimension)
     
-    # Sample
-    val1 = texture_sampler(tex_pos1)
-    val2 = texture_sampler(tex_pos2)
+    # Sample the volume data
+    value1 = texture2D(uVolData, texture_position1).x
+    value2 = texture2D(uVolData, texture_position2).x
     
-    # Normalize
-    if uRange == 0:
-        return 0.0  # Guard against division by zero [G]
-    norm1 = (val1 - uMinimum) / uRange
-    norm2 = (val2 - uMinimum) / uRange
+    # Normalize values
+    value1 = (value1 - uMinimum) / uRange
+    value2 = (value2 - uMinimum) / uRange
     
-    # Interpolate
-    t = (z * uTiles) - zp1
-    return norm1 + t * (norm2 - norm1)
+    # Interpolate between the two Z-tiles based on the fractional Z position within the tile
+    fraction = (volume_position.z * uTiles) - zp1
+    return mix(value1, value2, fraction)
+
+def main():
+    # Ray Setup
+    texture_coord = position.xy / position.w
+    texture_coord.x = 0.5 * texture_coord.x + 0.5
+    texture_coord.y = 0.5 * texture_coord.y + 0.5
+    
+    back_color = texture2D(uBackCoord, texture_coord)
+    vpos = frontColor # Ray origin
+    
+    step = (back_color.rgb - front_color.rgb) / MAXSTEPS
+    
+    accum = vec4(0.0, 0.0, 0.0, 0.0)
+    sample = vec4(0.0, 0.0, 0.0, 0.0)
+    
+    for i in range(MAXSTEPS):
+        # Get volume value
+        transfer_position_x = get_texture_value(vpos.xyz, uTiles, uTileWidth, uTileHeight, uDimension, uMinimum, uRange, uVolData)
+        value = vec4(transfer_position_x)
+        
+        # Compute sample alpha and RGB
+        sample.a = value.a * uOpacity * (1.0 / MAXSTEPS)
+        sample.rgb = value.rgb * sample.a * uLight
+        
+        # Accumulate
+        accum.rgb += (1.0 - accum.a) * sample.rgb
+        accum.a += sample.a
+        
+        # Advance ray
+        vpos.xyz += step
+        
+        # Break conditions
+        if vpos.x > 1.0 or vpos.y > 1.0 or vpos.z > 1.0 or accum.a >= 1.0:
+            break
+            
+    gl_FragColor = accum
 ```
 
-**Edge Cases and Pitfalls**
-*   **Boundary Conditions**: The loop breaks if $vpos > 1.0$ after advancing. If the ray origin is outside the $[0,1]^3$ box, the loop terminates immediately, returning zero accumulation [S1, unofficial].
-*   **Precision**: The use of `floor` and `mod` for index calculation requires sufficient floating-point precision to avoid index collisions or gaps, especially for large $uDimension$ values [G].
-*   **Normalization**: If $uRange$ is zero, division by zero occurs. This must be guarded against in implementation [G].
-*   **Tile Alignment**: The method assumes $uTileWidth$ and $uTileHeight$ align with the texture dimensions. Mismatches can cause sampling errors at tile boundaries [G].
+**Edge Cases and Pitfalls:**
+- **Boundary Conditions:** The loop breaks if `vpos.x`, `vpos.y`, or `vpos.z` exceeds 1.0. This assumes the volume is defined in the [0,1] cube. If the ray exits the volume early, the loop terminates, which is correct. However, if the ray origin is outside the volume, the initial steps might be invalid. The source does not specify handling for rays that start outside the volume but intersect it later. [G] A common practice is to clamp the ray origin or check for intersection with the volume bounding box before starting the march.
+- **Precision:** The use of `floor` and `mod` for index calculation can be sensitive to floating-point precision errors, especially near tile boundaries. This might lead to discontinuities or artifacts if the volume position is very close to a tile boundary. [G] Using a small epsilon or smoothing the interpolation near boundaries might mitigate this.
+- **Tile Dimensions:** The source assumes `uTileWidth`, `uTileHeight`, and `uDimension` are consistent. If `uTileWidth` or `uTileHeight` are not multiples of `uDimension`, the indexing logic might produce out-of-bounds texture coordinates. [G] It is recommended to ensure that `uTileWidth` and `uTileHeight` are less than or equal to `uDimension` to avoid wrapping issues.
 
 ## Subtopics
 
+### [Tiled Fitting with Hann Tapering](3103-tiled-fitting-with-hann-tapering.md)
+Tiled Fitting with Hann Tapering is a volume data fitting strategy that partitions large 3D volumes into overlapping tiles to fit Gaussian splat models independently, thereby enabling processing on hardware with limited memory. It solves the problem of GPU memory exhaustion for large volumes (e.g., $2048^3$ float32) by decomposing the domain into smaller, manageable chunks. It is distinguished from non-overlapping tiling by the application of a raised-cosine (Hann) taper in overlap regions, which ensures a partition-of-unity and prevents visible seams, keeping the seam-to-interior residual ratio within 1.01–1.13 of a monolithic fit. It builds on [Tile-based Volume Ray Marching](1678-tile-based-volume-ray-marching.md) by adding boundary apodisation to eliminate tiling artifacts.
+
 ## Operating characteristics
-*   **Time Complexity**: $O(MAXSTEPS)$ per pixel, where $MAXSTEPS$ is the number of ray marching steps [S1, unofficial]. The volume sampling function involves constant-time arithmetic and two texture lookups [S1, unofficial].
-*   **Memory Complexity**: $O(uTiles \cdot uDimension^2)$ for the volume data storage [S1, unofficial].
-*   **Performance**: The method is efficient for moderate-resolution volumes but may suffer from texture cache thrashing if $uDimension$ is large or if the tile layout causes non-coherent memory access patterns [G].
-*   **Strengths**: Simple implementation; leverages standard 2D texture hardware; linear interpolation provides smooth results across tile boundaries [S1, unofficial].
-*   **Limitations**: Limited to dense grids; no adaptive step size; memory usage scales linearly with volume size; interpolation across tile boundaries may introduce artifacts if the volume data is not smooth or if the tile size is too small [G].
-*   **When to use**: Suitable for real-time rendering of moderate-sized volumes on hardware with limited texture memory, where a simple, uniform sampling strategy is acceptable [G].
-*   **When not to use**: Unsuitable for very large volumes requiring sparse representation, or for high-quality rendering requiring adaptive sampling or complex transfer functions that cannot be pre-computed into the texture [G].
+- **Time Complexity:** $O(N \times M)$, where $N$ is the number of pixels and $M$ is the number of ray marching steps (`MAXSTEPS`). The texture lookup complexity is $O(1)$ per step.
+- **Memory Complexity:** $O(T \times W \times H)$, where $T$ is the number of Z-tiles, $W$ is the tile width, and $H$ is the tile height. The total memory is proportional to the volume size, but the tiling allows for better cache utilization.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** The method scales with the number of tiles and the resolution of the tiles. Larger tiles may improve cache locality but increase memory usage per tile. Smaller tiles may reduce memory usage but increase overhead for index calculation.
+- **Strengths:** Improved spatial locality for Z-axis traversal, simpler implementation compared to hierarchical brick-based storage, flexible tile dimensions.
+- **Limitations:** Potential for artifacts at tile boundaries if not handled carefully, limited to Z-axis tiling, requires careful management of tile dimensions and texture coordinates.
+- **When to Use:** Suitable for volumes where Z-axis traversal is dominant and memory bandwidth is a bottleneck.
+- **When Not to Use:** Not suitable for volumes with complex anisotropic structures or when non-Z-axis traversal is required.
 
 ## Background
-The method is a practical approach to volume rendering in WebGL, where 3D textures are not always supported or efficient [S1, unofficial]. By decomposing the volume into 1D texture array slices, it allows for efficient sampling using standard 2D texture units [S1, unofficial]. The technique relies on front-to-back accumulation, a standard volume rendering algorithm, but adapts the sampling strategy to the constraints of the 1D texture array layout [S1, unofficial].
+Tile-based volume ray marching was introduced in the context of WebGL volume rendering, specifically in the `volumetric.js` library by kapadia [S1, unofficial]. It is an adaptation of traditional volume ray marching techniques to work efficiently with the texture array features available in WebGL. The method leverages the 1D texture array to organize volume data into tiles, optimizing memory access patterns for ray marching along the Z-axis.
 
 ## Sources
 [S1] kapadia/volumetric.js, https://github.com/kapadia/volumetric.js, fetched 2026-10-27 (unofficial)

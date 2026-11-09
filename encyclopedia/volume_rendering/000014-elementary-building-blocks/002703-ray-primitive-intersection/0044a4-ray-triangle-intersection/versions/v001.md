@@ -1,0 +1,29 @@
+# Ray-Triangle Intersection
+## Overview
+This family provides the fundamental geometric primitives for determining spatial relationships between rays, points, and triangles in 3D space. It solves the core problem of identifying whether a ray intersects a triangular surface, finding the closest point on a triangle to a query, or detecting collisions between two triangles. What sets this family apart from sibling methods like [Sphere Intersection](1620-sphere-intersection.md) or [Implicit Surface and SDF Intersection](2795-implicit-surface-and-sdf-intersection.md) is its reliance on linear algebra and the Separating Axis Theorem (SAT) for planar polygonal primitives, rather than quadratic solvers or distance field evaluations.
+
+## Shared principles
+The shared principles of this family are the geometric definition of rays and the parallel execution model [G].
+**Ray Definition**
+Rays are defined by an origin $\mathbf{o}$ and a direction $\mathbf{d}$ [G]. The direction is typically normalized. The origin is often the camera eye position, but can vary based on the camera model [G].
+**Parallel Execution**
+Computations are mapped to parallel threads [G]. Each thread typically processes one or more pixels or samples [G]. Memory access patterns are optimized for coalescing [G]. Synchronization is used to manage data dependencies between threads [G].
+
+## Subtopics
+
+### [General Ray-Triangle Intersection (Plücker Coordinates)](909-general-ray-triangle-intersection-pl-cker-coordinates.md)
+This method determines if a ray intersects a triangle in 3D space using Plücker coordinates to evaluate the winding order of the triangle edges relative to the ray. It handles arbitrary ray directions and is distinct from barycentric approaches like Möller-Trumbore by relying on cross-product-based Plücker line coordinates rather than solving a linear system for barycentric weights.
+
+### [Point-Triangle Distance](2776-point-triangle-distance.md)
+Computes the closest point on a triangle to a query point and returns the squared distance, handling all edge and vertex cases via Voronoi-region decomposition. It differs from [Ray-primitive intersection](769-ray-primitive-intersection.md) by solving a static point-to-mesh query rather than a ray-scene traversal, and from [General Ray-Triangle Intersection (Plücker Coordinates)](909-general-ray-triangle-intersection-pl-cker-coordinates.md) by returning the geometric closest point rather than an intersection parameter [G].
+
+### [Triangle-Triangle Intersection Test](11175-triangle-triangle-intersection-test.md)
+The Triangle-Triangle Intersection Test determines whether two triangles in 3D space share any common points, returning true if they intersect and false otherwise. It solves the problem of detecting collisions between triangular primitives without computing the intersection polygon, which is computationally expensive. What sets this method apart from its siblings, such as [General Ray-Triangle Intersection (Plücker Coordinates)](909-general-ray-triangle-intersection-pl-cker-coordinates.md) which tests ray-primitive overlap, is that it operates directly on two planar polygons using the Separating Axis Theorem (SAT). Unlike [Point-Triangle Distance](2776-point-triangle-distance.md) which measures proximity, this method provides a binary boolean result for full overlap.
+
+## Background
+The mathematical foundations for ray-triangle intersection were established in the early days of ray tracing. The Möller-Trumbore algorithm, a standard for ray-triangle intersection, was published by Tomas Möller and Ben Trumbore in 1997 [S1]. The Plücker coordinate approach, while less common in real-time rendering due to computational overhead, provides a robust alternative for specific winding-order checks [S1, unofficial]. Point-to-triangle distance calculations are fundamental to collision detection and physics simulations, often implemented via barycentric coordinate projection [S2, unofficial]. Triangle-triangle intersection tests are critical in computational geometry and collision detection systems, relying heavily on the Separating Axis Theorem [S1, S2, S3, unofficial]. These primitives are ubiquitous in volume rendering for surface visualization, mesh-based volume representations, and hybrid rendering techniques.
+
+## Sources
+[S1] Ray-Triangle Intersection, https://fileadmin.cs.lth.se/cs/Personal/Tomas_Akenine-Moller/raytri/
+[S2] Point to Triangle Distance, https://www.geeksforgeeks.org/point-triangle-distance/
+[S3] Triangle-Triangle Intersection Test, https://www.geeksforgeeks.org/triangle-triangle-intersection-test/

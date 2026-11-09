@@ -1,0 +1,140 @@
+# Virtual Magic Lantern
+
+Also called: Magic Lantern metaphor
+
+## Overview
+Virtual Magic Lantern (VML) is an interaction metaphor for volumetric data inspection that uses a virtual cone, guided by a 3D pointer device, to define a region of interest [S1]. Inside this cone, the volume is rendered using a secondary transfer function or shading style, while the exterior retains the primary style, allowing simultaneous visualization of the focal region and its context [S1]. It differs from [Virtual Magic Window](11345-virtual-magic-window.md) by maintaining a continuous cone of illumination rather than a clipped window, providing richer contextual information at the boundaries of the region of interest [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** 3D volume texture, primary transfer function (TF), secondary transfer function (TF), cone geometry (apex position, axis direction, aperture angle), and camera parameters.
+*   **Outputs:** Rendered image with dual-style visualization.
+
+**Data Structures:**
+*   **Cone Geometry:** Defined by three parameters passed to the GPU:
+    *   `apex`: `vec3` (position of the pointer device, e.g., Wanda).
+    *   `axis`: `vec3` (unit vector representing the orientation of the pointer).
+    *   `aperture`: `float` (half-angle of the cone in radians or degrees).
+*   **Transfer Functions:** Two separate TFs, one for the "inside" region and one for the "outside" region.
+
+**Algorithm Steps:**
+1.  **Initialization:** Pass the primary and secondary transfer functions and the cone geometry (apex, axis, aperture) to the GPU fragment shader [S1].
+2.  **Ray Casting Loop:** For each pixel, cast a ray through the volume.
+3.  **Sampling:** For each sample point `position` along the ray:
+    *   Sample the volume density/value `v` at `position` [S1].
+    *   **Inclusion Test:** Determine if `position` lies inside the inspection cone [S1].
+        *   The cone is a right circular cone with apex `A`, axis `D`, and aperture angle `α`.
+        *   Let `P` be the sample position.
+        *   Calculate vector `V = P - A`.
+        *   Calculate the angle `θ` between `V` and `D`: $\cos(\theta) = \frac{V \cdot D}{\|V\| \|D\|}$.
+        *   The point is inside the cone if $\cos(\theta) \ge \cos(\alpha)$ and `V` points in the general direction of `D` (i.e., $V \cdot D > 0$) [S1].
+    *   **Color Calculation:**
+        *   If inside the cone: Compute material color using the **secondary** transfer function and shading style [S1].
+        *   If outside the cone: Compute material color using the **primary** transfer function and shading style [S1].
+    *   **Shading:** Apply Phong shading to the calculated material color [S1].
+    *   **Compositing:** Accumulate the color and opacity using standard volume ray casting compositing (front-to-back or back-to-front) [S1].
+4.  **Finalization:** Output the accumulated color for the pixel [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Vertex Shader / Initialization
+# Inputs: gl_FragCoord, VolumeTexture, Apex, Axis, Aperture, PrimaryTF, SecondaryTF
+
+vec3 position = calculateOriginRay(gl_FragCoord);
+vec3 ray_direction = calculateRayDirection(gl_FragCoord);
+vec3 current_pos = position;
+vec3 color_accum = vec3(0.0);
+float opacity_accum = 0.0;
+
+# Pre-calculate cone constants for efficiency
+float cos_aperture = cos(Aperture);
+vec3 axis_normalized = normalize(Axis);
+
+while (!endRayCasting(current_pos, VolumeTexture)) {
+    # 1. Sample Volume
+    float density = texture3D(VolumeTexture, current_pos).a;
+    
+    # 2. Inclusion Test
+    # Vector from apex to current sample point
+    vec3 v_to_point = current_pos - Apex;
+    
+    # Check if point is in front of apex along the axis
+    float dot_val = dot(v_to_point, axis_normalized);
+    bool is_in_front = dot_val > 0.0;
+    
+    # Calculate angle between v_to_point and axis
+    float cos_theta = dot(v_to_point, axis_normalized) / (length(v_to_point) * length(axis_normalized));
+    bool is_inside_cone = is_in_front && (cos_theta >= cos_aperture);
+    
+    # 3. Determine Material/Color based on TF
+    vec4 material;
+    if (is_inside_cone) {
+        material = calculateInsideColor(density, SecondaryTF);
+    } else {
+        material = calculateOutsideColor(density, PrimaryTF);
+    }
+    
+    # 4. Shading and Compositing
+    vec3 shaded_color = calculatePhongShading(material.color, material.normal, current_pos);
+    
+    # Front-to-back compositing
+    float alpha = material.opacity;
+    color_accum = color_accum + (1.0 - opacity_accum) * shaded_color * alpha;
+    opacity_accum = opacity_accum + (1.0 - opacity_accum) * alpha;
+    
+    if (opacity_accum >= 1.0) break;
+    
+    # 5. Update Position
+    current_pos += ray_direction * step_size;
+}
+
+# Output final color
+gl_FragColor = vec4(color_accum, opacity_accum);
+```
+
+**Parameters:**
+*   **Apex:** Position of the Wanda device [S1].
+*   **Axis:** Orientation of the Wanda device [S1].
+*   **Aperture:** Controlled by the Wanda joystick [S1].
+*   **Resolution:** Tested on 512 × 512 × 512 voxel models [S1].
+*   **Window Size:** 900 × 900 pixels [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Navigation Direction:** When navigating through a model, the cone apex (device position) may not point exactly in front of the user, causing the entire volume to be rendered with the primary transfer function if the cone misses the volume [S1].
+    *   *Solution:* Generate an inspection cone with the apex at the observer position while keeping the direction guided by the hand/device [S1].
+*   **Abrupt Region Changes:** The region pointed by the device may change more abruptly than expected if the pointed geometry is closer than supposed [S1].
+    *   *Solution:* Place the apex of the cone at some distance back from the device [S1].
+*   **Performance Penalty:** The inclusion test adds a rendering penalty, but real-time framerates are maintained [S1].
+
+## Subtopics
+
+### [Virtual Magic Window](11345-virtual-magic-window.md)
+A restricted case of the VML where the virtual lantern illuminates following the viewing direction. The region of interest is the intersection of the virtual lantern (guided by the pointer) and the bounding box of the volume, effectively creating a 'window' through which the volume is seen with a secondary style.
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of samples per ray and the number of pixels. The inclusion test adds a constant overhead per sample [S1].
+*   **Memory Complexity:** Requires storage for two transfer functions and the cone geometry parameters [S1].
+*   **Measured Performance:**
+    *   Hardware: 3.00 GHz Intel Core 2 Duo PC, 8GB RAM, GeForce 8800 GTX (768MB RAM) [S1].
+    *   Resolution: 512 × 512 × 512 voxels, 900 × 900 pixels [S1].
+    *   **Feet Model (1 sample/voxel):** RC=32 fps, VML=17 fps [S1].
+    *   **Feet Model (2 samples/voxel):** RC=18.5 fps, VML=9.8 fps [S1].
+    *   **Manix Model (1 sample/voxel):** RC=18 fps, VML=13 fps [S1].
+    *   **Manix Model (2 samples/voxel):** RC=10 fps, VML=6.5 fps [S1].
+    *   **Head Model (1 sample/voxel):** RC=28 fps, VML=15.3 fps [S1].
+    *   **Head Model (2 samples/voxel):** RC=15 fps, VML=10 fps [S1].
+    *   **Rips Model (1 sample/voxel):** RC=32 fps, VML=14.8 fps [S1].
+    *   **Rips Model (2 samples/voxel):** RC=18 fps, VML=8.4 fps [S1].
+*   **Scaling:** Framerates slow down roughly 40% when the volume covers the whole viewport (close inspection) compared to rendering from outside [S1]. Disabling stereo rendering doubles framerates [S1].
+*   **Strengths:** Intuitive interaction, maintains real-time framerates, provides rich contextual information at boundaries [S1].
+*   **Limitations:** Performance penalty compared to classical Ray Casting (RC) and Virtual Magic Window (VMW) [S1]. Abrupt changes in the region of interest if not configured correctly [S1].
+*   **When to use:** Immersive stereo systems (e.g., PowerWall) for volumetric data inspection, surgery planning, or injury diagnosis [S1].
+*   **When not to use:** When maximum performance is required and contextual boundary information is less critical (use VMW or RC) [S1].
+
+## Background
+The Virtual Magic Lantern was introduced by Andujar, Fairen, and Argelaguet in 2006 as an interaction tool tailored to facilitate volumetric data inspection [S1]. It is designed for use in Virtual Reality setups with large screens, where users can move a Wanda device like a lantern pointing to the model [S1]. The method builds on classical GPU ray casting [S1].
+
+## Sources
+[S1] The virtual magic lantern, https://doi.org/10.1145/1643928.1643955, fetched 2026-10-28

@@ -2,36 +2,31 @@
 
 
 ## Overview
-Stereo Rendering via Similarity Utilization accelerates the generation of stereo volume images by exploiting the geometric similarity between left and right eye views, reducing redundant computation [S1, unofficial]. Unlike standard stereo rendering which treats each eye independently, this method leverages the shared structure of the volume data to optimize the compositing step, particularly within the context of the Perspective Shear-Warp algorithm [S1, unofficial].
+Stereo Rendering via Similarity Utilization accelerates the generation of stereo volume images by exploiting the geometric similarity between left and right eye views [S1, unofficial]. The approach was proposed as an adaptation for the perspective projection shear-warp algorithm [S1, unofficial].
 
 ## How it works
-The method operates by rendering the volume data for each eye separately but utilizing the inherent similarities in the projection geometry to speed up the process. The core inputs are the volume dataset, the camera parameters for the left and right eyes, and the impostor generation settings. The output is a pair of stereo images suitable for display.
+Inputs and outputs are Not given in the sources. Data structures and exact layouts are Not given in the sources. Formulas are Not given in the sources. The process follows these steps:
 
-The implementation relies on the concept of "impostors"—2D texture maps representing 3D volume slices or objects. The process involves the following steps:
+1. **Impostor Generation**: Render the volume data as parallel projection images for each eye to produce texture maps [S2, unofficial].
+2. **Geometry Setup**: Create impostor geometry, typically quads, to represent the volume objects in 3D space [S2, unofficial].
+3. **Perspective Distortion**: Render the impostor quads with perspective distortion so the volume objects appear larger or smaller depending on the distance between the user’s viewpoint and the impostor [S2, unofficial].
+4. **Stereo Separation**: Render the impostor maps separately for each eye to enable stereo viewing [S2, unofficial].
 
-1.  **Impostor Generation**: Render the volume data as parallel projection images for each eye. These images serve as the texture maps for the impostors [S2, unofficial].
-2.  **Geometry Setup**: Create impostor geometry, typically quads, to represent the volume objects in 3D space [S2, unofficial].
-3.  **Perspective Distortion**: Render the impostor quads with perspective distortion. This ensures that the volume objects appear larger or smaller depending on the distance between the user’s viewpoint and the impostor, correcting the flat appearance of the parallel-projected textures [S2, unofficial].
-4.  **Stereo Separation**: Render the impostor maps separately for each eye to enable stereo viewing. This separation allows the brain to perceive depth when the images are displayed via a stereo-capable device [S2, unofficial].
+**Parameters and Typical Values**: The visual discrepancy between the pseudo-parallel projected impostors and correct perspective becomes noticeable when the user's viewpoint is close to the volume object, specifically at a distance of about one impostor diameter away [S2, unofficial].
 
-**Parameters and Typical Values**:
-*   **Impostor Diameter**: The discrepancy between pseudo-parallel projected impostors and correct perspective becomes noticeable when the user's viewpoint is close to the volume object, specifically at a distance of about one impostor diameter away [S2, unofficial].
-
-**Edge Cases and Pitfalls**:
-*   **Proximity Breakdown**: The method breaks down when the user approaches the object or places the viewpoint inside the volume. This is a critical limitation for Head-Mounted Displays (HMDs) where users may naturally move closer to virtual objects [S2, unofficial].
-*   **Perspective Discrepancy**: At close range (approx. one impostor diameter), the visual discrepancy between the pseudo-parallel projection and true perspective becomes noticeable, potentially breaking immersion [S2, unofficial].
+**Edge Cases and Pitfalls**: The method breaks down when the user approaches the object or places the viewpoint inside the volume, which is a critical limitation for Head-Mounted Displays (HMDs) [S2, unofficial]. At close range (approximately one impostor diameter), the visual discrepancy between the pseudo-parallel projection and true perspective becomes noticeable [S2, unofficial].
 
 ## Subtopics
 
 ### Pseudo-Perspective Rendering
-Pseudo-Perspective Rendering is a variant that integrates volume data as pseudoperspective images to balance rendering speed and visual fidelity. It renders texture maps for impostors in parallel projection but applies perspective distortion to the impostor geometry (quads) during rendering [S2, unofficial]. This makes volume objects appear to scale with distance despite the underlying parallel projection. It is chosen when standard perspective rendering is too slow for VR, but parallel projection alone is visually insufficient. It is not suitable for HMDs or close-up interactions where the viewpoint enters the volume or approaches within one impostor diameter, as the pseudo-perspective approximation fails and discrepancies become visible [S2, unofficial].
+Pseudo-Perspective Rendering integrates volume data as pseudoperspective images to balance rendering speed and visual fidelity [S2, unofficial]. It renders texture maps for impostors in parallel projection but applies perspective distortion to the impostor geometry (quads) during rendering [S2, unofficial]. This makes volume objects appear to scale with distance despite the underlying parallel projection [S2, unofficial]. It is chosen when standard perspective rendering is too slow for VR, but parallel projection alone is visually insufficient [S2, unofficial]. It is not suitable for HMDs or close-up interactions where the viewpoint enters the volume or approaches within one impostor diameter, as the pseudo-perspective approximation fails and discrepancies become visible [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity**: The method reduces rendering time by utilizing similarities between views, though exact complexity depends on the underlying Perspective Shear-Warp implementation [S1, unofficial].
+*   **Time Complexity**: Not given in the sources. The approach utilizes similarities to render stereo images faster, but exact complexity depends on the underlying implementation [S1, unofficial].
 *   **Memory Complexity**: Requires storage for impostor texture maps for each eye [S2, unofficial].
 *   **Strengths**: Enables stereo viewing with reduced computational overhead compared to full per-eye perspective ray casting; viable for networked client-server VR setups [S2, unofficial].
 *   **Limitations**: Fails at close range (within one impostor diameter) and inside the volume; not suitable for HMDs where close interaction is expected [S2, unofficial].
-*   **When to Use**: Suitable for distant viewing in VR environments where performance is critical and the user remains at a safe distance from the volume.
+*   **When to Use**: Suitable for distant viewing in VR environments where performance is critical and the user remains at a safe distance from the volume [S2, unofficial].
 *   **When Not to Use**: Unsuitable for HMDs, close-up inspection, or when the user might enter the volume data [S2, unofficial].
 
 ## Background

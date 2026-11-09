@@ -1,0 +1,271 @@
+# Barycentric Mapping for Material Interfaces
+
+Also called: Barycentric Voronoi Interface Reconstruction
+
+## Overview
+Barycentric Mapping for Material Interfaces is an algorithm for reconstructing piecewise two-manifold boundary surfaces between multiple materials in a grid where each cell contains fractional volumetric information for each material [S1]. It transforms the reconstruction problem to analyze a dual data set where vertices have associated barycentric coordinate tuples representing material fractions [S1]. Unlike SLIC, Youngs, or Gueffier algorithms which produce generally discontinuous interfaces and are limited to 2D or specific normal estimates, this algorithm produces a crack-free piecewise two-manifold, handles any number of materials per element, works on any grid structure (via tetrahedral conversion), and does not rely on application-specific hydrodynamics knowledge [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A grid $S$ (rectilinear, curvilinear, or unstructured) where each cell $C$ has an associated tuple $(v_1, v_2, \dots, v_m)$ representing the fractional volume of each of $m$ materials, such that $\sum_{i=1}^{m} v_i = 1$ [S1].
+*   **Output:** A set of triangulated polygonal surfaces approximating the boundaries between materials [S1].
+
+**Data Structures:**
+1.  **Dual Tetrahedral Mesh:** Constructed from the original grid. Each vertex in the dual mesh corresponds to the center of an original element and is associated with a barycentric coordinate tuple $(v_1, \dots, v_m)$ [S1].
+2.  **BSP Tree:** Used to store the tetrahedron (or simplex) to facilitate the clipping algorithm against Voronoi cell boundaries [S1].
+
+**Steps:**
+
+1.  **Preprocessing:** Subdivide each polyhedral cell of the input grid into tetrahedra to create a tetrahedral grid [S1].
+2.  **Dual Mesh Construction:** Construct a dual tetrahedral mesh. Each vertex in this dual mesh represents a cell center from the original grid and holds the volume fraction tuple $(v_1, \dots, v_m)$ [S1].
+3.  **Mapping to Barycentric Space:** For each tetrahedral cell $T$ in the dual mesh, map its vertices into an $m$-simplex representing $m$-dimensional barycentric space. The vertices of this reference simplex are $(1,0,\dots,0), (0,1,\dots,0), \dots, (0,0,\dots,1)$ [S1]. Let the mapped tetrahedron be $T'$ [S1].
+4.  **Intersection Calculation:** Calculate the intersections of the edges/faces of $T'$ with the boundaries of Voronoi cells in the barycentric $m$-simplex. Voronoi cells represent regions where one material dominates [S1].
+    *   The boundaries of the Voronoi cells are defined by hyperplanes $v_i = v_j$ for all $i \neq j$, clipped against the condition that the dominant material's fraction is at least $1/m$ (for the 3-material case, explicitly $v_k \le 1/3$ is not the condition, rather the boundary is $v_i=v_j$ AND the third material is $\le 1/3$? No, the source says: "bounded by the edges of the triangle, and the three line segments... where $v_1=v_2$ and $v_3 \le 1/3$". This implies the Voronoi cell for material $k$ is the region where $v_k \ge v_j$ for all $j$, which geometrically forms a cone/pyramid in barycentric space. The intersection of these cones with the simplex face creates the Voronoi cells. The boundaries between Voronoi cells $i$ and $j$ are the segments where $v_i = v_j$ and $v_k \le 1/3$ for all $k \neq i,j$ in the 3D case? The source text for 3-material case defines the line segments $l_{12}, l_{13}, l_{23}$ by: $v_1=v_2$ and $v_3 \le 1/3$; $v_1=v_3$ and $v_2 \le 1/3$; $v_2=v_3$ and $v_1 \le 1/3$ [S1].
+5.  **Mapping Back:** Map the calculated intersection points from barycentric space back to the original physical space of tetrahedron $T$ using linear interpolation [S1].
+6.  **Triangulation:** Triangulate the mapped intersection points to form the boundary surface approximation [S1].
+
+**Specific Cases:**
+
+*   **Two Materials ($m=2$):**
+    *   The material boundary is the set of points where $v_1 = v_2 = 1/2$ [S1].
+    *   Find the point on each edge of the tetrahedron where this equality holds using linear interpolation [S1].
+    *   Use a marching tetrahedra implementation to draw the boundary surface [S1].
+    *   If only one material is present ($v_i=1$ for some $i$), no boundary surface exists [S1].
+
+*   **Three Materials ($m=3$):**
+    *   Each vertex has a 3-tuple $(v_1, v_2, v_3)$ with $\sum v_i = 1$ [S1].
+    *   Map the barycentric coordinates of the tetrahedron $T$ to a reference $T'$ in barycentric space (which is a 2D triangle embedded in 3D, or effectively analyzed face-by-face) [S1].
+    *   The barycentric triangle is partitioned into three Voronoi cells $V_1, V_2, V_3$ bounded by edges and line segments $l_{12}, l_{13}, l_{23}$ [S1].
+    *   **Case 1:** No edge of $T'$ intersects $l_{12}, l_{13}, l_{23}$. No material boundaries exist in $T$ [S1].
+    *   **Case 2:** Edges of $T'$ intersect at least one line segment, but the center $c(1/3, 1/3, 1/3)$ is not inside any face of $T'$. Calculate intersection line segments for each triangular face. Determine a triangulation from these segments by following the marching tetrahedra algorithm [S1].
+    *   **Case 3:** The center $c$ lies inside two faces of $T'$. Two faces have a single material boundary line segment connecting two edge intersection points. Two faces have three material boundary line segments meeting in the interior. Map intersections back to $T$ using linear interpolation. Determine a valid triangulation of the boundary surface using the face segments and the line segment connecting the two interior points [S1].
+
+*   **Four Materials ($m=4$) and General $m$:**
+    *   Map tetrahedron $T$ to $T'$ in an $m$-simplex [S1].
+    *   Use a clipping algorithm to generate intersections in $T'$ by clipping against the hyperplanes defining the Voronoi cell boundaries. For $m=4$, these are the six planes $v_i = v_j$ [S1].
+    *   The tetrahedron is stored in a Binary Space Partitioning (BSP) tree to facilitate the clipping algorithm described by Samet [S1].
+    *   Map boundaries back to physical space to form boundaries inside $T$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def barycentric_mapping(grid, num_materials):
+    """
+    Reconstructs material interfaces from a grid with volume fraction data.
+    
+    Args:
+        grid: List of cells. Each cell has vertices and volume fractions (v1, ..., vm).
+        num_materials: Integer m.
+        
+    Returns:
+        List of triangles representing the material boundaries.
+    """
+    # Step 1: Preprocess grid into tetrahedra
+    # If the grid is not already tetrahedral, subdivide polyhedral cells into tetrahedra.
+    tetrahedral_grid = subdivide_to_tetrahedra(grid)
+    
+    # Step 2: Construct dual mesh
+    # Each vertex in dual mesh corresponds to a cell center in original grid.
+    # Associated with each vertex is the barycentric tuple (v1, ..., vm).
+    dual_mesh = construct_dual_mesh(tetrahedral_grid)
+    
+    boundaries = []
+    
+    for cell in dual_mesh.cells:
+        # Step 3: Map to barycentric space
+        # cell.vertices are the centers of the original cells forming the tetrahedron.
+        # Each vertex has a tuple (v1, ..., vm).
+        # Map these to the reference m-simplex.
+        # For m=2, reference is line segment. For m=3, reference is triangle.
+        # For m>3, reference is m-simplex.
+        mapped_cell = map_to_barycentric_simplex(cell.vertices, num_materials)
+        
+        # Step 4: Calculate intersections with Voronoi boundaries
+        # Voronoi boundaries are defined by hyperplanes vi = vj.
+        # For m=3, boundaries are segments l12, l13, l23.
+        # For m=4, boundaries are planes vi = vj.
+        
+        if num_materials == 2:
+            # Two-material case: isosurface v1 = v2 = 0.5
+            intersection_points = []
+            for edge in mapped_cell.edges:
+                # Linear interpolation to find point where v1 = v2
+                p = interpolate_edge_for_equal_fraction(edge, 0.5)
+                if p is not None:
+                    intersection_points.append(p)
+            
+            # Use marching tetrahedra logic to connect points
+            if len(intersection_points) > 0:
+                triangles = marching_tetrahedra_connect(intersection_points, mapped_cell)
+                boundaries.extend(triangles)
+                
+        elif num_materials == 3:
+            # Three-material case
+            # Check if center c(1/3, 1/3, 1/3) is inside mapped_cell
+            center_inside = is_point_inside_simplex(mapped_cell, [1/3, 1/3, 1/3])
+            
+            # Find intersections of mapped_cell edges with Voronoi lines l12, l13, l23
+            # l12: v1=v2, v3<=1/3; l13: v1=v3, v2<=1/3; l23: v2=v3, v1<=1/3
+            intersections = find_intersections_with_voronoi_boundaries(mapped_cell, num_materials)
+            
+            if not intersections:
+                continue # No boundaries
+            
+            if not center_inside:
+                # Case 2: Center not inside any face
+                # Calculate intersection line segments for each face
+                face_segments = []
+                for face in mapped_cell.faces:
+                    segs = get_face_boundary_segments(face, intersections)
+                    face_segments.extend(segs)
+                
+                # Determine triangulation using marching tetrahedra algorithm
+                triangles = marching_tetrahedra_connect(face_segments, mapped_cell)
+                boundaries.extend(triangles)
+            else:
+                # Case 3: Center inside two faces
+                # Two faces have single segment, two faces have three segments meeting in interior
+                interior_points = find_interior_intersection_points(mapped_cell, intersections)
+                
+                # Map intersections back to physical space
+                physical_intersections = map_back_to_physical_space(mapped_cell, intersections)
+                physical_interior_points = map_back_to_physical_space(mapped_cell, interior_points)
+                
+                # Determine valid triangulation
+                triangles = triangulate_three_material_case(
+                    physical_intersections, 
+                    physical_interior_points, 
+                    mapped_cell
+                )
+                boundaries.extend(triangles)
+                
+        else:
+            # General m-material case
+            # Use BSP tree for clipping
+            bsp_tree = build_bsp_tree(mapped_cell)
+            
+            # Clip against hyperplanes vi = vj
+            # For m materials, there are m*(m-1)/2 hyperplanes
+            clipped_polyhedron = clip_against_hyperplanes(bsp_tree, num_materials)
+            
+            if clipped_polyhedron is empty:
+                continue
+                
+            # Map boundaries back to physical space
+            physical_boundary_points = map_back_to_physical_space(mapped_cell, clipped_polyhedron.vertices)
+            
+            # Triangulate
+            triangles = triangulate_polyhedron(physical_boundary_points, clipped_polyhedron.faces)
+            boundaries.extend(triangles)
+            
+    return boundaries
+
+def interpolate_edge_for_equal_fraction(edge, fraction):
+    """
+    Finds the point on an edge where the volume fractions of two materials are equal.
+    Edge is defined by two vertices with tuples (v1, v2).
+    """
+    v1_start, v2_start = edge.vertex1.fractions[0], edge.vertex1.fractions[1]
+    v1_end, v2_end = edge.vertex2.fractions[0], edge.vertex2.fractions[1]
+    
+    # We want v1(t) = v2(t)
+    # v1(t) = v1_start + t * (v1_end - v1_start)
+    # v2(t) = v2_start + t * (v2_end - v2_start)
+    # v1_start + t * dv1 = v2_start + t * dv2
+    # t * (dv1 - dv2) = v2_start - v1_start
+    
+    dv1 = v1_end - v1_start
+    dv2 = v2_end - v2_start
+    denom = dv1 - dv2
+    
+    if abs(denom) < 1e-9:
+        return None # Parallel or equal fractions along edge
+        
+    t = (v2_start - v1_start) / denom
+    
+    if 0 <= t <= 1:
+        return edge.vertex1 + t * (edge.vertex2 - edge.vertex1)
+    return None
+
+def find_intersections_with_voronoi_boundaries(mapped_cell, num_materials):
+    """
+    Finds intersections of the mapped cell edges with Voronoi cell boundaries.
+    """
+    intersections = []
+    # For m=3, boundaries are l12, l13, l23
+    # l12: v1=v2, v3<=1/3
+    # l13: v1=v3, v2<=1/3
+    # l23: v2=v3, v1<=1/3
+    
+    for edge in mapped_cell.edges:
+        # Check intersection with l12
+        p12 = intersect_edge_with_line(edge, "v1=v2", "v3<=1/3")
+        if p12: intersections.append(p12)
+        
+        # Check intersection with l13
+        p13 = intersect_edge_with_line(edge, "v1=v3", "v2<=1/3")
+        if p13: intersections.append(p13)
+        
+        # Check intersection with l23
+        p23 = intersect_edge_with_line(edge, "v2=v3", "v1<=1/3")
+        if p23: intersections.append(p23)
+        
+    return intersections
+
+def intersect_edge_with_line(edge, equality_constraint, inequality_constraint):
+    """
+    Intersects an edge with a line defined by equality and inequality constraints in barycentric space.
+    """
+    # Solve for t such that equality holds
+    # Then check if inequality holds at t
+    # Return point if 0 <= t <= 1 and inequality holds
+    pass # Implementation depends on specific barycentric coordinate algebra
+
+def map_back_to_physical_space(mapped_cell, barycentric_points):
+    """
+    Maps points from barycentric space back to the physical tetrahedron.
+    Uses linear interpolation based on the original vertex fractions.
+    """
+    physical_points = []
+    for b_point in barycentric_points:
+        # b_point is a tuple (v1, ..., vm) or a point on an edge/face
+        # Map back using the original cell's vertices and their fractions
+        # This is essentially the inverse of the mapping in Step 3
+        p = interpolate_in_physical_space(mapped_cell, b_point)
+        physical_points.append(p)
+    return physical_points
+
+def interpolate_in_physical_space(cell, barycentric_point):
+    """
+    Interpolates a point in physical space given its barycentric coordinates relative to the material fractions.
+    Note: The source states "using the same linear parameters used to determine the intersections on the edges".
+    This implies that if a point is at parameter t on an edge in barycentric space, it is at parameter t on the edge in physical space.
+    """
+    # If barycentric_point is on an edge between vertex i and j with parameter t:
+    # return cell.vertex_i + t * (cell.vertex_j - cell.vertex_i)
+    pass
+```
+
+## Subtopics
+
+### [Barycentric Mapping for Material Interfaces (2D Triangular Grids)](9890-barycentric-mapping-for-material-interfaces-2d-triangular-gr.md)
+A method to determine material interface line segments within a 2D triangular grid cell by mapping the triangle's barycentric coordinates to a reference barycentric triangle and intersecting with Voronoi cell boundaries.
+
+## Operating characteristics
+*   **Time Complexity:** The algorithm runs in effectively the same time as the marching cubes/tetrahedra algorithm [S1]. It traverses the cells of a grid and calculates a polygonal representation for each cell.
+*   **Memory Complexity:** Requires storage for the dual mesh and BSP trees for clipping in the general case [S1].
+*   **Performance:** Most grid cells in common examples contain only one material, and boundaries do not exist in these cells, allowing for early exit [S1].
+*   **Strengths:** Produces crack-free piecewise two-manifold surfaces; handles any number of materials per element; works on any grid structure (via tetrahedral conversion); does not rely on application-specific hydrodynamics knowledge [S1].
+*   **Limitations:** Can miss material boundaries in tetrahedra, similar to other isosurface-type algorithms [S1].
+*   **When to use:** When reconstructing material interfaces from data sets with volume-fraction information, especially for multi-material simulations where continuity and manifold properties are required [S1].
+
+## Background
+*   **Origin:** Introduced by K. Bonnell, M.A. Duchaineau, D.R. Schikore, B. Hamann, and K.I. Joy from Lawrence Livermore National Laboratory and UC Davis [S1].
+*   **Publication:** Submitted to IEEE Visualization, Salt Lake City, UT, October 8-13, 2000. Preprint dated March 29, 2000 [S1].
+*   **Context:** Developed to solve the problem of finding crack-free piecewise two-manifold separating surfaces approximating boundary surfaces between various materials in Eulerian flow simulations, where grid cells contain fractional volumetric information [S1].
+*   **Comparison:** Previous algorithms like SLIC, Youngs, and Gueffier produced generally discontinuous interfaces, were limited to 2D or specific normal estimates, and relied on grouping fluids [S1].
+
+## Sources
+[S1] Constructing Material Interfaces from Data Sets with Volume-Fraction Information, https://digital.library.unt.edu/ark:/67531/metadc739076/?q=marching cubes, fetched 2026-10-28

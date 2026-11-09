@@ -1,0 +1,141 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Soft Voronoi Decomposition is a differentiable spatial partitioning method that decomposes a scene into $N$ regions (Voronoi cells) defined by a set of $N$ sites $\phi \in \mathbb{R}^{N \times 3}$ [S1]. It solves the problem of creating a smooth, differentiable approximation of a hard Voronoi diagram, allowing gradients to flow to the site positions $\phi$ during training [S1]. Unlike MLP-based decomposition methods which rely on softmax activations and suffer from random memory access patterns during integration, Soft Voronoi provides spatial coherence and cache-friendly memory access, enabling efficient acceleration as the number of decomposition heads increases [S1].
++Soft Voronoi Decomposition is a differentiable spatial partitioning method that decomposes a scene into $N$ regions defined by $N$ sites $\phi \in \mathbb{R}^{N \times 3}$ [S1]. It approximates a hard Voronoi diagram with smooth gradients to allow optimization of site positions during training [S1]. Unlike MLP-based softmax decomposition, it provides spatial coherence and cache-friendly memory access patterns for efficient rendering head compositing [S1].
+ 
+ ## How it works
+@@ -23,17 +23,15 @@
+ 
+ **Steps:**
+-1.  **Initialize Sites:** Scale the scene coordinate system such that $\phi \in [-1, 1]^{N \times 3}$ to ensure training invariance with respect to variable magnitude when using optimizers like ADAM [S1].
+-2.  **Schedule $\beta$:** Begin training with a sufficiently low $\beta$ such that $w_i(x) \approx w_j(x)$ for all $i, j$ [S1]. Exponentially increase $\beta$ during training until it reaches a high value (e.g., $10^9$) [S1]. This ensures that at convergence, $w_i(x) \approx 1$ or $w_i(x) \approx 0$ for all $i$, making the decomposition indistinguishable from a hard Voronoi diagram [S1].
+-3.  **Compute Weights:** For each query point $x$ and each site $\phi_n$, compute the weight using the following formula [S1]:
++1.  Scale the scene coordinate system such that $\phi \in [-1, 1]^{N \times 3}$ to ensure training invariance with respect to variable magnitude when using optimizers like ADAM [S1].
++2.  Schedule $\beta$ over training by starting at a sufficiently low value where $w_i(x) \approx w_j(x)$ for all $i, j$ [S1]. Exponentially increase $\beta$ during training until it reaches a high value (e.g., $10^9$) [S1]. This ensures that at convergence, $w_i(x) \approx 1$ or $w_i(x) \approx 0$ for all $i$, making the decomposition indistinguishable from a hard Voronoi diagram [S1].
++3.  For each query point $x$ and each site $\phi_n$, compute the weight using the soft Voronoi formula [S1].
+ 
+-    $$
+-    w_{\phi_n}(x) = \frac{\exp(-\beta \|x - \phi_n\|^2)}{\sum_{j=1}^{N} \exp(-\beta \|x - \phi_j\|^2)}
+-    $$
++**Formula:**
++$$
++w_{\phi_n}(x) = \frac{\exp(-\beta\|x - \phi_n\|^2)}{\sum_{j=1}^{N} \exp(-\beta\|x - \phi_j\|^2)}
++$$
++Where $\| \cdot \|$ denotes the Euclidean norm [S1].
+ 
+-    Where:
+-    *   $\| \cdot \|$ denotes the Euclidean norm [S1].
+-    *   $\beta$ is the current temperature parameter [S1].
+-
+-**Pitfalls and Edge Cases:**
++**Edge Cases and Pitfalls:**
+ *   If $\beta$ is too low, the decomposition is not spatially distinct, resulting in overlapping regions with similar weights [S1].
+ *   If $\beta$ is too high too early in training, gradients may become zero or unstable, preventing effective learning of site positions [S1]. The exponential scheduling strategy resolves this by starting low and increasing gradually [S1].
+@@ -41,80 +39,33 @@
+ 
+ **Pseudocode:**
+-
+ ```python
+ import numpy as np
+ 
+ def soft_voronoi_weights(phi, x, beta):
+-    """
+-    Compute soft Voronoi weights for a set of sites phi at query point x.
+-    
+-    Args:
+-        phi: numpy array of shape (N, 3), Voronoi sites.
+-        x: numpy array of shape (3,), query point.
+-        beta: float, temperature parameter.
+-        
+-    Returns:
+-        weights: numpy array of shape (N,), soft assignment weights.
+-    """
+-    # Compute squared Euclidean distances from x to each site
+-    # phi shape: (N, 3), x shape: (3,)
+-    # diff shape: (N, 3)
+-    diff = phi - x
+-    
+-    # Squared L2 norm for each site
+-    # dist_sq shape: (N,)
+-    dist_sq = np.sum(diff ** 2, axis=1)
+-    
+-    # Compute unnormalized weights
+-    # exp_term shape: (N,)
+-    exp_term = np.exp(-beta * dist_sq)
+-    
+-    # Normalize weights
+-    # sum_exp is a scalar
+-    sum_exp = np.sum(exp_term)
+-    
+-    # Avoid division by zero if sum_exp is 0 (e.g., if beta is very large and exp underflows)
+-    if sum_exp == 0:
+-        # Fallback to uniform distribution if all weights underflow
+-        return np.ones(len(phi)) / len(phi)
+-        
+-    weights = exp_term / sum_exp
+-    
+-    return weights
++    """Compute soft Voronoi weights for a set of sites phi at query point x."""
++    # phi: (N, 3), x: (3,), beta: scalar
++    diff = phi - x  # Broadcasting: (N, 3)
++    dist_sq = np.sum(diff ** 2, axis=1)  # Squared L2 norms: (N,)
++    exp_term = np.exp(-beta * dist_sq)  # Unnormalized weights: (N,)
++    sum_exp = np.sum(exp_term)  # Normalization constant: scalar
++    if sum_exp == 0:  # Guard against underflow when beta is large
++        return np.ones(len(phi)) / len(phi)  # Fallback to uniform distribution [G]
++    return exp_term / sum_exp  # Normalized weights: (N,)
+ 
+ def schedule_beta(step, start_beta=1e-3, end_beta=1e9, total_steps=10000):
+-    """
+-    Exponentially schedule beta from start_beta to end_beta.
+-    
+-    Args:
+-        step: current training step.
+-        start_beta: initial beta value.
+-        end_beta: final beta value.
+-        total_steps: total number of training steps.
+-        
+-    Returns:
+-        beta: current beta value.
+-    """
+-    # Linear interpolation in log space for exponential growth
+-    log_start = np.log(start_beta)
+-    log_end = np.log(end_beta)
+-    
+-    # Clamp step to [0, total_steps]
+-    t = min(max(step, 0), total_steps)
+-    progress = t / total_steps
+-    
+-    current_log_beta = log_start + progress * (log_end - log_start)
+-    beta = np.exp(current_log_beta)
+-    
+-    return beta
++    """Exponentially schedule beta from start_beta to end_beta."""
++    if step >= total_steps:
++        return end_beta  # Clamp to maximum [G]
++    progress = step / total_steps  # Linear progress: [0, 1)
++    return start_beta * (end_beta / start_beta) ** progress  # Exponential interpolation [G]
+ ```
+ 
+ ## Subtopics
+ 
+-### [Voronoi-based Customization Volume Generation](5278-voronoi-based-customization-volume-generation.md)
+-*   **What it is:** A method for generating segmentation volumes using Voronoi diagrams, likely focused on customization or specific application constraints.
+-*   **Difference:** While Soft Voronoi focuses on differentiability for gradient-based optimization of site positions, this sibling method may prioritize static generation or specific customization rules.
+-*   **When to choose:** Use when customization constraints are primary and differentiability is not required.
+-*   **Link:** [Voronoi-based Customization Volume Generation](5278-voronoi-based-customization-volume-generation.md)
++### [Adjustable Center Point for Voronoi Partitioning](9851-adjustable-center-point-for-voronoi-partitioning.md)
++A modification to the Voronoi partitioning where the center point of the barycentric triangle/simplex is adjusted to better handle specific material distributions, such as T-intersections. It sets itself apart by localizing the partition geometry to material boundaries rather than relying on fixed site positions. Choose this variant when material distributions require localized simplex adjustments to maintain partition accuracy. Link: [Adjustable Center Point for Voronoi Partitioning](9851-adjustable-center-point-for-voronoi-partitioning.md).
++
++### Tetrahedral Site Insertion
++A strategy to insert new Voronoi sites by forming a regular tetrahedron aligned with the spatial SDF gradient at an existing site, scaling the tetrahedron to avoid crossing the zero-level set [S2]. For each new site $\mathbf{s}'_{i,k}$, compute its SDF value $\phi(\mathbf{s}'_{i,k})$ using a linear approximation based on the original site's SDF value and gradient: $\phi(\mathbf{s}'_{i,k}) \approx \phi(\mathbf{s}_i) + \nabla \phi_i^\top (\mathbf{s}'_{i,k} - \mathbf{s}_i)$ [S2]. The new sites are placed via $\mathbf{s}'_{i,k} = \mathbf{s}_i + \frac{\rho_i}{4} \mathbf{T}_i \mathbf{d}_k$, where $\mathbf{s}'_{i,k}$ are the new sites, $\mathbf{s}_i$ is the original site, $\rho_i$ is the local spacing, $\mathbf{T}_i \in \mathbb{R}^{3\times3}$ is the local frame at $\mathbf{s}_i$, and $\{\mathbf{d}_k\}_{k=1}^4$ are the canonical tetrahedral directions [S2]. The factor $1/4$ scales the tetrahedron to avoid adding new sites that cross the zero-level set [S2].
+ 
+ ## Operating characteristics
+@@ -131,3 +82,4 @@
+ 
+ ## Sources
+-[S1] DeRF: Decomposed Radiance Fields, https://doi.org/10.1109/cvpr46437.2021.01393, fetched 2026-10-26+[S1] DeRF: Decomposed Radiance Fields, https://doi.org/10.1109/cvpr46437.2021.01393, fetched 2026-10-26
++[S2] DCCVT: Differentiable Clipped Centroidal Voronoi Tessellation, https://arxiv.org/abs/2601.13603v1, fetched 2026-10-26

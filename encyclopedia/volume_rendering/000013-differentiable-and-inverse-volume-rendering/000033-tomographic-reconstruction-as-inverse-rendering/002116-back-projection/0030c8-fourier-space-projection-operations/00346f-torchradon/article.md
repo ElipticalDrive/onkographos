@@ -3,28 +3,26 @@
 Also called: Differentiable Radon Transform, Implementation Details (TorchRadon), TorchRadon library
 
 ## Overview
-TorchRadon is a PyTorch-integrated library providing differentiable forward and backward Radon projection operators for computed tomography [S1, S2, unofficial]. It solves the problem of computing line integrals (forward projection) and their adjoints (backward projection) within a deep learning framework, enabling gradient-based optimization for tomographic reconstruction [S1, unofficial]. It distinguishes itself by offering high-performance CUDA implementations of these linear operators with support for both parallel-beam and fan-beam geometries, directly supporting backpropagation through the projection steps [S1, S2, unofficial].
+TorchRadon is a PyTorch-integrated library providing differentiable forward and backward Radon projection operators for computed tomography [S1, unofficial]. It solves the problem of computing line integrals (projections) and their adjoints (back-projections) within a deep learning pipeline, enabling gradient-based optimization for tomographic reconstruction [S1, unofficial]. Unlike standard non-differentiable C++ libraries, TorchRadon allows backpropagation of gradients through the projection operations, which is essential for training generative models or optimizing latent variables in inverse rendering contexts [S1, unofficial].
 
 ## How it works
-TorchRadon computes the Radon transform and its adjoint as linear operations. The forward projection corresponds to multiplication by the system matrix $A$, and the backward projection corresponds to multiplication by $A^T$ [S1, unofficial].
-
 **Inputs and Outputs:**
-- **Forward Projection:** Input is a 2D or 3D tensor representing the object (e.g., density map). Output is a sinogram (projection data).
-- **Backward Projection:** Input is a sinogram. Output is a 2D or 3D tensor representing the reconstructed object.
+The library operates on 2D or 3D tensor inputs representing the object volume or image.
+- **Forward Projection:** Input is an image/volume tensor $x$. Output is a sinogram tensor $y$ (projection data).
+- **Backward Projection:** Input is a sinogram tensor $y$. Output is a back-projected image/volume tensor $x_{bp}$.
 
 **Data Structures:**
-The library operates on PyTorch tensors. The geometry is defined by parameters such as image size, number of angles, detector resolution, and beam geometry type (parallel or fan) [S2, unofficial].
+Inputs are PyTorch tensors. The library handles memory layout internally. No explicit user-side data structure layout is defined in the sources beyond standard tensor dimensions [S1, unofficial][S2, unofficial].
 
 **Parameters:**
-- **Image Size:** Typically $N \times N$ (e.g., 512) [S2, unofficial].
-- **Angles:** Array of sampling angles. For parallel beam, typically $[0, \pi)$; for fan-beam, $[0, 2\pi)$ [S2, unofficial].
-- **Source/Detector Distances:** Specific to fan-beam geometry [S2, unofficial].
+- **Resolution:** Defined by the grid size (e.g., $512 \times 512$) [S2, unofficial].
+- **Angles:** Array of sampling angles. For parallel beam, typically $[0, \pi)$ or $[0, 2\pi)$ [S2, unofficial]. For fan-beam, angles are equally spaced in $[0, 2\pi)$ [S2, unofficial].
+- **Interpolation:** Supports linear and cubic interpolation [Parent].
 
 **Algorithm Steps:**
-1. Initialize the Radon operator with specified geometry parameters (image size, angles, beam type) [S2, unofficial].
-2. **Forward Projection:** Compute the line integrals through the input object tensor to generate the sinogram [S1, S2, unofficial].
-3. **Backward Projection:** Compute the adjoint operation on the sinogram to back-project the data into the image space [S1, S2, unofficial].
-4. **Differentiation:** Gradients are computed automatically via PyTorch's autograd engine during the backward pass of the training loop [S1, unofficial].
+1. Initialize the Radon operator with resolution, angles, and geometry parameters (e.g., `Radon` or `RadonFanbeam`) [S2, unofficial].
+2. Perform forward projection: $y = \text{radon.forward}(x)$ [S1, unofficial][S2, unofficial].
+3. Perform backward projection: $x_{bp} = \text{radon.backprojection}(y)$ [S1, unofficial][S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -32,55 +30,68 @@ The library operates on PyTorch tensors. The geometry is defined by parameters s
 ```python
 import torch
 import numpy as np
-from torch_radon import Radon, RadonFanbeam
+from torchradon import Radon, RadonFanbeam
 
 # Example: Parallel Beam
-# Define geometry
-num_pixels = 512
-angles = np.linspace(0, np.pi, num_pixels, endpoint=False)
-radon_parallel = Radon(num_pixels, angles)
+# Define angles: 512 angles equally spaced in [0, pi)
+angles = np.linspace(0, np.pi, 512, endpoint=False)
+# Initialize operator for 512x512 image
+radon = Radon(512, angles)
 
-# Create input tensor (batch, channels, height, width)
-x = torch.randn(1, 1, num_pixels, num_pixels)
+# Input image tensor x (e.g., 512x512)
+x = torch.randn(1, 1, 512, 512)
 
-# Forward projection
-sino_parallel = radon_parallel.forward(x)
+# Forward projection (product with A)
+sino = radon.forward(x)
 
-# Backward projection
-bp_parallel = radon_parallel.backprojection(sino_parallel)
+# Backward projection (product with A^T)
+bp = radon.backprojection(sino)
 
 # Example: Fan-Beam
-angles_fan = np.linspace(0, 2 * np.pi, num_pixels, endpoint=False)
-source_distance = 512
-det_distance = 512
-radon_fan = RadonFanbeam(num_pixels, angles_fan, source_distance=source_distance, det_distance=det_distance)
+# Define angles: 512 angles equally spaced in [0, 2*pi)
+angles_fb = np.linspace(0, 2 * np.pi, 512, endpoint=False)
+# Initialize fan-beam operator
+# source_distance: Distance from X-ray source to center (default 512)
+# det_distance: Distance from detector to center (default equals source_distance)
+radon_fb = RadonFanbeam(512, angles_fb, source_distance=512)
 
 # Forward projection
-sino_fan = radon_fan.forward(x)
+sino_fb = radon_fb.forward(x)
 
 # Backward projection
-bp_fan = radon_fan.backprojection(sino_fan)
+bp_fb = radon_fb.backprojection(sino_fb)
 ```
 
 **Edge Cases and Pitfalls:**
-- Precision differences exist between TorchRadon and other toolboxes like Astra. Relative errors for forward projection can be around $8.34 \cdot 10^{-4}$ and for backward projection around $4.84 \cdot 10^{-5}$ compared to Astra Toolbox [S2, unofficial].
-- Detector spacing and source/detector distances must be configured correctly to ensure rays cover the entire image [S2, unofficial].
+- **Precision:** The library's forward projection has a relative error of $8.34 \cdot 10^{-4}$ compared to the Astra Toolbox, and backprojection has a relative error of $4.84 \cdot 10^{-5}$ [S2, unofficial].
+- **Geometry:** Fan-beam requires specific source and detector distances [S2, unofficial].
 
 ## Subtopics
 
+### [Radon Transform](11306-radon-transform.md)
+The Radon Transform maps a 2D image into its projection profiles (sinogram) by integrating pixel values along parallel lines at various angles. It serves as the forward operator in tomographic reconstruction, converting spatial domain data into the measurement domain required for inverse rendering and CT reconstruction. Unlike direct back-projection, which is a reconstruction method, the Radon Transform is the projection step that generates the sinogram data structure.
+
 ### Fan-Beam Radon Transform
-Computes Radon transforms for fan-beam geometry where X-rays originate from a point source [S2, unofficial]. It is distinguished from parallel-beam by the diverging ray paths. Key parameters include `source_distance` (default 512) and `det_distance` (default equals `source_distance`) [S2, unofficial]. Angles are equally spaced in $[0, 2\pi)$ [S2, unofficial]. It is chosen when simulating or reconstructing data from point-source X-ray geometries. Relative error compared to Astra Toolbox is $8.34 \cdot 10^{-4}$ for forward projection and $4.84 \cdot 10^{-5}$ for backprojection [S2, unofficial].
+Computes Radon transforms for fan-beam geometry where X-rays originate from a point source [S2, unofficial]. It is distinguished from parallel-beam by its geometric parameters: `source_distance` (distance from source to object center, default 512) and `det_distance` (distance from detector to object center, default equals `source_distance`) [S2, unofficial]. Angles are equally spaced in $[0, 2\pi)$ [S2, unofficial]. It is chosen when simulating or reconstructing data from a point-source X-ray geometry rather than parallel rays [S2, unofficial].
 
 ## Operating characteristics
-- **Time and Memory Complexity:** Not given in the sources.
-- **Measured Performance:** The library is described as "Fast Differentiable Routines" [S2, unofficial].
-- **Scaling:** Not given in the sources.
-- **Strengths and Limitations:** Integrates seamlessly with PyTorch for end-to-end differentiable training [S1, unofficial]. Supports both 2D and 3D projections [S2, unofficial]. Precision is slightly lower than specialized toolboxes like Astra (errors in the range of $10^{-4}$ to $10^{-5}$) [S2, unofficial].
-- **When to use:** When differentiable projection operations are required within a PyTorch-based deep learning pipeline for tomography [S1, unofficial].
-- **When not:** When maximum numerical precision is critical and PyTorch integration is not required (use Astra Toolbox instead) [S2, unofficial].
+**Time and Memory Complexity:**
+Not given in the sources.
+
+**Measured Performance:**
+- **Forward Projection Relative Error:** $8.34 \cdot 10^{-4}$ compared to Astra Toolbox [S2, unofficial].
+- **Backprojection Relative Error:** $4.84 \cdot 10^{-5}$ compared to Astra Toolbox [S2, unofficial].
+- **Hardware:** Runs on GPU via PyTorch [S1, unofficial].
+
+**Strengths and Limitations:**
+- **Strengths:** Differentiable, allowing gradient backpropagation for training [S1, unofficial]. Integrated with PyTorch [S1, unofficial]. Supports both parallel and fan-beam geometries [S2, unofficial].
+- **Limitations:** Relative error exists compared to reference implementations like Astra Toolbox [S2, unofficial].
+
+**When to Use:**
+Use when differentiable projection/backprojection is needed within a PyTorch-based deep learning pipeline for tomography [S1, unofficial].
 
 ## Background
-TorchRadon was introduced as a library for fast differentiable routines for computed tomography [S2, unofficial]. It is used in generative tomography reconstruction models where the differentiability of the Radon transform is essential for training [S1, unofficial]. The library supports various filters for filtered backprojection (FBP) including Ram-Lak, Shepp-Logan, cosine, Hamming, and Hann [S2, unofficial].
+TorchRadon was introduced to provide fast, differentiable routines for computed tomography within the PyTorch ecosystem [S2, unofficial]. It is used in generative tomography reconstruction models where the Radon forward and backward projections correspond to linear operations (products with $A$ and $A^T$) that must be differentiated during training [S1, unofficial]. The library implements filtration of the sinogram in the frequency domain for filtered backprojection, including filters like Ram-Lak, Shepp-Logan, cosine, Hamming, and Hann [S2, unofficial].
 
 ## Sources
 [S1] Generative Tomography Reconstruction, https://core.ac.uk/works/91148923, fetched 2026-10-31 (unofficial)

@@ -1,0 +1,131 @@
+# Octree Raycasting
+
+Also called: Ray-Octant Intersection
+
+## Overview
+Octree Raycasting is an algorithm to find all octants in a pointer-based octree that intersect with a given ray, returning them sorted by distance (closest first) [S1, unofficial]. It uses parametric ray representation ($t$-values) to traverse the octree structure efficiently [S1, unofficial]. It differs from [Octree Path Computation](897-octree-path-computation.md) by explicitly computing and sorting intersection intervals for each visited octant rather than just determining path connectivity, and from [Stackless Traversal](5202-stackless-traversal.md) by relying on a specific recursive descent logic with explicit $t$-value bounds passed down the call stack [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, and a pointer-based octree root node.
+*   **Output:** A list of intersecting octants sorted by distance from the ray origin [S1, unofficial].
+
+**Data Structures:**
+*   **RaycastingFlags:** A static constant object holding a single value `value`, used as a bitmask or index modifier for child array access to handle potential child reordering or symmetry [S1, unofficial].
+*   **Octant Node:** Contains a pointer to children (array of 8) and potentially data (e.g., `pointData`) [S1, unofficial].
+
+**Numbered Steps:**
+1.  **Boundary Check:** Calculate the entry ($t_{min}$) and exit ($t_{max}$) distances of the ray relative to the root node's axis-aligned bounding box (AABB) [S1, unofficial]. If the ray does not intersect the root, terminate [S1, unofficial].
+2.  **Parametric Initialization:** Compute the ray projection parameters ($t$-values) at the entry and exit points of the current octant for the x, y, and z axes: $tx_0, ty_0, tz_0$ (entry) and $tx_1, ty_1, tz_1$ (exit) [S1, unofficial].
+3.  **Intersection Validation:** Check if the ray is behind the current octant or does not intersect it by verifying if $tx_0 \ge 0.0$, $ty_0 \ge 0.0$, and $tz_0 \ge 0.0$ [S1, unofficial]. If any are negative, return immediately without processing [S1, unofficial].
+4.  **Center Calculation:** Calculate the mean $t$-values for the center of the current octant:
+    $$
+    tx_m = 0.5 \cdot (tx_0 + tx_1), \quad ty_m = 0.5 \cdot (ty_0 + ty_1), \quad tz_m = 0.5 \cdot (tz_0 + tz_1)
+    $$
+    [S1, unofficial].
+5.  **Entry Octant Determination:** Determine the index of the first octant the ray enters using `findEntryOctant(tx_0, ty_0, tz_0, tx_m, ty_m, tz_m)` [S1, unofficial].
+6.  **Recursive Traversal:** Loop through octants starting from `currentOctant` while `currentOctant < 8` [S1, unofficial]:
+    *   **Child Access:** Access the child node using the flag `f` from `RaycastingFlags`. For octant 0, use `c[f]`. For octants 1-7, use `c[f ^ i]` where $i$ is the octant index [S1, unofficial].
+    *   **Recursive Call:** Recursively call `raycastOctant` with the appropriate $t$-value bounds for that child octant [S1, unofficial].
+    *   **Next Octant:** Update `currentOctant` to the next intersected octant using `findNextOctant(currentOctant, tx_m, ty_m, tz_m)` [S1, unofficial].
+    *   **Termination:** If `currentOctant` is 7 (far top right), set `currentOctant = 8` to terminate the loop, as no other octants can be reached from there [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def raycast_octant(node, tx0, ty0, tz0, tx1, ty1, tz1, result):
+    # Step 3: Check if ray is behind or misses
+    if tx0 < 0.0 or ty0 < 0.0 or tz0 < 0.0:
+        return
+
+    # Step 4: Calculate mean t-values for center
+    tx_m = 0.5 * (tx0 + tx1)
+    ty_m = 0.5 * (ty0 + ty1)
+    tz_m = 0.5 * (tz0 + tz1)
+
+    # Step 5: Determine entry octant index
+    current_octant = find_entry_octant(tx0, ty0, tz0, tx_m, ty_m, tz_m)
+
+    # Step 6: Loop through octants
+    while current_octant < 8:
+        # Get child node with flag handling
+        # Note: 'f' is a static flag from RaycastingFlags
+        child = node.children[f ^ current_octant] if current_octant > 0 else node.children[f]
+        
+        # Determine bounds for child
+        # This logic depends on find_next_octant and specific octant geometry
+        # For octant 0, bounds are (tx0, ty0, tz0) to (tx_m, ty_m, tz_m)
+        # For octant 7, bounds are (tx_m, ty_m, tz_m) to (tx1, ty1, tz1)
+        # Intermediate octants require specific t-bound calculations based on axis splits
+        
+        if current_octant == 0:
+            raycast_octant(child, tx0, ty0, tz0, tx_m, ty_m, tz_m, result)
+            current_octant = find_next_octant(current_octant, tx_m, ty_m, tz_m)
+        elif current_octant == 7:
+            raycast_octant(child, tx_m, ty_m, tz_m, tx1, ty1, tz1, result)
+            current_octant = 8
+        else:
+            # General case: bounds are derived from split planes
+            # Implementation detail: find_next_octant updates the index
+            # and the bounds for the next call are determined by the 
+            # intersection of the ray with the child's sub-box.
+            # For brevity, assuming helper computes correct t-bounds for child i
+            child_tx0, child_ty0, child_tz0, child_tx1, child_ty1, child_tz1 = get_child_bounds(current_octant, tx0, ty0, tz0, tx1, ty1, tz1, tx_m, ty_m, tz_m)
+            raycast_octant(child, child_tx0, child_ty0, child_tz0, child_tx1, child_ty1, child_tz1, result)
+            current_octant = find_next_octant(current_octant, tx_m, ty_m, tz_m)
+
+def find_entry_octant(tx0, ty0, tz0, tx_m, ty_m, tz_m):
+    # Returns index 0-7 based on which sub-box the ray enters first
+    # Logic: Compare t-values against center thresholds
+    # If tx0 < tx_m, ray enters left half, else right
+    # Same for y (bottom/top) and z (back/front)
+    # Index = 4*(z>=tz_m) + 2*(y>=ty_m) + 1*(x>=tx_m)
+    # Note: This is a simplified mapping; actual implementation may vary
+    # based on coordinate system orientation.
+    pass
+
+def find_next_octant(current, tx_m, ty_m, tz_m):
+    # Returns the next octant index in traversal order
+    # Traversal order is determined by parametric t-values
+    pass
+
+def get_child_bounds(octant_idx, tx0, ty0, tz0, tx1, ty1, tz1, tx_m, ty_m, tz_m):
+    # Returns the t-bounds for the specific child octant
+    # This involves clipping the ray against the child's AABB
+    pass
+```
+
+**Parameters:**
+*   $tx_0, ty_0, tz_0$: Ray projection parameters (t-values) at the entry point of the current octant [S1, unofficial].
+*   $tx_1, ty_1, tz_1$: Ray projection parameters (t-values) at the exit point of the current octant [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Octant 7 Termination:** Octant 7 (far top right) is the last possible octant reachable from the entry point in this traversal order. After processing octant 7, the loop terminates by setting `currentOctant = 8` [S1, unofficial].
+*   **Child Reordering:** The children array access uses a flag `f` to handle potential child reordering or symmetry. For octants 1-7, the child index is `c[f ^ i]`, where $i$ is the octant index. Octant 0 uses `c[f]` [S1, unofficial].
+*   **Division by Zero:** When calculating boundary intersections, zero-direction components must be handled to prevent division by zero [S1, unofficial].
+
+## Subtopics
+
+### [Ray-Octree Boundary Intersection](11318-ray-octree-boundary-intersection.md)
+Calculates the entry and exit distances ($t$-values) of a ray relative to the axis-aligned bounding box (AABB) of an octree root node. It normalizes the ray direction to be positive to simplify subsequent intersection logic and handles zero-direction components to prevent division by zero. This method serves as the initial boundary check for [Octree Raycasting](11317-octree-raycasting.md), determining whether a ray intersects the octree's spatial extent before traversal begins.
+
+### [Ray-Octant Traversal (Entry)](11321-ray-octant-traversal-entry.md)
+Determines the index of the first octant a ray enters within a local 2x2x2 block of an octree, and the index of the subsequent octant the ray traverses. It solves the problem of efficiently mapping ray-parametric intersections to discrete octant indices without branching on every axis comparison. It differs from [Ray-Octree Boundary Intersection](11318-ray-octree-boundary-intersection.md) by operating on parametric t-values relative to a specific octant's bounds rather than global geometric coordinates.
+
+### Octree Raycasting (Point Intersection)
+Finds points within an octree that intersect with a given raycaster by iterating through intersecting octants and testing contained points [S1, unofficial]. It initializes an empty result list, gets the list of octants intersecting the ray using `super.getIntersectingNodes(raycaster)`, and if the list is not empty, iterates through each octant. If the octant has point data (`pointData !== null`), it calls `pointData.testPoints(raycaster, result)` to find intersections [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Proportional to the number of visited octants. In the worst case (dense volume), it is $O(N)$ where $N$ is the number of leaf voxels. In sparse cases, it is significantly faster, proportional to the surface area of the object intersected.
+*   **Memory Complexity:** $O(D)$ where $D$ is the depth of the octree, due to the recursion stack [S1, unofficial].
+*   **Strengths:** Efficiently skips empty space; returns intersected octants sorted by distance [S1, unofficial].
+*   **Limitations:** Requires a pointer-based octree structure; recursion depth can be an issue on GPUs without explicit stack management [S1, unofficial].
+*   **When to use:** When the volume is sparse and the octree structure is available.
+*   **When not to use:** When the volume is dense and a uniform grid DDA is faster, or when stack space is limited on the GPU.
+
+## Background
+The method is described in the `sparse-octree` module [S1, unofficial]. It is based on the algorithm by Revelles et al. [S1, unofficial]. The implementation is part of a larger library for spatial data structures in JavaScript [S1, unofficial].
+
+## Sources
+[S1] sparse-octree module, https://github.com/vanruesc/sparse-octree, fetched 2026-10-27 (unofficial)

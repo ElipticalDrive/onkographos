@@ -1,50 +1,40 @@
 # Deferred Rendering Pipeline
-
 Also called: 8-Pass Deferred Rendering Pipeline
-
 ## Overview
-The Deferred Rendering Pipeline is a multi-pass sequence that decouples geometry processing from shading by storing per-pixel attributes in intermediate framebuffer objects (FBOs) before computing the final image. It solves the problem of efficiently applying complex lighting and post-processing effects (such as SSAO and shadows) to volumetric data by separating the traversal/rasterization stages from the evaluation stages. It differs from the [Volume Rendering Pipeline](1318-volume-rendering-pipeline.md) by explicitly managing a fixed sequence of distinct render passes with intermediate storage, and from the [Fragment List-Based Rendering Pipeline](3488-fragment-list-based-rendering-pipeline.md) by relying on screen-space quad passes for post-processing rather than explicit fragment lists.
-
+A multi-pass deferred rendering sequence that decouples geometry traversal, shading, and post-processing by storing intermediate results in separate framebuffer objects (FBOs) [S1, unofficial]. It computes depth, position/normal, materials, filtered normals, shadows, screen-space ambient occlusion (SSAO), blurred AO, and final shading in distinct stages [S1, unofficial]. It sets itself apart from object-order pipelines by deferring lighting calculations until after all geometry is processed, allowing for efficient handling of complex lighting and post-processing effects without re-traversing the volume structure for each light source [S1, unofficial].
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Scene geometry (typically an octree or voxel structure), camera matrices (`viewMat`, `projMat`, `viewMatInv`, `projMatInv`), light positions, and configuration flags (e.g., `_useMaterials`, `_filterNormals`, `_doShadows`, `_doSSAO`).
-*   **Output:** A final color image rendered to the default framebuffer.
+*   **Inputs:** View matrix, projection matrix, inverse matrices, camera position, light position, octree data (for depth/shadow passes), and configuration flags (`_useMaterials`, `_filterNormals`, `_doShadows`, `_doSSAO`) [S1, unofficial].
+*   **Outputs:** Final shaded image rendered to the default framebuffer [S1, unofficial].
 
 **Data Structures:**
-The pipeline uses a sequence of Framebuffer Objects (`_glFBO[0]` to `_glFBO[6]`) and associated textures. The textures are bound to specific texture units (`TEX_NUM_*`) during state reset.
-*   `_glFBO[0]`: Depth buffer (`_glTexDepth`).
-*   `_glFBO[1]`: Position and Normal buffer (`_glTexHitPos`, `_glTexHitNorm`).
-*   `_glFBO[2]`: Material buffer (`_glTexHitMaterial`).
-*   `_glFBO[3]`: Filtered Normal buffer (`_glTexHitNormFiltered`).
-*   `_glFBO[4]`: Shadow map buffer (`_glTexShadows`).
-*   `_glFBO[5]`: Ambient Occlusion buffer (`_glTexAO`).
-*   `_glFBO[6]`: Blurred AO buffer (`_glTexAOBlurred`).
-*   Additional textures: `_glTexAONoise`, `_glTexTBOMaterials`.
+The pipeline uses a sequence of 8 Framebuffer Objects (`_glFBO[0]` through `_glFBO[6]` and the default framebuffer) and associated textures [S1, unofficial]:
+*   `_glFBO[0]`: Depth buffer (`_glTexDepth`) [S1, unofficial].
+*   `_glFBO[1]`: Position and Normal buffer (`_glTexHitPos`, `_glTexHitNorm`) [S1, unofficial].
+*   `_glFBO[2]`: Material buffer (`_glTexHitMaterial`) [S1, unofficial].
+*   `_glFBO[3]`: Filtered Normal buffer (`_glTexHitNormFiltered`) [S1, unofficial].
+*   `_glFBO[4]`: Shadow buffer (`_glTexShadows`) [S1, unofficial].
+*   `_glFBO[5]`: AO buffer (`_glTexAO`) [S1, unofficial].
+*   `_glFBO[6]`: Blurred AO buffer (`_glTexAOBlurred`) [S1, unofficial].
+*   Additional textures: `_glTexAONoise`, `_glTexTBOMaterials` bound to texture units `TEX_NUM_*` during reset [S1, unofficial].
 
 **Numbered Steps:**
-1.  **Pass 1 (Depth):** Bind `_glFBO[0]`. Clear the buffer. Set the renderer mode to `DEPTH`. Draw the scene geometry (e.g., using `OctreeDDARenderer`). This computes the depth of the first hit for each pixel.
-2.  **Pass 2 (Position/Normal):** Bind `_glFBO[1]`. Clear the buffer. Use shader `_programPosNorm`. Set uniforms `viewMatInv`, `projMatInv`, and `useDif`. Draw a full-screen quad. This reconstructs world-space position and normal from the depth buffer.
-3.  **Pass 3 (Materials):** If `_useMaterials` is true: Bind `_glFBO[2]`. Clear the buffer. Use shader `_programMaterial`. Set uniforms. Draw a full-screen quad. This fetches material properties for the hit fragments.
-4.  **Pass 4 (Normal Filtering):** If `_filterNormals` is true: Bind `_glFBO[3]`. Clear the buffer. Use shader `_programNormFilter`. Set uniforms `sigma` and `bsigma`. Draw a full-screen quad. This smooths the normals to reduce noise.
-5.  **Pass 5 (Shadows):** If `_doShadows` is true: Bind `_glFBO[4]`. Clear the buffer. Set `lightPos`. Set renderer mode to `SHADOW`. Draw the scene geometry. Else, clear `_glFBO[4]` to white (1.0), representing a fully lit state.
-6.  **Pass 6 (SSAO):** If `_doSSAO` is true: Bind `_glFBO[5]`. Clear the buffer. Use shader `_programSSAO`. Set uniforms `projMat`, `viewMat`, `camPos`, and `radius`. Draw a full-screen quad. This computes screen-space ambient occlusion.
-7.  **Pass 7 (AO Blur):** Bind `_glFBO[6]`. Clear the buffer. Use shader `_programBlur`. Draw a full-screen quad. This blurs the AO buffer to reduce noise and artifacts.
-8.  **Pass 8 (Final Shading):** Bind the default framebuffer. Clear the buffer. Use shader `_programShading`. Set uniforms `isYUp`, `camPos`, `projMatInv`, `viewMatInv`, `lightPos`, `renderMode`, and `useMaterials`. Draw a full-screen quad. This combines all accumulated buffers (depth, position, normal, material, shadow, AO) to compute the final pixel color.
+1.  **Pass 1 (Depth):** Bind `_glFBO[0]`, clear buffers, set the `OctreeDDARenderer` mode to `DEPTH`, and draw the scene [S1, unofficial].
+2.  **Pass 2 (Position/Normal):** Bind `_glFBO[1]`, clear buffers, use `_programPosNorm`, set uniforms `viewMatInv`, `projMatInv`, and `useDif`, and draw a full-screen quad [S1, unofficial].
+3.  **Pass 3 (Materials):** If `_useMaterials` is true, bind `_glFBO[2]`, clear buffers, use `_programMaterial`, set uniforms, and draw a full-screen quad [S1, unofficial].
+4.  **Pass 4 (Normal Filtering):** If `_filterNormals` is true, bind `_glFBO[3]`, clear buffers, use `_programNormFilter`, set uniforms `sigma` and `bsigma`, and draw a full-screen quad [S1, unofficial].
+5.  **Pass 5 (Shadows):** If `_doShadows` is true, bind `_glFBO[4]`, clear buffers, set `lightPos`, set `OctreeDDARenderer` mode to `SHADOW`, and draw the scene. Else, clear `_glFBO[4]` to white (1.0) [S1, unofficial].
+6.  **Pass 6 (SSAO):** If `_doSSAO` is true, bind `_glFBO[5]`, clear buffers, use `_programSSAO`, set uniforms `projMat`, `viewMat`, `camPos`, and `radius`, and draw a full-screen quad [S1, unofficial].
+7.  **Pass 7 (AO Blur):** Bind `_glFBO[6]`, clear buffers, use `_programBlur`, and draw a full-screen quad [S1, unofficial].
+8.  **Pass 8 (Final Shading):** Bind the default framebuffer, clear buffers, use `_programShading`, set uniforms `isYUp`, `camPos`, `projMatInv`, `viewMatInv`, `lightPos`, `renderMode`, and `useMaterials`, and draw a full-screen quad [S1, unofficial].
 
 **Pitfalls:**
-*   Pass 5 clears to white when shadows are disabled, which acts as a default fully lit state. If the shadow logic is not handled correctly, this may lead to incorrect lighting if the shader assumes a different default.
-*   Pass 6 (SSAO) is often wrapped in conditional compilation (`#if 0/#else`) in reference implementations, indicating that the original octree-based AO path is disabled in favor of the screen-space quad pass. Implementers must ensure the correct path is active.
+*   Pass 5 clears the shadow buffer to white (1.0) when shadows are disabled, which acts as a default fully lit state [S1, unofficial].
+*   Pass 6 (SSAO) may be wrapped in `#if 0/#else` in some implementations, indicating the original octree-based AO path is disabled in favor of the screen-space quad pass [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of passes (8) and the screen resolution. Each pass is typically a full-screen quad or a geometry draw call.
-*   **Memory Complexity:** Proportional to the screen resolution times the number of intermediate buffers (8 FBOs). High-resolution scenes require significant VRAM for the depth, position, normal, material, shadow, and AO textures.
-*   **Strengths:** Decouples geometry complexity from shading complexity. Allows for efficient application of screen-space effects like SSAO and blurring.
-*   **Limitations:** Requires multiple render passes, increasing overhead. Depth buffer precision issues can affect position reconstruction. Not suitable for transparent objects without additional handling.
-*   **When to use:** When complex lighting and post-processing effects are needed for volumetric or opaque geometry.
-*   **When not to use:** For simple scenes where the overhead of multiple passes is unjustified, or for highly transparent scenes requiring order-independent transparency.
-
+Not given in the sources.
 ## Background
-The deferred rendering pipeline is a well-established technique in computer graphics, originally developed to handle complex lighting scenarios efficiently. The specific 8-pass implementation described here is found in the `ssvdag` repository [S1, unofficial], which implements a sparse voxel octree renderer. It builds on the principles of deferred shading, adapting them for volumetric data traversal and rendering.
-
+Not given in the sources.
 ## Sources
 [S1] ajaspe/ssvdag, https://github.com/ajaspe/ssvdag, fetched 2026-10-24 (unofficial)

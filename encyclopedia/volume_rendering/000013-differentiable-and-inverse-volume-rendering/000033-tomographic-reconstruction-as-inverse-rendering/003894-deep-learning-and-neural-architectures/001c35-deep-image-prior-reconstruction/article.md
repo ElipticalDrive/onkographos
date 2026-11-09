@@ -19,7 +19,7 @@ The method stores: projector (object), epochs (int), inner_steps (int), beta (fl
 - `epochs`: Number of outer optimization epochs. Default: 250 [S1, unofficial].
 - `inner_steps`: Number of Adam optimization steps on PriorModel weights per epoch. Default: 50 [S1, unofficial].
 - `beta`: Step size for the latent variable update. Default: 0.25 [S1, unofficial].
-- `lr`: Learning rate for the Adam optimizer. Not given in the sources.
+- `lr`: Learning rate for the Adam optimizer. Not given in the sources. [S1, unofficial].
 
 **Algorithm Steps:**
 1. Initialize the PriorModel if not provided, moving it to the device [S1, unofficial].
@@ -53,46 +53,31 @@ def deep_image_prior_reconstruction(
     lr: float = 0.01,
     device: str = 'cpu'
 ) -> torch.Tensor:
-    # Move prior model to device
+    # Initialize prior model and move to device
     prior_model = prior_model.to(device)
     
     # Initialize Adam optimizer on prior model parameters
     optimizer = optim.Adam(prior_model.parameters(), lr=lr)
     
-    # Initialize latent variable z using FBP
+    # Initialize latent variable z using FBP on the sinogram
     # [G] FBP implementation not provided in sources; assumed available.
-    z_init = torch.zeros_like(sinogram)
-    z = z_init.detach().to(device)
+    z = FBP(sinogram).detach().to(device)
     
     # Loss function
     mse_loss = nn.MSELoss()
     
     for epoch in range(epochs):
-        # --- Data Consistency Step ---
-        # 1. Compute current image estimate from latent z
+        # --- Data Consistency Step (update latent z) ---
         x = prior_model(z)
-        
-        # 2. Forward project the estimate
         p_hat = projector.forward(x)
-        
-        # 3. Compute residual in sinogram space and back-project
         delta = projector.backward(sinogram - p_hat)
-        
-        # 4. Update latent variable
         z = x + beta * delta
         
-        # --- Network Optimization Steps ---
+        # --- Network Optimization Steps (update prior weights) ---
         for _ in range(inner_steps):
-            # 1. Forward pass through prior model
             x = prior_model(z)
-            
-            # 2. Forward projection
             p_hat = projector.forward(x)
-            
-            # 3. Compute loss
             loss = mse_loss(p_hat, sinogram)
-            
-            # 4. Backpropagation and optimizer step
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -103,7 +88,7 @@ def deep_image_prior_reconstruction(
 ```
 
 **Edge Cases and Pitfalls:**
-Not given in the sources.
+Not given in the sources. [S1, unofficial].
 
 ## Subtopics
 
@@ -111,11 +96,11 @@ Not given in the sources.
 An unsupervised neural network variant for gradient-domain volumetric photon density estimation, specifically for volumetric photon mapping [S2]. It uses a GradNet variant with encoded shift connections and auxiliary features (transmittance, photon density) to smooth images globally while preserving high-frequency details locally [S2]. It produces higher-quality results than L1, L2, or GradNet baselines [S2]. Cannot reconstruct images with strong noise and tends to over-blur some features [S2].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Measured Performance:** Not given in the sources.
-- **Strengths and Limitations:** Not given in the sources.
-- **When to Use/Not:** Not given in the sources.
+- **Time Complexity:** Not given in the sources. [S1, unofficial].
+- **Memory Complexity:** Not given in the sources. [S1, unofficial].
+- **Measured Performance:** Not given in the sources. [S1, unofficial].
+- **Strengths and Limitations:** Not given in the sources. [S1, unofficial].
+- **When to Use/Not:** Not given in the sources. [S1, unofficial].
 
 ## Background
 Deep Image Prior Reconstruction is an iterative reconstruction method that uses a neural network (PriorModel) as an implicit regularizer [S1, unofficial]. It alternates between updating an intermediate latent variable using a data consistency step and optimizing the network weights to fit sparse sinogram data [S1, unofficial]. The method is initialized with Filtered Back Projection (FBP) and optimized via the Adam optimizer [S1, unofficial].

@@ -1,0 +1,162 @@
+# Virtual Magic Window
+
+Also called: Magic Window
+
+## Overview
+The Virtual Magic Window (VMW) is a volume rendering inspection metaphor that allows users to view a specific region of interest (ROI) within a volumetric dataset through a virtual "window" defined by a 3D pointer device, while the rest of the volume is rendered using a different style or transfer function. It serves as an efficient, restricted implementation of the Virtual Magic Lantern (VML), where the virtual lantern is constrained to align with the viewing direction, effectively creating a window through which the volume is seen. Unlike VML, VMW does not provide contextual information on the boundary of the ROI, but it incurs no performance penalty compared to classical volume ray casting.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Volumetric dataset, primary transfer function (TF), secondary transfer function (TF), viewing parameters (camera position, direction), and 3D pointer device state (origin and direction).
+*   **Output:** Rendered image where the ROI is visualized with the secondary TF and the exterior with the primary TF.
+
+**Data Structures:**
+*   **Ray Start Position Textures:** Two textures are used to store the starting positions for ray casting.
+    *   Texture 1: Stores starting positions for rays inside the ROI.
+    *   Texture 2: Stores starting positions for rays outside the ROI.
+*   **Volume Bounding Box:** Defines the spatial extent of the volume.
+
+**Steps:**
+1.  **Define ROI:** Construct a virtual cone (lantern) using the origin and direction from the 3D pointer device (e.g., Wanda device). Intersect this cone with the volume's bounding box to determine the Region of Interest (ROI).
+2.  **Label Rays:** Determine which rays cast from the observer pass through the ROI. Rays passing through the intersection are labeled as "inside"; others are "outside".
+3.  **Split Ray Initialization:** Initialize the input ray directions by splitting the texture storing ray starting positions into two:
+    *   For rays inside the ROI: Initialize starting positions as if they are outside the volume (or handle appropriately for the secondary pass).
+    *   For rays outside the ROI: Initialize starting positions as if they are outside the volume (or handle appropriately for the primary pass).
+    *   *Note: The source describes initializing the starting position for any ray outside the region of interest (and vice versa for the other texture) as it was outside the volume. This implies a mechanism to skip or handle rays not contributing to the current pass.*
+4.  **Render ROI (Secondary Pass):** Perform a classical ray casting pass using the secondary transfer function (or shading style) for rays identified as lying inside the cone/ROI.
+5.  **Render Exterior (Primary Pass):** Perform a second classical ray casting pass using the primary transfer function for rays lying outside the cone/ROI.
+6.  **Composite:** Combine the results of the two passes to produce the final image.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def virtual_magic_window(volume, primary_tf, secondary_tf, camera, pointer_device):
+    """
+    Renders the volume using the Virtual Magic Window metaphor.
+    
+    Args:
+        volume: The volumetric dataset.
+        primary_tf: Transfer function for the exterior region.
+        secondary_tf: Transfer function for the ROI.
+        camera: Camera parameters (position, direction, etc.).
+        pointer_device: 3D pointer device state (origin, direction).
+        
+    Returns:
+        Rendered image.
+    """
+    # Step 1: Define ROI by intersecting virtual cone with volume bounding box
+    roi_shape = intersect_cone_with_bbox(pointer_device.origin, pointer_device.direction, volume.bounding_box)
+    
+    # Step 2: Label rays based on whether they pass through the ROI
+    # This can be done by checking if the ray's path intersects the roi_shape
+    rays_inside_roi = []
+    rays_outside_roi = []
+    
+    for pixel in screen_pixels:
+        ray = cast_ray_from_camera(pixel, camera)
+        if intersects(ray, roi_shape):
+            rays_inside_roi.append(ray)
+        else:
+            rays_outside_roi.append(ray)
+            
+    # Step 3 & 4: Render ROI with secondary TF
+    # Initialize texture for rays inside ROI
+    texture_inside = initialize_texture(rays_inside_roi, volume.bounding_box)
+    image_roi = ray_cast(volume, texture_inside, secondary_tf)
+    
+    # Step 5: Render Exterior with primary TF
+    # Initialize texture for rays outside ROI
+    texture_outside = initialize_texture(rays_outside_roi, volume.bounding_box)
+    image_exterior = ray_cast(volume, texture_outside, primary_tf)
+    
+    # Step 6: Composite results
+    # Note: The source implies two passes. The final image is a combination.
+    # In a typical implementation, this might involve alpha blending or direct replacement
+    # depending on how the "outside" rays are handled in the first pass.
+    # The source states: "For the first rendering we use the secondary TF ... and for the last one we use the primary TF"
+    # This suggests a sequential rendering where the second pass might overwrite or blend.
+    # A common approach for "window" metaphors is to render the ROI on top of the exterior.
+    
+    final_image = composite(image_roi, image_exterior)
+    
+    return final_image
+
+def intersects(ray, roi_shape):
+    """
+    Checks if a ray intersects the ROI shape (intersection of cone and bbox).
+    """
+    # Implementation depends on the specific geometry of roi_shape
+    # For a cone-bbox intersection, this involves ray-cone and ray-bbox intersection tests
+    return ray_intersects_cone(ray, roi_shape.cone) and ray_intersects_bbox(ray, roi_shape.bbox)
+
+def initialize_texture(rays, bbox):
+    """
+    Initializes a texture with ray starting positions.
+    Rays outside the volume are handled by initializing their start position
+    as if they were outside the volume (e.g., at the near plane or skipped).
+    """
+    texture = create_texture(screen_width, screen_height)
+    for ray in rays:
+        # Determine starting position for ray casting
+        start_pos = get_ray_start_position(ray, bbox)
+        # Store in texture
+        texture[ray.pixel_index] = start_pos
+    return texture
+
+def ray_cast(volume, texture, tf):
+    """
+    Performs classical GPU ray casting using the given texture and transfer function.
+    """
+    image = create_image(screen_width, screen_height)
+    for y in range(screen_height):
+        for x in range(screen_width):
+            start_pos = texture[y, x]
+            # If start_pos indicates the ray is outside or invalid, skip or handle
+            if is_valid_start(start_pos):
+                color = cast_single_ray(volume, start_pos, tf)
+                image[y, x] = color
+    return image
+
+def composite(image_roi, image_exterior):
+    """
+    Combines the ROI and exterior images.
+    The source doesn't specify the exact compositing rule, but typically
+    the ROI is rendered on top of the exterior.
+    """
+    # Simple overwrite: ROI pixels replace Exterior pixels where ROI is valid
+    # This assumes the ROI pass renders only the ROI region and the exterior pass
+    # renders the rest. However, the source says "two classical ray casting passes".
+    # A more robust interpretation is that the final image is the union of the two.
+    # For simplicity, and based on "window" metaphor, ROI is likely on top.
+    final_image = copy(image_exterior)
+    for y in range(screen_height):
+        for x in range(screen_width):
+            if is_roi_pixel(y, x): # Assuming we know which pixels are in ROI
+                final_image[y, x] = image_roi[y, x]
+    return final_image
+```
+
+**Parameters:**
+*   **Primary TF:** Transfer function for the background/exterior region.
+*   **Secondary TF:** Transfer function for the ROI.
+*   **Pointer Device:** Provides the origin and direction for the virtual cone.
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Context:** VMW does not provide contextual information on the boundary of the ROI, which can make it harder to understand the spatial relationship of the ROI to the rest of the volume compared to VML.
+*   **Performance:** While VMW incurs no performance penalty with respect to classical volume ray casting, the implementation requires managing two ray casting passes and splitting the ray initialization.
+
+## Operating characteristics
+*   **Time Complexity:** Two passes of classical volume ray casting. The complexity is $O(N)$ where $N$ is the number of pixels, assuming constant time per ray.
+*   **Memory Complexity:** Requires storage for two ray start position textures and two intermediate images (or a mechanism to composite on the fly).
+*   **Measured Performance:** The implementation runs in real time and incurs no performance penalty with respect to classical volume ray casting [S1].
+*   **Strengths:** Efficient, simple implementation, intuitive interaction, flexible shading style and region shape without volume deformation.
+*   **Limitations:** Lack of contextual information at the ROI boundary compared to VML.
+*   **When to Use:** When comparing rendering motifs or inspecting a specific region with a different style, and performance is critical.
+*   **When Not to Use:** When contextual information at the boundary of the ROI is important.
+
+## Background
+The Virtual Magic Window (VMW) was introduced as a collateral implementation of the Virtual Magic Lantern (VML) in the paper "The virtual magic lantern" [S1]. It is based on the Magic Lens metaphor [Bier et al. 1993, Wang et al. 2005] but adapted for volume rendering with a 3D pointer device (Wanda device). The method was designed to be efficient and easy to adapt to GPU ray casting algorithms.
+
+## Sources
+[S1] The virtual magic lantern, https://doi.org/10.1145/1643928.1643955, fetched 2026-10-28

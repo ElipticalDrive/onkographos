@@ -1,18 +1,20 @@
 # Optimized Trilinear Reconstruction
 Also called: Trilinear interpolation optimized using SIMD
 ## Overview
-Optimized Trilinear Reconstruction is a method for accelerating the trilinear interpolation of volume data during direct volume ray casting by leveraging SIMD (Single Instruction, Multiple Data) processor extensions such as MMX, SSE, or 3DNow! [S1]. It improves memory copying and interpolation speed compared to scalar implementations, serving as a foundational optimization for subsequent techniques like the NV Rendering Formula [5960-nv-rendering-formula-trilerp.md].
+Optimized Trilinear Reconstruction is a method for accelerating the trilinear interpolation of volume data during direct volume ray casting by leveraging SIMD (Single Instruction, Multiple Data) processor extensions such as MMX, SSE, or 3DNow! [S1]. It improves memory copying and interpolation speed compared to scalar implementations [S1].
 ## How it works
 **Inputs and Outputs:**
-- Input: Volume data containing color and opacity values.
-- Output: Interpolated color and opacity values for ray casting.
+- Input: Volume data containing color and opacity values, ray origin, ray direction, grid resolution, sampling step size, and maximum traversal distance.
+- Output: Composited color and opacity values for the ray.
 
 **Data Structures:**
 - Color and opacity values are stored as 16-bit unsigned integers [S1].
-- Volume data may be decomposed into small blocks of 323 samples to reduce cache misses, using bit-interleaved coordinates [S1].
+- To reduce cache misses, the volume is decomposed into small blocks containing $32^3$ samples [S1].
+- The bits of the coordinates $(X, Y, Z)$ are interleaved to generate memory addresses: $(X_{n \dots 0}, Y_{n \dots 0}, Z_{n \dots 0}) \implies Z_{n \dots 5} Y_{n \dots 5} X_{n \dots 5} Z_4 Y_4 X_4 \dots Z_0 Y_0 X_0$ [S1].
+- A 32-entry table and binary operators are used to interleave the five lower bits and generate the new memory address [S1].
 
 **Steps:**
-1. **Data Preparation:** If cache optimization is enabled, decompose the volume into blocks of 323 samples. Interleave the bits of the coordinates $(X, Y, Z)$ to generate memory addresses. For the five lower bits, use a 32-entry table and binary operators to interleave $X_{n \dots 0}, Y_{n \dots 0}, Z_{n \dots 0}$ into the format $Z_{n \dots 5} Y_{n \dots 5} X_{n \dots 5} Z_4 Y_4 X_4 \dots Z_0 Y_0 X_0$ [S1].
+1. **Data Preparation:** Decompose the volume into blocks of $32^3$ samples to reduce cache misses [S1]. Interleave the bits of the coordinates $(X, Y, Z)$ to generate memory addresses using a 32-entry table and binary operators for the five lower bits [S1].
 2. **SIMD Execution:** Use SIMD extensions (MMX, SSE, or 3DNow!) to perform memory copying and trilinear interpolation operations on the 16-bit unsigned integer data [S1].
 3. **Interpolation:** Compute the trilinear interpolation of color and opacity values using the SIMD instructions [S1].
 
@@ -26,75 +28,77 @@ Optimized Trilinear Reconstruction is a method for accelerating the trilinear in
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pseudocode for Optimized Trilinear Reconstruction
-# Note: Specific SIMD intrinsics are hardware-dependent and not detailed in sources [S1]
+def trilinear_interpolate(v000, v100, v010, v110, v001, v101, v011, v111, fx, fy, fz):
+    # Standard trilinear interpolation formula
+    c00 = v000 * (1 - fx) + v100 * fx
+    c01 = v010 * (1 - fx) + v110 * fx
+    c10 = v001 * (1 - fx) + v101 * fx
+    c11 = v011 * (1 - fx) + v111 * fx
+    c0 = c00 * (1 - fy) + c01 * fy
+    c1 = c10 * (1 - fy) + c11 * fy
+    return c0 * (1 - fz) + c1 * fz
 
-def optimized_trilinear_reconstruction(volume_data, ray_origin, ray_direction, resolution):
-    """
-    Perform trilinear interpolation using SIMD optimizations.
-    
-    Args:
-        volume_data: Array of 16-bit unsigned integers representing color and opacity.
-        ray_origin: Starting point of the ray.
-        ray_direction: Direction of the ray.
-        resolution: Dimensions of the volume grid.
-        
-    Returns:
-        Interpolated color and opacity values.
-    """
-    # Initialize result variables
-    color = 0
-    opacity = 0
-    
-    # Step 1: Prepare data if cache optimization is used
-    # Decompose volume into blocks of 323 samples and interleave coordinates
-    # This step is implicit in the memory layout described in [S1]
-    
-    # Step 2: Iterate along the ray
-    t = 0
-    while t < max_distance:
-        # Calculate current position
-        x = ray_origin.x + t * ray_direction.x
-        y = ray_origin.y + t * ray_direction.y
-        z = ray_origin.z + t * ray_direction.z
-        
-        # Check if position is within volume bounds
-        if not is_within_bounds(x, y, z, resolution):
-            break
-            
-        # Step 3: Perform SIMD-based trilinear interpolation
-        # Use MMX, SSE, or 3DNow! instructions to interpolate
-        # This involves loading 16-bit unsigned integers and performing arithmetic
-        interpolated_value = simd_trilinear_interpolate(volume_data, x, y, z)
-        
-        # Accumulate results (simplified compositing)
-        color += interpolated_value.color
-        opacity += interpolated_value.opacity
-        
-        # Advance along the ray
+def optimized_trilinear_reconstruction(volume, origin, direction, resolution, step_size, max_t):
+    # volume: 3D array of 16-bit unsigned integers storing color and opacity [S1]
+    # resolution: tuple (Nx, Ny, Nz)
+    # step_size: distance between samples along the ray
+    # max_t: maximum ray parameter to traverse
+    accum_color = (0.0, 0.0, 0.0)
+    accum_alpha = 0.0
+
+    t = 0.0
+    while t <= max_t:
+        x = origin[0] + t * direction[0]
+        y = origin[1] + t * direction[1]
+        z = origin[2] + t * direction[2]
+
+        ix = int(x)
+        iy = int(y)
+        iz = int(z)
+        fx = x - ix
+        fy = y - iy
+        fz = z - iz
+
+        # Clamp indices to valid grid range [0, N-1]
+        ix = max(0, min(ix, resolution[0] - 1))
+        iy = max(0, min(iy, resolution[1] - 1))
+        iz = max(0, min(iz, resolution[2] - 1))
+
+        # Fetch 8 neighboring voxels
+        # In practice, SIMD loads these values [S1]
+        v000 = volume[ix, iy, iz]
+        v100 = volume[min(ix + 1, resolution[0] - 1), iy, iz]
+        v010 = volume[ix, min(iy + 1, resolution[1] - 1), iz]
+        v110 = volume[min(ix + 1, resolution[0] - 1), min(iy + 1, resolution[1] - 1), iz]
+        v001 = volume[ix, iy, min(iz + 1, resolution[2] - 1)]
+        v101 = volume[min(ix + 1, resolution[0] - 1), iy, min(iz + 1, resolution[2] - 1)]
+        v011 = volume[ix, min(iy + 1, resolution[1] - 1), min(iz + 1, resolution[2] - 1)]
+        v111 = volume[min(ix + 1, resolution[0] - 1), min(iy + 1, resolution[1] - 1), min(iz + 1, resolution[2] - 1)]
+
+        # Interpolate color and opacity (scalar fallback; SIMD executes this [S1])
+        sample_color = trilinear_interpolate(v000[0], v100[0], v010[0], v110[0], v001[0], v101[0], v011[0], v111[0], fx, fy, fz)
+        sample_alpha = trilinear_interpolate(v000[1], v100[1], v010[1], v110[1], v001[1], v101[1], v011[1], v111[1], fx, fy, fz)
+
+        # Front-to-back compositing
+        alpha_out = 1.0 - (1.0 - accum_alpha) * (1.0 - sample_alpha)
+        color_out = accum_color + sample_color * sample_alpha * (1.0 - accum_alpha)
+
+        accum_color = color_out
+        accum_alpha = alpha_out
+
         t += step_size
-        
-    return color, opacity
 
-def is_within_bounds(x, y, z, resolution):
-    """Check if coordinates are within the volume grid."""
-    return 0 <= x < resolution.x and 0 <= y < resolution.y and 0 <= z < resolution.z
-
-def simd_trilinear_interpolate(volume_data, x, y, z):
-    """
-    Perform trilinear interpolation using SIMD instructions.
-    This function is a placeholder for hardware-specific SIMD code [S1].
-    """
-    # Load 16-bit unsigned integers from volume_data
-    # Perform trilinear interpolation using SIMD arithmetic
-    # Return interpolated color and opacity
-    pass
+    return accum_color, accum_alpha
 ```
 ## Subtopics
+
+### [NV Rendering Formula (Trilerp)](5960-nv-rendering-formula-trilerp.md)
+A direct volume ray casting method that resamples volume data at evenly spaced locations along rays and composites the results using trilinear interpolation. It is implemented in modern frameworks (e.g., svox2) as `volume_render_nvol` and its variants, providing forward, backward, and fused execution modes. Choose this when integrating with existing GPU-accelerated rendering pipelines that require fused execution modes.
+
 ## Operating characteristics
 **Time and Memory Complexity:**
 - Time complexity is reduced compared to scalar trilinear interpolation due to SIMD parallelism [S1].
-- Memory complexity is optimized by decomposing the volume into small blocks of 323 samples to reduce cache misses [S1].
+- Memory complexity is optimized by decomposing the volume into small blocks of $32^3$ samples to reduce cache misses [S1].
 
 **Measured Performance:**
 - Specific performance metrics are not provided in the sources [S1].
@@ -106,8 +110,7 @@ def simd_trilinear_interpolate(volume_data, x, y, z):
 **When to Use:**
 - Use when hardware supports MMX, SSE, or 3DNow! SIMD extensions and performance optimization is critical [S1].
 - Avoid on MMX-only processors if artifact-free rendering is required [S1].
-
 ## Background
-Optimized Trilinear Reconstruction was introduced in the paper "A new object-order ray-casting algorithm" [S1]. It builds on the principles of trilinear interpolation and applies SIMD optimizations to enhance performance in direct volume ray casting.
+Optimized Trilinear Reconstruction was introduced in the paper "A new object-order ray-casting algorithm" [S1]. It builds on the principles of trilinear interpolation and applies SIMD optimizations to enhance performance in direct volume ray casting [S1].
 ## Sources
 [S1] A new object-order ray-casting algorithm, https://doi.org/10.5555/602099.602130, fetched 2026-10-26

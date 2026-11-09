@@ -1,160 +1,209 @@
 # Training Loop with Adaptive Regularization & LR Decay
 
-Also called: NeRF Training, Training Loop with Exponential LR Decay
+Also called: NeRF Optimization, NeRF Training Loop with Exponential LR Decay, Ray Batching Training, SimpleNeRF Training Configuration & Loss Schedule, Training Loop with Exponential LR Decay
 
 ## Overview
-This method specifies the iterative optimization procedure for training neural radiance fields, integrating adaptive regularization terms and exponential learning rate decay within the training loop [S1, unofficial][S2, unofficial]. It combines a reconstruction loss with structural priors (orthogonality, L1 density, and total variation) while gradually reducing the optimization step size to stabilize convergence [S2, unofficial].
+This method defines the standard iterative optimization protocol for training Neural Radiance Fields (NeRF), specifically tailored for sparse input scenarios. It solves the problem of converging a differentiable volume rendering model to match target images by combining ray-batched stochastic gradient descent with a two-phase loss schedule and exponential learning rate decay [S2][S3, unofficial]. It differs from sibling methods like [FreeNeRF](7471-pixelnerf.md) by using simpler auxiliary models for depth supervision rather than annealing positional encoding frequencies, and it explicitly manages regularization weights that decay alongside the learning rate [S2][S4, unofficial].
 
 ## How it works
+### Inputs and Outputs
 **Inputs:**
-- `rays_train`: Ray origins and directions sampled from the dataset [S2, unofficial].
-- `rgb_train`: Ground-truth RGB values for the sampled rays [S2, unofficial].
-- `tensorf`: Neural field model containing parameters to optimize [S2, unofficial].
-- `optimizer`: Adam optimizer instance initialized with `learning_rate` and `weight_decay` [S1, unofficial].
-- `args`: Configuration object containing hyperparameters (see Parameters) [S1, unofficial][S2, unofficial].
+*   Training dataset: Images, camera poses, scene bounds (near/far), and optionally depth priors with confidence scores [S3, S4, unofficial].
+*   Model: A NeRF representation (e.g., MLP-based or hash-grid based) initialized with random weights [S3, S4, unofficial].
+*   Hyperparameters: Initial learning rate ($lrate$), decay rate ($decay\_rate$), decay steps ($decay\_steps$), batch size ($N_{rand}$), and regularization weights [S2][S3, S4, unofficial].
 
 **Outputs:**
-- Updated `tensorf` parameters [S2, unofficial].
-- Updated `optimizer` state [S2, unofficial].
-- Scalar `total_loss` and PSNR metric for tracking [S2, unofficial].
+*   Optimized model parameters.
+*   Training metrics: Loss values, PSNR, and learning rate history [S3, S4, unofficial].
 
-**Data Structures:**
-- Ray tensors are fetched per batch using `trainingSampler.nextids()` [S2, unofficial].
-- Rendering outputs include `rgb_map`, `alphas_map`, `depth_map`, `weights`, and `uncertainty` [S2, unofficial].
-- Tensor shapes are not given in the sources [S1, unofficial][S2, unofficial].
+### Data Structures
+*   **Ray Batch:** A tensor of shape $(N_{rand}, 3)$ for ray origins and $(N_{rand}, 3)$ for ray directions. Stacked with RGB targets $(N_{rand}, 3)$ and optional depth/confidence priors [S3, S4, unofficial].
+*   **Optimizer State:** Adam optimizer state storing first and second moment estimates for each parameter group [S1, S3, unofficial].
+*   **Training State:** Global step counter, current learning rate, and regularization weight multipliers [S3, S4, unofficial].
 
-**Parameters:**
-- `learning_rate`: Initial learning rate for the Adam optimizer [S1, unofficial].
-- `weight_decay`: Weight decay coefficient for the Adam optimizer [S1, unofficial].
-- `decay_rate` / `decay_steps`: Exponential decay parameters for the learning rate [S1, unofficial].
-- `Ortho_reg_weight`: Initial orthogonality regularization strength (`args.Ortho_weight`) [S2, unofficial].
-- `L1_reg_weight`: Initial L1 density regularization strength (`args.L1_weight_inital`), switching to `args.L1_weight_rest` after the first alpha mask update iteration [S2, unofficial].
-- `TV_weight_density` / `TV_weight_app`: Initial total variation weights for density and appearance fields (`args.TV_weight_density`, `args.TV_weight_app`) [S2, unofficial].
-- `lr_factor`: Multiplicative factor applied to learning rates and TV weights per iteration (typically $< 1$) [S2, unofficial].
-- `batch_size`: Chunk size for rendering and ray sampling (`args.batch_size`) [S2, unofficial].
-- `nSamples`: Number of samples per ray, dynamically updated during resolution upscaling [S2, unofficial].
-- `white_bg`: Boolean flag for background color assumption during compositing [S2, unofficial].
-- `ndc_ray`: Boolean flag to switch between standard and NDC ray coordinates [S2, unofficial].
-- `crop_steps`: Number of steps to use center-cropped data at the beginning of training [S1, unofficial].
+### Numbered Steps
+1.  **Initialization:** Initialize the Adam optimizer with the initial learning rate $lrate$ and weight decay [S1, S3, unofficial]. Load training images, poses, and bounds. Compute depth confidences if priors are available [S3, unofficial].
+2.  **Ray Sampling:** For each iteration, sample $N_{rand}$ random ray indices from the training set. Fetch corresponding ray origins, directions, and target RGB values [S3, S4, unofficial].
+3.  **Rendering:** Render the sampled rays through the neural field model. This involves sampling points along each ray, querying the model for density ($\sigma$) and color ($c$), and compositing them using volume rendering equations to produce predicted RGB ($\hat{y}$), alphas, and depth [S3, S4, unofficial].
+4.  **Loss Computation:**
+    *   Compute the primary reconstruction loss (Mean Squared Error) between predicted RGB and target RGB [S3, S4, unofficial]:
+        $$ L_{img} = \frac{1}{N} \sum_{i=1}^{N} (\hat{y}_i - y_i)^2 $$
+    *   Apply phase-specific regularization losses (see Phase Schedule below) [S2].
+    *   Apply adaptive regularization terms if weights are non-zero (see Regularization Details below) [S4, unofficial].
+    *   Sum all components to get `total_loss` [S4, unofficial].
+5.  **Backpropagation:** Zero gradients, perform backward pass on `total_loss`, and step the optimizer [S3, S4, unofficial].
+6.  **Learning Rate Update:** Update the learning rate for all parameter groups using exponential decay [S3, S4, unofficial].
+7.  **Logging:** Compute PSNR from the current loss and log metrics [S3, S4, unofficial].
 
-**Steps:**
-1. Initialize the Adam optimizer with `learning_rate` and `weight_decay` [S1, unofficial].
-2. Sample ray indices using `trainingSampler.nextids()` and fetch `rays_train` and `rgb_train` from the dataset [S2, unofficial].
-3. Render rays through the neural field model to obtain `rgb_map`, `alphas_map`, `depth_map`, `weights`, and `uncertainty` [S2, unofficial].
-4. Compute the reconstruction loss as the mean squared error: $L_{rec} = \frac{1}{B} \sum_{i=1}^{B} \| \text{rgb\_map}_i - \text{rgb\_train}_i \|^2$ [S2, unofficial].
-5. Accumulate regularization losses:
-   - If `Ortho_reg_weight > 0`, compute `loss_reg = tensorf.vector_comp_diffs()` and add `Ortho_reg_weight * loss_reg` to `total_loss` [S2, unofficial].
-   - If `L1_reg_weight > 0`, compute `loss_reg_L1 = tensorf.density_L1()` and add `L1_reg_weight * loss_reg_L1` to `total_loss` [S2, unofficial].
-   - If `TV_weight_density > 0`, decay it by `lr_factor`, compute `loss_tv_density = tensorf.TV_loss_density(tvreg) * TV_weight_density`, and add it to `total_loss` [S2, unofficial].
-   - If `TV_weight_app > 0`, decay it by `lr_factor`, compute `loss_tv_app = tensorf.TV_loss_app(tvreg) * TV_weight_app`, and add it to `total_loss` [S2, unofficial].
-6. Zero gradients, backpropagate `total_loss`, and step the optimizer [S2, unofficial].
-7. Update the learning rate for all parameter groups: `param_group['lr'] = param_group['lr'] * lr_factor` [S2, unofficial].
-8. Compute PSNR for tracking: $\text{PSNR} = -10 \cdot \log_{10}(L_{rec})$ [S1, unofficial].
+### Phase Schedule
+The training is divided into two phases based on iteration count [S2]:
+*   **Phase 1 (Iterations 0–10,000):** Only $L_{color}$ (image reconstruction) and $L_{sd}$ (stereo depth consistency, if available) are applied [S2].
+*   **Phase 2 (Iterations > 10,000):** Additional losses $L_{ap}$, $L_{av}$, and $L_{cfc}$ are imposed [S2].
 
-**Pseudocode:**
+### Regularization Details
+Regularization terms are added to the total loss based on specific weights [S4, unofficial]:
+*   **Orthogonality:** If `Ortho_reg_weight > 0`, compute `loss_reg = tensorf.vector_comp_diffs()` and add `Ortho_reg_weight * loss_reg` [S4, unofficial].
+*   **L1 Density:** If `L1_reg_weight > 0`, compute `loss_reg_L1 = tensorf.density_L1()` and add `L1_reg_weight * loss_reg_L1` [S4, unofficial]. Note: `L1_reg_weight` switches from an initial value to a rest value after the first alpha mask update iteration [S4, unofficial].
+*   **Total Variation (TV):** If `TV_weight_density > 0` or `TV_weight_app > 0`, compute TV losses on density and appearance fields respectively. These weights decay multiplicatively by `lr_factor` every iteration [S4, unofficial].
+
+### Formulas
+**Learning Rate Decay:**
+$$ lrate_{new} = lrate_{initial} \times (decay\_rate)^{\frac{global\_step}{decay\_steps}} $$
+[S3, unofficial]
+
+**PSNR Calculation:**
+$$ PSNR = -10 \cdot \log_{10}(L_{img}) $$
+[S1, S3, unofficial]
+
+**Total Loss:**
+$$ L_{total} = L_{img} + \sum_{k} w_k L_{reg, k} $$
+Where $w_k$ are the dynamic regularization weights [S4, unofficial].
+
+### Parameters
+*   `learning_rate` ($lrate$): Initial learning rate. Default 5e-4 [S2].
+*   `decay_rate`: Exponential decay factor. Default 0.1 [S3, unofficial].
+*   `decay_steps`: Number of steps for decay. Default `args.lrate_decay * 1000` [S3, unofficial].
+*   `batch_size` ($N_{rand}$): Number of random rays per batch [S3, unofficial].
+*   `Ortho_reg_weight`: Initial orthogonality regularization strength [S4, unofficial].
+*   `L1_reg_weight`: Initial L1 density regularization strength [S4, unofficial].
+*   `TV_weight_density`, `TV_weight_app`: Initial TV regularization strengths [S4, unofficial].
+*   `lr_factor`: Multiplicative factor for decaying TV weights and potentially LR [S4, unofficial].
+*   Hyperparameters for Phase 2 losses: $l_{ap}=10, l_{v}=4, l_{p}=3, k=5, e_{\tau}=0.1, \lambda_1=1, \lambda_2=\lambda_3=\lambda_4=\lambda_5=0.1$ [S2].
+
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import numpy as np
-
-def train_step(rays_train, rgb_train, tensorf, optimizer, args, tvreg):
-    # Standard volumetric integration step [G]
-    rgb_map, alphas_map, depth_map, weights, uncertainty = renderer(
-        rays_train, tensorf, args.batch_size, args.nSamples, args.white_bg, args.ndc_ray
-    )
-
-    # 1. Compute Reconstruction Loss (MSE)
-    loss_rec = np.mean((rgb_map - rgb_train) ** 2)
-    total_loss = loss_rec
-
-    # 2. Orthogonality Regularization
-    if args.Ortho_reg_weight > 0:
-        loss_reg = tensorf.vector_comp_diffs()
-        total_loss += args.Ortho_reg_weight * loss_reg
-
-    # 3. L1 Density Regularization
-    if args.L1_reg_weight > 0:
-        loss_reg_L1 = tensorf.density_L1()
-        total_loss += args.L1_reg_weight * loss_reg_L1
-
-    # 4. Total Variation Regularization (Density)
-    if args.TV_weight_density > 0:
-        args.TV_weight_density *= args.lr_factor
-        loss_tv_density = tensorf.TV_loss_density(tvreg)
-        total_loss += args.TV_weight_density * loss_tv_density
-
-    # 5. Total Variation Regularization (Appearance)
-    if args.TV_weight_app > 0:
-        args.TV_weight_app *= args.lr_factor
-        loss_tv_app = tensorf.TV_loss_app(tvreg)
-        total_loss += args.TV_weight_app * loss_tv_app
-
-    # 6. Optimization Step
-    optimizer.zero_grad()
-    total_loss.backward()
-    optimizer.step()
-
-    # 7. Learning Rate Decay
-    for param_group in optimizer.param_groups:
-        param_group['lr'] *= args.lr_factor
-
-    # 8. Compute PSNR for tracking
-    psnr = -10.0 * np.log10(loss_rec)
-
-    return total_loss, psnr
+def train_loop(model, optimizer, dataset, args):
+    """
+    Args:
+        model: NeRF model instance
+        optimizer: Adam optimizer instance
+        dataset: Dataset providing rays, targets, and metadata
+        args: Configuration object containing hyperparameters
+    """
+    global_step = 0
+    lrate = args.lrate
+    decay_rate = args.decay_rate
+    decay_steps = args.decay_steps
+    
+    # Regularization weights
+    ortho_weight = args.Ortho_weight
+    l1_weight = args.L1_weight_inital
+    tv_weight_density = args.TV_weight_density
+    tv_weight_app = args.TV_weight_app
+    lr_factor = args.lr_factor
+    
+    # Phase 1 threshold
+    phase1_end = 10000
+    
+    # Validation setup
+    val_indices = sample_linear_indices(dataset.size, max_samples=1024*100)
+    
+    while global_step < args.max_iterations:
+        # 1. Sample Rays
+        ray_indices = dataset.sample_random_rays(args.batch_size)
+        rays_train, rgb_train = dataset.get_rays(ray_indices)
+        
+        # 2. Render
+        # Returns: rgb_map, alphas_map, depth_map, weights, extras
+        render_output = model.render(
+            rays=rays_train,
+            chunk=args.batch_size,
+            N_samples=args.nSamples,
+            white_bg=args.white_bg,
+            ndc_ray=args.ndc_ray,
+            is_train=True
+        )
+        rgb_map = render_output.rgb_map
+        extras = render_output.extras
+        
+        # 3. Compute Loss
+        # Primary MSE Loss
+        img_loss = torch.mean((rgb_map - rgb_train) ** 2)
+        
+        total_loss = img_loss
+        
+        # Phase 1: Only Color and Stereo Depth (if available)
+        if global_step < phase1_end:
+            if args.use_sd:
+                total_loss += args.l_sd * compute_sd_loss(extras, dataset)
+        else:
+            # Phase 2: Add AP, AV, CFC losses
+            # Note: Exact formulas for L_ap, L_av, L_cfc depend on specific implementation
+            # Assuming helper functions exist as per [S2] context
+            total_loss += args.l_ap * compute_ap_loss(extras)
+            total_loss += args.l_v * compute_av_loss(extras)
+            total_loss += args.l_p * compute_cfc_loss(extras)
+            
+        # 4. Apply Adaptive Regularizations
+        if ortho_weight > 0:
+            loss_reg = model.vector_comp_diffs()
+            total_loss += ortho_weight * loss_reg
+            
+        if l1_weight > 0:
+            loss_reg_L1 = model.density_L1()
+            total_loss += l1_weight * loss_reg_L1
+            
+        if tv_weight_density > 0:
+            # TV loss on density field
+            loss_tv_d = model.TV_loss_density(args.tvreg)
+            total_loss += tv_weight_density * loss_tv_d
+            
+        if tv_weight_app > 0:
+            # TV loss on appearance field
+            loss_tv_a = model.TV_loss_app(args.tvreg)
+            total_loss += tv_weight_app * loss_tv_a
+            
+        # 5. Backpropagate
+        optimizer.zero_grad()
+        total_loss.backward()
+        optimizer.step()
+        
+        # 6. Update Learning Rate and Regularization Weights
+        # Exponential LR Decay
+        new_lrate = lrate * (decay_rate ** (global_step / decay_steps))
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = new_lrate
+        lrate = new_lrate
+        
+        # Decay TV weights multiplicatively
+        tv_weight_density *= lr_factor
+        tv_weight_app *= lr_factor
+        
+        # Switch L1 weight after first alpha mask update (if applicable)
+        if global_step == args.alpha_mask_update_step:
+            l1_weight = args.L1_weight_rest
+            
+        # 7. Logging
+        psnr = -10.0 * np.log10(img_loss.item()) / np.log(10.0)
+        log_metrics(global_step, psnr, total_loss.item())
+        
+        # Periodic checkpointing
+        if global_step % args.checkpoint_freq == 0:
+            save_checkpoint(model, optimizer, global_step)
+            
+        global_step += 1
 ```
 
-**Edge Cases and Pitfalls:**
-- **TV Weight Vanishing**: If `lr_factor < 1`, TV weights decay multiplicatively every iteration, causing regularization strength to vanish rapidly over training [S2, unofficial].
-- **L1 Weight Switching**: `L1_reg_weight` switches from `args.L1_weight_inital` to `args.L1_weight_rest` only after the first alpha mask update iteration, potentially causing inconsistent regularization early on [S2, unofficial].
-- **Validation Set Size**: The validation set size is capped at $1024 \times 100$ rays [S1, unofficial]. If the dataset is larger, indices are sampled linearly [S1, unofficial].
-- **Precision**: Ensure `loss_rec` is not zero to avoid `log(0)` in PSNR calculation [G]. Add a small epsilon if necessary [G].
-
-## Subtopics
-
-### [Training Loop Setup](1522-training-loop-setup.md)
-Defines the initial configuration and data loading pipeline.
-
-### [Training Ray Marching and Integration](2199-training-ray-marching-and-integration.md)
-Details the rendering process used to generate `rgb_map`.
-
-### [Training Configuration](2332-training-configuration.md)
-Specifies hyperparameters like `batch_size` and `nSamples`.
-
-### [Dynamic Growth Parameters](2968-dynamic-growth-parameters.md)
-Explains how `nSamples` and resolution are updated.
-
-### [Mip-NeRF 360](3306-mip-nerf-360.md)
-An alternative training approach for unbounded scenes.
-
-### [Mip-NeRF 360 Sampling and Training](3393-mip-nerf-360-sampling-and-training.md)
-Specifics of Mip-NeRF 360's training loop.
-
-### [Coarse-to-Fine NeRF](3406-coarse-to-fine-nerf.md)
-A multi-resolution training strategy.
-
-### [Neural Volume Scene Setup](4168-neural-volume-scene-setup.md)
-Scene representation details.
-
-### [Neural Transient Field (NeTF)](4692-neural-transient-field-netf.md)
-Extension for dynamic scenes.
-
-### [NeuS](4951-neus.md)
-Neural Implicit Surfaces, which may use different regularization.
+### Subtopics
+*   **[Learning Rate Scheduling](2701-learning-rate-scheduling.md):** General techniques for adjusting learning rates. This method uses exponential decay specifically.
+*   **[Regularization and Priors](6281-regularization-and-priors.md):** Details on the specific regularization terms ($L_{sd}, L_{ap}, L_{av}, L_{cfc}$) used in this loop.
+*   **[Training Objective for Fine Representation](4686-training-objective-for-fine-representation.md):** How the loss components adapt for fine-grained details in later training stages.
 
 ## Operating characteristics
-- **Time Complexity**: Not given in the sources [S1, unofficial][S2, unofficial].
-- **Memory Complexity**: Not given in the sources [S1, unofficial][S2, unofficial].
-- **Measured Performance**: Not given in the sources [S1, unofficial][S2, unofficial].
-- **Scaling**: Scales with batch size and number of samples [S2, unofficial]. Resolution upscaling dynamically updates `nSamples` and model complexity [S2, unofficial].
-- **Strengths**: Adaptive regularization helps stabilize training of hash-based or high-frequency fields [S2, unofficial]. Exponential LR decay reduces optimization step size over time [S1, unofficial][S2, unofficial].
-- **Limitations**: TV weight decay can remove beneficial smoothing too quickly [S2, unofficial]. L1 weight inconsistency may affect early convergence [S2, unofficial].
-- **When to Use**: Standard for training neural radiance fields with hash grids or MLPs requiring structural regularization [S2, unofficial].
-- **When Not to Use**: For simple MLPs without hash grids, TV regularization may be unnecessary [S2, unofficial].
+*   **Time Complexity:** $O(N_{rand} \cdot N_{samples})$ per iteration, where $N_{rand}$ is batch size and $N_{samples}$ is samples per ray [S3, S4, unofficial].
+*   **Memory Complexity:** $O(N_{rand} \cdot N_{samples})$ for storing intermediate rendering buffers (weights, alphas, gradients) [S3, unofficial].
+*   **Performance:** On a single NVIDIA RTX A4000 16GB GPU, training takes approximately 22 hours per scene for 100,000 iterations [S2].
+*   **Strengths:** Simple to implement; exponential decay provides stable convergence; two-phase schedule prevents early overfitting to noise [S2][S3, unofficial].
+*   **Limitations:** TV weights decay rapidly if `lr_factor < 1`, potentially losing regularization benefits later in training [S4, unofficial]. Validation set size is capped at 102,400 rays, which may underrepresent large datasets [S1, unofficial].
+*   **When to use:** Standard NeRF training for sparse inputs where depth priors are available. Not suitable for real-time training or very large datasets without modification [S2][S4, unofficial].
 
 ## Background
-This training loop structure is derived from implementations of neural radiance fields, particularly those using hash grids and adaptive regularization [S2, unofficial]. The specific combination of orthogonality, L1 density, and total variation regularization with exponential LR decay is characteristic of recent efficient NeRF implementations [S2, unofficial]. The PSNR metric is calculated from the mean reconstruction loss to track training progress [S1, unofficial].
+This training configuration originates from the SimpleNeRF paper, which regularizes sparse input NeRFs using simpler auxiliary models [S2]. It builds upon the DS-NeRF architecture and Adam optimization framework [S2]. The method was developed to address floaters and radiance ambiguity in sparse view synthesis by leveraging reprojection error filtering and specific regularization losses ($L_{ap}, L_{av}, L_{cfc}$) [S2]. It contrasts with FreeNeRF by using fixed simpler models rather than annealing positional encoding degrees [S2].
 
 ## Sources
 [S1] Fourier Feature Networks and Neural Volume Rendering, https://github.com/matajoh/fourier_feature_nets, fetched 2026-10-26 (unofficial)
-[S2] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)
+[S2] SimpleNeRF: Regularizing Sparse Input Neural Radiance Fields with Simpler Solutions, https://doi.org/10.1145/3610548.3618188, fetched 2026-10-26
+[S3] weiyithu/NerfingMVS, https://github.com/weiyithu/NerfingMVS, fetched 2026-10-27 (unofficial)
+[S4] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)

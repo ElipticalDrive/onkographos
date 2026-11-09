@@ -1,0 +1,247 @@
+# Masked Wavelet Representation
+
+Also called: VM-192, VM-384
+
+## Overview
+Masked Wavelet Representation (MWR) is a compact encoding method for grid-based neural fields that utilizes a multi-level discrete wavelet transform (DWT) combined with a learnable masking strategy to achieve high parameter sparsity [S1]. It solves the problem of excessive memory consumption in dense grid representations by removing more than 95% of grid parameters without significant visual quality loss [S1]. Unlike standard grid methods or those relying on discrete cosine transforms (DCT), MWR is specifically designed to handle the non-repeating, non-smooth information characteristic of neural field grids, offering superior compression and representation performance [S1].
+
+## How it works
+MWR transforms the dense feature grid into a sparse set of wavelet coefficients and applies a binary mask to zero out insignificant coefficients, effectively pruning the grid. The method is built upon the TensoRF VM-192 baseline architecture [S1].
+
+### Inputs and Outputs
+*   **Input:** Continuous 3D spatial coordinates $\mathbf{x}$ (and potentially viewing direction $\mathbf{d}$) [G].
+*   **Output:** A signal vector containing density $\sigma$ and color $\mathbf{c}$ [G].
+*   **Parameters:** The method optimizes a set of wavelet coefficients and a binary mask $M$.
+
+### Data Structures and Layout
+The core data structure is the grid of wavelet coefficients.
+1.  **Wavelet Coefficients:** The grid is decomposed using a multi-level DWT. The coefficients are organized by frequency levels. Lower frequency coefficients exhibit lower sparsity, while higher frequency coefficients exhibit higher sparsity [S1].
+2.  **Mask ($M$):** A learnable mask $M$ of the same shape as the wavelet coefficients. The mask values are initialized to one [S1]. The raw mask values reflect the characteristics of the corresponding wavelet coefficients; specifically, vertical, horizontal, and diagonal patterns appear in the raw mask values corresponding to the vertical, horizontal, and diagonal wavelet coefficients, respectively [S1].
+3.  **Quantization:** All methods, including MWR, use 8-bit quantization for storage and transmission [S1].
+
+### Numbered Steps
+
+1.  **Initialization:**
+    *   Initialize the grid parameters $\phi$ (wavelet coefficients) and the mask $M$ with ones [S1].
+    *   Set the initial learning rate for grid parameters to 0.02 and for mask parameters to the same value as grid parameters [S1].
+    *   Set the initial learning rate for MLP-related parameters to 0.001 [S1].
+
+2.  **Wavelet Transform:**
+    *   Apply a multi-level Discrete Wavelet Transform (DWT) to the grid features. The default configuration uses 4 levels of transform [S1].
+    *   **Level-wise Scaling:** Multiply the wavelet coefficients by scales proportional to the inverse of their frequency. This scaling is critical for reconstruction performance; without it, DWT performance drops below that of DCT [S1].
+
+3.  **Masking:**
+    *   Apply the learnable mask $M$ to the scaled wavelet coefficients. The mask acts as a gate, zeroing out coefficients where $M$ is effectively zero.
+    *   The sparsity of the grid is controlled by a regularization weight $\lambda_m$ applied to the mask [S1].
+
+4.  **Training Loop:**
+    *   Train the model for 30,000 iterations using a minibatch of 4,096 rays [S1].
+    *   Use the Adam optimizer with an exponential learning rate decay scheduler [S1].
+    *   **Mask Update Schedule:** Explicitly update the alpha masks at specific iterations: 2000, 4000, 6000, 11000, 16000, 21000, and 26000 [S1].
+    *   **Learning Rate Decay:** Final learning rates are set to 1/10 of the initial learning rates [S1].
+
+5.  **Regularization:**
+    *   Apply mask regularization with weight $\lambda_m$ to control sparsity. Typical values are $1 \times 10^{-10}$ for high sparsity, and $5 \times 10^{-11}$ or $2.5 \times 10^{-11}$ for lower sparsity [S1]. Adjusting $\lambda_m$ controls size and quality without affecting computational costs, time, or memory requirements during inference [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+class MaskedWaveletRepresentation:
+    def __init__(self, grid_shape, num_channels=192, num_levels=4, lambda_m=1e-10):
+        """
+        Initialize the MWR model.
+        
+        Args:
+            grid_shape: Tuple defining the spatial dimensions of the grid.
+            num_channels: Number of channels in the grid (192 for VM-192, 384 for VM-384).
+            num_levels: Number of DWT levels (default 4).
+            lambda_m: Mask regularization weight.
+        """
+        self.grid_shape = grid_shape
+        self.num_channels = num_channels
+        self.num_levels = num_levels
+        self.lambda_m = lambda_m
+        
+        # Initialize wavelet coefficients (grid parameters phi)
+        # Shape: (num_channels, *grid_shape) after DWT decomposition
+        # Note: In practice, this might be stored as a dense tensor before masking
+        self.wavelet_coeffs = nn.Parameter(torch.zeros(num_channels, *grid_shape))
+        
+        # Initialize mask M to ones
+        self.mask = nn.Parameter(torch.ones(num_channels, *grid_shape))
+        
+        # MLP parameters (simplified for this example)
+        self.mlp = nn.Sequential(
+            nn.Linear(num_channels, 256),
+            nn.ReLU(),
+            nn.Linear(256, 4) # Density + RGB
+        )
+        
+        # Optimizer setup
+        # Grid-related parameters (wavelet_coeffs) lr: 0.02
+        # Mask parameters lr: 0.02 (same as grid)
+        # MLP parameters lr: 0.001
+        self.optimizer = optim.Adam([
+            {'params': self.wavelet_coeffs, 'lr': 0.02},
+            {'params': self.mask, 'lr': 0.02},
+            {'params': self.mlp.parameters(), 'lr': 0.001}
+        ])
+        
+        # Scheduler for exponential decay
+        self.scheduler = optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=0.1) # Final lr = 1/10 initial
+
+    def apply_dwt(self, x):
+        """
+        Apply multi-level Discrete Wavelet Transform with level-wise scaling.
+        
+        Args:
+            x: Input tensor of shape (num_channels, *grid_shape).
+        Returns:
+            Scaled wavelet coefficients.
+        """
+        # Perform DWT decomposition
+        # Note: Standard PyTorch does not have a built-in multi-level DWT for 3D grids 
+        # in the core library. This would typically use a library like PyWavelets or a custom implementation.
+        # Here we assume a function `dwt_decompose` exists that returns coefficients at different levels.
+        coeffs = dwt_decompose(x, levels=self.num_levels)
+        
+        # Level-wise scaling: multiply by scales proportional to inverse of frequency
+        # Lower frequencies (coarsest level) get smaller scale factors? 
+        # Source says "proportional to the inverse of frequency". 
+        # High frequency -> small scale. Low frequency -> large scale.
+        # This step is critical for performance [S1].
+        scaled_coeffs = apply_inverse_frequency_scaling(coeffs)
+        
+        return scaled_coeffs
+
+    def forward(self, coords):
+        """
+        Render a point.
+        
+        Args:
+            coords: Tensor of shape (N, 3) containing 3D coordinates.
+        Returns:
+            Tensor of shape (N, 4) containing density and RGB.
+        """
+        # 1. Sample grid features at coordinates
+        # This involves trilinear interpolation on the masked wavelet coefficients
+        # Reconstructing the spatial domain value from wavelet coefficients and mask
+        features = self.sample_grid(coords)
+        
+        # 2. Pass through MLP
+        output = self.mlp(features)
+        return output
+
+    def sample_grid(self, coords):
+        """
+        Sample the grid at given coordinates, applying the mask.
+        """
+        # Inverse DWT to get spatial domain features, then apply mask?
+        # Or apply mask in wavelet domain and then inverse DWT?
+        # The method applies the mask to the wavelet coefficients.
+        # So: Inverse DWT of (Masked Scaled Coefficients) -> Spatial Features
+        
+        # Get current scaled coefficients
+        scaled_coeffs = self.apply_dwt(self.wavelet_coeffs)
+        
+        # Apply mask
+        masked_coeffs = scaled_coeffs * self.mask
+        
+        # Inverse DWT to get spatial features
+        spatial_features = inverse_dwt(masked_coeffs)
+        
+        # Interpolate at coords
+        # Note: This is a placeholder for the actual interpolation logic
+        features = interpolate(spatial_features, coords)
+        
+        return features
+
+    def train_step(self, rays, targets, iteration):
+        """
+        Perform one training step.
+        
+        Args:
+            rays: Tensor of shape (4096, 3) or similar batch structure.
+            targets: Ground truth tensors.
+            iteration: Current iteration number.
+        """
+        self.optimizer.zero_grad()
+        
+        # Forward pass
+        outputs = self.forward(rays)
+        
+        # Compute loss (e.g., MSE)
+        loss = compute_loss(outputs, targets)
+        
+        # Add mask regularization
+        mask_reg = self.lambda_m * torch.sum(torch.abs(self.mask)) # Or similar sparsity inducing norm
+        loss = loss + mask_reg
+        
+        # Backward pass
+        loss.backward()
+        
+        # Update mask at specific iterations
+        if iteration in [2000, 4000, 6000, 11000, 16000, 21000, 26000]:
+            # Explicit mask update step as per source [S1]
+            # This might involve a specific update rule or just relying on the optimizer
+            # The source says "Update the alpha masks", implying a specific schedule.
+            # We assume the optimizer handles it, but the schedule ensures stability.
+            pass
+            
+        self.optimizer.step()
+        self.scheduler.step()
+
+    def set_lambda_m(self, value):
+        """
+        Adjust mask regularization weight to control sparsity.
+        
+        Args:
+            value: 1e-10 for high sparsity, 5e-11 or 2.5e-11 for lower sparsity.
+        """
+        self.lambda_m = value
+
+    def set_backbone_size(self, num_channels):
+        """
+        Change the network backbone size.
+        
+        Args:
+            num_channels: 192 for VM-192, 384 for VM-384.
+        """
+        self.num_channels = num_channels
+        # Re-initialize weights if necessary
+```
+
+### Parameters and Typical Values
+*   **Mask Regularization ($\lambda_m$):** $1 \times 10^{-10}$ (high sparsity), $5 \times 10^{-11}$ or $2.5 \times 10^{-11}$ (lower sparsity) [S1].
+*   **Grid Channels:** 192 (VM-192) or 384 (VM-384) [S1].
+*   **Wavelet Transform Levels:** 4 [S1].
+*   **Wavelet Function:** Biorthogonal 4.4 (default) [S1].
+*   **Quantization:** 8-bit [S1].
+*   **Learning Rates:** Grid/Mask initial: 0.02; MLP initial: 0.001. Final: 1/10 of initial [S1].
+*   **Mask Initialization:** Ones [S1].
+
+### Edge Cases and Pitfalls
+*   **VQAD Comparison:** VQAD requires depth maps to prune vacant areas. Without depth maps, memory exceeds 40GB (Tesla A100 capacity). Since standard datasets (NeRF synthetic, LLFF, etc.) do not provide depth maps, VQAD cannot be fairly compared in this context [S1].
+*   **Scaling Importance:** Without level-wise scaling, DWT performance (PSNR 31.145) is worse than DCT (PSNR 31.325) [S1].
+*   **Computational Cost:** Adjusting $\lambda_m$ does not affect computational cost, time, or memory requirements during inference. However, increasing network size (channels/resolution) increases training and testing costs [S1].
+
+## Operating characteristics
+*   **Time and Memory Complexity:** The method achieves high sparsity, removing >95% of parameters [S1]. Memory usage is controlled by $\lambda_m$ and network size. Under a 2 MB memory budget, it outperforms baselines [S1]. Adjusting $\lambda_m$ does not change computational cost or memory requirements during inference [S1].
+*   **Measured Performance:** On the NeRF synthetic dataset, MWR (VM-192) achieved a PSNR of 31.949 with DWT [S1]. This outperforms DCT (31.325) [S1].
+*   **Scaling:** Increasing network size (e.g., VM-384) improves performance but increases computational costs and training/testing time [S1].
+*   **Strengths:** High compression efficiency, superior to DCT for non-smooth grid data, state-of-the-art performance under small memory budgets [S1].
+*   **Limitations:** Requires careful tuning of $\lambda_m$ and mask update schedule. Computational cost increases with backbone size [S1].
+
+## Background
+*   **Origin:** Proposed in "Masked Wavelet Representation for Compact Neural Radiance Fields" (CVPR 2023) [S1].
+*   **Development:** Built upon the TensoRF VM-192 baseline [S1]. The method addresses the limitations of dense grid representations and the suboptimal compression of DCT for neural field grids [S1].
+*   **Usage:** Used for compact neural radiance fields, specifically in novel view synthesis tasks on datasets like NeRF synthetic, LLFF, and TanksAndTemples [S1].
+
+## Sources
+[S1] Masked Wavelet Representation for Compact Neural Radiance Fields, https://doi.org/10.1109/cvpr52729.2023.01981, fetched 2026-10-26

@@ -1,0 +1,209 @@
+# Deferred Voxel Shading
+
+Also called: Deferred Voxel Cone Tracing, Villegas Voxel Cone Tracing, Villegas Voxel Shading
+
+## Overview
+Deferred Voxel Shading is a real-time global illumination technique that merges voxel cone tracing with deferred shading to handle complex lighting effects such as emissive materials, multiple light bounces, and indirect shadows [S1, S2, unofficial]. It differs from standard voxel cone tracing by computing direct lighting per voxel in a compute shader and storing the results in a radiance volume, allowing the fragment shader to perform indirect illumination approximation as a screenspace effect [S2, unofficial]. This separation avoids redundant lighting calculations for overlapping polygons, enhancing performance in scenes with many light sources [S1, unofficial].
+
+## How it works
+The method consists of four main stages: Voxelization, Voxel Illumination, Anisotropic Voxel Generation, and Voxel Cone Tracing [S2, unofficial].
+
+### Inputs and Outputs
+**Inputs:**
+*   Scene geometry (vertices, normals, albedo, emission).
+*   Light sources (point, spot, directional) [S2, unofficial].
+*   Camera parameters (position, view matrix, projection matrix) [S2, unofficial].
+
+**Outputs:**
+*   Final fragment color with indirect diffuse, specular, color-blending, emissive, and ambient occlusion contributions [S2, unofficial].
+
+### Data Structures
+The technique uses several 3D textures bound as `uimage3D` [S2, unofficial]:
+
+1.  **Voxelization Storage:** Three textures for raw geometry data, using `r32ui` format (or equivalent integer formats for atomic operations) [S2, unofficial]:
+    *   `voxelAlbedo`: Stores averaged albedo.
+    *   `voxelNormal`: Stores averaged surface normals.
+    *   `voxelEmission`: Stores light emission values.
+    *   *Note:* Atomic operations like `imageAtomicRGBA8Avg` are used to average values per voxel during conservative voxelization [S2, unofficial].
+
+2.  **Flag Volume:** A single-value 3D texture used to identify voxels as static. It prevents dynamic geometry from overwriting static voxels during updates [S2, unofficial].
+
+3.  **Radiance Volume:** A 3D texture storing the maximum level of detail for the voxelized scene. It holds the computed outgoing radiance (direct lighting + emission) per voxel [S2, unofficial].
+
+4.  **Directional Volumes:** Six 3D textures at half the resolution of the radiance volume. One texture exists for each axis direction (positive and negative X, Y, Z). Mipmap levels within these textures store the levels of detail for anisotropic sampling [S2, unofficial].
+
+### Step 1: Voxelization
+Conservative voxelization is used to generate the initial 3D textures from input geometry [S2, unofficial].
+
+1.  For each fragment, determine the voxel position.
+2.  Use atomic operations to average the fragment's albedo, normal, and emission into `voxelAlbedo`, `voxelNormal`, and `voxelEmission` respectively [S2, unofficial].
+3.  If the voxel position is marked as static in the `Flag Volume`, do not overwrite it during dynamic updates [S2, unofficial].
+4.  Clear previous dynamic voxels by reading the `Flag Volume`; if a voxel exists and is dynamic, clear its data [S2, unofficial].
+
+### Step 2: Voxel Illumination
+Direct lighting is calculated per voxel in a compute shader using the data from Step 1 [S2, unofficial].
+
+1.  Extract the voxel position in world-space and its averaged normal $N$ from the voxelization storage [S2, unofficial].
+2.  For each light source, calculate the direct illumination contribution.
+3.  **Normal Weighted Attenuation:** To handle uneven normal vectors within a voxel, calculate attenuation per face:
+    $$ D_{x,y,z} = (\hat{i}\cdot\Psi, \hat{j}\cdot\Psi, \hat{k}\cdot\Psi) $$
+    where $\Psi$ is the light direction and $\hat{i}, \hat{j}, \hat{k}$ are the axis unit vectors [S2, unofficial].
+4.  Select dominant faces based on the sign of the voxel averaged normal vector component $N_\omega$:
+    $$ D_{\omega} = \begin{cases} \max\{D_\omega, 0\}, & N_\omega>0 \\ \max\{-D_\omega, 0\}, & \text{otherwise} \end{cases} $$
+5.  Compute the reflectance model:
+    $$ W = N^2 $$
+    $$ V_{r} = L_{i}\frac{\rho}{\pi}(W_x D_x + W_y D_y + W_z D_z) $$
+    where $L_i$ is light intensity, $\rho$ is voxel albedo, and $N$ is the voxel normal vector [S2, unofficial].
+6.  Add the emission term from `voxelEmission` to $V_r$ [S2, unofficial].
+7.  **Voxel Occlusion:** Trace a ray from the voxel position in the direction of the light. Sample the voxelized volume to determine if a voxel exists at the ray position. If true, the voxel is occluded [S2, unofficial].
+8.  **Soft Voxel Shadows:** Accumulate occlusion using:
+    $$ \nu = \nu + (1 - \nu)\kappa\div t $$
+    where $\kappa$ is the value accumulated per collision and $t$ is the traced distance. $1 - \nu$ represents the final occlusion value [S2, unofficial].
+9.  Store the resulting radiance in the `Radiance Volume` [S2, unofficial].
+
+### Step 3: Generate Anisotropic Voxels
+Anisotropic filtering is used to generate mipmaps for more precise cone trace results [S1, S2, unofficial].
+
+1.  Execute a compute shader thread per voxel at each mipmap level, using values from the previous level [S2, unofficial].
+2.  Perform volumetric integration in depth to compute directional values [S2, unofficial].
+3.  Store the resulting directional values in the six `Directional Volumes` [S2, unofficial].
+
+### Step 4: Voxel Cone Tracing
+Performed in the fragment shader as a screenspace effect [S2, unofficial].
+
+1.  **Cone Definition:** Define a cone by origin $C_o$, direction $C_d$, and aperture angle $\theta$ [S2, unofficial].
+2.  **Cone Diameter:** Calculate the diameter $d$ at traced distance $t$:
+    $$ d=2t\times\tan(\theta\div 2) $$
+3.  **Mipmap Level Selection:** Determine the mipmap level $V_{level}$ to sample:
+    $$ V_{level} = log_2(d\div V_{size}) $$
+    where $V_{size}$ is the size of a voxel at the maximum level of detail [S2, unofficial].
+4.  **Step Size:** Modify the distance $d'$ between cone steps by a factor $\beta$. $\beta = 1$ makes $d'$ equivalent to $d$. Values $< 1$ produce higher quality but require more samples [S2, unofficial].
+5.  **Accumulation:** Maintain accumulated color $c$ and occlusion $\alpha$. Retrieve outgoing radiance $c_2$ and occlusion $\alpha_2$ from the voxel structure (using linear interpolation between `Radiance Volume` and `Directional Volumes` if the required mipmap level ranges between the maximum and first filtered level) [S2, unofficial].
+6.  Update values using volumetric front-to-back accumulation:
+    $$ c =\alpha c + (1-\alpha)\alpha_2c_2 $$
+    $$ \alpha=\alpha+(1-\alpha)\alpha_2 $$
+7.  **BRDF Matching:**
+    *   **Diffuse:** Use a few large cones distributed over the normal-oriented hemisphere [S2, unofficial].
+    *   **Specular:** Use a single cone in the reflected direction, where aperture depends on the specular exponent [S2, unofficial].
+8.  **Ambient Occlusion:** Approximate using the same cones as diffuse reflection. Accumulate $\alpha_2$ multiplied by weighting function $f(r) = \frac{1}{1+\lambda r}$, where $r$ is the current radius and $\lambda$ is a parameter [S2, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Step 1: Voxelization (Compute Shader)
+def voxelize_geometry(geometry, flag_volume):
+    for fragment in geometry:
+        voxel_pos = get_voxel_position(fragment)
+        
+        # Check static flag
+        if flag_volume.read(voxel_pos) == STATIC:
+            continue
+            
+        # Atomic average
+        imageAtomicRGBA8Avg(voxelAlbedo, voxel_pos, fragment.albedo)
+        imageAtomicRGBA8Avg(voxelNormal, voxel_pos, fragment.normal)
+        imageAtomicRGBA8Avg(voxelEmission, voxel_pos, fragment.emission)
+        
+        # Mark as dynamic (or static if geometry is static)
+        flag_volume.write(voxel_pos, DYNAMIC)
+
+# Step 2: Voxel Illumination (Compute Shader)
+def compute_voxel_radiance():
+    for voxel in radiance_volume:
+        normal = voxelNormal.read(voxel.pos)
+        albedo = voxelAlbedo.read(voxel.pos)
+        emission = voxelEmission.read(voxel.pos)
+        
+        radiance = emission
+        
+        for light in lights:
+            # Normal Weighted Attenuation
+            Psi = normalize(light.position - voxel.pos)
+            D_x = dot(normalize(vec3(1,0,0)), Psi)
+            D_y = dot(normalize(vec3(0,1,0)), Psi)
+            D_z = dot(normalize(vec3(0,0,1)), Psi)
+            
+            N_x = normal.x
+            N_y = normal.y
+            N_z = normal.z
+            
+            # Dominant face selection
+            D_x_dom = max(D_x, 0) if N_x > 0 else max(-D_x, 0)
+            D_y_dom = max(D_y, 0) if N_y > 0 else max(-D_y, 0)
+            D_z_dom = max(D_z, 0) if N_z > 0 else max(-D_z, 0)
+            
+            W_x = normal.x ** 2
+            W_y = normal.y ** 2
+            W_z = normal.z ** 2
+            
+            # Reflectance model
+            Li = light.intensity
+            rho = albedo
+            Vr = Li * (rho / PI) * (W_x * D_x_dom + W_y * D_y_dom + W_z * D_z_dom)
+            
+            # Soft Shadow
+            nu = 0
+            t = 0
+            ray_pos = voxel.pos
+            while t < light.max_distance:
+                ray_pos += Psi * step_size
+                if voxel_exists(ray_pos):
+                    nu = nu + (1 - nu) * kappa / t
+                    break
+                t += step_size
+            
+            radiance += Vr * (1 - nu)
+            
+        radiance_volume.write(voxel.pos, radiance)
+
+# Step 3: Anisotropic Voxels (Compute Shader)
+def generate_anisotropic_voxels():
+    for level in mipmap_levels:
+        for voxel in directional_volumes:
+            # Volumetric integration from previous level
+            directional_value = volumetric_integration(voxel.pos, level)
+            directional_volumes[level].write(voxel.pos, directional_value)
+
+# Step 4: Voxel Cone Tracing (Fragment Shader)
+def fragment_shader():
+    # Cone parameters
+    Co = camera_position
+    Cd = normalize(view_direction)
+    theta = aperture_angle
+    beta = 1.0 # Quality factor
+    
+    c = vec3(0)
+    alpha = 0
+    
+    t = 0
+    while t < max_distance:
+        d = 2 * t * tan(theta / 2)
+        V_level = log2(d / V_size)
+        
+        # Interpolate between Radiance and Directional volumes
+        c2, alpha2 = sample_voxel_structure(Co, Cd, V_level, beta)
+        
+        # Front-to-back accumulation
+        c = alpha * c + (1 - alpha) * alpha2 * c2
+        alpha = alpha + (1 - alpha) * alpha2
+        
+        # Step size adjustment
+        t += beta * d
+        
+    return c
+```
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of voxels, lights, and cone tracing steps. Voxelization is $O(N)$ where $N$ is the number of fragments. Illumination is $O(V \times L)$ where $V$ is voxels and $L$ is lights. Cone tracing is $O(S)$ where $S$ is the number of samples per fragment [S2, unofficial].
+*   **Memory Complexity:** Requires storage for `voxelAlbedo`, `voxelNormal`, `voxelEmission`, `Flag Volume`, `Radiance Volume`, and six `Directional Volumes` [S2, unofficial].
+*   **Strengths:** Handles emissive materials, indirect shadows, and multiple light bounces efficiently. Performance is enhanced in scenes with many light sources due to deferred rendering [S1, unofficial]. No shadow maps are needed for voxel occlusion [S2, unofficial].
+*   **Limitations:** Crude Monte Carlo approximation may introduce noise. High-quality results require more samples (lower $\beta$) [S2, unofficial]. Dynamic updates require careful management of static vs. dynamic voxels [S2, unofficial].
+
+## Background
+Deferred Voxel Shading was presented by Jose Villegas [S1, S2, unofficial]. It expands upon rudimentary voxel cone tracing by merging it with deferred shading [S1, unofficial]. The approach allows for the computation of lighting effects such as emissive materials, indirect shadows, and multiple light bounces on a voxel cone tracing basis [S1, unofficial].
+
+## Sources
+[S1] Real-Time Global Illumination Using OpenGL And Voxel Cone Tracing, https://doi.org/10.48550/arxiv.2104.00618, fetched 2026-10-26 (unofficial)
+[S2] Deferred Voxel Shading for Real Time Global Illumination, https://jose-villegas.github.io/post/deferred_voxel_shading/, fetched 2026-10-27 (unofficial)

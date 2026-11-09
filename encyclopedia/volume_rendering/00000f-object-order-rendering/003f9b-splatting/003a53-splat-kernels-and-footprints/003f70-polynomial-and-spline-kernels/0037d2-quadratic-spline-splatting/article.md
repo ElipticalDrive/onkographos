@@ -1,54 +1,53 @@
 # Quadratic Spline Splatting
+
 Also called: Max, Crawfis and Max, Quadratic Spline Splatting (Max
+
 ## Overview
-Quadratic Spline Splatting replaces the standard Gaussian reconstruction kernel with a quadratic spline function to improve rendering accuracy, particularly under perspective projection [S1, unofficial]. It addresses the visual artifacts and blurring inherent in Gaussian kernels by providing a kernel optimized for specific reconstruction conditions [S1, unofficial].
+Quadratic Spline Splatting replaces the standard Gaussian reconstruction kernel with a quadratic spline function to improve rendering accuracy, particularly under perspective projection [S1, unofficial]. It addresses the visual artifacts and blurring inherent in Gaussian kernels by providing a kernel optimized for specific conditions, yielding higher quality images while maintaining the efficiency of the splatting framework [S1, unofficial].
+
 ## How it works
-Quadratic Spline Splatting follows the general splatting framework defined in [Polynomial and Spline Kernels](9995-polynomial-and-spline-kernels.md), with the specific modification of the kernel function $h$.
+Quadratic Spline Splatting follows the general splatting pipeline defined in [Polynomial and Spline Kernels](9995-polynomial-and-spline-kernels.md), with the specific modification of the kernel function $h$.
 
 **Inputs and Outputs:**
-*   **Input:** Volumetric data (voxels with position $\mathbf{p}_k$ and density $\rho_k$), camera parameters (view and projection matrices), and the quadratic spline kernel definition.
-*   **Output:** A 2D image where each pixel color is the accumulated contribution of splatted voxels.
+*   **Input:** Volumetric data defined by voxel positions $\mathbf{p}_k$, density values $\rho_k$, and a quadratic spline kernel $h_{quad}$.
+*   **Output:** A 2D image where pixel intensities are computed by projecting the splatted quadratic splines.
 
 **Data Structures:**
-*   **Kernel Definition:** The quadratic spline kernel is a piecewise polynomial function. While the specific coefficients depend on the optimization criteria cited by Max and Crawfis, the kernel $h(r)$ is typically defined over a support radius $R$. For a 1D radial distance $r$, a common quadratic B-spline form is:
-    $$
-    h(r) = \begin{cases} 
-    1 - \frac{3}{2}r^2 + \frac{3}{4}r^3 & 0 \le r < 1 \\
-    \frac{1}{4}(2-r)^3 & 1 \le r < 2 \\
-    0 & r \ge 2
-    \end{cases}
-    $$
-    [G] Note: The exact coefficients may vary based on the specific "optimized conditions" mentioned in [S1, unofficial]. The implementer must verify the specific quadratic spline variant intended by the source. The kernel is separable, allowing 3D evaluation as $h(x,y,z) = h(x)h(y)h(z)$.
+The method relies on the standard splatting data structures:
+1.  **Voxel List:** Contains position $\mathbf{p}_k$, density $\rho_k$, and potentially precomputed kernel parameters.
+2.  **Footprint Table:** To accelerate rendering, view-dependent footprints (which may be elliptical under perspective projection) are mapped to a generic footprint table computed once [S1, unofficial].
 
-**Steps:**
-1.  **Voxel Transformation:** For each voxel $k$ with center $\mathbf{p}_k$ and density $\rho_k$, transform the center to screen space $(x_k, y_k)$ using the Model-View-Projection (MVP) matrix.
-2.  **Footprint Calculation:** Determine the 2D footprint of the voxel on the image plane. Unlike Gaussian splatting, the footprint is defined by the support of the quadratic spline. For a separable kernel, the footprint is a square (or rectangle if anisotropic scaling is applied) of side length $2R$ in screen space, where $R$ is the support radius (typically 2 units in normalized kernel space, scaled by the voxel size and projection).
-3.  **Rasterization:** Rasterize the footprint polygon (typically a rectangle) onto the image buffer.
-4.  **Kernel Evaluation:** For each pixel $(x,y)$ covered by the footprint, calculate the weight $w(x,y)$ using the quadratic spline kernel function evaluated at the distance from the voxel center:
-    $$ w(x,y) = h(|x - x_k|) \cdot h(|y - y_k|) $$
-    [G] If perspective distortion is significant, the kernel evaluation should account for the non-linear mapping, or the footprint should be approximated as an ellipse (EWA splatting) to maintain isotropy [S1, unofficial].
-5.  **Compositing:** Accumulate the weighted density into the pixel's color and alpha buffer. The contribution $C$ to a pixel is:
-    $$ C = w(x,y) \cdot \rho_k $$
-    Standard alpha compositing (front-to-back or back-to-front) is applied to handle transparency.
+**Algorithm Steps:**
+1.  **Transformation:** Transform voxel positions $\mathbf{p}_k$ from volume space to screen space using the Model-View-Projection (MVP) matrix [S1, unofficial][S2, S3].
+2.  **Kernel Selection:** For each voxel, select the quadratic spline kernel $h_{quad}$ instead of a Gaussian [S1, unofficial]. The quadratic spline is defined piecewise. While the exact coefficients are not detailed in the provided source, the kernel is optimized for specific conditions to minimize error [S1, unofficial].
+3.  **Footprint Calculation:** Determine the 2D footprint $F(x,y)$ on the screen. Under perspective projection, the footprint shape is distorted. The method may use texture mapping hardware to render splats represented as textures mapped to polygons, or map elliptical footprints to a generic table [S1, unofficial].
+4.  **Rasterization:** Scan-convert the footprint onto the image plane. The contribution of voxel $k$ to a screen pixel $(x,y)$ is:
+    $$ P_k(x,y) = \rho_k \cdot h_{quad}(x - x_k, y - y_k) $$
+    where $(x_k, y_k)$ is the projected center of the voxel.
+5.  **Compositing:** Accumulate contributions from all splats. This is typically done using alpha blending in back-to-front order to handle transparency correctly [S1, unofficial][S2, S3].
 
 **Parameters:**
-*   **Support Radius ($R$):** Typically 2.0 for quadratic B-splines.
-*   **Optimization Conditions:** The kernel is "optimized for certain conditions" [S1, unofficial]. Specific parameters for this optimization are not detailed in the provided source.
+*   **Kernel Support:** The support of the quadratic spline is limited compared to a Gaussian, potentially allowing for faster culling of non-contributing voxels [S1, unofficial].
+*   **Optimization Conditions:** The spline is "optimized for certain conditions" [S1, unofficial]. The specific conditions (e.g., specific sampling rates or projection types) are not detailed in the source.
 
 **Edge Cases and Pitfalls:**
-*   **Perspective Distortion:** The source explicitly notes improved accuracy with perspective projection [S1, unofficial]. Implementers must ensure the kernel footprint is correctly mapped to screen space to avoid artifacts.
-*   **Discontinuity:** Quadratic splines are $C^1$ continuous, but the second derivative is discontinuous. This is generally acceptable for splatting but differs from the infinite smoothness of Gaussians.
-*   **Support Size:** The finite support (radius 2) allows for efficient culling of non-contributing voxels, unlike the infinite support of Gaussians.
+*   **Perspective Distortion:** Under strong perspective, the quadratic spline footprint may become highly elliptical or distorted. Accurate mapping or texture-based rendering is required to maintain quality [S1, unofficial].
+*   **Discontinuities:** Quadratic splines may have discontinuities in the first derivative at boundaries, potentially causing visible artifacts if not handled carefully during compositing [G].
 
 ## Subtopics
+
+### [Smoothness Splines](9886-smoothness-splines.md)
+Smoothness Splines (SS) is a scattered data approximation method that reconstructs a continuous volume function from sparse or compressed measurements by minimizing a combination of data fidelity and smoothness energy. It differs from standard interpolation by enforcing smoothness via the second-order Beppo-Levi seminorm, making it suitable for recovering smooth volumetric structures from undersampled data.
+
 ## Operating characteristics
 *   **Accuracy:** Provides higher quality images than Gaussian kernels, especially under perspective projection [S1, unofficial].
-*   **Performance:** Performance is comparable to Gaussian splatting. The finite support allows for efficient voxel culling [S1, unofficial].
-*   **Hardware Acceleration:** Can be accelerated using texture mapping hardware by representing splats as textures mapped to polygons, as proposed by Crawfis and Max [S1, unofficial].
-*   **Limitations:** The specific "optimized conditions" are not defined in the source, limiting the ability to tune the kernel for specific scene types.
+*   **Performance:** Performance is comparable to Gaussian splatting if hardware acceleration (texture mapping or footprint tables) is used [S1, unofficial].
+*   **Complexity:** Time complexity is $O(N \cdot A)$ where $N$ is the number of voxels and $A$ is the average number of pixels covered by a footprint. Memory complexity is dominated by the footprint table or texture storage [S1, unofficial].
+*   **Strengths:** Improved accuracy, potential for faster culling due to limited support.
+*   **Limitations:** Requires careful handling of perspective distortion; specific optimization conditions may limit general applicability.
 
 ## Background
-Quadratic Spline Splatting was proposed by Max and Crawfis [S1, unofficial]. It was introduced as an alternative to the dominant Gaussian reconstruction kernels used in splatting implementations at the time [S1, unofficial]. The method is part of the broader effort to improve the visual quality of volume rendering through better kernel selection.
+Quadratic Spline Splatting was proposed by Max [12] and Crawfis and Max [4] as an alternative to the widely used Gaussian reconstruction kernel [S1, unofficial]. The method was introduced to address accuracy issues in splatting, particularly when using perspective projection [S1, unofficial]. It is part of the broader effort to improve the visual quality of volume rendering while maintaining real-time performance through hardware acceleration [S1, unofficial].
 
 ## Sources
 [S1] DTIC ADA606342: An Anti-Aliasing Technique for Splatting, https://archive.org/details/DTIC_ADA606342, fetched 2026-10-26 (unofficial)

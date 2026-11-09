@@ -10,7 +10,147 @@
  ],
  "prompt_chars": 12667,
  "secs": 94.66552424430847,
- "checks": {},
+ "checks": {
+  "cited": {
+   "score": 0.5294117647058824,
+   "detail": {
+    "n": 51,
+    "g": 1,
+    "uncited": [
+     "- **Input:** A tile of pixels (typically 256 pixels), a set of depth-sorted 3D Gaussians projected to 2D splats covering the tile, and stored intermediate states from the forward pass.",
+     "- **Output:** Accumulated gradients for all Gaussian parameters (position, scale, rotation, opacity, spherical harmonics coefficients) within the tile.",
+     "- **Per-Pixel State:** A tuple $(T_j, C_j)$ for each pixel $j$, where $T_j$ is the accumulated transmittance and $C_j$ is the accumulated color.",
+     "- **Per-Splat State:** Maintained by the thread processing the splat.",
+     "Includes current gradient accumulators for the splat's attributes.",
+     "- **Autodiff Context (Forward Pass):** Stores one per-pixel state every $N$ splats (where $N$ is the bucket size, typically 32) for each pixel in the tile.",
+     "**Forward Pass Storage:** During the forward rasterization, for each pixel $j$ in the tile, store the per-pixel state $(T_j, C_j)$ after every $N$-th splat (where $N=32$) into the autodiff context.",
+     "**Backward Pass Initialization:** For each tile, partition the 256 pixels into 8 groups of 32 pixels, matching the warp size.",
+     "**Warp-Level State Fetching:** Within a warp, every lane $l$ fetches the per-pixel state for its corresponding pixel $j_l$ from global memory or shared memory.",
+     "**State Exchange:** Threads exchange per-pixel states via fast intra-warp shuffling (e.g., `__shfl_sync`).",
+     "Thread $i$ (associated with splat $i$) receives the per-pixel state $(T_j, C_j)$ for pixel $j$ from the previous splat in the blending order (or from the stored state if $i=0$).",
+     "Thread $i$ applies the alpha blending logic to compute the contribution of splat $s$ to pixel $j$.",
+     "where $\\alpha_s$ is the opacity of splat $s$ at pixel $j$, and $c_s$ is the color of splat $s$.",
+     "Thread $i$ computes the gradient of the loss with respect to the splat's parameters using the chain rule, incorporating the change in transmittance and color.",
+     "Thread $i$ updates the per-pixel state for the next splat: $(T_j, C_j) \\leftarrow (T'_j, C'_j)$.",
+     "Thread $i$ atomically adds the computed gradients to the global Gaussian attribute buffers.",
+     "**Repeat:** Repeat step 4 for all 8 groups of pixels (since 256 pixels / 32 pixels per group = 8 groups).",
+     "**Optimization: Last Contributor Tracking:** Track the last contributing splat for each pixel during the forward pass.",
+     "- **Time Complexity:** $O(N_{splats} \\cdot N_{pixels})$ per tile, but with reduced constant factors due to avoided atomic contention and redundant computations.",
+     "- **Memory Complexity:** $O(N_{pixels})$ for storing per-pixel states in shared memory/warp registers.",
+     "- **Measured Performance:** Significantly faster than original 3DGS backward pass, especially for high-resolution scenes with many Gaussians.",
+     "- **When to Use:** When training 3D Gaussian Splatting models and backward pass time is a bottleneck.",
+     "- **When Not to Use:** When memory is extremely constrained and cannot afford the checkpointing overhead.",
+     "Originated from the need to accelerate the training of 3D Gaussian Splatting."
+    ]
+   }
+  },
+  "coverage": {
+   "score": 1.0,
+   "detail": {
+    "step": "7/7",
+    "comparison": "2/2",
+    "definition": "2/2",
+    "parameter": "1/1",
+    "pitfall": "1/1"
+   }
+  },
+  "faith": {
+   "score": 1.0,
+   "detail": [
+    [
+     "supported",
+     "Each thread generates the initial pixel state $(i, j)$ for the current backward bucket from the stored starting states [S1].",
+     "The claim states that each thread generates the initial pixel state $(i, j)$ for the current backward bucket from the stored starting states [S1]. The provided text explicitly confirms this in the 'Backward pass initialization' bullet point and in the main passage: 'From these, each thread in a tile generates pixel state (i, j) at the beginning of the backward pass.' It also mentions that these starting states (0, j), (N, j)... are stored during the forward pass. Therefore, every fact in the claim is present in the evidence."
+    ],
+    [
+     "supported",
+     "The original 3DGS backward pass suffered from severe atomic contention [S1].",
+     "The evidence explicitly states that the original 3DGS backward pass involves threads atomically adding gradients to the same locations, which leads to 'multiple threads contending for access to the same locations and thus serialized atomic operations.' This directly supports the claim that the original method suffered from severe atomic contention."
+    ],
+    [
+     "supported",
+     "May be complex to implement correctly due to warp-level synchronization [S1][S2, unofficial].",
+     "The claim states that the implementation may be complex due to warp-level synchronization. Both sources describe methods that rely heavily on warp-level operations: Source [S1] mentions 'intra-warp shuffling' and dividing splats into buckets of size 32 scheduled to a CUDA warp. Source [S2] describes a 'recursive per-splat parallelization' where threads within a warp fetch values, circulate per-pixel states via a loop, and exchange them across lanes. These mechanisms (shuffling, looping, lane-specific fetching/exchanging) constitute warp-level synchronization and coordination, which inherently adds implementation complexity compared to simpler parallelization schemes."
+    ],
+    [
+     "supported",
+     "It solves the bottleneck where multiple threads contend for the same memory locations when atomically adding gradients to Gaussian attributes [S2, unofficial].",
+     "The evidence explicitly states that the original 3DGS backward propagation 'induces heavy contention as many threads target the same memory locations for atomic writes.' It further explains that the proposed solution 'parallelize[s] the backward propagation at the splat (rather than tile) level to mitigate contention from atomic gradient writes.' The notes and passages confirm that this approach eliminates atomic contention by processing gradients at the splat level within warps, directly supporting the claim that it solves the bottleneck of multiple threads contending for the same memory locations when atomically adding gradients."
+    ],
+    [
+     "supported",
+     "Forward pass storage is $O(N_{splats} \\cdot N_{pixels} / N)$ for checkpointing [S1].",
+     "The evidence explicitly states that during the forward pass, 'each thread stores one per-pixel state every N splats in the autodiff context for backward'. In the context of the simplified setting described (#threads = #pixels = #splats = N), storing one state every N splats implies that for a total of $N_{splats}$, the number of stored states per pixel is $N_{splats} / N$. Since there are $N_{pixels}$ pixels, the total storage required is $N_{pixels} * (N_{splats} / N)$, which is equivalent to $O(N_{splats} * N_{pixels} / N)$."
+    ],
+    [
+     "supported",
+     "Avoids the serialization caused by atomic operations [S1][S2, unofficial].",
+     "Both Source [S1] and Source [S2] explicitly state that their proposed methods avoid or mitigate the serialization caused by atomic operations. Source [S1] notes that the original 3DGS causes 'serialized atomic operations' due to contention, and their proposed scheme maps threads to 2D splats to avoid this. Source [S2] states that original 3DGS induces 'heavy contention' causing stalls on atomic writes, and their solution parallelizes at the splat level to 'mitigate contention from atomic gradient writes' and 'avoiding any redundant arithmetic' while handling updates."
+    ],
+    [
+     "supported",
+     "c.  **Shuffle:** After processing the splat, threads shuffle the updated per-pixel states to prepare for the next splat in the bucket [S1].",
+     "The claim states that after processing a splat, threads shuffle updated per-pixel states to prepare for the next splat. The evidence supports this: Source [S1] describes a backward pass where threads exchange pixel states (transmittance T and accumulated color RGB) via 'fast collaborative sharing' (intra-warp shuffling). Specifically, the text notes that 'In each step, thread i + 1 applies the default alpha blending logic to go from its received (i, j) to (i + 1, j)', implying that the state is updated and shared/shuffled between threads (specifically thread i+1 receives the state) to process the subsequent splat (i+1). The bucket size of 32 matches the warp size, facilitating intra-warp shuffling."
+    ],
+    [
+     "supported",
+     "The culling optimization must correctly identify splats that contribute to no pixels in the tile [S1].",
+     "The evidence explicitly states that the proposed method uses 'tighter culling' to 'minimize redundant splats' and tracks the 'last contributor' to 'skip entire groups of splat-tile pairings' in the backward pass. This directly supports the claim that the optimization identifies splats that do not contribute to pixels (redundant/occluded splats) to avoid unnecessary computation."
+    ],
+    [
+     "supported",
+     "Crucially, each group of 32 pixels is fetched only once per warp [S2, unofficial].",
+     "The claim states that 'each group of 32 pixels is fetched only once per warp'. The evidence in Source [S2] explicitly states: 'At the warp level, every lane fetches the value from its corresponding pixel; crucially, each group is fetched only once.' This directly matches the claim."
+    ],
+    [
+     "supported",
+     "7.  **Optimization: Tighter Culling:** Apply tighter culling strategies (e.g., as proposed by Radl et al. [2024]) to minimize redundant splats in both forward and backward passes [S1].",
+     "The claim states that the evidence supports the use of tighter culling strategies (e.g., as proposed by Radl et al. [2024]) to minimize redundant splats in both forward and backward passes. The provided text from Source [S1] explicitly contains the sentence: 'Finally, we reduce the overall rasterization workload via tighter culling as proposed by Radl et al. [2024], minimizing redundant splats in the forward and backward pass.' This matches the claim exactly."
+    ],
+    [
+     "supported",
+     "The per-splat parallelization ensures that each thread does useful work without waiting for atomic locks [S1].",
+     "The evidence explicitly states that the original method causes 'serialized atomic operations' due to contention. It then introduces a new parallelization scheme 'over the 2D splats instead of pixels' which allows threads to maintain per-splat state and exchange smaller per-pixel states via 'fast collaborative sharing' (intra-warp shuffling). By avoiding the accumulation of gradients into shared locations via atomics, the method ensures threads perform useful work (computing gradients for their assigned splats) without waiting for atomic locks."
+    ],
+    [
+     "supported",
+     "Unlike the original 3DGS approach which maps threads to pixels and requires strict depth-sorted traversal, this method allows threads to maintain per-splat state and exchange smaller per-pixel states (transmittance and color) via intra-warp shuffling, enabling order-independent processing and avoiding redundant computations [S1][S2, unofficial].",
+     "The claim accurately reflects the information presented in both sources. Source [S1] explicitly states that the original 3DGS maps threads to pixels and requires depth-sorted traversal, whereas the proposed method maps threads to 2D splats, allows threads to maintain per-splat state, and exchanges smaller per-pixel states (transmittance and color) via intra-warp shuffling to avoid atomic contention and redundant computations. Source [S2] corroborates this by describing how the original 3DGS (and Taming-3DGS) enforces strict depth order traversal and stores states every 32 splats, leading to redundant computations, while the new method uses order-independent processing (OIT) to avoid these constraints and redundant arithmetic."
+    ],
+    [
+     "supported",
+     "This completes the tile-internal gradient computation [S2, unofficial].",
+     "The claim states that the described process completes the tile-internal gradient computation. Source [S2] explicitly confirms this in the notes and the main text, stating: 'Repeat this procedure eight times to complete tile-internal gradient computation and atomic updates' and 'Repeating this procedure eight times completes the tile-internal gradient computation and the associated atomic updates.'"
+    ],
+    [
+     "supported",
+     "Thread $i$ atomically adds the computed gradients to the global Gaussian attribute buffers. *Note: In this per-splat parallelization, each thread handles one splat, so atomic contention is reduced to one thread per splat, avoiding the many-to-one contention of the pixel-parallel approach* [S1][S2, unofficial].",
+     "The claim states that thread $i$ atomically adds computed gradients to global Gaussian attribute buffers and that this per-splat parallelization reduces atomic contention compared to the pixel-parallel approach. Source [S1] explicitly contrasts the original 3DGS (pixel-parallel) which causes 'serialized atomic operations' due to 'multiple threads contending for access to the same locations', with the proposed method where 'each thread (and pixel) contributes to one Gaussian at a time', thereby avoiding this contention. Source [S2] similarly notes that the original design induces 'heavy contention' and that parallelizing at the splat level mitigates this, involving 'atomic updates'. Both sources confirm that the per-splat approach assigns specific responsibility to threads (reducing many-to-one contention) and that gradients are accumulated via atomic operations."
+    ],
+    [
+     "supported",
+     "Taming 3DGS [S1] introduced per-splat parallelization to mitigate this.",
+     "The evidence explicitly states that the proposed solution (referred to as 'Ours' or the method introduced in the paper associated with S1) uses a 'parallelization scheme over the 2D splats instead of pixels' to address the issue of 'serialized atomic operations' (contention) found in the original 3DGS backward pass. This aligns perfectly with the claim that 'Taming 3DGS [S1] introduced per-splat parallelization to mitigate this [atomic contention/serialization].'"
+    ]
+   ]
+  },
+  "pseudo": {
+   "score": null,
+   "detail": {
+    "undefined": [
+     "bucket_size",
+     "zeros_like",
+     "splat_params",
+     "compute_splat_contribution",
+     "compute_gradient"
+    ],
+    "translated": true,
+    "bench": null,
+    "why": "no matching oracle",
+    "rejected": []
+   }
+  }
+ },
  "code_blocks": 1,
  "verified_blocks": [],
  "inputs": {

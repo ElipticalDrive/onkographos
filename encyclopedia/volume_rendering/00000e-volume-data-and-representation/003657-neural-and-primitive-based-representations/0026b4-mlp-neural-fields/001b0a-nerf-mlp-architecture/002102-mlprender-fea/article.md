@@ -1,60 +1,74 @@
 # MLPRender_Fea
 
-Also called: Feature Encoding and MLP Decoding, MLP Render, MLP Render with Feature Encoding, MLP Render with Features, Scene Reconstruction MLP
+Also called: MLP Render, MLP Render with Features, MLP Render with Feature Encoding, MLP Render with Feature and View Positional Encoding
 
 ## Overview
-MLPRender_Fea is a neural rendering module that predicts RGB color from input features and viewing directions using a Multi-Layer Perceptron (MLP) [S3, unofficial]. It solves the problem of view-dependent appearance modeling by mapping latent feature representations to final pixel colors, distinguishing itself from position-only fields by explicitly incorporating directional information [S3, unofficial]. Unlike its sibling [Position-Only NeRF Field](1253-position-only-nerf-field.md) which ignores view direction, or [Tiny NeRF](1275-tiny-nerf.md) which simplifies the architecture, MLPRender_Fea retains the full directional encoding to capture complex specularities and shading [S3, unofficial].
+MLPRender_Fea is a neural rendering module that predicts RGB color from input features, view directions, and positions using a Multi-Layer Perceptron (MLP) with positional encoding applied to features and view direction, but NOT position [S5, unofficial]. It sets itself apart from standard NeRF MLPs by decoupling the density prediction (handled by the parent architecture or a separate branch) from the view-dependent color prediction, allowing the color network to focus exclusively on appearance synthesis given pre-computed geometric features [S5, unofficial]. Unlike [Position-Only NeRF Field](1253-position-only-nerf-field.md) which ignores view direction, or [View-Dependent MLP](2444-view-dependent-mlp.md) which encodes position, MLPRender_Fea explicitly encodes the viewing direction and input features to model view-dependent effects like specularities and lighting changes [S5, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
 *   **Inputs:**
-    *   `features`: Latent feature vector associated with the spatial location. Dimension $inChanel$ [S3, unofficial].
-    *   `viewdirs`: 3D viewing direction vector. Dimension 3 [S3, unofficial].
-    *   *Note:* Spatial position $x$ is **not** an input to this specific module; it is assumed the features already encode spatial information [S3, unofficial].
+    *   `features`: A tensor of latent geometric/appearance features associated with the 3D point. Shape: $(N, \text{inChanel})$.
+    *   `viewdirs`: A tensor of viewing directions for each sample. Shape: $(N, 3)$.
+    *   `viewpe`: Integer, number of sinusoidal frequencies for view direction encoding. Default: 6 [S3, unofficial].
+    *   `feape`: Integer, number of sinusoidal frequencies for feature encoding. Default: 0 or positive integer [S3, unofficial].
 *   **Outputs:**
-    *   `rgb`: Predicted RGB color values. Dimension 3 [S3, unofficial].
-    *   *Note:* While the parent [NeRF MLP Architecture](910-nerf-mlp-architecture.md) outputs density $\sigma$, MLPRender_Fea specifically refers to the color prediction branch [S3, unofficial]. However, in the context of the full NeRF pipeline described in [S2, unofficial], the density is derived from the intermediate hidden state of the MLP.
+    *   `rgb`: A tensor of predicted RGB color values. Shape: $(N, 3)$. Values are in $[0, 1]$ due to sigmoid activation.
 
-**Data Structures and Layout:**
-The MLP consists of 3 sequential linear layers [S3, unofficial].
-1.  **Input Layer:** Maps concatenated input features and encoded directions to hidden dimension `featureC`.
-2.  **Hidden Layer:** Maps `featureC` to `featureC`.
-3.  **Output Layer:** Maps `featureC` to 3 (RGB).
+**Data Structures:**
+The MLP consists of 3 sequential linear layers.
+*   `layer1`: Linear transformation from input dimension `in_mlpC` to `featureC`.
+*   `layer2`: Linear transformation from `featureC` to `featureC`.
+*   `layer3`: Linear transformation from `featureC` to 3 (RGB).
+*   `featureC`: Hidden dimension size. Default: 128 [S5, unofficial].
+*   `in_mlpC`: Input dimension calculated as:
+    $$ in\_mlpC = (3 + 2 \cdot viewpe \cdot 3) + (3 + 2 \cdot feape \cdot 3) + \text{inChanel} $$
+    *Note: The formula in [S5, unofficial] suggests features are treated as 3D for PE expansion if `feape > 0`, or the code assumes a specific feature dimensionality. The term `(3+2*feape*3)` implies the positional encoding is applied to a 3D representation of the features, or the features themselves are 3D. However, `inChanel` is added separately. If `feape=0`, the term is just `inChanel`. If `viewpe=0`, the view term is just 3.*
+    *   Raw viewdirs: 3 dimensions.
+    *   Encoded viewdirs: $2 \cdot viewpe \cdot 3$ dimensions.
+    *   Raw features: `inChanel` dimensions.
+    *   Encoded features: If `feape > 0`, $2 \cdot feape \cdot 3$ dimensions are added (assuming 3D feature encoding) or potentially `2 * feape * inChanel` if encoding each channel (see [S5, unofficial] layout note which says `2*feape*inChanel`). The definition note [S5, unofficial] says `(3+2*feape*3)`, but the layout note says `2*feape*inChanel`. We follow the layout note for implementation as it is more general for arbitrary `inChanel`.
+    *   Corrected Input Dimension:
+        $$ in\_mlpC = 3 + 2 \cdot viewpe \cdot 3 + \text{inChanel} + (2 \cdot feape \cdot \text{inChanel} \text{ if } feape > 0 \text{ else } 0) $$
+        *Wait, [S5, unofficial] layout explicitly states: `in_mlpC = 2*viewpe*3 + 2*feape*inChanel + 3 + inChanel`. This confirms the feature PE expands the `inChanel` dimension.*
 
 **Parameters:**
-*   `featureC`: Hidden dimension size. Default: 128 [S3, unofficial].
-*   `inChanel`: Input feature dimension [S3, unofficial].
-*   `viewpe`: Number of sinusoidal encoding functions for view direction. If 0, no encoding is applied [S3, unofficial].
-*   `feape`: Number of sinusoidal encoding functions for features. If 0, no encoding is applied [S3, unofficial].
+*   `viewpe`: Number of view positional encoding frequencies. Default: 6 [S3, unofficial].
+*   `feape`: Number of feature positional encoding frequencies. Default: 0 [S3, unofficial].
+*   `featureC`: Hidden layer channel size. Default: 128 [S5, unofficial].
 
-**Positional Encoding:**
-Sinusoidal positional encoding is applied to `viewdirs` and optionally `features` if `viewpe > 0` or `feape > 0` [S3, unofficial]. The encoding for input $x$ with embedding size $L$ is defined as:
-$$ \text{out} = [x, \sin(2^0 x), \cos(2^0 x), \dots, \sin(2^{L-1} x), \cos(2^{L-1} x)] $$
-Implemented by concatenating $x$ with $\sin(2^i x)$ and $\cos(2^i x)$ for $i \in [0, L-1]$ [S2, unofficial].
+**Step-by-Step Method:**
 
-**Input Dimension Calculation:**
-The total input dimension to the MLP, $in\_mlpC$, depends on whether features are encoded.
-If `feape` is applied (treating features as 3D for encoding purposes, as per [S3, unofficial] code logic):
-$$ in\_mlpC = (3 + 2 \cdot viewpe \cdot 3) + (3 + 2 \cdot feape \cdot 3) + inChanel $$
-If `feape` is 0:
-$$ in\_mlpC = (3 + 2 \cdot viewpe \cdot 3) + inChanel $$
-*Note: [S3, unofficial] provides two conflicting formulas. One includes feature encoding expansion $(3+2\cdot feape\cdot 3)$, implying features are treated as 3D vectors for PE, while the other assumes raw features are just added. The code snippet in [S3, unofficial] uses `positional_encoding(features, self.feape)`, and the dimension calculation includes `2*feape*inChanel` in one variant or `2*feape*3` in another. The most consistent interpretation from the code `self.in_mlpC = (3+2*viewpe*3) + (3+2*feape*3) + inChanel` suggests features are expanded as if they were 3D, or the code has a specific assumption about feature dimensionality being 3 for PE. However, a later snippet says `in_mlpC = 2*viewpe*3 + 2*feape*inChanel + 3 + inChanel`. We cite the explicit formula from [S3, unofficial]:*
-$$ in\_mlpC = (3+2\cdot viewpe\cdot 3) + inChanel \quad (\text{if } feape=0) $$
-$$ in\_mlpC = (3+2\cdot viewpe\cdot 3) + (3+2\cdot feape\cdot 3) + inChanel \quad (\text{if } feape>0, \text{assuming 3D feature PE}) $$
-*Correction based on [S3, unofficial] code snippet `self.in_mlpC = (3+2*viewpe*3) + (3+2*feape*3) + inChanel`: This implies the PE is applied to a 3D representation of features, or the code assumes features are 3D. However, `inChanel` is added separately. This formula is specific to the code provided [S3, unofficial].*
+1.  **Positional Encoding of View Directions:**
+    If `viewpe > 0`, apply sinusoidal positional encoding to `viewdirs`.
+    $$ \text{encoded\_viewdirs} = \text{PE}(\text{viewdirs}, \text{viewpe}) $$
+    Where $\text{PE}(x, L)$ produces a tensor of shape $(N, 3 + 2 \cdot L \cdot 3)$ containing $x$ and $\sin(2^i x), \cos(2^i x)$ for $i \in [0, L-1]$.
 
-**Algorithm Steps:**
-1.  **Encode View Direction:** Apply positional encoding to `viewdirs` with size `viewpe`. Result: `encoded_dir` of size $3 + 2 \cdot viewpe \cdot 3$.
-2.  **Encode Features (Optional):** If `feape > 0`, apply positional encoding to `features`. *Note: The source [S3, unofficial] code applies PE to features. If features are not 3D, this step requires reshaping or the PE function handles arbitrary dimensions. The formula suggests 3D expansion.* Result: `encoded_feat` of size $3 + 2 \cdot feape \cdot 3$ (if 3D assumption) or similar.
-3.  **Concatenate Input:** Concatenate `features`, `viewdirs`, `encoded_feat` (if applicable), and `encoded_dir` along the last dimension to form `mlp_in` [S3, unofficial].
-4.  **Forward Pass:**
-    *   Pass `mlp_in` through Layer 1: `h1 = ReLU(Linear(mlp_in, featureC))`.
-    *   Pass `h1` through Layer 2: `h2 = ReLU(Linear(h1, featureC))`.
-    *   Pass `h2` through Layer 3: `rgb_raw = Linear(h2, 3)`.
-5.  **Output Activation:** Apply Sigmoid activation to `rgb_raw` to clamp values to $[0, 1]$: `rgb = sigmoid(rgb_raw)` [S3, unofficial].
-6.  **Initialization:** Initialize the bias of the final layer (Layer 3) to 0 [S3, unofficial].
+2.  **Positional Encoding of Features:**
+    If `feape > 0`, apply sinusoidal positional encoding to `features`.
+    $$ \text{encoded\_features} = \text{PE}(\text{features}, \text{feape}) $$
+    Where $\text{PE}(x, L)$ produces a tensor of shape $(N, \text{inChanel} + 2 \cdot L \cdot \text{inChanel})$.
+
+3.  **Input Concatenation:**
+    Concatenate the raw and encoded tensors along the last dimension to form `mlp_in`.
+    $$ \text{mlp\_in} = \text{Concat}([\text{features}, \text{viewdirs}, \text{encoded\_features (if } feape>0), \text{encoded\_viewdirs (if } viewpe>0)]) $$
+    The order is: `[features, viewdirs, positional_encoding(features, feape), positional_encoding(viewdirs, viewpe)]` [S5, unofficial].
+
+4.  **MLP Forward Pass:**
+    Pass `mlp_in` through the 3-layer MLP.
+    *   $h_1 = \text{ReLU}(\text{Linear}_1(\text{mlp\_in}))$
+    *   $h_2 = \text{ReLU}(\text{Linear}_2(h_1))$
+    *   $rgb_{raw} = \text{Linear}_3(h_2)$
+
+5.  **Output Activation:**
+    Apply sigmoid activation to clamp RGB values to $[0, 1]$.
+    $$ rgb = \sigma(rgb_{raw}) $$
+
+6.  **Initialization:**
+    The bias of the final layer (`layer3`) is initialized to 0 [S5, unofficial].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
@@ -63,137 +77,123 @@ import torch.nn as nn
 
 def positional_encoding(x, embedding_size):
     """
-    Apply sinusoidal positional encoding.
-    x: Tensor of shape (..., D)
-    embedding_size: Number of frequency bands L
-    Returns: Tensor of shape (..., D + 2*L*D)
+    Apply sinusoidal positional encoding to input tensor.
+    Args:
+        x: Input tensor of shape (..., D)
+        embedding_size: Number of frequencies L
+    Returns:
+        Encoded tensor of shape (..., D + 2*L*D)
     """
     out = [x]
     for i in range(embedding_size):
-        freq = 2 ** i
-        out.append(torch.sin(freq * x))
-        out.append(torch.cos(freq * x))
+        for fn in [torch.sin, torch.cos]:
+            out.append(fn(2 ** i * x))
     return torch.cat(out, dim=-1)
 
 class MLPRender_Fea(nn.Module):
-    def __init__(self, inChanel, featureC=128, viewpe=4, feape=0):
+    def __init__(self, inChanel, viewpe=6, feape=0, featureC=128):
         super().__init__()
-        self.inChanel = inChanel
-        self.featureC = featureC
         self.viewpe = viewpe
         self.feape = feape
+        self.featureC = featureC
         
-        # Calculate input dimension based on [S3, unofficial] formula
-        # Note: The formula (3+2*feape*3) implies features are treated as 3D for PE
-        # or the code assumes a specific feature structure. 
-        # Using the explicit formula from [S3, unofficial]:
-        if feape > 0:
-            in_mlpC = (3 + 2 * viewpe * 3) + (3 + 2 * feape * 3) + inChanel
-        else:
-            in_mlpC = (3 + 2 * viewpe * 3) + inChanel
-            
-        self.mlp = nn.Sequential(
-            nn.Linear(in_mlpC, featureC),
-            nn.ReLU(),
-            nn.Linear(featureC, featureC),
-            nn.ReLU(),
-            nn.Linear(featureC, 3)
-        )
+        # Calculate input dimension
+        # Raw viewdirs: 3
+        # Encoded viewdirs: 2 * viewpe * 3
+        # Raw features: inChanel
+        # Encoded features: 2 * feape * inChanel
+        self.in_mlpC = 3 + 2 * viewpe * 3 + inChanel + (2 * feape * inChanel if feape > 0 else 0)
         
-        # Initialize bias of last layer to 0 [S3, unofficial]
-        nn.init.zeros_(self.mlp[-1].bias)
+        # 3-layer MLP
+        self.layer1 = nn.Linear(self.in_mlpC, featureC)
+        self.layer2 = nn.Linear(featureC, featureC)
+        self.layer3 = nn.Linear(featureC, 3)
+        
+        # Initialize bias of final layer to 0
+        nn.init.constant_(self.layer3.bias, 0)
 
     def forward(self, features, viewdirs):
         """
-        features: Tensor of shape (..., inChanel)
-        viewdirs: Tensor of shape (..., 3)
-        Returns: Tensor of shape (..., 3) representing RGB
+        Args:
+            features: Tensor of shape (N, inChanel)
+            viewdirs: Tensor of shape (N, 3)
+        Returns:
+            rgb: Tensor of shape (N, 3)
         """
-        # Encode view direction [S3, unofficial]
-        encoded_dir = positional_encoding(viewdirs, self.viewpe)
+        indata = [features, viewdirs]
         
-        # Encode features if feape > 0 [S3, unofficial]
         if self.feape > 0:
-            # The source code applies PE to features. 
-            # Assuming features are reshaped or treated as 3D for PE expansion 
-            # as per the dimension formula in [S3, unofficial].
-            # If features are not 3D, this step might require adjustment 
-            # not explicitly detailed in the snippet beyond the dimension formula.
-            # We follow the code structure:
-            encoded_feat = positional_encoding(features, self.feape)
-            # Concatenate: features, viewdirs, encoded_feat, encoded_dir
-            # Note: The order in [S3, unofficial] is [features, viewdirs, positional_encoding(features), positional_encoding(viewdirs)]
-            mlp_in = torch.cat([features, viewdirs, encoded_feat, encoded_dir], dim=-1)
-        else:
-            # Concatenate: features, viewdirs, encoded_dir
-            mlp_in = torch.cat([features, viewdirs, encoded_dir], dim=-1)
+            indata.append(positional_encoding(features, self.feape))
+        if self.viewpe > 0:
+            indata.append(positional_encoding(viewdirs, self.viewpe))
             
-        # Pass through MLP [S3, unofficial]
-        rgb_raw = self.mlp(mlp_in)
+        mlp_in = torch.cat(indata, dim=-1)
         
-        # Apply Sigmoid [S3, unofficial]
+        h = torch.relu(self.layer1(mlp_in))
+        h = torch.relu(self.layer2(h))
+        rgb_raw = self.layer3(h)
+        
         rgb = torch.sigmoid(rgb_raw)
-        
         return rgb
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Feature Dimensionality:** The positional encoding for features (`feape`) assumes a 3D structure for the expansion formula $(3+2\cdot feape\cdot 3)$ in [S3, unofficial], which may conflict with arbitrary `inChanel` dimensions. Implementers must ensure `features` are compatible with the PE function or adjust the dimension calculation [S3, unofficial].
-*   **Bias Initialization:** Failing to initialize the final layer bias to 0 may slow convergence or bias the initial color output [S3, unofficial].
-*   **Sigmoid Clamping:** The Sigmoid activation ensures RGB values are in $[0,1]$, but may limit dynamic range if not calibrated correctly [S3, unofficial].
+*   **Feature Dimensionality:** The positional encoding for features assumes the input `features` tensor has a dimension that can be encoded. If `feape > 0`, the code in [S5, unofficial] implies `inChanel` is the dimension being encoded. If `inChanel` is not 3, the PE expansion factor is `2 * feape * inChanel`.
+*   **View Direction Normalization:** View directions should be normalized before encoding to ensure consistent frequency scaling, although the source code does not explicitly show normalization in the forward pass [S5, unofficial].
+*   **Bias Initialization:** Failing to initialize the final layer bias to 0 may lead to slow convergence or biased initial predictions [S5, unofficial].
 
 ## Subtopics
 
 ### [NeRF with Per-Image Embeddings](2484-nerf-with-per-image-embeddings.md)
-A model variant that learns a per-image embedding for each scene and injects it into the NeRF MLP during color prediction. Unlike Stable View Synthesis (SVS), which modifies scene brightness and color to explain camera variation, this method neutralizes photometric variation during training, yielding consistent global brightness and color across views. It builds on [MLPRender_Fea](2414-mlprender-fea.md).
+Extends MLPRender_Fea by adding a per-image embedding vector to the input, allowing the MLP to account for global appearance shifts like lighting changes across different views.
+
+### [Volume Radiance Network](2576-volume-radiance-network.md)
+A variant that may use different feature sources or MLP structures for radiance prediction.
 
 ### [Linear Feature Decoder with Learned Color Basis](3352-linear-feature-decoder-with-learned-color-basis.md)
-This method replaces the nonlinear Multi-Layer Perceptron (MLP) decoder used in hybrid neural rendering models with a white-box linear decoder that uses spatially-localized features as coefficients for a learned basis to describe view-dependent color and density. It sets itself apart from its parent [MLPRender_Fea](2414-mlprender-fea.md) by explicitly modeling view dependence through a learned basis rather than a black-box MLP. This approach enables adaptivity for scenes with variable appearance and avoids the limited expressivity of spherical harmonic decoders.
+Replaces the nonlinear MLP decoder with a linear decoder using a learned basis, explicitly modeling view dependence without a black-box MLP.
 
 ### [Hybrid View-dependent Color Modeling](5083-hybrid-view-dependent-color-modeling.md)
-This method models view-dependent color emissions by combining a sparse feature voxel grid with a shallow Multi-Layer Perceptron (MLP). It solves the trade-off between the slow convergence of pure neural fields and the limited expressivity of static voxel grids. Unlike its sibling [NeRF with Per-Image Embeddings](2484-nerf-with-per-image-embeddings.md) which uses global image vectors, or [Linear Feature Decoder with Learned Color Basis](3352-linear-feature-decoder-with-learned-color-basis.md) which uses linear projections, this hybrid approach uses a local spatial lookup followed by a non-linear shallow MLP to capture complex specularities and shading.
+Combines a sparse feature voxel grid with a shallow MLP, separating view-independent and view-dependent components, whereas MLPRender_Fea applies PE to features and view direction but not position.
 
 ### [Color Network Architecture](7200-color-network-architecture.md)
-The Color Network Architecture is a lightweight Multi-Layer Perceptron (MLP) used in neural rendering to predict RGB color values from input features, view directions, and spatial positions. It solves the problem of view-dependent appearance modeling by mapping latent feature representations to final pixel colors. It is distinguished from its siblings by its specific input dimensionality (using positional encoding for position and view direction but not for the feature itself) and its minimal depth (three hidden layers), designed for fast optimization in dynamic view synthesis.
+Defines specific layer widths and activation functions for the MLP module in dynamic view synthesis contexts.
 
 ### [Neural BRDF and Geometry Decoding](8139-neural-brdf-and-geometry-decoding.md)
-This method decodes appearance features $a(x)$ into Bidirectional Reflectance Distribution Function (BRDF) values, surface normals, and RGB colors using distinct neural networks. It builds on [MLPRender_Fea](2414-mlprender-fea.md) by separating the decoding of geometric properties (normals, BRDF) from photometric properties (color) into specialized MLPs, allowing for explicit physical parameterization. Unlike [NeRF with Per-Image Embeddings](2484-nerf-with-per-image-embeddings.md) which adjusts global appearance, or [Linear Feature Decoder with Learned Color Basis](3352-linear-feature-decoder-with-learned-color-basis.md) which uses linear projections, this approach employs non-linear MLPs to map features to physical quantities.
+Decodes features into explicit BRDF values and normals, extending the color prediction to physically based rendering.
 
-### Volume Radiance Network
-*   **Definition:** A class `VolumeRadiance` that encapsulates the direction encoding and MLP network for volume rendering [S4, unofficial].
-*   **Layout:**
-    *   Attributes: `n_dir_dims` (default 3), `n_output_dims` (3), `encoding` (direction encoder), `n_input_dims` (sum of `input_feature_dim` and encoding output dims), `network` (MLP) [S4, unofficial].
-*   **Steps:**
-    1.  Normalize directions from $(-1, 1)$ to $(0, 1)$ by `(dirs + 1.) / 2.` [S4, unofficial].
-    2.  Encode directions using `self.encoding` after viewing as `(-1, n_dir_dims)` [S4, unofficial].
-    3.  Concatenate flattened features, encoded directions, and any additional args along the last dimension to form `network_inp` [S4, unofficial].
-    4.  Pass `network_inp` through `self.network` and reshape to match input feature shape plus `n_output_dims` [S4, unofficial].
-    5.  If `color_activation` is in config, apply the activation function to the color [S4, unofficial].
-*   **Parameters:** `input_feature_dim`, `dir_encoding_config`, `mlp_network_config`, `color_activation` [S4, unofficial].
+### [MLPRender_Fea_WeakView](10541-mlprender-fea-weakview.md)
+A variant that decouples density from color, deriving density from a specific feature channel while maintaining view-independence for volumetric properties.
+
+### [Gaussian Activated Radiance Fields Render](10546-gaussian-activated-radiance-fields-render.md)
+Uses Gaussian activation functions instead of ReLU to model view-dependent appearance.
 
 ### Neural Texture Decoder
-*   **Definition:** A decoder for texture generation [S5, unofficial].
-*   **Layout:**
-    *   Input FC: Fully-connected layer mapping 199-dim vector to $(32 \cdot 32 \cdot 32 \cdot 4)$-dim vector [S5, unofficial].
-    *   Reshape: Reshape to tensor of size $32 \times 32 \times 32 \times 4$ [S5, unofficial].
-    *   3D Convs: Series of 3D convolutions with channels $\{4, 8, 4\}$, kernel sizes $\{4, 4, 4\}$, strides $\{1, 2, 1\}$ [S5, unofficial].
-    *   Output: Tensor of size $64 \times 64 \times 64 \times 4$ [S5, unofficial].
+A decoder for texture generation that maps a 199-dim vector to a 32x32x32x4 tensor via fully-connected and 3D convolutional layers, outputting a 64x64x64x4 tensor [S7, unofficial].
+
+### Volumetric Appearance Network Layout
+An MLP that takes encoded position, spherical harmonics encoding of view direction, normal vector, and geometric feature vector as input. It uses three layers with 128, 128, and 64 features, GELU activations, and a Sigmoid output for RGB and transparency [S8].
+
+### MLP Opacity Regression
+A fusion ablation technique where opacity is regressed from an MLP using 8-dim feature vectors sampled from HexPlane, boosting PSNR/SSIM/LPIPS at the cost of slower rendering [S9].
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of MLP layers and input dimension. The MLP is shallow (3 layers), making it fast per sample [S3, unofficial].
-*   **Memory Complexity:** Dominated by the MLP weights. With `featureC=128`, the weight matrix sizes are small ($in\_mlpC \times 128$, $128 \times 128$, $128 \times 3$) [S3, unofficial].
-*   **Performance:** Fast convergence on macro features, but slow on micro features, requiring learning rate scheduling [S2, unofficial].
-*   **Strengths:** Explicitly models view dependence, capable of capturing complex specularities [S3, unofficial].
-*   **Limitations:** Black-box nature of MLP may lack interpretability compared to linear decoders [S1]. Sensitive to feature dimensionality assumptions for positional encoding [S3, unofficial].
-*   **When to Use:** When view-dependent appearance is critical and features are already available [S3, unofficial].
-*   **When Not to Use:** When computational efficiency is paramount and view dependence is minimal (use [Position-Only NeRF Field](1253-position-only-nerf-field.md)) or when interpretability is required (use [Linear Feature Decoder with Learned Color Basis](3352-linear-feature-decoder-with-learned-color-basis.md)) [S1].
+*   **Time Complexity:** The MLP forward pass is $O(N \cdot (\text{in\_mlpC} \cdot \text{featureC} + \text{featureC}^2 + \text{featureC} \cdot 3))$, where $N$ is the number of samples. Positional encoding is $O(N \cdot \text{inChanel} \cdot \text{feape})$ and $O(N \cdot 3 \cdot \text{viewpe})$.
+*   **Memory Complexity:** $O(\text{in\_mlpC} \cdot \text{featureC} + \text{featureC}^2 + \text{featureC} \cdot 3)$ for weights.
+*   **Performance:** The use of positional encoding for view directions allows the network to capture high-frequency view-dependent effects like specular highlights [S5, unofficial]. The separation of feature and view encoding allows for flexible integration with various feature extraction methods (e.g., from a voxel grid or hash table).
+*   **Strengths:** Simple architecture, easy to integrate with different feature representations, effective for view-dependent appearance.
+*   **Limitations:** The MLP may struggle with very high-frequency details compared to more complex architectures like InstantNGP [5049-instantngp-network-architecture.md]. The reliance on positional encoding can lead to spectral bias, where the network learns low-frequency functions first.
 
 ## Background
-MLPRender_Fea is part of the NeRF MLP Architecture, which represents a 3D scene as a continuous volumetric function mapping 3D spatial coordinates and 2D viewing directions to volume density and RGB color [S2, unofficial]. The specific use of feature encoding and MLP decoding is consistent with the main scene reconstruction task [S1]. The architecture was popularized by the original NeRF paper and implemented in various open-source repositories [S2, S3, unofficial].
+MLPRender_Fea is a component of the Neural Radiance Fields (NeRF) family, specifically designed for color prediction given features and view directions. It builds on the original NeRF MLP architecture [910-nerf-mlp-architecture.md] by decoupling the color prediction from the density prediction and explicitly encoding features and view directions. The method is used in various neural rendering pipelines where features are extracted from a separate representation (e.g., TensoRF, InstantNGP) and decoded into color.
 
 ## Sources
 [S1] Neural Harmonic Textures for High-Quality Primitive Based Neural Reconstruction, https://doi.org/10.1007/978-3-032-37032-7_18, fetched 2026-10-26
-[S2] AlbertAffectus/NeRF, https://github.com/AlbertAffectus/NeRF, fetched 2026-10-27 (unofficial)
-[S3] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)
-[S4] bennyguo/instant-nsr-pl, https://github.com/bennyguo/instant-nsr-pl, fetched 2026-10-27 (unofficial)
-[S5] RenderNet: A deep convolutional network for differentiable rendering from 3D shapes, https://doi.org/10.48550/arxiv.1806.06575, fetched 2026-10-26 (unofficial)
+[S2] weiyithu/NerfingMVS, https://github.com/weiyithu/NerfingMVS, fetched 2026-10-27 (unofficial)
+[S3] Nemo1999/Joint-TensoRF, https://github.com/Nemo1999/Joint-TensoRF, fetched 2026-10-27 (unofficial)
+[S4] AlbertAffectus/NeRF, https://github.com/AlbertAffectus/NeRF, fetched 2026-10-27 (unofficial)
+[S5] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)
+[S6] PI-NeRF: A Partial-Invertible Neural Radiance Fields for Pose Estimation, https://doi.org/10.1145/3581783.3612590, fetched 2026-11-08
+[S7] RenderNet: A deep convolutional network for differentiable rendering from 3D shapes, https://doi.org/10.48550/arxiv.1806.06575, fetched 2026-10-26 (unofficial)
+[S8] Volumetric Surfaces: Representing Fuzzy Geometries with Layered Meshes, https://doi.org/10.1109/cvpr52734.2025.01991, fetched 2026-10-26
+[S9] HexPlane: A Fast Representation for Dynamic Scenes, https://doi.org/10.1109/cvpr52729.2023.00021, fetched 2026-10-26

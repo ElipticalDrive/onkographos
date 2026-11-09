@@ -1,0 +1,214 @@
+# Discrete Volume Rendering Integral
+
+Also called: Classical Ray Tracing Integration, Discrete Volume Rendering Equation, Discretized Volume Rendering Integral (DVRI), Ray Tracing Integral, Riemann Sum Approximation for DVR, VRI, Volume Raycasting Discretization
+
+## Overview
+The Discrete Volume Rendering Integral (VRI) is the fundamental numerical approximation used in direct volume ray casting to compute the color and opacity of a pixel by integrating the continuous Volume Rendering Equation (VRE) along a camera ray [S1, S15][S24, unofficial]. It solves the problem of rendering 3D scalar or vector fields by discretizing the ray into fixed or variable segments, sampling the volume data at each step, and compositing the results front-to-back [S1][S8, S17, unofficial]. It sets itself apart from analytical methods like [Self-Attenuation Integral Evaluation](1085-self-attenuation-integral-evaluation.md) by relying on Riemann sums rather than closed-form solutions, and from higher-order integration schemes like [Runge-Kutta 4 (RK4) Integration](3158-runge-kutta-4-rk4-integration.md) by assuming constant density and color within each segment (Zero Order Integration) [S7, S20, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   **Volume Data:** A 3D grid of scalar or vector values (e.g., density $\sigma$, color $c$) [S1][S11, unofficial].
+*   **Camera Ray:** Defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, intersecting the volume at entry parameter $t_{in}$ and exit parameter $t_{out}$ [S1][S8, unofficial].
+*   **Step Size ($\Delta s$):** The distance between consecutive sample points along the ray [S15][S17, unofficial].
+*   **Transfer Function:** Maps sampled scalar values to color $c_i$ and opacity $\alpha_i$ [S1][S8, unofficial].
+
+**Outputs:**
+*   **Pixel Color ($C$):** The accumulated radiance for the pixel [S1][S24, unofficial].
+*   **Pixel Opacity ($\alpha$):** The accumulated transparency/opacity for the pixel [S1][S24, unofficial].
+
+### Data Structures
+*   **Volume Grid:** Typically stored as a 3D array or texture. For CPU implementations, this may be a flat array with row-major indexing: `data[z * width * height + y * width + x]` [S7, S13, unofficial]. For GPU implementations, this is often a 3D texture allowing hardware trilinear interpolation [S8, unofficial].
+*   **Accumulators:** Two variables per ray, `accumulated_color` (RGB) and `accumulated_alpha` (float), initialized to 0 and 0 respectively [S1][S16, unofficial].
+*   **Transmittance:** A scalar variable `T` (or derived from `accumulated_alpha`) representing the light reaching the current sample, initialized to 1.0 [S16, S25, unofficial].
+
+### Numbered Steps
+1.  **Ray Initialization:** For each pixel, compute the camera ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$. Determine the intersection interval $[t_{in}, t_{out}]$ with the volume bounding box or implicit surface [S1][S8, S19, unofficial].
+2.  **Discretization:** Divide the interval $[t_{in}, t_{out}]$ into $N$ segments of length $\Delta s = (t_{out} - t_{in}) / N$ [S15][S20, unofficial].
+3.  **Loop Over Samples:** Iterate $i$ from $0$ to $N-1$ (front-to-back):
+    a.  **Sample Position:** Calculate the position $\mathbf{p}_i = \mathbf{o} + (t_{in} + i \cdot \Delta s) \mathbf{d}$ [S1][S19, unofficial].
+    b.  **Interpolation:** Sample the volume data at $\mathbf{p}_i$ using trilinear interpolation to get the scalar value $v_i$ [S1][S24, unofficial].
+    c.  **Transfer Function:** Map $v_i$ to color $c_i$ and opacity $\alpha_i$ [S1][S8, unofficial].
+    d.  **Compute Weight:** Calculate the contribution weight $w_i$ for the current segment. Using the exponential attenuation model:
+        $$ w_i = T_i \cdot (1 - e^{-\sigma_i \Delta s}) $$
+        where $\sigma_i$ is the density (often equivalent to opacity per unit length or derived from $\alpha_i$) and $T_i$ is the transmittance entering the segment [S11, S12, S25, unofficial].
+        *Note: In simpler implementations where $\alpha_i$ is the opacity of the segment itself, the weight is often computed as:*
+        $$ w_i = T_i \cdot \alpha_i $$
+        where $T_i = \prod_{j=0}^{i-1} (1 - \alpha_j)$ [S20, S24, S26, unofficial].
+    e.  **Accumulate:** Update the accumulated color and opacity:
+        $$ C_{new} = C_{old} + w_i \cdot c_i $$
+        $$ \alpha_{new} = \alpha_{old} + w_i $$
+        *Alternatively, using the standard front-to-back compositing equations:*
+        $$ \hat{C}_{out} = \hat{C}_{in} + \hat{C}_i (1 - \alpha_{in}) $$
+        $$ \alpha_{out} = \alpha_{in} + \alpha_i (1 - \alpha_{in}) $$
+        where $\hat{C}$ denotes pre-multiplied color ($C \cdot \alpha$) [S1][S17, unofficial].
+    f.  **Update Transmittance:** Update $T_{i+1} = T_i \cdot (1 - \alpha_i)$ or $T_{i+1} = T_i \cdot e^{-\sigma_i \Delta s}$ [S11, S26, unofficial].
+    g.  **Early Termination:** If $\alpha_{out} \geq 1.0$ (or a threshold like 0.95), break the loop [S7, S19, unofficial].
+4.  **Final Color:** If the final accumulated opacity $\alpha_{out} < 1.0$, blend with the background color $C_{bg}$:
+    $$ C_{final} = C_{out} + C_{bg} (1 - \alpha_{out}) $$
+    If a fully opaque background was composited, normalization is omitted [S1].
+
+### Formulas
+The discrete volume rendering integral for a ray $\mathbf{r}$ is approximated as a Riemann sum [S15][S20, unofficial]:
+
+$$ L_{out} = \sum_{i=0}^{n-1} c_i \alpha_i \prod_{j=0}^{i-1} (1 - \alpha_j) $$
+
+Where:
+*   $L_{out}$ is the final pixel color (radiance) [S24, S26, unofficial].
+*   $c_i$ is the color contribution of the $i$-th sample [S24, unofficial].
+*   $\alpha_i$ is the opacity of the $i$-th sample/segment [S24, unofficial].
+*   $\prod_{j=0}^{i-1} (1 - \alpha_j)$ is the transmittance $T_i$ from the camera to the start of the $i$-th segment, representing the fraction of light not absorbed by previous samples [S24, S26, unofficial].
+
+For density-based rendering (e.g., NeRFs or physical media), the opacity $\alpha_i$ is derived from density $\sigma_i$ and step size $\Delta s$:
+$$ \alpha_i = 1 - e^{-\sigma_i \Delta s} $$
+$$ T_i = e^{-\sum_{j=0}^{i-1} \sigma_j \Delta s} $$
+$$ L_{out} = \sum_{i=0}^{n-1} c_i (1 - e^{-\sigma_i \Delta s}) e^{-\sum_{j=0}^{i-1} \sigma_j \Delta s} $$ [S6][S11, S25, unofficial].
+
+### Parameters
+*   **$\Delta s$ (Step Size):** Controls sampling density. Smaller $\Delta s$ reduces aliasing and integration error but increases computation time [S17, S27, unofficial]. Typical values depend on volume resolution; e.g., 0.001 in normalized coordinates or fixed voxel steps [S8, S13, unofficial].
+*   **$N$ (Number of Samples):** $N = (t_{out} - t_{in}) / \Delta s$ [S15].
+*   **Opacity Threshold:** Early termination threshold, typically 0.95 or 1.0 [S7, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Aliasing:** If $\Delta s$ is too large relative to the frequency of the volume data, visible artifacts (stair-stepping, moiré) occur [S17, S27, unofficial].
+*   **Precision:** Accumulating many small opacity values can lead to floating-point precision errors. Using full precision for intermediate transmittance calculations is recommended [S9, unofficial].
+*   **Boundary Conditions:** Incorrectly calculating $t_{in}$ and $t_{out}$ leads to missing data or sampling outside the volume bounds [S1][S19, unofficial].
+*   **Degenerate Rays:** Rays that do not intersect the volume should return the background color immediately [S3, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def discrete_volume_rendering_integral(volume, ray_origin, ray_direction, t_min, t_max, step_size, transfer_function):
+    """
+    Computes the pixel color and opacity using the Discrete Volume Rendering Integral.
+    
+    Args:
+        volume: 3D array or texture object with method sample(x, y, z) returning scalar value.
+        ray_origin: vec3, camera position.
+        ray_direction: vec3, normalized ray direction.
+        t_min: float, entry parameter of the ray into the volume.
+        t_max: float, exit parameter of the ray from the volume.
+        step_size: float, distance between samples.
+        transfer_function: function(scalar) -> (color, opacity).
+        
+    Returns:
+        (color, opacity): vec3 and float representing the final pixel color and opacity.
+    """
+    
+    # Initialize accumulators
+    accumulated_color = vec3(0.0, 0.0, 0.0)
+    accumulated_alpha = 0.0
+    transmittance = 1.0
+    
+    # Calculate number of steps
+    # Note: Use a small epsilon to avoid floating point issues at t_max
+    num_steps = int((t_max - t_min) / step_size)
+    
+    for i in range(num_steps):
+        # 1. Sample Position
+        t = t_min + i * step_size
+        pos = ray_origin + ray_direction * t
+        
+        # 2. Interpolation (Trilinear)
+        # Assuming volume.sample returns a scalar density/value
+        scalar_value = volume.sample(pos.x, pos.y, pos.z)
+        
+        # 3. Transfer Function
+        # Maps scalar value to color (RGB) and opacity (alpha)
+        color_sample, alpha_sample = transfer_function(scalar_value)
+        
+        # 4. Early Termination Check
+        if accumulated_alpha >= 0.99:
+            break
+            
+        # 5. Accumulate Color and Opacity (Front-to-Back)
+        # Contribution of current sample: transmittance * alpha_sample * color_sample
+        contribution = transmittance * alpha_sample * color_sample
+        accumulated_color += contribution
+        
+        # Update accumulated alpha and transmittance
+        accumulated_alpha += transmittance * alpha_sample
+        transmittance *= (1.0 - alpha_sample)
+        
+    # 6. Final Color (Blend with background if necessary)
+    # Assuming black background (0,0,0)
+    final_color = accumulated_color
+    
+    return final_color, accumulated_alpha
+```
+
+## Subtopics
+
+### [Eye Align](849-eye-align.md)
+A sample placement strategy where the first sample point is calculated relative to the eye position, creating concentric sampling lines across pixels. It differs from [Entry Align](855-entry-align.md) by aligning to the viewer, potentially introducing endpoint aliasing.
+
+### [Self-Attenuation Integral Evaluation](1085-self-attenuation-integral-evaluation.md)
+Computes the self-attenuation integral using a normalized 3D Gaussian density and exponential attenuation, providing an exact closed-form solution that avoids discretization errors.
+
+### [Partial Pre-Integration](1148-partial-pre-integration.md)
+Improves integration approximation by using a 2D lookup table ($\psi$ table) independent of the transfer function, allowing interactive updates with minimal overhead.
+
+### [CPU Volume Raycasting](1258-cpu-volume-raycasting.md)
+A direct volume rendering technique using explicit multithreaded pixel processing on the CPU with trilinear interpolation and early ray termination.
+
+### [Average Intensity Projection](1310-average-intensity-projection.md)
+A simplified technique averaging scalar intensities along rays, treating the volume as transparent and ignoring opacity/absorption, resulting in low contrast.
+
+### [Differential Sampling](1549-differential-sampling.md)
+Adapts sampling density along the ray based on view-dependent frequency to respect the Nyquist limit, using variable step sizes.
+
+### [In-Scattering Integral Approximation via Riemann Sum](1585-in-scattering-integral-approximation-via-riemann-sum.md)
+Explicitly approximates the in-scattering term $L_i(x, \omega)$ using auxiliary light rays and Beer's law for non-homogeneous volumes.
+
+### [Zero Order Integration (Rectangle Rule)](2082-zero-order-integration-rectangle-rule.md)
+Assumes constant density and color within each segment, evaluating a Riemann sum with one sample per segment. Simple but prone to discontinuities.
+
+### [Volumetric Ray Tracing with Global Illumination](5676-volumetric-ray-tracing-with-global-illumination.md)
+Extends ray tracing to handle geometric intersections and recursive paths for global illumination effects in volumetric scenes, introducing aliasing at grid locations.
+
+### Forward Projection with Trilinear Interpolation
+Separates line-integral calculation into continuous volume construction via trilinear interpolation and summation at equidistant points. Requires high oversampling for accuracy [S27, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(P \cdot N)$, where $P$ is the number of pixels and $N$ is the number of samples per ray. Linear with respect to dataset size if all voxels are sampled [S1].
+*   **Memory Complexity:** $O(V)$ for storing the volume data, where $V$ is the number of voxels. Minimal additional memory for accumulators [S1].
+*   **Performance:** Highly dependent on $\Delta s$ and early termination. Fast for sparse volumes or those with high opacity (early termination triggers quickly). Slow for dense, transparent volumes requiring full ray traversal [S1][S7, unofficial].
+*   **Strengths:** Simple to implement, physically plausible (with proper transfer functions), supports arbitrary lighting and shading models per sample [S1][S5, unofficial].
+*   **Limitations:** Prone to aliasing if $\Delta s$ is not small enough; computationally expensive for high-resolution volumes or transparent media; requires careful handling of interpolation and boundary conditions [S17, S27, unofficial].
+*   **When to Use:** Direct volume rendering of scalar fields where transparency and color mapping are key; suitable for GPU implementation via fragment shaders [S1][S8, unofficial].
+*   **When Not to Use:** When analytical solutions are available and sufficient (e.g., [Self-Attenuation Integral Evaluation](1085-self-attenuation-integral-evaluation.md)); when high performance is critical and the volume is very sparse (consider [Average Intensity Projection](1310-average-intensity-projection.md) or [CPU Volume Raycasting](1258-cpu-volume-raycasting.md) with optimizations) [S1][S2, unofficial].
+
+## Background
+The Discrete Volume Rendering Integral is rooted in the foundational work of volume rendering in the late 1980s and early 1990s. The front-to-back compositing algorithm, which discretizes the volume rendering integral, was popularized by Levoy [S1, S29, S33] and others. The term "Volume Rendering Integral" (VRI) refers to the continuous integral, and its discretization into a Riemann sum is the standard approach for direct volume ray casting [S15][S20, unofficial]. It is widely used in medical imaging, scientific visualization, and computer graphics for rendering 3D scalar fields [S1][S8, unofficial].
+
+## Sources
+[S1] Efficient ray tracing of volume data, https://doi.org/10.1145/78964.78965, fetched 2026-10-25
+[S2] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)
+[S3] An Introduction to Volume Rendering, https://scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers/intro-volume-rendering.html, fetched 2026-10-25 (unofficial)
+[S4] Direct rendering of multiresolution decomposed volume data., https://doi.org/10.82465/4870, fetched 2026-10-26 (unofficial)
+[S5] VIDILabs/instantvnr, https://github.com/VIDILabs/instantvnr, fetched 2026-10-26 (unofficial)
+[S6] RGB-D Mapping and Tracking in a Plenoxel Radiance Field, https://doi.org/10.1109/wacv57701.2024.00331, fetched 2026-10-26
+[S7] upupming/volume-rendering, https://github.com/upupming/volume-rendering, fetched 2026-10-26 (unofficial)
+[S8] extrovert7986/Scientific-visualization-Ray-casting-volume-rendering, https://github.com/extrovert7986/Scientific-visualization-Ray-casting-volume-rendering, fetched 2026-10-26 (unofficial)
+[S9] Smokeview (Version 6) A Tool for Visualizing Fire Dynamics Simulation Data Volume II : Technical Reference Guide, https://doi.org/10.6028/nist.sp.1017-2, fetched 2026-10-26 (unofficial)
+[S10] DTIC ADA193649: Rendering of Surfaces from Volume Data,, https://archive.org/details/DTIC_ADA193649, fetched 2026-10-26 (unofficial)
+[S11] samirangode/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/samirangode/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)
+[S12] Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)
+[S13] browarsoftware/directvolumerenderingcpu, https://github.com/browarsoftware/directvolumerenderingcpu, fetched 2026-10-26 (unofficial)
+[S14] Volume Rendering - Lei Mao's Log Book, https://leimao.github.io/blog/Volume-Rendering/, fetched 2026-10-26 (unofficial)
+[S15] 14 Rendering Volume and Subsurface Scattering - Foundations of Visual ..., https://learnvisualcomputing.github.io/rendering-rte.html, fetched 2026-10-27
+[S16] Production Volume Rendering, https://cg.informatik.uni-freiburg.de/intern/seminar/volumeRenderingProductionFundamentals2011.pdf, fetched 2026-10-27 (unofficial)
+[S17] Direct volume rendering of tree-based tetrahedral adaptive mesh refinement data, https://repository.bilkent.edu.tr/items/fcbc592a-2646-49af-8b84-67308b6fd3e9, fetched 2026-10-27 (unofficial)
+[S18] PDF Direct Volume Rendering - KTH, https://www.kth.se/social/files/565e35dff27654457fb84363/08_VolumeRendering.pdf, fetched 2026-10-27 (unofficial)
+[S19] GPU Ray Marching of Distance Fields, https://www2.compute.dtu.dk/pubdb/edoc/imm6392.pdf, fetched 2026-10-27 (unofficial)
+[S20] PDF Direct Volume Rendering, https://www.cs.unh.edu/~cs880/lectureNotes/DVR.pdf, fetched 2026-10-28 (unofficial)
+[S21] From Volume Rendering to 3D Gaussian Splatting, https://www.visgraf.impa.br/Data/RefBib/PS_PDF/tutorial-sib2025/tutorial-sib2025.pdf, fetched 2026-10-28 (unofficial)
+[S22] A Practical Evaluation of Popular Volume Rendering ..., https://courses.cs.duke.edu/spring03/cps296.8/papers/PracticalEvaluationofVolumeRenderingAlgorithms.pdf, fetched 2026-10-29
+[S23] Volume Raycasting Sampling Revisited, https://osf.io/download/u9qnz/, fetched 2026-10-29 (unofficial)
+[S24] Texture Mapping Based Volume Rendering, https://www.ciroduran.com/files/Tesis.pdf, fetched 2026-10-29 (unofficial)
+[S25] Total Internal Reflection, https://avishek.net/2022/12/05/pytorch-guide-plenoxels-nerf-part-2.html, fetched 2026-10-29 (unofficial)
+[S26] CISC/CMPE 454, GPU Volume Rendering, https://watkins.cs.queensu.ca/~jstewart/454/notes/44/44-gpu-volume-rendering.html, fetched 2026-10-30 (unofficial)
+[S27] 5 Forward Projection through Voxel Volumes, https://www.cvl.isy.liu.se/education/undergraduate/tsbb31/download/TurbellPhDCh5.pdf, fetched 2026-10-25 (unofficial)

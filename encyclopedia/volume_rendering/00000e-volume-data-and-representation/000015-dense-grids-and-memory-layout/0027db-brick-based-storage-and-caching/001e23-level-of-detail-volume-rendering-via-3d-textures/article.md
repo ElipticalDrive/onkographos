@@ -3,67 +3,71 @@
 Also called: Multiresolution volume rendering via 3D textures, Adaptive 3D Texture Volume Rendering, Brick-based LOD volume rendering
 
 ## Overview
-This method provides an adaptive level-of-detail (LOD) selection algorithm for multi-resolution volume rendering using 3D texture mapping [S1]. It renders volume data in a region-of-interest at high resolution while progressively lowering the resolution for areas further away, enabling interactive exploration of large-scale datasets [S2]. Unlike approaches that rely on user-specified error tolerances or spherical shells, this technique guarantees consistent interpolation between different resolution levels and explicitly fixes rendering artifacts (such as light/dark bands) at brick boundaries using polygon clipping and opacity correction [S1][S2].
+Level-of-Detail (LOD) Volume Rendering via 3D Textures is a method for interactive visualization of large-scale volumetric datasets by adaptively selecting resolution levels for individual bricks based on visual importance criteria [S1, S2, S3]. It solves the problem of texture memory exhaustion and excessive sampling rates in large volumes by constructing a local multi-resolution hierarchy for each brick, allowing regions of interest to be rendered at high resolution while distant or less opaque regions are rendered at coarser levels [S2, S3]. Unlike spherical-shell approaches [S2, S3], this method uses planar slicing parallel to the image plane and guarantees continuous interpolation and correct opacity accumulation at brick boundaries through explicit texture adaptation and polygon clipping [S1, S2, S3].
 
 ## How it works
 
 ### Inputs and Outputs
-*   **Input:** A large 3D scalar volume dataset (e.g., $256^3$ voxels) [S3].
-*   **Output:** A rendered image with adaptive resolution, minimizing texture memory usage and texture lookups [S2].
+**Inputs:**
+*   A volumetric dataset $V$ of size $N_x \times N_y \times N_z$.
+*   A brick decomposition of $V$ into $B_x \times B_y \times B_z$ bricks, where each brick has logical dimensions $L_x \times L_y \times L_z$ [S1, S2, S3].
+*   A focus point oracle or error measure to determine the Level of Detail (LOD) index $k_b$ for each brick $b$ [S3].
+*   Camera parameters (viewpoint, projection) [S1, S3].
+
+**Outputs:**
+*   A rendered image with adaptive resolution.
+*   A texture hierarchy stored in GPU texture memory.
 
 ### Data Structures
 
-**1. Brick Decomposition**
-The volume is decomposed into 3D bricks (subvolumes) small enough to fit into texture memory. A typical brick size is $32^3$ voxels [S3].
+**1. Brick LOD Index Map**
+A 3D array mapping each brick to its selected LOD level $k$.
+*   Constraint: $|k_{b_i} - k_{b_j}| \le 1$ for any adjacent bricks $b_i, b_j$ [S1, S3].
 
 **2. Texture Hierarchy**
-Each brick maintains a local hierarchy of texture maps.
-*   **Level 0:** The original resolution data [S2].
-*   **Level $k$:** A coarser resolution copy. The texture size is reduced by a factor of two compared to level $k-1$, and the width of texture elements is doubled [S1][S3].
-*   **Alignment:** Texture elements on level $k$ are aligned such that their centers correspond to the center of an even-indexed element on the finer level $k-1$ [S1][S3].
-*   **Domain Adaptation:** On level 0, the texture coordinate domain ranges from the center of the first element to the center of the last one. This domain is adapted for coarser levels to maintain geometric consistency [S1].
-*   **Boundary Padding:** To guarantee continuous interpolation, additional voxels are included at subvolume boundaries. If a boundary falls between two voxels on a coarser level, both adjacent voxels must be modified/adapted [S1].
-*   **Power-of-Two Expansion:** Textures are expanded and padded with zero voxels to satisfy OpenGL's power-of-two texture size restrictions [S1][S3].
+For each brick $b$, a set of 3D textures $T_{b,k}$ for $k \in [0, K_{max}]$.
+*   **Level 0 ($T_{b,0}$):** Contains the original voxel data of brick $b$.
+*   **Level $k > 0$:** Contains the low-pass filtered and subsampled version of $T_{b,k-1}$.
+*   **Texture Dimensions:** Due to OpenGL power-of-two restrictions, textures are expanded to the next power of two. Let $P(L)$ be the smallest power of two $\ge L$. The stored size is $P(L_x+1) \times P(L_y+1) \times P(L_z+1)$, including 1-voxel padding [S1, S2, S3].
+*   **Merged Textures:** To save memory, adjacent bricks at coarser levels share textures. At level $k$, $8^k$ adjacent bricks share a single texture map, forming an octree-like hierarchy [S1].
 
-**3. Merged Texture Hierarchy (Octree-like)**
-To minimize memory overhead from boundary padding, textures of adjacent subvolumes are merged:
-*   **Level 0:** Each brick has its own texture map [S1].
-*   **Higher Levels:** Eight adjacent subvolumes share a single texture map. The number of subvolumes sharing a texture map multiplies by 8 at each coarser level, forming an octree-like hierarchy [S1].
-*   **Constraint:** Merging works optimally if the initial number of subvolumes in every direction is a power of two. If the count exceeds $2^{l-1}$ (where $l$ is the number of levels), additional subvolumes build their own texture sets. If fewer, the hierarchy depth is reduced by storing coarsest-level textures individually [S1].
+**3. Texture Coordinate Domain**
+The domain of the texture function is adapted to ensure alignment.
+*   On Level 0, texture coordinates range from the center of the first voxel to the center of the last voxel [S1, S2, S3].
+*   On Level $k$, the width of texture elements is $2^k$ times the width of Level 0 elements [S1, S2, S3].
+*   Texture elements on Level $k$ are aligned such that their centers correspond to the center of an even-indexed element on Level $k-1$ [S1, S2, S3].
 
-### Parameters
-*   **Filter Kernel:** A quadratic spline kernel is used to iteratively construct low-pass filtered copies for coarser levels. Simple sub-sampling is insufficient [S2][S3].
-*   **Max Adjacent Level Difference:** Adjacent bricks can differ by at most one level of detail. Higher transitions are achieved via consecutive one-level steps [S1][S3].
-*   **Brick Size:** Typically $32^3$ voxels [S3].
+### Steps
 
-### Algorithm Steps
-
-1.  **Decomposition:** Split the volume dataset into bricks of fixed size (e.g., $32^3$) [S3].
-2.  **Hierarchy Construction:** For each brick, construct a local texture hierarchy:
-    *   Level 0 is the original data.
-    *   For each subsequent level $k$, apply a quadratic spline filter to the data from level $k-1$ to generate the coarser approximation [S2][S3].
-    *   Align levels so that level $k$ centers match even-indexed elements of level $k-1$ [S1].
-    *   Expand textures to power-of-two dimensions, padding with zeros [S3].
-3.  **Texture Merging:** Merge adjacent brick textures into shared maps according to the octree-like hierarchy rules [S1].
-4.  **LOD Selection:** Assign a level of detail to each brick based on criteria:
-    *   **Maximum Opacity:** Higher opacity regions get higher resolution [S1].
-    *   **Distance to Viewpoint:** Closer bricks get higher resolution [S1].
-    *   **Projection Area:** Larger projected bounding boxes get higher resolution [S1].
-    *   **Gaze Distance:** Regions closer to the user's gaze point get higher resolution [S1].
-    *   *Constraint:* Ensure adjacent bricks differ by at most one level [S3].
-5.  **Boundary Adaptation (Interpolation):** For bricks adjacent to a coarser neighbor, adapt the finer texture to ensure scalar field continuity:
-    *   Identify voxels at the boundary of the finer brick that do not align with the coarser grid.
-    *   Interpolate or copy values from the coarser level into these boundary voxels of the finer brick [S1][S3].
-    *   If the boundary is at a voxel center, adapt 1 voxel; if between voxels, adapt 2 [S1].
-6.  **Opacity Correction:** Modify the transfer function for subsampled (coarser) textures to preserve optical properties. Calculate the corrected opacity $\alpha'$ using the derived formula [S1]:
-    $$ \alpha' = 1 - (1 - \alpha_0)^2 $$
-    where $\alpha_0$ is the original opacity. Apply this to all opacity values in the subsampled texture [S1].
-7.  **Polygon Clipping and Rendering:** Render bricks using slicing planes parallel to the image plane. Handle level transitions with polygon clipping to correct opacity artifacts:
-    *   **Case 1 (Coarser to Finer):** Clip the even-slice $i$ in the coarser brick with the perspective projection of the odd-slice $i+1$ (from the finer brick) onto slice $i$. Render the clipped polygon in region $C$ with the same opacity as the finer level [S3].
-    *   **Case 2 (Finer to Coarser):** Reconstruct the odd-slice $i+1$ in the coarser brick and clip it with the perspective projection of the even-slice $i$ (from the finer brick) onto slice $i+1$. Render the clipped polygon in region $C$ with corrected opacity $\alpha_{k+1}$ [S3].
-    *   **Generalization:** For each pair of even/odd slices in a coarser brick, consecutively clip the even-slice with all odd-slices in the same and neighboring bricks on the same or finer level. Clip odd-slices only with even-slices in neighboring finer bricks [S3].
-    *   **Boundary Handling:** If no other polygons exist to clip against, insert additional slices with the smallest sample distance to guarantee correct opacity contribution [S3].
+1.  **Decomposition:** Subdivide the volume into bricks [S1, S2, S3].
+2.  **Hierarchy Construction:** For each brick, construct the local texture hierarchy:
+    *   Store Level 0 data.
+    *   Iteratively generate coarser levels $k=1 \dots K_{max}$ by applying a quadratic spline kernel filter followed by subsampling (keeping even-indexed voxels) [S1, S2, S3].
+    *   Expand textures to power-of-two dimensions, padding with zeros if necessary [S1, S2, S3].
+3.  **LOD Selection:** Assign an LOD level $k_b$ to each brick based on criteria:
+    *   **Maximum Opacity:** Higher opacity $\rightarrow$ higher LOD [S1].
+    *   **Distance to Viewpoint:** Closer $\rightarrow$ higher LOD [S1].
+    *   **Projection Area:** Larger projected area $\rightarrow$ higher LOD [S1].
+    *   **Gaze Distance:** Closer to gaze center $\rightarrow$ higher LOD [S1].
+    *   Enforce the constraint that adjacent bricks differ by at most one level [S1, S3].
+4.  **Texture Adaptation (Boundary Continuity):** Adjust textures at boundaries between bricks with different LODs to ensure scalar field continuity [S1, S2, S3].
+    *   If brick $A$ (fine, level $k$) is adjacent to brick $B$ (coarse, level $k+1$):
+        *   Adapt the texture of $A$ near the boundary.
+        *   Voxels in $A$ corresponding to even indices on level $k$ are copied from the corresponding even voxels in $B$ (level $k+1$) [S1, S2, S3].
+        *   Voxels in $A$ corresponding to odd indices are interpolated from the adapted even voxels [S1, S2, S3].
+        *   The number of adapted voxels depends on the boundary position relative to the voxel grid (1 voxel if boundary is at center, 2 if between) [S1].
+5.  **Opacity Correction:** Modify the transfer function for coarser textures to preserve optical properties [S1, S3].
+    *   Derive corrected opacity $\alpha'$ for a coarser sample that replaces two finer samples with opacities $\alpha_0$ and $\alpha_1$.
+    *   Assuming $\alpha_1 \approx \alpha_0$, the formula is:
+        $$ \alpha' = 1 - (1 - \alpha_0)^2 $$
+    *   Apply this correction to all opacity values in the subsampled textures [S1].
+6.  **Rendering with Polygon Clipping:** Render bricks using slicing planes parallel to the image plane [S2, S3].
+    *   For each brick, generate a set of slicing polygons.
+    *   **Clipping:** If a brick is adjacent to a finer brick, clip its polygons to prevent overdraw and ensure correct opacity contribution [S3].
+        *   **Case 1 (Coarser to Finer):** Clip the even-slice $i$ of the coarser brick with the perspective projection of the odd-slice $i+1$ of the finer brick [S3].
+        *   **Case 2 (Finer to Coarser):** Reconstruct the odd-slice $i+1$ in the coarser brick and clip it with the perspective projection of the even-slice $i$ of the finer brick [S3].
     *   **Sorting:** Sort clipped polygons to minimize color table reloads [S3].
+    *   **Rendering:** Render the clipped polygons using the adapted textures and corrected opacities [S3].
 
 ### Pseudocode
 
@@ -72,155 +76,123 @@ To minimize memory overhead from boundary padding, textures of adjacent subvolum
 ```python
 def build_texture_hierarchy(brick_data, max_levels):
     """
-    Constructs a local texture hierarchy for a single brick.
+    Construct multi-resolution texture hierarchy for a single brick.
     brick_data: 3D array of original voxels.
-    max_levels: Integer, maximum number of LOD levels.
-    Returns: List of 3D arrays, where index k is level k.
+    max_levels: Maximum LOD level.
+    Returns: List of 3D arrays [T_0, T_1, ..., T_max].
     """
-    levels = [brick_data]
+    textures = [brick_data]
     current_data = brick_data
-    for k in range(1, max_levels):
-        # Apply quadratic spline filter to downsample [S2]
-        coarser_data = apply_quadratic_spline_filter(current_data)
-        # Expand to power-of-two size if necessary, padding with zeros [S3]
-        coarser_data = expand_to_power_of_two(coarser_data)
-        levels.append(coarser_data)
-        current_data = coarser_data
-    return levels
-
-def apply_quadratic_spline_filter(data):
-    """Iteratively filters data using a quadratic spline kernel to build low-pass copies [S2]."""
-    # Standard quadratic spline downsampling: convolve with kernel, then subsample by 2
-    return subsample_by_two(convolve_3d(data, quadratic_spline_kernel))
-
-def expand_to_power_of_two(data):
-    """Pads data with zero voxels to reach the next power-of-two dimensions."""
-    new_dims = [next_power_of_two(d) for d in data.shape]
-    padded = create_zeros(new_dims)
-    padded[:data.shape[0], :data.shape[1], :data.shape[2]] = data
-    return padded
-
-def adapt_boundary_fine_bricks(fine_brick_level, coarse_brick_level):
-    """
-    Adapts the finer brick's boundary voxels to match the coarser brick's grid
-    to ensure continuous scalar field interpolation [S1].
-    """
-    # Identify boundary voxels in the fine brick that do not align with coarse grid
-    # If boundary is at voxel center, adapt 1 voxel; if between, adapt 2 [S1]
-    for voxel in fine_brick_level.boundary_voxels:
-        # Interpolate or copy value from the corresponding location in coarse level
-        # Since centers align with even elements of finer level, this is often a copy
-        # for even indices, but interpolation for misaligned boundaries [S1]
-        voxel.value = interpolate_from_coarse(voxel.position, coarse_brick_level)
-
-def interpolate_from_coarse(position, coarse_level):
-    """Samples the coarse level at the given position using trilinear interpolation."""
-    return trilinear_sample(coarse_level, position)
-
-def correct_opacity(transfer_function):
-    """
-    Applies opacity correction formula to preserve optical properties
-    when sampling at lower resolutions [S1].
-    """
-    corrected_tf = {}
-    for alpha in transfer_function:
-        # Formula derived from equating accumulated opacities D and D' [S1]
-        # alpha' = 1 - (1 - alpha)^2
-        alpha_corrected = 1.0 - (1.0 - alpha) ** 2
-        corrected_tf[alpha] = alpha_corrected
-    return corrected_tf
-
-def render_brick_with_clipping(brick, level, view_params):
-    """
-    Renders a brick at a specific LOD level, handling boundary artifacts
-    via polygon clipping [S3].
-    """
-    # 1. Determine slicing planes parallel to image plane [S2]
-    slices = generate_slices(brick, level, view_params)
     
-    # 2. Handle level transitions with clipping
-    # Case 1: Coarser to Finer neighbor
-    if has_finier_neighbor(brick):
-        for even_slice_i in brick.even_slices:
-            # Clip even-slice i with perspective projection of odd-slice i+1 from finer neighbor
-            clipped_poly = clip_polygon(even_slice_i, finer_neighbor.odd_slice_i_plus_1)
-            render_polygon(clipped_poly, opacity=finer_neighbor.opacity)
-            
-    # Case 2: Finer to Coarser neighbor
-    if has_coarser_neighbor(brick):
-        for odd_slice_i_plus_1 in brick.odd_slices:
-            # Reconstruct odd-slice in coarser brick and clip with even-slice i from finer neighbor
-            reconstructed_slice = reconstruct_slice(odd_slice_i_plus_1, brick.coarser_level)
-            clipped_poly = clip_polygon(reconstructed_slice, finer_neighbor.even_slice_i)
-            render_polygon(clipped_poly, opacity=corrected_opacity)
-            
-    # 3. Handle external boundaries
-    if no_clipping_polygons_exist():
-        insert_slices_with_smallest_sample_distance()
+    for k in range(1, max_levels + 1):
+        # Apply quadratic spline filter
+        filtered = quadratic_spline_filter(current_data)
         
-    # 4. Sort polygons to minimize state changes [S3]
-    sort_polygons_by_color_table()
-    render_all_polygons()
+        # Subsample: keep even-indexed voxels
+        # Assuming 0-based indexing, keep indices 0, 2, 4...
+        next_data = filtered[0::2, 0::2, 0::2]
+        
+        # Expand to power of two (padding with zeros)
+        next_data = expand_to_power_of_two(next_data)
+        
+        textures.append(next_data)
+        current_data = next_data
+        
+    return textures
 
-def generate_slices(brick, level, view_params):
-    """Generates slicing planes parallel to the image plane for the given brick and level."""
-    return [plane for plane in compute_slices(brick.bounding_box, view_params.camera_direction, level.sample_distance)]
+def adapt_boundary_texture(fine_texture, coarse_texture, boundary_axis, boundary_index):
+    """
+    Adapt the fine texture near the boundary with a coarser neighbor.
+    fine_texture: Texture at level k.
+    coarse_texture: Texture at level k+1.
+    boundary_axis: 'x', 'y', or 'z'.
+    boundary_index: Index in the fine texture where the boundary lies.
+    """
+    # Determine which voxels need adaptation based on alignment
+    # Even indices in fine texture correspond to coarse texture
+    # Odd indices need interpolation from neighbors
+    
+    # Example for X-axis boundary
+    # Copy even-indexed voxels from coarse to fine at boundary
+    # Interpolate odd-indexed voxels in fine from the new even voxels
+    
+    # Note: The exact number of voxels to adapt (1 or 2) depends on 
+    # whether the boundary falls on a voxel center or between voxels.
+    pass
 
-def has_finier_neighbor(brick):
-    """Checks if the brick has an adjacent brick with a finer LOD level."""
-    return any(neighbor.level < brick.level for neighbor in brick.adjacent_bricks)
+def correct_opacity(original_alpha):
+    """
+    Apply opacity correction formula for subsampled textures.
+    """
+    return 1.0 - (1.0 - original_alpha) ** 2
 
-def has_coarser_neighbor(brick):
-    """Checks if the brick has an adjacent brick with a coarser LOD level."""
-    return any(neighbor.level > brick.level for neighbor in brick.adjacent_bricks)
-
-def no_clipping_polygons_exist():
-    """Returns true if no clipping polygons are currently active."""
-    return len(active_clipping_polygons) == 0
-
-def sort_polygons_by_color_table():
-    """Sorts rendered polygons to minimize color table reloads."""
-    active_clipping_polygons.sort(key=lambda p: p.color_table_index)
-
-def render_all_polygons():
-    """Renders all sorted polygons to the framebuffer."""
-    for poly in active_clipping_polygons:
-        rasterize_and_draw(poly)
-
-def clip_polygon(slice_geom, projection_geom):
-    """Computes the clipped polygon using a modified 3D Sutherland-Hodgman algorithm."""
-    return modified_sutherland_hodgman_clip(slice_geom, projection_geom)
-
-def render_polygon(poly, opacity):
-    """Renders a single clipped polygon with the specified opacity."""
-    draw_polygon_with_opacity(poly, opacity)
-
-def reconstruct_slice(slice_index, coarse_level):
-    """Reconstructs a missing odd slice in the coarser brick from neighboring data."""
-    return interpolate_slice_from_coarse_neighbors(slice_index, coarse_level)
-
-def insert_slices_with_smallest_sample_distance():
-    """Inserts additional slices with the smallest sample distance at external boundaries."""
-    boundary_slices = compute_boundary_slices(brick.bounding_box, view_params)
-    for s in boundary_slices:
-        s.sample_distance = min_sample_distance
-        active_clipping_polygons.append(s)
+def render_brick_with_clipping(brick, camera, adjacent_bricks):
+    """
+    Render a brick with polygon clipping against finer neighbors.
+    """
+    polygons = generate_slicing_polygons(brick)
+    
+    for neighbor in adjacent_bricks:
+        if neighbor.level > brick.level:
+            # Neighbor is finer, clip this brick's polygons
+            # Case 1: Coarser to Finer
+            # Clip even slices of this brick with projected odd slices of neighbor
+            polygons = clip_polygons_against_finer(polygons, neighbor)
+            
+    # Sort polygons back-to-front
+    polygons = sort_back_to_front(polygons, camera)
+    
+    for poly in polygons:
+        render_polygon(poly, brick.texture, corrected_opacity=True)
 ```
+
+### Parameters
+*   **Brick Size:** Typically $32^3$ voxels [S3].
+*   **Filter Kernel:** Quadratic spline kernel [S2, S3].
+*   **Max Level Difference:** 1 [S1, S3].
+*   **Power-of-Two Expansion:** Required for OpenGL compatibility [S1, S2, S3].
+
+### Edge Cases and Pitfalls
+*   **Power-of-Two Restriction:** Textures must be expanded, potentially wasting memory [S3].
+*   **Interpolation Consistency:** Coarser level domains often fall between voxels, requiring additional padding voxels for correct interpolation [S3].
+*   **Topology Preservation:** LOD selection based solely on focus point may distort topology; error measures should be considered [S3].
+*   **Opacity Artifacts:** Incorrect opacities cause light/dark bands at boundaries if not corrected [S3].
+*   **Boundary Artifacts:** Large sample distances at external faces can make cutting plane geometry visible [S3].
+
+## Subtopics
+
+### Brick Caching with LRU Replacement
+Manages the residency of bricks in GPU memory. Unlike LOD which selects resolution, caching selects which bricks to keep. [Brick Caching with LRU Replacement](879-brick-caching-with-lru-replacement.md)
+
+### Bricking
+The fundamental decomposition of volume into bricks. LOD builds on this by adding resolution levels to each brick. [Bricking](914-bricking.md)
+
+### Brick-based Volume Raycasting
+A rendering technique that can use LOD bricks as input. LOD reduces the number of samples per ray. [Brick-based Volume Raycasting](3341-brick-based-volume-raycasting.md)
+
+### N³-tree with Brick Pool and Node Pool
+An alternative hierarchical structure. LOD uses a fixed brick hierarchy with local texture maps, whereas N³-tree uses a dynamic tree structure. [N³-tree with Brick Pool and Node Pool](3407-n-tree-with-brick-pool-and-node-pool.md)
+
+### Multi-Level Cache and Prefetching
+Optimizes data transfer. LOD reduces data volume, but prefetching ensures the selected LOD bricks are loaded in time. [Multi-Level Cache and Prefetching](4631-multi-level-cache-and-prefetching.md)
+
+### Bricked Volume Hierarchy
+The general concept of hierarchical bricks. LOD is a specific implementation using 3D textures and opacity correction. [Bricked Volume Hierarchy](5036-bricked-volume-hierarchy.md)
+
+### Raymarching with LOD-based Brick Caching
+Combines raymarching with LOD. LOD determines the resolution, caching determines the brick residency. [Raymarching with LOD-based Brick Caching](5776-raymarching-with-lod-based-brick-caching.md)
 
 ## Operating characteristics
 
-*   **Memory Efficiency:** Significantly reduces texture memory consumption. On the "engine" dataset, an adaptive representation with four levels of detail required only 29% of the original texture memory [S2][S3]. Using two levels reduced memory to 57% [S2].
-*   **Performance:** Reduces the number of texture lookups. The four-level adaptive representation required only 32% of the originally needed texture lookups [S2][S3].
-*   **Rendering Speed:** Full resolution rendering took ~2 seconds per frame on the engine dataset, while the LOD version took 0.5 seconds per frame [S3].
-*   **Overhead:** Clipping overhead is less than 0.1 seconds per frame. Texture adaptation takes ~0.2 seconds [S3].
-*   **Strengths:** Guarantees consistent interpolation between levels; fixes opacity artifacts (light/dark bands) at boundaries; interactive performance for large datasets [S1][S2].
-*   **Limitations:** Relies on OpenGL power-of-two restrictions requiring padding; topology preservation is not guaranteed if LOD selection ignores approximation error; clipping complexity increases with diagonal views [S3].
+*   **Time Complexity:** LOD selection is $O(B)$ where $B$ is the number of bricks. Hierarchy construction is $O(V)$ where $V$ is the total voxel count. Rendering is $O(P \cdot S)$ where $P$ is pixels and $S$ is samples, but $S$ is reduced by LOD. Clipping adds overhead, averaging 2500 operations per frame [S3].
+*   **Memory Complexity:** Texture memory usage is significantly reduced. For 4 levels of detail, memory usage drops to 29-38% of the original [S2, S3].
+*   **Performance:** On an engine dataset, LOD reduced texture lookups to 32-41% of original and frame time from 2s to 0.5s [S2, S3]. Clipping overhead is <0.1s [S3].
+*   **Strengths:** Interactive frame rates for large datasets; continuous interpolation; correct opacity.
+*   **Limitations:** Clipping overhead; power-of-two memory waste; potential topology distortion if LOD selection is naive.
 
 ## Background
 
-*   **Origin:** The method was developed by Manfred Weiler, Hans-Peter Seidel, and others at the University of Stuttgart and the University of Utah [S2][S3].
-*   **Key Paper:** "Level-of-Detail Volume Rendering via 3D Textures," published in IEEE Visualization 2000 [S2][S3].
-*   **Context:** It addresses the challenge of rendering large-scale volume data (e.g., MRI scans, simulation data) interactively on hardware with limited texture memory. It improves upon earlier methods like LaMar et al.'s spherical shell approach, which did not guarantee continuity between resolution levels [S2][S3].
+The method was introduced by Weiler et al. in 2000 [S2, S3] and further detailed by Xie et al. in 2005 [S1]. It addresses the limitations of earlier LOD methods like LaMar et al.'s spherical shell approach, which did not guarantee continuity [S2, S3]. It is widely used in medical imaging (e.g., MRI scans) and scientific visualization [S3].
 
 ## Sources
 

@@ -3,235 +3,248 @@
 Also called: Fast CGH method for point clouds, HPO WRP method
 
 ## Overview
-This method generates computer-generated holograms (CGH) for point clouds by computing wavefield propagation across multiple parallel Wavefront Recording Planes (WRPs), adapted for Horizontal Parallax Only (HPO) displays. It solves the computational bottleneck of full-parallax CGH by restricting diffraction calculations to 1D hololines, significantly reducing complexity while maintaining wide viewing angles. It distinguishes itself from full-parallax WRP methods by processing 1D contributions rather than 2D planes, and from direct point-source summation by using pre-computed Look-Up Tables (LUTs) and the Band-Limited Angular Spectrum Method (BL-ASM) to handle high-bandwidth, small-pitch sampling without aliasing errors.
+This method generates horizontal parallax only (HPO) computer-generated holograms (CGH) from point clouds by distributing the computation across multiple parallel wavefront recording planes (WRPs) [S1]. It solves the computational bottleneck of direct point-cloud holography by using pre-computed look-up tables (LUTs) for propagation between these planes, while adapting the geometry to compute 1D hololines instead of full 2D holograms [S1]. It is distinguished from full-parallax WRP methods by its reduction of the diffraction calculation to a single horizontal dimension per plane, and from direct summation methods by its use of parallel propagation planes to manage occlusion and memory access patterns [S1].
 
 ## How it works
-### Inputs and Outputs
 **Inputs:**
-*   Point cloud data: Set of points $P = \{p_i\}$, where each point $p_i$ has position $\mathbf{r}_i = (x_i, y_i, z_i)$ and color/intensity values $(I_R, I_G, I_B)$.
-*   Display parameters: Pixel pitch $p_x, p_y$, resolution $N_x, N_y$, wavelength $\lambda$, and number of WRPs $K$.
-*   Geometric parameters: Distance between WRPs $\Delta z$, and distance from the first WRP to the object plane $z_{obj}$.
+*   Point cloud data: A set of $M$ points, where each point $i$ has position $(x_i, y_i, z_i)$, amplitude $A_i$, and optionally RGB intensity values [S1].
+*   Display parameters: Pixel pitch $p_x, p_y$, resolution $N_x, N_y$, wavelength $\lambda$, and number of WRPs [S1].
+*   Gaussian profile parameters: Width for attributing volume to points [S1].
 
 **Outputs:**
-*   Hologram plane complex field $U_{holo}(x, y)$, encoded as a phase-only pattern for Spatial Light Modulator (SLM) display.
+*   Complex field distribution on the hologram plane (or phase-only pattern after encoding, though encoding is not detailed in the source) [S1].
 
-### Data Structures
-1.  **Point Cloud:** Array of structures containing `x, y, z` (floats) and `r, g, b` (floats, normalized 0-1).
-2.  **Look-Up Table (LUT):** Pre-computed complex propagation kernels.
-    *   Structure: 2D array of complex numbers `LUT[z_idx][x_idx]`.
-    *   Dimensions: `z_idx` corresponds to discrete propagation distances; `x_idx` corresponds to lateral offsets.
-    *   Content: Values of the transfer function $H'(u, v; z)$ or spatial kernel $h(x, y, z)$ depending on implementation domain, modified with random phase for diffuse reflection modeling.
-3.  **WRP Fields:** Array of complex fields $W_k(x, y)$ for $k=0 \dots K-1$.
-    *   For HPO, these are effectively 1D arrays (hololines) $W_k(x)$ for each vertical row $y$, or 2D arrays where vertical propagation is trivial/ignored.
+**Data Structures:**
+*   **Look-Up Tables (LUTs):** Pre-computed propagation kernels $H(u, v; z)$ for specific distances $z$ between WRPs and between WRPs and the hologram plane [S1]. The LUT content is modified with random phase to account for diffuse reflections [S1].
+*   **WRP Fields:** 2D complex arrays representing the wavefield at each parallel plane. For HPO, these are effectively 1D structures extended vertically, or 2D arrays where vertical propagation is ignored/simplified [S1].
+*   **Point Volume Representation:** Each point is treated as having a Gaussian distribution profile rather than being a delta function [S1].
 
-### Parameters and Typical Values
-*   **Wavelength ($\lambda$):** 640 nm (Red channel used for all channels to maintain wide viewing angle, with intensity scaling for G/B) [S1].
-*   **Pixel Pitch ($p$):** 0.55 µm (horizontal), 23.4 µm (vertical) [S1].
-*   **Resolution:** 32,768 × 768 pixels [S1].
-*   **Minimum Object-Hologram Distance ($z_{min}$):** Calculated as $z_{min} = \frac{N p^2}{\lambda}$ [S1]. For the example parameters, $z_{min} \approx 6.3$ mm [S1].
-*   **Maximum Diffraction Angle ($\theta$):** Determined by $\sin \theta = \frac{\lambda}{2p}$ [S1].
+**Steps:**
 
-### Algorithm Steps
+1.  **Initialize Display Parameters:**
+    Determine the minimum distance $z_{min}$ between the object and the hologram plane to satisfy the Shannon criterion:
+    $$ z_{min} = \frac{N p^2}{\lambda} $$
+    where $N$ is the pixel resolution (assuming square dimensions for the calculation of $z_{min}$), $p$ is the pixel pitch, and $\lambda$ is the wavelength [S1].
+    Determine the maximum diffraction angle $\theta$ using the grating equation:
+    $$ \sin \theta = \frac{\lambda}{2p} $$
+    [S1].
 
-1.  **Point Volume Attribution:**
-    Assign a Gaussian distribution profile to each point in the point cloud to generate smoother, continuous surface reconstructions. This replaces the point source approximation with a volumetric source [S1].
+2.  **Attribute Volume to Points:**
+    Assign a Gaussian distribution profile to each point in the point cloud. This models the point as a small volume, generating smoother, continuous surface reconstructions [S1].
+    [G] The Gaussian function $G(x,y)$ centered at $(x_i, y_i)$ with width $\sigma$ is typically $e^{-(x-x_i)^2/(2\sigma^2)}$. The source does not specify $\sigma$ calculation.
 
-2.  **LUT Generation (Pre-computation):**
-    *   Compute the propagation kernel $h(x, y, z)$ or its frequency domain equivalent $H(u, v; z)$ for all required distances $z$ between WRPs and between object and first WRP.
-    *   Apply the Band-Limited Angular Spectrum Method (BL-ASM) to the kernel to handle small sampling pitches and prevent edge errors from circular convolution [S1].
-    *   **BL-ASM Implementation:**
-        *   Define bandwidth limits $2u_{limit}$ and $2v_{limit}$.
-        *   Modify the transfer function: $H'(u, v; z) = H(u, v; z) \cdot \text{rect}\left(\frac{u}{2u_{limit}}\right) \cdot \text{rect}\left(\frac{v}{2v_{limit}}\right)$ [S1].
-        *   In the spatial domain calculation, double the source window area by padding zeros. After FFT-based propagation, crop the output to the original window size [S1].
-    *   **Diffuse Reflection Modeling:** Modify the spectral response of the LUT content with random phase to scatter light over a wide angular range, supporting wide fields of view [S1].
+3.  **Generate Look-Up Tables (LUTs):**
+    Pre-compute the propagation kernels for the required distances between WRPs and between WRPs and the hologram plane.
+    *   Use the Band-Limited Angular Spectrum Method (BL-ASM) for all propagations [S1].
+    *   For a distance $z$, the transfer function in the frequency domain is:
+        $$ H(u, v; z) = \exp(i 2 \pi w z) $$
+        where $w$ is the spatial frequency:
+        $$ w = w(u, v) = \begin{cases} (\lambda^{-2} - u^2 - v^2)^{1/2} & u^2 + v^2 \le \lambda^{-2} \\ 0 & \text{otherwise} \end{cases} $$
+        [S1].
+    *   Apply band-limiting to handle small sampling pitches and aperiodic functions:
+        $$ H'(u, v; z) = H(u, v; z) \text{rect}\left(\frac{u}{2u_{limit}}\right) \text{rect}\left(\frac{v}{2v_{limit}}\right) $$
+        where $2u_{limit}$ and $2v_{limit}$ are the bandwidth clipping limits [S1].
+    *   Modify the spectral response of the LUT content with random phase to account for diffuse reflections, scattering light over a wide angular range [S1].
+    *   **BL-ASM Implementation Detail:** Double the area of the calculation window in the source plane and pad additional sampling points as zeros. After the FFT-based calculation, crop the output window to the original window size at the destination plane [S1].
 
-3.  **Initialization of WRPs:**
-    Initialize the first WRP ($W_0$) at the object plane distance. For HPO, this involves computing the contribution of each point to the 1D hololines.
+4.  **Compute HPO Contributions (Hololines):**
+    Adapt the WRP method for HPO by computing the contribution of each point to 1D hololines rather than the full 2D hologram plane [S1].
+    *   For each point $i$, calculate its contribution to the relevant WRP(s).
+    *   Since it is HPO, diffraction is computed only along the horizontal line (hololine) corresponding to the point's vertical position.
+    *   Use the pre-computed LUTs to propagate the point's field from its position to the nearest WRP.
 
-4.  **Point-to-WRP Contribution (HPO Adaptation):**
-    *   For each point $p_i$ in the point cloud:
-        *   Determine its contribution to the hololines on the current WRP.
-        *   Unlike full parallax, compute diffraction only along the horizontal line (x-axis) for each vertical position $y$.
-        *   Use the pre-computed LUT to retrieve the complex amplitude contribution for the distance $z$ from the point to the WRP.
-        *   Sum contributions from all points to form the complex field on the first WRP.
+5.  **Model Occlusions:**
+    Use inverted Gaussian filters in the propagation process to model occlusions by locally blocking light [S1].
+    [G] This implies that if a point is occluded by another object or WRP, its contribution is attenuated or zeroed out using a spatial filter. The source does not provide the exact algorithm for determining occlusion or the filter application logic.
 
-5.  **Inter-WRP Propagation:**
-    *   Propagate the field from WRP $k$ to WRP $k+1$ using the Angular Spectrum Method (ASM) [S1].
-    *   Since all planes are parallel, use the frequency domain formulation:
-        $$ G(u, v; z_{k+1}) = G(u, v; z_k) \cdot H(u, v; \Delta z) $$
-        where $H(u, v; \Delta z) = \exp(i 2\pi w \Delta z)$ and $w = \sqrt{\lambda^{-2} - u^2 - v^2}$ for propagating components [S1].
-    *   Apply BL-ASM constraints during this propagation to maintain numerical stability and prevent aliasing [S1].
-    *   **Occlusion Handling:** Use inverted Gaussian filters in the propagation process to model occlusions by locally blocking light from points behind other objects [S1].
+6.  **Inter-WRP Propagation:**
+    Propagate the wavefield between parallel WRPs using the Angular Spectrum (AS) method, specifically BL-ASM [S1].
+    *   The 2D propagation in the spatial domain is:
+        $$ g(x, y, z) = g(x, y, 0) * h(x, y, z) $$
+        where $h(x, y, z)$ is the propagation kernel:
+        $$ h(x, y, z) = \frac{\exp(i 2 \pi r / \lambda)}{r} \left( \frac{1}{r} + \frac{1}{i 2 \pi \lambda} \right) $$
+        with $r = \sqrt{x^2 + y^2 + z^2}$ [S1].
+    *   In the frequency domain, this is a multiplication:
+        $$ G(u, v; z) = G(u, v; 0) H(u, v; z) $$
+        [S1].
+    *   Perform this propagation for all WRPs to accumulate the total field [S1].
 
-6.  **Final Hologram Generation:**
-    *   Propagate the field from the last WRP to the hologram plane (SLM plane).
-    *   Sum the contributions from all WRPs to form the total complex field $U_{holo}(x, y)$ at the hologram plane.
-    *   For color, compute the hologram for the red wavelength $\lambda_R$ using the scaled intensities for Red, Green, and Blue channels ($I_R, I_G, I_B$) to maintain a wide viewing angle for all colors [S1].
+7.  **Final Propagation to Hologram:**
+    Propagate the accumulated field from the final WRP to the hologram plane using BL-ASM [S1].
 
-7.  **Phase-Only Encoding:**
-    *   Extract the phase $\phi(x, y) = \arg(U_{holo}(x, y))$.
-    *   Encode $\phi(x, y)$ onto the SLM. Common techniques include direct quantization or detour phase, though the source primarily notes the phase extraction [S1, S3].
+8.  **Color Handling (Optional):**
+    To acquire color holograms, attribute RGB intensity values to the points. Compute the hologram for a single wavelength (e.g., red) but with three different intensity channels (R, G, B) per point to maintain color information while keeping the wide viewing angle [S1].
 
-### Pseudocode
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import numpy as np
 
-def generate_hpo_wrp_cgh(point_cloud, display_params, wrp_params):
+def compute_bl_asm_transfer_function(u, v, z, lambda_val):
     """
-    Generates an HPO CGH using Multiple Wavefront Recording Planes.
-    
-    Args:
-        point_cloud: List of dicts with 'x', 'y', 'z', 'r', 'g', 'b'.
-        display_params: Dict with 'lambda', 'px', 'py', 'nx', 'ny'.
-        wrp_params: Dict with 'num_wrps', 'z_step', 'z_obj_to_wrp0'.
-    
-    Returns:
-        hologram_phase: 2D numpy array of phase values.
+    Computes the band-limited angular spectrum transfer function.
+    u, v: 2D arrays of spatial frequencies.
+    z: propagation distance.
+    lambda_val: wavelength.
     """
-    lambda_w = display_params['lambda']
-    px = display_params['px']
-    nx = display_params['nx']
+    # Calculate w
+    w_sq = (1 / lambda_val**2) - u**2 - v**2
+    w = np.zeros_like(u)
+    valid = w_sq >= 0
+    w[valid] = np.sqrt(w_sq[valid])
     
-    # 1. Pre-compute LUTs using BL-ASM
-    # LUT stores complex transfer functions for various distances
-    lut = generate_bl_asm_lut(wrp_params['z_step'], lambda_w, px, nx)
+    # Calculate phase term
+    H = np.exp(1j * 2 * np.pi * w * z)
     
-    # 2. Initialize WRP fields
-    # For HPO, we can process row by row or use 2D arrays with vertical triviality
-    # Here we assume 2D arrays for clarity, but horizontal propagation is key
-    wrp_fields = [np.zeros((display_params['ny'], display_params['nx']), dtype=complex) 
-                  for _ in range(wrp_params['num_wrps'])]
+    # Apply band-limiting (rect function)
+    # Note: u_limit and v_limit are parameters not defined in source
+    # Assuming they are passed or derived from display specs
+    u_limit = 1 / (2 * pixel_pitch_x) # Example derivation, not in source
+    v_limit = 1 / (2 * pixel_pitch_y)
     
-    # 3. Compute contributions from points to the first WRP
-    # Points are projected onto the first WRP plane
-    z_first_wrp = wrp_params['z_obj_to_wrp0']
+    rect_u = np.where(np.abs(u) <= u_limit, 1.0, 0.0)
+    rect_v = np.where(np.abs(v) <= v_limit, 1.0, 0.0)
     
-    for point in point_cloud:
-        # Calculate distance from point to first WRP
-        z_dist = z_first_wrp - point['z']
-        
-        # Get LUT entry for this distance (interpolated if necessary)
-        kernel = get_lut_kernel(lut, z_dist, lambda_w, px, nx)
-        
-        # For HPO, we compute contribution to hololines (1D)
-        # The point contributes to a specific y-row based on its y-coordinate
-        # and spreads along x based on diffraction
-        
-        # Simplified: Add point contribution to the WRP field
-        # In practice, this involves convolution or direct summation using LUT
-        # We attribute a Gaussian volume to the point
-        gaussian_profile = get_gaussian_profile(point['r'], point['g'], point['b'], px)
-        
-        # Apply random phase for diffuse reflection modeling
-        random_phase = np.exp(1j * np.random.uniform(0, 2 * np.pi, gaussian_profile.shape))
-        gaussian_profile *= random_phase
-        
-        # Add to WRP field (handling occlusion via inverted Gaussian filters if needed)
-        # This step is complex in 2D; for HPO, it's 1D convolution per row
-        wrp_fields[0] += apply_point_contribution(holo_field=wrp_fields[0], 
-                                                  point_pos=point, 
-                                                  kernel=kernel, 
-                                                  profile=gaussian_profile)
+    H_prime = H * rect_u * rect_v
+    
+    # Apply random phase for diffuse reflections
+    random_phase = np.exp(1j * np.random.uniform(0, 2 * np.pi, H_prime.shape))
+    H_prime = H_prime * random_phase
+    
+    return H_prime
 
-    # 4. Propagate between WRPs
-    for k in range(wrp_params['num_wrps'] - 1):
-        # Propagate from WRP k to WRP k+1
-        # Use Angular Spectrum Method with BL-ASM
-        wrp_fields[k+1] = propagate_as_bl_asm(wrp_fields[k], 
-                                              wrp_params['z_step'], 
-                                              lambda_w, 
-                                              px, 
-                                              lut)
-        
-        # Apply occlusion modeling (inverted Gaussian filters)
-        # This requires knowledge of depth ordering, simplified here
-        wrp_fields[k+1] = apply_occlusion_filters(wrp_fields[k+1], point_cloud)
-
-    # 5. Propagate from last WRP to Hologram Plane
-    z_last_to_holo = wrp_params['z_obj_to_wrp0'] + wrp_params['num_wrps'] * wrp_params['z_step']
-    final_field = propagate_as_bl_asm(wrp_fields[-1], 
-                                      z_last_to_holo, 
-                                      lambda_w, 
-                                      px, 
-                                      lut)
-
-    # 6. Extract Phase
-    hologram_phase = np.angle(final_field)
-    
-    return hologram_phase
-
-def generate_bl_asm_lut(z_step, lambda_w, px, nx):
+def propagate_bl_asm(source_field, transfer_function, source_shape, dest_shape):
     """
-    Generates LUT using Band-Limited Angular Spectrum Method.
+    Propagates field using BL-ASM with zero-padding and cropping.
+    source_field: 2D complex array.
+    transfer_function: 2D complex array.
+    source_shape: (H, W) of original source window.
+    dest_shape: (H, W) of original destination window.
     """
-    # Define bandwidth limits
-    u_limit = 1 / (2 * px) # Nyquist limit
-    v_limit = 1 / (2 * px) # Assuming square pixels for limit calculation, adjust for anisotropy
+    # Double the area of the calculation window in the source plane
+    # Pad with zeros
+    padded_h = source_shape[0] * 2
+    padded_w = source_shape[1] * 2
     
-    # Create frequency grid
-    u = np.fft.fftfreq(nx, d=px)
-    v = np.fft.fftfreq(nx, d=px) # Assuming square grid for simplicity
-    U, V = np.meshgrid(u, v)
-    
-    # Calculate spatial frequency w
-    w = np.sqrt(np.maximum(0, (1/lambda_w)**2 - U**2 - V**2))
-    
-    # Transfer function
-    H = np.exp(1j * 2 * np.pi * w * z_step)
-    
-    # Apply band-limiting rect functions
-    rect_u = np.where(np.abs(U) <= u_limit, 1, 0)
-    rect_v = np.where(np.abs(V) <= v_limit, 1, 0)
-    H_bl = H * rect_u * rect_v
-    
-    return H_bl
-
-def propagate_as_bl_asm(field, z_dist, lambda_w, px, lut):
-    """
-    Propagates field using BL-ASM.
-    """
-    # Double the window size by padding zeros
-    ny, nx = field.shape
-    field_padded = np.zeros((ny, 2*nx), dtype=complex)
-    field_padded[:, :nx] = field
+    padded_field = np.zeros((padded_h, padded_w), dtype=complex)
+    padded_field[:source_shape[0], :source_shape[1]] = source_field
     
     # FFT
-    F = np.fft.fft2(field_padded, axes=(1,)) # FFT along x
+    F = np.fft.fft2(padded_field)
     
-    # Get transfer function for this distance (interpolate from LUT if needed)
-    # For simplicity, assume LUT has entry for z_dist
-    H = get_lut_kernel(lut, z_dist, lambda_w, px, 2*nx)
-    
-    # Multiply in frequency domain
-    G = F * H
+    # Multiply by transfer function (ensure TF is also padded or aligned)
+    # Note: TF should be computed for the padded grid or interpolated
+    F_propagated = F * transfer_function
     
     # IFFT
-    field_out_padded = np.fft.ifft2(G, axes=(1,))
+    field_propagated = np.fft.ifft2(F_propagated)
     
-    # Crop to original size
-    field_out = field_out_padded[:, :nx]
+    # Crop the output window to the original window size at the destination plane
+    # Assuming center crop or specific alignment, source says "crop to original window size"
+    # We assume the output is centered or aligned such that we take the center dest_shape
+    h_start = (padded_h - dest_shape[0]) // 2
+    w_start = (padded_w - dest_shape[1]) // 2
     
-    return field_out
+    cropped_field = field_propagated[h_start:h_start+dest_shape[0], w_start:w_start+dest_shape[1]]
+    
+    return cropped_field
+
+def generate_hpo_cgh(point_cloud, wrp_distances, hologram_distance, lambda_val, pixel_pitch_x, pixel_pitch_y, resolution_x, resolution_y):
+    """
+    Generates HPO CGH using Multiple WRP method.
+    """
+    # 1. Initialize
+    # Create WRP fields (1D hololines extended vertically or 2D arrays)
+    # For HPO, we compute contributions to hololines.
+    # Let's assume WRP fields are 2D arrays of size (resolution_y, resolution_x)
+    wrp_fields = [np.zeros((resolution_y, resolution_x), dtype=complex) for _ in wrp_distances]
+    
+    # 2. Pre-compute LUTs
+    # Create frequency grids
+    u = np.fft.fftfreq(resolution_x, d=pixel_pitch_x)
+    v = np.fft.fftfreq(resolution_y, d=pixel_pitch_y)
+    U, V = np.meshgrid(u, v)
+    
+    luts = {}
+    for z in wrp_distances + [hologram_distance]:
+        # Compute TF for the specific distance
+        # Note: TF computation needs to account for the doubled window size in practice
+        # But for LUT storage, we store the TF for the base resolution
+        tf = compute_bl_asm_transfer_function(U, V, z, lambda_val)
+        luts[z] = tf
+        
+    # 3. Process Points
+    for point in point_cloud:
+        x, y, z_pos = point.position
+        amplitude = point.amplitude
+        # Gaussian profile attribution [S1]
+        # [G] Create a Gaussian kernel centered at (x,y) with width sigma
+        # This kernel is placed on the WRP plane closest to z_pos
+        
+        # Determine which WRP to project to
+        # Find closest WRP distance
+        closest_wrp_idx = np.argmin([abs(z - z_pos) for z in wrp_distances])
+        z_wrp = wrp_distances[closest_wrp_idx]
+        
+        # Propagate point to WRP
+        # Point is a delta function convolved with Gaussian? 
+        # Source says "attribute a volume... by attributing a Gaussian distribution profile"
+        # So we create a Gaussian field at the point's z-position? 
+        # Or we propagate a Gaussian from the point to the WRP?
+        # The source says "intra-WRP light wave propagation strategy utilising pre-computed propagation kernels"
+        # And "adapted... by computing the contribution of the points to hololines"
+        
+        # Let's assume we create a 1D hololine contribution on the WRP
+        # The contribution is propagated from the point to the WRP using BL-ASM
+        
+        # Create source field for the point (Gaussian profile)
+        # [G] Assuming point is at (x,y) on the WRP plane for simplicity of 1D hololine
+        # In HPO, we only care about horizontal diffraction.
+        
+        # Propagate from point z_pos to WRP z_wrp
+        dist = abs(z_wrp - z_pos)
+        if dist == 0:
+            # Point is on WRP, just add Gaussian
+            # [G] Add Gaussian to wrp_fields[closest_wrp_idx] at (x,y)
+            pass
+        else:
+            # Propagate using LUT
+            # [G] Create a small field representing the point's Gaussian profile
+            # Propagate it to the WRP plane
+            # Add to wrp_fields[closest_wrp_idx]
+            pass
+            
+    # 4. Inter-WRP Propagation
+    # Propagate fields between WRPs
+    for i in range(len(wrp_distances) - 1):
+        z1 = wrp_distances[i]
+        z2 = wrp_distances[i+1]
+        dist = abs(z2 - z1)
+        tf = luts[dist]
+        wrp_fields[i+1] += propagate_bl_asm(wrp_fields[i], tf, wrp_fields[i].shape, wrp_fields[i].shape)
+        
+    # 5. Final Propagation to Hologram
+    z_final = wrp_distances[-1]
+    dist = abs(hologram_distance - z_final)
+    tf = luts[dist]
+    hologram_field = propagate_bl_asm(wrp_fields[-1], tf, wrp_fields[-1].shape, (resolution_y, resolution_x))
+    
+    return hologram_field
 ```
 
-### Edge Cases and Pitfalls
-*   **Small Sampling Pitch:** Leads to strong diffusion of the light field beyond computation window borders. This is handled by BL-ASM, which clips the bandwidth and pads the source window [S1].
-*   **Aperiodic Functions:** Cause errors at the edges of the computation window due to circular convolution in FFT. BL-ASM mitigates this by zero-padding and cropping [S1].
-*   **Occlusion:** Must be modeled explicitly. Inverted Gaussian filters are used in the propagation process to locally block light from points behind others [S1].
-*   **Color Consistency:** To maintain a wide viewing angle for all color channels, the hologram is computed for a single wavelength (e.g., red) with scaled intensities for green and blue channels, rather than computing separate holograms for each wavelength [S1].
-
 ## Operating characteristics
-*   **Complexity:** Significantly reduced compared to full-parallax WRP due to HPO adaptation (1D hololines instead of 2D planes). Complexity is dominated by FFT operations in BL-ASM, roughly $O(N \log N)$ per propagation step per hololine.
-*   **Memory:** Requires storage for LUTs and multiple WRP fields. LUT size depends on the number of discrete propagation distances.
-*   **Performance:** Fast computation suitable for point clouds. The use of pre-computed LUTs and parallelizable FFTs makes it efficient on GPUs.
-*   **Strengths:** Handles occlusion naturally; supports wide viewing angles; smooth surface reconstruction via Gaussian attribution; efficient for HPO displays.
-*   **Limitations:** Limited to horizontal parallax only; requires careful handling of sampling pitch to avoid aliasing; color is simulated via intensity scaling at a single wavelength, which may not perfectly match true multi-wavelength diffraction.
+*   **Time Complexity:** The method reduces complexity compared to direct summation by using LUTs and parallel planes. The cost is dominated by the FFTs in the BL-ASM propagation. The number of WRPs is a parameter that trades off memory for computational speed [S1].
+*   **Memory Complexity:** Requires storing LUTs for all propagation distances and fields for all WRPs. The HPO adaptation reduces the data volume per plane compared to full parallax [S1].
+*   **Performance:** Demonstrated on an Holografika HoloVizio 722RC display with 32,768-by-768 pixels, 0.55 µm horizontal pitch, 23.4 µm vertical pitch, and 640 nm wavelength [S1].
+*   **Strengths:** Handles occlusion via inverted Gaussian filters; provides wide field of view via random phase in LUTs; efficient for point clouds; suitable for HPO displays [S1].
+*   **Limitations:** HPO results in constrained viewing zones and astigmatic output due to diminished vertical resolution [S1]. Small sampling pitch requires BL-ASM to avoid edge errors and diffusion beyond the computation window [S1].
+*   **When to use:** When generating HPO holograms from point clouds for light field displays with wide viewing angles [S1].
+*   **When not to use:** When full parallax is required, or when the display does not support the small pixel pitch needed for the desired field of view [S1].
 
 ## Background
-This method was proposed for generating computer-generated holograms from point clouds on light field displays, specifically adapting the Multiple Wavefront Recording Planes (WRP) method for Horizontal Parallax Only (HPO) configurations. It addresses the trade-off between viewing angle and spatial bandwidth product (SBP) in holographic displays. The work demonstrates the framework using an Holografika HoloVizio 722RC light field display.
+The method was proposed by the authors of [S1] as an adaptation of their previously proposed multiple WRP method for fast computation of full-parallax holograms [S1]. It was developed to enable high-quality 3D rendering of point clouds on light field displays, specifically addressing the challenges of HPO holography with wide fields of view [S1]. The work was presented in 2016 [S1].
 
 ## Sources
 [S1] Three-dimensional rendering of computer-generated holograms acquired from point-clouds on light field displays, https://doi.org/10.1117/12.2237581, fetched 2026-11-04

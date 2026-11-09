@@ -7,49 +7,59 @@ JIT Type Specialization is a technique where type resolution and function routin
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A key (e.g., ray parameter or coordinate), a root node reference, and a set of specialized member functions corresponding to different element types (e.g., `foo_green`, `foo_orange`, `foo_blue`).
-*   **Output:** The result of the specialized function call for the element found at the key.
+*   **Input:** A key (e.g., coordinate or ray parameter) and a root node reference [S1, unofficial].
+*   **Output:** The result of the specialized function call for the element found at the key [S1, unofficial].
 
 **Data Structures:**
-*   **Compact Array (`a_comp`):** Stores type identifiers and pointers (addresses) for elements. In the source example, types are encoded as colors (e.g., green, orange, blue) [S1, unofficial].
-*   **Specialized Functions:** Individual functions for each element type (e.g., `foo_green`, `foo_orange`) that operate on the element's data.
+*   **Compact Array (`a_comp`):** Stores type identifiers and pointers (addresses) for elements [S1, unofficial]. Types are encoded as distinct identifiers (e.g., colors like green, orange, blue) [S1, unofficial].
+*   **Specialized Functions:** Individual functions for each element type that operate on the element's data [S1, unofficial].
 
 **Numbered Steps:**
-1.  **Tree Traversal:** Perform a standard tree traversal (e.g., binary search or octree descent) to locate the index of the element corresponding to the input key. This step determines the position in the compact array [S1, unofficial].
-2.  **Compact Array Lookup:** Retrieve the element structure `e` from `a_comp` using the calculated index. This structure contains the type identifier and the address (pointer) to the actual data [S1, unofficial].
-3.  **JIT Inlining (Conceptual):** Instead of executing a runtime switch statement to route the call, the JIT compiler generates a specialized version of the function. This version inlines the traversal logic, the type check, and the address lookup. The resulting code directly compares keys to determine the path and calls the specific function (e.g., `foo_green`) with the pre-resolved address [S1, unofficial].
-4.  **Execution:** The specialized function executes. Because the type is known at compile time, the call is direct, and no runtime dispatch overhead occurs [S1, unofficial].
+1.  **Standard Runtime Dispatch:** Perform a tree traversal to locate the element index, look up the element structure in `a_comp`, and use a runtime switch statement to route the call to the specialized function based on the element type [S1, unofficial].
+2.  **JIT Inlining:** The JIT compiler generates a specialized version of the function that inlines the traversal logic, type checks, and address lookups [S1, unofficial]. This eliminates the compact array lookup and switch statements [S1, unofficial].
+3.  **Execution:** The generated code directly compares keys against tree-specific thresholds to determine the path and calls the specific function with a pre-resolved address [S1, unofficial].
 
 **Formulas:**
-The source provides pseudocode rather than mathematical formulas. The core logic relies on conditional comparisons for traversal:
-$$ \text{if } (key < \text{threshold}) \rightarrow \text{traverse left} $$
-$$ \text{else if } (key > \text{threshold}) \rightarrow \text{traverse right} $$
-$$ \text{else} \rightarrow \text{call specialized function} $$
-Where thresholds are derived from the tree structure (e.g., 106, 8, 4, 13 in the example) [S1, unofficial].
+The method relies on conditional comparisons for traversal rather than closed-form mathematical equations [S1, unofficial]. The logic follows the pattern: `if (key < threshold) traverse left; else if (key > threshold) traverse right; else call specialized function` [S1, unofficial]. Thresholds are derived from the specific tree structure (e.g., 106, 8, 4, 13 in the source example) [S1, unofficial].
 
 **Parameters:**
-*   **Element Types:** Encoded as distinct identifiers (e.g., colors) in the compact array [S1, unofficial].
+*   **Element Types:** Encoded as distinct identifiers in the compact array [S1, unofficial].
 *   **Thresholds:** Specific to the tree structure being traversed [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **JIT Overhead:** The cost of JIT compilation is incurred once per function/tree configuration, not per access. This is beneficial for algorithms with many accesses [S1, unofficial].
+*   **JIT Overhead:** JIT compilation overhead is incurred once per function or tree configuration, not per access [S1, unofficial].
 *   **Memory Fetches:** The technique eliminates memory fetches in the top-level traversal code by inlining the logic, reducing memory-bound performance bottlenecks [S1, unofficial].
+*   **Code Specificity:** The generated code is specific to the tree structure and element types present at JIT time [S1, unofficial].
 
 **Pseudocode:**
-The following pseudocode illustrates the difference between the standard runtime dispatch approach and the JIT-specialized approach. Note that the JIT version is a generated function, not a generic dispatcher.
+The following pseudocode illustrates the difference between the standard runtime dispatch approach and the JIT-specialized approach. All helper names are defined to ensure self-containment.
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+# Resolved addresses for the specific tree layout (constants)
+ADDR0, ADDR1, ADDR2, ADDR3 = 0x1000, 0x1008, 0x1010, 0x1018
+ADDR4, ADDR5, ADDR6, ADDR7 = 0x1020, 0x1028, 0x1030, 0x1038
+
+# Specialized functions for each element type
+def foo_green(address):
+    return f"green_data_at_{address}"
+
+def foo_orange(address):
+    return f"orange_data_at_{address}"
+
+def foo_blue(address):
+    return f"blue_data_at_{address}"
+
+# Standard tree descent to locate index [G]
+def find(key, root):
+    # Standard recursive or iterative tree traversal
+    return 0  # Placeholder for actual traversal logic [G]
+
 # Standard Runtime Dispatch (Listing 3 in source)
 def foo_runtime(key, root, a_comp):
-    # 1. Tree traversal to get index
     index = find(key, root)
-    
-    # 2. Compact array lookup
     e = a_comp[index]
-    
-    # 3. Runtime switch statement
     if e.type == "green":
         return foo_green(e.address)
     elif e.type == "orange":
@@ -68,33 +78,33 @@ def foo_jit(key):
         if key < 8:
             # Traverse left-left subtree
             if key < 4:
-                return foo_green(addr0)
+                return foo_green(ADDR0)
             elif key > 4:
-                return foo_green(addr2)
+                return foo_green(ADDR2)
             else:
-                return foo_green(addr1)
+                return foo_green(ADDR1)
         else:
             # Traverse left-right subtree
             if key < 13:
-                return foo_green(addr4)
+                return foo_green(ADDR4)
             elif key > 13:
-                return foo_orange(addr6)
+                return foo_orange(ADDR6)
             else:
-                return foo_green(addr5)
+                return foo_green(ADDR5)
     else:
         # Traverse right subtree
-        # Code omitted for brevity, but follows same pattern
-        # e.g., if key > 106: ...
-        return foo_orange(addr7)
+        # Code omitted for brevity in source [S1, unofficial]
+        # Follows same pattern of key comparisons and direct address calls
+        return foo_orange(ADDR7)
 ```
 
 ## Operating characteristics
 *   **Time Complexity:** Access time is independent of the number of different elemental node types [S1, unofficial]. The overhead of resolving types is eliminated [S1, unofficial].
 *   **Memory Complexity:** Requires a compact array to store types and pointers [S1, unofficial].
-*   **Strengths:** Eliminates runtime type resolving overhead and switch statements. Access time does not degrade with more element types. Reduces memory-bound performance issues during tree traversal [S1, unofficial].
-*   **Limitations:** Requires a JIT compiler infrastructure. The generated code is specific to the tree structure and element types at compile time.
-*   **When to use:** When a function is called repeatedly on a sparse data structure with multiple element types, and the overhead of runtime dispatch is significant.
-*   **When not to use:** When the set of element types or tree structure changes frequently, requiring frequent recompilation.
+*   **Strengths:** Eliminates runtime type resolving overhead and switch statements. Reduces memory-bound performance issues during tree traversal [S1, unofficial].
+*   **Limitations:** Requires a JIT compiler infrastructure. The generated code is specific to the tree structure and element types at JIT time [S1, unofficial].
+*   **When to use:** Not given in the sources.
+*   **When not to use:** Not given in the sources.
 
 ## Background
 JIT Type Specialization, also known as JIT Member Function Evaluation, is described in the context of the JiTTree, a just-in-time compiled sparse GPU volume data structure [S1, unofficial]. It is designed to improve the performance of data processing algorithms by making access less memory-bound [S1, unofficial]. The technique allows an arbitrary number of different kinds of sparse data structures to improve overall quality without introducing new memory fetches [S1, unofficial].

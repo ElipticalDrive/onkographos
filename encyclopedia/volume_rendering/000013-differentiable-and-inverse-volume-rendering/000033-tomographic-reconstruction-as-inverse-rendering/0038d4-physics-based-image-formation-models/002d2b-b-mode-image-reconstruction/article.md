@@ -3,15 +3,15 @@
 Also called: Image Formation Model
 
 ## Overview
-B-mode Image Reconstruction is a differentiable forward model for synthesizing ultrasound B-mode images from volumetric data, primarily used in differentiable ultrasound rendering [S1]. It solves the inverse problem of reconstructing tissue properties by minimizing the discrepancy between simulated and measured echo signals, leveraging the differentiability of the wave propagation physics [S1]. It distinguishes itself from standard ray-marching volume rendering by modeling coupled forward and backward wave amplitudes across voxel interfaces using a sparse linear system, rather than simple line integrals of density [S1].
+B-mode Image Reconstruction is a differentiable forward model for synthesizing ultrasound B-mode images from volumetric data, primarily used in differentiable ultrasound rendering [S1]. It distinguishes itself from standard ray-marching volume rendering by modeling coupled forward and backward wave amplitudes across voxel interfaces using a sparse linear system, rather than simple line integrals of density [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D volumetric representation of tissue acoustic properties (e.g., reflection coefficients $R$ and transmission coefficients $T$).
+*   **Input:** A 3D volumetric representation of tissue acoustic properties, specifically reflection coefficients $R$ and transmission coefficients $T$ [S1].
 *   **Output:** A 2D B-mode image where pixel intensity corresponds to echo amplitude first differences, mapped to beam angle and depth [S1].
 
 **Data Structures:**
-The core data structure is a sparse matrix $A$ representing the coupled recursion relations for wave amplitudes. For a depth of $N$ voxels, the matrix has dimensions $(2N+2) \times (2N+2)$ [S1]. The matrix is strictly banded with at most three non-zero entries per row, resulting in $O(N)$ non-zero elements [S1]. The indices $r$ (row) and $c$ (column) are defined for $i = 0, \dots, N-1$ and $r, c = 0, \dots, 2N+1$ [S1].
+The core data structure is a sparse matrix $A$ representing the coupled recursion relations for wave amplitudes [S1]. For a depth of $N$ voxels, the matrix has dimensions $(2N+2) \times (2N+2)$ [S1]. The matrix is strictly banded with at most three non-zero entries per row, resulting in $O(N)$ non-zero elements [S1]. The indices $r$ (row) and $c$ (column) are defined for $i = 0, \dots, N-1$ and $r, c = 0, \dots, 2N+1$ [S1].
 
 **Formulas:**
 The matrix elements $A_{r,c}$ are defined as [S1]:
@@ -27,8 +27,8 @@ A_{r,c} = \begin{cases}
 $$
 
 Where:
-*   $T_{i \rightarrow i+1}$ is the transmission coefficient from voxel $i$ to $i+1$.
-*   $R_{i+1 \rightarrow i}$ is the reflection coefficient from voxel $i+1$ back to $i$.
+*   $T_{i \rightarrow i+1}$ is the transmission coefficient from voxel $i$ to $i+1$ [S1].
+*   $R_{i+1 \rightarrow i}$ is the reflection coefficient from voxel $i+1$ back to $i$ [S1].
 
 **Steps:**
 1.  **Initialize Wave System:** For a given beam direction, set up the linear system $A \mathbf{x} = \mathbf{b}$, where $\mathbf{x}$ contains the forward ($g_i$) and backward ($d_i$) wave amplitudes for each voxel interface [S1].
@@ -43,91 +43,55 @@ Where:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def reconstruct_bmode(volume, beam_angles):
-    """
-    Reconstructs a B-mode image from a volume using the DiffUS model.
-    
-    Args:
-        volume: Object containing reflection (R) and transmission (T) coefficients 
-                for each voxel interface.
-        beam_angles: List of angles for the fan-shaped acquisition.
-        
-    Returns:
-        image: 2D numpy array representing the B-mode image.
-    """
-    image = np.zeros((num_rows, num_cols))
-    
-    for angle in beam_angles:
-        # 1. Setup linear system for current beam direction
-        # Extract R and T coefficients along the ray path for this angle
-        R_coeffs = volume.get_reflection_coefficients(angle)
-        T_coeffs = volume.get_transmission_coefficients(angle)
-        N = len(R_coeffs)
-        
-        # Construct sparse matrix A based on recursion relations
-        # Dimensions: (2N+2) x (2N+2)
-        A = build_sparse_matrix(N, R_coeffs, T_coeffs)
-        
-        # Define right-hand side vector b (incident wave from transducer)
-        b = np.zeros(2 * N + 2)
-        b[0] = 1.0  # Unit incident wave amplitude
-        
-        # 2. Solve for wave amplitudes
-        # x contains [g_0, d_0, g_1, d_1, ..., g_N, d_N]
+def reconstruct_bmode(coefficients_per_beam, beam_angles):
+    # coefficients_per_beam: list of lists, each inner list contains (R_i, T_i) tuples for i=0..N-1
+    image = []
+    for angle_idx, angle in enumerate(beam_angles):
+        coeffs = coefficients_per_beam[angle_idx]
+        N = len(coeffs)
+        size = 2 * N + 2
+        A = [[0.0] * size for _ in range(size)]
+        for i in range(N):
+            R_i1, T_i1 = coeffs[i + 1] if i + 1 < N else (0.0, 0.0)
+            T_i = coeffs[i][1]
+            if 2 * i + 3 < size:
+                A[2 * i + 1][2 * i + 3] = -T_i1
+            if 2 * i >= 0:
+                A[2 * i + 2][2 * i] = -T_i
+            A[2 * i + 2][2 * i + 2] = 1.0
+            if 2 * i + 3 < size:
+                A[2 * i + 2][2 * i + 3] = -R_i1
+        b = [0.0] * size
+        b[0] = 1.0
         x = solve_linear_system(A, b)
-        
-        # 3. Extract backward wave amplitudes (echoes) at transducer
-        # d_0^(k) corresponds to the backward wave at the start of voxel k
-        # In the solution vector x, d_k is at index 2*k + 1
-        echoes = np.array([x[2 * k + 1] for k in range(1, N + 1)])
-        
-        # 4. Compute B-mode intensity as first differences
-        # Intensity = |d_0^(k) - d_0^(k-1)| or similar difference metric
-        # Note: Source specifies "first differences"
-        intensities = np.abs(np.diff(echoes))
-        
-        # 5. Map to image coordinates
-        # Map angle and depth to pixel (r, c)
-        # This mapping depends on the specific fan-beam geometry implementation
-        map_to_image(image, angle, intensities)
-        
+        echoes = [x[2 * k + 1] for k in range(1, N + 1)]
+        intensities = [abs(echoes[k] - echoes[k - 1]) for k in range(1, len(echoes))]
+        image.append(intensities)
     return image
 
-def build_sparse_matrix(N, R, T):
-    """
-    Builds the sparse matrix A for wave propagation recursion.
-    """
-    size = 2 * N + 2
-    A = np.zeros((size, size))
-    
-    for i in range(N):
-        r1 = 2 * i + 1
-        c1 = 2 * i + 3
-        if c1 < size:
-            A[r1, c1] = -T[i + 1] # T_{i+1 -> i}
-            
-        r2 = 2 * i + 2
-        c2 = 2 * i
-        if c2 >= 0:
-            A[r2, c2] = -T[i] # T_{i -> i+1}
-            
-        A[r2, r2] = 1.0 # 1 at r=2i+2, c=2i+2
-        
-        r3 = 2 * i + 2
-        c3 = 2 * i + 3
-        if c3 < size:
-            A[r3, c3] = -R[i + 1] # R_{i+1 -> i}
-            
-    return A
+def solve_linear_system(A, b):
+    # Solve Ax = b using Gaussian elimination with partial pivoting [G]
+    n = len(b)
+    M = [A[i][:] + [b[i]] for i in range(n)]
+    for i in range(n):
+        max_row = max(range(i, n), key=lambda k: abs(M[k][i]))
+        M[i], M[max_row] = M[max_row], M[i]
+        for k in range(i + 1, n):
+            factor = M[k][i] / M[i][i]
+            for j in range(i, n + 1):
+                M[k][j] -= factor * M[i][j]
+    x = [0.0] * n
+    for i in range(n - 1, -1, -1):
+        x[i] = (M[i][n] - sum(M[i][j] * x[j] for j in range(i + 1, n))) / M[i][i]
+    return x
 ```
 
 **Parameters:**
-*   **Voxel Depth ($N$):** Number of voxels along the ray path.
+*   **Voxel Depth ($N$):** Number of voxels along the ray path [S1].
 *   **Reflection/Transmission Coefficients:** Material properties defining wave interaction at interfaces [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Solver Choice:** While the matrix $A$ is sparse with a fixed bandwidth, the source notes that a dense solver is used for simplicity. Using a dense solver increases computational cost to $O(N^3)$ for solving, whereas a banded solver would be $O(N)$ [S1].
-*   **Boundary Conditions:** The matrix construction assumes specific boundary conditions at the transducer (incident wave) and the deepest voxel. Incorrect initialization of the right-hand side vector $\mathbf{b}$ will lead to erroneous echo amplitudes [S1].
+*   **Solver Choice:** While the matrix $A$ is sparse with a fixed bandwidth, the source notes that a dense solver is used for simplicity [S1]. Using a dense solver increases computational cost to $O(N^3)$ for solving, whereas a banded solver would be $O(N)$ [S1].
 
 ## Subtopics
 
@@ -141,7 +105,7 @@ An optional post-processing stage that imposes depth-related blurring by convolv
 *   **Time Complexity:** The construction of the sparse matrix $A$ is $O(N)$ due to its fixed bandwidth and local interactions [S1]. Solving the system depends on the solver: $O(N^3)$ for dense solvers, $O(N)$ for banded solvers [S1].
 *   **Memory Complexity:** The matrix $A$ requires $O(N)$ storage for non-zero elements [S1].
 *   **Strengths:** Physically accurate modeling of wave propagation and interference, enabling realistic ultrasound simulation for differentiable rendering [S1].
-*   **Limitations:** Computational cost can be high if dense solvers are used for large $N$ [S1]. Requires accurate acoustic property maps ($R$ and $T$) [S1].
+*   **Limitations:** Computational cost can be high if dense solvers are used for large $N$ [S1].
 
 ## Background
 The method is described in the DiffUS paper, which introduces a differentiable ultrasound rendering framework [S1]. It models wave propagation using coupled recursion relations for forward and backward wave amplitudes across voxel interfaces [S1].

@@ -3,68 +3,47 @@
 Also called: Capacity Growth
 
 ## Overview
-Dynamic Buffer Management handles the resizing of GPU buffers that store 3D Gaussian splat data during training or streaming, ensuring the allocated capacity matches the active Gaussian count. It solves the problem of buffer overflow when densification adds new Gaussians or buffer under-utilization when pruning removes them. It is distinguished from sibling methods like [GSPull](2773-gspull.md) (which handles data retrieval) and [Composite Error Map and Densification/Pruning Scoring](3396-composite-error-map-and-densification-pruning-scoring.md) (which determines *which* Gaussians to add/remove) by focusing on the *memory infrastructure* required to hold the changing set of active entities.
+Dynamic Buffer Management handles the resizing of GPU buffers that store 3D Gaussian splat data during training or streaming, ensuring the allocated capacity matches the active Gaussian count [S1, unofficial]. It solves the problem of buffer overflow when densification adds new Gaussians or buffer under-utilization when pruning removes them [G]. It is distinguished from sibling methods like [GSPull](2773-gspull.md) (which handles data retrieval) and [Composite Error Map and Densification/Pruning Scoring](3396-composite-error-map-and-densification-pruning-scoring.md) (which determines *which* Gaussians to add/remove) by focusing on the *memory infrastructure* required to hold the changing set of active entities [G].
 
 ## How it works
-The method manages the lifecycle of contiguous memory buffers on the GPU (or CPU, depending on the implementation) that store Gaussian attributes (position, covariance, SH coefficients, opacity). It operates in two modes: explicit capacity growth triggered by overflow, and global buffer lifecycle management for multi-renderer scenarios.
+The method manages the lifecycle of contiguous memory buffers on the GPU (or CPU, depending on the implementation) that store Gaussian attributes (position, covariance, SH coefficients, opacity) [G]. It operates in two modes: explicit capacity growth triggered by overflow, and global buffer lifecycle management for multi-renderer scenarios [S1, unofficial][S2, unofficial].
 
 ### Inputs and Outputs
-- **Inputs**: Current active Gaussian count (`num_active`), current buffer capacity (`capacity`), stride size of the Gaussian data structure (`stride`), and per-renderer splat counts (for global management).
-- **Outputs**: Updated buffer pointers, new capacity value, and valid memory ranges for the GPU driver/renderer.
+- **Inputs**: Current active Gaussian count (`num_active`), current buffer capacity (`capacity`), stride size of the Gaussian data structure (`stride`), and per-renderer splat counts (for global management) [S1, unofficial][S2, unofficial].
+- **Outputs**: Updated buffer pointers, new capacity value, and valid memory ranges for the GPU driver/renderer [G].
 
 ### Data Structures
 The primary data structure is a contiguous buffer (e.g., `GraphicsBuffer` in Unity, `Buffer` in Vulkan/Metal) with the following layout:
-- **Base Buffer**: Stores Gaussian attributes. Size = `capacity * stride * sizeof(float)`.
-- **Densification Flags**: A boolean or integer array of size `capacity`, initialized to zero.
-- **Scratch Buffers**: Temporary buffers used for packing, merging, or sorting. Size scales with `capacity`.
+- **Base Buffer**: Stores Gaussian attributes. Size = `capacity * stride * sizeof(float)` [S1, unofficial].
+- **Densification Flags**: A boolean or integer array of size `capacity`, initialized to zero [S1, unofficial].
+- **Scratch Buffers**: Temporary buffers used for packing, merging, or sorting. Size scales with `capacity` [S1, unofficial].
 - **Global State (Multi-Renderer)**:
-    - `m_builtSplatCounts`: Array storing the splat count per renderer at the time of the last buffer build.
-    - `rendererOffsets`: Array mapping renderer index to base offset in the global buffer.
+    - `m_builtSplatCounts`: Array storing the splat count per renderer at the time of the last buffer build [S2, unofficial].
+    - `rendererOffsets`: Array mapping renderer index to base offset in the global buffer [G].
 
 ### Steps
 
 #### 1. Capacity Growth (Explicit)
-When the number of active Gaussians exceeds the current buffer capacity, the buffer must be resized.
+When the number of active Gaussians exceeds the current buffer capacity, the buffer must be resized [S1, unofficial].
 
-1.  **Check Overflow**: Compare `num_active` with `capacity`.
-2.  **Determine New Capacity**:
-    - If `num_active > capacity`, calculate `new_capacity`.
-    - Standard strategy: `new_capacity = max(capacity * 2, num_active)` [S1, unofficial].
-    - [G] If `num_active` is significantly larger than `capacity * 2`, some implementations may use a smaller growth factor to avoid excessive memory waste, but doubling is the standard cited approach.
-3.  **Allocate New Buffers**:
-    - Allocate a new base buffer of size `new_capacity * stride * sizeof(float)`.
-    - Allocate new densification flags array of size `new_capacity`, initialized to zero.
-    - Allocate new scratch buffers of size proportional to `new_capacity`.
-4.  **Copy Data**:
-    - Copy existing Gaussian data from the old buffer to the new buffer.
-    - Number of elements to copy: `num_active`.
-    - Bytes to copy: `num_active * stride * sizeof(float)`.
-    - [G] Ensure memory alignment is respected during the copy operation.
-5.  **Update Views**:
-    - Update the GPU buffer view/pointer to point to the new buffer.
-    - Update the `capacity` variable to `new_capacity`.
-    - Discard old buffers.
+1.  **Check Overflow**: Compare `num_active` with `capacity` [S1, unofficial].
+2.  **Determine New Capacity**: If `num_active > capacity`, calculate `new_capacity = max(capacity * 2, num_active)` [S1, unofficial].
+3.  **Allocate New Buffers**: Allocate a new base buffer of size `new_capacity * stride * sizeof(float)` [S1, unofficial]. Allocate new densification flags array of size `new_capacity`, initialized to zero [S1, unofficial]. Allocate new scratch buffers of size proportional to `new_capacity` [S1, unofficial].
+4.  **Copy Data**: Copy existing Gaussian data from the old buffer to the new buffer [S1, unofficial]. Number of elements to copy: `num_active` [S1, unofficial]. Bytes to copy: `num_active * stride * sizeof(float)` [S1, unofficial].
+5.  **Update Views**: Update the GPU buffer view/pointer to point to the new buffer [S1, unofficial]. Update the `capacity` variable to `new_capacity` [S1, unofficial]. Discard old buffers [G].
 
 #### 2. Global Buffer Lifecycle Management
-In multi-renderer or streaming scenarios, global buffers must be rebuilt when the set of active renderers or their splat counts change.
+In multi-renderer or streaming scenarios, global buffers must be rebuilt when the set of active renderers or their splat counts change [S2, unofficial].
 
-1.  **Detect Change**:
-    - Check if `m_builtSplatCounts` is null or its length differs from `activeGsplats.Count` [S2, unofficial].
-    - Iterate through `activeGsplats` and compare each `t.SplatCount` with `m_builtSplatCounts[k]` [S2, unofficial].
-    - If any mismatch is found, mark global buffers as dirty and return true [S2, unofficial].
-    - [G] Note that adding/removing renderers is handled by `MarkGlobalBuffersDirty` on register/unregister, not by this count check [S2, unofficial].
-2.  **Rebuild (if dirty)**:
-    - Dispose all global buffers: packed data, SH bands (1-4), order, renderer offsets, renderer transforms, and renderer params.
-    - Dispose scratch buffers used for packing/merging to prevent memory leaks [S2, unofficial].
-    - Nullify `m_builtSplatCounts` to force recapture of splat counts from scratch on the next build [S2, unofficial].
-    - Re-allocate and populate global buffers based on current `activeGsplats` counts.
+1.  **Detect Change**: Check if `m_builtSplatCounts` is null or its length differs from `activeGsplats.Count` [S2, unofficial]. Iterate through `activeGsplats` and compare each `t.SplatCount` with `m_builtSplatCounts[k]` [S2, unofficial]. If any mismatch is found, mark global buffers as dirty and return true [S2, unofficial]. Note that adding/removing renderers is handled by `MarkGlobalBuffersDirty` on register/unregister, not by this count check [S2, unofficial].
+2.  **Rebuild (if dirty)**: Dispose all global buffers: packed data, SH bands (1-4), order, renderer offsets, renderer transforms, and renderer params [S2, unofficial]. Dispose scratch buffers used for packing/merging to prevent memory leaks [S2, unofficial]. Nullify `m_builtSplatCounts` to force recapture of splat counts from scratch on the next build [S2, unofficial]. Re-allocate and populate global buffers based on current `activeGsplats` counts [G].
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def dynamic_buffer_management(num_active, capacity, stride, active_gsplats=None, m_built_splat_counts=None):
+def dynamic_buffer_management(num_active, capacity, stride, old_base_buffer, old_flags, old_scratch, active_gsplats=None, m_built_splat_counts=None):
     """
     Manages buffer resizing and global buffer validity.
     
@@ -72,6 +51,9 @@ def dynamic_buffer_management(num_active, capacity, stride, active_gsplats=None,
         num_active: Current number of active Gaussians.
         capacity: Current buffer capacity.
         stride: Size of one Gaussian in floats.
+        old_base_buffer: Current base buffer data.
+        old_flags: Current densification flags.
+        old_scratch: Current scratch buffer data.
         active_gsplats: List of objects with 'SplatCount' attribute (for global management).
         m_built_splat_counts: Array of previous splat counts per renderer.
         
@@ -80,20 +62,20 @@ def dynamic_buffer_management(num_active, capacity, stride, active_gsplats=None,
         buffers_dirty: Boolean indicating if global buffers need rebuild.
     """
     buffers_dirty = False
+    sizeof_float = 4
     
     # 1. Explicit Capacity Growth
     if num_active > capacity:
-        # Determine new capacity: double or enough to hold active
         new_capacity = max(capacity * 2, num_active)
         
         # Allocate new buffers
-        new_base_buffer = allocate_buffer(new_capacity * stride * sizeof_float)
-        new_flags = allocate_array(new_capacity, init_zero=True)
-        new_scratch = allocate_scratch_buffers(new_capacity)
+        new_base_buffer = bytearray(new_capacity * stride * sizeof_float)
+        new_flags = [0] * new_capacity
+        new_scratch = bytearray(new_capacity * stride * sizeof_float)
         
         # Copy existing data
         bytes_to_copy = num_active * stride * sizeof_float
-        copy_memory(old_base_buffer, new_base_buffer, bytes_to_copy)
+        new_base_buffer[:bytes_to_copy] = old_base_buffer[:bytes_to_copy]
         
         # Update state
         capacity = new_capacity
@@ -103,7 +85,6 @@ def dynamic_buffer_management(num_active, capacity, stride, active_gsplats=None,
         
     # 2. Global Buffer Lifecycle (if multi-renderer)
     if active_gsplats is not None and m_built_splat_counts is not None:
-        # Check if counts have changed
         if m_built_splat_counts is None or len(m_built_splat_counts) != len(active_gsplats):
             buffers_dirty = True
         else:
@@ -114,9 +95,10 @@ def dynamic_buffer_management(num_active, capacity, stride, active_gsplats=None,
                     
         if buffers_dirty:
             # Dispose old global buffers
-            dispose_global_buffers()
-            dispose_scratch_buffers()
-            m_built_splat_counts = None # Force recapture next time
+            del old_base_buffer
+            del old_flags
+            del old_scratch
+            m_built_splat_counts = None
             
     return capacity, buffers_dirty
 ```
@@ -128,7 +110,7 @@ def dynamic_buffer_management(num_active, capacity, stride, active_gsplats=None,
 
 ### Edge Cases and Pitfalls
 - **Memory Leaks**: Failing to dispose scratch buffers when the number of active renderers decreases causes memory leaks [S2, unofficial].
-- **Precision**: Copying large buffers may require careful handling of memory alignment and stride to avoid corruption.
+- **Precision**: Copying large buffers may require careful handling of memory alignment and stride to avoid corruption [G].
 - **Asynchronous Changes**: Active-set size changes (adding/removing renderers) are not detected by the count check but by explicit dirty flags [S2, unofficial].
 
 ## Subtopics
@@ -142,19 +124,27 @@ This mechanism detects when active renderer splat counts change asynchronously (
 ### Global Buffer Lifecycle Management
 This step involves the disposal of all global buffers (packed, SH bands 1-4, order, renderer offsets, renderer transforms, renderer params) and setting references to null [S2, unofficial]. It also disposes scratch buffers used for packing and merging orders/depths to prevent memory leaks when the number of active renderers decreases [S2, unofficial]. Finally, it nullifies `m_builtSplatCounts` to force the next `EnsureGlobalBuffers` call to recapture splat counts from scratch [S2, unofficial].
 
+### Key-Value Global Prefetch Buffer
+A buffering mechanism to handle high variability in Gaussian counts per scene, tile, and pixel, reducing latency and improving local memory utilization [S3]. It prefetches Gaussian data into a global key-value buffer and serves tile/pixel requests from the buffer to decouple unpredictable Gaussian counts from pipeline stages [S3].
+
+### Per-Pixel Linked List Replay Buffers
+A collection strategy storing intersected Gaussian IDs, hit distances, and alpha values in per-pixel linked lists to avoid register spilling and multiple BVH traversals [S4]. PPLLs increase FPS from 175 to 248 [S4]. They are faster than 3DGRT's multiple BVH traversals because they avoid traversal overhead [S4]. GRay's PPLL implementation is lighter than EPBRR's, storing only IDs, distances, and alphas, as other attributes can be recomputed [S4].
+
 ## Operating characteristics
-- **Time Complexity**: Buffer resizing is $O(N)$ where $N$ is the number of active Gaussians, due to the memory copy operation. Global buffer rebuild is also $O(N)$ plus overhead for sorting/merging.
-- **Memory Complexity**: Memory usage scales linearly with capacity. Over-allocation (doubling) can lead to up to 2x memory waste before the next resize.
+- **Time Complexity**: Buffer resizing is $O(N)$ where $N$ is the number of active Gaussians, due to the memory copy operation [S1, unofficial]. Global buffer rebuild is also $O(N)$ plus overhead for sorting/merging [S2, unofficial].
+- **Memory Complexity**: Memory usage scales linearly with capacity. Over-allocation (doubling) can lead to up to 2x memory waste before the next resize [S1, unofficial].
 - **Measured Performance**: Not given in the sources.
-- **Scaling**: Doubling strategy ensures amortized $O(1)$ cost for insertions, but large jumps in Gaussian count can cause stuttering due to large memory copies.
-- **Strengths**: Simple to implement; prevents buffer overflow; handles dynamic scene complexity.
+- **Scaling**: Doubling strategy ensures amortized $O(1)$ cost for insertions, but large jumps in Gaussian count can cause stuttering due to large memory copies [G].
+- **Strengths**: Simple to implement; prevents buffer overflow; handles dynamic scene complexity [G].
 - **Limitations**: Memory fragmentation if not managed carefully; potential for memory leaks if disposal is not handled correctly in multi-renderer scenarios [S2, unofficial].
-- **When to use**: When the number of Gaussians changes significantly during training or runtime.
-- **When not to use**: When the Gaussian count is static and known in advance.
+- **When to use**: When the number of Gaussians changes significantly during training or runtime [G].
+- **When not to use**: When the Gaussian count is static and known in advance [G].
 
 ## Background
-Dynamic Buffer Management is a fundamental component of 3D Gaussian Splatting implementations that support dynamic scenes or training with densification. It originates from the need to manage the variable number of Gaussians in real-time rendering and optimization pipelines. The specific implementations cited here are from unofficial repositories: `msplat` (Metal-based) [S1, unofficial] and `gsplat-unity` (Unity-based) [S2, unofficial].
+Dynamic Buffer Management is a fundamental component of 3D Gaussian Splatting implementations that support dynamic scenes or training with densification [G]. It originates from the need to manage the variable number of Gaussians in real-time rendering and optimization pipelines [G]. The specific implementations cited here are from unofficial repositories: `msplat` (Metal-based) [S1, unofficial] and `gsplat-unity` (Unity-based) [S2, unofficial]. Hardware accelerators also employ key-value prefetch buffers to handle Gaussian count variability [S3]. Ray tracing implementations use per-pixel linked list replay buffers to manage Gaussian collection efficiently [S4].
 
 ## Sources
 [S1] Show HN: Msplat – 3D Gaussian Splatting training in ~90s on M4 Max, native Metal, https://github.com/rayanht/msplat, fetched 2026-10-26 (unofficial)
 [S2] wuyize25/gsplat-unity, https://github.com/wuyize25/gsplat-unity, fetched 2026-10-27 (unofficial)
+[S3] A 129 FPS Full HD Real-Time Accelerator for 3D Gaussian Splatting., https://doi.org/10.1109/tvcg.2026.3683714, fetched 2026-10-27
+[S4] GRay: Ray Tracing 3D Gaussians Near the Speed of Splats, https://doi.org/10.1145/3804496, fetched 2026-10-29

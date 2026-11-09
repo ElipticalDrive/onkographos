@@ -1,39 +1,43 @@
 # Polynomial and Spline Kernels
-## Overview
-This family defines splatting kernels using piecewise polynomial functions and spline basis functions to approximate volumetric density. It addresses the need for kernels with compact support and specific smoothness properties (continuity of derivatives) that differ from the standard Gaussian or EWA splats. It sets itself apart from [EWA Splatting](1069-ewa-splatting.md) by focusing on the algebraic form of the radial basis function rather than just the covariance-based footprint approximation, and from [Splat Extent and Projection](1792-splat-extent-and-projection.md) by defining the internal weight decay function.
-## Shared principles
-The splatting family shares the fundamental mechanism of treating volumetric data as a set of geometric or parametric primitives that are transformed and rasterized [S1, S3, S4, unofficial].
 
-1.  **Primitive Representation:** The volume is decomposed into primitives. These may be explicit geometric shapes (cubes, cells, splats) or implicit functions sampled via texture hardware [S1, S3, S4, unofficial]. Each primitive $k$ is defined by its position $\mathbf{p}_k$, density/extinction coefficient $g_k$ or $\rho_k$, and a reconstruction kernel $h$ (typically a Gaussian) [S1, unofficial][S6][S10, unofficial].
-2.  **Transformation:** Primitives are transformed from volume space to screen space using the Model-View-Projection (MVP) matrix or specific factorizations (e.g., shear-warp) [S2, S3, S4, unofficial]. For perspective projections, the kernel shape may be distorted (e.g., EWA splatting) to account for foreshortening [S6][S10, unofficial].
-3.  **Rasterization:** The transformed primitives are projected onto the 2D image plane. This step leverages hardware-accelerated scan-conversion, depth testing, and blending [S1, S2, S3, S4, unofficial]. The contribution of a voxel $D$ to a screen point $(x,y)$ is determined by the footprint function $F(x,y)$, which is the integral of the 3D kernel along the view direction [S2][S6][S10, unofficial]:
+Also called: Spline Kernels, Polynomial Kernels, Non-Gaussian Splatting
+
+## Overview
+Polynomial and Spline Kernels replace the standard Gaussian reconstruction kernel in splatting with piecewise polynomial or spline functions to improve rendering accuracy and visual fidelity [S1, unofficial][S2, S3, S4]. They solve the problem of visual artifacts and blurring inherent in Gaussian kernels by providing kernels with compact support, specific decay properties, or tunable shapes that better preserve high-frequency features like edges and small textures [S1, unofficial][S2]. They set themselves apart from siblings like [EWA Splatting](1069-ewa-splatting.md) by focusing on the mathematical form of the kernel function itself rather than just the projection geometry, and from [Splat Extent and Projection](1792-splat-extent-and-projection.md) by defining the internal weight distribution within the footprint [S1, unofficial][S2, S3, S4].
+
+## Shared principles
+The splatting family shares the fundamental mechanism of treating volumetric data as a set of geometric or parametric primitives that are transformed and rasterized [S1, unofficial][S3, S4].
+
+1.  **Primitive Representation:** The volume is decomposed into primitives. These may be explicit geometric shapes (cubes, cells, splats) or implicit functions sampled via texture hardware [S1, unofficial][S3, S4]. Each primitive $k$ is defined by its position $\mathbf{p}_k$, density/extinction coefficient $g_k$ or $\rho_k$, and a reconstruction kernel $h$ [S1, unofficial][S6, unofficial][S10, abstract only, unofficial].
+2.  **Transformation:** Primitives are transformed from volume space to screen space using the Model-View-Projection (MVP) matrix or specific factorizations (e.g., shear-warp) [S2, S3, S4]. For perspective projections, the kernel shape may be distorted (e.g., EWA splatting) to account for foreshortening [S6, unofficial][S10, abstract only, unofficial].
+3.  **Rasterization:** The transformed primitives are projected onto the 2D image plane. This step leverages hardware-accelerated scan-conversion, depth testing, and blending [S1, unofficial][S2, S3, S4]. The contribution of a voxel $D$ to a screen point $(x,y)$ is determined by the footprint function $F(x,y)$, which is the integral of the 3D kernel along the view direction [S2][S6, unofficial][S10, abstract only, unofficial]:
     $$ F(x,y) = \int h(x-x_D, y-y_D, z) \, dz $$
     The intensity written to the pixel is modulated by the voxel density:
     $$ P(x,y) = \text{weight}(x,y) \cdot \rho(D) $$
-    where $\text{weight}(x,y) = F(x-x_D, y-y_D)$ [S10, unofficial].
-4.  **Compositing:** Contributions are accumulated to form the final image. This is typically done using alpha blending in back-to-front or front-to-back order to handle transparency correctly [S1, unofficial][S2, S3][S7, book]. Splatting compositing is performed along sheets (all pixels at once for a set of voxels), whereas ray-casting composites along rays (one sample at a time) [S10, unofficial].
+    where $\text{weight}(x,y) = F(x-x_D, y-y_D)$ [S10, abstract only, unofficial].
+4.  **Compositing:** Contributions are accumulated to form the final image. This is typically done using alpha blending in back-to-front or front-to-back order to handle transparency correctly [S1, unofficial][S2, S3][S7]. Splatting compositing is performed along sheets (all pixels at once for a set of voxels), whereas ray-casting composites along rays (one sample at a time) [S10, abstract only, unofficial].
 5.  **Hardware Acceleration:** Most methods in this family rely on GPU rasterization pipelines for performance, enabling real-time interactivity [S1, unofficial][S2, S3].
 
 ## Subtopics
 
 ### [Quadratic Spline Splatting](8112-quadratic-spline-splatting.md)
-Uses quadratic spline basis functions for kernel definition.
+Quadratic Spline Splatting replaces the standard Gaussian reconstruction kernel with a quadratic spline function to improve rendering accuracy, particularly under perspective projection. It addresses the visual artifacts and blurring inherent in Gaussian kernels by providing a kernel optimized for specific conditions, yielding higher quality images while maintaining the efficiency of the splatting framework. It sets itself apart from its siblings by using a piecewise quadratic polynomial that offers compact support, potentially allowing for faster culling of non-contributing voxels compared to the infinite support of Gaussians. Choose this method when perspective distortion artifacts are prominent and a balance between smoothness and computational efficiency is required.
 
 ### [Beta Function Splatting Kernel](8602-beta-function-splatting-kernel.md)
-A 2D kernel function used for splatting that replaces the Normal distribution. It uses a Beta function to control footprint shape, offering smaller footprints and easier tuning for visual parameters like opacity and zoom.
+The Beta Function Splatting Kernel is a 2D footprint function used in object-order volume rendering that replaces the standard Normal (Gaussian) distribution with a Beta function to control the shape of the splat. It solves the problem of tuning visual parameters such as opacity, zoom, and shading by allowing independent control over the openness, height, and width of the kernel curve. It sets itself apart from its siblings, such as [Quadratic Spline Splatting](8112-quadratic-spline-splatting.md) and [Raised Cosine Splatting](9916-raised-cosine-splatting.md), by offering smaller footprints for equivalent visual quality, which can result in significantly faster execution times. Choose this method when fine-grained control over the kernel's tail behavior and footprint size is needed to optimize performance without sacrificing visual fidelity.
 
 ### [Raised Cosine Splatting](9916-raised-cosine-splatting.md)
-A splatting technique using a raised cosine function as the radial basis function, requiring a correction factor to scale the 3D covariance matrix.
+Raised Cosine Splatting is a volume rendering technique that replaces the standard Gaussian radial basis function with a modified raised cosine kernel to improve the reconstruction of fine geometric details. It distinguishes itself from Gaussian splatting by using a kernel with compact support and specific decay properties, which reduces reconstruction error in 1D simulations and enhances visual fidelity for high-frequency features like edges and small textures. Choose this method when preserving sharp edges and high-frequency details is critical, and the compact support allows for efficient boundary culling.
 
 ### 3D Point Splatting with Dirichlet Kernel
 - **Definition:** A method that splats a collection of weighted 3D points onto a volumetric grid using a Dirichlet kernel (described in the text as Lanczos/sinc filtering) [S1, unofficial].
-- **Step:**
+- **Steps:**
     1. Initialize the computation context with the output grid dimensions $(n_x, n_y, n_z)$ and the integer radius $ir = \lceil \text{radius} \rceil$ [S1, unofficial].
-    2. For each point $(x, y, z)$ with weight $w$, compute the integer floor coordinates $i_x = \lfloor x \rfloor$, $i_y = \lfloor y \rfloor$, $i_z = \lfloor z \rfloor$ [S1, unofficial].
-    3. Compute the bounding box $[x_0, x_1)$, $[y_0, y_1)$, $[z_0, z_1)$ for the splat by clamping $[i_x - ir, i_x + ir]$ to the grid boundaries $[0, n_x]$, $[0, n_y]$, $[0, n_z]$ [S1, unofficial].
+    2. For each point $(x, y, z)$ with weight $w$, compute the integer floor coordinates $ix = \lfloor x \rfloor$, $iy = \lfloor y \rfloor$, $iz = \lfloor z \rfloor$ [S1, unofficial].
+    3. Compute the bounding box $[x_0, x_1)$, $[y_0, y_1)$, $[z_0, z_1)$ for the splat by clamping $[ix-ir, ix+ir]$ to the grid boundaries $[0, n_x]$, $[0, n_y]$, $[0, n_z]$ [S1, unofficial].
     4. Iterate over the bounding box indices $i, j, k$ [S1, unofficial].
     5. Add the computed weight $w_z$ to the grid cell at $(i, j, k)$ [S1, unofficial].
-- **Parameter:**
+- **Parameters:**
     - `out`: a 3D ndarray representing the target volumetric grid [S1, unofficial].
     - `points`: a $[n, 3]$ shape ndarray encoding the x/y/z grid coordinates of the points to splat [S1, unofficial].
     - `weights`: a $[n]$ shape ndarray containing the weight for each point [S1, unofficial].
@@ -42,40 +46,42 @@ A splatting technique using a raised cosine function as the radial basis functio
 
 ### Parabolic Splatting
 - **Definition:** A splatting method based on a 3D parabolic function, defined as $1 - \frac{1}{\xi}(d_M)^2$ for $d_M \geq 0$ [S2].
-- **Step:** Forward pass culling: If $ellipse < 0$ or $ellipse > 9.f$, the splat is skipped [S2].
-- **Formula:**
+- **Steps:**
+    1. Forward pass culling: If $ellipse < 0$ or $ellipse > 9.f$, the splat is skipped [S2].
+- **Formulas:**
     - The 2D splat function is: $w = \left[ 1 - \frac{1}{\xi} (x - \boldsymbol{\mu}')^T (\Sigma'_{2 \times 2})^{-1} (x - \boldsymbol{\mu}') \right]$ [S2]. Here $z = (x - \mu')$.
     - The parabolic value is calculated as: $parabola = 1. - \frac{ellipse}{9}$ [S2]. The alpha is $\alpha = \min(0.99f, con\_o.w \times parabola)$ [S2].
     - Backward pass gradients for mean: $\frac{\partial w}{\partial z} = -\frac{2}{\xi}(\Sigma'_{2 \times 2})^{-1}z$ [S2]. In code, $dP_{d\delta x} = (con\_o.x \times d.x + con\_o.y \times d.y) \times \frac{-2}{9}$ [S2].
     - Backward pass gradients for covariance: $\frac{\partial w}{\partial (\Sigma'_{2 \times 2})^{-1}} = -\frac{1}{\xi} z z^T$ [S2]. In code, gradients are scaled by $\frac{-1}{9}$ [S2].
-- **Parameter:**
+- **Parameters:**
     - `correctionFactor`: Scalar multiplier for covariance matrices. Value: $1.3f$ [S2].
 - **Code:**
     - Forward propagation core loop snippet:
-      ```python
-      correctionFactor = 1.3f
-      cov *= correctionFactor
-      ellipse = (con_o.x * d.x * d.x + con_o.z * d.y * d.y + 2.f * con_o.y * d.x * d.y)
-      if ellipse < 0 or ellipse > 9.f:
-          continue
-      parabola = 1.0 - ellipse / 9.0
-      alpha = min(0.99f, con_o.w * parabola)
+      ```cpp
+      float correctionFactor = 1.3f;
+      cov *= correctionFactor;
+      float ellipse = (con_o.x * d.x * d.x + con_o.z * d.y * d.y + 2.f * con_o.y * d.x * d.y); // dM**2
+      if (ellipse < 0 || ellipse > 9.f) continue;
+      const float parabola = 1. - ellipse / 9.;
+      const float alpha = min(0.99f, con_o.w * parabola);
       ```
+      [S2]
     - Backward propagation gradient updates for mean and covariance:
-      ```python
-      correctionFactor = 1.3f
-      cov2D *= correctionFactor
-      # Gradients of loss w.r.t. entries of 2D covariance matrix,
-      # given gradients of loss w.r.t. conic matrix (inverse covariance matrix).
-      # e.g., dL / da = dL / d_conic_a * d_conic_a / d_a
-      dL_da = denom2inv * (-c * c * dL_dconic.x + 2 * b * c * dL_dconic.y + (denom - a * c) * dL_dconic.z)
-      dL_dc = denom2inv * (-a * a * dL_dconic.z + 2 * a * b * dL_dconic.y + (denom - a * c) * dL_dconic.x)
-      dL_db = ...
+      ```cpp
+      float correctionFactor = 1.3f;
+      cov2D *= correctionFactor;
+      // Gradients of loss w.r.t. entries of 2D covariance matrix,
+      // given gradients of loss w.r.t. conic matrix (inverse covariance matrix).
+      // e.g., dL / da = dL / d_conic_a * d_conic_a / d_a
+      dL_da = denom2inv * (-c * c * dL_dconic.x + 2 * b * c * dL_dconic.y + (denom - a * c) * dL_dconic.z);
+      dL_dc = denom2inv * (-a * a * dL_dconic.z + 2 * a * b * dL_dconic.y + (denom - a * c) * dL_dconic.x);
+      dL_db = deno…
       ```
+      [S2]
 
 ### Tree and Forest Modeling with KRS
-- **Definition:** Hierarchical modeling of trees and forests using KRS with specific kernel sets and reflection planes [S3].
-- **Step:**
+- **Definition:** Hierarchical modeling of trees and forests using Kernel-Reflection Sequences (KRS) with specific kernel sets and reflection planes [S3].
+- **Steps:**
     1. Define leaf geometry and thinnest twig with the first few kernels and reflections [S3].
     2. Double geometry at every new expansion level with a reflection placed so that two main branches start from the same point [S3].
     3. Add a new, thicker branch ending at the junction as the next kernel [S3].
@@ -86,10 +92,22 @@ A splatting technique using a raised cosine function as the radial basis functio
     8. Place planes of reflection at forking positions with editable normals [S3].
     9. Generate a forest by adding more reflections (identical to terrain reflections if present) with empty extra kernel sets [S3].
 
+### Fourier Boundary Evaluation (Horner's Method)
+- **Steps:**
+    1. Compute tangent plane coordinates $(u_j, v_j)$ via ray-plane intersection [S4].
+    2. Compute polar coordinates: $\rho_j = \sqrt{u_j^2 + v_j^2}$ and $\theta_j = \arctan(v_j/u_j)$ [S4].
+- **Code:**
+    - Horner's method accumulation for Fourier polynomial:
+      $$ z_{K-1} = c_{i,K-1} $$
+      $$ z_{k} = z_{k+1} \cdot w + c_{i,k} $$
+      yielding $r_i(\theta) = R_i |z_0|$ [S4].
+- **Complexity:** Time complexity: $K-1$ complex multiply-adds [S4].
+
 ## Background
-Kernel-Reflection Sequences (KRS) were introduced in 2016 [S3]. They are used for hierarchical modeling of natural features like trees, forests, coral, terrain, and rocks [S3]. The method leverages the self-similar nature of these structures, where individual kernels become indistinguishable at large scales, resembling a 3D equivalent of a Lévy C-curve [S3].
+Polynomial and spline kernels in volume rendering emerged as alternatives to Gaussian kernels to address limitations in visual quality and computational efficiency. The use of Dirichlet (Lanczos/sinc) kernels for 3D point splatting was implemented in libraries such as `splat-points-3d` by Mikola Lysenko, providing a method for accurate grid-based accumulation [S1, unofficial]. Parabolic and other decaying anisotropic radial basis functions were introduced in DARB-Splatting to generalize splatting with specific decay properties, allowing for differentiable rendering and optimization [S2]. Kernel-Reflection Sequences (KRS) were developed to model complex hierarchical structures like trees and forests, leveraging the self-similar nature of splines and reflections [S3]. Fourier-encoded primitives using Horner's method for boundary evaluation were proposed in Fourier Splatting to enable scalable radiance fields with efficient polynomial accumulation [S4]. These methods are used in real-time volume rendering, differentiable rendering pipelines, and procedural modeling of natural phenomena.
 
 ## Sources
 [S1] mikolalysenko/splat-points-3d, https://github.com/mikolalysenko/splat-points-3d, fetched 2026-10-26 (unofficial)
 [S2] DARB-Splatting: Generalizing Splatting with Decaying Anisotropic Radial Basis Functions, https://doi.org/10.1109/WACV61042.2026.00438, fetched 2026-10-30
 [S3] Kernel-Reflection Sequences, https://doi.org/10.2312/stag.20161364, fetched 2026-10-26
+[S4] Fourier Splatting: Generalized Fourier encoded primitives for scalable radiance fields, https://doi.org/10.48550/arXiv.2603.19834, fetched 2026-10-30

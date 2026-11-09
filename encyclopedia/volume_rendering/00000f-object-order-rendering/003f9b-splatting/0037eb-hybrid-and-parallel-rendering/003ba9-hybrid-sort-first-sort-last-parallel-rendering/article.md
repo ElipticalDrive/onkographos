@@ -3,53 +3,96 @@
 Also called: Dynamic Screen Partitioning, Hybrid algorithms, Hybrid rendering algorithms
 
 ## Overview
-Hybrid Sort-First/Sort-Last Parallel Rendering is a parallel volume rendering technique that partitions both the 3D object space and the 2D screen space dynamically to balance computational load across a cluster of nodes while minimizing redundant pixel compositing [S2, unofficial]. It serves as a hybrid between pure sort-first (which balances geometry processing) and sort-last (which balances pixel accumulation) methods by performing rendering in object space but compositing in image space [S1, unofficial]. Unlike its siblings, it explicitly addresses the trade-off between geometry replication and communication overhead by dynamically adjusting screen partitions based on predicted rendering costs [S2, unofficial].
+Hybrid Sort-First/Sort-Last Parallel Rendering is a parallel volume and polygon rendering technique that partitions both object space (geometry) and image space (screen) to balance computational load across a cluster of nodes [S1, unofficial][S2, unofficial]. It serves as a hybrid between pure sort-first and sort-last methods by performing rendering in object space but compositing in image space, or by dynamically partitioning both spaces to minimize redundant pixel transfer [S1, unofficial][S2, unofficial]. Unlike pure sort-first methods that focus on retained-mode databases fitting in graphics hardware memory [S2, unofficial], this approach targets immediate-mode databases larger than host main memory, though it still requires model replication on rendering nodes [S2, unofficial].
 
 ## How it works
-The method operates on a cluster of commodity PCs connected by a high-speed network [S1, unofficial]. The core mechanism involves a two-phase partitioning strategy: object-space partitioning to distribute geometry processing and screen-space partitioning to distribute rasterization and compositing loads [S2, unofficial].
+The method operates on a cluster of commodity PCs connected by a high-speed network. The core mechanism involves dynamic, view-dependent partitioning of the 3D model and the 2D screen to balance rendering load and minimize screen space overlaps [S2, unofficial].
 
 **Inputs and Outputs:**
-*   **Input:** A 3D model (geometry or volume data) and a camera view.
-*   **Output:** A composite image distributed across the cluster nodes.
+*   **Input:** A large 3D dataset (immediate-mode, larger than main memory) and a camera view.
+*   **Output:** A composited image distributed across the cluster's display or aggregated to a single frame.
 
 **Data Structures:**
-*   **Model Data:** Stored in main memory. In the basic variant, replicated on all $n$ nodes [S2, unofficial]. In the reduced replication variant, stored on $k$ nodes ($k < n$) [S2, unofficial].
-*   **Screen Partitions:** A grid or set of tiles defining regions of the final image.
-*   **Object Partitions:** Groups of primitives (e.g., triangles or voxels) assigned to specific nodes.
+*   **Model Data:** Replicated in main memory on each rendering node [S2, unofficial].
+*   **Screen Partition:** A dynamic grid or tile structure mapping screen regions to specific nodes.
+*   **Object Partition:** A grouping of geometry primitives (triangles/volume splats) assigned to nodes based on spatial overlap with screen partitions.
 
 **Steps:**
-1.  **Dynamic Object Partitioning:** The 3D model is partitioned into groups of primitives. This partitioning is view-dependent and performed dynamically after every frame to adapt to camera movement [S1, unofficial][S2, unofficial].
-2.  **Cost Prediction:** The system predicts the rendering cost for each group of primitives. This involves estimating the number of pixels each group will cover on the screen [S2, unofficial].
-3.  **Dynamic Screen Partitioning:** The 2D screen is partitioned into tiles. The partitioning scheme is designed to minimize the overlap between triangles and screen partitions, thereby reducing the amount of pixel transfer and compositing required between nodes [S2, unofficial].
-4.  **Load Balancing Assignment:** Object groups and screen partitions are assigned to cluster nodes such that the rendering load is balanced. The assignment considers both the geometry processing cost and the screen space overlap [S2, unofficial].
-5.  **Parallel Rendering:** Each node renders its assigned object groups. Since geometry is replicated (in the basic variant), each node has access to the necessary data [S2, unofficial].
-6.  **Compositing:** The rendered images from each node are composited. The dynamic screen partitioning aims to minimize the data transfer required for this step by reducing overlaps [S2, unofficial].
+1.  **Dynamic Partitioning:** After every frame (or view change), the system partitions both object and screen space into tiles and groups [S1, unofficial]. This partitioning is view-dependent [S2, unofficial].
+2.  **Cost Prediction:** The system predicts the rendering cost of triangle groups or volume splats [S2, unofficial].
+3.  **Assignment:** Geometry is assigned to nodes such that the rendering load is balanced and the overlap between triangles and screen partitions is minimized [S2, unofficial].
+4.  **Rendering:** Each node renders its assigned geometry into its assigned screen partition [S2, unofficial].
+5.  **Compositing:** Pixel data is transferred and composited. Minimizing overlap reduces the complexity of this step [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hybrid_sort_first_sort_last_render(model, camera, nodes):
+    # Step 1: Dynamic Partitioning
+    # Partition object space (model) and screen space (camera viewport)
+    # into tiles/groups dynamically after every frame [S1, unofficial]
+    object_partitions = partition_object_space(model, camera)
+    screen_partitions = partition_screen_space(camera, nodes)
+    
+    # Step 2: Cost Prediction and Assignment
+    # Predict rendering costs of groups [S2, unofficial]
+    # Minimize overlap between triangles and screen partitions [S2, unofficial]
+    assignments = []
+    for node in nodes:
+        assigned_geometry = []
+        assigned_screen_region = get_screen_region(node, screen_partitions)
+        
+        for group in object_partitions:
+            cost = predict_rendering_cost(group)
+            overlap = calculate_overlap(group, assigned_screen_region)
+            # Assign if it helps balance load and minimize overlap
+            if should_assign(group, cost, overlap, node):
+                assigned_geometry.append(group)
+        
+        assignments.append((node, assigned_geometry, assigned_screen_region))
+    
+    # Step 3: Parallel Rendering
+    # Geometry is replicated on each node [S2, unofficial]
+    render_results = []
+    for node, geometry, screen_region in assignments:
+        # Render assigned geometry to assigned screen region
+        pixels = render_geometry(geometry, camera, screen_region)
+        render_results.append((node, pixels))
+    
+    # Step 4: Compositing
+    # Compositing in image space [S1, unofficial]
+    # Minimize screen space overlaps to reduce pixel transfer [S2, unofficial]
+    final_image = composite_images(render_results)
+    
+    return final_image
+```
 
 **Parameters:**
-*   **Number of Nodes ($n$):** The number of PCs in the cluster.
-*   **Replication Factor ($k$):** The number of nodes storing the model data. In the basic variant, $k = n$. In the reduced replication variant, $k < n$ [S2, unofficial].
+*   **Partition Granularity:** Not given in the sources.
+*   **Network Bandwidth:** High-speed network required [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Bottleneck:** The dynamic partitioning phase can become a bottleneck, limiting the frame rate [S2, unofficial].
-*   **Memory Limit:** The basic variant requires the entire model to fit in main memory on each node. It cannot handle models larger than main memory [S2, unofficial].
-*   **Screen Partitioning Overhead:** In some cases, the screen partitioning scheme itself can become a bottleneck [S2, unofficial].
+*   **Bottleneck:** The dynamic partitioning phase can become a bottleneck, limiting frame rate [S2, unofficial].
+*   **Screen Partitioning Bottleneck:** In some cases, the screen partitioning scheme itself becomes the bottleneck [S2, unofficial].
+*   **Model Size Limitation:** The model must fit in main memory on each node; it cannot handle models larger than main memory [S2, unofficial].
 
 ## Subtopics
 
 ### Reduced Model Replication
-A technique to address the model replication problem in the basic hybrid algorithm. Instead of storing copies of the model on all $n$ nodes, copies are stored in main memory on only $k$ of the available nodes, where $k < n$ [S2, unofficial]. This reduces memory usage but introduces complexity in data distribution. Neither the preprocessing phase nor the rendering phase can handle a model larger than main memory with this technique [S2, unofficial].
+A technique developed by Samanta et al. to address the model replication problem [S2, unofficial]. Instead of storing copies of the model on all $n$ nodes, copies are stored in main memory on only $k$ of the available nodes, where $k < n$ [S2, unofficial]. Pitfall: Neither the preprocessing phase nor the rendering phase can handle a model larger than main memory [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The dynamic partitioning phase adds overhead to each frame. If this phase becomes a bottleneck, it limits the frame rate [S2, unofficial].
-*   **Memory Complexity:** The basic variant requires $O(N)$ memory per node, where $N$ is the size of the model, due to replication. The reduced replication variant requires $O(N \cdot k/n)$ memory per node [S2, unofficial].
-*   **Scalability:** The hybrid algorithm scales better with processor count and screen resolution compared to pure sort-first methods [S2, unofficial]. However, scalability is limited by the model size fitting in main memory [S2, unofficial].
-*   **Strengths:** Balances rendering load on nodes, minimizes screen space overlaps, and reduces pixel traffic compared to sort-last methods [S2, unofficial]. Exploits frame-to-frame coherence [S2, unofficial].
-*   **Limitations:** Requires model replication (basic variant) or complex data distribution (reduced variant). The dynamic partitioning phase can be a bottleneck. Cannot handle models larger than main memory [S2, unofficial].
-*   **When to Use:** When rendering large models on a cluster of commodity PCs where memory bandwidth and load balancing are critical, and the model fits in main memory.
-*   **When Not to Use:** When the model is too large to fit in main memory (use out-of-core methods instead) or when the overhead of dynamic partitioning outweighs the benefits of load balancing.
+*   **Time Complexity:** Dynamic partitioning is performed after every frame, which can become a bottleneck [S2, unofficial].
+*   **Memory Complexity:** Requires model replication in main memory on each node, limiting scalability with respect to model size [S2, unofficial].
+*   **Performance:** Scales better with processor count and screen resolution compared to earlier sort-first systems [S2, unofficial].
+*   **Strengths:** Exploits frame-to-frame coherence inherent in interactive applications [S2, unofficial]. Does not require high communication bandwidth for pixel traffic compared to sort-last [S2, unofficial].
+*   **Limitations:** Geometry replication limits scalability; dynamic partitioning can bottleneck frame rate; model size limited by main memory [S2, unofficial].
+*   **When to Use:** Interactive visualization of large datasets on PC clusters where frame-to-frame coherence is high and models fit in main memory [S2, unofficial].
+*   **When Not to Use:** When models exceed main memory capacity or when dynamic partitioning overhead is too high [S2, unofficial].
 
 ## Background
-The hybrid sort-first/sort-last approach was developed by Samanta et al. as an evolution of sort-first rendering systems [S2, unofficial]. It builds on Mueller's work on dynamic screen partitioning for load balancing in sort-first rendering [S2, unofficial]. Mueller focused on retained-mode databases fitting in graphics hardware memory, while Samanta et al. focused on immediate-mode databases larger than host main memory (though still limited by main memory in their hybrid approach) [S2, unofficial]. The system was designed for clusters of inexpensive PCs with high-speed networks [S1, unofficial][S2, unofficial].
+Originated from work on parallel rendering on clusters of commodity PCs [S1, unofficial]. Samanta et al. [73] presented a polygon rendering system using off-the-shelf components [S1, unofficial]. Subsequent work by Samanta et al. [116, 117, 118] developed dynamic screen partitioning schemes and hybrid sort-first/sort-last algorithms [S2, unofficial]. Mueller [99, 100] performed extensive experiments on sort-first rendering, emphasizing its advantages over sort-middle and sort-last, and designed dynamic screen partitioning schemes that influenced Samanta's work [S2, unofficial]. Mueller focused on retained-mode databases fitting in graphics hardware memory, while Samanta focused on immediate-mode databases larger than main memory [S2, unofficial].
 
 ## Sources
 [S1] Volume Visualization and Compositing on Large-Scale Displays Using Handheld Touchscreen Interaction, https://doi.org/10.25781/kaust-d5m7l, fetched 2026-10-26 (unofficial)
