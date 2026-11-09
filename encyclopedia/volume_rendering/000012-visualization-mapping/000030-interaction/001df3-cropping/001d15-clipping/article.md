@@ -24,7 +24,7 @@ Clipping is a technique to enable correct perspective projection in sliced-based
 4. Only slabs beyond this defined distance are rendered, ensuring correct depth impression for inside views [S1, unofficial].
 
 **Formulas:**
-- Let $d_{\text{slab}}$ be the distance from the viewpoint to a slab. The slab is processed if $d_{\text{slab}} \ge d_{\text{first}}$, where $d_{\text{first}}$ is the user-specified distance to the first slab [S1, unofficial].
+- Let $d_{\text{slab}}$ be the distance from the viewpoint to a slab [S1, unofficial]. The slab is processed if $d_{\text{slab}} \ge d_{\text{first}}$, where $d_{\text{first}}$ is the user-specified distance to the first slab [S1, unofficial].
 
 **Parameters:**
 - `ren`: `vtkRenderer` pointer [S2, unofficial].
@@ -34,13 +34,13 @@ Clipping is a technique to enable correct perspective projection in sliced-based
 **Edge cases and pitfalls:**
 - **Inside Views:** Without front clipping, perspective projection artifacts occur because slabs behind the viewpoint might be rendered or ordered incorrectly [S1, unofficial].
 - **Precision:** Not given in the sources.
-- **Degenerate Input:** Not given in the sources.
+- **Degenerate Input:** Not given in the sources [G].
 
 ## Subtopics
 
 ### Hard Cull
-**Definition:** A clipping operator that keeps or drops each Gaussian primitive entirely based on whether its center lies within the half-space defined by the clip plane. It adds no per-pixel attenuation factor [S3, unofficial].
-**Steps:** For each primitive, compute the dot product of the clip normal $\mathbf{n}$ and the primitive mean $\boldsymbol{\mu}$. If $\mathbf{n}^\top \boldsymbol{\mu} \le \tau$, keep the primitive; otherwise, drop it [S3, unofficial].
+**Definition:** A clipping operator that keeps or drops each Gaussian primitive entirely based on whether its center lies within the half-space defined by the clip plane [S3, unofficial]. It adds no per-pixel attenuation factor [S3, unofficial].
+**Steps:** For each primitive, compute the dot product of the clip normal $\mathbf{n}$ and the primitive mean $\boldsymbol{\mu}$ [S3, unofficial]. If $\mathbf{n}^\top \boldsymbol{\mu} \le \tau$, keep the primitive; otherwise, drop it [S3, unofficial].
 **Pitfalls:** Primitives straddling the clip plane either overshoot (if kept) or vanish (if dropped), producing a center-quantized boundary artifact as the plane sweeps [S3, unofficial]. The decision is non-differentiable [S3, unofficial].
 **Comparison:** Unlike Moment-Matched (MM) and analytic operators, Hard Cull has no gradient through its binary decision and updates only kept primitives [S3, unofficial].
 

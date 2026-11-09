@@ -1,0 +1,119 @@
+--- v003.md
++++ v004.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D volume dataset stored in texture memory; a set of object-space resampling polygons covering the volume; a 3D transfer function (piecewise-linear) mapping data values to color and opacity.
+-*   **Output:** A composited 2D image in the frame buffer.
++*   **Input:** A 3D volume dataset stored in texture memory; a set of object-space resampling polygons covering the volume; a piecewise-linear transfer function mapping data values to color and opacity [S1, unofficial].
++*   **Output:** A composited 2D image in the frame buffer [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -16,6 +16,6 @@
+ 
+ **Parameters:**
+-*   **Resolution:** The method scales with screen resolution and polygon count. Typical demonstration: $640 \times 512$ window [S1, unofficial].
+-*   **Volume Size:** Demonstrated with $256^3$ [S1, unofficial].
++*   **Resolution:** Performance scales with screen resolution; typical demonstration uses a $640 \times 512$ window [S1, unofficial].
++*   **Volume Size:** Demonstrated with a $256^3$ volume [S1, unofficial].
+ *   **Polygon Count:** Demonstrated with 400 object-space resampling polygons [S1, unofficial].
+ 
+@@ -35,35 +35,69 @@
+ def pixel_flow_render(polygon, screen_x, screen_y):
+     # 1. Fetch 8 arbitrarily-addressed 32-bit values from texture memory
+-    # Each 32-bit value contains 4x 8-bit components: [gx, gy, gz, raw]
+-    fetched_values = texture_fetch_8_arbitrary_32bit(polygon, screen_x, screen_y)
++    # Hardware primitive: returns 8 32-bit values in <500 µs
++    fetched_32bit = [texture_memory[polygon.sample_index(i)] for i in range(8)]
+     
+-    # 2. Trilinear interpolation of the 4 components
+-    # Interpolate gx, gy, gz, and raw data across the 8 samples
+-    interp_gx, interp_gy, interp_gz, interp_raw = trilinear_interpolate_4_components(fetched_values)
++    # 2. Unpack to 4x 8-bit components per value: [gx, gy, gz, raw]
++    samples = []
++    for v in fetched_32bit:
++        samples.append([
++            (v >> 24) & 0xFF, (v >> 16) & 0xFF,
++            (v >> 8) & 0xFF, v & 0xFF
++        ])
++        
++    # 3. Trilinear interpolation of the 4 components
++    # Interpolate gx, gy, gz, and raw across the 8 corner samples
++    interp = trilinear_interpolate_4d(samples)
++    gx, gy, gz, raw = interp
+     
+-    # 3. Normalize the gradient
+-    gradient_magnitude = sqrt(interp_gx**2 + interp_gy**2 + interp_gz**2)
+-    if gradient_magnitude == 0:
+-        norm_gx, norm_gy, norm_gz = 0, 0, 0
++    # 4. Normalize gradient
++    mag = sqrt(gx**2 + gy**2 + gz**2)
++    if mag < 1e-6:
++        # Guard against division by zero; default to z-axis normal [G]
++        nx, ny, nz = 0.0, 0.0, 1.0
+     else:
+-        norm_gx = interp_gx / gradient_magnitude
+-        norm_gy = interp_gy / gradient_magnitude
+-        norm_gz = interp_gz / gradient_magnitude
++        nx, ny, nz = gx/mag, gy/mag, gz/mag
+         
+-    # 4. Compute Phong lighting coefficients
+-    # Light direction and normal are assumed to be available in image space
+-    lighting_coeff = phong_shading(norm_gx, norm_gy, norm_gz)
++    # 5. Phong lighting coefficients
++    # Light direction fixed in image space [S1, unofficial]
++    light_dir = (0.0, 0.0, 1.0)
++    diff = max(0.0, nx*light_dir[0] + ny*light_dir[1] + nz*light_dir[2])
++    lighting = 0.2 + 0.8 * diff
+     
+-    # 5. Piecewise-linear transformation for color and opacity
+-    color, opacity = piecewise_linear_transfer(interp_raw)
++    # 6. Piecewise-linear transfer function
++    color, opacity = apply_piecewise_linear_transfer(raw)
+     
+-    # 6. Composite into frame buffer
+-    final_color = color * lighting_coeff
+-    composite_frame_buffer(screen_x, screen_y, final_color, opacity)
++    # 7. Composite into frame buffer
++    final_color = color * lighting
++    alpha_blend(screen_x, screen_y, final_color, opacity)
++
++def trilinear_interpolate_4d(samples):
++    # samples: list of 8 tuples of 4 floats
++    # Standard trilinear interpolation across 8 corner samples [G]
++    def lerp(a, b, t): return a + t * (b - a)
++    def trilerp(p000, p100, p010, p110, p001, p101, p011, p111, u, v, w):
++        c00 = [lerp(p000[i], p100[i], u) for i in range(4)]
++        c01 = [lerp(p010[i], p110[i], u) for i in range(4)]
++        c10 = [lerp(p001[i], p101[i], u) for i in range(4)]
++        c11 = [lerp(p011[i], p111[i], u) for i in range(4)]
++        r0 = [lerp(c00[i], c01[i], v) for i in range(4)]
++        r1 = [lerp(c10[i], c11[i], v) for i in range(4)]
++        return [lerp(r0[i], r1[i], w) for i in range(4)]
++    # Assuming standard corner ordering for hardware fetch
++    return trilerp(*samples, 0.5, 0.5, 0.5)
++
++def apply_piecewise_linear_transfer(raw):
++    # Maps 8-bit raw value to color and opacity via piecewise-linear function [S1, unofficial]
++    # Implementation depends on specific transfer function data
++    return (raw / 255.0, raw / 255.0)
++
++def alpha_blend(x, y, color, opacity):
++    # Standard over operator compositing into frame buffer [G]
++    pass
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Zero Gradient:** If the interpolated gradient magnitude is zero, normalization fails. The implementation must handle this by setting the normalized gradient to zero or a default value [G].
+-*   **Precision:** The use of 8-bit components for gradient and raw data may limit precision compared to 32-bit floating-point representations, potentially affecting shading accuracy [S1, unofficial].
++*   **Zero Gradient:** If the interpolated gradient magnitude is zero, normalization fails. The implementation must handle this by setting the normalized gradient to a default direction (e.g., $(0,0,1)$) to avoid division by zero [G].
++*   **Precision:** The use of 8-bit components for gradient and raw data limits precision compared to 32-bit floating-point representations, potentially affecting shading accuracy [S1, unofficial].
+ *   **Memory Limits:** Each processor card holds 0.5M texture values. Large volumes require multiple cards and network compositing, introducing potential synchronization or bandwidth bottlenecks [S1, unofficial].
+ 
+@@ -104,5 +138,5 @@
+ 
+ ## Background
+-PixelFlow Volume Rendering was proposed for the PixelFlow graphics system under development at the University of North Carolina at Chapel Hill [S1, unofficial]. It was designed to overcome the limitations of the RealityEngine, specifically regarding realistic lighting and data size [S1, unofficial]. The method leverages the PixelFlow texturing hardware, which allows 128^2 pixel processors to access texture memory and perform user-defined manipulations on the data [S1, unofficial]. The approach was described in a technical report from UNC Chapel Hill in 1991 [S1, unofficial].
++PixelFlow Volume Rendering was proposed for the PixelFlow graphics system under development at the University of North Carolina at Chapel Hill [S1, unofficial]. It was designed to overcome the limitations of the RealityEngine, specifically regarding realistic lighting and data size [S1, unofficial]. The method leverages the PixelFlow texturing hardware, which allows $128^2$ pixel processors to access texture memory and perform user-defined manipulations on the data [S1, unofficial]. The approach was described in a technical report from UNC Chapel Hill in 1991 [S1, unofficial].
+ 
+ ## Sources

@@ -3,91 +3,102 @@
 Also called: SDS, Score Distillation Sampling, Stable Diffusion Training Guidance
 
 ## Overview
-This method computes a gradient signal from a frozen Stable Diffusion model to optimize a radiance field representation by predicting noise, applying classifier-free guidance, and backpropagating the difference between predicted and actual noise [S1, unofficial]. It differs from sibling methods like [MVDream Multi-View Diffusion Guidance](6345-mvdream-multi-view-diffusion-guidance.md) by relying on a single-view diffusion prior with directional conditioning rather than multi-view consistency losses, and from [VCCNF Training Loop](4736-vccnf-training-loop.md) by using score distillation rather than normalizing flow constraints [S1, unofficial].
+Diffusion-Based Guidance for Radiance Field Optimization, commonly known as Score Distillation Sampling (SDS), computes a gradient signal from a frozen text-to-image diffusion model (typically Stable Diffusion) to optimize a radiance field or 3D Gaussian representation [S1, unofficial]. It solves the problem of generating 3D content from 2D priors by backpropagating the difference between the diffusion model's predicted noise and the actual noise added to the rendered image's latent representation [S1, unofficial]. It differs from its siblings by relying on a single-view 2D diffusion prior with classifier-free guidance, whereas [MVDream Multi-View Diffusion Guidance](6345-mvdream-multi-view-diffusion-guidance.md) uses multi-view consistency and [VCCNF Training Loop](4736-vccnf-training-loop.md) uses a different conditional flow matching approach.
 
 ## How it works
-**Inputs:**
-- `pred_rgb`: Rendered image from the radiance field (shape varies, typically $H \times W \times 3$).
-- `prompt`: Text prompt for conditioning.
-- `hors`: Optional azimuth angles for directional conditioning.
-- `as_latent`: Boolean flag indicating if input is already in latent space.
-- `guidance_scale`: CFG scale multiplier. Default: 100 [S1, unofficial].
-- `t_range`: List `[0.02, 0.98]` used to compute timestep bounds [S1, unofficial].
-- `step_ratio`: Float controlling timestep selection ($1.0 \to$ early diffusion, $0.0 \to$ late diffusion) [S1, unofficial].
-
-**Outputs:**
-- `loss`: Scalar loss value for backpropagation.
-- `grad`: Gradient signal applied to the radiance field parameters.
+**Inputs and Outputs:**
+*   **Input:** Rendered RGB image (`pred_rgb`) from the radiance field; text prompt embeddings (`encoder_hidden_states`); optional azimuth angles (`hors`) for directional conditioning; timestep `t`.
+*   **Output:** Gradient signal (`grad`) and loss value (`loss`) used to update the radiance field parameters.
 
 **Data Structures:**
-- `latents`: Latent tensor of shape `[B, 4, 64, 64]` (if `as_latent=False`) or `[B, 4, 64, 64]` (if `as_latent=True`, after interpolation to 64x64) [S1, unofficial].
-- `noise_pred`: UNet output tensor of shape `[2*B, 4, 64, 64]` containing concatenated conditional and unconditional predictions [S1, unofficial].
-- `embeddings`: Text embeddings tensor. Shape depends on prompt and directional cues.
+*   **Latents:** Tensor of shape `[B, 4, 64, 64]` (batch size, channels, height, width) representing the encoded image in the Stable Diffusion latent space [S1, unofficial].
+*   **Noisy Latents:** Tensor of same shape as `latents`, with noise added according to the diffusion scheduler [S1, unofficial].
+*   **Embeddings:** Concatenated tensor of positive (conditional) and negative (unconditional) text embeddings [S1, unofficial].
+
+**Parameters:**
+*   `guidance_scale`: Classifier-free guidance scale multiplier. Default value in code: 100 [S1, unofficial].
+*   `t_range`: List `[0.02, 0.98]` used to compute `min_step` and `max_step` as fractions of `num_train_timesteps` [S1, unofficial].
+*   `step_ratio`: Float controlling timestep selection. `1.0` maps to `min_step` (early diffusion), `0.0` maps to `max_step` (late diffusion) [S1, unofficial].
+*   `as_latent`: Boolean flag. If `false`, input is interpolated to 512x512 and encoded via VAE. If `true`, input is interpolated to 64x64 and scaled by `2 * x - 1` [S1, unofficial].
 
 **Steps:**
-1. **Preprocessing:** Convert `pred_rgb` to `self.dtype`. If `as_latent` is false, interpolate `pred_rgb` to 512x512 and encode via VAE to get `latents` of shape `[B, 4, 64, 64]`. If true, interpolate to 64x64 and scale by `2 * x - 1` [S1, unofficial].
-2. **Timestep Selection:** Compute weighting factor `w = (1 - self.alphas[t]).view(batch_size, 1, 1, 1)` where `t` is selected based on `step_ratio` and `t_range` [S1, unofficial].
-3. **Noise Addition:** Sample noise `noise = torch.randn_like(latents)` and add it to latents: `latents_noisy = self.scheduler.add_noise(latents, noise, t)` [S1, unofficial].
-4. **CFG Preparation:** Duplicate noisy latents and timesteps for Classifier-Free Guidance (CFG): `latent_model_input = torch.cat([latents_noisy] * 2)`, `tt = torch.cat([t] * 2)` [S1, unofficial].
-5. **Embedding Preparation:** Prepare text embeddings. Concatenate positive and negative embeddings. If `hors` (azimuth angles) is provided, select directional embeddings (`front` for `|h|<60`, `side` for `60<=|h|<120`, `back` otherwise) and concatenate with negative embeddings [S1, unofficial].
-6. **UNet Inference:** Pass inputs to UNet: `noise_pred = self.unet(latent_model_input, tt, encoder_hidden_states=embeddings).sample` [S1, unofficial].
-7. **Classifier-Free Guidance:** Split `noise_pred` into `noise_pred_cond` and `noise_pred_uncond`, then compute `noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)` [S1, unofficial].
-8. **Gradient Computation:** Compute gradient: `grad = w * (noise_pred - noise)`, then `grad = torch.nan_to_num(grad)` to handle numerical instability [S1, unofficial].
-9. **Target and Loss:** Compute target: `target = (latents - grad).detach()`. Compute loss: `loss = 0.5 * F.mse_loss(latents.float(), target, reduction='sum') / latents.shape[0]` [S1, unofficial].
+1.  **Preprocessing:** Convert `pred_rgb` to `self.dtype`. If `as_latent` is `false`, interpolate to 512x512 and encode via VAE to get `latents` of shape `[B, 4, 64, 64]`. If `as_latent` is `true`, interpolate to 64x64 and scale by `2 * x - 1` [S1, unofficial].
+2.  **Weighting:** Compute weighting factor $w = (1 - \alpha_t)$, where $\alpha_t$ is the noise schedule value at timestep $t$. Reshape to `[batch_size, 1, 1, 1]` [S1, unofficial].
+3.  **Noise Addition:** Sample noise $\epsilon \sim \mathcal{N}(0, I)$ with shape matching `latents`. Compute noisy latents: $z_t = \text{scheduler.add\_noise}(z_0, \epsilon, t)$ [S1, unofficial].
+4.  **CFG Preparation:** Duplicate noisy latents and timesteps for classifier-free guidance: $z_{t, \text{input}} = [z_t; z_t]$ and $t_{\text{input}} = [t; t]$ [S1, unofficial].
+5.  **Embedding Preparation:** Concatenate positive and negative text embeddings. If azimuth angles (`hors`) are provided, select directional embeddings: `front` if $|h| < 60^\circ$, `side` if $60^\circ \le |h| < 120^\circ$, `back` otherwise. Concatenate these with the negative embeddings [S1, unofficial].
+6.  **UNet Prediction:** Pass inputs to the frozen UNet: $\hat{\epsilon} = \text{UNet}(z_{t, \text{input}}, t_{\text{input}}, \text{encoder\_hidden\_states}=\text{embeddings}).\text{sample}$ [S1, unofficial].
+7.  **Classifier-Free Guidance:** Split $\hat{\epsilon}$ into conditional ($\hat{\epsilon}_c$) and unconditional ($\hat{\epsilon}_u$) predictions. Compute guided prediction: $\hat{\epsilon}_{\text{guided}} = \hat{\epsilon}_u + \text{guidance\_scale} \times (\hat{\epsilon}_c - \hat{\epsilon}_u)$ [S1, unofficial].
+8.  **Gradient Computation:** Compute the raw gradient: $g = w \times (\hat{\epsilon}_{\text{guided}} - \epsilon)$. Clamp NaN values to 0: $g = \text{torch.nan\_to\_num}(g)$ [S1, unofficial].
+9.  **Target and Loss:** Compute target: $z_{\text{target}} = (z_0 - g).\text{detach}()$. Compute loss: $\mathcal{L} = \frac{0.5}{B} \sum \| z_0 - z_{\text{target}} \|^2$ [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_sds_loss(pred_rgb, prompt, hors=None, as_latent=False, guidance_scale=100.0, step_ratio=0.5):
+def compute_sds_loss(pred_rgb, text_embeddings, hors, t, guidance_scale, as_latent, vae, unet, scheduler, dtype):
     # 1. Preprocessing
     if not as_latent:
         # Interpolate to 512x512 and encode via VAE
-        latents = vae.encode(interpolate_to_512(pred_rgb))
+        img_512 = interpolate(pred_rgb, size=(512, 512))
+        latents = vae.encode(img_512).latent_dist.sample()
     else:
         # Interpolate to 64x64 and scale
-        latents = interpolate_to_64(pred_rgb)
-        latents = 2 * latents - 1
-    
-    # 2. Timestep Selection
-    # t is determined by step_ratio and t_range [0.02, 0.98]
-    t = select_timestep(step_ratio)
-    w = (1 - alphas[t]).view(latents.shape[0], 1, 1, 1)
-    
+        img_64 = interpolate(pred_rgb, size=(64, 64))
+        latents = 2 * img_64 - 1
+
+    # 2. Weighting
+    alpha_t = scheduler.alphas[t]
+    w = (1 - alpha_t).view(latents.shape[0], 1, 1, 1)
+
     # 3. Noise Addition
     noise = torch.randn_like(latents)
     latents_noisy = scheduler.add_noise(latents, noise, t)
-    
+
     # 4. CFG Preparation
     latent_model_input = torch.cat([latents_noisy] * 2)
     tt = torch.cat([t] * 2)
-    
+
     # 5. Embedding Preparation
-    # Get positive and negative text embeddings
-    pos_emb = get_text_embedding(prompt)
-    neg_emb = get_text_embedding("") # Empty prompt for unconditional
+    # Assume pos_emb and neg_emb are extracted from text_embeddings
+    pos_emb, neg_emb = text_embeddings[0], text_embeddings[1]
     
-    # Handle directional conditioning if hors is provided
+    # Handle directional embeddings if hors is provided
     if hors is not None:
-        dir_emb = select_directional_embedding(hors) # front, side, or back
-        # Concatenate with negative embeddings as per source logic
-        # Note: Source implies concatenation with negative embeddings for CFG
-        # This step is implementation-specific regarding exact tensor shapes
-        embeddings = prepare_embeddings(pos_emb, neg_emb, dir_emb)
+        # Select directional embeddings based on azimuth angle h
+        # front: |h| < 60, side: 60 <= |h| < 120, back: otherwise
+        # This logic assumes a pre-defined mapping or tensor of directional embeddings
+        dir_embs = select_directional_embeddings(hors) 
+        # Concatenate with negative embeddings for the unconditional branch
+        # Note: The source implies concatenating with negative embeddings, 
+        # but standard CFG usually keeps neg_emb separate. 
+        # Based on [S1, unofficial]: "concatenate with negative embeddings"
+        # We assume neg_emb is expanded or concatenated appropriately for the UNet input
+        # For simplicity, we assume the UNet handles the concatenation or the 
+        # 'embeddings' variable passed below is the final concatenated tensor.
+        # Re-reading [S1, unofficial]: "Concatenate positive and negative embeddings... 
+        # select directional embeddings... and concatenate with negative embeddings."
+        # This suggests the unconditional input might be modified or the structure is specific.
+        # Standard CFG: [pos_emb; neg_emb]. 
+        # Here: [pos_emb; (neg_emb + dir_emb)]? Or [pos_emb; neg_emb] and dir_emb is used differently?
+        # The source says: "concatenate with negative embeddings". 
+        # Let's assume the unconditional embedding is modified by direction.
+        uncond_emb = concatenate(neg_emb, dir_embs)
+        embeddings = concatenate(pos_emb, uncond_emb)
     else:
-        embeddings = prepare_embeddings(pos_emb, neg_emb)
-        
-    # 6. UNet Inference
+        embeddings = concatenate(pos_emb, neg_emb)
+
+    # 6. UNet Prediction
     noise_pred = unet(latent_model_input, tt, encoder_hidden_states=embeddings).sample
-    
+
     # 7. Classifier-Free Guidance
-    noise_pred_cond, noise_pred_uncond = torch.chunk(noise_pred, 2, dim=0)
+    noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2)
     noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
-    
+
     # 8. Gradient Computation
     grad = w * (noise_pred - noise)
-    grad = torch.nan_to_num(grad) # Handle NaNs
-    
+    grad = torch.nan_to_num(grad)
+
     # 9. Target and Loss
     target = (latents - grad).detach()
     loss = 0.5 * F.mse_loss(latents.float(), target, reduction='sum') / latents.shape[0]
@@ -95,30 +106,42 @@ def compute_sds_loss(pred_rgb, prompt, hors=None, as_latent=False, guidance_scal
     return loss, grad
 ```
 
-**Parameters:**
-- `guidance_scale`: CFG scale multiplier. Default: 100 [S1, unofficial].
-- `t_range`: List `[0.02, 0.98]` [S1, unofficial].
-- `step_ratio`: Float controlling timestep selection [S1, unofficial].
-
 **Edge Cases and Pitfalls:**
-- Gradient computation can produce NaN values due to numerical instability in the diffusion process or guidance scaling. The code explicitly clamps NaNs to 0 using `torch.nan_to_num(grad)` [S1, unofficial].
+*   **NaN Values:** Gradient computation can produce NaN values due to numerical instability in the diffusion process or guidance scaling. The code explicitly clamps NaNs to 0 using `torch.nan_to_num(grad)` [S1, unofficial].
+*   **Timestep Selection:** The choice of `t` (via `step_ratio`) affects the balance between structure and detail. Early timesteps (`step_ratio` near 1.0) provide structural guidance, while late timesteps (`step_ratio` near 0.0) provide detail [S1, unofficial].
 
 ## Subtopics
 
-### [DDIM Sampling with Classifier-Free Guidance](8118-ddim-sampling-with-classifier-free-guidance.md)
-Iteratively denoises latent variables using the DDIM scheduler and classifier-free guidance to generate images or refine existing ones.
+### Iterative Optimization with Learnable Parameters for Diffusion-Guided Radiance Fields
+A method addressing quality impairment caused by differences between the diffusion prior and the training process of the diffusion model [S2]. It performs iterative optimization of the 3D model and the diffusion prior [S2]. Specifically, it introduces a learnable unconditional embedding in the classifier-free guidance formula and adds additional parameters, such as LoRA parameters, to the network [S2].
+
+### LucidDreamer
+A scene generation method based on a reference image that extends outward [S2]. It utilizes Stable Diffusion for image inpainting to generate unseen regions on sampled views [S2]. Monocular depth estimation and alignment are incorporated to establish a 3D point cloud from these views, which is then used as the initial value for 3D Gaussian Splatting optimization [S2].
+
+### Interval Score Matching
+A modification to SDS loss that replaces DDPM with DDIM inversion and introduces supervisions from interval steps to avoid high error in one-step reconstruction [S2].
+
+### Context-Translation Training with Segmentation Masking
+A technique where a segmentation mask is passed to the training process to exclude certain parts of the object from stylization [S3]. The loss is calculated only on pixels outside the mask to avoid changing the appearance of masked pixels [S3]. An additional background loss $L_{BG}$ is employed as regularization to prevent unwanted style artifacts in the background [S3]. $L_{BG}$ is defined as the L1 distance between the ground truth pixels of the background in the rendered image and the pixels in the background of the GT image [S3].
+
+### DDPM Denoise Function Network
+An 8-layer 3D convolution network used as the denoise function in some diffusion-based 3D generation methods [S4, unofficial]. Layer widths are {32, 64, 128, 256, 256, 128, 64, 32} [S4, unofficial]. The first four layers encode voxel resolution from 32 to 4 using stride 2, and the last four layers are 3D convolution transpose layers recovering resolution from 4 to 32 with stride 2 [S4, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Dominated by UNet inference per step. One forward pass per training step.
-- **Memory Complexity:** Requires storing latents, noise, and UNet activations. Batch size of 2 for CFG doubles memory for latents and embeddings.
-- **Performance:** High-quality results but computationally expensive due to diffusion model inference.
-- **Strengths:** Strong prior for photorealism and texture.
-- **Limitations:** Slow training, potential for "over-saturation" or artifacts if guidance scale is too high.
-- **When to use:** When high-fidelity texture is required and training time is not a primary constraint.
-- **When not to use:** For real-time applications or when multi-view consistency is critical without additional constraints.
+*   **Time Complexity:** High, due to the need to run the diffusion model (UNet) and VAE encoder/decoder for every optimization step. The UNet inference is the dominant cost [S1, unofficial].
+*   **Memory Complexity:** Moderate to High. Requires storing the radiance field parameters, the diffusion model weights (frozen), and intermediate latent tensors. The VAE encoding/decoding adds memory overhead [S1, unofficial].
+*   **Measured Performance:** Typically generates high-quality 3D assets from text prompts, but suffers from issues like the "Janus problem" (multiple faces) and floaters without additional constraints [S2].
+*   **Scaling:** Scales with the complexity of the diffusion model and the resolution of the rendered images. Larger guidance scales improve coherence but may reduce diversity [S1, unofficial].
+*   **Strengths:** Leverages powerful 2D diffusion priors; relatively simple to implement with existing diffusion libraries [S1, unofficial].
+*   **Limitations:** Computationally expensive; prone to artifacts like Janus and floaters; sensitive to timestep selection and guidance scale [S1, unofficial][S2].
+*   **When to Use:** When high-fidelity 2D diffusion models are available and computational resources are sufficient for iterative optimization.
+*   **When Not to Use:** When real-time performance is required or when multi-view consistency is critical without additional modifications (e.g., using MVDream instead) [S2].
 
 ## Background
-Originated from the DreamGaussian project [S1, unofficial]. It leverages the pre-trained Stable Diffusion model to provide a strong generative prior for 3D content creation.
+Score Distillation Sampling (SDS) was introduced by Poole et al. in "DreamFusion: Text-to-3D using 2D Diffusion" (2022) [S1, unofficial]. It enables the optimization of 3D representations (like NeRFs or 3D Gaussians) using gradients from a pre-trained 2D text-to-image diffusion model. The method has become a standard technique in text-to-3D generation, with numerous variants and improvements proposed in subsequent works [S2].
 
 ## Sources
 [S1] dreamgaussian/dreamgaussian, https://github.com/dreamgaussian/dreamgaussian, fetched 2026-10-27 (unofficial)
+[S2] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+[S3] Shape-Shifting Splats: Realtime Context Translation for Gaussian Splatting in VR, https://doi.org/10.1109/vr67842.2026.00046, fetched 2026-11-01
+[S4] Neural Volumetric Mesh Generator, https://arxiv.org/abs/2210.03158v1, fetched 2026-10-27 (unofficial)

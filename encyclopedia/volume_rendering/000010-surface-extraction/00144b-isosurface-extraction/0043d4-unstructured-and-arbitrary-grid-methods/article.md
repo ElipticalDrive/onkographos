@@ -1,0 +1,34 @@
+# Unstructured and Arbitrary Grid Methods
+
+Also called: Arbitrary Grid Isosurface Extraction, Polyhedral Grid Methods
+
+## Overview
+This family extracts isosurfaces from scalar fields defined on non-Cartesian domains, including arbitrary polyhedral cells and hybrid unstructured grids, solving the topological inconsistencies and geometric discontinuities inherent in standard grid-based methods like Marching Cubes [951-isosurface-extraction-on-arbitrary-polyhedral-grids.md]. It sets itself apart by operating directly on complex cell geometries (such as pentahedra or arbitrary polyhedra) without requiring decomposition into tetrahedra or reliance on predefined configuration tables for ambiguous faces [951-isosurface-extraction-on-arbitrary-polyhedral-grids.md].
+
+## Shared principles
+All methods in this family operate on a discretized domain, typically a regular grid (Cartesian, octree, or tetrahedral) where each cell contains scalar values or occupancy states at its vertices or centers. The core mechanism involves traversing the grid cells and evaluating the data to determine which parts of the domain constitute the surface [G].
+
+1.  **Domain Traversal**: The algorithm iterates over the volume data structure [G]. For regular grids, this often involves checking each cell or voxel [G].
+2.  **Surface Determination**: A criterion is applied to identify surface locations. In isosurface methods, this involves comparing scalar values against a threshold (isovalue) to detect sign changes or equality [30-isosurface-extraction.md]. In blocky meshing, this involves checking occupancy states or material IDs to identify exposed boundaries [31-blocky-meshing.md].
+3.  **Primitive Generation**: Geometric primitives (vertices, edges, faces) are generated based on the determined surface locations [G].
+4.  **Mesh Coherence**: Adjacent primitives are merged or connected to form a coherent mesh, often requiring vertex merging to avoid duplicates and ensure watertightness [30-isosurface-extraction.md].
+
+## Subtopics
+
+### [Isosurface extraction on arbitrary polyhedral grids](951-isosurface-extraction-on-arbitrary-polyhedral-grids.md)
+This method extracts isosurfaces from scalar fields defined on arbitrary polyhedral cells (convex, non-convex, planar, or non-planar) by approximating the surface locally at each cell as a polygonal surface (isopolygon) [951-isosurface-exraction-on-arbitrary-polyhedral-grids.md]. It solves the topological inconsistencies and holes inherent in standard Marching Cubes on ambiguous faces by treating face boundaries systematically using general polygon tracing rules, rather than relying on predefined configuration tables [951-isosurface-extraction-on-arbitrary-polyhedral-grids.md]. Unlike Marching Tetrahedra, it operates directly on arbitrary polyhedra without decomposing them into tetrahedra [951-isosurface-extraction-on-arbitrary-polyhedral-grids.md].
+
+### [Gallagher-Nagtegaal Bicubic Method](5321-gallagher-nagtegaal-bicubic-method.md)
+The Gallagher-Nagtegaal Bicubic Method is an isosurface extraction technique that replaces the triangular primitives of Marching Cubes with visually continuous bicubic polynomial patches [5321-gallagher-nagtegaal-bicubic-method.md]. It solves the problem of geometric discontinuity and aliasing artifacts inherent in piecewise-linear approximations by providing a smooth, curved representation of the implicit surface [5321-gallagher-nagtegaal-bicubic-method.md]. Unlike its sibling [Marching Cubes](30-isosurface-extraction.md), which outputs a mesh of triangles, this method outputs a set of parametric surface patches, making it particularly suitable for applications requiring high visual fidelity or further subdivision [5321-gallagher-nagtegaal-bicubic-method.md]. It builds on [Isosurface extraction](30-isosurface-extraction.md) by maintaining the cell-based traversal logic but altering the primitive generation step to fit a bicubic function rather than a linear interpolation.
+
+### Direct Isosurface Extraction from Pentahedral Elements
+**Definition**: A method for extracting isosurfaces of scalar fields defined on hybrid unstructured grids containing pentahedral elements (square pyramids and right triangular prisms) directly, avoiding the need to subdivide non-tetrahedral cells into tetrahedra or use indirect triangulation methods [S1].
+**Steps**: Construct look-up tables for square pyramidal cells with accurate topological considerations, and construct look-up tables for triangular prismatic cells with accurate topological considerations [S1].
+**Comparison**: Unlike indirect methods that subdivide non-tetrahedral cells into tetrahedra to use marching tetrahedra, or triangulate intersection points using standard algorithms, this method processes nearly all types of hybrid unstructured grids directly without subdivision [S1].
+**History**: The method is based on the basic ideas underlying the well-established marching cubes and marching tetrahedra algorithms, which are applied to hexahedral and tetrahedral elements, respectively [S1].
+
+## Background
+The need for methods handling arbitrary grids arises from the limitations of structured grid algorithms (like Marching Cubes) when applied to complex geometries or hybrid meshes common in engineering simulations. Standard approaches often require converting unstructured data into tetrahedral or hexahedral elements, which can introduce topological errors or computational overhead [S1]. The Gallagher-Nagtegaal method addresses the visual quality issues of linear interpolation in structured contexts, while the polyhedral and pentahedral methods extend the robustness of isosurface extraction to complex cell types found in practical applications [S1, 5321-gallagher-nagtegaal-bicubic-method.md].
+
+## Sources
+[S1] ISOSURFACE EXTRACTION FROM HYBRID UNSTRUCTURED GRIDS CONTAINING PENTAHEDRAL ELEMENTS, https://doi.org/10.5220/0003852506600669, fetched 2026-10-26

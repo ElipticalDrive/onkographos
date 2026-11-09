@@ -1,0 +1,140 @@
+# Diffusion-based Regularization for NeRF
+
+Also called: DDM regularization, Diffusion-based Regularization for Neural Radiance Fields, Score matching prior for NeRF
+
+## Overview
+This method incorporates a denoising diffusion model as a prior for the density ($\sigma$) and color ($\mathbf{c}$) fields in Neural Radiance Fields (NeRF) to mitigate interference factors and improve reconstruction stability in limited-view scenarios [S1]. Unlike standard photometric optimization which often yields blurry results and loses detailed information when views are sparse, this approach uses the diffusion model to enforce a learned data distribution prior, preventing the disappearance of fine structures [S1]. It builds on [Regularization and Loss Functions](8586-regularization-and-loss-functions.md) by adding a gradient term derived from the score of the diffusion prior.
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** Training images $\{I_i\}_{i=1}^N$ with known camera poses; a pre-trained denoising diffusion model $\epsilon_D$; hyperparameter $\lambda_D$.
+*   **Outputs:** Optimized NeRF fields (density $\sigma$ and color $\mathbf{c}$) that minimize the combined loss.
+
+**Data Structures**
+*   **NeRF Fields:** Implicit representation mapping 3D coordinates and viewing directions to density and color.
+*   **Diffusion Prior Network:** A neural network $\epsilon_D(x_k, k)$ that estimates the noise component $\epsilon_k$ given a noisy sample $x_k$ and noise level $k$ [S1].
+
+**Formulas**
+The posterior probability of the density and color fields given training views is expressed via Bayes' theorem as [S1]:
+$$ p(\sigma, \mathbf{c} | \{I_i\}_{i=1}^N) \propto p(\{I_i\}_{i=1}^N | \sigma, \mathbf{c}) p(\sigma, \mathbf{c}) $$
+
+The diffusion model acts as a prior where the noise estimator is linked to score matching [S1]:
+$$ \epsilon_D(x_k, k) \propto \nabla_x \log p(x) $$
+
+The mean of the Gaussian distribution for the preceding noisy sample $x_{k-1}$ given the current noisy sample $x_k$ is [S1]:
+$$ p(x_{k-1} | x_k) = \mathcal{N}(x_{k-1}; \mu(x_k, k), \hat{\gamma}_k I) $$
+where $\hat{\gamma}_k = (1 - \bar{\eta}_{k-1})\gamma_k / (1 - \bar{\eta}_k)$ [S1].
+
+The mean $\mu(x_k, k)$ is computed by estimating the noise term using the noised input [S1]:
+$$ \mu(x_k, k) = \frac{1}{\sqrt{\eta_k}} \left( x_k - \sqrt{\frac{1 - \bar{\eta}_{k-1}}{1 - \bar{\eta}_k}} \epsilon_D(x_k, k) \right) $$
+
+The total loss function gradient is derived from the log-posterior and formulated as [S1]:
+$$ \nabla L = \nabla L_p + \lambda_D \epsilon_D $$
+where $L_p = \| \hat{\mathbf{c}}(r) - \mathbf{c}_g \|^2$ is the $L_2$ loss between the predicted color $\hat{\mathbf{c}}(r)$ and the true color $\mathbf{c}_g$ [S1].
+
+**Parameters**
+*   $\lambda_D$: The weight of the diffusion regularization term. Typical value: 0.01 [S1].
+*   $\epsilon_D(x_k, k)$: A neural network that estimates the noise term $\epsilon_k$ given the noised input $x_k$ and noise level $k$ [S1].
+
+**Numbered Steps**
+1.  Initialize the NeRF fields (density $\sigma$ and color $\mathbf{c}$) and load the pre-trained denoising diffusion model $\epsilon_D$ [S1].
+2.  For each training iteration, render the color $\hat{\mathbf{c}}(r)$ for the current rays using the NeRF fields [S1].
+3.  Compute the photometric loss gradient $\nabla L_p$ based on the $L_2$ difference between rendered color $\hat{\mathbf{c}}(r)$ and ground truth $\mathbf{c}_g$ [S1].
+4.  Compute the diffusion regularization gradient $\lambda_D \epsilon_D$. This involves evaluating the diffusion model's noise estimator $\epsilon_D$ on the relevant field representations (density and color) [S1].
+5.  Combine the gradients: $\nabla L = \nabla L_p + \lambda_D \epsilon_D$ [S1].
+6.  Update the NeRF fields using the combined gradient $\nabla L$ [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def diffusion_regularized_nerf_update(nerf_fields, training_views, diffusion_model, lambda_D):
+    """
+    Performs one optimization step for NeRF using diffusion-based regularization.
+    
+    Args:
+        nerf_fields: Current state of the NeRF density and color fields.
+        training_views: List of training images and camera poses.
+        diffusion_model: Pre-trained neural network epsilon_D(x_k, k).
+        lambda_D: Weight for the diffusion regularization term.
+        
+    Returns:
+        Updated nerf_fields.
+    """
+    # 1. Compute Photometric Loss Gradient
+    # Render colors for all rays in training views
+    rendered_colors = []
+    ground_truth_colors = []
+    
+    for view in training_views:
+        rays = generate_rays(view.camera_pose)
+        # Render using current NeRF fields
+        colors = render_rays(nerf_fields, rays)
+        rendered_colors.append(colors)
+        ground_truth_colors.append(view.image)
+        
+    # Concatenate all rays
+    all_rendered = concatenate(rendered_colors)
+    all_gt = concatenate(ground_truth_colors)
+    
+    # L2 Loss: L_p = || c_hat - c_g ||^2
+    # Gradient of L2 loss w.r.t. NeRF fields
+    # Note: In practice, this is computed via backpropagation through the renderer
+    loss_p = mean_squared_error(all_rendered, all_gt)
+    grad_p = compute_gradient(loss_p, nerf_fields)
+    
+    # 2. Compute Diffusion Regularization Gradient
+    # The diffusion model acts as a prior on the fields (sigma, c)
+    # The gradient is proportional to the noise estimate epsilon_D
+    # We treat the current field representation as the input to the diffusion prior
+    
+    # Flatten or structure fields appropriately for the diffusion model input
+    # The source implies epsilon_D is applied to the field values directly or their representation
+    # Assuming x_k represents the noisy field representation
+    # In a training loop, we typically perturb or use the current estimate as the "noisy" input
+    # to evaluate the score/gradient direction.
+    
+    # Evaluate diffusion model to get noise estimate
+    # epsilon_D takes the field representation and noise level k
+    # For simplicity, assume k is fixed or sampled per step
+    k = sample_noise_level() 
+    field_representation = get_field_representation(nerf_fields)
+    
+    # Get noise estimate from diffusion model
+    # epsilon_D(x_k, k) estimates the noise added to x_k
+    noise_estimate = diffusion_model(field_representation, k)
+    
+    # The regularization gradient is lambda_D * epsilon_D
+    # This term guides the fields towards the manifold learned by the diffusion model
+    grad_diffusion = lambda_D * noise_estimate
+    
+    # 3. Combine Gradients
+    # grad_L = grad_L_p + lambda_D * epsilon_D
+    total_gradient = grad_p + grad_diffusion
+    
+    # 4. Update Fields
+    # Standard optimizer step (e.g., Adam)
+    updated_fields = apply_optimizer_step(nerf_fields, total_gradient)
+    
+    return updated_fields
+```
+
+**Edge Cases and Pitfalls**
+*   **Interference Factors:** The method is specifically designed to handle low-quality geometry and appearance in limited-view scenarios, but may fail if captured images contain degrading interference information such as mirror-like reflections [S1].
+*   **Blurry Results:** Without this regularization (e.g., "No DDM" variant), the model suffers from blurry reconstruction results and disappearance of detailed information [S1].
+*   **Generalization:** The method was evaluated on datasets with distinct scene and view distributions (NeRF synthetic, LLFF) compared to the training set (DTU), requiring careful handling of domain shifts [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Adds the computational cost of evaluating the diffusion model $\epsilon_D$ per optimization step. The diffusion model is a neural network, so this adds inference time proportional to its depth and width.
+*   **Memory Complexity:** Requires storing the parameters of the diffusion model in addition to the NeRF fields.
+*   **Performance:** Improves reconstruction stability and detail preservation in limited-view scenarios compared to methods using only $L_p$ loss [S1]. It prevents blurry results and loss of detailed information [S1].
+*   **Strengths:** Effective in limited-view scenarios; captures intricate details and fine structures; generalizes to diverse testing scenes [S1].
+*   **Limitations:** Performance may degrade with images containing mirror-like reflections or other degrading interference information [S1].
+*   **When to use:** When training data is limited (few views) and standard NeRF training results in blurry or incomplete reconstructions.
+*   **When not to use:** When high-quality, dense input views are available, or when the input images contain significant interference like strong reflections that the diffusion prior cannot handle [S1].
+
+## Background
+This method was proposed in the paper "Rugularizing generalizable neural radiance field with limited-view images" [S1]. It was evaluated on the DTU dataset (88 training scenes, 16 testing scenes) and tested on NeRF synthetic and LLFF datasets [S1]. The approach integrates a denoising diffusion model as a regularization term to address challenges in radiation field reconstruction tasks, leveraging the concept of score matching [S1].
+
+## Sources
+[S1] Rugularizing generalizable neural radiance field with limited-view images, https://link.springer.com/article/10.1007/s40747-024-01696-6, fetched 2026-10-29

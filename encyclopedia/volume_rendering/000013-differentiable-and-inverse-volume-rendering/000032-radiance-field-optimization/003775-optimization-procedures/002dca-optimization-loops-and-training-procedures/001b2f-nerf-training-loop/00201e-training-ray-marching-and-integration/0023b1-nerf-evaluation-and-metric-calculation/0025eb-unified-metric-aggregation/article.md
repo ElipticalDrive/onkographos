@@ -3,162 +3,156 @@
 Also called: Evaluation & Metric Computation, Evaluation Reporting, Global and Per-view Metric Aggregation
 
 ## Overview
-Unified Metric Aggregation processes the raw outputs of [NeRF Evaluation and Metric Calculation](3079-nerf-evaluation-and-metric-calculation.md) to produce standardized, reportable performance statistics. It aggregates per-view metrics (PSNR, SSIM, LPIPS) into global averages and per-view dictionaries, enabling consistent evaluation reporting across different training iterations or model variants [S1, S2, unofficial]. Unlike [Metric Computation (PSNR, SSIM, LPIPS)](9928-metric-computation-psnr-ssim-lpips.md), which calculates raw per-pixel or per-tensor values for individual image pairs, this method focuses on the statistical aggregation and serialization of those scores [S1, S2, unofficial]. It serves as the final step in the evaluation pipeline, converting computational results into human-readable or machine-parseable formats [S1, S2, unofficial].
+Unified Metric Aggregation processes rendered images against ground truth references to compute, aggregate, and persist evaluation metrics for radiance field models [S1, S2, unofficial]. It solves the problem of standardizing performance reporting by converting raw per-pixel errors into standardized perceptual and structural scores (PSNR, SSIM, LPIPS) and organizing them into global averages and per-view dictionaries [S1, unofficial]. Unlike [Metric Computation (PSNR, SSIM, LPIPS)](9928-metric-computation-psnr-ssim-lpips.md), which calculates raw per-pixel or per-tensor values for individual image pairs, this method aggregates those scores into summary statistics and structured output files [S1, S2, unofficial]. It builds on [NeRF Evaluation and Metric Calculation](3079-nerf-evaluation-and-metric-calculation.md) by handling the iteration, normalization, and final aggregation logic [S1, S2, unofficial].
 
 ## How it works
-The method takes as input a collection of rendered images and their corresponding ground truth (GT) images, along with configuration flags for metric selection and output formatting. It outputs global average metrics and a structured record of per-view scores.
+**Inputs:**
+- A dataset of test rays or image paths containing ground truth (GT) RGB images [S1, S2, unofficial].
+- A renderer capable of producing predicted RGB images for given camera poses [S2, unofficial].
+- Optional parameters: `compute_extra_metrics` (boolean, default True), `N_vis` (integer, controls sampling interval) [S2, unofficial].
 
-### Data Structures
-*   **Per-View Metrics Dictionary**: A mapping from image identifier (e.g., filename or index) to a dictionary of metric values.
-    *   Structure: `Dict[str, Dict[str, float]]`
-    *   Keys: Image name.
-    *   Values: `{"PSNR": float, "SSIM": float, "LPIPS": float}`.
-*   **Global Metrics Dictionary**: A mapping from metric name to its arithmetic mean across all views.
-    *   Structure: `Dict[str, float]`
-    *   Keys: `"PSNR"`, `"SSIM"`, `"LPIPS"`.
-    *   Values: Mean score.
-*   **Output JSON Structure**:
-    *   Global: `{ "ours_{iteration}": { "PSNR": float, "SSIM": float, "LPIPS": float } }` [S1, unofficial].
-    *   Per-View: `{ "ours_{iteration}": { "image_name": { "PSNR": float, "SSIM": float, "LPIPS": float } } }` [S1, unofficial].
+**Outputs:**
+- Global metrics dictionary: `{"ours_{iteration}": {"PSNR": float, "SSIM": float, "LPIPS": float}}` [S1, unofficial].
+- Per-view metrics dictionary: `{"ours_{iteration}": {"image_name": {"PSNR": float, "SSIM": float, "LPIPS": float}}}` [S1, unofficial].
+- Saved rendered images, depth visualizations, and videos [S2, unofficial].
 
-### Steps
-1.  **Initialize Storage**: Create empty lists for global metric accumulation (`psnr_list`, `ssim_list`, `lpips_list`) and a dictionary for per-view results (`per_view_metrics`) [S1, unofficial].
-2.  **Determine Evaluation Scope**:
-    *   If evaluating a subset, calculate the evaluation interval: `img_eval_interval = max(total_test_rays // N_vis, 1)` where `N_vis` is the number of visible images to evaluate [S2, unofficial].
-    *   Iterate through the test dataset rays or image paths using this interval [S2, unofficial].
-3.  **Load and Preprocess Images**:
-    *   Load the rendered RGB image and the ground truth RGB image [S1, unofficial].
-    *   Normalize pixel values to the range $[0, 1]$ [S1, unofficial].
-    *   Convert images to CHW (Channel, Height, Width) tensor format [S1, unofficial].
-    *   Validate that the rendered and ground truth images have identical shapes [S1, unofficial].
-4.  **Compute Metrics**:
-    *   **PSNR**: Calculate Mean Squared Error (MSE) between rendered ($R$) and ground truth ($G$) images:
-        $$ \text{MSE} = \frac{1}{N} \sum_{i=1}^{N} (R_i - G_i)^2 $$
-        Then compute PSNR:
-        $$ \text{PSNR} = -10 \cdot \frac{\log(\text{MSE})}{\log(10)} $$
-        [S2, unofficial].
-    *   **SSIM**: Compute Structural Similarity Index if enabled [S2, unofficial].
-    *   **LPIPS**: Compute Learned Perceptual Image Patch Similarity using a deep feature extractor (e.g., AlexNet or VGG) if enabled [S1, S2, unofficial].
-5.  **Validate Results**: Ensure all computed metric values are finite (not NaN or Inf) [S1, unofficial].
-6.  **Store Per-View Results**: Append the computed metrics to the respective lists and store the individual scores in the `per_view_metrics` dictionary keyed by the image name [S1, unofficial].
-7.  **Aggregate Global Metrics**: After iterating through all views, compute the arithmetic mean for each metric list:
-    $$ \text{Global Metric} = \frac{1}{M} \sum_{j=1}^{M} \text{Metric}_j $$
-    where $M$ is the number of evaluated views [S1, unofficial].
-8.  **Serialize Output**:
-    *   Construct the global metrics dictionary [S1, unofficial].
-    *   Construct the per-view metrics dictionary [S1, unofficial].
-    *   Write both structures to JSON files [S1, unofficial].
-    *   Optionally save rendered images, depth maps, and videos to disk [S2, unofficial].
+**Data Structures:**
+- `per_view_metrics`: List of dictionaries, one per view, containing `{"PSNR": float, "SSIM": float, "LPIPS": float}` [S1, unofficial].
+- `global_metrics`: Dictionary with keys `PSNR`, `SSIM`, `LPIPS` storing arithmetic means [S1, unofficial].
 
-### Pseudocode
+**Steps:**
+1. **Initialize**: Create an empty list `per_view_metrics` to store per-view results [S1, unofficial].
+2. **Determine Sampling Interval**: If `N_vis` is negative, evaluate all views (`img_eval_interval = 1`). Otherwise, calculate `img_eval_interval = max(total_test_rays // N_vis, 1)` [S2, unofficial].
+3. **Iterate Views**: Loop through the test dataset rays or image paths using the determined interval [S2, unofficial].
+4. **Render**: For each view, render the predicted RGB image. Clamp the output to the range $[0, 1]$ [S2, unofficial].
+5. **Load Ground Truth**: Load the corresponding GT RGB image. Normalize to $[0, 1]$ and convert to a CHW (Channel, Height, Width) tensor format [S1, unofficial].
+6. **Validate Shapes**: Ensure the predicted and GT images have identical dimensions. If not, skip or handle the mismatch [S1, unofficial].
+7. **Compute MSE**: Calculate the Mean Squared Error between the predicted RGB map ($\hat{I}$) and GT ($I$):
+   $$ \text{MSE} = \frac{1}{H \times W \times C} \sum_{i,j,k} (\hat{I}_{i,j,k} - I_{i,j,k})^2 $$
+   where $H, W$ are height and width, and $C$ is channels [S2, unofficial].
+8. **Compute PSNR**: Calculate Peak Signal-to-Noise Ratio:
+   $$ \text{PSNR} = -10 \cdot \frac{\log_{10}(\text{MSE})}{1} = -10 \cdot \log_{10}(\text{MSE}) $$
+   [S2, unofficial].
+9. **Compute Extra Metrics**: If `compute_extra_metrics` is true, calculate SSIM and LPIPS using standard libraries (e.g., AlexNet or VGG for LPIPS) [S2, unofficial].
+10. **Validate Finiteness**: Check that all computed metrics are finite numbers. Discard or flag non-finite values [S1, unofficial].
+11. **Store Per-View**: Append the per-view metrics dictionary to `per_view_metrics` [S1, unofficial].
+12. **Aggregate Global**: After the loop, compute the arithmetic mean of the PSNR, SSIM, and LPIPS values across all views in `per_view_metrics` [S1, unofficial].
+13. **Persist**: Write the global metrics and per-view JSON structures to disk [S1, unofficial]. Save rendered images, depth maps, and optionally videos [S2, unofficial].
+
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def unified_metric_aggregation(rendered_images, ground_truth_images, image_names, compute_extra_metrics=True):
-    """
-    Aggregates per-view metrics into global averages and per-view dictionaries.
+def unified_metric_aggregation(test_dataset, renderer, compute_extra_metrics=True, N_vis=-1):
+    # Step 2: Determine sampling interval
+    total_rays = test_dataset.all_rays.shape[0]
+    if N_vis < 0:
+        img_eval_interval = 1
+    else:
+        img_eval_interval = max(total_rays // N_vis, 1)
     
-    Args:
-        rendered_images: List of tensors (CHW), shape (C, H, W), values in [0, 1].
-        ground_truth_images: List of tensors (CHW), shape (C, H, W), values in [0, 1].
-        image_names: List of strings, identifiers for each image.
-        compute_extra_metrics: Boolean, whether to compute SSIM and LPIPS.
-        
-    Returns:
-        global_metrics: Dict[str, float]
-        per_view_metrics: Dict[str, Dict[str, float]]
-    """
-    psnr_list = []
-    ssim_list = []
-    lpips_list = []
-    per_view_metrics = {}
+    per_view_metrics = []
     
-    # Helper functions for metric computation (assumed defined elsewhere)
-    # def compute_psnr(rendered, gt): ...
-    # def compute_ssim(rendered, gt): ...
-    # def compute_lpips(rendered, gt): ...
-    
-    for rendered, gt, name in zip(rendered_images, ground_truth_images, image_names):
-        # 1. Normalize and validate
-        # Ensure tensors are in [0, 1] and have matching shapes
-        assert rendered.shape == gt.shape, f"Shape mismatch for {name}"
+    # Step 3: Iterate over test rays/images
+    for i in range(0, total_rays, img_eval_interval):
+        rays = test_dataset.all_rays[i]
         
-        # 2. Compute PSNR
-        mse = torch.mean((rendered - gt) ** 2)
-        psnr = -10.0 * torch.log(mse) / torch.log(torch.tensor(10.0))
-        psnr_val = psnr.item()
+        # Step 4: Render
+        rgb_map = renderer.render(rays)
+        rgb_map = torch.clamp(rgb_map, 0.0, 1.0)
         
-        # 3. Compute SSIM and LPIPS if enabled
-        ssim_val = None
-        lpips_val = None
+        # Step 5: Load GT
+        gt_rgb = load_gt_image(rays.camera_id)
+        gt_rgb = normalize_to_01(gt_rgb)
+        gt_tensor = rgb_to_chw_tensor(gt_rgb)
+        pred_tensor = rgb_to_chw_tensor(rgb_map)
         
-        if compute_extra_metrics:
-            ssim_val = compute_ssim(rendered, gt).item()
-            lpips_val = compute_lpips(rendered, gt).item()
+        # Step 6: Validate shapes
+        if pred_tensor.shape != gt_tensor.shape:
+            continue
             
-        # 4. Validate finiteness
-        if not np.isfinite(psnr_val):
-            raise ValueError(f"Non-finite PSNR for {name}")
-        if compute_extra_metrics:
-            if not np.isfinite(ssim_val) or not np.isfinite(lpips_val):
-                raise ValueError(f"Non-finite SSIM/LPIPS for {name}")
-                
-        # 5. Store per-view results
-        view_metrics = {
-            "PSNR": psnr_val,
-            "SSIM": ssim_val if ssim_val is not None else 0.0,
-            "LPIPS": lpips_val if lpips_val is not None else 0.0
-        }
-        per_view_metrics[name] = view_metrics
+        # Step 7: Compute MSE
+        mse = torch.mean((pred_tensor - gt_tensor) ** 2)
         
-        psnr_list.append(psnr_val)
-        if ssim_val is not None:
-            ssim_list.append(ssim_val)
-        if lpips_val is not None:
-            lpips_list.append(lpips_val)
+        # Step 8: Compute PSNR
+        psnr = -10.0 * torch.log10(mse)
+        
+        # Step 9: Compute Extra Metrics
+        ssim = 0.0
+        lpips = 0.0
+        if compute_extra_metrics:
+            ssim = compute_ssim(pred_tensor, gt_tensor)
+            lpips = compute_lpips(pred_tensor, gt_tensor)
             
-    # 6. Compute global averages
+        # Step 10: Validate finiteness
+        if not (torch.isfinite(psnr) and torch.isfinite(ssim) and torch.isfinite(lpips)):
+            continue
+            
+        # Step 11: Store per-view
+        view_name = get_view_name(rays.camera_id)
+        per_view_metrics.append({
+            "PSNR": psnr.item(),
+            "SSIM": ssim.item(),
+            "LPIPS": lpips.item(),
+            "image_name": view_name
+        })
+        
+        # Save images/videos if needed
+        save_image(rgb_map, f"{view_name}_rgb.png")
+        
+    # Step 12: Aggregate Global
+    if not per_view_metrics:
+        return {}, {}
+        
+    global_psnr = sum(m["PSNR"] for m in per_view_metrics) / len(per_view_metrics)
+    global_ssim = sum(m["SSIM"] for m in per_view_metrics) / len(per_view_metrics)
+    global_lpips = sum(m["LPIPS"] for m in per_view_metrics) / len(per_view_metrics)
+    
     global_metrics = {
-        "PSNR": sum(psnr_list) / len(psnr_list) if psnr_list else 0.0
+        "PSNR": global_psnr,
+        "SSIM": global_ssim,
+        "LPIPS": global_lpips
     }
     
-    if ssim_list:
-        global_metrics["SSIM"] = sum(ssim_list) / len(ssim_list)
-    if lpips_list:
-        global_metrics["LPIPS"] = sum(lpips_list) / len(lpips_list)
-        
-    return global_metrics, per_view_metrics
+    # Step 13: Persist
+    per_view_dict = {m["image_name"]: {k: v for k, v in m.items() if k != "image_name"} for m in per_view_metrics}
+    write_json("global_metrics.json", {"ours_iteration": global_metrics})
+    write_json("per_view_metrics.json", {"ours_iteration": per_view_dict})
+    
+    return global_metrics, per_view_dict
 ```
 
-### Parameters
-*   `compute_extra_metrics`: Boolean flag to enable SSIM and LPIPS computation. Default: `True` [S2, unofficial].
-*   `N_vis`: Number of images to evaluate from the test set. If negative, evaluate all [S2, unofficial].
-*   `img_eval_interval`: Step size for iterating through test rays/images. Calculated as `max(total_rays // N_vis, 1)` [S2, unofficial].
+**Parameters:**
+- `N_vis`: Integer. If negative, evaluate all views. Otherwise, subsample to approximately `N_vis` views [S2, unofficial].
+- `compute_extra_metrics`: Boolean. If True, compute SSIM and LPIPS in addition to PSNR [S2, unofficial].
 
-### Edge Cases and Pitfalls
-*   **Shape Mismatch**: Rendered and ground truth images must have identical dimensions. Mismatches should be caught and reported [S1, unofficial].
-*   **Non-Finite Values**: PSNR can become NaN if MSE is zero (perfect match) or if images are empty. Validation steps must handle this [S1, unofficial].
-*   **Memory Constraints**: Loading all images into memory simultaneously may be prohibitive for large datasets. Chunked processing or streaming is recommended [S2, unofficial].
-*   **Normalization**: Images must be normalized to $[0, 1]$ before metric computation to ensure consistent scaling [S1, unofficial].
+**Edge Cases and Pitfalls:**
+- **Shape Mismatch**: If rendered and GT images differ in resolution, the metric computation fails. Validation is required [S1, unofficial].
+- **Non-finite Values**: NaN or Inf in metrics (e.g., from MSE=0 in PSNR log) must be handled or excluded [S1, unofficial].
+- **Memory**: Loading all images into memory simultaneously may cause OOM errors; chunked processing is recommended [S2, unofficial].
 
 ## Subtopics
 
 ### [LPIPS Evaluation Protocol](4376-lpips-evaluation-protocol.md)
-Assesses perceptual quality using deep feature representations. Preferred over pixel-space metrics for robustness against structural differences.
+The LPIPS Evaluation Protocol computes the Learned Perceptual Image Patch Similarity distance between reference and rendered images to assess perceptual quality. It is used in radiance field evaluation protocols, including those for 3D Gaussian Splatting variants.
 
 ### [Metric Computation (PSNR, SSIM, LPIPS)](9928-metric-computation-psnr-ssim-lpips.md)
-Calculates raw per-pixel or per-tensor values for individual image pairs. Does not perform aggregation.
+Computes evaluation metrics (PSNR, SSIM, LPIPS) between the ground truth and predicted images. These metrics compare synthesized views at testing viewpoints with the ground truth. Unlike [Unified Metric Aggregation](3644-unified-metric-aggregation.md) which averages scores, this method calculates the raw per-pixel or per-tensor values for each image pair.
+
+### Evaluation Reporting
+Evaluates the approach by comparing it to previous methods in specific domains such as anatomy visualization and thermal scene representation [S3]. Reports PSNR, SSIM, and LPIPS alongside model size (in MB) and rendering speed on various platforms (standalone PC, PC-VR, mobile VR) [S3].
 
 ## Operating characteristics
-*   **Time Complexity**: $O(N \cdot M)$, where $N$ is the number of test images and $M$ is the number of pixels per image. PSNR is $O(M)$, SSIM is $O(M \cdot K^2)$ (where $K$ is window size), and LPIPS is $O(M \cdot C)$ (where $C$ is feature channels).
-*   **Memory Complexity**: $O(N \cdot M)$ if all images are loaded simultaneously. Can be reduced to $O(M)$ by processing images one by one [S2, unofficial].
-*   **Strengths**: Provides standardized, comparable metrics across different models and datasets. JSON output facilitates automated logging and comparison [S1, unofficial].
-*   **Limitations**: Computationally expensive for large datasets, especially with LPIPS. Does not provide spatial localization of errors [S1, unofficial].
-*   **When to Use**: Final evaluation of trained models. Not suitable for real-time feedback during training due to computational cost [S2, unofficial].
+- **Time Complexity**: Linear with respect to the number of test views $N$. Each view requires rendering, metric computation (PSNR is $O(HW)$, SSIM/LPIPS depend on network depth and patch size), and I/O [S1, S2, unofficial].
+- **Memory Complexity**: $O(HW)$ per view for image tensors. Global aggregation is $O(1)$ if streaming means are used, or $O(N)$ if storing all per-view scores [S1, unofficial].
+- **Performance**: Depends heavily on the cost of LPIPS computation, which involves forward passes through VGG/AlexNet networks [S2, unofficial].
+- **Strengths**: Standardized reporting, supports multiple metrics, handles subsampling for large datasets [S1, S2, unofficial].
+- **Limitations**: Does not compute raw per-pixel errors for downstream analysis (see [Metric Computation](9928-metric-computation-psnr-ssim-lpips.md)) [S1, unofficial].
 
 ## Background
-Unified Metric Aggregation is a standard procedure in differentiable volume rendering and NeRF evaluation pipelines. It emerged as a necessary component for reporting results in papers such as TensoRF [S2, unofficial] and Advanced3DGS [S1, unofficial]. The method formalizes the process of converting raw rendering outputs into statistically significant performance indicators, enabling reproducible research and model comparison [S1, S2, unofficial].
+Unified Metric Aggregation is a standard post-processing step in radiance field evaluation pipelines [S1, S2, unofficial]. It originated from the need to compare novel 3D reconstruction methods (like NeRF and 3DGS) against ground truth using established computer vision metrics [S1, S2, unofficial]. It is widely used in academic benchmarks and open-source implementations such as Advanced3DGS and TensoRF [S1, S2, unofficial].
 
 ## Sources
 [S1] 3DAgentWorld/Advanced3DGS, https://github.com/3DAgentWorld/Advanced3DGS, fetched 2026-10-27 (unofficial)
 [S2] GitHub - apchenstu/TensoRF: [ECCV 2022] Tensorial Radiance Fields, a ..., https://github.com/apchenstu/TensoRF, fetched 2026-10-29 (unofficial)
+[S3] Shape-Shifting Splats: Realtime Context Translation for Gaussian Splatting in VR, https://doi.org/10.1109/vr67842.2026.00046, fetched 2026-11-01

@@ -8,100 +8,54 @@ This method renders a 3D volume defined by a density texture by accumulating sca
 ## How it works
 **Inputs and Outputs**
 *   **Inputs:**
-    *   Camera parameters: origin `ro`, direction `rd` (derived from camera forward/right/up vectors and fragment UV coordinates).
-    *   Volume texture `u_volume`: 3D texture storing density in the red channel.
-    *   Velocity texture `u_velocity` (optional): 3D texture storing velocity vectors.
-    *   Parameters: `u_phaseG` (anisotropy $g$), `u_densityCoef` (density multiplier), `u_lightDir` (light direction), `u_lightColor` (light color), `u_showVelocity` (boolean flag).
-    *   Constants: `STEP_SIZE`, `MAX_STEPS`, `SHADOW_STEP_SIZE`, `SHADOW_FACTOR`.
+    *   Camera parameters: ray origin `ro` and direction `rd` (derived from camera forward/right/up vectors and fragment UV coordinates) [S1, unofficial].
+    *   Volume texture `u_volume`: 3D texture storing density in the red channel [S1, unofficial].
+    *   Velocity texture `u_velocity` (optional): 3D texture storing velocity vectors [S1, unofficial].
+    *   Parameters: `u_phaseG` (anisotropy $g$), `u_densityCoef` (density multiplier), `u_lightDir` (light direction), `u_lightColor` (light color), `u_showVelocity` (boolean flag) [S1, unofficial].
+    *   Constants: `STEP_SIZE`, `MAX_STEPS`, `SHADOW_STEP_SIZE`, `SHADOW_FACTOR` [S1, unofficial].
 *   **Outputs:**
-    *   Final fragment color `col`.
+    *   Final fragment color `col` [S1, unofficial].
 
 **Data Structures**
-*   **Volume Texture:** 3D array of floats. Density is stored in the red channel (`texture(...).r`). If velocity visualization is enabled, the texture stores 3D velocity vectors.
+*   **Volume Texture:** 3D array of floats where density is stored in the red channel (`texture(...).r`) [S1, unofficial]. If velocity visualization is enabled, the texture stores 3D velocity vectors [S1, unofficial].
 *   **Ray State:**
-    *   `ro`: `vec3` (Ray origin).
-    *   `rd`: `vec3` (Ray direction, normalized).
-    *   `t`: `float` (Current distance along ray).
-    *   `transmit`: `float` (Accumulated transmission, initial 1.0).
-    *   `col`: `vec3` (Accumulated color, initial 0.0).
+    *   `ro`: `vec3` (Ray origin) [S1, unofficial].
+    *   `rd`: `vec3` (Ray direction, normalized) [S1, unofficial].
+    *   `t`: `float` (Current distance along ray) [S1, unofficial].
+    *   `transmit`: `float` (Accumulated transmission, initial 1.0) [S1, unofficial].
+    *   `col`: `vec3` (Accumulated color, initial 0.0) [S1, unofficial].
 
 **Numbered Steps**
 
-1.  **Ray Initialization:**
-    *   Calculate ray origin `ro` from camera position.
-    *   Calculate ray direction `rd` from camera forward, right, and up vectors combined with fragment UV coordinates.
-    *   Perform ray-box intersection with the volume bounding box defined by `boxMin = (-0.5, -0.5, -0.5)` and `boxMax = (0.5, 0.5, 0.5)` to find entry distance `t0` and exit distance `t1`.
-
-2.  **No Intersection Check:**
-    *   If `t0 > t1` or `t1 < 0`, the ray misses the volume. Output a gradient background color based on the fragment's Y coordinate and terminate.
-
-3.  **Marcher Initialization:**
-    *   Set initial march distance `t = max(t0, 0.0)`.
-    *   Set maximum march distance `tMax = t1`.
-    *   Initialize accumulated color `col = 0.0` and transmission `transmit = 1.0`.
-    *   Add a random noise offset to `t` to reduce banding artifacts:
-        $$ t = t + \text{fract}(\sin(\text{dot}(\text{gl\_FragCoord.xy}, \text{vec2}(12.9898, 78.233))) \times 43758.5453) \times \text{STEP\_SIZE} $$
-        [S1, unofficial]
-
-4.  **Precompute Phase Value:**
-    *   Calculate the dot product between the view direction `rd` and the light direction `u_lightDir`. Let this be $\cos\theta$.
-    *   Compute the Henyey-Greenstein phase value $P(g, \cos\theta)$ using the anisotropy parameter `u_phaseG` ($g$) and $\cos\theta$ (see Formula section).
-
-5.  **Ray Marching Loop:**
-    *   Iterate `i` from 0 to `MAX_STEPS`.
-    *   If `t > tMax`, break the loop.
-
-6.  **Position and Coordinate Calculation:**
-    *   Calculate world position: $p = ro + rd \times t$.
-    *   Calculate normalized texture coordinates: $\text{texCoord} = p + 0.5$.
-
-7.  **Sampling:**
-    *   If `texCoord` is within $[0, 1]$ for all axes:
-        *   **If `u_showVelocity` is 1:**
-            *   Sample velocity texture.
-            *   Compute magnitude `mag` of the velocity vector.
-            *   Set `density = mag * 0.1 * u_densityCoef`.
-            *   Set `sampleCol = normalize(velocity) * 0.5 + 0.5` (visualize velocity direction as color).
-        *   **Else (Standard Density):**
-            *   Sample volume texture: `density = texture(u_volume, texCoord).r * u_densityCoef`.
-            *   Set `sampleCol = 1.0` (white base color).
-    *   If `texCoord` is out of bounds, `density = 0`.
-
-8.  **Lighting and Accumulation:**
-    *   If `density > 0.01`:
-        *   Calculate alpha for the step: $\alpha = 1.0 - \exp(-\text{density} \times \text{STEP\_SIZE})$.
-        *   **If `u_showVelocity` is 1:**
-            *   Add emissive color: `col += sampleCol * alpha * transmit`.
-        *   **Else (Lighting):**
-            *   **Shadow Ray:**
-                *   Initialize `shadowDens = 0.0`.
-                *   Step `SHADOW_STEPS` times along `u_lightDir` with step size `SHADOW_STEP_SIZE`.
-                *   In each step, check if position is within texture bounds. If so, sample density and add to `shadowDens`. If out of bounds, exit shadow ray loop early.
-            *   **Light Attenuation:**
-                *   Calculate light value: $\text{lightVal} = \exp(-\text{shadowDens} \times \text{SHADOW\_FACTOR} \times \text{u\_densityCoef} \times 0.1)$.
-            *   **Incoming Light:**
-                *   $\text{incomingLight} = \text{u\_lightColor} \times \text{lightVal} \times \text{phaseVal} + \text{ambientColor}$.
-                *   [Note: `ambientColor` is not explicitly defined in the source notes but is implied by the formula structure. It is treated as a constant or uniform input.]
-            *   **Accumulate:**
-                *   `col += incomingLight * alpha * transmit`.
-        *   **Update Transmission:**
-            *   `transmit *= (1.0 - alpha)`.
-            *   If `transmit < 0.01`, break the loop to save computation.
-        *   **Increment:**
-            *   `t += STEP_SIZE`.
-
-9.  **Background and Tone Mapping:**
-    *   Add background contribution: `col += bg * transmit`, where `bg` is the gradient background color calculated in Step 2.
-    *   Apply Reinhard tone mapping: $\text{col} = \frac{\text{col}}{\text{col} + 1.0}$.
-    *   Apply gamma correction: $\text{col} = \text{pow}(\text{col}, 0.4545)$.
+1.  **Ray Initialization:** Calculate ray origin `ro` from camera position and direction `rd` from camera forward, right, and up vectors combined with fragment UV coordinates [S1, unofficial]. Perform ray-box intersection with the volume bounding box defined by `boxMin = (-0.5, -0.5, -0.5)` and `boxMax = (0.5, 0.5, 0.5)` to find entry distance `t0` and exit distance `t1` [S1, unofficial].
+2.  **No Intersection Check:** If `t0 > t1` or `t1 < 0`, the ray misses the volume [S1, unofficial]. Output a gradient background color based on the fragment's Y coordinate and terminate [S1, unofficial].
+3.  **Marcher Initialization:** Set initial march distance `t = max(t0, 0.0)` [S1, unofficial]. Set maximum march distance `tMax = t1` [S1, unofficial]. Initialize accumulated color `col = 0.0` and transmission `transmit = 1.0` [S1, unofficial]. Add a random noise offset to `t` to reduce banding artifacts: $t = t + \text{fract}(\sin(\text{dot}(\text{gl\_FragCoord.xy}, \text{vec2}(12.9898, 78.233))) \times 43758.5453) \times \text{STEP\_SIZE}$ [S1, unofficial].
+4.  **Precompute Phase Value:** Calculate the dot product between the view direction `rd` and the light direction `u_lightDir` [S1, unofficial]. Let this be $\cos\theta$ [S1, unofficial]. Compute the Henyey-Greenstein phase value $P(g, \cos\theta)$ using the anisotropy parameter `u_phaseG` ($g$) and $\cos\theta$ (see Formula section) [S1, unofficial].
+5.  **Ray Marching Loop:** Iterate `i` from 0 to `MAX_STEPS` [S1, unofficial]. If `t > tMax`, break the loop [S1, unofficial].
+6.  **Position and Coordinate Calculation:** Calculate world position: $p = ro + rd \times t$ [S1, unofficial]. Calculate normalized texture coordinates: $\text{texCoord} = p + 0.5$ [S1, unofficial].
+7.  **Sampling:** If `texCoord` is within $[0, 1]$ for all axes:
+    *   **If `u_showVelocity` is 1:** Sample velocity texture [S1, unofficial]. Compute magnitude `mag` of the velocity vector [S1, unofficial]. Set `density = mag * 0.1 * u_densityCoef` [S1, unofficial]. Set `sampleCol = normalize(velocity) * 0.5 + 0.5` (visualize velocity direction as color) [S1, unofficial].
+    *   **Else (Standard Density):** Sample volume texture: `density = texture(u_volume, texCoord).r * u_densityCoef` [S1, unofficial]. Set `sampleCol = 1.0` (white base color) [S1, unofficial].
+    *   If `texCoord` is out of bounds, `density = 0` [S1, unofficial].
+8.  **Lighting and Accumulation:** If `density > 0.01`:
+    *   Calculate alpha for the step: $\alpha = 1.0 - \exp(-\text{density} \times \text{STEP\_SIZE})$ [S1, unofficial].
+    *   **If `u_showVelocity` is 1:** Add emissive color: `col += sampleCol * alpha * transmit` [S1, unofficial].
+    *   **Else (Lighting):**
+        *   **Shadow Ray:** Initialize `shadowDens = 0.0` [S1, unofficial]. Step `SHADOW_STEPS` times along `u_lightDir` with step size `SHADOW_STEP_SIZE` [S1, unofficial]. In each step, check if position is within texture bounds [S1, unofficial]. If so, sample density and add to `shadowDens` [S1, unofficial]. If out of bounds, exit shadow ray loop early [S1, unofficial].
+        *   **Light Attenuation:** Calculate light value: $\text{lightVal} = \exp(-\text{shadowDens} \times \text{SHADOW\_FACTOR} \times \text{u\_densityCoef} \times 0.1)$ [S1, unofficial].
+        *   **Incoming Light:** $\text{incomingLight} = \text{u\_lightColor} \times \text{lightVal} \times \text{phaseVal} + \text{ambientColor}$ [S1, unofficial].
+        *   **Accumulate:** `col += incomingLight * alpha * transmit` [S1, unofficial].
+    *   **Update Transmission:** `transmit *= (1.0 - alpha)` [S1, unofficial]. If `transmit < 0.01`, break the loop to save computation [S1, unofficial].
+    *   **Increment:** `t += STEP_SIZE` [S1, unofficial].
+9.  **Background and Tone Mapping:** Add background contribution: `col += bg * transmit`, where `bg` is the gradient background color calculated in Step 2 [S1, unofficial]. Apply Reinhard tone mapping: $\text{col} = \frac{\text{col}}{\text{col} + 1.0}$ [S1, unofficial]. Apply gamma correction: $\text{col} = \text{pow}(\text{col}, 0.4545)$ [S1, unofficial].
 
 **Formulas**
 
 *   **Henyey-Greenstein Phase Function:**
     $$ P(g, \cos\theta) = \frac{1 - g^2}{4\pi (1 + g^2 - 2g\cos\theta)^{1.5}} $$
     Where:
-    *   $g$ is the anisotropy parameter (`u_phaseG`).
-    *   $\cos\theta$ is the dot product of the view direction and light direction.
+    *   $g$ is the anisotropy parameter (`u_phaseG`) [S1, unofficial].
+    *   $\cos\theta$ is the dot product of the view direction and light direction [S1, unofficial].
     [S1, unofficial]
 
 *   **Alpha Calculation:**
@@ -121,136 +75,137 @@ This method renders a 3D volume defined by a density texture by accumulating sca
 *   `STEP_SIZE`: Step size for main ray marching. Value not given in the sources.
 *   `MAX_STEPS`: Maximum number of march steps. Value not given in the sources.
 *   `SHADOW_STEPS`: Number of steps for shadow ray. Value not given in the sources.
-*   `ambientColor`: Ambient light color. Value not given in the sources.
+*   `ambientColor`: Ambient light color. Value not given in the sources. [G]
 
 **Pitfalls and Edge Cases**
 
-*   **Shadow Ray Bounds:** Shadow ray marching must exit early if the shadow ray position goes outside the [0,1] texture coordinate space to prevent sampling invalid memory or incorrect densities. [S1, unofficial]
-*   **Early Termination:** The main ray marching loop terminates early if transmission drops below 0.01. This is a performance optimization but may cause slight inaccuracies in deep, highly opaque volumes. [S1, unofficial]
-*   **Banding:** Random noise offset is added to the initial `t` to reduce banding artifacts caused by uniform step sizes. [S1, unofficial]
+*   **Shadow Ray Bounds:** Shadow ray marching must exit early if the shadow ray position goes outside the [0,1] texture coordinate space to prevent sampling invalid memory or incorrect densities [S1, unofficial].
+*   **Early Termination:** The main ray marching loop terminates early if transmission drops below 0.01 [S1, unofficial].
+*   **Banding:** Random noise offset is added to the initial `t` to reduce banding artifacts caused by uniform step sizes [S1, unofficial].
+*   **Zero Direction Components:** Ray-box intersection must handle zero components in `rd` to avoid division by zero [G].
 
 **Pseudocode**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def ray_march_henyey_greenstein(ro, rd, u_volume, u_velocity, u_phaseG, u_densityCoef, u_lightDir, u_lightColor, u_showVelocity, bg):
-    # Constants
-    STEP_SIZE = 0.01  # Not given in sources, assumed typical value for implementation
-    MAX_STEPS = 100   # Not given in sources, assumed typical value
+import math
+
+def ray_march_henyey_greenstein(ro, rd, u_volume, u_velocity, u_phaseG, u_densityCoef, u_lightDir, u_lightColor, u_showVelocity, bg, frag_coord):
+    # Constants (values not given in the sources)
+    # STEP_SIZE = 0.01
+    # MAX_STEPS = 100
+    # SHADOW_STEPS = 10
     SHADOW_STEP_SIZE = 0.02
     SHADOW_FACTOR = 5.0
-    SHADOW_STEPS = 10 # Not given in sources, assumed typical value
-    AMBIENT_COLOR = vec3(0.1, 0.1, 0.1) # [G] Assumed default ambient color
+    AMBIENT_COLOR = [0.1, 0.1, 0.1]  # [G] Assumed default ambient color
 
-    # 1. Ray-Box Intersection
-    boxMin = vec3(-0.5)
-    boxMax = vec3(0.5)
-    t0, t1 = intersect_box(ro, rd, boxMin, boxMax)
+    # 1. Ray-Box Intersection (slab method)
+    boxMin = [-0.5, -0.5, -0.5]
+    boxMax = [0.5, 0.5, 0.5]
+    # Handle zero direction components to avoid division by zero [G]
+    invRd = [1.0 / (rd[i] if abs(rd[i]) > 1e-8 else 1e-8) for i in range(3)]
+    t0 = [(boxMin[i] - ro[i]) * invRd[i] for i in range(3)]
+    t1 = [(boxMax[i] - ro[i]) * invRd[i] for i in range(3)]
+    t_near = max(min(t0[0], t1[0]), min(t0[1], t1[1]), min(t0[2], t1[2]))
+    t_far = min(max(t0[0], t1[0]), max(t0[1], t1[1]), max(t0[2], t1[2]))
 
     # 2. No Intersection
-    if t0 > t1 or t1 < 0:
-        return gradient_background(rd.y)
+    if t_near > t_far or t_far < 0.0:
+        # Gradient background based on fragment Y coordinate [S1, unofficial]
+        bg_y = frag_coord[1] % 1.0
+        return [0.5 + 0.5 * bg_y, 0.5 + 0.5 * bg_y, 0.5 + 0.5 * bg_y]
 
     # 3. Initialization
-    t = max(t0, 0.0)
-    tMax = t1
-    col = vec3(0.0)
+    t = max(t_near, 0.0)
+    tMax = t_far
+    col = [0.0, 0.0, 0.0]
     transmit = 1.0
 
-    # Random offset for banding reduction
-    noise = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453)
-    t += noise * STEP_SIZE
+    # Random offset for banding reduction [S1, unofficial]
+    noise_val = math.sin(frag_coord[0] * 12.9898 + frag_coord[1] * 78.233) * 43758.5453
+    noise = noise_val - math.floor(noise_val)  # GLSL fract equivalent
+    t += noise * 0.01  # STEP_SIZE placeholder
 
     # 4. Precompute Phase Value
-    cos_theta = dot(normalize(rd), normalize(u_lightDir))
+    rd_len = math.sqrt(rd[0]**2 + rd[1]**2 + rd[2]**2)
+    light_len = math.sqrt(u_lightDir[0]**2 + u_lightDir[1]**2 + u_lightDir[2]**2)
+    cos_theta = (rd[0]*u_lightDir[0] + rd[1]*u_lightDir[1] + rd[2]*u_lightDir[2]) / (rd_len * light_len)
     g = u_phaseG
-    phaseVal = (1.0 - g*g) / (4.0 * PI * pow(1.0 + g*g - 2.0*g*cos_theta, 1.5))
+    phaseVal = (1.0 - g*g) / (4.0 * math.pi * (1.0 + g*g - 2.0*g*cos_theta)**1.5)
 
     # 5. Marching Loop
-    for i in range(MAX_STEPS):
+    for i in range(100):  # MAX_STEPS placeholder
         if t > tMax:
             break
 
         # 6. Position
-        p = ro + rd * t
-        texCoord = p + vec3(0.5)
+        p = [ro[j] + rd[j]*t for j in range(3)]
+        texCoord = [p[j] + 0.5 for j in range(3)]
 
         density = 0.0
-        sampleCol = vec3(0.0)
+        sampleCol = [0.0, 0.0, 0.0]
 
         # 7. Sampling
-        if is_inside(texCoord, 0.0, 1.0):
+        if 0.0 <= texCoord[0] <= 1.0 and 0.0 <= texCoord[1] <= 1.0 and 0.0 <= texCoord[2] <= 1.0:
             if u_showVelocity:
-                vel = sample_texture(u_velocity, texCoord)
-                mag = length(vel)
+                vel = u_velocity[int(texCoord[0]*99)][int(texCoord[1]*99)][int(texCoord[2]*99)]
+                mag = math.sqrt(vel[0]**2 + vel[1]**2 + vel[2]**2)
                 density = mag * 0.1 * u_densityCoef
-                sampleCol = normalize(vel) * 0.5 + 0.5
+                invMag = 1.0/mag if mag > 0 else 0.0
+                sampleCol = [vel[j]*invMag*0.5 + 0.5 for j in range(3)]
             else:
-                density = sample_texture(u_volume, texCoord).r * u_densityCoef
-                sampleCol = vec3(1.0)
+                density = u_volume[int(texCoord[0]*99)][int(texCoord[1]*99)][int(texCoord[2]*99)][0] * u_densityCoef
+                sampleCol = [1.0, 1.0, 1.0]
 
         # 8. Lighting and Accumulation
         if density > 0.01:
-            alpha = 1.0 - exp(-density * STEP_SIZE)
+            alpha = 1.0 - math.exp(-density * 0.01)  # STEP_SIZE placeholder
 
             if u_showVelocity:
-                col += sampleCol * alpha * transmit
+                col = [col[j] + sampleCol[j]*alpha*transmit for j in range(3)]
             else:
                 # Shadow Ray
                 shadowDens = 0.0
-                shadowPos = p + u_lightDir * STEP_SIZE # Start shadow ray from current position
-                for s in range(SHADOW_STEPS):
-                    shadowTex = shadowPos + vec3(0.5)
-                    if is_inside(shadowTex, 0.0, 1.0):
-                        shadowDens += sample_texture(u_volume, shadowTex).r
+                normLight = [u_lightDir[j]/light_len for j in range(3)]
+                shadowPos = [p[j] + normLight[j]*SHADOW_STEP_SIZE for j in range(3)]
+                for s in range(10):  # SHADOW_STEPS placeholder
+                    shadowTex = [shadowPos[j] + 0.5 for j in range(3)]
+                    if 0.0 <= shadowTex[0] <= 1.0 and 0.0 <= shadowTex[1] <= 1.0 and 0.0 <= shadowTex[2] <= 1.0:
+                        shadowDens += u_volume[int(shadowTex[0]*99)][int(shadowTex[1]*99)][int(shadowTex[2]*99)][0]
                     else:
-                        break # Exit early if out of bounds
-                    shadowPos += u_lightDir * SHADOW_STEP_SIZE
+                        break  # Exit early if out of bounds [S1, unofficial]
+                    shadowPos = [shadowPos[j] + normLight[j]*SHADOW_STEP_SIZE for j in range(3)]
 
-                lightVal = exp(-shadowDens * SHADOW_FACTOR * u_densityCoef * 0.1)
-                incomingLight = u_lightColor * lightVal * phaseVal + AMBIENT_COLOR
-                col += incomingLight * alpha * transmit
+                lightVal = math.exp(-shadowDens * SHADOW_FACTOR * u_densityCoef * 0.1)
+                incomingLight = [u_lightColor[j]*lightVal*phaseVal + AMBIENT_COLOR[j] for j in range(3)]
+                col = [col[j] + incomingLight[j]*alpha*transmit for j in range(3)]
 
             transmit *= (1.0 - alpha)
             if transmit < 0.01:
-                break
+                break  # Early termination to save computation [S1, unofficial]
 
-        t += STEP_SIZE
+        t += 0.01  # STEP_SIZE placeholder
 
     # 9. Background and Tone Mapping
-    col += bg * transmit
-    col = col / (col + 1.0)
-    col = pow(col, 0.4545)
+    col = [col[j] + bg[j]*transmit for j in range(3)]
+    col = [c/(c+1.0) for c in col]  # Reinhard tone mapping [S1, unofficial]
+    col = [c**0.4545 for c in col]   # Gamma correction [S1, unofficial]
 
     return col
 ```
 
-## Subtopics
-
-### Front-to-Back Volume Rendering
-The foundational accumulation method used here. It processes samples from near to far, blending each sample into the accumulated color. Choose this when you need standard alpha blending without complex light transport. [2350-front-to-back-volume-rendering.md]
-
-### Tiled Ray Marching with Grid Sampling
-Optimizes memory access by grouping rays into tiles and sampling a grid. Choose this for large volumes where memory bandwidth is a bottleneck. [2586-tiled-ray-marching-with-grid-sampling.md]
-
-### Fixed Step Ray Marching
-Uses a constant step size along the ray. Choose this for simplicity and uniform sampling, but be aware of potential aliasing in sparse regions. [3136-fixed-step-ray-marching.md]
-
-### Volumetric Raymarching with SDF Density
-Uses Signed Distance Fields for density instead of textures. Choose this for procedural volumes or when memory bandwidth for large textures is an issue. [4484-volumetric-raymarching-with-sdf-density.md]
-
 ## Operating characteristics
-*   **Time Complexity:** $O(N \times M)$, where $N$ is the number of pixels (rays) and $M$ is the number of steps per ray (`MAX_STEPS`). Shadow rays add a factor of `SHADOW_STEPS` to the lighting calculation per step.
-*   **Memory Complexity:** $O(V)$, where $V$ is the size of the volume texture.
-*   **Performance:** The method is computationally intensive due to the shadow ray casting for every sample. The early termination based on transmission (`transmit < 0.01`) helps optimize performance in opaque regions.
-*   **Strengths:** Accurately models anisotropic scattering, allowing for realistic lighting effects in participating media like fog or smoke. Simple to implement on the GPU.
-*   **Limitations:** Shadow rays significantly increase computation time. Fixed step size may lead to aliasing or inaccurate density integration in sparse regions.
-*   **When to Use:** Real-time rendering of volumetric effects where anisotropic scattering is desired and performance allows for shadow ray casting.
-*   **When Not to Use:** When real-time performance is critical and anisotropic scattering is not required (use standard front-to-back rendering). When the volume is extremely sparse and fixed step size leads to poor sampling.
+*   **Time Complexity:** $O(N \times M \times S)$, where $N$ is the number of pixels (rays), $M$ is the number of steps per ray (`MAX_STEPS`), and $S$ is the number of shadow steps (`SHADOW_STEPS`) [S1, unofficial].
+*   **Memory Complexity:** $O(V)$, where $V$ is the size of the volume texture [S1, unofficial].
+*   **Performance:** The method is computationally intensive due to the shadow ray casting for every sample [S1, unofficial]. The early termination based on transmission (`transmit < 0.01`) helps optimize performance in opaque regions [S1, unofficial].
+*   **Strengths:** Accurately models anisotropic scattering, allowing for realistic lighting effects in participating media like fog or smoke [S1, unofficial]. Simple to implement on the GPU [S1, unofficial].
+*   **Limitations:** Shadow rays significantly increase computation time [S1, unofficial]. Fixed step size may lead to aliasing or inaccurate density integration in sparse regions [S1, unofficial].
+*   **When to Use:** Real-time rendering of volumetric effects where anisotropic scattering is desired and performance allows for shadow ray casting [S1, unofficial].
+*   **When Not to Use:** When real-time performance is critical and anisotropic scattering is not required (use standard front-to-back rendering) [S1, unofficial]. When the volume is extremely sparse and fixed step size leads to poor sampling [S1, unofficial].
 
 ## Background
-This method is derived from real-time volume rendering techniques used in fluid simulation visualizations. It combines standard ray marching with the Henyey-Greenstein phase function to model light scattering in participating media. The specific implementation details, including the random offset for banding reduction and the shadow ray formulation, are based on a GitHub repository for fluid simulation. [S1, unofficial]
+This method is derived from real-time volume rendering techniques used in fluid simulation visualizations [S1, unofficial]. It combines standard ray marching with the Henyey-Greenstein phase function to model light scattering in participating media [S1, unofficial]. The specific implementation details, including the random offset for banding reduction and the shadow ray formulation, are based on a GitHub repository [S1, unofficial].
 
 ## Sources
 [S1] tzhazuma/Fluid_simulation, https://github.com/tzhazuma/Fluid_simulation, fetched 2026-10-26 (unofficial)

@@ -3,73 +3,125 @@
 Also called: Reflection, reflect, Refract & Reflect Utilities, Snell's Law Implementation, Vector Reflection
 
 ## Overview
-A method to determine the direction of a ray after it interacts with a surface during distance-field ray marching [S2, unofficial]. It calculates the new propagation direction based on the incident ray and the surface normal, enabling specular reflections in volume rendering [S3, unofficial]. It differs from [Ray Marching with Refraction and Beer's Law Absorption](1947-ray-marching-with-refraction-and-beer-s-law-absorption.md) by preserving the ray within the same medium, and from [Approximate Refraction](3072-approximate-refraction.md) by providing an exact geometric reflection rather than an approximation [G].
+Reflected Ray Directions is a geometric method used in volume rendering and ray marching to determine the propagation direction of a ray after it interacts with a surface boundary. It solves the problem of simulating specular reflection by computing a new ray vector based on the incident direction and the surface normal. It differs from sibling methods like [Refracted Ray Directions](3915-refracted-ray-directions.md) by computing transmission (bending) rather than reflection (bouncing), and serves as the geometric foundation for energy-splitting techniques like [Fresnel Reflection/Refraction](9067-fresnel-reflection-refraction.md).
 
 ## How it works
 **Inputs:**
-- Incident ray direction $\vec{v}$ (normalized) [S3, unofficial].
-- Surface normal $\vec{n}$ at the intersection point (normalized) [S3, unofficial].
-- Optional distance field value $f(p)$ to determine if a hit occurred [S2, unofficial].
+- Incident ray direction vector $\vec{v}$ (normalized).
+- Surface normal vector $\vec{n}$ at the intersection point (normalized).
+- Implicit surface function $f(\vec{p})$ and its gradient (for normal calculation).
 
 **Outputs:**
-- Reflected ray direction $\vec{v}_{new}$ (normalized) [S3, unofficial].
+- Reflected ray direction vector $\vec{v}_{out}$ (normalized).
 
 **Data Structures:**
-- Vectors $\vec{v}, \vec{n}$ are 3D floating-point vectors [G].
+- Vectors are represented as 3D floating-point tuples $(x, y, z)$.
+- Normals and directions are unit vectors ($|\vec{v}| = 1$).
 
 **Steps:**
-1. **Surface Hit Detection:** Determine if the ray has hit a surface by evaluating if the distance field value $f(p_i) \approx 0$ [S2, unofficial]. If no surface is hit, the direction remains unchanged: $\vec{v}_{i+1} = \vec{v}_i$ [S2, unofficial].
-2. **Normal Retrieval:** If a surface is hit, compute the surface normal $\vec{N}_i$ at the current position $p_i$ [S3, unofficial].
-3. **Reflection Vector Calculation:** Apply the reflection formula to compute the unnormalized reflected direction $\vec{r} = \vec{v} - 2(\vec{v} \cdot \vec{n})\vec{n}$ [S1, unofficial][S3, unofficial]. This subtracts twice the projection of $\vec{v}$ onto $\vec{n}$ from $\vec{v}$ [S1, unofficial].
-4. **Normalization:** Normalize the resulting vector to ensure it remains a unit direction vector: $\vec{v}_{new} = \frac{\vec{r}}{\|\vec{r}\|}$ [S3, unofficial].
+1. **Evaluate Surface Hit:** Determine if the current ray position $\vec{p}_i$ is on the surface. This is typically done by checking if the signed distance function value $f(\vec{p}_i) \approx 0$ or is below a small threshold $\epsilon$ [S2, unofficial].
+2. **Compute Normal:** If a hit is detected, compute the surface normal $\vec{n}$ at $\vec{p}_i$. For an implicit surface, $\vec{n} = \nabla f(\vec{p}_i)$, normalized [S3, unofficial].
+3. **Calculate Reflection:** Compute the reflected direction using the vector reflection formula [S1, S2, S3, unofficial]:
+   $$ \vec{v}_{out} = \vec{v} - 2(\vec{v} \cdot \vec{n})\vec{n} $$
+   Alternatively, expressed as:
+   $$ \vec{v}_{out} = \vec{v} - \vec{a}, \quad \text{where } \vec{a} = \vec{n} \cdot (2 \cdot (\vec{v} \cdot \vec{n})) $$
+   [S1, unofficial]
+4. **Normalize:** Ensure $\vec{v}_{out}$ is normalized to unit length to prevent drift in subsequent ray marching steps [S3, unofficial].
+5. **Fallback:** If the position is not on the surface ($f(\vec{p}_i) \not\approx 0$), the direction remains unchanged: $\vec{v}_{out} = \vec{v}$ [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def reflect_ray(incident_direction: list[float], surface_normal: list[float]) -> list[float]:
-    # Step 1: Calculate dot product v . n
-    dot_product = sum(a * b for a, b in zip(incident_direction, surface_normal))
-    # Step 2: Calculate reflection vector: r = v - 2 * (v . n) * n
-    reflection_vector = [
-        incident_direction[i] - 2.0 * dot_product * surface_normal[i]
-        for i in range(3)
-    ]
-    # Step 3: Normalize the result
-    magnitude = sum(x * x for x in reflection_vector) ** 0.5
-    if magnitude == 0.0:
-        return [0.0, 0.0, 0.0]
-    return [x / magnitude for x in reflection_vector]
+import math
+
+def reflect_ray(v: tuple, n: tuple) -> tuple:
+    """
+    Calculate the reflected ray direction.
+    
+    Args:
+        v: Incident ray direction (x, y, z), assumed normalized.
+        n: Surface normal (x, y, z), assumed normalized.
+        
+    Returns:
+        Reflected ray direction (x, y, z), normalized.
+    """
+    # Dot product of incident direction and normal
+    dot_vn = v[0]*n[0] + v[1]*n[1] + v[2]*n[2]
+    
+    # Reflection formula: v_out = v - 2 * (v . n) * n
+    # Calculate the scalar component 2 * (v . n)
+    scalar = 2.0 * dot_vn
+    
+    # Calculate the vector component to subtract: a = n * scalar
+    a_x = n[0] * scalar
+    a_y = n[1] * scalar
+    a_z = n[2] * scalar
+    
+    # Result: v - a
+    r_x = v[0] - a_x
+    r_y = v[1] - a_y
+    r_z = v[2] - a_z
+    
+    # Normalize the result
+    length = math.sqrt(r_x*r_x + r_y*r_y + r_z*r_z)
+    
+    # Guard against zero length (degenerate case)
+    if length < 1e-8:
+        return (0.0, 0.0, 0.0)
+        
+    inv_len = 1.0 / length
+    return (r_x * inv_len, r_y * inv_len, r_z * inv_len)
+
+def compute_reflected_direction(v: tuple, p: tuple, sdf_func) -> tuple:
+    """
+    Determine if reflection should occur based on surface proximity.
+    
+    Args:
+        v: Current ray direction.
+        p: Current ray position.
+        sdf_func: Signed Distance Function f(p).
+        
+    Returns:
+        New ray direction.
+    """
+    # Check if on surface (approximate zero)
+    # Threshold epsilon depends on implementation; 1e-4 is common for SDFs
+    epsilon = 1e-4
+    dist = sdf_func(p)
+    
+    if abs(dist) < epsilon:
+        # Compute normal from SDF gradient or pre-computed
+        # For this example, assume normal is passed or computed externally
+        # Here we simulate getting normal N_i
+        n = compute_normal(p) # [G] Helper to compute gradient of SDF at p
+        
+        return reflect_ray(v, n)
+    else:
+        # Not on surface, continue straight
+        return v
 ```
 
 **Parameters:**
-- No specific parameters other than the input vectors [S1, unofficial][S3, unofficial].
+- $\epsilon$: Surface proximity threshold. Typical value: $10^{-4}$ to $10^{-3}$ depending on scale [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Precision Errors:** Floating-point arithmetic may introduce small errors, making explicit normalization necessary [S3, unofficial].
-- **Degenerate Input:** If the incident ray is parallel to the surface ($\vec{v} \cdot \vec{n} = 0$), the reflection equals the incident ray. If anti-parallel ($\vec{v} \cdot \vec{n} = -1$), the reflection reverses the incident ray [G].
+- **Precision Errors:** Floating-point inaccuracies can cause the reflected vector to drift from unit length. Always re-normalize [S3, unofficial].
+- **Total Internal Reflection (TIR):** While primarily a reflection method, if used in conjunction with refraction logic, TIR cases must be handled. In pure reflection, TIR is not applicable, but if the normal calculation is inverted (back-face vs front-face), the reflection will be incorrect. Ensure the normal points against the incident ray ($\vec{v} \cdot \vec{n} < 0$ for incoming rays) [S1, unofficial].
+- **Degenerate Input:** If $\vec{v}$ and $\vec{n}$ are parallel or zero, the result may be undefined. Guard against zero-length vectors [S1, G, unofficial].
 
 ## Subtopics
 
-### Refracted Ray Directions
-Calculates the refracted direction of a ray given surface normals and refractive indices, handling entry and exit from spheres [S3, unofficial]. It differs from reflected directions by applying Snell's Law to change the ray's direction based on the ratio of refractive indices [S3, unofficial]. See [Ray Marching with Refraction and Beer's Law Absorption](1947-ray-marching-with-refraction-and-beer-s-law-absorption.md) [G].
-
-**Steps:**
-1. Get surface normal $\vec{N}$ [S3, unofficial].
-2. Set $n_1$ to current refractive index and $n_2$ to object's refractive index [S3, unofficial].
-3. Calculate $s = \vec{ray} \cdot \vec{N}$ [S3, unofficial].
-4. If object is a sphere and $s > 0$ (exiting sphere), swap $n_1$ and $n_2$ [S3, unofficial].
-5. Calculate $n = n_1 / n_2$ [S3, unofficial].
-6. Calculate refracted ray as $n \cdot (\vec{ray} - s \cdot \vec{N}) - \vec{N} \cdot \sqrt{1 - n^2 \cdot (1 - s^2)}$ [S3, unofficial].
-7. Normalize the result and update ref to $n_2$ [S3, unofficial].
-
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per reflection event, requiring a few dot products, multiplications, and one normalization [G].
-- **Memory Complexity:** $O(1)$ auxiliary space [G].
-- **Measured performance, scaling, strengths, limitations, and usage guidelines:** Not given in the sources [G].
+- **Time Complexity:** $O(1)$ per reflection event. Requires one dot product, a few multiplications, and a normalization.
+- **Memory Complexity:** $O(1)$. No additional data structures required.
+- **Strengths:** Computationally cheap; geometrically exact for specular surfaces; easy to implement.
+- **Limitations:** Only models perfect specular reflection; does not account for roughness (requires microfacet models); sensitive to normal accuracy.
+- **When to use:** When simulating mirror-like surfaces in volume rendering or ray marching.
+- **When not to use:** For diffuse surfaces (use Lambertian models) or rough surfaces (use GGX/Beckmann).
 
 ## Background
-Originated from basic geometric optics and vector algebra [G]. The reflection formula $\vec{r} = \vec{v} - 2(\vec{v} \cdot \vec{n})\vec{n}$ is a standard result in computer graphics, widely used in ray tracing and ray marching implementations [S1, unofficial][S3, unofficial]. It is a fundamental component of lighting models in volume rendering, particularly for simulating specular highlights on implicit surfaces defined by distance fields [S2, unofficial].
+The vector reflection formula is a fundamental concept in geometric optics and computer graphics, derived from the law of reflection. It is widely used in ray tracing and ray marching implementations. The specific implementation details in modern codebases often mirror the standard derivation found in graphics literature.
 
 ## Sources
 [S1] hexhowells/GoTracer, https://github.com/hexhowells/GoTracer, fetched 2026-10-26 (unofficial)

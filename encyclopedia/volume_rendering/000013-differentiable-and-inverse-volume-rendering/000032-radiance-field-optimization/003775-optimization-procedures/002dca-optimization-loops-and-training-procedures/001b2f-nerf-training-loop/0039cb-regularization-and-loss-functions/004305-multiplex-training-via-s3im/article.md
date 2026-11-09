@@ -1,0 +1,155 @@
+# Multiplex Training via S3IM
+
+Also called: S3IM Training, Stochastic Structural SIMilarity Training
+
+## Overview
+Multiplex Training via S3IM is a regularization paradigm that augments standard photometric losses with a Stochastic Structural SIMilarity (S3IM) term to improve neural field reconstruction quality, particularly for complex details and sparse inputs [S1]. It distinguishes itself from standard SSIM optimization by capturing non-local structural information from distant pixels across different images via stochastic patching, whereas standard SSIM only captures local structural information from nearby pixels within a single image [S1].
+
+## How it works
+The method replaces or augments the conventional pixel-wise loss (e.g., MSE or L1) with an S3IM loss calculated over $M$ stochastic patches [S1].
+
+**Inputs and Outputs:**
+*   **Inputs:** A minibatch of rays $\mathcal{R}$ sampled from the dataset $\mathcal{D}$; the neural field model parameters $\Theta$; hyperparameters $M$ (number of stochastic patches), $K$ (kernel size), $s$ (stride), and $\lambda$ (loss weight).
+*   **Outputs:** Updated model parameters $\Theta$ after one optimization step.
+
+**Data Structures:**
+*   $\mathcal{R}$: Set of rays.
+*   $\mathcal{C}$: Ground-truth pixel colors corresponding to $\mathcal{R}$.
+*   $\hat{\mathcal{C}}$: Rendered pixel colors corresponding to $\mathcal{R}$.
+*   $\Patch^{(m)}$: Stochastic patch generation function for iteration $m$.
+
+**Formulas:**
+The S3IM metric is the average SSIM over $M$ stochastic patches [S1]:
+$$ \SSSIM (\hat {\mathcal {R}},\mathcal {R}) = \frac {1}{M} \sum _{m=1}^{M} \SSIM (\Patch ^{(m)}(\hat {\mathcal {C}}), \Patch ^{(m)}(\mathcal {C})) $$
+where $\SSIM$ is computed using a kernel of size $K \times K$ and stride $s$ [S1].
+
+The S3IM loss is defined as [S1]:
+$$ L_{\SSSIM }(\Theta , \mathcal {R}) = 1 - \SSSIM (\hat {\mathcal {R}},\mathcal {R}) = 1-\frac {1}{M} \sum _{m=1}^{M} \SSIM (\Patch ^{(m)}(\hat {\mathcal {C}}), \Patch ^{(m)}(\mathcal {C})) $$
+
+For standard NeRF-like methods, the total loss combines the conventional loss $L(\Theta)$ (typically MSE) and the S3IM loss [S1]:
+$$ L_M(\Theta) = L(\Theta) + \lambda L_{\SSSIM }(\Theta) $$
+
+For neural surface representations like NeuS, the color loss is replaced by the multiplex color loss using L1 form for the base term [S1]:
+$$ L_{\mathrm {M},\mathrm {color}} = L_{\mathrm {color}} + \lambda L_{\SSSIM } $$
+where
+$$ L_{\mathrm {color}} = \frac {1}{\|\mathcal {R}\|}\sum _{\bm {r}\in \mathcal {R}} \| \hat {\bm {C}}(\bm {r}) - \bm {C}(\bm {r}) \|_{1} $$
+
+**Parameters:**
+*   $M$: Number of stochastic patches. Default is 10 to reduce stochasticity, but $M=1$ produces nearly identical results. Approaching $+\infty$ eliminates stochasticity [S1].
+*   $K$: Kernel size for SSIM. Default is 4 [S1].
+*   $s$: Stride size for SSIM. Default is $s=K$ [S1].
+*   $\lambda$: Weight for the S3IM loss term. Requires fine-tuning [S1].
+
+**Pseudocode:**
+The following algorithm describes one training iteration [S1].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def multiplex_training_step(model, optimizer, rays, ground_truth_colors, M=10, K=4, s=4, lambda_ssim=1.0):
+    """
+    Performs one step of multiplex training via S3IM.
+    
+    Args:
+        model: Neural field model with parameters Theta.
+        optimizer: SGD-like optimizer A.
+        rays: Minibatch of rays R sampled from dataset D.
+        ground_truth_colors: Ground-truth pixels C = {C(r) | r in R}.
+        M: Number of stochastic patches.
+        K: Kernel size for SSIM.
+        s: Stride size for SSIM.
+        lambda_ssim: Weight lambda for S3IM loss.
+        
+    Returns:
+        Updated model parameters.
+    """
+    # 1. Compute rendered pixels
+    rendered_colors = model.render(rays) # Compute C_hat = {C_hat(r) | r in R}
+    
+    # 2. Compute conventional loss L(Theta)
+    # Using MSE as the conventional loss for standard NeRF
+    conventional_loss = mean_squared_error(rendered_colors, ground_truth_colors)
+    
+    # 3. Compute S3IM Loss
+    ssim_sum = 0.0
+    for m in range(1, M + 1):
+        # Initialize stochastic patch generation function P^(m)
+        # Note: The specific implementation of P^(m) is not detailed in the source,
+        # but it transforms the full image arrays into stochastic patches.
+        patch_rendered = generate_stochastic_patch(rendered_colors, m)
+        patch_ground_truth = generate_stochastic_patch(ground_truth_colors, m)
+        
+        # Compute SSIM between patches using kernel KxK and stride s
+        ssim_value = compute_ssim(patch_rendered, patch_ground_truth, kernel_size=K, stride=s)
+        ssim_sum += ssim_value
+        
+    # Average SSIM over M patches
+    s3im_metric = ssim_sum / M
+    
+    # S3IM Loss is 1 - S3IM metric
+    s3im_loss = 1.0 - s3im_metric
+    
+    # 4. Calculate total loss
+    total_loss = conventional_loss + lambda_ssim * s3im_loss
+    
+    # 5. Compute gradient and update parameters
+    gradients = compute_gradients(total_loss, model.parameters())
+    optimizer.update(model.parameters(), gradients)
+    
+    return model.parameters()
+
+def generate_stochastic_patch(image_array, patch_index):
+    """
+    Generates a stochastic patch from the image array.
+    The source defines P^(m) as a stochastic patch generation function.
+    The exact randomization logic is not specified in the provided text.
+    [G] Placeholder for the specific stochastic sampling logic defined in the original paper's implementation.
+    """
+    # Implementation detail missing in source text.
+    # Typically involves random cropping or sampling of pixel coordinates.
+    pass
+
+def compute_ssim(img1, img2, kernel_size, stride):
+    """
+    Computes SSIM between two images/patches.
+    """
+    # Standard SSIM calculation using the specified kernel and stride.
+    # Returns a scalar SSIM value.
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   Directly optimizing standard SSIM via local patches (using an additional local-patch dataloader) increases coding and computational costs and hurts NeRF performance [S1].
+*   The S3IM loss value lies in $[-1, 1]$ and is positively correlated with image quality [S1].
+
+## Subtopics
+
+### S3IM for Neural Surface Representations (NeuS)
+Adapts the multiplex training to neural surface methods by replacing the color loss with the multiplex color loss defined above. It improves not only RGB image quality but also geometric metrics like Chamfer Distance [S1].
+
+### S3IM for Dynamic Scenes (D-NeRF)
+Applied to dynamic scene synthesis, showing significant improvements in PSNR and SSIM on dynamic datasets like 'Lego' and 'Mutant' [S1].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+The extra computational cost is limited because S3IM requires only one back-propagation per iteration, similar to standard training [S1]. The cost scales linearly with $M$, the number of stochastic patches.
+
+**Measured Performance:**
+*   **Replica Dataset (DVGO):** Mean PSNR improved from 17.07 to 33.50, SSIM from 0.696 to 0.955, LPIPS from 0.510 to 0.0637 [S1].
+*   **Replica Dataset (TensoRF):** Mean PSNR improved from 14.30 to 39.05, SSIM from 0.574 to 0.971, LPIPS from 0.689 to 0.0454 [S1].
+*   **T&T Dataset (DVGO):** Mean PSNR improved from 22.42 to 23.20, SSIM from 0.776 to 0.809, LPIPS from 0.236 to 0.176 [S1].
+*   **Sparse Inputs:** With only 20% of training images (Sparse Truck scene), PSNR improved by up to 4.32 compared to standard training [S1].
+*   **Dynamic Scenes (D-NeRF, Lego):** PSNR improved from 21.29 to 23.36, SSIM from 0.821 to 0.900, LPIPS from 0.0634 to 0.0482 [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** Significantly improves reconstruction quality for complex details and sparse inputs. Robust to image corruption and noise. Model-agnostic and orthogonal to existing NeRF variants (NeRF, DVGO, TensoRF, D-NeRF, NeuS) [S1].
+*   **Limitations:** Requires fine-tuning of the hyperparameter $\lambda$ [S1].
+
+**When to Use:**
+Use when standard photometric losses fail to capture structural details, particularly in scenarios with sparse training views or noisy/corrupted input images [S1].
+
+## Background
+Multiplex Training via S3IM was introduced in the paper "S3IM: Stochastic Structural SIMilarity and Its Unreasonable Effectiveness for Neural Fields" [S1]. It was developed to address the limitations of standard SSIM optimization in neural field training, which often fails to capture non-local structural information effectively [S1]. The method has been applied to various neural field representations including NeRF, DVGO, TensoRF, D-NeRF, and NeuS [S1].
+
+## Sources
+[S1] S3IM: Stochastic Structural SIMilarity and Its Unreasonable Effectiveness for Neural Fields, https://doi.org/10.1109/iccv51070.2023.01652, fetched 2026-10-26

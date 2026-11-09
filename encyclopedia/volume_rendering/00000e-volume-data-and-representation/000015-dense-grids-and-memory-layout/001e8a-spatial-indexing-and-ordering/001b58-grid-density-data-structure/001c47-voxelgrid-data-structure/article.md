@@ -3,32 +3,30 @@
 Also called: VoxelGrid3D, VoxelGrid3D Data Structure
 
 ## Overview
-The VoxelGrid Data Structure is a dense 3D grid representation used to store per-voxel data, such as occupancy bits, label histograms, or scalar values, within a defined bounding box. It serves as the foundational memory layout for spatial indexing in volume rendering and 3D reconstruction, mapping continuous world coordinates to discrete integer indices. It differs from sparse representations (like [Octree](../octree.md)) by guaranteeing $O(1)$ access at the cost of memory proportional to the volume of the bounding box, and from [BitGrid3D](../bitgrid3d.md) by potentially storing richer per-voxel payloads beyond a single occupancy bit.
+The VoxelGrid Data Structure is a dense 3D grid representation that maps continuous world coordinates to discrete voxel indices within a defined bounding box [S2, unofficial]. It stores per-voxel data such as occupancy bits or label histograms, differing from sparse alternatives by guaranteeing $O(1)$ index-based access at the cost of memory proportional to the bounding box volume [S1, unofficial][S2, unofficial].
 
 ## How it works
 ### Inputs and Outputs
-- **Input**: A 3D bounding box (defined by origin and extents or min/max corners), a voxel resolution (size in world units per axis), and optional initial data (e.g., a bit array or label histograms).
-- **Output**: A data structure providing $O(1)$ read/write access to voxel data via integer indices $(i, j, k)$ or world coordinates $(x, y, z)$.
+- **Input**: A 3D bounding box (defined by origin and extents), a voxel resolution (size in world units per axis), and optional initial data (e.g., a pre-allocated BitArray or label histogram vectors) [S1, unofficial][S2, unofficial].
+- **Output**: A data structure providing $O(1)$ read/write access to voxel data via integer indices $(i, j, k)$ or world coordinates $(x, y, z)$ [S1, unofficial][S2, unofficial].
 
 ### Data Structures
-The structure consists of global grid parameters and a contiguous storage array for voxel data.
+The structure consists of global grid parameters and a contiguous storage array for voxel data [S1, unofficial][S2, unofficial].
 
 **Global Parameters:**
-- `resolution_` (float): The physical size of one voxel along each axis (assumed isotropic in [S1, unofficial]).
-- `sizex_`, `sizey_`, `sizez_` (uint32_t): The number of voxels along the X, Y, and Z axes.
-- `offset_` (Vector4f or Point3d): The world coordinate of the grid origin (min corner). In [S1, unofficial], this is `Eigen::Vector4f`; in [S2, unofficial], it is derived from `BBox`.
-- `BBox` (Box): The bounding box defining the spatial extent.
+- `resolution_` (float): The physical size of one voxel along each axis [S1, unofficial].
+- `sizex_`, `sizey_`, `sizez_` (uint32_t): The number of voxels along the X, Y, and Z axes [S1, unofficial].
+- `offset_` (Vector4f or Point3d): The world coordinate of the grid origin (min corner) [S1, unofficial][S2, unofficial].
+- `BBox` (Box): The bounding box defining the spatial extent [S2, unofficial].
 
 **Voxel Storage:**
 Two distinct layouts are observed in the sources:
-
 1.  **Occupancy BitArray ([S2, unofficial])**:
     -   `Grid`: A `BitArray` or `TCollection` storing a single boolean value per voxel.
-    -   Size: `sizex_ * sizey_ * sizez_`.
+    -   Size: `SizeUVW.SelfProduct()` (i.e., $sizex\_ \times sizey\_ \times sizez\_$) [S2, unofficial].
     -   Memory: 1 bit per voxel.
-
 2.  **Label Histogram ([S1, unofficial])**:
-    -   `voxels_`: A `std::vector<Voxel>`.
+    -   `voxels_`: A `std::vector<Voxel>` [S1, unofficial].
     -   `Voxel` struct:
         -   `labels`: `std::map<uint32_t, uint32_t>` mapping label IDs to counts.
         -   `count`: `uint32_t` total occupancy count.
@@ -38,99 +36,59 @@ Two distinct layouts are observed in the sources:
         -   `occlusionsValid_`: `bool` flag.
 
 ### Numbered Steps
-
-1.  **Initialization**:
-    -   Define the bounding box `BBox` (min/max or origin/size) and voxel resolution `resolution_`.
-    -   Calculate grid dimensions:
-        $$ sizex\_ = \lceil \frac{BBox.max_x - BBox.min_x}{resolution\_}\rceil $$
-        $$ sizey\_ = \lceil \frac{BBox.max_y - BBox.min_y}{resolution\_}\rceil $$
-        $$ sizez\_ = \lceil \frac{BBox.max_z - BBox.min_z}{resolution\_}\rceil $$
-    -   Allocate the voxel storage array of size $N = sizex\_ \times sizey\_ \times sizez\_$.
-    -   Initialize all voxels to empty/false.
-
-2.  **Index Mapping (World to Grid)**:
-    -   Given a world point $P = (pos\_x, pos\_y, pos\_z)$, compute the voxel index $(i, j, k)$:
-        $$ i = \lfloor \frac{pos\_x - offset\_[0]}{resolution\_}\rfloor $$
-        $$ j = \lfloor \frac{pos\_y - offset\_[1]}{resolution\_}\rfloor $$
-        $$ k = \lfloor \frac{pos\_z - offset\_[2]}{resolution\_}\rfloor $$
-    -   [G] Use floor or truncation towards zero depending on whether negative coordinates are handled. Ensure bounds checking.
-
-3.  **Index Mapping (Grid to World)**:
-    -   Given voxel indices $(i, j, k)$, compute the center of the voxel in world coordinates:
-        $$ pos\_x = offset\_[0] + i \times resolution\_ + 0.5 \times resolution\_ $$
-        $$ pos\_y = offset\_[1] + j \times resolution\_ + 0.5 \times resolution\_ $$
-        $$ pos\_z = offset\_[2] + k \times resolution\_ + 0.5 \times resolution\_ $$
-
-4.  **Linear Index Calculation**:
-    -   Map 3D indices $(i, j, k)$ to a 1D array index:
-        $$ index(i, j, k) = i + j \times sizex\_ + k \times sizex\_ \times sizey\_ $$
-    -   This assumes row-major ordering (X varies fastest).
-
-5.  **Data Access**:
-    -   Retrieve voxel data: `voxels[index(i, j, k)]`.
-    -   For [S2, unofficial], access the bit at `Grid[index]`.
-    -   For [S1, unofficial], access the `Voxel` struct at `voxels[index]`.
+1.  **Initialization**: The constructor accepts a bounding box and voxel dimensions to initialize grid parameters [S2, unofficial]. If a BitArray is provided, it is injected directly without copying; otherwise, a new BitArray of size `SizeUVW.SelfProduct()` is created and initialized to false [S2, unofficial]. For label histograms, a vector of `Voxel` structs is allocated [S1, unofficial].
+2.  **World-to-Index**: Given a world point $P = (pos\_x, pos\_y, pos\_z)$, compute the voxel index $(i, j, k)$ using $i = (pos\_x - offset\_[0]) / resolution\_$, $j = (pos\_y - offset\_[1]) / resolution\_$, $k = (pos\_z - offset\_[2]) / resolution\_$ [S1, unofficial]. [G] Apply truncation or floor and clamp indices to $[0, sizex\_ - 1]$, $[0, sizey\_ - 1]$, $[0, sizez\_ - 1]$ to handle boundary precision.
+3.  **Index-to-World**: Given voxel indices $(i, j, k)$, compute the center of the voxel in world coordinates using $pos\_x = offset\_[0] + i \times resolution\_ + 0.5 \times resolution\_$, $pos\_y = offset\_[1] + j \times resolution\_ + 0.5 \times resolution\_$, $pos\_z = offset\_[2] + k \times resolution\_ + 0.5 \times resolution\_$ [S1, unofficial].
+4.  **Linear Index**: Map 3D indices $(i, j, k)$ to a 1D array index using $index(i, j, k) = i + j \times sizex\_ + k \times sizex\_ \times sizey\_$ [S1, unofficial].
+5.  **Bounds Check**: Verify if a sub-point $(i, j, k)$ is within grid bounds by checking $i \ge 0$, $j \ge 0$, $k \ge 0$ and $i < sizex\_$, $j < sizey\_$, $k < sizez\_$ [S2, unofficial].
 
 ### Pseudocode
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 class VoxelGrid:
-    def __init__(self, bbox_min, bbox_max, resolution):
+    def __init__(self, offset, resolution, sizex, sizey, sizez, bit_array=None):
         """
         Initialize VoxelGrid.
-        bbox_min: (x, y, z) world coordinates of the origin.
-        bbox_max: (x, y, z) world coordinates of the opposite corner.
+        offset: (x, y, z) world coordinates of the origin.
         resolution: float, size of one voxel.
+        sizex, sizey, sizez: int, grid dimensions.
+        bit_array: optional list of bools to inject without copying.
         """
-        self.offset = bbox_min
+        self.offset = offset
         self.resolution = resolution
+        self.sizex = sizex
+        self.sizey = sizey
+        self.sizez = sizez
+        self.total_voxels = sizex * sizey * sizez
         
-        # Calculate dimensions
-        self.sizex = int((bbox_max[0] - bbox_min[0]) / resolution)
-        self.sizey = int((bbox_max[1] - bbox_min[1]) / resolution)
-        self.sizez = int((bbox_max[2] - bbox_min[2]) / resolution)
-        
-        self.total_voxels = self.sizex * self.sizey * self.sizez
-        
-        # Initialize storage (using boolean for occupancy as per S2)
-        # For S1, this would be a list of Voxel objects
-        self.grid = [False] * self.total_voxels
+        if bit_array is not None:
+            self.grid = bit_array
+        else:
+            self.grid = [False] * self.total_voxels
 
     def world_to_index(self, x, y, z):
         """Convert world coordinates to 3D voxel index (i, j, k)."""
         i = int((x - self.offset[0]) / self.resolution)
         j = int((y - self.offset[1]) / self.resolution)
         k = int((z - self.offset[2]) / self.resolution)
-        return (i, j, k)
+        return i, j, k
 
     def index_to_world(self, i, j, k):
         """Convert 3D voxel index to world coordinates (center of voxel)."""
         x = self.offset[0] + i * self.resolution + 0.5 * self.resolution
         y = self.offset[1] + j * self.resolution + 0.5 * self.resolution
         z = self.offset[2] + k * self.resolution + 0.5 * self.resolution
-        return (x, y, z)
+        return x, y, z
 
     def linear_index(self, i, j, k):
         """Convert 3D index to 1D array index."""
         return i + j * self.sizex + k * self.sizex * self.sizey
 
-    def set_voxel(self, x, y, z, value=True):
-        """Set voxel occupancy at world coordinates."""
-        i, j, k = self.world_to_index(x, y, z)
-        if not self._is_valid_index(i, j, k):
-            return
-        idx = self.linear_index(i, j, k)
-        self.grid[idx] = value
-
-    def get_voxel(self, x, y, z):
-        """Get voxel occupancy at world coordinates."""
-        i, j, k = self.world_to_index(x, y, z)
-        if not self._is_valid_index(i, j, k):
-            return False
-        idx = self.linear_index(i, j, k)
-        return self.grid[idx]
+    def point_in_grid(self, i, j, k):
+        """Check if indices are within grid bounds."""
+        return (i >= 0 and j >= 0 and k >= 0 and
+                i < self.sizex and j < self.sizey and k < self.sizez)
 
     def clone(self):
         """Create a deep copy of the grid."""
@@ -141,37 +99,38 @@ class VoxelGrid:
         new_grid.sizey = self.sizey
         new_grid.sizez = self.sizez
         new_grid.total_voxels = self.total_voxels
-        new_grid.grid = list(self.grid) # Copy the list
+        new_grid.grid = [False] * self.total_voxels
+        for idx in range(self.total_voxels):
+            if self.grid[idx]:
+                new_grid.grid[idx] = True
         return new_grid
 
-    def _is_valid_index(self, i, j, k):
-        """Check if indices are within grid bounds."""
-        return (0 <= i < self.sizex and 
-                0 <= j < self.sizey and 
-                0 <= k < self.sizez)
+    def clone_empty(self):
+        """Create a new grid with the same dimensions but empty storage."""
+        return VoxelGrid(self.offset, self.resolution, self.sizex, self.sizey, self.sizez)
 ```
 
 ### Parameters and Edge Cases
--   **Resolution**: Must be positive. Smaller resolutions increase memory usage quadratically/cubically.
--   **Bounding Box**: Must encompass all points of interest. Points outside the box are discarded or require bounds checking.
--   **Precision**: Floating-point division in `world_to_index` can suffer from precision errors near boundaries. [G] It is recommended to use `floor` or explicit truncation and clamp indices to `[0, size-1]`.
--   **Memory**: For a $1024^3$ grid with 1-bit occupancy, memory is $\approx 128$ MB. With [S1, unofficial]'s `std::map` per voxel, memory overhead is prohibitive for dense grids; this layout is suitable only for sparse label histograms or small grids.
+- **Resolution**: Must be a positive float [S1, unofficial].
+- **Bounding Box**: Defines the spatial extent of the grid [S2, unofficial].
+- **Precision**: Floating-point division in `world_to_index` can suffer from precision errors near boundaries [G]. It is recommended to clamp indices to `[0, size-1]`.
+- **Memory**: Scales linearly with the total number of voxels $N = sizex \times sizey \times sizez$ [S2, unofficial].
 
 ## Operating characteristics
--   **Time Complexity**:
-    -   Access/Update: $O(1)$ for index-based access.
-    -   World-to-Index: $O(1)$ (3 subtractions, 3 divisions, 3 multiplications).
-    -   Clone: $O(N)$ where $N$ is the number of voxels [S2, unofficial].
--   **Memory Complexity**: $O(N)$ where $N = sizex \times sizey \times sizez$.
-    -   BitArray layout: $N$ bits.
-    -   Label Histogram layout: $N \times (\text{map overhead} + \text{counts})$.
--   **Strengths**: Simple implementation, cache-friendly for dense data, fast neighbor access.
--   **Limitations**: Memory usage grows cubically with resolution. Inefficient for sparse scenes.
--   **When to use**: Dense volumes, small to medium bounding boxes, or when frequent random access is required.
--   **When not to use**: Large-scale outdoor scenes, highly sparse data (use [Octree](../octree.md) or [KD-Tree](../kd-tree.md)).
+- **Time Complexity**:
+    - Access/Update: $O(1)$ for index-based access [S1, unofficial][S2, unofficial].
+    - World-to-Index: $O(1)$ (3 subtractions, 3 divisions) [S1, unofficial].
+    - Clone: $O(N)$ where $N$ is the number of voxels [S2, unofficial].
+- **Memory Complexity**: $O(N)$ where $N = sizex \times sizey \times sizez$ [S2, unofficial].
+    - BitArray layout: $N$ bits [S2, unofficial].
+    - Label Histogram layout: $N \times (\text{map overhead} + \text{counts})$ [S1, unofficial].
+- **Strengths**: Simple dense layout, $O(1)$ random access, cache-friendly for dense data.
+- **Limitations**: Memory usage grows cubically with resolution, inefficient for sparse scenes.
+- **When to use**: Dense volumes, small to medium bounding boxes, or when frequent random access is required.
+- **When not to use**: Large-scale outdoor scenes or highly sparse data.
 
 ## Background
-The VoxelGrid is a fundamental data structure in computer graphics and robotics. It is widely used in 3D reconstruction (e.g., [TSDF](../tsdf.md) fusion), collision detection, and spatial hashing. The specific implementation in [S1, unofficial] (jbehley/voxelizer) is used for LiDAR-based 3D object detection and occupancy estimation, storing label histograms for semantic segmentation. The implementation in [S2, unofficial] (voxeltools) provides a generic grid abstraction for various voxel-based algorithms.
+Not given in the sources.
 
 ## Sources
 [S1] jbehley/voxelizer, https://github.com/jbehley/voxelizer, fetched 2026-10-27 (unofficial)

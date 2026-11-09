@@ -1,0 +1,505 @@
+--- v001.md
++++ v002.md
+@@ -4,247 +4,274 @@
+ 
+ ## Overview
+-S3IM is a multiplex loss function for neural fields that captures nonlocal structural similarity by processing multiple data points (pixels/rays) as a whole set, rather than individually [S1]. It addresses the limitation of point-wise losses (like MSE) which fail to use collective supervision of distant pixels [S1]. Unlike conventional MSE loss which is computed pixel-wisely, S3IM cannot be expressed as the sum of any other loss computed over individual pixels from the batch [S1].
++S3IM is a regularization term for neural field optimization that captures nonlocal structural similarity by processing multiple data points (pixels/rays) as a collective set rather than individually [S1]. It addresses the limitation of point-wise losses like Mean Squared Error (MSE), which fail to utilize the collective supervision of distant pixels that provide rich structural information [S1]. Unlike conventional pixel-wise losses, S3IM cannot be expressed as the sum of any loss computed over individual pixels from the batch, allowing it to enforce global structural consistency at nearly no additional computational cost [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** A minibatch of rays $\mathcal{R}$, ground-truth pixel colors $\mathcal{C}$, rendered pixel colors $\hat{\mathcal{C}}$, model parameters $\Theta$, hyperparameter $\lambda$, number of stochastic estimations $M$, kernel size $K$, and stride size $s$.
+-*   **Outputs:** The total multiplex loss $L_{\mathrm{M}}(\Theta)$ and its gradient $\nabla L_{\mathrm{M}}(\Theta)$ for parameter update.
+-
+-**Data Structures:**
+-*   $\mathcal{R}$: Set of rays.
+-*   $\mathcal{C}$: Set of ground-truth color vectors $\mathbf{C}(\mathbf{r})$ for $\mathbf{r} \in \mathcal{R}$.
+-*   $\hat{\mathcal{C}}$: Set of rendered color vectors $\hat{\mathbf{C}}(\mathbf{r})$ for $\mathbf{r} \in \mathcal{R}$.
+-*   $\mathcal{P}^{(m)}(\cdot)$: Stochastic patch generation function mapping a set of pixels to a 2D patch representation for the $m$-th iteration.
+-
+-**Numbered Steps:**
+-1.  Sample a data minibatch of rays $\mathcal{R}$ from the dataset. Obtain ground-truth pixels $\mathcal{C} = \{\mathbf{C}(\mathbf{r}) | \mathbf{r} \in \mathcal{R}\}$ and compute rendered pixels $\hat{\mathcal{C}} = \{\hat{\mathbf{C}}(\mathbf{r}) | \mathbf{r} \in \mathcal{R}\}$ [S1].
+-2.  Loop $m$ from 1 to $M$ (number of stochastic estimations) [S1]:
+-    a. Initialize stochastic patch generation function $\mathcal{P}^{(m)}$ [S1].
+-    b. Transform rendered pixels into rendered stochastic patch $\mathcal{P}^{(m)}(\hat{\mathcal{C}})$ and ground-truth pixels into ground-truth stochastic patch $\mathcal{P}^{(m)}(\mathcal{C})$ [S1].
+-    c. Compute SSIM between the stochastic patches using kernel size $K$ and stride $s$ [S1].
+-3.  Average the $M$ computed SSIM values to obtain the final S3IM loss value $L_{\mathrm{S3IM}}$ [S1].
+-4.  Compute the conventional MSE loss $L_{\mathrm{MSE}}$ over the batch [S1].
+-5.  Combine losses: $L_{\mathrm{M}}(\Theta) = L_{\mathrm{MSE}} + \lambda L_{\mathrm{S3IM}}$ [S1].
+-6.  Compute gradient $\nabla L_{\mathrm{M}}(\Theta)$ and update model parameters $\Theta$ [S1].
+-
+-**Formulas:**
++S3IM integrates into the total loss function as a multiplex term, combining standard photometric reconstruction with a stochastic estimation of Structural Similarity (SSIM) [S1]. The method operates on a minibatch of rays, treating the sampled pixels as independent "stochastic patches" to bypass the lack of spatial coherence in randomly sampled ray batches [S1].
++
++### Inputs and Outputs
++*   **Inputs**:
++    *   $\Theta$: Model parameters (e.g., NeRF MLP weights).
++    *   $\mathcal{R}$: A minibatch of $B$ rays sampled from the dataset.
++    *   $\mathcal{C}$: Ground-truth pixel colors corresponding to $\mathcal{R}$, where $\mathcal{C} = \{\mathbf{C}(\mathbf{r}) | \mathbf{r} \in \mathcal{R}\}$.
++    *   $\hat{\mathcal{C}}$: Rendered pixel colors corresponding to $\mathcal{R}$, where $\hat{\mathcal{C}} = \{\hat{\mathbf{C}}(\mathbf{r}) | \mathbf{r} \in \mathcal{R}\}$.
++    *   $M$: Number of stochastic estimations (iterations).
++    *   $K$: Kernel size for SSIM computation (typically $K \times K$).
++    *   $\lambda$: Hyperparameter weighting the S3IM loss relative to MSE.
++*   **Outputs**:
++    *   $\mathcal{L}_{\text{S3IM}}$: The scalar S3IM loss value.
++    *   $\mathcal{L}_{\text{total}}$: The combined loss for backpropagation.
++
++### Data Structures
++*   **Minibatch $\mathcal{R}$**: A list or tensor of $B$ rays. Each ray $\mathbf{r}$ contains origin $\mathbf{o}$, direction $\mathbf{d}$, and associated ground-truth color $\mathbf{C}$.
++*   **Pixel Tensors**: $\mathcal{C}$ and $\hat{\mathcal{C}}$ are tensors of shape $(B, 3)$ (for RGB) or $(B, C)$ for $C$ channels.
++*   **Stochastic Patch $\mathcal{P}^{(m)}$**: A conceptual grouping of pixels. Since the input is a random batch, the "patch" is formed by reshaping or viewing the batch elements as a grid of size $K \times K$ (assuming $B$ is a multiple of $K^2$) or by treating the entire batch as a single large stochastic patch if $B < K^2$ is not the case. The source specifies forming a patch $\mathcal{P}$ from $B$ pixels [S1].
++
++### Parameters
++*   **$B$ (Batch Size)**: Number of rays/pixels per minibatch. Typical value: 1024 [S1].
++*   **$K$ (Kernel Size)**: Size of the local window for SSIM computation. Typical value: $4 \times 4$ [S1].
++*   **$M$ (Iterations)**: Number of times the stochastic patch generation and SSIM computation are repeated. Default value: 10 [S1].
++*   **$\lambda$**: Weight for S3IM. Not given in the sources.
++*   **SSIM Constants**:
++    *   $K_1 = 0.01$
++    *   $K_2 = 0.03$
++    *   $L = 1$ (for RGB images)
++    *   $C_1 = (K_1 L)^2 = 0.0001$
++    *   $C_2 = (K_2 L)^2 = 0.0009$
++    *   $C_3 = C_2 / 2 = 0.00045$ [S1]
++
++### Formulas
+ The total multiplex loss is defined as [S1]:
+-$$
+-L_{\mathrm{M}} (\Theta ) = \frac {1}{\|\mathcal {R}\|}\sum _{\bm {r}\in \mathcal {R}} l_{\MSE }(\Theta , \bm {r}) + \lambda L_{\SSSIM }(\Theta , \mathcal {R})
+-$$
+-where $\lambda$ is a hyperparameter adjusting the importance of S3IM [S1].
+-
+-The S3IM value is computed as the average of $M$ SSIM estimators over stochastic patches [S1]:
+-$$
+-L_{\SSSIM }(\hat {\mathcal {R}},\mathcal {R}) = 1 - \frac {1}{M} \sum _{m=1}^{M} \SSIM (\mathcal{P}^{(m)}(\hat {\mathcal {C}}), \mathcal{P}^{(m)}(\mathcal {C}))
+-$$
+-Note: The source defines $L_{\mathrm{S3IM}}$ as $1 - \text{average SSIM}$ in Algorithm 1 line 12 [S1], while the text formula uses $L_{\mathrm{S3IM}}$ directly. The SSIM index range is $[-1, 1]$, so $1 - \text{SSIM}$ maps it to a loss range where lower is better [S1].
+-
+-SSIM is defined as the product of luminance, contrast, and structure terms [S1]:
+-$$
+-\SSIM (a, b) = l(\bm {a}, \bm {b}) c(\bm {a}, \bm {b}) s(\bm {a}, \bm {b})
+-$$
+-The luminance, contrast, and structure comparison terms are [S1]:
+-$$
+-l(\bm {a}, \bm {b}) = \frac {2\mu _{a}\mu _{b} + C_{1}}{\mu _{a}^{2} + \mu _{b}^{2} + C_{1}}
+-$$
+-$$
+-c(\bm {a}, \bm {b}) = \frac {2\sigma _{a}\sigma _{b} + C_{2}}{\sigma _{a}^{2} + \sigma _{b}^{2} + C_{2}}
+-$$
+-$$
+-s(\bm {a}, \bm {b}) = \frac {\sigma _{ab} + C_{3}}{\sigma _{a}\sigma _{b} + C_{3}}
+-$$
+-where $\mu_a, \mu_b$ are means, $\sigma_a, \sigma_b$ are standard deviations, and $\sigma_{ab}$ is covariance of patches $a$ and $b$ [S1].
+-
+-**Parameters:**
+-*   Constants for SSIM: $C_1 = (K_1 L)^2$, $C_2 = (K_2 L)^2$, $C_3 = C_2 / 2$ [S1].
+-*   Typical values: $K_1 = 0.01$, $K_2 = 0.03$, $L = 1$ for RGB images [S1].
+-*   Batch size $B$: Number of rays/pixels per minibatch. Typical value: 1024 [S1].
+-*   Kernel size $K$: Size of the local window for SSIM computation. Typical value: $4 \times 4$ [S1].
+-*   Iterations $M$: Number of times steps 1 and 2 are repeated to average the SSIM estimates. Default value: 10 [S1].
+-*   Stride size $s$: Set to $K$ to ensure independent samples [S1].
+-
+-**Pitfalls:**
+-*   Stochastic sampling breaks positional relationships. The method accounts for this by treating the sampled pixels as a 'stochastic patch' rather than a spatially coherent image patch, and using non-overlapping strides ($s=K$) to ensure independent samples within the batch [S1].
+-
+-**Pseudocode:**
++$$ \mathcal{L}_{\mathrm{M}} (\Theta ) = \mathcal{L}_{\mathrm{MSE}} (\Theta ) + \lambda \mathcal{L}_{\mathrm{S3IM}} (\Theta ) $$
++
++Where $\mathcal{L}_{\mathrm{MSE}}$ is the standard pixel-wise MSE:
++$$ \mathcal{L}_{\mathrm{MSE}} (\Theta ) = \frac {1}{\|\mathcal {R}\|}\sum _{\bm {r}\in \mathcal {R}} || \hat{\mathbf{C}}(\bm {r}) - \mathbf{C}(\bm {r}) ||_2^2 $$
++
++The S3IM loss is derived from the S3IM index, which is the average of $M$ SSIM estimators over stochastic patches [S1]:
++$$ \mathcal{L}_{\mathrm{S3IM}} (\Theta ) = 1 - \SSSIM (\hat {\mathcal {C}},\mathcal {C}) $$
++$$ \SSSIM (\hat {\mathcal {C}},\mathcal {C}) = \frac {1}{M} \sum _{m=1}^{M} \SSIM (\mathcal{P}^{(m)}(\hat {\mathcal {C}}), \mathcal{P}^{(m)}(\mathcal {C})) $$
++
++The SSIM index between two patches $\mathbf{a}$ and $\mathbf{b}$ is the product of luminance, contrast, and structure terms [S1]:
++$$ \SSIM (\mathbf{a}, \mathbf{b}) = l(\mathbf{a}, \mathbf{b}) \cdot c(\mathbf{a}, \mathbf{b}) \cdot s(\mathbf{a}, \mathbf{b}) $$
++
++The comparison terms are [S1]:
++$$ l(\mathbf{a}, \mathbf{b}) = \frac {2\mu _{a}\mu _{b} + C_{1}}{\mu _{a}^{2} + \mu _{b}^{2} + C_{1}} $$
++$$ c(\mathbf{a}, \mathbf{b}) = \frac {2\sigma _{a}\sigma _{b} + C_{2}}{\sigma _{a}^{2} + \sigma _{b}^{2} + C_{2}} $$
++$$ s(\mathbf{a}, \mathbf{b}) = \frac {\sigma _{ab} + C_{3}}{\sigma _{a}\sigma _{b} + C_{3}} $$
++
++Where:
++*   $\mu_a, \mu_b$: Mean intensities of patches $\mathbf{a}, \mathbf{b}$.
++*   $\sigma_a, \sigma_b$: Standard deviations of patches $\mathbf{a}, \mathbf{b}$.
++*   $\sigma_{ab}$: Covariance between patches $\mathbf{a}, \mathbf{b}$.
++
++### Numbered Steps
++1.  **Sample Minibatch**: Sample a minibatch of rays $\mathcal{R}$ from the dataset. Obtain ground-truth pixels $\mathcal{C}$ and compute rendered pixels $\hat{\mathcal{C}}$ [S1].
++2.  **Stochastic Estimation Loop**: Initialize a sum variable for SSIM. Loop $m$ from 1 to $M$:
++    a.  **Generate Stochastic Patch**: Transform the rendered pixels $\hat{\mathcal{C}}$ and ground-truth pixels $\mathcal{C}$ into stochastic patches $\mathcal{P}^{(m)}(\hat{\mathcal{C}})$ and $\mathcal{P}^{(m)}(\mathcal{C})$. This involves arranging the $B$ pixels into a structure compatible with the $K \times K$ kernel. The source states that pixels are randomly formed into a patch [S1].
++    b.  **Compute SSIM**: Compute the SSIM index between $\mathcal{P}^{(m)}(\hat{\mathcal{C}})$ and $\mathcal{P}^{(m)}(\mathcal{C})$ using kernel size $K \times K$ and stride $s=K$. Note: Since the pixels are from a random batch, they do not form a spatially coherent image. The method treats them as a "stochastic patch" where the local statistics are computed over the subset of pixels defined by the kernel window within this stochastic arrangement [S1].
++    c.  **Accumulate**: Add the computed SSIM value to the sum.
++3.  **Average**: Divide the sum by $M$ to obtain $\SSSIM (\hat {\mathcal {C}},\mathcal {C})$ [S1].
++4.  **Calculate Loss**: Compute $\mathcal{L}_{\mathrm{S3IM}} = 1 - \SSSIM (\hat {\mathcal {C}},\mathcal {C})$ [S1].
++5.  **Combine**: Compute total loss $\mathcal{L}_{\mathrm{M}} = \mathcal{L}_{\mathrm{MSE}} + \lambda \mathcal{L}_{\mathrm{S3IM}}$ [S1].
++
++### Pseudocode
+ ```python
+-def compute_s3im_loss(rendered_pixels, ground_truth_pixels, batch_size, kernel_size, num_iterations, lambda_weight):
+-    """
+-    Computes the multiplex loss combining MSE and S3IM.
++def compute_s3im_loss(rendered_colors, ground_truth_colors, batch_size, kernel_size, num_iterations, lambda_weight):
++    """
++    Computes the S3IM loss and total multiplex loss.
+     
+     Args:
+-        rendered_pixels: List of color vectors [r, g, b] for each ray in the batch.
+-        ground_truth_pixels: List of color vectors [r, g, b] for each ray in the batch.
+-        batch_size: Number of rays in the batch (len(rendered_pixels)).
+-        kernel_size: Integer, size of the square kernel (e.g., 4).
+-        num_iterations: Integer, M, number of stochastic estimations.
+-        lambda_weight: Float, lambda, weight of S3IM loss.
++        rendered_colors: Tensor of shape (batch_size, channels), rendered pixel colors.
++        ground_truth_colors: Tensor of shape (batch_size, channels), ground truth pixel colors.
++        batch_size: Number of rays in the minibatch (B).
++        kernel_size: Size of the SSIM kernel (K).
++        num_iterations: Number of stochastic estimations (M).
++        lambda_weight: Weight for the S3IM term (lambda).
+         
+     Returns:
+-        total_loss: Float, the combined loss value.
+-    """
+-    
+-    # Step 1: Compute MSE Loss
+-    mse_sum = 0.0
+-    for r_gt, r_pred in zip(ground_truth_pixels, rendered_pixels):
+-        # l_MSE is squared error per pixel
+-        diff = [r_gt[i] - r_pred[i] for i in range(3)]
+-        mse_sum += sum(d*d for d in diff)
+-    
+-    mse_loss = mse_sum / batch_size
+-    
+-    # Step 2: Compute S3IM Loss
++        total_loss: Scalar tensor, the combined MSE and S3IM loss.
++    """
++    
++    # Constants for SSIM
++    K1 = 0.01
++    K2 = 0.03
++    L = 1.0
++    C1 = (K1 * L) ** 2
++    C2 = (K2 * L) ** 2
++    C3 = C2 / 2.0
++    
++    # 1. Compute MSE Loss
++    # MSE is computed pixel-wise over the batch
++    mse_loss = torch.mean((rendered_colors - ground_truth_colors) ** 2)
++    
++    # 2. Compute S3IM Loss
++    s3im_sum = 0.0
++    
++    for m in range(num_iterations):
++        # Step 2a: Generate Stochastic Patch
++        # The source describes forming a patch from the batch pixels.
++        # Since the batch is random, we treat the batch as a set of pixels.
++        # To apply a KxK kernel, we typically need to reshape or select subsets.
++        # The source implies using the entire batch as a "stochastic patch" 
++        # or reshaping it to fit the kernel logic. 
++        # Given B=1024 and K=4, we can reshape to (K*K, B/(K*K)) or similar.
++        # However, the source says "stride size s=K" and "kernel size KxK".
++        # In standard SSIM, this slides over an image. Here, the "image" is the stochastic arrangement.
++        # A common implementation for S3IM (as per the paper's Algorithm 1) 
++        # is to simply compute SSIM on the batch viewed as a grid if possible, 
++        # or more accurately, the paper states: "randomly form a rendered patch... 
++        # compute SSIM with kernel size KxK and stride size s".
++        # If B is not a perfect square of K, this is ambiguous. 
++        # However, the key insight is that the "patch" is the set of pixels itself.
++        # For implementation, we assume the batch is reshaped into a 2D grid 
++        # of size (sqrt(B), sqrt(B)) or similar, OR that the SSIM is computed 
++        # over the whole batch as a single "patch" if B < K^2, or multiple patches.
++        # The most robust interpretation of "stochastic patch" with stride K 
++        # on a batch of size B is to treat the batch as a 1D sequence or 
++        # reshape to a 2D image of size (B, 1) or (1, B) is not standard.
++        # Let's follow the source's implication: The pixels are arranged into a patch.
++        # If B=1024, we can reshape to (32, 32). Then apply KxK kernel.
++        # But the source says "stride size s=K".
++        # Let's assume the standard SSIM calculation on the reshaped batch.
++        
++        # Reshape batch to 2D image-like structure for SSIM calculation
++        # Assuming channels are handled by SSIM implementation or flattened.
++        # Standard SSIM takes H, W, C.
++        # Let's assume we reshape to (H, W, C) where H*W = B.
++        # For simplicity and consistency with "stochastic patch", 
++        # we reshape to a square if possible, or use the whole batch as one patch 
++        # if the SSIM function supports global stats.
++        # The source mentions "local statistics... computed within a local KxK kernel window".
++        # This implies sliding window.
++        
++        # Implementation detail: Reshape to (H, W, C)
++        # H = int(sqrt(B))
++        # W = int(sqrt(B))
++        # If B is not a perfect square, this is a pitfall. 
++        # The source does not specify handling non-square B. 
++        # We assume B is chosen such that it fits, or we pad.
++        # [G] Guard: Ensure batch_size is a perfect square for simple reshaping, 
++        # or use a 1D sliding window if the data is treated as a sequence.
++        # Given the "stochastic" nature, treating it as a 2D grid is the standard interpretation.
++        
++        H = int(batch_size ** 0.5)
++        W = int(batch_size ** 0.5)
++        
++        # Check if B is a perfect square
++        if H * W != batch_size:
++            # [G] Fallback: If not a perfect square, pad or use 1D. 
++            # For this article, we assume B is a perfect square as per typical S3IM setups.
++            raise ValueError("Batch size must be a perfect square for standard S3IM reshaping.")
++            
++        # Reshape to (H, W, C)
++        # Note: rendered_colors and ground_truth_colors are (B, C)
++        # We need to ensure the channel dimension is preserved.
++        # If C=3, shape is (B, 3). Reshape to (H, W, 3).
++        rendered_patch = rendered_colors.reshape(H, W, -1)
++        ground_truth_patch = ground_truth_colors.reshape(H, W, -1)
++        
++        # Compute SSIM on this patch
++        # The SSIM function computes local statistics with kernel K and stride K.
++        # Since the pixels are random, the "local" neighborhood is arbitrary.
++        ssim_value = compute_ssim(rendered_patch, ground_truth_patch, kernel_size=kernel_size, stride=kernel_size, C1=C1, C2=C2, C3=C3)
++        
++        s3im_sum += ssim_value
++        
++    # Average over M iterations
++    s3im_index = s3im_sum / num_iterations
++    
++    # S3IM Loss is 1 - SSIM
++    s3im_loss = 1.0 - s3im_index
++    
++    # Total Loss
++    total_loss = mse_loss + lambda_weight * s3im_loss
++    
++    return total_loss
++
++def compute_ssim(img1, img2, kernel_size, stride, C1, C2, C3):
++    """
++    Computes SSIM using a sliding window.
++    """
++    # Get image dimensions
++    H, W, C = img1.shape
++    
++    # Initialize sum of SSIM values and count
+     ssim_sum = 0.0
+-    
+-    for m in range(num_iterations):
+-        # Initialize stochastic patch generation
+-        # The source states pixels are randomly formed into a patch.
+-        # Since the batch is a set of independent rays, we treat the batch itself
+-        # as the source of pixels for the stochastic patch.
+-        # We assume the batch size B is sufficient to form a patch of size KxK or larger.
+-        # If B < K*K, this step is undefined in sources. We assume B >= K*K.
+-        
+-        # Transform pixels into stochastic patches
+-        # The source implies a random selection or reshaping into a 2D structure.
+-        # Given the stochastic nature and stride=K, we simply compute SSIM
+-        # on the entire batch treated as a single patch if B == K*K,
+-        # or average over non-overlapping windows if B > K*K.
+-        # However, the source says "randomly form a rendered patch... and corresponding ground-truth".
+-        # And "stride size s=K".
+-        # Algorithm 1 line 9-10: Compute SSIM(P(m)(C_hat), P(m)(C)) with kernel KxK and stride K.
+-        
+-        # Implementation detail:
+-        # To simulate the stochastic patch, we can randomly shuffle the batch indices
+-        # and then compute local statistics over windows of size KxK with stride K.
+-        # If the batch size is not a multiple of K*K, the remaining pixels are ignored
+-        # or handled as per standard SSIM implementation (usually ignored or padded).
+-        # The source does not specify padding. We assume B is a multiple of K*K for simplicity
+-        # or that the SSIM function handles the remainder by ignoring it.
+-        
+-        # Let's assume we reshape the batch into a 2D grid of size (B//K) x K? 
+-        # No, the source says "randomly form". This implies the spatial arrangement is arbitrary.
+-        # A simple interpretation is: Shuffle the list of pixels, then compute SSIM
+-        # on the resulting 2D array of shape (sqrt(B), sqrt(B)) if B is a square,
+-        # or more generally, compute local statistics over windows of size KxK.
+-        
+-        # Given the constraint "no placeholders", we must define the patch formation.
+-        # The most robust interpretation of "randomly form a patch" with stride K is:
+-        # 1. Shuffle the batch indices.
+-        # 2. Reshape the shuffled pixels into a 2D image of size H x W such that H*W >= B.
+-        #    Or, more likely, treat the batch as a set of pixels and compute SSIM
+-        #    over non-overlapping windows of size KxK drawn from this set.
+-        #    Since the source emphasizes "nonlocal" and "stochastic", the exact spatial
+-        #    arrangement doesn't matter as long as the local statistics are computed
+-        #    over groups of K*K pixels.
+-        
+-        # Let's implement a generic SSIM computation over non-overlapping windows.
+-        # We assume the batch pixels are arranged into a 2D grid for the purpose of
+-        # computing local statistics. The source says "randomly form", so we shuffle.
+-        
+-        indices = list(range(batch_size))
+-        shuffle(indices) # Random permutation
+-        
+-        # We need to compute SSIM. SSIM requires mean, var, cov over a window.
+-        # We will compute SSIM over non-overlapping windows of size KxK.
+-        # Total pixels used = (B // (K*K)) * (K*K).
+-        
+-        num_windows = batch_size // (kernel_size * kernel_size)
+-        current_ssim = 0.0
+-        
+-        for w in range(num_windows):
+-            # Extract window pixels
+-            start_idx = w * kernel_size * kernel_size
+-            window_indices = indices[start_idx : start_idx + kernel_size * kernel_size]
+-            
+-            gt_window = [ground_truth_pixels[i] for i in window_indices]
+-            pred_window = [rendered_pixels[i] for i in window_indices]
+-            
+-            # Compute local statistics for the window
+-            # Flatten to 1D lists of values for R, G, B channels
+-            gt_vals = [val for pixel in gt_window for val in pixel]
+-            pred_vals = [val for pixel in pred_window for val in pixel]
+-            
+-            # Compute mean
+-            mu_gt = sum(gt_vals) / len(gt_vals)
+-            mu_pred = sum(pred_vals) / len(pred_vals)
+-            
+-            # Compute variance and covariance
+-            # sigma^2 = E[x^2] - (E[x])^2
+-            # sigma_ab = E[ab] - E[a]E[b]
+-            
+-            sum_sq_gt = sum(v*v for v in gt_vals)
+-            sum_sq_pred = sum(v*v for v in pred_vals)
+-            sum_prod = sum(g*p for g, p in zip(gt_vals, pred_vals))
+-            
+-            n = len(gt_vals)
+-            
+-            var_gt = sum_sq_gt / n - mu_gt * mu_gt
+-            var_pred = sum_sq_pred / n - mu_pred * mu_pred
+-            cov = sum_prod / n - mu_gt * mu_pred
+-            
+-            # Constants
+-            K1 = 0.01
+-            K2 = 0.03
+-            L = 1.0
+-            C1 = (K1 * L) ** 2
+-            C2 = (K2 * L) ** 2
+-            C3 = C2 / 2.0
+-            
+-            # Luminance
+-            l_term = (2 * mu_gt * mu_pred + C1) / (mu_gt**2 + mu_pred**2 + C1)
+-            
+-            # Contrast
+-            # Avoid division by zero if variances are 0
+-            sigma_gt = math.sqrt(max(var_gt, 0))
+-            sigma_pred = math.sqrt(max(var_pred, 0))
+-            
+-            c_term = (2 * sigma_gt * sigma_pred + C2) / (sigma_gt**2 + sigma_pred**2 + C2)
+-            
+-            # Structure
+-            s_term = (cov + C3) / (sigma_gt * sigma_pred + C3)
+-            
+-            ssim_val = l_term * c_term * s_term
+-            current_ssim += ssim_val
+-            
+-        # Average SSIM over windows in this iteration
+-        if num_windows > 0:
+-            ssim_sum += current_ssim / num_windows
+-        else:
+-            # If batch is too small for even one window, SSIM is 0 or undefined.
+-            # We add 0 to sum.
+-            pass
+-            
+-    # Average SSIM over M iterations
+-    if num_iterations > 0:
+-        avg_ssim = ssim_sum / num_iterations
+-    else:
+-        avg_ssim = 0.0
+-        
+-    # S3IM Loss is 1 - SSIM (to make it a loss where lower is better)
+-    s3im_loss = 1.0 - avg_ssim
+-    
+-    # Total Multiplex Loss
+-    total_loss = mse_loss + lambda_weight * s3im_loss
+-    
+-    return total_loss
++    count = 0
++    
++    # Sliding window
++    for i in range(0, H - kernel_size + 1, stride):
++        for j in range(0, W - kernel_size + 1, stride):
++            # Extract patches
++            patch1 = img1[i:i+kernel_size, j:j+kernel_size, :]
++            patch2 = img2[i:i+kernel_size, j:j+kernel_size, :]
++            
++            # Compute local statistics
++            # Flatten patches to compute stats over all channels or per channel?
++            # Standard SSIM is often computed per channel and averaged, or on grayscale.
++            # The source defines SSIM for vectors a, b.
++            # We compute mean, var, cov for the patch.
++            
++            # Flatten patch to (N, C) where N = K*K
++            p1_flat = patch1.reshape(-1, C)
++            p2_flat = patch2.reshape(-1, C)
++            
++            # Compute means
++            mu1 = torch.mean(p1_flat, dim=0)
++            mu2 = torch.mean(p2_flat, dim=0)
++            
++            # Compute variances and covariance
++            # Covariance matrix is C x C. SSIM structure term uses scalar cov?
++            # The source formula s(a,b) uses sigma_ab.
++            # If C > 1, this is ambiguous. Usually, SSIM is computed per channel 
++            # and averaged, or the images are converted to grayscale.
++            # [G] Assumption: Compute SSIM per channel and average, or assume C=1 for simplicity.
++            # Given RGB, we compute per channel.
++            
++            channel_ssims = []
++            for c in range(C):
++                a = p1_flat[:, c]
++                b = p2_flat[:, c]
++                
++                mu_a = torch.mean(a)
++                mu_b = torch.mean(b)
++                
++                sigma_a_sq = torch.var(a, unbiased=False)
++                sigma_b_sq = torch.var(b, unbiased=False)
++                sigma_ab = torch.mean((a - mu_a) * (b - mu_b))
++                
++                # Luminance
++                l = (2 * mu_a * mu_b + C1) / (mu_a**2 + mu_b**2 + C1)
++                
++                # Contrast
++                sigma_a = torch.sqrt(sigma_a_sq)
++                sigma_b = torch.sqrt(sigma_b_sq)
++                c_term = (2 * sigma_a * sigma_b + C2) / (sigma_a_sq + sigma_b_sq + C2)
++                
++                # Structure
++                s = (sigma_ab + C3) / (sigma_a * sigma_b + C3)
++                
++                channel_ssims.append(l * c_term * s)
++                
++            ssim_sum += torch.mean(torch.stack(channel_ssims))
++            count += 1
++            
++    return ssim_sum / count
+ ```
+ 
+-## Subtopics
+-
+-### Multiplex Training via S3IM
+-The broader training framework that incorporates S3IM. It sets apart by processing multiple nonlocal inputs as a whole multiplex input. Choose when structural similarity is more important than pixel-wise accuracy. [10894-multiplex-training-via-s3im.md](10894-multiplex-training-via-s3im.md)
++### Edge Cases and Pitfalls
++*   **Stochastic Sampling Breaks Positional Relationships**: The method accounts for this by treating sampled pixels as a "stochastic patch" rather than a spatially coherent image patch [S1].
++*   **Stride and Independence**: The stride size $s$ is set equal to the kernel size $K$ to ensure independent samples within the batch, avoiding overlapping pixels in the stochastic patch calculation [S1].
++*   **Batch Size Constraints**: The pseudocode assumes the batch size $B$ is a perfect square to facilitate reshaping into a 2D grid for SSIM computation. If $B$ is not a perfect square, padding or a different arrangement is required [G].
++*   **Channel Handling**: The SSIM formula is defined for vectors. For RGB images, SSIM is typically computed per channel and averaged, or the image is converted to grayscale. The source does not explicitly specify this, but it is a standard implementation detail [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: The method requires $M$ iterations of SSIM computation per batch. SSIM computation is $O(K^2)$ per window. With batch size $B$ and stride $K$, there are $B/K^2$ windows. Total time per batch is $O(M \cdot B)$.
+-*   **Memory Complexity**: $O(B)$ to store the batch pixels.
+-*   **Measured Performance**: The improvements of quality metrics can be particularly significant for difficult tasks. E.g., test MSE loss unexpectedly drops by more than 90% for TensoRF and DVGO over eight novel view synthesis tasks [S1].
+-*   **Strengths**: Captures nonlocal structural similarity; improves quality metrics significantly; nearly free computational overhead compared to MSE.
+-*   **Limitations**: Stochastic sampling breaks positional relationships; requires careful handling of batch size and kernel size to ensure independent samples.
+-*   **When to use**: When structural similarity is critical and point-wise losses are insufficient.
+-*   **When not**: When computational resources are extremely limited and $M$ iterations are too expensive.
++*   **Time Complexity**: The S3IM loss requires $M$ iterations of SSIM computation. SSIM itself is $O(B \cdot K^2)$ per iteration if computed naively, or $O(B)$ with optimized sliding window. Thus, S3IM adds a factor of $M$ to the computational cost of the loss calculation. With $M=10$ and $K=4$, the overhead is small but non-negligible compared to MSE [S1].
++*   **Memory Complexity**: Requires storing the batch $\mathcal{R}$, rendered colors $\hat{\mathcal{C}}$, and ground truth $\mathcal{C}$. No additional large data structures are needed beyond the batch itself [S1].
++*   **Performance**: The source reports that S3IM improves quality metrics significantly, e.g., test MSE loss drops by more than 90% for TensoRF and DVGO over eight novel view synthesis tasks, and provides a 198% F-score gain and 64% Chamfer L1 distance reduction for surface representation [S1].
++*   **Strengths**: Captures nonlocal structural similarity; improves NeRF and neural surface representation quality; nearly free computational cost compared to the gain in quality [S1].
++*   **Limitations**: Relies on stochastic sampling, which may introduce variance (mitigated by $M$ iterations); requires careful handling of batch size and reshaping [S1].
+ 
+ ## Background
+-S3IM was proposed in the paper "S3IM: Stochastic Structural SIMilarity and Its Unreasonable Effectiveness for Neural Fields" [S1]. It is the first nonlocal multiplex training paradigm for NeRF and relevant neural field methods via a novel Stochastic Structural SIMilarity (S3IM) loss [S1].
++S3IM was introduced in the paper "S3IM: Stochastic Structural SIMilarity and Its Unreasonable Effectiveness for Neural Fields" [S1]. The authors state that previous research failed to use the collective supervision of distant pixels, which provide rich structural information [S1]. S3IM is the first nonlocal multiplex training paradigm for NeRF and relevant neural field methods, processing multiple data points as a whole set instead of independently [S1].
+ 
+ ## Sources

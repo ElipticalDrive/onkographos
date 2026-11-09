@@ -1,82 +1,74 @@
 # Scalar Quantization
-Also called: Per-block scalar quantization
+Also called: Per-block scalar quantization, Scalar Quantization Impact
 
 ## Overview
-Scalar Quantization (Per-Block) is a random-access decompression method used in compressed volume rendering that maps voxel values to a discrete index within a local range defined by the minimum and maximum values of a data block [S1, S2]. It differs from global quantization methods by computing block-specific extrema, allowing for better fidelity on data with high local variance, and differs from hardware-specific block coding (like S3TC) by using a simple linear interpolation formula rather than complex lookup tables or mode selection [S1, S2].
+Scalar quantization (per-block) is a random-access decompression method used in compressed volume rendering to reconstruct voxel values on-the-fly from compressed data. It solves the problem of storing high-precision volume data by mapping a block of voxels to a local range defined by block-specific minimum and maximum values, allowing for parallel GPU decompression without loading full-resolution data into memory [S2][S3]. It differs from general scalar quantization by computing range parameters locally per block rather than globally, and from hardware-accelerated block-coding (like S3TC) by relying on software-defined linear interpolation formulas rather than fixed hardware lookup tables [S1][S2][S3].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A block of compressed data containing the block minimum ($min$), block maximum ($max$), and a sequence of local indices ($index$) for each voxel in the block.
+*   **Input:** A block of compressed voxel data containing a local minimum value ($min$), a local maximum value ($max$), and a sequence of local indices ($index$) for each voxel in the block.
 *   **Output:** The decompressed scalar value ($v_{ijk}$) for each voxel in the block.
 
 **Data Structures:**
-The compressed block typically stores:
-1.  $min$: The minimum scalar value in the block (original bit depth).
-2.  $max$: The maximum scalar value in the block (original bit depth).
-3.  $index$: A bit-packed array of integers, where each integer uses $ibits$ bits. The number of bits $ibits$ is determined by the target compression ratio (e.g., if the original data is 32-bit float and the target is 8-bit index, $ibits=8$).
+*   **Block Header:** Stores $min$ and $max$ as floating-point values (typically 32-bit or 64-bit, exact bit-depth not specified in sources).
+*   **Voxel Data:** A sequence of integers representing the $index$ for each voxel. The number of bits per index is $ibits$.
+
+**Parameters:**
+*   $ibits$: The number of bits used to represent the local index. Typical values are not explicitly given, but the formula implies $index$ ranges from $0$ to $2^{ibits}-1$.
+*   $min$: The minimum value in the block.
+*   $max$: The maximum value in the block.
 
 **Steps:**
-1.  **Compute Extrema:** Identify the minimum ($min$) and maximum ($max$) values within the current block of voxel data.
-2.  **Compute Local Index:** For each voxel, determine its local index ($index$) based on its value relative to the block's range. This is typically done during compression by mapping the original value to the nearest integer in the range $[0, 2^{ibits} - 1]$.
-3.  **Reconstruct Value:** Calculate the decompressed value using linear interpolation between $min$ and $max$ based on the local index.
-
-**Formula:**
-The decompressed value $v_{ijk}$ is calculated as [S1, S2]:
-
-$$
-v_{ijk} = min + (max - min) \times \frac{index}{2^{ibits} - 1}
-$$
-
-Where:
-*   $v_{ijk}$ is the decompressed scalar value for the voxel at coordinates $(i, j, k)$.
-*   $min$ is the minimum value in the block.
-*   $max$ is the maximum value in the block.
-*   $index$ is the local index stored in the compressed data.
-*   $ibits$ is the number of bits used to represent the index values.
+1.  **Compute Range:** For each block of voxels, determine the minimum value ($min$) and maximum value ($max$) of the original data within that block [S2][S3].
+2.  **Quantize (Encoding):** For each voxel value $v$ in the block, compute a local index $index$ that maps $v$ to the range $[0, 2^{ibits}-1]$ based on $min$ and $max$. The sources do not provide the explicit encoding formula, but the decoding formula implies a linear mapping [S2][S3].
+3.  **Decode (Reconstruction):** For each voxel, compute the decompressed value $v_{ijk}$ using the formula:
+    $$v_{ijk} = min + (max - min) \times \frac{index}{2^{ibits}-1}$$
+    where $v_{ijk}$ is the decompressed value, $min$ and $max$ are the block minimum and maximum values, $index$ is the local index, and $ibits$ is the number of bits used to represent the index values [S2][S3].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def decompress_scalar_quantization_block(min_val, max_val, indices, ibits):
+def decompress_block(block_data, ibits):
     """
-    Decompresses a block of voxel data using per-block scalar quantization.
+    Decompresses a block of voxels using per-block scalar quantization.
     
     Args:
-        min_val (float): The minimum value in the block.
-        max_val (float): The maximum value in the block.
-        indices (list[int]): List of local indices for each voxel.
-        ibits (int): Number of bits used to represent each index.
+        block_data: A tuple or object containing:
+            - min_val: float, the minimum value in the block.
+            - max_val: float, the maximum value in the block.
+            - indices: list of int, the local indices for each voxel.
+        ibits: int, the number of bits used to represent the index values.
         
     Returns:
-        list[float]: List of decompressed voxel values.
+        list of float, the decompressed voxel values.
     """
-    # Calculate the maximum possible index value (2^ibits - 1)
-    max_index = (1 << ibits) - 1
+    min_val = block_data.min_val
+    max_val = block_data.max_val
+    indices = block_data.indices
     
-    # Handle edge case where min equals max to avoid division by zero
-    if min_val == max_val:
-        return [min_val] * len(indices)
+    # Calculate the denominator for the linear interpolation
+    # The formula uses 2^ibits - 1 as the denominator
+    denominator = (1 << ibits) - 1
     
     decompressed_values = []
     for index in indices:
-        # Clamp index to valid range [0, max_index] to handle potential encoding errors
-        index = max(0, min(index, max_index))
+        # Clamp index to valid range [0, denominator] to handle edge cases
+        # [G] Clamping is a standard guard for quantization indices
+        index = max(0, min(index, denominator))
         
-        # Linear interpolation formula
-        value = min_val + (max_val - min_val) * (index / max_index)
+        # Reconstruct the value using the linear interpolation formula
+        # v_ijk = min + (max - min) * (index / (2^ibits - 1))
+        value = min_val + (max_val - min_val) * (index / denominator)
         decompressed_values.append(value)
         
     return decompressed_values
 ```
 
-**Parameters:**
-*   $ibits$: The number of bits per index. Common values depend on the desired compression ratio. For example, if the original data is 32-bit and the block size is 64 voxels, storing 8-bit indices ($ibits=8$) yields a significant compression ratio. Not given in the sources.
-
 **Edge Cases and Pitfalls:**
-*   **Constant Blocks:** If $min = max$, the denominator in the interpolation formula becomes zero. The implementation must handle this by returning $min$ for all voxels in the block [G].
-*   **Precision:** The reconstruction error is bounded by the quantization step size $\phi = (max - min) / (2^{ibits} - 1)$. Floating-point rounding errors may occur during the multiplication and addition steps, but are generally negligible for standard volume rendering applications [G].
-*   **Out-of-Range Indices:** If the compression process produces an index outside the valid range $[0, 2^{ibits} - 1]$, it must be clamped to prevent invalid memory access or extreme values [G].
+*   **Constant Blocks:** If $min = max$, the denominator in the formula is irrelevant, and all voxels reconstruct to $min$. Division by zero is avoided if $min \neq max$, but if $min = max$, the term $(max - min)$ becomes 0, resulting in correct reconstruction.
+*   **Index Out of Range:** If the stored $index$ is outside $[0, 2^{ibits}-1]$, it must be clamped to prevent invalid memory access or incorrect values [G].
+*   **Precision Loss:** The reconstruction error is inherent to the quantization. The error roughly doubles for each reduction by one bit in the scalar quantizer [S1].
 
 ## Subtopics
 
@@ -84,17 +76,18 @@ def decompress_scalar_quantization_block(min_val, max_val, indices, ibits):
 Fixed-rate block-coding techniques, specifically Value Texture Compression (VTC) and S3TC, are hardware-supported lossy compression methods that approximate voxel values by selecting linear interpolation modes from a lookup table and applying formulas over precomputed representative values. They differ from general scalar quantization by providing on-the-fly hardware decoding that allows rendering directly from compressed data without storing decompressed volumes in memory.
 
 ## Operating characteristics
-*   **Time Complexity:** Decompression is $O(1)$ per voxel, as it involves a constant number of arithmetic operations (subtraction, multiplication, division) per voxel. This makes it highly suitable for parallel execution on GPUs [S1, S2].
-*   **Memory Complexity:** The compressed size is proportional to the number of voxels in the block times the number of bits per index ($ibits$), plus the overhead of storing $min$ and $max$ per block.
-*   **Performance:** The method is efficient for random-access decompression, allowing individual voxels to be decompressed in parallel without decoding the entire block [S1, S2].
-*   **Strengths:** Simple implementation, low computational overhead during decompression, and better fidelity than global quantization for data with local variations.
-*   **Limitations:** Compression ratio is limited by the block size and the number of bits per index. It may not perform well on data with large global variations but small local variations, or vice versa.
-*   **When to use:** Suitable for GPU-based direct volume rendering where random access is required and hardware support for simple arithmetic is available.
-*   **When not to use:** Not suitable for scenarios requiring very high compression ratios where more advanced techniques (like wavelet-based compression) are needed, or for data with complex structures that cannot be well-approximated by linear interpolation within small blocks.
+*   **Time Complexity:** Decompression is $O(1)$ per voxel, as it involves a constant number of arithmetic operations (subtraction, multiplication, division) [S2][S3]. Encoding time decreases faster than the number of nodes in related structures (like Mixture Graphs) because similar choices are made in early stages of greedy algorithms, reducing search space [S1].
+*   **Memory Complexity:** The output size stays more or less constant because the bulk of output size is allotted to voxel data at the finest level [S1]. The storage overhead is the block headers ($min, max$) plus the quantized indices.
+*   **Performance:** Lower bitrates in the scalar quantization stage lead to higher ambiguities between nodes, resulting in substantially fewer nodes in related data structures (e.g., Mixture Graphs), which translates to faster encoding and reconstruction times [S1]. However, the cost is higher reconstruction error.
+*   **Strengths:** Enables random-access decompression, which is easily implemented in parallel on GPUs [S2][S3]. Simple to implement and decode.
+*   **Limitations:** Reconstruction error increases significantly with lower bitrates (error roughly doubles for each bit reduction) [S1]. Not as efficient as hardware-accelerated methods for on-the-fly rendering without decompression [S1].
+*   **When to Use:** When random access to decompressed voxel data is required, and hardware-specific compression formats are not available or suitable.
+*   **When Not to Use:** When maximum compression ratio is needed and hardware acceleration is available (use S3TC/VTC) [S1]. When very high fidelity is required without significant error (use higher bitrates or other methods).
 
 ## Background
-The method was described in the context of compressed GPU-based direct volume rendering, where random-access decompression is essential for efficient rendering [S1, S2]. It is based on the principles of thresholding and quantization models, specifically per-block scalar quantization [YNV08, IGM10]. The approach allows each voxel to be decompressed in parallel by accessing corresponding codewords and their weighting coefficients, as proposed by Gobbetti et al. [GIM12].
+Scalar quantization (per-block) is a technique used in compressed GPU-based direct volume rendering. It was proposed as a random-access decompression method that can be easily implemented on GPUs [S2][S3]. The method is attributed to YNV08 and IGM10 in the context of thresholding and quantization models for volume rendering [S2][S3]. It is part of a broader family of compression techniques aimed at reducing the memory footprint of volume data while maintaining reasonable rendering performance.
 
 ## Sources
-[S1] PDF State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
-[S2] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+[S1] The Mixture Graph-A Data Structure for Compressing, Rendering, and Querying Segmentation Histograms, https://doi.org/10.1109/tvcg.2020.3030451, fetched 2026-10-26
+[S2] PDF State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+[S3] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27

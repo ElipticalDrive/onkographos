@@ -12,7 +12,7 @@ Adaptive clustering with error-bisector splitting is a method for generating a d
 
 **Data Structures:**
 *   **Cluster:** Contains a list of point indices, the current level $j$, and the fitted quadratic polynomial coefficients [S1, unofficial].
-*   **Quadratic Polynomial:** Defined by coefficients $c_{l,m}$ for $l+m \le 2$. In 2D, this is $\tilde{f}(x_1, x_2) = \sum_{l, m \geq 0; l+m \leq 2} c_{l,m} x_1^l x_2^m$ [S1, unofficial].
+*   **Quadratic Polynomial:** Defined by coefficients $c_{l,m}$ for $l+m \le 2$ [S1, unofficial]. In 2D, this is $\tilde{f}(x_1, x_2) = \sum_{l, m \geq 0; l+m \leq 2} c_{l,m} x_1^l x_2^m$ [S1, unofficial].
 *   **Residual:** The maximum norm error $\epsilon = \max_i | \tilde{f}(\mathbf{p}_i) - f_i |$ [S1, unofficial].
 
 **Algorithm Steps:**
@@ -39,7 +39,7 @@ Adaptive clustering with error-bisector splitting is a method for generating a d
     *   **Re-fitting:**
         *   For each new cluster, fit a new quadratic polynomial using least-squares [S1, unofficial].
         *   Compute the new residuals $\epsilon_{j+1}^{2m-1}$ and $\epsilon_{j+1}^{2m}$ using the maximum norm [S1, unofficial].
-    *   Replace $\tau_j^m$ with the two new clusters in the hierarchy. Increment level $j$ and repeat [S1, unofficial].
+    *   Replace $\tau_j^m$ with the two new clusters in the hierarchy [S1, unofficial]. Increment level $j$ and repeat [S1, unofficial].
 
 **Pseudocode:**
 
@@ -215,8 +215,8 @@ def compute_max_residual(points, values, coeffs, indices):
 *   **Degenerate Centers:** If $\mathbf{c}^+$ and $\mathbf{c}^-$ are identical (or one is undefined because all errors are zero or have the same sign), the splitting direction is arbitrary [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources [S1, unofficial].
 *   **Performance:** Typically produces a lower number of clusters than PCA-based splitting for the same approximation error, particularly when the function is curved in only one direction, resulting in long and skinny clusters [S1, unofficial].
 *   **Strengths:** Efficient triangulation of scattered data; better representation of smooth surfaces via quadratic polynomials compared to piecewise linear approximations; data-dependent hierarchy [S1, unofficial].
 *   **Limitations:** Requires 2D plane assumption (generalization to higher dimensions requires local projection via PCA) [S1, unofficial].
