@@ -1,0 +1,83 @@
+# Local Illumination Enhancement
+
+Also called: Blinn-Phong local illumination, Local point light enhancement
+
+## Overview
+Local Illumination Enhancement is a technique that combines global illumination with a local point light placed in front of the object to provide local detail information [S1, unofficial]. It builds on the [Blinn-Phong Shading Model](2239-blinn-phong-shading-model.md) by adding a specific local shading term to enhance the perception of surface shape and fine details that global illumination alone may miss [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs**:
+    *   Current voxel position $x$.
+    *   Phase function $h(\omega_i, \omega_0)$ at the current voxel [S1, unofficial].
+    *   Attenuated incident radiance $L_i(\omega_i)$ from direction $\omega_i$ [S1, unofficial].
+    *   Unit normal vector $N(x)$ at position $x$ [S1, unofficial].
+    *   Diffuse reflection coefficient $k_d$ [S1, unofficial].
+    *   Light diffuse color $l_d$ [S1, unofficial].
+    *   Normalized vector $l(x)$ in the direction of the local light source [S1, unofficial].
+    *   Shape factor $S_{object}$ [S1, unofficial].
+    *   Ambient and specular light colors $L_{ambient}$ and $L_{specular}$ [S1, unofficial].
+*   **Output**:
+    *   Final lighting color $L_f$ for the voxel [S1, unofficial].
+
+**Data Structures**
+Not given in the sources.
+
+**Steps**
+1.  Calculate the diffuse light component $L_{diffuse}$ using the absolute dot product of the normal and light direction:
+    $$L_{diffuse} = |N(x) \cdot l(x)| k_d l_d$$
+    where $N(x)$ is the unit normal vector, $l(x)$ is the normalized vector in the direction of the light source, $k_d$ is the diffuse reflection coefficient, and $l_d$ is the light diffuse color [S1, unofficial].
+2.  Combine the global illumination term with the local Blinn-Phong terms ($L_{diffuse}$, $L_{ambient}$, $L_{specular}$) and the shape factor $S_{object}$ to compute the final lighting color $L_f$:
+    $$L_f = \frac{1}{4\pi} \int h(\omega_i, \omega_0) L_i(\omega_i) d\omega_i \cdot (L_{diffuse} + L_{ambient} + L_{specular}) \cdot S_{object}$$
+    where $h(\omega_i, \omega_0)$ is the phase function, $L_i(\omega_i)$ is the attenuated incident radiance, and $S_{object}$ is the shape factor [S1, unofficial].
+
+**Parameters**
+*   $k_d$: Diffuse reflection coefficient, a scalar parameter [S1, unofficial].
+*   $l_d$: Light diffuse color [S1, unofficial].
+*   $S_{object}$: Shape factor in the shape volume [S1, unofficial].
+
+**Pitfalls**
+*   **Normal Inconsistency**: In volume rendering, normals are derived from local gradient vectors. These volume normals differ from true surface normals, particularly in concave regions. Because the local gradient vector cannot produce shadows at the surface, this leads to an inconsistency between concave and convex parts of the object [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def local_illumination_enhancement(
+    x,          # Position
+    N,          # Unit normal vector N(x)
+    l_dir,      # Normalized vector l(x) to light source
+    k_d,        # Diffuse reflection coefficient
+    l_d,        # Light diffuse color
+    L_ambient,  # Ambient light color
+    L_specular, # Specular light color
+    S_object,   # Shape factor
+    global_term # Result of integral: 1/(4*pi) * integral(h * L_i domega_i)
+):
+    # Calculate diffuse component using absolute dot product
+    # Note: Sources specify |N(x)l(x)|, implying absolute value of dot product
+    dot_product = dot(N, l_dir)
+    L_diffuse = abs(dot_product) * k_d * l_d
+    
+    # Combine with global illumination and other Blinn-Phong terms
+    # The formula multiplies the global term by the sum of local terms and shape factor
+    L_f = global_term * (L_diffuse + L_ambient + L_specular) * S_object
+    
+    return L_f
+```
+
+## Subtopics
+
+## Operating characteristics
+*   **Time Complexity**: Not given in the sources.
+*   **Memory Complexity**: Not given in the sources.
+*   **Strengths**: Enhances local shape details under global illumination by placing a local point light in front of the object [S1, unofficial].
+*   **Limitations**: The method suffers from inconsistency in concave regions because volume normals (local gradients) do not produce surface shadows correctly [S1, unofficial].
+*   **When to use**: When global illumination alone fails to convey sufficient local detail and shape information.
+*   **When not to use**: When accurate shadowing in concave regions is critical, as the gradient-based normals cannot replicate surface shadows [S1, unofficial].
+
+## Background
+The method was proposed by Jinta Zheng et al. in 2016 in the paper "Local Detail Enhancement for Volume Rendering under Global Illumination" [S1, unofficial]. It addresses the limitation of global illumination in rendering fine local details by introducing a local enhancement term based on the Blinn-Phong model [S1, unofficial].
+
+## Sources
+[S1] Local Detail Enhancement for Volume Rendering under Global Illumination, https://doi.org/10.2312/pg.20161334, fetched 2026-10-26 (unofficial)

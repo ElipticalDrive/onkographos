@@ -1,47 +1,79 @@
 # Stop-the-pop
 ## Overview
-Stop-the-pop is a technique to mitigate popping artifacts in volume splatting that are caused by the sorting procedure of Gaussians along the ray [S1][S4, unofficial]. It uses hierarchical or pixel-resorting to remove popping artifacts without sacrificing speed [S2, unofficial][S3, unofficial]. It is distinct from methods that modify opacity compensation terms [S1][S3, unofficial] or use ray-tracing-style intersections for accurate depth [S2, unofficial].
+Stop-the-pop is a hierarchical sorting technique used in volume splatting to mitigate popping artifacts caused by view-inconsistent depth ordering of Gaussians across frames [S1][S2, S4, unofficial]. Unlike global per-tile sorting which reorders all primitives every frame, it groups Gaussians into coarse depth bins and sorts only within the bin covering depth discontinuities, preserving rendering speed while ensuring visual stability [S2, S3, unofficial].
 ## How it works
-Inputs: A set of 3D Gaussians (position, covariance, color, opacity) and a camera view [G].
-Outputs: A rendered image with reduced popping artifacts [G].
+**Inputs and Outputs:**
+- Input: A set of $N$ Gaussians $\{G_k\}$, each defined by position $\mathbf{p}_k$, covariance $\Sigma_k$, opacity $\alpha_k$, and color $\mathbf{c}_k$; a camera view matrix; a tile grid covering the image plane.
+- Output: A sorted list of Gaussians per tile, ready for alpha blending.
 
-Data Structures:
-- Gaussian List: Array of Gaussian primitives [G].
-- Pixel Bucket: For each pixel, a list of Gaussians sorted by depth [G].
-- Hierarchical Structure: A structure allowing fast re-sorting of Gaussians within a local region (pixel or tile) [S2, unofficial].
+**Data Structures:**
+1.  **Gaussian List:** Array of $N$ structs.
+2.  **Depth Bins:** A coarse partitioning of the view-space depth range $[z_{near}, z_{far}]$ into $B$ bins. Each bin $b$ maintains a list of indices of Gaussians falling within its depth range.
+3.  **Tile Map:** Maps each pixel $(x,y)$ to a tile ID.
 
-Steps:
-1. Project all 3D Gaussians to 2D screen space to determine their footprint and depth [G].
-2. For each pixel (or tile), identify the Gaussians whose footprints cover it [G].
-3. Sort these Gaussians by depth (front-to-back) [G].
-4. Apply the Stop-the-pop algorithm:
-   - Detect potential popping events: These occur when the relative depth order of Gaussians changes significantly between frames or when a Gaussian enters/leaves the pixel's view, causing abrupt changes in the accumulated color/opacity [S1].
-   - Hierarchical/Pixel-resorting: Instead of a global sort, perform a localized sort or use a hierarchical structure to maintain a consistent depth ordering for Gaussians contributing to the same pixel or small region [S2, unofficial]. The method groups Gaussians into coarse depth bins and sorts only within the bin that covers the depth discontinuities [S2, unofficial].
-   - The specific implementation details of the hierarchical structure (e.g., k-d tree, grid) are not provided in the sources [S2, unofficial]. The core idea is to prevent the "pop" caused by the discrete nature of the sorting process [S1].
-5. Composite the sorted Gaussians using alpha blending [G].
+**Steps:**
+1.  **Project and Bin:** For each Gaussian $G_k$, compute its screen-space center $(u_k, v_k)$ and depth $z_k$. Assign $G_k$ to a coarse depth bin $b$ based on $z_k$. [S2, unofficial]
+2.  **Identify Active Bins:** For each tile, determine which depth bins contain Gaussians that project into that tile's spatial bounds. [S2, unofficial]
+3.  **Hierarchical Sort:**
+    -   For each tile, iterate only through the identified active depth bins.
+    -   Within each active bin, sort the Gaussians by depth $z_k$ (front-to-back or back-to-front depending on compositing order). [S2, unofficial]
+    -   Gaussians in inactive bins are skipped for that tile.
+4.  **Rasterize:** Render the sorted Gaussians using standard splatting rasterization with alpha blending. [S2, unofficial]
 
-Parameters:
-- Sorting threshold: Not given in the sources.
-- Hierarchical level: Not given in the sources.
+**Parameters:**
+-   Number of depth bins $B$: Not given in the sources. [G: Typically chosen to balance bin granularity vs. overhead, e.g., 16-64.]
+-   Bin depth range: $[z_{near}, z_{far}]$ from camera frustum.
 
-Edge cases:
-- Degenerate input: If Gaussians have identical depths, the sort order may be unstable [G].
-- The hierarchical approach helps mitigate this by maintaining a consistent local order [S2, unofficial].
-- Precision: Floating-point errors in depth calculation can cause sorting instability [G].
-- The method aims to reduce the visual impact of these errors [S1].
+**Edge Cases:**
+-   **Gaussian spanning bins:** A Gaussian may span multiple depth bins. It should be included in all bins it overlaps to ensure correct sorting relative to neighbors. [G: Standard practice in hierarchical sorting.]
+-   **Empty bins:** Skip sorting for empty bins to save computation. [S2, unofficial]
+-   **Precision:** Depth values must be computed consistently to avoid jitter at bin boundaries. [G: Use high-precision depth if available.]
 
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def stop_the_pop_sort(gaussians, camera, tile_grid, num_bins):
+    # Step 1: Project and assign to bins
+    bins = [[] for _ in range(num_bins)]
+    for k, g in enumerate(gaussians):
+        # Project Gaussian to screen space
+        u, v, z = project_to_screen(g.position, camera)
+        # Assign to bin based on depth z
+        bin_idx = map_depth_to_bin(z, camera.z_near, camera.z_far, num_bins)
+        bins[bin_idx].append(k)
+    
+    sorted_gaussians_per_tile = {}
+    
+    # Step 2 & 3: For each tile, sort only active bins
+    for tile in tile_grid:
+        tile_gaussians = []
+        # Identify bins that overlap with tile's spatial bounds
+        active_bins = get_active_bins_for_tile(tile, bins)
+        
+        for bin_idx in active_bins:
+            # Sort Gaussians within the bin by depth
+            bin_gaussians = bins[bin_idx]
+            sorted_bin = sort_by_depth(bin_gaussians, camera)
+            tile_gaussians.extend(sorted_bin)
+        
+        # Optional: Final global sort within tile if needed for exact order
+        # But StopThePop relies on bin-level sort for speed
+        sorted_gaussians_per_tile[tile.id] = tile_gaussians
+        
+    return sorted_gaussians_per_tile
+```
 ## Operating characteristics
-Time complexity: The method removes popping artifacts without sacrificing speed, maintaining the baseline sorting complexity [S2, unofficial][S3, unofficial].
-Memory complexity: Additional memory is required for the hierarchical structure [S2, unofficial].
-Performance: It removes popping artifacts without sacrificing speed [S2, unofficial].
-Strengths: Reduces visual artifacts (popping) caused by sorting [S1][S3, unofficial].
-Limitations: Not given in the sources.
+-   **Time Complexity:** $O(N \log N)$ worst-case if all Gaussians fall in one bin, but typically $O(N)$ or $O(N \log (N/B))$ due to reduced sorting scope per tile. [S2, unofficial]
+-   **Memory Complexity:** $O(N + B)$ for storing bins and tile maps. [S2, unofficial]
+-   **Performance:** Significantly faster than global sorting per frame, especially when depth changes are local. [S2, unofficial]
+-   **Strengths:** Eliminates popping artifacts without the high cost of full per-pixel or global sorting. [S2, S3, unofficial]
+-   **Limitations:** May still exhibit minor artifacts if bin boundaries are too coarse or if Gaussians move rapidly across bin boundaries. [G]
+-   **When to use:** Real-time volume splatting where visual stability is critical and global sorting is too slow. [S2, unofficial]
+-   **When not to use:** When exact depth ordering is required for all primitives regardless of performance cost. [S3, unofficial]
 
 ## Background
-Origin: Stop-the-pop (StopThePop) was introduced by Radl et al. at SIGGRAPH 2024 [S2, unofficial][S3, unofficial].
-History: It addresses issues in 3D Gaussian Splatting where the sorting procedure can cause popping artifacts [S1][S3, unofficial].
-Usage: It is used in 3D Gaussian Splatting pipelines to improve visual quality [S2, unofficial].
-
+Stop-the-pop was introduced by Radl et al. in SIGGRAPH 2024 [S3, unofficial]. It addresses the popping artifacts inherent in global per-tile sorting methods when Gaussian depths change across frames [S2, unofficial]. It is part of the broader effort to optimize 3D Gaussian Splatting rasterization for real-time performance [S2, S3, unofficial].
 ## Sources
 [S1] From Volume Rendering to 3D Gaussian Splatting: Theory and Applications, https://doi.org/10.1109/sibgrapi67909.2025.11223276, fetched 2026-10-26
 [S2] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,154 @@
+# Mega-NeRF Training Configuration
+
+Also called: Mega-NeRF training procedure, Mega-NeRF
+
+## Overview
+Mega-NeRF is a training configuration for Neural Radiance Fields (NeRF) designed to accelerate training and reduce model query costs for large-scale scenes. It differs from standard NeRF by using a single shared Multi-Layer Perceptron (MLP) for both coarse and fine sampling stages, which reduces model size and saves 25% of model queries per ray by reusing coarse outputs during the fine rendering stage [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of calibrated camera poses and corresponding images for a large-scale scene.
+*   **Output:** A trained radiance field model capable of synthesizing novel views.
+
+**Data Structures:**
+The model consists of 8 parallel submodules. Each submodule is an MLP with the following architecture:
+*   **Hidden Layers:** 8 layers, each with 256 hidden units.
+*   **Output Layer:** 1 fully connected layer with 128 channels, followed by a ReLU activation.
+*   **Total Parameters:** The shared nature of the MLP across coarse and fine stages reduces the total parameter count compared to using separate networks [S1].
+
+**Numbered Steps:**
+1.  **Initialization:** Initialize 8 parallel submodules, each containing an 8-layer MLP with 256 hidden units and a final 128-channel ReLU layer [S1].
+2.  **Ray Sampling:** For each batch, sample 1024 rays [S1].
+3.  **Hierarchical Sampling:**
+    *   Determine if the ray intersects foreground or background regions.
+    *   **Foreground:** Sample 256 coarse points and 512 fine points per ray.
+    *   **Background:** Sample 128 coarse points and 256 fine points per ray [S1].
+4.  **Coarse Query:** Query the shared MLP for color and density at the coarse sample locations. Store these outputs [S1].
+5.  **Fine Query:** Query the **same** shared MLP for color and density at the fine sample locations. Reuse the coarse network outputs if applicable to save computation [S1].
+6.  **Rendering:** Perform volume rendering using the hierarchical samples (coarse and fine) to compute the final pixel color [S1].
+7.  **Loss Computation:** Compute the loss between the rendered image and the ground truth image.
+8.  **Optimization:** Update the model parameters using the Adam optimizer [S1].
+9.  **Learning Rate Schedule:** Decay the learning rate exponentially from an initial value of $5 \times 10^{-4}$ to $5 \times 10^{-5}$ [S1].
+10. **Appearance Embedding Fine-tuning:** Apply the procedure described in NeRF in the Wild [21] to finetune appearance embeddings [S1].
+11. **Masking:** Use a pretrained semantic segmentation model to produce masks of common movable objects and ignore masked pixels during training [S1].
+12. **Precision:** Use mixed-precision training to accelerate the process [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+class MegaNeRFSubmodule(nn.Module):
+    def __init__(self):
+        super(MegaNeRFSubmodule, self).__init__()
+        # 8 layers of 256 hidden units
+        self.layers = nn.ModuleList([
+            nn.Linear(256 if i > 0 else 6, 256) for i in range(8)
+        ])
+        # Final fully connected ReLU layer of 128 channels
+        self.output_layer = nn.Linear(256, 128)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        # x shape: [N, 6] (3 for position, 3 for direction)
+        for layer in self.layers:
+            x = self.relu(layer(x))
+        return self.output_layer(x)
+
+def train_mega_nerf():
+    # Initialize 8 submodules in parallel
+    submodules = [MegaNeRFSubmodule() for _ in range(8)]
+    
+    # Optimizer
+    optimizer = optim.Adam(submodules.parameters(), lr=5e-4)
+    
+    # Learning rate decay parameters
+    initial_lr = 5e-4
+    final_lr = 5e-5
+    # Exponential decay implementation would go here
+    
+    batch_size = 1024  # rays per batch
+    
+    for epoch in range(num_epochs):
+        # Sample 1024 rays
+        rays = sample_rays(batch_size)
+        
+        # Determine foreground/background for each ray
+        is_foreground = determine_region(rays)
+        
+        # Hierarchical sampling
+        if is_foreground:
+            num_coarse = 256
+            num_fine = 512
+        else:
+            num_coarse = 128
+            num_fine = 256
+            
+        coarse_samples = sample_points(rays, num_coarse)
+        fine_samples = sample_points(rays, num_fine)
+        
+        # Query coarse samples using shared MLP
+        # Reuse coarse outputs during fine stage if possible
+        coarse_outputs = query_mlp(submodules, coarse_samples)
+        
+        # Query fine samples using the same shared MLP
+        fine_outputs = query_mlp(submodules, fine_samples)
+        
+        # Render image
+        rendered_images = render(rays, coarse_outputs, fine_outputs)
+        
+        # Compute loss
+        loss = compute_loss(rendered_images, ground_truth_images)
+        
+        # Optimization step
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        # Update learning rate
+        update_learning_rate(optimizer, initial_lr, final_lr)
+        
+        # Finetune appearance embeddings (procedure from NeRF in the Wild)
+        finetune_appearance_embeddings(submodules)
+        
+        # Ignore masked pixels (from semantic segmentation)
+        apply_masks(loss, masks)
+
+def query_mlp(submodules, samples):
+    # Query all 8 submodules in parallel
+    outputs = []
+    for submodule in submodules:
+        output = submodule(samples)
+        outputs.append(output)
+    return torch.stack(outputs, dim=0)
+```
+
+**Parameters:**
+*   **MLP Architecture:** 8 submodules, each with 8 layers of 256 hidden units and a final fully connected ReLU layer of 128 channels [S1].
+*   **Sampling:** Hierarchical sampling with 256 coarse and 512 fine samples per ray in foreground regions; 128 coarse and 256 fine samples per ray in background [S1].
+*   **Batch Size:** 1024 rays per batch [S1].
+*   **Optimizer:** Adam [S1].
+*   **Learning Rate:** Initial $5 \times 10^{-4}$, decaying exponentially to $5 \times 10^{-5}$ [S1].
+*   **Precision:** Mixed-precision training [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Masking:** Movable objects must be masked out using a pretrained semantic segmentation model to prevent training artifacts [S1].
+*   **Precision:** Mixed-precision training must be implemented correctly to avoid numerical instability [S1].
+*   **Shared MLP:** Reusing the same MLP for coarse and fine stages requires careful handling of the output caching to ensure the 25% query savings are realized [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Training time is significantly reduced compared to standard NeRF. For example, on the "Mill 19 - Building" dataset, Mega-NeRF takes 29:49 hours compared to NeRF's 59:51 hours [S1].
+*   **Memory Complexity:** The shared MLP reduces model size compared to using separate MLPs for coarse and fine stages [S1].
+*   **Performance:** On the "Mill 19 - Building" dataset, Mega-NeRF achieves a PSNR of 20.93, SSIM of 0.547, and LPIPS of 0.504 [S1].
+*   **Scaling:** The method is designed for scalable construction of large-scale NeRFs [S1].
+*   **Strengths:** Faster training, reduced model size, and efficient query usage [S1].
+*   **Limitations:** Requires careful implementation of mixed-precision training and semantic segmentation for masking [S1].
+
+## Background
+Mega-NeRF was introduced in the paper "Mega-NeRF: Scalable Construction of Large-Scale NeRFs for Virtual Fly-Throughs" [S1]. It builds on the original NeRF architecture [24] and NeRF++ [48] [S1]. The method is designed to address the scalability issues of NeRF for large-scale scenes [S1].
+
+## Sources
+[S1] Mega-NeRF: Scalable Construction of Large-Scale NeRFs for Virtual Fly- Throughs, https://doi.org/10.1109/cvpr52688.2022.01258, fetched 2026-10-26

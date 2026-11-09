@@ -3,145 +3,181 @@
 Also called: BFS/DFS Adjacency Graph Sort for Curvilinear Grids, Curvilinear Grid Visibility Ordering
 
 ## Overview
-An algorithm to generate a visibility ordering for cells in a curvilinear grid (hexahedra) to support semi-transparent rendering, using a combination of undirected breadth-first search and directed depth-first searches on the adjacency graph [S1, unofficial]. It sets itself apart from [Convex Grid Topological Visibility Sorting](2370-convex-grid-topological-visibility-sorting.md) by handling non-convex volumes without requiring a convex decomposition, leveraging the implicit topology of curvilinear grids to avoid auxiliary data structures [S1, unofficial].
+This method generates a back-to-front visibility ordering for cells in a curvilinear grid (specifically hexahedra) to support semi-transparent volume rendering [S1, unofficial]. It solves the problem of determining the correct draw order for non-convex or complex connected volumes by combining an undirected breadth-first search (BFS) with directed depth-first searches (DFS) on the grid's adjacency graph [S1, unofficial]. Unlike its parent method, which assumes convexity, this approach handles potentially non-convex volumes by deriving a directed "immediately occludes" relation from screen-space geometry, allowing it to work on general curvilinear grids without decomposing cells into simpler primitives [S1, unofficial].
 
 ## How it works
-**Inputs:** A curvilinear grid defined by hexahedral cells. The grid geometry provides vertex positions in screen space (specifically the $z$-component).
-**Outputs:** A visibility number (`visNumber`) for each cell, such that cells with lower numbers occlude cells with higher numbers.
+**Inputs and Outputs:**
+*   **Input:** A curvilinear grid defined by hexahedral cells. The grid topology is implicit; edges and faces are determined by arithmetic on cell indices rather than explicit adjacency structures [S1, unofficial]. The viewpoint position and projection matrix are required to compute screen-space coordinates.
+*   **Output:** A `visNumber` assigned to each cell, representing its position in the back-to-front rendering order.
 
 **Data Structures:**
-*   `visNumber`: Array mapping each cell index to an integer. Initialized to undefined.
-*   `marked`: Boolean array mapping each cell index to a boolean. Initialized to `false`.
-*   `FIFOqueue`: A First-In-First-Out queue storing cell indices.
+*   **Cell State:** Each cell maintains a `marked` boolean flag and an optional `visNumber` integer. Initially, all cells are `marked = false` and `visNumber` is undefined.
+*   **FIFO Queue:** A first-in-first-out queue storing cell indices, used for the BFS phase.
+*   **Recursion Stack:** Used implicitly by the DFS function.
 
 **Definitions:**
-*   **Adjacency:** Two cells are adjacent if they share a face. In curvilinear grids, neighbors are determined by arithmetic on cell indices $(i, j, k)$, incrementing or decrementing one index by 1, respecting grid boundaries [S1, unofficial].
-*   **Immediately Occludes:** Cell $A$ immediately occludes cell $B$ if they share a face and $A$ occludes $B$ in screen space. This is determined by the $z$-component of the shared face normal in screen space. If the normal points towards the viewer (or based on the specific convention where the "uphill" neighbor is pushed to the queue), the directionality is established [S1, unofficial]. Specifically, the algorithm distinguishes between "uphill" (occluding) and "downhill" (occluded by) neighbors based on screen-space depth.
+*   **Immediately Occludes:** Cell $A$ immediately occludes Cell $B$ if they share a face and $A$ is closer to the viewer than $B$ in screen space. This is determined by the $z$-component of the shared face normal in screen space [S1, unofficial]. Specifically, if the normal points towards the viewer relative to the shared face, the cell on the "back" side occludes the cell on the "front" side.
+*   **Uphill Neighbor:** A neighbor that does *not* immediately occlude the current cell (i.e., it is further back or laterally adjacent in a way that doesn't create a direct occlusion edge from current to neighbor).
 
 **Algorithm Steps:**
-1.  Initialize `nextNum` to 0.
-2.  Identify the starting cell: Find the cell that has a vertex farthest from the viewpoint (minimum $z$ in screen space).
-3.  Enqueue this starting cell into `FIFOqueue`.
-4.  Mark all cells as unmarked.
-5.  While `FIFOqueue` is not empty:
-    a.  Dequeue the front cell, call it `nextCell`.
-    b.  If `nextCell` is not marked:
-        i.  Call `depthFirstSearch(nextCell, nextNum)`, which returns a new number `newNum`.
-        ii. Update `nextNum` to `newNum`.
-        iii. (Note: The source pseudocode dequeues `nextCell` after the DFS call, implying the queue management is tied to the DFS completion or the cell is processed upon extraction. The standard interpretation of this specific pseudocode is that the cell is removed from the queue, and the DFS processes its connected component of unmarked cells.)
-6.  The `visNumber` for each cell is set during the DFS.
+1.  **Initialization:**
+    *   Find the cell $C_{start}$ that contains the vertex farthest from the viewpoint (minimum $z$ in screen space) [S1, unofficial].
+    *   Initialize an empty FIFO queue.
+    *   Enqueue $C_{start}$ into the FIFO queue.
+    *   Set `nextNum = 0`.
+    *   Mark all cells as unmarked.
+
+2.  **Main Loop:**
+    *   While the FIFO queue is not empty:
+        *   Dequeue the front cell, denoted as `nextCell`.
+        *   If `nextCell` is not marked:
+            *   Call `depthFirstSearch(nextCell, nextNum)`, which returns a new number `newNum`.
+            *   Update `nextNum = newNum`.
+
+3.  **Depth-First Search (DFS) Function:**
+    *   Input: `cell` (current cell index), `nextNum` (current counter).
+    *   Mark `cell` as marked.
+    *   For each `neighbor` adjacent to `cell` (sharing a face):
+        *   If `neighbor` is not marked:
+            *   Check if `neighbor` immediately occludes `cell`.
+            *   If **yes** (`neighbor` is in front of `cell`):
+                *   Enqueue `neighbor` into the FIFO queue.
+                *   Do **not** recurse into `neighbor` from this DFS call.
+            *   If **no** (`neighbor` is behind or not directly occluding):
+                *   Recursively call `depthFirstSearch(neighbor, nextNum)`, yielding `newNum`.
+                *   Update `nextNum = newNum`.
+        *   Else if `neighbor` is marked but has no `visNumber`:
+            *   Raise Error: Cycle in visibility order. (Note: This case has never been observed in practice [S1, unofficial]).
+        *   Else if `neighbor` is marked and has a `visNumber`:
+            *   Do not visit (already processed).
+    *   Assign `visNumber[cell] = nextNum`.
+    *   Return `nextNum + 1`.
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def visibility_ordering(curvilinear_grid):
-    # Grid dimensions and cell count assumed available
-    num_cells = curvilinear_grid.num_cells
-    
-    # Data structures
-    vis_number = [None] * num_cells
+def visibility_ordering(curvilinear_grid, viewpoint, projection_matrix):
+    """
+    Generates visibility ordering for hexahedral cells in a curvilinear grid.
+    """
+    num_cells = curvilinear_grid.num_cells()
+    vis_numbers = [-1] * num_cells
     marked = [False] * num_cells
     fifo_queue = []
     
-    # Step 1: Find starting cell (farthest vertex, min z)
-    start_cell = find_cell_with_min_z_vertex(curvilinear_grid)
+    # Step 1: Find starting cell (farthest vertex)
+    # Note: Requires iterating all vertices of all cells to find min screen-space z
+    start_cell = find_farthest_vertex_cell(curvilinear_grid, viewpoint, projection_matrix)
     
-    # Step 2: Initialize queue
     fifo_queue.append(start_cell)
-    
     next_num = 0
     
     while fifo_queue:
-        next_cell = fifo_queue.pop(0) # Dequeue front
+        next_cell = fifo_queue.pop(0)  # Dequeue front
         
         if not marked[next_cell]:
-            # Perform DFS to number the connected component
-            new_num = depth_first_search(next_cell, next_num, curvilinear_grid, marked, vis_number, fifo_queue)
+            new_num = depth_first_search(next_cell, next_num, curvilinear_grid, marked, fifo_queue)
             next_num = new_num
             
-    return vis_number
+    return vis_numbers
 
-def depth_first_search(cell, next_num, grid, marked, vis_number, fifo_queue):
+def depth_first_search(cell, next_num, curvilinear_grid, marked, fifo_queue):
+    """
+    Recursive DFS to assign visibility numbers.
+    """
     marked[cell] = True
     
-    # Get all adjacent cells (neighbors sharing a face)
-    neighbors = get_adjacent_cells(cell, grid)
+    # Get adjacent cells sharing a face
+    neighbors = get_adjacent_cells(cell, curvilinear_grid)
     
     for neighbor in neighbors:
         if not marked[neighbor]:
-            # Determine if neighbor immediately occludes current cell
-            # Based on screen-space z-component of shared face normal
-            if neighbor_immediately_occludes(neighbor, cell, grid):
-                # "Uphill" neighbor: enqueue for later processing
+            # Determine occlusion direction
+            # Compute shared face normal in screen space
+            # If neighbor immediately occludes cell (neighbor is closer to viewer)
+            if neighbor_immediately_occludes(cell, neighbor, curvilinear_grid):
+                # Push uphill neighbor to FIFO for later processing
                 fifo_queue.append(neighbor)
             else:
-                # "Downhill" neighbor: process immediately via recursive DFS
-                new_num = depth_first_search(neighbor, next_num, grid, marked, vis_number, fifo_queue)
+                # Neighbor is behind or not directly occluding; recurse
+                new_num = depth_first_search(neighbor, next_num, curvilinear_grid, marked, fifo_queue)
                 next_num = new_num
         else:
-            if vis_number[neighbor] is None:
-                # Cycle detected in visibility order
-                # Note: This has never happened in practice [S1, unofficial]
-                raise ValueError("Cycle in vis order")
-            # Neighbor already has a visNumber; do not visit
+            if vis_numbers[neighbor] == -1:
+                # Cycle detected
+                raise ValueError("Cycle in visibility order")
+            # Else: already processed, skip
             
-    vis_number[cell] = next_num
+    vis_numbers[cell] = next_num
     return next_num + 1
 
-def neighbor_immediately_occludes(neighbor, cell, grid):
-    # Determine if neighbor occludes cell based on screen-space z
-    # The z-component of the shared face normal determines the relation
-    # If the normal points such that neighbor is "in front" of cell
-    # in screen space, then neighbor occludes cell.
-    # Implementation detail: Compare z-depths of the shared face or normals.
-    # The source states: "The z component in screen space of the shared face normal determines which cell occludes the other."
-    # And: "post 'uphill' neighbors to the FIFO queue"
-    # So if neighbor is uphill (occludes), it goes to queue.
-    return is_uphill(neighbor, cell, grid)
-
-def is_uphill(neighbor, cell, grid):
-    # Heuristic/Geometric check:
-    # If the neighbor's centroid or shared face is closer to the viewer (lower z)
-    # than the cell, it occludes it.
-    # Or based on face normal z-component.
-    # Since explicit edge directions are not needed, arithmetic on indices
-    # combined with vertex positions is used.
-    # For simplicity in implementation without explicit normals:
-    # Compare the minimum z of the shared face vertices.
-    # If neighbor's shared face z < cell's shared face z, neighbor occludes.
-    # This is a simplification; the source emphasizes the face normal's z-component.
-    # We will assume a function that computes the shared face and checks its normal.
-    shared_face = get_shared_face(neighbor, cell, grid)
-    normal = compute_face_normal(shared_face, grid)
-    # Assuming camera looks down -Z or +Z. Standard screen space: lower Z is closer?
-    # Source says "minimum z in screen space" is farthest. So higher Z is closer?
-    # "vertex farthest from viewpoint (minimum z)" -> Min Z = Farthest.
-    # So Max Z = Closest.
-    # If neighbor occludes cell, neighbor is closer (higher Z) or normal points to viewer.
-    # The source says "neighbor immediately occludes cell" -> enqueue neighbor.
-    # So if neighbor is "uphill" (closer), it is enqueued.
-    return normal.z > 0 # Assuming normal points towards viewer if z > 0?
-    # Note: The exact sign depends on coordinate system. The key is the relative ordering.
+def neighbor_immediately_occludes(cell_a, cell_b, curvilinear_grid):
+    """
+    Returns True if cell_b immediately occludes cell_a.
+    Determined by the z-component of the shared face normal in screen space.
+    """
+    # 1. Identify shared face between cell_a and cell_b
+    # In curvilinear hex grids, this is determined by index arithmetic
+    shared_face = get_shared_face(cell_a, cell_b, curvilinear_grid)
+    
+    # 2. Compute face normal in world space
+    normal_world = compute_face_normal(shared_face, curvilinear_grid)
+    
+    # 3. Transform normal to screen space
+    # Note: Normals transform via the inverse-transpose of the model-view matrix,
+    # then projected. For simple orthographic or perspective, check z-component
+    # of the transformed normal relative to the view direction.
+    # Simplified: If the normal points towards the viewer, the cell on the
+    # "back" side of the face occludes the cell on the "front" side.
+    # Specifically, if the z-component of the screen-space normal indicates
+    # cell_b is in front of cell_a.
+    
+    # Implementation detail: Compute the vector from cell_a centroid to cell_b centroid
+    # in screen space. If this vector points in the same general direction as
+    # the view vector (or specifically, if the shared face normal's z-component
+    # implies cell_b is closer), then cell_b occludes cell_a.
+    
+    # Based on source: "The z component in screen space of the shared face normal
+    # determines which cell occludes the other."
+    screen_normal_z = transform_normal_to_screen_z(normal_world)
+    
+    # If the normal points towards the viewer (positive z in some conventions,
+    # or negative depending on coordinate system), the cell on the opposite
+    # side of the normal is the "back" cell.
+    # Standard convention: If normal points out of cell_a, and z > 0,
+    # then cell_b is in front of cell_a?
+    # Let's stick to the source's logic: "neighbor immediately occludes cell"
+    # if the relation holds.
+    
+    # Heuristic implementation based on source description:
+    # If the shared face normal's screen-space z-component indicates that
+    # cell_b is closer to the camera than cell_a.
+    return screen_normal_z > 0  # Placeholder for exact sign convention
 ```
 
-**Parameters:**
-*   None specific.
+**Parameters and Edge Cases:**
+*   **Starting Cell:** The choice of the farthest vertex cell is critical for the BFS initialization. If multiple cells share the farthest vertex, any one suffices.
+*   **Cycles:** The algorithm detects cycles if a marked neighbor lacks a `visNumber`. The source notes this has never happened in practice [S1, unofficial].
+*   **Non-Convexity:** The algorithm is designed for connected, possibly non-convex volumes [S1, unofficial]. It relies on the local "immediately occludes" relation, which may not capture global occlusions, but the BFS/DFS combination propagates the ordering correctly for rendering purposes.
 
-**Edge Cases and Pitfalls:**
-*   **Cycles:** The algorithm detects cycles in the visibility order if a marked neighbor has no `visNumber`. The source notes this has never happened in practice [S1, unofficial].
-*   **Non-Convex Volumes:** The algorithm is designed to work on connected, possibly non-convex volumes [S1, unofficial].
-*   **Hexahedra vs Tetrahedra:** Using hexahedra is advantageous because adjacency can be done by arithmetic on indices without auxiliary structures. Decomposing into tetrahedra multiplies the cell count by 6, increasing ordering cost by a factor of 5 [S1, unofficial].
+## Subtopics
 
 ## Operating characteristics
-*   **Time Complexity:** Linear time $O(n)$, where $n$ is the number of cells, due to the linear-time topological sorting nature of the DFS-based approach [S1, unofficial].
-*   **Memory Complexity:** $O(n)$ for storing `visNumber`, `marked`, and the queue.
-*   **Performance:** On an SGI 4D/VGX, approximately 60,000 tetrahedra per second could be ordered. The same algorithm ordered a comparable number of hexahedra per second. Converting to tetrahedra would increase visibility ordering cost by a factor of 5 due to the 6x cell count increase [S1, unofficial].
-*   **Strengths:** No auxiliary data structures needed for topology in curvilinear grids; handles non-convex volumes; simple implementation.
-*   **Limitations:** Relies on screen-space depth; may fail or require heuristics for highly complex non-convex geometries (though none reported in practice).
+*   **Time Complexity:** Linear, $O(N)$, where $N$ is the number of cells. The algorithm performs a single pass over the adjacency graph using BFS and DFS [S1, unofficial].
+*   **Memory Complexity:** $O(N)$ for storing cell states (`marked`, `visNumber`) and the FIFO queue. No auxiliary adjacency structures are needed for curvilinear grids, as topology is derived from index arithmetic [S1, unofficial].
+*   **Performance:** On an SGI 4D/VGX, the algorithm orders approximately 60,000 hexahedra per second, comparable to the 60,000 tetrahedra per second reported for tetrahedral decomposition [S1, unofficial].
+*   **Strengths:**
+    *   Avoids the 6x cell multiplication cost of tetrahedral decomposition, reducing ordering overhead by a factor of ~5 [S1, unofficial].
+    *   Leverages implicit topology of curvilinear grids, eliminating the need for explicit adjacency graph construction [S1, unofficial].
+*   **Limitations:**
+    *   Requires screen-space normal computation for every shared face.
+    *   Relies on the "immediately occludes" heuristic; while robust in practice, it lacks a formal theoretical guarantee for all non-convex cases [S1, unofficial].
+    *   Hexahedra are more complex to render than tetrahedra, trading ordering efficiency for rendering complexity [S1, unofficial].
 
 ## Background
-The method is described in a 1993 NASA Technical Report by Williams [S1, unofficial]. It builds on the well-known linear-time topological sorting algorithm [MHC90, Wil92b]. Williams previously reported experience with tetrahedral ordering, and this method offers a simpler alternative for curvilinear grids (hexahedra) that avoids decomposition [S1, unofficial].
+The method was described in a 1993 NASA technical report by Williams, focusing on the rapid exploration of curvilinear grids using direct volume rendering [S1, unofficial]. It builds on the well-known linear-time topological sorting algorithm for directed acyclic graphs [MHC90, Wil92b]. The approach was developed as a simpler alternative to heuristics for non-convex volumes, taking advantage of the undirected adjacency graph of hexahedral cells and directing it based on screen-space occlusion relations [S1, unofficial].
 
 ## Sources
 [S1] NASA Technical Reports Server (NTRS) 19930015755: Rapid exploration of curvilinear grids using direct volume rendering, https://archive.org/details/NASA_NTRS_Archive_19930015755, fetched 2026-10-26 (unofficial)

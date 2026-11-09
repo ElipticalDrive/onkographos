@@ -1,0 +1,171 @@
+# Dynamic Channel & Timepoint Switching
+
+Also called: Atlas & Renderer Rebuild, Channel & Timepoint Switching, Selective Brick Reload
+
+## Overview
+Dynamic Channel & Timepoint Switching allows the user to change the active source channels or timepoint of an OME-Zarr dataset without reopening the file or resetting the camera and display settings [S1, unofficial]. It distinguishes itself from sibling methods by selectively reloading only the bricks associated with changed channels or all bricks if the timepoint changes, while handling the structural rebuild of the GPU atlas when the channel count changes [S1, unofficial].
+
+## How it works
+**Inputs:** Current renderer state, new `sourceChannels` (array of integers), new `timepoint` (integer), and dataset metadata.
+**Outputs:** Updated GPU resources, streaming manager, and brick cache.
+
+**Data Structures:**
+*   **Bitmasks:**
+    *   `changedChannels`: Bitmask where bit $i$ is set if channel $i$ is new or removed.
+    *   `stale`: Bitmask of channels/timepoints requiring brick reload.
+*   **Renderer State (Preserved):**
+    *   `channelColors`: `float[4][4]` (RGBA per channel).
+    *   `channelWindowCenter`: `float[4]`.
+    *   `channelWindowWidth`: `float[4]`.
+    *   `windowCenter`: `float`.
+    *   `windowWidth`: `float`.
+    *   `volumeRenderMode`: `enum`.
+    *   `useIndirection`: `bool`.
+    *   `enableJitter`: `bool`.
+    *   `enableTAA`: `bool`.
+    *   `densityScale`: `float`.
+    *   `shading`: `bool`.
+    *   `gradientOpacity`: `bool`.
+    *   `isoValue`: `float`.
+    *   `floatMin`: `float`.
+    *   `floatMax`: `float`.
+    *   `clipMin`: `vec3`.
+    *   `clipMax`: `vec3`.
+    *   `sliceX`, `sliceY`, `sliceZ`: `float`.
+    *   `showSliceX`, `showSliceY`, `showSliceZ`: `bool`.
+    *   `showWireframe`: `bool`.
+    *   `showAxis`: `bool`.
+    *   `transferFunction`: `object`.
+    *   `renderScale`: `float`.
+
+**Steps:**
+1.  **Validate Selection:** Call `dataProvider.setSourceSelection` with the new channels and timepoint [S1, unofficial].
+2.  **Compute Bitmasks:**
+    *   Calculate `changedChannels` by comparing the current `sourceChannels` with the new selection [S1, unofficial].
+    *   Calculate `stale`:
+        *   If `timepoint` changed: `stale = (1 << numChannels) - 1` (all bits set) [S1, unofficial].
+        *   Else: `stale = changedChannels` [S1, unofficial].
+    *   If `stale` is 0 and channel count is unchanged, return early [S1, unofficial].
+3.  **Update Thresholds:** Update `emptyBrickThreshold` based on new data characteristics [S1, unofficial].
+4.  **Check Capacity:** If channel count changed, verify the new configuration fits the GPU atlas budget using `assertBaseFits` [S1, unofficial]. If it exceeds capacity, throw an error [S1, unofficial].
+5.  **Rebuild or Reload:**
+    *   **If channel count changed:** Call `rebuildGpu` [S1, unofficial].
+        *   Save `maxPixelError` [S1, unofficial].
+        *   Dispose old `streamingManager`, views, and resources [S1, unofficial].
+        *   Call `buildGpu` to create new resources and renderer [S1, unofficial].
+        *   Assign new resources to `this._resources` and `views[0].renderer` [S1, unofficial].
+        *   Copy all preserved renderer state fields (colors, windows, modes, flags, etc.) from the old renderer to the new one [S1, unofficial].
+        *   Set transfer function and `renderScale` [S1, unofficial].
+        *   Build view renderers for `views[1:]` [S1, unofficial].
+        *   Resize views [S1, unofficial].
+        *   Attach new `streamingManager` [S1, unofficial].
+        *   Restore `maxPixelError` [S1, unofficial].
+    *   **If channel count unchanged:**
+        *   Call `applyChannelDefaults` [S1, unofficial].
+        *   Set `floatMin` and `floatMax` [S1, unofficial].
+        *   Update visible channels [S1, unofficial].
+        *   Call `streamingManager.reload(stale)` to fetch only changed bricks [S1, unofficial].
+6.  **Finalize:** Reset accumulation buffers and mark the scene as dirty for redraw [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def switch_source_selection(renderer, data_provider, new_source_channels, new_timepoint):
+    # 1. Validate selection
+    data_provider.set_source_selection(new_source_channels, new_timepoint)
+    
+    # 2. Compute bitmasks
+    current_channels = renderer.source_channels
+    changed_channels = compute_bitmask_difference(current_channels, new_source_channels)
+    
+    if new_timepoint != renderer.current_timepoint:
+        stale = (1 << renderer.num_channels) - 1
+    else:
+        stale = changed_channels
+        
+    if stale == 0 and len(current_channels) == len(new_source_channels):
+        return  # No changes needed
+
+    # 3. Update thresholds
+    update_empty_brick_threshold()
+    
+    # 4. Check capacity if channel count changed
+    if len(new_source_channels) != len(current_channels):
+        assert_base_fits(renderer, new_source_channels)
+        # 5a. Rebuild GPU
+        save_max_pixel_error(renderer)
+        dispose_old_resources(renderer)
+        
+        new_renderer = build_gpu(data_provider, new_source_channels, new_timepoint)
+        
+        # Copy preserved state
+        new_renderer.channel_colors = renderer.channel_colors
+        new_renderer.channel_window_center = renderer.channel_window_center
+        new_renderer.channel_window_width = renderer.channel_window_width
+        new_renderer.window_center = renderer.window_center
+        new_renderer.window_width = renderer.window_width
+        new_renderer.volume_render_mode = renderer.volume_render_mode
+        new_renderer.use_indirection = renderer.use_indirection
+        new_renderer.enable_jitter = renderer.enable_jitter
+        new_renderer.enable_taa = renderer.enable_taa
+        new_renderer.density_scale = renderer.density_scale
+        new_renderer.shading = renderer.shading
+        new_renderer.gradient_opacity = renderer.gradient_opacity
+        new_renderer.iso_value = renderer.iso_value
+        new_renderer.float_min = renderer.float_min
+        new_renderer.float_max = renderer.float_max
+        new_renderer.clip_min = renderer.clip_min
+        new_renderer.clip_max = renderer.clip_max
+        new_renderer.slice_x = renderer.slice_x
+        new_renderer.slice_y = renderer.slice_y
+        new_renderer.slice_z = renderer.slice_z
+        new_renderer.show_slice_x = renderer.show_slice_x
+        new_renderer.show_slice_y = renderer.show_slice_y
+        new_renderer.show_slice_z = renderer.show_slice_z
+        new_renderer.show_wireframe = renderer.show_wireframe
+        new_renderer.show_axis = renderer.show_axis
+        new_renderer.transfer_function = renderer.transfer_function
+        new_renderer.render_scale = renderer.render_scale
+        
+        renderer.resources = new_renderer.resources
+        renderer.views[0].renderer = new_renderer
+        
+        build_view_renderers(renderer.views[1:])
+        resize_views(renderer.views)
+        attach_new_streaming_manager(renderer)
+        restore_max_pixel_error(renderer)
+    else:
+        # 5b. Reload bricks
+        apply_channel_defaults(renderer)
+        renderer.float_min = compute_float_min(data_provider)
+        renderer.float_max = compute_float_max(data_provider)
+        update_visible_channels(renderer, new_source_channels)
+        renderer.streaming_manager.reload(stale)
+        
+    # 6. Finalize
+    reset_accumulation(renderer)
+    mark_dirty(renderer)
+```
+
+**Parameters:**
+*   `stale`: Bitmask indicating which channels/timepoints need brick reloading. All bits set if timepoint changed; otherwise, only changed channels [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Atlas Capacity:** Growing the channel count may exceed the GPU atlas VRAM budget. The method mitigates this by calling `assertBaseFits` before making changes, which throws an error if the new configuration does not fit [S1, unofficial].
+*   **Precision:** Window center/width normalization depends on data type (float vs integer) and data range [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(C)$ where $C$ is the number of channels, for bitmask operations and state copying. Brick reloading is proportional to the number of stale bricks.
+*   **Memory Complexity:** Depends on the atlas budget. Rebuilding the renderer allocates new GPU resources, which are freed after disposal.
+*   **Performance:** Preserves camera and display settings, avoiding full scene reinitialization. Selective reloading minimizes data transfer when only channels change.
+*   **Strengths:** Fast switching between channels/timepoints without losing user context.
+*   **Limitations:** Channel count changes require a full renderer rebuild, which is more expensive than brick reloading.
+*   **When to use:** When users need to toggle between different stains (channels) or timepoints in a live dataset.
+*   **When not to use:** When the channel count changes frequently, as the rebuild overhead is significant.
+
+## Background
+This method is part of the Kiln renderer, a WebGPU-native out-of-core volume rendering engine for multi-GB datasets [S1, unofficial]. It addresses the need for interactive exploration of multi-channel, multi-timepoint OME-Zarr data in web browsers, where memory and bandwidth are constrained [S1, unofficial].
+
+## Sources
+[S1] Show HN: Kiln – WebGPU-native out-of-core volume rendering for multi-GB datasets, https://github.com/MPanknin/kiln-render, fetched 2026-10-26 (unofficial)

@@ -1,236 +1,245 @@
 # Hardware-Assisted Polyhedron Projection
 
-Also called: Approximate Volume Rendering for Curvilinear and Unstructured Grids by Hardware-Assisted Polyhedron Projection, CP scheme, Cell-Projection Volume Rendering, Parallel Cell-Projection Volume Rendering
+Also called: Approximate Volume Rendering for Curvilinear and Unstructured Grids by Hardware-Assisted Polyhedron Projection, CP scheme, Cell-Projection Volume Rendering, Parallel Cell-Projection Volume Rendering, Polyhedron Projection
 
 ## Overview
-Hardware-Assisted Polyhedron Projection is a volume rendering technique for unstructured grids that projects 3D convex polyhedral cells to 2D screen space, performs scan conversion to generate depth-sorted ray segments, and composites them using hardware acceleration [S1, S3, unofficial]. It differs from raycasting by operating in image space with object-order projection, allowing flexible data distribution on distributed-memory systems and leveraging standard polygon pipelines for scan conversion [S2][S3, unofficial]. Unlike [Projected Tetrahedra](877-projected-tetrahedra.md), which requires explicit triangle generation and sorting, this method projects cells directly as polygons and relies on hardware compositing or global sorting for depth ordering [S3, unofficial].
+Hardware-Assisted Polyhedron Projection is a technique for volume rendering arbitrary unstructured grids composed of convex polyhedral cells by projecting 3D cells to 2D screen space and using hardware polygon rendering pipelines for scan conversion and compositing [S1][S4, unofficial]. It solves the problem of efficiently rendering complex, non-uniform meshes by avoiding the irregular memory access patterns of raycasting, instead relying on global back-to-front sorting of cells and hardware-accelerated interpolation [S1][S4, unofficial]. Unlike sibling methods that may use local sorting or additive accumulation, this method requires explicit depth sorting of all cells to ensure correct alpha blending [S1][S4, unofficial].
 
 ## How it works
-The method consists of three main phases: Projection, Scan Conversion, and Composition [S1, unofficial]. It handles arbitrary convex polyhedral cells, including approximations for curvilinear cells [S3, unofficial].
+The method projects each convex polyhedral cell onto the image plane, subdivides the resulting 2D projection into regions where optical thickness varies linearly, and uses texture mapping to compute non-linear opacity per pixel.
 
 ### Inputs and Outputs
-- **Input**: Unstructured grid data (nodes and cells). Nodes store 3D coordinates and a scalar value [S2]. Cells store indices of their constituent nodes [S2].
-- **Output**: A 2D rendered image with color and opacity per pixel [S1, unofficial].
+*   **Input**: A set of convex polyhedral cells defined by their 3D vertices and scalar field values (extinction coefficient $\tau$).
+*   **Output**: A 2D image with color and opacity values for each pixel.
 
 ### Data Structures
-**Ray Segment**: A data structure used during scan conversion and composition, consisting of four parameters [S1, unofficial]:
-1.  $RGB$: Color contribution.
-2.  $\alpha$: Opacity contribution.
-3.  $z_{front}$: Depth of the front intersection point of the ray with the cell.
-4.  $z_{back}$: Depth of the back intersection point of the ray with the cell [S1, unofficial].
 
-**Cell Storage**: Each cell stores 4 node indices (16 bytes) [S2].
-**Node Storage**: Each node stores 3 coordinates and 1 scalar value (16 bytes) [S2].
+**Ray Segment**
+A data structure used during scan conversion and composition [S2, unofficial]:
+*   `RGB`: 3 floats (color contribution).
+*   $\alpha$: 1 float (opacity).
+*   $z_{front}$: 1 float (depth of front intersection).
+*   $z_{back}$: 1 float (depth of back intersection).
+
+**Winged-Edge Subdivision Structure**
+Used to manage the projection of an arbitrary polyhedron [S1]:
+*   Vertices: 2D screen coordinates.
+*   Edges: Connect two vertices, store next/previous edges in the polygon, and the face they belong to.
+*   Faces: List of edges forming a polygon.
+
+**Spatial Partitioning Tree (Parallel Variant)**
+Used in parallel implementations to optimize compositing and reduce memory consumption [S3]:
+*   Hierarchical representation of the data space.
+*   Guides rendering and cell searching.
 
 ### Steps
 
-1.  **Projection Phase**:
-    For each 3D cell, project its vertices onto the 2D screen space to determine the projection area $R$ [S1, unofficial]. If the cell is curvilinear (faces are not planar), modifications are made to approximate it as a convex polyhedron with planar faces [S3, unofficial].
+1.  **Global Sorting**: Sort all cells in back-to-front order relative to the viewpoint [S1][S4, unofficial]. This is necessary because the compositing step assumes a pile of cells being viewed from beneath, where cells are removed from the top (back) and composited [S1].
+2.  **Projection Phase**: For each cell, project its 3D vertices into 2D screen space [S2, unofficial]. Determine the projection area $R$ on the screen [S2, unofficial].
+3.  **Subdivision**: Construct a winged-edge subdivision structure for the projected polyhedron [S1].
+    *   Add projected edges one by one to the structure [S1].
+    *   Find intersections between new edges and existing edges [S1].
+    *   Create new vertices at intersections and modify the structure, potentially dividing existing polygons [S1].
+    *   The result is a set of polygonal regions $Q$ in the image plane [S1].
+4.  **Thickness and Opacity Calculation**:
+    *   Assume viewing rays are parallel or approximate perspective as linear variation for small/distant cells [S1].
+    *   For each region $Q$, identify the front and back faces of the polyhedron it lies in [S1].
+    *   Compute the thickness (length of the viewing ray segment in the cell) at the vertices of $Q$ [S1].
+        *   Thickness is zero at profile vertices (e.g., silhouette edges) [S1].
+        *   Compute thickness from geometry at non-profile vertices and projected edge intersections [S1].
+    *   Compute colors and opacities for viewing rays through the region's vertices by analytic integration of the extinction coefficient $\tau$ [S1].
+    *   The transparency is defined as $T = \exp\left(-\int_0^l \tau(s) \, ds\right)$ [S1].
+    *   If $\tau$ is constant, $T = \exp(-l \cdot \tau)$ [S1].
+5.  **Hardware Compositing (Scan Conversion)**:
+    *   Use polygon rendering hardware to render each region $Q$ [S1].
+    *   **Texture Mapping for Opacity**: To avoid Mach bands caused by linear interpolation of transparency, use a texture map for the exponential lookup [S1].
+        *   For constant $\tau$: Use the product $l \cdot \tau$ as a 1D texture coordinate [S1].
+        *   For varying $\tau$: Use $l$ and $\tau$ as a 2D texture coordinate pair [S1].
+    *   Interpolate and composite using hardware, avoiding linear interpolation of vertex transparency [S1].
+    *   *Parallel Variant*: Each processor scan converts its local cells to produce ray segments [S3]. Cells are not pre-sorted in depth order locally [S3].
+    *   *Parallel Variant*: Route generated ray segments to their final destinations in image space for merging [S3].
+    *   *Parallel Variant*: Use a double-buffer scheme with asynchronous send/receive to overlap communication with rendering [S3].
+    *   *Parallel Variant*: After scan conversion, each processor sends its completed subimage to a host computer for assembly [S3].
+6.  **Composition Phase**:
+    *   Composite depth-sorted ray segments from front to back using alpha blending with Porter-Duff's over operation [S2, unofficial].
+    *   *Partial Composition*: If two neighboring ray segments in a list are derived from neighboring cells contacting each other along the ray, compose them immediately to reduce list length [S2, unofficial].
 
-2.  **Scan Conversion Phase**:
-    For each pixel $P(x, y)$ within the projection area $R$ of a cell:
-    - Calculate the ray corresponding to $P(x, y)$ [S1, unofficial].
-    - Determine the intersection of the ray with the cell to find $z_{front}$ and $z_{back}$ [S1, unofficial].
-    - Compute the cell's color ($RGB$) and opacity ($\alpha$) contribution at these intersections [S1, unofficial].
-    - Create a Ray Segment for this pixel.
-    
-    After processing all cells, for each pixel on the screen, gather all Ray Segments corresponding to that pixel and sort them by depth ($z_{front}$) to form a depth-sorted list [S1, unofficial].
-    
-    *Partial Composition*: During scan conversion, if two neighboring ray segments in a list are derived from neighboring cells that contact each other along the ray, they can be composed immediately [S1, unofficial]. The result is a single Ray Segment, reducing the list length [S1, unofficial].
+### Formulas
 
-3.  **Composition Phase**:
-    For each pixel, composite the depth-sorted Ray Segment list from front to back using alpha blending with the Porter-Duff "over" operation to calculate the final pixel color [S1, unofficial].
+The differential equation for intensity $I(s)$ along a ray with extinction coefficient $\tau(s)$ is [S1]:
+$$ \frac{dI(s)}{ds} = -\tau(s)I(s) $$
+
+Integrating along a ray segment of length $l$ yields [S1]:
+$$ \ln I(l) - \ln I(0) = - \int_0^l \tau(s) \, ds $$
+
+Solving for intensity gives [S1]:
+$$ I(l) = I(0) \exp\left(-\int_0^l \tau(s) \, ds\right) $$
+
+Transparency is defined as [S1]:
+$$ T = \exp\left(-\int_0^l \tau(s) \, ds\right) $$
+
+### Parameters
+
+*   **Cell Storage**: 16 bytes per cell, storing four node indices [S3].
+*   **Node Storage**: 16 bytes per node, storing three coordinates and a scalar value [S3].
+*   **Transparency**: Non-linear function of thickness, requiring exponential calculation or texture lookup [S1].
+
+### Edge Cases and Pitfalls
+
+*   **Mach Bands**: Linear or bilinear interpolation of vertex transparency causes distracting Mach bands because opacity is a nonlinear function of thickness [S1]. Solution: Use texture mapping for exponential lookup [S1].
+*   **Curvilinear Cells**: Faces may not be planar. Modifications are required to approximate curvilinear cells, such as view-dependent subdivision into tetrahedra [S1][S4, unofficial].
+*   **Load Imbalance (Parallel)**: Grouping connected cells together causes severe load imbalances during zoom-in viewing, as a few processors handle all calculations while others go idle [S3]. Solution: Distribute cells in a round-robin fashion to disperse nearby cells widely [S3].
+*   **Irregular Meshes**: Unstructured meshes have irregular cell sizes and shapes, making balanced load distribution difficult due to variations in projected image area and scan conversion costs [S3].
+*   **Sorting Requirement**: Cells must be sorted in back-to-front order for correct compositing in the single-processor/hardware-assisted variant [S1][S4, unofficial].
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def hardware_assisted_polyhedron_projection(cells, nodes, view_matrix, proj_matrix, screen_width, screen_height):
+def hardware_assisted_polyhedron_projection(cells, view_matrix, projection_matrix, texture_map):
     """
-    Render unstructured grid using hardware-assisted polyhedron projection.
+    Renders unstructured grid cells using hardware-assisted polyhedron projection.
     
     Args:
-        cells: List of cells, each containing indices of nodes.
-        nodes: List of nodes, each with position (x,y,z) and scalar value.
-        view_matrix: 4x4 view transformation matrix.
-        proj_matrix: 4x4 projection transformation matrix.
-        screen_width: Width of the output image in pixels.
-        screen_height: Height of the output image in pixels.
+        cells: List of convex polyhedral cells. Each cell has vertices and extinction coefficient tau.
+        view_matrix: 4x4 view matrix.
+        projection_matrix: 4x4 projection matrix.
+        texture_map: 1D or 2D texture map for exponential lookup.
         
     Returns:
-        image: 2D array of RGB values.
+        Image buffer.
     """
-    # Initialize image buffer with zeros
-    image = [[[0.0, 0.0, 0.0] for _ in range(screen_width)] for _ in range(screen_height)]
-    ray_segment_lists = {}
-
-    # Step 1 & 2: Projection and Scan Conversion
-    for cell in cells:
-        # Get 3D node positions
-        node_positions = [nodes[idx].position for idx in cell.node_indices]
-
-        # Project vertices to screen space (standard view-projection)
-        screen_vertices = []
-        for v in node_positions:
-            clip = proj_matrix @ (view_matrix @ v)
-            if clip.w != 0:
-                ndc = (clip.xyz / clip.w)
-                screen_vertices.append(((ndc.x + 1) * screen_width / 2, (ndc.y + 1) * screen_height / 2))
-
-        # Determine bounding box
-        min_x = min(v[0] for v in screen_vertices)
-        max_x = max(v[0] for v in screen_vertices)
-        min_y = min(v[1] for v in screen_vertices)
-        max_y = max(v[1] for v in screen_vertices)
-
-        # Scan conversion over projection area
-        for y in range(int(min_y), int(max_y) + 1):
-            for x in range(int(min_x), int(max_x) + 1):
-                # Point-in-polygon test (ray casting)
-                if not _point_in_polygon(x, y, screen_vertices):
-                    continue
-
-                # Generate camera ray for pixel (standard inverse projection)
-                ndc_x = (x + 0.5) * 2 / screen_width - 1
-                ndc_y = (y + 0.5) * 2 / screen_height - 1
-                ray_origin = view_matrix.inverse().transform_point((0, 0, 0))
-                ray_dir = view_matrix.inverse().transform_direction((ndc_x, ndc_y, -1))
-                ray_dir = ray_dir / ray_dir.length()
-
-                # Intersect ray with convex polyhedron faces
-                intersections = []
-                for i in range(len(node_positions)):
-                    p1 = node_positions[i]
-                    p2 = node_positions[(i + 1) % len(node_positions)]
-                    p3 = node_positions[(i + 2) % len(node_positions)]
-                    # Compute face normal
-                    normal = (p2 - p1).cross(p3 - p1).normalize()
-                    denom = ray_dir.dot(normal)
-                    if abs(denom) > 1e-6:
-                        t = normal.dot(p1 - ray_origin) / denom
-                        if t > 0:
-                            hit = ray_origin + ray_dir * t
-                            if _point_in_polygon_3d(hit, [p1, p2, p3], normal):
-                                intersections.append(t)
-
-                if len(intersections) >= 2:
-                    intersections.sort()
-                    z_front = intersections[0]
-                    z_back = intersections[-1]
-
-                    # Interpolate scalar values at intersection points (barycentric/trilinear)
-                    p_front = ray_origin + ray_dir * z_front
-                    p_back = ray_origin + ray_dir * z_back
-                    scalar_front = _interpolate_scalar(p_front, node_positions, [n.scalar for n in nodes])
-                    scalar_back = _interpolate_scalar(p_back, node_positions, [n.scalar for n in nodes])
-
-                    # Map scalars to color and opacity (standard transfer function)
-                    color, alpha = _map_scalar_to_color_opacity(scalar_front, scalar_back)
-
-                    segment = RaySegment(RGB=color, alpha=alpha, z_front=z_front, z_back=z_back)
-                    if (x, y) not in ray_segment_lists:
-                        ray_segment_lists[(x, y)] = []
-                    ray_segment_lists[(x, y)].append(segment)
-
-    # Step 3: Sorting and Composition
-    for (x, y), segments in ray_segment_lists.items():
-        segments.sort(key=lambda s: s.z_front)
-
-        # Partial Composition: merge adjacent segments from neighboring cells if available [G]
-        # (Requires adjacency graph not provided in basic CP scheme)
-        merged_segments = segments
-
-        accumulated_alpha = 0.0
-        accumulated_color = [0.0, 0.0, 0.0]
-
-        for segment in merged_segments:
-            c_seg = segment.RGB
-            a_seg = max(0.0, min(1.0, segment.alpha))
-
-            # Porter-Duff over operation
-            accumulated_color = [
-                c_seg[0] + accumulated_color[0] * (1.0 - a_seg),
-                c_seg[1] + accumulated_color[1] * (1.0 - a_seg),
-                c_seg[2] + accumulated_color[2] * (1.0 - a_seg)
-            ]
-            accumulated_alpha = a_seg + accumulated_alpha * (1.0 - a_seg)
-
-            if accumulated_alpha >= 1.0:
-                break
-
-        image[y][x] = accumulated_color
-
+    # Step 1: Global Sorting (Single-Processor Variant)
+    # Sort cells back-to-front relative to viewpoint
+    sorted_cells = sort_cells_back_to_front(cells, view_matrix)
+    
+    # Initialize image buffer
+    image = initialize_image_buffer()
+    
+    # Step 2-5: Process each cell
+    for cell in sorted_cells:
+        # Project vertices to screen space
+        screen_vertices = project_vertices(cell.vertices, view_matrix, projection_matrix)
+        
+        # Construct winged-edge subdivision for the projection
+        subdivision = construct_winged_edge_subdivision(screen_vertices, cell.edges)
+        
+        # For each polygonal region Q in the subdivision
+        for region in subdivision.polygons:
+            # Identify front and back faces of the polyhedron for this region
+            front_face, back_face = identify_faces(region, cell)
+            
+            # Compute thickness at vertices of the region
+            # Thickness is zero at profile vertices, computed from geometry otherwise
+            thicknesses = compute_thickness(region.vertices, front_face, back_face, view_matrix)
+            
+            # Compute color and opacity at vertices
+            # Use analytic integration for opacity
+            vertex_colors = []
+            vertex_opacities = []
+            for i, vertex in enumerate(region.vertices):
+                # Analytic integration of tau along the ray through the vertex
+                tau_at_vertex = get_tau_at_vertex(vertex, cell)
+                l = thicknesses[i]
+                
+                # Transparency T = exp(-integral(tau ds))
+                # For constant tau: T = exp(-l * tau)
+                # Use texture map for exponential lookup
+                if is_constant_tau(cell):
+                    tex_coord = l * tau_at_vertex
+                    T = texture_map.lookup_1d(tex_coord)
+                else:
+                    tex_coord = (l, tau_at_vertex)
+                    T = texture_map.lookup_2d(tex_coord)
+                
+                opacity = 1.0 - T
+                color = interpolate_color(vertex, cell)
+                vertex_colors.append(color)
+                vertex_opacities.append(opacity)
+            
+            # Render region using hardware
+            # Use texture mapping to avoid Mach bands
+            render_region_hardware(region, vertex_colors, vertex_opacities, texture_map)
+            
+            # Composite onto image buffer
+            # Note: Hardware compositing assumes correct depth order
+            composite_region_into_image(region, image)
+            
     return image
 
-class RaySegment:
-    def __init__(self, RGB, alpha, z_front, z_back):
-        self.RGB = RGB
-        self.alpha = alpha
-        self.z_front = z_front
-        self.z_back = z_back
+def construct_winged_edge_subdivision(screen_vertices, edges):
+    """
+    Constructs a winged-edge subdivision structure for the projected polyhedron.
+    """
+    structure = WingedEdgeStructure()
+    
+    # Add projected edges one by one
+    for edge in edges:
+        # Find intersections with existing edges
+        intersections = find_edge_intersections(edge, structure)
+        
+        # Create new vertices at intersections
+        for intersection in intersections:
+            structure.add_vertex(intersection)
+            
+        # Modify structure, potentially dividing existing polygons
+        structure.add_edge(edge)
+        
+    return structure
 
-def _point_in_polygon(x, y, vertices):
-    # Standard ray casting algorithm
-    inside = False
-    n = len(vertices)
-    for i in range(n):
-        x1, y1 = vertices[i]
-        x2, y2 = vertices[(i + 1) % n]
-        if ((y1 > y) != (y2 > y)) and (x < (x2 - x1) * (y - y1) / (y2 - y1) + x1):
-            inside = not inside
-    return inside
+def compute_thickness(vertices, front_face, back_face, view_matrix):
+    """
+    Computes the thickness (length of viewing ray segment) at each vertex.
+    """
+    thicknesses = []
+    for vertex in vertices:
+        # Check if vertex is a profile vertex (silhouette)
+        if is_profile_vertex(vertex, front_face, back_face):
+            thickness = 0.0
+        else:
+            # Compute thickness from geometry of P and viewing ray
+            # Project vertex to 3D space if needed
+            thickness = compute_ray_length(vertex, front_face, back_face, view_matrix)
+        thicknesses.append(thickness)
+    return thicknesses
 
-def _point_in_polygon_3d(point, face_vertices, normal):
-    # Check if point is inside 3D triangle using barycentric coordinates
-    v0 = face_vertices[2] - face_vertices[0]
-    v1 = face_vertices[1] - face_vertices[0]
-    v2 = point - face_vertices[0]
-    dot00 = v0.dot(v0)
-    dot01 = v0.dot(v1)
-    dot02 = v0.dot(v2)
-    dot11 = v1.dot(v1)
-    dot12 = v1.dot(v2)
-    inv_denom = 1 / (dot00 * dot11 - dot01 * dot01)
-    u = (dot11 * dot02 - dot01 * dot12) * inv_denom
-    v = (dot00 * dot12 - dot01 * dot02) * inv_denom
-    return (u >= 0) and (v >= 0) and (u + v <= 1)
-
-def _interpolate_scalar(point, node_positions, node_scalars):
-    # Barycentric interpolation for tetrahedron/polyhedron approximation [G]
-    # In practice, uses cell-local basis functions or trilinear interpolation
-    return node_scalars[0]
-
-def _map_scalar_to_color_opacity(scalar_front, scalar_back):
-    # Standard transfer function lookup [G]
-    return (0.0, 0.0, 0.0), 0.0
+def is_profile_vertex(vertex, front_face, back_face):
+    """
+    Determines if a vertex is a profile vertex (silhouette edge).
+    """
+    # A vertex is a profile vertex if the viewing direction is tangent to the surface
+    # or if it lies on the silhouette boundary
+    return False # Implementation detail depends on specific geometry
 ```
 
-### Parameters
-- **Cell Storage**: 16 bytes per cell (4 node indices) [S2].
-- **Node Storage**: 16 bytes per node (3 coordinates, 1 scalar) [S2].
-- **Typical Values**: Not given in the sources.
+## Subtopics
 
-### Edge Cases and Pitfalls
-- **Curvilinear Cells**: Faces may not be planar. Modifications are required to approximate them as convex polyhedra with planar faces [S3, unofficial].
-- **Load Imbalance**: Grouping connected cells together causes severe load imbalances during zoom-in viewing, as a few processors handle all calculations while others go idle [S2].
-- **Irregular Meshes**: Unstructured meshes have irregular cell sizes and shapes, making balanced load distribution difficult due to variations in projected image area and scan conversion costs [S2].
-- **Global Sorting**: The method requires global sorting for back-to-front compositing, which can be a bottleneck [S3, unofficial].
+### Hardware-Assisted Projected Tetrahedra
+A sibling method that specifically handles tetrahedral cells, often using simpler projection logic than arbitrary polyhedra. Choose when the mesh is strictly tetrahedral and simpler hardware acceleration is desired. [Link](1729-hardware-assisted-projected-tetrahedra.md)
+
+### Absorption-Only Radiography via Unsorted Hexahedron Projection
+A sibling method that uses unsorted hexahedra and additive accumulation for absorption-only regimes, avoiding the need for global sorting. Choose when transparency is negligible and performance is critical. [Link](10255-absorption-only-radiography-via-unsorted-hexahedron-projecti.md)
 
 ## Operating characteristics
-- **Time Complexity**: Dominated by scan conversion and sorting [S1, S3, unofficial].
-- **Memory Complexity**: Depends on the number of ray segments per pixel [S1, unofficial].
-- **Performance**: On an IBM SP2 with 128 processors, the algorithm achieved 2 frames per second for a 400x400-pixel image using a dataset with half a million tetrahedral cells [S2].
-- **Scalability**: The round-robin distribution of cells among processors provides good scalability and load balancing for large datasets [S2].
-- **Strengths**: Flexible data distribution, efficient on distributed-memory systems, leverages hardware polygon rendering [S2][S3, unofficial].
-- **Limitations**: Requires global sorting for compositing, sensitive to load imbalances if data is not distributed properly, approximations for curvilinear cells [S2][S3, unofficial].
-- **When to Use**: Large unstructured grids on distributed-memory systems where flexibility in data distribution is needed [S2].
-- **When Not to Use**: When high precision for curvilinear cells is required without approximation, or when global sorting is a bottleneck [S3, unofficial].
+
+*   **Time Complexity**: Dominated by global sorting of cells $O(N \log N)$ and scan conversion of each cell's projection area. Parallel variant reduces sorting overhead by distributing cells round-robin but adds communication overhead for merging ray segments [S3].
+*   **Memory Complexity**: Requires storage for ray segments in parallel variants. Cell storage is 16 bytes per cell, node storage is 16 bytes per node [S3].
+*   **Measured Performance**: On an IBM SP2 with 128 processors, achieved 2 frames per second for a 400x400-pixel image using a dataset with half a million tetrahedral cells [S3].
+*   **Strengths**: Efficient use of hardware polygon rendering pipelines; flexible data distribution in parallel variants; avoids irregular memory access of raycasting [S1, S3].
+*   **Limitations**: Requires global sorting for correct compositing in single-processor variant; Mach bands if transparency is interpolated linearly; load imbalance if connected cells are grouped in parallel variants [S1, S3].
+*   **When to Use**: Suitable for convex polyhedral unstructured grids where hardware acceleration is available and global sorting is feasible.
+*   **When Not to Use**: Unsuitable for non-convex cells without decomposition; poor for highly transparent volumes where additive accumulation might be more efficient; load imbalance issues if not using round-robin distribution in parallel [S1, S3].
 
 ## Background
-The method was introduced by Nelson Max, Peter L. Williams, and Cláudio T Silva in 2000 [S3, unofficial]. It is based on the Cell-Projection (CP) scheme [S1, unofficial]. The approach was developed to address the challenges of volume rendering on massively parallel distributed-memory supercomputers, providing a scalable alternative to raycasting [S2].
+
+*   **Origin**: Proposed by Nelson Max, Peter L. Williams, and Cláudio T Silva in 2000 [S1].
+*   **History**: Builds on earlier work by Shirley and Tuchman (1990) and Wilhelms and Van Gelder (1991) on subdividing projected tetrahedra and cubes [S1].
+*   **Usage**: Used in scientific visualization for unstructured grids, particularly on distributed-memory supercomputers [S3].
 
 ## Sources
-[S1] PDF Cell-projection Parallel Volume Rendering With Early Ray Termination, http://www.tomitaken.org/project/papers/ReVolver/2004/VIIP.pdf, fetched 2026-10-27 (unofficial)
-[S2] PDF A Scalable Parallel Cell-Projection Volume Rendering Algorithm for ..., https://web.cs.ucdavis.edu/~ma/papers/PRS97.pdf, fetched 2026-10-27
-[S3] (PDF) Image-space visibility ordering for cell projection volume ..., https://www.researchgate.net/publication/8193687_Image-space_visibility_ordering_for_cell_projection_volume_rendering_of_unstructured_data, fetched 2026-10-29 (unofficial)
+
+[S1] Approximate volume rendering for curvilinear and unstructured grids by hardware-assisted polyhedron projection, https://doi.org/10.1002/(sici)1098-1098(2000)11:1<53::aid-ima6>3.0.co;2-7, fetched 2026-10-25
+[S2] PDF Cell-projection Parallel Volume Rendering With Early Ray Termination, http://www.tomitaken.org/project/papers/ReVolver/2004/VIIP.pdf, fetched 2026-10-27 (unofficial)
+[S3] PDF A Scalable Parallel Cell-Projection Volume Rendering Algorithm for ..., https://web.cs.ucdavis.edu/~ma/papers/PRS97.pdf, fetched 2026-10-27
+[S4] (PDF) Image-space visibility ordering for cell projection volume ..., https://www.researchgate.net/publication/8193687_Image-space_visibility_ordering_for_cell_projection_volume_rendering_of_unstructured_data, fetched 2026-10-29 (unofficial)

@@ -1,94 +1,106 @@
 # Ray Casting and Compositing Loop
 
-Also called: MLS Ray Casting Loop
+Also called: Front-to-back compositing loop, Volume rendering integral evaluation
 
 ## Overview
-This method performs direct volume rendering by intersecting camera rays with a volume domain defined by scattered data points, rather than a regular voxel grid. It solves the problem of rendering irregular or unstructured data by using Moving Least Squares (MLS) to evaluate density and gradients at arbitrary sample points [S1, unofficial]. Unlike sibling methods that rely on precomputed voxel grids or regular spatial structures, this approach computes the MLS function and its gradient on-the-fly (or via optimized lookup) to drive an adaptive integration loop, compositing results via front-to-back accumulation [S1, unofficial].
+This method defines the core computational loop for direct volume ray casting, responsible for sampling the volume, mapping data to optical properties, and accumulating color and opacity along a ray [S5, S10, S37]. It solves the problem of synthesizing a 2D image from a 3D scalar or vector field by evaluating the volume rendering equation [S1, S13]. It is distinguished from [Ray Marching and Discretization](2788-ray-marching-and-discretization.md) by its explicit handling of the compositing accumulation and transfer function application within the integration step, and from [Monte Carlo Path Tracing for Volume Rendering](4980-monte-carlo-path-tracing-for-volume-rendering.md) by its deterministic, image-order approach [S1, S56].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A set of scattered data points $\{\mathbf{x}_i, d_i\}$ where $\mathbf{x}_i$ is the position and $d_i$ is the scalar value; a transfer function $T(d) \rightarrow (C, \alpha)$; a camera ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; an early ray termination threshold $\tau$ (typically 0.99) [S1, unofficial].
-*   **Output:** Final pixel color $C_{final}$ and opacity $\alpha_{final}$ [S1, unofficial].
+**Inputs:** Ray origin $\mathbf{o}$, direction $\mathbf{d}$, volume data structure $V$, transfer function $T$, background color $C_{bg}$.
+**Outputs:** Final pixel color $C_{final}$ and opacity $\alpha_{final}$.
 
 **Data Structures:**
-*   **Spatial Search Structure:** A dynamic redundant octree (Guennebaud et al.) is used to efficiently find neighbor samples for the MLS evaluation [S1, unofficial].
-*   **Preintegration Tables:** Tables storing integrated color and opacity values for specific intervals of MLS function values and gradients [S1, unofficial].
-*   **Ray Stack:** A small stack stored in local memory (on GPU) to manage recursion for adaptive traversal [S1, unofficial].
+*   **Ray:** Parameterized as $r(t) = \mathbf{o} + t\mathbf{d}$.
+*   **Volume:** Accessible via interpolation. For regular grids, this is typically a 3D array; for unstructured grids (e.g., MLS), it requires neighbor queries [S1, unofficial].
+*   **Accumulators:** $C_{acc}$ (color, initialized to 0), $\alpha_{acc}$ (opacity, initialized to 0).
 
-**Method Steps:**
-1.  **Ray-Volume Intersection:** Intersect the camera ray with the boundary of the volume (the hull of the grid/data points) to determine all valid ray segments $[t_{start}, t_{end}]$ within the domain [S1, unofficial].
-    *   *Pitfall:* The MLS function approximation is ill-defined away from data points. Therefore, precise boundary intersection points are critical to ensure sampling occurs only within the valid data hull [S1, unofficial].
-2.  **Adaptive Interval Determination:** Along each intersected ray segment, determine integration intervals using an adaptive scheme. This scheme adjusts step sizes based on local frequency content or gradient magnitude to balance accuracy and performance [S1, unofficial].
-3.  **MLS Evaluation:** For each integration interval, compute the MLS function value $f(t)$ and its gradient $\nabla f(t)$ at the front and back endpoints of the interval. This involves a neighborhood query using the spatial search structure and solving a linear system (e.g., via Cholesky decomposition) to determine the local basis coefficients [S1, unofficial].
-4.  **Preintegration Lookup:** Use the computed MLS function values and gradients at the interval boundaries to look up precomputed color and opacity contributions from preintegration tables. If an interval length is not present in the tables, combine values from adjacent tables carefully (this occurs rarely, ~2 times per ray) [S1, unofficial].
-5.  **Compositing:** Composite the resulting color $C_i$ and opacity $\alpha_i$ from each interval into the accumulated ray state using front-to-back volume rendering equation:
-    $$ C_{final} = C_{prev} + C_i \alpha_i (1 - \alpha_{prev}) $$
-    $$ \alpha_{final} = \alpha_{prev} + \alpha_i (1 - \alpha_{prev}) $$
-    where $C_{prev}$ and $\alpha_{prev}$ are the accumulated color and opacity before the current interval [S1, unofficial].
-6.  **Early Ray Termination:** After each compositing step, check if $\alpha_{final} > \tau$. If true, terminate the ray early and output the current accumulated values [S1, unofficial].
+**Steps:**
 
-**Pseudocode:**
+1.  **Ray-Volume Intersection:** Determine the entry $t_{start}$ and exit $t_{end}$ points where the ray intersects the volume boundary [S1, S8, S16]. For non-convex volumes, this may yield multiple intervals [S1, unofficial].
+2.  **Discretization:** Divide the segment $[t_{start}, t_{end}]$ into $N$ samples. The step size is $\Delta t = (t_{end} - t_{start}) / N$ [S5, S10, S17]. Adaptive schemes may vary $\Delta t$ based on local frequency or error estimates [S1, unofficial].
+3.  **Sampling Loop:** For each sample $i$ from front to back:
+    a.  **Position:** Compute sample point $\mathbf{p}_i = r(t_i)$.
+    b.  **Interpolation:** Retrieve scalar value $d_i$ from $V$ at $\mathbf{p}_i$ using a reconstruction kernel (e.g., trilinear interpolation) [S7, S10, S43].
+    c.  **Classification:** Map $d_i$ to color $C_i$ and opacity $\alpha_i$ using the transfer function $T(d_i) \rightarrow (C_i, \alpha_i)$ [S2, S2789].
+    d.  **Step Size Correction:** Adjust opacity for the discrete step size to approximate continuous integration: $\alpha'_i = 1 - (1 - \alpha_i)^{\Delta t}$ [S11, S32].
+    e.  **Compositing:** Update accumulators:
+        $$
+        C_{acc}^{(i)} = C_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) \alpha'_i C_i
+        $$
+        $$
+        \alpha_{acc}^{(i)} = \alpha_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) \alpha'_i
+        $$
+        where $(1 - \alpha_{acc}^{(i-1)})$ is the transmittance [S1, S51].
+    f.  **Early Termination:** If $\alpha_{acc}^{(i)} > \tau$ (threshold, typically 0.99), break the loop [S1, S10, S12].
+4.  **Background Compositing:** Compute final color: $C_{final} = C_{acc} + (1 - \alpha_{acc}) C_{bg}$ [S1, S14].
+
+**Pitfalls:**
+*   **Boundary Intersection:** For methods relying on local approximations (like MLS), intersection points are critical because the approximation is ill-defined away from data points [S1, unofficial].
+*   **Precision:** Accumulating small opacity values can lead to precision issues; using the transmittance form $T_i = T_{i-1} \cdot (1 - \alpha'_i)$ is numerically more stable for highly transparent volumes [G].
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def ray_cast_and_composite(ray_origin, ray_direction, volume_data, transfer_function, threshold=0.99):
-    # 1. Intersect ray with volume boundary
-    intervals = intersect_ray_with_hull(ray_origin, ray_direction, volume_data.points)
+def ray_casting_loop(ray_origin, ray_direction, volume, transfer_function, background_color, threshold=0.99):
+    # 1. Intersection
+    t_start, t_end = intersect_volume(ray_origin, ray_direction, volume)
+    if t_start is None:
+        return background_color, 0.0
+
+    # 2. Discretization
+    num_samples = estimate_samples(t_end - t_start, volume)
+    delta_t = (t_end - t_start) / num_samples
     
-    accumulated_color = (0.0, 0.0, 0.0)
-    accumulated_opacity = 0.0
-    
-    for interval in intervals:
-        t_front, t_back = interval.start, interval.end
+    acc_color = [0.0, 0.0, 0.0]
+    acc_alpha = 0.0
+    transmittance = 1.0
+
+    # 3. Sampling Loop
+    for i in range(num_samples):
+        t = t_start + i * delta_t
+        point = ray_origin + ray_direction * t
         
-        # 2. Adaptive sampling: determine sub-intervals if necessary
-        # For simplicity, assume one interval per segment for core logic,
-        # but adaptive scheme may split this.
+        # Check if point is inside volume (for non-convex or adaptive steps)
+        if not is_inside_volume(point, volume):
+            continue
+
+        # Sampling and Interpolation
+        scalar_val = volume.interpolate(point)
         
-        # 3. Evaluate MLS at boundaries
-        # Find neighbors using spatial search structure (e.g., octree)
-        neighbors_front = find_neighbors(t_front, volume_data)
-        neighbors_back = find_neighbors(t_back, volume_data)
+        # Classification
+        color, alpha = transfer_function(scalar_val)
         
-        mls_val_front, grad_front = evaluate_mls(t_front, neighbors_front, volume_data)
-        mls_val_back, grad_back = evaluate_mls(t_back, neighbors_back, volume_data)
+        # Step Size Correction
+        alpha_corrected = 1.0 - (1.0 - alpha) ** delta_t
         
-        # 4. Lookup preintegration table
-        # Table key: (mls_val_front, mls_val_back, grad_front, grad_back, interval_length)
-        # Returns: (delta_color, delta_opacity)
-        delta_color, delta_opacity = lookup_preintegration_table(
-            mls_val_front, mls_val_back, grad_front, grad_back, t_back - t_front
-        )
+        # Compositing
+        contribution = transmittance * alpha_corrected * color
+        acc_color = [c + contrib for c, contrib in zip(acc_color, contribution)]
+        acc_alpha += contribution
+        transmittance *= (1.0 - alpha_corrected)
         
-        # 5. Composite
-        # Front-to-back compositing
-        weight = delta_opacity * (1.0 - accumulated_opacity)
-        accumulated_color = accumulated_color + delta_color * weight
-        accumulated_opacity = accumulated_opacity + delta_opacity * (1.0 - accumulated_opacity)
-        
-        # 6. Early Ray Termination
-        if accumulated_opacity > threshold:
+        # Early Termination
+        if acc_alpha > threshold:
             break
-            
-    return accumulated_color, accumulated_opacity
+
+    # 4. Background Compositing
+    final_color = [c + (1.0 - acc_alpha) * bg for c, bg in zip(acc_color, background_color)]
+    return final_color, acc_alpha
 ```
 
 ## Subtopics
 
 ### CUDA GPU Implementation
-This variant implements the ray casting loop on NVIDIA GPUs using CUDA. Each thread processes a single ray, decoupling ray traversal from the volume data structure to maximize parallelism [S1, unofficial]. It supports both constant step size and adaptive traversal strategies. Recursion for adaptive traversal is managed via a small stack in local memory to avoid overhead. The spatial search structure is a dynamic redundant octree, chosen for its efficiency on GPUs and ability to handle dynamic updates and memory footprint control [S1, unofficial].
+A parallel implementation where each thread processes a single ray, decoupling traversal from the data structure [S1, unofficial]. It uses a dynamic redundant octree for neighbor queries and manages adaptive recursion via a local stack [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Dominated by the MLS evaluation, which involves a neighborhood query and solving a linear system (Cholesky decomposition) for each sample point. The complexity depends on the neighborhood size and basis degrees of freedom [S1, unofficial].
-*   **Memory Complexity:** Requires storage for the spatial search structure (octree) and preintegration tables. The octree size scales with the number of data points [S1, unofficial].
-*   **Performance:** On irregular datasets (e.g., tetrahedral meshes), performance varies. For example, on a "Blunt Fin" dataset (180K tets), CPU time was ~196s, while GPU acceleration significantly reduced this, though exact GPU times for this specific dataset are not provided in the source, the GPU implementation aims for "nearly interactive performance" [S1, unofficial].
-*   **Strengths:** Handles irregular/scattered data natively; adaptive sampling reduces computation in smooth regions; preintegration improves speed by avoiding expensive on-the-fly integration.
-*   **Limitations:** MLS evaluation is computationally expensive; boundary intersection is critical and complex for non-convex hulls; ill-defined MLS outside data points requires careful handling [S1, unofficial].
-*   **When to Use:** Ideal for rendering unstructured or scattered data where regular voxelization is lossy or difficult.
-*   **When Not to Use:** For regular voxel grids, standard ray marching is more efficient.
+*   **Complexity:** $O(N \cdot P)$ where $N$ is the number of pixels and $P$ is the number of samples per ray. Adaptive schemes reduce $P$ in smooth regions but increase overhead for traversal logic [S1, unofficial].
+*   **Performance:** On CPU, interactive rates (e.g., 10-20 fps) are achievable for moderate resolutions with constant step sizes [S1, unofficial]. GPU implementations achieve higher throughput by parallelizing rays [S1, unofficial].
+*   **Strengths:** Simple to implement, produces high-quality results with proper transfer functions, supports early termination [S10].
+*   **Limitations:** Performance degrades with high opacity or complex transfer functions requiring many samples; adaptive schemes add complexity [S1, unofficial].
 
 ## Background
-This method originates from the work on Volume MLS Ray Casting, which applies Moving Least Squares to volume rendering of scattered data [S1, unofficial]. It was developed to address the limitations of voxel-based rendering for irregular datasets. The CUDA implementation was added to achieve interactive performance on modern hardware [S1, unofficial].
+The front-to-back compositing loop is a fundamental technique in direct volume rendering, derived from the volume rendering integral [S1, S13]. It has been standard since the early days of DVR [S5, S10]. The specific use of preintegration tables and MLS (Moving Least Squares) evaluation for unstructured grids was detailed by [S1, unofficial].
 
 ## Sources
 [S1] Volume MLS Ray Casting, https://miriah.github.io/publications/volume_mls.pdf, fetched 2026-10-29 (unofficial)

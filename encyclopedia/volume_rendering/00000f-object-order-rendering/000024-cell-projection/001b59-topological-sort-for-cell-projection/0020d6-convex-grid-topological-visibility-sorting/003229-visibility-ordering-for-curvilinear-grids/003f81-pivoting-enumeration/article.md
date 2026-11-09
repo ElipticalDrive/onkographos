@@ -1,0 +1,279 @@
+# Pivoting Enumeration
+
+Also called: Pivoting-based enumeration scheme
+
+## Overview
+Pivoting enumeration is an optimization for enumerating the ordered vertices of an analytic face $P_{\tilde{r}}^F$ by traversing the boundaries of the working analytic cell $C_{\tilde{r}}^F$, starting from a known point on the face and a known boundary hyperplane [S1]. It improves upon brute-force pair enumeration by sorting boundary planes by distance to a starting point, thereby reducing the number of iterations required to find valid vertices [S1]. It is used within the context of analytic marching for implicit surface networks [S1].
+
+## How it works
+**Inputs:**
+1. A point $x \in P_{\tilde{r}}^F$ (a point on the analytic face) [S1].
+2. A hyperplane $H_{\tilde{r}}^{l_k} \in \{ H_{\tilde{r}}^{l_k} \}$ that is a true boundary of the working cell $C_{\tilde{r}}^F$ [S1].
+
+**Outputs:**
+1. A set $V_{\tilde{r}}^P$ of ordered vertices forming the analytic face $P_{\tilde{r}}^F$ [S1].
+
+**Data Structures:**
+*   **Hyperplane Set:** $\{ H_{\tilde{r}}^{l_k} \}$, where each hyperplane is defined by coefficients $a_{\tilde{r}}^{l_k}$. The total number of hyperplanes is $N = \sum_{i=1}^L n_i$, where $n_i$ is the number of neurons in layer $i$ of the network $T$ [S1].
+*   **Index Set $I_{\tilde{r}}$:** A list of tuples $[(l_1, k_1), \dots, (l_N, k_N)]$ representing the hyperplanes, sorted in increasing order of their Euclidean distances from the point $x$ [S1].
+*   **Auxiliary Index Sets:**
+    *   $I_{\tilde{r}}' = I_{\tilde{r}} \setminus \{(l_t, k_t)\}$ (excluding the current pivot) [S1].
+    *   $I_{\tilde{r}}'' = I_{\tilde{r}} \setminus \{(l_t, k_t), (l_{t'}, k_{t'})\}$ (excluding the current pivot and the previous pivot) [S1].
+*   **Vertex Set $V_{\tilde{r}}^P$:** Initially empty, stores valid vertices $v \in \mathbb{R}^3$ [S1].
+*   **Auxiliary Integers:** $t, t', t'' \in \mathbb{N}$ used to index into the sorted hyperplane lists [S1].
+
+**Parameters:**
+*   **Starting Boundary Plane:** $H_{\tilde{r}}^{l^* k^*}$ (also indexed as $(l_t, k_t)$ initially). This is set to the switching plane that gives the current cell state, as determined in the preceding step of the analytic marching algorithm (Step 10 of Algorithm 1 in the source) [S1].
+*   **Starting Point:** $x$. This is set to the middle point of the switching edge on the switching plane $H_{\tilde{r}}^{l^* k^*}$ [S1].
+
+**Algorithm Steps:**
+1.  **Initialization:**
+    *   Establish the index set $I_{\tilde{r}}$ by sorting all $N$ hyperplanes in $\{ H_{\tilde{r}}^{l_k} \}$ in increasing order of their Euclidean distances from the point $x$ [S1].
+    *   Let $(l_t, k_t)$ be the index in $I_{\tilde{r}}$ corresponding to the starting boundary plane $H_{\tilde{r}}^{l^* k^*}$ [S1].
+    *   Initialize $V_{\tilde{r}}^P = \emptyset$ and $t'' = 1$ [S1].
+    *   Define $I_{\tilde{r}}' = I_{\tilde{r}} \setminus \{(l_t, k_t)\}$ [S1].
+
+2.  **Find First Vertex:**
+    *   Loop while $V_{\tilde{r}}^P = \emptyset$:
+        *   Solve the linear system of equations for a vertex candidate $v \in \mathbb{R}^3$:
+            $$ a_{\tilde{r}}^{l_t k_t} \times a_{\tilde{r}}^{l_{t''} k_{t''}} \times a_{\tilde{r}}^F \cdot v = 0 $$
+            Here, the notation $a_{\tilde{r}}^{l k} \times a_{\tilde{r}}^{l' k'} \times a_{\tilde{r}}^F$ represents the intersection of three hyperplanes (the current pivot, the candidate pivot, and the face plane $F$) [S1].
+        *   Check if $v$ satisfies the boundary condition (13) of the cell $C_{\tilde{r}}^F$ [S1].
+        *   If valid:
+            *   Push $v$ into $V_{\tilde{r}}^P$ [S1].
+            *   Update $(l_{t'}, k_{t'}) = (l_t, k_t)$ [S1].
+            *   Update $(l_t, k_t) = (l_{t''}, k_{t''})$ [S1].
+            *   Exit the loop [S1].
+        *   If invalid:
+            *   If $(l_{t''+1}, k_{t''+1}) \in I_{\tilde{r}}'$, update $t'' \leftarrow t'' + 1$ [S1].
+            *   Else if $(l_{t''+2}, k_{t''+2}) \in I_{\tilde{r}}'$, update $t'' \leftarrow t'' + 2$ [S1].
+            *   Repeat [S1].
+
+3.  **Find Subsequent Vertices:**
+    *   Loop indefinitely:
+        *   Define $I_{\tilde{r}}'' = I_{\tilde{r}} \setminus \{(l_t, k_t), (l_{t'}, k_{t'})\}$ [S1].
+        *   Solve the linear system for a new candidate $v$:
+            $$ a_{\tilde{r}}^{l_t k_t} \times a_{\tilde{r}}^{l_{t''} k_{t''}} \times a_{\tilde{r}}^F \cdot v = 0 $$
+        *   Check if $v$ satisfies the boundary condition (13) of the cell $C_{\tilde{r}}^F$ [S1].
+        *   If valid:
+            *   Push $v$ into $V_{\tilde{r}}^P$ [S1].
+            *   If $(l_{t''}, k_{t''})$ indexes the initial boundary plane $H_{\tilde{r}}^{l^* k^*}$ (i.e., the traversal has circled back):
+                *   Break the loop (all vertices found) [S1].
+            *   Else:
+                *   Update $(l_{t'}, k_{t'}) = (l_t, k_t)$ [S1].
+                *   Update $(l_t, k_t) = (l_{t''}, k_{t''})$ [S1].
+                *   Reset $t'' = 1$ [S1].
+        *   If invalid:
+            *   If $(l_{t''+1}, k_{t''+1}) \in I_{\tilde{r}}''$, update $t'' \leftarrow t'' + 1$ [S1].
+            *   Else if $(l_{t''+2}, k_{t''+2}) \in I_{\tilde{r}}''$, update $t'' \leftarrow t'' + 2$ [S1].
+            *   Repeat [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def pivoting_enumeration(x, starting_hyperplane_idx, hyperplanes, face_coeffs, cell_boundary_condition):
+    """
+    Enumerate ordered vertices of an analytic face.
+    
+    Args:
+        x: Point on the analytic face (vector).
+        starting_hyperplane_idx: Index in the sorted list of the starting boundary plane.
+        hyperplanes: List of hyperplane objects/coefficients. Each has a method to compute distance to x.
+        face_coeffs: Coefficients for the face plane F.
+        cell_boundary_condition: Function that returns True if a point satisfies the cell's boundary condition (Eq 13).
+        
+    Returns:
+        V: List of ordered vertices.
+    """
+    # 1. Establish index set I_r by sorting hyperplanes by distance to x
+    # hyperplanes is a list of (l, k, coeffs) tuples
+    # We create a list of indices sorted by distance
+    distances = []
+    for i, (l, k, coeffs) in enumerate(hyperplanes):
+        dist = euclidean_distance(coeffs, x)
+        distances.append((dist, i))
+    distances.sort(key=lambda item: item[0])
+    
+    # I_r is the list of indices (l, k) in sorted order
+    I_r = [hyperplanes[idx] for dist, idx in distances]
+    N = len(I_r)
+    
+    # 2. Identify starting boundary plane
+    # The starting plane is the one at starting_hyperplane_idx in the original list? 
+    # No, the source says "use (l_t, k_t) to index the boundary plane... identified in the beginning".
+    # The input gives us the hyperplane that is a true boundary. We must find its position in I_r.
+    start_plane = None
+    start_idx_in_Ir = -1
+    for i, plane in enumerate(I_r):
+        # Check if this plane matches the starting_hyperplane provided
+        # Assuming starting_hyperplane is identified by its (l,k) or coefficients
+        if plane == starting_hyperplane:
+            start_plane = plane
+            start_idx_in_Ir = i
+            break
+            
+    if start_idx_in_Ir == -1:
+        raise ValueError("Starting hyperplane not found in sorted list")
+
+    # 3. Initialize variables
+    # (l_t, k_t) indexes the current pivot plane in I_r
+    t = start_idx_in_Ir
+    # (l_t_prime, k_t_prime) indexes the previous pivot plane
+    t_prime = -1 # Not used until first vertex found
+    # (l_t_double_prime, k_t_double_prime) indexes the candidate pivot plane
+    t_double_prime = 1 # t'' starts at 1
+    
+    V = []
+    
+    # Define I_r' (excluding current pivot t)
+    # In the loop, we access I_r directly but skip index t
+    # The source defines I_r' = I_r \ {(l_t, k_t)}
+    
+    # Phase 1: Find first vertex
+    while len(V) == 0:
+        # Get current pivot plane coeffs
+        plane_t = I_r[t]
+        coeffs_t = plane_t.coeffs
+        
+        # Get candidate pivot plane coeffs
+        # t_double_prime is an index into I_r
+        # We must ensure t_double_prime != t
+        if t_double_prime == t:
+            t_double_prime += 1
+            
+        plane_tp = I_r[t_double_prime]
+        coeffs_tp = plane_tp.coeffs
+        
+        # Solve system: intersection of plane_t, plane_tp, and face F
+        # System: [a_t; a_tp; a_F] x = 0
+        # This is finding the intersection of 3 planes
+        v = solve_three_planes(coeffs_t, coeffs_tp, face_coeffs)
+        
+        if v is None:
+            # Parallel planes or degenerate, skip candidate
+            t_double_prime += 1
+            if t_double_prime >= N:
+                t_double_prime = 0 # Wrap around or handle error? Source implies linear scan.
+                # Source says "update t'' <- t'' + 1 ... or t'' <- t'' + 2". 
+                # It assumes valid candidates exist.
+                break 
+            
+        # Check validity
+        if cell_boundary_condition(v):
+            V.append(v)
+            # Update indices
+            # (l_t_prime, k_t_prime) = (l_t, k_t)
+            t_prime = t
+            # (l_t, k_t) = (l_t_double_prime, k_t_double_prime)
+            t = t_double_prime
+            break
+        else:
+            # Invalid, increment t_double_prime
+            # Check availability in I_r' (which is I_r excluding t)
+            # Source: update t'' <- t'' + 1 upon (l_{t''+1}, k_{t''+1}) in I_r'
+            # This implies checking if the next index is valid (not t)
+            
+            next_idx = t_double_prime + 1
+            if next_idx < N and next_idx != t:
+                t_double_prime = next_idx
+            else:
+                # Skip t if it falls in the way
+                next_idx = t_double_prime + 2
+                if next_idx < N and next_idx != t:
+                    t_double_prime = next_idx
+                else:
+                    # If we run out, this path is invalid? 
+                    # Source guarantees a valid v will be found if H is a true boundary.
+                    # We might need to wrap or handle edge cases.
+                    # For implementation, assume valid path exists.
+                    pass
+
+    # Phase 2: Find subsequent vertices
+    while True:
+        # Define I_r'' (excluding current pivot t and previous pivot t_prime)
+        # We just need to skip these indices when iterating t_double_prime
+        
+        plane_t = I_r[t]
+        coeffs_t = plane_t.coeffs
+        
+        plane_tp = I_r[t_prime]
+        coeffs_tp = plane_tp.coeffs
+        
+        # Get candidate pivot plane coeffs
+        # t_double_prime is an index into I_r
+        # Must not be t or t_prime
+        
+        # Solve system
+        v = solve_three_planes(coeffs_t, coeffs_tp, face_coeffs)
+        
+        if v is None:
+            t_double_prime += 1
+            if t_double_prime >= N:
+                t_double_prime = 0
+        
+        # Check validity
+        if cell_boundary_condition(v):
+            V.append(v)
+            
+            # Check if we have circled back to the start
+            # Source: if (l_t_double_prime, k_t_double_prime) indexes H_{l* k*}
+            # H_{l* k*} is the starting plane, which is at start_idx_in_Ir in I_r
+            if t_double_prime == start_idx_in_Ir:
+                break
+            
+            # Update indices
+            t_prime = t
+            t = t_double_prime
+            t_double_prime = 1 # Reset t''
+        else:
+            # Invalid, increment t_double_prime
+            # Skip t and t_prime
+            next_idx = t_double_prime + 1
+            if next_idx < N and next_idx != t and next_idx != t_prime:
+                t_double_prime = next_idx
+            else:
+                next_idx = t_double_prime + 2
+                if next_idx < N and next_idx != t and next_idx != t_prime:
+                    t_double_prime = next_idx
+                else:
+                    # Handle wrap around or exhaustion if necessary
+                    pass
+
+    return V
+
+def euclidean_distance(coeffs, point):
+    # coeffs are [A, B, C, D] for Ax + By + Cz + D = 0
+    # Distance = |Ax + By + Cz + D| / sqrt(A^2 + B^2 + C^2)
+    A, B, C, D = coeffs
+    return abs(A*point[0] + B*point[1] + C*point[2] + D) / (A**2 + B**2 + C**2)**0.5
+
+def solve_three_planes(coeffs1, coeffs2, coeffs3):
+    # Solve [A1 B1 C1; A2 B2 C2; A3 B3 C3] * x = [-D1; -D2; -D3]
+    # Using Cramer's rule or matrix inversion
+    import numpy as np
+    M = np.array([coeffs1[:3], coeffs2[:3], coeffs3[:3]])
+    rhs = -np.array([coeffs1[3], coeffs2[3], coeffs3[3]])
+    try:
+        x = np.linalg.solve(M, rhs)
+        return x
+    except np.linalg.LinAlgError:
+        return None
+```
+
+**Edge Cases and Pitfalls:**
+*   **Condition (13):** The algorithm relies on a specific boundary condition (Eq 13) to validate vertex candidates. This condition is defined elsewhere in the main text or previous appendices of the source and is not detailed in the pivoting enumeration section [S1]. Implementers must refer to the parent algorithm's definition of cell validity [S1].
+*   **Degenerate Planes:** If the three planes (current pivot, candidate pivot, face) are parallel or coincident, the linear system will not have a unique solution. The pseudocode handles this by skipping the candidate [G].
+*   **Index Bounds:** The index $t''$ must be managed carefully to avoid accessing out-of-bounds indices in $I_{\tilde{r}}$ or selecting excluded indices ($t$ or $t'$) [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The average-case complexity of pivoting enumeration is $O(|V_P| n^2 L^2)$, where $|V_P|$ is the average number of vertices per analytic face, $n$ is related to the number of neurons, and $L$ is the number of layers [S1].
+*   **Overall Impact:** It reduces the overall complexity of analytic marching from $O((n/2)^2(L-1)n 5L 3)$ to $O((n/2)^2(L-1)|V_P|n 4L 2)$ [S1].
+*   **Strengths:** Reduces the number of iterations required to find valid vertices by sorting planes according to Euclidean distances [S1].
+*   **Limitations:** Requires the identification of a starting point and a true boundary plane, which must be provided by the preceding step of the analytic marching algorithm [S1].
+
+## Background
+Pivoting enumeration was introduced as part of the "Analytic Marching" method for learning and meshing from deep implicit surface networks [S1]. It is presented in Appendix B of the source paper [S1]. The method is an optimization over brute-force enumeration, leveraging the geometric properties of the implicit surface network's hyperplane boundaries [S1].
+
+## Sources
+[S1] Learning and Meshing From Deep Implicit Surface Networks Using an Efficient Implementation of Analytic Marching, https://doi.org/10.1109/tpami.2021.3135007, fetched 2026-10-26

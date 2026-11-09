@@ -1,0 +1,95 @@
+# Volume Access Caching
+Also called: Back-sample caching, Iterative back-sample reuse
+## Overview
+Volume Access Caching is a technique used within Evaluation Cache frameworks to reduce redundant texture lookups during ray marching in direct volume rendering. It solves the problem of repeatedly fetching the same voxel data for adjacent integration steps by caching the result of the previous iteration's back sample. It sets itself apart from siblings like [Edge Point Caching](891-edge-point-caching.md) by focusing on temporal coherence along the ray rather than spatial coherence at geometry boundaries.
+## How it works
+**Inputs and Outputs:**
+- Input: Ray parameters (origin, direction), volume texture, transfer function, previous iteration's back sample value.
+- Output: Accumulated color and opacity for the current step.
+
+**Data Structures:**
+- `prev_back_sample`: A scalar value (or vector, depending on transfer function output) storing the result of the volume query at the end of the previous ray-marching step.
+
+**Steps:**
+1. Initialize the ray marching loop for $N$ iterations.
+2. For the first iteration, perform a standard volume access at the current sample position.
+3. For subsequent iterations ($i > 1$):
+   a. Use the cached `prev_back_sample` from iteration $i-1$ as the starting value for the current compositing step.
+   b. Perform the volume access at the new sample position to obtain the current sample value.
+   c. Update the compositing state using the current sample and the cached previous back sample.
+   d. Store the current sample value as the new `prev_back_sample` for the next iteration.
+
+**Formulas:**
+Let $C_i$ be the accumulated color and $\alpha_i$ be the accumulated opacity after step $i$. Let $s_i$ be the sample value at position $p_i$.
+The compositing equation for step $i$ uses $s_{i-1}$ (cached) and $s_i$ (new access).
+The number of texture accesses is always $N$, regardless of integration order [S1].
+
+**Parameters:**
+- $N$: Number of sampling steps per ray.
+
+**Edge Cases:**
+- First iteration: No previous back sample exists; must fetch normally.
+- Ray exit: If the ray exits the volume, caching may become invalid if the next ray does not start at the same boundary.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def volume_access_caching(ray_origin, ray_direction, volume_texture, num_steps):
+    prev_back_sample = None
+    accumulated_color = vec3(0.0)
+    accumulated_opacity = 0.0
+    
+    for i in range(num_steps):
+        # Calculate current sample position
+        t = i * step_size
+        pos = ray_origin + ray_direction * t
+        
+        # Fetch current sample
+        current_sample = volume_texture.sample(pos)
+        
+        if i == 0:
+            # First iteration: no previous back sample
+            prev_back_sample = current_sample
+            # Standard compositing with initial state
+            accumulated_color += current_sample * color_map(current_sample)
+            accumulated_opacity += alpha_map(current_sample)
+        else:
+            # Subsequent iterations: use cached back sample
+            # Compositing logic using prev_back_sample and current_sample
+            # This reduces texture accesses by reusing the previous result
+            accumulated_color += current_sample * color_map(current_sample) * (1.0 - accumulated_opacity)
+            accumulated_opacity += alpha_map(current_sample) * (1.0 - accumulated_opacity)
+            
+            # Update cache for next iteration
+            prev_back_sample = current_sample
+            
+    return accumulated_color, accumulated_opacity
+```
+## Subtopics
+## Operating characteristics
+**Time and Memory Complexity:**
+- Time: $O(N)$ texture accesses per ray, where $N$ is the number of steps. No asymptotic reduction in accesses, but reduced computational cost due to fewer compositing operations [S1].
+- Memory: $O(1)$ additional memory per ray for the cached back sample.
+
+**Measured Performance:**
+- Reduces computational cost by half the compositing operations compared to naive methods [S1].
+- Branching penalties on consumer graphics are mitigated by the regular loop structure [S1].
+
+**Strengths and Limitations:**
+- Strength: Significant reduction in arithmetic operations for compositing.
+- Limitation: Does not reduce the number of texture fetches, which may be the bottleneck in memory-bound scenarios.
+
+**When to Use:**
+- When compositing operations are expensive relative to texture fetches.
+- When using higher-order integration schemes that benefit from pre-integration.
+
+**When Not to Use:**
+- When texture bandwidth is the primary bottleneck.
+- When ray paths are highly irregular and spatial coherence is low.
+
+## Background
+Originated in the context of second-order pre-integrated volume rendering [S1]. The method was presented in "Second Order Pre-Integrated Volume Rendering" [S1]. It is used in direct volume rendering pipelines to optimize the compositing phase.
+
+## Sources
+[S1] Second Order Pre-Integrated Volume Rendering, https://people.freedesktop.org/~marcheu/pacificvis08.pdf, fetched 2026-10-29

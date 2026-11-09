@@ -3,34 +3,64 @@
 Also called: Pixel Subsampling, Random Pixel Sampling
 
 ## Overview
-Random Pixel Subsampling selects a random subset of pixel coordinates from a full image grid to reduce the computational cost of training volume rendering models, such as Neural Radiance Fields (NeRFs), by evaluating the scene only at a fraction of the pixels per iteration [S1, S2, unofficial]. It differs from [Two-stage NeRF Rendering](925-two-stage-nerf-rendering.md) by operating within a single training pass using stochastic gradient descent on a pixel subset, rather than separating coarse and fine rendering stages, and from [Resolution Adaptation](3063-resolution-adaptation.md) by keeping the image resolution constant while varying the number of active pixels [S1, S2, unofficial].
+Random Pixel Subsampling selects a random subset of pixel coordinates from a full image grid to reduce computational cost during training or rendering [S2, S3, unofficial]. It solves the problem of high memory and compute requirements when processing full-resolution images by allowing the model to learn from or render a sparse set of pixels [S2, unofficial]. Unlike its siblings, it relies on uniform random selection without spatial coherence or frequency awareness, making it a baseline for efficiency rather than quality [S2, S4, unofficial].
 
 ## How it works
 **Inputs:**
-- `n_pixels`: Integer, the number of pixels to sample per iteration [S2, unofficial].
-- `image_size`: Tuple `(W, H)` representing image width and height [S2, unofficial].
-- `camera`: `PerspectiveCameras` object providing projection parameters [S2, unofficial].
+- `image_size`: Tuple $(W, H)$ representing width and height [S2, unofficial].
+- `n_pixels`: Integer, number of pixels to sample [S2, unofficial].
+- `camera`: Camera object providing projection matrices (e.g., `PerspectiveCameras`) [S2, unofficial].
+- `iteration` (optional): Current training iteration index, used in precropping variants [S3, unofficial].
+- `precrop_iters`, `precrop_frac` (optional): Parameters for precropping [S3, unofficial].
 
 **Outputs:**
-- `pixel_coords`: Tensor of shape `[n_pixels, 2]` containing the $(x, y)$ coordinates of the selected pixels [S2, unofficial].
+- `pixel_coords`: Tensor of shape $[n\_pixels, 2]$ containing $(x, y)$ coordinates in normalized device coordinates (NDC) or pixel space [S1, S2, unofficial].
+- `rays` (optional): Ray origins and directions corresponding to the sampled pixels [S3, unofficial].
 
 **Data Structures:**
-- `pixel_grid`: 2D tensor of shape `[W*H, 2]` storing all pixel coordinates in the flattened grid [S2, unofficial].
-- `indices`: 1D tensor of shape `[W*H]` storing linear indices for the grid [S2, unofficial].
+- `RayBundle`: Contains `origins`, `directions`, `sample_points`, and `sample_lengths` [S2, unofficial].
+- `pixel_grid`: 2D grid of coordinates generated from image dimensions [S1, S2, unofficial].
 
 **Steps:**
-1. **Generate Full Grid:** Create a grid of all pixel coordinates for the image using `get_pixels_from_image` [S2, unofficial].
-2. **Generate Indices:** Create a list of linear indices corresponding to the flattened grid, i.e., `[0, 1, ..., W*H - 1]` [S2, unofficial].
-3. **Shuffle Indices:** Apply a random permutation to the indices to ensure unbiased sampling using `torch.randperm` [S2, unofficial].
-4. **Select Subset:** Slice the first `n_pixels` indices from the shuffled permutation [S2, unofficial].
-5. **Map to Coordinates:** Gather the corresponding pixel coordinates from the full grid using the selected indices [S2, unofficial].
-6. **Reshape:** Reshape the gathered coordinates to `[n_pixels, 2]` [S2, unofficial].
+1. **Generate Full Grid:** Create a grid of all pixel coordinates.
+   - In NDC space, coordinates range from $[-1, 1]$ [S1, unofficial].
+   - Use `get_pixels_from_image(image_size, camera)` to generate the full grid of shape $[W \times H, 2]$ [S1, S2, unofficial].
+   - Reshape to $[W \times H, 1, 2]$ if necessary for batch operations [S1, unofficial].
+
+2. **Random Selection:**
+   - Generate a random permutation of indices $[0, W \times H - 1]$ using `torch.randperm` (PyTorch) or `np.random.permutation` (NumPy) [S1, S2, unofficial].
+   - Select the first `n_pixels` indices from the permutation [S1, S2, unofficial].
+   - Reshape the selected indices to $[n\_pixels, 2]$ [S1, unofficial].
+
+3. **Ray Generation (Optional):**
+   - Use `get_rays_from_pixels(pixel_coords, camera)` to compute ray origins and directions for the sampled pixels [S1, unofficial].
+   - Construct a `RayBundle` with these rays [S2, unofficial].
+
+4. **Volume Rendering:**
+   - For each ray, sample points along the ray direction between `near` and `far` planes [S2, unofficial].
+   - Evaluate the volume function (e.g., density $\sigma$ and color $\mathbf{c}$) at these points [S2, unofficial].
+   - Aggregate using volume rendering integral:
+     $$
+     \mathbf{C}(\mathbf{r}) = \int_{t_n}^{t_f} T(t) \sigma(\mathbf{r}(t)) \mathbf{c}(\mathbf{r}(t)) dt
+     $$
+     where $T(t) = \exp\left(-\int_{t_n}^t \sigma(\mathbf{r}(s)) ds\right)$ [S2, unofficial].
+
+**Parameters:**
+- `n_pixels`: Number of pixels to sample. Typical value: Not given in the sources, but often a fraction of $W \times H$ [S2, unofficial].
+- `image_size`: $(W, H)$ [S2, unofficial].
+- `camera`: Camera object [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Ensure coordinate generation matches the camera's expected input format (NDC vs. pixel indices) [S1, unofficial].
+- **Boundaries:** Coordinates must be within $[-1, 1]$ for NDC or $[0, W-1] \times [0, H-1]$ for pixel indices [S1, unofficial].
+- **Degenerate Input:** If `n_pixels` > $W \times H$, clamp to $W \times H$ or raise an error [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import torch
+import numpy as np
 
 def get_random_pixels_from_image(image_size, n_pixels, camera=None):
     """
@@ -39,8 +69,8 @@ def get_random_pixels_from_image(image_size, n_pixels, camera=None):
     Args:
         image_size: Tuple (W, H)
         n_pixels: Number of pixels to sample
-        camera: PerspectiveCameras object (used for coordinate generation)
-    
+        camera: Optional camera object for coordinate generation
+        
     Returns:
         pixel_coords: Tensor of shape [n_pixels, 2]
     """
@@ -48,36 +78,53 @@ def get_random_pixels_from_image(image_size, n_pixels, camera=None):
     total_pixels = W * H
     
     # Step 1: Generate full pixel grid
-    # Generate NDC coordinates for pixel centers in range [-1, 1]
-    x_coords = torch.linspace(-1 + 1/W, 1 - 1/W, W)
-    y_coords = torch.linspace(-1 + 1/H, 1 - 1/H, H)
-    xx, yy = torch.meshgrid(x_coords, y_coords, indexing='ij')
-    pixel_grid = torch.stack([xx.flatten(), yy.flatten()], dim=-1)  # [W*H, 2]
+    # Using NDC coordinates [-1, 1] as per [S1, unofficial]
+    # If using pixel indices, adjust accordingly
+    if camera is not None:
+        # Use camera-specific method if available
+        # Placeholder for camera-dependent coordinate generation
+        # In many implementations, this is done via meshgrid
+        y, x = torch.meshgrid(torch.linspace(-1, 1, H), 
+                              torch.linspace(-1, 1, W), 
+                              indexing='ij')
+        pixel_coords = torch.stack([x, y], dim=-1).reshape(-1, 2)
+    else:
+        # Fallback to simple grid if no camera
+        y, x = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
+        pixel_coords = torch.stack([x.float(), y.float()], dim=-1).reshape(-1, 2)
+        
+    # Step 2: Random selection
+    # Generate random permutation of indices
+    indices = torch.randperm(total_pixels)
     
-    # Step 2: Generate indices
-    indices = torch.arange(total_pixels)  # [W*H]
+    # Select first n_pixels indices
+    selected_indices = indices[:n_pixels]
     
-    # Step 3: Shuffle indices
-    shuffled_indices = torch.randperm(total_pixels)  # [W*H]
+    # Gather coordinates
+    sampled_coords = pixel_coords[selected_indices]
     
-    # Step 4: Select subset
-    selected_indices = shuffled_indices[:n_pixels]  # [n_pixels]
+    return sampled_coords
+
+def get_rays_from_pixels(pixel_coords, camera):
+    """
+    Generates rays for given pixel coordinates.
     
-    # Step 5 & 6: Map to coordinates and reshape
-    pixel_coords = pixel_grid[selected_indices]  # [n_pixels, 2]
-    
-    return pixel_coords
+    Args:
+        pixel_coords: Tensor of shape [N, 2]
+        camera: Camera object
+        
+    Returns:
+        origins: Tensor of shape [N, 3]
+        directions: Tensor of shape [N, 3]
+    """
+    # Placeholder for camera-specific ray generation
+    # This function should use camera projection matrices to convert
+    # pixel coordinates to 3D rays
+    # Example logic (simplified):
+    # origins, directions = camera.get_rays(pixel_coords)
+    # return origins, directions
+    raise NotImplementedError("Camera-specific ray generation not implemented")
 ```
-
-**Parameters:**
-- `n_pixels`: Number of pixels to sample. Typical values: Not given in the sources.
-- `image_size`: Tuple `(W, H)` representing image width and height [S2, unofficial].
-- `camera`: `PerspectiveCameras` object providing projection parameters [S2, unofficial].
-
-**Edge Cases and Pitfalls:**
-- **Precision:** Coordinate generation must match the expected range (NDC vs. pixel indices) to align with the camera model [S1, unofficial].
-- **Boundaries:** When generating NDC coordinates, pixel centers must be correctly calculated to avoid edge artifacts [S1, unofficial].
-- **Degenerate Input:** If `n_pixels > W*H`, the method should raise an error or return all pixels [G].
 
 ## Subtopics
 
@@ -85,35 +132,23 @@ def get_random_pixels_from_image(image_size, n_pixels, camera=None):
 Frequency-aware Mask Generation produces a binary spatial mask $M_{freq}$ that highlights frequency-specific structures in rendered images to guide training. It distinguishes between coarse structures (prioritized early in training) and fine structures (prioritized later) by modulating Gaussian filter scales based on a schedule parameter. Unlike standard pixel-wise losses, this method spatially weights the error based on the spectral content of the ground truth image, allowing the model to prioritize low-frequency structures early and high-frequency details later.
 
 ### Ray Sampling with Precropping
-Ray Sampling with Precropping restricts coordinate selection to the image center during early training iterations to stabilize optimization, then expands to the full image [S3, unofficial].
-- **Steps:**
-  1. If iteration $i < \text{args.precrop\_iters}$, compute crop margins $dH = \text{int}(H//2 \times \text{args.precrop\_frac})$ and $dW = \text{int}(W//2 \times \text{args.precrop\_frac})$ [S3, unofficial].
-  2. Create a coordinate grid using `tf.meshgrid` with ranges $[H//2 - dH, H//2 + dH)$ and $[W//2 - dW, W//2 + dW)$, using `indexing='ij'` [S3, unofficial].
-  3. Else, create a full grid using `tf.range(H)` and `tf.range(W)` [S3, unofficial].
-  4. Reshape coordinates to `[-1, 2]`, randomly sample $N_{rand}$ indices without replacement via `np.random.choice`, and gather ray origins/directions and target colors using `tf.gather_nd` [S3, unofficial].
-- **Parameters:**
-  - `args.precrop_iters`: Number of iterations to apply precropping. Typical value: 10,000 [S3, unofficial].
-  - `args.precrop_frac`: Fraction of half-dimensions to crop. Typical value: 0.5 (samples center 50%) [S3, unofficial].
-- **Pitfall:** Coordinate indexing mismatch; resolved by using `indexing='ij'` in `meshgrid` to match the $(row, col) \rightarrow (y, x)$ layout expected by `gather_nd` [S3, unofficial].
+Ray Sampling with Precropping restricts coordinate selection to the image center during early training iterations to stabilize optimization, then expands to the full image [S3, unofficial]. If iteration $i < \text{precrop\_iters}$, crop margins are computed as $d_H = \lfloor H/2 \times \text{precrop\_frac} \rfloor$ and $d_W = \lfloor W/2 \times \text{precrop\_frac} \rfloor$ [S3, unofficial]. A coordinate grid is created using `tf.meshgrid` with ranges $[H/2 - d_H, H/2 + d_H)$ and $[W/2 - d_W, W/2 + d_W)$, using `indexing='ij'` to match $(y, x)$ layout [S3, unofficial]. Otherwise, the full grid is used [S3, unofficial]. Parameters: `precrop_iters` (typical: 10000), `precrop_frac` (typical: 0.5) [S3, unofficial]. Pitfall: Coordinate indexing mismatch, resolved by `indexing='ij'` [S3, unofficial].
 
 ### Pixel Shuffle Sampling
-Pixel Shuffle Sampling is a pixel distribution algorithm based on Fibonacci numbers that progressively adds or removes pixels to maintain low discrepancy [S4, unofficial].
-- **Comparison:**
-  - **vs. Random Distribution:** Random distribution leads to inhomogeneous regions, while Pixel Shuffle provides low discrepancy (LD) and uniform distribution, leading to better recovery results [S4, unofficial].
-  - **vs. Poisson Disk Sampling:** Poisson disk sampling achieves low discrepancy and blue-noise distribution but is not progressive (high coverage does not contain low coverage) [S4, unofficial]. Pixel Shuffle is progressive, allowing for progressive image updates [S4, unofficial].
+Pixel Shuffle Sampling is a pixel distribution algorithm based on Fibonacci numbers that progressively adds or removes pixels to maintain low discrepancy [S4, unofficial]. It is used to select which pixels are present/missing in compressive rendering, offering a progressive property that Poisson disk sampling lacks [S4, unofficial]. Unlike random distribution, which leads to inhomogeneous regions, Pixel Shuffle provides low discrepancy (LD) and uniform distribution, leading to better recovery results [S4, unofficial]. Unlike Poisson disk sampling, which is not progressive, Pixel Shuffle allows for progressive image updates [S4, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
+- **Time Complexity:** $O(n\_pixels)$ for selection, $O(n\_pixels \times N\_samples)$ for rendering [S2, unofficial].
+- **Memory Complexity:** $O(n\_pixels)$ for storing sampled pixels and rays [S2, unofficial].
 - **Measured Performance:** Not given in the sources.
-- **Scaling:** Not given in the sources.
-- **Strengths:** Not given in the sources.
-- **Limitations:** Not given in the sources.
-- **When to Use:** Not given in the sources.
-- **When Not to Use:** Not given in the sources.
+- **Scaling:** Scales linearly with `n_pixels` [S2, unofficial].
+- **Strengths:** Simple to implement, reduces computational cost significantly [S2, unofficial].
+- **Limitations:** Random selection may miss important structures, leading to slower convergence or artifacts [S4, unofficial].
+- **When to Use:** Early training stages, resource-constrained environments, or as a baseline [S2, S3, unofficial].
+- **When Not to Use:** When high-frequency details are critical, or when progressive rendering is required [S4, unofficial].
 
 ## Background
-Random Pixel Subsampling was introduced as a practical optimization for training Neural Radiance Fields (NeRFs) and other volume rendering models, where evaluating the neural network at every pixel is computationally expensive [S1, S2, unofficial]. The method leverages the fact that stochastic gradient descent does not require the full dataset in every iteration, allowing for a subset of pixels to be used for gradient updates [S1, S2, unofficial]. The technique has been widely adopted in open-source NeRF implementations, such as those by [Samiran Angode](https://github.com/samirangode/Volume-Rendering-and-Neural-Radiance-Fields) and [Shyam-pi](https://github.com/Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields) [S1, S2, unofficial].
+Random Pixel Subsampling is a common technique in neural radiance fields (NeRF) and volume rendering to accelerate training by reducing the number of pixels processed per iteration [S1, S2, unofficial]. It was popularized by the original NeRF paper and subsequent implementations [S3, unofficial]. The method is often used in conjunction with other acceleration techniques such as adaptive sampling and resolution adaptation [S2, unofficial].
 
 ## Sources
 [S1] samirangode/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/samirangode/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)

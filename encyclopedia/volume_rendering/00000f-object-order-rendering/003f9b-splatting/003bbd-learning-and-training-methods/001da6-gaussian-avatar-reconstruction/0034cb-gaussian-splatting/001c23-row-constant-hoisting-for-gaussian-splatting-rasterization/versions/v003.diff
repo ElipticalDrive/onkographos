@@ -1,0 +1,253 @@
+--- v002.md
++++ v003.md
+@@ -1,75 +1,81 @@
+ # Row-constant hoisting for Gaussian Splatting Rasterization
+ 
++Also called: row-constant optimization, inner-loop hoisting
+ 
+ ## Overview
+-Row-constant hoisting is an optimization for the inner pixel loop of a Gaussian splatting rasterizer that hoists row-constant terms outside the inner (column) loop to minimize arithmetic operations per pixel [S1, unofficial]. It reduces the computational cost of evaluating the 2D Gaussian exponent by precomputing terms dependent only on the row coordinate [S1, unofficial].
++Row-constant hoisting is an optimization for the inner pixel loop of a Gaussian splatting rasterizer that hoists row-constant terms outside the inner (column) loop to minimize arithmetic operations per pixel [S1, unofficial]. It reduces the computational cost of evaluating the 2D Gaussian exponent by precomputing terms dependent only on the row coordinate, allowing the inner loop to perform fewer multiplications and additions per column [S1, unofficial]. This method is a specific implementation detail within the broader [Gaussian Splatting](946-gaussian-splatting.md) rendering pipeline, distinct from higher-level optimizations like [Contribution-based ordering](8748-contribution-based-ordering.md) or [RoofGS Dual-Pixel Incremental Evaluation](9827-roofgs-dual-pixel-incremental-evaluation.md).
+ 
+ ## How it works
+-### Inputs and Outputs
+-- **Input**: A projected Gaussian primitive $p$ with screen-space center $(sx, sy)$, bounding box $[x_0, y_0, x_1, y_1]$, inverse covariance matrix elements $a, b, d$, opacity $\alpha_p$, and color $C_p$ [S1, unofficial].
+-- **Input**: A framebuffer `fb` of width $w$, where each cell stores accumulated color and opacity [S1, unofficial].
+-- **Input**: Parameters `saturation` (maximum accumulated opacity) and `alpha_threshold` (minimum alpha for contribution) [S1, unofficial].
+-- **Output**: Updated framebuffer cells for pixels covered by the splat [S1, unofficial].
++**Inputs and Outputs:**
++- **Input:** A projected 2D Gaussian primitive $p$ with screen-space center $(s_x, s_y)$, inverse covariance matrix elements $a, b, d$ (where $a = \Sigma^{-1}_{00}, b = \Sigma^{-1}_{01} = \Sigma^{-1}_{10}, d = \Sigma^{-1}_{11}$), opacity $\alpha_p$, and color $\mathbf{c}_p$. The bounding box of the splat $[x_0, y_0, x_1, y_1]$ is precomputed.
++- **Input:** A framebuffer `fb` of width $w$, where each cell stores an accumulated color $\mathbf{C}$ and accumulated opacity $\alpha_{acc}$.
++- **Input:** Parameters `saturation` (max accumulated opacity) and `alpha_threshold` (min alpha for contribution).
++- **Output:** Updated framebuffer cells within the splat's bounding box.
+ 
+-### Data Structures
+-- **Framebuffer Cell**: A tuple `(Vec3, f32)` storing the accumulated color (3 floats) and accumulated opacity (1 float) [S1, unofficial].
+-- **Projected Gaussian**: Contains screen coordinates, bounding box, inverse covariance matrix components, opacity, and color [S1, unofficial].
++**Data Structures:**
++- **Framebuffer Cell:** A tuple $(\mathbf{Vec3}, f32)$ storing accumulated color and opacity [S1, unofficial].
++- **Projected Gaussian:** Contains screen position, bounding box, inverse covariance components, opacity, and color [S1, unofficial].
+ 
+-### Numbered Steps
++**Steps:**
+ 1. Extract inverse covariance elements $a, b, d$ from the projected Gaussian's inverse covariance matrix [S1, unofficial].
+-2. Compute coefficients for the quadratic form:
++2. Compute coefficients for the quadratic form of the Gaussian exponent:
+    - $dx_{coeff} = -0.5 \cdot a$
+    - $dy_{coeff} = -0.5 \cdot d$
+-   - $cross_{coeff} = -b$ (derived from $-0.5 \cdot 2 \cdot b$) [S1, unofficial]
+-3. Initialize `saturation` and `alpha_threshold` from parameters [S1, unofficial].
+-4. Iterate over each row $py$ from $y_0$ to $y_1$ inclusive:
+-   a. Compute $dy = py - sy$ [S1, unofficial].
+-   b. Precompute row-constant terms:
+-      - $row_{base} = dy_{coeff} \cdot dy^2$
+-      - $row_{slope} = cross_{coeff} \cdot dy$
+-      - $row_{offset} = py \cdot w$ (for framebuffer indexing) [S1, unofficial]
+-   c. Iterate over each column $px$ from $x_0$ to $x_1$ inclusive:
+-      i. Calculate framebuffer index $idx = row_{offset} + px$ [S1, unofficial].
+-      ii. Check saturation: if `fb[idx].opacity >= saturation`, skip to next pixel [S1, unofficial].
+-      iii. Compute $dx = px - sx$ [S1, unofficial].
+-      iv. Calculate the power term: $power = dx_{coeff} \cdot dx^2 + row_{slope} \cdot dx + row_{base}$ [S1, unofficial].
+-      v. If $power > 0.0$, skip the pixel (exponential would exceed 1 or be invalid) [S1, unofficial].
+-      vi. Compute alpha: $\alpha = (\alpha_p \cdot e^{power}).\min(0.999)$ [S1, unofficial].
+-      vii. If $\alpha < alpha_{threshold}$, skip the pixel [S1, unofficial].
+-      viii. Compute contribution: $t = 1.0 - fb[idx].opacity$, $contrib = t \cdot \alpha$ [S1, unofficial].
+-      ix. Update framebuffer: `fb[idx].color += contrib * C_p`, `fb[idx].opacity += contrib` [S1, unofficial].
++   - $cross_{coeff} = -b$ (derived from $-0.5 \cdot 2b$) [S1, unofficial]
++3. Initialize loop bounds $y$ from $y_0$ to $y_1$ inclusive [S1, unofficial].
++4. For each row $p_y$ in the outer loop:
++   - Compute $dy = p_y - s_y$ [S1, unofficial].
++   - Precompute row-constant terms:
++     - $row_{base} = dy_{coeff} \cdot dy^2$
++     - $row_{slope} = cross_{coeff} \cdot dy$
++     - $row_{offset} = p_y \cdot w$ (for framebuffer indexing) [S1, unofficial]
++5. For each column $p_x$ in the inner loop (from $x_0$ to $x_1$):
++   - Calculate framebuffer index $idx = row_{offset} + p_x$ [S1, unofficial].
++   - Check saturation: if $fb[idx].\alpha_{acc} \ge saturation$, skip to next pixel [S1, unofficial].
++   - Compute $dx = p_x - s_x$ [S1, unofficial].
++   - Calculate the Gaussian exponent power using hoisted coefficients:
++     $$power = dx_{coeff} \cdot dx^2 + row_{slope} \cdot dx + row_{base}$$ [S1, unofficial]
++   - If $power > 0.0$, skip the pixel (exponential would exceed valid range) [S1, unofficial].
++   - Compute alpha: $\alpha = (\alpha_p \cdot e^{power}).\min(0.999)$ [S1, unofficial].
++   - If $\alpha < alpha_{threshold}$, skip the pixel [S1, unofficial].
++   - Compute contribution: $t = 1.0 - fb[idx].\alpha_{acc}$, $contrib = t \cdot \alpha$ [S1, unofficial].
++   - Update framebuffer:
++     - $fb[idx].\mathbf{C} \leftarrow fb[idx].\mathbf{C} + contrib \cdot \mathbf{c}_p$
++     - $fb[idx].\alpha_{acc} \leftarrow fb[idx].\alpha_{acc} + contrib$ [S1, unofficial]
+ 
+-### Formulas
+-The Gaussian exponent power is calculated as:
+-$$power = dx_{coeff} \cdot dx^2 + row_{slope} \cdot dx + row_{base}$$
+-where:
+-- $dx_{coeff} = -0.5 \cdot a$
+-- $row_{slope} = -b \cdot dy$
+-- $row_{base} = -0.5 \cdot d \cdot dy^2$
+-- $a, b, d$ are elements of the inverse covariance matrix
+-- $dx, dy$ are screen-space offsets from the Gaussian center [S1, unofficial]
+-
+-### Parameters
+-- **saturation**: The maximum accumulated opacity value in the framebuffer cell. If reached, further splats are skipped [S1, unofficial].
+-- **alpha_threshold**: The minimum alpha value for a splat to contribute. Splats with alpha below this are skipped [S1, unofficial].
+-
+-### Edge Cases and Pitfalls
+-- If the computed power is positive, the exponential term would exceed 1 (or be invalid for the Gaussian model), so the pixel is skipped [S1, unofficial].
+-- Alpha is clamped to 0.999 to prevent numerical issues when blending [S1, unofficial].
+-
+-### Pseudocode
++**Pseudocode:**
+ ```python
+-import math
+-
+-def composite_splat(p, fb, w, params):
++def composite_splat(p: Projected, fb: List[Tuple[Vec3, float]], w: int, params: RenderParams):
++    """
++    Composite a single 2D Gaussian splat into the framebuffer using row-constant hoisting.
++    
++    Args:
++        p: Projected Gaussian with attributes:
++            bbox: [x0, y0, x1, y1] (integers)
++            cov2d_inv: Inverse covariance matrix elements
++                x_axis.x: a (Sigma^-1_00)
++                x_axis.y: b (Sigma^-1_01)
++                y_axis.y: d (Sigma^-1_11)
++            screen: (sx, sy) (floats)
++            opacity: alpha_p (float)
++            color: c_p (Vec3)
++        fb: Framebuffer list of (color: Vec3, alpha: float) tuples
++        w: Framebuffer width
++        params: Render parameters including saturation and alpha_threshold
++    """
++    # Extract bounding box
+     x0, y0, x1, y1 = p.bbox
+-    a = p.cov2d_inv[0, 0]  # (0,0)
+-    b = p.cov2d_inv[0, 1]  # (0,1) = (1,0) since symmetric
+-    d = p.cov2d_inv[1, 1]  # (1,1)
+     
++    # Extract inverse covariance elements
++    a = p.cov2d_inv.x_axis.x
++    b = p.cov2d_inv.x_axis.y
++    d = p.cov2d_inv.y_axis.y
++    
++    # Precompute coefficients for the quadratic form
+     dx_coeff = -0.5 * a
+     dy_coeff = -0.5 * d
+-    cross_coeff = -b  # -0.5 * 2 * b
++    cross_coeff = -b  # Equivalent to -0.5 * 2 * b
+     
++    # Extract parameters
+     saturation = params.saturation
+     alpha_threshold = params.alpha_threshold
+@@ -79,5 +85,7 @@
+     sy = p.screen.y
+     
++    # Outer loop over rows
+     for py in range(y0, y1 + 1):
++        # Compute row-constant terms
+         dy = py - sy
+         row_base = dy_coeff * dy * dy
+@@ -85,46 +93,84 @@
+         row_offset = py * w
+         
++        # Inner loop over columns
+         for px in range(x0, x1 + 1):
+             idx = row_offset + px
+-            color_acc, opacity_acc = fb[idx]
++            cell = fb[idx]
+             
+-            if opacity_acc >= saturation:
++            # Check saturation
++            if cell[1] >= saturation:
+                 continue
+-                
++            
++            # Compute column offset
+             dx = px - sx
++            
++            # Calculate power using hoisted row constants
+             power = dx_coeff * dx * dx + row_slope * dx + row_base
+             
++            # Skip if power is positive (exponential > 1)
+             if power > 0.0:
+                 continue
+-                
+-            alpha = min(opacity * math.exp(power), 0.999)
+             
++            # Compute alpha with clamping
++            alpha = min(opacity * fast_exp(power), 0.999)
++            
++            # Skip if alpha is below threshold
+             if alpha < alpha_threshold:
+                 continue
+-                
+-            t = 1.0 - opacity_acc
++            
++            # Compute contribution
++            t = 1.0 - cell[1]
+             contrib = t * alpha
+-            fb[idx] = (color_acc + contrib * color, opacity_acc + contrib)
++            
++            # Update framebuffer
++            fb[idx] = (
++                cell[0] + contrib * color,
++                cell[1] + contrib
++            )
+ ```
++
++**Parameters:**
++- `saturation`: Maximum accumulated opacity value in the framebuffer cell. If reached, further splats are skipped [S1, unofficial].
++- `alpha_threshold`: Minimum alpha value for a splat to contribute. Splats with alpha below this are skipped [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++- If the computed `power` is positive, the exponential term would exceed 1 (or be invalid for the Gaussian model), so the splat is skipped [S1, unofficial].
++- Alpha is clamped to 0.999 to prevent numerical issues when blending [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### [Gaussian Splatting](946-gaussian-splatting.md)
+-The parent method that uses 3D Gaussians for scene representation. Row-constant hoisting optimizes its rasterization step.
+-
+-### [Ray-marching on 3D Gaussians](1036-ray-marching-on-3d-gaussians.md)
+-An alternative rasterization approach that marches rays through Gaussians, differing in computational strategy.
+-
+-### [2D Gaussian Projection with Covariance Stabilization](1198-2d-gaussian-projection-with-covariance-stabilization.md)
+-A technique for stabilizing 2D Gaussian projections, which may be used in conjunction with row-constant hoisting.
+-
+-### [Transformer-based Reconstruction](1794-transformer-based-reconstruction.md)
+-A different approach to scene reconstruction using transformers, not directly related to rasterization optimization.
++### [RoofGS Dual-Pixel Incremental Evaluation](9827-roofgs-dual-pixel-incremental-evaluation.md)
++An optimization that exploits spatial coherence between vertically adjacent pixels by assigning each thread to process two pixels, $(x, y)$ and $(x, y+1)$, allowing reuse of shared-memory attribute loads and incremental exponent calculation.
+ 
+ ## Operating characteristics
+-Not given in the sources.
++**Time and Memory Complexity:**
++- The optimization reduces the number of arithmetic operations per pixel in the inner loop by hoisting row-constant calculations. Specifically, it moves the computation of $dy_{coeff} \cdot dy^2$ and $cross_{coeff} \cdot dy$ outside the inner loop [S1, unofficial].
++- Memory complexity is unchanged, as it operates on the same framebuffer structure [S1, unofficial].
++
++**Measured Performance:**
++- Not given in the sources.
++
++**Scaling:**
++- The benefit scales with the number of pixels per splat, as more pixels mean more savings from hoisting row-constant terms [S1, unofficial].
++
++**Strengths and Limitations:**
++- **Strengths:** Reduces computational overhead per pixel by minimizing multiplications and additions in the inner loop [S1, unofficial].
++- **Limitations:** Requires precomputing row-constant terms for each row, adding a small overhead to the outer loop [S1, unofficial].
++
++**When to Use:**
++- Use when optimizing the inner loop of Gaussian splatting rasterization for performance [S1, unofficial].
++
++**When Not to Use:**
++- Not applicable as a standalone method; it is an optimization within a larger rasterization pipeline [S1, unofficial].
+ 
+ ## Background
+-This optimization is described in the tsplat project, which implements Gaussian splatting rasterization in a terminal environment [S1, unofficial].
++**Origin:**
++- The method is described in the context of the Tsplat project, an implementation of Gaussian splatting in a terminal environment [S1, unofficial].
++
++**History and Development:**
++- The technique is part of the Tsplat codebase, which focuses on efficient real-time rendering of Gaussian splats [S1, unofficial].
++
++**Where it is Used:**
++- Used in the Tsplat renderer for optimizing the rasterization of 2D Gaussians [S1, unofficial].
+ 
+ ## Sources

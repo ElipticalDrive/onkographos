@@ -1,0 +1,256 @@
+--- v001.md
++++ v002.md
+@@ -4,144 +4,147 @@
+ 
+ ## Overview
+-A method for assigning quantization precision to terrain vertices in a multiresolution hierarchy to minimize bitstream size while maintaining visual fidelity, using specific shift values for different vertex types (Corner, Leg, Hypotenuse, Interior) [S1]. It sets itself apart by deriving quantization shifts from the finest-resolution children to ensure coarsening errors are minimized, and by unifying precision during prediction to prevent boundary artifacts [S1].
++This method assigns quantization precision to terrain vertices in a multiresolution hierarchy to minimize bitstream size while maintaining visual fidelity. It solves the problem of efficient compression for multiresolution terrain data by using specific shift values for different vertex types (Corner, Leg, Hypotenuse, Interior). It sets itself apart from generic quantization methods by leveraging the geometric connectivity of patch neighbors (specifically cousin patches and parent-child relationships) to derive shifts for boundary vertices from their children, thereby reducing the number of stored parameters [S1].
+ 
+ ## How it works
+-**Inputs:** A multiresolution terrain mesh defined by patches; a target quantization error $\epsilon_q$; the height difference $\Delta z$ between adjacent vertices.
+-**Outputs:** A set of quantization shift values $k$ for each vertex in a patch, and a compressed bitstream of residuals.
++**Inputs:** A multiresolution terrain mesh represented as a hierarchy of patches. Each patch contains vertices classified as Corners (C), Legs (L), Hypotenuses (H), or Interior (I). A target quantization error $\epsilon_q$ and the local height variation $\Delta z$ for each patch.
++**Outputs:** A set of quantization shift values $k$ for each patch, and a prediction scheme that respects these shifts.
+ 
+ **Data Structures:**
+-*   **Vertex Classification:** Each vertex on non-finest levels is classified as:
+-    *   **Corner (C):** Vertices at the corners of a patch.
+-    *   **Leg (L):** Vertices on the patch legs (edges).
++*   **Patch:** Contains a list of vertices. Each vertex is classified as C, L, H, or I.
++*   **Shift Map:** A mapping from patch ID to shift values. For each patch, three shifts are relevant: $k_L^{left}$, $k_L^{right}$, and $k_{HI}$.
++*   **Bitstream:** Variable-length stream of quantized residuals.
++
++**Vertex Classification:**
++1.  Vertices on the finest level are assigned a shift of 0 (lossless).
++2.  On coarser levels, vertices are classified:
++    *   **Corner (C):** Vertices shared by multiple patches at different resolutions.
++    *   **Leg (L):** Vertices on the legs of the triangular patch.
+     *   **Hypotenuse (H):** Vertices on the hypotenuse of the triangular patch.
+-    *   **Interior (I):** Remaining vertices inside the patch.
+-*   **Shift Values:** Each patch requires three shift values for decoding:
+-    *   $k_{L1}, k_{L2}$: Shifts for the two legs.
+-    *   $k_{HI}$: Shift for the union of Hypotenuse and Interior vertices.
+-    *   Only $k_{HI}$ is stored explicitly with the patch. $k_{L1}$ and $k_{L2}$ are derived from the $k_{HI}$ values of the patch's children.
++    *   **Interior (I):** Vertices strictly inside the patch.
+ 
+-**Steps:**
++**Quantization Shift Calculation:**
++The shift $k$ determines the number of bits to discard. It is calculated as:
+ 
+-1.  **Classify Vertices:**
+-    For each patch on non-finest levels, classify vertices into C, L, H, and I [S1].
+-    *   Corners (C) are left unquantized (full precision, shift $k=0$) [S1].
+-    *   Boundary vertices are further divided into C, L, and H [S1].
++$$
++k = \begin{cases} \lfloor \log_2 \frac{\epsilon_q}{\Delta z} \rfloor + 1 & \text{if } \epsilon_q \geq \Delta z \\ 0 & \text{otherwise} \end{cases}
++$$
+ 
+-2.  **Determine Quantization Shifts:**
+-    Calculate the shift $k$ for a vertex based on the target error $\epsilon_q$ and the local height variation $\Delta z$ [S1]:
+-    $$
+-    k = \begin{cases} [\log_2 \frac{\epsilon_q}{\Delta z}] + 1 & \text{if } \epsilon_q \geq \Delta z \\ 0 & \text{otherwise} \end{cases} \quad (4)
+-    $$
+-    *   **Leg (L) Vertices:** An L vertex in a patch may be an L vertex in an adjacent patch on the same level, or an H vertex in a patch one level below. The precision is dictated by the finer resolution children to ensure coarsening errors are no larger [S1]. Thus, the shifts for L vertices are governed by other patches (specifically, they are the $k_{HI}$ shifts of the children) [S1].
+-    *   **Hypotenuse (H) and Interior (I) Vertices:** Only the two cousin patches forming a diamond must agree on quantization for H vertices. Since they have the same coarsening error, the same shift $k_{HI}$ is used for the union of their H and I vertices [S1].
++Where $\epsilon_q$ is the desired quantization error and $\Delta z$ is the local height variation.
+ 
+-3.  **Prediction Precision Handling:**
+-    To avoid unwanted low-order bits on patch boundaries, all vertices involved in a prediction must be reduced to the precision of the vertex being predicted [S1].
+-    *   Shift out low-order bits where necessary.
+-    *   Perform the prediction at unified precision.
+-    *   Add the low-precision residual.
+-    *   Left shift the result as needed [S1].
+-    *   **Optimization:** This step is necessary only for Corner (C) and Leg (L) vertices in the first triangle of a patch due to regular connectivity and traversal order from diamond interior to boundaries (low to high precision) [S1].
++**Shift Assignment Rules:**
++1.  **Corners (C):** Left unquantized (shift $k=0$) because they are surrounded by patches at various resolutions, making a single consistent shift difficult to define without excessive storage [S1].
++2.  **Legs (L):** The precision for an L vertex is dictated by the finer resolution children. An L vertex in a patch may be an L vertex in an adjacent patch at the same level or an H vertex in a patch one level below. Since children have smaller coarsening errors than parents, the shift is determined by the finest resolution neighbor. Specifically, the shifts for L vertices are derived from the H/I shifts of the patch's children [S1].
++3.  **Hypotenuse (H) and Interior (I):** Only the two cousin patches forming a diamond must agree on quantization for H vertices. Since these cousin patches have the same coarsening error, a single shift $k_{HI}$ is used for the union of their H and I vertices. This $k_{HI}$ is stored with the patch [S1].
++
++**Prediction Precision Handling:**
++To avoid unwanted low-order bits on patch boundaries, prediction must be performed at a unified precision.
++1.  Identify vertices involved in prediction.
++2.  Reduce all involved vertices to the precision of the vertex being predicted by shifting out low-order bits.
++3.  Perform prediction at this unified precision.
++4.  Add the low-precision residual.
++5.  Left shift the result to restore the original scale.
++
++This adjustment is necessary only for Corner (C) and Leg (L) vertices in the first triangle of a patch due to regular connectivity and traversal order from diamond interior to boundaries (low to high precision) [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def compute_quantization_shifts(patch, epsilon_q):
++def calculate_quantization_shifts(patch, epsilon_q, delta_z):
+     """
+-    Computes quantization shifts for a patch.
+-    patch: object with vertices, children, and classification (C, L, H, I)
+-    epsilon_q: target quantization error
++    Calculate the quantization shift for a single patch's H/I vertices.
+     """
+-    # Step 1: Classify vertices (assumed done by caller or internal logic)
+-    # Vertices are classified as C, L, H, I
++    if epsilon_q < delta_z:
++        return 0
++    else:
++        return floor(log2(epsilon_q / delta_z)) + 1
++
++def assign_shifts_to_hierarchy(patches, epsilon_q):
++    """
++    Assign shifts to all patches in the hierarchy.
++    patches: list of patch objects, each with children and neighbors.
++    """
++    # Process from finest to coarsest? Or just compute H/I shifts first.
++    # The source implies H/I shifts are stored, L shifts are derived from children.
+     
+-    # Step 2: Determine shifts
+-    # Corners are unquantized
+-    for v in patch.vertices:
+-        if v.type == 'C':
+-            v.shift = 0
+-            continue
++    for patch in patches:
++        # 1. Calculate H/I shift for this patch
++        # delta_z should be specific to the patch's geometry
++        patch.k_HI = calculate_quantization_shifts(patch, epsilon_q, patch.delta_z)
++        
++        # 2. Corners are always 0 (unquantized)
++        for vertex in patch.vertices:
++            if vertex.type == 'C':
++                vertex.k = 0
++            elif vertex.type == 'L':
++                # L shift is derived from children's H/I shifts
++                # This requires the children to be processed or accessible
++                # The source says: "the two L shifts are the H/I shifts of its children"
++                # We assume children are available or computed in a prior pass
++                pass 
++            elif vertex.type in ['H', 'I']:
++                vertex.k = patch.k_HI
++
++    # Second pass to resolve L shifts based on children
++    for patch in patches:
++        if patch.children:
++            # Left leg L shift comes from one child's H/I shift
++            # Right leg L shift comes from the other child's H/I shift
++            # The exact mapping depends on the triangle orientation
++            patch.k_L_left = patch.children[0].k_HI
++            patch.k_L_right = patch.children[1].k_HI
+             
+-    # For L vertices, shifts are derived from children's H/I shifts
+-    # This is handled during decoding or by propagating from children
+-    # Here we compute the patch's own H/I shift
++            # Apply to vertices
++            for vertex in patch.vertices:
++                if vertex.type == 'L':
++                    # Determine if it's left or right leg
++                    if vertex.is_left_leg:
++                        vertex.k = patch.k_L_left
++                    else:
++                        vertex.k = patch.k_L_right
++
++def predict_with_precision_adjustment(vertex, neighbors, shift):
++    """
++    Predict a vertex value, adjusting precision to avoid boundary artifacts.
++    """
++    # 1. Shift out low-order bits from neighbors and the vertex itself
++    # to unify precision at 'shift'
++    adjusted_neighbors = [n >> shift for n in neighbors]
++    adjusted_vertex = vertex >> shift
+     
+-    # Calculate shift for H and I vertices
+-    # Delta z is the max height difference for H/I vertices in this patch
+-    delta_z = max(abs(v.height - neighbor.height) for v in patch.vertices if v.type in ['H', 'I'] for neighbor in v.neighbors)
++    # 2. Perform prediction at unified precision
++    predicted_value = predict(adjusted_neighbors)
+     
+-    if epsilon_q >= delta_z:
+-        k_hi = int(math.log2(epsilon_q / delta_z)) + 1
+-    else:
+-        k_hi = 0
+-        
+-    patch.k_hi = k_hi
++    # 3. Add the low-precision residual (the bits that were shifted out)
++    # This step is conceptual; in practice, the residual is stored
++    # and added back during reconstruction.
++    # For encoding: residual = (vertex - predicted_value) >> shift
++    # For decoding: reconstructed = (predicted_value + residual) << shift
+     
+-    # Assign shifts to H and I vertices
+-    for v in patch.vertices:
+-        if v.type in ['H', 'I']:
+-            v.shift = k_hi
+-            
+-    # L vertices shifts are set by their children's k_hi during hierarchy traversal
+-    # This is a placeholder for the derivation logic
+-    # In practice, this is resolved when processing children first
+-
+-def predict_with_precision_unification(vertex, neighbors, shifts):
+-    """
+-    Predicts vertex height with precision unification to avoid boundary artifacts.
+-    """
+-    # Identify neighbors involved in prediction
+-    # Reduce all involved vertices to the precision of the vertex being predicted
+-    target_shift = shifts[vertex]
+-    
+-    # Shift out low-order bits from neighbors
+-    predicted_height = 0
+-    for neighbor in neighbors:
+-        # Unify precision
+-        neighbor_unified = neighbor.height >> (shifts[neighbor] - target_shift) if shifts[neighbor] > target_shift else neighbor.height
+-        # Perform prediction (e.g., average or linear interpolation)
+-        predicted_height += neighbor_unified
+-        
+-    predicted_height /= len(neighbors)
+-    
+-    # Add low-precision residual
+-    residual = vertex.height - (predicted_height << (shifts[vertex] - shifts[neighbor])) # Simplified residual logic
+-    # Note: Exact residual calculation depends on the specific prediction scheme (e.g., linear, planar)
+-    # The key is that the prediction is done at unified precision
+-    
+-    # Left shift result
+-    final_prediction = predicted_height << target_shift
+-    
+-    return final_prediction
++    return predicted_value
+ ```
+ 
+ **Parameters:**
+-*   $\epsilon_q$: Target quantization error. Typical values depend on the application's visual fidelity requirements [S1].
+-*   $\Delta z$: Local height difference. Varies per vertex/patch [S1].
++*   $\epsilon_q$: Target quantization error. Typical values depend on the application's visual tolerance.
++*   $\Delta z$: Local height variation within a patch.
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Precision Artifacts:** If prediction does not unify precision, unwanted low-order bits appear on patch boundaries [S1].
+-*   **Boundary Agreement:** L vertices must agree on quantization with adjacent patches (same level or finer level below). Failure to do so causes discontinuities [S1].
+-*   **Finest Level:** All vertices on the finest level must be assigned a zero shift for lossless coding [S1].
++*   **Boundary Agreement:** L vertices require agreement between four patches (two children, two parents). The method resolves this by deferring to the finest resolution (children) [S1].
+ 
+ ## Subtopics
+ 
+ ### [GPU Geometry Shader Decoder](10009-gpu-geometry-shader-decoder.md)
+-A GPU-based decoder that uses geometry shaders to decompress terrain patches from a variable-length bitstream and emit height values directly to a buffer, bypassing the rasterizer to avoid attribute limits.
++The GPU Geometry Shader Decoder is a method for decompressing multiresolution terrain height data directly on the graphics hardware, bypassing the CPU to minimize latency and memory bandwidth usage. It solves the problem of rendering massive terrain datasets by performing variable-length decompression in parallel on the GPU, emitting only height values to a buffer to avoid hardware attribute limits. Unlike methods that cache decompressed geometry or emit full vertex attributes, this approach decodes patches on-the-fly and renders them immediately, optimizing for throughput by maximizing shared memory utilization and minimizing vertex program threads.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Not given in the sources.
+-*   **Strengths:** Minimizes bitstream size by adaptively assigning quantization precision based on local geometry and hierarchy [S1]. Avoids boundary artifacts through precision unification [S1].
+-*   **Limitations:** Requires careful handling of vertex classification and shift derivation across patch boundaries [S1].
+-*   **When to Use:** When compressing multiresolution terrain data for efficient transmission and rendering [S1].
+-*   **When Not to Use:** When lossless compression is required for all levels (finest level is lossless, but coarser levels are lossy) [S1].
++*   **Time Complexity:** The shift calculation is $O(1)$ per patch. The assignment requires a traversal of the hierarchy. Prediction is $O(1)$ per vertex.
++*   **Memory Complexity:** Only three shift values per patch are stored (one H/I shift, two L shifts derived). This is significantly less than storing shifts for every vertex.
++*   **Strengths:** Minimizes bitstream size by exploiting geometric redundancy. Simple bit-shift operations are computationally cheap.
++*   **Limitations:** Requires a specific patch hierarchy (diamonds). Precision artifacts can occur if prediction is not handled carefully.
++*   **When to Use:** When rendering large multiresolution terrain datasets with limited bandwidth or storage.
++*   **When Not to Use:** When lossless reconstruction is required for all vertices (though C vertices are lossless, H/I are quantized).
+ 
+ ## Background
+-*   **Origin:** The method was introduced in "On-the-fly decompression and rendering of multiresolution terrain" [S1].
+-*   **History:** It builds on earlier work in multiresolution terrain representation and compression, focusing on efficient on-the-fly decompression and rendering [S1].
+-*   **Usage:** Used in real-time terrain rendering systems where bandwidth and memory are constrained [S1].
++This method was introduced in the context of on-the-fly decompression and rendering of multiresolution terrain. It builds on the concept of using bit shifts for quantization and leverages the specific connectivity of triangular patch hierarchies. The approach was developed to enable efficient GPU-based rendering of massive terrain datasets by reducing the data transfer and processing overhead [S1].
+ 
+ ## Sources

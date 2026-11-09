@@ -19,11 +19,11 @@ This method performs the primary hit resolution for a ray entering a 4×4×4 vox
 - Return value: $t$ if a hit is found, -1.0 otherwise [S1, unofficial].
 
 **Data Structures:**
-- `brick_voxel_idx(x, y, z)`: Maps 3D voxel coordinates $(x,y,z) \in [0,3]^3$ to a linear index.
-- `brick_voxel_solid(bi, idx)`: Returns true if the voxel at `idx` in brick `bi` is not empty.
-- `brick_voxel_material(bi, idx)`: Returns the material ID of the voxel.
+- `brick_voxel_idx(x, y, z)`: Maps 3D voxel coordinates $(x,y,z) \in [0,3]^3$ to a linear index [S1, unofficial].
+- `brick_voxel_solid(bi, idx)`: Returns true if the voxel at `idx` in brick `bi` is not empty [S1, unofficial].
+- `brick_voxel_material(bi, idx)`: Returns the material ID of the voxel [S1, unofficial].
 - `rt_is_transparent_mat(mat)`: Returns true if `mat` is transparent (e.g., IDs 5-12, 18, 35) [S1, unofficial].
-- `rt_face_normal(axis, d)`: Returns the outward normal of the face crossed along `axis` (0, 1, or 2), consistent with ray direction $d$.
+- `rt_face_normal(axis, d)`: Returns the outward normal of the face crossed along `axis` (0, 1, or 2), consistent with ray direction $d$ [G].
 
 **Algorithm Steps:**
 
@@ -37,18 +37,18 @@ This method performs the primary hit resolution for a ray entering a 4×4×4 vox
     Here, $bmin + \text{vec3}(4.0)$ is the brick's upper bound [S1, unofficial].
 
 3.  **Calculate Brick Entry/Exit:**
-    Determine per-axis entry times $te = \min(tb0, tb1)$ and exit times $tf = \max(tb0, tb1)$.
+    Determine per-axis entry times $te = \min(tb0, tb1)$ and exit times $tf = \max(tb0, tb1)$ [S1, unofficial].
     The brick entry time $tnear$ and exit time $tfar$ are:
     $$tnear = \max(te.x, te.y, te.z)$$
     $$tfar = \min(tf.x, tf.y, tf.z)$$
     This follows standard slab intersection logic where $tnear$ is the latest entry and $tfar$ is the earliest exit [S1, unofficial].
 
 4.  **Clamp to Interval:**
-    Set $t = \max(tnear, t_{lo})$ and $t_{end} = \min(tfar, t_{hi})$.
+    Set $t = \max(tnear, t_{lo})$ and $t_{end} = \min(tfar, t_{hi})$ [S1, unofficial].
     If $t > t_{end}$, return -1.0 (ray misses brick or interval) [S1, unofficial].
 
 5.  **Determine Entry Axis:**
-    Identify the axis of the first face crossed by comparing $te$ components:
+    Identify the axis of the first face crossed by comparing $te$ components [S1, unofficial]:
     - If $te.y > te.x$, $last\_axis = 1$.
     - Else if $te.z > \max(te.x, te.y)$, $last\_axis = 2$.
     - Else, $last\_axis = 0$.
@@ -66,17 +66,17 @@ This method performs the primary hit resolution for a ray entering a 4×4×4 vox
 
 8.  **Calculate Next Boundary Times:**
     For each axis $i \in \{x, y, z\}$:
-    - Calculate the next boundary coordinate: $bnd = v_i + (1 \text{ if } step_i > 0 \text{ else } 0)$.
-    - Calculate $t\_max_i = (bmin_i + bnd - o_i) \cdot inv_i$.
+    - Calculate the next boundary coordinate: $bnd = v_i + (1 \text{ if } step_i > 0 \text{ else } 0)$ [S1, unofficial].
+    - Calculate $t\_max_i = (bmin_i + bnd - o_i) \cdot inv_i$ [S1, unofficial].
     - Calculate $t\_delta_i = |inv_i|$ [S1, unofficial].
 
 9.  **Traverse Voxels:**
     Loop $i$ from 0 to 15:
     - If $t\_cur > t_{end}$, return -1.0.
-    - Get voxel index $vi\_q = brick\_voxel\_idx(v.x, v.y, v.z)$.
+    - Get voxel index $vi\_q = brick\_voxel\_idx(v.x, v.y, v.z)$ [S1, unofficial].
     - If $brick\_voxel\_solid(bi, vi\_q)$ is true AND (`skip_transparent` is false OR `!rt_is_transparent_mat(brick_voxel_material(bi, vi_q))`):
         - Set $*first\_vox = v$.
-        - Set $*first\_normal = rt\_face\_normal(last\_axis, d)$.
+        - Set $*first\_normal = rt\_face\_normal(last\_axis, d)$ [S1, unofficial].
         - Return $t\_cur$.
     - Find axis $ax$ with minimum $t\_max$.
     - Update $v.ax += step.ax$.
@@ -181,7 +181,7 @@ def rt_face_normal(axis, d):
 
 **Edge Cases and Pitfalls:**
 - **Zero Direction Components:** Handled by `rt_safe_inv` returning a large value, effectively making the ray never cross boundaries on that axis, which is correct for axis-aligned rays [S1, unofficial].
-- **Precision Errors:** The epsilon $10^{-4}$ added to $t$ prevents the ray from starting exactly on a voxel boundary, avoiding double-counting or missing voxels due to floating-point inaccuracies [S1, unofficial].
+- **Precision Errors:** The epsilon $10^{-4}$ added to $t$ prevents the ray from starting exactly on a voxel boundary, avoiding double-counting or missing voxels due to floating-point inaccuracies [S1, unofficial]. High-precision floating point coordinates and verification of adjacent block indices are also used to handle precision issues near block boundaries [S2, unofficial].
 - **Transparent Materials:** If `skip_transparent` is true, the ray continues through transparent voxels. If all voxels in the brick are transparent, the method returns -1.0 [S1, unofficial].
 
 ## Subtopics
@@ -196,14 +196,14 @@ Uses hardware RT cores for coarse BVH traversal and this method for in-brick res
 Adapts the DDA logic to accept two explicit 3D points instead of a ray origin and direction, handling edge cases like zero deltas and negative traversal with higher precision.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per brick, as the brick size is fixed at 4×4×4 (16 voxels). The loop runs at most 16 times.
-- **Memory Complexity:** $O(1)$, requiring only a few scalar variables for traversal state.
-- **Performance:** Highly efficient for sparse or structured voxel grids where bricks are used as coarse bounds. The fixed-size traversal avoids dynamic memory allocation and branching overhead associated with hierarchical traversal.
+- **Time Complexity:** $O(1)$ per brick, as the brick size is fixed at 4×4×4 (16 voxels) and the loop runs at most 16 times [S1, unofficial].
+- **Memory Complexity:** $O(1)$, requiring only a few scalar variables for traversal state [S1, unofficial].
+- **Performance:** Highly efficient for sparse or structured voxel grids where bricks are used as coarse bounds. The fixed-size traversal avoids dynamic memory allocation and branching overhead associated with hierarchical traversal [G].
 - **Strengths:** Simple implementation, low memory footprint, predictable performance.
-- **Limitations:** Only suitable for fixed-size bricks. Does not handle empty-space skipping across multiple bricks (handled by the parent or caller). Precision issues at voxel boundaries if not handled with epsilon.
+- **Limitations:** Only suitable for fixed-size bricks. Does not handle empty-space skipping across multiple bricks (handled by the parent or caller) [G].
 
 ## Background
-This method is derived from the Amanatides-Woo DDA algorithm, originally published for ray tracing through voxel grids [S1, unofficial]. It has been adapted for modern hardware ray tracing pipelines, specifically for resolving primary hits within 4×4×4 voxel bricks in real-time voxel rendering engines. The implementation details provided are from the `voxelG` project, which uses this method for efficient voxel traversal in a game engine context [S1, unofficial].
+This method is derived from the Amanatides-Woo DDA algorithm, originally published for ray tracing through voxel grids [S1, unofficial]. It has been adapted for modern hardware ray tracing pipelines, specifically for resolving primary hits within 4×4×4 voxel bricks in real-time voxel rendering engines [S1, unofficial]. The implementation details provided are from the `voxelG` project, which uses this method for efficient voxel traversal in a game engine context [S1, unofficial].
 
 ## Sources
 [S1] mstampfli/voxelG, https://github.com/mstampfli/voxelG, fetched 2026-10-24 (unofficial)

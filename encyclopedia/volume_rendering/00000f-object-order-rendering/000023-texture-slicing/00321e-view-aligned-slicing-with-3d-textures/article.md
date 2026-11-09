@@ -1,150 +1,165 @@
 # View-Aligned Slicing with 3D Textures
 
-Also called: View-Aligned Slicing, View-Orthogonal Slicing, View-Aligned Quad Slicing
+Also called: Slice-based rendering, TextureBasedProgram, View-facing slicing
 
 ## Overview
-View-aligned slicing with 3D textures is a hardware-accelerated volume rendering technique that renders the volume as a series of parallel planes orthogonal to the current view direction. Unlike object-aligned slicing, which renders slices parallel to the volume axes, this method ensures that each slice covers the entire visible extent of the volume in screen space, minimizing overdraw and maintaining consistent pixel coverage regardless of camera orientation. It builds on [Texture slicing](25-texture-slicing.md) by using 3D textures for data storage and view-aligned proxy geometry for rasterization.
+View-aligned slicing with 3D textures is a texture-based volume rendering technique that generates proxy geometry (slices) perpendicular to the view direction at every frame. It solves the problem of maintaining visual continuity and correct depth ordering in dynamic scenes by ensuring slices always face the camera. Unlike fixed-axis slicing, it prevents gaps between slices and leverages hardware MIP-mapping for better antialiasing of oblique views, though it requires per-frame geometry regeneration [S2][S3, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- **Input:** 3D scalar volume data, current modelview matrix, volume bounding box (or center and size), and a slicing interval (distance between slices).
-- **Output:** A composited 2D image in the frame buffer.
+*   **Inputs:** Volume data (3D texture), current Model-View matrix, number of slices ($N$), quad size (half-extent).
+*   **Outputs:** A stream of triangle primitives representing the intersection of view-aligned planes with the volume's bounding proxy, textured with the 3D volume data.
 
 **Data Structures:**
-- **3D Texture:** Stores the scalar volume data. The texture format is typically `GL_RGBA` (pre-classified) or `GL_COLOR_INDEX8_EXT` (paletted). Dimensions match the volume resolution $(N_x, N_y, N_z)$.
-- **Modelview Matrix:** A $4 \times 4$ column-major float array `mat[16]` representing the current camera transformation.
-- **Proxy Geometry:** A set of polygons (quads or triangle fans) representing the slicing planes.
+*   **Model-View Matrix (`mat`):** A 16-element float array (column-major).
+    *   Right vector: indices 0, 4, 8.
+    *   Up vector: indices 1, 5, 9.
+    *   Eye/View vector: indices 2, 6, 10.
+*   **Clipping Plane:** Defined by normal $\mathbf{n}$ and distance $d$. For view-aligned slices, $\mathbf{n}$ is the view direction, and $d$ is derived from the slice depth.
+*   **Slice Vertices:** A list of 3D points representing the polygon intersection.
 
-**Steps:**
+**Algorithm Steps:**
 
 1.  **Retrieve View Orientation:**
-    Get the current modelview matrix. Extract the right, up, and eye (view direction) vectors from the matrix columns. Assuming a column-major layout where vectors are stored in columns 0, 1, and 2:
-    $$
-    \begin{aligned}
-    \mathbf{r} &= (mat[0], mat[4], mat[8]) \\
-    \mathbf{u} &= (mat[1], mat[5], mat[9]) \\
-    \mathbf{e} &= (mat[2], mat[6], mat[10])
-    \end{aligned}
-    $$
+    Get the current Model-View matrix $M$ [S3, unofficial]. Extract basis vectors:
+    $$ \mathbf{r} = (M_{0}, M_{4}, M_{8}) $$
+    $$ \mathbf{u} = (M_{1}, M_{5}, M_{9}) $$
+    $$ \mathbf{e} = (M_{2}, M_{6}, M_{10}) $$
+    [S3, unofficial]
+
+2.  **Determine Slice Depth Range:**
+    Transform the vertices of the proxy geometry (e.g., a cube bounding the volume) using the translation and view matrices. Compute the minimum and maximum Z-coordinates ($z_{min}, z_{max}$) of these transformed vertices in view space [S1, unofficial].
+
+3.  **Generate Slice Planes:**
+    For each slice index $i$ from $0$ to $N-1$:
+    Calculate the slice depth $z_i$:
+    $$ z_i = z_{min} + \frac{(z_{max} - z_{min}) \cdot (i + 0.5)}{N} $$
+    [S1, unofficial]
+    Define the clipping plane normal $\mathbf{n} = (0, 0, 1)$ (forward in view space) and distance $d = -z_i$.
+
+4.  **Compute Intersection Polygon:**
+    There are two common approaches to defining the slice geometry:
+
+    *   **Approach A: Quad Intersection (Simpler, [S1, unofficial]):**
+        Define a large quad in view space centered at the origin (or volume center) with vertices $\mathbf{v}_0, \mathbf{v}_1, \mathbf{v}_2, \mathbf{v}_3$.
+        For each triangle of the proxy geometry (or the quad itself if used as the slice carrier):
+        Calculate signed distances $d_0, d_1, d_2$ from the plane to the triangle vertices.
+        If the plane cuts the triangle (e.g., one vertex is on the negative side, two on positive, or vice versa), compute intersection points on the edges using linear interpolation:
+        $$ t = \frac{-d_{start}}{d_{end} - d_{start}} $$
+        $$ \mathbf{p}_{int} = \mathbf{v}_{start} + t \cdot (\mathbf{v}_{end} - \mathbf{v}_{start}) $$
+        Collect all intersection points into a list `sliceVertices`.
+
+    *   **Approach B: Bounding Box Intersection (More Robust, [S3, unofficial]):**
+        Define the slicing plane equation $(a,b,c,d)$ using the view vector $(a,b,c)$ and distance $d$ from the volume center.
+        Intersect this plane with all 12 edges of the volume's bounding box.
+        Collect the intersection points.
+        Sort the points angularly around the center to form a convex polygon.
+
+5.  **Triangulate:**
+    Using the sorted `sliceVertices` list, create triangles using a fan triangulation from the first vertex:
+    For $k$ from $1$ to $L-1$ (where $L$ is the number of vertices):
+    $$ \text{Triangle} = (\text{sliceVertices}[0], \text{sliceVertices}[k], \text{sliceVertices}[(k+1) \pmod L]) $$
     [S1, unofficial]
 
-2.  **Define Slice Plane:**
-    Determine the position of the current slice. Let $d$ be the distance from the volume center along the view direction $\mathbf{e}$. The plane equation is defined by normal $\mathbf{n} = \mathbf{e}$ and distance $D = \mathbf{c} \cdot \mathbf{e} - d$, where $\mathbf{c}$ is the volume center. Alternatively, for view-aligned quads, the plane is implicitly defined by the center point $\mathbf{c}$ and the normal $\mathbf{e}$.
-    [S1, unofficial]
-
-3.  **Generate Proxy Geometry:**
-    There are two common approaches to generate the slice geometry:
-
-    **Approach A: View-Aligned Quad (Simple)**
-    Create a quad centered at the slice position, oriented orthogonal to the view.
-    Let $\mathbf{c}$ be the center of the slice (e.g., volume center offset by $d \cdot \mathbf{e}$).
-    Let $s$ be the `quad_size` (half-width/height of the quad in world space).
-    The four vertices are:
-    $$
-    \begin{aligned}
-    \mathbf{v}_0 &= \mathbf{c} + (-\mathbf{r} - \mathbf{u}) \cdot s \\
-    \mathbf{v}_1 &= \mathbf{c} + (\mathbf{r} - \mathbf{u}) \cdot s \\
-    \mathbf{v}_2 &= \mathbf{c} + (\mathbf{r} + \mathbf{u}) \cdot s \\
-    \mathbf{v}_3 &= \mathbf{c} + (-\mathbf{r} + \mathbf{u}) \cdot s
-    \end{aligned}
-    $$
-    [S1, unofficial]
-
-    **Approach B: Bounding Box Intersection (Precise)**
-    Compute the intersection of the slicing plane with the volume's bounding box.
-    1. Define the plane equation $(a,b,c,d)$ using the view vector $(a,b,c)$ and the distance from the center.
-    2. Intersect the plane with each of the 12 edges of the volume's axis-aligned bounding box.
-    3. Collect the intersection points.
-    4. Sort the intersection points in counter-clockwise order around the plane normal.
-    5. Render the sorted vertices as a triangle fan.
-    [S1, unofficial]
-
-4.  **Rasterize and Sample:**
-    Rasterize the proxy geometry. The fragment shader samples the 3D texture at the interpolated texture coordinates. The texture coordinates are typically derived from the world-space position of the fragment mapped into the volume's local coordinate system.
-
-5.  **Composite:**
-    Use hardware alpha blending to composite the fragment color and opacity into the frame buffer. The blending equation is:
-    $$ C_{dest} = C_{src} \cdot A_{src} + C_{dest} \cdot (1 - A_{src}) $$
-    [S3, book]
+6.  **Render:**
+    Pass the triangle vertices to the GPU. The vertex shader maps the 3D position to 3D texture coordinates. The fragment shader samples the 3D texture. Fragments are composited using hardware alpha blending (back-to-front order is implicit if slices are generated in depth order) [S3, S4, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_view_aligned_slices(volume_texture, modelview_matrix, volume_center, quad_size, num_slices, slice_spacing):
+def render_view_aligned_slices(volume_texture, model_view_matrix, num_slices, quad_size, volume_center):
     """
-    Renders volume using view-aligned quads.
+    Renders volume using view-aligned slices.
     """
-    # 1. Extract basis vectors from modelview matrix (column-major)
-    # mat is a 16-element list/array
-    mat = modelview_matrix
-    
-    # Right vector (column 0)
-    right = Vector3(mat[0], mat[4], mat[8])
-    # Up vector (column 1)
-    up = Vector3(mat[1], mat[5], mat[9])
-    # Eye/View vector (column 2)
-    eye = Vector3(mat[2], mat[6], mat[10])
-    
-    # 2. Iterate through slices
+    # 1. Extract basis vectors from column-major Model-View matrix
+    # Indices: 0,4,8 -> Right; 1,5,9 -> Up; 2,6,10 -> Eye/View
+    right = vec3(model_view_matrix[0], model_view_matrix[4], model_view_matrix[8])
+    up = vec3(model_view_matrix[1], model_view_matrix[5], model_view_matrix[9])
+    eye = vec3(model_view_matrix[2], model_view_matrix[6], model_view_matrix[10])
+
+    # 2. Determine depth range in view space
+    # Transform proxy geometry vertices (e.g., cube corners) to view space
+    # Compute min_z and max_z of these vertices
+    # Note: In a simplified implementation, if the volume is axis-aligned in object space
+    # and we only rotate, we might approximate this. However, exact implementation
+    # requires transforming the bounding box.
+    # For the sake of this algorithm, assume we have computed min_z and max_z
+    # from the transformed bounding box of the volume.
+    min_z, max_z = compute_view_space_depth_range(volume.bounding_box, model_view_matrix)
+
+    # 3. Generate slices
     for i in range(num_slices):
-        # Calculate slice distance from center
-        distance = (i - num_slices / 2.0) * slice_spacing
+        # Calculate slice depth, centered in the bin
+        z = min_z + ((max_z - min_z) * (i + 0.5)) / num_slices
+
+        # Define the plane in view space: Normal is (0,0,1), Distance is -z
+        # Plane equation: 0*x + 0*y + 1*z + d = 0 => z = -d
+        # Here d = -z, so z = z.
+        plane_normal = vec3(0, 0, 1)
+        plane_dist = -z
+
+        # 4. Compute intersection polygon
+        # Approach: Intersect plane with the volume's bounding box edges
+        intersection_points = []
         
-        # Center of the current slice in world space
-        slice_center = volume_center + eye * distance
+        # Get bounding box edges (12 edges for a box)
+        edges = volume.bounding_box.get_edges()
         
-        # 3. Compute quad vertices
-        # vec0 = center + (-right - up) * size
-        v0 = slice_center + (-right - up) * quad_size
-        # vec1 = center + (right - up) * size
-        v1 = slice_center + (right - up) * quad_size
-        # vec2 = center + (right + up) * size
-        v2 = slice_center + (right + up) * quad_size
-        # vec3 = center + (-right + up) * size
-        v3 = slice_center + (-right + up) * quad_size
+        for edge in edges:
+            p1 = edge.start
+            p2 = edge.end
+            
+            # Transform edge points to view space if they aren't already
+            # Assuming p1, p2 are in world/object space, transform them
+            p1_view = transform_point(p1, model_view_matrix)
+            p2_view = transform_point(p2, model_view_matrix)
+            
+            # Check intersection with plane
+            # Plane: n . x + d = 0
+            # n = (0,0,1), d = -z
+            # z_coord + d = 0 => z_coord = z
+            if is_between(p1_view.z, p2_view.z, z):
+                t = (z - p1_view.z) / (p2_view.z - p1_view.z)
+                int_point = lerp(p1_view, p2_view, t)
+                intersection_points.append(int_point)
         
-        # 4. Render the quad
-        # The texture coordinates must be mapped such that the quad covers the volume extent
-        # in the texture space. This usually requires transforming the vertices into 
-        # volume-local coordinates or using a custom vertex shader to compute texcoords.
-        # For simplicity, assuming a standard quad with texcoords (0,0) to (1,1) 
-        # mapped to the volume bounds in the shader.
-        draw_quad(v0, v1, v2, v3)
+        # 5. Sort and Triangulate
+        if len(intersection_points) < 3:
+            continue
+            
+        # Sort points angularly around the center in the plane
+        # Since the plane is view-aligned (XY plane in view space),
+        # we can sort by angle in XY plane relative to volume_center_view
+        center_view = transform_point(volume_center, model_view_matrix)
+        intersection_points.sort(key=lambda p: atan2(p.y - center_view.y, p.x - center_view.x))
         
-    # 5. Enable blending for compositing
-    enable_blend()
-    set_blend_func(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)
+        # Fan triangulation from the first point
+        origin = intersection_points[0]
+        for k in range(1, len(intersection_points) - 1):
+            v1 = intersection_points[k]
+            v2 = intersection_points[k+1]
+            draw_triangle(origin, v1, v2, volume_texture)
 ```
-
-**Parameters:**
-- `quad_size`: Half-width/height of the view-aligned quad in world units. Determines the extent of the slice geometry. [S1, unofficial]
-- `slice_spacing`: Distance between consecutive slices.
-- `num_slices`: Number of slices to render.
-
-**Edge Cases and Pitfalls:**
-- **Rotational Artifacts:** Rotating the volume without updating the view-aligned slice geometry correctly causes visual artifacts such as popping or the volume disappearing. The slice geometry must be recomputed every frame based on the current modelview matrix. [S1, unofficial]
-- **Precision:** Floating-point precision errors in matrix extraction or vertex computation can cause gaps between slices or incorrect occlusion.
-- **Boundary Handling:** If the quad size is too small, parts of the volume may not be covered. If too large, unnecessary overdraw occurs.
 
 ## Subtopics
 
 ### Paletted 3D Texture Rendering
-A rendering technique using a 3D texture where the index is identical to the scalar value, pointing to a color/opacity palette (transfer function) applied during runtime. The 3D texture is created with format `GL_COLOR_INDEX8_EXT`, where the index size is a byte identical to the scalar value. A 1D transfer function lookup table is defined using the OpenGL extension `glColorTableEXT`. The palette size is 256 entries, each 4 bytes (RGBA), corresponding to the 8-bit index. This allows simple and fast changes to the transfer function at runtime, unlike pre-classified textures which require complete redefinition of texture data. [S2, unofficial]
+A variant where the 3D texture stores color indices (e.g., `GL_COLOR_INDEX8_EXT`) instead of RGBA values. The index is identical to the scalar value. A 1D transfer function lookup table (palette) is defined using extensions like `glColorTableEXT`. This allows simple and fast runtime changes to the transfer function without redefining texture data. Palette size is typically 256 entries (4 bytes each) [S4, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N_s \cdot N_p)$, where $N_s$ is the number of slices and $N_p$ is the number of pixels covered by the slice geometry.
-- **Memory Complexity:** $O(N_x \cdot N_y \cdot N_z)$ for the 3D texture storage.
-- **Performance:** Fast for moderately sized data sets due to hardware acceleration. Interactive exploration is possible. [S2, unofficial]
-- **Strengths:** Consistent pixel coverage regardless of view angle; minimal overdraw compared to object-aligned slicing when viewing from arbitrary angles; simple implementation.
-- **Limitations:** Requires frequent geometry regeneration on camera rotation; may suffer from popping if not updated correctly; limited to linear sampling unless higher-order interpolation is used in the shader.
-- **When to use:** When interactive rotation is required and the volume data is stored in 3D textures.
-- **When not to use:** When the volume is extremely large and memory bandwidth is a bottleneck, or when non-linear slicing planes are required.
+*   **Time Complexity:** $O(N \cdot E)$ per frame, where $N$ is the number of slices and $E$ is the number of bounding box edges (constant 12 for a box) or proxy geometry triangles. The dominant cost is geometry generation and transfer to GPU every frame [S2].
+*   **Memory Complexity:** $O(V)$ for the 3D texture, where $V$ is the volume resolution. Geometry memory is small and transient [S2].
+*   **Performance:** Fast for moderately sized datasets on consumer hardware. Interactive exploration is possible [S4, unofficial].
+*   **Strengths:** Prevents seeing between slices (no gaps); better antialiasing via isotropic MIP-mapping for oblique views [S2].
+*   **Limitations:** Geometry must be recomputed every frame; rotating the volume without updating slice geometry causes popping/disappearance artifacts [S2][S3, unofficial]. Adaptive slicing on surfaces is complicated [S2].
 
 ## Background
-Originating from early OpenGL volume rendering techniques, view-aligned slicing leverages the fixed-function pipeline's ability to rasterize geometry and sample textures. It was popularized in the early 2000s as a method to achieve interactive frame rates on consumer graphics hardware. The technique is discussed in community forums and educational resources on direct volume rendering. [S1, unofficial][S2, unofficial]
+Originating from early direct volume rendering techniques, view-aligned slicing leverages the fixed-function pipeline's ability to handle texture mapping and blending. It was popularized in real-time tools like Volumizer and discussed in forums for OpenGL implementation (e.g., OpenQVis) [S2][S3, unofficial]. It builds on the general texture slicing principles [Parent](25-texture-slicing.md).
 
 ## Sources
-[S1] view aligned slices - OpenGL: Advanced Coding, https://community.khronos.org/t/view-aligned-slices/38447, fetched 2026-10-28 (unofficial)
-[S2] Direct Volume Rendering Techniques, https://www.scribd.com/document/853597780/VIS-Modules-06-Direct-Volume-Rendering, fetched 2026-10-25 (unofficial)
+[S1] jaanonim/volume-rendering, https://github.com/jaanonim/volume-rendering, fetched 2026-10-26 (unofficial)
+[S2] Rendering Forest Scenes in Real-Time, https://doi.org/10.2312/egwr/egsr04/093-102, fetched 2026-10-26
+[S3] view aligned slices - OpenGL: Advanced Coding, https://community.khronos.org/t/view-aligned-slices/38447, fetched 2026-10-28 (unofficial)
+[S4] Direct Volume Rendering Techniques, https://www.scribd.com/document/853597780/VIS-Modules-06-Direct-Volume-Rendering, fetched 2026-10-25 (unofficial)

@@ -19,7 +19,7 @@ The method operates in two phases: a precomputation phase that builds an importa
 ### Precomputation Steps
 The precomputation determines the initial importance for each grid cell and then filters these values to account for the SPH kernel's spatial support and interface detection [S1].
 
-1.  **Initialize Grid:** Create an importance grid of sufficient resolution to cover the particle domain. Initialize all cells to 0.
+1.  **Initialize Grid:** Create an importance grid of sufficient resolution to cover the particle domain. Initialize all cells to 0 [S1].
 2.  **Compute Initial Importance:** For each grid cell $c$ with center $\mathbf{x}_c$:
     a. Identify the set of particles $\mathcal{P}(\mathbf{x}_c)$ lying within this cell [S1].
     b. If $\mathcal{P}(\mathbf{x}_c)$ is empty, set $p_i(\mathbf{x}_c) = 0$ [S1].
@@ -30,7 +30,7 @@ The precomputation determines the initial importance for each grid cell and then
         $$ \mathbb{H}_{\mathcal{P}(\mathbf{x}_c)}(A) = - \sum_{b=0}^{N_{\text{bins}}-1} h(b) \log_2 h(b) $$
         iii. Normalize the entropy to be independent of histogram size:
         $$ \overline{\mathbb{H}}_{\mathcal{P}(\mathbf{x}_c)}(A) = \frac{2^{\mathbb{H}_{\mathcal{P}(\mathbf{x}_c)}(A)}}{N_{\text{bins}}} $$
-        iv. Set $p_i(\mathbf{x}_c) = \overline{\mathbb{H}}_{\mathcal{P}(\mathbf{x}_c)}(A)$ [S1].
+        iv. Set $p_i(\mathbf{x}_c) = \mathbb{H}_{\mathcal{P}(\mathbf{x}_c)}(A)$ [S1].
 3.  **Filter with Maximum Dilation:** Apply a 3D maximum dilation filter to the importance grid to propagate importance values to neighboring cells, compensating for the fact that SPH approximation at a sampling point depends on particles in neighboring cells [S1].
     a. Define a dilation kernel with width equal to the number of grid cells covered by the finite support of the SPH kernel function used in rendering [S1].
     b. For each cell in the grid, update its importance value to the maximum importance value found in any cell within the dilation kernel [S1].
@@ -48,15 +48,24 @@ During ray marching, for a sampling position $\mathbf{x}$:
 
 ```python
 import math
+from collections import defaultdict
+
+class Particle:
+    def __init__(self, x, y, z, phase, attr):
+        self.x = x
+        self.y = y
+        self.z = z
+        self.phase = phase
+        self.attr = attr
 
 def compute_entropy(attribute_values, n_bins):
-    """Computes normalized entropy for a set of attribute values."""
+    """Computes entropy for a set of attribute values per Eq. 11."""
     if not attribute_values:
         return 0.0
     min_val = min(attribute_values)
     max_val = max(attribute_values)
     if min_val == max_val:
-        return 1.0 / n_bins
+        return 0.0
 
     bin_width = (max_val - min_val) / n_bins
     hist = [0.0] * n_bins
@@ -72,9 +81,9 @@ def compute_entropy(attribute_values, n_bins):
         if count > 0:
             p = count / total
             entropy -= p * math.log2(p)
-    return (2 ** entropy) / n_bins
+    return entropy
 
-def precompute_importance_grid(particles, grid_bounds, grid_resolution, n_bins, kernel_support_cells, dilation_iterations):
+def precompute_importance_grid(particles, grid_bounds, grid_resolution, n_bins, dilation_radius):
     """Precomputes the importance grid for SPH attribute entropy sampling."""
     nx, ny, nz = grid_resolution
     (min_x, max_x), (min_y, max_y), (min_z, max_z) = grid_bounds
@@ -85,15 +94,15 @@ def precompute_importance_grid(particles, grid_bounds, grid_resolution, n_bins, 
     importance_grid = [[[0.0] * nz for _ in range(ny)] for _ in range(nx)]
     has_particles = [[[False] * nz for _ in range(ny)] for _ in range(nx)]
 
-    cell_particles = {}
+    cell_particles = defaultdict(list)
     for p in particles:
-        i = int((p.pos[0] - min_x) / dx)
-        j = int((p.pos[1] - min_y) / dy)
-        k = int((p.pos[2] - min_z) / dz)
+        i = int((p.x - min_x) / dx)
+        j = int((p.y - min_y) / dy)
+        k = int((p.z - min_z) / dz)
         i = max(0, min(nx - 1, i))
         j = max(0, min(ny - 1, j))
         k = max(0, min(nz - 1, k))
-        cell_particles.setdefault((i, j, k), []).append(p)
+        cell_particles[(i, j, k)].append(p)
         has_particles[i][j][k] = True
 
     for i in range(nx):
@@ -105,21 +114,20 @@ def precompute_importance_grid(particles, grid_bounds, grid_resolution, n_bins, 
                     if len(phases) > 1:
                         importance_grid[i][j][k] = 1.0
                     else:
-                        attrs = [p.attr_value for p in plist]
+                        attrs = [p.attr for p in plist]
                         importance_grid[i][j][k] = compute_entropy(attrs, n_bins)
 
-    half_k = kernel_support_cells // 2
-    for _ in range(dilation_iterations):
+    for _ in range(dilation_radius):
         new_grid = [[[0.0] * nz for _ in range(ny)] for _ in range(nx)]
         for i in range(nx):
             for j in range(ny):
                 for k in range(nz):
-                    i_min = max(0, i - half_k)
-                    i_max = min(nx - 1, i + half_k)
-                    j_min = max(0, j - half_k)
-                    j_max = min(ny - 1, j + half_k)
-                    k_min = max(0, k - half_k)
-                    k_max = min(nz - 1, k + half_k)
+                    i_min = max(0, i - dilation_radius)
+                    i_max = min(nx - 1, i + dilation_radius)
+                    j_min = max(0, j - dilation_radius)
+                    j_max = min(ny - 1, j + dilation_radius)
+                    k_min = max(0, k - dilation_radius)
+                    k_max = min(nz - 1, k + dilation_radius)
 
                     empty_count = 0
                     max_imp = 0.0
@@ -143,7 +151,7 @@ def precompute_importance_grid(particles, grid_bounds, grid_resolution, n_bins, 
 ```
 
 ### Parameters
-*   **$N_{\text{bins}}$:** Number of histogram bins for entropy calculation. Not given in the sources. [G] A typical value might be 256 or 512, depending on the attribute range and desired precision.
+*   **$N_{\text{bins}}$:** Number of histogram bins for entropy calculation. Not given in the sources [S1].
 *   **Dilation kernel width:** Equal to the number of grid cells covered by the finite support of the SPH kernel function used in rendering [S1].
 *   **Dilation iterations:** User-specified number of iterations for the filtering process; 1 or 2 iterations are sufficient in practice [S1].
 
@@ -158,17 +166,17 @@ def precompute_importance_grid(particles, grid_bounds, grid_resolution, n_bins, 
 Stratified Stochastic Particle Sampling reduces overall sampling error in SPH rendering by selecting well-distributed particle subsets within an acceleration structure's cells. It differs from naive random discarding by enforcing a structured selection process based on cell and position importance, ensuring that the statistical properties of the particle neighborhood are preserved more accurately during ray marching.
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Measured Performance:** Not given in the sources.
-*   **Scaling:** Not given in the sources.
-*   **Strengths:** Not given in the sources.
-*   **Limitations:** Not given in the sources.
-*   **When to Use:** Not given in the sources.
-*   **When Not to Use:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources [S1].
+*   **Memory Complexity:** Not given in the sources [S1].
+*   **Measured Performance:** Not given in the sources [S1].
+*   **Scaling:** Not given in the sources [S1].
+*   **Strengths:** Not given in the sources [S1].
+*   **Limitations:** Not given in the sources [S1].
+*   **When to Use:** Not given in the sources [S1].
+*   **When Not to Use:** Not given in the sources [S1].
 
 ## Background
-The method was introduced in the paper "Stochastic Volume Rendering of Multi-Phase SPH Data" [S1]. It addresses the challenges of rendering SPH data with multiple phases, where traditional uniform sampling can lead to artifacts at phase boundaries. The use of entropy to measure attribute variation is based on information theory [Sha48], and the normalization of entropy follows Wei et al. [WDS18].
+The method was introduced in the paper "Stochastic Volume Rendering of Multi-Phase SPH Data" [S1]. It addresses the challenges of rendering SPH data with multiple phases, where traditional uniform sampling can lead to artifacts at phase boundaries [S1]. The use of entropy to measure attribute variation is based on information theory [Sha48], and the normalization of entropy follows Wei et al. [WDS18] [S1].
 
 ## Sources
 [S1] Stochastic Volume Rendering of Multi‐Phase SPH Data, https://doi.org/10.1111/cgf.14121, fetched 2026-10-27

@@ -1,0 +1,177 @@
+# Adapt-Decompress-Draw Rendering Pipeline
+
+Also called: Adapt-decode-draw system, GPU-based Terrain Decoding and Rendering Pipeline, Multiresolution terrain rendering, On-the-fly decompression and rendering, Three-stage terrain rendering
+
+## Overview
+The Adapt-Decompress-Draw pipeline is a three-stage rendering system for multiresolution terrain that decodes compressed height data on the GPU and renders it as triangles without maintaining a persistent cache of decompressed geometry [S1]. It solves the problem of rendering massive terrain datasets by performing variable-length decompression directly into a transform feedback buffer, bypassing the rasterizer during the decode phase to avoid attribute limits [S1]. Unlike sibling methods that cache geometry, this pipeline adapts the visible patch cut on the CPU, decodes it in parallel on the GPU, and immediately draws it, optimizing for throughput by minimizing vertex program threads and maximizing shared memory utilization [S1].
+
+## How it works
+The pipeline consists of three sequential phases: Adapt (CPU), Decode (GPU), and Draw (GPU) [S1].
+
+### Inputs and Outputs
+*   **Inputs:** Compressed bitstreams stored in GPU texture buffers; viewing parameters (eye position, projection matrix); screen-space error tolerance (in pixels); patch hierarchy structure (bintree) [S1].
+*   **Outputs:** A stream of triangles rendered to the screen [S1].
+
+### Data Structures
+*   **Bitstream Buffer:** A GPU texture buffer containing the compressed terrain data [S1].
+*   **Decode Command:** A single OpenGL point primitive representing one patch. It contains:
+    *   Offset to the patch's start in the bitstream buffer.
+    *   Three shift parameters for quantization, packed as raw bits into two floating-point variables [S1].
+*   **Transform Feedback Buffer:** A GPU buffer capturing the output of the geometry shader during the decode phase. It stores the decompressed height values [S1].
+*   **Index Buffer:** A single set of vertex indices stored on the GPU, reused for all patches to define the triangle topology [S1].
+*   **Height Buffer:** The decoded height values from the transform feedback buffer, accessed by the draw phase vertex program [S1].
+
+### Numbered Steps
+
+1.  **Adapt Phase (CPU):**
+    *   Perform a top-down traversal of the bintree patch hierarchy [S1].
+    *   Calculate screen-space error for each node based on viewing parameters and error tolerance [S1].
+    *   Select the cut of nodes that are just beneath the error tolerance and not culled by the viewing frustum [S1].
+    *   Organize the selected cut into bins to minimize graphics state changes in the draw phase (grouped by bitstream buffer number, orientation, and hierarchy level) [S1].
+    *   *Optimization:* Pipeline this phase with the decode/draw phases of the previous frame [S1]. For small patch sizes, adapt at a coarser granularity to avoid CPU bottlenecks [S1].
+
+2.  **Decode Phase (GPU):**
+    *   Issue a sequence of OpenGL point primitives, one for each patch in the cut [S1].
+    *   **Vertex Program:** A trivial vertex program unpacks the offset and shift parameters from the point primitive attributes [S1].
+    *   **Geometry Program (Decoder):**
+        *   The geometry program receives the unpacked parameters [S1].
+        *   It reads from the bitstream buffer using a conditional-free, redundant fetch strategy to handle variable-length coding efficiently [S1].
+        *   Bits enter a 32-bit register from the right 16 bits at a time. If the register underflows, the pointer advances to fetch more bits [S1].
+        *   The decoder executes a fixed number of instructions per patch (approx. 22.2 instructions/vertex without quantization, 23.5 with) [S1].
+        *   **Output Packing:** Two height values are packed into each `emit` command to fully utilize the four-byte attribute space of the transform feedback buffer [S1].
+        *   The rasterizer is configured to discard fragments; no fragment program is executed [S1].
+        *   Outputs (heights) are captured into the transform feedback buffer [S1].
+    *   *Optimization:* Use point primitives to minimize vertex program threads, allowing more multi-processors to handle geometry shading [S1].
+
+3.  **Draw Phase (GPU):**
+    *   Render the decoded patches as indexed OpenGL triangle set primitives [S1].
+    *   **Vertex Program:**
+        *   Binds a height value from the decoded height buffer using canonical xy-coordinates from a properly oriented patch [S1].
+        *   Applies patch translation, LOD scaling, and the modelview-projection matrix to produce clip-space coordinates [S1].
+        *   Computes object-space coordinates for normal computation and texture coordinates [S1].
+    *   **Geometry Program (Optional Flat Shading):**
+        *   If enabled, a flat shading program computes a face normal from the three triangle vertices and performs dot product lighting [S1].
+        *   If not bound, vertex program results go directly to the rasterizer [S1].
+    *   **Fragment Program:**
+        *   Bound to produce effects such as flat shading with a 1D color ramp (indexed by height), 2D texturing, or contour line extraction [S1].
+    *   **Draw Calls:** Issue a single `glDrawElements` call per patch using triangle sets [S1].
+    *   *Optimization:* Set only the height buffer offset and translation before issuing each patch [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Adapt Phase (CPU)
+def adapt_phase(hierarchy, view_params, error_tolerance):
+    """
+    Traverse bintree hierarchy to find visible patches.
+    Returns a list of patch descriptors sorted for efficient drawing.
+    """
+    cut = []
+    # Top-down traversal
+    for node in hierarchy.top_down():
+        if node.culled_by_frustum(view_params):
+            continue
+        error = calculate_screen_space_error(node, view_params)
+        if error <= error_tolerance:
+            cut.append(node)
+        else:
+            # If error is too high, children are needed (handled by traversal logic)
+            pass
+            
+    # Bin cut to minimize state changes
+    bins = organize_into_bins(cut, key=lambda p: (p.bitstream_id, p.orientation, p.level))
+    return bins
+
+# Decode Phase (GPU - Geometry Shader Logic)
+def decode_patch(bitstream_offset, shift_params, bitstream_buffer):
+    """
+    Decodes a single patch from the bitstream.
+    Returns a list of height values.
+    """
+    heights = []
+    # Pointer to bitstream buffer
+    ptr = bitstream_offset
+    
+    # Register for buffered bits
+    register = 0
+    bits_in_register = 0
+    
+    # Fixed number of iterations for patch size N
+    for i in range(patch_vertex_count):
+        # Conditional-free read: fetch 16 bits if needed
+        if bits_in_register < 16:
+            # Fetch next 16 bits from bitstream_buffer at ptr
+            register = (register << 16) | fetch_16_bits(bitstream_buffer, ptr)
+            ptr += 2 # Advance pointer by 2 bytes (16 bits)
+            bits_in_register += 16
+        
+        # Extract variable-length code from register
+        # (Implementation details of RBUC decoding omitted as per source constraint)
+        code = extract_code(register, bits_in_register)
+        
+        # Decode height value from code and shift params
+        height = decode_value(code, shift_params)
+        
+        # Pack two heights per emit command
+        heights.append(height)
+        
+        # If we have two heights, emit them
+        if len(heights) == 2:
+            emit_two_heights(heights[0], heights[1])
+            heights = []
+            
+    # Emit remaining height if any
+    if heights:
+        emit_height(heights[0])
+        
+    return heights
+
+# Draw Phase (GPU - Vertex Shader Logic)
+def draw_patch(patch_descriptor, height_buffer, index_buffer):
+    """
+    Renders a single patch using indexed triangle sets.
+    """
+    # Set uniform: height buffer offset and translation
+    set_uniform("height_buffer_offset", patch_descriptor.height_offset)
+    set_uniform("translation", patch_descriptor.translation)
+    
+    # Bind index buffer
+    bind_index_buffer(index_buffer)
+    
+    # Issue draw call
+    # Uses triangle sets, single glDrawElements call per patch
+    gl_draw_elements(GL_TRIANGLES, index_buffer.count)
+```
+
+### Parameters and Typical Values
+*   **Error Tolerance:** Screen-space error in pixels. Typical value: 0.5 pixels [S1].
+*   **Quantization ($q$):** Percentage of precision reduction for upper levels. Typical value: 25% [S1].
+*   **Patch Size:** Power-of-two dimensions. Typical values: 16 rows/cols and above for optimal compression [S1].
+*   **Compression Ratio:** Defined as $mb/mv$ (total bits for multiresolution terrain / total vertices in hierarchy) [S1].
+
+### Edge Cases and Pitfalls
+*   **Non-Power-of-Two Patch Sizes:** Require cropping the terrain, potentially reducing usable area to as little as 28% (e.g., 17 rows), causing kinks in compression curves [S1].
+*   **Timer Inaccuracies:** Performance spikes in throughput graphs may be due to involuntary context switching [S1].
+*   **Geometry Shader Overhead:** Binding a geometry shader for normal computation reduces throughput significantly, even if no computation is performed, due to retasking multi-processors [S1].
+*   **Patch Size Trade-off:** Too small patches incur fixed overhead and boundary overlap penalties; too large patches cause poor spatial locality and slower decompression [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The decode phase executes a fixed number of instructions per patch (approx. 22-24 instructions/vertex) [S1]. The adapt phase is efficient but can be a bottleneck if not pipelined [S1].
+*   **Memory Complexity:** Depends on the size of the transform feedback buffer, which must hold the output of the geometry program. Performance is limited by shared memory for this buffer [S1].
+*   **Measured Performance:**
+    *   Hardware: NVIDIA GTX 280 (1 GB VRAM), 3 GHz Dual Xeon CPU [S1].
+    *   Throughput: Over 1.9 billion triangles per second (95% of peak) for CalNev/Puget Sound with 0.5 pixel error tolerance [S1].
+    *   Decoding throughput is 3-4 times the drawing throughput in 2D texturing mode [S1].
+    *   Decoding throughput is more sensitive to triangle count variation than drawing throughput due to per-patch parallelization granularity [S1].
+*   **Strengths:** High throughput; no need to cache decoded geometry; efficient variable-length decoding; low CPU overhead for adapt phase [S1].
+*   **Limitations:** Performance bottleneck in shared memory for transform feedback; geometry shader binding reduces throughput; non-power-of-two patch sizes require cropping [S1].
+*   **When to Use:** Large terrain datasets requiring real-time rendering with view-dependent LOD; hardware with sufficient shared memory (e.g., GT200 series or better) [S1].
+*   **When Not to Use:** Scenes requiring persistent geometry caching; hardware with limited shared memory; applications where geometry shader overhead is prohibitive [S1].
+
+## Background
+The Adapt-Decompress-Draw pipeline was introduced in the paper "On-the-fly decompression and rendering of multiresolution terrain" [S1]. It builds on the GPU Geometry Shader Decoder method [10009-gpu-geometry-shader-decoder.md] to provide a complete rendering solution. The method was evaluated on large terrain datasets including Hawaii, Puget Sound, Pacific NW, and CalNev [S1].
+
+## Sources
+[S1] On-the-fly decompression and rendering of multiresolution terrain, https://doi.org/10.1145/1730804.1730815, fetched 2026-11-01

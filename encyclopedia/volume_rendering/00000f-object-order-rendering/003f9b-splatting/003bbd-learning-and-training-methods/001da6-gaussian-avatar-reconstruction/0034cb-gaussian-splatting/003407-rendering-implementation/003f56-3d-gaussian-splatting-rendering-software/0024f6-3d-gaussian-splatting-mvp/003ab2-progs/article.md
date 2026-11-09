@@ -1,0 +1,110 @@
+# PRoGS
+
+Also called: PRoGS (Progressive Rendering of Gaussian Splats), contribution-based prioritization method, importance-based sampling method
+
+## Overview
+PRoGS is a post-training technique for 3D Gaussian Splatting that approximates each Gaussian's contribution to the final scene to construct a prioritization order, enabling progressive rendering or streaming by dynamically selecting splats to display or transmit [S1]. Unlike existing web-viewers that require full scene retrieval before rendering, PRoGS loads a representative subset early, significantly reducing time-to-first-paint while maintaining perceptual quality [S1]. It is designed for on-device rendering applications constrained by memory and streaming applications requiring minimal bandwidth [S1].
+
+## How it works
+**Inputs:** A trained set of 3D Gaussians (positions, covariances, opacities, spherical harmonics coefficients) and a set of training views (camera poses and intrinsics).
+**Outputs:** A static global ordering of splats based on contribution, and a dynamic rendering pipeline that selects splats based on this order and viewport context.
+
+**Data Structures:**
+1.  **Training Views:** A list of camera parameters and image dimensions.
+2.  **Contribution Map:** A global aggregation structure storing the count of times each Gaussian index appears in the top-$k$ contributors for any pixel in any training view.
+3.  **Splat Order:** A sorted list of Gaussian indices, sorted descending by their total contribution count.
+
+**Parameters:**
+*   $k$: Number of contributing splats to return per pixel per training image during the contribution calculation phase. Typical value: 20 [S1].
+*   $p$: Progression percentage, the fraction of the total splats used for initial rendering or streaming chunks. Typical values tested: 0.2%, 0.5%, 1.0%, 10.0% [S1].
+
+**Steps:**
+
+1.  **Render Training Views:** For each training view, render the scene using all 3D Gaussians. During rasterization, for each pixel, identify the top-$k$ Gaussians that contribute most to the final color (e.g., highest opacity-weighted depth contribution or alpha coverage).
+2.  **Aggregate Contributions:** Initialize a global counter array $C$ of size $N$ (total number of Gaussians) to zero. For every occurrence of a Gaussian $i$ in the top-$k$ lists from Step 1, increment $C[i]$.
+3.  **Create Ordering:** Sort all Gaussian indices $i \in \{0, \dots, N-1\}$ based on the values in $C$ in descending order. Let this sorted list be $O$.
+4.  **Dynamic Selection:** To render or stream a scene, select the first $M = \lfloor p \times N \rfloor$ splats from $O$.
+5.  **Viewport Integration:** Integrate the static ordering $O$ with real-time viewport context. Prioritize relevant content by potentially adjusting the selection window or blending strategy based on the current camera pose, ensuring that high-contribution splats visible in the current view are rendered first [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_contribution_order(gaussians, training_views, k=20):
+    """
+    Computes a global ordering of splats based on their contribution to training views.
+    
+    Args:
+        gaussians: List of Gaussian objects with properties (position, covariance, opacity, etc.)
+        training_views: List of camera parameters and image dimensions
+        k: Number of top contributing splats per pixel to track
+        
+    Returns:
+        ordered_indices: List of Gaussian indices sorted by contribution (descending)
+    """
+    n_gaussians = len(gaussians)
+    contribution_counts = [0] * n_gaussians
+    
+    # Step 1 & 2: Render and Aggregate
+    for view in training_views:
+        # Render the view to get per-pixel contributions
+        # This returns a list of lists: pixel_contributions[y][x] = list of (gaussian_index, weight)
+        # sorted by weight descending, limited to top k
+        pixel_contributions = render_view_with_top_k(gaussians, view, k)
+        
+        for pixel_list in pixel_contributions:
+            for gaussian_index, _ in pixel_list:
+                contribution_counts[gaussian_index] += 1
+                
+    # Step 3: Create Ordering
+    # Sort indices by contribution count descending
+    ordered_indices = sorted(range(n_gaussians), key=lambda i: contribution_counts[i], reverse=True)
+    
+    return ordered_indices
+
+def progressive_render(gaussians, ordered_indices, view, progression_percentage=0.01):
+    """
+    Renders a view using a subset of splats determined by the precomputed order.
+    
+    Args:
+        gaussians: List of Gaussian objects
+        ordered_indices: Precomputed global ordering of Gaussian indices
+        view: Current camera parameters
+        progression_percentage: Fraction of total splats to use (e.g., 0.01 for 1%)
+        
+    Returns:
+        image: Rendered image
+    """
+    n_gaussians = len(gaussians)
+    num_splats_to_render = int(progression_percentage * n_gaussians)
+    
+    # Select top splats from the global order
+    selected_indices = ordered_indices[:num_splats_to_render]
+    selected_gaussians = [gaussians[i] for i in selected_indices]
+    
+    # Render using only the selected splats
+    image = render_view(selected_gaussians, view)
+    
+    return image
+```
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Input:** If training views do not cover the entire scene, Gaussians outside the training view frustums may have zero contribution and be placed at the end of the order. [G] Ensure training views are representative of the final intended viewing angles.
+*   **Precision:** Contribution counts are integers. For very large scenes, use 64-bit integers to avoid overflow. [G]
+*   **Boundaries:** The method assumes a fixed set of training views. Changing the training set requires recomputing the order.
+
+## Operating characteristics
+*   **Time Complexity:** The pre-processing step (contribution calculation) requires rendering all training views with all Gaussians. If $V$ is the number of training views, $N$ the number of Gaussians, and $P$ the number of pixels per view, the complexity is roughly $O(V \cdot N \cdot P)$ for rendering and $O(N \log N)$ for sorting. The rendering step itself is $O(M \cdot P)$ where $M$ is the number of splats rendered.
+*   **Memory Complexity:** Requires storing the contribution counts ($O(N)$) and the ordered indices ($O(N)$). The rendering memory is proportional to the number of splats currently being rendered.
+*   **Measured Performance:** At 0.2% of splats, PRoGS loads a basic level of the scene (e.g., a truck) while alternative approaches show it as completely missing [S1]. It significantly reduces time-to-first-paint compared to loading the full scene [S1].
+*   **Strengths:** Reduces initial load time and bandwidth usage. Works with existing compression methods. Applicable to both complete scenes and individual objects [S1].
+*   **Limitations:** Requires a post-training pass over all training views. The initial quality is an approximation; fine details may be missing until more splats are loaded.
+*   **When to use:** On-device rendering with memory constraints, streaming applications with bandwidth limits, web-based viewers requiring fast initial paint [S1].
+*   **When not to use:** When full fidelity is required immediately without progressive refinement.
+
+## Background
+PRoGS was introduced by Zoomers et al. in September 2024 as the first academic work to bring progressive rendering of 3DGS to an academic context [S1]. It addresses the substantial storage requirements of 3DGS, where each splat's individual data must be stored, and the limitation of compression techniques that still necessitate retrieving the entire scene before any part can be rendered [S1]. The method establishes a foundation for making remotely hosted 3DGS content more quickly accessible to end-users in over-the-top consumption scenarios [S1].
+
+## Sources
+[S1] PRoGS: Progressive Rendering of Gaussian Splats, https://doi.org/10.1109/wacv61041.2025.00308, fetched 2026-10-26

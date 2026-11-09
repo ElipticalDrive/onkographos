@@ -1,0 +1,266 @@
+My goal seemed straightforward but implementing it with RealityKit to target visionOS 2.5 proved to be way more challenging what I had expected. The idea is very simple: Create a 3D mesh composed of voxels, each of which can have its own opacity value in the range [0,1]. I have a working implementation where each voxel is instantiated as  ModelEntity(mesh: MeshResource.generateBox(size: voxelSize) , but because every voxel is a ModelEntity, this implementation is not really scalable. 
+ The ultimate objective is to be able to render ~1M voxels in (hopefully) real time. I found online that this could be accomplished by using  static func generate(from: [MeshDescriptor]) throws -> MeshResource , as  outlined here . I can see the voxel mesh initialized properly with the right opacity, but then when I try to change its values I don't get what I'd expect. My MWE implementation so far looks like this: 
+ import Foundation
+import RealityKit
+import RealityKitContent
+import SwiftUI
+
+
+// Define Voxel struct
+struct Voxel {
+    var position: SIMD3<Float>
+    var color: SIMD4<Float>
+}
+
+// Function to create cube geometry
+func makeCube(at position: SIMD3<Float>, size: Float) -> (vertices: [SIMD3<Float>], normals: [SIMD3<Float>], indices: [UInt32]) {
+    let halfSize = size / 2
+    let vertices: [SIMD3<Float>] = [
+        // Front face
+        [-halfSize, -halfSize,  halfSize], // 0
+        [ halfSize, -halfSize,  halfSize], // 1
+        [ halfSize,  halfSize,  halfSize], // 2
+        [-halfSize,  halfSize,  halfSize], // 3
+        // Back face
+        [-halfSize, -halfSize, -halfSize], // 4
+        [ halfSize, -halfSize, -halfSize], // 5
+        [ halfSize,  halfSize, -halfSize], // 6
+        [-halfSize,  halfSize, -halfSize]  // 7
+    ].map { $0 + position } // Offset by voxel position
+    
+    let normals: [SIMD3<Float>] = [
+        [ 0,  0,  1], // Front
+        [ 0,  0,  1],
+        [ 0,  0,  1],
+        [ 0,  0,  1],
+        [ 0,  0, -1], // Back
+        [ 0,  0, -1],
+        [ 0,  0, -1],
+        [ 0,  0, -1]
+    ]
+    
+    let indices: [UInt32] = [
+        // Front
+        0, 1, 2,  2, 3, 0,
+        // Right
+        1, 5, 6,  6, 2, 1,
+        // Back
+        5, 4, 7,  7, 6, 5,
+        // Left
+        4, 0, 3,  3, 7, 4,
+        // Top
+        3, 2, 6,  6, 7, 3,
+        // Bottom
+        0, 4, 5,  5, 1, 0
+    ]
+    
+    return (vertices, normals, indices)
+}
+
+// Function to create voxel mesh contents
+func makeVoxelMeshContents(voxels: [Voxel], voxelSize: Float = 1.0) throws -> MeshResource.Contents {
+    var positions: [SIMD3<Float>] = []
+    var normals: [SIMD3<Float>] = []
+    var colors: [SIMD4<Float>] = []
+    var indices: [UInt32] = []
+    var uvs: [SIMD2<Float>] = []
+    
+    // Reserve capacity for performance
+    let vertexCountPerCube = 8
+    let indexCountPerCube = 36
+    positions.reserveCapacity(voxels.count * vertexCountPerCube)
+    normals.reserveCapacity(voxels.count * vertexCountPerCube)
+    colors.reserveCapacity(voxels.count * vertexCountPerCube)
+    indices.reserveCapacity(voxels.count * indexCountPerCube)
+    
+    var vertexOffset: UInt32 = 0
+    
+    // Generate geometry for each voxel
+    for voxel in voxels {
+        let (verts, norms, inds) = makeCube(at: voxel.position, size: voxelSize)
+        positions.append(contentsOf: verts)
+        normals.append(contentsOf: norms)
+        // Repeat or generate UVs per vertex of the cube
+        let cubeUVs: [SIMD2<Float>] = [
+            [0, 0], [1, 0], [1, 1], [0, 1], // front face
+            [0, 0], [1, 0], [1, 1], [0, 1]  // back face
+        ]
+        uvs.append(contentsOf: cubeUVs)
+        colors.append(contentsOf: Array(repeating: voxel.color, count: verts.count))
+        indices.append(contentsOf: inds.map { $0 + vertexOffset })
+        vertexOffset += UInt32(verts.count)
+    }
+    
+    // Create MeshDescriptor
+    var descriptor = MeshDescriptor(name: "voxels")
+
+    descriptor.positions = MeshBuffer(positions)
+    descriptor.normals = MeshBuffer(normals)
+    descriptor.textureCoordinates = MeshBuffer(uvs)
+//    descriptor.colors = MeshBuffer(colors)
+
+    descriptor.primitives = .triangles(indices)
+    descriptor.materials = .allFaces(0)
+
+    // Generate MeshResource and return its contents
+    let mesh = try MeshResource.generate(from: [descriptor])
+    return mesh.contents
+}
+
+
+class VoxelMesh: ObservableObject {
+    @Published var voxels: [Voxel] = []
+    var entity: ModelEntity?
+    var elSize: Float = 1.0
+    var parentEntity: Entity
+    private var isInitialized = false
+    
+    init(parent: Entity, voxels: [Voxel], voxelSize: Float = 1.0) {
+        self.parentEntity = parent
+        self.voxels = voxels
+        self.elSize = voxelSize
+        Task {
+            await self.generateVoxelEntity()
+            await MainActor.run {
+                self.isInitialized = true // Mark as initialized
+            }
+        }
+    }
+    func waitForInitialization() async {
+        while !isInitialized {
+            try? await Task.sleep(nanoseconds: 100_000_000) // Wait 0.1 seconds
+        }
+    }
+
+    func generateVoxelEntity() async {
+        do {
+            let contents = try makeVoxelMeshContents(voxels: voxels, voxelSize: elSize)
+            let mesh = try await MeshResource(from: contents)
+
+            guard let device = MTLCreateSystemDefaultDevice(),
+                  let library = try? device.makeDefaultLibrary(bundle: .main) else {
+                fatalError("Failed to load default Metal library.")
+            }
+
+            
+            let entity = await MainActor.run {
+
+                var material = UnlitMaterial(color: .red)
+                material.blending = .transparent(opacity: .init(floatLiteral: 0.5))
+
+                return ModelEntity(
+                    mesh: mesh,
+                    materials: [material]
+                )
+            }
+            
+            await entity.generateCollisionShapes(recursive: false)
+            self.entity = entity
+            parentEntity.addChild(entity)
+            await MainActor.run {
+                self.isInitialized = true
+            }
+        } catch {
+            print("Failed to generate voxel mesh: \(error)")
+        }
+    }
+    
+    func updateVoxelOpacities(newOpacities: [Double]) async {
+        
+        print("3. lalalalal")
+        guard newOpacities.count == voxels.count else {
+            fatalError("Number of opacity values (\(newOpacities.count) is not the same as the number of mesh voxels (\(voxels.count)")
+        }
+
+        await MainActor.run {
+            for i in voxels.indices {
+                voxels[i].color.w = Float(newOpacities[i])
+            }
+        }
+                
+        do {
+            let updatedContents = try makeVoxelMeshContents(voxels: voxels, voxelSize: elSize)
+            let newMesh = try await MeshResource(from: updatedContents)
+            self.entity?.model?.mesh = newMesh
+        } catch {
+            print("Failed to update voxel mesh: \(error)")
+        }
+    }
+}
+
+
+class VoxelViewModel: ObservableObject {
+    @Published var voxelMesh: VoxelMesh?
+
+    let elSize: Float = 0.05
+    let parentEntity = Entity()
+
+    func generateVoxelMesh() {
+        let voxels = compileMeshVoxels()
+        voxelMesh = VoxelMesh(parent: parentEntity, voxels: voxels, voxelSize: elSize)
+    }
+
+    private func compileMeshVoxels() -> [Voxel] {
+        var instances: [Voxel] = []
+
+        print("**** In compileMeshVoxels")
+
+        for x in 0..<2 {
+            for y in 0..<4 {
+                for z in 0..<6 {
+                    let tx = self.elSize * Float(x)
+                    let ty = self.elSize * Float(y)
+                    let tz = self.elSize * Float(z)
+                    let voxel = Voxel(position: [tx, ty, tz], color: [1, 0, 0, 0.5])
+                    instances.append(voxel)
+                }
+            }
+        }
+        
+        return instances
+    }
+}
+
+
+struct ContentView: View {
+    @StateObject private var viewModel = VoxelViewModel()
+    
+    var body: some View {
+        
+        VStack {
+            Model3D(named: "Scene", bundle: realityKitContentBundle)
+                .padding(.bottom, 50)
+            
+            Text("Hello, world!")
+        }
+
+        RealityView { content in
+            // Add anchor
+            content.add(viewModel.parentEntity)
+            let anchor = AnchorEntity()
+            
+            // Load model
+            if let modelEntity = try? await ModelEntity(named: "Scene", in: realityKitContentBundle) {
+                anchor.addChild(modelEntity)
+            }
+            
+            content.add(anchor)
+            
+            let randomValues = (1...48).map { _ in Double.random(in: 0...1) }
+            await viewModel.voxelMesh!.updateVoxelOpacities(newOpacities: randomValues)
+            
+        } update: { content in
+            // You can update the scene here if needed
+        }
+        .task {
+            // Build voxel mesh immediately
+            viewModel.generateVoxelMesh()
+        }
+    }
+}
+
+#Preview(windowStyle: .automatic) {
+    ContentView()
+}
+ 
+ What can I try next? 

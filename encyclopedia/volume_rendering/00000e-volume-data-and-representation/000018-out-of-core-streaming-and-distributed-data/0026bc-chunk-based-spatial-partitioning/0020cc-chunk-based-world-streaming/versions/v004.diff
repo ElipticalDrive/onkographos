@@ -1,0 +1,344 @@
+--- v003.md
++++ v004.md
+@@ -4,159 +4,221 @@
+ 
+ ## Overview
+-Chunk-based World Streaming divides a 3D voxel world into fixed-size spatial partitions (chunks) to manage memory, generation, and rendering efficiently by loading only the chunks near the player [S1, S2, unofficial]. It builds on [Chunk-based spatial partitioning](3862-chunk-based-spatial-partitioning.md) by managing chunk lifecycle, I/O scheduling, and state transitions rather than just spatial decomposition [S1, S2, unofficial].
++Chunk-based World Streaming divides a 3D voxel world into fixed-size spatial chunks to manage memory, generation, and rendering efficiently by loading and unloading data based on camera proximity [S1, unofficial]. It solves the problem of out-of-core memory constraints in large volumetric or voxel worlds by ensuring only relevant chunks reside in active memory. It differs from [MPI-based Volume Partitioning](1093-mpi-based-volume-partitioning.md) by operating on a single process with CPU-managed queues rather than distributed networked nodes, and from [Synchronous Chunk Loading](3904-synchronous-chunk-loading.md) by decoupling the decision of *what* to load from the blocking I/O operations, allowing for asynchronous background processing [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Player position (world coordinates), render distance (in chunks), unload timeout (seconds), chunk size (world units), and maximum chunks to load per frame [S1, S2, unofficial].
+-*   **Output:** A set of active `Chunk` objects resident in memory, with states indicating generation and meshing progress [S1, S2, unofficial].
++- **Input:** Global world coordinates of the camera/player, chunk dimensions ($W_x, W_y, W_z$), render distance ($R_{dist}$), and unload timeout ($T_{unload}$).
++- **Output:** A set of active chunk objects in memory, each containing voxel data and/or mesh geometry, ready for rendering.
+ 
+ **Data Structures:**
+-*   `Chunk`: An object representing a fixed-size volume of voxels.
+-    *   Fields: `chunk_coordinate_x` (int), `chunk_coordinate_z` (int), `state` (enum flags) [S1, S2, unofficial].
+-    *   State Flags: `CHUNK_STATE_IN_GENERATION_QUEUE`, `CHUNK_STATE_IN_MESHING_QUEUE`, `CHUNK_STATE_OUTOFVISION`, `CHUNK_STATE_UNLOADED`, `CHUNK_STATE_GENERATED`, `CHUNK_STATE_MESHED`, `CHUNK_STATE_IN_DELETING_QUEUE` [S1, unofficial].
+-*   `chunk_map`: A hash map mapping 2D chunk coordinates `(x, z)` to `Chunk` pointers [S1, S2, unofficial].
+-*   Queues:
+-    *   `chunks_to_generate_queue`: List of chunk coordinates pending generation [S1, unofficial].
+-    *   `chunks_todelete`: List of chunk pointers pending deletion [S1, unofficial].
+-    *   Renderer delete queue: List of chunk indices sent to the rendering backend for cleanup [S1, unofficial].
+-
+-**Parameters:**
+-*   `CHUNK_SIZE`: Size of a chunk in world units. Sources indicate a value of 16 units [S2, unofficial] or imply coordinate division by this value [S1, unofficial].
+-*   `chunk_view`: Radius in chunks around the player for loading checks. Typical value: 8 [S2, unofficial].
+-*   `RENDER_DISTANCE`: Distance from the camera (in chunks) within which chunks are kept active. Used for bounds checks: `distx >= -RENDER_DISTANCE && distx < RENDER_DISTANCE` [S1, unofficial].
+-*   `UNLOAD_TIMEOUT`: Time in seconds a chunk remains in `OUTOFVISION` state before deletion [S1, unofficial].
+-*   `load_limit_each_frame`: Maximum number of new chunks loaded per frame. Typical value: 4 [S2, unofficial].
++1.  **Chunk Map:** A hash map (e.g., `unordered_map`) mapping chunk indices $\mathbf{k} = (k_x, k_y, k_z)$ to `Chunk` pointers. The key is typically a packed integer or vector representing the chunk coordinates [S1, unofficial].
++2.  **Chunk Object:** Contains:
++    -   `chunk_coordinate`: The global chunk index $\mathbf{k}$.
++    -   `state`: An enumerated flag indicating status (e.g., `UNLOADED`, `IN_GENERATION_QUEUE`, `GENERATED`, `IN_MESHING_QUEUE`, `MESHED`, `OUTOFVISION`, `IN_DELETING_QUEUE`) [S1, unofficial].
++    -   `unload_timer`: A timestamp (seconds) set when the chunk enters `OUTOFVISION` state [S1, unofficial].
++    -   `voxel_data`: The raw voxel buffer (size $W_x \times W_y \times W_z$).
++    -   `mesh`: Optional geometry buffer generated from voxels.
++3.  **Queues:**
++    -   `chunks_to_generate_queue`: List of chunk indices pending generation.
++    -   `chunks_todelete`: List of chunk indices pending deletion.
++    -   `meshing_queue`: List of generated chunks pending meshing.
+ 
+ **Algorithm Steps:**
+-1.  **Calculate Player Chunk:** Determine the chunk coordinates containing the player:
+-    $$
+-    \text{player\_chunk\_x} = \lfloor \text{player\_pos\_x} / \text{CHUNK\_SIZE} \rfloor
+-    $$
+-    $$
+-    \text{player\_chunk\_z} = \lfloor \text{player\_pos\_z} / \text{CHUNK\_SIZE} \rfloor
+-    $$
+-    [S1, S2, unofficial]
+-
+-2.  **Define View Bounds:** Calculate the bounding box of chunks to consider for loading/unloading:
+-    $$
+-    \text{origin\_x} = \text{player\_chunk\_x} - \text{chunk\_view}, \quad \text{end\_x} = \text{player\_chunk\_x} + \text{chunk\_view}
+-    $$
+-    (Identical calculation applies to the z-axis) [S2, unofficial].
+-
+-3.  **Process Unloading:** Iterate through `chunk_map` [S2, S1, unofficial]. If a chunk's coordinates are outside `[origin_x, end_x]` or `[origin_z, end_z]`, delete the chunk object and erase it from the map [S2, unofficial]. Alternatively, if a chunk is outside `RENDER_DISTANCE` and marked `OUTOFVISION`, start a timer; if `glfwGetTime() - c->unload_timer >= UNLOAD_TIMEOUT`, mark it as `IN_DELETING_QUEUE` [S1, unofficial]. Chunks are deleted before new ones are created in the update loop [S1, unofficial].
+-
+-4.  **Process Loading:** Iterate `torigin_x` from `origin_x` to `end_x` and `torigin_z` from `origin_z` to `end_z` [S2, unofficial]. For each coordinate, check if the chunk exists in `chunk_map` [S2, unofficial]. If not found, call `addChunk(torigin_x, torigin_z)` and increment `loaded_chunks` [S2, unofficial]. If `loaded_chunks >= load_limit_each_frame`, break the loops [S2, unofficial].
+-
+-5.  **Trigger Generation:** For chunks within `RENDER_DISTANCE` that are not yet generated (`!CHUNK_STATE_GENERATED`) and are free, mark them as `IN_GENERATION_QUEUE` and push to `chunks_to_generate_queue` [S1, unofficial].
+-
+-6.  **Trigger Meshing:** If a chunk is generated but not meshed, check if all 6 neighbors are generated (or out of bounds/distance). If so, send the chunk to the meshing thread [S1, unofficial].
+-
+-7.  **Execute Queues:** Process `chunks_to_generate_queue` using parallel execution [S1, unofficial]. Process `chunks_todelete`: pop from queue [S1, unofficial]. If chunk exists in map, erase from map, push index to renderer delete queue, and delete object. If erase fails, reset state [S1, unofficial].
++1.  **Calculate Player Chunk:** Determine the chunk index containing the player/camera:
++    $$
++    k_{player, x} = \lfloor x_{player} / W_x \rfloor, \quad k_{player, y} = \lfloor y_{player} / W_y \rfloor, \quad k_{player, z} = \lfloor z_{player} / W_z \rfloor
++    $$
++    [S1, unofficial][S2, unofficial]
++
++2.  **Define View Bounds:** Calculate the bounding box of chunks to consider for loading/unloading, based on `chunk_view` (radius in chunks) or `RENDER_DISTANCE` ($R_{dist}$):
++    $$
++    \begin{aligned}
++    origin_x &= k_{player, x} - R_{dist} \\
++    end_x &= k_{player, x} + R_{dist} \\
++    origin_y &= k_{player, y} - R_{dist} \\
++    end_y &= k_{player, y} + R_{dist} \\
++    origin_z &= k_{player, z} - R_{dist} \\
++    end_z &= k_{player, z} + R_{dist}
++    \end{aligned}
++    $$
++    [S1, unofficial][S2, unofficial]
++
++3.  **Unloading (Deletion):**
++    -   Iterate through existing chunks in the `Chunk Map`.
++    -   If a chunk's coordinates are outside the view bounds $[origin, end]$ and its state is `OUTOFVISION`:
++        -   Check if `current_time - chunk.unload_timer >= T_unload`.
++        -   If true, change state to `IN_DELETING_QUEUE` and add to `chunks_todelete`.
++    -   Pop from `chunks_todelete`:
++        -   If chunk exists in map, erase from map, delete object, and signal renderer to free GPU resources.
++    -   *Note:* Some implementations delete old chunks before creating new ones to aid memory allocator reuse [S1, unofficial].
++
++4.  **Loading (Generation Trigger):**
++    -   Iterate through chunk indices $\mathbf{k}$ within $[origin, end]$.
++    -   If $\mathbf{k}$ is not in `Chunk Map`:
++        -   Create new `Chunk` object with state `UNLOADED`.
++        -   Insert into `Chunk Map`.
++    -   If $\mathbf{k}$ is in `Chunk Map` and state is `UNLOADED` (or similar inactive state):
++        -   If distance from player $\le R_{dist}$:
++            -   Set state to `IN_GENERATION_QUEUE`.
++            -   Add $\mathbf{k}$ to `chunks_to_generate_queue`.
++
++5.  **Meshing Trigger:**
++    -   For chunks in `GENERATED` state but not `MESHED`:
++        -   Check if all 6 immediate neighbors are `GENERATED` (or out of bounds/distance).
++        -   If yes, set state to `IN_MESHING_QUEUE` and add to `meshing_queue`.
++    -   *Note:* Neighbor checks prevent artifacts at chunk boundaries during meshing [S1, unofficial].
++
++6.  **Asynchronous Processing (Background Threads):**
++    -   **Generation Thread:** Pops from `chunks_to_generate_queue`, generates voxel data, sets state to `GENERATED`.
++    -   **Meshing Thread:** Pops from `meshing_queue`, generates mesh from voxels, sets state to `MESHED`.
++    -   *Limit:* To prevent frame drops, limit the number of chunks processed per frame (e.g., `load_limit_each_frame`) [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-import math
+-
+-def update_world(player_pos, render_distance, unload_timeout, chunk_view, load_limit_each_frame, chunk_size, chunk_map, chunks_to_generate_queue, chunks_todelete, renderer_delete_queue):
++# Constants
++CHUNK_SIZE = 16  # World units per chunk dimension
++RENDER_DISTANCE = 8  # Radius in chunks
++UNLOAD_TIMEOUT = 5.0  # Seconds
++LOAD_LIMIT_PER_FRAME = 4  # Max chunks to load per frame
++
++def update_world_streaming(player_pos, current_time, chunk_map, queues):
++    """
++    Main update loop for chunk-based streaming.
++    """
+     # 1. Calculate player chunk
+-    player_chunk_x = int(player_pos.x / chunk_size)
+-    player_chunk_z = int(player_pos.z / chunk_size)
+-
+-    # 2. Define bounds
+-    origin_x = player_chunk_x - chunk_view
+-    end_x = player_chunk_x + chunk_view
+-    origin_z = player_chunk_z - chunk_view
+-    end_z = player_chunk_z + chunk_view
+-
+-    # 3. Unload chunks outside bounds
+-    for chunk_coord, chunk in list(chunk_map.items()):
+-        if chunk_coord.x < origin_x or chunk_coord.x > end_x or \
+-           chunk_coord.z < origin_z or chunk_coord.z > end_z:
+-            del chunk_map[chunk_coord]
+-            chunks_todelete.append(chunk)
+-
+-    # 4. Load new chunks
++    px = int(player_pos.x) // CHUNK_SIZE
++    py = int(player_pos.y) // CHUNK_SIZE
++    pz = int(player_pos.z) // CHUNK_SIZE
++    
++    # 2. Define view bounds
++    min_x = px - RENDER_DISTANCE
++    max_x = px + RENDER_DISTANCE
++    min_y = py - RENDER_DISTANCE
++    max_y = py + RENDER_DISTANCE
++    min_z = pz - RENDER_DISTANCE
++    max_z = pz + RENDER_DISTANCE
++    
++    # 3. Unloading: Mark distant chunks for deletion
++    chunks_to_delete = []
++    for chunk_key, chunk in list(chunk_map.items()):
++        if is_outside_bounds(chunk.key, min_x, max_x, min_y, max_y, min_z, max_z):
++            if chunk.state == 'OUTOFVISION':
++                if current_time - chunk.unload_timer >= UNLOAD_TIMEOUT:
++                    chunk.state = 'IN_DELETING_QUEUE'
++                    chunks_to_delete.append(chunk_key)
++    
++    # Process deletions
++    for key in chunks_to_delete:
++        if key in chunk_map:
++            chunk = chunk_map.pop(key)
++            delete_chunk_resources(chunk) # Free CPU/GPU memory
++            chunk.state = 'DELETED'
++
++    # 4. Loading: Identify chunks to load/generate
+     loaded_count = 0
+-    for x in range(origin_x, end_x + 1):
+-        for z in range(origin_z, end_z + 1):
+-            if loaded_count >= load_limit_each_frame:
++    chunks_to_generate = []
++    
++    # Iterate over the bounding box of chunks
++    for x in range(min_x, max_x + 1):
++        for y in range(min_y, max_y + 1):
++            for z in range(min_z, max_z + 1):
++                if loaded_count >= LOAD_LIMIT_PER_FRAME:
++                    break
++                key = (x, y, z)
++                if key not in chunk_map:
++                    # Create new chunk
++                    chunk = Chunk(key=key, state='UNLOADED', unload_timer=current_time)
++                    chunk_map[key] = chunk
++                    chunks_to_generate.append(key)
++                    loaded_count += 1
++                else:
++                    chunk = chunk_map[key]
++                    if chunk.state == 'UNLOADED':
++                        chunk.state = 'IN_GENERATION_QUEUE'
++                        chunks_to_generate.append(key)
++                        loaded_count += 1
++            if loaded_count >= LOAD_LIMIT_PER_FRAME:
+                 break
+-            if (x, z) not in chunk_map:
+-                # Create new Chunk object and insert into chunk_map [S1, S2, unofficial]
+-                chunk_map[(x, z)] = Chunk()
+-                loaded_count += 1
+-        if loaded_count >= load_limit_each_frame:
++        if loaded_count >= LOAD_LIMIT_PER_FRAME:
+             break
+ 
+-    # 5. Trigger generation for new chunks within render distance
+-    for chunk_coord, chunk in chunk_map.items():
+-        if not chunk.state.is_generated() and chunk.state.is_free():
+-            dist_x = chunk_coord.x - player_chunk_x
+-            dist_z = chunk_coord.z - player_chunk_z
+-            if -render_distance <= dist_x < render_distance and -render_distance <= dist_z < render_distance:
+-                chunk.state = CHUNK_STATE_IN_GENERATION_QUEUE
+-                chunks_to_generate_queue.push(chunk)
+-
+-    # 6. Trigger meshing for generated chunks
+-    for chunk_coord, chunk in chunk_map.items():
+-        if chunk.state.is_generated() and not chunk.state.is_meshed():
+-            # Check if all 6 neighbors are generated (or out of bounds/distance) [S1, unofficial]
+-            # Standard neighbor coordinate calculation and state check would occur here.
+-            # Send chunk to meshing thread [S1, unofficial]
+-            pass
+-
+-    # 7. Process deletion queue
+-    for chunk in chunks_todelete:
+-        if chunk.coord in chunk_map:
+-            del chunk_map[chunk.coord]
+-            renderer_delete_queue.push(chunk.coord)
+-            del chunk
+-        else:
+-            chunk.reset_state()
+-
+-    # 8. Process generation queue (parallel execution per source [S1, unofficial])
+-    for chunk in chunks_to_generate_queue:
+-        # Generate chunk voxel data [S1, unofficial]
+-        pass
++    # Add to generation queue
++    for key in chunks_to_generate:
++        queues['generate_queue'].push(key)
++
++    # 5. Meshing Trigger (Simplified: check neighbors)
++    chunks_to_mesh = []
++    for key, chunk in chunk_map.items():
++        if chunk.state == 'GENERATED':
++            if are_all_neighbors_generated(key, chunk_map):
++                chunk.state = 'IN_MESHING_QUEUE'
++                chunks_to_mesh.append(key)
++    
++    for key in chunks_to_mesh:
++        queues['meshing_queue'].push(key)
++
++def are_all_neighbors_generated(key, chunk_map):
++    """Check if 6 neighbors are generated or out of bounds."""
++    x, y, z = key
++    neighbors = [
++        (x+1, y, z), (x-1, y, z),
++        (x, y+1, z), (x, y-1, z),
++        (x, y, z+1), (x, y, z-1)
++    ]
++    for n_key in neighbors:
++        if n_key in chunk_map:
++            if chunk_map[n_key].state != 'GENERATED':
++                return False
++        # If neighbor is out of bounds, it's considered "generated" (empty)
++    return True
+ ```
+ 
++**Parameters:**
++-   `CHUNK_SIZE`: Size of a chunk in world units. Common values: 16, 32, 64, or 128 [S1, unofficial][S2, unofficial].
++-   `RENDER_DISTANCE`: Radius in chunks within which chunks are kept active. Typical: 8-16 chunks [S1, unofficial].
++-   `UNLOAD_TIMEOUT`: Time in seconds a chunk remains in `OUTOFVISION` before deletion. Typical: 5-10 seconds [S1, unofficial].
++-   `LOAD_LIMIT_PER_FRAME`: Maximum number of chunks to load/generate per frame to prevent stutter. Typical: 4-16 [S2, unofficial].
++
++**Edge Cases and Pitfalls:**
++-   **Precision:** Integer division for chunk indices must handle negative coordinates correctly (floor division) [S1, unofficial].
++-   **Boundary Artifacts:** Meshing must wait for neighbors to ensure continuity. If a neighbor is missing, the mesh may have holes or incorrect normals at the chunk edge [S1, unofficial].
++-   **Memory Leaks:** Failing to erase chunks from the map when deleting them causes memory leaks [S2, unofficial].
++-   **Hash Collisions:** If using a fixed-size array for chunk storage (e.g., `TArray`), ensure the load factor does not exceed 50% to avoid performance degradation [S3, unofficial].
++
+ ## Subtopics
+ 
+ ### [Synchronous Chunk Loading](3904-synchronous-chunk-loading.md)
+-Synchronous Chunk Loading generates and applies a 3x3 grid of chunks around a world position in a single blocking call. It differs from the asynchronous queue-based approach by ensuring immediate consistency for the central chunk and its immediate neighbors, useful for initial world setup or save-game loading.
+-*   **When to choose:** Use when immediate availability of the local chunk set is required without waiting for background threads, such as during game start or level transition.
+-*   **Link:** [Synchronous Chunk Loading](3904-synchronous-chunk-loading.md)
++Synchronous Chunk Loading ensures that the 3x3 grid of chunks surrounding a specific world position is generated, cached, and rendered immediately. It solves the problem of missing or incomplete geometry when a player or camera moves into an ungenerated area by blocking execution until the local data is ready. It differs from asynchronous variants by performing all generation and mesh preparation on the calling thread, guaranteeing visual consistency at the cost of potential frame stalls during initial generation.
+ 
+ ### [Chunk Lifecycle Management](3987-chunk-lifecycle-management.md)
+ Chunk Lifecycle Management is the core synchronization mechanism in chunk-based volume streaming that ensures the set of loaded chunks matches the set of chunks required by the current camera position. It solves the problem of memory leaks and visual pop-in by explicitly identifying which chunks must be spawned (loaded) and which must be despawned (unloaded) each frame. It sets itself apart from [Synchronous Chunk Loading](3904-synchronous-chunk-loading.md) by focusing on the *decision* logic of what to load/unload rather than the blocking I/O operations, and from [Chunk-Based World Management & Asynchronous Loading](6440-chunk-based-world-management-asynchronous-loading.md) by providing the foundational state-transition logic that higher-level managers orchestrate.
+-*   **When to choose:** Use when precise control over chunk state transitions and memory allocation is required, independent of I/O scheduling.
+-*   **Link:** [Chunk Lifecycle Management](3987-chunk-lifecycle-management.md)
+ 
+ ### [Chunk-Based World Management & Asynchronous Loading](6440-chunk-based-world-management-asynchronous-loading.md)
+ This method manages a voxel world by dividing it into fixed-size chunks, loading them asynchronously based on player proximity, and removing distant chunks to manage memory and rendering load. It sets itself apart from synchronous loading by processing a limited number of pending chunks per frame, preventing frame drops during high-demand generation phases.
+-*   **When to choose:** Use when maintaining a stable frame rate is critical and background threads can handle I/O and generation without blocking the main loop.
+-*   **Link:** [Chunk-Based World Management & Asynchronous Loading](6440-chunk-based-world-management-asynchronous-loading.md)
++
++### [Dynamic Channel & Timepoint Switching](8814-dynamic-channel-timepoint-switching.md)
++Dynamic Channel & Timepoint Switching allows the user to change the active source channels or timepoint of an OME-Zarr dataset without reopening the file or resetting the camera and display settings. It distinguishes itself from sibling methods by selectively reloading only the bricks associated with changed channels or all bricks if the timepoint changes, while handling the structural rebuild of the GPU atlas when the channel count changes.
+ 
+ ### Paged Volume
+-Paged Volume initializes a pager instance with a memory limit and chunk side length [S3, unofficial]. It loads chunks near the player controller up to `MaxWorldHeight` and `NumberOfChunksToPageIn`, using provided materials and a marching cubes flag [S3, unofficial]. It supports prefetching voxels within a specified `FRegion` and flushing all voxels from memory [S3, unofficial].
+-*   **Parameters:** `TargetMemoryUsageInBytes` defaults to 268435456 (256 MiB), capping total loaded chunk memory. `ChunkSideLength` is a `uint8` defining the voxel dimensions of each chunk [S3, unofficial].
+-*   **Layout:** `ArrayChunks` is a `TArray<APagedChunk*>` with fixed size `CHUNK_ARRAY_SIZE = 65536`, used as a hash-table for chunk storage. Index calculation: `int32 index = XPos + (YPos * RowLength)` [S3, unofficial].
+-*   **Pitfalls:** Hash-table load factor should not exceed 50% to avoid conflicts; practical chunk size is 64^3. Index bounds checking is performed in `Get1DIndexFrom2DIndicies` and getter/setter helpers, returning 0 or default values and logging errors if out of bounds [S3, unofficial].
+-*   **When to choose:** Use when strict memory capping and hash-based chunk indexing are required for large-scale volume paging [S3, unofficial].
+-*   **When not to use:** Small, static worlds where all data can fit in memory; real-time applications with strict frame-time budgets and no background thread support [S3, unofficial].
++Paged Volume initializes a pager instance with a memory limit and chunk side length. It loads chunks near the player controller up to a maximum height and number of chunks, using provided materials and marching cubes flags. It prefetches voxels within a specified region and flushes all voxels from memory when needed. The target memory usage defaults to 256 MiB, and the chunk side length is defined as a uint8. The system uses a fixed-size array (`TArray<APagedChunk*>`) of size 65536 as a hash table for chunk storage. The hash-table load factor should not exceed 50% to avoid conflicts, with a practical chunk size of $64^3$. Index bounds checking is performed in helper functions, returning default values and logging errors if out of bounds. [S3, unofficial]
++
++### Ray-Guided Streaming Initialization
++Ray-Guided Streaming Initialization sets up the streaming manager to load bricks on-demand, optionally using ray-guided visibility tracking to prioritize bricks along active rays. It creates a `StreamingManager` with resources, data provider, metadata, device, config, reset callback, and visible channel mask. If `gpu.rayGuided` is enabled, it calls `streamingManager.enableRayGuidance()`. It registers a callback to update renderer float min/max ranges, apply channel windows, and reset accumulation when base LOD derives ranges. [S4, unofficial]
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Loading is $O(N)$ where $N$ is the number of chunks in the view radius, but limited by `load_limit_each_frame` per frame, making frame-time complexity $O(1)$ relative to frame rate, though total load time scales with view radius [S2, unofficial]. Generation and meshing are typically parallelized [S1, unofficial].
+-*   **Memory Complexity:** Proportional to the number of active chunks within `RENDER_DISTANCE` and `chunk_view` [S1, unofficial].
+-*   **Strengths:** Efficient memory usage by only keeping nearby chunks in memory; scalable to large worlds [S1, unofficial].
+-*   **Limitations:** Potential for pop-in if generation/meshing is slow; requires careful management of chunk states to avoid race conditions [S1, unofficial].
+-*   **When to use:** Large open-world voxel games where the world size exceeds available RAM [S1, unofficial].
+-*   **When not to use:** Small, static worlds where all data can fit in memory; real-time applications with strict frame-time budgets and no background thread support [S1, S2, unofficial].
++-   **Time Complexity:** Chunk lookup is $O(1)$ on average using a hash map. Loading/unloading is $O(N)$ where $N$ is the number of chunks in the view radius, but limited by `LOAD_LIMIT_PER_FRAME` to $O(1)$ per frame. Generation and meshing are $O(V)$ where $V$ is the number of voxels in a chunk, but performed asynchronously.
++-   **Memory Complexity:** $O(R_{dist}^3 \cdot W^3)$ where $R_{dist}$ is the render distance in chunks and $W$ is the chunk dimension in voxels. Only chunks within the render distance are loaded.
++-   **Measured Performance:** Performance depends heavily on the efficiency of the generation and meshing threads. Asynchronous processing prevents frame drops during high-demand generation phases [S1, unofficial].
++-   **Strengths:** Efficient memory usage for large worlds; scalable to arbitrary world sizes; decouples I/O from rendering.
++-   **Limitations:** Potential for pop-in if generation is slow; complexity in managing chunk states and neighbor dependencies for meshing; requires careful tuning of render distance and unload timeout.
++-   **When to Use:** Large voxel worlds where not all data can fit in memory; real-time applications requiring smooth camera movement.
++-   **When Not to Use:** Small worlds that fit entirely in memory; applications requiring strict deterministic loading order without background threads.
+ 
+ ## Background
+-Implementation details are derived from open-source voxel engine projects [S1, S2, S3, unofficial].
++Chunk-based world streaming originated in voxel-based games and simulations to manage large, procedurally generated worlds. It is a standard technique in engines like Minecraft and its derivatives, where the world is divided into 16x16x16 or 32x32x32 chunks. The method has been adapted for volume rendering in scientific visualization and medical imaging, where large 3D datasets (e.g., OME-Zarr) are streamed on-demand. The approach leverages spatial locality to minimize I/O and memory bandwidth.
+ 
+ ## Sources
+ [S1] EmaMaker/voxel-engine, https://github.com/EmaMaker/voxel-engine, fetched 2026-10-26 (unofficial)
+ [S2] Kaefaell/VoxelDemo, https://github.com/Kaefaell/VoxelDemo, fetched 2026-10-27 (unofficial)
+-[S3] Jay2645/VoxelGenerator, https://github.com/Jay2645/VoxelGenerator, fetched 2026-10-27 (unofficial)+[S3] Jay2645/VoxelGenerator, https://github.com/Jay2645/VoxelGenerator, fetched 2026-10-27 (unofficial)
++[S4] Show HN: Kiln – WebGPU-native out-of-core volume rendering for multi-GB datasets, https://github.com/MPanknin/kiln-render, fetched 2026-10-26 (unofficial)
