@@ -1,202 +1,77 @@
 # Ref-DVGO
-
 Also called: Reflection-Aware Direct Voxel Grid Optimization
-
 ## Overview
-Ref-DVGO is a reflection-aware neural rendering method that combines the fast hybrid implicit-explicit representation of Direct Voxel Grid Optimization (DVGO) with the reflection direction reparameterization of Ref-NeRF to achieve high-quality photorealistic novel view synthesis of reflective scenes with reduced training and rendering time [S1, unofficial]. It replaces the large spatial Multi-Layer Perceptrons (MLPs) of Ref-NeRF with six distinct voxel grids, significantly reducing GPU memory requirements and training duration while maintaining competitive quality for shiny objects [S1, unofficial].
-
+Ref-DVGO is a reflection-aware neural rendering method that combines the fast hybrid implicit-explicit representation of Direct Voxel Grid Optimization (DVGO) with the reflection direction reparameterization of Ref-NeRF to achieve high-quality photorealistic novel view synthesis of reflective scenes with reduced training and rendering time [S1, unofficial]. It sets itself apart from DVGO by explicitly modeling specular reflections via a reflection-aware reparameterization and from Ref-NeRF by replacing large spatial MLPs with six distinct voxel grids, significantly reducing GPU memory requirements and training time [S1, unofficial].
 ## How it works
-Ref-DVGO optimizes a scene representation for reflective objects by combining a voxel-based density field with a small directional MLP for view-dependent appearance. The method operates in two training stages: a coarse stage to learn geometry and a fine stage with progressive scaling to learn high-frequency details and reflections.
+**Inputs and Outputs:**
+- **Inputs:** A set of calibrated images of a scene containing reflective objects.
+- **Outputs:** A rendered image for a given camera pose, and optimized voxel grids representing the scene's geometry and appearance.
 
-### Inputs and Outputs
-**Inputs:**
-*   A set of $M$ training images with known camera poses.
-*   A bounding box defining the scene volume.
-*   Hyperparameters: number of progressive scaling steps (default 10), directional MLP size (default 8 layers, 256 units), and loss weights [S1, unofficial].
+**Data Structures:**
+The method replaces the spatial MLP of Ref-NeRF with six distinct voxel grids representing view-independent properties [S1, unofficial]. The layout of these grids is as follows:
+1.  **Density ($\sigma$):** Scalar field representing volume density.
+2.  **Diffuse Color ($c_d$):** RGB vector field for diffuse albedo.
+3.  **Specular Tint ($s$):** RGB vector field for specular color/tint.
+4.  **Appearance/Bottleneck Features ($b$):** Vector field providing intermediate features for the directional network.
+5.  **Roughness ($\rho$):** Scalar field representing surface roughness.
+6.  **Predicted Normals ($\hat{n}'$):** Normalized 3D vector field for predicted surface normals.
 
-**Outputs:**
-*   Rendered color $\hat{C}(\mathbf{r})$ and alpha $\hat{\alpha}(\mathbf{r})$ for any ray $\mathbf{r}$.
-*   Optimized voxel grids for density, diffuse color, specular tint, bottleneck features, roughness, and predicted normals.
+**Numbered Steps:**
+1.  **Coarse Training (Stage 1):**
+    - Initialize the voxel grids.
+    - Train a coarse model using only view-independent components (density $\sigma$ and diffuse color $c_d$) for 5000 iterations [S1, unofficial].
+    - This stage learns coarse geometry and refines the bounding box of the scene [S1, unofficial].
+2.  **Fine Training (Stage 2):**
+    - Enable view-dependent components (specular tint $s$, appearance features $b$, roughness $\rho$, predicted normals $\hat{n}'$).
+    - Use the coarse model to sample points in occupied space, informing the sampling for the fine stage to reduce redundant queries to the directional MLP [S1, unofficial].
+    - Apply Progressive Scaling (PGS) of the voxel grid over 10 steps (default) to ensure low-frequency information is learned before high-frequency details and view-dependent effects [S1, unofficial].
+3.  **Rendering:**
+    - For a ray $r$, sample $K$ points along the ray.
+    - For each point $i$, query the six voxel grids to obtain $\sigma_i, c_{d,i}, s_i, b_i, \rho_i, \hat{n}'_i$.
+    - Compute the reflection direction $r_{refl}$ based on the view direction and the predicted normal $\hat{n}'_i$.
+    - Pass the appearance features $b_i$ and the reflection direction $r_{refl}$ into a directional MLP (default size 8x256) to predict the final color [S1, unofficial].
+    - Composite the colors and alphas along the ray using standard volume rendering equations to produce the final pixel color $\hat{C}(r)$ [S1, unofficial].
+4.  **Optimization:**
+    - Minimize the total loss function $\mathcal{L}$ defined below.
 
-### Data Structures
-The scene representation consists of six 3D voxel grids and one directional MLP [S1, unofficial]. The spatial MLP of Ref-NeRF is replaced by these grids, which store view-independent properties [S1, unofficial].
+**Formulas:**
+The total loss function is a weighted sum of photometric loss, per-point RGB loss, background entropy loss, predicted normals penalty, normal orientation regularization, and total variation regularization [S1, unofficial]:
 
-1.  **Density Grid ($\sigma$):** Stores volume density $\sigma$.
-2.  **Diffuse Color Grid ($\mathbf{c}_d$):** Stores diffuse albedo $\mathbf{c}_d$.
-3.  **Specular Tint Grid ($\mathbf{s}$):** Stores specular tint $\mathbf{s}$.
-4.  **Bottleneck Feature Grid ($\mathbf{b}$):** Stores appearance/bottleneck features $\mathbf{b}$.
-5.  **Roughness Grid ($\rho$):** Stores surface roughness $\rho$.
-6.  **Predicted Normal Grid ($\hat{\mathbf{n}}'$):** Stores predicted surface normals $\hat{\mathbf{n}}'$.
-7.  **Directional MLP:** A small MLP that takes the reflection direction and bottleneck features as input to predict the final specular color.
-
-*Note: The exact bit-depth and grid resolution are not specified in the sources [S1, unofficial].*
-
-### Rendering Process
-For a ray $\mathbf{r}$, points are sampled along the ray. The rendering follows the standard emission-absorption model defined in the parent article [Radiance-field optimization](44-radiance-field-optimization.md). However, the color $\mathbf{c}_i$ at each sample point $i$ is computed using the reflection-aware model [S1, unofficial].
-
-1.  **Sample Retrieval:** For each sample point $\mathbf{x}_i$ on the ray, trilinearly interpolate values from the six voxel grids to obtain $\sigma_i, \mathbf{c}_{d,i}, \mathbf{s}_i, \mathbf{b}_i, \rho_i, \hat{\mathbf{n}}'_i$.
-2.  **Reflection Direction:** Compute the reflection direction $\mathbf{r}_{refl}$ at $\mathbf{x}_i$ based on the view direction $\mathbf{v}$ and the predicted normal $\hat{\mathbf{n}}'_i$:
-    $$ \mathbf{r}_{refl} = 2(\mathbf{v} \cdot \hat{\mathbf{n}}'_i)\hat{\mathbf{n}}'_i - \mathbf{v} $$
-    This reparameterization facilitates smoother interpolation of specular highlights compared to using the view direction directly [S1, unofficial].
-3.  **Color Computation:** The color $\mathbf{c}_i$ is computed by passing the bottleneck features $\mathbf{b}_i$ and the reflection direction $\mathbf{r}_{refl}$ through the directional MLP. The specific internal structure of the MLP (e.g., activation functions) is not detailed in the sources, but it outputs the final color $\mathbf{c}_i$ [S1, unofficial].
-4.  **Volume Rendering:** Compute transmittance $T_i$ and accumulated color $\hat{C}(\mathbf{r})$ and alpha $\hat{\alpha}(\mathbf{r})$ using the standard volume rendering equation [S1, unofficial][S5]:
-    $$ T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) $$
-    $$ \hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
-    $$ \hat{\alpha}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) $$
-
-### Optimization
-The model is optimized using a weighted sum of multiple loss functions [S1, unofficial].
-
-**Loss Function:**
 $$ \mathcal{L} = w_p \mathcal{L}_{ph} + w_{pp} \mathcal{L}_{pp} + w_b \mathcal{L}_{bg} + w_p \mathcal{R}_p + w_o \mathcal{R}_o + \mathcal{R}_{TV} $$
 
 Where:
-*   $\mathcal{L}_{ph}$: Photometric loss. Supervises rendered color $\hat{C}(\mathbf{r})$ against ground truth $C(\mathbf{r})$ [S1, unofficial].
-*   $\mathcal{L}_{pp}$: Per-point RGB loss. Supervises the color $\mathbf{c}_i$ of each sampled point against ground truth [S1, unofficial].
-*   $\mathcal{L}_{bg}$: Background entropy loss. Regularizes the rendered background probability to reduce uncertainty between foreground and background [S1, unofficial].
-*   $\mathcal{R}_p$: Predicted normals penalty. Supervises predicted normals $\hat{\mathbf{n}}'_i$ with normals $\hat{\mathbf{n}}_i$ estimated from the density gradient to produce smoother normals [S1, unofficial].
-*   $\mathcal{R}_o$: Normal orientation regularization. Penalizes back-facing normals to concentrate normals on the object surface and prevent semi-transparent surfaces or floating artifacts [S1, unofficial].
-*   $\mathcal{R}_{TV}$: Total variation regularization. Applied to the gradients of all six voxel grids to reduce geometry noise and improve spatial continuity [S1, unofficial].
+- $\mathcal{L}_{ph}$: Photometric loss supervising rendered alpha-composed ray colors $\hat{C}(r)$ with ground truth pixel colors $C(r)$ [S1, unofficial].
+- $\mathcal{L}_{pp}$: Per-point RGB loss directly supervising the colors $c_i$ of each of the $K$ sampled points along a ray $r$ [S1, unofficial].
+- $\mathcal{L}_{bg}$: Background entropy loss regularizing the rendered background probability to reduce uncertainty between foreground and background [S1, unofficial].
+- $\mathcal{R}_p$: Predicted normals penalty supervising the predicted normals $\hat{n}'_i$ with the normals $\hat{n}_i$ estimated through the density gradient to produce smoother normals [S1, unofficial].
+- $\mathcal{R}_o$: Normal orientation regularization penalizing back-facing normals to concentrate all normals on the surface of the object and prevent semi-transparent surfaces and embedded or floating artifacts [S1, unofficial].
+- $\mathcal{R}_{TV}$: Total variation regularization applied on the gradients of all six voxel grids ($\sigma, c_d, s, b, \rho, \hat{n}'$) to reduce geometry noise, unnecessary sharpness, and improve spatial continuity [S1, unofficial].
 
-**Training Stages:**
-1.  **Coarse Stage:** A coarse model with only view-independent components (density $\sigma$, diffuse color $\mathbf{c}_d$) is trained for 5000 iterations. This learns coarse geometry and refines the bounding box [S1, unofficial].
-2.  **Fine Stage:** The view-dependent components are enabled. The model is optimized by efficiently sampling from the coarse model for points in occupied space. This reduces redundant queries to the directional MLP [S1, unofficial].
-3.  **Progressive Scaling (PGS):** The fine stage uses progressive scaling of the voxel grid in a coarse-to-fine manner (default 10 steps). This ensures low-frequency information is learned before high-frequency details and view-dependent effects [S1, unofficial].
+**Parameters:**
+- $w_p$: Weight for photometric loss $\mathcal{L}_{ph}$ and predicted normals penalty $\mathcal{R}_p$ (Note: The source uses $w_p$ for both, which may be a typo in the source, but the weights are distinct in the formula structure) [S1, unofficial].
+- $w_{pp}$: Weight for per-point RGB loss $\mathcal{L}_{pp}$ [S1, unofficial].
+- $w_b$: Weight for background entropy loss $\mathcal{L}_{bg}$ [S1, unofficial].
+- $w_o$: Weight for normal orientation regularization $\mathcal{R}_o$ [S1, unofficial].
+- Number of coarse training iterations: 5000 [S1, unofficial].
+- Directional MLP size: 8x256 (default) [S1, unofficial].
+- Number of progressive scaling steps: 10 (default) [S1, unofficial].
 
-### Pseudocode
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def render_ref_dvgo(ray_origin, ray_direction, voxel_grids, directional_mlp, num_samples):
-    """
-    Renders a single ray using Ref-DVGO representation.
-    
-    Args:
-        ray_origin: 3D vector, origin of the ray.
-        ray_direction: 3D vector, direction of the ray.
-        voxel_grids: Dictionary containing 6 voxel grids:
-            - sigma: density grid
-            - c_d: diffuse color grid
-            - s: specular tint grid
-            - b: bottleneck feature grid
-            - rho: roughness grid
-            - n_hat_prime: predicted normal grid
-        directional_mlp: Function representing the directional MLP.
-        num_samples: Number of samples along the ray.
-        
-    Returns:
-        color: Rendered color.
-        alpha: Rendered alpha.
-        point_colors: List of colors at each sample point (for loss computation).
-    """
-    # 1. Sample points along the ray
-    # Assuming uniform sampling within the bounding box for simplicity
-    # In practice, DVGO uses efficient sampling based on the density grid
-    points = sample_points(ray_origin, ray_direction, num_samples)
-    
-    color_accum = 0.0
-    transmittance_accum = 1.0
-    alpha_accum = 0.0
-    point_colors = []
-    
-    for i, point in enumerate(points):
-        # 2. Retrieve voxel grid values at point
-        sigma = trilinear_interpolate(voxel_grids['sigma'], point)
-        c_d = trilinear_interpolate(voxel_grids['c_d'], point)
-        s = trilinear_interpolate(voxel_grids['s'], point)
-        b = trilinear_interpolate(voxel_grids['b'], point)
-        rho = trilinear_interpolate(voxel_grids['rho'], point)
-        n_hat_prime = normalize(trilinear_interpolate(voxel_grids['n_hat_prime'], point))
-        
-        # 3. Compute reflection direction
-        # v is the view direction (negative of ray_direction for camera rays)
-        v = -ray_direction
-        r_refl = 2 * dot(v, n_hat_prime) * n_hat_prime - v
-        
-        # 4. Compute color using directional MLP
-        # The MLP takes bottleneck features and reflection direction
-        c_i = directional_mlp(b, r_refl)
-        
-        # 5. Volume rendering step
-        # delta is the step size (distance between samples)
-        delta = distance(points[i], points[i-1]) if i > 0 else default_delta
-        
-        alpha_i = 1.0 - exp(-sigma * delta)
-        
-        color_accum += transmittance_accum * alpha_i * c_i
-        alpha_accum += transmittance_accum * alpha_i
-        transmittance_accum *= (1.0 - alpha_i)
-        
-        point_colors.append(c_i)
-        
-        # Early termination if ray is fully opaque
-        if transmittance_accum < 1e-5:
-            break
-            
-    return color_accum, alpha_accum, point_colors
-
-def compute_loss(rendered_color, rendered_alpha, point_colors, gt_color, voxel_grids):
-    """
-    Computes the total loss for Ref-DVGO.
-    """
-    # Photometric loss
-    L_ph = mse(rendered_color, gt_color)
-    
-    # Per-point RGB loss
-    # Supervises each sampled point's color
-    L_pp = mean([mse(pc, gt_color) for pc in point_colors])
-    
-    # Background entropy loss
-    # Regularizes background probability
-    L_bg = compute_background_entropy(rendered_alpha)
-    
-    # Predicted normals penalty
-    # Supervises predicted normals with density gradient normals
-    n_hat_density = compute_density_gradient_normals(voxel_grids['sigma'])
-    R_p = mse(voxel_grids['n_hat_prime'], n_hat_density)
-    
-    # Normal orientation regularization
-    # Penalizes back-facing normals
-    R_o = compute_back_facing_penalty(voxel_grids['n_hat_prime'])
-    
-    # Total variation regularization
-    # Applied to all six voxel grids
-    R_TV = sum([total_variation(grid) for grid in voxel_grids.values()])
-    
-    # Total loss
-    # Weights are hyperparameters
-    L = w_p * L_ph + w_pp * L_pp + w_b * L_bg + w_p * R_p + w_o * R_o + R_TV
-    
-    return L
-```
-
-### Parameters
-*   $w_p$: Weight for photometric loss $\mathcal{L}_{ph}$ [S1, unofficial].
-*   $w_{pp}$: Weight for per-point RGB loss $\mathcal{L}_{pp}$ [S1, unofficial].
-*   $w_b$: Weight for background entropy loss $\mathcal{L}_{bg}$ [S1, unofficial].
-*   $w_p$: Weight for predicted normals penalty $\mathcal{R}_p$ [S1, unofficial].
-*   $w_o$: Weight for normal orientation regularization $\mathcal{R}_o$ [S1, unofficial].
-*   Number of coarse training iterations: 5000 [S1, unofficial].
-*   Directional MLP size: 8 layers, 256 units (default) [S1, unofficial].
-*   Number of progressive scaling steps: 10 (default) [S1, unofficial].
-
-### Edge Cases and Pitfalls
-*   **Transparency:** Transparent and semi-transparent surfaces/objects are not supported by this method [S1, unofficial].
-*   **Normal Penalty:** Removing the predicted normals penalty marginally improves performance across all metrics in ablation studies, suggesting it may not be strictly necessary for all scenes [S1, unofficial].
-*   **Precision:** The method relies on trilinear interpolation of voxel grids, which may introduce smoothing artifacts at high frequencies if the grid resolution is insufficient [G].
+**Pitfalls and Edge Cases:**
+- Transparent and semi-transparent surfaces/objects are not examined or supported by this method [S1, unofficial].
+- Removing the predicted normals penalty marginally improves performance across all metrics in ablation studies, suggesting it may not be strictly necessary for optimal results [S1, unofficial].
+- Using a smaller directional MLP (e.g., 3x128 instead of 8x256) or reducing the number of progressive scaling steps from ten to four has a negative impact on performance [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Training is significantly faster than Ref-NeRF. On the Shiny Blender dataset, Ref-DVGO takes 30 minutes compared to Ref-NeRF's 3 days [S1, unofficial].
-*   **Memory Complexity:** Ref-DVGO uses 4x less GPU memory than Ref-NeRF due to the replacement of large spatial MLPs with voxel grids [S1, unofficial].
-*   **Performance:** On the Shiny Blender dataset, Ref-DVGO achieves PSNR 32.89, SSIM 0.957, LPIPS 0.104 [S1, unofficial]. This is lower than Ref-NeRF (PSNR 35.96, SSIM 0.967, LPIPS 0.058) but higher than DVGO (PSNR 29.83, SSIM 0.933, LPIPS 0.135) and InstantNGP (PSNR 25.61, SSIM 0.900, LPIPS 0.143) [S1, unofficial].
-*   **Strengths:** Fast training and rendering, low memory usage, good quality for reflective scenes.
-*   **Limitations:** Does not support transparency, quality is lower than Ref-NeRF.
-*   **When to use:** When training time and memory are constrained, and the scene contains reflective objects.
-*   **When not to use:** When high-fidelity results comparable to Ref-NeRF are required, or when the scene contains transparent objects.
+- **Time Complexity:** Training is significantly faster than Ref-NeRF. On the Shiny Blender dataset, Ref-DVGO achieves competitive quality in 30 minutes compared to Ref-NeRF's 3 days [S1, unofficial].
+- **Memory Complexity:** Uses 4x less GPU memory requirements compared to Ref-NeRF due to the replacement of large spatial MLPs with voxel grids [S1, unofficial].
+- **Performance:** On the Shiny Blender dataset, Ref-DVGO achieves PSNR 32.89, SSIM 0.957, LPIPS 0.104 [S1, unofficial]. This is lower than Ref-NeRF (PSNR 35.96, SSIM 0.967, LPIPS 0.058) but higher than DVGO (PSNR 29.83, SSIM 0.933, LPIPS 0.135) and InstantNGP (PSNR 25.61, SSIM 0.900, LPIPS 0.143) [S1, unofficial].
+- **Strengths:** Fast training and rendering, low GPU memory usage, good quality for reflective scenes.
+- **Limitations:** Does not support transparent or semi-transparent surfaces. Quality is lower than Ref-NeRF.
+- **When to use:** When reconstructing reflective scenes with limited computational resources or when fast training is required.
+- **When not to use:** For scenes with transparent or semi-transparent objects, or when the highest possible photometric quality is required regardless of training time.
 
 ## Background
-Ref-DVGO was proposed by G. Kouros in 2023 [S1, unofficial]. It builds upon Direct Voxel Grid Optimization (DVGO) [12, unofficial] and Ref-NeRF [15, unofficial]. The method was introduced to address the high computational cost of Ref-NeRF while maintaining its ability to model reflections. The source code is available at https://github.com/gkouros/ref-dvgo [S1, unofficial].
+Ref-DVGO was proposed by G. Kouros et al. in 2023 [S1, unofficial]. It builds on Direct Voxel Grid Optimization (DVGO) [S1, unofficial] and incorporates the reflection-aware reparameterization from Ref-NeRF [S1, unofficial]. The method aims to provide a better quality-efficiency trade-off for reflective scene reconstruction. The source code is available at https://github.com/gkouros/ref-dvgo [S1, unofficial].
 
 ## Sources
 [S1] Ref-DVGO: Reflection-Aware Direct Voxel Grid Optimization for an Improved Quality-Efficiency Trade-Off in Reflective Scene Reconstruction, https://doi.org/10.48550/arxiv.2308.08530, fetched 2026-10-26 (unofficial)

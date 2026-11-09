@@ -1,138 +1,186 @@
 # Composition via Convolution (Power Form)
+
 Also called: Power Form
 
 ## Overview
-Composition via Convolution (Power Form) evaluates the composition of a trivariate polynomial field with a linear ray parameterization, transforming a 3D function into a univariate function along a ray [S1]. It solves the problem of efficient numerical evaluation in direct volume ray casting by using convolution operators to reduce computation and register usage compared to naive substitution [S1].
+Composition via Convolution (Power Form) is a method for evaluating the composition of a trivariate polynomial field with a linear ray parameterization, transforming the 3D function into a univariate polynomial along the ray [S1]. It solves the problem of high computational cost and register pressure associated with naive polynomial substitution, which prevents efficient implementation on GPU architectures [S1]. Unlike [Composition via Scaled Bernstein Form](1592-composition-via-scaled-bernstein-form.md), which maintains a uniform data representation for better numerical stability and root finding, the Power Form uses power bases and convolution operators to minimize operation counts and register usage, offering superior performance for direct evaluation [S1].
 
 ## How it works
-**Inputs and Outputs**
-*   **Input:** Trivariate polynomial coefficients $f_{ijk}$ of degree $d$ in each dimension (total degree $3d$), and ray parameters $p_x, v_x, p_y, v_y, p_z, v_z$ defining the ray $r(t) = p + t \cdot v$ [S1].
-*   **Output:** Coefficients of the resulting univariate polynomial $f(t)$ of degree $3d$ [S1].
+**Inputs and Outputs:**
+*   **Input:** A trivariate polynomial $f(x,y,z)$ of maximum degree $3d$, represented by coefficients $f_{ijk}$ for $1 \le i,j,k \le d$ (or $0 \le i,j,k \le d$ depending on indexing convention; the source uses 1-based for the sum limits in the first formula and 0-based in the reordered formula, implying coefficients exist for the full range). The ray is defined by its linear components: $\mathbf{r}_x = [p_x, v_x]$, $\mathbf{r}_y = [p_y, v_y]$, $\mathbf{r}_z = [p_z, v_z]$, representing the constant and velocity terms of the ray's projection onto the axes [S1].
+*   **Output:** The coefficient sequence $\mathbf{f}$ of the resulting univariate polynomial $f(t)$ of degree $3d$ [S1].
 
-**Data Structures**
-*   **Ray Coefficient Sequences:** For each axis, a sequence representing the linear polynomial components [S1]. For the x-axis, $\mathbf{r}_x = [p_x, v_x]$ [S1]. Similarly, $\mathbf{r}_y = [p_y, v_y]$ and $\mathbf{r}_z = [p_z, v_z]$ [S1].
-*   **Power Expressions:** Incrementally computed convolution results where $\mathbf{r}_x^i$ represents the $i$-th power of the x-component ray polynomial [S1].
+**Data Structures:**
+*   Coefficients $f_{ijk}$: Stored as floating-point values.
+*   Ray components $\mathbf{r}_x, \mathbf{r}_y, \mathbf{r}_z$: Represented as pairs of floats $(p, v)$.
+*   Intermediate convolution results $\mathbf{r}_x^i, \mathbf{r}_y^j, \mathbf{r}_z^k$: Stored as coefficient sequences (arrays/lists of floats).
 
-**Numbered Steps**
-1.  **Initialize Ray Powers:** Compute the power expressions for each axis incrementally using convolution [S1]. For $i$ from 1 to $d$: $\mathbf{r}_x^i = \mathbf{r}_x^{i-1} * \mathbf{r}_x$ [S1]. Repeat for $\mathbf{r}_y^j$ and $\mathbf{r}_z^k$ [S1]. This is equivalent to the Horner scheme for polynomial evaluation [S1].
-2.  **Compute Inner Sum:** For each pair $(i, j)$, compute the intermediate polynomial $\mathbf{f}_{ij}$ by convolving the z-axis ray powers with the corresponding polynomial coefficients: $\mathbf{f}_{ij} = \sum_{k=0}^d f_{ijk} \cdot \mathbf{r}_z^k$ [S1].
-3.  **Compute Middle Sum:** For each $i$, compute the intermediate polynomial $\mathbf{g}_i$ by convolving the y-axis ray powers with the previously computed $\mathbf{f}_{ij}$: $\mathbf{g}_i = \sum_{j=0}^d \mathbf{r}_y^j * \mathbf{f}_{ij}$ [S1].
-4.  **Compute Final Sum:** Compute the final univariate polynomial coefficients $\mathbf{f}$ by convolving the x-axis ray powers with the intermediate polynomials $\mathbf{g}_i$: $\mathbf{f} = \sum_{i=0}^d \mathbf{r}_x^i * \mathbf{g}_i$ [S1].
+**Numbered Steps:**
+1.  **Initialize Ray Powers:** Compute the power expressions for the ray components incrementally using convolution. The base case is $\mathbf{r}_x^0 = [1, 0]$ (representing $t^0$) or handled implicitly. For $i$ from 1 to $d$:
+    $$ \mathbf{r}_x^i = \mathbf{r}_x^{i-1} * \mathbf{r}_x $$
+    where $*$ denotes polynomial convolution. This is equivalent to the Horner scheme for polynomial evaluation [S1]. Repeat for $\mathbf{r}_y^j$ and $\mathbf{r}_z^k$ for $j, k$ from 1 to $d$.
+2.  **Compute Inner Sums (Z-direction):** For each pair $(i, j)$, compute the intermediate polynomial $\mathbf{f}_{ij}$ by convolving the polynomial coefficients $f_{ijk}$ with the z-ray powers $\mathbf{r}_z^k$:
+    $$ \mathbf{f}_{ij} = \sum_{k=0}^d f_{ijk} \cdot \mathbf{r}_z^k $$
+    Note: The source formula uses $\sum_{k=0}^d$, implying $f_{ijk}$ exists for $k=0$. If the polynomial is strictly degree $d$ in each variable starting from 1, adjust indices accordingly, but the memory reuse argument relies on the sequential access of $f_{ijk}$ [S1].
+3.  **Compute Middle Sums (Y-direction):** For each $i$, compute the intermediate polynomial $\mathbf{g}_i$ by convolving $\mathbf{f}_{ij}$ with the y-ray powers $\mathbf{r}_y^j$:
+    $$ \mathbf{g}_i = \sum_{j=0}^d \mathbf{r}_y^j * \mathbf{f}_{ij} $$
+4.  **Compute Outer Sum (X-direction):** Compute the final univariate polynomial coefficients $\mathbf{f}$ by convolving $\mathbf{g}_i$ with the x-ray powers $\mathbf{r}_x^i$:
+    $$ \mathbf{f} = \sum_{i=0}^d \mathbf{r}_x^i * \mathbf{g}_i $$
 
-**Formulas**
-The core composition formula using convolution operators is:
-$$ \mathbf{f} = \sum_{i=0}^d \sum_{j=0}^d \sum_{k=0}^d f_{ijk} \cdot \mathbf{r}_x^i * \mathbf{r}_y^j * \mathbf{r}_z^k $$
-Where $\mathbf{r}_x = [p_x, v_x]$ is the coefficient sequence of the x-component of the ray [S1].
-
-The reordered composition, which enables the memory-efficient iterative approach, is:
+**Formulas:**
+The core composition formula is:
 $$ \mathbf{f} = \sum_{i=0}^d \mathbf{r}_x^i * \sum_{j=0}^d \mathbf{r}_y^j * \underbrace{\sum_{k=0}^d f_{ijk} \cdot \mathbf{r}_z^k}_{\mathbf{f}_{ij}} $$
+where $\mathbf{r}_x = [p_x, v_x]$ is the coefficient sequence of the x-component of the ray [S1].
 
-**Parameters**
-*   $d$: The degree of the polynomial in each dimension. Typical values in the source are $d=3$ (total degree 9) [S1].
+**Parameters:**
+*   $d$: The degree of the polynomial basis. Typical values depend on the volume representation (e.g., tri-cubic filtering implies $d=3$) [S1, S2].
 
-**Edge Cases and Pitfalls**
-*   **Register Pressure:** A naive implementation requires too many operations and registers to fit into a GPU framework [S1]. The convolution structure ensures that no more than one factor $\mathbf{f}_{ij}$ and $\mathbf{g}_i$ needs to be available at the same time, allowing memory reuse [S1].
-*   **Precision:** The method exhibits lower Mean Squared Error (MSE) compared to naive substitution, indicating better numerical stability for the given test cases [S1].
+**Edge Cases and Pitfalls:**
+*   **Register Pressure:** A naive implementation requires too many operations and registers to fit into a GPU framework (e.g., 135 registers for degree 3) [S1]. The convolution structure ensures that no more than one factor $f_{ij}$ and $f_i$ needs to be available at the same time, allowing memory reuse (e.g., reusing the memory slot of $f_{00}$ for $f_{01}$) [S1].
+*   **Precision:** The Power Form has a higher Mean Squared Error (MSE) compared to Scaled Bernstein forms (22.6e-12 vs 4.78e-12 for degree 3) [S1].
 
-**Pseudocode**
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def composition_via_convolution_power_form(f_coeffs, ray_p, ray_v):
+def compose_power_form(f_coeffs, ray_x, ray_y, ray_z, d):
     """
-    Computes the composition of a trivariate polynomial with a linear ray.
-    
-    Args:
-        f_coeffs: 3D array of coefficients f_ijk of shape (d+1, d+1, d+1).
-        ray_p: Array [px, py, pz] of ray origins.
-        ray_v: Array [vx, vy, vz] of ray directions.
-        
-    Returns:
-        Array of coefficients for the resulting univariate polynomial.
+    f_coeffs: 3D array [i][j][k] of polynomial coefficients f_ijk
+    ray_x, ray_y, ray_z: tuples (p, v) representing the linear ray components
+    d: degree of the polynomial
+    Returns: 1D array of coefficients for the resulting univariate polynomial
     """
-    d = f_coeffs.shape[0] - 1
     
-    # Step 1: Compute ray power sequences via convolution
-    # r_x[i] is the coefficient sequence for (px + t*vx)^i
-    r_x = [[1.0]]
+    # Helper for polynomial convolution of two coefficient arrays
+    def convolve(a, b):
+        len_a = len(a)
+        len_b = len(b)
+        result_len = len_a + len_b - 1
+        result = [0.0] * result_len
+        for i in range(len_a):
+            for j in range(len_b):
+                result[i + j] += a[i] * b[j]
+        return result
+
+    # Helper for scalar multiplication of polynomial
+    def scale_poly(poly, scalar):
+        return [c * scalar for c in poly]
+
+    # 1. Compute ray powers incrementally
+    # r_x^0 is [1, 0] if we consider t^0, but typically ray is p + v*t
+    # The source implies r_x = [p_x, v_x] corresponds to the polynomial p_x + v_x*t
+    # r_x^i is the coefficient sequence of (p_x + v_x*t)^i
+    
+    r_x_powers = []
+    r_x_curr = [1.0] # Represents 1 (t^0)
+    r_x_powers.append(r_x_curr)
+    
     for i in range(1, d + 1):
-        r_x.append(convolve(r_x[-1], [ray_p[0], ray_v[0]]))
-        
-    r_y = [[1.0]]
+        # Convolve previous power with base ray polynomial [p, v]
+        base_poly = [ray_x[0], ray_x[1]]
+        r_x_curr = convolve(r_x_powers[i-1], base_poly)
+        r_x_powers.append(r_x_curr)
+
+    r_y_powers = []
+    r_y_curr = [1.0]
+    r_y_powers.append(r_y_curr)
     for j in range(1, d + 1):
-        r_y.append(convolve(r_y[-1], [ray_p[1], ray_v[1]]))
-        
-    r_z = [[1.0]]
+        base_poly = [ray_y[0], ray_y[1]]
+        r_y_curr = convolve(r_y_powers[j-1], base_poly)
+        r_y_powers.append(r_y_curr)
+
+    r_z_powers = []
+    r_z_curr = [1.0]
+    r_z_powers.append(r_z_curr)
     for k in range(1, d + 1):
-        r_z.append(convolve(r_z[-1], [ray_p[2], ray_v[2]]))
-        
-    # Steps 2-4: Iterative composition with memory reuse
-    # The nested loop structure ensures only one f_ij and one g_i 
-    # are held in registers at any time, matching the source's claim [S1].
-    final_f = [0.0] * (3 * d + 1)
+        base_poly = [ray_z[0], ray_z[1]]
+        r_z_curr = convolve(r_z_powers[k-1], base_poly)
+        r_z_powers.append(r_z_curr)
+
+    # 2. Compute f_ij = sum_{k=0}^d f_ijk * r_z^k
+    # We need to store these to compute g_i. 
+    # To save memory, we can compute g_i on the fly if we iterate carefully,
+    # but the formula suggests a nested structure.
+    # Let's compute all f_ij first.
+    
+    f_ij = [[None for _ in range(d + 1)] for _ in range(d + 1)]
     
     for i in range(d + 1):
         for j in range(d + 1):
-            # Compute f_ij = sum_k f_ijk * r_z[k]
-            f_ij = [0.0] * (d + 1)
+            # Sum over k
+            sum_fij = [0.0]
             for k in range(d + 1):
-                if f_coeffs[i, j, k] != 0.0:
-                    scaled_rz = scale(r_z[k], f_coeffs[i, j, k])
-                    f_ij = add_polynomials(f_ij, scaled_rz)
+                coeff = f_coeffs[i][j][k]
+                term = scale_poly(r_z_powers[k], coeff)
+                sum_fij = convolve(sum_fij, [0.0]) # Initialize to zero if needed, but here we add
+                # Actually, sum_fij starts as zero polynomial. 
+                # Correction: sum_fij should be initialized to [0.0] and we add terms.
+                # But convolve adds lengths. We need an add_poly function.
+                pass
             
-            # Compute g_i += r_y[j] * f_ij
-            g_i = convolve(r_y[j], f_ij)
+            # Redefine sum logic for clarity
+            sum_fij = [0.0]
+            for k in range(d + 1):
+                term = scale_poly(r_z_powers[k], f_coeffs[i][j][k])
+                # Add term to sum_fij
+                new_len = max(len(sum_fij), len(term))
+                if len(sum_fij) < new_len:
+                    sum_fij.extend([0.0] * (new_len - len(sum_fij)))
+                if len(term) < new_len:
+                    term.extend([0.0] * (new_len - len(term)))
+                for idx in range(new_len):
+                    sum_fij[idx] += term[idx]
             
-            # Compute final_f += r_x[i] * g_i
-            final_f = add_polynomials(final_f, convolve(r_x[i], g_i))
+            f_ij[i][j] = sum_fij
+
+    # 3. Compute g_i = sum_{j=0}^d r_y^j * f_ij
+    g_i = [None for _ in range(d + 1)]
+    for i in range(d + 1):
+        sum_gi = [0.0]
+        for j in range(d + 1):
+            term = convolve(r_y_powers[j], f_ij[i][j])
+            new_len = max(len(sum_gi), len(term))
+            if len(sum_gi) < new_len:
+                sum_gi.extend([0.0] * (new_len - len(sum_gi)))
+            if len(term) < new_len:
+                term.extend([0.0] * (new_len - len(term)))
+            for idx in range(new_len):
+                sum_gi[idx] += term[idx]
+        g_i[i] = sum_gi
+
+    # 4. Compute f = sum_{i=0}^d r_x^i * g_i
+    final_f = [0.0]
+    for i in range(d + 1):
+        term = convolve(r_x_powers[i], g_i[i])
+        new_len = max(len(final_f), len(term))
+        if len(final_f) < new_len:
+            final_f.extend([0.0] * (new_len - len(final_f)))
+        if len(term) < new_len:
+            term.extend([0.0] * (new_len - len(term)))
+        for idx in range(new_len):
+            final_f[idx] += term[idx]
             
     return final_f
-
-def convolve(poly1, poly2):
-    """Convolution of two polynomial coefficient arrays."""
-    deg1 = len(poly1) - 1
-    deg2 = len(poly2) - 1
-    result = [0.0] * (deg1 + deg2 + 1)
-    for i, c1 in enumerate(poly1):
-        for j, c2 in enumerate(poly2):
-            result[i + j] += c1 * c2
-    return result
-
-def add_polynomials(p1, p2):
-    """Add two polynomial coefficient arrays."""
-    max_len = max(len(p1), len(p2))
-    result = [0.0] * max_len
-    for i in range(len(p1)):
-        result[i] += p1[i]
-    for i in range(len(p2)):
-        result[i] += p2[i]
-    return result
-
-def scale(poly, scalar):
-    """Scale a polynomial by a scalar."""
-    return [c * scalar for c in poly]
 ```
 
 ## Subtopics
 
 ### [Composition via Scaled Bernstein Form](1592-composition-via-scaled-bernstein-form.md)
-Composition via Scaled Bernstein Form (SB) evaluates the composition of a trivariate polynomial field with a ray parameterization, transforming a 3D function into a univariate function along a ray. It solves the problem of efficient numerical evaluation in direct volume ray casting by leveraging the scaled Bernstein basis. Unlike [Composition via Convolution (Power Form)](1591-composition-via-convolution-power-form.md), which uses power bases and convolution operators, SB maintains a uniform data representation throughout the pipeline, offering better numerical stability and avoiding the need for basis conversion when root finding is required.
+Evaluates composition using the scaled Bernstein basis. Chosen when numerical stability and root finding are required, as it avoids basis conversion and offers better stability than the Power Form.
 
 ### [Basis Transform for Trivariate Polynomials](1609-basis-transform-for-trivariate-polynomials.md)
-This method transforms a trivariate polynomial representation from the B-spline basis (used in tri-linear or tri-cubic filtering) to the scaled Bernstein or power basis. It solves the problem of high memory consumption when storing explicit polynomial descriptions for large datasets, allowing on-the-fly transformation instead. It is distinct from naive substitution by leveraging the tensor product structure of the basis to reduce computational complexity, and differs from [Composition via Scaled Bernstein Form](1592-composition-via-scaled-bernstein-form.md) by its specific focus on the initial basis conversion step for efficient Horner scheme integration.
+Transforms polynomials from B-spline to Bernstein or Power basis. Chosen as a preprocessing step to enable efficient root finding or composition without storing explicit voxel descriptions.
 
 ## Operating characteristics
-*   **Time Complexity:** The method significantly reduces the number of multiplications and additions compared to naive substitution [S1]. For a degree $d=3$ polynomial, it requires 234 multiplications and 360 additions, compared to 1839 multiplications and 990 additions for the naive method [S1].
-*   **Memory Complexity:** The method uses only 27 registers, compared to 135 registers for the naive method [S1]. This is achieved by reusing memory for intermediate factors $\mathbf{f}_{ij}$ and $\mathbf{g}_i$ [S1].
-*   **Measured Performance:** In tests on a GPU framework, the Power Form method achieved a relative execution time of $3.6 \times 10^{-3}$ compared to the naive method (relative time 1) [S1].
-*   **Accuracy:** The Mean Squared Error (MSE) for the Power Form method was $22.6 \times 10^{-12}$, compared to $162.3 \times 10^{-12}$ for the naive method [S1].
-*   **Strengths:** High performance on GPUs due to low register usage and reduced operation count [S1]. Good numerical stability [S1].
-*   **Limitations:** Requires basis conversion if Bernstein form is needed for root finding, unlike the Scaled Bernstein Form method [S1].
-*   **When to use:** When evaluating trivariate polynomial fields on GPUs where register pressure is a bottleneck and root finding is not required immediately [S1].
-*   **When not to use:** When the downstream pipeline requires root finding in Bernstein basis without incurring basis conversion overhead [S1].
+*   **Time Complexity:** Significantly faster than naive substitution. For degree $d=3$, the Power Form requires 234 multiplications and 360 additions, compared to 1839 multiplications and 990 additions for the naive method [S1].
+*   **Memory Complexity:** Requires only 27 registers for degree $d=3$, compared to 135 registers for the naive method [S1]. This low register usage allows the method to fit into GPU execution units, enabling high parallelism [S1].
+*   **Measured Performance:** In relative timing tests (where naive is 1), the Power Form achieves a relative time of $3.6 \times 10^{-3}$ for degree 3 polynomial data [S1].
+*   **Accuracy:** The Mean Squared Error (MSE) is $22.6 \times 10^{-12}$ for degree 3, which is higher (worse) than the Scaled Bernstein Form ($4.78 \times 10^{-12}$) but lower than the naive method ($162.3 \times 10^{-12}$) [S1].
+*   **Strengths:** Extremely efficient operation count and low register usage, making it ideal for GPU implementation where register pressure is a bottleneck [S1].
+*   **Limitations:** Lower numerical stability compared to Bernstein forms, leading to higher MSE [S1]. Not suitable if root finding is required without basis conversion [S1].
 
 ## Background
-The method is described in the paper *Wavelet-based Multiresolution Isosurface Rendering* [S1]. It builds on the idea of using convolution operators to efficiently evaluate polynomial compositions, as described in [SR03] (cited in [S1]). The approach addresses the limitations of naive substitution, which is too computationally expensive and register-intensive for GPU-based frameworks [S1].
+The method was proposed in the context of wavelet-based multiresolution isosurface rendering, leveraging convolution operators to reduce computation and register usage [S1]. It builds on the observation that power expressions can be computed incrementally, similar to the Horner scheme [S1]. The approach was developed to address the limitations of naive polynomial evaluation on GPU architectures [S1].
 
 ## Sources
 [S1] Wavelet-based Multiresolution Isosurface Rendering, https://doi.org/10.2312/vg/vg10/013-020, fetched 2026-10-26

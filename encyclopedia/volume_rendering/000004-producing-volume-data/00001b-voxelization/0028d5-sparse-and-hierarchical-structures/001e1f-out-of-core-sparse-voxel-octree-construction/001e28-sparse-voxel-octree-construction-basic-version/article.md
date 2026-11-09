@@ -1,89 +1,96 @@
 # Sparse Voxel Octree Construction (Basic Version)
 
-Also called: Basic SVO Construction, SVO Construction, basic version, Voxel Octree Construction
+Also called: Basic SVO Construction, SVO Construction, basic version
 
 ## Overview
-Sparse Voxel Octree Construction (Basic Version) builds a hierarchical Sparse Voxel Octree (SVO) from a stream of voxelized data, typically Morton codes, by maintaining a set of queues per depth level and merging nodes when queues fill up [S3]. It differs from its siblings, such as [Brute Force SVO Construction](1704-brute-force-svo-construction.md), by processing the input in a streaming, bottom-up manner that avoids storing the full octree in memory, and from [Sparse Voxel Octree Construction via Morton Code Sorting](2227-sparse-voxel-octree-construction-via-morton-code-sorting.md) by not requiring a global sort of all points before construction [S3]. Trade-offs include higher memory usage compared to optimized variants due to processing empty nodes, but it offers a straightforward implementation for out-of-core construction [S3].
+This method constructs a Sparse Voxel Octree (SVO) from a stream of non-empty voxel Morton codes by maintaining queues per depth level, merging nodes when a queue fills up, and writing non-empty nodes to disk [S3]. It differs from its siblings, such as [Brute Force SVO Construction](1704-brute-force-svo-construction.md) and [Sparse Voxel Octree Construction via Morton Code Sorting](2227-sparse-voxel-octree-construction-via-morton-code-sorting.md), by processing the input in a single streaming pass without requiring full in-memory tree storage or pre-sorting [S3]. Trade-offs include higher memory usage compared to optimized variants due to the processing of empty nodes, but it offers a straightforward implementation for out-of-core construction [S3].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A stream of leaf nodes (voxels), typically represented as Morton codes or indexed leaves, generated from a voxelization step [S3].
-- Output: A flattened Sparse Voxel Octree structure, often written to disk or a buffer, where siblings are stored next to each other [S3].
+- Input: A stream of non-empty voxel leaf nodes, typically generated from a voxelization process (e.g., [Morton-Partitioned Triangle Voxelization](7460-morton-partitioned-triangle-voxelization.md)). Each leaf node contains a Morton code and associated data (e.g., color, normal) [S3].
+- Output: A serialized Sparse Voxel Octree written to disk (e.g., an NPZ archive or binary file), where nodes are stored in Morton order to ensure spatial locality [S3].
 
 **Data Structures:**
-- **Queues:** An array of queues, one for each depth level of the octree. The number of queues equals the maximum depth of the tree [S3].
-- **Node Representation:** The specific layout of nodes depends on the implementation. A common compact representation uses 24 bytes per node: a 64-bit reference to the first child, a 1-byte offset for every child, and a 64-bit reference to associated data [S3]. Another variant uses a 32-byte `SvoNode` struct containing an array of 8 `u32` child descriptors, where each descriptor is either 0 (empty), a solid leaf marker, or an index into a node buffer [S2, unofficial].
-- **Queue Capacity:** The capacity of each queue is determined by the available memory and the node size. For out-of-core variants, buffers are flushed to disk when full [S4, unofficial].
+- **Queues:** An array of queues, one for each depth level of the octree. The number of queues equals the maximum depth of the octree. Each queue holds nodes (leaves or internal nodes) at that specific depth. The size of each queue is fixed and determined by the available memory budget [S3].
+- **Node Representation:**
+  - **Leaf Node:** Contains the voxel data (e.g., color, normal) and implicitly its position via the Morton code stream order.
+  - **Internal Node:** Contains 8 child references. In the basic version, these references are indices or offsets into the output stream or a flat node buffer [S3].
+  - **Memory Layout (Optimized Variant Reference):** While the basic version uses a generic node structure, the output format often uses 24 bytes per node: a 64-bit reference to the first child, a 1-byte offset for every child, and a 64-bit reference to the data [S3]. However, the basic construction algorithm itself primarily manages the hierarchical relationships via the queues.
 
 **Algorithm Steps:**
-1. Initialize an array of empty queues, `queues`, with size equal to the maximum octree depth.
-2. Initialize a depth counter `d` to the current depth (typically the maximum depth or the depth of the input leaves) [S3].
+1. Initialize an array of empty queues, `queues[0...max_depth]`.
+2. Initialize a depth counter `d` to the maximum depth of the octree (or the depth of the input leaves) [S3].
 3. While the input stream is not empty:
-    a. Consume the next leaf node `l` from the input stream [S3].
-    b. Push `l` onto `queues[d]` [S3].
-    c. Set `d` to the depth of `l` (or the current processing depth) [S3].
-    d. While `d > 0` and `queues[d]` is full:
-        i. Create a new internal node `p` [S3].
-        ii. Set the children of `p` to the child offsets (or indices) of the elements currently in `queues[d]` [S3].
-        iii. Write the non-empty elements of `queues[d]` to the output (e.g., disk) [S3].
-        iv. Clear `queues[d]` [S3].
-        v. Push the new internal node `p` onto `queues[d-1]` [S3].
-        vi. Decrement `d` by 1 [S3].
-4. After the input stream is exhausted, if `queues[0]` is not empty, write the root node(s) to the output [S3].
+   a. Consume the next leaf node `l` from the input stream [S3].
+   b. Push `l` onto `queues[d]` [S3].
+   c. Set `d` to the depth of `l` (typically the maximum depth) [S3].
+   d. While `d > 0` and `queues[d]` is full:
+      i. Create a new internal node `p` [S3].
+      ii. Set the children of `p` to the child offsets (or indices) of the elements currently in `queues[d]` [S3].
+      iii. Write the non-empty elements of `queues[d]` to the output storage (disk) [S3].
+      iv. Clear `queues[d]` [S3].
+      v. Push the new internal node `p` onto `queues[d-1]` [S3].
+      vi. Decrement `d` by 1 [S3].
+4. After the input stream is exhausted, if `queues[0]` contains the root node, write it to the output [S3].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def build_svo_basic(input_stream, max_depth):
+def build_svo_basic(input_stream, max_depth, queue_capacity):
     # Initialize queues for each depth level
-    queues = [[] for _ in range(max_depth + 1)]
+    queues = [ [] for _ in range(max_depth + 1) ]
     
-    # Process input stream
-    for leaf in input_stream:
-        # Determine depth of the leaf. 
-        # In a standard SVO construction from a grid, leaves are at the finest level.
-        # Let's assume the input stream provides leaves at depth 'max_depth'.
-        d = max_depth
+    # Start from the deepest level (leaves)
+    d = max_depth
+    
+    while input_stream has next:
+        # Consume a leaf node from the input stream
+        leaf = input_stream.consume()
         
-        # Push leaf onto the queue at its depth
+        # Push the leaf onto the queue corresponding to its depth
         queues[d].append(leaf)
         
-        # Merge nodes while the queue is full and we are not at the root
-        while d > 0 and len(queues[d]) == 8:  # Assuming full queue means 8 children
+        # Start merging from the current depth
+        d = max_depth
+        
+        # While the current queue is full and we are not at the root
+        while d > 0 and len(queues[d]) >= queue_capacity:
             # Create a new internal node
-            internal_node = {
-                'children': [child.offset for child in queues[d]]
-            }
+            internal_node = create_internal_node()
             
-            # Write non-empty elements of the current queue to output
-            # In a basic version, we might write the children directly or their references
-            for child in queues[d]:
-                write_to_output(child)
+            # Set children to the offsets/indices of the elements in the full queue
+            # The order of children corresponds to the Morton order (0-7)
+            internal_node.children = [child.offset for child in queues[d]]
+            
+            # Write the non-empty elements of the current queue to disk
+            # This effectively serializes the subtree
+            write_to_disk(queues[d])
             
             # Clear the current queue
             queues[d].clear()
             
-            # Push the new internal node to the parent queue
+            # Push the new internal node to the parent level's queue
             queues[d-1].append(internal_node)
             
             # Move up one level
             d -= 1
             
-    # Handle remaining nodes in the root queue
+    # Handle the root node if it remains in queue 0
     if queues[0]:
-        for node in queues[0]:
-            write_to_output(node)
+        write_to_disk(queues[0])
+        
+    return root_node
 ```
 
 **Parameters:**
-- `max_depth`: The maximum depth of the octree. This determines the resolution of the voxel grid. A typical value for high-resolution scenes is 8 or higher, corresponding to a $2^8 \times 2^8 \times 2^8$ grid [S2, unofficial].
-- Queue capacity: Determined by available memory. In out-of-core implementations, this is set to fit within a specific memory budget (e.g., 128 MB or 1 GB) [S3].
+- `max_depth`: The maximum depth of the octree. Typical values depend on the resolution of the voxel grid. For a $2048^3$ grid, the depth is 11 (levels 0 to 10 for internal nodes, level 11 for leaves) [S3].
+- `queue_capacity`: The maximum number of nodes each queue can hold before triggering a merge. This is determined by the available memory budget [S3].
 
 **Edge Cases and Pitfalls:**
-- **Empty Nodes:** The basic version processes empty nodes, which can lead to significant time spent on nodes that do not contribute to the final structure [S3]. This is a key limitation compared to optimized versions [S3].
-- **Queue Fullness:** The algorithm assumes that a queue is "full" when it contains 8 children, forming a complete octree node. If the input stream does not provide voxels in Morton order, the queues may not fill up correctly, leading to an incorrect tree structure [S3].
-- **Memory Management:** In out-of-core implementations, careful management of buffer flushing is required to avoid memory overflow [S4, unofficial].
+- **Empty Input:** If the input stream is empty, the output SVO is empty.
+- **Queue Overflow:** The algorithm assumes that the input stream is sorted in Morton order. If the input is not sorted, the merging logic will produce an incorrect tree structure because siblings may not be processed consecutively [S3].
+- **Memory Constraints:** The `queue_capacity` must be chosen carefully to fit within the available memory. If the memory is too small, the algorithm may still work but will perform more disk I/O operations [S3].
 
 ## Subtopics
 
@@ -97,35 +104,43 @@ This method constructs a Sparse Voxel Octree (SVO) from a stream of non-empty vo
 This method constructs a static Sparse Voxel Octree (SVO) from a set of 3D points or voxels by converting them to Z-order (Morton) codes, sorting them for spatial locality, and recursively partitioning the sorted array into octree nodes and leaf voxels. It differs from dynamic insertion methods by pre-sorting all points into Morton order, which guarantees spatial locality and allows $O(1)$ range queries via binary search instead of tree traversal during construction.
 
 ### [Dynamic Octree Growth Algorithm](2375-dynamic-octree-growth-algorithm.md)
-The Dynamic Octree Growth Algorithm constructs a Sparse Voxel Octree (SVO) by dynamically increasing its depth and spatial extent as new voxels are processed, rather than pre-calculating the size from the input data. It handles both positive and negative coordinates by centering the root at the boundary between -1 and 0, ensuring the tree grows to encompass all input data without pre-calculating the scene's bounding box. It differs from static voxelization by handling out-of-bounds coordinates on-the-fly.
+The Dynamic Octree Growth Algorithm constructs a Sparse Voxel Octree (SVO) by dynamically increasing its depth and spatial extent as new voxels are processed, rather than pre-calculating the size from the input data. It handles both positive and negative coordinates by centering the root at the boundary between -1 and 0, ensuring the tree grows to encompass all input data without pre-calculating the scene's bounding box. It differs from static voxelization by adapting resolution locally and handling boundary conditions through recursive growth.
 
 ### [Sparse Voxel Octree Construction (Queue-Based Collapse)](2457-sparse-voxel-octree-construction-queue-based-collapse.md)
 This method constructs a Sparse Voxel Octree (SVO) from a stream of indexed leaves by maintaining a fixed-size array of queues, one per tree depth level, and collapsing homogeneous subtrees into single leaf or invalid nodes to compress the structure. It differs from brute-force or sorting-based builders by processing leaves in a single pass without requiring full in-memory tree storage or pre-sorting.
 
 ### [Sparse Voxel Octree (SVO) Builder](2617-sparse-voxel-octree-svo-builder.md)
-An algorithm to build a dense Sparse Voxel Octree (SVO) structure in a flat array, initializing all nodes to empty and leaf nodes to solid up to a maximum depth. It constructs the hierarchical acceleration structure by recursively or iteratively expanding nodes based on occupancy, mapping non-empty voxels to specific paths in the octree. Unlike queue-based methods that merge nodes dynamically, this approach pre-allocates or strictly follows a depth-first expansion pattern to ensure a dense, contiguous memory layout suitable for GPU raycasting.
+An algorithm to construct a Sparse Voxel Octree from a stream of voxelized geometry or a voxel list by maintaining a flat array of nodes and expanding them level-by-level or recursively. It maps occupied voxels to hierarchical paths in the octree, pre-allocating memory for internal and leaf nodes up to a specified maximum depth. Unlike queue-based methods that merge nodes dynamically, this approach follows a strict depth-first or level-order expansion pattern to ensure a predictable memory layout.
 
 ### Out-of-Core SVO Construction via Morton Order
-An out-of-core algorithm to build a Sparse Voxel Octree (SVO) from voxel grid data sorted in Morton order. It reads voxels in groups of 8, generates parent nodes, and flushes buffers to disk to manage memory constraints [S4, unofficial]. The buffer size is $8 \times \text{octree\_depth} \times \text{node\_size}$ bits [S4, unofficial]. The resulting array structure ensures that at every level, child nodes are stored next to each other, and the tree is sparse, containing only nodes for voxels that have data [S4, unofficial]. This method assumes the octree spans the whole grid space, meaning 8 voxels always share the same parent, eliminating the need for a top-down search to find the parent node [S4, unofficial]. Unlike point-based global illumination methods (e.g., Tabellion EGSR2011) which require a top-down search to find parents for scattered points, this method benefits from voxel data spanning the whole grid, simplifying parent lookup [S4, unofficial].
+An out-of-core algorithm to build a Sparse Voxel Octree (SVO) from voxel grid data sorted in Morton order. It reads voxels in groups of 8, generates parent nodes, and flushes buffers to disk to manage memory constraints [S4, unofficial]. It assumes the octree spans the whole grid space, meaning 8 voxels always share the same parent, eliminating the need for a top-down search to find the parent node [S4, unofficial]. Unlike point-based global illumination methods (e.g., Tabellion EGSR2011) which require a top-down search to find parents for scattered points, this method benefits from voxel data spanning the whole grid, simplifying parent lookup [S4, unofficial].
 
 ### SSVDAG Construction Algorithm
-An out-of-core, bottom-up external-memory algorithm that reduces an SVO to a minimal SSVDAG [S5, unofficial]. The algorithm operates bottom-up, alternating phases at each level of the octree hierarchy [S5, unofficial]. Phase 1: Cluster nodes representing similar subtrees (identical up to a similarity transform) and replace them with a single representative node [S5, unofficial]. Phase 2: Replace pointers in the immediately higher level to the clustered nodes with tagged pointers to the single representative. The tag encodes the required similarity transform [S5, unofficial]. Phase 3: Sort the representatives by their reference count to facilitate variable-bit-rate encoding of the pointers [S5, unofficial]. The method assumes the original scene has geometric redundancy (many subtrees similar with respect to a reflective transformation) [S5, unofficial].
+An out-of-core, bottom-up external-memory algorithm that reduces an SVO to a minimal SSVDAG [S5, unofficial]. The algorithm operates bottom-up, alternating phases at each level of the octree hierarchy: clustering nodes representing similar subtrees, replacing pointers with tagged pointers to a single representative, and sorting representatives by reference count [S5, unofficial]. The method assumes the original scene has geometric redundancy (many subtrees similar with respect to a reflective transformation) [S5, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** The basic version has a time complexity proportional to the number of voxels and the depth of the tree. However, it spends significant time processing empty nodes, making it slower than optimized versions [S3]. The optimized version is over two orders of magnitude faster than the non-optimized version [S3].
-- **Memory Complexity:** The basic version requires memory proportional to the number of queues and their capacity. In out-of-core implementations, memory usage is logarithmic in the size of the SVO, as data is streamed and flushed to disk [S3]. For example, using 128 MB or 1 GB of memory, the out-of-core method uses up to 64 times less memory than an in-core method using 8 GB [S3].
-- **Measured Performance:** On a Dell Precision T7500 workstation (Intel Xeon X5650 CPU, 7200 RPM SATA II disk), the out-of-core method using 128 MB or 1 GB memory is roughly as fast as an in-core method using 8 GB memory, but uses up to 64 times less memory [S3]. The sparse voxel octree construction process consumes only roughly 1.6 MB of memory in the optimized version [S3].
-- **Strengths:** Simple implementation, suitable for out-of-core construction, handles large scenes by streaming data [S3].
-- **Limitations:** Slower than optimized versions due to processing empty nodes, requires Morton-ordered input for correct queue filling [S3].
-- **When to Use:** When implementation simplicity is prioritized, or when an out-of-core solution is needed and memory is limited [S3].
-- **When Not to Use:** When performance is critical and the scene has many empty regions, in which case the optimized version is preferred [S3].
+**Time and Memory Complexity:**
+- **Time Complexity:** The basic version has a time complexity of $O(N)$, where $N$ is the number of non-empty voxels, assuming constant-time queue operations. However, the optimized version is over two orders of magnitude faster than the non-optimized version because the non-optimized version spends significant time processing empty nodes [S3].
+- **Memory Complexity:** The memory usage is logarithmic in the size of the SVO, as it processes the voxel grid in a streaming manner using a fixed number of queues [S3]. The out-of-core method using 128 MB or 1 GB memory is roughly as fast as an in-core method using 8 GB memory, but uses up to 64 times less memory [S3].
+
+**Measured Performance:**
+- On a Dell Precision T7500 workstation (Intel Xeon X5650 CPU, 7200 RPM SATA II disk), the out-of-core method using 128 MB or 1 GB memory is roughly as fast as an in-core method using 8 GB memory, but uses up to 64 times less memory [S3].
+- The optimized version is over two orders of magnitude faster than the non-optimized version [S3].
+
+**Strengths and Limitations:**
+- **Strengths:** Low memory footprint, suitable for out-of-core construction, simple implementation.
+- **Limitations:** Slower than optimized versions due to processing of empty nodes, requires input to be sorted in Morton order.
+
+**When to Use:**
+- Use this method when memory is constrained and the input is already sorted in Morton order.
+- Use the optimized version when performance is critical and the input contains many empty voxels.
 
 ## Background
-The Sparse Voxel Octree (SVO) is a hierarchical representation of a voxel grid, where nodes store 8 child descriptors. Each child descriptor is either 0 (empty subtree), a high-bit set value indicating a solid leaf with packed RGB8 color in the lower 24 bits, or an index into a flat storage buffer of nodes [S2, unofficial]. The construction of an octree hierarchy from a voxel grid, stored as a compressed NPZ archive for later reuse, is a common task in volume rendering [S1, unofficial]. The basic version of SVO construction was described in the context of out-of-core construction of sparse voxel octrees, where the goal was to handle extremely large triangle meshes by voxelizing them into a high-resolution 3D grid and then constructing the SVO in a streaming manner [S3]. The optimized version was introduced to address the performance issues of the basic version, particularly the time spent processing empty nodes [S3]. The SSVDAG construction algorithm extends this by reducing the SVO to a minimal Symmetry-aware Sparse Voxel DAG (SSVDAG) for compression-domain tracing [S5, unofficial].
+The Sparse Voxel Octree (SVO) is a hierarchical representation of a voxel grid where nodes store 8 child descriptors. Each child descriptor is either 0 (empty subtree), a high-bit set value indicating a solid leaf with packed RGB8 color in the lower 24 bits, or an index into a flat storage buffer of nodes [S2, unofficial]. The construction of an octree hierarchy from a voxel grid, stored as a compressed NPZ archive for later reuse, is a common task in volume rendering [S1, unofficial]. The basic version of the SVO construction algorithm was introduced in the paper "Out-of-Core Construction of Sparse Voxel Octrees" by Laine and Karras [S3]. This method has been widely adopted in various graphics applications due to its efficiency and simplicity.
 
 ## Sources
 [S1] hsafari68/Voxelerate, https://github.com/hsafari68/Voxelerate, fetched 2026-10-26 (unofficial)
 [S2] scarlyle0/voxel-compare, https://github.com/scarlyle0/voxel-compare, fetched 2026-10-27 (unofficial)
-[S3] Out-of-Core Construction of Sparse Voxel Octrees, https://graphics.cs.kuleuwen.be/publications/BLD13OCCSVO/BLD13OCCSVO_paper.pdf, fetched 2026-10-27
+[S3] Out-of-Core Construction of Sparse Voxel Octrees, https://graphics.cs.kuleuven.be/publications/BLD13OCCSVO/BLD13OCCSVO_paper.pdf, fetched 2026-10-27
 [S4] Out-Of-Core construction of Sparse Voxel Octrees - Jeroen Baert's Blog, https://www.forceflow.be/2012/07/24/out-of-core-construction-of-sparse-voxel-octrees/, fetched 2026-10-30 (unofficial)
 [S5] Symmetry-aware Sparse Voxel DAGs (SSVDAGs) for compression-domain tracing of high-resolution geometric scenes, https://albertojaspe.net/publications/2017-JCGT-ssvdags.pdf, fetched 2026-10-24 (unofficial)

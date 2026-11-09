@@ -3,11 +3,11 @@
 Also called: Hardware accelerated texture decoding, On-chip decoding
 
 ## Overview
-Compression Domain Rendering is a technique that reconstructs volumetric data on the GPU per-fragment by fetching indices from a compressed RGB index texture, using dependent texture fetches to retrieve difference vectors from codebook textures, and adding them to the mean value [S1, unofficial]. It differs from [Stripe-based On-the-fly Decoding](5363-stripe-based-on-the-fly-decoding.md) by relying on hardware-accelerated 3D texture mapping with dependent fetches rather than explicit CPU/GPU block decompression loops, and from [CPU-Based Block Decompression](7197-cpu-based-block-decompression.md) by performing the reconstruction entirely within the GPU shader pipeline without transferring decompressed blocks to main memory [S1, unofficial].
+Compression Domain Rendering reconstructs volumetric data on the GPU per-fragment by fetching indices from a compressed RGB index texture, using dependent texture fetches to retrieve difference vectors from codebook textures, and adding them to the mean value [S1, unofficial]. It differs from [Stripe-based On-the-fly Decoding](5363-stripe-based-on-the-fly-decoding.md) and [CPU-Based Block Decompression](7197-cpu-based-block-decompression.md) by performing the reconstruction entirely within the GPU shader pipeline using hardware-accelerated 3D texture mapping [S1, unofficial].
 
 ## How it works
 **Inputs:**
-*   Compressed volumetric data represented as a hierarchical quantization scheme, generating an RGB index set of 1/4 the original size in every dimension [S1, unofficial].
+*   Compressed volumetric data represented as a hierarchical quantization scheme, generating an RGB index set of $1/4$ the original size in every dimension [S1, unofficial].
 *   Codebook textures $C_1$ and $C_2$ storing difference vectors [S1, unofficial].
 *   Address texture $A$ storing relative addresses for codeword components [S1, unofficial].
 *   Color table (1D dependent texture map) [S1, unofficial].
@@ -44,58 +44,48 @@ Compression Domain Rendering is a technique that reconstructs volumetric data on
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Fragment Shader for Compression Domain Rendering
+# Fragment shader simulation for Compression Domain Rendering
 # Inputs:
 #   I: 3D Index Texture (RGB)
 #   C1: 2D Codebook Texture for difference vectors (64 entries)
 #   C2: 2D Codebook Texture for difference vectors (8 entries)
 #   A: 3D Address Texture (RGB)
 #   ColorTable: 1D Texture (Scalar -> RGBA)
-#   ViewDirection: Vector defining the slicing planes
-#   SliceIndex: Integer index of the current slice being rendered
+#   slice_coords: Tuple (u, v, w) for current slice fragment
+#   addr_coords: Tuple (u, v, w) for address texture lookup
 
-def render_fragment(I, C1, C2, A, ColorTable, ViewDirection, SliceIndex):
-    # 1. Calculate texture coordinates for the current slice
-    # The slice is orthogonal to ViewDirection.
-    # Coordinates range from 0 to Nx/4, Ny/4, Nz/4 with GL_REPEAT
-    tex_coords = calculate_slice_coordinates(SliceIndex, ViewDirection)
-    
-    # 2. Fetch index from I
-    # Wrap mode is GL_REPEAT
-    index_texel = sample_texture(I, tex_coords)
-    mean_value = index_texel.r
-    idx_c1 = index_texel.g
-    idx_c2 = index_texel.b
-    
-    # 3. Fetch address from A
+def reconstruct_fragment(slice_coords, addr_coords):
+    # 1. Fetch index texel from I (RGB)
+    # Wrap mode is GL_REPEAT, handled by texture unit
+    index_texel = lookup_texture(I, slice_coords)
+    mean_value = index_texel[0]  # R component
+    idx_c1 = index_texel[1]      # G component
+    idx_c2 = index_texel[2]      # B component
+
+    # 2. Fetch address texel from A (RGB)
     # Interpolation is Nearest Neighbor
-    addr_texel = sample_texture(A, tex_coords)
-    
-    # 4. Determine s coordinates for dependent fetches
-    # G and B of I determine the base index (s) for C1 and C2
-    # R and G of A determine the relative address (t) within the codeword
-    s_c1 = idx_c1
-    t_c1 = addr_texel.r
-    
-    s_c2 = idx_c2
-    t_c2 = addr_texel.g
-    
-    # 5. Fetch difference vectors from dependent textures
-    diff_c1 = sample_texture(C1, vec2(s_c1, t_c1))
-    diff_c2 = sample_texture(C2, vec2(s_c2, t_c2))
-    
-    # 6. Reconstruct scalar value
+    addr_texel = lookup_texture(A, addr_coords)
+    rel_addr_c1 = addr_texel[0]  # R component: 64 addresses for C1
+    rel_addr_c2 = addr_texel[1]  # G component: 8 addresses for C2
+
+    # 3. Fetch difference vectors from dependent codebook textures
+    # s coordinate is the index from I, t coordinate is the relative address from A
+    diff_c1 = lookup_texture(C1, (idx_c1, rel_addr_c1))
+    diff_c2 = lookup_texture(C2, (idx_c2, rel_addr_c2))
+
+    # 4. Reconstruct scalar value
     # Add mean value to difference information
-    # Note: The exact combination of diff_c1 and diff_c2 depends on the 
-    # specific hierarchical quantization scheme. Based on the text, 
-    # they are fetched and added to the mean.
     reconstructed_value = mean_value + diff_c1 + diff_c2
-    
-    # 7. Map to color and opacity
-    color_rgba = sample_texture(ColorTable, vec1(reconstructed_value))
-    
-    # 8. Draw to framebuffer
+
+    # 5. Map to color and opacity via 1D color table
+    color_rgba = lookup_texture(ColorTable, (reconstructed_value, 0.0))
+
     return color_rgba
+
+# Standard helper definitions
+def lookup_texture(tex, coords):
+    # Simulates hardware texture fetch with specified wrap/interpolation
+    return tex[coords]
 ```
 
 **Edge Cases and Pitfalls:**
@@ -105,15 +95,15 @@ def render_fragment(I, C1, C2, A, ColorTable, ViewDirection, SliceIndex):
 ## Subtopics
 
 ### [GPU Decoder with Texture Mapping](1050-gpu-decoder-with-texture-mapping.md)
-This method reconstructs volumetric data values on the GPU by mapping output coordinates to texture memory indices, retrieving codebook vectors via dependent texture fetches, and combining them with mean values. It differs from CPU-based decoding by minimizing data transfer between main memory and GPU memory, leveraging the GPU's texture hardware for parallel reconstruction of compressed vector-quantized data.
+This method reconstructs volumetric data values on the GPU by mapping output coordinates to texture memory indices, retrieving codebook vectors via dependent texture fetches, and combining them with mean values. It differs from CPU-based decoding by leveraging the GPU's texture hardware for parallel reconstruction of compressed vector-quantized data.
 
 ### [Pure Random-Access Decompression](5361-pure-random-access-decompression.md)
 Pure Random-Access Decompression is a compression-domain rendering strategy where volumetric data is transmitted to the GPU in compressed form and decompressed on-demand for each individual voxel access during the rendering process. Unlike methods that decompress a full working set into GPU memory before rendering, this approach never fully decompresses the dataset in GPU memory, thereby better exploiting memory bandwidth during transmission. It is distinguished from [Compression Domain Rendering](960-compression-domain-rendering.md) by its lack of pre-fetching or block-based reconstruction; instead, it relies on immediate, spatially independent decompression for every requested sample.
 
 ## Operating characteristics
 *   **Performance**: The simultaneous decoding and rendering of compressed data sets results in a loss in performance of about a factor of 2-3 compared to the rendering of uncompressed data [S1, unofficial].
-*   **Memory**: The index set is 1/4 the original size in every dimension [S1, unofficial]. The address texture is periodically repeated to avoid storing a full-sized address map [S1, unofficial].
-*   **Strengths**: Hardware accelerated 3D texture mapping allows for parallel reconstruction [S1, unofficial]. Minimizes data transfer between main memory and GPU memory [S1, unofficial].
+*   **Memory**: The index set is $1/4$ the original size in every dimension [S1, unofficial]. The address texture is periodically repeated to avoid storing a full-sized address map [S1, unofficial].
+*   **Strengths**: Hardware accelerated 3D texture mapping allows for parallel reconstruction [S1, unofficial].
 *   **Limitations**: Performance loss compared to uncompressed rendering [S1, unofficial].
 
 ## Background

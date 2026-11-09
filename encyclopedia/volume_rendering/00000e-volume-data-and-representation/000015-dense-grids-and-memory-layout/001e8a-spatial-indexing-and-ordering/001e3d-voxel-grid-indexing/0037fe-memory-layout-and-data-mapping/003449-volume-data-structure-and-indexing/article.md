@@ -3,150 +3,170 @@
 Also called: IJK to RAS coordinate mapping, Volume class
 
 ## Overview
-The Volume data structure stores 3D scalar data in a contiguous typed array while managing the coordinate transformation between voxel indices (IJK) and physical space (RAS) [S1, unofficial]. It solves the problem of efficiently accessing and mapping volumetric data for rendering by providing linear indexing formulas and spatial metadata [S1, unofficial]. It differs from sparse representations by using a dense grid layout where memory is allocated for the entire bounding box, regardless of data sparsity [S1, unofficial].
+This method defines the core data structure for storing and accessing 3D scalar volume data in a dense grid format, specifically implementing the mapping between voxel indices (IJK) and physical world coordinates (RAS). It solves the problem of efficiently storing volumetric data in contiguous memory while providing the necessary geometric metadata to transform topological indices into physical space. It differs from sparse representations (like [Multi-Material Cell Map Indexing & Access](4886-multi-material-cell-map-indexing-access.md)) by using a fixed-size dense array, which simplifies indexing but requires explicit bounds checking and memory management by the caller.
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A typed array buffer (e.g., `Float32Array`, `Uint8Array`) containing voxel values, and dimensions $xLength$, $yLength$, $zLength$.
-*   **Output:** A `Volume` object instance providing access to data, coordinate transforms, and metadata.
+*   **Input:** A typed array buffer (e.g., `Float32Array`, `Uint8Array`) containing voxel values, and dimensions $N_x, N_y, N_z$.
+*   **Output:** A `Volume` object instance that provides indexed access to data and coordinate transformations.
 
 **Data Structures:**
-The `Volume` object contains the following fields [S1, unofficial]:
-*   `this.data`: The `TypedArray` holding the voxel values.
-*   `this.xLength`, `this.yLength`, `this.zLength`: Integer dimensions of the volume.
-*   `this.spacing`: Array of 3 numbers representing voxel size in physical units. Default: `[1, 1, 1]`.
-*   `this.offset`: Array of 3 numbers representing the physical origin. Default: `[0, 0, 0]`.
-*   `this.matrix`: A $3 \times 3$ matrix (identity by default) for coordinate rotation/scaling.
-*   `this.inverseMatrix`: The inverse of `this.matrix`.
-*   `this.segmentation`: Boolean flag, default `false`.
-*   `this.sliceList`: Array of `VolumeSlice` objects associated with this volume.
-*   `this.min`, `this.max`: Numbers representing the minimum and maximum values in the data.
+The `Volume` object maintains the following fields:
+*   `data`: The underlying `TypedArray` holding the scalar values.
+*   `xLength`, `yLength`, `zLength`: Integers representing the grid dimensions $N_x, N_y, N_z$.
+*   `spacing`: An array of 3 numbers `[sx, sy, sz]`, default `[1, 1, 1]`, representing voxel dimensions in physical units.
+*   `offset`: An array of 3 numbers `[ox, oy, oz]`, default `[0, 0, 0]`, representing the physical origin.
+*   `matrix`: A $3 \times 3$ matrix (identity by default) for rotation/scaling.
+*   `inverseMatrix`: The inverse of the `matrix`.
+*   `segmentation`: A boolean flag, default `false`, indicating if the data represents segmentation labels.
+*   `sliceList`: An array of `VolumeSlice` objects associated with this volume.
+*   `min`, `max`: Numbers representing the minimum and maximum values in the data (computed on construction or update).
+*   `lowerThreshold`, `upperThreshold`: Numbers for filtering voxels in slices. Default `-Infinity` and `Infinity` respectively. Changing these triggers `geometryNeedsUpdate = true` on all associated slices.
 
-**Linear Indexing (IJK to Linear):**
-The data is stored in row-major order where the I index varies fastest, then J, then K [S1, unofficial]. The linear index $idx$ for voxel coordinates $(i, j, k)$ is calculated as [S1, unofficial]:
+**Indexing Formulas:**
+The storage follows row-major layout where the $i$-axis (x) is the innermost dimension, $j$ (y) is middle, and $k$ (z) is outermost [S1, unofficial].
 
-$$
-idx = k \times xLength \times yLength + j \times xLength + i
-$$
+1.  **Forward Index (IJK to Linear):**
+    Given voxel coordinates $(i, j, k)$ where $0 \le i < N_x$, $0 \le j < N_y$, $0 \le k < N_z$:
+    $$
+    idx = k \cdot N_x \cdot N_y + j \cdot N_x + i
+    $$
+    The value is accessed as `data[idx]` [S1, unofficial].
 
-**Reverse Indexing (Linear to IJK):**
-Given a linear index $idx$, the voxel coordinates $(x, y, z)$ (corresponding to $i, j, k$) are derived as [S1, unofficial]:
-
-$$
-z = \lfloor idx / (yLength \times xLength) \rfloor
-$$
-
-$$
-y = \lfloor (idx - z \times yLength \times xLength) / xLength \rfloor
-$$
-
-$$
-x = idx - z \times yLength \times xLength - y \times xLength
-$$
+2.  **Reverse Index (Linear to IJK):**
+    Given a linear index `idx`:
+    $$
+    k = \lfloor idx / (N_x \cdot N_y) \rfloor
+    $$
+    $$
+    j = \lfloor (idx \pmod{N_x \cdot N_y}) / N_x \rfloor
+    $$
+    $$
+    i = idx \pmod{N_x}
+    $$
+    [S1, unofficial].
 
 **Coordinate Transformation (IJK to RAS):**
-While specific matrix multiplication code is not detailed in the source, the `Volume` object manages the transformation between IJK (voxel index) and RAS (Right-Anterior-Superior, physical) spaces using `spacing`, `offset`, and the `matrix` [S1, unofficial].
-
-**Parameters:**
-*   `lowerThreshold`: Voxel values below this are excluded from slices. Default: `-Infinity`. Changing this sets `geometryNeedsUpdate = true` on all associated slices [S1, unofficial].
-*   `upperThreshold`: Voxel values above this are excluded from slices. Default: `Infinity`. Changing this sets `geometryNeedsUpdate = true` on all associated slices [S1, unofficial].
+To map voxel index $(i, j, k)$ to physical RAS coordinates $(x, y, z)$:
+1.  Apply spacing: $v_x = i \cdot s_x, v_y = j \cdot s_y, v_z = k \cdot s_z$.
+2.  Apply rotation/scaling via `matrix` $M$:
+    $$
+    \begin{bmatrix} x' \\ y' \\ z' \end{bmatrix} = M \begin{bmatrix} v_x \\ v_y \\ v_z \end{bmatrix}
+    $$
+3.  Apply offset:
+    $$
+    \begin{bmatrix} x \\ y \\ z \end{bmatrix} = \begin{bmatrix} x' \\ y' \\ z' \end{bmatrix} + \begin{bmatrix} o_x \\ o_y \\ o_z \end{bmatrix}
+    $$
+    [S1, unofficial].
 
 **Pseudocode:**
-The following Python-like pseudocode implements the core indexing and validation logic described in the sources [S1, unofficial].
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
 class Volume:
-    def __init__(self, data, x_length, y_length, z_length):
-        # Validate input size
+    def __init__(self, data: TypedArray, x_length: int, y_length: int, z_length: int,
+                 spacing: List[float] = [1.0, 1.0, 1.0],
+                 offset: List[float] = [0.0, 0.0, 0.0],
+                 matrix: Matrix3 = IdentityMatrix3()):
+        """
+        Initialize Volume object.
+        Args:
+            data: TypedArray (Float32Array, Uint8Array, etc.)
+            x_length, y_length, z_length: Dimensions Nx, Ny, Nz
+            spacing: [sx, sy, sz]
+            offset: [ox, oy, oz]
+            matrix: 3x3 rotation/scaling matrix
+        """
+        # Validate buffer size
         expected_size = x_length * y_length * z_length
         if len(data) != expected_size:
-            raise ValueError("Error in Volume constructor, lengths are not matching arrayBuffer size")
+            raise Error("Error in Volume constructor, lengths are not matching arrayBuffer size")
         
-        # Check for unsupported types (JavaScript TypedArrays do not support 64-bit integers)
-        # [G] Assuming a helper function type_check exists to detect int64/uint64
-        if type_check(data) == 'int64' or type_check(data) == 'uint64':
-            raise ValueError("Error in Volume constructor : this type is not supported in JavaScript")
+        # Validate type (JS TypedArrays do not support 64-bit ints)
+        if data.constructor.name in ["BigInt64Array", "BigUint64Array"]:
+            raise Error("Error in Volume constructor : this type is not supported in JavaScript")
 
         self.data = data
         self.xLength = x_length
         self.yLength = y_length
         self.zLength = z_length
-        
-        # Default metadata
-        self.spacing = [1, 1, 1]
-        self.offset = [0, 0, 0]
-        self.matrix = IdentityMatrix3() # Placeholder for 3x3 identity
-        self.inverseMatrix = IdentityMatrix3()
+        self.spacing = spacing
+        self.offset = offset
+        self.matrix = matrix
+        self.inverseMatrix = matrix.inverse()
         self.segmentation = False
         self.sliceList = []
+        self.lowerThreshold = -Infinity
+        self.upperThreshold = Infinity
         
-        # Compute min/max ignoring NaN
-        self.min, self.max = compute_min_max(self.data)
+        # Compute min/max, ignoring NaN
+        self.min = Infinity
+        self.max = -Infinity
+        for val in data:
+            if not isnan(val):
+                if val < self.min: self.min = val
+                if val > self.max: self.max = val
 
-    def ijk_to_linear(self, i, j, k):
-        """
-        Convert IJK voxel indices to linear array index.
-        Assumes row-major storage: I varies fastest, then J, then K.
-        """
+    def get_linear_index(self, i: int, j: int, k: int) -> int:
+        """Calculate linear index from IJK coordinates."""
         return k * self.xLength * self.yLength + j * self.xLength + i
 
-    def linear_to_ijk(self, index):
-        """
-        Convert linear array index to IJK voxel indices.
-        """
-        z = math.floor(index / (self.yLength * self.xLength))
-        y = math.floor((index - z * self.yLength * self.xLength) / self.xLength)
-        x = index - z * self.yLength * self.xLength - y * self.xLength
-        return x, y, z
+    def get_ijk_from_index(self, idx: int) -> Tuple[int, int, int]:
+        """Calculate IJK coordinates from linear index."""
+        k = floor(idx / (self.xLength * self.yLength))
+        remainder = idx % (self.xLength * self.yLength)
+        j = floor(remainder / self.xLength)
+        i = remainder % self.xLength
+        return (i, j, k)
 
-    def map_voxels(self, callback):
-        """
-        Apply a callback function to every voxel in place.
-        """
-        for idx in range(len(self.data)):
-            self.data[idx] = callback(self.data[idx], idx)
-
-def compute_min_max(data):
-    """
-    Compute min and max values, ignoring NaN.
-    """
-    min_val = float('inf')
-    max_val = float('-inf')
-    
-    for val in data:
-        if val != val: # Check for NaN (NaN != NaN is True)
-            continue
-        if val < min_val:
-            min_val = val
-        if val > max_val:
-            max_val = val
-            
-    # Handle case where all values are NaN
-    if min_val == float('inf'):
-        return 0, 0
+    def get_ras_from_ijk(self, i: int, j: int, k: int) -> Vector3:
+        """Transform IJK voxel index to RAS physical coordinates."""
+        # 1. Apply spacing
+        vx = i * self.spacing[0]
+        vy = j * self.spacing[1]
+        vz = k * self.spacing[2]
         
-    return min_val, max_val
+        # 2. Apply matrix (rotation/scaling)
+        # Assuming matrix is 3x3 stored as row-major or column-major consistent with math library
+        # Here we assume standard vector-matrix multiplication M * v
+        v_vec = Vector3(vx, vy, vz)
+        transformed = self.matrix.multiply_vector(v_vec)
+        
+        # 3. Apply offset
+        return Vector3(
+            transformed.x + self.offset[0],
+            transformed.y + self.offset[1],
+            transformed.z + self.offset[2]
+        )
+
+    def map(self, callback: Callable[[float, int, int, int], float]):
+        """Apply a callback to every voxel in place.
+        callback(value, i, j, k) -> new_value
+        """
+        for k in range(self.zLength):
+            for j in range(self.yLength):
+                for i in range(self.xLength):
+                    idx = self.get_linear_index(i, j, k)
+                    val = self.data[idx]
+                    new_val = callback(val, i, j, k)
+                    self.data[idx] = new_val
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Buffer Size Mismatch:** If the input `arrayBuffer` size does not match `xLength * yLength * zLength`, an error is thrown: 'Error in Volume constructor, lengths are not matching arrayBuffer size' [S1, unofficial].
-*   **Unsupported Data Types:** JavaScript TypedArrays do not support 64-bit integers (`int64`/`uint64`). If the volume type is detected as such, an error is thrown: 'Error in Volume constructor : this type is not supported in JavaScript' [S1, unofficial].
-*   **NaN Handling:** Min/Max calculations must explicitly ignore `NaN` values [S1, unofficial].
+*   **Buffer Size Mismatch:** If the input `arrayBuffer` size does not equal $N_x \cdot N_y \cdot N_z$, an error is thrown [S1, unofficial].
+*   **Unsupported Types:** JavaScript `TypedArray` does not support 64-bit integers (`int64`/`uint64`). Attempting to use these types throws an error [S1, unofficial].
+*   **NaN Handling:** Min/max calculations must explicitly ignore `NaN` values to avoid incorrect bounds [S1, unofficial].
+*   **Threshold Updates:** Changing `lowerThreshold` or `upperThreshold` requires setting `geometryNeedsUpdate = true` on all associated `VolumeSlice` objects to ensure visual consistency [S1, unofficial].
 
 ## Operating characteristics
-*   **Memory Complexity:** $O(N)$ where $N = xLength \times yLength \times zLength$. The entire volume is stored in a contiguous typed array.
-*   **Time Complexity:** Indexing is $O(1)$. Computing min/max is $O(N)$.
-*   **Strengths:** Simple, cache-friendly linear access pattern for dense data. Direct mapping between voxel coordinates and memory offsets.
-*   **Limitations:** High memory usage for large volumes, even if sparse. Not suitable for very large datasets with low fill factors compared to sparse structures.
-*   **When to use:** Dense volumetric data where random access to any voxel is required and memory is sufficient.
-*   **When not to use:** Sparse volumes where memory efficiency is critical.
+*   **Time Complexity:** Indexing is $O(1)$. Computing min/max is $O(N_x N_y N_z)$. Coordinate transformation is $O(1)$ (constant number of arithmetic operations).
+*   **Memory Complexity:** $O(N_x N_y N_z)$ for the data array. Additional overhead for metadata (spacing, offset, matrix) is $O(1)$.
+*   **Strengths:** Simple, cache-friendly contiguous memory layout; fast linear indexing; straightforward coordinate transformation pipeline.
+*   **Limitations:** Dense storage is inefficient for sparse data; no built-in compression; bounds checking is the caller's responsibility.
+*   **When to use:** Ideal for dense volumetric data where random access is frequent and memory bandwidth is a concern. Not suitable for highly sparse volumes where sparse structures (e.g., octrees) would be more efficient.
 
 ## Background
-The `Volume` class and its associated indexing scheme are part of the `webgl_volume_demo` project by PeterC-DLS [S1, unofficial]. It provides a foundational data structure for WebGL-based volume rendering, handling the mapping between logical voxel indices and physical coordinates.
+This structure is derived from the `Volume` class implementation in the `webgl_volume_demo` project by PeterC-DLS [S1, unofficial]. It reflects common practices in WebGL-based volume rendering where typed arrays are used for efficient GPU/CPU data transfer. The IJK-to-RAS mapping is a standard convention in medical imaging (DICOM), adapted here for general 3D scalar field visualization.
 
 ## Sources
-[S1] PeterC-DLS/webgl_volume_demo, https://github.com/PeterC-DLS/webgl_volume_demo, fetched 2026-10-27 (unofficial)
+[S1] webgl_volume_demo, https://github.com/PeterC-DLS/webgl_volume_demo, fetched 2026-10-27 (unofficial)

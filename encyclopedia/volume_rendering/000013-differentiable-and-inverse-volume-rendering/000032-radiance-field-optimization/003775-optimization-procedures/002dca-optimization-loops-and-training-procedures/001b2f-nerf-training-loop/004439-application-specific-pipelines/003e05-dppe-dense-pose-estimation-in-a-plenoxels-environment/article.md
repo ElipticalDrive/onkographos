@@ -1,0 +1,344 @@
+# DPPE (Dense Pose Estimation in a Plenoxels Environment)
+
+Also called: DPPE-1%, DPPE-full, Render-Based Plenoxels Pose Estimation
+
+## Overview
+DPPE is a 6-DoF monocular RGB-only pose estimation procedure for Plenoxels environments that recovers the ground truth camera pose after a perturbation by minimizing errors in re-rendering using stochastic gradient descent and numerical gradient approximation [S1, unofficial]. It sets itself apart from analytical derivative-based methods (like Teigen et al. [30]) by using numerical central differencing, making it generalizable to any scene representation where re-renderings are not prohibitively expensive, and from iNeRF by leveraging Plenoxels' speed to render the full image at each step rather than subsampled rays [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A pre-trained Plenoxels grid, a ground truth image $I_{gt}$, a ground truth camera pose $\pi_{gt}$, and a perturbation vector $\Delta\pi$ [S1, unofficial].
+*   **Output:** The optimized final camera pose $\pi_{final}$ [S1, unofficial].
+
+**Data Structures:**
+*   **Plenoxels Grid:** A 3D voxel grid storing Plenoptic volume elements. Default resolution is $[256]^3$ [S1, unofficial].
+*   **Pose $\pi$:** Represented as a camera-to-world matrix $[\pi_R | \pi_t]$, where $\pi_R$ is the $3 \times 3$ rotation matrix and $\pi_t$ is the $3 \times 1$ translation vector [S1, unofficial].
+*   **Perturbation $\Delta\pi$:** A 6-element vector $[x, y, z, \omega_1, \omega_2, \omega_3]$ representing 3D translation and 3D orientation [S1, unofficial].
+
+**Rendering Formulas:**
+For a ray $r$ with origin $o_r$ and direction $d_r$, the rendered color $\hat{C}(r)$ is computed via volume rendering [S1, unofficial]:
+$$ \hat{C}(r) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) c_i $$
+where:
+*   $N$ is the number of samples.
+*   $\sigma_i$ is the opacity of sample $i$.
+*   $\delta_i$ is the distance between sample $i$ and $i+1$.
+*   $c_i$ is the color of sample $i$ determined by trilinear interpolation of the 8 nearest voxels.
+*   $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the transmittance to sample $i$ [S1, unofficial].
+
+Ray parameters are derived from the pose $\pi = [\pi_R | \pi_t]$ and pixel coordinates $(u, v)$ with image dimensions $W, H$ and focal length $f$ [S1, unofficial]:
+$$ o_r = \pi_t $$
+$$ d_r = \pi_R \begin{bmatrix} \frac{u - W/2}{f} \\ \frac{-v - H/2}{f} \\ -1 \end{bmatrix} $$
+
+**Parameters:**
+*   **Translation step size:** A shift of 1 voxel in the Plenoxels grid [S1, unofficial].
+*   **Rotation step size:** 0.001 radians [S1, unofficial].
+*   **Learning rate $\alpha$:** Initialized at 4 for translation and 5 for rotation, decayed by 25% every 100 epochs [S1, unofficial].
+*   **Convergence threshold $\epsilon$:** Set to 2000 for full image usage; set to 0 for 1% image usage [S1, unofficial].
+*   **Maximum epochs:** 1000 [S1, unofficial].
+*   **Success cutoffs:** Rotation error $< 5^\circ$; Translation error $< 80$ pixels (10% of image side length) [S1, unofficial].
+
+**Algorithm Steps:**
+1.  Initialize current pose $\pi_c = \pi_{gt} + \Delta\pi$ [S1, unofficial].
+2.  While the squared L2 norm of the difference between the ground truth and current rendered image is greater than $\epsilon$ AND the number of epochs is less than the maximum allowed epochs:
+    a.  Cast rays $r$ from current pose $\pi_c$ and render image $\hat{I}_{\pi_c}(r)$ using the Plenoxels volume renderer [S1, unofficial].
+    b.  For each of the 6 camera degrees of freedom $i \in [x, y, z, \omega_1, \omega_2, \omega_3]$:
+        i.  Render image $\hat{I}_{\pi_c}(R(i+1))$ by perturbing the pose by $+1$ step (1 voxel for translation, 0.001 radians for rotation) [S1, unofficial].
+        ii. Render image $\hat{I}_{\pi_c}(R(i-1))$ by perturbing the pose by $-1$ step [S1, unofficial].
+        iii. Compute the gradient component $J_i(r)$ using central differencing:
+        $$ J_i(r) \leftarrow [\hat{I}_{\pi_c}(R(i+1)) - \hat{I}_{\pi_c}(R(i-1))]/2 $$
+    c.  Compute photometric error $\Delta I(r) \leftarrow \hat{I}_{\pi_c}(r) - I_{gt}(r)$ [S1, unofficial].
+    d.  Update pose $\pi_c$ using SGD step:
+    $$ \pi_c \leftarrow \pi_c + \alpha (J(r) \cdot \Delta I(r)) $$
+    e.  Alternate between a single rotation step (updating 3 DoF) and a single translation step (updating 3 DoF) per epoch [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dppe_pose_estimation(plenoxels_grid, I_gt, pi_gt, delta_pi, epsilon, max_epochs, alpha_init_trans, alpha_init_rot, decay_rate, decay_interval):
+    """
+    DPPE Pose Estimation Algorithm.
+    
+    Args:
+        plenoxels_grid: Pre-trained Plenoxels grid data structure.
+        I_gt: Ground truth image tensor (H, W, C).
+        pi_gt: Ground truth camera pose [R, t].
+        delta_pi: Perturbation vector [x, y, z, w1, w2, w3].
+        epsilon: Convergence threshold for squared L2 norm.
+        max_epochs: Maximum number of optimization epochs.
+        alpha_init_trans: Initial learning rate for translation.
+        alpha_init_rot: Initial learning rate for rotation.
+        decay_rate: Learning rate decay factor (e.g., 0.75 for 25% decay).
+        decay_interval: Epochs between learning rate decay.
+        
+    Returns:
+        pi_final: Optimized camera pose.
+    """
+    # Initialize current pose
+    pi_c = pi_gt + delta_pi
+    
+    # Initialize learning rates
+    alpha_trans = alpha_init_trans
+    alpha_rot = alpha_init_rot
+    
+    epoch = 0
+    
+    while epoch < max_epochs:
+        # Render current pose
+        I_rendered = render_plenoxels(plenoxels_grid, pi_c)
+        
+        # Check convergence
+        error_sq = sum((I_rendered - I_gt)**2)
+        if error_sq <= epsilon:
+            break
+            
+        # Determine step type: alternate rotation and translation
+        # Even epochs: Rotation, Odd epochs: Translation (or vice versa, as long as they alternate)
+        is_rotation_step = (epoch % 2 == 0)
+        
+        if is_rotation_step:
+            # Rotation Step
+            current_alpha = alpha_rot
+            # Perturbation indices for rotation: w1, w2, w3 (indices 3, 4, 5 in delta_pi)
+            dof_indices = [3, 4, 5]
+            step_size = 0.001 # Radians
+        else:
+            # Translation Step
+            current_alpha = alpha_trans
+            # Perturbation indices for translation: x, y, z (indices 0, 1, 2 in delta_pi)
+            dof_indices = [0, 1, 2]
+            step_size = 1.0 # 1 Voxel
+            
+        # Compute numerical gradient via central differencing
+        J = zeros_like(I_rendered)
+        
+        for i in dof_indices:
+            # Create perturbed poses
+            pi_plus = pi_c.copy()
+            pi_minus = pi_c.copy()
+            
+            # Apply perturbation
+            # Note: delta_pi[i] corresponds to the specific DoF. 
+            # For rotation, this is an angle. For translation, this is voxel shift.
+            # The actual application of perturbation to the matrix depends on the representation.
+            # Assuming delta_pi stores the magnitude of perturbation for that DoF.
+            # We perturb by +step_size and -step_size relative to the current pose's DoF.
+            
+            # Helper to apply perturbation to pose matrix
+            pi_plus = apply_perturbation(pi_plus, dof_index=i, magnitude=step_size)
+            pi_minus = apply_perturbation(pi_minus, dof_index=i, magnitude=-step_size)
+            
+            # Render perturbed poses
+            I_plus = render_plenoxels(plenoxels_grid, pi_plus)
+            I_minus = render_plenoxels(plenoxels_grid, pi_minus)
+            
+            # Central difference
+            J_component = (I_plus - I_minus) / 2.0
+            J += J_component
+            
+        # Compute photometric error
+        delta_I = I_rendered - I_gt
+        
+        # SGD Update
+        # The update is pi_c <- pi_c + alpha * (J * delta_I)
+        # This implies an element-wise multiplication of the gradient image and error image
+        # to determine the direction of pose update.
+        update_direction = J * delta_I
+        
+        # Apply update to current pose
+        # Note: The pseudocode in the source uses a simplified notation. 
+        # In practice, one must map the image-space gradient back to pose space.
+        # The source states: pi_c <- pi_c + alpha(J(r) * Delta I(r))
+        # We assume the implementation handles the mapping from image gradient to pose update.
+        pi_c = apply_pose_update(pi_c, update_direction, current_alpha)
+        
+        # Decay learning rate
+        if (epoch + 1) % decay_interval == 0:
+            alpha_trans *= decay_rate
+            alpha_rot *= decay_rate
+            
+        epoch += 1
+        
+    return pi_c
+
+def render_plenoxels(grid, pose):
+    """
+    Renders an image from the Plenoxels grid using the given pose.
+    Returns an image tensor of shape (H, W, C).
+    """
+    H, W, C = 800, 800, 3 # Default NeRF Synthetic Dataset resolution
+    I = zeros((H, W, C))
+    
+    for u in range(W):
+        for v in range(H):
+            # Compute ray origin and direction
+            o_r = pose.t # Translation vector
+            # Rotation matrix from pose
+            R = pose.R
+            
+            # Focal length (assumed known or from camera intrinsics)
+            f = 1.0 # Placeholder, typically derived from camera matrix
+            
+            # Direction vector in camera space
+            d_cam = [ (u - W/2)/f, (-v - H/2)/f, -1 ]
+            
+            # Transform to world space
+            d_r = R @ d_cam
+            d_r = d_r / norm(d_r) # Normalize
+            
+            # Volume rendering along ray
+            color = volume_render_ray(grid, o_r, d_r)
+            I[v, u] = color
+            
+    return I
+
+def volume_render_ray(grid, o_r, d_r):
+    """
+    Renders a single ray through the Plenoxels grid.
+    """
+    N = 128 # Number of samples per ray
+    color = zeros(3)
+    T = 1.0 # Transmittance
+    
+    for i in range(N):
+        # Sample point along ray
+        # Assuming uniform sampling for simplicity, actual implementation may vary
+        t = i # Distance along ray
+        p = o_r + t * d_r
+        
+        # Get opacity and color from grid
+        sigma = get_opacity(grid, p)
+        c = get_color(grid, p)
+        
+        # Distance between samples
+        delta = 1.0 # Placeholder, depends on ray length and N
+        
+        # Accumulate color
+        # T_i = exp(-sum(sigma_j * delta_j))
+        # Contribution = T_i * (1 - exp(-sigma_i * delta_i)) * c_i
+        alpha = 1.0 - exp(-sigma * delta)
+        color += T * alpha * c
+        T *= (1.0 - alpha)
+        
+        if T < 1e-4:
+            break
+            
+    return color
+
+def apply_perturbation(pose, dof_index, magnitude):
+    """
+    Applies a perturbation to the pose matrix for a specific DoF.
+    dof_index: 0,1,2 for translation (x,y,z); 3,4,5 for rotation (w1,w2,w3).
+    """
+    new_pose = pose.copy()
+    
+    if dof_index < 3:
+        # Translation
+        # Shift by 1 voxel. Voxel size depends on grid resolution.
+        # Assuming grid covers a unit cube or known world size.
+        # For simplicity, we assume the perturbation is applied directly to the translation vector.
+        # The source says "shift of 1 voxel".
+        voxel_size = get_voxel_size(pose.grid_resolution)
+        new_pose.t[dof_index] += magnitude * voxel_size
+    else:
+        # Rotation
+        # Perturb rotation matrix by angle magnitude around specific axis.
+        # This requires converting the scalar perturbation to a rotation matrix update.
+        # The source uses central differencing on the rendered image, so the exact 
+        # mathematical application of rotation perturbation is abstracted by the renderer.
+        # We assume the renderer handles the pose perturbation.
+        # Here we simulate the effect by modifying the pose object.
+        # Note: This is a placeholder for the actual rotation matrix perturbation logic.
+        new_pose.R = apply_rotation_perturbation(new_pose.R, dof_index - 3, magnitude)
+        
+    return new_pose
+
+def get_voxel_size(grid_resolution):
+    """
+    Returns the size of a voxel in world units.
+    Assumes the scene is normalized to a specific world size (e.g., 2x2x2 cube).
+    """
+    # Not given in the sources. Assuming a standard normalization.
+    # For a 256^3 grid covering a unit cube, voxel size is 1/256.
+    return 1.0 / grid_resolution
+
+def apply_rotation_perturbation(R, axis_index, angle):
+    """
+    Applies a small rotation perturbation to the rotation matrix.
+    axis_index: 0,1,2 for x,y,z axes.
+    """
+    # Create rotation matrix for the perturbation
+    if axis_index == 0:
+        R_pert = rotation_matrix_x(angle)
+    elif axis_index == 1:
+        R_pert = rotation_matrix_y(angle)
+    else:
+        R_pert = rotation_matrix_z(angle)
+        
+    # Apply perturbation
+    # Note: The order of multiplication (pre- or post-) depends on the coordinate system.
+    # Assuming local rotation: R_new = R_pert @ R
+    return R_pert @ R
+
+def rotation_matrix_x(angle):
+    c = cos(angle)
+    s = sin(angle)
+    return [[1, 0, 0], [0, c, -s], [0, s, c]]
+
+def rotation_matrix_y(angle):
+    c = cos(angle)
+    s = sin(angle)
+    return [[c, 0, s], [0, 1, 0], [-s, 0, c]]
+
+def rotation_matrix_z(angle):
+    c = cos(angle)
+    s = sin(angle)
+    return [[c, -s, 0], [s, c, 0], [0, 0, 1]]
+
+def apply_pose_update(pose, update_direction, alpha):
+    """
+    Updates the pose based on the image-space gradient and error.
+    The source uses: pi_c <- pi_c + alpha (J(r) * Delta I(r))
+    This implies a direct update to the pose parameters based on the image gradient.
+    In practice, this requires backprojecting the image gradient to pose space.
+    The source abstracts this as a single step.
+    """
+    # The source does not provide the explicit backprojection formula.
+    # It states that the gradient approximation is used with SGD.
+    # We assume the implementation handles the mapping.
+    # For the purpose of this pseudocode, we note that the update is applied.
+    # In a real implementation, one would compute the Jacobian of the rendering process
+    # with respect to the pose parameters.
+    # Since DPPE uses numerical gradients, the update direction is derived from the 
+    # difference in rendered images.
+    
+    # Placeholder for the actual pose update logic.
+    # The source implies that the image gradient J and error Delta I are multiplied
+    # to get the update direction.
+    # This is a simplified representation.
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Local Minima:** The method may get stuck in local minima, particularly in scenes with grid patterns (e.g., Materials) or depending on pose initialization [S1, unofficial].
+*   **Uniform Texture:** Scenes with large regions of uniform texture (e.g., water, bun) cause the algorithm to struggle because it relies on image gradients [S1, unofficial].
+*   **Coarse Gradient Approximation:** If the pose error becomes smaller than the resampling step size, the gradient approximation becomes too coarse to capture information, limiting convergence to small errors [S1, unofficial].
+*   **Translation Step Size Variability:** The translation step size is variable depending on Plenoxels grid resolution; a shift of 1 voxel changes magnitude based on grid size [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The method requires rendering the full image for each of the 6 DoF perturbations at every epoch. However, Plenoxels rendering is fast enough that more than 6 image renders can be performed in the time it takes a single NeRF render [S1, unofficial].
+*   **Memory Complexity:** Depends on the Plenoxels grid resolution. Default $[256]^3$ grid fits in 24 GB VRAM on an NVIDIA RTX-4090 [S1, unofficial].
+*   **Measured Performance:**
+    *   On the NeRF Synthetic Dataset (Average across 8 scenes), DPPE-full achieved an Average Rotation Error of 2.95° and Average Translation Error of 0.21 units [S1, unofficial].
+    *   DPPE-full runtime: ~70 seconds [S1, unofficial].
+    *   DPPE-1% (1% pixel subsampling) runtime: ~11 seconds [S1, unofficial].
+    *   DPPE-1% Average Rotation Error: 2.97°, Translation Error: 0.20 units [S1, unofficial].
+*   **Scaling:** Performance is similar across pixel subsampling levels (1% to 100%), with 1% offering the best trade-off between speed and accuracy [S1, unofficial]. Higher grid resolutions (512^3) increase runtime (77.8s) but slightly improve translation accuracy (0.18 units) while decreasing rotation success rate (0.81) compared to 256^3 (0.91) [S1, unofficial].
+*   **Strengths:** Rapid initial convergence; works with monocular RGB only; generalizable to other scene representations; fast runtime with subsampling.
+*   **Limitations:** Struggles with uniform textures; prone to local minima; gradient approximation becomes coarse at small errors.
+
+## Background
+DPPE was introduced by Christopher Kolios, Yeganeh Bahoo, and Sajad Saeedi in March 2024 [S1, unofficial]. It builds on the Plenoxels representation [7] and the BARF formulation [6] for pose estimation. Unlike Teigen et al. [30] which uses analytic derivatives and requires RGB-D data, DPPE uses numerical approximation and requires only monocular RGB data. It is designed to leverage the speed of Plenoxels to enable full-image re-rendering for pose estimation, addressing the slow rendering times of traditional NeRFs which limit methods like iNeRF to subsampled rays [S1, unofficial].
+
+## Sources
+[S1] DPPE: Dense Pose Estimation in a Plenoxels Environment using Gradient Approximation, https://doi.org/10.48550/arxiv.2403.10773, fetched 2026-10-26 (unofficial)

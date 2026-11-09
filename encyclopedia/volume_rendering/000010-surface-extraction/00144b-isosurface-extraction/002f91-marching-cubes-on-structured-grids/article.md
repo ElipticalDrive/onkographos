@@ -1,0 +1,197 @@
+# Marching Cubes on Structured Grids
+
+Also called: Marching Cubes in IJK Coordinate Space
+
+## Overview
+Marching Cubes on Structured Grids is a surface extraction method that generates a triangular mesh from scalar field data defined on a regular, axis-aligned grid by performing the standard Marching Cubes topology and interpolation logic in the discrete IJK (index) coordinate space and subsequently mapping the resulting vertices to the continuous XYZ (physical) space [S1]. It solves the problem of extracting isosurfaces from data that is logically structured but physically non-uniform or non-orthogonal, allowing the reuse of the standard $256 \times 16$ lookup tables without modifying the core algorithm [S1]. It differs from direct XYZ-space implementations by decoupling the topological decision-making (which relies on the regular connectivity of the IJK grid) from the geometric positioning (which handles the physical distortion) [S1].
+
+## How it works
+The method processes the scalar field $V$ defined on a structured grid with dimensions $N_x \times N_y \times N_z$. The input is the scalar field values at grid vertices and the physical coordinates of these vertices. The output is a list of triangles (vertices and normals) in XYZ space.
+
+**Data Structures:**
+1.  **Scalar Field $V$**: A 3D array of size $N_x \times N_y \times N_z$, where $V[i][j][k]$ is the scalar value at index $(i,j,k)$.
+2.  **Vertex Coordinates $P$**: A 3D array of size $N_x \times N_y \times N_z$, where $P[i][j][k]$ is the 3D vector $(x,y,z)$ of the grid vertex at index $(i,j,k)$.
+3.  **Lookup Tables**: The `edgeTable` (256 entries, 12-bit masks) and `triangleTable` (256 rows, 16 integers) as defined in [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md).
+
+**Algorithm Steps:**
+1.  **Iterate Voxels**: Loop through each voxel in the grid, indexed by $(i, j, k)$ where $0 \le i < N_x-1$, $0 \le j < N_y-1$, $0 \le k < N_z-1$.
+2.  **Get Corner Indices**: Identify the 8 corner indices of the current voxel in IJK space:
+    $$
+    \begin{aligned}
+    c_0 &= (i, j, k) \\
+    c_1 &= (i+1, j, k) \\
+    c_2 &= (i+1, j+1, k) \\
+    c_3 &= (i, j+1, k) \\
+    c_4 &= (i, j, k+1) \\
+    c_5 &= (i+1, j, k+1) \\
+    c_6 &= (i+1, j+1, k+1) \\
+    c_7 &= (i, j+1, k+1)
+    \end{aligned}
+    $$
+3.  **Compute Case Index**: Calculate the 8-bit case index $C$. For each corner $m \in [0, 7]$, if $V(c_m) < I$ (where $I$ is the isovalue), set bit $m$ of $C$ to 1; otherwise 0. The bit assignment must match the vertex ordering assumed by the LUT generation [2518-marching-cubes-lookup-and-configuration].
+4.  **Lookup Edges**: Retrieve the 12-bit edge mask $E = \text{edgeTable}[C]$. If $E == 0$, the voxel contains no intersection; continue to the next voxel.
+5.  **Compute Intersections in IJK**: For each edge $e \in [0, 11]$ where bit $e$ of $E$ is set:
+    a. Identify the two corner indices of the edge in IJK space, $u$ and $v$.
+    b. Retrieve the scalar values $V_u = V(u)$ and $V_v = V(v)$.
+    c. Calculate the interpolation factor $t$ in IJK space:
+       $$ t = \frac{I - V_u}{V_v - V_u} $$
+       [G] Guard against division by zero: if $|V_v - V_u| < \epsilon$, set $t = 0.5$.
+    d. Calculate the intersection point in IJK space, $P_{ijk}$, by linearly interpolating between the IJK coordinates of the corners:
+       $$ P_{ijk} = (1-t) \cdot u + t \cdot v $$
+       Note: $u$ and $v$ here are treated as 3D vectors of their integer indices.
+6.  **Map to XYZ**: Retrieve the physical coordinates of the two corners, $P_u = P(u)$ and $P_v = P(v)$. Interpolate the physical position using the same factor $t$:
+    $$ P_{xyz} = (1-t) \cdot P_u + t \cdot P_v $$
+    [S1] This step performs the IJK-to-XYZ interpolation. While not technically the exact trilinear interpolation in physical space, the difference is negligible for most applications [S1].
+7.  **Generate Triangles**: Retrieve the triangle configuration from `triangleTable[C]`. Iterate through the triplets $(a, b, c)$ until the terminator `-1` is reached. For each triplet, the indices $a, b, c$ refer to the edges $e_a, e_b, e_c$. Retrieve the pre-computed $P_{xyz}$ for these edges and add the triangle $(P_{xyz}(a), P_{xyz}(b), P_{xyz}(c))$ to the output mesh.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def marching_cubes_structured_grid(V, P, isovalue):
+    """
+    V: 3D array of scalar values, shape (Nx, Ny, Nz)
+    P: 3D array of vertex positions, shape (Nx, Ny, Nz, 3)
+    isovalue: float, the threshold for extraction
+    Returns: list of triangles, each triangle is a list of 3 (x,y,z) tuples
+    """
+    triangles = []
+    Nx, Ny, Nz = V.shape
+    
+    # Pre-load lookup tables from parent article
+    edge_table = get_edge_table()
+    triangle_table = get_triangle_table()
+    
+    # Iterate over all voxels
+    for i in range(Nx - 1):
+        for j in range(Ny - 1):
+            for k in range(Nz - 1):
+                # 1. Get corner indices in IJK
+                corners = [
+                    (i, j, k), (i+1, j, k), (i+1, j+1, k), (i, j+1, k),
+                    (i, j, k+1), (i+1, j, k+1), (i+1, j+1, k+1), (i, j+1, k+1)
+                ]
+                
+                # 2. Compute case index C
+                C = 0
+                for m in range(8):
+                    if V[corners[m]] < isovalue:
+                        C |= (1 << m)
+                
+                # 3. Lookup edge mask
+                edge_mask = edge_table[C]
+                if edge_mask == 0:
+                    continue
+                
+                # 4. Compute intersection points in XYZ
+                # Store in a dict keyed by edge index 0-11
+                intersections = {}
+                
+                # Define edge connections (u, v) in terms of corner indices 0-7
+                edges = [
+                    (0, 1), (1, 2), (2, 3), (3, 0), # Bottom
+                    (4, 5), (5, 6), (6, 7), (7, 4), # Top
+                    (0, 4), (1, 5), (2, 6), (3, 7)  # Vertical
+                ]
+                
+                for e_idx in range(12):
+                    if (edge_mask >> e_idx) & 1:
+                        c_u_idx, c_v_idx = edges[e_idx]
+                        c_u = corners[c_u_idx]
+                        c_v = corners[c_v_idx]
+                        
+                        V_u = V[c_u]
+                        V_v = V[c_v]
+                        
+                        # Interpolation factor
+                        denom = V_v - V_u
+                        if abs(denom) < 1e-9:
+                            t = 0.5
+                        else:
+                            t = (isovalue - V_u) / denom
+                        
+                        # Physical coordinates
+                        P_u = P[c_u]
+                        P_v = P[c_v]
+                        
+                        # Linear interpolation in XYZ
+                        P_int = P_u + t * (P_v - P_u)
+                        intersections[e_idx] = P_int
+                
+                # 5. Generate triangles
+                tri_config = triangle_table[C]
+                for idx in range(0, 15, 3):
+                    e_a = tri_config[idx]
+                    e_b = tri_config[idx+1]
+                    e_c = tri_config[idx+2]
+                    
+                    if e_a == -1:
+                        break
+                    
+                    triangles.append([
+                        intersections[e_a],
+                        intersections[e_b],
+                        intersections[e_c]
+                    ])
+                    
+    return triangles
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision**: The method assumes linear interpolation in physical space using the IJK-derived $t$. This is an approximation of true trilinear interpolation in physical space [S1]. For highly distorted grids, this may introduce small geometric errors.
+*   **Boundaries**: The loop bounds $N_x-1$, etc., ensure no out-of-bounds access for voxel corners.
+*   **Degenerate Input**: If $V_u = V_v$, the denominator in $t$ calculation is zero. A guard is required [G].
+
+## Subtopics
+
+### [Bitwise Marching Cubes](7374-bitwise-marching-cubes.md)
+Uses bitwise propagation to compute cube indices, reusing bits from previous cells to avoid redundant lookups.
+
+### [Uniform Marching Cubes with Snapping](7468-uniform-marching-cubes-with-snapping.md)
+Snaps vertices to edges to reduce geometric error on uniform grids.
+
+### [Smart Conversion](7489-smart-conversion.md)
+Gradient-based correction for noisy or inaccurate iso-values.
+
+### [Flying Edges](7520-flying-edges.md)
+Edge-based parallel processing to avoid point merging bottlenecks.
+
+### [Undeformed Space Ray Start via Deformed Hull Intersection](10141-undeformed-space-ray-start-via-deformed-hull-intersection.md)
+Determines ray starts in undeformed space via hull intersection.
+
+### [Dual Grid Isosurface Extraction](10271-dual-grid-isosurface-extraction.md)
+Extracts crack-free surfaces from AMR data using a dual grid.
+
+### [Dividing Cubes](10391-dividing-cubes.md)
+Point-based representation for dense data, avoiding triangle scan conversion.
+
+### Matveyev's Algorithm
+An algorithm based on a triangulation table that correctly represents trilinear interpolant behavior using intersections on cube diagonals [S2]. Proposed by Matveyev in 1999, it addresses the ambiguity of the standard Marching Cubes by using diagonal intersections to determine the topology of the trilinear interpolant within the cube [S2].
+
+### Geomorph LOD Seam Handling
+A technique to achieve watertight seams between fine and coarse LOD levels in Marching Cubes by geometrically deforming the fine surface at the boundary to match the coarse contour [S3, unofficial]. It identifies boundary vertices, applies a geometric morph (bending) to fine surface vertices at the boundary, and deforms them toward the coarse contour to eliminate gaps [S3, unofficial].
+
+### Cell Subdivision Isosurface Extraction
+A method that retains the identity of cells (vertex/node centered data) and eliminates non-linear hanging nodes by subdividing boundary cells into pyramids, allowing standard isosurface techniques to be applied [S4, unofficial]. It subdivides lower-resolution cell faces to match higher-resolution faces, obtains values at newly created hanging nodes by linear interpolation, and subdivides 3D cells into pyramids with a common apex point [S4, unofficial]. Unlike the dual grid approach, this method retains the original cell identity and uses subdivision/pyramids instead of stitch cells [S4, unofficial]. Tested on star cluster formation: 2.30 sec for 44,332 cells/10,456 triangles (first level) and 7.73 sec for 303,759 cells/77,029 triangles (multiple levels) [S4, unofficial].
+
+### TexF with Implicit Geometry (SDF)
+An extension where TexF shares a canonical grid with an implicit Signed Distance Field (SDF). The surface is extracted via Marching Cubes, and TexF attributes are transferred to vertices for standard vertex-color rendering, avoiding per-pixel TexF queries [S5, unofficial]. The SDF and TexF share the same grid. After extracting a mesh with Marching Cubes, TexF attributes are transferred to its vertices using k-nearest-neighbor interpolation. The rasterizer then interpolates these vertex attributes across triangles [S5, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: $O(N)$, where $N$ is the number of voxels. Each voxel is processed in constant time (lookup table access and linear interpolation).
+*   **Memory Complexity**: $O(N)$ for storing the scalar field and vertex coordinates. The output mesh size is proportional to the surface area.
+*   **Strengths**: Simple to implement; leverages highly optimized lookup tables; easily parallelizable (voxels are independent); supports streaming (only two slices needed in memory) [S1].
+*   **Limitations**: The IJK-to-XYZ interpolation is an approximation and not technically correct for highly distorted grids [S1]. Standard ambiguity cases (46, 47, 98, 99, 210, 213, 214, 215) may cause cracks if adjacent voxels resolve ambiguities differently [2518-marching-cubes-lookup-and-configuration].
+*   **When to use**: Regular structured grids where physical distortion is mild or negligible; large datasets requiring streaming; real-time applications.
+*   **When not to use**: Highly distorted or unstructured grids; applications requiring exact trilinear interpolation in physical space; scenes with severe topological ambiguities requiring advanced resolution strategies.
+
+## Background
+The Marching Cubes algorithm was originally developed and patented by GE Medical Systems for use in their CT and MRI equipment [S1]. The patent has since expired, placing the algorithm in the public domain [S1]. It is one of the most common visualization methods for isosurface extraction [S1]. The specific approach of performing the algorithm in IJK space and interpolating back to XYZ is a modification to handle structured grids with arbitrary physical coordinates [S1].
+
+## Sources
+[S1] Marching Cubes, https://daac.hpc.mil/gettingStarted/Marching_Cubes.html, fetched 2026-10-29
+[S2] A Evolucao do Algoritmo Marching Cubes, https://doi.org/10.5540/03.2017.005.01.0107, fetched 2026-10-26
+[S3] draquel/VoxelWorlds, https://github.com/draquel/VoxelWorlds, fetched 2026-10-27 (unofficial)
+[S4] Visualization Tools for Adaptive Mesh Refinement Data, https://www.vacet.org/publications/AMRVisJune2007.pdf, fetched 2026-10-27 (unofficial)
+[S5] Beyond UV Mapping: Mesh Texture Compression via Surface-Aligned Texture Fields, https://doi.org/10.48550/arxiv.2609.23606, fetched 2026-10-26 (unofficial)

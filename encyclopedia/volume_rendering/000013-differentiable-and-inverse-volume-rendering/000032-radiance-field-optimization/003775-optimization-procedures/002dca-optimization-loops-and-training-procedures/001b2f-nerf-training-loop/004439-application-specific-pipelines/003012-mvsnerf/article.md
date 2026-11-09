@@ -1,0 +1,81 @@
+# MVSNeRF
+
+Also called: MVS-NeRF, MVSNeRF: Fast Generalizable Radiance Field Reconstruction from Multi-View Stereo
+
+## Overview
+MVSNeRF is a method for fast, generalizable radiance field reconstruction from multi-view stereo (MVS) inputs [S1, unofficial]. Unlike standard NeRF, which requires per-scene optimization via iterative gradient descent, MVSNeRF employs a feedforward model to predict the radiance field directly from input images, significantly reducing training time and iteration counts [S1, unofficial]. It solves the problem of slow convergence in traditional NeRF by learning a data prior that accelerates the reconstruction process [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of multi-view images $\{I_t\}$ corresponding to known camera poses.
+*   **Output:** A radiance field representation (implicitly or explicitly defined) that can be rendered for novel views.
+
+**Data Structures:**
+*   The method utilizes a feedforward neural network architecture. The specific internal structure (e.g., encoder-decoder, feature aggregation mechanism) is not detailed in the provided sources [S1, unofficial].
+*   The output is a radiance field, which may be represented as a continuous function or a discrete volume, depending on the specific implementation variant [S1, unofficial].
+
+**Steps:**
+1.  **Feature Extraction:** Input images are processed through a shared encoder to extract multi-view features [S1, unofficial].
+2.  **Data Prior Learning:** The feedforward model learns a data prior from the multi-view inputs. This prior captures the statistical regularities of the scene geometry and appearance [S1, unofficial].
+3.  **Radiance Field Prediction:** The model directly predicts the radiance field parameters (e.g., density and color) for query points in space, conditioned on the extracted features and camera poses [S1, unofficial].
+4.  **Rendering:** Standard volume rendering is applied to the predicted radiance field to generate novel views [S1, unofficial].
+
+**Formulas:**
+*   Not given in the sources. The core innovation is the architectural shift to a feedforward model rather than a specific mathematical formulation provided in the notes [S1, unofficial].
+
+**Parameters:**
+*   Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def MVSNeRF_render(input_images, camera_poses):
+    """
+    Renders novel views using the MVSNeRF feedforward model.
+    
+    Args:
+        input_images: List of input multi-view images.
+        camera_poses: Corresponding camera poses for the input images.
+        
+    Returns:
+        Rendered novel view images.
+    """
+    # Step 1: Extract features from input images
+    # The specific feature extraction architecture is not detailed in the sources [S1, unofficial].
+    features = extract_features(input_images)
+    
+    # Step 2: Predict radiance field using the feedforward model
+    # The model learns a data prior to accelerate convergence [S1, unofficial].
+    # The exact mapping from features to radiance field parameters is not specified [S1, unofficial].
+    radiance_field = predict_radiance_field(features, camera_poses)
+    
+    # Step 3: Render novel views from the predicted radiance field
+    # Standard volume rendering is applied [S1, unofficial].
+    novel_views = render(radiance_field, novel_camera_poses)
+    
+    return novel_views
+```
+
+## Subtopics
+
+### [Local Sparse Volume Reconstruction](7514-local-sparse-volume-reconstruction.md)
+Regresses a local neural volume for each input frame using neighboring images, aggregating multi-view features in a canonical world coordinate frame. Unlike MVSNeRF, which builds perspective frustum volumes for small-baseline rendering, this method constructs volumes directly in canonical space to facilitate global fusion.
+
+## Operating characteristics
+*   **Time Complexity:** Significantly faster than standard NeRF as it eliminates the per-scene iterative optimization loop. The feedforward model allows for direct inference [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Reduces the number of iterations required for convergence compared to standard NeRF [S1, unofficial].
+*   **Strengths:** Fast reconstruction, generalizable across scenes without per-scene tuning [S1, unofficial].
+*   **Limitations:** Not given in the sources.
+*   **When to use:** When fast, generalizable radiance field reconstruction from multi-view stereo is required [S1, unofficial].
+*   **When not to use:** When per-scene optimization is necessary for higher fidelity or when the scene characteristics deviate significantly from the training distribution of the feedforward model [S1, unofficial].
+
+## Background
+MVSNeRF was introduced in the paper "MVSNeRF: Fast Generalizable Radiance Field Reconstruction from Multi-View Stereo" published at ICCV 2021 [S1, unofficial]. It addresses the limitations of standard NeRF, such as slow training speed and poor scene modeling capabilities for large or dynamic scenes [S1, unofficial]. The method leverages a feedforward model to learn a data prior, which accelerates convergence and reduces the number of iterations needed for reconstruction [S1, unofficial].
+
+## Sources
+[S1] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)

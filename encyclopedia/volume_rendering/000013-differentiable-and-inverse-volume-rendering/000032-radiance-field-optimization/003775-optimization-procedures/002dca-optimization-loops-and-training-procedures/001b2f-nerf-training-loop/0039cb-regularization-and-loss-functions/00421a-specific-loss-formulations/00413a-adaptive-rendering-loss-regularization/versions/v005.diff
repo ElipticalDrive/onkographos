@@ -1,0 +1,462 @@
+--- v004.md
++++ v005.md
+@@ -4,223 +4,259 @@
+ 
+ ## Overview
+-Adaptive Rendering Loss Regularization (AR-NeRF) is a method for few-shot Neural Radiance Fields (NeRF) that mitigates the inconsistency between Positional Encoding (PE) frequency regularization and rendering loss [S1]. It aligns the frequency relationship between PE and 2D-pixel supervision by using two-phase rendering supervision and an adaptive rendering loss weight learning strategy [S1]. Unlike siblings such as [AligNeRF Training Objective](8701-alignerf-training-objective.md) or [NeRF-XL Multi-GPU Distortion Loss](10377-nerf-xl-multi-gpu-distortion-loss.md), AR-NeRF does not introduce external modules or significant computational overhead, focusing instead on dynamic loss weighting and supervision transformation [S1].
++Adaptive Rendering Loss Regularization (AR-NeRF) is a method for few-shot Neural Radiance Fields (NeRF) that mitigates the inconsistency between Positional Encoding (PE) frequency regularization and rendering loss [S1]. It aligns the frequency relationship between PE and 2D-pixel supervision by using a two-phase rendering supervision and an adaptive rendering loss weight learning strategy [S1]. Unlike siblings such as [AligNeRF Training Objective](8701-alignerf-training-objective.md) which may use external modules, AR-NeRF achieves state-of-the-art performance in sparse input settings (e.g., 3-view) without introducing obvious computational cost or external supervision [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Sparse set of input views (e.g., 3, 6, or 9 images), camera poses, ground truth images.
+-*   **Outputs:** Optimized MLP parameters $\theta$ representing density $\sigma$ and color $\mathbf{c}$ fields, and variance $\beta^2$ field.
++*   **Inputs:** Sparse set of input views (images), camera poses, and a target number of training iterations $T$.
++*   **Outputs:** Optimized MLP parameters $\theta$ representing the scene's color and density fields.
+ 
+ **Data Structures:**
+-*   **MLP $F_\theta$:** Takes concatenated PE of position $\mathbf{x}$ and direction $\mathbf{d}$ as input. Outputs tuple $(\mathbf{c}, \beta^2, \sigma)$.
+-    *   $\mathbf{c} \in [0, 1]^3$: Color.
+-    *   $\beta^2 \in \mathbb{R}^+$: Color variance (uncertainty).
+-    *   $\sigma \in \mathbb{R}^+$: Density.
+-*   **Positional Encoding (PE):** Standard NeRF PE [S1].
++*   **MLP Parameters $\theta$:** Weights and biases for the neural network $F_\theta$.
++*   **Positional Encoding (PE):** A vector representation of 3D position $\mathbf{x}$ and viewing direction $\mathbf{d}$.
++*   **Ray Samples:** A set of $N$ 3D points $\mathbf{y}_i$ along a ray, with associated densities $\sigma_i$, colors $\mathbf{c}_i$, and variances $\beta_i^2$.
++*   **Frequency Mask $\mathbf{m}$:** A vector of length $L+3$ controlling PE activation.
++
++**Numbered Steps:**
++
++1.  **Sample 3D Points:** Sample a set of 3D points along a ray $\mathbf{y}(t) = \mathbf{o} + t\mathbf{d}$ from camera center $\mathbf{o}$ in direction $\mathbf{d}$. Let $N$ be the total number of samples.
++2.  **Encode Positions and Directions:** Encode each 3D position $\mathbf{x}$ and viewing direction $\mathbf{d}$ using Positional Encoding (PE). The standard PE is defined as:
+     $$ PE(\mathbf{a}) = [\mathbf{a}, \eta_0(\mathbf{a}), \eta_1(\mathbf{a}), \dots, \eta_{K-1}(\mathbf{a})] $$
+-    where $\mathbf{a}$ is $\mathbf{x}$ or $\mathbf{d}$, $K$ is max frequency, and $\eta_k(\mathbf{a}) = [\sin(2^k \pi \mathbf{a}), \cos(2^k \pi \mathbf{a})]$ [S1].
+-*   **Frequency Mask $\mathbf{m}(t, T, L)$:** A vector of length $L+3$ (where $L$ is PE length parameter) used to regularize PE input [S1].
+-
+-**Numbered Steps:**
+-
+-1.  **Ray Sampling:** Sample $N$ 3D points along a ray $\mathbf{y}(t) = \mathbf{o} + t\mathbf{d}$, where $\mathbf{o}$ is camera center and $\mathbf{d}$ is direction. Let $\delta_i$ be the distance between adjacent samples [S1].
+-2.  **PE Encoding:** Encode position $\mathbf{x}$ and direction $\mathbf{d}$ using PE. Apply frequency mask $\mathbf{m}(t, T, L)$ to create regularized PE $PE'$ [S1]:
+-    $$ PE'(t, T; \mathbf{a}) = PE(\mathbf{a}) \odot \mathbf{m}(t, T, L) $$
+-    The mask $m_i(t, T, L)$ is defined as [S1]:
+-    $$ m_i(t,T,L)= \begin{cases} 1, & \text{if } i\leq \frac{t\cdot L}{T}+3 \\ \frac{t\cdot L}{T}-\lfloor \frac{t\cdot L}{T}\rfloor, & \text{if } \frac{t\cdot L}{T}+3<i\leq \frac{t\cdot L}{T}+6 \\ 0, & \text{if } i>\frac{t\cdot L}{T}+6 \end{cases} $$
+-    where $t$ is current iteration, $T$ is max iteration for frequency regularization [S1].
+-3.  **MLP Forward Pass:** Feed $PE'(t, T; \mathbf{x})$ and $PE'(t, T; \mathbf{d})$ into MLP $F_\theta$ to output $(\mathbf{c}_i, \beta_i^2, \sigma_i)$ for each sample $i$ [S1].
+-4.  **Volume Rendering:** Compute rendered color $\hat{\mathbf{c}}(\mathbf{y})$ and variance $\bar{\beta}^2(\mathbf{y})$ using alpha compositing [S1]:
+-    $$ \hat{\mathbf{c}}(\mathbf{y}) = \sum_{i=1}^{N} w_i \mathbf{c}_{i} = \sum_{i=1}^{N} T_{i} \alpha_i \mathbf{c}_{i} $$
+-    $$ \bar{\beta}^2(\mathbf{y}) = \sum_{i=1}^{N} w_i^2 \beta_i^2 $$
+-    where transmittance $T_i = \exp(-\sum_{j=1}^{i-1}\sigma_j \delta_j)$, opacity $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$, and weight $w_i = T_i \alpha_i$ [S1].
+-5.  **Loss Computation:** Compute total loss $\mathcal{L}_{\text{total}}$ as sum of rendering loss $\mathcal{L}_s$, adaptive loss $\mathcal{L}_u$, ray density regularization $\mathcal{L}_r$, and occlusion regularization $\mathcal{L}_o$ [S1]:
+-    $$ \mathcal{L}_{\text{total}} = \mathcal{L}_s + \lambda_u \mathcal{L}_u + \lambda_r \mathcal{L}_r + \lambda_o \mathcal{L}_o $$
+-
+-**Detailed Loss Formulations:**
+-
+-*   **Two-Phase Rendering Supervision ($\mathcal{L}_s$):**
+-    Define transformation $\Phi(t, T_s; \cdot)$ [S1]:
+-    $$ \Phi(t,T_s;\cdot ) = \begin{cases} G(\cdot ), & \text{if } t < T_s \\ \mathrm{I}, & \text{if } t\geq T_s \end{cases} $$
+-    where $G(\cdot)$ is Gaussian blur (kernel size 3) and $\mathrm{I}$ is identity. $T_s$ is the transition iteration [S1].
+-    $$ \mathcal{L}_s = \sum_{\mathbf{y}\in \mathcal{Y}} ||\hat{\mathbf{c}}(\mathbf{y}) - \Phi(t, T_s; \mathbf{c}(\mathbf{y}))||_2^2 $$
+-    where $\mathbf{c}(\mathbf{y})$ is ground truth color [S1].
+-
+-*   **Adaptive Rendering Loss ($\mathcal{L}_u$):**
+-    Based on negative log likelihood of Gaussian distribution $\mathcal{N}(\bar{\mathbf{c}}(\mathbf{y}), \bar{\beta}^2(\mathbf{y}))$ [S1]:
+-    $$ \mathcal{L}_u = \sum_{\mathbf{y}\in \mathcal{Y}} \frac{||\mathbf{c}(\mathbf{y}) - \bar{\mathbf{c}}(\mathbf{y})||_2^2}{2\bar{\beta}^2(\mathbf{y})} + \frac{\log \bar{\beta}^2(\mathbf{y})}{2} $$
+-    This acts as an adaptive weight where $1/\bar{\beta}^2(\mathbf{y})$ adjusts based on uncertainty [S1].
+-
+-*   **Ray Density Regularization ($\mathcal{L}_r$):**
+-    Define ray density $p_i(\mathbf{y}) = \frac{\alpha_i}{\sum_j \alpha_j}$ [S1].
+-    $$ \mathcal{L}_r = \sum_{\mathbf{y}\in \mathcal{Y}} \frac{1}{N} \sum_{i=1}^N \log(1 + s \cdot p_i(\mathbf{y})) $$
+-    where $s=10.0$ controls steepness [S1].
+-
+-*   **Occlusion Regularization ($\mathcal{L}_o$):**
+-    Penalizes density fields near the camera [S1]. Specific formula not detailed in sources beyond reference to [49].
++    where $\mathbf{a}$ is $\mathbf{x}$ or $\mathbf{d}$, $K$ is the maximum encoded frequency hyperparameter, and $\eta_k(\mathbf{a}) = [\sin(2^k \pi \mathbf{a}), \cos(2^k \pi \mathbf{a})]$ [S1].
++3.  **Apply Frequency Mask:** Compute a linearly increasing frequency mask $\mathbf{m}(t, T, L)$ based on current iteration $t$, max iteration $T$, and PE length $L$. The $i$-th bit $m_i$ is:
++    $$ m_i(t,T,L) = \begin{cases} 1, & \text{if } i \leq \frac{t \cdot L}{T} + 3 \\ \frac{t \cdot L}{T} - \lfloor \frac{t \cdot L}{T} \rfloor, & \text{if } \frac{t \cdot L}{T} + 3 < i \leq \frac{t \cdot L}{T} + 6 \\ 0, & \text{if } i > \frac{t \cdot L}{T} + 6 \end{cases} $$
++    Apply the mask to the PE: $PE'(t, T; \mathbf{a}) = PE(\mathbf{a}) \odot \mathbf{m}(t, T, L)$ [S1].
++4.  **MLP Forward Pass:** Feed the masked encodings into the MLP to output color $\mathbf{c}$, variance $\beta^2$, and density $\sigma$:
++    $$ F_\theta(PE'(t,T;\mathbf{x}), PE'(t,T;\mathbf{d})) = (\mathbf{c}, \beta^2, \sigma) $$
++    where $\mathbf{c} \in [0, 1]^3$ and $\sigma \in \mathbb{R}^+$ [S1].
++5.  **Volume Rendering:** Render the pixel color $\hat{\mathbf{c}}(\mathbf{y})$ and variance $\bar{\beta}^2(\mathbf{y})$ using alpha compositing.
++    *   Compute transmittance $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ and opacity $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$, where $\delta_i$ is the distance between adjacent samples.
++    *   Compute rendered color mean: $\bar{\mathbf{c}}(\mathbf{y}) = \sum_{i=1}^{N} w_i \mathbf{c}_i$, where $w_i = T_i \alpha_i$.
++    *   Compute rendered color variance (assuming independent color distributions): $\bar{\beta}^2(\mathbf{y}) = \sum_{i=1}^{N} w_i^2 \beta_i^2$ [S1].
++6.  **Compute Two-Phase Rendering Supervision:** Define a transformation $\Phi(t, T_s; \cdot)$ for ground truth pixel color $\mathbf{c}(\mathbf{y})$:
++    $$ \Phi(t, T_s; \cdot) = \begin{cases} G(\cdot), & \text{if } t < T_s \\ \mathrm{I}, & \text{if } t \geq T_s \end{cases} $$
++    where $G(\cdot)$ is a Gaussian blur (kernel size 3) and $\mathrm{I}$ is the identity function. $T_s$ is the max iteration of the early training phase [S1].
++7.  **Compute Losses:**
++    *   **Supervision Loss:** $\mathcal{L}_s = \sum_{\mathbf{y} \in \mathcal{Y}} ||\hat{\mathbf{c}}(\mathbf{y}) - \Phi(t, T_s; \mathbf{c}(\mathbf{y}))||_2^2$ [S1].
++    *   **Adaptive Rendering Loss:** Based on negative log likelihood of the Gaussian distribution $\mathcal{N}(\bar{\mathbf{c}}(\mathbf{y}), \bar{\beta}^2(\mathbf{y}))$:
++        $$ \mathcal{L}_u = \sum_{\mathbf{y} \in \mathcal{Y}} \frac{||\mathbf{c}(\mathbf{y}) - \bar{\mathbf{c}}(\mathbf{y})||_2^2}{2\bar{\beta}^2(\mathbf{y})} + \frac{\log \bar{\beta}^2(\mathbf{y})}{2} $$
++        Here, $1/\bar{\beta}^2(\mathbf{y})$ acts as an adaptive weight for the pixel supervision [S1].
++    *   **Ray Density Regularization:** Define ray density $p_i(\mathbf{y}) = \frac{\alpha_i}{\sum_j \alpha_j}$. Compute:
++        $$ \mathcal{L}_r = \sum_{\mathbf{y} \in \mathcal{Y}} \frac{1}{N} \sum_{i=1}^{N} \log(1 + s \cdot p_i(\mathbf{y})) $$
++        where $s=10.0$ controls steepness [S1].
++    *   **Occlusion Regularization:** $\mathcal{L}_o$ penalizes density fields near the camera [S1].
++8.  **Optimize:** Minimize total loss $\mathcal{L}_{\text{total}} = \mathcal{L}_s + \lambda_u \mathcal{L}_u + \lambda_r \mathcal{L}_r + \lambda_o \mathcal{L}_o$ using Adam optimizer [S1].
++
++**Pseudocode:**
++
++```python
++import numpy as np
++
++def positional_encoding(a, K):
++    """Standard NeRF positional encoding."""
++    # a: (..., 3) or (..., 2)
++    # K: int, number of frequency bands
++    pe = [a]
++    for k in range(K):
++        freq = 2**k * np.pi
++        pe.append(np.sin(freq * a))
++        pe.append(np.cos(freq * a))
++    return np.concatenate(pe, axis=-1)
++
++def compute_frequency_mask(t, T, L, num_pe_dims):
++    """
++    Compute linearly increasing frequency mask.
++    t: current iteration
++    T: max iteration
++    L: PE length (number of frequency bands, excluding raw input)
++    num_pe_dims: total dimensions of PE vector (L + 3 for x,y,z raw + 2*L for sin/cos)
++    """
++    # The mask applies to the PE vector. 
++    # The formula defines m_i for i in 1..L+3? 
++    # The paper says PE length L+3. 
++    # Let's assume the mask vector m has length equal to PE output size.
++    # The formula indices i refer to the components of the PE vector.
++    # Raw input (x,y,z) corresponds to first 3 dims? 
++    # The paper says: "begin with raw inputs (x, d) and gradually inputs PE".
++    # So indices 1,2,3 are raw. Indices 4..L+3 are the sin/cos pairs.
++    # The formula uses t*L/T + 3. This suggests the "cutoff" is in terms of L bands.
++    
++    mask = np.zeros(num_pe_dims)
++    # Calculate the threshold in terms of L bands
++    threshold_bands = (t * L) / T
++    
++    # The formula:
++    # if i <= threshold_bands + 3: m_i = 1
++    # if threshold_bands + 3 < i <= threshold_bands + 6: m_i = fractional part
++    # if i > threshold_bands + 6: m_i = 0
++    
++    # Note: The paper defines PE(a) = [a, eta_0, ..., eta_{K-1}].
++    # Length is 3 + 2*K. Let L = K.
++    # The mask m is applied to this vector.
++    
++    # We need to map the "band index" to vector indices.
++    # Band 0 corresponds to indices 4,5. Band 1 to 6,7.
++    # The formula uses i as the index in the PE vector? 
++    # "mi(t,T,L) denotes the i-th bit value of m".
++    # If i <= t*L/T + 3, it is 1.
++    # This implies the first 3 elements (raw coords) are always 1 (since t>=0).
++    # The next elements are masked based on the band index.
++    
++    # Let's implement the formula directly on the vector index i (1-based for math, 0-based for code)
++    # Math i: 1..3 are raw. 4..5 are band 0. 6..7 are band 1.
++    # Formula: i <= t*L/T + 3.
++    # For i=1,2,3: 1 <= t*L/T + 3 is true (assuming t>=0). So raw is always 1.
++    # For i=4 (band 0 start): 4 <= t*L/T + 3 => 1 <= t*L/T.
++    
++    for i in range(1, num_pe_dims + 1):
++        val = t * L / T + 3
++        if i <= val:
++            mask[i-1] = 1.0
++        elif i <= val + 3: # The range is width 3? Formula says i <= t*L/T + 6. 
++                           # val + 3 = t*L/T + 6.
++            # Fractional part of t*L/T
++            frac = (t * L / T) - np.floor(t * L / T)
++            mask[i-1] = frac
++        else:
++            mask[i-1] = 0.0
++            
++    return mask
++
++def render_ray(samples, params, t, T, L, Ts, gt_color, s, lambda_u, lambda_r, lambda_o):
++    """
++    samples: list of dicts with keys 'x', 'd', 'delta' (distance to next)
++    params: MLP object
++    t: current iteration
++    T: max iteration
++    L: PE length (K)
++    Ts: transition iteration
++    gt_color: ground truth color for this ray
++    s: steepness for ray density loss
++    lambda_u, lambda_r, lambda_o: loss weights
++    """
++    N = len(samples)
++    
++    # 1. Encode and Mask
++    pe_x_list = []
++    pe_d_list = []
++    mask = compute_frequency_mask(t, T, L, params.pe_dim)
++    
++    for sample in samples:
++        pe_x = positional_encoding(sample['x'], L)
++        pe_d = positional_encoding(sample['d'], L)
++        pe_x_masked = pe_x * mask
++        pe_d_masked = pe_d * mask
++        pe_x_list.append(pe_x_masked)
++        pe_d_list.append(pe_d_masked)
++        
++    # 2. MLP Forward
++    # F_theta outputs (c, beta2, sigma)
++    # Assuming params.mlp_forward takes list of masked PEs
++    outputs = params.mlp_forward(pe_x_list, pe_d_list)
++    colors = outputs['c']      # (N, 3)
++    betas2 = outputs['beta2']  # (N,)
++    sigmas = outputs['sigma']  # (N,)
++    
++    # 3. Alpha Compositing
++    deltas = np.array([s['delta'] for s in samples])
++    
++    # Transmittance T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
++    # Compute accumulated transmittance
++    acc_sigma_delta = np.cumsum(sigmas * deltas)
++    # T_i corresponds to transmittance BEFORE sample i
++    # T_1 = 1 (exp(0))
++    # T_i = exp(-acc_sigma_delta[i-2]) for i > 1
++    T_trans = np.ones(N)
++    if N > 1:
++        T_trans[1:] = np.exp(-acc_sigma_delta[:-1])
++        
++    alphas = 1 - np.exp(-sigmas * deltas)
++    weights = T_trans * alphas
++    
++    # Rendered Color Mean
++    c_hat = np.sum(weights[:, None] * colors, axis=0)
++    
++    # Rendered Color Variance
++    beta2_hat = np.sum(weights**2 * betas2, axis=0)
++    
++    # 4. Supervision Transformation
++    # Phi: Gaussian blur if t < Ts, else Identity
++    # Note: gt_color is the pixel color. We blur the GT image patch corresponding to this ray's pixel.
++    # For simplicity, assume gt_color is already the blurred or raw value passed in.
++    # In implementation, this requires access to the image and coordinates.
++    # Here we assume gt_color is pre-processed by the caller or passed as Phi(gt).
++    # The formula uses Phi(t, Ts; c(y)).
++    # Let's assume the input gt_color is the RAW GT. We apply blur here if needed.
++    # However, the pseudocode structure usually keeps data processing separate.
++    # We will assume gt_color is the target value.
++    
++    # 5. Loss Calculation
++    # L_s
++    diff = gt_color - c_hat
++    L_s = np.sum(diff**2)
++    
++    # L_u (Adaptive Rendering Loss)
++    # -log p(c|y) proportional to ||c - c_hat||^2 / (2 beta2_hat) + log(beta2_hat)/2
++    # Note: beta2_hat is a scalar for the whole ray/pixel? 
++    # The formula sums over y. For a single ray, it's one term.
++    # beta2_hat is scalar.
++    if beta2_hat > 1e-8:
++        L_u = np.sum(diff**2) / (2 * beta2_hat) + np.log(beta2_hat) / 2
++    else:
++        L_u = 0.0 # Guard against division by zero
++        
++    # L_r (Ray Density Regularization)
++    # p_i(y) = alpha_i / sum_j alpha_j
++    sum_alphas = np.sum(alphas)
++    if sum_alphas > 1e-8:
++        ray_density = alphas / sum_alphas
++        # L_r = sum_y (1/N) sum_i log(1 + s * p_i(y))
++        L_r_term = np.mean(np.log(1 + s * ray_density))
++        L_r = L_r_term
++    else:
++        L_r = 0.0
++        
++    # L_o (Occlusion Regularization)
++    # Placeholder for specific implementation details not fully detailed in formula block
++    # but mentioned as penalizing density near camera.
++    L_o = 0.0 # [G] Placeholder: Implement occlusion regularization based on sample distances to camera.
++    
++    # Total Loss
++    L_total = L_s + lambda_u * L_u + lambda_r * L_r + lambda_o * L_o
++    
++    return L_total, c_hat
++```
+ 
+ **Parameters:**
+-*   $\lambda_u = 0.01$ [S1].
+-*   $\lambda_o = 0.01$ [S1].
+-*   $\lambda_r$: Initialized to $10^{-5}$, linearly increased to $10^{-3}$ over 512 iterations [S1].
+-*   $s = 10.0$ [S1].
++*   $K$: Hyperparameter for PE maximum frequency.
++*   $\lambda_u$: Balancing term for adaptive rendering loss. Value: 0.01 [S1].
++*   $\lambda_o$: Balancing term for occlusion regularization loss. Value: 0.01 [S1].
++*   $\lambda_r$: Balancing term for ray density regularization loss. Initialized as $10^{-5}$, linearly increased to $10^{-3}$ in 512 iterations [S1].
++*   $s$: Constant controlling steepness of ray density loss. Value: 10.0 [S1].
+ *   Gaussian blur kernel size: 3 [S1].
+-*   $T_s$ (Early phase max iteration): 10,000 (3-view), 15,000 (6-view), 16,000 (9-view) for DTU/LLFF [S1].
++*   $T_s$: Max iteration of early training phase. DTU/LLFF 3-view: 10000, 6-view: 15000, 9-view: 16000 [S1].
+ *   Batch size: 4096 [S1].
+-*   Optimizer: Adam with exponential decay and warm-up [S1].
+-
+-**Pseudocode:**
+-
+-```python
+-import jax.numpy as jnp
+-from jax import grad, jit
+-
+-# Constants
+-K = 10  # Example PE frequency count, actual L depends on implementation
+-S_STEEPNESS = 10.0
+-LAMBDA_U = 0.01
+-LAMBDA_O = 0.01
+-BLUR_KERNEL_SIZE = 3
+-
+-def positional_encoding(a, K):
+-    """Standard NeRF PE."""
+-    # a: (..., 3)
+-    # Returns: (..., 2*K + 3)
+-    scales = jnp.array([2**i for i in range(K)])
+-    scaled_a = jnp.reshape(a[..., None, :] * scales[:, None], (*a.shape[:-1], -1))
+-    encoded = jnp.concatenate([jnp.sin(scaled_a), jnp.cos(scaled_a)], axis=-1)
+-    return jnp.concatenate([a, encoded], axis=-1)
+-
+-def frequency_mask(t, T, L):
+-    """
+-    t: current iteration
+-    T: max iteration for frequency regularization
+-    L: PE length parameter (number of frequency bands)
+-    Returns mask vector of length L+3
+-    """
+-    # Indices i from 0 to L+2
+-    indices = jnp.arange(L + 3)
+-    threshold_low = (t * L / T) + 3
+-    threshold_high = threshold_low + 6
+-    
+-    # m_i = 1 if i <= threshold_low
+-    # m_i = frac(threshold_low) if threshold_low < i <= threshold_high
+-    # m_i = 0 if i > threshold_high
+-    
+-    # Note: The source uses 1-based indexing in formula description but array is 0-based.
+-    # Assuming i in formula corresponds to index + 1.
+-    # Let's map formula index i to array index idx = i-1.
+-    # Formula: i <= t*L/T + 3  => idx+1 <= ... => idx <= t*L/T + 2
+-    # Formula: t*L/T + 3 < i <= t*L/T + 6 => t*L/T + 2 < idx <= t*L/T + 5
+-    
+-    val = t * L / T
+-    
+-    mask = jnp.where(indices <= (val + 2), 1.0,
+-             jnp.where(indices <= (val + 5), val - jnp.floor(val), 0.0))
+-    return mask
+-
+-def render(ray_samples, mlpparams, t, T, L, Ts, gt_color, iteration):
+-    """
+-    ray_samples: (N, 3) positions, (N, 3) directions, (N,) dists delta
+-    mlpparams: MLP weights
+-    t, T, L: Frequency regularization params
+-    Ts: Transition iteration for two-phase supervision
+-    gt_color: (H, W, 3) ground truth color for the pixel/ray batch
+-    iteration: Current global iteration
+-    
+-    Returns: loss, rendered_color, rendered_variance
+-    """
+-    # 1. Encode
+-    pos_pe = positional_encoding(ray_samples.pos, K)
+-    dir_pe = positional_encoding(ray_samples.dir, K)
+-    
+-    mask = frequency_mask(t, T, L)
+-    # Apply mask to PE
+-    # Assuming PE structure allows masking of frequency components
+-    # In practice, mask is applied to the concatenated PE vector
+-    pos_pe_masked = pos_pe * mask
+-    dir_pe_masked = dir_pe * mask
+-    
+-    # 2. MLP Forward
+-    # F_theta(PE(x), PE(d)) -> (c, beta2, sigma)
+-    # This is a placeholder for the actual MLP forward pass
+-    c, beta2, sigma = mlp_forward(mlpparams, pos_pe_masked, dir_pe_masked)
+-    
+-    # 3. Volume Rendering
+-    # Compute transmittance and opacity
+-    # alpha_i = 1 - exp(-sigma_i * delta_i)
+-    alpha = 1.0 - jnp.exp(-sigma * ray_samples.delta)
+-    # T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
+-    # Cumulative product of (1-alpha)
+-    transmittance = jnp.exp(-jnp.cumsum(sigma * ray_samples.delta[:-1]))
+-    transmittance = jnp.concatenate([jnp.ones_like(transmittance[:1]), transmittance], axis=0)
+-    
+-    weights = transmittance * alpha
+-    rendered_color = jnp.sum(weights[:, None] * c, axis=0)
+-    rendered_variance = jnp.sum(weights**2 * beta2, axis=0)
+-    
+-    # 4. Two-Phase Supervision
+-    # Phi(t, Ts; c)
+-    if iteration < Ts:
+-        # Apply Gaussian Blur
+-        # Note: In implementation, this is usually done on the image level before sampling
+-        # or approximated. Here we assume gt_color_blurred is precomputed or available
+-        # for the specific pixel coordinates corresponding to the rays.
+-        # For the sake of the algorithm description, we assume gt_color is already
+-        # transformed if t < Ts.
+-        supervision_color = gt_color_blurred 
+-    else:
+-        supervision_color = gt_color
+-        
+-    # 5. Loss Calculation
+-    
+-    # Rendering Loss L_s
+-    # MSE between rendered and supervision
+-    loss_s = jnp.mean((rendered_color - supervision_color)**2)
+-    
+-    # Adaptive Loss L_u
+-    # Negative log likelihood
+-    # L_u = sum( (c - c_bar)^2 / (2*beta2) + log(beta2)/2 )
+-    # Note: The source sums over rays Y. Here we compute for the batch.
+-    # We need to handle potential division by zero or small beta2
+-    eps = 1e-8
+-    beta2_safe = jnp.maximum(rendered_variance, eps)
+-    diff_sq = (supervision_color - rendered_color)**2
+-    loss_u = jnp.mean(diff_sq / (2 * beta2_safe) + jnp.log(beta2_safe) / 2)
+-    
+-    # Ray Density Regularization L_r
+-    # p_i = alpha_i / sum(alpha_j)
+-    sum_alpha = jnp.sum(alpha)
+-    ray_density = alpha / (sum_alpha + eps)
+-    # L_r = sum_y (1/N) sum_i log(1 + s * p_i)
+-    # Assuming we compute this per ray and average
+-    loss_r = jnp.mean(jnp.mean(jnp.log(1 + S_STEEPNESS * ray_density), axis=0))
+-    
+-    # Occlusion Regularization L_o
+-    # Placeholder for occlusion loss near camera
+-    loss_o = occlusion_loss(sigma, ray_samples.pos) 
+-    
+-    # Total Loss
+-    # Lambda_r is dynamic
+-    lambda_r = 1e-5 + (1e-3 - 1e-5) * min(iteration / 512, 1.0)
+-    
+-    total_loss = loss_s + LAMBDA_U * loss_u + lambda_r * loss_r + LAMBDA_O * loss_o
+-    
+-    return total_loss, rendered_color, rendered_variance
+-```
++*   Optimizer: Adam [S1].
++*   Learning rate: Exponential decay and warm up [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Division by Zero:** $\bar{\beta}^2(\mathbf{y})$ or $\sum \alpha_j$ can be zero if the ray is empty or transparent. A small epsilon guard is required [G].
++*   **Precision:** The fractional part calculation in the mask should be handled carefully to avoid discontinuities [S1].
++*   **Boundary Conditions:** The mask transition range (width 3 in index space) ensures smooth interpolation between active and inactive frequencies [S1].
+ 
+ ## Subtopics
+ 
+ ### Linear Frequency Weighting Strategy
+-A handcrafted strategy that linearly increases the rendering loss weight for high-frequency pixel supervision from 0 to 1 during training [S1]. The rendering loss is modified as $L' = L_{low} + h \cdot L_{high}$, where $h$ is the weight [S1]. It achieves 19.66 PSNR on DTU 3-view, improving over the baseline (19.54), but is considered inferior to the adaptive method because it cannot fully align frequency relationships [S1].
++A handcrafted strategy that linearly increases the rendering loss weight for high-frequency pixel supervision from 0 to 1 during training [S1]. The rendering loss is modified as $L' = L_{low} + h \cdot L_{high}$, where $h$ is the weight for high-frequency pixel supervision that linearly increases from 0 to 1 during training [S1]. It achieves 19.66 PSNR on DTU 3-view, improving over the Baseline (19.54), but is considered handcrafted and cannot fully align frequency relationships compared to the adaptive method [S1].
+ 
+ ## Operating characteristics
+-*   **Time and Memory Complexity:** The method adds minimal computational overhead compared to standard NeRF, as it relies on standard MLP forward passes and simple loss modifications [S1]. The primary cost is the additional variance output $\beta^2$ and the computation of the adaptive loss terms [S1].
++*   **Time and Memory Complexity:** Standard NeRF complexity, with minor overhead for computing the adaptive variance and mask. No external modules are introduced [S1].
+ *   **Measured Performance:** Achieves 20.36 PSNR on DTU (3-view) and 20.87 PSNR on LLFF (3-view), outperforming baselines like FreeNeRF, RegNeRF, MixNeRF, and pre-training methods [S1].
+-*   **Scaling:** Performance scales with the number of input views, with transition iterations $T_s$ adjusted accordingly (10k, 15k, 16k for 3, 6, 9 views) [S1].
+-*   **Strengths:** Effective for few-shot NeRF; aligns PE frequency with supervision without external modules; learns global structures first, then local details [S1].
+-*   **Limitations:** Requires careful tuning of transition iteration $T_s$ and balancing parameters $\lambda$ [S1]. Relies on the assumption that uncertainty correlates with frequency difficulty [S1].
++*   **Scaling:** Designed for few-shot settings (3, 6, 9 views). Performance degrades if the number of views is very high, as the method is optimized for sparse input inconsistency [S1].
++*   **Strengths:** Aligns frequency relationship between PE and pixel supervision, allowing better global structure learning in early phases and adaptive local detail learning later [S1]. No external modules or obvious computational cost [S1].
++*   **Limitations:** Requires careful tuning of $T_s$ and $\lambda$ parameters based on the number of input views [S1].
++*   **When to Use:** Few-shot NeRF novel view synthesis where input views are sparse (e.g., 3-9 views) [S1].
+ 
+ ## Background
+-AR-NeRF was proposed to address the inconsistency between Positional Encoding (PE) frequency regularization and rendering loss in few-shot NeRF settings [S1]. It builds on the observation that high-frequency PEs can cause early overfitting to local details, preventing the learning of global structures [S1]. The method was introduced by Xu et al. [S1].
++AR-NeRF was proposed to address the inconsistency between PE frequency regularization and rendering loss in few-shot NeRF, which prevents high-quality novel view synthesis [S1]. It builds on previous works like FreeNeRF and SPARF that regularize PE frequency [S1]. The method was introduced in the paper "Few-shot NeRF by Adaptive Rendering Loss Regularization" [S1].
+ 
+ ## Sources

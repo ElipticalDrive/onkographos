@@ -3,35 +3,40 @@
 Also called: Volume Graphics, Hypertexture Mesh Amplification
 
 ## Overview
-This family encompasses specific data structures, storage formats, and primitive representations used to store and process voxelized volume data. It addresses the problem of efficiently storing, retrieving, and rendering volumetric information by defining how continuous geometry or scalar fields are mapped into discrete voxel grids and how those grids are organized in memory or on disk. It is distinguished from general voxelization algorithms by its focus on the resulting data representation (e.g., out-of-core files, CSG worksheets, or attribute-rich buffers) rather than the geometric conversion process itself.
+This family encompasses specific volumetric data structures and primitive representations used during or after the voxelization process, ranging from hardware-accelerated binary encodings to out-of-core storage formats and feature tensors. It solves the problem of efficiently storing, accessing, and rendering complex volumetric data by defining how geometric or scalar information is mapped into discrete or analytic primitives. Unlike general voxelization algorithms which focus on the conversion of geometry to voxels, this family focuses on the resulting data format (e.g., bit-packed frame buffers, Morton-ordered files, or feature tensors) and specialized primitives (e.g., CSG classification maps, point-based contours).
 
 ## Shared principles
-The methods in this family share a reliance on discrete spatial indexing and attribute storage. While the specific encoding varies, the core mechanism involves:
-1.  **Discretization**: Mapping continuous world-space coordinates or geometric primitives into a finite set of integer grid indices $(i, j, k)$ [G].
-2.  **Attribute Association**: Linking geometric or scalar data (such as density, color, or normal vectors) to these indices. This may involve pre-computed view-independent attributes [S2] or binary occupancy flags.
-3.  **Storage Organization**: Organizing these voxel attributes into data structures suitable for the intended access pattern, such as linear files with look-up tables for out-of-core access [S1, unofficial] or GPU texture arrays for real-time blending [S1, unofficial].
+The methods in this family share the following mechanisms for representing volumetric data:
+1.  **Encoding**: Mapping continuous or logical properties (inside/outside, scalar value, feature vector) into discrete data structures (bitmasks, color indices, tensors).
+2.  **Access Optimization**: Using spatial indexing (e.g., Morton order) or hardware look-up tables (e.g., PCM) to enable fast retrieval or classification without iterating through all voxels.
+3.  **Primitive Abstraction**: Treating voxels not just as scalar values but as carriers of additional attributes (normals, textures, CSG bits) or as part of larger logical structures (CSG trees, point clouds).
 
 ## Subtopics
 
 ### [CSG Model Voxelization](2497-csg-model-voxelization.md)
-CSG Model Voxelization converts Constructive Solid Geometry (CSG) trees into voxel grids by voxelizing individual leaf nodes into intermediate "worksheets" and performing boolean operations in image space using GPU blending. It differs from its siblings by leveraging density computation inherent in solid voxelization to recover intersection volumes rapidly, making it suitable for collision detection and haptic feedback. Unlike SDF-based methods, it operates directly on discrete voxel grids for real-time performance. See [CSG Model Voxelization](2497-csg-model-voxelization.md).
+CSG Model Voxelization is a hardware-accelerated algorithm that generates a binary voxelization of a Constructive Solid Geometry (CSG) model by encoding primitive classifications into frame buffer pixel colors and using logical operations to compute the final CSG classification implicitly via a Point-Classification Map (PCM). It solves the problem of efficiently converting complex CSG trees into discrete volumetric data for applications like volume rendering and layered manufacturing. Unlike previous hardware-accelerated methods that required intermediate textures for each Boolean operation node, this method computes boolean operations in image space using frame buffer pixel maps, resulting in faster performance and avoiding hardware restrictions on blending function combinations. It operates slice-by-slice (Z-plane by Z-plane), rendering primitives into a frame buffer where each bit of the pixel color represents the inclusion of a specific primitive.
 
 ### [Out-of-Core Point-Based Rendering](6825-out-of-core-point-based-rendering.md)
-Out-of-core point-based rendering visualizes very large volumetric datasets by storing voxel data on disk and bypassing memory limitations. It solves the problem of real-time interaction with high-resolution data by assuming voxel density is sufficient to represent isovalue structures as discrete points, eliminating the need for connectivity. Unlike mesh-based methods, it renders contours directly from sorted point clouds. See [Out-of-Core Point-Based Rendering](6825-out-of-core-point-based-rendering.md).
+Out-of-core point-based rendering is a method for the interactive visualization of very large volumetric datasets that exceed available main memory. It solves the problem of real-time interaction with high-resolution data by assuming that voxel density is sufficient to represent isovalue structures (contours) using discrete points rather than continuous meshes or full volume textures. Unlike mesh-based methods which require connectivity and topology information, this approach renders points directly, allowing for full-resolution contour rendering at interactive frame rates without the computational overhead of surface extraction. It builds on [Specific Data Formats and Primitives](7148-specific-data-formats-and-primitives.md) by utilizing out-of-core storage and point-based primitives.
 
 ### [Point Feature Generation](6972-point-feature-generation.md)
-Point Feature Generation creates features for ray points by indexing volume features and building color volumes from images. See [Point Feature Generation](6972-point-feature-generation.md).
+Point Feature Generation constructs the initial feature tensors for ray-based volume rendering by indexing spatial data and integrating image-derived attributes. It differs from sibling methods by explicitly separating general input features from color volume data, allowing for flexible integration of auxiliary image features alongside standard geometric ray points.
 
-### Hypertexture Mesh Amplification
-Hypertexture Mesh Amplification is used to define a volume by the interior of a mesh [S1, unofficial]. Currently, animation is a significant problem for this volume data type [S1, unofficial].
+#### Hypertexture Mesh Amplification
+**Usage**: Used to define a volume by the interior of a mesh. Currently, animation is a big problem for this volume data type [S1, unofficial].
 
-### Volume Graphics
-Volume Graphics is an approach concerned with the synthesis, manipulation, and rendering of volumetric geometric objects, where geometric models are voxelized (3D scan-converted) into a set of voxels stored in a volume buffer with pre-computed view-independent attributes [S2].
-*   **Step**: Voxelize the geometric model into a set of voxels that best approximate the model [S2]. Store each voxel in the volume buffer along with pre-computed view-independent attributes such as texture, anti-aliasing, and normal vector [S2].
-*   **Comparison**: Volume graphics focuses on modeled geometric scenes represented in a volume buffer, whereas volume visualization focuses on sampled and computed datasets [S2].
+#### Volume Graphics
+**Definition**: An approach concerned with the synthesis, manipulation, and rendering of volumetric geometric objects, where geometric models are voxelized (3D scan-converted) into a set of voxels stored in a volume buffer with pre-computed view-independent attributes [S2].
+**Steps**:
+1.  Voxelize the geometric model (3D scan-convert) into a set of voxels that best approximate the model [S2].
+2.  Store each voxel in the volume buffer along with pre-computed view-independent attributes such as texture, anti-aliasing, and normal vector [S2].
+**Parameters**: Attributes: Pre-computed view-independent attributes stored per voxel, including texture, anti-aliasing, and normal vector [S2].
+**Comparison**: Volume graphics focuses on modeled geometric scenes represented in a volume buffer, whereas volume visualization focuses on sampled and computed datasets [S2].
 
 ## Background
-The concept of "Volume Graphics" was introduced by Kaufman et al. [S2] as an emerging approach to advance 3D graphics by offering a comprehensive alternative to traditional surface graphics. It leverages the viewpoint-independence and insensitivity to scene complexity of voxel-based representations. The specific techniques for out-of-core rendering and CSG voxelization were further developed in subsequent research, such as the work by Coeurjolly et al. [S1, unofficial], which explored ray-guided streaming and efficient voxel rendering for large datasets.
+The concept of "Volume Graphics" was introduced by Kaufman et al. in 1993 as an emerging approach to synthesize, manipulate, and render volumetric geometric objects [S2]. It distinguishes itself from volume visualization by focusing on modeled geometric scenes rather than sampled datasets [S2]. The method involves 3D scan-converting geometric models into voxels stored in a volume buffer with pre-computed attributes [S2]. This approach offers advantages over surface graphics, including viewpoint independence and suitability for constructive solid modeling [S2].
+
+The use of specific data formats like Morton-ordered out-of-core files for point-based rendering and bit-packed frame buffers for CSG voxelization represents later developments in handling large-scale or complex volumetric data, as seen in works such as "Ray-Guided Streaming for Efficient and Detailed Voxel Rendering" [S1, unofficial].
 
 ## Sources
 [S1] [PDF] Ray-Guided Streaming for Efficient and Detailed Voxel Rendering, https://www-sop.inria.fr/reves/Basilic/2009/CNLE09/CNLE09.pdf, fetched 2026-10-26 (unofficial)

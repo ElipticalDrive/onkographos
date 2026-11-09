@@ -3,47 +3,64 @@
 Also called: IPE (Interatomic Positional Encoding), Interatomic Positional Encoding, NeRF Optimization Loop, NeRF Training Procedure, Neural Radiance Field (NeRF) Training
 
 ## Overview
-The NeRF Training Loop is the iterative optimization procedure that minimizes the photometric reconstruction error between rendered images and ground-truth training views by updating the parameters of a coordinate-based neural network [S5, S6, S14, unofficial]. It solves the inverse problem of learning a continuous volumetric scene representation from discrete 2D images by treating the volume rendering equation as a differentiable operator [S5, S14, unofficial]. It sets itself apart from evaluation by using stochastic ray sampling, adaptive integration strategies, and gradient-based weight updates rather than deterministic full-image rendering [S2, S4, S9, unofficial].
+The NeRF Training Loop is the iterative optimization procedure that minimizes the photometric reconstruction error between rendered images and ground-truth observations by updating the parameters of a coordinate-based neural radiance field [S5, S6, S14, unofficial]. It solves the inverse rendering problem by treating the scene representation as a differentiable function $f_\theta(\mathbf{x}, \mathbf{d})$ that maps 3D coordinates and viewing directions to volume density and color [S1][S5, unofficial]. It sets itself apart from its siblings by defining the core stochastic gradient descent cycle—ray sampling, forward volume rendering, loss computation, and weight update—that serves as the foundation for all specialized variants like [Training Ray Marching and Integration](2199-training-ray-marching-and-integration.md) and [Training Configuration](2332-training-configuration.md).
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A set of $N$ training images with known camera poses (extrinsics and intrinsics) [S5, S11, unofficial]. The neural network parameters $\theta$ (weights and biases) [S5, unofficial].
-*   **Outputs:** Optimized network parameters $\theta^*$ that minimize the loss function [S5, unofficial].
+*   **Inputs:** A dataset of $N$ training images with known camera poses (extrinsics $C$ and intrinsics $K$) [S5, S11, unofficial]. The neural network parameters $\theta$ (weights and biases of the MLP) [S5, unofficial].
+*   **Outputs:** Updated network parameters $\theta$ that minimize the difference between rendered and observed pixel colors [S5, unofficial].
 
 **Data Structures:**
-*   **Rays:** A batch of rays is represented as a tensor of shape $[B, 3, 3]$ or $[B, 6]$ depending on implementation, where $B$ is the batch size (number of rays) [S5, S14, unofficial]. The first 3 components are the ray origin $(o_x, o_y, o_z)$, the next 3 are the ray direction $(d_x, d_y, d_z)$ [S5, S14, unofficial].
-*   **Targets:** Ground-truth RGB colors for the sampled pixels, shape $[B, 3]$ [S5, S14, unofficial].
-*   **Pre-computed Rays:** To avoid repeated camera projection, rays are often pre-computed into a flat array `rays_rgb` of shape $[(N-1) \cdot H \cdot W, 3, 3]$ (or $[N \cdot H \cdot W, 3, 3]$) containing origins, directions, and target RGB values, shuffled for random access [S5, S14, unofficial].
+*   **Rays:** A batch of rays is represented as a tensor of shape $[B, 3, 3]$ or $[B, 6]$ depending on implementation, where $B$ is the batch size (number of rays) [S5, S14, unofficial].
+    *   Axis 0 (or first 3 elements): Ray origins $\mathbf{o}$ (xyz).
+    *   Axis 1 (or next 3 elements): Ray directions $\mathbf{d}$ (xyz), typically normalized [S5, S14, unofficial].
+    *   Axis 2 (or last 3 elements): Target RGB colors $\mathbf{c}_{gt}$ [S5, S14, unofficial].
+*   **Pre-computed Rays Array:** To avoid repeated ray generation, a flat array `rays_rgb` of shape $[(N-1) \cdot H \cdot W, 3, 3]$ is often pre-computed, where $N$ is the number of training images, and $H, W$ are image dimensions [S5, S14, unofficial]. This allows random sampling of any pixel from any training image [S5, unofficial].
+*   **Checkpoint:** A dictionary containing `model` (state dict), `optimizer` (state dict), and `epoch` or `step` counter [S10, S11, unofficial].
 
 **Numbered Steps:**
 
-1.  **Initialization:** Initialize the neural network weights $\theta$. For standard MLPs, weights are often initialized using specific schemes (e.g., SIREN initialization with $\omega_0=30$ or uniform distributions) [S3, S15, unofficial]. Initialize the optimizer (typically Adam) with a learning rate $lr$ (e.g., $5 \times 10^{-4}$) [S11, S17, unofficial]. Initialize a learning rate scheduler if exponential decay is used [S5, S11, unofficial].
-2.  **Ray Sampling:** For each iteration $i$:
-    *   Select a batch of $N_{rand}$ rays (typically 1024 or 2048) from the pre-computed ray pool or by randomly sampling pixel coordinates from training images [S5, S14, unofficial].
-    *   If using precropping, restrict sampling to a central crop of the image for the first $I_{precrop}$ iterations [S2, S14, unofficial].
-    *   Retrieve the corresponding ray origins, directions, and ground-truth RGB targets [S5, S14, unofficial].
-3.  **Forward Pass (Rendering):**
-    *   Sample $K$ points along each ray within the near/far bounds $[t_{near}, t_{far}]$ [S5, S13, unofficial]. Bounds are dataset-dependent (e.g., $[2, 6]$ for Blender, computed from bounding depths for LLFF) [S2, S13, unofficial].
-    *   Apply positional encoding $\gamma(\mathbf{x})$ to the 3D coordinates and view directions $\mathbf{d}$ [S5, unofficial][S20].
-    *   Query the neural network $f_\theta(\mathbf{x}, \mathbf{d})$ to obtain volume density $\sigma$ and color $\mathbf{c}$ for each sample point [S5, S6, unofficial].
-    *   Compute the rendered color $\hat{C}(\mathbf{r})$ using the differentiable volume rendering equation (alpha compositing) [S5, S6, unofficial]:
-        $$ \hat{C}(\mathbf{r}) = \sum_{i=1}^K T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
-        where $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the transmittance, and $\delta_i$ is the distance between samples [S5, S6, unofficial].
-    *   If using a coarse-fine two-stage model, render a coarse image, sample additional points based on importance weights, and render a fine image [S5, S11, unofficial].
-4.  **Loss Computation:**
-    *   Compute the Mean Squared Error (MSE) between the rendered color $\hat{C}$ and the ground-truth color $C_{gt}$ [S5, S14, unofficial]:
-        $$ \mathcal{L}_{rgb} = \frac{1}{B} \sum_{b=1}^B \| \hat{C}_b - C_{gt,b} \|^2 $$
-    *   If a coarse network was used, add the coarse loss $\mathcal{L}_{coarse}$ to the total loss [S11, S18, unofficial]:
-        $$ \mathcal{L} = \mathcal{L}_{rgb} + \mathcal{L}_{coarse} $$
-    *   Optionally add regularization terms (e.g., sparsity, total variation, eikonal) [S7, unofficial][S8].
-5.  **Backpropagation and Update:**
-    *   Compute gradients $\nabla_\theta \mathcal{L}$ via automatic differentiation [S5, S18, unofficial].
-    *   **Pitfall:** If higher-order derivatives (e.g., for logging gradients or Laplacians) are needed, they must be computed *before* calling `loss.backward()`, as the backward pass frees the computational graph [S3, unofficial].
-    *   Update the network weights using the optimizer step (e.g., `optimizer.step()`) [S5, S18, unofficial].
-    *   Update the learning rate according to the scheduler (e.g., exponential decay or cosine annealing) [S5, S11, unofficial].
-6.  **Logging and Checkpointing:**
-    *   Log loss metrics (PSNR, SSIM) and render validation images at specified intervals [S11, S14, unofficial].
-    *   Save model checkpoints (optimizer state, model weights, epoch/step count) at specified intervals [S11, S15, unofficial].
+1.  **Initialization:**
+    *   Load training and validation datasets [S8][S11, unofficial].
+    *   Initialize the neural network (MLP) with random weights [S5, S15, unofficial]. For progressive growth methods, initialize alpha linear weights of grown sub-networks to match the parent to avoid instability [S1].
+    *   Initialize the optimizer (typically Adam) with a learning rate $lr$ [S5, S11, unofficial].
+    *   Initialize a learning rate scheduler (e.g., Exponential Decay or Cosine Annealing) [S5, S11, unofficial].
+    *   Pre-compute the `rays_rgb` array by iterating over all training images, generating rays for every pixel, and storing origins, directions, and target RGB values [S5, S14, unofficial]. Shuffle this array [S5, S11, unofficial].
+
+2.  **Iteration Loop:**
+    For each iteration $i$ from 1 to $N_{iters}$:
+    a.  **Ray Sampling:**
+        *   If batching is enabled, slice a batch of $N_{rand}$ rays from the `rays_rgb` array using the current batch index [S5, S14, unofficial].
+        *   Transpose the batch to shape $[3, N_{rand}, 3]$ (origin, direction, target) [S5, S14, unofficial].
+        *   If the batch index exceeds the array length, shuffle the `rays_rgb` array and reset the index [S5, S11, S14, unofficial].
+        *   *Optional:* Apply perturbation to sample positions if `perturb > 0` to break symmetry and improve reconstruction [S5, unofficial].
+        *   *Optional:* Apply precropping for the first $P$ iterations to focus on central image details [S5, unofficial].
+
+    b.  **Forward Pass (Rendering):**
+        *   For each ray in the batch, sample $K$ points along the ray segment $[t_{near}, t_{far}]$ [S5, unofficial].
+        *   Query the neural network $f_\theta$ at each point $\mathbf{x}$ and direction $\mathbf{d}$ to obtain raw output (density $\sigma$ and color $\mathbf{c}$) [S5, unofficial].
+        *   Compute transmittance $T_i$ and weights $w_i$ using the emission-absorption model [S5, S18, unofficial].
+        *   Composite the final color $\hat{\mathbf{C}}$ for each ray [S5, unofficial].
+        *   *Optional:* If using a coarse-fine two-stage model, render with the coarse network, sample additional points based on coarse weights, and render with the fine network [S5, S11, unofficial].
+
+    c.  **Loss Computation:**
+        *   Compute the Mean Squared Error (MSE) between the predicted color $\hat{\mathbf{C}}$ and the target color $\mathbf{c}_{gt}$ [S5, S14, unofficial]:
+            $$ \mathcal{L}_{MSE} = \frac{1}{B} \sum_{j=1}^{B} \| \hat{\mathbf{C}}_j - \mathbf{c}_{gt, j} \|^2 $$
+        *   *Optional:* If a coarse network was used, add the coarse loss $\mathcal{L}_{coarse}$ to the total loss [S6, S11, S18, unofficial].
+        *   *Optional:* Add regularization terms (e.g., sparsity, Total Variation, Eikonal) weighted by hyperparameters [S7, unofficial][S8].
+        *   Total Loss: $\mathcal{L} = \mathcal{L}_{MSE} + \lambda_{coarse}\mathcal{L}_{coarse} + \dots$
+
+    d.  **Backpropagation and Update:**
+        *   Zero the gradients of the optimizer [S18, unofficial].
+        *   Compute gradients: $\nabla_\theta \mathcal{L}$ [S18, unofficial].
+        *   *Pitfall:* If logging higher-order derivatives (gradient, Laplacian) is required, compute them *before* calling `backward()` [S3, unofficial].
+        *   Step the optimizer: $\theta \leftarrow \theta - \eta \nabla_\theta \mathcal{L}$ [S18, unofficial].
+        *   Update the learning rate according to the scheduler [S5, S18, unofficial].
+
+    e.  **Logging and Checkpointing:**
+        *   Log loss and PSNR every $I_{print}$ steps [S3, S11, unofficial].
+        *   Render validation images every $I_{img}$ steps [S2, S11, unofficial].
+        *   Save model checkpoint every $I_{weights}$ steps [S2, S11, unofficial].
 
 **Pseudocode:**
 
@@ -53,95 +70,114 @@ The NeRF Training Loop is the iterative optimization procedure that minimizes th
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import numpy as np
 
-def train_nerf_loop(model, optimizer, scheduler, dataloader, num_iters, device):
+def train_nerf_loop(model, rays_rgb, optimizer, scheduler, n_iters, batch_size, render_fn, log_interval=100, save_interval=1000):
     """
     Standard NeRF training loop.
     
     Args:
-        model: Neural Radiance Field model (MLP).
-        optimizer: Optimizer (e.g., Adam).
+        model: Neural Radiance Field MLP.
+        rays_rgb: Pre-computed array of shape [N_pixels, 3, 3] (origin, dir, target_rgb).
+        optimizer: PyTorch optimizer (e.g., Adam).
         scheduler: Learning rate scheduler.
-        dataloader: Iterator yielding batches of (rays_o, rays_d, targets).
-        num_iters: Total number of training iterations.
-        device: 'cpu' or 'cuda'.
+        n_iters: Total number of training iterations.
+        batch_size: Number of rays per batch (N_rand).
+        render_fn: Function that takes rays and model, returns rendered RGB.
+        log_interval: Steps between logging.
+        save_interval: Steps between saving checkpoints.
     """
-    model.train()
-    mse_loss = nn.MSELoss()
+    # Initialize batch index
+    batch_idx = 0
+    n_pixels = rays_rgb.shape[0]
     
-    for iteration in range(num_iters):
-        # 1. Data Loading / Ray Sampling
-        # In a real implementation, rays are sampled from pre-computed arrays
-        # or generated on-the-fly from images. Here we assume a batch is provided.
-        rays_o, rays_d, targets = next(dataloader)
-        rays_o = rays_o.to(device)
-        rays_d = rays_d.to(device)
-        targets = targets.to(device)
+    # Convert rays_rgb to tensor for efficient slicing if using PyTorch
+    # Assuming rays_rgb is float32
+    rays_tensor = torch.from_numpy(rays_rgb).float()
+    
+    for i in range(n_iters):
+        # 1. Ray Sampling
+        # Slice batch
+        end_idx = batch_idx + batch_size
+        if end_idx > n_pixels:
+            # Shuffle and reset if exhausted
+            indices = torch.randperm(n_pixels)
+            rays_tensor = rays_tensor[indices]
+            batch_idx = 0
+            end_idx = batch_idx + batch_size
+            
+        batch_data = rays_tensor[batch_idx:end_idx] # Shape: [batch_size, 3, 3]
+        batch_idx += batch_size
+        
+        # Split into rays (origin, dir) and targets
+        # batch_data[:, 0, :] -> origins
+        # batch_data[:, 1, :] -> directions
+        # batch_data[:, 2, :] -> target_rgb
+        rays_o = batch_data[:, 0, :]
+        rays_d = batch_data[:, 1, :]
+        target_rgb = batch_data[:, 2, :]
         
         # 2. Forward Pass
-        optimizer.zero_grad()
-        
-        # Render the batch of rays
-        # render_fn returns predicted RGB, and optionally coarse RGB, depth, etc.
-        # This function internally handles ray marching, network querying, and alpha compositing.
-        outputs = render_fn(model, rays_o, rays_d)
-        
-        predicted_rgb = outputs['rgb']
+        # Pack rays for render_fn (implementation specific, e.g., [N, 6] or [N, 3, 3])
+        # Here we assume render_fn accepts origins and directions separately or a combined tensor
+        # and returns predicted RGB of shape [batch_size, 3]
+        predicted_rgb = render_fn(model, rays_o, rays_d)
         
         # 3. Loss Computation
-        # Standard MSE loss
-        loss = mse_loss(predicted_rgb, targets)
+        # MSE Loss
+        loss = nn.functional.mse_loss(predicted_rgb, target_rgb)
         
-        # If coarse-fine training is used, add coarse loss
-        if 'rgb_coarse' in outputs:
-            loss_coarse = mse_loss(outputs['rgb_coarse'], targets)
-            loss = loss + loss_coarse
-            
+        # Optional: Add coarse loss if model returns it
+        # if 'rgb_coarse' in extras:
+        #     loss += nn.functional.mse_loss(extras['rgb_coarse'], target_rgb)
+        
         # 4. Backpropagation
+        optimizer.zero_grad()
         loss.backward()
-        
-        # 5. Optimization Step
         optimizer.step()
         
-        # 6. Learning Rate Scheduling
-        if scheduler is not None:
-            scheduler.step()
+        # 5. Scheduler Update
+        scheduler.step()
+        
+        # 6. Logging and Checkpointing
+        if i % log_interval == 0:
+            psnr = -10.0 * torch.log10(loss)
+            print(f"Iter {i}: Loss {loss.item():.6f}, PSNR {psnr.item():.2f}")
             
-        # Logging (example)
-        if iteration % 100 == 0:
-            psnr = -10.0 * torch.log10(loss).item()
-            print(f"Iter {iteration}: Loss={loss.item():.6f}, PSNR={psnr:.2f}")
-            
-        # Checkpointing would occur here at specified intervals
+        if i % save_interval == 0:
+            torch.save({
+                'step': i,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict()
+            }, f"checkpoint_{i}.pth")
+
 ```
 
 **Parameters with Typical Values:**
-*   **Learning Rate ($lr$):** $5 \times 10^{-4}$ for Adam [S11, unofficial].
-*   **Batch Size ($N_{rand}$):** 1024 or 2048 rays per iteration [S5, S11, unofficial].
-*   **Samples per Ray ($K$):** 128 (coarse) + 128 (fine) [S5, S11, unofficial].
-*   **Iterations:** 500,000 to 1,000,000 [S11, S14, unofficial].
-*   **Positional Encoding Frequency ($L$):** 10 for position, 4 for direction [S11, unofficial][S20].
-*   **Near/Far Bounds:** Dataset-dependent (e.g., 2.0/6.0 for Blender) [S13, unofficial].
+*   $N_{rand}$ (Batch Size): 1024 or 2048 rays per iteration [S5, S11, unofficial].
+*   Learning Rate ($lr$): $5 \times 10^{-4}$ for Adam [S11, unofficial].
+*   Decay: Exponential decay with rate 0.1 every 1000 steps (or $args.lrate\_decay \times 1000$) [S5, S18, unofficial].
+*   Positional Encoding Frequencies: 10 for position, 4 for direction [S11, unofficial].
+*   Total Iterations ($N_{iters}$): 100,000 to 1,000,000 [S11, S14, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **VRAM Overflow:** Rendering full images or large batches can exceed GPU memory. Mitigated by chunking rays (processing subsets of rays sequentially) [S5, S14, unofficial].
-*   **Instability in Growing Networks:** Directly growing sub-networks with random initialization can cause density to collapse to zero. Weights of new sub-networks should be initialized to match the parent network's alpha linear weights [S1].
-*   **Empty Checkpoints:** Loading a checkpoint with step 0 is considered an error and should abort training [S15, unofficial].
-*   **Gradient Graph Freeing:** Higher-order derivatives for logging must be computed before `loss.backward()` [S3, unofficial].
+*   **VRAM Overflow:** Rendering all pixels at once exceeds GPU memory. Mitigated by chunking rays or using small batch sizes ($N_{rand}$) [S5, S15, unofficial].
+*   **Gradient Freeing:** Higher-order derivatives (for logging gradients/Laplacians) must be computed before `loss.backward()` [S3, unofficial].
+*   **Empty Checkpoints:** Loading a checkpoint with step 0 is an error condition [S15, unofficial].
+*   **Scheduler Resumption:** When resuming, the scheduler's last epoch must be set to `start_epoch - 1` to maintain correct decay [S9, unofficial].
+*   **Instability in Growth:** Randomly initialized sub-networks in growing NeRFs can collapse to zero density; weights should be inherited from the parent [S1].
 
 ## Subtopics
 
 ### [Training Ray Marching and Integration](2199-training-ray-marching-and-integration.md)
-Training Ray Marching and Integration is the differentiable forward pass that synthesizes RGB images from a neural radiance field (NeRF) during optimization. It solves the problem of computing gradients for scene parameters by sampling points along camera rays, querying a neural network for volume density and color, and integrating them via alpha compositing. It sets itself apart from evaluation by using stochastic perturbations, adaptive sampling strategies (e.g., occupancy grid pruning), and chunked processing to manage memory, whereas evaluation disables these for deterministic results.
+The differentiable forward pass that synthesizes RGB images from a neural radiance field (NeRF) during optimization. It solves the problem of computing gradients for scene parameters by sampling points along camera rays, querying a neural network for volume density and color, and integrating them via alpha compositing. It sets itself apart from evaluation by using stochastic perturbations, adaptive sampling strategies (e.g., occupancy grid pruning), and chunked processing to manage memory, whereas evaluation disables these for deterministic results.
 
 ### [Training Configuration](2332-training-configuration.md)
 Training Configuration defines the hyperparameters, optimization routines, and architectural constraints required to stabilize and accelerate the differentiable volume rendering optimization process. It addresses the sensitivity of radiance field training to initialization, sampling density, and activation function choices. Unlike general optimization loops, it specifies implementation-specific details such as learning rate schedules, loss weights, and batch sampling strategies that are critical for convergence in methods like mip-NeRF, Instant-NGP, and NeuralVDB.
 
 ### [Neural Volume Scene Setup](4168-neural-volume-scene-setup.md)
 Constructs a Mitsuba scene containing a volumetric cube and a custom neural radiance field integrator, initializing the density grid and spherical harmonics coefficients. It differs from generic training setups by directly binding the neural network parameters to the scene graph's heterogeneous volume and integrator components.
-
-### [MVSNeRF](6197-mvsnerf.md)
-MVSNeRF is a method for fast radiance field reconstruction from multi-view stereo images. It addresses the slow training speed of standard NeRF by employing a feedforward model to learn a data prior, which accelerates convergence and reduces iteration counts. Unlike iterative NeRF training, it predicts the radiance field directly from input images without per-scene optimization.
 
 ### [Camera Pose and Parameter Optimization](7611-camera-pose-and-parameter-optimization.md)
 Camera Pose and Parameter Optimization refers to the family of methods that jointly optimize the parameters of a Neural Radiance Field (NeRF) and the camera poses (extrinsics) and/or intrinsics (e.g., focal length) from a set of input images. It solves the problem of reconstructing 3D scenes when camera parameters are unknown, inaccurate, or when the system requires online pose estimation for navigation. Unlike baseline NeRF, which relies on pre-estimated poses from Structure-from-Motion (SfM) pipelines like COLMAP, these methods treat camera parameters as learnable variables updated via gradient descent alongside the NeRF weights. This family encompasses static scene reconstruction with unknown poses, hybrid 2D/3D registration, and online robot navigation filters.
@@ -150,7 +186,7 @@ Camera Pose and Parameter Optimization refers to the family of methods that join
 This family encompasses specific neural network architectures and structural modifications applied to the Neural Radiance Field (NeRF) representation to address limitations in rendering speed, geometric accuracy, generalization, and semantic understanding. While the parent [NeRF Training Loop](970-nerf-training-loop.md) defines the optimization procedure, these architectures define the function $f_\theta(\mathbf{x}, \mathbf{d})$ itself. They are distinguished from siblings like [AdaNeRF](6195-adanerf.md) (adaptive sampling) and [Zip-NeRF](9538-zip-nerf-training-procedure.md) (hash grids) by their focus on the internal network topology, input/output mappings, and auxiliary modules (e.g., discriminators, diffusion priors, or geometric heads) rather than just the sampling strategy or data structure.
 
 ### [Regularization and Loss Functions](8586-regularization-and-loss-functions.md)
-Regularization and Loss Functions in NeRF optimization address the severe under-constraint of Neural Radiance Fields, particularly in sparse-view settings, by augmenting the standard photometric reconstruction loss with geometric priors, structural similarity metrics, or generative model constraints. This family distinguishes itself from sibling methods like [Training Ray Marching and Integration](2199-training-ray-marching-and-integration.md) by focusing on the objective function's formulation rather than the sampling strategy, and from [Depth and Geometry Supervision](8727-depth-and-geometry-supervision.md) by often relying on internal consistency or learned priors rather than explicit external depth sensors.
+This family encompasses the mathematical terms added to the standard photometric reconstruction loss to constrain the optimization of Neural Radiance Fields (NeRFs), addressing issues such as under-constrained geometry, floaters, and color artifacts in sparse or few-view settings. It distinguishes itself from sibling methods like [Training Ray Marching and Integration](2199-training-ray-marching-and-integration.md) by focusing on the objective function's structure rather than the sampling strategy, and from [Training Configuration](2332-training-configuration.md) by defining the specific gradients that drive parameter updates.
 
 ### [Progressive Inpainting-and-Erasing](8658-progressive-inpainting-and-erasing.md)
 Progressive Inpainting-and-Erasing (PERF) is a training strategy for single-view NeRF that avoids geometry conflicts between visible and invisible regions by computing a mask of conflicted regions and eliminating them from NeRF training. It sets itself apart from standard single-view NeRF methods by integrating a collaborative RGBD inpainting step with a progressive erasing mechanism to handle the ambiguity of unseen geometry, building on the [NeRF Training Loop](970-nerf-training-loop.md) by dynamically expanding the reference view set.
@@ -173,9 +209,6 @@ Scene Representation and Partitioning addresses the scalability limits of global
 ### [Zip-NeRF Training Procedure](9538-zip-nerf-training-procedure.md)
 The Zip-NeRF Training Procedure is a two-stage optimization method for inverse rendering that jointly trains a physically-based scene model, environment map, and radiance caches (Zip-NeRF and Fast Cache) to estimate incoming radiance. It solves the bias introduced by approximating incoming radiance using neural caches by employing a control variate strategy and a specific gradient trick for the photometric loss. It sets itself apart from standard NeRF training by decoupling the cache initialization from the joint optimization of the physical model and by using an occlusion-aware importance sampler to reduce variance in the radiance estimation.
 
-### [DPPE (Dense Pose Estimation in a Plenoxels Environment)](9640-dppe-dense-pose-estimation-in-a-plenoxels-environment.md)
-DPPE is a 6-DoF monocular RGB-only pose estimation procedure for Plenoxels environments that recovers the ground truth camera pose after a perturbation by minimizing photometric errors in re-rendering. It distinguishes itself from analytical derivative-based methods (e.g., Teigen et al. [30]) by using numerical gradient approximation, making it generalizable to any scene representation where re-renderings are not prohibitively expensive, and from NeRF-based methods (e.g., iNeRF) by leveraging Plenoxels' rendering speed to re-render the full image at each optimization step rather than subsampling rays.
-
 ### [NeRV Training](10253-nerv-training.md)
 NeRV training optimizes a continuous volumetric representation that decouples scene geometry (shape) from material appearance (reflectance) and lighting interactions (visibility) to enable efficient relighting and view synthesis. It differs from standard NeRF training by introducing a separate "visibility MLP" that predicts ray visibility and termination depth, supervised by consistency terms with the primary shape MLP rather than ground-truth labels, allowing the simulation of direct and one-bounce indirect illumination within the training loop.
 
@@ -191,42 +224,39 @@ Aug-NeRF is a training framework for Neural Radiance Fields (NeRF) that injects 
 ### [Cross-Guided Optimization of Radiance Fields (CROP)](10371-cross-guided-optimization-of-radiance-fields-crop.md)
 Cross-Guided Optimization of Radiance Fields (CROP) is a framework that performs multi-view image super-resolution (MVSR) on training-view images during the radiance field optimization process to improve high-resolution novel view synthesis (HRNVS). It fuses single-image super-resolution (SISR) features with voxel-based uncertainty fields to ensure multi-view consistency and high-frequency details. Unlike methods that rely solely on the spectral characteristics of coordinate-based networks for upscaling, CROP explicitly bridges 2D SISR and 5D radiance fields by iteratively refining input images based on rendering errors.
 
-### [GO-NeRF](11181-go-nerf.md)
-GO-NeRF is a pipeline for generating text-prompt-controlled 3D virtual objects at user-specified locations within an existing 3D environment represented as a NeRF, while preserving unchanged scene content. It distinguishes itself from general scene editing methods by employing a compositional rendering formulation that separates the pre-trained scene from the generated object, using optimized 3D-aware opacity maps to handle occlusions and ensure compatibility with various NeRF representations such as InstantNGP.
+### [Application-Specific Pipelines](11200-application-specific-pipelines.md)
+Application-Specific Pipelines are specialized training and optimization procedures designed to address distinct downstream tasks—such as rapid reconstruction, pose estimation, or scene editing—rather than generic radiance field optimization. They diverge from standard NeRF training by integrating external priors (e.g., multi-view stereo data, diffusion models, or dynamics models) and modifying the loss landscape or rendering loop to suit specific constraints like speed, geometric accuracy, or semantic control.
 
 ### Supersampling Baseline
-A baseline method for evaluating NeRF on multiscale data by training on full-resolution images and using brute-force supersampling during evaluation, or training on multiscale data with supersampling during both training and evaluation [S21]. For every pixel, multiple jittered rays are sampled uniformly at random through the spatial footprint of the pixel. The mean of the rendered values is used as the predicted color in the loss function [S21]. This baseline relies on 'oracle' scale information that does not exist for most datasets and performs worse than mip-NeRF while being significantly more expensive [S21].
+A baseline method for evaluating NeRF on multiscale data by training on full-resolution images and using brute-force supersampling during evaluation, or training on multiscale data with supersampling during both training and evaluation [S21]. For every pixel, multiple jittered rays are sampled uniformly at random through the spatial footprint of the pixel, rendered with NeRF, and averaged to predict the color in the loss function [S21]. This approach relies on 'oracle' scale information that does not exist for most datasets and performs worse than mip-NeRF while being significantly more expensive during both training and evaluation [S21].
 
 ### Two-stage training for proposers
-A training schedule split into two equal-duration phases to stabilize learning of a trainable proposer network in NeRF-ID [S22, unofficial]. Phase 1 trains the learnt proposer to mimic the heuristic proposer by minimizing the L2 matching loss between their proposal sets. Phase 2 trains all network components end-to-end, starting with a reset of the optimizer state and a linear warmup for 1,000 SGD steps to reduce shock from switching regimes [S22, unofficial]. This two-stage approach is consistently effective where training from scratch often fails [S22, unofficial].
+A training schedule split into two equal-duration phases to stabilize learning of a trainable proposer network in NeRF-ID [S22, unofficial]. Phase 1 trains the learnt proposer to mimic the heuristic proposer by minimizing the L2 matching loss between their proposal sets [S22, unofficial]. Phase 2 trains all network components end-to-end, resetting the optimizer state and performing a linear warmup for 1,000 SGD steps to reduce shock from switching regimes [S22, unofficial]. This two-stage approach is consistently effective where training from scratch often fails [S22, unofficial].
 
 ### Multi-view SDS
-A plug-and-play method that creates multi-view supervision during SDS optimization to address the Janus problem caused by one-by-one view sampling [S23]. Rendered images from 4 sampled views are stitched into a large 2x2 image. Gradients are calculated under the condition of the multi-view normal map. The method converts a 3D asset into differentiable representations including NeRF, 3DGS, and DMTet through rendering supervision, which are then optimized to improve the quality of the 3D asset [S23].
+A plug-and-play method that creates multi-view supervision during SDS optimization to address the Janus problem caused by one-by-one view sampling [S23]. Rendered images from 4 sampled views are stitched into a large 2x2 image, and gradients are calculated under the condition of the multi-view normal map [S23]. The method converts a 3D asset into differentiable representations including NeRF, 3DGS, and DMTet through rendering supervision, which are then optimized to improve the quality of the 3D asset [S23].
 
 ### Guided NeRF Optimization for MVS
-A multi-view depth estimation method that utilizes conventional reconstruction (sparse SfM+MVS) and learning-based priors over Neural Radiance Fields (NeRF) [S24]. It performs test-time optimization directly over implicit volumes to eliminate the need for accurate pixel matching across views, addressing the shape-radiance ambiguity of NeRF in indoor scenes [S24]. Step 1 runs COLMAP to acquire per-view sparse depth maps. Step 2 adapts a monocular depth network to the target scene by finetuning it on the sparse depth maps using a scale-invariant loss [S24].
+A multi-view depth estimation method that utilizes conventional reconstruction (sparse SfM+MVS) and learning-based priors over Neural Radiance Fields (NeRF) [S24]. It performs test-time optimization directly over implicit volumes to eliminate the need for accurate pixel matching across views, addressing the shape-radiance ambiguity of NeRF in indoor scenes [S24]. Step 1 runs COLMAP to acquire per-view sparse depth maps by projecting fused 3D point clouds after multi-view stereo [S24]. Step 2 adapts a monocular depth network to the target scene by finetuning it on the sparse depth maps from COLMAP using a scale-invariant loss [S24].
 
 ### Surface-aware density formulation
 A method to extract high-quality surfaces from NeRF by modeling geometry as a distance function or occupancy field and converting its output to density using a probability density function [S25]. It incorporates an eikonal term to encourage geometric consistency, enforcing that the gradient norm of the learned SDF is equal to one [S25]. The density distribution is modeled as $\Phi_S(x) = \frac{se^{-sx}}{1+e^{-sx}}$, where $s$ is a scaling parameter and $x$ is the SDF or occupancy value [S25].
 
-### Dynamically-informed iNeRF Estimator
-A state estimation method that uses an iNeRF initialized with a dynamics prior, optimized only via photometric loss, acting as a recursive Bayesian filter with infinite state covariance [S26]. The process loss is set to 0 [S26]. An iNeRF estimator initialized without a dynamics prior will very quickly diverge [S26].
-
 ### Volumetric Supervision
-A training strategy that uses high-quality volumetric reconstructions from conventional tomography (available at start/end times) to supervise the neural network training at intermediate times with sparse projections [S27, unofficial]. Step 1 obtains rich projection data at $t=0$ and $t=1$. Step 2 reconstructs 3D volumes using conventional tomography. Step 3 computes the normalized correlation coefficient ($C_{cor}$) between the network's predicted volume and the CT-reconstructed volume. Step 4 minimizes the volumetric loss $L_{vol} = -C_{cor}(y, \hat{y})$ [S27, unofficial].
+A training strategy that uses high-quality volumetric reconstructions from conventional tomography (available at start/end times) to supervise the neural network training at intermediate times with sparse projections [S26, unofficial]. It obtains rich projection data at $t=0$ and $t=1$, reconstructs 3D volumes using conventional tomography, and during training at intermediate times, computes the normalized correlation coefficient ($C_{cor}$) between the network's predicted volume and the CT-reconstructed volume [S26, unofficial]. The volumetric loss is minimized as $L_{vol} = -C_{cor}(y, \hat{y})$ [S26, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N_{iters} \cdot N_{rand} \cdot K)$, where $N_{iters}$ is the number of iterations, $N_{rand}$ is the batch size (rays per iteration), and $K$ is the number of samples per ray [S5, S14, unofficial].
-*   **Memory Complexity:** $O(N_{rand} \cdot K)$ for the forward pass gradients if using reverse-mode AD without checkpointing, or $O(N_{iters})$ if using adjoint methods/analytic inversion [S5, unofficial]. VRAM usage is a primary constraint, often mitigated by chunking rays [S5, S14, unofficial].
-*   **Measured Performance:** Training typically requires 500,000 to 1,000,000 iterations [S11, S14, unofficial]. For a standard Blender scene, this can take several hours on a modern GPU [S11, unofficial].
-*   **Scaling:** Performance scales with batch size, but larger batches hinder data loading performance and reduce throughput due to GPU occupancy limits; a batch size of $2^{10}$ is often a tradeoff [S15, unofficial].
-*   **Strengths:** End-to-end differentiable, handles complex geometry and appearance, produces high-quality novel views.
-*   **Limitations:** Slow training convergence, high memory usage, prone to "floaters" and overfitting in sparse-view settings without regularization [S1, S9394-sparse-view-and-initialization-methods.md].
-*   **When to Use:** When high-quality novel view synthesis is required and computational resources are available.
-*   **When Not to Use:** When real-time training or extremely sparse views (without specialized priors) are required.
+*   **Time Complexity:** $O(N_{iters} \cdot N_{rand} \cdot K)$, where $N_{iters}$ is the number of iterations, $N_{rand}$ is the batch size (rays per step), and $K$ is the number of samples per ray [S5, S14, unofficial].
+*   **Memory Complexity:** $O(N_{rand} \cdot K)$ for the forward pass activations, plus $O(\theta)$ for the model parameters and optimizer states [S5, S18, unofficial]. VRAM usage is a primary constraint, often requiring chunking of ray batches [S5, S15, unofficial].
+*   **Measured Performance:** Training typically runs for 100,000 to 1,000,000 iterations [S11, S14, unofficial]. For a scene with ~200 images, training may take several hours on a modern GPU [S17, unofficial].
+*   **Scaling:** Performance scales with batch size up to GPU memory limits; larger batches improve throughput but risk OOM errors [S15, unofficial].
+*   **Strengths:** Simple to implement, differentiable end-to-end, produces high-quality novel views [S5, S14, unofficial].
+*   **Limitations:** Slow convergence due to low-frequency bias of MLPs, high memory usage for large scenes, sensitive to hyperparameters [S1][S17, unofficial].
+*   **When to Use:** When high-quality view synthesis is required and computational resources are sufficient for iterative optimization [S5, unofficial].
+*   **When Not to Use:** For real-time applications or extremely large scenes where partitioning or explicit representations are needed [S1][S3, unofficial].
 
 ## Background
-The NeRF Training Loop was introduced by Mildenhall et al. in "NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis" (2020) [S5, S18, unofficial]. It established the standard paradigm of optimizing a coordinate-based MLP to represent a 3D scene by minimizing the photometric error between rendered and ground-truth images. The method builds on earlier work in neural implicit representations and differentiable rendering [S3, S18, unofficial]. It is widely used in computer vision and graphics for novel view synthesis, 3D reconstruction, and increasingly in robotics and AR/VR [S1, S26].
+The NeRF Training Loop was introduced by Mildenhall et al. in "NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis" (2020) [S5, S18, unofficial]. It established the standard paradigm of optimizing a coordinate-based MLP to represent a 3D scene by minimizing the photometric loss between rendered and observed images [S5, unofficial]. The method builds on earlier work in implicit neural representations and differentiable rendering [S3, S18, unofficial]. It is widely used in computer vision and graphics for novel view synthesis, 3D reconstruction, and scene editing [S1][S5, unofficial].
 
 ## Sources
 [S1] Recursive-NeRF: An Efficient and Dynamically Growing NeRF, https://doi.org/10.1109/tvcg.2022.3204608, fetched 2026-10-26
@@ -254,5 +284,4 @@ The NeRF Training Loop was introduced by Mildenhall et al. in "NeRF: Representin
 [S23] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
 [S24] Depth-Guided Optimization of Neural Radiance Fields for Indoor Multi-View Stereo, https://doi.org/10.1109/tpami.2023.3263464, fetched 2026-10-27
 [S25] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
-[S26] Vision-Only Robot Navigation in a Neural Radiance World, https://doi.org/10.1109/lra.2022.3150497, fetched 2026-10-26
-[S27] Neural rendering enables dynamic tomography, https://doi.org/10.48550/arxiv.2410.20558, fetched 2026-10-26 (unofficial)
+[S26] Neural rendering enables dynamic tomography, https://doi.org/10.48550/arxiv.2410.20558, fetched 2026-10-26 (unofficial)

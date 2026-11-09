@@ -21,42 +21,26 @@ The method assumes the triangle is aligned with the Z-axis (sweep direction). If
 2.  **Initialize:**
     *   Calculate the minimum slice index: $layer = \lfloor (z_1 - z_{min}) / z_{slice} \rfloor$ [S1, unofficial].
     *   Set current slice depth: $slice = z_{min} + layer \times z_{slice}$ [S1, unofficial].
-3.  **Loop:** Iterate while $z_3 \ge slice$ [S1, unofficial].
-    *   **Case A:** If $z_3 \ge slice$ and this is the first iteration (or $z_2 < slice$ was false in previous context, specifically checking if the triangle spans the current slice from the start):
-        *   Emit the original triangle $(v_1, v_2, v_3)$ to `gl_Layer = layer` [S1, unofficial].
-        *   Return/Exit loop for this triangle (optimization for triangles fully contained in one slice or handled by initial logic) [S1, unofficial]. *Note: The source pseudocode structure implies a complex state machine. The standard interpretation of Algorithm 1 in the source is a loop that handles intersections. The "Return" in Case A in the source text seems to be a specific optimization or a misinterpretation of the loop flow; however, the source explicitly lists "Emit... return" for Case A. We follow the source's explicit steps.*
-    *   **Intersection Calculation (Start of Slice):**
-        *   If $z_2 \ge slice$:
-            *   Set $v_{1L} = v_{1R} = v_1$ [S1, unofficial].
-            *   Calculate $v_{2L}, v_{2R}$ by intersecting edges $(v_1, v_2)$ and $(v_1, v_3)$ with the plane $z = slice$ [S1, unofficial].
-            *   Emit quad strip $(v_{1R}, v_{1L}, v_{2L}, v_{2R})$ to `gl_Layer = layer` [S1, unofficial].
-        *   Else ($z_2 < slice$):
-            *   Set $v_{1L} = v_2, v_{1R} = v_1$ [S1, unofficial].
-            *   Calculate $v_{2L}, v_{2R}$ by intersecting edges with the plane $z = slice$ [S1, unofficial].
-            *   Emit quad strip $(v_{1R}, v_{1L}, v_{2L}, v_{2R})$ to `gl_Layer = layer` [S1, unofficial].
-    *   **Advance Slice:**
-        *   $slice \leftarrow slice + z_{slice}$
-        *   $layer \leftarrow layer + 1$
-        *   Update $v_{1L} = v_{2L}, v_{1R} = v_{2R}$ [S1, unofficial].
-    *   **Case B:** If $z_2 \ge slice$:
-        *   Calculate $v_{2L}, v_{2R}$ by intersecting edges with the plane $z = slice$ [S1, unofficial].
-        *   Continue to next iteration (the loop condition $z_3 \ge slice$ will likely still hold or be checked) [S1, unofficial].
-    *   **Case C/D (Triangle Ends):** If $z_3 < slice$:
-        *   If $z_2$ was previously $\ge slice$ (Case C):
-            *   Set $v_{2L} = v_2, v_{2R} = v_3$ [S1, unofficial].
-        *   Else (Case D):
-            *   Set $v_{2L} = v_{2R} = v_3$ [S1, unofficial].
-        *   Emit quad strip $(v_{1R}, v_{1L}, v_{2L}, v_{2R})$ to `gl_Layer = layer` [S1, unofficial].
-    *   **Case E/F (Intermediate Slices):** Else if $z_2 < slice$ (and $z_3 \ge slice$):
-        *   If $z_2$ was previously $< slice$ (Case E):
-            *   Calculate $v_{2L}, v_{2R}$ by intersecting edges with the plane $z = slice$ [S1, unofficial].
-        *   Else (Case F):
-            *   Calculate $v_{2L}, v_{2R}$ by intersecting edges with the plane $z = z_2$ [S1, unofficial].
-        *   Emit quad strip $(v_{1R}, v_{1L}, v_{2L}, v_{2R})$ to `gl_Layer = layer` [S1, unofficial].
-        *   Update $v_{1L} = v_{2L}, v_{1R} = v_{2R}$ [S1, unofficial].
-        *   Calculate $v_{2L}, v_{2R}$ by intersecting edges with the plane $z = slice$ [S1, unofficial].
-        *   Emit quad strip $(v_{1R}, v_{1L}, v_{2L}, v_{2R})$ to `gl_Layer = layer` [S1, unofficial].
-4.  **Termination:** The loop repeats until $z_3 < slice$ [S1, unofficial].
+3.  **Case A (Single Slice):** If $z_3 \ge slice$, emit the original triangle $(v_1, v_2, v_3)$ to `gl_Layer = layer` and return [S1, unofficial].
+4.  **Initial Slice Crossing:**
+    *   If $z_2 \ge slice$, set $v_{1L} = v_{1R} = v_1$ [S1, unofficial].
+    *   Else, set $v_{1L} = v_2, v_{1R} = v_1$ [S1, unofficial].
+    *   Calculate $v_{2L}, v_{2R}$ by intersecting edges $(v_1, v_2)$ and $(v_1, v_3)$ with the plane $z = slice$ [S1, unofficial].
+    *   Emit quad strip $(v_{1R}, v_{1L}, v_{2L}, v_{2R})$ to `gl_Layer = layer` [S1, unofficial].
+5.  **Loop:** Iterate while $z_3 \ge slice$ [S1, unofficial]:
+    *   Increment $slice \leftarrow slice + z_{slice}$ and $layer \leftarrow layer + 1$ [S1, unofficial].
+    *   Update $v_{1L} \leftarrow v_{2L}, v_{1R} \leftarrow v_{2R}$ [S1, unofficial].
+    *   **Case B:** If $z_2 \ge slice$, calculate $v_{2L}, v_{2R}$ by intersecting edges with $z = slice$ [S1, unofficial].
+    *   **Case C/D (Triangle Ends):** Else if $z_3 < slice$:
+        *   If $z_2$ was previously $\ge slice$ (Case C), set $v_{2L} = v_2, v_{2R} = v_3$ [S1, unofficial].
+        *   Else (Case D), set $v_{2L} = v_{2R} = v_3$ [S1, unofficial].
+        *   Emit quad strip $(v_{1R}, v_{1L}, v_{2L}, v_{2R})$ to `gl_Layer = layer` and break [S1, unofficial].
+    *   **Case E/F (Intermediate Slices):** Else if $z_2$ was previously $< slice$ (Case E), calculate $v_{2L}, v_{2R}$ by intersecting edges with $z = slice$ [S1, unofficial]. Else (Case F), calculate $v_{2L}, v_{2R}$ by intersecting edges with $z = z_2$ [S1, unofficial].
+    *   Emit quad strip $(v_{1R}, v_{1L}, v_{2L}, v_{2R})$ to `gl_Layer = layer` [S1, unofficial].
+    *   Update $v_{1L} \leftarrow v_{2L}, v_{1R} \leftarrow v_{2R}$ [S1, unofficial].
+    *   Calculate $v_{2L}, v_{2R}$ by intersecting edges with $z = slice$ [S1, unofficial].
+    *   Emit quad strip $(v_{1R}, v_{1L}, v_{2L}, v_{2R})$ to `gl_Layer = layer` [S1, unofficial].
+6.  **Termination:** The loop repeats until $z_3 < slice$ [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -66,61 +50,55 @@ def geometry_shader_triangle_slicing(v1, v2, v3, z_slice_thickness, z_volume_min
     # Input: v1, v2, v3 in Eye Coordinate Space (ECS)
     # Data: z_slice_thickness, z_volume_min
     
-    # Check alignment with Z-axis
+    # Check alignment with Z-axis (triangle plane parallel to Z)
+    def is_aligned_with_z(a, b, c):
+        # Cross product of two edges; if Z component is non-zero, it's not aligned
+        e1 = (b.x - a.x, b.y - a.y, b.z - a.z)
+        e2 = (c.x - a.x, c.y - a.y, c.z - a.z)
+        cross_z = e1[0]*e2[1] - e1[1]*e2[0]
+        return cross_z == 0.0
+
     if not is_aligned_with_z(v1, v2, v3):
         return
 
     # Sort vertices by Z depth
-    vertices = sort_by_z([v1, v2, v3])
+    vertices = sorted([v1, v2, v3], key=lambda v: v.z)
     v1, v2, v3 = vertices[0], vertices[1], vertices[2]
     
     # Initialize
-    layer = floor((v1.z - z_volume_min) / z_slice_thickness)
+    layer = int((v1.z - z_volume_min) // z_slice_thickness)
     slice_depth = z_volume_min + layer * z_slice_thickness
     
-    # State variables for the strip
-    v1L = None
-    v1R = None
-    v2L = None
-    v2R = None
+    # Case A
+    if v3.z >= slice_depth:
+        emit_triangle(v1, v2, v3, layer)
+        return
+
+    # Initial slice crossing setup
+    if v2.z >= slice_depth:
+        v1L = v1R = v1
+    else:
+        v1L = v2
+        v1R = v1
+        
+    v2L, v2R = intersect_edges_with_plane(v1, v2, v1, v3, slice_depth)
+    emit_strip([v1R, v1L, v2L, v2R], layer)
     
-    # Track previous state of v2 relative to slice
-    v2_was_ge_slice = False
+    # Track state for Cases C/E
+    v2_was_ge_slice = (v2.z >= slice_depth)
     
     while v3.z >= slice_depth:
-        # Case A: Triangle fully spans the current slice from the start (optimization)
-        # Note: Source pseudocode has a specific flow. We follow the logic of intersecting.
-        
-        # Determine left edge points (v1L, v1R) for the current slice
-        if v2.z >= slice_depth:
-            v1L = v1
-            v1R = v1
-            # Intersect edges (v1,v2) and (v1,v3) with slice plane
-            v2L, v2R = intersect_edges_with_plane(v1, v2, v1, v3, slice_depth)
-            emit_strip([v1R, v1L, v2L, v2R], layer)
-        else:
-            # v2 is below the slice, v1 is above or at slice
-            v1L = v2
-            v1R = v1
-            # Intersect edges with slice plane
-            v2L, v2R = intersect_edges_with_plane(v1, v2, v1, v3, slice_depth)
-            emit_strip([v1R, v1L, v2L, v2R], layer)
-            
-        # Advance to next slice
         slice_depth += z_slice_thickness
         layer += 1
         
-        # Update left edge points for next iteration
         v1L = v2L
         v1R = v2R
         
-        # Check if v2 is still above the new slice
         if v2.z >= slice_depth:
             # Case B
             v2L, v2R = intersect_edges_with_plane(v1, v2, v1, v3, slice_depth)
-            # Loop continues, next iteration will use these as v1L/v1R
         elif v3.z < slice_depth:
-            # Triangle ends within this slice or just before
+            # Triangle ends within this slice
             if v2_was_ge_slice:
                 # Case C
                 v2L = v2
@@ -130,38 +108,27 @@ def geometry_shader_triangle_slicing(v1, v2, v3, z_slice_thickness, z_volume_min
                 v2L = v3
                 v2R = v3
             emit_strip([v1R, v1L, v2L, v2R], layer)
-            break # Triangle processed
+            break
         else:
-            # v3 is still >= slice, but v2 < slice
+            # v3.z >= slice_depth and v2.z < slice_depth
             if v2_was_ge_slice:
                 # Case E
                 v2L, v2R = intersect_edges_with_plane(v1, v2, v1, v3, slice_depth)
             else:
                 # Case F
-                v2L, v2R = intersect_edges_with_plane(v1, v2, v1, v3, v2.z) # Intersect with v2 depth? Source says "Intersect Edges (v2 depth)"
-                # Correction: Source says "Intersect Edges (v2 depth)" for Case F. 
-                # This likely means intersecting the edges of the triangle with the plane z=v2.z? 
-                # Or using v2 as the pivot. Given v2 < slice, this case handles the transition.
-                # We follow source: intersect edges with v2 depth plane.
                 v2L, v2R = intersect_edges_with_plane(v1, v2, v1, v3, v2.z)
-            
             emit_strip([v1R, v1L, v2L, v2R], layer)
             
-            # Update for next iteration
             v1L = v2L
             v1R = v2R
             
-            # Calculate new v2L, v2R for the current slice plane
             v2L, v2R = intersect_edges_with_plane(v1, v2, v1, v3, slice_depth)
             emit_strip([v1R, v1L, v2L, v2R], layer)
             
-        v2_was_ge_slice = (v2.z >= slice_depth) # Update state for next loop check? 
-        # Note: The source logic for v2_was_ge_slice is tricky. It refers to "was >= slice" in the previous iteration context.
-        # We assume standard state tracking.
+        v2_was_ge_slice = (v2.z >= slice_depth)
 
 def intersect_edges_with_plane(v1, v2, v3, v4, z_plane):
     # Intersects edge (v1,v2) and (v3,v4) with plane z=z_plane
-    # Returns intersection points
     p1 = interpolate(v1, v2, z_plane)
     p2 = interpolate(v3, v4, z_plane)
     return p1, p2
@@ -171,11 +138,13 @@ def interpolate(v_start, v_end, z_target):
     t = (z_target - v_start.z) / (v_end.z - v_start.z)
     return v_start + t * (v_end - v_start)
 
+def emit_triangle(v1, v2, v3, layer):
+    # Emits triangle to layer
+    pass
+
 def emit_strip(vertices, layer):
-    # Emits a quad strip (2 triangles) to the specified layer
+    # Emits quad strip (2 triangles) to layer
     # Vertices: v1R, v1L, v2L, v2R
-    # Triangle 1: v1R, v1L, v2L
-    # Triangle 2: v1R, v2L, v2R
     pass
 ```
 

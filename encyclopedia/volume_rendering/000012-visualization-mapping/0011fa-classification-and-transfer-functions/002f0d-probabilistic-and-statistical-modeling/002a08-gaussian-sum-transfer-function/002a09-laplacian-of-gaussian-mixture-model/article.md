@@ -3,21 +3,21 @@
 Also called: LoG Mixture Model
 
 ## Overview
-The Laplacian of Gaussian (LoG) Mixture Model is a probabilistic transfer function used in volume rendering to map scalar field values to density and color. It constructs a transfer function by summing individual Laplacian of Gaussian basis functions, each defined by a mean, scale, and weight. Unlike the parent [Gaussian Sum Transfer Function](1812-gaussian-sum-transfer-function.md), which uses simple Gaussian bumps, the LoG model introduces a second-order derivative characteristic that creates a "Mexican hat" shape, allowing for more nuanced control over edge detection and feature highlighting within the volume.
+The Laplacian of Gaussian (LoG) Mixture Model is a probabilistic transfer function used in volume rendering to map scalar field values to density and color [S1]. It constructs a transfer function by summing individual Laplacian of Gaussian basis functions, each defined by a mean, scale, and weight [S1]. Unlike the parent [Gaussian Sum Transfer Function](1812-gaussian-sum-transfer-function.md), which uses simple Gaussian bumps, the LoG model introduces a second-order derivative characteristic that creates a "Mexican hat" shape, allowing for more nuanced control over edge detection and feature highlighting within the volume [G].
 
 ## How it works
 **Inputs and Outputs**
-*   **Input:** A scalar field value $x \in [0, 1]$ representing the voxel intensity or density.
-*   **Output:** A scalar response value $l(x)$ representing the accumulated opacity or density contribution for that component.
+*   **Input:** A scalar field value $x \in [0, 1]$ representing the voxel intensity or density [S1].
+*   **Output:** A scalar response value $l(x)$ representing the accumulated opacity or density contribution for that component [S1].
 *   **Parameters:**
-    *   $N$: Number of mixture components.
-    *   $w_i$: Weight of the $i$-th component.
-    *   $\mu_i$: Mean (center) of the $i$-th component.
-    *   $\gamma_i$: Scale parameter of the $i$-th component.
-    *   $\epsilon$: Stability constant to prevent division by zero.
+    *   $N$: Number of mixture components [S1].
+    *   $w_i$: Weight of the $i$-th component [S1].
+    *   $\mu_i$: Mean of the $i$-th component [S1].
+    *   $\gamma_i$: Scale of the $i$-th component [S1].
+    *   $\epsilon$: Stability constant to prevent division by zero [S1].
 
 **Data Structures**
-The model requires storing $N$ tuples of parameters $(w_i, \mu_i, \gamma_i)$. No additional spatial data structures are required beyond the scalar field being evaluated.
+The model requires storing $N$ tuples of parameters $(w_i, \mu_i, \gamma_i)$ [S1]. No additional spatial data structures are required beyond the scalar field being evaluated [G].
 
 **Formula**
 The transfer function $l(x)$ is defined as [S1]:
@@ -25,18 +25,20 @@ The transfer function $l(x)$ is defined as [S1]:
 $$l(x) = \sum_{i=1}^N w_i \left( -\frac{(x - \mu_i)^2}{\gamma_i^2} + 1 \right) \exp\left( -\frac{(x - \mu_i)^2}{2\gamma_i^2 + \epsilon} \right)$$
 
 Where:
-*   $x$ is the input scalar value.
-*   $\mu_i$ is the mean of the $i$-th component.
-*   $\gamma_i$ is the scale of the $i$-th component.
-*   $w_i$ is the weight of the $i$-th component.
+*   $x$ is the input scalar value [S1].
+*   $\mu_i$ is the mean of the $i$-th component [S1].
+*   $\gamma_i$ is the scale of the $i$-th component [S1].
+*   $w_i$ is the weight of the $i$-th component [S1].
 *   $\epsilon$ is a small constant, typically $10^{-8}$ [S1].
 
 **Pseudocode**
-The following Python-like pseudocode implements the evaluation of the LoG Mixture Model for a single scalar input $x$.
+The following Python-like pseudocode implements the evaluation of the LoG Mixture Model for a single scalar input $x$ [S1].
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def log_mixture_model(x, components, epsilon=1e-8):
     """
     Evaluate the Laplacian of Gaussian Mixture Model.
@@ -71,9 +73,9 @@ def log_mixture_model(x, components, epsilon=1e-8):
 ```
 
 **Edge Cases and Pitfalls**
-*   **Division by Zero:** The term $\gamma_i^2$ appears in the denominator. If $\gamma_i$ is zero, the model is undefined. The stability constant $\epsilon$ is added to the exponential denominator but not the polynomial denominator in the standard formula [S1]. Implementers must ensure $\gamma_i > 0$ or handle $\gamma_i \approx 0$ as a degenerate case.
-*   **Precision:** For very large deviations $|x - \mu_i|$, the exponential term underflows to zero. This is generally safe but may lead to loss of gradient information in optimization if automatic differentiation is used without care.
-*   **Boundary Conditions:** The LoG function is symmetric around $\mu_i$ but has a negative lobe. If weights $w_i$ are not constrained, the transfer function can produce negative density values, which may require clamping or post-processing depending on the renderer's requirements.
+*   **Division by Zero:** The term $\gamma_i^2$ appears in the denominator. If $\gamma_i$ is zero, the model is undefined. The stability constant $\epsilon$ is added to the exponential denominator but not the polynomial denominator in the standard formula [S1]. Implementers must ensure $\gamma_i > 0$ or handle $\gamma_i \approx 0$ as a degenerate case [G].
+*   **Precision:** For very large deviations $|x - \mu_i|$, the exponential term underflows to zero. This is generally safe but may lead to loss of gradient information in optimization if automatic differentiation is used without care [G].
+*   **Boundary Conditions:** The LoG function is symmetric around $\mu_i$ but has a negative lobe. If weights $w_i$ are not constrained, the transfer function can produce negative density values, which may require clamping or post-processing depending on the renderer's requirements [G].
 
 ## Subtopics
 
@@ -84,17 +86,17 @@ $$d(x) = \sum_{i=1}^N w_i D_i$$
 
 $$D_i = \left( \exp \left( -\frac{(x - \mu_i)^2}{2\sigma_i^2 + \epsilon} \right) - \exp \left( -\frac{(x - \mu_i)^2}{2(\sigma_i^2/\nu + \epsilon)} \right) \right)$$
 
-Where $\sigma_i$ is the scale parameter, $\nu$ is the fixed variance ratio (typically 4), and $\epsilon$ is the stability constant [S1]. This model is chosen when a sharper, asymmetric edge response is desired compared to the symmetric LoG, or when specific frequency band separation is needed.
+Where $\sigma_i$ is the scale parameter, $\nu$ is the fixed variance ratio (typically 4), and $\epsilon$ is the stability constant [S1]. This model is chosen when a sharper, asymmetric edge response is desired compared to the symmetric LoG, or when specific frequency band separation is needed [G].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ per voxel, where $N$ is the number of mixture components. Each component requires a constant number of arithmetic operations (subtraction, multiplication, exponentiation).
-*   **Memory Complexity:** $O(N)$ to store the parameters $(w_i, \mu_i, \gamma_i)$ for all components.
-*   **Strengths:** The LoG shape allows for highlighting edges and fine details more effectively than simple Gaussians, as it responds strongly to changes in intensity gradients. It is computationally efficient as it involves only basic mathematical functions.
-*   **Limitations:** The negative lobe of the LoG function can result in negative transfer function values, which may be physically meaningless for density in some rendering contexts. It is less flexible than the [Generalized Exponential Transfer Function](4663-generalized-exponential-transfer-function.md) which can adjust shape via a learnable parameter $\beta$.
-*   **When to use:** Use when edge enhancement or feature detection within the transfer function is critical. Avoid if negative density values are problematic and cannot be clamped.
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** The LoG shape allows for highlighting edges and fine details more effectively than simple Gaussians, as it responds strongly to changes in intensity gradients [G]. It is computationally efficient as it involves only basic mathematical functions [G].
+*   **Limitations:** The negative lobe of the LoG function can result in negative transfer function values, which may be physically meaningless for density in some rendering contexts [G]. It is less flexible than the [Generalized Exponential Transfer Function](4663-generalized-exponential-transfer-function.md) which can adjust shape via a learnable parameter $\beta$ [S1].
+*   **When to use:** Use when edge enhancement or feature detection within the transfer function is critical. Avoid if negative density values are problematic and cannot be clamped [G].
 
 ## Background
-The Laplacian of Gaussian Mixture Model originates from the work on Generalized Exponential Splatting for Efficient Radiance Field Rendering [S1]. It is part of a family of probabilistic transfer functions designed to improve the expressiveness of volume rendering classification. The LoG function is a well-known operator in image processing for blob detection and edge enhancement, and its adaptation to mixture models allows for flexible, multi-scale feature representation in volumetric data.
+The Laplacian of Gaussian Mixture Model originates from the work on Generalized Exponential Splatting for Efficient Radiance Field Rendering [S1]. It is part of a family of probabilistic transfer functions designed to improve the expressiveness of volume rendering classification [S1]. The LoG function is a well-known operator in image processing for blob detection and edge enhancement, and its adaptation to mixture models allows for flexible, multi-scale feature representation in volumetric data [G].
 
 ## Sources
 [S1] GES: Generalized Exponential Splatting for Efficient Radiance Field Rendering, https://doi.org/10.1109/cvpr52733.2024.01873, fetched 2026-10-26

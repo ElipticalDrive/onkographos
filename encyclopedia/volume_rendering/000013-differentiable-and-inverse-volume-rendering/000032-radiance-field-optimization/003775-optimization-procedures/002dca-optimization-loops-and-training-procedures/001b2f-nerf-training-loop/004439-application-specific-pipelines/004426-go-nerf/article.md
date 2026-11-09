@@ -1,0 +1,163 @@
+# GO-NeRF
+
+Also called: Generating Objects in Neural Radiance Fields
+
+## Overview
+GO-NeRF is a pipeline for generating text-prompt-controlled 3D virtual objects at user-specified locations within an existing 3D environment represented as a NeRF, while preserving unchanged scene content [S1]. It sets itself apart from standard NeRF training by decoupling the object generation from the scene representation, using a compositional rendering formulation with 3D-aware opacity maps to handle occlusions and prevent unintended modifications to the original scene [S1]. Unlike methods that retrain the entire scene, GO-NeRF optimizes a new NeRF representation only within a user-defined 3D bounding box [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A pre-trained NeRF representation of a 3D scene, a set of pre-defined cameras, a text prompt describing the desired object, and three 2D points selected by the user on a rendered image of the scene to define the region of interest [S1].
+*   **Outputs:** A final composited image $I_v$ containing the generated object integrated into the scene [S1].
+
+**Data Structures:**
+*   **Scene NeRF:** The existing radiance field representation (e.g., InstantNGP or standard NeRF) [S1].
+*   **Object NeRF:** A new neural radiance field representation optimized within the 3D bounding box [S1].
+*   **3D Bounding Box:** Defined by three 2D points converted to 3D space [S1].
+*   **RGB-D Images:** $(S, D)$, where $S$ is the scene RGB image and $D$ is the depth map [S1].
+*   **Object RGB Image:** $G_v$ [S1].
+*   **Object Opacity Map:** $O_v$ [S1].
+*   **Final Image:** $I_v$ [S1].
+
+**Numbered Steps:**
+
+1.  **User Interface:** The user selects three points on a rendered image of the pre-trained scene to define the region of interest [S1].
+2.  **Region Definition:** Convert the three selected 2D points into a 3D bounding box within the scene using depth information, perspective projection, and cross-product operations [S1].
+3.  **Scene Rendering:** Render the pre-trained scene NeRF using pre-defined cameras to generate RGB-D images $(S, D)$ of the 3D scene [S1].
+4.  **Object Generation:** Optimize a new NeRF representation within the 3D bounding box to produce RGB images $G_v$ and opacity maps $O_v$ through volume rendering, guided by text prompts [S1].
+5.  **Compositional Rendering:** Composite the rendered scene and the generated object using a 3D-aware opacity map to handle occlusions and create the final output $I_v$ [S1].
+
+**Formulas:**
+The object generation step produces RGB images $G_v$ and opacity maps $O_v$ through volume rendering [S1]. The final output $I_v$ is created by blending the scene and generated content using optimized opacity maps [S1]. The specific mathematical formulations for $G_v$, $O_v$, and $I_v$ are referenced as Eq. (1), Eq. (2), and Eq. (3) in the source, but the exact equations are not provided in the text [S1].
+
+**Parameters:**
+*   **Text Prompt:** Describes the desired object [S1].
+*   **Three 2D Points:** Define the 3D bounding box [S1].
+*   **Pre-defined Cameras:** Used for scene rendering [S1].
+*   **Random Background Ratio:** A ratio at which the scene context is randomly replaced with a random background during training to eliminate artifacts [S1]. The exact value is not given in the sources.
+*   **Saturation Regularizer Weight:** Not given in the sources.
+*   **Feature Space Loss Weight:** Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Oversaturation:** SDS-based results can suffer from oversaturation issues [S1].
+*   **Artifacts:** Artifacts may arise during object optimization, particularly if they share a similar color with the scene background [S1].
+*   **Unintended Modifications:** Without compositional rendering, the generation process might alter the original scene content outside the desired editing area [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# GO-NeRF Pipeline
+# Inputs: scene_nerf, cameras, text_prompt, user_points_2d
+# Outputs: final_image
+
+def go_nerf_pipeline(scene_nerf, cameras, text_prompt, user_points_2d):
+    # Step 1: User Interface (handled externally)
+    # user_points_2d is provided by the user
+
+    # Step 2: Region Definition
+    # Convert 2D points to 3D bounding box using depth and perspective projection
+    depth_map = get_depth_map(scene_nerf, cameras)
+    bounding_box_3d = convert_2d_to_3d_box(user_points_2d, depth_map, cameras)
+
+    # Step 3: Scene Rendering
+    # Render pre-trained scene to get RGB-D images
+    scene_rgb, scene_depth = render_scene(scene_nerf, cameras)
+
+    # Step 4: Object Generation
+    # Initialize object NeRF within the bounding box
+    object_nerf = initialize_object_nerf(bounding_box_3d)
+
+    # Optimize object NeRF using text prompt and scene context
+    # This involves Score Distillation Sampling (SDS) and regularization
+    for iteration in range(num_iterations):
+        # Sample cameras within the bounding box region
+        sampled_cameras = sample_cameras(cameras, bounding_box_3d)
+        
+        # Render object NeRF
+        object_rgb, object_opacity = render_object(object_nerf, sampled_cameras)
+        
+        # Calculate SDS loss from diffusion model
+        sds_loss = calculate_sds_loss(object_rgb, text_prompt, diffusion_model)
+        
+        # Calculate saturation regularizer to align with scene tone
+        saturation_loss = calculate_saturation_loss(object_rgb, scene_rgb)
+        
+        # Calculate feature space loss for style guidance
+        feature_loss = calculate_feature_loss(object_rgb, reference_image)
+        
+        # Randomly replace scene context with random background to mitigate artifacts
+        if random() < random_background_ratio:
+            scene_context = random_background()
+        else:
+            scene_context = scene_rgb
+        
+        # Composite scene and object for loss calculation
+        composited_image = composite_images(scene_context, object_rgb, object_opacity)
+        
+        # Total loss
+        total_loss = sds_loss + saturation_loss + feature_loss
+        
+        # Update object NeRF parameters
+        update_object_nerf(object_nerf, total_loss)
+
+    # Step 5: Compositional Rendering
+    # Render final object NeRF with original cameras
+    final_object_rgb, final_object_opacity = render_object(object_nerf, cameras)
+    
+    # Composite with original scene
+    final_image = composite_images(scene_rgb, final_object_rgb, final_object_opacity)
+    
+    return final_image
+
+def convert_2d_to_3d_box(points_2d, depth_map, cameras):
+    # Use perspective projection and cross-product operations
+    # Not given in the sources. [G]
+    pass
+
+def render_scene(scene_nerf, cameras):
+    # Render scene NeRF to get RGB and depth
+    # Not given in the sources. [G]
+    pass
+
+def render_object(object_nerf, cameras):
+    # Render object NeRF to get RGB and opacity
+    # Not given in the sources. [G]
+    pass
+
+def calculate_sds_loss(rgb_image, text_prompt, diffusion_model):
+    # Distill 2D text-guided image inpainting priors from diffusion models using SDS
+    # Not given in the sources. [G]
+    pass
+
+def calculate_saturation_loss(rgb_image, scene_rgb):
+    # Align saturation of synthesized objects with the overall tone of the scene
+    # Not given in the sources. [G]
+    pass
+
+def calculate_feature_loss(rgb_image, reference_image):
+    # Use feature space similarity to guide the style of the generated objects
+    # Not given in the sources. [G]
+    pass
+
+def composite_images(scene_rgb, object_rgb, object_opacity):
+    # Blend scene and generated content using optimized opacity maps
+    # Not given in the sources. [G]
+    pass
+```
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Extensive experiments on public datasets including forward-facing and 360° scenes show superior performance in both quantitative and qualitative evaluations [S1].
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** Preserves unchanged scene content, handles occlusions via 3D-aware opacity maps, compatible with various NeRF representations (e.g., InstantNGP, NeRF), mitigates artifacts like floaters, and ensures high-quality composited results [S1].
+*   **Limitations:** SDS-based results can suffer from oversaturation, which requires additional regularization [S1]. Artifacts may arise if generated objects share color with the scene background [S1].
+*   **When to Use:** When generating text-prompt-controlled 3D objects at specific locations within an existing NeRF scene while preserving the original scene content [S1].
+*   **When Not to Use:** When the entire scene needs to be modified or when high-fidelity photometric consistency without text guidance is required [S1].
+
+## Background
+GO-NeRF was proposed to address the complex process of creating virtual reality content, which requires generating high-quality 3D objects and seamlessly integrating them into existing 3D scenes [S1]. The method leverages 2D text-guided image inpainting priors from diffusion models using Score Distillation Sampling (SDS) to optimize the object's NeRF [S1]. It was developed to provide a user-friendly interface for generating context-compatible 3D virtual objects from text prompts at user-specified locations within an established 3D scene [S1].
+
+## Sources
+[S1] GO-NeRF: Generating Objects in Neural Radiance Fields for Virtual Reality Content Creation, https://doi.org/10.1109/tvcg.2025.3549558, fetched 2026-10-29

@@ -1,76 +1,63 @@
 # Nearest Integer Rounding
 Also called: Round, Round to nearest integer
 ## Overview
-Nearest Integer Rounding converts continuous floating-point coordinates into discrete integer grid indices by rounding to the closest integer value. It serves as the fundamental coordinate quantization step in volume rendering, mapping sample points to voxel centers or corners. Unlike floor-based indexing which truncates towards zero or negative infinity, this method minimizes spatial quantization error by selecting the nearest grid node, which is critical for accurate gradient estimation and high-fidelity reconstruction. It differs from [Ceil](1574-ceil.md) which always rounds up, and [Floor](1575-floor.md) which always rounds down, by balancing bias in both directions.
+Nearest Integer Rounding rounds a 3D vector to the nearest integer coordinates [S1]. It serves as the fundamental coordinate quantization step in volume rendering, mapping sample points to discrete grid indices [G]. Unlike floor-based indexing which truncates towards zero or negative infinity, this method minimizes spatial quantization error by selecting the nearest grid node [G]. It differs from [Ceil](1574-ceil.md) which always rounds up, and [Floor](1575-floor.md) which always rounds down, by balancing bias in both directions [G].
 
 ## How it works
-**Inputs:** A 3D vector `xyz` of type `Vec3<double>`, `Vec3<float>`, or `Vec3<RealT>`.
-**Outputs:** A coordinate type `CoordT` (typically `int32_t` or `int64_t`) representing the rounded integer coordinates.
+**Inputs:** A 3D vector `xyz` of type `Vec3<double>`, `Vec3<float>`, or `Vec3<RealT>` [S1].
+**Outputs:** A coordinate type `CoordT` representing the rounded integer coordinates [S1].
 
 **Data Structures:**
-The input is a 3-element vector. The output is a scalar or vector of integer type, depending on the template specialization.
+The input is a 3-element vector [S1]. The output is a scalar or vector of integer type, depending on the template specialization [S1].
 
 **Steps:**
 1. For each component $c \in \{x, y, z\}$ of the input vector $xyz$:
    - Let $v = xyz.c$.
    - Compute the rounded integer $r = \text{round}(v)$.
-   - The standard definition of $\text{round}(v)$ is $\lfloor v + 0.5 \rfloor$ for positive $v$, and $\lceil v - 0.5 \rceil$ for negative $v$, effectively rounding to the nearest integer, with ties (e.g., 0.5) typically rounding away from zero or to the nearest even integer depending on the specific hardware/standard implementation. In the context of the source [S1], the function `Round` is templated to accept `Vec3<double>`, `Vec3<float>`, or `Vec3<RealT>` and returns a `CoordT`.
+   - Cast $r$ to `CoordT` [S1].
 
 **Formulas:**
 $$ r_c = \text{round}(xyz_c) $$
-where $r_c$ is the integer result for component $c$.
+where $r_c$ is the integer result for component $c$ [S1].
 
 **Parameters:**
-- `xyz`: The input floating-point coordinates.
-- `CoordT`: The target integer type for the output.
-- `RealT`: The floating-point type of the input (double, float, etc.).
+- `xyz`: The input floating-point coordinates [S1].
+- `CoordT`: The target integer type for the output [S1].
+- `RealT`: The floating-point type of the input (double, float, etc.) [S1].
 
 **Edge Cases and Pitfalls:**
-- **Precision:** Floating-point representation errors may cause values exactly halfway between integers (e.g., 2.5) to be represented as 2.4999999 or 2.5000001, affecting the rounding direction. The specific tie-breaking rule (round half up, round half to even) depends on the underlying C++ `std::round` or hardware instruction used by the implementation [S1].
-- **Overflow:** If the input coordinates exceed the range of `CoordT`, the result is undefined or clamped, depending on the implementation. The source does not specify overflow handling for `Round` [S1].
-- **Negative Zero:** Rounding -0.0 results in 0, which is standard for integer types.
+- The source does not specify tie-breaking rules, overflow handling, or negative zero behavior [S1]. Standard floating-point rounding applies [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def Round(xyz: Vec3[RealT]) -> CoordT:
+def Round(xyz, CoordT=int):
     """
     Rounds a 3D vector to the nearest integer coordinates.
-    
     Args:
         xyz: Input vector of type Vec3<double>, Vec3<float>, or Vec3<RealT>.
-        
+        CoordT: Target integer type for the output.
     Returns:
-        CoordT: The rounded integer coordinates.
+        A tuple of three integers representing the rounded coordinates.
     """
-    # Implementation depends on the specific template specialization
-    # For Vec3<double>:
-    if isinstance(xyz, Vec3_double):
-        return CoordT(round(xyz.x), round(xyz.y), round(xyz.z))
-    # For Vec3<float>:
-    elif isinstance(xyz, Vec3_float):
-        return CoordT(round(xyz.x), round(xyz.y), round(xyz.z))
-    # For Vec3<RealT>:
-    else:
-        return CoordT(round(xyz.x), round(xyz.y), round(xyz.z))
+    return (CoordT(round(xyz[0])), CoordT(round(xyz[1])), CoordT(round(xyz[2])))
 ```
-Note: The `round` function here refers to the standard mathematical rounding to the nearest integer. The source [S1] provides templated overloads for `double`, `float`, and generic `RealT`.
 
 ## Subtopics
 
 ### Ceil
-Returns the ceiling of a floating-point value as an `int32_t`. It always rounds up to the nearest integer greater than or equal to the input. Defined for both `double` and `float` inputs [S1]. Use when you need to ensure coverage of the entire voxel space without gaps, such as in bounding box calculations or when sampling requires including the upper boundary.
+Returns the ceiling of a floating-point value as an `int32_t` [S1]. It always rounds up to the nearest integer greater than or equal to the input [S1]. Defined for both `double` and `float` inputs [S1]. Use when you need to ensure coverage of the entire voxel space without gaps, such as in bounding box calculations or when sampling requires including the upper boundary [G].
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per component. The operation is a single arithmetic instruction or library call.
-- **Memory Complexity:** $O(1)$. No additional memory is allocated.
-- **Performance:** Extremely fast, typically mapping to a single CPU instruction (e.g., `cvttss2si` or similar on x86) or a highly optimized library call.
-- **Strengths:** Minimal quantization error compared to floor/ceil; simple implementation.
-- **Limitations:** Does not handle out-of-bounds indices (that is handled by the parent [Nearest Voxel Lookup with Periodic Boundary](1573-nearest-voxel-lookup-with-periodic-boundary.md)); tie-breaking behavior may vary across platforms if not explicitly standardized.
+- **Time Complexity:** $O(1)$ per component [G].
+- **Memory Complexity:** $O(1)$ [G].
+- **Performance:** Extremely fast, typically mapping to a single CPU instruction or a highly optimized library call [G].
+- **Strengths:** Minimal quantization error compared to floor/ceil; simple implementation [G].
+- **Limitations:** Does not handle out-of-bounds indices (that is handled by the parent [Nearest Voxel Lookup with Periodic Boundary](1573-nearest-voxel-lookup-with-periodic-boundary.md)); tie-breaking behavior may vary across platforms if not explicitly standardized [G].
 
 ## Background
-The `Round` and `Ceil` functions are part of the `nanovdb::math` namespace in OpenVDB, a library for sparse volumetric data. They are designed for high-performance GPU and CPU execution, indicated by the `__hostdev__` qualifiers [S1]. The implementation is templated to support various floating-point precisions and coordinate types, ensuring flexibility in volume rendering pipelines that may use single or double precision.
+The `Round` and `Ceil` functions are part of the `nanovdb::math` namespace in OpenVDB, a library for sparse volumetric data [S1]. They are designed for high-performance GPU and CPU execution, indicated by the `__hostdev__` qualifiers [S1]. The implementation is templated to support various floating-point precisions and coordinate types, ensuring flexibility in volume rendering pipelines that may use single or double precision [S1].
 
 ## Sources
 [S1] OpenVDB: nanovdb::math Namespace Reference, https://openvdb.org/documentation/doxygen/namespacenanovdb_1_1math.html, fetched 2026-10-24
