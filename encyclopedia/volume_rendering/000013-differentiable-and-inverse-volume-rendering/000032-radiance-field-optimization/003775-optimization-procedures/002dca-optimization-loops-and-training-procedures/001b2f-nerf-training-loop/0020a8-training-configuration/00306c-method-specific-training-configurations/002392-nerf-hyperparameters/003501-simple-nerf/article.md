@@ -3,7 +3,7 @@
 Also called: Simple Radiance Field for NeRF, Simple-NeRF regularization
 
 ## Overview
-Simple-NeRF is a radiance field regularization method for sparse input views that trains two augmented NeRF models (Smoothing and Lambertian) in tandem with a main NeRF to reduce overfitting and distortions, using depth supervision and consistency losses [S1]. It differs from its siblings by explicitly reducing model capacity (via positional encoding and view-dependence removal) to learn "simpler" solutions that serve as reliable depth priors, whereas [HashNeRF Parameters](3068-hashnerf-parameters.md) focuses on hash table regularization and [Gradient Scaling for Near-Camera Training](7379-gradient-scaling-for-near-camera-training.md) focuses on loss weighting [S1].
+Simple-NeRF is a radiance field regularization method for sparse input views that trains two augmented NeRF models (Smoothing and Lambertian) in tandem with a main NeRF to reduce overfitting and distortions, using depth supervision and consistency losses [S1]. It differs from alternatives like RegNeRF, which uses a depth smoothness prior and fuses objects at different depths, by mitigating both floaters and incorrect depth issues through in-situ depth priors [S1].
 
 ## How it works
 **Inputs and Outputs:**
@@ -11,37 +11,35 @@ Simple-NeRF is a radiance field regularization method for sparse input views tha
 *   **Outputs:** A trained main NeRF model ($N_1, N_2$) for inference; augmented models ($N_{1s}, N_{2s}, N_{1l}, N_{2l}$) are discarded after training [S1].
 
 **Data Structures:**
-The method uses four neural networks:
-1.  **Main Coarse MLP ($N_1$):** Input: Positional encoding $\gamma(\mathbf{p}_i, 0, l_p)$. Output: Density $\sigma_i$ and latent feature $\mathbf{h}_i$.
-2.  **Main Fine MLP ($N_2$):** Input: Latent feature $\mathbf{h}_i$ and view direction $\gamma(\mathbf{v}_i, 0, l_v)$. Output: Color $\mathbf{c}_i$.
-3.  **Smoothing Augmentation Coarse MLP ($N_{1s}$):** Input: Positional encoding $\gamma(\mathbf{p}_i, l_{ps}, l_p)$ (reduced frequency). Output: Latent feature $\mathbf{h}_{is}$.
-4.  **Smoothing Augmentation Fine MLP ($N_{2s}$):** Input: Latent feature $\mathbf{h}_{is}$ and view direction $\gamma(\mathbf{v}_i, 0, l_v)$. Output: Color $\mathbf{c}_{is}$.
-5.  **Lambertian Augmentation Coarse MLP ($N_{1l}$):** Input: Positional encoding $\gamma(\mathbf{p}_i, 0, l_p)$. Output: Latent feature $\mathbf{h}_{il}$.
-6.  **Lambertian Augmentation Fine MLP ($N_{2l}$):** Input: Latent feature $\mathbf{h}_{il}$ and **no** view direction (or zero vector). Output: Color $\mathbf{c}_{il}$.
+The method uses four neural networks [S1]:
+1.  **Main Coarse MLP ($N_1$):** Input: Positional encoding $\gamma(\mathbf{p}_i, 0, l_p)$ [S1]. Output: Density $\sigma_i$ and latent feature $\mathbf{h}_i$ [S1].
+2.  **Main Fine MLP ($N_2$):** Input: Latent feature $\mathbf{h}_i$ and view direction $\gamma(\mathbf{v}_i, 0, l_v)$ [S1]. Output: Color $\mathbf{c}_i$ [S1].
+3.  **Smoothing Augmentation Fine MLP ($N_{2s}$):** Input: Latent feature $\mathbf{h}_i$, reduced positional encoding $\gamma(\mathbf{p}_i, l_{ps}, l_p)$, and view direction $\gamma(\mathbf{v}_i, 0, l_v)$ [S1]. Output: Color $\mathbf{c}_{is}$ [S1].
+4.  **Lambertian Augmentation Fine MLP ($N_{2l}$):** Input: Latent feature $\mathbf{h}_i$ and zero view direction [S1]. Output: Color $\mathbf{c}_{il}$ [S1].
 
-*Note: The positional encoding function is defined as $\gamma(\mathbf{x}, d_1, d_2) = [\sin(2^{d_1}\mathbf{x}), \cos(2^{d_1}\mathbf{x}), \dots, \sin(2^{d_2-1}\mathbf{x}), \cos(2^{d_2-1}\mathbf{x})]$ [S1]. If $d_1=0$, $\mathbf{x}$ is concatenated directly [S1].*
+The positional encoding function is defined as $\gamma(\mathbf{x}, d_1, d_2) = [\sin(2^{d_1}\mathbf{x}), \cos(2^{d_1}\mathbf{x}), \dots, \sin(2^{d_2-1}\mathbf{x}), \cos(2^{d_2-1}\mathbf{x})]$ [S1]. If $d_1=0$, $\mathbf{x}$ is concatenated directly [S1].
 
 **Parameters:**
-*   $l_p$: Highest positional encoding frequency for position.
-*   $l_v$: Highest positional encoding frequency for view direction.
-*   $l_{ps}$: Reduced highest positional encoding frequency for the smoothing augmentation coarse MLP [S1].
-*   Sampling: Coarse stratified sampling (64 queries) and fine dense sampling (192 queries) per pixel [S1].
+*   $l_p$: Highest positional encoding frequency for position [S1].
+*   $l_v$: Highest positional encoding frequency for view direction [S1].
+*   $l_{ps}$: Reduced highest positional encoding frequency for the smoothing augmentation [S1].
+*   Sampling: Coarse MLP queries 192 times and fine MLP queries 192 times per pixel (384 total) [S1].
 
 **Numbered Steps:**
 
 1.  **Initialization:** Initialize main NeRF ($N_1, N_2$) and two augmented models: Smoothing ($N_{1s}, N_{2s}$) and Lambertian ($N_{1l}, N_{2l}$) [S1].
-2.  **Forward Pass (Main):** For each pixel, sample points along the ray. Compute density $\sigma$ and color $\mathbf{c}$ using $N_1$ and $N_2$. Render color $\hat{C}$ and mean depth $z_m$ [S1].
+2.  **Forward Pass (Main):** For each pixel, sample points along the ray. Compute density $\sigma$ and color $\mathbf{c}$ using $N_1$ and $N_2$. Compute mean depth $z_m$ [S1].
 3.  **Forward Pass (Augmented):**
-    *   **Smoothing:** Pass remaining high-frequency positional encoding components $\gamma(\mathbf{p}_i, l_{ps}, l_p)$ to $N_{1s}$ to get $\mathbf{h}_{is}$. Pass $\mathbf{h}_{is}$ and $\gamma(\mathbf{v}_i, 0, l_v)$ to $N_{2s}$ to get $\mathbf{c}_{is}$. Render coarse depth $z_s$ [S1].
+    *   **Smoothing:** Pass remaining high-frequency positional encoding components ($l_{ps}$ to $l_p$) of $\mathbf{p}_i$ to the fine MLP $N_{2s}$ along with latent features $\mathbf{h}_i$ and view direction $\mathbf{v}_i$: $\mathbf{c}_i = N_{2s}(\mathbf{h}_i, \gamma(\mathbf{p}_i, l_{ps}, l_p), \gamma(\mathbf{v}_i, 0, l_v))$ [S1]. Render coarse depth $z_s$ [S1].
     *   **Lambertian:** Pass $\gamma(\mathbf{p}_i, 0, l_p)$ to $N_{1l}$ to get $\mathbf{h}_{il}$. Pass $\mathbf{h}_{il}$ and zero view direction to $N_{2l}$ to get $\mathbf{c}_{il}$. Render coarse depth $z_l$ [S1].
-4.  **Reliability Masking:** Compute reliability masks $m_a$ (for augmented) and $m_m$ (for main) by reprojecting to the closest training view and checking intensity consistency. If intensities do not match (e.g., specular regions), the mask is zero [S1].
+4.  **Reliability Masking:** Compute reliability masks $m_a$ (for augmented) and $m_m$ (for main) by reprojecting to the closest training view and checking intensity consistency [S1]. If intensities do not match (e.g., specular regions), the mask is zero [S1].
 5.  **Depth Supervision Loss ($L_{aug}$):** Impose depth supervision using stop-gradient ($\hat{\nabla}$) on the target depth to prevent gradient flow to the teacher model:
     $$ L_{aug} = \mathbb{1}\{m_a=1\} \odot \|z_m - \hat{\nabla}(z_a)\|^2 + \mathbb{1}\{m_m=1\} \odot \|\hat{\nabla}(z_m) - z_a\|^2 $$
-    where $z_a$ is the depth from the augmented model (either $z_s$ or $z_l$). Compute $L_s$ and $L_l$ separately for smoothing and Lambertian augmentations, then sum them for the final depth supervision loss [S1].
+    where $z_a$ is the depth from the augmented model (either $z_s$ or $z_l$) [S1]. Compute $L_s$ and $L_l$ separately for smoothing and Lambertian augmentations, then sum them for the final depth supervision loss [S1].
 6.  **Coarse-Fine Consistency Loss ($L_{cfc}$):** Ensure hierarchical sampling consistency between coarse depth $z_c$ and fine depth $z_f$ of the main model:
     $$ L_{cfc} = \mathbb{1}\{m_f=1\} \odot \|z_c - \hat{\nabla}(z_f)\|^2 + \mathbb{1}\{m_c=1\} \odot \|\hat{\nabla}(z_c) - z_f\|^2 $$
     where $m_f$ and $m_c$ are reliability masks for fine and coarse depths respectively [S1].
-7.  **Photometric Loss:** Standard photometric loss between rendered color $\hat{C}$ and ground truth image $C$ [S1].
+7.  **Photometric Loss:** Standard photometric loss between rendered color and ground truth image [S1].
 8.  **Optimization:** Minimize the sum of photometric, depth supervision ($L_{aug}$), and consistency ($L_{cfc}$) losses [S1].
 
 **Pseudocode:**
@@ -49,60 +47,59 @@ The method uses four neural networks:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def simple_nerf_training_step(images, poses, sparse_depths, camera_intrinsics):
-    # 1. Initialize models
-    N1, N2 = init_main_nerf()
-    N1s, N2s = init_smoothing_augmentation()
-    N1l, N2l = init_lambertian_augmentation()
+def positional_encoding(x, d1, d2):
+    freqs = 2.0 ** torch.arange(d1, d2, dtype=x.dtype)
+    return torch.cat([torch.sin(x * freqs), torch.cos(x * freqs)], dim=-1)
+
+def volume_render_depth(z, sigma):
+    alpha = 1.0 - torch.exp(-sigma * z.diff(dim=-1))
+    weights = alpha * torch.cumprod(torch.cat([torch.ones_like(alpha[..., :1]), 1.0 - alpha[..., :-1] + 1e-10], dim=-1), dim=-1)
+    mean_depth = torch.sum(weights * z, dim=-1)
+    return mean_depth
+
+def compute_reliability_mask(depth, images, poses, intrinsics):
+    projected = reproject_to_training_view(depth, poses, intrinsics)
+    consistency = compare_intensity(projected, images)
+    return (consistency > threshold).float()
+
+def simple_nerf_training_step(images, poses, intrinsics, N1, N2, N2s, N2l):
+    # 1. Forward pass Main Model
+    pos_enc_main = positional_encoding(positions, 0, l_p)
+    sigma_c, h_c = N1(pos_enc_main)
+    z_c = compute_depth_from_sampling()
+    C_c = volume_render_color(z_c, sigma_c, N2, h_c, views)
+    z_m = volume_render_depth(z_c, sigma_c)
     
-    # 2. Compute reliability masks
-    # Reproject scene points to closest training view and check intensity consistency
-    m_main = compute_reliability_mask(images, poses, N1, N2)
-    m_aug_s = compute_reliability_mask(images, poses, N1s, N2s)
-    m_aug_l = compute_reliability_mask(images, poses, N1l, N2l)
+    # 2. Forward pass Augmented Models
+    pos_enc_s = positional_encoding(positions, l_ps, l_p)
+    C_s = N2s(h_c, pos_enc_s, views)
+    z_s = volume_render_depth(z_c, sigma_c)
     
-    # 3. Forward pass Main Model
-    # Coarse sampling (64 points)
-    z_c, sigma_c, h_c = forward_coarse(N1, positions, N2, h_c, views)
-    # Fine sampling (192 points)
-    z_f, sigma_f, h_f = forward_fine(N2, positions, views)
+    pos_enc_l = positional_encoding(positions, 0, l_p)
+    views_zero = torch.zeros_like(views)
+    C_l = N2l(h_c, pos_enc_l, views_zero)
+    z_l = volume_render_depth(z_c, sigma_c)
     
-    # Render Main
-    C_main, z_m = render_volume_rendering(z_c, sigma_c, z_f, sigma_f)
+    # 3. Compute Reliability Masks
+    m_main = compute_reliability_mask(z_m, images, poses, intrinsics)
+    m_aug_s = compute_reliability_mask(z_s, images, poses, intrinsics)
+    m_aug_l = compute_reliability_mask(z_l, images, poses, intrinsics)
+    m_c = compute_reliability_mask(z_c, images, poses, intrinsics)
+    m_f = compute_reliability_mask(z_f, images, poses, intrinsics)
     
-    # 4. Forward pass Smoothing Augmentation
-    # Reduce positional encoding frequency for coarse MLP
-    pos_enc_s = positional_encoding(positions, d1=l_ps, d2=l_p)
-    h_s = N1s(pos_enc_s)
-    C_s, z_s = render_augmented(N2s, h_s, views)
+    # 4. Compute Losses
+    L_photo = torch.mean((C_c - images) ** 2)
     
-    # 5. Forward pass Lambertian Augmentation
-    # Disable view-dependent feature
-    pos_enc_l = positional_encoding(positions, d1=0, d2=l_p)
-    h_l = N1l(pos_enc_l)
-    views_zero = zeros_like(views)
-    C_l, z_l = render_augmented(N2l, h_l, views_zero)
-    
-    # 6. Compute Losses
-    # Photometric Loss
-    L_photo = mean_squared_error(C_main, images)
-    
-    # Depth Supervision Loss (Sum of Smoothing and Lambertian)
-    # Stop gradient on target depth
-    L_s = (m_aug_s * (z_m - stop_gradient(z_s))**2).mean()
-    L_l = (m_aug_l * (z_m - stop_gradient(z_l))**2).mean()
+    # Depth Supervision Loss (Smoothing)
+    L_s = torch.mean(m_aug_s * (z_m - stop_gradient(z_s)) ** 2 + m_main * (stop_gradient(z_m) - z_s) ** 2)
+    # Depth Supervision Loss (Lambertian)
+    L_l = torch.mean(m_aug_l * (z_m - stop_gradient(z_l)) ** 2 + m_main * (stop_gradient(z_m) - z_l) ** 2)
     L_aug = L_s + L_l
     
     # Coarse-Fine Consistency Loss
-    L_cfc = (m_f * (z_c - stop_gradient(z_f))**2).mean() + \
-            (m_c * (stop_gradient(z_c) - z_f)**2).mean()
-            
-    # Total Loss
+    L_cfc = torch.mean(m_f * (z_c - stop_gradient(z_f)) ** 2 + m_c * (stop_gradient(z_c) - z_f) ** 2)
+    
     loss = L_photo + L_aug + L_cfc
-    
-    # 7. Backpropagate and Update
-    update_parameters(N1, N2, N1s, N2s, N1l, N2l, loss)
-    
     return loss
 ```
 

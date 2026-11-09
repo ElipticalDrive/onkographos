@@ -3,120 +3,73 @@
 Also called: Editable Gaussian, iVR-GS Gaussian
 
 ## Overview
-Editable Gaussian Representation extends the Gaussian Avatar framework by parameterizing each Gaussian primitive with explicit shading attributes, enabling the decoupling of geometry from appearance. This allows for explicit editing of color, opacity, and lighting effects, such as scene recoloring and relighting, which are not natively supported by standard 3D Gaussian Splatting. It builds on [iVR-GS Relighting via Gaussian Primitives](7018-ivr-gs-relighting-via-gaussian-primitives.md) by introducing a palette-based color representation and specific regularization terms to maintain compactness and smoothness during optimization.
+Editable Gaussian Representation extends the iVR-GS framework [7018-ivr-gs-relighting-via-gaussian-primitives.md] by parameterizing each Gaussian primitive with explicit shading attributes, enabling direct manipulation of color, opacity, and lighting effects [S1]. Unlike standard 3D Gaussian Splatting which treats color as a static view-dependent attribute, this method decouples geometry from shading, allowing for scene recoloring, opacity adjustment, and directional light editing by modifying specific primitive parameters rather than retraining the entire model [S1].
 
 ## How it works
+**Inputs and Outputs:**
+*   **Input:** Multi-view images of a scene; initial Gaussian parameters (geometry and shading); ground-truth color images for regularization.
+*   **Output:** A collection of $N$ editable Gaussian primitives, each defined by geometry and shading attributes, optionally compressed via Vector Quantization (VQ) and composed into a single model.
 
-### Inputs and Outputs
-*   **Inputs:** Multi-view images of a scene; initial Gaussian primitives (geometry and shading parameters).
-*   **Outputs:** A collection of editable Gaussian primitives, each defined by geometry and shading attributes, representing the scene.
-
-### Data Structures
-Each editable Gaussian $i$ is parameterized by two sets of attributes:
-
+**Data Structures:**
+Each editable Gaussian $i$ is defined by two sets of attributes:
 1.  **Geometry Attributes:**
-    *   $\mu_i \in \mathbb{R}^3$: Mean position.
-    *   $q_i \in \mathbb{R}^4$: Rotation quaternion.
-    *   $s_i \in \mathbb{R}^3$: Scale vector.
-    *   $o_i \in \mathbb{R}$: Opacity.
-    *   $n_i \in \mathbb{R}^3$: Normal vector.
-
+    *   Mean position $\mu_i \in \mathbb{R}^3$
+    *   Rotation quaternion $q_i \in \mathbb{R}^4$
+    *   Scale $s_i \in \mathbb{R}^3$
+    *   Opacity $o_i \in \mathbb{R}$
+    *   Normal $n_i \in \mathbb{R}^3$
 2.  **Shading Attributes:**
-    *   $\Delta c_i \in \mathbb{R}^3$: Offset color.
-    *   $k_{ia} \in \mathbb{R}$: Ambient coefficient.
-    *   $k_{id} \in \mathbb{R}$: Diffuse coefficient.
-    *   $k_{is} \in \mathbb{R}$: Specular coefficient.
-    *   $\beta_i \in \mathbb{R}$: Shininess.
+    *   Offset color $\Delta c_i \in \mathbb{R}^3$
+    *   Ambient coefficient $k_{ia} \in \mathbb{R}$
+    *   Diffuse coefficient $k_{id} \in \mathbb{R}$
+    *   Specular coefficient $k_{is} \in \mathbb{R}$
+    *   Shininess $\beta_i \in \mathbb{R}$
 
-### Palette Color
-A global palette color $c_p \in \mathbb{R}^3$ is shared by all Gaussians within a basic scene.
-*   **Training:** $c_p$ is fixed as the mean color value of the input multi-view images.
-*   **Inference:** $c_p$ is adjustable to achieve scene recoloring.
-*   **Final Color:** The voxel color $c_v$ for a Gaussian is expressed as $c_p + \Delta c_i$. The offset color $\Delta c_i$ enhances the expressiveness of the palette color.
+Additionally, a global **Palette Color** $c_p \in \mathbb{R}^3$ is maintained per basic scene.
 
-### Optimization and Regularization
-In addition to the standard 3DGS loss, the following regularizations are applied:
+**Rendering Formula:**
+The color $c_v$ of a voxel or pixel covered by Gaussian $i$ is computed as:
+$$ c_v = c_p + \Delta c_i $$
+The final rendered color is accumulated using standard alpha compositing, where the contribution of Gaussian $i$ depends on its opacity $\alpha_i$ (derived from $o_i$) and depth-based transmittance $T_i$.
 
-1.  **Opacity L1 Regularization:** An L1 regularization term is added to the opacity $o_i$. This encourages opacity to be low, neutralizing the tendency of the model to use more Gaussians for compact surfaces (due to normal-dependent color representation). This facilitates the removal of low-opacity Gaussians. [S1]
-2.  **Sparsity Regularization for Offset Color:** To avoid significant palette color shiftings caused by $\Delta c$, an L1 loss is applied to the rendered offset color map $\Delta C$.
-    $$ \Delta C = \sum_{i \in N} T_i \alpha_i \Delta c_i $$
-    The loss is $L_{sparsity} = \| \Delta C \|_1$. [S1]
-3.  **Bilateral Smoothness Regularization:** Applied to shading attributes ($k_a, k_d, k_s, \beta$) to ensure they do not change significantly in smooth-color regions. For the ambient coefficient map $K_a = \sum_{i \in N} T_i \alpha_i k_{ia}$, the regularization is:
-    $$ L_{smooth} = | \nabla K_a | \exp(-| \nabla c_{GT} |) $$
-    where $c_{GT}$ is the ground-truth color. Similar terms are applied to $k_d, k_s$, and $\beta$. [S1]
+**Training and Optimization Steps:**
+1.  **Initialization:** Initialize Gaussians with geometry attributes. Set the palette color $c_p$ to the mean color value of the input multi-view images [S1].
+2.  **Regularization Application:** During optimization, apply the following loss terms in addition to the standard 3DGS photometric loss:
+    *   **Opacity L1 Regularization:** Encourages low opacity to prevent over-reconstruction of compact surfaces and facilitate the removal of redundant Gaussians. The specific formula is not provided, but it is an L1 term on opacity [S1].
+    *   **Offset Color Sparsity:** Prevents significant shifts from the palette color. Defined as the L1 loss of the rendered offset color map $\Delta C$:
+        $$ L_{\text{sparsity}} = \| \Delta C \|_1, \quad \text{where } \Delta C = \sum_{i \in N} T_i \alpha_i \Delta c_i $$
+    *   **Bilateral Smoothness:** Applied to shading attributes ($k_a, k_d, k_s, \beta$) to ensure smoothness in regions with smooth ground-truth colors. For the ambient coefficient map $K_a = \sum_{i \in N} T_i \alpha_i k_{ia}$, the loss is:
+        $$ L_{\text{smooth}} = \| \nabla K_a \| \exp(-\| \nabla c_{GT} \|) $$
+        where $c_{GT}$ is the ground-truth color [S1]. This is similarly applied to $k_d, k_s, \beta$.
+3.  **Pruning:** Periodically remove Gaussians with low opacity to reduce model size, similar to base 3DGS [S1].
+4.  **Compression (Optional):** Apply Vector Quantization (VQ) using k-means clustering to compress the attributes of each basic iVR-GS model, achieving roughly 4× compression without sacrificing quality [S1].
+5.  **Composition:** To form a composed model, save exact values of $\mu$ and $n$, and indices with shared codebooks for other attributes. Decompress quantized models and append attribute values from basic models into a single parameter list [S1].
 
-### Pruning
-Low-opacity Gaussians are removed periodically during training to reduce model size, similar to base 3DGS. The opacity L1 regularization facilitates this by driving unnecessary Gaussians to low opacity. [S1]
+**Parameters:**
+*   **Palette Color ($c_p$):** Fixed during training as the mean color of input images; adjustable during inference for recoloring [S1].
+*   **Offset Color ($\Delta c$):** Enhances expressiveness of $c_p$ [S1].
 
-### Pseudocode
+**Edge Cases and Pitfalls:**
+*   **Compact Surfaces:** The model tends to use more Gaussians to reconstruct compact surfaces because color depends on the normal attribute. The L1 opacity regularization is critical to neutralize this effect [S1].
+*   **Palette Shifts:** Without sparsity regularization on $\Delta c$, the offset color may cause significant deviations from the intended palette [S1].
 
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+## Subtopics
 
-```python
-# Initialization
-# For each Gaussian i:
-#   Initialize geometry: mu_i, q_i, s_i, o_i, n_i
-#   Initialize shading: delta_c_i, k_ia, k_id, k_is, beta_i
-# Global palette color c_p is set to mean color of input images
+### [Text-Driven Gaussian Editing](11107-text-driven-gaussian-editing.md)
+Text-Driven Gaussian Editing performs non-photorealistic scene editing (NPSE) on volume visualization (VolVis) scenes by applying text instructions via an image-to-image (IP2P) diffusion model. It distinguishes itself from sibling methods like DGE, IG2G, and IN2N by employing a one-time update strategy on a small subset of multi-view images and by keeping Gaussian geometry fixed while updating only texture attributes, thereby ensuring geometry consistency and significantly reducing editing time.
 
-def optimize_editable_gaussians(scene_data, num_iterations):
-    for iteration in range(num_iterations):
-        # 1. Render scene
-        # Project Gaussians to 2D, sort by depth
-        # For each pixel, accumulate color and alpha
-        # Rendered color C_render = sum(T_i * alpha_i * (c_p + delta_c_i))
-        # Rendered ambient map K_a = sum(T_i * alpha_i * k_ia)
-        # Rendered offset map Delta_C = sum(T_i * alpha_i * delta_c_i)
-        
-        # 2. Compute Losses
-        # L_recon: Standard 3DGS reconstruction loss (L1 + D-SSIM)
-        L_recon = compute_reconstruction_loss(C_render, scene_data.gt_color)
-        
-        # L_opacity: L1 regularization on opacity
-        L_opacity = sum(o_i for all i)
-        
-        # L_sparsity: L1 loss on rendered offset color map
-        L_sparsity = L1_norm(Delta_C)
-        
-        # L_smooth: Bilateral smoothness on shading attributes
-        # Compute gradients of rendered maps and GT color
-        grad_Ka = gradient(K_a)
-        grad_cGT = gradient(scene_data.gt_color)
-        L_smooth_ka = sum(abs(grad_Ka) * exp(-abs(grad_cGT)))
-        
-        # Similarly compute L_smooth for kd, ks, beta
-        L_smooth = L_smooth_ka + L_smooth_kd + L_smooth_ks + L_smooth_beta
-        
-        # Total Loss
-        L_total = L_recon + lambda_opa * L_opacity + lambda_sparsity * L_sparsity + lambda_smooth * L_smooth
-        
-        # 3. Backpropagate and Update
-        gradients = compute_gradients(L_total)
-        update_parameters(gradients)
-        
-        # 4. Periodic Pruning
-        if iteration % prune_interval == 0:
-            remove_low_opacity_gaussians(threshold=0.005)
-```
-
-### Edge Cases and Pitfalls
-*   **Palette Color Shift:** Without sparsity regularization, $\Delta c$ can cause significant shifts from the intended palette color $c_p$. [S1]
-*   **Model Size:** The dependency of color on normal attributes can lead to an overuse of Gaussians for compact surfaces. The opacity L1 regularization is critical to mitigate this. [S1]
-*   **Shading Smoothness:** Shading attributes may exhibit noise if not regularized. Bilateral smoothness ensures consistency with the ground-truth color structure. [S1]
+#### Scene Composition
+Scene Composition allows the merging of multiple basic iVR-GS models into a single composed model. The process involves saving the exact values of geometry attributes $\mu$ and $n$, and indices with shared codebooks for other attributes for each editable Gaussian. The palette color $c_p$ is stored as a global parameter for each basic scene. The composed model is formed by decompressing each model from its quantized format and appending the attribute values of primitives from all basic iVR-GS models into a single parameter list. This enables real-time editing of color, opacity, and light direction by adjusting the attributes of each basic model within the composition [S1].
 
 ## Operating characteristics
-
-*   **Time Complexity:** Optimization is slower than base 3DGS due to additional shading attributes and regularization terms. Pruning is periodic.
-*   **Memory Complexity:** Higher than base 3DGS due to additional per-Gaussian shading attributes ($\Delta c, k_a, k_d, k_s, \beta$). Vector Quantization (VQ) can be applied post-optimization to compress the model. [S1]
-*   **Strengths:** Enables explicit editing of color (via $c_p$) and lighting (via shading coefficients). Compact representation through pruning and VQ.
-*   **Limitations:** Requires multi-view input. Optimization is more complex due to additional regularizations.
-*   **When to use:** When relighting or recoloring capabilities are required in a Gaussian Splatting-based scene.
-*   **When not to use:** For static scenes where no editing is needed, standard 3DGS is more efficient.
+*   **Time Complexity:** Training time is comparable to base 3DGS with additional regularization overhead. The VQ compression time is negligible [S1].
+*   **Memory Complexity:** The base model size is larger than standard 3DGS due to additional shading attributes per Gaussian. However, VQ provides roughly 4× compression [S1].
+*   **Performance:** Enables real-time scene editing (recoloring, opacity adjustment, light direction) without retraining [S1].
+*   **Strengths:** Explicit control over lighting and color; composability of scenes; reduced model size via pruning and VQ.
+*   **Limitations:** Requires multi-view input for training; complexity in managing shared codebooks for composition.
 
 ## Background
-
-The Editable Gaussian Representation was introduced in the iVR-GS paper. It extends the Gaussian Avatar framework to support inverse volume rendering for explorable visualization. The method allows for the decomposition of appearance into geometry and shading, enabling interactive editing. The approach uses a palette-based color representation and specific regularizations to maintain model compactness and visual quality.
+The Editable Gaussian Representation was introduced in the iVR-GS paper, which proposes Inverse Volume Rendering for Explorable Visualization via Editable 3D Gaussian Splatting. It builds upon the iVR-GS method which models lighting effects using the Blinn-Phong model. The method was developed to address the lack of explicit editability in standard 3DGS for volume visualization scenes [S1].
 
 ## Sources
-
 [S1] iVR-GS: Inverse Volume Rendering for Explorable Visualization via Editable 3D Gaussian Splatting., https://doi.org/10.1109/tvcg.2025.3567121, fetched 2026-10-26

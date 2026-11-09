@@ -1,0 +1,191 @@
+--- v002.md
++++ v003.md
+@@ -35,61 +35,45 @@
+ 
+ ```python
+-def distributed_volume_render(volume, camera, tree_config):
+-    """
+-    volume: 3D list of voxels (list of list of list)
+-    camera: dict with 'viewpoint', 'projection', 'image_plane', 'width', 'height'
+-    tree_config: dict with 'b' (branching factor) and 'n' (depth)
+-    """
+-    b = tree_config['b']
+-    n = tree_config['n']
+-    
+-    # 1. Volume Division
+-    sub_volumes = divide_volume(volume, b, depth=1, max_depth=n)
+-    
+-    # 2. Rendering Phase (Parallel on Leaf Nodes)
+-    rendered_images = []
+-    windows = []
+-    
+-    for sub_vol in sub_volumes:
+-        # Store three alternately-ordered copies to avoid real-time re-ordering
+-        copy1 = sub_vol
+-        copy2 = transpose_axes(sub_vol, axes=(1, 0, 2))
+-        copy3 = transpose_axes(sub_vol, axes=(2, 1, 0))
+-        
+-        # Select optimal storage order based on camera viewing angle [G]
+-        optimal_data = select_optimal_storage(copy1, copy2, copy3, camera)
+-        
+-        # Apply Shear-Warp: shear, project with 'over', warp
+-        sheared_data = shear_data(optimal_data, camera)
+-        projected_image = shear_warp_project(sheared_data, camera)
+-        final_image = warp_image(projected_image, camera)
+-        
+-        # Window-Encoding: Compute bounding box of non-blank pixels
+-        window = compute_bounding_box(final_image)
+-        
+-        rendered_images.append(final_image)
+-        windows.append(window)
+-        
++def distributed_volume_render(volume, camera, b, n):
++    # 1. Volume Division: recursively divide into b pieces along longest axis, n-1 times
++    # Sub-volumes share at least one plane of voxels [S1]
++    leaves = divide_volume(volume, b, current_depth=1, max_depth=n)
++
++    # 2. Rendering Phase (Leaf Nodes)
++    leaf_results = []
++    for sub_vol in leaves:
++        # Store three alternately-ordered copies to avoid real-time re-ordering [S1]
++        c1 = sub_vol
++        c2 = permute_axes(sub_vol, (1, 0, 2))
++        c3 = permute_axes(sub_vol, (2, 1, 0))
++        # Select optimal storage based on viewing angle [G]
++        data = select_storage(c1, c2, c3, camera)
++
++        # Apply shear, project with 'over', warp [S1]
++        sheared = shear_data(data, camera)
++        projected = shear_warp_project(sheared, camera)
++        image = warp_image(projected, camera)
++
++        # Window-Encoding: bounding box of non-blank pixels [S1]
++        window = compute_bounding_box(image)
++        leaf_results.append((image, window))
++
+     # 3. Compositing Phase (Up the Tree)
+-    # Composite back-to-front using ordering information
+-    composited_image = rendered_images[0]
+-    for i in range(1, len(rendered_images)):
+-        composited_image = over_operator(rendered_images[i], composited_image)
+-        
+-    # 4. Output
+-    output_image = run_length_encode(composited_image)
+-    return output_image
++    # Combine b images back-to-front using 'over' operator [S1]
++    composited = leaf_results[0][0]
++    for i in range(1, len(leaf_results)):
++        composited = over_operator(leaf_results[i][0], composited)
+ 
+-def divide_volume(vol, b, depth, max_depth):
+-    """Divides volume into b pieces along the longest axis.
+-    Sub-volumes share at least one plane of voxels [S1]."""
+-    if depth >= max_depth:
++    # 4. Output: RLE encoding for network transfer [S1]
++    output = run_length_encode(composited)
++    return output
++
++def divide_volume(vol, b, current_depth, max_depth):
++    if current_depth >= max_depth:
+         return [vol]
+-    
+-    # Find longest axis using len() to avoid AttributeError on lists
++    # Find longest axis
+     dims = [len(vol), len(vol[0]), len(vol[0][0])]
+     axis = dims.index(max(dims))
+-    
+-    # Split into b pieces, sharing one plane
++    # Split into b pieces with 1-voxel overlap to share planes [S1]
+     step = len(vol) // b
+     pieces = []
+@@ -98,22 +82,27 @@
+         end = (i + 1) * step + 1 if i < b - 1 else (i + 1) * step
+         pieces.append(slice_volume(vol, axis, start, end))
+-        
+-    # Recursively divide if children are compositors
+-    result = []
++    # Recursively divide compositors
++    leaves = []
+     for piece in pieces:
+-        result.extend(divide_volume(piece, b, depth + 1, max_depth))
+-    return result
++        leaves.extend(divide_volume(piece, b, current_depth + 1, max_depth))
++    return leaves
+ 
+ def slice_volume(vol, axis, start, end):
+     if axis == 0: return vol[start:end]
+-    elif axis == 1: return [row[start:end] for row in vol]
+-    else: return [[[voxel[start:end] for voxel in row] for row in plane] for plane in vol]
++    if axis == 1: return [row[start:end] for row in vol]
++    return [[[v[start:end] for v in row] for row in plane] for plane in vol]
+ 
+-def transpose_axes(vol, axes):
+-    # Standard 3D list transpose
+-    return [[[vol[i][j][k] for k in range(len(vol[0][0]))] for j in range(len(vol[0]))] for i in range(len(vol))]
++def permute_axes(vol, axes):
++    # Reorders dimensions to match axes permutation
++    d0, d1, d2 = len(vol), len(vol[0]), len(vol[0][0])
++    result = [[[0.0]*d2 for _ in range(d1)] for _ in range(d0)]
++    for i in range(d0):
++        for j in range(d1):
++            for k in range(d2):
++                result[axes[0]][axes[1]][axes[2]] = vol[i][j][k]
++    return result
+ 
+-def select_optimal_storage(c1, c2, c3, camera):
+-    # [G] Selects copy based on viewing direction to align with shear plane
++def select_storage(c1, c2, c3, camera):
++    # [G] Returns the copy aligned with the viewing direction
+     return c1
+ 
+@@ -124,5 +113,5 @@
+ def shear_warp_project(data, camera):
+     # [G] Traverses sheared volume and applies 'over' operator
+-    return [[0.0 for _ in range(camera['width'])] for _ in range(camera['height'])]
++    return [[0.0] * camera['width'] for _ in range(camera['height'])]
+ 
+ def warp_image(image, camera):
+@@ -131,10 +120,19 @@
+ 
+ def compute_bounding_box(image):
+-    # [G] Standard bounding box calculation for non-blank pixels
+-    return (0, 0, len(image[0]), len(image))
++    # [G] Finds min/max row/col of non-zero pixels
++    rows, cols = len(image), len(image[0])
++    r_min, r_max, c_min, c_max = rows, -1, cols, -1
++    for r in range(rows):
++        for c in range(cols):
++            if image[r][c] != 0:
++                r_min = min(r_min, r)
++                r_max = max(r_max, r)
++                c_min = min(c_min, c)
++                c_max = max(c_max, c)
++    return (r_min, c_min, r_max, c_max)
+ 
+ def over_operator(front, back):
+-    # Standard alpha compositing operator
+-    return [[front[i][j] + back[i][j] * (1 - front[i][j]) for j in range(len(front[0]))] for i in range(len(front))]
++    # Standard alpha compositing: out = front + back * (1 - front)
++    return [[front[r][c] + back[r][c] * (1.0 - front[r][c]) for c in range(len(front[0]))] for r in range(len(front))]
+ 
+ def run_length_encode(image):
+@@ -143,14 +141,11 @@
+     for row in image:
+         if not row: continue
+-        current = row[0]
+-        count = 1
++        curr, count = row[0], 1
+         for val in row[1:]:
+-            if val == current:
+-                count += 1
++            if val == curr: count += 1
+             else:
+-                encoded.append((current, count))
+-                current = val
+-                count = 1
+-        encoded.append((current, count))
++                encoded.append((curr, count))
++                curr, count = val, 1
++        encoded.append((curr, count))
+     return encoded
+ ```

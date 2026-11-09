@@ -1,242 +1,121 @@
 # Near-Middle-Far Ray Generation
-
-
 ## Overview
-Near-Middle-Far Ray Generation is a ray sampling strategy that divides the ray into two distinct segments: a linear segment from the near plane to a middle point, and a disparity (inverse-linear) segment from the middle point to the far plane [S1, unofficial]. This approach addresses the problem of uneven depth resolution in volume rendering, where linear sampling provides poor depth discrimination for distant objects, while pure disparity sampling can be noisy or inefficient near the camera [S1, unofficial]. It sets itself apart from [Near-Far Linear Ray Generation](6841-near-far-linear-ray-generation.md) by introducing a non-linear, inverse-depth interpolation for the far segment, and from [Refined Ray Generation via PDF Sampling](6837-refined-ray-generation-via-pdf-sampling.md) by using a deterministic geometric split rather than probability density function-based adaptive sampling.
-
+Near-Middle-Far Ray Generation divides a camera ray into two distinct segments: a linear interpolation from the near plane to a middle point, and a disparity (inverse-linear) interpolation from the middle point to the far plane [S1, unofficial]. It allocates a configurable fraction of samples to the near-middle segment and the remainder to the middle-far segment [S1, unofficial].
 ## How it works
 **Inputs:**
-- `near`: float, the distance to the near clipping plane.
-- `far`: float, the distance to the far clipping plane.
-- `middle`: float, the distance to the middle point where the sampling strategy switches.
+- `near`: float or tensor, the distance to the near clipping plane.
+- `far`: float or tensor, the distance to the far clipping plane.
+- `middle`: float or tensor, the distance to the middle point where the sampling strategy switches.
 - `point_count`: int, the total number of sample points to generate along the ray.
 - `middle_split`: float, the fraction of `point_count` allocated to the near-middle segment (default 0.6) [S1, unofficial].
-- `jitter`: float in [0, 1), a fraction of the step length used to perturb sample positions to reduce aliasing [S1, unofficial].
-- `campos`: vector, the camera position.
-- `raydir`: vector, the normalized ray direction.
+- `jitter`: float in $[0, 1)$, a fraction of the step length used to perturb sample positions [S1, unofficial].
+- `campos`: tensor, the camera position.
+- `raydir`: tensor, the ray direction.
 
 **Outputs:**
-- `raypos`: tensor of shape `(batch, height, width, point_count, 3)`, containing the 3D positions of the sample points.
-- `valid`: tensor of shape `(batch, height, width, point_count)`, a mask of ones indicating all samples are valid [S1, unofficial].
+- `raypos`: tensor of sample positions along the ray.
+- `valid`: tensor of ones indicating all samples are valid [S1, unofficial].
 
 **Data Structures:**
-- `vals0`: tensor of shape `(batch, height, width, N0)`, linearly spaced values in $[0, 1]$ for the first segment.
-- `vals1`: tensor of shape `(batch, height, width, N1)`, linearly spaced values in $[0, 1]$ for the second segment.
-- `tvals`: concatenated tensor of shape `(batch, height, width, N0 + N1)`.
-- `segment_length`: tensor of shape `(batch, height, width, point_count)`, representing the distance between consecutive sample points.
-- `end_point_ts`: tensor of shape `(batch, height, width, point_count + 1)`, cumulative distances from the camera origin.
-- `middle_point_ts`: tensor of shape `(batch, height, width, point_count)`, distances to the midpoints of each segment.
+- `t0`, `t1`: tensors of linearly spaced values in $[0, 1]$ with sizes $N_0$ and $N_1$.
+- `d0`, `d1`: tensors of computed distances for the near-middle and middle-far segments.
+- `all_dists`: concatenated distance tensor of shape `(batch, height, width, N0 + N1)`.
+- `segment_length`: tensor of truncated, jittered segment lengths of shape `(batch, height, width, point_count)`.
+- `end_point_ts`: tensor of cumulative end-point distances of shape `(batch, height, width, point_count + 1)`.
+- `middle_point_ts`: tensor of midpoint distances of shape `(batch, height, width, point_count)`.
 
 **Steps:**
+1. Calculate point counts: $N_0 = \lfloor \text{point\_count} \times \text{middle\_split} \rfloor + 1$ and $N_1 = \lfloor \text{point\_count} \times (1 - \text{middle\_split}) \rfloor + 2$ [S1, unofficial].
+2. Generate linear parameter values: `t0 = linspace(0, 1, N0)` and `t1 = linspace(0, 1, N1)` [S1, unofficial].
+3. Compute near-middle distances: `d0 = near * (1 - t0) + middle * t0` [S1, unofficial].
+4. Compute middle-far distances: `d1 = 1.0 / (1.0/middle * (1 - t1) + 1.0/far * t1)` [S1, unofficial].
+5. Concatenate distances along the sample dimension: `all_dists = cat([d0, d1], dim=-1)` [S1, unofficial].
+6. Compute raw segment lengths: `diffs = all_dists[..., 1:] - all_dists[..., :-1]` [S1, unofficial].
+7. Apply jitter: `jittered = diffs * (1.0 + jitter * (rand_like(diffs) - 0.5))` [S1, unofficial].
+8. Truncate to `point_count` samples: `segment_length = jittered[..., :point_count]` [S1, unofficial].
+9. Compute cumulative distances, prepend zeros, and add `near` offset: `end_point_ts = near + cat([zeros_like(segment_length[..., :1]), cumsum(segment_length)], dim=-1)` [S1, unofficial].
+10. Compute middle-point distances: `middle_point_ts = (end_point_ts[..., :-1] + end_point_ts[..., 1:]) / 2.0` [S1, unofficial].
+11. Compute ray positions: `raypos = campos + raydir * middle_point_ts` [S1, unofficial].
+12. Set validity mask: `valid = ones_like(middle_point_ts)` [S1, unofficial].
 
-1.  **Calculate Point Counts:**
-    Determine the number of points for each segment:
-    $$ N_0 = \lfloor \text{point\_count} \times \text{middle\_split} \rfloor + 1 $$
-    $$ N_1 = \lfloor \text{point\_count} \times (1 - \text{middle\_split}) \rfloor + 2 $$
-    [S1, unofficial]
+**Formulas:**
+- Linear interpolation: $d_0 = \text{near} \times (1 - t) + \text{middle} \times t$
+- Disparity interpolation: $d_1 = \frac{1}{\frac{1}{\text{middle}} \times (1 - t) + \frac{1}{\text{far}} \times t}$
+- Jittered segment length: $\Delta = \Delta_{\text{raw}} \times (1 + \text{jitter} \times (u - 0.5))$, where $u \sim \mathcal{U}(0, 1)$ [S1, unofficial].
+- Midpoint distance: $t_{\text{mid}} = \frac{t_{\text{end}, i} + t_{\text{end}, i+1}}{2}$ [S1, unofficial].
 
-2.  **Generate Linear Values for First Segment:**
-    Create `vals0` as a linear interpolation from 0 to 1 with $N_0$ points:
-    $$ \text{vals0} = \text{linspace}(0, 1, N_0) $$
-    [S1, unofficial]
+**Parameters:**
+- `middle_split`: float, default 0.6 [S1, unofficial].
+- `jitter`: float in $[0, 1)$ [S1, unofficial].
 
-3.  **Generate Linear Values for Second Segment:**
-    Create `vals1` as a linear interpolation from 0 to 1 with $N_1$ points:
-    $$ \text{vals1} = \text{linspace}(0, 1, N_1) $$
-    [S1, unofficial]
-
-4.  **Concatenate Values:**
-    $$ \text{tvals} = \text{concat}([\text{vals0}, \text{vals1}], \text{dim}=2) $$
-    [S1, unofficial]
-
-5.  **Compute Distances for First Segment (Linear):**
-    For each value $t$ in `vals0`, compute the distance $d_0$:
-    $$ d_0 = \text{near} \times (1 - t) + \text{middle} \times t $$
-    [S1, unofficial]
-
-6.  **Compute Distances for Second Segment (Disparity/Inverse-Linear):**
-    For each value $t$ in `vals1`, compute the distance $d_1$:
-    $$ d_1 = \frac{1}{\frac{1}{\text{middle}} \times (1 - t) + \frac{1}{\text{far}} \times t} $$
-    [S1, unofficial]
-
-7.  **Combine Segment Distances:**
-    Concatenate $d_0$ and $d_1$ along the sample dimension to form the initial set of distances. Note that the middle point is included in both segments to ensure continuity, resulting in $N_0 + N_1$ points.
-    [S1, unofficial]
-
-8.  **Compute Segment Lengths:**
-    Calculate the difference between consecutive distances:
-    $$ \text{diffs} = \text{tvals\_distances}[:, :, 1:] - \text{tvals\_distances}[:, :, :-1] $$
-    Apply jitter to each segment length:
-    $$ \text{jittered\_diffs} = \text{diffs} \times (1 + \text{jitter} \times (\text{random\_uniform}() - 0.5)) $$
-    [S1, unofficial]
-
-9.  **Truncate to Point Count:**
-    The total number of points generated is $N_0 + N_1 - 1$ (due to concatenation and differencing). Truncate `jittered_diffs` to keep only the first `point_count` values:
-    $$ \text{segment\_length} = \text{jittered\_diffs}[:, :, : \text{point\_count}] $$
-    [S1, unofficial]
-
-10. **Compute Cumulative Distances:**
-    Compute the cumulative sum of `segment_length`:
-    $$ \text{cumsum\_lengths} = \text{cumsum}(\text{segment\_length}) $$
-    Prepend zeros to `cumsum_lengths` to get start points:
-    $$ \text{start\_ts} = \text{concat}([0, \text{cumsum\_lengths}], \text{dim}=2) $$
-    Add the `near` offset to all start points:
-    $$ \text{end\_point\_ts} = \text{near} + \text{start\_ts} $$
-    [S1, unofficial]
-
-11. **Compute Middle-Point Distances:**
-    Calculate the midpoint between consecutive end points:
-    $$ \text{middle\_point\_ts} = \frac{\text{end\_point\_ts}[:, :, :-1] + \text{end\_point\_ts}[:, :, 1:]}{2} $$
-    [S1, unofficial]
-
-12. **Compute Ray Positions:**
-    $$ \text{raypos} = \text{campos} + \text{raydir} \times \text{middle\_point\_ts} $$
-    [S1, unofficial]
-
-13. **Set Validity Mask:**
-    $$ \text{valid} = \text{ones}(\text{shape}(\text{middle\_point\_ts})) $$
-    [S1, unofficial]
+**Edge Cases and Pitfalls:**
+- If `middle` is not strictly between `near` and `far`, the disparity formula may yield invalid or inverted distances [G].
+- If `point_count` exceeds $N_0 + N_1 - 1$, the truncation step discards samples; the source assumes $N_0 + N_1 - 1 \ge \text{point\_count}$ [S1, unofficial].
+- Division by zero occurs if `middle` or `far` is zero in the disparity formula [G].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import torch
-import math
 
 def near_middle_far_ray_generation(near, far, middle, point_count, middle_split=0.6, jitter=0.0, campos=None, raydir=None):
-    """
-    Generates ray samples using near-middle-far strategy.
-    
-    Args:
-        near (float or tensor): Near plane distance.
-        far (float or tensor): Far plane distance.
-        middle (float or tensor): Middle plane distance.
-        point_count (int): Number of samples per ray.
-        middle_split (float): Fraction of points for near-middle segment.
-        jitter (float): Jitter factor [0, 1).
-        campos (tensor): Camera position.
-        raydir (tensor): Ray direction.
-        
-    Returns:
-        raypos (tensor): Sample positions.
-        valid (tensor): Validity mask.
-    """
-    # Step 1: Calculate point counts
+    # 1. Calculate point counts
     N0 = int(point_count * middle_split) + 1
     N1 = int(point_count * (1 - middle_split)) + 2
-    
-    # Step 2 & 3: Generate linear values
-    # Assuming batch, height, width dimensions are handled by broadcasting or explicit tensors
-    # For simplicity, we assume inputs are broadcastable to (B, H, W)
-    # vals0 and vals1 are 1D tensors of size N0 and N1 respectively
-    vals0 = torch.linspace(0, 1, N0)
-    vals1 = torch.linspace(0, 1, N1)
-    
-    # Step 4: Concatenate
-    tvals = torch.cat([vals0, vals1], dim=0) # Shape: (N0 + N1,)
-    
-    # Step 5: Compute distances for first segment (Linear)
-    # d0 = near * (1 - t) + middle * t
-    d0 = near * (1 - vals0) + middle * vals0
-    
-    # Step 6: Compute distances for second segment (Disparity)
-    # d1 = 1 / (1/middle * (1 - t) + 1/far * t)
+
+    # 2. Generate linear parameter values [0, 1]
+    t0 = torch.linspace(0, 1, N0)
+    t1 = torch.linspace(0, 1, N1)
+
+    # 3. Compute near-middle distances (linear)
+    d0 = near * (1.0 - t0) + middle * t0
+
+    # 4. Compute middle-far distances (disparity)
     inv_middle = 1.0 / middle
     inv_far = 1.0 / far
-    d1 = 1.0 / (inv_middle * (1 - vals1) + inv_far * vals1)
-    
-    # Step 7: Combine segment distances
-    # Note: The middle point is the last element of d0 and first of d1.
-    # We concatenate d0 and d1. The total number of points is N0 + N1.
-    # However, the differencing step reduces this to N0 + N1 - 1 segments.
-    # We need to select 'point_count' segments.
-    
-    all_dists = torch.cat([d0, d1], dim=0) # Shape: (N0 + N1,)
-    
-    # Step 8: Compute segment lengths
-    diffs = all_dists[1:] - all_dists[:-1] # Shape: (N0 + N1 - 1,)
-    
-    # Apply jitter
-    # Generate random jitter values of the same shape as diffs
-    # In a real implementation, this would be per-pixel, but here we show the logic
-    # Assuming we are working with a single ray for this function signature, 
-    # or broadcasting is handled externally.
-    # For a full implementation, diffs would be (B, H, W, N0+N1-1)
-    # random_vals = torch.rand_like(diffs)
-    # jittered_diffs = diffs * (1 + jitter * (random_vals - 0.5))
-    
-    # For the sake of the algorithm description, we assume diffs is already jittered or jitter is 0
-    # If jitter > 0, we need random numbers. Let's assume a helper for random jitter.
-    # Since we can't import random in a pure math context without state, we'll note it.
-    # [G] In practice, torch.rand(diffs.shape) is used.
-    
-    # Step 9: Truncate to point_count
-    # We need exactly point_count segments.
-    # If N0 + N1 - 1 < point_count, this is an error.
-    # If N0 + N1 - 1 > point_count, we truncate.
-    segment_length = diffs[:point_count]
-    
-    # Step 10: Compute cumulative distances
-    cumsum_lengths = torch.cumsum(segment_length, dim=0)
-    start_ts = torch.cat([torch.tensor([0.0]), cumsum_lengths], dim=0)
-    end_point_ts = near + start_ts
-    
-    # Step 11: Compute middle-point distances
-    # end_point_ts has shape (point_count + 1,)
-    # middle_point_ts has shape (point_count,)
-    middle_point_ts = (end_point_ts[:-1] + end_point_ts[1:]) / 2.0
-    
-    # Step 12: Compute ray positions
-    # raypos = campos + raydir * middle_point_ts
-    # [G] Ensure raydir is normalized.
-    if raydir is not None and campos is not None:
-        raypos = campos + raydir * middle_point_ts.unsqueeze(-1) # Assuming raydir is (3,) and middle_point_ts is (N,)
+    d1 = 1.0 / (inv_middle * (1.0 - t1) + inv_far * t1)
+
+    # 5. Concatenate distances along the sample dimension
+    all_dists = torch.cat([d0, d1], dim=-1)
+
+    # 6. Compute raw segment lengths
+    diffs = all_dists[..., 1:] - all_dists[..., :-1]
+
+    # 7. Apply jitter
+    random_vals = torch.rand_like(diffs)
+    jittered = diffs * (1.0 + jitter * (random_vals - 0.5))
+
+    # 8. Truncate to point_count samples
+    segment_length = jittered[..., :point_count]
+
+    # 9. Compute cumulative distances, prepend zeros, add near offset
+    cumsum_lengths = torch.cumsum(segment_length, dim=-1)
+    zeros = torch.zeros_like(segment_length[..., :1])
+    end_point_ts = near + torch.cat([zeros, cumsum_lengths], dim=-1)
+
+    # 10. Compute middle-point distances
+    middle_point_ts = (end_point_ts[..., :-1] + end_point_ts[..., 1:]) / 2.0
+
+    # 11. Compute ray positions
+    if campos is not None and raydir is not None:
+        raypos = campos + raydir * middle_point_ts.unsqueeze(-1)
     else:
-        raypos = middle_point_ts # Placeholder if no camera setup
-    
-    # Step 13: Set validity mask
+        raypos = middle_point_ts
+
+    # 12. Set validity mask
     valid = torch.ones_like(middle_point_ts)
-    
+
     return raypos, valid
 ```
-
-**Parameters:**
-- `middle_split`: float, default 0.6. The fraction of total points allocated to the near-middle segment [S1, unofficial].
-- `jitter`: float in [0, 1). A fraction of step length used to perturb sample positions [S1, unofficial].
-
-**Edge Cases and Pitfalls:**
-- If `middle` is not between `near` and `far`, the disparity formula may produce invalid or inverted distances.
-- If `point_count` is small, the truncation in Step 9 may discard significant portions of the ray, leading to poor coverage.
-- Precision issues may arise if `near` is very close to 0, causing division by zero in the disparity formula if `middle` is also close to 0. [G] Ensure `near > 0`.
-
-## Subtopics
-
-### Near-Far Linear Ray Generation
-- **What it is:** A simpler ray generation method that uses linear interpolation for both the near-middle and middle-far segments.
-- **What sets it apart:** It lacks the inverse-depth interpolation of the Near-Middle-Far method, resulting in uniform depth resolution across the entire ray, which is less effective for distant objects.
-- **When to choose it:** When computational simplicity is prioritized over depth resolution accuracy, or when the scene depth range is small.
-- **Link:** [Near-Far Linear Ray Generation](6841-near-far-linear-ray-generation.md)
-
-### Refined Ray Generation via PDF Sampling
-- **What it is:** A method that uses probability density functions to adaptively sample rays based on scene content or importance.
-- **What sets it apart:** It is stochastic and adaptive, whereas Near-Middle-Far is deterministic and geometric.
-- **When to choose it:** When the scene has high variance in density or when importance sampling can significantly reduce noise.
-- **Link:** [Refined Ray Generation via PDF Sampling](6837-refined-ray-generation-via-pdf-sampling.md)
-
 ## Operating characteristics
-- **Time Complexity:** $O(N)$, where $N$ is the number of sample points per ray. The operations are primarily vectorized linear algebra and cumulative sums.
-- **Memory Complexity:** $O(N)$ per ray for storing the sample positions and validity masks.
-- **Measured Performance:** Not given in the sources.
-- **Scaling:** Scales linearly with the number of samples and the number of rays.
-- **Strengths:** Provides better depth resolution for distant objects compared to linear sampling, while maintaining stability near the camera.
-- **Limitations:** The fixed split point (`middle`) may not be optimal for all scenes. The jittering adds noise but helps with aliasing.
-- **When to use it:** When rendering scenes with significant depth variation and where linear sampling would result in poor detail for distant objects.
-- **When not to use it:** When the scene depth range is small, or when adaptive sampling is more appropriate for the specific rendering task.
-
+- Time complexity: Not given in the sources.
+- Memory complexity: Not given in the sources.
+- Measured performance: Not given in the sources.
+- Scaling: Not given in the sources.
+- Strengths and limitations: Not given in the sources.
+- When to use it and when not: Not given in the sources.
 ## Background
-The Near-Middle-Far Ray Generation method is described in the context of the PointNeRF project, which is an unofficial implementation or extension of NeRF (Neural Radiance Fields) techniques [S1, unofficial]. The method is designed to improve the quality of volume rendering by addressing the limitations of uniform linear sampling.
-
+Origin: Described in the Xharlie/pointnerf repository [S1, unofficial].
 ## Sources
 [S1] Xharlie/pointnerf, https://github.com/Xharlie/pointnerf, fetched 2026-10-26 (unofficial)

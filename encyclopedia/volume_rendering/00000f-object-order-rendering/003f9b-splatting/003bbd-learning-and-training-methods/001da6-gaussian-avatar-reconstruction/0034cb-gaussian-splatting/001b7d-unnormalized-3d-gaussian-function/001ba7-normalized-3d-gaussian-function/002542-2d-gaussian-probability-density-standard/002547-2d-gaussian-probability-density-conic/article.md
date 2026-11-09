@@ -1,59 +1,89 @@
 # 2D Gaussian Probability Density (Conic)
-
 Also called: 2D Gaussian Probability Density from Conic and Rescale
-
 ## Overview
-Computes the unnormalized probability density of a 2D Gaussian at a query point `xy` given its mean, conic matrix components, and a rescaling factor [S1, unofficial]. The conic matrix represents the inverse covariance matrix [S1, unofficial]. It differs from the [Standard](3466-2d-gaussian-probability-density-standard.md) variant by operating directly on the conic components and an explicit rescaling factor rather than a full covariance matrix [S1, unofficial].
-
+Computes the unnormalized probability density function (PDF) value of a 2D Gaussian at a specific 2D point `xy`, given the Gaussian's mean and a conic matrix (the inverse covariance matrix) along with a rescaling factor. It differs from its parent [2D Gaussian Probability Density (Standard)](3466-2d-gaussian-probability-density-standard.md) by operating directly on the conic representation and including a multiplicative rescaling term, which is often used to handle opacity or normalization factors separately during rasterization.
 ## How it works
 **Inputs:**
-- `xy`: A 2D point $(x, y)$ representing the query location [S1, unofficial].
-- `gaussian_mean`: A 2D vector $(\mu_x, \mu_y)$ representing the Gaussian center [S1, unofficial].
-- `conic_and_rescale`: A 4-component vector containing the conic matrix elements and the rescaling factor [S1, unofficial].
+- `xy`: A 2D point $(x, y)$ where the density is evaluated.
+- `gaussian_mean`: The mean vector $(\mu_x, \mu_y)$ of the 2D Gaussian.
+- `conic_and_rescale`: A 4D vector containing the conic matrix components and the rescaling factor. The layout is:
+  - `x`: $C_{00}$ (inverse covariance element $(0,0)$)
+  - `y`: $C_{01}$ (inverse covariance element $(0,1)$)
+  - `z`: $C_{11}$ (inverse covariance element $(1,1)$)
+  - `w`: $R$ (rescaling factor)
 
 **Outputs:**
-- `p`: The unnormalized probability density value at `xy` [S1, unofficial].
+- `p`: The unnormalized probability density value.
 
 **Data Structures:**
-The `conic_and_rescale` parameter layout maps to $C_{00}$, $C_{01}$, $C_{11}$, and $R$ respectively [S1, unofficial].
+The `conic_and_rescale` vector is typically stored as a single 4-component vector (e.g., `vec4` in GLSL, `ti.Vector4f` in Taichi, or a struct of four floats). The components are accessed by index or named fields as defined above.
 
 **Steps:**
-1. Compute the difference vector $\Delta \mathbf{x}$ between the query point and the Gaussian mean: $\Delta x = xy.x - gaussian\_mean.x$, $\Delta y = xy.y - gaussian\_mean.y$ [S1, unofficial].
-2. Compute the exponent using the conic matrix components: $E = -0.5 (\Delta x^2 C_{00} + \Delta y^2 C_{11}) - \Delta x \Delta y C_{01}$ [S1, unofficial].
-3. Apply the exponential and rescale: $p = \exp(E) \cdot R$ [S1, unofficial].
+1. Compute the difference vector $\Delta = xy - gaussian\_mean$.
+   $$ \Delta x = xy.x - gaussian\_mean.x $$
+   $$ \Delta y = xy.y - gaussian\_mean.y $$
+2. Compute the exponent term using the conic matrix components and the difference vector. The quadratic form is:
+   $$ E = -0.5 (\Delta x^2 C_{00} + \Delta y^2 C_{11}) - \Delta x \Delta y C_{01} $$
+   Note: The source code [S1, unofficial] implements this as:
+   $$ E = -0.5 \cdot (\Delta x^2 \cdot C_{00} + \Delta y^2 \cdot C_{11}) - \Delta x \cdot \Delta y \cdot C_{01} $$
+3. Compute the exponential of the exponent term.
+   $$ \text{exp\_val} = \exp(E) $$
+4. Multiply by the rescaling factor $R$.
+   $$ p = \text{exp\_val} \cdot R $$
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
 def compute_2d_gaussian_pdf_conic(xy, gaussian_mean, conic_and_rescale):
-    dx = xy[0] - gaussian_mean[0]
-    dy = xy[1] - gaussian_mean[1]
-    C00 = conic_and_rescale[0]
-    C01 = conic_and_rescale[1]
-    C11 = conic_and_rescale[2]
-    R = conic_and_rescale[3]
+    # Step 1: Compute difference vector
+    dx = xy.x - gaussian_mean.x
+    dy = xy.y - gaussian_mean.y
+    
+    # Step 2: Compute exponent term
+    # C00 = conic_and_rescale.x, C01 = conic_and_rescale.y, C11 = conic_and_rescale.z
+    C00 = conic_and_rescale.x
+    C01 = conic_and_rescale.y
+    C11 = conic_and_rescale.z
+    
+    # Quadratic form: -0.5 * (dx^2 * C00 + dy^2 * C11) - dx * dy * C01
     exponent = -0.5 * (dx * dx * C00 + dy * dy * C11) - dx * dy * C01
-    return math.exp(exponent) * R
+    
+    # Step 3: Exponential
+    exp_val = math.exp(exponent)
+    
+    # Step 4: Rescale
+    R = conic_and_rescale.w
+    p = exp_val * R
+    
+    return p
 ```
 
 **Parameters:**
-- $R$: The rescaling factor [S1, unofficial].
+- $C_{00}, C_{01}, C_{11}$: Elements of the inverse covariance matrix (conic matrix). These must be derived from the 3D Gaussian's covariance matrix projected to 2D and inverted.
+- $R$: Rescaling factor. Often related to opacity or normalization constants.
 
 **Edge Cases and Pitfalls:**
-- Precision, boundaries, and degenerate input handling are not specified in the sources.
+- **Precision:** The exponent can become very large negative numbers, leading to underflow to zero. This is expected behavior for points far from the mean.
+- **Conic Matrix Validity:** The conic matrix must be positive definite for the Gaussian to be well-defined. If the matrix is singular or negative definite, the result may be invalid or unstable.
+- **Rescaling Factor:** If $R=0$, the result is always 0. If $R$ is very large, it may cause overflow if the exponent is close to 0.
 
 ## Subtopics
 
-### 2D Gaussian Evaluation
-Computes the exponent term of the 2D Gaussian probability density function at given 2D points for rasterization or shading [S2, unofficial]. It operates on batches of points and means [S2, unofficial]. Definition: Computes $P = -\frac{1}{2} (\mathbf{x}_m^T C_{2D}^{-1} \mathbf{x}_m)$, where $\mathbf{x}_m$ is the difference vector and $C_{2D}^{-1}$ is the inverse covariance matrix [S2, unofficial]. Steps: 1. Compute difference vector: $\mathbf{x}_m = \text{points}_{2D} - \text{means}_{2D}$ [S2, unofficial]. 2. Reshape for batched matrix multiplication: $\mathbf{x}_m^{\text{col}} = \mathbf{x}_m.\text{unsqueeze}(-1)$, $\mathbf{x}_m^{\text{row}} = \mathbf{x}_m.\text{unsqueeze}(-2)$ [S2, unofficial]. 3. Compute inverse covariance: $C_{2D}^{-1} = \text{cov}_{2D}.\text{inverse}()$, unsqueezed for broadcasting [S2, unofficial]. 4. Compute quadratic form: $P = -0.5 \cdot (\mathbf{x}_m^{\text{row}} @ C_{2D}^{-1} @ \mathbf{x}_m^{\text{col}}).\text{squeeze}(-1).\text{squeeze}(-1)$ [S2, unofficial]. When to choose: Use this variant when working with batched tensor operations (e.g., in PyTorch) and when the covariance matrix is available directly rather than its inverse [S2, unofficial].
+### [2D Gaussian Evaluation](4728-2d-gaussian-evaluation.md)
+Computes the exponent term of the 2D Gaussian probability density function at given 2D points, used for rasterization or shading. It differs from its parent [2D Gaussian Probability Density (Conic)](3475-2d-gaussian-probability-density-conic.md) by returning only the unnormalized exponent value $P$ rather than the full normalized density, allowing the caller to apply normalization factors or opacity scaling separately.
 
 ## Operating characteristics
+- **Time Complexity:** $O(1)$ per evaluation. It involves a constant number of arithmetic operations (multiplications, additions) and one exponential function.
+- **Memory Complexity:** $O(1)$ auxiliary space.
+- **Performance:** The computation is lightweight and suitable for per-pixel evaluation in rasterization pipelines. The exponential function is the most expensive operation, but it is typically optimized in hardware or libraries.
+- **Strengths:** Direct use of conic matrix avoids explicit inversion during evaluation. The rescaling factor allows flexible handling of opacity.
+- **Limitations:** Only computes the unnormalized density. The caller must ensure the conic matrix is correctly computed and positive definite.
+- **When to use:** When rasterizing 2D Gaussians derived from 3D Gaussian Splatting, especially when the conic representation is already available and a rescaling factor is needed.
+- **When not to use:** When the full normalized PDF is required without additional scaling, or when the covariance matrix is available in standard form and inversion is not pre-computed.
 
 ## Background
+This method is part of the Gaussian Splatting rendering pipeline, specifically for evaluating 2D Gaussians projected from 3D space. The conic representation (inverse covariance matrix) is often used in rasterization to avoid repeated matrix inversions. The rescaling factor is introduced to handle opacity and normalization. The implementation is based on the Taichi 3D Gaussian Splatting library [S1, unofficial].
 
 ## Sources
 [S1] wanmeihuali/taichi_3d_gaussian_splatting, https://github.com/wanmeihuali/taichi_3d_gaussian_splatting, fetched 2026-10-27 (unofficial)
-[S2] Fhz2346/3D-Gaussian-Splatting, https://github.com/Fhz2346/3D-Gaussian-Splatting, fetched 2026-10-27 (unofficial)

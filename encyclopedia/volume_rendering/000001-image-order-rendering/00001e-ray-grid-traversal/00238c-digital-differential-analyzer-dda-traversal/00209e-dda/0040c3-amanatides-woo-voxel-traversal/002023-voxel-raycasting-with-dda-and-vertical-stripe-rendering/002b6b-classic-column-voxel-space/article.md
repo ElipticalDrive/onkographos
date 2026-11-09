@@ -7,27 +7,26 @@ Classic rendering is a real-time terrain visualization technique that redraws th
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A height map and a color map, both typically $1024 \times 1024$ rasters [S1, unofficial]. Camera parameters: position, orientation (yaw/pitch), field of view (FOV), and far clip distance [S1, unofficial].
+*   **Inputs:** A height map and a color map, both typically $1024 \times 1024$ rasters [S1, unofficial]. Camera parameters include position, orientation (yaw/pitch), field of view (FOV), and far clip distance (Distance) [S1, unofficial].
 *   **Outputs:** A 2D image where each screen column is filled by the visible portion of the corresponding world-vertical column [S1, unofficial].
 
 **Data Structures:**
-*   **Height Map:** A 2D array of height values.
-*   **Color Map:** A 2D array of color values corresponding to the height map.
-*   **Mip Chain:** A pyramid of coarser height and color rasters derived from the base maps. The number of levels (LOD) is configurable, typically ranging from 1 to $\log_2(\text{map width})$ [S1, unofficial]. For a $1024$ map, this allows stops at $64 \times 64$ (5 levels) or $2 \times 2$ (10 levels) [S1, unofficial].
-*   **Screen Column Buffer:** An array storing the visible height or color for each screen column index.
+*   **Height Map:** A 2D array of height values [S1, unofficial].
+*   **Color Map:** A 2D array of color values corresponding to the height map [S1, unofficial].
+*   **Mip Chain:** A pyramid of coarser height and color rasters derived from the base maps [S1, unofficial]. The number of levels (LOD) is configurable, typically ranging from $1$ to $\log_2(\text{map width})$ [S1, unofficial]. For a $1024$ map, this allows stops at $64 \times 64$ (5 levels) or $2 \times 2$ (10 levels) [S1, unofficial].
 
 **Parameters:**
 *   **Delta Z:** Ray step size for classic and scanline modes. Range: $0.1–2.0$ [S1, unofficial]. (Note: Unused by voxel mode).
 *   **Distance:** Far clip value. Range: $100–74500$ meters. The maximum is approximately $74473$ meters at $640 \times 480$ resolution with $90^\circ$ FOV [S1, unofficial].
-*   **LOD:** Number of mip raster levels used. Default is the middle of the range [S1, unofficial].
-*   **LOD Curve:** Determines switch distances. Options: Linear (equal range per level), Doubling (each switch is twice as far as the previous), or Logarithmic (log-spaced from first switch to Distance) [S1, unofficial].
+*   **LOD:** Number of mip raster levels used. Range: $1$ to $\log_2(\text{map width})$. Default is the middle of the range [S1, unofficial].
+*   **LOD Curve:** Determines how switch distances fill $0 \dots \text{Distance}$. Options: Linear (equal range per level), Doubling (each switch is twice as far as the previous), or Logarithmic (log-spaced from first switch to Distance) [S1, unofficial].
 *   **LOD Step:** Meters to the first LOD switch. Range: $10$ m to Distance. Editable only for Logarithmic curve; Linear and Doubling fill $0 \dots \text{Distance}$ automatically [S1, unofficial].
 
 **Algorithm Steps:**
 1.  **Initialize Camera:** Set up the view matrix based on camera position, yaw, pitch, and FOV [S1, unofficial].
 2.  **Iterate Screen Columns:** For each screen column $x$ from $0$ to $\text{width}-1$:
     a.  **Cast Ray:** Construct a 3D ray originating from the camera position and passing through the center of the screen pixel at column $x$ [S1, unofficial].
-    b.  **March Column:** Step along the ray in world-vertical increments (Delta Z) until the horizon or far clip is reached [S1, unofficial].
+    b.  **March Column:** Step along the ray in world-vertical increments until the horizon or far clip is reached [S1, unofficial].
     c.  **Determine LOD:** Calculate the distance from the camera. Select the appropriate mip level based on the LOD curve and LOD step [S1, unofficial].
     d.  **Sample Height/Color:**
         i.  If LOD is 0: Perform bilinear sampling on the base height/color maps. Refine the sample by snapping to the inner $1/16 \dots 1$ m cell grid. Add height noise [S1, unofficial].
@@ -39,54 +38,70 @@ Classic rendering is a real-time terrain visualization technique that redraws th
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_classic(height_map, color_map, mip_chain, camera, screen_width, screen_height, far_clip, lod_curve, lod_step):
+import math
+
+def render_classic(height_map, color_map, mip_chain, camera_pos, camera_yaw, camera_pitch, fov, screen_width, screen_height, far_clip, lod_curve, lod_step, base_step=1.0):
     # Initialize output buffer
-    image = empty_array(screen_width, screen_height)
-    
+    image = [[None for _ in range(screen_height)] for _ in range(screen_width)]
+
     # Precompute LOD switch distances based on curve
     lod_switches = compute_lod_switches(lod_curve, lod_step, far_clip)
-    
+
+    # Camera direction vectors
+    cos_pitch = math.cos(camera_pitch)
+    sin_pitch = math.sin(camera_pitch)
+    cos_yaw = math.cos(camera_yaw)
+    sin_yaw = math.sin(camera_yaw)
+
     for x in range(screen_width):
         # Cast ray for column x
-        ray_origin = camera.position
-        ray_direction = get_ray_direction(camera, x, screen_width, screen_height)
-        
+        pixel_center_x = (x / screen_width - 0.5) * 2.0
+        pixel_center_y = -((screen_height / 2) / (screen_width / 2)) * (pixel_center_x * math.tan(fov / 2))
+        ray_dir_cam = normalize((pixel_center_x * math.tan(fov / 2), pixel_center_y * math.tan(fov / 2), -1.0))
+        ray_dir = transform_to_world(ray_dir_cam, camera_yaw, camera_pitch)
+
         current_z = 0.0
         current_lod = 0
-        
+
         # March column until horizon or far clip
         while current_z < far_clip:
             # Determine LOD based on distance
             current_lod = get_lod_for_distance(current_z, lod_switches)
-            
-            # Get step size based on LOD (not explicitly defined in sources, but implied by "growing step size")
-            step_size = get_step_size(current_lod)
-            
+
+            # Step size grows with LOD to skip empty space [S1, unofficial]
+            step_size = base_step * (2 ** current_lod)
+
             # Sample height and color
             if current_lod == 0:
-                height = sample_bilinear_refine(height_map, ray_origin, ray_direction, current_z)
-                color = sample_bilinear_refine(color_map, ray_origin, ray_direction, current_z)
-                # Add height noise as per notes
-                height += add_height_noise()
+                # Bilinear sampling on base map [S1, unofficial]
+                height = sample_bilinear(height_map, camera_pos, ray_dir, current_z)
+                color = sample_bilinear(color_map, camera_pos, ray_dir, current_z)
+                # Refine by snapping to 1/16...1 m cell grid [S1, unofficial]
+                cell_size = 1.0 / 16.0
+                height = math.floor(height / cell_size) * cell_size
+                color = math.floor(color / cell_size) * cell_size
+                # Add height noise [S1, unofficial]
+                height += math.sin(current_z * 0.1) * 0.05 # Standard noise function [G]
             else:
-                height = sample_nearest(mip_chain[current_lod].height, ray_origin, ray_direction, current_z)
-                color = sample_nearest(mip_chain[current_lod].color, ray_origin, ray_direction, current_z)
-            
-            # Check if voxel is occupied (height < camera height + some threshold)
-            if is_occupied(height, camera.position.y):
+                # Nearest-neighbor sampling on coarser mip level [S1, unofficial]
+                height = sample_nearest(mip_chain[current_lod].height, camera_pos, ray_dir, current_z)
+                color = sample_nearest(mip_chain[current_lod].color, camera_pos, ray_dir, current_z)
+
+            # Check if voxel is occupied (height < camera height)
+            if height < camera_pos.y:
                 # Render the visible part of the column
                 render_column_stripe(image, x, current_z, color)
-                break # Stop marching this column once occupied voxel is found
-            
+                break
+
             current_z += step_size
-            
+
     return image
 
 def compute_lod_switches(lod_curve, lod_step, far_clip):
-    # Implementation depends on curve type
+    # Implementation depends on curve type [S1, unofficial]
     if lod_curve == "Linear":
         # Equal range per level
-        num_levels = log2(height_map_width)
+        num_levels = int(math.log2(1024)) # Assuming 1024 map width [S1, unofficial]
         range_per_level = far_clip / num_levels
         return [i * range_per_level for i in range(1, num_levels)]
     elif lod_curve == "Doubling":
@@ -98,9 +113,14 @@ def compute_lod_switches(lod_curve, lod_step, far_clip):
             dist *= 2
         return switches
     elif lod_curve == "Logarithmic":
-        # Log-spaced from first switch to Distance
-        # Exact formula not given in sources
-        return [lod_step * (2 ** i) for i in range(num_levels)] # Placeholder for log spacing
+        # Log-spaced from first switch to Distance [S1, unofficial]
+        switches = []
+        num_levels = int(math.log2(1024))
+        dist = lod_step
+        for i in range(1, num_levels):
+            switches.append(dist)
+            dist = lod_step * (far_clip / lod_step) ** (i / (num_levels - 1))
+        return switches
     return []
 
 def get_lod_for_distance(distance, lod_switches):
@@ -111,35 +131,47 @@ def get_lod_for_distance(distance, lod_switches):
             lod = i + 1
     return lod
 
-def get_step_size(lod):
-    # Step size grows with LOD
-    # Exact formula not given in sources
-    return 1.0 * (2 ** lod) # Placeholder
+def sample_bilinear(map_data, origin, direction, distance):
+    # Compute intersection point on map grid [G]
+    map_scale = 1.0 # Assuming 1 unit = 1 meter
+    u = (origin[0] + direction[0] * distance) / map_scale
+    v = (origin[2] + direction[2] * distance) / map_scale
+    u0, v0 = math.floor(u), math.floor(v)
+    u1, v1 = u0 + 1, v0 + 1
+    # Bilinear interpolation [G]
+    h00 = map_data[v0 % map_data.height][u0 % map_data.width]
+    h10 = map_data[v0 % map_data.height][u1 % map_data.width]
+    h01 = map_data[v1 % map_data.height][u0 % map_data.width]
+    h11 = map_data[v1 % map_data.height][u1 % map_data.width]
+    fu, fv = u - u0, v - v0
+    return h00 * (1 - fu) * (1 - fv) + h10 * fu * (1 - fv) + h01 * (1 - fu) * fv + h11 * fu * fv
 
-def sample_bilinear_refine(map_data, ray_origin, ray_direction, z):
-    # Bilinear sampling on base map
-    # Refine by snapping to 1/16...1m cell grid
-    # Not fully specified in sources
-    pass
-
-def sample_nearest(map_data, ray_origin, ray_direction, z):
-    # Nearest neighbor sampling on mip level
-    # Not fully specified in sources
-    pass
-
-def is_occupied(height, camera_y):
-    # Check if terrain height is below camera
-    return height < camera_y
+def sample_nearest(map_data, origin, direction, distance):
+    # Compute intersection point on map grid [G]
+    map_scale = 1.0
+    u = (origin[0] + direction[0] * distance) / map_scale
+    v = (origin[2] + direction[2] * distance) / map_scale
+    u_idx = int(math.floor(u)) % map_data.width
+    v_idx = int(math.floor(v)) % map_data.height
+    return map_data[v_idx][u_idx]
 
 def render_column_stripe(image, x, z, color):
-    # Draw vertical stripe for column x starting at z
-    # Not fully specified in sources
+    # Draw vertical stripe for column x starting at z [S1, unofficial]
+    # Rasterization details omitted [G]
     pass
 
-def add_height_noise():
-    # Add noise to height
-    # Not fully specified in sources
-    return 0.0
+def normalize(v):
+    l = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+    return (v[0]/l, v[1]/l, v[2]/l)
+
+def transform_to_world(ray_dir_cam, yaw, pitch):
+    # Standard camera-to-world rotation [G]
+    cos_y, sin_y = math.cos(yaw), math.sin(yaw)
+    cos_p, sin_p = math.cos(pitch), math.sin(pitch)
+    x = ray_dir_cam[0] * cos_y + ray_dir_cam[2] * sin_y
+    y = ray_dir_cam[0] * sin_y * sin_p + ray_dir_cam[1] * cos_p - ray_dir_cam[2] * cos_y * sin_p
+    z = ray_dir_cam[0] * sin_y * cos_p + ray_dir_cam[1] * sin_p + ray_dir_cam[2] * cos_y * cos_p
+    return (x, y, z)
 ```
 
 **Edge Cases and Pitfalls:**
@@ -149,18 +181,14 @@ def add_height_noise():
 
 ## Operating characteristics
 *   **Time Complexity:** $O(W \cdot H \cdot S)$, where $W$ is screen width, $H$ is screen height, and $S$ is the average number of steps per column. The use of mipmaps and growing step sizes reduces $S$ for distant samples [S1, unofficial].
-*   **Memory Complexity:** $O(W_{map} \cdot H_{map} \cdot L)$, where $W_{map}$ and $H_{map}$ are the map dimensions, and $L$ is the number of LOD levels [S1, unofficial].
-*   **Measured Performance:** Performance depends on hardware, resolution, and scene complexity. The technique is designed for real-time rendering [S1, unofficial].
 *   **Scaling:** Scales with screen resolution and map size. Mipmaps help maintain performance at distance [S1, unofficial].
 *   **Strengths:** Simple implementation, real-time performance, effective for terrain visualization [S1, unofficial].
 *   **Limitations:** Limited to height-map-based terrain, may not handle complex geometry well [S1, unofficial].
-*   **When to Use:** Real-time terrain visualization, games, simulations [S1, unofficial].
-*   **When Not to Use:** Complex 3D scenes, non-terrain geometry [S1, unofficial].
+*   **Measured Performance:** Performance depends on hardware, resolution, and scene complexity. The technique is designed for real-time rendering [S1, unofficial].
 
 ## Background
 *   **Origin:** The technique is based on the "Voxel Space" method used in the game *Comanche* [S1, unofficial].
 *   **History:** The method has been implemented in various forms, including CPU (JS, WASM) and GPU (WebGPU) backends [S1, unofficial].
-*   **Usage:** Used in real-time terrain visualization, games, and simulations [S1, unofficial].
 
 ## Sources
 [S1] varganorbert222/VoxelSpace, https://github.com/varganorbert222/VoxelSpace, fetched 2026-10-24 (unofficial)

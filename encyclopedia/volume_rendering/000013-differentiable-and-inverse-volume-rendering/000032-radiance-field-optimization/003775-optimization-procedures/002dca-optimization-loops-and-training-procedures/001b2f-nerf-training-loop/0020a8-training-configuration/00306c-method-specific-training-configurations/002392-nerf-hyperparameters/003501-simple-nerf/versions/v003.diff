@@ -1,0 +1,121 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,5 @@
+ # Simple-NeRF
+ 
+-Also called: Simple Radiance Field for NeRF, Simple-NeRF regularization
++Also called: Simple-RF for NeRF
+ 
+ ## Overview
+@@ -29,8 +29,8 @@
+ 
+ 1.  **Initialization:** Initialize main NeRF ($N_1, N_2$) and two augmented models: Smoothing ($N_{1s}, N_{2s}$) and Lambertian ($N_{1l}, N_{2l}$) [S1].
+-2.  **Forward Pass (Main):** For each pixel, sample points along the ray. Compute density $\sigma$ and color $\mathbf{c}$ using $N_1$ and $N_2$. Compute mean depth $z_m$ [S1].
++2.  **Forward Pass (Main):** For each pixel, sample points along the ray [S1]. Compute density $\sigma$ and color $\mathbf{c}$ using $N_1$ and $N_2$ [S1]. Compute mean depth $z_m$ [S1].
+ 3.  **Forward Pass (Augmented):**
+     *   **Smoothing:** Pass remaining high-frequency positional encoding components ($l_{ps}$ to $l_p$) of $\mathbf{p}_i$ to the fine MLP $N_{2s}$ along with latent features $\mathbf{h}_i$ and view direction $\mathbf{v}_i$: $\mathbf{c}_i = N_{2s}(\mathbf{h}_i, \gamma(\mathbf{p}_i, l_{ps}, l_p), \gamma(\mathbf{v}_i, 0, l_v))$ [S1]. Render coarse depth $z_s$ [S1].
+-    *   **Lambertian:** Pass $\gamma(\mathbf{p}_i, 0, l_p)$ to $N_{1l}$ to get $\mathbf{h}_{il}$. Pass $\mathbf{h}_{il}$ and zero view direction to $N_{2l}$ to get $\mathbf{c}_{il}$. Render coarse depth $z_l$ [S1].
++    *   **Lambertian:** Pass $\gamma(\mathbf{p}_i, 0, l_p)$ to $N_{1l}$ to get $\mathbf{h}_{il}$ [S1]. Pass $\mathbf{h}_{il}$ and zero view direction to $N_{2l}$ to get $\mathbf{c}_{il}$ [S1]. Render coarse depth $z_l$ [S1].
+ 4.  **Reliability Masking:** Compute reliability masks $m_a$ (for augmented) and $m_m$ (for main) by reprojecting to the closest training view and checking intensity consistency [S1]. If intensities do not match (e.g., specular regions), the mask is zero [S1].
+ 5.  **Depth Supervision Loss ($L_{aug}$):** Impose depth supervision using stop-gradient ($\hat{\nabla}$) on the target depth to prevent gradient flow to the teacher model:
+@@ -50,54 +50,61 @@
+     return torch.cat([torch.sin(x * freqs), torch.cos(x * freqs)], dim=-1)
+ 
+-def volume_render_depth(z, sigma):
+-    alpha = 1.0 - torch.exp(-sigma * z.diff(dim=-1))
+-    weights = alpha * torch.cumprod(torch.cat([torch.ones_like(alpha[..., :1]), 1.0 - alpha[..., :-1] + 1e-10], dim=-1), dim=-1)
+-    mean_depth = torch.sum(weights * z, dim=-1)
+-    return mean_depth
++def stop_gradient(x):
++    return x.detach()
+ 
+-def compute_reliability_mask(depth, images, poses, intrinsics):
+-    projected = reproject_to_training_view(depth, poses, intrinsics)
+-    consistency = compare_intensity(projected, images)
+-    return (consistency > threshold).float()
++def volume_render(z_samples, sigma, N, h, v):
++    # Standard volume rendering [G]
++    deltas = torch.cat([z_samples[..., 1:] - z_samples[..., :-1], torch.zeros_like(z_samples[..., -1:])], dim=-1)
++    alpha = 1.0 - torch.exp(-sigma * deltas)
++    T = torch.cumprod(1.0 - alpha + 1e-10, dim=-1)
++    weights = alpha * torch.cat([torch.ones_like(T[..., :1]), T[..., :-1]], dim=-1)
++    color = torch.sum(weights.unsqueeze(-1) * N(h, positional_encoding(v, 0, l_v)), dim=-2)
++    mean_depth = torch.sum(weights * z_samples, dim=-1)
++    return color, mean_depth, weights
+ 
+-def simple_nerf_training_step(images, poses, intrinsics, N1, N2, N2s, N2l):
+-    # 1. Forward pass Main Model
++def compute_reliability_mask(depth, gt_images, poses, intrinsics):
++    # Reproject depth to closest training view and check intensity consistency [G]
++    projected_2d = project_to_2d(depth, poses, intrinsics)
++    sampled_gt = sample_image(gt_images, projected_2d)
++    mask = (torch.abs(sampled_gt - depth[..., :3]) < threshold).float()
++    return mask
++
++def simple_nerf_training_step(positions, views, gt_images, poses, intrinsics, N1, N2, N2s, N2l):
++    # 1. Main Model Forward (Coarse)
+     pos_enc_main = positional_encoding(positions, 0, l_p)
+     sigma_c, h_c = N1(pos_enc_main)
+-    z_c = compute_depth_from_sampling()
+-    C_c = volume_render_color(z_c, sigma_c, N2, h_c, views)
+-    z_m = volume_render_depth(z_c, sigma_c)
+-    
+-    # 2. Forward pass Augmented Models
++    C_c, z_c, _ = volume_render(positions, sigma_c, N2, h_c, views)
++    z_m = z_c
++
++    # 2. Augmented Models Forward (Coarse only)
+     pos_enc_s = positional_encoding(positions, l_ps, l_p)
+-    C_s = N2s(h_c, pos_enc_s, views)
+-    z_s = volume_render_depth(z_c, sigma_c)
+-    
++    C_s, z_s, _ = volume_render(positions, sigma_c, N2s, h_c, views)
++
+     pos_enc_l = positional_encoding(positions, 0, l_p)
+     views_zero = torch.zeros_like(views)
+-    C_l = N2l(h_c, pos_enc_l, views_zero)
+-    z_l = volume_render_depth(z_c, sigma_c)
+-    
+-    # 3. Compute Reliability Masks
+-    m_main = compute_reliability_mask(z_m, images, poses, intrinsics)
+-    m_aug_s = compute_reliability_mask(z_s, images, poses, intrinsics)
+-    m_aug_l = compute_reliability_mask(z_l, images, poses, intrinsics)
+-    m_c = compute_reliability_mask(z_c, images, poses, intrinsics)
+-    m_f = compute_reliability_mask(z_f, images, poses, intrinsics)
+-    
+-    # 4. Compute Losses
+-    L_photo = torch.mean((C_c - images) ** 2)
+-    
+-    # Depth Supervision Loss (Smoothing)
++    C_l, z_l, _ = volume_render(positions, sigma_c, N2l, h_c, views_zero)
++
++    # 3. Reliability Masks
++    m_main = compute_reliability_mask(z_m, gt_images, poses, intrinsics)
++    m_aug_s = compute_reliability_mask(z_s, gt_images, poses, intrinsics)
++    m_aug_l = compute_reliability_mask(z_l, gt_images, poses, intrinsics)
++
++    # 4. Photometric Loss
++    L_photo = torch.mean((C_c - gt_images) ** 2)
++
++    # 5. Depth Supervision Loss
+     L_s = torch.mean(m_aug_s * (z_m - stop_gradient(z_s)) ** 2 + m_main * (stop_gradient(z_m) - z_s) ** 2)
+-    # Depth Supervision Loss (Lambertian)
+     L_l = torch.mean(m_aug_l * (z_m - stop_gradient(z_l)) ** 2 + m_main * (stop_gradient(z_m) - z_l) ** 2)
+     L_aug = L_s + L_l
+-    
+-    # Coarse-Fine Consistency Loss
++
++    # 6. Coarse-Fine Consistency Loss (Fine sampling around surfaces [G])
++    z_f_samples = sample_fine(positions, z_c, sigma_c)
++    sigma_f, _ = N2(pos_enc_main)
++    C_f, z_f, _ = volume_render(z_f_samples, sigma_f, N2, h_c, views)
++    m_c = compute_reliability_mask(z_c, gt_images, poses, intrinsics)
++    m_f = compute_reliability_mask(z_f, gt_images, poses, intrinsics)
+     L_cfc = torch.mean(m_f * (z_c - stop_gradient(z_f)) ** 2 + m_c * (stop_gradient(z_c) - z_f) ** 2)
+-    
+-    loss = L_photo + L_aug + L_cfc
+-    return loss
++
++    return L_photo + L_aug + L_cfc
+ ```
+ 

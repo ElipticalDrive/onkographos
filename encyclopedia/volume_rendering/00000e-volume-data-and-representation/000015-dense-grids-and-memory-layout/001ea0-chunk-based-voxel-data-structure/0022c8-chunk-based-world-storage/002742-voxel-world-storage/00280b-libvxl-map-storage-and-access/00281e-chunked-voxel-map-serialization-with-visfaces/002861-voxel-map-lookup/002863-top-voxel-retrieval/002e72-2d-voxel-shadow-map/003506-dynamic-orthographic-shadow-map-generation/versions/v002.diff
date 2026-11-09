@@ -1,0 +1,188 @@
+--- v001.md
++++ v002.md
+@@ -4,26 +4,26 @@
+ 
+ ## Overview
+-Generates a per-frame depth texture from a directional light's perspective to compute shadow occlusion for voxel models [S1, unofficial]. It differs from ray-marched voxel shadows by pre-computing the highest occupied voxel Y-coordinate per (X, Z) column into a 2D texture, allowing lighting calculations to use simple depth comparisons without traversal [S1, unofficial]. This method builds on the [2D Voxel Shadow Map](5769-2d-voxel-shadow-map.md) concept by dynamically updating the depth buffer every frame to reflect moving objects or changing geometry.
++Generates a per-frame depth texture from a directional light's perspective to compute shadow occlusion for voxel models [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Scene entities with bounding boxes, directional light direction (from scene trie), current viewport dimensions.
+-*   **Output:** A 1024x1024 depth texture (`shadowDepthTexture`) attached to an OpenGL framebuffer object (`shadowFramebuffer`).
++*   **Input:** Scene entities with bounding boxes, directional light direction (from scene trie), current viewport dimensions [S1, unofficial].
++*   **Output:** A 1024x1024 depth texture (`shadowDepthTexture`) attached to an OpenGL framebuffer object (`shadowFramebuffer`) [S1, unofficial].
+ 
+ **Data Structures:**
+-*   `shadowFramebuffer`: OpenGL FBO ID bound to `GL_FRAMEBUFFER`.
+-*   `shadowDepthTexture`: 2D texture ID, internal format `GL_DEPTH_COMPONENT`, type `GL_FLOAT`, dimensions 1024x1024, attached to `GL_DEPTH_ATTACHMENT`.
+-*   `shadowMatrix`: `Matrix4x4` (4x4 column-major float array).
+-*   `AABB`: Axis-Aligned Bounding Box defined by `min` (Vector3) and `max` (Vector3).
++*   `shadowFramebuffer`: OpenGL framebuffer object ID bound to `GL_FRAMEBUFFER` [S1, unofficial].
++*   `shadowDepthTexture`: 2D texture ID, internal format `GL_DEPTH_COMPONENT`, type `GL_FLOAT`, dimensions 1024x1024, attached to `GL_DEPTH_ATTACHMENT` [S1, unofficial].
++*   `shadowMatrix`: 4x4 column-major float array [S1, unofficial].
++*   `AABB`: Axis-Aligned Bounding Box defined by `min` and `max` vectors [S1, unofficial].
+ 
+ **Parameters:**
+-*   `shadowTextureWidth`, `shadowTextureHeight`: 1024 pixels.
+-*   Orthographic Projection Bounds: `right=210`, `left=-210`, `top=210`, `bottom=-210`, `near=210`, `far=-210`.
+-*   Z-clamp Range: `[0, 255]`.
++*   `shadowTextureWidth`, `shadowTextureHeight`: Resolution of the shadow depth map in pixels [S1, unofficial].
++*   Orthographic projection bounds: `right=210`, `left=-210`, `top=210`, `bottom=-210`, `near=210`, `far=-210` [S1, unofficial].
++*   Z-clamp range: Minimum and maximum Z coordinates constrained to `[0, 255]` before matrix construction [S1, unofficial].
+ 
+ **Steps:**
+ 1.  Initialize global bounding box vectors `min` to $(\infty, \infty, \infty)$ and `max` to $(-\infty, -\infty, -\infty)$ [S1, unofficial].
+ 2.  Retrieve the model's bounding box and screen-space bounds via `GetModelBounds` [S1, unofficial].
+-3.  If the object's screen-space bounds fall completely outside the viewport, skip it to avoid unnecessary updates [S1, unofficial].
++3.  If the object's screen-space bounds fall completely outside the viewport, skip it to avoid unnecessary shadow map updates [S1, unofficial].
+ 4.  Expand the global AABB to encapsulate the current model's bounds:
+     $$ min = \min(min, model\_min) $$
+@@ -47,6 +47,6 @@
+ def generate_shadow_map(entities, light_direction, viewport_bounds):
+     # 1. Initialize bounds
+-    min_bound = Vector3(INFINITY, INFINITY, INFINITY)
+-    max_bound = Vector3(-INFINITY, -INFINITY, -INFINITY)
++    min_bound = [float('inf'), float('inf'), float('inf')]
++    max_bound = [float('-inf'), float('-inf'), float('-inf')]
+     object_count = 0
+ 
+@@ -55,54 +55,90 @@
+         model_min, model_max = entity.get_bounds()
+         screen_min, screen_max = get_model_bounds(entity, viewport_bounds)
+-        
++
+         # 3. Cull outside viewport
+         if not intersects_viewport(screen_min, screen_max, viewport_bounds):
+             continue
+-            
+-        min_bound = min(min_bound, model_min)
+-        max_bound = max(max_bound, model_max)
++
++        min_bound = [min(min_bound[i], model_min[i]) for i in range(3)]
++        max_bound = [max(max_bound[i], model_max[i]) for i in range(3)]
+         object_count += 1
+ 
+     # 5. Handle single object degenerate case
+     if object_count == 1:
+-        centroid = (min_bound + max_bound) / 2.0
++        centroid = [(min_bound[i] + max_bound[i]) / 2.0 for i in range(3)]
+         min_bound = centroid
+         max_bound = centroid
+ 
+     # 6. Clamp Z
+-    min_bound.z = clamp(min_bound.z, 0, 255)
+-    max_bound.z = clamp(max_bound.z, 0, 255)
++    min_bound[2] = max(0.0, min(255.0, min_bound[2]))
++    max_bound[2] = max(0.0, min(255.0, max_bound[2]))
+ 
+     # 7-9. Compute Matrices
+-    identity = Matrix4x4.identity()
+-    centroid = (min_bound + max_bound) / 2.0
+-    view_matrix = look_at(centroid, centroid + light_direction, Vector3(0, 1, 0))
+-    
++    identity = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
++    centroid = [(min_bound[i] + max_bound[i]) / 2.0 for i in range(3)]
++    view_matrix = look_at(centroid, [centroid[0], centroid[1], centroid[2] + light_direction[2]], [0, 1, 0])
++
+     right, left, top, bottom, near, far = 210, -210, 210, -210, 210, -210
+-    proj_matrix = Matrix4x4(
+-        m=[
+-            [2.0/(right-left), 0, 0, -(right+left)/(right-left)],
+-            [0, 2.0/(top-bottom), 0, -(top+bottom)/(top-bottom)],
+-            [0, 0, -2.0/(far-near), -(far+near)/(far-near)],
+-            [0, 0, 0, 1]
+-        ]
+-    )
+-    
+-    shadow_matrix = proj_matrix * view_matrix
++    proj_matrix = [
++        [2.0/(right-left), 0, 0, -(right+left)/(right-left)],
++        [0, 2.0/(top-bottom), 0, -(top+bottom)/(top-bottom)],
++        [0, 0, -2.0/(far-near), -(far+near)/(far-near)],
++        [0, 0, 0, 1]
++    ]
++
++    shadow_matrix = multiply_matrices(proj_matrix, view_matrix)
+ 
+     # 11. Setup FBO
+-    bind_framebuffer(GL_FRAMEBUFFER, shadow_framebuffer_id)
+-    set_viewport(0, 0, 1024, 1024)
+-    enable_depth_test()
+-    clear_depth_buffer()
++    # bind_framebuffer(GL_FRAMEBUFFER, shadow_framebuffer_id)
++    # set_viewport(0, 0, 1024, 1024)
++    # enable_depth_test()
++    # clear_depth_buffer()
+ 
+     # 12-13. Setup Shader
+-    use_shader(4)
+-    set_uniform_matrix4("shadowMatrix", shadow_matrix)
+-    set_uniform3("lightDirection", light_direction)
++    # use_shader(4)
++    # set_uniform_matrix4("shadowMatrix", shadow_matrix)
++    # set_uniform3("lightDirection", light_direction)
+ 
+     # 14. Render
+     for entity in entities:
+         render_entity(entity)
++
++# Helper definitions
++def get_model_bounds(entity, viewport):
++    # Not given in the sources.
++    pass
++def intersects_viewport(screen_min, screen_max, viewport):
++    # Not given in the sources.
++    pass
++def look_at(eye, target, up):
++    # Not given in the sources.
++    pass
++def multiply_matrices(a, b):
++    # Not given in the sources.
++    pass
++def bind_framebuffer(target, id):
++    # Not given in the sources.
++    pass
++def set_viewport(x, y, w, h):
++    # Not given in the sources.
++    pass
++def enable_depth_test():
++    # Not given in the sources.
++    pass
++def clear_depth_buffer():
++    # Not given in the sources.
++    pass
++def use_shader(index):
++    # Not given in the sources.
++    pass
++def set_uniform_matrix4(name, mat):
++    # Not given in the sources.
++    pass
++def set_uniform3(name, vec):
++    # Not given in the sources.
++    pass
++def render_entity(entity):
++    # Not given in the sources.
++    pass
+ ```
+ 
+@@ -110,5 +146,4 @@
+ *   **Degenerate AABB:** If only one object is shadowed, `min` equals `max`, resulting in a zero-volume orthographic matrix. This is handled by collapsing bounds to the object's centroid [S1, unofficial].
+ *   **Viewport Corruption:** Objects outside the viewport can corrupt the shadow matrix bounds if not culled. Early culling based on screen-space AABB prevents this [S1, unofficial].
+-*   **Precision:** The depth texture uses `GL_FLOAT`. Ensure the orthographic near/far planes are set correctly to maintain depth precision across the clamped Z range [S1, unofficial].
+ 
+ ## Subtopics
+@@ -118,6 +153,4 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of visible entities, as each entity is processed twice (once for bounds, once for rendering).
+-*   **Memory Complexity:** $O(1)$ for the shadow map itself (fixed 1024x1024 float depth buffer).
+ *   **Measured Performance:** Executed in the `ShadowsUpdate` system every game loop iteration [S1, unofficial].
+ *   **Strengths:** Fast per-frame update for dynamic scenes; simple depth comparison during lighting.
+@@ -127,5 +160,5 @@
+ 
+ ## Background
+-Originated in the PixelVoxels project by KellerMartins [S1, unofficial]. It is used in voxel-based games to provide real-time shadowing for dynamic entities without the computational cost of ray marching through the voxel grid.
++Executed in the ShadowsUpdate system every game loop iteration [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,134 @@
+# Spherical Harmonics Decoding
+
+Also called: RGB SH decoding, SH coefficient unpacking
+
+## Overview
+Spherical Harmonics (SH) Decoding is the process of extracting the RGB color components from the packed SH coefficient data stored in a Gaussian's feature vector. It solves the problem of interpreting the binary-packed SH coefficients, which are stored in a compact `Uint32Array` format, into standard floating-point RGB values for a specific SH degree. It differs from [Spherical Harmonics Evaluation](3848-spherical-harmonics-evaluation.md) by handling the raw data layout and unpacking logic rather than computing the final color via SH basis functions; it differs from [Spherical Harmonics Encoder](4390-spherical-harmonics-encoder.md) by performing the inverse operation of packing.
+
+## How it works
+**Inputs:**
+- `coefficients`: A flat `Uint32Array` containing the packed SH coefficients.
+- `degree`: The SH degree (integer, typically 0, 1, 2, or 3).
+
+**Outputs:**
+- `result`: An array of `Color` objects (or equivalent RGB tuples), one for each SH coefficient.
+
+**Data Structures:**
+- **Packed Layout**: SH coefficients are stored in a flat `Uint32Array` with 4 coefficients packed into each 32-bit word.
+- **Indexing**: For a coefficient index $c$:
+  - The word index in the array is $c \gg 2$ (integer division by 4).
+  - The channel offset within the word is $c \& 3$ (modulo 4).
+- **SH Keys**: A mapping `SH_KEYS` is used to determine the source array index for higher degrees, though for standard RGB decoding in this context, the linear packing is primary.
+
+**Steps:**
+1. Calculate the total number of coefficients: $N = \text{degree} \times (\text{degree} + 2)$.
+2. Initialize an empty list `result` of length $N$.
+3. Initialize an RGB accumulator `acc` to $[0, 0, 0]$.
+4. For each coefficient index $c$ from $0$ to $N-1$:
+   a. Determine the word index: $w\_idx = c \gg 2$.
+   b. Determine the channel offset: $ch\_off = c \& 3$.
+   c. Calculate the base byte/word offset: $base = w\_idx \times 4$.
+   d. Read the 32-bit word from `coefficients` at $w\_idx$. If the index is out of bounds, treat the word as 0.
+   e. Extract the RGB component for this coefficient from the word using the channel offset. This typically involves bit-shifting or masking depending on the specific packing scheme (e.g., if each channel is 8 bits, shift right by $ch\_off \times 8$ and mask with 0xFF).
+   f. Decode the extracted value into a normalized RGB float (e.g., divide by 255.0 if 8-bit, or apply a specific decoder function `decodeShRgbToArray`).
+   g. Create a `Color` object with the decoded RGB values.
+   h. Append the `Color` object to `result`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def decode_sh_rgb(coefficients: list[int], degree: int) -> list[tuple[float, float, float]]:
+    """
+    Decodes packed SH coefficients into RGB colors.
+    
+    Args:
+        coefficients: List of integers representing the packed Uint32Array.
+        degree: SH degree (0, 1, 2, or 3).
+        
+    Returns:
+        List of RGB tuples (r, g, b) with values in [0, 1].
+    """
+    num_coeffs = degree * (degree + 2)
+    result = []
+    
+    for c in range(num_coeffs):
+        # Determine word index and channel offset
+        word_idx = c >> 2
+        ch_off = c & 3
+        
+        # Read word, default to 0 if out of bounds
+        if word_idx < len(coefficients):
+            word = coefficients[word_idx]
+        else:
+            word = 0
+            
+        # Extract channel component
+        # Assuming 8-bit per channel packing within the 32-bit word
+        # Shift right by (ch_off * 8) and mask with 0xFF
+        channel_val = (word >> (ch_off * 8)) & 0xFF
+        
+        # Normalize to [0, 1]
+        r = channel_val / 255.0
+        
+        # Note: In a full 3-channel unpacking from a single word, 
+        # this logic would need to handle all 3 channels if the word 
+        # contains multiple coefficients' channels. 
+        # However, the source [S1, unofficial] implies a direct mapping per coefficient 
+        # to a color, or a specific decode function. 
+        # Given the "decodeShRgbToArray" reference, we assume a helper 
+        # that extracts the specific RGB triplet for this coefficient.
+        # Since the packing is 4 coeffs per word, and each coeff has 3 channels,
+        # a single word holds 12 channels. This simple extraction is illustrative.
+        # A more robust implementation would extract the full RGB triplet.
+        
+        # Simplified assumption based on "decodeShRgbToArray":
+        # The function handles the extraction of the full RGB triplet for coefficient c.
+        rgb = decode_sh_rgb_from_word(word, ch_off) # [G] Helper to extract full RGB
+        
+        result.append(rgb)
+        
+    return result
+
+def decode_sh_rgb_from_word(word: int, ch_off: int) -> tuple[float, float, float]:
+    """
+    Extracts RGB from a 32-bit word given the channel offset.
+    Assumes 8-bit per channel.
+    """
+    # This is a placeholder for the specific bit-packing logic.
+    # If each coefficient is 3 channels, and 4 coeffs per word,
+    # the layout is complex. [S1, unofficial] suggests a direct index mapping.
+    # For the purpose of this article, we assume the existence of
+    # a decoder that maps the packed word and offset to RGB.
+    return (0.0, 0.0, 0.0) # [G] Placeholder for specific bit manipulation
+```
+
+**Parameters:**
+- `degree`: Typical values are 0, 1, 2, or 3. Degree 0 is 1 coefficient, Degree 1 is 3, Degree 2 is 6, Degree 3 is 10.
+
+**Edge Cases:**
+- **Out of Bounds**: If `word_idx` exceeds the length of `coefficients`, the word is treated as 0.
+- **Precision**: Ensure that the decoding function correctly handles the bit-packing scheme (e.g., 8-bit vs 16-bit per channel).
+
+## Subtopics
+
+### Neural Deferred Shading
+A decoding strategy that concatenates the accumulated harmonics with ray direction encoding and decodes the final pixel color using a shallow MLP in a single image-space pass [S2]. It encodes the ray direction $\mathbf{d}$ using second-degree spherical harmonics $\text{SH}_2(\mathbf{d}) \in \mathbb{R}^9$ [S2]. The accumulated harmonic sum is concatenated with $k \cdot \text{SH}_2(\mathbf{d})$ [S2]. The final color $\mathbf{c}$ is computed as:
+$$
+\mathbf{c} = \text{MLP}_\theta \left( \sum_{i \in \mathcal{G}} \alpha_i T_i \begin{bmatrix} \sin(\mathbf{f}_i) \\ \cos(\mathbf{f}_i) \end{bmatrix}, k \cdot \text{SH}_2(\mathbf{d}) \right)
+$$
+where $\mathbf{f}_i$ denotes the primitive feature interpolated at the point $\mathbf{p}^*_i$ of maximum response, $\mathcal{G}$ is the set of primitives intersected by the ray, $\alpha_i$ and $T_i$ correspond to the primitive opacity and accumulated transmittance, $\text{MLP}_\theta$ is a shallow MLP with weights $\theta$, and $k$ is a scaling factor [S2].
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$ where $N$ is the number of SH coefficients. The decoding is a simple array lookup and bit manipulation, making it very fast.
+- **Memory Complexity**: $O(N)$ for the output color array.
+- **Performance**: Extremely efficient as it avoids trigonometric calculations associated with SH evaluation. It is suitable for real-time rendering.
+- **Strengths**: Low computational overhead, simple implementation.
+- **Limitations**: Requires careful handling of the packed data format. Does not account for view-dependent color changes unless combined with SH evaluation or other methods.
+
+## Background
+Spherical Harmonics are widely used in computer graphics for representing functions on the sphere, such as lighting and reflectance. In the context of 3D Gaussian Splatting, SH coefficients are used to represent view-dependent color. The decoding step is crucial for converting the stored SH coefficients into usable RGB values. The specific packing scheme described in [S1, unofficial] is an optimization to reduce memory footprint.
+
+## Sources
+[S1] WilliamLiu-1997/Gaussian-Splat-Lite, https://github.com/WilliamLiu-1997/Gaussian-Splat-Lite, fetched 2026-10-27 (unofficial)
+[S2] Neural Harmonic Textures for High-Quality Primitive Based Neural Reconstruction, https://doi.org/10.1007/978-3-032-37032-7_18, fetched 2026-10-26

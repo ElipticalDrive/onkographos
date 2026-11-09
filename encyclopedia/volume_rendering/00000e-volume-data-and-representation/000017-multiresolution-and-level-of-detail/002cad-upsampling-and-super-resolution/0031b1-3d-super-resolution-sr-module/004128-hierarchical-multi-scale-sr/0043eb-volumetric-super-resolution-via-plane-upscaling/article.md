@@ -1,0 +1,134 @@
+# Volumetric Super-Resolution via Plane Upscaling
+
+Also called: Neural Volume Super-Resolution, SR Model F
+
+## Overview
+This method super-resolves 3D scenes by applying a 2D image super-resolution network $F$ directly to the learned 2D feature planes of a volumetric representation, rather than upscaling rendered images [S1, unofficial]. It sets itself apart from sibling methods by operating on the implicit representation's parameters (feature planes) to produce $\alpha$ times super-resolved versions of them, leveraging existing 2D SR architectures like EDSR [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** Low-resolution (LR) learned positional feature planes $P_s = \{P_{xy}, P_{xz}, P_{yz}\}$ and a view-direction plane $P_{dir}$ for a scene $s$.
+*   **Output:** High-resolution (HR) positional feature planes $P_s^{HR}$ and the original $P_{dir}$.
+*   **SR Factor:** $\alpha$ (typical value: 4) [S1, unofficial].
+
+**Data Structures**
+*   **Feature Planes:** Each plane $P \in P_s$ is a 2D grid of feature vectors. The number of channels $C$ is typically 48 [S1, unofficial]. The spatial resolution $N$ varies (e.g., 100, 400, 1600) [S1, unofficial].
+*   **SR Model $F$:** An EDSR architecture with 32 residual blocks and 256 channels [S1, unofficial]. It takes LR planes as input and outputs HR planes.
+
+**Steps**
+1.  **Super-Resolution:** Apply model $F$ to each positional plane $P \in P_s \setminus \{P_{dir}\}$ independently to obtain HR planes $P^{HR}$ [S1, unofficial].
+2.  **View-Direction Plane:** Use $P_{dir}$ as-is without super-resolution, as all points along a ray share the same viewing direction [S1, unofficial].
+3.  **Rendering:** Render the scene using the HR planes $P^{HR}$, the original $P_{dir}$, and the decoder $G$ [S1, unofficial]. The rendered image is $\hat{I}_{SR}(r) = G(F(\theta_F, \theta_G), r)$ [S1, unofficial].
+
+**Training**
+Training alternates between three optimization steps chosen with probability ratios $f_{LR} : f_{HR} : f_{incon}$ [S1, unofficial]:
+1.  **LR Loss ($L_{LR}$):** Minimize reconstruction error over LR training images [S1, unofficial].
+2.  **HR Loss ($L_{HR}$):** Minimize reconstruction error over HR training images [S1, unofficial].
+    $$L_{HR} = \sum_{s \in S_t, r \in I_{hr}^s} \| G(F(\theta_F, \theta_G), r) - I_{hr}^s(r) \|_2^2$$
+3.  **Inconsistency Loss ($L_{incon}$):** Minimize the difference between GT LR views and downsampled HR views rendered by the model, using test scenes $S_e$ [S1, unofficial].
+    $$L_{incon} = \sum_{s \in S_e} \| G(F(\theta_F, \theta_G), r) \downarrow_\alpha - I_{lr}^s(r) \|_2^2$$
+    where $\downarrow_\alpha$ denotes downsampling by factor $\alpha$ [S1, unofficial].
+
+**Parameters**
+*   **Optimizer:** Adam [S1, unofficial].
+*   **Learning Rate:** 0.0005 for decoder and feature planes, 0.00005 for SR model $F$ [S1, unofficial].
+*   **Training Ratios:**
+    *   Initial convergence: $f_{LR}=1, f_{HR}=1, f_{incon}=0$ [S1, unofficial].
+    *   Test scene adaptation: $f_{LR}=1, f_{HR}=1, f_{incon}=10$ [S1, unofficial].
+
+**Pitfalls**
+*   **Overfitting:** Training $F$ only on training scenes $S_t$ causes poor generalization to unseen scenes $S_e$ because $F$ learns specific combinations of $v_p$ triplets [S1, unofficial]. This is solved by adding $L_{incon}$ using test scenes $S_e$ [S1, unofficial].
+*   **Plane Resolution:** Too small $N$ cannot represent fine details; too large $N$ leads to visual artifacts due to limited training image resolution [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_volumetric_sr(model_G, model_F, optimizer_G, optimizer_F, 
+                        scenes_train, scenes_test, alpha=4, 
+                        f_lr=1, f_hr=1, f_incon=0):
+    """
+    model_G: Volumetric representation model (decoder + feature planes)
+    model_F: SR model (EDSR)
+    optimizer_G: Adam optimizer for model_G
+    optimizer_F: Adam optimizer for model_F
+    scenes_train: List of training scenes with LR and HR images
+    scenes_test: List of test scenes with LR images
+    alpha: SR factor
+    f_lr, f_hr, f_incon: Probability ratios for training steps
+    """
+    total_steps = f_lr + f_hr + f_incon
+    p_lr = f_lr / total_steps
+    p_hr = f_hr / total_steps
+    p_incon = f_incon / total_steps
+    
+    for step in range(num_steps):
+        # Choose training step based on probabilities
+        rand_val = random.random()
+        if rand_val < p_lr:
+            # Step 1: Minimize L_LR
+            scene = random.choice(scenes_train)
+            lr_images = scene.lr_images
+            for lr_img in lr_images:
+                rays = sample_rays(lr_img, num_rays=4096)
+                # Render using current model_G (LR planes)
+                rendered = render(model_G, rays)
+                loss = mse(rendered, lr_img)
+                optimizer_G.zero_grad()
+                loss.backward()
+                optimizer_G.step()
+                
+        elif rand_val < p_lr + p_hr:
+            # Step 2: Minimize L_HR
+            scene = random.choice(scenes_train)
+            hr_images = scene.hr_images
+            for hr_img in hr_images:
+                rays = sample_rays(hr_img, num_rays=4096)
+                # Render using model_G with SR model_F applied to planes
+                hr_planes = apply_sr(model_F, model_G.positional_planes)
+                model_G.positional_planes = hr_planes
+                rendered = render(model_G, rays)
+                loss = mse(rendered, hr_img)
+                optimizer_G.zero_grad()
+                optimizer_F.zero_grad()
+                loss.backward()
+                optimizer_G.step()
+                optimizer_F.step()
+                
+        else:
+            # Step 3: Minimize L_incon
+            scene = random.choice(scenes_test)
+            lr_images = scene.lr_images
+            for lr_img in lr_images:
+                rays = sample_rays(lr_img, num_rays=4096)
+                # Render using model_G with SR model_F applied to planes
+                hr_planes = apply_sr(model_F, model_G.positional_planes)
+                model_G.positional_planes = hr_planes
+                rendered_hr = render(model_G, rays)
+                # Downsample rendered HR to match LR
+                rendered_lr_downsampled = downsample(rendered_hr, alpha)
+                loss = mse(rendered_lr_downsampled, lr_img)
+                optimizer_G.zero_grad()
+                optimizer_F.zero_grad()
+                loss.backward()
+                optimizer_G.step()
+                optimizer_F.step()
+```
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** 
+    *   Using positional + view-direction planes yields 29.6 dB and 30.8 dB PSNR [S1, unofficial].
+    *   Using only positional planes yields 23.7 dB and 26.6 dB PSNR [S1, unofficial].
+    *   PSNR for plane resolution N: N=100 yields 24.2 dB, N=400 yields 26.2 dB, N=1600 yields 29.6 dB (with artifacts) [S1, unofficial].
+*   **Strengths:** Improves reconstruction performance by accounting for directional appearance changes [S1, unofficial].
+*   **Limitations:** Overfitting to specific plane combinations if not trained with $L_{incon}$ [S1, unofficial]. Visual artifacts at very high plane resolutions [S1, unofficial].
+*   **When to use:** When high-resolution details are needed and LR training images are available [S1, unofficial].
+*   **When not to use:** When generalization to unseen scenes is critical without sufficient test scene data for $L_{incon}$ [S1, unofficial].
+
+## Background
+The method was proposed in "Neural Volume Super-Resolution" [S1, unofficial]. It builds on the idea of using 2D feature planes for 3D scene representation [S1, unofficial]. The SR model $F$ is trained to super-resolve these planes, leveraging existing 2D SR architectures like EDSR [S1, unofficial].
+
+## Sources
+[S1] Neural Volume Super-Resolution, https://doi.org/10.48550/arXiv.2212.04666, fetched 2026-10-30 (unofficial)

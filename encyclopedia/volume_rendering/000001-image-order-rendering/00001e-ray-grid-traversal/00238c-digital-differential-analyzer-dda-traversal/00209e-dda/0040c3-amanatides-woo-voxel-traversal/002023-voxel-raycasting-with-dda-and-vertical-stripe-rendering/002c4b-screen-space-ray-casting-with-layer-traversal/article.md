@@ -18,17 +18,13 @@ A real-time rendering technique that performs ray casting in screen space by mar
 *   $z\_sgn$: Sign of the ray direction relative to the view direction. Value is $-1$ if ray marching against view direction, otherwise $1$ [S1].
 
 **Steps:**
-1.  **Initialize:** Start at the pixel containing the ray origin. Initialize a `layer` hint variable (typically from the previous pixel's last processed layer) [S1][G].
+1.  **Initialize:** Start at the pixel containing the ray origin, using the depth layer from the previous pixel as a starting hint [S1][G].
 2.  **Column Intersection:** Determine the current voxel column intersected by the ray [S1].
 3.  **Depth Bounds:** Calculate the entry and exit depths of the ray within the current voxel column: $[entry, exit]$ [S1].
-4.  **Layer Search:** Find the first layer index after the entry depth, using the `layer` hint as a starting point: $layer = first\_layer\_after(entry, z\_sgn, start\_hint = layer)$ [S1].
+4.  **Layer Search:** Find the first layer index after the entry depth, using the hint as a starting point: $layer = first\_layer\_after(entry, z\_sgn, start\_hint = layer)$ [S1].
 5.  **Validity Check:** Determine if a valid layer exists within the column bounds: $layer\_found = (z\_sgn \times layer \le exit \times z\_sgn)$ [S1].
 6.  **State Determination:** Determine if the ray is entering the volume at this layer: $entering = ((layer \& 1) \neq (z\_sgn > 0)) == layer\_found$ [S1].
-7.  **Marching Loop:** Iterate through layers within the column bounds:
-    *   If the current `entering` state differs from the previous `was_inside` state, handle the intersection (e.g., compute contribution, perturb ray for refraction) [S1].
-    *   If a layer was found, increment the layer index: $layer += z\_sgn$ [S1].
-    *   Toggle the entering state: $entering = !entering$ [S1].
-    *   Continue while $z\_sgn \times layer \le exit \times z\_sgn$ [S1].
+7.  **Marching Loop:** Iterate through layers within the column bounds, detecting state changes between inside and outside [S1].
 8.  **Hint Update:** Use the final `layer` value as the `start_hint` for the next pixel to optimize the search [S1].
 9.  **Termination:** Terminate when the voxel grid boundary is reached [S1].
 
@@ -38,6 +34,7 @@ A real-time rendering technique that performs ray casting in screen space by mar
 ```python
 # z_sgn = -1 if ray marching against view dir, else 1
 layer = initial_hint  # From previous pixel or initialization [G]
+was_inside = False    # Initial state before first layer [G]
 
 column = next_intersected(ray, column)
 while column:
@@ -45,13 +42,12 @@ while column:
     layer = first_layer_after(entry, z_sgn, start_hint=layer)
     layer_found = (z_sgn * layer <= exit * z_sgn)
     entering = ((layer & 1) != (z_sgn > 0)) == layer_found
-    was_inside = False  # Track state across layers [G]
+    was_inside = entering  # Initialize for do-while loop [G]
 
-    # do-while loop simulation
     while True:
         if entering != was_inside:
-            # Abort marching, compute ray contribution, perturb ray, restart casting [S1]
-            break
+            # handle_intersection(...) computes contribution and restarts casting with a perturbed ray [S1]
+            handle_intersection(...)
         if layer_found:
             layer += z_sgn
         entering = not entering
@@ -65,9 +61,9 @@ while column:
 *   **Refraction Restart:** When a surface is intersected, marching aborts, the ray's contribution is computed, and ray casting restarts with a new perturbed ray to trace multiple refractions [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of layers intersected per pixel. The use of a depth hint from the previous pixel optimizes the search for the next layer [S1].
+*   **Time Complexity:** Not given in the sources.
 *   **Memory Complexity:** Depends on the storage of surface layers per voxel column [S1].
-*   **Strengths:** Enables deep ambient occlusion by accessing multiple surface layers. Supports multiple refractions by restarting ray casting with perturbed rays. Efficient layer traversal using hints [S1].
+*   **Strengths:** Enables deep ambient occlusion by accessing multiple surface layers [S1]. Supports multiple refractions by restarting ray casting with perturbed rays [S1]. Efficient layer traversal using hints [S1].
 *   **Limitations:** Requires storing multiple layers per voxel column, which increases memory usage compared to single-layer methods [S1].
 
 ## Background

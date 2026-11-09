@@ -1,0 +1,209 @@
+--- v005.md
++++ v006.md
+@@ -4,91 +4,90 @@
+ 
+ ## Overview
+-Single-pass GPU Solid Voxelization is a technique to voxelize the interior of watertight 3D models into a high-resolution binary volume with solid interior in a single rendering pass, using bitwise arithmetic to pack information [S2, unofficial]. It builds on [Single-pass GPU Solid Voxelization](3323-single-pass-gpu-solid-voxelization.md) by exploiting the Jordan curve theorem: a point is interior if a ray from it intersects the surface an odd number of times [S1, unofficial]. It distinguishes itself from boundary-only voxelization by producing a fully filled interior volume [S1, unofficial]. Unlike depth peeling which requires multiple passes and occlusion queries, this method performs solid voxelization in a single geometry rendering pass [S2, unofficial].
++Single-pass GPU Solid Voxelization is a technique to voxelize the interior of watertight 3D models into a high-resolution binary volume in a single rendering pass [S2, unofficial]. It exploits the Jordan curve theorem: a point is interior if a ray from it intersects the surface an odd number of times [S2, unofficial]. It distinguishes itself from boundary-only voxelization by producing a fully filled interior volume and from multi-pass methods like depth peeling by requiring only one geometry pass [S1, unofficial][S2, unofficial]. It builds on [Solid Voxelization](1695-solid-voxelization.md).
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A watertight 3D mesh. The mesh does not need to be manifold or topologically coherent, only watertight [S1, unofficial].
+-*   **Output:** A "slicemap," a 2D texture where the $k$-th bit of the RGBA representation of pixel $(i, j)$ encodes the voxel value at grid coordinates $(i, j, k)$ [S2, unofficial].
++- Input: A watertight 3D mesh (manifold or non-manifold, but topologically closed per component) [S1, unofficial].
++- Output: A binary slicemap texture representing the solid voxel grid [S2, unofficial].
+ 
+ **Data Structures:**
+-*   **Slicemap:** A 2D texture (e.g., $2^w \times 2^h$). Each texel stores 32 bits (one per color channel component, or packed into RGBA). The bits represent the Z-axis (depth slices). For a standard 32-bit integer per pixel, this supports up to 32 layers per pass without Multi-Render Targets (MRT), or up to 1024 layers if using MRTs or specific hardware extensions [S1, unofficial][S2, unofficial].
+-*   **Framebuffer:** Initialized to zero. Stores the accumulated bitmask.
++- **Slicemap:** A 2D texture where the $k$-th bit of the RGBA representation of pixel $(i, j)$ encodes the voxel value at grid coordinates $(i, j, k)$ [S2, unofficial].
++    - The texture dimensions define the $x$ and $y$ grid sizes.
++    - The bits of the RGBA channels form the $z$-axis column. With 4 channels and 8 bits per channel, a single texel stores 32 bits, representing 32 voxels along $z$ [S2, unofficial].
++    - The framebuffer is initialized to zero [S2, unofficial].
+ 
+ **Parameters:**
+-*   **Blending Mode:** Bitwise XOR (`GL_XOR` or equivalent). This is critical for solid voxelization. (Note: Bitwise OR is used for boundary voxelization accumulation, but XOR is used for the solid voxelization mask accumulation) [S2, unofficial].
+-*   **Depth Clamp:** Must be enabled (e.g., `GL_DEPTH_CLAMP` or NV extension) to prevent polygons from being clipped by near/far planes. This ensures correct intersection counting even when viewing from inside the volume [S2, unofficial].
++- **Blending Mode:** Bitwise XOR [S2, unofficial].
++- **Depth Clamp:** Enabled (e.g., `NV_depth_clamp`) to prevent near/far plane clipping, ensuring correct intersection counting even when viewing from inside the volume [S2, unofficial].
++- **Z-Offset:** Add half a voxel to the fragment's distance to counteract rasterization shifting the sampled grid by half a voxel along the z-axis [S2, unofficial].
+ 
+ **Steps:**
+-1.  **Initialize** the framebuffer to zero.
+-2.  **Render** the scene geometry.
+-3.  **Fragment Shader:** For each fragment, compute a bitmask indicating all voxels in the column that lie in front of the current fragment's depth.
+-    *   Let $d$ be the fragment's depth (quantized to the voxel grid).
+-    *   The bitmask $B$ has bits set to 1 for all indices $k < d$ (or $k \le d$ depending on the specific rasterization offset handling, see Pitfalls).
+-    *   Implementation: Perform a lookup in a small 1D bitmask texture based on the fragment's depth, or generate the mask via bitwise operations (e.g., `mask = (1 << depth) - 1`) [S2, unofficial].
+-4.  **Accumulate:** Blend the fragment's color (the bitmask) into the framebuffer using the **Bitwise XOR** operation.
+-    *   Mathematically, if $n$ fragments lie in front of voxel $(i, j, k)$, the voxel is inside if $n$ is odd.
+-    *   $n \pmod 2 = (\sum_{t=0}^{n-1} 1) \pmod 2 = \bigoplus_{t=0}^{n-1} 1$, where $\oplus$ is XOR [S2, unofficial].
+-5.  **Result:** After rendering is complete, the framebuffer contains a center-sampled solid voxelization. Voxels are marked (bit set to 1) if they lie in the interior of the model [S2, unofficial].
++1.  **Setup:** Initialize the framebuffer (slicemap) to zero. Enable depth testing and bitwise XOR blending. Enable depth clamp.
++2.  **Render:** For each fragment generated by the rasterizer:
++    a.  Compute the fragment's depth $d$ in voxel units (or normalized depth mapped to voxel indices).
++    b.  Generate a bitmask $B$ where all bits $k < d$ are set to 1, and bits $k \ge d$ are 0. This indicates all voxels in the column in front of the current fragment [S2, unofficial].
++        - *Implementation Note:* This bitmask can be generated via a lookup in a small 1D texture or computed via bitwise arithmetic on the depth value [S2, unofficial].
++    c.  Output the bitmask $B$ as the fragment color (RGBA).
++3.  **Accumulate:** The GPU hardware blends the output color into the framebuffer using bitwise XOR.
++    - Mathematically, for a voxel $(i, j, k)$, let $n$ be the number of fragments in front of it. The voxel is inside if $n \pmod 2 = 1$.
++    - This is computed as:
++      $$ n \pmod 2 = \left(\sum_{t=0}^{n-1} 1\right) \pmod 2 = \bigoplus_{t=0}^{n-1} 1 $$
++      where $\oplus$ is the XOR operation [S2, unofficial].
++4.  **Result:** After rendering, the framebuffer contains the center-sampled solid voxelization. Voxels are marked (1) if they lie in the interior [S2, unofficial].
++
++**Pitfalls and Edge Cases:**
++- **Intersecting Models:** If two watertight models intersect, the algorithm computes the symmetric difference (hollow representation), not the union [S1, unofficial].
++- **Ambiguity:** Arbitrary numbers of fragments can fall in a single voxel; the XOR accumulation handles this parity logic implicitly without ambiguity [S2, unofficial].
++- **Non-Watertight Input:** The method requires watertight models. Cracks or open boundaries violate the Jordan theorem assumption [S2, unofficial].
++- **Precision:** Standard rasterization samples voxel centers shifted by half a voxel along Z. Counteract by adding half a voxel to fragment distance [S2, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-# Fragment Shader Logic
+-def compute_bitmask(depth_quantized, max_layers=32):
+-    """
+-    Computes a bitmask where bits 0 to depth_quantized-1 are set to 1.
+-    This represents all voxels in the column 'in front of' the fragment.
+-    """
+-    # Clamp depth to valid range
+-    d = clamp(depth_quantized, 0, max_layers - 1)
++# Initialization
++framebuffer = Texture2D(width, height, format=RGBA32UI)
++framebuffer.clear(0)
++
++# Render Pass
++enable_depth_test()
++enable_depth_clamp() # Critical for internal visibility
++set_blend_op(blend_op=XOR) # Bitwise XOR accumulation
++
++for fragment in rasterize(mesh):
++    # Map fragment depth to voxel index k
++    # Assume voxel grid covers the view frustum
++    # z_offset counteracts rasterization shift
++    k = floor(fragment.depth + 0.5) 
+     
+-    # Create mask: 11...1 (d ones)
+-    # Example: if d=3, mask = 0b111 (7)
+-    # In GLSL/HLSL: (1 << d) - 1
+-    mask = (1 << d) - 1
++    # Generate bitmask: 1s for all voxels in front of k
++    # Assuming 32-bit integer representation for the column
++    # Bits 0 to k-1 are 1, bits k to 31 are 0
++    # Example for 32-bit int:
++    if k <= 0:
++        mask = 0
++    elif k >= 32:
++        mask = 0xFFFFFFFF
++    else:
++        mask = (1 << k) - 1
++        
++    # Output mask as RGBA (packed into one integer or distributed)
++    # In DX10/OpenGL, this is often packed into a single 32-bit integer texture
++    # or distributed across RGBA channels if more than 32 layers are needed
++    # For single pass with <= 32 layers:
++    output_color = uint_to_rgba(mask)
+     
+-    # Ensure mask fits within 32 bits (or 128 if using RGBA as 4x32)
+-    # For single 32-bit channel:
+-    return mask & 0xFFFFFFFF
++    framebuffer.write(fragment.u, fragment.v, output_color)
+ 
+-# Rendering Pass
+-def single_pass_voxelization(mesh, voxel_grid_dimensions, framebuffer):
+-    """
+-    voxel_grid_dimensions: (W, H, D)
+-    framebuffer: 2D texture of size (W, H), initialized to 0
+-    """
+-    # 1. Initialize framebuffer to 0
+-    framebuffer.clear(0)
+-    
+-    # 2. Set blending to XOR
+-    set_blend_mode(BLEND_XOR)
+-    
+-    # 3. Enable Depth Clamp to handle inside-outside view correctly
+-    enable_depth_clamp()
+-    
+-    # 4. Render Mesh
+-    for fragment in rasterize(mesh):
+-        # Quantize fragment depth to voxel index k
+-        # Note: Rasterization samples centers of a voxel grid shifted by half a voxel along Z.
+-        # To align with voxel centers, add 0.5 to distance before quantizing.
+-        depth_float = fragment.position.z
+-        depth_shifted = depth_float + 0.5
+-        depth_quantized = floor(depth_shifted / voxel_size)
+-        
+-        # Compute bitmask for all voxels in front of this fragment
+-        bitmask = compute_bitmask(depth_quantized)
+-        
+-        # Write to framebuffer (XOR accumulation happens in hardware)
+-        framebuffer.write(fragment.uv, bitmask)
+-        
+-    # 5. Result is in framebuffer
+-    return framebuffer
++# Post-processing: Read framebuffer to extract voxel grid
++voxel_grid = []
++for y in range(height):
++    for x in range(width):
++        pixel = framebuffer.read(x, y)
++        voxel_column = rgba_to_uint(pixel)
++        # Extract bits 0..31 to get voxel values for z=0..31
++        for z in range(32):
++            is_solid = (voxel_column >> z) & 1
++            voxel_grid.append((x, y, z, is_solid))
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Rasterization Offset:** Standard rasterization causes the voxelization to sample centers of a voxel grid shifted by half a voxel along the z-axis. This can be counteracted by adding half a voxel to the fragment's distance before quantizing [S2, unofficial].
+-*   **Intersecting Models:** When two watertight models intersect, the algorithm computes the symmetric difference (XOR), resulting in a hollow representation rather than a union. This is consistent with the definition of watertight based on the Jordan theorem [S1, unofficial][S2, unofficial].
+-*   **Ambiguity:** Ambiguous situations occur when several front and back-facing triangles fall in one voxel. The XOR accumulation handles this parity logic implicitly, making the method accurate even if an arbitrary number of fragments fall in a single voxel [S1, unofficial][S2, unofficial].
+-*   **Clipping:** Polygons must not be clipped by near/far planes. Use Depth Clamp to ensure correct intersection counting [S2, unofficial].
+ 
+ ## Subtopics
+@@ -98,32 +97,26 @@
+ 
+ ### [Conservative Solid Voxelization](3563-conservative-solid-voxelization.md)
+-A technique to fill voxels that are partially interior, addressing the issue where thin geometry misses voxel centers and is annihilated by XOR.
++Conservative Solid Voxelization is a technique to fill voxels that are partially interior, addressing the issue where thin geometry misses voxel centers and is annihilated by XOR blending. It builds on [Single-pass GPU Solid Voxelization](3323-single-pass-gpu-solid-voxelization.md) by adding a conservative boundary pass to ensure no surface-touching voxels are lost, resulting in a conservative solid voxelization.
+ 
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-*   **Time:** Single geometry pass. Performance depends on fill rate and geometry complexity.
+-*   **Memory:** O(W * H) for the slicemap texture, where W, H are the XY dimensions of the voxel grid. The Z dimension is packed into the bits of the texture.
++- Time: $O(N)$ where $N$ is the number of fragments, performed in a single geometry pass [S1, unofficial].
++- Memory: $O(W \times H \times L)$ where $W, H$ are texture dimensions and $L$ is the number of layers (bits per texel). Typically 32 layers per pass on DX9, up to 1024 on DX10 with MRTs [S1, unofficial][S2, unofficial].
+ 
+ **Measured Performance:**
+-*   **DX10 (G80):**
+-    *   Density computation timings: 0.20 ms at $64^3$, 0.6 ms at $128^3$, 2.9 ms at $256^3$, 20.9 ms at $512^3$ [S1, unofficial].
+-    *   Speedup over CPU-based method [5]: >300x for complex models; ~20x for a simple 12-triangle cube (worst-case due to low geometric complexity and high fill-rate) [S1, unofficial].
+-    *   Theoretical maximum speedup is 1024x due to multi-layer extraction per pass [S2, unofficial].
+-*   **DX9 (G6):**
+-    *   Density computation timings: 0.28 ms at $256^3$, 0.9 ms at $512^3$, 6.5 ms at $1024^3$ [S1, unofficial].
+-    *   Speedup over [5]: ~23x for models up to 12,500 triangles [S1, unofficial].
+-    *   Without MRT support, 32 layers are extracted per pass. Performance is ~2x the cost of 4 MRTs but still yields significant speedup [S1, unofficial].
++- **DX10 (G80):**
++    - Density computation timings: 0.20 ms at $64^3$, 0.6 ms at $128^3$, 2.9 ms at $256^3$, 20.9 ms at $512^3$ [S1, unofficial].
++    - Speedup over [5]: >300x for complex models; ~20x for a simple 12-triangle cube (worst-case due to low geometry/high fill-rate) [S1, unofficial].
++- **DX9 (G6800):**
++    - Density computation timings: 0.28 ms at $256^3$, 0.9 ms at $512^3$, 6.5 ms at $1024^3$ [S1, unofficial].
++    - Speedup over [5]: ~23x for models up to 12,500 triangles [S1, unofficial].
++    - Without MRT support, 32 layers are extracted per pass, costing ~2x more than 4 MRTs but still achieving 23x speedup over [5] [S1, unofficial].
+ 
+ **Strengths and Limitations:**
+-*   **Strengths:** Single pass; handles arbitrary fragment density per voxel accurately; does not require manifold meshes or front/back face separation; handles grazing angles automatically [S1, unofficial][S2, unofficial].
+-*   **Limitations:** Only works for watertight models; intersecting models result in symmetric difference (hollow) rather than union; standard rasterization framerate drops quickly for high-polygon models and high voxel resolutions [S1, unofficial][S2, unofficial].
+-*   **Hardware Specifics:** DX9 implementation treats all four color components equally, reflecting vector capacities of older processors [S1, unofficial]. Using 4 MRTs imposes more than the expected 33% supplementary workload compared to 3 MRTs, likely due to hardware sweet spots (e.g., G6) [S1, unofficial].
++- **Strengths:** Single pass; handles arbitrary fragment density per voxel; no front/back face separation required; works on non-manifold watertight meshes; fast density estimation via box-filtering [S1, unofficial][S2, unofficial].
++- **Limitations:** Requires watertight input; intersecting models produce symmetric difference (hollow) rather than union; standard rasterization causes Z-axis shift; performance drops for high-polygon models and high resolutions due to fill-rate limits [S1, unofficial][S2, unofficial].
+ 
+ ## Background
+-**Origin:**
+-The method was introduced by Elmar Eisemann and Xavier Decoret in their paper "Single-Pass GPU Solid Voxelization for Real-Time Applications" [S2, unofficial]. It builds upon previous work on GPU boundary voxelization by Dong et al. [8] and Eisemann & Decoret [10] [S2, unofficial].
+-
+-**History and Development:**
+-Prior methods like depth peeling required multiple passes. The stencil buffer approach [5] was limited to one voxel layer per rendering pass. This method leverages the bitwise capabilities of modern GPUs (DX10/DX9) to pack up to 1024 binary layers into a single pass using XOR accumulation [S2, unofficial]. It was demonstrated in applications such as translucency effects, CSG operations, particle simulation interaction, and morphological operations [S2, unofficial].
++Originated by Elmar Eisemann and Xavier Decoret in their paper "Single-Pass GPU Solid Voxelization for Real-Time Applications" [S2, unofficial]. It was developed to address the limitations of previous methods like Dong et al. [8] (which failed with multiple fragments per voxel) and Eisemann & Decoret [10] (which required front/back face separation) [S2, unofficial]. It enables real-time solid voxelization for applications like fluid simulation interaction and CSG operations [S2, unofficial].
+ 
+ ## Sources

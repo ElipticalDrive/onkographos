@@ -7,7 +7,7 @@ Sparse Volume Texture (SVT) is a technique that trades rendering speed for data 
 ## How it works
 ### Inputs and Outputs
 **Inputs:**
-- A large voxel dataset (logical coordinates).
+- A large voxel dataset (logical coordinates) [S1, unofficial].
 - Tile size: $16^3$ voxels [S1, unofficial].
 - Maximum texture dimension: 2048 [S1, unofficial].
 - Padding: Required for trilinear interpolation at tile borders [S1, unofficial].
@@ -19,12 +19,12 @@ Sparse Volume Texture (SVT) is a technique that trades rendering speed for data 
 
 ### Data Structures
 1.  **Physical Tile Data Texture:**
-    -   Format: 3D Texture.
+    -   Format: 3D Texture [S1, unofficial].
     -   Dimensions: Up to $2048^3$ texels [S1, unofficial].
     -   Content: Densely packed $16^3$ tiles. Each tile is padded to allow correct trilinear interpolation at borders [S1, unofficial].
     -   Mipmaps: The mipmap hierarchy is stored in the same texture object as the base layer [S1, unofficial].
 2.  **Page Table Texture:**
-    -   Format: 3D Texture.
+    -   Format: 3D Texture [S2].
     -   Content: Stores offsets or indices to locate non-empty tiles within the Physical Tile Data Texture [S1, unofficial].
 3.  **CPU Upload Buffer:**
     -   Format: ByteAddressBuffer (GPU access) / uint32 offsets (CPU side) [S1, unofficial].
@@ -71,9 +71,27 @@ The memory footprint increases by a factor of 4 compared to a scalar density val
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# SVT Upload and Rendering Logic
-# Note: This pseudocode reflects the described mechanics. 
-# Actual implementation requires handling uint32 overflow and sliding window.
+import math
+
+def create_padded_tile(tile_size, voxel_data):
+    """Creates a padded tile buffer for trilinear interpolation."""
+    padded_size = tile_size + 2
+    buffer = [0.0] * (padded_size ** 3)
+    for lx, ly, lz, val in voxel_data:
+        idx = (lz + 1) * padded_size * padded_size + (ly + 1) * padded_size + (lx + 1)
+        buffer[idx] = val
+    return buffer
+
+def create_byte_address_buffer(tiles):
+    """Concatenates tile buffers into a single GPU-accessible buffer."""
+    buffer = []
+    for tile in tiles:
+        buffer.extend(tile)
+    return buffer
+
+def create_texture(page_table):
+    """Creates a 3D texture from the page table mapping."""
+    return page_table
 
 def upload_svt_data(logical_voxels, tile_size=16):
     """
@@ -81,7 +99,6 @@ def upload_svt_data(logical_voxels, tile_size=16):
     logical_voxels: List of (x, y, z, value) tuples.
     tile_size: Size of each tile (16).
     """
-    # 1. Chunk into tiles
     tiles = {}
     for x, y, z, value in logical_voxels:
         tx, ty, tz = x // tile_size, y // tile_size, z // tile_size
@@ -89,66 +106,123 @@ def upload_svt_data(logical_voxels, tile_size=16):
             tiles[(tx, ty, tz)] = []
         tiles[(tx, ty, tz)].append((x % tile_size, y % tile_size, z % tile_size, value))
 
-    # 2. Filter non-empty tiles and pad
     physical_tiles = []
     page_table = {}
     current_offset = 0
-    
-    # Sort tiles to ensure deterministic packing
+
     sorted_tile_keys = sorted(tiles.keys())
-    
+
     for tx, ty, tz in sorted_tile_keys:
         voxel_data = tiles[(tx, ty, tz)]
         if not voxel_data:
             continue
-            
-        # Create padded tile buffer
-        # Padding is required for trilinear interpolation at borders
+
         padded_tile = create_padded_tile(tile_size, voxel_data)
-        
-        # Check for uint32 overflow
+
         if current_offset + len(padded_tile) > 2**32:
             raise OverflowError("SVT streaming data overflowed the uint32 range!")
-            
-        # Store in physical texture
+
         physical_tiles.append(padded_tile)
-        
-        # Record offset in page table
         page_table[(tx, ty, tz)] = current_offset
         current_offset += len(padded_tile)
 
-    # 3. Upload to GPU
-    # Use ByteAddressBuffer with uint32 offsets
-    # Note: Only 227 elements can be uploaded at a single time
     upload_buffer = create_byte_address_buffer(physical_tiles)
     page_table_texture = create_texture(page_table)
-    
+
     return upload_buffer, page_table_texture
 
-def render_svt_volume(ray, page_table, physical_texture):
+def render_svt_volume(ray_origin, ray_dir, step_size, max_steps, page_table, physical_texture):
     """
     Renders volume using SVT.
-    ray: Ray origin and direction.
-    page_table: Texture mapping logical tile coords to physical offsets.
-    physical_texture: Packed tile data texture with mipmaps.
+    ray_origin: (x, y, z) tuple.
+    ray_dir: (dx, dy, dz) tuple.
+    step_size: Distance per step.
+    max_steps: Maximum ray marching steps.
+    page_table: Dict mapping (tx, ty, tz) to byte offset.
+    physical_texture: Concatenated tile buffers.
     """
-    # 1. Determine tile coordinates along ray
-    # 2. Lookup tile in page table
-    # 3. If tile exists:
-    #    - Fetch tile from physical texture
-    #    - Perform ray marching within tile
-    # 4. If tile does not exist:
-    #    - Treat as empty or constant color
-    pass
+    t = 0.0
+    accumulated_color = [0.0, 0.0, 0.0, 0.0]
+    accumulated_density = 0.0
+    alpha = 1.0
+
+    for _ in range(max_steps):
+        pos = [ray_origin[i] + ray_dir[i] * t for i in range(3)]
+        tile_coords = [int(pos[i] // 16) for i in range(3)]
+        local_coords = [(pos[i] - tile_coords[i] * 16) / 16.0 for i in range(3)]
+
+        # Clamp to [0, 1] to correctly sample padded borders
+        local_coords = [max(0.0, min(1.0, c)) for c in local_coords]
+
+        offset = page_table.get(tuple(tile_coords), -1)
+        if offset == -1:
+            t += step_size
+            continue
+
+        # Fetch tile data and sample
+        tile_size = 16
+        padded_size = tile_size + 2
+        tile_buffer = physical_texture[offset:offset + padded_size**3]
+
+        # Trilinear interpolation simulation
+        u, v, w = local_coords
+        x0, y0, z0 = int(u * tile_size), int(v * tile_size), int(w * tile_size)
+        x1, y1, z1 = min(x0 + 1, tile_size), min(y0 + 1, tile_size), min(z0 + 1, tile_size)
+
+        def sample_texel(lx, ly, lz):
+            idx = (lz + 1) * padded_size * padded_size + (ly + 1) * padded_size + (lx + 1)
+            return tile_buffer[idx]
+
+        c000 = sample_texel(x0, y0, z0)
+        c100 = sample_texel(x1, y0, z0)
+        c010 = sample_texel(x0, y1, z0)
+        c110 = sample_texel(x1, y1, z0)
+        c001 = sample_texel(x0, y0, z1)
+        c101 = sample_texel(x1, y0, z1)
+        c011 = sample_texel(x0, y1, z1)
+        c111 = sample_texel(x1, y1, z1)
+
+        # Interpolate along x
+        c00 = [c000[i] + u * (c100[i] - c000[i]) for i in range(4)]
+        c01 = [c010[i] + u * (c110[i] - c010[i]) for i in range(4)]
+        c10 = [c001[i] + u * (c101[i] - c001[i]) for i in range(4)]
+        c11 = [c101[i] + u * (c111[i] - c101[i]) for i in range(4)]
+
+        # Interpolate along y
+        c0 = [c00[i] + v * (c01[i] - c00[i]) for i in range(4)]
+        c1 = [c10[i] + v * (c11[i] - c10[i]) for i in range(4)]
+
+        # Interpolate along z
+        sample = [c0[i] + w * (c1[i] - c0[i]) for i in range(4)]
+
+        density = sample[0]
+        color = sample[1:4]
+        alpha_val = sample[3]
+
+        transmittance = math.exp(-accumulated_density * step_size)
+        contribution = [color[i] * (1.0 - transmittance) for i in range(3)]
+        accumulated_color = [accumulated_color[i] + contribution[i] * alpha for i in range(3)]
+        accumulated_color[3] = alpha * transmittance
+        alpha *= transmittance
+        accumulated_density += density * step_size
+
+        if alpha < 0.001:
+            break
+        t += step_size
+
+    return accumulated_color
 ```
 
 ## Subtopics
+
+### SVT Streaming Optimization
+Techniques to optimize real-time playback of animated SVTs by managing resolution, sparseness, and streaming prefetch to prevent fidelity drops [S2]. Use a smaller pixel format when importing a VDB (e.g., avoid 32-bit) to improve streaming performance, lower the animation frame rate to reduce streaming load, or use a lower resolution mip level by setting the MipLevel on the Animated SVT Controller or Heterogeneous Volume component settings [S2]. The console variable `r.SparseVolumeTexture.Streaming.NumPrefetchFrames` controls the number of frames to prefetch when a frame is requested (default is 3) [S2]. Setting `NumPrefetchFrames` too high can choke the streaming system with requests, while setting it too low might cause frames to not be fully streamed in by the time they are needed for rendering [S2].
 
 ### Heterogeneous Volumes
 A rendering approach in Unreal Engine 5 that uses SVT for large datasets, supporting interactive exploration and lighting [S1, unofficial].
 
 ### Sparse Textures (AMD)
-An earlier technique using partially-resident textures to mark empty regions as non-resident, falling short for 3D textures due to minimum brick sizes [S2, unofficial].
+An earlier technique using partially-resident textures to mark empty regions as non-resident, falling short for 3D textures due to minimum brick sizes [S3, unofficial].
 
 ## Operating characteristics
 -   **Time Complexity:** Not given in the sources.
@@ -156,7 +230,7 @@ An earlier technique using partially-resident textures to mark empty regions as 
 -   **Measured Performance:** Renders a 5.9 gigavoxel sparse dataset (8 bit/voxel) at ~10 fps on RTX 5000 and ~20 fps on RTX 3500 Ada Laptop GPU [S1, unofficial].
 -   **Scaling:** Extending the upload buffer beyond 4 GB provides limited benefit (factor of ~1.31) for datasets with high per-tile occupancy (e.g., Kolumbo dataset, ~70% average occupancy) or high bit resolution, but little to no benefit for less compact or lower bit resolution datasets [S1, unofficial].
 -   **Strengths:** Circumvents the 2048 voxels/dimension API limit; reduces displayed volume size by a factor of $4^3 = 64$ compared to the original dataset [S1, unofficial].
--   **Limitations:** Crashes at ~2 gigavoxels due to signed int32 overflow; limited by 4 GB upload buffer; ineffective for dense datasets where memory/performance gains are negated [S1, unofficial].
+-   **Limitations:** Crashes at ~2 gigavoxels due to signed int32 overflow; CPU upload buffer limited to uint32 range (4 GB); ineffective for dense datasets where memory/performance gains are negated [S1, unofficial].
 -   **When to Use:** For large, sparse volume datasets that exceed the 2048 dimension limit in Unreal Engine 5 [S1, unofficial].
 -   **When Not to Use:** For dense datasets (e.g., Kolumbo) where SVT offers no memory or performance gain over dense textures [S1, unofficial].
 
@@ -165,4 +239,5 @@ Sparse Volume Texture (SVT) is an in-core implementation used for rendering larg
 
 ## Sources
 [S1] Rendering Large Volume Datasets in Unreal Engine 5: A Survey, https://arxiv.org/abs/2504.07485, fetched 2026-10-27 (unofficial)
-[S2] http://realtimevoxels.blogspot.fr/2012/09/introduction-to-gigavoxels-and-sparse.html, http://realtimevoxels.blogspot.fr/2012/09/introduction-to-gigavoxels-and-sparse.html, fetched 2026-10-28 (unofficial)
+[S2] Sparse Volume Textures in Unreal Engine | Unreal Engine 5.8 ... - Epic Dev, https://dev.epicgames.com/documentation/en-us/unreal-engine/sparse-volume-textures-in-unreal-engine, fetched 2026-10-28
+[S3] http://realtimevoxels.blogspot.fr/2012/09/introduction-to-gigavoxels-and-sparse.html, http://realtimevoxels.blogspot.fr/2012/09/introduction-to-gigavoxels-and-sparse.html, fetched 2026-10-28 (unofficial)
