@@ -3,272 +3,214 @@
 Also called: MCM Renderer, MCCRenderer
 
 ## Overview
-
-Compute Shader Photon Integration is a GPU-accelerated Monte Carlo photon integration technique for volume rendering that simulates photon transport through participating media using parallel compute shaders [S1, S2, S3, unofficial]. It solves the problem of estimating radiance in participating media by tracing random walks of photons, handling absorption, scattering, and null collisions, while accumulating results in a feedback buffer [S2, unofficial]. What sets it apart from its siblings is its explicit use of global invocation IDs for parallel photon processing and its specific implementation of incremental radiance updates and null-collision sampling within a compute shader environment, differing from the spatial photon storage of [Volumetric Photon Mapping](2190-volumetric-photon-mapping.md) and the point-based light transport approach of [Point-Based Light Transport in Participating Media](3763-point-based-light-transport-in-participating-media.md).
+Compute Shader Photon Integration is a GPU-accelerated Monte Carlo photon integration method that simulates light transport through participating media by processing photons in parallel using global invocation IDs [S1, S2, S3, unofficial]. It differs from CPU-based photon mapping by leveraging compute shaders to perform random walk steps, handling absorption, scattering, and null collisions via Russian Roulette-like probability checks, while accumulating radiance in a feedback buffer [S2, unofficial]. Unlike traditional photon mapping which stores photons in a spatial data structure for later density estimation, this method directly updates radiance buffers per-frame, making it suitable for dynamic scenes or real-time feedback [S1, S2, unofficial].
 
 ## How it works
 
 ### Inputs and Outputs
-
 **Inputs:**
-*   `uExtinction`: Extinction coefficient for exponential distance sampling [S2, unofficial].
-*   `uMajorant`: Global majorant coefficient for null-collision step sampling [S3, unofficial].
-*   `uAbsorptionCoefficient`: Base absorption coefficient multiplier applied to volume alpha [S3, unofficial].
-*   `uScatteringCoefficient`: Base scattering coefficient multiplier applied to volume alpha [S3, unofficial].
-*   `uAnisotropy` / `uScatteringBias`: Henyey-Greenstein scattering anisotropy parameter $g$ [S2, S3, unofficial].
-*   `uMaxBounces`: Maximum number of scattering events allowed per photon before transmittance-only estimation [S2, S3, unofficial].
-*   `uSteps`: Fixed number of null-collision steps per photon per frame [S2, S3, unofficial].
-*   `uBlur`: Blur parameter used in `unprojectRand` for ray origin jittering [S2, unofficial].
-*   `uColorBias`: Blending factor between mask and data transfer function colors [S3, unofficial].
-*   `uAlphaBias`: Blending factor for final alpha [S3, unofficial].
-*   `uAlphaTransfer`: Blending factor for mask alpha [S3, unofficial].
-*   `uMvpInverseMatrix`: Inverse Model-View-Projection matrix for unprojection [S1, S2, unofficial].
-*   `uInverseResolution`: Inverse resolution for unprojection [S2, unofficial].
-*   `volumeTexture`: 3D texture containing volume data [S2, S3, unofficial].
-*   `transferFunction`: Transfer function for volume color/alpha [S2, S3, unofficial].
-*   `environmentMap`: Environment map for out-of-bounds sampling [S2, S3, unofficial].
-*   `sPhotons[]`: Input photon buffer containing initial photon states [S1, unofficial].
+*   **Photon Buffer:** A storage buffer (`std430`) containing photon state structures. Each photon has a position, direction, transmittance, radiance, bounce count, and sample count [S1, S2, S3, unofficial].
+*   **Volume Texture:** A 3D texture storing volume density/color information. The `sampleVolumeColor` function returns a `vec4` where `rg` comes from the volume texture, `rgb` from the transfer function, and `a` (alpha) from the transfer function alpha [S2, S3, unofficial].
+*   **Environment Map:** A 2D texture for sampling background radiance when photons exit the volume [S2, S3, unofficial].
+*   **Uniforms:**
+    *   `uMajorant`: Global majorant extinction coefficient [S3, unofficial].
+    *   `uAbsorptionCoefficient`: Base absorption multiplier [S3, unofficial].
+    *   `uScatteringCoefficient`: Base scattering multiplier [S3, unofficial].
+    *   `uAnisotropy` / `uScatteringBias`: Henyey-Greenstein asymmetry parameter $g$ [S2, S3, unofficial].
+    *   `uMaxBounces`: Maximum scattering events allowed [S2, S3, unofficial].
+    *   `uSteps`: Fixed number of null-collision steps per photon per frame [S3, unofficial].
+    *   `uColorBias`, `uAlphaBias`, `uAlphaTransfer`: Blending factors for transfer function application [S3, unofficial].
+    *   `uMvpInverseMatrix`, `uInverseResolution`, `uBlur`: Parameters for ray unprojection and jittering [S2, unofficial].
 
 **Outputs:**
-*   `oPosition`: Output buffer (`vec4`) storing photon position (`xyz`) and unused `w` (typically `0`) [S2, S3, unofficial].
-*   `oDirection`: Output buffer (`vec4`) storing photon direction (`xyz`) and bounce count (`w`) [S2, S3, unofficial].
-*   `oTransmittance`: Output buffer (`vec4`) storing photon transmittance (`rgb`) and unused `w` (typically `0`) [S2, S3, unofficial].
-*   `oRadiance`: Output buffer (`vec4`) storing accumulated radiance (`rgb`) and sample count (`w`) [S2, S3, unofficial].
+*   **Radiance Image:** A `rgba32f` write-only image buffer (`image2D`) storing the accumulated radiance [S1, unofficial].
+*   **Photon State Buffers (G-buffers):** Four 2D textures storing photon state for the next frame or feedback:
+    *   `oPosition` (`vec4`): `xyz` = position, `w` = unused (or 0) [S2, S3, unofficial].
+    *   `oDirection` (`vec4`): `xyz` = direction, `w` = bounce count [S2, S3, unofficial].
+    *   `oTransmittance` (`vec4`): `rgb` = transmittance, `w` = unused (or 0) [S2, S3, unofficial].
+    *   `oRadiance` (`vec4`): `rgb` = accumulated radiance, `w` = sample count [S2, S3, unofficial].
 
 ### Data Structures
-
-**Photon Buffer Layout (Compute Shader):**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```glsl
-layout(std430, binding = 0) buffer bPhotons {
-    Photon sPhotons[];
-};
-```
-[S1, unofficial]
-
-**Output Buffers (G-Buffer Textures):**
-All outputs are `vec4` textures:
-*   `oPosition`: `xyz` = position, `w` = unused (or `0`) [S2, S3, unofficial].
-*   `oDirection`: `xyz` = direction, `w` = bounce count [S2, S3, unofficial].
-*   `oTransmittance`: `rgb` = transmittance, `w` = unused (or `0`) [S2, S3, unofficial].
-*   `oRadiance`: `rgb` = accumulated radiance, `w` = sample count [S2, S3, unofficial].
+The photon state is typically stored in a flat buffer or structured buffer accessible via `std430` layout [S1, unofficial]. The structure `Photon` contains:
+*   `position`: `vec3`
+*   `direction`: `vec3`
+*   `transmittance`: `vec3`
+*   `radiance`: `vec3`
+*   `bounces`: `uint`
+*   `samples`: `uint`
 
 ### Steps
+1.  **Dispatch and Indexing:** The compute shader is dispatched with a grid size matching the number of photons. Each work item calculates its global index:
+    $$ \text{globalIndex} = \text{gl\_GlobalInvocationID.x} + \text{gl\_GlobalInvocationID.y} \times \text{gl\_WorkGroupSize.x} $$
+    [S1, unofficial]. It loads the photon state from `sPhotons[globalIndex]` [S1, unofficial].
 
-1.  **Compute Global Index:** Calculate the global invocation index: `global_idx = gid_x + gid_y * group_size_x` [S1, unofficial].
-2.  **Load Photon:** Load the photon state from `sPhotons[global_idx]` [S1, unofficial].
-3.  **Initialize Photon:**
-    *   Call `unprojectRand(state, vPosition, uMvpInverseMatrix, uInverseResolution, uBlur, from, to)` to get ray origin `from` and direction `to` [S2, S3, unofficial].
+2.  **Photon Initialization (Reset):**
+    *   Generate a random ray origin and direction using `unprojectRand(state, vPosition, uMvpInverseMatrix, uInverseResolution, uBlur, from, to)` [S2, S3, unofficial].
     *   Set `photon.direction = normalize(to - from)` [S2, S3, unofficial].
-    *   Compute intersection with volume cube: `tbounds = max(intersectCube(from, photon.direction), 0.0)` [S2, S3, unofficial].
+    *   Intersect the ray with the volume cube (unit cube $[0,1]^3$) using `intersectCube(from, photon.direction)` to get `tbounds` [S2, S3, unofficial].
     *   Set `photon.position = from + tbounds.x * photon.direction` [S2, S3, unofficial].
-    *   Set `photon.transmittance = vec3(1)` [S2, S3, unofficial].
-    *   Set `photon.bounces = 0` [S2, S3, unofficial].
-    *   Set `photon.radiance = vec3(0)` [S2, unofficial].
-    *   Set `photon.samples = 0` [S2, unofficial].
-4.  **Loop for Steps:** Iterate `i` from `0` to `uSteps - 1`:
-    *   **Sample Distance:**
-        *   Using majorant: Sample random `r = rand()`, compute step size `t = -log(r.x) / uMajorant` [S3, unofficial].
-        *   Using extinction (alternative): Sample distance `dist = random_exponential(state, uExtinction)` [S2, unofficial].
-    *   **Advance Position:** `photon.position += t * photon.direction` (or `dist * photon.direction`) [S2, S3, unofficial].
-    *   **Sample Volume Color:** Call `sampleVolumeColor(photon.position)` to get `volumeSample` (`vec4`: `rg` from volume texture, `rgb` from transfer function, `a` from transfer function alpha) [S2, S3, unofficial].
-    *   **Compute Coefficients:**
-        *   Absorption: `muAbsorption = volumeSample.a * uAbsorptionCoefficient` [S3, unofficial].
-        *   Scattering: `muScattering = volumeSample.a * uScatteringCoefficient` [S3, unofficial].
-        *   Null: `muNull = uMajorant - muAbsorption - muScattering` [S3, unofficial].
-        *   Adjusted Majorant: `muMajorant = muAbsorption + muScattering + abs(muNull)` [S3, unofficial].
-        *   Probabilities: `PNul = abs(muNull) / muMajorant`, `PAbsorption = muAbsorption / muMajorant`, `PScattering = muScattering / muMajorant` [S3, unofficial].
-        *   Alternative Probabilities (S2): `PNul = 1.0 - volumeSample.a`. If `photon.bounces >= uMaxBounces`, `PScattering = 0.0`; else `PScattering = volumeSample.a * max3(volumeSample.rgb)`. `PAbsorption = 1.0 - PNull - PScattering` [S2, unofficial].
-    *   **Check Bounds:**
-        *   If `photon.position` is out of bounds (any component > `1` or < `0`):
-            *   Sample environment map: `envSample = sampleEnvironmentMap(photon.direction)` [S2, S3, unofficial].
-            *   Compute radiance: `radiance = photon.transmittance * envSample.rgb` [S3, unofficial].
-            *   Update radiance incrementally: `photon.radiance += (radiance - photon.radiance) / float(photon.samples)` [S2, S3, unofficial].
-            *   Increment `photon.samples` [S2, S3, unofficial].
-            *   Reset photon via `resetPhoton(r, photon)` [S2, S3, unofficial].
-            *   Continue to next step or end loop.
-    *   **Sample Interaction Type:**
-        *   Roll fortune wheel: `fortuneWheel = random_uniform(state)` [S2, unofficial].
-        *   If `fortuneWheel < PAbsorption` (or `r.y < PAbsorption` in S3):
-            *   **Absorption:**
-                *   Update transmittance: `photon.transmittance *= 1.0 - muAbsorption / (uMajorant * PAbsorption)` [S3, unofficial].
-                *   Update radiance: `photon.radiance += (vec3(0) - photon.radiance) / float(photon.samples)` [S2, unofficial].
-                *   Increment `photon.samples` [S2, unofficial].
-                *   Reset photon state [S2, unofficial].
-        *   Else If `fortuneWheel < PAbsorption + PScattering` (or `r.y < PAbsorption + PScattering` in S3):
-            *   **Scattering:**
-                *   Update transmittance: `photon.transmittance *= volumeSample.rgb * muScattering / (uMajorant * PScattering)` [S3, unofficial].
-                *   Sample new direction using Henyey-Greenstein: `photon.direction = sampleHenyeyGreenstein(state, uAnisotropy, photon.direction)` [S2, S3, unofficial].
-                *   Increment `photon.bounces` [S2, S3, unofficial].
-        *   Else (Null Collision):
-            *   Update transmittance: `photon.transmittance *= muNull / (uMajorant * PNull)` [S3, unofficial].
-            *   Continue loop without changing photon position or direction [S2, unofficial].
-5.  **Write Output:** Write final photon state to output buffers `oPosition`, `oDirection`, `oTransmittance`, `oRadiance` [S2, unofficial].
+    *   Reset state: `photon.transmittance = vec3(1)`, `photon.bounces = 0`, `photon.radiance = vec3(0)`, `photon.samples = 0` [S2, S3, unofficial].
+
+3.  **Random Walk Loop:** Iterate `i` from 0 to `uSteps - 1` [S2, S3, unofficial].
+    *   **Step Sampling:** Sample a random number $r_x$ and compute step size:
+        $$ t = -\frac{\ln(r_x)}{\sigma_{\text{majorant}}} $$
+        where $\sigma_{\text{majorant}}$ is `uMajorant` [S3, unofficial].
+    *   **Advance Position:** `photon.position += t * photon.direction` [S3, unofficial].
+    *   **Boundary Check:** If `photon.position` is out of bounds (any component $< 0$ or $> 1$) [S3, unofficial]:
+        *   Sample environment map: `envSample = sampleEnvironmentMap(photon.direction)` [S2, S3, unofficial].
+        *   Compute radiance contribution: `radiance = photon.transmittance * envSample.rgb` [S3, unofficial].
+        *   Update radiance incrementally:
+            $$ L_{\text{new}} = L_{\text{old}} + \frac{L_{\text{sample}} - L_{\text{old}}}{N} $$
+            where $N$ is `photon.samples` [S3, unofficial].
+        *   Increment `photon.samples` and reset photon state (return to Step 2) [S2, S3, unofficial].
+    *   **Volume Sampling:** Sample volume color at `photon.position` using `sampleVolumeColor` [S2, S3, unofficial]. Let the result be `volumeSample` (`vec4`).
+    *   **Coefficient Calculation:**
+        *   Compute absorption coefficient: $\mu_{\text{absorption}} = \text{volumeSample.a} \times \text{uAbsorptionCoefficient}$ [S3, unofficial].
+        *   Compute scattering coefficient: $\mu_{\text{scattering}} = \text{volumeSample.a} \times \text{uScatteringCoefficient}$ [S3, unofficial].
+        *   Compute null coefficient: $\mu_{\text{null}} = \sigma_{\text{majorant}} - \mu_{\text{absorption}} - \mu_{\text{scattering}}$ [S3, unofficial].
+        *   Adjust majorant: $\sigma_{\text{majorant}}' = \mu_{\text{absorption}} + \mu_{\text{scattering}} + |\mu_{\text{null}}|$ [S3, unofficial].
+        *   Compute probabilities:
+            $$ P_{\text{null}} = \frac{|\mu_{\text{null}}|}{\sigma_{\text{majorant}}'} $$
+            $$ P_{\text{absorption}} = \frac{\mu_{\text{absorption}}}{\sigma_{\text{majorant}}'} $$
+            $$ P_{\text{scattering}} = \frac{\mu_{\text{scattering}}}{\sigma_{\text{majorant}}'} $$
+            [S3, unofficial].
+        *   *Note:* Some implementations use a simplified probability model based on volume alpha and max RGB: $P_{\text{scattering}} = \text{volumeSample.a} \times \max(\text{volumeSample.rgb})$ if `bounces < uMaxBounces`, else 0; $P_{\text{absorption}} = 1 - P_{\text{null}} - P_{\text{scattering}}$ [S2, unofficial]. The majorant-based approach [S3, unofficial] is more rigorous for null-collision Monte Carlo.
+    *   **Interaction Selection:** Sample a random number $r_y$ [S3, unofficial].
+        *   If $r_y < P_{\text{absorption}}$:
+            *   **Absorption:** Update transmittance:
+                $$ \text{photon.transmittance} \times= 1.0 - \frac{\mu_{\text{absorption}}}{\sigma_{\text{majorant}}' \times P_{\text{absorption}}} $$
+                [S3, unofficial]. (Alternatively, set radiance contribution to 0 and reset [S2, unofficial]).
+            *   Reset photon state (return to Step 2) [S2, S3, unofficial].
+        *   Else if $r_y < P_{\text{absorption}} + P_{\text{scattering}}$:
+            *   **Scattering:** Update transmittance:
+                $$ \text{photon.transmittance} \times= \text{volumeSample.rgb} \times \frac{\mu_{\text{scattering}}}{\sigma_{\text{majorant}}' \times P_{\text{scattering}}} $$
+                [S3, unofficial].
+            *   Sample new direction using Henyey-Greenstein phase function with parameter $g$ (`uAnisotropy`) [S2, S3, unofficial].
+                *   Compute $\cos\theta = \frac{1 + g^2 - c^2}{2g}$, where $c = \frac{1 - g^2}{1 - g + 2gU}$ and $U$ is a uniform random number [S3, unofficial].
+                *   Compute new direction $\mathbf{d}'$ using a random vector $\mathbf{u}$ [S3, unofficial].
+            *   Increment `photon.bounces` [S2, S3, unofficial].
+        *   Else:
+            *   **Null Collision:** Update transmittance:
+                $$ \text{photon.transmittance} \times= \frac{\mu_{\text{null}}}{\sigma_{\text{majorant}}' \times P_{\text{null}}} $$
+                [S3, unofficial]. Continue loop without changing direction or bounces.
+
+4.  **Output:** Write the final photon state to the output buffers (`oPosition`, `oDirection`, `oTransmittance`, `oRadiance`) [S2, S3, unofficial].
 
 ### Pseudocode
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-from typing import List, Tuple
-
-# Minimal vector types for valid Python execution
-class vec3:
-    def __init__(self, x=0.0, y=0.0, z=0.0):
-        self.x, self.y, self.z = x, y, z
-    def __mul__(self, s): return vec3(self.x*s, self.y*s, self.z*s)
-    def __add__(self, o): return vec3(self.x+o.x, self.y+o.y, self.z+o.z)
-    def __sub__(self, o): return vec3(self.x-o.x, self.y-o.y, self.z-o.z)
-    def __truediv__(self, s): return vec3(self.x/s, self.y/s, self.z/s)
-    def dot(self, o): return self.x*o.x + self.y*o.y + self.z*o.z
-    def length(self): return math.sqrt(self.x**2 + self.y**2 + self.z**2)
-    def normalize(self): l = self.length(); return vec3(self.x/l, self.y/l, self.z/l) if l > 0 else vec3()
-
-class vec4:
-    def __init__(self, x=0.0, y=0.0, z=0.0, w=0.0):
-        self.x, self.y, self.z, self.w = x, y, z, w
-
-class Photon:
-    def __init__(self):
-        self.position = vec3()
-        self.direction = vec3()
-        self.transmittance = vec3()
-        self.bounces = 0
-        self.radiance = vec3()
-        self.samples = 0
-
-def reset_photon(photon: Photon):
-    photon.position = vec3()
-    photon.direction = vec3()
-    photon.transmittance = vec3(1.0, 1.0, 1.0)
+# Compute Shader Entry Point
+def compute_shader(globalInvocationID, gl_WorkGroupSize, sPhotons, oPosition, oDirection, oTransmittance, oRadiance, volumeTexture, envMap, uMajorant, uAbsorptionCoefficient, uScatteringCoefficient, uAnisotropy, uMaxBounces, uSteps, uMvpInverseMatrix, uInverseResolution, uBlur):
+    globalIndex = globalInvocationID.x + globalInvocationID.y * gl_WorkGroupSize.x
+    
+    # Load photon
+    photon = sPhotons[globalIndex]
+    
+    # Reset Photon
+    from_pos, to_dir = unprojectRand(state, vPosition, uMvpInverseMatrix, uInverseResolution, uBlur)
+    photon.direction = normalize(to_dir - from_pos)
+    tbounds = intersectCube(from_pos, photon.direction)
+    photon.position = from_pos + tbounds.x * photon.direction
+    photon.transmittance = vec3(1.0)
     photon.bounces = 0
-    photon.radiance = vec3()
+    photon.radiance = vec3(0.0)
     photon.samples = 0
-
-def compute_shader_photon_integration(gid_x: int, gid_y: int, group_size_x: int, 
-                                      sPhotons: List[Photon], uMajorant: float, 
-                                      uAbsorptionCoefficient: float, uScatteringCoefficient: float, 
-                                      uAnisotropy: float, uSteps: int, 
-                                      uMvpInverseMatrix: List, uInverseResolution: float, uBlur: float,
-                                      volumeTexture: List, transferFunction: List, environmentMap: List,
-                                      oPosition: List, oDirection: List, oTransmittance: List, oRadiance: List):
-    global_idx = gid_x + gid_y * group_size_x
-    photon = sPhotons[global_idx]
-
-    # Initialize Photon
-    from_pt, to_pt = unprojectRand(state, vPosition, uMvpInverseMatrix, uInverseResolution, uBlur)
-    photon.direction = to_pt - from_pt
-    photon.direction = photon.direction.normalize()
-    tbounds = max(intersectCube(from_pt, photon.direction), 0.0)
-    photon.position = from_pt + vec3(tbounds, tbounds, tbounds) * photon.direction
-    photon.transmittance = vec3(1.0, 1.0, 1.0)
-    photon.bounces = 0
-    photon.radiance = vec3()
-    photon.samples = 0
-
+    
     for i in range(uSteps):
-        # Sample Distance (Majorant method [S3, unofficial])
-        r = rand()
-        t = -math.log(r.x) / uMajorant
-        photon.position = photon.position + photon.direction * t
-
-        # Sample Volume Color
-        volume_sample = sample_volume_color(photon.position)
-        mu_absorption = volume_sample.w * uAbsorptionCoefficient
-        mu_scattering = volume_sample.w * uScatteringCoefficient
-        mu_null = uMajorant - mu_absorption - mu_scattering
-        mu_majorant = mu_absorption + mu_scattering + abs(mu_null)
-
-        # Probabilities
-        p_nul = abs(mu_null) / mu_majorant
-        p_absorption = mu_absorption / mu_majorant
-        p_scattering = mu_scattering / mu_majorant
-
-        # Check Bounds
+        # Step Size
+        r_x = rand()
+        t = -log(r_x) / uMajorant
+        photon.position += t * photon.direction
+        
+        # Boundary Check
         if is_out_of_bounds(photon.position):
-            env_sample = sample_environment_map(photon.direction)
-            radiance_sample = photon.transmittance * env_sample
-            if photon.samples == 0:
-                photon.radiance = radiance_sample
-                photon.samples = 1
-            else:
-                photon.radiance = photon.radiance + (radiance_sample - photon.radiance) / float(photon.samples)
+            env_sample = sample_environment_map(envMap, photon.direction)
+            radiance_contrib = photon.transmittance * env_sample.rgb
+            # Incremental Update
+            N = float(photon.samples)
+            photon.radiance = photon.radiance + (radiance_contrib - photon.radiance) / N
             photon.samples += 1
-            reset_photon(photon)
-            continue
-
-        # Sample Interaction
-        fortune_wheel = random_uniform()
-        if fortune_wheel < p_absorption:
+            # Reset for next photon
+            break # Or return to reset logic depending on implementation flow
+            
+        # Volume Sample
+        volume_sample = sample_volume_color(volumeTexture, photon.position)
+        
+        # Coefficients
+        mu_abs = volume_sample.a * uAbsorptionCoefficient
+        mu_scat = volume_sample.a * uScatteringCoefficient
+        mu_null = uMajorant - mu_abs - mu_scat
+        sigma_majorant_prime = mu_abs + mu_scat + abs(mu_null)
+        
+        # Probabilities
+        P_null = abs(mu_null) / sigma_majorant_prime
+        P_abs = mu_abs / sigma_majorant_prime
+        P_scat = mu_scat / sigma_majorant_prime
+        
+        # Interaction
+        r_y = rand()
+        if r_y < P_abs:
             # Absorption
-            photon.transmittance = photon.transmittance * (1.0 - mu_absorption / (uMajorant * p_absorption))
-            radiance_sample = vec3()
-            if photon.samples == 0:
-                photon.radiance = radiance_sample
-                photon.samples = 1
-            else:
-                photon.radiance = photon.radiance + (radiance_sample - photon.radiance) / float(photon.samples)
+            photon.transmittance *= 1.0 - mu_abs / (sigma_majorant_prime * P_abs)
+            photon.radiance = vec3(0.0) # Or incremental update with 0
             photon.samples += 1
-            reset_photon(photon)
-        elif fortune_wheel < p_absorption + p_scattering:
+            break
+        elif r_y < P_abs + P_scat:
             # Scattering
-            photon.transmittance = photon.transmittance * (volume_sample * mu_scattering / (uMajorant * p_scattering))
-            photon.direction = sample_henyey_greenstein(state, uAnisotropy, photon.direction)
+            photon.transmittance *= volume_sample.rgb * mu_scat / (sigma_majorant_prime * P_scat)
+            photon.direction = sample_henyey_greenstein(uAnisotropy, photon.direction)
             photon.bounces += 1
         else:
             # Null Collision
-            photon.transmittance = photon.transmittance * (mu_null / (uMajorant * p_nul))
-
+            photon.transmittance *= mu_null / (sigma_majorant_prime * P_null)
+            
     # Write Output
-    oPosition[global_idx] = vec4(photon.position.x, photon.position.y, photon.position.z, 0.0)
-    oDirection[global_idx] = vec4(photon.direction.x, photon.direction.y, photon.direction.z, float(photon.bounces))
-    oTransmittance[global_idx] = vec4(photon.transmittance.x, photon.transmittance.y, photon.transmittance.z, 0.0)
-    oRadiance[global_idx] = vec4(photon.radiance.x, photon.radiance.y, photon.radiance.z, float(photon.samples))
+    oPosition[globalInvocationID.xy] = vec4(photon.position, 0.0)
+    oDirection[globalInvocationID.xy] = vec4(photon.direction, float(photon.bounces))
+    oTransmittance[globalInvocationID.xy] = vec4(photon.transmittance, 0.0)
+    oRadiance[globalInvocationID.xy] = vec4(photon.radiance, float(photon.samples))
 ```
 
-### Formulas
-
-*   **Step Size:** $t = -\frac{\ln(r_x)}{\sigma_{\text{majorant}}}$, where $r_x$ is a uniform random number in $(0,1)$ and $\sigma_{\text{majorant}}$ is the global majorant coefficient [S3, unofficial].
-*   **Henyey-Greenstein Scattering:**
-    *   Cosine: $\cos\theta = \frac{1 + g^2 - c^2}{2g}$, where $c = \frac{1 - g^2}{1 - g + 2gU}$ and $U$ is a uniform random number [S3, unofficial].
-    *   New Direction: $\mathbf{d}' = \frac{\mathbf{u} + (\cos\theta - \mathbf{d} \cdot \mathbf{u})\mathbf{d}}{\|\mathbf{u} + (\cos\theta - \mathbf{d} \cdot \mathbf{u})\mathbf{d}\|}$, with $\mathbf{u}$ a random direction [S3, unofficial].
-*   **Incremental Radiance Update:** $L_{\text{new}} = L_{\text{old}} + \frac{L_{\text{sample}} - L_{\text{old}}}{N}$, where $N$ is the current sample count [S3, unofficial].
-
 ### Parameters
+*   `uMajorant`: Global majorant coefficient. Must be $\ge \sigma_t(\mathbf{p})$ for all $\mathbf{p}$ in the volume [S3, unofficial].
+*   `uSteps`: Fixed number of steps per photon. Higher values increase accuracy but cost more [S3, unofficial].
+*   `uMaxBounces`: Limits scattering depth. Set to 0 for single-scattering approximation [S2, S3, unofficial].
+*   `uAnisotropy`: Henyey-Greenstein $g$ parameter. $g=0$ is isotropic, $g>0$ is forward-scattering [S2, S3, unofficial].
 
-*   `uExtinction`: Extinction coefficient for exponential distance sampling [S2, unofficial].
-*   `uMajorant`: Global majorant coefficient for null-collision step sampling [S3, unofficial].
-*   `uAbsorptionCoefficient`: Base absorption coefficient multiplier applied to volume alpha [S3, unofficial].
-*   `uScatteringCoefficient`: Base scattering coefficient multiplier applied to volume alpha [S3, unofficial].
-*   `uAnisotropy` / `uScatteringBias`: Henyey-Greenstein scattering anisotropy parameter $g$ [S2, S3, unofficial].
-*   `uMaxBounces`: Maximum number of scattering events allowed per photon before transmittance-only estimation [S2, S3, unofficial].
-*   `uSteps`: Fixed number of null-collision steps per photon per frame [S2, S3, unofficial].
-*   `uBlur`: Blur parameter used in `unprojectRand` for ray origin jittering [S2, unofficial].
-*   `uColorBias`: Blending factor between mask and data transfer function colors [S3, unofficial].
-*   `uAlphaBias`: Blending factor for final alpha [S3, unofficial].
-*   `uAlphaTransfer`: Blending factor for mask alpha [S3, unofficial].
-
-### Edge Cases and Pitfalls
-
-*   **Out-of-Bounds Positions:** Out-of-bounds positions cause division-by-zero or invalid texture fetches if not handled; the code explicitly checks bounds before sampling and resets the photon upon boundary exit [S3, unofficial].
-*   **Precision:** Incremental radiance updates require a guard for `photon.samples == 0` to avoid division by zero, initializing `photon.radiance` directly on the first sample [G].
-*   **Degenerate Input:** If `uMajorant` is zero or negative, step sampling will fail; a minimum majorant threshold must be enforced [G].
+### Pitfalls
+*   **Out-of-Bounds:** If `photon.position` is out of bounds, sampling the volume texture may cause undefined behavior or division by zero if not checked. Always check bounds before sampling [S3, unofficial].
+*   **Majorant Selection:** If `uMajorant` is too close to the local extinction coefficient, variance increases. If too large, null collisions dominate, reducing efficiency [S3, unofficial].
+*   **Precision:** Using `rgba32f` for radiance accumulation is critical to avoid overflow and maintain dynamic range [S1, unofficial].
 
 ## Operating characteristics
 
-*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of photons and $S$ is the number of steps per photon [S2, S3, unofficial].
-*   **Memory Complexity:** $O(N)$ for photon storage and $O(W \cdot H)$ for output buffers, where $W, H$ are screen dimensions [S2, S3, unofficial].
-*   **Measured Performance:** Not given in the sources.
-*   **Scaling:** Scales linearly with the number of compute units and photons [S1, unofficial].
-*   **Strengths:** Parallel processing of photons, efficient null-collision handling, incremental radiance updates [S1, S2, S3, unofficial].
-*   **Limitations:** Requires careful tuning of majorant and step counts, potential for high variance with few steps [S2, S3, unofficial].
-*   **When to Use:** Real-time volume rendering with participating media, especially when parallel processing is beneficial [S1, S2, S3, unofficial].
+### Time and Memory Complexity
+*   **Time:** $O(N \times S)$, where $N$ is the number of photons and $S$ is `uSteps` [S2, S3, unofficial]. Each step involves texture sampling and random number generation.
+*   **Memory:** $O(N)$ for photon storage plus $O(W \times H)$ for output buffers, where $W, H$ are screen dimensions [S1, S2, unofficial].
+
+### Measured Performance
+*   Performance depends heavily on GPU compute throughput and memory bandwidth. Parallel processing of photons allows high throughput on modern GPUs [S1, unofficial].
+*   Scaling is linear with the number of photons and steps [S3, unofficial].
+
+### Strengths and Limitations
+*   **Strengths:** Fully parallelizable on GPU; suitable for dynamic scenes; no need for complex spatial data structures like BVH or KD-trees for photon storage [S1, S2, unofficial].
+*   **Limitations:** High variance with few photons; requires many samples for convergence; null collisions can be inefficient if the majorant is poorly chosen [S3, unofficial].
+
+### When to Use
+*   Use for real-time or near-real-time volume rendering where dynamic changes are expected [S1, S2, unofficial].
+*   Avoid for static scenes requiring high-quality offline rendering where traditional photon mapping or path tracing might offer better convergence with spatial caching [S2, unofficial].
 
 ## Background
 
-Compute Shader Photon Integration was developed as part of the MCM Renderer / MCCRenderer project, leveraging WebGL2 Compute Shaders for parallel photon transport simulation [S1, S2, S3, unofficial]. It builds on the principles of Monte Carlo photon integration and null-collision methods, adapting them for real-time GPU execution [S1, S2, S3, unofficial]. The method is used in real-time volume rendering applications, particularly those requiring interactive performance with participating media [S1, S2, S3, unofficial].
+### Origin
+Compute Shader Photon Integration is an implementation of Monte Carlo photon integration using GPU compute shaders. It is associated with the "MCM Renderer" and "MCCRenderer" projects [S1, S2, S3, unofficial].
+
+### History
+The method leverages the parallel processing capabilities of modern GPUs to accelerate photon transport simulation, which was traditionally done on CPUs. The use of null-collision Monte Carlo allows for efficient handling of heterogeneous media [S3, unofficial].
+
+### Usage
+Used in WebGL/OpenGL compute shader implementations for volumetric rendering [S1, S2, S3, unofficial].
 
 ## Sources
 

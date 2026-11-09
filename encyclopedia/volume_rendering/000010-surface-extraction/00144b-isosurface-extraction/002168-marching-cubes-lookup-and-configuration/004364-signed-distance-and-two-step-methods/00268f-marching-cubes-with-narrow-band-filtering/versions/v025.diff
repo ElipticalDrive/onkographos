@@ -1,0 +1,410 @@
+--- v024.md
++++ v025.md
+@@ -4,215 +4,218 @@
+ 
+ ## Overview
+-This method reconstructs a triangle mesh from a Signed Distance Function (SDF) by restricting the standard Marching Cubes algorithm to a "narrow band" of grid cells near the zero-level set [S1, unofficial]. It solves the performance bottleneck of processing the entire volume by skipping cubes that are geometrically too far from the surface to intersect it [S1, unofficial]. Unlike standard Marching Cubes which iterates over all voxels, this approach filters cubes based on the distance from their center to the isosurface, significantly reducing the number of intersection calculations [S1, unofficial].
++This method reconstructs a triangle mesh from a Signed Distance Function (SDF) by evaluating the SDF on a grid of cubes, filtering cubes based on their distance to the surface (narrow-band filtering), and applying the Marching Cubes algorithm to intersected cubes [S1, unofficial]. It sets itself apart from standard Marching Cubes by skipping voxels where the distance from the center to the surface exceeds the cube's geometric bounds, significantly accelerating reconstruction for sparse or bounded SDFs [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-*   `sdf`: A function $S: \mathbb{R}^3 \to \mathbb{R}$ returning the signed distance to the surface.
+-*   `domain`: A bounding box defined by `min` (Vec3) and `size` (Vec3).
+-*   `isoLevel`: The scalar value defining the surface (typically 0 for SDFs).
+-*   `cubeSize`: The dimensions of the cubic grid cells (Vec3). Optional `sdfGrad` function for vertex normals; if null, numerical gradients are used [S1, unofficial].
++*   `sdf`: A function $S: \mathbb{R}^3 \to \mathbb{R}$ representing the Signed Distance Function.
++*   `domain`: A `Rect3` structure defining the bounding box of the reconstruction volume, with fields `min` (Vec3) and `size` (Vec3).
++*   `cubeSize`: A Vec3 defining the dimensions of each voxel/cube. If not provided, it is calculated from `NumCubes`.
++*   `isoLevel`: The scalar value defining the isosurface (typically 0 for SDFs).
++*   `sdfGrad`: An optional gradient function for vertex normals. If `nullptr`, numerical approximation is used [G].
+ 
+ **Outputs:**
+-*   `mesh`: A collection of triangles (vertices and indices) representing the isosurface.
++*   `mesh`: A triangle mesh data structure containing vertices and indices.
+ 
+ **Data Structures:**
+-*   `Cube`: Represents a single grid cell.
+-    *   `pos[8]`: Array of 8 vertex positions (Vec3).
+-    *   `sdf[8]`: Array of 8 scalar SDF values at vertices.
+-    *   `intersect`: List of intersection points on edges.
+-*   `signConfigToIntersectedEdges`: A lookup table of 256 integers (12-bit bitmasks). Each integer corresponds to one of the $2^8$ possible sign configurations of the cube's vertices. The $k$-th bit is set if the $k$-th edge intersects the isosurface [S1, unofficial].
+-*   `edges`: An array of 12 `Edge` structs defining the cube topology.
+-    *   `Edge` struct:
+-        *   `edgeFlag`: 12-bit integer ($2^k$) identifying the edge.
+-        *   `vert0`: Index of the first vertex (0-7).
+-        *   `vert1`: Index of the second vertex (0-7).
+-    *   Edge definitions (index, flag, v0, v1):
+-        0: 1, 0, 1
+-        1: 2, 1, 2
+-        2: 4, 2, 3
+-        3: 8, 3, 0
+-        4: 16, 4, 5
+-        5: 32, 5, 6
+-        6: 64, 6, 7
+-        7: 128, 7, 4
+-        8: 256, 0, 4
+-        9: 512, 1, 5
+-        10: 1024, 2, 6
+-        11: 2048, 3, 7 [S1, unofficial]
++*   `Rect3`: Contains `min` (Vec3) and `size` (Vec3).
++*   `Cube`: Contains `pos[8]` (Vec3 array of vertex positions) and `sdf[8]` (double array of SDF values at vertices).
++*   `signConfigToIntersectedEdges`: A static array of 256 integers (bitmasks) mapping vertex sign configurations to intersected edges.
++*   `edges`: A static array of 12 `Edge` structs. Each `Edge` has `edgeFlag` (12-bit integer, powers of 2: 1, 2, 4... 2048), `vert0` (int 0-7), and `vert1` (int 0-7).
+ 
+ **Parameters:**
+-*   `NumCubes`: Integer constant, default 50. Used to calculate default `cubeSize` as `domain.size / NumCubes` [S1, unofficial].
+-*   `isoLevel`: Default 0. Changing this moves the reconstructed surface [S1, unofficial].
+-
+-**Algorithm Steps:**
+-
++*   `NumCubes`: Integer constant, default 50. Used to calculate default `cubeSize` as `domain.size * (1.0 / NumCubes)` [S1, unofficial].
++*   `isoLevel`: Default 0 [S1, unofficial].
++
++**Steps:**
+ 1.  **Calculate Grid Dimensions:**
+-    Determine the number of cubes along each axis:
+-    $$
+-    \text{NumX} = \lceil \frac{\text{domain.size.x}}{\text{cubeSize.x}} \rceil
+-    $$
+-    $$
+-    \text{NumY} = \lceil \frac{\text{domain.size.y}}{\text{cubeSize.y}} \rceil
+-    $$
+-    $$
+-    \text{NumZ} = \lceil \frac{\text{domain.size.z}}{\text{cubeSize.z}} \rceil
+-    $$ [S1, unofficial]
+-
++    $$ \text{NumX} = \lceil \text{domain.size.x} / \text{cubeSize.x} \rceil $$
++    $$ \text{NumY} = \lceil \text{domain.size.y} / \text{cubeSize.y} \rceil $$
++    $$ \text{NumZ} = \lceil \text{domain.size.z} / \text{cubeSize.z} \rceil $$
+ 2.  **Calculate Geometric Constants:**
+-    $$
+-    \text{HalfCubeDiag} = \frac{\|\text{cubeSize}\|}{2.0}
+-    $$
+-    $$
+-    \text{HalfCubeSize} = \text{cubeSize} \times 0.5
+-    $$ [S1, unofficial]
+-    *Note: `HalfCubeDiag` is the maximum distance from the cube center to any vertex. If the distance from the center to the surface exceeds this, the cube cannot intersect the surface.*
+-
+-3.  **Iterate Grid:**
+-    Loop over indices $i_x \in [0, \text{NumX}-1]$, $i_y \in [0, \text{NumY}-1]$, $i_z \in [0, \text{NumZ}-1]$.
+-
+-4.  **Cube Initialization:**
+-    Calculate the minimum corner of the current cube in domain space:
+-    $$
+-    \text{min} = \text{domain.min} + \{ i_x \cdot \text{cubeSize.x}, \ i_y \cdot \text{cubeSize.y}, \ i_z \cdot \text{cubeSize.z} \}
+-    $$
+-    Calculate the cube center:
+-    $$
+-    \text{cubeCenter} = \text{min} + \text{HalfCubeSize}
+-    $$ [S1, unofficial]
+-
+-5.  **Narrow-Band Filter (Pitfall Guard):**
+-    Calculate the distance from the cube center to the isosurface:
+-    $$
+-    \text{dist} = | S(\text{cubeCenter}) - \text{isoLevel} |
+-    $$
+-    If $\text{dist} > \text{HalfCubeDiag}$, the cube is too far from the surface to intersect it. Continue to the next cube [S1, unofficial].
+-
+-6.  **Sample Vertices:**
+-    Construct the `Cube` object. Sample the SDF at the 8 vertices of the cube to populate `cube.sdf[8]` and store positions in `cube.pos[8]` [S1, unofficial].
+-
+-7.  **Intersect:**
+-    Call `cube.Intersect(isoLevel)`.
+-    *   Determine the sign configuration index $C$ by checking the sign of each vertex's SDF value relative to `isoLevel`.
+-    *   Look up `signConfigToIntersectedEdges[C]` to get the bitmask of intersected edges.
+-    *   For each set bit $k$ in the mask, identify the edge using the `edges` array.
+-    *   Calculate the intersection point on the edge using linear interpolation:
+-        $$
+-        \mu = \frac{\text{isoLevel} - \text{sdf}[v_0]}{\text{sdf}[v_1] - \text{sdf}[v_0]}
+-        $$
+-        $$
+-        P_{\text{intersect}} = P_{v_0} + \mu (P_{v_1} - P_{v_0})
+-        $$
+-        *Precision Guard:* If $|\text{isoLevel} - \text{sdf}[v_i]| < \epsilon$ (e.g., $10^{-5}$), use $P_{v_i}$ directly. If $|\text{sdf}[v_0] - \text{sdf}[v_1]| < \epsilon$, use $P_{v_0}$ [S1, unofficial].
+-
+-8.  **Triangulate:**
+-    Call `Triangulate(intersect, sdfGrad, mesh)`.
+-    *   Use the standard Marching Cubes lookup table (or the edge configuration) to determine which triangles to form from the intersection points.
+-    *   Generate vertex normals using `sdfGrad` if provided, otherwise compute numerical approximations [S1, unofficial].
+-    *   Add generated triangles to `mesh` [S1, unofficial].
++    $$ \text{HalfCubeDiag} = \|\text{cubeSize}\| / 2.0 $$
++    $$ \text{HalfCubeSize} = \text{cubeSize} \times 0.5 $$
++3.  **Iterate Grid:** For each grid index $(ix, iy, iz)$ where $0 \le ix < \text{NumX}$, etc.:
++    a. Calculate cube minimum corner:
++       $$ \text{min} = \text{domain.min} + \{ ix \cdot \text{cubeSize.x}, iy \cdot \text{cubeSize.y}, iz \cdot \text{cubeSize.z} \} $$
++    b. Calculate cube center:
++       $$ \text{cubeCenter} = \text{min} + \text{HalfCubeSize} $$
++    c. Evaluate SDF at center and calculate distance to isosurface:
++       $$ \text{dist} = | \text{sdf}(\text{cubeCenter}) - \text{isoLevel} | $$
++    d. **Narrow-Band Filter:** If $\text{dist} > \text{HalfCubeDiag}$, the cube cannot intersect the isosurface. Continue to next cube [S1, unofficial].
++    e. Construct `Cube` object:
++       i. Set `Cube.pos[v]` for $v \in [0,7]$ to the 8 vertices of the cube defined by `min` and `cubeSize`.
++       ii. Set `Cube.sdf[v] = sdf(Cube.pos[v])`.
++    f. **Classify Cube:** Compute vertex signs $s_v = \text{sign}(\text{Cube.sdf}[v] - \text{isoLevel})$. Form an 8-bit configuration index $C = \sum_{v=0}^{7} s_v \cdot 2^v$.
++    g. **Find Intersections:** Use `signConfigToIntersectedEdges[C]` to identify intersected edges. For each intersected edge $e$ (defined by `edges[e_idx]`):
++       i. Interpolate intersection point $P$ on the edge between vertices $v_0 = \text{Cube.pos}[e.\text{vert0}]$ and $v_1 = \text{Cube.pos}[e.\text{vert1}]$ with SDF values $d_0 = \text{Cube.sdf}[v_0]$ and $d_1 = \text{Cube.sdf}[v_1]$:
++          $$ \mu = \frac{\text{isoLevel} - d_0}{d_1 - d_0} $$
++          $$ P = v_0 + (v_1 - v_0) \cdot \mu $$
++          (Handle division by zero or near-zero denominator by returning $v_0$ if $|d_1 - d_0| < \epsilon$) [S1, unofficial].
++    h. **Triangulate:** Use the standard Marching Cubes `triangleTable` (from parent article) to generate triangles from the intersection points. Add triangles to `mesh`.
+ 
+ **Pseudocode:**
+-
+ ```python
+-def MarchingCubesNarrowBand(sdf, domain, cube_size, iso_level=0.0, sdf_grad=None):
+-    # 1. Calculate Grid Dimensions
+-    num_x = ceil(domain.size.x / cube_size.x)
+-    num_y = ceil(domain.size.y / cube_size.y)
+-    num_z = ceil(domain.size.z / cube_size.z)
+-
+-    # 2. Calculate Geometric Constants
+-    half_cube_diag = norm(cube_size) / 2.0
+-    half_cube_size = cube_size * 0.5
+-
++import math
++
++# Constants from source [S1, unofficial]
++signConfigToIntersectedEdges = [
++    0x0, 0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c,
++    0x80c, 0x905, 0xa0f, 0xb06, 0xc0a, 0xd03, 0xe09, 0xf00,
++    0x190, 0x99, 0x393, 0x29a, 0x596, 0x49f, 0x795, 0x69c,
++    0x99c, 0x895, 0xb9f, 0xa96, 0xd9a, 0xc93, 0xf99, 0xe90,
++    0x230, 0x339, 0x33, 0x13a, 0x636, 0x73f, 0x435, 0x53c,
++    0xa3c, 0xb35, 0x83f, 0x936, 0xe3a, 0xf33, 0xc39, 0xd30,
++    0x3a0, 0x2a9, 0x1a3, 0xaa, 0x7a6, 0x6af, 0x5a5, 0x4ac,
++    0xbac, 0xaa5, 0x9af, 0x8a6, 0xfaa, 0xea3, 0xda9, 0xca0,
++    0x460, 0x569, 0x663, 0x76a, 0x66, 0x16f, 0x265, 0x36c,
++    0xc6c, 0xd65, 0xe6f, 0xf66, 0x86a, 0x963, 0xa69, 0xb60,
++    0x5f0, 0x4f9, 0x7f3, 0x6fa, 0x1f6, 0xff, 0x3f5, 0x2fc,
++    0xdfc, 0xcf5, 0xfff, 0xef6, 0x9fa, 0x8f3, 0xbf9, 0xaf0,
++    0x650, 0x759, 0x453, 0x55a, 0x256, 0x35f, 0x55, 0x15c,
++    0xe5c, 0xf55, 0xc5f, 0xd56, 0xa5a, 0xb53, 0x859, 0x950,
++    0x7c0, 0x6c9, 0x5c3, 0x4ca, 0x3c6, 0x2cf, 0x1c5, 0xcc,
++    0xfcc, 0xec5, 0xdcf, 0xcc6, 0xbca, 0xac3, 0x9c9, 0x8c0,
++    0x8c0, 0x9c9, 0xac3, 0xbca, 0xcc6, 0xdcf, 0xec5, 0xfcc,
++    0xcc, 0x1c5, 0x2cf, 0x3c6, 0x4ca, 0x5c3, 0x6c9, 0x7c0,
++    0x950, 0x859, 0xb53, 0xa5a, 0xd56, 0xc5f, 0xf55, 0xe5c,
++    0x15c, 0x55, 0x35f, 0x256, 0x55a, 0x453, 0x759, 0x650,
++    0xaf0, 0xbf9, 0x8f3, 0x9fa, 0xef6, 0xfff, 0xcf5, 0xdfc,
++    0x2fc, 0x3f5, 0xff, 0x1f6, 0x6fa, 0x7f3, 0x4f9, 0x5f0,
++    0xb60, 0xa69, 0x963, 0x86a, 0xf66, 0xe6f, 0xd65, 0xc6c,
++    0x36c, 0x265, 0x16f, 0x66, 0x76a, 0x663, 0x569, 0x460,
++    0xca0, 0xda9, 0xea3, 0xfaa, 0x8a6, 0x9af, 0xaa5, 0xbac,
++    0x4ac, 0x5a5, 0x6af, 0x7a6, 0xaa, 0x1a3, 0x2a9, 0x3a0,
++    0xd30, 0xc39, 0xf33, 0xe3a, 0x936, 0x83f, 0xb35, 0xa3c,
++    0x53c, 0x435, 0x73f, 0x636, 0x13a, 0x33, 0x339, 0x230,
++    0xe90, 0xf99, 0xf00, 0xe09, 0xd03, 0xc0a, 0xb06, 0xa0f,
++    0x905, 0x80c, 0x70c, 0x605, 0x50f, 0x406, 0x30a, 0x203,
++    0x109, 0x0
++]
++
++edges = [
++    {"edgeFlag": 1, "vert0": 0, "vert1": 1},
++    {"edgeFlag": 2, "vert0": 1, "vert1": 2},
++    {"edgeFlag": 4, "vert0": 2, "vert1": 3},
++    {"edgeFlag": 8, "vert0": 3, "vert1": 0},
++    {"edgeFlag": 16, "vert0": 4, "vert1": 5},
++    {"edgeFlag": 32, "vert0": 5, "vert1": 6},
++    {"edgeFlag": 64, "vert0": 6, "vert1": 7},
++    {"edgeFlag": 128, "vert0": 7, "vert1": 4},
++    {"edgeFlag": 256, "vert0": 0, "vert1": 4},
++    {"edgeFlag": 512, "vert0": 1, "vert1": 5},
++    {"edgeFlag": 1024, "vert0": 2, "vert1": 6},
++    {"edgeFlag": 2048, "vert0": 3, "vert1": 7}
++]
++
++# Placeholder for triangleTable from parent article [Parent]
++# triangleTable is a 256-entry array of arrays of edge indices
++triangleTable = [...] 
++
++def lerp_vertex(isoLevel, v1, v2, p1, p2, eps=1e-5):
++    if abs(isoLevel - v1) < eps:
++        return p1
++    if abs(isoLevel - v2) < eps:
++        return p1
++    if abs(v1 - v2) < eps:
++        return p1
++    mu = (isoLevel - v1) / (v2 - v1)
++    return p1 + (p2 - p1) * mu
++
++def marching_cubes_narrow_band(sdf, domain, cubeSize=None, isoLevel=0.0, NumCubes=50):
++    if cubeSize is None:
++        cubeSize = domain.size * (1.0 / NumCubes)
++    
++    numX = math.ceil(domain.size.x / cubeSize.x)
++    numY = math.ceil(domain.size.y / cubeSize.y)
++    numZ = math.ceil(domain.size.z / cubeSize.z)
++    
++    halfCubeDiag = math.sqrt(cubeSize.x**2 + cubeSize.y**2 + cubeSize.z**2) / 2.0
++    halfCubeSize = cubeSize * 0.5
++    
+     mesh = Mesh()
+-
+-    # 3. Iterate Grid
+-    for ix in range(num_x):
+-        for iy in range(num_y):
+-            for iz in range(num_z):
+-                # 4. Cube Initialization
+-                min_corner = domain.min + Vec3(ix * cube_size.x, iy * cube_size.y, iz * cube_size.z)
+-                cube_center = min_corner + half_cube_size
+-
+-                # 5. Narrow-Band Filter
+-                dist_to_surface = abs(sdf(cube_center) - iso_level)
+-                if dist_to_surface > half_cube_diag:
++    
++    for ix in range(numX):
++        for iy in range(numY):
++            for iz in range(numZ):
++                min_corner = domain.min + Vec3(ix * cubeSize.x, iy * cubeSize.y, iz * cubeSize.z)
++                cubeCenter = min_corner + halfCubeSize
++                dist = abs(sdf(cubeCenter) - isoLevel)
++                
++                if dist > halfCubeDiag:
+                     continue
+-
+-                # 6. Sample Vertices
+-                cube = Cube(min_corner, cube_size, sdf)
+-                
+-                # 7. Intersect
+-                intersect_points = cube.intersect(iso_level)
+-                
+-                # 8. Triangulate
+-                if intersect_points is not None:
+-                    triangles = triangulate(cube, intersect_points, sdf_grad, iso_level)
+-                    mesh.add(triangles)
+-    
++                
++                # Construct cube vertices and SDF values
++                pos = [
++                    min_corner,
++                    min_corner + Vec3(cubeSize.x, 0, 0),
++                    min_corner + Vec3(cubeSize.x, cubeSize.y, 0),
++                    min_corner + Vec3(0, cubeSize.y, 0),
++                    min_corner + Vec3(0, 0, cubeSize.z),
++                    min_corner + Vec3(cubeSize.x, 0, cubeSize.z),
++                    min_corner + Vec3(cubeSize.x, cubeSize.y, cubeSize.z),
++                    min_corner + Vec3(0, cubeSize.y, cubeSize.z)
++                ]
++                sdf_vals = [sdf(p) for p in pos]
++                
++                # Compute configuration index
++                config = 0
++                for v in range(8):
++                    if sdf_vals[v] < isoLevel:
++                        config |= (1 << v)
++                
++                # Get intersected edges
++                intersected_edges_mask = signConfigToIntersectedEdges[config]
++                
++                # Find intersection points
++                intersections = []
++                for e_idx, edge in enumerate(edges):
++                    if intersected_edges_mask & edge["edgeFlag"]:
++                        v0_idx = edge["vert0"]
++                        v1_idx = edge["vert1"]
++                        p_int = lerp_vertex(isoLevel, sdf_vals[v0_idx], sdf_vals[v1_idx], pos[v0_idx], pos[v1_idx])
++                        intersections.append(p_int)
++                
++                # Triangulate
++                # Note: triangleTable indices refer to the 12 edges, not the intersections list directly.
++                # We must map edge indices to intersection points.
++                edge_to_inter = {}
++                for e_idx, edge in enumerate(edges):
++                    if intersected_edges_mask & edge["edgeFlag"]:
++                        edge_to_inter[e_idx] = intersections.pop(0)
++                
++                tri_indices = triangleTable[config]
++                for i in range(0, len(tri_indices), 3):
++                    e0 = tri_indices[i]
++                    e1 = tri_indices[i+1]
++                    e2 = tri_indices[i+2]
++                    
++                    p0 = edge_to_inter[e0]
++                    p1 = edge_to_inter[e1]
++                    p2 = edge_to_inter[e2]
++                    
++                    mesh.add_triangle(p0, p1, p2)
++                    
+     return mesh
+-
+-class Cube:
+-    def __init__(self, min_corner, size, sdf_func):
+-        self.pos = [
+-            min_corner,
+-            min_corner + Vec3(size.x, 0, 0),
+-            min_corner + Vec3(size.x, size.y, 0),
+-            min_corner + Vec3(0, size.y, 0),
+-            min_corner + Vec3(0, 0, size.z),
+-            min_corner + Vec3(size.x, 0, size.z),
+-            min_corner + Vec3(size.x, size.y, size.z),
+-            min_corner + Vec3(0, size.y, size.z)
+-        ]
+-        self.sdf = [sdf_func(p) for p in self.pos]
+-
+-    def intersect(self, iso_level):
+-        # Determine configuration index
+-        config = 0
+-        for i in range(8):
+-            if self.sdf[i] > iso_level:
+-                config |= (1 << i)
+-        
+-        # Get intersected edges bitmask
+-        edge_mask = signConfigToIntersectedEdges[config]
+-        
+-        points = []
+-        for edge_idx in range(12):
+-            if edge_mask & (1 << edge_idx):
+-                edge = edges[edge_idx]
+-                p0 = self.pos[edge.vert0]
+-                p1 = self.pos[edge.vert1]
+-                v0 = self.sdf[edge.vert0]
+-                v1 = self.sdf[edge.vert1]
+-                
+-                # Linear interpolation with precision guards
+-                eps = 1e-5
+-                if abs(iso_level - v0) < eps:
+-                    points.append(p0)
+-                elif abs(iso_level - v1) < eps:
+-                    points.append(p1)
+-                elif abs(v1 - v0) < eps:
+-                    points.append(p0)
+-                else:
+-                    mu = (iso_level - v0) / (v1 - v0)
+-                    points.append(p0 + (p1 - p0) * mu)
+-        
+-        return points
+-
+-def triangulate(cube, points, sdf_grad, iso_level):
+-    # Standard Marching Cubes logic based on edge intersections
+-    # Returns list of triangles
+-    pass
+ ```
+ 
++## Subtopics
++
++### SDF to PLY Conversion
++Converts SDF data directly to PLY format, potentially using similar narrow-band techniques but focusing on output format [Sibling].
++
++### Two-Step Surface Reconstruction Method
++Uses a low-cost approximation to screen voxels before high-accuracy evaluation, offering a different acceleration strategy than simple distance filtering [Sibling].
++
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N_{\text{band}})$, where $N_{\text{band}}$ is the number of cubes within the narrow band. This is significantly faster than $O(N_{\text{total}})$ for large volumes with small surface areas.
+-*   **Memory Complexity:** $O(N_{\text{band}})$ for storing the active cubes and resulting mesh. The lookup table is constant size ($256 \times 4$ bytes for the edge mask array).
+-*   **Strengths:** High performance for sparse surfaces or large domains; avoids processing empty space. Simple implementation using standard Marching Cubes lookup tables.
+-*   **Limitations:** Relies on the SDF property that the distance from the cube center to the surface is bounded by the cube diagonal. If the surface is extremely thin or curved such that it passes through a cube but the center is far from the zero-level set (unlikely for SDFs but possible for other implicit functions), it may be missed. The narrow band width is implicitly defined by the grid resolution; finer grids yield better accuracy but more cubes.
+-*   **When to use:** When reconstructing meshes from SDFs where the domain is much larger than the object, or when performance is critical and the surface is relatively smooth.
+-*   **When not to use:** For non-SDF implicit functions where the "distance to surface" heuristic does not hold, or if the surface has features smaller than the grid resolution that might be missed by the center-point check.
++*   **Time Complexity**: $O(N)$ where $N$ is the number of voxels in the grid, but effectively much less due to narrow-band filtering skipping non-intersecting cubes.
++*   **Memory Complexity**: $O(1)$ auxiliary space per cube, plus $O(V)$ for the output mesh where $V$ is the number of vertices.
++*   **Performance**: Fast due to precomputed lookup tables and narrow-band approach excluding cubes far from the surface [S1, unofficial].
++*   **Strengths**: Efficient for SDFs where the surface is localized; avoids evaluating SDF for all voxels.
++*   **Limitations**: Requires SDF or a function that can be evaluated at arbitrary points; grid resolution affects accuracy.
++*   **When to use**: When reconstructing meshes from SDFs or implicit functions where the domain is large but the surface is confined.
++*   **When not to use**: When the surface fills the entire domain or when SDF evaluation is extremely expensive and narrow-band filtering doesn't skip enough cubes.
+ 
+ ## Background
+-This method is implemented in the `MeshReconstruction` library by Magnus2 [S1, unofficial]. It combines the classic Marching Cubes algorithm [S1, unofficial] with a filtering step to optimize performance. The library is self-contained, requires C++14, and is licensed under MIT [S1, unofficial]. It is designed to be fast due to precomputed lookup tables and the narrow-band approach [S1, unofficial].
++The method is implemented in the `MeshReconstruction` library by Magnus2 [S1, unofficial]. It builds on the classic Marching Cubes algorithm [S1, unofficial] and is designed to be self-contained with no dependencies, requiring C++14 [S1, unofficial]. It is licensed under the MIT License [S1, unofficial].
+ 
+ ## Sources

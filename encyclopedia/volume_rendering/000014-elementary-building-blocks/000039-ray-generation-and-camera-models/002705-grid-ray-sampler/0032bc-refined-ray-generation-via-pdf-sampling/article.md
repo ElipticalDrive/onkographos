@@ -3,50 +3,42 @@
 Also called: NeRF Ray Refinement Sampling, Refine Ray Generation, Refined Ray Generation
 
 ## Overview
-Refined Ray Generation via PDF Sampling generates higher-fidelity ray samples for volume rendering by resampling depth positions based on the probability distribution defined by previous iteration's weights. It improves upon the coarse sampling provided by the [Grid Ray Sampler](3930-grid-ray-sampler.md) by concentrating samples in regions of high opacity or color change, thereby reducing noise and aliasing in the final render.
+Refined Ray Generation via PDF Sampling generates refined ray samples for volume rendering by sampling new depth positions based on previous iteration's weights, then computing segment lengths and midpoints for rendering [S1, unofficial]. It builds on the coarse sampling provided by the [Grid Ray Sampler](3930-grid-ray-sampler.md) by adaptively drawing new samples from the distribution defined by prior weights [S1, unofficial].
 
 ## How it works
-The method takes previous depth samples and their associated importance weights, constructs a piecewise constant probability density function (PDF), and draws new samples from this distribution. It then computes the geometric properties (segment lengths, midpoints, and world positions) required for the volume rendering integral.
+The method takes previous depth samples and their associated weights, samples new depth positions using a probability density function routine, and computes the geometric properties required for volume rendering [S1, unofficial].
 
 ### Inputs and Outputs
 **Inputs:**
-*   `prev_ts`: Tensor of shape `(N, Rays, PrevSamples)` containing the depth distances of the previous iteration's samples.
-*   `prev_weights`: Tensor of shape `(N, Rays, PrevSamples)` containing the importance weights (typically opacity $\times$ color contribution) corresponding to `prev_ts`.
+*   `prev_ts`: Tensor of shape `(N, Rays, PrevSamples)` containing the previous sample distances [S1, unofficial].
+*   `prev_weights`: Tensor of shape `(N, Rays, PrevSamples)` containing the previous sample weights [S1, unofficial].
 *   `point_count`: Integer specifying the number of new samples to generate per ray.
 *   `campos`: Camera position vector.
 *   `raydir`: Ray direction vector.
-*   `jitter`: Boolean flag indicating whether to add uniform noise to samples to prevent banding artifacts.
+*   `jitter`: Boolean flag indicating whether to add uniform noise to samples.
 
 **Outputs:**
 *   `raypos`: Tensor of shape `(N, Rays, point_count)` containing the 3D world positions of the new sample points.
 *   `segment_length`: Tensor of shape `(N, Rays, point_count)` containing the length of each segment along the ray.
-*   `validity_mask`: Boolean tensor indicating valid samples (initialized to all ones).
+*   `validity_mask`: Boolean tensor indicating valid samples.
 
 ### Data Structures
-*   `prev_ts`: Float tensor. Stores depth values $t$.
-*   `prev_weights`: Float tensor. Stores weights $w$.
-*   `end_point_ts`: Float tensor. Stores the sorted new depth samples.
-*   `middle_point_ts`: Float tensor. Stores the midpoints of the segments defined by `end_point_ts`.
-*   `segment_length`: Float tensor. Stores the distance between consecutive endpoints.
+*   `prev_ts`: Float tensor storing depth values $t$ [S1, unofficial].
+*   `prev_weights`: Float tensor storing weights $w$ [S1, unofficial].
+*   `end_point_ts`: Float tensor storing the new depth samples [S1, unofficial].
+*   `middle_point_ts`: Float tensor storing the midpoints of the segments defined by `end_point_ts` [S1, unofficial].
+*   `segment_length`: Float tensor storing the distance between consecutive endpoints [S1, unofficial].
 
 ### Algorithm Steps
-
-1.  **Sample New Depths:** Use a PDF sampling routine (`sample_pdf`) to draw `point_count + 1` new depth values from the distribution defined by `prev_ts` and `prev_weights`. This routine treats the weights as probabilities and samples from the cumulative distribution function (CDF). If `jitter` is true, uniform noise is added to the samples.
-2.  **Reshape:** Reshape `end_point_ts` to remove any extra dimensions introduced by the sampling function, resulting in shape `(N, Rays, point_count + 1)`.
-3.  **Compute Segment Lengths:** Calculate the difference between consecutive depth values:
-    $$ \text{segment\_length}_i = \text{end\_point\_ts}_i - \text{end\_point\_ts}_{i-1} $$
-    for $i = 1 \dots \text{point\_count}$.
-4.  **Scale Segment Lengths:** Multiply the depth differences by the norm of the ray direction vector $\|\mathbf{d}\|$ to convert depth distance to Euclidean distance:
-    $$ \text{segment\_length}_i^{\text{euclidean}} = \text{segment\_length}_i \times \|\mathbf{d}\| $$
-5.  **Compute Midpoints:** Calculate the midpoint depth for each segment:
-    $$ \text{middle\_point\_ts}_i = \frac{\text{end\_point\_ts}_i + \text{end\_point\_ts}_{i-1}}{2} $$
-6.  **Compute Ray Positions:** Calculate the 3D world position for each midpoint:
-    $$ \mathbf{p}_i = \mathbf{c} + \text{middle\_point\_ts}_i \times \mathbf{d} $$
-    where $\mathbf{c}$ is `campos` and $\mathbf{d}$ is `raydir`.
-7.  **Initialize Validity Mask:** Create a boolean mask of ones with the same shape and device as `middle_point_ts`.
+1. **Sample New Depths:** Draw `point_count + 1` new depth values from the distribution defined by `prev_ts` and `prev_weights` using a PDF sampling routine (`sample_pdf`) with a jitter condition [S1, unofficial].
+2. **Reshape:** Reshape `end_point_ts` to remove the last dimension added by `sample_pdf`, resulting in shape `(N, Rays, point_count + 1)` [S1, unofficial].
+3. **Compute Segment Lengths:** Calculate the difference between consecutive depth values: $\text{segment\_length}_i = \text{end\_point\_ts}_i - \text{end\_point\_ts}_{i-1}$ for $i = 1 \dots \text{point\_count}$ [S1, unofficial].
+4. **Scale Segment Lengths:** Multiply the depth differences by the norm of the ray direction vector $\|\mathbf{d}\|$ to convert depth distance to Euclidean distance: $\text{segment\_length}_i^{\text{euclidean}} = \text{segment\_length}_i \times \|\mathbf{d}\|$ [S1, unofficial].
+5. **Compute Midpoints:** Calculate the midpoint depth for each segment: $\text{middle\_point\_ts}_i = \frac{\text{end\_point\_ts}_i + \text{end\_point\_ts}_{i-1}}{2}$ [S1, unofficial].
+6. **Compute Ray Positions:** Calculate the 3D world position for each midpoint: $\mathbf{p}_i = \mathbf{c} + \text{middle\_point\_ts}_i \times \mathbf{d}$, where $\mathbf{c}$ is `campos` and $\mathbf{d}$ is `raydir` [S1, unofficial].
+7. **Initialize Validity Mask:** Create a boolean mask of ones with the same dtype and device as `middle_point_ts` [S1, unofficial].
 
 ### Pseudocode
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
@@ -62,39 +54,26 @@ def sample_pdf(bins, weights, n_samples, jitter=True):
     jitter: bool, add uniform noise
     Returns: (..., n_samples) sampled depths
     """
-    # Pad bins with zeros at start and end to define full range
-    # Note: In NeRF context, bins usually represent intervals.
-    # Weights are associated with intervals or points.
-    # Standard implementation:
-    # 1. Compute CDF from weights
-    # 2. Sample uniform random numbers
-    # 3. Invert CDF to get bins
-    
-    # Add zero at the beginning
+    # Pad weights with zeros at start and end to define full range [G]
     weights = F.pad(weights, (1, 0), 'constant', 0.0)
-    
-    # Compute CDF
+    # Compute CDF [G]
     cdf = torch.cumsum(weights, dim=-1)
-    cdf = cdf[..., :-1]  # Remove last element as it's sum of all weights
-    cdf = cdf / torch.max(cdf[..., -1:], dim=-1, keepdim=True)[0]
-    
-    # Sample uniform random numbers
+    cdf = cdf[..., :-1]
+    cdf = cdf / cdf[..., -1:]
+    # Sample uniform random numbers [G]
     u = torch.rand(list(weights.shape[:-1]) + [n_samples], device=weights.device)
     if jitter:
         u = u * (1.0 / n_samples) + torch.rand_like(u) / n_samples
-        
-    # Invert CDF
-    # Find indices where cdf < u
+    # Invert CDF [G]
     indices = torch.searchsorted(cdf, u, side='left')
-    
-    # Get lower and upper bins
     bins_g = bins.gather(-1, indices)
     bins_l = bins.gather(-1, indices - 1)
-    
-    # Interpolate
-    # This is a simplified interpolation; exact implementation depends on source
-    # For this method, we assume sample_pdf returns the new depth points
-    return bins_g
+    cdf_g = cdf.gather(-1, indices)
+    cdf_l = cdf.gather(-1, indices - 1)
+    # Interpolate [G]
+    t = (u - cdf_l) / (cdf_g - cdf_l + 1e-5)
+    samples = bins_l + t * (bins_g - bins_l)
+    return samples
 
 def refined_ray_generation(prev_ts, prev_weights, point_count, campos, raydir, jitter=True):
     """
@@ -102,30 +81,19 @@ def refined_ray_generation(prev_ts, prev_weights, point_count, campos, raydir, j
     prev_weights: (N, Rays, PrevSamples)
     """
     # Step 1: Sample new end-point ts
-    # sample_pdf expects bins and weights. 
-    # prev_ts are the bins (depths), prev_weights are the weights.
-    # We sample point_count + 1 points.
     end_point_ts = sample_pdf(prev_ts, prev_weights, point_count + 1, jitter)
     
-    # Step 2: Reshape end_point_ts
-    # Ensure shape is (N, Rays, point_count + 1)
-    # The sample_pdf output might have different shape depending on implementation
-    # Assuming it returns the correct shape or needs reshaping
+    # Step 2: Reshape end_point_ts to remove the last dimension added by sample_pdf
     if end_point_ts.dim() > 3:
-        end_point_ts = end_point_ts.view(end_point_ts.shape[0], end_point_ts.shape[1], -1)
+        end_point_ts = end_point_ts.squeeze(-1)
         
     # Step 3: Compute segment lengths
-    # segment_length = end_point_ts[:, :, 1:] - end_point_ts[:, :, :-1]
     segment_length = end_point_ts[:, :, 1:] - end_point_ts[:, :, :-1]
     
     # Step 4: Compute middle-point ts
     middle_point_ts = (end_point_ts[:, :, :-1] + end_point_ts[:, :, 1:]) / 2.0
     
     # Step 5: Compute ray positions
-    # raypos = campos + raydir * middle_point_ts
-    # Note: raydir is typically normalized, but we scale segment_length by norm later
-    # If raydir is not normalized, we must handle scaling carefully.
-    # Standard NeRF assumes raydir is normalized.
     raypos = campos.unsqueeze(1).unsqueeze(1) + raydir.unsqueeze(1).unsqueeze(1) * middle_point_ts.unsqueeze(-1)
     
     # Step 6: Multiply segment_length by ray direction norm
@@ -139,22 +107,28 @@ def refined_ray_generation(prev_ts, prev_weights, point_count, campos, raydir, j
 ```
 
 ### Parameters
-*   `point_count`: The number of refined samples per ray. Typical values range from 32 to 64 in NeRF implementations.
-*   `jitter`: Boolean. When true, adds uniform noise to prevent banding. Default is often true.
+*   `point_count`: The number of refined samples per ray [S1, unofficial].
+*   `jitter`: Boolean flag indicating whether to add uniform noise to samples [S1, unofficial].
 
 ### Edge Cases and Pitfalls
-*   **Zero Weights:** If all `prev_weights` are zero, the CDF is undefined. A guard should ensure weights sum to a positive value or add a small epsilon.
-*   **Unsorted Depths:** The algorithm assumes `prev_ts` are sorted. If not, sorting is required before computing CDF.
-*   **Precision:** Floating point precision issues may arise when computing CDF if weights vary significantly in magnitude.
+*   **Reshape Requirement:** The `sample_pdf` routine may return an extra trailing dimension that must be explicitly removed before computing differences [S1, unofficial].
+*   **Direction Norm Scaling:** Segment lengths computed from depth differences must be scaled by the ray direction norm to yield correct Euclidean distances [S1, unofficial].
+*   **Mask Initialization:** The validity mask must be initialized to ones with the exact same dtype and device as `middle_point_ts` to ensure correct broadcasting and device placement [S1, unofficial].
+
+## Subtopics
+
+### Cube-Bounded Ray Refinement
+Extends NeRF ray refinement by restricting samples to a cube domain defined by `domain_size`, marking points outside as invalid [S1, unofficial]. It calls the base `refine_ray_generation` to obtain initial `raypos`, `segment_length`, and `middle_point_ts`, then computes a validity mask by checking if all coordinates of `raypos` fall within $(-\text{domain\_size}, \text{domain\_size})$ [S1, unofficial].
+
+### Weighted Fusion of Sampling Distributions
+Combines pixel-guided and depth-guided sampling distributions using a weight parameter $\beta$ that increments from $0$ to $0.5$ across training iterations [S2]. The final sampling probability is computed as $P_{samp}(u, v) = \beta P'_c(u, v) + (1 - \beta)P'_d(u, v)$, where $P'_c$ is the normalized pixel-guided probability and $P'_d$ is the normalized depth-guided probability [S2]. Rays are sampled based on this fused distribution during training [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot R \cdot S \log S)$ or $O(N \cdot R \cdot S)$ depending on the sorting/searching implementation in `sample_pdf`, where $N$ is batch size, $R$ is number of rays, and $S$ is `PrevSamples`.
-*   **Memory Complexity:** $O(N \cdot R \cdot S)$ for storing intermediate tensors.
-*   **Strengths:** Significantly reduces noise compared to uniform sampling by concentrating samples in high-variance regions.
-*   **Limitations:** Requires a previous pass of sampling and rendering to generate weights. Adds computational overhead per iteration.
+Not given in the sources.
 
 ## Background
-This method is a core component of Neural Radiance Fields (NeRF) and its variants, such as PointNeRF. It was introduced to improve the efficiency of volume rendering by adaptively sampling along rays. The technique builds on the importance sampling principles used in computer graphics to reduce variance in Monte Carlo integration.
+This method is used in PointNeRF [S1, unofficial]. It was introduced to improve the efficiency of volume rendering by adaptively sampling along rays based on previous iteration weights [S1, unofficial].
 
 ## Sources
 [S1] Xharlie/pointnerf, https://github.com/Xharlie/pointnerf, fetched 2026-10-26 (unofficial)
+[S2] Efficient ray sampling for radiance fields reconstruction, https://doi.org/10.1016/j.cag.2023.11.005, fetched 2026-10-27

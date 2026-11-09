@@ -1,0 +1,99 @@
+# Hard Sample Mining
+
+Also called: HSM
+
+## Overview
+Hard Sample Mining (HSM) is an optimization procedure that reduces training time and memory usage by subsampling a "hard minibatch" of point samples ranked by their propagated pixel loss, rather than using all samples for the gradient update [S1]. It differs from sibling methods like Nerfacc, which prune low-weight samples based on density/opacity, by explicitly using the error signal (pixel loss) to identify samples that contribute most to the optimization gradient [S1].
+
+## How it works
+**Inputs:**
+- A batch of rays, each with $N$ point samples $\{x_i\}_{i=1}^N$.
+- The rendered color $C$ and the target image color $C_{target}$ for the batch.
+- The total batch size $B$ (number of rays).
+
+**Outputs:**
+- A subset of point samples (the hard minibatch) used to compute the loss and update network parameters.
+
+**Data Structures:**
+- **Loss Array:** A 1D array of size $B \times N$ storing the per-sample pixel loss.
+- **Ranking Indices:** An array of indices sorting the Loss Array in descending order.
+
+**Parameters:**
+- $B$: Total batch size (number of rays). Typical values are $2^{18}$ (262,144) for Instant-NGP and $2^{18}$ for Nerfacto [S1].
+- $K$: The number of samples to retain in the hard minibatch. Not given in the sources.
+
+**Steps:**
+1. **Compute Per-Sample Loss:** For each ray $r$ in the batch and each sample $i$ along that ray, compute the pixel loss $L_{r,i}$. This is typically the squared difference between the rendered color contribution of sample $i$ and the target pixel color, or the final pixel loss weighted by the sample's transmittance/weight. The source states "propagated pixel loss" [S1].
+2. **Rank Samples:** Flatten the $B \times N$ loss values into a single list. Sort this list in descending order to identify the samples with the highest loss.
+3. **Subsample Hard Minibatch:** Select the top $K$ samples from the sorted list. The source implies $K$ is chosen to retain "most of the update information" while reducing computational load [S1].
+4. **Compute Gradient:** Compute the loss and gradients using *only* the selected hard minibatch samples. The network parameters are updated based on this subset [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hard_sample_mining(rays, samples, targets, batch_size, retain_ratio):
+    """
+    rays: List of ray origins and directions.
+    samples: Tensor of shape (batch_size, num_samples, 3) containing 3D coordinates.
+    targets: Tensor of shape (batch_size, 3) containing target pixel colors.
+    batch_size: Number of rays in the batch.
+    retain_ratio: Fraction of total samples to keep (e.g., 0.5).
+    """
+    # 1. Forward pass to get rendered colors and weights (assuming standard volume rendering)
+    # colors: (batch_size, num_samples, 3)
+    # weights: (batch_size, num_samples, 1)
+    colors, weights = forward_pass(rays, samples)
+    
+    # 2. Compute per-sample pixel loss
+    # Loss is propagated from the final pixel error to individual samples
+    # Using mean squared error for each sample's contribution
+    # Note: Exact propagation formula not specified in sources [S1]
+    # Assuming simple per-sample MSE weighted by importance or just raw error
+    pixel_errors = (colors - targets[:, None, :]) ** 2
+    per_sample_loss = pixel_errors.sum(dim=-1) # Shape: (batch_size, num_samples)
+    
+    # 3. Flatten and rank
+    flat_loss = per_sample_loss.flatten()
+    num_total_samples = flat_loss.shape[0]
+    num_retain = int(num_total_samples * retain_ratio)
+    
+    # Get indices of the top K samples
+    top_k_indices = torch.topk(flat_loss, num_retain).indices
+    
+    # 4. Select hard samples
+    # Reshape indices back to (batch_size, num_samples) to select samples
+    # This requires mapping flat indices back to (ray_idx, sample_idx)
+    ray_indices = top_k_indices // per_sample_loss.shape[1]
+    sample_indices = top_k_indices % per_sample_loss.shape[1]
+    
+    # Gather the specific samples and their associated data
+    hard_samples = samples[ray_indices, sample_indices]
+    hard_weights = weights[ray_indices, sample_indices]
+    hard_targets = targets[ray_indices]
+    
+    # 5. Compute loss and update
+    # Recompute or use cached values for the hard samples
+    # The source states updates are based *only* on this hard minibatch [S1]
+    loss = compute_loss(hard_samples, hard_weights, hard_targets)
+    loss.backward()
+    
+    return loss
+```
+
+**Edge Cases and Pitfalls:**
+- **Uniformly Challenging Content:** In scenes with unbounded backgrounds or multiple outward-facing objects, the pixel loss distribution is more uniform. This limits the computational efficiency gains because there are no distinct "hard" samples to prioritize [S1].
+- **Pose Errors:** Severe pose mistakes in the dataset can produce "impossible to learn" point samples. These samples will consistently have high loss and crowd the hard minibatch, potentially degrading training stability [S1].
+
+## Operating characteristics
+- **Time Complexity:** Reduces iteration time by processing fewer samples for the backward pass and parameter update [S1].
+- **Memory Complexity:** Reduces dynamic memory footprint. For Nerfacto, memory usage dropped from 300 MB to 160 MB for normal iterations [S1].
+- **Performance:** On Mip-NeRF-360 scenes, HSM converges ~2x faster to a given PSNR level and achieves ~1 dB higher validation PSNR per same training time compared to the baseline [S1].
+- **Strengths:** Significant reduction in training time and memory; improved convergence speed.
+- **Limitations:** Less effective in scenes with uniform difficulty; sensitive to dataset pose errors.
+
+## Background
+Hard Sample Mining was introduced by J. Korhonen et al. in the paper "Efficient NeRF Optimization -- Not All Samples Remain Equally Hard" [S1]. It was applied to PyTorch reimplementations of Instant-NGP and Nerfacto on Mip-NeRF-360 and synthetic NeRF datasets [S1]. The method is distinct from prior importance sampling techniques that rely on density or opacity weights, being one of the first to use propagated pixel loss for sample ranking [S1].
+
+## Sources
+[S1] Efficient NeRF Optimization -- Not All Samples Remain Equally Hard, https://arxiv.org/abs/2408.03193v1, fetched 2026-10-27

@@ -1,0 +1,168 @@
+# Spread-space MIP chain with luminance weighting
+
+Also called: Luminance-weighted MIP chain, Masked MIP chain
+
+## Overview
+This method constructs a multi-resolution pyramid (MIP chain) for scattering light transport that prevents illumination leaking artifacts by masking pixels with low spreading width before blurring. It differs from standard Gaussian MIP chains [Streaming MIP Implementation (Basic)](1803-streaming-mip-implementation-basic.md) by introducing an auxiliary mask $\mathbf{M}$ and using luminance-weighted averaging for the width chain, ensuring that bright pixels (which are visually significant) are not blurred by dark, low-variance neighbors. It builds on [Streaming MIP Implementation (Basic)](1803-streaming-mip-implementation-basic.md) and is distinct from [Conical MImP](7656-conical-mimp.md) which uses conical filters rather than masked Gaussian blurring.
+
+## How it works
+**Inputs:**
+- $\mathbf{L}_{\text{sc}}^{[0]}$: The scattering light field at level 0 (RGB values).
+- $\mathbf{W}^{[0]}$: The spreading width (standard deviation) at level 0.
+- $K$: The maximum MIP level.
+- $c$: Constant from the spreading width model (Equation 3.7 in [S1, unofficial]).
+- $\varepsilon$: Masking width parameter.
+
+**Outputs:**
+- $\mathbf{L}_{\text{sc}}^{[0...K]}$: The MIP chain of scattering light.
+- $\mathbf{W}^{[0...K]}$: The MIP chain of spreading widths.
+- $\mathbf{M}^{[0...K]}$: The auxiliary masking chain.
+
+**Data Structures:**
+- $\mathbf{L}_{\text{sc}}^{[k]}$: 3-channel (RGB) texture at level $k$.
+- $\mathbf{W}^{[k]}$: Single-channel (float) texture at level $k$.
+- $\mathbf{M}^{[k]}$: Single-channel (float, 0.0 to 1.0) texture at level $k$.
+- $\mathbf{Y}^{[k]}$: Single-channel (float) texture at level $k$, representing luminance.
+
+**Parameters:**
+- $T_k = c \cdot 2^{k-1}$: Threshold distance for level $k$.
+- $\varepsilon$: Width of the smoothstep transition. Typical value $\varepsilon = 2$ reduces flickering; values $\varepsilon < 0.5$ cause high flickering [S1, unofficial].
+
+**Steps:**
+
+1. **Initialize Level 0:**
+   Set $\mathbf{L}_{\text{sc}}^{[0]}$, $\mathbf{W}^{[0]}$ from input data.
+
+2. **Iterate for $k = 1$ to $K$:**
+
+   a. **Compute Luminance Mask $\mathbf{Y}^{[k]}$:**
+      Calculate the absolute RGB luminance of the scattering light from the previous level:
+      $$ \mathbf{Y}^{[k]} = y(\mathbf{L}_{\text{sc}}^{[k-1]}) $$
+      where $y(\mathbf{L})$ is the standard luminance function (e.g., $0.299 R + 0.587 G + 0.114 B$) [S1, unofficial].
+
+   b. **Compute Width Chain $\mathbf{W}^{[k]}$ (Luminance-Weighted Average):**
+      Perform a uniform averaging (convolution with uniform distribution $\mathcal{U}$) weighted by luminance:
+      $$ \mathbf{W}^{[k]} = \frac{\left( \mathbf{Y}^{[k]} \cdot \mathbf{W}^{[k-1]} \right) * \mathcal{U}}{\mathbf{Y}^{[k]} * \mathcal{U}} $$
+      Here, $\mathcal{U}$ is a uniform kernel of the same size as the Gaussian filter $\mathcal{G}$ [S1, unofficial]. This step prefers the standard deviation of brighter pixels [S1, unofficial].
+
+   c. **Compute Mask $\mathbf{M}^{[k]}$:**
+      Define the mask using smoothstep based on the previous level's width $\mathbf{W}^{[k-1]}$:
+      $$ \mathbf{M}^{[k]} = \text{smoothstep}\left(T_k, (1 + \varepsilon) \cdot T_k, \mathbf{W}^{[k-1]}\right) $$
+      The `smoothstep(e1, e2, x)` function returns 0 if $x \le e1$, 1 if $x \ge e2$, and smooth interpolation otherwise [S1, unofficial].
+      The threshold $T_k = c \cdot 2^{k-1}$ [S1, unofficial].
+
+   d. **Compute Scattering Light $\mathbf{L}_{\text{sc}}^{[k]}$:**
+      Apply the mask to the previous level's light and convolve with the discrete Gaussian filter $\mathcal{G}$:
+      $$ \mathbf{L}_{\text{sc}}^{[k]} = \left( \mathbf{M}^{[k]} \cdot \mathbf{L}_{\text{sc}}^{[k-1]} \right) * \mathcal{G} $$
+      This masks out pixels with low spreading width before blurring, preventing dark, low-variance pixels from propagating into bright regions [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def build_spread_space_mip_chain(L_sc_0, W_0, K, c, epsilon):
+    """
+    Builds the spread-space MIP chain with luminance weighting.
+    
+    Args:
+        L_sc_0: 3D array (H, W, 3) or texture, RGB scattering light at level 0.
+        W_0: 2D array (H, W) or texture, spreading width at level 0.
+        K: int, maximum MIP level.
+        c: float, constant for threshold calculation.
+        epsilon: float, mask width parameter.
+        
+    Returns:
+        L_sc_chain: List of arrays, L_sc[0...K]
+        W_chain: List of arrays, W[0...K]
+        M_chain: List of arrays, M[0...K]
+    """
+    L_sc_chain = [L_sc_0]
+    W_chain = [W_0]
+    M_chain = [] # M[0] is not strictly needed for the loop start, but can be initialized if required
+    
+    # Pre-define filters
+    # G: Discrete Gaussian filter kernel
+    # U: Uniform filter kernel (same size as G)
+    # smoothstep: Function implementing smooth interpolation
+    
+    for k in range(1, K + 1):
+        # 1. Compute Luminance Mask Y[k]
+        # y(L) computes absolute RGB luminance
+        Y_k = compute_luminance(L_sc_chain[k-1])
+        
+        # 2. Compute Width Chain W[k]
+        # Weighted average: (Y * W_prev) * U / (Y * U)
+        numerator = convolve(Y_k * W_chain[k-1], U)
+        denominator = convolve(Y_k, U)
+        # Avoid division by zero
+        W_k = numerator / (denominator + 1e-8)
+        
+        # 3. Compute Mask M[k]
+        # T = c * 2^(k-1)
+        T = c * (2 ** (k - 1))
+        # smoothstep(T, (1 + epsilon) * T, W[k-1])
+        M_k = smoothstep(T, (1 + epsilon) * T, W_chain[k-1])
+        
+        # 4. Compute Scattering Light L_sc[k]
+        # (M * L_prev) * G
+        masked_L = M_k * L_sc_chain[k-1]
+        L_sc_k = convolve(masked_L, G)
+        
+        # Store results
+        W_chain.append(W_k)
+        M_chain.append(M_k)
+        L_sc_chain.append(L_sc_k)
+        
+    return L_sc_chain, W_chain, M_chain
+
+def compute_luminance(L_rgb):
+    """Computes luminance from RGB."""
+    # Standard luminance weights
+    return 0.299 * L_rgb[..., 0] + 0.587 * L_rgb[..., 1] + 0.114 * L_rgb[..., 2]
+
+def smoothstep(e1, e2, x):
+    """
+    Smooth interpolation function.
+    Returns 0 for x <= e1, 1 for x >= e2, smooth interpolation otherwise.
+    """
+    # Normalize x to [0, 1] range based on e1 and e2
+    # t = clamp((x - e1) / (e2 - e1), 0, 1)
+    # return t * t * (3 - 2 * t) # Smoothstep polynomial
+    # Note: The exact polynomial implementation depends on the specific smoothstep definition,
+    # but the behavior is defined as 0 for x<=e1, 1 for x>=e2.
+    t = (x - e1) / (e2 - e1)
+    t = max(0.0, min(1.0, t))
+    return t * t * (3.0 - 2.0 * t)
+
+def convolve(data, kernel):
+    """
+    Convolution of data with kernel.
+    Assumes standard 2D convolution with appropriate padding/boundary handling.
+    """
+    # Implementation depends on the specific convolution library or method.
+    # For the purpose of this article, it represents the mathematical operation.
+    # In practice, this is often done via FFT or separable filters for efficiency.
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+- **Division by Zero:** In the luminance-weighted average for $\mathbf{W}^{[k]}$, if $\mathbf{Y}^{[k]} * \mathcal{U}$ is zero (no bright pixels in the neighborhood), division by zero occurs. A small epsilon ($10^{-8}$) should be added to the denominator [G].
+- **Flickering:** Low values of $\varepsilon$ (e.g., $\varepsilon < 0.5$) cause high flickering of the blurring. Use $\varepsilon = 2$ for stability [S1, unofficial].
+- **Boundary Conditions:** The convolution operations ($\mathcal{U}$ and $\mathcal{G}$) require boundary handling. Standard clamping or replication padding is assumed [G].
+
+## Subtopics
+
+## Operating characteristics
+- **Time Complexity:** Building each level involves convolutions with Gaussian and uniform kernels. If separable filters are used, convolution is $O(N)$ per pixel per level, where $N$ is the number of pixels. Total time is $O(K \cdot N)$.
+- **Memory Complexity:** Stores $K+1$ levels of $\mathbf{L}_{\text{sc}}$, $\mathbf{W}$, and $\mathbf{M}$. Total memory is $O(K \cdot N)$.
+- **Strengths:** Reduces illumination leaking artifacts by masking low-variance pixels. Luminance weighting ensures bright pixels are preserved.
+- **Limitations:** Requires building auxiliary chains ($\mathbf{W}$, $\mathbf{M}$, $\mathbf{Y}$). Flickering can occur if $\varepsilon$ is not tuned correctly.
+- **When to Use:** When illumination leaking is a concern in MIP-based volume rendering, especially with heterogeneous media.
+- **When Not to Use:** If memory bandwidth is extremely constrained and auxiliary chains are prohibitive, or if flickering cannot be tolerated without extensive tuning.
+
+## Background
+This method was introduced by Elek et al. [2013] in the context of real-time light transport in analytically integrable participating media. It addresses the issue of naive MIP filtering blurring bright pixels with dark neighbors, leading to visual artifacts. The approach uses an auxiliary mask based on spreading width and luminance weighting to preserve visual quality.
+
+## Sources
+[S1] Real-Time Light Transport in Analytically Integrable Participating Media, https://cgg.mff.cuni.cz/~tomas/publications/pub-thesis-real-time-scattering/thesis.pdf, fetched 2026-10-29 (unofficial)
