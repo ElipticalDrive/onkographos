@@ -1,0 +1,98 @@
+--- v006.md
++++ v007.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-HashGrid Encoding maps continuous spatial coordinates to high-dimensional feature vectors using a cascade of learnable hash tables at different resolutions [S1][S3, S7, unofficial]. It solves the problem of **spectral bias** in neural implicit representations by allowing the network to capture high-frequency details without requiring massive parameter counts, enabling rapid training and rendering on consumer hardware [S2, S3, S7, unofficial]. Unlike positional encoding which maps to a fixed basis, or dense grids which scale poorly with resolution, HashGrid uses spatial hashing to map voxel coordinates to a compact embedding table, reducing computational operations by approximately 70% compared to direct large implicit network queries [S2, S3, S7, unofficial].
++HashGrid Encoding maps continuous spatial coordinates to high-dimensional feature vectors using a cascade of learnable hash tables at different resolutions [S1][S3, S7, unofficial]. It solves the problem of **spectral bias** in neural implicit representations by allowing the network to capture high-frequency details without requiring massive parameter counts, enabling rapid training and rendering on consumer hardware [G]. Unlike positional encoding which maps to a fixed basis, or dense grids which scale poorly with resolution, HashGrid uses spatial hashing to map voxel coordinates to a compact embedding table, reducing computational operations by approximately 70% compared to direct large implicit network queries [S2, S3, S7, unofficial].
+ 
+ ## How it works
+@@ -19,5 +19,5 @@
+ *   **Parameters**:
+     *   $H$: Base resolution (grid size at level 0) [S6][S8, S9, S11, unofficial].
+-    *   $S$: Scaling factor exponent controlling resolution growth per level [S4, unofficial][S6][S9, S11, unofficial].
++    *   $S$: Scaling factor exponent controlling resolution growth per level [S4, S9, S11, unofficial].
+     *   $L$: Number of resolution levels (typically 16) [S3, S4, S9, S11, unofficial][S12].
+     *   $C$: Number of feature channels per level. Restricted to 1, 2, 4, or 8 [S4, S9, S11, unofficial].
+@@ -47,5 +47,5 @@
+ 4.  **Hash Index**: The local grid coordinates $\text{pos\_grid\_local}$ are mapped to a hash index. A common hash function uses prime multipliers and XOR:
+     $$ \text{hash}(\text{pos\_grid}) = \bigoplus_{i=0}^{D-1} (\text{pos\_grid}[i] \times \pi_i) $$
+-    where $\pi_i$ are distinct large primes (e.g., $\pi_0=1, \pi_1=2654435761, \pi_2=805459861, \dots$) [S1][S3, S11, unofficial][S12].
++    where $\pi_i$ are distinct large primes (e.g., $\pi_0=1, \pi_1=2654435761, \pi_2=805459861, \dots$) [S1][S11, unofficial][S12].
+     The final index in the embeddings array is:
+     $$ \text{index} = (\text{hash}(\text{pos\_grid}) \pmod{\text{hashmap\_size}_l}) \times C + ch $$
+@@ -77,5 +77,5 @@
+     B = len(inputs)
+     outputs = [[[0.0] * C for _ in range(B)] for _ in range(L)]
+-    dy_dx = [[[0.0] * C for _ in range(D)] for _ in range(B * L)]
++    dy_dx = [[[0.0] * C for _ in range(D)] for _ in range(B) for _ in range(L)]
+     primes = [1, 2654435761, 805459861, 3674653429, 2097192037, 1434869437, 2165219737]
+ 
+@@ -87,9 +87,7 @@
+ 
+         for b in range(B):
+-            # Check bounds: if any coord < 0 or > 1, output is 0
+             if any(inputs[b][d] < 0.0 or inputs[b][d] > 1.0 for d in range(D)):
+                 continue
+ 
+-            # Map to grid space
+             pos = [inputs[b][d] * scale + offset_val for d in range(D)]
+             pos_grid = [math.floor(p) for p in pos]
+@@ -99,5 +97,4 @@
+             level_grads = [[0.0] * C for _ in range(D)]
+ 
+-            # Forward pass: interpolate over 2^D corners
+             for idx in range(1 << D):
+                 w = 1.0
+@@ -111,5 +108,4 @@
+                         pos_grid_local[d] = pos_grid[d]
+ 
+-                # Hash index
+                 hash_val = 0
+                 for d in range(D):
+@@ -117,12 +113,9 @@
+                 index = (hash_val % hashmap_size) * C
+ 
+-                # Accumulate features
+                 for ch in range(C):
+                     level_features[ch] += w * embeddings[index + ch]
+ 
+-            # Backward pass: compute dy_dx efficiently per dimension
+             for gd in range(D):
+                 grad_dim = [0.0] * C
+-                # Iterate over 2^(D-1) neighbors fixing gd
+                 for idx in range(1 << (D - 1)):
+                     w_other = 1.0
+@@ -144,5 +137,4 @@
+                                 pos_grid_right[d] = pos_grid[d]
+ 
+-                    # Hash for left and right
+                     hash_left = 0
+                     hash_right = 0
+@@ -154,5 +146,4 @@
+                     idx_right = (hash_right % hashmap_size) * C
+ 
+-                    # Derivative factor
+                     pos_deriv = scale
+                     if interp == 'smoothstep':
+@@ -167,5 +158,5 @@
+             outputs[l][b] = level_features
+             for d in range(D):
+-                dy_dx[b * L + l][d] = level_grads[d]
++                dy_dx[b][l][d] = level_grads[d]
+ 
+     return outputs, dy_dx
+@@ -174,5 +165,5 @@
+ ### Edge Cases and Pitfalls
+ *   **Out-of-Bounds**: Inputs outside $[0, 1]$ must be handled. The standard implementation checks bounds and outputs 0 features, returning 0 gradients to prevent undefined behavior [S4, S9, S11, unofficial].
+-*   **Hash Collisions**: Hash collisions are inevitable due to finite table size. They are handled by modulo arithmetic. The backward pass uses `atomicAdd` for gradient updates, which handles collisions but introduces contention [S3, unofficial][S6][S8, S9, S11, unofficial].
++*   **Hash Collisions**: Hash collisions are inevitable due to finite table size. They are handled by modulo arithmetic. The backward pass uses `atomicAdd` for gradient updates, which handles collisions but introduces contention [S3, S9, unofficial][S12].
+ *   **Precision**: `atomicAdd` on half-precision (`__half`) is slow on older CUDA architectures. Implementations use `__half2` vectorization when `N_C % 2 == 0` (where `N_C = min(2, C)`) to improve performance [S3, S4, S9, S11, unofficial].
+ *   **Dimensionality**: $D$ is typically restricted to 2 or 3. Higher dimensions increase the $2^D$ interpolation cost significantly [S11, unofficial].
+@@ -189,5 +180,5 @@
+ *   **Performance**: Reduces computational operations by ~70% compared to direct large implicit network queries [S2, S3, S7, unofficial]. Enables real-time rendering on consumer GPUs (e.g., RTX 3080/4070) [S2, S3, S7, unofficial]. Training speedup is over 8× faster than frequency encoding with similar parameter counts, achieving state-of-the-art quality in seconds [S3, unofficial][S12].
+ *   **Strengths**: Compact memory footprint, fast $O(1)$ lookup, fully differentiable, supports multi-resolution details, and automatically prioritizes sparse areas with important fine-scale detail via gradient averaging [S3, unofficial][S12].
+-*   **Limitations**: Spatial aliases caused by hash collisions can degrade geometric interpretation and introduce visually undesirable surface roughness in SDF rendering [S4, unofficial][S6, S12]. Hash collisions may cause gradient noise during training [S6, S12].
++*   **Limitations**: Spatial aliases caused by hash collisions can degrade geometric interpretation and introduce visually undesirable surface roughness in SDF rendering [S6, S12]. Hash collisions may cause gradient noise during training [S6, S12].
+ *   **When to use**: When training speed and memory efficiency are critical, and high-frequency detail preservation is needed. Suitable for NeRF, neural implicit fields, and gigapixel image approximation on consumer hardware [S3, unofficial][S12].
+ *   **When not to use**: When exact geometric interpretation without aliasing is required, or when $D$ is very large (curse of dimensionality in $2^D$ interpolation) [S11, unofficial][S12].

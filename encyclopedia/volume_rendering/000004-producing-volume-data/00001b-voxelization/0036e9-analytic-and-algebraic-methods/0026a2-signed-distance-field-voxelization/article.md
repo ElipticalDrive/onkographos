@@ -1,16 +1,15 @@
 # Signed Distance Field Voxelization
 
-Also called: SDF Voxelization, Signed Distance Grid Generation
 
 ## Overview
-Signed Distance Field (SDF) Voxelization converts continuous geometric primitives (typically triangle meshes) into a discrete 3D grid where each voxel stores the signed Euclidean distance to the nearest surface point. It solves the problem of creating a continuous, differentiable volumetric representation from explicit geometry, enabling operations like marching cubes, collision detection, and fluid simulation. It differs from [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) by computing exact geometric distances rather than projected coverage, and from [SDF-based Binary Voxelization](2402-sdf-based-binary-voxelization.md) by retaining continuous distance values rather than discretizing to binary occupancy.
+Signed Distance Field (SDF) Voxelization converts continuous geometric primitives (typically triangle meshes) into a discrete 3D grid where each voxel stores the signed Euclidean distance to the nearest surface point [S1]. It solves the problem of creating a continuous, differentiable volumetric representation from explicit geometry, enabling operations like marching cubes extraction [S1]. It differs from [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) by computing exact geometric distances rather than projected coverage, and from [SDF-based Binary Voxelization](2402-sdf-based-binary-voxelization.md) by retaining continuous distance values rather than discretizing to binary occupancy.
 
 ## Shared principles
-All methods in this family compute a scalar field $D(x)$ for every voxel center $x$ in a defined 3D grid, representing the signed Euclidean distance to the input surface. The core mechanism involves:
-1.  **Grid Definition**: Defining a bounding box, resolution, and voxel size. The domain is often normalized to $[-1, 1]$ or mapped from world coordinates [S1][S2, unofficial].
-2.  **Distance Evaluation**: For each voxel center, calculating the minimum distance to the input geometry (e.g., triangle mesh). This is typically done by iterating over all primitives or using spatial acceleration structures [S1][S2, unofficial].
-3.  **Sign Determination**: Assigning a sign to the distance: negative for interior points and positive for exterior points. This is commonly achieved via ray-casting parity tests or winding number algorithms [S1][S2, unofficial].
-4.  **Storage**: Storing the resulting signed distance values in a 3D array, texture, or function object [S1][S2, unofficial].
+All methods in this family compute a scalar field $D(x)$ for every voxel center $x$ in a defined 3D grid, representing the signed Euclidean distance to the input surface [S1]. The core mechanism involves:
+1. **Grid Definition**: Defining a bounding box, resolution, and voxel size derived from the mesh's bounding box [S1].
+2. **Distance Evaluation**: For each voxel center, calculating the minimum distance to the input geometry [S1].
+3. **Sign Determination**: Assigning a sign to the distance: negative for interior points and positive for exterior points, typically using a winding number rule robust to holes and self-intersections [S1].
+4. **Storage**: Storing the resulting signed distance values in a 3D array, texture, or function object [S1].
 
 ## Subtopics
 
@@ -35,7 +34,7 @@ Tracks the free surface of a liquid by storing signed distances to the water-air
 - **Parameter**: `voxelSize`: Vector3f diagonal size, calculated via `mm.suggestVoxelSize(mesh, 1e7)` [S1]. `origin`: Vector3f defining the grid origin, calculated via `mm.calcOriginAndDimensions` [S1]. `dimensions`: Vector3i defining the grid dimensions, calculated via `mm.calcOriginAndDimensions` [S1]. `maxDistSq`: float squared maximum distance to calculate, set to $(3 \cdot \text{oneDimVoxelSize})^2$ [S1]. `nullOutsideMinMax`: boolean, if True, do not calculate values too far [S1]. `signMode`: enum for sign detection, `mm.SignDetectionMode.HoleWindingRule` is robust [S1]. `fwn`: Optional FastWindingNumber object (GPU/CUDA) for accelerated sign calculation [S1].
 
 ## Background
-The method originates from the need to represent complex 3D geometry in a format suitable for volume rendering, simulation, and machine learning. The `meshlib` library provides a Python and C++ implementation for converting meshes to SDFs, supporting both dense volumes and function volumes [S1]. The approach is widely used in computer graphics for tasks such as marching cubes extraction, collision detection, and fluid simulation [S1].
+The method originates from the need to represent complex 3D geometry in a format suitable for volume rendering and geometric processing [G]. The `meshlib` library provides a Python and C++ implementation for converting meshes to SDFs, supporting both dense volumes and function volumes [S1]. The approach is widely used in computer graphics for tasks such as marching cubes extraction [S1].
 
 ## Sources
 [S1] Mesh to SDF (Signed Distance Field) Library for Python & C++, https://meshlib.io/feature/mesh-to-sdf/, fetched 2026-10-30

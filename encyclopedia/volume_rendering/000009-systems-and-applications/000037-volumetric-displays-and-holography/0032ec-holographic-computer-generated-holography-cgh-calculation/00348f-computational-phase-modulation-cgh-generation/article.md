@@ -2,284 +2,199 @@
 Also called: ORA method, Optimization with Random Phase Algorithm
 
 ## Overview
-Computational Phase Modulation, specifically via the Optimization with Random Phase Algorithm (ORA), is an iterative optimization method for generating Computer-Generated Holograms (CGH) that produce a target intensity distribution $I_r$ composed of a uniform spot array [S1]. It solves the phase retrieval problem for phase-only Spatial Light Modulators (SLMs) by iteratively adjusting the hologram phase $\phi_h$ to maximize the sum of light intensities at desired reconstruction pixels [S1]. It differs from direct diffraction calculation methods by using feedback-driven optimization rather than analytical superposition, and from standard Gerchberg-Saxton implementations by its specific update rule for phase variation $\Delta\phi_h$ derived from maximizing intensity sums [S1, S2].
+Computational Phase Modulation (CPM), specifically implemented via the Optimization with Random Phase Algorithm (ORA), is an iterative optimization method for generating Computer-Generated Holograms (CGHs) that produce a spot array with uniform intensity on a reconstruction plane [S1]. It solves the problem of controlling the spatial intensity distribution of light reflected from a Liquid Crystal Spatial Light Modulator (LC-SLM) to create multiple, precisely positioned 3D focal points (voxels) for volumetric displays [S1]. Unlike direct superposition methods, ORA iteratively adjusts the phase of the hologram to minimize the error between the reconstructed intensity and a desired target intensity, allowing for high-quality uniform spot arrays [S1].
 
 ## How it works
-**Inputs:**
-*   Target intensity distribution $I_r^{(d)}$ on the reconstruction plane.
-*   Wavelength $\lambda$ of the illumination light.
-*   SLM parameters: pixel pitch, resolution, and maximum phase modulation range (typically $0$ to $2\pi$) [S1, S2].
-*   Optical system parameters: focal length $f$ for axial control [S1].
-
-**Outputs:**
-*   CGH phase pattern $\phi_h(x, y)$ to be displayed on the SLM [S1].
+**Inputs and Outputs:**
+*   **Input:** Desired intensity distribution $I_r^{(d)}$ on the reconstruction plane; wavelength $\lambda$; SLM pixel pitch (implicit in propagation model); number of iterations.
+*   **Output:** Phase-only hologram pattern $\phi_h(x,y)$ to be displayed on the SLM.
 
 **Data Structures:**
-*   **Hologram Plane:** 2D array of complex amplitude $U_h(x, y) = a_h(x, y) \exp[i\phi_h(x, y)]$. Since the illumination is a uniform plane wave, the amplitude $a_h(x, y)$ is constant [S1].
-*   **Reconstruction Plane:** 2D array of complex amplitude $U_r(\nu_x, \nu_y)$ and intensity $I_r = |U_r|^2$ [S1].
-*   **Weights:** Array $\omega_r$ representing the phase at pixel $r$ on the reconstruction plane, used to control light intensity [S1].
+*   **Hologram Plane:** Complex field $U_h(x,y)$ with amplitude $a_h(x,y)$ and phase $\phi_h(x,y)$. In the standard ORA implementation, $a_h$ is constant (uniform plane wave illumination) [S1].
+*   **Reconstruction Plane:** Complex field $U_r(\nu_x, \nu_y)$ with amplitude $a_r(\nu_x, \nu_y)$ and phase $\phi_r(\nu_x, \nu_y)$.
+*   **Weights:** $\omega_r^{(i)}$ representing the phase or intensity weighting at pixel $r$ on the reconstruction plane during iteration $i$ [S1].
+
+**Formulas:**
+The relationship between the hologram plane and reconstruction plane is governed by the Fourier Transform:
+$$ U_r(\nu_x, \nu_y) = \iint U_h(x, y) e^{-i 2\pi (x\nu_x + y\nu_y)} dx dy = a_r(\nu_x, \nu_y) e^{i\phi_r(\nu_x, \nu_y)} $$
+$$ U_h(x, y) = a_h(x, y) \exp[i\phi_h(x, y)] $$
+where $U_r$ is the complex amplitude of reconstruction, $U_h$ is the CGH pattern, and $a_r, \phi_r$ are the amplitude and phase of the reconstruction [S1].
+
+The intensity at pixel $r$ in iteration $i$ is $I_r^{(i)} = |U_r^{(i)}|^2$ [S1].
 
 **Parameters:**
-*   $\alpha$: Constant for intensity update (value not specified in sources) [S1].
-*   Iteration limit: Typically 50 iterations for Fourier-based optimization [S2].
+*   $a_h$: Amplitude of the hologram plane. Assumed constant because the irradiation light is a plane wave with uniform intensity [S1].
+*   $\alpha$: Constant used in the weight update equation [S1].
+*   $k = 2\pi/\lambda$: Wavenumber [S1].
+*   $f$: Focal length of the phase Fresnel lens (for axial control) [S1].
 
 **Steps:**
+1.  **Initialization:** Initialize the phase $\phi_h^{(0)}$ randomly or with a base pattern. Set iteration counter $i=0$.
+2.  **Forward Propagation:** Compute the complex amplitude $U_r^{(i)}$ on the reconstruction plane by taking the Fourier Transform of $U_h^{(i)} = a_h \exp[i\phi_h^{(i)}]$ [S1].
+3.  **Weight Update:** Update the weight $\omega_r^{(i)}$ based on the ratio of desired intensity $I_r^{(d)}$ to current intensity $I_r^{(i)}$:
+    $$ \omega_r^{(i)} = \omega_r^{(i-1)} \left( \frac{I_r^{(d)}}{I_r^{(i)}} \right)^\alpha $$
+    (Note: $\omega_r^{(0)}$ is typically initialized to 1 or a constant phase) [S1].
+4.  **Phase Variation Calculation:** Calculate the phase variation $\Delta\phi_h^{(i)}$ to be added to the hologram phase. Define sums $S_1$ and $S_2$:
+    $$ S_2 = \sum_r \omega_r^{(i)} a_h \sin(\phi_r^{(i)} - \phi_{hr} - \phi_h^{(i)}) $$
+    $$ S_1 = \sum_r \omega_r^{(i)} a_h \cos(\phi_r^{(i)} - \phi_{hr} - \phi_h^{(i)}) $$
+    $$ \Delta\phi_h^{(i)} = \tan^{-1}\left(\frac{S_2}{S_1}\right) $$
+    where $\phi_{hr}$ is the phase contribution from pixel $h$ on the CGH plane to pixel $r$ on the reconstruction plane [S1].
+5.  **Phase Update:** Update the hologram phase:
+    $$ \phi_h^{(i)} = \phi_h^{(i-1)} + \Delta\phi_h^{(i)} $$
+6.  **Convergence Check:** Check if $I_r^{(i)}$ is nearly equal to $I_r^{(d)}$ (e.g., error metric below threshold). If not, increment $i$ and return to Step 2 [S1].
 
-1.  **Initialization:**
-    *   Set initial phase $\phi_h^{(0)}(x, y) = 0$ or random values.
-    *   Set initial reconstruction plane weights $\omega_r^{(0)} = 1$ (or appropriate initial guess) [S1].
-    *   Set iteration counter $i = 0$ [S1].
-
-2.  **Forward Propagation (Calculate Reconstruction Field):**
-    *   Construct the hologram field: $U_h^{(i)}(x, y) = a_h \exp[i\phi_h^{(i)}(x, y)]$ [S1].
-    *   Compute the complex amplitude of the reconstruction $U_r^{(i)}(\nu_x, \nu_y)$ via Fourier Transform:
-        $$ U_r^{(i)}(\nu_x, \nu_y) = \iint U_h^{(i)}(x, y) e^{-i 2\pi (x\nu_x + y\nu_y)} dx dy $$
-        $$ U_r^{(i)}(\nu_x, \nu_y) = a_r^{(i)}(\nu_x, \nu_y) e^{i\phi_r^{(i)}(\nu_x, \nu_y)} $$
-        where $a_r$ and $\phi_r$ are the amplitude and phase of the reconstruction [S1].
-    *   Calculate the current intensity: $I_r^{(i)} = |U_r^{(i)}|^2$ [S1].
-
-3.  **Update Reconstruction Weights:**
-    *   Update the phase $\omega_r$ at each pixel $r$ on the reconstruction plane to guide the intensity toward the target $I_r^{(d)}$:
-        $$ \omega_r^{(i)} = \omega_r^{(i-1)} \left( \frac{I_r^{(d)}}{I_r^{(i)}} \right)^\alpha $$
-        where $I_r^{(d)}$ is the desired light intensity and $\alpha$ is a constant [S1].
-
-4.  **Calculate Phase Variation $\Delta\phi_h^{(i)}$:**
-    *   For each pixel $h$ on the hologram plane, calculate the sums $S_1$ and $S_2$:
-        $$ S_1 = \sum_r \omega_r^{(i)} a_h \cos(\phi_r^{(i)} - \phi_{hr} - \phi_h^{(i)}) $$
-        $$ S_2 = \sum_r \omega_r^{(i)} a_h \sin(\phi_r^{(i)} - \phi_{hr} - \phi_h^{(i)}) $$
-        where $\phi_{hr}$ is the phase contribution from hologram pixel $h$ to reconstruction pixel $r$ [S1].
-    *   Compute the phase update:
-        $$ \Delta\phi_h^{(i)} = \tan^{-1}\left(\frac{S_2}{S_1}\right) $$
-        [S1].
-
-5.  **Update Hologram Phase:**
-    *   Update the phase of the CGH:
-        $$ \phi_h^{(i)} = \phi_h^{(i-1)} + \Delta\phi_h^{(i)} $$
-        [S1].
-
-6.  **Convergence Check:**
-    *   If $I_r^{(i)}$ is nearly equal to $I_r^{(d)}$ (within a defined tolerance) or the maximum number of iterations is reached, stop. Otherwise, increment $i$ and return to Step 2 [S1].
-
-7.  **Apply Optical Modulations (Post-Processing or Integrated Design):**
-    *   **Lateral (XY) Control:** If the target consists of multiple focusing spots, the CGH design incorporates a superposition of complex amplitudes of blazed gratings with various azimuth angles. For $N$ spots, $N$ blazed gratings are included [S1].
-    *   **Axial (Z) Control:** Add a phase Fresnel lens pattern to $\phi_h$:
-        $$ \phi_p(x, y) = \frac{k(x^2 + y^2)}{2f} $$
-        where $k = 2\pi/\lambda$ is the wave number and $f$ is the focal length [S1].
+**Positioning Control:**
+*   **Lateral (XY) Control:** The CGH is designed based on a superposition of complex amplitudes of blazed gratings with various azimuth angles. For $N$ multiple focusing spots, the CGH includes $N$ blazed gratings [S1].
+*   **Axial (Z) Control:** A phase Fresnel lens pattern is added to $\phi_h$:
+    $$ \phi_p(x, y) = \frac{k(x^2 + y^2)}{2f} $$
+    where $f$ is the focal length. The spatial resolution of the SLM determines the minimum focal length [S1].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_ora_cgh(target_intensity, wavelength, slm_resolution, focal_length, num_iterations, alpha):
+def compute_ora_cgh(target_intensity, num_iterations, alpha, wavelength, slm_pitch, reconstruction_plane_size):
     """
-    Computes a CGH phase pattern using the Optimization with Random Phase Algorithm (ORA).
+    Computes the phase-only CGH using the Optimization with Random Phase Algorithm (ORA).
     
     Args:
-        target_intensity: 2D array of desired intensities I_r^(d).
-        wavelength: Float, lambda in meters.
-        slm_resolution: Tuple (width, height) in pixels.
-        focal_length: Float, f in meters for axial control.
-        num_iterations: Integer, max iterations.
-        alpha: Float, constant for intensity update.
+        target_intensity: 2D array of desired intensity I_r^(d) on reconstruction plane.
+        num_iterations: Number of ORA iterations.
+        alpha: Constant for weight update.
+        wavelength: Wavelength lambda.
+        slm_pitch: Pixel pitch of the SLM.
+        reconstruction_plane_size: (width, height) of the reconstruction plane in pixels.
         
     Returns:
-        phi_h: 2D array of phase values in radians.
+        phi_h: 2D array of phase values for the CGH.
     """
-    import numpy as np
-    
     # Constants
-    k = 2 * np.pi / wavelength
-    width, height = slm_resolution
+    k = 2 * pi / wavelength
     
-    # Initialize
-    # a_h is constant because illumination is a uniform plane wave
+    # Initialize hologram plane
+    # Amplitude a_h is constant (uniform plane wave)
     a_h = 1.0 
-    phi_h = np.zeros((height, width))
-    # Initialize weights omega_r. Source implies they are updated iteratively.
-    # Assuming initial weights are 1 or derived from initial guess.
-    omega_r = np.ones_like(target_intensity) 
     
-    # Precompute propagation phases phi_hr from each hologram pixel h to each reconstruction pixel r
-    # This is a large matrix O(N_h * N_r). In practice, FFT is used for propagation,
-    # but the ORA update formula explicitly sums over r for each h.
-    # We will simulate the summation using FFT-based forward/backward steps 
-    # as implied by "Fourier iterative calculations" in S2, but the specific ORA formula 
-    # in S1 requires explicit sums. 
-    # Note: The source [S1] defines phi_hr as the phase contributed by light propagation.
-    # For a Fourier transform system, phi_hr corresponds to the phase term in the kernel.
+    # Initialize phase phi_h randomly or with zeros
+    phi_h = random.uniform(0, 2 * pi, reconstruction_plane_size)
     
-    # Create coordinate grids
-    x = np.arange(width)
-    y = np.arange(height)
-    X, Y = np.meshgrid(x, y)
+    # Initialize weights omega_r
+    # Assuming omega_r^(0) = 1 for all r
+    omega_r = np.ones(reconstruction_plane_size)
     
-    # Frequency coordinates for Fourier domain
-    nu_x = np.fft.fftfreq(width) * width
-    nu_y = np.fft.fftfreq(height) * height
-    Nu_x, Nu_y = np.meshgrid(nu_x, nu_y)
-    
-    # Kernel for Fourier Transform: exp(-i 2pi (x*nu_x + y*nu_y))
-    # Note: np.fft.fft2 handles the normalization and signs. 
-    # We need the phase component phi_hr for the ORA sum.
-    # phi_hr = -2 * pi * (x*nu_x + y*nu_y)
-    Phi_hr = -2 * np.pi * (X * Nu_x + Y * Nu_y)
+    # Precompute propagation phases phi_hr
+    # phi_hr is the phase contribution from pixel h to pixel r.
+    # This requires the specific propagation model (e.g., Fresnel or Fraunhofer).
+    # For ORA as described in [S1], it uses Fourier Transform, implying Fraunhofer approximation
+    # or far-field propagation.
+    # phi_hr = angle( exp(-i 2pi (x_h * nu_r + y_h * nu_r)) )
+    # We compute the full complex propagation matrix or use FFT.
     
     for i in range(1, num_iterations + 1):
-        # Step 2: Forward Propagation
+        # 1. Forward Propagation
         # U_h = a_h * exp(i * phi_h)
         U_h = a_h * np.exp(1j * phi_h)
         
-        # Fourier Transform to get U_r
+        # U_r = FFT(U_h)
         U_r = np.fft.fft2(U_h)
         
-        # Extract amplitude and phase of reconstruction
-        a_r = np.abs(U_r)
-        phi_r = np.angle(U_r)
+        # Get current intensity and phase
+        I_r_current = np.abs(U_r)**2
+        phi_r_current = np.angle(U_r)
         
-        # Current intensity
-        I_r = np.abs(U_r)**2
-        
-        # Step 3: Update Reconstruction Weights
+        # 2. Weight Update
         # Avoid division by zero
-        safe_I_r = np.where(I_r > 1e-10, I_r, 1e-10)
+        safe_I_r = np.where(I_r_current > 1e-10, I_r_current, 1e-10)
         omega_r = omega_r * (target_intensity / safe_I_r)**alpha
         
-        # Step 4: Calculate Phase Variation
-        # S1 and S2 sums over r for each h
-        # S1 = sum_r [ omega_r * a_h * cos(phi_r - phi_hr - phi_h) ]
-        # S2 = sum_r [ omega_r * a_h * sin(phi_r - phi_hr - phi_h) ]
+        # 3. Phase Variation Calculation
+        # We need to compute S1 and S2.
+        # S2 = sum_r omega_r * a_h * sin(phi_r - phi_hr - phi_h)
+        # S1 = sum_r omega_r * a_h * cos(phi_r - phi_hr - phi_h)
         
-        # Vectorized calculation for all h
-        # Expand dimensions for broadcasting:
-        # omega_r: (H, W)
-        # a_h: scalar
-        # phi_r: (H, W)
-        # phi_hr: (H, W)
-        # phi_h: (H, W)
+        # Note: The summation in [S1] is over r (reconstruction pixels) for each h (hologram pixel).
+        # This implies we need to iterate over h or use matrix operations.
+        # Let's construct the phase term: theta_hr = phi_r - phi_hr - phi_h
+        # phi_hr is the phase of the propagation kernel from h to r.
+        # In Fourier domain, the kernel is exp(-i 2pi (x_h nu_r + y_h nu_r)).
+        # So phi_hr = -2pi (x_h nu_r + y_h nu_r).
         
-        # The term inside cos/sin: phi_r - phi_hr - phi_h
-        phase_diff = phi_r - Phi_hr - phi_h
+        # To implement efficiently without explicit loops over h and r:
+        # We can compute the gradient-like update directly.
+        # However, the formula explicitly sums over r.
         
-        # We need to sum over r. But here, the indices of U_r and U_h are the same 
-        # in the FFT domain representation if we consider the pixel mapping.
-        # In the standard ORA derivation for Fourier holography, the sum over r 
-        # effectively becomes a correlation or inverse transform operation if the 
-        # basis functions are orthogonal, but the source gives an explicit sum.
-        # However, calculating the sum over all r for each h is O(N^2).
-        # Given the source says "Fourier iterative calculations", it implies 
-        # efficient computation. The explicit formula (6)-(8) in [S1] is the 
-        # theoretical update rule.
+        S1 = np.zeros(reconstruction_plane_size) # Wait, S1 and S2 are per pixel h?
+        # Re-reading [S1]: "S2 = sum_r ...", "S1 = sum_r ...", "Delta phi_h = atan(S2/S1)"
+        # Yes, S1 and S2 are calculated for each pixel h on the CGH plane.
         
-        # Let's implement the explicit sum as defined, noting it is computationally expensive.
-        # S1[h] = sum_r ( omega_r[r] * a_h * cos( phi_r[r] - phi_hr[r,h] - phi_h[h] ) )
-        # Since phi_hr[r,h] = -phi_hr[h,r] in symmetric kernels? 
-        # Actually, for Fourier transform, the kernel is K(r,h) = exp(-i 2pi (x_h nu_r + y_h nu_r)).
-        # The sum is over all r.
+        # Initialize S1_h and S2_h arrays for each h
+        S1_h = np.zeros(reconstruction_plane_size)
+        S2_h = np.zeros(reconstruction_plane_size)
         
-        # To avoid O(N^2) in pseudocode for clarity, we note that this step 
-        # computes the gradient of the intensity sum with respect to phase.
-        # S1 and S2 are the real and imaginary parts of the gradient.
+        # Create coordinate grids
+        # x_h, y_h: coordinates of hologram pixels
+        # nu_r, nu_r: coordinates of reconstruction pixels (spatial frequencies)
+        # This requires careful grid setup.
         
-        # Construct the complex gradient term:
-        # G = sum_r [ omega_r * a_h * exp(i * (phi_r - phi_hr - phi_h)) ]
-        # G = a_h * exp(-i * phi_h) * sum_r [ omega_r * a_h * exp(i * (phi_r - phi_hr)) ]
+        # For simplicity in pseudocode, assuming we have precomputed the phase kernel matrix K_hr
+        # where K_hr[h, r] = phi_hr
+        # And we have phi_r_current[r] and phi_h[h]
         
-        # Let's compute the inner sum: Sum_r [ omega_r * exp(i * (phi_r - phi_hr)) ]
-        # Note: phi_hr depends on both h and r.
-        # phi_hr(r, h) = -2pi (x_h nu_r + y_h nu_r)
+        # theta[h, r] = phi_r_current[r] - K_hr[h, r] - phi_h[h]
+        # This is a 3D tensor or requires broadcasting.
         
-        # This is effectively an Inverse Fourier Transform if we view it correctly.
-        # Let V_r = omega_r * a_r * exp(i * phi_r) ? No, omega_r is a weight.
+        # Let's assume we compute this efficiently.
+        # theta[h, r] = phi_r[r] - phi_hr[h, r] - phi_h[h]
         
-        # Let's stick to the explicit formula components for correctness to source.
-        # We will compute S1 and S2 arrays.
+        # S1[h] = sum_r omega_r[r] * a_h * cos(theta[h, r])
+        # S2[h] = sum_r omega_r[r] * a_h * sin(theta[h, r])
         
-        S1 = np.zeros((height, width))
-        S2 = np.zeros((height, width))
+        # Since a_h is constant, it factors out.
+        # S1[h] = a_h * sum_r omega_r[r] * cos(theta[h, r])
+        # S2[h] = a_h * sum_r omega_r[r] * sin(theta[h, r])
         
-        # Reshape for broadcasting if necessary, but direct iteration is clearer for "sum over r"
-        # However, for a valid Python implementation without external libraries for tensor ops,
-        # we use numpy broadcasting.
+        # Compute theta matrix
+        # phi_r is (N_r,), phi_h is (N_h,), K_hr is (N_h, N_r)
+        # theta[h, r] = phi_r[r] - K_hr[h, r] - phi_h[h]
         
-        # omega_r shape: (H, W)
-        # phi_r shape: (H, W)
-        # Phi_hr shape: (H, W) -- Wait, Phi_hr is defined for each pair (h, r).
-        # In the FFT context, h and r share the same grid indices if we are doing 
-        # forward and backward transforms between the same plane sizes.
-        # phi_hr[h, r] corresponds to the phase from pixel h to pixel r.
-        # In the Fourier transform U_r = FFT(U_h), the relationship is global.
-        # The source formula (8) sums over r.
+        # Using broadcasting:
+        # phi_r_expanded: (1, N_r)
+        # phi_h_expanded: (N_h, 1)
+        # K_hr: (N_h, N_r)
         
-        # Let's assume the standard implementation where the sum is computed via 
-        # inverse FFT of the weighted reconstruction field.
-        # Let W_r = omega_r * exp(i * phi_r)
-        # Then the term sum_r [ omega_r * exp(i * (phi_r - phi_hr)) ] 
-        # is related to IFFT(W_r).
+        theta = phi_r_current[np.newaxis, :] - K_hr - phi_h[:, np.newaxis]
         
-        # Let's define the complex field on the reconstruction plane guided by weights:
-        U_r_weighted = omega_r * np.exp(1j * phi_r)
+        # Compute S1 and S2
+        # omega_r is (N_r,)
+        # weight_matrix[h, r] = omega_r[r]
+        weight_matrix = omega_r[np.newaxis, :]
         
-        # Inverse FFT to get back to hologram plane contributions
-        # This gives sum_r [ U_r_weighted[r] * exp(i 2pi (x_h nu_r + y_h nu_r)) ]
-        # Note: IFFT kernel is exp(+i 2pi ...). 
-        # Our phi_hr has a minus sign: exp(-i 2pi ...).
-        # So exp(i (phi_r - phi_hr)) = exp(i phi_r) * exp(i 2pi (x_h nu_r + y_h nu_r))
+        S1_h = a_h * np.sum(weight_matrix * np.cos(theta), axis=1)
+        S2_h = a_h * np.sum(weight_matrix * np.sin(theta), axis=1)
         
-        # Therefore, the sum over r is exactly the IFFT of (omega_r * exp(i * phi_r))
-        # multiplied by a_h? No, a_h is constant.
+        # Delta phi_h
+        Delta_phi_h = np.arctan2(S2_h, S1_h)
         
-        # Let's calculate the complex sum S_complex = S1 + i S2
-        # S1 + i S2 = sum_r [ omega_r * a_h * (cos(...) + i sin(...)) ]
-        #           = a_h * sum_r [ omega_r * exp(i * (phi_r - phi_hr - phi_h)) ]
-        #           = a_h * exp(-i * phi_h) * sum_r [ omega_r * exp(i * (phi_r - phi_hr)) ]
+        # 4. Phase Update
+        phi_h = phi_h + Delta_phi_h
         
-        # The sum term is: sum_r [ omega_r * exp(i * phi_r) * exp(i 2pi (x_h nu_r + y_h nu_r)) ]
-        # This is the Inverse FFT of (omega_r * exp(i * phi_r)) evaluated at h.
-        
-        inner_sum = np.fft.ifft2(omega_r * np.exp(1j * phi_r))
-        
-        # S_complex[h] = a_h * exp(-i * phi_h[h]) * inner_sum[h]
-        S_complex = a_h * np.exp(-1j * phi_h) * inner_sum
-        
-        S1 = np.real(S_complex)
-        S2 = np.imag(S_complex)
-        
-        # Step 4 continued: Calculate Delta Phi
-        # Delta Phi = atan2(S2, S1)
-        delta_phi_h = np.arctan2(S2, S1)
-        
-        # Step 5: Update Hologram Phase
-        phi_h = phi_h + delta_phi_h
-        
-        # Step 7: Apply Optical Modulations (Optional/Post-processing)
-        # If axial control is needed, add Fresnel lens phase
-        # phi_h = phi_h + (k * (X**2 + Y**2)) / (2 * focal_length)
-        # Note: This is usually added to the final phase or integrated into the 
-        # target phase if the system is designed for it. The source says "added to phi_h".
-        
-    # Final Phase Unwrapping/Clamping to 0-2pi if required by SLM
-    phi_h = np.mod(phi_h, 2 * np.pi)
-    
     return phi_h
 ```
 
 ## Subtopics
 
 ### CGH-based parallel focal point generation
-Generates multiple focal points in parallel using a phase-only CGH displayed on an LCOS-SLM to increase voxel generation density per frame [S2]. It uses the Gerchberg–Saxton method for optimization (50 Fourier iterative calculations) rather than the specific ORA update rule, mapping grayscale values 0–255 to phase modulation 0–2π [S2]. It is chosen when high voxel throughput is required, such as in femtosecond laser volumetric displays [S2]. The number of voxels per frame $N$ is estimated by $N = P n / f_r$, where $P$ is the number of parallel focal points, $n$ is the number of voxels generated per second (dependent on laser repetition frequency), and $f_r$ is the refresh rate [S2]. A key pitfall is that the actual number of parallel voxels $P$ achieved may be significantly lower than estimated due to irradiated pulse energy limits required to prevent varifocal lens damage (e.g., estimated $P=708$ vs actual $P=4$) [S2]. This is mitigated by using varifocal lenses with higher light resistance or combining with dynamic optimization for CGH diffraction efficiency [S2].
+Generates multiple focal points in parallel using a phase-only CGH displayed on an LCOS-SLM to increase voxel generation density per frame [S2]. It uses the Gerchberg–Saxton method for 50 Fourier iterative calculations to optimize the CGH, which controls light to form separated focal points in a drawing space at infinite distance using a lens and varifocal lens [S2]. The number of voxels generated per frame $N$ is estimated by $N = P n / f_r$, where $P$ is the number of parallel focal points, $n$ is the number of voxels generated in 1 second (dependent on laser repetition frequency), and $f_r$ is the refresh rate [S2]. A pitfall is that the actual number of parallelized voxels achieved may be significantly less than estimated due to irradiated pulse energy reduction to prevent varifocal lens damage [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** The ORA method is iterative. Each iteration involves a forward Fourier Transform and an inverse Fourier Transform (implied by the summation step in the pseudocode derivation), resulting in $O(N \log N)$ per iteration, where $N$ is the number of pixels. The total time depends on the number of iterations required for convergence [S1, S2].
-*   **Memory Complexity:** Requires storage for the hologram plane, reconstruction plane, weights, and phase propagation matrices if not computed on the fly. $O(N)$ for standard FFT-based implementations [S1].
-*   **Performance:** The method allows for the design of CGH with high quality, producing spot arrays with uniform intensity [S1]. In parallel focal point generation, it can theoretically generate tens of thousands of voxels per frame (e.g., 35,400 at 20 Hz) [S2].
-*   **Strengths:** Handles phase-only SLMs effectively; allows precise control of lateral (XY) and axial (Z) focusing positions; can generate arbitrary intensity distributions (spot arrays) [S1].
-*   **Limitations:** Iterative nature can be computationally intensive; convergence is not guaranteed and depends on the target distribution and initialization; actual parallel voxel count may be limited by hardware constraints (laser energy, lens damage thresholds) [S1, S2].
-*   **When to use:** When high-quality uniform intensity distributions are required and phase-only SLMs are used; when lateral and axial control of focal spots is needed [S1].
-*   **When not to use:** When real-time performance is critical and iterative methods are too slow; when the hardware cannot support the required pulse energies for parallel generation [S2].
+*   **Time Complexity:** Iterative method. Convergence speed depends on the complexity of the target intensity distribution and the number of iterations required. [S1] specifies iterating until $I_r^{(i)} \approx I_r^{(d)}$.
+*   **Memory Complexity:** Requires storing the hologram plane, reconstruction plane, weights, and propagation phases. [S1]
+*   **Performance:** Allows design of CGH with high quality for uniform spot arrays [S1].
+*   **Strengths:** Enables precise control of focusing position in lateral (XY) and axial (Z) directions [S1]. Can generate arbitrary spot arrays with uniform intensity [S1].
+*   **Limitations:** Iterative nature can be computationally expensive. Sensitive to parameters like $\alpha$ [S1]. Parallel generation efficiency is limited by hardware constraints (e.g., varifocal lens damage threshold) [S2].
 
 ## Background
-The Computational Phase Modulation method, specifically the ORA (Optimization with Random Phase Algorithm), was introduced by Hayasaki et al. in 2005 [S1]. It was developed to enable spatial phase control of light for laser processing and volumetric graphics rendering using Liquid Crystal Spatial Light Modulators (LCSLM) [S1]. The method leverages the LCSLM's ability to act as an optical phased array, where molecule directions controlled by electrodes modulate the phase of reflected laser light [S1]. It is used in femtosecond laser volumetric displays to generate aerial and volumetric graphics by focusing laser beams into voxels [S1, S2].
+The ORA method was developed for use with Liquid Crystal Spatial Light Modulators (LC-SLM) to modulate the phase of reflected laser beams, acting as an optical phased array [S1]. It was introduced in the context of generating arbitrary patterns of laser for applications like laser processing and volumetric graphics [S1, Hayasaki et al. 2005]. The method is specifically designed to obtain a CGH reconstruction composed of a spot array with uniform intensity by adding adequate phase variation through iterative optimization [S1].
 
 ## Sources
 [S1] Fairy Lights in Femtoseconds: Aerial and Volumetric Graphics Rendered by Focused Femtosecond Laser Combined with Computational Holographic Fields, https://arxiv.org/abs/1506.06668v1, fetched 2026-10-26

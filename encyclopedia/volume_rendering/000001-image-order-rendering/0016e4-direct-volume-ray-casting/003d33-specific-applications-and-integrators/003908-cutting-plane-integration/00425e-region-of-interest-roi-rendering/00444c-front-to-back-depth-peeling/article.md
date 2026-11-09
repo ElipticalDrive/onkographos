@@ -1,0 +1,96 @@
+# Front-to-Back Depth Peeling
+
+Also called: FtBDP
+
+## Overview
+Front-to-Back Depth Peeling (FtBDP) is a technique for Region of Interest (ROI) rendering that defines an ROI as a 3D envelope by combining polygon-based depth peeling with volume ray casting [S1, unofficial]. It solves the problem of visualizing internal volume features bounded by an arbitrary surface by breaking the ray casting process into stages synchronized with intermediate peeling results [S1, unofficial]. Unlike standard depth peeling which only handles polygonal models, FtBDP interleaves polygon rendering and volume ray casting to correctly handle volume samples both inside and outside the envelope [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** Polygonal envelope geometry (tagged), volume dataset, MIDA (Multilevel Isosurface Data Analysis) visualization settings, initial ray starting positions (optional, for optimization).
+*   **Outputs:** Final composited image with ROI visualization.
+
+**Data Structures**
+*   **Depth Buffer:** Stores depth values of fragments. Used to track peeled surfaces.
+*   **Color Buffer:** Stores accumulated color from previous peeling and ray casting passes.
+*   **Ray Position Buffer:** Stores the 3D intersection positions of rays with the peeled envelope surfaces from previous steps.
+*   **Envelope Geometry Tag:** A vertex attribute key used to distinguish envelope polygons from regular scene geometry [S1, unofficial].
+
+**Parameters**
+*   **MIDA Settings:** Visualization parameters for rendering volume samples inside vs. outside the envelope [S1, unofficial].
+*   **Depth Test Condition:** Comparison operator (e.g., `>`) to select fragments behind previously peeled surfaces [S1, unofficial].
+
+**Algorithm Steps**
+The method proceeds in a sequence of peeling and ray casting stages [S1, unofficial]:
+
+1.  **Initial Peeling:** Render the front-most polygonal geometry (the front surface of the envelope) normally. Store the depths of all corresponding fragments for every pixel in the depth buffer [S1, unofficial].
+2.  **First Ray Casting Stage:** Initiate MIDA ray casting. Pass the color and depth buffers from Step 1 as textures. Perform a depth test; render only volume parts that fall *outside* the envelope. Blend the colors from the previous peeling pass with the ray casting results. Store the positions of rays intersecting the peeled surface (from Step 1) in a separate buffer [S1, unofficial].
+3.  **Next Peeling Stage:** Initiate the next envelope peeling stage. Pass the depth results of the previous peeling pass as a texture. Choose new fragments that satisfy the depth test condition (depth > stored texture values). Store the depth values of all newly chosen fragments in the depth buffer [S1, unofficial].
+4.  **Subsequent Ray Casting Stage:** Initiate MIDA ray casting. Pass the color and depth buffers from Step 3, as well as the ray positions and accumulated color results from Step 2, as textures. Initialize ray starting positions from the stored values. Perform the depth test. Render sampled values inside or outside the envelope using different MIDA settings. Blend the colors from the previous peeling pass and the previous ray casting pass with the current ray casting results. Store the positions of rays intersecting the newly peeled surface (from Step 3) in the ray position buffer [S1, unofficial].
+5.  **Iteration:** Repeat Steps 3 and 4 until the envelope peeling stage reports 0 newly chosen fragments [S1, unofficial].
+
+**Inside/Outside Determination**
+To distinguish between volume parts inside and outside the envelope, polygon face orientation is used. Any ray sample values that fall between a front-facing and a back-facing fragment are considered to be *inside* the envelope; otherwise, they are considered *outside* [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialization
+depth_buffer = render_front_envelope(envelope_geometry)
+ray_position_buffer = get_ray_intersections(ray_origin, ray_direction, depth_buffer)
+accumulated_color = blend(peeling_color, ray_casting_color)
+
+# Iterative Peeling and Ray Casting
+while True:
+    # Peeling Stage
+    current_depth_texture = depth_buffer
+    new_fragments = select_fragments(envelope_geometry, current_depth_texture, condition="depth > texture_value")
+    
+    if new_fragments is empty:
+        break
+        
+    depth_buffer = update_depth_buffer(depth_buffer, new_fragments)
+    
+    # Ray Casting Stage
+    # Pass buffers as textures to shaders
+    color_texture = accumulated_color
+    depth_texture = depth_buffer
+    ray_pos_texture = ray_position_buffer
+    
+    # Initialize ray start positions from previous intersections
+    ray_start_positions = ray_pos_texture
+    
+    # Render volume using MIDA settings
+    # Different settings for inside vs outside based on face orientation
+    current_ray_color = ray_cast_volume(
+        volume_data, 
+        ray_start_positions, 
+        color_texture, 
+        depth_texture,
+        inside_settings, 
+        outside_settings
+    )
+    
+    # Update buffers
+    accumulated_color = blend(accumulated_color, current_ray_color)
+    ray_position_buffer = get_ray_intersections(ray_start_positions, ray_direction, depth_buffer)
+```
+
+**Edge Cases and Pitfalls**
+*   **Open Surfaces:** Extreme cases where the envelope geometry crosses metaball grid boundaries and no longer forms a closed surface are handled correctly [S1, unofficial].
+*   **Overdraw:** The full geometry of the scene must be drawn and tested in each polygon peeling pass, leading to overdraw [S1, unofficial].
+*   **Shader Overhead:** There is overhead associated with shader code initialization and execution per stage [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The method involves multiple passes. Each peeling pass requires drawing the full geometry and performing depth tests. Each ray casting pass involves volume sampling and blending. The number of passes depends on the complexity of the envelope depth layers.
+*   **Memory Complexity:** Requires storage for depth buffers, color buffers, and ray position buffers. The ray position buffer size scales with the number of pixels and rays [S1, unofficial].
+*   **Performance:** No additional GPU computational workload for ray casting is introduced by keeping and initializing ray positions between stages [S1, unofficial]. However, overhead exists from shader initialization/execution per stage and overdraw from the depth peeling algorithm [S1, unofficial].
+*   **Strengths:** Allows for complex ROI definitions using implicit surfaces (metaballs) and handles open envelope surfaces. Correctly blends polygonal and volumetric data [S1, unofficial].
+*   **Limitations:** Overdraw and shader overhead can impact performance. Requires careful management of buffer passing between passes [S1, unofficial].
+
+## Background
+Front-to-Back Depth Peeling was introduced in the context of a 3D painting metaphor for volume image exploration [S1, unofficial]. It extends the concept of depth peeling, which traditionally deals only with polygonal models, to integrate with volume ray casting [S1, unofficial]. The technique was developed to support an envelope definition using GPU-accelerated metaballs, allowing for growing and editing of the ROI in a manner similar to placing brush strokes [S1, unofficial]. The term "Front-to-Back" refers to the order of peeling, which matches the front-to-back order of ray casting [S1, unofficial].
+
+## Sources
+[S1] Context-Preserving Volume Image Exploration Using A 3D Painting Metaphor, https://doi.org/10.32920/ryerson.14646888, fetched 2026-10-26 (unofficial)

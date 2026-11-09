@@ -1,0 +1,243 @@
+# Depth-aware Order-independent Rendering
+
+Also called: Depth-aware Weighting OIT, Learnable Depth-aware Weighting
+
+## Overview
+Depth-aware Order-independent Rendering is a rendering technique that eliminates the computational bottleneck of depth sorting in traditional alpha blending by using a learnable, view-conditioned weighting strategy to order-independently blend 3D Gaussians [S1, unofficial]. It replaces the sorted accumulation paradigm with a commutative weighted-sum blending scheme, allowing parallel accumulation of Gaussian colors in a single pass [S1, unofficial]. Unlike its sibling [SortFree Weighting](8006-sortfree-weighting.md), which uses a fixed exponential depth weighting, this method introduces neural networks to predict view-dependent weights and opacity, significantly improving visual quality in view-dependent scenarios while maintaining real-time performance on edge devices [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   Set of $N$ 3D Gaussians, each defined by position $\mu_i$, scale $s_i \in \mathbb{R}^3$, rotation $r_i \in SO(3)$, spherical harmonic coefficients $Y_i$, and base opacity parameters.
+*   Camera center $t_v$.
+*   Background color $\mathbf{c}_{bg}$.
+
+**Outputs:**
+*   Rendered pixel color $\mathbf{C}$.
+
+**Data Structures:**
+*   **Gaussian Attributes:** For each Gaussian $i$, store $\mu_i, s_i, r_i, Y_i$.
+*   **Learnable Parameters:** Three Multi-Layer Perceptrons (MLPs): $\text{MLP}_f$ (feature extraction), $\text{MLP}_\phi$ (weight prediction), $\text{MLP}_o$ (opacity prediction).
+*   **Pixel Accumulators:** For each pixel, maintain accumulators for the numerator term $\sum \mathbf{c}_i \alpha_i w_i$ and the denominator term $\sum \alpha_i w_i$, plus a global transmittance accumulator $T$.
+
+**Steps:**
+
+1.  **Compute Camera-Gaussian Vector:**
+    For each Gaussian $i$, calculate the normalized direction vector from the camera center $t_v$ to the Gaussian center $\mu_i$:
+    $$ P_i = \frac{\mu_i - t_v}{\|\mu_i - t_v\|} $$
+    [S1, unofficial]
+
+2.  **Feature Extraction:**
+    Construct a composite feature vector $\mathbf{F}$ by concatenating $P_i$, scale $s_i$, rotation $r_i$, and spherical harmonic coefficients $Y_i$. Pass this vector through the feature MLP:
+    $$ \mathbf{F} = \text{MLP}_f(P_i, s_i, r_i, Y_i) $$
+    [S1, unofficial]
+
+3.  **Predict View-Dependent Weight and Opacity:**
+    Use the extracted features to predict the view-dependent weight $\phi_i$ and the neural opacity $o_i$:
+    $$ \phi_i = \text{ReLU}(\text{MLP}_\phi(\mathbf{F})) $$
+    $$ o_i = \sigma(\text{MLP}_o(\mathbf{F})) $$
+    where $\sigma(\cdot)$ is the Sigmoid activation function.
+    [S1, unofficial]
+
+4.  **Compute Alpha Value:**
+    Calculate the alpha value $\alpha_i$ for the Gaussian based on the neural opacity $o_i$ and its spatial distribution at the pixel's projected center offset $\Delta x_i$ relative to the Gaussian's covariance matrix $\Sigma_i$:
+    $$ \alpha_i = o_i \exp\left(-\frac{1}{2}\Delta x_i^T \Sigma_i^{-1} \Delta x_i\right) $$
+    [S1, unofficial]
+
+5.  **Compute Depth-Aware Weight:**
+    Calculate the depth-aware weight $w_i$ using the predicted view-dependent parameter $\phi_i$, the depth $d_i$ of the Gaussian in camera coordinates, and the maximum scale $s_{max}$ of the Gaussian:
+    $$ w_i = \phi_i^2 + \frac{\phi_i}{d_i^2} + \exp\left(\frac{s_{max}}{d_i}\right) $$
+    [S1, unofficial]
+
+6.  **Parallel Accumulation:**
+    For each pixel, accumulate the contributions of all projected Gaussians in parallel. Since addition is commutative, no sorting is required.
+    *   Accumulate weighted color: $C_{num} = \sum_{i=1}^{N} \mathbf{c}_i \alpha_i w_i$
+    *   Accumulate weighted alpha: $C_{den} = \sum_{i=1}^{N} \alpha_i w_i$
+    *   Accumulate global transmittance: $T = \prod_{j=1}^{N} (1 - \alpha_j)$
+    [S1, unofficial]
+
+7.  **Composite Final Color:**
+    Compute the final pixel color $\mathbf{C}$ by combining the accumulated foreground contribution with the background color, modulated by the global transmittance $T$:
+    $$ \mathbf{C} = (1 - T) \frac{\sum_{i=1}^{N} \mathbf{c}_i \alpha_i w_i}{\sum_{i=1}^{N} \alpha_i w_i} + T \mathbf{c}_{bg} $$
+    [S1, unofficial]
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def sigmoid(x):
+    return 1.0 / (1.0 + math.exp(-x))
+
+def depth_aware_rendering(gaussians, camera_center, background_color, mlps):
+    """
+    Render scene using Depth-aware Order-independent Rendering.
+    
+    Args:
+        gaussians: List of Gaussian objects with attributes:
+                   - mu: position (3D vector)
+                   - s: scale (3D vector)
+                   - r: rotation (SO(3) representation)
+                   - Y: spherical harmonic coefficients
+                   - c: RGB color
+                   - sigma_inv: inverse covariance matrix (for alpha calc)
+                   - center: projected 2D center (precomputed)
+                   - d: depth in camera coordinates (precomputed)
+                   - s_max: maximum scale component
+        camera_center: 3D vector representing camera position t_v
+        background_color: 3D vector c_bg
+        mlps: Dictionary containing MLP functions:
+              - 'f': Feature extraction MLP
+              - 'phi': Weight prediction MLP
+              - 'o': Opacity prediction MLP
+              
+    Returns:
+        pixel_colors: Dictionary mapping pixel coordinates to 3D color vectors
+    """
+    
+    # Initialize accumulators for all pixels
+    # Using a dictionary or 2D array depending on implementation
+    pixel_accum = {} 
+    
+    # Initialize global transmittance for all pixels to 1.0
+    pixel_T = {} 
+
+    # Step 1-5: Process each Gaussian
+    for g in gaussians:
+        # 1. Compute Camera-Gaussian vector
+        diff = g.mu - camera_center
+        norm = math.sqrt(diff[0]**2 + diff[1]**2 + diff[2]**2)
+        if norm == 0:
+            continue # Avoid division by zero
+        P_i = (diff[0]/norm, diff[1]/norm, diff[2]/norm)
+        
+        # 2. Feature Extraction
+        # Concatenate P_i, s_i, r_i, Y_i into a single feature vector
+        # Note: r_i and Y_i must be flattened/encoded appropriately for MLP input
+        F = mlps['f'](P_i, g.s, g.r, g.Y)
+        
+        # 3. Predict View-Dependent Weight and Opacity
+        phi_i = max(0.0, mlps['phi'](F)) # ReLU
+        o_i = sigmoid(mlps['o'](F))
+        
+        # 4. Compute Alpha Value
+        # Delta x_i is the offset from Gaussian center to pixel center
+        # This step is typically done in a rasterization pass per pixel
+        # Here we assume we iterate over pixels covered by the Gaussian
+        # For simplicity, we assume alpha is computed per-pixel in the accumulation loop
+        # In practice, alpha_i depends on the specific pixel's (x,y)
+        
+        # 5. Compute Depth-Aware Weight
+        d_i = g.d
+        s_max = g.s_max
+        # Avoid division by zero for depth
+        if d_i == 0:
+            d_i = 1e-6
+            
+        w_i = phi_i**2 + phi_i / (d_i**2) + math.exp(s_max / d_i)
+        
+        # 6. Parallel Accumulation
+        # Iterate over all pixels covered by this Gaussian's projection
+        for pixel in g.covered_pixels:
+            # Compute alpha for this specific pixel
+            # Delta x_i is vector from g.center to pixel coordinate
+            delta_x = (pixel.x - g.center.x, pixel.y - g.center.y)
+            # Quadratic form: delta_x^T * Sigma_inv * delta_x
+            # Assuming Sigma_inv is 2x2 matrix
+            qx = delta_x[0]
+            qy = delta_x[1]
+            inv_sig = g.sigma_inv
+            quad_form = (inv_sig[0][0]*qx + inv_sig[0][1]*qy)*qx + \
+                        (inv_sig[1][0]*qx + inv_sig[1][1]*qy)*qy
+            
+            alpha_i = o_i * math.exp(-0.5 * quad_form)
+            
+            # Update accumulators
+            if pixel not in pixel_accum:
+                pixel_accum[pixel] = (0.0, 0.0, 0.0, 0.0) # (R_num, G_num, B_num, Denom)
+                pixel_T[pixel] = 1.0
+            
+            current_num, current_den = pixel_accum[pixel]
+            current_T = pixel_T[pixel]
+            
+            # Add weighted color contribution
+            new_num = (
+                current_num[0] + g.c[0] * alpha_i * w_i,
+                current_num[1] + g.c[1] * alpha_i * w_i,
+                current_num[2] + g.c[2] * alpha_i * w_i
+            )
+            new_den = current_den + alpha_i * w_i
+            
+            # Update global transmittance
+            new_T = current_T * (1.0 - alpha_i)
+            
+            pixel_accum[pixel] = (new_num[0], new_num[1], new_num[2], new_den)
+            pixel_T[pixel] = new_T
+
+    # Step 7: Composite Final Color
+    pixel_colors = {}
+    for pixel, (num, den) in pixel_accum.items():
+        T = pixel_T[pixel]
+        
+        if den == 0:
+            pixel_colors[pixel] = background_color
+        else:
+            # Weighted average of foreground
+            fg_color = (num[0]/den, num[1]/den, num[2]/den)
+            
+            # Composite with background
+            final_color = (
+                (1.0 - T) * fg_color[0] + T * background_color[0],
+                (1.0 - T) * fg_color[1] + T * background_color[1],
+                (1.0 - T) * fg_color[2] + T * background_color[2]
+            )
+            pixel_colors[pixel] = final_color
+            
+    return pixel_colors
+```
+
+**Parameters:**
+*   **MLP Architectures:** The sizes and depths of $\text{MLP}_f$, $\text{MLP}_\phi$, and $\text{MLP}_o$ are not specified in the sources [S1, unofficial].
+*   **Activation Functions:** ReLU for $\phi_i$, Sigmoid for $o_i$ [S1, unofficial].
+*   **Depth $d_i$:** Depth of the Gaussian center in camera coordinates [S1, unofficial].
+*   **Max Scale $s_{max}$:** The maximum component of the scale vector $s_i$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Transparency Artifacts:** Unordered blending can introduce transparency artifacts in regions with overlapping geometry due to the scarcity of rendering order information [S1, unofficial]. The neural view-dependent enhancement strategy is designed to mitigate this [S1, unofficial].
+*   **Division by Zero:** Depth $d_i$ must be handled to avoid division by zero in the weighting function $w_i$ [S1, unofficial].
+*   **Numerical Stability:** The product for global transmittance $T$ can underflow to zero for large numbers of Gaussians, which is acceptable as it implies full occlusion, but precision should be monitored [S1, unofficial].
+
+## Subtopics
+
+### Mobile-GS
+*   **What it is:** A specific implementation of Depth-aware Order-independent Rendering tailored for mobile and edge devices.
+*   **Differentiation:** Optimized to reduce storage and inference delay compared to general SortFreeGS implementations. It uses the same core OIT formula but with compressed representations and efficient MLPs suitable for mobile hardware.
+*   **When to choose:** When rendering 3D Gaussians on resource-constrained devices like smartphones or AR glasses where sorting and tile-based rendering are too expensive.
+*   **Link:** [Mobile-GS](8007-mobile-gs.md)
+
+### SortFreeGS
+*   **What it is:** A representative work that achieves fast rendering without sorting using a depth-aware weighting function $w(d_i) = \exp(-\sigma_i \beta_i d_i)$.
+*   **Differentiation:** Uses a simpler, non-neural weighting function compared to the learnable view-dependent weighting in Depth-aware Order-independent Rendering. It is noted as having large storage and significant inference delay, making it less suitable for edge devices.
+*   **When to choose:** When higher visual fidelity is prioritized over extreme mobile performance, and sufficient computational resources are available.
+*   **Link:** [SortFreeGS](8008-sortfree-gs.md)
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot P)$ where $N$ is the number of Gaussians and $P$ is the number of pixels they cover, as each Gaussian is processed for each pixel it affects. The lack of sorting reduces the complexity from $O(N \log N)$ per pixel (or tile) to $O(N)$ accumulation.
+*   **Memory Complexity:** $O(N + P)$ for storing Gaussian attributes and pixel accumulators. The MLPs add a small constant memory overhead [S1, unofficial].
+*   **Measured Performance:** Enables real-time rendering on mobile hardware by eliminating tile-based rendering and sorting [S1, unofficial].
+*   **Strengths:**
+    *   Eliminates the computational bottleneck of depth sorting.
+    *   Allows parallel accumulation of Gaussian contributions.
+    *   Neural view-dependent weighting improves visual quality by mitigating transparency artifacts [S1, unofficial].
+*   **Limitations:**
+    *   Unordered blending can still introduce transparency artifacts in complex overlapping geometry, though reduced by the neural module [S1, unofficial].
+    *   Requires training of MLPs, adding to the training time and complexity [S1, unofficial].
+*   **When to use:** Real-time rendering applications, especially on edge devices, where sorting is prohibitive [S1, unofficial].
+*   **When not to use:** When absolute geometric correctness in complex transparent scenes is required and performance is not a constraint (traditional sorted alpha blending may be preferred) [S1, unofficial].
+
+## Background
+Depth-aware Order-independent Rendering was proposed in the context of optimizing 3D Gaussian Splatting for mobile devices. The method addresses the limitations of traditional alpha blending, which relies on sorting 3D Gaussians by depth, a process that is computationally intensive and unsuitable for real-time rendering on resource-constrained hardware [S1, unofficial]. The technique builds upon earlier SortFree approaches but enhances them with learnable, view-dependent weights to improve visual fidelity [S1, unofficial].
+
+## Sources
+[S1] Mobile-GS: Real-time Gaussian Splatting for Mobile Devices, https://doi.org/10.48550/arXiv.2603.11531, fetched 2026-10-29 (unofficial)

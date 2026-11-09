@@ -1,38 +1,35 @@
 # Load Imbalance Factors
-Also called: Load Imbalance Metric
 
 ## Overview
-Load Imbalance Factors quantify the performance degradation caused by uneven workload distribution across processors in parallel volume ray-casting on unstructured grids [S1, unofficial]. Unlike static partitioning schemes that assume uniform data density, this method identifies specific geometric and rendering parameters that cause significant deviations in per-processor rendering times [S1, unofficial]. It sets apart from sibling methods by explicitly modeling the impact of viewing angle and opacity transfer functions on load distribution, rather than relying solely on spatial volume partitioning [S1, unofficial].
+Load Imbalance Factors quantify the performance degradation caused by uneven workload distribution across processors in parallel volume ray-casting on unstructured grids [S1, unofficial]. Unlike static partitioning schemes that assume uniform data density, this method identifies specific geometric and rendering parameters that cause significant deviations in per-processor rendering times [S1, unofficial]. It sets apart from sibling methods like [Distributed Parallel Volume Ray-Casting for Unstructured-Grid Data](2592-distributed-parallel-volume-ray-casting-for-unstructured-gri.md) by explicitly modeling the impact of viewing angle and opacity transfer functions on load distribution, rather than relying solely on spatial volume partitioning [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Per-processor rendering times ($t_i$) for a given frame; subvolume definitions (number of elements, physical size); opacity transfer function parameters; viewing angle and zoom level.
-*   **Outputs:** A scalar load imbalance metric $l$; identification of contributing factors.
+The method takes per-processor rendering times $t_i$ for a given frame as input and outputs a scalar load imbalance metric $l$ alongside an identification of contributing factors [S1, unofficial].
 
 **Data Structures:**
-*   **Processor Times:** An array $T = [t_1, t_2, ..., t_p]$ where $t_i$ is the time taken by processor $i$.
-*   **Subvolume Metadata:** For each subvolume $j$, store $N_j$ (number of elements) and $A_j$ (projected area).
+Processor times are stored as an array $T = [t_1, t_2, \dots, t_p]$ where $t_i$ is the time taken by processor $i$, and subvolume metadata stores $N_j$ (number of elements) and $A_j$ (projected area) for each subvolume $j$ [S1, unofficial].
+
+**Steps:**
+1. Measure the rendering time $t_i$ for each processor $i$ during a frame [S1, unofficial].
+2. Compute $t_{max}$ and $t_{avg}$ from the set of times [S1, unofficial].
+3. Calculate $l$ using the formula below [S1, unofficial].
+4. Analyze the subvolume assignments to correlate high $t_i$ values with specific factors (see Subtopics) [S1, unofficial].
 
 **Formula:**
 The load imbalance metric $l$ is calculated as:
 $$ l = \frac{t_{max} - t_{avg}}{t_{max}} $$
 Where:
-*   $t_{max} = \max(T)$ is the maximum rendering time across all processors.
-*   $t_{avg} = \frac{1}{p} \sum_{i=1}^{p} t_i$ is the average rendering time across all $p$ processors.
-
-**Steps:**
-1.  Measure the rendering time $t_i$ for each processor $i$ during a frame.
-2.  Compute $t_{max}$ and $t_{avg}$ from the set of times.
-3.  Calculate $l$ using the formula above.
-4.  Analyze the subvolume assignments to correlate high $t_i$ values with specific factors (see Subtopics).
+* $t_{max} = \max(T)$ is the maximum rendering time across all processors [S1, unofficial].
+* $t_{avg} = \frac{1}{p} \sum_{i=1}^{p} t_i$ is the average rendering time across all $p$ processors [S1, unofficial].
 
 **Parameters:**
-*   $p$: Number of processors.
-*   Image resolution: Affects total ray count but not the relative imbalance metric directly.
+* $p$: Number of processors [S1, unofficial].
+* Image resolution: Affects total ray count but not the relative imbalance metric directly [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   The metric $l$ aggregates degradation and does not reveal the actual distribution of the imbalanced load (e.g., whether one processor is slow or many are slightly slow) [S1, unofficial].
-*   Static load balancing is difficult because $l$ varies significantly with viewing angle and zoom level [S1, unofficial].
+* The metric $l$ aggregates degradation and does not reveal the actual distribution of the imbalanced load (e.g., whether one processor is slow or many are slightly slow) [S1, unofficial].
+* Static load balancing is difficult because $l$ varies significantly with viewing angle and zoom level [S1, unofficial].
 
 ## Subtopics
 
@@ -41,23 +38,19 @@ A metric quantifying performance degradation due to uneven workload distribution
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-*   **Time:** $O(p)$ to compute $t_{max}$ and $t_{avg}$ from $p$ processor times.
-*   **Memory:** $O(p)$ to store per-processor times.
+Computing the metric requires $O(p)$ time and $O(p)$ memory to store per-processor times [S1, unofficial].
 
 **Measured Performance:**
-*   On average, imbalanced loads degrade overall performance by at least 20% [S1, unofficial].
-*   For flow data (480x480 pixels) on 32 processors, focusing on specific views, the difference between maximum and minimum time increased from 40% to 66%, resulting in ~33% of time devoted to ray casting due to load imbalance [S1, unofficial].
+On average, imbalanced loads degrade overall performance by at least 20% [S1, unofficial]. For flow data (480x480 pixels) on 32 processors, focusing on specific zoomed-in views, the difference between maximum and minimum time increased from 40% to 66%, resulting in approximately 33% of ray-casting time being devoted to load imbalance [S1, unofficial].
 
 **Strengths and Limitations:**
-*   **Strengths:** Simple to compute; highlights the impact of dynamic factors like viewing angle.
-*   **Limitations:** Static balancing is difficult because imbalance factors change with view; the metric is aggregate and hides distribution details.
+The method is simple to compute and highlights the impact of dynamic factors like viewing angle, but static balancing remains difficult because imbalance factors change with the view and the metric is aggregate, hiding distribution details [S1, unofficial].
 
 **When to Use:**
-*   Use for post-mortem analysis of rendering performance or to guide dynamic load balancing strategies.
-*   Not suitable for static partitioning alone due to viewing angle dependency.
+It is suitable for post-mortem analysis of rendering performance or to guide dynamic load balancing strategies, but not suitable for static partitioning alone due to viewing angle dependency [S1, unofficial].
 
 ## Background
-Originated in research on parallel volume ray-casting for unstructured-grid data on distributed-memory architectures [S1, unofficial]. The study identified five primary factors causing uneven workload distribution: subvolume size (number of elements), subvolume size (physical size/projected area), opacity transfer functions, viewing angle, and zoom in/out [S1, unofficial]. Attempts at static round-robin distribution of disjointed subvolumes showed that increasing the number of subvolumes reduced average size differences but introduced overhead from ray segment merging [S1, unofficial].
+The concept was introduced in studies of parallel volume ray-casting for unstructured-grid data on distributed-memory architectures [S1, unofficial]. The research identified five primary factors causing uneven workload distribution: subvolume size (number of elements), subvolume size (physical size or projected area), opacity transfer functions, viewing angle, and zoom in/out [S1, unofficial]. An attempted static scheme partitioned data into $n-p$ subvolumes distributed round-robin among $p$ processors, which reduced average size differences as $n$ increased but introduced overhead from ray segment merging [S1, unofficial].
 
 ## Sources
 [S1] DTIC ADA301855: Parallel Volume Ray-Casting for Unstructured-Grid Data on Distributed-Memory Architectures., https://archive.org/details/DTIC_ADA301855, fetched 2026-10-26 (unofficial)

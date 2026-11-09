@@ -1,0 +1,172 @@
+# Light-space opacity precomputation
+
+Also called: Light-point-of-view ray marching, Light-volume accumulation
+
+## Overview
+This method accelerates non-collocated view and light rendering by precomputing light-ray opacity accumulation to avoid expensive per-shading-point light-ray marching [S1]. It sets itself apart from naive non-collocated rendering, which connects each shading point to the light source with additional light-dependent opacity accumulation per point, by computing this accumulation once from the light's point of view and storing it in a volume [S1].
+
+## How it works
+**Inputs:**
+- A volume representation of the scene (geometry and reflectance) [S1].
+- Camera intrinsic and extrinsic parameters calibrated via Structure from Motion (SfM) [S1].
+- Scene normalization: Object center translated to origin, scaled to fit into the $[-1, 1]^3$ cube [S1].
+
+**Outputs:**
+- A precomputed accumulated opacity volume [S1].
+- Rendered images under arbitrary light and view directions [S1].
+
+**Data Structures:**
+- **Precomputed Opacity Volume:** A 3D grid storing accumulated opacity values.
+  - **Layout:** 3D array of floating-point values.
+  - **Size:** $128^3$ voxels [S1].
+  - **Content:** For each voxel, the accumulated opacity along the light ray passing through that voxel [S1].
+
+**Parameters:**
+- **Volume Resolution:** $128^3$ [S1].
+- **Scene Normalization:** $[-1, 1]^3$ bounding box [S1].
+- **Training Image Resolution:** $400 \times 500$ to $1100 \times 1100$ [S1].
+- **Rendering Resolution:** $700 \times 700$ [S1].
+
+**Steps:**
+1. **Precomputation Phase:**
+   1.1. Ray march from the light's point of view through the volume [S1].
+   1.2. Accumulate opacity along each light ray at each spatial position of the volume [S1].
+   1.3. Store the accumulated opacity in the precomputed volume [S1].
+
+2. **Rendering Phase:**
+   2.1. For each shading point in the view ray, sample the precomputed accumulated opacity volume directly for the connection to the light source [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def precompute_light_opacity(volume, light_position, light_direction, volume_resolution=128):
+    """
+    Precomputes accumulated opacity from the light's point of view.
+    
+    Args:
+        volume: The scene volume representation (geometry/reflectance).
+        light_position: 3D vector, position of the light source.
+        light_direction: 3D vector, direction of the light rays.
+        volume_resolution: Integer, resolution of the precomputed volume (default 128).
+        
+    Returns:
+        opacity_volume: 3D array of shape (volume_resolution, volume_resolution, volume_resolution).
+    """
+    # Initialize the precomputed opacity volume
+    opacity_volume = np.zeros((volume_resolution, volume_resolution, volume_resolution))
+    
+    # Define the volume bounds in normalized space [-1, 1]^3
+    bounds_min = -1.0
+    bounds_max = 1.0
+    
+    # Iterate over each voxel in the precomputed volume
+    for x in range(volume_resolution):
+        for y in range(volume_resolution):
+            for z in range(volume_resolution):
+                # Map voxel index to world coordinates
+                # Assuming uniform sampling within [-1, 1]^3
+                voxel_center = np.array([
+                    bounds_min + (2.0 * (x + 0.5)) / volume_resolution,
+                    bounds_min + (2.0 * (y + 0.5)) / volume_resolution,
+                    bounds_min + (2.0 * (z + 0.5)) / volume_resolution
+                ])
+                
+                # Ray march from the light's point of view through this voxel
+                # Note: The source describes ray marching from the light's POV.
+                # In a typical setup, this implies casting rays from the light
+                # through the volume and accumulating opacity.
+                # However, the specific implementation detail of "accumulating opacity 
+                # at each spatial position" suggests a volume rendering integral 
+                # along the light ray passing through the voxel.
+                
+                # Simplified accumulation: 
+                # In practice, this involves casting a ray from the light source
+                # through the voxel and integrating the extinction coefficient.
+                # Since the source does not provide the exact integration formula,
+                # we assume a standard volume rendering accumulation.
+                
+                # Placeholder for the actual ray marching and accumulation logic
+                # which depends on the specific volume representation (e.g., neural network query).
+                accumulated_opacity = accumulate_opacity_from_light(
+                    volume, light_position, light_direction, voxel_center
+                )
+                
+                opacity_volume[x, y, z] = accumulated_opacity
+                
+    return opacity_volume
+
+def accumulate_opacity_from_light(volume, light_position, light_direction, voxel_center):
+    """
+    [G] Placeholder for the specific ray marching and accumulation logic.
+    This function would query the volume representation along the ray 
+    from the light position through the voxel center and integrate opacity.
+    """
+    # Implementation details not provided in the source.
+    # Typically involves:
+    # 1. Define ray: origin = light_position, direction = voxel_center - light_position
+    # 2. March along ray, querying volume for density/extinction.
+    # 3. Accumulate opacity using standard volume rendering formula.
+    return 0.0 # Placeholder
+
+def render_with_precomputed_opacity(volume, camera_params, light_params, opacity_volume, resolution=700):
+    """
+    Renders the scene using the precomputed light-space opacity volume.
+    
+    Args:
+        volume: The scene volume representation.
+        camera_params: Camera intrinsic and extrinsic parameters.
+        light_params: Light position and direction.
+        opacity_volume: The precomputed opacity volume from precompute_light_opacity.
+        resolution: Integer, rendering resolution (default 700).
+        
+    Returns:
+        image: Rendered image.
+    """
+    # Initialize image
+    image = np.zeros((resolution, resolution, 3))
+    
+    # For each pixel in the image
+    for u in range(resolution):
+        for v in range(resolution):
+            # Cast view ray from camera through pixel
+            view_ray = cast_view_ray(camera_params, u, v)
+            
+            # Ray march along view ray to find shading points
+            shading_points = ray_march_volume(volume, view_ray)
+            
+            for point in shading_points:
+                # Sample the precomputed opacity volume for the light connection
+                # Map point's world coordinates to voxel indices
+                voxel_indices = world_to_voxel_indices(point.position, opacity_volume.shape)
+                
+                # Check if voxel indices are within bounds
+                if is_within_bounds(voxel_indices, opacity_volume.shape):
+                    light_opacity = opacity_volume[voxel_indices]
+                    
+                    # Use light_opacity to compute final color
+                    # This avoids re-marching from the light for each shading point
+                    color = compute_color(volume, point, light_opacity, light_params)
+                    image[u, v] += color
+                    
+    return image
+```
+
+**Edge Cases and Pitfalls:**
+- **SfM Failure:** Structure from Motion (SfM) may fail to register certain views, reducing the actual number of training images [S1].
+- **Resolution Limits:** A $128^3$ volume resolution may fail to fully reproduce geometry and appearance for scenes with highly complex surface normal variations and texture details [S1].
+
+## Operating characteristics
+- **Time Complexity:** Precomputation is performed once per light direction. Rendering time is significantly reduced compared to naive non-collocated rendering.
+- **Memory Complexity:** Requires $128^3$ voxels for the precomputed opacity volume, which is restricted by available GPU memory [S1].
+- **Measured Performance:**
+  - Collocated view/light rendering: ~0.8s per $700 \times 700$ image [S1].
+  - Non-collocated view/light rendering: ~2.3s per image [S1].
+- **Strengths:** Enables real-time relighting and novel view synthesis under arbitrary light/view directions by avoiding expensive per-point light-ray marching [S1].
+- **Limitations:** Limited by GPU memory for volume resolution; may not capture fine details in complex scenes [S1].
+
+## Background
+This method is used in the system described in "Deep Reflectance Volumes: Relightable Reconstructions from Multi-view Photometric Images" for relighting and novel view synthesis under arbitrary light/view directions [S1]. The system uses a practical acquisition setup with unstructured images captured using a mobile phone with its built-in flashlight in a dark room [S1]. The method leverages regularization terms in training to automatically recover a clean background without using a foreground mask [S1].
+
+## Sources
+[S1] Deep Reflectance Volumes: Relightable Reconstructions from Multi-view Photometric Images, https://doi.org/10.1007/978-3-030-58580-8_18, fetched 2026-10-26

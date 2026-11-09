@@ -1,200 +1,213 @@
 # HashGrid Encoding
 
-Also called: Hash Grid, Hash Encoding, Multi-resolution Hash Encoding, Grid Encoder, GridEncoding
+Also called: GridEncoding, Hash Encodings, Hash Grid, Instant NGP encoding, Instant Neural Graphics Primitives Encoding
 
 ## Overview
-HashGrid Encoding maps continuous spatial coordinates to high-dimensional feature vectors using a cascade of learnable hash tables at different resolutions [S1][S3, unofficial]. It solves the problem of **spectral bias** in neural implicit representations by allowing the network to capture high-frequency details without requiring massive parameter counts, enabling rapid training and rendering on consumer hardware [S2, S3, unofficial]. Unlike positional encoding which maps to a fixed basis, or dense grids which scale poorly with resolution, HashGrid uses spatial hashing to map voxel coordinates to a compact embedding table, reducing computational operations by approximately 70% compared to direct large implicit network queries [S2, unofficial].
+HashGrid Encoding maps continuous spatial coordinates to high-dimensional feature vectors using a cascade of learnable hash tables at different resolutions [S1][S3, S7, unofficial]. It solves the problem of **spectral bias** in neural implicit representations by allowing the network to capture high-frequency details without requiring massive parameter counts, enabling rapid training and rendering on consumer hardware [S2, S3, S7, unofficial]. Unlike positional encoding which maps to a fixed basis, or dense grids which scale poorly with resolution, HashGrid uses spatial hashing to map voxel coordinates to a compact embedding table, reducing computational operations by approximately 70% compared to direct large implicit network queries [S2, S3, S7, unofficial].
 
 ## How it works
-The method defines a scene function $F_\Theta: \mathbb{R}^D \rightarrow \mathbb{R}^k$ by concatenating features from $L$ resolution levels. Each level $l$ consists of a hash table mapping integer grid coordinates to feature vectors of dimension $C$.
+The method defines a scene function $F_\Theta: \mathbb{R}^D \rightarrow \mathbb{R}^k$ by concatenating features from $L$ resolution levels [S3, unofficial][S12]. Each level $l$ consists of a hash table mapping integer grid coordinates to feature vectors of dimension $C$ [S3, unofficial][S12].
 
 ### Inputs and Outputs
-*   **Inputs**: A tensor of input coordinates $\mathbf{x} \in \mathbb{R}^{B \times D}$, where $B$ is the batch size and $D$ is the spatial dimensionality (typically 3). Values are expected to be normalized to the range $[0, 1]$ [S3, S6, unofficial].
-*   **Outputs**: A tensor of embedded features $\mathbf{y} \in \mathbb{R}^{L \times B \times C}$, where features for each level are concatenated [S3, S6, unofficial].
-*   **Gradients**: Optional output tensor $\frac{\partial \mathbf{y}}{\partial \mathbf{x}} \in \mathbb{R}^{B \times L \times D \times C}$ for backpropagation [S6, S8, unofficial].
+*   **Inputs**: A tensor of input coordinates $\mathbf{x} \in \mathbb{R}^{B \times D}$, where $B$ is the batch size and $D$ is the spatial dimensionality (typically 3). Values are expected to be normalized to the range $[0, 1]$ [S4, S9, S11, unofficial].
+*   **Outputs**: A tensor of embedded features $\mathbf{y} \in \mathbb{R}^{L \times B \times C}$, where features for each level are concatenated [S4, S9, S11, unofficial].
+*   **Gradients**: Optional output tensor $\frac{\partial \mathbf{y}}{\partial \mathbf{x}} \in \mathbb{R}^{B \times L \times D \times C}$ (or flattened to $[B, L \times D \times C]$) for backpropagation [S4, S9, S11, unofficial].
 
 ### Data Structures
-*   **Embeddings**: A flattened 1D array (or tensor) of shape $[sO, C]$, where $sO = \sum_{l=0}^{L-1} \text{hashmap\_size}_l$ is the total capacity of all hash tables [S6, S8, unofficial].
-*   **Offsets**: An integer array of shape $[L+1]$. `offsets[l]` stores the starting index in the embeddings array for level $l$. The size of the hash table for level $l$ is `hashmap_size_l = offsets[l+1] - offsets[l]` [S3, S6, S8, unofficial].
+*   **Embeddings**: A flattened 1D array (or tensor) of shape $[sO, C]$, where $sO = \sum_{l=0}^{L-1} \text{hashmap\_size}_l$ is the total capacity of all hash tables [S4, S9, S11, unofficial].
+*   **Offsets**: An integer array of shape $[L+1]$. `offsets[l]` stores the starting index in the embeddings array for level $l$. The size of the hash table for level $l$ is `hashmap_size_l = offsets[l+1] - offsets[l]` [S4, S9, S11, unofficial].
 *   **Parameters**:
-    *   $H$: Base resolution (grid size at level 0) [S6, S8, unofficial].
-    *   $S$: Scaling factor exponent controlling resolution growth per level [S6, S3, unofficial].
-    *   $L$: Number of resolution levels [S6, S8, unofficial].
-    *   $C$: Number of feature channels per level. Restricted to 1, 2, 4, or 8 [S6, S8, unofficial].
-    *   $D$: Input dimensionality (typically 3) [S6, S8, unofficial].
-    *   `align_corners`: Boolean. If true, input range $[0,1]$ maps to grid corners $[0, \text{scale}]$. If false, adds 0.5 offset for center-aligned sampling $[0.5/\text{scale}, \text{scale}-0.5/\text{scale}]$ [S3, S6, unofficial].
-    *   `interp`: Interpolation type. 0 for linear, 1 for smoothstep [S6, unofficial].
+    *   $H$: Base resolution (grid size at level 0) [S6][S8, S9, S11, unofficial].
+    *   $S$: Scaling factor exponent controlling resolution growth per level [S4, unofficial][S6][S9, S11, unofficial].
+    *   $L$: Number of resolution levels (typically 16) [S3, S4, S9, S11, unofficial][S12].
+    *   $C$: Number of feature channels per level. Restricted to 1, 2, 4, or 8 [S4, S9, S11, unofficial].
+    *   $D$: Input dimensionality (typically 3) [S4, S9, S11, unofficial].
+    *   `align_corners`: Boolean. If true, input range $[0,1]$ maps to grid corners $[0, \text{scale}]$. If false, adds 0.5 offset for center-aligned sampling $[0.5/\text{scale}, \text{scale}-0.5/\text{scale}]$ [S4, S9, unofficial].
+    *   `interp`: Interpolation type. 0 for linear, 1 for smoothstep [S9, unofficial].
+    *   $T$: Max entries per level (hash table size). Tunable hyper-parameter trading parameters for quality. Typical range: $[2^{14}, 2^{24}]$ [S3, unofficial][S12].
+    *   $F$: Number of feature dimensions per entry. Typical value is 2 [S3, unofficial][S12].
+    *   $N_{\min}$: Coarsest resolution. Typical value: 16 [S12].
+    *   $N_{\max}$: Finest resolution. Tunable to match finest detail in training data. Typical range: $[512, 524288]$ [S12].
 
 ### Formulas
 1.  **Scale and Resolution**: For level $l$, the scale factor and integer grid resolution are:
     $$ \text{scale}_l = 2^{l \cdot S} \cdot H - 1 $$
     $$ \text{resolution}_l = \lceil \text{scale}_l \rceil + 1 $$
-    [S3, S6, S8, unofficial]
+    [S4, S9, S11, unofficial][S12]
 
 2.  **Grid Coordinate Mapping**: Input coordinates $\mathbf{x}$ are mapped to continuous grid coordinates $\mathbf{pos}$:
     $$ \text{pos}[d] = \mathbf{x}[d] \times \text{scale}_l + (\text{align\_corners} ? 0.0 : 0.5) $$
-    [S3, S6, S8, unofficial]
+    [S4, S9, S11, unofficial]
 
 3.  **Integer and Fractional Parts**:
     $$ \text{pos\_grid}[d] = \lfloor \text{pos}[d] \rfloor $$
     $$ \text{frac}[d] = \text{pos}[d] - \text{pos\_grid}[d] $$
-    [S3, S6, S8, unofficial]
+    [S4, S9, S11, unofficial]
 
 4.  **Hash Index**: The local grid coordinates $\text{pos\_grid\_local}$ are mapped to a hash index. A common hash function uses prime multipliers and XOR:
     $$ \text{hash}(\text{pos\_grid}) = \bigoplus_{i=0}^{D-1} (\text{pos\_grid}[i] \times \pi_i) $$
-    where $\pi_i$ are distinct large primes (e.g., $\pi_0=1, \pi_1=2654435761, \pi_2=805459861, \dots$) [S1][S3, S8, unofficial].
+    where $\pi_i$ are distinct large primes (e.g., $\pi_0=1, \pi_1=2654435761, \pi_2=805459861, \dots$) [S1][S3, S11, unofficial][S12].
     The final index in the embeddings array is:
     $$ \text{index} = (\text{hash}(\text{pos\_grid}) \pmod{\text{hashmap\_size}_l}) \times C + ch $$
-    [S1][S3, S8, unofficial]
-    *Note*: If `gridtype` is 'tiled' (linear indexing), the hash is replaced by a stride-based calculation: $\sum_{d=0}^{D-1} \text{pos\_grid}[d] \times \prod_{k=0}^{d-1} (\text{resolution}_l+1)$ [S8, unofficial].
+    [S4, S11, unofficial]
+    *Note*: If `gridtype` is 'tiled' (linear indexing), the hash is replaced by a stride-based calculation: $\sum_{d=0}^{D-1} \text{pos\_grid}[d] \times \prod_{k=0}^{d-1} (\text{resolution}_l+1)$ [S8, S11, unofficial].
 
 5.  **Trilinear Interpolation**: For each of the $2^D$ corners of the voxel, identified by bit mask `idx`:
     $$ w = \prod_{d=0}^{D-1} \begin{cases} \text{frac}[d] & \text{if bit } d \text{ of } \text{idx} \text{ is 1} \\ 1 - \text{frac}[d] & \text{if bit } d \text{ of } \text{idx} \text{ is 0} \end{cases} $$
     The feature for channel $ch$ is accumulated:
     $$ \mathbf{y}[l, b, ch] = \sum_{\text{idx}=0}^{2^D-1} w \cdot \text{embeddings}[\text{index}(\text{idx}) + ch] $$
-    [S3, S6, S8, unofficial]
+    [S4, S9, S11, unofficial]
 
 6.  **Smoothstep (Optional)**: If `interp=1`, linear interpolation is replaced by smoothstep:
     $$ \text{smoothstep}(x) = x^2(3 - 2x) $$
     $$ \text{smoothstep}'(x) = 6x(1 - x) $$
-    [S6, unofficial]
+    [S9, unofficial]
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def hash_grid_encode(inputs, offsets, embeddings, H, S, L, C, D, align_corners=False, interp='linear'):
     """
-    inputs: [B, D] float, range [0, 1]
-    offsets: [L+1] int
-    embeddings: [sO, C] float
-    Returns: [L, B, C] features, [B, L, D, C] gradients (optional)
+    inputs: list of lists of shape [B, D], values in [0, 1]
+    offsets: list of ints of shape [L+1]
+    embeddings: list of lists of shape [sO, C]
+    Returns: list of lists of shape [L, B, C], list of lists of shape [B, L, D, C]
     """
-    B = inputs.shape[0]
-    outputs = torch.zeros(L, B, C)
-    dy_dx = torch.zeros(B, L, D, C) if compute_grad else None
+    B = len(inputs)
+    outputs = [[[0.0] * C for _ in range(B)] for _ in range(L)]
+    dy_dx = [[[0.0] * C for _ in range(D)] for _ in range(B * L)]
+    primes = [1, 2654435761, 805459861, 3674653429, 2097192037, 1434869437, 2165219737]
 
     for l in range(L):
-        # 1. Calculate scale and resolution
         scale = (2 ** (l * S)) * H - 1.0
-        resolution = int(math.ceil(scale)) + 1
+        resolution = math.ceil(scale) + 1
         hashmap_size = offsets[l+1] - offsets[l]
-        
-        # 2. Map inputs to grid space
-        # pos: [B, D]
         offset_val = 0.0 if align_corners else 0.5
-        pos = inputs * scale + offset_val
-        
-        # 3. Compute integer grid coords and fractional parts
-        pos_grid = torch.floor(pos).long() # [B, D]
-        frac = pos - pos_grid.float()      # [B, D]
-        
-        # 4. Iterate over batch and corners
+
         for b in range(B):
             # Check bounds: if any coord < 0 or > 1, output is 0
-            if torch.any((inputs[b] < 0) | (inputs[b] > 1)):
+            if any(inputs[b][d] < 0.0 or inputs[b][d] > 1.0 for d in range(D)):
                 continue
-                
-            level_features = torch.zeros(C)
-            level_grads = torch.zeros(D, C) if compute_grad else None
-            
-            # 5. Iterate over 2^D corners
+
+            # Map to grid space
+            pos = [inputs[b][d] * scale + offset_val for d in range(D)]
+            pos_grid = [math.floor(p) for p in pos]
+            frac = [p - pg for p, pg in zip(pos, pos_grid)]
+
+            level_features = [0.0] * C
+            level_grads = [[0.0] * C for _ in range(D)]
+
+            # Forward pass: interpolate over 2^D corners
             for idx in range(1 << D):
                 w = 1.0
                 pos_grid_local = [0] * D
-                
                 for d in range(D):
                     if (idx >> d) & 1:
-                        w *= frac[b, d]
-                        pos_grid_local[d] = pos_grid[b, d] + 1
+                        w *= frac[d]
+                        pos_grid_local[d] = pos_grid[d] + 1
                     else:
-                        w *= 1.0 - frac[b, d]
-                        pos_grid_local[d] = pos_grid[b, d]
-                
-                # 6. Compute hash index
+                        w *= 1.0 - frac[d]
+                        pos_grid_local[d] = pos_grid[d]
+
+                # Hash index
                 hash_val = 0
-                primes = [1, 2654435761, 805459861, 3674653429, 2097192037, 1434869437, 2165219737]
                 for d in range(D):
                     hash_val ^= pos_grid_local[d] * primes[d]
-                
                 index = (hash_val % hashmap_size) * C
-                
-                # 7. Interpolate features
+
+                # Accumulate features
                 for ch in range(C):
                     level_features[ch] += w * embeddings[index + ch]
-                
-                # 8. Compute gradients (dy_dx) if requested
-                if compute_grad:
-                    # Gradient w.r.t input x[d] involves derivative of interpolation weight
-                    # dy/dx[d] = sum_ch sum_corners ( dw/dx[d] * grid_val )
-                    # dw/dx[d] = (dw/dfrac[d]) * (dfrac[d]/dx[d])
-                    # dfrac/dx = scale
-                    
-                    # Simplified: compute partial derivative along dimension gd
-                    # For each dimension gd, we need the difference between right and left neighbors
-                    pass # See detailed backward step below
 
-            outputs[l, b, :] = level_features
-            
-            if compute_grad:
-                # Detailed backward pass for level l
-                for gd in range(D):
-                    # Initialize gradient accumulator for this dimension
-                    grad_dim = torch.zeros(C)
-                    
-                    # Iterate over 2^(D-1) neighbors fixing gd
-                    # We need left and right indices along gd
-                    # Left: pos_grid[gd], Right: pos_grid[gd] + 1
-                    
-                    # Weights for other dimensions
-                    # w_other = product of weights for d != gd
-                    
-                    # Fetch left and right grid values
-                    # Compute hash for left and right positions
-                    
-                    # Accumulate: grad_dim[ch] += w_other * scale * (grid_right[ch] - grid_left[ch])
-                    
-                    # Apply smoothstep derivative if needed
+            # Backward pass: compute dy_dx efficiently per dimension
+            for gd in range(D):
+                grad_dim = [0.0] * C
+                # Iterate over 2^(D-1) neighbors fixing gd
+                for idx in range(1 << (D - 1)):
+                    w_other = 1.0
+                    pos_grid_left = [0] * D
+                    pos_grid_right = [0] * D
+                    for d in range(D):
+                        if d == gd:
+                            pos_grid_left[d] = pos_grid[d]
+                            pos_grid_right[d] = pos_grid[d] + 1
+                        else:
+                            bit = (idx >> d) & 1
+                            if bit:
+                                w_other *= frac[d]
+                                pos_grid_left[d] = pos_grid[d] + 1
+                                pos_grid_right[d] = pos_grid[d] + 1
+                            else:
+                                w_other *= 1.0 - frac[d]
+                                pos_grid_left[d] = pos_grid[d]
+                                pos_grid_right[d] = pos_grid[d]
+
+                    # Hash for left and right
+                    hash_left = 0
+                    hash_right = 0
+                    for d in range(D):
+                        hash_left ^= pos_grid_left[d] * primes[d]
+                        hash_right ^= pos_grid_right[d] * primes[d]
+
+                    idx_left = (hash_left % hashmap_size) * C
+                    idx_right = (hash_right % hashmap_size) * C
+
+                    # Derivative factor
+                    pos_deriv = scale
                     if interp == 'smoothstep':
-                        # Multiply by smoothstep'(frac[gd])
-                        pass
-                        
-                    level_grads[gd, :] = grad_dim
-                
-                dy_dx[b, l, :, :] = level_grads
+                        pos_deriv *= 6.0 * frac[gd] * (1.0 - frac[gd])
+
+                    w_total = w_other * pos_deriv
+                    for ch in range(C):
+                        grad_dim[ch] += w_total * (embeddings[idx_right + ch] - embeddings[idx_left + ch])
+
+                level_grads[gd] = grad_dim
+
+            outputs[l][b] = level_features
+            for d in range(D):
+                dy_dx[b * L + l][d] = level_grads[d]
 
     return outputs, dy_dx
 ```
 
 ### Edge Cases and Pitfalls
-*   **Out-of-Bounds**: Inputs outside $[0, 1]$ must be handled. The standard implementation checks bounds and outputs 0 features, returning 0 gradients to prevent undefined behavior [S3, S6, unofficial].
-*   **Hash Collisions**: Hash collisions are inevitable due to finite table size. They are handled by modulo arithmetic. The backward pass uses `atomicAdd` for gradient updates, which handles collisions but introduces contention [S6, S8, unofficial].
-*   **Precision**: `atomicAdd` on half-precision (`__half`) is slow on older CUDA architectures. Implementations use `__half2` vectorization when $C$ is even to improve performance [S3, S8, unofficial].
-*   **Dimensionality**: $D$ is typically restricted to 2 or 3. Higher dimensions increase the $2^D$ interpolation cost significantly [S8, unofficial].
+*   **Out-of-Bounds**: Inputs outside $[0, 1]$ must be handled. The standard implementation checks bounds and outputs 0 features, returning 0 gradients to prevent undefined behavior [S4, S9, S11, unofficial].
+*   **Hash Collisions**: Hash collisions are inevitable due to finite table size. They are handled by modulo arithmetic. The backward pass uses `atomicAdd` for gradient updates, which handles collisions but introduces contention [S3, unofficial][S6][S8, S9, S11, unofficial].
+*   **Precision**: `atomicAdd` on half-precision (`__half`) is slow on older CUDA architectures. Implementations use `__half2` vectorization when `N_C % 2 == 0` (where `N_C = min(2, C)`) to improve performance [S3, S4, S9, S11, unofficial].
+*   **Dimensionality**: $D$ is typically restricted to 2 or 3. Higher dimensions increase the $2^D$ interpolation cost significantly [S11, unofficial].
+*   **Cache Oversubscription**: Performance drops significantly if hash table size exceeds threshold where $2 \cdot T \cdot F > 6 \cdot 2^{20}$ (6 MB L2 cache limit on RTX 3090) [S3, unofficial].
 
 ## Subtopics
 
 ### [Instant-NGP](6604-instant-ngp.md)
-Instant-NGP is a neural radiance field (NeRF) technique that replaces conventional Fourier (positional) encoding with a multi-resolution hash encoding mechanism to enable rapid training and rendering on consumer hardware. It facilitates the capture of both overall shape and local textures, outperforming frequency-based methods in preserving sharpness, clarity, and fine details. Unlike PixelNeRF, which relies on CNN features, or vanilla NeRF, which uses positional encoding, Instant-NGP utilizes a learnable hash table to map spatial coordinates to feature vectors, allowing for efficient parallel processing via CUDA.
+Instant-NGP replaces the slow multi-layer perceptron (MLP) of standard Neural Radiance Fields (NeRF) with a multi-resolution hash-encoded feature grid to accelerate training and rendering while maintaining comparable quality. It achieves a 1000–10000× training speedup, enabling convergence in 2–5 minutes on a single GPU, by leveraging highly optimized GPU hash table lookups to reduce MLP depth and width. Unlike frequency-based encodings that prioritize low-frequency shape capture, hash encoding facilitates both overall shape and local textures, outperforming vanilla NeRF in preserving sharpness and fine details.
 
 ## Operating characteristics
-*   **Time Complexity**: Forward pass is $O(B \cdot L \cdot 2^D \cdot C)$ operations per batch element [S6, unofficial]. Backward pass for grid embeddings is similar but includes `atomicAdd` overhead [S6, unofficial].
-*   **Memory Complexity**: $O(\sum_{l=0}^{L-1} \text{hashmap\_size}_l \times C)$ for the embedding table [S8, unofficial]. The total size $sO$ is configurable but typically scales with the number of levels and desired resolution.
-*   **Performance**: Reduces computational operations by ~70% compared to direct large implicit network queries [S2, unofficial]. Enables real-time rendering on consumer GPUs (e.g., RTX 3080/4070) [S2, unofficial].
-*   **Strengths**: Compact memory footprint, fast lookup, differentiable, supports multi-resolution details.
-*   **Limitations**: Spatial aliases caused by hash collisions can degrade geometric interpretation [S4]. Hash collisions may cause gradient noise during training [S6, unofficial].
-*   **When to use**: When training speed and memory efficiency are critical, and high-frequency detail preservation is needed. Suitable for NeRF and neural implicit fields on consumer hardware.
-*   **When not to use**: When exact geometric interpretation without aliasing is required, or when $D$ is very large (curse of dimensionality in $2^D$ interpolation).
+*   **Time Complexity**: Forward pass is $O(B \cdot L \cdot 2^D \cdot C)$ operations per batch element [S9, unofficial]. Backward pass for grid embeddings is similar but includes `atomicAdd` overhead [S9, unofficial].
+*   **Memory Complexity**: $O(\sum_{l=0}^{L-1} \text{hashmap\_size}_l \times C)$ for the embedding table [S11, unofficial]. The total size $sO$ scales with the number of levels and desired resolution [S11, unofficial].
+*   **Performance**: Reduces computational operations by ~70% compared to direct large implicit network queries [S2, S3, S7, unofficial]. Enables real-time rendering on consumer GPUs (e.g., RTX 3080/4070) [S2, S3, S7, unofficial]. Training speedup is over 8× faster than frequency encoding with similar parameter counts, achieving state-of-the-art quality in seconds [S3, unofficial][S12].
+*   **Strengths**: Compact memory footprint, fast $O(1)$ lookup, fully differentiable, supports multi-resolution details, and automatically prioritizes sparse areas with important fine-scale detail via gradient averaging [S3, unofficial][S12].
+*   **Limitations**: Spatial aliases caused by hash collisions can degrade geometric interpretation and introduce visually undesirable surface roughness in SDF rendering [S4, unofficial][S6, S12]. Hash collisions may cause gradient noise during training [S6, S12].
+*   **When to use**: When training speed and memory efficiency are critical, and high-frequency detail preservation is needed. Suitable for NeRF, neural implicit fields, and gigapixel image approximation on consumer hardware [S3, unofficial][S12].
+*   **When not to use**: When exact geometric interpretation without aliasing is required, or when $D$ is very large (curse of dimensionality in $2^D$ interpolation) [S11, unofficial][S12].
 
 ## Background
-HashGrid Encoding was introduced by Müller et al. in 2022 as part of Instant-NGP [S1, S4]. It was designed to overcome the slow training times of traditional NeRFs by replacing positional encoding with a learnable multi-resolution hash grid. The method leverages spatial hashing to map continuous coordinates to discrete feature vectors, allowing for efficient parallelization on GPUs [S3, S6, unofficial]. It has since become a standard component in many neural rendering and implicit field frameworks, including [Neural Volumes with Multi-Resolution Hash Encoding](1497-neural-volumes-with-multi-resolution-hash-encoding.md) and [Lagrangian Hashing](3242-lagrangian-hashing.md).
+HashGrid Encoding was introduced by Müller et al. in 2022 as part of Instant-NGP [S3, unofficial][S12]. It was designed to overcome the slow training times of traditional NeRFs by replacing positional encoding with a learnable multi-resolution hash grid [S7, unofficial]. The method leverages spatial hashing to map continuous coordinates to discrete feature vectors, allowing for efficient parallelization on GPUs [S3, unofficial][S6][S7, unofficial]. It has since become a standard component in many neural rendering and implicit field frameworks, including [Neural Volumes with Multi-Resolution Hash Encoding](1497-neural-volumes-with-multi-resolution-hash-encoding.md) and [Lagrangian Hashing](3242-lagrangian-hashing.md) [S3, unofficial][S12].
 
 ## Sources
 [S1] One Is All: Bridging the Gap between Neural Radiance Fields Architectures with Progressive Volume Distillation, https://doi.org/10.1609/aaai.v37i1.25135, fetched 2026-10-26
 [S2] Optimizing Real-Time Neural Radiance Fields (NeRF) for Dynamic 3D Scene Rendering on Consumer GPUs, https://doi.org/10.5281/zenodo.21889839, fetched 2026-10-26 (unofficial)
-[S3] Fictionarry/ER-NeRF, https://github.com/Fictionarry/ER-NeRF, fetched 2026-10-26 (unofficial)
-[S4] Progressive Volume Distillation with Active Learning for Efficient NeRF Architecture Conversion, https://doi.org/10.1007/s11263-026-02815-1, fetched 2026-10-26
-[S5] (PDF) Volume Feature Rendering for Fast Neural Radiance Field ..., https://www.researchgate.net/publication/371136390_Volume_Feature_Rendering_for_Fast_Neural_Radiance_Field_Reconstruction, fetched 2026-10-27 (unofficial)
-[S6] Fictionarry/DNGaussian, https://github.com/Fictionarry/DNGaussian, fetched 2026-10-27 (unofficial)
-[S7] Linyou/taichi-ngp-renderer, https://github.com/Linyou/taichi-ngp-renderer, fetched 2026-10-27 (unofficial)
-[S8] DESY-FS-PETRA/HoloINR, https://github.com/DESY-FS-PETRA/HoloINR, fetched 2026-10-27 (unofficial)
+[S3] Nvidia – learning representations of positions in a 3D scene [pdf], https://nvlabs.github.io/instant-ngp/assets/mueller2022instant.pdf, fetched 2026-10-26 (unofficial)
+[S4] Fictionarry/ER-NeRF, https://github.com/Fictionarry/ER-NeRF, fetched 2026-10-26 (unofficial)
+[S5] Neuralangelo: High-Fidelity Neural Surface Reconstruction, https://doi.org/10.1109/cvpr52729.2023.00817, fetched 2026-10-26
+[S6] Progressive Volume Distillation with Active Learning for Efficient NeRF Architecture Conversion, https://doi.org/10.1007/s11263-026-02815-1, fetched 2026-10-26
+[S7] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)
+[S8] (PDF) Volume Feature Rendering for Fast Neural Radiance Field ..., https://www.researchgate.net/publication/371136390_Volume_Feature_Rendering_for_Fast_Neural_Radiance_Field_Reconstruction, fetched 2026-10-27 (unofficial)
+[S9] Fictionarry/DNGaussian, https://github.com/Fictionarry/DNGaussian, fetched 2026-10-27 (unofficial)
+[S10] Linyou/taichi-ngp-renderer, https://github.com/Linyou/taichi-ngp-renderer, fetched 2026-10-27 (unofficial)
+[S11] DESY-FS-PETRA/HoloINR, https://github.com/DESY-FS-PETRA/HoloINR, fetched 2026-10-27 (unofficial)
+[S12] Instant Neural Graphics Primitives with a Multiresolution ..., https://www.cs.jhu.edu/~misha/ReadingSeminar/Papers/Mueller22.pdf, fetched 2026-10-28
+[S13] MERF: Memory-Efficient Radiance Fields for Real-time View Synthesis in Unbounded Scenes, https://doi.org/10.1145/3592426, fetched 2026-10-26

@@ -2,109 +2,93 @@
 Also called: stacked sampling
 
 ## Overview
-Combined sampling is a two-stage acceleration technique for volume rendering that stacks an occupancy grid on top of a proposal network to reduce the number of rays and shrink the near-far plane for remaining rays, leveraging the transmittance estimation from both [S1]. It addresses the inefficiency of uniform or single-stage sampling in scenes with significant empty space by using the proposal network to identify likely object regions and the occupancy grid to prune rays that pass through empty voxels [S1]. It sets itself apart from [Coarse-Fine Sampling](8172-coarse-fine-sampling.md) by explicitly decoupling spatial sparsity estimation (grid) from density prediction (network), and from [VF-NeRF Rendering Pipeline](3302-vf-nerf-rendering-pipeline.md) by focusing on the specific synergy of these two pruning mechanisms rather than a full training pipeline [S1].
+Combined sampling is a two-stage acceleration technique for neural radiance fields that stacks an occupancy grid on top of a proposal network to reduce the number of rays processed and shrink the near-far plane for remaining rays [S1]. It leverages transmittance estimation from both structures to skip empty space more effectively than either method alone [S1]. It differs from [VF-NeRF Rendering Pipeline](3302-vf-nerf-rendering-pipeline.md) by using a learned proposal network for initial density estimation rather than a fixed grid, and from [Coarse-Fine Sampling](8172-coarse-fine-sampling.md) by explicitly combining a sparse spatial index with a neural density prior to prune rays before the final fine sampling stage [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Camera extrinsics and intrinsics; a trained proposal network $N_p$; an occupancy grid $G$ (typically a hash grid or 3D texture); scene bounds $[t_{min}, t_{max}]$.
-*   **Outputs:** A set of sample points $\{x_i\}$ and weights $\{w_i\}$ for volume rendering.
+*   **Inputs:** Camera ray origin $\mathbf{o}$ and direction $\mathbf{d}$; a pre-trained proposal network $N_p(\mathbf{x})$ outputting density $\sigma$; a pre-computed occupancy grid $G$ storing binary occupancy values for voxels; near and far clipping planes $t_{min}, t_{max}$.
+*   **Outputs:** A set of sample points $\{t_i\}$ along the ray for the final volume rendering stage; a boolean flag indicating if the ray is fully skipped.
 
 **Data Structures:**
-*   **Occupancy Grid $G$:** A sparse data structure mapping 3D coordinates to binary occupancy values (occupied/empty). In implementations like NerfAcc, this is often a Multiresolution Hash Grid [S1].
-*   **Proposal Network $N_p$:** A lightweight neural network that takes a 3D coordinate and outputs a density estimate or transmittance probability.
+1.  **Occupancy Grid ($G$):** A 3D hash map or uniform grid mapping voxel coordinates to binary values (occupied/unoccupied). The resolution and hash function are implementation-specific [S1].
+2.  **Proposal Network ($N_p$):** A lightweight neural network (e.g., MLP) that takes 3D coordinates $\mathbf{x}$ and outputs a scalar density $\sigma_p(\mathbf{x})$ [S1].
 
-**Algorithm Steps:**
-1.  **Initial Proposal:** For each ray, use the proposal network $N_p$ to estimate transmittance and select initial sample points. This step identifies regions with high probability of containing geometry [S1].
-2.  **Grid Filtering:** Apply the occupancy grid $G$ to the initial sample points. Rays or segments that fall entirely within empty voxels are discarded or skipped. This step shrinks the effective near-far bounds for the remaining rays [S1].
-3.  **Final Sampling:** Perform final sampling based on the combined transmittance estimates from both the proposal network and the occupancy grid. Samples are concentrated in regions where both the network predicts density and the grid indicates occupancy [S1].
+**Numbered Steps:**
+1.  **Initial Proposal Sampling:** Sample $N_{prop}$ points uniformly or via importance sampling along the ray $[\mathbf{o}, \mathbf{d}]$ within $[t_{min}, t_{max}]$. Evaluate the proposal network $N_p$ at these points to estimate density $\sigma_p$. Compute cumulative transmittance $T(t) = \exp(-\sum_{j < i} \sigma_p(t_j) \Delta t_j)$ [S1].
+2.  **Ray Pruning via Occupancy Grid:** For rays where the cumulative transmittance remains high (indicating empty space), query the occupancy grid $G$ along the ray segment. If the ray passes through unoccupied voxels for the majority of its path, or if the grid indicates no occupied voxels within the current bounds, the ray is skipped entirely [S1].
+3.  **Shrinking Near-Far Bounds:** For rays that are not skipped, use the combined transmittance estimates from the proposal network and the occupancy grid to identify the first and last occupied regions. Shrink the effective near-far bounds $[t'_{min}, t'_{max}]$ to exclude empty space identified by the grid [S1].
+4.  **Final Sampling:** Perform the final volume rendering sampling using $N_{fine}$ samples within the shrunk bounds $[t'_{min}, t'_{max}]$, evaluating the final neural radiance field [S1].
+
+**Formulas:**
+*   Transmittance from proposal network: $T_p(t_i) = \exp\left(-\sum_{j=1}^{i-1} \sigma_p(t_j) \Delta t_j\right)$ [S1].
+*   Ray skip condition: If $\sum_{v \in \text{ray}} G(v) = 0$ and $T_p(t_{max}) > \tau_{skip}$, skip ray [S1, G].
+
+**Parameters:**
+*   $N_{prop}$: Number of proposal samples. Typical values not given in the sources.
+*   $N_{fine}$: Number of final samples. Typical values not given in the sources.
+*   $\tau_{skip}$: Transmittance threshold for skipping. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Floating-point errors in cumulative transmittance calculation may lead to incorrect pruning [G].
+*   **Boundaries:** Degenerate rays (origin inside a voxel) require careful handling of grid queries [G].
+*   **Empty Space:** The method is most effective in scenes with significant empty space, as the occupancy grid can skip these regions entirely [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def combined_sampling(ray_origin, ray_direction, t_min, t_max, proposal_network, occupancy_grid, num_samples_proposal, num_samples_final):
-    # Step 1: Use proposal network to estimate transmittance and select initial samples
-    # Generate initial sample positions along the ray within [t_min, t_max]
-    t_proposal = linspace(t_min, t_max, num_samples_proposal)
-    x_proposal = ray_origin + ray_direction * t_proposal
+def combined_sampling(ray_o, ray_d, t_min, t_max, proposal_network, occupancy_grid, N_prop, N_fine, tau_skip):
+    # Step 1: Proposal Sampling
+    t_prop = linspace(t_min, t_max, N_prop)
+    sigma_prop = proposal_network(ray_o + ray_d * t_prop)
+    delta_t = diff(t_prop)
+    # Prepend zero for first segment
+    delta_t = concatenate([array([0]), delta_t])
+    alpha_prop = 1 - exp(-sigma_prop * delta_t)
+    T_prop = exp(-cumsum(sigma_prop * delta_t))
     
-    # Query proposal network for density/transmittance
-    density_proposal = proposal_network(x_proposal)
+    # Step 2 & 3: Grid Query and Bounds Shrinking
+    # Query occupancy grid along the ray
+    occupied_voxels = occupancy_grid.query_ray(ray_o, ray_d, t_min, t_max)
     
-    # Compute transmittance from proposal network
-    # T(t) = exp(-sum(sigma * delta_t))
-    transmittance_proposal = compute_transmittance(density_proposal, t_proposal)
+    if not occupied_voxels:
+        # Ray is entirely in empty space
+        return [], True
     
-    # Select samples based on proposal transmittance (e.g., inverse CDF sampling)
-    indices_proposal = sample_indices(transmittance_proposal, num_samples_proposal)
-    x_selected = x_proposal[indices_proposal]
-    t_selected = t_proposal[indices_proposal]
+    # Find first and last occupied voxel boundaries
+    t_first_occ, t_last_occ = occupancy_grid.get_ray_bounds(ray_o, ray_d, occupied_voxels)
     
-    # Step 2: Apply occupancy grid to further filter rays or shrink near-far bounds
-    # Check occupancy for selected points
-    occupancy = occupancy_grid.query(x_selected)
+    # Shrink bounds
+    t_eff_min = max(t_min, t_first_occ)
+    t_eff_max = min(t_max, t_last_occ)
     
-    # Filter out points in empty voxels
-    valid_mask = occupancy == OCCUPIED
-    x_valid = x_selected[valid_mask]
-    t_valid = t_selected[valid_mask]
-    
-    # If no valid points remain, fallback to uniform sampling or skip ray
-    if len(x_valid) == 0:
-        return empty_samples()
+    # Check if remaining segment is negligible or empty
+    if t_eff_max <= t_eff_min:
+        return [], True
         
-    # Update near-far bounds based on valid points
-    t_min_valid = min(t_valid)
-    t_max_valid = max(t_valid)
-    
-    # Step 3: Perform final sampling based on combined transmittance estimates
-    # Re-sample within the refined bounds [t_min_valid, t_max_valid]
-    # Use combined density estimate: sigma_combined = sigma_proposal * occupancy
-    # Or simply use proposal network density for points that passed grid check
-    
-    t_final = linspace(t_min_valid, t_max_valid, num_samples_final)
-    x_final = ray_origin + ray_direction * t_final
-    
-    # Query proposal network for final points
-    density_final = proposal_network(x_final)
-    
-    # Apply occupancy grid to final points for final weighting/filtering
-    occupancy_final = occupancy_grid.query(x_final)
-    density_final = density_final * occupancy_final
-    
-    # Compute final transmittance and weights
-    transmittance_final = compute_transmittance(density_final, t_final)
-    weights = compute_weights(transmittance_final, density_final)
-    
-    return x_final, weights
+    # Step 4: Final Sampling
+    t_fine = linspace(t_eff_min, t_eff_max, N_fine)
+    # Final rendering would use these t_fine points
+    return t_fine, False
 ```
-
-**Parameters:**
-*   `num_samples_proposal`: Number of initial samples proposed by the network. Typical values depend on the dataset; higher values improve accuracy but increase cost [S1].
-*   `num_samples_final`: Number of final samples after filtering. Typically smaller than `num_samples_proposal` due to pruning [S1].
-*   **Occupancy Grid Resolution:** Higher resolution captures finer details but uses more memory. The source notes that varying resolution affects performance [S1].
-
-**Edge Cases and Pitfalls:**
-*   **Empty Rays:** If a ray passes entirely through empty space, both the proposal network and occupancy grid may return no valid samples. A fallback strategy (e.g., uniform sampling or skipping) is required [G].
-*   **Precision:** The interaction between the continuous proposal network and discrete occupancy grid can lead to aliasing if not handled carefully. The occupancy grid acts as a hard filter, which might discard valid samples if the grid resolution is too low [S1].
-*   **Boundary Conditions:** The near-far plane shrinking must be handled carefully to avoid clipping valid geometry near the boundaries of empty voxels [G].
 
 ## Subtopics
 
 ### [Hierarchical Importance Sampling](6773-hierarchical-importance-sampling.md)
-A sampling strategy using multiple levels of importance sampling to reduce the number of samples required for rendering, implemented using Multiresolution Hash Grids (MHG) for density fields. It differs by using a hierarchical structure for density estimation rather than a binary occupancy grid for pruning. Choose it when fine-grained density estimation is needed across multiple scales.
+Hierarchical Importance Sampling is a strategy for efficiently selecting sample points along rays in Neural Radiance Fields (NeRF) by using coarse density estimates to guide the placement of fine samples. It differs from uniform sampling by concentrating computational effort on regions of high density, and from single-stage importance sampling by using multiple levels of guidance to further refine the sample distribution. It builds on [Combined Sampling (Occupancy Grid + Proposal Network)](1626-combined-sampling-occupancy-grid-proposal-network.md) by providing the specific mechanism for the proposal stage when occupancy grids are insufficient or when higher fidelity is required.
 
 ## Operating characteristics
-*   **Time Complexity:** Reduces the number of expensive neural network queries by filtering out empty space. The proposal network is queried for initial samples, and the occupancy grid (typically a hash lookup) is queried for filtering. This is faster than uniform sampling in sparse scenes [S1].
-*   **Memory Complexity:** Requires storing the occupancy grid (e.g., hash grid) and the proposal network weights. The occupancy grid size depends on resolution and hash table size [S1].
-*   **Measured Performance:** On the NeRF-Synthetic dataset using HashEncoding from Instant-NGP, quality improved from 31.40dB to 32.35dB PSNR, and training time reduced from 5.2min to 4.3min [S1].
-*   **Strengths:** Highly effective for scenes with significant empty space, as the occupancy grid can skip large portions of the ray [S1].
-*   **Limitations:** Less effective on datasets with less empty space (e.g., Mip-NeRF 360), where the proposal network alone may perform better [S1].
-*   **When to Use:** Use for datasets with sparse geometry and large empty regions (e.g., NeRF-Synthetic) [S1].
-*   **When Not to Use:** Avoid for dense scenes or datasets with less empty space (e.g., Mip-NeRF 360), where the overhead of grid management may not be justified [S1].
+*   **Time Complexity:** Reduces the number of rays processed by the final, more expensive neural network by skipping empty space [S1].
+*   **Memory Complexity:** Requires memory for the occupancy grid and the proposal network [S1].
+*   **Measured Performance:** On the NeRF-Synthetic dataset using HashEncoding from Instant-NGP, quality improved from 31.40dB to 32.35dB PSNR; Training time reduced from 5.2min to 4.3min [S1].
+*   **Scaling:** More effective on datasets with significant empty space (e.g., NeRF-Synthetic) compared to those with dense geometry (e.g., Mip-NeRF 360) [S1].
+*   **Strengths:** Significant speedup and quality improvement on sparse scenes [S1].
+*   **Limitations:** Less effective on dense scenes where the occupancy grid cannot skip many rays [S1].
+*   **When to use:** Scenes with large empty regions.
+*   **When not to use:** Dense scenes with little empty space.
 
 ## Background
-The method was analyzed in the context of the NerfAcc library, which provides efficient sampling accelerators for NeRFs [S1]. The analysis highlighted that combining occupancy grid and proposal network sampling can lead to significant improvements in training speed and image quality, particularly for datasets with sparse geometry [S1]. The approach builds on the observation that spatial skipping via occupancy grids is effective for certain types of scenes [S1].
+Originated in the context of efficient NeRF training and rendering, specifically within the NerfAcc library [S1]. The method was developed to address the inefficiency of single-stage sampling methods by combining the spatial skipping capabilities of occupancy grids with the density-awareness of proposal networks [S1]. It is used in modern NeRF acceleration frameworks to improve training speed and inference quality [S1].
 
 ## Sources
 [S1] NerfAcc: Efficient Sampling Accelerates NeRFs, https://doi.org/10.1109/iccv51070.2023.01699, fetched 2026-10-26

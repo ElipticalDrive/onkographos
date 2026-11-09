@@ -2,84 +2,124 @@
 Also called: Dynamic Octree Caching, Temporal Coherence Rendering
 
 ## Overview
-Mega-NeRF-Dynamic Rendering is an interactive rendering method for large-scale Neural Radiance Fields (NeRFs) that exploits temporal coherence in fly-through sequences by dynamically expanding and reusing a sparse voxel octree cache across frames [S1]. Unlike fixed-resolution caching methods such as Plenoctree, which limit image fidelity due to static data structures, this method dynamically subdivides the octree based on the current camera position, allowing for higher resolution and incremental refinement [S1]. It addresses the problem of high latency in large-scale NeRF fly-throughs by minimizing additional processing time beyond the initial training phase [S1].
+Mega-NeRF-Dynamic is an interactive rendering method for large-scale Neural Radiance Fields (NeRFs) that exploits temporal coherence in fly-throughs by dynamically expanding and reusing a sparse voxel octree cache across frames [S1]. Unlike sibling methods such as [Plenoctree](link) which rely on a fixed, precomputed octree that limits resolution, Mega-NeRF-Dynamic dynamically subdivides the octree based on the current camera position, allowing for higher resolution and incremental refinement [S1]. It addresses the problem of high latency in large-scale NeRF rendering by reducing per-frame work through state caching and guided sampling [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A trained Mega-NeRF model (a collection of self-contained MLPs), the previous frame's dynamic octree cache, and the current camera pose.
-*   **Output:** A rendered image frame and an updated dynamic octree cache for the next frame.
+*   **Inputs:** A trained Mega-NeRF model (comprising spatial MLPs and feature modules), a camera trajectory (fly-through), and the octree cache from the previous frame (or a coarse initial cache for the first frame) [S1].
+*   **Outputs:** A rendered image frame and an updated sparse voxel octree cache containing refined opacity and color data [S1].
 
 **Data Structures:**
-*   **Sparse Voxel Octree:** A hierarchical structure storing precomputed opacity and color (radiance) values. The tree is not fixed; it expands dynamically.
-*   **Octree Weights:** Stored in the octree nodes to guide ray sampling, providing a high-quality estimate of scene geometry [S1].
+*   **Sparse Voxel Octree:** A hierarchical structure storing precomputed model outputs (opacity and color/spherical harmonic coefficients) [S1].
+    *   **Fields:** Each node contains metadata for traversal and leaf nodes store the radiance/opacity values [S1].
+    *   **Layout:** The octree is dynamically expanded. The source notes that generating an 8-level octree requires 1–12 GB of memory, with higher levels scaling significantly (e.g., adding one level increases size to 55 GB) [S1].
+    *   **Weights:** The octree stores weights used to guide ray sampling, estimating scene geometry to place samples near surfaces of interest [S1].
 
-**Steps:**
-1.  **Precomputation:** Precompute a coarse cache of opacity and color into a sparse voxel octree [S1]. This initial step is computationally expensive (see Operating characteristics).
-2.  **Dynamic Expansion:** During interactive visualization, dynamically subdivide the octree based on the current camera position [S1]. This contrasts with fixed octrees used in methods like Plenoctree [S1].
-3.  **Initial View Generation:** Use the cached outputs from the expanded octree to produce an initial view of the current frame [S1].
-4.  **Refinement:** Perform additional rounds of model sampling to refine the image quality. Store these new, refined values into the octree cache [S1].
-5.  **Temporal Reuse:** For the next frame, reuse the expanded octree from the previous frame. Due to temporal coherence, only incremental work is required to maintain quality [S1].
-6.  **Guided Ray Sampling:** Perform a final round of guided ray sampling in a single pass. Use the weights stored in the octree to place samples near surfaces of interest, skipping empty spaces [S1]. This replaces the traditional two-stage hierarchical sampling [S1].
-7.  **Transmittance Accumulation:** Accumulate transmittance along the ray and terminate sampling after a certain threshold to accelerate the process [S1].
+**Algorithm Steps:**
+1.  **Initialization (Precomputation):** Precompute a coarse cache of opacity and color into a sparse voxel octree. This step is computationally expensive (e.g., 1 hour for 8 levels) and memory-intensive [S1].
+2.  **Initial View Generation:** For the current frame, use the cached outputs from the previous frame's expanded octree to produce an initial view. This leverages temporal coherence, as the next frame has significant overlap with the predecessor [S1].
+3.  **Dynamic Expansion & Refinement:** Dynamically subdivide the octree based on the current camera position. Perform additional rounds of model sampling to refine the image in regions of interest. Store these new, refined values into the cache [S1].
+4.  **Guided Ray Sampling:** Perform a final round of guided ray sampling in a single pass. Unlike standard hierarchical sampling which uses uniform coarse intervals followed by fine sampling, this method uses the weights stored in the octree to skip empty spaces and place a small number of samples near surfaces of interest [S1].
+5.  **Transmittance Accumulation:** Accumulate transmittance along the ray. End sampling after a certain threshold is reached to accelerate the process [S1].
+6.  **Cache Update:** The refined octree from the current frame is reused for the next frame, requiring only incremental work to maintain quality [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_frame_mega_nerf_dynamic(prev_octree, camera_pose, nerf_model):
+def render_frame_mega_nerf_dynamic(camera, prev_octree, nerf_model):
+    """
+    Renders a single frame using dynamic octree caching and guided sampling.
+    
+    Args:
+        camera: Current camera pose and intrinsics.
+        prev_octree: Sparse voxel octree from the previous frame.
+        nerf_model: The trained Mega-NeRF model.
+        
+    Returns:
+        image: Rendered image buffer.
+        current_octree: Updated octree for the next frame.
+    """
+    # Step 1: Initialize octree for current frame based on previous state
+    # If first frame, use coarse precomputed cache; otherwise, reuse and expand
+    current_octree = prev_octree.copy()
+    
     # Step 2: Dynamic Expansion
-    # Subdivide the octree based on current camera position
-    current_octree = dynamic_expand_octree(prev_octree, camera_pose)
+    # Subdivide octree nodes based on camera proximity and current view requirements
+    current_octree = dynamic_subdivide(current_octree, camera)
     
-    # Step 3: Initial View
-    # Render using cached outputs for speed
-    initial_image = render_from_cache(current_octree, camera_pose)
+    # Step 3: Initial View & Refinement
+    # Use cached outputs for a quick initial view
+    initial_image = render_from_cache(current_octree, camera)
     
-    # Step 4: Refinement
-    # Perform additional sampling to refine image and update cache
-    refined_image, updated_octree = refine_image_and_cache(
-        initial_image, 
-        current_octree, 
-        camera_pose, 
-        nerf_model
-    )
+    # Perform additional rounds of model sampling to refine the image
+    # Store new values into the cache
+    refined_octree = refine_octree(current_octree, camera, nerf_model)
     
-    # Step 6 & 7: Guided Sampling & Transmittance
-    # Final pass using octree weights to skip empty space
-    final_image = guided_ray_marching(
-        updated_octree, 
-        camera_pose, 
-        nerf_model,
-        transmittance_threshold=0.95 # Example threshold [S1]
-    )
+    # Step 4: Guided Ray Sampling
+    # Render rays in a single pass using octree weights
+    image = render_guided_sampling(refined_octree, camera, nerf_model)
     
-    return final_image, updated_octree
+    return image, refined_octree
+
+def render_guided_sampling(octree, camera, nerf_model):
+    """
+    Performs guided ray sampling using octree weights to skip empty spaces.
+    """
+    image = empty_image_buffer()
+    
+    for pixel in image:
+        ray = generate_ray(camera, pixel)
+        
+        # Traverse octree to find relevant regions
+        relevant_nodes = octree.traverse(ray)
+        
+        # Accumulate transmittance and color
+        transmittance = 1.0
+        accumulated_color = 0.0
+        
+        for node in relevant_nodes:
+            # Place samples near surfaces of interest based on node weights
+            samples = get_samples_from_node(node, ray)
+            
+            for sample in samples:
+                # Query NeRF model for density and color
+                density, color = nerf_model.query(sample.position)
+                
+                # Accumulate
+                alpha = 1.0 - exp(-density * sample.distance)
+                accumulated_color += alpha * transmittance * color
+                transmittance *= (1.0 - alpha)
+                
+                # Terminate if transmittance is below threshold
+                if transmittance < 0.001:
+                    break
+        
+        image[pixel] = accumulated_color
+        
+    return image
 ```
 
+**Parameters:**
+*   **Octree Depth:** The source notes that an 8-level octree is used for scenes, with higher levels increasing memory usage drastically (55 GB for one additional level) [S1].
+*   **Transmittance Threshold:** Sampling ends after a certain threshold is reached. The exact value is not specified in the sources [S1].
+
 **Edge Cases and Pitfalls:**
-*   **Memory Usage:** The method requires significant memory for large scenes. Generating an 8-level octree can take 1-12 GB of memory [S1].
-*   **Precision:** Not given in the sources.
-*   **Boundaries:** Rays are terminated near ground level to avoid querying underground regions, which improves efficiency [S1].
-
-## Subtopics
-
-### Dynamic vs. Fixed Octree
-Mega-NeRF-Dynamic expands the octree based on camera position, whereas Plenoctree uses a fixed octree [S1]. Choose Mega-NeRF-Dynamic when high resolution and fly-through coherence are required [S1]. See [Plenoctree](link).
-
-### Guided Sampling
-Uses octree weights to place samples near surfaces, skipping empty space, unlike standard hierarchical sampling [S1]. See [Hierarchical Sampling](link).
+*   **Memory Usage:** Generating high-level octrees is memory-intensive. Adding a single level can increase size to 55 GB, exceeding the capacity of many GPUs [S1].
+*   **Precomputation Time:** Generating the initial coarse cache takes significant time (1 hour for 8 levels) [S1].
+*   **Camera Motion:** The method relies on temporal coherence. Large, sudden camera movements may reduce the effectiveness of cache reuse, requiring more incremental work [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Precomputation is heavy. Generating an 8-level octree took 1 hour of computation [S1]. Adding one level increased time to 10 hours [S1]. Interactive rendering is accelerated by reusing the octree [S1].
-*   **Memory Complexity:** High. 1-12 GB for an 8-level octree [S1]. Adding a level increased size to 55 GB, exceeding the capacity of most GPUs [S1].
-*   **Measured Performance:** Normal ray sampling takes over 2 minutes for a 720p frame [S1]. The dynamic method accelerates this to interactive speeds [S1].
-*   **Strengths:** Preserves visual fidelity, minimizes additional processing time beyond training, and accelerates rendering for large-scale scenes [S1].
-*   **Limitations:** High memory requirements for deep octrees; precomputation time is significant [S1].
-*   **When to use:** Interactive fly-throughs of large-scale scenes where temporal coherence is high [S1].
-*   **When not to use:** Static views or scenes with large, rapid changes where temporal coherence is low [S1].
+*   **Time Complexity:** Precomputation is expensive (1 hour for 8-level octree) [S1]. Interactive rendering is accelerated by reusing the octree, requiring only incremental work per frame [S1].
+*   **Memory Complexity:** High. An 8-level octree requires 1–12 GB of memory. Adding a level increases this to 55 GB [S1].
+*   **Performance:** Reduces rendering time from over 2 minutes per 720p frame (with normal ray sampling) to something more manageable for interactive fly-throughs [S1].
+*   **Strengths:** High resolution due to dynamic expansion; efficient reuse of computation across frames; guided sampling reduces unnecessary queries [S1].
+*   **Limitations:** High memory footprint for deep octrees; precomputation overhead; sensitivity to camera motion speed [S1].
+*   **When to use:** Large-scale NeRF fly-throughs where visual fidelity and resolution are prioritized, and hardware has sufficient memory [S1].
+*   **When not to use:** Scenes with rapid, non-sequential camera motion or hardware with limited memory [S1].
 
 ## Background
-Mega-NeRF-Dynamic Rendering was introduced in the paper "Mega-NeRF: Scalable Construction of Large-Scale NeRFs for Virtual Fly-Throughs" [S1]. It was developed to address the limitations of existing fast NeRF renderers, such as Plenoctree, which use fixed octrees that limit resolution [S1]. The method is particularly relevant for search-and-rescue use cases requiring high fidelity and low latency [S1].
+Mega-NeRF-Dynamic was introduced in the paper "Mega-NeRF: Scalable Construction of Large-Scale NeRFs for Virtual Fly-Throughs" [S1]. It was developed to address the limitations of existing fast NeRF renderers like Plenoctree, which use fixed octrees that limit resolution [S1]. The method is designed for search-and-rescue use cases, aiming to preserve visual fidelity while minimizing processing time beyond training [S1].
 
 ## Sources
 [S1] Mega-NeRF: Scalable Construction of Large-Scale NeRFs for Virtual Fly- Throughs, https://doi.org/10.1109/cvpr52688.2022.01258, fetched 2026-10-26

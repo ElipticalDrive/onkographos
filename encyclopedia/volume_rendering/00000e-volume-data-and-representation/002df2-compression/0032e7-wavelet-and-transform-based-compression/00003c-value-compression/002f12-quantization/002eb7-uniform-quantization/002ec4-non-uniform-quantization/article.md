@@ -3,16 +3,15 @@
 Also called: Adaptive Quantization, Logarithmic Quantization
 
 ## Overview
-Non-uniform quantization is a lossy compression method that allocates quantization levels non-uniformly across the source data domain to minimize perceptual distortion or enhance specific features, rather than distributing levels evenly as in [Uniform Quantization](5855-uniform-quantization.md). It solves the problem of wide dynamic range data where uniform spacing causes loss of detail in low-magnitude or high-importance regions. It differs from uniform quantization by adapting level density to either the data distribution or a user-defined importance function.
+Non-uniform quantization is a lossy compression method that allocates more quantization levels to a particular range of source data values to enhance specific features and minimize distortion error, rather than using uniform spacing [S1, S2, unofficial]. It solves the problem of volume data with a wide dynamic range, where uniform spacing would cause important features to become invisible [S1, S2, unofficial]. It differs from uniform quantization by adapting level density to either the source data distribution or a user-defined importance function [S1, S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Source volume data values $x$, number of quantization levels $L$ (e.g., $2^b$ for $b$ bits), and optionally an importance function $\alpha(x)$ or probability density function $f(x)$.
-- Output: Quantized indices $q \in \{0, \dots, L-1\}$ and a reconstruction map (codebook) mapping indices to reconstructed values.
+- Input: Source volume data values $x$, number of quantization levels $L$, importance function $\alpha(x)$, and optionally the probability density function $f(x)$ [S1, S2, unofficial].
+- Output: Quantized indices representing the source data [S1, S2, unofficial].
 
 **Data Structures:**
-- Codebook: An array of $L$ floating-point values representing the reconstruction levels (midpoints of quantization intervals).
-- Lookup Table: A mapping from source value ranges to quantization indices.
+- Exact layouts, fields, sizes, and bit packing are Not given in the sources.
 
 **Formulas:**
 The distortion measure $D$ for non-uniform quantization incorporates an importance function $\alpha(x)$, typically the opacity transfer function in volume rendering [S1, S2, unofficial]:
@@ -22,71 +21,64 @@ $$
 where:
 - $x$ is the source value.
 - $\hat{x}$ is the reconstructed value.
-- $f(x)$ is the probability density function of the source data.
-- $\alpha(x)$ is the importance function (e.g., opacity).
+- $f(x)$ is the general source data distribution [S1, S2, unofficial].
+- $\alpha(x)$ is the importance function provided by the user [S1, S2, unofficial].
 
 **Steps:**
-1. **Analyze Data Statistics:** Compute the probability density function $f(x)$ of the source data values over the domain of interest [S1, S2, unofficial].
-2. **Define Importance:** Determine the importance function $\alpha(x)$. In volume rendering, this is often the user-defined opacity transfer function [S1, S2, unofficial].
-3. **Select Quantization Strategy:**
-   - **Logarithmic Quantization:** For data with a wide dynamic range, apply a logarithmic mapping to compress the range before uniform quantization [S1, S2, unofficial].
-   - **Adaptive Quantization:** Use the combined weight $w(x) = \alpha(x)f(x)$ to determine optimal decision boundaries and reconstruction levels that minimize $D$ [S1, S2, unofficial].
-4. **Compute Boundaries:** Determine quantization interval boundaries $y_i$ such that the weighted distortion is minimized. For logarithmic quantization, boundaries are spaced exponentially [S1, S2, unofficial].
-5. **Assign Indices:** Map each source value $x$ to the index $i$ corresponding to the interval $[y_i, y_{i+1})$ [S1, S2, unofficial].
-6. **Store Codebook:** Store the reconstruction levels (e.g., midpoints of intervals) for decoding [S1, S2, unofficial].
+1. **Define Importance:** Determine the importance function $\alpha(x)$, which in volume rendering corresponds to the user-defined opacity transfer function [S1, S2, unofficial].
+2. **Analyze Statistics:** Obtain the probability density function $f(x)$ of the source data, or assume a uniform distribution if statistics are unavailable [G].
+3. **Select Mapping Strategy:** For data with a wide dynamic range, apply a logarithmic mapping to compress the value range before quantization [S1, S2, unofficial]. For general cases, set quantization levels adaptively to minimize the weighted distortion $D$ [S1, S2, unofficial].
+4. **Quantize:** Map each source value $x$ to its corresponding quantization level using the chosen mapping or adaptive boundaries [S1, S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def non_uniform_quantize(data, num_levels, importance_func=None):
     """
     Quantize volume data using non-uniform spacing.
     data: array of source values
     num_levels: number of quantization levels (L)
-    importance_func: function alpha(x) returning importance of value x
+    importance_func: optional function alpha(x) for weighted distortion [S1, S2, unofficial]
     """
-    # Step 1: Determine data range and distribution
     min_val = min(data)
     max_val = max(data)
     
-    # Step 2: Choose mapping based on data characteristics
-    # Simple case: Logarithmic quantization for wide dynamic range
-    # More elaborate: Adaptive based on f(x) and alpha(x)
+    # Logarithmic mapping for wide dynamic range [S1, S2, unofficial]
+    # Handle zero/negative values to avoid log domain errors [G]
+    offset = 1.0 if min_val <= 0 else 0.0
+    shifted_data = [x + offset for x in data]
     
-    # Logarithmic mapping example
-    # Map x to log-space, then uniform quantize
-    # Handle zero and negative values appropriately (e.g., shift or split)
+    log_min = math.log(min(shifted_data))
+    log_max = math.log(max(shifted_data))
+    log_step = (log_max - log_min) / (num_levels - 1)
     
-    # Compute boundaries in log-space
-    # y_i = exp(log_min + i * (log_max - log_min) / (L - 1))
-    
-    # Assign indices
     indices = []
-    for x in data:
-        # Map x to log-space
-        log_x = log(x + epsilon) # epsilon to handle zero
-        # Find bin index
-        idx = floor((log_x - log_min) / bin_width)
-        indices.append(idx)
+    for x in shifted_data:
+        log_x = math.log(x)
+        idx = int((log_x - log_min) / log_step)
+        indices.append(max(0, min(num_levels - 1, idx)))
         
-    return indices, codebook
+    # Adaptive quantization based on f(x) and alpha(x) to minimize D
+    # is not fully specified in the sources [G]
+    return indices
 ```
 
 **Edge Cases:**
-- **Wide Dynamic Range:** Data with extreme variations (e.g., turbulence flow) requires careful quantization to prevent loss of low-magnitude features [S1, S2, unofficial].
-- **Zero Values:** Logarithmic functions are undefined at zero; handle with offset or separate treatment [S1, S2, unofficial].
-- **Importance Function:** If $\alpha(x)$ is not provided, uniform weighting may be assumed, reducing to standard non-uniform quantization [S1, S2, unofficial].
+- **Wide Dynamic Range:** Data with extreme variations (e.g., turbulence flow datasets) requires careful quantization to prevent important features from becoming invisible [S1, S2, unofficial].
+- **Missing Statistics or Importance Function:** The sources do not specify fallback behavior when $f(x)$ or $\alpha(x)$ are unavailable [S1, S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Depends on the method. Logarithmic quantization is $O(N)$ for $N$ data points. Adaptive quantization requires statistical analysis ($O(N)$) and optimization ($O(L \log L)$ or iterative).
-- **Memory Complexity:** $O(L)$ for the codebook.
-- **Performance:** More effective than uniform quantization for data with wide dynamic ranges or specific feature importance [S1, S2, unofficial].
-- **Strengths:** Preserves features in regions of interest; minimizes perceptual distortion.
-- **Limitations:** More complex to implement; requires knowledge of data distribution or importance function.
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** More effective than uniform quantization at minimizing distortion error and enhancing specific features in volume data [S1, S2, unofficial].
+- **Strengths:** Preserves and enhances particular features in the data; allocates more levels to ranges of interest [S1, S2, unofficial].
+- **Limitations:** Requires knowledge of source data statistics or an importance function; data values outside the range of interest and their distortion error are ignored [S1, S2, unofficial].
 
 ## Background
-Originated in the context of efficient encoding and rendering of time-varying volume data [S1, S2, unofficial]. It addresses the limitations of uniform quantization when dealing with data that has non-uniform distributions or varying feature importance.
+Developed for the efficient encoding and rendering of time-varying volume data [S1, S2, unofficial]. It was applied to datasets with multiple time steps, such as an 81-step turbulence flow simulation, where wide dynamic ranges would otherwise obscure important features [S1, S2, unofficial].
 
 ## Sources
 [S1] NASA Technical Reports Server (NTRS) 19980217078: Efficient Encoding and Rendering of Time-Varying Volume Data, https://archive.org/details/NASA_NTRS_Archive_19980217078, fetched 2026-10-26 (unofficial)
