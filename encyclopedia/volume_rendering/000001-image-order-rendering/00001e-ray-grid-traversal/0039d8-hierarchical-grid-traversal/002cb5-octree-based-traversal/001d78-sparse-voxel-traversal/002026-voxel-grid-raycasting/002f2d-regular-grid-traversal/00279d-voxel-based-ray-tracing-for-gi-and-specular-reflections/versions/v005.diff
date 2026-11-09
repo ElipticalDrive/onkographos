@@ -1,0 +1,118 @@
+--- v004.md
++++ v005.md
+@@ -21,4 +21,5 @@
+ *   `VOXEL_RT_REFLECTIONS`: Feature flag to enable specular reflection fallback. Commented out by default [S1, unofficial].
+ *   `VOXEL_GI`: Indirect effect mode identifier, value 6 [S1, unofficial].
++*   World coordinates use feet-relative scaling consistent with the camera system [S1, unofficial].
+ 
+ **Algorithm Steps:**
+@@ -29,31 +30,46 @@
+ 
+ **Formulas:**
+-*   Voxel size: $s = 1 / \text{VOXEL\_GRID\_SIZE}$
+-*   Initial cell: $i_x = \lfloor O_x / s \rfloor$, $i_y = \lfloor O_y / s \rfloor$, $i_z = \lfloor O_z / s \rfloor$
+-*   Step direction: $step_x = \text{sign}(D_x)$, $step_y = \text{sign}(D_y)$, $step_z = \text{sign}(D_z)$
+-*   Distance to next boundary: $tMax_x = ((i_x + \max(step_x, 0)) \cdot s - O_x) / D_x$ (similarly for $y, z$)
+-*   Step increment: $tDelta_x = s / |D_x|$ (similarly for $y, z$)
+-*   Hit position: $P = O + D \cdot \min(tMax_x, tMax_y, tMax_z)$
+-*   Hit normal: $N = (-step_x, -step_y, -step_z)$ along the axis that produced the minimum $tMax$
++*   Voxel size: $s = 1 / \text{VOXEL\_GRID\_SIZE}$ [G]
++*   Initial cell: $i_x = \lfloor O_x / s \rfloor$, $i_y = \lfloor O_y / s \rfloor$, $i_z = \lfloor O_z / s \rfloor$ [G]
++*   Step direction: $step_x = \text{sign}(D_x)$, $step_y = \text{sign}(D_y)$, $step_z = \text{sign}(D_z)$ [G]
++*   Distance to next boundary: $tMax_x = ((i_x + \max(step_x, 0)) \cdot s - O_x) / D_x$ (similarly for $y, z$) [G]
++*   Step increment: $tDelta_x = s / |D_x|$ (similarly for $y, z$) [G]
++*   Hit position: $P = O + D \cdot \min(tMax_x, tMax_y, tMax_z)$ [G]
++*   Hit normal: $N = (-step_x, -step_y, -step_z)$ along the axis that produced the minimum $tMax$ [G]
+ 
+ **Pseudocode:**
+ ```python
+-# Standard math/vector operations assumed available [G]
+ import math
++import random
++
++class Vec3:
++    def __init__(self, x, y, z):
++        self.x, self.y, self.z = x, y, z
++    def __add__(self, o): return Vec3(self.x+o.x, self.y+o.y, self.z+o.z)
++    def __sub__(self, o): return Vec3(self.x-o.x, self.y-o.y, self.z-o.z)
++    def __mul__(self, s): return Vec3(self.x*s, self.y*s, self.z*s)
++    def __truediv__(self, s): return Vec3(self.x/s, self.y/s, self.z/s)
++    def __neg__(self): return Vec3(-self.x, -self.y, -self.z)
++    def dot(self, o): return self.x*o.x + self.y*o.y + self.z*o.z
++    def length(self): return math.sqrt(self.dot(self))
++    def normalize(self):
++        l = self.length()
++        return self/l if l > 1e-8 else Vec3(0,0,0)
+ 
+ def is_voxel_occupied(ix, iy, iz, grid):
+-    """Checks occupancy in the 128³ imgVoxelMask grid."""
++    """Checks occupancy in the 128³ imgVoxelMask grid [G]."""
+     return grid[ix][iy][iz] > 0
+ 
+ def cosine_weighted_hemisphere_sample(normal):
+     """Generates a random direction on the hemisphere oriented by normal [G]."""
+-    # Standard rejection sampling or spherical coordinate mapping [G]
+-    u = math.random()
+-    v = math.random()
++    u = random.random()
++    v = random.random()
+     phi = 2.0 * math.pi * u
+     cos_theta = math.sqrt(v)
+     sin_theta = math.sqrt(1.0 - v)
+-    # Rotate to align with normal [G]
+-    return vec3(sin_theta * math.cos(phi), sin_theta * math.sin(phi), cos_theta)
++    # Construct local basis aligned with normal [G]
++    up = Vec3(0, 1, 0) if abs(normal.dot(Vec3(0,1,0))) < 0.999 else Vec3(1,0,0)
++    tangent = Vec3(0,0,0).normalize() # Placeholder for cross-product basis setup [G]
++    return Vec3(sin_theta * math.cos(phi), sin_theta * math.sin(phi), cos_theta).normalize()
+ 
+ def texture_3d(tex, uv):
+@@ -82,5 +98,5 @@
+     tMaxZ = ((iz + max(stepZ, 0)) * voxel_size - origin.z) / dz if dz != 0 else float('inf')
+ 
+-    # Ray bias to avoid self-intersection
++    # Ray bias to avoid self-intersection [S1, unofficial]
+     tMaxX += 1e-4
+     tMaxY += 1e-4
+@@ -92,9 +108,9 @@
+             hit_pos = origin + direction * tHit
+             if tHit == tMaxX:
+-                hit_normal = vec3(-stepX, 0, 0)
++                hit_normal = Vec3(-stepX, 0, 0)
+             elif tHit == tMaxY:
+-                hit_normal = vec3(0, -stepY, 0)
++                hit_normal = Vec3(0, -stepY, 0)
+             else:
+-                hit_normal = vec3(0, 0, -stepZ)
++                hit_normal = Vec3(0, 0, -stepZ)
+             return hit_pos, hit_normal
+ 
+@@ -119,22 +135,22 @@
+ 
+ def ApplyVoxelRT(surface_position, surface_normal, sky_color, grid, LPV_texture):
+-    total_indirect = vec3(0.0)
+-    for _ in range(VOXEL_GI_SAMPLES):
++    total_indirect = Vec3(0.0, 0.0, 0.0)
++    for _ in range(4): # VOXEL_GI_SAMPLES default [S1, unofficial]
+         sample_dir = cosine_weighted_hemisphere_sample(surface_normal)
+         ray_origin = surface_position + surface_normal * 1e-4
+-        hit_pos, hit_normal = VoxelDDA(ray_origin, sample_dir, VOXEL_GI_STEPS, grid)
++        hit_pos, hit_normal = VoxelDDA(ray_origin, sample_dir, 32, grid) # VOXEL_GI_STEPS [S1, unofficial]
+         if hit_pos is not None:
+             total_indirect += SampleVoxelLighting(hit_pos, hit_normal, LPV_texture)
+         else:
+             total_indirect += sky_color
+-    return total_indirect / VOXEL_GI_SAMPLES
++    return total_indirect / 4.0
+ 
+ def VoxelReflectionFallback(reflection_direction, surface_position, brightness_scale_factor, grid, LPV_texture):
+     ray_origin = surface_position + reflection_direction * 1e-4
+-    hit_pos, hit_normal = VoxelDDA(ray_origin, reflection_direction, VOXEL_REFL_STEPS, grid)
++    hit_pos, hit_normal = VoxelDDA(ray_origin, reflection_direction, 32, grid) # VOXEL_REFL_STEPS [S1, unofficial]
+     if hit_pos is not None:
+         lpv_color = SampleVoxelLighting(hit_pos, hit_normal, LPV_texture)
+         return lpv_color * brightness_scale_factor
+-    return vec3(0.0)
++    return Vec3(0.0, 0.0, 0.0)
+ ```
+ 

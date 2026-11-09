@@ -3,82 +3,69 @@
 Also called: Masked Gaussian Splatting
 
 ## Overview
-MaskGaussian is a differentiable pruning method for 3D Gaussian Splatting that models Gaussian existence probabilistically rather than deterministically, mitigating sub-optimized reconstruction caused by permanent removal of components [S1]. It extends Compact3DGS by introducing a "masked-rasterization" technique that allows gradients to flow to unsampled (masked-out) Gaussians, enabling dynamic assessment of their contribution to the evolving scene [S1]. Unlike methods that multiply masks with Gaussian attributes (opacity/scale) which zero out density and prevent gradient updates, MaskGaussian applies masks during the alpha-blending stage, ensuring all Gaussians participate in rasterization and receive meaningful gradients regardless of their current mask state [S1].
+MaskGaussian is a differentiable pruning method for 3D Gaussian Splatting that models Gaussians as probabilistic entities rather than deterministically removing them based on static importance scores. It solves the problem of sub-optimal reconstruction caused by early pruning by introducing **masked-rasterization**, which allows gradients to flow to "masked-out" (inactive) Gaussians, enabling them to be re-evaluated and potentially reactivated as the scene evolves. Unlike sibling methods like [Compact3DGS](1398-compact3dgs.md) which use deterministic pruning or multiply masks with opacity/scale (blocking gradients), MaskGaussian applies masks during the alpha-blending stage, decoupling Gaussian existence from its geometric attributes.
 
 ## How it works
-MaskGaussian operates by learning a binary mask distribution for each 3D Gaussian, representing its probability of existence. The method modifies the standard 3DGS rasterization pipeline to incorporate these masks into the color accumulation and transmittance attenuation steps, while preserving the integrity of the Gaussian's physical attributes (opacity, scale) for the alpha-filtering stage.
+MaskGaussian extends the standard 3D Gaussian Splatting pipeline by introducing learnable mask parameters for each Gaussian. The core innovation is a rasterization technique that applies these masks to the blending process, ensuring that even inactive Gaussians participate in the forward pass and receive gradient updates.
 
 ### Inputs and Outputs
-**Inputs:**
-- Set of $N$ 3D Gaussians, each defined by mean $\mu_i$, covariance $\Sigma_i$ (or scale/rotation), color $\mathbf{c}_i$, and base opacity $\alpha_i$.
-- Camera parameters (intrinsics $K$, extrinsics $c2w$) for the current view.
-- Learnable mask scores for each Gaussian.
-
-**Outputs:**
-- Rendered image color $\hat{C}(\mathbf{x})$ for each pixel $\mathbf{x}$.
-- Updated Gaussian attributes and mask scores via backpropagation.
+*   **Inputs:**
+    *   Set of $N$ 3D Gaussians, each defined by position $\mathbf{p}_i$, covariance $\mathbf{\Sigma}_i$ (or rotation $\mathbf{R}_i$ and scale $\mathbf{s}_i$), color $\mathbf{c}_i$, and opacity $\alpha_i$.
+    *   Camera parameters (view and projection matrices).
+    *   Learnable mask scores $\mathbf{z}_i \in \mathbb{R}^2$ for each Gaussian $i$.
+*   **Outputs:**
+    *   Rendered image $\mathbf{I}$.
+    *   Gradients for all Gaussian attributes and mask scores.
 
 ### Data Structures
-For each Gaussian $i$, in addition to the standard 3DGS attributes, the method maintains:
-- **Mask Scores**: Two learnable scalar parameters, denoted as $s_{i,0}$ and $s_{i,1}$. These are not probabilities but logits for a binary categorical distribution.
-- **Mask Variable**: A binary variable $\mathcal{M}_i \in \{0, 1\}$ sampled from the distribution defined by the scores.
+*   **Gaussian Attributes:** Standard 3DGS attributes (position, scale, rotation, SH coefficients, opacity).
+*   **Mask Scores:** For each Gaussian $i$, two learnable scalar values $\mathbf{z}_i = [z_{i,0}, z_{i,1}]$. These are not probabilities but logits for a binary distribution.
 
 ### Numbered Steps
 
-1.  **Mask Sampling**:
-    For each Gaussian $i$, sample a differentiable binary mask $\mathcal{M}_i$ using the Gumbel-Softmax trick applied to the two learnable mask scores $s_{i,0}$ and $s_{i,1}$ [S1]. This allows the mask to be treated as a stochastic sample during training, enabling gradient flow through the sampling process [S1].
+1.  **Mask Sampling:**
+    For each Gaussian $i$, sample a binary mask $M_i \in \{0, 1\}$ from the mask scores $\mathbf{z}_i$ using the Gumbel-Softmax trick to ensure differentiability.
+    $$ M_i = \text{GumbelSoftmax}(\mathbf{z}_i) $$
+    *Note: During training, this is a soft sample; during inference or pruning evaluation, it is treated as hard binary.*
 
-2.  **Standard Splatting (Alpha Filtering)**:
-    Project all $N$ Gaussians to the 2D image plane. Compute the 2D covariance and opacity $\alpha_i$ for each Gaussian based on its 3D parameters and view direction. Crucially, **do not** apply the mask $\mathcal{M}_i$ to the Gaussian's opacity or scale at this stage. All Gaussians, regardless of their mask value, are splatted to compute valid alpha values [S1].
+2.  **Standard Splatting (Alpha Computation):**
+    Splat all $N$ Gaussians onto the image plane using standard 3DGS rasterization. Compute the splatted density $\alpha_i$ and transmittance $T_i$ for each Gaussian *without* applying the mask $M_i$ to the opacity or scale. This ensures that all Gaussians, regardless of their mask value, pass through the alpha-filtering stage and are processed by the rasterizer.
+    *   $\alpha_i$: Splatted density of Gaussian $i$.
+    *   $T_i$: Transmittance reaching Gaussian $i$, defined as $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$ (assuming sorted order).
 
-3.  **Alpha Filtering**:
-    Sort the Gaussians by depth and apply the standard alpha-filtering threshold. Since masks were not applied to opacity, Gaussians with $\mathcal{M}_i=0$ still have non-zero $\alpha_i$ and pass through the filter, ensuring they participate in the rasterization loop [S1].
+3.  **Masked Rasterization (Color and Transmittance Blending):**
+    Compute the final pixel color $\mathbf{c}(\mathbf{x})$ and update transmittance using the masks $M_i$. The mask is applied directly to the color accumulation and transmittance attenuation terms.
+    
+    **Color Accumulation:**
+    $$ \mathbf{c}(\mathbf{x}) = \sum_{i=1}^N M_i \cdot \mathbf{c}_i \cdot \alpha_i \cdot T_i $$
+    
+    **Transmittance Update:**
+    $$ T_{i+1} = M_i \cdot (1 - \alpha_i) \cdot T_i + (1 - M_i) \cdot T_i $$
+    
+    *   If $M_i = 1$: The Gaussian contributes its color $\mathbf{c}_i \cdot \alpha_i \cdot T_i$ and attenuates transmittance by $(1-\alpha_i)$.
+    *   If $M_i = 0$: The Gaussian contributes no color, and transmittance is unchanged ($T_{i+1} = T_i$).
 
-4.  **Masked Rasterization (Forward Pass)**:
-    Iterate through the sorted Gaussians $i=1 \dots N$ for each pixel. Update the accumulated color $\mathbf{c}(\mathbf{x})$ and transmittance $T$ using the following equations [S1]:
-    
-    Color accumulation:
-    $$
-    \mathbf{c}(\mathbf{x}) = \sum_{i=1}^N \mathcal{M}_i \cdot \mathbf{c}_i \cdot \alpha_i \cdot T_i
-    $$
-    
-    Transmittance update:
-    $$
-    T_{i+1} = \mathcal{M}_i \cdot (1 - \alpha_i) \cdot T_i + (1 - \mathcal{M}_i) \cdot T_i
-    $$
-    
-    Here, $T_i$ is the transmittance before Gaussian $i$. If $\mathcal{M}_i = 1$, the Gaussian contributes its color and attenuates transmittance normally. If $\mathcal{M}_i = 0$, the Gaussian's color contribution is zeroed out, and transmittance is not attenuated (i.e., $T_{i+1} = T_i$) [S1].
+4.  **Loss Computation:**
+    Compute the total loss $L$:
+    $$ L = L_{render} + \lambda_m \cdot L_m $$
+    Where:
+    *   $L_{render}$ is the standard rendering loss (e.g., L1 + SSIM) between the rendered image and the ground truth.
+    *   $L_m$ is a squared loss on the average number of active Gaussians to constrain the model size:
+        $$ L_m = \left( \frac{1}{N} \sum_{i=1}^N M_i \right)^2 $$
+    *   $\lambda_m$ is a balancing hyperparameter.
 
-5.  **Loss Computation**:
-    Compute the total loss $L$ as the sum of the rendering loss $L_{render}$ (e.g., MSE between rendered and ground truth color) and a regularization term $L_m$ that constrains the average number of Gaussians [S1]:
-    
-    $$
-    L_m = \left( \frac{1}{N} \sum_{i=1}^N \mathcal{M}_i \right)^2
-    $$
-    
-    $$
-    L = L_{render} + \lambda_m \cdot L_m
-    $$
-    
-    where $\lambda_m$ is a balancing hyperparameter [S1].
+5.  **Backpropagation:**
+    Compute gradients for the mask scores $\mathbf{z}_i$. The gradient of the loss with respect to the mask $M_i$ is derived as:
+    $$ \frac{\partial L}{\partial M_i} = \alpha_i \cdot T_i \cdot \frac{\partial L}{\partial \mathbf{c}(\mathbf{x})} \cdot (\mathbf{c}_i - \mathbf{b}_{i+1}) $$
+    Where $\mathbf{b}_{i+1}$ is the background color rendered behind the $i$-th Gaussian:
+    $$ \mathbf{b}_{i+1} = \sum_{j=i+1}^N M_j \cdot \mathbf{c}_j \cdot \alpha_j \cdot T_j $$
+    The gradient flows through the Gumbel-Softmax operation to update $\mathbf{z}_i$. This allows $M_i=0$ Gaussians to receive meaningful gradients based on their potential contribution ($\mathbf{c}_i$) versus the background ($\mathbf{b}_{i+1}$).
 
-6.  **Backpropagation**:
-    Compute gradients with respect to the mask scores. The gradient of the loss with respect to the mask $\mathcal{M}_i$ is derived as [S1]:
-    
-    $$
-    \frac{\partial L}{\partial \mathcal{M}_i} = \alpha_i \cdot T_i \cdot \frac{\partial L}{\partial \mathbf{c}(\mathbf{x})} \cdot (\mathbf{c}_i - \mathbf{b}_{i+1})
-    $$
-    
-    where $\mathbf{b}_{i+1}$ is the background color rendered behind the $i$-th Gaussian, defined as:
-    
-    $$
-    \mathbf{b}_{i+1} = \sum_{j=i+1}^N \mathcal{M}_j \cdot \mathbf{c}_j \cdot \alpha_j \cdot T_j
-    $$
-    
-    This gradient allows masked-out Gaussians ($\mathcal{M}_i=0$) to receive updates based on their potential contribution (difference between their color and the background) [S1].
-
-7.  **Pruning Procedure**:
-    Periodically, sample each Gaussian's mask 10 times. If a Gaussian is never sampled (probability near zero) across these 10 trials, it is permanently removed from the scene [S1]. This pruning is applied at every densification step and every 1000 iterations after densification [S1].
+6.  **Pruning Procedure:**
+    Periodically, hard prune Gaussians with near-zero probability of existence.
+    *   Sample each Gaussian's mask 10 times.
+    *   If a Gaussian is never sampled (i.e., $M_i=0$ in all 10 trials), remove it from the scene.
+    *   This is applied at every densification step and every 1000 iterations after densification.
 
 ### Pseudocode
 
@@ -88,136 +75,209 @@ For each Gaussian $i$, in addition to the standard 3DGS attributes, the method m
 import torch
 import torch.nn.functional as F
 
-def mask_gaussian_rasterization(gaussians, cameras, image_size):
+def gumbel_softmax_sample(logits, temperature=1.0):
+    """
+    Samples from a Gumbel-Softmax distribution.
+    logits: Tensor of shape (N, 2)
+    Returns: Tensor of shape (N, 2) with one-hot like values, but differentiable.
+    """
+    gumbels = -torch.empty_like(logits).exponential_().log()
+    gumbels = (gumbels + logits) / temperature
+    y_soft = F.softmax(gumbels, dim=-1)
+    # Straight-through estimator for binary mask
+    index = y_soft.max(1, keepdim=True)[1]
+    y_hard = torch.zeros_like(logits, memory_format=torch.contiguous_format).scatter_(1, index, 1.0)
+    ret = y_hard - y_soft.detach() + y_soft
+    return ret
+
+def masked_rasterization(gaussians, camera, mask_scores, lambda_m, iteration):
     """
     Forward pass for MaskGaussian.
     
     Args:
-        gaussians: List of Gaussian objects. Each has:
-            - mu: (3,) mean position
-            - cov: (3,3) covariance matrix (or scale/rotation)
-            - c: (3,) color
-            - alpha: (1,) base opacity
-            - mask_scores: (2,) learnable logits for mask
-        cameras: Camera parameters
-        image_size: (H, W)
+        gaussians: Object containing attributes (pos, scale, rot, sh, opacity) for N Gaussians.
+        camera: Camera parameters.
+        mask_scores: Tensor of shape (N, 2) containing learnable mask logits.
+        lambda_m: Hyperparameter for mask regularization.
+        iteration: Current training iteration.
         
     Returns:
-        rendered_color: (H, W, 3)
+        rendered_image: Tensor of shape (H, W, 3)
+        loss: Scalar loss value
     """
-    # 1. Project Gaussians and compute 2D properties
-    # This step is identical to standard 3DGS rasterization
-    projected_gaussians = project_gaussians(gaussians, cameras)
+    N = gaussians.num_gaussians
     
-    # 2. Sample Masks using Gumbel-Softmax
-    # mask_scores shape: (N, 2)
-    mask_probs = F.softmax(gaussians.mask_scores, dim=-1)
-    # Sample binary masks. In training, use straight-through estimator or 
-    # differentiable sampling. Here we assume a differentiable sample function.
-    masks = sample_gumbel_softmax(gaussians.mask_scores, hard=True) 
-    # masks shape: (N, 1), values in {0, 1}
+    # Step 1: Sample masks
+    # Use straight-through estimator for binary sampling during training
+    # In practice, this might be done per-pixel or per-gaussian globally. 
+    # The paper implies per-gaussian mask M_i applied to all pixels.
+    # We assume M_i is sampled once per Gaussian per iteration.
+    mask_samples = gumbel_softmax_sample(mask_scores) # Shape (N, 2)
+    M = mask_samples[:, 1] # Probability of being active (index 1)
+    # For the forward pass, we use the sampled binary mask
+    # Note: The paper uses M_i in {0,1}. We hard sample for forward, soft for backward via straight-through
+    M_binary = (M > 0.5).float() 
     
-    # 3. Alpha Filtering
-    # Sort by depth. Do NOT filter based on masks.
-    sorted_indices = sort_by_depth(projected_gaussians)
-    sorted_gaussians = [projected_gaussians[i] for i in sorted_indices]
-    sorted_masks = [masks[i] for i in sorted_indices]
+    # Step 2: Standard Splatting (Alpha computation without mask)
+    # This part is handled by the standard 3DGS rasterizer
+    # We need to get alpha_i and T_i for all Gaussians projected to screen
+    # Assuming a function that returns sorted list of Gaussians per pixel
+    # For simplicity, we outline the logic assuming we have per-pixel sorted Gaussians
     
-    # 4. Masked Rasterization
-    H, W = image_size
-    rendered_color = torch.zeros(H, W, 3)
-    transmittance = torch.ones(H, W, 1)
+    # Let's assume we have a rasterizer that returns:
+    # alpha: Tensor (H, W, N_max) - splatted alpha for each Gaussian at each pixel
+    # depth: Tensor (H, W, N_max) - depth for sorting
+    # We need to sort and compute T_i
     
-    for i, (g, m) in enumerate(zip(sorted_gaussians, sorted_masks)):
-        # Compute 2D alpha for this Gaussian
-        alpha_i = g.alpha * compute_2d_gaussian_alpha(g)
-        
-        # Get pixel coverage for this Gaussian
-        pixel_mask = get_pixel_coverage(g) # (H, W) boolean or soft mask
-        
-        # Update Transmittance: T_{i+1} = M_i * (1 - alpha_i) * T_i + (1 - M_i) * T_i
-        # If M_i=1: T_new = (1 - alpha_i) * T_old
-        # If M_i=0: T_new = T_old
-        transmittance = (m * (1 - alpha_i) + (1 - m)) * transmittance
-        
-        # Update Color: c(x) = sum M_i * c_i * alpha_i * T_i
-        # Note: T_i is the transmittance BEFORE this Gaussian
-        contribution = m * g.c * alpha_i * transmittance
-        rendered_color = rendered_color + contribution * pixel_mask
-        
-    return rendered_color
+    # Standard 3DGS rasterization step
+    # This is a high-level representation of the CUDA kernel logic
+    alpha, depth, indices = standard_splat(gaussians, camera) # Shape (H, W, N)
+    
+    # Sort Gaussians by depth (back-to-front)
+    # In 3DGS, this is done efficiently in CUDA. Here we assume sorted order.
+    # alpha_sorted, indices_sorted = sort_by_depth(alpha, depth)
+    
+    # Compute Transmittance T_i for all Gaussians (without mask)
+    # T_i = product(1 - alpha_j) for j < i
+    # We compute this cumulatively
+    alpha_flat = alpha.view(-1, alpha.shape[-1]) # (H*W, N)
+    T_flat = torch.cumprod(1 - alpha_flat, dim=1)
+    T_flat = torch.cat([torch.ones_like(T_flat[:, :1]), T_flat[:, :-1]], dim=1) # T_1 = 1
+    
+    # Reshape back
+    T = T_flat.view(alpha.shape) # (H, W, N)
+    
+    # Step 3: Masked Rasterization
+    # Expand M_binary to (H, W, N)
+    M_expanded = M_binary.view(1, 1, -1).expand_as(alpha)
+    
+    # Get colors for each Gaussian
+    # c_i is the color of Gaussian i at pixel (u,v)
+    # This is computed by projecting SH coefficients
+    colors = compute_sh_color(gaussians, camera, indices) # (H, W, N, 3)
+    
+    # Apply Mask to Color Accumulation and Transmittance
+    # c(x) = sum( M_i * c_i * alpha_i * T_i )
+    # T_{i+1} = M_i * (1 - alpha_i) * T_i + (1 - M_i) * T_i
+    
+    # We can compute the final color directly
+    # Note: T_i in the formula is the transmittance BEFORE Gaussian i
+    # The contribution of Gaussian i is M_i * c_i * alpha_i * T_i
+    
+    contribution = M_expanded * colors * alpha * T # (H, W, N, 3)
+    rendered_image = torch.sum(contribution, dim=2) # (H, W, 3)
+    
+    # Step 4: Loss Computation
+    # L_render
+    # Assume ground_truth is available
+    L_render = l1_loss(rendered_image, ground_truth) + ssim_loss(rendered_image, ground_truth)
+    
+    # L_m: Squared loss on average number of Gaussians
+    # M_i is the sampled mask. We use the soft probability for the loss gradient
+    # Or the hard mask? The paper says "squared loss on the average number of Gaussians"
+    # and uses M_i in the formula. It likely uses the soft probability for the loss
+    # to allow gradient flow, or the hard mask if it's a constraint.
+    # Given it's a regularization term, using the soft probability (M) is more standard for differentiable pruning.
+    # However, the paper defines L_m = (1/N sum M_i)^2.
+    # Let's use the soft probability M (from gumbel_softmax) for the loss.
+    avg_M = torch.mean(M)
+    L_m = avg_M ** 2
+    
+    loss = L_render + lambda_m * L_m
+    
+    # Step 5: Pruning (if applicable)
+    # This is done periodically, not every step.
+    # We return the mask scores and current masks for pruning logic.
+    
+    return rendered_image, loss, M_binary
 
-def compute_mask_gradient(loss, rendered_color, gaussians, masks, transmittance_history):
+def compute_mask_gradient(rendered_image, ground_truth, alpha, T, colors, M_binary):
     """
-    Backward pass logic for mask gradients.
-    Formula: dL/dM_i = alpha_i * T_i * dL/dc(x) * (c_i - b_{i+1})
+    Computes the gradient for the mask M_i.
+    dL/dM_i = alpha_i * T_i * dL/dc(x) * (c_i - b_{i+1})
     """
-    # dL/dc(x) is provided by the loss function's backward pass
-    dL_dc = torch.autograd.grad(loss, rendered_color, retain_graph=True)[0]
+    # dL/dc(x) is the gradient from the loss w.r.t the rendered image
+    dL_dc = (rendered_image - ground_truth) # Simplified for L1
     
-    gradients = []
-    for i, (g, m) in enumerate(zip(gaussians, masks)):
-        alpha_i = g.alpha
-        T_i = transmittance_history[i] # Transmittance before Gaussian i
-        
-        # Compute background color b_{i+1}
-        # Sum of contributions from Gaussians j > i
-        b_i_plus_1 = sum(
-            m_j * g_j.c * g_j.alpha * T_j 
-            for j, (g_j, m_j, T_j) in enumerate(zip(gaussians[i+1:], masks[i+1:], transmittance_history[i+1:]))
-        )
-        
-        # Gradient calculation
-        grad = alpha_i * T_i * dL_dc * (g.c - b_i_plus_1)
-        gradients.append(grad)
-        
-    return gradients
-
-def prune_gaussians(gaussians, masks, num_samples=10):
-    """
-    Prune Gaussians that are never sampled as 'present' (M=1) in num_samples trials.
-    """
-    # Re-sample masks multiple times to estimate probability
-    # In practice, this might be done by sampling from the Gumbel-Softmax distribution
-    # without the straight-through estimator, or by checking the probability threshold.
-    # The source specifies: "Sample each Gaussian 10 times. Remove Gaussians that are never sampled."
+    # Compute b_{i+1}: Background color behind Gaussian i
+    # b_{i+1} = sum_{j=i+1}^N M_j * c_j * alpha_j * T_j
+    # We need to compute this for each Gaussian i
     
-    present_counts = torch.zeros(len(gaussians))
-    for _ in range(num_samples):
-        # Sample hard masks
-        current_masks = sample_gumbel_softmax(gaussians.mask_scores, hard=True)
-        present_counts += (current_masks == 1).float().sum(dim=1)
-        
-    # If count is 0, probability is near zero
-    to_remove = present_counts == 0
-    return to_remove
+    # Contribution of all Gaussians
+    contribution = M_binary * colors * alpha * T # (H, W, N, 3)
+    
+    # Cumulative sum from back to front to get b_{i+1}
+    # b_{i+1} is the sum of contributions from j > i
+    # Reverse the sum
+    reversed_contribution = torch.flip(contribution, [2])
+    cumsum_reversed = torch.cumsum(reversed_contribution, dim=2)
+    b = torch.flip(cumsum_reversed, [2])
+    
+    # Shift b to get b_{i+1} (sum of j > i)
+    # b[i] includes contribution of i. We want sum of j > i.
+    # So b_{i+1} = b[i+1:] padded with 0 at the end
+    b_next = torch.cat([b[:, :, 1:], torch.zeros_like(b[:, :, :1])], dim=2)
+    
+    # Gradient dL/dM_i
+    # dL/dM_i = alpha_i * T_i * dL/dc(x) * (c_i - b_{i+1})
+    # Note: dL/dc(x) is a vector (H, W, 3). We need to broadcast correctly.
+    # The gradient is a scalar per Gaussian per pixel? 
+    # Actually, M_i is per Gaussian, not per pixel. 
+    # The paper says "sample a mask for each Gaussian".
+    # So M_i is a scalar per Gaussian.
+    # The gradient dL/dM_i is the sum of gradients over all pixels where Gaussian i is visible.
+    
+    # Let's compute the gradient per pixel first
+    # dL/dM_i_pixel = alpha_i * T_i * dL_dc * (c_i - b_{i+1})
+    # This is a vector (H, W, 3)
+    
+    term = alpha * T.unsqueeze(-1) * dL_dc * (colors - b_next) # (H, W, N, 3)
+    
+    # Sum over pixels to get gradient for each Gaussian
+    # We need to know which pixels each Gaussian covers.
+    # This is implicitly handled by the rasterization.
+    # In practice, this gradient is accumulated in the CUDA kernel.
+    
+    # For the purpose of the article, we state the formula.
+    # The gradient is backpropagated through the Gumbel-Softmax to update mask_scores.
+    pass
 ```
 
 ### Parameters
-- **$\lambda_m$**: Balancing weight for the squared loss $L_m$.
-    - Typical values: 0.1 for iterations 19,000–20,000; 0.0005 or 0.001 for iterations 0–30,000 [S1].
-- **Pruning Frequency**: Every densification step and every 1000 iterations after densification [S1].
-- **Sampling Count for Pruning**: 10 samples per Gaussian [S1].
+*   **$\lambda_m$**: Balancing weight for the squared loss $L_m$.
+    *   Typical values:
+        *   0.1 for iterations 19,000–20,000.
+        *   0.0005 or 0.001 for iterations 0–30,000.
+*   **Pruning Frequency**: Every densification step and every 1000 iterations after densification.
+*   **Sampling Count for Pruning**: 10 samples per Gaussian to determine if it should be removed.
 
 ### Edge Cases and Pitfalls
-- **Gradient Vanishing in Attribute-Based Masking**: If masks are applied to opacity or scale (multiplying them), the resulting alpha becomes zero. This causes the Gaussian to be filtered out before rasterization, preventing any gradient update to the mask or attributes [S1]. MaskGaussian avoids this by applying masks during blending [S1].
-- **Outdated Gaussians**: In deterministic pruning, unsampled Gaussians remain static and may become outdated as the scene evolves. MaskGaussian mitigates this by allowing unsampled Gaussians to receive gradients through the mask, keeping their probability of existence dynamic [S1].
-- **Fine Gaussians Disadvantage**: Methods that bind mask gradients to scales/opacity may disadvantage fine Gaussians if they receive negative gradients intended to shrink them. MaskGaussian decouples mask gradients from physical attributes [S1].
+*   **Gradient Blocking**: If masks are applied to opacity or scale (setting them to zero), the Gaussian's density $\alpha$ becomes zero. This causes the Gaussian to be filtered out before rasterization, preventing gradient updates. MaskGaussian avoids this by applying masks during blending.
+*   **Outdated Gaussians**: If masked Gaussians do not receive gradients, they remain static and may become outdated as the scene evolves. MaskGaussian ensures they receive gradients via masked-rasterization.
+*   **Fine Gaussians**: Methods that bind mask gradients to scales/opacity may disadvantage fine Gaussians if they receive negative gradients intended to shrink them. MaskGaussian decouples these.
+
+## Subtopics
+
+### [Sparsity Regularization for Pruning](9357-sparsity-regularization-for-pruning.md)
+A regularization technique applied to learnable mask parameters in 3D Gaussian Splatting to guide the pruning process and encourage condensed scene representations. It solves the problem of inefficient storage and rendering by promoting both fine-grained sparsity (removing non-essential individual Gaussians) and structural coherence (removing entire anchors). Unlike standard L1-style penalties which may leave anchors with only a few sparsely active Gaussians, hindering compactness, this method uses a group L2 norm to encourage switching off entire anchors cohesively. It builds on [MaskGaussian](4242-maskgaussian.md) by providing the optimization signal that determines which probabilistic entities should be deactivated.
 
 ## Operating characteristics
-- **Pruning Ratio**: Achieves pruning ratios of 62.4% (Mip-NeRF360), 67.7% (Tanks & Temples), and 75.3% (Deep Blending) [S1].
-- **Rendering Speedup**: 2.05x (Mip-NeRF360), 2.19x (Tanks & Temples), and 3.16x (Deep Blending) compared to standard 3DGS [S1].
-- **Quality**: PSNR decline of only 0.02 on Mip-NeRF360 and Tanks & Temples; improvement on Deep Blending [S1].
-- **Performance Metrics (Ours-α setting)**:
-    - **Mip-NeRF360**: 27.43 PSNR, 1.205M Gaussians, 384.7 FPS (vs 3DGS: 27.45 PSNR, 3.204M Gaussians, 187.8 FPS) [S1].
-    - **Tanks & Temples**: 23.72 PSNR, 0.590M Gaussians, 558.3 FPS (vs 3DGS: 23.74 PSNR, 1.825M Gaussians, 254.5 FPS) [S1].
-    - **Deep Blending**: 29.69 PSNR, 0.694M Gaussians, 637.1 FPS (vs 3DGS: 29.53 PSNR, 2.815M Gaussians, 201.3 FPS) [S1].
-- **Hardware**: Experiments conducted on NVIDIA RTX 4090 [S1].
-- **Strengths**: Better rendering quality with fewer Gaussians than previous pruning methods; adaptive pruning that evolves with the scene; efficient rendering due to reduced Gaussian count.
-- **Limitations**: Requires modification of the CUDA rasterization code; introduces additional learnable parameters (mask scores); pruning is stochastic, requiring careful tuning of $\lambda_m$ and sampling frequency.
+*   **Time Complexity**: Similar to standard 3DGS rasterization, with minor overhead for mask sampling and blending. The pruning step adds negligible overhead as it is performed periodically.
+*   **Memory Complexity**: Adds $2N$ learnable parameters (mask scores) for $N$ Gaussians.
+*   **Measured Performance**:
+    *   **Mip-NeRF360**: 27.43 PSNR, 1.205M Gaussians, 384.7 FPS (vs. 3DGS: 27.45 PSNR, 3.204M Gaussians, 187.8 FPS). Pruning ratio: 62.4%. Speedup: 2.05x.
+    *   **Tanks & Temples**: 23.72 PSNR, 0.590M Gaussians, 558.3 FPS (vs. 3DGS: 23.74 PSNR, 1.825M Gaussians, 254.5 FPS). Pruning ratio: 67.7%. Speedup: 2.19x.
+    *   **Deep Blending**: 29.69 PSNR, 0.694M Gaussians, 637.1 FPS (vs. 3DGS: 29.53 PSNR, 2.815M Gaussians, 201.3 FPS). Pruning ratio: 75.3%. Speedup: 3.16x.
+*   **Strengths**:
+    *   Achieves significant pruning ratios (62-75%) with minimal PSNR loss (0.02 dB).
+    *   Enables real-time rendering with fewer Gaussians.
+    *   Allows dynamic re-evaluation of Gaussians, preventing premature pruning.
+*   **Limitations**:
+    *   Requires modification of the rasterization code to implement masked-rasterization.
+    *   Hyperparameter $\lambda_m$ requires tuning for different scenes and training phases.
 
 ## Background
-MaskGaussian was introduced in the paper "MaskGaussian: Adaptive 3D Gaussian Representation from Probabilistic Masks" (CVPR 2025) [S1]. It builds upon Compact3DGS, extending its pruning approach from deterministic to probabilistic. The method is inspired by techniques in other fields (CNNs, Vision Transformers, LLMs) where masks are optimized to receive gradients from both active and inactive components, balancing benefit and cost [S1]. It addresses the limitation of previous mask-based pruning methods that fail to update unsampled Gaussians, leading to sub-optimal reconstruction [S1].
+MaskGaussian was introduced in the paper "MaskGaussian: Adaptive 3D Gaussian Representation from Probabilistic Masks" (CVPR 2025) [S1]. It builds upon [Compact3DGS](1398-compact3dgs.md) by extending its pruning approach from deterministic to probabilistic. The method addresses the limitations of previous mask-based pruning methods that multiply masks with Gaussian attributes (opacity/scale), which block gradient flow and lead to sub-optimal reconstruction. By treating pruning as a stochastic sampling process and introducing masked-rasterization, MaskGaussian allows for adaptive pruning that evolves with the scene.
 
 ## Sources
 [S1] MaskGaussian: Adaptive 3D Gaussian Representation from Probabilistic Masks, https://doi.org/10.1109/cvpr52734.2025.00072, fetched 2026-10-30

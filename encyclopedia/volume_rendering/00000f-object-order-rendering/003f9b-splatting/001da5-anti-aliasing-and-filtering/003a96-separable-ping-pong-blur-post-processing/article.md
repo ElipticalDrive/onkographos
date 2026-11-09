@@ -1,0 +1,98 @@
+# Separable Ping-Pong Blur Post-Processing
+
+Also called: Horizontal-vertical blur, PostProcessBlurShader, Two-pass blur
+
+## Overview
+This method applies a separable Gaussian blur to a rendered scene to reduce aliasing artifacts and smooth the final image. It solves the problem of high-frequency noise and jagged edges in splatted volume renderings by decoupling the 2D convolution into two 1D passes. It differs from [Splatting for Anti-aliasing Small Cells](829-splatting-for-anti-aliasing-small-cells.md) by applying filtering in post-processing rather than during primitive rasterization, and from [Prefiltering](2928-prefiltering.md) by operating on the final color buffer rather than precomputing mipmaps.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A rendered scene texture (color buffer) produced by the splatting pass.
+*   **Output:** A blurred version of the scene texture.
+
+**Data Structures:**
+The implementation requires two ping-pong framebuffers and their associated textures to alternate read/write roles between passes.
+*   **Textures:** Two textures, `_fbTexture[0]` and `_fbTexture[1]`, each with resolution $512 \times 512$ [S1, unofficial].
+    *   Format: `GL_RGB` with `GL_UNSIGNED_SHORT_5_6_5` internal format [S1, unofficial].
+    *   Filtering: `GL_LINEAR` (bilinear) [S1, S2, unofficial].
+    *   Wrapping: `GL_CLAMP_TO_EDGE` [S1, S2, unofficial].
+*   **Framebuffers:**
+    *   `_framebuffer[0]`: Attaches `_fbTexture[0]` as color attachment and a `GL_DEPTH_COMPONENT16` renderbuffer as depth attachment [S1, unofficial].
+    *   `_framebuffer[1]`: Attaches `_fbTexture[1]` as color attachment only [S1, unofficial].
+*   **Shader Uniforms:**
+    *   `_SHADER_UNIFORM_TEXEL_OFFSET_X` (float): Horizontal texel offset [S1, unofficial].
+    *   `_SHADER_UNIFORM_TEXEL_OFFSET_Y` (float): Vertical texel offset [S1, unofficial].
+    *   `blurStep` (Vec2): Controls blur step size [S2, unofficial].
+    *   `focus` (float): Controls focus [S2, unofficial].
+    *   `halfBand` (float): Controls half band [S2, unofficial].
+    *   `maxRadius` (float): Controls max radius [S2, unofficial].
+    *   `saturation` (float): Controls saturation [S2, unofficial].
+
+**Parameters:**
+*   `fullTextureSize`: Fixed resolution for post-processing textures, set to $512$ [S1, unofficial].
+*   Kernel weights for intra-texel adjustment: $w_1 = 0.0555555f$, $w_2 = 0.2777777f$ [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Initialization:** Create two $512 \times 512$ textures with `GL_UNSIGNED_SHORT_5_6_5` format, `GL_LINEAR` filtering, and `GL_CLAMP_TO_EDGE` wrapping [S1, unofficial]. Create two framebuffers: `_framebuffer[0]` with color `_fbTexture[0]` and depth buffer, and `_framebuffer[1]` with color `_fbTexture[1]` [S1, unofficial].
+2.  **Scene Render:** Render the volume splatting scene into `_framebuffer[0]` [S1, unofficial].
+3.  **Horizontal Pass:**
+    *   Bind `_framebuffer[1]` as the draw target [S1, unofficial].
+    *   Calculate the base texel offset: $m\_fTexelOffset = 1.0f / fullTextureSize$ [S1, unofficial].
+    *   Calculate the intra-texel offset adjustment: $intraTexelOffset = \frac{w_2}{w_1 + w_2} \times m\_fTexelOffset$ [S1, unofficial].
+    *   Calculate the final offset: $m\_fTexelOffset_{final} = m\_fTexelOffset + intraTexelOffset$ [S1, unofficial].
+    *   Set shader uniform `_SHADER_UNIFORM_TEXEL_OFFSET_X` to $m\_fTexelOffset_{final}$ and `_SHADER_UNIFORM_TEXEL_OFFSET_Y` to $0.0f$ [S1, unofficial].
+    *   Draw a fullscreen quad to apply the horizontal blur from `_framebuffer[0]` to `_framebuffer[1]` [S1, unofficial].
+4.  **Vertical Pass:**
+    *   Bind the final target color buffer (or `_framebuffer[0]` if ping-ponging back) [S1, unofficial].
+    *   Set shader uniform `_SHADER_UNIFORM_TEXEL_OFFSET_X` to $0.0f$ and `_SHADER_UNIFORM_TEXEL_OFFSET_Y` to $m\_fTexelOffset_{final}$ [S1, unofficial].
+    *   Draw a fullscreen quad to apply the vertical blur from `_framebuffer[1]` to the target [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def separable_ping_pong_blur(scene_texture, target_buffer, full_texture_size=512):
+    # Constants
+    w1 = 0.0555555f
+    w2 = 0.2777777f
+    
+    # Calculate offsets
+    base_offset = 1.0f / full_texture_size
+    intra_offset = (w2 / (w1 + w2)) * base_offset
+    final_offset = base_offset + intra_offset
+    
+    # Pass 1: Horizontal Blur
+    # Bind source: scene_texture (or previous ping-pong buffer)
+    # Bind destination: ping_pong_buffer_1
+    # Set shader uniforms:
+    #   texel_offset_x = final_offset
+    #   texel_offset_y = 0.0f
+    # Draw fullscreen quad
+    
+    # Pass 2: Vertical Blur
+    # Bind source: ping_pong_buffer_1
+    # Bind destination: target_buffer
+    # Set shader uniforms:
+    #   texel_offset_x = 0.0f
+    #   texel_offset_y = final_offset
+    # Draw fullscreen quad
+```
+
+**Edge Cases and Pitfalls:**
+*   **Edge Artifacts:** Texture wrapping must be set to `CLAMP_TO_EDGE`. If wrapping is set to `REPEAT` (default in some libraries like Raylib), the blur at the top edge will pull in pixels from the bottom of the frame, causing visible seams [S2, unofficial].
+*   **Precision:** The use of `GL_UNSIGNED_SHORT_5_6_5` format may introduce quantization artifacts in high-dynamic-range scenes, but is sufficient for standard 8-bit display outputs [S1, unofficial].
+*   **Filtering:** Bilinear filtering is required because the blur taps land between texels. Nearest-neighbor filtering would produce blocky artifacts [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of pixels, as it performs two passes over the image with a fixed kernel size.
+*   **Memory Complexity:** $O(W \times H)$ for the two ping-pong textures. For a $512 \times 512$ texture, this is minimal [S1, unofficial].
+*   **Performance:** Real-time capable on modern GPUs due to hardware-accelerated blitting and simple shader operations [S1, S2, unofficial].
+*   **Strengths:** Simple to implement, effective for general anti-aliasing, decouples filtering from the rendering pipeline [S1, S2, unofficial].
+*   **Limitations:** Does not preserve edges as well as bilateral filters (see [PseudoSeparable Cross Bilateral Filter](8374-pseudoseparable-cross-bilateral-filter.md)), may blur out fine details [S2, unofficial].
+
+## Background
+This method is derived from standard post-processing techniques used in real-time graphics. The specific implementation details, including the ping-pong framebuffer setup and offset calculations, are found in the `iVoxel` project by larsxschneider [S1, unofficial] and the `VoxelTerraformer` project by GhostlyActive [S2, unofficial].
+
+## Sources
+[S1] larsxschneider/iVoxel, https://github.com/larsxschneider/iVoxel, fetched 2026-10-27 (unofficial)
+[S2] GhostlyActive/VoxelTerraformer, https://github.com/GhostlyActive/VoxelTerraformer, fetched 2026-10-27 (unofficial)

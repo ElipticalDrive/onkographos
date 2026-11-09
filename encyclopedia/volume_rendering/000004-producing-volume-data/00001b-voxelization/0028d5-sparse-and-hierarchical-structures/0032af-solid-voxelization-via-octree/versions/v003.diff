@@ -1,0 +1,458 @@
+--- v002.md
++++ v003.md
+@@ -4,46 +4,68 @@
+ 
+ ## Overview
+-Solid Voxelization via Octree is a technique to convert a set of 3D line segments (typically derived from triangle meshes) into a solid voxel representation using an octree data structure [S1, unofficial]. This method enables efficient ray intersection testing against the solid volume, serving as a bridge between polygonal geometry and volume rendering [S1, unofficial]. It distinguishes itself from sibling methods like [Out-of-Core Sparse Voxel Octree Construction](1689-out-of-core-sparse-voxel-octree-construction.md) by focusing on generating a "solid" (filled) representation suitable for direct ray casting, rather than just storing sparse density fields or neural features.
++Solid Voxelization via Octree converts a set of 3D line segments (typically derived from triangle meshes) into a solid voxel representation using an octree data structure [S1, unofficial]. This method enables efficient ray intersection testing against the solid volume, serving as a bridge between polygonal geometry and volume rendering pipelines [S1, unofficial]. It distinguishes itself from dense voxelization by using hierarchical subdivision to store only occupied regions, and from standard sparse voxelization by explicitly computing "solid" occupancy (whether a voxel is filled by geometry) rather than just surface presence or density [S1, unofficial].
+ 
+ ## How it works
++The method consists of three phases: building the octree from input segments, generating a mesh representation for rendering, and traversing the tree for ray intersection.
+ 
+ ### Inputs and Outputs
+-*   **Input**: A set of 3D line segments (edges) extracted from a mesh, and a target `resolution` for the bounding box.
+-*   **Output**: An octree data structure representing the solid volume, and optionally a generated mesh of the voxelized surface.
++*   **Input**: A list of 3D line segments. In practice, these are often edges extracted from a triangle mesh [S1, unofficial].
++*   **Output**: An octree data structure representing the solid volume, and optionally a generated mesh for visualization [S1, unofficial].
+ 
+ ### Data Structures
+ 
+ **Octree Node**
+-The node is a struct aligned to 8 bytes containing three fields [S1, unofficial]:
+-1.  `_child_offset` (`uint32_t`): Offset to the first child node in a flat array or pointer.
+-2.  `_child_masks` (`uint8_t`): An 8-bit mask representing the occupancy of the 8 children. The bits correspond to children in the order: 000, 001, 011, 010, 110, 111, 101, 100 (Morton order) [S1, unofficial].
+-3.  `_full` (`bool`): Indicates if the node is completely filled with geometry.
++Each node is a struct aligned to 8 bytes containing three fields [S1, unofficial]:
++1.  `_child_offset` (`uint32_t`): Offset to the children array in memory.
++2.  `_child_masks` (`uint8_t`): An 8-bit mask representing the occupancy of the 8 children. The bits correspond to children in the order: 000, 001, 011, 010, 110, 111, 101, 100 (Morton order/Z-order) [S1, unofficial].
++3.  `_full` (`bool`): Indicates if the node is completely filled with geometry [S1, unofficial].
+ 
+ **Cube Vertices**
+-A unit cube at the origin $(0,0,0)$ to $(1,1,1)$ is defined by 8 vertices. Indices define 12 triangles (36 indices) forming the cube surface [S1, unofficial].
++A unit cube is defined by 8 vertices at coordinates $(0,0,0)$ to $(1,1,1)$. The surface is composed of 12 triangles, requiring 36 indices [S1, unofficial].
+ 
+ ### Parameters
+-*   **resolution**: The side length of the bounding box in voxels. Must be a power of two between 2 and 4096 inclusive [S1, unofficial].
++*   **Resolution**: The side length of the bounding box in voxels. Must be a power of two between 2 and 4096 inclusive [S1, unofficial].
+ 
+ ### Algorithm Steps
+ 
+-1.  **Build Phase**: Recursively build the octree.
+-    *   If the list of segments intersecting the node's bounding box is empty, the node is marked empty.
+-    *   If the current resolution is 2 (leaf level), determine the occupancy of the 8 sub-cubes by checking if any segment intersects the Z-range of the sub-cube.
+-    *   If the resolution is greater than 2, partition the segments by X, then Y, then Z coordinates to distribute them to the 8 children. Recursively build the children. Set the `_child_masks` based on which children are non-empty.
+-
+-2.  **Mesh Generation Phase** (Optional, for visualization):
+-    *   Traverse the octree.
+-    *   If a node is marked `_full`, add a single cube mesh for the node's bounding box.
+-    *   If the node is a leaf (resolution 2), iterate over the 8 children. If a child's mask bit is set, add a unit cube mesh at the child's offset.
+-    *   If the node is an inner node, iterate over the 8 children. If a child's mask bit is set, recursively traverse the child node at the offset plus the child's index.
+-
+-3.  **Ray Traversal Phase**:
+-    *   Use a stack-based traversal starting with the root node.
+-    *   For each node, compute the intersection with its bounding box.
+-    *   If the hit is valid and closer than the current closest hit:
+-        *   If the node is `_full`, update the closest hit to the entry point of the node.
+-        *   If the node is a leaf, check the 8 sub-cubes for intersections.
+-        *   If the node is an inner node, push its children to the stack for further processing.
++#### 1. Build Phase
++Recursively build the octree. The process depends on the current resolution level [S1, unofficial]:
++
++1.  **Empty Check**: If the list of segments intersecting the current node's bounding box is empty, mark the node as empty and return.
++2.  **Leaf Case (Resolution = 2)**:
++    *   Divide the current bounding box into 8 sub-cubes.
++    *   For each sub-cube, determine occupancy by checking if any segment in the list intersects the Z-range of that sub-cube.
++    *   Set the corresponding bit in `_child_masks` if occupied.
++    *   Mark `_full` as false.
++3.  **Inner Node Case (Resolution > 2)**:
++    *   Partition the segment list into 8 subsets based on which sub-cube they intersect. This is done by checking X, then Y, then Z coordinates relative to the node's center.
++    *   Recursively build the 8 children using their respective segment subsets.
++    *   Compute `_child_masks` by checking if each child is non-empty.
++    *   If all 8 children are non-empty and fully filled, mark `_full` as true. Otherwise, `_full` is false.
++
++#### 2. Mesh Generation Phase
++Traverse the octree to generate a renderable mesh [S1, unofficial]:
++
++1.  Start traversal at the root node.
++2.  For each node:
++    *   If `_full` is true, add a single cube mesh for the node's bounding box.
++    *   If the node is a leaf (Resolution = 2):
++        *   Iterate through the 8 children.
++        *   If the corresponding bit in `_child_masks` is set, add a unit cube mesh at the child's local offset.
++    *   If the node is an inner node:
++        *   Iterate through the 8 children.
++        *   If the corresponding bit in `_child_masks` is set, recursively traverse the child node, applying the child's offset to the current position.
++
++#### 3. Ray Traversal Phase
++Perform ray intersection testing using a stack-based traversal [S1, unofficial]:
++
++1.  Initialize a stack with the root node.
++2.  While the stack is not empty:
++    *   Pop the top node.
++    *   Compute the intersection of the ray with the node's bounding box.
++    *   If the intersection is valid and closer than the current closest hit:
++        *   If the node is marked `_full`, update the closest hit to the entry point of the bounding box.
++        *   If the node is a leaf (Resolution = 2), check the 8 sub-cubes defined by `_child_masks` for intersection.
++        *   If the node is an inner node, push its 8 children (where `_child_masks` bits are set) onto the stack.
+ 
+ ### Pseudocode
+@@ -51,140 +73,238 @@
+ ```python
+ import math
+-
+-class OctreeNode:
++from typing import List, Tuple, Optional
++
++# Constants
++TOLERANCE = 1e-5
++
++class Node:
+     def __init__(self):
+-        self.child_offset = 0
+-        self.child_masks = 0
+-        self.full = False
+-        self.children = []
+-
+-def build_octree(segments, min_coord, max_coord, resolution):
+-    """
+-    Recursively builds the octree.
+-    segments: List of line segments (p1, p2) intersecting the current bounding box.
+-    min_coord: (x, y, z) minimum of current node.
+-    max_coord: (x, y, z) maximum of current node.
+-    resolution: Current resolution (side length in voxels).
+-    """
+-    node = OctreeNode()
+-    
+-    # Base case: Leaf node
++        self.child_offset: int = 0
++        self.child_masks: int = 0
++        self.full: bool = False
++        self.children: List[Node] = []
++
++class Segment:
++    def __init__(self, p1: Tuple[float, float, float], p2: Tuple[float, float, float]):
++        self.p1 = p1
++        self.p2 = p2
++
++class BoundingBox:
++    def __init__(self, min_pt: Tuple[float, float, float], max_pt: Tuple[float, float, float]):
++        self.min = min_pt
++        self.max = max_pt
++
++def build_octree(segments: List[Segment], bbox: BoundingBox, resolution: int) -> Node:
++    """
++    Recursively build the octree.
++    resolution: current side length in voxels.
++    """
++    node = Node()
++    
++    # Filter segments intersecting current bbox
++    intersecting_segs = []
++    for seg in segments:
++        if segment_intersects_bbox(seg, bbox):
++            intersecting_segs.append(seg)
++            
++    if not intersecting_segs:
++        return node # Empty node
++
+     if resolution == 2:
+-        # Determine occupancy of 8 sub-cubes
+-        # Check if any segment intersects the Z-range of each sub-cube
+-        # This is a simplified check based on source notes
++        # Leaf case: check occupancy of 8 sub-cubes
++        # Sub-cubes are defined by splitting bbox into 8 equal parts
++        sub_cubes = get_sub_cubes(bbox)
++        mask = 0
++        for i, sub_cube in enumerate(sub_cubes):
++            # Check if any segment intersects the Z-range of the sub-cube
++            # Note: The source specifies checking Z-range intersection for occupancy
++            if segment_intersects_z_range(intersecting_segs, sub_cube):
++                mask |= (1 << i)
++        node.child_masks = mask
++        node.full = False
++    else:
++        # Inner node case: partition segments
++        sub_cubes = get_sub_cubes(bbox)
++        child_segments = [[] for _ in range(8)]
++        
++        for seg in intersecting_segs:
++            # Determine which sub-cubes the segment intersects
++            # This involves checking X, Y, Z bounds
++            for i, sub_cube in enumerate(sub_cubes):
++                if segment_intersects_bbox(seg, sub_cube):
++                    child_segments[i].append(seg)
++        
++        # Recursively build children
+         for i in range(8):
+-            # Calculate sub-cube bounds
+-            sub_min, sub_max = get_subcube_bounds(min_coord, max_coord, i)
+-            if any(segment_intersects_z_range(seg, sub_min[2], sub_max[2]) for seg in segments):
++            child_bbox = sub_cubes[i]
++            child_node = build_octree(child_segments[i], child_bbox, resolution // 2)
++            node.children.append(child_node)
++            if child_node.child_masks != 0:
+                 node.child_masks |= (1 << i)
+-        return node
+-
+-    # Recursive case: Inner node
+-    mid = (min_coord + max_coord) / 2.0
+-    
+-    # Partition segments by X, Y, Z
+-    # This step distributes segments to children
+-    child_segments = [[] for _ in range(8)]
++            # Check if full
++            if child_node.full:
++                # If all children are full, this node is full
++                # This check is simplified; full logic requires all 8 children to be full
++                pass
++        
++        # Determine if node is full
++        all_full = True
++        for child in node.children:
++            if not child.full:
++                all_full = False
++                break
++        node.full = all_full
++
++    return node
++
++def segment_intersects_bbox(seg: Segment, bbox: BoundingBox) -> bool:
++    """Check if a segment intersects a bounding box."""
++    # Simplified AABB intersection test for a line segment
++    # Returns True if any part of the segment is inside or intersects the box
++    min_x, min_y, min_z = bbox.min
++    max_x, max_y, max_z = bbox.max
++    
++    # Check if segment is completely outside
++    if (seg.p1[0] < min_x and seg.p2[0] < min_x) or \
++       (seg.p1[0] > max_x and seg.p2[0] > max_x) or \
++       (seg.p1[1] < min_y and seg.p2[1] < min_y) or \
++       (seg.p1[1] > max_y and seg.p2[1] > max_y) or \
++       (seg.p1[2] < min_z and seg.p2[2] < min_z) or \
++       (seg.p1[2] > max_z and seg.p2[2] > max_z):
++        return False
++    return True
++
++def segment_intersects_z_range(segments: List[Segment], bbox: BoundingBox) -> bool:
++    """Check if any segment intersects the Z-range of the bbox."""
++    min_z, max_z = bbox.min[2], bbox.max[2]
+     for seg in segments:
+-        # Determine which children the segment intersects
+-        # Based on source: partition by X, then Y, then Z
+-        child_indices = get_intersecting_children(seg, min_coord, max_coord)
+-        for idx in child_indices:
+-            child_segments[idx].append(seg)
+-            
+-    # Recursively build children
+-    for i in range(8):
+-        if child_segments[i]:
+-            sub_min, sub_max = get_subcube_bounds(min_coord, max_coord, i)
+-            child_node = build_octree(child_segments[i], sub_min, sub_max, resolution // 2)
+-            node.children.append(child_node)
+-            node.child_masks |= (1 << i)
+-            
+-    # Check if node is full
+-    if node.child_masks == 0xFF: # All 8 children present
+-        # Further check if all children are full or if the volume is solid
+-        # Source implies setting mask based on non-empty children
+-        pass
++        # Check if segment's Z range overlaps with bbox's Z range
++        seg_min_z = min(seg.p1[2], seg.p2[2])
++        seg_max_z = max(seg.p1[2], seg.p2[2])
++        if seg_max_z >= min_z and seg_min_z <= max_z:
++            return True
++    return False
++
++def get_sub_cubes(bbox: BoundingBox) -> List[BoundingBox]:
++    """Divide bbox into 8 sub-cubes."""
++    min_x, min_y, min_z = bbox.min
++    max_x, max_y, max_z = bbox.max
++    
++    mid_x = (min_x + max_x) / 2
++    mid_y = (min_y + max_y) / 2
++    mid_z = (min_z + max_z) / 2
++    
++    sub_cubes = []
++    for i in range(2):
++        for j in range(2):
++            for k in range(2):
++                new_min = (min_x + i * (mid_x - min_x), min_y + j * (mid_y - min_y), min_z + k * (mid_z - min_z))
++                new_max = (mid_x + i * (max_x - mid_x), mid_y + j * (max_y - mid_y), mid_z + k * (max_z - mid_z))
++                sub_cubes.append(BoundingBox(new_min, new_max))
++    return sub_cubes
++
++def ray_intersect_box_akari(ray_origin: Tuple[float, float, float], ray_dir: Tuple[float, float, float], bbox: BoundingBox) -> Optional[float]:
++    """
++    Akari's method for ray-box intersection.
++    Returns t_min if hit, else None.
++    """
++    min_x, min_y, min_z = bbox.min
++    max_x, max_y, max_z = bbox.max
++    
++    tx1 = (min_x - ray_origin[0]) / ray_dir[0]
++    tx2 = (max_x - ray_origin[0]) / ray_dir[0]
++    ty1 = (min_y - ray_origin[1]) / ray_dir[1]
++    ty2 = (max_y - ray_origin[1]) / ray_dir[1]
++    tz1 = (min_z - ray_origin[2]) / ray_dir[2]
++    tz2 = (max_z - ray_origin[2]) / ray_dir[2]
++    
++    t_enter = max(min(tx1, tx2), min(ty1, ty2), min(tz1, tz2))
++    t_exit = min(max(tx1, tx2), max(ty1, ty2), max(tz1, tz2))
++    
++    if t_enter > t_exit or t_exit < 0:
++        return None
++    
++    return t_enter
++
++def traverse_octree_for_mesh(node: Node, bbox: BoundingBox, mesh: List) -> None:
++    """Generate mesh from octree."""
++    if node.full:
++        # Add single cube mesh for node's bounding box
++        mesh.append(create_cube_mesh(bbox))
++        return
++    
++    if node.child_masks == 0:
++        return
++
++    if node.child_masks != 0 and len(node.children) == 0:
++        # Leaf case (resolution 2)
++        sub_cubes = get_sub_cubes(bbox)
++        for i in range(8):
++            if node.child_masks & (1 << i):
++                mesh.append(create_cube_mesh(sub_cubes[i]))
++    else:
++        # Inner node case
++        sub_cubes = get_sub_cubes(bbox)
++        for i in range(8):
++            if node.child_masks & (1 << i):
++                traverse_octree_for_mesh(node.children[i], sub_cubes[i], mesh)
++
++def create_cube_mesh(bbox: BoundingBox) -> List:
++    """Create a cube mesh from a bounding box."""
++    # Returns list of vertices and indices for 12 triangles
++    # Implementation details omitted for brevity, assumes standard cube generation
++    pass
++
++def ray_traverse_octree(ray_origin: Tuple[float, float, float], ray_dir: Tuple[float, float, float], root: Node, bbox: BoundingBox) -> Optional[float]:
++    """
++    Stack-based ray traversal.
++    Returns closest t hit, or None.
++    """
++    stack = [(root, bbox)]
++    closest_t = float('inf')
++    
++    while stack:
++        node, node_bbox = stack.pop()
+         
+-    return node
+-
+-def ray_traverse(node, ray_origin, ray_direction, current_min_hit):
+-    """
+-    Stack-based ray traversal.
+-    """
+-    stack = [node]
+-    closest_hit = current_min_hit
+-    
+-    while stack:
+-        current_node = stack.pop()
+-        
+-        # Compute intersection with bounding box
+-        hit = intersect_box(current_node.bounds, ray_origin, ray_direction)
+-        
+-        if hit and hit.t < closest_hit:
+-            if current_node.full:
+-                closest_hit = hit.t
+-                # Return or store hit
+-            elif current_node.children:
+-                # Push children to stack
+-                for i, child in enumerate(current_node.children):
+-                    if current_node.child_masks & (1 << i):
+-                        stack.append(child)
+-            else:
+-                # Leaf node check
+-                # Check 8 sub-cubes
+-                for i in range(8):
+-                    if current_node.child_masks & (1 << i):
+-                        sub_hit = intersect_subcube(current_node, i, ray_origin, ray_direction)
+-                        if sub_hit and sub_hit.t < closest_hit:
+-                            closest_hit = sub_hit.t
++        t_hit = ray_intersect_box_akari(ray_origin, ray_dir, node_bbox)
++        if t_hit is not None and t_hit < closest_t:
++            if node.full:
++                closest_t = t_hit
++            elif node.child_masks != 0:
++                if len(node.children) == 0:
++                    # Leaf case
++                    sub_cubes = get_sub_cubes(node_bbox)
++                    for i in range(8):
++                        if node.child_masks & (1 << i):
++                            # Check intersection with sub-cube
++                            t_sub = ray_intersect_box_akari(ray_origin, ray_dir, sub_cubes[i])
++                            if t_sub is not None and t_sub < closest_t:
++                                closest_t = t_sub
++                else:
++                    # Inner node case
++                    sub_cubes = get_sub_cubes(node_bbox)
++                    for i in range(8):
++                        if node.child_masks & (1 << i):
++                            stack.append((node.children[i], sub_cubes[i]))
+                             
+-    return closest_hit
+-
+-def intersect_box_akari(box_min, box_max, ray_o, ray_d):
+-    """
+-    Simplified slab method using component-wise max/min.
+-    Uses a tolerance of 1e-5f for floating point comparison.
+-    """
+-    tol = 1e-5
+-    t_min = -math.inf
+-    t_max = math.inf
+-    
+-    for i in range(3):
+-        if abs(ray_d[i]) < tol:
+-            if ray_o[i] < box_min[i] or ray_o[i] > box_max[i]:
+-                return None
+-        else:
+-            t1 = (box_min[i] - ray_o[i]) / ray_d[i]
+-            t2 = (box_max[i] - ray_o[i]) / ray_d[i]
+-            t_min = max(t_min, min(t1, t2))
+-            t_max = min(t_max, max(t1, t2))
+-            
+-    if t_min > t_max:
+-        return None
+-        
+-    return t_min
++    return closest_t if closest_t != float('inf') else None
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Floating Point Comparison**: Box intersection uses a tolerance of $10^{-5}$ to determine which face was hit [S1, unofficial].
+-*   **Resolution Constraints**: The resolution must be a power of two between 2 and 4096. Non-power-of-two resolutions are not supported [S1, unofficial].
+-*   **Segment Intersection**: The leaf occupancy check relies on Z-range intersection, which may be sensitive to the orientation of segments relative to the voxel grid.
++*   **Floating Point Precision**: Box intersection uses a tolerance of $10^{-5}$ to determine which face was hit, which can affect accuracy in tight intersections [S1, unofficial].
++*   **Resolution Limits**: Resolution must be a power of two between 2 and 4096. Values outside this range are invalid [S1, unofficial].
++*   **Segment Intersection Logic**: The leaf occupancy check relies on Z-range intersection, which may not fully capture 3D intersection for segments parallel to the Z-axis or lying exactly on boundaries [S1, unofficial].
+ 
+ ## Operating characteristics
+-
+-*   **Time Complexity**: Building the octree is $O(N \log N)$ where $N$ is the number of segments, due to the recursive partitioning. Ray traversal is $O(\log V)$ where $V$ is the number of voxels, but can be slower in complex scenes with many small voxels.
+-*   **Memory Complexity**: The octree stores only non-empty nodes, making it sparse. However, the "solid" nature means that even empty space inside a bounding box may be filled if it is enclosed by geometry, potentially increasing memory usage compared to purely sparse representations.
+-*   **Strengths**: Efficient ray intersection testing; suitable for real-time applications; handles complex geometry well.
+-*   **Limitations**: Resolution is fixed and must be a power of two; may consume significant memory for large, detailed scenes if not carefully managed.
+-*   **When to use**: When you need to convert mesh data into a voxel format for ray casting or volume rendering, and performance is critical.
+-*   **When not to use**: For scenes with extremely high detail requiring adaptive resolution beyond the fixed octree levels, or when memory is extremely constrained.
++*   **Time Complexity**: Building the octree is $O(N \log M)$ where $N$ is the number of segments and $M$ is the resolution, due to recursive subdivision and partitioning [S1, unofficial]. Ray traversal is $O(\log M)$ on average for sparse volumes, but can degrade to $O(M)$ in dense cases [S1, unofficial].
++*   **Memory Complexity**: Memory usage is proportional to the number of non-empty nodes, which is typically much less than $M^3$ for sparse scenes [S1, unofficial]. Each node uses 8 bytes [S1, unofficial].
++*   **Strengths**: Efficient for sparse volumes; enables fast ray intersection; hierarchical structure allows for LOD [S1, unofficial].
++*   **Limitations**: Resolution is limited to powers of two up to 4096; floating-point precision issues in intersection tests [S1, unofficial].
++*   **When to Use**: Suitable for real-time rendering of sparse solid volumes where ray intersection performance is critical [S1, unofficial].
++*   **When Not to Use**: Not suitable for dense volumes where memory overhead of the tree structure becomes significant, or for scenes requiring sub-voxel precision beyond the resolution limit [S1, unofficial].
+ 
+ ## Background
+-
+-This method is implemented in the [Mike-Leo-Smith/SolidVoxelization](https://github.com/Mike-Leo-Smith/SolidVoxelization) repository [S1, unofficial]. It is designed as a practical tool for converting 3D models into voxel data for rendering purposes. The approach builds on general principles of sparse and hierarchical structures, specifically using octrees for spatial decomposition.
++Solid Voxelization via Octree was introduced by Mike Leo Smith in the repository "SolidVoxelization" [S1, unofficial]. The method is designed to bridge the gap between polygonal meshes and volume rendering by providing a solid voxel representation that can be efficiently ray-traced [S1, unofficial]. It is used in real-time rendering applications, as demonstrated by the accompanying GPU-based ray tracer [S1, unofficial].
+ 
+ ## Sources
+-
+ [S1] Mike-Leo-Smith/SolidVoxelization, https://github.com/Mike-Leo-Smith/SolidVoxelization, fetched 2026-10-27 (unofficial)

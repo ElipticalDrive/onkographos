@@ -3,47 +3,47 @@
 Also called: Sparse Voxel Structures, Hierarchical Voxel Grids
 
 ## Overview
-This family addresses the memory and computational inefficiency of dense, uniform voxel grids by storing only occupied regions using hierarchical data structures (typically octrees) or sparse hash maps. It solves the problem of rendering or processing large-scale 3D scenes or high-resolution volumetric data that exceed available main memory or require adaptive resolution. It sets itself apart from sibling methods like [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) and [Point Cloud Voxelization](1000-point-cloud-voxelization.md) by focusing on the *storage and traversal* of the voxelized data in a hierarchical manner, rather than just the initial conversion from primitives to voxels.
+Sparse and Hierarchical Structures organize volumetric data into non-uniform, tree-based layouts (typically octrees) to efficiently store and access sparse or multi-resolution data, avoiding the memory overhead of dense uniform grids. Unlike sibling methods that fill a fixed uniform grid [12-voxelization.md] or rely on rasterization [908-rasterization-based-voxelization.md], this family recursively subdivides space, allowing resolution to adapt to geometric detail or data density, which is essential for out-of-core processing, neural scene representations, and high-frequency geometry like hair or terrain.
 
 ## Shared principles
-All methods in this family share the following mechanisms, terms, and math:
-
-1.  **Hierarchical Decomposition**: The 3D space is recursively subdivided into 8 child nodes (octants) for each parent node. This allows variable resolution: high resolution where geometry exists, and no storage where it is empty.
-2.  **Sparse Storage**: Only nodes that contain data (geometry, density, or features) are allocated. Empty nodes are represented by null pointers or omitted from the data structure entirely.
-3.  **Morton Order (Z-order Curve)**: Many implementations (e.g., [Out-of-Core Sparse Voxel Octree Construction](1689-out-of-core-sparse-voxel-octree-construction.md)) map 3D coordinates $(x, y, z)$ to a 1D linear index using Morton codes. This preserves spatial locality, allowing efficient streaming and sorting. The Morton code $M$ for a coordinate $(x, y, z)$ is formed by interleaving the bits of the coordinates:
-    $$ M = \sum_{i=0}^{n-1} (x_i 2^{2i} + y_i 2^{2i+1} + z_i 2^{2i+2}) $$
-    where $x_i, y_i, z_i$ are the $i$-th bits of the coordinates [S1, unofficial].
-4.  **Streaming/Out-of-Core Processing**: For very large scenes, the hierarchy is built or traversed in chunks that fit in memory, often using disk-backed intermediate structures (e.g., Morton-ordered voxel grids) [S1, unofficial].
+The core mechanism involves:
+1.  **Recursive Subdivision**: Space is divided into octants (in 3D). A node is subdivided only if it contains data or exceeds a resolution/detail threshold.
+2.  **Sparse Storage**: Only non-empty or significant nodes are stored. Empty space is represented by the absence of nodes, enabling logarithmic memory scaling relative to the volume size rather than linear scaling with resolution [S1, unofficial].
+3.  **Hierarchical Access**: Data is accessed via tree traversal. Morton order (Z-order curve) is often used to linearize the tree for efficient streaming and cache coherence, as it preserves spatial locality [S1, unofficial].
+4.  **Level of Detail (LoD)**: Coarser nodes represent large empty or uniform regions, while finer nodes capture local detail, allowing for adaptive rendering or compression.
 
 ## Subtopics
 
 ### [Out-of-Core Sparse Voxel Octree Construction](1689-out-of-core-sparse-voxel-octree-construction.md)
-Constructs a Sparse Voxel Octree (SVO) from a triangle mesh with logarithmic memory usage relative to output size, enabling processing of scenes larger than RAM. It streams an intermediate high-resolution 3D voxel grid in Morton order, allowing bottom-up SVO construction with fixed-size queues. Unlike top-down methods (e.g., Laine and Karras [2010a]), it consumes input and produces output in a streaming manner.
+Constructs an SVO from a mesh in streaming fashion, guaranteeing memory usage is logarithmic to the SVO size by processing subgrids in Morton order.
 
 ### [Adaptive Voxelization of Unstructured Grids](3246-adaptive-voxelization-of-unstructured-grids.md)
-Converts large, out-of-core unstructured grids (tetrahedral/hexahedral) into a hierarchical 3D texture (voxel octree) for interactive rendering. It uses an adaptive octree to preserve data at higher resolutions where needed, avoiding undersampling/oversampling. Unlike siblings using uniform grid arrangements of multi-resolution bricks, it uses a hierarchical arrangement of constant-resolution texture bricks and specializes the octree to distinguish data from non-data voxels using a pad-and-stencil algorithm to eliminate boundary artifacts.
+Converts unstructured grids into a hierarchical 3D texture octree, specializing the tree to distinguish data from non-data to maximize image quality for a target frame rate.
+
+### [Sparse Sampling / Sparse Voxel Grid Generation](4588-sparse-sampling-sparse-voxel-grid-generation.md)
+A placeholder method generating a fixed uniform grid with a regular sampling pattern for testing traversal algorithms, differing from the recursive subdivision of this family.
 
 ### [Solid Voxelization via Octree](6830-solid-voxelization-via-octree.md)
-Converts 3D line segments (from meshes) into a solid voxel representation using an octree. It enables efficient ray intersection testing against the solid volume by filling the interior. It differs from [Out-of-Core Sparse Voxel Octree Construction](1689-out-of-core-sparse-voxel-octree-construction.md) by focusing on a fixed-resolution, fully solid representation optimized for ray tracing rather than adaptive sparse storage for large-scale scenes.
+Converts 3D line segments into a solid voxel octree for efficient ray intersection testing, focusing on filled volumes rather than sparse density fields.
 
 ### [Neural Sparse Voxel Fields (NSVF)](7144-neural-sparse-voxel-fields-nsvf.md)
-A hybrid neural scene representation that accelerates free-viewpoint rendering by combining implicit neural fields with explicit sparse voxel structures. Unlike standard NeRF which samples uniformly, NSVF restricts sampling to a sparse set of active voxels, skipping empty space. It sets itself apart by providing a coarse-to-fine multi-resolution framework that supports progressive training, self-pruning of empty voxels, and modeling dynamic scenes via a time dimension.
+A hybrid representation combining NeRF with a sparse voxel grid, accelerating rendering by restricting ray-marching to non-empty voxels and enabling progressive training.
 
 ### [Sparse Voxelization with Hierarchical LoD](7760-sparse-voxelization-with-hierarchical-lod.md)
-A pipeline for high-frequency sparse geometric objects (fibers, hair) that processes volumetric data into multiple Levels of Detail (LoD). It preserves appearance by separating geometric/directional data from material properties, aggregating fine sparse details into coarser blocks without rasterization or fixed-size memory allocation for sub-block grids. It differs by explicitly handling microgeometry via SGGX distribution fitting and asynchronous sample gathering to avoid draw-call ordering artifacts.
+A pipeline for high-frequency sparse geometry (hair, fibers) that separates geometric/directional data from material properties across multiple LoDs.
 
-### Terrain Voxelization into Octants
-- **Definition**: A geometry stage that voxelizes terrain into a $128^3$ volume composed of half-block octants, used for local light propagation [S1, unofficial].
-- **Parameter**: Voxel resolution is defined as half-block octants (each voxel represents half a block) [S1, unofficial].
-- **Pitfall**: Iris provides `MC_RENDER_STAGE_*` identifiers as preprocessor macros. Redeclaring them as `const int` causes invalid GLSL expansion (e.g., `const int 0 = 0`). The solution is to use Iris's predefined macros directly [S1, unofficial].
+### [Sparse Voxel Octree Construction](9181-sparse-voxel-octree-construction.md)
+An extension of simple voxelization that builds and updates an SVO directly on the GPU, avoiding intermediate full regular grids.
 
-### Sparse Sampling / Sparse Voxel Grid Generation
-- **Definition**: Generates a sparse voxel grid by marking every 5th voxel along each axis as occupied. This is a placeholder method for testing traversal [S2, unofficial].
-- **Step**: Loop over all voxel coordinates $i, j, k$ from $0$ to $CUBE\_DIM-1$. If $i\%5==0$ AND $j\%5==0$ AND $k\%5==0$, set `grid[flatten(i,j,k)]` to true [S2, unofficial].
+### [Sparse Solid Voxelization](9768-sparse-solid-voxelization.md)
+Performs solid voxelization directly into a sparse hierarchical structure, skipping refinement of uniform regions.
+#### Terrain Voxelization into Octants
+- **Definition**: A geometry stage that voxelizes terrain into a $128^3$ volume composed of half-block octants, used for local light propagation in Minecraft shaders [S1, unofficial].
+- **Parameter**: Voxel resolution is defined as half-block octants, where each voxel represents half a block [S1, unofficial].
+- **Pitfall**: Redeclaring Iris's `MC_RENDER_STAGE_*` identifiers as `const int` causes invalid GLSL expansion (e.g., `const int 0 = 0`). The solution is to use Iris's predefined macros directly [S1, unofficial].
 
 ## Background
-The concept of sparse voxel octrees was popularized for real-time rendering by Laine and Karras [2010a], who introduced efficient construction and traversal algorithms. The need for out-of-core processing arose as scene sizes exceeded GPU/CPU memory limits, leading to streaming algorithms like the one described in [Out-of-Core Sparse Voxel Octree Construction](1689-out-of-core-sparse-voxel-octree-construction.md). Adaptive voxelization of unstructured grids was developed to handle scientific visualization data (e.g., CFD simulations) that naturally reside in unstructured meshes [S2, unofficial]. Neural Sparse Voxel Fields (NSVF) emerged with the rise of Neural Radiance Fields (NeRF) to address the computational cost of uniform sampling in neural rendering [S3, unofficial].
+The concept of sparse voxel octrees (SVO) emerged in the early 2000s to address the memory limitations of dense voxel grids in volume rendering and ray tracing. Key developments include the work by Laine and Karras (2010) on efficient SVO construction and later adaptations for out-of-core processing [S1, unofficial]. The integration of sparse voxels with neural networks (NSVF) represents a more recent evolution, leveraging the explicit structure of octrees to accelerate implicit neural rendering [S3]. These structures are widely used in real-time rendering, out-of-core visualization of large scientific datasets, and modern neural radiance fields.
 
 ## Sources
 [S1] Hearthlight: sun/moon shadows, voxel local lights, hand fixed, https://github.com/MeYashverma/Hearthlight/pull/1, fetched 2026-10-26 (unofficial)
-[S2] an1pse/voxel-traversal, https://github.com/an1pse/voxel-traversal, fetched 2026-10-27 (unofficial)

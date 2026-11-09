@@ -3,12 +3,12 @@
 Also called: Ping-Pong Buffering, Puffer-Alternierung, Volumeold/Volumenew Swap
 
 ## Overview
-This method prevents visual flickering and data corruption caused by concurrent read/write access to contiguous voxel data during parallel modification [S1, unofficial]. It ensures that every thread uses consistent, untainted information from the previous state to compute the next state, thereby preventing concurrency issues arising from simultaneous writes [S2, unofficial]. It differs from sibling methods by duplicating the volume in memory to allow frame-wise buffer swapping, avoiding the need for complex synchronization primitives like atomic compare-and-swap operators [S1, unofficial][S2, unofficial].
+This method prevents visual flickering and data corruption caused by concurrent read/write access to contiguous voxel data during parallel modification [S1, unofficial]. It ensures every thread uses consistent, untainted information from the previous state to compute the next state, thereby preventing concurrency issues arising from simultaneous writes [S2, unofficial]. It differs from sibling methods by duplicating the volume in memory to allow frame-wise buffer swapping, though it still requires atomic operations or multiple passes to handle concurrent writes to the same target voxel [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
 *   Input: A voxel grid representing the current state of the volume.
-*   Output: A voxel grid representing the modified state for the next frame/time step.
+*   Output: A voxel grid representing the modified state for the next frame or time step.
 
 **Data Structures:**
 Two identical volume buffers are allocated in memory (typically GPU memory):
@@ -19,12 +19,14 @@ Two identical volume buffers are allocated in memory (typically GPU memory):
 1.  **Initialization**: Allocate and initialize two volume buffers, `Volumeold` and `Volumenew` [S1, unofficial].
 2.  **Read and Delete**: For each voxel at position $\vec{p_i}$ moving along direction $\vec{h_i}$, read the voxel data from `Volumeold` and mark it as deleted or empty in `Volumeold` [S1, unofficial].
 3.  **Write**: Write the voxel data to the new position $\vec{p_i} + \vec{h_i}$ in `Volumenew` [S1, unofficial].
-4.  **Swap**: Before the next modification phase, swap the references of `Volumeold` and `Volumenew` (`Volumeold` $\rightleftharpoons$ `Volumenew`) [S1, unofficial]. This ensures that subsequent threads do not read data that has already been modified in the current frame [S2, unofficial].
+4.  **Swap**: Before the next modification phase, swap the references of `Volumeold` and `Volumenew` (`Volumeold` $\rightleftharpoons$ `Volumenew`) [S1, unofficial]. This ensures that every thread consistently uses the same information to compute its next state, untainted by changes already made to neighboring voxels [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+EMPTY = 0
+
 # Initialization
 Volumeold = allocate_volume(size)
 Volumenew = allocate_volume(size)
@@ -32,8 +34,8 @@ initialize(Volumeold, initial_data)
 
 # Per Frame / Time Step
 def process_voxels(Volumeold, Volumenew):
-    # Parallel execution over all voxels
-    parallel_for voxel in Volumeold:
+    # Parallel execution over all voxels is assumed
+    for voxel in Volumeold:
         if voxel.is_active():
             # 1. Read from old buffer
             data = Volumeold[voxel.position]
@@ -45,20 +47,16 @@ def process_voxels(Volumeold, Volumenew):
             new_pos = voxel.position + voxel.direction
             
             # 4. Write to new buffer
-            # Note: In a pure double-buffering approach without atomics,
-            # this assumes no two threads write to the exact same new_pos
-            # in the same frame, or that overwrites are acceptable.
-            # If multiple threads write to the same target, atomic operations
-            # or multiple passes are required [S2, unofficial].
+            # Concurrent writes to the same new_pos require atomic compare-and-swap
+            # operators, as buffer swapping alone does not prevent data loss [S2, unofficial].
             Volumenew[new_pos] = data
 
     # 5. Swap buffers
-    swap(Volumeold, Volumenew)
+    Volumeold, Volumenew = Volumenew, Volumeold
     
-    # Optional: Clear the new buffer (which is now Volumeold) for the next step
-    # if the simulation requires a clean slate, though typically the 
-    # "deleted" voxels from step 2 handle this implicitly if the grid 
-    # is fully traversed.
+    # Clear the buffer that is now Volumeold for the next step if required
+    # [G] Standard practice to reset deleted voxels, though implicit clearing
+    # may suffice if all voxels are traversed.
 ```
 
 **Parameters:**
@@ -67,7 +65,7 @@ def process_voxels(Volumeold, Volumenew):
 
 **Edge Cases and Pitfalls:**
 *   **Memory Usage**: The method doubles the required graphics memory [S1, unofficial].
-*   **Concurrent Writes**: Double-buffering alone does not prevent two threads from writing to the *same* voxel in `Volumenew` simultaneously, which can lead to voxels disappearing or data loss [S2, unofficial]. This requires additional measures such as multiple passes (moving voxels in one direction per pass) or atomic compare-and-swap operators [S2, unofficial].
+*   **Concurrent Writes**: Double-buffering alone does not prevent two threads from writing to the *same* voxel in `Volumenew` simultaneously, which can lead to voxels disappearing or data loss [S2, unofficial]. This requires additional measures such as atomic compare-and-swap operators, as multiple passes were explicitly rejected for overcomplicating the implementation [S2, unofficial].
 *   **Synchronization**: Without double-buffering, complex synchronization mechanisms are needed to ensure safe concurrent access [S1, unofficial].
 
 ## Subtopics
@@ -85,12 +83,12 @@ def process_voxels(Volumeold, Volumenew):
 *   **Link**: [Volumeold/Volumenew Swap](52-volumeold-volumenew-swap.md)
 
 ## Operating characteristics
-*   **Time Complexity**: $O(N)$ per frame, where $N$ is the number of voxels. The swap operation is $O(1)$ (pointer swap) [S1, unofficial].
+*   **Time Complexity**: Not given in the sources.
 *   **Memory Complexity**: $2 \times V$, where $V$ is the size of the volume [S1, unofficial].
-*   **Strengths**: Eliminates race conditions on reads; simple to implement compared to atomic operations; overlaps communication and computation when used with asynchronous tasks [Parent].
-*   **Limitations**: Doubles memory footprint; does not inherently solve concurrent write conflicts to the same target voxel without additional logic (e.g., atomics or multiple passes) [S2, unofficial].
-*   **When to use**: When concurrent read/write conflicts are the primary concern and memory is available.
-*   **When not to use**: When memory is constrained or when concurrent writes to the same location are frequent and require strict consistency beyond simple overwriting.
+*   **Strengths**: Not given in the sources.
+*   **Limitations**: Doubles memory footprint; does not inherently solve concurrent write conflicts to the same target voxel without additional logic (e.g., atomics) [S2, unofficial].
+*   **When to use**: Not given in the sources.
+*   **When not to use**: Not given in the sources.
 
 ## Background
 Originated in the context of raycasting-based voxel rendering to address flickering artifacts caused by simultaneous modifications [S1, unofficial]. It is commonly referred to as "ping-ponging" in GPU programming contexts [S2, unofficial]. The method is critical for maintaining data consistency in parallel voxel simulations where threads process neighboring voxels simultaneously [S2, unofficial].

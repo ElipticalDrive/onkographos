@@ -1,0 +1,121 @@
+# Sparsity Regularization for Pruning
+
+Also called: Group Sparsity Loss
+
+## Overview
+Sparsity Regularization for Pruning is a regularization technique applied to learnable mask parameters in 3D Gaussian Splatting to guide the pruning process and encourage condensed scene representations [S1]. It solves the problem of inefficient storage and rendering by promoting both fine-grained sparsity (removing non-essential individual Gaussians) and structural coherence (removing entire anchors) [S1]. Unlike standard L1-style penalties which may leave anchors with only a few sparsely active Gaussians, hindering compactness, this method uses a group L2 norm to encourage switching off entire anchors cohesively [S1]. It builds on [MaskGaussian](4242-maskgaussian.md) by providing the optimization signal that determines which probabilistic entities should be deactivated.
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:**
+    *   $N$: Total number of anchors in the scene.
+    *   $K$: Number of Gaussians per anchor.
+    *   $\mathbf{m}_j$: A vector of $K$ learnable mask parameters for anchor $j$, where $j \in \{1, \dots, N\}$.
+    *   $\lambda_{\text{mask}}$: Hyperparameter balancing the per-Gaussian masking loss.
+    *   $\lambda_{\text{group}}$: Hyperparameter balancing the group sparsity loss.
+*   **Outputs:**
+    *   $\mathcal{L}_{\text{sparsity}}$: The total scalar sparsity regularization loss value.
+
+**Data Structures**
+The method operates on the learnable mask parameters. For each anchor $j$, there is a vector $\mathbf{m}_j = [m_{j,1}, m_{j,2}, \dots, m_{j,K}]^T$. These parameters are typically optimized via gradient descent alongside other scene attributes. The masks $M_{j,i}$ used in the rendering equation are derived from these parameters via the sigmoid function: $M_{j,i} = \sigma(m_{j,i})$.
+
+**Steps**
+1.  **Compute Per-Gaussian Mask Activations:** For every Gaussian $i$ in every anchor $j$, compute the sigmoid activation:
+    $$ M_{j,i} = \sigma(m_{j,i}) = \frac{1}{1 + e^{-m_{j,i}}} $$
+2.  **Compute Per-Gaussian Masking Loss ($\mathcal{L}_{\text{mask}}$):** Sum the activations of all $N \times K$ mask entries and normalize by the total count to ensure invariance to scene size:
+    $$ \mathcal{L}_{\text{mask}} = \frac{1}{NK} \sum_{j=1}^{N} \sum_{i=1}^{K} M_{j,i} $$
+    This term encourages the deactivation of any single non-essential Gaussian [S1].
+3.  **Compute Group Sparsity Loss ($\mathcal{L}_{\text{group}}$):** For each anchor $j$, treat the vector of mask activations $\boldsymbol{\sigma}(\mathbf{m}_j)$ as a single group. Compute the L2 norm of this vector. Sum these norms over all $N$ anchors and normalize by $N$:
+    $$ \mathcal{L}_{\text{group}} = \frac{1}{N} \sum_{j=1}^{N} \|\boldsymbol{\sigma}(\mathbf{m}_j)\|_2 = \frac{1}{N} \sum_{j=1}^{N} \sqrt{\sum_{i=1}^{K} M_{j,i}^2} $$
+    This term is designed to encourage the entire group of Gaussians associated with a single anchor to be "switched off" together [S1].
+4.  **Compute Total Sparsity Loss:** Combine the two components using the hyperparameters:
+    $$ \mathcal{L}_{\text{sparsity}} = \lambda_{\text{mask}} \mathcal{L}_{\text{mask}} + \lambda_{\text{group}} \mathcal{L}_{\text{group}} $$
+5.  **Pruning Decision:** An anchor $j$ is considered pruned or inactive for a given Level of Detail (LOD) if all of its associated masks are effectively zero. Formally, if $\sum_{i=1}^K M_{j,i} = 0$ (or below a negligible threshold due to floating-point precision), the anchor is removed [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_sparsity_loss(masks: List[List[float]], lambda_mask: float, lambda_group: float) -> float:
+    """
+    Computes the sparsity regularization loss for 3D Gaussian Splatting pruning.
+    
+    Args:
+        masks: A list of N lists, where each inner list contains K float values 
+               representing the learnable mask parameters m_{j,i} for anchor j.
+        lambda_mask: Weight for the per-Gaussian masking loss.
+        lambda_group: Weight for the group sparsity loss.
+        
+    Returns:
+        The total sparsity loss scalar.
+    """
+    N = len(masks)
+    if N == 0:
+        return 0.0
+    
+    K = len(masks[0])
+    if K == 0:
+        return 0.0
+        
+    total_mask_loss = 0.0
+    total_group_loss = 0.0
+    
+    for j in range(N):
+        anchor_masks = masks[j]
+        anchor_sigmoid_sum = 0.0
+        anchor_l2_norm_sq = 0.0
+        
+        for i in range(K):
+            # Sigmoid activation
+            m_val = anchor_masks[i]
+            sigmoid_val = 1.0 / (1.0 + math.exp(-m_val))
+            
+            # Accumulate for L_mask
+            anchor_sigmoid_sum += sigmoid_val
+            
+            # Accumulate for L_group (L2 norm squared)
+            anchor_l2_norm_sq += sigmoid_val * sigmoid_val
+            
+        # L_mask contribution: sum of all sigmoids
+        total_mask_loss += anchor_sigmoid_sum
+        
+        # L_group contribution: L2 norm of the group
+        anchor_l2_norm = math.sqrt(anchor_l2_norm_sq)
+        total_group_loss += anchor_l2_norm
+        
+    # Normalize
+    # L_mask is normalized by NK
+    l_mask = total_mask_loss / (N * K)
+    
+    # L_group is normalized by N
+    l_group = total_group_loss / N
+    
+    # Combine
+    loss = lambda_mask * l_mask + lambda_group * l_group
+    
+    return loss
+```
+
+**Parameters**
+*   $\lambda_{\text{mask}}$: Balances the standard per-Gaussian masking loss. Value not given in the sources.
+*   $\lambda_{\text{group}}$: Balances the group sparsity loss. Value not given in the sources.
+*   Note: Both terms are normalized so that the regularization strength is invariant to scene size [S1].
+
+**Edge Cases and Pitfalls**
+*   **L1 vs L2:** Using an L1-style penalty on the group masks may leave anchors with only a few sparsely active Gaussians, which hinders the compactness of the condensed model [S1]. The L2 norm is preferred to encourage cohesive removal of entire anchors.
+*   **Pruning Condition:** An anchor is pruned if $\sum_{i=1}^K M_{j,i} = 0$. In practice, due to floating-point precision, a small epsilon threshold may be required to determine if the sum is effectively zero [S1].
+*   **Initialization:** The source does not specify the initialization of $m_{j,i}$. [G] Typically, mask parameters are initialized to small negative values to encourage sparsity, or zero for neutral start.
+
+## Operating characteristics
+*   **Time Complexity:** $O(NK)$ to compute the loss, as it iterates over all $N$ anchors and $K$ Gaussians per anchor.
+*   **Memory Complexity:** $O(NK)$ to store the mask parameters $\mathbf{m}_j$.
+*   **Strengths:** Promotes both fine-grained sparsity and structural coherence, leading to significant storage savings by removing entire anchors [S1]. The normalization ensures regularization strength is invariant to scene size [S1].
+*   **Limitations:** Requires tuning of two hyperparameters ($\lambda_{\text{mask}}, \lambda_{\text{group}}$). The effectiveness depends on the convergence of the sigmoid activations to 0 or 1.
+*   **When to use:** When using the iterative Gaussian synopsis unfolding scheme and needing to prune anchors to create condensed LODs [S1].
+*   **When not to use:** When structural coherence of anchors is not desired, or when a simpler per-Gaussian pruning strategy is sufficient.
+
+## Background
+The method was introduced in the paper "Unfolding 3D Gaussian Splatting via Iterative Gaussian Synopsis" [S1]. It is part of a top-down unfolding and pruning scheme where the representation of anchors is optimized for specific levels of detail. The approach addresses the limitations of standard masking losses by explicitly modeling group sparsity to improve the compactness of the 3D Gaussian representation.
+
+## Sources
+[S1] Unfolding 3D Gaussian Splatting via Iterative Gaussian Synopsis., https://doi.org/10.1109/tvcg.2026.3746672, fetched 2026-10-26

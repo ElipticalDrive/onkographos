@@ -3,196 +3,183 @@
 Also called: Out-of-core SVO construction, Streaming SVO construction
 
 ## Overview
-This method constructs a Sparse Voxel Octree (SVO) from a triangle mesh while ensuring that memory usage remains logarithmic relative to the size of the SVO, allowing the processing of scenes larger than available RAM [S1]. It achieves this by streaming an intermediate high-resolution 3D voxel grid in Morton order, which enables the SVO construction phase to operate in a bottom-up, queue-based manner without storing the full hierarchy in memory [S1]. Unlike top-down methods such as [Laine and Karras 2010a](link-to-laine-karras), which may require arbitrarily large initial build data for the root node, this approach guarantees out-of-core operation by consuming input and producing output in a streaming fashion [S1].
+This method constructs a Sparse Voxel Octree (SVO) from a triangle mesh while ensuring memory usage remains logarithmic relative to the size of the SVO, allowing the processing of datasets larger than available main memory [S1]. It achieves this by decomposing the problem into two sequential subprocesses: (1) voxelization, which consumes a triangle mesh and produces an intermediate high-resolution 3D voxel grid in Morton order, and (2) SVO construction, which consumes this grid and produces the output SVO in a streaming, bottom-up manner [S1]. Unlike in-core algorithms such as [Laine and Karras 2010a](link-to-laine-karras), which may require arbitrarily large initial build data for the root node, this method guarantees out-of-core operation by consuming input and producing output in a stream with bounded memory [S1]. It differs from [Sparse Voxel Octree Construction (Basic Version)](1694-sparse-voxel-octree-construction-basic-version.md) by explicitly managing the intermediate voxel grid via disk-based partitioning to fit subgrids into RAM, whereas the basic version assumes the input stream is already available in memory or on a fast stream [S1].
 
 ## How it works
-The algorithm consists of two sequential subprocesses: (1) Voxelization, which consumes a triangle mesh and produces an intermediate high-resolution 3D voxel grid in Morton order, and (2) SVO Construction, which consumes this voxel grid and produces the output SVO [S1].
+The algorithm consists of two distinct phases: Voxelization and SVO Construction. Both phases are designed to operate in a streaming fashion, reading from and writing to disk as necessary.
 
 ### Inputs and Outputs
-*   **Input**: A triangle mesh (with optional bounding box) and available memory size.
-*   **Output**: A Sparse Voxel Octree (SVO) written to disk/output stream.
-*   **Intermediate**: A high-resolution 3D voxel grid in Morton order, stored on disk.
+*   **Input**: A triangle mesh (with optional vertex attributes for appearance variants) and the available main memory size.
+*   **Output**: A serialized Sparse Voxel Octree (SVO) written to disk.
+*   **Intermediate Data**: A high-resolution 3D voxel grid, stored on disk in Morton order. Only non-empty cells are explicitly stored in the stream to save space, though the full grid structure is implied by the Morton codes [S1].
 
 ### Data Structures
-1.  **Subgrid Partition**: A temporary on-disk storage of triangle mesh partitions, where each partition contains triangles overlapping a specific subgrid of the voxel grid.
+1.  **Subgrid Partition**: A temporary file on disk storing the subset of triangles intersecting a specific subgrid of the voxel grid.
 2.  **Level Queues**: An array of queues, one for each level of the octree. Each queue holds at most $2^d$ nodes (where $d=3$ for 3D, so max 8 nodes per level) [S1].
-3.  **SVO Node**: Represents a voxel or internal node. Contains the Morton code and pointers/indices to children (if internal) or data (if leaf).
+3.  **SVO Node**: Represents a voxel or internal node. Contains the Morton code and metadata (e.g., child pointers or data). The output SVO is written with good locality of reference, storing siblings next to each other [S1].
 
 ### Parameters
-*   **Grid Resolution**: Must be a power of two (e.g., $2048^3$) to ensure subgrids correspond to contiguous ranges in Morton order [S1].
-*   **Subgrid Size**: Determined by regularly subdividing the high-resolution grid until a single subgrid fits in available memory [S1].
-*   **Voxelization Method**: 6-separability surface voxelization [S1].
+*   **Grid Resolution**: The intermediate voxel grid uses a power-of-two resolution (e.g., $2048^3$) [S1].
+*   **Subgrid Size**: Determined by subdividing the high-resolution grid until a single subgrid fits within the available main memory [S1].
+*   **Queue Capacity**: $2^d$ nodes per level (8 for 3D) [S1].
 
-### Steps
+### Algorithm Steps
 
-#### Phase 1: Voxelization (Streaming)
+#### Phase 1: Voxelization
+The goal is to produce the intermediate voxel grid in Morton order.
 
 1.  **Partitioning**:
-    *   Determine subgrid dimensions by subdividing the total bounding box until the voxel grid for one subgrid fits in memory [S1].
-    *   Iterate through all subgrids in Morton order.
-    *   For each subgrid, test every triangle in the input mesh against the subgrid's Axis-Aligned Bounding Box (AABB).
-    *   Store triangles that overlap the subgrid into a temporary partition file on disk [S1].
+    *   Determine the bounding box of the triangle mesh. If not given, compute it in a streaming manner [S1].
+    *   Subdivide the high-resolution 3D voxel grid into subgrids. The subdivision depth is chosen such that each subgrid fits in available memory [S1].
+    *   For each subgrid, test every triangle in the mesh against the subgrid's axis-aligned bounding box (AABB).
+    *   Store the triangles intersecting each subgrid into a separate temporary file on disk. This creates a partitioned triangle mesh [S1].
 
 2.  **Actual Voxelization**:
-    *   Iterate through subgrids in Morton order.
+    *   Process the subgrids in Morton order (Z-order) [S1].
     *   For each subgrid, load its corresponding triangle partition from disk into memory.
-    *   Voxelize the triangles using the 6-separability surface voxelization variant of Huang et al. [1998] [S1]. This method processes triangles independently, allowing streaming [S1].
-    *   Output only the Morton codes of non-empty cells to the intermediate voxel grid file. Do not output boolean values for empty cells [S1].
-    *   Clear the triangle partition from memory before proceeding to the next subgrid [S1].
+    *   Voxelize the triangles using the 6-separability surface voxelization variant of Huang et al. [1998] [S1]. This method processes triangles independently, supporting streaming [S1].
+    *   For each non-empty voxel cell found, compute its Morton code.
+    *   Write the Morton codes of these non-empty cells to the intermediate output stream. Do not output boolean values for empty cells [S1].
 
-#### Phase 2: SVO Construction (Streaming)
+#### Phase 2: SVO Construction
+The goal is to build the octree from the stream of Morton codes using a bottom-up approach. The key insight is that Morton order corresponds to a post-order depth-first traversal of the octree nodes [S1].
 
-The construction relies on the property that Morton order corresponds to a post-order depth-first traversal of the octree nodes [S1].
-
-1.  **Initialization**:
-    *   Create an array of queues `Q[0...L]`, where $L$ is the maximum depth of the octree.
-    *   Open the intermediate voxel grid file for reading.
-    *   Open the SVO output file for writing.
-
-2.  **Processing Levels**:
-    *   Let `current_level` be the leaf level (deepest level).
-    *   Read Morton codes from the input stream.
-    *   Store each read Morton code into `Q[current_level]`.
-    *   If `Q[current_level]` contains $2^d$ nodes (i.e., a full set of siblings):
-        *   Create a new internal node with the parent's Morton code (derived from the children's codes).
-        *   Store this internal node in `Q[current_level - 1]`.
-        *   Record the parent-child relationship (typically by writing children to output before creating the parent, or by storing indices).
-        *   Write all non-empty nodes currently in `Q[current_level]` to the SVO output file.
-        *   Clear `Q[current_level]`.
-        *   If `current_level > 0`, decrement `current_level`.
-        *   Repeat reading from input into the new `current_level` queue.
-
-3.  **Completion**:
-    *   Repeat the level-up process until the root node (level 0) is created.
-    *   Write the root node to the output file.
-    *   Clear `Q[0]` [S1].
+1.  **Initialization**: Create an array of queues, one for each level of the octree. Initialize all queues as empty.
+2.  **Streaming Construction**:
+    *   Read the next Morton code from the intermediate voxel grid stream.
+    *   Determine the level of the leaf node corresponding to this Morton code (based on the resolution of the intermediate grid).
+    *   Store this node in the queue corresponding to that level.
+    *   **Check for Parent Completion**: If a queue for level $L$ is full (contains $2^d$ nodes), it implies all children for a parent at level $L-1$ have been processed.
+        *   Create an internal node for the parent at level $L-1$. Its Morton code is derived from the children's codes (e.g., by shifting right by $d$ bits).
+        *   Store this parent node in the queue for level $L-1$.
+        *   Record the parent-child relationship (e.g., by writing the parent's pointer or index to the children nodes before they are flushed, or by maintaining a mapping) [S1].
+        *   Write all non-empty nodes currently in the queue for level $L$ to the final SVO output.
+        *   Clear the queue for level $L$.
+3.  **Termination**:
+    *   Repeat steps 2 until the root node (level 0) is created.
+    *   Write the root node to the output.
+    *   Clear the root's queue [S1].
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def out_of_core_svo_construction(triangle_mesh, memory_limit):
+def out_of_core_svo_construction(triangle_mesh, available_memory):
     # Phase 1: Voxelization
-    # Determine subgrid size based on memory_limit
-    subgrid_size = determine_subgrid_size(memory_limit)
-    total_resolution = 2048  # Example power-of-two resolution
-    num_subgrids = total_resolution / subgrid_size
+    # 1. Determine grid resolution (power of 2) and subgrid size
+    grid_res = determine_power_of_two_resolution(triangle_mesh.bounding_box)
+    subgrid_size = determine_subgrid_size(grid_res, available_memory)
     
-    # Step 1: Partition triangles
-    # Create temporary files for each subgrid
-    partitions = [open(f"partition_{i}.bin", "wb") for i in range(num_subgrids)]
+    # 2. Partition triangles by subgrid
+    # Subgrids are processed in Morton order to ensure output order
+    subgrids = generate_subgrids(grid_res, subgrid_size)
+    triangle_partitions = []
     
-    for tri in triangle_mesh:
-        # Find all subgrids overlapping tri.aabb
-        overlapping_subgrids = get_overlapping_subgrids(tri.aabb, subgrid_size, total_resolution)
-        for sg_idx in overlapping_subgrids:
-            write_triangle(partitions[sg_idx], tri)
+    for subgrid in subgrids:
+        # Test each triangle against subgrid AABB
+        intersecting_triangles = [t for t in triangle_mesh.triangles 
+                                  if intersects_aabb(t, subgrid.aabb)]
+        triangle_partitions.append(intersecting_triangles)
+        
+    # 3. Voxelize and produce Morton codes stream
+    voxel_stream = []
+    for i, subgrid in enumerate(subgrids):
+        triangles = triangle_partitions[i]
+        # Voxelize using Huang et al. 6-separability method
+        non_empty_cells = voxelize_triangles(triangles, subgrid)
+        
+        # Compute Morton codes for non-empty cells
+        for cell in non_empty_cells:
+            morton_code = compute_morton_code(cell.coordinates, grid_res)
+            voxel_stream.append(morton_code)
             
-    for p in partitions:
-        p.close()
-        
-    # Step 2: Voxelize subgrids in Morton order
-    intermediate_grid_file = open("intermediate_grid.bin", "wb")
-    
-    # Generate Morton order indices for subgrids
-    subgrid_morton_order = get_morton_order(num_subgrids, subgrid_size)
-    
-    for sg_idx in subgrid_morton_order:
-        partition_file = open(f"partition_{sg_idx}.bin", "rb")
-        triangles = read_triangles(partition_file)
-        partition_file.close()
-        
-        # Voxelize triangles in this subgrid
-        # Output only Morton codes of non-empty cells
-        for tri in triangles:
-            voxels = voxelize_triangle_6_separability(tri, sg_idx, subgrid_size)
-            for v in voxels:
-                write_morton_code(intermediate_grid_file, v.morton_code)
-                
-    intermediate_grid_file.close()
-    
     # Phase 2: SVO Construction
-    # Open intermediate grid for reading
-    grid_reader = open("intermediate_grid.bin", "rb")
-    svo_writer = open("output_svo.bin", "wb")
+    # Initialize queues for each level
+    # Max levels = log2(grid_res)
+    num_levels = int(log2(grid_res))
+    queues = [Queue() for _ in range(num_levels + 1)]
     
-    # Determine max depth based on resolution and subgrid size
-    max_depth = log2(total_resolution) - log2(subgrid_size)
-    queues = [Queue() for _ in range(max_depth + 1)]
-    
-    current_level = max_depth
-    
-    while True:
-        # Read nodes for current level
-        while len(queues[current_level]) < 8:
-            try:
-                m_code = read_morton_code(grid_reader)
-                queues[current_level].push(m_code)
-            except EOFError:
-                break
+    # Process stream
+    for morton_code in voxel_stream:
+        # Determine leaf level (deepest level)
+        leaf_level = num_levels
+        
+        # Add to leaf queue
+        queues[leaf_level].enqueue(Node(morton_code))
+        
+        # Check if queues are full and promote to parents
+        for level in range(leaf_level, 0, -1):
+            if queues[level].size() == 8: # 2^d for 3D
+                # All 8 children processed
+                children = [queues[level].dequeue() for _ in range(8)]
                 
-        # If queue is full, promote to parent
-        if len(queues[current_level]) == 8:
-            # Create parent node
-            parent_m_code = get_parent_morton_code(queues[current_level].get_all())
+                # Create parent node
+                # Parent Morton code is child code >> 3
+                parent_morton = children[0].morton_code >> 3
+                parent_node = InternalNode(parent_morton, children)
+                
+                # Record parent-child relation
+                # (Implementation detail: store parent pointer in children 
+                # or write parent to output after children)
+                for child in children:
+                    child.parent = parent_node
+                
+                # Write children to output SVO
+                for child in children:
+                    write_to_svo_output(child)
+                    
+                # Enqueue parent
+                queues[level - 1].enqueue(parent_node)
+                
+    # Handle remaining nodes in queues (should be just root eventually)
+    for level in range(num_levels, -1, -1):
+        while not queues[level].is_empty():
+            node = queues[level].dequeue()
+            write_to_svo_output(node)
             
-            # Write children to output
-            for child_m_code in queues[current_level].get_all():
-                write_node(svo_writer, child_m_code, is_leaf=True)
-                
-            # Clear child queue
-            queues[current_level].clear()
-            
-            # Add parent to parent's queue
-            if current_level > 0:
-                queues[current_level - 1].push(parent_m_code)
-                current_level -= 1
-            else:
-                # Root node
-                write_node(svo_writer, parent_m_code, is_leaf=False)
-                break
-                
-    grid_reader.close()
-    svo_writer.close()
+    return "SVO constructed"
+
+def compute_morton_code(coordinates, resolution):
+    # Interleave bits of x, y, z coordinates
+    x, y, z = coordinates
+    # Standard bit-interleaving algorithm
+    m = 0
+    for i in range(int(log2(resolution))):
+        m |= ((x & (1 << i)) << (2*i)) | \
+             ((y & (1 << i)) << (2*i + 1)) | \
+             ((z & (1 << i)) << (2*i + 2))
+    return m
 ```
 
 ### Edge Cases and Pitfalls
-*   **Empty Subgrids**: If a subgrid contains no triangles, it produces no Morton codes. The SVO construction must handle gaps in the Morton code stream correctly, ensuring that sibling relationships are maintained even if some children are missing (though the queue logic assumes full sets of 8 for promotion; missing children are implicitly empty and not written to the SVO, but the parent is still created if *any* child exists? The source implies processing "cells with Morton codes... stored in queue". If a queue doesn't fill up because of missing siblings, the parent is not created until the next batch? The source states "When a parent node's children... are processed". This implies the algorithm relies on the *stream* providing the codes. If a subgrid is empty, no codes are emitted. The algorithm must handle the case where a level's queue does not fill up with 8 nodes before moving to the next subgrid? Actually, the source says "Read cells... corresponding to the current level's leaf nodes... store in queue". If the input stream is sparse, the queue might not fill. The source example uses a $2048^3$ grid and processes level-2 nodes. It assumes the input is the *full* stream of non-empty cells. If siblings are missing, they are simply not in the queue. The parent is created only when *all* existing children of that parent in the stream are processed? The source says "When a parent node's children (all nodes in the current level's queue) are processed". This phrasing is ambiguous. It likely means: when the queue for a level contains a complete set of 8 siblings *or* when the stream moves to the next block of 8? Given the Morton order property, siblings are contiguous. If some are empty, they are skipped in the stream. The algorithm must detect when a set of 8 potential siblings has been fully scanned (including empties) to create the parent. However, the source notes "Output only the Morton codes of the non-empty cells". This suggests the queue logic might need to account for missing siblings. The source pseudocode description says "Read cells... store in queue... When a parent node's children... are processed". This implies the queue holds the *non-empty* children. If a parent has only 1 non-empty child, the queue for that level will have 1 item. It will never reach 8. Thus, the parent is created when the *next* sibling block starts? Or is the parent created immediately? The source says "Write all non-empty nodes currently in the child's queue to the output. Clear the child's queue." This happens when the parent is created. The parent is created when the children are "processed". This implies the parent is created *after* all its children (even empty ones) are accounted for. Since empty ones are not in the stream, the algorithm must know when a block of 8 is complete. This is handled by the Morton order: the codes are contiguous. If the next code is not a sibling of the current ones, the previous block is complete. [G]: The implementation must track the expected Morton code range for the current block of 8 siblings. When the next read code falls outside this range, the current block is complete, and the parent is created.
-*   **Precision**: Morton codes for large grids require 64-bit integers.
-*   **Boundaries**: The bounding box of the mesh must be known or computed in a streaming manner [S1].
+*   **Empty Nodes**: The voxelization phase only outputs Morton codes for non-empty cells. The SVO construction relies on the fact that if a queue fills up, all 8 children must have been present in the stream (either as non-empty leaves or as internal nodes from deeper levels). If the input stream is not strictly Morton-ordered, this logic fails [S1].
+*   **Memory Limits**: The subgrid size must be carefully calculated to ensure that the triangle partition for a subgrid fits in memory along with the voxelization buffers [S1].
+*   **Precision**: Morton codes for high-resolution grids (e.g., $2048^3$) require 30 bits. Ensure integer types are large enough (e.g., 32-bit or 64-bit integers) [S1].
 
 ## Subtopics
 
 ### [Sparse Voxel Octree Construction (Basic Version)](1694-sparse-voxel-octree-construction-basic-version.md)
-This variant builds a hierarchical SVO from a stream of voxelized data (Morton codes) by maintaining a set of queues per depth level and merging nodes when queues fill up. It differs from [Brute Force SVO Construction](1704-brute-force-svo-construction.md) by processing input in a streaming, bottom-up manner that avoids storing the full octree in memory, and from [Sparse Voxel Octree Construction via Morton Code Sorting](2227-sparse-voxel-octree-construction-via-morton-code-sorting.md) by not requiring a global sort of all points before construction. Trade-offs include higher memory usage compared to optimized variants due to processing empty nodes, but it offers a straightforward implementation for out-of-core construction.
+Builds an SVO from a stream of Morton codes using queues per level. It differs from the main method by assuming the input stream is already available and does not handle the disk-based partitioning of the voxelization phase. It is simpler but not fully out-of-core for the voxelization step.
 
 ### [Morton-Partitioned Triangle Voxelization](7460-morton-partitioned-triangle-voxelization.md)
-This is a streaming voxelization pipeline that constructs an SVO from a triangle mesh by processing a high-resolution 3D grid in Morton order. It partitions the voxel grid into subgrids, assigns triangles to subgrids via AABB overlap, and marks voxels using triangle-box intersection tests. It sets itself apart from [Sparse Voxel Octree Construction (Basic Version)](1694-sparse-voxel-octree-construction-basic-version.md) by managing memory usage logarithmically through out-of-core partitioning, allowing the construction of large SVOs that exceed available RAM.
+A streaming voxelization pipeline that constructs an SVO from a triangle mesh by processing a high-resolution 3D grid in Morton order. It sets itself apart by managing memory usage logarithmically through out-of-core partitioning, allowing the construction of large SVOs that exceed available RAM.
 
 ### [Out-of-Core Octree Construction](9038-out-of-core-octree-construction.md)
-An incremental out-of-core algorithm to build an octree where leaves contain the geometry of a given dataset, designed for datasets larger than main memory. It partitions the model into manageable pieces stored on disk, allowing the octree to be constructed directly on a machine with small memory without holding the entire dataset in main memory. Unlike in-core brute-force approaches or algorithms that build from leaves upward, this method builds from the root downward, splitting leaves that exceed a primitive count limit, and ensures that each section insertion reads any affected node at most once.
+An incremental out-of-core algorithm to build an octree where leaves contain geometry. It builds from the root downward, splitting leaves that exceed a primitive count limit. Unlike the main method which builds bottom-up from a voxel grid, this method builds top-down from primitives.
 
 ### [Grid-Free Out-Of-Core Voxelization to Sparse Voxel Octrees](9464-grid-free-out-of-core-voxelization-to-sparse-voxel-octrees.md)
-A stream-based out-of-core voxelization technique that processes triangles and voxels in batches to build SVOs on the GPU, avoiding grid-based structures and atomic operations by predicting voxel counts and using Morton ordering. It differs from grid-based out-of-core methods by maintaining no global occupancy grid, instead using a Morton queue to manage voxel locality across batch boundaries.
-
-### Out-of-Core Voxelization with Appearance Data
-An extension of the out-of-core SVO construction that handles appearance data (colors, normals, texture coordinates) by interpolating vertex attributes during voxelization and propagating them to higher levels of the octree, provided the data is available locally [S1].
-
-### Sparse-Voxel-Octree (SVO) Voxelization
-A variant of voxel cone tracing that uses an SVO instead of a regular 3D texture to store lighting data, reducing GPU memory usage by dynamically instantiating nodes [S2, unofficial]. The voxelization procedure undergoes three rasterization passes, once for each spatial axis [S2, unofficial]. The SVO structure is a tree-like hierarchy where each internal node has exactly eight children [S2, unofficial]. Storing lighting data in a sparse octree is significantly more challenging to implement and navigate compared to a regular grid [S2, unofficial].
+A stream-based out-of-core voxelization technique that processes triangles and voxels in batches to build SVOs on the GPU. It differs by maintaining no global occupancy grid and using a Morton queue to manage voxel locality across batch boundaries.
 
 ## Operating characteristics
-*   **Time Complexity**: The voxelization phase is linear in the number of triangles and subgrids. The SVO construction phase is linear in the number of non-empty voxels in the intermediate grid.
-*   **Space Complexity**: Logarithmic in the size of the SVO [S1]. The memory usage is dominated by the size of one subgrid's voxel grid and the level queues (max 8 nodes per level) [S1].
-*   **Measured Performance**: On a Dell Precision T7500 workstation (Intel Xeon X5650, 7200 RPM SATA II disk), the method constructed SVOs from the David and San Miguel models using only a fraction of the memory required by in-core algorithms in roughly the same time [S1].
-*   **Strengths**: Handles extremely large triangle meshes; memory usage is independent of the total scene size (only depends on subgrid size); streaming-friendly.
-*   **Limitations**: Requires disk I/O for intermediate data; relies on power-of-two resolutions; complex implementation compared to in-core methods.
-*   **When to use**: When the scene size exceeds available RAM.
-*   **When not to use**: When memory is sufficient for in-core construction, as in-core methods may be faster due to reduced I/O overhead.
+*   **Time Complexity**: Linear with respect to the number of triangles and the number of non-empty voxels in the intermediate grid, assuming efficient Morton code computation and sorting (implicit in the streaming order) [S1].
+*   **Space Complexity**: Logarithmic in the size of the SVO. The memory usage is bounded by the size of the largest subgrid (for voxelization) and the number of levels in the octree (for construction, using queues of size 8 per level) [S1].
+*   **Measured Performance**: On a Dell Precision T7500 workstation (Intel Xeon X5650, 7200 RPM SATA II disk), the method constructed SVOs from large triangle meshes (e.g., San Miguel scene) using only a fraction of the memory required by in-core algorithms, in roughly the same time [S1].
+*   **Strengths**: Handles extremely large scenes; memory usage is predictable and small; streaming-friendly.
+*   **Limitations**: Requires disk I/O for intermediate data; relies on power-of-two resolutions for Morton order contiguity; voxelization quality depends on the chosen algorithm (e.g., Huang et al.) [S1].
 
 ## Background
-The method was introduced by Bekaert et al. in 2013 [S1]. It addresses the limitation of previous top-down methods like Laine and Karras [2010a], which were not out-of-core because the initial build data for the root node could be arbitrarily large [S1]. The algorithm builds on the concept of Morton order (Z-order curve) to ensure spatial locality, allowing efficient streaming and sorting [S1]. It is used in volume rendering pipelines for large-scale scenes, such as in voxel cone tracing for global illumination [S2, unofficial].
+The method was introduced by [Bittner et al. (2013)](https://graphics.cs.kuleuven.be/publications/BLD13OCCSVO/BLD13OCCSVO_paper.pdf) to address the need for constructing SVOs from triangle meshes for large-scale rendering systems. Previous methods, such as [Laine and Karras 2010a](link-to-laine-karras), were not out-of-core because the initial build data for the root node could be arbitrarily large. This method leverages the properties of Morton order to enable a streaming, bottom-up construction process [S1].
 
 ## Sources
 [S1] Out-of-Core Construction of Sparse Voxel Octrees, https://graphics.cs.kuleuven.be/publications/BLD13OCCSVO/BLD13OCCSVO_paper.pdf, fetched 2026-10-27

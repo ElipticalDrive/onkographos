@@ -1,0 +1,89 @@
+# Codebook Sharing
+
+Also called: Shared Codebook, Universal Codebook
+
+## Overview
+Codebook sharing is a technique to reduce memory usage by reusing a single codebook across all tree levels for smooth data (distance fields, light maps) via scaling, or across similar images via a universal codebook trained on a reference image [S1, unofficial]. It sets itself apart from standard Vector Quantization by eliminating the need to store separate codebooks for each level of detail or distinct image, leveraging the spatial coherence or content similarity of the data [S1, unofficial].
+
+## How it works
+**Inputs and outputs:**
+*   **Inputs:** A hierarchical dataset (e.g., distance fields, light maps) or a set of similar images; a reference image for universal codebook training.
+*   **Outputs:** A shared codebook $r$ and, for each level, the scaling factors or modulated codevectors required for reconstruction.
+
+**Data structures:**
+*   **Shared Codebook $r$:** A table of codevectors. For smooth data, the memory size is approximately 1 KB [S1, unofficial]. For a single-channel image, a standard codebook is 3 KB, but the shared version is 1 KB [S1, unofficial].
+*   **Scaling Factor:** A scalar value computed per level to adapt the shared codebook.
+
+**Steps:**
+1.  **Construct the shared codebook $r$ at the finest level.** This is done using standard Vector Quantization on the residuals of the finest level data [S1, unofficial].
+2.  **Compute scaling factors for coarser levels.** For each coarser level, compute the scaling factor as the ratio of the norm of the image residuals relative to the norm of the shared codebook:
+    $$ s = \frac{\|r_{\text{level}}\|}{\|r\|} $$
+    where $r_{\text{level}}$ represents the residuals at the current level and $r$ is the shared codebook [S1, unofficial].
+3.  **Apply scaling to codevectors.** Multiply each codevector in the shared codebook $r$ by the scaling factor $s$ to adapt it for the current level [S1, unofficial].
+
+**Parameters:**
+*   **Memory size of shared codebook for smooth data:** 1 KB [S1, unofficial].
+*   **Memory size of single-channel image codebook:** 3 KB [S1, unofficial].
+
+**Edge cases and pitfalls:**
+*   **Universal codebooks do not extend well to dissimilar light maps or color images.** They are effective for distance fields with a universal codebook trained on a specific image, but fail when applied to dissimilar content [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_shared_codebook(data_levels):
+    """
+    data_levels: list of arrays, where data_levels[0] is the finest level.
+    Returns: shared_codebook, scaling_factors
+    """
+    # Step 1: Construct shared codebook at finest level
+    finest_residuals = data_levels[0]
+    shared_codebook = vector_quantize(finest_residuals) # Standard VQ implementation
+    
+    scaling_factors = [1.0] # Finest level uses codebook as-is
+    
+    # Step 2 & 3: Compute scaling and apply for coarser levels
+    for level_data in data_levels[1:]:
+        level_residuals = level_data # Assuming residuals are pre-computed or derived
+        # Compute scaling factor
+        norm_shared = norm(shared_codebook)
+        norm_level = norm(level_residuals)
+        
+        if norm_shared == 0:
+            scale = 0.0
+        else:
+            scale = norm_level / norm_shared
+            
+        scaling_factors.append(scale)
+        
+    return shared_codebook, scaling_factors
+
+def reconstruct_level(shared_codebook, scaling_factor, indices):
+    """
+    Reconstruct data for a specific level using the shared codebook and scaling.
+    """
+    # Retrieve codevectors
+    codevectors = shared_codebook[indices]
+    # Apply scaling
+    scaled_codevectors = codevectors * scaling_factor
+    return scaled_codevectors
+```
+
+## Subtopics
+
+### Coherent Basis Modulation
+A module that produces a level-specific version of the codebook $C^{(\ell)}$ for LOD $\ell$ by fine-tuning or modulating entries of a global foundational codebook $C$, preserving structural relationships while tailoring features to detail requirements [S2]. It differs from simple scaling by allowing non-linear adaptation of codebook entries through fine-tuning [S2]. Choose this when preserving learned structural relationships between anchors is critical while adapting to specific detail levels [S2].
+
+## Operating characteristics
+*   **Memory:** Reduces memory usage significantly for smooth data. A shared codebook for smooth data requires only 1 KB, compared to 3 KB for a single-channel image codebook [S1, unofficial].
+*   **Performance:** Compression times range from 2 to 10 minutes, with most time spent in VQ optimization [S1, unofficial].
+*   **Limitations:** Universal codebooks do not work well for dissimilar light maps or color images [S1, unofficial].
+*   **Use cases:** Best suited for distance fields and light maps where data residuals are extremely autosimilar across levels [S1, unofficial].
+
+## Background
+Originated in the work of S. Lefebvre & H. Hoppe, "Compressed Random-Access Trees for Spatially Coherent Data" [S1, unofficial]. It is used in the context of tree-based compression for spatially coherent data, including light maps, alpha mattes, distance fields, and high-dynamic-range images [S1, unofficial].
+
+## Sources
+[S1] Compressed Random-Access Trees for Spatially Coherent Data, https://doi.org/10.2312/egwr/egsr07/339-349, fetched 2026-10-26 (unofficial)
+[S2] Unfolding 3D Gaussian Splatting via Iterative Gaussian Synopsis., https://doi.org/10.1109/tvcg.2026.3746672, fetched 2026-10-26

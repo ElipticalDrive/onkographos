@@ -1,0 +1,261 @@
+--- v003.md
++++ v004.md
+@@ -8,10 +8,10 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Ray origin ($O$), ray direction ($D$), current surface position, LPV texture (indirect lighting data), voxel mask grid (`imgVoxelMask`).
+-*   **Output:** Indirect lighting color (for GI) or reflected color (for specular fallback).
++*   **Input:** Ray origin ($O$), ray direction ($D$), current surface position, LPV texture (indirect lighting data), voxel mask grid (`imgVoxelMask`) [S1, unofficial].
++*   **Output:** Indirect lighting color (for GI) or reflected color (for specular fallback) [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Voxel Grid:** A 128³ block-occupancy grid stored in `imgVoxelMask` [S1, unofficial]. Populated each frame in the shadow pass [S1, unofficial].
+-*   **LPV Buffer:** Light Propagation Volumes data, accessed via image load/store [S1, unofficial].
++*   **Voxel Grid:** A 128³ block-occupancy grid stored in `imgVoxelMask`, populated each frame in the shadow pass [S1, unofficial].
++*   **LPV Buffer:** Light Propagation Volumes data, accessed via `GL_ARB_shader_image_load_store` [S1, unofficial].
+ 
+ **Parameters:**
+@@ -23,141 +23,118 @@
+ 
+ **Algorithm Steps:**
++1.  **VoxelDDA Traversal:** Perform 3-D DDA traversal over the voxel grid. Handle grid bounds and sign-safe boundary distances. Include ray bias to avoid self-intersection and handle near-parallel rays gracefully. Return the face-centre position and the axis-aligned normal of the hit voxel [S1, unofficial].
++2.  **SampleVoxelLighting:** Read the LPV data half a block in front of the hit face. This obtains the indirect color at the surface from propagated light [S1, unofficial].
++3.  **ApplyVoxelRT (GI Mode):** Trace `VOXEL_GI_SAMPLES` cosine-weighted hemisphere rays from the surface. For each ray, use `VoxelDDA` to find a hit. If a hit occurs, use `SampleVoxelLighting` to get the LPV color. Blend the sky contribution with the LPV color bounce at the hit surfaces [S1, unofficial].
++4.  **VoxelReflectionFallback (Specular Mode):** Perform a single specular DDA ray trace. Activated only when screen-space reflection misses (indicated by `environmentReflection.a < 1`). Scale the voxel lighting to match typical sky-reflection brightness ranges to avoid visual mismatch. Fill in the LPV-sampled voxel color [S1, unofficial].
+ 
+-1.  **VoxelDDA Traversal:** Perform 3-D DDA traversal over the voxel grid.
+-    *   Handle grid bounds and sign-safe boundary distances [S1, unofficial].
+-    *   Include ray bias to avoid self-intersection and handle near-parallel rays gracefully [S1, unofficial].
+-    *   Return the face-centre position and the axis-aligned normal of the hit voxel [S1, unofficial].
+-
+-2.  **SampleVoxelLighting:**
+-    *   Read the LPV data half a block in front of the hit face [S1, unofficial].
+-    *   This obtains the indirect color at the surface from propagated light [S1, unofficial].
+-
+-3.  **ApplyVoxelRT (GI Mode):**
+-    *   Trace `VOXEL_GI_SAMPLES` cosine-weighted hemisphere rays from the surface [S1, unofficial].
+-    *   For each ray, use `VoxelDDA` to find a hit.
+-    *   If a hit occurs, use `SampleVoxelLighting` to get the LPV color.
+-    *   Blend the sky contribution with the LPV color bounce at the hit surfaces [S1, unofficial].
+-
+-4.  **VoxelReflectionFallback (Specular Mode):**
+-    *   Perform a single specular DDA ray trace [S1, unofficial].
+-    *   Activated only when screen-space reflection misses (indicated by `environmentReflection.a < 1`) [S1, unofficial].
+-    *   Scale the voxel lighting to match typical sky-reflection brightness ranges to avoid visual mismatch [S1, unofficial].
+-    *   Fill in the LPV-sampled voxel color [S1, unofficial].
++**Formulas:**
++*   Voxel size: $s = 1 / \text{VOXEL\_GRID\_SIZE}$
++*   Initial cell: $i_x = \lfloor O_x / s \rfloor$, $i_y = \lfloor O_y / s \rfloor$, $i_z = \lfloor O_z / s \rfloor$
++*   Step direction: $step_x = \text{sign}(D_x)$, $step_y = \text{sign}(D_y)$, $step_z = \text{sign}(D_z)$
++*   Distance to next boundary: $tMax_x = ((i_x + \max(step_x, 0)) \cdot s - O_x) / D_x$ (similarly for $y, z$)
++*   Step increment: $tDelta_x = s / |D_x|$ (similarly for $y, z$)
++*   Hit position: $P = O + D \cdot \min(tMax_x, tMax_y, tMax_z)$
++*   Hit normal: $N = (-step_x, -step_y, -step_z)$ along the axis that produced the minimum $tMax$
+ 
+ **Pseudocode:**
++```python
++# Standard math/vector operations assumed available [G]
++import math
+ 
+-```python
+-# Constants
+-VOXEL_GRID_SIZE = 128
+-VOXEL_GI_SAMPLES = 4
+-VOXEL_GI_STEPS = 16 # Example default, configurable
+-VOXEL_REFL_STEPS = 16 # Example default, configurable
+-RAY_BIAS = 1e-4 # Small epsilon for self-intersection avoidance
++def is_voxel_occupied(ix, iy, iz, grid):
++    """Checks occupancy in the 128³ imgVoxelMask grid."""
++    return grid[ix][iy][iz] > 0
+ 
+-def VoxelDDA(origin, direction, max_steps):
+-    """
+-    Performs 3D DDA traversal on the voxel grid.
+-    Returns (hit_position, hit_normal) or (None, None) if no hit.
+-    """
+-    # Map origin to initial voxel coordinates
+-    voxel_x = floor(origin.x * VOXEL_GRID_SIZE)
+-    voxel_y = floor(origin.y * VOXEL_GRID_SIZE)
+-    voxel_z = floor(origin.z * VOXEL_GRID_SIZE)
+-    
+-    # Check if origin is inside the grid bounds
+-    if not (0 <= voxel_x < VOXEL_GRID_SIZE and 
+-            0 <= voxel_y < VOXEL_GRID_SIZE and 
+-            0 <= voxel_z < VOXEL_GRID_SIZE):
++def cosine_weighted_hemisphere_sample(normal):
++    """Generates a random direction on the hemisphere oriented by normal [G]."""
++    # Standard rejection sampling or spherical coordinate mapping [G]
++    u = math.random()
++    v = math.random()
++    phi = 2.0 * math.pi * u
++    cos_theta = math.sqrt(v)
++    sin_theta = math.sqrt(1.0 - v)
++    # Rotate to align with normal [G]
++    return vec3(sin_theta * math.cos(phi), sin_theta * math.sin(phi), cos_theta)
++
++def texture_3d(tex, uv):
++    """Standard 3D texture fetch [G]."""
++    return tex.sample(uv)
++
++def VoxelDDA(origin, direction, max_steps, grid, grid_size=128, voxel_size=1.0/128.0):
++    ix = int(math.floor(origin.x / voxel_size))
++    iy = int(math.floor(origin.y / voxel_size))
++    iz = int(math.floor(origin.z / voxel_size))
++
++    if not (0 <= ix < grid_size and 0 <= iy < grid_size and 0 <= iz < grid_size):
+         return None, None
+ 
+-    # Calculate tMax and tDelta for each axis
+-    # Note: Exact implementation depends on grid spacing and ray direction sign
+-    # tDeltaX = dx / |dir_x|, etc.
+-    # tMaxX = (boundary_x - origin_x) / dir_x
+-    # Adjust tMax by RAY_BIAS to avoid self-intersection
+-    
+-    for step in range(max_steps):
+-        # Check occupancy of current voxel
+-        if is_voxel_occupied(voxel_x, voxel_y, voxel_z):
+-            # Calculate hit position on the face
+-            # This requires tracking the specific tMax that caused the step
+-            hit_pos = origin + direction * current_t_max
+-            hit_normal = get_axis_normal(voxel_x, voxel_y, voxel_z, current_t_max)
++    dx, dy, dz = direction.x, direction.y, direction.z
++    tDeltaX = voxel_size / abs(dx) if dx != 0 else float('inf')
++    tDeltaY = voxel_size / abs(dy) if dy != 0 else float('inf')
++    tDeltaZ = voxel_size / abs(dz) if dz != 0 else float('inf')
++
++    stepX = 1 if dx > 0 else (-1 if dx < 0 else 0)
++    stepY = 1 if dy > 0 else (-1 if dy < 0 else 0)
++    stepZ = 1 if dz > 0 else (-1 if dz < 0 else 0)
++
++    tMaxX = ((ix + max(stepX, 0)) * voxel_size - origin.x) / dx if dx != 0 else float('inf')
++    tMaxY = ((iy + max(stepY, 0)) * voxel_size - origin.y) / dy if dy != 0 else float('inf')
++    tMaxZ = ((iz + max(stepZ, 0)) * voxel_size - origin.z) / dz if dz != 0 else float('inf')
++
++    # Ray bias to avoid self-intersection
++    tMaxX += 1e-4
++    tMaxY += 1e-4
++    tMaxZ += 1e-4
++
++    for _ in range(max_steps):
++        if is_voxel_occupied(ix, iy, iz, grid):
++            tHit = min(tMaxX, tMaxY, tMaxZ)
++            hit_pos = origin + direction * tHit
++            if tHit == tMaxX:
++                hit_normal = vec3(-stepX, 0, 0)
++            elif tHit == tMaxY:
++                hit_normal = vec3(0, -stepY, 0)
++            else:
++                hit_normal = vec3(0, 0, -stepZ)
+             return hit_pos, hit_normal
+-        
+-        # Advance to nearest boundary
+-        # Determine which axis has the smallest tMax
++
+         if tMaxX < tMaxY and tMaxX < tMaxZ:
+-            voxel_x += step_x
++            ix += stepX
+             tMaxX += tDeltaX
+         elif tMaxY < tMaxZ:
+-            voxel_y += step_y
++            iy += stepY
+             tMaxY += tDeltaY
+         else:
+-            voxel_z += step_z
++            iz += stepZ
+             tMaxZ += tDeltaZ
+-            
+-        # Check bounds
+-        if not (0 <= voxel_x < VOXEL_GRID_SIZE and 
+-                0 <= voxel_y < VOXEL_GRID_SIZE and 
+-                0 <= voxel_z < VOXEL_GRID_SIZE):
++
++        if not (0 <= ix < grid_size and 0 <= iy < grid_size and 0 <= iz < grid_size):
+             break
+-            
++
+     return None, None
+ 
+-def SampleVoxelLighting(hit_position, hit_normal):
+-    """
+-    Reads LPV data half a block in front of the hit face.
+-    """
+-    # Offset position by half a voxel in the direction of the normal
+-    voxel_size = 1.0 / VOXEL_GRID_SIZE
++def SampleVoxelLighting(hit_position, hit_normal, LPV_texture, grid_size=128, voxel_size=1.0/128.0):
+     sample_pos = hit_position + hit_normal * (voxel_size * 0.5)
+-    
+-    # Sample LPV texture at sample_pos
+-    # LPV coordinates are typically normalized [0,1]
+-    lpv_uv = sample_pos # Assuming LPV covers the same world space
+-    indirect_color = texture(LPV_texture, lpv_uv).rgb
+-    return indirect_color
++    return texture_3d(LPV_texture, sample_pos).rgb
+ 
+-def ApplyVoxelRT(surface_position, surface_normal, view_direction):
+-    """
+-    Computes GI using cosine-weighted hemisphere sampling.
+-    """
++def ApplyVoxelRT(surface_position, surface_normal, sky_color, grid, LPV_texture):
+     total_indirect = vec3(0.0)
+-    
+-    # Generate cosine-weighted hemisphere samples
+-    for i in range(VOXEL_GI_SAMPLES):
++    for _ in range(VOXEL_GI_SAMPLES):
+         sample_dir = cosine_weighted_hemisphere_sample(surface_normal)
+-        
+-        # Trace ray
+-        ray_origin = surface_position + surface_normal * RAY_BIAS
+-        hit_pos, hit_normal = VoxelDDA(ray_origin, sample_dir, VOXEL_GI_STEPS)
+-        
++        ray_origin = surface_position + surface_normal * 1e-4
++        hit_pos, hit_normal = VoxelDDA(ray_origin, sample_dir, VOXEL_GI_STEPS, grid)
+         if hit_pos is not None:
+-            # Get lighting from LPV at hit point
+-            lpv_color = SampleVoxelLighting(hit_pos, hit_normal)
+-            total_indirect += lpv_color
++            total_indirect += SampleVoxelLighting(hit_pos, hit_normal, LPV_texture)
+         else:
+-            # Sky contribution if ray escapes grid
+-            # Not fully specified in sources, assumed to be sky color or ambient
+-            total_indirect += sky_color 
+-            
+-    # Average samples
++            total_indirect += sky_color
+     return total_indirect / VOXEL_GI_SAMPLES
+ 
+-def VoxelReflectionFallback(reflection_direction, surface_position):
+-    """
+-    Fallback for SSR when coverage is incomplete.
+-    """
+-    ray_origin = surface_position + reflection_direction * RAY_BIAS
+-    hit_pos, hit_normal = VoxelDDA(ray_origin, reflection_direction, VOXEL_REFL_STEPS)
+-    
++def VoxelReflectionFallback(reflection_direction, surface_position, brightness_scale_factor, grid, LPV_texture):
++    ray_origin = surface_position + reflection_direction * 1e-4
++    hit_pos, hit_normal = VoxelDDA(ray_origin, reflection_direction, VOXEL_REFL_STEPS, grid)
+     if hit_pos is not None:
+-        lpv_color = SampleVoxelLighting(hit_pos, hit_normal)
+-        # Scale to match sky-reflection brightness
+-        scaled_color = lpv_color * brightness_scale_factor
+-        return scaled_color
+-    else:
+-        return vec3(0.0)
++        lpv_color = SampleVoxelLighting(hit_pos, hit_normal, LPV_texture)
++        return lpv_color * brightness_scale_factor
++    return vec3(0.0)
+ ```
+ 
+@@ -169,10 +146,10 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Proportional to `VOXEL_GI_SAMPLES` * `VOXEL_GI_STEPS` for GI, and `VOXEL_REFL_STEPS` for reflections. The DDA traversal is efficient, O(N) where N is the number of steps.
++*   **Time Complexity:** Proportional to `VOXEL_GI_SAMPLES` * `VOXEL_GI_STEPS` for GI, and `VOXEL_REFL_STEPS` for reflections [S1, unofficial].
+ *   **Memory Complexity:** Depends on the LPV buffer size and the voxel mask grid (128³). No additional large buffers are needed as it reuses existing shadow pass data [S1, unofficial].
+ *   **Strengths:** Provides global illumination and specular reflections in scenes where screen-space methods fail (e.g., occluded areas, off-screen objects). Drop-in replacement for SSRT [S1, unofficial].
+-*   **Limitations:** Relies on the accuracy of the LPV propagation. Lower resolution grid (128³) may result in blocky lighting. Requires specific hardware features (`GL_ARB_shader_image_load_store`) [S1, unofficial].
++*   **Limitations:** Relies on the accuracy of the LPV propagation. Requires specific hardware features (`GL_ARB_shader_image_load_store`) [S1, unofficial].
+ *   **When to Use:** When screen-space GI/Reflections are insufficient or unavailable. Useful for Minecraft-style voxel worlds where LPV is already computed [S1, unofficial].
+-*   **When Not to Use:** On hardware lacking required OpenGL extensions. If LPV is not enabled or populated.
++*   **When Not to Use:** On hardware lacking required OpenGL extensions. If LPV is not enabled or populated [S1, unofficial].
+ 
+ ## Background

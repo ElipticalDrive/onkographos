@@ -3,87 +3,115 @@
 Also called: Adaptive Voxelization, Geresim, Geresim-Spike, Hierarchical 3D Texture Mapping for Unstructured Grids, Hierarchical 3D Voxelization, Octree-based Voxelization, Spike
 
 ## Overview
-Adaptive Voxelization converts large, out-of-core unstructured grids (hexahedral, tetrahedral, or structured) into a hierarchical 3D texture (voxel octree) to enable interactive volume rendering on standard PC hardware [S2]. It solves the problem of undersampling and oversampling inherent in uniform grids by partitioning model space with an adaptive octree that preserves data at higher resolutions where needed [S2]. Unlike sibling methods that may use uniform grid arrangements of multi-resolution bricks [S2] or maximize frame rate for a given quality [S2], this method specializes the octree to distinguish data from non-data voxels and maximizes image quality for a user-specified target frame rate [S2].
+Adaptive Voxelization converts large, unstructured grids (tetrahedral or hexahedral meshes) into a hierarchical 3D texture (voxel octree) to enable interactive volume rendering on standard PC hardware [S2]. It solves the problem of rendering out-of-core datasets by partitioning space with an adaptive octree, preserving data at higher resolutions where needed and avoiding the undersampling/oversampling of uniform grids [S2]. Unlike sibling methods that use uniform grids of multi-resolution bricks [S2] or sparse sampling [4588-sparse-sampling-sparse-voxel-grid-generation.md], this method uses a hierarchical arrangement of constant-resolution texture bricks and specializes the octree to distinguish data from non-data voxels using a pad-and-stencil algorithm [S2].
 
 ## How it works
-The method consists of a preprocessing stage that builds the hierarchical voxel octree and a rendering stage that visualizes it.
+The method consists of a preprocessing stage (voxelization) and a rendering stage. The preprocessing converts the input grid into a voxel octree, while the rendering uses 3D texture mapping to visualize it [S2].
 
 ### Inputs and Outputs
-**Inputs:**
-*   Unstructured grid (hexahedral, tetrahedral, or structured).
-*   Scalar field values associated with grid vertices.
-*   Target frame rate (e.g., >10 fps) [S2].
-
-**Outputs:**
-*   A voxel octree where each node contains a fixed-resolution texture brick (scalar field/gradient and stencil) [S2].
-*   For the "Spike" variant: A `R32UI` 3D texture of cell indices and a `RGBA32F` 2D texture of cell corner data [S1, unofficial].
+*   **Input:** Unstructured grid (tetrahedral or hexahedral) or structured grid. For hexahedral inputs, cells are converted to tetrahedra [S2].
+*   **Output:** A voxel octree where each node contains a texture brick (scalar field, gradient, and stencil) [S2].
 
 ### Data Structures
 
-**1. Tetrahedron File Format (S2)**
-Used for out-of-core streaming. Flat, unindexed.
-*   **Layout:** 4 vertices per tetrahedron.
-*   **Vertex:** 3 × 32-bit float (coordinates) + 1 × 16-bit float (scalar).
-*   **Size:** 56 bytes per tetrahedron [S2].
+**Tetrahedron File Format**
+Used for out-of-core I/O. Flat, unindexed.
+*   Each tetrahedron has 4 vertices.
+*   Each vertex has 3 × 32-bit float coordinates and 1 × 16-bit scalar field value.
+*   Total size: 56 bytes per tetrahedron [S2].
 
-**2. Octree Node Structure (S2)**
-*   **Content:** Texture brick of fixed resolution $r$.
-*   **Usable Domain:** Texture coordinates from $1/(2r)$ to $(2r-1)/(2r)$.
-*   **Overlap:** Neighboring bricks share 1 texel of overlap for continuity [S2].
-*   **Brick Data:** Scalar field/gradient texture + 1-bit-per-voxel stencil texture (0 for null, 1 for data) [S2].
+**Octree Node Structure**
+*   Each node contains a texture brick of fixed resolution $r$.
+*   Usable texture domain: $[1/(2r), (2r-1)/(2r)]$.
+*   Neighboring bricks have 1 texel of overlap for continuity [S2].
+*   Final data includes a scalar field/gradient texture and a 1-bit-per-voxel stencil texture (0 for null, 1 for data) [S2].
 
-**3. Spike Variant Textures (S1)**
-*   **Cell Index Texture:** `R32UI` 3D texture. Maps each $32^3$ voxel tile to a cell index.
-*   **Cell Data Texture:** `RGBA32F` 2D texture. Stores 8-corner data (positions and scalars) per cell [S1, unofficial].
+**Geresim-Spike Specific Layout (Variant)**
+*   **Cell Index Texture:** `R32UI` 3D texture storing cell indices. Precomputed on CPU using an $8^3$ coarse grid mapping tiles to cell AABBs. For each $32^3$ voxel, linear inverse-trilinear interpolation at the cell center finds local coordinates $(u,v,w)$ [S1, unofficial].
+*   **Cell Data Texture:** 2D `RGBA32F` texture storing 8-corner data per cell [S1, unofficial].
 
 ### Algorithm Steps
 
-#### Preprocessing: Adaptive Voxelization (S2)
+#### 1. Tetrahedralization (Preprocessing)
+If the input is a structured grid (e.g., hexahedral), convert it to tetrahedra. Convex cells are sliced into 5 tetrahedra using a standard decomposition template [S2].
 
-**Stage 1: Tetrahedralization**
-If the input is a structured grid (e.g., hexahedral), convert it to tetrahedra. For convex hexahedral cells, slice each cell into 5 tetrahedra [S2]. Write tetrahedra to a flat file [S2].
+#### 2. Octree Construction (Top-Down)
+Recursively subdivide space. The procedure `Process(Node N, Tetrahedra File FN)` is defined as follows [S2]:
 
-**Stage 2: Top-Down Octree Construction**
-Recursively partition space.
-1.  Read node extent $N$. Create 8 children $C_i$ and associated tetrahedron files $FC_i$.
-2.  Initialize $N.Recursion = FALSE$.
-3.  For each tetrahedron $T$ in $N$'s file $FN$:
-    *   For each child $C_i$:
-        *   If $Intersect(C_i, T)$, write $T$ to $FC_i$.
-        *   If $T.NeededResolution > Resolution$, set $N.Recursion = TRUE$.
-4.  If $N.Recursion$ is FALSE:
-    *   Delete children/files.
-    *   Sample $N$ into a voxel grid $V_N$ (Stage 3).
-5.  Else:
-    *   Delete $FN$.
-    *   For each child $C_i$: $V_{C_i} = Process(C_i, FC_i)$.
-6.  Return $V_N$ [S2].
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-**Intersection Test (S2)**
-To determine if a tetrahedron $T$ intersects a box cell $C$, extend the Separating Axis Theorem. Test 25 axes:
-*   3 axes orthogonal to cell faces.
-*   4 axes orthogonal to tetrahedron faces.
-*   18 cross products of cell edges (3) and tetrahedron edges (6).
+```python
+def Process(Node N, TetrahedraFile FN):
+    # Read N's spatial extent
+    extent = N.extent
+    
+    # Create 8 children and their associated tetrahedra files
+    children = []
+    child_files = []
+    for i in range(8):
+        Ci = create_child_node(N, i)
+        FCi = create_tetrahedra_file()
+        write_extent(Ci.extent, FCi)
+        children.append(Ci)
+        child_files.append(FCi)
+    
+    N.recursion_needed = False
+    
+    # Distribute tetrahedra to children
+    for T in FN:
+        for Ci, FCi in zip(children, child_files):
+            if intersect_box_tetrahedron(Ci.extent, T):
+                write_tetrahedron(T, FCi)
+                # Check if resolution threshold is exceeded
+                if T.needed_resolution > N.resolution:
+                    N.recursion_needed = True
+    
+    # Termination or Recursion
+    if not N.recursion_needed:
+        # Leaf node: sample tetrahedra into voxels
+        delete_children(children)
+        delete_files(child_files)
+        VN = sample_node(N, FN)
+        return VN
+    else:
+        # Internal node: recurse
+        delete_file(FN)
+        for Ci, FCi in zip(children, child_files):
+            VCi = Process(Ci, FCi)
+        return None # Internal nodes don't return voxel grid directly in this logic flow
+```
+
+**Tetrahedron-Cell Overlap Test**
+Uses an extended Separating Axis Theorem. For a box (cell) and tetrahedron, test 25 axes:
+1.  3 axes orthogonal to cell faces.
+2.  4 axes orthogonal to tetrahedron faces.
+3.  18 cross products of cell edges (3) and tetrahedron edges (6) [S2].
 Exit early if overlap is disproven [S2].
 
-**Stage 3: Node Sampling (Leaf Nodes)**
-Resample tetrahedra within the leaf node's spatial cell into a regular grid of voxels.
-1.  Load all tetrahedra for the node into memory.
-2.  For each voxel sample point, compute barycentric coordinates relative to each tetrahedron.
-3.  If coordinates sum to < 1, the point is inside. Interpolate scalar value using barycentric weights [S2].
-*   *Note:* Degenerate (nearly flat) tetrahedra are excluded from the scalar field error threshold computation to ensure feasibility [S2].
+#### 3. Node Sampling (Leaf Nodes)
+Resample tetrahedra within a leaf node's spatial cell into a regular grid of voxels.
+*   Uses a voxel-order algorithm (all tetrahedra loaded into memory) [S2].
+*   For each voxel sample point, compute barycentric coordinates with respect to the tetrahedron. If coordinates sum to < 1, the point is contained. Use these coordinates for trilinear interpolation of the scalar field [S2].
+*   Cache the basis conversion matrix (Euclidean to barycentric) for each tetrahedron [S2].
 
-**Stage 4: Bottom-Up Node Filtering**
-Compute voxel grids for interior nodes from their children. Two stages, executed level-by-level bottom-up [S2]:
-1.  **Merge Children:** Apply a 3x3 box filter (or Gaussian) to merge 8 children into a parent.
-2.  **Compute Gradients:** Compute gradients using central differences (forward/backward at boundaries).
+#### 4. Node Filtering (Bottom-Up)
+Create parent nodes from children to ensure continuity. Two stages, executed level-by-level from leaves to root [S2]:
 
-**Filtering Pseudocode (S2):**
+**Stage 1: Merge Children**
+*   Apply a 3x3 box filter (or Gaussian) to merge 8 children into a parent [S2].
+*   **Border Continuity:** Load 7 adjacent nodes (in 2D example) or 26 neighbors (in 3D) to maintain overlapping borders. If a neighbor doesn't exist at the same level, load a special null data node [S2].
+*   **Internal Border Fix:** If a node's octants subdivide unevenly, copy border data from existing siblings into the node being merged to prevent discontinuities [S2].
+
+**Stage 2: Compute Gradients**
+*   Compute gradients using central difference (forward/backward at boundaries) [S2].
+*   Load 26 neighbors to calculate gradients accurately at borders [S2].
+
+**Pseudocode for Filtering** [S2]:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def Filter(Node N, FilterStage S):
-    create data buffers B and O
+    create buffers B, O
     if S == MERGE_CHILDREN:
         read N's 8 children into B
         for each child Ci:
@@ -92,65 +120,56 @@ def Filter(Node N, FilterStage S):
     else: # S == COMPUTE_GRADIENT
         read N and N's neighbors into B
         create gradient filter kernel K
+    
     convolve B by K into O
-    perform normalization on O
-    write O into N.output_filename
-    free temporary data B and O
+    normalize O
+    write O to N.output_filename
+    free B, O
 ```
 
-**Border Continuity Fixes (S2):**
-*   **External Borders:** Load 7 adjacent nodes (2D) or 26 neighbors (3D) during filtering to maintain overlapping borders. If a neighbor doesn't exist, load a null data node [S2].
-*   **Internal Borders:** If only a portion of a node's octants subdivides, merging children creates incorrect borders. Fix by copying border data from existing siblings into the node being merged [S2].
+#### 5. Padding and Stencil (Boundary Handling)
+Prevents striping artifacts at data/non-data boundaries [S2].
+1.  **Stencil:** Create a 1-bit-per-voxel stencil texture (0 for null, 1 for data) [S2].
+2.  **Padding:** Pad the volume by one voxel. At boundaries, grow the texture by averaging neighboring non-null voxels. This replicates boundary data outward [S2].
+3.  **Rendering:** Use a 3D stencil test to clip the replicated data so it is never rendered, but is used for linear interpolation near boundaries [S2].
 
-**Padding and Stencil (S2):**
-1.  **Stencil:** Create 1-bit-per-voxel texture (0 for null, 1 for data).
-2.  **Padding:** Extend discontinuity outward by one voxel. Replicate boundary data by averaging neighboring non-null voxels. This prevents "striping artifacts" caused by linear interpolation against zero-filled non-data voxels [S2].
-
-#### Rendering: Spike Variant (S1)
-*Note: This is a distinct, GPU-centric implementation described in [S1, unofficial].*
-
-1.  **CPU Precompute:**
-    *   Create an $8^3$ coarse grid mapping tiles to cell AABBs [S1, unofficial].
-    *   For each $32^3$ voxel, perform linear inverse-trilinear interpolation at the cell center to find local coordinates $(u,v,w)$ [S1, unofficial].
-    *   Store cell indices in a `R32UI` 3D texture [S1, unofficial].
-    *   Store per-cell 8-corner data in a `RGBA32F` 2D texture [S1, unofficial].
-2.  **GPU Fragment Shader:**
-    *   Ray-march through the 3D texture of cell indices [S1, unofficial].
-    *   Sample per-cell 8-corner data from the 2D texture [S1, unofficial].
-    *   Compute trilinear scalar value and analytic gradient [S1, unofficial].
-    *   Use analytic gradient as pseudo-normal for Blinn-Phong shading [S1, unofficial].
-    *   Composite results front-to-back [S1, unofficial].
+#### 6. Rendering (Geresim-Spike Variant)
+For the Geresim-Spike implementation [S1, unofficial]:
+1.  **Ray Marching:** GPU fragment shader ray-marches through the `R32UI` 3D texture of cell indices.
+2.  **Data Sampling:** Sample per-cell 8-corner data from the 2D `RGBA32F` texture.
+3.  **Interpolation:** Compute trilinear scalar value and analytic gradient.
+4.  **Shading:** Use the analytic gradient as a pseudo-normal for Blinn-Phong shading.
+5.  **Compositing:** Composite results front-to-back.
 
 ### Parameters
-*   **Brick Resolution ($r$):** Fixed resolution for texture bricks. Example: $4 \times 4$ in 2D figures, general $r$ in 3D [S2].
-*   **Voxel Sampling Resolution (Spike):** $32^3$ per tile [S1, unofficial].
-*   **Coarse Grid Resolution (Spike):** $8^3$ [S1, unofficial].
-*   **Target Frame Rate:** User-specified. Typical: >10 fps [S2].
-*   **Scalar Field Error Threshold:** Bounds maximum resampling error. Zero-error is feasible if degenerate tetrahedra are excluded [S2].
+*   **Brick Resolution ($r$):** Fixed resolution for texture bricks. Example: $4 \times 4$ for 2D representation, general $r$ for 3D [S2].
+*   **Voxel Sampling Resolution:** $32^3$ per tile in Geresim-Spike [S1, unofficial].
+*   **Coarse Grid Resolution:** $8^3$ in Geresim-Spike [S1, unofficial].
+*   **Target Frame Rate:** User-specified, typically >10 fps [S2].
+*   **Scalar Field Error Threshold:** Determines subdivision. Zero-error is possible but excludes degenerate tetrahedra [S2].
 
 ### Edge Cases and Pitfalls
-*   **Striping Artifact:** Naïve filling of non-data voxels with zero causes discontinuity. Linear interpolation displays this as striping along the model boundary. Solved by padding and stenciling [S2].
-*   **Internal Border Discontinuity:** Occurs in incomplete adaptive octrees when merging children of nodes with mixed subdivision. Solved by copying border from existing siblings [S2].
-*   **Degenerate Tetrahedra:** Nearly flat tetrahedra can make zero-error constraints infeasible. Exclude them from error threshold computation [S2].
-*   **Cell-by-Cell Look (Spike):** The trilinear gradient is constant within a cell but discontinuous at cell faces. This is a feature, not a bug, enabling correct shading per cell [S1, unofficial].
-*   **Coverage (Spike):** Cell index precompute yields ~35% voxel coverage; the rest are micro-cells or boundary cases where linear approximation fails [S1, unofficial].
+*   **Striping Artifact:** Naïve filling of non-data voxels with zero-scalar data causes discontinuity, visible as striping along the model boundary. Fixed by padding and stenciling [S2].
+*   **Internal Border Discontinuity:** In adaptive octrees, if only a portion of a node's octants subdivides, merging children creates incorrect borders because children lack neighbors at their depth. Fix: Copy border from existing siblings [S2].
+*   **Degenerate Tetrahedra:** Nearly flat tetrahedra are excluded from the scalar field error threshold computation to make the zero-error constraint feasible [S2].
+*   **Cell-by-Cell Look:** In Geresim-Spike, the trilinear gradient is constant within a cell but discontinuous at cell faces, leading to a "cell-by-cell" visual effect [S1, unofficial].
+*   **Coverage:** Cell index precompute yields ~35% voxel coverage; the rest are micro-cells too small to hit the grid or fall on boundaries where linear approximation fails [S1, unofficial].
 
 ## Subtopics
 
 ### Octree-based Regular Grid Hierarchy
-A technique that converts an unstructured grid into a hierarchy of regular grids stored in an octree, managing resampling, filtering, and rendering out-of-core [S3, unofficial]. It mitigates data size explosion by handling the structured grid resampling and rendering out-of-core, allowing the use of texture-based LOD techniques for regular grids [S3, unofficial].
+A technique that converts an unstructured grid into a hierarchy of regular grids stored in an octree, managing resampling, filtering, and rendering out-of-core [S3, unofficial]. It mitigates data size explosion by resampling the unstructured grid with a structured grid, allowing texture-based LOD techniques for regular grids [S3, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Preprocessing is out-of-core, processing tetrahedra independently. Rendering is interactive, adapting the octree cut to maintain frame rate [S2].
-*   **Memory Usage:** Less than 5 MB RAM for tested datasets, despite handling data larger than main memory (up to 9 GB voxel data) [S2].
-*   **Performance:** Interactive rates >10 fps for scalar fields ranging from 1,700 to 6,000,000 tetrahedra (7 MB to 9 GB voxel data) on standard PC hardware (e.g., NVIDIA GeForce4) [S2].
-*   **Strengths:** Handles out-of-core data; maximizes quality for target frame rate; leverages standard 3D texture hardware [S2].
-*   **Limitations:** Requires 3D texture mapping support; adaptive octree construction can be complex due to border continuity issues [S2].
-*   **When to Use:** Interactive visualization of large unstructured grids on standard PCs.
-*   **When Not to Use:** When strict uniform grid resolution is required or hardware lacks 3D texture support [S2].
+*   **Time Complexity:** Preprocessing is out-of-core, processing tetrahedra independently. Rendering is interactive, leveraging 3D texture mapping hardware [S2].
+*   **Memory Usage:** Less than 5 MB of RAM for tested datasets, despite handling data larger than main memory (up to 9 GB voxel data) [S2].
+*   **Performance:** Visualized scalar fields ranging from 1,700 to 6,000,000 tetrahedra at interactive rates >10 fps on standard PC with OpenGL 3D texturing [S2].
+*   **Hardware:** Implemented on Windows PC using NVIDIA Geforce4 accelerator [S2].
+*   **Strengths:** Handles out-of-core data, interactive frame rates, high quality via adaptive resolution [S2].
+*   **Limitations:** Requires 3D texture mapping support. Geresim-Spike has ~35% voxel coverage due to micro-cells and boundary approximations [S1, unofficial].
 
 ## Background
-Originated from the work of Leven et al. (2002) [S2], building upon the texture octree data structure of LaMar et al. (1999) [S2]. It was developed to address the limitations of previous approaches that used uniform grid arrangements of multi-resolution bricks [S2] or did not specialize the octree for unstructured grids [S2]. The "Spike" variant was later implemented by Miranda and Celes (Tecgraf/PUC-Rio + Petrobras, SIBGRAPI 2011 / TVC 2012) for WebGL fragment-shader volume rendering [S1, unofficial]. It is used to visualize scalar fields from unstructured grids, structured grids, and regular voxel data [S2].
+Originated from the work of Leven et al. (2002) "Interactive Visualization of Unstructured Grids Using Hierarchical 3D Texture Mapping" [S2]. It builds upon the texture octree data structure developed by LaMar et al. (1999) [S2]. A variant, Geresim-Spike, was presented by Miranda and Celes (SIBGRAPI 2011 / TVC 2012) [S1, unofficial]. It is used to visualize scalar fields from unstructured grids, structured grids, and regular voxel data [S2].
 
 ## Sources
 [S1] Amory0709/geresim-spike, https://github.com/Amory0709/geresim-spike, fetched 2026-10-27 (unofficial)

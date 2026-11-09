@@ -3,11 +3,11 @@
 Also called: Noordmans Spectral Shadow Algorithm, Spectral Two-Pass Shadow Casting
 
 ## Overview
-The Two-pass Spectral Rendering Integral is a method for computing volumetric shadows in participating media by adapting the Kajiya and von Herzen two-pass algorithm to spectral representation [S1, book]. It separates shadow computation (illumination phase) from radiance accumulation (radiation phase), allowing for the simulation of complex spectral effects such as fluorescence and phosphorescence [S1, book]. It is distinguished from its parent [Two-Pass Shadow Casting (Kajiya and Von Herzen)](2196-two-pass-shadow-casting-kajiya-and-von-herzen.md) by its explicit handling of wavelength-dependent opacity and emission spectra [S1, book].
+The Two-pass Spectral Rendering Integral computes volumetric shadows in participating media by adapting the Kajiya and von Herzen two-pass algorithm to a spectral representation [S1, book]. It separates shadow computation from radiance accumulation, distinguishing itself from its parent method through explicit wavelength-dependent opacity and emission spectra [S1, book].
 
 ## How it works
 **Inputs:**
-*   Volume density field $\rho_m(x)$ for each material $m$ [S1, book].
+*   Mass density field $\rho_m(x)$ for each material $m$ [S1, book].
 *   Spectral absorption attributes $\kappa_m(\lambda)$ for each material $m$ [S1, book].
 *   Incident light spectrum $I_t(x, \lambda)$ at the volume entry [S1, book].
 *   Local emission spectrum $I_e(x, \lambda)$ [S1, book].
@@ -28,24 +28,21 @@ For a position $x$ with $M$ materials, the spectral opacity is defined as [S1, b
 $$ \tau(x, \lambda) = \sum_{m=1}^M \rho_m(x) \cdot \kappa_m(\lambda) $$
 
 **Algorithm Steps:**
-
-1.  **Illumination Phase (Shadow Computation):**
-    Propagate light flux through the volume using discrete ray casting from front to back [S1, book]. For each sample step $\Delta x$ at position $x$, update the transmitted light $I_t$ [S1, book]:
+1.  **Illumination Phase (Shadow Computation):** Propagate light flux through the volume using discrete front-to-back ray casting [S1, book]. For each sample step $\Delta x$ at position $x$, update the transmitted light $I_t$ [S1, book]:
     $$ I_t(x + \Delta x, \lambda) = I_t(x, \lambda) \cdot (1 - \Delta x \cdot \tau(x, \lambda)) $$
     The resulting $I_t$ at the end of the ray represents the shadowed incident light for the radiation phase [S1, book].
-
-2.  **Radiation Phase (Radiance Accumulation):**
-    Accumulate radiance using back-to-front ray casting [S1, book]. For each sample step $\Delta x$ at position $x$, update the radiance $I_r$ based on the local emission $I_e$ and the backward irradiance $I_b$ [S1, book]:
+2.  **Radiation Phase (Radiance Accumulation):** Accumulate radiance using back-to-front ray casting [S1, book]. For each sample step $\Delta x$ at position $x$, update the radiance $I_r$ based on the local emission $I_e$ and the backward irradiance $I_b$ [S1, book]:
     $$ I_b(x+\Delta x, \lambda) = I_r(x, \lambda) = I_e(x, \lambda) + I_b(x, \lambda) \cdot (1 - \Delta x \cdot \tau(x, \lambda)) $$
     Here, $I_b(x, \lambda)$ acts as the accumulated background/transmitted light term [S1, book].
 
-**Emission Function:**
-The local emission $I_e(x, \lambda)$ is split into two components [S1, book]:
-*   **Elastic Scattering:** Scattering in a chromatic medium where each material $m$ is associated with a specific spectral band, facilitating a spectral transfer function [S1, book].
-*   **Inelastic Scattering:** Absorption of light at one wavelength and re-emission at another, simulating fluorescence and phosphorescence [S1, book].
+**Parameters:**
+*   Step size $\Delta x$: Not given in the sources.
+*   Number of materials $M$: Not given in the sources.
+*   Wavelength discretization: Not given in the sources.
 
-**Pitfalls:**
+**Edge Cases and Pitfalls:**
 *   The term $(1 - \Delta x \cdot \tau(x, \lambda))$ used in both phases is only an approximation [S1, book].
+*   Degenerate inputs (e.g., zero density or infinite step size) require clamping to prevent negative or unphysical radiance values [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -72,33 +69,30 @@ def two_pass_spectral_rendering(densities, absorption_attrs, incident_light, ste
     I_t = list(incident_light)
     for x in range(num_samples - 1):
         for w in range(num_wavelengths):
-            I_t[x + 1] = I_t[x] * (1.0 - step_size * tau[x][w])
+            I_t[w] = I_t[w] * (1.0 - step_size * tau[x][w])
 
     # Phase 2: Radiation (Back-to-Front)
     I_b = [0.0] * num_wavelengths
     I_r = [0.0] * num_wavelengths
     for x in range(num_samples - 1, -1, -1):
-        I_e = compute_emission(densities, x, wavelengths)
+        # [G] Sources do not specify the exact emission function formula.
+        # Typically combines elastic scattering (material-specific spectral bands)
+        # and inelastic scattering (fluorescence/phosphorescence).
+        I_e = [0.0] * num_wavelengths
         for w in range(num_wavelengths):
             I_r[w] = I_e[w] + I_b[w] * (1.0 - step_size * tau[x][w])
-            I_b[w] = I_r[w]
+        I_b = list(I_r)
 
     return I_r
-
-def compute_emission(densities, x, wavelengths):
-    # [G] Computes local emission spectrum I_e(x, lambda)
-    # Combines elastic scattering (material-specific spectral bands)
-    # and inelastic scattering (fluorescence/phosphorescence).
-    return [0.0] * len(wavelengths)
 ```
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources. [S1, book]
+*   **Memory Complexity:** Not given in the sources. [S1, book]
 *   **Strengths:** Allows for spectral effects like fluorescence and material-specific absorption [S1, book].
 *   **Limitations:** The linear approximation $(1 - \Delta x \cdot \tau)$ is only an approximation [S1, book].
-*   **When to use:** Not given in the sources.
-*   **When not to use:** Not given in the sources.
+*   **When to use:** Not given in the sources. [S1, book]
+*   **When not to use:** Not given in the sources. [S1, book]
 
 ## Background
 The method was proposed by Noordmans et al., who adopted the Kajiya and von Herzen two-pass algorithm for volumetric shadows and adapted the notion of opacity to a spectral representation [S1, book]. It is described in the context of local and global illumination in the volume rendering integral [S1, book].

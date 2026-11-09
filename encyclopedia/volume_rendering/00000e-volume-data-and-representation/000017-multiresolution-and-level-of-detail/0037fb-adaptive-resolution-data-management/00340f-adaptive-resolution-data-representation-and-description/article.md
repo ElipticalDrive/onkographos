@@ -3,144 +3,168 @@
 Also called: Adaptive Resolution Data Representation, Block-based Adaptive Resolution
 
 ## Overview
-Adaptive-Resolution Data Representation is a scheme where a volume dataset is partitioned into spatial blocks, each assigned one of three discrete resolution levels (High, Medium, or Low) to balance fidelity and storage [S1, unofficial]. It differs from flat blocking by allowing variable block sizes at lower resolutions to maintain constant data size per level, achieving different compression ratios [S2, unofficial].
+This method defines a block-based spatial partitioning scheme where a volume dataset is divided into discrete blocks, each assigned one of three specific resolution levels (High, Medium, or Low) [S1, unofficial]. It solves the problem of efficiently storing and transmitting heterogeneous volume data by allowing regions of interest to retain high fidelity while less important regions use lower resolution [S1, unofficial]. It differs from flat blocking by using a hierarchical structure where lower-resolution blocks cover larger spatial extents, maintaining a constant data size per level rather than reducing sample counts [S2, unofficial].
 
 ## How it works
-**Inputs:** A volume dataset and a data description file defining block geometry and resolution.
-**Outputs:** A structured representation of blocks with associated resolution codes.
+**Inputs and Outputs:**
+*   **Input:** A high-resolution volume dataset and a data description file defining the spatial partitioning and resolution assignment for each block.
+*   **Output:** A set of subimages (blocks) at varying resolutions, ready for compositing.
 
 **Data Structures:**
-The core structure is defined by a data description file. Each block entry contains:
-1.  `Start-X`, `Start-Y`, `Start-Z`: Starting coordinates of the block.
-2.  `End-X`, `End-Y`, `End-Z`: Ending coordinates of the block.
-3.  `Resolution`: A string code indicating the resolution level.
+The core data structure is the **Data Description File**, a plain text format.
+*   **Line 1:** Integer specifying the total number of blocks $N_{blocks}$.
+*   **Lines 2 to $N_{blocks}+1$:** Each line defines one block with the following fields:
+    1.  `Start-X`: Integer coordinate of the block's starting x-index.
+    2.  `Start-Y`: Integer coordinate of the block's starting y-index.
+    3.  `Start-Z`: Integer coordinate of the block's starting z-index.
+    4.  `End-X`: Integer coordinate of the block's ending x-index.
+    5.  `End-Y`: Integer coordinate of the block's ending y-index.
+    6.  `End-Z`: Integer coordinate of the block's ending z-index.
+    7.  `Resolution`: A string token indicating the resolution level.
 
 **Resolution Codes:**
+The `Resolution` field uses specific string tokens [S1, unofficial]:
 *   High: `/`
 *   Medium: `/s`
 *   Low: `/s/s`
 
 **Virtual vs. Actual Dimensions:**
-*   **Virtual Dimensions:** The dimensions of the block at the highest resolution (High). For compositing, subimages from lower-resolution blocks are expanded to these virtual dimensions.
-*   **Actual Dimensions:** The dimensions of the data points actually stored for that block.
-    *   High: Same as virtual.
-    *   Medium: Half the virtual dimensions in each axis.
-    *   Low: Quarter the virtual dimensions in each axis (or half of Medium).
+To facilitate compositing, the method distinguishes between two dimensional concepts [S1, unofficial]:
+1.  **Virtual Dimensions:** The dimensions of the block at the highest resolution (High). All subimages are expanded to these dimensions for compositing.
+2.  **Actual Dimensions:** The dimensions of the data points actually stored for that block at its assigned resolution.
 
-**Example Calculation (from [S1, unofficial]):**
-If a block has virtual dimensions $196 \times 56 \times 56$:
-*   High Actual: $196 \times 56 \times 56$
-*   Medium Actual: $98 \times 28 \times 28$
-*   Low Actual: $49 \times 14 \times 14$
+**Algorithm Steps:**
+1.  Parse the Data Description File to determine $N_{blocks}$ and the properties of each block $i$.
+2.  For each block $i$, calculate its Virtual Dimensions $(V_x, V_y, V_z)$ based on the bounding box defined by Start/End coordinates.
+3.  Determine the Actual Dimensions $(A_x, A_y, A_z)$ based on the assigned Resolution code:
+    *   If High: $(A_x, A_y, A_z) = (V_x, V_y, V_z)$.
+    *   If Medium: $(A_x, A_y, A_z) = (V_x/2, V_y/2, V_z/2)$.
+    *   If Low: $(A_x, A_y, A_z) = (V_x/4, V_y/4, V_z/4)$.
+    *   *Note: The scaling factors 1, 1/2, and 1/4 are derived from the example in [S1, unofficial] where High=(196,56,56), Medium=(98,28,28), Low=(49,14,14).*
+4.  Extract or generate the voxel data for block $i$ using the Actual Dimensions.
+5.  For compositing, upsample or pad the block data to match the Virtual Dimensions.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def parse_data_description_file(filepath):
-    """
-    Parses the data description file to extract block definitions.
-    Returns a list of block dictionaries.
-    """
     blocks = []
     with open(filepath, 'r') as f:
         lines = f.readlines()
     
-    # First line: Total number of blocks
-    try:
-        num_blocks = int(lines[0].strip())
-    except ValueError:
-        raise ValueError("First line must be an integer representing total blocks")
-    
-    # Remaining lines: Block definitions
-    # Format: Start-X, Start-Y, Start-Z, End-X, End-Y, End-Z, Resolution
-    # Note: The source implies a specific format. We assume comma or whitespace separation.
-    # The source shows:
-    # Block-1-Start-X
-    # Block-1-Start-Y
-    # ...
-    # Resolution
-    # This suggests each field might be on a new line or space-separated.
-    # Based on "Figure 18 shows the format", and typical CSV-like structures in such theses,
-    # we assume space-separated or similar. However, the text lists them vertically.
-    # Let's assume a standard space-separated line for each block for robustness,
-    # or handle the vertical format if strictly required.
-    # Given the ambiguity of "Figure 18" without the image, we assume a line-based record.
+    # Line 1: Total number of blocks
+    num_blocks = int(lines[0].strip())
     
     for i in range(1, num_blocks + 1):
-        if i - 1 < len(lines):
-            line = lines[i].strip()
-            # Split by whitespace
-            parts = line.split()
-            if len(parts) < 7:
-                raise ValueError(f"Line {i+1} does not contain enough fields")
+        line = lines[i].strip().split()
+        # Format: Start-X Start-Y Start-Z End-X End-Y End-Z Resolution
+        start_x = int(line[0])
+        start_y = int(line[1])
+        start_z = int(line[2])
+        end_x = int(line[3])
+        end_y = int(line[4])
+        end_z = int(line[5])
+        resolution_str = line[6]
+        
+        # Calculate Virtual Dimensions (High Resolution Size)
+        # Note: Assuming inclusive end coordinates or standard grid size calculation
+        # Based on [S1, unofficial] example: 392x112x112 total, 8 blocks of 196x56x56
+        # This implies End - Start + 1 or similar logic. 
+        # We define virtual dims as the bounding box size.
+        virtual_x = end_x - start_x + 1
+        virtual_y = end_y - start_y + 1
+        virtual_z = end_z - start_z + 1
+        
+        # Determine Actual Dimensions based on Resolution Code
+        if resolution_str == '/':
+            # High
+            actual_x = virtual_x
+            actual_y = virtual_y
+            actual_z = virtual_z
+        elif resolution_str == '/s':
+            # Medium
+            actual_x = virtual_x // 2
+            actual_y = virtual_y // 2
+            actual_z = virtual_z // 2
+        elif resolution_str == '/s/s':
+            # Low
+            actual_x = virtual_x // 4
+            actual_y = virtual_y // 4
+            actual_z = virtual_z // 4
+        else:
+            raise ValueError(f"Unknown resolution code: {resolution_str}")
             
-            start_x = int(parts[0])
-            start_y = int(parts[1])
-            start_z = int(parts[2])
-            end_x = int(parts[3])
-            end_y = int(parts[4])
-            end_z = int(parts[5])
-            resolution_code = parts[6]
-            
-            # Validate resolution code
-            if resolution_code not in ['/', '/s', '/s/s']:
-                raise ValueError(f"Invalid resolution code: {resolution_code}")
-            
-            # Calculate dimensions
-            width = end_x - start_x + 1
-            height = end_y - start_y + 1
-            depth = end_z - start_z + 1
-            
-            # Virtual dimensions are the dimensions at High resolution
-            virtual_width = width
-            virtual_height = height
-            virtual_depth = depth
-            
-            # Actual dimensions depend on resolution
-            if resolution_code == '/':
-                actual_width = virtual_width
-                actual_height = virtual_height
-                actual_depth = virtual_depth
-            elif resolution_code == '/s':
-                actual_width = virtual_width // 2
-                actual_height = virtual_height // 2
-                actual_depth = virtual_depth // 2
-            elif resolution_code == '/s/s':
-                actual_width = virtual_width // 4
-                actual_height = virtual_height // 4
-                actual_depth = virtual_depth // 4
-            
-            blocks.append({
-                'id': i,
-                'start': (start_x, start_y, start_z),
-                'end': (end_x, end_y, end_z),
-                'virtual_dims': (virtual_width, virtual_height, virtual_depth),
-                'actual_dims': (actual_width, actual_height, actual_depth),
-                'resolution_code': resolution_code
-            })
-    
+        blocks.append({
+            'id': i,
+            'start': (start_x, start_y, start_z),
+            'end': (end_x, end_y, end_z),
+            'virtual_dims': (virtual_x, virtual_y, virtual_z),
+            'actual_dims': (actual_x, actual_y, actual_z),
+            'resolution': resolution_str
+        })
+        
     return blocks
+
+def get_block_data(block_info, source_volume):
+    """
+    Extracts data for a block.
+    In a real implementation, this would read from disk or memory.
+    Here we assume source_volume contains the high-res data.
+    """
+    sx, sy, sz = block_info['start']
+    ex, ey, ez = block_info['end']
+    ax, ay, az = block_info['actual_dims']
+    
+    # Extract high-res sub-volume
+    # Note: This assumes the source volume is large enough and aligned.
+    # The actual extraction logic depends on the specific storage format.
+    # For the purpose of this description, we assume we can slice the high-res data.
+    high_res_block = source_volume[sx:ex+1, sy:ey+1, sz:ez+1]
+    
+    # Downsample if necessary to get actual dimensions
+    if block_info['resolution'] == '/s':
+        # Average pooling or similar downsampling by 2
+        # Implementation detail: [G] Specific downsampling kernel not defined in source.
+        # Assuming simple 2x2x2 average pooling.
+        high_res_block = downsample_by_2(high_res_block)
+    elif block_info['resolution'] == '/s/s':
+        # Downsample by 4
+        # Implementation detail: [G] Assuming 4x4x4 average pooling or two passes of 2x2x2.
+        high_res_block = downsample_by_4(high_res_block)
+        
+    return high_res_block
+
+def downsample_by_2(volume):
+    # Placeholder for actual downsampling logic
+    # [G] Standard 2x2x2 average pooling
+    pass
+
+def downsample_by_4(volume):
+    # Placeholder for actual downsampling logic
+    # [G] Standard 4x4x4 average pooling
+    pass
 ```
 
-**Edge Cases:**
-*   **Boundary Alignment:** Blocks must align with the resolution grid. If a block's virtual dimensions are not divisible by 2 or 4, actual dimensions may require rounding or padding. The source example uses dimensions divisible by 4 ($196, 56$), so this is not explicitly addressed [S1, unofficial].
-*   **Empty Blocks:** The source does not specify how empty blocks are handled in this specific representation. [G] Typically, empty blocks might be flagged or stored as null references.
+**Edge Cases and Pitfalls:**
+*   **Boundary Alignment:** The start/end coordinates must align with the resolution scaling factors to avoid fractional voxel indices. The example in [S1, unofficial] uses dimensions divisible by 4.
+*   **Compositing Expansion:** Subimages must be correctly expanded to virtual dimensions. The method does not specify the interpolation kernel used for this expansion [S1, unofficial].
+*   **Resolution Code Parsing:** The string tokens are specific (`/`, `/s`, `/s/s`). Deviations will cause parsing errors.
 
 ## Subtopics
 
 ### Hierarchical Blocking
-A multiresolution volume representation using hierarchical blocking where lower resolution blocks cover increasing spatial size, maintaining constant data size per level [S2, unofficial]. It achieves a data reduction of 2.2:1, whereas flat blocking achieves 3.8:1 for the same levels [S2, unofficial].
+A multiresolution volume representation where lower-resolution blocks cover increasing spatial sizes, maintaining a constant data size per level [S2, unofficial]. It achieves a data reduction of 2.2:1, whereas flat blocking achieves 3.8:1 for the same levels [S2, unofficial]. Hierarchical blocking is chosen when memory efficiency per level is prioritized over the simplicity of flat structures.
 
 ## Operating characteristics
-*   **Time Complexity:** Parsing the description file is $O(N)$ where $N$ is the number of blocks. Rendering time depends on the number of high-resolution blocks accessed.
-*   **Memory Complexity:** Depends on the distribution of resolution levels. High-resolution blocks consume more memory per unit volume than low-resolution blocks.
-*   **Performance:** The source does not provide specific performance metrics for the flat/block-based adaptive resolution method [S1, unofficial].
-*   **Strengths:** Allows regions of interest to be rendered at higher fidelity while less important regions use lower resolution [S1, unofficial].
-*   **Limitations:** Requires a data description file and complex logic to handle different resolutions during compositing [S1, unofficial].
+*   **Time Complexity:** Parsing the description file is $O(N_{blocks})$. Data extraction and downsampling depend on the volume size and the number of blocks.
+*   **Memory Complexity:** The total memory usage is the sum of the actual dimensions of all blocks. This is less than the full high-resolution volume but more than a single low-resolution version.
+*   **Performance:** The method allows for parallel visualization by processing blocks independently [S1, unofficial].
+*   **Strengths:** Flexible spatial adaptation; simple text-based description format.
+*   **Limitations:** Limited to three discrete resolution levels in the primary description [S1, unofficial]. The data reduction ratio is lower than flat blocking in hierarchical contexts [S2, unofficial].
 
 ## Background
-This method was developed for parallel visualization of spatial adaptive-resolution data, specifically using MHD pressure data [S1, unofficial]. The goal was to create a dummy AR Data Representation for temporary use in a project focused on parallel visualization techniques [S1, unofficial].
+The method was developed for the parallel visualization of spatial adaptive-resolution data, specifically using MHD pressure data [S1, unofficial]. It was part of a project aimed at creating a dummy adaptive data representation for temporary use in visualization research [S1, unofficial]. The concept of hierarchical blocking was further explored in the context of GPU-based volume ray-casting to optimize LOD based on visual error [S2, unofficial].
 
 ## Sources
 [S1] Volume visualization of time-varying data using parallel, multiresolution and adaptive-resolution techniques, https://scholars.unh.edu/cgi/viewcontent.cgi?article=1245&context=thesis, fetched 2026-10-27 (unofficial)

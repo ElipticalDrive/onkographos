@@ -1,31 +1,28 @@
 # Distortion Loss with Power Transformation
 
-Also called: Power-Transformed Distortion Loss
 
 ## Overview
-A modification of the mip-NeRF 360 distortion loss that applies a power transformation to metric distance before computing the loss [S1]. This curves metric distance to aggressively penalize "floaters" (spurious geometry artifacts) near the camera, which significantly improves the quality of rendered videos [S1]. It sets itself apart from standard distortion loss by altering the metric space of the penalty, and from [Gradient Scaling](6887-gradient-scaling.md) by modifying the loss function rather than the backpropagation gradients [S1, S1].
+A modification of the mip-NeRF 360 distortion loss that applies a power transformation to metric distance before computing the loss [S1]. This curves metric distance to aggressively penalize "floaters" near the camera, significantly improving the quality of rendered videos [S1]. It differs from [Gradient Scaling](6887-gradient-scaling.md) by modifying the loss function rather than the backpropagation gradients [S1].
 
 ## How it works
 **Inputs:**
-*   Metric distance $t$ of a sample point along a ray.
-*   Transformation parameters: scaling factor $S$ and power exponent $\lambda$.
-*   Distortion loss multiplier $\alpha$.
+*   Metric distance $t$ of a sample point along a ray [S1].
+*   Transformation parameters: scaling factor $S$ and power exponent $\lambda$ [S1].
+*   Distortion loss multiplier $\alpha$ [S1].
 
 **Outputs:**
-*   The transformed distortion loss value for the ray.
+*   The transformed distortion loss value for the ray [S1].
 
 **Data Structures:**
-*   No specific data structures are required beyond standard scalar values for distance and loss accumulation.
+*   Standard arrays or lists for sample distances, weights, and transformed distances [G].
 
 **Steps:**
-1.  Retrieve the metric distance $t$ for the current sample.
-2.  Scale the metric distance by the factor $S$: $t_{scaled} = S \cdot t$.
-3.  Apply the power transformation $P$ to the scaled distance:
-    $$ t_{transformed} = P(t_{scaled}, \lambda) = t_{scaled}^{\lambda} $$
-    Note: The transformation is designed to have a steep gradient near the origin that tapers off, resembling log-distance behavior for larger values [S1].
-4.  Compute the standard distortion loss using the transformed distances $t_{transformed}$ instead of raw metric distances $t$ [S1]. The standard distortion loss for a ray with samples $i=1 \dots N$ with weights $w_i$ and transformed distances $d_i$ is typically:
-    $$ L_{dist} = \sum_{i=1}^{N} \sum_{j=1}^{N} w_i w_j |d_i - d_j| $$
-5.  Multiply the resulting distortion loss by the multiplier $\alpha$ and add it to the total training loss [S1].
+1. Retrieve the metric distance $t$ for each sample along the ray [S1].
+2. Scale the metric distance by the factor $S$: $t_{scaled} = S \cdot t$ [S1].
+3. Apply the power transformation $P$ to the scaled distance: $t_{transformed} = t_{scaled}^{\lambda}$ [S1].
+4. Compute the standard distortion loss using the transformed distances $t_{transformed}$ instead of raw metric distances [S1]. The standard distortion loss for a ray with samples $i=1 \dots N$ with weights $w_i$ and transformed distances $d_i$ is typically:
+   $$ L_{dist} = \sum_{i=1}^{N} \sum_{j=1}^{N} w_i w_j |d_i - d_j| $$ [G].
+5. Multiply the resulting distortion loss by the multiplier $\alpha$ and add it to the total training loss [S1].
 
 **Parameters:**
 *   Scaling factor $S$: 10000 [S1].
@@ -33,20 +30,20 @@ A modification of the mip-NeRF 360 distortion loss that applies a power transfor
 *   Distortion loss multiplier $\alpha$: 0.005 [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Precision at Origin:** The transformation $t^{\lambda}$ with $\lambda < 0$ approaches infinity as $t \to 0$. In practice, $t$ is bounded by the near plane of the camera frustum, preventing division by zero or overflow, but the steep gradient near the origin requires careful handling of numerical stability if $t$ is extremely small [S1].
 *   **Impact on Metrics:** While this loss improves video quality by reducing floaters, it does not significantly improve test-set metrics on still images, as floaters contribute little to error metrics computed on static frames [S1].
+*   **Numerical Stability:** The transformation $t^{\lambda}$ with $\lambda < 0$ has a steep gradient near the origin that tapers off, resembling log-distance behavior for larger values [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_power_transformed_distortion_loss(samples, weights, S=10000.0, lambda_val=-0.25, alpha=0.005):
+def compute_power_transformed_distortion_loss(t_values, weights, S=10000.0, lambda_val=-0.25, alpha=0.005):
     """
     Compute distortion loss using power-transformed metric distances.
     
     Args:
-        samples: List of sample objects or tuples containing 't' (metric distance).
-        weights: List of weights (transmittance * density * delta_t) corresponding to samples.
+        t_values: List of metric distances for samples along a ray.
+        weights: List of sample weights (transmittance * density * delta_t).
         S: Scaling factor for metric distance.
         lambda_val: Power exponent for transformation.
         alpha: Multiplier for the distortion loss term.
@@ -54,37 +51,33 @@ def compute_power_transformed_distortion_loss(samples, weights, S=10000.0, lambd
     Returns:
         The scaled distortion loss value.
     """
-    # Extract metric distances
-    t_values = [s.t for s in samples]
-    
-    # Apply power transformation
-    # t_transformed = (S * t) ^ lambda
-    # Note: In implementation, ensure t > 0 to avoid log/inf issues if lambda < 0.
-    # The source implies t is metric distance, which is positive.
+    # Step 2 & 3: Scale and apply power transformation
     t_transformed = [(S * t) ** lambda_val for t in t_values]
     
-    # Compute standard distortion loss on transformed distances
-    # L_dist = sum_i sum_j w_i * w_j * |d_i - d_j|
+    # Step 4: Compute standard distortion loss on transformed distances
     distortion_loss = 0.0
     n = len(t_transformed)
     for i in range(n):
         for j in range(n):
             distortion_loss += weights[i] * weights[j] * abs(t_transformed[i] - t_transformed[j])
             
-    # Scale by alpha
+    # Step 5: Scale by alpha
     return alpha * distortion_loss
 ```
 
 ## Subtopics
 
+### [Gradient Scaling](6887-gradient-scaling.md)
+A technique that mitigates near-camera overfitting and floaters by rescaling gradients during backpropagation to ensure uniform gradient magnitude across all samples on a ray. Unlike this method, which modifies the loss function to penalize metric distance, Gradient Scaling modifies the optimization process itself. Choose it when gradient imbalance along rays is the primary issue rather than metric-space distortion penalties. [Gradient Scaling](6887-gradient-scaling.md)
+
 ## Operating characteristics
-*   **Time Complexity:** The distortion loss computation is $O(N^2)$ with respect to the number of samples per ray $N$, due to the pairwise distance calculation. This is unchanged from the standard distortion loss, but the transformation adds negligible overhead.
-*   **Memory Complexity:** $O(N)$ to store the transformed distances and weights.
+*   **Time Complexity:** $O(N^2)$ with respect to the number of samples per ray $N$, due to the pairwise distance calculation [G].
+*   **Memory Complexity:** $O(N)$ to store the transformed distances and weights [G].
 *   **Performance:** Significantly improves the visual quality of rendered videos by suppressing "floaters" near the camera [S1]. It does not significantly improve quantitative test-set metrics on still images [S1].
-*   **Strengths:** Effective at removing artifacts close to the camera that are visually distracting in video but statistically insignificant in still-image metrics.
-*   **Limitations:** Does not improve standard PSNR/SSIM metrics on still images. The steep gradient near the origin may require careful numerical handling.
-*   **When to use:** When rendering videos or when visual quality near the camera is prioritized over standard still-image metrics.
-*   **When not to use:** When computational budget is extremely tight and $O(N^2)$ distortion loss is prohibitive, or when still-image metrics are the sole optimization target.
+*   **Strengths:** Effective at removing artifacts close to the camera that are visually distracting in video but statistically insignificant in still-image metrics [S1].
+*   **Limitations:** Does not improve standard PSNR/SSIM metrics on still images [S1]. The steep gradient near the origin requires careful numerical handling [S1].
+*   **When to use:** When rendering videos or when visual quality near the camera is prioritized over standard still-image metrics [S1].
+*   **When not to use:** When still-image metrics are the sole optimization target [S1].
 
 ## Background
 This method was introduced in the Zip-NeRF paper as a modification to the mip-NeRF 360 distortion loss [S1]. The authors found that curving metric distance into a normalized space allowed for more effective resampling and interlevel supervision, and specifically improved video quality by penalizing floaters near the camera [S1].

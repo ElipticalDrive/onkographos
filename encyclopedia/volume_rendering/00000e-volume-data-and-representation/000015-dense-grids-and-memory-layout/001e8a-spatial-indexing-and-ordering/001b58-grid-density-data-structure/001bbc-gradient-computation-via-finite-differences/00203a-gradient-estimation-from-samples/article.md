@@ -3,56 +3,28 @@
 Also called: Gradient-based Normal Estimation, Gradient-based Volume Shading, Multi-Volume Ray Casting Gradient Estimation and Shading, Normal Computation for Shading, Normal Vector Computation, Surface Normal Estimation, vtkGPUMultiVolumeRayCastMapper shading logic
 
 ## Overview
-Gradient Estimation from Samples is a technique for computing surface normals directly from the scalar field samples taken during volume ray casting, enabling Phong-based shading without precomputing a separate gradient volume [S1, unofficial][S3]. It differs from [Precomputed Gradient Volume](2425-precomputed-gradient-volume.md) by avoiding the memory overhead and preprocessing time of storing explicit gradient vectors, and from [Analytic Gradient Computation](2167-analytic-gradient-computation.md) by relying on discrete finite differences rather than closed-form derivatives [S3]. This method is primarily used in interactive GPU-based volume rendering to enhance shape perception through diffuse and specular lighting cues [S1, unofficial][S3].
+Gradient Estimation from Samples computes surface normals directly from scalar field samples taken during volume ray casting, enabling Phong-based shading without precomputing a separate gradient volume [S1, unofficial][S3]. It differs from [Precomputed Gradient Volume](2425-precomputed-gradient-volume.md) by avoiding the memory overhead and preprocessing time of storing explicit gradient vectors, and from [Analytic Gradient Computation](2167-analytic-gradient-computation.md) by relying on discrete finite differences rather than closed-form derivatives [S3]. This method is primarily used in interactive GPU-based volume rendering to enhance shape perception through diffuse and specular lighting cues [S1, unofficial][S3].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D texture (`dataSetTexture`) containing the scalar volume data, sampled at a current ray position `posX`.
-*   **Output:** A shaded color value (`finalColor`) for the current sample, incorporating lighting and shading based on the estimated normal.
+*   **Input:** A 3D texture (`dataSetTexture`) containing the scalar volume data, sampled at a current ray position `posX` [S2, unofficial].
+*   **Output:** A shaded color value (`finalColor`) for the current sample, incorporating lighting and shading based on the estimated normal [S2, unofficial].
 
 **Data Structures:**
 *   `dataSetTexture`: An array of 3D samplers (`sampler3D`) used for volume data sampling [S2, unofficial].
-*   `colorTexture`: An array of 1D samplers (`uniform sampler1D colorTexture[MAX_NUMBER_OF_VOLUMES]`) used for color mapping in one-component datasets. Max size is 4 on Apple platforms and 5 otherwise [S2, unofficial].
+*   `colorTexture`: An array of 1D samplers (`uniform sampler1D colorTexture[MAX_NUMBER_OF_VOLUMES]`) used for color mapping in one-component datasets, with a maximum size of 4 on Apple platforms and 5 otherwise [S2, unofficial].
 *   `transposeTextureToEye`: A matrix used to transform the normalized gradient from texture space to eye space [S2, unofficial].
 *   `cellScale`: A scalar used to scale the gradient vector from texture coordinates to eye coordinates [S2, unofficial].
 
 **Algorithm Steps:**
-1.  **Extract Scalar Value:** Determine the scalar value $f$ at the current position. For a 4-component dataset, use the W component; for 1-component, use the X component [S2, unofficial].
-    $$ \text{scalar} = \begin{cases} \text{value}.w & \text{if 4 components} \\ \text{value}.x & \text{if 1 component} \end{cases} $$
-2.  **Compute Gradient Components:** Calculate the central difference gradient vector $\mathbf{g}$ by sampling the texture at offsets from the current position `posX`. Let $\mathbf{xvec}, \mathbf{yvec}, \mathbf{zvec}$ be the unit vectors in texture space corresponding to the x, y, and z axes [S2, unofficial].
-    $$ \mathbf{g}_{\text{raw}} = \begin{bmatrix} f(\text{posX} + \mathbf{xvec}) - f(\text{posX} - \mathbf{xvec}) \\ f(\text{posX} + \mathbf{yvec}) - f(\text{posX} - \mathbf{yvec}) \\ f(\text{posX} + \mathbf{zvec}) - f(\text{posX} - \mathbf{zvec}) \end{bmatrix} $$
-    *Note: The source code samples `posX + vec` and `posX - vec` separately into `g1` and `g2` before subtraction logic is implied by the central difference formula [S1, S2, unofficial].*
-3.  **Scale Gradient:** Convert the gradient from texture space to eye coordinates by scaling with `cellScale` [S2, unofficial].
-    $$ \mathbf{g}_{\text{eye}} = \mathbf{g}_{\text{raw}} \times \text{cellScale} $$
-4.  **Normalize Gradient:** Compute the length $L = \|\mathbf{g}_{\text{eye}}\|$. If $L > 0$, transform the gradient to eye space using the inverse texture-to-eye matrix `transposeTextureToEye` and normalize:
-    $$ \mathbf{n} = \frac{\text{transposeTextureToEye} \times \mathbf{g}_{\text{eye}}}{L} $$
-    If $L = 0$, set $\mathbf{n} = (0, 0, 0)$ [S2, unofficial].
-5.  **Compute Lighting Vectors:**
-    *   If the light is positional ($w \neq 0$):
-        *   Transform vertex position `hPos` to texture coordinates: $\mathbf{tmp} = \text{eyeToTexture4} \times \text{hPos}$.
-        *   Convert to eye coordinates: $\mathbf{ldir}_{\text{dir}} = \mathbf{tmp}.xyz / \mathbf{tmp}.w$.
-        *   Calculate light direction: $\mathbf{ldir} = \text{lightPos} - \mathbf{ldir}_{\text{dir}}$.
-        *   Calculate squared distance: $d^2 = \mathbf{ldir} \cdot \mathbf{ldir}$.
-        *   Normalize: $\mathbf{ldir} = \mathbf{ldir} / \sqrt{d^2}$.
-        *   Calculate half vector: $\mathbf{h} = \text{normalize}(\mathbf{ldir} + \mathbf{wReverseRayDir})$ [S2, unofficial].
-    *   If the light is directional ($w = 0$), $\mathbf{ldir}$ is taken directly from the light source direction [S2, unofficial].
-6.  **Calculate Attenuation:**
-    $$ \text{att} = \frac{1.0}{C + L \sqrt{d^2} + Q d^2} $$
-    Where $C, L, Q$ are constant, linear, and quadratic attenuation factors. If the light is directional, $\text{att} = 1.0$ [S2, unofficial].
-7.  **Calculate Spot Illumination:**
-    *   If spot cutoff is $180^\circ$, $\text{spot} = 1.0$.
-    *   Otherwise, calculate $\text{coef} = -\mathbf{ldir} \cdot \text{spotDirection}$.
-    *   If $\text{coef} \ge \text{spotCosCutoff}$, $\text{spot} = \text{coef}^{\text{spotExponent}}$.
-    *   Else, $\text{spot} = 0.0$ [S2, unofficial].
-8.  **Shade:**
-    *   Initialize `finalColor` to $(0, 0, 0, 0)$ [S2, unofficial].
-    *   Calculate dot products: $nDotL = \mathbf{n} \cdot \mathbf{ldir}$ and $nDotH = \mathbf{n} \cdot \mathbf{h}$ [S2, unofficial].
-    *   **Two-sided shading:** If $nDotL < 0$, negate $nDotL$. If $nDotH < 0$, negate $nDotH$ [S2, unofficial].
-    *   Add ambient: $\text{finalColor} += \text{ambientProduct}$ [S2, unofficial].
-    *   Add diffuse (if $nDotL > 0$): $\text{finalColor} += (\text{diffuseProduct} \times nDotL) \times \text{color}$ [S2, unofficial].
-    *   Add specular: $\text{shininessFactor} = nDotH^{\text{shininess}}$. $\text{finalColor} += \text{specularProduct} \times \text{shininessFactor}$ [S2, unofficial].
-    *   Apply attenuation and spot: $\text{finalColor} *= \text{att} \times \text{spot}$ [S2, unofficial].
-    *   Add scene ambient: $\text{finalColor} += \text{sceneColor} \times \text{color}$ [S2, unofficial].
+1.  **Extract Scalar Value:** Determine the scalar value $f$ at the current position [S2, unofficial]. For a 4-component dataset, use the W component; for 1-component, use the X component [S2, unofficial].
+2.  **Compute Gradient Components:** Calculate the central difference gradient vector $\mathbf{g}$ by sampling the texture at offsets from the current position `posX` [S2, unofficial]. Let $\mathbf{xvec}$, $\mathbf{yvec}$, and $\mathbf{zvec}$ be the unit vectors in texture space corresponding to the x, y, and z axes [S2, unofficial]. The gradient is computed as $\mathbf{g}_{\text{raw}} = \frac{1}{2} \begin{bmatrix} f(\text{posX} + \mathbf{xvec}) - f(\text{posX} - \mathbf{xvec}) \\ f(\text{posX} + \mathbf{yvec}) - f(\text{posX} - \mathbf{yvec}) \\ f(\text{posX} + \mathbf{zvec}) - f(\text{posX} - \mathbf{zvec}) \end{bmatrix}$ [S1, unofficial].
+3.  **Scale Gradient:** Convert the gradient from texture space to eye coordinates by scaling with `cellScale` [S2, unofficial]. $\mathbf{g}_{\text{eye}} = \mathbf{g}_{\text{raw}} \times \text{cellScale}$ [S2, unofficial].
+4.  **Normalize Gradient:** Compute the length $L = \|\mathbf{g}_{\text{eye}}\|$ [S2, unofficial]. If $L > 0$, transform the gradient to eye space using the inverse texture-to-eye matrix `transposeTextureToEye` and normalize: $\mathbf{n} = \frac{\text{transposeTextureToEye} \times \mathbf{g}_{\text{eye}}}{L}$ [S2, unofficial]. If $L = 0$, set $\mathbf{n} = (0, 0, 0)$ [S2, unofficial].
+5.  **Compute Lighting Vectors:** If the light is positional ($w \neq 0$), transform vertex position `hPos` to texture coordinates: $\mathbf{tmp} = \text{eyeToTexture4} \times \text{hPos}$ [S2, unofficial]. Convert to eye coordinates: $\mathbf{ldir}_{\text{dir}} = \mathbf{tmp}.xyz / \mathbf{tmp}.w$ [S2, unofficial]. Calculate light direction: $\mathbf{ldir} = \text{lightPos} - \mathbf{ldir}_{\text{dir}}$ [S2, unofficial]. Calculate squared distance: $d^2 = \mathbf{ldir} \cdot \mathbf{ldir}$ [S2, unofficial]. Normalize: $\mathbf{ldir} = \mathbf{ldir} / \sqrt{d^2}$ [S2, unofficial]. Calculate half vector: $\mathbf{h} = \text{normalize}(\mathbf{ldir} + \mathbf{wReverseRayDir})$ [S2, unofficial]. If the light is directional ($w = 0$), $\mathbf{ldir}$ is taken directly from the light source direction [S2, unofficial].
+6.  **Calculate Attenuation:** Calculate attenuation $\text{att}$ using light source constants: $\text{att} = \frac{1.0}{\text{constantAttenuation} + \text{linearAttenuation} \sqrt{d^2} + \text{quadraticAttenuation} \times d^2}$ [S2, unofficial]. If the light is directional, set $\text{att} = 1.0$ [S2, unofficial].
+7.  **Calculate Spot Illumination:** If spot cutoff is $180^\circ$, $\text{spot} = 1.0$ [S2, unofficial]. Otherwise, calculate $\text{coef} = -\mathbf{ldir} \cdot \text{spotDirection}$ [S2, unofficial]. If $\text{coef} \ge \text{spotCosCutoff}$, $\text{spot} = \text{coef}^{\text{spotExponent}}$ [S2, unofficial]. Else, $\text{spot} = 0.0$ [S2, unofficial].
+8.  **Shade:** Initialize `finalColor` to $(0, 0, 0, 0)$ [S2, unofficial]. Calculate dot products: $nDotL = \mathbf{n} \cdot \mathbf{ldir}$ and $nDotH = \mathbf{n} \cdot \mathbf{h}$ [S2, unofficial]. For two-sided shading, negate $nDotL$ if $nDotL < 0$ and $nDotH$ if $nDotH < 0$ [S2, unofficial]. Add ambient lighting: $\text{finalColor} += \text{gl\_FrontLightProduct}[0].\text{ambient}$ [S2, unofficial]. Add diffuse lighting if $nDotL > 0$: $\text{finalColor} += (\text{gl\_FrontLightProduct}[0].\text{diffuse} \times nDotL) \times \text{color}$ [S2, unofficial]. Add specular lighting: calculate $\text{shininessFactor} = \text{pow}(nDotH, \text{gl\_FrontMaterial.shininess})$ and add $\text{finalColor} += \text{gl\_FrontLightProduct}[0].\text{specular} \times \text{shininessFactor}$ [S2, unofficial]. Apply attenuation and spot factor: $\text{finalColor} *= \text{att} \times \text{spot}$ [S2, unofficial]. Add scene ambient term: $\text{finalColor} += \text{gl\_FrontLightModelProduct.sceneColor} \times \text{color}$ [S2, unofficial].
 9.  **Clamp:** Clamp `finalColor` to `[clampMin, clampMax]` to prevent black spots [S2, unofficial].
 
 **Pseudocode:**
@@ -61,41 +33,35 @@ Gradient Estimation from Samples is a technique for computing surface normals di
 ```python
 def shade_volume_sample(pos, ray_dir, light_pos, light_dir, light_constants, 
                         transpose_texture_to_eye, cell_scale, clamp_min, clamp_max,
-                        shininess, color_value, is_directional_light):
+                        shininess, color_value, is_directional_light, eye_to_texture4):
     """
     Computes shaded color for a volume sample using gradient estimation from samples.
     """
+    # Helper: standard 3D texture sampling operation
+    def sample_3d(tex, p):
+        # Returns the scalar value at texture coordinate p
+        return tex[p]
+
     # 1. Extract scalar value
-    # Assuming 4-component dataset uses W, 1-component uses X
-    scalar = color_value.w if color_value.w is not None else color_value.x
+    scalar = color_value.w if len(color_value) == 4 else color_value.x
     
     # 2. Compute Gradient (Central Differences)
-    # Offsets are unit vectors in texture space
     x_vec = vec3(1.0, 0.0, 0.0)
     y_vec = vec3(0.0, 1.0, 0.0)
     z_vec = vec3(0.0, 0.0, 1.0)
     
-    # Sample neighbors
-    val_pos_x = texture3D(dataSetTexture, pos + x_vec)
-    val_neg_x = texture3D(dataSetTexture, pos - x_vec)
-    val_pos_y = texture3D(dataSetTexture, pos + y_vec)
-    val_neg_y = texture3D(dataSetTexture, pos - y_vec)
-    val_pos_z = texture3D(dataSetTexture, pos + z_vec)
-    val_neg_z = texture3D(dataSetTexture, pos - z_vec)
+    s_pos_x = sample_3d(dataSetTexture, pos + x_vec)
+    s_neg_x = sample_3d(dataSetTexture, pos - x_vec)
+    s_pos_y = sample_3d(dataSetTexture, pos + y_vec)
+    s_neg_y = sample_3d(dataSetTexture, pos - y_vec)
+    s_pos_z = sample_3d(dataSetTexture, pos + z_vec)
+    s_neg_z = sample_3d(dataSetTexture, pos - z_vec)
     
-    # Extract scalar components (assuming same component logic as input)
-    s_pos_x = val_pos_x.w if val_pos_x.w is not None else val_pos_x.x
-    s_neg_x = val_neg_x.w if val_neg_x.w is not None else val_neg_x.x
-    s_pos_y = val_pos_y.w if val_pos_y.w is not None else val_pos_y.x
-    s_neg_y = val_neg_y.w if val_neg_y.w is not None else val_neg_y.x
-    s_pos_z = val_pos_z.w if val_pos_z.w is not None else val_pos_z.x
-    s_neg_z = val_neg_z.w if val_neg_z.w is not None else val_neg_z.x
-    
-    # Central difference formula
+    # Apply 1/2 factor from central difference formula
     grad_raw = vec3(
-        (s_pos_x - s_neg_x),
-        (s_pos_y - s_neg_y),
-        (s_pos_z - s_neg_z)
+        (s_pos_x - s_neg_x) * 0.5,
+        (s_pos_y - s_neg_y) * 0.5,
+        (s_pos_z - s_neg_z) * 0.5
     )
     
     # 3. Scale Gradient
@@ -104,27 +70,22 @@ def shade_volume_sample(pos, ray_dir, light_pos, light_dir, light_constants,
     # 4. Normalize Gradient
     normal_length = length(grad_eye)
     if normal_length > 0.0:
-        # Transform to eye space and normalize
-        grad_eye = transpose_texture_to_eye * grad_eye
+        grad_eye = transpose_texture_to_eye @ grad_eye
         normal = normalize(grad_eye)
     else:
         normal = vec3(0.0, 0.0, 0.0)
         
     # 5. Compute Lighting Vectors
     if not is_directional_light:
-        # Positional light
-        # Transform position to texture coords then to eye coords for light direction calc
-        # Note: eyeToTexture4 is assumed available from context
-        tmp = eye_to_texture4 * pos
-        ldir_dir = tmp.xyz / tmp.w
+        tmp = eye_to_texture4 @ pos
+        ldir_dir = vec3(tmp.x / tmp.w, tmp.y / tmp.w, tmp.z / tmp.w)
         ldir = light_pos - ldir_dir
         sqr_distance = dot(ldir, ldir)
         ldir = normalize(ldir)
-        # Half vector calculation requires reverse ray direction
-        h = normalize(ldir + ray_dir) # Assuming ray_dir is the reverse ray direction or wReverseRayDir
+        h = normalize(ldir + ray_dir)
     else:
         ldir = light_dir
-        sqr_distance = 0.0 # Infinite distance for directional light
+        sqr_distance = 0.0
         h = normalize(ldir + ray_dir)
         
     # 6. Calculate Attenuation
@@ -156,15 +117,15 @@ def shade_volume_sample(pos, ray_dir, light_pos, light_dir, light_constants,
         n_dot_h = -n_dot_h
         
     # Ambient
-    final_color += light_constants.ambient_product
+    final_color += light_constants.ambient
     
     # Diffuse
     if n_dot_l > 0.0:
-        final_color += (light_constants.diffuse_product * n_dot_l) * color_value
+        final_color += (light_constants.diffuse * n_dot_l) * color_value
         
     # Specular
     shininess_factor = pow(n_dot_h, shininess)
-    final_color += light_constants.specular_product * shininess_factor
+    final_color += light_constants.specular * shininess_factor
     
     # Apply attenuation and spot
     final_color *= att * spot
@@ -186,7 +147,7 @@ def shade_volume_sample(pos, ray_dir, light_pos, light_dir, light_constants,
 **Edge Cases and Pitfalls:**
 *   **Black Spots:** Occur if the final color is not clamped or if negative dot products are not handled for two-sided shading [S2, unofficial].
 *   **Zero Gradient:** If the gradient length is zero, the normal is set to $(0,0,0)$, resulting in no diffuse/specular contribution [S2, unofficial].
-*   **Boundary Conditions:** Central differences require neighbors. At volume boundaries, sampling outside the texture domain must be handled (e.g., clamping or repeating), though the source code assumes valid texture sampling [S2, unofficial].
+*   **Boundary Conditions:** Central differences require neighbors [S1, unofficial]. At volume boundaries, sampling outside the texture domain must be handled, though the source implementation assumes valid texture sampling [S2, unofficial].
 
 ## Subtopics
 
@@ -197,11 +158,11 @@ Precomputes shaded colors for each voxel using a Lambertian model to avoid per-r
 Approximates surface normals at query points for enhanced shape perception. Choose when intrinsic spatial variation cues are needed without external light sources.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per sample, as it requires a constant number of texture lookups (6 for central differences) and vector operations.
+*   **Time Complexity:** $O(1)$ per sample, as it requires a constant number of texture lookups and vector operations [S3].
 *   **Memory Complexity:** $O(1)$ additional memory per sample, as no precomputed gradient volume is stored [S3].
-*   **Performance:** Enables interactive visualization on GPU workstations by avoiding expensive precomputation [S3]. However, it is computationally more expensive than simple dot-product shading due to the gradient evaluation [S1, unofficial].
-*   **Strengths:** No preprocessing time, low memory overhead, enhances shape perception [S1, unofficial][S3].
-*   **Limitations:** Gradient estimation can be noisy in sparse or low-resolution regions; central differences may be inaccurate near boundaries [S1, unofficial][S3].
+*   **Performance:** Enables interactive visualization on GPU workstations by avoiding expensive precomputation [S3].
+*   **Strengths:** Avoids preprocessing time and reduces memory overhead compared to gradient volume storage [S3].
+*   **Limitations:** Requires additional texture lookups per sample compared to simple dot-product shading [S1, unofficial].
 
 ## Background
 The method was introduced in the context of interactive volume rendering for medical data visualization, using central differences to estimate normals for Phong shading [S1, unofficial]. It was further implemented in the VTK `vtkGPUMultiVolumeRayCastMapper` for multi-volume ray casting, allowing for real-time shading on GPUs [S2, unofficial]. A related contribution by Wald et al. described a novel method to compute gradient vectors from just the samples taken for reconstruction in AMR data, highlighting its utility for interactive visualization [S3].

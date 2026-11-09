@@ -1,61 +1,68 @@
 # Marching Cubes Lookup and Configuration
 
+Also called: Marching Cubes Lookup Tables, MC LUTs, Case Indexing
 
 ## Overview
-Marching Cubes Lookup and Configuration provides the static data structures and mapping logic that determine how a voxel's scalar field sign configuration is converted into mesh geometry. It solves the combinatorial problem of isosurface extraction by replacing runtime conditional branching with direct array indexing, enabling $O(1)$ determination of triangle topology per voxel. It differs from symmetry-based approaches by handling all 256 cases explicitly (or via symmetry reduction) and from dynamic ambiguity resolution methods by using fixed triangulations for ambiguous cases, which may produce topological artifacts if adjacent cells resolve ambiguities inconsistently.
+Marching Cubes Lookup and Configuration defines the static data structures and decision logic used to map the 256 possible binary sign configurations of a voxel's eight corners to a specific polygonal topology [10327-lookup-table-and-ambiguity-handling]. It solves the problem of efficiently determining which edges of a cube are intersected by an isosurface and how to connect those intersections into triangles without runtime geometric reasoning [10327-lookup-table-and-ambiguity-handling]. What sets this family apart from siblings like [Snap Marching Cubes](2181-snap-marching-cubes.md) or [GPU Acceleration](4136-gpu-acceleration-and-parallel-pipelines.md) is its reliance on precomputed, static decision logic (lookup tables) rather than dynamic geometric queries or hardware-specific optimizations [10327-lookup-table-and-ambiguity-handling].
 
 ## Shared principles
-The family relies on two precomputed data structures derived from the 256 possible binary configurations of a voxel's eight corner signs relative to an isovalue.
+The family relies on two precomputed data structures derived from the 256 possible binary configurations of a voxel's eight corner signs relative to an isovalue [10327-lookup-table-and-ambiguity-handling].
 
 1.  **Edge Intersection Table (`edgeTable`)**: An array of 256 integers (or shorts). Each entry is a 12-bit bitmask. Bit $k$ ($0 \le k \le 11$) is set to 1 if the isosurface intersects the $k$-th edge of the cube, and 0 otherwise. The standard edge numbering convention is:
     *   Bottom face ($z=0$): $e_0=(0,1), e_1=(1,2), e_2=(2,3), e_3=(3,0)$
     *   Top face ($z=1$): $e_4=(4,5), e_5=(5,6), e_6=(6,7), e_7=(7,4)$
-    *   Vertical edges: $e_8=(0,4), e_9=(1,5), e_{10}=(2,6), e_{11}=(3,7)$
+    *   Vertical edges: $e_8=(0,4), e_9=(1,5), e_{10}=(2,6), e_{11}=(3,7)$ [10327-lookup-table-and-ambiguity-handling]
 
 2.  **Triangle Connection Table (`triangleTable`)**: A 2D array of size $256 \times 16$.
     *   Rows are indexed by the case index $C \in [0, 255]$.
     *   Columns store integer indices. Indices $0–11$ refer to the 12 cube edges.
     *   Indices are grouped in triplets $(a, b, c)$ to form triangles.
     *   The sequence is terminated by the value `-1`.
-    *   The maximum number of triangles per voxel is 5, requiring 15 indices plus 1 terminator.
+    *   The maximum number of triangles per voxel is 5, requiring 15 indices plus 1 terminator [10327-lookup-table-and-ambiguity-handling].
 
-**Case Index Calculation**: For each voxel, the 8-bit case index $C$ is determined by the scalar field values $V$ at the 8 vertices $v_i$ ($i=0..7$). If $V(v_i) < I$ (or $> I$, depending on convention), bit $i$ of $C$ is set to 1; otherwise 0. The bit assignment must strictly match the vertex ordering assumed by the LUT generation.
+**Case Index Calculation**: For each voxel, the 8-bit case index $C$ is determined by the scalar field values $V$ at the 8 vertices $v_i$ ($i=0..7$). If $V(v_i) < I$ (or $> I$, depending on convention), bit $i$ of $C$ is set to 1; otherwise 0. The bit assignment must strictly match the vertex ordering assumed by the LUT generation [10327-lookup-table-and-ambiguity-handling].
 
-**Ambiguity**: Cases 46, 47, 98, 99, 210, 213, 214, 215 contain saddle points where the topology is ambiguous (the isosurface passes through the cube center). The standard LUT uses a fixed triangulation for these, which can cause cracks or holes if adjacent voxels resolve the ambiguity differently.
+**Ambiguity**: Cases 46, 47, 98, 99, 210, 213, 214, 215 contain saddle points where the topology is ambiguous (the isosurface passes through the cube center). The standard LUT uses a fixed triangulation for these, which can cause cracks or holes if adjacent voxels resolve the ambiguity differently [10327-lookup-table-and-ambiguity-handling].
 
 ## Subtopics
 
 ### [Snap Marching Cubes](2181-snap-marching-cubes.md)
-Improves mesh quality by snapping isosurface vertices to grid vertices, reducing triangles and eliminating small angles. It differs from adaptive methods by operating on a uniform grid, offering significant speedups at the cost of potential topological errors. Choose it when mesh simplification and speed are prioritized over strict topological correctness.
-
-### [SDF to PLY Conversion](2343-sdf-to-ply-conversion.md)
-Converts an implicit function defined on a 3D grid into a polygonal mesh file by sampling the scalar field and applying Marching Cubes. It prioritizes memory management during evaluation to support high-resolution grids. Choose it when exporting implicit representations to standard mesh formats for rendering or simulation.
+Snap Marching Cubes (SnapMC) is an isosurface extraction algorithm that improves mesh quality by reducing the number of triangles and eliminating small angles, which are common artifacts in standard Marching Cubes. It achieves this by modifying the scalar field to "snap" isosurface vertices that are geometrically close to grid vertices onto those grid vertices, causing nearby geometric elements to merge. Unlike adaptive methods such as [Advancing Front Framework for Implicit Surfaces](819-advancing-front-framework-for-implicit-surfaces.md) or [DelIso](954-extended-clcir-plic-reconstruction.md), SnapMC is non-adaptive and operates on a uniform grid, offering a significant speedup over adaptive counterparts at the cost of potential topological errors and non-manifold surfaces.
 
 ### [GPU Acceleration and Parallel Pipelines](4136-gpu-acceleration-and-parallel-pipelines.md)
-Executes the extraction algorithm on a GPU to achieve real-time performance on large volumetric datasets. It differs from CPU-based methods by utilizing diverse output management strategies like atomic counters and indirect rendering. Choose it for real-time visualization and large-scale data processing.
-
-### [Marching Cubes Vertex List Generation](4447-marching-cubes-vertex-list-generation.md)
-Computes precise 3D positions of vertices on intersected edges via linear interpolation. It differs from approximation methods by offering exact placement strategies like QEF minimization or centroid averaging. Choose it when geometric accuracy is critical for downstream rendering or simulation.
-
-### [Lookup Table and Configuration](4978-lookup-table-and-configuration.md)
-Provides the static data structures and mapping logic that determine how a voxel's scalar field sign configuration is converted into mesh geometry. It differs from dynamic resolution methods by using fixed triangulations for all cases. Choose it as the foundational step for standard, fast isosurface extraction.
-
-### [Topology and Ambiguity Handling](6547-topology-and-ambiguity-handling.md)
-Resolves topological inconsistencies in standard lookup-table-based extraction when the isosurface passes through saddle points. It ensures the resulting mesh is a topological manifold. Choose it when watertightness and manifold connectivity are required for simulation or advanced rendering.
+GPU Acceleration and Parallel Pipelines refers to the family of isosurface extraction techniques that offload the voxel classification, edge intersection calculation, and triangle generation stages of Marching Cubes to the GPU, typically using compute shaders or fragment shaders. This approach solves the performance bottleneck of CPU-based extraction by leveraging massive parallelism to process thousands of voxels simultaneously. It differs from CPU implementations by eliminating the host-device data transfer overhead for intermediate geometry and from other GPU variants by the specific memory management strategy employed (e.g., atomic counters, histogram pyramids, or slab-based prefix sums) to handle the variable output size of the algorithm.
 
 ### [Marching Cubes Iso-surface Extraction](6921-marching-cubes-iso-surface-extraction.md)
-Generates a polygonal mesh representing an isosurface from 3D scalar volumetric data by dividing the volume into cubic voxels and connecting intersection points into triangles. It differs from direct volume rendering by extracting a discrete boundary. Choose it for visualizing specific tissue densities or material boundaries.
-
-### [Watt & Watt Marching Cubes](7787-watt-watt-marching-cubes.md)
-An improved version that treats arbitrary datasets and isosurfaces efficiently, addressing issues of I/O and cell classification timing. Choose it when processing non-standard or arbitrary volumetric datasets with strict performance constraints.
+Marching Cubes Iso-surface Extraction is a surface rendering technique that generates a polygonal mesh representing an isosurface from 3D scalar volumetric data. It operates by dividing the volume into cubic voxels, determining surface intersections at the edges of each cube, and connecting these points into triangles. Unlike direct volume rendering, which projects opacity and color through the volume, this method extracts a discrete boundary, making it distinct for visualizing specific tissue densities (e.g., bone vs. soft tissue). It builds on the precomputed lookup tables defined in [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md).
 
 ### [Mesh Simplification and Optimization](8588-mesh-simplification-and-optimization.md)
-Addresses post-processing of isosurfaces to reduce mesh complexity and memory footprint through geometric reduction or topological simplification. It differs from extraction logic by focusing on downstream optimization. Choose it when rendering overhead and memory bandwidth are bottlenecks.
+Mesh simplification and optimization reduces the geometric complexity of isosurfaces extracted via Marching Cubes to improve rendering performance, storage efficiency, and visual quality. While standard Marching Cubes produces a dense, often redundant mesh, this family of methods applies post-processing or integrated strategies to remove unnecessary vertices and triangles while preserving the underlying topology and surface accuracy. It sets itself apart from raw extraction methods by explicitly addressing mesh density and manifold integrity, often through decimation, stripification, or hybrid contour-and-simplify pipelines.
 
-### [Improved Marching Cubes Algorithm](9090-improved-marching-cubes-algorithm.md)
-Modifies the traditional MC algorithm in voxel representation, interpolation method, and triangular mesh simplification to improve operation efficiency and real-time interaction. Choose it for medical imaging and real-time CT reconstruction applications.
+### [Surface-following Marching Cubes with Blocking](8966-surface-following-marching-cubes-with-blocking.md)
+An alternative approach using surface-following marching cubes with a blocking algorithm for unbounded rendering and a point insert, 3D lookup cache.
+
+### [Real-time particle isosurface extraction](10275-real-time-particle-isosurface-extraction.md)
+A technique for fast, high-quality polygonization of isosurfaces over thousands of particles in an unbounded spatial domain using small working memory, generating a triangle mesh for real-time rendering.
+
+### [Lookup Table and Ambiguity Handling](10327-lookup-table-and-ambiguity-handling.md)
+This family defines the static data structures and decision logic used to map the 256 possible binary sign configurations of a voxel's eight corners to a specific polygonal topology [4978-lookup-table-and-configuration]. It solves the problem of efficiently determining which edges of a cube are intersected by an isosurface and how to connect those intersections into triangles without runtime geometric reasoning. What sets this family apart from siblings like [Snap Marching Cubes](2181-snap-marching-cubes.md) or [GPU Acceleration](4136-gpu-acceleration-and-parallel-pipelines.md) is its reliance on precomputed, static decision logic (lookup tables) rather than dynamic geometric queries or hardware-specific optimizations.
+
+### [Multi-Isosurface and Generalized Contouring](10723-multi-isosurface-and-generalized-contouring.md)
+
+### [Signed Distance and Two-Step Methods](10990-signed-distance-and-two-step-methods.md)
+This family extends standard isosurface extraction to Signed Distance Functions (SDFs) and implicit fields defined by scattered data. It solves the problem of efficiently and accurately extracting the zero-level set from continuous implicit representations by combining spatial filtering, error-bounded approximation, and standard lookup-based triangulation. It differs from siblings by prioritizing the handling of continuous implicit inputs (SDFs/RBFs) over discrete grid data, often using narrow-band filtering or two-step evaluation to avoid processing the entire volume.
+
+### [Vertex Position Optimization and Error Minimization](10991-vertex-position-optimization-and-error-minimization.md)
+This family of methods enhances the geometric accuracy of isosurfaces extracted via Marching Cubes by refining vertex positions after the initial topology is determined. While standard Marching Cubes places vertices via linear interpolation along edges, these methods minimize the error between the resulting mesh and the underlying scalar field. They distinguish themselves from [Snap Marching Cubes](2181-snap-marching-cubes.md) by using optimization or snapping logic rather than simple grid snapping, and from [Mesh Simplification and Optimization](8588-mesh-simplification-and-optimization.md) by focusing on local vertex placement accuracy rather than global topology reduction.
+
+### Feature Location (Particle Initialization)
+- **Definition**: Initial placement of particles near a feature (isosurface at a user-selected iso-value) by sampling volume data at a user-defined grid [S1].
+- **Step**: For each grid point $r$, iterate through each neighboring grid point $n$. Sample Volume at grid points $n$ and $r$. If the iso-surface is crossed, output a particle between grid points $n$ and $r$ [S1]. GPU Implementation: Each active shader thread determines particle location. For each grid point, compare values to sampled values of front, right, and top neighboring grid points. This results in zero, one, two, or three particle positions [S1].
+- **Layout**: Output: Vertices of line-strip primitives recorded into a texture buffer object (TBO). Each vertex represents a particle position $(x,y,z)$ [S1].
+- **Complexity**: Complexity is in the order of the number of grid points [S1].
 
 ## Background
-Not given in the sources.
+The Marching Cubes algorithm was introduced by William E. Lorensen and Harvey E. Cline in 1987 [S1, S3, S4, unofficial]. It became the standard method for extracting polygonal meshes from volumetric data, particularly in medical imaging and scientific visualization. The lookup table approach was formalized to allow for efficient, branchless processing of voxel configurations, enabling real-time performance on modern hardware. The ambiguity cases (46, 47, 98, 99, 210, 213, 214, 215) were identified early on as a limitation of the original table, leading to various extensions and ambiguity-handling strategies [10327-lookup-table-and-ambiguity-handling].
 
 ## Sources
+[S1] GPU-based Particle Systems for Illustrative Volume Rendering, https://doi.org/10.2312/vg/vg-pbg08/089-096, fetched 2026-10-26
