@@ -1,0 +1,151 @@
+# Structured Grid Triangle List Generation
+
+Also called: Structured Grid Surface Mesh Generation (for planar slices)
+
+## Overview
+Precomputes vertex index arrays for triangle lists representing surfaces parallel to the xy, yz, and xz planes on a regular 3D grid [S1, unofficial]. It solves the problem of efficiently generating the connectivity for isosurface or slice rendering by providing static index buffers that can be offset for different grid depths [S1, unofficial]. It differs from general isosurface extraction (e.g., Marching Cubes) by assuming axis-aligned planar topology, allowing for $O(1)$ index computation per triangle without geometric intersection tests [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `ngx`, `ngy`, `ngz`: Integer grid dimensions in the x, y, and z directions respectively [S1, unofficial].
+- `ngxy`: Precomputed stride `ngx * ngy` [S1, unofficial].
+
+**Outputs:**
+- Three integer arrays storing vertex indices for triangle lists:
+  - `indices_xy`: Size $6(n_x-1)(n_y-1)$ [S1, unofficial].
+  - `indices_yz`: Size $6(n_y-1)(n_z-1)$ [S1, unofficial].
+  - `indices_xz`: Size $6(n_z-1)(n_x-1)$ [S1, unofficial].
+
+**Data Structures:**
+- `index`: A flat integer array (or list) used to store the 6 indices per quad (2 triangles) for each cell in the grid [S1, unofficial].
+
+**Algorithm:**
+The method generates base indices for the plane at coordinate 0 along the axis perpendicular to the plane. These base indices are reused for all slices by adding an offset corresponding to the slice's position [S1, unofficial].
+
+1. **XY-Plane Generation:**
+   - Initialize index pointer `k = 0`.
+   - Loop `i` from `0` to `ngy - 1`.
+   - Loop `j` from `0` to `ngx - 1`.
+   - Assign 6 indices to `index[k...k+5]`:
+     - `index[k] = ngx * i + j`
+     - `index[k+1] = ngx * i + j + 1`
+     - `index[k+2] = ngx * (i + 1) + j + 1`
+     - `index[k+3] = ngx * i + j`
+     - `index[k+4] = ngx * (i + 1) + j + 1`
+     - `index[k+5] = ngx * (i + 1) + j`
+   - Increment `k` by 6 [S1, unofficial].
+
+2. **YZ-Plane Generation:**
+   - Initialize index pointer `k = 0`.
+   - Loop `i` from `0` to `ngz - 1`.
+   - Set `m = i * ngxy`.
+   - Loop `j` from `0` to `ngy - 1`.
+   - Assign 6 indices to `index[k...k+5]`:
+     - `index[k] = m`
+     - `index[k+1] = m + ngx`
+     - `index[k+2] = m + ngx + ngxy`
+     - `index[k+3] = m`
+     - `index[k+4] = m + ngx + ngxy`
+     - `index[k+5] = m + ngxy`
+   - Increment `m` by `ngx` (Note: The source code increments `m` inside the inner loop, effectively treating `j` as a row iterator within a column-major or specific memory layout context, but the index calculation relies on `m` which is updated per `j` iteration in the provided snippet [S1, unofficial]).
+   - Increment `k` by 6 [S1, unofficial].
+
+3. **XZ-Plane Generation:**
+   - Initialize index pointer `k = 0`.
+   - Loop `i` from `0` to `ngz - 1`.
+   - Set `m = i * ngxy`.
+   - Loop `j` from `0` to `ngx - 1`.
+   - Assign 6 indices to `index[k...k+5]`:
+     - `index[k] = m`
+     - `index[k+1] = m + 1`
+     - `index[k+2] = m + 1 + ngxy`
+     - `index[k+3] = m`
+     - `index[k+4] = m + 1 + ngxy`
+     - `index[k+5] = m + ngxy`
+   - Increment `m` by `1` (Note: Similar to YZ, `m` is incremented in the inner loop [S1, unofficial]).
+   - Increment `k` by 6 [S1, unofficial].
+
+**Rendering Usage:**
+To render a surface at a specific z-coordinate `z_idx` for the XY-plane, add `z_idx * ngxy` to every index in the `indices_xy` array before passing to the GPU [S1, unofficial]. Similar offsets apply for YZ (adding `z_idx * ngxy`? No, YZ is parallel to YZ, so it varies in X? No, YZ plane is constant X. The source states "surfaces parallel to the y-z or x-z plane can also be computed similarly" by adding the index of the grid point at the axis [S1, unofficial]. For YZ, the varying axis is X. For XZ, the varying axis is Y. The offset logic follows the grid indexing scheme $idx(x,y,z) = x + y \cdot dX + z \cdot dX \cdot dY$ [S2, unofficial]).
+
+**Pitfalls:**
+- Indices must be offset by the grid position of the perpendicular axis when computing triangle lists for surfaces not at the origin (e.g., z-axis offset for xy-plane surfaces) [S1, unofficial].
+- The inner loop variable updates for `m` in YZ and XZ generation are specific to the provided implementation and must be replicated exactly to maintain correct connectivity [S1, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_structured_grid_triangles(ngx, ngy, ngz):
+    ngxy = ngx * ngy
+    
+    # XY Plane: Parallel to XY, varies in Z
+    # Size: 6 * (ngx-1) * (ngy-1)
+    indices_xy = []
+    k = 0
+    for i in range(ngy - 1):
+        for j in range(ngx - 1):
+            # Two triangles forming a quad
+            # Triangle 1
+            indices_xy.append(ngx * i + j)
+            indices_xy.append(ngx * i + j + 1)
+            indices_xy.append(ngx * (i + 1) + j + 1)
+            # Triangle 2
+            indices_xy.append(ngx * i + j)
+            indices_xy.append(ngx * (i + 1) + j + 1)
+            indices_xy.append(ngx * (i + 1) + j)
+            
+    # YZ Plane: Parallel to YZ, varies in X
+    # Size: 6 * (ngy-1) * (ngz-1)
+    indices_yz = []
+    k = 0
+    for i in range(ngz - 1):
+        m = i * ngxy
+        for j in range(ngy - 1):
+            indices_yz.append(m)
+            indices_yz.append(m + ngx)
+            indices_yz.append(m + ngx + ngxy)
+            indices_yz.append(m)
+            indices_yz.append(m + ngx + ngxy)
+            indices_yz.append(m + ngxy)
+            m = m + ngx # Source increments m here
+            
+    # XZ Plane: Parallel to XZ, varies in Y
+    # Size: 6 * (ngz-1) * (ngx-1)
+    indices_xz = []
+    k = 0
+    for i in range(ngz - 1):
+        m = i * ngxy
+        for j in range(ngx - 1):
+            indices_xz.append(m)
+            indices_xz.append(m + 1)
+            indices_xz.append(m + 1 + ngxy)
+            indices_xz.append(m)
+            indices_xz.append(m + 1 + ngxy)
+            indices_xz.append(m + ngxy)
+            m = m + 1 # Source increments m here
+            
+    return indices_xy, indices_yz, indices_xz
+```
+
+## Subtopics
+
+### Structured Grid Cell Generation
+Generates the volume mesh (hexahedra or quads) for a structured grid, returning a list of vertex indices per cell in z-major order [S2, unofficial]. It handles 3D hexahedra (8 vertices) and 2D planar cases (quads, 4 vertices) depending on whether dimensions are greater than 1 [S2, unofficial]. Vertex indexing follows $idx(x, y, z) = x + y \cdot dX + z \cdot dX \cdot dY$ [S2, unofficial]. Use this when volume rendering requires explicit cell connectivity rather than surface triangles [S2, unofficial].
+
+### Structured Grid Surface Generation
+Generates the surface mesh (quads) for a structured grid by iterating over the boundary faces of the voxel grid defined by dimensions $dX, dY, dZ$ [S2, unofficial]. It calculates effective loop counts clamped to minimum 1 ($cx = \max(1, dX-1)$, etc.) [S2, unofficial]. It generates 6 faces for 3D grids, or single planes for 2D grids (dZ=1, dY=1, or dX=1) [S2, unofficial]. Use this when rendering the outer shell of a structured volume rather than internal slices [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of cells in the grid, specifically proportional to $(n_x-1)(n_y-1) + (n_y-1)(n_z-1) + (n_z-1)(n_x-1)$ [S1, unofficial].
+- **Memory Complexity:** $O(N)$ for storing the index arrays [S1, unofficial].
+- **Strengths:** Extremely fast precomputation; no runtime geometric calculation required; simple offset-based rendering for multiple slices [S1, unofficial].
+- **Limitations:** Only supports axis-aligned planar surfaces; cannot represent arbitrary isosurfaces or curved boundaries [S1, unofficial].
+- **When to use:** When rendering orthogonal slices or planar isosurfaces on a regular grid [S1, unofficial].
+- **When not to use:** When the surface of interest is not aligned with the coordinate axes or requires complex topology [S1, unofficial].
+
+## Background
+Originated in the context of visualizing surfaces and 3D vector fields on regular grids [S1, unofficial]. The method relies on the regular topology of structured grids to precompute connectivity, avoiding the need for dynamic mesh generation during rendering [S1, unofficial]. It is commonly used in scientific visualization systems that require efficient display of multiple orthogonal slices [S1, unofficial].
+
+## Sources
+[S1] Visualization of Surfaces and 3D Vector Fields, https://digital.library.unt.edu/ark:/67531/metadc3235/?q=vector field volume rendering, fetched 2026-10-28 (unofficial)
+[S2] thermeng/SciRender, https://github.com/thermeng/SciRender, fetched 2026-10-26 (unofficial)

@@ -7,7 +7,7 @@ Dynamic Chunk Generation with Radius manages chunk instantiation and removal bas
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Player position ($P$), render radius ($R$), chunk size ($S$), and the current set of loaded chunks.
+*   **Inputs:** Player position ($P$), render radius ($R$), chunk size ($S$), and the current set of loaded chunks [S1, unofficial].
 *   **Outputs:** Updated set of loaded chunks (instantiated or destroyed) [S1, S3, unofficial].
 
 **Data Structures:**
@@ -15,16 +15,16 @@ Dynamic Chunk Generation with Radius manages chunk instantiation and removal bas
 *   **Chunk States:** Chunks are assigned one of three labels during the update cycle: **KEEP** (exists and within radius), **DRAW** (does not exist but within radius), or **DONE** (exists but outside radius) [S3, unofficial].
 
 **Algorithm Steps:**
-1.  **Calculate Bounding Sphere Diameter:** Determine the diameter of the render sphere in chunk units.
+1.  **Calculate Bounding Sphere Diameter:** Determine the diameter of the render sphere in chunk units [S1, unofficial].
     $$ \text{render\_diameter} = \left\lfloor \frac{\text{radius} \times 2}{\text{chunk\_size}} \right\rfloor $$
     [S1, unofficial].
-2.  **Determine Grid Range:** Calculate the minimum and maximum chunk indices ($x, y, z$) that could possibly intersect the render sphere.
+2.  **Determine Grid Range:** Calculate the minimum and maximum chunk indices ($x, y, z$) that could possibly intersect the render sphere [S1, unofficial].
     $$ \text{chunk\_range\_start} = \left\lfloor \frac{\text{render\_diameter}}{2} \right\rfloor \times -1 $$
     $$ \text{chunk\_range\_end} = \text{render\_diameter} + \text{chunk\_range\_start} $$
     [S1, unofficial].
-3.  **Identify Target Chunks:** Iterate through all integer coordinates $(x, y, z)$ within the range $[\text{chunk\_range\_start}, \text{chunk\_range\_end}]$. Compute chunk position: $\text{chunk\_possibly\_in\_radius} = (x, y, z) + \text{get\_chunk\_from\_point}(P, \text{chunk\_size})$. Compute world location: $\text{chunk\_location} = \text{chunk\_possibly\_in\_radius} \times \text{chunk\_size}$. If $\text{chunk\_location.distance\_to}(P) < \text{radius}$, add the chunk key $(x, y, z)$ to a temporary set `surrounding_chunks` [S1, unofficial].
+3.  **Identify Target Chunks:** Iterate through all integer coordinates $(x, y, z)$ within the range $[\text{chunk\_range\_start}, \text{chunk\_range\_end}]$ [S1, unofficial]. Compute chunk position: $\text{chunk\_possibly\_in\_radius} = (x, y, z) + \text{get\_chunk\_from\_point}(P, \text{chunk\_size})$ [S1, unofficial]. Compute world location: $\text{chunk\_location} = \text{chunk\_possibly\_in\_radius} \times \text{chunk\_size}$ [S1, unofficial]. If $\text{chunk\_location.distance\_to}(P) < \text{radius}$, add the chunk key $(x, y, z)$ to a temporary set `surrounding_chunks` [S1, unofficial].
 4.  **Compute Set Differences:** Compare `surrounding_chunks` with the keys of the currently loaded chunks dictionary (`loaded_chunks`) to find load/remove sets [S1, unofficial].
-5.  **Execute Lifecycle Actions:** If a chunk exists in `loaded_chunks` and is in `surrounding_chunks`, keep it for the next frame. If it does not exist in `loaded_chunks` but is in `surrounding_chunks`, create it. If it exists in `loaded_chunks` but not in `surrounding_chunks`, mark it as DONE and destroy it [S3, unofficial].
+5.  **Execute Lifecycle Actions:** If a chunk exists in `loaded_chunks` and is in `surrounding_chunks`, keep it for the next frame [S3, unofficial]. If it does not exist in `loaded_chunks` but is in `surrounding_chunks`, create it [S3, unofficial]. If it exists in `loaded_chunks` but not in `surrounding_chunks`, mark it as DONE and destroy it [S3, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -76,8 +76,8 @@ def update_chunks(player_pos, render_radius, chunk_size, loaded_chunks_dict):
 ```
 
 **Parameters:**
-*   **Render Radius ($R$):** The distance from the player within which chunks are generated. Not given in the sources.
-*   **Chunk Size ($S$):** The physical dimension of a chunk. Not given in the sources.
+*   **Render Radius ($R$):** The distance from the player within which chunks are generated [S1, unofficial].
+*   **Chunk Size ($S$):** The physical dimension of a chunk [S1, unofficial].
 *   **m_RenderDistance:** Radius in chunks for loading/unloading [S2, unofficial].
 *   **m_MaxRemeshPerFrame:** Maximum remesh jobs pushed per frame [S2, unofficial].
 
@@ -95,11 +95,11 @@ A multithreaded generation technique that uses a recursive flood fill algorithm 
 A management approach that maintains the world state, including the chunk generator and a cache for chunk generation status and data [S4, unofficial]. The `World` object contains an `Arc<dyn WorldGen>` trait object for chunk generation and an `AHashMap` mapping `(ChunkPosition, ZoomLevel)` to `ChunkStatus` [S4, unofficial]. The `ChunkStatus` enum tracks whether a chunk is `Generating`, `Generated` (holding an `Arc<ChunkInfo>`), or `Empty` [S4, unofficial]. `ChunkInfo` contains opaque geometry (`Box<Array3Chunk>`), translucent geometry (`Vec<Array3Chunk>`), and face data (`StaticCopyMap<Direction, ChunkFace>`) [S4, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources [S1, S2, S3, S4, unofficial].
+*   **Memory Complexity:** Not given in the sources [S1, S2, S3, S4, unofficial].
 *   **Strengths:** Simple to implement; guarantees a spherical visibility volume; efficient lookups with hash maps [S1, S3, unofficial].
 *   **Limitations:** Single-threaded version is inefficient for large radii; requires careful handling of generation latency to prevent players from outpacing world generation; bounding box iteration includes chunks outside the radius that are quickly discarded, wasting CPU cycles if the radius is large [S3, unofficial].
-*   **When to use:** Suitable for moderate render distances and when generation is fast or pre-cached. Requires multithreading or asynchronous generation for large open worlds to avoid stuttering [S3, unofficial].
+*   **When to use:** Suitable for moderate render distances and when generation is fast or pre-cached [S3, unofficial]. Requires multithreading or asynchronous generation for large open worlds to avoid stuttering [S3, unofficial].
 
 ## Background
 The method originated in voxel-based procedural terrain generation systems for open-world games where static generation was insufficient [S3, unofficial]. The initial implementation used a simple radius value updated as the player moved, labeling chunks as KEEP, DRAW, or DONE [S3, unofficial]. This approach was found too slow for open worlds, leading to the development of multithreaded variants [S3, unofficial]. The concept is implemented in various voxel engines, including Godot-based plugins and Rust-based generators like Infinigen [S1, S4, unofficial].

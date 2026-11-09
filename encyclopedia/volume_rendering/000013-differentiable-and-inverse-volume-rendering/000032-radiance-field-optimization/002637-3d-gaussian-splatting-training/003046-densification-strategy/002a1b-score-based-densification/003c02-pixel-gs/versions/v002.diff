@@ -1,0 +1,141 @@
+--- v001.md
++++ v002.md
+@@ -1,51 +1,111 @@
+ # Pixel-GS
++
+ Also called: Pixel-based densification, Projected area gradient scaling
+ 
+ ## Overview
+-Pixel-GS is a densification strategy for 3D Gaussian Splatting that modifies the gradient-based splitting criteria to account for the spatial footprint of each Gaussian primitive [S1]. It scales the positional gradient by the number of pixels a Gaussian influences, ensuring that primitives causing error across many pixels are prioritized for refinement [S2, unofficial]. Additionally, it applies a distance-dependent scaling factor to the gradient to suppress the creation of "floaters" in background regions [S1]. This approach yields state-of-the-art rendering quality compared to standard 3DGS, though it typically results in a higher number of Gaussian primitives [S1].
++Pixel-GS is a densification strategy for 3D Gaussian Splatting that prioritizes splitting Gaussians based on their spatial impact on the rendered image. It solves the problem of inefficient primitive distribution by scaling the densification gradient by the number of pixels a Gaussian influences, ensuring that primitives causing errors across many pixels are split first [S2, unofficial]. Unlike standard 3DGS which uses average positional gradients, Pixel-GS accounts for the projected area and depth, yielding state-of-the-art rendering quality at the cost of a higher total number of Gaussian primitives [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** The current set of 3D Gaussians $\mathcal{G}_i$, the accumulated gradient of the loss with respect to the 2D mean position $\nabla_{\mu_{2D}}$, the projected area of each Gaussian in pixel space $A_i$, and the depth $d_i$ of each Gaussian.
+-*   **Output:** A binary mask or score list determining which Gaussians are split, cloned, or pruned during the densification step.
++*   **Input:** The set of 3D Gaussians $\{G_i\}$ from the previous training iteration, their positional gradients $\nabla_{pos} G_i$, and the camera parameters for all input viewpoints.
++*   **Output:** A modified set of Gaussians where high-impact primitives are split or cloned, and low-impact primitives are retained.
+ 
+ **Data Structures:**
+-*   **Gradient Buffer:** Stores $\nabla_{\mu_{2D}}$ for each Gaussian.
+-*   **Pixel Count Buffer:** Stores $N_{pix, i}$, the number of pixels covered by Gaussian $i$ across all training viewpoints.
+-*   **Depth Buffer:** Stores $d_i$, the depth of the Gaussian center relative to the camera.
++Each Gaussian $G_i$ maintains:
++*   Position $\mathbf{p}_i \in \mathbb{R}^3$
++*   Covariance $\Sigma_i$ (or rotation $\mathbf{q}_i$ and scale $\mathbf{s}_i$)
++*   Opacity $\alpha_i$
++*   Color coefficients
++*   Accumulated gradient magnitude $g_i$ (initialized to 0)
++*   Pixel coverage count $c_i$ (initialized to 0)
+ 
+-**Method Steps:**
+-1.  **Accumulate Pixel Coverage:** For each Gaussian $\mathcal{G}_i$, compute the total number of pixels $N_{pix, i}$ it influences across all input viewpoints during the forward pass [S1].
+-2.  **Compute Base Gradient:** Calculate the gradient norm $\|\nabla_{\mu_{2D}}\|$ for each Gaussian from the differentiable rendering pipeline [Parent].
+-3.  **Scale by Projected Area:** Multiply the gradient norm by the pixel coverage count $N_{pix, i}$ to obtain the area-scaled gradient $G_{area}$ [S2, unofficial]:
+-    $$ G_{area, i} = \|\nabla_{\mu_{2D}, i}\| \cdot N_{pix, i} $$
+-    This ensures that a Gaussian affecting a large number of pixels contributes more to the densification score than one affecting few pixels, even if the per-pixel error is similar [S2, unofficial].
+-4.  **Apply Depth Scaling:** Scale the gradient by a factor dependent on the depth $d_i$ to suppress densification in distant regions [S1]. Let $S(d_i)$ be the depth scaling function. The final densification score $S_i$ is:
+-    $$ S_i = G_{area, i} \cdot S(d_i) $$
+-    The specific form of $S(d_i)$ is not explicitly defined in the provided sources, but it is intended to reduce the likelihood of splitting Gaussians in the background to prevent floaters [S1].
+-5.  **Thresholding:** Compare $S_i$ against a threshold. If $S_i$ exceeds the threshold, trigger split or clone operations according to the parent [Densification Strategy](6234-densification-strategy.md) principles.
++**Steps:**
++1.  **Forward Pass:** Render the scene from all input viewpoints. For each Gaussian $G_i$ contributing to the image, determine the set of pixels $P_i$ it influences.
++2.  **Pixel Counting:** For each Gaussian $G_i$, count the number of pixels it covers across all viewpoints:
++    $$ c_i = \sum_{v \in \text{views}} |P_i^{(v)}| $$
++    [S1]
++3.  **Gradient Scaling:** Compute the standard positional gradient magnitude $||\nabla_{pos} G_i||$. Scale this gradient by the pixel coverage count $c_i$ and a depth-dependent factor $d_i$ to suppress floaters in the background:
++    $$ \tilde{g}_i = c_i \cdot ||\nabla_{pos} G_i|| \cdot d_i $$
++    The depth factor $d_i$ typically increases with distance to the camera to encourage densification in background regions where Gaussians are larger and sparser [S1].
++4.  **Densification Decision:** Compare $\tilde{g}_i$ against a threshold $\tau$. If $\tilde{g}_i > \tau$, mark $G_i$ for splitting or cloning.
++5.  **Splitting:** For marked Gaussians, create two new Gaussians by perturbing the position along the principal axes of the covariance matrix, halving the scale, and copying other attributes. Reset $g_i$ and $c_i$ for the new primitives.
++6.  **Update:** Accumulate $\tilde{g}_i$ into the Gaussian's history for the next iteration.
+ 
+ **Parameters:**
+-*   **Depth Scaling Factor:** Not given in the sources.
+-*   **Thresholds:** Not given in the sources.
++*   Threshold $\tau$: Not given in the sources.
++*   Depth factor $d_i$: Not given in the sources.
++*   Number of viewpoints: All input views [S1].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **High Primitive Count:** The method typically results in a higher number of Gaussian primitives compared to standard 3DGS, which may increase memory usage [S1].
+-*   **Background Floaters:** Without the depth scaling, the method might still generate artifacts in low-texture background regions; the depth factor is critical for suppression [S1].
++**Edge Cases:**
++*   **Precision:** High pixel counts for large foreground Gaussians may dominate the gradient, potentially starving background refinement if $d_i$ is not tuned [S1].
++*   **Boundaries:** Gaussians at the edge of the view frustum may have artificially low pixel counts; culling should be handled before counting.
++
++**Pseudocode:**
++```python
++def pixel_gs_densification(gaussians, cameras, threshold):
++    # Reset counters
++    for g in gaussians:
++        g.pixel_count = 0
++        g.accumulated_grad = 0.0
++
++    # Render and count pixels for all views
++    for cam in cameras:
++        rendered_image, depth_map = render(gaussians, cam)
++        # Identify which Gaussian contributes to which pixel
++        # This requires a visibility buffer or rasterization metadata
++        pixel_contributions = get_pixel_contributions(rendered_image, gaussians)
++        
++        for g in gaussians:
++            # Count pixels influenced by this Gaussian in this view
++            count = count_pixels_influenced(g, pixel_contributions)
++            g.pixel_count += count
++
++    # Compute scaled gradients
++    for g in gaussians:
++        # Standard positional gradient from backprop
++        pos_grad_mag = compute_gradient_magnitude(g.position_gradient)
++        
++        # Depth factor: suppress floaters (background) or encourage them?
++        # Sources say "scales the gradient according to the distance to the camera to suppress floaters"
++        # This implies distance factor reduces gradient for far objects? 
++        # Or increases it to densify background? 
++        # "suppress floaters" usually means preventing splitting of noisy background noise.
++        # However, "encourage densification in background regions" is also stated.
++        # We assume a factor f(dist) that balances these.
++        dist = compute_distance_to_camera(g.position, cam)
++        depth_factor = compute_depth_factor(dist)
++        
++        scaled_grad = g.pixel_count * pos_grad_mag * depth_factor
++        g.accumulated_grad += scaled_grad
++
++    # Split Gaussians exceeding threshold
++    new_gaussians = []
++    for g in gaussians:
++        if g.accumulated_grad > threshold:
++            # Split logic
++            g1, g2 = split_gaussian(g)
++            new_gaussians.append(g1)
++            new_gaussians.append(g2)
++        else:
++            new_gaussians.append(g)
++            
++    return new_gaussians
++```
+ 
+ ## Subtopics
+ 
+ ### [PixelGS Densification Criteria](9689-pixelgs-densification-criteria.md)
+-Modifies the gradient-based densification strategy to account for the spatial footprint of each Gaussian primitive. It scales the positional gradient by the number of pixels a Gaussian influences and applies a depth-dependent scaling factor to encourage densification in background regions while suppressing it in the foreground. This approach yields state-of-the-art rendering quality compared to standard 3DGS, though it typically results in a higher number of Gaussian primitives.
++Modifies the gradient strategy to account for spatial footprint and applies depth-dependent scaling to suppress floaters and encourage background densification.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Increases with the number of viewpoints due to the accumulation of pixel coverage counts across all views [S1].
+-*   **Memory Complexity:** Higher than standard 3DGS due to the increased number of Gaussian primitives required to achieve state-of-the-art quality [S1].
++*   **Time Complexity:** Higher than standard 3DGS due to the need to track pixel contributions per Gaussian across all views.
++*   **Memory Complexity:** Higher, as it requires storing pixel coverage counts and potentially larger metadata for gradient accumulation.
+ *   **Performance:** Yields state-of-the-art rendering quality compared to standard 3DGS [S1].
+-*   **Strengths:** Effective at refining regions with high pixel-level error; reduces floaters through depth scaling.
+-*   **Limitations:** Results in a higher number of Gaussian primitives, potentially impacting memory and rendering speed [S1].
++*   **Limitations:** Typically results in a higher number of Gaussian primitives, increasing memory usage and potentially slowing down rendering [S1].
++*   **When to use:** When reconstruction quality is prioritized over model size and training speed.
++*   **When not to use:** When memory or rendering speed is constrained.
+ 
+ ## Background
+-Pixel-GS was introduced as part of the evolution of 3D Gaussian Splatting densification strategies. It is cited in recent surveys of 3D Gaussian Splatting advancements [S1]. The method addresses the limitation of standard gradient-based densification by considering the spatial extent of the error in pixel space [S2, unofficial].
++Pixel-GS was introduced as a variant of 3D Gaussian Splatting to improve densification efficiency. It is cited in recent surveys of 3D Gaussian Splatting advances [S1] and compared with other methods like GaussianPro and AbsGS [S2, unofficial].
+ 
+ ## Sources

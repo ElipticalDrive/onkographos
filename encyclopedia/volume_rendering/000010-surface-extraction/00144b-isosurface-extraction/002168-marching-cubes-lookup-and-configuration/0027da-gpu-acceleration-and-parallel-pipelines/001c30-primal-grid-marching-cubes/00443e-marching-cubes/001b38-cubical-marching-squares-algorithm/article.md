@@ -19,42 +19,38 @@ The algorithm relies on:
 
 ### Steps
 
-1. **Face Ambiguity Resolution**:
-   For each face of the voxel grid, determine the intersection of the isosurface with the face. If the face configuration is ambiguous (e.g., the "X-face" case where diagonals have the same sign), use the 2D sharp features on that face to resolve the topology. The specific criteria for X-face slashing are defined in [X-face slashing criteria](1777-x-face-slashing-criteria.md).
+1. **Face Ambiguity Resolution**: For each face of the voxel grid, determine the intersection of the isosurface with the face [S2]. If the face configuration is ambiguous (e.g., the "X-face" case where diagonals have the same sign), use the 2D sharp features on that face to resolve the topology [S2]. The specific criteria for X-face slashing are defined in [X-face slashing criteria](1777-x-face-slashing-criteria.md).
 
-2. **Component Formation**:
-   Identify connected components of the isosurface intersection within the 2x2x2 neighborhood. A component consists of vertices (segment vertices and face sharp features) and the segments connecting them [S2].
+2. **Component Formation**: Identify connected components of the isosurface intersection within the 2x2x2 neighborhood [S2]. A component consists of vertices (segment vertices and face sharp features) and the segments connecting them [S2].
 
-3. **Sharp Feature Sampling**:
-   For each resulting component, sample its 3D sharp feature. This is done by solving a linear system using Singular Value Decomposition (SVD) [S2]:
+3. **Sharp Feature Sampling**: For each resulting component, sample its 3D sharp feature [S2]. This is done by solving a linear system using Singular Value Decomposition (SVD) [S2]:
    $$ T \mathbf{p} = \mathbf{n} $$
    Where:
-   - $\mathbf{p}$ is the location of the sharp feature.
-   - $T$ is a matrix constructed from sample points $\mathbf{s}_i$ and their normals $\mathbf{n}_i$. Specifically, if there are $k$ sample points, $T$ is a $k \times 3$ matrix where the $i$-th row is $\mathbf{s}_i^T$, and $\mathbf{n}$ is a $k \times 1$ vector where the $i$-th element is $\mathbf{s}_i \cdot \mathbf{n}_i$ [S2].
-   - $\mathbf{s}_i$ is the location of a sample point on the component.
-   - $\mathbf{n}_i$ is the sample normal at $\mathbf{s}_i$.
+   - $\mathbf{p}$ is the location of the sharp feature [S2].
+   - $T$ is a matrix constructed from sample points $\mathbf{s}_i$ and their normals $\mathbf{n}_i$ [S2].
+   - $\mathbf{s}_i$ is the location of a sample point on the component [S2].
+   - $\mathbf{n}_i$ is the sample normal at $\mathbf{s}_i$ [S2].
 
-4. **Internal Ambiguity Resolution**:
-   Determine if two components within the neighborhood are joined or separated. This is done by checking if the 3D sharp features of the two components overlap [S2].
-   - For each component, form a cone-like volume centered at its sampled sharp feature $\mathbf{p}$.
-   - If the volumes of two components overlap, classify them as **joined**.
-   - If they do not overlap, classify them as **separated**.
+4. **Internal Ambiguity Resolution**: Determine if two components within the neighborhood are joined or separated [S2]. This is done by checking if the 3D sharp features of the two components overlap [S2].
+   - For each component, form a cone-like volume centered at its sampled sharp feature $\mathbf{p}$ [S2].
+   - If the volumes of two components overlap, classify them as **joined** [S2].
+   - If they do not overlap, classify them as **separated** [S2].
 
 5. **Triangulation**:
-   - **Separated Components**: For each separated component, generate a triangle fan.
-       - If a sharp feature $\mathbf{p}$ exists for the component, use $\mathbf{p}$ as the center.
-       - If no sharp feature exists, calculate the average point $\mathbf{c}$ of all sample points on the component and use it as the center.
-       - Let the vertices of the component boundary be $v_1, \dots, v_n$ (including segment vertices and face sharp features).
+   - **Separated Components**: For each separated component, generate a triangle fan [S2].
+       - If a sharp feature $\mathbf{p}$ exists for the component, use $\mathbf{p}$ as the center [S2].
+       - If no sharp feature exists, calculate the average point $\mathbf{c}$ of all sample points on the component and use it as the center [S2].
+       - Let the vertices of the component boundary be $v_1, \dots, v_n$ (including segment vertices and face sharp features) [S2].
        - Generate triangles: $p v_1 v_2, p v_2 v_3, \dots, p v_{n-1} v_n, p v_n v_1$ [S2].
-   - **Joined Components**: If two components are classified as joined, the resulting surface is topologically equivalent to a cylinder. Use a dynamic programming algorithm to connect and triangulate these two components to form the surface [S2].
+   - **Joined Components**: If two components are classified as joined, the resulting surface is topologically equivalent to a cylinder [S2]. Use a dynamic programming algorithm to connect and triangulate these two components to form the surface [S2].
 
 ### Parameters
-- **$\theta$ (theta_sharp)**: A parameter affecting the quality of remeshing, defined in Extended Marching Cubes (EMC) [KBSS01]. Larger values generate more triangles for regions with higher curvatures, while flat regions remain similar. Typical values tested: 0.7, 0.8, 0.9 [S2].
+- **$\theta$ (theta_sharp)**: A parameter affecting the quality of remeshing, defined in Extended Marching Cubes (EMC) [KBSS01] [S2]. Larger values generate more triangles for regions with higher curvatures, while flat regions remain similar [S2]. Typical values tested: 0.7, 0.8, 0.9 [S2].
 
 ### Edge Cases and Pitfalls
-- **Inter-cell Dependency**: CMS eliminates inter-cell dependency by reconstructing 3D features from 2D features on cell faces. This ensures that shared geometric components between neighboring cells are common, preventing cracks without patching [S2].
-- **Degenerate Input**: The method assumes well-defined normals for Hermite data. If normals are missing or inconsistent, the sharp feature sampling may fail.
-- **Precision**: The SVD calculation for sharp feature location requires numerical stability.
+- **Inter-cell Dependency**: CMS eliminates inter-cell dependency by reconstructing 3D features from 2D features on cell faces [S2]. This ensures that shared geometric components between neighboring cells are common, preventing cracks without patching [S2].
+- **Degenerate Input**: The method assumes well-defined normals for Hermite data. If normals are missing or inconsistent, the sharp feature sampling may fail. [G]
+- **Precision**: The SVD calculation for sharp feature location requires numerical stability. [G]
 
 ### Pseudocode
 
@@ -69,21 +65,20 @@ def linear_interpolate(val1, val2, iso):
         return 0.5
     return (iso - val1) / (val2 - val1)
 
-def compute_edge_intersections(cell_scalars, iso):
-    """Computes intersection points on the 12 edges of a 2x2x2 cell block."""
-    # cell_scalars is a 2x2x2 array of scalar values
+def compute_2x2x2_intersections(block_scalars, iso):
+    """Computes intersection points on all edges of a 2x2x2 block (3x3x3 vertices)."""
     intersections = []
-    edges = [
-        (0,0,0, 1,0,0), (0,0,0, 0,1,0), (0,0,0, 0,0,1),
-        (1,0,0, 1,1,0), (1,0,0, 1,0,1),
-        (0,1,0, 1,1,0), (0,1,0, 0,1,1),
-        (1,1,0, 1,1,1),
-        (0,0,1, 1,0,1), (0,0,1, 0,1,1),
-        (1,0,1, 1,1,1), (0,1,1, 1,1,1)
-    ]
+    edges = []
+    for x in range(3):
+        for y in range(3):
+            for z in range(3):
+                for dx, dy, dz in [(1,0,0), (0,1,0), (0,0,1)]:
+                    nx, ny, nz = x+dx, y+dy, z+dz
+                    if nx < 3 and ny < 3 and nz < 3:
+                        edges.append(((x,y,z), (nx,ny,nz)))
     for p1, p2 in edges:
-        v1 = cell_scalars[p1]
-        v2 = cell_scalars[p2]
+        v1 = block_scalars[p1]
+        v2 = block_scalars[p2]
         if (v1 - iso) * (v2 - iso) < 0:
             t = linear_interpolate(v1, v2, iso)
             pt = np.array([p1[0] + t*(p2[0]-p1[0]),
@@ -111,7 +106,6 @@ def find_components(intersections):
                     visited[j] = True
                     comp.append(intersections[j])
                     queue.append(j)
-        components.append(comp)
     return components
 
 def solve_sharp_feature(sample_points, sample_normals):
@@ -119,7 +113,8 @@ def solve_sharp_feature(sample_points, sample_normals):
     T = np.array(sample_points)
     n = np.array([np.dot(s, nv) for s, nv in zip(sample_points, sample_normals)])
     U, S, Vt = np.linalg.svd(T, full_matrices=False)
-    T_pinv = Vt.T @ np.diag(1.0 / S) @ U.T
+    S_inv = np.array([1.0 / s if s > 1e-9 else 0.0 for s in S])
+    T_pinv = Vt.T @ np.diag(S_inv) @ U.T
     p = T_pinv @ n
     return p
 
@@ -141,19 +136,19 @@ def generate_triangle_fan(vertices, center):
     return triangles
 
 def cms_extract(grid_scalars, grid_normals, isolevel):
-    """Main extraction function for CMS."""
+    """Main extraction function for CMS operating on 2x2x2 neighborhoods [S2]."""
     mesh_triangles = []
     dims = grid_scalars.shape
     
     # Iterate over 2x2x2 neighborhoods
-    for x in range(dims[0] - 1):
-        for y in range(dims[1] - 1):
-            for z in range(dims[2] - 1):
+    for x in range(dims[0] - 2):
+        for y in range(dims[1] - 2):
+            for z in range(dims[2] - 2):
                 # Extract 2x2x2 block
                 block_scalars = grid_scalars[x:x+2, y:y+2, z:z+2]
                 
                 # 1. Face Ambiguity Resolution & 2. Component Formation
-                intersections = compute_edge_intersections(block_scalars, isolevel)
+                intersections = compute_2x2x2_intersections(block_scalars, isolevel)
                 components = find_components(intersections)
                 
                 if not components:
@@ -162,9 +157,7 @@ def cms_extract(grid_scalars, grid_normals, isolevel):
                 # 3. Sharp Feature Sampling
                 component_features = []
                 for comp in components:
-                    # Sample points and normals for this component
                     sample_pts = np.array(comp)
-                    # Retrieve normals from grid at sample locations
                     sample_nls = []
                     for pt in comp:
                         gx, gy, gz = int(round(pt[0])), int(round(pt[1])), int(round(pt[2]))

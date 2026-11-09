@@ -1,0 +1,286 @@
+# Illustrative Volume Rendering with Style Transfer
+
+Also called: Style Transfer Function (STF) Volume Rendering
+
+## Overview
+This method extends direct volume ray casting by integrating a Style Transfer Function (STF) to apply artistic styles to volumetric data, allowing users to load volumes, save/load transfer functions with assigned styles, and interactively rotate or zoom [S1, unofficial]. It distinguishes itself from standard ray casting by decoupling the optical properties (color/opacity) from the visual style, using a two-pass rendering approach that captures exit points to facilitate style application [S1, unofficial].
+
+## How it works
+The method operates on the fundamental loop structure of [Direct volume ray casting](19-direct-volume-ray-casting.md): for each pixel, a ray $r(t) = \mathbf{o} + t\mathbf{d}$ is defined, intersected with the volume domain, and sampled/composited along its path [G]. The traversal order is determined by the pixel's position in the image plane [G].
+
+### Inputs and Outputs
+**Inputs:**
+*   Volumetric data: A 3D grid of scalar values, stored as normalized floats (`dataScalars`) [S1, unofficial].
+*   Camera parameters: Projection matrix (45 deg FOV, aspect ratio, near/far planes), view matrix (lookAt), model matrix, and normal matrix [S1, unofficial].
+*   Style Transfer Function (STF) textures:
+    *   `transferFunctionTexture`: A 1D texture mapping scalar values to base color/opacity [S1, unofficial].
+    *   `indexFunctionTexture`: A 1D texture used for indexing styles [S1, unofficial].
+    *   `styleTransferTexture`: A 2D array texture storing the artistic style definitions [S1, unofficial].
+*   Parameters: `stepSize` (default 0.001f) and `threshold` (default 0.15f) [S1, unofficial].
+
+**Outputs:**
+*   A 2D image where volumetric structures are rendered with applied artistic styles [S1, unofficial].
+
+### Data Structures
+The implementation relies on specific GPU data structures [S1, unofficial]:
+
+1.  **Volume Texture**:
+    *   Type: `GL_TEXTURE_3D`
+    *   Dimensions: `width`, `height`, `numCuts` (slices)
+    *   Internal Format: `GL_INTENSITY`
+    *   Wrap Modes: `GL_CLAMP` for S, T, R
+    *   Filters: `GL_LINEAR` min/mag
+    *   Data Source: `dataScalars` (float array)
+
+2.  **Transfer Function Texture**:
+    *   Type: `GL_TEXTURE_1D`
+    *   Size: 256
+    *   Internal Format: `GL_RGBA8`
+    *   Wrap Mode: `GL_REPEAT`
+    *   Filters: `GL_NEAREST` min/mag
+    *   Data Source: `transferFunc` array (array of `glm::vec4`, initialized as `transferFunc[i] = glm::vec4((float)i / 255.f)`)
+
+3.  **Style Transfer Texture**:
+    *   Type: `GL_TEXTURE_2D_ARRAY`
+    *   Data Source: Style definitions loaded via `stf.loadStyles()`
+
+4.  **Back Face Texture**:
+    *   Type: `GL_TEXTURE_2D`
+    *   Size: Window width $\times$ height
+    *   Internal Format: `GL_RGBA32F`
+    *   Wrap Modes: `GL_REPEAT`
+    *   Filters: `GL_NEAREST` min/mag
+    *   Purpose: Stores exit points for ray casting
+
+5.  **Vertex Buffer Object (VBO)**:
+    *   Layout: 24 floats defining 8 vertices of a unit cube (0.0-1.0 range)
+    *   Index Buffer: 36 unsigned ints defining 12 triangles (2 per face, counter-clockwise)
+    *   VAO: Binds attribute 0 (vertex location) and attribute 1 (vertex color) to the same vertex data buffer
+
+6.  **Frame Buffer Object (FBO)**:
+    *   Attachments: Depth renderbuffer (`GL_DEPTH_COMPONENT`) and color attachment (`backFaceTexture`)
+    *   State: Depth test enabled
+
+### Steps
+The rendering process consists of two main passes [S1, unofficial]:
+
+1.  **Initialization**:
+    *   Set `isLoaded = false`.
+    *   Allocate `sModelName` (1024 chars).
+    *   Set `width`, `height`, `numCuts = 1`, `stepSize = 0.001f`, `threshold = 0.15f`.
+    *   Initialize texture/buffer IDs to 0.
+    *   Initialize `transferFunc` array with 256 entries where `transferFunc[i] = glm::vec4((float)i / 255.f)` [S1, unofficial].
+    *   Call `setupVolumeShaders()`, `createTransferFunctionTexture()`, and `stf.loadStyles()` [S1, unofficial].
+
+2.  **Volume Loading**:
+    *   Call `createVertexBuffer()` to set up VBO/VAO for cube rendering [S1, unofficial].
+    *   Load volume data via `loadVolumeFromFile8()` or `loadVolumeFromFile16()` into `dataScalars` (normalized floats) [S1, unofficial].
+    *   Create `backFaceTexture` for exit point storage [S1, unofficial].
+    *   Create Frame Buffer Object (FBO) [S1, unofficial].
+    *   Set dimensions and compute `cubeSizes = glm::vec3(width/max, height/max, numCuts/max)` [S1, unofficial].
+    *   Scale model and position at `(-cubeSizes.x/2, -cubeSizes.y/2, 0)` [S1, unofficial].
+    *   Compute matrices:
+        *   Projection: 45 deg FOV, aspect ratio, near=0.1, far=500 [S1, unofficial].
+        *   View: `lookAt(0,0,-1, 0,0,0, 0,1,0)` [S1, unofficial].
+        *   Model, Normal, ViewProjection, ModelViewProjection [S1, unofficial].
+
+3.  **Back Face Pass (Exit Point Capture)**:
+    *   Bind the FBO [S1, unofficial].
+    *   Render the back face of the volume bounding box to capture exit points into the `backFaceTexture` [S1, unofficial]. This pass determines the ray length for subsequent ray casting.
+
+4.  **Ray Casting Pass (Style Transfer)**:
+    *   Bind default framebuffer (`glBindFramebuffer(GL_FRAMEBUFFER, 0)`) [S1, unofficial].
+    *   Set viewport to window size [S1, unofficial].
+    *   Activate `rayCastShader` [S1, unofficial].
+    *   Set uniforms:
+        *   `MVP`: ModelViewProjection matrix [S1, unofficial].
+        *   `ViewMatrix`: View matrix [S1, unofficial].
+        *   `NormalMatrix`: Normal matrix [S1, unofficial].
+        *   `StepSize`: `stepSize` (0.001f) [S1, unofficial].
+        *   `Threshold`: `threshold` (0.15f) [S1, unofficial].
+        *   `ScreenSize`: Window width and height [S1, unofficial].
+    *   Bind textures to units:
+        *   Unit 1: `transferFunctionTexture` (`GL_TEXTURE_1D`) [S1, unofficial].
+        *   Unit 2: `indexFunctionTexture` (`GL_TEXTURE_1D`) [S1, unofficial].
+        *   Unit 3: `styleTransferTexture` (`GL_TEXTURE_2D_ARRAY`) [S1, unofficial].
+    *   Render the volume using ray casting, utilizing the exit points from the back face pass and the style transfer textures to apply artistic styles [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def initialize_raw_data_model():
+    """Initialize the RawDataModel structure."""
+    model = {
+        "isLoaded": False,
+        "sModelName": [0] * 1024,
+        "width": 0,
+        "height": 0,
+        "numCuts": 1,
+        "stepSize": 0.001,
+        "threshold": 0.15,
+        "textureIds": [],
+        "bufferIds": []
+    }
+    # Initialize transfer function with identity mapping
+    model["transferFunc"] = [glm_vec4(i / 255.0) for i in range(256)]
+    
+    # Setup shaders and styles
+    setup_volume_shaders()
+    create_transfer_function_texture(model["transferFunc"])
+    stf_load_styles()
+    
+    return model
+
+def load_volume(model, file_path):
+    """Load volume data and setup rendering resources."""
+    # Create VBO/VAO for cube
+    create_vertex_buffer()
+    
+    # Load data
+    if file_path.endswith(".8"):
+        model["dataScalars"] = load_volume_from_file_8(file_path)
+    else:
+        model["dataScalars"] = load_volume_from_file_16(file_path)
+    
+    # Normalize data if necessary (assumed normalized in sources)
+    
+    # Create back face texture for exit points
+    window_size = get_window_size()
+    model["backFaceTexture"] = create_2d_texture(
+        width=window_size.x,
+        height=window_size.y,
+        internal_format="GL_RGBA32F",
+        wrap_mode="GL_REPEAT",
+        filter="GL_NEAREST"
+    )
+    
+    # Create FBO
+    create_frame_buffer(model["backFaceTexture"])
+    
+    # Set dimensions
+    model["width"], model["height"], model["numCuts"] = get_volume_dimensions(model["dataScalars"])
+    
+    # Compute cube sizes and model transform
+    max_dim = max(model["width"], model["height"], model["numCuts"])
+    model["cubeSizes"] = glm_vec3(
+        model["width"] / max_dim,
+        model["height"] / max_dim,
+        model["numCuts"] / max_dim
+    )
+    
+    # Position model
+    model["position"] = glm_vec3(
+        -model["cubeSizes"].x / 2,
+        -model["cubeSizes"].y / 2,
+        0
+    )
+    
+    # Compute matrices
+    model["projection"] = compute_projection(fov=45.0, aspect=model["width"]/model["height"], near=0.1, far=500.0)
+    model["view"] = compute_look_at(eye=glm_vec3(0,0,-1), target=glm_vec3(0,0,0), up=glm_vec3(0,1,0))
+    model["model"] = compute_model_transform(model["position"], model["cubeSizes"])
+    model["normalMatrix"] = compute_normal_matrix(model["model"])
+    model["viewProjection"] = model["projection"] @ model["view"]
+    model["modelViewProjection"] = model["viewProjection"] @ model["model"]
+    
+    # Create volume texture
+    model["volumeTexture"] = create_3d_texture(
+        width=model["width"],
+        height=model["height"],
+        depth=model["numCuts"],
+        internal_format="GL_INTENSITY",
+        wrap_mode="GL_CLAMP",
+        filter="GL_LINEAR",
+        data=model["dataScalars"]
+    )
+    
+    model["isLoaded"] = True
+    return model
+
+def render(model):
+    """Main render loop."""
+    if not model["isLoaded"]:
+        return
+    
+    # Pass 1: Render back face to capture exit points
+    render_back_face(model)
+    
+    # Pass 2: Ray casting with style transfer
+    render_volume_ray_casting(model)
+
+def render_back_face(model):
+    """Render the back face of the volume to an FBO to capture exit points."""
+    bind_framebuffer(model["fbo"])
+    enable_depth_test()
+    
+    # Render the back face geometry
+    # The specific geometry and shader for back face rendering are not detailed in sources
+    # [G] Typically involves rendering the rear faces of the bounding box or volume slices
+    draw_back_face_geometry(model)
+    
+    bind_framebuffer(0)
+
+def render_volume_ray_casting(model):
+    """Perform ray casting with style transfer."""
+    bind_framebuffer(0)
+    set_viewport(0, 0, get_window_size().x, get_window_size().y)
+    
+    use_shader(model["rayCastShader"])
+    
+    # Set uniforms
+    model["rayCastShader"].set_uniform("MVP", model["modelViewProjection"])
+    model["rayCastShader"].set_uniform("ViewMatrix", model["view"])
+    model["rayCastShader"].set_uniform("NormalMatrix", model["normalMatrix"])
+    model["rayCastShader"].set_uniform("StepSize", model["stepSize"])
+    model["rayCastShader"].set_uniform("Threshold", model["threshold"])
+    model["rayCastShader"].set_uniform("ScreenSize", get_window_size().x, get_window_size().y)
+    
+    # Bind transfer function texture
+    active_texture(GL_TEXTURE1)
+    bind_texture(GL_TEXTURE_1D, model["stf"]["transferFunctionTexture"])
+    model["rayCastShader"].set_uniform("transferFunctionTexture", 1)
+    
+    # Bind index function texture
+    active_texture(GL_TEXTURE2)
+    bind_texture(GL_TEXTURE_1D, model["stf"]["indexFunctionTexture"])
+    model["rayCastShader"].set_uniform("indexFunctionTexture", 2)
+    
+    # Bind style transfer texture
+    active_texture(GL_TEXTURE3)
+    bind_texture(GL_TEXTURE_2D_ARRAY, model["stf"]["styleTransferTexture"])
+    model["rayCastShader"].set_uniform("styleTransferTexture", 3)
+    
+    # Bind volume texture (assumed to be bound to a unit, e.g., 0)
+    active_texture(GL_TEXTURE0)
+    bind_texture(GL_TEXTURE_3D, model["volumeTexture"])
+    
+    # Render the volume
+    # The ray casting shader uses the exit points from the back face pass
+    # and the style transfer textures to apply styles
+    draw_volume_geometry(model)
+```
+
+### Parameters
+*   `stepSize`: Ray casting step size. Default: 0.001f [S1, unofficial].
+*   `threshold`: Ray casting threshold. Default: 0.15f [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Precision**: The back face texture uses `GL_RGBA32F` for exit point storage, ensuring high precision for ray length calculations [S1, unofficial].
+*   **Boundaries**: The volume texture uses `GL_CLAMP` wrap modes to prevent sampling artifacts at the volume boundaries [S1, unofficial].
+*   **Degenerate Input**: If the volume data is empty or incorrectly loaded, `isLoaded` remains false, and no rendering occurs [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: Not given in the sources.
+*   **Memory Complexity**: Not given in the sources.
+*   **Measured Performance**: Not given in the sources.
+*   **Strengths**: Allows interactive rotation and zoom with style transfer; supports saving and loading transfer functions with assigned styles [S1, unofficial].
+*   **Limitations**: The method is based on a homework project and may not be optimized for large-scale production use [S1, unofficial].
+*   **When to use**: When artistic style transfer is desired for volumetric data and interactive exploration is required [S1, unofficial].
+*   **When not to use**: When high performance on very large datasets is required without style transfer [S1, unofficial].
+
+## Background
+The method is based on the academic paper "Volume Rendering and Style Transfer Function" by Bruckner et al. (2007) [S1, unofficial]. It was implemented as a homework project for a college course [S1, unofficial]. The implementation allows users to load volumetric data, apply style transfer functions, and interactively explore the data [S1, unofficial].
+
+## Sources
+[S1] IllustrativeVolumeRendering, https://github.com/jose-villegas/IllustrativeVolumeRendering, fetched 2026-10-26 (unofficial)

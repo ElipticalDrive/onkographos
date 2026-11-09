@@ -1,0 +1,280 @@
+# NeRF-Casting Reflection Model
+
+Also called: NeRF-Casting Specular Rendering, Reflection Cone Tracing
+
+## Overview
+NeRF-Casting is a rendering procedure designed to model accurate, detailed specular reflections in neural radiance fields without the computational cost of evaluating expensive color MLPs along every reflected ray [S1]. It addresses the problem of rendering view-dependent specular highlights by casting a small number of reflected rays through a volume representation, accumulating features, and then using a lightweight decoder to produce final colors [S1]. It differs from its siblings by explicitly approximating the reflection cone via a von Mises-Fisher distribution and pulling the reflection origin closer to the surface for non-perfect mirrors to maintain intersection with the pixel cone, whereas [Conical Reflected Features](11502-conical-reflected-features.md) likely handles conical integration differently and [Fast Cache](9552-fast-cache-control-variate-radiance-cache.md) uses control variates [S1].
+
+## How it works
+The method builds on the Zip-NeRF representation, which uses a multi-scale hashgrid to store 3D features, a small MLP (1 layer, width 64) to decode density, and a larger MLP (3 layers, width 256) to decode color [S1]. The rendering process for a single camera ray with origin $\mathbf{o}$ and direction $\mathbf{d}$ proceeds as follows:
+
+### Inputs and Outputs
+*   **Input:** Camera ray origin $\mathbf{o}$, camera ray direction $\mathbf{d}$.
+*   **Output:** Final pixel color $\bar{c}$.
+
+### Data Structures
+The underlying representation is based on Zip-NeRF [S1]:
+*   **Hashgrid:** Multi-scale grid storing 3D features.
+*   **Density MLP:** 1 layer, width 64. Takes grid features, outputs density $\rho(\mathbf{x})$.
+*   **Color MLP:** 3 layers, width 256. Takes grid features, bottleneck features, mixing coefficients, and viewing direction to output RGB color.
+*   **Reflection Feature:** A single accumulated vector $\mathbf{f}$ representing the integrated reflection appearance.
+
+### Numbered Steps
+
+1.  **Sample and Encode Camera Ray:**
+    Sample $N$ points $\mathbf{x}_i$ along the camera ray. Use the Zip-NeRF spatial encoder to encode each point into:
+    *   Volume density $\rho(\mathbf{x}_i)$
+    *   Roughness $\kappa(\mathbf{x}_i)$ (inverse-roughness parameter for the reflection distribution)
+    *   Surface normal $\mathbf{n}(\mathbf{x}_i)$
+
+2.  **Alpha Composite Camera Ray Features:**
+    Alpha composite the sampled densities and features along the camera ray to compute:
+    *   An expected termination point $\bar{\mathbf{x}}$
+    *   An aggregated von Mises-Fisher distribution width $\bar{\kappa}$ (inverse-roughness)
+    *   An aggregated surface normal $\bar{\mathbf{n}}$
+    [S1]
+
+3.  **Construct Reflection Distribution:**
+    Reflect the camera direction $\mathbf{d}$ around the aggregated surface normal $\bar{\mathbf{n}}$ to define the center of the reflection distribution. Approximate the von Mises-Fisher distribution $vMF(\mathbf{d}', \bar{\kappa})$ over reflected rays by sampling a small set of $M$ reflected rays $\{\mathbf{d}'_j\}_{j=1}^M$ (where $M=5$ in the source) [S1].
+
+4.  **Determine Reflection Ray Origins:**
+    For each reflected ray $j$, determine the origin $\mathbf{o}'_j$. If the surface is not a perfect mirror (i.e., $\bar{\kappa}$ is finite), the reflection cone widens. To maintain the same intersection with the pixel cone, the origin of the reflected ray cone must be pulled closer to the surface location $\bar{\mathbf{x}}$ [S1].
+
+5.  **Trace Reflected Rays:**
+    Cast the $M$ reflected rays defined by origins $\mathbf{o}'_j$ and directions $\mathbf{d}'_j$. Sample points along these reflected rays. Encode each point using the same Zip-NeRF spatial encoder to obtain densities $\rho'(\mathbf{x})$ and features $\mathbf{f}(\mathbf{x})$ [S1].
+
+6.  **Accumulate Reflection Features:**
+    *   Alpha composite the features along each reflected ray $j$ to get per-ray features $\bar{\mathbf{f}}_j$ [S1].
+    *   Average the composited features $\bar{\mathbf{f}}_j$ across all $M$ reflected rays to produce a single reflection feature $\mathbf{f}$ [S1].
+
+7.  **Decode Final Colors:**
+    Broadcast the single reflection feature $\mathbf{f}$ over the original camera ray's samples. For each sample $i$ along the original ray, pass the following to the color decoder:
+    *   The reflection feature $\mathbf{f}$
+    *   Bottleneck features $\mathbf{b}$ (from Zip-NeRF)
+    *   Mixing coefficients $\alpha$
+    *   Viewing direction $\mathbf{d}$
+    The decoder produces an RGB color $c(\mathbf{x}_i)$ for each point [S1].
+
+8.  **Alpha Composite Final Color:**
+    Alpha composite the colors $c(\mathbf{x}_i)$ and densities $\rho(\mathbf{x}_i)$ along the original camera ray to render the final pixel color $\bar{c}$ [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_nerf_casting_ray(o, d, zip_nerf_model, M=5):
+    """
+    Renders a single ray using the NeRF-Casting reflection model.
+    
+    Args:
+        o: Camera ray origin (3D vector)
+        d: Camera ray direction (3D vector)
+        zip_nerf_model: Object containing Zip-NeRF hashgrid, density MLP, and color MLP
+        M: Number of reflected rays to sample (default 5)
+        
+    Returns:
+        final_color: Rendered RGB color
+    """
+    
+    # Step 1: Sample points along the camera ray
+    # Assume sample_points returns N points x_i, weights w_i, and densities rho_i
+    # based on standard volume rendering sampling strategy
+    x_samples, weights, densities = sample_points(o, d, zip_nerf_model)
+    N = len(x_samples)
+    
+    # Step 2: Encode samples and aggregate
+    # Encode each point to get density, roughness, and normal
+    # Note: Zip-NeRF density MLP is 1 layer width 64; Color MLP is 3 layers width 256
+    # We use the spatial encoder part of Zip-NeRF to get features, then density MLP for rho
+    # and a normal estimation head or gradient for n.
+    
+    aggregated_rho = 0.0
+    aggregated_normal = [0.0, 0.0, 0.0]
+    aggregated_roughness_inv = 0.0
+    termination_point = [0.0, 0.0, 0.0]
+    
+    for i in range(N):
+        x = x_samples[i]
+        w = weights[i]
+        
+        # Get features from hashgrid
+        features = zip_nerf_model.get_grid_features(x)
+        
+        # Decode density
+        rho = zip_nerf_model.density_mlp(features)
+        
+        # Decode roughness (inverse-roughness kappa)
+        # Assuming a specific head or feature component for roughness exists
+        kappa = zip_nerf_model.roughness_head(features)
+        
+        # Estimate surface normal
+        # In practice, this might be derived from density gradient or a dedicated head
+        n = zip_nerf_model.normal_head(features)
+        
+        # Alpha composite aggregation
+        # T_i = exp(-sum(rho_k * delta_k)) for k < i
+        # The source describes alpha compositing features to get termination point and normal
+        # We approximate the standard volume rendering accumulation for the "expected" values
+        
+        # Accumulate for expected termination point (weighted average of positions)
+        # and aggregated normal/roughness
+        # Note: Exact aggregation formula for vMF width and normal from discrete samples
+        # is complex; the source states these are alpha composited.
+        
+        # Simplified aggregation for pseudocode completeness:
+        # We accumulate the contribution to the "surface"
+        transmittance = exp(-aggregated_rho)
+        contribution = w * rho # Simplified weight
+        
+        termination_point = termination_point + contribution * x
+        aggregated_normal = aggregated_normal + contribution * n
+        aggregated_roughness_inv = aggregated_roughness_inv + contribution * kappa
+        aggregated_rho += rho * (x_samples[i+1] - x_samples[i]).norm() if i < N-1 else 0
+        
+    # Normalize aggregated values
+    total_weight = sum(weights) # Or use accumulated transmittance logic
+    if total_weight > 0:
+        termination_point = [v / total_weight for v in termination_point]
+        aggregated_normal = normalize([v / total_weight for v in aggregated_normal])
+        aggregated_roughness_inv = aggregated_roughness_inv / total_weight
+    else:
+        # Fallback if no surface hit
+        return [0.0, 0.0, 0.0]
+
+    # Step 3: Construct Reflection Distribution
+    # Reflect camera direction d around aggregated normal n_bar
+    n_bar = aggregated_normal
+    d_reflect_center = reflect(d, n_bar)
+    kappa_bar = aggregated_roughness_inv
+    
+    # Sample M reflected rays from von Mises-Fisher distribution vMF(d_reflect_center, kappa_bar)
+    reflected_rays = sample_vmf_rays(d_reflect_center, kappa_bar, M)
+    
+    # Step 4 & 5: Trace Reflected Rays and Accumulate Features
+    reflection_features = []
+    
+    for j in range(M):
+        o_prime, d_prime = reflected_rays[j]
+        
+        # Sample points along reflected ray
+        # The origin o_prime is pulled closer to the surface for non-perfect mirrors
+        # This adjustment is handled in sample_vmf_rays or a helper
+        
+        ref_x_samples, ref_weights, ref_densities = sample_points(o_prime, d_prime, zip_nerf_model)
+        
+        # Encode and alpha composite features along reflected ray
+        ref_features_accumulated = [0.0, 0.0, 0.0] # Feature vector
+        ref_rho_accumulated = 0.0
+        
+        for k in range(len(ref_x_samples)):
+            x_ref = ref_x_samples[k]
+            w_ref = ref_weights[k]
+            
+            features_ref = zip_nerf_model.get_grid_features(x_ref)
+            rho_ref = zip_nerf_model.density_mlp(features_ref)
+            f_ref = zip_nerf_model.color_mlp_input_head(features_ref) # Intermediate features
+            
+            # Alpha composite features
+            # f_bar_j = sum(w_k * f_k) / sum(w_k) roughly, or standard volume rendering
+            # Source says: "Alpha composite these samples and densities into the final color"
+            # for the reflection features specifically.
+            
+            # Standard alpha compositing for feature accumulation
+            # T_k = exp(-sum(rho_m * delta_m))
+            # F_k = T_k * w_k * f_k
+            # Accumulate F_k
+            
+            # Simplified:
+            ref_features_accumulated = add_scaled(ref_features_accumulated, f_ref, w_ref)
+            ref_rho_accumulated += rho_ref
+            
+        # Average features across the M rays
+        reflection_features.append(ref_features_accumulated)
+        
+    # Average the composited features into a single reflection feature f
+    f_reflection = average_vectors(reflection_features)
+    
+    # Step 7: Decode Final Colors
+    final_colors = []
+    
+    for i in range(N):
+        x = x_samples[i]
+        w = weights[i]
+        
+        # Get features for this point
+        features = zip_nerf_model.get_grid_features(x)
+        bottleneck_features = zip_nerf_model.get_bottleneck(features)
+        
+        # Mixing coefficients alpha (from Zip-NeRF or specific blending logic)
+        alpha = zip_nerf_model.get_mixing_coefficient(features)
+        
+        # Pass to color decoder
+        # Color decoder takes: reflection feature f, bottleneck b, mixing alpha, viewing direction d
+        color = zip_nerf_model.color_decoder(f_reflection, bottleneck_features, alpha, d)
+        final_colors.append(color)
+        
+    # Step 8: Alpha Composite Final Color
+    final_color = alpha_composite_colors(final_colors, densities, weights)
+    
+    return final_color
+
+def reflect(v, n):
+    """Reflect vector v around normal n."""
+    return v - 2 * dot(v, n) * n
+
+def normalize(v):
+    """Normalize vector v."""
+    mag = sqrt(sum(x*x for x in v))
+    if mag == 0: return v
+    return [x/mag for x in v]
+
+def add_scaled(acc, vec, scale):
+    """Accumulate vector with scale."""
+    return [acc[i] + vec[i] * scale for i in range(len(acc))]
+
+def average_vectors(vectors):
+    """Average a list of vectors."""
+    if not vectors: return [0,0,0]
+    n = len(vectors)
+    dim = len(vectors[0])
+    avg = [0]*dim
+    for v in vectors:
+        for i in range(dim):
+            avg[i] += v[i]
+    return [x/n for x in avg]
+
+def alpha_composite_colors(colors, densities, weights):
+    """Standard alpha compositing."""
+    # Simplified implementation
+    # c_bar = sum(c_i * alpha_i) / sum(alpha_i) or standard transmittance
+    # Assuming weights are pre-computed alpha contributions
+    total_w = sum(weights)
+    if total_w == 0: return [0,0,0]
+    return [sum(c * w for c, w in zip(colors, weights)) / total_w for _ in range(3)] # Placeholder for RGB
+```
+
+### Parameters
+*   **Zip-NeRF Density MLP:** 1 layer, width 64 [S1].
+*   **Zip-NeRF Color MLP:** 3 layers, width 256 [S1].
+*   **Number of Reflected Rays ($M$):** 5 [S1].
+*   **Roughness Parameter ($\kappa$):** Inverse-roughness, used to define the width of the von Mises-Fisher distribution. For non-perfect mirrors, the reflection cone widens and the origin is pulled closer to the surface [S1].
+
+### Edge Cases and Pitfalls
+*   **Non-Perfect Mirrors:** When the surface is not a perfect mirror, the reflection cone widens. The origin of the reflected ray cone must be pulled closer to the surface location to maintain the same intersection with the pixel cone [S1]. Failure to adjust the origin may result in incorrect reflection sampling.
+*   **Precision:** The method relies on accurate estimation of the surface normal and termination point from noisy volume samples. Degenerate inputs (e.g., empty space) should return black or background color.
+*   **Computational Cost:** While cheaper than full ray tracing, querying the hashgrid and MLPs for $M$ reflected rays per camera ray sample still adds overhead. The cost is mitigated by using the small density MLP for sampling and only using the larger color MLP for the final composite step [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Proportional to $N \times (1 + M)$, where $N$ is the number of samples per camera ray and $M$ is the number of reflected rays (typically 5). Each reflected ray requires sampling and feature encoding, but avoids the full color MLP evaluation until the final step.
+*   **Memory Complexity:** Dominated by the Zip-NeRF hashgrid storage. The reflection feature is a single vector per ray, requiring minimal additional memory.
+*   **Strengths:** Models accurate detailed reflections without expensive MLP evaluations along every reflected ray. Minimizes computation by querying density/features cheaply and only decoding color once per camera sample using accumulated reflection features [S1].
+*   **Limitations:** Approximates the reflection cone with a discrete set of rays, which may introduce aliasing or inaccuracies for highly rough surfaces if $M$ is too small. Relies on the quality of the Zip-NeRF representation for normal and roughness estimation.
+*   **When to Use:** When view-dependent specular reflections are important and computational resources are limited compared to full path tracing, but more accurate than simple environment map reflections.
+*   **When Not to Use:** For scenes with complex global illumination beyond first-order reflections, or where perfect mirror reflections are required without approximation.
+
+## Background
+NeRF-Casting was introduced in the paper "NeRF-Casting: Improved View-Dependent Appearance with Consistent Reflections" [S1]. It builds upon the Zip-NeRF representation, which itself improves upon standard NeRF by using a multi-scale hashgrid for efficient feature storage and decoding [S1]. The method was developed to address the high computational cost of rendering reflections in neural radiance fields by reducing the number of expensive MLP evaluations.
+
+## Sources
+[S1] NeRF-Casting: Improved View-Dependent Appearance with Consistent Reflections, https://arxiv.org/abs/2405.14871v1, fetched 2026-10-26

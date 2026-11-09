@@ -3,7 +3,7 @@
 Also called: GPU Marching Cubes with HistoPyramid, GPU Marching Cubes with HistoPyramid-style Compaction, GPU-MC, Histogram Pyramid Marching Cubes, OpenCL Marching Cubes
 
 ## Overview
-This method extracts isosurfaces from volumetric scalar fields on the GPU using OpenCL and OpenGL, employing a Histogram Pyramid (HP) to count triangles per voxel and compactly store vertex data in a Vertex Buffer Object (VBO) without atomic operations or sorting [S1, unofficial]. It builds on the lookup tables and parallel dispatch principles defined in [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md) and [GPU Acceleration and Parallel Pipelines](4136-gpu-acceleration-and-parallel-pipelines.md).
+This method extracts isosurfaces from volumetric scalar fields on the GPU using OpenCL and OpenGL, employing a Histogram Pyramid (HP) to count triangles per voxel and compactly store vertex data in a Vertex Buffer Object (VBO) without atomic operations or sorting [S1, unofficial]. It builds on the lookup tables and parallel dispatch principles defined in [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md) and [GPU Acceleration and Parallel Pipelines](4136-gpu-acceleration-and-parallel-pipelines.md) [S1, unofficial].
 
 ## How it works
 ### Inputs and Outputs
@@ -25,7 +25,7 @@ This method extracts isosurfaces from volumetric scalar fields on the GPU using 
 *   **Padding:** If input dimensions are not equal powers of two, the volume is padded with zeros to the calculated $SIZE$ [S1, unofficial].
 
 **2. Histogram Pyramid (HP)**
-A hierarchical structure storing partial sums of triangle counts. The implementation supports two paths depending on hardware support for 3D texture writes [S1, unofficial].
+A hierarchical structure storing partial sums of triangle counts [S1, unofficial]. The implementation supports two paths depending on hardware support for 3D texture writes [S1, unofficial].
 
 *   **Path A: 3D Textures (Preferred)**
     *   **Level 0:** `CL_RGBA, CL_UNSIGNED_INT8`, size $(SIZE/2)^3$ [S1, unofficial].
@@ -54,13 +54,13 @@ A hierarchical structure storing partial sums of triangle counts. The implementa
 1.  **Input Preparation:**
     *   Read raw volume data.
     *   Apply subsampling if $stepSize > 1$.
-    *   Calculate $largestSize = \max(sizeX, sizeY, sizeZ)$.
-    *   Determine $SIZE$: Find smallest integer $i$ such that $2^i \ge largestSize$. Set $SIZE = 2^i$.
-    *   Allocate new voxel array of size $SIZE^3$ initialized to 0.
+    *   Calculate $largestSize = \max(sizeX, sizeY, sizeZ)$ [S1, unofficial].
+    *   Determine $SIZE$: Find smallest integer $i$ such that $2^i \ge largestSize$ [S1, unofficial]. Set $SIZE = 2^i$.
+    *   Allocate new voxel array of size $SIZE^3$ initialized to 0 [S1, unofficial].
     *   Copy original data into the new array at indices $x + y \cdot SIZE + z \cdot SIZE^2$ [S1, unofficial].
 
 2.  **Scalar Field Update (Classification):**
-    *   Execute `classifyCubesKernel` with work group $NDRange(SIZE, SIZE, SIZE)$.
+    *   Execute `classifyCubesKernel` with work group $NDRange(SIZE, SIZE, SIZE)$ [S1, unofficial].
     *   Input: Raw data, `isolevel`.
     *   Output: Base level of HP (or `cubeIndexesBuffer` in buffer mode).
     *   If using buffers, copy `cubeIndexesBuffer` to `cubeIndexesImage` [S1, unofficial].
@@ -70,20 +70,20 @@ A hierarchical structure storing partial sums of triangle counts. The implementa
         *   Textures: `constructHPLevelKernel` reads Level 0, writes Level 1. Work group $(SIZE/2)^3$.
         *   Buffers: `constructHPLevelCharCharKernel` reads Level 0, writes Level 1. Work group $(SIZE/2)^3$.
     *   **Intermediate Levels:**
-        *   Iterate $i$ from 1 to $\log_2(SIZE)-2$.
+        *   Iterate $i$ from 1 to $\log_2(SIZE)-2$ [S1, unofficial].
         *   Textures: `constructHPLevelKernel` reads Level $i$, writes Level $i+1$. Work group $(SIZE/2^{i+1})^3$.
         *   Buffers: Use specific kernels for type transitions:
-            *   Level 1->2: `constructHPLevelCharShortKernel`.
-            *   Level 2->3: `constructHPLevelShortShortKernel`.
-            *   Level 3->4: `constructHPLevelShortShortKernel`.
-            *   Level 4->5: `constructHPLevelShortIntKernel`.
-            *   Level 5+: `constructHPLevelKernel` (int->int).
+            *   Level 1->2: `constructHPLevelCharShortKernel` [S1, unofficial].
+            *   Level 2->3: `constructHPLevelShortShortKernel` [S1, unofficial].
+            *   Level 3->4: `constructHPLevelShortShortKernel` [S1, unofficial].
+            *   Level 4->5: `constructHPLevelShortIntKernel` [S1, unofficial].
+            *   Level 5+: `constructHPLevelKernel` (int->int) [S1, unofficial].
         *   Work group size halves each iteration [S1, unofficial].
     *   **Constraint:** If buffer size becomes 1 during construction, force it to 2 to satisfy OpenGL/OpenCL image constraints [S1, unofficial].
 
 4.  **Triangle Count Retrieval:**
-    *   Read the top level of the HP (8 integers).
-    *   Sum these integers to get `totalSum`.
+    *   Read the top level of the HP (8 integers) [S1, unofficial].
+    *   Sum these integers to get `totalSum` [S1, unofficial].
     *   If `totalSum` is 0, skip rendering [S1, unofficial].
 
 5.  **VBO Allocation:**
@@ -94,13 +94,13 @@ A hierarchical structure storing partial sums of triangle counts. The implementa
     *   **Arguments:**
         *   Textures: HP levels (indices 0 to N-1), VBO (last), `isolevel` (second to last), `sum` (third to last).
         *   Buffers: `rawData` (arg 0), `cubeIndexesImage` (arg 1), HP levels (args 2 to N+1), VBO (last), `isolevel`, `sum`.
-    *   **Work Group:** Global size is the smallest multiple of 64 $\ge$ `totalSum`. Local size is 64.
+    *   **Work Group:** Global size is the smallest multiple of 64 $\ge$ `totalSum` [S1, unofficial]. Local size is 64.
     *   **Logic:** Traverse from top to bottom to compute offsets and write triangle vertex/normal data to the VBO [S1, unofficial].
 
 7.  **Rendering:**
     *   Bind VBO.
-    *   Set vertex pointer: 3 floats, stride 24, offset 0.
-    *   Set normal pointer: 3 floats, stride 24, offset 12.
+    *   Set vertex pointer: 3 floats, stride 24, offset 0 [S1, unofficial].
+    *   Set normal pointer: 3 floats, stride 24, offset 12 [S1, unofficial].
     *   Draw: `glDrawArrays(GL_TRIANGLES, 0, totalSum * 3)` [S1, unofficial].
 
 ### Pseudocode
@@ -111,8 +111,8 @@ A hierarchical structure storing partial sums of triangle counts. The implementa
 import math
 
 # Standard Marching Cubes lookup tables (defined per parent article)
-NUM_VERTS_TABLE = [0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4, ...] # 256 entries
-TRI_TABLE = [ ... ] # 256 * 16 entries, stores edge indices
+NUM_VERTS_TABLE = [0] * 256 # Defined in [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md) [G]
+TRI_TABLE = [0] * (256 * 16) # Defined in [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md) [G]
 
 def gpu_marching_cubes_with_histo_pyramid(raw_data, size_x, size_y, size_z, isolevel=51, step_sizes=(1,1,1)):
     # 1. Input Preparation
@@ -147,7 +147,6 @@ def gpu_marching_cubes_with_histo_pyramid(raw_data, size_x, size_y, size_z, isol
     # 3. Histogram Pyramid Construction
     hp_levels = [cube_indexes]
     current_size = size // 2
-    current_type = 'char'
     
     # Base to Level 1
     hp_levels.append([0] * (current_size ** 3))
@@ -174,7 +173,7 @@ def gpu_marching_cubes_with_histo_pyramid(raw_data, size_x, size_y, size_z, isol
     global_work_size = total_sum + 64 - (total_sum - 64 * (total_sum // 64))
     # Traverse from top to bottom to fill VBO
     # Kernel logic: read HP levels, compute offsets, write to VBO
-    # ... (implementation details omitted as per source structure)
+    # Source does not provide full traversal kernel logic; it traverses HP levels top-down to compute offsets and writes to VBO [S1, unofficial].
 
     return vbo
 ```

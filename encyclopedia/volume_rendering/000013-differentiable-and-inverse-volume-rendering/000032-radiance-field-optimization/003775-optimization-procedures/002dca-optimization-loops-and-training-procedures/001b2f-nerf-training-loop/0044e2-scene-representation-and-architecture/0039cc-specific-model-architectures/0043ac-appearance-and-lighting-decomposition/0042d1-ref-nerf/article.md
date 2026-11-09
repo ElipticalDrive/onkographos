@@ -3,39 +3,36 @@
 Also called: Structured View-Dependent Appearance for Neural Radiance Fields
 
 ## Overview
-Ref-NeRF is a neural radiance field method that replaces standard NeRF’s parameterization of view-dependent outgoing radiance with a representation of reflected radiance, structured using spatially-varying scene properties to improve specular reflection realism [S1]. It sets itself apart from sibling methods by explicitly decomposing radiance into diffuse and specular components and reparameterizing the directional input using reflection vectors, rather than relying on raw viewing directions or spherical harmonics [S1].
+Ref-NeRF is a neural radiance field method that replaces NeRF’s parameterization of view-dependent outgoing radiance with a representation of reflected radiance, structured using spatially-varying scene properties to improve specular reflection realism [S1]. It sets itself apart from standard NeRF and its sibling [Anisotropic Neural Representation Learning](9475-anisotropic-neural-representation-learning.md) by explicitly decomposing radiance into diffuse and specular components and reparameterizing the directional input using surface normals, allowing for accurate interpolation of glossy appearances [S1].
 
 ## How it works
+Ref-NeRF builds on the [Appearance and Lighting Decomposition](11061-appearance-and-lighting-decomposition.md) principles. It modifies the directional MLP to predict reflected radiance rather than outgoing radiance directly.
+
 **Inputs and Outputs:**
-*   **Inputs:** 3D spatial coordinates $\mathbf{x}$, viewing direction $\mathbf{d}$, and surface normal $\mathbf{n}$ (estimated from density).
-*   **Outputs:** Volume density $\sigma$ and outgoing radiance $L_o$, decomposed into diffuse $L_d$ and specular $L_s$ components.
+*   **Inputs:** 3D position $\mathbf{x} \in \mathbb{R}^3$, viewing direction $\mathbf{d} \in \mathbb{R}^3$, and surface normal $\mathbf{n} \in \mathbb{R}^3$.
+*   **Outputs:** Volume density $\sigma \in \mathbb{R}$, diffuse color $\mathbf{c}_{diff} \in \mathbb{R}^3$, and specular color $\mathbf{c}_{spec} \in \mathbb{R}^3$.
 
 **Data Structures:**
-The model uses two primary MLPs: a spatial MLP and a directional MLP.
-1.  **Spatial MLP:** Takes $\mathbf{x}$ and outputs a feature vector $\mathbf{c}$, volume density $\sigma$, and an intermediate feature for the normal estimation.
-2.  **Directional MLP:** Takes the reflection vector $\mathbf{r}$ and feature $\mathbf{c}$ to output the specular radiance. The diffuse radiance is typically computed as a function of albedo and diffuse lighting, often independent of the viewing direction in the simplest formulation, or via a separate diffuse directional branch.
+The model uses two coupled MLPs, $F_\sigma$ and $F_c$, consistent with the parent article.
+*   $F_\sigma$: Takes encoded position $\gamma(\mathbf{x})$. Outputs density $\sigma$ and an intermediate feature vector $\mathbf{f}$.
+*   $F_c$: Takes encoded position $\gamma(\mathbf{x})$, intermediate feature $\mathbf{f}$, and a reparameterized direction input. Outputs $\mathbf{c}_{diff}$ and $\mathbf{c}_{spec}$.
 
 **Numbered Steps:**
 
-1.  **Normal Estimation and Regularization:**
-    Standard NeRF geometry is "foggy," leading to noisy normals unsuitable for reflection calculations [S1]. Ref-NeRF applies a volume density regularizer to concentrate density around surfaces. This ensures that the gradient of the density field $\nabla \sigma$ provides a sharp, accurate normal vector $\mathbf{n} = \frac{\nabla \sigma}{\|\nabla \sigma\|}$ [S1].
-
-2.  **Reflection Vector Computation:**
-    Instead of using the viewing direction $\mathbf{d}$ as input to the directional MLP, Ref-NeRF computes the reflection vector $\mathbf{r}$ of $\mathbf{d}$ about the local normal $\mathbf{n}$:
+1.  **Positional Encoding:** Encode position $\mathbf{x}$ using $\gamma(\mathbf{x})$ as defined in the parent article [S1][S3].
+2.  **Density and Feature Prediction:** Pass $\gamma(\mathbf{x})$ through $F_\sigma$ to obtain density $\sigma$ and feature vector $\mathbf{f}$ [S1].
+3.  **Normal Estimation:** Compute the surface normal $\mathbf{n}$ at $\mathbf{x}$ by taking the negative gradient of the density field:
+    $$ \mathbf{n} = -\frac{\nabla \sigma(\mathbf{x})}{\|\nabla \sigma(\mathbf{x})\|} $$
+    [S1]. Note: NeRF's geometry is naturally "foggy," making $\mathbf{n}$ noisy. A specific regularizer is applied to $\sigma$ to concentrate density around surfaces and stabilize $\mathbf{n}$ [S1].
+4.  **Reflection Vector Calculation:** Compute the reflection of the viewing direction $\mathbf{d}$ about the normal $\mathbf{n}$:
     $$ \mathbf{r} = 2(\mathbf{d} \cdot \mathbf{n})\mathbf{n} - \mathbf{d} $$
-    This reparameterization ensures that the reflected radiance function is constant across the scene for distant illumination (ignoring occlusions), making it smoother and easier for the neural network to interpolate [S1].
-
-3.  **Integrated Directional Encoding (IDE):**
-    To handle varying materials and textures smoothly, Ref-NeRF employs Integrated Directional Encoding. This technique encodes the reflection vector $\mathbf{r}$ (and potentially the viewing direction) using a specific basis (e.g., spherical harmonics or positional encoding) before feeding it into the directional MLP. This allows the model to capture high-frequency specular details while maintaining smoothness in the underlying radiance function [S1].
-
-4.  **Radiance Decomposition:**
-    The outgoing radiance is split into explicit diffuse and specular components:
-    $$ L_o = L_d + L_s $$
-    *   **Diffuse ($L_d$):** Computed based on material albedo and diffuse lighting. It is generally view-independent or weakly view-dependent.
-    *   **Specular ($L_s$):** Computed by the directional MLP using the encoded reflection vector $\mathbf{r}$ and spatial features $\mathbf{c}$. This separation allows the specular component to remain smooth despite variations in material and texture [S1].
-
-5.  **Volume Rendering:**
-    Standard volume rendering integration is performed along the ray, accumulating the density $\sigma$ and the decomposed radiance $L_o$ to produce the final pixel color [S1].
+    [S1]. This $\mathbf{r}$ serves as the directional input to the color network, replacing $\mathbf{d}$ [S1].
+5.  **Integrated Directional Encoding (IDE):** Apply Integrated Directional Encoding to $\mathbf{r}$ to create a smooth interpolation kernel for the reflected radiance function. This involves encoding $\mathbf{r}$ with sinusoidal functions, similar to $\gamma(\mathbf{x})$, but tailored for directional interpolation [S1].
+6.  **Color Prediction:** Pass $\gamma(\mathbf{x})$, $\mathbf{f}$, and the encoded $\mathbf{r}$ through $F_c$. The network outputs separate diffuse and specular color components $\mathbf{c}_{diff}$ and $\mathbf{c}_{spec}$ [S1].
+7.  **Radiance Composition:** The total outgoing radiance $\mathbf{c}$ is the sum of the diffuse and specular components:
+    $$ \mathbf{c} = \mathbf{c}_{diff} + \mathbf{c}_{spec} $$
+    [S1]. This separation allows the reflected radiance function (dependent on $\mathbf{r}$) to remain smooth despite variations in material and texture [S1].
+8.  **Volumetric Rendering:** Render the pixel color $C(\mathbf{r})$ using the standard volume rendering equation with the predicted $\sigma$ and $\mathbf{c}$ [S1][S3].
 
 **Pseudocode:**
 
@@ -45,94 +42,98 @@ The model uses two primary MLPs: a spatial MLP and a directional MLP.
 import math
 import torch
 
-def compute_normal(density_field, x, epsilon=1e-3):
-    """
-    Estimate normal from density field using central differences.
-    density_field: callable returning density at x
-    x: tensor of shape (3,)
-    """
-    # Compute gradients using finite differences
-    grad_x = torch.zeros_like(x)
-    for i in range(3):
-        x_plus = x.clone()
-        x_minus = x.clone()
-        x_plus[i] += epsilon
-        x_minus[i] -= epsilon
-        grad_x[i] = (density_field(x_plus) - density_field(x_minus)) / (2 * epsilon)
-    
-    # Normalize to get unit normal
-    n = grad_x / (torch.norm(grad_x) + 1e-8)
-    return n
+def positional_encoding(x, num_freq_bands):
+    """Standard positional encoding for coordinates."""
+    freq_bands = 2.0 ** torch.linspace(0, num_freq_bands - 1, num_freq_bands)
+    scaled_x = x.unsqueeze(-1) * freq_bands * math.pi
+    return torch.cat([torch.sin(scaled_x), torch.cos(scaled_x)], dim=-1)
 
-def reflection_vector(d, n):
+def integrated_directional_encoding(r, num_freq_bands):
     """
-    Compute reflection vector r of viewing direction d about normal n.
-    d: tensor of shape (3,)
-    n: tensor of shape (3,)
+    Integrated Directional Encoding for the reflection vector r.
+    Structured to allow smooth interpolation of reflected radiance.
     """
-    dot_product = torch.dot(d, n)
-    r = 2 * dot_product * n - d
-    return r
+    freq_bands = 2.0 ** torch.linspace(0, num_freq_bands - 1, num_freq_bands)
+    scaled_r = r.unsqueeze(-1) * freq_bands * math.pi
+    return torch.cat([torch.sin(scaled_r), torch.cos(scaled_r)], dim=-1)
 
-def integrated_directional_encoding(r, encoding_fn):
+def compute_normal(density_fn, x, epsilon=1e-4):
     """
-    Apply Integrated Directional Encoding to the reflection vector.
-    r: tensor of shape (3,)
-    encoding_fn: function that encodes a vector (e.g., spherical harmonics)
+    Compute surface normal from density gradient.
+    Uses finite differences for numerical stability.
     """
-    # Placeholder for specific IDE implementation details not fully specified in source
-    # Typically involves projecting r onto a basis
-    encoded_r = encoding_fn(r)
-    return encoded_r
+    # Compute gradient of density at x
+    # Note: In practice, this is often done via automatic differentiation
+    # during the training loop. Here we assume a helper that returns grad.
+    grad_sigma = torch.autograd.grad(
+        density_fn(x).sum(), x, create_graph=True
+    )[0]
+    normal = -grad_sigma / (torch.norm(grad_sigma) + 1e-8)
+    return normal
 
-def ref_nerf_forward(x, d, spatial_mlp, directional_mlp, density_field, encoding_fn):
+def reflect_vector(d, n):
+    """Reflect viewing direction d about normal n."""
+    return 2.0 * torch.dot(d, n) * n - d
+
+def ref_nerf_forward(x, d, density_mlp, color_mlp, num_freq_bands):
     """
     Forward pass for Ref-NeRF.
+    
+    Args:
+        x: 3D position (3,)
+        d: Viewing direction (3,)
+        density_mlp: MLP for density and features
+        color_mlp: MLP for diffuse and specular colors
+        num_freq_bands: Number of frequency bands for encoding
+        
+    Returns:
+        sigma: Volume density
+        c_diff: Diffuse color
+        c_spec: Specular color
     """
-    # 1. Get spatial features and density
-    spatial_features, sigma = spatial_mlp(x)
+    # 1. Encode position
+    x_enc = positional_encoding(x, num_freq_bands)
     
-    # 2. Estimate normal from density for reflection calculation
-    n = compute_normal(density_field, x)
+    # 2. Get density and feature vector
+    # density_mlp outputs (sigma, feature_vector)
+    sigma, feature_vec = density_mlp(x_enc)
     
-    # 3. Compute reflection vector
-    r = reflection_vector(d, n)
+    # 3. Estimate normal
+    # In a real implementation, density_fn would be a wrapper around density_mlp
+    # that returns scalar sigma for gradient computation.
+    normal = compute_normal(lambda px: density_mlp(positional_encoding(px, num_freq_bands))[0], x)
     
-    # 4. Encode reflection vector
-    encoded_r = integrated_directional_encoding(r, encoding_fn)
+    # 4. Compute reflection vector
+    r = reflect_vector(d, normal)
     
-    # 5. Compute specular radiance
-    # Concatenate spatial features and encoded reflection vector
-    directional_input = torch.cat([spatial_features, encoded_r], dim=-1)
-    specular_radiance = directional_mlp(directional_input)
+    # 5. Encode reflection vector using IDE
+    r_enc = integrated_directional_encoding(r, num_freq_bands)
     
-    # 6. Compute diffuse radiance (simplified as view-independent albedo * diffuse light)
-    # In practice, this might involve a separate diffuse MLP or simple albedo lookup
-    diffuse_radiance = compute_diffuse_radiance(spatial_features) 
+    # 6. Predict diffuse and specular colors
+    # color_mlp takes (x_enc, feature_vec, r_enc)
+    # It outputs (c_diff, c_spec)
+    c_diff, c_spec = color_mlp(x_enc, feature_vec, r_enc)
     
-    # 7. Combine
-    total_radiance = diffuse_radiance + specular_radiance
-    
-    return sigma, total_radiance
+    return sigma, c_diff, c_spec
 ```
 
 **Parameters:**
-*   **Regularization Weight:** The weight for the density concentration regularizer is critical. Not given in the sources.
-*   **Encoding Basis:** The specific basis used for Integrated Directional Encoding (e.g., number of spherical harmonic bands). Not given in the sources.
+*   `num_freq_bands`: Number of frequency bands for positional and directional encoding. Typical values are not explicitly given in the sources, but standard NeRF uses 10 [S1][S3].
+*   Regularizer weight for volume density: Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-*   **Foggy Geometry:** If the density regularizer is insufficient, normals will be noisy, leading to incorrect reflection vectors and artifacts [S1].
-*   **Degenerate Normals:** If $\nabla \sigma$ is near zero (flat density regions), normal estimation fails. A small epsilon is added for stability [G].
+*   **Noisy Normals:** NeRF's geometry is "foggy," leading to noisy normal vectors. This is mitigated by the volume density regularizer [S1].
+*   **Degenerate Normals:** If the density gradient is zero (e.g., in empty space), the normal computation may fail. A small epsilon is added to the norm denominator [G].
 
 ## Operating characteristics
-*   **Time Complexity:** Similar to standard NeRF, as it adds normal estimation and reflection vector computation, which are low-cost compared to MLP inference.
-*   **Memory Complexity:** Similar to standard NeRF, with minor overhead for storing intermediate features for normal estimation.
+*   **Time Complexity:** Similar to NeRF, dominated by MLP evaluations per sample. The additional normal computation and reflection vector calculation add negligible overhead [S1].
+*   **Memory Complexity:** Similar to NeRF. The model stores the same MLP parameters plus the logic for normal estimation [S1].
 *   **Performance:** On the evaluated dataset, Ref-NeRF achieves 35.6dB PSNR and 11.5 degrees Mean Angular Error (MAE) for normals, compared to mip-NeRF's 30.3dB PSNR and 59.5 degrees MAE [S1].
-*   **Strengths:** Significantly improves the realism and accuracy of specular reflections; provides an interpretable internal representation useful for scene editing [S1].
-*   **Limitations:** Relies heavily on accurate normal estimation, which requires careful regularization of the density field [S1].
+*   **Strengths:** Significantly improves the realism and accuracy of specular reflections. The internal representation is interpretable and useful for scene editing [S1].
+*   **Limitations:** Relies on accurate normal estimation, which requires the density regularizer. Performance on non-glossy surfaces may not differ significantly from standard NeRF [S1].
 
 ## Background
-Ref-NeRF was introduced by Dor Verbin, Peter Hedman, Ben Mildenhall, Todd Zickler, Jonathan T. Barron, and Pratul P. Srinivasan from Harvard University and Google Research [S1]. It was published as arXiv:2112.03907v1 on Dec 7, 2021 [S1]. The method addresses the limitation of NeRF-based techniques in accurately capturing glossy surfaces by structuring the view-dependent appearance using spatially-varying scene properties [S1].
+Ref-NeRF was introduced by Dor Verbin, Peter Hedman, Ben Mildenhall, Todd Zickler, Jonathan T. Barron, and Pratul P. Srinivasan from Harvard University and Google Research. It was published as arXiv:2112.03907v1 on Dec 7, 2021 [S1]. The method addresses the limitation of NeRF-based techniques in accurately capturing glossy surfaces by reparameterizing the view-dependent appearance using reflected radiance [S1].
 
 ## Sources
 [S1] Ref-NeRF: Structured View-Dependent Appearance for Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.00541, fetched 2026-10-26

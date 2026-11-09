@@ -1,0 +1,170 @@
+# Depth Consistency Check / Depth Outlier Removal
+
+Also called: Geometric Consistency Masking, Reprojection-based Depth Filtering
+
+## Overview
+This method filters noisy depth data by verifying the geometric consistency of depth estimates across multiple camera views. It solves the problem of unreliable depth supervision in differentiable volume rendering by identifying and discarding depth outliers that violate rigid body motion constraints. It differs from sibling methods like [Depth Supervision Loss (Laug)](8111-depth-supervision-loss-laug.md) by acting as a pre-processing or masking step that rejects inconsistent data points rather than applying a continuous penalty to all depth errors.
+
+## How it works
+**Inputs and Outputs:**
+- Input: Depth map $D_i$ for source frame $i$, depth map $D_j$ for target frame $j$, camera intrinsics and extrinsics for frames $i$ and $j$.
+- Output: A binary geometric consistency mask $M_d$ of the same spatial resolution as $D_i$, where valid pixels are marked.
+
+**Data Structures:**
+- $D_i$: 2D array of depth values.
+- $M_d$: 2D boolean array or mask.
+- $\mathbf{u}_i$: Pixel coordinates $(u, v)$ in frame $i$.
+
+**Steps:**
+1. **Unproject:** Convert the depth map $D_i$ of frame $i$ into a 3D point cloud. For each pixel $\mathbf{u}_i$, compute the 3D position $\mathbf{X}_i$ using the inverse projection $\pi_i^{-1}$ and the depth value $D_i(\mathbf{u}_i)$.
+2. **Reproject:** Transform the 3D points $\mathbf{X}_i$ into the coordinate system of a nearby view $j$ using the relative camera pose. Project these 3D points onto the image plane of frame $j$ to obtain the projected pixel coordinates.
+3. **Sample Depth:** Retrieve the depth value at the projected coordinates from the target depth map $D_j$. This yields the reprojected depth $D_{i \to j}$.
+4. **Compare and Mask:** Calculate the absolute difference between the reprojected depth $D_{i \to j}$ and the actual depth $D_j$ at the corresponding pixel. If the difference is below the threshold $\sigma$, the pixel is considered consistent.
+
+**Formula:**
+The geometric consistency mask $M_d$ is defined as [S1]:
+
+$$
+M_d = \left| D_{i \to j} - D_j \right| < \sigma
+$$
+
+where the reprojected depth is:
+
+$$
+D_{i \to j} = D_j \left( \pi_j \pi_i^{-1} (\mathbf{u}_i) \right)
+$$
+
+Here, $\mathbf{u}_i$ denotes the pixel coordinates of the $i$-th frame, $\pi_i^{-1}$ is the unprojection operation, $\pi_j$ is the projection operation for frame $j$, and $D_j$ is the depth map of the target view.
+
+**Parameters:**
+- $\sigma$: Empirical threshold for the absolute relative error in depth reprojection. The source sets $\sigma = 0.2$m [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def depth_consistency_check(D_i, D_j, pose_i, pose_j, intrinsics, sigma=0.2):
+    """
+    Computes geometric consistency mask between two views.
+    
+    Args:
+        D_i: Depth map of source view i (H, W)
+        D_j: Depth map of target view j (H, W)
+        pose_i: 4x4 transformation matrix for view i
+        pose_j: 4x4 transformation matrix for view j
+        intrinsics: Camera intrinsic matrix K
+        sigma: Threshold for depth difference (meters)
+        
+    Returns:
+        M_d: Boolean mask (H, W) where True indicates consistent depth
+    """
+    H, W = D_i.shape
+    
+    # 1. Unproject D_i to 3D points
+    # Create grid of pixel coordinates
+    u, v = np.meshgrid(np.arange(W), np.arange(H))
+    
+    # Convert pixel coordinates to normalized device coordinates
+    # Assuming standard pinhole model: x = (u - cx) / fx, y = (v - cy) / fy
+    fx, fy = intrinsics[0, 0], intrinsics[1, 1]
+    cx, cy = intrinsics[0, 2], intrinsics[1, 2]
+    
+    x_ndc = (u - cx) / fx
+    y_ndc = (v - cy) / fy
+    
+    # Unproject to 3D: X = z * [x_ndc, y_ndc, 1]
+    # D_i contains depth values (z)
+    X_i_homogeneous = np.stack([x_ndc * D_i, y_ndc * D_i, D_i, np.ones_like(D_i)], axis=-1)
+    
+    # Transform to world coordinates (assuming poses are world-to-camera, need inverse)
+    # Let T_w2c_i be pose_i. X_world = T_w2c_i^{-1} * X_i
+    T_w2c_i = np.linalg.inv(pose_i)
+    X_world = (T_w2c_i @ X_i_homogeneous.reshape(-1, 4).T).T
+    X_world = X_world.reshape(H, W, 4)
+    
+    # 2. Reproject to view j
+    # Transform world points to camera j coordinates
+    T_w2c_j = pose_j
+    X_j_homogeneous = (T_w2c_j @ X_world.reshape(-1, 4).T).T
+    X_j = X_j.reshape(H, W, 4)
+    
+    # Project to 2D
+    x_j_ndc = X_j[:, :, 0] / X_j[:, :, 2]
+    y_j_ndc = X_j[:, :, 1] / X_j[:, :, 2]
+    z_j = X_j[:, :, 2]
+    
+    # Convert back to pixel coordinates
+    u_j = x_j_ndc * fx + cx
+    v_j = y_j_ndc * fy + cy
+    
+    # 3. Sample depth from D_j at projected coordinates
+    # Use bilinear interpolation to handle non-integer coordinates
+    # Clip coordinates to image bounds
+    u_j_clipped = np.clip(u_j, 0, W - 1)
+    v_j_clipped = np.clip(v_j, 0, H - 1)
+    
+    # Sample D_j at (v_j, u_j)
+    # Note: D_j is indexed as [row, col] = [v, u]
+    D_j_sampled = bilinear_interpolate(D_j, v_j, u_j)
+    
+    # 4. Compare and create mask
+    # Handle invalid depths (e.g., 0 or infinity)
+    valid_mask = (D_i > 0) & (D_j_sampled > 0) & (z_j > 0)
+    
+    diff = np.abs(D_j_sampled - D_j)
+    consistent = diff < sigma
+    
+    M_d = valid_mask & consistent
+    
+    return M_d
+
+def bilinear_interpolate(image, v, u):
+    """
+    Bilinear interpolation of image at float coordinates (v, u).
+    """
+    v0 = np.floor(v).astype(int)
+    u0 = np.floor(u).astype(int)
+    v1 = v0 + 1
+    u1 = u0 + 1
+    
+    # Clip to bounds
+    v0 = np.clip(v0, 0, image.shape[0] - 1)
+    u0 = np.clip(u0, 0, image.shape[1] - 1)
+    v1 = np.clip(v1, 0, image.shape[0] - 1)
+    u1 = np.clip(u1, 0, image.shape[1] - 1)
+    
+    I00 = image[v0, u0]
+    I01 = image[v0, u1]
+    I10 = image[v1, u0]
+    I11 = image[v1, u1]
+    
+    dv = v - v0
+    du = u - u0
+    
+    # Interpolate
+    top = I00 * (1 - dv) + I01 * dv
+    bottom = I10 * (1 - dv) + I11 * dv
+    result = top * (1 - du) + bottom * du
+    
+    return result
+```
+
+**Edge Cases and Pitfalls:**
+- **Occlusions:** Points visible in frame $i$ may be occluded in frame $j$. The reprojected depth $D_{i \to j}$ will sample a different surface or invalid region, leading to large errors. This method may incorrectly filter valid geometry if the occlusion is not handled [G].
+- **Invalid Depth Values:** Pixels with zero or infinite depth in $D_i$ or $D_j$ must be excluded from the mask calculation to avoid division by zero or invalid comparisons.
+- **Precision:** Reprojection involves floating-point operations. Small misalignments due to precision errors may cause valid pixels to be filtered if $\sigma$ is set too tightly.
+
+## Subtopics
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of pixels, as it involves per-pixel unprojection, transformation, and interpolation.
+- **Memory Complexity:** $O(N)$ to store the 3D points and intermediate projections.
+- **Strengths:** Effectively removes gross outliers and "floaters" in depth maps that do not conform to rigid scene geometry.
+- **Limitations:** Relies on the accuracy of the input depth maps and camera poses. Fails in textureless regions or areas with significant parallax if the depth estimates are poor.
+- **When to use:** When using monocular depth estimators that produce noisy outputs, particularly in urban or structured environments where rigid body motion assumptions hold.
+
+## Background
+This method is described in the context of efficient volume-based Gaussian splatting for urban view synthesis. It is used to clean depth data before further optimization steps, such as the 3D statistical filtering of point clouds. The approach leverages the geometric consistency between multiple views to validate depth estimates.
+
+## Sources
+[S1] EVolSplat: Efficient Volume-based Gaussian Splatting for Urban View Synthesis, https://doi.org/10.1109/CVPR52734.2025.01054, fetched 2026-11-03

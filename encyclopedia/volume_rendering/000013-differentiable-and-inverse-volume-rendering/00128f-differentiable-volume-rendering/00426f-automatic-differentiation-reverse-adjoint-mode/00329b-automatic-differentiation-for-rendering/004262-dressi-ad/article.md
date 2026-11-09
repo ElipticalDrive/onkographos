@@ -1,0 +1,105 @@
+# Dressi-AD
+
+Also called: Vulkan-Based AD Library for DR
+
+## Overview
+Dressi-AD is a hardware-agnostic automatic differentiation library for differentiable rendering (DR) built on the Vulkan API [S1]. It solves the problem of integrating reverse-mode AD into a graphics pipeline by using 2D images as primitive data structures instead of multi-dimensional tensors, maintaining compatibility with hardware rasterizers [S1]. Unlike general-purpose AD libraries that rely on multi-dimensional tensors, Dressi-AD aligns with graphics pipeline constraints and differentiable rendering workflows by utilizing fragment shaders with dummy vertex shaders for computation [S1].
+
+## How it works
+**Inputs and Outputs:**
+The user provides mathematical problem definitions via provided APIs. The system outputs a computational graph executed on GPUs [S1].
+
+**Data Structures:**
+*   **Variable Objects:** Represent inputs and outputs of functions. They are converted into `VkImage` structures [S1]. `VkImage` handles 2D arrays and can store textures, vertex buffers, blend weight matrices, or higher-dimensional tensors represented as stacked 2D arrays [S1].
+*   **Function Objects:** Each forward function object contains a GLSL representation compatible with a fragment shader and includes a method to generate corresponding backward function objects [S1].
+
+**Steps:**
+1.  **Instantiation:** Developers write mathematical problems using provided APIs. Dressi-AD instantiates forward function objects and variable objects [S1].
+2.  **Graph Construction:** The system builds a computational graph from the instantiated objects [S1].
+3.  **GLSL Code Generation:** Forward function objects are converted into GLSL code. This generation step roughly follows the approach used in TensorFlow.js [S1].
+4.  **Backward Function Generation:** Each forward function object generates its corresponding backward function object [S1].
+5.  **Stage Packing:** A Just-In-Time (JIT) compilation technique maps multiple subpasses to a render pass. Shader codes on the computational graph are automatically packed into optimal GPU execution units, considering hardware constraints. A reactive cache is integrated to skip redundant computation [S1].
+6.  **Execution:** The graph is executed on GPUs using a define-and-run scheme [S1].
+
+**Shader Selection:**
+Fragment shaders with dummy vertex shaders are preferred for computation [S1]. Vertex shaders are avoided because they cannot export intermediate variables, and compute shaders are avoided because they are not well optimized for graphics purposes [S1].
+
+**Inverse UV for Texture Sampling:**
+Standard hardware texture samplers (`texture()`) do not support automatic differentiation. Dressi-AD implements a custom backward function for texture sampling called "Inverse UV" [S1]. This allows direct handling of textures within the graphics pipeline, avoiding software-based tensor operations [S1].
+
+**Pitfalls:**
+Some differentiable rendering function objects cannot be defined using built-in GLSL functions, requiring custom backward implementations (e.g., texture sampling) [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Conceptual representation of the define-and-run scheme
+# Note: Actual implementation details for JIT packing and Reactive Cache are not fully specified in sources.
+
+class Variable:
+    def __init__(self, data):
+        # Convert data into VkImage structure
+        self.vk_image = create_vk_image(data)
+
+class ForwardFunction:
+    def __init__(self, glsl_code):
+        self.glsl_code = glsl_code
+    
+    def generate_backward(self):
+        # Generate corresponding backward function object
+        # For texture sampling, this returns the InverseUV backward function
+        return BackwardFunction()
+
+class BackwardFunction:
+    def __init__(self, glsl_code):
+        self.glsl_code = glsl_code
+
+class DressiAD:
+    def __init__(self):
+        self.computational_graph = []
+    
+    def define(self, user_program):
+        # Instantiate function and variable objects from user APIs
+        variables = []
+        functions = []
+        
+        # Example: User defines a mathematical operation
+        # var_a = Variable(input_data)
+        # var_b = var_a * 2.0  # This creates a ForwardFunction object
+        
+        # Dressi-AD processes the user program to build the graph
+        for operation in user_program.operations:
+            if operation.type == 'forward':
+                func = ForwardFunction(glsl_code=operation.glsl_representation)
+                functions.append(func)
+                # Generate backward function
+                func.backward = func.generate_backward()
+            elif operation.type == 'variable':
+                var = Variable(data=operation.data)
+                variables.append(var)
+        
+        self.computational_graph = (variables, functions)
+    
+    def execute(self):
+        # Stage Packing: Map multiple subpasses to a render pass
+        # Pack shader codes into optimal GPU execution units
+        packed_shaders = jit_compile(self.computational_graph)
+        
+        # Execute on GPU using Vulkan
+        # Use fragment shaders with dummy vertex shaders
+        for stage in packed_shaders:
+            execute_vulkan_subpass(stage)
+```
+
+## Operating characteristics
+*   **Hardware Support:** Supports NVIDIA, AMD, Intel, Arm, and other hardware via the Vulkan API [S1].
+*   **Performance:** Uses low-level Vulkan APIs to increase rendering speed compared to more abstract APIs like OpenGL [S1].
+*   **Optimization:** Includes a reactive cache to skip redundant computation [S1].
+*   **Limitations:** Relies on the graphics pipeline, which imposes limitations compared to general-purpose compute shaders [S1]. Some operations require custom backward implementations because they cannot be defined using built-in GLSL functions [S1].
+
+## Background
+Dressi-AD was proposed as part of the Dressi renderer system [S1]. The design choices were motivated by the limitations of other graphics APIs: OpenGL is too abstract to exploit modern hardware performance, and OpenCL/compute shaders may not be well-supported on mobile devices or lack correspondence to Vulkan’s subpasses [S1]. The system was published in 2022 [S1].
+
+## Sources
+[S1] Dressi: A Hardware‐Agnostic Differentiable Renderer with Reactive Shader Packing and Soft Rasterization, https://doi.org/10.1111/cgf.14455, fetched 2026-10-29

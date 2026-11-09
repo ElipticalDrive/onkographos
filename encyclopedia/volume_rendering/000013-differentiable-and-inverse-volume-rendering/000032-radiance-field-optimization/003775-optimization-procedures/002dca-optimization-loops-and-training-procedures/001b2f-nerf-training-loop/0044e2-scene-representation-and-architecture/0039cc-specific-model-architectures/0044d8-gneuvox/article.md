@@ -3,87 +3,63 @@
 Also called: General Neural Voxels, Generalizable Neural Voxels
 
 ## Overview
-GNeuVox is a fast-training framework for rendering free-view moving human bodies from monocular video by integrating neural fields with explicit neural voxel grids [S1, unofficial]. It solves the high computational cost of traditional NeRF-based human rendering by using two types of voxels: "general voxels" pretrained across multiple bodies to provide geometric priors, and "individual voxels" optimized per subject for unique details [S1, unofficial]. This separation allows training a novel human body in minutes rather than hours, while maintaining rendering quality comparable to methods like HumanNeRF [S1, unofficial].
+GNeuVox is a fast-training framework for rendering free-view moving human bodies from monocular video by integrating neural fields with explicit neural voxel grids [S1, unofficial]. It solves the high computational cost of traditional NeRF-based human rendering by using two types of voxels: "general voxels" pretrained across multiple bodies to provide geometric priors, and "individual voxels" optimized per subject for unique details [S1, unofficial]. Unlike implicit MLP representations, this explicit structure significantly accelerates optimization, allowing fine-tuning for a new body in minutes rather than hours [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Monocular video frames, initial human pose estimates $P$ (joint positions $J$ and rotation angles $\Omega$), camera intrinsics/extrinsics.
-*   **Outputs:** Rendered pixel colors $\hat{C}(\mathbf{r})$ for novel views.
+*   **Inputs:** Monocular video frames (images), initial human pose estimates $P$ (joint positions $J$ and rotation angles $\Omega$), camera intrinsics/extrinsics, and ray origins/directions.
+*   **Outputs:** Rendered RGB color $\mathbf{c}$ and volume density $\sigma$ for each ray sample, used to compute pixel color via volume rendering.
 
 **Data Structures:**
 1.  **General Voxels ($V_g$):** A 3D grid of shape $N_x \times N_y \times N_z$ with channel depth $C_v$. Initialized via pretraining on multiple subjects.
-2.  **Individual Voxels ($V_i$):** A 3D grid of shape $N_x \times N_y \times N_z$ with channel depth $C_v$. Initialized to zero for each new subject.
-3.  **Deformation Embedding ($Z$):** A learnable vector/grid mapped to blend weights via 3D convolutions. Initialized to zero for each new subject.
-4.  **Radiance Field ($\Phi_r$):** A neural network mapping voxel features and coordinates to color $\mathbf{c}$ and density $\sigma$.
-
-**Parameters:**
-*   Voxel grid resolution: $160^3$ for both $V_g$ and $V_i$ [S1, unofficial].
-*   Voxel feature channel number ($C_v$): 6 [S1, unofficial].
-*   Positional encoding frequencies:
-    *   Voxel features ($v$): 2 [S1, unofficial].
-    *   Coordinates $(x, y, z)$: 10 [S1, unofficial].
-    *   Direction $\mathbf{d}$: 4 [S1, unofficial].
-*   Ray sampling: 128 points randomly sampled along each ray [S1, unofficial].
-*   LPIPS loss sampling: $G=6$ patches of size $H \times H = 32 \times 32$ per image [S1, unofficial].
+    *   Layout: `float32[Nx][Ny][Nz][Cv]`
+    *   Typical Size: $160^3$ grid, $C_v = 6$.
+2.  **Individual Voxels ($V_i$):** A 3D grid of the same shape as $V_g$, initialized to zero for each new subject.
+    *   Layout: `float32[Nx][Ny][Nz][Cv]`
+3.  **Deformation Embedding ($Z$):** A learnable vector/grid mapped to blend weights via 3D convolutions. Initialized to zero for new subjects.
+4.  **Radiance Field ($\Phi_r$):** A small MLP taking concatenated voxel features, positional encoded coordinates, direction, and timestamp to predict $\sigma$ and $\mathbf{c}$.
 
 **Numbered Steps:**
 
 1.  **Pose Refinement:**
-    Obtain initial pose $P = (J, \Omega)$ from off-the-shelf estimation. Refine it using a pose refinement network $\Phi_p$ to get corrected pose $P_c = (J_c, \Omega_c)$ [S1, unofficial].
-    $$P_c = (J, \Omega \otimes \Delta\Omega)$$
-    where $\otimes$ denotes $(R_i \cdot \Delta R_i, T_i + \Delta T_i)$, with $R_i, T_i$ and $\Delta R_i, \Delta T_i$ derived from $\Omega$ and $\Delta\Omega$ respectively [S1, unofficial].
+    Correct the initial pose $P = (J, \Omega)$ using a pose refinement network $\Phi_p$ to obtain $P_c = (J_c, \Omega_c)$.
+    $$ P_c = (J, \Omega \otimes \Delta\Omega) $$
+    where $\otimes$ denotes combining rotation matrices $R_i \cdot \Delta R_i$ and translations $T_i + \Delta T_i$ derived from $\Omega$ and $\Delta\Omega$ [S1, unofficial].
 
 2.  **Coordinate Deformation:**
-    Deform observation space coordinates $\mathbf{x}_o = (x_o, y_o, z_o)$ to canonical T-pose coordinates $\mathbf{x}_c = (x_c, y_c, z_c)$ using the pose deformation network $\mathbf{F}_d$ and corrected pose $P_c$ [S1, unofficial].
-    $$(x_c, y_c, z_c) = \mathbf{F}_d((x_o, y_o, z_o), P_c)$$
-    The network $\mathbf{F}_d$ uses the same structure as the skeletal deformation in HumanNeRF:
-    $$T_{skel}(\mathbf{x}, P_c) = \sum_{i=1}^K w^i(\mathbf{x})(R_c^i \mathbf{x} + T_c^i)$$
-    where $w^i$ are blend weights obtained by mapping the learnable embedding $Z$ into a volume via 3D convolutional layers and trilinear interpolation [S1, unofficial].
+    Map observation space coordinates $\mathbf{x}_o = (x_o, y_o, z_o)$ to canonical T-pose coordinates $\mathbf{x}_c = (x_c, y_c, z_c)$ using the pose deformation network $\mathbf{F}_d$ and corrected pose $P_c$.
+    $$ \mathbf{x}_c = \mathbf{F}_d(\mathbf{x}_o, P_c) $$
+    The deformation is a weighted sum of rigid transformations:
+    $$ T_{skel}(\mathbf{x}, P_c) = \sum_{i=1}^K w^i(\mathbf{x})(R_c^i \mathbf{x} + T_c^i) $$
+    where $w^i(\mathbf{x})$ are blend weights obtained by mapping embedding $Z$ through 3D convolutions and trilinear interpolation [S1, unofficial].
 
 3.  **Voxel Interpolation:**
-    Interpolate features from both voxel grids using the canonical coordinates $\mathbf{x}_c$ via trilinear interpolation [S1, unofficial].
-    $$\mathbf{v}_g = \text{interp}(\mathbf{x}_c, V_g)$$
-    $$\mathbf{v}_i = \text{interp}(\mathbf{x}_c, V_i)$$
-    where $\text{interp}$ denotes multi-distance interpolation (MDI) [S1, unofficial].
+    Perform trilinear interpolation on the canonical coordinates $\mathbf{x}_c$ to fetch features from both voxel grids.
+    $$ \mathbf{v}_g = \text{TrilinearInterp}(\mathbf{x}_c, V_g) $$
+    $$ \mathbf{v}_i = \text{TrilinearInterp}(\mathbf{x}_c, V_i) $$
+    Where $\mathbf{v}_g \in \mathbb{R}^{C_v}$ and $\mathbf{v}_i \in \mathbb{R}^{C_v}$ [S1, unofficial].
 
 4.  **Feature Concatenation and Encoding:**
-    Concatenate the interpolated features: $\mathbf{v}_{concat} = [\mathbf{v}_g; \mathbf{v}_i]$. Apply positional encoding $\gamma$ to $\mathbf{v}_{concat}$, coordinates $\mathbf{x}_o$, direction $\mathbf{d}$, and timestamp $t$ [S1, unofficial].
-    $$\gamma(x) = (\sin(2^0 x), \cos(2^0 x), \dots, \sin(2^{L-1} x), \cos(2^{L-1} x))$$
-    where $L$ controls the maximum frequency [S1, unofficial].
+    Concatenate features: $\mathbf{v}_{cat} = [\mathbf{v}_g; \mathbf{v}_i]$.
+    Apply positional encoding $\gamma$ to $\mathbf{v}_{cat}$, coordinates $\mathbf{x}_o$, direction $\mathbf{d}$, and timestamp $t$.
+    $$ \gamma(\mathbf{x}) = (\sin(2^0 \pi \mathbf{x}), \cos(2^0 \pi \mathbf{x}), \dots, \sin(2^{L-1} \pi \mathbf{x}), \cos(2^{L-1} \pi \mathbf{x})) $$
+    *   Frequency for $\mathbf{v}$: 2.
+    *   Frequency for $\mathbf{x}_o$: 10.
+    *   Frequency for $\mathbf{d}$: 4 [S1, unofficial].
 
-5.  **Radiance Field Query:**
-    Feed the encoded features into the radiance field $\Phi_r$ to obtain color $\mathbf{c}$ and density $\sigma$ [S1, unofficial].
-    $$\mathbf{c}, \sigma = \Phi_r(\gamma(\mathbf{v}_{concat}), \gamma(t), \gamma(\mathbf{x}_o), \gamma(\mathbf{d}))$$
+5.  **Radiance Field Prediction:**
+    Feed encoded features into the radiance field $\Phi_r$ to predict density $\sigma$ and color $\mathbf{c}$.
+    $$ \sigma, \mathbf{c} = \Phi_r(\gamma(\mathbf{v}_{cat}), \gamma(\mathbf{x}_o), \gamma(\mathbf{d}), \gamma(t)) $$
 
 6.  **Volume Rendering:**
-    Render the pixel color $\hat{C}(\mathbf{r})$ along ray $\mathbf{r}$ using standard differentiable volume rendering [S1, unofficial].
-    $$\hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i(1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i$$
-    where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$, $\delta_i = t_{i+1} - t_i$, and $N$ is the number of sampled points [S1, unofficial].
+    Compute pixel color $\hat{C}(\mathbf{r})$ along ray $\mathbf{r}$ with $N$ samples.
+    $$ \hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
+    $$ T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) $$
+    where $\delta_i = t_{i+1} - t_i$ [S1, unofficial].
 
 7.  **Loss Computation:**
-    Compute the total loss $\mathcal{L}$ [S1, unofficial].
-    $$\mathcal{L} = \lambda_M \mathcal{L}_{MSE} + \lambda_L \mathcal{L}_{LPIPS}$$
-    where $\mathcal{L}_{MSE} = \|\hat{C}(\mathbf{r}) - C(\mathbf{r})\|_2^2$ and $\mathcal{L}_{LPIPS}$ is the perceptual loss using VGG [S1, unofficial].
-
-**Training Phases:**
-
-*   **Pretraining:**
-    *   Train $V_g$, $\mathbf{F}_d$, and $\Phi_r$ on multiple human bodies (e.g., 7 subjects from ZJU-MoCap or Human3.6M) [S1, unofficial].
-    *   $V_i$ and $Z$ are not used or zero-initialized [S1, unofficial].
-    *   Iterations: 50k [S1, unofficial].
-    *   Loss weights: $\lambda_M=0.2, \lambda_L=1$ [S1, unofficial].
-
-*   **Fine-tuning (New Subject):**
-    *   Load pretrained $V_g$, $\mathbf{F}_d$, and $\Phi_r$ [S1, unofficial].
-    *   Initialize new $V_i$ and $Z$ to zero [S1, unofficial].
-    *   Optimize all parameters to fit the specific new human body [S1, unofficial].
-    *   Iterations: 1k (ZJU-MoCap pretrained) or 3k (Human3.6M pretrained) [S1, unofficial].
-    *   Loss weights: First 300 iterations $\lambda_M=10, \lambda_L=0$; remaining iterations $\lambda_M=0.2, \lambda_L=1$ [S1, unofficial].
-
-*   **Training from Scratch:**
-    *   Initialize all components.
-    *   Iterations: 10k [S1, unofficial].
-    *   Loss weights: $\lambda_M=0.2, \lambda_L=1$ [S1, unofficial].
+    $$ \mathcal{L} = \lambda_M \|\hat{C}(\mathbf{r}) - C(\mathbf{r})\|_2^2 + \lambda_L \mathcal{L}_{LPIPS} $$
+    $\mathcal{L}_{LPIPS}$ is computed on $G=6$ patches of size $32 \times 32$ [S1, unofficial].
 
 **Pseudocode:**
 
@@ -95,164 +71,159 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class GNeuVox:
-    def __init__(self, voxel_res=160, voxel_channels=6, 
-                 freq_voxel=2, freq_coord=10, freq_dir=4):
-        self.voxel_res = voxel_res
-        self.voxel_channels = voxel_channels
-        self.freq_voxel = freq_voxel
-        self.freq_coord = freq_coord
-        self.freq_dir = freq_dir
+    def __init__(self, grid_res=160, channel_dim=6, num_bones=24):
+        # Voxel grids: [Nx, Ny, Nz, Cv]
+        self.V_g = nn.Parameter(torch.randn(grid_res, grid_res, grid_res, channel_dim))
+        self.V_i = nn.Parameter(torch.zeros(grid_res, grid_res, grid_res, channel_dim))
         
-        # General Voxels (Pretrained)
-        self.V_g = nn.Parameter(torch.randn(voxel_channels, voxel_res, voxel_res, voxel_res))
-        
-        # Individual Voxels (Per-subject)
-        self.V_i = None
-        
-        # Deformation Network (Pretrained)
-        self.F_d = PoseDeformationNetwork()
-        
-        # Radiance Field (Pretrained)
-        self.phi_r = RadianceField()
-        
-        # Embedding for deformation weights
-        self.Z = None
-
-    def positional_encoding(self, x, freq):
-        """Standard positional encoding as defined in Eq. 3."""
-        # x is of shape [..., D]
-        # Output shape [..., D * 2 * freq]
-        scales = torch.tensor([2**i for i in range(freq)], dtype=x.dtype, device=x.device)
-        x = x.unsqueeze(-1) * scales.unsqueeze(0)
-        x = torch.cat([torch.sin(x), torch.cos(x)], dim=-1)
-        return x.flatten(-2)
-
-    def interpolate_voxels(self, coords, voxel_grid):
-        """Trilinear interpolation of voxel grid at canonical coordinates."""
-        # coords: [N, 3] in range [-1, 1]
-        # voxel_grid: [C, D, D, D]
-        # Output: [N, C]
-        # Note: PyTorch grid_sample expects [N, C, H, W] or [N, C, D, H, W]
-        # coords need to be reshaped to [N, 1, 1, 1, 3] and permuted for grid_sample
-        # This is a simplified representation of MDI/Trilinear interp
-        coords_norm = coords # Assuming already normalized to [-1, 1]
-        # Expand dims for grid_sample: [N, 1, 1, 1, 3]
-        coords_grid = coords_norm.unsqueeze(1).unsqueeze(1).unsqueeze(1)
-        # grid_sample input: [N, C, D, H, W] -> [N, C, D, H, W]
-        # We need to permute voxel_grid to [N, C, D, H, W] if N>1, but here N is batch
-        # Standard grid_sample: input [N, C, D, H, W], grid [N, ..., 3]
-        # Reshape voxel_grid to [1, C, D, H, W] if single batch, or handle batch dim
-        # For simplicity, assuming batch size 1 for the grid operation or using torch.nn.functional.grid_sample
-        # Correct usage for 3D:
-        # grid_sample(input, grid, mode='bilinear', padding_mode='zeros', align_corners=True)
-        # input: [N, C, D, H, W]
-        # grid: [N, ..., D, H, W, 3]
-        
-        # Reshape voxel_grid to [1, C, D, H, W] if not batched, or keep batch dim if applicable
-        # Here we assume we are interpolating for a batch of rays
-        # Let's assume voxel_grid is [C, D, H, W] and we want to sample N points
-        # We must expand voxel_grid to [1, C, D, H, W]
-        v_grid = voxel_grid.unsqueeze(0) # [1, C, D, H, W]
-        
-        # grid_sample expects grid of shape [N, H_out, W_out, D_out, 3] for 3D? 
-        # Actually torch.nn.functional.grid_sample supports 3D if input is 5D.
-        # grid shape: [N, out_depth, out_height, out_width, 3]
-        # We have N points. We want out_depth=1, out_height=1, out_width=1
-        grid = coords_grid # [N, 1, 1, 1, 3]
-        
-        # Perform interpolation
-        # Note: grid_sample align_corners=True is standard for NeRF-like coords
-        features = F.grid_sample(v_grid, grid, align_corners=True) # [1, C, 1, 1, 1]
-        features = features.squeeze(0).squeeze(-1).squeeze(-1).squeeze(-1) # [N, C]
-        return features
-
-    def forward(self, rays_o, rays_d, poses, t, V_i=None, Z=None):
-        """
-        rays_o: [N, 3] origin
-        rays_d: [N, 3] direction
-        poses: [N, 2] (J, Omega) or similar structure for pose refinement
-        t: [N] timestamp
-        V_i: Individual voxels for current subject
-        Z: Embedding for current subject
-        """
-        # 1. Pose Refinement
-        P_c = self.refine_pose(poses)
-        
-        # 2. Deformation
-        # Deform observation coords to canonical space
-        # Assume rays_o are sampled points on rays in observation space
-        x_c = self.F_d(rays_o, P_c, Z)
-        
-        # 3. Interpolation
-        v_g = self.interpolate_voxels(x_c, self.V_g)
-        v_i = self.interpolate_voxels(x_c, V_i)
-        
-        # 4. Concatenation and Encoding
-        v_concat = torch.cat([v_g, v_i], dim=-1)
-        
-        # Apply positional encoding
-        v_enc = self.positional_encoding(v_concat, self.freq_voxel)
-        x_enc = self.positional_encoding(rays_o, self.freq_coord)
-        d_enc = self.positional_encoding(rays_d, self.freq_dir)
-        t_enc = self.positional_encoding(t.unsqueeze(-1), 1) # Assuming t is scalar per point
-        
-        # 5. Radiance Field
-        c, sigma = self.phi_r(v_enc, x_enc, d_enc, t_enc)
-        
-        # 6. Volume Rendering (Simplified for single ray step, usually done in a loop or batched)
-        # This function returns color and density for the sampled points
-        return c, sigma
-
-    def refine_pose(self, P):
-        # P = (J, Omega)
-        # Delta Omega = Phi_p(Omega)
-        # P_c = (J, Omega @ Delta_Omega)
-        # Simplified implementation
-        return P # Placeholder for actual refinement logic
-
-class PoseDeformationNetwork(nn.Module):
-    def __init__(self):
-        super().__init__()
-        # 3D Conv layers to map Z to blend weights
-        self.conv_layers = nn.Sequential(
-            nn.Conv3d(1, 16, 3, padding=1),
+        # Deformation network components (simplified structure)
+        # In practice, Z is mapped to weights via 3D Conv layers
+        self.Z = nn.Parameter(torch.zeros(1, 1, 1, 1)) # Embedding
+        self.deform_conv = nn.Conv3d(1, num_bones, kernel_size=1) # Maps Z to blend weights
+        self.radiance_field = nn.Sequential(
+            nn.Linear(channel_dim * 2 + 30 + 10 + 12 + 10, 256), # 2*6(v) + 30(x) + 10(d) + 10(t) approx
             nn.ReLU(),
-            nn.Conv3d(16, 1, 3, padding=1),
+            nn.Linear(256, 4) # sigma, r, g, b
         )
         
-    def forward(self, x_o, P_c, Z):
-        # Z is embedding, mapped to volume via convs
-        # w^i = interp(conv(Z))
-        # T_skel(x, P_c) = sum(w^i(x) * (R_c^i x + T_c^i))
-        # Simplified: returns deformed coordinates
-        return x_o # Placeholder for actual deformation logic
-
-class RadianceField(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(6 * 2 * 2 + 3 * 2 * 10 + 3 * 2 * 4 + 2, 128), # Approx dim
-            nn.ReLU(),
-            nn.Linear(128, 4) # c (3) + sigma (1)
-        )
+        # Hyperparameters
+        self.freq_v = 2
+        self.freq_x = 10
+        self.freq_d = 4
         
-    def forward(self, v_enc, x_enc, d_enc, t_enc):
-        concat = torch.cat([v_enc, x_enc, d_enc, t_enc], dim=-1)
-        out = self.mlp(concat)
-        c = out[:, :3]
-        sigma = out[:, 3:]
-        return c, sigma
+    def positional_encoding(self, x, freq_bands):
+        """Standard positional encoding."""
+        # x shape: [..., D]
+        # Output: [..., D * 2 * freq_bands]
+        x = x.unsqueeze(-1)
+        scales = 2.0 ** torch.arange(freq_bands).to(x.device)
+        pe = torch.cat([torch.sin(x * scales * torch.pi), torch.cos(x * scales * torch.pi)], dim=-1)
+        return pe.view(*x.shape[:-1], -1)
+
+    def deform_coordinates(self, x_o, P_c, Z):
+        """
+        Deform observation coordinates to canonical space.
+        x_o: [B, N, 3]
+        P_c: Pose parameters (J, Omega)
+        Z: Embedding
+        Returns: x_c [B, N, 3]
+        """
+        # 1. Get blend weights from Z
+        # Z is typically a small tensor, expanded and convolved to match spatial resolution or bone count
+        # Simplified: Assume Z generates weights w^i for each bone i
+        # In GNeuVox, Z is mapped via 3D conv layers to volume, then interpolated.
+        # For implementation, we assume a function get_blend_weights(Z, x_o) exists.
+        # Here we simulate the weighted sum of rigid transforms.
+        
+        # Rigid transforms R_c^i, T_c^i are derived from P_c
+        # w^i(x) is obtained from Z via 3D Conv + Trilinear Interp
+        # This step is complex; we assume a helper `compute_deformation` handles the SMPL-like deformation
+        x_c = compute_deformation(x_o, P_c, Z) 
+        return x_c
+
+    def forward(self, x_o, d, t, P_c, Z):
+        """
+        Forward pass for a batch of rays.
+        x_o: [B, N, 3] Observation coordinates
+        d: [B, N, 3] Ray directions
+        t: [B, N, 1] Timestamps
+        P_c: Corrected pose
+        Z: Subject embedding
+        """
+        # 1. Deform to canonical space
+        x_c = self.deform_coordinates(x_o, P_c, Z)
+        
+        # 2. Interpolate Voxel Features
+        # Trilinear interpolation on V_g and V_i
+        # Normalize x_c to [-1, 1] for grid sampling
+        x_c_norm = (x_c / (160/2)) - 1 # Assuming grid size 160 and centered
+        x_c_norm = x_c_norm.unsqueeze(1) # [B, 1, N, 3]
+        
+        v_g = F.grid_sample(self.V_g.permute(0, 3, 1, 2).unsqueeze(0), x_c_norm, 
+                            mode='bilinear', padding_mode='zeros').squeeze(-1).squeeze(1) # [B, N, Cv]
+        # Note: grid_sample expects [N, C, H, W] or [N, C, D, H, W]. 
+        # Correct 3D grid sample:
+        # V_g shape: [1, Cv, Nx, Ny, Nz]
+        # x_c_norm shape: [B, N, 1, 1, 3] -> needs to be [B, N, 1, 1, 3] for grid_sample in PyTorch 3D
+        # Simplified logic for clarity:
+        v_g = trilinear_interpolate(x_c, self.V_g)
+        v_i = trilinear_interpolate(x_c, self.V_i)
+        
+        # 3. Concatenate and Encode
+        v_cat = torch.cat([v_g, v_i], dim=-1) # [B, N, 2*Cv]
+        
+        pe_v = self.positional_encoding(v_cat, self.freq_v)
+        pe_x = self.positional_encoding(x_o, self.freq_x)
+        pe_d = self.positional_encoding(d, self.freq_d)
+        pe_t = self.positional_encoding(t, 1) # Simple encoding for time
+        
+        input_features = torch.cat([pe_v, pe_x, pe_d, pe_t], dim=-1)
+        
+        # 4. Radiance Field
+        # Output: sigma, color
+        out = self.radiance_field(input_features)
+        sigma = torch.sigmoid(out[..., 0]) # Ensure positive density
+        color = torch.sigmoid(out[..., 1:]) # RGB
+        
+        return sigma, color
+
+    def render(self, rays, P_c, Z):
+        """
+        rays: [B, N, 6] (ox, oy, oz, dx, dy, dz, t)
+        """
+        x_o = rays[..., :3]
+        d = rays[..., 3:6]
+        t = rays[..., 6:7]
+        
+        sigma, color = self.forward(x_o, d, t, P_c, Z)
+        
+        # Volume Rendering
+        # delta_i is distance between samples. Assume uniform or given.
+        # Simplified: assume uniform delta
+        delta = 0.01 # Placeholder for actual ray step size
+        alpha = 1.0 - torch.exp(-sigma * delta)
+        
+        # Transmittance
+        T = torch.cumprod(torch.cat([torch.ones_like(alpha[..., :1]), 1.0 - alpha[..., :-1]], dim=-1), dim=-1)
+        
+        # Accumulate color
+        weights = T * alpha
+        C_hat = torch.sum(weights.unsqueeze(-1) * color, dim=-2)
+        
+        return C_hat
 ```
 
+**Parameters:**
+*   **Voxel Resolution:** $160^3$ for both $V_g$ and $V_i$ [S1, unofficial].
+*   **Channel Depth ($C_v$):** 6 [S1, unofficial].
+*   **Positional Encoding Frequencies:** $L=2$ for voxel features, $L=10$ for coordinates, $L=4$ for direction [S1, unofficial].
+*   **Ray Sampling:** 128 points per ray [S1, unofficial].
+*   **Optimizer:** Adam ($\beta_1=0.9, \beta_2=0.99$) [S1, unofficial].
+*   **Learning Rates:** $5 \times 10^{-5}$ for most params, $2 \times 10^{-2}$ for voxel grids, $5 \times 10^{-4}$ for radiance field [S1, unofficial].
+*   **LR Decay:** Factor 0.1 every 500k iterations [S1, unofficial].
+*   **Loss Weights:** $\lambda_M=0.2, \lambda_L=1$ (pretrain/scratch); $\lambda_M=10, \lambda_L=0$ (fine-tune first 300 iters); $\lambda_M=0.2, \lambda_L=1$ (fine-tune remaining) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Training Collapse:** Training from scratch can lead to high variance or collapse. Pretrained general voxels provide necessary priors to stabilize fitting [S1, unofficial].
+*   **Face Distortion:** Due to limited fine-tuning iterations ($\le 3k$) and reliance on SMPL priors, complex non-rigid facial deformations may appear vague or distorted [S1, unofficial].
+
+## Subtopics
+
+### Pretraining Strategy
+Train $V_g$, $\mathbf{F}_d$, and $\Phi_r$ on multiple subjects (e.g., 7 from ZJU-MoCap or Human3.6M). $V_i$ and $Z$ are zero-initialized or unused. This builds a "template" of human geometry [S1, unofficial].
+
+### Fine-tuning Strategy
+For a new subject, initialize $V_i$ and $Z$ to zero. Load pretrained $V_g$ and $\Phi_r$. Optimize $V_i$ (and optionally $\mathbf{F}_d$) for a short duration (1k-3k iterations). This captures differential textures and unique body shapes [S1, unofficial].
+
 ## Operating characteristics
-*   **Time Complexity:** Pretraining takes ~50k iterations (15-50 minutes depending on dataset). Fine-tuning takes 1k-3k iterations (5-15 minutes) [S1, unofficial]. Training from scratch takes 10k iterations (50 minutes) [S1, unofficial]. This is significantly faster than HumanNeRF (288 hours) and Neural Body (14 hours) [S1, unofficial].
-*   **Memory Complexity:** Uses explicit voxel grids of size $160^3 \times 6$ channels for both general and individual voxels. This is more memory-intensive than implicit MLPs but allows for faster optimization [S1, unofficial].
-*   **Performance:** On ZJU-MoCap Subject 377, GNeuVox-ZJU achieves PSNR 29.93 in 5 minutes [S1, unofficial]. On PeopleSnapshot, GNeuVox-ZJU achieves PSNR 27.73 and GNeuVox-H36m achieves PSNR 27.94 in 5 minutes [S1, unofficial].
-*   **Strengths:** Extremely fast training time; generalization across subjects; explicit representation allows for stable optimization [S1, unofficial].
-*   **Limitations:** Face rendering can be vague or distorted due to limited fine-tuning iterations and reliance on SMPL priors [S1, unofficial]. Training from scratch can lead to collapse or high variance [S1, unofficial].
+*   **Time Complexity:** Significantly faster than implicit NeRFs. Pretraining takes 15-50 minutes. Fine-tuning takes 5-15 minutes (1k-3k iterations) [S1, unofficial].
+*   **Memory Complexity:** Dominated by the voxel grids. $2 \times 160^3 \times 6 \times 4$ bytes $\approx 18.4$ MB for voxels, plus network weights. Much lower than dense MLP storage for high-res scenes.
+*   **Performance:** On ZJU-MoCap, GNeuVox-ZJU achieves PSNR 29.93 in 5 mins, comparable to HumanNeRF (30.41 PSNR, 288 hours) [S1, unofficial]. On PeopleSnapshot, it achieves ~27.7-27.9 PSNR in 5 mins, vs Neural Body (24.47 PSNR, 14 hours) [S1, unofficial].
+*   **Strengths:** Extremely fast training/inference adaptation; explicit representation allows for easier editing and generalization; stable convergence due to priors.
+*   **Limitations:** Lower fidelity on complex non-rigid details (face) compared to longer training methods; requires initial pose estimation (SMPL); resolution limited by voxel grid size [S1, unofficial].
 
 ## Background
-GNeuVox was introduced in the paper "Generalizable Neural Voxels for Fast Human Radiance Fields" [S1, unofficial]. It builds upon concepts from Anim-NeRF, Neural Body, and HumanNeRF [S1, unofficial]. The method addresses the high computational cost of NeRF-based human rendering by introducing explicit neural voxel grids and a generalization strategy using pretrained general voxels [S1, unofficial].
+GNeuVox was introduced in the paper "Generalizable Neural Voxels for Fast Human Radiance Fields" (2023) [S1, unofficial]. It builds upon concepts from Anim-NeRF, Neural Body, and HumanNeRF, replacing implicit MLPs with explicit neural voxel grids to accelerate optimization. The method leverages the commonality of human skeletal structures across individuals to enable generalization [S1, unofficial].
 
 ## Sources
 [S1] Generalizable Neural Voxels for Fast Human Radiance Fields, https://doi.org/10.48550/arxiv.2303.15387, fetched 2026-10-26 (unofficial)

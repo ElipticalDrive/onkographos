@@ -3,46 +3,46 @@
 Also called: Macrocell Acceleration, Macrocell Zero-Density Skipping, Macrocell rendering with zero-density skip, Ray marcher with macrocell, Skipping macrocells with zero density
 
 ## Overview
-Ray Marcher with Macrocell Empty Space Skipping is an acceleration technique that divides a volume into coarse macrocells, precomputes a boolean occupancy flag for each, and skips ray marching within macrocells that contain only zero-density data [S1][S3, unofficial]. It sets itself apart from sibling methods like [Empty Space Skipping with Orthogonal BSP Tree](1054-empty-space-skipping-with-orthogonal-bsp-tree.md) and [Empty Space Skipping with Octree](1610-empty-space-skipping-with-octree.md) by using a fixed, uniform grid hierarchy rather than a dynamic tree structure, and from [Spatial Skipping (Occupancy Grid)](1614-spatial-skipping-occupancy-grid.md) by operating on precomputed boolean flags derived from transfer-function-dependent densities rather than simple binary occupancy [S3, unofficial].
+Ray Marcher with Macrocell Empty Space Skipping is an acceleration technique that divides a volume into coarse macrocells, precomputes a boolean occupancy flag for each, and skips ray marching within macrocells that contain only zero-density data [S1][S2, unofficial]. It sets itself apart from sibling methods like [Empty Space Skipping with Orthogonal BSP Tree](1054-empty-space-skipping-with-orthogonal-bsp-tree.md) and [Empty Space Skipping with Octree](1610-empty-space-skipping-with-octree.md) by using a fixed, uniform grid hierarchy rather than a dynamic tree structure, and from [Spatial Skipping (Occupancy Grid)](1614-spatial-skipping-occupancy-grid.md) by operating on precomputed boolean flags derived from transfer-function-dependent densities rather than simple binary occupancy [S2, unofficial].
 
 ## How it works
 **Inputs:**
-- Volume dataset (voxel grid or tetrahedral mesh).
-- Transfer function (TF) mapping density to opacity/color.
-- Ray origin and direction for each pixel.
-- Macrocell size $M$ (number of voxels/elements per side).
+- Volume dataset (voxel grid or tetrahedral mesh) [G].
+- Transfer function (TF) mapping density to opacity/color [G].
+- Ray origin and direction for each pixel [G].
+- Macrocell size $M$ (number of voxels/elements per side) [S1].
 
 **Outputs:**
-- Rendered image.
-- Boolean occupancy grid for macrocells.
+- Rendered image [G].
+- Boolean occupancy grid for macrocells [S1][S2, unofficial].
 
 **Data Structures:**
-1. **Volume Data:** The underlying voxel or element data.
-2. **Macrocell Boolean Grid:** A 3D array of booleans (or bits) where each entry corresponds to a macrocell.
-   - `MacrocellGrid[i][j][k] = true` if the macrocell contains at least one non-zero density element (according to the current TF).
-   - `MacrocellGrid[i][j][k] = false` if all elements in the macrocell have zero density.
+1. **Volume Data:** The underlying voxel or element data [G].
+2. **Macrocell Boolean Grid:** A 3D array of booleans (or bits) where each entry corresponds to a macrocell [S2, unofficial].
+   - `MacrocellGrid[i][j][k] = true` if the macrocell contains at least one non-zero density element (according to the current TF) [S2, unofficial].
+   - `MacrocellGrid[i][j][k] = false` if all elements in the macrocell have zero density [S2, unofficial].
 3. **Distance Field (Optional, specific to fiber surfaces):** A precomputed distance field used to update macrocell booleans when control polygons change [S1].
 
 **Preprocessing Steps:**
 1. Divide the volume domain into a 3D grid of macrocells, each of size $M \times M \times M$ [S1].
-2. For each macrocell, determine if it contains any non-zero density elements based on the current transfer function [S3, unofficial].
+2. For each macrocell, determine if it contains any non-zero density elements based on the current transfer function [S2, unofficial].
 3. Set the boolean flag for each macrocell:
-   - If all elements in the macrocell have zero density, set flag to `false` (empty).
-   - Otherwise, set flag to `true` (occupied) [S3, unofficial].
+   - If all elements in the macrocell have zero density, set flag to `false` (empty) [S2, unofficial].
+   - Otherwise, set flag to `true` (occupied) [S2, unofficial].
 4. (Optional) If using fiber surfaces, maintain a distance field and update macrocell booleans when control polygons are modified [S1].
 
 **Rendering Steps (Ray Marching):**
-1. For each pixel, cast a ray.
+1. For each pixel, cast a ray [G].
 2. Use a 3D Digital Differential Analyzer (3DDDA) to traverse the macrocell grid [S1].
 3. For each macrocell visited by the ray:
    a. Fetch the precomputed boolean value for the current macrocell [S1].
    b. If the boolean value is `false` (empty):
-      - Skip all ray marching steps within this macrocell.
-      - Advance the ray to the exit boundary of the macrocell [S3, unofficial].
+      - Skip all ray marching steps within this macrocell [S2, unofficial].
+      - Advance the ray to the next macrocell boundary using 3DDDA logic [G].
    c. If the boolean value is `true` (occupied):
       - Perform standard ray marching within the macrocell, sampling the volume data [S1].
-      - Accumulate color and opacity according to the volume rendering integral [S3, unofficial].
-4. Composite the accumulated color and opacity into the final pixel value [S3, unofficial].
+      - Accumulate color and opacity according to the volume rendering integral [G].
+4. Composite the accumulated color and opacity into the final pixel value [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -53,7 +53,7 @@ def ray_march_with_macrocell(ray_origin, ray_direction, volume_data, macrocell_g
     Ray marcher with macrocell empty space skipping.
     
     Args:
-        ray_origin: (x, y, z) ray origin.
+        ray_origin: (x, y, z) ray origin in voxel coordinates.
         ray_direction: (dx, dy, dz) normalized ray direction.
         volume_data: 3D array of voxel densities.
         macrocell_grid: 3D array of booleans indicating occupied macrocells.
@@ -64,160 +64,140 @@ def ray_march_with_macrocell(ray_origin, ray_direction, volume_data, macrocell_g
         color: (r, g, b) final pixel color.
         opacity: float final pixel opacity.
     """
-    # Initialize accumulation
-    accumulated_color = (0.0, 0.0, 0.0)
+    accumulated_color = [0.0, 0.0, 0.0]
     accumulated_opacity = 0.0
     transmittance = 1.0
-    
-    # Ray parameters
     t_min = 0.0
-    t_max = length(ray_origin) # Or scene bounding box limit
-    
-    # 3DDDA traversal of macrocell grid
-    # Calculate initial macrocell coordinates
-    current_macrocell_x = floor(ray_origin.x / macrocell_size)
-    current_macrocell_y = floor(ray_origin.y / macrocell_size)
-    current_macrocell_z = floor(ray_origin.z / macrocell_size)
-    
-    # Calculate step sizes in macrocell space
-    step_x = 1 if ray_direction.x > 0 else -1
-    step_y = 1 if ray_direction.y > 0 else -1
-    step_z = 1 if ray_direction.z > 0 else -1
-    
-    # Calculate t-values for crossing macrocell boundaries
-    # Note: This is a simplified 3DDDA for macrocells. 
-    # In practice, one might use a standard 3DDDA for voxels but skip based on macrocell flags.
-    # Here we assume traversal at macrocell level for skipping.
-    
-    t_delta_x = macrocell_size / abs(ray_direction.x) if ray_direction.x != 0 else infinity
-    t_delta_y = macrocell_size / abs(ray_direction.y) if ray_direction.y != 0 else infinity
-    t_delta_z = macrocell_size / abs(ray_direction.z) if ray_direction.z != 0 else infinity
-    
-    t_max_x = (current_macrocell_x + (1 if step_x > 0 else 0)) * macrocell_size - ray_origin.x
-    t_max_y = (current_macrocell_y + (1 if step_y > 0 else 0)) * macrocell_size - ray_origin.y
-    t_max_z = (current_macrocell_z + (1 if step_z > 0 else 0)) * macrocell_size - ray_origin.z
-    
-    t_max_x = t_max_x / ray_direction.x if ray_direction.x != 0 else infinity
-    t_max_y = t_max_y / ray_direction.y if ray_direction.y != 0 else infinity
-    t_max_z = t_max_z / ray_direction.z if ray_direction.z != 0 else infinity
-    
-    # Traverse macrocells
+    t_max = 1000.0 # Scene bounding limit [G]
+
+    # 3DDDA initialization for macrocell grid
+    current_mc_x = int(ray_origin[0] // macrocell_size)
+    current_mc_y = int(ray_origin[1] // macrocell_size)
+    current_mc_z = int(ray_origin[2] // macrocell_size)
+
+    step_x = 1 if ray_direction[0] > 0 else -1
+    step_y = 1 if ray_direction[1] > 0 else -1
+    step_z = 1 if ray_direction[2] > 0 else -1
+
+    # Distance to next macrocell boundary in t-space
+    next_x = (current_mc_x + (1 if step_x > 0 else 0)) * macrocell_size
+    next_y = (current_mc_y + (1 if step_y > 0 else 0)) * macrocell_size
+    next_z = (current_mc_z + (1 if step_z > 0 else 0)) * macrocell_size
+
+    t_max_x = (next_x - ray_origin[0]) / ray_direction[0] if ray_direction[0] != 0 else float('inf')
+    t_max_y = (next_y - ray_origin[1]) / ray_direction[1] if ray_direction[1] != 0 else float('inf')
+    t_max_z = (next_z - ray_origin[2]) / ray_direction[2] if ray_direction[2] != 0 else float('inf')
+
+    t_delta_x = macrocell_size / abs(ray_direction[0]) if ray_direction[0] != 0 else float('inf')
+    t_delta_y = macrocell_size / abs(ray_direction[1]) if ray_direction[1] != 0 else float('inf')
+    t_delta_z = macrocell_size / abs(ray_direction[2]) if ray_direction[2] != 0 else float('inf')
+
     while t_min < t_max:
-        # Determine next macrocell boundary to cross
+        # Find closest boundary
         if t_max_x < t_max_y:
             if t_max_x < t_max_z:
-                next_boundary = t_max_x
-                current_macrocell_x += step_x
+                t_exit = t_max_x
+                current_mc_x += step_x
                 t_max_x += t_delta_x
             else:
-                next_boundary = t_max_z
-                current_macrocell_z += step_z
+                t_exit = t_max_z
+                current_mc_z += step_z
                 t_max_z += t_delta_z
         else:
             if t_max_y < t_max_z:
-                next_boundary = t_max_y
-                current_macrocell_y += step_y
+                t_exit = t_max_y
+                current_mc_y += step_y
                 t_max_y += t_delta_y
             else:
-                next_boundary = t_max_z
-                current_macrocell_z += step_z
+                t_exit = t_max_z
+                current_mc_z += step_z
                 t_max_z += t_delta_z
-        
-        # Check if current macrocell is empty
-        # Note: Bounds checking for macrocell_grid should be performed here [G]
-        if not macrocell_grid[current_macrocell_x][current_macrocell_y][current_macrocell_z]:
-            # Skip this macrocell
-            t_min = next_boundary
-        else:
-            # March within this macrocell
-            # Calculate entry and exit t for this macrocell
-            t_entry = t_min
-            t_exit = next_boundary
-            
-            # Perform ray marching within the macrocell
-            # Step size should be small enough to capture details [G]
-            step_size = 1.0 # In voxel units, or normalized t
-            t_current = t_entry
-            
-            while t_current < t_exit:
-                # Calculate voxel position
-                voxel_pos = ray_origin + ray_direction * t_current
-                voxel_coords = (voxel_pos.x, voxel_pos.y, voxel_pos.z)
-                
-                # Sample density
-                density = sample_volume(volume_data, voxel_coords)
-                
-                # Apply transfer function
-                opacity = transfer_function(density)
-                
-                # Volume rendering accumulation
-                color_contribution = density * opacity # Simplified
-                accumulated_color += color_contribution * transmittance
-                accumulated_opacity += opacity * transmittance
-                transmittance *= (1.0 - opacity)
-                
-                t_current += step_size
-                
-                if transmittance < 1e-4: # Early termination if fully opaque
-                    break
-            
+
+        # Bounds check for macrocell grid [G]
+        if not macrocell_grid[current_mc_x][current_mc_y][current_mc_z]:
             t_min = t_exit
-            
+            continue
+
+        # March within occupied macrocell
+        t_current = t_min
+        step_size = 1.0 # Voxel step [G]
+        while t_current < t_exit:
+            voxel_pos = [ray_origin[i] + ray_direction[i] * t_current for i in range(3)]
+            voxel_coords = (int(voxel_pos[0]), int(voxel_pos[1]), int(voxel_pos[2]))
+            density = sample_volume(volume_data, voxel_coords)
+            opacity = transfer_function(density)
+            color_contribution = density * opacity # Simplified [G]
+            accumulated_color[0] += color_contribution * transmittance
+            accumulated_color[1] += color_contribution * transmittance
+            accumulated_color[2] += color_contribution * transmittance
+            accumulated_opacity += opacity * transmittance
+            transmittance *= (1.0 - opacity)
+            t_current += step_size
+            if transmittance < 1e-4:
+                break
+        t_min = t_exit
         if transmittance < 1e-4:
             break
-            
+
     return accumulated_color, accumulated_opacity
+
+def sample_volume(grid, coords):
+    # Clamp to bounds and return density, 0 if out of bounds [G]
+    x, y, z = coords
+    if 0 <= x < grid.shape[0] and 0 <= y < grid.shape[1] and 0 <= z < grid.shape[2]:
+        return grid[x, y, z]
+    return 0.0
 ```
 
 **Parameters:**
-- **Voxels per macrocell ($M$):** 23 is recommended for best performance [S1]. Other tested values include 13, 43, and 83 [S1]. Larger data sets do not suffer high penalties from 43 or 83 macrocells [S1]. Smoother data with more empty space can achieve good performance with coarser macrocells [S1].
+- **Voxels per macrocell ($M$):** 23 voxels per macrocell generally give the best rendering performance, but 43 is recommended for the best overall interactive rate [S1]. Other tested values include 13, 43, and 83 [S1]. Larger data sets do not suffer high penalties from 43 or 83 macrocells [S1]. Smoother data with more empty space can achieve good performance with coarser macrocells [S1].
 
 **Edge Cases and Pitfalls:**
-- **Low Skip Rate:** If the number of skipped macrocells is small relative to the total, performance degrades due to the overhead of memory access and condition checks per macrocell [S3, unofficial]. This is observed in the Engine dataset where only 12 macrocells have zero density [S3, unofficial].
-- **Transfer Function Dependency:** Performance gains depend heavily on the transfer function, as macrocell values are computed from TF densities [S3, unofficial]. If the TF results in few zero-density macrocells, the overhead may dominate [S3, unofficial].
-- **Agulhas Dataset Anomaly:** On the Agulhas dataset, despite a large number of skipped cells (1,395,619), performance was worse with macrocell skipping for the ray marcher due to extra memory access and condition checks per coarse element [S3, unofficial].
+- **Low Skip Rate:** If the number of skipped macrocells is small relative to the total, performance degrades due to the overhead of memory access and condition checks per macrocell [S2, unofficial]. This is observed in the Engine dataset where only 12 macrocells have zero density [S2, unofficial].
+- **Transfer Function Dependency:** Performance gains depend heavily on the transfer function, as macrocell values are computed from TF densities [S2, unofficial]. If the TF results in few zero-density macrocells, the overhead may dominate [S2, unofficial].
+- **Agulhas Dataset Anomaly:** On the Agulhas dataset, despite a large number of skipped cells (1,395,619), performance was worse with macrocell skipping for the ray marcher due to extra memory access and condition checks per coarse element [S2, unofficial].
 
 ## Subtopics
 
-### [Macro-Cell Trimming](1023-macro-cell-trimming.md)
-Macro-cell trimming is an optimization that reduces the number of local rays by trimming each macro-cell to the smallest cuboid containing its portions of the iso-surfaces, rather than projecting the entire macro-cell. It sets itself apart from sibling methods like [Triangulated Active Brick Boundary Mesh for Space Skipping](1426-triangulated-active-brick-boundary-mesh-for-space-skipping.md) by operating on axis-aligned bounding boxes derived from cell occupancy rather than explicit mesh geometry, and from [Adaptive Ray Marching with Macrocell DDA](1500-adaptive-ray-marching-with-macrocell-dda.md) by focusing on pre-projection culling of the pixel footprint rather than adaptive step sizing during traversal.
+### Macro-Cell Trimming [1023-macro-cell-trimming.md]
+Macro-cell trimming is an optimization that reduces the number of local rays by trimming each macro-cell to the smallest cuboid containing its portions of the iso-surfaces, rather than projecting the entire macro-cell [S1]. It operates on axis-aligned bounding boxes derived from cell occupancy rather than explicit mesh geometry, and focuses on pre-projection culling of the pixel footprint rather than adaptive step sizing during traversal [G].
 
-### [Triangulated Active Brick Boundary Mesh for Space Skipping](1426-triangulated-active-brick-boundary-mesh-for-space-skipping.md)
-A GPU-accelerated space-skipping technique for structured volumes that replaces clustered proxy boxes with a triangle mesh bounding the surface between active and inactive macrocells. It solves the host-GPU transfer bottleneck and high depth complexity of prior proxy-box methods by generating the boundary geometry entirely on the GPU and using native RTX hardware for ray-triangle intersection.
+### Triangulated Active Brick Boundary Mesh for Space Skipping [1426-triangulated-active-brick-boundary-mesh-for-space-skipping.md]
+A GPU-accelerated space-skipping technique for structured volume rendering that replaces clustered proxy boxes with a triangle mesh bounding the surface between active and inactive macrocells. It differs from [Macro-Cell Trimming](1023-macro-cell-trimming.md) and [Adaptive Ray Marching with Macrocell DDA](1500-adaptive-ray-marching-with-macrocell-dda.md) by generating a boundary mesh entirely on the GPU, avoiding host-to-device transfers and user-defined intersection programs, and leveraging native hardware-accelerated triangle intersection to reduce depth complexity and warp divergence.
 
-### [Adaptive Ray Marching with Macrocell DDA](1500-adaptive-ray-marching-with-macrocell-dda.md)
-Adaptive Ray Marching with Macrocell DDA is a ray marching technique that traverses a volumetric grid using a 3D Digital Differential Analyzer (DDA) over macrocells, adapting the sampling step size based on opacity upper bounds to skip empty or low-opacity regions. It differs from its parent [Ray Marcher with Macrocell Empty Space Skipping](1009-ray-marcher-with-macrocell-empty-space-skipping.md) by dynamically adjusting the step size within occupied macrocells rather than only skipping entirely empty ones, and from its sibling [Triangulated Active Brick Boundary Mesh for Space Skipping](1426-triangulated-active-brick-boundary-mesh-for-space-skipping.md) by relying on a uniform grid structure with DDA traversal rather than explicit boundary meshes.
+### Adaptive Ray Marching with Macrocell DDA [1500-adaptive-ray-marching-with-macrocell-dda.md]
+Adaptive Ray Marching with Macrocell DDA is an empty-space skipping technique that accelerates volume rendering by dividing the volume into a coarse grid of bricks (macrocells) and traversing them using a 3D Digital Differential Analyzer (3DDDA) [S1]. It solves the problem of excessive sampling in sparse volumes by skipping entire bricks if their opacity upper bound is zero, and adaptively adjusting the sampling step size within non-empty bricks based on local density estimates [S1][S2, unofficial]. It differs from its sibling [Macro-Cell Trimming](1023-macro-cell-trimming.md) by using a fixed uniform grid with min-max bounds rather than trimming inactive cells, and from [Triangulated Active Brick Boundary Mesh for Space Skipping](1426-triangulated-active-brick-boundary-mesh-for-space-skipping.md) by using a structured grid traversal instead of a boundary mesh [S1].
 
 ## Operating characteristics
 **Time and Memory Complexity:**
 - Preprocessing time is linear with the total number of voxels [S1].
-- Rendering time is reduced by the fraction of skipped macrocells [S3, unofficial].
-- Memory overhead includes the boolean grid for macrocells [S3, unofficial].
+- Rendering time scales with the number of non-skipped macrocells, but gains depend on the transfer function and skip fraction [S2, unofficial].
+- Memory overhead includes the boolean grid for macrocells and distance fields [S1].
 
 **Measured Performance:**
 - Performance without macrocells is 4x-8x slower than with 23-voxel macrocells [S1].
-- On the MRI dataset, increasing skipped macrocells from 0 to 1,190 reduces rendering time from 44.83 ms to 26.05 ms [S3, unofficial].
-- On the Heptane dataset, macrocell skipping improves time from 51.92 ms to 46.3 ms [S3, unofficial].
-- On the Advection dataset, macrocell skipping improves time from 58.14 ms to 46.29 ms [S3, unofficial].
-- On the Engine dataset, macrocell skipping worsens performance due to low skip rate (12 cells) [S3, unofficial].
-- On the Agulhas dataset, macrocell skipping worsens performance for the ray marcher despite high skip count, due to overhead [S3, unofficial].
+- On the MRI dataset, increasing skipped macrocells from 0 to 1,190 reduces rendering time from 44.83 ms to 26.05 ms [S2, unofficial].
+- On the Heptane dataset, macrocell skipping improves time from 51.92 ms to 46.3 ms [S2, unofficial].
+- On the Advection dataset, macrocell skipping improves time from 58.14 ms to 46.29 ms [S2, unofficial].
+- On the Engine dataset, macrocell skipping worsens performance due to low skip rate (12 cells) [S2, unofficial].
+- On the Agulhas dataset, macrocell skipping worsens performance for the ray marcher despite high skip count, due to overhead [S2, unofficial].
 
 **Strengths and Limitations:**
 - **Strengths:** Simple implementation, effective for volumes with large empty regions, interactive performance on mobile GPUs [S1].
-- **Limitations:** Overhead can negate benefits if skip rate is low, performance is transfer-function dependent [S3, unofficial].
+- **Limitations:** Overhead can negate benefits if skip rate is low, performance is transfer-function dependent [S2, unofficial].
 
 **When to Use:**
-- Use when the volume has significant empty space and the transfer function results in many zero-density macrocells [S3, unofficial].
+- Use when the volume has significant empty space and the transfer function results in many zero-density macrocells [S2, unofficial].
 - Use when interactivity is required and the dataset is large [S1].
 
 **When Not to Use:**
-- Do not use if the volume is dense with few empty regions (e.g., Engine dataset) [S3, unofficial].
-- Do not use if the overhead of checking macrocell flags dominates the cost of marching (e.g., Agulhas dataset for ray marcher) [S3, unofficial].
+- Do not use if the volume is dense with few empty regions (e.g., Engine dataset) [S2, unofficial].
+- Do not use if the overhead of checking macrocell flags dominates the cost of marching (e.g., Agulhas dataset for ray marcher) [S2, unofficial].
 
 ## Background
-Originating from work on fiber surface volume ray casting, this method was introduced to accelerate interactive exploration of fiber surfaces [S1]. It was further analyzed in the context of tree-based tetrahedral adaptive mesh refinement data [S3, unofficial]. The technique leverages the spatial coherence of empty regions in volumes to reduce the number of ray marching steps [S1][S3, unofficial].
+Originating from work on fiber surface volume ray casting, this method was introduced to accelerate interactive exploration of fiber surfaces [S1]. It was further analyzed in the context of tree-based tetrahedral adaptive mesh refinement data [S2, unofficial]. The technique leverages the spatial coherence of empty regions in volumes to reduce the number of ray marching steps [S1][S2, unofficial].
 
 ## Sources
 [S1] Direct Multifield Volume Ray Casting of Fiber Surfaces, https://doi.org/10.1109/tvcg.2016.2599040, fetched 2026-10-26
-[S2] Optimizing Real-Time Neural Radiance Fields (NeRF) for Dynamic 3D Scene Rendering on Consumer GPUs, https://doi.org/10.5281/zenodo.21889839, fetched 2026-10-26 (unofficial)
-[S3] Direct volume rendering of tree-based tetrahedral adaptive mesh refinement data, https://repository.bilkent.edu.tr/items/fcbc592a-2646-49af-8b84-67308b6fd3e9, fetched 2026-10-27 (unofficial)
+[S2] Direct volume rendering of tree-based tetrahedral adaptive mesh refinement data, https://repository.bilkent.edu.tr/items/fcbc592a-2646-49af-8b84-67308b6fd3e9, fetched 2026-10-27 (unofficial)
+[S3] Optimizing Real-Time Neural Radiance Fields (NeRF) for Dynamic 3D Scene Rendering on Consumer GPUs, https://doi.org/10.5281/zenodo.21889839, fetched 2026-10-26 (unofficial)

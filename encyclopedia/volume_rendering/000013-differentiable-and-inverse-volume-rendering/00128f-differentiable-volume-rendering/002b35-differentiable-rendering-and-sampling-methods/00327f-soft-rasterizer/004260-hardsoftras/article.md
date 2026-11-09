@@ -1,0 +1,312 @@
+# HardSoftRas
+
+Also called: Hard Soft Rasterization, Hardware Accelerated Soft Rasterizer
+
+## Overview
+HardSoftRas is a hardware-accelerated differentiable rasterization method that propagates gradients from screen space to far-range vertex attributes by combining hard face rasterization with soft face expansion [S1]. It solves the problem of pseudo-occlusion artifacts and sparse, discontinuous gradients common in prior soft rasterizers (like SoftRas) and geometric anti-aliasing methods (like Nvdiffrast) when using a small number of depth peeling buffers [S1]. Unlike its siblings, it uses a hybrid hard/soft depth test and uniform edge pixel blending to ensure dense, smooth gradients for inverse rendering [S1].
+
+## How it works
+HardSoftRas rasterizes geometry through $K$ peeling planes, using a hybrid hard/soft depth test to handle silhouette edges, and blends the resulting shaded images using weights derived from edge distances [S1]. The rendering function is defined as [S1]:
+
+$$
+I(\Theta) = f_{pp}(f_{shade}(f_{rasterize}(\theta_G, \theta_C), \theta_M, \theta_L, \theta_E))
+$$
+
+where $I(\Theta)$ is the rendered image, and $\theta_G, \theta_C, \theta_M, \theta_L, \theta_E$ are geometric, camera, material, lighting, and environment parameters [S1].
+
+### Inputs and Outputs
+**Inputs:**
+*   Vertex positions ($vtx\_pos$), UVs ($vtx\_uv$), and face indices ($faces$).
+*   Model, view, and projection matrices ($model\_mat, view\_mat, prj\_mat$).
+*   Material properties (albedo, metallic, roughness, normal map) and environment map.
+*   Background color.
+*   Parameters: Blur radius $r \in [0, 1]$, number of buffers $K \ge 1$, blending parameter $\sigma = r/7$, silhouette edge width $\delta = r$ [S1].
+
+**Outputs:**
+*   Blended shaded image ($blended\_shaded\_img$).
+*   Blended silhouette image ($blended\_silhouette\_img$).
+*   Final image: $Vec4(blended\_shaded\_img, blended\_silhouette\_img)$ [S1].
+
+### Data Structures
+*   **Vertex Buffer:** Contains projected 3D positions. For enlarged triangles, original vertex indices are stored to allow attribute interpolation from the original geometry [S1].
+*   **G-Buffer:** Stores per-pixel attributes including depth, world position, world normal, and UVs for deferred shading [S1].
+*   **Stencil Masks:** Binary masks indicating which pixels belong to the hard face (inside original triangle) or soft face (enlarged region) for each peeling plane [S1].
+
+### Algorithm Steps
+
+1.  **Initialization:** Set `prev_prj_depth` to 0. Create empty lists for `shaded_imgs`, `stencils`, and `edge_dists` [S1].
+2.  **Depth Peeling Loop:** Iterate $k$ from 0 to $K-1$:
+    a.  **Enlarge:** For each face $f_j$, compute the enlarged face $f'_j$ using `Enlarge(f_j, r)` [S1].
+    b.  **Rasterize:** Perform hardware rasterization on $f'_j$ to generate pixels [S1].
+    c.  **Compute Distances:** For each pixel $i$ on $f'_j$, compute the signed distance $dist_{ij}$ from the original face $f_j$ using `SignedDist` [S1].
+    d.  **Interpolate Attributes:** Compute screen-space barycentric coordinates and interpolate projected positions, world positions, world normals, and UVs using the original vertex indices [S1].
+    e.  **Shift Depth:** Modify the depth value to prevent pseudo-occlusion using `Shift(depth^0_{ij}, dist_{ij})` [S1].
+    f.  **Set Fragment Depth:** Set the fragment depth to the modified depth [S1].
+    g.  **Peel Depth:** Call `PeelDepth(prj_depth, prev_prj_depth)` to generate the stencil mask for the current plane [S1].
+    h.  **Shade:** Apply deferred shading (e.g., physically-based shading) to generate the shaded image for this plane [S1].
+    i.  **Update:** Store the stencil, shaded image, and edge distance. Update `prev_prj_depth` to the current `prj_depth` [S1].
+3.  **Blend:** Call `BuildBlend` with `shaded_imgs`, `stencils`, `edge_dists`, background, $K$, $\sigma$, and $\delta$ to compute `blended_shaded_img` and `blended_silhouette_img` [S1].
+4.  **Edge Masking:**
+    a.  Compute `is_hard` as $(0.f < edge\_dists[0])$ [S1].
+    b.  Compute `hard_shaded` as `shaded_imgs[0] * is_hard` [S1].
+    c.  Compute `edge_mask` using `BuildEdgeMask(edge_dists[0], delta)` [S1].
+    d.  Mix `hard_shaded` and `blended_col` using `edge_mask` [S1].
+    e.  Mix `is_hard` and `blended_sil` using `edge_mask` [S1].
+5.  **Post-Processing:** Apply tone mapping to `blended_shaded_img` and construct the final image [S1].
+
+### Subroutines
+
+**Enlarge(f_j, r):**
+Expands the triangle $f_j$ by radius $r$ in screen space [S1].
+*   For acute triangles (smallest angle $\ge 30^\circ$), stretch vertices in the opposite direction of the centroid [S1].
+*   For obtuse triangles (smallest angle $< 30^\circ$), expand the bounding box to cover $r$ and split into pairs of triangles to avoid shaggy boundaries and precision errors [S1].
+*   Store original vertex indices [S1].
+
+**SignedDist(p_i, f_j):**
+Computes the signed distance from pixel position $p_i$ to the edges of the original face $f_j$ [S1]. Positive if inside, negative if outside [S1].
+
+**Shift(depth, dist):**
+Modifies the depth value of the soft face to prevent pseudo-occlusion [S1]. Ensures all hard faces are rasterized in front of all soft faces [S1].
+$$
+Shift(depth, dist) = 
+\begin{cases} 
+0.5 \times depth & \text{if } dist \ge 0 \\
+0.5 \times |dist| + 0.5 & \text{if } dist < 0 
+\end{cases}
+$$
+[ S1 ]
+
+**BuildBlend(shaded_imgs, stencils, edge_dists, background, K, sigma, delta):**
+Blends the shaded images from all peeling planes [S1].
+*   Compute weights: $weight_k = \frac{1}{1 + e^{dist_k / -\sigma}} \times stencil_k$ [S1].
+*   Compute color blend: $I_c = \frac{\sum_k weight_k C_k}{\sum_k weight_k}$ for edges, and $I_c = S_H C_1$ for non-edges [S1].
+*   Compute silhouette blend: $I_s = 1 - \prod_k (1 - weight_k)$ for edges, and $I_s = S_H$ for non-edges [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def HardSoftRas(vtx_pos, vtx_uv, faces, model_mat, view_mat, prj_mat, 
+                albedo, metallic, roughness, normal, background, 
+                K, r, sigma, delta):
+    """
+    HardSoftRas differentiable rasterization.
+    
+    Args:
+        vtx_pos: Vertex positions (N, 3)
+        vtx_uv: Vertex UVs (N, 2)
+        faces: Face indices (F, 3)
+        model_mat, view_mat, prj_mat: Transformation matrices
+        albedo, metallic, roughness, normal: Material attributes
+        background: Background color
+        K: Number of peeling buffers
+        r: Blur radius
+        sigma: Blending parameter (typically r/7)
+        delta: Silhouette edge width (typically r)
+        
+    Returns:
+        rendered_img: Final image (H, W, 4)
+    """
+    prev_prj_depth = 0.0
+    shaded_imgs = []
+    stencils = []
+    edge_dists = []
+    
+    # Precompute world positions and normals if not provided
+    # Note: In a full implementation, these are interpolated per-pixel
+    # Here we assume helper functions exist for matrix multiplication and interpolation
+    
+    for k in range(K):
+        # 1. Enlarge triangles
+        # Returns enlarged projected vertices and original vertex indices
+        large_prj_0, large_prj_1, large_prj_2, original_vtx_idxs = \
+            BuildEnlarge(vtx_pos, faces, r)
+        
+        # Stack enlarged vertices into a single buffer
+        large_prj_flat = Stack(large_prj_0, large_prj_1, large_prj_2)
+        
+        # 2. Rasterize enlarged triangles
+        # Returns screen-space vertex indices for each fragment
+        screen_vtx_idxs = Rasterize(large_prj_flat, original_vtx_idxs)
+        
+        # 3. Compute signed distances to original edges
+        edge_dist = BuildEdgeDistance(vtx_pos, faces, screen_vtx_idxs)
+        
+        # 4. Compute barycentric coordinates for original triangles
+        bary_coords = BuildBaryCoord(vtx_pos, faces, screen_vtx_idxs)
+        
+        # 5. Interpolate attributes using original vertex indices
+        # Interpolate projected positions for depth
+        prj_pos = Interpolate(vtx_pos, faces, screen_vtx_idxs, bary_coords)
+        # Interpolate world positions, normals, UVs for shading
+        world_pos = Interpolate(vtx_pos, faces, screen_vtx_idxs, bary_coords)
+        world_nor = Interpolate(normal, faces, screen_vtx_idxs, bary_coords)
+        uv = Interpolate(vtx_uv, faces, screen_vtx_idxs, bary_coords)
+        
+        # 6. Shift depth to handle pseudo-occlusion
+        prj_depth_w = GetW(prj_pos) # Extract w component
+        soft_depth = edge_dist * 0.5 + 0.5
+        hard_depth = prj_depth_w * 0.5
+        is_inside = (edge_dist > 0.0)
+        prj_depth = Mix(soft_depth, hard_depth, is_inside)
+        
+        # 7. Set fragment depth and peel
+        # Note: In a real GPU pipeline, this sets gl_FragDepth
+        # Here we simulate the stencil generation
+        stencil = PeelDepth(prj_depth, prev_prj_depth)
+        
+        # 8. Shade
+        # Deferred shading with PBR
+        shaded_img = PhysicallyBasedShading(world_pos, world_nor, uv, 
+                                            albedo, metallic, roughness)
+        
+        # Store results
+        shaded_imgs.append(shaded_img)
+        stencils.append(stencil)
+        edge_dists.append(edge_dist)
+        
+        # Update previous depth for next peeling plane
+        prev_prj_depth = prj_depth
+        
+    # 9. Blend
+    blended_shaded_img, blended_silhouette_img = BuildBlend(
+        shaded_imgs, stencils, edge_dists, background, K, sigma, delta
+    )
+    
+    # 10. Edge Masking
+    is_hard = (edge_dists[0] > 0.0)
+    hard_shaded = shaded_imgs[0] * is_hard
+    edge_mask = BuildEdgeMask(edge_dists[0], delta)
+    
+    blended_col = Mix(hard_shaded, blended_shaded_img, edge_mask)
+    blended_sil = Mix(is_hard, blended_silhouette_img, edge_mask)
+    
+    # 11. Post-processing
+    blended_shaded_img = ToneMap(blended_col)
+    
+    # Construct final image with silhouette as alpha
+    rendered_img = Vec4(blended_shaded_img, blended_sil)
+    
+    return rendered_img
+
+def BuildEnlarge(vtx_pos, faces, r):
+    """
+    Enlarge triangles by radius r.
+    Returns enlarged projected vertices and original vertex indices.
+    """
+    # Project vertices to screen space
+    # For each face, determine if acute or obtuse
+    # Acute: Stretch vertices opposite to centroid
+    # Obtuse (smallest angle < 30 deg): Expand bounding box
+    # Return new vertex positions and mapping to original indices
+    pass
+
+def BuildEdgeDistance(vtx_pos, faces, screen_vtx_idxs):
+    """
+    Compute signed distance from pixel to original triangle edges.
+    """
+    # Use barycentric coordinates or explicit edge distance formula
+    pass
+
+def BuildBaryCoord(vtx_pos, faces, screen_vtx_idxs):
+    """
+    Compute screen-space barycentric coordinates for original triangles.
+    """
+    pass
+
+def Interpolate(attr, faces, screen_vtx_idxs, bary_coords):
+    """
+    Interpolate attribute using barycentric coordinates and original vertex indices.
+    """
+    # attr: (N, D)
+    # faces: (F, 3)
+    # screen_vtx_idxs: (H, W, 3) indices into faces
+    # bary_coords: (H, W, 3)
+    pass
+
+def PeelDepth(prj_depth, prev_prj_depth):
+    """
+    Generate stencil mask for pixels that are in front of prev_prj_depth.
+    """
+    return (prj_depth < prev_prj_depth).float()
+
+def BuildBlend(shaded_imgs, stencils, edge_dists, background, K, sigma, delta):
+    """
+    Blend shaded images from all peeling planes.
+    """
+    weights = []
+    weighted_cols = []
+    
+    for k in range(K):
+        # Sigmoid weight based on edge distance
+        prob = 1.0 / (1.0 + Exp(edge_dists[k] / -sigma))
+        weight = prob * stencils[k]
+        weights.append(weight)
+        weighted_cols.append(weight * shaded_imgs[k])
+        
+    # Color blending
+    # Sum of weighted colors
+    sum_weighted_cols = Sum(weighted_cols, axis=0)
+    sum_weights = Sum(weights, axis=0)
+    
+    # Avoid division by zero
+    sum_weights = Max(sum_weights, 1e-6)
+    
+    blended_color = sum_weighted_cols / sum_weights
+    
+    # Silhouette blending
+    blended_sil = 1.0
+    for k in range(K):
+        blended_sil *= (1.0 - weights[k])
+    blended_sil = 1.0 - blended_sil
+    
+    return blended_color, blended_sil
+
+def BuildEdgeMask(edge_dist, delta):
+    """
+    Create a binary mask for edge pixels.
+    """
+    # Mask is 1 where edge_dist is within delta of 0
+    return ((edge_dist > -delta) & (edge_dist < delta)).float()
+
+def ToneMap(img):
+    """
+    Apply tone mapping (e.g., Reinhard or ACES).
+    """
+    pass
+
+def PhysicallyBasedShading(world_pos, world_nor, uv, albedo, metallic, roughness):
+    """
+    Compute PBR color for each pixel.
+    """
+    pass
+```
+
+### Parameters
+*   **$r$ (Blur radius):** Defines the range of blurring in screen space $[0, 1]^2$. Typical values: 0.01, 0.1, or pixel-based (1-7 pixels) [S1].
+*   **$K$ (Number of buffers):** Maximum number of depth peeling buffers. Set to a maximum of 5 to avoid pseudo-occlusion artifacts with few buffers. Typical value: 2 [S1].
+*   **$\sigma$ (Blending parameter):** Computed as $r/7$. Controls the smoothness of the sigmoid weight function [S1].
+*   **$\delta$ (Silhouette edge width):** Width of the edge mask. Default value is $r$ [S1].
+
+### Edge Cases and Pitfalls
+*   **Pseudo-occlusion:** Expanding soft faces by interpolated depth values may cause them to occlude necessary hard faces. This is handled by `Shift()`, which pushes soft faces behind hard faces and assigns depth based on distance to hard faces [S1].
+*   **Shaggy boundaries:** Using only acute triangle enlargement without the full strategy results in shaggy boundaries for soft faces. Obtuse triangles (smallest angle $< 30^\circ$) require bounding box expansion [S1].
+*   **Numerical instability:** SoftRas uses a square for distance in sigmoid computation, causing instability. HardSoftRas removes the square [S1].
+*   **Triangle count change:** Enlarging triangles changes the number of triangles. Original vertex indices must be preserved and passed through to avoid mismatched attribute lookups [S1].
+*   **Conventional geometric anti-aliasing:** Methods like Nvdiffrast select a limited number of edge pixels, leading to sparse and discontinuous gradients. HardSoftRas blends all edge pixels, ensuring dense and smooth gradients [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Linear in the number of faces $F$ and buffers $K$. The depth peeling loop runs $K$ times, and each iteration rasterizes $F$ enlarged triangles [S1].
+*   **Memory Complexity:** Proportional to $K \times H \times W$ for storing G-buffers and stencils. $K$ is kept small (≤ 5) to minimize memory usage [S1].
+*   **Performance:** Less computationally expensive and more robust than conservative rasterization [HAO05] by keeping triangle primitives small and avoiding floating-point precision errors in obtuse triangles [S1].
+*   **Strengths:** Dense and smooth far-range gradients; robust optimization without shape collapse; hardware-accelerated; works with small $K$ [S1].
+*   **Limitations:** Requires careful tuning of $r$ and $K$; blending weights depend on edge distance, which may not always align with semantic edges [S1].
+*   **When to use:** Differentiable rendering with physically-based shading, especially for inverse rendering tasks requiring stable gradients [S1].
+*   **When not to use:** When extremely high precision at silhouette edges is required without any blurring, or when $K$ must be very large for complex transparency [S1].
+
+## Background
+HardSoftRas was introduced in the Dressi renderer paper by Y. Takimoto et al. in 2022 [S1]. It is designed to propagate gradients from screen space to far-range vertex attributes using hardware rasterizers, addressing limitations in prior soft rasterization methods like SoftRas and PyTorch3D [S1]. The method is used in the Dressi renderer for differentiable rendering with physically-based shading [S1].
+
+## Sources
+[S1] Dressi: A Hardware‐Agnostic Differentiable Renderer with Reactive Shader Packing and Soft Rasterization, https://doi.org/10.1111/cgf.14455, fetched 2026-10-29

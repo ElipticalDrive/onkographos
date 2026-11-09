@@ -1,0 +1,146 @@
+# Joint Optimization of Camera Pose and Decomposed Low-Rank Tensorial Radiance Fields
+
+Also called: Joint TensoRF
+
+## Overview
+Joint TensoRF is an algorithm for the joint refinement of camera pose and scene geometry represented by decomposed low-rank tensors, using only 2D images as supervision [S1]. It addresses the instability of naive joint optimization on voxel-based NeRFs, which lack the spectral bias of MLPs and tend to overemphasize sharp edges, leading to local optima [S1]. Unlike standard voxel-based methods, it employs a coarse-to-fine training schedule via convolutional Gaussian filters applied to 2D and 3D radiance fields, enabling robust joint optimization [S1].
+
+## How it works
+**Inputs:**
+*   A set of 2D images with known initial camera poses and intrinsics.
+*   A decomposed low-rank tensor representation of the 3D radiance field (as defined in [Scene Representation and Architecture](11368-scene-representation-and-architecture.md)).
+
+**Outputs:**
+*   Refined camera poses.
+*   Optimized decomposed low-rank tensor parameters representing the scene.
+
+**Data Structures:**
+The scene is represented by a decomposed low-rank tensor. While the specific tensor decomposition format (e.g., CP or Tucker) is not detailed in the provided notes, the method leverages the decomposition property to achieve efficient filtering [S1]. The implementation relies on a single reusable voxel grid for spectral filtering [S1].
+
+**Parameters:**
+*   Training iterations: 50,000 [S1].
+*   Kernel parameters for Gaussian filters: Randomly scaled during training to improve robustness [S1].
+*   Loss mask: Edge-guided mask applied to supervision [S1].
+
+**Steps:**
+1.  **Initialization:** Initialize the decomposed low-rank tensor and camera poses.
+2.  **Coarse-to-Fine Filtering:** Apply convolutional Gaussian filters to the 2D supervision images and the 3D radiance field. This creates a coarse-to-fine training schedule [S1].
+3.  **Efficient Convolution:** Leverage the decomposition property of the low-rank tensor to compute the equivalent effect of brute-force 3D convolution with minimal computational overhead [S1].
+4.  **Supervision:** Render images from the current pose and tensor representation. Compute the loss against the 2D supervision images using an edge-guided loss mask [S1].
+5.  **Optimization:** Update both the camera poses and the tensor parameters using the computed loss [S1].
+6.  **Iteration:** Repeat steps 2-5 for 50,000 iterations [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for Joint TensoRF optimization loop
+# Note: Specific tensor decomposition operations (e.g., CP/Tucker) are assumed to be available
+# as per the underlying TensoRF architecture [S1].
+
+def joint_optimization(images, initial_poses, tensor_params, num_iterations=50000):
+    """
+    Jointly optimize camera poses and decomposed low-rank tensor radiance fields.
+    
+    Args:
+        images: List of 2D reference images.
+        initial_poses: Initial camera poses (extrinsics).
+        tensor_params: Parameters of the decomposed low-rank tensor.
+        num_iterations: Number of training iterations (default 50k) [S1].
+        
+    Returns:
+        optimized_poses: Refined camera poses.
+        optimized_tensor_params: Optimized tensor parameters.
+    """
+    poses = initial_poses
+    params = tensor_params
+    
+    for step in range(num_iterations):
+        # 1. Apply Gaussian filters for coarse-to-fine schedule [S1]
+        # The filter scale/kernel size may be adjusted based on training progress
+        filtered_images = apply_gaussian_filter(images, step)
+        filtered_tensor = apply_gaussian_filter_3d(params, step)
+        
+        # 2. Efficient convolution using tensor decomposition [S1]
+        # Instead of brute-force 3D convolution, use the decomposition property
+        # to achieve equivalent spectral filtering with low overhead
+        filtered_rendered = render_with_decomposed_tensor(filtered_tensor, poses)
+        
+        # 3. Compute edge-guided loss [S1]
+        # Use an edge-guided mask to weight the loss, improving robustness
+        loss_mask = compute_edge_guided_mask(filtered_images, filtered_rendered)
+        loss = compute_loss(filtered_images, filtered_rendered, loss_mask)
+        
+        # 4. Randomly scale kernel parameters for robustness [S1]
+        # This helps prevent overfitting to specific frequencies
+        current_kernel_scale = random_scale_kernel(step)
+        
+        # 5. Update parameters and poses
+        # Gradient descent step on both poses and tensor parameters
+        gradients = compute_gradients(loss, poses, params)
+        poses = update_poses(poses, gradients['poses'])
+        params = update_tensor_params(params, gradients['tensor'])
+        
+    return poses, params
+
+def apply_gaussian_filter(data, step):
+    """
+    Apply convolutional Gaussian filter.
+    The kernel parameters are randomly scaled [S1].
+    """
+    kernel_size = get_kernel_size(step)
+    sigma = random_scale_kernel(step) # Randomly scaled kernel parameter [S1]
+    kernel = create_gaussian_kernel(kernel_size, sigma)
+    return convolve(data, kernel)
+
+def apply_gaussian_filter_3d(tensor_params, step):
+    """
+    Apply 3D Gaussian filter leveraging tensor decomposition [S1].
+    """
+    # Leverage decomposition property to achieve equivalent effect to brute-force 3D convolution [S1]
+    # This is computationally efficient
+    kernel_size = get_kernel_size(step)
+    sigma = random_scale_kernel(step)
+    kernel = create_gaussian_kernel_3d(kernel_size, sigma)
+    return convolve_tensor_decomposed(tensor_params, kernel)
+
+def compute_edge_guided_mask(image1, image2):
+    """
+    Compute edge-guided loss mask [S1].
+    """
+    # Compute edges in both images
+    edges1 = detect_edges(image1)
+    edges2 = detect_edges(image2)
+    # Combine edges to form mask
+    mask = combine_edges(edges1, edges2)
+    return mask
+
+def compute_loss(target, rendered, mask):
+    """
+    Compute loss with edge-guided mask [S1].
+    """
+    # Example: L1 loss weighted by mask
+    diff = abs(target - rendered)
+    weighted_diff = diff * mask
+    return sum(weighted_diff) / sum(mask)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Local Optima:** Naive joint optimization on voxel-based NeRFs can easily lead to suboptimal solutions because voxel-based methods lack the spectral bias of MLPs, causing them to overemphasize sharp edges and get trapped in local optima [S1].
+*   **Precision:** Not given in the sources.
+*   **Boundaries:** Not given in the sources.
+
+## Operating characteristics
+*   **Time Complexity:** The method requires only 50k training iterations, compared to 200k for previous methods, reducing training time by 25% compared to previous MLP-based methods [S1].
+*   **Memory Complexity:** The decomposed low-rank tensor architecture achieves a high data compression ratio and low computational cost [S1].
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** Superior performance in novel view synthesis and rapid convergence for optimization [S1].
+*   **Limitations:** Requires careful design of spectral filtering and supervision techniques for successful pose refinement [S1].
+*   **When to use:** When joint optimization of camera pose and scene geometry is required for voxel-based radiance fields, and robustness to local optima is critical [S1].
+*   **When not to use:** When MLP-based radiance fields are used, as they have inherent spectral bias [S1].
+
+## Background
+Joint TensoRF was proposed by Bo-Yu Cheng, Wei-Chen Chiu, and Yu-Lun Liu from National Yang Ming Chiao Tung University [S1]. It builds on the TensoRF framework, which uses decomposed low-rank tensors to represent 3D radiance fields [S1]. The method addresses the limitations of naive joint optimization on voxel-based NeRFs, which lack the spectral bias of MLPs [S1]. The source code is available at https://github.com/Nemo1999/Joint-TensoRF [S1].
+
+## Sources
+[S1] Improving Robustness for Joint Optimization of Camera Pose and Decomposed Low-Rank Tensorial Radiance Fields, https://doi.org/10.1609/aaai.v38i2.27859, fetched 2026-10-26

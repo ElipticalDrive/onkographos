@@ -1,0 +1,125 @@
+# Hybrid Differentiable Rendering Method
+
+Also called: Analysis-by-synthesis inverse rendering with SfM/MVS/Poisson initialization
+
+## Overview
+The Hybrid Differentiable Rendering Method is an analysis-by-synthesis inverse rendering technique that reconstructs 3D geometry and physically-based reflectance (PBR) materials from multi-view 2D images captured by conventional hand-held cameras under uncontrolled lighting [S1]. It addresses the trade-off between computational efficiency and visual fidelity by combining approximate differentiable rendering for geometry optimization with physically-based differentiable rendering for reflectance optimization [S1]. Unlike pure approximate methods that yield poor visual effects due to simple material models, or pure physically-based methods that incur high computational costs via path tracing, this hybrid approach achieves high-quality reconstructions efficiently [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of RGB images captured from multiple viewpoints using conventional hand-held cameras. No additional information (e.g., depth maps) is required [S1].
+*   **Output:** Optimized scene parameters $\Theta^*$, comprising 3D geometry (mesh) and reflection parameters (PBR materials and environment lighting) [S1].
+
+**Data Structures:**
+*   **Geometry:** A triangular mesh with vertex positions and vertex colors [S1].
+*   **Lighting:** An environment map represented as a 2D texture with resolution $512 \times 128$ [S1].
+*   **Scene Parameters ($\Theta$):** Includes geometry parameters (mesh vertices) and reflection parameters (material properties and environment map values) [S1].
+
+**Formulation:**
+The method formulates the reconstruction as an optimization problem:
+$$ \Theta^* = \arg \min_{\Theta} L(I(\Theta), \Theta; \tilde{I}) $$
+where:
+*   $\Theta$ represents the scene parameters to be estimated [S1].
+*   $L$ is the loss function minimized between rendered and ground truth images [S1].
+*   $\tilde{I}$ is the ground truth image [S1].
+*   $I(\Theta)$ is the image rendered by the hybrid differentiable rendering method using the same camera parameters as $\tilde{I}$ [S1].
+
+**Steps:**
+
+1.  **Initialization Phase:**
+    1.  **Sparse Reconstruction:** Use Structure-from-Motion (SfM) to generate sparse feature points in each input image [S1]. Match these points across images to reconstruct a sparse point cloud and a rough mesh [S1].
+    2.  **Dense Matching:** Use Multi-View Stereo (MVS) on the sparse point cloud/rough mesh to generate dense pixel-level matching [S1].
+    3.  **Mesh Generation:** Apply Poisson surface reconstruction to the dense matching to obtain a dense mesh with vertex colors derived from the input images [S1].
+    4.  **Lighting Initialization:** Initialize the environment map (lighting source) with white light, setting the three RGB channels to $(0.5, 0.5, 0.5)$ [S1]. The environment map resolution is fixed at $512 \times 128$ [S1].
+
+2.  **Optimization Phase:**
+    1.  **Geometry Optimization:** Optimize the geometry first using an approximate differentiable rendering method. This step iteratively minimizes the loss $L$ between rendered images and ground truth images for the same camera poses [S1].
+    2.  **Reflectance Optimization:** Optimize the reflectance (materials and environment map) afterward using a physically-based differentiable rendering method. This step also iteratively minimizes the loss $L$ between rendered images and ground truth images [S1].
+    3.  **Iteration:** Both optimization steps are performed iteratively to refine the parameters until convergence or a stopping criterion is met [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hybrid_differentiable_rendering(input_images, camera_poses):
+    """
+    Reconstructs 3D geometry and PBR materials from multi-view images.
+    
+    Args:
+        input_images: List of RGB images captured from multiple viewpoints.
+        camera_poses: Camera poses corresponding to the input images.
+        
+    Returns:
+        optimized_mesh: Optimized triangular mesh.
+        optimized_materials: Optimized PBR material parameters.
+        optimized_env_map: Optimized environment map (512x128).
+    """
+    
+    # --- Initialization Phase ---
+    
+    # Step 1: Sparse Reconstruction via SfM
+    sparse_points = extract_sparse_features(input_images)
+    sparse_cloud, rough_mesh = match_features_and_reconstruct(sparse_points)
+    
+    # Step 2: Dense Matching via MVS
+    dense_matching = perform_mvs(sparse_cloud, rough_mesh)
+    
+    # Step 3: Mesh Generation via Poisson Reconstruction
+    initial_mesh = poisson_surface_reconstruction(dense_matching)
+    initial_mesh.vertex_colors = derive_vertex_colors_from_images(input_images, initial_mesh)
+    
+    # Step 4: Lighting Initialization
+    env_map = initialize_environment_map(resolution=(512, 128), value=(0.5, 0.5, 0.5))
+    
+    # Initial scene parameters
+    geometry = initial_mesh
+    reflectance = {
+        'materials': initialize_pbr_materials(),
+        'environment_map': env_map
+    }
+    
+    # --- Optimization Phase ---
+    
+    # Step 5: Geometry Optimization using Approximate Differentiable Rendering
+    # Note: The specific approximate renderer is not detailed in the source, 
+    # but it is used to optimize geometry efficiently.
+    for iteration in range(num_iterations_geometry):
+        rendered_image = approximate_differentiable_render(geometry, reflectance, camera_poses)
+        loss = compute_loss(rendered_image, input_images)
+        gradients = backpropagate_loss(loss, geometry)
+        geometry = update_geometry(geometry, gradients)
+        
+    # Step 6: Reflectance Optimization using Physically-Based Differentiable Rendering
+    # Note: The specific physically-based renderer (e.g., path tracer) is not detailed,
+    # but it is used to optimize reflectance with high quality.
+    for iteration in range(num_iterations_reflectance):
+        rendered_image = physically_based_differentiable_render(geometry, reflectance, camera_poses)
+        loss = compute_loss(rendered_image, input_images)
+        gradients = backpropagate_loss(loss, reflectance)
+        reflectance = update_reflectance(reflectance, gradients)
+        
+    return geometry, reflectance['materials'], reflectance['environment_map']
+```
+
+**Edge Cases and Pitfalls:**
+*   **Uncontrolled Lighting:** The method assumes uncontrolled lighting, requiring the environment map to be learned. Poor initialization of the environment map may affect convergence [S1].
+*   **Complex Scenes:** The method is designed for complex, unstructured scenes, but the quality of the initial SfM/MVS reconstruction is critical. Failure in feature matching or dense matching may lead to poor initial geometry [S1].
+*   **Computational Cost:** While hybrid, the physically-based optimization step can still be resource-intensive. The number of iterations for each phase should be balanced to manage computational resources [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The method is more efficient than pure physically-based differentiable rendering methods because it uses an approximate differentiable rendering method for geometry optimization, which is computationally cheaper [S1]. However, it is less efficient than pure approximate methods due to the subsequent physically-based reflectance optimization [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Extensive experiments on synthetic and real data demonstrate that the method produces reconstructions with similar or higher quality than state-of-the-art methods while being more efficient [S1].
+*   **Strengths:** Combines the efficiency of approximate methods with the high-quality results of physically-based methods [S1]. Suitable for complex, unstructured scenes with conventional hand-held cameras [S1].
+*   **Limitations:** Relies on the quality of initial SfM/MVS reconstruction. The physically-based optimization step can be computationally expensive [S1].
+*   **When to Use:** Virtual reality, augmented reality, novel view synthesis, and relighting [S1].
+*   **When Not to Use:** When real-time performance is critical and high-fidelity PBR materials are not required, approximate methods may be sufficient. When computational resources are extremely limited, the hybrid approach may be too slow [S1].
+
+## Background
+*   **Origin:** The method was introduced in the paper "Efficient Multi-View Inverse Rendering Using a Hybrid Differentiable Rendering Method" by Zhu et al. from the School of Computer Science and Informatics, Cardiff University, UK, and the Research Center for Information Science and Technology (BNRist), China [S1].
+*   **History and Development:** Inverse rendering, which recovers 3D geometry, reflection properties, and illumination from 2D images, is a long-standing and challenging problem in computer graphics and vision [S1]. Recent advances in deep neural networks have promoted the development of multi-view inverse rendering tasks using triangular meshes as geometry representation [S1]. Approximate differentiable rendering methods use simplified rendering processes for efficiency but employ simple material models that yield poor visual effects [S1]. Physically-based differentiable rendering methods use path tracing to reconstruct high-quality PBR materials but incur high computational costs [S1]. The hybrid method was proposed to combine the efficiency of the former with the quality of the latter [S1].
+*   **Usage:** The method is used for virtual reality, augmented reality, novel view synthesis, and relighting [S1].
+
+## Sources
+[S1] Efficient Multi-View Inverse Rendering Using a Hybrid Differentiable Rendering Method, https://doi.org/10.24963/ijcai.2023/205, fetched 2026-10-26

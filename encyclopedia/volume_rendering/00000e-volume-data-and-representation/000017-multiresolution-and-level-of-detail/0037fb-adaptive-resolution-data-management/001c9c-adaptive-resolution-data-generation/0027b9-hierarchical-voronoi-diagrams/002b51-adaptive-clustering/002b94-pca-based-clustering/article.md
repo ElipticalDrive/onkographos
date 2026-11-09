@@ -1,112 +1,69 @@
 # PCA-based Clustering
+
 Also called: Heckel et al. clustering, Principal Component Analysis clustering
 
 ## Overview
-PCA-based clustering partitions a set of scattered points into well-shaped clusters by aligning the splitting hyperplane with the principal axes of the point distribution [S1, unofficial]. It solves the problem of generating data-dependent hierarchies for surface reconstruction or volume representation where cluster shape quality is critical [S1, unofficial]. It is distinguished from basic adaptive clustering by its use of eigenanalysis to determine splitting directions, ensuring splits are orthogonal to the longest axis of the point cloud, and from affine-invariant approaches by its standard covariance analysis which may produce elongated clusters on curved data [S1, unofficial].
+PCA-based Clustering is a method for generating adaptive clusters from scattered point data by partitioning a set of samples recursively based on the geometric distribution of their spatial coordinates [S1, unofficial]. It solves the problem of creating data-dependent hierarchies that respect the intrinsic topological and geometric structures of the input cloud, ensuring well-shaped clusters by splitting along the direction of maximum variance [S1, unofficial]. It sets itself apart from its siblings by using Principal Component Analysis to define a local coordinate system and splitting plane, whereas [Adaptive Clustering with Error-Bisector Splitting](6211-adaptive-clustering-with-error-bisector-splitting.md) uses error metrics and [Hierarchical Density-based Clustering](10952-hierarchical-density-based-clustering.md) relies on density estimation [S1, unofficial].
 
 ## How it works
-**Inputs:** A set of $n$ points $\mathbf{p}_i = (p_{i1}, \dots, p_{ik})^T$ in $k$-dimensional space, optionally with associated scalar function values $f_i$ and weights $w_i$ [S1, unofficial].
-**Outputs:** A splitting hyperplane defined by a normal vector and a point on the plane (typically the centroid), and the partition of points into two subsets based on the hyperplane [S1, unofficial].
+**Inputs:** A set of $n$ points $\mathbf{p}_i = (p_{i1}, \dots, p_{ik})^T$ in $k$-dimensional space, and optionally associated scalar function values $f_i$ with weights $w_i$.
+**Outputs:** A hierarchical tree of clusters, where each node represents a subset of points.
 
 **Data Structures:**
-*   **Point Cloud:** List of $n$ vectors of size $k$ [S1, unofficial].
-*   **Covariance Matrix:** $k \times k$ symmetric matrix $A$ [S1, unofficial].
-*   **Eigenvectors:** $k$ orthonormal vectors $\mathbf{e}_1, \dots, \mathbf{e}_k$ [S1, unofficial].
-*   **Eigenvalues:** $k$ real, non-negative scalars $\lambda_1, \dots, \lambda_k$ [S1, unofficial].
+*   **Point Cloud:** List of $n$ vectors of size $k$.
+*   **Cluster Node:** Contains a list of indices to points, a centroid $\mathbf{c}$, a covariance matrix $A$, and eigenvectors/eigenvalues.
 
 **Steps:**
+1.  **Initialization:** Assign all input points to the root cluster.
+2.  **Centroid Calculation:** Compute the centroid $\mathbf{c}$ of the points in the current cluster. If weights $w_i$ are provided, use the weighted centroid [S1, unofficial]:
+    $$ \mathbf{c} = \frac{\sum_{i=1}^n w_i \mathbf{p}_i}{\sum_{i=1}^n w_i} $$
+    If no weights are used, the standard centroid is [S1, unofficial]:
+    $$ \mathbf{c} = \frac{1}{n} \sum_{i=1}^n \mathbf{p}_i $$
+3.  **Covariance Matrix Construction:** Compute the $k \times k$ symmetric covariance matrix $A$ with elements $a_{jk}$ [S1, unofficial]. For weighted points:
+    $$ a_{jk} = \frac{\sum_{i=1}^n w_i (p_{ij} - c_j)(p_{ik} - c_k)}{\sum_{i=1}^n w_i} $$
+    For unweighted points:
+    $$ a_{jk} = \frac{1}{n} \sum_{i=1}^n (p_{ij} - c_j)(p_{ik} - c_k) $$
+4.  **Eigenanalysis:** Perform eigenvalue decomposition on $A$ to obtain orthonormal eigenvectors $\mathbf{e}_1, \dots, \mathbf{e}_k$ and corresponding real, positive eigenvalues $\lambda_1, \dots, \lambda_k$ [S1, unofficial].
+5.  **Splitting Plane Determination:** Identify the eigenvector $\mathbf{e}_{\lambda_{max}}$ associated with the largest eigenvalue $\lambda_{max}$. The splitting hyperplane is defined to pass through the centroid $\mathbf{c}$ and be orthogonal to $\mathbf{e}_{\lambda_{max}}$ [S1, unofficial]. This ensures the cluster is split orthogonal to its longest axis.
+6.  **Partitioning:** Assign each point $\mathbf{p}_i$ in the cluster to one of the two sub-clusters based on the sign of the projection onto the splitting normal $\mathbf{e}_{\lambda_{max}}$. Specifically, if $(\mathbf{p}_i - \mathbf{c}) \cdot \mathbf{e}_{\lambda_{max}} > 0$, assign to one child; otherwise, to the other.
+7.  **Recursion:** Repeat steps 2–6 for each sub-cluster until a stopping criterion is met (e.g., minimum cluster size or maximum depth).
 
-1.  **Compute Centroid:** Calculate the mean position of the points [S1, unofficial]. If weights $w_i$ are provided, use the weighted centroid [S1, unofficial].
-    $$ \mathbf{c} = \frac{1}{n} \sum_{i=1}^n \mathbf{p}_i \quad \text{(unweighted)} $$
-    $$ \mathbf{c} = \frac{\sum_{i=1}^n w_i \mathbf{p}_i}{\sum_{i=1}^n w_i} \quad \text{(weighted)} $$
-
-2.  **Compute Covariance Matrix:** Calculate the scatter matrix centered at $\mathbf{c}$ [S1, unofficial].
-    $$ a_{jk} = \frac{1}{n} \sum_{i=1}^n (p_{ij} - c_j)(p_{ik} - c_k) \quad \text{(unweighted)} $$
-    $$ a_{jk} = \frac{\sum_{i=1}^n w_i(p_{ij} - c_j)(p_{ik} - c_k)}{\sum_{i=1}^n w_i} \quad \text{(weighted)} $$
-
-3.  **Eigenanalysis:** Compute the eigenvalues $\lambda$ and corresponding orthonormal eigenvectors $\mathbf{e}$ of the symmetric matrix $A$ [S1, unofficial]. Sort them such that $\lambda_{\min}$ corresponds to the smallest eigenvalue and $\lambda_{\max}$ to the largest [S1, unofficial].
-
-4.  **Define Approximating Function:** The local distance to the reconstructed manifold is approximated by the signed distance along the direction of the smallest eigenvalue (assumed to be the surface normal) [S1, unofficial].
-    $$ \tilde{f}_k^j(\mathbf{x}) = (\mathbf{x} - \mathbf{c}) \cdot \mathbf{e}_{\lambda_{\min}} $$
-
-5.  **Define Splitting Hyperplane:** The splitting plane passes through the centroid $\mathbf{c}$ and is orthogonal to the eigenvector with the largest eigenvalue $\mathbf{e}_{\lambda_{\max}}$ [S1, unofficial]. This ensures the split is orthogonal to the longest axis of the cluster [S1, unofficial].
-    $$ \text{Normal } \mathbf{n} = \mathbf{e}_{\lambda_{\max}} $$
-    $$ \text{Plane Equation: } (\mathbf{x} - \mathbf{c}) \cdot \mathbf{e}_{\lambda_{\max}} = 0 $$
-
-6.  **Partition:** Assign each point $\mathbf{p}_i$ to a subset based on the sign of $(\mathbf{p}_i - \mathbf{c}) \cdot \mathbf{e}_{\lambda_{\max}}$ [S1, unofficial].
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def pca_cluster(points, weights=None):
-    """
-    Performs PCA-based clustering on a set of points.
-    Returns the splitting normal and centroid.
-    """
-    n = len(points)
-    k = len(points[0])
-    
-    # Step 1: Compute Centroid
-    if weights is None:
-        weights = [1.0] * n
-    sum_weights = sum(weights)
-    centroid = [0.0] * k
-    for i in range(n):
-        for j in range(k):
-            centroid[j] += weights[i] * points[i][j]
-    for j in range(k):
-        centroid[j] /= sum_weights
-        
-    # Step 2: Compute Covariance Matrix
-    cov = [[0.0] * k for _ in range(k)]
-    for i in range(n):
-        diff = [points[i][j] - centroid[j] for j in range(k)]
-        for j in range(k):
-            for l in range(k):
-                cov[j][l] += weights[i] * diff[j] * diff[l]
-    for j in range(k):
-        for l in range(k):
-            cov[j][l] /= sum_weights
-            
-    # Step 3: Eigenanalysis
-    # [G] Compute eigenvalues and orthonormal eigenvectors of symmetric matrix cov
-    eigenvalues, eigenvectors = standard_eigen_decomposition(cov)
-    
-    # Find indices of min and max eigenvalues
-    min_idx = argmin(eigenvalues)
-    max_idx = argmax(eigenvalues)
-    
-    # Step 4 & 5: Define Splitting Hyperplane
-    # Normal is eigenvector corresponding to largest eigenvalue
-    splitting_normal = eigenvectors[:, max_idx]
-    
-    return centroid, splitting_normal
-```
+**Approximating Function:**
+The method defines an approximating function $\tilde{f}_k^j(\mathbf{x})$ representing the local signed distance to the reconstructed manifold, using the eigenvector $\mathbf{e}_{\lambda_{min}}$ with the smallest eigenvalue [S1, unofficial]:
+$$ \tilde{f}_k^j(\mathbf{x}) = (\mathbf{x} - \mathbf{c}) \cdot \mathbf{e}_{\lambda_{min}} $$
+This vector is assumed to be locally orthogonal to the manifold if the points define a surface [S1, unofficial].
 
 **Parameters:**
-*   **Weights ($w_i$):** Not given in the sources as a default [S1, unofficial]. If function values $f_i$ are to be considered, $w_i$ is defined by the approximation error [S1, unofficial].
+*   **Weights ($w_i$):** Optional. If associated function values $f_i$ are ignored, $w_i=1$ for all $i$. To incorporate function values, $w_i$ should be defined by the approximation error [S1, unofficial]. Not given in the sources.
+*   **Stopping Criterion:** Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-*   **Curved Data:** The basic process ignores associated function values [S1, unofficial]. If the function is curved in only one direction, this method generates long and skinny clusters [S1, unofficial].
-*   **Recursive Splitting:** The affine-invariant variant (scaling by $\sqrt{1/\lambda_i}$) may work well on densely sampled, smooth data but provides poor approximation behavior in regions where clusters are recursively split along similar directions [S1, unofficial].
-*   **Degenerate Input:** If points are collinear or coplanar, eigenvalues may be zero, leading to undefined normals for the splitting plane [G].
+*   **Shear Invariance:** The basic clustering process is not invariant under shear transformations [S1, unofficial].
+*   **Ignoring Function Values:** The standard process ignores associated function values $f_i$, potentially leading to clusters that are geometrically coherent but functionally heterogeneous [S1, unofficial].
+*   **Degenerate Input:** If points are collinear or coplanar, the covariance matrix may be singular or have zero eigenvalues. The source notes eigenvalues are real and positive, implying non-degenerate cases or regularization is assumed [S1, unofficial].
 
 ## Subtopics
 
-### Affine-Invariant PCA Clustering
-A variant that transforms points into a PCA-based coordinate system and scales coordinates by $\sqrt{1/\lambda_i}$ to achieve invariance under shear and other affine transformations [S1, unofficial]. It is chosen when geometric invariance to non-uniform scaling is required, but may fail on data with recursive splitting along similar directions [S1, unofficial]. [Affine-Invariant Clustering](link-to-affine-invariant.md)
+### [Affine-Invariant Clustering](5762-affine-invariant-clustering.md)
+Affine-Invariant Clustering is a method for generating adaptive clusters from scattered point data that remains invariant under general affine transformations, including translation, rotation, uniform scaling, and shear. It solves the limitation of standard PCA-based clustering, which is not invariant under shear transformations. By transforming data into a PCA-based coordinate system and normalizing axes by eigenvalues, it produces well-shaped clusters that are robust to affine distortions, distinguishing it from its parent method, [PCA-based Clustering](5048-pca-based-clustering.md), which lacks shear invariance.
+
+### Iterative Cluster Discriminant Optimization
+This variant refines cluster assignments by optimizing a discriminant ratio $T_J$ [S2, unofficial]. In an iterative round, each pixel (data point) is temporarily removed from its home cluster and assigned to each of the other clusters one by one [S2, unofficial]. For each temporary assignment, the differences in means and variances are renewed and the discriminant ratio is recalculated [S2, unofficial]. A pixel is permanently detached and reassigned to another cluster only if such reassignment causes an increase in the ratio, promoting larger inter-cluster distance and smaller intra-cluster distance [S2, unofficial]. Statistical optimization ends when ratio alteration becomes ignorable [S2, unofficial]. The discriminant ratio $T_J$ is calculated as [S2, unofficial]:
+$$ T_J = \frac{\sum_{k_i=1} \sum_{k_j>i} (m_{ip} - m_{jp})(m_{ip} - m_{jp})}{\sum_{k_i=1} v_{ip}} $$
+Note: The denominator in the source text appears garbled as `(∑𝑘𝑖=1 𝑣𝑖𝑝 𝑣𝑖𝑝 )`, likely representing the sum of variances or a normalization factor involving $v_{ip}$ [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Dominated by the eigenanalysis of the $k \times k$ covariance matrix [S1, unofficial]. For fixed dimension $k$, this is $O(n)$ per cluster for computing the matrix, plus constant time for eigen-decomposition [G].
-*   **Memory Complexity:** $O(nk)$ to store the point cloud and $O(k^2)$ for the covariance matrix [G].
-*   **Strengths:** Produces well-shaped clusters by splitting orthogonal to the longest axis [S1, unofficial]. Invariant under translation, rotation, and uniform scaling [S1, unofficial].
-*   **Limitations:** Not invariant under general affine transformations (unless the affine-invariant variant is used) [S1, unofficial]. Ignores function values by default, leading to poor results on curved data if weights are not applied [S1, unofficial]. The affine-invariant variant can produce poor approximations in specific recursive splitting scenarios [S1, unofficial].
-*   **When to use:** Densely sampled, smooth data sets where cluster shape quality is prioritized over function-value-aware splitting [S1, unofficial].
-*   **When not to use:** Data with significant curvature where function-value-aware splitting (e.g., bisector methods) yields a lower number of clusters [S1, unofficial].
+**Time Complexity:** Not given in the sources.
+**Memory Complexity:** Not given in the sources.
+**Measured Performance:** Not given in the sources.
+**Strengths:** Produces well-shaped clusters by splitting orthogonal to the longest axis; provides a local coordinate system aligned with the data manifold; simple to implement using standard linear algebra routines [S1, unofficial].
+**Limitations:** Not invariant under shear transformations; ignores associated function values unless weights are explicitly defined; sensitive to the choice of weights if function values are important [S1, unofficial].
+**When to use:** When the geometric distribution of points is the primary factor for clustering and the data is relatively isotropic or aligned with principal axes.
+**When not to use:** When the data undergoes significant shear transformations or when function value correlation is more important than spatial proximity.
 
 ## Background
-The PCA-based clustering approach for surface reconstruction was introduced by Heckel et al. [S1, unofficial]. It matches the general definition of adaptive clustering by using an approximating function to define local distance and a splitting plane for refinement [S1, unofficial]. The method leverages the property that for a $s$-manifold, the eigenvector with the smallest eigenvalue of the covariance matrix is locally orthogonal to the manifold, serving as a normal estimate [S1, unofficial].
+PCA-based clustering was introduced by Heckel et al. for surface reconstruction and adaptive resolution data management [S1, unofficial]. It matches the general definition of adaptive clustering by using PCA to construct an approximating function and estimate a splitting plane [S1, unofficial]. The approach uses the eigenvector with the smallest eigenvalue as a local estimate for the surface normal and the eigenvector with the largest eigenvalue to define the splitting plane [S1, unofficial].
 
 ## Sources
 [S1] Multiresolution modeling for scientific visualization, https://escholarship.org/uc/item/5317385v, fetched 2026-10-26 (unofficial)
+[S2] Segmentation Assisted Object Distinction for Direct Volume Rendering, https://doi.org/10.22044/jadm.2019.7207.1854, fetched 2026-10-29 (unofficial)

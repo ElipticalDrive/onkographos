@@ -3,94 +3,100 @@
 Also called: Coarse-to-Fine Initialization, Progressive Scale Training
 
 ## Overview
-Coarse-to-Fine Model Initialization is a training strategy for dynamic radiance fields that accelerates convergence and improves final reconstruction quality by progressively increasing model complexity. It solves the problem of optimizing high-dimensional, view-dependent features in dynamic scenes, which is prone to local minima and slow convergence when trained from scratch. It sets itself apart from standard NeRF training by explicitly decoupling the learning of geometry/deformation (coarse stage) from view-dependent appearance (fine stage), and from [Hierarchical Spherical Harmonics Optimization](5444-hierarchical-spherical-harmonics-optimization.md) by using voxel grids and MLPs rather than spherical harmonics bases.
+Coarse-to-Fine Model Initialization is a training strategy for differentiable volume rendering that accelerates convergence and improves final reconstruction quality by leveraging a pre-optimized low-resolution model to initialize a high-resolution one. It sets itself apart from monolithic training by decoupling the recovery of global geometry from the refinement of fine details, thereby avoiding local minima associated with high-frequency optimization from scratch [S1][S2, unofficial].
 
 ## How it works
-The method consists of two distinct stages: a Coarse Stage to learn geometry and deformation, and a Fine Stage to learn view-dependent color, utilizing weight transfer and resolution scaling.
+The method initializes a high-resolution "fine" model using parameters learned by a lower-resolution "coarse" model. It is primarily applied in dynamic view synthesis where deformation fields are learned [S1].
 
-### Inputs and Outputs
-- **Inputs**: A set of dynamic scene images with known camera poses and time steps.
-- **Outputs**: A trained dynamic radiance field model (deformation grid, color MLPs) ready for novel view synthesis.
+**Inputs and Outputs:**
+*   **Input:** A trained coarse model consisting of a deformation network $F_{\theta_d}$ and an optimized deformation feature grid.
+*   **Output:** An initialized fine model ready for high-resolution training.
 
-### Data Structures
-1.  **Deformation Feature Grid**: A 3D voxel grid storing deformation features. In the coarse stage, this is initialized to zero or random. In the fine stage, it is initialized via interpolation from the coarse stage's optimized grid [S1].
-2.  **Coarse Deformation MLP ($F_{\theta_{d1}}$)**: A fully connected network with 4 layers, width 64. Inputs: position (3), time (1), feature (4). Outputs: deformation vector [S1].
-3.  **Fine Color MLP ($F_{\theta_{c2}}$)**: A fully connected network with 3 layers, width 128. Inputs: position (3), view direction (27), feature (12). Outputs: color [S1].
-4.  **Proxy Geometry Bounding Box**: A smaller bounding box computed during the coarse stage to filter empty space in the fine stage [S2].
+**Data Structures:**
+1.  **Deformation Network ($F_{\theta_d}$):** A Multi-Layer Perceptron (MLP). The architecture must be identical in both coarse and fine stages to allow weight transfer [S1].
+    *   **Layers:** 4 fully connected layers [S1].
+    *   **Width:** 64 units per layer [S1].
+    *   **Activation:** ReLU between layers [S1].
+    *   **Input Dimensions:** Position (3), Time (1), Feature (4) [S1].
+2.  **Deformation Feature Grid:** A voxel grid storing features. The resolution changes between coarse and fine stages [S1].
 
-### Steps
+**Numbered Steps:**
+1.  **Train Coarse Model:** Optimize the coarse model (lower resolution) until convergence or a stable state is reached. Filter out sampled points whose alpha is always below a threshold during all training times [S1].
+2.  **Initialize Network Weights:** Copy the trained weights of the coarse deformation module $F_{\theta_d}$ directly to the fine model's deformation module. This is valid because the MLP architecture is identical [S1].
+3.  **Initialize Feature Grid:** Interpolate the optimized feature grid from the coarse model to create the initial feature grid for the fine model [S1].
+4.  **Progressive Scale Training:** Begin training the fine model. Optionally, apply progressive scale training by doubling the voxel resolution after a set number of iterations [S1].
+5.  **Color Decoding:** In the fine model, use a lightweight MLP to decode the interpolated color feature, modeling view-dependent effects [S1].
+    *   **Color Network ($F_{\theta_c}$):** 3 fully connected layers, width 128, ReLU activations [S1].
+    *   **Input Dimensions:** Position (3), View Direction (27), Feature (12) [S1].
 
-#### Stage 1: Coarse Training
-1.  **Initialize**: Set color features to be the color itself, ignoring ray direction dependency [S2].
-2.  **Train Deformation**: Optimize the coarse deformation module ($F_{\theta_{d1}}$) and the deformation feature grid using images close to the canonical time first, progressively adding farther time steps [S2].
-3.  **Filter Empty Space**: Compute a proxy geometry from the coarse stage and define a smaller bounding box. Filter out sampled points outside this box or with alpha below a threshold during all training times (only filtering empty points at canonical time for the canonical module) [S1, S2].
-
-#### Stage 2: Fine Training (Initialization and Optimization)
-1.  **Initialize Deformation Grid**: Interpolate the optimized feature grid from the coarse model into the fine model's deformation feature grid [S1].
-2.  **Initialize MLP Weights**: Copy the trained network weights from the coarse deformation module to the fine model's deformation module, as the architecture is identical [S1].
-3.  **Progressive Scale Training**: Begin with a base voxel resolution. After a fixed number of training iterations, double the voxel resolution [S1]. Repeat until the target resolution is reached.
-4.  **Train View-Dependent Color**: Use a high-dimensional feature vector and a lightweight MLP ($F_{\theta_{c2}}$) to decode color, explicitly modeling ray direction dependency [S1, S2].
-5.  **Finalize**: The model trained in this stage is the final model [S2].
-
-### Pseudocode
-
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def coarse_to_fine_training(scene_data, canonical_time_idx):
-    # Stage 1: Coarse Training
-    coarse_deform_grid = initialize_voxel_grid(resolution=coarse_res)
-    coarse_deform_mlp = initialize_mlp(layers=4, width=64, 
-                                       input_dim=8, output_dim=3) # pos(3)+time(1)+feat(4) -> def(3)
+def initialize_fine_model(coarse_model, target_voxel_resolution):
+    """
+    Initializes the fine model using the coarse model's learned parameters.
     
-    # Progressive time training
-    time_steps = get_closest_times(scene_data, canonical_time_idx)
-    for t in time_steps:
-        optimize(coarse_deform_grid, coarse_deform_mlp, scene_data[t])
+    Args:
+        coarse_model: Object containing trained deformation network weights 
+                      and optimized deformation feature grid.
+        target_voxel_resolution: The voxel grid size for the fine model.
         
-    # Filter empty space using proxy geometry
-    proxy_bbox = compute_proxy_bbox(coarse_deform_grid)
+    Returns:
+        fine_model: Initialized fine model object.
+    """
+    fine_model = create_fine_model(target_voxel_resolution)
     
-    # Stage 2: Fine Training
-    fine_deform_grid = interpolate_grid(coarse_deform_grid, fine_res)
-    fine_deform_mlp = copy_weights(coarse_deform_mlp) # Same architecture
+    # Step 2: Initialize Network Weights
+    # The MLP architecture is identical, so weights can be copied directly.
+    fine_model.deformation_network.weights = coarse_model.deformation_network.weights
     
-    # Progressive scale training
-    current_res = base_res
-    while current_res <= target_res:
-        optimize_fine_stage(fine_deform_grid, fine_deform_mlp, scene_data, 
-                            bbox=proxy_bbox, resolution=current_res)
-        current_res *= 2 # Double resolution
-        
-    return fine_deform_grid, fine_deform_mlp
+    # Step 3: Initialize Feature Grid
+    # Interpolate the coarse feature grid to the fine resolution.
+    coarse_grid = coarse_model.deformation_feature_grid
+    fine_model.deformation_feature_grid = interpolate_grid(coarse_grid, target_voxel_resolution)
+    
+    # Note: Progressive scale training (doubling resolution) is applied 
+    # during the subsequent optimization loop, not during initialization.
+    
+    return fine_model
+
+def interpolate_grid(coarse_grid, target_resolution):
+    """
+    Interpolates a voxel grid from coarse to fine resolution.
+    Implementation detail: [G] Standard trilinear or nearest-neighbor 
+    interpolation is used to map coarse voxel values to the finer grid.
+    """
+    # Not given in the sources. Standard interpolation logic applies.
+    pass
 ```
 
-### Parameters
-- **Coarse MLP Width**: 64 [S1].
-- **Fine MLP Width**: 128 [S1].
-- **Feature Dimension (Coarse)**: 4 [S1].
-- **Feature Dimension (Fine)**: 12 [S1].
-- **View Direction Dimension**: 27 (likely SH basis or similar encoding) [S1].
+**Parameters:**
+*   **Deformation Network Width:** 64 [S1].
+*   **Color Network Width:** 128 [S1].
+*   **Resolution Scaling Factor:** 2 (doubling) [S1].
+*   **Alpha Threshold:** Points with alpha always below a threshold are filtered out [S1]. Exact value not given in the sources.
 
-### Edge Cases and Pitfalls
-- **Precision**: Interpolation of the feature grid must preserve the learned deformation patterns; naive zero-filling of new voxels may degrade performance [S1].
-- **Boundaries**: The proxy bounding box must be tight enough to save computation but loose enough to avoid clipping valid geometry [S2].
+**Edge Cases and Pitfalls:**
+*   **Architecture Mismatch:** The method relies on the MLP architecture being identical between coarse and fine stages. Any change in layer count or width prevents direct weight transfer [S1].
+*   **Empty Points:** In the canonical module, only empty points are filtered out at the canonical time. Filtering logic must distinguish between temporal and canonical empty points [S1].
 
 ## Subtopics
 
-### Progressive Coarse-to-Fine Training Strategy
-This variant emphasizes the temporal progression in the coarse stage. It starts training with images close to the canonical time and progressively adds images with farther time steps until all images are added [S2]. This helps stabilize the learning of deformation before introducing complex view-dependent effects in the fine stage [S2].
+### [Progressive Coarse-to-Fine Training Strategy](8900-progressive-coarse-to-fine-training-strategy.md)
+A training methodology that decouples the recovery of global geometry from the refinement of fine details and appearance, typically applied in dynamic or high-fidelity volume rendering. It sets itself apart from monolithic training by first establishing a coherent low-resolution structure (coarse stage) before optimizing high-resolution features and directional dependencies (fine stage), thereby improving convergence stability and final reconstruction quality.
 
 ## Operating characteristics
-- **Time Complexity**: Reduced compared to training from scratch due to warm-starting the deformation module [S1].
-- **Memory Complexity**: Higher than single-stage training due to maintaining both coarse and fine grids/MLPs during transition, though the coarse stage uses lower resolution [S1].
-- **Performance**: Results in higher final performance and shorter training time [S1].
-- **Strengths**: Avoids local minima in view-dependent optimization; efficiently filters empty space [S2].
-- **Limitations**: Requires careful tuning of the resolution doubling schedule [S1].
+*   **Time Complexity:** Reduces total training time by providing a better initialization, shortening the time required for the fine model to converge [S1].
+*   **Memory Complexity:** Requires storing both coarse and fine model states during the transition, but the coarse model can be discarded after initialization.
+*   **Performance:** Results in higher performance and shorter training time compared to random initialization [S1].
+*   **Strengths:** Improves convergence stability; handles global geometry first, then fine details.
+*   **Limitations:** Requires a two-stage training process; dependent on the coarse model reaching a sufficiently good local minimum.
+*   **When to Use:** Dynamic view synthesis where deformation fields are learned and computational efficiency is critical [S1].
+*   **When Not to Use:** Static scenes where a single-resolution model suffices, or when the coarse model fails to capture global structure.
 
 ## Background
-Originating from works on dynamic view synthesis such as Neural Deformable Voxel Grid [S1] and Forward Flow [S2], this method addresses the computational cost and optimization difficulty of learning dynamic radiance fields. It builds on the observation that geometry and deformation can be learned independently of view-dependent appearance [S1, S2].
+The method originates from the work of X. Guo et al. in "Neural Deformable Voxel Grid for Fast Optimization of Dynamic View Synthesis" [S1]. It is designed to address the challenges of optimizing dynamic scenes, where learning deformation fields and view-dependent appearance simultaneously is difficult. By initializing the fine model with the coarse model's learned features, the method leverages the stability of low-frequency optimization to bootstrap high-frequency detail recovery.
 
 ## Sources
 [S1] Neural Deformable Voxel Grid for Fast Optimization of Dynamic View Synthesis, https://doi.org/10.1007/978-3-031-26319-4_27, fetched 2026-10-26
-[S2] Forward Flow for Novel View Synthesis of Dynamic Scenes, https://doi.org/10.1109/iccv51070.2023.01468, fetched 2026-10-26

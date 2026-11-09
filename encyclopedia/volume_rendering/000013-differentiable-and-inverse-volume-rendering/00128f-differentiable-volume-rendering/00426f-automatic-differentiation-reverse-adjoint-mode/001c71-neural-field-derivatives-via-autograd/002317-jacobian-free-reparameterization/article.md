@@ -3,32 +3,33 @@
 Also called: linearize operator
 
 ## Overview
-Jacobian-Free Reparameterization is a technique for differentiating path integrals over evolving implicit surfaces by mapping a fixed reference surface to the target geometry. It solves the problem of computing gradients with respect to surface parameters $\pi$ without explicitly constructing or inverting large Jacobian matrices. Unlike [Implicit Differentiation for Sphere Tracing](2012-implicit-differentiation-for-sphere-tracing.md), which relies on the implicit function theorem for static surfaces, this method handles time-varying or parameter-varying surfaces by defining a specific displacement mapping that is only one-to-one at the reference parameter value.
+Jacobian-Free Reparameterization is a method to numerically compute the Jacobian matrix $J_f$ of an image formation model $x = f(p)$ by generating random pose perturbations, rendering images, and solving a linear least-squares system [S2]. It bypasses the analytical differentiation of the image formation process, which is often complex due to lens and illumination modeling [S2]. Unlike methods that only track a target pose, this approach estimates the pose by minimizing feature errors using the estimated Jacobian, with learning the inverse Jacobian noted to result in better performance than inverting an estimate of the Jacobian [S2].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A scalar field function $\phi(\mathbf{x}; \pi)$ defining the surface $M(\pi)$, and a reference parameter value $\pi_0$ (typically $0$).
-- Output: Gradients of a rendered image or path integral with respect to $\pi$, computed via automatic differentiation.
+*   **Input:** A reference pose $p_{ref}$, a set of $N_s$ random pose perturbations $\Delta p_i$, and a feature extraction function $h$ that maps a rendered image to a feature vector $x$.
+*   **Output:** The Jacobian matrix $J_f$ (or its inverse) approximating the local gradient of the image formation model [S2].
 
 **Data Structures:**
-- Reference Surface $B$: A fixed geometric entity defined as the zero-level set of $\phi$ at $\pi_0$.
-- Mapping Function $X(\mathbf{p}, \pi)$: A function that displaces points on $B$ to $M(\pi)$.
+*   **Feature Vector $x$:** For $k$ key-point features, $x$ is a vector of $2k$ coordinates. In the source example with 4 key-points, $x = (x_1, y_1, \dots, x_4, y_4)$, resulting in a dimension of 8 [S2].
+*   **Pose Difference Matrix $B$:** Size $6 \times N_s$. Each column $i$ contains the relative pose difference $\Delta p_i$ composed of rotation and translation components [S2].
+*   **Feature Difference Matrix $E$:** Size $2k \times N_s$. Each column $i$ contains the feature error $\Delta x_i$ [S2].
 
 **Steps:**
-1. **Define Reference Surface:** Construct the reference surface $B$ as the zero-level set of the scalar field at the reference parameter $\pi_0$:
-   $$ B := M(\pi_0) = \{ \mathbf{x} \in \mathbb{R}^3 : \phi(\mathbf{x}; \pi_0) = 0 \} $$
-   [S2]
-
-2. **Define Displacement Mapping:** For any point $\mathbf{p} \in B$, define the mapping $X(\mathbf{p}, \pi)$ to the evolving surface $M(\pi)$ as:
-   $$ X(\mathbf{p}, \pi) := \mathbf{p} + t(\mathbf{p}, \pi) \mathbf{n}_B(\mathbf{p}) $$
-   where:
-   - $\mathbf{n}_B(\mathbf{p})$ is the unit normal of the reference surface $B$ at $\mathbf{p}$, assumed to be smooth and differentiable.
-   - $t(\mathbf{p}, \pi) \in \mathbb{R}$ is the distance from $\mathbf{p}$ along the direction $\mathbf{n}_B(\mathbf{p})$ to the first intersection with the evolving surface $M(\pi)$.
-   - The mapping $X(\cdot, \pi_0)$ is the identity map. [S2]
-
-3. **Jacobian-Free Application:** To compute the gradient of a function $f$ (e.g., the rendering integral) with respect to $\pi$, use the `linearize` operator from the autodiff framework (e.g., JAX). This operator constructs a function that applies the Jacobian matrix-vector product $J_f(\mu) \mathbf{v}$ without forming the matrix $J_f(\mu)$ explicitly. [S1]
-
-4. **Sequential Application:** Apply the linearized operator twice in sequence to the covariance matrix $\Sigma$ (or relevant gradient vectors), transposing the dimensions of $\Sigma$ after each application to maintain correct tensor shapes. [S1]
+1.  **Pose Sampling:** Generate $N_s$ random pose perturbations $\Delta p_i$ around the reference pose $p_{ref}$. The rotation component is sampled using Gibbs vectors (uniformly distributed on a spherical surface), and the translation component is sampled randomly [S2].
+2.  **Rendering and Feature Extraction:** For each perturbed pose $p_i = p_{ref} + \Delta p_i$, render the image and extract the feature vector $x_i$ [S2].
+3.  **Compute Feature Differences:** Calculate the difference between the reference feature vector $x_{ref}$ and the perturbed feature vector $x_i$:
+    $$ \Delta x_i = x_{ref} - x_i $$
+    This forms the matrix $E = [\Delta x_1, \dots, \Delta x_{N_s}]$ [S2].
+4.  **Compute Pose Differences:** Calculate the relative pose difference $\Delta p_i$. Using Gibbs vectors $q$ for attitude, the relative pose difference is:
+    $$ \Delta R_i = R_{ref}^T R_i $$
+    $$ \Delta t_i = t_{ref} - t_i $$
+    $$ \Delta p_i = [\Delta q_i, \Delta t_i]^T $$
+    This forms the matrix $B = [\Delta p_1, \dots, \Delta p_{N_s}]$ [S2].
+5.  **Solve for Jacobian:** The relationship is linearized as $E \approx J_f B$. Solve for $J_f$ using a least-squares solution:
+    $$ J_f = E B^T (B B^T)^{-1} $$
+    The dimension of $E$ is $2k \times N_s$, $B$ is $6 \times N_s$, and $J_f$ is $2k \times 6$ [S2].
+6.  **Jacobian-Free Application (Autograd):** In frameworks like Jax, the Jacobian-vector product can be computed without explicit matrix construction using the `linearize` operator. To apply the Jacobian to a covariance matrix $\Sigma$, apply the `linearize` operator twice in sequence to $\Sigma$, transposing the dimensions of the covariance matrix after each application [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -36,77 +37,128 @@ Jacobian-Free Reparameterization is a technique for differentiating path integra
 ```python
 import jax
 import jax.numpy as jnp
+import numpy as np
 
-# Assume phi(x, pi) defines the implicit surface
-# Assume render(p, pi) computes the radiance for a point p on the surface
-
-def compute_gradient(pi, p_ref):
+def generate_pose_perturbation(p_ref, n_samples):
     """
-    Computes the gradient of the render function with respect to pi
-    using Jacobian-free reparameterization.
+    Generate n_samples random pose perturbations.
+    p_ref: (6,) vector [q_x, q_y, q_z, t_x, t_y, t_z]
+    Returns: perturbations (6, n_samples)
+    """
+    # Sample Gibbs vectors for rotation (uniform on sphere)
+    # Sample random translations
+    # Combine into (6, n_samples) matrix
+    # Note: Specific sampling details for Gibbs vectors are not fully specified in [S2] beyond "uniformly on spherical surface"
+    # Implementation detail [G]: Use rejection sampling or normal distribution normalization for Gibbs vectors.
+    perturbations = np.random.randn(6, n_samples) * 0.1 # Placeholder scale
+    return perturbations
+
+def render_and_extract_features(pose, feature_extractor):
+    """
+    Render image at pose and extract features.
+    Returns: feature vector (2*k,)
+    """
+    # Render image
+    # Extract features
+    # Return flattened feature vector
+    pass
+
+def compute_jacobian(p_ref, feature_extractor, n_samples):
+    """
+    Compute Jacobian J_f via linear least squares.
+    """
+    # 1. Pose Sampling
+    deltas_p = generate_pose_perturbation(p_ref, n_samples)
     
-    Args:
-        pi: Current parameter value.
-        p_ref: Point on the reference surface B.
+    # 2. Rendering and Feature Extraction
+    # Reference features
+    x_ref = render_and_extract_features(p_ref, feature_extractor)
+    
+    E_list = []
+    B_list = []
+    
+    for i in range(n_samples):
+        # Perturbed pose
+        p_i = p_ref + deltas_p[:, i]
         
-    Returns:
-        Gradient of render output w.r.t. pi.
-    """
-    # 1. Define the mapping X(p, pi)
-    # Note: In practice, t(p, pi) is found by solving phi(p + t*n, pi) = 0
-    # For the purpose of autodiff, we treat the intersection finding as differentiable
-    # or use the linearized operator on the composed function.
+        # Render and extract
+        x_i = render_and_extract_features(p_i, feature_extractor)
+        
+        # 3. Feature Differences
+        delta_x = x_ref - x_i
+        E_list.append(delta_x)
+        
+        # 4. Pose Differences
+        # Assuming p_ref and p_i are [q, t]
+        # Compute relative rotation and translation
+        # Note: [S2] defines delta_p as [delta_q, delta_t]
+        # Implementation detail [G]: Convert quaternions to Gibbs vectors for delta_q
+        delta_q = compute_gibbs_difference(p_ref[:3], p_i[:3])
+        delta_t = p_ref[3:] - p_i[3:]
+        delta_p = np.concatenate([delta_q, delta_t])
+        B_list.append(delta_p)
+        
+    E = np.column_stack(E_list) # (2k, N_s)
+    B = np.column_stack(B_list) # (6, N_s)
     
-    # 2. Use linearize operator for Jacobian-vector product
-    # f is the composed function: render(X(p_ref, pi), pi)
-    f = lambda pi_val: render(X(p_ref, pi_val), pi_val)
+    # 5. Solve Least Squares
+    # J_f = E * B^T * (B * B^T)^-1
+    # Or use numpy.linalg.lstsq
+    J_f, residuals, rank, s = np.linalg.lstsq(B.T, E.T, rcond=None)
+    J_f = J_f.T # (2k, 6)
     
-    # linearize returns a function that applies the Jacobian at pi
-    # J_f(pi) @ v
-    lin_f = jax.linearize(f, pi)
-    
-    # Apply the linearized function to a tangent vector (e.g., 1 for scalar pi)
-    # If pi is a vector, v is the direction of interest
-    v = jnp.ones_like(pi)
-    df_dpi = lin_f(v)
-    
-    return df_dpi
+    return J_f
 
-def X(p_ref, pi):
+def jacobian_free_apply(p_ref, feature_extractor, sigma):
     """
-    Mapping from reference surface B to evolving surface M(pi).
+    Apply Jacobian to covariance matrix sigma without explicit J_f construction.
+    Uses JAX linearize operator.
     """
-    # Compute normal at reference point
-    # n_B(p) = grad_phi(p, pi_0) / |grad_phi(p, pi_0)|
-    # This assumes pi_0 is fixed for the reference surface
-    n_B = compute_normal(p_ref, pi_0)
+    # [S1] Apply linearize operator twice to sigma, transposing dimensions after each application.
+    # This is a high-level description as the exact JAX API for 'linearize' on a custom function
+    # requires defining the function f(p) -> x.
     
-    # Find t such that phi(p_ref + t * n_B, pi) = 0
-    # This step requires a differentiable root-finding method or implicit differentiation
-    # For the sake of the algorithm description, we assume a differentiable solver exists
-    t = solve_intersection(p_ref, n_B, pi)
+    def f(p):
+        x = render_and_extract_features(p, feature_extractor)
+        return x
     
-    return p_ref + t * n_B
+    # JAX linearize returns a function that applies the Jacobian
+    # J_f @ v
+    linearized_f = jax.linearize(f, p_ref)
+    
+    # Apply to sigma (assuming sigma is a matrix)
+    # The source mentions applying it twice to Sigma with transposes.
+    # This likely refers to propagating covariance: Sigma_out = J_f @ Sigma_in @ J_f^T
+    # However, the text says "applying it twice in sequence to Sigma".
+    # This pseudocode captures the intent of avoiding explicit matrix construction.
+    
+    # Step 1: Apply J_f to Sigma
+    # Step 2: Apply J_f^T (or transpose logic) to the result
+    # Note: The exact JAX syntax for this specific covariance propagation is not fully detailed in [S1]
+    # beyond "applying it twice in sequence to Sigma, with the dimensions of the covariance matrix transposed after each application".
+    
+    return None # Placeholder for specific JAX implementation details
 ```
 
 **Parameters:**
-- $\pi_0$: Reference parameter value. Typically $0$. [S2]
-- $\mathbf{n}_B(\mathbf{p})$: Unit normal of the reference surface. Must be smooth and differentiable. [S2]
+*   $N_s$: Number of pose samples. Must be sufficiently large for the least-squares solution to be stable [S2].
+*   Perturbation magnitude: Small enough to justify the linear approximation (Taylor series expansion ignoring higher-order terms) [S2].
 
 **Edge Cases and Pitfalls:**
-- The mapping $X(\cdot, \pi)$ is only one-to-one at $\pi = \pi_0$. For $\pi \neq \pi_0$, the mapping may not be bijective, which can lead to ambiguities in the gradient computation if the surface undergoes topological changes or self-intersections. [S2]
-- The method assumes the normal field $\mathbf{n}_B$ is differentiable. Discontinuities in the normal field will break the differentiability of the mapping. [S2]
-- Finding $t(\mathbf{p}, \pi)$ requires solving a root-finding problem. This must be implemented in a differentiable manner to allow backpropagation. [S2]
+*   **Rank Deficiency:** The matrix $B$ may be rank-deficient if perturbations do not cover all 6 degrees of freedom. Mitigation: Randomly and carefully perturb the pose along all 6 axes [S2].
+*   **Feature Tracking Failure:** If tracking of at least four features is unsuccessful, the method re-initializes with conservative pose samples [S2].
+*   **Higher-Order Terms:** The method relies on a linear approximation. If perturbations are too large, higher-order terms in the Taylor series expansion become significant, reducing accuracy [S2].
 
 ## Operating characteristics
-- **Time Complexity:** The method avoids the $O(N^2)$ cost of explicit Jacobian matrix construction, reducing the cost to $O(N)$ for Jacobian-vector products, where $N$ is the dimension of the parameter space. [S1]
-- **Memory Complexity:** Significantly lower than explicit Jacobian methods, as no large matrices are stored. [S1]
-- **Strengths:** Efficient for high-dimensional parameter spaces; compatible with modern autodiff frameworks like JAX. [S1]
-- **Limitations:** Restricted to cases where a valid reference surface $B$ can be defined and the mapping $X$ is well-behaved near $\pi_0$. [S2]
+*   **Time Complexity:** Depends on the number of samples $N_s$ and the cost of rendering and feature extraction. Solving the least-squares system is $O(N_s)$ for fixed feature dimensions [S2].
+*   **Memory Complexity:** Stores $N_s$ rendered images and feature vectors. The Jacobian matrix size is fixed ($2k \times 6$) [S2].
+*   **Strengths:** Bypasses complex analytical differentiation of the image formation model, including lens and illumination effects [S2]. Learning the inverse Jacobian provides better performance than inverting an estimate [S2].
+*   **Limitations:** Requires multiple renders per Jacobian estimation step. Sensitive to feature tracking failures [S2].
+*   **When to Use:** When analytical gradients are difficult to derive or when the image formation model includes complex non-differentiable components (e.g., specific lens models) [S2].
 
 ## Background
-The method was introduced in the context of differentiable rendering of evolving implicit surfaces. It builds on the work of Zhang et al. [2020] by reparameterizing the surface using a fixed reference surface to facilitate differentiation of path integrals. [S2] The use of the `linearize` operator for Jacobian-free differentiation is a standard technique in JAX-based differentiable programming. [S1]
+The method originates from work on differentiable rendering for pose estimation in proximity operations [S2]. It builds on the idea that online learning to estimate the Jacobian based on visual features can be used for pose estimation rather than just tracking [S2]. The use of the `linearize` operator in JAX for Jacobian-free reparameterization is discussed in the context of Mip-NeRF 360 [S1].
 
 ## Sources
 [S1] Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.00539, fetched 2026-10-26
-[S2] Path-Space Differentiable Rendering of Implicit Surfaces, https://doi.org/10.1145/3641519.3657473, fetched 2026-10-30
+[S2] Differentiable Rendering for Pose Estimation in Proximity Operations, https://core.ac.uk/download/552738213.pdf, fetched 2026-10-30

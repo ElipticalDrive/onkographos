@@ -1,0 +1,77 @@
+# NeuManifold
+
+
+## Overview
+NeuManifold is a three-stage pipeline for reconstructing neural watertight manifolds with efficient, high-quality rendering support [S1]. It solves the problem of generating high-fidelity 3D meshes from 2D images by combining the robust initialization of volume rendering with the geometric precision of differentiable rasterization [S1]. Unlike pure volumetric methods, it produces explicit triangle meshes; unlike pure mesh-based methods, it avoids the artifacts caused by linear interpolation in non-linear density fields by using a differentiable marching cubes algorithm [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of 2D images with known camera poses.
+*   **Output:** A watertight triangle mesh (geometry) and an appearance network (color) capable of real-time rendering [S1].
+
+**Data Structures:**
+*   **Geometry Network ($G$):** A neural field (specifically TensoRF [S1]) that maps a 3D location $x$ to volume density $\sigma_x$.
+*   **Appearance Network ($A$):** A neural field (specifically TensoRF [S1]) that maps a 3D location $x$ and viewing direction $d$ to view-dependent color $c_x$.
+*   **Grid:** An axis-aligned grid used for the Differentiable Marching Cubes (DiffMC) operation [S1].
+*   **Mesh:** A triangle mesh extracted from the grid, containing vertex positions and connectivity [S1].
+*   **Textures:** For deployment, TensoRF weights are stored as three 3D textures and three 1D textures with linear filtering; MLP weights are stored as 2D textures [S1].
+
+**Formulas:**
+The geometry and appearance networks are defined as [S1]:
+$$ \sigma_x, c_x = G(x), A(x, d) $$
+where $x$ is a 3D location, $d$ is the viewing direction, $\sigma_x$ is volume density, and $c_x$ is view-dependent color.
+
+Volume rendering compositing equation [S1]:
+$$ C = \sum_{i=1}^N T_i(1 - \exp(-\sigma_i \delta_i))c_i $$
+$$ T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) $$
+where $C$ is the rendered pixel color, $N$ is the number of samples, $\sigma_i$ is density, $\delta_i$ is ray marching step size, $c_i$ is color, and $T_i$ is volume transmittance.
+
+**Parameters:**
+*   **Neural Field Representation:** TensoRF [7] is used for both geometry and appearance networks [S1].
+*   **Implementation:** DiffMC is implemented in CUDA [S1].
+
+**Steps:**
+
+1.  **Stage 1: Initialization by Volume Rendering**
+    Train the geometry network $G$ and appearance network $A$ using differentiable volume rendering to establish a strong initialization [S1].
+    *   Sample rays through the scene.
+    *   Query $G(x)$ for density $\sigma$ and $A(x, d)$ for color $c$.
+    *   Compute pixel colors $C$ using the volume rendering compositing equation [S1].
+    *   Optimize network weights to minimize rendering loss [S1].
+
+2.  **Stage 2: Manifold Generation & Optimization**
+    Use the pretrained network weights from Stage 1 as initialization. Optimize object topology, geometry, and appearance simultaneously using differentiable rasterization [S1].
+    *   **Iso-surface Extraction:** Apply Differentiable Marching Cubes (DiffMC) on an axis-aligned grid. DiffMC extracts meshes using conventional Marching Cubes [33] and provides gradients for mesh vertices relative to the grid [S1].
+    *   **Rendering:** Feed the resulting mesh into nvdiffrast [28] to render 2D images [S1].
+    *   **Optimization:** Use the rendering loss to update the geometry and appearance networks [S1].
+
+3.  **Stage 3: Geometry and Appearance Fine-tuning (Optional)**
+    Fine-tune only the positions of mesh vertices and the appearance network to minimize rendering loss [S1].
+    *   This preserves original robust edge connections, maintaining watertightness [S1].
+    *   Note: This step may occasionally introduce self-intersections [S1].
+
+4.  **Rendering Deployment**
+    Implement neural networks as GLSL shaders for integration into modern rendering engines [S1].
+    *   **Vertex Shader:** Rasterize triangles [S1].
+    *   **Fragment Shader:** Compute TensoRF and MLPs using modelspace coordinates and viewing directions [S1].
+    *   **Anti-Aliasing:** Use Supersample Anti-Aliasing (SSAA) or Multisample Anti-Aliasing (MSAA) to handle aliasing from undersampling high-frequency features [S1].
+
+**Pitfalls and Edge Cases:**
+*   **DMTet Artifacts:** DMTet [46] produces severe artifacts (peaks and valleys) when extracting meshes from density fields due to reliance on linear interpolation between tetrahedra vertices, which is inadequate for non-linear density fields [S1]. This issue is not present with SDF [S1].
+*   **Self-Intersections:** Stage 3 fine-tuning may introduce self-intersections [S1].
+*   **Grid Alignment:** While DiffMC is less susceptible to non-linear data issues, geometries not aligned with the grid axis may still exhibit some artifacts, though significantly smoother than DMTet [S1].
+
+## Operating characteristics
+*   **Time Complexity:** DiffMC is implemented in CUDA for optimal GPU performance and is approximately 20 times faster than DMTet [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** The method achieves high-quality mesh reconstruction, photorealistic rendering quality, and real-time rendering support [S1].
+*   **Strengths:** Produces watertight, manifold, and intersection-free meshes; handles non-linear density fields better than tetrahedra-based methods; supports real-time rendering via GLSL shaders [S1].
+*   **Limitations:** Stage 3 may introduce self-intersections; SSAA has higher computational cost [S1].
+*   **When to use:** When high-quality, watertight manifold meshes are required with efficient rendering support [S1].
+*   **When not to use:** When SDF-based representations are available and DMTet artifacts are not a concern (though DiffMC is still faster) [S1].
+
+## Background
+NeuManifold was proposed to integrate the advantages of volumetric and mesh-based methods. The authors observed that with proper initialization, mesh-based methods can converge to a more favorable state, enabling the reconstruction of high-quality meshes [S1]. The method addresses the limitations of DMTet [46] in handling non-linear density fields by introducing DiffMC, a differentiable marching cubes algorithm operating on an axis-aligned grid [S1]. The work cites TensoRF [7] as the state-of-the-art neural field representation used in this context [S1].
+
+## Sources
+[S1] NeuManifold: Neural Watertight Manifold Reconstruction with Efficient and High-Quality Rendering Support, https://doi.org/10.1109/wacv61041.2025.00081, fetched 2026-10-29

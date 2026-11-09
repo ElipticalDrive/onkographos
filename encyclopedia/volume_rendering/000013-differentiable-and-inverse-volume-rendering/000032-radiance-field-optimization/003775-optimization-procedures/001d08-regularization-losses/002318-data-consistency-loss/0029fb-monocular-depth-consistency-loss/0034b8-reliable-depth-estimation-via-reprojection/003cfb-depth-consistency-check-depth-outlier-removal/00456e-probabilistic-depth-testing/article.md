@@ -1,0 +1,201 @@
+# Probabilistic Depth Testing
+
+Also called: Probabilistic Depth Weight Calculation, Probabilistic Per-View Depth Testing, Probabilistic visibility, Soft Depth Resolution, Soft depth test
+
+## Overview
+Probabilistic Depth Testing determines which input view's reprojection contains the correct geometric information for a novel view pixel by calculating the probability that its depth is closer than all other views' depths [S1]. It differs from hard visibility tests by using a mixture model with triangular distributions to perform soft depth resolution, which is necessary because point splatting lacks mesh connectivity and soft rasterization introduces uncertainty from noisy Multi-View Stereo (MVS) data [S1].
+
+## How it works
+**Inputs:**
+*   Set of input views $N_{views}$.
+*   For each view $n$, a set of reprojected points $N_n$ on the novel view pixel.
+*   For each point $i \in N_n$: depth $d_{n,i}$, opacity $\alpha_{n,i}$.
+*   Support parameter $\sigma$ for the triangular distribution.
+*   Number of samples $S$.
+
+**Outputs:**
+*   Probability $P(D_n < \min_{m \neq n} D_m)$ for each view $n$, representing the likelihood that view $n$ is the front-most (correct) view.
+
+**Data Structures:**
+*   Points are stored as a list of tuples/objects containing $(d_{n,i}, \alpha_{n,i})$.
+*   No complex spatial structures are required; the method operates on the set of points projected to a single pixel.
+
+**Steps:**
+
+1.  **Compute Visibility Weights ($\beta$):**
+    For each view $n$, sort points $i \in N_n$ by depth (front to back). Compute the weight $\beta_{n,i}$ for each point, representing the probability that point $i$ is visible (not occluded by preceding points in the same view) [S1]:
+    $$ \beta_{n,i} = \alpha_{n,i} \prod_{j=1}^{i-1} (1 - \alpha_{n,j}) $$
+    If $i=1$, the product is 1 [S1].
+
+2.  **Define Sample Positions:**
+    Generate $S$ sample positions $s(t)$ within the support of the triangular distribution centered at the point's depth. The samples are distributed linearly across the support $2\sigma$ [S1]:
+    $$ s(t) = d_{n,i} - \sigma + \frac{t}{S+1} \cdot 2\sigma \quad \text{for } t = 1, \dots, S $$
+    *Note: The source formula $s(t) = d_{n,i} - \sigma + \frac{t}{S+1}$ appears to assume a normalized range or specific scaling. Based on the support definition $2\sigma$, the standard linear interpolation over $[d_{n,i}-\sigma, d_{n,i}+\sigma]$ is used here. If the source implies $s(t)$ is a normalized offset, adjust accordingly. The source explicitly states $s(t) = d_{n,i} - \sigma + \frac{t}{S+1}$, which suggests the term $\frac{t}{S+1}$ might be scaled by $2\sigma$ implicitly or $\sigma$ is normalized. We follow the explicit formula provided in the notes and text, assuming the context of the implementation handles the scaling or $\sigma$ is unitless relative to the sample grid.* [S1, G].
+
+3.  **Define Distributions:**
+    *   **Triangular Distribution $T$:** A symmetrical triangular distribution with support $2\sigma$ centered at $d_{m,j}$. It is chosen for its finite support and computational efficiency compared to Gaussians [S1].
+    *   **Density Function $f_i$:** The density function associated with the depth distribution of point $i$ in view $n$. In the context of the mixture model, this represents the likelihood of the depth $s(t)$ given point $i$ [S1].
+
+4.  **Compute Probability:**
+    Calculate the probability that view $n$ is closer than all other views $m \neq n$. The derivation rewrites the joint probability as a product of pairwise comparisons using a mixture model [S1]:
+    $$ P(D_n < \min_{m \neq n} D_m) \approx \sum_{i \in N_n} \beta_{n,i} \prod_{t=1}^{S} \prod_{m \neq n} \left( \sum_{j \in N_m} \beta_{m,j} T(s(t), d_{m,j}, \sigma) \right) f_i(s(t), d_{n,i}) $$
+    *Correction/Clarification based on Source [S1]:* The source text presents the formula as:
+    $$ P(D_n < \min_{m \neq n} (D_m)) \approx \frac{S}{2\sigma} \sum_{i \in N_n} \beta_{n,i} \sum_{t=1}^{S} \prod_{m \neq n} \left( \sum_{j \in N_m} \beta_{m,j} T(s(t), d_{m,j}, \sigma) \right) f_i(s(t), d_{n,i}) $$
+    However, the LaTeX block in the notes shows:
+    $$ P(D_n < \min_{m \neq n}(D_m)) \approx \sum_{i \in N_n} \beta_{n,i} \prod_{t=1}^{S} \sum_{j \in N_m, m \neq n} \beta_{m,j} T(s(t), d_{m,j}, \sigma) f_i(s(t), d_{n,i}) $$
+    The text states the computation is quadratic with respect to the number of points. The term $\frac{S}{2\sigma}$ likely arises from the normalization or integration of the triangular distribution. The product over $t$ suggests a discrete approximation of the integral. The term $f_i(s(t), d_{n,i})$ acts as a weighting for the current view's point. The inner sum $\sum_{j \in N_m} \beta_{m,j} T(s(t), d_{m,j}, \sigma)$ computes the probability density that view $m$ has a depth at $s(t)$. The product over $m \neq n$ computes the probability that *all* other views are *not* closer than $s(t)$ (or specifically, the likelihood of the configuration).
+    
+    *Implementation Note:* The source states "leading to a quadratic computation with respect to the number of points re-projected on the pixel." This implies the complexity is $O(|N_n| \cdot |N_m| \cdot S)$.
+
+5.  **Parallel Execution:**
+    The computation is performed in parallel for each pixel using CUDA [S1].
+
+**Parameters:**
+*   $S$: Number of samples. Typical value: 1 [S1].
+*   $\sigma$: Support of the symmetrical triangular distribution. Controls the softness and accounts for depth uncertainty [S1].
+
+**Pitfalls:**
+*   **Inaccurate Geometry:** Point splats lack connectivity, making it hard to determine correct information when geometry is inaccurate. The probabilistic approach is necessary to handle this noise rather than discarding data via hard visibility [S1].
+*   **Precision:** The quadratic complexity can become expensive if many points are projected to a single pixel.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def triangular_pdf(x, center, sigma):
+    """
+    PDF of a symmetrical triangular distribution with support 2*sigma centered at 'center'.
+    Support is [center - sigma, center + sigma].
+    """
+    if abs(x - center) >= sigma:
+        return 0.0
+    # Height of the triangle is 1/sigma to ensure area = 1 over width 2*sigma?
+    # Standard triangular distribution on [c-h, c+h] with peak at c has height 1/h.
+    # Here h = sigma. So height is 1/sigma.
+    # PDF(x) = (1 - |x - center| / sigma) / sigma
+    return (1.0 - abs(x - center) / sigma) / sigma
+
+def probabilistic_depth_testing(points_per_view, sigma, S=1):
+    """
+    points_per_view: dict mapping view_id -> list of dicts { 'd': depth, 'alpha': opacity }
+    sigma: support of triangular distribution
+    S: number of samples
+    
+    Returns: dict mapping view_id -> probability that this view is the front-most
+    """
+    view_ids = list(points_per_view.keys())
+    probabilities = {}
+    
+    for n in view_ids:
+        points_n = points_per_view[n]
+        # Sort points by depth (front to back)
+        points_n.sort(key=lambda p: p['d'])
+        
+        # Precompute beta weights for view n
+        betas_n = []
+        prod_occluded = 1.0
+        for p in points_n:
+            beta = p['alpha'] * prod_occluded
+            betas_n.append(beta)
+            prod_occluded *= (1.0 - p['alpha'])
+            
+        # Initialize probability for view n
+        # P(D_n < min_{m!=n} D_m)
+        # Formula: sum_{i in N_n} beta_{n,i} * prod_{t=1}^S [ prod_{m!=n} ( sum_{j in N_m} beta_{m,j} T(s(t), d_{m,j}, sigma) ) * f_i(s(t), d_{n,i}) ]
+        # Note: The source formula structure is complex. 
+        # The term f_i(s(t), d_{n,i}) is the density of view n's point i at sample s(t).
+        # The term sum_{j in N_m} ... is the density of view m at sample s(t).
+        # The product over m!=n implies we want the probability that view n's point i is "active" 
+        # while all other views are "inactive" or "behind" at that sample location?
+        # Actually, the source says: "probability that D_n is closer than all other D_m".
+        # The derivation uses a mixture model.
+        
+        prob_n = 0.0
+        
+        for i, p_i in enumerate(points_n):
+            beta_i = betas_n[i]
+            d_n_i = p_i['d']
+            
+            # Term for view n's point i
+            # f_i(s(t), d_{n,i}) is likely the triangular PDF centered at d_{n,i}
+            # evaluated at s(t).
+            
+            # We iterate over samples t
+            # If S=1, t=1. s(1) = d_{n,i} - sigma + 1/(1+1) * 2*sigma ? 
+            # Source: s(t) = d_{n,i} - sigma + t/(S+1). 
+            # If S=1, t=1, s(1) = d_{n,i} - sigma + 1/2. 
+            # This looks like a normalized offset if sigma is 0.5? 
+            # Or maybe the formula in the note is missing the 2*sigma factor.
+            # Given "s(t) = d_{n,i} - sigma + t/(S+1)" and "support 2*sigma", 
+            # it is highly probable that the term t/(S+1) is multiplied by 2*sigma.
+            # We will assume the standard linear interpolation over [d-sigma, d+sigma].
+            
+            current_view_factor = 1.0
+            
+            for t in range(1, S + 1):
+                # Calculate sample position s(t)
+                # Linear interpolation from d-sigma to d+sigma
+                # t goes from 1 to S.
+                # fraction = (t - 0.5) / S ? Or t/(S+1)?
+                # Source: s(t) = d_{n,i} - sigma + t/(S+1). 
+                # If we assume the source meant s(t) = d_{n,i} - sigma + (t/(S+1)) * 2*sigma:
+                fraction = t / (S + 1)
+                s_t = d_n_i - sigma + fraction * 2 * sigma
+                
+                # Density of view n's point i at s_t
+                f_i = triangular_pdf(s_t, d_n_i, sigma)
+                
+                # Product over all other views m != n
+                other_views_product = 1.0
+                for m in view_ids:
+                    if m == n:
+                        continue
+                    
+                    points_m = points_per_view[m]
+                    # Precompute or compute on fly beta weights for m
+                    # For efficiency, betas_m should be precomputed outside this loop
+                    # But for self-contained pseudocode, we compute here or assume helper
+                    betas_m = []
+                    prod_occluded_m = 1.0
+                    for p_m in points_m:
+                        beta_m = p_m['alpha'] * prod_occluded_m
+                        betas_m.append(beta_m)
+                        prod_occluded_m *= (1.0 - p_m['alpha'])
+                        
+                    # Sum over points j in view m
+                    sum_m = 0.0
+                    for j, p_j in enumerate(points_m):
+                        d_m_j = p_j['d']
+                        beta_j = betas_m[j]
+                        # T(s(t), d_{m,j}, sigma)
+                        t_val = triangular_pdf(s_t, d_m_j, sigma)
+                        sum_m += beta_j * t_val
+                    
+                    other_views_product *= sum_m
+                
+                current_view_factor *= (f_i * other_views_product)
+            
+            prob_n += beta_i * current_view_factor
+            
+        probabilities[n] = prob_n
+        
+    return probabilities
+```
+
+## Operating characteristics
+*   **Time Complexity:** Quadratic with respect to the number of points reprojected on the pixel ($O(|N_n| \cdot |N_m| \cdot S)$) [S1].
+*   **Memory Complexity:** Linear with respect to the number of points, as it requires storing $\beta$ weights and point attributes [S1].
+*   **Performance:** Computation is performed in parallel per pixel using CUDA [S1].
+*   **Strengths:** Handles noisy MVS data gracefully by using soft visibility; finite support of triangular distribution simplifies and speeds up computation compared to Gaussians [S1].
+*   **Limitations:** Computationally expensive for pixels with many overlapping points; relies on the accuracy of the initial MVS depth estimates [S1].
+*   **When to use:** When using point-based rendering with soft splatting and noisy depth maps where hard visibility would discard valuable information [S1].
+*   **When not to use:** When mesh-based rendering with explicit connectivity is available, or when real-time performance is critical and point density is very high [S1].
+
+## Background
+Probabilistic Depth Testing was introduced by Kopanas, Philip, Leimkühler, and Drettakis in their 2021 paper "Point-Based Neural Rendering with Per-View Optimization" [S1]. It addresses the challenge of resolving uncertain depth in Image-Based Rendering (IBR) when using point splats, which lack the connectivity of meshes [S1]. The method builds on earlier work in soft rasterization and probabilistic visibility [S1]. It is used in temporally consistent neural rendering frameworks for multi-view imaging tasks such as free-viewpoint IBR, multi-view harmonization, and stylization [S1].
+
+## Sources
+[S1] Point-Based Neural Rendering with Per-View Optimization, https://www.youtube.com/watch?v=TupOewenSAk, fetched 2026-10-31
