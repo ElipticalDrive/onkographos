@@ -20,7 +20,7 @@ The model adapts the Generalized Boltzmann Equation (GBE) from neutron transfer 
     *   $S(s)$: Effective scattering coefficient at distance $s$.
 
 ### Data Structures
-No complex data structures are required. The model relies on scalar values for coefficients and distances. The parameter $a$ is often mapped to a user-friendly "bleed" parameter $b$ such that $a = 1/b$ [S2, unofficial].
+No complex data structures are required. The model relies on scalar values for coefficients and distances [G]. The parameter $a$ is often mapped to a user-friendly "bleed" parameter $b$ such that $a = 1/b$ [S2, unofficial].
 
 ### Formulas
 1.  **Transmittance:**
@@ -47,12 +47,12 @@ No complex data structures are required. The model relies on scalar values for c
 
 ### Parameters
 *   **$a$ (Shape Parameter):** Controls the shape of the distribution.
-    *   As $a \to \infty$, the model converges to the exponential Beer's Law case.
+    *   As $a \to \infty$, the model converges to the exponential Beer's Law case [G].
     *   Smaller values of $a$ (or larger "bleed" values) result in longer tails, allowing light to penetrate deeper [S2, unofficial].
 *   **Bleed ($b$):** A user-friendly parameter where $a = 1/b$. This maps the parameter to a meaningful unit range for artists [S2, unofficial].
 
 ### Pseudocode
-The following Python-like pseudocode implements the sampling and scattering logic for a single step in the random walk.
+The following Python-like pseudocode implements the sampling and scattering logic for a single step in the random walk [G].
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
@@ -142,7 +142,7 @@ def monte_carlo_step(sigma_e, sigma_s, a, xi):
 ### Edge Cases and Pitfalls
 *   **Boundary Limitations:** The original GBE theory assumes an isotropic medium without boundaries [S1]. While computer graphics adaptations eliminate some limitations, the model is strictly defined for homogeneous media in its basic form [S1].
 *   **Heterogeneous Media:** Although the theory can conceptually support heterogeneous media, it does not provide a feasible solution, nor explain reciprocity and path integral form for such cases, so it cannot be directly applied to general light transport methods for heterogeneous volumes [S1].
-*   **Parameter Intuition:** The raw parameter $a$ can have unintuitive ranges. Using the mapped "bleed" parameter $b$ ($a=1/b$) is recommended for usability [S2, unofficial].
+*   **Parameter Intuition:** The raw parameter $a$ can have unintuitive ranges [S2, unofficial]. Using the mapped "bleed" parameter $b$ ($a=1/b$) is recommended for usability [S2, unofficial].
 *   **Precision:** When $\xi$ is very close to 0, numerical stability in the inverse CDF calculation must be handled (e.g., clamping $\xi$ to a small positive value) [G].
 
 ## Subtopics
@@ -153,14 +153,14 @@ A general, physically-based framework for modeling and rendering spatially-corre
 ## Operating characteristics
 *   **Time Complexity:** Sampling the distance $s$ requires computing a power function and basic arithmetic, which is $O(1)$ per step, similar to exponential sampling but slightly more expensive due to the exponentiation [S2, unofficial].
 *   **Memory Complexity:** $O(1)$, as no additional data structures are needed beyond the coefficients and current distance [S2, unofficial].
-*   **Performance:** The model allows for artistic control over light bleeding, which can be computationally efficient compared to explicitly simulating correlated particle distributions [S2, unofficial].
+*   **Performance:** The model allows for artistic control over light bleeding [S2, unofficial].
 *   **Strengths:** Provides a simple parametric way to model non-exponential attenuation with longer tails, suitable for subsurface scattering and correlated volumetric effects [S2, unofficial].
 *   **Limitations:** Limited to homogeneous media in its standard implementation; does not natively support heterogeneous media with reciprocity in a feasible path-integral form [S1]. The "memory" effect is local to the free flight step and does not account for complex boundary interactions in the original formulation [S1].
 *   **When to Use:** When simulating media with clustered or voided particle distributions (e.g., skin, clouds, fog) where Beer's Law is too aggressive in attenuation [S2, unofficial].
-*   **When Not to Use:** For heterogeneous media where a full path-integral solution is required, or when strict physical accuracy of particle positions is needed over artistic control [S1].
+*   **When Not to Use:** For heterogeneous media where a full path-integral solution or reciprocity is required, as the theory does not provide a feasible solution for such cases [S1].
 
 ## Background
-The Non-Exponential Free Flight Model is based on the Generalized Boltzmann Equation (GBE) from the field of neutron transfer [S1]. It was adapted for computer graphics by Davis and Xu in 2014, published in "A generalized linear transport model for spatially correlated stochastic media" in the Journal of Computational and Theoretical Transport [S2, unofficial]. The model was further popularized in graphics for subsurface scattering by Pixar researchers (e.g., Brent Burley) to provide intuitive artistic control over light bleeding [S2, unofficial]. The Fractional Gaussian Field (FGF) framework was later proposed by Guo et al. in 2019 to extend these concepts to both short-range and long-range correlations [S1].
+The Non-Exponential Free Flight Model is based on the Generalized Boltzmann Equation (GBE) from the field of neutron transfer [S1]. It was developed by Davis and Xu in 2014, published in "A generalized linear transport model for spatially correlated stochastic media" in the Journal of Computational and Theoretical Transport [S2, unofficial]. It was later adopted in production path tracing for subsurface scattering to provide intuitive artistic control over light bleeding [S2, unofficial]. The Fractional Gaussian Field (FGF) framework was later proposed by Guo et al. in 2019 to extend these concepts to both short-range and long-range correlations [S1].
 
 ## Sources
 [S1] A survey on rendering homogeneous participating media, https://doi.org/10.1007/s41095-021-0249-1, fetched 2026-10-26

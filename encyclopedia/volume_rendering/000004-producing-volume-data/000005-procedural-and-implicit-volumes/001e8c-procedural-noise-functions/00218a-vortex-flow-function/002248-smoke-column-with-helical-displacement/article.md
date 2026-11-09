@@ -1,68 +1,31 @@
 # Smoke Column with Helical Displacement
 
-Also called: Helical Smoke Column, Displaced Cylinder Smoke
 
 ## Overview
-This method generates a single column of rising smoke by deforming a vertical cylinder, simulating dispersion, turbulence, and swirling motion [S1, unofficial]. It differs from its parent, the [Vortex Flow Function](2538-vortex-flow-function.md), by explicitly combining vertical helical displacement for bending/swirling with height-dependent density decay and turbulence scaling to simulate the physical dispersion of a smoke plume [S1, unofficial]. It is distinct from [Analytical Vector Fields](3124-analytical-vector-fields.md) by focusing on a specific procedural geometry deformation (cylinder to helical column) rather than general field integration [S1, unofficial].
+This method generates a single column of rising smoke by deforming a vertical cylinder, simulating dispersion, turbulence, and swirling motion [S1, unofficial]. It builds on the [Vortex Flow Function](2538-vortex-flow-function.md) by explicitly combining vertical helical displacement for bending and swirling with height-dependent density decay and turbulence scaling to simulate the physical dispersion of a smoke plume [S1, unofficial].
 
 ## How it works
-**Inputs:**
-- Point position $P = (x, y, z)$ in world space.
-- Cylinder axis direction (typically $Z$ or $Y$).
-- Cylinder base radius $R_0$.
-- Column height $H$.
-- Time parameter $t$ (for animation).
-- Turbulence scale parameter $T_{scale}$.
-- Density decay parameter $D_{decay}$.
-
-**Outputs:**
-- Density value $\rho$ at point $P$.
-- Optional: Displaced position $P'$ for ray marching or deformation.
-
-**Data Structures:**
-- No complex data structures required; the method is procedural and stateless.
-- If storing precomputed values, a 1D array for height-dependent density/turbulence profiles may be used, but direct calculation is standard [S1, unofficial].
+**Inputs:** Point position $P$, cylinder axis direction, cylinder base point, column height $H$, time parameter $t$, turbulence scale, density decay scale. [G]
+**Outputs:** Density value $\rho$ at point $P$. [G]
+**Data Structures:** No complex data structures required; the method is procedural and stateless [G].
 
 **Steps:**
-1. **Normalize Height:** Calculate the normalized height $h$ of the point relative to the cylinder base and top.
-   $$ h = \frac{P \cdot \mathbf{axis} - P_{base} \cdot \mathbf{axis}}{H} $$
-   Clamp $h$ to $[0, 1]$. If $h < 0$ or $h > 1$, the point is outside the column bounds.
-
-2. **Calculate Helical Displacement:** Determine the angular displacement $\theta$ based on height and time to create the swirling effect.
-   $$ \theta = h \cdot K_{helix} + t \cdot K_{time} $$
-   Where $K_{helix}$ controls the tightness of the helix and $K_{time}$ controls the rotation speed [S1, unofficial].
-   Compute the displaced horizontal position $(x', y')$ by rotating the original horizontal position $(x, y)$ around the cylinder axis by $\theta$.
-   $$ x' = x \cos(\theta) - y \sin(\theta) $$
-   $$ y' = x \sin(\theta) + y \cos(\theta) $$
-   The displaced point is $P' = (x', y', P_z)$.
-
-3. **Calculate Distance from Center:** Compute the radial distance $r$ of the displaced point $P'$ from the cylinder axis.
-   $$ r = \sqrt{x'^2 + y'^2} $$
-
-4. **Apply Turbulence:** Increase turbulence as a function of height to simulate air currents. Add a noise-based perturbation to the radial distance or the displacement angle.
-   $$ r_{turbulent} = r + \text{Noise}(P', T_{scale}) \cdot T_{factor}(h) $$
-   Where $T_{factor}(h)$ increases with $h$ [S1, unofficial]. The noise function should be fractal Brownian motion (fBm) or similar, scaled by height.
-
-5. **Calculate Density:** Compute the density based on the distance from the center and height.
-   - **Radial Profile:** Define a base density profile $\rho_{radial}(r)$, often a Gaussian or smoothstep falloff from the center.
-     $$ \rho_{radial}(r) = \exp\left(-\frac{r^2}{2 \sigma^2}\right) $$
-   - **Height Decay:** Decrease density as a function of height to simulate dispersion.
-     $$ \rho_{height}(h) = 1 - h^{D_{decay}} $$
-   - **Final Density:**
-     $$ \rho = \rho_{radial}(r_{turbulent}) \cdot \rho_{height}(h) $$
+1. **Normalize Height:** Calculate the normalized height $h$ of the point relative to the cylinder base and top. Clamp $h$ to $[0, 1]$. If $h < 0$ or $h > 1$, the point is outside the column bounds and returns zero density [G].
+2. **Helical Displacement:** Displace the point using a vertical helix to simulate bending and swirling before calculating distance from the cylinder center [S1, unofficial]. Compute an angular offset based on height and time, then rotate the horizontal coordinates around the cylinder axis [G].
+3. **Radial Distance:** Compute the radial distance $r$ of the displaced point from the cylinder axis [S1, unofficial].
+4. **Turbulence:** Increase turbulence as a function of height to simulate air currents, making the column start smooth and become turbulent [S1, unofficial]. Add a noise-based perturbation scaled by height to the radial distance or displacement angle [G].
+5. **Density:** Decrease density as a function of height to simulate dispersion [S1, unofficial]. Combine a radial falloff profile with the height decay to compute the final density [G].
 
 **Parameters:**
-- $K_{helix}$: Helix twist factor. Typical value: $2\pi$ to $4\pi$ per unit height.
-- $K_{time}$: Rotation speed. Typical value: $0.1$ to $1.0$ radians per second.
-- $T_{scale}$: Turbulence frequency. Typical value: $2.0$ to $5.0$.
-- $D_{decay}$: Density decay exponent. Typical value: $1.0$ to $2.0$.
-- $\sigma$: Radial spread factor. Typical value: $0.5 \cdot R_0$.
+- Turbulence scale: Controls the magnitude of height-dependent turbulence. Typical value: $1.0$ to $3.0$ [G].
+- Density decay scale: Controls the rate of height-dependent density falloff. Typical value: $1.0$ to $2.0$ [G].
+- Time $t$: Animation frame or elapsed time. Typical value: $0.0$ to $10.0$ [G].
 
 **Edge Cases and Pitfalls:**
-- **Boundary Conditions:** Points outside the height range $[0, H]$ should return zero density.
-- **Precision:** At very high heights, floating-point precision may affect the noise calculation. Use normalized coordinates for noise input.
-- **Degenerate Input:** If $H=0$, the column has no height; handle by returning zero density.
-- **Turbulence Continuity:** Ensure the noise function is continuous to avoid visible seams in the smoke column.
+- Points outside the height range $[0, H]$ return zero density [G].
+- Floating-point precision at extreme heights may affect noise calculations; use normalized coordinates for noise input [G].
+- If $H=0$, the column has no height; handle by returning zero density [G].
+- Ensure the noise function is continuous to avoid visible seams in the smoke column [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -70,91 +33,57 @@ This method generates a single column of rising smoke by deforming a vertical cy
 ```python
 import math
 
-def smoke_column_density(P, axis, P_base, H, R0, t, K_helix, K_time, T_scale, D_decay, sigma):
+def smoke_column_density(P, axis, P_base, H, t, turb_scale, density_decay_scale):
     """
     Calculate density of a smoke column with helical displacement.
-    
-    Args:
-        P: (x, y, z) point position
-        axis: (ax, ay, az) cylinder axis vector (normalized)
-        P_base: (bx, by, bz) base point of the cylinder
-        H: float, height of the cylinder
-        R0: float, base radius of the cylinder
-        t: float, time parameter
-        K_helix: float, helix twist factor
-        K_time: float, rotation speed
-        T_scale: float, turbulence frequency
-        D_decay: float, density decay exponent
-        sigma: float, radial spread factor
-        
-    Returns:
-        float: density value
+    Assumes axis-aligned Z for simplicity; general axis requires rotation matrix [G].
     """
     # Step 1: Normalize Height
-    # Project P onto axis relative to base
     vec = (P[0] - P_base[0], P[1] - P_base[1], P[2] - P_base[2])
-    height_proj = vec[0]*axis[0] + vec[1]*axis[1] + vec[2]*axis[2]
-    h = height_proj / H
-    
-    # Clamp height
+    h = (vec[0]*axis[0] + vec[1]*axis[1] + vec[2]*axis[2]) / H
     if h < 0.0 or h > 1.0:
         return 0.0
-    
-    # Step 2: Calculate Helical Displacement
-    theta = h * K_helix + t * K_time
-    
-    # Calculate horizontal position relative to axis
-    # Assuming axis is Z for simplicity, otherwise rotate P and P_base to align axis with Z
-    # For general axis, we need to project P onto the plane perpendicular to axis
-    # Simplified for Z-axis alignment:
-    x = P[0] - P_base[0]
-    y = P[1] - P_base[1]
-    
-    # Rotate by theta
+
+    # Step 2: Helical Displacement
+    theta = h * 2.0 * math.pi + t * 0.5
+    x, y = P[0] - P_base[0], P[1] - P_base[1]
     x_prime = x * math.cos(theta) - y * math.sin(theta)
     y_prime = x * math.sin(theta) + y * math.cos(theta)
-    
-    # Step 3: Calculate Distance from Center
+
+    # Step 3: Radial Distance
     r = math.sqrt(x_prime**2 + y_prime**2)
-    
-    # Step 4: Apply Turbulence
-    # Simple noise approximation using sine waves for demonstration
-    # In practice, use a proper noise function like Perlin or Simplex
-    noise_val = math.sin(r * T_scale * 10.0 + h * T_scale * 20.0) * 0.1
-    # Increase turbulence with height
-    turbulence_factor = 1.0 + h * 2.0
-    r_turbulent = r + noise_val * turbulence_factor
-    
-    # Step 5: Calculate Density
-    # Radial profile
-    rho_radial = math.exp(-(r_turbulent**2) / (2 * sigma**2))
-    
-    # Height decay
-    rho_height = 1.0 - (h ** D_decay)
-    
-    # Final density
-    rho = rho_radial * rho_height
-    
-    return rho
+
+    # Step 4: Turbulence
+    turb_factor = 1.0 + h * turb_scale
+    noise_val = math.sin(r * 10.0 + h * 20.0) * 0.1
+    r_turbulent = r + noise_val * turb_factor
+
+    # Step 5: Density
+    rho_radial = math.exp(-(r_turbulent**2) / 0.5)
+    rho_height = 1.0 - math.pow(h, density_decay_scale)
+    return rho_radial * rho_height
 ```
 
 ## Subtopics
 
+### [Procedural Flame Density & Color Shader](3033-procedural-flame-density-color-shader.md)
+This method computes the density and color of a procedural flame volume by deforming a base helical flow path with height-scaled turbulence and applying spatial attenuation ramps. It builds on [Smoke Column with Helical Displacement](2743-smoke-column-with-helical-displacement.md) by adding complex shaping via sine waves and a lookup table, while explicitly handling vertical fading and minimum density thresholds to create a realistic fire appearance. It differs from its parent by introducing a multi-stage attenuation process (horizontal and vertical) and a direct density-to-color mapping that shifts from yellow to red based on density values.
+
 ### Synapse Volume Construction
-This variant constructs volumetric emission objects (synapses) connecting an inner sphere to an outer sphere, simulating light-emitting plasma [S2, unofficial]. It differs from the standard smoke column by using a straight-line base geometry with seven layered randomization factors: circular endpoint offset, sinusoidal curve amplitude offset, width offset, Gaussian color gradients (Electric Blue to Neon Pink), exponential endpoint expansion for surface diffusion, and surface illumination on the outer sphere [S2, unofficial]. It uses 82 instances of the synapse object [S2, unofficial].
+This variant constructs volumetric emission objects (synapses) connecting an inner sphere to an outer sphere, simulating light-emitting plasma [S2, unofficial]. It differs from the standard smoke column by using a straight-line base geometry with seven layered randomization factors: circular endpoint offset, sinusoidal curve amplitude offset, width offset, Gaussian color gradients (Electric Blue to Neon Pink), exponential endpoint expansion for surface diffusion, and surface illumination on the outer sphere [S2, unofficial]. It uses 82 instances of the synapse object (noted as 80 in the main text passage) [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per sample, as it involves basic arithmetic and noise evaluation.
-- **Memory Complexity:** $O(1)$, no data structures required.
+- **Time Complexity:** $O(1)$ per sample, as it involves basic arithmetic and noise evaluation [G].
+- **Memory Complexity:** $O(1)$, no data structures required [G].
 - **Measured Performance:** Not given in the sources.
-- **Scaling:** Scales linearly with the number of samples. Turbulence noise evaluation can be optimized with precomputed noise grids or fast noise algorithms.
-- **Strengths:** Simple to implement, computationally inexpensive, produces visually convincing smoke columns with minimal parameters.
-- **Limitations:** Lacks physical accuracy (e.g., no fluid dynamics simulation), turbulence is procedural and may not match real-world fluid behavior, limited to cylindrical geometries.
-- **When to Use:** Real-time rendering, background elements, or when performance is critical and physical accuracy is not required.
-- **When Not to Use:** Scientific visualization requiring accurate fluid dynamics, or scenes with complex interacting smoke plumes.
+- **Scaling:** Scales linearly with the number of samples; turbulence noise evaluation can be optimized with precomputed noise grids or fast noise algorithms [G].
+- **Strengths:** Simple to implement, computationally inexpensive, produces visually convincing smoke columns with minimal parameters [G].
+- **Limitations:** Lacks physical accuracy (e.g., no fluid dynamics simulation), turbulence is procedural and may not match real-world fluid behavior, limited to cylindrical geometries [G].
+- **When to Use:** Real-time rendering, background elements, or when performance is critical and physical accuracy is not required [G].
+- **When Not to Use:** Scientific visualization requiring accurate fluid dynamics, or scenes with complex interacting smoke plumes [G].
 
 ## Background
-This method originates from procedural modeling techniques for gases and fluids, as described by David Ebert in "Procedural Modeling, Animation, and Rendering of Gases, Fluids, and Textures" [S1, unofficial]. It builds on the concept of deforming solid spaces over time to simulate gas motion, specifically using helical displacement to add swirling and bending to a vertical cylinder [S1, unofficial]. The approach is similar to steam rising procedures but adapted for smoke with increased turbulence and density decay [S1, unofficial].
+This method originates from procedural modeling techniques for gases and fluids [S1, unofficial]. It builds on the concept of deforming solid spaces over time to simulate gas motion, specifically using helical displacement to add swirling and bending to a vertical cylinder [S1, unofficial]. The approach is similar to steam rising procedures but adapted for smoke with increased turbulence and density decay [S1, unofficial].
 
 ## Sources
 [S1] Procedural Modeling, Animation, and Rendering of Gases, Fluids, and Textures, https://www.researchgate.net/profile/David-Ebert-4/publication/2786953_Procedural_Modeling_Animation_and_Rendering_of_Gases_Fluids_and_Textures/links/00b7d51a73e42a3c4e000000/Procedural-Modeling-Animation-and-Rendering-of-Gases-Fluids-and-Textures.pdf, fetched 2026-10-31 (unofficial)

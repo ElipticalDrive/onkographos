@@ -1,0 +1,135 @@
+--- v001.md
++++ v002.md
+@@ -4,84 +4,70 @@
+ 
+ ## Overview
+-Motion blur simulates the integration of light over a finite shutter interval $[t_0, t_1]$ rather than an instantaneous snapshot [S1, unofficial]. In path tracing, this is achieved by sampling a random time $t$ for each ray, evaluating scene geometry at that specific time, and accumulating the result [S1, unofficial]. This method distinguishes itself from post-processing blur techniques by physically modeling the temporal accumulation of light transport, ensuring correct interaction between moving objects and dynamic lighting [S1, unofficial].
++Motion blur simulates the integration of radiance over a finite shutter interval $[t_0, t_1]$ rather than at a single instant [S1, unofficial]. In path tracing, this is achieved by assigning a unique random time sample to each ray, causing moving objects to appear blurred along their trajectories [S1, unofficial]. It differs from post-processing blur by correctly handling occlusion and perspective changes during the exposure [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- Shutter interval $[t_0, t_1]$.
+-- Scene geometry with time-varying transforms (position, rotation, scale) for each object or vertex [S1, unofficial].
+-- Camera parameters (view and projection matrices) which may also be time-varying [S1, unofficial].
+-- Random number generator state.
+-
+-**Outputs:**
+-- A single pixel color value representing the integrated radiance over the shutter interval.
++**Inputs:** Camera parameters (view/projection matrices), scene geometry with per-object transform data (position, rotation, scale) or velocity vectors, and shutter interval $[t_0, t_1]$.
++**Outputs:** A single pixel color value representing the time-integrated radiance.
+ 
+ **Data Structures:**
+-- **Transform Data:** Per-object or per-vertex transformation matrices $M(t)$ or velocity vectors $\mathbf{v}(t)$ defined for the interval $[t_0, t_1]$ [S1, unofficial].
+-- **Ray Structure:** Contains origin $\mathbf{o}$, direction $\mathbf{d}$, and time $t$ [S1, unofficial].
++*   **Transform Data:** Per-object matrices or velocity vectors. For interpolated transforms, the position $\mathbf{p}(t)$ is often linearly interpolated: $\mathbf{p}(t) = \mathbf{p}_0 + (\mathbf{p}_1 - \mathbf{p}_0) \cdot \frac{t - t_0}{t_1 - t_0}$ [S1, unofficial].
++*   **Ray Structure:** Contains origin $\mathbf{o}$, direction $\mathbf{d}$, and time $t$.
+ 
+ **Steps:**
+-1.  **Sample Time:** Generate a uniform random number $u \in [0, 1]$ and compute the sample time $t$:
++1.  **Sample Time:** Generate a uniform random number $u \in [0, 1]$ and compute the shutter time $t$:
+     $$ t = t_0 + u \cdot (t_1 - t_0) $$
+     [S1, unofficial]
+-
+-2.  **Evaluate Transforms:** Retrieve or compute the transformation matrices for all relevant scene objects at time $t$. If explicit transforms are not stored, interpolate between keyframes or use velocity data:
+-    $$ \mathbf{p}(t) = \mathbf{p}_0 + \mathbf{v} \cdot (t - t_0) $$
+-    [S1, unofficial]
+-
+-3.  **Construct Ray:** Build the ray origin and direction based on the camera state at time $t$. For a pinhole camera, the origin is the camera position at $t$, and the direction is calculated from the pixel coordinates transformed by the camera's view matrix at $t$ [S1, unofficial].
+-    $$ \mathbf{o} = \text{CameraPosition}(t) $$
+-    $$ \mathbf{d} = \text{UnprojectPixel}(uv, \text{CameraView}(t)) $$
+-    [S1, unofficial]
+-
+-4.  **Trace Ray:** Perform the standard path tracing steps (intersection, shading, recursion) using the ray $(\mathbf{o}, \mathbf{d}, t)$ and the scene geometry transformed to time $t$ [S1, unofficial].
+-
+-5.  **Accumulate:** Add the resulting radiance to the pixel buffer. Repeat for multiple samples to reduce noise.
+-
+-**Parameters:**
+-- **Shutter Interval:** $[t_0, t_1]$. Typical values depend on the simulated frame rate (e.g., $1/60$ seconds for 60fps). [S1, unofficial]
+-- **Samples per Pixel:** Number of temporal samples $N$. Higher $N$ reduces noise but increases computation time. [S1, unofficial]
+-
+-**Edge Cases and Pitfalls:**
+-- **Discontinuous Motion:** If objects teleport or change topology, linear interpolation of transforms may produce artifacts. [G]
+-- **Velocity Data:** Requires careful handling of per-vertex vs. per-object velocities. [S1, unofficial]
+-- **Precision:** Floating-point precision in time interpolation can cause jitter if not handled carefully. [G]
++2.  **Evaluate Transforms:** Update the world transform of each object in the scene to its state at time $t$ using the available velocity or interpolated keyframe data [S1, unofficial].
++3.  **Trace Ray:** Cast the ray through the scene using the transformed geometry. The intersection logic must account for the object's position at time $t$ [S1, unofficial].
++4.  **Accumulate:** Repeat steps 1–3 for multiple samples per pixel and average the results to reduce noise [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def trace_motion_blur_ray(uv, t0, t1, scene, camera, rng):
+-    # Step 1: Sample time
+-    u = rng.uniform(0.0, 1.0)
+-    t = lerp(t0, t1, u)
+-    
+-    # Step 2: Evaluate camera and scene transforms at time t
+-    camera_transform = camera.get_transform(t)
+-    scene_objects = scene.get_transforms(t)
+-    
+-    # Step 3: Construct ray
+-    origin = camera_transform.position
+-    direction = unproject_pixel(uv, camera_transform.view_matrix)
+-    ray = Ray(origin, direction, t)
+-    
+-    # Step 4: Trace ray with time-aware intersection
+-    hit = trace_ray(ray, scene_objects)
+-    
+-    if hit is not None:
+-        return shade(hit, scene_objects, t)
+-    else:
+-        return get_background_radiance(ray, t)
++def trace_motion_blur_pixel(uv, t0, t1, num_samples, scene):
++    color = vec3(0.0)
++    for i in range(num_samples):
++        # 1. Sample time
++        u = random_float()
++        t = lerp(t0, t1, u)
++        
++        # 2. Evaluate transforms at time t
++        # This updates the scene's world matrices based on t
++        scene.update_transforms(t)
++        
++        # 3. Construct ray
++        # Origin and direction are computed from camera matrices
++        # Note: Camera motion can also be sampled if the camera moves
++        origin = camera.get_origin(uv, t)
++        direction = camera.get_direction(uv, t)
++        
++        # 4. Trace ray against transformed scene
++        hit = trace_ray(origin, direction, scene)
++        
++        if hit:
++            color += hit.radiance
++        else:
++            color += background_radiance
++            
++    return color / num_samples
+ ```
++
++**Parameters:**
++*   $t_0, t_1$: Shutter start and end times. Typical values depend on the simulation time scale [S1, unofficial].
++*   `num_samples`: Number of temporal samples per pixel. Higher values reduce noise but increase cost [S1, unofficial].
++
++**Edge Cases:**
++*   **High Velocity:** If objects move significantly between frames, linear interpolation may cause artifacts. Per-object velocity data is preferred [S1, unofficial].
++*   **Camera Motion:** If the camera moves, the ray origin and direction must also be sampled at time $t$ [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot C)$, where $N$ is the number of temporal samples per pixel and $C$ is the cost of a single path trace. [S1, unofficial]
+-- **Memory Complexity:** Requires storage for time-varying geometry data (e.g., vertex buffers at multiple keyframes or velocity fields). [S1, unofficial]
+-- **Strengths:** Physically accurate motion blur; handles complex interactions between moving objects and dynamic lighting; no post-processing artifacts. [S1, unofficial]
+-- **Limitations:** Computationally expensive due to multiple samples; requires efficient time-varying scene representation; can introduce temporal noise if samples are insufficient. [S1, unofficial]
+-- **When to Use:** High-quality offline rendering or real-time applications with sufficient hardware resources and time-varying scenes. [S1, unofficial]
+-- **When Not to Use:** Static scenes (use post-processing blur); real-time applications with strict performance constraints and no time-varying geometry. [G]
++*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the number of temporal samples per pixel. Each sample requires a full scene transform update and ray trace [S1, unofficial].
++*   **Memory Complexity:** $O(V)$, where $V$ is the number of vertices/objects, to store transform history or velocity data [S1, unofficial].
++*   **Strengths:** Physically accurate motion blur; handles occlusion and perspective correctly [S1, unofficial].
++*   **Limitations:** Requires per-object motion data; noisy with few samples; expensive due to repeated scene traversal [S1, unofficial].
+ 
+ ## Background
+-Motion blur in path tracing was introduced as a natural extension of the path tracing algorithm to handle temporal integration [S1, unofficial]. It is a standard technique in modern physically based renderers. [S1, unofficial]
++Motion blur in path tracing is a standard technique for achieving cinematic realism. It relies on the principle that a camera shutter integrates light over a finite time interval [S1, unofficial]. The method described here is a fundamental implementation detail in modern path tracers, often discussed in the context of camera models and anti-aliasing [S1, unofficial].
+ 
+ ## Sources

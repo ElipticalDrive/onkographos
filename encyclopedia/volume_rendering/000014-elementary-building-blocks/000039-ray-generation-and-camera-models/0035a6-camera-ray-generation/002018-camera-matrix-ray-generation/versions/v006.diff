@@ -1,0 +1,91 @@
+--- v005.md
++++ v006.md
+@@ -11,5 +11,5 @@
+ *   Camera Intrinsics: A 3x3 matrix $K$ (or parameters $f_x, f_y, c_x, c_y$) [S12, unofficial].
+ *   Camera Extrinsic: A 4x4 Camera-to-World transformation matrix $T_{c2w}$ (or SE(3) pose) [S11, unofficial].
+-*   Optional: Principal point offsets $(c_x, c_y)$ if not embedded in $K$; pixel centering flag.
++*   Optional: Principal point offsets $(c_x, c_y)$ if not embedded in $K$; pixel centering flag [S21, unofficial].
+ 
+ **Outputs:**
+@@ -18,5 +18,5 @@
+ 
+ **Data Structures:**
+-*   $K$: 3x3 matrix. $K_{0,0}=f_x, K_{1,1}=f_y, K_{0,2}=c_x, K_{1,2}=c_y$. Skew and aspect ratio are typically assumed 0 and 1 respectively in simplified models [S27, unofficial].
++*   $K$: 3x3 matrix. $K_{0,0}=f_x, K_{1,1}=f_y, K_{0,2}=c_x, K_{1,2}=c_y$. Skew and aspect ratio are typically assumed 0 and 1 respectively in simplified models [S31, unofficial].
+ *   $T_{c2w}$: 4x4 matrix. The upper-left 3x3 block is the rotation matrix $\mathbf{R}_{c2w}$ [S12, unofficial]. The rightmost column (indices 0-2 of column 3) is the translation vector $\mathbf{t}_{c2w}$ (camera origin in world space) [S12, unofficial].
+ 
+@@ -25,6 +25,6 @@
+ 1.  **Generate Pixel Coordinates:**
+     Create 2D grids of pixel coordinates $(i, j)$ for $i \in [0, W)$ and $j \in [0, H)$ [S27, unofficial].
+-    *   Convention: $i$ corresponds to columns (x-axis), $j$ corresponds to rows (y-axis) [S11, S17, unofficial].
+-    *   Pixel Centering: Add 0.5 to coordinates to target the center of each pixel: $i' = i + 0.5, j' = j + 0.5$ [S21, unofficial]. Some implementations omit this if calibration accuracy is insufficient [S9, S28, unofficial].
++    *   Convention: $i$ corresponds to columns (x-axis), $j$ corresponds to rows (y-axis) [S11, unofficial].
++    *   Pixel Centering: Add 0.5 to coordinates to target the center of each pixel: $i' = i + 0.5, j' = j + 0.5$ [S21, unofficial]. Some implementations omit this if calibration accuracy is insufficient [S9, unofficial].
+ 
+ 2.  **Compute Camera-Space Directions:**
+@@ -33,5 +33,5 @@
+     \mathbf{d}_{\text{cam}} = \begin{bmatrix} \frac{i' - c_x}{f_x} \\ -\frac{j' - c_y}{f_y} \\ -1 \end{bmatrix}
+     $$
+-    Note the negative sign on the $y$-component if the image y-axis (down) is opposite to the camera v-axis (up), and the $-1$ for the z-component indicating forward projection [S11, S17, S27, S28, unofficial].
++    Note the negative sign on the $y$-component if the image y-axis (down) is opposite to the camera v-axis (up), and the $-1$ for the z-component indicating forward projection [S11, S17, unofficial].
+     *   Alternative formulation using normalized device coordinates (NDC) and FOV:
+         $$ x_{\text{ndc}} = \frac{2(i + 0.5)}{W} - 1, \quad y_{\text{ndc}} = 1 - \frac{2(j + 0.5)}{H} $$
+@@ -44,5 +44,5 @@
+     Or element-wise:
+     $$ \mathbf{d}_{\text{world}} = \sum_{k=0}^{2} d_{\text{cam}, k} \cdot \mathbf{R}_{c2w}[:, k] $$
+-    [S8, S17, S27, S29, unofficial].
++    [S8, S17, unofficial].
+ 
+ 4.  **Normalize Directions:**
+@@ -54,5 +54,11 @@
+     The ray origin is the camera position in world space, extracted from the translation component of $T_{c2w}$ [S11, unofficial].
+     $$ \mathbf{o}_{\text{world}} = T_{c2w}[:3, 3] $$
+-    This origin is broadcast to all pixels $(H, W)$ [S17, S19, S21, unofficial].
++    This origin is broadcast to all pixels $(H, W)$ [S17, S19, unofficial].
++
++**Pitfalls:**
++*   Division by zero if $f_x$ or $f_y$ is 0 [S15, S20, unofficial].
++*   Sign convention mismatches: Image coordinates typically have Y pointing down, while camera space Y points up, requiring a negation in the direction calculation [S6, unofficial].
++*   Pixel centering omission: Skipping the $+0.5$ offset can introduce sub-pixel misalignment, though some pipelines omit it due to insufficient calibration accuracy [S9, S10, unofficial].
++*   Zero direction components: If a ray direction component is exactly 0, ray-box intersection tests (downstream) may fail or require special handling for infinite t-values [S15, unofficial].
+ 
+ **Pseudocode:**
+@@ -117,5 +123,5 @@
+     # R_c2w.T shape: (3, 3)
+     # Result shape: (H, W, 3)
+-    directions_world = torch.einsum('hwk,kj->hwj', directions_cam, R_c2w)
++    directions_world = directions_cam @ R_c2w.T
+     
+     # 7. Normalize directions
+@@ -131,17 +137,23 @@
+ ## Subtopics
+ 
++### [Camera Intrinsic Matrix Construction](3112-camera-intrinsic-matrix-construction.md)
++Constructs the 3x3 camera intrinsic matrix $K$ from focal length and image dimensions, serving as the bridge between pixel coordinates and normalized device coordinates (NDC) for ray generation. It differs from [Pinhole Camera Ray Generation](5058-pinhole-camera-ray-generation.md) by explicitly building the calibration matrix $K$ rather than assuming a canonical pinhole model with unit focal length and center at the image center. Choose it when precise calibration parameters are available.
++
++### [Pinhole Camera Ray Generation](5058-pinhole-camera-ray-generation.md)
++Computes the origin and direction vectors for rays corresponding to each pixel on an image plane, assuming an ideal pinhole camera model with no lens distortion or depth of field. It explicitly constructs the view frustum geometry (basis vectors and view plane bounds) from high-level camera parameters (eye position, look-at point, up vector, and field of view) rather than relying on a pre-computed projection matrix. Choose it for simple, parameter-driven camera setups without explicit calibration matrices.
++
+ ### Camera Intrinsics Simplification
+-Constructs the 3x3 camera intrinsic matrix $K$ assuming zero skew and aspect ratio of 1 [S31, unofficial]. The matrix is defined as $K = \begin{bmatrix} f_{\text{camera}} & 0 & W/2 \\ 0 & f_{\text{camera}} & H/2 \\ 0 & 0 & 1 \end{bmatrix}$, where $f_{\text{camera}}$ is the focal length, $W$ is image width, and $H$ is image height [S31, unofficial]. This simplification assumes square pixels and a principal point at the image center [S31, unofficial].
++Constructs the 3x3 camera intrinsic matrix $K$ assuming zero skew and an aspect ratio of 1 [S31, unofficial]. The matrix is defined as $K = \begin{bmatrix} f_{\text{camera}} & 0 & W/2 \\ 0 & f_{\text{camera}} & H/2 \\ 0 & 0 & 1 \end{bmatrix}$, where $f_{\text{camera}}$ is the focal length, $W$ is image width, and $H$ is image height [S31, unofficial]. This simplification assumes square pixels and a principal point at the image center [S31, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(W \times H)$ to generate rays for all pixels [G]. The operations are element-wise vector math, highly parallelizable on GPU.
+-*   **Memory Complexity:** $O(W \times H)$ to store the origin and direction tensors.
+-*   **Strengths:** Explicit control over camera calibration; supports arbitrary principal points and focal lengths; standard in NeRF and modern rendering pipelines.
+-*   **Limitations:** Requires accurate calibration data; sensitive to errors in $K$ or $T_{c2w}$; division by zero if focal length is 0.
+-*   **When to use:** When camera parameters are known from calibration (e.g., COLMAP, sensor data) or when precise control over projection geometry is needed.
+-*   **When not to use:** For simple orthographic views or when only relative camera motion is available without scale/intrinsics.
++*   **Time Complexity:** $O(W \times H)$ to generate rays for all pixels [G]. The operations are element-wise vector math, highly parallelizable on GPU [G].
++*   **Memory Complexity:** $O(W \times H)$ to store the origin and direction tensors [G].
++*   **Strengths:** Explicit control over camera calibration; supports arbitrary principal points and focal lengths; standard in NeRF and modern rendering pipelines [S11, S17, S27, unofficial].
++*   **Limitations:** Requires accurate calibration data; sensitive to errors in $K$ or $T_{c2w}$; division by zero if focal length is 0 [S15, S20, unofficial].
++*   **When to use:** When camera parameters are known from calibration (e.g., COLMAP, sensor data) or when precise control over projection geometry is needed [S11, S17, unofficial].
++*   **When not to use:** For simple orthographic views or when only relative camera motion is available without scale/intrinsics [G].
+ 
+ ## Background
+-Originating from standard computer graphics and photogrammetry, this method formalizes the pinhole camera model using matrix algebra. It is widely used in Neural Radiance Fields (NeRF) [S11, S17, S27, unofficial] and volume rendering pipelines [S1, S7, unofficial] to generate rays from camera parameters for consistent viewing geometry. The explicit use of the intrinsic matrix $K$ allows for handling non-square pixels and off-center principal points, generalizing the basic pinhole model.
++Originating from standard computer graphics and photogrammetry, this method formalizes the pinhole camera model using matrix algebra [G]. It is widely used in Neural Radiance Fields (NeRF) [S11, S17, S27, unofficial] and volume rendering pipelines [S1, S7, unofficial] to generate rays from camera parameters for consistent viewing geometry. The explicit use of the intrinsic matrix $K$ allows for handling non-square pixels and off-center principal points, generalizing the basic pinhole model [S31, unofficial].
+ 
+ ## Sources

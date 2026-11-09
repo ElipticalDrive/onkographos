@@ -1,33 +1,30 @@
 # LPIPS Computation
 Also called: LPIPS, Learned Perceptual Image Patch Similarity, LPIPS Loss
 ## Overview
-LPIPS (Learned Perceptual Image Patch Similarity) measures perceptual similarity between two images by comparing deep feature representations rather than raw pixel values, outputting a distance metric where lower values indicate higher similarity [S1, unofficial]. It is preferred over pixel-space metrics like Mean Squared Error (MSE) because it accounts for neighboring information and structural context, providing a more robust optimization objective for differentiable rendering [S2, unofficial].
+LPIPS (Learned Perceptual Image Patch Similarity) measures perceptual similarity between original and reconstructed images by comparing deep features extracted from neural networks, outputting a distance metric where lower values indicate higher similarity [S1][S2, unofficial]. It is preferred over pixel-space metrics like Mean Squared Error (MSE) because it accounts for neighboring information and structural context, providing a more robust optimization objective for differentiable rendering [S3, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Two image tensors, `render` (the generated image) and `gt` (the ground truth image). Both are expected to be in the range $[0, 1]$ and have shape $(H, W, C)$ or $(B, H, W, C)$.
-- Output: A scalar float representing the perceptual distance.
+- Input: Two image tensors, `render` (the generated image) and `gt` (the ground truth image), both in the range $[0, 1]$ [S2, unofficial].
+- Output: A scalar float representing the perceptual distance [S2, unofficial].
 
 **Data Structures:**
-- The method relies on a pretrained VGG network (specifically VGG-16) configured as a feature extractor [S1, unofficial]. The network is set to evaluation mode to disable dropout and batch normalization updates [S1, unofficial].
+- The method relies on a pretrained VGG network configured as a feature extractor, set to evaluation mode to disable dropout and batch normalization updates [S2, unofficial].
 
 **Steps:**
 1. **Normalization:** Scale the pixel values of both `render` and `gt` from the range $[0, 1]$ to $[-1, 1]$ using the linear transformation:
    $$ x_{norm} = 2.0 \cdot x - 1.0 $$
-   This aligns the input distribution with the expectations of the pretrained VGG model [S1, unofficial].
-2. **Batching:** If the input tensors do not have a batch dimension, add one. For a single image pair, this involves unsqueezing the tensor at dimension 0:
-   $$ x_{batch} = \text{unsqueeze}(x_{norm}, \text{dim}=0) $$
-   The resulting shape is $(1, H, W, C)$ or $(1, C, H, W)$ depending on the framework's channel convention [S1, unofficial].
-3. **Feature Extraction:** Pass the normalized tensors through the pretrained VGG network. The network outputs feature maps at multiple intermediate layers (typically conv1_2, conv2_2, conv3_3, conv4_3, conv5_3) [S1, unofficial].
-4. **Distance Calculation:** Compute the L2 distance between the feature maps of the rendered image and the ground truth image for each layer. These distances are weighted by learned per-channel weights (obtained during the original LPIPS training) and averaged across spatial dimensions and layers [S1, unofficial].
-5. **Aggregation:** Return the mean of the output tensor as a single float value [S1, unofficial].
+   This aligns the input distribution with the expectations of the pretrained VGG model [S2, unofficial].
+2. **Batching:** If the input tensors do not have a batch dimension, add one using `unsqueeze(0)` [S2, unofficial].
+3. **Feature Extraction:** Pass the normalized tensors through the pretrained VGG model [S2, unofficial].
+4. **Aggregation:** Return the mean of the output tensor as a single float value [S2, unofficial].
 
 **Parameters:**
-- `net`: The backbone architecture for perceptual features. The default and most common value is `"vgg"` [S1, unofficial].
+- `net`: The backbone architecture for perceptual features. The default and most common value is `"vgg"` [S2, unofficial].
 
 **Pitfalls:**
-- **First Run Download:** The first execution requires downloading pretrained weights to the `TORCH_HOME` cache directory. This requires an internet connection or pre-cached weights [S1, unofficial].
-- **Input Range:** Failing to normalize inputs to $[-1, 1]$ before passing them to the VGG model will result in incorrect feature activations and invalid distance scores [S1, unofficial].
+- **First Run Download:** The first execution requires downloading pretrained weights to the `TORCH_HOME` cache directory, which requires an internet connection or pre-cached weights [S2, unofficial].
+- **Input Range:** Failing to normalize inputs to $[-1, 1]$ before passing them to the VGG model will result in incorrect feature activations and invalid distance scores [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -35,57 +32,44 @@ LPIPS (Learned Perceptual Image Patch Similarity) measures perceptual similarity
 ```python
 import torch
 import torch.nn as nn
-import lpips # Assuming lpips library is available, or equivalent VGG wrapper
 
 def compute_lpips(render: torch.Tensor, gt: torch.Tensor) -> float:
-    """
-    Compute LPIPS distance between render and gt images.
-    
-    Args:
-        render: Tensor of shape (H, W, C) or (B, H, W, C) with values in [0, 1].
-        gt: Tensor of shape (H, W, C) or (B, H, W, C) with values in [0, 1].
-        
-    Returns:
-        Scalar float representing perceptual distance.
-    """
-    # 1. Load model if not already loaded [G]
-    # In a real implementation, this would be a global singleton or passed in.
-    # model = lpips.LPIPS(net='vgg') 
-    # model.eval()
-    
-    # 2. Normalize from [0, 1] to [-1, 1]
+    # 1. Load pretrained VGG model and set to evaluation mode [S2, unofficial]
+    # Standard VGG-16 feature extractor initialization [G]
+    # Not given in the sources.
+    model = nn.Sequential(...) # Standard VGG layers [G]
+    model.eval()
+
+    # 2. Scale render and GT tensors from [0,1] to [-1,1] [S2, unofficial]
     render_norm = 2.0 * render - 1.0
     gt_norm = 2.0 * gt - 1.0
-    
-    # 3. Add batch dimension if missing [S1, unofficial]
+
+    # 3. Add batch dimension with unsqueeze(0) [S2, unofficial]
     if render_norm.dim() == 3:
         render_norm = render_norm.unsqueeze(0)
     if gt_norm.dim() == 3:
         gt_norm = gt_norm.unsqueeze(0)
-        
-    # 4. Pass through model [S1, unofficial]
-    # The model returns a tensor of distances. 
-    # Note: lpips library typically handles the multi-layer comparison internally.
-    # distance = model(render_norm, gt_norm)
-    
-    # 5. Return mean as float [S1, unofficial]
-    # return distance.mean().item()
-    
-    # Placeholder for actual model call as library-specific details vary
-    raise NotImplementedError("Requires lpips library or equivalent VGG feature extractor implementation")
+
+    # 4. Pass through model [S2, unofficial]
+    with torch.no_grad():
+        distance = model(render_norm, gt_norm)
+
+    # 5. Return mean of output tensor as float [S2, unofficial]
+    return distance.mean().item()
 ```
 
 ## Operating characteristics
-- **Time Complexity:** Dominated by the forward pass of the VGG-16 network. For standard image resolutions (e.g., 256x256 or 512x512), this is significantly slower than MSE but faster than full training iterations.
-- **Memory Complexity:** Requires memory for the VGG model weights and intermediate feature maps. Not given in the sources.
-- **Strengths:** Provides a perceptual metric that correlates better with human judgment than pixel-wise errors [S2, unofficial]. It avoids the "blurry" solutions often associated with MSE optimization [S2, unofficial].
-- **Limitations:** Requires a pretrained model and internet access for initial weight download [S1, unofficial]. It is not a differentiable loss in the same lightweight sense as MSE, requiring more computational resources per iteration [S2, unofficial].
-- **When to use:** When perceptual quality is more important than exact pixel fidelity, or when optimizing for visual realism in differentiable rendering [S2, unofficial].
-- **When not to use:** When computational efficiency is paramount and pixel-level accuracy is sufficient, or when network access is unavailable for weight caching [S1, unofficial].
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Strengths:** Accounts for neighboring information and structural context, providing a more robust optimization objective than pixel-space metrics [S3, unofficial].
+- **Limitations:** Requires a pretrained model and internet access for initial weight download [S2, unofficial].
+- **When to use:** When perceptual quality is more important than exact pixel fidelity [S3, unofficial].
+- **When not to use:** When computational efficiency is paramount and pixel-level accuracy is sufficient, or when network access is unavailable for weight caching [S2, unofficial].
 
 ## Background
-LPIPS was introduced by Zhang et al. in 2018 [S2, unofficial]. It was designed to address the limitations of pixel-space metrics like MSE, which do not account for neighboring information and often lead to suboptimal optimization results in perceptual tasks [S2, unofficial]. It has since become a standard metric for evaluating perceptual similarity in image synthesis and differentiable rendering pipelines [S1, S2, unofficial].
+LPIPS was introduced by Zhang et al. in 2018 [S3, unofficial]. It was designed to address the limitations of pixel-space metrics like MSE, which do not account for neighboring information and often lead to suboptimal optimization results in perceptual tasks [S3, unofficial]. It is used in differentiable rendering pipelines [S3, unofficial].
 
 ## Sources
-[S1] 3DAgentWorld/Advanced3DGS, https://github.com/3DAgentWorld/Advanced3DGS, fetched 2026-10-27 (unofficial)
-[S2] Feature-Guided Diffusion for Non-Differentiable Inverse Rendering, https://doi.org/10.48550/arXiv.2607.17411, fetched 2026-10-29 (unofficial)
+[S1] The Adaption of Recent New Concepts in Neural Radiance Fields and Their Role for High-Fidelity Volume Reconstruction in Medical Images., https://doi.org/10.3390/s24185923, fetched 2026-10-26
+[S2] 3DAgentWorld/Advanced3DGS, https://github.com/3DAgentWorld/Advanced3DGS, fetched 2026-10-27 (unofficial)
+[S3] Feature-Guided Diffusion for Non-Differentiable Inverse Rendering, https://doi.org/10.48550/arXiv.2607.17411, fetched 2026-10-29 (unofficial)

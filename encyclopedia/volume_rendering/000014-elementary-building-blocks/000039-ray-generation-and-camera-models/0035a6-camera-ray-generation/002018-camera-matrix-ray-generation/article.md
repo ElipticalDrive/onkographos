@@ -1,57 +1,57 @@
 # Camera Matrix Ray Generation
 
-Also called: Camera Ray Generation, Ray Generation from Camera Matrix, Ray Generation from Camera Parameters
+Also called: Ray Generation from Camera Matrix, Ray Generation from Camera Pose, Ray Generation from Camera Parameters, Ray to World Coordinates, Ray origin/direction generation, Ray Origin and Direction Calculation, Ray Origin and Direction Computation, Perspective Ray Direction Computation, Camera Ray Casting
 
 ## Overview
-Camera Matrix Ray Generation computes the origin and direction vectors for primary rays corresponding to each pixel in an image, based on explicit camera intrinsic and extrinsic parameters. It solves the problem of mapping 2D raster coordinates to 3D world-space rays for volume rendering or ray tracing. It differs from [Orthographic (Parallel) Camera Ray Generation](1319-orthographic-parallel-camera-ray-generation.md) by using perspective projection (converging rays) and from [Pinhole Camera Ray Generation](5058-pinhole-camera-ray-generation.md) by explicitly constructing and utilizing a calibration matrix $K$ rather than assuming a canonical pinhole model with unit focal length and center at the image center.
+Camera Matrix Ray Generation computes the origin and direction vectors for primary rays corresponding to each pixel in an image, based on explicit camera intrinsic and extrinsic parameters [S4, S12, unofficial]. It solves the problem of mapping 2D raster coordinates to 3D world-space rays for volume rendering or ray tracing [S7, unofficial]. It differs from [Orthographic (Parallel) Camera Ray Generation](1319-orthographic-parallel-camera-ray-generation.md) by using perspective projection (converging rays) and from [Pinhole Camera Ray Generation](5058-pinhole-camera-ray-generation.md) by explicitly constructing and utilizing a calibration matrix $K$ rather than assuming a canonical pinhole model with unit focal length and center at the image center [S11, unofficial].
 
 ## How it works
 **Inputs:**
-*   Image dimensions: Width $W$, Height $H$ (integers).
-*   Camera Intrinsics: A 3x3 matrix $K$ (or parameters $f_x, f_y, c_x, c_y$).
-*   Camera Extrinsic: A 4x4 Camera-to-World transformation matrix $T_{c2w}$ (or SE(3) pose).
+*   Image dimensions: Width $W$, Height $H$ (integers) [S12, unofficial].
+*   Camera Intrinsics: A 3x3 matrix $K$ (or parameters $f_x, f_y, c_x, c_y$) [S12, unofficial].
+*   Camera Extrinsic: A 4x4 Camera-to-World transformation matrix $T_{c2w}$ (or SE(3) pose) [S11, unofficial].
 *   Optional: Principal point offsets $(c_x, c_y)$ if not embedded in $K$; pixel centering flag.
 
 **Outputs:**
-*   Ray Origins: Tensor of shape $(H, W, 3)$ containing world-space origins.
-*   Ray Directions: Tensor of shape $(H, W, 3)$ containing world-space directions (often normalized).
+*   Ray Origins: Tensor of shape $(H, W, 3)$ containing world-space origins [S11, unofficial].
+*   Ray Directions: Tensor of shape $(H, W, 3)$ containing world-space directions (often normalized) [S11, unofficial].
 
 **Data Structures:**
 *   $K$: 3x3 matrix. $K_{0,0}=f_x, K_{1,1}=f_y, K_{0,2}=c_x, K_{1,2}=c_y$. Skew and aspect ratio are typically assumed 0 and 1 respectively in simplified models [S27, unofficial].
-*   $T_{c2w}$: 4x4 matrix. The upper-left 3x3 block is the rotation matrix $\mathbf{R}_{c2w}$. The rightmost column (indices 0-2 of column 3) is the translation vector $\mathbf{t}_{c2w}$ (camera origin in world space).
+*   $T_{c2w}$: 4x4 matrix. The upper-left 3x3 block is the rotation matrix $\mathbf{R}_{c2w}$ [S12, unofficial]. The rightmost column (indices 0-2 of column 3) is the translation vector $\mathbf{t}_{c2w}$ (camera origin in world space) [S12, unofficial].
 
 **Steps:**
 
 1.  **Generate Pixel Coordinates:**
-    Create 2D grids of pixel coordinates $(i, j)$ for $i \in [0, W)$ and $j \in [0, H)$.
+    Create 2D grids of pixel coordinates $(i, j)$ for $i \in [0, W)$ and $j \in [0, H)$ [S27, unofficial].
     *   Convention: $i$ corresponds to columns (x-axis), $j$ corresponds to rows (y-axis) [S11, S17, unofficial].
-    *   Pixel Centering: Add 0.5 to coordinates to target the center of each pixel: $i' = i + 0.5, j' = j + 0.5$. Some implementations omit this if calibration accuracy is insufficient [S9, S28, unofficial].
+    *   Pixel Centering: Add 0.5 to coordinates to target the center of each pixel: $i' = i + 0.5, j' = j + 0.5$ [S21, unofficial]. Some implementations omit this if calibration accuracy is insufficient [S9, S28, unofficial].
 
 2.  **Compute Camera-Space Directions:**
-    Calculate the unnormalized direction vector in the camera's local coordinate system. The camera typically looks down the negative Z-axis (OpenGL convention) or positive Z-axis (OpenCV convention). Most sources use the negative Z convention where the ray direction in camera space is:
+    Calculate the unnormalized direction vector in the camera's local coordinate system [S12, unofficial]. The camera typically looks down the negative Z-axis (OpenGL convention) or positive Z-axis (OpenCV convention) [S12, unofficial]. Most sources use the negative Z convention where the ray direction in camera space is:
     $$
     \mathbf{d}_{\text{cam}} = \begin{bmatrix} \frac{i' - c_x}{f_x} \\ -\frac{j' - c_y}{f_y} \\ -1 \end{bmatrix}
     $$
     Note the negative sign on the $y$-component if the image y-axis (down) is opposite to the camera v-axis (up), and the $-1$ for the z-component indicating forward projection [S11, S17, S27, S28, unofficial].
     *   Alternative formulation using normalized device coordinates (NDC) and FOV:
-        $$ x_{\text{ndc}} = \frac{2(i' + 0.5)}{W} - 1, \quad y_{\text{ndc}} = 1 - \frac{2(j' + 0.5)}{H} $$
+        $$ x_{\text{ndc}} = \frac{2(i + 0.5)}{W} - 1, \quad y_{\text{ndc}} = 1 - \frac{2(j + 0.5)}{H} $$
         $$ \mathbf{d}_{\text{cam}} = \begin{bmatrix} x_{\text{ndc}} \cdot \tan(\text{fov}_y/2) \cdot \frac{W}{H} \\ y_{\text{ndc}} \cdot \tan(\text{fov}_y/2) \\ -1 \end{bmatrix} $$
         [S16, unofficial].
 
 3.  **Transform Directions to World Space:**
-    Rotate the camera-space directions into world space using the rotation part of the camera-to-world matrix.
+    Rotate the camera-space directions into world space using the rotation part of the camera-to-world matrix [S29, unofficial].
     $$ \mathbf{d}_{\text{world}} = \mathbf{d}_{\text{cam}} \cdot \mathbf{R}_{c2w}^\top $$
     Or element-wise:
     $$ \mathbf{d}_{\text{world}} = \sum_{k=0}^{2} d_{\text{cam}, k} \cdot \mathbf{R}_{c2w}[:, k] $$
     [S8, S17, S27, S29, unofficial].
 
 4.  **Normalize Directions:**
-    Normalize $\mathbf{d}_{\text{world}}$ to unit length.
+    Normalize $\mathbf{d}_{\text{world}}$ to unit length [S9, unofficial].
     $$ \mathbf{d}_{\text{final}} = \frac{\mathbf{d}_{\text{world}}}{\|\mathbf{d}_{\text{world}}\|} $$
     [S8, S16, unofficial].
 
 5.  **Set Ray Origins:**
-    The ray origin is the camera position in world space, extracted from the translation component of $T_{c2w}$.
+    The ray origin is the camera position in world space, extracted from the translation component of $T_{c2w}$ [S11, unofficial].
     $$ \mathbf{o}_{\text{world}} = T_{c2w}[:3, 3] $$
     This origin is broadcast to all pixels $(H, W)$ [S17, S19, S21, unofficial].
 
@@ -133,10 +133,10 @@ def generate_camera_rays(W, H, K, c2w, use_pixel_centers=True):
 ## Subtopics
 
 ### Camera Intrinsics Simplification
-Constructs the 3x3 camera intrinsic matrix $K$ assuming zero skew and aspect ratio of 1. The matrix is defined as $K = \begin{bmatrix} f_{\text{camera}} & 0 & W/2 \\ 0 & f_{\text{camera}} & H/2 \\ 0 & 0 & 1 \end{bmatrix}$, where $f_{\text{camera}}$ is the focal length, $W$ is image width, and $H$ is image height [S27, unofficial]. This simplification assumes square pixels and a principal point at the image center.
+Constructs the 3x3 camera intrinsic matrix $K$ assuming zero skew and aspect ratio of 1 [S31, unofficial]. The matrix is defined as $K = \begin{bmatrix} f_{\text{camera}} & 0 & W/2 \\ 0 & f_{\text{camera}} & H/2 \\ 0 & 0 & 1 \end{bmatrix}$, where $f_{\text{camera}}$ is the focal length, $W$ is image width, and $H$ is image height [S31, unofficial]. This simplification assumes square pixels and a principal point at the image center [S31, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(W \times H)$ to generate rays for all pixels. The operations are element-wise vector math, highly parallelizable on GPU.
+*   **Time Complexity:** $O(W \times H)$ to generate rays for all pixels [G]. The operations are element-wise vector math, highly parallelizable on GPU.
 *   **Memory Complexity:** $O(W \times H)$ to store the origin and direction tensors.
 *   **Strengths:** Explicit control over camera calibration; supports arbitrary principal points and focal lengths; standard in NeRF and modern rendering pipelines.
 *   **Limitations:** Requires accurate calibration data; sensitive to errors in $K$ or $T_{c2w}$; division by zero if focal length is 0.
@@ -144,7 +144,7 @@ Constructs the 3x3 camera intrinsic matrix $K$ assuming zero skew and aspect rat
 *   **When not to use:** For simple orthographic views or when only relative camera motion is available without scale/intrinsics.
 
 ## Background
-Originating from standard computer graphics and photogrammetry, this method formalizes the pinhole camera model using matrix algebra. It is widely used in Neural Radiance Fields (NeRF) [S11, S17, S27, unofficial] and volume rendering pipelines [S1, S7, unofficial] to ensure consistency between training data poses and rendering rays. The explicit use of the intrinsic matrix $K$ allows for handling non-square pixels and off-center principal points, generalizing the basic pinhole model.
+Originating from standard computer graphics and photogrammetry, this method formalizes the pinhole camera model using matrix algebra. It is widely used in Neural Radiance Fields (NeRF) [S11, S17, S27, unofficial] and volume rendering pipelines [S1, S7, unofficial] to generate rays from camera parameters for consistent viewing geometry. The explicit use of the intrinsic matrix $K$ allows for handling non-square pixels and off-center principal points, generalizing the basic pinhole model.
 
 ## Sources
 [S1] jamestkiernan/webgpu-voxel-raymarching, https://github.com/jamestkiernan/webgpu-voxel-raymarching, fetched 2026-10-24 (unofficial)

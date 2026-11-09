@@ -1,0 +1,164 @@
+# SART Proximal Operator
+
+Also called: Modified SART, SART with Proximal Term
+
+## Overview
+The SART Proximal Operator is an iterative tomographic reconstruction method that extends the Simultaneous Algebraic Reconstruction Technique (SART) by incorporating a proximal term to enforce prior information or regularization [S1, unofficial]. It solves the linear system $Ax = p$ while minimizing the distance to an input estimate $u$, effectively finding the least-squares solution closest to $u$ [S1, unofficial]. Unlike standard SART, which initializes the volume to zero, this method maintains an auxiliary variable $y$ to handle the data fidelity term relative to the prior, allowing for the inclusion of prior knowledge directly in the iteration loop [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Forward projection matrix $A \in \mathbb{R}^{m \times n}$, projection measurements $p \in \mathbb{R}^m$, input volume estimate (prior) $u \in \mathbb{R}^n$, regularization parameter $\lambda \in \mathbb{R}$, step size $\alpha \in \mathbb{R}$, and number of iterations $T$.
+*   **Outputs:** Reconstructed volume $x \in \mathbb{R}^n$.
+
+**Data Structures:**
+*   $x$: Volume reconstruction array of size $n$ (number of voxels).
+*   $y$: Auxiliary variable array of size $m$ (number of projection pixels/lines).
+*   $A$: Sparse or dense matrix representing the forward projection operator.
+*   $p$: Vector of scaled projection measurements.
+
+**Parameters:**
+*   $\lambda$: Regularization parameter. Controls the weight of the proximal term. Typical values depend on the noise level and desired regularization strength [S1, unofficial].
+*   $\alpha$: Step size (relaxation parameter). Must be chosen to ensure convergence [S1, unofficial].
+*   $u$: Prior estimate. Used to initialize $x$ and shift the data term [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Preprocessing:** Scale the projection measurements and the matrix by $\sqrt{2\lambda}$.
+    $$ \tilde{p} = \sqrt{2\lambda} p $$
+    $$ \tilde{A} = \sqrt{2\lambda} A $$
+    *Note: The sources define the scaled variables $\tilde{p}$ and $\tilde{A}$ but then simplify the update equations to use $p$ and $A$ directly with the $\sqrt{2\lambda}$ terms embedded in the residual calculation [S1, unofficial]. The final algorithm uses the simplified form below.*
+
+2.  **Initialization:**
+    $$ y^{(0)} = 0 $$
+    $$ x^{(0)} = u $$
+
+3.  **Iteration:** For $t = 1$ to $T$:
+    a. **Subset Loop:** Iterate over all projection subsets $S$ (e.g., angular views).
+    b. **Residual Calculation:** For each projection $i \in S$, compute the residual term $c_i^{(t)}$:
+       $$ c_i^{(t)} = \frac{p_i - \sum_{k=1}^{n} a_{ik} x_k^{(t)} - y_i^{(t)}}{\sum_{k=1}^{n} a_{ik} + 1} $$
+       Here, $a_{ik}$ is the element of matrix $A$ at row $i$ and column $k$. The term $\sum_{k=1}^{n} a_{ik}$ is the sum of the $i$-th row of $A$.
+    c. **Update Auxiliary Variable $y$:** For each $j \in S$ (where $j$ corresponds to the projection pixel index $i$):
+       $$ y_j^{(t+1)} = y_j^{(t)} + \alpha c_j^{(t)} $$
+       *Note: Only one element of $y$ is updated per projection pixel in the subset.*
+    d. **Update Volume $x$:** For all voxels $j = 1$ to $n$:
+       $$ x_j^{(t+1)} = x_j^{(t)} + \alpha \frac{\sum_{i \in S} c_i^{(t)} a_{ij}}{\sum_{i \in S} a_{ij}} $$
+       Here, $\sum_{i \in S} a_{ij}$ is the sum of the elements in column $j$ of $A$ restricted to the rows in subset $S$.
+
+4.  **Return:** $x^{(T)}$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def sart_proximal_operator(A, p, u, lambda_reg, alpha, T, subsets):
+    """
+    A: Forward projection matrix (m x n)
+    p: Projection measurements (m,)
+    u: Prior volume estimate (n,)
+    lambda_reg: Regularization parameter lambda
+    alpha: Step size
+    T: Number of outer iterations
+    subsets: List of projection subsets, each containing indices of projections
+    """
+    import numpy as np
+
+    # Preprocessing: Scale p and A by sqrt(2*lambda)
+    # Note: The simplified update formulas in the source use p and A directly
+    # with the scaling factors embedded in the residual formula derivation.
+    # However, the algorithm description explicitly states scaling.
+    # We follow the final simplified algorithm which uses the scaled p and A
+    # but the residual formula provided in Algorithm 2 uses p and A directly
+    # with the denominator having +1. This implies the scaling is absorbed
+    # into the definition of the residual c_i.
+    # Let's stick to the explicit Algorithm 2 steps which use p and A
+    # as given in the input, but the residual formula has a specific structure.
+    # Actually, the source says: "p = sqrt(2lambda)*p" and "A = sqrt(2lambda)*A"
+    # Then it simplifies the update. The residual c_i in Algorithm 2 is:
+    # c_i = (p_i - sum(a_ik x_k) - y_i) / (sum(a_ik) + 1)
+    # This formula corresponds to the scaled system if we interpret p and A
+    # as the scaled versions. Let's scale them explicitly to be safe.
+    
+    scale = np.sqrt(2 * lambda_reg)
+    p_scaled = scale * p
+    A_scaled = scale * A
+    
+    # Initialization
+    y = np.zeros(len(p_scaled))
+    x = u.copy()
+    
+    # Precompute row sums of A_scaled for efficiency
+    # sum_k a_ik for each row i
+    row_sums = np.sum(A_scaled, axis=1)
+    
+    # Precompute column sums for each subset? 
+    # The denominator sum_{i in S} a_ij depends on the subset S.
+    # We can compute this on the fly or precompute.
+    
+    for t in range(1, T + 1):
+        for S in subsets:
+            # S is a list of projection indices
+            
+            # Compute residuals c_i for i in S
+            # c_i = (p_i - sum_k a_ik x_k - y_i) / (sum_k a_ik + 1)
+            # sum_k a_ik x_k is the forward projection of x for rows in S
+            forward_proj = A_scaled[S, :] @ x
+            numerators = p_scaled[S] - forward_proj - y[S]
+            denominators = row_sums[S] + 1
+            c = numerators / denominators
+            
+            # Update y for j in S
+            # y_j = y_j + alpha * c_j
+            y[S] += alpha * c
+            
+            # Update x for all j
+            # x_j = x_j + alpha * (sum_{i in S} c_i * a_ij) / (sum_{i in S} a_ij)
+            
+            # Compute numerator: sum_{i in S} c_i * a_ij for each j
+            # This is A_scaled[S, :].T @ c
+            # But we need to divide by sum_{i in S} a_ij for each j
+            # Let col_sums_S[j] = sum_{i in S} a_ij
+            
+            # Efficiently compute col_sums for the subset S
+            # col_sums_S = np.sum(A_scaled[S, :], axis=0)
+            # numerator_x = A_scaled[S, :].T @ c
+            # x += alpha * numerator_x / col_sums_S
+            
+            # However, A_scaled[S, :] @ x is already computed as forward_proj
+            # But we need A_scaled[S, :].T @ c
+            # Let's compute it directly
+            
+            # To avoid creating large intermediate matrices if n is large,
+            # we can iterate or use sparse operations. Assuming dense for clarity.
+            
+            # Compute sum_{i in S} a_ij for each j
+            col_sums_S = np.sum(A_scaled[S, :], axis=0)
+            
+            # Compute sum_{i in S} c_i * a_ij for each j
+            # This is the dot product of c with each column of A_scaled[S, :]
+            # Equivalent to A_scaled[S, :].T @ c
+            weighted_col_sums = A_scaled[S, :].T @ c
+            
+            # Update x
+            # Guard against division by zero
+            safe_col_sums = np.where(col_sums_S > 0, col_sums_S, 1.0)
+            x += alpha * (weighted_col_sums / safe_col_sums)
+            
+    return x
+```
+
+**Edge Cases and Pitfalls:**
+*   **Memory Usage:** The method requires storing the volume $x$ and the auxiliary variable $y$. For a $256^3$ volume (64 MB) and 360 projections of $2000 \times 1500$ pixels ($\approx 4$ GB for $y$), total memory can exceed 12 GB if multiple versions are kept in RAM [S1, unofficial].
+*   **Division by Zero:** The denominators $\sum_k a_{ik} + 1$ and $\sum_{i \in S} a_{ij}$ must be non-zero. The $+1$ in the residual denominator ensures the first is never zero. The column sum denominator should be checked for zero if a voxel is not intersected by any ray in the subset [G].
+*   **Convergence:** The step size $\alpha$ must be chosen appropriately. Too large a value may cause divergence [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Each iteration involves a forward projection and a back-projection-like update. The complexity is proportional to the number of non-zero elements in $A$ (or $m \times n$ for dense). The update of $y$ is $O(|S|)$ and the update of $x$ is $O(|S| \cdot n)$.
+*   **Memory Complexity:** $O(n + m)$ for storing $x$ and $y$. This is significantly higher than standard SART which only requires $O(n)$ [S1, unofficial].
+*   **Strengths:** Incorporates prior information $u$ effectively. Better reconstruction quality than ART. Amenable to parallelization [S1, unofficial].
+*   **Limitations:** High memory consumption due to the auxiliary variable $y$. Slower convergence per iteration compared to some direct methods, but often more robust than ART [S1, unofficial].
+*   **When to Use:** When prior information is available and regularization is needed. When memory resources are sufficient to store the auxiliary variable.
+
+## Background
+The SART Proximal Operator was introduced in the context of industrial computed tomography to improve reconstruction quality by incorporating prior knowledge [S1, unofficial]. It is based on the proximal algorithm framework, which allows for the minimization of a function involving a data fidelity term and a regularization term [S1, unofficial]. The method modifies the standard SART algorithm by introducing an auxiliary variable $y$ and initializing the volume with a prior estimate $u$ [S1, unofficial].
+
+## Sources
+[S1] Industrial Computed Tomography using Proximal Algorithm, https://doi.org/10.25781/kaust-th10i, fetched 2026-10-27 (unofficial)

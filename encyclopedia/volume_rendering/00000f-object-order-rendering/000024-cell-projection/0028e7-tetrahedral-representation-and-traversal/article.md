@@ -1,28 +1,35 @@
 # Tetrahedral representation and traversal
 
-Also called: Projected tetrahedra, tetrahedral volume rendering, tetrahedral mesh traversal
+Also called: Projected Tetrahedra, Tetrahedral Volume Rendering, Marching Tetrahedrons, Tetrahedral Strips, Adaptive Delaunay, Grid-based Traversal, Sorting-free PBVR, Parallel KD-Tree Partitioning, Cut-Border Machine, Screen Space Area Calculation, Point Representation, LinPrim, Delaunay Triangulation
 
 ## Overview
-This family covers methods that represent volumetric data as a collection of tetrahedra to leverage their geometric simplicity and topological consistency. It solves the problem of rendering unstructured or irregular volumetric data by decomposing cells into tetrahedra, which avoids the ambiguities and non-planar faces associated with hexahedral or cubic decompositions. Unlike [Tetrahedral Volume Rendering](820-tetrahedral-volume-rendering.md), which typically relies on ray casting through the volume, this family often employs explicit geometric projection (object-order) or efficient spatial traversal to determine visibility and opacity. It differs from [Cell Projection](26-cell-projection.md) in that it specifically targets the tetrahedral primitive, allowing for hardware-accelerated rasterization of projected faces or optimized grid-based traversal, whereas general cell projection may handle arbitrary convex polyhedra.
+Tetrahedral representation and traversal is a family of object-order volume rendering and isosurface extraction techniques that decompose volumetric data into tetrahedral cells to leverage hardware-accelerated rasterization or efficient spatial traversal [S1, unofficial][S2, S3][S4, S6, S7][S8, S9, S10, unofficial][S11][S12, unofficial][S14, S16][S17, S18, unofficial]. It solves the problem of rendering unstructured or irregular tetrahedral grids by projecting 3D primitives onto the 2D image plane or traversing them via spatial indices, ensuring correct visibility ordering and scalar interpolation [S1, unofficial][S2][S4, S6][S8, S9, S10, unofficial][S11][S12, unofficial][S14, S16][S17, S18, unofficial]. Unlike [Tetrahedral Volume Rendering](820-tetrahedral-volume-rendering.md), which often relies on ray casting, this family uses explicit geometric projection and scan-conversion [S2][S4, S6, S7][S12, unofficial][S14, S16]. It differs from [GPU-based Projected Tetrahedra](7484-gpu-based-projected-tetrahedra.md) in that the original algorithms perform sorting and projection in software, whereas later variants offload these steps to the GPU [S4, S7][S12, unofficial][S14, S16].
 
 ## Shared principles
-The tetrahedral representation family shares the following mechanism, terms, and math:
+The tetrahedral representation and traversal family shares the following mechanism, terms, and math:
 
-1.  **Primitive Representation:** The volume is decomposed into tetrahedra. For regular grids (cubes or hexahedra), cells are subdivided into tetrahedra (typically 5 or 6) to ensure planar faces and consistent topology [S2, S8, S13, S19, unofficial][S1, unofficial]. This decomposition resolves "problem cells" where rays might intersect a face twice in curvilinear grids [S4, book].
-2.  **Scalar Interpolation:** Scalar values $s$ at any point within a tetrahedron are interpolated linearly from the vertex values $s_i$ using barycentric coordinates or linear interpolation along edges [S1, unofficial][S2][S3].
-3.  **Opacity Calculation:** The integrated opacity $\alpha$ for a segment of length $l$ with average differential opacity $\tau_{avg}$ is:
+1.  **Primitive Representation:** The volume is decomposed into tetrahedral cells. For regular grids (cubes or hexahedra), cells are often subdivided into tetrahedra (typically 5 or 6) to ensure planar faces and consistent topology [S2, S8, S13, S19, unofficial][S1, unofficial]. This decomposition resolves "problem cells" where rays might intersect a face twice in curvilinear grids [S4].
+2.  **Projection and Subdivision:** The 3D vertices of each cell are projected to 2D screen space. The projected edges of the cell divide the image plane into polygons, where each polygon lies within the projection of a single front-facing face and a single back-facing face of the cell [S1, unofficial][S2][S4]. For general cells, an incremental method builds this subdivision by adding projected edges one by one [S1, unofficial][S2]. For curvilinear grids, standard topologies are identified to use lookup tables for subdivision [S1, unofficial][S2].
+3.  **Scalar Interpolation:** Scalar values $s$ at any point within a tetrahedron are interpolated linearly from the vertex values $s_i$ using barycentric coordinates or linear interpolation along edges [S1, unofficial][S2][S3]. The scalar field is assumed to vary linearly across the cell, and transfer functions mapping scalar to color/extinction are assumed linear [S1, unofficial][S2][S4].
+4.  **Opacity Calculation:** The integrated opacity $\alpha$ for a segment of length $l$ with average differential opacity $\tau_{avg}$ is:
     $$ \alpha = 1 - \exp(-\tau_{avg} l) $$
-    [S1, unofficial][S4, book].
-4.  **Visibility and Sorting:** Correct compositing requires back-to-front ordering. This is achieved via global visibility sorts (e.g., sorting by centroid depth) or image-space merging of ray segments [S1, unofficial][S4, S7, S11][S12, unofficial][S14][S17, unofficial].
-5.  **Compositing:** Fragments or ray segments are composited using the Porter-Duff over operation in back-to-front order [S1, unofficial][S2][S6, S7][S9, S10, unofficial][S11][S12, unofficial][S14, S16][S17, S18, unofficial].
+    [S1, unofficial][S4].
+5.  **Visibility and Sorting:** Correct compositing requires back-to-front ordering. This is achieved via global visibility sorts (e.g., sorting by centroid depth) or image-space merging of ray segments [S1, unofficial][S4, S7, S11][S12, unofficial][S14][S17, unofficial].
+6.  **Compositing:** Fragments or ray segments are composited using the Porter-Duff over operation in back-to-front order [S1, unofficial][S2][S6, S7][S9, S10, unofficial][S11][S12, unofficial][S14, S16][S17, S18, unofficial].
 
 ## Subtopics
 
 ### [Projected Tetrahedra](877-projected-tetrahedra.md)
-Projected Tetrahedra (PT) is an object-order technique that projects volumetric tetrahedra onto the 2D image plane to leverage hardware-accelerated rasterization. It solves the problem of rendering unstructured tetrahedral grids by decomposing each 3D cell into partially transparent 2D triangles, which are composited in back-to-front order. Unlike [Tetrahedral Volume Rendering](820-tetrahedral-volume-rendering.md), which often relies on ray casting, PT uses explicit geometric projection and scan-conversion. It differs from [GPU-based Projected Tetrahedra](7484-gpu-based-projected-tetrahedra.md) in that the original PT algorithm performs sorting and projection in software, whereas later variants offload these steps to the GPU.
+Projected Tetrahedra (PT) is an object-order volume rendering technique that projects volumetric primitives, specifically tetrahedra, onto the 2D image plane to leverage hardware-accelerated rasterization. It solves the problem of rendering unstructured tetrahedral grids by decomposing each 3D cell into a set of partially transparent 2D triangles, which are then composited in back-to-front order. Unlike [Tetrahedral Volume Rendering](820-tetrahedral-volume-rendering.md), which often relies on ray casting, PT uses explicit geometric projection and scan-conversion. It differs from [GPU-based Projected Tetrahedra](7484-gpu-based-projected-tetrahedra.md) in that the original PT algorithm performs sorting and projection in software, whereas later variants offload these steps to the GPU.
 
 ### [Marching Tetrahedrons Algorithm](940-marching-tetrahedrons-algorithm.md)
 The Marching Tetrahedrons Algorithm (MTA) is an isosurface extraction method that decomposes volumetric data cells into tetrahedra to resolve topological ambiguities inherent in cube-based methods like Marching Cubes. Unlike its siblings, MTA guarantees topological consistency by ensuring that the intersection of an isosurface with a tetrahedron is always a simple polygon, eliminating the need for complex case tables required by cubic decompositions.
+
+### [Parallelized Accurate Sorting for Projected Tetrahedra](1128-parallelized-accurate-sorting-for-projected-tetrahedra.md)
+Parallelized Accurate Sorting is a view-dependent sorting algorithm for tetrahedral datasets that uses logical partitioning to enable parallel processing, solving the dependency and sequence limitations of neighboring tetrahedra in parallel performance. It sets itself apart from standard [Projected Tetrahedra](877-projected-tetrahedra.md) by replacing global topological sorts with a block-based logical partitioning scheme that allows for parallel peeling of unobstructed layers, thereby reducing sorting time and improving rendering performance.
+
+### [Tetrahedral Strips and Fans](1389-tetrahedral-strips-and-fans.md)
+Tetrahedral Strips and Fans are graphics primitives designed to address the bandwidth bottleneck between main memory and the graphics processor when rendering unstructured tetrahedral meshes. They reduce the number of vertices transmitted per tetrahedron, achieving rates approaching 1.2 vertices per tetrahedron, similar to how triangle strips optimize triangle meshes. Unlike static triangle strips, these primitives are necessary because tetrahedral decomposition is view-dependent, preventing the use of static display lists when changing viewpoints. They enable performance improvements of 72 to 85 times over triangle-based hardware approaches, making interactive volumetric rendering feasible.
 
 ### [Adaptive Delaunay Update](4923-adaptive-delaunay-update.md)
 Adaptive Delaunay Update is a strategy for maintaining the topological validity of a tetrahedral mesh during optimization-based volume rendering, specifically when vertex positions are updated incrementally. It solves the problem of computational cost by avoiding full Delaunay re-triangulation at every iteration, instead triggering updates only when topological changes (edge flips) are geometrically necessitated by vertex movement. It sets itself apart from static meshing methods by allowing the mesh topology to evolve with the scene representation, and from continuous full-update methods by batching these topological corrections.
@@ -30,37 +37,51 @@ Adaptive Delaunay Update is a strategy for maintaining the topological validity 
 ### [Grid-based Traversal](7083-grid-based-traversal.md)
 Grid-based Traversal is a method for rendering irregular volume data (tetrahedral meshes) at interactive rates by partitioning the volume into a hierarchical grid structure to quickly determine candidate tetrahedra. It sets itself apart from sibling methods like [Projected Tetrahedra](877-projected-tetrahedra.md) by avoiding explicit connectivity information and instead relying on spatial hashing via a rectilinear grid to filter tetrahedra. Unlike [Plücker Space Traversal](4396-tetrahedral-representation-and-traversal.md#subtopics), which uses geometric tests for unstructured data, this method uses a brute-force check of all tetrahedra attached to a grid cell.
 
+### [Sorting-free Pre-integrated Projected Tetrahedra](7491-sorting-free-pre-integrated-projected-tetrahedra.md)
+Sorting-free Pre-integrated Projected Tetrahedra (PBVR) is a volume rendering technique for irregular datasets that eliminates the need for explicit back-to-front visibility sorting. It solves the scalability bottlenecks of conventional projected tetrahedra and the image-quality artifacts of particle-based methods by treating rendering as a stochastic process where fragments are rendered with a probability equal to their opacity. Unlike [Projected Tetrahedra](877-projected-tetrahedra.md), which requires sorting, and [Particle-based Volume Rendering](877-projected-tetrahedra.md) (PBVR in the context of the source's comparison, though the method name is PBVR), which suffers from visible footprints, PBVR uses pre-integrated projected tetrahedra to achieve semi-transparency without alpha-blending or sorting.
+
 ### [Parallel Projected Tetrahedra with KD-Tree Partitioning](8767-parallel-projected-tetrahedra-with-kd-tree-partitioning.md)
 This method enables the parallel rendering of large-scale unstructured tetrahedral grids by partitioning the dataset using a kd-tree, allowing the application of a traditional sort-last compositing algorithm. Unlike approaches that sample the volume into a regular grid—which require extensive parallel distribution of samples and suffer from oversampling or undersampling in varying cell sizes—this method renders the unstructured grid natively. It builds on [Projected Tetrahedra](877-projected-tetrahedra.md) for the per-process rendering and [Parallelized Accurate Sorting for Projected Tetrahedra](1128-parallelized-accurate-sorting-for-projected-tetrahedra.md) for the final image composition, but distinguishes itself by handling the spatial decomposition of the unstructured data itself rather than relying on uniform grid sampling or complex cell-transfer protocols after distribution.
 
 ### [Tetrahedral Mesh Connectivity Encoding](8957-tetrahedral-mesh-connectivity-encoding.md)
 The Cut-Border Machine (CBM) is a region-growing compression scheme for tetrahedral meshes that encodes connectivity by growing a region bounded by a cut-border. It solves the problem of efficiently storing and transmitting the topology of tetrahedral volumes by generating a stream of opcodes that describe the position of new vertices relative to the current boundary. Unlike sibling methods that may rely on fixed subdivision patterns or explicit neighbor lists, CBM dynamically adapts its encoding based on the local manifold structure, using 11 distinct opcodes to uniquely identify vertex positions. It is particularly suited for multi-resolution meshes where segments are encoded sequentially, supporting cross-segment incidencies through shared vertex indexing.
 
-### Screen Space Area Calculation
-#### definition
-- [S1, unofficial] Calculates the projected area of a tetrahedron in normalized screen space to determine refinement criteria or culling. Uses cross products to compute wedge areas, which are twice the triangle area, then divides by four.
-#### step
-- [S1, unofficial] Project tetrahedron vertices T, L, R, B to screen space using camera projection: `T ← camera.projectPoint(T)`, `L ← camera.projectPoint(L)`, `R ← camera.projectPoint(R)`, `B ← camera.projectPoint(B)`.
-- [S1, unofficial] Calculate area sum using cross products of vertex vectors: `area ← |(L−T)×(R−T)|+|(R−T)×(B−T)|`. Add remaining terms: `area ← area+|(B−T)×(L−T)|+|(L−B)×(R−B)|`.
-- [S1, unofficial] Return final area divided by 4: `return area / 4`.
-#### pitfall
-- [S1, unofficial] Triangles cover the total area twice in projection, and cross products yield wedge areas (twice triangle area), necessitating division by 4.
+#### Screen Space Area Calculation
+- **Definition:** Calculates the projected area of a tetrahedron in normalized screen space to determine refinement criteria or culling. Uses cross products to compute wedge areas, which are twice the triangle area, then divides by four [S1, unofficial].
+- **Steps:**
+    1. Project tetrahedron vertices $T, L, R, B$ to screen space using camera projection: $T \leftarrow \text{camera.projectPoint}(T)$, $L \leftarrow \text{camera.projectPoint}(L)$, $R \leftarrow \text{camera.projectPoint}(R)$, $B \leftarrow \text{camera.projectPoint}(B)$ [S1, unofficial].
+    2. Calculate area sum using cross products of vertex vectors: $\text{area} \leftarrow |(L-T)\times(R-T)| + |(R-T)\times(B-T)|$. Add remaining terms: $\text{area} \leftarrow \text{area} + |(B-T)\times(L-T)| + |(L-B)\times(R-B)|$ [S1, unofficial].
+    3. Return final area divided by 4: $\text{return area} / 4$ [S1, unofficial].
+- **Pitfall:** Triangles cover the total area twice in projection, and cross products yield wedge areas (twice triangle area), necessitating division by 4 [S1, unofficial].
 
-### Point Representation via Tetrahedra
-#### definition
-- [S2] Representing data points as small tetrahedra to fit them into the triangular mesh framework for rendering.
-#### parameter
-- [S2] size: specifies the size of the point tetrahedra relative to the data ranges.
+#### Point Representation via Tetrahedra
+- **Definition:** Representing data points as small tetrahedra to fit them into the triangular mesh framework for rendering [S2].
+- **Parameter:** `size`: specifies the size of the point tetrahedra relative to the data ranges [S2].
 
-### Delaunay Triangulation for Tetrahedral Representation
-#### step
-- [S3] Obtain a tetrahedral representation of the Voronoi sites via Delaunay triangulation using gDel3D [5] to accelerate computation on the GPU.
-- [S3] Recompute the triangulation from scratch at every iteration.
+#### LinPrim Tetrahedron Representation
+- **Definition:** A scene representation using transparent tetrahedra bounded by triangular faces with homogeneous density [S3].
+- **Steps:**
+    1. Define four basis vectors describing directions from the center on which corners are located, equally spaced to represent regular tetrahedra [S3].
+    2. Optimize the distance between the center and each corner independently [S3].
+- **Parameter:** Tetrahedra memory requirement: 12 floats per primitive (omitting color), due to absence of symmetry in the formulation [S3].
+- **Pitfall:** Unlike octahedra, the optimized position (center) can differ from the geometric center of the primitive due to lack of symmetry [S3].
+
+#### Delaunay Triangulation for Tetrahedral Representation
+- **Steps:**
+    1. Obtain a tetrahedral representation of the Voronoi sites via Delaunay triangulation using gDel3D [5] to accelerate computation on the GPU [S4].
+    2. Recompute the triangulation from scratch at every iteration [S4].
 
 ## Background
-The use of tetrahedra in volume rendering originated from the need to handle unstructured grids and resolve topological ambiguities in isosurface extraction. The Marching Tetrahedrons Algorithm was introduced to fix the ambiguities of Marching Cubes [S1, unofficial]. Projected Tetrahedra was developed to allow efficient rendering of unstructured volumes by leveraging 2D rasterization hardware [S1, unofficial][S2, S3][S4, S6, S7][S8, S9, S10, unofficial][S11][S12, unofficial][S14, S16][S17, S18, unofficial]. The family has expanded to include parallelization strategies using kd-trees [S1, unofficial], adaptive mesh updates for optimization [S1, unofficial], and connectivity encoding for compression [S1, unofficial].
+The concept of decomposing volumetric data into tetrahedra for rendering and isosurface extraction has evolved from early object-order techniques to modern GPU-accelerated and differentiable methods. The foundational [Projected Tetrahedra](877-projected-tetrahedra.md) algorithm was introduced to handle unstructured grids by projecting tetrahedra to screen space, leveraging standard rasterization hardware [S1, unofficial][S2, S3][S4, S6, S7][S8, S9, S10, unofficial][S11][S12, unofficial][S14, S16][S17, S18, unofficial]. The [Marching Tetrahedrons Algorithm](940-marching-tetrahedrons-algorithm.md) was developed to resolve topological ambiguities in Marching Cubes by ensuring consistent isosurface extraction within tetrahedral cells [S1, unofficial].
+
+Efficiency improvements led to [Tetrahedral Strips and Fans](1389-tetrahedral-strips-and-fans.md), which reduced memory bandwidth bottlenecks by grouping tetrahedra into efficient transmission primitives [S1, unofficial][S2]. Parallelization strategies, such as [Parallelized Accurate Sorting for Projected Tetrahedra](1128-parallelized-accurate-sorting-for-projected-tetrahedra.md) and [Parallel Projected Tetrahedra with KD-Tree Partitioning](8767-parallel-projected-tetrahedra-with-kd-tree-partitioning.md), enabled the rendering of large-scale datasets by partitioning the workload across multiple processors or GPUs [S1, unofficial][S2][S1, unofficial].
+
+Compression and connectivity encoding were addressed by the [Cut-Border Machine](8957-tetrahedral-mesh-connectivity-encoding.md), which provides a compact representation of tetrahedral mesh topology [S1, unofficial]. For optimization-based rendering, [Adaptive Delaunay Update](4923-adaptive-delaunay-update.md) allows for dynamic mesh updates without full re-triangulation [S1, unofficial]. Spatial traversal methods like [Grid-based Traversal](7083-grid-based-traversal.md) offer alternative ways to access tetrahedral data without explicit connectivity [S1, unofficial][S2].
+
+Recent advancements include [Sorting-free Pre-integrated Projected Tetrahedra](7491-sorting-free-pre-integrated-projected-tetrahedra.md), which uses stochastic sampling to avoid sorting overhead [S1, unofficial], and differentiable representations such as [LinPrim](3) and [DCCVT](4), which integrate tetrahedral primitives into differentiable rendering pipelines for optimization and gradient-based methods [S3][S4].
 
 ## Sources
 [S1] Direct volume rendering of tree-based tetrahedral adaptive mesh refinement data, https://repository.bilkent.edu.tr/items/fcbc592a-2646-49af-8b84-67308b6fd3e9, fetched 2026-10-27 (unofficial)
 [S2] Computing and Displaying Isosurfaces inR, https://doi.org/10.18637/jss.v028.i01, fetched 2026-10-27
-[S3] DCCVT: Differentiable Clipped Centroidal Voronoi Tessellation, https://arxiv.org/abs/2601.13603v1, fetched 2026-10-26
+[S3] LinPrim: Linear Primitives for Differentiable Volumetric Rendering, https://arxiv.org/abs/2501.16312, fetched 2026-10-26
+[S4] DCCVT: Differentiable Clipped Centroidal Voronoi Tessellation, https://arxiv.org/abs/2601.13603v1, fetched 2026-10-26

@@ -20,9 +20,9 @@ This method is a geometry shader technique used in rasterization-based voxelizat
 2.  **Determine Optimal Axis:** Calculate the absolute dot product of the face normal with the three world-space axes ($\mathbf{x}=(1,0,0)$, $\mathbf{y}=(0,1,0)$, $\mathbf{z}=(0,0,1)$) [S1, unofficial]. Select the axis with the maximum dot product [S1, unofficial].
     $$ d_x = |\mathbf{n}_{face} \cdot \mathbf{x}|, \quad d_y = |\mathbf{n}_{face} \cdot \mathbf{y}|, \quad d_z = |\mathbf{n}_{face} \cdot \mathbf{z}| $$
     The axis index is determined as follows [S1, unofficial]:
-    *   If $d_x$ is maximum, select the X-axis (projection onto the ZY plane).
-    *   If $d_y$ is maximum, select the Y-axis (projection onto the XZ plane).
-    *   If $d_z$ is maximum, select the Z-axis (projection onto the XY plane).
+    *   If $d_x$ is maximum, select the X-axis (projection onto the ZY plane) [S1, unofficial].
+    *   If $d_y$ is maximum, select the Y-axis (projection onto the XZ plane) [S1, unofficial].
+    *   If $d_z$ is maximum, select the Z-axis (projection onto the XY plane) [S1, unofficial].
 3.  **Transform to Clip Space:** For each vertex, transform its world-space position to clip space [S1, unofficial].
     $$ \mathbf{p}_{clip} = \text{TransformWorldToHClip}(\mathbf{p}_{world}) $$
 4.  **Normalize to NDC:** Divide the clip space position by its w-component to normalize to Normalized Device Coordinates (NDC) [S1, unofficial].
@@ -50,10 +50,8 @@ def normalize(v):
     length = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
     return (v[0]/length, v[1]/length, v[2]/length)
 
-def abs_vec(v):
-    return (abs(v[0]), abs(v[1]), abs(v[2]))
-
 def transform_world_to_hclip(pos, view_proj_matrix):
+    # Standard 4x4 matrix multiplication for clip space transform
     w = view_proj_matrix[3][0]*pos[0] + view_proj_matrix[3][1]*pos[1] + view_proj_matrix[3][2]*pos[2] + view_proj_matrix[3][3]
     return (view_proj_matrix[0][0]*pos[0] + view_proj_matrix[0][1]*pos[1] + view_proj_matrix[0][2]*pos[2] + view_proj_matrix[0][3],
             view_proj_matrix[1][0]*pos[0] + view_proj_matrix[1][1]*pos[1] + view_proj_matrix[1][2]*pos[2] + view_proj_matrix[1][3],
@@ -63,7 +61,7 @@ def transform_world_to_hclip(pos, view_proj_matrix):
 def transform_tex(uv, scale, offset):
     return (uv[0]*scale[0] + offset[0], uv[1]*scale[1] + offset[1])
 
-def process_triangle(input_vertices, view_proj_matrix, uv_scale, uv_offset):
+def process_triangle(input_vertices, view_proj_matrix, uv_scale, uv_offset, unity_near_clip_value):
     # Step 1: Calculate Face Normal
     n0 = input_vertices[0].normal
     n1 = input_vertices[1].normal
@@ -75,9 +73,9 @@ def process_triangle(input_vertices, view_proj_matrix, uv_scale, uv_offset):
     axis_y = (0.0, 1.0, 0.0)
     axis_z = (0.0, 0.0, 1.0)
     
-    dot_x = abs_vec(dot(face_normal, axis_x))
-    dot_y = abs_vec(dot(face_normal, axis_y))
-    dot_z = abs_vec(dot(face_normal, axis_z))
+    dot_x = abs(dot(face_normal, axis_x))
+    dot_y = abs(dot(face_normal, axis_y))
+    dot_z = abs(dot(face_normal, axis_z))
     
     if dot_x >= dot_y and dot_x >= dot_z:
         axis_idx = 0
@@ -87,7 +85,6 @@ def process_triangle(input_vertices, view_proj_matrix, uv_scale, uv_offset):
         axis_idx = 2
         
     output_stream = []
-    UNITY_NEAR_CLIP_VALUE = 0.0 # Platform constant
     
     for i in range(3):
         vertex = input_vertices[i]
@@ -100,7 +97,7 @@ def process_triangle(input_vertices, view_proj_matrix, uv_scale, uv_offset):
         position_ndc = (position_cs[0]/w, position_cs[1]/w, position_cs[2]/w)
         
         # Step 5: Adjust Z Range (Platform Specific)
-        if UNITY_NEAR_CLIP_VALUE >= 0:
+        if unity_near_clip_value >= 0:
             position_ndc = (position_ndc[0], position_ndc[1], position_ndc[2]*2.0 - 1.0)
             
         # Step 6: Permute Coordinates
@@ -112,7 +109,7 @@ def process_triangle(input_vertices, view_proj_matrix, uv_scale, uv_offset):
             position_permuted = position_ndc
             
         # Step 7: Restore Z Range (Platform Specific)
-        if UNITY_NEAR_CLIP_VALUE >= 0:
+        if unity_near_clip_value >= 0:
             position_permuted = (position_permuted[0], position_permuted[1], position_permuted[2]*0.5 + 0.5)
             
         # Step 8: De-normalize
@@ -139,16 +136,16 @@ def process_triangle(input_vertices, view_proj_matrix, uv_scale, uv_offset):
 *   **Precision:** The normalization and dot product calculations are sensitive to floating-point precision. Ensure that the normal calculation is robust for nearly coplanar or degenerate triangles [G].
 
 ## Operating characteristics
-*   **Time Complexity:** The method adds a constant amount of computation per triangle in the geometry shader. The complexity is $O(N)$ where $N$ is the number of triangles, as each triangle is processed independently to determine its projection axis [S1, unofficial].
-*   **Memory Complexity:** The method requires storing the transformed positions and attributes for the output stream. The memory usage is proportional to the number of vertices in the output stream, which is $3 \times N$ for $N$ triangles [S1, unofficial].
-*   **Measured Performance:** Performance depends on the efficiency of the geometry shader and the rasterization stage. Not given in the sources.
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
 *   **Strengths:** Reduces projection distortion and overlap by adapting to the triangle's orientation. Simple to implement within a geometry shader pipeline [S1, unofficial].
 *   **Limitations:** Relies on rasterization, which may have limitations in handling complex overlaps or transparency. The visual output is not directly interpretable as a standard 3D view [S1, unofficial].
 *   **When to Use:** Suitable for real-time voxelization of meshes where projection quality is important and the target is a voxel grid rather than a standard screen image [S1, unofficial].
 *   **When Not to Use:** Not suitable for offline rendering or when a standard 3D view is required directly from the geometry shader output [S1, unofficial].
 
 ## Background
-This technique is described in a Unity-focused blog post [S1, unofficial]. It is part of a broader effort to perform real-time GPU-based voxelization of 3D models using Unity's Universal Render Pipeline (URP) [S1, unofficial]. The method builds on the concept of triangle projection voxelization, where triangles are rendered into a voxel grid [5432-triangle-projection-voxelization.md]. The specific approach of choosing the projection axis based on the face normal is a heuristic to optimize the rasterization process for voxel coverage [S1, unofficial].
+This technique is described in a Unity-focused blog post [S1, unofficial]. It is part of a broader effort to perform real-time GPU-based voxelization of 3D models using Unity's Universal Render Pipeline (URP) [S1, unofficial]. The method builds on the concept of triangle projection voxelization, where triangles are rendered into a voxel grid [5432-triangle-projection-voxelization.md] [S1, unofficial]. The specific approach of choosing the projection axis based on the face normal is a heuristic to optimize the rasterization process for voxel coverage [S1, unofficial].
 
 ## Sources
 [S1] 【Unity】GPUで3Dモデルをリアルタイムにボクセル化する, https://qiita.com/seyakara/items/b635939f6c6106a15d40, fetched 2026-10-29 (unofficial)

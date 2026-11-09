@@ -3,38 +3,55 @@
 Also called: Foot point extraction, Point Engine for Distance Fields (hgridf), Point generation from DFV, hgridf point generation
 
 ## Overview
-Distance Field Foot Point Generation is a method for extracting surface points (foot points) from a clamped, signed distance field volume (DFV) by projecting grid voxels onto the isosurface along the gradient direction [S1, unofficial]. It solves the problem of efficiently generating point clouds for isosurface rendering in interactive applications, avoiding the latency of updating the entire volume [S1, unofficial]. It is distinguished from its sibling [Primary Edge Sampling](7168-primary-edge-sampling.md) by its reliance on gradient-based projection from voxel centers rather than edge-based intersection, and from its parent [Near-Surface Point Sampling](2910-near-surface-point-sampling.md) by its specific use of the $p_f = p - d \mathbf{g}$ formula for DFVs [S1, unofficial].
+A method to generate surface points (foot points) from a clamped, signed distance field volume (DFV) by projecting grid voxels onto the isosurface along the gradient direction [S1, unofficial]. It differs from general scalar field foot point estimation by relying on the specific property that the gradient of a distance field is unit length, allowing for a single-step projection without iterative refinement [S1, unofficial]. It builds on [Near-Surface Point Sampling](2910-near-surface-point-sampling.md).
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A hierarchical grid (hgridf) containing a signed distance field volume (DFV). The grid consists of cells, each containing a set of voxels with distance values $d$.
-*   **Output:** A vertex array containing generated foot points $p_f$ and their corresponding normalized gradient vectors $\mathbf{g}$, which can be rendered as a point cloud [S1, unofficial].
+**Inputs:** A hierarchical grid of distance field values (hgridf) representing a signed distance field volume (DFV).
+**Outputs:** A set of 3D points lying on the isosurface (typically $d=0$) and their corresponding gradient vectors, stored for rendering.
 
 **Data Structures:**
-*   **Hierarchical Grid (hgridf):** A tree structure where nodes represent grid cells. Each cell has a status flag (clean/dirty) and a list of child voxels or sub-cells.
-*   **Voxel:** Contains a scalar distance value $d$ and its 3D position $p$ in world space.
-*   **Vertex Array:** A contiguous memory block storing pairs of $(p_f, \mathbf{g})$ for each generated point.
-*   **Display List:** A pre-compiled rendering command list generated from the vertex array for efficient GPU submission [S1, unofficial].
+*   **HGridf Cell:** Contains a flag indicating if the cell is "dirty" (needs regeneration) or "clean" (cached).
+*   **Vertex Array:** Stores generated foot points $p_f$ and gradients $\mathbf{g}$.
+*   **Display List:** Cached rendering primitive generated from the vertex array.
+
+**Algorithm Steps:**
+1.  Iterate through all cells in the hierarchical grid.
+2.  Skip cells that are empty.
+3.  For each non-empty cell:
+    a.  If the cell is "dirty":
+        i.  Traverse all voxels within the cell.
+        ii. For each voxel at position $p$ with distance value $d$:
+            1.  Check if $d \in [0, \sqrt{3})$. If not, skip this voxel.
+            2.  Compute the gradient $\mathbf{g}_{raw}$ using central differences on the distance field values surrounding $p$.
+            3.  Normalize the gradient: $\mathbf{g} = \frac{\mathbf{g}_{raw}}{\|\mathbf{g}_{raw}\|}$.
+            4.  Calculate the foot point position: $p_f = p - d \mathbf{g}$.
+            5.  Store $p_f$ and $\mathbf{g}$ in the vertex array.
+        iii. Generate a display list from the vertex array.
+        iv. Mark the cell as "clean".
+    b.  If the cell is "clean":
+        i.  Render the associated display list.
+4.  Move to the next cell.
+
+**Formulas:**
+*   **Foot Point Calculation:**
+    $$p_f = p - d \mathbf{g}$$
+    Where:
+    *   $p_f$: The foot point (closest point on the isosurface).
+    *   $p$: The position of the current voxel in the grid.
+    *   $d$: The signed distance value at voxel $p$.
+    *   $\mathbf{g}$: The normalized gradient vector of the distance field at $p$.
+
+*   **Gradient Normalization:**
+    $$\mathbf{g} = \frac{\nabla d}{\|\nabla d\|}$$
+    Where $\nabla d$ is the gradient computed via central differences.
 
 **Parameters:**
-*   **Interval Threshold:** $\sqrt{3}$ (approx. 1.732). Voxels are selected if their distance value $d$ lies in the interval $[0, \sqrt{3})$ [S1, unofficial]. This threshold ensures that all voxels on the positive side of the isosurface are included if they belong to cells intersected by the isosurface [S1, unofficial].
+*   **Interval Threshold:** $\sqrt{3}$. The interval $[0, \sqrt{3})$ is used to select voxels. This value ensures that all voxels on the positive side of the isosurface are included if they belong to cells intersected by the isosurface, preventing holes in the generated point cloud [S1, unofficial].
 
-**Steps:**
-1.  **Traverse Grid:** Iterate through all cells in the hgridf. Skip empty cells [S1, unofficial].
-2.  **Check Cell Status:** Determine if the current cell is "dirty" (needs regeneration) or "clean" [S1, unofficial].
-    *   If **clean**: Render the associated display list and proceed to the next cell [S1, unofficial].
-    *   If **dirty**: Proceed to step 3.
-3.  **Voxel Selection:** For each voxel $p$ within the current cell:
-    *   Retrieve the distance value $d$.
-    *   Test if $d \in [0, \sqrt{3})$. If not, skip the voxel [S1, unofficial].
-4.  **Gradient Computation:** For selected voxels:
-    *   Compute the gradient $\mathbf{g}_{raw}$ using central differences on the distance field values [S1, unofficial].
-    *   Normalize the gradient: $\mathbf{g} = \frac{\mathbf{g}_{raw}}{\|\mathbf{g}_{raw}\|}$ [S1, unofficial]. Normalization is beneficial because central differences do not yield exact unit length gradients for non-trivial cases [S1, unofficial].
-5.  **Foot Point Calculation:** Compute the foot point position $p_f$ using the formula:
-    $$ p_f = p - d \mathbf{g} $$
-    where $p_f$ is the closest surface point, $p$ is the voxel position, $d$ is the distance field voxel value, and $\mathbf{g}$ is the normalized gradient [S1, unofficial].
-6.  **Storage:** Store the pair $(p_f, \mathbf{g})$ in the vertex array [S1, unofficial].
-7.  **Rendering Preparation:** After processing all voxels in the cell, generate a display list from the vertex array and render it [S1, unofficial]. Mark the cell as clean [S1, unofficial].
+**Pitfalls and Edge Cases:**
+*   **Medial Surface:** The gradient $\mathbf{g}$ is undefined at points belonging to the medial surface (where there is an equal shortest distance to two or more surface points). The method assumes $\mathbf{g}$ is well-defined [S1, unofficial].
+*   **Gradient Accuracy:** Central differences do not yield an exact unit gradient for non-trivial distance fields. Normalization is required to correct this [S1, unofficial].
+*   **Holes:** Using an interval smaller than $[0, \sqrt{3})$ may cause holes to appear in the rendered surface [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -42,88 +59,63 @@ Distance Field Foot Point Generation is a method for extracting surface points (
 ```python
 def generate_foot_points(hgridf):
     """
-    Generates foot points for a hierarchical grid distance field volume.
+    Generates foot points for a distance field volume using hgridf.
     """
     for cell in hgridf.cells:
         if cell.is_empty:
             continue
             
-        if cell.is_clean:
-            # Render pre-computed display list
-            render_display_list(cell.display_list)
-            continue
+        if cell.is_dirty:
+            vertex_array = []
             
-        # Cell is dirty: regenerate points
-        vertex_array = []
-        
-        for voxel in cell.voxels:
-            d = voxel.distance_value
-            p = voxel.position
-            
-            # Select voxels in the interval [0, sqrt(3))
-            if d < 0 or d >= 1.73205080757: # sqrt(3)
-                continue
+            for voxel in cell.voxels:
+                p = voxel.position
+                d = voxel.distance_value
                 
-            # Compute gradient using central differences
-            # Assuming voxel has access to neighbors or a function to compute gradient
-            g_raw = compute_central_gradient(voxel)
+                # Check interval [0, sqrt(3))
+                if d < 0 or d >= 1.73205080757: # sqrt(3)
+                    continue
+                
+                # Compute gradient using central differences
+                # Note: Implementation of central differences depends on grid structure
+                g_raw = compute_central_gradient(hgridf, p)
+                
+                # Normalize gradient
+                g_norm = vector_length(g_raw)
+                if g_norm == 0:
+                    continue # Avoid division by zero, though rare in valid DFV
+                g = g_raw / g_norm
+                
+                # Calculate foot point
+                pf = p - (d * g)
+                
+                vertex_array.append((pf, g))
             
-            # Normalize gradient
-            norm = vector_length(g_raw)
-            if norm < 1e-9:
-                continue # Avoid division by zero at medial surface
-            g = g_raw / norm
+            # Generate display list from vertex array
+            cell.display_list = create_display_list(vertex_array)
+            cell.is_dirty = False
+            cell.is_clean = True
             
-            # Calculate foot point: pf = p - d * g
-            pf = p - (d * g)
-            
-            vertex_array.append((pf, g))
-            
-        # Generate display list from vertex array
-        display_list = create_display_list(vertex_array)
-        cell.display_list = display_list
-        cell.is_clean = True
-        
-        # Render the new display list
-        render_display_list(display_list)
-
-def compute_central_gradient(voxel):
-    """
-    Computes the gradient at a voxel using central differences.
-    Returns a 3D vector (gx, gy, gz).
-    """
-    # Implementation depends on specific grid layout.
-    # Standard central difference for scalar field f at (x,y,z):
-    # gx = (f(x+1,y,z) - f(x-1,y,z)) / 2
-    # Similarly for gy, gz.
-    # [G] Placeholder for specific neighbor lookup logic based on grid structure.
-    pass
-
-def vector_length(v):
-    return (v.x**2 + v.y**2 + v.z**2)**0.5
+        if cell.is_clean:
+            render_display_list(cell.display_list)
 ```
-
-**Edge Cases and Pitfalls:**
-*   **Medial Surface:** The gradient $\mathbf{g}$ is undefined at points belonging to the medial surface (where there is an equal shortest distance to two or more surface points) [S1, unofficial]. The method assumes $\mathbf{g}$ is well-defined. In practice, normalization may fail or produce erratic results if the gradient magnitude is near zero [S1, unofficial].
-*   **Holes:** Using a smaller interval than $[0, \sqrt{3})$ could cause holes to appear in the generated point cloud [S1, unofficial].
-*   **Precision:** Central differences do not yield exact unit length gradients, necessitating normalization [S1, unofficial].
 
 ## Subtopics
 
-### Primary Edge Sampling
-Generates points by sampling edges of the grid intersected by the isosurface. It is more robust to medial surface singularities but may produce fewer points per cell compared to voxel-based projection. Choose when medial surface artifacts are critical. [Link](7168-primary-edge-sampling.md)
+### [Medial Axis Detection via Foot Point Method](10987-medial-axis-detection-via-foot-point-method.md)
+An algorithm to detect the medial axis (MA) of a general implicit surface F by analyzing characteristic lines (normals) and detecting changes in foot points, providing subgrid accuracy without thinning or post-processing.
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of non-empty voxels in the hierarchical grid. Each voxel is processed once per dirty cell update.
-*   **Memory Complexity:** Proportional to the number of generated points. The vertex array and display lists store one point and one gradient vector per selected voxel.
-*   **Performance:** Extremely fast for distance fields because the foot point calculation is a simple vector operation ($p_f = p - d \mathbf{g}$) [S1, unofficial]. The use of a hierarchical grid allows skipping empty regions, making it suitable for interactive applications where latency is a concern [S1, unofficial].
-*   **Strengths:** Simplicity, speed, and ease of implementation. No iterative solving is required.
-*   **Limitations:** Fails or produces artifacts at the medial surface. Not directly applicable to general scalar fields without modification (which would require iterative methods or Marching Cubes variants) [S1, unofficial].
-*   **When to Use:** Interactive rendering of signed distance fields where performance is critical and medial surface artifacts are acceptable or rare.
-*   **When Not to Use:** General scalar field volumes, or when high-quality surface representation at medial surfaces is required.
+*   **Time Complexity:** Linear with respect to the number of voxels in non-empty cells intersecting the near-surface band. The cost is dominated by gradient computation and normalization for voxels in the $[0, \sqrt{3})$ band.
+*   **Memory Complexity:** Proportional to the number of generated foot points. Caching via display lists reduces repeated computation for static scenes.
+*   **Performance:** Extremely fast for distance fields compared to iterative methods or Marching Cubes, as it requires only a single projection step per voxel [S1, unofficial].
+*   **Strengths:** Simple implementation; no iterative convergence required; suitable for interactive applications where latency is critical [S1, unofficial].
+*   **Limitations:** Only applicable to signed distance fields (DFVs); fails or produces artifacts at the medial surface where the gradient is undefined [S1, unofficial].
+*   **When to use:** When rendering isosurfaces from pre-computed distance fields in interactive applications.
+*   **When not to use:** For general scalar fields (requires iterative refinement or Marching Cubes) or when medial axis accuracy is required without post-processing.
 
 ## Background
-The method originates from the work on hardware-accelerated point rendering of isosurfaces, specifically within the context of the "point engine for synthetic volume" [S1, unofficial]. It was developed to address the latency issues of updating entire volume datasets in interactive applications [S1, unofficial]. The approach leverages the mathematical property that the gradient of a distance field points directly to the closest surface point, allowing for direct projection without iterative refinement [S1, unofficial]. It is part of a broader family of point-based rendering techniques for volume data.
+The method originates from the work on hardware-accelerated point rendering of isosurfaces, specifically within the context of the "point engine for synthetic volume" [S1, unofficial]. It leverages the mathematical properties of signed distance fields to simplify surface point generation. The approach was detailed in the paper "Hardware Accelerated Point Rendering of Isosurfaces" [S1, unofficial]. It is part of a broader family of near-surface point sampling techniques used in volume rendering.
 
 ## Sources
 [S1] Hardware Accelerated Point Rendering of Isosurfaces, http://wscg.zcu.cz/wscg2003/Papers_2003/J61.pdf, fetched 2026-10-26 (unofficial)

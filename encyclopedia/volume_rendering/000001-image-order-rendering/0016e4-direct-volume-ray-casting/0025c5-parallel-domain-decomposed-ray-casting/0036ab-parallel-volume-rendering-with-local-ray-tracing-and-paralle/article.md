@@ -1,163 +1,204 @@
 # Parallel Volume Rendering with Local Ray Tracing and Parallel Compositing
 
-Also called: Data Distributed Parallel Ray-Traced Volume Rendering, Divide and conquer ray-traced volume rendering, Parallel Volume Ray-Tracing Algorithm, Tenderer
+Also called: Data Distributed Parallel Algorithm, Data-Distributed Parallel Ray-Traced Volume Rendering, Data-space subdivision for volume rendering, Divide-and-Conquer Parallel Volume Rendering, Divide-and-conquer ray-traced volume rendering, Parallel Volume Ray-Tracing Algorithm, Parallel Volume Rendering with Local Raytracing
 
 ## Overview
-This method is a parallel volume rendering algorithm that distributes both volume data and computation to individual processing units to render high-resolution datasets that exceed the memory of a single processor [S1, unofficial]. It solves the scalability problem of direct volume ray casting by dividing the data space into subvolumes, allowing each node to perform local ray tracing independently without inter-processor communication during the rendering phase [S1, unofficial]. It is distinguished from image-space subdivision methods (like [Parallel Domain-Decomposed Ray Casting](3625-parallel-domain-decomposed-ray-casting.md)) by using data-space subdivision, which is better suited for distributed-memory environments where data can be partitioned [S1, unofficial]. The final image is constructed by compositing the subimages in a determined depth order using a binary-swap method [S1, unofficial].
+This method is a parallel volume rendering algorithm that distributes both the volume data and the computational load across individual processing units to render high-resolution datasets that exceed the memory capacity of a single machine [S1][S2, unofficial][S4]. It employs data-space subdivision, where the volume is partitioned into subvolumes assigned to different processors, which perform local ray tracing independently without inter-processor communication during the rendering phase [S2, unofficial][S4]. The final image is constructed by compositing the resulting subimages in a specific front-to-back order [S1, S4]. Unlike image-space subdivision methods (e.g., [Image-order rendering](52-name.md)), this approach is designed for distributed-memory environments where data can be partitioned in memory [S2, unofficial]. It builds on the associativity of the Porter and Duff 'over' compositing operator, allowing rays to be split into segments processed in parallel [S2, unofficial][S5].
 
 ## How it works
-The algorithm consists of two main phases: local ray tracing and parallel compositing. It operates on a host/node model where a host manages data distribution and image gathering, while nodes execute the rendering core (Tenderer) and compositing logic [S1, unofficial].
-
 ### Inputs and Outputs
-*   **Inputs:** A 3D volume dataset (scalar field), camera parameters (eye position, view direction, image plane dimensions), transfer functions (color map, opacity map), and transformation matrices.
-*   **Outputs:** A final 2D image composed of pixels with color and opacity values.
+**Inputs:**
+*   A 3D volume dataset $V$ of size $D_x \times D_y \times D_z$.
+*   A viewpoint (eye position and projection parameters).
+*   Transfer functions: a color map and an opacity map.
+*   A shading model (e.g., Phong) and surface normal estimation (normalized gradient of $V$) [S2, unofficial].
+*   A sampling rate (typically 1–2 samples per voxel) [S2, unofficial].
+*   A termination threshold for accumulated opacity [S2, unofficial].
+*   $n$ processing units (processors/nodes).
+
+**Outputs:**
+*   A final 2D image $I$ of resolution $W \times H$.
 
 ### Data Structures
-*   **Volume Data:** Distributed evenly across $N$ nodes. Each node stores a contiguous subvolume chunk. The partitioning must allow an unambiguous front-to-back ordering to be determined a priori [S1, unofficial].
-*   **Subimage:** Each node generates a partial image (subimage) corresponding to its subvolume's contribution to the final frame.
-*   **k-D Tree:** Used to manage the binary-swap compositing process, organizing the partial images for efficient merging [S1, unofficial].
-
-### Parameters
-*   **Sampling Rate:** One to two samples per voxel along the ray [S1, unofficial].
-*   **Interpolation:** Trilinear interpolation using the eight nearest voxels to compute color and opacity at each sample point [S1, unofficial].
-*   **Shading Model:** Phong lighting model using the normalized gradient of the data volume as the surface normal [S1, unofficial].
-*   **Termination Threshold:** Ray sampling stops when the subvolume is exhausted or accumulated opacity exceeds a cut-off value [S1, unofficial].
-*   **Partition Sizes:** Tested with 32, 64, 128, 256, and 512 nodes [S1, unofficial].
+*   **Volume Partitioning:** The volume $V$ is partitioned into $n$ equal-sized 3D blocks (subvolumes) $\tilde{V}_q$ for $1 \le q \le n$ [S5]. The partitioning planes are parallel to the coordinate planes of the data [S4].
+*   **Boundary Replication:** To avoid boundary artifacts during compositing, one layer of boundary grid points is replicated at each subvolume's interface so that the composited image includes the layer from the adjacent subvolume [S1].
+*   **Subimage:** Each processor $q$ generates a subimage $\tilde{I}_q$ corresponding to the contribution of $\tilde{V}_q$.
+*   **Ray Set:** For each processor $q$, the set of rays $R_q$ traversing its subvolume $\tilde{V}_q$ is determined [S5].
 
 ### Algorithm Steps
+1.  **Initialization:**
+    *   The host reads the volume data (optionally from disk) and broadcasts opacity/colormap and transformation information to the nodes [S2, unofficial].
+    *   Each node receives its data-space partitioning information and its portion of the volume data $\tilde{V}_q$ [S2, unofficial][S4].
+    *   Nodes update the transfer function and transform matrices [S2, unofficial].
+    *   The viewpoint coordinate is broadcast to all processors [S5].
 
-1.  **Host Initialization:**
-    *   The host determines the data-space partitioning based on the number of available nodes [S1, unofficial].
-    *   The host reads the volume data (optionally from parallel storage like DataVault/Scalable Disk Array) and broadcasts it to the nodes. Alternatively, nodes read directly from storage [S1, unofficial].
-    *   The host broadcasts opacity/colormap transfer functions and transformation information to all nodes [S1, unofficial].
+2.  **Phase 1: Local Ray Tracing (No Communication):**
+    *   Each processor $q$ independently casts rays from the eye through the image plane into its assigned subvolume $\tilde{V}_q$ [S2, unofficial][S4].
+    *   For each ray $\mathbf{r} \in R_q$:
+        *   Sample the subvolume at evenly spaced points along the ray, typically at a rate of one to two samples per voxel [S2, unofficial].
+        *   At each sample point, compute color $c$ and opacity $\alpha$ using trilinear interpolation from the eight nearest voxels in $\tilde{V}_q$ [S2, unofficial].
+        *   Apply the shading model (e.g., Phong) using the normalized gradient of the data as the surface normal [S2, unofficial].
+        *   Accumulate color and opacity using the Porter and Duff 'over' operator until the subvolume is exhausted or the accumulated opacity reaches the threshold cut-off [S2, unofficial].
+        *   Generate the subimage $\tilde{I}_q$ [S2, unofficial][S4].
 
-2.  **Node Initialization:**
-    *   Each node receives its partitioning information and its portion of the volume data [S1, unofficial].
-    *   Nodes update their local transfer functions and transform matrices [S1, unofficial].
+3.  **Phase 2: Parallel Compositing:**
+    *   The $n$ subimages $\tilde{I}_1, \dots, \tilde{I}_n$ are merged into the final image $I$ [S5].
+    *   The merge order is determined a priori based on the unambiguous front-to-back ordering of the subvolumes [S4].
+    *   A binary-swap compositing method is used [S2, unofficial]:
+        *   Processors exchange and composite half-images in a tree-like structure.
+        *   For example, Computer 1 keeps its left half-image and sends its right half-image to Computer 2. Computer 2 keeps its right half-image and sends its left half-image to Computer 1. Both composite the half-image they keep with the half-image they receive [S1].
+        *   This process reduces the image size for sending/compositing and keeps all processors busy [S2, unofficial].
+        *   A k-D tree structure may be used to manage the compositing steps [S2, unofficial].
+        *   Compression (e.g., 4-to-1 ratio) may be applied to subimages before swapping to reduce communication cost [S2, unofficial].
 
-3.  **Local Ray Tracing (Phase 1):**
-    *   All nodes execute the Tenderer core simultaneously [S1, unofficial].
-    *   For each pixel in the image, a ray is cast from the eye through the image plane into the node's assigned subvolume [S1, unofficial].
-    *   The ray is sampled at evenly spaced points (1-2 samples per voxel) [S1, unofficial].
-    *   At each sample point, color $C$ and opacity $\alpha$ are computed via trilinear interpolation from the eight nearest voxels [S1, unofficial].
-    *   The Phong shading model calculates the final color contribution [S1, unofficial].
-    *   Front-to-back compositing is performed locally along the ray segment until the subvolume is exhausted or the accumulated opacity threshold is reached [S1, unofficial].
-    *   Each node generates a subimage [S1, unofficial].
+4.  **Phase 3: Image Gathering:**
+    *   Each node sends its portion of the final composited image back to the host for display [S2, unofficial].
 
-4.  **Parallel Compositing (Phase 2):**
-    *   Nodes synchronize after rendering [S1, unofficial].
-    *   A binary-swap compositing algorithm merges the subimages in depth order [S1, unofficial].
-    *   The associativity of the Porter-Duff "over" operator allows independent segment processing:
-        $$ a \text{ over } (b \text{ over } c) = (a \text{ over } b) \text{ over } c $$
-    *   The binary-swap method recursively pairs nodes, compositing their subimages, and reducing the image size for subsequent swaps [S1, unofficial].
-    *   Compression may be applied to subimages before swapping to reduce communication costs [S1, unofficial].
+### Formulas
+The compositing is based on the Porter and Duff 'over' operator, which is associative [S2, unofficial]:
+$$ a \text{ over } (b \text{ over } c) = (a \text{ over } b) \text{ over } c $$
+This associativity allows the ray to be broken into segments processed independently by different processors and combined later [S2, unofficial].
 
-5.  **Image Gathering:**
-    *   After compositing, each node sends its portion of the final image back to the host [S1, unofficial].
-    *   The host performs an I/O servicing loop to receive and assemble the final image for display [S1, unofficial].
+The color $C$ and opacity $\alpha$ at a sample point are computed via trilinear interpolation from the eight nearest voxels $v_i$ with values $d_i$ [S2, unofficial]:
+$$ C = \text{ColorMap}(\text{Interpolate}(d_1, \dots, d_8)) $$
+$$ \alpha = \text{OpacityMap}(\text{Interpolate}(d_1, \dots, d_8)) $$
+The final color $C_{final}$ and opacity $\alpha_{final}$ for a ray segment are accumulated front-to-back:
+$$ C_{out} = C_{in} + (1 - \alpha_{in}) C_{sample} $$
+$$ \alpha_{out} = \alpha_{in} + (1 - \alpha_{in}) \alpha_{sample} $$
+where $(C_{in}, \alpha_{in})$ is the accumulated value from previous samples and $(C_{sample}, \alpha_{sample})$ is the current sample [S2, unofficial].
+
+### Parameters
+*   **Sampling Rate:** 1–2 samples per voxel [S2, unofficial].
+*   **Interpolation:** Trilinear [S2, unofficial].
+*   **Shading:** Phong lighting model [S2, unofficial].
+*   **Termination:** Accumulated opacity threshold cut-off [S2, unofficial].
+*   **Partition Sizes:** Supported 32, 64, 128, 256, and 512 nodes on CM-5 [S2, unofficial].
+*   **Image Resolution:** Tested on 64x64 and 512x512 [S2, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Load Imbalance:** Data sets with many empty voxels (e.g., head, vessel) cause load imbalance, preventing linear speedup. Dense data sets (e.g., vorticity) exhibit nearly linear speedup [S2, unofficial].
+*   **Fixed Viewpoint Optimization:** Partitioning to minimize overlap between subimages reduces merging cost but cannot be applied to animation sequences where the viewpoint changes [S4].
+*   **Communication Overhead:** On networked workstations, communication dominates compositing costs (~97% of compositing time) because Ethernet bandwidth is fixed [S2, unofficial]. On CM-5, communication time varied from 10% to 3% of total compositing time [S2, unofficial].
+*   **Variable Network Performance:** In shared environments, communication performance is difficult to characterize due to network traffic from NFS, tape backups, and other users [S2, unofficial].
+*   **Boundary Artifacts:** Replicating one layer of boundary grid points is required to avoid artifacts at subvolume interfaces [S1].
 
 ### Pseudocode
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Host Side
-def host_main(volume_data, num_nodes, image_dims):
-    # 1. Determine partitioning
-    partitions = compute_data_space_partitioning(volume_data, num_nodes)
+def parallel_volume_rendering(volume_data, viewpoint, transfer_functions, num_nodes):
+    """
+    Main entry point for the parallel volume rendering algorithm.
+    """
+    # Phase 1: Initialization
+    # Host broadcasts viewpoint, transfer functions, and partitioning info
+    partition_info = determine_partitioning(volume_data, num_nodes)
+    broadcast(viewpoint, transfer_functions, partition_info)
     
-    # 2. Broadcast data and parameters
-    broadcast(partitions)
-    broadcast(volume_data) # Or signal nodes to read from disk
-    broadcast(opacity_map)
-    broadcast(color_map)
-    broadcast(transformation_matrix)
+    # Each node receives its subvolume
+    subvolume = get_subvolume(volume_data, partition_info)
     
-    # 3. Wait for rendering and gather images
-    final_image = gather_images_from_nodes(num_nodes, image_dims)
-    display(final_image)
+    # Phase 2: Local Ray Tracing
+    # No communication occurs here
+    subimage = local_ray_trace(subvolume, viewpoint, transfer_functions)
+    
+    # Synchronize after rendering
+    synchronize()
+    
+    # Phase 3: Parallel Compositing
+    # Binary-swap compositing
+    final_image = binary_swap_compositing(subimage, partition_info)
+    
+    # Phase 4: Image Gathering
+    # Each node sends its portion of the final image to the host
+    send_to_host(final_image)
+    
+    return final_image
 
-# Node Side
-def node_main(partition_info, opacity_map, color_map, transformation_matrix):
-    # 1. Receive data
-    my_subvolume = receive_volume_data(partition_info)
+def local_ray_trace(subvolume, viewpoint, transfer_functions):
+    """
+    Performs local ray tracing on the assigned subvolume.
+    """
+    width, height = get_image_dimensions()
+    subimage = create_empty_image(width, height)
     
-    # 2. Local Ray Tracing
-    my_subimage = render_subvolume(my_subvolume, opacity_map, color_map, transformation_matrix)
+    # Replicate boundary layer to avoid artifacts
+    subvolume = replicate_boundary(subvolume)
     
-    # 3. Parallel Compositing (Binary Swap)
-    # Assume 'my_subimage' is the initial leaf in the k-D tree
-    composited_image = binary_swap_compositing(my_subimage, partition_info)
-    
-    # 4. Send result to host
-    send_image_to_host(composited_image)
-
-def render_subvolume(subvolume, opacity_map, color_map, transform):
-    subimage = create_empty_image()
-    for each pixel in subimage:
-        ray = generate_ray(pixel, transform)
-        accumulated_color = (0, 0, 0)
-        accumulated_opacity = 0
-        
-        # Sample ray through subvolume
-        for sample_point in ray_intersections(subvolume):
-            # Trilinear interpolation
-            voxel_val = trilinear_interpolate(subvolume, sample_point)
-            color = lookup_color(voxel_val, color_map)
-            alpha = lookup_opacity(voxel_val, opacity_map)
+    for y in range(height):
+        for x in range(width):
+            ray = cast_ray(viewpoint, x, y)
+            accumulated_color = (0, 0, 0)
+            accumulated_opacity = 0
             
-            # Phong shading
-            normal = normalize(gradient(subvolume, sample_point))
-            color = apply_phong_shading(color, normal, ray.direction)
+            # Sample along the ray within the subvolume
+            for sample_point in ray.samples_in(subvolume):
+                # Trilinear interpolation from 8 nearest voxels
+                voxel_value = trilinear_interpolate(subvolume, sample_point)
+                
+                # Compute color and opacity using transfer functions
+                color = transfer_functions.color_map(voxel_value)
+                opacity = transfer_functions.opacity_map(voxel_value)
+                
+                # Apply shading (Phong model)
+                normal = normalize_gradient(subvolume, sample_point)
+                color = apply_phong_shading(color, normal, viewpoint)
+                
+                # Porter and Duff 'over' operator
+                # C_out = C_in + (1 - alpha_in) * C_sample
+                # alpha_out = alpha_in + (1 - alpha_in) * alpha_sample
+                accumulated_color = accumulated_color + (1 - accumulated_opacity) * color
+                accumulated_opacity = accumulated_opacity + (1 - accumulated_opacity) * opacity
+                
+                # Termination condition
+                if accumulated_opacity >= THRESHOLD:
+                    break
             
-            # Front-to-back compositing for this segment
-            # C_out = C_in + C_s * alpha_s * (1 - alpha_in)
-            # alpha_out = alpha_in + alpha_s * (1 - alpha_in)
-            accumulated_color, accumulated_opacity = porter_duff_over(
-                accumulated_color, accumulated_opacity,
-                color, alpha
-            )
+            subimage.set_pixel(x, y, accumulated_color, accumulated_opacity)
             
-            # Termination check
-            if accumulated_opacity > THRESHOLD:
-                break
-        
-        subimage[pixel] = accumulated_color
     return subimage
 
-def porter_duff_over(C1, a1, C2, a2):
-    # a1 over a2
-    new_alpha = a1 + a2 * (1 - a1)
-    new_color = C1 + C2 * a2 * (1 - a1)
-    return new_color, new_alpha
-
-def binary_swap_compositing(my_subimage, partition_info):
-    # Binary swap algorithm using k-D tree structure
-    # Pairs nodes, composites images, reduces problem size
-    # Details of k-D tree management are implementation-specific [S1, unofficial]
-    # This step merges partial images in depth order
-    return composited_result
+def binary_swap_compositing(subimage, partition_info):
+    """
+    Merges subimages using binary-swap compositing.
+    """
+    current_image = subimage
+    current_node = partition_info.node_id
+    
+    # Binary-swap steps
+    for step in range(log2(num_nodes)):
+        partner = get_partner_node(current_node, step)
+        
+        # Exchange half-images
+        if is_left_half(current_node, step):
+            send_right_half(current_image, partner)
+            receive_left_half(partner, current_node)
+            composite_with_left(receive_buffer)
+        else:
+            send_left_half(current_image, partner)
+            receive_right_half(partner, current_node)
+            composite_with_right(receive_buffer)
+            
+        current_image = composited_image
+        
+    return current_image
 ```
 
-### Edge Cases and Pitfalls
-*   **Load Imbalance:** Datasets with many empty voxels (e.g., head CT, vessel MRA) cause load imbalance, preventing linear speedup. Dense datasets (e.g., vorticity) exhibit nearly linear speedup [S1, unofficial].
-*   **Communication Overhead:** On networked workstations, communication dominates compositing costs (~97% of compositing time) because Ethernet bandwidth is fixed and does not scale with partition size [S1, unofficial].
-*   **Variable Network Performance:** In shared environments, network traffic from NFS, backups, and other users makes communication performance difficult to characterize [S1, unofficial].
-*   **Small Image Overhead:** Rendering small images (e.g., 64x64) exhibits lower speedup due to fixed overhead costs associated with rendering and compositing steps [S1, unofficial].
-
 ## Operating characteristics
-*   **Time Complexity:** The local ray tracing phase is $O(N \cdot R \cdot S)$, where $N$ is the number of nodes, $R$ is the number of rays, and $S$ is the number of samples per ray. The compositing phase is $O(\log N)$ steps with decreasing image sizes [S1, unofficial].
-*   **Memory Complexity:** Each node stores only its assigned subvolume, allowing rendering of datasets larger than any single node's memory [S1, unofficial].
-*   **Performance:**
-    *   **CM-5:** Communication time varied from 10% to 3% of total compositing time. Speedup from 32 to 512 nodes was 1.46 for 64x64 images [S1, unofficial].
-    *   **Workstations:** On 32 workstations, compression achieved a 4-to-1 ratio, resulting in 80% faster communication. Total compositing time for one workstation was 1.465 seconds (0.042s raw, 0.088s compression, 1.271s communication) [S1, unofficial].
-    *   **Data Distribution:** On CM-5, distribution time varied from 40 to 90 seconds for vorticity data. On workstations, it varied from 17 to 150 seconds due to network load [S1, unofficial].
-*   **Strengths:** Suitable for distributed-memory environments; no communication during ray tracing; efficient use of all processors during compositing [S1, unofficial].
-*   **Limitations:** Sensitive to load imbalance from sparse data; communication overhead on fixed-bandwidth networks; data distribution and image gathering can be bottlenecks [S1, unofficial].
+*   **Time Complexity:** The local ray tracing phase is $O(N \cdot S)$ where $N$ is the number of rays and $S$ is the number of samples per ray, performed in parallel by $n$ processors, yielding $O(N \cdot S / n)$ for the rendering phase [S2, unofficial]. The compositing phase involves $O(\log n)$ steps of communication and compositing [S2, unofficial].
+*   **Memory Complexity:** Each node stores only its assigned subvolume $\tilde{V}_q$, allowing the rendering of datasets larger than the memory of a single machine [S1][S2, unofficial].
+*   **Performance:** On the CM-5, the algorithm demonstrated practicality with good speedup characteristics up to 512 nodes for dense data sets (vorticity) [S2, unofficial]. For sparse data sets (head, vessel), speedup was limited by load imbalance [S2, unofficial]. On networked workstations, communication overhead was significant (~97% of compositing time) due to fixed Ethernet bandwidth [S2, unofficial]. Compression (4-to-1 ratio) improved communication rates by 80% [S2, unofficial].
+*   **Strengths:** Suitable for distributed-memory environments; handles large datasets; no communication during the computationally intensive ray tracing phase [S1][S2, unofficial].
+*   **Limitations:** Load imbalance for sparse data; communication overhead on networks with fixed bandwidth; boundary artifacts if not handled; fixed-viewpoint optimization not applicable to animations [S2, unofficial][S4].
+*   **When to use:** When rendering large volume datasets on distributed-memory systems where data cannot fit in a single machine's memory.
+*   **When not to use:** When the dataset is small enough for a single machine; when the network bandwidth is very low and communication overhead dominates; when the viewpoint changes frequently (animation) and dynamic partitioning is not implemented.
 
 ## Background
-The algorithm was presented by Ma et al. as an early parallel volume rendering algorithm, adopting the divide-and-conquer paradigm [S2, unofficial]. It is based on the volume ray-tracing scheme presented by Levoy [S1, unofficial]. The implementation, known as Tenderer, was used in the STARVolume visualization framework [S2, unofficial]. It was implemented and tested on the Connection Machine CM-5 and a network of 32 high-performance workstations (IBM RS/6000-550, HP9000/730, Sun Sparc-15/30) using PVM 3.1 [S1, unofficial]. Tests used three datasets: 256x256x256 vorticity (CFD), 128x128x128 head (CT), and 256x256x128 vessel (MRA) [S1, unofficial].
+The algorithm was presented by Ma et al. in 1993 [S1][S2, unofficial][S4]. It was implemented and tested on the Connection Machine CM-5 and a network of 32 high-performance workstations (IBM RS/6000-550, HP9000/730, Sun Sparc-15/30) using PVM 3.1 [S2, unofficial]. The method is based on the divide-and-conquer paradigm and the associativity of the Porter and Duff 'over' operator [S2, unofficial]. It was adopted by STARVolume [S3, unofficial]. Tests used three data sets: 256x256x256 vorticity (CFD), 128x128x128 head (CT), and 256x256x128 vessel (MRA) [S2, unofficial].
 
 ## Sources
-[S1] DTIC ADA270501: A Data Distributed Parallel Algorithm for Ray-Traced Volume Rendering, https://archive.org/details/DTIC_ADA270501, fetched 2026-10-26 (unofficial)
-[S2] Volume visualization of time-varying data using parallel, multiresolution and adaptive-resolution techniques, https://scholars.unh.edu/cgi/viewcontent.cgi?article=1245&context=thesis, fetched 2026-10-27 (unofficial)
+[S1] A data distributed, parallel algorithm for ray-traced volume rendering, https://doi.org/10.1109/prs.1993.586080, fetched 2026-10-24
+[S2] DTIC ADA270501: A Data Distributed Parallel Algorithm for Ray-Traced Volume Rendering, https://archive.org/details/DTIC_ADA270501, fetched 2026-10-26 (unofficial)
+[S3] Volume visualization of time-varying data using parallel, multiresolution and adaptive-resolution techniques, https://scholars.unh.edu/cgi/viewcontent.cgi?article=1245&context=thesis, fetched 2026-10-27 (unofficial)
+[S4] A data distributed, parallel algorithm for ray-traced volume ..., https://www.cs.ucdavis.edu/~ma/papers/PRS93.pdf, fetched 2026-10-27
+[S5] PDF A Divided-Screenwise Hierarchical Compositing for Sort-Last Parallel ..., http://www-ppl.ist.osaka-u.ac.jp/research/papers/200304_ino_ipdps.pdf, fetched 2026-10-29

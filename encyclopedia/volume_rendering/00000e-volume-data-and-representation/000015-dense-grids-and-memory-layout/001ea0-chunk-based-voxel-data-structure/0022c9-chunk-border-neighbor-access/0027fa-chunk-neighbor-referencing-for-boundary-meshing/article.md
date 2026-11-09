@@ -1,88 +1,72 @@
 # Chunk Neighbor Referencing for Boundary Meshing
 
-Also called: Chunk Neighbor Referencing
+Also called: Chunk Neighbor Referencing, Chunk Neighborhood Construction, GetAdjacentChunks, GetAllNeighborChunks
 
 ## Overview
-Chunk Neighbor Referencing is a strategy for handling meshing at chunk boundaries by precomputing pointers to adjacent chunks, thereby avoiding global lookups during the meshing process [S1, unofficial]. It builds on [Chunk Border Neighbor Access](2860-chunk-border-neighbor-access.md) by providing the specific data structures and logic required to resolve neighbor identities for boundary voxels efficiently.
+Chunk Neighbor Referencing precomputes pointers to adjacent chunks to handle meshing at chunk boundaries without global lookups [S1, unofficial]. It builds on [Chunk Border Neighbor Access](2860-chunk-border-neighbor-access.md) by providing the specific data structures and logic required to resolve neighbor identities for boundary voxels efficiently [G].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A flat array of chunks representing the voxel map, map dimensions ($M_x, M_y, M_z$), and a boolean flag `ShouldMeshExterior`.
-*   **Output:** A set of neighbor pointers for a given chunk, allowing the meshing algorithm to access adjacent voxel data without traversing a global map structure.
+*   **Input:** A flat array of chunks representing the voxel map, map dimensions ($M_x, M_y, M_z$), and a boolean flag `ShouldMeshExterior` [S1, unofficial].
+*   **Output:** A `ChunkNeighborhood` structure containing pointers to adjacent chunks, allowing the meshing algorithm to access adjacent voxel data without traversing a global map structure [S1, unofficial].
 
 **Data Structures:**
-The chunk data is stored in a flat, contiguous memory array (e.g., `Chunk* chunks`). The layout is row-major (or similar linear indexing) where strides are precomputed based on the maximum map dimensions.
+The chunk data is stored in a flat, contiguous memory array (`Chunk* chunks`) allocated to `MaxChunkAmount^3` [S1, unofficial]. The layout uses row-major linear indexing where strides are precomputed based on the maximum map dimensions [S1, unofficial].
 
 **Precomputed Strides:**
 To calculate neighbor indices in the flat array, three strides are defined based on the maximum chunk counts ($MaxChunkAmount$):
 *   $CHUNK\_STEP\_X = MaxChunkAmount$
 *   $CHUNK\_STEP\_Y = 1$
-*   $CHUNK\_STEP\_Z = MaxChunkAmount^2$
+*   $CHUNK\_STEP\_Z = MaxChunkAmount^2$ [S1, unofficial].
 
 **Algorithm Steps:**
-1.  **Calculate Local Index:** Determine the linear index of the current chunk using its 3D coordinates $(chunkPosX, chunkPosY, chunkPosZ)$ and the map dimensions. The source provides a helper `GetAccessLocal(chunkPosX, chunkPosY, chunkPosZ)` for this calculation [S1, unofficial].
-2.  **Determine Neighbor Pointers:** For each axis (X, Y, Z), calculate the index of the adjacent chunk by adding or subtracting the corresponding stride ($CHUNK\_STEP\_X, CHUNK\_STEP\_Y, CHUNK\_STEP\_Z$) from the current chunk's index.
-3.  **Handle Boundaries:** Check if the calculated neighbor index is within the valid bounds of the chunk array.
-    *   If the neighbor is **in bounds**, assign the pointer to the actual chunk at that index.
-    *   If the neighbor is **out of bounds**, assign a sentinel chunk pointer. The choice of sentinel depends on the `ShouldMeshExterior` flag:
-        *   If `ShouldMeshExterior` is true, use `Map.EMPTY_CHUNK` (representing empty space).
-        *   If `ShouldMeshExterior` is false, use `Map.FULL_CHUNK` (representing solid space) [S1, unofficial].
+1.  **Calculate Local Index:** Determine the linear index of the current chunk using its 3D coordinates $(chunkPosX, chunkPosY, chunkPosZ)$ and the precomputed strides [S1, unofficial].
+2.  **Initialize Neighborhood:** Create an empty `ChunkNeighborhood` structure to store neighbor pointers [S1, unofficial].
+3.  **Determine Neighbor Pointers:** For each axis (X, Y, Z), calculate the index of the adjacent chunk by adding or subtracting the corresponding stride ($CHUNK\_STEP\_X, CHUNK\_STEP\_Y, CHUNK\_STEP\_Z$) from the current chunk's index [S1, unofficial].
+4.  **Handle Boundaries:** Check if the calculated neighbor index is within the valid bounds of the chunk array [S1, unofficial].
+    *   If the neighbor is **in bounds**, assign the pointer to the actual chunk at that index [S1, unofficial].
+    *   If the neighbor is **out of bounds**, assign a sentinel chunk pointer [S1, unofficial]. The choice depends on the `ShouldMeshExterior` flag: if true, use `Map.EMPTY_CHUNK`; if false, use `Map.FULL_CHUNK` [S1, unofficial].
+5.  **Lookup and Store:** Compute a 64-bit key for each neighbor chunk, look it up in the map's chunk dictionary, and store the resulting pointer in the neighborhood array at offset `[dx+1][dy+1][dz+1]` [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Constants derived from map configuration
-MAX_CHUNK_AMOUNT = ... # Precomputed maximum chunk count in one dimension
-CHUNK_STEP_X = MAX_CHUNK_AMOUNT
-CHUNK_STEP_Y = 1
-CHUNK_STEP_Z = MAX_CHUNK_AMOUNT * MAX_CHUNK_AMOUNT
+def get_neighbor_pointers(chunk_pos_x, chunk_pos_y, chunk_pos_z,
+                          chunk_array, max_chunk_amount, should_mesh_exterior):
+    CHUNK_STEP_X = max_chunk_amount
+    CHUNK_STEP_Y = 1
+    CHUNK_STEP_Z = max_chunk_amount * max_chunk_amount
 
-# Sentinel chunks
-EMPTY_CHUNK = ... # Pointer to a chunk filled with empty voxels
-FULL_CHUNK = ...  # Pointer to a chunk filled with solid voxels
+    EMPTY_CHUNK = None  # Sentinel for empty space
+    FULL_CHUNK = None   # Sentinel for solid space
 
-def get_neighbor_pointers(chunk_pos_x, chunk_pos_y, chunk_pos_z, 
-                          chunk_array, should_mesh_exterior):
-    """
-    Returns a dictionary of neighbor chunk pointers for the given chunk position.
-    """
     # Step 1: Calculate current chunk index
-    # Note: The exact formula for GetAccessLocal is not explicitly detailed 
-    # in the source, but it maps 3D coordinates to the flat array index.
-    current_index = get_access_local(chunk_pos_x, chunk_pos_y, chunk_pos_z)
-    
-    neighbors = {}
-    
-    # Step 2 & 3: Calculate and validate neighbors for each axis
-    # X-axis neighbors
-    idx_xn = current_index - CHUNK_STEP_X
-    idx_xp = current_index + CHUNK_STEP_X
-    
-    neighbors['xn'] = chunk_array[idx_xn] if is_valid_index(idx_xn) else (EMPTY_CHUNK if should_mesh_exterior else FULL_CHUNK)
-    neighbors['xp'] = chunk_array[idx_xp] if is_valid_index(idx_xp) else (EMPTY_CHUNK if should_mesh_exterior else FULL_CHUNK)
-    
-    # Y-axis neighbors
-    idx_yn = current_index - CHUNK_STEP_Y
-    idx_yp = current_index + CHUNK_STEP_Y
-    
-    neighbors['yn'] = chunk_array[idx_yn] if is_valid_index(idx_yn) else (EMPTY_CHUNK if should_mesh_exterior else FULL_CHUNK)
-    neighbors['yp'] = chunk_array[idx_yp] if is_valid_index(idx_yp) else (EMPTY_CHUNK if should_mesh_exterior else FULL_CHUNK)
-    
-    # Z-axis neighbors
-    idx_zn = current_index - CHUNK_STEP_Z
-    idx_zp = current_index + CHUNK_STEP_Z
-    
-    neighbors['zn'] = chunk_array[idx_zn] if is_valid_index(idx_zn) else (EMPTY_CHUNK if should_mesh_exterior else FULL_CHUNK)
-    neighbors['zp'] = chunk_array[idx_zp] if is_valid_index(idx_zp) else (EMPTY_CHUNK if should_mesh_exterior else FULL_CHUNK)
-    
-    return neighbors
+    current_index = chunk_pos_x * CHUNK_STEP_X + chunk_pos_y * CHUNK_STEP_Y + chunk_pos_z * CHUNK_STEP_Z
 
-def is_valid_index(index):
-    """Check if index is within the bounds of the chunk array."""
-    # Implementation depends on the specific array size and layout.
-    # Typically: 0 <= index < total_chunks
-    return 0 <= index < len(chunk_array)
+    # Step 2: Initialize neighborhood structure
+    neighborhood = [[None for _ in range(3)] for _ in range(3)]
+
+    # Step 3 & 4: Loop over 3x3x3 surrounding chunks
+    for dx in range(-1, 2):
+        for dy in range(-1, 2):
+            for dz in range(-1, 2):
+                neighbor_index = current_index + dx * CHUNK_STEP_X + dy * CHUNK_STEP_Y + dz * CHUNK_STEP_Z
+
+                # Step 5: Handle boundaries
+                if 0 <= neighbor_index < max_chunk_amount ** 3:
+                    neighbor_ptr = chunk_array[neighbor_index]
+                else:
+                    neighbor_ptr = EMPTY_CHUNK if should_mesh_exterior else FULL_CHUNK
+
+                # Step 6 & 7: Compute key and lookup (implementation-specific)
+                # neighbor_key = compute_64bit_key(neighbor_ptr)
+                # final_ptr = chunk_dictionary.get(neighbor_key, neighbor_ptr)
+
+                # Step 8: Store pointer
+                neighborhood[dx + 1][dy + 1][dz + 1] = neighbor_ptr
+
+    return neighborhood
 ```
 
 **Parameters:**
@@ -91,25 +75,26 @@ def is_valid_index(index):
 
 **Edge Cases and Pitfalls:**
 *   **Precision:** Not given in the sources.
-*   **Boundaries:** The method relies on `ShouldMeshExterior` to determine the semantic meaning of the boundary. Incorrect setting can lead to visual artifacts (holes or solid walls) at the world edge [S1, unofficial].
-*   **Degenerate Input:** If the chunk array is not contiguous or strides are miscalculated, neighbor lookups will fail. The source assumes a flat array allocation of size `MaxChunkAmount^3` [S1, unofficial].
+*   **Boundaries:** The method relies on `ShouldMeshExterior` to determine the semantic meaning of the boundary [S1, unofficial].
+*   **Degenerate Input:** If the chunk array is not contiguous or strides are miscalculated, neighbor lookups will fail [S1, unofficial]. The source assumes a flat array allocation of size `MaxChunkAmount^3` [S1, unofficial].
 
 ## Subtopics
 
 ### Seam Ownership
-Seam Ownership is an architectural method for chunk meshing where each chunk meshes only its interior voxels, and a single seam job is assigned to each chunk boundary to read both adjacent sides' voxels, preventing inter-chunk waiting or re-meshing [S2, unofficial]. This approach ensures that a chunk never waits for, or re-meshes on, a neighbor, improving parallelism [S2, unofficial]. The seam job reads voxel data from both adjacent chunks and generates boundary geometry without blocking [S2, unofficial]. This method has been used in cubic meshing since world modes review M5 [S2, unofficial].
+Seam Ownership is an architectural method for chunk meshing where each chunk meshes only its interior voxels, and a single seam job is assigned to each chunk boundary to read both adjacent sides' voxels, preventing inter-chunk waiting or re-meshing [S3, unofficial]. The process follows four steps: 1. Mesh each chunk's interior voxels independently. 2. Assign exactly one seam job per chunk boundary. 3. Seam job reads voxel data from both adjacent chunks. 4. Seam job generates boundary geometry without blocking or triggering neighbour re-meshing [S3, unofficial]. This approach ensures that a chunk never waits for, or re-meshes on, a neighbor, improving parallelism [S3, unofficial]. The method has been used in cubic meshing since world modes review M5 [S3, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ for neighbor lookup per chunk, as strides are precomputed and array access is direct.
-*   **Memory Complexity:** $O(N)$ where $N$ is the number of chunks, for storing the chunk array and precomputed strides.
-*   **Strengths:** Eliminates the need for global map lookups during meshing, reducing latency and synchronization overhead.
-*   **Limitations:** Requires precomputation of strides and sentinel chunks. The flat array layout may lead to cache misses if chunks are accessed in a non-sequential manner.
-*   **When to use:** When meshing is performed in parallel across chunks and boundary consistency is critical.
-*   **When not to use:** When the world size is dynamic and chunk allocation is sparse, as the flat array may waste memory.
+*   **Time Complexity:** $O(1)$ for neighbor lookup per chunk, as strides are precomputed and array access is direct [G].
+*   **Memory Complexity:** $O(N)$ where $N$ is the number of chunks, for storing the chunk array and precomputed strides [G].
+*   **Strengths:** Eliminates the need for global map lookups during meshing, reducing latency and synchronization overhead [S1, unofficial].
+*   **Limitations:** Requires precomputation of strides and sentinel chunks. The flat array layout may lead to cache misses if chunks are accessed in a non-sequential manner [G].
+*   **When to use:** When meshing is performed in parallel across chunks and boundary consistency is critical [G].
+*   **When not to use:** When the world size is dynamic and chunk allocation is sparse, as the flat array may waste memory [G].
 
 ## Background
-Chunk Neighbor Referencing is part of the meshing implementation in the `vercidium-patreon/meshing` repository [S1, unofficial]. It is designed to handle the complexities of boundary meshing in chunk-based voxel data structures. The method is closely related to the Seam Ownership architecture described in `draquel/VoxelWorlds` [S2, unofficial], which further optimizes the process by separating interior and boundary meshing tasks.
+Chunk Neighbor Referencing is part of the meshing implementation in the `vercidium-patreon/meshing` repository [S1, unofficial]. It is designed to handle the complexities of boundary meshing in chunk-based voxel data structures [S1, unofficial]. The method is closely related to the Seam Ownership architecture described in `draquel/VoxelWorlds`, which further optimizes the process by separating interior and boundary meshing tasks [S3, unofficial].
 
 ## Sources
 [S1] vercidium-patreon/meshing, https://github.com/vercidium-patreon/meshing, fetched 2026-10-26 (unofficial)
-[S2] draquel/VoxelWorlds, https://github.com/draquel/VoxelWorlds, fetched 2026-10-27 (unofficial)
+[S2] Linirby/HelloVoxel, https://github.com/Linirby/HelloVoxel, fetched 2026-10-27 (unofficial)
+[S3] draquel/VoxelWorlds, https://github.com/draquel/VoxelWorlds, fetched 2026-10-27 (unofficial)

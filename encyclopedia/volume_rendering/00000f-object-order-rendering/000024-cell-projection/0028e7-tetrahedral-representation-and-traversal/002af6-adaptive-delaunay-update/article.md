@@ -3,154 +3,51 @@
 Also called: Delaunay Update Frequency
 
 ## Overview
-Adaptive Delaunay Update is a strategy for maintaining the topological validity of a tetrahedral mesh during optimization-based volume rendering, specifically when vertex positions are updated incrementally [S1, unofficial]. It solves the problem of computational cost by avoiding full Delaunay re-triangulation at every iteration, instead triggering updates only when topological changes (edge flips) are geometrically necessitated by vertex movement [S1, unofficial]. It sets itself apart from static meshing methods by allowing the mesh topology to evolve with the scene representation, and from continuous full-update methods by batching these topological corrections [S1, unofficial].
+Adaptive Delaunay Update is a strategy for maintaining the topological validity of a tetrahedral mesh during optimization-based volume rendering, specifically within frameworks like Radiance Meshes. It addresses the problem of mesh degeneracy caused by vertex movement during training by periodically recomputing the Delaunay triangulation to restore the empty-circumsphere property. It sets itself apart from incremental update methods by trading continuous topological accuracy for significant GPU acceleration speed, relying on batched recomputation rather than real-time edge flipping [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A valid Delaunay tetrahedralization of a set of vertices $V$, a small vertex displacement $\epsilon$ applied during optimization, and an update frequency counter $k$.
-*   **Output:** An updated Delaunay tetrahedralization reflecting the new vertex positions and topological flips.
+The method operates within an iterative optimization loop (e.g., differentiable rendering training). The core input is a set of tetrahedral vertices with associated attributes (position, color, density) and a current Delaunay topology. The output is an updated mesh topology and vertex positions valid for the next rendering pass.
 
 **Data Structures:**
-*   **Tetrahedral Mesh:** Stores vertices and their connectivity. Each tetrahedron is defined by 4 vertices.
-*   **Circumsphere Data:** For each tetrahedron, the center and squared radius of its circumsphere are required to check the Delaunay condition [S1, unofficial].
-*   **Update Counter:** An integer tracking the number of optimization iterations since the last full or adaptive update.
-
-**Steps:**
-1.  **Vertex Update:** During an optimization iteration, update vertex positions by a small displacement $\epsilon$ [S1, unofficial].
-2.  **Counter Check:** Increment the update counter. If the counter is less than the predefined update frequency (e.g., 10), skip topological checks and proceed to rendering [S1, unofficial].
-3.  **Validity Check (if counter == frequency):**
-    a. Iterate through all tetrahedra in the mesh.
-    b. For each tetrahedron, check if any of its vertices has moved into the circumsphere of a neighboring tetrahedron sharing a face [S1, unofficial].
-    c. Specifically, if a vertex $v$ enters the circumsphere of a neighbor $T_{neighbor}$, the shared face between $T_{neighbor}$ and the tetrahedron containing $v$ is no longer Delaunay.
-4.  **Topological Flip (Pachner Move):**
-    a. Identify the pair of tetrahedra sharing the non-Delaunay face.
-    b. Perform an edge flip (Pachner move) to replace the shared face with a new diagonal, restoring the Delaunay property for the local configuration [S1, unofficial].
-    c. Repeat checks locally as flips may cascade or reveal new invalid configurations.
-5.  **Reset Counter:** Reset the update counter to 0 after the update phase is complete [S1, unofficial].
-
-**Formulas:**
-*   **Delaunay Condition:** A tetrahedron $T$ with vertices $\{v_1, v_2, v_3, v_4\}$ is Delaunay if no other vertex $v_k$ lies inside its circumsphere. The condition for a vertex $v_k$ being inside the circumsphere of $T$ is determined by the determinant of the power diagram or by checking the distance from $v_k$ to the circumcenter $C_T$ against the circumradius $R_T$:
-    $$ \|v_k - C_T\|^2 < R_T^2 $$
-    [S1, unofficial].
-*   **Vertex Displacement:** Vertices are moved by $\epsilon$ during optimization [S1, unofficial].
+*   **Vertices:** Array of 3D positions $\mathbf{v}_i$ and attributes.
+*   **Topology:** List of tetrahedra, each defined by 4 vertex indices.
+*   **Acceleration Structure:** Instant-NGP hash grid for spatial queries [S1, unofficial].
 
 **Parameters:**
-*   **Update Frequency:** The number of iterations between Delaunay updates. A typical value is 10 iterations [S1, unofficial].
+*   **Update Frequency ($F$):** The number of optimization iterations between full Delaunay recomputations. Typical value: $F=10$ [S1, unofficial].
+
+**Steps:**
+1.  **Initialization:** Construct an initial Delaunay tetrahedralization of the input points.
+2.  **Optimization Step:** Perform one iteration of gradient descent. Update vertex positions by a small displacement $\epsilon$.
+3.  **Check Condition:** If the current iteration count $k$ is a multiple of $F$ ($k \mod F == 0$):
+    a.  **Recompute:** Discard the current tetrahedral connectivity.
+    b.  **Triangulate:** Compute a new Delaunay tetrahedralization of the updated vertex positions using a standard 3D Delaunay algorithm.
+    c.  **Update Topology:** Replace the old tetrahedra list with the new one.
+4.  **Render:** Project the tetrahedra and perform volume rendering using the current topology and vertex attributes.
+5.  **Repeat:** Return to Step 2.
 
 **Edge Cases and Pitfalls:**
-*   **Nearly Cospherical Points:** Because vertices are moved by small $\epsilon$, flips involve points that are nearly cospherical. The geometric configurations before and after the flip share an almost identical circumsphere, which can lead to numerical instability in determining the correct flip direction [S1, unofficial].
-*   **Precision:** Care must be taken with floating-point precision when checking the circumsphere condition due to the near-cospherical nature of the points involved in flips [S1, unofficial].
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def adaptive_delaunay_update(vertices, tetrahedra, update_counter, frequency):
-    """
-    Updates the Delaunay tetrahedralization if the update frequency is reached.
-    
-    Args:
-        vertices: List of vertex positions.
-        tetrahedra: List of tetrahedra, each defined by 4 vertex indices.
-        update_counter: Current iteration count since last update.
-        frequency: Number of iterations between updates (e.g., 10).
-        
-    Returns:
-        updated_tetrahedra: The new Delaunay tetrahedralization.
-        new_counter: The reset counter.
-    """
-    # Step 1: Vertex positions are assumed to be updated by epsilon in the optimization loop
-    # before this function is called.
-    
-    # Step 2: Check frequency
-    if update_counter < frequency:
-        return tetrahedra, update_counter + 1
-    
-    # Step 3: Perform full adaptive update
-    # Note: A robust implementation would use a library or a specific incremental 
-    # Delaunay algorithm. Here we outline the logic described in [S1, unofficial].
-    
-    updated_tetrahedra = tetrahedra
-    changed = True
-    
-    while changed:
-        changed = False
-        # Iterate through tetrahedra to find invalid ones
-        for i, tet in enumerate(updated_tetrahedra):
-            # Get circumcenter and squared radius for tet
-            c, r_sq = compute_circumsphere(tet, vertices)
-            
-            # Check neighbors for violations
-            # In a full implementation, neighbor relationships are stored or computed
-            neighbors = get_neighbors(tet, updated_tetrahedra)
-            
-            for neighbor in neighbors:
-                # Check if any vertex of neighbor is inside tet's circumsphere
-                for v_idx in neighbor.vertices:
-                    if v_idx not in tet.vertices:
-                        v_pos = vertices[v_idx]
-                        if distance_sq(v_pos, c) < r_sq:
-                            # Flip detected
-                            # Identify the shared face and perform Pachner move
-                            new_tets = perform_pachner_move(tet, neighbor, vertices)
-                            # Replace old tets with new ones
-                            # This is a simplified representation; actual implementation 
-                            # requires careful mesh data structure management
-                            updated_tetrahedra = replace_tets(updated_tetrahedra, tet, neighbor, new_tets)
-                            changed = True
-                            break # Restart scan or handle carefully
-                if changed:
-                    break
-            if changed:
-                break
-    
-    # Step 5: Reset counter
-    return updated_tetrahedra, 0
-
-def compute_circumsphere(tet, vertices):
-    """
-    Computes the circumcenter and squared radius of a tetrahedron.
-    """
-    # Implementation details for circumcenter calculation
-    # Not given in sources, standard geometric computation [G]
-    pass
-
-def get_neighbors(tet, tetrahedra):
-    """
-    Returns neighboring tetrahedra sharing a face.
-    """
-    # Implementation details for neighbor lookup
-    # Not given in sources, depends on mesh data structure [G]
-    pass
-
-def perform_pachner_move(tet1, tet2, vertices):
-    """
-    Performs a Pachner move (edge flip) on two adjacent tetrahedra.
-    """
-    # Implementation details for Pachner move
-    # Not given in sources, standard geometric operation [G]
-    pass
-```
+*   **Cospherical Degeneracy:** When vertices move by $\epsilon$, they may enter the circumsphere of a neighboring tetrahedron. The resulting flips involve points that are nearly cospherical, as the geometric configurations before and after the flip share an almost identical circumsphere [S1, unofficial]. This can lead to numerical instability in standard incremental flip algorithms, justifying the periodic full recomputation approach.
+*   **Staleness:** Between updates, the mesh is not strictly Delaunay. This may cause minor topological inaccuracies in ray-tetrahedron intersection or sorting, but the small $\epsilon$ ensures visual continuity [S1, unofficial].
 
 ## Subtopics
 
 ### Delaunay Edge Flipping (Pachner Moves)
-A method to form a Delaunay triangulation by flipping edges of triangles that are not Delaunay, specifically those where the circumsphere contains a vertex. In 3D, these edge-flips are called Pachner moves [S1, unofficial]. During optimization, if a vertex moves by a small amount $\epsilon$ and enters the circumsphere of a neighboring tetrahedron, a topological flip is triggered [S1, unofficial]. A key pitfall is that flips involve sets of points that are nearly cospherical because the vertex was already nearby the circumsphere boundary prior to the move, and the geometric configurations before and after the flip share an almost identical circumsphere [S1, unofficial].
+A method to form a Delaunay triangulation by flipping edges of triangles that are not Delaunay, specifically those where the circumsphere contains a vertex. In 3D, these edge-flips are called Pachner moves [S1, unofficial]. During optimization, if a vertex moves by a small amount $\epsilon$ and enters the circumsphere of a neighboring tetrahedron, a topological flip is triggered. The pitfall is that these flips involve sets of points that are nearly cospherical because the vertex was already nearby the circumsphere boundary prior to the move, and the geometric configurations before and after the flip share an almost identical circumsphere [S1, unofficial].
 
 ### Hybrid Rendering with Multi-Resolution Tetrahedral Mesh
-Extends multi-triangulation to support multiple visualization techniques simultaneously within a single data structure, allowing independent mesh adaptation per technique [S2]. It stores one Directed Acyclic Graph (DAG) per technique to control refinement and coarsening. Each tetrahedron stores three face-incidency entries per face (one for each technique), and the cross-patch face hash map is tripled [S2]. This allows the renderer to adapt the mesh to each technique independently, enabling direct volume rendering to use fewer tetrahedra than isosurface extraction [S2].
+Extends multi-triangulation to support multiple visualization techniques simultaneously within a single data structure, allowing independent mesh adaptation per technique [S2]. It stores one Directed Acyclic Graph (DAG) per technique to control refinement and coarsening. Each tetrahedron stores three face-incidency entries per face (one for each technique). The cross-patch face hash map is tripled. This allows the renderer to adapt the mesh to each technique independently, enabling direct volume rendering to use fewer tetrahedra than isosurface extraction [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** The cost of Delaunay triangulation is significant. On a scene with 1.2 million tetrahedra, computing the Delaunay triangulation takes approximately 92 ms [S1, unofficial]. By updating only every 10 iterations, this cost is amortized.
-*   **Memory Complexity:** Not given in the sources.
-*   **Performance:** On a scene with 1.2 million tetrahedra, the total training time per iteration includes 19 ms for rendering, 13 ms for instant-NGP query, 143 ms for the backwards pass, and 92 ms for Delaunay triangulation computation [S1, unofficial].
-*   **Strengths:** Balances GPU acceleration speed with accuracy by reducing the frequency of expensive topological updates [S1, unofficial].
-*   **Limitations:** Recomputing Delaunay triangulation from scratch is still slow, necessitating the adaptive frequency [S1, unofficial]. Numerical instability can arise from nearly cospherical points during flips [S1, unofficial].
-*   **When to use:** When using optimization-based volume rendering methods like Radiance Meshes where vertex positions change frequently, and full Delaunay updates are too costly per iteration [S1, unofficial].
-*   **When not to use:** When high-frequency topological changes are expected, or when the overhead of checking for flips outweighs the cost of full updates (though this is rare given the cost of Delaunay computation).
+*   **Time Complexity:** The cost is dominated by the periodic Delaunay triangulation. For a scene with 1.2 million tetrahedra, the Delaunay computation takes approximately 92 ms [S1, unofficial]. Rendering takes ~19 ms, and the backward pass ~143 ms [S1, unofficial].
+*   **Memory Complexity:** Linear in the number of tetrahedra and vertices. Hybrid rendering variants increase memory usage by a factor of 3 for face-incidency data and hash maps [S2].
+*   **Strengths:** Significantly faster than incremental updating on GPU due to batched computation and avoidance of complex conditional logic for edge flips. Balances GPU acceleration speed with accuracy [S1, unofficial].
+*   **Limitations:** The mesh is not Delaunay between updates. Requires careful tuning of the update frequency $F$ to balance visual quality and performance.
+*   **When to use:** When using differentiable rendering with mesh optimization (e.g., Radiance Meshes) where full topological correctness is less critical than training speed.
+*   **When not to use:** When strict topological validity is required at every frame (e.g., for precise geometric analysis) or when the update frequency cannot be amortized over multiple iterations.
 
 ## Background
-The concept of adaptive Delaunay updates is primarily discussed in the context of Radiance Meshes for Volumetric Reconstruction [S1, unofficial]. The method leverages the property that Delaunay triangulations can be formed by flipping non-Delaunay edges (Pachner moves in 3D) [S1, unofficial]. The specific application of updating the mesh topology every 10 iterations during optimization was introduced to balance rendering speed and accuracy in GPU-accelerated volumetric reconstruction [S1, unofficial].
+The concept originates from the Radiance Meshes framework for volumetric reconstruction, which decouples topology (Delaunay mesh) from attribute parameterization (Instant-NGP) [S1, unofficial]. The specific update frequency strategy was introduced to mitigate the slowness of GPU-accelerated Delaunay recomputation, which is still relatively expensive compared to rendering [S1, unofficial]. The underlying geometric principle of using circumcircles for visibility sorting in Delaunay meshes was also detailed in the same work [S1, unofficial].
 
 ## Sources
 [S1] Radiance Meshes for Volumetric Reconstruction, https://arxiv.org/abs/2512.04076v1, fetched 2026-10-26 (unofficial)
