@@ -3,109 +3,71 @@
 Also called: Block model rendering, Shader-driven voxel volume
 
 ## Overview
-Voxel Volume Rendering is a technique for visualizing 3D scalar fields by ray marching through a discrete voxel grid stored in a 3D texture. It solves the problem of rendering interpolated spatial data (such as geological assay values) by mapping continuous scalar attributes to a `Data3DTexture` and compositing them along view rays. It is distinguished from its siblings by its reliance on a uniform 3D hash grid for interpolation and its support for two distinct rendering modes: "block mode" (snapping rays to voxel centers for a crisp, discrete appearance) and "smooth compositing" (standard front-to-back ray marching) [S1, unofficial].
+Voxel volume rendering is a technique for visualizing 3D scalar fields by ray marching through a discrete voxel grid stored in a 3D texture. It solves the problem of rendering volumetric data (such as geological assays or simulation results) directly in a graphics pipeline. It is distinguished from implicit surface rendering by its direct manipulation of discrete voxel values and from standard ray marching by its support for "block mode," which snaps sampling to voxel centers for a crisp, block-model aesthetic, alongside standard smooth compositing [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A set of 3D sample points (e.g., drill-hole assays) and configuration parameters including grid dimensions, interpolation settings, and display transfer functions.
-*   **Output:** A rendered image of the 3D scalar field, displayed within a scene graph (e.g., Three.js `Object3D`).
+*   **Input:** A 3D scalar field represented as a `Float32Array` of dimensions $(D_x, D_y, D_z)$, where each element holds a value (e.g., concentration).
+*   **Input:** Display parameters: `displayMin`, `displayMax`, `opacity`, `threshold`, and a color transfer function.
+*   **Output:** A rendered 2D image of the volume.
 
 **Data Structures:**
-1.  **Voxel Grid:** A `Float32Array` where each element represents one voxel's interpolated scalar value. The array size is $W \times H \times D$.
-    *   Memory usage: $64^3 \approx 1 \text{ MB}$, $128^3 \approx 8 \text{ MB}$, $256^3 \approx 64 \text{ MB}$ [S1, unofficial].
-2.  **3D Texture:** The `Float32Array` is uploaded to the GPU as a `Data3DTexture` (one float per voxel) [S1, unofficial].
-3.  **Spatial Hash:** A `SpatialHash3D` structure used for $O(1)$ cell lookup during interpolation, supporting `queryRadius()` and `queryKNearest()` [S1, unofficial].
+1.  **Voxel Grid:** A 1D `Float32Array` of size $D_x \times D_y \times D_z$. Each index $i$ corresponds to a voxel. Memory usage is $4 \times D_x \times D_y \times D_z$ bytes (e.g., $64^3 \approx 1$ MB) [S1, unofficial].
+2.  **3D Texture:** The grid is uploaded to the GPU as a `Data3DTexture` (one float per voxel) [S1, unofficial].
+3.  **Ray:** Defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, typically generated per-pixel from a camera.
 
-**Numbered Steps:**
-1.  **Interpolation:** Evaluate an Inverse Distance Weighting (IDW) sampler onto the voxel grid. For each voxel center $(x, y, z)$, compute the weighted average of nearby sample points.
-2.  **Texture Upload:** Upload the resulting `Float32Array` to the GPU as a `Data3DTexture` [S1, unofficial].
-3.  **Ray Marching Setup:** Initialize a ray marcher through a unit-cube `ShaderMaterial` [S1, unofficial].
-4.  **Sampling:** For each ray step, sample the `Data3DTexture` at the current ray position [S1, unofficial].
-5.  **Compositing:** Apply front-to-back compositing to accumulate color and opacity along the ray [S1, unofficial].
-6.  **Nodata Handling:** Skip voxels with sentinel values less than $-1 \times 10^{29}$ (nodata) [S1, unofficial].
-7.  **Color Mapping:** Apply a two-stop color transfer function based on the sampled value, global opacity, and a threshold cutoff [S1, unofficial].
+**Steps:**
+1.  **Upload:** Transfer the `Float32Array` to GPU memory as a `Data3DTexture` [S1, unofficial].
+2.  **Ray Marching:** For each pixel, cast a ray through the unit-cube bounding box of the volume.
+3.  **Sampling:** At each step along the ray, sample the `Data3DTexture` at the current 3D coordinate.
+    *   If the value is less than the nodata sentinel ($-1e29$), skip the voxel [S1, unofficial].
+    *   If the value is below the `threshold`, treat as transparent [S1, unofficial].
+4.  **Color Mapping:** Map the sampled scalar value $v$ to color $C$ and opacity $\alpha$ using a two-stop color transfer function based on `displayMin` and `displayMax` [S1, unofficial].
+5.  **Compositing:** Apply front-to-back compositing to accumulate color and opacity along the ray.
+6.  **Block Mode (Optional):** If enabled, snap the ray step positions to voxel centers to produce a crisp, discrete block appearance rather than smooth interpolation [S1, unofficial].
 
 **Formulas:**
-*   **IDW Interpolation:** The value $V$ at a query point is calculated as:
-    $$ V = \frac{\sum_{i=1}^{n} w_i v_i}{\sum_{i=1}^{n} w_i} $$
-    where $v_i$ is the value of the $i$-th neighbor, and $w_i = \frac{1}{d_i^p}$ is the weight based on distance $d_i$ and power $p$ [S1, unofficial].
 *   **Front-to-Back Compositing:**
-    $$ C_{out} = C_{in} + (1 - \alpha_{in}) \cdot C_{sample} \cdot \alpha_{sample} $$
-    $$ \alpha_{out} = \alpha_{in} + (1 - \alpha_{in}) \cdot \alpha_{sample} $$
-    where $C$ is color, $\alpha$ is opacity, and subscripts denote input/output and sample values [S1, unofficial].
+    $$ C_{out} = C_{in} + C_{sample} \cdot \alpha_{sample} \cdot (1 - \alpha_{in}) $$
+    $$ \alpha_{out} = \alpha_{in} + \alpha_{sample} \cdot (1 - \alpha_{in}) $$
+    Where $C_{in}, \alpha_{in}$ are the accumulated color and opacity, and $C_{sample}, \alpha_{sample}$ are the color and opacity of the current voxel sample [S1, unofficial].
+
+*   **Color Transfer:**
+    The color $C$ and opacity $\alpha$ are derived from the scalar value $v$ using a linear or piecewise mapping between `displayMin` and `displayMax`, modulated by global `opacity` and `threshold` [S1, unofficial].
 
 **Parameters:**
-*   `dims`: Dimensions of the voxel grid (width, height, depth). Typical value: `[64, 64, 64]` [S1, unofficial].
-*   `displayMin`/`displayMax`: Range of values mapped to the color transfer function. Typical values: `0` to `500` [S1, unofficial].
-*   `opacity`: Global opacity of the volume. Typical value: `0.4` [S1, unofficial].
-*   `threshold`: Minimum value for a voxel to be rendered (alpha cutoff). Typical value: `0.1` [S1, unofficial].
-*   `power`: IDW interpolation power. Typical value: `2` [S1, unofficial].
-*   `searchRadius`: Radius for neighbor search in IDW. Typical value: `60` [S1, unofficial].
-*   `maxNeighbors`: Maximum neighbors considered in IDW. Typical value: `16` [S1, unofficial].
+*   `dims`: Grid dimensions $(D_x, D_y, D_z)$. Typical: $[64, 64, 64]$ [S1, unofficial].
+*   `displayMin`/`displayMax`: Range for color mapping. Typical: $0$ to $500$ [S1, unofficial].
+*   `opacity`: Global opacity multiplier. Typical: $0.4$ [S1, unofficial].
+*   `threshold`: Alpha cutoff. Voxels below this are skipped. Typical: $0.1$ [S1, unofficial].
 
-**Edge Cases and Pitfalls:**
-*   **Nodata Sentinels:** Voxels with values $< -1 \times 10^{29}$ are treated as empty and skipped during compositing [S1, unofficial].
-*   **Uniform Updates:** Display parameters (min/max, opacity, threshold, color gradient) are uniform-only updates. They do not require re-uploading the texture, allowing for real-time tweaking [S1, unofficial].
-*   **Block Mode:** In "block mode," ray marching is snapped to voxel centers, producing a crisp block-model look rather than smooth interpolation [S1, unofficial].
+**Pitfalls:**
+*   **Precision:** Use `Float32Array` for the grid to balance memory and precision [S1, unofficial].
+*   **Nodata Handling:** Ensure the sentinel value ($-1e29$) is distinct from valid data to avoid rendering artifacts [S1, unofficial].
+*   **Uniform Updates:** Display parameters (min/max, opacity, threshold) are uniform-only updates and do not require re-uploading the texture, allowing real-time tweaking [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# IDW Interpolation Step
-def compute_idw_value(samples, query_point, power=2, search_radius=60, max_neighbors=16):
-    # Find neighbors within search_radius using SpatialHash3D
-    neighbors = spatial_hash.query_radius(query_point, search_radius)
-    
-    # Sort by distance and take top max_neighbors
-    neighbors = sorted(neighbors, key=lambda s: distance(s.pos, query_point))[:max_neighbors]
-    
-    if len(neighbors) == 0:
-        return -1e29  # Nodata sentinel
-        
-    numerator = 0.0
-    denominator = 0.0
-    
-    for sample in neighbors:
-        d = distance(sample.pos, query_point)
-        if d < 1e-9:
-            return sample.value  # Exact-hit short-circuit
-        w = 1.0 / (d ** power)
-        numerator += w * sample.value
-        denominator += w
-        
-    return numerator / denominator
-
-# Voxel Grid Construction
-def build_voxel_grid(samples, dims, idw_options):
-    width, height, depth = dims
-    grid_size = width * height * depth
-    voxel_grid = Float32Array(grid_size)
-    
-    for z in range(depth):
-        for y in range(height):
-            for x in range(width):
-                # Convert voxel index to world coordinates
-                world_pos = voxel_to_world(x, y, z, dims)
-                value = compute_idw_value(samples, world_pos, **idw_options)
-                voxel_grid[index(x, y, z, width, height)] = value
-                
-    return voxel_grid
-
-# Rendering Step (Shader Logic)
-def render_voxel_volume(voxel_texture, ray_origin, ray_direction, display_params):
-    color = vec3(0.0)
-    alpha = 0.0
-    
-    # Ray marching loop
+# Shader fragment logic for one ray step
+def render_voxel_volume(ray_origin, ray_direction, texture, dims, display_min, display_max, opacity, threshold, block_mode):
+    accumulated_color = [0.0, 0.0, 0.0, 0.0]
     t = 0.0
-    step_size = 1.0 / max(dims)  # Simplified step size
+    step_size = 1.0 / max(dims) # Simplified step size
     
-    while t < 1.0 and alpha < 1.0:
+    while t < 3.0: # Assume unit cube bounding box
+        # Calculate current 3D position
         pos = ray_origin + ray_direction * t
         
+        # Block mode: snap to voxel center
+        if block_mode:
+            voxel_coords = floor(pos + 0.5)
+        else:
+            voxel_coords = pos
+            
         # Sample texture
-        value = texture(voxel_texture, pos).r
+        value = texture_sample(voxel_coords, texture)
         
         # Skip nodata
         if value < -1e29:
@@ -113,33 +75,44 @@ def render_voxel_volume(voxel_texture, ray_origin, ray_direction, display_params
             continue
             
         # Apply threshold
-        if value < display_params.threshold:
+        if value < threshold:
             t += step_size
             continue
             
-        # Compute sample color and opacity
-        sample_alpha = map_opacity(value, display_params.display_min, display_params.display_max, display_params.opacity)
-        sample_color = map_color(value, display_params.display_min, display_params.display_max)
+        # Map value to color and opacity
+        normalized = clamp((value - display_min) / (display_max - display_min), 0.0, 1.0)
+        sample_color = transfer_function(normalized)
+        sample_alpha = normalized * opacity
         
         # Front-to-back compositing
-        color = color + (1.0 - alpha) * sample_color * sample_alpha
-        alpha = alpha + (1.0 - alpha) * sample_alpha
+        accumulated_color = composite(accumulated_color, sample_color, sample_alpha)
         
+        # Early exit if fully opaque
+        if accumulated_color[3] >= 1.0:
+            break
+            
         t += step_size
         
-    return color
+    return accumulated_color
 ```
 
+## Subtopics
+
+### Block Mode Rendering
+Snaps raymarching to voxel centers for a crisp, discrete look. Choose when a stylized, blocky aesthetic is desired or when performance is critical and smooth interpolation is unnecessary [S1, unofficial].
+
+### Smooth Compositing
+Standard raymarching with trilinear interpolation. Choose when visual fidelity and smooth gradients are required [S1, unofficial].
+
 ## Operating characteristics
-*   **Time Complexity:** Interpolation is $O(N \cdot K)$ where $N$ is the number of voxels and $K$ is the number of neighbors (bounded by `maxNeighbors`). Ray marching is $O(R \cdot S)$ where $R$ is the number of rays and $S$ is the number of steps per ray.
-*   **Memory Complexity:** $O(W \cdot H \cdot D)$ for the voxel grid and texture. For $256^3$, this is approximately 64 MB [S1, unofficial].
-*   **Strengths:** Real-time tweaking of display parameters without texture re-upload; supports both crisp block models and smooth volumes; efficient $O(1)$ spatial hashing for interpolation [S1, unofficial].
-*   **Limitations:** Memory usage grows cubically with resolution; interpolation quality depends on sample density and IDW parameters; nodata handling requires specific sentinel values [S1, unofficial].
-*   **When to use:** When visualizing sparse 3D scalar fields (e.g., geological data) with real-time interaction requirements.
-*   **When not to use:** When high-resolution smooth volumes are required without significant memory overhead, or when the data is dense and regular (grid-based methods may be more efficient).
+*   **Time Complexity:** $O(R \cdot S)$, where $R$ is the number of rays (pixels) and $S$ is the number of steps per ray.
+*   **Memory Complexity:** $O(D_x \cdot D_y \cdot D_z)$ for the voxel grid. Typical usage: $64^3 \approx 1$ MB, $128^3 \approx 8$ MB, $256^3 \approx 64$ MB [S1, unofficial].
+*   **Performance:** Real-time tweaking of display parameters is possible without texture re-upload, as they are uniform updates [S1, unofficial].
+*   **Strengths:** Simple implementation, supports real-time parameter adjustment, flexible block vs. smooth modes.
+*   **Limitations:** Memory usage grows cubically with resolution; block mode may appear aliased at low resolutions.
 
 ## Background
-This method originates from the Baselode project, specifically the implementation of a 3D Inverse Distance Weighting (IDW) interpolation pipeline for visualizing drill-hole sample data. It was developed to provide a shader-driven voxel volume renderer within a Three.js scene, supporting both block-style and smooth compositing [S1, unofficial].
+This method is implemented in the Baselode project as part of a 3D IDW interpolation pipeline for visualizing drill-hole sample data. It uses Three.js for rendering and supports both block-style and smooth compositing [S1, unofficial].
 
 ## Sources
 [S1] feat: 3D IDW interpolation volume and voxel visualisation, https://github.com/darkmine-oss/baselode/pull/50, fetched 2026-10-27 (unofficial)

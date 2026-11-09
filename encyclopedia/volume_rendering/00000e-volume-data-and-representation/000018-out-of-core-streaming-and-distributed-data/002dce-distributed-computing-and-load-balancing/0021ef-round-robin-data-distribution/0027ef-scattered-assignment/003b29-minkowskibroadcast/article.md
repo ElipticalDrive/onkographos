@@ -1,0 +1,84 @@
+# MinkowskiBroadcast
+
+Also called: Copy Broadcast
+
+## Overview
+MinkowskiBroadcast is a scattered assignment operation that propagates a single global feature vector (reduced to the origin) to all coordinates in a sparse tensor. It solves the problem of attaching global context to local sparse features without altering the coordinate structure. It differs from sibling methods like [MinkowskiBroadcastAddition](4204-scattered-assignment.md#minkowskibroadcastaddition) and [MinkowskiBroadcastMultiplication](4204-scattered-assignment.md#minkowskibroadcastmultiplication) by performing a pure copy operation, whereas those variants apply element-wise arithmetic. It is distinct from [MinkowskiBroadcastConcatenation](4204-scattered-assignment.md#minkowskibroadcastconcatenation), which expands the feature dimension rather than replacing it.
+
+## How it works
+**Inputs and Outputs:**
+- Input 1: `input`, a `SparseTensor` with coordinates $\mathcal{C}^\text{in}$ and features $\mathbf{x}_1$.
+- Input 2: `input_glob`, a `SparseTensor` containing global features $\mathbf{x}_2$ reduced to the origin. Typically produced by [MinkowskiGlobalPooling](4204-scattered-assignment.md#minkowskiglobalpooling).
+- Output: A `SparseTensor` with the same coordinates $\mathcal{C}^\text{out} = \mathcal{C}^\text{in}$ and broadcast features $\mathbf{y}$.
+
+**Data Structures:**
+- `SparseTensor`: Contains features tensor `F` and a `coordinate_map_key` linked to a `coordinate_manager`.
+- `broadcast_feat`: A dense tensor of shape `(len(input), input_glob.size()[1])`.
+
+**Steps:**
+1. Assert that both `input` and `input_glob` are instances of `SparseTensor` [S1, unofficial].
+2. Allocate `broadcast_feat` with dtype and device matching `input.F`, with dimensions `(len(input), input_glob.size()[1])` [S1, unofficial].
+3. Retrieve batch indices and corresponding row indices for the origin from the input's coordinate manager: `batch_indices, batch_rows = input.coordinate_manager.origin_map(input.coordinate_map_key)` [S1, unofficial].
+4. Iterate through each batch index `b` and its associated rows `rows`:
+   - Assign the global feature vector for batch `b` (`input_glob.F[b]`) to the corresponding rows in `broadcast_feat` [S1, unofficial].
+5. Construct and return a new `SparseTensor` using `broadcast_feat` and the original `input.coordinate_map_key` and `coordinate_manager` [S1, unofficial].
+
+**Formula:**
+For all input coordinates $\mathbf{u} \in \mathcal{C}^\text{in}$:
+$$ \mathbf{y}_\mathbf{u} = \mathbf{x}_2 $$
+where $\mathbf{x}_2$ is the global feature vector associated with the batch of $\mathbf{u}$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def minkowski_broadcast(input: SparseTensor, input_glob: SparseTensor) -> SparseTensor:
+    # Assert inputs are SparseTensors
+    assert isinstance(input, SparseTensor)
+    assert isinstance(input_glob, SparseTensor)
+
+    # Allocate broadcast_feat tensor of size (len(input), input_glob.size()[1])
+    # Using input.F.new ensures correct dtype and device
+    broadcast_feat = input.F.new(len(input), input_glob.size()[1])
+
+    # Get batch indices and rows corresponding to the origin for the input coordinate map key
+    batch_indices, batch_rows = input.coordinate_manager.origin_map(input.coordinate_map_key)
+
+    # Iterate through batch indices and rows, assigning the global feature for batch b to the broadcast_feat rows
+    for b, rows in zip(batch_indices, batch_rows):
+        broadcast_feat[rows] = input_glob.F[b]
+
+    # Return a SparseTensor with broadcast_feat and the input coordinate map key
+    return SparseTensor(
+        broadcast_feat,
+        coordinate_map_key=input.coordinate_map_key,
+        coordinate_manager=input.coordinate_manager,
+    )
+```
+
+**Parameters and Edge Cases:**
+- `input_glob` must contain exactly one feature vector per batch index present in `input`. If `input_glob` is missing a batch index present in `input`, the behavior is undefined or results in uninitialized memory [G].
+- The output coordinates are identical to the input coordinates: $\mathcal{C}^\text{in} = \mathcal{C}^\text{out}$ [S1, unofficial].
+
+## Subtopics
+
+### MinkowskiBroadcastAddition
+Broadcasts reduced global features to all input coordinates by adding them element-wise to the input sparse tensor features. The output coordinates are identical to the input coordinates. It is chosen when global context should be added as a bias or residual to local features. Formula: $\mathbf{y}_\mathbf{u} = \mathbf{x}_{1, \mathbf{u}} + \mathbf{x}_2 \; \text{for} \; \mathbf{u} \in \mathcal{C}^\text{in}$ [S1, unofficial].
+
+### MinkowskiBroadcastMultiplication
+Broadcasts reduced global features to all input coordinates by multiplying them element-wise with the input sparse tensor features. The output coordinates are identical to the input coordinates. It is chosen when global context should modulate local features (e.g., attention-like gating). Formula: $\mathbf{y}_\mathbf{u} = \mathbf{x}_{1, \mathbf{u}} \times \mathbf{x}_2 \; \text{for} \; \mathbf{u} \in \mathcal{C}^\text{in}$ [S1, unofficial].
+
+### MinkowskiBroadcastConcatenation
+Broadcasts reduced global features to all input coordinates and concatenates them to the input features along the feature dimension. It is chosen when both local and global features need to be preserved and processed jointly in subsequent layers. Formula: $\mathbf{y}_\mathbf{u} = [\mathbf{x}_{1,\mathbf{u}}, \mathbf{x}_2] \; \text{for} \; \mathbf{u} \in \mathcal{C}^\text{in}$ [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of active coordinates in the input sparse tensor, $O(|\mathcal{C}^\text{in}|)$, due to the iteration over batch rows [S1, unofficial].
+- **Memory Complexity:** $O(|\mathcal{C}^\text{in}| \cdot d)$, where $d$ is the dimension of the global feature vector, for the `broadcast_feat` allocation [S1, unofficial].
+- **Strengths:** Efficiently attaches global context to sparse data without changing coordinate topology. Simple implementation.
+- **Limitations:** Requires the global features to be pre-computed and aligned with the batch indices of the input. Does not handle missing batch indices gracefully [G].
+
+## Background
+MinkowskiBroadcast is part of the MinkowskiEngine library, which implements sparse tensor operations for 3D deep learning. It is designed to work with sparse tensors where features are reduced to the origin (global pooling) and then broadcast back to the original sparse coordinates. The method is commonly used in conjunction with [MinkowskiGlobalPooling](4204-scattered-assignment.md#minkowskiglobalpooling) to provide global context to local sparse features [S1, unofficial].
+
+## Sources
+[S1] ziplab/VolSplat, https://github.com/ziplab/VolSplat, fetched 2026-10-27 (unofficial)

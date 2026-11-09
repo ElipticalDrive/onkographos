@@ -1,0 +1,253 @@
+--- v004.md
++++ v005.md
+@@ -4,151 +4,144 @@
+ 
+ ## Overview
+-Variance Shadow Mapping for NeRFs is a shadow rendering technique that adapts the variance shadow mapping algorithm from traditional computer graphics to neural radiance fields. It solves the problem of computing soft shadows in NeRFs without performing expensive cumulative transmittance integrations along shadow rays [S1]. By comparing depth inconsistencies between the camera view and a virtual light view, it produces continuous visibility values in the range $[0, 1]$, avoiding the hard-edged artifacts typical of naive shadow mapping [S1].
++Variance Shadow Mapping for NeRFs is a technique for rendering cast shadows in neural radiance fields that avoids the computational cost of ray-marching transmittance along shadow rays. Inspired by traditional variance shadow mapping, it computes shadow visibility by comparing the depth of a surface point (from the camera view) against a statistical distribution of depths rendered from a virtual light source. It produces soft, continuous shadows in the range $[0, 1]$, distinguishing it from naive shadow mapping which yields hard edges, and from direct shadow ray casting which requires expensive cumulative transmittance calculations.
+ 
+ ## How it works
+-The method computes visibility $V(\mathbf{r})$ for a camera ray $\mathbf{r}$ by projecting the sampled 3D points into a light-space depth buffer and applying statistical filtering.
++The method relies on two depth maps: one from the camera view and one from a virtual light source. It uses the Chebyshev inequality to estimate the probability that a point is occluded based on the mean and variance of the depth distribution in the light's view.
+ 
+-**Inputs:**
+-*   Camera ray $\mathbf{r}$ and its associated 3D sample points $\mathbf{x}$ obtained from the NeRF volume rendering process.
+-*   Camera intrinsics and extrinsics.
+-*   Light source position (defining the virtual camera).
+-*   Pre-rendered depth maps from the light view: mean depth map $X$ and squared depth map $X^2$.
++### Inputs and Outputs
++*   **Inputs**:
++    *   Camera parameters (intrinsics, extrinsics).
++    *   Light source position and orientation (defining the virtual light camera).
++    *   A trained NeRF model (implicitly accessed via the generation of depth maps).
++    *   A surface point $\mathbf{r}$ in 3D space (or the ray $\mathbf{r}$ being rendered).
++*   **Outputs**:
++    *   Visibility factor $V(\mathbf{r}) \in [0, 1]$.
++    *   Final pixel color $I(\mathbf{r})$ (when combined with other lighting terms).
+ 
+-**Outputs:**
+-*   Visibility factor $V(\mathbf{r}) \in [0, 1]$.
++### Data Structures
++1.  **Depth Map ($X$)**: A 2D array of size $H \times W$ (matching the light camera resolution). Each element stores the depth $z$ of the first surface hit from the light's perspective.
++2.  **Squared Depth Map ($X^2$)**: A 2D array of size $H \times W$. Each element stores the square of the depth value at that pixel ($z^2$).
++3.  **Filtered Maps**:
++    *   $\mu(X)$: Box-filtered version of $X$.
++    *   $\mu(X^2)$: Box-filtered version of $X^2$.
+ 
+-**Data Structures:**
+-*   **Depth Map ($X$):** A 2D array where each element stores the depth $z$ of the nearest surface point along the ray from the light source.
+-*   **Squared Depth Map ($X^2$):** A 2D array where each element stores the square of the depth $z^2$.
+-*   **Filtered Maps:** $\mu(X)$ and $\mu(X^2)$, resulting from box filtering the input maps.
++### Numbered Steps
+ 
+-**Steps:**
++1.  **Reconstruct 3D Coordinates from Camera View**:
++    Using the depth map from the primary camera view and the camera parameters, reconstruct the 3D coordinates of the surface point $\mathbf{r}$ corresponding to the pixel being rendered. Let $z(\mathbf{r})$ be the depth of this point along the light ray direction (or the depth value associated with the point in the light's coordinate system).
+ 
+-1.  **Reconstruct 3D Coordinates:**
+-    For each sample point $\mathbf{x}$ on the camera ray $\mathbf{r}$, determine its 3D coordinates using the camera parameters and the depth value associated with the pixel $\mathbf{r}$ in the camera's depth map [S1].
++2.  **Render Light View Depth Maps**:
++    Set up a virtual camera at the light source position. Render two depth maps from this view:
++    *   The standard depth map $X$, where each pixel stores the distance to the nearest surface.
++    *   The squared depth map $X^2$, where each pixel stores the square of that distance.
+ 
+-2.  **Project to Light View:**
+-    Set a virtual camera at the light source position. Transform the 3D coordinates of the sample points into the light camera's coordinate system. Determine the corresponding pixel $\mathbf{r}_l$ in the light view's depth buffer [S1].
++3.  **Box Filtering**:
++    Apply a box filter (uniform averaging) over a neighborhood of size $k \times k$ to both $X$ and $X^2$. This produces the filtered mean depth $\mu(X)$ and filtered mean squared depth $\mu(X^2)$.
++    *   *Note*: The filter size determines the softness of the shadow.
+ 
+-3.  **Retrieve Light-Space Depth:**
+-    Let $z(\mathbf{r})$ be the depth of the sample point $\mathbf{x}$ as measured from the light source (i.e., the distance from the light camera origin to $\mathbf{x}$ along the light ray) [S1].
+-
+-4.  **Retrieve Filtered Statistics:**
+-    Access the pre-computed filtered mean depth $\mu(\mathbf{X})(\mathbf{r}_l)$ and filtered mean squared depth $\mu(\mathbf{X}^2)(\mathbf{r}_l)$ at the corresponding pixel $\mathbf{r}_l$ in the light view [S1].
+-
+-5.  **Calculate Variance:**
+-    Compute the variance $\sigma^2(\mathbf{r}_l)$ of the depth distribution in the local neighborhood defined by the filter [S1]:
++4.  **Calculate Variance**:
++    For the pixel $\mathbf{r}_l$ in the light view corresponding to the 3D point $\mathbf{r}$, calculate the variance $\sigma^2(\mathbf{r}_l)$ using the formula:
+     $$ \sigma^2(\mathbf{r}_l) = \mu(\mathbf{X}^2)(\mathbf{r}_l) - \mu^2(\mathbf{X})(\mathbf{r}_l) $$
+ 
+-6.  **Compute Visibility:**
+-    Calculate the visibility $V(\mathbf{r})$ using the Chebyshev inequality-based bound [S1]:
++5.  **Calculate Visibility**:
++    Determine the visibility $V(\mathbf{r})$ by comparing the point's depth $z(\mathbf{r})$ with the mean depth $\mu(\mathbf{X})(\mathbf{r}_l)$ from the light view:
+     $$ V(\mathbf{r}) = \begin{cases} 1, & z(\mathbf{r}) \leq \mu(\mathbf{X})(\mathbf{r}_l) \\ \frac{\sigma^2(\mathbf{r}_l)}{\sigma^2(\mathbf{r}_l) + (z(\mathbf{r}) - \mu(\mathbf{X})(\mathbf{r}_l))^2}, & z(\mathbf{r}) > \mu(\mathbf{X})(\mathbf{r}_l) \end{cases} $$
++    *   If the point is closer to the light than the mean depth of the light's view, it is fully visible ($V=1$).
++    *   If it is further, the visibility is estimated using the Chebyshev inequality bound, resulting in a value between 0 and 1.
+ 
+-**Pseudocode:**
++6.  **Composite Final Color**:
++    Combine the visibility with the direct illumination and other lighting components. The final rendering for ray $\mathbf{r}$ is:
++    $$ I(\mathbf{r}) = I_d(\mathbf{r}) + I_s(\mathbf{r}) + V(\mathbf{r})\mathcal{R}(\mathbf{r})S_{SG}(\mathbf{r}) $$
++    Where $I_d$ is diffuse, $I_s$ is specular, $\mathcal{R}$ is reflectance, and $S_{SG}$ is the shadow term from the neural scene graph or similar component [S1].
++
++### Pseudocode
+ 
+ ```python
+-def compute_vsm_visibility(sample_points, camera_intrinsics, light_camera_intrinsics, 
+-                           light_depth_map, light_depth_sq_map, filter_size):
++def variance_shadow_mapping_neRF(camera_depth_map, camera_intrinsics, light_camera_intrinsics, 
++                                 light_camera_extrinsics, point_3d, filter_size):
+     """
+-    Computes visibility for a set of sample points on a camera ray using Variance Shadow Mapping.
++    Computes shadow visibility for a 3D point using Variance Shadow Mapping for NeRFs.
+     
+     Args:
+-        sample_points: List of 3D points (x, y, z) on the camera ray.
+-        camera_intrinsics: Camera matrix K.
+-        light_camera_intrinsics: Light camera matrix K_l.
+-        light_depth_map: 2D array of depth values Z from light view.
+-        light_depth_sq_map: 2D array of squared depth values Z^2 from light view.
+-        filter_size: Integer size of the box filter kernel.
++        camera_depth_map: 2D array, depth from primary camera view.
++        camera_intrinsics: Camera matrix for primary view.
++        light_camera_intrinsics: Camera matrix for light view.
++        light_camera_extrinsics: Extrinsics for light view.
++        point_3d: 3D coordinates (x, y, z) of the surface point to shadow test.
++        filter_size: Integer, size of the box filter kernel (e.g., 5).
+         
+     Returns:
+-        visibility: Float value in [0, 1].
++        V: Float, visibility factor in [0, 1].
+     """
+-    # Step 1 & 2: Project sample points to light view
+-    # Note: In practice, this is done per-pixel during rendering. 
+-    # Here we assume we are processing a specific pixel r and its corresponding 3D point x.
+     
+-    # Assume we have the 3D point x corresponding to the surface point on the camera ray
+-    # and we know its pixel coordinate r in the camera image.
+-    # We need the 3D coordinate x.
++    # Step 1: Get depth of the point from the light's perspective
++    # Transform point_3d to light camera coordinates
++    point_light_coords = transform_to_light_view(point_3d, light_camera_extrinsics)
++    z_point = point_light_coords[2] # Depth along light ray
+     
+-    # Reconstruct 3D point from camera ray and depth (simplified)
+-    # x_3d = unproject(r, depth_r, camera_intrinsics)
+-    # For this method, the 3D point x is already available from the volume rendering samples.
++    # Step 2: Render/Retrieve Light View Depth Maps
++    # In practice, these are pre-rendered or cached.
++    # X: Depth map from light view
++    # X2: Squared depth map from light view
++    X = get_light_depth_map() 
++    X2 = get_light_squared_depth_map()
+     
+-    # Transform 3D point to light camera space
+-    # x_light = light_camera_extrinsics * x_3d
+-    # z_light = x_light.z  # Depth in light view
++    # Step 3: Box Filtering
++    # Calculate mean of X and X2 over the filter neighborhood
++    # Let r_l be the pixel coordinate in light view corresponding to point_3d
++    r_l = project_to_light_view(point_3d, light_camera_intrinsics, light_camera_extrinsics)
+     
+-    # Determine pixel coordinate r_l in light view
+-    # r_l = project(x_light, light_camera_intrinsics)
++    mu_X = box_filter(X, r_l, filter_size)
++    mu_X2 = box_filter(X2, r_l, filter_size)
+     
+-    # Step 3: Get depth from light view for this point
+-    # z_r = z_light
++    # Step 4: Calculate Variance
++    sigma_sq = mu_X2 - (mu_X ** 2)
+     
+-    # Step 4: Get filtered statistics from light view maps
+-    # The maps must be pre-filtered with a box filter of size filter_size x filter_size
+-    mu_X = box_filter(light_depth_map, filter_size)[r_l.y, r_l.x]
+-    mu_X2 = box_filter(light_depth_sq_map, filter_size)[r_l.y, r_l.x]
+-    
+-    # Step 5: Calculate Variance
+-    variance = mu_X2 - (mu_X ** 2)
+-    
+-    # Step 6: Compute Visibility
+-    if z_r <= mu_X:
+-        visibility = 1.0
++    # Step 5: Calculate Visibility
++    if z_point <= mu_X:
++        V = 1.0
+     else:
+         # Chebyshev inequality bound
+-        numerator = variance
+-        denominator = variance + (z_r - mu_X) ** 2
+-        if denominator == 0:
+-            visibility = 1.0 # Avoid division by zero; if variance is 0 and z > mu, it's an edge case
++        # Avoid division by zero if sigma_sq is very small
++        if sigma_sq < 1e-6:
++            V = 0.0 # Or handle as fully occluded if depth is significantly larger
+         else:
+-            visibility = numerator / denominator
++            V = sigma_sq / (sigma_sq + (z_point - mu_X)**2)
+             
+-    return visibility
++    return V
+ 
+-def box_filter(input_map, kernel_size):
++def box_filter(image, center_pixel, kernel_size):
+     """
+-    Applies a simple box filter to a 2D map.
++    Applies a uniform box filter to an image at center_pixel.
+     """
+-    height, width = input_map.shape
+-    output_map = np.zeros_like(input_map)
+-    half_k = kernel_size // 2
++    h, w = image.shape
++    ky, kx = kernel_size // 2, kernel_size // 2
++    cy, cx = center_pixel
+     
+-    # Efficient box filter implementation (summing over kernel)
+-    # For simplicity, we use a direct convolution
+-    for y in range(height):
+-        for x in range(width):
+-            sum_val = 0.0
+-            count = 0
+-            for ky in range(-half_k, half_k + 1):
+-                for kx in range(-half_k, half_k + 1):
+-                    ny = y + ky
+-                    nx = x + kx
+-                    if 0 <= ny < height and 0 <= nx < width:
+-                        sum_val += input_map[ny, nx]
+-                        count += 1
+-            output_map[y, x] = sum_val / count if count > 0 else 0.0
+-            
+-    return output_map
++    y_min = max(0, cy - ky)
++    y_max = min(h, cy + ky + 1)
++    x_min = max(0, cx - kx)
++    x_max = min(w, cx + kx + 1)
++    
++    region = image[y_min:y_max, x_min:x_max]
++    return np.mean(region)
+ ```
+ 
+-**Parameters:**
+-*   **Filter Size:** The size of the box filter applied to the depth and squared depth maps. Not given in the sources. Larger sizes produce softer shadows but may introduce blur artifacts.
+-
+-**Edge Cases and Pitfalls:**
+-*   **Negative Variance:** Due to numerical precision errors, $\mu(X^2) - \mu^2(X)$ might be slightly negative. Clamp variance to 0 if negative [G].
+-*   **Division by Zero:** If variance is 0 and $z(\mathbf{r}) > \mu(\mathbf{X})$, the denominator becomes 0. This implies a sharp edge. The visibility should be handled carefully, potentially defaulting to 0 or 1 depending on the desired behavior [G].
+-*   **Depth Precision:** Depth values must be consistent between the camera and light views. Mismatches in coordinate systems or depth encoding can lead to incorrect visibility calculations [S1].
++### Parameters and Edge Cases
++*   **Filter Size**: Controls shadow softness. Larger kernels produce softer shadows but may introduce "bleeding" artifacts where shadows leak into unoccluded areas. Not given in the sources.
++*   **Precision**: The variance calculation $\mu(X^2) - \mu(X)^2$ is prone to numerical instability if the depth values are large and the variance is small. [G] Clamp $\sigma^2$ to be non-negative ($\max(0, \sigma^2)$) to prevent NaNs or invalid visibility values.
++*   **Depth Boundaries**: If the point is outside the light camera's frustum, visibility is undefined or should be handled as fully lit/occluded based on scene context. Not given in the sources.
++*   **Degenerate Input**: If the light view depth map is empty or invalid, the method fails. [G] Check for valid depth values before filtering.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The visibility calculation per sample is $O(1)$ after the depth maps are pre-filtered. The pre-filtering step is $O(N \cdot K^2)$ where $N$ is the number of pixels and $K$ is the filter size.
+-*   **Memory Complexity:** Requires storing two additional depth maps (depth and squared depth) for the light view.
+-*   **Strengths:** Avoids the expensive integration of transmittance along shadow rays, making it efficient for NeRFs [S1]. Produces soft shadows naturally [S1].
+-*   **Limitations:** Relies on accurate depth maps from the light view. If the NeRF does not provide reliable depth information, the method may fail. The quality of shadows depends on the filter size and the accuracy of the depth maps [S1].
+-*   **When to use:** When soft shadows are desired in NeRF rendering and computational efficiency is a priority over physically accurate shadow integration.
++*   **Time Complexity**: Dominated by the rendering of two depth maps (light view) and the box filtering. The visibility lookup is $O(1)$ per pixel after preprocessing. This is significantly faster than ray-marching shadow rays, which is $O(N)$ per pixel where $N$ is the number of samples.
++*   **Memory Complexity**: Requires storing two additional depth maps ($X$ and $X^2$) at the resolution of the light camera. Memory usage is $2 \times H \times W \times \text{bytes\_per\_pixel}$.
++*   **Strengths**: Produces soft shadows efficiently without iterative ray marching. Integrates well with NeRF rendering pipelines that already generate depth maps.
++*   **Limitations**: Shadows are an approximation based on depth statistics. Can suffer from shadow acne or bleeding if the filter size is not tuned correctly. Relies on the accuracy of the NeRF's depth estimation.
++*   **When to Use**: When soft shadows are desired and computational efficiency is critical, and the scene geometry is well-represented by the NeRF's depth maps.
++*   **When Not to Use**: When precise hard shadows are required, or when the NeRF's depth map is noisy/inaccurate, leading to poor variance estimates.
+ 
+ ## Background
+-This method was proposed in the context of relighting scenes with object insertions in Neural Radiance Fields [S1]. It draws inspiration from variance shadow mapping in traditional computer graphics [S1]. The key insight is that variance shadow mapping transforms discontinuous depth from the light perspective into continuous depth, leading to soft shadows with visibility in $[0, 1]$ [S1].
++This method was proposed in the context of relighting scenes with object insertions in Neural Radiance Fields. It adapts the variance shadow mapping technique from traditional computer graphics [14] (referenced in [S1]) to the implicit representation of NeRFs. The key insight is that NeRFs can provide depth information, allowing the use of depth-based shadowing techniques without explicit mesh extraction. The method avoids the cumulative transmittance calculation typical of volumetric shadowing, offering a more efficient alternative for local illumination.
+ 
+ ## Sources

@@ -3,64 +3,57 @@
 Also called: Elemental Node Types
 
 ## Overview
-Sparse Volume Data Structures (SVDS) is a family of hybrid volume data structures that adaptively selects the most memory-efficient representation for local regions of a volume, typically organized as an octree where leaf nodes are one of several "elemental node types" [S1, unofficial]. It solves the problem of memory overhead in sparse volumes by omitting empty regions and using compact structures for sparse data, while maintaining fast access times [S1, unofficial]. What sets it apart from its siblings is the explicit categorization of leaf representations (Empty, Voxel List, Pointer Octree, Dense) and the optimization of these choices at the GPU level, often combined with JIT compilation to eliminate traversal overhead [S1, 6834, unofficial].
+Sparse Volume Data Structures (SVDS) is a family of hybrid volume data structures that decompose a 3D volume into bricks, assigning each brick one of several "elemental node types" (empty, voxel list, pointer octree, or dense) based on local sparsity to minimize memory consumption [S1, unofficial]. It solves the problem of inefficient memory usage in uniform representations by adapting the storage format to the data density within each brick. Unlike its siblings, which may suffer from branch divergence or pointer-chasing overhead when mixing elemental types, this family (specifically the JIT-compiled variant) can generate specialized code to eliminate dead code and memory fetches, shifting the optimization burden from memory cache to instruction cache [S1, unofficial].
 
 ## Shared principles
-The core mechanism of this family is the decomposition of a volume into hierarchical blocks (bricks) where each leaf node is assigned an "elemental node type" based on the sparsity and density of the data within that block [S1, unofficial]. The four elemental node types defined in the foundational literature are:
+The core mechanism of this family is the decomposition of the volume into cubic bricks of side length $m$ (where $m$ is a power of two). Each brick is classified into one of four elemental node types based on the number of non-zero elements $n$ and the data size $d$. The goal is to select the type with the minimum memory footprint for each brick, and globally optimize the brick size $m$ [S1, unofficial].
 
-1.  **Empty Volume**: Represents a completely empty brick. These bricks are omitted from the data structure entirely when uploaded to the GPU, requiring zero memory storage [S1, unofficial].
-2.  **Voxel List**: Represents extremely sparse data. It stores a set of quadruples $(x, y, z, \text{value})$ [S1, unofficial].
-    *   **Memory**: The coordinates theoretically require $\lceil \log_2(m) \rceil$ bits per axis, where $m$ is the side length of the volume (or brick, depending on context; the source notes $3 \log_2(m)$ total bits for coordinates in a voxel list context, though typically this refers to global coordinates or brick-relative coordinates scaled appropriately) [S1, unofficial].
-    *   **Access**: Naive access is $O(n)$ where $n$ is the number of elements. With a sorted list, binary search reduces access to $O(\log(n))$ [S1, unofficial].
-    *   **Overhead**: The bit overhead per non-empty voxel is bounded by $3 \log_2(m)$ [S1, unofficial].
-3.  **Pointer Octree**: An adaptive structure for medium sparsity. It is a full pointer octree where each internal node stores 8 pointers to its children [S1, unofficial].
-    *   **Structure**: Pointers are indices into a 1D array and can point to empty elements [S1, unofficial]. Leaf nodes store bricks with $2^3$ values (or generally $m^3$ if $m>2$, but the source specifies $2^3$ for the implementation discussed) [S1, unofficial].
-    *   **Size**: A full pointer octree has $(m^3 - 1) / 7$ internal nodes, where $m$ is a power of two [S1, unofficial].
-    *   **Access**: Worst-case access is $O(\log(m))$ traversal steps [S1, unofficial].
-    *   **Overhead**: The maximum overhead of pointers for a full octree is approximately $1/6$ of the number of values in the corresponding dense volume [S1, unofficial].
-4.  **Dense Volume**: A Cartesian grid for very dense data. It has the lowest overhead per data voxel and provides $O(1)$ access time [S1, unofficial].
-    *   **Memory**: Size is $d \cdot m^3$, where $d$ is bytes per entry and $m$ is brick side length [S1, unofficial].
+The four elemental node types are:
 
-**Comparison of Elemental Types**:
-*   **Access Time**: Dense is $O(1)$; Pointer Octree is $O(\log(m))$; Voxel List is $O(n)$ or $O(\log(n))$; Empty is $O(1)$ (implicit).
-*   **Bit Overhead**: Dense is minimal per voxel; Pointer Octree has $\sim p/7$ overhead (where $p$ is pointer size); Voxel List has $3 \log_2(m)$ overhead; Empty has 0.
-*   **Shift Sensitivity**: Pointer Octrees are shift sensitive, meaning the number of internal nodes depends on the exact location of the octree within the volume [S1, unofficial]. Voxel Lists and Dense volumes are not shift sensitive [S1, unofficial].
-*   **Empty Space Skipping**: Pointer Octrees and Empty nodes allow skipping empty space; Voxel Lists and Dense volumes do not inherently skip empty space in the same structural manner [S1, unofficial].
+1.  **Empty:**
+    *   **Definition:** Bricks with no non-zero elements.
+    *   **Storage:** Omitted from storage; requires zero memory [S1, unofficial].
+    *   **Access:** Not applicable.
+    *   **Properties:** Allows empty space skipping during traversal [S1, unofficial].
 
-**Optimization**:
-The structure is optimized by locally adapting elemental node types and globally adapting brick size $m$ [S1, unofficial]. This is often done using parallel reduction to determine the layout [S1, unofficial].
+2.  **Voxel List:**
+    *   **Definition:** A list of quadruples $(x, y, z, \text{value})$ storing only non-zero elements.
+    *   **Storage:** Coordinates are stored as 2-byte integers. Values are stored in a separate buffer. The list is sorted in Morton order [S1, unofficial].
+    *   **Memory:** The bit overhead for coordinates is $3 \lceil \log_2(m) \rceil$ bits per element. The upper bound for memory usage is reached if the volume is practically empty (excluding the list structure overhead), and the lower bound if it contains no zero entries [S1, unofficial].
+    *   **Access:** $O(n)$ for unsorted lists; $O(\log n)$ for sorted lists using binary search [S1, unofficial].
+    *   **Properties:** Memory efficient for extremely sparse volumes. Does not allow empty space skipping within the brick [S1, unofficial].
+
+3.  **Pointer Octree:**
+    *   **Definition:** A modified octree where leaf nodes store bricks of size $2^3$ (8 values) instead of single scalars. Internal nodes store 8 pointers.
+    *   **Storage:** Pointers are indices into a 1D array. Leaf values are in a separate memory region [S1, unofficial].
+    *   **Memory:** A full pointer octree has $(m^3 - 1) / 7$ internal nodes, where $m$ is a power of two. The overhead of pointers is approximately $1/6$ of the number of values in a dense volume [S1, unofficial].
+    *   **Access:** $O(\log m)$ traversal steps. Access time depends on the side length $m$, not the number of elements [S1, unofficial].
+    *   **Properties:** Shift sensitive; the number of internal nodes in a sparse octree depends on the exact location of the octree within the volume [S1, unofficial]. Allows empty space skipping [S1, unofficial].
+
+4.  **Dense Volume:**
+    *   **Definition:** A Cartesian grid storing $m^3$ values per brick.
+    *   **Storage:** $d \cdot m^3$ bits, where $d$ is the size of one data entry in bits and $m$ is the brick side length [S1, unofficial].
+    *   **Access:** $O(1)$ access time [S1, unofficial].
+    *   **Properties:** Lowest overhead per data voxel. Optimal for very dense data. Highest overhead for single values [S1, unofficial].
+
+**Comparison of Elemental Types:**
+
+| Type | Access Time | Bit Overhead / Non-Empty Voxel | Shift Sensitive | Allows Empty Space Skipping |
+| :--- | :--- | :--- | :--- | :--- |
+| **Empty** | N/A | 0 | N/A | Yes |
+| **Voxel List** | $O(\log n)$ | $3 \log_2(m)$ | No | No |
+| **Pointer Octree** | $O(\log m)$ | $\sim p/7$ | Yes | Yes |
+| **Dense Volume** | $O(1)$ | 0 | No | No |
+
+*Note: $p$ is the pointer size [S1, unofficial].*
 
 ## Subtopics
 
 ### [Sparse GPU Volume Data Structure with JIT Compilation](6834-sparse-gpu-volume-data-structure-with-jit-compilation.md)
-A hybrid volume data structure that uses a modified octree with leaves of 8 values to reduce memory overhead compared to pointer-based leaf nodes, combined with just-in-time (JIT) compilation of a kd-tree to eliminate traversal overhead and enable data-dependent dead code removal.
-
-### [Bottom-up Octree Construction](1590-bottom-up-octree-construction.md)
-Focuses on the construction algorithm for building the octree hierarchy from leaf nodes up.
-
-### [Packed Tensor Representation](1611-packed-tensor-representation.md)
-Uses tensor decomposition techniques to compress the sparse volume data.
-
-### [Octree Volume Structure](1978-octree-volume-structure.md)
-Details the specific memory layout and node structure of the octree.
-
-### [Octree Volume Compression](1979-octree-volume-compression.md)
-Applies compression algorithms to the octree structure itself.
-
-### [Sparse Voxel Octree Attribute Encoding (Neighbor)](2641-sparse-voxel-octree-attribute-encoding-neighbor.md)
-Encodes attributes using neighbor information to reduce redundancy.
-
-### [SVO Node Encoding](2705-svo-node-encoding.md)
-Specific encoding schemes for Sparse Voxel Octree nodes.
-
-### [Sparse Voxel Octree Structure Encoding/Decoding](3012-sparse-voxel-octree-structure-encoding-decoding.md)
-Algorithms for encoding and decoding the SVO structure.
-
-### [Hierarchical Data Structure Storage](3333-hierarchical-data-structure-storage.md)
-General strategies for storing hierarchical data structures in memory.
+JiTTree is a sparse hybrid volume data structure that combines multiple elemental data structures (empty, voxel list, octree, dense) to minimize memory consumption while using just-in-time (JIT) compilation to generate GPU code tailored to a specific dataset. It solves the problem of increased traversal overhead inherent in conventional hybrid structures by inlining access logic and removing dead code at runtime, shifting the burden from the GPU's memory cache to the instruction cache. Unlike its siblings, which suffer from branch divergence and pointer-chasing overhead when mixing elemental types, JiTTree's traversal overhead depends on the homogeneity of the dataset rather than the number of elemental structures used.
 
 ## Background
-The concept of Sparse Volume Data Structures, specifically the "Elemental Node Types" approach, was introduced by Labschütz et al. in 2016 in the paper "A Just-in-Time Compiled Sparse GPU Volume Data Structure" [S1, unofficial]. The work focuses on optimizing volume rendering on GPUs by reducing memory overhead and traversal costs. The paper analyzes four elemental node types (Empty, Voxel List, Pointer Octree, Dense) and their theoretical properties, such as access time and bit overhead [S1, unofficial]. It highlights that pointer-less octrees (e.g., Balmelli) can achieve 0 bit overhead per entry but require storing Morton codes [S1, unofficial]. The approach is part of a broader effort to make sparse volume rendering efficient on modern GPU architectures by combining data structure adaptation with JIT compilation [S1, 6834, unofficial].
+The concept of using elemental node types for sparse volume data was introduced in the work on "A Just-in-Time Compiled Sparse GPU Volume Data Structure" [S1, unofficial]. The authors identified that single data structures (like pure octrees or dense grids) are suboptimal for volumes with varying sparsity. By combining empty, voxel list, pointer octree, and dense representations, and optimizing them via JIT compilation, they achieved significant memory savings and performance improvements for GPU-based volume rendering [S1, unofficial]. The approach addresses the limitations of traditional hybrid structures by eliminating the overhead associated with generic traversal logic.
 
 ## Sources
 [S1] A Just-in-Time Compiled Sparse GPU Volume Data Structure, https://vis.uib.no/wp-content/papercite-data/pdfs/Labschuetz-2016-JJC.pdf, fetched 2026-10-29 (unofficial)

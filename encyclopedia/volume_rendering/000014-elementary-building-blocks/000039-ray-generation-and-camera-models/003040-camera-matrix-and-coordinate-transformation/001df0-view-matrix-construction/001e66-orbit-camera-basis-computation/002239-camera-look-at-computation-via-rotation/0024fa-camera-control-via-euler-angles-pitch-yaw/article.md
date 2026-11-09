@@ -7,11 +7,11 @@ This method computes a camera's orientation and view matrix using two rotation a
 
 ## How it works
 **Inputs and Outputs:**
-- Inputs: Camera position $\mathbf{p} = (p_x, p_y, p_z)$, yaw angle $\theta_y$ (radians or degrees), pitch angle $\theta_p$ (radians or degrees). Optional: rotation center $\mathbf{c} = (c_x, c_y, c_z)$ for scene-rotation variants [S1, S4, unofficial].
+- Inputs: Camera position $\mathbf{p} = (p_x, p_y, p_z)$, yaw angle $\theta_y$ (radians or degrees), pitch angle $\theta_p$ (radians or degrees) [S3, S4, unofficial]. Optional: rotation center $\mathbf{c} = (c_x, c_y, c_z)$ for scene-rotation variants [S1, S4, unofficial].
 - Outputs: Camera forward vector $\mathbf{f}$, right vector $\mathbf{r}$, up vector $\mathbf{u}$, and view matrix $\mathbf{V}$ [S2, S3, unofficial].
 
 **Data Structures:**
-- Vectors are 3D floating-point tuples $(x, y, z)$.
+- Vectors are 3D floating-point tuples $(x, y, z)$ [G].
 - Angles are stored as floats; conversion to radians is required for trigonometric functions [S4, unofficial].
 - The view matrix is a $4 \times 4$ matrix constructed via a look-at function [S2, unofficial].
 
@@ -90,7 +90,7 @@ def compute_camera_basis(position, yaw_deg, pitch_deg, sensitivity=1.0):
     fy = sin_pitch
     fz = sin_yaw * cos_pitch
     
-    # Normalize forward (already unit length if derived from sphere, but safe to normalize)
+    # Normalize forward
     f_len = math.sqrt(fx*fx + fy*fy + fz*fz)
     if f_len > 1e-6:
         fx, fy, fz = fx/f_len, fy/f_len, fz/f_len
@@ -237,7 +237,6 @@ Choose this when gimbal lock must be avoided without clamping, or when smooth in
 - Performance is limited by the language (Lua) and single-threaded execution, not the camera control method itself [S4, unofficial].
 
 **Scaling:**
-- Scales linearly with the number of camera updates, but is independent of scene complexity [S4, unofficial].
 - Suitable for real-time applications due to low computational cost [S2, S4, unofficial].
 
 **Strengths and Limitations:**

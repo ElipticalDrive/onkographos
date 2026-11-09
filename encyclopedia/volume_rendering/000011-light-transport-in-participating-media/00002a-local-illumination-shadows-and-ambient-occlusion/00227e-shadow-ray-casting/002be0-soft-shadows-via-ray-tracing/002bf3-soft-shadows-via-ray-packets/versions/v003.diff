@@ -1,0 +1,235 @@
+--- v002.md
++++ v003.md
+@@ -1,128 +1,132 @@
+ # Soft Shadows via Ray Packets
+ 
+-Also called: Ray Packet Soft Shadows
++Also called: Area Light Shadows, Ray Packet Soft Shadows, Soft Shadows via Coherent Shadow Rays, Soft Shadows with Ray Packets
+ 
+ ## Overview
+-This method extends ray casting in participating media to support non-local illumination effects, specifically soft shadows, by tracing secondary ray packets from primary rays toward area light sources [S1]. It distinguishes itself from hard shadow techniques by sampling a spatial distribution of directions to approximate the penumbra, leveraging the coherence of these secondary rays to maintain interactive performance [S1].
++Soft Shadows via Ray Packets generates soft shadows from area light sources by creating packets of coherent shadow rays, leveraging the ray tracing basis of the method to support global effects that are difficult to implement in rasterization-based systems [S1, S2]. This method differs from hard shadow casting by tracing secondary ray packets from primary ray hit points to samples on an area light source, allowing for smooth transitions between shadowed and unshadowed regions which provide important visual cues about object positioning [S1, S2]. It builds on [Soft Shadows via Ray Tracing](5136-soft-shadows-via-ray-tracing.md) by specifically organizing shadow rays into coherent packets to maintain traversal efficiency.
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Input:** Primary ray, scene geometry, light source definition [S1].
+-*   **Output:** Shadow term (transmittance) applied to the primary ray's contribution [G].
++**Inputs and Outputs:**
++- **Input:** Primary ray hit point on a surface or particle; area light source definition (position, size/orientation); scene geometry (particle dataset); grid structure for traversal.
++- **Output:** Shadow factor (visibility) for the primary ray, modulating the final color.
+ 
+-**Data Structures**
+-The method operates on ray packets. A packet is a collection of rays sharing a common origin but diverging in direction to sample the light source area [G].
+-*   **Packet Size:** Fixed configurations of $2 \times 2$ (4 rays), $4 \times 4$ (16 rays), and $8 \times 8$ (64 rays) [S1].
+-*   **Ray Layout:** Each ray consists of an origin point $\mathbf{o}$ and a direction vector $\mathbf{d}$ [G]. Shadow rays originate from the shading point on the primary ray, not the primary ray origin [G]. Directions are distributed across the solid angle subtended by the light source [G].
++**Data Structures:**
++- **Shadow Ray Packet:** A collection of $N \times N$ shadow rays sharing a common origin (the primary ray hit point). Each ray is defined by its origin $\mathbf{o}$ and direction $\mathbf{d}$.
++- **Area Light Samples:** $N \times N$ points distributed over the area light source. The light source area is typically set to 5% of the solid angle subtended by the bounding box of the scene [S2]. Note: One source mentions "5% of the area of the bounding box" [S1], but the detailed results section clarifies it as solid angle [S2]. The solid angle interpretation is used here as it is more physically consistent with area light sampling [S2].
+ 
+-**Parameters**
+-*   **Light Source Area:** The size of the light source is defined as 5% of the solid angle subtended by the bounding box of the scene [S1].
+-*   **Packet Dimensions:** $k \times k$, where $k \in \{2, 4, 8\}$ [S1].
++**Numbered Steps:**
++1. **Shadow Ray Generation:** For each primary ray that hits a surface or particle, generate a packet of coherent shadow rays. Connect the hit point (common origin) to $N \times N$ samples on the area light source [S1, S2]. The direction $\mathbf{d}_i$ for each shadow ray $i$ is calculated as:
++   $$ \mathbf{d}_i = \frac{\mathbf{l}_i - \mathbf{o}}{\|\mathbf{l}_i - \mathbf{o}\|} $$
++   where $\mathbf{o}$ is the hit point and $\mathbf{l}_i$ is the $i$-th sample point on the area light [G].
++2. **Packet Traversal:** Trace the secondary ray packet through the scene using the modified Coherent Grid Traversal (CGT) algorithm [S1, S2]. Because all rays in the packet share a common origin, they exhibit high coherence, allowing them to traverse the grid in a manner identical to primary ray packets [S1, S2].
++3. **Shadow Determination:** For each ray in the packet, determine if it intersects any occluding geometry (particles) before reaching the light source. The shadow factor is computed based on the ratio of unoccluded rays to total rays in the packet [S1, S2].
++4. **Shading:** Modulate the local illumination (e.g., Lambertian shading) by the computed shadow factor [S1].
+ 
+-**Algorithm Steps**
+-1.  **Generate Shadow Directions:** For a given primary ray shading point $\mathbf{o}_p$, generate $N$ secondary ray directions $\{\mathbf{d}_i\}_{i=1}^{N}$ toward the light source area [G].
+-2.  **Construct Packet:** Create a ray packet where each ray $i$ has origin $\mathbf{o}_i = \mathbf{o}_p$ and direction $\mathbf{d}_i$ [G].
+-3.  **Trace Rays:** Trace each ray in the packet against the scene geometry or particles [S1].
+-    *   For each ray $i$, compute the transmittance $T_i$ from $\mathbf{o}_p$ to the light source, checking for occlusions along the path [G].
+-4.  **Aggregate Shadow Term:** Compute the final shadow term $S$ for the primary ray by averaging the transmittances:
+-    $$ S = \frac{1}{N} \sum_{i=1}^{N} T_i $$
+-    [G] This assumes equal weighting for all samples in the packet.
+-5.  **Apply:** Multiply the primary ray's radiance contribution by $S$ [G].
++**Parameters:**
++- **Packet Size ($N \times N$):** Tested sizes are 2x2 (4 rays), 4x4 (16 rays), and 8x8 (64 rays) [S1, S2]. The number of shadow ray samples is interactively controlled by the user to permit performance-for-quality trade-offs [S1, S2].
++- **Light Source Area:** 5% of the solid angle subtended by the bounding box of the scene [S2].
+ 
+-**Pseudocode**
++**Edge Cases and Pitfalls:**
++- **Coherence Dependency:** Interactive performance depends heavily on the coherence exhibited by secondary ray packets. If coherence is low, traversal overhead may increase [S2].
++- **Performance Scaling:** The performance impact is sublinear in the number of shadow rays traced, but large packets (8x8) can still cause significant frame rate degradation (up to a factor of 19.35) [S2].
++- **Light Size:** Large light sources increase the angular spread of shadow rays, potentially reducing coherence and increasing traversal cost [S2].
++
++**Pseudocode:**
+ ```python
+-class Ray:
+-    def __init__(self, origin, direction):
+-        self.origin = origin
+-        self.direction = direction
++def compute_soft_shadow(hit_point, light_samples, grid, particles):
++    """
++    Compute soft shadow factor for a primary ray hit point using ray packets.
++    
++    Args:
++        hit_point (Vector3): Origin of the shadow ray packet.
++        light_samples (List[Vector3]): N*N sample points on the area light.
++        grid (Grid): The coherent grid structure for traversal.
++        particles (List[Particle]): The particle dataset.
++        
++    Returns:
++        float: Shadow factor (0.0 to 1.0).
++    """
++    num_rays = len(light_samples)
++    occluded_count = 0
++    
++    for light_sample in light_samples:
++        # Calculate shadow ray direction
++        direction = light_sample - hit_point
++        direction = normalize(direction)
++        
++        # Trace shadow ray using modified CGT
++        # This function handles grid traversal and particle intersection
++        # It returns True if the ray is occluded before reaching the light
++        is_occluded = trace_shadow_ray(hit_point, direction, grid, particles)
++        
++        if is_occluded:
++            occluded_count += 1
++            
++    # Shadow factor is the ratio of unoccluded rays
++    shadow_factor = 1.0 - (occluded_count / num_rays)
++    return shadow_factor
+ 
+-def compute_soft_shadow(primary_ray, light_source, packet_dim):
++def trace_shadow_ray(origin, direction, grid, particles):
+     """
+-    Computes soft shadow term for a primary ray using a ray packet.
+-    Args:
+-        primary_ray: Ray object with origin and direction.
+-        light_source: Object defining area and position.
+-        packet_dim: Integer dimension of the square packet (2, 4, or 8).
+-    Returns:
+-        float: Shadow term (0.0 to 1.0).
++    Trace a single shadow ray through the grid to check for occlusion.
++    Uses the modified CGT algorithm for coherent traversal.
+     """
+-    n = packet_dim * packet_dim
+-    total_transmittance = 0.0
++    # Initialize traversal state
++    current_cell = grid.get_cell_at(origin)
+     
+-    # Generate directions sampling the light source solid angle
+-    # The light source area is 5% of the solid angle of the scene bounding box [S1]
+-    directions = sample_light_source_directions(primary_ray.origin, light_source, n)
+-    
+-    for d in directions:
+-        shadow_ray = Ray(origin=primary_ray.origin, direction=d)
+-        # Trace ray against scene geometry/particles [S1]
+-        # Returns transmittance from origin to light source [G]
+-        t = trace_ray(shadow_ray)
+-        total_transmittance += t
++    # Traverse grid cells along the ray direction
++    while not reached_light_distance(origin, direction):
++        # Check for particle intersections in current cell
++        for particle in current_cell.particles:
++            if intersects_ray(origin, direction, particle):
++                return True  # Occluded
+         
+-    return total_transmittance / n
+-
+-def sample_light_source_directions(origin, light_source, count):
+-    """
+-    Generates 'count' directions from 'origin' that sample the light source.
+-    The light source subtends 5% of the solid angle of the scene bounding box [S1].
+-    """
+-    directions = []
+-    for _ in range(count):
+-        # Standard stratified or uniform sampling over the light's solid angle [G]
+-        d = generate_direction(origin, light_source)
+-        directions.append(d)
+-    return directions
+-
+-def generate_direction(origin, light_source):
+-    """Generates a single ray direction toward the light source area [G]."""
+-    # Standard vector math to compute direction toward a point/area on the light [G]
+-    target = light_source.sample_point()
+-    return normalize(target - origin)
+-
+-def normalize(v):
+-    return v / magnitude(v)
+-
+-def magnitude(v):
+-    return (v[0]**2 + v[1]**2 + v[2]**2)**0.5
+-
+-def trace_ray(ray):
+-    # Standard ray-scene intersection returning transmittance [G]
+-    return 1.0
++        # Move to next cell using CGT traversal logic
++        next_cell = grid.get_next_cell(origin, direction, current_cell)
++        if next_cell is None:
++            break
++        current_cell = next_cell
++        
++    return False  # Not occluded
+ ```
+ 
+-**Edge Cases and Pitfalls**
+-*   **Coherence Dependency:** Interactive performance depends heavily on the coherence exhibited by secondary ray packets [S1].
+-*   **Performance Degradation:** The performance impact is sublinear in the number of shadow rays traced, but large packets (e.g., $8 \times 8$) can significantly reduce frame rates [S1].
+-*   **Light Size:** The light source area is fixed at 5% of the solid angle subtended by the scene bounding box for the tested configurations [S1].
++## Operating characteristics
++**Time and Memory Complexity:**
++- **Time Complexity:** The traversal time for a packet of $N \times N$ rays is sublinear in $N$ due to coherence, but still increases with packet size [S2]. The base traversal cost is determined by the modified CGT algorithm [S1].
++- **Memory Complexity:** Depends on the grid structure and particle storage, similar to primary ray casting [S1]. No additional significant memory is required for the shadow rays themselves beyond the packet storage [S2].
+ 
+-## Operating characteristics
+-**Time and Memory Complexity**
+-*   **Time Complexity:** The cost is proportional to the number of shadow rays per primary ray and the cost of tracing each ray [S1].
+-*   **Memory Complexity:** Minimal additional memory is required for storing the packet of rays [G].
++**Measured Performance:**
++Performance was measured on a test machine with 16 threads, rendering 1024x1024 images [S1]. Frame rates for various datasets and shadow settings are as follows [S1, S2]:
+ 
+-**Measured Performance**
+-Performance was measured on various datasets using different packet sizes. Frame rates (fps) are provided below. The light source area was 5% of the solid angle subtended by the scene bounding box [S1].
++| Dataset     | No shadows | 2x2 (4 rays) | 4x4 (16 rays) | 8x8 (64 rays) |
++|-------------|------------|--------------|---------------|---------------|
++| Cylinder    | 100.20 fps | 14.91 fps    | 10.47 fps     | 5.34 fps      |
++| JP8         | 99.88 fps  | 16.31 fps    | 12.21 fps     | 6.65 fps      |
++| Bullet      | 126.93 fps | 19.55 fps    | 13.69 fps     | 6.56 fps      |
++| Thunder     | 40.86 fps  | 14.07 fps    | 10.74 fps     | 6.45 fps      |
++| Foam        | 14.34 fps  | 4.38 fps     | 2.51 fps      | 1.17 fps      |
++| BulletTorso | 18.30 fps  | 7.39 fps     | 6.09 fps      | 3.82 fps      |
+ 
+-| Dataset     | No Shadows | 2x2 Packets | 4x4 Packets | 8x8 Packets |
+-|-------------|------------|-------------|-------------|-------------|
+-| Cylinder    | 100.20     | 14.91       | 10.47       | 5.34        |
+-| JP8         | 99.88      | 16.31       | 12.21       | 6.65        |
+-| Bullet      | 126.93     | 19.55       | 13.69       | 6.56        |
+-| Thunder     | 40.86      | 14.07       | 10.74       | 6.45        |
+-| Foam        | 14.34      | 4.38        | 2.51        | 1.17        |
+-| BulletTorso | 18.30      | 7.39        | 6.09        | 3.82        |
++The performance degradation ranges from a factor of 2.42 (for 2x2 packets) to 19.35 (for 8x8 packets) [S2].
+ 
+-**Strengths and Limitations**
+-*   **Strengths:** Supports soft shadows with minimal code changes to existing ray casting pipelines [S1]. Performance degradation is sublinear, allowing for interactive frame rates with small packets (e.g., $2 \times 2$) [S1].
+-*   **Limitations:** Performance is highly dependent on ray coherence [S1]. Large packets ($8 \times 8$) can result in significant frame rate drops, with degradation factors ranging from 2.42 (for $2 \times 2$ packets) to 19.35 (for $8 \times 8$ packets) [S1].
++**Strengths and Limitations:**
++- **Strengths:** Integrates easily into ray tracing-based visualization systems; provides smooth, realistic shadows; performance impact is sublinear in the number of shadow rays; user-controllable quality/performance trade-off [S1, S2].
++- **Limitations:** Performance is highly dependent on ray coherence; large packets can significantly reduce frame rates; not suitable for real-time applications requiring high frame rates with large shadow packets [S2].
+ 
+-**When to Use**
+-*   Use when soft shadows are required and interactive performance is critical [S1].
+-*   Use small packet sizes ($2 \times 2$) for high performance, larger sizes ($4 \times 4$ or $8 \times 8$) for higher quality if performance allows [S1].
++**When to Use:**
++- Use when soft shadows are needed for visual clarity in particle-based simulations and interactive performance is acceptable with moderate packet sizes (e.g., 2x2 or 4x4) [S1, S2].
++- Avoid when high frame rates are critical and large shadow packets are required, or when ray coherence is low [S2].
+ 
+ ## Background
+-This method was introduced in the context of interactive visualization environments to support non-local effects like shadows, which were previously omitted for performance reasons [S1]. It extends basic ray casting by leveraging the coherence of rays to maintain interactivity even when tracing multiple shadow rays per pixel [S1].
++**Origin:**
++The method was introduced in the paper "A Coherent Grid Traversal Approach to Visualizing Particle-Based Simulation Data" by Thiago Ize et al. [S1, S2]. The paper presents a modified Coherent Grid Traversal (CGT) algorithm for efficient visualization of particle-based data and extends it to support soft shadows via ray packets [S1, S2].
++
++**History and Development:**
++The work builds on previous research in coherent ray tracing and grid traversal for particle visualization [S1]. The specific technique of using ray packets for soft shadows leverages the coherence of shadow rays sharing a common origin to maintain traversal efficiency [S1, S2].
++
++**Applications:**
++The method is used in interactive visualization systems for particle-based simulation data, such as fluid dynamics and molecular dynamics simulations, where soft shadows provide important visual cues about object positioning and depth [S1, S2].
+ 
+ ## Sources
+-[S1] A Coherent Grid Traversal Approach to Visualizing Particle ..., https://www.sci.utah.edu/~thiago/papers/pcgt_revised.pdf, fetched 2026-10-25+[S1] A coherent grid traversal approach to visualizing particle-based simulation data, https://ieeexplore.ieee.org/abstract/document/4293019/, fetched 2026-10-25
++[S2] A Coherent Grid Traversal Approach to Visualizing Particle ..., https://www.sci.utah.edu/~thiago/papers/pcgt_revised.pdf, fetched 2026-10-25

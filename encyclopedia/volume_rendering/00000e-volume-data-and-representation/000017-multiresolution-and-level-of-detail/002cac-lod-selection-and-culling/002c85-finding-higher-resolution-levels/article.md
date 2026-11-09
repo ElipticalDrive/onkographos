@@ -3,33 +3,29 @@
 Also called: Choosing a higher resolution given a node’s bitmap
 
 ## Overview
-This method determines the next higher resolution level in a residency octree traversal when the current node is only partially mapped at the current resolution. It solves the problem of efficiently skipping resolution levels that are fully unmapped or already processed, ensuring that the renderer accesses the finest available data that still contains partial occupancy information. It is distinct from sibling methods like [VoxelGrid Down Sample](1014-voxelgrid-down-sample.md) which generate data, or [LOD Selection and Culling](5338-lod-selection-and-culling.md) which make final rendering decisions; this method is a specific bitwise lookup operation used during hierarchical traversal to find the next candidate resolution index.
+This method finds the next higher resolution level in a residency octree traversal where a node is partially mapped [S1, unofficial]. It returns the index of the finest available resolution level strictly higher than a given resolution index, based on a node's occupancy bitmap [S1, unofficial]. It differs from sibling methods that generate data or make final rendering decisions by performing a specific bitwise lookup during hierarchical traversal [S1, unofficial].
 
 ## How it works
-The algorithm operates on a bitmap representing the resolution levels in which a specific octree node is partially mapped. It takes the current resolution index and returns the index of the next higher resolution (finer detail) where the node is partially mapped.
-
 **Inputs and Outputs:**
-*   `partiallyMapped`: A bitmask where the $j$-th bit is set to 1 if the node is partially mapped at resolution level $j$, and 0 otherwise.
-*   `resolution`: The integer index of the resolution level last tested.
-*   **Output**: The integer index of the next higher resolution level, or a special value `NONE` if no higher partially mapped resolution exists.
+*   `partiallyMapped`: A bitmask where the $j$-th bit is set to 1 if the node is partially mapped at resolution level $j$, and 0 otherwise [S1, unofficial].
+*   `resolution`: The integer index of the resolution level last tested [S1, unofficial].
+*   **Output**: The integer index of the next higher resolution level, or a special value `NONE` if no higher partially mapped resolution exists [S1, unofficial].
 
 **Data Structures:**
-*   **Resolution Indexing**: Resolution levels are ordered such that index 0 represents the highest resolution (finest detail) and index $k$ represents the lowest resolution (coarsest detail) [S1, unofficial]. Consequently, "higher resolution" corresponds to a lower numerical index.
-*   **Bitmask**: The `partiallyMapped` variable is an integer of fixed bit-width `BIT_WIDTH`, sufficient to cover all possible resolution levels in the hierarchy.
+*   **Resolution Indexing**: Resolution levels are ordered from 0 (highest) to $k$ (lowest) [S1, unofficial]. Consequently, "higher resolution" corresponds to a lower numerical index [S1, unofficial].
+*   **Bitmask**: The `partiallyMapped` variable is an integer of fixed bit-width `BIT_WIDTH`, sufficient to cover all possible resolution levels in the hierarchy [S1, unofficial].
 
 **Steps:**
-1.  **Mask Generation**: Compute a mask `higher` that isolates bits corresponding to resolution levels strictly higher than the current `resolution` index. This is done by performing a bitwise AND between `partiallyMapped` and a precomputed mask `getHigherResolutionsMask(resolution)`. The function `getHigherResolutionsMask(resolution)` returns a bitmask with 1s in all positions corresponding to indices $0$ to `resolution` - 1, and 0s elsewhere [S1, unofficial].
-2.  **Empty Check**: If the resulting `higher` mask is 0, it means the node is not partially mapped in any resolution level higher than the current one. Return `NONE` [S1, unofficial].
-3.  **Index Extraction**: If `higher` is non-zero, the index of the next higher resolution is the position of the first leading one-bit in `higher`. Since index 0 is the highest resolution, the "first" leading bit (most significant bit) corresponds to the finest available resolution [S1, unofficial].
+1.  **Mask Generation**: Compute a mask `higher` by performing a bitwise AND between `partiallyMapped` and a precomputed mask that isolates bits corresponding to resolution levels strictly higher than the given `resolution` index [S1, unofficial].
+2.  **Empty Check**: If the resulting `higher` mask is 0, it means the node is not partially mapped in any resolution level higher than the current one [S1, unofficial]. Return `NONE` [S1, unofficial].
+3.  **Index Extraction**: If `higher` is non-zero, the index of the next higher resolution is the position of the first leading one-bit in `higher` [S1, unofficial].
 
 **Formulas:**
 If the hardware instruction `firstLeadingBit` is unavailable, the index $i$ of the first leading one-bit of an integer $x$ can be computed using the `countLeadingZeros` function:
-
 $$ i = \text{BIT\_WIDTH} - 1 - \text{countLeadingZeros}(x) $$
-
 where:
-*   $i$ is the index of the first leading one-bit.
-*   $\text{BIT\_WIDTH}$ is the total number of bits in the integer type of $x$.
+*   $i$ is the index of the first leading one-bit [S1, unofficial].
+*   $\text{BIT\_WIDTH}$ is the total number of bits in the integer type of $x$ [S1, unofficial].
 *   $\text{countLeadingZeros}(x)$ returns the number of zero bits preceding the most significant one-bit in $x$ [S1, unofficial].
 
 **Pseudocode:**
@@ -50,12 +46,8 @@ def find_higher_resolution(partially_mapped: int, resolution: int, bit_width: in
     """
     # Step 1: Create a mask for all resolutions strictly higher than 'resolution'.
     # Since index 0 is highest, higher resolutions have indices < resolution.
-    # We create a mask with 1s in positions 0 to resolution-1.
-    # Example: if resolution=3, we want bits 0,1,2 set.
-    # (1 << resolution) - 1 creates a mask with 'resolution' ones at the LSB.
+    # (1 << resolution) - 1 creates a mask with 1s at positions 0 to resolution-1.
     higher_mask = (1 << resolution) - 1
-    
-    # Apply the mask to the partially mapped bits
     higher = partially_mapped & higher_mask
     
     # Step 2: Check if any higher resolution is partially mapped
@@ -63,61 +55,31 @@ def find_higher_resolution(partially_mapped: int, resolution: int, bit_width: in
         return -1  # NONE
         
     # Step 3: Find the index of the first leading one-bit.
-    # This corresponds to the smallest index (highest resolution) present in 'higher'.
-    
-    # Method A: Using hardware intrinsic if available
-    # i = firstLeadingBit(higher)
-    
-    # Method B: Using countLeadingZeros (portable fallback)
-    # countLeadingZeros returns the number of zeros before the first 1.
-    # For a 32-bit integer, if the first 1 is at bit 31 (MSB), countLeadingZeros is 0.
-    # Index = BIT_WIDTH - 1 - countLeadingZeros
-    leading_zeros = countLeadingZeros(higher)
+    # Using the portable fallback formula from the sources [S1, unofficial].
+    # countLeadingZeros(x) for a fixed width W is W - x.bit_length() for x > 0.
+    leading_zeros = bit_width - higher.bit_length()
     i = bit_width - 1 - leading_zeros
     
     return i
-
-def countLeadingZeros(x: int) -> int:
-    """
-    Returns the number of zero bits preceding the most significant one-bit.
-    Assumes x > 0.
-    """
-    if x == 0:
-        return 0 # Undefined behavior for 0, but handled by caller check
-    # Implementation depends on language/hardware. 
-    # In Python, this can be simulated:
-    return (x.bit_length() - 1) # This is actually MSB position from LSB. 
-    # Wait, countLeadingZeros is from MSB. 
-    # For a 32-bit int:
-    # If x=1 (0...01), MSB pos is 0. Leading zeros = 31.
-    # If x=2 (0...10), MSB pos is 1. Leading zeros = 30.
-    # Formula: i = BIT_WIDTH - 1 - clz.
-    # If i=0, clz = BIT_WIDTH - 1.
-    # If i=31, clz = 0.
-    # bit_length() gives the position of the highest 1 bit + 1.
-    # e.g. 1 (1) -> bl=1. 2 (10) -> bl=2.
-    # clz = BIT_WIDTH - bit_length(x)
-    return bit_width - x.bit_length()
 ```
 
 **Parameters:**
-*   `bit_width`: Typically 32 or 64, depending on the system architecture and the maximum depth of the octree. Not given in the sources.
+*   `bit_width`: The bit-width of the integer type used for the mask [S1, unofficial]. Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-*   **Zero Mask**: If `higher` is 0, the algorithm must return `NONE`. Failing to check this leads to undefined behavior when computing leading zeros on a zero value [S1, unofficial].
-*   **Resolution Ordering**: The algorithm relies on the convention that resolution index 0 is the highest resolution. If the hierarchy is indexed in reverse (0 = lowest), the mask generation and leading bit interpretation must be inverted [S1, unofficial].
-*   **Hardware Support**: The `firstLeadingBit` instruction is not available on all platforms. The fallback using `countLeadingZeros` must be implemented correctly, accounting for the specific integer width [S1, unofficial].
+*   **Zero Mask**: If `higher` is 0, the algorithm must return `NONE` [S1, unofficial].
+*   **Resolution Ordering**: The algorithm relies on the convention that resolution index 0 is the highest resolution [S1, unofficial].
+*   **Hardware Support**: The `firstLeadingBit` instruction is not available on all platforms, requiring the `countLeadingZeros` fallback [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity**: $O(1)$ assuming hardware support for bitwise operations and leading zero counting. With software fallback, it remains $O(1)$ but with a higher constant factor.
-*   **Memory Complexity**: $O(1)$ auxiliary space.
-*   **Strengths**: Extremely fast bitwise operation suitable for real-time traversal. Avoids iterating through resolution levels.
-*   **Limitations**: Requires the `partiallyMapped` bitmap to be precomputed and maintained. Relies on specific bit-width assumptions.
-*   **When to use**: During residency octree traversal when determining the next level of detail to sample.
-*   **When not to use**: When the hierarchy is not based on a fixed set of resolution levels indexed by integers, or when the "partially mapped" status is not tracked via a bitmap.
+*   **Time and Memory Complexity**: Not given in the sources.
+*   **Strengths**: Extremely fast bitwise operation suitable for real-time traversal [G].
+*   **Limitations**: Requires the `partiallyMapped` bitmap to be precomputed and maintained [S1, unofficial].
+*   **When to use**: During residency octree traversal when determining the next level of detail to sample [S1, unofficial].
+*   **When not to use**: When the hierarchy is not based on a fixed set of resolution levels indexed by integers, or when the "partially mapped" status is not tracked via a bitmap [G].
 
 ## Background
-This method is described in the context of scalable web-based volume rendering of large biomedical datasets. It is part of a residency octree traversal algorithm designed to efficiently manage memory and rendering quality by dynamically selecting resolution levels based on partial occupancy [S1, unofficial].
+This method is described in the context of scalable web-based volume rendering of large biomedical datasets [S1, unofficial]. It is part of a residency octree traversal algorithm designed to dynamically select resolution levels based on partial occupancy [S1, unofficial].
 
 ## Sources
 [S1] Skalierbares Webbasiertes Volume Rendering großer biomedizinischer Datensätze, https://doi.org/10.34726/hss.2023.106203, fetched 2026-10-26 (unofficial)

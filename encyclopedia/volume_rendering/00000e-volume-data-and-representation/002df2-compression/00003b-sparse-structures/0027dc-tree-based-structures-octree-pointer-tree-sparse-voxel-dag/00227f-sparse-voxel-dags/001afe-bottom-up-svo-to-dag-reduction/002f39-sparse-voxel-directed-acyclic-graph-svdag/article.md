@@ -1,12 +1,12 @@
 # Sparse Voxel Directed Acyclic Graph (SVDAG)
-Also called: Common Subtrees Merge, HashDAG, Sparse Voxel Directed Acyclic Graph (SVDAG) with Common Subtrees Merge (CSM)
+Also called: Common Subtrees Merge, Sparse Voxel Directed Acyclic Graph (SVDAG) with Common Subtrees Merge (CSM)
 
 ## Overview
 A Sparse Voxel Directed Acyclic Graph (SVDAG) is a hierarchical data structure that transforms a Sparse Voxel Octree (SVO) into a Directed Acyclic Graph (DAG) by identifying identical subtrees and representing them as a single fully expanded instance, which is multi-referenced from parent nodes [S1][S3, unofficial][S4]. This reduces the number of nodes, particularly at leaf layers, achieving significant compression while enabling quick traversal during visualization [S2][S3, unofficial]. Unlike an SVO, which only encodes empty regions efficiently, the DAG additionally encodes identical regions of space by sharing pointers to identical subtrees [S3, unofficial]. It builds on [Bottom-up SVO to DAG Reduction](898-bottom-up-svo-to-dag-reduction.md) by explicitly storing pointers to enable this merging, distinguishing it from pointerless variants like PSVDAG [S2].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A Sparse Voxel Octree (SVO) or a raw voxel grid of resolution $N^3$, where $N \ge 2$ and $N = 2^m$ [S2][S3, unofficial]. The grid contains binary geometry (active/passive voxels) [S6, unofficial].
+*   **Input:** A Sparse Voxel Octree (SVO) or a raw voxel grid of resolution $N^3$, where $N \ge 2$ and $N = 2^m$ [S2][S3, unofficial]. The grid contains binary geometry (active/passive voxels) [S6].
 *   **Output:** A Sparse Voxel Directed Acyclic Graph (SVDAG) data structure [S1][S3, unofficial].
 
 **Data Structures:**
@@ -31,13 +31,13 @@ The SVDAG consists of two node types: Internal Nodes (INODE) and Leaf Nodes (LNO
 $$
 \begin{aligned}
 \text{SVDAG} &::= (n) \ \text{NODE} \\
-\text{NODE} &::= \text{INODE} \ | \ \text{LNODE} \\
+\text{NODE} &::= \text{INODE} \mid \text{LNODE} \\
 \text{INODE} &::= \text{CHNM} \ (p) \ \text{PTS} \\
 \text{LNODE} &::= \text{CHNM} \ (q) \\
 \text{CHNM} &::= (8) \ \text{HT} \\
 \text{PTS} &::= (1) \dots (8) \ \text{PT} \\
 \text{PT} &::= (r) \ \text{BIT} \\
-\text{HT} &::= \text{BIT} ::= "0" \ | \ "1"
+\text{HT} &::= \text{BIT} ::= "0" \mid "1"
 \end{aligned}
 $$
 Where juxtaposition denotes concatenation, $(n)$ denotes $n$ repetitions, and $(1)\dots(8)$ denotes 1 to 8 repetitions [S2].
@@ -56,26 +56,26 @@ The reduction algorithm proceeds from leaves upward, searching the tree for comm
         *   Create a Leaf Node (LNODE).
         *   Set `IsLeaf = true`.
         *   Set `Value = grid[0, 0, 0]`.
-        *   Assign color based on homogeneity (e.g., green if homogeneous, red if not) [S6, unofficial].
-        *   Generate a unique string key for the current grid section using `GenerateSubtreeKey(grid)` [S6, unofficial].
-        *   **Cache Check:** If `subtreeCache.TryGetValue(key, out VoxelNode existingNode)` returns true, return `existingNode` immediately to merge identical subtrees [S6, unofficial].
-        *   **Cache Insertion:** Add the new node to the cache: `subtreeCache[key] = node` [S6, unofficial].
-        *   Return the created or cached node [S6, unofficial].
+        *   Assign color based on homogeneity (e.g., green if homogeneous, red if not) [S6].
+        *   Generate a unique string key for the current grid section using `GenerateSubtreeKey(grid)` [S6].
+        *   **Cache Check:** If `subtreeCache.TryGetValue(key, out VoxelNode existingNode)` returns true, return `existingNode` immediately to merge identical subtrees [S6].
+        *   **Cache Insertion:** Add the new node to the cache: `subtreeCache[key] = node` [S6].
+        *   Return the created or cached node [S6].
     *   **Recursive Step (Internal Node):**
-        *   Create an Internal Node (INODE) with `IsLeaf = false` and color blue [S6, unofficial].
+        *   Create an Internal Node (INODE) with `IsLeaf = false` and color blue [S6].
         *   Initialize `CHNM` to 0.
         *   Initialize `PTS` as an empty list.
         *   Loop `i` from 0 to 7:
-            *   Extract the octant using `GetOctant(grid, i, newSize)` [S6, unofficial].
-                *   Calculate start indices: `xStart = (i & 1) * size`, `yStart = (i & 2) * size / 2`, `zStart = (i & 4) * size / 4` [S6, unofficial].
-            *   Recursively call `BuildDAG(octant, depth - 1)` to get `childNode` [S6, unofficial].
+            *   Extract the octant using `GetOctant(grid, i, newSize)` [S6].
+                *   Calculate start indices: `xStart = (i & 1) * size`, `yStart = (i & 2) * size / 2`, `zStart = (i & 4) * size / 4` [S6].
+            *   Recursively call `BuildDAG(octant, depth - 1)` to get `childNode` [S6].
             *   If `childNode` is not null (i.e., the octant is active):
                 *   Set the $i$-th bit of `CHNM` to 1 [S2].
-                *   Append `childNode` to `PTS` [S1].
-        *   **Cache Check:** Generate a key for the current internal node (based on CHNM and PTS content) [S6, unofficial].
-        *   If the key exists in `subtreeCache`, return the cached node [S6, unofficial].
-        *   Add the new INODE to `subtreeCache` [S6, unofficial].
-        *   Return the node [S6, unofficial].
+                *   Add `childNode` to `PTS`.
+        *   **Cache Check:** Generate a key for the current internal node (based on CHNM and PTS content) [S6].
+        *   If the key exists in `subtreeCache`, return the cached node [S6].
+        *   Add the new INODE to `subtreeCache` [S6].
+        *   Return the node [S6].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -89,7 +89,7 @@ class VoxelNode:
         self.CHNM = chnm
 
 def is_homogeneous(grid):
-    if not grid:
+    if not grid or grid.size == 0:
         return False
     first_value = grid[0, 0, 0]
     for x in range(grid.shape[0]):
@@ -101,15 +101,14 @@ def is_homogeneous(grid):
 
 def get_octant(grid, octant_index, size):
     # Extract sub-grid based on octant index (0-7)
-    # xStart = (octant_index & 1) * size
-    # yStart = (octant_index & 2) * size / 2
-    # zStart = (octant_index & 4) * size / 4
-    # Return sub-grid slice
-    pass
+    x_off = (octant_index & 1) * size
+    y_off = (octant_index & 2) * size // 2
+    z_off = (octant_index & 4) * size // 4
+    return grid[x_off:x_off+size, y_off:y_off+size, z_off:z_off+size]
 
 def generate_subtree_key(grid, chnm, children):
     # Create a unique identifier for the subtree content
-    # Implementation details not provided in sources [S6, unofficial]
+    # Implementation details not provided in sources [S6]
     pass
 
 def build_dag(grid, depth, subtree_cache):
@@ -173,8 +172,8 @@ def build_dag(grid, depth, subtree_cache):
 
 **Edge Cases and Pitfalls:**
 *   **Memory Layout:** Identical pointers exist because nodes can have multiple parents. Rearranging nodes could potentially share pointers and amortize their cost, but this is an open issue [S4].
-*   **Attributes:** Adding extra bits of information (e.g., color, material) to leaf nodes reduces the number of identical elements, abolishing compression because previously identical leaves become unique [S5, unofficial][S7]. Materials hurt DAGs significantly; subtrees only match if shape and material are identical [S7].
-*   **Subtree Key Generation:** The method relies on `GenerateSubtreeKey(grid)` to create a unique identifier. The implementation is critical for the caching mechanism but is not provided in the sources [S6, unofficial].
+*   **Attributes:** Adding extra bits of information (e.g., color, material) to leaf nodes reduces the number of identical elements, abolishing compression because previously identical leaves become unique [S5, unofficial][S7, unofficial]. Materials hurt DAGs significantly; subtrees only match if shape and material are identical [S7, unofficial].
+*   **Subtree Key Generation:** The method relies on `GenerateSubtreeKey(grid)` to create a unique identifier. The implementation is critical for the caching mechanism but is not provided in the sources [S6].
 *   **Passive Octants:** A leaf node with a $(00000000)_2$ configuration does not exist, as it represents a passive octant with no separate node being created [S1].
 
 ## Subtopics
@@ -193,13 +192,13 @@ Compresses the 8-octant child node mask by replacing a fixed 32-bit representati
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-*   **Node Reduction:** The CSM reduces node counts by one to three orders of magnitude [S3, unofficial][S7]. For example, the CRYSPONZA scene achieved a 576x reduction in node count at the highest built resolution, while the HAIRBALL scene achieved a 28x reduction despite lacking obvious regularities [S3, unofficial].
+*   **Node Reduction:** The CSM reduces node counts by one to three orders of magnitude [S3, unofficial][S7, unofficial]. For example, the CRYSPONZA scene achieved a 576x reduction in node count at the highest built resolution, while the HAIRBALL scene achieved a 28x reduction despite lacking obvious regularities [S3, unofficial].
 *   **Memory Consumption:** The DAG consumes 8 to 36 bytes per node [S3, unofficial]. It reduces total memory consumption by up to 38x compared to ESVO and up to 26x compared to a minimal pointer-less SVO [S3, unofficial].
-*   **Geometry Cost:** Geometry alone costs 0.08–2.24 bits per Voxel across test scenes [S7].
+*   **Geometry Cost:** Geometry alone costs 0.08–2.24 bits per Voxel across test scenes [S7, unofficial].
 
 **Measured Performance:**
-*   **EPICCITADEL Scene (128K³, 19 billion voxels):** The SVDAG stores the scene in 945 MB of GPU memory. An SVO would require 5.1 GB (excluding pointers) [S3, unofficial][S7].
-*   **Ray Tracing:** On an NVIDIA GTX680, ray tracing in the sparse voxel DAG achieves 170 MRays/sec for ambient occlusion and 240 MRays/sec for shadows [S3, unofficial][S7].
+*   **EPICCITADEL Scene (128K³, 19 billion voxels):** The SVDAG stores the scene in 945 MB of GPU memory. An SVO would require 5.1 GB (excluding pointers) [S3, unofficial][S7, unofficial].
+*   **Ray Tracing:** On an NVIDIA GTX680, ray tracing in the sparse voxel DAG achieves 170 MRays/sec for ambient occlusion and 240 MRays/sec for shadows [S3, unofficial][S7, unofficial].
 *   **Build Time:** Building the DAG for CRYSPONZA at 512³ takes 8.4ms total (1.9ms sorting). At 8K³, it takes 4.5s total (0.6s sorting). For HAIRBALL at 8K³, it takes 40.6s total (4.5s sorting) [S3, unofficial].
 
 **Scaling:**
@@ -208,12 +207,12 @@ Compresses the 8-octant child node mask by replacing a fixed 32-bit representati
 
 **Strengths and Limitations:**
 *   **Strengths:** Lossless compression without decompression overhead; efficient traversal; supports real-time rendering and interactive editing [S2, S4].
-*   **Limitations:** Adding attributes (color, material) to leaves reduces compression significantly [S5, unofficial][S7]. Memory layout optimization (sharing pointers among multiple parents) is not fully optimized [S4].
+*   **Limitations:** Adding attributes (color, material) to leaves reduces compression significantly [S5, unofficial][S7, unofficial]. Memory layout optimization (sharing pointers among multiple parents) is not fully optimized [S4].
 
 **When to Use:**
-*   Use for high-resolution voxel geometry where sparsity and repetitive structures are present.
-*   Use when real-time traversal and ray tracing are required.
-*   Do not use if the scene has high attribute variation that prevents subtree merging, or if memory layout optimization is critical and not implemented.
+*   Use for high-resolution voxel geometry where sparsity and repetitive structures are present [S4].
+*   Use when real-time traversal and ray tracing are required [S2][S4].
+*   Do not use if the scene has high attribute variation that prevents subtree merging, or if memory layout optimization is critical and not implemented [S5, unofficial][S7, unofficial][S4].
 
 ## Background
 **Origin:**
@@ -227,7 +226,7 @@ High Resolution Sparse Voxel Directed Acyclic Graphs (SVDAGs) were proposed by V
 
 **Usage:**
 *   Used for real-time ray tracing of hard and soft shadows, ambient occlusion, and primary rays in extremely high-resolution voxel scenes [S3, unofficial].
-*   Used in interactive editing of voxel models, with GPU editing on an RTX 4080 placing spheres of 1140–1820 Voxel radius in 15–18 ms [S7].
+*   Used in interactive editing of voxel models, with GPU editing on an RTX 4080 placing spheres of 1140–1820 Voxel radius in 15–18 ms [S7, unofficial].
 
 ## Sources
 [S1] Parameter Optimization in Sparse Voxel DAGs for Efficient Geometry Representation of Voxelized 3D Scenes, https://doi.org/10.12700/aph.22.7.2025.7.11, fetched 2026-10-27
@@ -235,6 +234,6 @@ High Resolution Sparse Voxel Directed Acyclic Graphs (SVDAGs) were proposed by V
 [S3] PDF High Resolution Sparse Voxel DAGs - Chalmers, https://www.cse.chalmers.se/~uffe/HighResolutionSparseVoxelDAGs.pdf, fetched 2026-10-27 (unofficial)
 [S4] (PDF) High resolution sparse voxel DAGs - ResearchGate, https://www.researchgate.net/publication/262367808_High_resolution_sparse_voxel_DAGs, fetched 2026-10-27
 [S5] PDF On sparse voxel DAGs and memory efficient compression of surface ..., https://research.chalmers.se/publication/528795/file/528795_Fulltext.pdf, fetched 2026-10-27 (unofficial)
-[S6] Building a High-Performance Voxel Engine in Unity: A Step ..., https://medium.com/@adamy1558/building-a-high-performance-voxel-engine-in-unity-a-step-by-step-guide-part-6-high-resolution-e0217efd56d2, fetched 2026-10-27 (unofficial)
-[S7] https://github.com/theHimanshuShekhar/bhayanakvoxel/blob/research/voxel-data-structures/docs/research/voxel-data-structures.md, https://github.com/theHimanshuShekhar/bhayanakvoxel/blob/research/voxel-data-structures/docs/research/voxel-data-structures.md, fetched 2026-10-28
+[S6] Building a High-Performance Voxel Engine in Unity: A Step ..., https://medium.com/@adamy1558/building-a-high-performance-voxel-engine-in-unity-a-step-by-step-guide-part-6-high-resolution-e0217efd56d2, fetched 2026-10-27
+[S7] https://github.com/theHimanshuShekhar/bhayanakvoxel/blob/research/voxel-data-structures/docs/research/voxel-data-structures.md, https://github.com/theHimanshuShekhar/bhayanakvoxel/blob/research/voxel-data-structures/docs/research/voxel-data-structures.md, fetched 2026-10-28 (unofficial)
 [S8] PSVDAG: Compact Voxelized Representation of 3D Scenes Using Pointerless Sparse Voxel Directed Acyclic Graphs, https://doi.org/10.31577/cai_2020_3_587, fetched 2026-10-26

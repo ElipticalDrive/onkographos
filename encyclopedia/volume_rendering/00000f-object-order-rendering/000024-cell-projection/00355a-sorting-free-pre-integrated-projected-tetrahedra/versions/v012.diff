@@ -1,0 +1,227 @@
+--- v011.md
++++ v012.md
+@@ -4,141 +4,110 @@
+ 
+ ## Overview
+-Sorting-free Pre-integrated Projected Tetrahedra (PBVR) is a volume rendering technique for irregular datasets that eliminates the need for global visibility sorting by treating rendering as a stochastic process [S1]. Unlike conventional Projected Tetrahedra which requires back-to-front compositing, PBVR achieves semi-transparency by repeating the rasterization of projected tetrahedra multiple times, discarding fragments based on their opacity [S1]. It solves the scalability issues of sorting-based methods and the visible footprint artifacts of particle-based methods by using projected tetrahedra with pre-integration [S1].
++Sorting-free Pre-integrated Projected Tetrahedra (PBVR) is a volume rendering technique for irregular datasets that eliminates the need for global visibility sorting by treating rendering as a stochastic process [S1]. Unlike conventional projected tetrahedra which require back-to-front compositing, PBVR controls fragment rendering probabilistically based on opacity, allowing correct semi-transparent image synthesis without explicit cell ordering [S1]. It improves upon particle-based methods by avoiding visible footprints and upon sorting-based methods by removing scalability bottlenecks associated with large-scale irregular volumes [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** An irregular volume dataset decomposed into tetrahedral cells. Each cell has 3D vertex positions and scalar field values (density $\rho$). A transfer function mapping density to particle luminosity $c$ and extinction coefficient $\rho$ is required.
+-*   **Output:** A rendered image representing the ensemble average of brightness values.
++**Inputs:** Irregular volume dataset decomposed into tetrahedral cells; transfer function mapping scalar values to density ($\rho$) and luminosity ($c$); camera parameters.
++**Outputs:** Final image brightness/color.
+ 
+ **Data Structures:**
+-*   **Tetrahedral Mesh:** A list of tetrahedra, each defined by 4 vertices $(v_0, v_1, v_2, v_3)$ and associated scalar values.
+-*   **Pre-integration Texture:** A 2D texture storing the integrated opacity $\alpha$ as a function of average differential opacity $\tau_{avg}$ and segment length $l$, as defined in [Tetrahedral representation and traversal](4396-tetrahedral-representation-and-traversal.md).
++*   **Tetrahedral Mesh:** List of tetrahedra, each defined by 4 vertices and associated scalar values at vertices.
++*   **Projected Polygons:** For each tetrahedron, the 2D screen-space projection is computed. The projected edges divide the image plane into polygons. Each polygon corresponds to the projection of a specific ray segment passing through the tetrahedron [S1][S4, book].
++*   **Segment Parameters:** For each polygon, the average differential opacity (extinction coefficient) $\tau_{avg}$ and the segment length $l$ are computed. $\tau_{avg}$ is interpolated from cell data; $l$ is interpolated from vertex depths [S1][S4, book].
+ 
+-**Mathematical Model:**
+-The method uses the density emitter model, assuming the number of particles in a volume follows a Poisson distribution [S1].
+-*   **Opacity:** The opacity $\tau$ for a ray segment of length $\Delta t$ with particle density $\rho$ (particles per unit volume) and effective cross-sectional area $\pi r^2$ is:
+-    $$ \tau = 1 - e^{-\pi r^2 \rho \Delta t} $$
+-    In the context of projected tetrahedra, this is approximated using the pre-integrated opacity lookup based on the interpolated $\tau_{avg}$ and projected segment length $l$ [S1, S4].
+-*   **Brightness:** The brightness $B_k$ of a segment $k$ with constant luminosity $c_k$ and opacity $\tau_k$ is:
+-    $$ B_k = c_k (1 - e^{-\tau_k}) $$
+-    Or equivalently, using the particle count model where $\pi r^2 \rho \Delta t$ represents the expected number of particles:
+-    $$ B_k = c_k (1 - e^{-\rho \cdot \text{area} \cdot \text{length}}) $$ [S1].
++**Core Optical Model:**
++The method uses the density emitter model, assuming the number of particles in a unit volume follows a Poisson distribution [S1]. The opacity $\alpha$ for a ray segment of length $l$ with average density $\rho$ is derived from this distribution:
++$$ \alpha = 1 - e^{-\rho \cdot \text{area} \cdot l} $$
++In the context of projected tetrahedra, the "area" term is absorbed into the density definition or normalized, such that the effective opacity depends on $\rho$ and $l$ [S1]. Specifically, the text defines $\pi r^2 \rho \Delta t$ as the number of particles in a segment, where $\Delta t$ is the segment length [S1].
+ 
+ **Algorithm Steps:**
+-1.  **Pre-computation:** Construct the pre-integration texture for opacity lookup based on the transfer function [S1, S4].
+-2.  **Projection:** For each tetrahedron, project its 4 vertices to screen space.
+-3.  **Subdivision:** Subdivide the projected tetrahedron into polygons corresponding to the projections of its faces. For each pixel covered by a polygon, determine the segment length $l$ within the tetrahedron. For orthogonal projection, $l$ is interpolated linearly; for perspective, it is approximated or computed per-pixel [S4].
+-4.  **Opacity Lookup:** Calculate the average differential opacity $\tau_{avg}$ for the segment. Use the pre-integration texture to look up the integrated opacity $\alpha$ for coordinates $(\tau_{avg}, l)$ [S1, S4].
+-5.  **Stochastic Rasterization (Repetition):** Repeat the following $N$ times (where $N$ is the repetition level):
+-    a.  **Fragment Generation:** Rasterize the projected tetrahedra.
+-    b.  **Probabilistic Discarding:** For each fragment, generate a random number $r \in [0, 1]$. If $r > \alpha$, discard the fragment. Otherwise, keep it.
+-    c.  **Color Assignment:** If kept, assign the fragment a color/brightness value proportional to the luminosity $c$ of the tetrahedron at that point.
+-    d.  **Accumulation:** Add the fragment's color to a running sum buffer for that pixel.
+-6.  **Final Image:** Divide the accumulated sum buffer by $N$ to obtain the final image brightness [S1].
++1.  **Pre-integration:** Compute a 2D texture lookup table for opacity $\alpha(\tau_{avg}, l)$ using the formula $\alpha = 1 - \exp(-\tau_{avg} l)$ to avoid Mach bands from linear interpolation [S1][S4, book].
++2.  **Projection:** Project all tetrahedral vertices to screen space. Generate the set of polygons representing the cell projections.
++3.  **Rasterization and Stochastic Sampling:** For each polygon:
++    a.  Rasterize the polygon.
++    b.  For each fragment, compute the local opacity $\alpha$ using the pre-integrated texture lookup with coordinates $(\tau_{avg}, l)$ [S1].
++    c.  Generate a random number $r \in [0, 1]$.
++    d.  If $r > \alpha$, discard the fragment.
++    e.  If $r \le \alpha$, render the fragment with its associated luminosity/color [S1].
++4.  **Repetition:** Repeat steps 3a-3e for $N$ repetitions (repetition level) [S1].
++5.  **Accumulation:** Average the pixel values from all $N$ repetitions to obtain the final brightness [S1].
+ 
+ **Pseudocode:**
+-
+ ```python
+-def render_pbvr(tetrahedra, transfer_function, image_width, image_height, repetition_level):
+-    """
+-    Renders an irregular volume using Sorting-free Pre-integrated Projected Tetrahedra.
++def render_pbvr(tetrahedra, transfer_function, camera, num_repetitions, image_width, image_height):
++    # Initialize accumulator image
++    accumulator = zeros((image_height, image_width, 3))
+     
+-    Args:
+-        tetrahedra: List of Tetrahedron objects.
+-        transfer_function: Function mapping density -> (luminosity c, density rho).
+-        image_width: Width of the output image.
+-        image_height: Height of the output image.
+-        repetition_level: Number of stochastic repetitions N.
++    # Pre-compute opacity lookup table if not already done
++    # opacities = preintegrate_opacity_table() 
++    
++    for rep in range(num_repetitions):
++        # Initialize current frame image
++        current_frame = zeros((image_height, image_width, 3))
+         
+-    Returns:
+-        Final rendered image buffer.
+-    """
+-    # Initialize accumulation buffer
+-    # Using float32 to prevent overflow during accumulation
+-    acc_buffer = zeros((image_height, image_width, 3), dtype=float32)
++        # Process each tetrahedron
++        for tet in tetrahedra:
++            # Project vertices to screen space
++            projected_vertices = project_vertices(tet.vertices, camera)
++            
++            # Generate polygons from projected edges
++            # This step involves clipping and decomposing the projected tetrahedron
++            # into convex polygons in screen space.
++            polygons = decompose_projected_tetrahedron(projected_vertices)
++            
++            for poly in polygons:
++                # Compute average density and segment length for the polygon
++                # These are interpolated from the tetrahedron's vertex data
++                avg_density = interpolate_density(poly, tet)
++                segment_length = interpolate_length(poly, tet)
++                
++                # Compute opacity using pre-integration or direct formula
++                # Using direct formula for clarity, though texture lookup is preferred
++                opacity = 1.0 - exp(-avg_density * segment_length)
++                
++                # Rasterize polygon
++                fragments = rasterize_polygon(poly)
++                
++                for frag in fragments:
++                    # Generate random number for stochastic sampling
++                    r = random_float(0.0, 1.0)
++                    
++                    # Stochastic acceptance/rejection
++                    if r <= opacity:
++                        # Get color/luminosity from transfer function
++                        color = transfer_function(avg_density)
++                        
++                        # Add to current frame (simple accumulation for averaging later)
++                        # Note: In hardware, this might be done via alpha blending 
++                        # if treating the stochastic event as an opaque object, 
++                        # but the source describes averaging pixel values.
++                        current_frame[frag.y, frag.x] += color
++        
++        # Accumulate results
++        accumulator += current_frame
+     
+-    # Pre-compute pre-integration texture if not already done
+-    # This is a helper step described in [S4] and implied in [S1]
+-    pre_int_tex = build_pre_integration_texture(transfer_function)
+-    
+-    # Project all tetrahedra to screen space once
+-    projected_tets = []
+-    for tet in tetrahedra:
+-        # Project vertices to screen space
+-        screen_verts = [project_to_screen(v) for v in tet.vertices]
+-        # Determine bounding box and polygons for rasterization
+-        # This involves splitting the projected tetrahedron into front/back face polygons
+-        # as per [Tetrahedral representation and traversal](4396-tetrahedral-representation-and-traversal.md)
+-        polygons = decompose_projected_tetrahedron(screen_verts, tet)
+-        projected_tets.append((tet, polygons))
+-        
+-    for rep in range(repetition_level):
+-        # Clear accumulation for this pass? No, we accumulate across reps.
+-        # But we need to rasterize each rep independently.
+-        # In a GPU implementation, this would be a render pass.
+-        
+-        for tet, polygons in projected_tets:
+-            for poly in polygons:
+-                # Rasterize polygon
+-                for pixel in poly.covered_pixels:
+-                    # 1. Calculate segment length l
+-                    # Interpolate l based on screen coordinates
+-                    l = interpolate_segment_length(poly, pixel)
+-                    
+-                    # 2. Calculate average differential opacity tau_avg
+-                    # Interpolate density from tetrahedron vertices
+-                    density = interpolate_density(tet, pixel)
+-                    tau_avg = transfer_function(density).rho # Density rho
+-                    
+-                    # 3. Lookup integrated opacity alpha
+-                    # alpha = 1 - exp(-tau_avg * l) approximated by texture lookup
+-                    alpha = pre_int_tex.lookup(tau_avg, l)
+-                    
+-                    # 4. Stochastic discard
+-                    r = random_float(0.0, 1.0)
+-                    if r <= alpha:
+-                        # 5. Calculate brightness/color
+-                        luminosity = transfer_function(density).c
+-                        # Brightness B = c * (1 - exp(-tau))
+-                        # Since alpha = 1 - exp(-tau), then (1 - exp(-tau)) = alpha
+-                        # However, the source [S1] defines brightness as c_k * (1 - e^{-rho * area * length})
+-                        # which is effectively c * alpha.
+-                        brightness = luminosity * alpha
+-                        
+-                        # 6. Accumulate
+-                        acc_buffer[pixel.y, pixel.x] += brightness
+-                        
+-    # Final average
+-    final_image = acc_buffer / repetition_level
++    # Average over repetitions
++    final_image = accumulator / num_repetitions
+     return final_image
+ ```
+ 
+ **Parameters:**
+-*   **Repetition Level ($N$):** The number of times the rasterization is repeated. Higher $N$ reduces noise but increases computation time. Typical values tested: 1, 25, 100, 144 [S1].
+-*   **Resolution:** Performance is heavily influenced by the number of pixels. 1024x1024 is a common test resolution [S1].
++*   **Repetition Level ($N$):** The number of times the rendering calculation is repeated. Higher $N$ reduces error but increases computation time. Typical values tested: 1, 25, 100, 144 [S1].
++*   **Resolution:** Image resolution (e.g., 1024x1024) affects the number of pixels and thus the total number of particles/samples [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Drastic Density Changes:** If the density function changes drastically, PBVR may generate an insufficient number of particles, leading to artifacts. In such cases, Sorting-free Projected Tetrahedra (SPT) or other methods might be preferred [S1].
+-*   **Memory Consumption:** PBVR is memory-consuming because the number of particles (and thus the computational load) increases with image resolution [S1].
+-*   **Noise:** Low repetition levels result in noisy images. The error decreases with $N$, but convergence is stochastic [S1].
+-*   **Complexity:** The basic brightness calculation without stochastic approximation is $O(n^2)$ if intermediate brightness values are considered. The stochastic approach reduces this to $O(n)$ per repetition, but requires $N$ repetitions [S1].
++*   **Drastic Density Changes:** PBVR may generate an insufficient number of particles when the density function changes drastically, leading to artifacts compared to sorting-based techniques like SPT [S1].
++*   **Memory Consumption:** Performance is greatly influenced by the number of pixels. High resolution increases memory consumption because it affects the number of particles processed [S1].
++*   **Convergence:** Low repetition levels result in noisy images. The error decreases with the number of repetitions [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot P \cdot C)$, where $N$ is the repetition level, $P$ is the number of pixels covered by the volume, and $C$ is the number of tetrahedra. The performance is greatly influenced by the number of pixels [S1].
+-*   **Memory Complexity:** Memory usage scales with the number of pixels and the number of particles. It is more memory-efficient than Hardware-Assisted Visibility Sorting (HAVS), which requires memory space for sorting cell faces about twice that for tetrahedral cells [S1].
+-*   **Measured Performance:** On an NVIDIA GeForce 9600GT, PBVR rendered ~10 million particles at 1024x1024 resolution in 25.7 milliseconds per repetition [S1]. On an Intel Core 2 Quad 2.83 GHz with NVIDIA GeForce GTX 280, it handled large-scale irregular volumes effectively [S1].
+-*   **Strengths:**
+-    *   No visibility sorting required, making it suitable for large-scale irregular volumes distributed across multiple nodes [S1].
+-    *   Avoids artifacts from insufficient k-buffer sizes associated with HAVS [S1].
+-    *   Avoids visible footprints of particles when the viewpoint is inside the volume, unlike PBVR (particle-based) [S1].
+-*   **Limitations:**
+-    *   Performance degrades with high image resolutions due to pixel count [S1].
+-    *   Stochastic noise requires high repetition levels for high-quality images, increasing render time [S1].
+-    *   Less effective than SPT for precipitous transfer functions [S1].
+-*   **When to Use:** Large-scale irregular volumes where visibility sorting is impractical or impossible, and when the transfer function is smooth.
+-*   **When Not to Use:** When high precision is needed for sharp density gradients (use SPT), or when memory is extremely constrained relative to resolution.
++*   **Time Complexity:** The basic brightness calculation without stochastic approximation is $O(n^2)$ if intermediate brightness values are considered [S1]. PBVR's performance is influenced by the number of cells and the number of pixels. It is memory-consuming as image resolution affects the number of particles [S1].
++*   **Measured Performance:** On an NVIDIA GeForce 9600GT, PBVR rendered ~10 million particles at 25.7 milliseconds per repetition with 1024x1024 resolution [S1].
++*   **Strengths:** No visibility sorting required, making it scalable for large-scale irregular volumes distributed across multiple nodes. Avoids artifacts from insufficient k-buffer sizes in hardware-assisted sorting. No visible footprints when the viewpoint is inside the volume (unlike particle-based methods) [S1].
++*   **Limitations:** High memory usage at high resolutions. Noisy images at low repetition levels. Less effective than sorting-based methods (SPT) for precipitous transfer functions [S1].
++*   **When to Use:** Large-scale irregular volumes where visibility sorting is impractical or impossible, and high resolution is not the primary constraint.
++*   **When Not to Use:** When precise visualization of sharp density gradients is required (SPT is better), or when memory is severely constrained at high resolutions [S1].
+ 
+ ## Background
+-Sorting-free Pre-integrated Projected Tetrahedra was introduced by [S1] to address the limitations of existing volume rendering techniques for large-scale irregular datasets. Conventional methods like Hardware-Assisted Visibility Sorting (HAVS) require significant memory and sorting overhead, while particle-based methods suffer from low image quality and visible footprints. PBVR combines the geometric accuracy of projected tetrahedra with a stochastic rendering approach to eliminate the need for sorting. It builds on the density emitter model and Poisson distribution assumptions for particle counts [S1].
++PBVR was introduced as a sorting-free technique for volume rendering of irregular volume datasets [S1]. It addresses the limitations of particle-based volume rendering (low image quality, visible footprints) and conventional projected tetrahedra (requirement for visibility sorting, scalability issues) [S1]. The method is based on the density emitter model and the Poisson distribution of particles [S1]. It was developed to handle large-scale simulation results (CSM and CFD) that are divided into multiple sub-volumes across computing nodes, where global visibility sorting is impractical [S1].
+ 
+ ## Sources

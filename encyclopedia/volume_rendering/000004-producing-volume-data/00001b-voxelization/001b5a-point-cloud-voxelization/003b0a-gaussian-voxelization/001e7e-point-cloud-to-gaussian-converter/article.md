@@ -3,118 +3,122 @@
 Also called: Point Cloud to Gaussian Ellipsoids
 
 ## Overview
-The Point Cloud to Gaussian Converter transforms a discrete set of 3D points into a volume representation composed of isotropic Gaussian ellipsoids, enabling differentiable volume rendering of point-based data [S1, unofficial]. It solves the problem of converting unstructured point clouds into a continuous density field suitable for ray marching, distinguishing itself from hard voxelization by using soft, probabilistic kernels defined by local point proximity [S1, unofficial]. Unlike the Mesh to Isotropic Gaussian Converter, which relies on mesh topology (edges), this method determines kernel scale based on the spatial distribution of neighboring points [S1, unofficial].
+The Point Cloud to Gaussian Converter transforms a discrete set of 3D points into a set of isotropic Gaussian ellipsoids suitable for volume rendering. It solves the problem of converting unstructured point data into a continuous volumetric representation by assigning a spatial covariance to each point based on local density. It differs from the Mesh to Isotropic Gaussian Converter by deriving the scale parameter from nearest-neighbor distances rather than connected edge lengths, and from 3D Gaussian Voxelization by focusing on the primitive generation phase rather than the grid mapping phase.
 
 ## How it works
-**Inputs:**
-- A point cloud $P = \{p_1, p_2, \dots, p_N\}$, where each $p_i \in \mathbb{R}^3$.
-- A target coverage rate $\zeta \in (0, 1)$, controlling the transparency/opacity of the kernels [S1, unofficial].
-- A neighbor count $m$, defining the number of nearest neighbors used to estimate local density [S1, unofficial].
-
-**Outputs:**
-- A list of Gaussian kernels, where each kernel $k$ is defined by its center position $c_k$ (the original point), its isotropic variance $\sigma_k$, and its covariance matrix $\Sigma_k$.
+**Inputs and Outputs:**
+*   **Input:** A point cloud $P = \{p_1, p_2, \dots, p_N\}$ where each $p_i \in \mathbb{R}^3$.
+*   **Output:** A set of $N$ Gaussian primitives $G_k = \{\mu_k, \Sigma_k, \alpha_k, F_k\}_{k=1}^N$. The mean $\mu_k$ is the point position $p_k$. The opacity $\alpha_k$ and feature vectors $F_k$ are typically inherited from the input point attributes or set to default values if not provided.
 
 **Data Structures:**
-- Each kernel $k$ stores:
-  - `center`: `vec3` (position $c_k$)
-  - `sigma`: `float` (variance $\sigma_k$)
-  - `covariance`: `mat3` (3x3 diagonal matrix $\Sigma_k$)
-
-**Steps:**
-1. For each point $p_i$ in the input cloud $P$:
-   a. Identify the $m$ nearest neighbor points from $P \setminus \{p_i\}$ using a spatial search structure (e.g., k-d tree or octree). Let this set be $N_i$.
-   b. Compute the distance $d_i$ to these neighbors. The source defines $d_k$ as "the distance to $m$ nearest points." In practice, this implies an aggregate distance metric. Given the formula uses $d_k/2$ as a radius-like term, $d_k$ is typically the average distance to the $m$ neighbors or the distance to the $m$-th nearest neighbor. Based on the mesh converter analogy (average edge length), we assume $d_i$ is the **average Euclidean distance** to the $m$ nearest neighbors [S1, unofficial].
-      $$ d_i = \frac{1}{m} \sum_{p_j \in N_i} \| p_i - p_j \| $$
-   c. Compute the variance $\sigma_i$ using the coverage rate $\zeta$:
-      $$ \sigma_i = \frac{(d_i/2)^2}{\log(1/\zeta)} $$
-   d. Construct the diagonal covariance matrix $\Sigma_i$:
-      $$ \Sigma_i = \begin{bmatrix} \sigma_i & 0 & 0 \\ 0 & \sigma_i & 0 \\ 0 & 0 & \sigma_i \end{bmatrix} $$
-   e. Store the kernel $(c_i = p_i, \sigma_i, \Sigma_i)$.
+*   **Point Cloud:** Array of $N$ 3D vectors.
+*   **Gaussian Primitives:** Array of $N$ structures containing:
+    *   $\mu_k$: `vec3` (position).
+    *   $\Sigma_k$: `mat3` (covariance matrix, diagonal).
+    *   $\alpha_k$: `float` (opacity).
+    *   $F_k$: `vecN` (features).
 
 **Parameters:**
-- $\zeta$: Coverage rate. Typical values are not explicitly given, but it controls density. Lower $\zeta$ leads to larger $\sigma$ (more transparent/diffuse) [S1, unofficial].
-- $m$: Number of neighbors. Not given in the sources.
+*   $m$: Number of nearest neighbors to consider for distance calculation. Typical value: Not given in the sources.
+*   $\zeta$: Coverage rate (threshold for Gaussian decay). Typical value: Not given in the sources.
 
-**Edge Cases and Pitfalls:**
-- **Boundary Artifacts:** Hard cutoffs in rendering can cause ink-like artifacts. Decreasing $\zeta$ makes the object denser but may require more kernels to avoid artifacts [S1, unofficial].
-- **Precision:** The term $\log(1/\zeta)$ must be positive, so $\zeta < 1$. If $\zeta \to 1$, $\sigma \to \infty$.
-- **Degenerate Input:** If $m$ is larger than the number of available points, the neighbor set is incomplete. If points are coincident, $d_i=0$, leading to $\sigma_i=0$ (singular Gaussian).
+**Steps:**
+1.  **Neighbor Search:** For each point $p_k$ in the input cloud, identify the $m$ nearest neighbor points within the cloud.
+2.  **Distance Calculation:** Compute the average distance $d_k$ from $p_k$ to its $m$ nearest neighbors.
+    $$ d_k = \frac{1}{m} \sum_{j \in \text{neighbors}(k)} \| p_k - p_j \| $$
+3.  **Variance Computation:** Calculate the isotropic variance $\sigma_k$ using the coverage rate $\zeta$ and the average distance $d_k$:
+    $$ \sigma_k = \frac{(d_k/2)^2}{\log(1/\zeta)} $$
+4.  **Covariance Matrix Construction:** Construct the covariance matrix $\Sigma_k$ as a diagonal matrix:
+    $$ \Sigma_k = \begin{bmatrix} \sigma_k & 0 & 0 \\ 0 & \sigma_k & 0 \\ 0 & 0 & \sigma_k \end{bmatrix} $$
+5.  **Primitive Assembly:** Assign $\mu_k = p_k$, $\Sigma_k$ as computed, and default/derived $\alpha_k, F_k$ to form the Gaussian primitive $G_k$.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-import numpy as np
-
-def point_cloud_to_gaussian(point_cloud, m, zeta):
+def point_cloud_to_gaussian(point_cloud: List[Vec3], m: int, zeta: float) -> List[GaussianPrimitive]:
     """
-    Convert a point cloud to Gaussian ellipsoids.
+    Convert a point cloud to isotropic Gaussian ellipsoids.
     
     Args:
-        point_cloud: List of vec3 (N, 3)
-        m: int, number of nearest neighbors
-        zeta: float, coverage rate (0 < zeta < 1)
+        point_cloud: List of 3D points.
+        m: Number of nearest neighbors.
+        zeta: Coverage rate threshold.
         
     Returns:
-        kernels: List of dicts with 'center', 'sigma', 'covariance'
+        List of Gaussian primitives.
     """
-    N = len(point_cloud)
-    kernels = []
+    import numpy as np
     
-    # Precompute distances to find nearest neighbors
-    # In practice, use a k-d tree for efficiency
-    # Here we assume a naive O(N^2) search for clarity
-    dist_matrix = np.zeros((N, N))
-    for i in range(N):
-        for j in range(N):
-            if i != j:
-                dist_matrix[i, j] = np.linalg.norm(point_cloud[i] - point_cloud[j])
-            else:
-                dist_matrix[i, j] = np.inf
-                
-    log_inv_zeta = math.log(1.0 / zeta)
+    n = len(point_cloud)
+    gaussians = []
     
-    for i in range(N):
-        # Get distances to all other points
-        dists = dist_matrix[i, :]
-        # Sort and take m smallest
-        sorted_dists = np.sort(dists)
-        nearest_dists = sorted_dists[:m]
+    # Precompute pairwise distances for efficiency
+    # In practice, use a KD-tree for O(N log N) neighbor search
+    points = np.array(point_cloud)
+    dists = np.linalg.norm(points[:, np.newaxis, :] - points[np.newaxis, :, :], axis=2)
+    
+    for i in range(n):
+        # Get distances to all other points, excluding self (distance 0)
+        row_dists = dists[i]
+        # Sort and take top m nearest neighbors (excluding self if distance is 0)
+        # Note: dists[i][i] is 0. We sort ascending and take first m+1, then exclude self if necessary.
+        # Assuming m neighbors distinct from self.
+        sorted_indices = np.argsort(row_dists)
         
-        # Compute average distance d_k
-        d_k = np.mean(nearest_dists)
+        # Select m nearest neighbors (skip index i itself if it appears in top m+1)
+        neighbor_indices = []
+        for idx in sorted_indices:
+            if idx != i:
+                neighbor_indices.append(idx)
+                if len(neighbor_indices) == m:
+                    break
         
-        # Compute variance sigma_k
-        sigma_k = (d_k / 2.0)**2 / log_inv_zeta
+        if len(neighbor_indices) < m:
+            # Fallback if fewer than m neighbors exist (e.g., boundary points)
+            # Use all available neighbors
+            pass
+            
+        neighbor_dists = [row_dists[j] for j in neighbor_indices]
+        d_k = np.mean(neighbor_dists)
         
-        # Construct diagonal covariance matrix
-        covariance = np.diag([sigma_k, sigma_k, sigma_k])
+        # Compute variance
+        # log(1/zeta) = -log(zeta)
+        if zeta <= 0 or zeta >= 1:
+            raise ValueError("Zeta must be in (0, 1)")
+            
+        sigma_k = (d_k / 2.0)**2 / np.log(1.0 / zeta)
         
-        kernels.append({
-            'center': point_cloud[i],
-            'sigma': sigma_k,
-            'covariance': covariance
-        })
+        # Construct covariance matrix (isotropic)
+        sigma_matrix = np.diag([sigma_k, sigma_k, sigma_k])
         
-    return kernels
+        # Create primitive
+        gaussian = GaussianPrimitive(
+            mu=points[i],
+            Sigma=sigma_matrix,
+            alpha=1.0, # Default, adjust as needed
+            features=None # Default, adjust as needed
+        )
+        gaussians.append(gaussian)
+        
+    return gaussians
 ```
 
 ## Subtopics
 
 ### Mesh to Isotropic Gaussian Converter
-A converter that transforms triangular meshes into isotropic Gaussian ellipsoids by retaining original vertices and computing covariance matrices based on local geometry [S1, unofficial]. It differs from the Point Cloud converter by using the average length of edges connected to a vertex as the distance metric $d_k$ instead of nearest neighbor distances [S1, unofficial]. It is chosen when the input is a manifold mesh rather than a raw point cloud. A known pitfall is that it does not consider the shape of the triangles, potentially leading to suboptimal representation; anisotropic conversion per triangle is suggested as an improvement [S1, unofficial].
+A converter that transforms triangular meshes into isotropic Gaussian ellipsoids by retaining original vertices and computing covariance matrices based on local geometry. It differs from the Point Cloud converter by using connected edge lengths instead of nearest-neighbor distances. To choose this method, use it when the input is a manifold mesh and vertex-based representation is desired. Pitfall: It does not consider the shape of the triangles, potentially leading to suboptimal representation; anisotropic conversion per triangle is suggested as an improvement [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N \cdot m \log N)$ or $O(N^2)$ depending on the nearest neighbor search implementation, where $N$ is the number of points.
-- **Memory Complexity:** $O(N)$ to store the kernels.
-- **Strengths:** Produces smooth, differentiable volume representations from sparse point data; supports anisotropic rendering natively in the VoGE pipeline [S1, unofficial].
-- **Limitations:** The isotropic assumption may not capture complex local geometries well; performance depends heavily on the efficiency of the nearest neighbor search [S1, unofficial].
-- **When to use:** When rendering point clouds as volumes and differentiability is required.
-- **When not to use:** When high-fidelity surface detail is needed from a mesh (use Mesh converter or anisotropic variants) or when hard boundaries are preferred (use Hard Voxelization).
+**Time Complexity:** $O(N \cdot m \log N)$ or $O(N \log N)$ with a spatial index (KD-tree) for neighbor search, where $N$ is the number of points and $m$ is the number of neighbors.
+**Memory Complexity:** $O(N)$ for storing the primitives.
+**Strengths:** Simple to implement; adapts scale to local point density.
+**Limitations:** Isotropic assumption may not capture anisotropic structures in the point cloud; sensitive to the choice of $m$ and $\zeta$.
+**When to use:** When converting sparse or unstructured point clouds to a volumetric representation for rendering.
+**When not to use:** When the input is a mesh (use Mesh converter) or when anisotropic features are critical (requires anisotropic conversion).
 
 ## Background
-The method originates from the VoGE (Volume Gaussian Ellipsoids) renderer, introduced in the paper "VoGE: A Differentiable Volume Renderer using Gaussian Ellipsoids for Analysis-by-Synthesis" [S1, unofficial]. The approach was developed to provide a differentiable volume rendering pipeline that can handle both meshes and point clouds by converting them into Gaussian ellipsoids. The point cloud converter was designed as a counterpart to the mesh converter, using point proximity instead of mesh connectivity to define kernel scales [S1, unofficial].
+The method originates from the VoGE (Volume Gaussian Ellipsoids) renderer, introduced in 2022. It is part of a pipeline that converts geometric primitives (meshes and point clouds) into Gaussian ellipsoids for differentiable volume rendering. The approach uses a coverage rate $\zeta$ to determine the spread of the Gaussian based on local geometric features (nearest neighbor distance for points, average edge length for meshes) [S1, unofficial].
 
 ## Sources
 [S1] VoGE: A Differentiable Volume Renderer using Gaussian Ellipsoids for Analysis-by-Synthesis, https://doi.org/10.48550/arxiv.2205.15401, fetched 2026-10-26 (unofficial)

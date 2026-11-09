@@ -3,110 +3,94 @@
 Also called: Hybrid CPU/GPU Compression Scheme
 
 ## Overview
-The two-stage compression approach is a hybrid scheme for lossless compression and streaming of time-varying volume data, designed to overcome the bandwidth bottlenecks of mass storage and the PCI Express bus [S1]. It solves the problem of interactive rendering for large datasets by combining a simple algorithm optimized for GPU decompression with a CPU-based compression technique [S1]. Unlike pure CPU decompression, this method leverages the GPU's high memory bandwidth for simple computations and memory copies, while the CPU handles the complex, serial decompression tasks [S1].
+The two-stage compression approach is a hybrid CPU/GPU scheme for lossless compression and streaming of time-varying volume data, designed to overcome the I/O bottlenecks of mass storage and the PCI Express bus [S1]. It sets itself apart from pure CPU decompression by offloading simple, parallelizable computations and memory copies to the GPU, while reserving complex, serial decompression logic for the CPU, thereby leveraging the GPU's high memory bandwidth for data assembly [S1].
 
 ## How it works
+The method compresses data twice: first with a simple algorithm suitable for efficient GPU decompression, and second with a CPU-based compression technique [S1]. The pipeline ensures that the output of the first stage remains suitable for the second stage to maintain compression efficiency [S1].
+
 **Inputs and Outputs:**
-*   **Input:** Time-varying volume data, typically converted from floating-point to 16-bit integer scalar values during preprocessing to utilize the full value range based on the dataset's minimum and maximum [S1].
-*   **Output:** A compressed bitstream suitable for streaming, which is decompressed into a single 3D texture in GPU memory [S1].
+*   **Input:** Time-varying volume data, typically converted to 16-bit integer scalar values during preprocessing to utilize the full value range based on the dataset's minimum and maximum [S1].
+*   **Output:** A compressed bitstream on disk and, upon decompression, a single 3D texture in GPU memory representing the uncompressed volume [S1].
 
 **Data Structures:**
-*   The output of the decompression process is assembled into a single 3D texture in GPU memory [S1]. This layout avoids the overhead of multi-pass bricking and border handling associated with splitting data into individual volume bricks [S1].
+*   **Preprocessed Data:** 16-bit integer scalars. Floating-point simulation data is mapped to this format by spreading values according to the dataset's global minimum and maximum [S1].
+*   **Intermediate Representation:** The output of the first compression stage. It must be structured such that it can be effectively compressed by the second stage (e.g., LZO) [S1].
+*   **GPU Memory:** A single contiguous 3D texture. The scheme avoids multi-pass bricking and border handling overhead by assembling the data back into its original form as a single texture [S1].
 
-**Algorithm Steps:**
-1.  **Preprocessing (Optional but typical):** Convert floating-point simulation data to 16-bit integer scalar values. Spread values according to the dataset's minimum and maximum to utilize the full 16-bit range [S1].
-2.  **First Stage Compression (Simple Algorithm):** Compress the data using a simple algorithm. The output of this step must be suitable for the second compression step [S1]. This stage is designed such that its decompression component runs efficiently on the GPU [S1].
-3.  **Second Stage Compression (CPU-based):** Compress the result of the first stage using a CPU-based compression technique, such as LZO [S1].
-4.  **Decompression (CPU):** Perform the main decompression on the CPU to leverage its capacity for complex, serial algorithms [S1].
-5.  **GPU Processing:** Use the GPU for simple computations and memory copies that fit its parallel architecture, exploiting the higher CPU-GPU bandwidth compared to mass storage [S1].
-6.  **Assembly:** Assemble the decompressed data back into its original form as a single 3D texture in GPU memory [S1].
+**Numbered Steps:**
+1.  **Preprocessing:** Convert floating-point simulation data to 16-bit integer scalars. Spread the values according to the dataset's minimum and maximum to utilize the full 16-bit range [S1].
+2.  **First Compression (GPU-friendly):** Compress the preprocessed data using a simple algorithm. This algorithm must be chosen such that its decompression component runs efficiently on the GPU [S1].
+3.  **Second Compression (CPU-based):** Compress the output of the first step using a CPU-based compression technique, such as LZO [S1].
+4.  **Storage:** Save the doubly compressed data to disk [S1].
+5.  **Decompression (CPU):** Perform the main decompression on the CPU to leverage its capacity for complex, serial algorithms [S1].
+6.  **Decompression (GPU):** Use the GPU to perform simple computations and memory copies associated with the first stage's decompression and data assembly [S1].
+7.  **Assembly:** Assemble the decompressed data into a single 3D texture in GPU memory, avoiding the overhead of managing multiple volume bricks or border handling [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compress_volume(data):
+def compress_volume(data_float):
     """
-    Compress time-varying volume data using the two-stage approach.
-    data: numpy array of floating-point values.
-    Returns: compressed bitstream.
+    Compresses time-varying volume data using the two-stage approach.
     """
-    # Step 1: Preprocessing (if input is float)
-    # Convert to 16-bit integer by spreading values based on min/max
-    min_val = data.min()
-    max_val = data.max()
-    # [G] Linear normalization to 16-bit range [0, 65535]
-    normalized = ((data - min_val) / (max_val - min_val)) * 65535
-    int_data = normalized.astype(np.uint16)
+    # Step 1: Preprocessing
+    min_val = min(data_float)
+    max_val = max(data_float)
+    # Spread values to utilize full 16-bit range [G]
+    data_int = scale_to_16bit(data_float, min_val, max_val)
+    
+    # Step 2: First Compression (Simple, GPU-decompressible)
+    # The specific algorithm is not named in the source, but it must be
+    # simple enough for GPU parallel execution [S1].
+    stage1_compressed = simple_compress(data_int)
+    
+    # Step 3: Second Compression (CPU-based, e.g., LZO)
+    # Ensure output of step 2 is suitable for this step [S1]
+    final_compressed = lzo_compress(stage1_compressed)
+    
+    return final_compressed
 
-    # Step 2: First Stage Compression (Simple, GPU-friendly decompression)
-    # [G] The specific simple algorithm is not detailed in the source,
-    # but it must produce output suitable for the second stage.
-    stage1_compressed = simple_compress(int_data)
-
-    # Step 3: Second Stage Compression (CPU-based, e.g., LZO)
-    stage2_compressed = lzo_compress(stage1_compressed)
-
-    return stage2_compressed
-
-def decompress_and_render(compressed_bitstream, gpu_context):
+def decompress_volume(compressed_data):
     """
-    Decompress and prepare volume data for rendering.
-    compressed_bitstream: bytes from compress_volume.
-    gpu_context: CUDA context or similar.
+    Decompresses data and uploads to GPU as a single 3D texture.
     """
-    # Step 4: Main Decompression on CPU
-    # [G] LZO decompression
-    stage1_data = lzo_decompress(compressed_bitstream)
-
-    # Step 5: GPU Processing (Simple computations/memory copies)
-    # [G] The source mentions moving simple computations to GPU.
-    # This step transfers data to GPU and performs any necessary simple ops.
-    gpu_data = gpu_context.upload(stage1_data)
-    gpu_data = gpu_simple_operations(gpu_data) # [G] Placeholder for specific simple ops
-
-    # Step 6: Assembly into 3D Texture
-    # [G] Reshape and bind as 3D texture
-    volume_texture = gpu_context.create_3d_texture(gpu_data)
-
-    return volume_texture
+    # Step 5: Main Decompression on CPU
+    # Unpack the CPU-based compression (e.g., LZO)
+    stage1_compressed = lzo_decompress(compressed_data)
+    
+    # Step 6 & 7: GPU Decompression and Assembly
+    # Transfer stage1_compressed to GPU [G]
+    # Launch CUDA kernel to decompress stage1_compressed
+    # and assemble into a single 3D texture
+    gpu_texture = gpu_decompress_and_assemble(stage1_compressed)
+    
+    return gpu_texture
 ```
 
 **Parameters:**
-*   **Data Type:** 16-bit integer scalar values [S1].
-*   **Compression Algorithm (Stage 2):** LZO is cited as an example [S1].
-*   **Hardware Context:** NVIDIA GeForce GTX 280 (110 GB/s on-device copy bandwidth) [S1].
+*   **Data Type:** 16-bit integer [S1].
+*   **Compression Algorithms:** First stage is unspecified but must be GPU-friendly; second stage is typically LZO [S1].
 
 **Edge Cases and Pitfalls:**
-*   **GPU Suitability:** GPUs are poorly suited for compression because most compression algorithms operate serially and lack coherent branching behavior [S1]. Therefore, the main decompression must be performed by the CPU [S1].
-*   **Data Suitability:** Care must be taken that the output of the first compression is still suitable for the second compression step to be effective [S1].
-*   **Bricking Overhead:** Avoiding multi-pass bricking and border handling is critical for performance and implementation simplicity [S1].
+*   **GPU Suitability:** GPUs are poorly suited for compression because most algorithms operate serially and lack coherent branching behavior [S1]. This necessitates the hybrid approach.
+*   **Preprocessing Mapping:** The simple linear spreading of float values to 16-bit integers may not be sufficient for all applications; more elaborate mappings might be needed depending on the data distribution [S1].
+*   **Brick Management:** Avoiding multi-pass bricking simplifies implementation but requires sufficient GPU memory to hold the single 3D texture [S1].
 
 ## Subtopics
+
+### [GPU Decompression Pipeline](7516-gpu-decompression-pipeline.md)
+The execution engine for this approach, handling streaming and decompression by overlapping I/O, decompression, and data upload.
+
 ## Operating characteristics
-*   **Time and Memory Complexity:** Not given in the sources.
-*   **Measured Performance:** The scheme allows near-interactive performance for rendering large real-world data sets with low signal-to-noise-ratio without degrading image quality [S1].
-*   **Hardware Bandwidths:**
-    *   NVIDIA GeForce GTX 280 on-device copy: 110 GB/s [S1].
-    *   PCI Express bus: ~2.5 GB/s [S1].
-    *   Desktop hard drives: ~110 MB/s [S1].
-    *   Server hard drives: up to 170 MB/s [S1].
-*   **Scaling:** The approach is designed for out-of-core streaming, allowing it to handle data sizes that exceed available GPU and main memory [S1].
-*   **Strengths:**
-    *   Leverages GPU's high memory bandwidth for simple operations [S1].
-    *   Uses CPU for complex, serial decompression [S1].
-    *   Outputs a single 3D texture, avoiding bricking overhead [S1].
-    *   Compatible with standard volume raycasting and existing acceleration methods [S1].
-*   **Limitations:**
-    *   Requires preprocessing to convert float data to 16-bit integers [S1].
-    *   GPU parallel architecture is not well-suited for the compression tasks themselves [S1].
-*   **When to Use:** For out-of-core streaming of time-varying volume data to support interactive rendering without degrading image quality [S1].
-*   **When Not to Use:** When pure GPU decompression is required (due to serial nature of compression) or when float data precision cannot be sacrificed for 16-bit integer conversion [S1].
+*   **Time and Memory Complexity:** The scheme is designed for out-of-core streaming, allowing interactive rendering of datasets that exceed available GPU and main memory [S1]. It avoids the memory overhead of managing multiple bricks by assembling a single 3D texture [S1].
+*   **Measured Performance:** Tested on datasets such as Combustion (448×704×128, 77 MB/step), Convection (512×256², 64 MB/step), and Hurricane (512²×128, 64 MB/step) [S1].
+*   **Hardware Context:** The approach addresses the bottleneck of mass storage (~110-170 MB/s) and PCI Express bus (~2.5 GB/s) compared to on-device GPU memory bandwidth (e.g., 110 GB/s on NVIDIA GeForce GTX 280) [S1].
+*   **Strengths:** Enables near-interactive performance for large, real-world datasets with low signal-to-noise ratio without degrading image quality (lossless) [S1]. Compatible with standard volume raycasting and existing acceleration methods [S1].
+*   **Limitations:** Relies on the assumption that simple computations can be effectively parallelized on the GPU, while complex decompression remains on the CPU [S1].
 
 ## Background
-*   **Origin:** The method was presented in "A GPU-Supported Lossless Compression Scheme for Rendering Time-Varying Volume Data" by J. Mensmann, T. Ropinski, and K. Hinrichs [S1].
-*   **History:** The paper was published in the Eurographics Association proceedings in 2010 [S1].
-*   **Usage:** It is used for out-of-core streaming of time-varying volume data, supporting interactive rendering with standard volume raycasting [S1].
+The method was introduced by J. Mensmann, T. Ropinski, and K. Hinrichs in 2010 as a solution for out-of-core streaming of time-varying volume data [S1]. It addresses the limitations of direct float compression and the inefficiencies of pure CPU or pure GPU decompression strategies [S1].
 
 ## Sources
 [S1] A GPU-Supported Lossless Compression Scheme for Rendering Time-Varying Volume Data, https://doi.org/10.2312/vg/vg10/109-116, fetched 2026-10-26

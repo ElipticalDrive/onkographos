@@ -1,0 +1,82 @@
+# Scattered Assignment
+## Overview
+Scattered Assignment (SCA) is a data distribution scheme for parallel direct volume rendering on unstructured grids that assigns mesh-cells to processors in a scattered fashion to achieve load balancing during the Light Path Mapping (LPM) step [S1, unofficial]. It sets itself apart from its siblings, Minimum-Communication Assignment (MCA) and Balanced-Load Minimized-Communication Assignment (BLMCA), by prioritizing computational load balance over communication minimization, relying on the assumption that neighboring cells have similar workloads due to similar views of the volume [S1, unofficial].
+## How it works
+**Inputs and outputs:**
+- Input: A set of mesh-cells $C$, a set of processors $P$, and the total number of processors $N_p = |P|$.
+- Output: An assignment map $A: C \rightarrow P$ mapping each mesh-cell to a specific processor.
+
+**Data structures:**
+- The mesh-cells are typically stored in a linear array or list, indexed $0$ to $N_c-1$, where $N_c$ is the total number of cells.
+- Processors are indexed $0$ to $N_p-1$.
+
+**Steps:**
+1. Iterate through each mesh-cell $c_i$ in the input list, where $i$ ranges from $0$ to $N_c-1$.
+2. Assign cell $c_i$ to processor $p_j$ using the modulo operation:
+   $$ j = i \mod N_p $$
+   $$ A(c_i) = p_j $$
+3. Each processor concurrently determines its assigned cells without inter-processor communication.
+
+**Parameters:**
+- $N_p$: The number of processors. This is the primary parameter controlling the distribution granularity.
+
+**Edge cases and pitfalls:**
+- **Communication Overhead:** The major deficiency is the lack of explicit minimization of communication overhead for the Ray-Segment Migration (RSM) step [S1, unofficial].
+- **Load Balance Assumption:** The scheme assumes neighbor mesh-cells have equal workloads. If the volume has high variance in opacity or density gradients, this assumption may fail, leading to load imbalance despite the scattered distribution [S1, unofficial].
+- **Precision:** The modulo operation is computationally negligible, ensuring speed of task assignment [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def scattered_assignment(mesh_cells, num_processors):
+    """
+    Assigns mesh cells to processors using Scattered Assignment (SCA).
+    
+    Args:
+        mesh_cells (list): List of mesh cell objects or indices.
+        num_processors (int): Total number of processors P.
+        
+    Returns:
+        dict: Mapping from mesh cell to processor index.
+    """
+    assignment = {}
+    num_cells = len(mesh_cells)
+    
+    for i in range(num_cells):
+        cell = mesh_cells[i]
+        # Assign cell i to processor (i mod N_p)
+        processor_index = i % num_processors
+        assignment[cell] = processor_index
+        
+    return assignment
+```
+## Subtopics
+## Operating characteristics
+**Time and memory complexity:**
+- Time Complexity: $O(N_c)$, where $N_c$ is the number of mesh-cells. The assignment is performed in linear time with negligible computation per cell [S1, unofficial].
+- Memory Complexity: $O(N_c)$ to store the assignment map. No additional communication buffers are required during the assignment phase [S1, unofficial].
+
+**Measured performance:**
+- Performance depends on the assumption that neighbor mesh-cells have equal workloads [S1, unofficial].
+- Increasing the mesh size is more likely to obtain better load balance, as the scattered distribution averages out local variations [S1, unofficial].
+
+**Strengths and limitations:**
+- **Strengths:** Simplicity, speed of task assignment, negligible computation, and no communication overhead during the assignment phase [S1, unofficial].
+- **Limitations:** Lack of explicit minimization of communication overhead for the RSM step [S1, unofficial].
+
+**When to use it and when not:**
+- Use when load balancing during the LPM step is the primary concern and communication overhead is secondary or expected to be manageable due to mesh size [S1, unofficial].
+- Do not use when communication volume is the bottleneck, in which case MCA or BLMCA should be considered [S1, unofficial].
+## Background
+**Origin:**
+- Proposed in the context of parallel direct volume rendering of unstructured grids based on object-space decomposition [S1, unofficial].
+- Developed as one of three effective schemes for mesh-cell assignment, alongside Minimum-Communication Assignment (MCA) and Balanced-Load Minimized-Communication Assignment (BLMCA) [S1, unofficial].
+
+**History and development:**
+- The scheme is part of early research into distributed computing and load balancing for volume rendering, specifically addressing the trade-offs between load balancing and communication minimization [S1, unofficial].
+
+**Where it is used:**
+- Used in parallel direct volume rendering systems that utilize object-space decomposition on unstructured grids [S1, unofficial].
+## Sources
+[S1] Parallel direct volume rendering of unstructured grids based on object-space decomposition, http://hdl.handle.net/11693/17897, fetched 2026-10-26 (unofficial)

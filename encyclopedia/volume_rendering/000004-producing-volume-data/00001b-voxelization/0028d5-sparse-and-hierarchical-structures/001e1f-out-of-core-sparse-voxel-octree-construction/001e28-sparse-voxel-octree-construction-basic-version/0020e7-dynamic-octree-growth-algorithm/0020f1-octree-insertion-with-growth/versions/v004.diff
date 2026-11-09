@@ -1,0 +1,187 @@
+--- v003.md
++++ v004.md
+@@ -1,24 +1,23 @@
+ # Octree Insertion with Growth
+ 
+-Also called: Dynamic Octree Insertion, Recursive Voxel Insertion with Boundary Growth
+ 
+ ## Overview
+-Octree Insertion with Growth is a method for constructing a Sparse Voxel Octree (SVO) by recursively inserting voxels while dynamically expanding the octree's spatial extent when a voxel falls outside the current root bounds [S1, unofficial]. It solves the problem of unknown scene bounds during incremental voxelization by ensuring the tree always covers the active data [S1, unofficial]. It differs from static voxelization by adapting resolution locally and from fixed-size octrees by handling boundary conditions through recursive growth [S1, G, unofficial].
++Octree Insertion with Growth is a method for constructing a Sparse Voxel Octree (SVO) by recursively inserting voxels while dynamically expanding the octree's spatial extent when a voxel falls outside the current root bounds [S1, unofficial]. It solves the problem of unknown scene bounds during incremental voxelization by ensuring the tree always covers the active data [S1, unofficial]. It builds on [Dynamic Octree Growth Algorithm](2375-dynamic-octree-growth-algorithm.md) by providing the recursive insertion logic that triggers boundary expansion.
+ 
+ ## How it works
+-**Inputs:** A voxel $v$ (containing position $p$ and color/data), and an existing octree $o$ with root node $n$ and current depth $d$.
+-**Outputs:** The updated octree $o'$ with the voxel inserted.
++**Inputs:** A voxel $v$ (containing position $p$ and color/data), and an existing octree $o$ with root node $n$ and current depth $d$ [S1, unofficial].
++**Outputs:** The updated octree $o'$ with the voxel inserted [S1, unofficial].
+ 
+ **Data Structures:**
+ The core node structure is a naive representation used for clarity in the primary source [S1, unofficial]:
+ *   `Node` struct:
+-    *   `children[8]`: Array of 8 pointers to child nodes (or null if leaf).
+-    *   `voxelColorIndex`: Integer index representing the voxel's color (only valid if `isLeaf` is true).
++    *   `children[8]`: Array of 8 pointers to child nodes (null if leaf).
++    *   `voxelColorIndex`: Integer index representing the voxel's color (valid only if `isLeaf` is true).
+     *   `isLeaf`: Boolean flag indicating if the node is a leaf.
++*   The naive node structure consumes 72 bytes on 64-bit processors or 40 bytes on 32-bit processors [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Extract Position and Depth:** Get the 3D position $p$ of the voxel $v$ and the current depth $d$ of the octree $o$.
+-2.  **Boundary Check:** Determine if $p$ is within the valid range of the current octree. The valid range for depth $d$ is defined as $[-2^{d-1}, 2^{d-1})$ [S1, unofficial].
+-    *   *Note:* The source text contains a typo in the range definition `[-2^(d-1), -2^(d-1))` [S1, unofficial]. Based on standard octree conventions and the context of "growing" to cover negative coordinates, the range is interpreted as symmetric around the origin, i.e., $[-2^{d-1}, 2^{d-1})$ [G].
++1.  **Extract Position and Depth:** Get the 3D position $p$ of the voxel $v$ and the current depth $d$ of the octree $o$ [S1, unofficial].
++2.  **Boundary Check:** Determine if $p$ is within the valid range of the current octree. The valid range for depth $d$ is defined as $[-2^{d-1}, 2^{d-1})$ [S1, unofficial]. (Note: The source text contains a typo `[-2^(d-1), -2^(d-1))` which is corrected to a symmetric half-open interval [S1, unofficial]).
+ 3.  **Grow if Necessary:** If $p \notin [-2^{d-1}, 2^{d-1})$, call `grow(o)` to expand the octree's depth and spatial extent to encompass $p$ [S1, unofficial].
+ 4.  **Recursive Insertion:**
+@@ -33,80 +32,69 @@
+ **Pseudocode:**
+ ```python
+-def insert_voxel(voxel: Voxel, octree: Octree) -> Octree:
++class Node:
++    def __init__(self):
++        self.children = [None] * 8
++        self.voxel_color_index = 0
++        self.is_leaf = False
++
++def group(bitstream: int, depth: int, bits: int) -> int:
++    """Extracts 'bits' bits from the bitstream corresponding to the spatial position at the given depth."""
++    return (bitstream >> (depth * bits)) & ((1 << bits) - 1)
++
++def voxel_pos_to_bitstream(pos, depth):
++    """Converts 3D integer position to a Morton-like bitstream for the given depth."""
++    # [G] Standard Morton code interleaving for 3D coordinates up to `depth` levels.
++    x, y, z = pos.x, pos.y, pos.z
++    code = 0
++    for i in range(depth):
++        code |= ((x & 1) << (3 * i)) | ((y & 1) << (3 * i + 1)) | ((z & 1) << (3 * i + 2))
++        x >>= 1
++        y >>= 1
++        z >>= 1
++    return code
++
++def grow(octree_depth: int, voxel_pos) -> int:
+     """
+-    Inserts a voxel into an octree, growing the tree if the position is out of bounds.
++    Doubles the octree depth to encompass the voxel position.
++    Returns the new depth.
+     """
+-    p = voxel.position
+-    d = octree.depth
+-    
+-    # Check boundary: [-2^(d-1), 2^(d-1))
+-    limit = 1 << (d - 1)
+-    if not (-limit <= p.x < limit and -limit <= p.y < limit and -limit <= p.z < limit):
+-        octree = grow(octree)
+-        # Note: grow() updates the depth and root. We must re-fetch depth if needed,
+-        # but the recursive call below uses the original d logic relative to the new root?
+-        # The source algorithm calls grow then inserts with the *original* depth logic 
+-        # but applied to the new root? Actually, the source says:
+-        # "return set root(o, insert voxel(v, root(o), bitstream(v)), depth(o))"
+-        # This implies the depth passed to insert is the depth of the octree *after* growth?
+-        # Or the original depth? The source snippet `d <- depth(o)` happens before grow.
+-        # However, `insert` is recursive. Let's follow the source structure strictly.
+-        
+-    return set_root(octree, insert_recursive(voxel, octree.root, voxel.bitstream, octree.depth))
++    # [G] Standard dynamic growth: depth increases by 1, spatial extent doubles.
++    return octree_depth + 1
+ 
+-def insert_recursive(voxel: Voxel, node: Node, bitstream: BitStream, depth: int) -> Node:
+-    """
+-    Recursively inserts a voxel into the octree at the specified depth.
+-    """
++def insert_recursive(voxel_color_index: int, bitstream: int, depth: int, node: Node) -> Node:
++    """Recursively inserts a voxel into the octree at the specified depth."""
+     if depth == 0:
+-        # Leaf node: store the voxel color/index
+-        new_node = Node()
+-        new_node.is_leaf = True
+-        new_node.voxelColorIndex = voxel.color_index
+-        return new_node
+-    
+-    # Determine child index from bitstream at current depth
+-    # group(b, d, 3) extracts 3 bits for the 8 children
++        leaf = Node()
++        leaf.is_leaf = True
++        leaf.voxel_color_index = voxel_color_index
++        return leaf
++
+     child_idx = group(bitstream, depth, 3)
+-    
+-    # Get or create child
+     child = node.children[child_idx]
+     if child is None:
+         child = Node()
+-        child.is_leaf = False # Internal node
+-        # Initialize children array to None
+-        
+-    # Recurse
+-    child = insert_recursive(voxel, child, bitstream, depth - 1)
+-    
+-    # Update parent's child pointer
+-    node.children[child_idx] = child
+-    
++        node.children[child_idx] = child
++
++    node.children[child_idx] = insert_recursive(voxel_color_index, bitstream, depth - 1, child)
+     return node
+ 
+-def group(bitstream: BitStream, depth: int, bits: int) -> int:
++def insert_voxel(voxel_color_index: int, voxel_pos, octree_depth: int, root: Node) -> tuple:
+     """
+-    Extracts 'bits' bits from the bitstream corresponding to the spatial position
+-    at the given depth. The exact bit extraction depends on the bitstream encoding.
+-    Standard Morton code or similar interleaved bitstream is assumed.
++    Inserts a voxel into an octree, growing the tree if the position is out of bounds.
++    Returns (new_root, new_depth).
+     """
+-    # Implementation detail: This depends on how the bitstream is constructed.
+-    # Typically, for depth d, we look at bits d*3 to (d+1)*3 - 1 in a Morton-like stream.
+-    # Since the source does not define bitstream construction, we assume a helper exists.
+-    # [G] Placeholder for bit extraction logic.
+-    pass
++    limit = 1 << (octree_depth - 1)
++    if not (-limit <= voxel_pos.x < limit and -limit <= voxel_pos.y < limit and -limit <= voxel_pos.z < limit):
++        octree_depth = grow(octree_depth, voxel_pos)
++        # [G] When growing, the old root becomes a child of the new root.
++        # The new root's children array is initialized, and the old root is placed
++        # at the child index corresponding to the new voxel's position relative to the new bounds.
++        new_root = Node()
++        new_child_idx = group(voxel_pos_to_bitstream(voxel_pos, octree_depth), octree_depth, 3)
++        new_root.children[new_child_idx] = root
++        root = new_root
+ 
+-def grow(octree: Octree) -> Octree:
+-    """
+-    Expands the octree depth by 1, doubling the spatial extent.
+-    The old root becomes one of the children of the new root.
+-    """
+-    # [G] Standard dynamic octree growth logic:
+-    # 1. Create new root.
+-    # 2. Determine which child index the old root occupies based on the new voxel's position.
+-    # 3. Set old root as that child.
+-    # 4. Set other children to null.
+-    # 5. Increment depth.
+-    pass
++    new_root = insert_recursive(voxel_color_index, voxel_pos_to_bitstream(voxel_pos, octree_depth), octree_depth, root)
++    return new_root, octree_depth
+ ```
+ 
+@@ -157,13 +145,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Insertion is $O(d)$ where $d$ is the depth of the octree, assuming constant-time child access. Growth is $O(1)$ amortized if implemented with pointer swapping, but may require rebalancing if not handled carefully [G].
+-*   **Memory Complexity:** Proportional to the number of active voxels and the depth of the tree. The naive node structure uses 72 bytes (64-bit) or 40 bytes (32-bit) per node [S1, unofficial]. More compact representations (e.g., 28 bytes per node in tiles) can significantly reduce memory usage [S2, unofficial].
+-*   **Strengths:** Handles unknown scene bounds dynamically; adaptive resolution reduces memory for sparse data [S1, G, unofficial].
+-*   **Limitations:** Naive node structure is memory-heavy [S1, unofficial]. Frequent growth operations may lead to fragmentation or require complex root management [S4, unofficial].
++*   **Time Complexity:** Insertion is $O(d)$ where $d$ is the depth of the octree, assuming constant-time child access [S1, G, unofficial].
++*   **Memory Complexity:** Proportional to the number of active voxels and the depth of the tree [S1, G, unofficial].
++*   **Strengths:** Handles unknown scene bounds dynamically and adapts resolution locally to reduce memory for sparse data [S1, G, unofficial].
++*   **Limitations:** The naive node structure is memory-heavy [S1, unofficial]. Frequent growth operations require careful root management to avoid fragmentation [S4, unofficial].
+ *   **When to Use:** Incremental voxelization where scene bounds are not known a priori or change over time [S1, unofficial].
+-*   **When Not to Use:** When memory is extremely constrained and a compact node structure is required (use tiled octrees instead) [S2, unofficial]. When static bounds are known, a fixed-size octree may be more efficient [G].
+ 
+ ## Background
+-The method originates from studies on Sparse Voxel Octree compression and global illumination calculation, specifically in the context of dynamic voxel insertion [S1, unofficial]. It is a fundamental building block for dynamic SVO construction, allowing for the incremental update of voxel data without rebuilding the entire structure [S1, unofficial]. Variants and related implementations can be found in voxel cone tracing pipelines [S2, unofficial], surfel-based rendering [S3, unofficial], and procedural generation systems [S4, S7, unofficial].
++The method originates from studies on Sparse Voxel Octree compression and global illumination calculation, specifically in the context of dynamic voxel insertion [S1, unofficial]. It is a fundamental building block for dynamic SVO construction, allowing for the incremental update of voxel data without rebuilding the entire structure [S1, unofficial]. Variants and related implementations appear in voxel cone tracing pipelines [S2, unofficial], surfel-based rendering [S3, unofficial], dynamic expansion routines [S4, unofficial], and procedural generation systems [S7, unofficial].
+ 
+ ## Sources

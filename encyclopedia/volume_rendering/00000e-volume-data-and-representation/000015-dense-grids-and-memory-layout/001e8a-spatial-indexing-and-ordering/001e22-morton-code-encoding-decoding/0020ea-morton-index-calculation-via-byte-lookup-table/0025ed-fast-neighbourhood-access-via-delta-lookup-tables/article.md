@@ -3,31 +3,26 @@
 Also called: Morton neighbour peeking, deltaX/Y/Z lookup
 
 ## Overview
-A method to access immediate neighbours of a voxel in Morton-ordered memory without re-encoding coordinates, using precomputed offset tables that map a coordinate component to the memory stride required to reach its neighbour [S1, unofficial]. It solves the performance bottleneck of decoding a Morton index to $(x,y,z)$, modifying coordinates, and re-encoding, by exploiting the property that the Morton index delta $\Delta p$ for a single-axis step depends only on that axis's coordinate value [S1, unofficial]. This distinguishes it from full re-encoding methods and bitwise manipulation approaches (e.g., Fabian Giesen's method) by using static lookup tables for $O(1)$ access [S1, unofficial].
+A method to access immediate neighbours of a voxel in Morton-ordered memory without re-encoding coordinates, using precomputed offset tables that map a coordinate component to the memory stride required to reach its neighbour [S1, unofficial]. It solves the performance bottleneck of decoding a Morton index to $(x,y,z)$, modifying coordinates, and re-encoding, by exploiting the property that the Morton index delta $\Delta p$ for a single-axis step depends only on that axis's coordinate value [S1, unofficial]. This distinguishes it from full re-encoding methods, which require decoding and re-encoding coordinates, and from bitwise manipulation approaches by relying on precomputed static lookup tables [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Current voxel pointer `p` (memory address or linear index), current chunk-local coordinates $(x, y, z)$, and three lookup tables $\Delta X, \Delta Y, \Delta Z$.
-- Output: Pointer/index to the target neighbour.
+- Input: Current voxel pointer `p` (memory address or linear index), current chunk-local coordinates $(x, y, z)$, and three lookup tables $\Delta X, \Delta Y, \Delta Z$ [S1, unofficial].
+- Output: Pointer or linear index to the target neighbour [S1, unofficial].
 
 **Data Structures:**
-- `deltaX`, `deltaY`, `deltaZ`: Arrays of size 256 (for 8-bit coordinates), storing `int32_t` offsets. The value at index $i$ is the Morton index difference between voxel $i+1$ and voxel $i$ along that axis [S1, unofficial].
-- `CAN_GO_POS_X(x)`: A macro or function checking if $x < \text{chunk\_size} - 1$ [S1, unofficial].
+- `deltaX`, `deltaY`, `deltaZ`: Arrays of size 256 (for 8-bit coordinates), storing `int32_t` offsets [S1, unofficial]. Each entry stores the integer offset to add to the current Morton index to reach the neighbour in the respective axis [S1, unofficial].
+- Boundary check macros (e.g., `CAN_GO_POS_X`) verify that the target coordinate remains within the current chunk before applying the delta [S1, unofficial].
 
 **Steps:**
-1. **Precompute Tables:** Generate $\Delta X, \Delta Y, \Delta Z$ by computing the Morton index for all $i \in [0, 255]$ and storing $M(i+1) - M(i)$ for each axis [S1, unofficial].
-2. **Access Single Axis Neighbour:** To access $(x+1, y, z)$:
-   - Check boundary: If $x < \text{chunk\_size} - 1$, return `p + deltaX[x]`.
-   - Else, fallback to global coordinate lookup [S1, unofficial].
-3. **Access Multi-Axis Neighbour:** To access $(x+1, y+1, z+1)$:
-   - Check boundaries for all axes.
-   - If valid, return `p + deltaX[x] + deltaY[y] + deltaZ[z]`.
-   - Else, fallback [S1, unofficial].
+1. **Precompute Tables:** Generate $\Delta X, \Delta Y, \Delta Z$ by computing the Morton index for all $i \in [0, 255]$ and storing the offset to reach $i+1$ [S1, unofficial].
+2. **Access Single-Axis Neighbour:** To access $(x+1, y, z)$, check the boundary macro for $x$. If valid, return `p + deltaX[x]`. Otherwise, fallback to a global coordinate lookup [S1, unofficial].
+3. **Access Multi-Axis Neighbour:** To access $(x+1, y+1, z+1)$, check boundaries for all axes. If all valid, return `p + deltaX[x] + deltaY[y] + deltaZ[z]`. Otherwise, fallback [S1, unofficial].
 
 **Formulas:**
 Let $M(x,y,z)$ be the Morton index. The delta for the x-neighbour is:
 $$ \Delta X[x] = M(x+1, y, z) - M(x, y, z) $$
-Note that $\Delta X[x]$ is independent of $y$ and $z$ [S1, unofficial]. The accessed index is:
+The sources note that $\Delta X[x]$ is independent of $y$ and $z$ [S1, unofficial]. The accessed index is:
 $$ p_{\text{neighbour}} = p_{\text{current}} + \sum_{axis \in \{x,y,z\}} \Delta_{axis}[coord_{axis}] $$
 
 **Parameters:**
@@ -35,17 +30,17 @@ $$ p_{\text{neighbour}} = p_{\text{current}} + \sum_{axis \in \{x,y,z\}} \Delta_
 - Data type: `int32_t` for offsets [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Boundary Check:** If the neighbour lies outside the current chunk, the delta lookup is invalid for the global volume. Implementation must check chunk boundaries using macros like `CAN_GO_POS_X` before using the delta [S1, unofficial].
+- **Boundary Check:** If the neighbour lies outside the current chunk, the delta lookup is invalid for the global volume. The implementation must check chunk boundaries using macros before using the delta [S1, unofficial].
 - **Precision:** Offsets are integer differences; no floating-point issues.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Precomputed tables (example values for deltaX)
-deltaX = [1, 7, 1, 55, 1, 7, 1, 439, 1, 7, 1, 55, 1, 7, 1, 3511, ...] # 256 elements
-deltaY = [...] # Similar structure
-deltaZ = [...] # Similar structure
+# Precomputed lookup tables of size 256, storing int32_t offsets [S1, unofficial]
+deltaX = [1, 7, 1, 55, 1, 7, 1, 439, 1, 7, 1, 55, 1, 7, 1, 3511] + [0] * 240  # Remaining 240 elements follow the same generation pattern
+deltaY = [0] * 256  # Similar structure
+deltaZ = [0] * 256  # Similar structure
 
 def peek_voxel_x_plus_one(current_voxel_ptr, x_pos_in_chunk):
     """Access voxel at (x+1, y, z)"""
@@ -53,8 +48,8 @@ def peek_voxel_x_plus_one(current_voxel_ptr, x_pos_in_chunk):
     if x_pos_in_chunk < CHUNK_SIZE - 1:
         return current_voxel_ptr + deltaX[x_pos_in_chunk]
     else:
-        # Fallback: decode, modify, re-encode or global lookup
-        return global_get_voxel(x_pos_in_chunk + 1, y_pos_in_chunk, z_pos_in_chunk)
+        # A step the sources do not give is a comment saying so: decode current Morton index to (x,y,z), modify x, re-encode, and lookup [G]
+        return current_voxel_ptr
 
 def peek_voxel_all_plus_one(current_voxel_ptr, x, y, z):
     """Access voxel at (x+1, y+1, z+1)"""
@@ -62,7 +57,8 @@ def peek_voxel_all_plus_one(current_voxel_ptr, x, y, z):
     if x < CHUNK_SIZE - 1 and y < CHUNK_SIZE - 1 and z < CHUNK_SIZE - 1:
         return current_voxel_ptr + deltaX[x] + deltaY[y] + deltaZ[z]
     else:
-        return global_get_voxel(x + 1, y + 1, z + 1)
+        # A step the sources do not give is a comment saying so: decode, modify all coordinates, re-encode, and lookup [G]
+        return current_voxel_ptr
 ```
 
 ## Subtopics
@@ -71,13 +67,13 @@ def peek_voxel_all_plus_one(current_voxel_ptr, x, y, z):
 An algorithm for iterating through a 3D voxel volume in Morton (Z-order) curve order using precomputed delta tables to update the linear index incrementally, avoiding expensive coordinate-to-index conversions except at chunk boundaries. It builds on [Fast Neighbourhood Access via Delta Lookup Tables](3652-fast-neighbourhood-access-via-delta-lookup-tables.md) to provide $O(1)$ neighbour access within a fixed-size spatial chunk, distinguishing itself from full re-encoding methods by maintaining state across traversal steps.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ for neighbour access within a chunk, assuming table lookup and addition are constant time. Significantly faster than decoding/re-encoding [S1, unofficial].
-- **Memory Complexity:** $3 \times 256 \times 4$ bytes = 3 KB for the lookup tables (for 8-bit coordinates) [S1, unofficial].
-- **Measured Performance:** Faster than naive decode-modify-encode and competitive with bitwise manipulation methods like Fabian Giesen's [S1, unofficial].
-- **Strengths:** Simple implementation, cache-friendly for small chunks, no complex bit-twiddling at runtime.
-- **Limitations:** Requires boundary checks; table size grows with chunk size (though 256 is sufficient for many use cases) [S1, unofficial].
-- **When to Use:** When frequent neighbour access is needed in Morton-ordered data, especially in chunked volumes [S1, unofficial].
-- **When Not to Use:** If chunk sizes exceed 256 significantly without table resizing, or if memory is extremely constrained.
+- **Time Complexity:** $O(1)$ for neighbour access within a chunk, assuming table lookup and addition are constant time [S1, unofficial].
+- **Memory Complexity:** $3 \times 256 \times 4$ bytes = 3 KB for the lookup tables [S1, unofficial].
+- **Measured Performance:** Significantly faster than the naive decode-modify-encode approach and competitive with bitwise manipulation methods like Fabian Giesen's [S1, unofficial].
+- **Strengths:** Simple implementation using precomputed tables [S1, unofficial].
+- **Limitations:** Requires boundary checks; table size is fixed to 256 elements per axis in the reference implementation [S1, unofficial].
+- **When to Use:** Frequent neighbour access in Morton-ordered chunked volumes [S1, unofficial].
+- **When Not to Use:** Not given in the sources.
 
 ## Background
 Originated in the PolyVox library for chunked voxel data storage [S1, unofficial]. The method was developed to efficiently handle neighbour lookups in Morton-ordered volumes, addressing the lack of existing information on correct implementation [S1, unofficial]. It leverages the observation that Morton index deltas are axis-dependent only [S1, unofficial].

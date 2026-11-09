@@ -1,0 +1,1527 @@
+Voctopus 0.1.0
+==============
+Voctopus is a Javascript implementation of a sparse voxel octree. The end goal is to create a data structure small and fast 
+enough that it can be rendered directly by a shader in WebGL without meshification, using ray tracing techniques (or something
+analogous to that - I'm currently experimenting with a mix of ideas taken from cone tracing, path tracing and depth marching). 
+The shader code is still a work in progress, and will be released as a separate repository along with the rest of the tools
+necessary to create and manipulate scenes.
+
+Architecture
+------------
+Voctopus has two main pieces: a low-level kernel written in asm.js and a high-level javascript API for use by humans.
+
+Memory management, access, traversal, and other core operations are handled by the kernel, yielding real-world performance 
+of over one million (and up to 8 million) r/w operations per second on commodity hardware in a small memory footprint. See the 
+[benchmarks](https://github.com/nphyx/voctopus/wiki/benchmark) for performance details.
+
+The kernel currently supports 32-bit voxels representing either a 31-bit subtree pointer or 24 bits of RGB color, a 4 bit alpha 
+channel, and 3 bits reserved for rendering instructions (the remaining bit is a flag indicating whether the entry is a pointer
+or voxel data). The non-kernel code is agnostic, such that kernels with other data structures (e.g. for indexed color) could
+be supported.
+
+Todo
+----
+* prune dead octets and free for reallocation - incomplete
+* defragmentation (maybe not neccessary)
+* ray intersection - partially complete, weird test results
+
+Voctopus is still a work in progress! Neither the API nor the data structure should be considered stable.
+
+Current documentation is available in the [project wiki](https://github.com/nphyx/voctopus/wiki/voctopus.core). Examples and demos
+will follow as the code stabilizies - they're currently not in useful shape.
+
+License (MIT)
+=============
+Copyright 2015 Justen Robertson <nphyxx@gmail.com> / https://github.com/nphyx.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+### gulpfile.js
+```
+"use strict";
+var gulp = require("gulp");
+// test suites
+var babelRegister = require("babel-core/register");
+var exec = require("child_process").exec;
+var mocha = require("gulp-mocha");
+var istanbul = require("gulp-babel-istanbul");
+gulp.task("default", function(cb) {
+	exec("browserify -t babelify voctopus.js | uglifyjs > dist/voctopus.ugly.js", function(err, stdout, stderr) {
+		console.log(stderr);
+		console.log(stdout);
+		cb(err);
+	});
+});
+
+gulp.task("kernel", function(cb) {
+	exec("browserify -t babelify src/voctopus.kernel.asm.js > dist/voctopus.kernel.js", function(err, stdout, stderr) {
+		console.log(stderr);
+		console.log(stdout);
+		cb(err);
+	});
+});
+
+gulp.task("docs", function (cb) {
+	exec("jsdox --templateDir docs/templates --output docs src/*.js", function(err, stdout, stderr) {
+		console.log(stderr);
+		console.log(stdout);
+		cb(err);
+	});
+});
+
+gulp.task("benchmark", function(cb) {
+	exec("browserify -t babelify src/voctopus.benchmark.js | uglifyjs > dist/voctopus.benchmark.js && node dist/voctopus.benchmark.js | tee docs/benchmark.md", function(err, stdout, stderr) {
+	//exec("browserify -t babelify src/voctopus.benchmark.js > dist/voctopus.benchmark.js && node dist/voctopus.benchmark.js | tee docs/benchmark.md", function(err, stdout, stderr) {
+		console.log(stderr);
+		console.log(stdout);
+		cb(err);
+	});
+});
+
+gulp.task("test", function() {
+	return gulp.src(["test/*.js"])
+	.pipe(mocha({
+		bail:true,
+		compilers: {
+			js: babelRegister
+		}
+	}))
+});
+
+gulp.task("test:core", function() {
+	return gulp.src(["test/voctopus.core.test.js"])
+	.pipe(mocha({
+		bail:true,
+		compilers: {
+			js: babelRegister
+		}
+	}))
+});
+
+gulp.task("test:util", function() {
+	return gulp.src(["test/voctopus.util.test.js"])
+	.pipe(mocha({
+		bail:true,
+		compilers: {
+			js: babelRegister
+		}
+	}))
+});
+
+gulp.task("test:schema", function() {
+	return gulp.src(["test/voctopus.schema.test.js"])
+	.pipe(mocha({
+		bail:true,
+		compilers: {
+			js: babelRegister
+		}
+	}))
+});
+
+gulp.task("test:kernel", function() {
+	return gulp.src(["test/voctopus.kernel.asm.test.js"])
+	.pipe(mocha({
+		bail:true,
+		compilers: {
+			js: babelRegister
+		}
+	}))
+});
+
+gulp.task("test:coverage", function(cb) {
+	gulp.src(["src/*js"])
+	.pipe(istanbul())
+	.pipe(istanbul.hookRequire())
+	.on("finish", function() {
+		gulp.src(["test/*.js"])
+		.pipe(mocha({
+			bail:true,
+			compilers: {
+				js:babelRegister 
+			}
+		}))
+		.pipe(istanbul.writeReports())
+		.on("end", cb)
+	});
+});
+```
+
+### voctopus.js
+```
+"use strict";
+const Voctopus = require("./src/voctopus.core").Voctopus 
+const voxel = require("./src/voctopus.core").voxel 
+window.Voctopus = {voxel:voxel,create:(n) => new Voctopus(n)}
+```
+
+### src/voctopus.benchmark.js
+```
+"use strict";
+const Voctopus = require("./voctopus.core.js").Voctopus;
+const loop3D = require("./voctopus.util.js").loop3D;
+// use a lot of globals because it has less impact on run time
+const testList = ["voxel", "direct", "octet"];
+var tmpvec = new Float32Array(3);
+var voc = new Voctopus(1);
+var tmpOctet = [
+	Object.create(voc.voxel),
+	Object.create(voc.voxel),
+	Object.create(voc.voxel),
+	Object.create(voc.voxel),
+	Object.create(voc.voxel),
+	Object.create(voc.voxel),
+	Object.create(voc.voxel),
+	Object.create(voc.voxel)
+];
+/* Setup */
+const tests = {
+	voxel:{
+		read:(voc, pos, out) => voc.getVoxel(pos, out),
+		write:(voc, pos, i) => voc.setVoxel(pos, {r:i,g:i+1,b:i+2,m:i+3})
+	},
+	direct:{
+		read:(voc, pos, out) => {
+			let ptr = voc.traverse(pos);
+			out = voc.get(ptr); 
+		},
+		write:(voc, pos, i) => {
+			let ptr = voc.init(pos);
+			voc.set(ptr, i, i+1, i+2, i+3, i+4>>4);
+		}
+	},
+	octet:{
+		read: (voc, pos, out) => {
+			tmpvec[0] = pos[0]*2; tmpvec[1] = pos[1]*2; tmpvec[2] = pos[2]*2;
+			voc.getOctet(tmpvec, undefined, out);
+		},
+		write:(voc, pos, i) => {
+			tmpvec[0] = pos[0]*2; tmpvec[1] = pos[1]*2; tmpvec[2] = pos[2]*2;
+			tmpOctet[0].r = tmpOctet[0].g = tmpOctet[0].b = tmpOctet[0].a = i+0;
+			tmpOctet[1].r = tmpOctet[1].g = tmpOctet[1].b = tmpOctet[1].a = i+1;
+			tmpOctet[2].r = tmpOctet[2].g = tmpOctet[2].b = tmpOctet[2].a = i+2;
+			tmpOctet[3].r = tmpOctet[3].g = tmpOctet[3].b = tmpOctet[3].a = i+3;
+			tmpOctet[4].r = tmpOctet[4].g = tmpOctet[4].b = tmpOctet[4].a = i+4;
+			tmpOctet[5].r = tmpOctet[5].g = tmpOctet[5].b = tmpOctet[5].a = i+5;
+			tmpOctet[6].r = tmpOctet[6].g = tmpOctet[6].b = tmpOctet[6].a = i+6;
+			tmpOctet[7].r = tmpOctet[7].g = tmpOctet[7].b = tmpOctet[7].a = i+7;
+			voc.setOctet(tmpvec, tmpOctet);
+		}
+	}
+}
+
+/* util functions */
+let fmt = (cellw, cells) => {
+	return "|"+cells.map((cell) => ((" ").repeat(cellw)+cell).slice(-cellw))
+				 .join("|")+"|";
+}
+
+// make table dividers
+let divider = (cellw, cells) => cells.map((cell) => {
+	switch(cell) {
+		case "l": return ":"+(("-").repeat(cellw-2))+"-";
+		case "r": return "-"+(("-").repeat(cellw-2))+":";
+		case "c": return ":"+(("-").repeat(cellw-2))+":";
+		default: return ("-").repeat(cellw);
+	}
+});
+
+// range from a to b
+let range = (a, b) => {
+	let arr = [];
+	for(let x = a; x <= b; x++) arr.push(x);
+	return arr;
+}
+
+// make table
+function table(cellw, rows) {
+	let out = "";
+	out += "\n"+rows.map((row) => fmt(cellw, row)).join("\n");
+	return out;
+}
+
+
+// shortcut for Date().getTime();
+let time = () => new Date().getTime();
+
+// calculate time elapsed
+let elapsed = (start) => (time()-start)/1000
+let fmtTime = (time) => time.toFixed(3)+"s";
+
+// timer wrapper
+let stopwatch = (cb) => {
+	let start = time();
+	cb();
+	return fmtTime(elapsed(start));
+}
+
+// calculate octets in voctopus
+let calcOctets = (voc) => {
+	let usedBytes = voc.buffer.byteLength-(voc.buffer.byteLength-voc.nextOffset);
+	return ~~(usedBytes / voc.octetSize - 1);
+}
+
+// bytes as mb
+let inMB = (b) => (b/1024/1024).toFixed(3);
+
+/**
+ * Iterate through dmin to dmax, calling callback and putting the result in an array.
+ * @param {int} dmin start iteration at 
+ * @param {int} dmax stop iteration at
+ * @param {function} cb callback
+ * @return {array}
+ */
+let iterd = (dmin, dmax, cb) => {
+	let results = [];
+	for(let d = dmin; d <= dmax; ++d) {
+		results.push(cb(d));
+	}
+	return results;
+}
+
+function cbInst(d) {
+	return stopwatch(() => new Voctopus(d));
+}
+
+function cbExpand(d) {
+	let voc = new Voctopus(d);
+	return stopwatch(() => {
+		let res = 1;
+		while(res) res = voc.expand();
+	});
+}
+
+function cbInit(d) {
+	let voc = new Voctopus(d);
+	let size = Math.pow(2, d - 1);
+	let start = time();
+	loop3D(size, {z:(pos) => voc.init(pos)});
+	return fmtTime(elapsed(start));
+}
+
+function cbWalk(d) {
+	let voc = new Voctopus(d);
+	let size = Math.pow(2, d - 1);
+	let start = time();
+	loop3D(size, {z:(pos) => voc.walk(pos, true)});
+	return fmtTime(elapsed(start));
+}
+
+function loop(voc, read, write, dims, out) {
+	var start, rtime, wtime, i = 0, count = 0;
+	var pos = new Uint32Array(3);
+
+	start = time();
+	for(pos[0] = 0; pos[0] < dims; ++pos[0]) {
+		for(pos[1] = 0; pos[1] < dims; ++pos[1]) {
+			i = 0;
+			for(pos[2] = 0; pos[2] < dims; ++pos[2]) {
+				write(voc, pos, i);
+				++i;
+				++count;
+			}
+		}
+	}
+	wtime = elapsed(start);
+
+	start = time();
+	for(pos[0] = 0; pos[0] < dims; ++pos[0]) {
+		for(pos[1] = 0; pos[1] < dims; ++pos[1]) {
+			for(pos[2] = 0; pos[2] < dims; ++pos[2]) {
+				read(voc, pos, out);
+			}
+		}
+	}
+	rtime = elapsed(start);
+	return {rtime, wtime, count};
+}
+
+function testMem(d) {
+	var voc = new Voctopus(d);
+	var out = [
+		Object.create(voc.voxel),
+		Object.create(voc.voxel),
+		Object.create(voc.voxel),
+		Object.create(voc.voxel),
+		Object.create(voc.voxel),
+		Object.create(voc.voxel),
+		Object.create(voc.voxel),
+		Object.create(voc.voxel)
+	];
+
+	var {rtime, wtime, count} = loop(voc, tests.octet.read, tests.octet.write, voc.dimensions/2, out);
+
+	// fudge for octet test
+	count *= 8;
+	return [d, voc.dimensions+"^3", fmtTime(rtime), fmtTime(wtime), count, calcOctets(voc), inMB(voc.view.byteLength)+"MB"];
+}
+
+function testRW(testName, d) {
+	var voc = new Voctopus(d);
+	var res = 1, dims, out;
+	// expand it first so it won't get slowed down arbitrarily
+	while(res) res = voc.expand();
+	if(testName == "octet") {
+		dims = Math.ceil(voc.dimensions/2);
+		out = [
+			Object.create(voc.voxel),
+			Object.create(voc.voxel),
+			Object.create(voc.voxel),
+			Object.create(voc.voxel),
+			Object.create(voc.voxel),
+			Object.create(voc.voxel),
+			Object.create(voc.voxel),
+			Object.create(voc.voxel)
+		];
+	}
+	else {
+		dims = voc.dimensions;
+		out = Object.create(voc.voxel);
+	}
+	var {rtime, wtime, count} = loop(voc, tests[testName].read, tests[testName].write, dims, out);
+
+	// fudge for octet test
+	if(testName == "octet") {
+		count *= 8;
+		dims *= 2;
+	}
+	return [testName, fmtTime(rtime), fmtTime(wtime), Math.round((1/rtime)*count), Math.round((1/wtime)*count), dims+"^3", count];
+}
+
+function benchmark() {
+	let cellw = 8, i = 0, rows = [], depth = 8;
+	console.log("\nBEGIN BENCHMARK");
+	console.log(  "===============");
+	// Initialization benchmarks  
+	console.log("\nInitialization Tests\n--------------------");
+	rows.push(["Depth"].concat(range(3, depth)));
+	rows.push(divider(cellw, new Array(depth-1).fill("r")));
+	rows.push(["Create"].concat(iterd(3, depth, cbInst.bind(null))));
+	rows.push(["Expand"].concat(iterd(3, depth, cbExpand.bind(null))));
+	rows.push(["Init"].concat(iterd(3, depth, cbInit.bind(null))));
+	rows.push(["Walk"].concat(iterd(3, depth, cbWalk.bind(null))));
+	console.log(table(cellw, rows));
+
+	const doTest = (testName) => rows.push(testRW(testName, depth));
+	// Read/Write Benchmarks 
+	console.log("\nR/W Tests Depth "+depth)
+	console.log(  "-----------------");
+	rows = [];
+	rows.push(["Type", "Read", "Write", "R/s", "W/s", "Dims", "Voxels"]);
+	rows.push(divider(cellw, ["r","r","r","r","r","r","r"]));
+	testList.forEach(doTest);
+	console.log(table(cellw, rows));
+
+	console.log("\nMemory Tests\n------------");
+	rows = [];
+	rows.push(["Depth", "Dims", "Read", "Write", "Voxels", "Octets", "Memory"]);
+	rows.push(divider(cellw, ["c","r","r","r","r","r","r"]));
+
+	i = 5;
+	for(let max = depth; i <= max; ++i) {
+		rows.push(testMem(i));
+	}
+	console.log(table(cellw, rows));
+}
+
+console.log(`
+Benchmarks
+==========
+This page includes some benchmarks run against the current version of Voctopus.
+They're useful as a way to measure the impact of code changes. A brief
+description of each test suite follows.
+
+Init Tests
+----------
+These benchmarks cover certain maintenance operations:
+* Create: the time it takes to instantiate a new Voctopus
+* Expand: how long it takes to expand a buffer to maximum size 
+* Init: the total time to initialize every voxel in the octree to full depth
+* Walk: the total time to walk to each voxel in the tree
+
+R/W Tests
+---------
+These tests measure how long reads and writes take using different interfaces. The
+octree is expanded to full size so that expansions won't interrupt r/w.
+
+* *Object*: how long it takes to read/write using the getVoxel and setVoxel methods
+* *Direct*: time to read/write using the direct getter/setter methods (Voc.set[field])
+* *Octet*: time to read/write using the octet batch write (Voc.set[field])
+
+Memory Tests
+------------
+These tests measure r/w speeds without expansion, and how much memory is consumed
+by Voctopus' on-demand buffer expansion. The direct-write interfaces are used here.
+`);
+
+benchmark();
+```
+
+### src/voctopus.core.js
+```
+"use strict";
+/*jshint strict:false */
+/*jshint globalstrict:true */
+/*jshint latedef:nofunc */
+const {VoctopusKernel, VK_FO} = require("./voctopus.kernel.asm.js");
+const {sump8, npot} = require("../src/voctopus.util");
+const MAX_BUFFER = 1024*1024*1024*512;
+const create = Object.create;
+export const voxel = {
+	r:0,
+	g:0,
+	b:0,
+	a:0,
+}
+
+/**
+* Voctopus Core
+* =============
+*
+* This contains the core Voctopus object.
+*
+* Quick definition of terms:
+*
+* * 1 octant = one voxel at a given depth
+* * 1 octet = 8 octants, or one tree node
+*
+* @module voctopus.core
+*/
+
+/**
+* The Voctopus constructor. Accepts a maximum depth value and a schema (see the schemas
+* module for more info).
+* @param {int} depth maximum depth of tree
+* @param {Array} schema data
+* @return {Voctopus}
+*/
+export function Voctopus(depth) {
+	if(!depth) throw new Error("Voctopus#constructor must be given a depth");
+	var buffer, view, octantSize, octetSize, firstOffset, startSize, maxSize, dimensions, kernel;
+
+	function octet() {
+		return [
+			create(voxel),
+			create(voxel),
+			create(voxel),
+			create(voxel),
+			create(voxel),
+			create(voxel),
+			create(voxel),
+			create(voxel)
+		];
+	}
+
+	/**
+	* calculate the size of a single octant based on the sum of lengths of properties 
+	* in the schema. the size of an octant is just the size of 8 octets
+	*/
+	octantSize = 8; // bytes for a single octet
+	octetSize = octantSize * 8;
+	firstOffset = VK_FO; 
+	maxSize = npot(firstOffset+sump8(depth));
+	dimensions = Math.pow(2, depth);
+
+	// define public properties now
+	Object.defineProperties(this, {
+		"octetSize":{get: () => octetSize},
+		"octantSize":{get: () => octantSize},
+		"freedOctets":{value: [], enumerable: false},	
+		"nextOffset":{get: () => kernel.getNextOffset()},
+		"firstOffset":{get: () => firstOffset},
+		"depth":{get: () => depth},
+		"buffer":{get: () => buffer},
+		"view":{get: () => view},
+		"maxSize":{get: () => maxSize},
+		"dimensions":{get: () => dimensions},
+		"voxel":{get: () => voxel}
+	});
+
+	/**
+	* Set up the ArrayBuffer as a power of two, so that it can be used as a WebGL
+	* texture more efficiently. The minimum size should be keyed to the minimum octant
+	* size times nine because that corresponds to a tree of depth 2, the minimum useful
+	* tree. Optimistically assume that deeper trees will be mostly sparse, which should
+	* be true for very large trees (and for small trees, expanding the buffer won't
+	* be as expensive).
+	*/
+	startSize = npot(Math.max(0x10000, Math.min(maxSize/8, MAX_BUFFER)));
+
+	// initialize the kernel
+	buffer = new ArrayBuffer(startSize);
+	view = new Uint8Array(buffer);
+	kernel = new VoctopusKernel(buffer, depth-1);
+
+
+	/**
+	* Expands the internal storage buffer. This is a VERY EXPENSIVE OPERATION and
+	* should be avoided until neccessary.
+	* @return {bool} true if the voctopus was expanded, otherwise false
+	*/
+	this.expand = function() {
+		var s, tmp, max;
+		max = Math.min(MAX_BUFFER, this.maxSize);
+		s = buffer.byteLength * 2;
+		if(s > max) return false;
+		tmp = new ArrayBuffer(s);
+		tmp.transfer(buffer);
+		kernel = new VoctopusKernel(tmp);
+		buffer = tmp;
+		view = new Uint8Array(buffer);
+		return true;
+	}
+
+	/**
+	* Gets the properties of an octant at the specified index. If the index is invalid
+	* you'll get back garbage data, so use with care.
+	* @param {int} index index to set
+	* @param {voxel} out out param (defaults to instance of this.voxel)
+	* @return {voxel}
+	* @example
+	* let voc = new Voctopus(5);
+	* let index = voc.init([9,3,2]); // initializes the voxel at 9,3,2 and returns its index 
+	* voc.get(index); // {r:0,g:0,b:0,m:0}
+	*/
+	this.get = function(p, out = create(voxel)) {
+		var raw = kernel.getOctant(p);
+		out.r = kernel.rFrom(raw);
+		out.g = kernel.gFrom(raw);
+		out.b = kernel.bFrom(raw);
+		out.a = kernel.aFrom(raw);
+		return out;
+	}
+
+	/**
+	* Sets the properties of an octant at the specified index. Be careful with using it 
+	* directly. If the index is off it will corrupt the octree.
+	* @param {int} p index to write to
+	* @param {int} r red channel 
+	* @param {int} g green channel
+	* @param {int} b blue channel
+	* @param {int} a alpha channel
+	* @return {undefined}
+	* @example
+	* let voc = new Voctopus(5);
+	* let index = voc.init([9,3,2]); // initializes the voxel at 9,3,2 and returns its index 
+	* voc.set(index, 232, 19, 224, 63); // r = 232, g = 19, b = 224, a = 64 
+	*/
+	this.set = function(p, r, g, b, a) {
+		var rgba = kernel.valFromRGBA(r,g,b,a);
+		kernel.setOctant(p, rgba);
+		return p;
+	}
+
+	this.getPointer = function(index) {
+		return kernel.getP(index);
+	}
+
+	this.setPointer = function(index, pointer) {
+		kernel.setP(index, pointer);
+	}
+
+	/**
+	* Initializes a voxel at the supplied vector and branch depth, walking down the
+	* tree and allocating voxels at each level until it hits the end.
+	* @param {vector} v coordinate vector of the target voxel
+	* @param {int} depth depth to initialize at (default max depth)
+	* @return {int} index
+	* @example
+	* let voc = new Voctopus(5);
+	* voc.init([9,3,2]); // 1536 (index)
+	*/
+	this.init = function(v, depth = this.depth) {
+		kernel.prepareLookup(v[0], v[1], v[2], depth);
+		return(kernel.initOctet());
+	}
+
+	/**
+	* Walks the octree from the root to the supplied position vector, building an
+	* array of indices of each octet as it goes, then returns the array. Optionally
+	* initializes octets when init = true.
+	* @param {vector} v coordinate vector of the target voxel
+	* @param {int} depth number of depth levels to walk through (default this.depth)
+	* @param {int} p start pointer (defaults to start of root octet)
+	* @return {array} indexes of octant at each branch
+	* @example
+	* let voc = new Voctopus(5);
+	*/
+	this.walk = function(v, depth = this.depth, p = kernel.getFirstOffset()) {
+		const {step} = kernel;
+		let stack = [p], c = 0, push = stack.push.bind(stack); 
+		kernel.prepareLookup(v[0], v[1], v[2], depth);
+		for(let i = 0; i < depth; ++i) {
+			c = step();
+			if(c) {
+				push(c);
+				p = c;
+			}
+			else return stack;
+		}
+		return stack;
+	}
+
+	/**
+	* Gets the properties of a voxel at a given coordinate and (optional) depth.
+	* @param {vector} v [x,y,z] position
+	* @param {voxel} out out param (defaults to instance of this.voxel)
+	* @param {depth} d max depth to read from (default max depth)
+	* @return {voxel}
+	* @example
+	* var voc = new Voctopus(5, schemas.RGBM);
+	* voc.getVoxel([13,22,1], 4); // {r:0,g:0,b:0,m:0} (index)
+	*/
+	this.getVoxel = function(v, out = create(this.voxel), d = this.depth) {
+		kernel.prepareLookup(v[0], v[1], v[2], d);
+		return this.get(kernel.seek(), out);
+	}
+
+	/**
+	* Sets the properties of an octant at a given coordinate and (optional) depth.
+	* @param {vector} v [x,y,z] position 
+	* @param {object} props a property object, members corresponding to the schema
+	* @param {depth} d depth to write at (default max depth)
+	* @return {index} pointer to the voxel that was set
+	* @example
+	* var voc = new Voctopus(5, schemas.RGBM);
+	* voc.setVoxel([13,22,1], {r:122,g:187,b:1234,m:7}, 4); // 1536 (index)
+	*/
+	this.setVoxel = function(v, props, d = this.depth) {
+		kernel.prepareLookup(v[0], v[1], v[2], d);
+		return this.set(kernel.initOctet(), props.r, props.g, props.b, props.a);
+	}
+
+
+	/**
+	* Steps through the tree until it finds the deepest voxel at the given coordinate,
+	* up to the given depth.
+	* @param {vector} v coordinate vector of the target voxel
+	* @param {int} depth depth to initialize at (default this.depth - 1)
+	* @return {int} index
+	*/
+	this.seek = function(v, depth = this.depth) {
+		kernel.prepareLookup(v[0], v[1], v[2], depth);
+		return kernel.seek();
+	}
+
+	/**
+	* Sets the data for each element in an octet. Pointers are managed automatically.
+	* This can be a big performance boost when you have multiple voxels to write to the
+	* same octet, since it avoids redundant traversal. Octet location is automatically
+	* derived from the given vector so it doesn't have to point at the first voxel in
+	* the octet. If the octet doesn't currently exist in the tree it will be initialized.
+	*
+	* @param {vector} v position vector for target octet 
+	* @param {array} data data to write, as an array of 8 objects (see example)
+	* @param {depth} d depth to write at (default max depth)
+	* @return {undefined}
+	* @example
+	* let voc = new Voctopus(6);
+	* let data = array[
+	* 	 {}, // members may be empty, but must be present so the indexes are correct
+	* 	 {r:210,g:12,b:14,a:15}, // can use all properties
+	* 	 {a:7},   // or
+	* 	 {g:82},  // any
+	* 	 {b:36},  // combination
+	* 	 {r:255}, // thereof
+	* 	 {},
+	* 	 {}
+	* ];
+	* // in this example, walk to the second-lowest depth to find the pointer
+	* voc.set.octet([0,0,1], data); // and done!
+	*/
+	Voctopus.prototype.setOctet = function(v, data, d = this.depth) {
+		let p = this.init(v, d);
+		const set = this.set.bind(this);
+		for(let i = 0; i < 8; ++i) {
+			set(p+i, data[i].r, data[i].g, data[i].b, data[i].a);
+		}
+	}
+
+	/**
+	* Gets an array of each voxel in an octet. Pointers are managed automatically.
+	* This can be a big performance boost when you have multiple voxels to write to the
+	* same octet, since it avoids redundant traversal. Octet location is automatically
+	* derived from the given vector so it doesn't have to point at the first voxel in
+	* the octet. If the octet doesn't currently exist in the tree it will be initialized.
+	*
+	* @param {vector} v coordinates of voxel
+	* @param {octet} out (optional) a collection of 8 voxels to store output
+	* @param {depth} d (optional, default max depth) depth to write at
+	* @return {array} array of 8 voxels ordered by identity (@see voctopus/util#octetIdentity)
+	* @example
+	* let voc = new Voctopus(5, schemas.I8M16P);
+	* voc.getOctet([0,0,0], 3)
+	* 	.map((voxel) => console.log(voxel)); // {m:0} (x8)
+	*/
+	Voctopus.prototype.getOctet = function(v, out = octet(), d = this.depth) {
+		var p = this.seek(v, d);
+		const get = this.get.bind(this);
+		for(let i = 0; i < 8; ++i) {
+			get(p+i, out[i]);
+		}
+		return out;
+	}
+
+	return this;
+}
+
+/**
+* Cast a ray into the octree, computing intersections along the path.
+* The accumulator function should be in the form `f(t, p) => bool`, where t is distance
+* traveled in units, p is a pointer to the voxel hit, and the return value is a boolean
+* indicating whether to halt traversal (true = halt, false = continue).
+* along ray, an
+* @param {vector} ro ray origin coordinates
+* @param {vector} rd unit vector of ray direction
+* @param {function} f accumulator callback
+* @return {bool} true if at least one voxel was hit, otherwise false
+* @example
+* var voc = new Voctopus(5);
+* voc.setVoxel([0,0,0], {r:232,g:0,b:232,m:0}, 0); // set the top,left,rear voxel
+* var ro = [16,16,-32]; // start centered 32 units back on z axis 
+* var rd = [-0.30151, 0.30148, 0.90454]; // 30 deg left, 30 deg up, forward 
+* var dist = 0;
+* var index = 0;
+* var cb = function(t, p) {
+* 	dist = t;
+* 	index = p;
+* 	return 1; // halt after first hit (you could return 0 to keep )
+* }
+* voc.cast(ro, rd, cb); // 1, because at least one voxel was hit
+* p; // 40, pointer of the voxel at [0,0,0]
+* t; // 
+*
+Voctopus.prototype.intersect = function(ro, rd) {
+	// TODO: update these later on to support dynamic coordinates
+	let end = this.dimensions - 1;
+	let start = 0;
+	// decompose vectors, saves time referencing
+	let rdi = [1/rd[0], 1/rd[1], 1/rd[2]];
+
+	// find out if ray intersects outer bounding box
+	if(rayAABB([start,start,start],[end,end,end], ro, rdi)) {
+		// find first octant of intersection
+	}
+
+	// descend
+	// if hit found, call accumulator
+	// if result is zero, repeat for neighbor
+	// return pointer
+}
+*/
+```
+
+### src/voctopus.kernel.asm.js
+```
+"use strict";
+/* jshint strict:false */
+/* jshint unused:false */
+
+// imul polyfill
+Math.imul = Math.imul || function(a, b) {
+  var ah = (a >>> 16) & 0xffff;
+  var al = a & 0xffff;
+  var bh = (b >>> 16) & 0xffff;
+  var bl = b & 0xffff;
+  // the shift by 0 fixes the sign on the high part
+  // the final |0 converts the unsigned value into a signed value
+  return ((al * bl) + (((ah * bl + al * bh) << 16) >>> 0)|0);
+};
+
+// Restricted lib for use in voctopus kernel
+const kernelLib = {
+	Math:Math,
+	Int32Array: Int32Array,
+	Uint32Array: Uint32Array,
+	Float64Array:Float64Array,
+	Uint8Array: Uint8Array
+}
+
+
+function VoctopusKernel32(stdlib, foreign, buffer) {
+	"use asm";
+	// aliases
+	var min = stdlib.Math.min;
+	var max = stdlib.Math.max;
+	var imul = stdlib.Math.imul;
+
+	// heap for reading full octants and color values
+	var heap32 = new stdlib.Uint32Array(buffer);
+	// pointers for fixed locations
+  var D_MAX = 0,  // tree's preset maximum depth (set externally)
+			P_FO = 4,   // offset of root octet in tree (set externally)
+			P_NO = 8,   // next octet pointer
+      P_CUR = 12, // current pointer during operations
+      P_TMP = 16, // next pointer during traversals 
+			D_CUR = 20, // current depth during operations
+		  LOC_X = 24, // x destination for current op
+			LOC_Y = 28, // y destination for current op
+			LOC_Z = 32, // z destination for current op
+			D_TGT = 36, // target depth
+			D_INV = 40, // inverse of current depth
+			V_TMP = 44, // tmp placeholder for a voxel
+			STEPA = 48, // var used in stepIntoTree
+			STEPB = 52, // var used in stepIntoTree 
+			TRAVA = 56, // var used in seek
+			INITA = 60; // var used in initOctet
+	// heap for reading 8-bit values from voxels
+	var heap8 = new stdlib.Uint8Array(buffer);
+	var PO_A = 0,
+	    PO_B = 1,
+	    PO_G = 2,
+	    PO_R = 3;
+	// heap for doing floating point calculations
+	var heapd = new stdlib.Float64Array(buffer);
+	// pointers for heapd
+	var DBLA = 64,
+	    DBLB = 72,
+			DBLC = 80,
+			DBLD = 88,
+			DBLE = 96;
+	var MASK_R = 0xff000000;
+	var MASK_G = 0x00ff0000;
+	var MASK_B = 0x0000ff00;
+	var MASK_A = 0x000000f0;
+
+	/**
+	 * The last bit of a value is a flag for a pointer, so this shifts a
+	 * number left and then sets the last bit to 1 to flag it as a pointer.
+	 * It has to be decoded in reverse.
+	 */
+	function makeP(n) {
+		n = n|0;
+		return (n << 1 | 1)|0;
+	}
+
+	/**
+	 * Sets maximum depth value. Maximum depth should not be modified during
+	 * runtime due to side effects not being tested for. If you need a larger
+	 * octree, copy the current tree into a larger one. Never, ever decrease
+	 * an octree's depth.
+	 * @param {int} n
+	 */
+	function setMaxDepth(n) {
+		n = n|0;
+		heap32[D_MAX>>2] = n;
+	}
+
+	/**
+	 * Accessor for max depth value.
+	 */
+	function getMaxDepth() {
+		return heap32[D_MAX>>2]|0;
+	}
+
+	/**
+	 * Sets the current depth value.
+	 */
+	function setCurrentDepth(d) {
+		d = d|0;
+		heap32[D_CUR>>2] = d;
+	}
+
+	/**
+	 * Accessor for current depth value.
+	 */
+	function getCurrentDepth() {
+		return heap32[D_CUR>>2]|0;
+	}
+
+	/**
+	 * Increments current depth value. Used during octree traversal.
+	 */
+	function incrementCurrentDepth() {
+		setCurrentDepth((1|0) + (getCurrentDepth()|0)|0);
+		calcDepthInverse();
+	}
+
+	/**
+	 * Sets firstOffset value. This generally should not be changed during runtime.
+	 */
+	function setFirstOffset(n) {
+		n = n|0;
+		heap32[P_FO>>2] = n;
+	}
+
+	/**
+	 * Gets firstOffset value.
+	 */
+	function getFirstOffset() {
+		return heap32[P_FO>>2]|0;
+	}
+
+	/**
+	 * Sets nextOffset value. This is generally handled through allocateOctet and
+	 * shouldn't be set manually.
+	 * @param {int} n
+	 */
+	function setNextOffset(n) {
+		n = n|0;
+		heap32[P_NO>>2] = n;
+	}
+
+	/**
+	 * Gets nextOffset value. This value is managed by allocateOctet, so you shouldn't
+	 * access it directly unless you need to read it without incrementing it.
+	 * @return {int}
+	 */
+	function getNextOffset() {
+		return heap32[P_NO>>2]|0;
+	}
+
+	/**
+	 * Increments the next octet value, then returns the previous value. This is
+	 * used to keep track of the next available octet memory space.
+	 */
+	function allocateOctet() {
+		heap32[P_NO>>2] = (8|0) + (heap32[P_NO>>2]|0);
+		return (-8 + (heap32[P_NO>>2]|0))|0;
+	}
+
+	/**
+	 * Gets raw int value of octant at index i.
+	 * @param {int} i 32-bit index
+	 */
+	function getOctant(i) {
+		i = i|0;
+		return (heap32[i<<2>>2])|0;
+	}
+	
+	/**
+	 * Sets octant at index i to value v.
+	 * @param {int} i 32-bit index
+	 * @param {int} v 32-bit value
+	 */
+	function setOctant(i, v) {
+		i = i|0;
+		v = v|0;
+		heap32[i<<2>>2] = v;
+	}
+
+	/**
+	 * For debugging purposes.
+	 */
+	function getTRAVA() {
+		return heap32[TRAVA>>2]|0;
+	}
+
+	/**
+	 * Decodes the red value from an rgba value.
+	 * @param {int} n 32-bit rgba value
+	 * @return {int} 8-bit color value
+	 */
+	function rFrom(n) {
+		n = n|0;
+		// have to be tricky here because js will assume a 32-bit int (not uint)
+		return ((n >> 8) & MASK_G) >> 16;
+		/*
+		heap32[V_TMP>>2] = n;
+		return heap8[V_TMP|0+PO_R|0]|0;
+		*/
+	}
+
+	/**
+	 * Decodes the green value from an rgba value.
+	 * @param {int} n 32-bit rgba value
+	 * @return {int} 8-bit color value
+	 */
+	function gFrom(n) {
+		n = n|0;
+		return (n & MASK_G) >> 16;
+		/*
+		heap32[V_TMP>>2] = n;
+		return heap8[V_TMP|0+PO_G|0]|0;
+		*/
+	}
+
+	/**
+	 * Decodes the blue value from an rgba value.
+	 * @param {int} n 32-bit rgba value
+	 * @return {int} 8-bit color value
+	 */
+	function bFrom(n) {
+		n = n|0;
+		return (n & MASK_B) >> 8;
+		/*
+		heap32[V_TMP>>2] = n;
+		return heap8[V_TMP|0+PO_B|0]|0;
+		*/
+	}
+
+	/**
+	 * Decodes the alpha value from an rgba value.
+	 * @param {int} n 32-bit rgba value
+	 * @return {int} 4-bit alpha value
+	 */
+	function aFrom(n) {
+		n = n|0;
+		return (n & MASK_A) >> 4;
+		/*
+		heap32[V_TMP>>2] = n;
+		return (heap8[V_TMP|0+PO_A|0] >> 4)|0;
+		*/
+	}
+
+	/**
+	 * Determines whether a value is flagged as a pointer by checking the first bit.
+	 */
+	function isP(n) {
+		n = n|0;
+		return (n & 1)|0;
+	}
+
+	/**
+	 * Decode a pointer from a stored value. Returns 0 if the value wasn't
+	 * a pointer. Note this only works correctly if n is a value from the octree.
+	 * @param n {octant} an octant value from the octree
+	 * @return {int} a decoded pointer, or 0 if it wasn't a pointer
+	 */
+	function pFrom(n) {
+		n = n|0;
+		// this will return 0 if n is not an encoded pointer, without branching
+		return ((~(0x7FFFFFFF+(n & 1)) & n) >> 1)|0;
+	}
+
+	/**
+	 * Reads a value from the index with the assumption that it's a pointer.
+	 * @param {int} i index to read from
+	 * @return {int} value decoded as a pointer
+	 */
+	function getP(i) {
+		i = i|0;
+		return (pFrom(getOctant(i)|0)|0)|0;
+	}
+
+	/**
+	 * Sets a value at the index as an encoded pointer.
+	 * @param {int} i index to read from
+	 * @param {int} n pointer to set
+	 */
+	function setP(i, p) {
+		i = i|0;
+		p = p|0;
+		setOctant(i, makeP(p)|0);
+	}
+
+	/**
+	 * Sets the current pointer value, used during traversal.
+	 * Note that this value is *not* encoded as a pointer, because it's not
+	 * in the octree and converting it back and forth is computationally wasteful.
+	 * @param {int} p pointer to set
+	 */
+	function setCurrentPointer(p) {
+		p = p|0;
+		heap32[P_CUR>>2] = p;
+	}
+
+	function getCurrentPointer() {
+		return heap32[P_CUR>>2]|0;
+	}
+
+	/**
+	 * Translates a set of rgba values to an unsigned 32-bit int.
+	 * @param {int} r
+	 * @param {int} g
+	 * @param {int} b
+	 * @param {int} a
+	 * @return int
+	 */
+	function valFromRGBA(r,g,b,a) {
+		r = r|0;
+		g = g|0;
+		b = b|0;
+		a = a|0;
+		return (r << 24) + (g << 16) + (b << 8) + ((a & 63) << 4);
+	}
+
+	/**
+	 * Calculates inverse of current depth. Used in octantIdentity calculation.
+	 */
+	function calcDepthInverse() {
+		heap32[D_INV>>2] = (heap32[D_MAX>>2]|0) - (heap32[D_CUR>>2]|0);
+	}
+
+	/**
+	 * Prepares internal variables for a voxel lookup. Called whenever these
+	 * values need to be refreshed during a voxel lookup or related calculations.
+	 * @param {int} x x-coordinate
+	 * @param {int} y y-coordinate
+	 * @param {int} z z-coordinate
+	 * @param {int} d target depth
+	 */
+	function prepareLookup(x, y, z, d) {
+		x = x|0;
+		y = y|0;
+		z = z|0;
+		d = d|0;
+		heap32[LOC_X>>2] = x;
+		heap32[LOC_Y>>2] = y;
+		heap32[LOC_Z>>2] = z;
+		heap32[D_TGT>>2] = d;
+		heap32[P_CUR>>2] = heap32[P_FO>>2]|0;
+		setCurrentDepth(0);
+	}
+
+	/**
+	 * Finds the identity of an octant for the prepared vector at the current
+	 * depth.
+	 * @return {int}
+	 */
+	function octantIdentity() {
+		return (((heap32[LOC_Z>>2] >>> heap32[D_INV>>2]) & 1) << 2 | 
+						((heap32[LOC_Y>>2] >>> heap32[D_INV>>2]) & 1) << 1 |
+						((heap32[LOC_X>>2] >>> heap32[D_INV>>2]) & 1) 
+					 );
+	}
+
+	/**
+	 * Derives the pointer for the octant at the current depth and vector
+	 * from the octet pointer.
+	 * @return {int}
+	 */
+	function octantPointer() {
+		return ((heap32[P_CUR>>2]|0) + (octantIdentity()|0))|0;
+	}
+
+	function seek() {
+		/* jshint -W041:false */
+		heap32[TRAVA>>2] = 0|0;
+		while((heap32[D_CUR>>2]|0) < min((heap32[D_TGT>>2]|0), (heap32[D_MAX>>2]|0))) {
+			incrementCurrentDepth();
+			heap32[TRAVA>>2] = getOctant(octantPointer()|0)|0;
+			if(!(isP(heap32[TRAVA>>2]|0)|0)) return (heap32[TRAVA>>2])|0;
+			heap32[P_CUR>>2] = pFrom(heap32[TRAVA>>2]|0)|0;
+		}
+		return (heap32[P_CUR>>2])|0;
+	}
+
+	/**
+	 * Initializes an octet at the depth and vector set using prepareLookup
+	 */
+	function initOctet() {
+		heap32[INITA>>2] = 0|0;
+		while((heap32[D_CUR>>2]|0) < min((heap32[D_TGT>>2]|0), (heap32[D_MAX>>2]|0))) {
+			incrementCurrentDepth();
+			heap32[INITA>>2] = getOctant(octantPointer()|0)|0;
+			if(!(isP(heap32[INITA>>2]|0)|0)) {
+				heap32[INITA>>2] = makeP(allocateOctet()|0)|0;
+				setOctant(octantPointer()|0, heap32[INITA>>2]|0);
+			}
+			heap32[P_CUR>>2] = pFrom(heap32[INITA>>2]|0)|0;
+		}
+		return heap32[P_CUR>>2]|0;
+	}
+
+	/**
+	 * Single step in traversal. Used when walking the tree.
+	 */
+	function step() {
+		incrementCurrentDepth();
+		heap32[STEPA>>2] = getOctant(octantPointer()|0)|0;
+		heap32[P_CUR>>2] = pFrom(heap32[STEPA>>2]|0)|0;
+		return (octantPointer()|0)|0;
+	}
+
+	/**
+	 * Check the ray - box intersection of a voxel (which is an axis-aligned bounding box)
+	 * @param {double} bs[x,y,z] box start (top, left, back) 
+	 * @param {double} be[x,y,z] box end (bottom, right, front)
+	 * @param {double} ro[x,y,z] ray origin
+	 * @param {double} rd[x,y,z] inverse of ray direction (inverse should be precalculated)
+	 * @return {int} 1 if there was a hit, otherwise 0
+	 */
+	function rayAABB(bsx, bsy, bsz, bex, bey, bez, rox, roy, roz, rdx, rdy, rdz) {
+		bsx = +bsx;
+		bsy = +bsy;
+		bsz = +bsz;
+		bex = +bex;
+		bey = +bey;
+		bez = +bez;
+		rox = +rox;
+		roy = +roy;
+		roz = +roz;
+		rdx = +rdx;
+		rdy = +rdy;
+		rdz = +rdz;
+
+		heapd[DBLA>>3] = (bsx - rox)*rdx;
+		heapd[DBLB>>3] = (bex - rox)*rdx;
+		heapd[DBLC>>3] = (bsy - roy)*rdy;
+		heapd[DBLD>>3] = (bey - roy)*rdy;
+		heapd[DBLE>>3] = (bsz - roz)*rdz;
+		heapd[DBLD>>3] = (bez - roz)*rdz;
+
+		return (
+			+max(
+				(+min(heapd[DBLA>>3], heapd[DBLB>>3])), 
+				(+min(heapd[DBLC>>3], heapd[DBLD>>3])), 
+				(+min(heapd[DBLD>>3], heapd[DBLE>>3]))
+			) >=
+			+min(
+				(+max(heapd[DBLA>>3], heapd[DBLB>>3])), 
+				(+max(heapd[DBLC>>3], heapd[DBLD>>3])), 
+				(+max(heapd[DBLD>>3], heapd[DBLE>>3]))
+			)
+		)|0;
+	}
+
+	return {
+		setMaxDepth:setMaxDepth,
+		getMaxDepth:getMaxDepth,
+		setFirstOffset:setFirstOffset,
+		getFirstOffset:getFirstOffset,
+		setNextOffset:setNextOffset,
+		getNextOffset:getNextOffset,
+		setCurrentDepth:setCurrentDepth,
+		getCurrentDepth:getCurrentDepth,
+		incrementCurrentDepth:incrementCurrentDepth,
+		calcDepthInverse:calcDepthInverse,
+		setCurrentPointer:setCurrentPointer,
+		getCurrentPointer:getCurrentPointer,
+		allocateOctet:allocateOctet,
+		getTRAVA:getTRAVA,
+		getOctant:getOctant,
+		setOctant:setOctant,
+		getP:getP,
+		setP:setP,
+		rFrom:rFrom,
+		gFrom:gFrom,
+		bFrom:bFrom,
+		aFrom:aFrom,
+		makeP:makeP,
+		pFrom:pFrom,
+		isP:isP,
+		valFromRGBA:valFromRGBA,
+		prepareLookup:prepareLookup,
+		initOctet:initOctet,
+		octantIdentity:octantIdentity,
+		octantPointer:octantPointer,
+		seek:seek,
+		step:step,
+		rayAABB:rayAABB
+	};
+}
+export const VK_FO = 100; // first offset
+export const VK_OS = 8; // octet size (in bytes)
+export const VoctopusKernel = function(buffer, depth) {
+	var vk = new VoctopusKernel32(kernelLib, null, buffer);
+	vk.setMaxDepth(depth);
+	vk.setFirstOffset(VK_FO);
+	vk.setNextOffset(VK_FO+VK_OS);
+	return vk;
+}
+```
+
+### src/voctopus.util.js
+```
+"use strict";
+/**
+ * This module contains an assortment of export functions used internally in Voctopus, as well
+ * as some export functions for analyzing octree properties for experimental purposes (they
+ * help find "sweet spots" for initial octree memory allocations)
+ * @module voctopus/util
+ */
+
+/**
+ * Provide a 24 bit int implementation for DataViews. Note this
+ * causes two reads/writes per call, meaning it's going to be
+ * around half as fast as the native implementations.
+ */
+DataView.prototype.getUint24 =  function(pos) {
+	return (this.getUint16(pos) << 8) + this.getUint8(pos+2);
+}
+
+/**
+ * Setter for Uint24.
+ */
+DataView.prototype.setUint24 =  function(pos, val) {
+	this.setUint16(pos, val >> 8);
+	this.setUint8(pos+2, val & ~4294967040);
+}
+
+/**
+ * Sum of powers of 8 up to n. Used in various calculations.
+ * @param {int} n highest power of 8, up to 24 (after which precision errors become a problem)
+ * @return {Float64}
+ */
+export function sump8(n) {
+	return (Math.pow(8, n+1) -1) / 7;
+}
+
+/**
+ * Find the cardinal identity (0-7) of an octant. Octets contain 8 octants, so in 
+ * x,y,z order they live at identities 0-7.
+ * @param {vector} vector representing the absolute coordinate of a voxel at max depth 
+ * @param {int} dc current depth (zero-indexed)
+ * @param {int} dm maximum depth
+ * @return {int} identity
+ */
+export function octantIdentity(v, dc, dm) {
+	let d = dm - 1 - dc;
+	return (((v[2] >>> d) & 1) << 2 | 
+					((v[1] >>> d) & 1) << 1 |
+					((v[0] >>> d) & 1) 
+				 );
+}
+
+/**
+ * Figures out the maximum size of a voctopus octree, assuming it's 100% dense (e.g. filled with random noise).
+ * @param {int} octantSize size of a single octant in the tree
+ * @param {int} depth octree depth
+ * @return {int}
+ */
+export function fullOctreeSize(octantSize, depth) {
+	return sump8(depth)*octantSize;
+}
+
+/**
+ * Discover the maximum addressable depth for an octree schema at 100% density. Note 
+ * that this is not very useful on its own because ArrayBuffers have a hard limit of 
+ * 2gb, and this can produce buffers sized in EXABYTES if used naively!
+ * @param {int} octantSize (in bytes)
+ * @return {int} depth
+ */
+export function maxAddressableOctreeDepth(octantSize) {
+	var sum = 0, depth = 1;
+	while(((sum+1)-(sum) === 1)) {
+		++depth;
+		sum = sump8(depth)*octantSize;
+	}
+	return depth;
+}
+
+/**
+ * Find the maximum density factor of an octree given an octantSize, depth, and memory limit. Voctopus figures out how much memory to allocate based on its octant size, depth and density factor.
+ * @param {int} octantSize size of a single octant in bytes
+ * @param {int} depth octree depth
+ * @param {int} limit memory limit in bytes
+ */
+export function maxOctreeDensityFactor(octantSize, depth, limit) {
+	return ~~(fullOctreeSize(octantSize, depth)/limit+1);
+}
+
+/**
+ * Find the nearest power of two greater than a number.
+ * @param {int} n number to test against
+ * @return {int}
+ */
+export function npot(n) {
+	n--;
+	n |= n >> 1;
+	n |= n >> 2;
+	n |= n >> 4;
+	n |= n >> 8;
+	n |= n >> 16;
+	n++;
+	return n;
+}
+
+/**
+ * Used to loop through every voxel in an octree and run callbacks. Used for
+ * Voctopus testing. Three nested loops of X, Y, and Z axis, supporting a callback
+ * for each iteration of each loop as supplied in the cbs parameter.
+ *
+ * @param {int} size size of a volume
+ * @param {Object} cbs callback object {x:f(vector),y:f(vector),z:f(vector)}
+ * @return {undefined}
+ */
+export function loop3D(size, cbs) {
+	var cbx, cby, cbz, v = Uint32Array.of(0,0,0);
+	cbx = typeof(cbs.x) === "function"?cbs.x:function(){};
+	cby = typeof(cbs.y) === "function"?cbs.y:function(){};
+	cbz = typeof(cbs.z) === "function"?cbs.z:function(){};
+	for(v[0] = 0; v[0] < size; ++v[0]) {
+		v[1] = 0;
+		v[2] = 0;
+		cbx(v);
+		for(v[1] = 0; v[1] < size; ++v[1]) {
+			v[2] = 0;
+			cby(v);
+			for(v[2] = 0; v[2] < size; ++v[2]) {
+				cbz(v);
+			}
+		}
+	}
+}
+
+/**
+ * Find the coordinate space (size of a single octree axis) for a given depth.
+ * @param {int} depth octree depth
+ */
+export function coordinateSpace(depth) {
+	return Math.pow(2, depth);
+}
+
+/**
+ * Check the ray - box intersection of a voxel (which is an axis-aligned bounding box)
+ * @param {vector} bs box start (top, left, back) 
+ * @param {vector} be box end (bottom, right, front)
+ * @param {vector} ro ray origin
+ * @param {vector} rd inverse of ray direction (inverse should be precalculated)
+ * @return bool true if there was a hit, otherwise false
+ */
+export function rayAABB(bs, be, ro, rd) {
+	let min = Math.min, max = Math.max;
+	// decompose vectors, saves time referencing
+	// ray origin
+	let ox = ro[0], oy = ro[1], oz = ro[2];
+	// ray direction
+	let dx = rd[0], dy = rd[1], dz = rd[2];
+
+  let tx0 = (bs[0] - ox)*dx;
+  let tx1 = (be[0] - ox)*dx;
+  let ty0 = (bs[1] - oy)*dy;
+  let ty1 = (be[1] - oy)*dy;
+  let tz0 = (bs[2] - oz)*dz;
+  let tz1 = (be[2] - oz)*dz;
+
+  let tmin = max(min(tx0, tx1), min(ty0, ty1), min(tz0, tz1));
+  let tmax = min(max(tx0, tx1), max(ty0, ty1), max(tz0, tz1));
+
+  return tmax >= tmin;
+}
+
+/**
+ * Polyfill for ArrayBuffer.transfer. Uses DataView setter/getters to make transfers
+ * as fast as possible. Still slow with large buffers, but less slow than copying
+ * byte by byte. This has been working for me so far but I'm not 100% sure there
+ *
+ * are no bugs or edge cases.
+ *
+ * @param {ArrayBuffer} buffer original arraybuffer
+ * @return {undefined}
+ */
+if(typeof(ArrayBuffer.prototype.transfer) === "undefined") {
+	ArrayBuffer.prototype.transfer =  function transfer(old) {
+		var dva, dvb, i, mod;
+		dva = new DataView(this);
+		dvb = new DataView(old);
+		mod = this.byteLength%8+1;
+		for(i = 0; i <= old.byteLength-mod; i+=8) dva.setFloat64(i, dvb.getFloat64(i));
+		mod = this.byteLength%4+1;
+		if(i < old.byteLength-mod) {
+			dva.setUint32(i, dvb.getUint32(i));
+			i += 4;
+		}
+		mod = this.byteLength%2+1;
+		if(i < old.byteLength-mod) {
+			dva.setUint16(i, dvb.getUint16(i));
+			i += 2;
+		}
+		if(i < old.byteLength) dva.setUint8(i, dvb.getUint8(i));
+	}
+}
+
+// memory mapping utility for debugging
+export function mmap(start, end, v) {
+	const pad = (n) => "0".repeat(4).slice(0, 4-n.toString().length)+n;
+	for(let i = start; i < end; i+=8) {
+		console.log([i, i+1, i+2, i+3, i+4, i+5, i+6, i+7].map(pad).join(" "));
+		console.log([v[i], v[i+1], v[i+2], v[i+3], v[i+4], v[i+5], v[i+6], v[i+7]].map(pad).join(" "));
+		console.log("");
+	}
+}
+```

@@ -1,0 +1,162 @@
+--- v005.md
++++ v006.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-The NerfAcc Rendering Pipeline is a modular, high-performance volumetric rendering method implemented as a PyTorch library [S1]. It decouples the sampling strategy from the radiance field representation, supporting both Occupancy Grids and Proposal Networks to accelerate training and inference [S1]. Unlike standard uniform sampling, it uses interval-based ray representation to support conical frustums and integrates coarse/fine sampling with importance sampling to concentrate samples on surfaces while skipping empty space [S1][S3, unofficial]. It builds on [NeRF Volumetric Rendering (Coarse/Fine Sampling)](979-nerf-volumetric-rendering-coarse-fine-sampling.md) by providing a unified API for efficient transmittance estimation and differentiable rendering [S1].
++The NerfAcc Rendering Pipeline is a modular, high-performance volumetric rendering method implemented as a PyTorch library [S1]. It decouples the sampling strategy from the radiance field representation, supporting both Occupancy Grids and Proposal Networks to accelerate training and inference [S1]. Unlike standard uniform sampling, it uses an interval-based ray representation to support conical frustums and integrates coarse/fine sampling with importance sampling to concentrate samples on surfaces while skipping empty space [S1][S3, unofficial]. It builds on [NeRF Volumetric Rendering (Coarse/Fine Sampling)](979-nerf-volumetric-rendering-coarse-fine-sampling.md) by providing a unified API for efficient transmittance estimation and differentiable rendering [S1].
+ 
+ ## How it works
+@@ -10,12 +10,12 @@
+ - Ray origins $r_o \in \mathbb{R}^{N_{rays} \times 3}$ and normalized directions $r_d \in \mathbb{R}^{N_{rays} \times 3}$ [S3, unofficial].
+ - Near and far clipping planes $near, far$ [S3, unofficial].
+-- Neural radiance field model (coarse and optionally fine) providing density $\sigma$ and color $c$ [S3, unofficial].
++- Neural radiance field model providing density $\sigma$ and color $c$ [S3, unofficial].
+ - Transmittance estimator (Occupancy Grid or Proposal Network) [S1].
+ 
+ **Outputs:**
+-- Rendered RGB color $C$, opacity $\alpha$, depth $z$, and auxiliary data (variance, weights) [S1].
++- Rendered RGB color $C$, opacity $\alpha$, depth $z$, and auxiliary data including variance and weights [S1][S2, unofficial].
+ 
+ **Data Structures:**
+-- **Packed Samples:** Instead of individual points, samples are stored as intervals $(t_0, t_1, r_{id})$ where $t_0, t_1$ are start/end distances along the $r_{id}$-th ray. This allows conical sampling support [S1].
++- **Packed Samples:** Instead of individual points, samples are stored as intervals $(t_0, t_1, r_{id})$ where $t_0, t_1$ are start/end distances along the $r_{id}$-th ray, rather than single coordinates [S1].
+ - **Ray Array:** Structure of shape $(N_{rays}, 8)$. Columns 0-2: origin $(x,y,z)$; Columns 3-5: direction $(x,y,z)$; Column 6: near depth; Column 7: far depth [S3, unofficial].
+ 
+@@ -26,5 +26,5 @@
+ - $perturb$: Jitter factor for coarse sampling (default 0) [S3, unofficial].
+ - $noise\_std$: Noise added to $\sigma$ (default 1) [S3, unofficial].
+-- $chunk$: Integer chunk size for batched inference to manage memory (default 1024*32) [S3, unofficial].
++- $chunk$: Integer chunk size for batched inference to manage memory (default 32768) [S3, unofficial].
+ - $white\_back$: Boolean, adds background weight to RGB if true [S3, unofficial].
+ - $use\_disp$: Boolean, uses inverse depth interpolation if true [S3, unofficial].
+@@ -50,7 +50,7 @@
+ 3. **Efficient Sampling (NerfAcc Core):**
+    Define density function $density\_fn(t_0, t_1, r_{id})$ querying the neural network [S1].
+-   Initialize transmittance estimator: $estimator = \text{nerfacc.TransmittanceEstimator()}$ [S1].
++   Initialize transmittance estimator: $estimator = \text{TransmittanceEstimator()}$ [S1].
+    Perform efficient sampling to get packed intervals:
+-   $$ t_0, t_1, r_{id} = \text{nerfacc.sampling}(r_o, r_d, estimator, density\_fn) $$
++   $$ t_0, t_1, r_{id} = \text{sampling}(r_o, r_d, estimator, density\_fn) $$
+    This step uses the estimator to skip empty space (Occupancy Grid) or concentrate samples (Proposal Network) [S1].
+ 
+@@ -62,12 +62,12 @@
+    Compute opacity:
+    $$ \alpha_i = 1 - \exp(-\delta_i \sigma'_i) $$
+-   [S2, S3, unofficial].
++   [S2, unofficial].
+    Compute weights:
+    $$ \alpha_{shifted} = [1, 1-\alpha_1+\epsilon, \dots, 1-\alpha_{N-1}+\epsilon] $$
+    $$ w_i = \alpha_i \cdot \prod_{j=0}^{i-1} (1-\alpha_j) $$
+-   [S2, S3, unofficial].
++   [S2, unofficial].
+    Compute color and depth:
+    $$ C_{coarse} = \sum w_i c_i, \quad z_{coarse} = \sum w_i \frac{t_{i+1}+t_i}{2} $$
+-   [S2, S3, unofficial].
++   [S2, unofficial].
+    If $white\_back$ is true, add the unrendered background weight $(1 - \sum w_i)$ to the final RGB color, assuming a white background [S3, unofficial].
+ 
+@@ -91,4 +91,11 @@
+    Compute loss (e.g., MSE) between rendered color and ground truth, and backpropagate [S1].
+ 
++**Edge cases and pitfalls:**
++- Clamp points to $[-bound, bound]$ to prevent NaN in hashgrid encoders [S2, unofficial].
++- Handle division by zero in ray bounding box intersection by adding a small epsilon to the direction vector [S3, unofficial].
++- Detach gradients from fine sampling to prevent backpropagation to coarse weights [S3, unofficial].
++- Add $\epsilon$ to weights before PDF computation to avoid division by zero in sample_pdf [S3, unofficial].
++- Set denominator to 1 if it falls below $\epsilon$ during linear interpolation in sample_pdf [S3, unofficial].
++
+ **Pseudocode:**
+ 
+@@ -96,5 +103,5 @@
+ import torch
+ 
+-def nerfacc_rendering_pipeline(r_o, r_d, near, far, nerf_model, estimator, 
++def nerfacc_rendering_pipeline(r_o, r_d, near, far, nerf_model, 
+                                N_samples=64, N_importance=0, perturb=0.0, 
+                                noise_std=1.0, white_back=False, chunk=32768):
+@@ -102,37 +109,8 @@
+     r_o: (N_rays, 3) ray origins
+     r_d: (N_rays, 3) ray directions (normalized)
+-    nerf_model: object with .forward(r_o, r_d, t0, t1) returning (rgb, sigma)
+-    estimator: nerfacc.TransmittanceEstimator instance
++    nerf_model: object with .forward(pts, r_d) returning (rgb, sigma)
+     """
+     
+-    # 1. Define functions for NerfAcc
+-    def density_fn(t0, t1, r_id):
+-        # Query sigma from nerf model
+-        # Note: nerf_model.forward should handle chunking internally or be wrapped
+-        rgb, sigma = nerf_model.forward(r_o[r_id], r_d[r_id], t0, t1)
+-        return sigma
+-
+-    def rgb_density_fn(t0, t1, r_id):
+-        rgb, sigma = nerf_model.forward(r_o[r_id], r_d[r_id], t0, t1)
+-        return rgb, sigma
+-
+-    # 2. Efficient Sampling using NerfAcc
+-    # Returns packed intervals: t0, t1, r_id
+-    t0, t1, r_id = nerfacc.sampling(r_o, r_d, estimator, density_fn=density_fn)
+-
+-    # 3. Differentiable Volumetric Rendering
+-    # Returns color, opacity, depth, aux (weights, etc.)
+-    color, opacity, depth, aux = nerfacc.rendering(
+-        t0, t1, r_id, rgb_density_fn=rgb_density_fn
+-    )
+-
+-    # 4. Update Estimator (typically called every N steps during training)
+-    # estimator.update_every_n_steps(t0, t1, r_id, aux)
+-
+-    return color, opacity, depth, aux
+-
+-# If implementing coarse/fine manually without NerfAcc's internal fine sampling:
+-def manual_coarse_fine(r_o, r_d, near, far, nerf_model, N_samples=64, N_importance=0, perturb=0.0):
+-    # Coarse Sampling
++    # 1. Coarse Sampling
+     z_vals = torch.logspace(0, 1, N_samples, base=2.0, device=r_o.device).unsqueeze(0).unsqueeze(0) - 1
+     z_vals = near + (far - near) * z_vals
+@@ -147,6 +125,5 @@
+     # Query Coarse Model
+     pts = r_o.unsqueeze(1) + r_d.unsqueeze(1) * z_vals.unsqueeze(-1)
+-    # Chunked inference for memory management
+-    rgbs_coarse, sigmas_coarse = nerf_model.forward(pts, r_d) # Shape: (N_rays, N_samples, 3/1)
++    rgbs_coarse, sigmas_coarse = nerf_model.forward(pts, r_d)
+     
+     # Compute Deltas
+@@ -172,10 +149,9 @@
+         # Fine Sampling
+         z_vals_mid = z_vals[:, :, :-1] + 0.5 * deltas
+-        # Sample PDF
+         weights_flat = weights.reshape(-1, N_samples)
+         z_vals_fine = sample_pdf(z_vals_mid.reshape(-1, N_samples-1), 
+                                  weights_flat[:, 1:-1].reshape(-1, N_samples-2) + 1e-5, 
+                                  N_importance, det=(perturb==0))
+-        z_vals_fine = z_vals_fine.detach() # Stop gradient to coarse
++        z_vals_fine = z_vals_fine.detach()
+         
+         # Combine and Sort
+@@ -187,5 +163,5 @@
+         rgbs_fine, sigmas_fine = nerf_model.forward(pts_fine, r_d)
+         
+-        # Re-compute Deltas/Alphas/Weights for fine samples
++        # Re-compute Deltas/Alphas/Weights
+         deltas_fine = z_vals_combined[:, :, 1:] - z_vals_combined[:, :, :-1]
+         delta_inf_fine = 1e10 * torch.ones_like(deltas_fine[:, :, :1])
+@@ -244,7 +220,10 @@
+ A variant that explicitly performs importance sampling after coarse rendering to refine details. It computes weights from coarse samples, samples new depths from the resulting PDF, and queries the network again. It detaches gradients from the coarse weights to stabilize training [S2, S3, unofficial].
+ 
++### Occupancy Grid Sampling
++A strategy to select sample points within a predefined sphere radius $r$ for each scene, using an OccupancyGrid to skip empty space. The density is set to zero for points outside the bounding sphere. The sphere radius $r$ is typically 1.5 for nerf-synthetic dataset scenes, and the occupancy threshold is 0.005 for all experiments [S4].
++
+ ## Operating characteristics
+-- **Time Complexity:** $O(N_{rays} \cdot N_{samples})$ for coarse, plus $O(N_{rays} \cdot N_{importance})$ for fine. The estimator update is $O(N_{samples})$ [S1].
+-- **Memory Complexity:** $O(N_{rays} \cdot N_{samples})$ for storing intervals and activations. Chunking reduces peak memory for network inference [S3, unofficial].
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
+ - **Performance:** Speedups of 1.5× to 20× over standard NeRF rendering depending on the scene and estimator used [S1].
+ - **Strengths:** Decoupled sampling allows easy integration of various acceleration structures (Occupancy Grid, Proposal Network) [S1]. Interval-based representation supports anti-aliasing (Mip-NeRF) [S1].
+@@ -258,3 +237,4 @@
+ [S1] NerfAcc: Efficient Sampling Accelerates NeRFs, https://doi.org/10.1109/iccv51070.2023.01699, fetched 2026-10-26
+ [S2] megvii-research/cv-master-ex, https://github.com/megvii-research/cv-master-ex, fetched 2026-10-27 (unofficial)
+-[S3] GitHub - nitthilan/neural_sparse_voxel_field: Neural scene ..., https://github.com/nitthilan/neural_sparse_voxel_field, fetched 2026-10-28 (unofficial)+[S3] GitHub - nitthilan/neural_sparse_voxel_field: Neural scene ..., https://github.com/nitthilan/neural_sparse_voxel_field, fetched 2026-10-28 (unofficial)
++[S4] Rip-NeRF: Anti-aliasing Radiance Fields with Ripmap-Encoded Platonic Solids, https://arxiv.org/abs/2405.02386v1, fetched 2026-10-26

@@ -3,115 +3,110 @@
 Also called: Compress
 
 ## Overview
-Voxel Chunk Compression is a block-based compression method that encodes fixed-size volumetric data blocks (chunks) into a compact bitstream for storage or transmission. It solves the problem of high memory bandwidth and storage requirements for dense voxel grids by exploiting spatial redundancy within local neighborhoods. Unlike sparse structures which omit empty space entirely, this method retains the dense grid topology but compresses the value data, making it suitable for scenes with high fill factors or where random access to any voxel is required without hierarchical traversal overhead. It differs from [Run-Length Encoding for Voxel Data](5051-run-length-encoding-for-voxel-data.md) by supporting multiple codec backends and planar data layouts, and from [HAC++](5702-hac.md) by operating on fixed-size chunks rather than hierarchical adaptive structures.
+Voxel Chunk Compression is a method for reducing the storage size of volumetric data blocks (chunks) by applying general-purpose compression algorithms to raw voxel buffers. It solves the problem of high memory bandwidth and storage requirements for large-scale voxel worlds by exploiting spatial redundancy within fixed-size data blocks. It is distinguished from sparse structures by operating on dense data layouts and from specialized volume codecs by relying on standard compression primitives (LZ4, Oodle) rather than volume-specific transforms [S1, S1, unofficial].
 
 ## How it works
-**Inputs:** A contiguous buffer of voxel data (`Data`), the number of voxels in the chunk (`NumVoxels`), and a preferred compression codec (`PreferredCodec`).
-**Outputs:** An output buffer (`OutBuffer`) containing a header followed by the compressed payload.
+**Inputs and Outputs:**
+- Input: A contiguous buffer of voxel data (`Data`) containing `NumVoxels` elements of type `FVoxelData`, and a preferred compression codec (`PreferredCodec`).
+- Output: A binary buffer (`OutBuffer`) containing a header followed by the compressed payload.
 
 **Data Structures:**
-*   **Header:** Contains `Magic` (identifier), `FormatVersion`, `CodecId` (identifying the compression algorithm used), `VoxelFormatVersion`, `ChunkSize` (dimensions), and `UncompressedBytes` (size of raw data).
-*   **Payload:** The compressed byte stream.
-*   **PlaneScratch:** Temporary buffer used for planar de-interleaving.
+- `FVoxelData`: The raw voxel element. The size is determined by `sizeof(FVoxelData)`.
+- `Header`: A fixed-size structure containing:
+  - `Magic`: Identifier for the chunk format.
+  - `FormatVersion`: Version of the header format.
+  - `CodecId`: Identifier for the compression algorithm used.
+  - `VoxelFormatVersion`: Version of the voxel data format.
+  - `ChunkSize`: Dimensions of the chunk (e.g., $N \times N \times N$).
+  - `UncompressedBytes`: The size of the raw voxel data in bytes.
+- `Payload`: The compressed byte stream.
+
+**Parameters:**
+- `PreferredCodec`: An enumeration `EVoxelChunkCodec` specifying the compression algorithm. Valid values include `LZ4`, `LZ4Planar`, `Oodle`, `OodlePlanar`, and `Raw` [S1, S1, unofficial].
 
 **Steps:**
-1.  **Validation:** If `NumVoxels` is 0, return failure.
-2.  **Raw Size Calculation:** Calculate `RawBytes = NumVoxels * sizeof(FVoxelData)`.
-3.  **Planar Check:** Determine if the codec requires planar data (`bPlanar`). This is true if `PreferredCodec` is `LZ4Planar` or `OodlePlanar`.
-4.  **De-interleaving:** If `bPlanar` is true, de-interleave the interleaved voxel data into `PlaneScratch` and set the source pointer `Src` to `PlaneScratch`. Otherwise, set `Src` to the original `Data` buffer.
-5.  **Compression Attempt:**
-    *   Map `PreferredCodec` to a format identifier `Fmt`.
-    *   Calculate the maximum compressed size bound: `Bound = FCompression::CompressMemoryBound(Fmt, RawBytes)`.
-    *   Attempt to compress `Src` into `Payload` using `Fmt`.
-    *   If compression succeeds and `CompressedSize < RawBytes`, set `UsedCodec = PreferredCodec`.
-    *   If compression fails or does not reduce size, reset `Payload` and mark `UsedCodec` for fallback.
-6.  **Fallback to Raw:** If `UsedCodec` is not set or the compression was ineffective, set `UsedCodec` to `Raw`. Copy `Data` directly to `Payload` using `memcpy`.
-7.  **Header Construction:** Create a header structure containing `Magic`, `FormatVersion`, `CodecId` (set to `UsedCodec`), `VoxelFormatVersion`, `ChunkSize`, and `UncompressedBytes`.
-8.  **Output Assembly:** Write the Header to `OutBuffer`, followed immediately by the `Payload`.
+1.  **Validation:** If `NumVoxels` is 0, the operation fails and returns false [S1, S1, unofficial].
+2.  **Raw Size Calculation:** Calculate the uncompressed size in bytes:
+    $$ \text{RawBytes} = \text{NumVoxels} \times \text{sizeof}(FVoxelData) $$
+3.  **Planar Check:** Determine if the selected codec requires planar data layout. Let `bPlanar` be true if `PreferredCodec` is `LZ4Planar` or `OodlePlanar` [S1, S1, unofficial].
+4.  **Data Reordering (if Planar):**
+    - If `bPlanar` is true, de-interleave the voxel data from interleaved format (XYZ components of all voxels) to planar format (all X components, then all Y, then all Z) into a scratch buffer `PlaneScratch`.
+    - If `bPlanar` is false, use the original `Data` buffer directly as the source `Src` [S1, S1, unofficial].
+5.  **Compression:**
+    - Determine the compression format `Fmt` corresponding to `PreferredCodec`.
+    - Calculate the maximum compressed size bound:
+      $$ \text{Bound} = \text{FCompression::CompressMemoryBound}(Fmt, \text{RawBytes}) $$
+    - Allocate a payload buffer of size `Bound`.
+    - Attempt to compress `Src` (either `Data` or `PlaneScratch`) into `Payload` using `Fmt`.
+    - If compression succeeds and the resulting `CompressedSize` is strictly less than `RawBytes`, set `UsedCodec` to `PreferredCodec`. Otherwise, reset `Payload` and mark the codec as `Raw` [S1, S1, unofficial].
+6.  **Fallback to Raw:**
+    - If `UsedCodec` is `Raw`, copy the original `Data` buffer directly into `Payload` using `memcpy` [S1, S1, unofficial].
+7.  **Header Construction:** Create the `Header` structure with the appropriate `Magic`, `FormatVersion`, `CodecId` (set to `UsedCodec`), `VoxelFormatVersion`, `ChunkSize`, and `UncompressedBytes` [S1, S1, unofficial].
+8.  **Output Assembly:** Write the `Header` followed immediately by the `Payload` into the output buffer `OutBuffer` [S1, S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compress_voxel_chunk(data: bytes, num_voxels: int, preferred_codec: str) -> bytes:
-    if num_voxels == 0:
-        raise ValueError("NumVoxels cannot be 0")
-
-    # Determine voxel data size
-    voxel_size = get_size_of_voxel_data() # Implementation detail: sizeof(FVoxelData)
-    raw_bytes = num_voxels * voxel_size
-
-    # Determine if planar layout is required
-    b_planar = preferred_codec in ["LZ4Planar", "OodlePlanar"]
-
-    # Handle de-interleaving if necessary
-    if b_planar:
-        src_data = de_interleave(data) # DeInterleave(Data, PlaneScratch)
-    else:
-        src_data = data
-
-    # Attempt compression
-    used_codec = None
-    payload = None
-
-    # Map codec to format
-    fmt = codec_to_format(preferred_codec)
-
-    if fmt is not None:
-        # Calculate bound for allocation
-        bound = get_compression_memory_bound(fmt, raw_bytes)
-        
-        # Attempt compression
-        compressed_data, compressed_size = try_compress(src_data, fmt, bound)
-        
-        if compressed_data is not None and compressed_size < raw_bytes:
-            used_codec = preferred_codec
-            payload = compressed_data
-
-    # Fallback to raw if compression failed or was not beneficial
-    if used_codec is None:
-        used_codec = "Raw"
-        payload = data # memcpy(Data, Payload)
-
-    # Construct header
-    header = {
-        "Magic": "VOXEL_CHUNK_MAGIC",
-        "FormatVersion": 1,
-        "CodecId": used_codec,
-        "VoxelFormatVersion": 1,
-        "ChunkSize": get_chunk_dimensions(),
-        "UncompressedBytes": raw_bytes
-    }
-
-    # Write output
-    out_buffer = write_header(header)
-    out_buffer.extend(payload)
+def CompressVoxelChunk(Data: list, NumVoxels: int, PreferredCodec: EVoxelChunkCodec) -> bytes:
+    if NumVoxels == 0:
+        return False
     
-    return out_buffer
+    RawBytes = NumVoxels * sizeof(FVoxelData)
+    bPlanar = PreferredCodec in [LZ4Planar, OodlePlanar]
+    
+    if bPlanar:
+        Src = DeInterleave(Data, PlaneScratch)
+    else:
+        Src = Data
+    
+    Fmt = CodecToFormat(PreferredCodec)
+    Bound = FCompression.CompressMemoryBound(Fmt, RawBytes)
+    Payload = allocate_buffer(Bound)
+    
+    CompressedSize = FCompression.CompressMemory(Fmt, Src, Payload, RawBytes)
+    
+    if CompressedSize is Success and CompressedSize < RawBytes:
+        UsedCodec = PreferredCodec
+        Payload = Payload[0:CompressedSize]
+    else:
+        UsedCodec = Raw
+        Payload = memcpy(Data) # Fallback to raw
+        
+    Header = {
+        Magic: CHUNK_MAGIC,
+        FormatVersion: CURRENT_FORMAT_VERSION,
+        CodecId: UsedCodec,
+        VoxelFormatVersion: CURRENT_VOXEL_FORMAT_VERSION,
+        ChunkSize: Data.ChunkDimensions,
+        UncompressedBytes: RawBytes
+    }
+    
+    OutBuffer = Header.serialize() + Payload
+    return OutBuffer
 ```
 
-**Parameters:**
-*   `PreferredCodec`: Enum value from `EVoxelChunkCodec` (e.g., `LZ4`, `LZ4Planar`, `Oodle`, `OodlePlanar`, `Raw`) [S1, unofficial].
-
-**Edge Cases:**
-*   **Small Data:** If the compressed size is not smaller than the raw size, the method falls back to raw storage to avoid overhead [S1, unofficial].
-*   **Empty Chunks:** Explicitly handled by returning false/error [S1, unofficial].
+**Edge Cases and Pitfalls:**
+- **Compression Failure:** If the compressed size is not smaller than the raw size, the method falls back to storing raw data. This ensures data integrity but results in no compression gain [S1, S1, unofficial].
+- **Planar Layout:** Planar compression (`LZ4Planar`, `OodlePlanar`) requires memory reordering. Incorrect handling of the de-interleaving step will result in corrupted data upon decompression [S1, S1, unofficial].
+- **Empty Chunks:** Chunks with zero voxels must be explicitly handled to avoid division by zero or invalid memory access [S1, S1, unofficial].
 
 ## Subtopics
 
 ### Encoded Mesh Decoding
-Decodes a compressed voxel mesh representation by scaling down encoded vertex positions and reconstructing the triangle list. It iterates through vertices, extracts X, Y, Z components, and scales them by dividing by 256.0f to convert from fixed-point/compressed integer representation back to floating-point world coordinates. Vertex attributes (material ID, normal) are copied. Indices are validated to be a multiple of 3, and triangles are reconstructed in steps of 3. The mesh offset is also copied [S2, unofficial].
+Decodes a compressed voxel mesh representation by scaling down encoded vertex positions and reconstructing the triangle list. It is distinguished by its specific handling of fixed-point position data and index-based triangle reconstruction. Choose this when rendering voxel meshes that have been stored in a compressed, quantized format to save space. It scales vertex positions by dividing by 256.0f to convert from compressed integer representation back to floating-point world coordinates, copies vertex attributes (material ID, normal), and iterates through indices in steps of 3 to form triangles [S2, S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Compression time depends on the backend codec (e.g., LZ4 is fast, Oodle is slower but higher ratio). Decompression is generally fast for block-based methods.
-*   **Memory Complexity:** Requires temporary scratch memory for planar de-interleaving if `bPlanar` is true. The output size is bounded by the raw size plus header overhead.
-*   **Strengths:** Simple random access to any chunk; compatible with standard compression libraries; handles both dense and sparse-ish data (by falling back to raw if compression is poor).
-*   **Limitations:** Fixed chunk size may lead to inefficiency if data distribution is highly non-uniform across chunks; planar conversion adds CPU overhead.
-*   **When to use:** When random access to specific voxel regions is required and the data has local redundancy suitable for block compressors.
-*   **When not to use:** For highly sparse data where sparse structures are more efficient; for data with no local redundancy.
+- **Time Complexity:** Compression time depends on the chosen codec (LZ4/Oodle). Planar variants add $O(N)$ overhead for de-interleaving. Decompression is the inverse.
+- **Memory Complexity:** Requires additional memory for the scratch buffer during planar compression ($O(N)$) and the payload buffer ($O(N)$).
+- **Performance:** Provides high compression ratios for homogeneous or repetitive voxel data. Performance is hardware-dependent on the underlying compression library.
+- **Strengths:** Simple to implement, leverages highly optimized standard compression libraries, supports multiple codecs.
+- **Limitations:** Does not exploit volumetric-specific redundancy (e.g., empty space) as effectively as sparse structures. Planar layout increases memory usage during compression.
+- **When to Use:** When general-purpose compression is sufficient and volumetric-specific codecs are not available or too complex.
+- **When Not to Use:** When the data is highly sparse (use Sparse structures) or when specific perceptual quality metrics are required (use specialized volume compression).
 
 ## Background
-This method is implemented in the VoxelWorlds engine components, specifically within the voxel core compression utilities. It provides a flexible framework for compressing voxel chunks using various backends like LZ4 and Oodle, supporting both interleaved and planar data layouts [S1, unofficial]. The encoded mesh decoding variant is found in voxel generation tools for reconstructing mesh data from compressed representations [S2, unofficial].
+Voxel Chunk Compression is a technique used in voxel-based game engines and simulation software to manage the large memory footprint of voxel worlds. It is commonly implemented in engines like Unreal Engine's voxel plugins, where it serves as a foundational layer for storing and transmitting voxel data. The method relies on established compression algorithms rather than novel volumetric transforms, making it a robust and widely adopted solution for general voxel data storage [S1, S1, unofficial].
 
 ## Sources
 [S1] draquel/VoxelWorlds, https://github.com/draquel/VoxelWorlds, fetched 2026-10-27 (unofficial)

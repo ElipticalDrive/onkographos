@@ -3,39 +3,39 @@
 Also called: Isovalue-Dependent Error Metric
 
 ## Overview
-This method calculates a relative error metric for adaptive ray marching in scalar volume rendering by weighting the interpolation error based on the distance to a user-specified isovalue $v_{iso}$. Unlike uniform error metrics that treat all regions equally, this approach refines the mesh only in regions where the scalar field values are close to $v_{iso}$, significantly reducing computation time in areas far from the isosurface [S1]. It sets itself apart from its sibling [Error Estimate](2768-error-estimate.md) by introducing data-dependence on the exploration parameter ($v_{iso}$) rather than relying solely on geometric or field-range properties.
+This method calculates a relative error metric for adaptive ray marching in scalar volume rendering by weighting the interpolation error based on the distance to a user-specified isovalue $v_{iso}$ [S1]. Unlike uniform error metrics that treat all regions equally, this approach refines the mesh only in regions where the scalar field values are close to $v_{iso}$, significantly reducing computation time in areas far from the isosurface [S1]. It sets itself apart from its sibling [Error Estimate](2768-error-estimate.md) by introducing data-dependence on the exploration parameter ($v_{iso}$) rather than relying solely on geometric or field-range properties [S1].
 
 ## How it works
 **Inputs:**
-- Scalar field $F(x)$ defined over tetrahedra $T$.
-- Linear interpolation function $f(x)$ within each tetrahedron.
-- User-defined isovalue $v_{iso}$.
-- Scalar field range bounds $v_{min}$ and $v_{max}$.
+- Scalar field $F(x)$ defined over tetrahedra $T$ [S1].
+- Linear interpolation function $f(x)$ within each tetrahedron [S1].
+- User-defined isovalue $v_{iso}$ [S1].
+- Scalar field range bounds $v_{min}$ and $v_{max}$ [S1].
 
 **Outputs:**
-- Error value $E_s(T)$ for each tetrahedron $T$, used to determine step size or refinement.
+- Error value $E_s(T)$ for each tetrahedron $T$, used to determine step size or refinement [S1].
 
 **Data Structures:**
-For each tetrahedron $T$, precompute three coefficients $\gamma_0, \gamma_1, \gamma_2$. These are stored as floating-point values. The layout per tetrahedron is:
+For each tetrahedron $T$, precompute three coefficients $\gamma_0, \gamma_1, \gamma_2$ [S1]. These are stored as floating-point values [S1]. The layout per tetrahedron is:
 - `gamma_0`: float
 - `gamma_1`: float
 - `gamma_2`: float
 
 **Parameters:**
-- $v_{iso}$: The isovalue chosen for visualization. Typical values depend on the dataset's semantic meaning (e.g., density, temperature).
-- $v_\delta$: The range width of the scalar field, defined as $|v_{max} - v_{min}|$. This is a constant for the dataset.
-- $\beta$: The exponent for the weighting function $g(x)$. The sources specify $\beta \in \mathbb{N}, \beta \ge 2$. The implementation uses $\beta = 2$ for efficient precomputation [S1].
+- $v_{iso}$: The isovalue chosen for visualization [S1]. Typical values depend on the dataset's semantic meaning (e.g., density, temperature) [G].
+- $v_\delta$: The range width of the scalar field, defined as $|v_{max} - v_{min}|$ [S1]. This is a constant for the dataset [S1].
+- $\beta$: The exponent for the weighting function $g(x)$ [S1]. The sources specify $\beta \in \mathbb{N}, \beta \ge 2$, and provide the explicit derivation for $\beta = 2$ [S1].
 
 **Formulas:**
 The general error metric is defined as:
 $$ E_s(T) = \frac{1}{|T|} \sum_{x \in T} (g(v_{iso} - F(x)) - g(v_{iso} - f(x)))^2 $$
-where $|T|$ is the volume of tetrahedron $T$, $F(x)$ is the original scalar field value, $f(x)$ is the linearly interpolated value, and $g: \mathbb{R} \to \mathbb{R}$ is a weighting function satisfying:
-1. Continuous within $[-v_\delta, v_\delta]$.
-2. Non-negative ($g \ge 0$).
-3. Strictly monotonic decreasing ($g' < 0$).
-4. No inflection point ($g'' > 0$) within $[-v_\delta, v_\delta]$ [S1].
+where $|T|$ is the volume of tetrahedron $T$, $F(x)$ is the original scalar field value, $f(x)$ is the linearly interpolated value, and $g: \mathbb{R} \to \mathbb{R}$ is a weighting function satisfying the following conditions within $[-v_\delta, v_\delta]$ [S1]:
+1. Continuous [S1].
+2. Non-negative ($g \ge 0$) [S1].
+3. Strictly monotonic decreasing ($g' < 0$) [S1].
+4. No inflection point ($g'' > 0$) [S1].
 
-The simplest function satisfying these conditions is $g(x) = (v_\delta - x)^\beta$ with $\beta \ge 2$. For $\beta = 2$, the error expands into a quadratic form in terms of $v_{iso}$:
+The simplest function satisfying these conditions is $g(x) = (v_\delta - x)^\beta$ with $\beta \ge 2$ [S1]. For $\beta = 2$, the error expands into a quadratic form in terms of $v_{iso}$:
 $$ E_s(T) = \gamma_0 + \gamma_1 v_{iso} + \gamma_2 v_{iso}^2 $$
 
 The coefficients $\gamma_0, \gamma_1, \gamma_2$ are independent of $v_{iso}$ and are precomputed as:
@@ -45,20 +45,20 @@ $$ \gamma_2 = \frac{4}{|T|} \sum_{x \in T} (F(x) - f(x))^2 $$
 
 **Numbered Steps:**
 1. **Preprocessing (Offline):**
-   1. Determine $v_{min}$ and $v_{max}$ for the entire scalar field.
-   2. Calculate $v_\delta = |v_{max} - v_{min}|$.
+   1. Determine $v_{min}$ and $v_{max}$ for the entire scalar field [S1].
+   2. Calculate $v_\delta = |v_{max} - v_{min}|$ [S1].
    3. For each tetrahedron $T$ in the mesh:
-      a. Sample points $x$ within $T$ (or use analytical integration if applicable, though the source implies summation/discretization).
-      b. Compute $F(x)$ and $f(x)$ for each sample.
-      c. Calculate $\gamma_0, \gamma_1, \gamma_2$ using the formulas above.
-      d. Store $\gamma_0, \gamma_1, \gamma_2$ in the tetrahedron's data structure.
+      a. Sample points $x$ within $T$ [S1].
+      b. Compute $F(x)$ and $f(x)$ for each sample [S1].
+      c. Calculate $\gamma_0, \gamma_1, \gamma_2$ using the formulas above [S1].
+      d. Store $\gamma_0, \gamma_1, \gamma_2$ in the tetrahedron's data structure [S1].
 
 2. **Runtime (Per Ray/Step):**
-   1. Receive the user-selected isovalue $v_{iso}$.
+   1. Receive the user-selected isovalue $v_{iso}$ [S1].
    2. For the current tetrahedron $T$ being traversed:
-      a. Retrieve precomputed $\gamma_0, \gamma_1, \gamma_2$.
-      b. Compute $E_s(T) = \gamma_0 + \gamma_1 v_{iso} + \gamma_2 v_{iso}^2$.
-   3. Use $E_s(T)$ to determine step size or termination criteria according to the parent [Error Estimate](2768-error-estimate.md) method.
+      a. Retrieve precomputed $\gamma_0, \gamma_1, \gamma_2$ [S1].
+      b. Compute $E_s(T) = \gamma_0 + \gamma_1 v_{iso} + \gamma_2 v_{iso}^2$ [S1].
+   3. Use $E_s(T)$ to determine step size or termination criteria according to the parent [Error Estimate](2768-error-estimate.md) method [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -112,29 +112,26 @@ def compute_error(gamma0, gamma1, gamma2, v_iso):
 ```
 
 **Edge Cases and Pitfalls:**
-- **Precision:** The calculation involves squaring differences. If $v_\delta$ is large and $F(x) \approx f(x)$, cancellation errors may occur in the calculation of $\gamma$ terms. Using double precision is recommended [G].
-- **Boundary Conditions:** The function $g(x)$ is defined within $[-v_\delta, v_\delta]$. If $v_{iso} - F(x)$ or $v_{iso} - f(x)$ falls outside this range, the properties of $g$ (monotonicity, convexity) are not guaranteed by the source definition. The source implies the metric is valid within the field's range [S1].
-- **Degenerate Input:** If $v_{max} = v_{min}$, then $v_\delta = 0$. The formula for $g(x)$ becomes $g(x) = (-x)^\beta$. This is a valid mathematical case but may lead to division by zero or undefined behavior if not handled, though $v_\delta$ appears in the base of $g$, not the denominator of $E_s$. However, if the field is constant, $F(x) = f(x)$, so $\gamma_2 = 0$ and $\gamma_1 = 0$, resulting in $E_s(T) = \gamma_0$. If the field is constant, $F(x) = f(x)$, so $\gamma_0 = 0$ as well. Thus $E_s(T) = 0$.
+- **Precision:** The calculation involves squaring differences [S1]. If $v_\delta$ is large and $F(x) \approx f(x)$, cancellation errors may occur in the calculation of $\gamma$ terms [G]. Using double precision is recommended [G].
+- **Boundary Conditions:** The function $g(x)$ is defined within $[-v_\delta, v_\delta]$ [S1]. If $v_{iso} - F(x)$ or $v_{iso} - f(x)$ falls outside this range, the properties of $g$ (monotonicity, convexity) are not guaranteed by the source definition [S1].
+- **Degenerate Input:** If $v_{max} = v_{min}$, then $v_\delta = 0$ [S1]. The formula for $g(x)$ becomes $g(x) = (-x)^\beta$ [S1]. If the field is constant, $F(x) = f(x)$, so $\gamma_2 = 0$, $\gamma_1 = 0$, and $\gamma_0 = 0$, resulting in $E_s(T) = 0$ [S1].
 
 ## Subtopics
 
-### Uniform Error Metric
-Calculates error based solely on interpolation bounds without regard to specific feature values. Choose when no specific isovalue is targeted or for general field quality assessment. [Uniform Error Metric](link)
-
-### View-Dependent Error Metric
-Adjusts error based on camera position and viewing angle. Choose when view-dependent optimization is required. [View-Dependent Error Metric](link)
+### Mean-Square Error Metric for Scalar Fields
+An error metric comparing the original scalar field to a downsampled approximation by summing squared difference values at all original sample points within a tetrahedron [S1]. The formula is $EMS(T) = \frac{1}{|T|} \sum_{x \in T} (F(x) - f(x))^2$, where $|T|$ is the volume spanned by tetrahedron $T$, $F(x)$ is the original scalar field value at sample point $x$, and $f(x)$ is the value at $x$ linearly interpolated from the values at the vertices of $T$ [S1]. Using mean-square error alone may cause unnecessary refinement near the viewpoint even if the isosurface is not present in that region, leading to wasted computation [S1]. Data-dependent metrics solve this [S1].
 
 ## Operating characteristics
-- **Time Complexity:** Preprocessing is $O(N)$ where $N$ is the number of tetrahedra, assuming a constant number of samples per tetrahedron. Runtime error calculation is $O(1)$ per tetrahedron.
-- **Memory Complexity:** $O(N)$ to store $\gamma_0, \gamma_1, \gamma_2$ for each tetrahedron.
-- **Measured Performance:** The source notes that using this metric allows saving a "significant amount of computation time" by avoiding refinement in regions far from the isovalue [S1]. Specific hardware or resolution metrics are not provided in the sources.
-- **Strengths:** Reduces unnecessary computation in empty or irrelevant regions of the scalar field. Interactive performance improves as the user changes $v_{iso}$ without needing to re-traverse or re-mesh the data.
-- **Limitations:** Only applicable to scalar fields with a meaningful isovalue. Not suitable for vector fields or general volume rendering without isosurface extraction [S1]. Requires preprocessing.
-- **When to use:** When exploring scalar data with specific isovalue thresholds and interactive performance is critical.
-- **When not to use:** For vector fields, or when the user is exploring multiple unrelated isovalue ranges simultaneously without switching.
+- **Time Complexity:** Preprocessing is $O(N)$ where $N$ is the number of tetrahedra, assuming a constant number of samples per tetrahedron [G]. Runtime error calculation is $O(1)$ per tetrahedron [G].
+- **Memory Complexity:** $O(N)$ to store $\gamma_0, \gamma_1, \gamma_2$ for each tetrahedron [G].
+- **Measured Performance:** The source notes that using this metric allows saving a "significant amount of computation time" by avoiding refinement in regions far from the isovalue [S1]. Specific hardware or resolution metrics are not provided in the sources [S1].
+- **Strengths:** Reduces unnecessary computation in empty or irrelevant regions of the scalar field [S1]. Interactive performance improves as the user changes $v_{iso}$ without needing to re-traverse or re-mesh the data [S1].
+- **Limitations:** Only applicable to scalar fields with a meaningful isovalue [S1]. Not suitable for vector fields or general volume rendering without isosurface extraction [S1]. Requires preprocessing [S1].
+- **When to use:** When exploring scalar data with specific isovalue thresholds and interactive performance is critical [S1].
+- **When not to use:** For vector fields, or when the user is exploring multiple unrelated isovalue ranges simultaneously without switching [S1].
 
 ## Background
-This method was introduced in the paper "Adaptive Multi-Valued Volume Data Visualization using Data-Dependent Error Metrics" [S1]. It addresses the inefficiency of uniform refinement strategies where tetrahedra far from the isosurface are still processed. The key insight is that the error metric can be decoupled from the isovalue at runtime by precomputing coefficients, allowing for efficient adaptive stepping based on user interaction.
+This method was introduced in the paper "Adaptive Multi-Valued Volume Data Visualization using Data-Dependent Error Metrics" [S1]. It addresses the inefficiency of uniform refinement strategies where tetrahedra far from the isosurface are still processed [S1]. The key insight is that the error metric can be decoupled from the isovalue at runtime by precomputing coefficients, allowing for efficient adaptive stepping based on user interaction [S1].
 
 ## Sources
 [S1] Adaptive Multi-Valued Volume Data Visualization using Data-Dependent Error Metrics, https://doi.org/10.2316/journal.205.2005.2.205-4291, fetched 2026-10-26

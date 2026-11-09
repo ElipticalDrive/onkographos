@@ -1,0 +1,199 @@
+--- v005.md
++++ v006.md
+@@ -3,32 +3,42 @@
+ 
+ ## Overview
+-The Voxel Occupancy Test determines whether a given set of continuous world-space points lies within any occupied voxel of a pre-computed voxel grid [S1]. It solves the problem of spatial querying for point-in-volume containment, serving as a fundamental primitive for collision detection, point cloud filtering, and visibility culling [S1]. Unlike [Voxel Visibility Culling](8235-voxel-visibility-culling.md), which filters voxels based on scalar field thresholds to find surface-adjacent cells, this method performs a direct binary containment check against the discrete occupancy mask [S1]. It differs from [Sparse AABB Collision Test](3047-sparse-aabb-collision-test.md) by operating on discrete point queries rather than continuous bounding box intersections [S1].
++The Voxel Occupancy Test determines whether a given query point lies within an occupied voxel of a pre-computed voxel grid. It solves the problem of spatial containment queries for discrete volumetric data, returning a binary result (occupied or empty) for each input coordinate. Unlike [Analytic Voxelization](10493-analytic-voxelization.md) which computes occupancy on-the-fly via signed distance functions, or [Point Cloud Voxelization](1000-point-cloud-voxelization.md) which generates the grid, this method performs a direct lookup against an existing discrete structure. It differs from [Voxel Visibility Culling](8235-voxel-visibility-culling.md) by testing for general volume inclusion rather than surface-adjacency based on scalar thresholds.
+ 
+ ## How it works
++The method maps continuous world coordinates to discrete grid indices and performs a bounds check followed by a texture or array lookup. The implementation varies slightly depending on whether the voxel grid is stored as a dense array or a texture buffer, but the logical steps remain consistent.
++
+ **Inputs and Outputs:**
+-- Input: An array of $N$ query points, represented as an $(N, 3)$ matrix of floating-point world coordinates $P = \{p_0, p_1, \dots, p_{N-1}\}$ [S1].
+-- Input: A voxel grid structure containing the occupancy data and grid parameters (origin, resolution, voxel size) [S1].
+-- Output: A boolean array $B$ of length $N$, where $B_i = \text{true}$ if point $p_i$ is contained in an occupied voxel, and $\text{false}$ otherwise [S1].
++*   **Input:** A set of query points $P = \{p_1, p_2, \dots, p_n\}$, where each $p_i = (x, y, z)$ is a 3D vector in world space.
++*   **Input:** A voxel grid structure $V$ containing occupancy data, defined by a bounding box, resolution $(N_x, N_y, N_z)$, and voxel size $s$.
++*   **Output:** A boolean array $B = \{b_1, b_2, \dots, b_n\}$, where $b_i = \text{true}$ if $p_i$ is inside an occupied voxel, and $\text{false}$ otherwise.
+ 
+ **Data Structures:**
+-The voxel grid is typically stored as a structured 3D array or texture. In the implementation referenced by [S2, unofficial], the occupancy data is stored in a texture `voxel_world` with integer coordinates. The occupancy value is packed into the red channel of a vector, masked by `0xFFu` to ensure a binary 0 or 1 result [S2, unofficial].
++The voxel grid $V$ is typically represented as a 3D array or texture.
++*   **Dense Array:** A 3D array `voxel_world` of size $N_x \times N_y \times N_z$. Each element stores occupancy status. In some implementations (e.g., GPU textures), the value may be packed into a color channel where the red channel `r` encodes occupancy intensity [S2, unofficial].
++*   **Grid Parameters:**
++    *   `voxel_size`: The physical size of one voxel unit.
++    *   `texture_size` or `grid_dims`: The integer dimensions $(N_x, N_y, N_z)$ of the grid.
++    *   `origin`: The world coordinate of the grid's minimum corner (often $(0,0,0)$ or the bounding box min).
+ 
+-**Steps:**
+-1.  **Coordinate Mapping**: For each query point $p_i = (x, y, z)$, map the world coordinates to integer grid indices $(i, j, k)$. This assumes the grid origin is at $(0,0,0)$ and the voxel size is uniform, as implied by the bounds check in [S2, unofficial] which compares directly against `texture_size` [S2, unofficial].
+-    $$ i = \lfloor x / \text{voxel\_size} \rfloor, \quad j = \lfloor y / \text{voxel\_size} \rfloor, \quad k = \lfloor z / \text{voxel\_size} \rfloor $$
+-    [G] If the grid has a non-zero origin, subtract the origin coordinates before division.
++**Numbered Steps:**
++1.  **Coordinate Transformation:** Convert the world coordinate $p = (x, y, z)$ to grid indices $(i, j, k)$.
++    $$ i = \lfloor \frac{x - x_{min}}{s} \rfloor $$
++    $$ j = \lfloor \frac{y - y_{min}}{s} \rfloor $$
++    $$ k = \lfloor \frac{z - z_{min}}{s} \rfloor $$
++    Where $(x_{min}, y_{min}, z_{min})$ is the grid origin and $s$ is the voxel size. If the grid origin is $(0,0,0)$, this simplifies to $i = \lfloor x/s \rfloor$.
+ 
+-2.  **Boundary Check**: Verify that the computed grid indices $(i, j, k)$ lie within the valid bounds of the voxel grid. Let $W, H, D$ be the dimensions of the grid along the X, Y, and Z axes respectively.
+-    - If $i < 0$ or $i \ge W$, the point is outside the grid.
+-    - If $j < 0$ or $j \ge H$, the point is outside the grid.
+-    - If $k < 0$ or $k \ge D$, the point is outside the grid.
+-    - If any condition is true, the point is not included. Return $\text{false}$ (or 0.0) [S2, unofficial].
++2.  **Boundary Check:** Verify if the computed indices $(i, j, k)$ lie within the valid range of the grid.
++    $$ 0 \le i < N_x $$
++    $$ 0 \le j < N_y $$
++    $$ 0 \le k < N_z $$
++    If any index is outside these bounds, the point is outside the voxel grid. Return `false` (or `0.0` in float-based implementations) [S2, unofficial].
+ 
+-3.  **Occupancy Lookup**: Access the voxel data at the integer coordinates. In the specific implementation from [S2, unofficial], the coordinates are accessed as `vec3<i32>(pos.zyx)`, indicating a ZYX memory layout or coordinate system convention (common in OpenGL/Direct3D textures where Z is the depth/texture layer) [S2, unofficial].
+-    - Retrieve the voxel value $v$.
+-    - Extract the occupancy bit: $o = v \ \& \ 0xFFu$ [S2, unofficial].
+-    - Convert to float and clamp: $result = \min(f32(o), 1.0)$ [S2, unofficial].
++3.  **Occupancy Lookup:** Access the voxel data at index $(i, j, k)$.
++    *   If stored as a boolean array: Return `voxel_world[i][j][k]`.
++    *   If stored as a texture (e.g., RGBA): Sample the texture at integer coordinates. The occupancy is often derived from the red channel `r`. The value is normalized to $[0, 1]$ and clamped.
++        $$ \text{occupancy} = \min(\frac{\text{voxel.r}}{255.0}, 1.0) $$
++        Return `true` if $\text{occupancy} > 0$, else `false` [S2, unofficial]. Note: Some implementations use `vec3<i32>(pos.zyx)` for texture sampling, implying a specific memory layout (e.g., Z-major or YXZ packing) [S2, unofficial].
+ 
+-4.  **Result Assignment**: Assign the result to the output array $B_i$. If the implementation uses floating-point returns (as in [S2, unofficial]), $1.0$ indicates inclusion and $0.0$ indicates exclusion. Otherwise, convert to boolean [S1].
++4.  **Result Aggregation:** For a batch of $n$ points, repeat steps 1-3 for each point and store the results in the output boolean array.
+ 
+ **Pseudocode:**
+@@ -36,82 +46,94 @@
+ def voxel_occupancy_test(queries, voxel_grid):
+     """
+-    queries: list of (x, y, z) tuples or (N, 3) array
+-    voxel_grid: object containing .width, .height, .depth, .voxel_size, .origin, and .get_occupancy(x, y, z)
++    queries: list of (x, y, z) tuples
++    voxel_grid: object containing:
++        - origin: (x_min, y_min, z_min)
++        - voxel_size: float s
++        - dimensions: (Nx, Ny, Nz)
++        - data: 3D array or texture lookup function
+     """
++    x_min, y_min, z_min = voxel_grid.origin
++    s = voxel_grid.voxel_size
++    Nx, Ny, Nz = voxel_grid.dimensions
+     results = []
++
+     for p in queries:
+-        # 1. Coordinate Mapping
+-        # [G] Assuming origin is (0,0,0) for simplicity based on S2's direct comparison.
+-        # If origin exists: x -= origin.x, etc.
+-        ix = int(p[0] / voxel_grid.voxel_size)
+-        iy = int(p[1] / voxel_grid.voxel_size)
+-        iz = int(p[2] / voxel_grid.voxel_size)
++        x, y, z = p
+         
+-        # 2. Boundary Check
+-        if (ix < 0 or ix >= voxel_grid.width or
+-            iy < 0 or iy >= voxel_grid.height or
+-            iz < 0 or iz >= voxel_grid.depth):
++        # Step 1: Coordinate Transformation
++        i = int((x - x_min) / s)
++        j = int((y - y_min) / s)
++        k = int((z - z_min) / s)
++        
++        # Step 2: Boundary Check
++        if i < 0 or i >= Nx or j < 0 or j >= Ny or k < 0 or k >= Nz:
+             results.append(False)
+             continue
+             
+-        # 3. Occupancy Lookup
+-        # [G] The specific bit-packing logic (R & 0xFF) from S2 is abstracted here.
+-        # The core logic is checking if the voxel at (ix, iy, iz) is occupied.
+-        # Note: S2 uses zyx order for texture lookup. Adjust indexing if necessary.
+-        is_occupied = voxel_grid.get_occupancy(ix, iy, iz)
++        # Step 3: Occupancy Lookup
++        # Assuming dense array access for clarity; texture logic varies by API
++        voxel_value = voxel_grid.data[i][j][k]
+         
+-        # 4. Result Assignment
+-        results.append(is_occupied)
++        # Handle packed integer/float formats if necessary
++        # Example: if voxel_value is an integer 0-255
++        if isinstance(voxel_value, int):
++            occupancy = min(voxel_value / 255.0, 1.0)
++        else:
++            occupancy = voxel_value
++            
++        results.append(occupancy > 0.0)
+         
+     return results
+ ```
+ 
+-**Parameters:**
+-- `voxel_size`: The physical dimension of a voxel. Must be consistent with the grid creation [S1].
+-- `texture_size` / Grid Dimensions: The number of voxels along each axis [S2, unofficial].
++**Parameters with Typical Values:**
++*   `voxel_size`: Depends on the scene scale. Common values range from $0.01$ to $1.0$ units.
++*   `grid_dimensions`: Determined by the bounding box size divided by `voxel_size`.
+ 
+ **Edge Cases and Pitfalls:**
+-- **Out-of-Bounds**: Points outside the grid bounds must be handled explicitly to avoid memory access violations. The check `pos < 0.0 or pos >= texture_size` is critical [S2, unofficial].
+-- **Coordinate System Order**: The source [S2, unofficial] uses `pos.zyx` for texture lookup, which may differ from standard Cartesian $(i, j, k)$ or $(x, y, z)$ array indexing. Implementers must verify the memory layout of their voxel grid [S2, unofficial].
+-- **Precision**: Floating-point division and floor operations can introduce off-by-one errors for points exactly on voxel boundaries. Using consistent floor logic is required [G].
++*   **Precision Errors:** Floating-point division and floor operations can cause off-by-one errors at boundaries. Using epsilon comparisons or consistent floor logic is critical [G].
++*   **Coordinate System Mismatch:** Texture sampling often expects specific index orders (e.g., ZYX vs XYZ). Mismatching the index order leads to incorrect lookups [S2, unofficial].
++*   **Out-of-Bounds Access:** Failing to check bounds before accessing the array/texture causes crashes or undefined behavior.
+ 
+ ## Subtopics
+ 
+ ### [Point-in-Box Inclusion Test](1400-point-in-box-inclusion-test.md)
+-Determines if points lie within an orthogonal bounding box. It is the core primitive for this method, filtering points before detailed voxel checks. Choose it for simple AABB containment without grid resolution overhead.
++Partitions points by orthogonal bounding boxes. It is the core primitive for voxel occupancy, returning counts of points inside a box. It differs by performing direct geometric containment checks, often optimized for sorting.
+ 
+ ### [3D Filled Circle Kernel Generation](1520-3d-filled-circle-kernel-generation.md)
+-Generates a binary kernel for spherical occupancy. Choose it when defining a discrete spherical region rather than axis-aligned voxel containment.
++Generates a 3D binary kernel for spherical occupancy regions. It differs by defining a discrete spherical region rather than a single voxel containment.
+ 
+ ### [Voxel Filled Check](1705-voxel-filled-check.md)
+-Tests if a specific voxel brick is occupied. Choose it for checking pre-computed voxel masks rather than querying arbitrary world points.
++Determines if a specific voxel/chunk is occupied. It acts as a binary test for pre-computed masks, similar to the core test but often applied to larger chunks.
+ 
+ ### [Sparse AABB Collision Test](3047-sparse-aabb-collision-test.md)
+-Tests if an AABB intersects occupied voxels. Choose it for continuous volume collision detection rather than discrete point queries.
++Tests if an AABB intersects any occupied voxels in a sparse volume. It differs by evaluating a continuous volume (AABB) rather than discrete points.
+ 
+ ### [Solidity Check](4229-solidity-check.md)
+-Determines if a voxel is solid or void, managing chunk-based indexing. Choose it for boundary condition handling in chunked worlds.
++Determines if a voxel is solid geometry or void. It differs by explicitly handling boundary conditions and chunk-based data structures to prevent artifacts.
+ 
+ ### [Sphere-Clamped Voxel Neighbor Search](5131-sphere-clamped-voxel-neighbor-search.md)
+-Finds the closest voxel to a query point. Choose it for nearest-neighbor lookups rather than binary inclusion.
++Finds the closest occupied voxel within a spherical radius. It differs by returning the nearest neighbor rather than a binary result.
+ 
+ ### [Voxel Collision Test](5774-voxel-collision-test.md)
+-Tests a vertical column of voxels for occupancy. Choose it for terrain collision detection along a specific axis.
++Tests a vertical column of voxels for solid geometry between two Y heights. It differs by iterating along an axis to detect occupancy within a slab.
+ 
+ ### [Mask Cache Lookup](6434-mask-cache-lookup.md)
+-Tests points against a boolean occupancy grid with coordinate transformation. Choose it for optimized cache-friendly lookups in structured grids.
++Tests points against a 3D boolean occupancy grid. It differs by explicitly handling coordinate transformation and bounds checking in a single pass, often optimized for caching.
+ 
+ ### [Voxel Visibility Culling](8235-voxel-visibility-culling.md)
+-Discards voxels not contributing to the image. Choose it for rendering optimization, not for general point containment.
++Discards voxels not contributing to the final image. It differs by filtering for surface-adjacent voxels based on scalar thresholds, not just inclusion.
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(N)$ for $N$ query points, assuming $O(1)$ grid lookup [S1].
+-- **Memory Complexity**: $O(1)$ auxiliary space per query, dominated by the storage of the voxel grid itself [S1].
+-- **Performance**: Fast for dense grids and small query sets. Performance degrades if the grid lookup involves complex sparse structures or cache misses [S1].
+-- **Strengths**: Simple to implement, deterministic, and fast for point containment [S1].
+-- **Limitations**: Only works for points; does not handle continuous primitives (lines, triangles) directly without sampling [S1]. Dependent on the resolution of the voxel grid [S1].
++*   **Time Complexity:** $O(1)$ per query point for lookup, assuming direct array access. For $n$ points, the total time is $O(n)$.
++*   **Memory Complexity:** $O(N_x N_y N_z)$ for the voxel grid storage. The query processing uses $O(n)$ for the output array.
++*   **Measured Performance:** Performance is dominated by memory access patterns. On CPU, cache locality of the 3D array affects speed. On GPU, texture sampling is highly optimized but requires correct coordinate transformation and bounds checking [S2, unofficial].
++*   **Strengths:** Fast, deterministic, and simple to implement. Ideal for point-in-volume queries.
++*   **Limitations:** Requires pre-computed voxel grid. Does not provide information about the *type* of geometry (e.g., material) unless the voxel data stores more than binary occupancy.
++*   **When to Use:** When you need to quickly check if points lie inside a known volumetric shape.
++*   **When Not to Use:** When the geometry is dynamic and voxelization is too expensive, or when you need continuous collision detection rather than discrete checks.
+ 
+ ## Background
+-The method is implemented in the Open3D library as `check_if_included`, allowing users to test if points from a point cloud are within an occupied voxel grid created via `create_from_point_cloud` [S1]. It is also used in voxel-based game engines for physics and collision detection, where occupancy is stored in textures and queried via shader code [S2, unofficial].
++The Voxel Occupancy Test is a fundamental operation in voxel-based rendering and simulation. It is closely associated with the Open3D library, which provides the `check_if_included` method for `VoxelGrid` objects [S1]. The method is also used in voxel engines for collision detection and spatial queries, as seen in implementations like the Bevy Voxel Engine [S2, unofficial]. The technique relies on the discretization of space, a concept central to [Voxelization](12-voxelization.md).
+ 
+ ## Sources

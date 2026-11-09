@@ -1,0 +1,200 @@
+# Variance Shadow Mapping for NeRFs
+
+Also called: NeRF shadow mapping, VSM for NeRFs
+
+## Overview
+Variance Shadow Mapping for NeRFs is a technique to render cast shadows in neural radiance fields by leveraging depth statistics from a light-source viewpoint, inspired by traditional variance shadow mapping. It avoids the computational cost of cumulative transmittance along shadow rays by comparing depth inconsistencies between the camera and light views, producing soft shadows with continuous visibility values in $[0, 1]$ rather than the hard shadows produced by naive depth comparison.
+
+## How it works
+**Inputs:**
+- A trained NeRF model.
+- Camera parameters (intrinsics and extrinsics) for the view being rendered.
+- Light source position and direction (or virtual camera parameters for the light view).
+- A depth map $D$ rendered from the camera view.
+- A box filter kernel size (typically small, e.g., $3\times3$ or $5\times5$).
+
+**Outputs:**
+- A visibility factor $V(\mathbf{r}) \in [0, 1]$ for each pixel $\mathbf{r}$ in the camera view.
+- The final pixel color $I(\mathbf{r})$ incorporating the shadow.
+
+**Data Structures:**
+1.  **Depth Map ($X$):** A 2D array of floats, where each element $X(\mathbf{r}_c)$ represents the depth $z$ of the surface point at camera pixel $\mathbf{r}_c$.
+2.  **Squared Depth Map ($X^2$):** A 2D array of floats, where each element $X^2(\mathbf{r}_c) = (X(\mathbf{r}_c))^2$.
+3.  **Filtered Depth Map ($\mu(X)$):** The result of applying a box filter to $X$.
+4.  **Filtered Squared Depth Map ($\mu(X^2)$):** The result of applying a box filter to $X^2$.
+5.  **Variance Map ($\sigma^2$):** A 2D array of floats computed from the filtered maps.
+
+**Steps:**
+
+1.  **Reconstruct 3D Points:**
+    For each pixel $\mathbf{r}$ in the camera view, use the depth map value $z(\mathbf{r})$ and the camera parameters to reconstruct the 3D coordinate $\mathbf{P}$ of the surface point.
+    $$ \mathbf{P} = \text{Unproject}(\mathbf{r}, z(\mathbf{r})) $$
+    [G] This typically involves multiplying the inverse camera projection matrix by the homogeneous coordinate $(\mathbf{r}_x, \mathbf{r}_y, 1, 1)$ and dividing by the resulting $w$ component, then scaling by $z(\mathbf{r})$.
+
+2.  **Render Light View Maps:**
+    Set up a virtual camera at the light source position, oriented towards the scene. Render two depth maps from this light view:
+    -   The depth map $X_L$, where each pixel $\mathbf{r}_l$ contains the depth $z_L$ of the closest surface point along the ray from the light.
+    -   The squared depth map $X^2_L$, where each pixel $\mathbf{r}_l$ contains $z_L^2$.
+    [G] If the NeRF is volumetric, the "depth" is typically the distance to the first significant density threshold or the mean depth of the volume segment. The source implies using the depth map directly, suggesting a surface-like interpretation or a specific depth metric from the NeRF query.
+
+3.  **Filter the Light View Maps:**
+    Apply a box filter (uniform average) to both $X_L$ and $X^2_L$ to obtain $\mu(X_L)$ and $\mu(X^2_L)$.
+    $$ \mu(X_L)(\mathbf{r}_l) = \frac{1}{K} \sum_{\mathbf{k} \in \text{Kernel}} X_L(\mathbf{r}_l + \mathbf{k}) $$
+    $$ \mu(X^2_L)(\mathbf{r}_l) = \frac{1}{K} \sum_{\mathbf{k} \in \text{Kernel}} X^2_L(\mathbf{r}_l + \mathbf{k}) $$
+    where $K$ is the number of pixels in the kernel.
+
+4.  **Calculate Variance:**
+    For each pixel $\mathbf{r}_l$ in the light view, calculate the variance $\sigma^2(\mathbf{r}_l)$:
+    $$ \sigma^2(\mathbf{r}_l) = \mu(X^2_L)(\mathbf{r}_l) - (\mu(X_L)(\mathbf{r}_l))^2 $$
+    [G] Clamp $\sigma^2(\mathbf{r}_l)$ to a minimum of $0$ to handle numerical noise where $\mu(X^2) < \mu(X)^2$.
+
+5.  **Map Camera Point to Light View:**
+    For the 3D point $\mathbf{P}$ reconstructed in Step 1, project it into the light camera's coordinate system to find the corresponding pixel $\mathbf{r}_l$ in the light view. Retrieve the depth $z(\mathbf{P})$ of this point from the light's perspective. Note: The source notation $z(\mathbf{r})$ refers to the depth of the point being shaded as seen from the light. Let this be $z_{cam\_point\_in\_light\_view}$.
+
+6.  **Compute Visibility:**
+    Calculate the visibility $V(\mathbf{r})$ for the camera pixel $\mathbf{r}$ using the Chebyshev inequality-based formula from Variance Shadow Mapping:
+    $$ V(\mathbf{r}) = \begin{cases} 1, & z_{cam\_point\_in\_light\_view} \leq \mu(X_L)(\mathbf{r}_l) \\ \frac{\sigma^2(\mathbf{r}_l)}{\sigma^2(\mathbf{r}_l) + (z_{cam\_point\_in\_light\_view} - \mu(X_L)(\mathbf{r}_l))^2}, & z_{cam\_point\_in\_light\_view} > \mu(X_L)(\mathbf{r}_l) \end{cases} $$
+
+7.  **Final Rendering:**
+    Combine the visibility with the NeRF's radiance. The final color $I(\mathbf{r})$ is:
+    $$ I(\mathbf{r}) = I_d(\mathbf{r}) + I_s(\mathbf{r}) + V(\mathbf{r})\mathcal{R}(\mathbf{r})S_{SG}(\mathbf{r}) $$
+    [G] $I_d$ and $I_s$ are diffuse and specular components, $\mathcal{R}$ is the BRDF, and $S_{SG}$ is the light source intensity. The term $V(\mathbf{r})$ modulates the direct lighting contribution.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def box_filter(image, kernel_size=3):
+    """Apply a uniform box filter to a 2D image."""
+    pad = kernel_size // 2
+    padded = np.pad(image, pad, mode='edge')
+    h, w = image.shape
+    filtered = np.zeros_like(image)
+    
+    # Vectorized box filter using cumulative sums for efficiency
+    # Or simple convolution for clarity
+    kernel = np.ones((kernel_size, kernel_size)) / (kernel_size * kernel_size)
+    filtered = np.convolve(padded.flatten(), kernel.flatten(), mode='valid').reshape(h, w)
+    return filtered
+
+def variance_shadow_mapping_for_nerf(nerf_model, camera_params, light_params, depth_map):
+    """
+    Compute shadow visibility for a NeRF rendering.
+    
+    Args:
+        nerf_model: Function to query NeRF (returns color, density, etc.)
+        camera_params: Intrinsics and extrinsics for the view.
+        light_params: Position and orientation of the light (virtual camera).
+        depth_map: 2D array of depth values from the camera view.
+        
+    Returns:
+        visibility_map: 2D array of visibility values [0, 1].
+    """
+    # Step 1: Reconstruct 3D points from depth map
+    # Assuming camera_params provides a function to unproject (u, v, z) to 3D
+    h, w = depth_map.shape
+    u, v = np.meshgrid(np.arange(w), np.arange(h))
+    
+    # Get 3D points P for each pixel
+    # This depends on the specific camera model; here we assume a helper exists
+    points_3d = unproject_from_depth(u, v, depth_map, camera_params)
+    
+    # Step 2: Render Light View Maps
+    # Project all 3D points into the light's view to get depth and pixel coordinates
+    # We need to handle points that are outside the light's frustum
+    light_depth_map, valid_mask = project_points_to_light_view(points_3d, light_params)
+    
+    # Create squared depth map
+    light_depth_sq = light_depth_map ** 2
+    
+    # Step 3: Filter Light View Maps
+    # Apply box filter. Only filter valid regions or pad appropriately.
+    # For simplicity, assume we filter the whole map and ignore invalid pixels later
+    mu_light_depth = box_filter(light_depth_map, kernel_size=5)
+    mu_light_depth_sq = box_filter(light_depth_sq, kernel_size=5)
+    
+    # Step 4: Calculate Variance
+    variance = mu_light_depth_sq - mu_light_depth ** 2
+    variance = np.maximum(variance, 1e-6) # Clamp to avoid negative variance due to noise
+    
+    # Step 5 & 6: Compute Visibility
+    # For each pixel, we have the depth of the point in the light view: light_depth_map
+    # And the filtered mean depth: mu_light_depth
+    # And the variance: variance
+    
+    # Note: light_depth_map contains the depth of the point being shaded as seen from light
+    # mu_light_depth contains the average depth of neighbors in the light view
+    
+    diff = light_depth_map - mu_light_depth
+    
+    # Visibility calculation
+    visibility = np.ones_like(diff)
+    
+    # Points behind the mean depth are fully visible (in shadow from light's perspective? No, 
+    # if z_point <= z_mean, it means the point is closer to light than the average neighbor, 
+    # so it's not occluded by the "blob" of depth. Wait, standard VSM: 
+    # If z_point <= z_mean, it is in front of the average surface, so it is visible.
+    # If z_point > z_mean, it is behind the average surface, so it might be occluded.
+    
+    occluded_mask = diff > 0
+    visible_mask = ~occluded_mask
+    
+    visibility[visible_mask] = 1.0
+    visibility[occluded_mask] = variance[occluded_mask] / (variance[occluded_mask] + diff[occluded_mask] ** 2)
+    
+    # Handle invalid pixels (outside light frustum)
+    visibility[~valid_mask] = 1.0 # Default to fully lit if light view is invalid
+    
+    return visibility
+
+def unproject_from_depth(u, v, depth, camera_params):
+    """Helper to unproject depth to 3D. Implementation depends on camera model."""
+    # Inverse projection matrix K_inv
+    K_inv = camera_params['K_inv']
+    # Extrinsics: world_to_cam
+    # We want cam_to_world
+    cam_to_world = np.linalg.inv(camera_params['extrinsics'])
+    
+    # Homogeneous coordinates in camera space
+    # x = (u - cx) / fx, y = (v - cy) / fy, z = 1
+    # But depth_map is usually in camera space Z
+    # Let's assume depth_map is the Z value in camera space
+    
+    # Reconstruct in camera space
+    x_cam = (u - camera_params['cx']) * depth / camera_params['fx']
+    y_cam = (v - camera_params['cy']) * depth / camera_params['fy']
+    z_cam = depth
+    
+    # Stack and convert to homogeneous
+    points_cam = np.stack([x_cam, y_cam, z_cam, np.ones_like(z_cam)], axis=-1)
+    
+    # Transform to world space
+    points_world = np.einsum('ij,...j->...i', cam_to_world, points_cam[..., :3])
+    return points_world
+```
+
+**Parameters:**
+-   **Box Filter Kernel Size:** Not explicitly given in sources, but typical for VSM is small (e.g., $3\times3$ to $5\times5$). Larger kernels produce softer shadows but more blur.
+-   **Variance Clamp:** A small epsilon (e.g., $10^{-6}$) to prevent division by zero or negative variance.
+
+**Edge Cases and Pitfalls:**
+-   **Negative Variance:** Due to numerical precision, $\mu(X^2)$ can be slightly less than $\mu(X)^2$. Clamp variance to $\ge 0$.
+-   **Light Frustum Bounds:** Points outside the light's view frustum cannot be projected. These should default to fully visible ($V=1$) or be handled based on scene requirements.
+-   **Depth Discontinuities:** VSM handles soft shadows well, but sharp edges may still exhibit artifacts if the filter size is too small.
+-   **NeRF Depth Definition:** The "depth" in NeRFs is ambiguous (surface vs. volume). The source implies using a depth map, which suggests a surface extraction or a specific depth metric (e.g., mean depth) was used to generate the initial depth map.
+
+## Operating characteristics
+-   **Time Complexity:** $O(N)$ where $N$ is the number of pixels, dominated by the projection and filtering steps. The filtering is $O(N \cdot K^2)$ where $K$ is kernel size.
+-   **Memory Complexity:** $O(N)$ to store the depth maps and filtered maps.
+-   **Performance:** Efficient compared to ray-traced shadows or cumulative transmittance methods, as it avoids per-ray shadow ray traversal.
+-   **Strengths:** Produces soft shadows, efficient, easy to implement with standard graphics primitives.
+-   **Limitations:** Relies on the accuracy of the depth map from the NeRF. Artifacts may occur if the depth map is noisy or if the NeRF representation is not surface-like.
+
+## Background
+This method is inspired by Variance Shadow Mapping (VSM) from traditional computer graphics [S1]. It was proposed for NeRFs in the context of relighting scenes with object insertions, aiming to provide realistic shadow effects without the computational overhead of volumetric shadow ray marching.
+
+## Sources
+[S1] Relighting Scenes With Object Insertions in Neural Radiance Fields, https://doi.org/10.1109/TCSVT.2025.3535599, fetched 2026-10-29

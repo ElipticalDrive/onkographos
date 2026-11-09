@@ -3,100 +3,149 @@
 Also called: Block Position Shadowing, Deterministic Voxel Shadowing
 
 ## Overview
-Positional & Normal-Based Voxel Shadowing is a deterministic, non-ray-traced method for calculating per-face shadow multipliers in voxel grids. It solves the problem of simulating directional shading and ambient occlusion effects without the computational cost of ray marching or global illumination. Unlike [Ray-marched Volumetric Lighting with Density Thresholding](2456-ray-marched-volumetric-lighting-with-density-thresholding.md) which integrates density along rays, this method uses explicit geometric rules based on block coordinates and face normals to apply a static shadow intensity [S1, unofficial]. It is distinct from [Volumetric Soft Shadowing](4507-volumetric-soft-shadowing.md) by producing hard, deterministic shadows rather than probabilistic or blurred ones.
+Positional & Normal-Based Voxel Shadowing calculates a per-face shadow multiplier for voxel blocks using deterministic rules based on block position, block type, and face normal to simulate directional shading without ray tracing [S1, unofficial]. It differs from ray-traced or ray-marched shadowing methods (such as [Two-Pass Shadow Casting](2196-two-pass-shadow-casting-kajiya-and-von-herzen.md) or [Shadow Ray Casting](2796-shadow-ray-casting.md)) by avoiding expensive visibility integration along light rays, instead relying on static geometric heuristics to approximate occlusion [S1, unofficial]. This method is primarily used in voxel-based terrain rendering where performance is critical and global illumination effects are approximated locally.
 
 ## How it works
-The method evaluates visibility and shading for a specific block face based on its position in the world grid and its orientation.
+**Inputs:**
+- `blockPos`: The 3D integer coordinates $(X, Y, Z)$ of the voxel block.
+- `block`: The unique identifier (ID) of the block type (e.g., `ushort`).
+- `faceNormal`: The direction of the face being shaded (e.g., `Direction.Top`, `Direction.Bottom`, etc.).
 
-**Inputs and Outputs:**
-*   **Input:** `blockPos` (3D integer vector representing the block's grid coordinates), `block` (unsigned 16-bit integer block type ID), `faceNormal` (enum or vector representing the outward direction of the face being shaded).
-*   **Output:** `shadow` (float multiplier, typically $1.0$ for full light, $<1.0$ for shadow).
+**Outputs:**
+- `shadow`: A float multiplier in the range $[0, 1]$ representing the shadow intensity applied to the face.
 
 **Data Structures:**
-*   `BlockCulling.transparencyModeByBlock`: An array or map indexed by block ID, storing the transparency mode (e.g., `Opaque`, `Transparent`).
-*   `shadowIntensity`: A scalar float parameter defining the darkness of the shadow.
+- `BlockCulling.transparencyModeByBlock`: An array or map indexed by block ID, storing the transparency mode (e.g., `Opaque`, `Transparent`) for each block type.
+- `shadowIntensity`: A scalar float parameter defining the darkness of the shadow when conditions are met.
 
-**Steps:**
-1.  Initialize `shadow` to $1.0$.
-2.  Determine if the block is transparent. If `BlockCulling.transparencyModeByBlock[block]` is not `Opaque`, the block is marked as transparent.
-3.  Evaluate shadow conditions in order. If any condition is met, set `shadow` to `shadowIntensity` and terminate evaluation (or accumulate, depending on implementation; the source implies assignment) [S1, unofficial]:
-    *   **Condition 1 (Depth):** If `blockPos.Y < -2`, apply shadow.
-    *   **Condition 2 (Z-offset pattern):** If `blockPos.Y <= 0` AND `blockPos.Z != 0` AND `abs(blockPos.X) % 10 > 5`, apply shadow.
-    *   **Condition 3 (X-offset pattern):** If `blockPos.Y <= 0` AND `blockPos.X != 0` AND `abs(blockPos.Z) % 14 > 7`, apply shadow.
-    *   **Condition 4 (Normal-based):** If `faceNormal` points downward (e.g., `Direction.Bottom`) AND the block is opaque, apply shadow.
-4.  Return `shadow`.
-
-**Formulas:**
-The shadow multiplier $S$ is defined as:
-$$
-S = \begin{cases} 
-\text{shadowIntensity} & \text{if } C_1 \lor C_2 \lor C_3 \lor C_4 \\
-1.0 & \text{otherwise}
-\end{cases}
-$$
-Where:
-*   $C_1: \text{blockPos}.y < -2$
-*   $C_2: \text{blockPos}.y \le 0 \land \text{blockPos}.z \neq 0 \land |\text{blockPos}.x| \pmod{10} > 5$
-*   $C_3: \text{blockPos}.y \le 0 \land \text{blockPos}.x \neq 0 \land |\text{blockPos}.z| \pmod{14} > 7$
-*   $C_4: \text{faceNormal} == \text{Bottom} \land \text{isOpaque}$
-
-**Parameters:**
-*   `shadowIntensity`: The value applied when a shadow condition is met. Exact value not defined in the source [S1, unofficial].
-*   Modulo bases: $10$ for X-coordinate check, $14$ for Z-coordinate check.
-*   Depth threshold: $-2$ for Y-coordinate.
-
-**Edge Cases and Pitfalls:**
-*   **Grass Blocks:** Block ID $1$ (Grass) requires special handling. When side faces are visible, an additional dirt face (ID $5$) must be rendered before tint calculation to prevent visual artifacts [S1, unofficial].
-*   **Transparency:** Transparent blocks do not trigger Condition 4 (Normal-based shadowing) if the logic explicitly checks for opacity.
+**Algorithm Steps:**
+1. Initialize `shadow` to $1.0$.
+2. Determine if the block is transparent:
+   - If `BlockCulling.transparencyModeByBlock[block]` is not `Opaque`, the block is marked as transparent.
+3. Evaluate shadow conditions in the following order. If a condition is met, update `shadow` to `shadowIntensity` and terminate further checks for that face:
+   - **Depth Shadow:** If $Y < -2$, apply shadow.
+   - **Z-Offset Shadow:** If $Y \le 0$ AND $Z \neq 0$ AND $|X| \pmod{10} > 5$, apply shadow.
+   - **X-Offset Shadow:** If $Y \le 0$ AND $X \neq 0$ AND $|Z| \pmod{14} > 7$, apply shadow.
+   - **Bottom Face Shadow:** If `faceNormal` is `Direction.Bottom` AND the block is opaque, apply shadow.
+4. Return `shadow`.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def get_shadow(block_pos: Vector3i, block_id: uint16, face_normal: Direction, shadow_intensity: float) -> float:
+def get_shadow(block_pos: Vector3i, block_id: ushort, face_normal: Direction, shadow_intensity: float) -> float:
     """
-    Calculate shadow multiplier for a voxel face based on position and normal.
+    Calculates the shadow multiplier for a voxel face based on position and normal.
+    
+    Args:
+        block_pos: (X, Y, Z) coordinates of the block.
+        block_id: ID of the block type.
+        face_normal: Direction of the face being shaded.
+        shadow_intensity: The multiplier value when shadowed.
+        
+    Returns:
+        Shadow multiplier (1.0 if no shadow, shadow_intensity if shadowed).
     """
     shadow = 1.0
     
-    # Check transparency mode
+    # Check transparency
     is_opaque = (BlockCulling.transparency_mode_by_block[block_id] != TransparencyMode.Transparent)
     
-    # Condition 1: Depth below -2
+    # Condition 1: Depth shadow (below a certain Y threshold)
     if block_pos.y < -2:
         return shadow_intensity
         
-    # Condition 2: Z-offset pattern
-    if block_pos.y <= 0 and block_pos.z != 0 and abs(block_pos.x) % 10 > 5:
-        return shadow_intensity
-        
-    # Condition 3: X-offset pattern
-    if block_pos.y <= 0 and block_pos.x != 0 and abs(block_pos.z) % 14 > 7:
-        return shadow_intensity
-        
-    # Condition 4: Downward facing opaque blocks
+    # Condition 2: Z-offset shadow (checkerboard-like pattern along Z)
+    if block_pos.y <= 0 and block_pos.z != 0:
+        if abs(block_pos.x) % 10 > 5:
+            return shadow_intensity
+            
+    # Condition 3: X-offset shadow (checkerboard-like pattern along X)
+    if block_pos.y <= 0 and block_pos.x != 0:
+        if abs(block_pos.z) % 14 > 7:
+            return shadow_intensity
+            
+    # Condition 4: Bottom face shadow (only for opaque blocks)
     if face_normal == Direction.Bottom and is_opaque:
         return shadow_intensity
         
     return shadow
 ```
 
+**Parameters:**
+- `shadowIntensity`: The multiplier applied when any shadow condition is met. Exact value not defined in the source snippet [S1, unofficial].
+- `blockPos`: Integer vector $(X, Y, Z)$.
+- `faceNormal`: Enum representing one of the six cardinal directions.
+
+**Edge Cases and Pitfalls:**
+- **Grass Blocks:** Blocks with ID 1 (Grass) require an additional dirt face (ID 5) to be rendered when side faces are visible. This must be handled before tint calculation to prevent visual artifacts [S1, unofficial].
+- **Transparent Blocks:** Bottom faces of transparent blocks do not receive the bottom-face shadow, but may still receive position-based shadows if they meet the Y or offset criteria.
+
 ## Subtopics
 
 ### Noise-Driven Face Tinting
-A variant that applies procedural color variation to faces, modulated by the shadow multiplier. It initializes a tint vector to white $(1,1,1)$ and a flag `do_tint` to false. Tinting is enabled for specific block/face combinations: Block ID $1$ (Grass) on non-bottom faces, and Block ID $6$ on top faces. If enabled, it samples 2D noise at the block's X/Z coordinates, normalizes the result to $[0,1]$, and linearly interpolates between `color1` $(0.8, 0.7, 1.0)$ and `color2` $(0.0, 1.0, 1.0)$. The final tint is multiplied by the shadow multiplier. This adds visual variety to flat shaded voxels [S1, unofficial].
+Noise-Driven Face Tinting applies a procedural color tint to visible block faces using 2D noise, modulated by the calculated shadow multiplier from Positional & Normal-Based Voxel Shadowing [S1, unofficial]. It is used to add visual variation to specific block types (e.g., Grass ID 1, Stone ID 6) based on their position.
+- **Definition:** Interpolates between two colors based on a 2D noise sample at the block's X/Z coordinates.
+- **Steps:**
+  1. Initialize `tint` to white $(1, 1, 1)$ and `doTint` flag to `false`.
+  2. Determine if tinting is enabled:
+     - If `block == 1` (Grass) AND `faceNormal != Direction.Bottom`, set `doTint = true`.
+     - If `block == 6` (Stone) AND `faceNormal == Direction.Top`, set `doTint = true`.
+  3. If `doTint` is true:
+     - Sample 2D noise at `(blockPos.X, blockPos.Z)`.
+     - Normalize the noise sample to $[0, 1]$.
+     - Interpolate between `color1` and `color2` using the normalized noise value.
+  4. Multiply the resulting `tint` by the `shadow` multiplier from `GetShadow`.
+- **Parameters:**
+  - `color1`: Base tint color $(0.8, 0.7, 1.0)$.
+  - `color2`: Target tint color $(0.0, 1.0, 1.0)$.
+  - `noise`: A `FastNoiseLite` instance (or equivalent procedural noise generator).
+- **Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def get_shaded_tint(block_pos: Vector3i, block_id: ushort, face_normal: Direction, shadow: float, noise_generator: NoiseGenerator) -> Vector3:
+    """
+    Calculates the final tint color for a voxel face, modulated by shadow.
+    """
+    shadow_multiplier = shadow # From GetShadow function
+    
+    tint = Vector3(1.0, 1.0, 1.0)
+    do_tint = False
+    
+    # Determine if this block/face combination requires tinting
+    if block_id == 1 and face_normal != Direction.Bottom:
+        do_tint = True
+    elif block_id == 6 and face_normal == Direction.Top:
+        do_tint = True
+        
+    if do_tint:
+        # Sample 2D noise at X/Z coordinates
+        noise_val = noise_generator.get_noise_2d(block_pos.x, block_pos.z)
+        # Normalize to [0, 1] assuming noise output is [-1, 1]
+        normalized_noise = (noise_val + 1.0) / 2.0
+        
+        # Interpolate between color1 and color2
+        color1 = Vector3(0.8, 0.7, 1.0)
+        color2 = Vector3(0.0, 1.0, 1.0)
+        tint = Vector3.lerp(color1, color2, normalized_noise)
+        
+    # Apply shadow multiplier
+    final_tint = tint * shadow_multiplier
+    return final_tint
+```
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per face. The calculation involves a fixed number of arithmetic comparisons and modulo operations.
-*   **Memory Complexity:** $O(1)$ auxiliary space, plus storage for the transparency lookup table.
-*   **Performance:** Extremely fast, suitable for real-time rendering on low-end hardware or massive voxel counts where ray tracing is prohibitive.
-*   **Strengths:** Deterministic results, no ray marching artifacts, simple implementation.
-*   **Limitations:** Shadows are static and do not respond to dynamic light sources or complex geometry occlusion. The "shadow" is a stylistic approximation rather than a physical simulation.
-*   **When to use:** Voxel games with static lighting, aesthetic-driven shading, or when performance is critical.
-*   **When not to use:** Physically based rendering, dynamic lighting scenarios, or when soft shadows are required.
+- **Time Complexity:** $O(1)$ per face. The method involves a fixed number of arithmetic comparisons and modulo operations, independent of scene size or light distance.
+- **Memory Complexity:** $O(1)$ auxiliary memory. No ray buffers, depth maps, or accumulation buffers are required.
+- **Performance:** Extremely fast, suitable for real-time rendering of large voxel worlds on low-end hardware or mobile devices. It avoids the high cost of ray marching or shadow map generation.
+- **Strengths:** Deterministic, artifact-free (no ray marching errors or shadow acne), and easily parallelizable.
+- **Limitations:** Shadows are static and do not change with light position or time. They do not account for actual occlusion by other blocks, only heuristic rules. Soft shadows are not supported natively.
+- **When to use:** When performance is critical, and approximate, stylized shading is acceptable. Ideal for voxel games with static lighting or simple directional light sources.
+- **When not to use:** When dynamic lighting, realistic soft shadows, or global illumination effects are required.
 
 ## Background
-This method originates from the `Cubic-Grid_Voxel_Renderer` project by rarefushion [S1, unofficial]. It represents a common approach in voxel engines (like Minecraft clones) where lighting is baked or calculated via simple heuristics rather than global illumination. The use of modulo arithmetic for shadow patterns suggests an attempt to create procedural variation without per-vertex noise sampling overhead.
+This method originates from the `Cubic-Grid_Voxel_Renderer` project by rarefushion [S1, unofficial]. It is designed for efficient voxel rendering in game engines, specifically targeting Minecraft-like block worlds. The approach simplifies lighting by decoupling shadow calculation from ray tracing, using block position and type as proxies for occlusion.
 
 ## Sources
 [S1] rarefushion/Cubic-Grid_Voxel_Renderer, https://github.com/rarefushion/Cubic-Grid_Voxel_Renderer, fetched 2026-10-27 (unofficial)
