@@ -1,61 +1,36 @@
 # Local Sparse Volume Reconstruction
 
-Also called: Reconstructing Local Volumes
+Also called: Local Radiance Field Reconstruction, Per-frame Local Radiance Field, Reconstructing Local Volumes
 
 ## Overview
-Local Sparse Volume Reconstruction is a method for regressing a local neural volume $V_t$ for each input frame $t$ in a sequence, using the current image and $K-1$ neighboring images [S1]. It solves the problem of per-frame radiance field estimation by aggregating multi-view features in a canonical world coordinate frame, ensuring alignment with a global volume for large-scale reconstruction [S1]. Unlike MVS-NeRF, which builds perspective frustum volumes for small-baseline rendering, this method constructs volumes directly in canonical space to facilitate global fusion [S1].
+Local Sparse Volume Reconstruction regresses a local neural volume $V_t$ for each input frame $t$ using its image $I_t$ and $K-1$ neighboring images [S1]. It solves per-frame radiance field estimation by aggregating multi-view features in a canonical world coordinate frame, ensuring alignment with a global volume for large-scale reconstruction [S1]. Unlike MVS-NeRF, which builds perspective frustum volumes for small-baseline rendering, this method constructs volumes directly in canonical space to facilitate global fusion [S1].
 
 ## How it works
 **Inputs:**
-- A sequence of images $\{I_t\}$.
+- A sequence of RGB images $I_1, \dots, I_N$ with known camera parameters $\Phi_1, \dots, \Phi_N$ [S1].
 - For each frame $t$, a set of $K$ neighboring viewpoints $\mathcal{N}_t$ (typically temporal neighbors in monocular video) [S1].
-- Camera intrinsics and extrinsics for all views to define the world coordinate frame [S1].
 
 **Outputs:**
 - A local sparse neural volume $\mathcal{V}_t$ representing the local radiance field for frame $t$ in canonical world space [S1].
 
 **Data Structures:**
-1.  **2D Feature Map $F_t$**: Extracted for each image $I_t$ using a deep 2D CNN. Layout is a standard 2D tensor (height, width, channels) [S1].
-2.  **Sparse Voxel Set**: A set of 3D voxel centers $\{v\}$ within an axis-aligned bounding box (AABB) that covers the frustums of all $K$ neighboring viewpoints in the world coordinate frame. Voxels invisible to all $K$ views are masked out [S1].
-3.  **3D Feature Volume $\mathcal{U}_i$**: For each neighboring view $i \in \mathcal{N}_t$, a 3D feature volume where each visible voxel $v$ stores a concatenated feature vector [S1].
-4.  **Local Volume $\mathcal{V}_t$**: The output volume, same spatial layout as $\mathcal{U}_i$, containing the regressed local radiance field features [S1].
+1. **2D Feature Map $F_t$**: A standard 2D tensor (height, width, channels) extracted for each image $I_t$ using a deep 2D CNN [S1].
+2. **Sparse Voxel Set**: A set of 3D voxel centers $\{v\}$ within an axis-aligned bounding box (AABB) covering the frustums of all $K$ neighboring viewpoints in the world coordinate frame, with voxels invisible to all views masked out [S1].
+3. **3D Feature Volume $\mathcal{U}_i$**: For each neighboring view $i \in \mathcal{N}_t$, a 3D feature volume where each visible voxel $v$ stores a concatenated feature vector [S1].
+4. **Local Volume $\mathcal{V}_t$**: The output volume with the same spatial layout as $\mathcal{U}_i$, containing the regressed local radiance field features [S1].
 
 **Parameters:**
-- $K$: Number of neighboring viewpoints used for reconstruction. Typical value: Not given in the sources.
+- $K$: Number of neighboring viewpoints used for reconstruction. Not given in the sources.
 - $G$: MLP for computing direction features. Architecture details not given in the sources.
 - $J$: Deep neural network for regressing the local volume from aggregated statistics. Architecture details not given in the sources.
 
 **Steps:**
-
-1.  **Extract 2D Image Features**:
-    For each input image $I_t$ in the sequence, pass it through a deep 2D convolutional neural network to extract a 2D feature map $F_t$ [S1].
-
-2.  **Define Bounding Box and Sparse Voxels**:
-    Define an axis-aligned bounding box in the canonical world coordinate frame that encompasses the viewing frustums of all $K$ neighboring viewpoints in $\mathcal{N}_t$. Identify the set of voxels within this box. Mask out any voxel that is not visible to at least one of the $K$ neighboring views, resulting in a sparse set of active voxels [S1].
-
-3.  **Build 3D Feature Volumes ($\mathcal{U}_i$)**:
-    For each neighboring viewpoint $i \in \mathcal{N}_t$ and its corresponding feature map $F_i$:
-    - For each visible voxel $v$ in the sparse set:
-        - Compute the 2D projection $u_i$ of the voxel center $v$ onto the image plane of view $i$.
-        - Fetch the 2D image feature $F_i(u_i)$ from the feature map at location $u_i$ [S1].
-        - Compute the viewing direction $d_i$ from viewpoint $i$ to voxel $v$ in world coordinates.
-        - Pass $d_i$ through an MLP $G$ to get direction features $G(d_i)$ [S1].
-        - Concatenate the image and direction features to form the per-view feature at voxel $v$:
-          $$ \mathcal{U}_i(v) = [F_i(u_i), G(d_i)] $$
-          where $[\cdot, \cdot]$ denotes concatenation [S1].
-
-4.  **Aggregate and Regress Local Volume ($\mathcal{V}_t$)**:
-    - For each visible voxel $v$, compute the element-wise mean and variance of the features $\mathcal{U}_i(v)$ across all $K$ neighboring viewpoints $i \in \mathcal{N}_t$:
-      $$ \text{Mean}_v = \text{Mean}_{i \in \mathcal{N}_t} \mathcal{U}_i(v) $$
-      $$ \text{Var}_v = \text{Var}_{i \in \mathcal{N}_t} \mathcal{U}_i(v) $$
-      These operations are invariant to the number and order of inputs, naturally handling voxels with varying numbers of visible viewpoints [S1].
-    - Concatenate the mean and variance features: $[\text{Mean}_v, \text{Var}_v]$ [S1].
-    - Pass this concatenated vector through a deep neural network $J$ to regress the local volume feature at voxel $v$:
-      $$ \mathcal{V}_t(v) = J([\text{Mean}_{i \in \mathcal{N}_t} \mathcal{U}_i(v), \text{Var}_{i \in \mathcal{N}_t} \mathcal{U}_i(v)]) $$
-      The result $\mathcal{V}_t$ is the local neural volume for frame $t$ [S1].
+1. **Extract 2D Image Features**: For each input image $I_t$ in the sequence, pass it through a deep 2D convolutional neural network to extract a 2D feature map $F_t$ [S1].
+2. **Define Bounding Box and Sparse Voxels**: Define an axis-aligned bounding box in the canonical world coordinate frame that encompasses the viewing frustums of all $K$ neighboring viewpoints in $\mathcal{N}_t$ [S1]. Identify the set of voxels within this box and mask out any voxel that is not visible to at least one of the $K$ neighboring views, resulting in a sparse set of active voxels [S1].
+3. **Build 3D Feature Volumes ($\mathcal{U}_i$)**: For each neighboring viewpoint $i \in \mathcal{N}_t$ and its corresponding feature map $F_i$, iterate over each visible voxel $v$ in the sparse set [S1]. Compute the 2D projection $u_i$ of the voxel center $v$ onto the image plane of view $i$ [S1]. Fetch the 2D image feature $F_i(u_i)$ from the feature map at location $u_i$ [S1]. Compute the viewing direction $d_i$ from viewpoint $i$ to voxel $v$ in world coordinates [S1]. Pass $d_i$ through an MLP $G$ to get direction features $G(d_i)$ [S1]. Concatenate the image and direction features to form the per-view feature at voxel $v$: $\mathcal{U}_i(v) = [F_i(u_i), G(d_i)]$, where $[\cdot, \cdot]$ denotes concatenation [S1].
+4. **Aggregate and Regress Local Volume ($\mathcal{V}_t$)**: For each visible voxel $v$, compute the element-wise mean and variance of the features $\mathcal{U}_i(v)$ across all $K$ neighboring viewpoints $i \in \mathcal{N}_t$: $\text{Mean}_v = \text{Mean}_{i \in \mathcal{N}_t} \mathcal{U}_i(v)$ and $\text{Var}_v = \text{Var}_{i \in \mathcal{N}_t} \mathcal{U}_i(v)$ [S1]. These operations are invariant to the number and order of inputs, naturally handling voxels with varying numbers of visible viewpoints [S1]. Concatenate the mean and variance features: $[\text{Mean}_v, \text{Var}_v]$ [S1]. Pass this concatenated vector through a deep neural network $J$ to regress the local volume feature at voxel $v$: $\mathcal{V}_t(v) = J([\text{Mean}_{i \in \mathcal{N}_t} \mathcal{U}_i(v), \text{Var}_{i \in \mathcal{N}_t} \mathcal{U}_i(v)])$ [S1]. The result $\mathcal{V}_t$ is the local neural volume for frame $t$ [S1].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
@@ -63,91 +38,69 @@ def reconstruct_local_volume(images, neighbors, K, camera_intrinsics, camera_ext
                              feature_extractor, direction_mlp, regressor, voxel_grid):
     """
     Reconstructs a local sparse volume for a target frame using K neighboring views.
-    
-    Args:
-        images: List of images for the target frame and K-1 neighbors.
-        neighbors: List of K camera poses (extrinsics) and intrinsics for the neighboring views.
-        K: Number of neighboring views.
-        feature_extractor: 2D CNN to extract image features.
-        direction_mlp: MLP to encode viewing directions.
-        regressor: Deep NN J to regress local volume from mean/var features.
-        voxel_grid: Sparse set of voxel centers v in canonical world space, 
-                    filtered to be visible to at least one neighbor.
-                    
-    Returns:
-        local_volume: 3D tensor of features for the local volume V_t.
     """
     # Step 1: Extract 2D features for all K views
-    # images[0] is target, images[1..K-1] are neighbors, or all K are neighbors depending on definition.
-    # Source says "using its image It and K-1 neighboring images", so total K images.
-    feature_maps = []
-    for img in images:
-        F = feature_extractor(img)
-        feature_maps.append(F)
-        
-    # Step 2: Define bounding box and sparse voxels (Pre-computed or done externally)
-    # voxel_grid contains list of 3D points v that are visible to at least one neighbor.
-    
-    local_volume = {} # Dictionary mapping voxel v to feature vector
-    
-    # Step 3: Build 3D feature volumes U_i for each neighbor i
-    # Note: The source aggregates across neighbors to get V_t. 
-    # We need to store U_i(v) for all i and v to compute mean/var.
-    
-    # Initialize accumulators for mean and variance
-    # Since variance requires sum of squares, we store sum and sum_sq
-    voxel_stats = {} # v -> (sum_features, sum_sq_features, count)
-    
+    feature_maps = [feature_extractor(img) for img in images]
+
+    # Step 2: voxel_grid contains 3D points v visible to at least one neighbor
+    voxel_stats = {}  # v -> [sum_features, sum_sq_features, count]
+
     for i in range(K):
         F_i = feature_maps[i]
-        cam = neighbors[i]
-        
-        # Get viewing direction and projection for each voxel
+        cam_intr = camera_intrinsics[i]
+        cam_extr = camera_extrinsics[i]
+
         for v in voxel_grid:
             # Project voxel v to 2D image plane of view i
-            u_i = project_2d(v, cam.intrinsics, cam.extrinsics)
-            
-            # Fetch 2D feature
-            # Bilinear interpolation or nearest neighbor depending on implementation.
-            # Source says "fetch", implies sampling.
+            u_i = project_2d(v, cam_intr, cam_extr)
+            # Fetch 2D feature via bilinear interpolation
             feat_2d = sample_feature(F_i, u_i)
-            
             # Compute viewing direction d_i from camera center to v
-            cam_center = get_camera_center(cam.extrinsics)
+            cam_center = get_camera_center(cam_extr)
             d_i = normalize(v - cam_center)
-            
             # Encode direction
             feat_dir = direction_mlp(d_i)
-            
-            # Concatenate
+            # Concatenate image and direction features
             U_i_v = concatenate(feat_2d, feat_dir)
-            
+
             # Accumulate for mean/var
             if v not in voxel_stats:
                 voxel_stats[v] = [zeros_like(U_i_v), zeros_like(U_i_v), 0]
-            
             stats = voxel_stats[v]
-            stats[0] += U_i_v       # Sum
-            stats[1] += U_i_v * U_i_v # Sum of Squares
-            stats[2] += 1           # Count
-            
-    # Step 4: Regress Local Volume
+            stats[0] += U_i_v
+            stats[1] += U_i_v * U_i_v
+            stats[2] += 1
+
+    local_volume = {}
     for v, stats in voxel_stats.items():
         sum_feat, sum_sq_feat, count = stats
-        
-        # Compute Mean
         mean_feat = sum_feat / count
-        
-        # Compute Variance: E[X^2] - (E[X])^2
         var_feat = (sum_sq_feat / count) - (mean_feat * mean_feat)
-        
-        # Concatenate Mean and Variance
         input_to_J = concatenate(mean_feat, var_feat)
-        
-        # Regress
         local_volume[v] = regressor(input_to_J)
-        
+
     return local_volume
+
+# Standard helper operations
+def project_2d(v, intr, extr):
+    cam_coord = extr @ v
+    u = intr @ cam_coord[:3]
+    return u[:2] / u[2]
+
+def sample_feature(F, u):
+    return F[u[1], u[0]]  # Bilinear interpolation assumed
+
+def get_camera_center(extr):
+    return -extr[:3, :3].T @ extr[:3, 3]
+
+def normalize(v):
+    return v / (v.norm() + 1e-8)
+
+def concatenate(a, b):
+    return a + b  # Vector concatenation
+
+def zeros_like(t):
+    return [0.0] * len(t)
 ```
 
 **Edge Cases and Pitfalls:**
@@ -155,20 +108,15 @@ def reconstruct_local_volume(images, neighbors, K, camera_intrinsics, camera_ext
 - **Coordinate Frame**: Volumes are built in the canonical world coordinate frame, not the view's perspective coordinate. This is crucial for aligning with the global volume $V_g$ [S1].
 
 ## Operating characteristics
-- **Time Complexity**: Not given in the sources. Depends on the number of voxels, $K$, and the depth of networks $G$ and $J$.
-- **Memory Complexity**: Not given in the sources. Depends on the size of the bounding box and the sparsity of visible voxels.
-- **Strengths**: 
-    - Builds volumes in canonical space, facilitating global large-scale reconstruction and fusion [S1].
-    - Uses mean and variance aggregation, which is robust to varying visibility and order of inputs [S1].
-    - Incorporates viewing direction information to account for view-dependent effects [S1].
-- **Limitations**: 
-    - Requires a sparse voxel grid and visibility checks, which may be computationally intensive to set up [S1].
-    - Limited to local reconstruction per frame; requires a subsequent fusion step (e.g., GRU) for global consistency [S1].
+- **Time Complexity**: Not given in the sources. Depends on the number of voxels, $K$, and the depth of networks $G$ and $J$. [S1]
+- **Memory Complexity**: Not given in the sources. Depends on the size of the bounding box and the sparsity of visible voxels. [S1]
+- **Strengths**: Builds volumes in canonical space, facilitating global large-scale reconstruction and fusion [S1]. Uses mean and variance aggregation, which is robust to varying visibility and order of inputs [S1]. Incorporates viewing direction information to account for view-dependent effects [S1].
+- **Limitations**: Requires a sparse voxel grid and visibility checks, which may be computationally intensive to set up [S1]. Limited to local reconstruction per frame; requires a subsequent fusion step (e.g., GRU) for global consistency [S1].
 - **When to use**: For large-scale scene reconstruction from monocular video where global consistency is required, and when leveraging multi-view cues per frame is beneficial [S1].
 - **When not to use**: For small-baseline rendering where perspective frustum volumes (like MVS-NeRF) are sufficient and simpler [S1].
 
 ## Background
-Local Sparse Volume Reconstruction was introduced in the paper "NeRFusion: Fusing Radiance Fields for Large-Scale Scene Reconstruction" [S1]. It is part of the NeRFusion framework, which aims to fuse radiance fields for large-scale scene reconstruction. The method was developed to address the limitations of previous approaches like MVS-NeRF, which built perspective frustum volumes for small-baseline rendering, by constructing volumes in canonical space for global reconstruction [S1]. The technique leverages mean and variance aggregation, a strategy widely used in MVS-based cost volumes, to fuse per-view appearance and geometry cues [S1].
+Local Sparse Volume Reconstruction was introduced in the paper "NeRFusion: Fusing Radiance Fields for Large-Scale Scene Reconstruction" [S1]. It is part of the NeRFusion framework, which aims to fuse radiance fields for large-scale scene reconstruction [S1]. The method was developed to address the limitations of previous approaches like MVS-NeRF, which built perspective frustum volumes for small-baseline rendering, by constructing volumes in canonical space for global reconstruction [S1]. The technique leverages mean and variance aggregation, a strategy widely used in MVS-based cost volumes, to fuse per-view appearance and geometry cues [S1].
 
 ## Sources
 [S1] NeRFusion: Fusing Radiance Fields for Large-Scale Scene Reconstruction, https://doi.org/10.1109/cvpr52688.2022.00537, fetched 2026-10-26

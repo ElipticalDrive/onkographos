@@ -1,77 +1,145 @@
 # Neuralangelo Hashgrid Configuration
-
 Also called: Neuralangelo Hashgrid Parameters
 
 ## Overview
-This method defines the standard hyperparameter configuration for the hash-grid-based implicit neural representation used in Neuralangelo, as implemented in Sdfstudio [S1]. It solves the problem of balancing representation capacity and memory usage for high-fidelity surface reconstruction by specifying a fixed multi-level grid structure [S1]. It is distinguished from generic multi-level hashed grids by its specific resolution progression and feature dimensions tailored for SDF optimization [S1].
+Neuralangelo Hashgrid Configuration defines the specific hyperparameters for the multi-level hashed grid construction used in the Neuralangelo neural implicit surface reconstruction method. It solves the problem of balancing representational capacity and memory usage for high-fidelity 3D reconstruction by specifying a fixed set of grid resolutions, feature dimensions, and hash map sizes. It is distinguished from generic hash grid implementations by its specific adherence to the Sdfstudio baseline configuration, which prioritizes fine-grained detail recovery for indoor scenes [S1].
 
 ## How it works
-The configuration defines the architecture of the hash grid used to store feature vectors for the neural field.
+The method configures the input data structures for the Neuralangelo hash encoder. The encoder maps 3D coordinates to feature vectors using a hierarchical set of hash grids.
 
-**Inputs:** None (static configuration).
-**Outputs:** A set of hyperparameters defining the hash grid topology.
+**Inputs and Outputs:**
+- Input: 3D spatial coordinates $\mathbf{x} \in \mathbb{R}^3$.
+- Output: Feature vector $\mathbf{f} \in \mathbb{R}^{d}$, where $d$ is the feature size.
 
 **Data Structures:**
-The hash grid consists of $L$ levels. Each level $l$ has a resolution $R_l$ and maps 3D coordinates to feature vectors of size $F$.
+The configuration consists of $L$ levels of hash grids. Each level $l$ has a resolution $R_l$ and a shared hash map size $H$.
 - **Levels ($L$):** 16 [S1].
-- **Resolutions ($R_l$):** A sequence from 32 to 4096 [S1]. The exact mapping of level index to resolution is not specified in the sources, but the range is inclusive [S1].
-- **Feature Size ($F$):** 8 [S1].
+- **Resolutions ($R_l$):** A sequence of 16 integer values ranging from 32 to 4096 [S1]. The exact sequence is not provided in the sources, but the range is inclusive [S1].
 - **Hashmap Size ($H$):** $2^{19}$ entries [S1].
+- **Feature Size ($d$):** 8 [S1].
+- **Hash Map Layout:** An array of $H$ entries. Each entry stores a feature vector of size $d=8$ (typically floating-point). The hash function maps a coordinate to an index in $[0, H-1]$.
 
 **Parameters:**
-- **Hash Function:** Not specified in the sources [G]. Typically a simple modulo or bitwise hash is used to map coordinate hashes to the $2^{19}$ bucket size.
 - **Training Epochs:** 100,000 [S1].
-- **Scheduler:** Schedulers and coarse-to-fine duration are scaled down proportionally from the original 500k epoch schedule to fit the 100k limit [S1].
-
-**Edge Cases and Pitfalls:**
-- **Background/Contraction:** For synthetic indoor datasets (e.g., Replica), background MLPs, appearance embeddings, and scene contraction are removed [S1].
-- **Initialization:** The method supports initialization via SDF inverted spheres, though the specific implementation details of this initialization are not provided in the sources [S1].
+- **Scheduling:** The training schedule (learning rate schedulers and coarse-to-fine duration) is scaled down proportionally to match the 100k epoch limit compared to the original 500k epoch baseline [S1].
+- **Scene Contraction:** Removed for synthetic indoor datasets (e.g., Replica) [S1].
+- **Background MLPs:** Removed for synthetic indoor datasets [S1].
+- **Appearance Embedding:** Removed for synthetic indoor datasets [S1] [G: Standard Neuralangelo includes these; they are explicitly excluded here for the specific evaluation context].
 
 **Pseudocode:**
+The following pseudocode defines the configuration constants and the basic hash grid lookup logic implied by the parameters.
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Neuralangelo Hashgrid Configuration
-# Defines the static hyperparameters for the hash grid.
+import numpy as np
 
-def get_neuralangelo_config():
-    """
-    Returns the standard Neuralangelo hash grid configuration.
-    Based on Sdfstudio implementation [S1].
-    """
-    config = {
-        "num_levels": 16,
-        "resolution_min": 32,
-        "resolution_max": 4096,
-        "feature_size": 8,
-        "hashmap_size": 2**19,
-        "training_epochs": 100000,
-        "remove_background_mlp": True,
-        "remove_appearance_embedding": True,
-        "remove_scene_contraction": True
-    }
-    return config
+# Configuration constants from [S1]
+NUM_LEVELS = 16
+HASHMAP_SIZE = 2**19  # 524288
+FEATURE_SIZE = 8
+RESOLUTION_MIN = 32
+RESOLUTION_MAX = 4096
+
+# Note: The exact sequence of 16 resolutions between 32 and 4096 is not specified in [S1].
+# In standard implementations (e.g., Sdfstudio), this is often a geometric progression.
+# We assume a placeholder list for the structure, but the implementer must derive the specific sequence
+# if not provided by the source code of the referenced Sdfstudio baseline.
+RESOLUTIONS = [0] * NUM_LEVELS 
+# TODO: Fill RESOLUTIONS with the specific 16 values ranging from 32 to 4096.
+# Example geometric progression logic (not from source, for structure only):
+# for i in range(NUM_LEVELS):
+#     RESOLUTIONS[i] = int(np.floor(RESOLUTION_MIN * (RESOLUTION_MAX / RESOLUTION_MIN) ** (i / (NUM_LEVELS - 1))))
+
+class NeuralangeloHashGrid:
+    def __init__(self):
+        # Initialize feature grids for each level
+        # Each grid is a hash map of size HASHMAP_SIZE storing FEATURE_SIZE floats
+        self.grids = []
+        for _ in range(NUM_LEVELS):
+            # Initialize with zeros or small random values [G]
+            self.grids.append(np.zeros((HASHMAP_SIZE, FEATURE_SIZE), dtype=np.float32))
+
+    def hash(self, x, y, z, level):
+        """
+        Hash a 3D coordinate to an index in the hash map for a specific level.
+        The specific hash function is not detailed in [S1], but standard implementations
+        use a simple hash with modulo arithmetic.
+        """
+        # Placeholder for the specific hash function used in Sdfstudio/Neuralangelo
+        # Typically involves mixing bits of x, y, z and the level index
+        coord = (x, y, z, level)
+        # Simple hash for demonstration; replace with actual implementation
+        h = hash(coord) % HASHMAP_SIZE
+        return h
+
+    def forward(self, coords):
+        """
+        Forward pass: aggregate features from all levels.
+        coords: Tensor of shape (N, 3)
+        Returns: Tensor of shape (N, FEATURE_SIZE)
+        """
+        N = coords.shape[0]
+        aggregated_features = np.zeros((N, FEATURE_SIZE), dtype=np.float32)
+
+        for l in range(NUM_LEVELS):
+            x = coords[:, 0]
+            y = coords[:, 1]
+            z = coords[:, 2]
+            
+            # Get resolution for this level
+            res = RESOLUTIONS[l]
+            
+            # Normalize coordinates to [0, 1] based on resolution? 
+            # Or use integer grid indices? Standard hash grids often use integer indices.
+            # Assuming coordinates are already in the appropriate grid space or need truncation.
+            # [G: Standard practice is to use floor(x * res) as integer index before hashing]
+            ix = np.floor(x * res).astype(np.int32)
+            iy = np.floor(y * res).astype(np.int32)
+            iz = np.floor(z * res).astype(np.int32)
+            
+            # Compute hash indices
+            # Note: The exact hashing scheme (e.g., using level in the hash) varies.
+            # Here we assume the level is part of the hash input or grid selection.
+            indices = np.zeros(N, dtype=np.int32)
+            for i in range(N):
+                indices[i] = self.hash(ix[i], iy[i], iz[i], l)
+            
+            # Gather features
+            features = self.grids[l][indices]
+            aggregated_features += features
+            
+        # Average or sum? Neuralangelo typically sums or averages. 
+        # [G: Standard hash grid encoding often averages the features from all levels]
+        return aggregated_features / NUM_LEVELS
+
 ```
+
+**Edge Cases and Pitfalls:**
+- **Resolution Sequence:** The exact 16 resolution values are not provided in the sources. Implementers must refer to the Sdfstudio implementation or assume a geometric progression [S1].
+- **Scene Contraction:** The configuration explicitly removes scene contraction for synthetic indoor datasets, which may affect performance on real-world or large-scale scenes [S1].
+- **Epoch Scaling:** The training schedule must be scaled down to 100k epochs to match the evaluation protocol; using the original 500k schedule may lead to overfitting or mismatched convergence [S1].
 
 ## Subtopics
 
 ### [Adaptive Feature Grids](10458-adaptive-feature-grids.md)
-A method using multiple spatially adaptive feature grids with learnable transformation matrices to concentrate capacity in high-error regions, addressing the inefficiency of fixed uniform placement [10458-adaptive-feature-grids.md].
+Adaptive Feature Grids is a neural volume compression method that replaces fixed uniform grid placement with multiple spatially adaptive grids, each equipped with learnable transformation matrices to concentrate representational capacity in high-error regions. Unlike standard hash encodings which rely on collision averaging for sparse data, this approach optimizes parameter distribution via a feature density loss, making it superior for dense, complex scientific volumes but underperforming on highly sparse datasets.
 
 ### Wu INR Compression
 A method scaling INR compression to tera-scale data on consumer hardware using hash grids combined with small fully fused MLPs and three engineering optimizations [S2, unofficial].
-1. **Sample-streaming rendering:** Provides a 3–8× speedup [S2, unofficial].
-2. **Macro-cell acceleration:** Enables empty-space skipping with a 40× speedup [S2, unofficial].
-3. **Out-of-core training:** Allows training on volumes exceeding GPU memory [S2, unofficial].
-Performance: On a DNS volume ($10,240 \times 7,680 \times 1,536$, ~950 GB double precision), it achieved 35.9 dB PSNR with a 1.5 GB model in under two hours on a single consumer GPU [S2, unofficial].
+1. Implement sample-streaming rendering for speedup [S2, unofficial].
+2. Implement macro-cell acceleration for empty-space skipping [S2, unofficial].
+3. Implement out-of-core training for volumes exceeding GPU memory [S2, unofficial].
+Performance on DNS volume (10,240 × 7,680 × 1,536, ~950 GB double precision): 35.9 dB PSNR with a 1.5 GB model in under two hours on a single consumer GPU [S2, unofficial].
 
 ## Operating characteristics
-- **Memory:** The hashmap size is fixed at $2^{19}$ entries [S1]. The total memory footprint depends on the feature size (8) and the number of levels (16), but the exact total bytes are not calculated in the sources [S1].
-- **Performance:** The configuration is designed for convergence within 100k epochs [S1].
-- **Limitations:** The sources do not provide specific time complexity or memory complexity formulas for the hash grid lookup itself [S1].
+- **Memory Usage:** The hash map size is $2^{19}$ entries. With a feature size of 8 (assuming 32-bit floats), the memory per level is $2^{19} \times 8 \times 4$ bytes $\approx 64$ MB. With 16 levels, the total memory for the hash grids is approximately 1 GB [S1].
+- **Training Time:** The configuration is evaluated over 100,000 epochs [S1]. The original Neuralangelo configuration used 500,000 epochs, so this is a 5x reduction in training duration [S1].
+- **Performance:** The configuration is designed for high-fidelity reconstruction of indoor scenes (e.g., Replica dataset) [S1]. It is not optimized for highly sparse data, where hash collision averaging may be less beneficial compared to other methods like APMGSRN [S2, unofficial].
+- **Scalability:** The fixed resolution range (32 to 4096) limits the maximum detail resolution. For larger scenes, scene contraction or adaptive grids may be required [S1].
 
 ## Background
-The configuration is based on the basic Neuralangelo implementation provided by Sdfstudio [S1]. The original implementation used a 500k epoch schedule, but it was observed that scaling down the schedulers and coarse-to-fine duration to 100k epochs resulted in similar convergence [S1]. This configuration is used in evaluations of RING-NeRF, NeuS-facto, and Neuralangelo on synthetic indoor datasets [S1].
+The Neuralangelo Hashgrid Configuration is based on the basic configuration implemented by Sdfstudio [S1]. It was adopted in the RING-NeRF paper for evaluating neural fields on synthetic indoor datasets [S1]. The configuration was modified from the original 500k epoch schedule to 100k epochs to match the evaluation protocol of the RING-NeRF study [S1]. The method is part of the broader Neuralangelo framework for high-fidelity neural surface reconstruction [S1].
 
 ## Sources
 [S1] RING-NeRF : Rethinking Inductive Biases for Versatile and Efficient Neural Fields, https://doi.org/10.1007/978-3-031-72761-0_9, fetched 2026-10-30

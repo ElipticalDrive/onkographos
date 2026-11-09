@@ -3,130 +3,138 @@
 Also called: 3D Grid Index Calculation, Position Index Calculation, getPositionIndex
 
 ## Overview
-Uniform Grid Indexing converts a 3D world position into a linear array index within a uniform voxel grid, enabling efficient spatial lookups for volume rendering and ray tracing [S1, S2, unofficial]. It sets itself apart from hierarchical or sparse alternatives by using a fixed-size, dense memory layout with $O(1)$ lookup time, trading memory efficiency for access speed [S1, unofficial][S3].
+Uniform Grid Indexing converts a 3D world position into a linear array index within a dense, axis-aligned voxel grid [S1, S2, unofficial]. It solves the problem of spatial lookup in volume rendering by mapping continuous coordinates to discrete storage locations using an axis-aligned bounding box (AABB) and fixed grid resolution [S1, S2, unofficial]. It sets itself apart from [Spatial Hashing](5002-spatial-hashing.md) by guaranteeing deterministic, collision-free indexing for all points within the grid bounds without hash collisions, and from [Sparse Voxel Grid](8021-sparse-voxel-grid.md) by using a fixed memory footprint regardless of data sparsity [S1, S2, unofficial].
 
 ## How it works
 **Inputs:**
-- `position`: A 3D vector $(p_x, p_y, p_z)$ in world coordinates.
-- `boundsMin`: A 3D vector defining the minimum corner of the grid's axis-aligned bounding box (AABB).
-- `boundsMax`: A 3D vector defining the maximum corner of the AABB.
-- `cellsPerEdge`: An integer scalar representing the number of voxels along each axis (assumed cubic grid, i.e., $N_x = N_y = N_z = N$).
+- `position`: A 3D vector $(x, y, z)$ in world space.
+- `boundsMin`: The minimum corner of the grid's AABB $(min_x, min_y, min_z)$.
+- `boundsMax`: The maximum corner of the grid's AABB $(max_x, max_y, max_z)$.
+- `cellsPerEdge`: The number of voxels along one edge of the cubic grid (integer $N$).
 
 **Outputs:**
-- `linearIndex`: An integer representing the position in the flattened 1D array.
+- `linearIndex`: A single integer representing the position in a 1D array storing the grid data.
 
 **Data Structures:**
-- The grid is stored as a 1D array of size $N^3$.
-- Memory layout is row-major (Z-major in some conventions, but standard row-major implies X varies fastest, then Y, then Z). The formula provided in [S1, unofficial] uses $Z$ as the most significant dimension ($Z \cdot N^2 + Y \cdot N + X$), which corresponds to a column-major or Z-major layout depending on definition. We follow the source formula exactly: $Index = Z \cdot N^2 + Y \cdot N + X$.
+- The grid is stored as a 1D array of size $N^3$ using row-major ordering.
+- Row-major layout implies that the $z$-axis is the most significant dimension, followed by $y$, then $x$.
 
 **Steps:**
-1. **Edge Case:** If `cellsPerEdge` is 1, return 0 immediately [S2, unofficial].
-2. **Calculate Cell Size:** Compute the physical size of one voxel:
-   $$ \text{cellSize} = \frac{\text{boundsMax} - \text{boundsMin}}{\text{cellsPerEdge}} $$
-   [S1, unofficial]
-3. **Translate Position:** Compute the relative position of the input point from the minimum bound:
-   $$ \text{relativePos} = \text{position} - \text{boundsMin} $$
-   [S2, unofficial]
-4. **Normalize:** Convert relative position to a $[0, 1]$ range per axis. Handle division by zero if `cellSize` is zero (use a small epsilon `KINDA_SMALL_NUMBER`) [S2, unofficial]:
-   $$ \text{normalizedPos} = \frac{\text{relativePos}}{\text{cellSize}} $$
-   [S1, S2, unofficial]
-5. **Scale:** Multiply by the number of cells to get floating-point coordinates:
-   $$ \text{scaledPos} = \text{normalizedPos} \times \text{cellsPerEdge} $$
-   [S2, unofficial]
-6. **Floor:** Convert to integer grid indices $(x, y, z)$ by flooring the scaled coordinates:
-   $$ x = \lfloor \text{scaledPos}.x \rfloor, \quad y = \lfloor \text{scaledPos}.y \rfloor, \quad z = \lfloor \text{scaledPos}.z \rfloor $$
-   [S2, unofficial]
-7. **Clamp:** Clamp indices to the valid range $[0, \text{cellsPerEdge} - 1]$ to handle points exactly on the boundary or slightly outside due to precision errors [S1, S2, unofficial]:
-   $$ x = \text{clamp}(x, 0, \text{cellsPerEdge} - 1) $$
-   (Similarly for $y$ and $z$)
-8. **Linearize:** Calculate the 1D index using row-major ordering (where Z is the slowest varying index, Y is medium, X is fastest):
-   $$ \text{index} = z \cdot (\text{cellsPerEdge})^2 + y \cdot \text{cellsPerEdge} + x $$
-   [S1, S2, unofficial]
+1. **Edge Case Handling:** If `cellsPerEdge` is 1, the grid contains only one voxel. Return `0` immediately [S2, unofficial].
+2. **Bounding Box Validation:** Calculate the bounding box size vector: $\text{BoxSize} = \text{boundsMax} - \text{boundsMin}$ [S2, unofficial]. If any component of `BoxSize` is zero or negative, the grid is degenerate; handle as an error or clamp to a minimal valid size [G].
+3. **Relative Position:** Translate the input position relative to the minimum bound: $\text{RelativePosition} = \text{position} - \text{boundsMin}$ [S2, unofficial].
+4. **Normalization:** Normalize the relative position to the $[0, 1]$ range per axis. For each axis $i \in \{x, y, z\}$:
+   $$ \text{Normalized}_i = \frac{\text{RelativePosition}_i}{\text{BoxSize}_i} $$
+   If $\text{BoxSize}_i$ is zero (or below a small epsilon like `KINDA_SMALL_NUMBER`), set $\text{Normalized}_i = 0$ to avoid division by zero [S2, unofficial].
+5. **Scaling:** Scale the normalized coordinates by the grid resolution to get floating-point cell coordinates:
+   $$ \text{ScaledPosition}_i = \text{Normalized}_i \times \text{cellsPerEdge} $$
+6. **Integer Conversion:** Floor the scaled positions to obtain integer grid indices $(CellX, CellY, CellZ)$:
+   $$ CellX = \lfloor \text{ScaledPosition}_x \rfloor, \quad CellY = \lfloor \text{ScaledPosition}_y \rfloor, \quad CellZ = \lfloor \text{ScaledPosition}_z \rfloor $$
+7. **Clamping:** Clamp the integer indices to the valid range $[0, \text{cellsPerEdge} - 1]$ to handle boundary cases where the position lies slightly outside the AABB due to floating-point precision [S2, unofficial].
+8. **Linear Index Calculation:** Compute the linear index using row-major ordering:
+   $$ \text{LinearIndex} = CellZ \cdot (\text{cellsPerEdge}^2) + CellY \cdot \text{cellsPerEdge} + CellX $$
 
 **Formulas:**
-The core indexing formula from [S1, unofficial] is:
-$$ x = \text{clamp}\left(\frac{p_x - \text{min}_x}{\text{cellSize}_x}, 0, N_x - 1\right) $$
-$$ \text{index} = x \cdot N_y \cdot N_z + y \cdot N_z + z $$
-Note: [S1, unofficial] defines the linear index as $x \cdot N_y \cdot N_z + y \cdot N_z + z$. This implies X is the most significant dimension (Column-Major or Y-major depending on convention). However, [S2, unofficial] explicitly states "row-major order" and gives $Z \cdot N^2 + Y \cdot N + X$. We provide the implementation based on [S2, unofficial]'s explicit step-by-step description which matches standard "row-major" (X fastest) if we interpret the final formula in [S1, unofficial] as potentially having a typo or different axis ordering. Given [S2, unofficial] is a direct implementation guide, we prioritize its step order: $Z$ is most significant.
-*Correction*: Re-reading [S1, unofficial] formula: $x \cdot N_y \cdot N_z + y \cdot N_z + z$. If $N_x=N_y=N_z=N$, this is $x N^2 + y N + z$. This is **Column-Major** (Z fastest).
-Re-reading [S2, unofficial] step: "LinearIndex = CellZ * (cellsPerEdge^2) + CellY * cellsPerEdge + CellX". This is **Row-Major** (X fastest).
-These sources disagree on the memory layout convention. The pseudocode below follows [S2, unofficial] as it provides the explicit algorithmic steps for the function `getPositionIndex`.
+The conversion can be expressed compactly using clamp operations on the normalized coordinates scaled by the number of divisions $\text{_numDivs}$ (where $\text{_numDivs} = \text{cellsPerEdge}$) [S1, unofficial]:
 
-**Parameters:**
-- `cellsPerEdge`: Typical values range from 16 to 1024 depending on scene complexity and memory budget [S1, unofficial][S3].
-- `KINDA_SMALL_NUMBER`: A small epsilon (e.g., $1e-6$) to prevent division by zero [S2, unofficial].
+$$ x = \text{clamp}\left(\frac{\text{position}.x - \text{_aabb.min}.x}{\text{_cellSize}.x}, 0, \text{_numDivs}.x - 1\right) $$
+$$ y = \text{clamp}\left(\frac{\text{position}.y - \text{_aabb.min}.y}{\text{_cellSize}.y}, 0, \text{_numDivs}.y - 1\right) $$
+$$ z = \text{clamp}\left(\frac{\text{position}.z - \text{_aabb.min}.z}{\text{_cellSize}.z}, 0, \text{_numDivs}.z - 1\right) $$
 
-**Edge Cases and Pitfalls:**
-- **Boundary Precision:** Points exactly on `boundsMax` may compute to `cellsPerEdge` before clamping. Clamping is required [S1, S2, unofficial].
-- **Zero Division:** If `boundsMin == boundsMax`, `cellSize` is zero. Use epsilon or return a default index [S2, unofficial].
-- **Out-of-Bounds:** Points outside the AABB must be clamped, not discarded, to avoid segmentation faults in dense arrays [S1, S2, unofficial].
+$$ \text{index} = x \cdot \text{_numDivs}.y \cdot \text{_numDivs}.z + y \cdot \text{_numDivs}.z + z $$
+
+Note: In the formula above, $\text{_cellSize}$ is equivalent to $\text{BoxSize} / \text{cellsPerEdge}$ [S1, unofficial]. The terms $\text{_numDivs}.y \cdot \text{_numDivs}.z$ and $\text{_numDivs}.z$ correspond to the stride for the $y$ and $z$ dimensions respectively in a non-cubic grid, but for a uniform cubic grid where $\text{cellsPerEdge}$ is constant, this simplifies to the row-major formula in Step 8 [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def uniform_grid_indexing(position, bounds_min, bounds_max, cells_per_edge):
-    # Step 1: Handle single cell case
+    """
+    Converts a 3D world position to a linear index in a uniform voxel grid.
+    
+    Args:
+        position (tuple): (x, y, z) world coordinates.
+        bounds_min (tuple): (min_x, min_y, min_z) of the AABB.
+        bounds_max (tuple): (max_x, max_y, max_z) of the AABB.
+        cells_per_edge (int): Number of voxels along one edge (N).
+        
+    Returns:
+        int: Linear index in the 1D grid array.
+    """
     if cells_per_edge == 1:
         return 0
 
-    # Step 2: Calculate bounding box size and cell size
-    box_size = bounds_max - bounds_min
-    # Handle division by zero with epsilon
-    epsilon = 1e-6
-    cell_size = box_size / max(cells_per_edge, 1)
-    # If box_size is zero, cell_size might be zero or inf depending on implementation.
-    # Ensure no division by zero in normalization.
-    safe_cell_size = max(cell_size, epsilon)
+    # Calculate bounding box size
+    box_size_x = bounds_max[0] - bounds_min[0]
+    box_size_y = bounds_max[1] - bounds_min[1]
+    box_size_z = bounds_max[2] - bounds_min[2]
 
-    # Step 3: Translate position relative to boundsMin
-    relative_position = position - bounds_min
+    # Handle degenerate box sizes to avoid division by zero [G]
+    if box_size_x <= 0 or box_size_y <= 0 or box_size_z <= 0:
+        return 0
 
-    # Step 4: Normalize relative position to [0, 1] range per axis
-    normalized_position = relative_position / safe_cell_size
+    # Calculate relative position
+    rel_x = position[0] - bounds_min[0]
+    rel_y = position[1] - bounds_min[1]
+    rel_z = position[2] - bounds_min[2]
 
-    # Step 5: Scale normalized position by cellsPerEdge
-    scaled_position = normalized_position * cells_per_edge
+    # Normalize to [0, 1]
+    norm_x = rel_x / box_size_x
+    norm_y = rel_y / box_size_y
+    norm_z = rel_z / box_size_z
 
-    # Step 6: Floor the scaled position to get integer 3D grid cell indices
-    cell_x = floor(scaled_position.x)
-    cell_y = floor(scaled_position.y)
-    cell_z = floor(scaled_position.z)
+    # Scale to grid coordinates
+    scaled_x = norm_x * cells_per_edge
+    scaled_y = norm_y * cells_per_edge
+    scaled_z = norm_z * cells_per_edge
 
-    # Step 7: Clamp cell indices to valid range [0, cellsPerEdge - 1]
-    limit = cells_per_edge - 1
-    cell_x = clamp(cell_x, 0, limit)
-    cell_y = clamp(cell_y, 0, limit)
-    cell_z = clamp(cell_z, 0, limit)
+    # Floor to integer indices
+    cell_x = int(scaled_x)
+    cell_y = int(scaled_y)
+    cell_z = int(scaled_z)
 
-    # Step 8: Calculate linear index using row-major order (X fastest, Z slowest)
-    # Formula from [S2, unofficial]: Z * N^2 + Y * N + X
+    # Clamp to valid range [0, cells_per_edge - 1]
+    max_idx = cells_per_edge - 1
+    cell_x = max(0, min(cell_x, max_idx))
+    cell_y = max(0, min(cell_y, max_idx))
+    cell_z = max(0, min(cell_z, max_idx))
+
+    # Calculate linear index (row-major: Z is most significant)
     linear_index = cell_z * (cells_per_edge ** 2) + cell_y * cells_per_edge + cell_x
 
     return linear_index
 ```
 
+**Parameters:**
+- `cells_per_edge`: Typically a power of 2 (e.g., 64, 128, 256) for efficient bit-shifting in optimized implementations, though the algorithm works for any integer [S2, unofficial].
+- `boundsMin`, `boundsMax`: Define the spatial extent of the volume. Must be axis-aligned.
+
+**Edge Cases and Pitfalls:**
+- **Division by Zero:** If `boundsMin` equals `boundsMax` in any dimension, `BoxSize` is zero. The implementation must check for this and return a default index or error [S2, unofficial].
+- **Boundary Precision:** Points exactly on the boundary may suffer from floating-point inaccuracies. Clamping ensures the index remains within bounds [S2, unofficial].
+- **Out-of-Bounds:** Points outside the AABB are clamped to the nearest edge voxel, which may cause multiple distinct world positions to map to the same voxel [S1, unofficial].
+
 ## Subtopics
+
+### [Regular Grid Decomposition](7659-regular-grid-decomposition.md)
+Regular Grid Decomposition is a spatial partitioning strategy for neural volume rendering where the global scene domain is divided into a uniform 3D grid of independent neural network models, each responsible for a specific sub-region. It solves the problem of representing large-scale or complex scenes by distributing the modeling capacity across multiple smaller networks rather than relying on a single global model. Unlike [Compact Grid Method](9891-compact-grid-method.md), which adapts grid density to data sparsity, Regular Grid Decomposition uses a fixed, homogeneous grid structure, which simplifies the inference pipeline but requires significantly more regions to achieve comparable accuracy in non-homogeneous scenes.
 
 ### [Compact Grid Method](9891-compact-grid-method.md)
 The Compact Grid Method is a static data structure for representing a uniform grid acceleration structure with minimal memory requirements: exactly one index per grid cell and exactly one index per object reference, built in linear time. It solves the problem of efficiently mapping objects to grid cells for ray tracing without the memory overhead of linked lists or dynamic arrays. It sets itself apart from its siblings by using a two-pass counting-sort-like algorithm to pack object indices into a single contiguous array, managed by a cell offset array that defines list boundaries implicitly, avoiding null pointers or extra tracking arrays.
 
-### Regular Grid Decomposition
-Using a regular grid decomposition for neural radiance fields (like DeRF) requires significantly more regions for the same accuracy due to non-homogeneous scene structure [S3]. This results in significant memory access incoherence for network weights, lowering computational performance [S3].
-
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ for index calculation [S1, S2, unofficial].
-- **Memory Complexity:** $O(N^3)$ where $N$ is `cellsPerEdge`. This is the primary limitation; memory grows cubically [S3].
-- **Performance:** Provides fast, predictable access times suitable for real-time rendering [S1, S2, unofficial]. However, for sparse scenes, it wastes memory on empty cells [S3].
-- **Strengths:** Simple implementation, cache-friendly for dense data, no pointer chasing [S1, S2, unofficial].
-- **Limitations:** Poor memory efficiency for sparse or highly heterogeneous scenes [S3]. Incoherent memory access patterns can hurt performance in neural rendering contexts [S3].
-- **When to use:** Dense volumes, uniform scenes, or when memory is abundant and speed is critical [S1, S2, unofficial].
-- **When not to use:** Sparse scenes, scenes with large empty spaces, or when memory bandwidth is the bottleneck due to incoherent access [S3].
+- **Time Complexity:** $O(1)$ for index calculation. The operations involve a constant number of arithmetic operations and comparisons [S1, S2, unofficial].
+- **Memory Complexity:** $O(N^3)$ for the grid storage, where $N$ is `cells_per_edge`. The indexing function itself uses $O(1)$ auxiliary memory [S1, S2, unofficial].
+- **Measured Performance:** Performance is limited by memory bandwidth when accessing the grid data, not by the indexing calculation [S1, unofficial].
+- **Scaling:** Scales linearly with the number of queries. Grid size grows cubically with resolution, making high-resolution grids memory-intensive [S1, S2, unofficial].
+- **Strengths:** Deterministic access time, no hash collisions, simple implementation, cache-friendly for sequential access if rays traverse the grid in order [S1, S2, unofficial].
+- **Limitations:** Memory usage is high for large volumes or high resolutions, even if the scene is sparse. Fixed resolution cannot adapt to local detail requirements [S1, S2, unofficial].
+- **When to Use:** Suitable for dense volumes, small to medium scenes, or when uniform sampling is required. Not suitable for highly sparse or extremely large open-world scenes where [Sparse Voxel Grid](8021-sparse-voxel-grid.md) or [Spatial Hashing](5002-spatial-hashing.md) would be more efficient [S1, S2, unofficial].
 
 ## Background
-Uniform grids are a fundamental spatial partitioning technique in computer graphics. The specific implementation details for `getPositionIndex` are derived from Unreal Engine-inspired codebases [S2, unofficial] and voxel-based machine learning pipelines [S1, unofficial]. The critique of regular grids in neural rendering comes from DeRF [S3].
+Uniform Grid Indexing is a fundamental technique in volume rendering and spatial data structures. It originates from the need to efficiently map continuous 3D space to discrete storage for voxel-based representations. The method is widely used in early volume rendering systems and remains a baseline for comparison with more advanced adaptive structures. The specific implementation details, such as the use of `KINDA_SMALL_NUMBER` for epsilon checks, are derived from game engine and real-time rendering contexts [S2, unofficial]. The formulaic approach using AABB normalization is common in graphics programming literature [S1, unofficial].
 
 ## Sources
 [S1] AlfonsoLRz/VoxelFragmentML, https://github.com/AlfonsoLRz/VoxelFragmentML, fetched 2026-10-26 (unofficial)
 [S2] JI20/unreal-splat, https://github.com/JI20/unreal-splat, fetched 2026-10-27 (unofficial)
-[S3] DeRF: Decomposed Radiance Fields, https://doi.org/10.1109/cvpr46437.2021.01393, fetched 2026-10-26

@@ -7,11 +7,10 @@ Directional Derivative Diffuse Lighting is an approximation for diffuse lighting
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Current 3D position `p` in the volume, light direction vector `sunDirection` (normalized), and a density function `scene(p)` that returns the scalar density at position `p`.
-*   **Output:** A diffuse lighting factor (scalar) and a linear lighting color vector, used to modulate the accumulated volume color.
+The method takes the current 3D position `p`, a normalized light direction `sunDirection`, and a density function `scene(p)` that returns the scalar density at position `p` as inputs [S1, unofficial]. It outputs a diffuse lighting factor and a linear lighting color vector to modulate the accumulated volume color [S1, unofficial].
 
 **Data Structures:**
-No specific complex data structures are required beyond the density function `scene(p)` and standard vector types. The method relies on scalar arithmetic and vector addition.
+No complex data structures are required beyond the density function and standard vector types [S1, unofficial]. The method relies on scalar arithmetic and vector addition [S1, unofficial].
 
 **Parameters:**
 *   **Offset Scale:** `0.3` (distance along the light direction for the second sample) [S1, unofficial].
@@ -22,117 +21,92 @@ No specific complex data structures are required beyond the density function `sc
 *   **Clamp Range:** `[0.0, 1.0]` [S1, unofficial].
 
 **Steps:**
-1.  Sample the density at the current point `p`: `d_current = scene(p)`.
-2.  Sample the density at an offset point `p'` located further along the light direction: `d_offset = scene(p + 0.3 * sunDirection)`.
-3.  Calculate the diffuse factor by taking the difference between the two density samples, dividing by the offset scale, and clamping the result to `[0.0, 1.0]`. This approximates the rate of change of density along the light direction [S1, unofficial].
-    *   Formula: `diffuse = clamp((d_current - d_offset) / 0.3, 0.0, 1.0)`
-    *   Interpretation: If density increases along the light path (`d_current > d_offset`), the result is positive, indicating more scattering. If density decreases, the result is lower or zero, indicating less scattering [S1, unofficial].
-4.  Compute the linear lighting color by mixing ambient light and the calculated diffuse light [S1, unofficial]:
-    *   Formula: `lin = ambient_color * ambient_mult + diffuse_color * diffuse * diffuse_mult`
-    *   Specifics: `lin = vec3(0.60, 0.60, 0.75) * 1.1 + vec3(1.0, 0.6, 0.3) * diffuse * 0.8`
-5.  Determine the base color of the volume slice by mixing white and black based on the current density `d_current` [S1, unofficial]:
+1.  Sample the density at the current point `p` [S1, unofficial].
+2.  Sample the density at an offset point `p'` located further along the light direction [S1, unofficial].
+3.  Calculate the diffuse factor by taking the difference between the two density samples, dividing by the offset scale, and clamping the result to `[0.0, 1.0]` [S1, unofficial].
+    *   Formula: `diffuse = clamp((scene(p) - scene(p + 0.3 * sunDirection)) / 0.3, 0.0, 1.0)`
+    *   Interpretation: If density increases along the light path (`d_current > d_offset`), the result is positive, indicating more scattering [S1, unofficial]. If density decreases, the result is lower or zero, indicating less scattering [S1, unofficial].
+4.  Compute the linear lighting color by mixing ambient light and the calculated diffuse light [S1, unofficial].
+    *   Formula: `lin = vec3(0.60, 0.60, 0.75) * 1.1 + vec3(1.0, 0.6, 0.3) * diffuse * 0.8`
+5.  Determine the base color of the volume slice by mixing white and black based on the current density `d_current` [S1, unofficial].
     *   Formula: `base_color = mix(vec3(1.0, 1.0, 1.0), vec3(0.0, 0.0, 0.0), d_current)`
-6.  Combine the base color with the linear lighting and the density alpha, then accumulate into the final result using the over operator [S1, unofficial]:
+6.  Combine the base color with the linear lighting and the density alpha, then accumulate into the final result using the over operator [S1, unofficial].
     *   Formula: `color = vec4(base_color * lin, d_current)`
-    *   Accumulation: `res += color.rgb * color.a * (1.0 - res.a)` (assuming `res` is the accumulated result color with alpha).
+    *   Accumulation: `color.rgb *= color.a; res += color * (1.0 - res.a);` [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def directional_derivative_diffuse_lighting(p, sun_direction, scene_func):
+def directional_derivative_diffuse_lighting_raymarch(origin, direction, step_size, max_steps, sun_direction, scene_func):
     """
-    Calculates diffuse lighting for a volumetric point using directional derivatives.
-    
+    Marches a ray through a volume applying directional derivative diffuse lighting.
     Args:
-        p (vec3): Current 3D position in the volume.
+        origin (vec3): Ray origin.
+        direction (vec3): Ray direction (normalized).
+        step_size (float): Constant step size for marching.
+        max_steps (int): Maximum number of steps to prevent infinite loops.
         sun_direction (vec3): Normalized light direction vector.
-        scene_func (function): Function that returns density at a given 3D position.
-        
+        scene_func (callable): Returns scalar density at a 3D position.
     Returns:
-        tuple: (diffuse_factor, linear_lighting_color)
+        vec4: Accumulated result (rgb, a).
     """
-    # Step 1: Sample density at current point
-    d_current = scene_func(p)
+    # Initialize accumulated result to zero (fixes bug where res was undefined/zeroed incorrectly)
+    res = vec4(0.0, 0.0, 0.0, 0.0)
     
-    # Step 2: Sample density at offset point along light direction
-    # Offset scale is 0.3 as per source
-    offset_scale = 0.3
-    p_offset = p + offset_scale * sun_direction
-    d_offset = scene_func(p_offset)
-    
-    # Step 3: Calculate diffuse factor
-    # Formula: clamp((d_current - d_offset) / offset_scale, 0.0, 1.0)
-    diffuse_factor = (d_current - d_offset) / offset_scale
-    if diffuse_factor < 0.0:
-        diffuse_factor = 0.0
-    elif diffuse_factor > 1.0:
-        diffuse_factor = 1.0
+    # March along the ray
+    for i in range(max_steps):
+        p = origin + direction * (i * step_size)
+        d_current = scene_func(p)
         
-    # Step 4: Compute linear lighting color
-    # Ambient: vec3(0.60, 0.60, 0.75) * 1.1
-    ambient_color = vec3(0.60, 0.60, 0.75) * 1.1
-    
-    # Diffuse: vec3(1.0, 0.6, 0.3) * diffuse * 0.8
-    diffuse_color = vec3(1.0, 0.6, 0.3) * diffuse_factor * 0.8
-    
-    linear_lighting = ambient_color + diffuse_color
-    
-    return diffuse_factor, linear_lighting
-
-def accumulate_volume_slice(p, sun_direction, scene_func, res):
-    """
-    Accumulates a single volume slice using directional derivative diffuse lighting.
-    
-    Args:
-        p (vec3): Current 3D position.
-        sun_direction (vec3): Normalized light direction.
-        scene_func (function): Density function.
-        res (vec4): Current accumulated result (rgb, a).
-        
-    Returns:
-        vec4: Updated accumulated result.
-    """
-    d_current = scene_func(p)
-    
-    # Only process if density is present
-    if d_current > 0.0:
-        # Get lighting
-        _, linear_lighting = directional_derivative_diffuse_lighting(p, sun_direction, scene_func)
-        
-        # Base color: mix white and black based on density
-        base_color = mix(vec3(1.0, 1.0, 1.0), vec3(0.0, 0.0, 0.0), d_current)
-        
-        # Apply lighting
-        colored_base = base_color * linear_lighting
-        
-        # Form the slice color with alpha
-        slice_color = vec4(colored_base, d_current)
-        
-        # Accumulate using over operator: res_new = res_old + slice * (1 - res_old.a)
-        # Note: The source code does `color.rgb *= color.a` before accumulation,
-        # which effectively makes the contribution `slice.rgb * slice.a`.
-        # Standard over operator is: res += slice * (1 - res.a)
-        # The source code: `color.rgb *= color.a; res += color * (1.0 - res.a);`
-        # This implies the slice's alpha is used to modulate its RGB contribution before blending.
-        
-        slice_color.rgb *= slice_color.a
-        res.rgb += slice_color.rgb * (1.0 - res.a)
-        res.a += slice_color.a * (1.0 - res.a)
-        
+        # Only process if density is present
+        if d_current > 0.0:
+            # Directional derivative approximation
+            offset_scale = 0.3
+            p_offset = p + offset_scale * sun_direction
+            d_offset = scene_func(p_offset)
+            
+            # Calculate diffuse factor
+            diffuse = (d_current - d_offset) / offset_scale
+            if diffuse < 0.0:
+                diffuse = 0.0
+            elif diffuse > 1.0:
+                diffuse = 1.0
+                
+            # Compute linear lighting color
+            ambient = vec3(0.60, 0.60, 0.75) * 1.1
+            diffuse_light = vec3(1.0, 0.6, 0.3) * diffuse * 0.8
+            lin = ambient + diffuse_light
+            
+            # Determine base color
+            base_color = mix(vec3(1.0, 1.0, 1.0), vec3(0.0, 0.0, 0.0), d_current)
+            
+            # Form slice color and apply lighting
+            color = vec4(base_color * lin, d_current)
+            color.rgb *= color.a
+            
+            # Accumulate using over operator
+            res.rgb += color.rgb * (1.0 - res.a)
+            res.a += color.a * (1.0 - res.a)
+            
+        # Exit early if fully opaque
+        if res.a >= 1.0:
+            break
+            
     return res
 ```
 
 **Edge Cases and Pitfalls:**
 *   **Normal Calculation Suboptimality:** Standard normal calculation using `getNormal` requires 4-6 sample points to estimate the gradient, which is resource-intensive given the heavy volumetric loop [S1, unofficial]. This method avoids that by using only 2 samples [S1, unofficial].
 *   **Loop Inclusion:** Unlike surface raymarching where diffuse is computed once at the surface, this calculation must be included inside the volumetric raymarching loop because density varies throughout the volume [S1, unofficial].
-*   **Precision:** The division by `0.3` can amplify noise if the density function is noisy. Clamping to `[0.0, 1.0]` prevents negative lighting contributions but may clip valid gradients if the density change is very steep [S1, unofficial].
+*   **Precision:** The division by `0.3` can amplify noise if the density function is noisy [S1, unofficial]. Clamping to `[0.0, 1.0]` prevents negative lighting contributions but may clip valid gradients if the density change is very steep [S1, unofficial].
+*   **Initialization and Loop Bounds:** The accumulation variable `res` must be explicitly initialized to `vec4(0.0, 0.0, 0.0, 0.0)` before the marching loop, and the loop must iterate over the ray path using the specified step size; failure to do so results in a zero output for all rays [G].
 
 ## Operating characteristics
-*   **Time Complexity:** O(1) per sample point, requiring exactly 2 density function evaluations per lighting calculation. This is significantly faster than gradient-based normal estimation which requires 4-6 evaluations [S1, unofficial].
-*   **Memory Complexity:** O(1) additional memory, as it only stores a few scalar and vector variables.
+*   **Time Complexity:** O(1) per sample point, requiring exactly 2 density function evaluations per lighting calculation [S1, unofficial]. This is significantly faster than gradient-based normal estimation which requires 4-6 evaluations [S1, unofficial].
+*   **Memory Complexity:** O(1) additional memory, as it only stores a few scalar and vector variables [S1, unofficial].
 *   **Strengths:** Low computational cost, easy to implement, provides a visually plausible approximation of diffuse lighting in volumes without explicit normals [S1, unofficial].
-*   **Limitations:** Approximation may not capture complex scattering effects accurately. The fixed offset scale (`0.3`) may not be optimal for all volume densities or scales [S1, unofficial].
+*   **Limitations:** Approximation may not capture complex scattering effects accurately [S1, unofficial].
 *   **When to use:** Real-time volumetric rendering where performance is critical and approximate diffuse lighting is sufficient [S1, unofficial].
 *   **When not to use:** Offline rendering requiring high physical accuracy, or volumes with very fine details where the fixed offset might miss significant density changes [S1, unofficial].
 

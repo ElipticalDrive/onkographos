@@ -1,0 +1,173 @@
+--- v001.md
++++ v002.md
+@@ -4,107 +4,106 @@
+ 
+ ## Overview
+-Noise Layer Evaluation is a procedural shading technique that computes a single layer of volumetric density or color by sampling a base noise function (such as Perlin, Simplex, or Worley) at a distorted position, applying non-linear power scaling, and optionally inverting the result [S1, unofficial]. It serves as a modular building block for complex volumetric effects, allowing artists to stack multiple layers with independent scales, powers, and noise types to create detailed textures like clouds, marble, or terrain [S1, unofficial]. Unlike single-function noise generators, this method encapsulates distortion, type selection, and post-processing into a unified evaluation step, distinguishing it from siblings like [Worley Noise](1726-worley-noise.md) or [Gradient-based Noise (Perlin/Simplex)](3860-gradient-based-noise-perlin-simplex.md) by adding configurable layer parameters and positional warping [S1, unofficial].
++Noise Layer Evaluation is a procedural shading technique that computes a single noise layer value for volume or terrain rendering, supporting multiple noise primitives, positional distortion, power scaling, and inversion [S1, unofficial]. It differs from sibling methods by bundling noise type selection, distortion, and post-processing into a unified evaluation step that can be toggled or inverted independently, whereas siblings like [Worley Noise](1726-worley-noise.md) or [Gradient-based Noise (Perlin/Simplex)](3860-gradient-based-noise-perlin-simplex.md) typically focus on the generation of the noise field itself without this specific layer-compositing logic.
+ 
+ ## How it works
+ **Inputs and Outputs**
+-- **Input**: A 3D sample position $P_{sample}$, a configuration vector $L_{data}$ encoding layer parameters, a distortion strength scalar $D_{str}$, and boolean flags for inversion ($I_{vert}$) and enablement ($E_{nabled}$).
+-- **Output**: A scalar value $V_{final}$ representing the layer's contribution to density or color.
++*   **Input:** `noiseSamplePosition` (vec3), `noiseLayerData` (vec4), `positionDistortion` (float), `invert` (bool), `enabled` (bool).
++*   **Output:** `finalValue` (float).
+ 
+ **Data Structures**
+-The layer configuration is packed into a 4-component vector $L_{data} = (x, y, z, w)$ [S1, unofficial]:
+-- $x$: Noise scale factor ($S_{cale}$).
+-- $y$: Noise power exponent ($P_{ower}$).
+-- $z$: Angle offset ($A_{offset}$), used primarily for Voronoi-based noise.
+-- $w$: Noise type identifier ($T_{ype}$), an integer mapping to specific noise functions.
++*   `noiseLayerData`: A 4-component vector encoding layer parameters:
++    *   `x`: `noiseScale` (float)
++    *   `y`: `noisePower` (float)
++    *   `z`: `angleOffset` (float)
++    *   `w`: `noiseType` (integer, cast from float)
+ 
+ **Numbered Steps**
+-1. **Enable Check**: If $E_{nabled}$ is false, return $V_{final} = 1.0$ immediately [S1, unofficial].
+-2. **Position Distortion**: Calculate distortion magnitude $M_{ag} = 0.1 \times D_{str}$ [S1, unofficial]. If $M_{ag} > 0$, compute a distortion vector $D_{vec}$ by sampling a continuous noise function (e.g., cnoise) at position $P_{sample} \times M_{ag}$. Update the sample position: $P_{distorted} = P_{sample} + D_{vec}$ [S1, unofficial]. If $M_{ag} \le 0$, $P_{distorted} = P_{sample}$ [S1, unofficial].
+-3. **Parameter Unpacking**: Extract $S_{cale} = L_{data}.x$, $P_{ower} = L_{data}.y$, $A_{offset} = L_{data}.z$, and $T_{ype} = \lfloor L_{data}.w \rfloor$ [S1, unofficial].
+-4. **Noise Sampling**: Initialize $V_{sample} = 0.0$. Evaluate the base noise function $N(P)$ based on $T_{ype}$:
+-   - If $T_{ype} = 0$: $V_{sample} = \text{cnoise}(P_{distorted} \times S_{cale})$ [S1, unofficial].
+-   - If $T_{ype} = 1$: $V_{sample} = \text{snoise}(P_{distorted} \times S_{cale})$ [S1, unofficial].
+-   - If $T_{ype} = 2$: $V_{sample} = \text{voronoi}(P_{distorted} \times S_{cale}, A_{offset}, S_{cale})$ [S1, unofficial].
+-   - If $T_{ype} = 3$: $V_{sample} = \text{nebulaNoise}(P_{distorted} \times S_{cale})$ [S1, unofficial].
+-   - Otherwise: $V_{sample} = 0.0$ [S1, unofficial].
+-5. **Clamping and Inversion**: Clamp $V_{sample}$ to $[0.0, 1.0]$ to get $V_{clamped}$ [S1, unofficial]. If $I_{vert}$ is true, set $V_{val} = 1.0 - V_{sample}$ (using the unclamped value) [S1, unofficial]. Else, set $V_{val} = V_{clamped}$ [S1, unofficial].
+-6. **Power Scaling**: Compute $V_{final} = |V_{val}|^{P_{ower}}$ [S1, unofficial].
++1.  **Enable Check:** If `enabled` is false, set `finalValue` to 1.0 and return immediately [S1, unofficial].
++2.  **Distortion Calculation:** Compute `distortionStrength` as $0.1 \times \text{positionDistortion}$. If `distortionStrength` > 0, sample a noise function `cnoise` at `distortionStrength * noiseSamplePosition`. Add the resulting 3D vector to `noiseSamplePosition` to create a distorted position [S1, unofficial].
++3.  **Parameter Unpacking:** Extract `noiseScale`, `noisePower`, `angleOffset`, and `noiseType` from `noiseLayerData` [S1, unofficial].
++4.  **Noise Sampling:** Initialize `sampledNoiseValue` to 0.0. Select the noise function based on `noiseType`:
++    *   0: `cnoise` (Curl Noise)
++    *   1: `snoise` (Simplex Noise)
++    *   2: `voronoi` (Voronoi Noise)
++    *   3: `nebulaNoise`
++    *   Evaluate the selected function at `noiseSamplePosition * noiseScale`. For Voronoi, pass `angleOffset` and `noiseScale` as additional arguments [S1, unofficial].
++5.  **Clamping and Inversion:** Clamp `sampledNoiseValue` to the range $[0.0, 1.0]$ and store in `value`. If `invert` is true, overwrite `value` with $1.0 - \text{sampledNoiseValue}$ (note: this bypasses the previous clamp) [S1, unofficial].
++6.  **Power Scaling:** Compute `absNoisePower` as $|\text{noisePower}|$. Calculate `finalValue` as $\text{value}^{\text{absNoisePower}}$ [S1, unofficial].
+ 
+ **Pseudocode**
+ ```python
+-def evaluate_noise_layer(position: vec3, layer_data: vec4, distortion_strength: float, invert: bool, enabled: bool) -> float:
++def evaluate_noise_layer(noise_sample_position, noise_layer_data, position_distortion, invert, enabled):
+     # Step 1: Enable Check
+     if not enabled:
+         return 1.0
+ 
+-    # Step 2: Position Distortion
+-    mag = 0.1 * distortion_strength
+-    if mag > 0:
+-        # Assuming cnoise is available as a base noise function
+-        distortion_vec = vec3(cnoise(position * mag))
+-        sample_pos = position + distortion_vec
++    # Step 2: Distortion
++    distortion_strength = 0.1 * position_distortion
++    if distortion_strength > 0:
++        # cnoise is assumed to be a defined curl noise function
++        distortion_offset = cnoise(distortion_strength * noise_sample_position)
++        distorted_position = noise_sample_position + distortion_offset
+     else:
+-        sample_pos = position
++        distorted_position = noise_sample_position
+ 
+-    # Step 3: Parameter Unpacking
+-    scale = layer_data.x
+-    power = layer_data.y
+-    angle_offset = layer_data.z
+-    noise_type = int(layer_data.w)
++    # Step 3: Unpack Parameters
++    noise_scale = noise_layer_data.x
++    noise_power = noise_layer_data.y
++    angle_offset = noise_layer_data.z
++    noise_type = int(noise_layer_data.w)
+ 
+     # Step 4: Noise Sampling
+-    sampled_value = 0.0
+-    scaled_pos = sample_pos * scale
++    sampled_noise_value = 0.0
++    scaled_position = distorted_position * noise_scale
+ 
+     if noise_type == 0:
+-        sampled_value = cnoise(scaled_pos)
++        sampled_noise_value = cnoise(scaled_position)
+     elif noise_type == 1:
+-        sampled_value = snoise(scaled_pos)
++        sampled_noise_value = snoise(scaled_position)
+     elif noise_type == 2:
+-        sampled_value = voronoi(scaled_pos, angle_offset, scale)
++        sampled_noise_value = voronoi(scaled_position, angle_offset, noise_scale)
+     elif noise_type == 3:
+-        sampled_value = nebula_noise(scaled_pos)
++        sampled_noise_value = nebula_noise(scaled_position)
+     else:
+-        sampled_value = 0.0
++        # Fallback for unknown types
++        sampled_noise_value = 0.0
+ 
+     # Step 5: Clamping and Inversion
+-    clamped_value = clamp(sampled_value, 0.0, 1.0)
++    value = clamp(sampled_noise_value, 0.0, 1.0)
+     
+     if invert:
+-        # Pitfall: Inversion uses unclamped sampled_value, not clamped_value
+-        val = 1.0 - sampled_value
+-    else:
+-        val = clamped_value
++        # Pitfall: Inversion uses original sampled value, bypassing clamp
++        value = 1.0 - sampled_noise_value
+ 
+     # Step 6: Power Scaling
+-    final_value = abs(val) ** power
+-    
++    abs_noise_power = abs(noise_power)
++    final_value = pow(value, abs_noise_power)
++
+     return final_value
+ ```
+ 
+-**Parameters and Typical Values**
+-- `noiseLayerData` (vec4): Encoded parameters. $x \in [0.0, \infty)$ for scale, $y \in [0.0, \infty)$ for power, $z$ for angle offset, $w \in \{0, 1, 2, 3\}$ for type [S1, unofficial].
+-- `positionDistortion` (float): Controls the intensity of positional warping. Typical values are small (e.g., 1.0–5.0) to avoid excessive distortion [S1, unofficial].
+-- `invert` (bool): Toggles inversion logic [S1, unofficial].
+-- `enabled` (bool): Enables/disables the layer [S1, unofficial].
+-- `densityMult` (float): Default 1.0, range $[0.0, 1.0]$, step 0.001. Multiplies the final density in the raymarching loop [S1, unofficial].
+-- `maxSteps` (int): Default 70, range $[40, 256]$ [S1, unofficial].
+-- `stepSize` (float): Default 0.01, range $[0.00001, 0.1]$ [S1, unofficial].
++**Parameters**
++*   `noiseLayerData` (vec4): Encoded layer parameters. `x`=scale, `y`=power, `z`=angle offset, `w`=noise type (integer 0-3) [S1, unofficial].
++*   `positionDistortion` (float): Scales the offset applied to the sample position [S1, unofficial].
++*   `invert` (bool): When true, inverts the noise value before power application [S1, unofficial].
++*   `enabled` (bool): When false, forces the layer output to 1.0 [S1, unofficial].
++*   `densityMult` (float): Default 1.0, range $[0.0, 1.0]$, step 0.001. Multiplies volume density in the raymarching loop [S1, unofficial].
++*   `maxSteps` (int): Default 70, range $[40, 256]$, step 1. Maximum number of raymarching steps per ray [S1, unofficial].
++*   `stepSize` (float): Default 0.01, range $[0.00001, 0.1]$, step 0.000001. Distance between consecutive sample positions along the ray [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls**
+-- **Inversion Clamping Bug**: The inversion branch uses the raw `sampledNoiseValue` instead of the clamped `value`. This means if `invert` is true, the clamp applied in the previous step is ignored, potentially allowing values outside $[0.0, 1.0]$ to be inverted and raised to a power [S1, unofficial].
+-- **Unused Depth Parameter**: The function signature may include a `depth` parameter that is declared but never referenced in the body, leading to unused computation or confusion [S1, unofficial].
+-- **Division by Zero**: If `scale` is 0.0, noise sampling may behave unpredictably depending on the implementation of the base noise functions [G].
++*   **Inversion Bypass:** The inversion branch uses `sampledNoiseValue` instead of the clamped `value`. This means if `invert` is true, the clamp applied in Step 5 is ignored, potentially allowing values outside $[0.0, 1.0]$ to be inverted and raised to a power [S1, unofficial].
++*   **Unused Depth Parameter:** The function signature may include a `depth` parameter which is declared but never referenced or used in the function body [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(1)$ per layer evaluation, assuming constant-time noise function evaluation. The cost depends on the complexity of the base noise function (e.g., Voronoi is generally more expensive than Simplex) [S1, unofficial].
+-- **Memory Complexity**: $O(1)$, as it computes values on-the-fly without storing large lookup tables [S1, unofficial].
+-- **Strengths**: Modular design allows for complex effects by stacking layers; supports multiple noise types; distortion adds organic variation [S1, unofficial].
+-- **Limitations**: The inversion bug can lead to unexpected artifacts; distortion adds computational overhead; power scaling can amplify noise artifacts if not clamped correctly [S1, unofficial].
+-- **When to Use**: Ideal for procedural volumetric texturing where artistic control over scale, power, and noise type is required [S1, unofficial].
+-- **When Not to Use**: When performance is critical and distortion is unnecessary; when strict clamping is required before inversion [S1, unofficial].
++*   **Time Complexity:** $O(1)$ per layer evaluation, assuming constant-time noise primitives.
++*   **Memory Complexity:** $O(1)$ auxiliary memory.
++*   **Strengths:** Unified handling of multiple noise types and post-processing effects (distortion, inversion, power) in a single pass.
++*   **Limitations:** The inversion logic bug (bypassing clamp) can lead to unexpected artifacts if not accounted for. Performance depends heavily on the underlying noise primitives (`cnoise`, `snoise`, etc.).
++*   **When to use:** When a procedural volume requires flexible noise layering with distortion and non-linear scaling.
++*   **When not to use:** When strict bounded output $[0.0, 1.0]$ is required regardless of inversion settings.
+ 
+ ## Background
+-Noise Layer Evaluation originates from procedural texture generation techniques used in real-time rendering, particularly in WebGL-based volume visualization tools like Texturinator [S1, unofficial]. It builds upon foundational noise functions such as Perlin noise, Simplex noise, and Worley noise, extending them with layer-specific parameters for scale, power, and distortion [S1, unofficial]. The method is commonly used in 3D volume preview services and shader-based rendering pipelines to generate complex, organic textures for clouds, terrain, and materials [S1, unofficial].
++This method is derived from the procedural noise layer evaluation logic found in the Texturinator project, an unofficial implementation for 3D volume previewing [S1, unofficial]. It integrates standard gradient-based noise primitives (like Simplex and Curl noise) with a specific layer management system used in real-time volume rendering applications.
+ 
+ ## Sources

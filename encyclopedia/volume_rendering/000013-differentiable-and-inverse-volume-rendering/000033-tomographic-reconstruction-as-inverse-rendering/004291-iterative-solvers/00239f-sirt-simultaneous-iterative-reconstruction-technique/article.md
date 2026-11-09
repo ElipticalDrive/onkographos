@@ -1,72 +1,98 @@
 # SIRT (Simultaneous Iterative Reconstruction Technique)
+Also called: Simultaneous Iterative Reconstruction Technique
 ## Overview
-SIRT is an iterative algebraic reconstruction technique that solves the inverse problem of tomographic reconstruction by minimizing the discrepancy between measured projections and forward-projected volume estimates [S1, unofficial]. It distinguishes itself from simultaneous methods like SART by applying global normalization to both the ray residuals and the backprojected updates, ensuring stable convergence through nonnegativity constraints [S1, unofficial].
+SIRT is an iterative algebraic reconstruction method that solves the linear system $Ax=y$ by normalizing ray residuals by total intersected length and backprojected updates by accumulated voxel sensitivity [S1, unofficial]. It differs from [ART](6944-algebraic-reconstruction-technique-art.md) by updating all voxels simultaneously using averaged corrections rather than sequential single-projection updates [S1, unofficial].
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** Measured sinogram $y$, forward projection matrix/operator $A$, initial volume estimate $x^{(0)}$ [S1, unofficial].
-*   **Output:** Reconstructed volume $x$ [S1, unofficial].
+**Inputs:** Projection data vector $y$, system matrix $A$ (ray-voxel intersection weights), maximum iterations $K$.
+**Outputs:** Reconstructed volume vector $x$.
 **Data Structures:**
-*   $x$: 3D volume array of density/absorption coefficients [S1, unofficial].
-*   $y$: 1D array of projection measurements [S1, unofficial].
-*   $A$: Matrix representing ray-voxel intersections, where $A_{ji}$ is the path length of ray $j$ through voxel $i$ [S1, unofficial].
-*   $R$: Diagonal normalization matrix for rays [S1, unofficial].
-*   $C$: Diagonal normalization matrix for voxels [S1, unofficial].
-**Parameters:**
-*   $k$: Iteration counter. Typical value: 200 iterations [S1, unofficial].
-**Algorithm Steps:**
-1.  **Initialization:** Set initial volume estimate $x^{(0)} = 0$ [S1, unofficial].
-2.  **Compute Residuals:** Calculate the difference between measured projections and current forward projections: $r = y - Ax^{(k)}$ [S1, unofficial].
-3.  **Normalize Residuals:** Apply diagonal matrix $R$ to normalize residuals by total intersected ray length: $r_{\text{norm}} = R r$ [S1, unofficial].
-4.  **Backproject:** Compute the adjoint operation (back-projection) of the normalized residuals: $b = A^T r_{\text{norm}}$ [S1, unofficial].
-5.  **Normalize Update:** Apply diagonal matrix $C$ to normalize the backprojected update by accumulated voxel sensitivity: $u = C b$ [S1, unofficial].
-6.  **Update Volume:** Add the normalized update to the current volume: $x^{(k+1)}_{\text{raw}} = x^{(k)} + u$ [S1, unofficial].
-7.  **Enforce Nonnegativity:** Apply componentwise maximum with zero: $x^{(k+1)} = \max(0, x^{(k+1)}_{\text{raw}})$ [S1, unofficial].
-8.  **Convergence Check:** If convergence criteria are not met, increment $k$ and return to Step 2 [G].
+- $x$: Vector of voxel values, initialized to zero.
+- $R$: Diagonal matrix for ray normalization.
+- $C$: Diagonal matrix for voxel sensitivity normalization.
+
+**Steps:**
+1. Initialize $x^{(0)} = 0$.
+2. For $k = 0$ to $K-1$:
+   a. Compute residual: $r = y - Ax^{(k)}$.
+   b. Normalize residual: $r_{norm} = R r$.
+   c. Backproject: $b = A^T r_{norm}$.
+   d. Normalize update: $u = C b$.
+   e. Update: $x^{(k+1)} = \max(0, x^{(k)} + u)$.
+
 **Formulas:**
-The combined update rule is defined as [S1, unofficial]:
-$$x^{(k+1)} = \max(0, x^{(k)} + C A^T R (y - A x^{(k)}))$$
-Where:
-*   $R$ is a diagonal matrix with entries $R_{jj} = \frac{1}{(A \mathbf{1})_j}$ if $(A \mathbf{1})_j > 0$, else $0$ [S1, unofficial]. This normalizes each ray residual by its total intersected length [S1, unofficial].
-*   $C$ is a diagonal matrix with entries $C_{ii} = \frac{1}{(A^T \mathbf{1})_i}$ if $(A^T \mathbf{1})_i > 0$, else $0$ [S1, unofficial]. This normalizes the backprojected update by accumulated voxel sensitivity [S1, unofficial].
-*   $\mathbf{1}$ is a vector of ones [G].
+$$x^{(k+1)} = \max(0, x^{(k)} + CA^T R(y - Ax^{(k)}))$$
+where $R$ and $C$ are diagonal matrices [S1, unofficial]:
+$$R_{jj} = \begin{cases} \frac{1}{(A\mathbf{1})_j} & \text{if } (A\mathbf{1})_j > 0 \\ 0 & \text{otherwise} \end{cases}$$
+$$C_{ii} = \begin{cases} \frac{1}{(A^\top\mathbf{1})_i} & \text{if } (A^\top\mathbf{1})_i > 0 \\ 0 & \text{otherwise} \end{cases}$$
+$R$ normalizes each ray residual by its total intersected length; $C$ normalizes the backprojected update by accumulated voxel sensitivity [S1, unofficial]. The $\max(0, \cdot)$ enforces nonnegativity componentwise [S1, unofficial].
+
+**Parameters:**
+- Iterations $K$: Typically 200 for measured data [S1, unofficial].
+
+**Edge Cases:**
+- If $(A\mathbf{1})_j = 0$ or $(A^\top\mathbf{1})_i = 0$, the corresponding diagonal entry is 0 to avoid division by zero [S1, unofficial].
+- Nonnegativity constraint prevents negative voxel values [S1, unofficial].
+
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def sirt_reconstruct(y, A, A_T, num_iterations=200):
-    # Initialize volume to zero
-    x = [0.0] * len(A_T(y))
+def sirt(A, y, K):
+    # A: sparse matrix or function returning Ax and A^T x
+    # y: projection data vector
+    # K: number of iterations
+    
+    # Initialize x
+    x = zeros_like(y) # Assuming x and y have compatible dimensions for A
     
     # Precompute normalization factors
-    ray_lengths = [sum(A[j]) for j in range(len(A))]
-    voxel_sensitivities = [sum(A[j][i] for j in range(len(A))) for i in range(len(A[0]))]
+    # A1: sum of each row of A (total intersected length per ray)
+    A1 = A.sum(axis=1)
+    # A_T1: sum of each column of A (accumulated voxel sensitivity per voxel)
+    A_T1 = A.sum(axis=0)
     
-    # Invert and clamp to 1.0 for zero denominators
-    ray_lengths = [1.0 / l if l > 0 else 1.0 for l in ray_lengths]
-    voxel_sensitivities = [1.0 / s if s > 0 else 1.0 for s in voxel_sensitivities]
+    # Create diagonal matrices R and C
+    # R_jj = 1/A1_j if A1_j > 0 else 0
+    R_diag = where(A1 > 0, 1.0 / A1, 0.0)
+    # C_ii = 1/A_T1_i if A_T1_i > 0 else 0
+    C_diag = where(A_T1 > 0, 1.0 / A_T1, 0.0)
     
-    for k in range(num_iterations):
-        x_proj = A(x)
-        residual = [y[j] - x_proj[j] for j in range(len(y))]
-        residual_normalized = [residual[j] * ray_lengths[j] for j in range(len(residual))]
-        backprojected = A_T(residual_normalized)
-        update = [backprojected[i] * voxel_sensitivities[i] for i in range(len(backprojected))]
-        x = [max(0.0, x[i] + update[i]) for i in range(len(x))]
+    for k in range(K):
+        # Forward projection: Ax
+        Ax = A @ x
+        
+        # Residual: y - Ax
+        residual = y - Ax
+        
+        # Normalize residual by R
+        # R is diagonal, so element-wise multiplication
+        residual_norm = R_diag * residual
+        
+        # Backprojection: A^T * residual_norm
+        backprojected = A.T @ residual_norm
+        
+        # Normalize backprojected update by C
+        update = C_diag * backprojected
+        
+        # Update x with nonnegativity constraint
+        x = maximum(x + update, 0.0)
+        
     return x
 ```
 ## Subtopics
 
 ### [SART (Simultaneous Algebraic Reconstruction Technique)](3277-sart-simultaneous-algebraic-reconstruction-technique.md)
-SART updates the volume per view, offering modest memory requirements and superior performance over direct methods like FDK in limited projection scenarios. It is preferred over Conjugate Gradient (CG) for sparse-view settings because CG suffers from numerical noise in matrix-free implementations and convergence issues with large sparse systems.
+SART is an iterative algebraic reconstruction technique based on the Kaczmarz projection method, used to solve the data fidelity term in tomographic reconstruction problems. It updates the reconstructed volume for each scan view, offering modest memory requirements and superior performance over direct methods like FDK in limited projection scenarios. It is preferred over Conjugate Gradient (CG) for sparse-view settings because CG suffers from numerical noise in matrix-free implementations and convergence issues with large sparse systems.
 
 ## Operating characteristics
-*   **Time Complexity:** Linear in the number of voxels and rays per iteration. Convergence can be slow, requiring many iterations (e.g., 200) [S1, unofficial].
-*   **Memory Complexity:** Requires storage for the volume, sinogram, and potentially the projection matrix $A$ or its structure [G].
-*   **Strengths:** Stable convergence, enforces nonnegativity, handles sparse data reasonably well [G].
-*   **Limitations:** Slow convergence compared to direct methods like FDK for dense data; sensitive to noise if not regularized [G].
-*   **When to use:** When nonnegativity is critical, or when using iterative optimization frameworks that benefit from differentiable forward/backward projections [G].
-*   **When not to use:** For real-time applications or when high-speed reconstruction is required and data is dense (use FDK) [G].
+- **Time Complexity:** $O(K \cdot N_{rays} \cdot N_{voxels})$ per iteration, where $K$ is iterations, $N_{rays}$ is number of rays, $N_{voxels}$ is number of voxels.
+- **Memory Complexity:** $O(N_{rays} + N_{voxels})$ for storing $R$ and $C$ diagonals, plus storage for $A$ if explicit.
+- **Performance:** Requires 200 iterations for measured data [S1, unofficial].
+- **Strengths:** Enforces nonnegativity, normalizes for ray length and voxel sensitivity.
+- **Limitations:** Convergence can be slow compared to direct methods like FDK in ideal scenarios [S1, unofficial].
+- **When to use:** When nonnegativity is required and ray lengths vary significantly.
+- **When not to use:** When speed is critical and direct methods are applicable.
 ## Background
-SIRT is an iterative algebraic reconstruction technique used in computed tomography (CT) and other tomographic imaging modalities [S1, unofficial].
+SIRT is an iterative reconstruction method introduced in the context of tomographic reconstruction [S1, unofficial]. It is part of the family of algebraic reconstruction techniques.
 ## Sources
 [S1] diffct: Differentiable CT Operators from Circular Orbits to Arbitrary Trajectories, https://doi.org/10.20944/preprints202605.1446.v2, fetched 2026-10-26 (unofficial)

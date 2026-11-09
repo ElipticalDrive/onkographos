@@ -1,8 +1,7 @@
 # Scatter-Add Accumulation
-
-
+Also called: Accumulation Renderer
 ## Overview
-Scatter-Add Accumulation is a method for aggregating weighted feature values and weights into per-ray buffers when samples are not presented in strict ray order. It solves the problem of non-deterministic or unordered sample generation by using atomic-like scatter-add operations to sum contributions into a fixed-size output buffer indexed by ray ID. Unlike sequential ray-order compositing, it decouples sample generation from accumulation order, enabling parallel processing of scattered samples.
+Scatter-Add Accumulation aggregates weighted feature values and weights into per-ray buffers when samples are not presented in strict ray order [S1, unofficial]. It solves the problem of non-deterministic or unordered sample generation by using scatter-add operations to sum contributions into a fixed-size output buffer indexed by ray ID [S1, unofficial]. Unlike sequential ray-order compositing, it decouples sample generation from accumulation order, enabling parallel processing of scattered samples [S1, unofficial].
 
 ## How it works
 **Inputs:**
@@ -13,50 +12,62 @@ Scatter-Add Accumulation is a method for aggregating weighted feature values and
 - `C`: Integer number of feature channels.
 
 **Data Structures:**
-- `output`: Array of shape $[n\_rays, C]$ (or $[n\_rays, 1]$ if `values` is `None`), initialized to zero. Data type is typically `float32`.
+- `output`: Array of shape $[n\_rays, C]$ (or $[n\_rays, 1]$ if `values` is `None`), initialized to zero. Data type is `float32` [S1, unofficial].
 
 **Steps:**
-1. **Compute Weighted Features:** If `values` is provided, compute the weighted contribution for each sample.
+1. **Initialize Output Buffer:** Create an output buffer of shape $[n\_rays, C]$ filled with zeros [S1, unofficial].
+   $$ \text{output} = \mathbf{0} $$
+2. **Compute Weighted Features:** If `values` is provided, compute the weighted contribution for each sample [S1, unofficial].
    $$ \text{weighted}[m, c] = \text{weights}[m] \times \text{values}[m, c] $$
-   where $m \in [0, M)$ and $c \in [0, C)$. The result is an array of shape $[M, C]$. [S1, unofficial]
-
-2. **Initialize Output Buffer:** Create an output buffer of shape $[n\_rays, C]$ (or $[n\_rays, 1]$) filled with zeros.
-   $$ \text{output} = \mathbf{0} $$ [S1, unofficial]
-
-3. **Perform Scatter-Add:** Accumulate the weighted values into the output buffer using the ray indices. This operation adds `weighted[m]` to `output[ray_indices[m]]` for all $m$.
+   where $m \in [0, M)$ and $c \in [0, C)$. The result is an array of shape $[M, C]$.
+3. **Perform Scatter-Add:** Accumulate the weighted values into the output buffer using the ray indices [S1, unofficial].
    $$ \text{output}[\text{ray\_indices}] \mathrel{+}= \text{weighted} $$
-   In array programming terms (e.g., JAX/MLX), this is expressed as:
-   ```python
-   output = output.at[ray_indices].add(weighted)
-   ``` [S1, unofficial]
+4. **Weight-Only Accumulation:** If `values` is `None`, accumulate only the weights into a buffer of shape $[n\_rays, 1]$ [S1, unofficial].
+   $$ \text{output}[\text{ray\_indices}] \mathrel{+}= \text{weights}[:, \text{None}] $$
 
-4. **Weight-Only Accumulation:** If `values` is `None`, accumulate only the weights. The output buffer has shape $[n\_rays, 1]$.
-   $$ \text{output}[\text{ray\_indices}] \mathrel{+}= \text{weights}[:, \text{None}] $$ [S1, unofficial]
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def scatter_add_accumulation(weights, values, ray_indices, n_rays, C):
+    # Initialize output buffer of shape [n_rays, C] with zeros
+    output = zeros((n_rays, C), dtype=float32)
+    if values is not None:
+        # Compute weighted features: weights broadcast to [M, 1]
+        weighted = weights[:, None] * values  # Shape [M, C]
+        # Accumulate weighted values using scatter-add
+        output = output.at[ray_indices].add(weighted)
+    else:
+        # Weight-only accumulation into a [n_rays, 1] buffer
+        output = output.at[ray_indices].add(weights[:, None])
+    return output
+```
 
 **Parameters:**
-- `dtype`: Typically `float32` for precision balance. [S1, unofficial]
+- `dtype`: Typically `float32` for precision balance [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Ray Index Bounds:** `ray_indices` must be within $[0, n\_rays)$. Out-of-bounds indices cause undefined behavior or errors depending on the implementation. [G]
-- **Atomicity:** In GPU implementations, scatter-add operations must be atomic to prevent race conditions when multiple samples map to the same ray. [G]
-- **Precision:** Accumulating many small weights may lead to precision loss in `float32`. Consider `float64` for high-accuracy requirements. [G]
+- **Ray Index Bounds:** `ray_indices` must be within $[0, n\_rays)$; out-of-bounds indices cause undefined behavior or errors [G].
+- **Precision:** Accumulating many small weights may lead to precision loss in `float32`; consider `float64` for high-accuracy requirements [G].
+- **Atomicity:** In GPU implementations, scatter-add operations must be atomic to prevent race conditions when multiple samples map to the same ray [G].
 
 ## Subtopics
 
 ### Concentric Rectangular Band Accumulation
-A multipass approach for volumetric light scattering where pixel shader summation is performed by accumulating results from concentric rectangular bands emanating from the light source into successive outer bands. The accumulation formula is $L_i(s, \theta, \phi) = L_{i-1}(s, \theta, \phi) + L_i(s, \theta, \phi)$, where $L$ represents accumulated light and $i$ is the band index. This method is described as the minimal required sampling and computation limit but may not be best suited to current hardware design compared to single-pass execution. [S2, book]
+A multipass approach for volumetric light scattering where pixel shader summation is performed by accumulating results from concentric rectangular bands emanating from the light source into successive outer bands [S3, book]. The accumulation formula is $L_i(s, \theta, \phi) = L_{i-1}(s, \theta, \phi) + L_i(s, \theta, \phi)$, where $L$ represents accumulated light and $i$ is the band index [S3, book]. This method is described as the minimal required sampling and computation limit, though it may not be best suited to current hardware design compared to single-pass execution [S3, book].
 
 ## Operating characteristics
-- **Time Complexity:** $O(M)$ for scatter-add, where $M$ is the number of samples. [S1, unofficial]
-- **Memory Complexity:** $O(n\_rays \times C)$ for the output buffer. [S1, unofficial]
-- **Strengths:** Handles unordered samples; parallelizable; simple implementation in array frameworks. [S1, unofficial]
-- **Limitations:** Requires atomic operations for correctness on GPUs; memory usage scales with number of rays. [G]
-- **When to Use:** When sample generation order is non-deterministic or parallelized across rays. [S1, unofficial]
-- **When Not to Use:** When ray-order compositing is possible and memory bandwidth is a bottleneck. [G]
+- Time complexity: Not given in the sources.
+- Memory complexity: $O(n\_rays \times C)$ for the output buffer [S1, unofficial].
+- Strengths: Handles unordered samples; supports both feature and weight-only accumulation [S1, unofficial].
+- Limitations: Not given in the sources.
+- When to use: Not given in the sources.
+- When not to use: Not given in the sources.
 
 ## Background
-Scatter-Add Accumulation is a fundamental technique in modern differentiable rendering and neural graphics, particularly in frameworks like JAX and MLX that support automatic differentiation and array programming. It is used in methods like 3D Gaussian Splatting where rasterization or ray casting produces unordered samples. The method leverages hardware-supported atomic add operations for efficiency. [S1, unofficial]
+The method is also known as Accumulation Renderer or accumulate_along_rays [S2, unofficial]. It is used in differentiable rendering frameworks that support array programming and automatic differentiation [S1, unofficial]. Not given in the sources.
 
 ## Sources
 [S1] RobotFlow-Labs/gsplat-mlx, https://github.com/RobotFlow-Labs/gsplat-mlx, fetched 2026-10-27 (unofficial)
-[S2] Volumetric Light Scattering as a Post-Process, https://developer.nvidia.com/gpugems/gpugems3/part-ii-light-and-shadows/chapter-13-volumetric-light-scattering-post-process, fetched 2026-10-27 (book)
+[S2] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)
+[S3] Volumetric Light Scattering as a Post-Process, https://developer.nvidia.com/gpugems/gpugems3/part-ii-light-and-shadows/chapter-13-volumetric-light-scattering-post-process, fetched 2026-10-27 (book)

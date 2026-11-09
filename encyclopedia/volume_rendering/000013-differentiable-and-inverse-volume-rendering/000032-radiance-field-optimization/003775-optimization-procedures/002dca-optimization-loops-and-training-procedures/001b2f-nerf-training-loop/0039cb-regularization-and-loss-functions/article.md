@@ -2,10 +2,10 @@
 
 
 ## Overview
-Regularization and Loss Functions constrain the optimization of Neural Radiance Fields (NeRFs) to prevent degenerate solutions, such as "floaters" (semi-transparent artifacts) and image copying, particularly in sparse-view or few-shot settings. This family distinguishes itself from sibling methods like [Training Ray Marching and Integration](2199-training-ray-marching-and-integration.md) by focusing on the objective function's mathematical structure rather than the sampling strategy, and from [Training Configuration](2332-training-configuration.md) by defining specific penalty terms rather than hyperparameter schedules. It addresses the shape-radiance ambiguity inherent in volume rendering by introducing geometric, structural, or generative priors into the loss landscape.
+Regularization and Loss Functions in NeRF optimization address the severe under-constraint of Neural Radiance Fields, particularly in sparse-view settings, by augmenting the standard photometric reconstruction loss with geometric priors, structural similarity metrics, or generative model constraints [S1, 7381-diffusion-regularized-nerf.md, 8582-regnerf.md]. This family distinguishes itself from sibling methods like [Training Ray Marching and Integration](2199-training-ray-marching-and-integration.md) by focusing on the objective function's formulation rather than the sampling strategy, and from [Depth and Geometry Supervision](8727-depth-and-geometry-supervision.md) by often relying on internal consistency or learned priors rather than explicit external depth sensors.
 
 ## Shared principles
-The total training loss $\mathcal{L}_{\text{total}}$ is a weighted sum of a standard photometric reconstruction loss and one or more regularization terms $\mathcal{L}_k$:
+All methods in this family share the fundamental structure of an augmented loss function. The total loss $\mathcal{L}_{\text{total}}$ is a weighted sum of the standard photometric reconstruction loss and one or more regularization terms $\mathcal{L}_k$:
 
 $$ \mathcal{L}_{\text{total}} = \mathcal{L}_{\text{photo}} + \sum_k \lambda_k \mathcal{L}_k $$
 
@@ -17,51 +17,46 @@ Regularization terms $\mathcal{L}_k$ operate on the density $\sigma$ and color $
 
 ## Subtopics
 
-### [Diffusion-Regularized NeRF Training](7381-diffusion-regularized-nerf-training.md)
-Mitigates severe under-constraint in limited-view settings by using a Denoising Diffusion Model (DDM) trained on RGBD patches to regularize geometry and color. It sets itself apart from [RegNeRF](8582-regnerf.md) by using a DDM rather than normalizing flows, and from [Depth and Geometry Supervision](8727-depth-and-geometry-supervision.md) by learning a probabilistic prior rather than using explicit depth sensors.
+### [Diffusion-regularized NeRF](7381-diffusion-regularized-nerf.md)
+Mitigates under-constraint in sparse views using a Denoising Diffusion Model (DDM) trained on RGBD patches to regularize geometry and color. It sets itself apart from [RegNeRF](8582-regnerf.md) by using a DDM rather than normalizing flows, and from [Depth and Geometry Supervision](8727-depth-and-geometry-supervision.md) by learning a probabilistic prior instead of using explicit depth sensors.
 
 ### [Geometric Baseline Regularization](7475-geometric-baseline-regularization.md)
-Prevents degenerate solutions in few-view settings by combining photometric error with three geometric priors: foreground completeness, frustum consistency, and depth distribution compactness. It distinguishes itself from [RegNeRF](8582-regnerf.md) and [Depth and Geometry Supervision](8727-depth-and-geometry-supervision.md) by relying solely on internal ray weights and view frustum overlaps without external depth inputs.
+Prevents degenerate solutions (e.g., image copying) in few-view settings using three geometric priors: foreground completeness, frustum consistency, and depth distribution compactness. It relies solely on internal ray weights and view frustum overlaps, distinguishing it from [RegNeRF](8582-regnerf.md) and [Depth and Geometry Supervision](8727-depth-and-geometry-supervision.md) which use external constraints or multi-view consistency checks.
 
 ### [RegNeRF](8582-regnerf.md)
-Improves view synthesis from sparse views by constraining unobserved regions via a smoothness prior and a normalizing flow prior. It distinguishes itself from [DiffNeRF](8572-diffnerf.md) by approximating spatial gradients via finite differences on patch-based dataloaders rather than automatic differentiation on ray-based representations.
+Improves view synthesis from sparse inputs by constraining unobserved regions via a smoothness prior and a normalizing flow prior. It approximates spatial gradients via finite differences on patch-based dataloaders, distinguishing it from [DiffNeRF](8572-diffnerf.md) which uses automatic differentiation on ray-based representations.
 
 ### [Occlusion-Eliminating NeRF Variant](8653-occlusion-eliminating-nerf-variant.md)
-Addresses novel view synthesis degradation caused by foreground occlusions by modeling the scene and occluding background as separate components using a dual-MLP architecture. It distinguishes itself from generic regularization methods by using cost volume and depth inconsistency losses to disentangle foreground objects from background artifacts.
+Addresses novel view synthesis degradation caused by foreground occlusions by modeling the scene and background as separate components using a dual-MLP architecture. It uses cost volume and depth inconsistency losses to disentangle foreground from background artifacts, unlike siblings relying on generic regularization.
 
 ### [Depth and Geometry Supervision](8727-depth-and-geometry-supervision.md)
-Accelerates optimization and improves geometric accuracy by incorporating external depth estimates or structural constraints. It is distinguished from [Diffusion-Regularized NeRF Training](7381-diffusion-regularized-nerf-training.md) by relying on explicit depth values rather than learned generative priors, and from [Geometric Baseline Regularization](7475-geometric-baseline-regularization.md) by focusing on alignment with specific depth targets.
+Accelerates optimization and improves geometric accuracy by incorporating external depth estimates or structural constraints. It is distinguished from [Diffusion-Regularized NeRF Training](7381-diffusion-regularized-nerf.md) by relying on explicit depth values rather than learned generative priors, and from [Geometric Baseline Regularization](7475-geometric-baseline-regularization.md) by focusing on alignment with specific depth targets.
 
 ### [Specific Loss Formulations](10636-specific-loss-formulations.md)
-Encompasses precise mathematical formulations for regularization and reconstruction losses, such as patch-based MSE or adaptive uncertainty weighting, to address spatial misalignment and few-shot generalization.
-
-### [Diffusion-based Regularization for NeRF](10661-diffusion-based-regularization-for-nerf.md)
-Incorporates a denoising diffusion model as a prior for density and color fields to mitigate interference factors in limited-view scenarios. It builds on [Regularization and Loss Functions](8586-regularization-and-loss-functions.md) by adding a gradient term derived from the score of the diffusion prior, preventing the disappearance of fine structures.
+Encompasses precise mathematical formulations for regularization and reconstruction losses, such as patch-based MSE, distributed distortion aggregation, or adaptive uncertainty weighting, to constrain density and color fields during training.
 
 ### [Multiplex Training via S3IM](10894-multiplex-training-via-s3im.md)
-Augments standard photometric losses with a Stochastic Structural SIMilarity (S3IM) term to improve reconstruction quality for complex details. It distinguishes itself from standard SSIM by capturing non-local structural information from distant pixels across different images via stochastic patching.
+Augments photometric losses with a Stochastic Structural SIMilarity (S3IM) term to improve reconstruction quality for complex details and sparse inputs. It captures non-local structural information from distant pixels via stochastic patching, whereas standard SSIM only captures local information.
 
 ### [S3IM (Stochastic Structural SIMilarity)](10895-s3im-stochastic-structural-similarity.md)
-Captures nonlocal structural similarity by processing multiple data points as a collective set. Unlike conventional pixel-wise losses, S3IM cannot be expressed as the sum of any loss computed over individual pixels, enforcing global structural consistency at nearly no additional computational cost.
+A regularization term that captures nonlocal structural similarity by processing multiple data points as a collective set. It addresses the limitation of point-wise losses like MSE by enforcing global structural consistency at nearly no additional computational cost.
 
 ### Cache Consistency Loss
-- [S1] A loss supervising the physically-based model to constrain the appearance of the NeRF cache by matching diffuse and specular colors.
-- [S1] Supervise cache diffuse color $c_{\text{cache}}(\mathbf{x})$ and specular color $c_{\text{cache}}(\mathbf{x}, \omega_i)$ to match physically-based model colors $c_{\text{phys}}(\mathbf{x})$ and $c_{\text{phys}}(\mathbf{x}, \omega_i)$.
-- [S1] Predict an additional output from the cache $c_{\text{irradiance}}(\mathbf{x}, \omega_o)$ and supervise it to match irradiance from the physically-based model (computed by setting BRDF to perfectly Lambertian with $a(\mathbf{x}) = 1$).
+- **Definition**: A loss supervising the physically-based model to constrain the appearance of the NeRF cache by matching diffuse and specular colors [S1].
+- **Step**: Supervise cache diffuse color $c_{\text{cache}}(\mathbf{x})$ and specular color $c_{\text{cache}}(\mathbf{x}, \omega_i)$ to match physically-based model colors $c_{\text{phys}}(\mathbf{x})$ and $c_{\text{phys}}(\mathbf{x}, \omega_i)$. Predict an additional output from the cache $c_{\text{irradiance}}(\mathbf{x}, \omega_o)$ and supervise it to match irradiance from the physically-based model (computed by setting BRDF to perfectly Lambertian with $a(\mathbf{x}) = 1$) [S1].
 
 ### Emptiness Loss on Weights
-- [S2] A ray regularization technique that applies emptiness loss to the NeRF weight $w_i$.
-- [S2] Fails because $w_i$ in NeRF is a biased geometry proxy.
-- [S2] Achieves 19.33 PSNR on DTU 3-view, performing worse than Model-C (20.01) and AR-NeRF (20.07).
+- **Definition**: A ray regularization technique that applies emptiness loss to the NeRF weight $w_i$ [S2].
+- **Pitfall**: Fails because $w_i$ in NeRF is a biased geometry proxy [S2].
+- **Number**: Achieves 19.33 PSNR on DTU 3-view, performing worse than Model-C (20.01) and AR-NeRF (20.07) [S2].
 
 ### NeRF Pre-training (Density and Color)
-- [S3] Training the density net $\Theta_\sigma$ and color branch $\Theta_c$ using posed RGB images and an appearance loss, orthogonal to the Instance Field component.
-- [S3] Appearance loss: $L_p = \frac{1}{2|R|} \sum_{r \in R} \| \hat{C}(r) - C(r) \|^2$, where $R$ are sampled rays in a training batch, $C(r)$ is ground truth RGB, and $\hat{C}(r)$ is predicted RGB.
-- [S3] $\Theta_\sigma$: Density network parameters.
-- [S3] $\Theta_c$: Color branch network parameters.
+- **Definition**: Training the density net $\Theta_\sigma$ and color branch $\Theta_c$ using posed RGB images and an appearance loss, orthogonal to the Instance Field component [S3].
+- **Formula**: Appearance loss: $L_p = \frac{1}{2|R|} \sum_{r \in R} \| \hat{C}(r) - C(r) \|^2$, where $R$ are sampled rays in a training batch, $C(r)$ is ground truth RGB, and $\hat{C}(r)$ is predicted RGB [S3].
+- **Parameter**: $\Theta_\sigma$: Density network parameters; $\Theta_c$: Color branch network parameters [S3].
 
 ## Background
-The need for regularization in NeRF optimization arises from the ill-posed nature of inverse volume rendering, where multiple density-color configurations can produce the same 2D projections. Early works like [RegNeRF](8582-regnerf.md) introduced smoothness and normalizing flow priors to handle sparse views [S1]. Subsequent research explored geometric baselines [7475-geometric-baseline-regularization.md], diffusion models [7381-diffusion-regularized-nerf-training.md, 10661-diffusion-based-regularization-for-nerf.md], and structural similarity metrics [10894-multiplex-training-via-s3im.md, 10895-s3im-stochastic-structural-similarity.md] to improve generalization and geometric fidelity.
+Regularization in NeRF optimization originated from the observation that standard photometric loss leads to "floaters" and poor geometry in sparse-view scenarios. Early works like RegNeRF introduced smoothness and normalizing flow priors [S1, 8582-regnerf.md]. Subsequent research explored diffusion models for RGBD regularization [S1, 7381-diffusion-regularized-nerf.md], geometric baselines for few-view settings [S1, 7475-geometric-baseline-regularization.md], and structural similarity metrics like S3IM to capture non-local coherence [S1, 10895-s3im-stochastic-structural-similarity.md]. These methods are widely used in inverse rendering, sparse-view synthesis, and few-shot NeRF applications.
 
 ## Sources
 [S1] Flash Cache: Reducing Bias in Radiance Cache Based Inverse Rendering, https://doi.org/10.1007/978-3-031-73390-1_2, fetched 2026-10-27

@@ -3,41 +3,35 @@
 Also called: Bhattacharyya Distance
 
 ## Overview
-The Bhattacharyya Distance Coefficient measures the overlap between the probability distributions of voxel values inside and outside a target object in a volume. It serves as a density evaluation metric for point cloud or voxel-based representations, quantifying how well the reconstructed volume matches the ground truth distribution. Unlike nearest-neighbor metrics, it operates on global histogram statistics rather than local point-to-point distances.
+The Bhattacharyya Distance Coefficient measures the overlap between two discrete probability distributions, specifically the histograms of voxel values inside and outside a target object in non-regular volumes [S1, unofficial]. It serves as a density evaluation metric that quantifies how well the internal and external intensity distributions align, distinguishing itself from sibling methods like [Chamfer Distance](2446-chamfer-distance.md) by focusing on distributional similarity rather than geometric point-to-point proximity.
 
 ## How it works
-**Inputs:**
-- `x`: Tensor of voxel values (reconstructed volume).
-- `target`: Tensor of voxel values (ground truth volume).
-- `patterns`: Boolean masks or indices defining "inside" and "outside" regions for both `x` and `target`.
-
-**Outputs:**
-- `bc`: The Bhattacharyya Coefficient (overlap measure).
-- `bd`: The Bhattacharyya Distance (divergence measure).
+**Inputs and Outputs:**
+- Input: A volume grid $V$ containing voxel values, a binary mask or segmentation defining the "inside" region ($I$) and "outside" region ($O$).
+- Output: The Bhattacharyya Coefficient (BC) and optionally the Bhattacharyya Distance (BD).
 
 **Data Structures:**
-- Histograms are computed for the "inside" and "outside" regions separately for both the reconstructed and target volumes.
-- `num_bins`: Integer, number of histogram bins. Default: 100 [S1, unofficial].
-- `bins`: Array defining the range of histogram bins. Default: `np.linspace(0, 1.5, num_bins)` [S1, unofficial].
+- Two histograms, $p$ and $q$, representing the normalized frequency of voxel values in regions $I$ and $O$ respectively.
+- Histogram bins are defined over a specified range.
+
+**Parameters:**
+- `num_bins`: Number of histogram bins. Default: 100 [S1, unofficial].
+- `bins`: The range of values for the histogram bins. Default: `np.linspace(0, 1.5, num_bins)` [S1, unofficial].
 
 **Steps:**
-1. **Extract Regions:** Identify voxel values inside the target object ($V_{in}$) and outside ($V_{out}$) for both the reconstructed volume $x$ and the target volume $t$.
+1. **Extract Values:** Collect all voxel values $v$ where the voxel is inside the target object into set $V_{in}$, and all values where the voxel is outside into set $V_{out}$.
 2. **Compute Histograms:**
-   - Compute histogram $P$ for $V_{in}$ of $x$.
-   - Compute histogram $Q$ for $V_{in}$ of $t$.
-   - Compute histogram $R$ for $V_{out}$ of $x$.
-   - Compute histogram $S$ for $V_{out}$ of $t$.
-   - Normalize histograms so they sum to 1, treating them as probability mass functions.
-3. **Calculate Coefficient:**
-   - For the "inside" distributions $P$ and $Q$:
-     $$ \text{BC}_{in} = \sum_{i=1}^{N} \sqrt{p_i q_i} $$
-     where $p_i$ and $q_i$ are the probabilities in bin $i$ for $P$ and $Q$ respectively, and $N$ is the number of bins [S1, unofficial].
-   - For the "outside" distributions $R$ and $S$:
-     $$ \text{BC}_{out} = \sum_{i=1}^{N} \sqrt{r_i s_i} $$
-4. **Calculate Distance:**
-   - The Bhattacharyya Distance is derived from the coefficient:
+   - Compute histogram $H_{in}$ for $V_{in}$ using `num_bins` and `bins`.
+   - Compute histogram $H_{out}$ for $V_{out}$ using `num_bins` and `bins`.
+   - Normalize $H_{in}$ and $H_{out}$ to form probability distributions $p$ and $q$ such that $\sum p_i = 1$ and $\sum q_i = 1$. If a region is empty, its distribution is undefined or handled as a zero-overlap case (BC=0).
+3. **Calculate Bhattacharyya Coefficient:**
+   - Compute the sum of the square roots of the products of corresponding bin probabilities:
+     $$ \text{BC} = \sum_{i=1}^{N} \sqrt{p_i q_i} $$
+     where $N$ is `num_bins` [S1, unofficial].
+4. **Calculate Bhattacharyya Distance (Optional):**
+   - Compute the distance as the negative natural logarithm of the coefficient:
      $$ \text{BD} = -\ln(\text{BC}) $$
-     where $\text{BC}$ is typically the average or weighted combination of $\text{BC}_{in}$ and $\text{BC}_{out}$ depending on implementation specifics [S1, unofficial]. Note: If $\text{BC}=0$, $\text{BD}$ is undefined (often handled by adding a small epsilon or clamping).
+     [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -45,71 +39,68 @@ The Bhattacharyya Distance Coefficient measures the overlap between the probabil
 ```python
 import numpy as np
 
-def bhattacharyya_coefficient(hist_p, hist_q):
+def bhattacharyya_coefficient(volume, mask, num_bins=100, bin_range=(0.0, 1.5)):
     """
-    Computes the Bhattacharyya coefficient between two normalized histograms.
-    """
-    # Ensure non-negative and normalized
-    hist_p = np.maximum(hist_p, 1e-10)
-    hist_q = np.maximum(hist_q, 1e-10)
-    hist_p = hist_p / np.sum(hist_p)
-    hist_q = hist_q / np.sum(hist_q)
+    Compute Bhattacharyya Coefficient between inside and outside voxel distributions.
     
-    # Formula: sum(sqrt(p_i * q_i))
-    bc = np.sum(np.sqrt(hist_p * hist_q))
-    return bc
-
-def compute_bhattacharyya_distance(x, target, mask_in, mask_out, num_bins=100, bin_range=(0, 1.5)):
+    Args:
+        volume: np.ndarray of voxel values.
+        mask: np.ndarray of booleans, True for inside, False for outside.
+        num_bins: int, number of histogram bins.
+        bin_range: tuple, (min, max) for histogram bins.
+        
+    Returns:
+        bc: float, Bhattacharyya Coefficient.
+        bd: float, Bhattacharyya Distance.
     """
-    Computes Bhattacharyya Distance between inside and outside distributions.
-    """
-    # Extract values
-    x_in = x[mask_in]
-    x_out = x[mask_out]
-    t_in = target[mask_in]
-    t_out = target[mask_out]
+    # Extract values based on mask
+    values_in = volume[mask]
+    values_out = volume[~mask]
     
+    # Handle edge cases where one region is empty
+    if len(values_in) == 0 or len(values_out) == 0:
+        return 0.0, np.inf
+        
     # Compute histograms
-    # Note: In practice, use np.histogram with density=False then normalize
-    hist_x_in, _ = np.histogram(x_in, bins=num_bins, range=bin_range)
-    hist_t_in, _ = np.histogram(t_in, bins=num_bins, range=bin_range)
-    hist_x_out, _ = np.histogram(x_out, bins=num_bins, range=bin_range)
-    hist_t_out, _ = np.histogram(t_out, bins=num_bins, range=bin_range)
+    hist_in, _ = np.histogram(values_in, bins=num_bins, range=bin_range)
+    hist_out, _ = np.histogram(values_out, bins=num_bins, range=bin_range)
     
-    # Calculate coefficients
-    bc_in = bhattacharyya_coefficient(hist_x_in, hist_t_in)
-    bc_out = bhattacharyya_coefficient(hist_x_out, hist_t_out)
+    # Normalize to probability distributions
+    p = hist_in / np.sum(hist_in)
+    q = hist_out / np.sum(hist_out)
     
-    # Combine coefficients (e.g., average)
-    bc = (bc_in + bc_out) / 2.0
+    # Compute Bhattacharyya Coefficient
+    # Add small epsilon to avoid log(0) if needed, though sqrt(0) is 0
+    bc = np.sum(np.sqrt(p * q))
     
-    # Calculate distance
-    # Clamp bc to avoid log(0)
-    bc = np.maximum(bc, 1e-10)
+    # Compute Bhattacharyya Distance
+    # Clamp bc to [0, 1] to handle floating point errors slightly above 1
+    bc = np.clip(bc, 0.0, 1.0)
     bd = -np.log(bc)
     
     return bc, bd
 ```
 
-**Edge Cases:**
-- **Empty Regions:** If `mask_in` or `mask_out` is empty, histograms cannot be computed. Guard against this by checking mask sizes [G].
-- **Zero Probability:** If a bin has zero probability in one distribution but not the other, $\sqrt{0 \cdot q_i} = 0$, which is valid. However, if both are zero, it contributes 0. The main issue is if the entire histogram is zero (empty input), handled by the empty region check.
-- **Log of Zero:** If $\text{BC}=0$, $\ln(0)$ is undefined. Clamping or adding epsilon is required [G].
+**Edge Cases and Pitfalls:**
+- **Empty Regions:** If the mask is entirely True or entirely False, one distribution is undefined. The coefficient is typically 0 (no overlap) or handled as a special case [S1, unofficial].
+- **Bin Range:** The `bin_range` must cover the full range of voxel values in both regions. If values fall outside, they are discarded or cause errors depending on implementation. Default range `0` to `1.5` may need adjustment for non-normalized data [S1, unofficial].
+- **Zero Probabilities:** If a bin has zero probability in one distribution but not the other, $\sqrt{0 \cdot q_i} = 0$, which is correct. However, $\ln(0)$ in BD calculation requires handling.
 
 ## Subtopics
 
 ### [Wasserstein Distance](7206-wasserstein-distance.md)
-Computes the 1D Wasserstein distance between the distribution of voxel values inside the target object and those outside, used as a shape/alignment metric.
+Computes the 1D Wasserstein distance between the distribution of voxel values inside a target object and those outside, serving as a shape and alignment metric for non-regular volumes. It differs from its parent [Bhattacharyya Distance Coefficient](6998-bhattacharyya-distance-coefficient.md) by measuring the "cost" of transforming one distribution into another rather than their overlap integral, making it sensitive to the spatial displacement of intensity values.
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ where $N$ is the number of voxels, dominated by histogram computation.
-- **Memory Complexity:** $O(N + B)$ where $B$ is the number of bins.
-- **Strengths:** Provides a global measure of distribution similarity; robust to small local perturbations compared to point-wise metrics.
-- **Limitations:** Loses spatial information; sensitive to binning choices; requires defining "inside" and "outside" regions accurately.
-- **When to use:** When evaluating the overall density distribution match rather than geometric alignment.
+- **Time Complexity:** $O(N)$ where $N$ is the number of voxels, for extracting values and computing histograms. Histogram binning is linear.
+- **Memory Complexity:** $O(N)$ for storing voxel values and histograms.
+- **Strengths:** Simple to implement, provides a single scalar metric for distribution overlap, sensitive to both shape and intensity alignment.
+- **Limitations:** Sensitive to binning choices (number of bins, range). Does not account for spatial arrangement of voxels, only their intensity distribution. May be less robust than Wasserstein for large displacements.
+- **When to Use:** When evaluating the similarity of intensity distributions between segmented regions in volumetric data, particularly in additive manufacturing or tomographic reconstruction contexts where internal/external density consistency is key.
+- **When Not to Use:** When spatial alignment is more important than intensity distribution similarity, or when the data is sparse and histogram binning is unreliable.
 
 ## Background
-The Bhattacharyya distance is a statistical measure of the overlap between two probability distributions. It originates from information theory and statistics. In the context of volume rendering and inverse rendering for additive manufacturing, it is used to evaluate the fidelity of reconstructed volumes against ground truth data [S1, unofficial].
+The Bhattacharyya distance is a statistical measure of the overlap between two probability distributions. In the context of volume rendering and non-regular volumes, it is applied to evaluate the consistency of voxel value distributions inside and outside a target object. This method is used in the Dr. TVAM framework for inverse rendering in tomographic volumetric additive manufacturing [S1, unofficial].
 
 ## Sources
 [S1] Dr. TVAM – Inverse Rendering for Tomographic Volumetric Additive Manufacturing, https://github.com/rgl-epfl/drtvam, fetched 2026-10-26 (unofficial)

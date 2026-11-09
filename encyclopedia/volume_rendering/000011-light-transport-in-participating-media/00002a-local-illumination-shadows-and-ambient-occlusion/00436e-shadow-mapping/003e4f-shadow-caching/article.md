@@ -1,0 +1,98 @@
+# Shadow Caching
+
+Also called: Shadow Caching with 3D Textures
+
+## Overview
+Shadow Caching is a technique that exploits the inherent coherence of shadow rays for a point light source that are occluded by the same object [S1, unofficial]. It improves performance by storing shadow test results in a spatial data structure, avoiding redundant ray casting for identical occlusion queries. Unlike Shadow Mapping, which stores depth values for binary occlusion decisions against opaque occluders, Shadow Caching stores the result of the shadow ray traversal itself [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Scene geometry (or volume data), light source position, and transfer function (for volume rendering).
+*   **Output:** A cached shadow lookup structure (typically a 3D texture) and the final rendered image with shadows.
+
+**Data Structures:**
+1.  **Shadow Cache (3D Texture):** A volumetric texture where each texel stores the shadow status (e.g., occluded or unoccluded) for a specific region of space relative to the light source.
+2.  **Shadow Feelers:** Precomputed rays or queries used to populate the cache.
+
+**Steps:**
+1.  **Preprocessing (Build Phase):**
+    *   The scene is subdivided into cells or regions.
+    *   For each cell, "shadow feelers" are generated. These are rays cast from representative points within the cell towards the light source.
+    *   The traversal of these feelers determines if the cell is fully occluded, fully visible, or partially visible to the light [S1, unofficial].
+    *   The results are stored in the 3D texture cache. For volume rendering, this may involve raycasting to determine opacity accumulation [S2, unofficial].
+2.  **Rendering (Lookup Phase):**
+    *   During volume raycasting, when a shadow ray needs to be tested for a point $P$, the system first queries the 3D texture cache at the location corresponding to $P$.
+    *   If the cache indicates the point is fully occluded or fully visible, the result is returned immediately, skipping the expensive ray traversal.
+    *   If the cache indicates partial visibility or a miss, a full shadow ray traversal is performed, and the result may be updated in the cache [S1, unofficial].
+
+**Parameters:**
+*   **Cache Resolution:** Determines the granularity of the shadow feelers. Higher resolution increases accuracy but memory usage. Not given in the sources.
+*   **Light Source Position:** Must be known during preprocessing.
+
+**Edge Cases and Pitfalls:**
+*   **Dynamic Light Sources:** If the light source moves, the shadow feelers become invalid and must be recomputed [S2, unofficial].
+*   **Transfer Function Changes:** In volume rendering, changes to the transfer function (opacity mapping) can alter shadow casting behavior, requiring cache recomputation [S2, unofficial].
+*   **Precision:** Cache misses or boundary errors in the 3D texture lookup can lead to visual artifacts.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Preprocessing Phase
+def build_shadow_cache(scene, light_position, resolution):
+    # Initialize 3D texture cache with default values (e.g., unoccluded)
+    cache = create_3d_texture(resolution)
+    
+    # Iterate over cells in the scene subdivision
+    for cell in scene.cells:
+        # Generate shadow feelers for this cell
+        feelers = generate_shadow_feelers(cell, light_position)
+        
+        for feeler in feelers:
+            # Cast ray to determine occlusion status
+            status = cast_shadow_ray(feeler, scene)
+            
+            # Store result in cache
+            cache.set(feeler.origin, status)
+            
+    return cache
+
+# Rendering Phase
+def render_with_shadow_caching(volume_data, cache, light_position):
+    for each voxel in volume_data:
+        # Query cache first
+        cache_status = cache.get(voxel.position)
+        
+        if cache_status == OCCLUDED:
+            illumination = 0
+        elif cache_status == UNOCCLUDED:
+            illumination = full_light_intensity
+        else:
+            # Cache miss or partial: perform full ray traversal
+            shadow_ray = create_ray(voxel.position, light_position)
+            occluded = cast_shadow_ray(shadow_ray, volume_data)
+            illumination = 0 if occluded else full_light_intensity
+            
+        # Accumulate color based on illumination
+        accumulate_color(voxel, illumination)
+```
+
+## Subtopics
+
+### Shadow Caching with 3D Textures
+This variant uses 3D textures to store shadow results. It gains performance by allowing fast texture lookups instead of ray traversal. It requires preprocessing of shadow feelers. A key pitfall is that shadow feelers need to be recomputed if the light source position changes or if the transfer function (in volume rendering) changes [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Preprocessing is $O(N)$ where $N$ is the number of shadow feelers. Rendering lookup is $O(1)$ for cache hits, $O(R)$ for cache misses where $R$ is ray traversal cost.
+*   **Memory Complexity:** $O(V)$ where $V$ is the volume of the 3D texture cache.
+*   **Strengths:** Significant performance gain for scenes with high shadow ray coherence. Reduces redundant computations.
+*   **Limitations:** Requires preprocessing time. Cache invalidation is costly when light or transfer function changes. Memory overhead for the 3D texture.
+*   **When to use:** Static scenes or scenes with static lights where shadow coherence is high.
+*   **When not to use:** Dynamic scenes with moving lights or frequently changing transfer functions, due to recomputation cost.
+
+## Background
+Shadow Caching was introduced to address the inefficiency of redundant shadow ray casting. Fernandez et al. [104] proposed subdividing the scene and keeping lists of light sources occluded/visible per region. Pharr et al. [94] introduced ray queues for scene cells. The use of 3D textures for caching was explored by Timo Ropinski [S2, unofficial] in the context of GPU-based volume raycasting.
+
+## Sources
+[S1] Massive Data Management for Distributed Volume Visualization, http://hdl.handle.net/1951/47671, fetched 2026-10-26 (unofficial)
+[S2] GPU-Based Volume Ray-Casting with Advanced Illumination, https://www.uni-ulm.de/fileadmin/website_uni_ulm/iui.inst.100/institut/Papers/viscom/2008/advanced_illumination.pdf, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,310 @@
+# 3D Texture Volume Render
+
+Also called: 3D Texture Volume Render node, SDF Volume Render
+
+## Overview
+The 3D Texture Volume Render node renders volumetric textures from 3D data to create cloud and fog effects by integrating light through a volume defined by a 3D texture and its corresponding signed distance field (SDF) [S1]. It differs from standard ray marching on raw voxel grids by operating on a specific compressed texture layout (16x16 grid of 256 slices) and providing built-in lighting models (directional + hemispherical skylight) and post-processing features like dithering and ground planes [S1]. It builds on [Volume Sampling](7111-volume-sampling.md) for density retrieval.
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+1.  **3D Signed Distance Field Grayscale**: A 4096x4096 grayscale texture representing the SDF of the shape [S1].
+2.  **Density Grayscale**: A 4096x4096 grayscale texture representing the density of the shape [S1].
+
+**Output:**
+*   **Rendered Image**: An image of resolution `Output Resolution` x `Output Resolution` [S1].
+
+### Data Structures
+The input textures follow a specific layout defined by Adobe Substance 3D Designer [S1]:
+*   **Dimensions**: 4096 pixels width x 4096 pixels height.
+*   **Logical Structure**: Represents 256 slices of 3D data.
+*   **Grid Layout**: The 256 slices are arranged in a 16x16 grid within the 2D texture.
+    *   Each slice is a 256x256 pixel square ($4096 / 16 = 256$).
+    *   Slices are indexed $i \in [0, 255]$.
+    *   Slice $i$ is located at grid coordinates $(gx, gy)$ where:
+        $$gx = i \pmod{16}$$
+        $$gy = \lfloor i / 16 \rfloor$$
+    *   Pixel coordinates $(u, v)$ for a specific slice $i$ and local coordinate $(sx, sy)$ within the slice ($sx, sy \in [0, 255]$) are:
+        $$u = gx \times 256 + sx$$
+        $$v = gy \times 256 + sy$$
+*   **Value Range**:
+    *   **SDF**: Signed distance values. The node expects the SDF to be computed via the [3D Texture SDF](link) node [S1].
+    *   **Density**: Mapped from 0 (entirely transparent) to 1 (entirely opaque) [S1].
+
+### Parameters
+*   **Output Resolution** (Integer): Resolution of the output image in X and Y. Must be a power of two [S1].
+*   **Camera Position** (Float2): Position of the camera around the shape [S1].
+*   **Light Position** (Float2): Position of the directional light around the shape [S1].
+*   **Camera Distance** (Float): Distance from the camera to the shape [S1].
+*   **Camera FOV** (Float): Field of view of the camera in degrees [S1].
+*   **Absorption** (Float): Adjusts light absorption as it passes through the volume [S1].
+*   **Feather** (Float): Multiplies the Density input with the inner distance field value to adjust the fading gradient width from the volume's outer limit inwards [S1].
+*   **Light Color Mode** (Integer): `0` for Temperature (Kelvin), `1` for RGB Color [S1].
+*   **Light Temperature** (Float): Light temperature in Kelvin. Useful values: 1800 K (Candle), 2800 K (Incandescent), 5500 K (Daylight), 6200 K (Natural white), 7000 K (Overcast sky) [S1].
+*   **Light Color** (Float3): RGB color of the directional light [S1].
+*   **Light Intensity** (Float): Intensity of the directional light [S1].
+*   **Ambient Color** (Float3): Color of the ambient skylight [S1].
+*   **Ambient Intensity** (Float): Intensity of the ambient skylight [S1].
+*   **Albedo** (Float3): Albedo color of the volume [S1].
+*   **Background Mode** (Integer): `0` for Shaded, `1` for Constant Color [S1].
+*   **Background Color** (Float4): Color for the background [S1].
+*   **Dithering** (Float): Intensity of blue noise dithering to smooth shading [S1].
+*   **Enable Ground Plane** (Boolean): Renders an infinite ground plane if True [S1].
+*   **Infinite Plane** (Boolean): Extends ground plane to horizon if True (requires Enable Ground Plane) [S1].
+*   **Ground Plane Size** (Float2): Size of the ground plane if Infinite Plane is False (requires Enable Ground Plane) [S1].
+
+### Algorithm
+The volume is represented within the bounds of a unit cube [S1]. The rendering process involves casting rays from the camera through the unit cube, sampling the density and SDF, computing transmittance and color, and applying lighting.
+
+1.  **Initialize Camera**:
+    *   Construct the camera projection matrix using `Camera FOV`, `Camera Distance`, and `Output Resolution`.
+    *   Define the camera origin and direction vectors based on `Camera Position` and `Camera Distance` [S1].
+
+2.  **Light Color Calculation**:
+    *   If `Light Color Mode` is Temperature: Convert `Light Temperature` to RGB color $C_{light}$ using a blackbody radiation approximation or lookup table [S1].
+    *   If `Light Color Mode` is RGB: Set $C_{light} = \text{Light Color}$ [S1].
+    *   Calculate directional light vector $L$ from `Light Position` [S1].
+
+3.  **Background Calculation**:
+    *   If `Background Mode` is Constant: $C_{bg} = \text{Background Color}$ [S1].
+    *   If `Background Mode` is Shaded: Calculate $C_{bg}$ based on `Background Color`, `Light Color`, and `Light Intensity` [S1].
+
+4.  **Ray Casting Loop**:
+    *   For each pixel $(x, y)$ in the output image:
+        *   Compute ray origin $O$ and direction $D$ in world space.
+        *   Intersect ray with the unit cube $[-0.5, 0.5]^3$ (or $[0, 1]^3$ depending on convention; the node states "unit cube" [S1]). Let the entry point be $t_{min}$ and exit point be $t_{max}$.
+        *   Initialize accumulated color $C_{acc} = (0, 0, 0, 0)$ and transmittance $T = 1.0$.
+        *   Define step size $\Delta t$ based on `Output Resolution` and `Camera Distance` [G].
+        *   Iterate $t$ from $t_{min}$ to $t_{max}$ with step $\Delta t$:
+            *   Compute world position $P = O + t \cdot D$.
+            *   Normalize $P$ to texture coordinates if necessary (assuming unit cube bounds $[0,1]$ or $[-0.5, 0.5]$ mapped to $[0,1]$).
+            *   **Sample Density**:
+                *   Determine slice index $i$ from the normalized Z-coordinate.
+                *   Sample the **Density Grayscale** texture at $(u, v)$ corresponding to slice $i$ and XY coordinates. Let raw density be $d_{raw}$ [S1].
+                *   Sample the **SDF** texture at $(u, v)$ for slice $i$. Let SDF value be $s$ [S1].
+                *   Apply **Feather**: $d = d_{raw} \times \max(0, s) \times \text{Feather}$ [S1]. Note: The source says "Multiplies the value supplied by the Density input with the inner distance field value". This implies $d = d_{raw} \times s \times \text{Feather}$, clamped to 0 if $s < 0$ or if the product is negative.
+            *   **Absorption**:
+                *   Calculate optical depth increment: $\Delta \tau = d \cdot \Delta t \cdot \text{Absorption}$ [S1].
+                *   Update transmittance: $T = T \cdot e^{-\Delta \tau}$ [S1].
+            *   **Lighting**:
+                *   Calculate diffuse contribution from directional light: $C_{dir} = C_{light} \cdot \text{Light Intensity} \cdot \text{Albedo} \cdot \max(0, N \cdot L)$ [G]. Note: Normal $N$ is not explicitly defined in the source. In SDF rendering, $N$ is often approximated by the gradient of the SDF or the surface normal if a surface is hit. However, this is a *volume* render. The source mentions "Lighting is computed using directional light and a hemispherical skylight" [S1]. Without explicit normal calculation steps, we assume a simplified volume lighting model or that the "inner distance field value" influences the shading directly. Given the lack of explicit normal calculation in the source, we assume the lighting is applied to the accumulated color or a simplified model. A common approach in such nodes is to modulate the albedo by the light direction relative to the view or a fixed normal. *Pitfall*: The source does not specify how the normal is derived for lighting in a volume context. It might be using the SDF gradient. We will assume the lighting term is applied to the emitted/scattered light.
+                *   Calculate ambient contribution: $C_{amb} = \text{Ambient Color} \cdot \text{Ambient Intensity} \cdot \text{Albedo}$ [S1].
+                *   Total light contribution $C_{light\_total} = C_{dir} + C_{amb}$ [G].
+            *   **Accumulation**:
+                *   Calculate emitted color $C_{emit} = C_{light\_total} \cdot d$ [G].
+                *   Update accumulated color: $C_{acc} = C_{acc} + C_{emit} \cdot T \cdot \Delta t$ [S1].
+            *   **Termination**:
+                *   If $T < \epsilon$ (e.g., $10^{-4}$), break loop [G].
+        *   **Final Color**:
+            *   $C_{final} = C_{acc} + C_{bg} \cdot T$ [S1].
+            *   Apply **Dithering**: Add blue noise scaled by `Dithering` to $C_{final}$ to smooth shading [S1].
+            *   Set pixel $(x, y)$ to $C_{final}$ [S1].
+
+5.  **Ground Plane**:
+    *   If `Enable Ground Plane` is True:
+        *   Intersect ray with the ground plane (z = -0.5 or similar, depending on unit cube placement) [S1].
+        *   If intersection exists and is closer than the volume exit, replace $C_{final}$ with the ground plane color (shaded or constant based on `Background Mode` and `Ground Plane Size`/`Infinite Plane`) [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def sample_texture_3d_grid(texture, slice_idx, u, v):
+    """
+    Samples a 4096x4096 texture representing 256 slices in a 16x16 grid.
+    Each slice is 256x256 pixels.
+    """
+    slice_size = 256
+    grid_size = 16
+    
+    # Calculate grid coordinates for the slice
+    gx = slice_idx % grid_size
+    gy = slice_idx // grid_size
+    
+    # Calculate pixel coordinates
+    px = gx * slice_size + u
+    py = gy * slice_size + v
+    
+    # Clamp to texture bounds
+    px = max(0, min(px, 4095))
+    py = max(0, min(py, 4095))
+    
+    return texture[py, px]
+
+def blackbody_temperature_to_rgb(temp_k):
+    """
+    Approximate blackbody radiation color from temperature in Kelvin.
+    """
+    temp_k = max(1000, min(40000, temp_k))
+    temp_c = temp_k / 100.0
+    
+    if temp_c <= 66:
+        r = 255.0
+        g = 99.4708025861 * math.log(temp_c) - 161.1195681661
+        b = 138.5177312231 * math.log(temp_c - 10.0) - 305.0447927307
+    else:
+        r = 329.698727446 * math.pow(temp_c - 60.0, -0.1332047592)
+        g = 288.1221695283 * math.pow(temp_c - 60.0, -0.0755146169)
+        b = 255.0
+        
+    return (r / 255.0, g / 255.0, b / 255.0)
+
+def render_3d_texture_volume(sdf_texture, density_texture, params):
+    """
+    Renders the 3D volume based on the provided parameters.
+    """
+    output_res = params['output_resolution']
+    camera_pos = params['camera_position']
+    camera_dist = params['camera_distance']
+    camera_fov = params['camera_fov']
+    absorption = params['absorption']
+    feather = params['feather']
+    light_color_mode = params['light_color_mode']
+    light_temp = params['light_temperature']
+    light_color_rgb = params['light_color']
+    light_intensity = params['light_intensity']
+    light_pos = params['light_position']
+    ambient_color = params['ambient_color']
+    ambient_intensity = params['ambient_intensity']
+    albedo = params['albedo']
+    bg_mode = params['background_mode']
+    bg_color = params['background_color']
+    dithering = params['dithering']
+    enable_ground = params['enable_ground_plane']
+    infinite_plane = params['infinite_plane']
+    ground_size = params['ground_plane_size']
+    
+    # Determine light color
+    if light_color_mode == 0: # Temperature
+        light_color = blackbody_temperature_to_rgb(light_temp)
+    else: # RGB
+        light_color = light_color_rgb
+        
+    # Calculate light direction (simplified)
+    light_dir = normalize(light_pos - camera_pos) # [G] Assumption
+    
+    # Background color calculation
+    if bg_mode == 1: # Constant
+        bg_color_final = bg_color
+    else: # Shaded
+        # [G] Simplified shading for background
+        bg_color_final = (bg_color[0] * light_color[0] * light_intensity, 
+                          bg_color[1] * light_color[1] * light_intensity, 
+                          bg_color[2] * light_color[2] * light_intensity, 
+                          bg_color[3])
+                          
+    output_image = zeros((output_res, output_res, 4))
+    
+    # Ray generation setup
+    # [G] Assuming standard perspective projection
+    aspect = 1.0 # Assuming square pixels/output
+    fov_rad = math.radians(camera_fov)
+    h = math.tan(fov_rad / 2.0) * camera_dist
+    w = h * aspect
+    
+    for y in range(output_res):
+        for x in range(output_res):
+            # Normalized device coordinates
+            ndc_x = (x / output_res - 0.5) * 2.0
+            ndc_y = (y / output_res - 0.5) * 2.0
+            
+            # Ray direction
+            ray_dir = normalize(vec3(ndc_x * w, ndc_y * h, -camera_dist))
+            ray_origin = camera_pos
+            
+            # Intersect with unit cube [-0.5, 0.5]
+            # [G] Standard ray-box intersection
+            t_min, t_max = intersect_unit_cube(ray_origin, ray_dir)
+            
+            if t_max < 0:
+                output_image[y, x] = bg_color_final
+                continue
+                
+            t = t_min
+            acc_color = vec3(0.0)
+            transmittance = 1.0
+            step_size = (t_max - t_min) / output_res # [G] Adaptive step size
+            
+            while t < t_max and transmittance > 1e-4:
+                # World position
+                pos = ray_origin + ray_dir * t
+                
+                # Normalize to [0, 1] for texture sampling
+                # Assuming unit cube is [-0.5, 0.5]
+                norm_pos = pos + 0.5
+                
+                # Extract slice index from Z
+                slice_idx = int(norm_pos.z * 256)
+                slice_idx = max(0, min(255, slice_idx))
+                
+                # Local coordinates within slice
+                u = int((norm_pos.x) * 256)
+                v = int((norm_pos.y) * 256)
+                u = max(0, min(255, u))
+                v = max(0, min(255, v))
+                
+                # Sample textures
+                density_raw = sample_texture_3d_grid(density_texture, slice_idx, u, v)
+                sdf_val = sample_texture_3d_grid(sdf_texture, slice_idx, u, v)
+                
+                # Apply Feather
+                # "Multiplies the value supplied by the Density input with the inner distance field value"
+                # Clamping to 0 if negative
+                density = density_raw * sdf_val * feather
+                if density < 0:
+                    density = 0.0
+                    
+                # Absorption
+                delta_tau = density * absorption * step_size
+                transmittance *= math.exp(-delta_tau)
+                
+                # Lighting
+                # [G] Simplified volume lighting
+                # Diffuse from directional light
+                # Normal is not explicitly defined for volume. 
+                # Assuming a simple model where light affects the albedo directly or via a fixed normal.
+                # Given the lack of normal info, we assume the light term is modulated by density.
+                light_contrib = light_color * light_intensity * albedo
+                ambient_contrib = ambient_color * ambient_intensity * albedo
+                
+                emitted = (light_contrib + ambient_contrib) * density
+                
+                acc_color += emitted * transmittance * step_size
+                
+                t += step_size
+                
+            # Final color
+            final_color = acc_color + bg_color_final[:3] * transmittance
+            
+            # Dithering
+            # [G] Add blue noise
+            noise = blue_noise(x, y) * dithering
+            final_color += noise
+            
+            output_image[y, x] = vec4(final_color[0], final_color[1], final_color[2], 1.0)
+            
+    return output_image
+```
+
+### Edge Cases and Pitfalls
+*   **SDF Input Format**: The SDF must be a 4096x4096 texture with 256 slices in a 16x16 grid. Using a different layout will result in incorrect sampling [S1].
+*   **Density Range**: Density values are expected to be in [0, 1]. Values outside this range may cause unexpected transparency or opacity [S1].
+*   **Feather Negative Values**: If the SDF value is negative (outside the shape) and Feather is positive, the density becomes negative. The algorithm must clamp the density to 0 to prevent negative absorption/emission [S1].
+*   **Camera Position**: The camera position is relative to the unit cube. Moving the camera too close or too far may result in the volume being out of frame or clipped [S1].
+*   **Ground Plane**: The ground plane is only rendered if `Enable Ground Plane` is True. If `Infinite Plane` is False, `Ground Plane Size` must be set appropriately [S1].
+
+## Operating characteristics
+*   **Time Complexity**: $O(R^2 \cdot N)$, where $R$ is the output resolution and $N$ is the number of steps per ray. $N$ is determined by the volume depth and step size [G].
+*   **Memory Complexity**: $O(T)$, where $T$ is the size of the input textures (2 x 4096x4096x1 bytes for grayscale) [S1].
+*   **Performance**: Performance depends heavily on the output resolution and the number of steps. Higher `Output Resolution` and smaller `Absorption` (requiring more steps for transmittance to drop) will increase render time [S1].
+*   **Strengths**: Simple setup for volumetric effects like clouds and fog. Built-in lighting and post-processing (dithering) [S1].
+*   **Limitations**: Fixed input texture format (4096x4096, 256 slices). Limited control over the volume integration algorithm compared to custom GLSL injection [S1].
+
+## Background
+The 3D Texture Volume Render node is part of the Adobe Substance 3D Designer node library, specifically in the Filter > Effect section [S1]. It is designed for creating volumetric textures from 3D data, such as cloud and fog effects, using a 3D texture and its corresponding signed distance field [S1]. The node was last updated on September 9, 2026 [S1].
+
+## Sources
+[S1] 3D Texture Volume Render | Adobe Substance 3D Designer, https://experienceleague.adobe.com/en/docs/substance-3d-designer/using/substance-graphs/nodes-reference-for-substance-graphs/node-library/filters/effects/3d-texture-volume-render, fetched 2026-10-27

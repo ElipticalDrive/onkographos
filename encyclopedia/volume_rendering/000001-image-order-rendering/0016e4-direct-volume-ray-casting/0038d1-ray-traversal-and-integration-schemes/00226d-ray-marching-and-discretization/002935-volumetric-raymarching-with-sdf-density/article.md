@@ -2,77 +2,77 @@
 Also called: Raymarching with a twist, Signed distance field (SDF) ray marching, Volumetric Raymarching
 
 ## Overview
-Volumetric Raymarching with SDF Density is a rendering technique that adapts sphere tracing principles to volumetric Signed Distance Fields (SDFs), encoding both interior density and exterior distance in a single continuous function [S1][S2, unofficial]. It solves the problem of rendering intricate procedural volumes, such as fractals or noise-based densities, without requiring explicit voxelization or precomputed grids [S1]. Unlike standard raymarching which stops at the first surface intersection, this method marches through the object interior using a constant step size, accumulating color and alpha via front-to-back blending based on the SDF's positive interior values [S2, unofficial]. It sets itself apart from [Fixed Step Ray Marching](3136-fixed-step-ray-marching.md) by interpreting the distance field as density rather than geometric proximity, and from [Tiled Ray Marching with Grid Sampling](2586-tiled-ray-marching-with-grid-sampling.md) by relying on procedural evaluation rather than grid lookups [S1][S2, unofficial].
+Volumetric Raymarching with SDF Density is a rendering technique that adapts sphere tracing principles to volumetric Signed Distance Fields (SDFs), encoding both interior density and exterior distance in a single continuous function [S1][S2, unofficial]. It solves the problem of rendering intricate procedural volumes, such as fractals or noise-based densities, without requiring explicit voxelization or precomputed grids [S1]. Unlike standard raymarching which stops at the first surface intersection, this method marches through the object interior using a constant step size, accumulating color and alpha via front-to-back blending based on the SDF's positive interior values [S2, unofficial]. It sets itself apart from [Fixed Step Ray Marching](3136-fixed-step-ray-marching.md) by interpreting the distance field as density rather than geometric proximity, and from [Front-to-Back Volume Rendering](2350-front-to-back-volume-rendering.md) by evaluating the density function procedurally on-the-fly rather than sampling a discrete grid [S1][S2, unofficial].
 
 ## How it works
-**Inputs:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$ (normalized), SDF function $f(\mathbf{p})$ that returns $-d$ (negative of Euclidean distance to surface) for points inside the volume, and $0$ or positive for points outside.
-**Outputs:** Final color $\mathbf{C}$ and accumulated alpha $\alpha$.
+**Inputs:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$ (normalized), and an SDF function $f(\mathbf{p})$ that returns the negative Euclidean distance to the surface for points inside the volume, and zero for points outside [S2, unofficial].
+**Outputs:** A `vec4` accumulator containing the final color $\mathbf{C}$ and accumulated alpha $\alpha$ [S2, unofficial].
 
 **Data Structures:**
-*   `rayOrigin`: `vec3`
-*   `rayDirection`: `vec3`
-*   `res`: `vec4` (accumulator for color and alpha)
-*   `depth`: `float` (distance along ray)
-*   `p`: `vec3` (current sample position)
+*   `rayOrigin`: `vec3` representing the ray start point [S2, unofficial].
+*   `rayDirection`: `vec3` representing the normalized ray direction [S2, unofficial].
+*   `res`: `vec4` accumulator for color and alpha [S2, unofficial].
+*   `depth`: `float` tracking distance traveled along the ray [S2, unofficial].
+*   `p`: `vec3` current sample position [S2, unofficial].
 
 **Parameters:**
-*   `MARCH_SIZE`: Constant step size. Typical value: $0.08$ [S2, unofficial].
-*   `MAX_STEPS`: Maximum iterations. Typical value: $100$ [S2, unofficial].
+*   `MARCH_SIZE`: Constant step size for traversal. Typical value: $0.08$ [S2, unofficial].
+*   `MAX_STEPS`: Maximum number of iterations in the raymarching loop. Typical value: $100$ [S2, unofficial].
 
 **Steps:**
-1.  Initialize `depth` to $0.0$ and `res` to $(0.0, 0.0, 0.0, 0.0)$.
-2.  Calculate initial position $\mathbf{p} = \mathbf{o} + \text{depth} \cdot \mathbf{d}$.
-3.  Loop for $i$ from $0$ to `MAX_STEPS` - 1:
-    a. Evaluate density $D = f(\mathbf{p})$.
+1.  Initialize `depth` to $0.0$ and `res` to $(0.0, 0.0, 0.0, 0.0)$ [S2, unofficial].
+2.  Calculate the initial sample position $\mathbf{p} = \mathbf{o} + \text{depth} \cdot \mathbf{d}$ [S2, unofficial].
+3.  Iterate $i$ from $0$ to `MAX_STEPS` - 1:
+    a. Evaluate the SDF at the current position to obtain density $D = f(\mathbf{p})$ [S2, unofficial].
     b. If $D > 0.0$:
-        i. Compute sample color $\mathbf{C}_{sample}$. A simple mapping mixes white $(1,1,1)$ and black $(0,0,0)$ based on density: $\mathbf{C}_{sample} = \text{mix}((1,1,1), (0,0,0), D)$.
-        ii. Set sample alpha $\alpha_{sample} = D$.
-        iii. Apply alpha to color: $\mathbf{C}_{sample} \leftarrow \mathbf{C}_{sample} \cdot \alpha_{sample}$.
-        iv. Accumulate using front-to-back blending:
-            $$ \mathbf{res} \leftarrow \mathbf{res} + \mathbf{C}_{sample} \cdot (1.0 - \mathbf{res}.a) $$
-    c. Advance depth: $\text{depth} \leftarrow \text{depth} + \text{MARCH\_SIZE}$.
-    d. Update position: $\mathbf{p} \leftarrow \mathbf{o} + \text{depth} \cdot \mathbf{d}$.
-4.  Return `res`.
+        i. Construct a `vec4` color where the RGB channels are interpolated between white $(1,1,1)$ and black $(0,0,0)$ based on $D$, and the alpha channel is set to $D$ [S2, unofficial].
+        ii. Modulate the RGB channels by the alpha channel: $\mathbf{C}_{sample}.\text{rgb} \leftarrow \mathbf{C}_{sample}.\text{rgb} \cdot D$ [S2, unofficial].
+        iii. Accumulate the sample into the result using front-to-back blending: $\mathbf{res} \leftarrow \mathbf{res} + \mathbf{C}_{sample} \cdot (1.0 - \mathbf{res}.a)$ [S2, unofficial].
+    c. Advance the traversal distance: $\text{depth} \leftarrow \text{depth} + \text{MARCH\_SIZE}$ [S2, unofficial].
+    d. Update the sample position: $\mathbf{p} \leftarrow \mathbf{o} + \text{depth} \cdot \mathbf{d}$ [S2, unofficial].
+4.  Return `res` [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def raymarch(ray_origin, ray_direction):
-    # Constants
+def vec3(x, y, z): return (x, y, z)
+def vec4(x, y, z, w): return (x, y, z, w)
+def mix(a, b, t): return tuple(a[i] + t * (b[i] - a[i]) for i in range(len(a)))
+
+def raymarch(ray_origin, ray_direction, f):
     MARCH_SIZE = 0.08
     MAX_STEPS = 100
     
     depth = 0.0
-    p = ray_origin + depth * ray_direction
+    p = vec3(ray_origin[0] + depth * ray_direction[0],
+             ray_origin[1] + depth * ray_direction[1],
+             ray_origin[2] + depth * ray_direction[2])
     res = vec4(0.0, 0.0, 0.0, 0.0)
     
     for i in range(MAX_STEPS):
-        # Evaluate SDF; returns -distance inside, >= 0 outside
-        density = scene(p)
+        density = f(p)
         
         if density > 0.0:
-            # Map density to color (white to black)
-            # mix(a, b, t) returns a + t * (b - a)
-            sample_color = mix(vec3(1.0, 1.0, 1.0), vec3(0.0, 0.0, 0.0), density)
-            sample_alpha = density
-            
-            # Apply alpha to color
-            sample_color = sample_color * sample_alpha
-            
-            # Front-to-back blending
-            res = res + sample_color * (1.0 - res.a)
+            color = vec4(*mix(vec3(1.0, 1.0, 1.0), vec3(0.0, 0.0, 0.0), density), density)
+            color = vec4(color[0] * color[3], color[1] * color[3], color[2] * color[3], color[3])
+            res = vec4(res[0] + color[0] * (1.0 - res[3]),
+                       res[1] + color[1] * (1.0 - res[3]),
+                       res[2] + color[2] * (1.0 - res[3]),
+                       res[3] + color[3] * (1.0 - res[3]))
             
         depth = depth + MARCH_SIZE
-        p = ray_origin + depth * ray_direction
+        p = vec3(ray_origin[0] + depth * ray_direction[0],
+                 ray_origin[1] + depth * ray_direction[1],
+                 ray_origin[2] + depth * ray_direction[2])
         
     return res
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Step Size:** Using a constant step size is critical. The distance returned by the SDF must NOT be used for stepping, as it represents density magnitude, not geometric clearance [S2, unofficial].
-*   **SDF Sign:** The SDF function must return the negative of the distance ($-d$) so that values are positive inside the object and zero outside. Standard SDFs return positive inside; this inversion is required for the density check $D > 0.0$ [S2, unofficial].
-*   **Precision:** For complex, non-intersecting surfaces like fractals, fixed-step methods may require more iterations than sphere tracing to converge, potentially leading to aliasing in thin features if the step size is too large [S1].
+*   **Step Size:** A constant step size must be used for traversal; the magnitude returned by the SDF represents density, not geometric clearance, and must never be used to scale the step [S2, unofficial].
+*   **SDF Sign:** The SDF function must invert the standard distance convention by returning $-d$ inside the volume so that density values are strictly positive within the object and zero outside, enabling the $D > 0.0$ occupancy test [S2, unofficial].
+*   **Boundary Precision:** Fixed step sizes may undersample thin volumetric features or require higher `MAX_STEPS` to avoid aliasing near density gradients [S1].
 
 ## Subtopics
 
@@ -80,16 +80,15 @@ def raymarch(ray_origin, ray_direction):
 A post-processing technique using cone-shaped SDFs for directional light shafts in screen space. Chosen when rendering volumetric lighting effects from specific light sources rather than general volume density.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is `MAX_STEPS`. Independent of scene complexity as the SDF is evaluated procedurally [S1].
-*   **Memory Complexity:** $O(1)$ auxiliary memory, as no voxel grid or acceleration structure is stored [S1].
-*   **Performance:** Efficient for real-time procedural volumes (e.g., clouds, smoke) on GPUs due to lack of precomputation [S1]. Performance scales with `MAX_STEPS` and `MARCH_SIZE`; smaller steps increase accuracy but reduce frame rate.
-*   **Strengths:** Watertight traversal without precomputation; compact representation; avoids aliasing in thin features by refining steps near boundaries (if step size is adaptive, though this method uses fixed steps) [S1].
-*   **Limitations:** Fixed step size may miss thin features or require high `MAX_STEPS` for accuracy; no explicit handling of scattering or complex lighting beyond simple color mapping in the base method [S1][S2, unofficial].
-*   **When to use:** Procedural volumes where explicit voxelization is infeasible, real-time rendering of clouds/smoke, differentiable optimization for scene fitting [S1].
-*   **When not to use:** When high-fidelity light transport (multiple scattering) is required without additional shaders; when exact geometric boundaries are needed without density interpretation.
+*   **Time Complexity:** $O(N)$ where $N$ is `MAX_STEPS`, as each iteration performs a constant number of SDF evaluations and arithmetic operations [S1].
+*   **Memory Complexity:** $O(1)$ auxiliary memory, since the method evaluates the SDF procedurally without storing voxel grids or acceleration structures [S1].
+*   **Performance:** Highly efficient for real-time procedural volumes on GPUs due to the absence of precomputation and memory bandwidth bottlenecks [S1]. Frame rate scales linearly with `MAX_STEPS` and inversely with `MARCH_SIZE`, as smaller steps increase traversal iterations [S2, unofficial].
+*   **Strengths:** Provides watertight traversal without precomputation; enables compact representation of complex procedural volumes; supports differentiable optimization for neural scene fitting [S1].
+*   **Limitations:** Fixed step size cannot adapt to local density gradients, potentially missing thin features or requiring high iteration counts for accuracy; the base formulation does not model multiple scattering or complex light transport [S1][S2, unofficial].
+*   **When to use:** Real-time rendering of procedural clouds, smoke, or terrain where explicit voxelization is infeasible, or when differentiable volume fitting is required [S1].
 
 ## Background
-Originating from the adaptation of sphere tracing principles to volumetric SDFs, this method was popularized in real-time graphics communities for rendering procedural clouds and smoke [S1][S2, unofficial]. It enables compact representation of intricate procedural volumes by evaluating the SDF on-the-fly, supporting applications like real-time procedural terrain or cloud volumes [S1]. The technique leverages the continuous nature of SDFs to encode interior density, allowing for differentiable optimization in neural reconstruction contexts [S1].
+The method originates from adapting sphere tracing principles to volumetric SDFs, popularized in real-time graphics communities for rendering procedural clouds and smoke [S1][S2, unofficial]. It enables compact representation of intricate procedural volumes by evaluating the SDF on-the-fly, supporting applications like real-time procedural terrain or cloud volumes [S1]. The technique leverages the continuous nature of SDFs to encode interior density, allowing for differentiable optimization in neural reconstruction contexts [S1].
 
 ## Sources
 [S1] Volume ray casting, https://grokipedia.com/page/Volume_ray_casting, fetched 2026-10-26

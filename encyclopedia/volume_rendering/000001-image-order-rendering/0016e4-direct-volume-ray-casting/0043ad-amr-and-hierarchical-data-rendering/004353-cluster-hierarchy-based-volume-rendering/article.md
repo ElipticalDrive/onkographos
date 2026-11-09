@@ -3,191 +3,117 @@
 Also called: Cluster Tree Widget Rendering, Interactive Visual Exploration of Multi-variate Volume Data
 
 ## Overview
-Cluster Hierarchy-based Volume Rendering is a direct volume rendering technique that maps hierarchical clusters of multi-variate data to transfer function parameters (color, opacity, size) to enable interactive exploration [S1, unofficial]. It solves the problem of visualizing high-dimensional spatial data by allowing users to interactively filter and modify clusters via a cluster tree widget and parallel coordinates, rather than manually tuning transfer functions for every dimension [S1, unofficial]. It differs from standard direct volume rendering by decoupling the classification logic from the ray casting loop, using a pre-computed cluster hierarchy to drive the transfer function, and from pre-classification methods by performing classification on the GPU (post-classification) to maintain interactive frame rates [S1, unofficial].
+This method renders multi-variate volume data by mapping hierarchical clusters of feature vectors to transfer function parameters (color, opacity, size) for direct volume rendering [S1, unofficial]. It solves the problem of interactive exploration in high-dimensional spaces by decoupling the classification logic (handled via cluster tree and parallel coordinates widgets) from the rendering engine, allowing users to filter and modify data subsets in real-time [S1, unofficial]. It differs from pre-classification approaches by performing classification post-sampling on the GPU to maintain interactive frame rates, and from static multiresolution methods by supporting dynamic, user-driven cluster modification [S1, unofficial].
 
 ## How it works
-The method integrates a hierarchical clustering algorithm with a 3D texture-based direct volume renderer. The core innovation is the use of a cluster hierarchy to define the transfer function, allowing interactive modification of cluster properties (size/density thresholds) which are immediately reflected in the rendering [S1, unofficial].
+**Inputs and Outputs:**
+- **Input:** A multi-variate volume dataset (e.g., $N$ scalar fields per voxel), a pre-computed or interactive cluster hierarchy, and user interaction parameters (density sliders, brush selections).
+- **Output:** A rendered image with colors and opacities determined by the active clusters.
 
-### Inputs and Outputs
-*   **Input**: Multi-variate volume data (scalar fields or derived properties), a pre-computed cluster hierarchy (tree structure), and user interaction parameters (cluster size adjustments via sliders, selection via parallel coordinates) [S1, unofficial].
-*   **Output**: A rendered image where voxels are colored and opacified based on their cluster membership and the current transfer function settings [S1, unofficial].
+**Data Structures:**
+1.  **Cluster Hierarchy:** A tree structure where each node represents a cluster of data points in the multi-variate feature space. Nodes have properties: `color`, `opacity`, `density_threshold`, and `children`.
+2.  **Mask Volume:** A volume data structure (same spatial resolution as the input) storing binary values (0 or 1) indicating whether a voxel belongs to an active cluster subset [S1, unofficial].
+3.  **Transfer Function:** Mapped from cluster properties. Default color/opacity are assigned by the clustering algorithm; users can override via widgets [S1, unofficial].
 
-### Data Structures
-1.  **Cluster Hierarchy**: A tree structure where each node represents a cluster of data points in the multi-variate feature space. Nodes have attributes including:
-    *   `id`: Unique identifier.
-    *   `children`: List of child node IDs.
-    *   `parent`: Parent node ID.
-    *   `density_threshold`: A slider-controlled parameter defining the size or density bounds of the cluster [S1, unofficial].
-    *   `color`: Default RGB color assigned by the clustering algorithm or user [S1, unofficial].
-    *   `opacity`: Default opacity assigned by the clustering algorithm [S1, unofficial].
-2.  **Voxel Cluster Map**: A 3D array (same dimensions as the volume data) storing the cluster ID assigned to each voxel [S1, unofficial].
-3.  **Mask Buffer**: A 3D array of binary values (0 or 1) indicating whether a voxel belongs to a currently selected/active cluster [S1, unofficial].
+**Steps:**
+1.  **Clustering Initialization:**
+    - If pre-clustering exists, use the automatic clustering algorithm's output to assign default color and opacity to each cluster [S1, unofficial].
+    - If no pre-clustering exists, place all data points in a single root cluster [S1, unofficial].
+2.  **User Interaction (CPU):**
+    - **Cluster Tree Widget:** Users adjust density sliders for specific nodes. This modifies the `density_threshold` for that cluster, effectively filtering voxels. Moving a slider reduces the cluster size to include only voxels meeting the new threshold (e.g., removing noise) [S1, unofficial].
+    - **Parallel Coordinates Widget:** Users brush intervals in the multi-variate feature space. Data points falling within selected intervals are marked; others are excluded [S1, unofficial].
+    - **Reclustering:** Users can split or merge nodes. This operation is performed on the CPU and takes $\le 0.5$ seconds on modern hardware [S1, unofficial].
+3.  **Mask Generation (CPU/GPU):**
+    - For each voxel, determine if its multi-variate feature vector belongs to any active cluster subset defined by the current tree state and parallel coordinates selection [S1, unofficial].
+    - Set the mask value to 1 if the voxel belongs to an active cluster, and 0 otherwise [S1, unofficial].
+4.  **Rendering (GPU):**
+    - Perform direct volume ray casting using a 3D texture-based renderer [S1, unofficial].
+    - For each sample point along the ray:
+        - Sample the mask volume. If the mask value is 0, the voxel is fully transparent (hidden) [S1, unofficial].
+        - If the mask value is 1, sample the multi-variate data to determine the cluster membership.
+        - Apply the transfer function associated with that cluster to get color ($C$) and opacity ($\alpha$) [S1, unofficial].
+        - Composite the color and opacity using standard volume integration [S1, unofficial].
+    - Combine the mask with the transfer function composited above. Voxels with mask value 0 are rendered fully transparently, effectively hiding them [S1, unofficial].
 
-### Steps
-1.  **Clustering (Pre-processing)**:
-    *   If the dataset is not pre-clustered, all data points are initially placed in a single root cluster [S1, unofficial].
-    *   An automatic clustering algorithm partitions the multi-variate feature space into clusters [S1, unofficial].
-    *   Each voxel is assigned to a cluster based on its feature values [S1, unofficial].
-    *   *Note*: For datasets without pre-clustering, the parallel coordinates widget is used to "brush" data points, creating new clusters interactively [S1, unofficial].
-
-2.  **Interaction and Cluster Modification**:
-    *   **Cluster Tree Widget**: Users adjust sliders to modify the `density_threshold` of specific clusters. This effectively filters voxels within that cluster based on density thresholds [S1, unofficial].
-    *   **Parallel Coordinates Widget**: Users select intervals in multi-variate space. Voxels with values falling in selected intervals are marked as active (mask value 1); others are marked as inactive (mask value 0) [S1, unofficial].
-    *   **Reclustering**: Splitting or merging nodes in the cluster hierarchy is performed on the CPU [S1, unofficial]. This operation updates the Voxel Cluster Map and Mask Buffer [S1, unofficial].
-
-3.  **Transfer Function Generation**:
-    *   For each cluster, a default color and opacity are assigned based on the clustering output or user selection [S1, unofficial].
-    *   Color mapping can be applied based on physical properties (e.g., ionization state) to visualize trends [S1, unofficial].
-    *   The transfer function is defined such that the color $C$ and opacity $\alpha$ for a voxel depend on its cluster ID [S1, unofficial].
-
-4.  **Rendering (Direct Volume Ray Casting)**:
-    *   The renderer uses a 3D texture for the volume data and the Mask Buffer [S1, unofficial].
-    *   **Masking**: Voxels with a mask value of 0 are rendered fully transparent (hidden) [S1, unofficial]. The mask is combined with the transfer function [S1, unofficial].
-    *   **Interpolation**: Post-classification with nearest-neighbor interpolation is used to determine the cluster ID of sample points [S1, unofficial].
-    *   **Compositing**: Standard front-to-back compositing is applied, but the optical properties $(C_i, \alpha_i)$ are retrieved from the cluster associated with the sample point's cluster ID [S1, unofficial].
-    *   **Illumination**: Surface normals are precomputed and used for lighting [S1, unofficial].
-
-### Pseudocode
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pre-processing: Clustering and Mask Generation
-def generate_cluster_hierarchy_and_mask(volume_data, clustering_params):
-    """
-    volume_data: 3D array of multi-variate features
-    clustering_params: parameters for the clustering algorithm
-    Returns:
-        cluster_tree: Tree structure of clusters
-        voxel_cluster_map: 3D array mapping each voxel to a cluster ID
-        mask_buffer: 3D array of 0s and 1s
-    """
-    # Step 1: Cluster the data
-    # If no pre-clustering, start with a single root cluster
-    if not pre_clustered:
-        cluster_tree = ClusterNode(id=0, children=[], density_threshold=0.0)
-        cluster_tree.children = [ClusterNode(id=1, children=[], density_threshold=0.0)]
-        current_cluster_id = 1
-    else:
-        cluster_tree = run_clustering_algorithm(volume_data, clustering_params)
-        current_cluster_id = max_cluster_id
-
-    # Step 2: Assign voxels to clusters
-    voxel_cluster_map = zeros_like(volume_data, dtype=int)
-    for voxel in volume_data:
-        cluster_id = find_cluster_for_voxel(voxel, cluster_tree)
-        voxel_cluster_map[voxel.position] = cluster_id
-
-    # Step 3: Initialize mask buffer (all active initially)
-    mask_buffer = ones_like(volume_data, dtype=int)
-    return cluster_tree, voxel_cluster_map, mask_buffer
-
-def update_mask_and_clusters(cluster_tree, mask_buffer, parallel_coords_selection, cluster_tree_sliders):
-    """
-    Update the mask buffer and cluster properties based on user interaction.
-    parallel_coords_selection: intervals in multi-variate space
-    cluster_tree_sliders: density thresholds for specific clusters
-    """
-    # Update density thresholds from sliders
-    for node in cluster_tree.traverse():
-        node.density_threshold = cluster_tree_sliders.get(node.id, node.density_threshold)
-
-    # Update mask based on parallel coordinates selection
-    for voxel in volume_data:
-        cluster_id = voxel_cluster_map[voxel.position]
-        if voxel.values in parallel_coords_selection[cluster_id]:
-            mask_buffer[voxel.position] = 1
-        else:
-            mask_buffer[voxel.position] = 0
-
-# Rendering: GPU-side Ray Casting
-def render_volume(volume_texture, cluster_texture, mask_texture, normal_texture, camera_params):
-    """
-    volume_texture: 3D texture of scalar values (or derived density)
-    cluster_texture: 3D texture of cluster IDs
-    mask_texture: 3D texture of mask values (0 or 1)
-    normal_texture: 3D texture of precomputed normals
-    camera_params: origin, direction, sampling rate
-    """
-    # For each pixel
-    for pixel in image_plane:
-        ray = generate_ray(pixel, camera_params)
-        t_start, t_end = intersect_volume(ray)
+# Pseudocode for the rendering loop per ray
+def render_ray(ray_origin, ray_direction, cluster_tree, mask_volume, transfer_functions):
+    color_accum = (0.0, 0.0, 0.0, 0.0)
+    alpha_accum = 0.0
+    
+    # Ray marching parameters
+    step_size = calculate_step_size(ray_origin, ray_direction, mask_volume.resolution)
+    num_steps = calculate_num_steps(ray_origin, ray_direction, mask_volume.extent)
+    
+    for i in range(num_steps):
+        # Sample position along the ray
+        pos = ray_origin + ray_direction * (i * step_size)
         
-        acc_color = (0, 0, 0)
-        acc_opacity = 0.0
+        # Sample the mask volume at this position
+        mask_val = mask_volume.sample(pos)
         
-        # Sample along ray
-        for t in sample_ray(ray, t_start, t_end, sampling_rate):
-            p = ray.origin + t * ray.direction
+        # If mask is 0, the voxel is hidden (fully transparent)
+        if mask_val == 0:
+            continue
             
-            # Sample cluster ID and mask
-            cluster_id = sample_3d(cluster_texture, p, interpolation='nearest')
-            mask_value = sample_3d(mask_texture, p, interpolation='nearest')
+        # If mask is 1, proceed with standard volume rendering
+        # Sample multi-variate data to identify cluster
+        feature_vector = multivariate_volume.sample(pos)
+        cluster_id = find_cluster(feature_vector, cluster_tree)
+        
+        # Get transfer function parameters for this cluster
+        tf = transfer_functions[cluster_id]
+        color = tf.color
+        opacity = tf.opacity
+        
+        # Standard volume compositing
+        # C_out = C_in + C_sample * alpha_sample * (1 - alpha_in)
+        # alpha_out = alpha_in + alpha_sample * (1 - alpha_in)
+        
+        alpha_contrib = opacity * step_size # Simplified opacity integration
+        alpha_contrib = min(alpha_contrib, 1.0 - alpha_accum)
+        
+        if alpha_contrib > 0.001:
+            color_accum = color_accum + color * alpha_contrib
+            alpha_accum = alpha_accum + alpha_contrib
             
-            # If masked out, skip
-            if mask_value == 0:
-                continue
-                
-            # Get cluster properties
-            color = get_cluster_color(cluster_id)
-            opacity = get_cluster_opacity(cluster_id)
+        if alpha_accum >= 1.0:
+            break
             
-            # Apply density threshold filter (if implemented in transfer function)
-            # Note: The source mentions density sliders modify cluster size,
-            # which effectively filters voxels. This is handled by the mask or
-            # by adjusting opacity based on local density if available.
-            # For simplicity, we assume the mask handles the filtering.
-            
-            # Sample density for lighting/interpolation
-            density = sample_3d(volume_texture, p, interpolation='trilinear')
-            normal = sample_3d(normal_texture, p, interpolation='trilinear')
-            
-            # Compute lighting (precomputed normals used)
-            # Lighting calculation omitted as per source: "surface normals are always precomputed"
-            # and "applied illumination" was not possible in some examples due to lack of density.
-            # Assuming basic lighting model if density is available.
-            
-            # Compositing
-            # Note: Post-classification with nearest-neighbor interpolation may cause aliasing
-            # at cluster boundaries [S1, unofficial].
-            alpha = opacity
-            # Opacity correction for step size (standard DVR)
-            alpha_corrected = 1 - (1 - alpha) ** ray.step_size
-            
-            acc_color = acc_color + (1 - acc_opacity) * alpha_corrected * color
-            acc_opacity = acc_opacity + (1 - acc_opacity) * alpha_corrected
-            
-            # Early ray termination
-            if acc_opacity > 0.99:
-                break
-                
-        # Composite over background
-        final_color = acc_color + (1 - acc_opacity) * background_color
-        set_pixel_color(pixel, final_color)
+    return color_accum, alpha_accum
 ```
 
-### Parameters
-*   **Screen Resolution**: 1680x1050 pixels [S1, unofficial].
-*   **Hardware**: nVIDIA GTX260 graphics card [S1, unofficial].
-*   **Frame Rate Target**: 20-30 frames per second [S1, unofficial].
-*   **Clustering Modification Time**: Reclustering operations (splitting/merging) take no more than 0.5 seconds on modern hardware [S1, unofficial].
-*   **Interpolation**: Nearest-neighbor for cluster ID (post-classification) [S1, unofficial]. Trilinear for scalar values and normals [S1, unofficial].
+**Parameters:**
+- **Screen Resolution:** 1680x1050 pixels [S1, unofficial].
+- **Performance Target:** 20–30 frames per second [S1, unofficial].
+- **Reclustering Time:** $\le 0.5$ seconds on modern hardware [S1, unofficial].
 
-### Edge Cases and Pitfalls
-*   **Aliasing**: Post-classification with nearest-neighbor interpolation causes aliasing artifacts at cluster boundaries [S1, unofficial].
-*   **Performance**: Pre-classification (computing colors/opacities on CPU and transmitting to GPU) inhibits true interactive frame rates [S1, unofficial]. On-the-fly surface normal computation significantly slows down rendering; normals must be precomputed [S1, unofficial].
-*   **Missing Density**: In some datasets (e.g., astrophysical simulations), density values may not be available, preventing the application of illumination [S1, unofficial].
+**Edge Cases and Pitfalls:**
+- **Aliasing:** Post-classification with nearest-neighbor interpolation causes aliasing artifacts at cluster boundaries [S1, unofficial].
+- **Pre-classification Rejection:** Pre-classification was rejected because it requires CPU classification and transmission of colors/opacities for all voxels to the GPU, inhibiting true interactive frame rates, with only marginal quality gain [S1, unofficial].
+- **Surface Normals:** On-the-fly surface normal computation was rejected because it significantly slowed down rendering; surface normals are always precomputed [S1, unofficial].
+- **Illumination:** Illumination may not be applicable if no density values are available in the feature space [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity**: The clustering step is performed on the CPU and takes up to 0.5 seconds for reclustering [S1, unofficial]. The rendering step is GPU-accelerated and achieves 20-30 FPS at 1680x1050 resolution on a GTX260 [S1, unofficial].
-*   **Memory Complexity**: Requires storing the volume data, cluster hierarchy, voxel cluster map, mask buffer, and precomputed normals [S1, unofficial].
-*   **Strengths**: Interactive exploration of multi-variate data; intuitive interface via cluster tree and parallel coordinates; fast reclustering [S1, unofficial].
-*   **Limitations**: Aliasing artifacts from nearest-neighbor interpolation; pre-classification is too slow; requires precomputed normals for lighting [S1, unofficial].
-*   **When to Use**: Interactive exploration of multi-variate volume data where users need to intuitively filter and modify clusters [S1, unofficial].
-*   **When Not to Use**: When high-quality anti-aliasing at cluster boundaries is critical; when pre-classification is required for other reasons; when surface normals cannot be precomputed [S1, unofficial].
+- **Time Complexity:** Rendering time depends on dataset resolution, zoom level, and sampling rate [S1, unofficial]. Reclustering operations (splitting/merging nodes) take $\le 0.5$ seconds on modern hardware [S1, unofficial].
+- **Memory Complexity:** Requires storing the multi-variate volume data, the cluster hierarchy, and the mask volume [S1, unofficial].
+- **Measured Performance:** Achieved 20–30 fps on an nVIDIA GTX260 graphics card at 1680x1050 resolution [S1, unofficial].
+- **Strengths:** Interactive exploration of multi-variate data; intuitive modification of clusters via density sliders and parallel coordinates; fast reclustering [S1, unofficial].
+- **Limitations:** Aliasing artifacts at cluster boundaries due to nearest-neighbor interpolation; pre-classification is too slow for interactivity; illumination may be limited by available density fields [S1, unofficial].
+- **When to use:** Interactive exploration of high-dimensional volume data where users need to dynamically filter and visualize specific feature subsets [S1, unofficial].
+- **When not to use:** When pre-computed classification is required for maximum quality and interactivity is not a priority; when on-the-fly normal computation is necessary for lighting [S1, unofficial].
 
 ## Background
-The method was presented by Dobrev et al. in 2011 [S1, unofficial]. It was applied to various datasets including the Bonsai tree, ionization front instability simulation, medical MRI, tornado flow field, and white dwarf/black hole simulation [S1, unofficial]. The approach builds on ideas by Daniels II et al. and Park et al. [S1, unofficial].
+The method was presented by Dobrev et al. in 2011 [S1, unofficial]. It builds on ideas by Daniels II et al. and Park et al. regarding multi-variate field exploration [S1, unofficial]. It was implemented in C++ using QT, OpenGL, and GLSL [S1, unofficial]. The approach was applied to several datasets:
+- **Bonsai tree dataset:** Multi-variate with first- and second-order derivatives [S1, unofficial].
+- **Ionization front instability simulation:** 10 scalar fields (mass density, temperature, mass fractions) [S1, unofficial].
+- **Medical MRI datasets:** T1, T1+contrast, T2, FA from DTI at 256x256x176 resolution [S1, unofficial].
+- **Tornado flow field data:** 256^3 resolution using derived properties (flow magnitude, divergence, gradient magnitude, curl magnitude, helicity) [S1, unofficial].
+- **White dwarf/black hole simulation:** 11-dimensional feature space (mass density, temperature, mass fractions, proton/neutron number) [S1, unofficial].
 
 ## Sources
+
 [S1] A Cluster Hierarchy-based Volume Rendering Approach for Interactive Visual Exploration of Multi-variate Volume Data, https://doi.org/10.2312/pe/vmv/vmv11/137-144, fetched 2026-10-26 (unofficial)
