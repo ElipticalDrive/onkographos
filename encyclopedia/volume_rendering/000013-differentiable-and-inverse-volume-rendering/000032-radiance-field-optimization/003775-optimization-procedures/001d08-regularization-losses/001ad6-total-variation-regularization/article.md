@@ -3,92 +3,71 @@
 Also called: Efficient Total Variation (TV) Loss, TV Loss
 
 ## Overview
-Total Variation (TV) regularization is a loss term applied to explicit radiance field representations (such as voxel grids) to suppress visual artifacts like "floaters" (spurious geometry) and "holes" (missing geometry) that are prevalent in unbounded, non-convex optimization of sparse or dense grids [S1, unofficial]. It encourages spatial smoothness by penalizing large gradients between neighboring voxels, distinguishing itself from sibling methods like [Output Noise Regularization](928-output-noise-regularization.md) which target noise distribution, or [Efficient O(N) Distortion Loss](1051-efficient-o-n-distortion-loss.md) which targets depth consistency along rays [S1, unofficial]. While standard TV uses L1 or L2 norms on gradients, efficient implementations often use Huber loss or fused CUDA kernels to balance artifact suppression with computational efficiency [S1, S2, unofficial].
+Total Variation (TV) regularization is a loss term applied to explicit radiance field representations to suppress visual artifacts like "floaters" and "holes" that arise during non-convex optimization of sparse or dense grids [S1, unofficial]. It encourages spatial smoothness by penalizing large gradients between neighboring voxels, distinguishing itself from sibling methods like [Output Noise Regularization](928-output-noise-regularization.md) which target noise distribution, or [Efficient O(N) Distortion Loss](1051-efficient-o-n-distortion-loss.md) which targets depth consistency along rays [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D tensor representing the radiance field parameters (e.g., density $\sigma$, opacity $\alpha$, or SH coefficients) with shape $[D_x, D_y, D_z, C]$, where $C$ is the channel dimension (e.g., 4 for RGBA, or more for SH).
-*   **Output:** A scalar loss value $L_{TV}$ and gradients added to the input tensor's gradient buffer.
+*   **Input:** A 3D tensor representing radiance field parameters (e.g., density $\sigma$, opacity $\alpha$, or spherical harmonic coefficients) with shape $[D_x, D_y, D_z, C]$ [S2, unofficial].
+*   **Output:** A scalar loss value $L_{TV}$ and gradients added directly to the input tensor's gradient buffer [S1, unofficial].
 
 **Data Structures:**
-*   The radiance field is stored as a dense or sparse 3D grid. For efficient computation, the grid is often treated as a dense tensor during the backward pass to leverage GPU parallelism [S1, unofficial].
+*   The radiance field is stored as a dense or sparse 3D grid, which is treated as a dense tensor during computation to leverage GPU parallelism [S1, unofficial].
 
 **Steps:**
-1.  **Gradient Computation:** Compute spatial gradients along the three principal axes (x, y, z). For a tensor $V$, the gradient along axis $k$ is the difference between adjacent slices:
-    $$
-    \nabla_k V = V[..., :-1, ...] - V[..., 1:, ...]
-    $$
-    where the ellipsis indicates broadcasting over other dimensions [S2, unofficial].
-2.  **Loss Calculation:**
-    *   **Standard TV (L1/L2):** Compute the magnitude of the gradient vector. For isotropic TV, this is the Euclidean norm $\|\nabla V\|_2 = \sqrt{\sum_k (\nabla_k V)^2}$. For anisotropic TV, this is the sum of absolute values $\sum_k |\nabla_k V|$ [S1, S2, unofficial].
-    *   **Huber TV:** Use Huber loss between each grid point and its six nearest neighbors. Huber loss is preferred over pure L1 or L2 for explicit modeling as it is less sensitive to outliers while maintaining sparsity [S1, unofficial].
-    *   **Log-Opacity TV:** For log-opacity regularization, compute the gradient of $\log(\alpha)$ instead of $\alpha$ directly [S3].
-3.  **Aggregation:** Sum the loss values over all voxels and divide by the number of voxels $N$ to get the mean loss [S3].
-4.  **Gradient Injection (Efficient Implementation):** To avoid the memory overhead of storing intermediate gradient tensors for backpropagation, the TV loss gradients are computed directly and added to the PyTorch tensor's `.grad` buffer after the standard backward pass of the rendering loss [S1, unofficial].
+1.  **Gradient Computation:** Compute spatial gradients along the x, y, and z axes by subtracting adjacent slices: $\nabla_x V = V[:, :-1, :, :] - V[:, 1:, :, :]$, and similarly for y and z [S2, unofficial].
+2.  **Loss Calculation:** Compute the magnitude of the gradients. Standard implementations use the L2 norm (isotropic) or L1 norm (anisotropic) [S1, S2, unofficial]. Efficient implementations compute the Huber loss between each grid point and its six nearest neighbors, as it is found to be better than L1 and L2 loss for explicit modeling [S1, unofficial].
+3.  **Aggregation:** Sum the loss values over all voxels and divide by the total number of voxels $N$ to obtain the mean loss [S3].
+4.  **Gradient Injection:** Skip the forward pass through the TV loss graph and directly add the pre-computed gradients into the tensor's gradient buffer after the standard backward pass of the rendering loss [S1, unofficial].
+
+**Formulas:**
+*   Standard TV: $L_{TV} = \frac{\lambda_{tv}}{N} \sum_{\mathbf{x}} \|\nabla V(\mathbf{x})\|$, where $\lambda_{tv}$ is the TV weight, $N$ is the number of voxels, $\mathbf{x}$ denotes voxel centers, and $\nabla V$ is the spatial gradient [S1, unofficial].
+*   Log-Opacity TV: $J_{\text{tv}}(\mathbf{V}_\alpha) = \frac{1}{N} \sum_{\mathbf{x}} \lambda_{\text{tv}} \left\| \frac{\partial}{\partial \mathbf{x}} \log \mathbf{V}_\alpha(\mathbf{x}) \right\|$, where $\mathbf{V}_\alpha(\mathbf{x})$ is the voxel opacity at center $\mathbf{x}$ [S3].
+
+**Parameters:**
+*   **tv_weight ($\lambda_{tv}$):** Weight of the TV loss term. Typical values are 0.05 for tomographic reconstruction [S4].
+*   **dense_mode:** Boolean flag controlling whether to compute TV for all grid points or only those with non-zero gradients. Set to `True` for the first 10,000 iterations, then `False` [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Computational Cost:** Computing TV densely for all grid points is time-consuming, necessitating the restriction to the first 10,000 iterations [S1, unofficial].
+*   **Log-Space Sensitivity:** Applying TV to $\log(\alpha)$ increases sensitivity to small opacity values, which can lead to transparent artifacts [S3].
+*   **Boundary Conditions:** Gradient computation at boundaries requires careful slice indexing to avoid out-of-bounds errors [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def compute_tv_loss(tensor, tv_weight, dense_mode=True):
-    """
-    Computes Total Variation loss and adds gradients to tensor.grad.
-    
-    Args:
-        tensor: Input 3D tensor [Dx, Dy, Dz, C] or [Dx, Dy, Dz]
-        tv_weight: Scalar weight for the TV loss
-        dense_mode: If True, compute TV for all voxels. If False, only for voxels with non-zero gradients (optimization)
-    """
-    # 1. Compute gradients along x, y, z axes
-    # Gradient is difference between adjacent slices
+    # 1. Compute gradients along x, y, z axes by subtracting adjacent slices
     grad_x = tensor[:, :-1, :, :] - tensor[:, 1:, :, :]
     grad_y = tensor[:, :, :-1, :] - tensor[:, :, 1:, :]
     grad_z = tensor[:, :, :, :-1] - tensor[:, :, :, 1:]
-    
-    # 2. Compute magnitude (Isotropic L2 norm) or Sum of abs (Anisotropic L1)
-    # Using L2 norm as per standard isotropic TV definition [S2, unofficial]
-    # Note: For Huber loss, replace the norm with Huber function
-    grad_magnitude = torch.sqrt(grad_x**2 + grad_y**2 + grad_z**2 + 1e-8)
-    
-    # 3. Aggregate loss
-    # Mean over all voxels and channels
-    tv_loss = torch.mean(grad_magnitude)
-    
-    # 4. Scale by weight
-    tv_loss = tv_loss * tv_weight
-    
-    # 5. Add gradients to the tensor's grad buffer
-    # We need to compute the gradient of tv_loss w.r.t tensor
-    # Since we skipped the forward pass through the TV loss graph,
-    # we manually compute the derivative and add it.
-    # d(L2_norm)/d(x) = x / ||x||
-    # This is a simplified manual gradient injection [S1, unofficial]
-    
-    # Compute gradient w.r.t each axis
-    # grad_x contributes to tensor[:, :-1] and tensor[:, 1:]
-    # This requires careful indexing to avoid boundary issues
-    
-    # For implementation simplicity, we rely on autograd if dense_mode is True
-    # If dense_mode is False, we might skip or use a custom CUDA kernel [S1, unofficial]
-    
-    if dense_mode:
-        # Standard autograd path (memory intensive)
-        tv_loss.backward()
-    else:
-        # Efficient path: Add pre-computed gradients directly
-        # This requires a custom CUDA kernel or manual gradient assembly
-        # See [S1, unofficial] for details on 'total_variation_add_grad'
-        pass 
+
+    # 2. Compute magnitude (L2 norm)
+    # Standard tensor operations: sqrt, mean, zeros_like [G]
+    magnitude = sqrt(grad_x**2 + grad_y**2 + grad_z**2 + 1e-8)
+
+    # 3. Aggregate loss (mean over all voxels)
+    tv_loss = mean(magnitude) * tv_weight
+
+    # 4. Gradient injection: compute derivative w.r.t tensor and add to buffer
+    # d(magnitude)/d(grad_x) = grad_x / magnitude
+    scale = tv_weight / (magnitude.shape[0] * magnitude.numel())
+    dx = scale * grad_x / magnitude
+    dy = scale * grad_y / magnitude
+    dz = scale * grad_z / magnitude
+
+    if tensor.grad is None:
+        tensor.grad = zeros_like(tensor)
+
+    # Scatter gradients back to original tensor positions
+    tensor.grad[:, :-1, :, :] += dx
+    tensor.grad[:, 1:, :, :] -= dx
+    tensor.grad[:, :, :-1, :] += dy
+    tensor.grad[:, :, 1:, :] -= dy
+    tensor.grad[:, :, :, :-1] += dz
+    tensor.grad[:, :, :, 1:] -= dz
+    # Note: The exact fused CUDA kernel implementation is not provided in the sources [G]
 ```
-
-**Parameters:**
-*   **tv_weight:** Weight of the TV loss term. Typical values range from 0.05 to 1.0 depending on the scene complexity [S4].
-*   **dense_mode:** Boolean flag. Set to `True` for the first 10,000 iterations to ensure global smoothness, then `False` to compute TV only for voxels with non-zero gradients from the main loss, reducing training time [S1, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **Computational Cost:** Computing TV densely for all grid points is time-consuming. It is recommended to restrict dense computation to the initial phase of training (e.g., first 10k iterations) [S1, unofficial].
-*   **Log-Space Sensitivity:** Applying TV to $\log(\alpha)$ increases sensitivity to small opacity values, which can lead to artifacts if $\alpha$ approaches zero [S3].
-*   **Boundary Conditions:** Gradient computation at boundaries requires handling slice indices carefully to avoid out-of-bounds errors [S2, unofficial].
 
 ## Subtopics
 
@@ -111,16 +90,16 @@ This variant applies TV to the logarithm of voxel opacities ($\log \mathbf{V}_\a
 This variant uses 3D TV regularization on a tiny density volume $V_{tv}$ queried randomly during training to act as a homogeneity prior for tomographic reconstruction [S4]. It is chosen for optimizing radiative Gaussians in tomography, where it helps suppress artifacts in homogeneous areas like human organs [S4]. The total loss is $L_{total} = L_1 + \lambda_{ssim} L_{ssim} + \lambda_{tv} L_{tv}$, with typical weights $\lambda_{ssim}=0.25$ and $\lambda_{tv}=0.05$ [S4].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as it involves a constant number of operations per voxel (gradient computation and norm calculation) [S1, S2, unofficial].
-*   **Memory Complexity:** $O(N)$ for storing the gradient tensors if using standard autograd. Efficient implementations using fused CUDA kernels and direct gradient injection reduce memory overhead by avoiding intermediate graph storage [S1, unofficial].
-*   **Performance:** Dense TV computation is significantly slower than sparse computation. Restricting dense TV to the first 10,000 iterations can reduce training time by up to 50% in large grids [S1, unofficial].
+*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as it involves a constant number of operations per voxel for gradient computation and norm calculation [S1, S2, unofficial].
+*   **Memory Complexity:** $O(N)$ for storing gradient tensors with standard autograd, while fused CUDA kernels and direct gradient injection reduce memory overhead by avoiding intermediate graph storage [S1, unofficial].
+*   **Performance:** Dense TV computation is significantly slower than sparse computation, requiring restriction to the first 10,000 iterations to manage training time [S1, unofficial].
 *   **Strengths:** Effective at removing floaters and holes in explicit representations; computationally efficient compared to higher-order regularization; easy to implement with standard tensor operations [S1, S2, unofficial].
-*   **Limitations:** Can oversmooth fine details if the weight is too high; sensitive to the choice of norm (L1 vs L2); log-space TV can be unstable for very low opacities [S1, unofficial][S3].
-*   **When to Use:** When optimizing explicit radiance fields (voxel grids, Plenoxels) and observing artifacts like floaters or holes; when computational resources are limited and efficient gradient injection is needed [S1, unofficial][S4].
-*   **When Not to Use:** When optimizing implicit MLPs (where TV is less common and other regularizers like Laplacian smoothing are preferred); when fine, high-frequency details are critical and TV oversmoothing is detrimental [S1, unofficial].
+*   **Limitations:** Can oversmooth fine details if the weight is too high; sensitive to the choice of norm; log-space TV can be unstable for very low opacities [S1, unofficial][S3].
+*   **When to Use:** When optimizing explicit radiance fields and observing artifacts like floaters or holes; when computational resources are limited and efficient gradient injection is needed [S1, unofficial][S4].
+*   **When Not to Use:** When optimizing implicit MLPs where TV is less common and other regularizers are preferred; when fine, high-frequency details are critical and TV oversmoothing is detrimental [S1, unofficial].
 
 ## Background
-Total Variation regularization originated in image processing (Rudin-Osher-Fatemi model) for denoising and edge preservation [S1, S2, unofficial]. In the context of volume rendering, it was adapted for explicit radiance field representations (like Direct Voxel Grid Optimization) to address the instability of optimizing sparse, high-dimensional grids [S1, unofficial]. The "Efficient TV Loss" variant was introduced in the context of Direct Voxel Grid Optimization (DVGO) to mitigate the computational cost of standard TV implementation in PyTorch [S1, unofficial]. Variants like Log-Opacity TV were introduced in Neural Volumes to handle dynamic scenes and reduce transparency artifacts [S3]. R2-Gaussian applied TV to Gaussian Splatting for tomographic reconstruction, leveraging its ability to enforce homogeneity [S4].
+Total Variation regularization originated in image processing for denoising and edge preservation [S1, S2, unofficial]. In volume rendering, it was adapted for explicit radiance field representations like Direct Voxel Grid Optimization to address the instability of optimizing sparse, high-dimensional grids [S1, unofficial]. The "Efficient TV Loss" variant was introduced to mitigate the computational cost of standard TV implementation in PyTorch [S1, unofficial]. Variants like Log-Opacity TV were introduced in Neural Volumes to handle dynamic scenes and reduce transparency artifacts [S3]. R2-Gaussian applied TV to Gaussian Splatting for tomographic reconstruction, leveraging its ability to enforce homogeneity [S4].
 
 ## Sources
 [S1] Improved Direct Voxel Grid Optimization for Radiance Fields Reconstruction, https://doi.org/10.48550/arxiv.2206.05085, fetched 2026-10-26 (unofficial)

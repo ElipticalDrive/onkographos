@@ -3,85 +3,87 @@
 Also called: Density stretching, mass-conserving density mapping
 
 ## Overview
-Volume Density Stretching adjusts voxel density values based on geometric deformation to simulate mass conservation, ensuring that density decreases when "particles" are stretched over a greater distance [S1, unofficial]. Unlike standard voxelization which maps primitive attributes directly to grid cells regardless of local expansion or compression, this method scales the stored density inversely to the local volume expansion factor [S1, unofficial]. This sets it apart from siblings like [Interior Voxelize](995-interior-voxelize.md) or [Box-filtering Density Estimation](5987-box-filtering-density-estimation.md), which typically assume uniform or static density distributions, by allowing dynamic density modulation that preserves the visual consistency of expanding or contracting volumes [S1, unofficial].
+Volume Density Stretching adjusts the density values of a volumetric field based on spatial deformation to simulate mass conservation [S1, unofficial]. When a volume is stretched over a greater distance, its density decreases proportionally, ensuring that thicker parts do not artificially block more light than thinner parts [S1, unofficial]. This distinguishes it from sibling methods like [Interior Voxelize](995-interior-voxelize.md) or [Box-filtering Density Estimation](5987-box-filtering-density-estimation.md), which typically assign density based on geometric occupancy or filtering without accounting for the local stretching factor of the underlying parametric deformation [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs**
-*   **Input**: A parametric volume definition (e.g., a spline tube or noise field), a deformation map (scaling factors or Jacobian determinant of the coordinate transformation), and a base density function $\rho_0$.
-*   **Output**: A voxel grid where each cell contains a density value $\rho$ adjusted for local stretching.
+**Inputs and Outputs:**
+*   **Input:** A parametric volume definition (e.g., a spline tube) where a point $\mathbf{p}$ is mapped from parametric coordinates $(u, v, \theta)$ to world space. The base density function $\rho_0$ defined in the undeformed parametric space.
+*   **Output:** The stretched density value $\rho$ at the sampled point.
 
-**Data Structures**
-*   **Voxel Grid**: A 3D array of floats. Each element stores the final density $\rho$.
-*   **Deformation Field**: A 3D array of floats (or a scalar field) representing the local volume expansion factor $J$. If the transformation is defined by a Jacobian matrix $J_{mat}$, then $J = |\det(J_{mat})|$ [S1, unofficial].
+**Data Structures:**
+*   Parametric coordinates $(u, v, \theta)$ representing position along the tube axis, radial distance, and angular position.
+*   Deformation Jacobian or local scaling factors derived from the mapping function.
 
-**Steps**
-1.  **Evaluate Base Density**: For each voxel center $x$, compute the undeformed density $\rho_0(x)$ using the source primitive (e.g., noise value, tube radius function) [S1, unofficial].
-2.  **Compute Expansion Factor**: Determine the local volume expansion factor $J(x)$. For a 1D stretching along a curve, if the arc length element changes from $ds_0$ to $ds$, then $J = ds/ds_0$ [S1, unofficial]. In general, $J$ is the determinant of the Jacobian of the mapping from the reference configuration to the deformed configuration.
-3.  **Apply Stretching**: Calculate the stretched density $\rho(x)$ using the mass conservation principle:
-    $$ \rho(x) = \frac{\rho_0(x)}{J(x)} $$
-    If $J(x) > 1$ (expansion), $\rho(x) < \rho_0(x)$. If $J(x) < 1$ (compression), $\rho(x) > \rho_0(x)$ [S1, unofficial].
-4.  **Clamp and Store**: Clamp $\rho(x)$ to valid range $[0, \rho_{max}]$ and store in the voxel grid.
+**Method:**
+1.  **Map to World Space:** Compute the world position $\mathbf{P}$ from parametric coordinates using the volume's transformation function $T(u, v, \theta)$.
+2.  **Compute Local Stretching:** Determine the local scaling factor $S$ resulting from the deformation. For a tube with varying radius $R(u)$, the stretching is related to the change in cross-sectional area or arc length. If the volume expands, $S > 1$; if it contracts, $S < 1$.
+3.  **Apply Mass Conservation:** Adjust the base density $\rho_0$ by the inverse of the stretching factor to conserve mass. The stretched density $\rho$ is calculated as:
+    $$ \rho = \frac{\rho_0}{S} $$
+    Where $\rho_0$ is the density in the reference (undeformed) configuration [S1, unofficial].
+4.  **Sample Noise (Optional):** If procedural noise (e.g., Perlin noise) is used, evaluate the noise in the parametric space before or after stretching depending on the desired anisotropy. Stretching the noise field anisotropically creates filamentary structures [S1, unofficial].
 
-**Parameters**
-*   $\rho_{max}$: Maximum density cap. Typical value: 1.0 or based on light absorption limits [G].
-*   $J_{min}$: Minimum expansion factor to prevent division by zero. Typical value: $10^{-6}$ [G].
+**Parameters:**
+*   $\rho_0$: Base density value. Typical values depend on the material (e.g., gas vs. dust).
+*   $S$: Local scaling factor. Computed from the derivative of the mapping function.
 
-**Edge Cases and Pitfalls**
-*   **Singularity**: If $J(x) \approx 0$ (extreme compression), density becomes infinite. Guard against this by clamping $J$ to $J_{min}$ [G].
-*   **Discontinuities**: Sharp changes in deformation can cause visible artifacts in density. Smoothing $J$ may be required [G].
-*   **Coordinate Mapping**: Ensure the deformation field is evaluated at the same resolution and coordinate system as the voxel grid [G].
+**Edge Cases and Pitfalls:**
+*   **Singularity:** If $S \to 0$ (extreme compression), density may become unbounded. A clamp or minimum density threshold is required [G].
+*   **Precision:** In WebGL/GLSL implementations, ensure floating-point precision is sufficient to handle small density variations in stretched regions [S1, unofficial].
 
-**Pseudocode**
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_stretched_density(base_density_field, expansion_field, max_density=1.0, min_expansion=1e-6):
+def compute_stretched_density(u, v, theta, base_density_func, mapping_func, noise_func):
     """
-    Computes density with mass-conserving stretching.
+    Computes density with mass conservation stretching.
+    u: parametric coordinate along axis
+    v: radial coordinate
+    theta: angular coordinate
+    base_density_func: function returning rho_0(u, v, theta)
+    mapping_func: function returning (P, scale_factor) where P is world pos and scale_factor is local stretch S
+    noise_func: function returning noise value at (u, v, theta)
+    """
+    # 1. Get base density
+    rho_0 = base_density_func(u, v, theta)
     
-    Args:
-        base_density_field: 3D array of floats, rho_0(x)
-        expansion_field: 3D array of floats, J(x)
-        max_density: float, upper bound for density
-        min_expansion: float, lower bound for expansion factor to avoid division by zero
+    # 2. Compute local stretching factor S
+    # The mapping function returns the world position and the local scaling factor
+    # S represents how much the volume has been stretched relative to the reference
+    P, S = mapping_func(u, v, theta)
+    
+    # Guard against division by zero or extreme compression
+    if S < 1e-6:
+        S = 1e-6
         
-    Returns:
-        3D array of floats, rho(x)
-    """
-    stretched_density = base_density_field.copy()
+    # 3. Apply mass conservation: rho = rho_0 / S
+    rho = rho_0 / S
     
-    # Guard against division by zero
-    safe_expansion = max(expansion_field, min_expansion)
+    # 4. Optional: Apply noise for filaments
+    # Noise is evaluated in parametric space, then the resulting field is stretched
+    noise_val = noise_func(u, v, theta)
+    rho = rho * (1.0 + noise_val)
     
-    # Apply mass conservation: rho = rho_0 / J
-    stretched_density = base_density_field / safe_expansion
-    
-    # Clamp to valid range
-    stretched_density = min(stretched_density, max_density)
-    stretched_density = max(stretched_density, 0.0)
-    
-    return stretched_density
+    return rho
 ```
 
 ## Subtopics
 
 ### Solar Flare Model
-An animated solar flare composed of 4 Bezier segments arranged in a circle. The circle grows and shrinks with time. The density field stretches as it grows, rotates, and moves along the ring. Perlin noise creates dust-cloud filaments. Density stretching is used to simulate the expansion of the flare [S1, unofficial].
+An animated solar flare composed of 4 Bezier segments arranged in a circle that grows and shrinks with time [S1, unofficial]. The density field stretches as the flare expands, rotates, and moves along the ring [S1, unofficial]. Perlin noise creates dust-cloud filaments that become anisotropic due to the stretching [S1, unofficial].
 
 ### Galaxy Model
-A galaxy inspired by Centaurus A, composed of 2 Bezier segments forming an S-shape. Brighter orange parts in the middle, darker on sides. Uses dust-cloud noise forming filaments when stretched. Density stretching is used to maintain visual consistency during deformation [S1, unofficial].
+A galaxy inspired by Centaurus A, composed of 2 Bezier segments forming an S-shape [S1, unofficial]. It features brighter orange parts in the middle and darker sides [S1, unofficial]. Uses dust-cloud noise that forms filaments when stretched, with density stretching applied to maintain mass conservation [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity**: $O(N)$ where $N$ is the number of voxels, assuming constant-time evaluation of base density and expansion field.
-*   **Memory Complexity**: $O(N)$ for storing the voxel grid and expansion field.
-*   **Performance**: Depends on the complexity of the deformation field. Simple analytic deformations are fast; complex noise-based deformations may require additional sampling [S1, unofficial].
-*   **Strengths**: Physically plausible density modulation for expanding/contracting volumes; prevents visual artifacts from uniform density in deforming shapes [S1, unofficial].
-*   **Limitations**: Requires computation of the expansion factor (Jacobian), which may be non-trivial for complex deformations; potential for numerical instability if expansion factors are very small [G].
-*   **When to use**: When simulating gases, fluids, or procedural noise fields that undergo significant deformation or expansion/compression [S1, unofficial].
-*   **When not to use**: For static volumes or volumes with negligible deformation, where the overhead is unjustified [G].
+*   **Time Complexity:** $O(1)$ per sample, assuming the mapping function and noise evaluation are constant time.
+*   **Memory Complexity:** $O(1)$, as it is a procedural method requiring no voxel grid storage.
+*   **Performance:** Implemented in WebGL/GLSL on Shadertoy, allowing real-time rendering [S1, unofficial]. Performance is limited by the complexity of the Bezier curve evaluation and noise function.
+*   **Strengths:** Physically plausible density distribution for deforming volumes; creates realistic filamentary structures when combined with noise [S1, unofficial].
+*   **Limitations:** Requires a parametric definition of the volume; not directly applicable to static voxel grids without inverse mapping [G].
 
 ## Background
-Originated in the context of real-time rendering of procedural noise fields, specifically for interstellar dust clouds and solar flares, as described in "Sculpting procedural noise: real-time rendering of interstellar dust clouds and solar flares" [S1, unofficial]. The method was implemented in WebGLSL on Shadertoy to demonstrate the visual impact of mass-conserving density mapping in animated volumetric scenes [S1, unofficial].
+Originated in the context of real-time procedural rendering of interstellar dust clouds and solar flares [S1, unofficial]. The method was implemented in WebGL/GLSL for Shadertoy, leveraging the ability to compute parametric mappings and noise on the GPU [S1, unofficial]. It addresses the visual artifact where undeformed density values cause thicker parts of a stretched volume to appear unnaturally opaque [S1, unofficial].
 
 ## Sources
 [S1] Sculpting procedural noise: real-time rendering of interstellar dust clouds and solar flares, https://openalex.org/W4293584834, fetched 2026-10-26 (unofficial)

@@ -3,49 +3,45 @@
 Also called: Antimatter15 .splat file reader, Antimatter15 Splat Reader, Lazy ChunkSource for .splat
 
 ## Overview
-This method implements a lazy `ChunkSource` for reading Antimatter15 `.splat` files, which are flat binary arrays of 32-byte records with no header [S1]. It decodes position, geometric (rotation, scale, opacity), and DC-only color layers on demand, supporting both contiguous chunk reads and scatter-gather reads [S1]. Unlike formats with spherical harmonic coefficients, `.splat` files carry no SH data, so the color layer is DC-only (constant per gaussian) [S1].
+This method implements a lazy `ChunkSource` for reading Antimatter15 `.splat` files, which are flat arrays of 32-byte binary records with no header [S1]. It decodes position, geometric (rotation, scale, opacity), and DC-only color layers on demand, supporting both contiguous chunk reads and scatter-gather reads [S1]. Unlike formats with spherical harmonic coefficients, `.splat` files carry no SH data, so the color layer is DC-only (constant per gaussian) [S1]. It builds on [Standard Splat File Parsing](6828-standard-splat-file-parsing.md) by providing a lazy, chunk-based interface rather than a simple bulk load.
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A `.splat` file path or buffer.
-- Output: A `ChunkSource` object providing lazy access to splat properties.
+- Input: A file path or byte stream representing an Antimatter15 `.splat` file.
+- Output: A `ChunkSource` object that provides decoded Gaussian properties (position, geometric, color) via `read()` requests.
 
 **Data Structures:**
-- **Record Layout (32 bytes per splat):**
+- **Record Layout (32 bytes):**
   - `position`: 3 × `Float32` at offsets 0, 4, 8.
   - `scale`: 3 × `Float32` at offsets 12, 16, 20.
-  - `color`: 4 × `Uint8` at offsets 24, 25, 26, 27.
-  - `rotation`: 4 × `Uint8` at offsets 28, 29, 30, 31.
+  - `color`: 4 × `uint8` at offsets 24, 25, 26, 27.
+  - `rotation`: 4 × `uint8` at offsets 28, 29, 30, 31.
 - **Constants:**
   - `BYTES_PER_SPLAT = 32` [S1].
   - `SH_C0 = 0.28209479177387814` [S1].
-  - `eps = 1e-6` [S1].
+  - `EPSILON = 1e-6` [S1].
 
 **Steps:**
 1. **Initialization:**
-   - Determine file size. If undefined, read all data into a resident buffer; otherwise use `source.size` [S1].
+   - Check file size. If size is undefined, read all data into a resident buffer; otherwise use `source.size` [S1].
    - Validate that `size` is a multiple of 32 bytes and non-zero [S1].
    - Calculate `numGaussians = size / 32` [S1].
-   - Calculate `chunkSize` from `pool.chunkSize` [S1].
-   - Calculate `numChunks = max(1, ceil(numGaussians / chunkSize))` [S1].
-   - Define available layers as a set containing `'position'`, `'geometric'`, `'color'` [S1].
+   - Calculate `chunkSize` from `pool.chunkSize`. Calculate `numChunks = max(1, ceil(numGaussians / chunkSize))` [S1].
+   - Define available layers as a Set containing `'position'`, `'geometric'`, `'color'` [S1].
    - Define layouts:
      - `position`: stride `POSITION_STRIDE`, fields `positionFields()` [S1].
      - `geometric`: stride `GEOMETRIC_STRIDE`, fields `geometricFields()` [S1].
      - `color`: stride `colorStride(0)`, fields `colorFields(0)` [S1].
 
 2. **Read Request Handling:**
-   - If `lod != 0`, throw an error [S1].
-   - Extract `position`, `geometric`, `color` `Float32Arrays` from the request [S1].
-   - If no layers are requested, return [S1].
-
-3. **Gather Read Path (Scatter-Gather):**
-   - If the request has indices, sort slots by source row to coalesce reads [S1].
+   - On `read` request: if `lod != 0`, throw error [S1].
+   - Extract `position`, `geometric`, `color` `Float32Arrays` from request. If none requested, return [S1].
+   - **Gather Read Path:** If request has indices, sort slots by source row to coalesce reads [S1].
    - Iterate over `gatherRuns`, calculating `firstByte` and `byteLen` [S1].
-   - If the data is resident, use `subarray`; otherwise allocate/reuse `gatherScratch` and call `readExact` [S1].
+   - If resident, use `subarray`; otherwise allocate/reuse `gatherScratch` and call `readExact` [S1].
    - Call `decode` with `srcRec` mapping [S1].
 
-4. **Contiguous Chunk Decode Loop:**
+3. **Decoding (Contiguous Chunk Loop):**
    - Iterate `t` from 0 to `n-1` [S1].
    - Calculate byte offset `o = srcRec(t) * 32` [S1].
    - Calculate destination slot `d = dstRow(t)` [S1].
@@ -54,173 +50,152 @@ This method implements a lazy `ChunkSource` for reading Antimatter15 `.splat` fi
 **Decoding Formulas:**
 - **Position:** Read 3 floats from `DataView` at offset `o` with little-endian byte order [S1].
 - **Rotation:**
-  - Read 4 `Uint8`s at offsets `o+28` to `o+31` [S1].
-  - Map to `[-1, 1]` via `(u8 / 255) * 2 - 1` [S1].
-  - Normalize quaternion. If length is 0, set to identity `(1, 0, 0, 0)` [S1].
+  - Read 4 `uint8`s at offsets `o+28` to `o+31` [S1].
+  - Map to `[-1, 1]` via $q_i = \frac{u8_i}{255} \times 2 - 1$ [S1].
+  - Normalize quaternion: $q_{norm} = \frac{q}{\|q\|}$ [S1].
+  - If $\|q\| = 0$, set to identity $(1, 0, 0, 0)$ [S1].
 - **Scale:**
   - Read 3 floats from `DataView` at offsets `o+12`, `o+16`, `o+20` [S1].
-  - Apply `log` [S1].
+  - Apply log: $s_i = \log(scale_i)$ [S1].
 - **Opacity:**
-  - Read `Uint8` at `o+27` [S1].
-  - Clamp normalized alpha to `[eps, 1-eps]` where `eps = 1e-6` [S1].
-  - Apply inverse sigmoid (logit): `log(a / (1 - a))` [S1].
+  - Read `uint8` at `o+27` [S1].
+  - Normalize: $\alpha_{norm} = \frac{u8}{255}$ [S1].
+  - Clamp to $[\epsilon, 1-\epsilon]$ where $\epsilon = 10^{-6}$ [S1].
+  - Apply inverse sigmoid (logit): $\alpha = \log\left(\frac{\alpha_{clamp}}{1 - \alpha_{clamp}}\right)$ [S1].
 - **Color:**
-  - Read 3 `Uint8`s at offsets `o+24`, `o+25`, `o+26` [S1].
-  - Map to `[-0.5, 0.5]` by `(u8 / 255 - 0.5)` [S1].
-  - Divide by `SH_C0` [S1].
+  - Read 3 `uint8`s at offsets `o+24`, `o+25`, `o+26` [S1].
+  - Map to $[-0.5, 0.5]$ via $c_i = \frac{u8_i}{255} - 0.5$ [S1].
+  - Divide by `SH_C0`: $C_i = \frac{c_i}{SH\_C0}$ [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import math
+import struct
 
 BYTES_PER_SPLAT = 32
 SH_C0 = 0.28209479177387814
-EPS = 1e-6
+EPSILON = 1e-6
 
-def decode_antimatter_splat(file_data, num_gaussians, chunk_size, request_layers):
-    """
-    Lazy ChunkSource for Antimatter15 .splat files.
-    file_data: bytes or memory view of the file content.
-    num_gaussians: int, total number of splats.
-    chunk_size: int, size of each chunk in splats.
-    request_layers: set of strings, e.g., {'position', 'geometric', 'color'}.
-    """
-    if len(file_data) % BYTES_PER_SPLAT != 0:
-        raise ValueError("File size must be a multiple of 32 bytes")
+def decode_splat_record(data: bytes, offset: int) -> dict:
+    """Decode a single 32-byte splat record."""
+    # Position: 3 floats at 0, 4, 8
+    x, y, z = struct.unpack_from('<fff', data, offset)
     
+    # Scale: 3 floats at 12, 16, 20
+    sx, sy, sz = struct.unpack_from('<fff', data, offset + 12)
+    # Apply log
+    sx = math.log(sx)
+    sy = math.log(sy)
+    sz = math.log(sz)
+    
+    # Opacity: 1 uint8 at 27
+    alpha_u8 = data[offset + 27]
+    alpha_norm = alpha_u8 / 255.0
+    # Clamp to [eps, 1-eps]
+    alpha_clamped = max(EPSILON, min(1.0 - EPSILON, alpha_norm))
+    # Inverse sigmoid
+    opacity = math.log(alpha_clamped / (1.0 - alpha_clamped))
+    
+    # Rotation: 4 uint8 at 28, 29, 30, 31
+    qx_u8, qy_u8, qz_u8, qw_u8 = data[offset + 28], data[offset + 29], data[offset + 30], data[offset + 31]
+    # Map to [-1, 1]
+    qx = (qx_u8 / 255.0) * 2.0 - 1.0
+    qy = (qy_u8 / 255.0) * 2.0 - 1.0
+    qz = (qz_u8 / 255.0) * 2.0 - 1.0
+    qw = (qw_u8 / 255.0) * 2.0 - 1.0
+    # Normalize
+    norm = math.sqrt(qx**2 + qy**2 + qz**2 + qw**2)
+    if norm == 0:
+        qx, qy, qz, qw = 1.0, 0.0, 0.0, 0.0
+    else:
+        qx /= norm
+        qy /= norm
+        qz /= norm
+        qw /= norm
+        
+    # Color: 3 uint8 at 24, 25, 26
+    r_u8, g_u8, b_u8 = data[offset + 24], data[offset + 25], data[offset + 26]
+    # Map to [-0.5, 0.5] and divide by SH_C0
+    r = ((r_u8 / 255.0) - 0.5) / SH_C0
+    g = ((g_u8 / 255.0) - 0.5) / SH_C0
+    b = ((b_u8 / 255.0) - 0.5) / SH_C0
+    
+    return {
+        'position': (x, y, z),
+        'scale': (sx, sy, sz),
+        'opacity': opacity,
+        'rotation': (qx, qy, qz, qw),
+        'color': (r, g, b)
+    }
+
+def parse_splat_file(file_path: str, chunk_size: int = 1000):
+    """
+    Lazy ChunkSource implementation for Antimatter15 .splat files.
+    """
+    with open(file_path, 'rb') as f:
+        file_data = f.read()
+    
+    size = len(file_data)
+    if size == 0 or size % BYTES_PER_SPLAT != 0:
+        raise ValueError("Invalid file size")
+    
+    num_gaussians = size // BYTES_PER_SPLAT
     num_chunks = max(1, math.ceil(num_gaussians / chunk_size))
     
-    # Pre-calculate strides and field counts if needed by the specific ChunkSource implementation
-    # For this generic parser, we focus on the decode logic.
-    
-    def decode_position(src_rec_idx, dst_array, dst_offset):
-        """Decode position from a single record."""
-        base = src_rec_idx * BYTES_PER_SPLAT
-        # Read 3 floats little-endian
-        x = struct.unpack_from('<f', file_data, base + 0)
-        y = struct.unpack_from('<f', file_data, base + 4)
-        z = struct.unpack_from('<f', file_data, base + 8)
-        dst_array[dst_offset] = x
-        dst_array[dst_offset + 1] = y
-        dst_array[dst_offset + 2] = z
-
-    def decode_geometric(src_rec_idx, dst_array, dst_offset):
-        """Decode scale and rotation from a single record."""
-        base = src_rec_idx * BYTES_PER_SPLAT
-        
-        # Scale: 3 floats at 12, 16, 20
-        sx = struct.unpack_from('<f', file_data, base + 12)
-        sy = struct.unpack_from('<f', file_data, base + 16)
-        sz = struct.unpack_from('<f', file_data, base + 20)
-        # Apply log
-        dst_array[dst_offset] = math.log(sx)
-        dst_array[dst_offset + 1] = math.log(sy)
-        dst_array[dst_offset + 2] = math.log(sz)
-        
-        # Opacity: 1 uint8 at 27
-        alpha_u8 = struct.unpack_from('B', file_data, base + 27)[0]
-        alpha_norm = alpha_u8 / 255.0
-        # Clamp to [eps, 1-eps]
-        alpha_clamped = max(EPS, min(1.0 - EPS, alpha_norm))
-        # Inverse sigmoid (logit)
-        opacity = math.log(alpha_clamped / (1.0 - alpha_clamped))
-        dst_array[dst_offset + 3] = opacity
-        
-        # Rotation: 4 uint8 at 28, 29, 30, 31
-        r0_u8 = struct.unpack_from('B', file_data, base + 28)[0]
-        r1_u8 = struct.unpack_from('B', file_data, base + 29)[0]
-        r2_u8 = struct.unpack_from('B', file_data, base + 30)[0]
-        r3_u8 = struct.unpack_from('B', file_data, base + 31)[0]
-        
-        # Map to [-1, 1]
-        q0 = (r0_u8 / 255.0) * 2.0 - 1.0
-        q1 = (r1_u8 / 255.0) * 2.0 - 1.0
-        q2 = (r2_u8 / 255.0) * 2.0 - 1.0
-        q3 = (r3_u8 / 255.0) * 2.0 - 1.0
-        
-        # Normalize
-        norm = math.sqrt(q0*q0 + q1*q1 + q2*q2 + q3*q3)
-        if norm == 0:
-            # Identity quaternion
-            q0, q1, q2, q3 = 1.0, 0.0, 0.0, 0.0
-        else:
-            q0 /= norm
-            q1 /= norm
-            q2 /= norm
-            q3 /= norm
+    class SplatChunkSource:
+        def __init__(self):
+            self.resident_data = file_data
+            self.num_chunks = num_chunks
+            self.chunk_size = chunk_size
+            self.num_gaussians = num_gaussians
             
-        dst_array[dst_offset + 4] = q0
-        dst_array[dst_offset + 5] = q1
-        dst_array[dst_offset + 6] = q2
-        dst_array[dst_offset + 7] = q3
+        def read(self, chunk_idx: int, indices: list = None):
+            """
+            Read a chunk of splats.
+            If indices is provided, perform scatter-gather read.
+            """
+            if indices is None:
+                # Contiguous read
+                start = chunk_idx * self.chunk_size
+                end = min(start + self.chunk_size, self.num_gaussians)
+                splats = []
+                for i in range(start, end):
+                    offset = i * BYTES_PER_SPLAT
+                    splats.append(decode_splat_record(self.resident_data, offset))
+                return splats
+            else:
+                # Scatter-gather read
+                # Sort indices to coalesce reads (simplified: just decode each)
+                splats = []
+                for idx in indices:
+                    if idx < self.num_gaussians:
+                        offset = idx * BYTES_PER_SPLAT
+                        splats.append(decode_splat_record(self.resident_data, offset))
+                    else:
+                        raise IndexError(f"Index {idx} out of bounds")
+                return splats
 
-    def decode_color(src_rec_idx, dst_array, dst_offset):
-        """Decode DC-only color from a single record."""
-        base = src_rec_idx * BYTES_PER_SPLAT
-        r_u8 = struct.unpack_from('B', file_data, base + 24)[0]
-        g_u8 = struct.unpack_from('B', file_data, base + 25)[0]
-        b_u8 = struct.unpack_from('B', file_data, base + 26)[0]
-        
-        # Map to [-0.5, 0.5]
-        r = (r_u8 / 255.0) - 0.5
-        g = (g_u8 / 255.0) - 0.5
-        b = (b_u8 / 255.0) - 0.5
-        
-        # Divide by SH_C0
-        dst_array[dst_offset] = r / SH_C0
-        dst_array[dst_offset + 1] = g / SH_C0
-        dst_array[dst_offset + 2] = b / SH_C0
-
-    def read_chunk(chunk_idx, layers):
-        """Read a specific chunk of splats."""
-        start_idx = chunk_idx * chunk_size
-        end_idx = min(start_idx + chunk_size, num_gaussians)
-        count = end_idx - start_idx
-        
-        # Allocate output arrays based on requested layers
-        # Note: In a real implementation, these would be pre-allocated buffers
-        # passed in by the ChunkSource interface. Here we simulate the decode loop.
-        
-        for t in range(count):
-            src_rec_idx = start_idx + t
-            dst_offset = t * 8 # Assuming 8 floats per splat in output buffer for simplicity
-            
-            if 'position' in layers:
-                decode_position(src_rec_idx, dst_array, dst_offset)
-                dst_offset += 3
-                
-            if 'geometric' in layers:
-                decode_geometric(src_rec_idx, dst_array, dst_offset)
-                dst_offset += 4 # scale(3) + opacity(1) + rotation(4) -> wait, geometric usually includes scale, opacity, rotation. 
-                # Based on notes: geometric fields include scale, opacity, rotation.
-                # Let's assume the output buffer layout matches the source fields.
-                # The pseudocode above decodes them into separate slots.
-                # For the sake of the loop structure in [S1]:
-                # dstRow(t) is the destination slot.
-                pass 
-            
-            if 'color' in layers:
-                decode_color(src_rec_idx, dst_array, dst_offset)
-                dst_offset += 3
-
-    return read_chunk
+    return SplatChunkSource()
 ```
 
 ## Subtopics
 
 ### [Splatv Binary File Format Parser](7762-splatv-binary-file-format-parser.md)
-Parses a custom binary file format (.splatv) containing magic header, JSON camera metadata, and binary splat data chunks.
+The Splatv Binary File Format Parser is a method for loading `.splatv` files, a custom binary container format used by `gsplat.js` to store 3D Gaussian Splatting scene data. It solves the problem of parsing a structured binary stream that combines a magic header, JSON-encoded camera metadata, and binary splat data chunks into a usable scene graph. It is distinct from the Antimatter15 `.splat` parser because it handles a multi-chunk container with explicit type markers and embedded JSON metadata, rather than a flat, headerless array of records.
 
 ## Operating characteristics
-- **Time Complexity:** O(N) for reading N splats, with overhead for lazy decoding and scatter-gather coalescing.
-- **Memory Complexity:** O(1) auxiliary memory per chunk, plus resident buffer if file size is undefined or small [S1].
-- **Strengths:** Lazy loading allows efficient access to subsets of splats; scatter-gather optimization reduces I/O calls for non-contiguous access [S1].
-- **Limitations:** No spherical harmonic data, limiting color fidelity to DC-only [S1]. Degenerate quaternions and opacity boundaries require explicit handling [S1].
+- **Time Complexity:** $O(N)$ for full load, where $N$ is the number of Gaussians. Lazy loading reduces initial load time to $O(1)$ per chunk accessed.
+- **Memory Complexity:** $O(N)$ for resident buffer, or $O(C)$ for chunk-based lazy loading, where $C$ is the chunk size.
+- **Performance:** Depends on hardware and resolution. Lazy loading is beneficial for large scenes where not all Gaussians are needed immediately.
+- **Strengths:** Low memory footprint for large scenes, fast initial load, supports scatter-gather reads for efficient random access.
+- **Limitations:** No spherical harmonic data, so color is DC-only. Requires full file read for non-resident modes if random access is frequent.
+- **When to use:** When memory is constrained or when only a subset of Gaussians is needed.
+- **When not to use:** When full scene access is required and memory is sufficient, or when SH coefficients are needed.
 
 ## Background
-The Antimatter15 `.splat` format is a compact binary representation for 3D Gaussian Splatting data, used in tools like `splat-transform` [S1]. It is designed for efficient storage and parsing of Gaussian properties without the overhead of spherical harmonic coefficients [S1].
+The Antimatter15 `.splat` format is a simple, headerless binary format for storing 3D Gaussian Splatting data. It was popularized by the Antimatter15 project and is widely used in web-based 3D Gaussian Splatting viewers due to its simplicity and efficiency. The format stores position, scale, rotation, opacity, and color in a fixed 32-byte record.
 
 ## Sources
 [S1] playcanvas/splat-transform, https://github.com/playcanvas/splat-transform, fetched 2026-10-27

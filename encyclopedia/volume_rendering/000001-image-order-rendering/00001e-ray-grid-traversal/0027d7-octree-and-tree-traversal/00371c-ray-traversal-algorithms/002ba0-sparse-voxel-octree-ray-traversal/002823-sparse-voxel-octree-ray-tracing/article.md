@@ -7,12 +7,12 @@ Sparse Voxel Octree (SVO) Ray Tracing is a ray traversal algorithm that finds th
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Ray origin ($O$), ray direction ($D$), SVO root node index, world bounds (origin, size), and maximum traversal depth/iterations.
-*   **Outputs:** Hit position, hit normal, hit depth ($t$), and status (hit, miss, out of bounds).
+*   **Inputs:** Ray origin ($O$), ray direction ($D$), SVO root node index, world bounds (origin, size), maximum traversal depth/iterations, and a children buffer for internal nodes [S2, S6, unofficial].
+*   **Outputs:** Hit position, hit normal, hit depth ($t$), and status (hit, miss, out of bounds) [S1, S2, unofficial].
 
 **Data Structures:**
 *   **SVO Node:** Stored in a flat array or buffer. A 32-bit integer where the MSB (bit 31) indicates a solid leaf. If MSB is 0, the lower 24 bits store an index to the children array [S6, unofficial].
-*   **Stack:** Used for backtracking when exiting child nodes. A fixed-size array (e.g., 16 or 64 elements) storing `ParentElement` structs [S2, unofficial].
+*   **Stack:** Used for backtracking when exiting child nodes. A fixed-size array (e.g., 64 elements) storing `ParentElement` structs [S2, unofficial].
     *   `ParentElement`: `float3 pos`, `float scale`, `float exit`, `uint index`, `uint childIndex` [S2, unofficial].
 *   **RayHit Struct:** `status` (u32: 0=no hit, 1=hit octree, 2=hit voxel, 3=out of bounds), `iterations` (u32), `position` (vec3<f32>), `normal` (vec3<f32>) [S1, unofficial].
 
@@ -33,9 +33,10 @@ Sparse Voxel Octree (SVO) Ray Tracing is a ray traversal algorithm that finds th
 2.  **Root Intersection:**
     *   Compute intersection of the ray with the root box. Get entry ($t_{entry}$) and exit ($t_{exit}$) distances [S2, unofficial].
     *   If $t_{entry} \le 0$ and $t_{exit} \le 0$, the ray misses the root; return false/miss [S2, unofficial].
+    *   Clamp $t_{entry}$ to 0.0 if negative to handle rays starting inside the volume.
 
 3.  **Traversal Loop:**
-    *   While `didNotHit` and steps < limit:
+    *   While steps < limit:
         *   **Child Selection:** Determine the child index intersected by the ray at the current entry point. This is done by comparing the ray position relative to the center of the current node's bounding box [S2, unofficial].
         *   **Node Check:** Check if the selected child exists and is valid using the node's descriptor mask (e.g., `getValidMask`) [S2, unofficial].
         *   **Leaf Check:** If the child is a leaf (`getLeafMask > 0`) and valid, and the ray intersects it ($t_{entry} \ge 0$), a hit is found.
@@ -43,11 +44,10 @@ Sparse Voxel Octree (SVO) Ray Tracing is a ray traversal algorithm that finds th
             *   Compute normal based on the face of the bounding box hit [S7, unofficial].
             *   Set `didNotHit = false` and break [S2, unofficial].
         *   **Internal Node:** If the child is an internal node:
-            *   Push current state (position, scale, exit distance, node index) onto the stack [S2, unofficial].
+            *   Push current state (position, scale, exit distance, node index, next sibling index) onto the stack [S2, unofficial].
             *   Descend: Update current position to the child's box, update scale, and update the node index to the child's pointer [S2, unofficial].
             *   Recalculate ray intersection with the new child box to get new $t_{entry}$ and $t_{exit}$ [S2, unofficial].
         *   **Backtracking:** If the ray misses the current child or no valid child is found:
-            *   If stack is empty, return miss [S2, unofficial].
             *   Pop from stack to restore previous state [S2, unofficial].
             *   Continue traversal from the parent node, checking the next sibling child [S2, unofficial].
 
@@ -61,17 +61,18 @@ Sparse Voxel Octree (SVO) Ray Tracing is a ray traversal algorithm that finds th
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def trace_svo_ray(ray_origin, ray_dir, svo_nodes, root_index, world_min, world_max, max_steps):
+def trace_svo_ray(ray_origin, ray_dir, svo_nodes, children_buffer, root_index, world_min, world_max, max_steps):
     # 1. World Bounds Check
     t_near, t_far = ray_aabb(ray_origin, ray_dir, world_min, world_max)
     if t_near > t_far or t_far < 0:
-        return {"status": 0, "position": None} # Miss
+        return {"status": 0, "position": None}
 
     # 2. Initialization
     stack = []
     current_node_idx = root_index
     current_pos = vec3(0.0, 0.0, 0.0)
     current_scale = 256.0 # mRootRadius
+    t_entry = 0.0
     steps = 0
     
     # 3. Root Intersection
@@ -80,69 +81,57 @@ def trace_svo_ray(ray_origin, ray_dir, svo_nodes, root_index, world_min, world_m
     t_entry, t_exit = ray_aabb(ray_origin, ray_dir, root_box_min, root_box_max)
     
     if t_entry <= 0.0 and t_exit <= 0.0:
-        return {"status": 0, "position": None} # Miss
-
+        return {"status": 0, "position": None}
+    if t_entry < 0.0:
+        t_entry = 0.0
+        
     # Nudge origin to avoid precision issues
-    ray_origin = ray_origin + ray_dir * 0.0004 
+    ray_origin = ray_origin + ray_dir * 0.0004
 
     while steps < max_steps:
         steps += 1
         
         # 4. Determine Child Index
-        # Calculate relative position of ray entry point within current node
         rel_pos = (ray_origin + ray_dir * t_entry - current_pos) / current_scale
-        # Determine octant index (0-7) based on sign of rel_pos components
         child_idx = 0
         if rel_pos.x > 0.0: child_idx |= 1
         if rel_pos.y > 0.0: child_idx |= 2
         if rel_pos.z > 0.0: child_idx |= 4
         
         # 5. Check Child Validity
-        # Assuming node structure: MSB is leaf flag, lower bits are children index
         node_val = svo_nodes[current_node_idx]
         is_leaf = (node_val & 0x80000000) != 0
         
         if is_leaf:
-            # Leaf node check
-            # If it's a leaf, we need to check if it's solid. 
-            # In some implementations, leaf nodes are always solid if reached, 
-            # or checked via color/alpha. Here we assume hit if reached.
             hit_pos = ray_origin + ray_dir * t_entry
             normal = compute_normal(hit_pos, current_pos, current_scale, child_idx)
             return {"status": 1, "position": hit_pos, "normal": normal, "depth": t_entry}
         
         # Internal node: Check if child exists
-        # Child index is stored in lower bits. 
-        # Note: Source [S6, unofficial] says lower 24 bits are index to children array.
-        # We need to fetch the specific child node.
-        # For simplicity, assume a function getChildNode exists.
-        child_node_idx = get_child_node_index(svo_nodes, current_node_idx, child_idx)
+        child_node_idx = get_child_node_index(svo_nodes, children_buffer, current_node_idx, child_idx)
         
         if child_node_idx is None:
             # Child does not exist (empty space)
-            # Backtrack
+            # Backtrack to try next sibling
             if len(stack) == 0:
-                return {"status": 0, "position": None} # Miss
-            
-            # Pop stack
+                return {"status": 0, "position": None}
             prev_state = stack.pop()
             current_node_idx = prev_state["node_idx"]
             current_pos = prev_state["pos"]
             current_scale = prev_state["scale"]
             t_entry = prev_state["t_entry"]
+            child_idx = prev_state["next_child_idx"]
             continue
-        
+            
         # 6. Descend into Child
-        # Calculate child box
         child_scale = current_scale / 2.0
         child_offset = vec3(
             (child_idx & 1) * child_scale,
             (child_idx & 2) * child_scale,
             (child_idx & 4) * child_scale
         )
-        child_pos = current_pos + child_offset - child_scale # Center of child box
+        child_pos = current_pos + child_offset - child_scale
         
-        # Intersect ray with child box
         child_box_min = child_pos - child_scale
         child_box_max = child_pos + child_scale
         t_child_entry, t_child_exit = ray_aabb(ray_origin, ray_dir, child_box_min, child_box_max)
@@ -152,7 +141,6 @@ def trace_svo_ray(ray_origin, ray_dir, svo_nodes, root_index, world_min, world_m
             
         if t_child_entry > t_child_exit:
             # Ray misses child box
-            # Backtrack
             if len(stack) == 0:
                 return {"status": 0, "position": None}
             prev_state = stack.pop()
@@ -160,6 +148,7 @@ def trace_svo_ray(ray_origin, ray_dir, svo_nodes, root_index, world_min, world_m
             current_pos = prev_state["pos"]
             current_scale = prev_state["scale"]
             t_entry = prev_state["t_entry"]
+            child_idx = prev_state["next_child_idx"]
             continue
             
         # Push current state to stack for potential backtracking
@@ -167,7 +156,8 @@ def trace_svo_ray(ray_origin, ray_dir, svo_nodes, root_index, world_min, world_m
             "node_idx": current_node_idx,
             "pos": current_pos,
             "scale": current_scale,
-            "t_entry": t_entry
+            "t_entry": t_entry,
+            "next_child_idx": child_idx + 1
         })
         
         # Update current state
@@ -176,7 +166,7 @@ def trace_svo_ray(ray_origin, ray_dir, svo_nodes, root_index, world_min, world_m
         current_scale = child_scale
         t_entry = t_child_entry
 
-    return {"status": 0, "position": None} # Max steps reached
+    return {"status": 0, "position": None}
 
 def ray_aabb(ro, rd, box_min, box_max):
     inv_rd = 1.0 / rd
@@ -187,13 +177,24 @@ def ray_aabb(ro, rd, box_min, box_max):
     return t_near, t_far
 
 def compute_normal(hit_pos, node_pos, node_scale, child_idx):
-    # Determine which face was hit
-    center = node_pos # Or center of the specific voxel
-    # Simplified: check which component of (hit_pos - center) is max relative to half-size
     half_size = node_scale / 2.0
-    diff = hit_pos - center
-    # ... logic to find max component and sign
-    return vec3(0.0, 0.0, 0.0) # Placeholder for specific face logic
+    diff = hit_pos - node_pos
+    # Determine which face was hit by comparing normalized distances to half-size
+    nx = abs(diff.x / half_size)
+    ny = abs(diff.y / half_size)
+    nz = abs(diff.z / half_size)
+    max_comp = max(nx, max(ny, nz))
+    normal = vec3(0.0, 0.0, 0.0)
+    if max_comp == nx: normal.x = 1.0 if diff.x > 0.0 else -1.0
+    elif max_comp == ny: normal.y = 1.0 if diff.y > 0.0 else -1.0
+    else: normal.z = 1.0 if diff.z > 0.0 else -1.0
+    return normal
+
+def get_child_node_index(svo_nodes, children_buffer, parent_idx, child_idx):
+    # Extract child pointer from parent node descriptor or children buffer
+    # Assuming flat array layout where children are stored sequentially
+    child_ptr = children_buffer[parent_idx * 8 + child_idx]
+    return child_ptr if child_ptr != 0xFFFFFFFF else None
 ```
 
 **Edge Cases and Pitfalls:**
@@ -216,8 +217,8 @@ Uses precomputed "bricks" to skip empty/uniform regions, reducing memory accesse
 
 ## Operating characteristics
 *   **Time Complexity:** $O(\log N)$ on average for sparse scenes, where $N$ is the number of voxels, as it skips empty space. Worst case is $O(D)$ where $D$ is the depth of the tree [S1, S3, unofficial].
-*   **Memory Complexity:** $O(N)$ for storing the SVO structure, where $N$ is the number of nodes. The stack size is constant $O(D)$ [S2, unofficial].
-*   **Performance:** Real-time capable on GPU due to single draw call and no mesh generation [S6, unofficial]. Performance scales with scene density; sparse scenes benefit significantly from space skipping [S1, unofficial].
+*   **Memory Complexity:** $O(N)$ for storing the SVO structure, where $N$ is the number of nodes. The stack size is fixed [S2, unofficial].
+*   **Performance:** Real-time capable on GPU due to single draw call and no mesh generation [S6, unofficial].
 *   **Strengths:** No mesh generation overhead, single draw call, efficient handling of large sparse volumes [S6, unofficial].
 *   **Limitations:** High memory usage for dense scenes, potential for precision issues near boundaries [S6, S5, unofficial].
 

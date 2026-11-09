@@ -2,7 +2,7 @@
 
 
 ## Overview
-Shadow Ray Casting evaluates visibility from a light source to a point in a volume by integrating extinction along a ray, solving the problem of accurate volumetric shadowing where standard surface techniques fail due to participating media. It differs from [Two-Pass Shadow Casting (Kajiya and Von Herzen)](2196-two-pass-shadow-casting-kajiya-and-von-herzen.md) by computing shadows locally per-shading-point rather than via a global pre-pass, and from [Shadow Mapping](2934-shadow-mapping.md) by integrating physical transmittance rather than comparing discrete depth buffers.
+Shadow Ray Casting evaluates visibility or illumination at a specific point $\mathbf{p}$ within or on the boundary of a volume by casting rays toward light sources or environment directions to determine occlusion and transmittance [G]. It solves the problem of accurate shadowing and ambient occlusion in participating media by integrating the extinction coefficient $\sigma_t$ along the path from the source to $\mathbf{p}$, distinguishing itself from screen-space approximations by relying on direct geometric sampling of the volume density field [S1, unofficial]. Unlike [Two-Pass Shadow Casting (Kajiya and Von Herzen)](2196-two-pass-shadow-casting-kajiya-and-von-herzen.md) which uses a separate shadow pass, or [Lookup Table Shadow Rendering](3588-lookup-table-shadow-rendering.md) which relies on precomputed indices, this family directly samples the volume along the ray path during rendering [S1, unofficial].
 
 ## Shared principles
 All methods in this family share the core mechanism of evaluating visibility or illumination at a specific point $\mathbf{p}$ within or on the boundary of a volume, based on a light source direction $\mathbf{l}$ or environment [G].
@@ -22,56 +22,47 @@ All methods in this family share the core mechanism of evaluating visibility or 
 ## Subtopics
 
 ### [Ambient Occlusion via Shadow Rays](878-ambient-occlusion-via-shadow-rays.md)
-Approximates lack of secondary light by evaluating geometric obscurance via hemisphere sampling, offering a balance between physical accuracy and speed.
+Approximates the lack of secondary (reflected) light rays by evaluating the geometric obscurance of a point $\mathbf{p}$ within or on the boundary of a volume. It solves the problem of flat, unshaded volume appearances by darkening crevices and areas shielded from the environment, providing a view-independent shading term that can be combined with arbitrary direct illumination. Unlike [Variance Shadow Mapping for NeRFs](3561-variance-shadow-mapping-for-nerfs.md) which uses probabilistic depth buffers, or [Lookup Table Shadow Rendering](3588-lookup-table-shadow-rendering.md) which relies on precomputed spatial indices, this method directly samples the hemisphere around $\mathbf{p}$ using shadow rays to determine visibility, offering a balance between the physical accuracy of [Recursive Ray Tracing](5600-recursive-ray-tracing.md) and the speed of screen-space approximations.
 
 ### [Direct Illumination with Shadow Rays](2011-direct-illumination-with-shadow-rays.md)
-Computes direct lighting by integrating extinction to light sources, differing from path tracing by avoiding recursive bounces.
+Computes the direct lighting contribution at a surface point $\mathbf{p}$ by evaluating visibility to light sources through participating media. It differs from standard surface shadowing by integrating the extinction coefficient $\sigma_t$ along the path to the light to calculate volumetric transmittance, and from path tracing by evaluating illumination locally without recursive bounces. It builds on [Local illumination, shadows and ambient occlusion](34-local-illumination-shadows-and-ambient-occlusion.md).
 
 ### [Lookup Table Shadow Rendering](3588-lookup-table-shadow-rendering.md)
-A fast, one-pass technique in VolPack that precomputes visibility into tables, avoiding per-ray integration costs.
+A fast, one-pass shadowing technique implemented within the VolPack volume rendering library. It solves the problem of computing shadows for participating media by precomputing visibility information into lookup tables, avoiding the per-ray integration costs of standard shadow casting. Unlike [Shadow Ray Casting](2796-shadow-ray-casting.md), which evaluates transmittance along rays during rendering, this method accelerates shadow determination by mapping density or depth values to pre-calculated shadow factors.
 
 ### [Soft Shadows via Ray Tracing](5136-soft-shadows-via-ray-tracing.md)
-Computes soft shadows by generating coherent packets of secondary rays toward area lights, leveraging coherence for performance.
+Computes soft shadows in participating media by generating coherent packets of secondary rays from primary ray hit points toward an area light source. It distinguishes itself from hard shadow techniques by sampling a spatial distribution of directions to approximate the penumbra, leveraging the coherence of these secondary rays to maintain interactive performance.
 
 ### [Recursive Ray Tracing](5600-recursive-ray-tracing.md)
-Extends basic casting to handle reflection/refraction via physical laws, distinguishing itself by modeling surface interactions beyond simple shadow tests.
+Extends basic ray casting by handling diffuse reflection, specular reflection, and transmission (refraction) through the recursive tracing of rays upon intersection with objects. It solves the problem of local illumination and shadowing in participating media by evaluating visibility to light sources and simulating surface interactions that influence the final pixel color. It is distinguished from its sibling [Shadow Ray Casting](2796-shadow-ray-casting.md) by explicitly modeling reflection and refraction via physical laws (Snell's law, Fresnel equation) rather than relying solely on shadow tests and ambient approximations.
 
 ### [Soft Shadows via Area Lights](7320-soft-shadows-via-area-lights.md)
-Computes soft shadows by sampling light source geometry for natural penumbra, distinguished by direct area integration.
-
-### [Shadow Mapping](10992-shadow-mapping.md)
-Evaluates visibility via depth texture comparison, solving occlusion without expensive ray-marching transmittance calculations.
+Computes soft shadows by modeling light sources with spatial extent, allowing points in space to be partially occluded rather than fully lit or fully in shade. Unlike point source approximations which cast sharp shadows, this approach samples the light source area to generate natural penumbra effects. It is distinguished from sibling methods like [Variance Shadow Mapping for NeRFs](3561-variance-shadow-mapping-for-nerfs.md) by its direct sampling of the light geometry rather than statistical variance estimation, and from [Soft Shadows via Ray Tracing](5136-soft-shadows-via-ray-tracing.md) by its specific focus on area light integration within the volume ray marching context.
 
 ### Thin-Walled Glass with Airy Film
-- [S1, unofficial] A rendering mode for thin-walled glass (window panes, bulbs, soap bubbles) that skips refraction offset and interior medium, using an optional Airy film as the wall itself.
-- [S1, unofficial] Skip refraction offset and interior medium calculation.
-- [S1, unofficial] Pass shadow rays through with colored transmittance.
-- [S1, unofficial] Use the straight-through BSDF event to keep the previous vertex's MIS state, preventing double counting with other strategies.
-- [S1, unofficial] Must ensure MIS consistency between the straight-through BSDF and other sampling strategies to avoid double counting.
+- **Definition:** A rendering mode for thin-walled glass (window panes, bulbs, soap bubbles) that skips refraction offset and interior medium, using an optional Airy film as the wall itself [S1, unofficial].
+- **Step:** Skip refraction offset and interior medium calculation [S1, unofficial]. Pass shadow rays through with colored transmittance [S1, unofficial]. Use the straight-through BSDF event to keep the previous vertex's MIS state, preventing double counting with other strategies [S1, unofficial].
+- **Pitfall:** Must ensure MIS consistency between the straight-through BSDF and other sampling strategies to avoid double counting [S1, unofficial].
 
 ### Shadow Ray Marching
-- [S2, unofficial] Calculates sunlight contribution by casting a shadow ray from the surface towards the sun. If the shadow ray hits an object, the point is in shadow.
-- [S2, unofficial] If SUN_ENABLED, calculate sunDir from sceneData. Calculate nDotL = max(dot(normal, sunDir), 0.0). If nDotL > 0, create shadowOrigin = position + normal * 0.001. March shadow ray using March(shadowOrigin, sunDir, 64).
-- [S2, unofficial] If shadowRay.status != 2 (no hit), sunContribution = SUN_COLOR * nDotL * sceneData.sunIntensity.
+- **Definition:** Calculates sunlight contribution by casting a shadow ray from the surface towards the sun. If the shadow ray hits an object, the point is in shadow [S2, unofficial].
+- **Step:** If SUN_ENABLED, calculate sunDir from sceneData. Calculate nDotL = max(dot(normal, sunDir), 0.0). If nDotL > 0, create shadowOrigin = position + normal * 0.001. March shadow ray using March(shadowOrigin, sunDir, 64) [S2, unofficial]. If shadowRay.status != 2 (no hit), sunContribution = SUN_COLOR * nDotL * sceneData.sunIntensity [S2, unofficial].
 
 ### Mean Intensity Projection
-- [S3, unofficial] A variation of ray casting that projects the mean intensity along the ray.
-- [S3, unofficial] The output C(R) is determined by the mean scalar value B along the ray: $C(R) = B$.
+- **Definition:** A variation of ray casting that projects the mean intensity along the ray [S3, unofficial].
+- **Formula:** The output $C(R)$ is determined by the mean scalar value $B$ along the ray: $C(R) = B$ [S3, unofficial].
 
 ### Halfway Vector Slicing for Shadows
-- [S4] A shadow computation method that modifies the slice axis to be the direction halfway between the view and light directions, allowing the same slice to be rendered from both eye and light points of view.
-- [S4] 1. Calculate the dot product of light and view directions.
-2. If dot product > 0: Slice along vector halfway between light and view directions. Render front-to-back relative to observer.
-3. If dot product < 0: Slice along vector halfway between light and inverted view directions. Render back-to-front relative to observer.
-4. In both cases, render front-to-back relative to the light.
-- [S4] Slice spacing maintenance: Care must be taken to maintain slice spacing along view and light directions when light or eye positions change.
-- [S4] Differs from previous hardware shadow work [2] by using an off-screen render buffer instead of a volumetric shadow map, and by modifying the slice axis to allow shared slicing.
+- **Definition:** A shadow computation method that modifies the slice axis to be the direction halfway between the view and light directions, allowing the same slice to be rendered from both eye and light points of view [S4].
+- **Step:** 1. Calculate the dot product of light and view directions. 2. If dot product > 0: Slice along vector halfway between light and view directions. Render front-to-back relative to observer. 3. If dot product < 0: Slice along vector halfway between light and inverted view directions. Render back-to-front relative to observer. 4. In both cases, render front-to-back relative to the light [S4].
+- **Pitfall:** Slice spacing maintenance: Care must be taken to maintain slice spacing along view and light directions when light or eye positions change [S4].
+- **Comparison:** Differs from previous hardware shadow work [2] by using an off-screen render buffer instead of a volumetric shadow map, and by modifying the slice axis to allow shared slicing [S4].
 
 ### Dynamic Shadow Region Approximation
-- [S5, unofficial] A technique by Fernandez et al. that subdivides the scene and keeps a list of light sources that will be fully occluded, fully visible, or partially visible to each region of space, using an approximation based on shadow rays to build the data structure at run time for dynamic scenes.
+- **Definition:** A technique by Fernandez et al. that subdivides the scene and keeps a list of light sources that will be fully occluded, fully visible, or partially visible to each region of space, using an approximation based on shadow rays to build the data structure at run time for dynamic scenes [S5, unofficial].
 
 ## Background
-Shadow ray casting in volume rendering evolved from surface-based shadowing techniques to handle participating media. Early work by Kajiya and Von Herzen introduced two-pass methods for global illumination in volumes [2196-two-pass-shadow-casting-kajiya-and-von-herzen.md]. Local shadow casting became prevalent with the rise of real-time volume rendering, where per-pixel shadow rays provided accurate attenuation without the memory overhead of global shadow maps. The technique is widely used in medical visualization, atmospheric effects, and real-time game engines (e.g., VolPack, WebGPU voxel raymarchers) where physical accuracy of light transport through fog, smoke, or tissue is required.
+Shadow ray casting in volume rendering originated from the need to accurately simulate light transport in participating media, where traditional surface-based shadowing fails to account for volumetric attenuation. The foundational work by Kajiya and Von Herzen introduced two-pass shadow casting for volumes, establishing the principle of integrating extinction along shadow paths [S1, unofficial]. Subsequent developments, such as those by Fernandez et al., focused on optimizing these calculations for dynamic scenes through spatial subdivision and shadow caching [S5, unofficial]. The technique is widely used in scientific visualization, medical imaging, and real-time graphics engines (e.g., VolPack, WebGPU voxel raymarchers) to provide realistic lighting and depth cues in volumetric datasets [S1, unofficial][S2, unofficial].
 
 ## Sources
 [S1] Add volumetric rendering, advanced materials, and imager effects, https://github.com/MihrimatriX/photon-engine/pull/3, fetched 2026-10-28 (unofficial)

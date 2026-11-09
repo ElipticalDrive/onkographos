@@ -1,0 +1,110 @@
+# Multiscale Pre-convolved Representation
+
+Also called: Environment Convolution Maps for Decomposition, Pre-convolved Background, Pre-convolved Representation
+
+## Overview
+A regularization technique for neural illumination fields that stabilizes the decomposition of object materials from environmental illumination by enforcing consistency with pre-computed, roughness-adapted background reflections [S1]. It addresses the ambiguity where diffuse object color is incorrectly absorbed into the estimated environment map, a problem inherent to high-dimensional neural illumination representations [S1]. Unlike methods that ignore the background or treat it as static, this method explicitly models the relationship between rough refractive surfaces and the convolved background, allowing for realistic specular reflections even when roughness exceeds the kernel scale [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A set of training images containing objects with varying surface roughness; a neural illumination field (NeIF) representing ambient illumination as a volumetric radiance field [S1].
+*   **Output:** A regularized illumination field and decomposed object materials (diffuse color, roughness) that are disentangled from the environment [S1].
+
+**Data Structures**
+*   **Pre-convolved Background ($S_B$):** A set of background images pre-computed by applying discrete Gaussian blur kernels to the raw background. Each image in the set corresponds to a specific roughness level [S1].
+*   **Specular Integration Kernel:** Defined by a Gaussian kernel with variance $\sigma$ and radius $r_p = 3\sigma_{r0}$, where $r_0$ is the radius of the raw pixel size [S1].
+
+**Formulas**
+The specular integration is modeled as an integral over incoming rays within a specular lobe, which is approximated as a convolution [S1]:
+$$ C(x_s, d) = \int_{\Omega} L_i(\omega) \rho_s(\omega, d) d\omega $$
+Where $C(x_s, d)$ is the convolved color, $L_i$ is incident light, and $\rho_s$ is the specular lobe [S1]. The width of the lobe is related to roughness; as roughness increases, the environment illumination is convolved with more scattered samples within a wider lobe, creating blurrier reflections [S1].
+
+The total training loss is:
+$$ l = l_{rec} + \lambda_s l_s + \lambda_p l_{pre} $$
+Where:
+*   $l_{rec}$ is the reconstruction loss [S1].
+*   $l_s$ is the smoothness regularization loss [S1].
+*   $l_{pre}$ is the pre-convolved representation regularization loss [S1].
+*   $\lambda_s = 10^{-4}$ and $\lambda_p = 10^{-1}$ are empirically set weights [S1].
+
+**Parameters**
+*   **Kernel Radius ($r_p$):** Set to $3\sigma_{r0}$ during training [S1].
+*   **Specular Tint ($\alpha$):** Set to 1 [S1].
+*   **Diffuse Color ($C_d$):** Set to $[0]^3$ (black) during the specific supervision step to isolate specular contributions [S1].
+*   **$\sigma$:** Variance of the Gaussian kernel [S1].
+*   **$r_0$:** Radius of the raw pixel size [S1].
+
+**Steps**
+1.  **Pre-compute Pre-convolved Background:** Apply a set of different discrete Gaussian blur kernels to the background of the object to obtain pre-convolved results corresponding to different levels of roughness [S1]. This creates the set $S_B$ [S1].
+2.  **Evaluate Specular Integration:** For each training view, evaluate the pixels of the background through the specular integration equation (Eq. 5 in source) using the current estimated illumination field and roughness [S1].
+3.  **Compute Regularization Loss ($l_{pre}$):** Perform the regularization in the same manner as the standard smoothness regularization (Eq. 9 in source), but replace the object pixels $S_I$ with pixels from the pre-convolved background $S_B$ [S1]. This ensures the estimated illumination matches the expected convolved background for the given roughness [S1].
+4.  **Update Network:** Minimize the total loss $l$ using gradient descent, updating the neural illumination field and material parameters [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for the Multiscale Pre-convolved Representation regularization step
+# Assumes access to:
+# - NeIF: Neural Illumination Field network
+# - MaterialNet: Network predicting material properties (roughness, etc.)
+# - S_B: Pre-computed set of pre-convolved background images for different roughness levels
+# - r0: Raw pixel radius
+# - sigma: Variance of Gaussian kernel
+# - lambda_p: Weight for pre-convolved loss (10^-1)
+
+def compute_pre_convolved_loss(NeIF, MaterialNet, S_B, r0, sigma, lambda_p):
+    """
+    Computes the regularization loss l_pre by comparing the estimated 
+    specular response against the pre-convolved background.
+    """
+    # 1. Determine kernel parameters
+    # Radius rp = 3 * sigma * r0
+    rp = 3 * sigma * r0
+    
+    # 2. Sample roughness from MaterialNet for the current view
+    # roughness is a scalar or tensor representing surface roughness
+    roughness = MaterialNet.get_roughness()
+    
+    # 3. Select or interpolate the corresponding pre-convolved background
+    # S_B contains pre-convolved images for discrete roughness levels
+    # Interpolate to find the background image matching the current roughness
+    background_image = interpolate_background(S_B, roughness)
+    
+    # 4. Evaluate the estimated illumination field at the background pixels
+    # This simulates what the NeIF would predict for the background 
+    # given the current roughness and view direction
+    estimated_specular = NeIF.evaluate_specular_integration(
+        background_image, 
+        roughness, 
+        rp
+    )
+    
+    # 5. Compute the difference between estimated specular and pre-convolved background
+    # This acts as a regularization term to ensure consistency
+    # The source states this is performed similarly to Eq. 9, replacing object pixels with background pixels
+    l_pre = mean_squared_error(estimated_specular, background_image)
+    
+    # 6. Scale by lambda_p
+    loss = lambda_p * l_pre
+    
+    return loss
+```
+
+**Edge Cases and Pitfalls**
+*   **Excessive Roughness:** If the roughness becomes extremely large and exceeds the maximum scale of the pre-convolved representation, the method still produces visually realistic outcomes, but novel views gradually become blurred [S1].
+*   **Omission:** Omitting the multiscale pre-convolved representation ("w/o Conv.") leads to incorrect roughness estimation due to lighting ambiguities, as the background guidance is necessary to disentangle material and light [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Adds computational overhead for pre-computing the background convolutions and evaluating the specular integration against the pre-convolved set during training. The source notes that Integrated Lobe Encoding (ILE) is used to reduce computational cost for the specular lobe featurization [S1].
+*   **Memory Complexity:** Requires storing the set of pre-convolved background images $S_B$, the size of which depends on the number of roughness levels sampled [S1].
+*   **Strengths:** Stabilizes convergence; prevents ambiguity between diffuse color and environment illumination; produces realistic specular reflections consistent with the object's roughness level; handles varying roughness [S1].
+*   **Limitations:** Relies on geometry reconstructed through a prior stage; difficult to model ambient illumination if the background is not adequately captured; novel views may blur if roughness exceeds the pre-convolved scale [S1].
+*   **When to use:** When decomposing materials from images containing reflective/rough surfaces and ambient illumination is a key component of the appearance [S1].
+*   **When not to use:** When the background is not available or cannot be accurately captured; when roughness varies beyond the pre-computed kernel scales and blurring is unacceptable [S1].
+
+## Background
+The concept is inspired by environment convolution maps in traditional image-based lighting, specifically the pre-filtered environment maps used in CG rendering [S1]. The seminal work by Debevec (1998) proposed omnidirectional radiance maps (environment maps) for ambient illumination [S1]. Follow-up methods used environment maps for inverse rendering problems [S1]. This method adapts the concept to neural rendering frameworks (NeIF), considering view direction and roughness adaptively, which allows for more accurate specular reflections than static environment maps [S1]. It was proposed to address the issue where high-dimensional neural illumination representations easily integrate diffuse color into environment illumination, causing ambiguous decomposition [S1].
+
+## Sources
+[S1] A Pre-convolved Representation for Plug-and-Play Neural Illumination Fields, https://doi.org/10.1609/aaai.v38i7.28618, fetched 2026-10-29

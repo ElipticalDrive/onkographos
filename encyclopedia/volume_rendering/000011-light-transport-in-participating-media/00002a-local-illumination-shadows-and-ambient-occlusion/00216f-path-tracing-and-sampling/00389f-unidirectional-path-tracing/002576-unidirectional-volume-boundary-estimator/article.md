@@ -3,106 +3,130 @@
 Also called: Main-path side-path sampling, Unidirectional estimator
 
 ## Overview
-The Unidirectional Volume Boundary Estimator is a Monte Carlo method for estimating radiance from volume boundary paths in participating media. It solves the problem of efficiently sampling paths where a scattering event occurs exactly on a volume boundary (interface) by building a main path from the camera and attaching side paths to the boundary. It sets itself apart from its sibling, the [Bidirectional Volume Boundary Estimator](4773-bidirectional-volume-boundary-estimator.md), by constructing the path unidirectionally: it samples the main path first and then the boundary vertex, whereas the bidirectional variant samples the boundary vertex first and connects it to both light and camera.
+The Unidirectional Volume Boundary Estimator is a Monte Carlo method that samples volume boundary paths by building a main path from the detector to the light, then constructing side paths from main path vertices to the volume boundary and then to the light [S1]. It solves the problem of efficiently sampling paths where a scattering event occurs exactly on a volume boundary (interface) [S1]. It sets itself apart from its sibling, the [Bidirectional Volume Boundary Estimator](4773-bidirectional-volume-boundary-estimator.md), by constructing the path unidirectionally: it samples the main path first and then the boundary vertex, whereas the bidirectional variant samples the boundary vertex first and connects it to both light and camera [S1].
 
 ## How it works
 **Inputs:**
-*   Camera position (detector) $p^D_0$.
-*   Scene geometry, including translucent objects with "null" interfaces $\partial BV$.
-*   Light sources.
-*   Medium properties (absorption, scattering coefficients, phase function).
-*   BSDF properties at surface vertices.
+*   Camera position (detector) $p^D_0$ [S1].
+*   Scene geometry, including translucent objects with "null" interfaces $\partial BV$ [S1].
+*   Light sources [S1].
+*   Medium properties (absorption, scattering coefficients, phase function) [S1].
+*   BSDF properties at surface vertices [S1].
 
 **Outputs:**
-*   An unbiased estimate of the radiance contribution from volume boundary paths, $\langle \mathbf{I}_{\text{bnd}} \rangle$.
+*   An unbiased estimate of the radiance contribution from volume boundary paths, $\langle \mathbf{I}_{\text{bnd}} \rangle$ [S1].
 
 **Data Structures:**
-*   Main path: A sequence of vertices $\vec{\mathbf{p}}^D = (p^D_0, p^D_1, \dots, p^D_N)$.
-*   Side path: A sequence of vertices $\vec{\mathbf{p}}^S_n = (p^S_{n,0}, \dots, p^S_{n,m_n})$ connecting the boundary to the light.
-*   Boundary vertex: $p^B_n \in \partial BV$.
+*   Main path: A sequence of vertices $\vec{\mathbf{p}}^D = (p^D_0, p^D_1, \dots, p^D_N)$ [S1].
+*   Side path: A sequence of vertices $\vec{\mathbf{p}}^S_n = (p^S_{n,0}, \dots, p^S_{n,m_n})$ connecting the boundary to the light [S1].
+*   Boundary vertex: $p^B_n \in \partial BV$ [S1].
 
 **Steps:**
-1.  **Build Main Path:** Construct a main path $\vec{\mathbf{p}}^D = (p^D_0, p^D_1, \dots)$ starting from the detector $p^D_0$ using standard unidirectional volume path tracing. This involves sampling medium scattering events and surface interactions (BSDF) until termination.
-2.  **Russian Roulette for Side Paths:** For each vertex $p^D_n$ in the main path, stochastically decide whether to generate a side path. This decision is based on the current throughput of the main path to avoid high computational overhead when the main path is long. If the decision is to skip, proceed to the next vertex.
-3.  **Sample Direction:** If a side path is to be generated, draw a direction $\omega_n$ from the BSDF or phase function evaluated at $p^D_n$.
-4.  **Find Boundary Vertex:** Trace a ray from $p^D_n$ in direction $\omega_n$. Find the intersection point $p^B_n$ with all "null" interfaces $\partial BV$ of translucent objects. This point $p^B_n$ represents a volume scattering event happening exactly on the boundary.
-5.  **Connect to Light:** Construct a subpath from $p^B_n$ to a light source. This subpath is denoted as $(p^S_{n,0}, \dots, p^S_{n,m_n})$ where $m_n \ge 0$. This step typically involves Next-Event Estimation (NEE) or further path tracing to connect to the light.
-6.  **Form Volume Boundary Path:** The complete volume boundary path is $\vec{\mathbf{p}} = (p^S_{n,m_n}, \dots, p^S_{n,0}, p^B_n, p^D_n, \dots, p^D_0)$.
-7.  **Estimate Contribution:** Compute the contribution of this path using the estimator formula.
+1.  **Build Main Path:** Construct a main path $\vec{\mathbf{p}}^D = (p^D_0, p^D_1, \dots)$ starting from the detector $p^D_0$ using standard unidirectional volume path tracing [S1].
+2.  **Russian Roulette for Side Paths:** For each vertex $p^D_n$ in the main path, stochastically decide whether to generate a side path using Russian roulette based on throughput [S1].
+3.  **Sample Direction:** If generating a side path, draw a direction $\omega_n$ based on the BSDF or phase function at $p^D_n$ [S1].
+4.  **Find Boundary Vertex:** Trace a ray from $p^D_n$ in direction $\omega_n$ and find the intersection $p^B_n$ with all "null" interfaces $\partial BV$ [S1].
+5.  **Connect to Light:** Connect $p^B_n$ to a light source via a subpath $(p^S_{n,0}, \dots, p^S_{n,m_n})$ where $m_n \ge 0$ [S1].
+6.  **Form Volume Boundary Path:** Form the volume boundary path $(p^S_{n,m_n}, \dots, p^S_{n,0}, p^B_n, p^D_n, \dots, p^D_0)$ where $p^B_n$ corresponds to a volume scattering event happening exactly on the boundary [S1].
 
 **Formula:**
 The single-sample Monte Carlo estimator for the radiance contribution is:
 $$
-\langle \mathbf{I}_{\text{bnd}} \rangle = \frac{f(\vec{\mathbf{p}}) \nu_{\perp}(p^B_n)}{\text{pdf}(\vec{\mathbf{p}})}
+\langle \mathbf{I}_{\text{bnd}} \rangle = \frac{f(\vec{\mathbf{p}}) \nu_{\perp}(\mathbf{p}_K)}{\text{pdf}(\vec{\mathbf{p}})}
 $$
 where:
-*   $f(\vec{\mathbf{p}})$ is the path contribution (product of BSDFs, phase functions, transmittances, and light emission).
-*   $\nu_{\perp}(p^B_n)$ is the perpendicular velocity (or geometric term) at the boundary vertex $p^B_n$. In the context of boundary sampling, this accounts for the Jacobian of the transformation from direction to boundary intersection.
-*   $\text{pdf}(\vec{\mathbf{p}})$ is the joint probability density of sampling the entire path $\vec{\mathbf{p}}$, including the main path, the direction $\omega_n$, the boundary intersection, and the side path to the light.
+*   $f(\vec{\mathbf{p}})$ is the path contribution (product of BSDFs, phase functions, transmittances, and light emission) [S1].
+*   $\nu_{\perp}(\mathbf{p}_K)$ is the perpendicular velocity at the boundary vertex $\mathbf{p}_K$ (equivalent to $p^B_n$) [S1].
+*   $\text{pdf}(\vec{\mathbf{p}})$ is the joint probability density of sampling the entire path $\vec{\mathbf{p}}$, including the main path, the direction $\omega_n$, the boundary intersection, and the side path to the light [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def unidirectional_volume_boundary_estimator(camera_pos, scene, light_sources):
-    # 1. Build main path from detector
-    main_path = build_unidirectional_volume_path(camera_pos, scene)
-    
+def unidirectional_volume_boundary_estimator(camera_pos, scene, light_sources, max_depth=10):
+    # 1. Build main path from detector using unidirectional volume path tracing [S1]
+    main_path = [camera_pos]
+    throughput = 1.0
+    current_pos = camera_pos
+    for _ in range(max_depth):
+        # Sample next medium scattering or surface interaction [G]
+        hit, next_pos, weight, pdf = sample_medium_or_surface(current_pos, scene)
+        if not hit:
+            break
+        main_path.append(next_pos)
+        throughput *= weight
+        current_pos = next_pos
+        # Terminate main path via Russian roulette [G]
+        if random.random() > throughput:
+            break
+
     total_estimate = 0.0
-    
+
     for n, p_D_n in enumerate(main_path):
-        # 2. Russian roulette to decide if we generate a side path
-        # throughput is the product of all weights along the main path so far
-        throughput = compute_throughput(main_path, n)
-        if russian_roulette(throughput) == False:
+        # 2. Stochastically decide whether to generate a side path based on throughput [S1]
+        if random.random() > throughput:
             continue
-            
-        # 3. Sample direction from BSDF or phase function at p_D_n
-        omega_n = sample_direction(p_D_n, scene)
-        
-        # 4. Trace ray to find boundary intersection p_B_n
-        ray = Ray(origin=p_D_n, direction=omega_n)
-        p_B_n = find_intersection_with_null_interfaces(ray, scene)
-        
+
+        # 3. Draw a direction omega_n based on the BSDF or phase function at p_D_n [S1]
+        omega_n = sample_bsdf_or_phase(p_D_n, scene)
+
+        # 4. Trace a ray from p_D_n in direction omega_n and find intersection p_B_n [S1]
+        p_B_n = trace_ray(p_D_n, omega_n, scene, interface="null")
+
         if p_B_n is None:
             continue
-            
-        # 5. Connect p_B_n to a light source via a subpath
-        # This subpath is (p^S_{n,0}, ..., p^S_{n,m_n})
-        side_path = connect_to_light(p_B_n, light_sources, scene)
-        
+
+        # 5. Connect p_B_n to a light source via a subpath (p^S_{n,0}, ..., p^S_{n,m_n}) where m_n >= 0 [S1]
+        side_path = build_light_subpath(p_B_n, light_sources, scene)
+
         if side_path is None:
             continue
-            
-        # 6. Form the full volume boundary path
-        # Path: side_path_reversed + [p_B_n] + main_path_prefix
+
+        # 6. Form the volume boundary path (p^S_{n,m_n}, ..., p^S_{n,0}, p^B_n, p^D_n, ..., p^D_0) [S1]
         full_path = side_path[::-1] + [p_B_n] + main_path[:n+1]
-        
-        # 7. Compute estimator value
-        # f(p) is the path contribution
+
+        # 7. Compute contribution using the estimator formula [S1]
         f_p = compute_path_contribution(full_path, scene)
-        
-        # nu_perp is the perpendicular velocity at the boundary
         nu_perp = compute_perpendicular_velocity(p_B_n, omega_n)
-        
-        # pdf(p) is the probability density of the full path
         pdf_p = compute_path_pdf(full_path, scene)
-        
+
         if pdf_p > 0:
-            estimate = (f_p * nu_perp) / pdf_p
-            total_estimate += estimate
-            
+            total_estimate += (f_p * nu_perp) / pdf_p
+
     return total_estimate
+
+# Standard graphics operations [G]
+def sample_medium_or_surface(pos, scene):
+    # Returns (hit, next_pos, weight, pdf) for medium/surface sampling
+    pass
+def sample_bsdf_or_phase(pos, scene):
+    # Returns direction sampled from BSDF or phase function
+    pass
+def trace_ray(origin, direction, scene, interface):
+    # Returns intersection point with specified interface type
+    pass
+def build_light_subpath(pos, lights, scene):
+    # Returns list of vertices connecting pos to a light source
+    pass
+def compute_path_contribution(path, scene):
+    # Returns product of BSDFs, phase functions, transmittances, and light emission
+    pass
+def compute_perpendicular_velocity(point, direction):
+    # Returns geometric term (e.g., cosine or Jacobian) at boundary
+    pass
+def compute_path_pdf(path, scene):
+    # Returns joint probability density of sampling the entire path
+    pass
 ```
 
 **Parameters:**
-*   Russian roulette threshold: Not given in the sources. Typically based on throughput magnitude.
-*   Maximum path depth: Not given in the sources.
+*   Russian roulette threshold: Not given in the sources. Typically based on throughput magnitude [G].
+*   Maximum path depth: Not given in the sources [G].
 
 **Edge Cases and Pitfalls:**
-*   **No Boundary Intersection:** If the ray from $p^D_n$ does not intersect any null interface $\partial BV$, the side path generation is skipped.
-*   **Multiple Intersections:** The ray may intersect multiple null interfaces. The source specifies finding the intersection $p^B_n$ with "all" null interfaces, but typically the closest one is used for the primary contribution, or all are sampled if the method supports it. The source does not specify handling of multiple intersections explicitly.
-*   **PDF Calculation:** The PDF must account for the probability of choosing the main path vertex $p^D_n$, the direction $\omega_n$, the boundary intersection, and the side path. Misestimating this PDF leads to biased results.
+*   **No Boundary Intersection:** If the ray from $p^D_n$ does not intersect any null interface $\partial BV$, the side path generation is skipped [S1].
+*   **Multiple Intersections:** The ray may intersect multiple null interfaces. The source specifies finding the intersection $p^B_n$ with "all" null interfaces, but typically the closest one is used for the primary contribution, or all are sampled if the method supports it. The source does not specify handling of multiple intersections explicitly [S1].
+*   **PDF Calculation:** The PDF must account for the probability of choosing the main path vertex $p^D_n$, the direction $\omega_n$, the boundary intersection, and the side path. Misestimating this PDF leads to biased results [S1].
 
 ## Subtopics
 
@@ -110,15 +134,15 @@ def unidirectional_volume_boundary_estimator(camera_pos, scene, light_sources):
 Samples the boundary vertex first, then connects to light and camera. Chosen when the boundary is hard to reach from the camera or when light sources are complex.
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the length of the main path and the cost of finding boundary intersections and connecting to lights. Russian roulette helps mitigate the cost for long main paths.
-*   **Memory Complexity:** Linear in the length of the main path and side paths.
-*   **Strengths:** Efficiently samples volume boundary paths by leveraging the main path structure. Can handle complex media and anisotropic scattering.
-*   **Limitations:** May be inefficient if the boundary is rarely hit by rays from the main path vertices. Russian roulette introduces variance if not tuned properly.
-*   **When to use:** When volume boundary effects are significant and the camera has a good view of the boundary.
-*   **When not to use:** When the boundary is occluded or hard to reach from the camera.
+*   **Time Complexity:** Not given in the sources. Depends on the length of the main path and the cost of finding boundary intersections and connecting to lights [G].
+*   **Memory Complexity:** Not given in the sources. Linear in the length of the main path and side paths [G].
+*   **Strengths:** Efficiently samples volume boundary paths by leveraging the main path structure. Can handle complex media and anisotropic scattering [S1].
+*   **Limitations:** May be inefficient if the boundary is rarely hit by rays from the main path vertices. Russian roulette introduces variance if not tuned properly [G].
+*   **When to use:** When volume boundary effects are significant and the camera has a good view of the boundary [G].
+*   **When not to use:** When the boundary is occluded or hard to reach from the camera [G].
 
 ## Background
-The Unidirectional Volume Boundary Estimator was introduced in the paper "Efficient Path-Space Differentiable Volume Rendering With Respect To Shapes" by Zhang et al. [S1]. It is part of a framework that supports the full radiative transfer model, including multiple scattering, anisotropic phase functions, and heterogeneity. The method is designed to be combined with a bidirectional estimator using Multiple Importance Sampling (MIS) for robust rendering.
+The Unidirectional Volume Boundary Estimator was introduced in the paper "Efficient Path-Space Differentiable Volume Rendering With Respect To Shapes" by Zhang et al. [S1]. It is part of a framework that supports the full radiative transfer model, including multiple scattering, anisotropic phase functions, and heterogeneity [S1]. The method is designed to be combined with a bidirectional estimator using Multiple Importance Sampling (MIS) for robust rendering [S1].
 
 ## Sources
 [S1] Efficient Path-Space Differentiable Volume Rendering With Respect To Shapes, https://www.shuangz.com/projects/psdr-vol2-egsr23/psdr-vol2-egsr23.pdf, fetched 2026-10-27

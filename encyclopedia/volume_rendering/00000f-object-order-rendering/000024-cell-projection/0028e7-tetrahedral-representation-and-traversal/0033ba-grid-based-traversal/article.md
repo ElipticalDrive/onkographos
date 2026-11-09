@@ -3,61 +3,116 @@
 Also called: Hierarchical grid traversal for irregular volumes, Parker's brute-force approach, Parker's method
 
 ## Overview
-Grid-based Traversal is a ray-tracing method for rendering irregular volume data (tetrahedral meshes) at interactive rates by partitioning the volume into a hierarchical grid structure to quickly determine candidate tetrahedra [S1][S2, unofficial]. It sets itself apart from its siblings by avoiding explicit connectivity information, instead relying on spatial hashing into a rectilinear grid to cull non-intersecting cells using min/max value bounds [S1][S2, unofficial].
+Grid-based Traversal is a method for rendering irregular volume data (tetrahedral meshes) at interactive rates by partitioning the volume into a hierarchical grid structure to quickly determine candidate tetrahedra [S1][S2, unofficial]. It sets itself apart from sibling methods like [Projected Tetrahedra](877-projected-tetrahedra.md) by avoiding explicit connectivity information and instead relying on spatial hashing via a rectilinear grid to filter tetrahedra [S1]. Unlike [Plücker Space Traversal](4396-tetrahedral-representation-and-traversal.md#subtopics), which uses geometric tests for unstructured data, this method uses a brute-force check of all tetrahedra attached to a grid cell [S1].
 
 ## How it works
-**Inputs:** A tetrahedral mesh representing the volume; a hierarchical rectilinear grid structure; ray origins and directions for each pixel.
-**Outputs:** A 2D image with iso-surface values or scalar attributes interpolated at intersection points.
+**Inputs:** A tetrahedral mesh representing the volume; a hierarchical rectilinear grid structure; ray origin $O$ and direction $D$.
+**Outputs:** Composited color and opacity for each pixel.
 
 **Data Structures:**
-1.  **Hierarchical Rectilinear Grid:** A multi-level grid (e.g., three layers) partitioning 3D space [S1][S2, unofficial].
-2.  **Grid Cell:** Contains:
+1.  **Hierarchical Grid:** A multi-level grid (e.g., three layers) covering the volume bounding box. Each grid cell stores:
     *   `min_val`: Minimum scalar value of all tetrahedra attached to this cell.
     *   `max_val`: Maximum scalar value of all tetrahedra attached to this cell.
-    *   `tetrahedra`: A list of references to all tetrahedra intersecting this cell [S1][S2, unofficial].
+    *   `tet_list`: A list of indices to tetrahedra that intersect this cell.
+2.  **Tetrahedron:** Defined by 4 vertices and their scalar values.
 
 **Steps:**
 1.  **Grid Construction:**
-    *   Partition the volume bounding box into a hierarchical rectilinear grid [S1][S2, unofficial].
-    *   For each tetrahedron in the mesh, determine which grid cells it intersects [S1].
-    *   Attach the tetrahedron to the list of all intersecting grid cells [S1][S2, unofficial].
-    *   For each grid cell, compute and store the minimum (`min_val`) and maximum (`max_val`) scalar values of all attached tetrahedra [S1][S2, unofficial].
-
-2.  **Ray Traversal and Culling:**
-    *   For each ray, traverse the hierarchical grid [S1][S2, unofficial].
-    *   For each visited grid cell, check if the target iso-value $I$ lies within the cell's bounds:
-        $$ \text{min\_val} \le I \le \text{max\_val} $$
-    *   If the condition fails, cull the cell and all its attached tetrahedra [S1][S2, unofficial].
-    *   If the condition passes, iterate through all tetrahedra attached to the cell [S1].
-
+    *   Initialize the hierarchical grid.
+    *   For each tetrahedron in the mesh, determine which grid cells it intersects.
+    *   Attach the tetrahedron to all intersecting grid leaf cells [S1][S2, unofficial].
+    *   Compute and store the minimum and maximum scalar values of the attached tetrahedra for each cell [S1][S2, unofficial].
+2.  **Ray Traversal:**
+    *   For each pixel, cast a ray $R(t) = O + D \cdot t$.
+    *   Traverse the hierarchical grid to find the leaf cells intersected by the ray [S1][S2, unofficial].
+    *   **Culling:** At each grid cell, check if the current iso-value $I$ lies within `[min_val, max_val]`. If $I < min\_val$ or $I > max\_val$, skip all tetrahedra in this cell [S1][S2, unofficial].
 3.  **Intersection and Interpolation:**
-    *   For each candidate tetrahedron, compute the intersection of the ray with the tetrahedron's faces (triangles) [S1].
-    *   Determine the barycentric coordinates of the intersection point on the intersected face [S1].
-    *   Use the barycentric coordinates to linearly interpolate the scalar value $S$ at the intersection point from the vertex values of the tetrahedron [S1].
-    *   Compute the intersection with the iso-surface using linear interpolation of the scalar values along the ray segment within the tetrahedron [S1].
-    *   [G] If the interpolated scalar value crosses the iso-value $I$ within the tetrahedron, record the intersection point and depth.
+    *   For each remaining tetrahedron in the candidate list:
+        *   Compute the intersection of the ray with the tetrahedron faces [S1].
+        *   Determine the barycentric coordinates of the intersection point on the intersected face (triangle) [S1].
+        *   Interpolate the scalar value $s$ at the intersection point using the vertex scalar values and barycentric coordinates [S1].
+        *   Compute the intersection with the iso-surface using linear interpolation of scalar values along the ray segment inside the tetrahedron [S1].
+4.  **Compositing:**
+    *   Collect all iso-surface intersections from all candidate tetrahedra.
+    *   Sort intersections back-to-front based on distance from the ray origin [S1][S2, unofficial].
+    *   Composite using the Porter-Duff over operation [S1][S2, unofficial].
 
-4.  **Rendering:**
-    *   The iso-surface is computed on the fly during traversal, allowing dynamic changes to the iso-value [S1].
-    *   [G] Standard ray-tracing shading or coloring is applied at the intersection point.
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def grid_based_traversal(ray_origin, ray_direction, iso_value, grid, tetrahedra):
+    # 1. Traverse grid to find candidate cells
+    candidate_cells = traverse_grid(ray_origin, ray_direction, grid)
+    
+    # 2. Collect candidate tetrahedra
+    candidate_tets = []
+    for cell in candidate_cells:
+        # Culling based on min/max values
+        if iso_value < cell.min_val or iso_value > cell.max_val:
+            continue
+        
+        # Attach all tetrahedra intersecting this cell
+        for tet_idx in cell.tet_list:
+            candidate_tets.append(tetrahedra[tet_idx])
+            
+    # 3. Compute intersections
+    intersections = []
+    for tet in candidate_tets:
+        # Compute ray-tetrahedron intersection
+        hit = ray_intersect_tet(ray_origin, ray_direction, tet)
+        if hit is not None:
+            # Compute barycentric coordinates at the face intersection
+            bary = compute_barycentric_coords(hit.face_intersection, tet)
+            # Interpolate scalar value
+            scalar_val = interpolate_scalar(bary, tet.vertex_scalars)
+            # Compute iso-surface intersection along the ray segment
+            iso_hit = compute_iso_intersection(hit.entry, hit.exit, tet.vertex_scalars, iso_value)
+            if iso_hit is not None:
+                intersections.append({
+                    'distance': iso_hit.distance,
+                    'color': interpolate_color(bary, tet.vertex_colors),
+                    'opacity': compute_opacity(iso_hit, tet)
+                })
+                
+    # 4. Sort and composite
+    intersections.sort(key=lambda x: x['distance'], reverse=True)
+    result_color = (0, 0, 0)
+    result_opacity = 0
+    
+    for hit in intersections:
+        # Porter-Duff over
+        result_color = hit.color + (1 - hit.opacity) * result_color * (1 - result_opacity)
+        result_opacity = result_opacity + hit.opacity * (1 - result_opacity)
+        
+    return result_color, result_opacity
+```
 
 **Parameters:**
 *   Grid resolution: Not given in the sources.
-*   Number of grid layers: Three layers were used in the reported results [S1].
+*   Number of grid layers: Three layers were used in the demonstration [S1][S2, unofficial].
 
-**Edge Cases and Pitfalls:**
-*   **Curvilinear Volumes:** The method does not natively support curvilinear volumes. They must be decomposed into hexahedra, which are then further decomposed into five tetrahedra [S1][S2, unofficial].
-*   **Performance:** Since no connectivity information is used, all tetrahedra attached to a leaf cell must be checked, which can be inefficient if many tetrahedra overlap a single cell [S1].
+**Edge Cases:**
+*   **Curvilinear Volumes:** Not supported directly; must be decomposed into hexahedra and then into tetrahedra (e.g., 5 tetrahedra per hexahedron) [S1][S2, unofficial].
+*   **Precision:** Linear interpolation is used, which may introduce artifacts if the scalar field is not smooth [S1].
+
+## Subtopics
+
+### Plücker Space Traversal
+Uses Plücker coordinates for geometric tests on unstructured data after kd-tree initialization [S1][S2, unofficial]. Choose when higher precision or curvilinear support is needed. [Plücker Space Traversal](4396-tetrahedral-representation-and-traversal.md#subtopics)
+
+### Projected Tetrahedra
+Projects tetrahedra to screen space and sorts polygons. Choose for simpler implementation without grid overhead. [Projected Tetrahedra](877-projected-tetrahedra.md)
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of processors for parallel implementations [S1][S2, unofficial]. The per-ray cost depends on the number of tetrahedra attached to visited grid cells.
-*   **Memory Complexity:** Proportional to the number of tetrahedra and grid cells, as each tetrahedron is stored in every cell it intersects [S1][S2, unofficial].
-*   **Measured Performance:** Rendered a bioelectric field consisting of over one million tetrahedra at interactive rates using a 512x512 viewport on 16 processors or more [S1][S2, unofficial].
-*   **Strengths:** Enables interactive rendering of large irregular volume datasets on supercomputers; allows dynamic iso-value changes [S1].
-*   **Limitations:** Does not support curvilinear volumes without preprocessing; potentially high memory usage due to tetrahedron duplication across grid cells [S1][S2, unofficial].
+*   **Time Complexity:** Linear with the number of processors for parallelization [S1][S2, unofficial]. Grid traversal is logarithmic, but tetrahedron checking is linear in the number of attached tetrahedra.
+*   **Memory Complexity:** Proportional to the number of tetrahedra and grid cells. Each tetrahedron is stored in multiple grid cells if it intersects them [S1][S2, unofficial].
+*   **Performance:** Rendered over one million tetrahedra at interactive rates on a 512x512 viewport using 16 or more processors [S1][S2, unofficial].
+*   **Strengths:** Enables interactive rendering of large irregular volumes; iso-surface computed on the fly [S1][S2, unofficial].
+*   **Limitations:** No connectivity information used, leading to potential redundancy; curvilinear volumes require preprocessing [S1][S2, unofficial].
 
 ## Background
-Grid-based Traversal was introduced by Parker et al. [PPL* 99] as one of the first methods capable of rendering irregular volume data at interactive rates on a supercomputer [S1][S2, unofficial]. It was applied to bioelectric field simulations, demonstrating high-quality volume rendering of large datasets [S1]. The method scales well with the number of processors [S1][S2, unofficial].
+Originated by Parker et al. [PPL* 99] as one of the first methods to render irregular volume data at interactive rates on a supercomputer [S1][S2, unofficial]. It was demonstrated on a bioelectric field simulation with over one million tetrahedra [S1][S2, unofficial]. The method scales linearly with the number of processors [S1][S2, unofficial].
 
 ## Sources
 [S1] Interactive Volume Rendering with Ray Tracing, https://doi.org/10.2312/egst.20061055, fetched 2026-10-24

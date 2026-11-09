@@ -3,66 +3,83 @@
 Also called: Asynchronous Job Processing, Job Queue, LIFO Job Queue with Priority Handling, TaskManager for Multithreading, Worker Loop, World::WorkerLoop
 
 ## Overview
-Distributes terrain generation and meshing tasks across multiple CPU threads using a LIFO job queue with priority handling [S1, S2, unofficial]. It solves the bottleneck of synchronous chunk processing by decoupling job submission from execution, allowing the main thread to continue while workers process geometry [S1, unofficial]. Unlike [Asynchronous Chunk Loading](4216-asynchronous-chunk-loading.md) which focuses on data transfer, this method focuses on CPU-intensive computation (generation and meshing) [S1, S2, unofficial]. It builds on [Chunk Mesh Rebuild Queue](3911-chunk-mesh-rebuild-queue.md) by providing the actual parallel execution engine [S1, unofficial].
+This method distributes terrain generation and meshing tasks across multiple CPU threads using a LIFO job queue with priority handling [S1, unofficial]. It solves the problem of blocking the main thread during chunk processing by decoupling job submission from execution [S1, unofficial]. It is distinguished from [Asynchronous Chunk Loading](4216-asynchronous-chunk-loading.md) by its explicit priority-based ordering (remesh before generation) and its tight integration with the immediate meshing pipeline rather than just data loading [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- Job submission requests containing chunk position (`Int3` or `ChunkPosition`) and a generation function (`Func<Int3, Chunk>`) [S2, unofficial].
-- Remesh jobs including pointers to neighbor chunks (`left`, `right`, `front`, `back`) [S1, unofficial].
-- Configuration: `m_MaxRemeshPerFrame` (limit on remesh jobs per frame) [S1, unofficial], worker count (default `std::thread::hardware_concurrency()`, fallback 4) [S1, unofficial].
+- A job queue (`m_JobQueue`) storing `WorkerJob` structs.
+- A result queue (`m_ResultQueue`) storing `WorkerResult` structs.
+- A generation function `gen: Int3 -> Chunk` [S2, unofficial].
+- A maximum remesh limit `m_MaxRemeshPerFrame` [S1, unofficial].
 
 **Outputs:**
-- Completed `WorkerResult` containing generated chunk data (blocks, heights, tree level) or mesh data (opaque/transparent SSBOs, vertices, indices) [S1, unofficial].
-- Error states if processing fails [S2, unofficial].
+- Completed `WorkerResult` objects containing generated chunks or optimized meshes.
+- Side effects: Neighbor chunks marked as `NeedRemesh` after generation [S1, unofficial].
 
 **Data Structures:**
-- `WorkerJob`:
-  - `JobType type`: Enum indicating `GenerateJobType` or `MeshJobType` [S1, unofficial].
-  - `ChunkPosition pos`: The 3D position of the chunk [S1, unofficial].
-  - For `MeshJobType`: `std::shared_ptr<Chunk> center, left, right, front, back` [S1, unofficial].
-- `m_JobQueue`: Blocking queue for pending jobs [S1, unofficial].
-- `m_ResultQueue`: Queue for completed results [S1, unofficial].
 
-**Steps:**
-1. **Initialization:** Determine thread count. If `std::thread::hardware_concurrency()` returns 0, use 4 [S1, unofficial]. Spawn worker threads, each calling `World::WorkerLoop` [S1, unofficial].
-2. **Job Submission:**
-   - Push remesh jobs first (up to `m_MaxRemeshPerFrame`) [S1, unofficial].
-   - Push generation jobs next [S1, unofficial].
-   - LIFO order ensures generation jobs are processed before remesh jobs if the queue is full or prioritized [S1, unofficial].
-   - Generation jobs only store position [S1, unofficial].
-   - Remesh jobs store neighbor chunk pointers retrieved via lambda [S1, unofficial].
-   - Use `manager.Enqueue((chunkPos, p => new Chunk(...)))` to submit [S2, unofficial].
-3. **Worker Loop (`World::WorkerLoop`):**
-   - Run indefinitely [S1, unofficial].
-   - Pop a job from `m_JobQueue` (blocking call) [S1, unofficial].
-   - If queue is stopped and no job available, break loop [S1, unofficial].
-   - **If `GenerateJobType`:**
-     - Create `Generator` with world and chunk position [S1, unofficial].
-     - Call `generator.GenerateFromChunk()` [S1, unofficial].
-     - Move blocks, heights, and tree level from generator to `WorkerResult` [S1, unofficial].
-     - Push result to `m_ResultQueue` [S1, unofficial].
-     - Mark neighbors as `NeedRemesh` [S1, unofficial].
-   - **If `MeshJobType`:**
-     - Create `Mesh` object [S1, unofficial].
-     - Call `mesh.MeshFromChunk` with texture and pointers to center, left, right, front, back chunks [S1, unofficial].
-     - Move opaque/transparent SSBOs, vertices, and indices from mesh to `WorkerResult` [S1, unofficial].
-     - Push result to `m_ResultQueue` [S1, unofficial].
-4. **Result Retrieval:**
-   - Dequeue completed tasks using `manager.TryDequeueCompleted(out Completion r)` [S2, unofficial].
-   - Check `r.Error` for issues [S2, unofficial].
-   - Return result as `ValueTask.FromResult((chunk, mesh))` [S2, unofficial].
-5. **Cleanup:**
-   - Dispose manager asynchronously using `await manager.DisposeAsync()` to prevent leaks [S2, unofficial].
+1.  **WorkerJob**:
+    -   `JobType type`: Enum, either `GenerateJobType` or `MeshJobType` [S1, unofficial].
+    -   `ChunkPosition pos`: The 3D coordinates of the chunk [S1, unofficial].
+    -   For `MeshJobType` only:
+        -   `std::shared_ptr<Chunk> center`: The chunk being remeshed [S1, unofficial].
+        -   `std::shared_ptr<Chunk> left`: Neighbor chunk at `pos.x - 1` [S1, unofficial].
+        -   `std::shared_ptr<Chunk> right`: Neighbor chunk at `pos.x + 1` [S1, unofficial].
+        -   `std::shared_ptr<Chunk> front`: Neighbor chunk at `pos.z - 1` [S1, unofficial].
+        -   `std::shared_ptr<Chunk> back`: Neighbor chunk at `pos.z + 1` [S1, unofficial].
+
+2.  **WorkerResult**:
+    -   Contains the output data moved from the generator or mesh object (e.g., `m_Blocks`, `m_HeightTable`, `m_OpaqueSSBO`, vertices, indices) [S1, unofficial].
+
+**Parameters:**
+-   `workerCount`: Number of worker threads. Typically `std::thread::hardware_concurrency()`, with a fallback to 4 if unavailable [S1, unofficial]. Alternatively `Environment.ProcessorCount` [S2, unofficial].
+-   `m_MaxRemeshPerFrame`: Integer limit on remesh jobs pushed per frame to control CPU load [S1, unofficial].
+
+**Algorithm:**
+
+1.  **Initialization**:
+    -   Determine `workerCount` [S1, unofficial].
+    -   Spawn `workerCount` threads. Each thread executes the `World::WorkerLoop` function [S1, unofficial].
+
+2.  **Job Submission (Main Thread)**:
+    -   When a chunk needs processing, determine if it is a remesh or generation job.
+    -   **Remesh Jobs**: Create `WorkerJob` with `type = MeshJobType`. Retrieve neighbor chunk pointers (`left`, `right`, `front`, `back`) via lambda or lookup [S1, unofficial]. Push to `m_JobQueue`.
+    -   **Generation Jobs**: Create `WorkerJob` with `type = GenerateJobType` and `pos`. Do not include neighbor pointers [S1, unofficial]. Push to `m_JobQueue`.
+    -   **Priority Ordering**: Push all remesh jobs first, then generation jobs. Because the queue is LIFO (Last-In, First-Out), generation jobs are at the top and processed first [S1, unofficial].
+    -   **Frame Limit**: Limit the number of remesh jobs pushed per frame to `m_MaxRemeshPerFrame` [S1, unofficial].
+
+3.  **Worker Loop (Worker Threads)**:
+    -   Loop indefinitely.
+    -   Pop a job from `m_JobQueue`. This is a blocking call [S1, unofficial].
+    -   If the queue is stopped or empty (no job available), break the loop [S1, unofficial].
+    -   **Execute Job**:
+        -   If `type == GenerateJobType`:
+            -   Create a `Generator` instance with the world and `pos` [S1, unofficial].
+            -   Call `generator.GenerateFromChunk()` [S1, unofficial].
+            -   Move `m_Blocks`, `m_HeightTable`, and `m_TreeLevel` from the generator to `WorkerResult` [S1, unofficial].
+            -   Push `WorkerResult` to `m_ResultQueue` [S1, unofficial].
+            -   Mark neighbor chunks as `NeedRemesh` [S1, unofficial].
+        -   If `type == MeshJobType`:
+            -   Create a `Mesh` object [S1, unofficial].
+            -   Call `mesh.MeshFromChunk` passing the texture and pointers to `center`, `left`, `right`, `front`, `back` chunks [S1, unofficial].
+            -   Move opaque/transparent SSBOs, vertices, and indices from `mesh` to `WorkerResult` [S1, unofficial].
+            -   Push `WorkerResult` to `m_ResultQueue` [S1, unofficial].
+
+4.  **Result Consumption (Main Thread)**:
+    -   Dequeue completed tasks from `m_ResultQueue` using `manager.TryDequeueCompleted(out Completion r)` [S2, unofficial].
+    -   Check `r.Error` for issues [S2, unofficial].
+    -   Apply results to the scene (e.g., update chunk data, upload buffers).
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import threading
 import queue
-import time
+import math
 
-# Data structures
+# Data Structures
 class WorkerJob:
     def __init__(self, job_type, pos, center=None, left=None, right=None, front=None, back=None):
         self.type = job_type
@@ -74,126 +91,157 @@ class WorkerJob:
         self.back = back
 
 class WorkerResult:
-    def __init__(self, success, error=None, chunk=None, mesh=None, blocks=None, heights=None, tree_level=None):
-        self.success = success
-        self.error = error
-        self.chunk = chunk
-        self.mesh = mesh
+    def __init__(self, blocks=None, heights=None, tree_level=0, mesh_data=None):
         self.blocks = blocks
         self.heights = heights
         self.tree_level = tree_level
+        self.mesh_data = mesh_data
 
-class JobQueueSystem:
-    def __init__(self, max_remesh_per_frame=10):
-        self.max_remesh_per_frame = max_remesh_per_frame
-        self.job_queue = queue.Queue()
-        self.result_queue = queue.Queue()
-        self.workers = []
-        self.running = False
+class World:
+    def __init__(self):
+        self.m_JobQueue = queue.Queue()
+        self.m_ResultQueue = queue.Queue()
+        self.m_MaxRemeshPerFrame = 10 # Example value
+        self.worker_threads = []
+        self.worker_count = 0
 
-    def start(self):
+    def start_workers(self):
         # Determine thread count
-        import multiprocessing
-        num_threads = multiprocessing.cpu_count()
-        if num_threads == 0:
-            num_threads = 4
+        hw_concurrency = threading.active_count() # Placeholder for hardware_concurrency check
+        self.worker_count = max(4, hw_concurrency) # Fallback to 4
         
-        self.running = True
-        for _ in range(num_threads):
-            t = threading.Thread(target=self.worker_loop)
+        for _ in range(self.worker_count):
+            t = threading.Thread(target=self.worker_loop, daemon=True)
             t.start()
-            self.workers.append(t)
-
-    def stop(self):
-        self.running = False
-        # Clear queue to unblock workers
-        while not self.job_queue.empty():
-            try:
-                self.job_queue.get_nowait()
-            except queue.Empty:
-                break
-        for t in self.workers:
-            t.join()
-
-    def enqueue_generation(self, pos, gen_func):
-        job = WorkerJob(job_type="GenerateJobType", pos=pos)
-        self.job_queue.put(job)
-        # Note: gen_func is typically captured or looked up by pos in worker
-
-    def enqueue_remesh(self, pos, center, left, right, front, back):
-        job = WorkerJob(job_type="MeshJobType", pos=pos, center=center, left=left, right=right, front=front, back=back)
-        self.job_queue.put(job)
+            self.worker_threads.append(t)
 
     def worker_loop(self):
-        while self.running:
+        while True:
+            # Blocking pop
             try:
-                # Blocking pop
-                job = self.job_queue.get(timeout=1.0)
+                job = self.m_JobQueue.get(timeout=1.0)
             except queue.Empty:
-                continue
-
-            if not self.running:
+                # Check if queue is stopped or empty logic applies
                 break
-
-            result = None
-            if job.type == "GenerateJobType":
-                # Simulate generation
-                # In real impl: Generator generator(world, job.pos); generator.GenerateFromChunk();
-                # Move blocks, heights, tree level to result
-                result = WorkerResult(success=True, blocks=[], heights=[], tree_level=0)
-                # Mark neighbors NeedRemesh [S1, unofficial]
-            elif job.type == "MeshJobType":
-                # Simulate meshing
-                # In real impl: Mesh mesh; mesh.MeshFromChunk(...);
-                # Move SSBOs, vertices, indices to result
-                result = WorkerResult(success=True, mesh=None)
             
-            if result:
-                self.result_queue.put(result)
-
-    def get_results(self):
-        results = []
-        while not self.result_queue.empty():
-            try:
-                res = self.result_queue.get_nowait()
-                if res.error:
-                    # Handle error [S2, unofficial]
-                    pass
-                results.append(res)
-            except queue.Empty:
+            if job is None:
                 break
-        return results
 
-    def async_dispose(self):
-        # await manager.DisposeAsync() [S2, unofficial]
+            result = WorkerResult()
+
+            if job.type == "GenerateJobType":
+                # Create generator and generate
+                generator = Generator(self, job.pos)
+                generator.generate_from_chunk()
+                
+                # Move data
+                result.blocks = generator.move_blocks()
+                result.heights = generator.move_heights()
+                result.tree_level = generator.get_tree_level()
+                
+                # Mark neighbors for remesh
+                self.mark_neighbors_need_remesh(job.pos)
+
+            elif job.type == "MeshJobType":
+                # Create mesh and mesh from chunk
+                mesh = Mesh()
+                mesh.mesh_from_chunk(
+                    texture=None, # Placeholder
+                    center=job.center,
+                    left=job.left,
+                    right=job.right,
+                    front=job.front,
+                    back=job.back
+                )
+                
+                # Move mesh data
+                result.mesh_data = mesh.move_data()
+
+            # Push result
+            self.m_ResultQueue.put(result)
+            self.m_JobQueue.task_done()
+
+    def submit_jobs(self, remesh_jobs, generation_jobs):
+        # Push remesh jobs first
+        for job in remesh_jobs[:self.m_MaxRemeshPerFrame]:
+            self.m_JobQueue.put(job)
+        
+        # Push generation jobs
+        for job in generation_jobs:
+            self.m_JobQueue.put(job)
+
+    def mark_neighbors_need_remesh(self, pos):
+        # Implementation specific to marking neighbors
         pass
+
+class Generator:
+    def __init__(self, world, pos):
+        self.world = world
+        self.pos = pos
+        self.m_Blocks = []
+        self.m_HeightTable = []
+        self.m_TreeLevel = 0
+
+    def generate_from_chunk(self):
+        # Noise generation logic
+        pass
+
+    def move_blocks(self):
+        blocks = self.m_Blocks
+        self.m_Blocks = []
+        return blocks
+
+    def move_heights(self):
+        heights = self.m_HeightTable
+        self.m_HeightTable = []
+        return heights
+
+    def get_tree_level(self):
+        return self.m_TreeLevel
+
+class Mesh:
+    def __init__(self):
+        self.m_OpaqueSSBO = None
+        self.m_TransparentSSBO = None
+        self.vertices = []
+        self.indices = []
+
+    def mesh_from_chunk(self, texture, center, left, right, front, back):
+        # Meshing logic using neighbors
+        pass
+
+    def move_data(self):
+        return {
+            'opaque_ssbo': self.m_OpaqueSSBO,
+            'transparent_ssbo': self.m_TransparentSSBO,
+            'vertices': self.vertices,
+            'indices': self.indices
+        }
 ```
 
-**Parameters:**
-- `m_MaxRemeshPerFrame`: Limits remesh jobs per frame to control CPU load [S1, unofficial]. Typical value not given in sources.
-- `workerCount`: Set to `Environment.ProcessorCount` or 1 for single-threaded [S2, unofficial].
-
-**Edge Cases:**
-- Queue stopped: Worker loop breaks if no job is available and queue is stopped [S1, unofficial].
-- Error handling: Check `r.Error` after dequeue [S2, unofficial].
-- Resource leaks: Dispose manager asynchronously [S2, unofficial].
+**Edge Cases and Pitfalls:**
+-   **Precision**: Not given in the sources.
+-   **Boundaries**: Neighbor pointers (`left`, `right`, etc.) must handle boundary checks (e.g., if a chunk is at the world edge, the neighbor might be null or a default empty chunk) [S1, unofficial].
+-   **Degenerate Input**: If `gen(pos)` fails, the error handling mechanism (`r.Error` in [S2, unofficial]) should be checked by the consumer [S2, unofficial].
+-   **Queue Stopping**: The worker loop must handle the case where the queue is stopped gracefully to avoid infinite blocking [S1, unofficial].
 
 ## Subtopics
 
 ### [VoxelTerrainJob Pipeline](8732-voxelterrainjob-pipeline.md)
-A multi-phase job system for processing voxel chunks, handling mesh generation, collider creation, lighting baking, and physics assignment. It extends the basic job queue with specialized phases.
+A multi-phase, resumable job system that yields back to the main thread between phases to prevent frame drops, unlike the continuous blocking loop of the standard job queue. Choose this when frame-time stability is critical and jobs can be split into smaller phases.
 
 ## Operating characteristics
-- **Time Complexity:** O(1) for enqueue/dequeue operations. Total time depends on number of jobs and worker count.
-- **Memory Complexity:** O(N) where N is the number of pending jobs in the queue.
-- **Performance:** Parallel processing speedup depends on CPU core count and job granularity. [S1, S2, unofficial]
-- **Strengths:** Decouples generation/meshing from main thread, allows priority handling (LIFO), controls CPU load via `m_MaxRemeshPerFrame` [S1, unofficial].
-- **Limitations:** Requires careful synchronization of chunk data. Memory overhead for job structures and result queues [S1, S2, unofficial].
-- **When to use:** When terrain generation or meshing is CPU-bound and needs to be offloaded from the main thread [S1, S2, unofficial].
-- **When not to use:** For simple, fast operations where thread overhead outweighs benefits.
+-   **Time Complexity**: Job execution time depends on the complexity of generation and meshing. Queue operations are O(1) for push/pop.
+-   **Memory Complexity**: O(N) where N is the number of pending jobs. Each job holds references to chunks, which can be memory-intensive if chunks are large.
+-   **Measured Performance**: Not given in the sources.
+-   **Scaling**: Scales with `workerCount`. Limited by CPU core count and memory bandwidth.
+-   **Strengths**: Prevents main thread blocking; prioritizes remeshing to keep visible geometry updated; simple LIFO priority ensures generation jobs are processed first when mixed.
+-   **Limitations**: LIFO priority means generation jobs are processed before remesh jobs if pushed in that order (which is the intended behavior for freshness, but might starve remeshes if generation is heavy); no built-in phase yielding (unlike the VoxelTerrainJob Pipeline).
+-   **When to use**: When real-time terrain modification requires non-blocking updates and remeshing is frequent.
+-   **When not to use**: When frame-time consistency is more important than throughput and jobs can be broken into smaller phases.
 
 ## Background
-Originated in voxel engine implementations for real-time terrain generation [S1, S2, unofficial]. Developed to handle the computational cost of chunk generation and meshing in large voxel worlds [S1, S2, unofficial]. Used in projects like VoxelEngine and Voxel-Mesh-Optimization-Library [S1, S2, unofficial].
+The method originates from the VoxelEngine project by adrienlabayle [S1, unofficial] and the Voxel-Mesh-Optimization-Library by nicolas-goyon [S2, unofficial]. It is used in voxel-based game engines to manage the computational cost of terrain generation and meshing.
 
 ## Sources
 [S1] adrienlabayle/VoxelEngine, https://github.com/adrienlabayle/VoxelEngine, fetched 2026-10-27 (unofficial)

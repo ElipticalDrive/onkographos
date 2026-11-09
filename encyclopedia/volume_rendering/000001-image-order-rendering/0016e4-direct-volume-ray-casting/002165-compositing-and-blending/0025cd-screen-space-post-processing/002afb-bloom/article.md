@@ -1,9 +1,8 @@
 # Bloom
-
 Also called: Bloom Post-Processing, Cross-shaped bloom, Luminance-based bright pass, Multi-Scale Gaussian Bloom
 
 ## Overview
-Bloom is a screen-space post-processing effect that enhances the perception of brightness by isolating luminous regions via a soft threshold, blurring them across a pyramid of scales, and adding the result back to the original image [S1, S2, unofficial].
+Bloom is a screen-space post-processing effect that enhances the perception of brightness by isolating luminous regions via a soft threshold, blurring them across a pyramid of scales, and adding the result back to the original image [S1, S2, unofficial]. It differs from direct compositing methods by operating entirely in screen space on the final display image rather than during ray traversal [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
@@ -11,7 +10,7 @@ Bloom is a screen-space post-processing effect that enhances the perception of b
 - Output: An image of the same resolution with the bloom effect applied [S1, unofficial].
 
 **Data Structures:**
-- The method operates on a 2D array of color values [G].
+- The method operates on a 2D array of luminance values [G].
 
 **Steps:**
 1. **Luminance-based Bright Pass:** Identify bright parts of the image using a soft threshold [S2, unofficial]. Pixels below the threshold contribute minimally, while those above contribute proportionally to their excess brightness [S2, unofficial].
@@ -19,7 +18,7 @@ Bloom is a screen-space post-processing effect that enhances the perception of b
 3. **Accumulation:** Add the blurred result back to the original image [S1, unofficial].
 
 **Formulas:**
-Let $I(x,y)$ be the original image intensity at pixel $(x,y)$ [G].
+Let $I(x,y)$ be the original image luminance at pixel $(x,y)$ [G].
 Let $T$ be the soft threshold for the bright pass [G].
 Let $B(x,y) = \max(0, I(x,y) - T)$ be the bright pass mask [G].
 Let $G_k$ be a Gaussian kernel with scale $k$ [G].
@@ -28,9 +27,9 @@ The total bloom contribution $W(x,y)$ is the sum over all scales: $W(x,y) = \sum
 The final image is $I_{final}(x,y) = I(x,y) + W(x,y)$ [G].
 
 **Parameters:**
-- Threshold $T$: Not given in the sources.
-- Gaussian scales: Not given in the sources.
-- Number of scales: Not given in the sources.
+- Threshold $T$: Not given in the sources. [G]
+- Gaussian scales: Not given in the sources. [G]
+- Number of scales: Not given in the sources. [G]
 
 **Edge Cases and Pitfalls:**
 - Precision: High-intensity values may overflow if the addition exceeds the bit depth of the target format [G].
@@ -46,7 +45,7 @@ def apply_bloom(image, threshold, scales):
     """
     Apply bloom effect to an image.
     Args:
-        image: 2D array of pixel values (RGB).
+        image: 2D array of luminance values (floats).
         threshold: Soft threshold for bright pass.
         scales: List of Gaussian kernel standard deviations.
     Returns:
@@ -83,17 +82,9 @@ def apply_bloom(image, threshold, scales):
     return final_image
 ```
 
-## Subtopics
-
-### Cross-shaped bloom
-A variant using a cross-shaped kernel instead of a full Gaussian kernel, chosen for performance or specific artistic direction [G].
-
-### Polygonal bokeh
-A related effect where out-of-focus highlights become polygons shaped by camera blades, chosen to simulate optical diffraction patterns [S1, unofficial].
-
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
+- **Time Complexity:** Not given in the sources. [G]
+- **Memory Complexity:** Not given in the sources. [G]
 - **Strengths:** Simple to implement, effective at enhancing perceived brightness and glow [G].
 - **Limitations:** Can introduce halo artifacts if the threshold or blur radius is not chosen carefully [G].
 - **When to use:** When a glow effect is desired for bright light sources [G].

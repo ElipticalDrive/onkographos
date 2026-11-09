@@ -3,98 +3,94 @@
 Also called: Gradient-based Adaptive Sampling
 
 ## Overview
-Adaptive screen sampling is an image-order acceleration technique that varies the number of rays cast per pixel based on local color variance [S1, S2, unofficial]. It solves the problem of unnecessary computation in smooth regions by concentrating sampling effort only where high value gradients indicate significant detail or edges [S1, S2, unofficial]. Unlike sibling methods that adapt ray steps or resolution globally, this method operates strictly on the 2D image plane neighborhood to decide per-pixel sampling density [S1, S2, unofficial].
+Adaptive screen sampling is a spatially adaptive rendering technique that adjusts the number of rays cast per pixel based on the local color or intensity gradient in the image plane [S1, S2, unofficial]. It solves the problem of inefficient uniform sampling by concentrating computational effort in regions of high visual complexity (high gradients) while maintaining coarse sampling in smooth areas [S1, S2, unofficial]. Unlike hierarchical methods that use explicit data structures like quadtrees, this method operates directly on the 2D image buffer, switching to a higher sampling rate only where the color change in a small neighborhood exceeds a threshold [S1, S2, unofficial].
 
 ## How it works
 **Inputs:**
-- A low-resolution or initial pass image buffer containing color values $C(x,y)$ for each pixel $(x,y)$.
-- A threshold parameter $\tau$ for gradient magnitude (Not given in the sources).
-- A neighborhood radius $r$ defining the subset of pixels to analyze (Not given in the sources).
+*   Initial render buffer containing color/intensity values from a base sampling pass (typically 1 ray per pixel) [S1, S2, unofficial].
+*   A threshold parameter $\tau$ for gradient magnitude [G].
+*   A neighborhood size $N \times N$ (typically small, e.g., $3 \times 3$ or $5 \times 5$) [G].
 
 **Outputs:**
-- A final image with high-fidelity detail in high-gradient regions and interpolated values in low-gradient regions.
-- A mask or list of pixels requiring secondary sampling.
+*   Final image buffer with refined samples in high-gradient regions [S1, S2, unofficial].
 
 **Data Structures:**
-- `ImageBuffer`: 2D array of color values (e.g., RGB or scalar density).
-- `GradientMap`: 2D array of scalar gradient magnitudes.
-- `SampleMask`: Boolean or integer mask indicating pixels needing refinement.
+*   `ImageBuffer`: 2D array of color values $C(x,y)$ and/or intensity values $I(x,y)$ [S1, S2, unofficial].
+*   `GradientMap`: 2D array of gradient magnitudes $G(x,y)$ [G].
+*   `Mask`: 2D boolean array indicating pixels requiring refinement [G].
 
 **Steps:**
-1. **Initial Pass:** Render the scene using a base sampling rate (e.g., 1 ray per pixel) to generate the initial image buffer $I_0$.
-2. **Gradient Analysis:** For each pixel $(x,y)$, compute the gradient magnitude $G(x,y)$ based on color differences in the neighborhood defined by radius $r$.
-   $$ G(x,y) = \max_{(dx,dy) \in \mathcal{N}_r} |I_0(x+dx, y+dy) - I_0(x,y)| $$
-   Where $\mathcal{N}_r$ is the set of offsets within radius $r$.
-3. **Thresholding:** Compare $G(x,y)$ against $\tau$. If $G(x,y) > \tau$, mark pixel $(x,y)$ for refinement in `SampleMask`.
-4. **Secondary Sampling:** For all pixels marked in `SampleMask`, cast additional rays at a higher sampling rate to compute exact color values $C_{exact}(x,y)$.
-5. **Interpolation:** For pixels *not* marked in `SampleMask`, retain the initial value $I_0(x,y)$. If rays missed the surface during the initial pass (a known pitfall), interpolate missing values from neighboring valid samples [S1, S2, unofficial].
-6. **Composite:** Combine $C_{exact}$ and interpolated/initial values to form the final image.
+1.  **Initial Rendering:** Cast a base set of rays (e.g., 1 per pixel) through the volume to generate the initial image buffer [S1, S2, unofficial].
+2.  **Gradient Estimation:** Compute the gradient magnitude for each pixel in the initial buffer. For a pixel at $(x,y)$, the gradient magnitude $G(x,y)$ is calculated using the color or intensity values of the pixel and its neighbors in the neighborhood $N$ [S1, S2, unofficial].
+    $$ G(x,y) = \sqrt{ \left( \frac{\partial C}{\partial x} \right)^2 + \left( \frac{\partial C}{\partial y} \right)^2 } $$
+    where $\frac{\partial C}{\partial x}$ and $\frac{\partial C}{\partial y}$ are finite differences of the color/intensity channel [G].
+3.  **Mask Generation:** Compare $G(x,y)$ against the threshold $\tau$. If $G(x,y) > \tau$, mark the pixel for refinement [S1, S2, unofficial].
+4.  **Adaptive Refinement:** For each marked pixel, cast additional rays at a higher sampling rate to replace the interpolated or initial values with exact color values [S1, S2, unofficial].
+5.  **Handling Misses:** If rays miss the volume surface during refinement, interpolate the missing values from surrounding valid samples [S1, S2, unofficial].
+6.  **Reconstruction:** Combine the refined samples from marked pixels with the initial samples from unmarked pixels to form the final image [S2, S3].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def adaptive_screen_sampling(initial_image, threshold, radius):
+def adaptive_screen_sampling(initial_buffer, threshold, neighborhood_size):
     """
-    initial_image: 2D array of color values from first pass
-    threshold: float, gradient magnitude cutoff
-    radius: int, neighborhood size for gradient calculation
+    initial_buffer: 2D array of color/intensity values from base pass
+    threshold: float, gradient magnitude threshold
+    neighborhood_size: int, size of the neighborhood for gradient calculation
     """
-    height, width = initial_image.shape
-    gradient_map = zeros_like(initial_image)
-    refine_mask = zeros_like(initial_image, dtype=bool)
+    height, width = initial_buffer.shape
+    gradient_map = zeros((height, width))
+    mask = zeros((height, width), dtype=bool)
     
-    # Step 2: Compute gradient magnitude for each pixel
+    # Step 2: Gradient Estimation
     for y in range(height):
         for x in range(width):
-            max_diff = 0.0
-            # Check neighborhood
-            for dy in range(-radius, radius + 1):
-                for dx in range(-radius, radius + 1):
-                    ny, nx = y + dy, x + dx
-                    if 0 <= ny < height and 0 <= nx < width:
-                        diff = abs(initial_image[ny, nx] - initial_image[y, x])
-                        if diff > max_diff:
-                            max_diff = diff
-            gradient_map[y, x] = max_diff
+            # Calculate gradient magnitude using finite differences
+            # Handle boundaries by clamping or assuming zero gradient
+            dx = initial_buffer[y, min(x+1, width-1)] - initial_buffer[y, max(x-1, 0)]
+            dy = initial_buffer[min(y+1, height-1), x] - initial_buffer[max(y-1, 0), x]
+            gradient_map[y, x] = sqrt(dx**2 + dy**2)
             
-    # Step 3: Determine which pixels need refinement
-    refine_mask = gradient_map > threshold
-    
-    # Step 4: Secondary sampling for high-gradient areas
-    final_image = initial_image.copy()
+            # Step 3: Mask Generation
+            if gradient_map[y, x] > threshold:
+                mask[y, x] = True
+                
+    # Step 4 & 5: Adaptive Refinement
+    final_buffer = copy(initial_buffer)
     for y in range(height):
         for x in range(width):
-            if refine_mask[y, x]:
-                # Cast additional rays and compute exact color
-                exact_color = cast_additional_rays(x, y)
-                final_image[y, x] = exact_color
-            else:
-                # Handle potential ray misses via interpolation [G]
-                if is_missing(initial_image[y, x]):
-                    final_image[y, x] = interpolate_neighbors(x, y, initial_image)
+            if mask[y, x]:
+                # Cast additional rays at higher sampling rate
+                refined_color = cast_additional_rays(x, y, sampling_rate=4) # [G]
+                
+                # Handle misses: if refined_color is invalid, interpolate
+                if refined_color is None:
+                    refined_color = interpolate_neighbors(final_buffer, x, y)
                     
-    return final_image
+                final_buffer[y, x] = refined_color
+                
+    return final_buffer
 ```
 
 **Parameters:**
-- $\tau$: Not given in the sources.
-- $r$: Not given in the sources.
+*   $\tau$: Gradient threshold. Not given in the sources. [G]
+*   Neighborhood size: Typically small (e.g., $3 \times 3$). Not given in the sources. [G]
 
-**Edge Cases:**
-- **Ray Misses:** Rays may occasionally miss the surface during the initial pass. Missing values must be interpolated from surrounding valid samples [S1, S2, unofficial].
-- **Smooth Regions:** In areas with low gradients, interpolation is used instead of exact sampling, which may introduce artifacts if the initial pass was too coarse [S1, S2, unofficial].
+**Edge Cases and Pitfalls:**
+*   **Ray Misses:** Rays may occasionally miss the surface during refinement, requiring interpolation of missing values [S1, S2, unofficial].
+*   **Boundary Conditions:** Gradient calculation at image boundaries requires special handling (e.g., clamping, mirroring, or assuming zero gradient) [G].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N \cdot S_{base} + N_{refine} \cdot S_{high})$, where $N$ is total pixels, $S_{base}$ is base samples, $N_{refine}$ is pixels with high gradients, and $S_{high}$ is high samples.
-- **Memory Complexity:** $O(N)$ for storing the initial image, gradient map, and mask.
-- **Strengths:** Reduces computation in smooth regions; improves quality in edges.
-- **Limitations:** Requires two passes; interpolation artifacts in non-refined areas; sensitive to threshold choice.
-- **When to use:** When scene has distinct edges and smooth volumes; when computational budget is limited.
-- **When not to use:** When uniform quality is required; when noise dominates gradients.
+*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the average number of additional rays cast per pixel in high-gradient regions. In smooth regions, $M=1$; in complex regions, $M > 1$ [S1, S2, unofficial].
+*   **Memory Complexity:** $O(N)$ for storing the initial buffer, gradient map, and mask [G].
+*   **Strengths:** Simple to implement; adapts to visual complexity without complex data structures; effective for scenes with sharp edges or high-frequency details [S1, S2, unofficial].
+*   **Limitations:** Does not account for temporal coherence (if used in animation); may produce visible artifacts if the threshold is not chosen carefully; interpolation for missed rays can introduce blurring [S1, S2, unofficial].
+*   **When to use:** When rendering static scenes with varying levels of detail across the image plane and computational resources are limited [S1, S2, unofficial].
+*   **When not to use:** When temporal consistency is critical (e.g., real-time animation) or when the scene has uniform complexity [S1, S2, unofficial].
 
 ## Background
-Introduced by Marc Levoy in 1990 [Levoy-1990-HRT], this technique is well known in traditional ray tracing and direct volume rendering [S1, S2, unofficial]. It was designed to adaptively switch sampling rates based on color change in a pixel neighborhood [S1, S2, unofficial].
+Adaptive screen sampling was introduced by Levoy in 1990 [S1, S2, unofficial]. It is well known in traditional ray tracing and has been applied to volume rendering to optimize the trade-off between rendering quality and performance [S1, S2, unofficial]. The method is particularly useful in applications where rendering speed is important, and the scene contains regions of both high and low visual complexity [S1, S2, unofficial].
 
 ## Sources
 [S1] Direct Volume Rendering Techniques, https://www.scribd.com/document/853597780/VIS-Modules-06-Direct-Volume-Rendering, fetched 2026-10-25 (unofficial)

@@ -6,21 +6,20 @@ This method renders deformed volumetric data, specifically video volumes bent in
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A video volume $V$ consisting of $N$ consecutive 2D frames $I_i$. The volume is conceptually divided into bricks $B_k$.
-- Input: Rendering parameters: inner radius $r_{min}$, outer radius $r_{max}$, y-scaling factor $y_s$, and scale/offset for temporal mapping $g_{vScaleCrd}$ (vector).
-- Input: Fragment shader input `TextureCoord0` representing the physical position $(x_P, y_P, z_P)$ on the slice plane, normalized to $[-1, 1]$ or $[0, 1]$ depending on implementation.
-- Output: Texture coordinates $(x_C, y_C, t_C)$ in computation space $C$, used to sample the video volume.
+- Input: A video volume $V$ consisting of $N$ consecutive 2D frames $I_i$, conceptually divided into bricks $B_k$ for rendering [S1, unofficial].
+- Input: Rendering parameters: inner radius $r_{min}$, outer radius $r_{max}$, y-scaling factor $y_s$, and a scale/offset vector $g_{vScaleCrd}$ for temporal mapping [S1, unofficial].
+- Input: Fragment shader input `TextureCoord0` representing the physical position $(x_P, y_P, z_P)$ on the slice plane [S1, unofficial].
+- Output: Texture coordinates $(x_C, y_C, t_C)$ in computation space $C$, used to sample the video volume [S1, unofficial].
 
 **Data Structures:**
 - Video Volume $V$: Array of 2D images.
 - Parameters:
-  - $r_{min}, r_{max}$: Floats defining the radial range.
-  - $y_s$: Float scaling the vertical dimension.
-  - $g_{vScaleCrd}$: Vector $(offset, scale)$ for temporal coordinate adjustment.
+  - $r_{min}, r_{max}$: Floats defining the radial range of the horseshoe [S1, unofficial].
+  - $y_s$: Float scaling the vertical dimension [S1, unofficial].
+  - $g_{vScaleCrd}$: Vector $(\text{offset}, \text{scale})$ for temporal coordinate adjustment [S1, unofficial].
 
 **Transformation Formulas:**
 The mapping from Computation Space $C$ (where $x_C, y_C, t_C \in [0, 1]$) to Physical Space $P$ (where the slice lies) is defined by cylindrical coordinates [S1, unofficial]:
-
 $$
 \begin{aligned}
 x_P &= -r \cos(\pi t_C) \\
@@ -28,90 +27,67 @@ y_P &= y_s y_C \\
 z_P &= r \sin(\pi t_C)
 \end{aligned}
 $$
-
 where the radius $r$ varies linearly with $x_C$:
-
 $$
-r = r_{min} + \Delta r x_C
+r = r_{min} + \Delta r x_C, \quad \Delta r = r_{max} - r_{min}
 $$
-
-$$
-\Delta r = r_{max} - r_{min}
-$$
-
 The inverse mapping (Physical $P$ to Computation $C$) is required for backward mapping [S1, unofficial]:
-
-1.  Compute radius $r_p$ and angle $\theta$ from $x_P, z_P$:
-    $$
-    r_p = \sqrt{x_P^2 + z_P^2}
-    $$
-    $$
-    \theta = \operatorname{atan2}(z_P, x_P)
-    $$
-2.  Compute $x_C$:
-    $$
-    x_C = \frac{r_p - r_{min}}{r_{max} - r_{min}}
-    $$
-3.  Compute $y_C$:
-    $$
-    y_C = \frac{y_P}{y_s}
-    $$
-4.  Compute $t_C$:
-    $$
-    t_C = \frac{\theta}{\pi}
-    $$
-    *Note: The angle $\theta$ ranges from $-\pi$ to $\pi$. The formula in the source divides by $\pi$, implying a specific range handling or offset. The source code snippet shows `tmpZ = rp.y/g_PI` followed by scaling. Standard `atan2` returns $(-\pi, \pi]$. To map to $[0,1]$, an offset of $\pi$ is typically needed before division, or the source assumes a specific coordinate system orientation. The source code snippet calculates `lkup.z` using `tmpZ` and `g_vScaleCrd`, suggesting a linear transform rather than a simple clamp.*
+1. Compute radius $r_p$ and angle $\theta$ from $x_P, z_P$:
+   $$
+   r_p = \sqrt{x_P^2 + z_P^2}, \quad \theta = \operatorname{atan2}(z_P, x_P)
+   $$
+2. Compute $x_C$:
+   $$
+   x_C = \frac{r_p - r_{min}}{r_{max} - r_{min}}
+   $$
+3. Compute $y_C$:
+   $$
+   y_C = \frac{y_P}{y_s}
+   $$
+4. Compute $t_C$:
+   $$
+   t_C = \left(\frac{\theta}{\pi} - \text{offset}\right) \times \text{scale}
+   $$
+   where $\text{offset}$ and $\text{scale}$ are the components of $g_{vScaleCrd}$ [S1, unofficial]. The angle $\theta$ ranges from $(-\pi, \pi]$, and the linear transform maps this range to the desired temporal coordinate range [S1, unofficial].
 
 **Pseudocode:**
-The following HLSL-like pseudocode implements the inverse mapping within a fragment program. It assumes `In.TextureCoord0` contains physical coordinates $(x_P, y_P, z_P)$ mapped to $[-1, 1]$ range for $x$ and $z$, and $[0, 1]$ or similar for $y$, consistent with the snippet's preprocessing [S1, unofficial].
-
+The following Python-like pseudocode implements the inverse mapping within a fragment program, matching the source HLSL snippet [S1, unofficial].
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Input: txCrd = In.TextureCoord0 (float3)
-# Assumption: txCrd.x and txCrd.z are in [-1, 1] range representing P-space x and z.
-# Assumption: txCrd.y is in [0, 1] range representing P-space y (scaled by y_s later or already scaled).
-# Globals: g_fInRad (r_min), g_fOutRad (r_max), g_vScaleCrd (float2: offset, scale)
+# Inputs:
+# txCrd: float3 representing physical coordinates (x_P, y_P, z_P) on the slice plane
+# g_fInRad: float, inner radius r_min
+# g_fOutRad: float, outer radius r_max
+# g_vScaleCrd: float2, (offset, scale) for temporal mapping
+# PI: float, mathematical constant π
 
-# 1. Preprocess x coordinate to align with source snippet logic
-# Source: txCrd.x = ((txCrd.x*2.0) - 1.0f) * (-1.0f);
-# This maps [0,1] -> [-1,1] then flips sign, or [-1,1] -> [1,-1].
-# Let's assume standard [-1,1] input for x,z as per typical texture coords if not specified.
-# The snippet explicitly transforms txCrd.x.
+# 1. Preprocess x coordinate to match source coordinate system assumptions
 txCrd_x = ((txCrd.x * 2.0) - 1.0) * (-1.0)
 
 # 2. Compute radius and angle in P-space
-# rp.x = sqrt(txCrd.x^2 + txCrd.z^2)
 rp_x = sqrt(txCrd_x * txCrd_x + txCrd.z * txCrd.z)
-
-# rp.y = atan2(txCrd.z, txCrd.x)
 rp_y = atan2(txCrd.z, txCrd_x)
 
 # 3. Compute C-space coordinates
-# lkup.x = (rp.x - g_fInRad) / (g_fOutRad - g_fInRad)
 lkup_x = (rp_x - g_fInRad) / (g_fOutRad - g_fInRad)
-
-# lkup.y = txCrd.y
 lkup_y = txCrd.y
 
 # 4. Compute temporal coordinate t_C
-# tmpZ = rp.y / PI
-tmpZ = rp_y / 3.14159265358979323846
-
-# lkup.z = (tmpZ - g_vScaleCrd.x) * g_vScaleCrd.y
+tmpZ = rp_y / PI
 lkup_z = (tmpZ - g_vScaleCrd.x) * g_vScaleCrd.y
 
 # Output: lkup = (lkup_x, lkup_y, lkup_z)
 ```
 
 **Parameters:**
-- $r_{min}, r_{max}$: Not given in the sources. Typical values depend on the scene scale.
+- $r_{min}, r_{max}$: Not given in the sources.
 - $y_s$: Not given in the sources.
-- $g_{vScaleCrd}$: Not given in the sources. Typically $(0.5, 0.5/\pi)$ or similar to map $(-\pi, \pi)$ to $(0,1)$, but the source uses a generic vector.
+- $g_{vScaleCrd}$: Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-- **Gradient Transformation:** Since video volumes are typically unlit (no shading), the transformation of volume gradients for lighting calculations can be omitted [S1, unofficial]. If shading is required, the Jacobian of the transformation must be applied to gradients [G].
-- **Angle Continuity:** `atan2` has a discontinuity at the branch cut. Ensure texture coordinates wrap correctly if the horseshoe is not a full circle or if interpolation artifacts are visible.
+- **Gradient Transformation:** Since video volumes are typically unlit, the transformation of volume gradients for lighting calculations can be omitted [S1, unofficial]. If shading is required, the Jacobian of the transformation must be applied to gradients [G].
+- **Angle Continuity:** `atan2` has a discontinuity at the branch cut. Ensure texture coordinates wrap correctly if the horseshoe is not a full circle or if interpolation artifacts are visible [G].
 - **Radius Bounds:** If $r_p < r_{min}$ or $r_p > r_{max}$, $x_C$ will be outside $[0,1]$. Clamp or handle out-of-bounds sampling [G].
 
 ## Subtopics
@@ -120,13 +96,13 @@ lkup_z = (tmpZ - g_vScaleCrd.x) * g_vScaleCrd.y
 Opaque flow geometry (arrows, lines) can be added to the scene to visualize optical flow fields alongside the distorted volume [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per fragment for the coordinate transformation. The cost is dominated by the texture lookup and compositing from the parent method.
-- **Memory Complexity:** $O(1)$ additional memory for temporary variables in the shader.
-- **Strengths:** No geometric deformation overhead; compatible with standard hardware texture mapping; handles complex deformations like horseshoes easily.
-- **Limitations:** Requires inverse mapping functions (atan2, sqrt) which may be slightly more expensive than linear transforms, though negligible on modern GPUs. Not suitable for lighting without gradient transformation.
+- **Time Complexity:** $O(1)$ per fragment for the coordinate transformation. The cost is dominated by the texture lookup and compositing from the parent method [G].
+- **Memory Complexity:** $O(1)$ additional memory for temporary variables in the shader [G].
+- **Strengths:** No geometric deformation overhead; compatible with standard hardware texture mapping; handles complex deformations like horseshoes easily [S1, unofficial].
+- **Limitations:** Requires inverse mapping functions (`atan2`, `sqrt`) which may be slightly more expensive than linear transforms, though negligible on modern GPUs [G]. Not suitable for lighting without gradient transformation [S1, unofficial].
 
 ## Background
-The method was introduced by Botchen, Chen, Weiskopf, and Ertl in their work on GPU-assisted multi-field video volume visualization [S1, unofficial]. It builds on the concept of backward mapping for deformed volumes proposed by Ropinski et al. [RSSSG01], adapting it for video data rendered via texture slicing.
+The method was introduced by Botchen, Chen, Weiskopf, and Ertl in their work on GPU-assisted multi-field video volume visualization [S1, unofficial]. It builds on the concept of backward mapping for deformed volumes proposed by Ropinski et al. [RSSSG01], adapting it for video data rendered via texture slicing [S1, unofficial].
 
 ## Sources
 [S1] GPU-assisted Multi-field Video Volume Visualization, https://www.semanticscholar.org/paper/b3eb5a9069e8d00fa52149b0ff85554801f0f917, fetched 2026-11-04 (unofficial)

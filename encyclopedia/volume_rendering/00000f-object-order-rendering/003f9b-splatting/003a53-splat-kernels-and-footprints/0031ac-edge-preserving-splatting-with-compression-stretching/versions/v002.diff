@@ -1,0 +1,322 @@
+--- v001.md
++++ v002.md
+@@ -4,182 +4,181 @@
+ 
+ ## Overview
+-Edge-Preserving Splatting with Compression/Stretching is a volume rendering technique that sharpens discontinuities in low-resolution or undersampled data by applying non-linear compression and stretching functions to the standard splatting kernel [S1]. Unlike conventional splatting, which produces smooth, blurred edges, this method ensures C1 continuity (continuous first derivative) across splat boundaries, allowing for the reconstruction of sharp features such as cavity walls and small protrusions [S1]. It distinguishes itself from sibling methods by explicitly modeling edge direction and strength to drive view-dependent footprint selection, rather than relying solely on binary classification or fixed kernel shapes [S1].
++Edge-Preserving Splatting is a volume rendering technique that sharpens discontinuities in low-resolution or undersampled data by applying non-linear compression and stretching functions to standard splatting kernels [S1]. Unlike conventional splatting, which produces smooth, blurred edges, this method ensures C1 continuity (continuous first derivative) across splat boundaries while enhancing the visual definition of iso-surfaces [S1]. It distinguishes itself from sibling methods like [EWA Splatting](1069-ewa-splatting.md) by explicitly modeling edge geometry (direction and strength) to drive view-dependent footprint selection, rather than relying solely on geometric projection [S1].
+ 
+ ## How it works
+-The method modifies the spatial footprint of each splat based on the local edge characteristics of the underlying voxel data. It operates by classifying voxels as "primary" or "secondary" relative to an edge threshold and applying asymmetric compression/stretching to the kernel profile to enhance the gradient at the edge boundary.
++The method modifies the footprint function of a splat based on the local edge characteristics of the voxel. It requires precomputed edge information and uses a lookup table of pre-rendered splat footprints to achieve interactive performance.
+ 
+ ### Inputs and Outputs
+ *   **Inputs:**
+-    *   Volume data $V(x,y,z)$.
+-    *   Camera parameters (view direction, projection matrix).
+-    *   Edge threshold value $T$ (used to distinguish edge regions from interior/exterior).
+-    *   Precomputed footprint table (texture memory) containing splat profiles for various edge positions and strengths [S1].
++    *   Volume data $V$.
++    *   Iso-contour value $C$ used for edge detection.
++    *   View direction $\mathbf{v}$.
++    *   Precomputed table of splat footprints indexed by edge position and strength.
+ *   **Outputs:**
+     *   Final 2D image with enhanced edge sharpness.
+ 
+ ### Data Structures
+-1.  **Voxel Attributes:** For each voxel $k$, the following attributes are computed and stored:
+-    *   Position $\mathbf{p}_k$.
+-    *   Data value $v_k$.
+-    *   Gradient $\nabla v_k$ (computed via central differences) [S1].
+-    *   Edge direction $\mathbf{d}_k = \frac{\nabla v_k}{\|\nabla v_k\|}$ [S1].
+-    *   Contour distance $d_k$: The signed distance from the voxel center to the iso-surface defined by $T$. Calculated as $d_k = \frac{T - v_k}{\|\nabla v_k\|}$ [S1].
+-    *   Normalized edge position $x_k$: A value in $[0, 1]$ representing the relative position of the voxel within the edge transition region. This is derived from $d_k$ and the estimated edge width [S1].
+-    *   Edge strength $s_k$: Derived from the projected length of the edge direction onto the viewing plane. If the viewing direction is parallel to the edge, $s_k$ is negligible [S1].
+-    *   Classification:
+-        *   **Primary Kernel:** If $v_k > T$ (or consistently defined as the "higher" value side) [S1].
+-        *   **Secondary Kernel:** If $v_k \le T$ [S1].
++1.  **Voxel Attributes:** For each voxel $i$, store:
++    *   Value $V_i$.
++    *   Gradient $\nabla V_i = (\frac{\partial V}{\partial x}, \frac{\partial V}{\partial y}, \frac{\partial V}{\partial z})$ estimated via central differences [S1].
++    *   Edge position $p_i$: The normalized distance from the voxel center to the iso-surface along the gradient direction. Calculated as $p_i = \frac{C - V_i}{|\nabla V_i|}$, normalized to $[0, 1]$ or similar range depending on the mapping function definition [S1]. *Note: The source describes using trilinear interpolation for edge position estimation in practice [S1].*
++    *   Normalized edge direction $\mathbf{d}_i = \frac{\nabla V_i}{|\nabla V_i|}$ [S1].
++2.  **Footprint Table:** A texture or memory array storing 2D footprint functions $F_{edge\_pos, strength}(x,y)$ precomputed for various combinations of edge position and projected edge strength [S1].
+ 
+-2.  **Precomputed Footprint Table:**
+-    *   A set of 1D kernel profiles $g(x)$ indexed by edge position $x \in [0,1]$ and edge strength $s$.
+-    *   These profiles are stored in texture memory for hardware-accelerated sampling [S1].
++### Parameters
++*   **Iso-contour value $C$:** Threshold for edge detection. In the Sinus Cavity dataset, a binary threshold at 128 was used after low-pass filtering [S1]. In the Hipip dataset, thresholds at 0.0017 and 0.5 were used [S1].
++*   **Edge Strength:** Derived from the projected length of the edge direction onto the viewing plane.
++*   **Kernel Type:** The base kernel $g(x,y)$ is typically a standard splatting kernel (e.g., Gaussian or cubic B-spline). The source does not specify the exact base kernel function, only that the mapping is applied to it [S1].
+ 
+-### Algorithm Steps
++### Steps
+ 
+-1.  **Preprocessing (Edge Detection):**
+-    *   Compute the gradient $\nabla v_k$ for all voxels using central differences [S1].
+-    *   Estimate the contour distance $d_k$ using the gradient and the difference between the voxel value and the threshold $T$:
+-        $$ d_k = \frac{T - v_k}{\|\nabla v_k\|} $$
+-    *   Estimate the edge position $x_k$ by normalizing $d_k$ within the expected edge width. Trilinear interpolation is used to refine position estimates if necessary [S1].
++1.  **Preprocessing (Offline/Setup):**
++    1.  Compute gradients $\nabla V_i$ for all voxels using central differences [S1].
++    2.  Compute edge position $p_i$ and normalized edge direction $\mathbf{d}_i$ for voxels near the iso-surface $C$ [S1].
++    3.  Define the compression/stretching mapping function $map(x)$. The source defines a general shape but does not provide the explicit analytical formula for $map(x)$, only its properties:
++        *   It maps the spatial domain to modify the footprint.
++        *   It has a first derivative $map'(x) = 1$ at the boundaries $x=0$ and $x=1$ to ensure C1 continuity [S1].
++        *   It creates asymmetric compression/stretching profiles based on edge strength [S1].
++    4.  Precompute splat footprints for various edge positions and strengths using the mapping function and store them in texture memory [S1].
+ 
+-2.  **View-Dependent Processing:**
+-    *   For each splat, project the normalized edge direction $\mathbf{d}_k$ onto the viewing plane.
+-    *   Calculate the projected edge length to determine the edge strength $s_k$.
+-    *   If the viewing direction is parallel to the edge direction, the edge is imperceptible; treat the splat as a standard non-edge splat [S1].
++2.  **Rendering (Per Frame):**
++    1.  For each voxel $i$ in the volume:
++        a.  **Edge Classification:** Determine if the voxel is a "primary" or "secondary" kernel.
++            *   If $V_i > C$ (or the specific threshold logic defined), it is one type; if $V_i < C$, it is the other. The source states: "primary and secondary kernels with larger or lower data value are specified for each splat" [S1]. The exact mapping of "primary/secondary" to "larger/lower" is consistent but arbitrary as long as it is defined [S1].
++        b.  **View-Dependent Projection:**
++            *   Project the normalized edge direction $\mathbf{d}_i$ onto the viewing plane perpendicular to $\mathbf{v}$ [S1].
++            *   If $\mathbf{d}_i$ is parallel to $\mathbf{v}$, the edge is imperceptible; treat as a standard splat or skip edge enhancement [S1].
++            *   Calculate the projected edge length/strength from the projected direction [S1].
++        c.  **Footprint Selection:**
++            *   Use the projected edge position and strength to index into the precomputed footprint table [S1].
++            *   Select the corresponding 2D footprint $F_{selected}(x,y)$ [S1].
++        d.  **Rasterization:**
++            *   Transform the voxel to screen space.
++            *   Rasterize the selected footprint $F_{selected}$ onto the image plane [S1].
++    2.  **Compositing:**
++        *   Accumulate the splats using standard alpha blending (back-to-front or front-to-back) [S1, see Parent].
++    3.  **Lighting (Optional):**
++        *   Apply view-dependent light source shading *only* to voxels labeled as primary or secondary edge splats [S1].
+ 
+-3.  **Footprint Selection:**
+-    *   Based on the classification (Primary/Secondary), the edge position $x_k$, and the strength $s_k$, select the appropriate precomputed footprint profile from the texture table [S1].
+-    *   The profile is a function $h(x)$ that modifies the base kernel $g(x)$.
+-
+-4.  **Kernel Modification (Compression/Stretching):**
+-    *   The core of the method is the mapping function $map(x)$ that transforms the coordinate $x$ of the base kernel $g$ to produce the enhanced kernel $h$.
+-    *   The mapping ensures C1 continuity. The condition for C1 continuity at the boundaries $x=0$ and $x=1$ is:
+-        $$ h'(x) = g'(map(x)) \cdot map'(x) $$
+-    *   To preserve continuity with the adjacent splat, we require $map'(0) = 1$ and $map'(1) = 1$. Thus:
+-        $$ h'(0) = g'(map(0)) \cdot 1 = g'(0) $$
+-        $$ h'(1) = g'(map(1)) \cdot 1 = g'(1) $$
+-    *   This ensures that the slope of the enhanced kernel matches the slope of the base kernel at the boundaries, preventing artifacts at splat edges [S1].
+-
+-5.  **Rasterization:**
+-    *   Transform the voxel position $\mathbf{p}_k$ to screen space.
+-    *   Render the splat using the selected footprint profile $h(x)$ as a texture or analytical function.
+-    *   Apply view-dependent lighting *only* to voxels labeled as primary or secondary edge splats [S1].
+-
+-### Formulas and Definitions
+-
+-**Base Kernel:**
+-Let $g(x)$ be the standard radial basis function (e.g., Gaussian) centered at 0.
+-
+-**Mapping Function:**
+-The function $map(x)$ compresses the region near the edge and stretches the region away from it (or vice versa) to sharpen the transition.
+-For a Primary Kernel (higher data value), the profile $h(x,y)$ is defined relative to the edge position. The source provides specific piecewise definitions for different intervals. For example, for a primary kernel with lower data value (note: source text has conflicting labels "primary... lower" vs "primary... larger", but defines the logic as "larger or lower"):
+-
+-If we define the edge transition from $x=-1$ to $x=1$ (normalized):
+-For a splat where the edge is at the right boundary (Primary, higher value):
+-$$ h(x) = \begin{cases} g(map(x+1)-1) & \text{if } -1 \le x \le 0 \\ g(x) & \text{otherwise} \end{cases} $$
+-
+-For a splat where the edge is at the left boundary (Secondary, lower value):
+-$$ h(x) = \begin{cases} g(map(x-1)+1) & \text{if } 0 \le x \le 1 \\ g(x) & \text{otherwise} \end{cases} $$
+-
+-The function $map(x)$ is designed such that $map(0)=0$ and $map(1)=1$ (or equivalent shifts) and $map'(0)=1, map'(1)=1$. The exact shape of $map(x)$ depends on the edge strength; stronger edges result in more aggressive compression/stretching [S1].
++### Formulas
+ 
+ **C1 Continuity Condition:**
+-$$ \frac{dh}{dx} = \frac{dg}{du} \frac{du}{dx} \quad \text{where } u = map(x) $$
+-At boundaries where $map'(x)=1$, $\frac{dh}{dx} = \frac{dg}{du}$. This matches the derivative of the adjacent splat's base kernel [S1].
++To ensure the first derivative is continuous across splat boundaries, the mapping function $rmap(x)$ (which is a shifted version of $map(x)$) must satisfy:
++$$ rmap'(x) = 1 \quad \text{at} \quad x=0 \quad \text{and} \quad x=1 $$
++The derivative of the modified kernel $h$ with respect to the original kernel $g$ is:
++$$ h_x'(rmap(x)) = g_x'(rmap(x)) \cdot rmap'(x) $$
++Since $rmap'(x) = 1$ at the boundaries:
++$$ h_x'(rmap(x)) = g_x'(rmap(x)) $$
++This ensures the slope of the enhanced kernel matches the slope of the original kernel at the join points, preserving C1 continuity [S1].
+ 
+-### Pseudocode
++**Edge Position Estimation:**
++$$ p = \frac{C - V_i}{|\nabla V_i|} $$
++Where $C$ is the contour value and $\nabla V_i$ is the gradient [S1].
++
++**Pseudocode**
+ 
+ ```python
+-def edge_preserving_splatting(volume, camera, threshold):
++# Preprocessing Phase
++def preprocess_volume(volume_data, contour_value):
+     """
+-    Renders volume using edge-preserving splatting.
++    Computes edge attributes for each voxel.
+     """
+-    # 1. Precompute edge attributes for all voxels
+-    voxels = []
+-    for k in volume.voxels:
+-        # Compute gradient using central differences
+-        grad = compute_gradient_central_diff(volume, k)
++    edge_attributes = {}
++    # Compute gradients using central differences
++    gradients = compute_central_differences(volume_data)
++    
++    for voxel in volume_data:
++        grad = gradients[voxel]
++        val = volume_data[voxel]
+         
+-        # Compute contour distance
+-        # d = (T - v) / ||grad||
+-        dist = (threshold - k.value) / norm(grad)
++        # Skip voxels far from the contour
++        if abs(val - contour_value) > threshold:
++            continue
++            
++        # Calculate edge position (normalized distance to iso-surface)
++        # Note: Source mentions trilinear interpolation for position estimation
++        # Simplified analytical form based on source description:
++        dist = (contour_value - val) / norm(grad)
+         
+-        # Normalize distance to edge position x in [0, 1]
+-        # Assuming edge width W, x = dist / W + 0.5 (clamped)
+-        x_edge = clamp(dist / k.edge_width + 0.5, 0.0, 1.0)
++        # Normalized edge direction
++        dir_norm = grad / norm(grad)
+         
+-        # Classify as Primary or Secondary
+-        is_primary = k.value > threshold
++        # Classify as primary or secondary based on value relative to contour
++        # Source: "primary and secondary kernels with larger or lower data value"
++        is_primary = val > contour_value 
+         
+-        # Project edge direction to view plane for strength
+-        edge_dir = normalize(grad)
+-        view_dir = camera.direction
+-        # Project edge_dir onto plane perpendicular to view_dir
+-        projected_edge = edge_dir - dot(edge_dir, view_dir) * view_dir
+-        edge_strength = norm(projected_edge)
++        edge_attributes[voxel] = {
++            'position': dist,
++            'direction': dir_norm,
++            'is_primary': is_primary
++        }
+         
+-        # If view is parallel to edge, strength is near 0, treat as normal
+-        if edge_strength < epsilon:
+-            edge_strength = 0.0
++    return edge_attributes
++
++def render_frame(volume_data, edge_attributes, view_direction, footprint_table):
++    """
++    Renders the volume using edge-preserving splatting.
++    """
++    image = create_empty_image()
++    
++    # Sort voxels back-to-front for correct alpha blending
++    sorted_voxels = sort_voxels_by_depth(volume_data, view_direction)
++    
++    for voxel in sorted_voxels:
++        attrs = edge_attributes.get(voxel)
++        
++        # If no edge info, use standard splat (not detailed in source, assumed standard)
++        if attrs is None:
++            render_standard_splat(voxel, image)
++            continue
+             
+-        voxels.append({
+-            'pos': k.pos,
+-            'is_primary': is_primary,
+-            'x_edge': x_edge,
+-            'strength': edge_strength,
+-            'value': k.value,
+-            'grad': grad
+-        })
++        # View-dependent edge processing
++        edge_dir = attrs['direction']
+         
+-    # 2. Sort voxels back-to-front (standard splatting requirement)
+-    voxels = sort_back_to_front(voxels, camera)
+-    
+-    # 3. Rasterize
+-    image = zeros(camera.resolution)
+-    
+-    for v in voxels:
++        # Check if edge is parallel to view (imperceptible)
++        if dot(edge_dir, view_direction) > 0.99: # Threshold for parallel
++            render_standard_splat(voxel, image)
++            continue
++            
++        # Project edge direction onto viewing plane
++        # Projected direction is the component of edge_dir perpendicular to view_direction
++        proj_edge_dir = edge_dir - dot(edge_dir, view_direction) * view_direction
++        proj_edge_dir = normalize(proj_edge_dir)
++        
++        # Determine edge strength from projected length/direction
++        # Source: "use this projected length to select a strength"
++        strength = compute_edge_strength(proj_edge_dir, view_direction)
++        
+         # Select footprint from precomputed table
+-        # Table indexed by (is_primary, x_edge, strength)
+-        footprint = get_footprint_from_texture(v.is_primary, v.x_edge, v.strength)
++        # Index by projected edge position and strength
++        footprint = footprint_table.lookup(attrs['position'], strength)
+         
+-        # Transform position to screen space
+-        screen_pos = project(v.pos, camera)
++        # Rasterize the footprint
++        rasterize_footprint(voxel, footprint, image)
+         
+-        # Render splat using footprint
+-        # The footprint function h(x) is sampled here
+-        render_splat(screen_pos, footprint, v.value, image)
+-        
+-        # Apply lighting only to edge splats
+-        if v.strength > epsilon:
+-            apply_lighting(screen_pos, v.grad, image)
++        # Apply lighting only to primary/secondary edge splats
++        if attrs['is_primary']:
++            apply_lighting(voxel, view_direction, image)
+             
+     return image
+-
+-def compute_gradient_central_diff(volume, voxel):
+-    # Standard central difference: (f(x+1) - f(x-1)) / 2
+-    # Returns 3D vector
+-    pass
+-
+-def get_footprint_from_texture(is_primary, x_edge, strength):
+-    # Returns the 1D profile h(x) or texture coordinates to sample it
+-    # The texture contains precomputed maps based on map(x)
+-    pass
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Parallel Viewing Direction:** If the viewing direction is parallel to the edge direction, the edge is imperceptible. The method should fall back to standard splatting or assign zero edge strength to avoid artifacts [S1].
+-*   **Undersampled Structures:** Small structures (e.g., small protrusions into a cavity) are often undersampled due to high-frequency components in digitized data. This makes edge preservation challenging as the gradient estimation may be inaccurate. Adaptive multivariate representations are suggested as a future improvement [S1].
+-*   **Edge Detection Accuracy:** The method requires fairly accurate edge detection. Iso-contouring produces sharp discontinuities, which helps in estimating edge direction and contour distance. For noisy data (CT/MRI), advanced edge detection or segmentation is indispensable [S1].
+-*   **Definition Consistency:** The distinction between "primary" and "secondary" kernels depends on whether the data value is larger or smaller than the threshold. This definition must be consistent throughout the application, as the compression/stretching function is asymmetric [S1].
++*   **Parallel Edge Direction:** If the viewing direction is parallel to the edge direction, the edge is imperceptible. The method skips special treatment for these voxels [S1].
++*   **Undersampled Structures:** Small structures protruding into cavities are often undersampled due to high-frequency components in digitized data. This makes edge preservation challenging and may require adaptive multivariate representations or mixing datasets of different resolutions (e.g., 8-Tesla and 1.5-Tesla MRI) [S1].
++*   **Edge Detection Accuracy:** The method requires fairly accurate edge detection. Iso-contouring produces sharp discontinuities, allowing good estimates of edge direction and contour distance. For experimental data (CT/MRI), advanced edge detection or segmentation is indispensable [S1].
++*   **Asymmetry:** The compression/stretching function is not symmetric. The definition of "primary" vs "secondary" (based on data value being larger or lower than the threshold) must be consistent throughout the application [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The per-voxel preprocessing (gradient, edge detection) is $O(N)$ where $N$ is the number of voxels. Rendering is $O(M)$ where $M$ is the number of splats rasterized. The footprint lookup is $O(1)$ via texture sampling.
+-*   **Memory Complexity:** Requires storage for the volume data, gradient fields, and the precomputed footprint texture table. The table size depends on the resolution of edge position and strength discretization.
+-*   **Performance:** The method is designed for interactive rendering by precomputing splats and loading them into texture memory [S1]. It adds overhead compared to standard splatting due to the edge detection and footprint selection steps, but remains efficient on GPU hardware.
+-*   **Strengths:** Significantly improves visual quality for low-resolution or undersampled data by producing sharp edges and enhancing details on cavity walls and small structures [S1].
+-*   **Limitations:** Relies heavily on the accuracy of edge detection. Fails to recover details that are fundamentally undersampled (Nyquist limit violations). Computationally more expensive than basic splatting due to preprocessing and texture lookups.
++*   **Time Complexity:** Rendering is $O(N)$ where $N$ is the number of voxels, assuming constant-time footprint lookup and rasterization. The preprocessing step is also $O(N)$ for gradient and edge attribute computation.
++*   **Memory Complexity:** Requires storage for the volume data, edge attributes (gradient, position, direction per voxel), and the precomputed footprint table. The footprint table size depends on the discretization of edge position and strength [S1].
++*   **Performance:** Enables interactive rendering by precomputing splats and loading them into texture memory [S1].
++*   **Strengths:** Produces much sharper decreasing regions and nice sharp edges, especially visible in low-resolution or undersampled data, compared to conventional splatting [S1]. Enhances details on sidewalls and coarse resolution cross-sections [S1].
++*   **Limitations:** Requires accurate edge detection and additional per-voxel data (gradient, direction). Does not handle high-frequency undersampled structures well without additional techniques like adaptive representations [S1].
+ 
+ ## Background
+-The method was introduced in the paper "Edge Preservation in Volume Rendering Using Splatting" [S1]. It was applied to the Sinus Cavity dataset (derived from the Visible Human dataset) and the Hipip (HIgh Potential Iron Protein) dataset. The technique was used for virtual navigation through sinus cavity data to enhance sidewall details and coarse resolution cross-sections. The work addresses the limitation of conventional splatting, which produces smooth curves and blurs sharp edges, particularly in low-resolution data [S1].
++*   **Origin:** The method was introduced in the paper "Edge Preservation in Volume Rendering Using Splatting" [S1].
++*   **History:** It was applied to the Sinus Cavity dataset (derived from the Visible Human dataset) and the Hipip (HIgh Potential Iron Protein) dataset [S1]. The Sinus Cavity application involved virtual navigation to enhance sidewall details [S1]. The Hipip dataset was used to enhance details in protein structures [S1].
++*   **Development:** The method builds on standard splatting principles but adds a layer of edge-aware footprint selection. It differs from previous work by requiring more information than simple binary classification, specifically edge direction and strength for view-dependent processing [S1].
+ 
+ ## Sources

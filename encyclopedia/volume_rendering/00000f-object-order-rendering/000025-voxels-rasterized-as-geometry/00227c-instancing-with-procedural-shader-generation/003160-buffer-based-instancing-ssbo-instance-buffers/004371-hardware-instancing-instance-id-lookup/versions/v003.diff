@@ -1,0 +1,113 @@
+--- v002.md
++++ v003.md
+@@ -4,26 +4,25 @@
+ 
+ ## Overview
+-Hardware Instancing with Instance ID Lookup is a rendering technique that draws multiple instances of a base geometry using a single draw call, where instance-specific data (such as transformation matrices or material properties) is retrieved from a buffer within the vertex shader using a system-provided instance identifier. It differs from standard hardware instancing, which passes instance data directly via a second vertex buffer, by relying on an indirect lookup mechanism that trades off driver optimization potential for flexible, shader-driven data access [S1, unofficial].
++Hardware Instancing (Instance ID Lookup) is a rendering technique that draws multiple instances of a base geometry using a single draw call by utilizing a system-provided Instance ID to look up instance-specific data (such as transformation matrices) from a buffer or constant buffer within the vertex shader [S1, unofficial]. It differs from standard hardware instancing, which uses a second vertex buffer attached to the draw context to pass per-instance data directly to the vertex shader, by relying on an index-based lookup into a shader-accessible buffer [S1, unofficial]. This approach is less efficient than the standard method because the driver cannot inline the data, and hardware precaching on the GPU wavefront is wasted as the hardware must look up the related array entry for each vertex [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A base geometry defined in a Vertex Buffer Object (VBO) or generated procedurally; a buffer (SSBO, Constant Buffer, or Texture) containing instance state data; an instance count $N$.
+-- **Output:** Rasterized fragments for $N$ instances of the base geometry.
++*   **Input:** Base geometry (vertices, indices), a buffer containing per-instance data (e.g., matrices), and an instance count.
++*   **Output:** Rasterized pixels for all instances.
+ 
+ **Data Structures:**
+-1.  **Input Layout:** The vertex input layout must include an element for the system value `SV_InstanceID`.
+-    -   **Semantic:** `SV_InstanceID`
+-    -   **Format:** `DXGI_FORMAT_R32_UINT` (32-bit unsigned integer) [S1, unofficial].
+-    -   **Classification:** `D3D11_INPUT_CLASSIFICATION_PER_VERTEX_DATA` (per-vertex, not per-instance) [S1, unofficial].
+-    -   **Offset:** `D3D11_APPEND_ALIGNED_ELEMENT` (compiler-assigned alignment) [S1, unofficial].
+-2.  **Shader Input Structure:** The vertex shader input structure must contain a `uint` field bound to the `SV_InstanceID` semantic [S1, unofficial].
+-3.  **Instance Data Buffer:** A buffer (e.g., HLSL `StructuredBuffer` or GLSL `SSBO`) indexed by the instance ID, storing per-instance properties like world matrices [S1, unofficial].
++1.  **Input Layout:** Must include an element for the system value `SV_InstanceID` (or `gl_InstanceID`).
++    *   Format: `DXGI_FORMAT_R32_UINT` [S1, unofficial].
++    *   Classification: `D3D11_INPUT_CLASSIFICATION_PER_VERTEX_DATA` [S1, unofficial].
++    *   Note: The `SV_` prefix indicates a system value that can be added to the input layout of any shader except the Pixel Shader, and only once per draw call [S1, unofficial].
++2.  **Instance Data Buffer:** A buffer object (e.g., Constant Buffer, SSBO) bound to a shader binding point. It contains per-instance records. The layout is defined by the shader [S1, unofficial].
++3.  **Vertex Shader Input Structure:** Must include a field for the Instance ID.
++    *   Example HLSL: `uint Instance : SV_InstanceID;` [S1, unofficial].
+ 
+ **Numbered Steps:**
+-1.  **Define Input Layout:** Configure the graphics API input layout to include the `SV_InstanceID` element with format `R32_UINT` and per-vertex classification [S1, unofficial].
+-2.  **Update Shader Signature:** Modify the vertex shader input structure to include a `uint` member with the `SV_InstanceID` semantic [S1, unofficial].
+-3.  **Implement Lookup Logic:** In the vertex shader, use the `Instance` ID to index into the instance data buffer to fetch instance-specific properties (e.g., transformation matrices) [S1, unofficial].
+-4.  **Transform Geometry:** Apply the fetched transformations to the base geometry vertices to compute world and clip-space positions [S1, unofficial].
+-5.  **Execute Draw Call:** Issue a `DrawIndexedInstanced` call (or equivalent), specifying the index count, instance count $N$, base vertex index, base instance index, and vertex buffer increment (typically 0 if processing is GPU-only) [S1, unofficial].
++1.  **Define Input Layout:** Add an input layout element for the system value `SV_InstanceID` with format `DXGI_FORMAT_R32_UINT`, classification `D3D11_INPUT_CLASSIFICATION_PER_VERTEX_DATA`, and aligned element offset [S1, unofficial].
++2.  **Modify Vertex Shader Input:** Update the vertex shader input structure to include a `uint` field with the `SV_InstanceID` semantic [S1, unofficial].
++3.  **Implement Lookup Logic:** In the vertex shader, use the `Instance ID` to determine instance-specific properties. Typically, this involves using the ID as an index to fetch a transformation matrix (or other data) from the instance data buffer and applying it to the vertex position [S1, unofficial].
++4.  **Execute Draw Call:** Call `DrawIndexedInstanced` (or equivalent), specifying the index count, instance count, base vertex index, base instance index, and vertex buffer increment [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -36,42 +35,46 @@
+ };
+ 
+-# Instance Data Buffer (conceptual)
+-# StructuredBuffer<float4x4> InstanceMatrices;
++# Instance Data Buffer (e.g., cbuffer or SSBO)
++# Layout depends on shader definition, e.g., array of matrices
++InstanceData g_InstanceData[INSTANCE_COUNT];
+ 
+-VS_OUTPUT main(VS_INPUT input) {
+-    # Lookup instance-specific matrix using the system-provided ID
+-    float4x4 worldMatrix = InstanceMatrices[input.Instance];
++# Vertex Shader
++float4 VS_Main(VS_INPUT input) : SV_POSITION {
++    # Lookup instance-specific data using the Instance ID
++    # Note: Bounds checking should be performed in practice
++    InstanceRecord record = g_InstanceData[input.Instance];
+     
+-    # Transform vertex position
+-    float4 worldPos = mul(worldMatrix, input.Pos);
++    # Transform vertex using looked-up data
++    # Example: P_world = T_i * P_local + O_i
++    float4 worldPos = mul(input.Pos, record.WorldMatrix);
+     
+-    # Further transformation to clip space...
+-    return VS_OUTPUT(worldPos, input.Normal);
++    return worldPos;
+ }
+ 
+-# Draw Call (Conceptual API)
++# Draw Call
+ # pImmCtx->DrawIndexedInstanced(indexCount, instanceCount, baseVertexIndex, baseInstanceIndex, vertexBufferIncrement);
+-# Example: pImmCtx->DrawIndexedInstanced(24, YOUR_INSTANCE_COUNT, 0, 0, 0);
++# Example:
++# pImmCtx->DrawIndexedInstanced(24, YOUR_INSTANCE_COUNT, 0, 0, 0);
+ ```
+ 
+ **Parameters:**
+--   `instanceCount`: The number of instances to draw [S1, unofficial].
+--   `baseInstanceIndex`: The starting index in the instance data buffer [S1, unofficial].
++*   `instanceCount`: The number of instances to draw [S1, unofficial].
++*   `baseInstanceIndex`: The starting index in the instance buffer [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+--   **Performance:** Using `SV_InstanceID` for data lookup is less efficient than using a second vertex buffer because the driver cannot inline the data, and hardware precaching/setup on the GPU wavefront is wasted as the hardware must look up the related array entry for each vertex [S1, unofficial].
+--   **Driver Optimization:** The lack of inlining means that for each vertex, the hardware performs a memory lookup rather than loading the data once per instance [S1, unofficial].
++*   **Efficiency:** Using `SV_InstanceID` to look up data in a vertex shader is less efficient than using a second vertex buffer because the driver cannot inline the data, and hardware precaching/setup on the GPU wavefront is wasted as the hardware must look up the related array entry for each vertex [S1, unofficial].
++*   **Logic Requirement:** If no logic is implemented that depends on the `Instance ID`, all instances will have the same vertices [S1, unofficial].
+ 
+ ## Operating characteristics
+--   **Time Complexity:** $O(N \cdot V)$, where $N$ is the number of instances and $V$ is the number of vertices per instance. However, the constant factor is higher due to memory lookup latency per vertex.
+--   **Memory Complexity:** $O(N)$ for storing instance data in the buffer.
+--   **Performance:** Less efficient than standard instancing with a second vertex buffer due to the inability of the driver to inline data and wasted hardware precaching [S1, unofficial].
+--   **Strengths:** Flexible data access patterns; allows for complex, shader-driven instance state generation.
+--   **Limitations:** Higher memory bandwidth usage per vertex; reduced driver optimization potential.
+--   **When to Use:** When instance data is complex, dynamic, or requires shader-driven computation that cannot be easily pre-transformed into a vertex buffer.
+--   **When Not to Use:** When performance is critical and instance data is simple (e.g., static transformations), in which case standard instancing with a second vertex buffer is preferred [S1, unofficial].
++*   **Time Complexity:** Lookup time is $O(1)$ per vertex, but involves a memory access to the instance buffer.
++*   **Memory Complexity:** Requires storage for the instance data buffer.
++*   **Performance:** Less efficient than standard instancing with a second vertex buffer due to the inability to inline data and wasted hardware precaching [S1, unofficial].
++*   **Strengths:** Flexibility in accessing arbitrary instance data via indexing; can be used when a second vertex buffer is not available or practical.
++*   **Limitations:** Higher memory latency per vertex compared to standard instancing; potential for cache misses if instance data is not co-located with the accessed vertex data.
++*   **When to use:** When instance data is large, sparse, or requires complex indexing logic that doesn't fit well into a second vertex buffer layout.
++*   **When not to use:** When performance is critical and instance data is simple (e.g., just transformation matrices), as standard instancing with a second vertex buffer is more efficient [S1, unofficial].
+ 
+ ## Background
+-This technique is a variation of hardware instancing, specifically utilizing the `SV_InstanceID` system value in Direct3D 11/12 and similar mechanisms in other APIs. It was discussed in the context of Direct3D 11 instancing on GameDev.StackExchange [S1, unofficial].
++This technique is part of the broader hardware instancing technology, which allows drawing many instances of geometry using a single GPU draw call [S1, unofficial]. The specific use of `SV_InstanceID` for lookup is a variation discussed in the context of Direct3D 11/12 programming [S1, unofficial].
+ 
+ ## Sources

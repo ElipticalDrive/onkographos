@@ -3,197 +3,163 @@
 Also called: SplatParser.parseStandardSplatToUncompressedSplatArray, decodeSplatToDataTable, readSplat
 
 ## Overview
-Standard Splat File Parsing is a method for decoding the binary `.splat` file format into an uncompressed, contiguous array of splat properties. It solves the problem of efficiently loading 3D Gaussian Splatting data from disk into a format suitable for immediate rendering or further processing. Unlike the INRIA V1 PLY format, which uses text-based headers and variable-length fields, the standard `.splat` format is a fixed-width binary record, allowing for direct memory mapping and simple offset-based extraction. It differs from lazy parsing methods (such as Antimatter15's chunk-based loader) by eagerly decoding all data into memory, serving as a baseline for correctness testing and simple scene loading.
+Standard Splat File Parsing decodes the binary `.splat` file format into an uncompressed splat array or data table, handling the specific binary layout of position, scale, color, and rotation data [S1, unofficial][S2]. It serves as the foundational parser for loading 3D Gaussian Splatting assets, converting raw binary records into structured geometric and appearance properties [S1, unofficial][S2]. Unlike the INRIA V1 PLY format, which includes headers and spherical harmonic coefficients, the standard `.splat` format is a flat binary stream with no header and DC-only color [S1, 6902-antimatter15-splat-file-parsing.md, unofficial]. This method provides both eager decoding for validation and lazy chunk-based reading for memory efficiency [S1, unofficial][S2].
 
 ## How it works
 **Inputs and Outputs:**
-- **Input:** A binary buffer containing the raw bytes of a `.splat` file.
-- **Output:** An uncompressed data structure (e.g., `DataTable` or array of objects) containing normalized position, scale, rotation (quaternion), opacity, and color (DC spherical harmonic coefficients) for each splat.
+- **Input:** A binary buffer containing the `.splat` file data.
+- **Output:** An uncompressed data structure containing splat properties. This can be a custom `SplatArray` object (as in [S1, unofficial]) or a `DataTable` with typed columns (as in [S2]).
 
 **Data Structures and Layout:**
-The standard `.splat` file consists of a sequence of fixed-size records. Each record (splat) is exactly 32 bytes long. The layout is as follows:
+The standard `.splat` format uses a fixed row size of 32 bytes per splat [S1, unofficial][S2]. The fields are packed in the following order:
+1. **Center (Position):** 12 bytes. Three `Float32` values (x, y, z) [S1, unofficial][S2].
+2. **Scale:** 12 bytes. Three `Float32` values (scale_x, scale_y, scale_z) [S1, unofficial][S2].
+3. **Color:** 4 bytes. Four `Uint8` values (r, g, b, opacity) [S1, unofficial][S2].
+4. **Rotation:** 4 bytes. Four `Uint8` values representing a quaternion [S1, unofficial][S2].
 
-| Offset (bytes) | Field | Size (bytes) | Data Type | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| 0 | Center | 12 | `Float32` (x, y, z) | 3D position coordinates. |
-| 12 | Scale | 12 | `Float32` (x, y, z) | 3D scale factors. |
-| 24 | Color | 4 | `Uint8` (r, g, b) | DC color coefficients (RGB). |
-| 28 | Rotation | 4 | `Uint8` (w, x, y, z) | Quaternion components, quantized. |
+**Parameters:**
+- `SplatParser.RowSizeBytes`: 32 [S1, unofficial].
+- `BYTES_PER_SPLAT`: 32 [S2].
+- `SplatParser.CenterSizeBytes`: 12 [S1, unofficial].
+- `SplatParser.ScaleSizeBytes`: 12 [S1, unofficial].
+- `SplatParser.ColorSizeBytes`: 4 [S1, unofficial].
 
-Constants:
-- `SplatParser.RowSizeBytes = 32`
-- `SplatParser.CenterSizeBytes = 12`
-- `SplatParser.ScaleSizeBytes = 12`
-- `SplatParser.ColorSizeBytes = 4`
-- `SplatParser.RotationSizeBytes = 4`
+**Numbered Steps:**
+1. **Validate File Size:** Calculate the total file size in bytes. If `fileSize % 32 !== 0`, the file is invalid [S2]. Calculate `numSplats = fileSize / 32`. If `numSplats === 0`, throw an error [S2].
+2. **Initialize Output Structure:**
+   - For eager decoding [S2]: Initialize `Float32Array` columns for x, y, z, scale_0, scale_1, scale_2, f_dc_0, f_dc_1, f_dc_2, opacity, rot_0, rot_1, rot_2, rot_3, each of size `numSplats`.
+   - For lazy parsing [S1, unofficial]: Prepare a `SplatArray` container.
+3. **Iterate and Decode:** Loop `i` from 0 to `numSplats - 1`. Calculate the byte offset `o = i * 32`.
+   - **Position:** Read 12 bytes starting at `o` as three `Float32` values. Assign to x, y, z [S2].
+   - **Scale:** Read 12 bytes starting at `o + 12` as three `Float32` values. Assign to scale_0, scale_1, scale_2 [S2].
+   - **Color/Opacity:** Read 4 bytes starting at `o + 24` as four `Uint8` values. Assign r, g, b to f_dc_0, f_dc_1, f_dc_2. Assign the fourth byte to opacity [S2].
+   - **Rotation:** Read 4 bytes starting at `o + 28` as four `Uint8` values. Let these be `u0, u1, u2, u3` [S1, unofficial].
+4. **Quaternion Normalization:** Convert the raw uint8 rotation bytes to a normalized quaternion [S1, unofficial]:
+   - Map the uint8 values to floats in the range [-1, 1]:
+     $$ w = \frac{u_0 - 128}{128} $$
+     $$ x = \frac{u_1 - 128}{128} $$
+     $$ y = \frac{u_2 - 128}{128} $$
+     $$ z = \frac{u_3 - 128}{128} $$
+   - Construct a quaternion $(x, y, z, w)$ and normalize it to ensure it is a unit quaternion [S1, unofficial].
+   - Assign the normalized components to rot_0, rot_1, rot_2, rot_3 [S2].
+5. **Finalize:** Return the populated data structure [S1, unofficial][S2].
 
-**Steps:**
-
-1.  **Validate File Size:**
-    Calculate the total number of splats ($N$) by dividing the input buffer byte length ($B$) by the row size (32).
-    $$ N = \lfloor B / 32 \rfloor $$
-    If $B \pmod{32} \neq 0$, the file is invalid. If $N = 0$, the file is empty.
-
-2.  **Initialize Output Storage:**
-    Allocate arrays for the output data. Common implementations use separate `Float32Array` or `Uint8Array` columns for each property:
-    - `x`, `y`, `z`: Position
-    - `s0`, `s1`, `s2`: Scale
-    - `c0`, `c1`, `c2`: Color (RGB)
-    - `op`: Opacity
-    - `r0`, `r1`, `r2`, `r3`: Rotation (Quaternion w, x, y, z)
-
-3.  **Iterate and Extract:**
-    For each splat index $i$ from $0$ to $N-1$:
-    a. Calculate the byte offset in the input buffer:
-       $$ \text{offset}_i = i \times 32 $$
-    b. Extract the **Center** (12 bytes) starting at $\text{offset}_i$. Interpret as three `Float32` values.
-    c. Extract the **Scale** (12 bytes) starting at $\text{offset}_i + 12$. Interpret as three `Float32` values.
-    d. Extract the **Color** (4 bytes) starting at $\text{offset}_i + 24$. Interpret as three `Uint8` values (R, G, B).
-    e. Extract the **Rotation** (4 bytes) starting at $\text{offset}_i + 28$. Interpret as four `Uint8` values.
-
-4.  **Decode Rotation:**
-    The rotation quaternion is stored as quantized `Uint8` values. Decode them to normalized float values in the range $[-1, 1]$ using the following mapping:
-    $$ w = \frac{\text{rot}[0] - 128}{128} $$
-    $$ x = \frac{\text{rot}[1] - 128}{128} $$
-    $$ y = \frac{\text{rot}[2] - 128}{128} $$
-    $$ z = \frac{\text{rot}[3] - 128}{128} $$
-    Construct a quaternion $q = (w, x, y, z)$ and normalize it to ensure it is a unit quaternion:
-    $$ q_{\text{norm}} = \frac{q}{\|q\|} $$
-    Store the components $w, x, y, z$ of $q_{\text{norm}}$ in the output arrays.
-
-5.  **Store Data:**
-    Assign the decoded values to the corresponding output arrays at index $i$.
-    - `x[i]`, `y[i]`, `z[i]` from Center.
-    - `s0[i]`, `s1[i]`, `s2[i]` from Scale.
-    - `c0[i]`, `c1[i]`, `c2[i]` from Color (typically normalized to $[0, 1]$ if required by the renderer, though the raw `Uint8` values are often stored directly or scaled).
-    - `op[i]` is not explicitly present in the 32-byte layout described in [S1, unofficial]; however, [S2] indicates an opacity field is present in the decoded geometric data. *Note: The standard 32-byte layout in [S1, unofficial] does not explicitly list opacity. [S2] implies a separate parsing path or a different layout variant including opacity. If following the strict 32-byte layout of [S1, unofficial], opacity may be missing or packed differently. For compatibility with [S2]'s `DataTable` output, assume opacity is extracted if present in the specific implementation variant, otherwise it is not given in the standard 32-byte spec.*
-    - `r0[i]` to `r3[i]` from decoded Rotation.
-
-**Pseudocode:**
-
+**Pseudocode (Eager Decoding):**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def parse_standard_splat(file_buffer):
-    """
-    Parses a standard 32-byte per splat .splat file into uncompressed arrays.
+def decode_splat_to_datatable(file_buffer: bytes) -> DataTable:
+    file_size = len(file_buffer)
+    if file_size % 32 != 0:
+        raise Error("Invalid .splat file: file size is not a multiple of 32 bytes")
     
-    Args:
-        file_buffer: bytes or ArrayBuffer containing the .splat data.
-        
-    Returns:
-        dict: Dictionary with keys 'x', 'y', 'z', 's0', 's1', 's2', 
-              'c0', 'c1', 'c2', 'r0', 'r1', 'r2', 'r3' containing Float32Arrays.
-    """
-    byte_length = len(file_buffer)
-    
-    # Validate file size
-    if byte_length % 32 != 0:
-        raise ValueError("Invalid .splat file: file size is not a multiple of 32 bytes")
-    
-    num_splats = byte_length // 32
+    num_splats = file_size // 32
     if num_splats == 0:
-        return {k: [] for k in ['x', 'y', 'z', 's0', 's1', 's2', 'c0', 'c1', 'c2', 'r0', 'r1', 'r2', 'r3']}
-    
-    # Initialize output arrays
+        raise Error("Invalid .splat file: no splats found")
+
+    # Initialize arrays
     x = [0.0] * num_splats
     y = [0.0] * num_splats
     z = [0.0] * num_splats
-    s0 = [0.0] * num_splats
-    s1 = [0.0] * num_splats
-    s2 = [0.0] * num_splats
-    c0 = [0.0] * num_splats
-    c1 = [0.0] * num_splats
-    c2 = [0.0] * num_splats
-    r0 = [0.0] * num_splats # w
-    r1 = [0.0] * num_splats # x
-    r2 = [0.0] * num_splats # y
-    r3 = [0.0] * num_splats # z
+    scale_0 = [0.0] * num_splats
+    scale_1 = [0.0] * num_splats
+    scale_2 = [0.0] * num_splats
+    f_dc_0 = [0.0] * num_splats
+    f_dc_1 = [0.0] * num_splats
+    f_dc_2 = [0.0] * num_splats
+    opacity = [0.0] * num_splats
+    rot_0 = [0.0] * num_splats
+    rot_1 = [0.0] * num_splats
+    rot_2 = [0.0] * num_splats
+    rot_3 = [0.0] * num_splats
+
+    view = DataView(file_buffer)
     
-    # Parse each splat
     for i in range(num_splats):
-        base_offset = i * 32
+        o = i * 32
         
-        # Extract Center (Float32, 12 bytes)
-        # Assuming little-endian, standard struct format '<fff'
-        center = struct.unpack_from('<fff', file_buffer, base_offset)
-        x[i] = center[0]
-        y[i] = center[1]
-        z[i] = center[2]
+        # Position (Float32)
+        x[i] = view.getFloat32(o, True)
+        y[i] = view.getFloat32(o + 4, True)
+        z[i] = view.getFloat32(o + 8, True)
         
-        # Extract Scale (Float32, 12 bytes)
-        # Offset 12
-        scale = struct.unpack_from('<fff', file_buffer, base_offset + 12)
-        s0[i] = scale[0]
-        s1[i] = scale[1]
-        s2[i] = scale[2]
+        # Scale (Float32)
+        scale_0[i] = view.getFloat32(o + 12, True)
+        scale_1[i] = view.getFloat32(o + 16, True)
+        scale_2[i] = view.getFloat32(o + 20, True)
         
-        # Extract Color (Uint8, 4 bytes)
-        # Offset 24
-        # Note: The 4th byte is often unused or padding in the 32-byte spec, 
-        # but sometimes used for opacity. Standard 32-byte layout in [S1, unofficial] 
-        # lists Color as 4 bytes Uint8. We extract RGB.
-        color_bytes = struct.unpack_from('<BBB', file_buffer, base_offset + 24)
-        c0[i] = color_bytes[0] / 255.0  # Normalize to [0, 1]
-        c1[i] = color_bytes[1] / 255.0
-        c2[i] = color_bytes[2] / 255.0
+        # Color and Opacity (Uint8)
+        r = view.getUint8(o + 24)
+        g = view.getUint8(o + 25)
+        b = view.getUint8(o + 26)
+        op = view.getUint8(o + 27)
         
-        # Extract Rotation (Uint8, 4 bytes)
-        # Offset 28
-        rot_bytes = struct.unpack_from('<BBBB', file_buffer, base_offset + 28)
+        f_dc_0[i] = r / 255.0
+        f_dc_1[i] = g / 255.0
+        f_dc_2[i] = b / 255.0
+        opacity[i] = op / 255.0
         
-        # Decode quaternion: (val - 128) / 128
-        w = (rot_bytes[0] - 128) / 128.0
-        x_q = (rot_bytes[1] - 128) / 128.0
-        y_q = (rot_bytes[2] - 128) / 128.0
-        z_q = (rot_bytes[3] - 128) / 128.0
+        # Rotation (Uint8 -> Normalized Quaternion)
+        u0 = view.getUint8(o + 28)
+        u1 = view.getUint8(o + 29)
+        u2 = view.getUint8(o + 30)
+        u3 = view.getUint8(o + 31)
+        
+        # Map to [-1, 1]
+        w = (u0 - 128) / 128.0
+        x_q = (u1 - 128) / 128.0
+        y_q = (u2 - 128) / 128.0
+        z_q = (u3 - 128) / 128.0
         
         # Normalize quaternion
-        norm = math.sqrt(w*w + x_q*x_q + y_q*y_q + z_q*z_q)
+        norm = sqrt(x_q**2 + y_q**2 + z_q**2 + w**2)
         if norm == 0:
-            # Handle degenerate case, e.g., identity quaternion
-            w, x_q, y_q, z_q = 1.0, 0.0, 0.0, 0.0
+            # Handle degenerate case, e.g., set to identity or zero
+            x_q = 0.0
+            y_q = 0.0
+            z_q = 0.0
+            w = 1.0
         else:
-            w /= norm
             x_q /= norm
             y_q /= norm
             z_q /= norm
+            w /= norm
             
-        r0[i] = w
-        r1[i] = x_q
-        r2[i] = y_q
-        r3[i] = z_q
-        
-    return {
+        rot_0[i] = x_q
+        rot_1[i] = y_q
+        rot_2[i] = z_q
+        rot_3[i] = w
+
+    return DataTable({
         'x': x, 'y': y, 'z': z,
-        's0': s0, 's1': s1, 's2': s2,
-        'c0': c0, 'c1': c1, 'c2': c2,
-        'r0': r0, 'r1': r1, 'r2': r2, 'r3': r3
-    }
+        'scale_0': scale_0, 'scale_1': scale_1, 'scale_2': scale_2,
+        'f_dc_0': f_dc_0, 'f_dc_1': f_dc_1, 'f_dc_2': f_dc_2,
+        'opacity': opacity,
+        'rot_0': rot_0, 'rot_1': rot_1, 'rot_2': rot_2, 'rot_3': rot_3
+    }, transform=Transform.PLY)
 ```
 
 **Edge Cases and Pitfalls:**
-- **Non-multiple of 32:** If the file size is not divisible by 32, the file is corrupted or not a standard `.splat` file.
-- **Degenerate Quaternion:** If the decoded quaternion has a norm of zero (all bytes are 128), normalization fails. A default identity quaternion should be used [G].
-- **Endianness:** The standard `.splat` format is typically little-endian. If the source system is big-endian, byte swapping is required for `Float32` and `Uint8` fields.
-- **Opacity:** The 32-byte layout described in [S1, unofficial] does not explicitly include an opacity field. However, [S2] includes opacity in its output. If opacity is required, it may be stored in the 4th byte of the Color field (often unused) or in a different variant of the format. Implementers should check if the 4th byte of the Color/Rotation block contains opacity data if the renderer requires it.
+- **Invalid File Size:** The file size must be a multiple of 32 bytes. Non-multiples indicate corruption or truncation [S2].
+- **Zero Norm Quaternion:** If the normalized quaternion has a zero norm, it is degenerate. The implementation should handle this, potentially by defaulting to an identity quaternion or zeroing components [G].
+- **Endianness:** The standard `.splat` format uses little-endian byte order for `Float32` and `Uint8` arrays [S1, unofficial][S2].
 
 ## Subtopics
 
 ### [Antimatter15 .splat File Parsing](6902-antimatter15-splat-file-parsing.md)
-A lazy ChunkSource implementation for reading Antimatter15 .splat files, which are flat arrays of 32-byte records with no header. It decodes position, geometric (rotation, scale, opacity), and DC-only color layers on demand, supporting both contiguous chunk reads and scatter-gather reads.
+Implements a lazy `ChunkSource` for reading `.splat` files, supporting contiguous and scatter-gather reads without loading the entire file into memory. It decodes DC-only color and geometric data on demand. Choose this when memory efficiency is critical for large scenes.
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$, where $N$ is the number of splats. Each splat is processed in constant time.
-- **Memory Complexity:** $O(N)$ for the uncompressed output arrays. The input buffer is also held in memory.
-- **Performance:** Very fast for small to medium scenes due to simple linear memory access. For very large scenes, the eager loading can cause high memory usage and longer load times compared to lazy loading.
-- **Strengths:** Simple implementation, fast random access to any splat, easy to debug and verify.
-- **Limitations:** High memory consumption for large scenes. No support for hierarchical or chunked loading.
-- **When to use:** Small scenes, debugging, testing, or when random access to all splats is required immediately.
-- **When not to use:** Large-scale scenes with limited memory, or when streaming is required.
+- **Time Complexity:** $O(N)$, where $N$ is the number of splats. Each splat requires a constant number of memory reads and arithmetic operations.
+- **Memory Complexity:** $O(N)$ for eager decoding, storing all properties in contiguous arrays. Lazy parsing reduces peak memory usage to $O(K)$, where $K$ is the chunk size.
+- **Measured Performance:** Not given in the sources.
+- **Strengths:** Simple binary layout allows for fast, straightforward parsing. No header parsing overhead.
+- **Limitations:** No spherical harmonic data, limiting color accuracy to DC only. No compression, leading to large file sizes for high-resolution scenes.
+- **When to use:** When loading standard `.splat` files generated by tools like `splat-transform` or `GaussianSplats3D` for immediate visualization or further processing.
+- **When not to use:** When spherical harmonic color variation is required, or when memory constraints prevent loading the full dataset.
 
 ## Background
-The standard `.splat` file format was introduced as a compact binary representation for 3D Gaussian Splatting data. It simplifies the data exchange between different tools and renderers by providing a fixed-width binary layout. The parsing method described here is commonly implemented in various Gaussian Splatting viewers and converters, such as those found in the GaussianSplats3D and splat-transform repositories.
+The standard `.splat` file format was developed as a compact, header-less binary format for storing 3D Gaussian Splatting data. It is widely used in tools such as `GaussianSplats3D` [S1, unofficial] and `splat-transform` [S2]. The format simplifies parsing by removing the complexity of PLY headers and SH coefficients, focusing on the essential geometric and appearance properties.
 
 ## Sources
 [S1] mkkellogg/GaussianSplats3D, https://github.com/mkkellogg/GaussianSplats3D, fetched 2026-10-27 (unofficial)

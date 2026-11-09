@@ -1,127 +1,116 @@
 # Parallelized Accurate Sorting for Projected Tetrahedra
-
 Also called: Logical partition sorting, Quick and accurate sorting algorithm of tetrahedral datasets
 
 ## Overview
-Parallelized Accurate Sorting is a view-dependent object-order sorting algorithm for tetrahedral datasets that uses logical partitioning to enable parallel processing, solving the dependency and sequence limitations of neighboring tetrahedra inherent in standard topological sorting [S1, unofficial][S2, unofficial]. It sets itself apart from its siblings by decomposing the global visibility problem into independent spatial blocks along the viewing direction, allowing unobstructed layers to be peeled and sorted in parallel without write access violations, whereas methods like [Topological Sort for Cell Projection](999-topological-sort-for-cell-projection.md) rely on global graph traversal [S1, unofficial][S2, unofficial]. It builds on [Cell projection](26-cell-projection.md) by providing the necessary back-to-front ordering for correct alpha compositing [S1, unofficial][S2, unofficial].
+Parallelized Accurate Sorting is a view-dependent sorting algorithm for tetrahedral datasets that uses logical partitioning to enable parallel processing, solving the dependency and sequence limitations of neighboring tetrahedra in parallel performance [S1, unofficial][S2, unofficial]. It sets itself apart from its siblings by replacing global topological sorts with a block-based logical partitioning scheme that allows for the parallel peeling of unobstructed layers, significantly reducing sorting time and improving rendering performance [S1, unofficial][S2, unofficial].
 
 ## How it works
-The method processes a tetrahedral dataset $T$ and a viewing direction $V$ to produce a sorted list of tetrahedra ready for rasterization and compositing.
+The method operates on tetrahedral datasets projected into screen space. It ensures correct back-to-front compositing by partitioning the volume into blocks along the viewing direction and processing them in parallel layers.
 
 **Inputs:**
-*   Tetrahedral dataset $T = \{t_1, t_2, ..., t_N\}$, where each tetrahedron $t_i$ has 4 vertices in 3D space and associated optical properties (extinction coefficient $\tau$).
-*   Viewing direction $V$ (unit vector).
-*   View frustum or bounding box for culling.
+*   A tetrahedral dataset (list of tetrahedra with vertex coordinates and optical properties).
+*   A viewing direction (camera position and orientation).
 
 **Outputs:**
-*   A sequence of tetrahedra ordered back-to-front relative to $V$.
+*   A sorted sequence of tetrahedral subsets ready for segment integration and accumulation.
 
 **Data Structures:**
-*   **Blocks:** A list of spatial blocks $B = \{b_1, b_2, ..., b_K\}$ partitioning the space along $V$. Each block $b_k$ contains a subset of tetrahedra $T_k \subset T$.
-*   **Layers:** Within each block, tetrahedra are organized into unobstructed layers $L_{k,j}$, where $j$ is the layer index. A layer is a set of tetrahedra that do not occlude each other within the block's projection.
+*   **Blocks:** A list of spatial blocks defined along the viewing direction. Each block contains a subset of tetrahedra.
+*   **Layers:** Unobstructed subsets of tetrahedra peeled from the blocks.
+*   **Optical Contribution:** Accumulated values for each ray segment.
 
 **Steps:**
+1.  **Block Division:** Divide the space containing the tetrahedral datasets into a list of blocks along the viewing direction. Each block contains a subset of tetrahedra [S1, unofficial][S2, unofficial].
+2.  **Parallel Sorting:** Sort the tetrahedra accurately by peeling tetrahedral subsets into unobstructed layers in parallel. This step resolves the dependencies between neighboring tetrahedra by identifying layers that are not occluded by previously processed layers [S1, unofficial][S2, unofficial].
+3.  **Boundary Partitioning and Integration:** Partition tetrahedra on the boundary logically. Compute the optical contribution of each subset using segment integration. This involves calculating the segment length $l$ and the integrated opacity $\alpha$ for the tetrahedra within each subset [S1, unofficial][S2, unofficial].
+4.  **Accumulation:** Accumulate the optical contribution of each subset along the viewing direction to produce the final image [S1, unofficial][S2, unofficial].
 
-1.  **Spatial Partitioning:** Divide the space containing the tetrahedral datasets into a list of blocks along the viewing direction. Each block contains a subset of tetrahedra. This decomposition is view-dependent, meaning the blocks are defined relative to the current camera orientation [S1, unofficial][S2, unofficial].
-2.  **Parallel Peeling:** Sort tetrahedra accurately by peeling tetrahedral subsets into unobstructed layers in parallel. For each block, identify the "front-most" or "back-most" (depending on compositing order) unobstructed tetrahedra. These form the first layer. Remove them from the block and repeat for the next layer. This peeling process is performed independently for each block, enabling parallel execution [S1, unofficial][S2, unofficial].
-3.  **Boundary Partitioning and Optical Contribution:** Partition tetrahedra on the boundary of blocks logically. Tetrahedra intersecting block boundaries are assigned to specific blocks based on logical criteria (e.g., centroid position or overlap) to ensure consistent ordering across block boundaries. Compute the optical contribution of each subset (layer) with segment integration. For each tetrahedron $t_i$ in a layer, calculate the integrated opacity $\alpha_i$ using the segment length $l_i$ and average differential opacity $\tau_{avg, i}$:
-    $$ \alpha_i = 1 - \exp(-\tau_{avg, i} l_i) $$
-    [S1, unofficial][S2, unofficial]. The segment length $l_i$ is determined by the intersection of the viewing ray with the tetrahedron [S1, unofficial][S2, unofficial].
-4.  **Accumulation:** Accumulate the optical contribution of each subset along the viewing direction. The final image is composited by processing the layers in order, blending the optical contributions of tetrahedra from each block according to the global back-to-front order established by the peeling process [S1, unofficial][S2, unofficial].
+**Formulas:**
+The optical contribution is computed using segment integration. For a segment of length $l$ with average differential opacity $\tau_{avg}$, the integrated opacity $\alpha$ is:
+$$ \alpha = 1 - \exp(-\tau_{avg} l) $$
+This formula is applied to the subsets of tetrahedra identified in Step 3 [S1, unofficial][S2, unofficial].
+
+**Parameters:**
+*   **Block Size:** Not given in the sources.
+*   **Early Termination:** An early tetrahedron termination scheme can be leveraged, using a summed-area table for accumulating and comparing opacity of individual tetrahedra during the rendering phase [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Tetrahedra:** Tetrahedra on the boundary between blocks must be partitioned logically to ensure correct ordering and optical contribution calculation [S1, unofficial][S2, unofficial].
+*   **Dependency Resolution:** The algorithm must accurately peel unobstructed layers to avoid rendering artifacts caused by incorrect sorting [S1, unofficial][S2, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def parallelized_accurate_sorting(tetrahedra, view_direction):
     # Step 1: Divide space into blocks along viewing direction
-    blocks = partition_space_along_view(tetrahedra, view_direction)
+    blocks = divide_space_into_blocks(tetrahedra, view_direction)
     
     # Step 2: Sort accurately by peeling unobstructed layers in parallel
-    # This step is parallelized across blocks
     sorted_layers = []
     for block in blocks:
-        block_layers = peel_unobstructed_layers(block.tetrahedra, view_direction)
-        sorted_layers.append((block.id, block_layers))
-        
-    # Step 3: Partition boundary tetrahedra logically and compute optical contribution
-    # Note: Boundary handling ensures no gaps or overlaps between blocks
-    final_sorted_tetrahedra = []
-    for block_id, layers in sorted_layers:
-        for layer in layers:
-            for tet in layer:
-                # Compute segment length l for this tetrahedron
-                l = compute_segment_length(tet, view_direction)
-                # Compute average extinction coefficient tau_avg
-                tau_avg = compute_average_extinction(tet)
-                # Compute integrated opacity alpha
-                alpha = 1.0 - exp(-tau_avg * l)
-                final_sorted_tetrahedra.append({
-                    'tet': tet,
-                    'alpha': alpha,
-                    'l': l,
-                    'tau_avg': tau_avg,
-                    'order': get_global_order(block_id, layer.index)
-                })
-                
-    # Step 4: Accumulate optical contribution along viewing direction
-    # The final_sorted_tetrahedra is already ordered back-to-front
-    return final_sorted_tetrahedra
-
-def peel_unobstructed_layers(tetrahedra, view_direction):
-    layers = []
-    remaining_tetrahedra = list(tetrahedra)
+        # Peel unobstructed layers from the block's tetrahedra
+        layers = peel_unobstructed_layers(block.tetrahedra)
+        sorted_layers.extend(layers)
     
-    while remaining_tetrahedra:
-        # Find unobstructed tetrahedra in the current layer
-        # "Unobstructed" means no other tetrahedron in the set occludes it
-        # from the viewer's perspective within the block
-        current_layer = []
-        next_remaining = []
+    # Step 3: Partition boundary tetrahedra logically and compute optical contribution
+    optical_contributions = []
+    for layer in sorted_layers:
+        # Partition tetrahedra on the boundary logically
+        partitioned_layer = partition_boundary_tetrahedra(layer)
         
-        for tet in remaining_tetrahedra:
-            if is_unobstructed(tet, remaining_tetrahedra, view_direction):
-                current_layer.append(tet)
-            else:
-                next_remaining.append(tet)
-                
-        layers.append(current_layer)
-        remaining_tetrahedra = next_remaining
-        
+        # Compute optical contribution with segment integration
+        contribution = compute_segment_integration(partitioned_layer)
+        optical_contributions.append(contribution)
+    
+    # Step 4: Accumulate optical contribution along viewing direction
+    final_image = accumulate_optical_contributions(optical_contributions)
+    
+    return final_image
+
+def divide_space_into_blocks(tetrahedra, view_direction):
+    # Divide the space containing tetrahedral datasets into a list of blocks
+    # along the viewing direction, with every block containing a subset of tetrahedra
+    # Implementation detail: Spatial hashing or grid-based partitioning along view axis
+    blocks = []
+    # ... [G] Implementation of spatial partitioning along view direction ...
+    return blocks
+
+def peel_unobstructed_layers(tetrahedra_subset):
+    # Sort tetrahedra accurately by peeling tetrahedral subsets into unobstructed layers
+    # in parallel. This involves determining visibility order within the subset.
+    # Implementation detail: Topological sort or depth-based sorting within the block
+    layers = []
+    # ... [G] Implementation of parallel peeling of unobstructed layers ...
     return layers
 
-def is_unobstructed(tet, candidates, view_direction):
-    # Check if any other tet in candidates occludes tet
-    # Occlusion is determined by projection overlap and depth comparison
-    for other_tet in candidates:
-        if other_tet == tet:
-            continue
-        if projects_inside(tet, other_tet, view_direction) and is_behind(tet, other_tet, view_direction):
-            return False
-    return True
+def partition_boundary_tetrahedra(layer):
+    # Partition tetrahedra on the boundary logically
+    # Implementation detail: Identify tetrahedra at block boundaries and adjust
+    # their contribution to avoid double-counting or gaps
+    partitioned = []
+    # ... [G] Implementation of logical boundary partitioning ...
+    return partitioned
 
-def projects_inside(tet_a, tet_b, view_direction):
-    # Check if the projection of tet_a is fully contained within tet_b
-    # This is a simplification; actual implementation may use bounding boxes or convex hulls
-    return False # Placeholder for complex geometric test [G]
+def compute_segment_integration(partitioned_layer):
+    # Compute the optical contribution of each subset with segment integration
+    contributions = []
+    for tet in partitioned_layer:
+        l = calculate_segment_length(tet)
+        tau_avg = calculate_average_opacity(tet)
+        alpha = 1 - exp(-tau_avg * l)
+        contributions.append(alpha)
+    return contributions
 
-def is_behind(tet_a, tet_b, view_direction):
-    # Check if tet_a is further from the viewer than tet_b
-    # Compare depths along view_direction
-    depth_a = dot(tet_a.centroid, view_direction)
-    depth_b = dot(tet_b.centroid, view_direction)
-    return depth_a > depth_b # Assuming view_direction points from eye to scene
+def accumulate_optical_contributions(optical_contributions):
+    # Accumulate the optical contribution of each subset along the viewing direction
+    # Implementation detail: Porter-Duff over operation in back-to-front order
+    image = initialize_image()
+    for contribution in optical_contributions:
+        # ... [G] Implementation of accumulation using Porter-Duff over ...
+        pass
+    return image
 ```
-
-**Parameters and Typical Values:**
-*   **Block Size:** Not given in the sources. Depends on dataset size and GPU memory [S1, unofficial][S2, unofficial].
-*   **Early Termination:** An early tetrahedron termination scheme can be applied, leveraging a summed-area table for accumulating and comparing opacity. This provides a gain of more than 10% in rendering performance for datasets with more than a million tetrahedra [S1, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **Boundary Tetrahedra:** Tetrahedra intersecting block boundaries must be handled logically to ensure consistent ordering. Failure to do so may result in visual artifacts or incorrect compositing [S1, unofficial][S2, unofficial].
-*   **Occlusion Testing:** The `is_unobstructed` function requires accurate geometric tests. Approximations may lead to incorrect sorting [G].
-*   **Precision:** Floating-point precision issues may arise in depth comparisons, especially for large datasets or extreme viewing angles [G].
 
 ## Subtopics
 
@@ -132,17 +121,17 @@ Multi-segment and Multi-stage Projected Tetrahedra is a technique designed to so
 A volume rendering technique for tetrahedral datasets that enhances parallelization by dividing space into blocks along the viewing direction, sorting tetrahedra by peeling unobstructed layers in parallel, partitioning boundary tetrahedra logically, and accumulating optical contributions via segment integration [S2, unofficial]. The algorithm reduces sorting time largely and improves rendering performance greatly compared to previous methods [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The sorting time is largely reduced compared to previous methods [S2, unofficial]. The parallel nature of the peeling process allows for significant speedup on GPU hardware.
-*   **Memory Complexity:** Not given in the sources. Depends on the number of blocks and layers [S1, unofficial][S2, unofficial].
+*   **Time Complexity:** The algorithm enhances the parallelization of topological sorting, reducing sorting time largely [S1, unofficial][S2, unofficial].
+*   **Memory Complexity:** Not given in the sources.
 *   **Measured Performance:** GPU implementation of the parallelized accurate sorting scheme achieves 91% acceleration compared with the CPU implementation [S1, unofficial]. The early tetrahedron termination scheme has a gain of more than 10% in terms of rendering performance for datasets with more than a million tetrahedra [S1, unofficial].
-*   **Strengths:** Enhances parallelization of topological sorting, reduces sorting time, and improves rendering performance greatly [S1, unofficial][S2, unofficial].
-*   **Limitations:** Requires view-dependent partitioning, which may need to be recomputed for each frame. Boundary handling adds complexity [S1, unofficial][S2, unofficial].
-*   **When to Use:** Suitable for large tetrahedral datasets where sorting time is a bottleneck and GPU acceleration is available [S1, unofficial][S2, unofficial].
-*   **When Not to Use:** For small datasets where the overhead of partitioning and parallelization may not be justified [G].
+*   **Strengths:** Reduces sorting time, improves rendering performance, enhances parallelization [S1, unofficial][S2, unofficial].
+*   **Limitations:** Not given in the sources.
+*   **When to Use:** Suitable for large tetrahedral datasets where parallel processing is required to achieve real-time or near-real-time rendering [S1, unofficial][S2, unofficial].
+*   **When Not to Use:** Not given in the sources.
 
 ## Background
-The method was proposed by Xin Li, W. Chen, X. Wu, and W. Zuo in 2013 in the paper "Fast projected tetrahedra volume rendering based on parallelized accurate sorting" [S1, unofficial]. It addresses the limitations of parallel performance in projected tetrahedra rendering caused by the sequence and dependency of neighboring tetrahedra [S1, unofficial][S2, unofficial]. The technique is part of the broader field of cell projection volume rendering, which decomposes volumes into convex polyhedral cells for rendering [S1, unofficial][S2, unofficial].
+The method was proposed by Xin Li, W. Chen, X. Wu, and W. Zuo in the paper "Fast projected tetrahedra volume rendering based on parallelized accurate sorting" published in August 2013 [S1, unofficial]. It addresses the limitations of parallel performance in projected tetrahedra rendering caused by the sequence and dependency of neighboring tetrahedra [S1, unofficial][S2, unofficial].
 
 ## Sources
-[S1] Fast projected tetrahedra volume rendering based on parallelized accurate sorting, https://www.researchgate.net/publication/251888888_Fast_projected_tetrahedra_volume_rendering_based_on_parallelized_accurate_sorting, fetched 2026-10-29 (unofficial)
+[S1] Fast projected tetrahedra volume rendering based on parallelized accurate sorting, https://www.researchgate.net/publication/245386896_Fast_projected_tetrahedra_volume_rendering_based_on_parallelized_accurate_sorting, fetched 2026-10-29 (unofficial)
 [S2] Volume and Isosurface Rendering with GPU‐Accelerated Cell Projection, https://www.researchgate.net/publication/227523087_Volume_and_Isosurface_Rendering_with_GPU-Accelerated_Cell_Projection, fetched 2026-10-27 (unofficial)
