@@ -3,35 +3,35 @@
 Also called: Cube Bounding Box, Cubify Bounding Box, Equal-Axis Bounding Box, Mesh Bounding Box Normalization
 
 ## Overview
-Bounding Cube Creation adjusts an axis-aligned bounding box (AABB) to be a perfect cube by expanding the smaller dimensions to match the largest dimension, centered on the original bounding box center. This method is primarily used in voxelization and sparse voxel octree (SVO) construction to ensure uniform grid resolution across all axes, simplifying spatial partitioning logic. It differs from sibling methods like [Character Bounding Box Initialization](4016-character-bounding-box-initialization.md) which may account for specific character proportions, and [Volume Bounds Computation](5114-volume-bounds-computation.md) which may define bounds for existing volumetric data rather than mesh primitives.
+Bounding Cube Creation adjusts an axis-aligned bounding box (AABB) to be a perfect cube by expanding the smaller dimensions to match the largest dimension, centered on the original bounding box center [S1, S2, unofficial]. This method is used in voxelization pipelines to ensure uniform grid resolution across all axes [S2, unofficial]. It differs from sibling methods like [Character Bounding Box Initialization](4016-character-bounding-box-initialization.md) which may account for specific character proportions, and [Volume Bounds Computation](5114-volume-bounds-computation.md) which may define bounds for existing volumetric data rather than mesh primitives [G].
 
 ## How it works
 **Inputs:**
-- An axis-aligned bounding box (AABB) defined by minimum and maximum coordinates.
+- An axis-aligned bounding box (AABB) defined by minimum and maximum coordinates [S2, unofficial].
 - The AABB is represented as a structure `AABox` containing two 3D vectors: `min` and `max` [S2, unofficial].
 
 **Outputs:**
-- A modified `AABox` where `max.x - min.x == max.y - min.y == max.z - min.z`.
+- A modified `AABox` where `max.x - min.x == max.y - min.y == max.z - min.z` [S2, unofficial].
 
 **Data Structures:**
 - `AABox`: A structure with fields `min` (vec3) and `max` (vec3) [S2, unofficial].
-- `vec3`: A 3D vector with components `x`, `y`, `z`.
+- `vec3`: A 3D vector with components `x`, `y`, `z` [G].
 
 **Steps:**
-1. Retrieve the current `min` and `max` vectors of the mesh's bounding box.
-2. Calculate the length of the bounding box along each axis:
-   $$ L_x = max.x - min.x $$
-   $$ L_y = max.y - min.y $$
-   $$ L_z = max.z - min.z $$
-3. Determine the maximum length among the three axes:
-   $$ L_{max} = \max(L_x, L_y, L_z) $$
-4. For each axis $i \in \{x, y, z\}$:
+1. Retrieve the current `min` and `max` vectors of the mesh's bounding box [S1, S2, unofficial].
+2. Apply a scaling offset (typically $1.0$) to `min` and `max` [S1, unofficial].
+3. Calculate the length of the bounding box along each axis:
+   $$ L_x = \text{max}.x - \text{min}.x $$
+   $$ L_y = \text{max}.y - \text{min}.y $$
+   $$ L_z = \text{max}.z - \text{min}.z $$
+4. Determine the maximum length among the three axes:
+   $$ L_{\text{max}} = \max(L_x, L_y, L_z) $$
+5. For each axis $i \in \{x, y, z\}$:
    a. Calculate the required expansion delta:
-      $$ \delta_i = L_{max} - L_i $$
-   b. If $\delta_i > 0$ (or non-zero):
-      $$ min[i] = min[i] - \frac{\delta_i}{2} $$
-      $$ max[i] = max[i] + \frac{\delta_i}{2} $$
-   c. If $\delta_i = 0$, no change is made to that axis.
+      $$ \delta_i = L_{\text{max}} - L_i $$
+   b. If $\delta_i \neq 0$, adjust the bounds symmetrically:
+      $$ \text{min}[i] = \text{min}[i] - \frac{\delta_i}{2.0} $$
+      $$ \text{max}[i] = \text{max}[i] + \frac{\delta_i}{2.0} $$
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -48,17 +48,18 @@ def create_bounding_cube(aabb_min, aabb_max):
     Returns:
         tuple: (new_min, new_max) as vec3.
     """
+    # Apply scaling offset (typically 1.0)
+    scale = 1.0
+    new_min = vec3(aabb_min.x * scale, aabb_min.y * scale, aabb_min.z * scale)
+    new_max = vec3(aabb_max.x * scale, aabb_max.y * scale, aabb_max.z * scale)
+    
     # Calculate lengths along each axis
-    length_x = aabb_max.x - aabb_min.x
-    length_y = aabb_max.y - aabb_min.y
-    length_z = aabb_max.z - aabb_min.z
+    length_x = new_max.x - new_min.x
+    length_y = new_max.y - new_min.y
+    length_z = new_max.z - new_min.z
     
     # Find the maximum dimension
     max_length = max(length_x, length_y, length_z)
-    
-    # Initialize new min and max
-    new_min = vec3(aabb_min.x, aabb_min.y, aabb_min.z)
-    new_max = vec3(aabb_max.x, aabb_max.y, aabb_max.z)
     
     # Adjust X axis
     delta_x = max_length - length_x
@@ -82,23 +83,23 @@ def create_bounding_cube(aabb_min, aabb_max):
 ```
 
 **Parameters:**
-- No external parameters are required. The method is deterministic based on the input AABB.
+- No external parameters are required. The method is deterministic based on the input AABB [G].
 
 **Edge Cases and Pitfalls:**
-- **Degenerate Input:** If the mesh is a point or line segment, some lengths may be zero. The algorithm handles this correctly by expanding zero-length axes to match the largest non-zero length.
-- **Precision:** Floating-point arithmetic should be used for the division by 2.0 to maintain precision.
-- **Centering:** The expansion is symmetric ($\pm \delta/2$), ensuring the center of the bounding box remains unchanged.
+- **Degenerate Input:** If the mesh is a point or line segment, some lengths may be zero. The algorithm handles this correctly by expanding zero-length axes to match the largest non-zero length [G].
+- **Precision:** Floating-point arithmetic should be used for the division by 2.0 to maintain precision [G].
+- **Centering:** The expansion is symmetric ($\pm \delta/2$), ensuring the center of the bounding box remains unchanged [G].
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ as it involves a fixed number of arithmetic operations regardless of mesh size.
-- **Memory Complexity:** $O(1)$ as it only requires storing a few temporary variables.
-- **Strengths:** Simple to implement, computationally inexpensive, ensures uniform voxel grid dimensions.
-- **Limitations:** May introduce significant padding if the mesh is highly elongated in one dimension, potentially wasting memory in voxelization.
-- **When to use:** When constructing voxel grids or SVOs where uniform resolution is required.
-- **When not to use:** When memory efficiency is critical and the mesh has extreme aspect ratios, or when non-uniform voxel sizes are acceptable.
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Strengths:** Not given in the sources.
+- **Limitations:** Not given in the sources.
+- **When to use:** Not given in the sources.
+- **When not to use:** Not given in the sources.
 
 ## Background
-Bounding Cube Creation is a standard preprocessing step in voxelization pipelines, particularly in systems using Sparse Voxel Octrees (SVO) or similar hierarchical structures. It ensures that the spatial partitioning grid is isotropic, which simplifies ray-box intersection tests and voxel indexing. The method is commonly found in academic implementations of voxelization algorithms, such as those based on Huang et al.'s work [S2, unofficial].
+The method appears in voxelization implementations based on Huang et al.'s algorithm [S2, unofficial]. It ensures that the spatial partitioning grid is isotropic, which simplifies ray-box intersection tests and voxel indexing [G].
 
 ## Sources
 [S1] GilesPenfold/MasterThesisSVO, https://github.com/GilesPenfold/MasterThesisSVO, fetched 2026-10-26 (unofficial)

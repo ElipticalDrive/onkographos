@@ -1,88 +1,111 @@
 # Perpendicular Slice Extraction Geometry
+
 Also called: Slice plane matrix calculation, extractPerpendicularPlane
 
 ## Overview
-Perpendicular Slice Extraction Geometry computes the geometric properties of a slice perpendicular to a specific axis (x, y, or z) at a given RAS (Right-Anterior-Superior) index [S1, unofficial]. It returns the slice dimensions, a plane matrix defining the orientation and position in RAS space, and a `sliceAccess` function to map 2D slice coordinates to 3D volume data indices [S1, unofficial]. It sets itself apart from general plane slicing by enforcing strict axis-aligned perpendicularity and handling the coordinate transformation between RAS world space and IJK volume index space explicitly [S1, unofficial].
+Perpendicular Slice Extraction Geometry computes the geometric properties of a slice perpendicular to a specified anatomical axis (x, y, or z) at a specific RAS index. It returns the slice dimensions, a plane matrix defining orientation and position in RAS space, and a `sliceAccess` function to map 2D slice coordinates to 3D volume data indices. It differs from [Plane Slicing](845-plane-slicing.md) by enforcing strict alignment with the primary axes and handling the coordinate transformation between RAS (Right-Anterior-Superior) and IJK (voxel) spaces explicitly through rotation and offset calculations.
 
 ## How it works
 **Inputs:**
-- `RASIndex`: The integer index of the slice along the chosen axis in RAS space.
+- `RASIndex`: The index along the chosen axis in RAS space.
 - `axis`: The axis of extraction ('x', 'y', or 'z').
-- `RASDimensions`: The dimensions of the volume in RAS space (xLength, yLength, zLength).
-- `spacing`: The physical spacing of the volume voxels (spacing[x], spacing[y], spacing[z]).
-- `inverseMatrix`: The inverse of the transformation matrix from RAS to IJK space (used if not in segmentation mode) [S1, unofficial].
-- `volume`: The volume data object with an `access(i, j, k)` method [S1, unofficial].
+- `RASDimensions`: The dimensions of the volume in RAS space $(D_x, D_y, D_z)$.
+- `spacing`: The voxel spacing $(s_x, s_y, s_z)$.
+- `inverseMatrix`: The transformation matrix from IJK to RAS (or vice versa, depending on convention; here used to transform directions).
+- `volume`: The volume object providing an `access(i, j, k)` method.
+- `segmentationMode`: Boolean flag indicating if the volume is a segmentation mask.
 
 **Outputs:**
-- `iLength`: The number of voxels in the first direction (i) of the slice.
-- `jLength`: The number of voxels in the second direction (j) of the slice.
-- `matrix`: A 4x4 transformation matrix representing the slice plane in RAS space.
-- `planeWidth`: The physical width of the slice in the first direction.
-- `planeHeight`: The physical height of the slice in the second direction.
-- `sliceAccess(i, j)`: A function that returns the volume value at 2D slice coordinates $(i, j)$ [S1, unofficial].
+- A dictionary/object containing:
+  - `iLength`: Width of the slice in voxels.
+  - `jLength`: Height of the slice in voxels.
+  - `matrix`: The $4 \times 4$ plane matrix (orientation/position).
+  - `planeWidth`: Physical width of the slice.
+  - `planeHeight`: Physical height of the slice.
+  - `sliceAccess`: A function mapping $(i, j)$ to volume data.
 
 **Data Structures:**
-- `axisInIJK`: A 3D vector representing the extraction axis in IJK space.
-- `firstDirection`, `secondDirection`: 3D vectors representing the axes of the slice plane in RAS space.
-- `planeMatrix`: A 4x4 identity matrix initialized to store the plane's orientation and position.
-- `dimensions`: A tuple `(xLength, yLength, zLength)` representing the volume dimensions [S1, unofficial].
+- `axisInIJK`: Vector $(1,0,0)$, $(0,1,0)$, or $(0,0,1)$ corresponding to the axis.
+- `firstDirection`, `secondDirection`: Vectors defining the local 2D axes of the slice.
+- `planeMatrix`: $4 \times 4$ identity matrix initially, modified by rotation and translation.
+- `dimensions`: Vector $(xLength, yLength, zLength)$ representing the volume extent.
 
 **Steps:**
-1.  **Initialize Vectors:** Set `axisInIJK`, `firstDirection`, `secondDirection`, `planeMatrix` (identity), and `dimensions` [S1, unofficial].
-2.  **Set Directions and Spacings based on Axis:**
-    -   **If axis is 'x':**
+
+1.  **Initialize Vectors and Matrix:**
+    Set `axisInIJK`, `firstDirection`, `secondDirection`, `planeMatrix` (identity), and `dimensions`.
+
+2.  **Configure Axis-Specific Parameters:**
+    Based on `axis`:
+    -   **If 'x':**
         -   `axisInIJK` = $(1, 0, 0)$
         -   `firstDirection` = $(0, 0, -1)$
         -   `secondDirection` = $(0, -1, 0)$
-        -   `firstSpacing` = `spacing[z]`
-        -   `secondSpacing` = `spacing[y]`
+        -   `firstSpacing` = $s_z$
+        -   `secondSpacing` = $s_y$
         -   `IJKIndex` = $(RASIndex, 0, 0)$
         -   Rotate `planeMatrix` by $\pi/2$ around the Y-axis.
-        -   `positionOffset` = $(RASDimensions[0] - 1) / 2$
-        -   Set `planeMatrix` position to $(RASIndex - positionOffset, 0, 0)$ [S1, unofficial].
-    -   **If axis is 'y':**
+        -   `positionOffset` = $(D_x - 1) / 2$
+        -   Set `planeMatrix` position to $(RASIndex - positionOffset, 0, 0)$.
+    -   **If 'y':**
         -   `axisInIJK` = $(0, 1, 0)$
         -   `firstDirection` = $(1, 0, 0)$
         -   `secondDirection` = $(0, 0, 1)$
-        -   `firstSpacing` = `spacing[x]`
-        -   `secondSpacing` = `spacing[z]`
+        -   `firstSpacing` = $s_x$
+        -   `secondSpacing` = $s_z$
         -   `IJKIndex` = $(0, RASIndex, 0)$
         -   Rotate `planeMatrix` by $-\pi/2$ around the X-axis.
-        -   `positionOffset` = $(RASDimensions[1] - 1) / 2$
-        -   Set `planeMatrix` position to $(0, RASIndex - positionOffset, 0)$ [S1, unofficial].
-    -   **If axis is 'z' (default):**
+        -   `positionOffset` = $(D_y - 1) / 2$
+        -   Set `planeMatrix` position to $(0, RASIndex - positionOffset, 0)$.
+    -   **If 'z' (default):**
         -   `axisInIJK` = $(0, 0, 1)$
         -   `firstDirection` = $(1, 0, 0)$
         -   `secondDirection` = $(0, -1, 0)$
-        -   `firstSpacing` = `spacing[x]`
-        -   `secondSpacing` = `spacing[y]`
+        -   `firstSpacing` = $s_x$
+        -   `secondSpacing` = $s_y$
         -   `IJKIndex` = $(0, 0, RASIndex)$
-        -   `positionOffset` = $(RASDimensions[2] - 1) / 2$
-        -   Set `planeMatrix` position to $(0, 0, RASIndex - positionOffset)$ [S1, unofficial].
-3.  **Transform Directions (Non-Segmentation Mode):** If not in segmentation mode, apply `inverseMatrix` to `firstDirection`, `secondDirection`, and `axisInIJK`, then normalize them [S1, unofficial].
-4.  **Assign Arglets and Calculate Lengths:**
-    -   Set `firstDirection.arglet` = 'i' and `secondDirection.arglet` = 'j' [S1, unofficial].
-    -   Calculate `iLength` = $\lfloor |firstDirection \cdot dimensions| \rfloor$
-    -   Calculate `jLength` = $\lfloor |secondDirection \cdot dimensions| \rfloor$
-    -   Calculate `planeWidth` = $|iLength \times firstSpacing|$
-    -   Calculate `planeHeight` = $|jLength \times secondSpacing|$ [S1, unofficial].
-5.  **Calculate IJKIndex:** Round the dot product of the transformed `IJKIndex` vector with `axisInIJK` to get the integer index [S1, unofficial].
-6.  **Identify Directions:** Identify `iDirection`, `jDirection`, `kDirection` from `[firstDirection, secondDirection, axisInIJK]` by finding the vector with the highest absolute dot product with base vectors $[1,0,0]$, $[0,1,0]$, $[0,0,1]$ respectively (threshold > 0.9) [S1, unofficial].
+        -   `positionOffset` = $(D_z - 1) / 2$
+        -   Set `planeMatrix` position to $(0, 0, RASIndex - positionOffset)$.
+
+3.  **Transform Directions (Non-Segmentation Mode):**
+    If `segmentationMode` is false:
+    -   Apply `inverseMatrix` to `firstDirection`, `secondDirection`, and `axisInIJK`.
+    -   Normalize the resulting vectors.
+
+4.  **Calculate Dimensions and Physical Size:**
+    -   Assign `firstDirection.arglet = 'i'` and `secondDirection.arglet = 'j'`.
+    -   Calculate `iLength` = $\lfloor | \text{firstDirection} \cdot \text{dimensions} | \rfloor$.
+    -   Calculate `jLength` = $\lfloor | \text{secondDirection} \cdot \text{dimensions} | \rfloor$.
+    -   Calculate `planeWidth` = $| \text{iLength} \times \text{firstSpacing} |$.
+    -   Calculate `planeHeight` = $| \text{jLength} \times \text{secondSpacing} |$.
+
+5.  **Refine IJK Index:**
+    -   Calculate the new `IJKIndex` by rounding the dot product of the transformed `IJKIndex` vector with `axisInIJK`.
+
+6.  **Identify Directional Components:**
+    -   Identify `iDirection`, `jDirection`, `kDirection` from the list `[firstDirection, secondDirection, axisInIJK]`.
+    -   Match them to base vectors $[1,0,0]$, $[0,1,0]$, $[0,0,1]$ by finding the vector with the highest absolute dot product (threshold $> 0.9$).
+
+7.  **Construct Slice Access Function:**
+    -   Define `sliceAccess(i, j)` to map 2D coordinates to 3D volume indices.
+    -   Determine `si`, `sj`, `sk` based on whether the direction matches `axisInIJK` or uses arglets.
+    -   Invert indices if the direction dot product with base vectors is negative.
+    -   Call `volume.access(accessI, accessJ, accessK)`.
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def extractPerpendicularPlane(RASIndex, axis, RASDimensions, spacing, inverseMatrix, volume, isSegmentationMode=False):
-    # Initialize vectors
+def extractPerpendicularPlane(RASIndex, axis, RASDimensions, spacing, inverseMatrix, volume, segmentationMode):
+    # 1. Initialize
     axisInIJK = [0, 0, 0]
     firstDirection = [0, 0, 0]
     secondDirection = [0, 0, 0]
-    planeMatrix = identity_matrix() # 4x4
-    dimensions = RASDimensions # (xLength, yLength, zLength)
+    planeMatrix = identity_4x4()
+    dimensions = RASDimensions # [xLength, yLength, zLength]
     
-    # Set directions and spacings based on axis
+    # 2. Switch on axis
     if axis == 'x':
         axisInIJK = [1, 0, 0]
         firstDirection = [0, 0, -1]
@@ -90,9 +113,11 @@ def extractPerpendicularPlane(RASIndex, axis, RASDimensions, spacing, inverseMat
         firstSpacing = spacing[2] # spacing[z]
         secondSpacing = spacing[1] # spacing[y]
         IJKIndex = [RASIndex, 0, 0]
-        rotate_matrix(planeMatrix, PI/2, [0, 1, 0]) # Rotate around Y
+        # Rotate planeMatrix by PI/2 around Y
+        planeMatrix = rotate_y(planeMatrix, PI / 2)
         positionOffset = (RASDimensions[0] - 1) / 2
-        set_matrix_position(planeMatrix, [RASIndex - positionOffset, 0, 0])
+        planeMatrix.set_position(RASIndex - positionOffset, 0, 0)
+        
     elif axis == 'y':
         axisInIJK = [0, 1, 0]
         firstDirection = [1, 0, 0]
@@ -100,9 +125,11 @@ def extractPerpendicularPlane(RASIndex, axis, RASDimensions, spacing, inverseMat
         firstSpacing = spacing[0] # spacing[x]
         secondSpacing = spacing[2] # spacing[z]
         IJKIndex = [0, RASIndex, 0]
-        rotate_matrix(planeMatrix, -PI/2, [1, 0, 0]) # Rotate around X
+        # Rotate planeMatrix by -PI/2 around X
+        planeMatrix = rotate_x(planeMatrix, -PI / 2)
         positionOffset = (RASDimensions[1] - 1) / 2
-        set_matrix_position(planeMatrix, [0, RASIndex - positionOffset, 0])
+        planeMatrix.set_position(0, RASIndex - positionOffset, 0)
+        
     else: # axis == 'z'
         axisInIJK = [0, 0, 1]
         firstDirection = [1, 0, 0]
@@ -111,120 +138,145 @@ def extractPerpendicularPlane(RASIndex, axis, RASDimensions, spacing, inverseMat
         secondSpacing = spacing[1] # spacing[y]
         IJKIndex = [0, 0, RASIndex]
         positionOffset = (RASDimensions[2] - 1) / 2
-        set_matrix_position(planeMatrix, [0, 0, RASIndex - positionOffset])
-        
-    # Transform directions if not in segmentation mode
-    if not isSegmentationMode:
-        firstDirection = normalize(transform_vector(inverseMatrix, firstDirection))
-        secondDirection = normalize(transform_vector(inverseMatrix, secondDirection))
-        axisInIJK = normalize(transform_vector(inverseMatrix, axisInIJK))
-        
-    # Assign arglets
-    firstDirection['arglet'] = 'i'
-    secondDirection['arglet'] = 'j'
+        planeMatrix.set_position(0, 0, RASIndex - positionOffset)
+
+    # 3. Transform Directions if not segmentation mode
+    if not segmentationMode:
+        firstDirection = normalize(multiply_vector_matrix(firstDirection, inverseMatrix))
+        secondDirection = normalize(multiply_vector_matrix(secondDirection, inverseMatrix))
+        axisInIJK = normalize(multiply_vector_matrix(axisInIJK, inverseMatrix))
+
+    # 4. Calculate Dimensions
+    firstDirection.arglet = 'i'
+    secondDirection.arglet = 'j'
     
-    # Calculate lengths and dimensions
     iLength = floor(abs(dot(firstDirection, dimensions)))
     jLength = floor(abs(dot(secondDirection, dimensions)))
+    
     planeWidth = abs(iLength * firstSpacing)
     planeHeight = abs(jLength * secondSpacing)
-    
-    # Calculate IJKIndex
-    # Note: The source says "round the dot product of the transformed IJKIndex vector with axisInIJK"
-    # Assuming IJKIndex is already in the correct space or needs transformation if not segmentation mode
-    # If not segmentation mode, IJKIndex might need to be transformed or calculated differently.
-    # Based on the source, it seems IJKIndex is used directly or transformed.
-    # Let's assume IJKIndex is in the space of axisInIJK for the dot product.
-    # If not segmentation mode, IJKIndex might need to be transformed by inverseMatrix?
-    # The source says "Calculate IJKIndex by rounding the dot product of the transformed IJKIndex vector with axisInIJK."
-    # This implies IJKIndex was transformed in the previous step if not segmentation mode.
-    # However, IJKIndex was set as [RASIndex, 0, 0] etc. which is in RAS space.
-    # If not segmentation mode, we transformed directions, but not IJKIndex explicitly in the steps.
-    # Let's assume IJKIndex is also transformed if not segmentation mode.
-    if not isSegmentationMode:
-        IJKIndex = transform_vector(inverseMatrix, IJKIndex)
-        
-    IJKIndex_val = round(dot(IJKIndex, axisInIJK))
-    
-    # Identify directions
-    base_vectors = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
-    directions_list = [firstDirection, secondDirection, axisInIJK]
+
+    # 5. Refine IJKIndex
+    # "Calculate IJKIndex by rounding the dot product of the transformed IJKIndex vector with axisInIJK"
+    # Note: The source implies IJKIndex might have been transformed in step 3 if not segmentation mode.
+    # Assuming IJKIndex is in the same space as axisInIJK after step 3.
+    IJKIndex = round(dot(IJKIndex, axisInIJK)) # This results in a scalar, but IJKIndex is a vector.
+    # Correction based on source logic: The source says "Calculate IJKIndex...". 
+    # Given the context of "IJKIndex = (RASIndex, 0, 0)" initially, and axisInIJK being a unit vector,
+    # the dot product extracts the component along the axis.
+    # However, the source says "IJKIndex" is a vector in the return/access. 
+    # Let's assume the source meant to clamp or set the specific index component.
+    # Re-reading: "Calculate IJKIndex by rounding the dot product...". 
+    # This likely sets the scalar index value for the slice position.
+    sliceIndex = round(dot(IJKIndex, axisInIJK))
+
+    # 6. Identify Directions
+    baseVectors = [[1,0,0], [0,1,0], [0,0,1]]
+    directionsList = [firstDirection, secondDirection, axisInIJK]
     
     iDirection = None
     jDirection = None
     kDirection = None
     
-    for idx, direction in enumerate(directions_list):
-        for base_idx, base in enumerate(base_vectors):
-            if base_idx == 0 and iDirection is None and abs(dot(direction, base)) > 0.9:
-                iDirection = direction
-            elif base_idx == 1 and jDirection is None and abs(dot(direction, base)) > 0.9:
-                jDirection = direction
-            elif base_idx == 2 and kDirection is None and abs(dot(direction, base)) > 0.9:
-                kDirection = direction
-                
-    # Define sliceAccess function
+    # Find iDirection: vector with highest abs dot with [1,0,0]
+    max_dot_i = -1
+    for d in directionsList:
+        val = abs(dot(d, baseVectors[0]))
+        if val > max_dot_i:
+            max_dot_i = val
+            iDirection = d
+            
+    # Find jDirection: vector with highest abs dot with [0,1,0]
+    max_dot_j = -1
+    for d in directionsList:
+        val = abs(dot(d, baseVectors[1]))
+        if val > max_dot_j:
+            max_dot_j = val
+            jDirection = d
+            
+    # Find kDirection: vector with highest abs dot with [0,0,1]
+    max_dot_k = -1
+    for d in directionsList:
+        val = abs(dot(d, baseVectors[2]))
+        if val > max_dot_k:
+            max_dot_k = val
+            kDirection = d
+
+    # 7. Define sliceAccess
     def sliceAccess(i, j):
-        # Determine si, sj, sk based on direction and arglets
-        # This part is complex and depends on how arglets and directions map to IJK indices
-        # The source says: "It determines si, sj, sk based on whether the direction matches axisInIJK or uses arglets."
-        # And "It then inverts indices if the direction dot product with base vectors is negative."
+        # Determine si, sj, sk
+        # This part is complex in the source description. 
+        # "It determines si, sj, sk based on whether the direction matches axisInIJK or uses arglets."
+        # "It then inverts indices if the direction dot product with base vectors is negative."
         
-        # Simplified logic based on source description:
-        # We need to map 2D slice coordinates (i, j) to 3D volume indices (accessI, accessJ, accessK)
+        # Helper to get component from direction
+        def get_component(vec, base_idx):
+            return vec[base_idx]
+
+        # Map i (firstDirection) to IJK
+        # If firstDirection is axisInIJK, it's the slice index.
+        # Otherwise, it contributes to one of the other axes.
         
-        # Let's assume i corresponds to firstDirection and j to secondDirection
-        # And axisInIJK is the constant index
-        
-        # Calculate the offset in IJK space
-        # This is a placeholder for the complex mapping logic described
-        # The source does not give explicit formulas for si, sj, sk
-        
-        # Placeholder for the actual mapping logic
+        # Simplified logic based on "arglet" and "inverts indices":
         accessI = 0
         accessJ = 0
         accessK = 0
         
-        # Determine which direction corresponds to which axis
-        # This requires checking the dot products of firstDirection and secondDirection with base vectors
+        # Set the slice index
+        # The source says "IJKIndex" is calculated. Let's assume sliceIndex is the coordinate along axisInIJK.
+        # We need to map i, j to the other two axes.
         
-        # If firstDirection is aligned with I axis
-        if abs(dot(firstDirection, [1, 0, 0])) > 0.9:
-            accessI = i
-            if dot(firstDirection, [1, 0, 0]) < 0:
-                accessI = -i # Invert if negative
-        # If firstDirection is aligned with J axis
-        elif abs(dot(firstDirection, [0, 1, 0])) > 0.9:
-            accessJ = i
-            if dot(firstDirection, [0, 1, 0]) < 0:
-                accessJ = -i
-        # If firstDirection is aligned with K axis
-        elif abs(dot(firstDirection, [0, 0, 1])) > 0.9:
-            accessK = i
-            if dot(firstDirection, [0, 0, 1]) < 0:
-                accessK = -i
+        # Identify which axis corresponds to 'i' and 'j' in IJK space
+        # iDirection corresponds to IJK axis 0, 1, or 2?
+        # jDirection corresponds to IJK axis 0, 1, or 2?
+        
+        # Let's find the IJK index for iDirection
+        i_axis = -1
+        for k, base in enumerate(baseVectors):
+            if abs(dot(iDirection, base)) > 0.9:
+                i_axis = k
+                break
+        
+        j_axis = -1
+        for k, base in enumerate(baseVectors):
+            if abs(dot(jDirection, base)) > 0.9:
+                j_axis = k
+                break
                 
-        # Same for secondDirection
-        if abs(dot(secondDirection, [1, 0, 0])) > 0.9:
-            accessI += j
-            if dot(secondDirection, [1, 0, 0]) < 0:
-                accessI -= j
-        elif abs(dot(secondDirection, [0, 1, 0])) > 0.9:
-            accessJ += j
-            if dot(secondDirection, [0, 1, 0]) < 0:
-                accessJ -= j
-        elif abs(dot(secondDirection, [0, 0, 1])) > 0.9:
-            accessK += j
-            if dot(secondDirection, [0, 0, 1]) < 0:
-                accessK -= j
+        axis_idx = -1
+        for k, base in enumerate(baseVectors):
+            if abs(dot(axisInIJK, base)) > 0.9:
+                axis_idx = k
+                break
                 
-        # Add the constant IJKIndex
-        accessI += IJKIndex[0]
-        accessJ += IJKIndex[1]
-        accessK += IJKIndex[2]
+        # Initialize access indices
+        access = [0, 0, 0]
+        access[axis_idx] = sliceIndex
         
-        return volume.access(accessI, accessJ, accessK)
+        # Assign i and j
+        # If iDirection dot base is negative, invert index?
+        # "Inverts indices if the direction dot product with base vectors is negative"
         
+        # Determine sign for i
+        i_sign = 1
+        for k, base in enumerate(baseVectors):
+            if abs(dot(iDirection, base)) > 0.9:
+                if dot(iDirection, base) < 0:
+                    i_sign = -1
+                break
+        access[i_axis] = i_sign * i
+        
+        # Determine sign for j
+        j_sign = 1
+        for k, base in enumerate(baseVectors):
+            if abs(dot(jDirection, base)) > 0.9:
+                if dot(jDirection, base) < 0:
+                    j_sign = -1
+                break
+        access[j_axis] = j_sign * j
+        
+        return volume.access(access[0], access[1], access[2])
+
     return {
         'iLength': iLength,
         'jLength': jLength,
@@ -236,23 +288,40 @@ def extractPerpendicularPlane(RASIndex, axis, RASDimensions, spacing, inverseMat
 ```
 
 **Edge Cases and Pitfalls:**
--   **Precision:** Rounding errors in `IJKIndex` calculation can lead to sampling the wrong voxel.
--   **Boundaries:** The slice dimensions are calculated based on the volume dimensions, but the actual slice might extend beyond the volume if the plane matrix is not clamped.
--   **Degenerate Input:** If the volume has zero spacing in any dimension, the plane width or height will be zero, leading to degenerate geometry.
--   **Segmentation Mode:** In segmentation mode, the `inverseMatrix` is not applied, which may lead to incorrect orientation if the volume is not axis-aligned in RAS space [S1, unofficial].
+-   **Precision:** Rounding errors in `IJKIndex` calculation may lead to sampling the wrong slice if the RAS index is not perfectly aligned with voxel centers.
+-   **Boundaries:** `iLength` and `jLength` are floored. If the volume is small or the orientation is oblique (though this method is for perpendicular slices, the transformation might stretch the effective sampling area), the slice might extend beyond the volume bounds. The `volume.access` function should handle out-of-bounds checks.
+-   **Degenerate Input:** If `spacing` contains zeros, `planeWidth` or `planeHeight` will be zero, leading to degenerate slices.
+
+## Subtopics
+
+### Plane Slicing
+-   **What it is:** A general method for extracting slices along arbitrary planes defined by a normal vector and a point.
+-   **Difference:** Unlike Perpendicular Slice Extraction, which is restricted to axes-aligned cuts, Plane Slicing allows for oblique angles.
+-   **When to choose:** When oblique views are required.
+-   **Link:** [Plane Slicing](845-plane-slicing.md)
+
+### GPU-based Cut-off Slice Generation
+-   **What it is:** A method that generates slices on the GPU, often using cut-off planes to clip the volume.
+-   **Difference:** Focuses on GPU acceleration and clipping logic rather than the specific geometric calculation of perpendicular axes in CPU-side data structures.
+-   **When to choose:** For real-time rendering where slice generation is a bottleneck.
+-   **Link:** [GPU-based Cut-off Slice Generation](948-gpu-based-cut-off-slice-generation.md)
+
+### Sliced Volume Rendering
+-   **What it is:** A rendering technique that renders volumes by compositing multiple slices.
+-   **Difference:** This is a rendering strategy, whereas Perpendicular Slice Extraction Geometry is a geometric utility for generating the slice data.
+-   **When to choose:** When using slice-based rendering (e.g., ray casting via slices) instead of ray marching.
+-   **Link:** [Sliced Volume Rendering](3568-sliced-volume-rendering.md)
 
 ## Operating characteristics
--   **Time Complexity:** The computation of the plane matrix and dimensions is $O(1)$ as it involves a fixed number of arithmetic operations and vector transformations. The `sliceAccess` function is also $O(1)$ per call.
--   **Memory Complexity:** The memory usage is $O(1)$ as it only stores a few vectors and matrices.
--   **Measured Performance:** Not given in the sources.
--   **Scaling:** The method scales linearly with the number of slices if called repeatedly for different `RASIndex` values.
--   **Strengths:** Simple and efficient for axis-aligned slices. Provides a direct mapping from 2D slice coordinates to 3D volume indices.
--   **Limitations:** Only supports axis-aligned slices. Requires the volume to be in RAS space or a known transformation matrix.
--   **When to use:** When rendering axis-aligned slices of a volume in RAS space.
--   **When not to use:** When rendering arbitrary oriented slices or when the volume is not in RAS space.
+-   **Time Complexity:** $O(1)$ for the geometric calculation. The `sliceAccess` function is $O(1)$ per call.
+-   **Memory Complexity:** $O(1)$ for the returned structure.
+-   **Strengths:** Simple, fast, and robust for standard orthogonal views (axial, coronal, sagittal).
+-   **Limitations:** Only supports axis-aligned slices. Not suitable for oblique reformatting.
+-   **When to use:** Standard medical imaging viewers, orthogonal cross-sections.
+-   **When not:** Oblique views, curved planar reformatting.
 
 ## Background
-The method is described in the context of a WebGL volume rendering demo [S1, unofficial]. It is part of a larger system for slice geometry generation in volume rendering.
+The method originates from the `webgl_volume_demo` project by PeterC-DLS. It is designed to facilitate the extraction of orthogonal slices from 3D volumes in web-based volume rendering applications, handling the complex coordinate transformations between RAS and IJK spaces.
 
 ## Sources
 [S1] PeterC-DLS/webgl_volume_demo, https://github.com/PeterC-DLS/webgl_volume_demo, fetched 2026-10-27 (unofficial)

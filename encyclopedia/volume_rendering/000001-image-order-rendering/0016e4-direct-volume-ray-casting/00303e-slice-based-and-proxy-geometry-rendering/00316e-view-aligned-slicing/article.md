@@ -3,131 +3,183 @@
 Also called: View-Aligned Proxy Geometry Sampling, View-Aligned Slice Rendering
 
 ## Overview
-View-Aligned Slicing is a direct volume rendering technique that decomposes a 3D volume into a series of 2D triangular proxy polygons aligned with the view direction [S2, unofficial][S3, unofficial]. It solves the problem of inconsistent sampling density and artifacts inherent in fixed-grid slicing by dynamically regenerating geometry to maintain consistent slice thickness relative to the camera [S1, unofficial]. Unlike standard ray casting which samples volume textures directly, this method rasterizes explicit geometry, requiring geometry regeneration on every view change [S2, unofficial].
+View-Aligned Slicing is a direct volume rendering technique that decomposes a 3D volume into a series of 2D proxy polygons (typically quads or triangle fans) aligned with the view direction [S2, S3, unofficial][S4]. Unlike standard ray casting which samples the volume texture directly per pixel, this method generates explicit geometry that is rasterized, requiring dynamic regeneration of the proxy mesh when the camera transform changes [S2, unofficial]. It sets itself apart from siblings like [Texture-Based Volume Rendering](4707-texture-based-volume-rendering.md) by explicitly managing slice geometry to maintain consistent sampling distance relative to the camera, thereby reducing view-dependent aliasing artifacts [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** 3D volumetric data (scalar field), camera parameters (view and projection matrices), number of slices ($N$).
-*   **Output:** 2D image composited into the frame buffer.
+- **Input:** 3D volume data (scalar field), camera view matrix, projection matrix, number of slices ($N$).
+- **Output:** 2D image composited into the framebuffer.
 
 **Data Structures:**
-*   **Volume Texture:** A 3D texture (`sampler3D`) storing the scalar data. Clamping mode must be `GL_CLAMP_TO_BORDER` to prevent artifacts during coordinate transformation [S3, unofficial].
-*   **Transfer Function:** A 1D texture (`sampler2D`) mapping scalar values to color ($C$) and opacity ($\alpha$) [S1, unofficial][S3, unofficial].
-*   **Vertex Buffer (`a_position`):** A `Float32Array` containing flat vertex coordinates $[x, y, z]$ for all slices concatenated together [S2, unofficial].
-*   **Offset/Length Array (`offsets_length`):** An array of tuples $[offset, length]$, where $offset$ is the byte offset in the vertex buffer and $length$ is the number of vertices for each slice [S2, unofficial].
+1.  **Volume Texture:** A 3D texture holding the scalar data. Clamping mode must be `GL_CLAMP_TO_BORDER` to prevent artifacts during texture coordinate transformation [S3, unofficial].
+2.  **Transfer Function:** A 1D texture mapping scalar values to color and opacity [S2, S3, unofficial].
+3.  **Vertex Buffer (`a_position`):** A `Float32Array` containing concatenated vertex coordinates $[x, y, z]$ for all slices [S2, unofficial].
+4.  **Offset Array (`offsets_length`):** An array of tuples $[offset, length]$, where `offset` is the byte offset in the vertex buffer and `length` is the number of vertices for each slice [S2, unofficial].
 
-**Algorithm Steps:**
+**Numbered Steps:**
 
 1.  **Initialization:**
-    *   Load 3D volume data into a 3D texture [S3, unofficial].
-    *   Load transfer function into a 1D texture [S3, unofficial].
-    *   Calculate the total number of slices to generate. Sources indicate generating $2N$ slices during initialization and $N$ slices during the draw pass [S2, unofficial]. Let $N$ be the base number of slices [S2, unofficial][S3, unofficial].
+    - Load 3D volume data into a 3D texture [S3, unofficial].
+    - Initialize the transfer function texture [S2, unofficial].
+    - Generate initial proxy geometry. The initialization phase may generate $2N$ slices to pre-compute bounds, while the draw pass uses $N$ slices [S2, unofficial].
+    - Scale a unit cube to match the volume dimensions $W \times H \times D$ [S3, unofficial].
 
-2.  **Geometry Generation (Per Frame):**
-    *   Compute the view-aligned geometry by intersecting slicing planes with the volume's bounding box [S1, unofficial].
-    *   The volume is conceptually divided into $N$ slices along the z-direction [S3, unofficial].
-    *   A rotation matrix is applied to align these slices with the view plane (typically the X-Y plane) [S3, unofficial]. This can be achieved by transforming the texture coordinates in the vertex shader while keeping the proxy geometry (unit quad/cube) stationary, or by rotating the geometry itself [S3, unofficial].
-    *   Vertices are sorted in counter-clockwise order [S1, unofficial].
-    *   Construct polygon primitives from the centroid as a triangle fan [S1, unofficial].
-    *   *Pitfall:* When constructing triangles from slice vertices, if the index $k+1$ exceeds the array length, it wraps around to index 1 to ensure closed polygons [S2, unofficial].
-    *   Update the vertex attribute buffer `a_position` with the newly generated slice data [S1, unofficial].
+2.  **Per-Frame Geometry Generation:**
+    - Determine the number of slices $N$ based on the desired sampling rate [S3, unofficial].
+    - Divide the volume into $N$ slices along the local z-direction [S3, unofficial].
+    - Calculate the view-aligned geometry by intersecting these slicing planes with the volume's bounding box [S1, unofficial].
+    - Compute the rotation matrix that aligns the slicing planes with the view plane (X-Y plane) [S3, unofficial]. This can be achieved by rotating the view so the desired plane is parallel to the image plane [S2, unofficial].
+    - Sort the resulting vertices in counter-clockwise order [S1, unofficial].
+    - Construct polygon primitives from the centroid as triangle fans [S1, unofficial].
+    - Update the vertex attribute buffer `a_position` with the newly generated slice data [S2, unofficial].
 
 3.  **Rendering Loop:**
-    *   Enable blending: `gl.enable(gl.BLEND)` [S2, unofficial].
-    *   Set blend function for the Over operator: Source = `GL_ONE`, Destination = `GL_ONE_MINUS_SRC_ALPHA` [S1, unofficial][S2, unofficial].
-    *   Disable face culling during rendering to handle arbitrary orientations: `gl.disable(gl.CULL_FACE)` [S2, unofficial].
-    *   Bind the vertex buffer and enable the vertex attribute array for `a_position` [S2, unofficial].
-    *   Iterate through the `offsets_length` array. For each slice $i$:
-        *   Set the vertex pointer: size 3, type `gl.FLOAT`, normalized false, stride 0, offset $= offset_i \times 4$ bytes (for Float32 alignment) [S2, unofficial].
-        *   Draw the slice using `gl.drawArrays(gl.TRIANGLES, 0, length_i)` [S2, unofficial].
-    *   Re-enable face culling if required for subsequent passes: `gl.enable(gl.CULL_FACE)` [S2, unofficial].
+    - Enable blending with `gl.enable(gl.BLEND)` and set blend function to `gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)` [S2, unofficial].
+    - Disable face culling during rendering to ensure correct back-to-front compositing if necessary, or rely on draw order [S2, unofficial].
+    - Bind the vertex buffer and enable the vertex attribute array for `a_position` [S2, unofficial].
+    - Iterate through the `offsets` array. For each slice $i$ with offset $O_i$ and length $L_i$:
+        - Set the vertex pointer: size 3, type `gl.FLOAT`, normalized false, stride 0, offset $O_i \times 4$ (for Float32 byte alignment) [S2, unofficial].
+        - Pass shader uniforms: `sliceNumber`, `totalSlices`, `MVPMatrix`, `ModelMatrix`, `ViewMatrix`, `TextureMatrix` [S3, unofficial].
+        - Draw the slice using `gl.drawArrays(gl.TRIANGLES, 0, L_i)` [S2, unofficial].
+    - Re-enable face culling after rendering [S2, unofficial].
+
+4.  **Fragment Shader Processing:**
+    - Transform texture coordinates in the vertex shader [S3, unofficial].
+    - Sample the 3D volume texture at the interpolated 3D texture coordinates $(u, v, w)$ to retrieve scalar value $V(\mathbf{p})$ [S1, S5, S6, unofficial].
+    - Look up color $C$ and opacity $\alpha$ from the 1D transfer function texture using $V(\mathbf{p})$ [S2, S3, unofficial].
+    - Composite the fragment into the framebuffer using hardware alpha blending [S1, S2, S8].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_view_aligned_slices(volume_texture, transfer_fn, camera_transform, num_slices):
+def render_view_aligned_slices(volume_texture, transfer_fn_texture, camera_transform, num_slices):
     """
-    Renders a 3D volume using view-aligned slicing proxy geometry.
+    Renders a 3D volume using view-aligned slicing.
     
     Args:
         volume_texture: 3D texture object containing scalar data.
-        transfer_fn: 1D texture object for color/opacity mapping.
+        transfer_fn_texture: 1D texture object for color/opacity mapping.
         camera_transform: Object containing lookAtMatrix, perspectiveMatrix, translationMatrix.
-        num_slices: Base number of slices N.
+        num_slices: Integer, base number of slices for rendering.
     """
     # 1. Setup OpenGL State
     gl.enable(gl.BLEND)
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
-    gl.disable(gl.CULL_FACE) # Disable culling for arbitrary view alignment
+    gl.disable(gl.CULL_FACE) # Disable culling to handle back-to-front order correctly
     
-    # 2. Bind Shaders and Textures
-    use_program(volume_shader_program)
-    bind_texture_3d(volume_texture, unit=0)
-    bind_texture_1d(transfer_fn, unit=1)
+    # 2. Generate View-Aligned Geometry
+    # Calculate matrices from camera transform
+    look_at_matrix = camera_transform.lookAtMatrix
+    perspective_matrix = camera_transform.perspectiveMatrix
+    translation_matrix = camera_transform.translationMatrix
     
-    # 3. Generate Geometry
-    # Note: Some implementations generate 2*N during init, N during draw [S2, unofficial]
-    # Here we generate N slices for the current frame
-    vertex_data, offsets_length = generate_view_aligned_slices(
+    # Generate slice geometry. 
+    # Note: Implementation may generate 2*num_slices during init, but num_slices during draw.
+    vertices, offsets_length = generate_view_aligned_slices(
         slice_count=num_slices,
-        look_at_matrix=camera_transform.lookAtMatrix,
-        translation_matrix=camera_transform.translationMatrix
+        look_at_matrix=look_at_matrix,
+        translation_matrix=translation_matrix
     )
     
-    # 4. Update Vertex Buffer
-    update_attribute_buffer("a_position", vertex_data)
+    # Update vertex buffer
+    vertex_buffer = create_buffer(vertices)
+    vertex_attr = get_attribute_location("a_position")
+    gl.bind_buffer(gl.ARRAY_BUFFER, vertex_buffer)
+    gl.enable_vertex_attrib_array(vertex_attr)
     
-    # 5. Render Loop
-    a_position_loc = get_attribute_location("a_position")
-    gl.enableVertexAttribArray(a_position_loc)
-    bind_buffer(gl.ARRAY_BUFFER, get_buffer_id("a_position"))
-    
+    # 3. Render Each Slice
     for offset, length in offsets_length:
-        # Set vertex pointer: 3 floats, no normalization, stride 0, byte offset
-        vertex_pointer(
-            location=a_position_loc,
+        # Set vertex pointer: 3 floats, no normalization, stride 0, offset in bytes
+        gl.vertex_attrib_pointer(
+            vertex_attr,
             size=3,
             type=gl.FLOAT,
             normalized=False,
             stride=0,
-            offset=offset * 4 # Float32 is 4 bytes
+            offset=offset * 4 # 4 bytes per float
         )
         
-        # Draw triangles for this slice
-        draw_arrays(primitive_type=gl.TRIANGLES, first=0, count=length)
+        # Set Shader Uniforms
+        set_uniform("u_matrix_projection", perspective_matrix)
+        set_uniform("u_matrix_camera_translation", look_at_matrix)
+        set_uniform("u_matrix_translation", translation_matrix)
+        set_uniform("u_volume_size", volume_dimensions)
         
-    gl.disableVertexAttribArray(a_position_loc)
-    gl.enable(gl.CULL_FACE) # Restore culling state
+        # Bind Textures
+        gl.active_texture(gl.TEXTURE0)
+        gl.bind_texture(gl.TEXTURE_3D, volume_texture)
+        gl.active_texture(gl.TEXTURE1)
+        gl.bind_texture(gl.TEXTURE_2D, transfer_fn_texture)
+        
+        # Draw Slice
+        gl.draw_arrays(gl.TRIANGLES, 0, length)
+        
+    # 4. Cleanup State
+    gl.enable(gl.CULL_FACE)
+    gl.disable(gl.BLEND)
+
+def generate_view_aligned_slices(slice_count, look_at_matrix, translation_matrix):
+    """
+    Generates vertices and offsets for view-aligned slices.
+    Intersects slicing planes with volume bounding box.
+    """
+    vertices = []
+    offsets = []
+    
+    # Divide volume into slice_count slices in z-direction
+    # Rotate view so slices align with X-Y plane
+    # Intersect with bounding box to form 2D polygons
+    
+    for i in range(slice_count):
+        # Calculate slice position and geometry
+        # Construct polygon primitive from centroid as triangle fan
+        # Sort vertices in counter-clockwise order
+        
+        slice_vertices = create_slice_geometry(i, slice_count, look_at_matrix, translation_matrix)
+        
+        # Handle wrapping for closed polygons if necessary
+        # If k + 1 exceeds array length, wrap index to 1
+        
+        current_offset = len(vertices)
+        vertices.extend(slice_vertices)
+        offsets.append((current_offset, len(slice_vertices)))
+        
+    return flatten(vertices), offsets
 ```
 
-**Formulas and Parameters:**
-*   **Sampling Rate:** Determined by `numberOfSlices` ($N$) [S3, unofficial].
-*   **Vertex Offset:** The byte offset for the $i$-th slice in the vertex buffer is calculated as $offset_i \times 4$ bytes, assuming `Float32` vertices [S2, unofficial].
-*   **Texture Coordinate Transformation:** The rotation matrix transforms texture coordinates in the vertex shader to align slices with the view plane [S3, unofficial].
+**Parameters:**
+- `numberOfSlices` ($N$): The base number of slices used for rendering. Determines the sampling rate [S2, S3, unofficial].
+- `lookAtMatrix`: Defines the camera orientation and position [S2, unofficial].
+- `translationMatrix`: Defines the volume's position relative to the camera [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Texture Artifacts:** Using `GL_CLAMP_TO_BORDER` for the 3D texture is critical to avoid artifacts caused by the transformation of texture coordinates [S3, unofficial].
-*   **Geometry Closure:** Triangle construction must handle index wrapping to ensure closed polygons [S2, unofficial].
-*   **View Alignment:** The proxy geometry must be strictly view-aligned to ensure samples can be correctly read from the frame buffer in subsequent interaction steps (e.g., picking) [S4].
+- **Texture Coordinate Artifacts:** Using `GL_CLAMP_TO_BORDER` for the 3D texture is critical to avoid artifacts caused by the transformation of texture coordinates when view-aligning [S3, unofficial].
+- **Polygon Winding:** Vertices must be sorted in counter-clockwise order to ensure correct rasterization and blending [S1, unofficial].
+- **Index Wrapping:** When constructing triangles from slice vertices, ensure indices wrap correctly (e.g., to index 1) if the loop counter exceeds the array length to maintain closed polygons [S2, unofficial].
+- **View Alignment:** The line or plane proxy geometry must be strictly view-aligned to ensure samples can be correctly read from the frame buffer in subsequent passes (e.g., for picking or arbitrary slicing) [S4].
 
 ## Subtopics
 
+### [VoxelBlur Depth-of-Field Volume Rendering](10657-voxelblur-depth-of-field-volume-rendering.md)
+VoxelBlur is an interactive direct volume rendering method that provides a depth-of-field effect by selectively blurring voxels based on their distance from a predefined focus plane, simulating real-world camera lens systems. It extends the view-aligned slicing technique by splitting the rendering pipeline into front-to-back and back-to-front passes, each maintaining an intermediate buffer where blur is applied during compositing. Unlike standard back-to-front blending which relies on native GPU blending, VoxelBlur uses custom shader-based blending to enable the blur effect, allowing users to enhance depth perception and separate focus from context.
+
 ### Arbitrary Slicing
-Arbitrary Slicing extends View-Aligned Slicing by using planes as proxy geometry to sample arbitrary planes within the volume, rather than just view-aligned slices for full rendering [S4]. It removes depth complexity when exploring volumes [S4]. The plane is view-aligned (rotated to be parallel to the image plane) and rendered to the back buffer, allowing results to be displayed in a separate viewport or as a textured polygon in object space [S4]. This technique enables interactive probing and slicing without deforming the mesh of the proxy geometry [S4].
+Arbitrary Slicing uses a plane as proxy geometry to sample arbitrary planes for removing depth complexity and exploring volumes [S4]. The implementation view-aligns the slicing plane and renders it to the back buffer [S4]. The result can be displayed either in a separate viewport or as a textured polygon in object space [S4]. This requires rotating the view so the arbitrary plane is parallel to the image plane, rendering the element, and then reading the results from the frame buffer [S4].
 
 ## Operating characteristics
-*   **Time Complexity:** Geometry generation is $O(N)$ where $N$ is the number of slices. Rasterization is $O(P)$ where $P$ is the number of pixels covered by the proxy geometry.
-*   **Memory Complexity:** $O(V)$ for the volume texture and $O(N \cdot V_{poly})$ for the vertex buffer, where $V_{poly}$ is the vertex count per slice.
-*   **Performance:** Slower than fixed-grid methods due to per-frame geometry regeneration [S1, unofficial]. However, it is more memory efficient than full ray casting for large volumes [S1, unofficial].
-*   **Strengths:** Consistent sampling distance regardless of viewpoint [S1, unofficial]. Reduces sampling artifacts compared to fixed-grid slicing [S3, unofficial].
-*   **Limitations:** Requires geometry regeneration on every view change [S2, unofficial]. Not suitable for dynamic volume data without frequent buffer updates.
-*   **When to use:** Interactive visualization where consistent sampling quality is prioritized over raw frame rate, or when exploring volumes with arbitrary slicing planes [S4].
-*   **When not to use:** Real-time applications with strict performance constraints where fixed-grid slicing is sufficient, or when the volume data changes every frame.
+- **Time Complexity:** $O(N \cdot V_{poly})$, where $N$ is the number of slices and $V_{poly}$ is the number of vertices per slice. Geometry generation is $O(N)$ but must be performed every frame if the view changes [S2, unofficial].
+- **Memory Complexity:** $O(V_{total})$ for the vertex buffer, where $V_{total}$ is the total number of vertices for all slices [S2, unofficial].
+- **Measured Performance:** Slower than texture-based volume rendering due to the overhead of generating and uploading geometry per frame, but more memory efficient than full ray casting for large volumes [S1, unofficial].
+- **Scaling:** Performance scales linearly with the number of slices. Increasing $N$ improves sampling accuracy but increases draw calls and vertex processing load [S2, S3, unofficial].
+- **Strengths:** Consistent sampling distance relative to the camera, reducing view-dependent aliasing artifacts [S1, unofficial]. Enables easy integration of arbitrary slicing and picking operations [S4].
+- **Limitations:** Requires dynamic geometry regeneration on every frame when the camera moves, which can be costly [S2, unofficial]. Not suitable for highly dynamic scenes with frequent camera changes without optimization [S2, unofficial].
+- **When to use:** When consistent sampling density is required regardless of view angle, or when integrating interactive slicing/picking features [S1, unofficial][S4].
+- **When not to use:** When performance is critical and view changes are frequent, or when the volume is static and texture-based methods are sufficient [S2, unofficial].
 
 ## Background
-View-Aligned Slicing is part of the broader family of proxy geometry rendering methods for volume visualization. It was developed to address the limitations of fixed-grid slicing, such as inconsistent sampling density and artifacts when the camera moves [S1, unofficial][S3, unofficial]. The technique leverages hardware rasterization capabilities to perform volume sampling, integrating with standard graphics pipelines [S2, unofficial][S4]. It is often discussed in the context of interactive volume visualization and dynamic deformations [S4].
+View-Aligned Slicing is a proxy geometry-based volume rendering technique. It was developed as part of the broader effort to integrate dynamic deformations into interactive volume visualization, allowing for flexible sampling strategies using proxy geometry [S4]. The method leverages hardware rasterization to sample 3D textures, bridging the gap between traditional ray casting and texture-based rendering [S2, unofficial][S4]. It is commonly used in interactive visualization tools where user interaction (such as slicing or picking) requires explicit control over the sampling geometry [S4].
 
 ## Sources
 [S1] GPU volume rendering, http://www.slideserve.com/hilliard/volume-rendering-using-graphics-hardware, fetched 2026-10-26 (unofficial)

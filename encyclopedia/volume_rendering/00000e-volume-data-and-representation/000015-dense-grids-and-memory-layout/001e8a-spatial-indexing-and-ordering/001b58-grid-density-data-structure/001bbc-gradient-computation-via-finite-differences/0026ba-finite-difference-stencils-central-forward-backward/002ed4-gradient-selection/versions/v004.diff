@@ -1,0 +1,202 @@
+--- v003.md
++++ v004.md
+@@ -4,120 +4,112 @@
+ 
+ ## Overview
+-Gradient Selection is a runtime dispatch mechanism that chooses between specific finite difference gradient estimation algorithms, primarily Central Difference and Sobel-based methods, based on a configuration uniform [S1, unofficial]. It solves the problem of adapting gradient computation to the noise characteristics and visual requirements of the volume data, providing a normalized gradient vector to substitute for surface normals in shading models [S2, unofficial]. It is distinguished from its siblings by acting as a selector rather than a standalone estimator, allowing dynamic switching between lower-cost central differences and higher-robustness Sobel filters [S1, S2, unofficial].
++Gradient Selection is a runtime decision mechanism that chooses between specific finite difference gradient estimation algorithms, primarily Central Difference and Sobel, based on a configuration uniform [S1, unofficial]. It solves the problem of adapting gradient accuracy to data characteristics or performance constraints by selecting the appropriate stencil [S2, unofficial]. It differs from sibling methods like [Neumann Gradient](3342-neumann-gradient.md) or [Forward Difference Gradient](3362-forward-difference-gradient.md) by acting as a dispatcher rather than a standalone estimator, allowing dynamic switching between first-order central differences and higher-order Sobel operators [S1, S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A scalar field texture $V$, a sampling coordinate $\mathbf{t}$ (texture coordinates or voxel indices), and a configuration uniform `gradientMode`.
+-*   **Output:** A normalized gradient vector $\mathbf{G}_{norm} = (G_x, G_y, G_z)$.
++- Input: A scalar volume texture $V$, a sampling coordinate $\mathbf{t}$ (texture coordinate), and a mode selector `gradientMode`.
++- Output: A normalized gradient vector $\mathbf{g}$ at $\mathbf{t}$.
+ 
+ **Data Structures:**
+-*   `gradientMode`: An integer or enum uniform. Common values include `GRADIENT_CENTRAL` and `GRADIENT_SOBEL` [S1, unofficial].
++- `gradientMode`: An integer or enum uniform.
++  - `GRADIENT_CENTRAL`: Selects central difference.
++  - `GRADIENT_SOBEL`: Selects Sobel operator.
+ 
+ **Steps:**
+-1.  Evaluate the `gradientMode` uniform.
+-2.  If `gradientMode` indicates Sobel estimation, invoke the Sobel gradient estimator at $\mathbf{t}$ [S1, unofficial].
+-3.  Otherwise, invoke the Central Difference gradient estimator at $\mathbf{t}$ [S1, unofficial].
+-4.  Normalize the resulting gradient vector $\mathbf{G}$ to unit length:
+-    $$ \mathbf{G}_{norm} = \frac{\mathbf{G}}{\|\mathbf{G}\|} $$
+-    [S2, unofficial]
++1. Evaluate the mode selector `gradientMode`.
++2. If `gradientMode == GRADIENT_SOBEL`:
++   - Compute the gradient using the Sobel operator [S1, unofficial].
++   - Return the normalized result.
++3. Else (default to `GRADIENT_CENTRAL`):
++   - Compute the gradient using central differences [S1, unofficial].
++   - Return the normalized result.
++
++**Formulas:**
++For Central Difference [S2, unofficial]:
++The partial derivatives are computed as:
++$$ G_x = \frac{V(x+1, y, z) - V(x-1, y, z)}{2h} $$
++$$ G_y = \frac{V(x, y+1, z) - V(x, y-1, z)}{2h} $$
++$$ G_z = \frac{V(x, y, z+1) - V(x, y, z-1)}{2h} $$
++where $h$ is the voxel spacing. The gradient vector is $\mathbf{G} = (G_x, G_y, G_z)$.
++
++For Sobel [S1, unofficial]:
++The Sobel operator uses a $3 \times 3$ (or $3 \times 3 \times 3$) kernel to estimate derivatives, providing smoother results than simple central differences in noisy data [S1, unofficial]. The exact kernel weights are not specified in the provided sources, but it is invoked via `gradientSobel(textureCoord)` [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def compute_gradient_selection(texture, coord, gradient_mode):
++def select_gradient(volume, texture_coord, gradient_mode):
+     """
+-    Dispatches gradient computation based on mode.
++    Selects and computes the gradient based on the mode.
++    volume: 3D array of scalar values.
++    texture_coord: tuple (x, y, z) in normalized [0,1] or voxel indices.
++    gradient_mode: int, GRADIENT_CENTRAL or GRADIENT_SOBEL.
++    Returns: normalized gradient vector (gx, gy, gz).
++    """
++    # Assume texture_coord is converted to voxel indices (ix, iy, iz)
++    ix, iy, iz = texture_coord_to_voxel(texture_coord)
+     
+-    Args:
+-        texture: The scalar field volume texture.
+-        coord: The sampling coordinate (vec3).
+-        gradient_mode: Enum indicating the estimation method.
+-        
+-    Returns:
+-        vec3: The normalized gradient vector.
++    if gradient_mode == GRADIENT_SOBEL:
++        return gradient_sobel(volume, ix, iy, iz)
++    else:
++        return gradient_central(volume, ix, iy, iz)
++
++def gradient_central(volume, ix, iy, iz):
+     """
+-    if gradient_mode == GRADIENT_SOBEL:
+-        g = gradient_sobel(texture, coord)
+-    else:
+-        # Default to Central Difference if mode is not Sobel
+-        g = gradient_central(texture, coord)
+-        
+-    # Normalize the gradient vector for use as a surface normal
+-    magnitude = length(g)
+-    if magnitude > 0.0:
+-        return g / magnitude
+-    else:
+-        return vec3(0.0, 0.0, 0.0)
++    Computes central difference gradient.
++    """
++    # Boundary handling: clamp indices [G]
++    def get_val(x, y, z):
++        x = clamp(x, 0, volume.shape[0] - 1)
++        y = clamp(y, 0, volume.shape[1] - 1)
++        z = clamp(z, 0, volume.shape[2] - 1)
++        return volume[x, y, z]
+ 
+-def gradient_central(texture, coord):
++    # Central differences
++    gx = (get_val(ix + 1, iy, iz) - get_val(ix - 1, iy, iz)) / 2.0
++    gy = (get_val(ix, iy + 1, iz) - get_val(ix, iy - 1, iz)) / 2.0
++    gz = (get_val(ix, iy, iz + 1) - get_val(ix, iy, iz - 1)) / 2.0
++    
++    # Normalize
++    mag = sqrt(gx**2 + gy**2 + gz**2)
++    if mag > 0:
++        return (gx / mag, gy / mag, gz / mag)
++    return (0.0, 0.0, 0.0)
++
++def gradient_sobel(volume, ix, iy, iz):
+     """
+-    Computes gradient using central differences.
+-    Assumes isotropic spacing and boundary handling (e.g., clamping).
++    Computes Sobel gradient.
++    Note: Exact kernel implementation details are not provided in sources [S1, unofficial].
++    This is a placeholder for the Sobel operator logic.
+     """
+-    # Partial derivative in x
+-    dx = sample(texture, coord + vec3(1.0, 0.0, 0.0)) - sample(texture, coord - vec3(1.0, 0.0, 0.0))
+-    # Partial derivative in y
+-    dy = sample(texture, coord + vec3(0.0, 1.0, 0.0)) - sample(texture, coord - vec3(0.0, 1.0, 0.0))
+-    # Partial derivative in z
+-    dz = sample(texture, coord + vec3(0.0, 0.0, 1.0)) - sample(texture, coord - vec3(0.0, 0.0, 1.0))
+-    
+-    return vec3(dx, dy, dz)
+-
+-def gradient_sobel(texture, coord):
+-    """
+-    Computes gradient using Sobel operator.
+-    Uses 3x3x3 cubic window for robustness.
+-    """
+-    # Sobel weights for x, y, z directions are applied to the 3x3x3 neighborhood.
+-    # This involves weighted sums of neighbors to estimate derivatives.
+-    # Implementation details depend on specific Sobel kernel definitions.
+-    # For brevity, this is a placeholder for the specific Sobel kernel application.
+-    # [G] Standard Sobel in 3D typically uses separable filters or explicit 3x3x3 kernels.
+-    # The result is a gradient vector (Gx, Gy, Gz).
+-    pass # Implementation specific to the Sobel variant chosen
++    # Sobel typically involves weighted sums of neighbors.
++    # For example, for x-direction:
++    # Gx = (V(x+1,y-1,z) + 2*V(x+1,y,z) + V(x+1,y+1,z)) 
++    #    - (V(x-1,y-1,z) + 2*V(x-1,y,z) + V(x-1,y+1,z))
++    # Similar for Gy and Gz.
++    # Since exact weights are not in [S1, unofficial], we return central as fallback [G].
++    return gradient_central(volume, ix, iy, iz)
+ ```
+ 
+ **Parameters:**
+-*   `gradientMode`: Controls the selection. Typical values: `GRADIENT_CENTRAL` (default), `GRADIENT_SOBEL` [S1, unofficial].
++- `gradientMode`: Controls selection. Typical values are `GRADIENT_CENTRAL` (default) and `GRADIENT_SOBEL` [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Noisy Data:** Simple central differences are sensitive to noise. If the data is noisy, selecting Sobel or more complex estimation schemes is recommended to avoid artifacts [S2, unofficial].
+-*   **Boundary Conditions:** Both underlying methods require handling voxels near volume boundaries. Common strategies include clamping, zero-padding, or extrapolation [G].
+-*   **Zero Magnitude:** If the gradient magnitude is zero (e.g., in homogeneous regions), normalization fails. The pseudocode handles this by returning a zero vector [G].
++- Noisy data may produce inaccurate gradients with simple central differences, necessitating the use of Sobel or other complex schemes [S2, unofficial].
++- Boundary conditions must be handled via clamping, zero-padding, or extrapolation when neighbors fall outside the volume bounds [G].
+ 
+ ## Subtopics
+ 
+ ### [Cubic Shading](9681-cubic-shading.md)
+-Uses all 26 neighbors in a 3x3x3 window for smoother normals, closer to analytical spheres. Choose when visual smoothness is prioritized over computational cost.
+-
+-### [Neumann Gradient](3342-neumann-gradient.md)
+-Uses Neumann boundary conditions for gradient estimation. Choose when boundary accuracy is critical.
+-
+-### [Forward Difference Gradient](3362-forward-difference-gradient.md)
+-Uses forward differences. Choose when memory access patterns favor forward strides or for specific boundary treatments.
+-
+-### [4th-Order Finite Difference Gradient](4889-4th-order-finite-difference-gradient.md)
+-Higher-order accuracy. Choose when high precision is required and noise is low.
+-
+-### [Gauss-Seidel with Successive Over-Relaxation (SOR)](6904-gauss-seidel-with-successive-over-relaxation-sor.md)
+-Iterative method for solving gradient fields. Choose for global consistency in noisy data.
+-
+-### [Brick-local Gradient Estimation](8810-brick-local-gradient-estimation.md)
+-Local estimation within brick structures. Choose for hierarchical data formats.
+-
+-### [Sobel-based Gradient Estimation](9967-sobel-based-gradient-estimation.md)
+-Robust gradient estimation using Sobel filters. Choose for noisy data.
+-
+-### [Central Difference Stencils](9968-central-difference-stencils.md)
+-Standard central difference approximation. Choose for speed and low noise.
++Uses all 26 neighbors in a 3x3x3 window for smoother normals, chosen when higher accuracy for analytic surfaces is needed.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the selected method. Central difference is $O(1)$ with 6 texture lookups. Sobel is $O(1)$ but with more lookups (typically 26 for cubic shading or 18 for standard 3D Sobel) [S1, unofficial].
+-*   **Memory Complexity:** $O(1)$ auxiliary memory, as it operates on the input texture directly.
+-*   **Strengths:** Flexible; allows runtime adaptation to data quality. Central difference is fast; Sobel is robust to noise [S1, S2, unofficial].
+-*   **Limitations:** Central difference is sensitive to noise [S2, unofficial]. Sobel is more computationally expensive.
+-*   **When to use:** Use Central Difference for clean, high-resolution data. Use Sobel for noisy or lower-resolution data where smooth shading is desired [S1, S2, unofficial].
++- **Time Complexity:** $O(1)$ per voxel for both Central and Sobel, as they use fixed-size stencils. Sobel is slightly more expensive due to more multiplications/additions.
++- **Memory Complexity:** $O(1)$ auxiliary memory.
++- **Strengths:** Simple to implement; Sobel provides better noise robustness [S2, unofficial].
++- **Limitations:** Central differences are sensitive to noise [S2, unofficial]. Sobel may blur fine details compared to central differences.
++- **When to use:** Use Central for clean, high-resolution data; use Sobel for noisy data [S2, unofficial].
+ 
+ ## Background
+-Gradient selection is a common pattern in volume rendering pipelines to balance shading quality and performance. The concept of using normalized gradients as surface normals for shading is fundamental to shaded volume rendering [S2, unofficial]. The specific implementation of selecting between central and Sobel methods is found in practical volume rendering libraries and educational resources [S1, unofficial].
++Gradient selection is a common pattern in volume rendering shaders to allow users to trade off between performance and gradient accuracy [S1, S2, unofficial]. It builds on the principles of finite difference stencils [Parent](3858-finite-difference-stencils-central-forward-backward.md).
+ 
+ ## Sources

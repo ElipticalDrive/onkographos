@@ -6,21 +6,21 @@ PlenOctree is an octree-based 3D representation that enables real-time rendering
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A trained NeRF-SH model (a neural network predicting density and spherical harmonic coefficients) and a set of training images.
-*   **Output:** A sparse octree data structure where leaves store density ($\sigma$) and spherical harmonic (SH) coefficients for view-dependent appearance.
+*   **Input:** A trained NeRF-SH model (a neural network predicting density and spherical harmonic coefficients) and a set of training images [S1, unofficial].
+*   **Output:** A sparse octree data structure where leaves store density ($\sigma$) and spherical harmonic (SH) coefficients for view-dependent appearance [S1, unofficial].
 
 **Data Structures:**
-The representation is a sparse voxel-based octree.
-*   **Node:** Internal nodes typically store bounding boxes or occupancy flags to enable traversal skipping of empty space [S1, unofficial].
+The representation is a sparse voxel-based octree [S1, unofficial].
+*   **Node:** Internal nodes store occupancy flags or bounding volumes to enable traversal skipping of empty space [S1, unofficial].
 *   **Leaf:** Stores the physical properties of the volume element:
-    *   $\sigma$: Density value (scalar).
-    *   $\mathbf{c}_{l,m}$: Spherical Harmonic coefficients for the $l$-th degree and $m$-th order. The source specifies that appearance is factorized via closed-form spherical basis functions [S1, unofficial]. The exact degree $L$ is not specified in the provided notes, but standard NeRF-SH implementations often use $L=3$ or $L=4$ [G].
+    *   $\sigma$: Density value (scalar) [S1, unofficial].
+    *   $\mathbf{c}_{l,m}$: Spherical Harmonic coefficients for the $l$-th degree and $m$-th order [S1, unofficial]. The source specifies that appearance is factorized via closed-form spherical basis functions [S1, unofficial]. The exact degree $L$ is Not given in the sources. Standard NeRF-SH implementations often use $L=3$ or $L=4$ [G].
 
 **Method Steps:**
 1.  **Sampling:** Densely sample the trained NeRF-SH model within the 3D volume surrounding the target object [S1, unofficial]. For each sample point $\mathbf{x}$ and a set of discretized viewing directions, query the NeRF-SH to obtain the density $\sigma(\mathbf{x})$ and the SH coefficients $\mathbf{c}(\mathbf{x})$ [S1, unofficial].
-2.  **Tabulation:** Populate the octree leaves with the sampled density and SH coefficients. Empty regions of the space are left unallocated or marked as empty to maintain sparsity [S1, unofficial].
-3.  **Optimization (Optional but Recommended):** Optimize the values stored in the PlenOctree directly using the training images. This step improves rendering quality by correcting discretization errors and aligning the tabulated values with the observed data. The rendering procedure remains differentiable with respect to these leaf values, allowing gradient-based optimization [S1, unofficial].
-4.  **Rendering:** To render a pixel, cast a ray through the octree. For each occupied leaf intersected by the ray, retrieve the density and SH coefficients. Compute the view-dependent color $\mathbf{c}(\mathbf{x}, \mathbf{d})$ by evaluating the spherical harmonic basis functions at the ray direction $\mathbf{d}$ using the stored coefficients [S1, unofficial]. Perform standard volume rendering (e.g., differentiable volume rendering) using the retrieved $\sigma$ and $\mathbf{c}$.
+2.  **Tabulation:** Populate the octree leaves with the sampled density and SH coefficients [S1, unofficial]. Empty regions of the space are left unallocated or marked as empty to maintain sparsity [S1, unofficial].
+3.  **Optimization:** Optimize the values stored in the PlenOctree directly using the training images [S1, unofficial]. This step improves rendering quality by aligning the tabulated values with the observed data [S1, unofficial]. The rendering procedure remains differentiable with respect to these leaf values, allowing gradient-based optimization [S1, unofficial].
+4.  **Rendering:** To render a pixel, cast a ray through the octree [S1, unofficial]. For each occupied leaf intersected by the ray, retrieve the density and SH coefficients [S1, unofficial]. Compute the view-dependent color $\mathbf{c}(\mathbf{x}, \mathbf{d})$ by evaluating the spherical harmonic basis functions at the ray direction $\mathbf{d}$ using the stored coefficients [S1, unofficial]. Perform standard volume rendering using the retrieved $\sigma$ and $\mathbf{c}$ [S1, unofficial].
 
 **Formulas:**
 The view-dependent color $\mathbf{c}$ at position $\mathbf{x}$ for direction $\mathbf{d} = (\theta, \phi)$ is computed as a weighted sum of spherical harmonic bases:
@@ -33,16 +33,16 @@ where $c_{l,m}(\mathbf{x})$ are the SH coefficients stored in the leaf at $\math
 *   **Sampling Density:** "Densely" is specified, but no numerical grid spacing is provided [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Discretization Error:** The initial tabulation is an approximation of the continuous NeRF. Optimization step 3 is critical to mitigate artifacts caused by coarse sampling [S1, unofficial].
+*   **Discretization Error:** The initial tabulation is an approximation of the continuous NeRF [S1, unofficial].
 *   **Memory Usage:** While sparse, high-resolution scenes with complex view-dependent effects (e.g., specularities) may require many leaves, potentially exceeding memory limits if sparsity is low [S1, unofficial].
 
 ## Operating characteristics
 *   **Performance:** Renders 800×800 images at 167.68 FPS on an NVIDIA V100 GPU [S1, unofficial]. This is over 3000 times faster than conventional NeRFs, which take approximately 30 seconds per image [S1, unofficial].
-*   **Memory:** Memory usage is determined by the number of occupied leaves in the octree. It is significantly lower than dense voxel grids but higher than the original NeRF model size due to the storage of SH coefficients per leaf [S1, unofficial].
+*   **Memory:** Memory usage is determined by the number of occupied leaves in the octree [S1, unofficial]. It is significantly lower than dense voxel grids but higher than the original NeRF model size due to the storage of SH coefficients per leaf [S1, unofficial].
 *   **Strengths:** Real-time rendering capability; preserves view-dependent effects (specularities); compatible with web technologies for browser-based interactive rendering [S1, unofficial].
 *   **Limitations:** Requires an initial training phase to build the octree; quality depends on the optimization step; memory bound limits the maximum resolution that can be captured for very large scenes [S1, unofficial].
-*   **When to use:** When real-time or interactive rendering of high-quality NeRFs is required.
-*   **When not to use:** When memory is extremely constrained and the scene is very large, or when the scene has no view-dependent effects (simpler representations may suffice).
+*   **When to use:** When real-time or interactive rendering of high-quality NeRFs is required [G].
+*   **When not to use:** When memory is extremely constrained and the scene is very large, or when the scene has no view-dependent effects (simpler representations may suffice) [G].
 
 ## Background
 PlenOctrees were introduced by Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng, and Angjoo Kanazawa from UC Berkeley, USC Institute for Creative Technologies, and Pinscreen [S1, unofficial]. The method is named after plenoptic functions, referencing the work of Adelson and Bergen [S1, unofficial]. It was developed to address the slow rendering speed of NeRFs, which rely on dense sampling and neural network inference for every sample point dependent on viewing direction [S1, unofficial]. The approach builds on the idea of pre-tabulating the NeRF into a view-dependent volume, similar to how Multi-Resolution Volumes (MPIs) or other sparse representations reduce compute, but specifically integrates spherical harmonics to handle view dependence [S1, unofficial]. Concurrent work includes NeX and other methods exploring sparse representations for real-time NeRFs [S1, unofficial].

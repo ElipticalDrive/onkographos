@@ -1,0 +1,196 @@
+--- v008.md
++++ v009.md
+@@ -14,4 +14,5 @@
+ - `Gain`: Amplitude multiplier per octave (typically 0.5) [S3][S5, unofficial].
+ - `Lacunarity`: Frequency multiplier per octave (typically 2.0 or varying 2.01–2.03) [S3][S4, S5, unofficial].
++- `Seed`: Integer for noise initialization (e.g., 123456) [S1, unofficial].
+ 
+ **Outputs:**
+@@ -19,9 +20,9 @@
+ 
+ **Data Structures:**
+-- The output is a contiguous memory buffer of floating-point values. In GPU implementations, this is often an `RWStructuredBuffer<float>` [S2, unofficial].
++- The output is a contiguous memory buffer of floating-point values [S2, unofficial]. In GPU implementations, this is typically an `RWStructuredBuffer<float>` [S2, unofficial].
+ - Thread groups are typically sized $[8, 8, 8]$ for parallel voxel generation [S2, unofficial].
+ 
+ **Algorithm:**
+-The generator iterates over every voxel in the grid. For each voxel, it computes a centered world position, initializes a value accumulator with a vertical gradient, and then sums the contributions of $N$ octaves of noise. Each octave scales the input coordinates by the lacunarity and multiplies the noise output by the gain. To prevent axis-aligned artifacts, the coordinate space is rotated or the lacunarity is varied between octaves [S3].
++The generator iterates over every voxel in the grid [S1, unofficial]. For each voxel, it computes a centered world position, initializes a value accumulator with a vertical gradient, and then sums the contributions of $N$ octaves of noise [S2, unofficial]. Each octave scales the input coordinates by the lacunarity and multiplies the noise output by the gain [S3]. To prevent axis-aligned artifacts, the coordinate space is rotated or the lacunarity is varied between octaves [S3].
+ 
+ **Formulas:**
+@@ -35,6 +36,6 @@
+ 
+ 3.  **FBM Accumulation:**
+-    $$ \text{value} \leftarrow \text{value} + \sum_{i=0}^{\text{Octaves}-1} \text{Gain}^i \cdot \text{Noise}(p_i) $$
+-    where $p_i$ is the transformed coordinate for octave $i$.
++    $$ \text{value} \leftarrow \text{value} + \sum_{i=0}^{\text{Octaves}-1} \text{Gain}^i \cdot \text{Noise}(q_i) $$
++    where $q_i$ is the transformed coordinate for octave $i$ [S3].
+ 
+ **Pseudocode:**
+@@ -42,113 +43,56 @@
+ 
+ ```python
+-import math
+-
+-def noise_3d(x, y, z):
+-    """
+-    Placeholder for a gradient-based noise function (e.g., Simplex or Perlin).
+-    Returns a value in [-1, 1] or [0, 1] depending on implementation.
+-    For this example, we assume a standard noise returning [-1, 1].
+-    """
+-    # Implementation details of the underlying hash/interpolation are in [S3]
+-    pass
+-
+ def generate_noise_field(Dims, Scale, Time, Octaves, Gain, UseRotation=True):
+     """
+     Generates a 3D scalar field using layered noise with vertical gradient.
+-    
+-    Args:
+-        Dims: tuple (Dx, Dy, Dz)
+-        Scale: float
+-        Time: float
+-        Octaves: int
+-        Gain: float
+-        UseRotation: bool, whether to use coordinate rotation to break artifacts
+-        
+-    Returns:
+-        list: Flat list of float values
+     """
+     Dx, Dy, Dz = Dims
+-    total_voxels = Dx * Dy * Dz
+-    voxels = [0.0] * total_voxels
++    voxels = [0.0] * (Dx * Dy * Dz)
+     
+-    # Precompute rotation matrix components if needed
+-    # mat2 m = mat2(1.6, 1.2, -1.2, 1.6) from [S3]
+-    # det(m) = 1.6*1.6 - (1.2*-1.2) = 2.56 + 1.44 = 4.0? 
+-    # Note: [S3] states |m|=2.0, likely referring to scaling factor or determinant sqrt.
+-    # We use the matrix values directly.
+-    m_a, m_b, m_c, m_d = 1.6, 1.2, -1.2, 1.6
+-    
++    # Precompute constants
++    m_a, m_b, m_c, m_d = 1.6, 1.2, -1.2, 1.6  # Rotation+scale matrix from [S3]
++    time_vec = (0.5 * Time, -0.1 * Time, -0.5 * Time)  # Derived from [S4, unofficial]: 0.5 * vec3(1.0, -0.2, -1.0)
++    base_scale = 0.5
++    base_factor = 2.02
++    factor_increment = 0.21
++
+     for id_z in range(Dz):
+         for id_y in range(Dy):
+             for id_x in range(Dx):
+                 # 1. Compute centered world position [S2, unofficial]
+-                p_x = Scale * (id_x + 0.5 - Dx / 2.0)
+-                p_y = Scale * (id_y + 0.5 - Dy / 2.0)
+-                p_z = Scale * (id_z + 0.5 - Dz / 2.0)
+-                
++                p = (Scale * (id_x + 0.5 - Dx / 2.0),
++                     Scale * (id_y + 0.5 - Dy / 2.0),
++                     Scale * (id_z + 0.5 - Dz / 2.0))
++
+                 # 2. Initialize value with vertical gradient [S2, unofficial]
+-                value = -p_y
+-                
+-                # 3. Add noise octaves
+-                # Variant A: Simplex with time offset and fixed scaling [S2, S4, unofficial]
+-                # This variant is used in [S2, unofficial] for SimplexNoise3D
+-                # Note: [S2, unofficial] adds two specific octaves. We generalize to N octaves.
+-                
+-                # Current coordinate for noise sampling
+-                curr_p_x = p_x
+-                curr_p_y = p_y
+-                curr_p_z = p_z
+-                
+-                # Time offset vector [S4, unofficial]
+-                time_offset_x = Time * 0.5 * 1.0
+-                time_offset_y = Time * 0.5 * -0.2
+-                time_offset_z = Time * 0.5 * -1.0
+-                
+-                # Initial scale and factor [S4, unofficial]
+-                current_scale = 0.5
+-                current_factor = 2.02
+-                
++                value = -p[1]
++
++                # 3. FBM accumulation
++                q = (p[0] + time_vec[0], p[1] + time_vec[1], p[2] + time_vec[2])
++                current_scale = base_scale
++                current_factor = base_factor
++
+                 for i in range(Octaves):
+-                    # Apply time offset [S4, unofficial]
+-                    sample_x = curr_p_x + time_offset_x
+-                    sample_y = curr_p_y + time_offset_y
+-                    sample_z = curr_p_z + time_offset_z
+-                    
+-                    # Sample noise. [S2, unofficial] uses SimplexNoise. [S3] uses generic noise.
+-                    # We assume noise returns [-1, 1]. If [0, 1], adjust accordingly.
+-                    n = noise_3d(sample_x, sample_y, sample_z)
+-                    
+-                    # Add to value. [S2, unofficial] multiplies noise by 0.5. 
+-                    # [S4, unofficial] uses current_scale. We follow [S4, unofficial] structure for FBM.
++                    # Sample base noise (implementation not specified in sources [G])
++                    n = noise_3d(q[0], q[1], q[2])
+                     value += current_scale * n
+-                    
+-                    # Update coordinates for next octave
++
++                    # Update coordinate for next octave
+                     if UseRotation:
+-                        # Rotate and scale [S3]
+-                        new_x = m_a * curr_p_x + m_b * curr_p_y
+-                        new_y = m_c * curr_p_x + m_d * curr_p_y
+-                        curr_p_x = new_x * current_factor
+-                        curr_p_y = new_y * current_factor
+-                        curr_p_z = curr_p_z * current_factor # Z also scales
++                        # Apply 2D rotation+scale to x,y, scale z independently [S3][S4, unofficial]
++                        new_x = m_a * q[0] + m_b * q[1]
++                        new_y = m_c * q[0] + m_d * q[1]
++                        q = (new_x * current_factor, new_y * current_factor, q[2] * current_factor)
+                     else:
+-                        # Standard scaling [S1, S4, unofficial]
+-                        curr_p_x *= current_factor
+-                        curr_p_y *= current_factor
+-                        curr_p_z *= current_factor
+-                        
++                        q = (q[0] * current_factor, q[1] * current_factor, q[2] * current_factor)
++
+                     # Update amplitude and lacunarity
+                     current_scale *= Gain
+-                    if UseRotation:
+-                        # [S3] uses constant lacunarity via matrix scale, 
+-                        # but [S4, unofficial] varies lacunarity. We vary it if not using rotation.
+-                        if not UseRotation:
+-                            current_factor += 0.21 # Varying lacunarity [S4, unofficial]
+-                    else:
+-                        current_factor *= 2.0 # Standard lacunarity [S1, unofficial]
++                    if not UseRotation:
++                        current_factor += factor_increment  # Varying lacunarity [S4, unofficial]
+ 
+                 # 4. Write to output buffer [S2, unofficial]
+                 idx = id_x + Dx * (id_y + Dy * id_z)
+                 voxels[idx] = value
+-                
+     return voxels
+ ```
+@@ -174,15 +118,14 @@
+ 
+ ### Ocean Wave Octave
+-A specialized FBM variant for water surfaces. It computes wave components using `sea_octave`, which mixes `abs(sin(uv))` and `abs(cos(uv))` to create peaked crests, and sums bidirectional propagation shifted by `SEA_TIME` [S3].
++A specialized FBM variant for water surfaces [S3]. It computes wave components using `sea_octave`, which mixes `abs(sin(uv))` and `abs(cos(uv))` to create peaked crests, and sums bidirectional propagation shifted by `SEA_TIME` [S3].
+ 
+ ### Bounded Perlin Noise Texture
+-A texture class that maps 3D points to RGB colors using Perlin noise, scaled and bounded within a specific region defined by `min_bound_` and `max_bound_` [S7, unofficial]. It stores color, scale, and a Perlin instance [S7, unofficial].
++A texture class that maps 3D points to RGB colors using Perlin noise, scaled and bounded within a specific region defined by `min_bound_` and `max_bound_` [S7, unofficial]. It stores `scale_`, `min_bound_`, `max_bound_`, and a `Perlin` instance `noise_` [S7, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(V \cdot O)$, where $V$ is the number of voxels and $O$ is the number of octaves. Each voxel requires $O$ noise evaluations [S5, unofficial].
+-- **Memory Complexity:** $O(V)$ for the output scalar field. Intermediate calculations are $O(1)$ per voxel [S2, unofficial].
+-- **Performance:** FBM is more computationally intensive than single-layer noise because it samples many waves, but produces more realistic results [S5, unofficial]. Performance can be optimized by reducing octave count for distant objects or using texture sampling instead of mathematical hash functions [S3].
+-- **Strengths:** Generates natural-looking, multi-scale detail suitable for clouds, terrain, and organic volumes [S3][S5, unofficial].
+-- **Limitations:** High computational cost for high-resolution volumes with many octaves. Axis-aligned artifacts if not properly randomized [S3].
++- FBM is more computationally intensive than single-layer noise because it samples many waves, but produces more realistic and stunning results [S5, unofficial].
++- Performance can be optimized by reducing octave count for distant objects or using texture sampling instead of mathematical hash functions [S3].
++- Strengths include generating natural-looking, multi-scale detail suitable for clouds, terrain, and organic volumes [S3][S5, unofficial].
++- Limitations include high computational cost for high-resolution volumes with many octaves, and axis-aligned artifacts if not properly randomized [S3].
+ 
+ ## Background

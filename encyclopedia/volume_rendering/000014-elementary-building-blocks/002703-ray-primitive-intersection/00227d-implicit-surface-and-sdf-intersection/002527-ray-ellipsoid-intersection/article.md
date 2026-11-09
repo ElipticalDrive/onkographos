@@ -1,66 +1,34 @@
 # Ray-Ellipsoid Intersection
-Also called: Ellipsoid Ray Intersection
+Also called: Ellipsoid Ray Intersection, Ellipsoid Ray Intersection via Quadratic Equation, Ellipsoid intersection roots, Proof of Proposition 2
 ## Overview
-Computes the intersection of a ray with a 3D ellipsoid defined by a rotation matrix, translation vector, and scale factors. It returns whether an intersection exists and the intersection point in world space. This method transforms the ray into the ellipsoid's local space, solving a quadratic equation for the unit sphere, then transforms the result back. It is distinguished from general implicit surface methods by its closed-form quadratic solution, which is computationally cheaper than iterative root-finding but requires the primitive to be strictly ellipsoidal.
+Computes the intersection of a ray with a 3D ellipsoid defined by a rotation matrix, translation vector, and scale factors [S2, unofficial]. It returns whether an intersection exists and the intersection point in world space [S2, unofficial]. This method transforms the ray into the ellipsoid's local space, solves a quadratic equation for the unit sphere, then transforms the result back [S2, unofficial]. It is distinguished from general implicit surface methods by its closed-form quadratic solution, which is computationally cheaper than iterative root-finding but requires the primitive to be strictly ellipsoidal [G].
 ## How it works
 **Inputs:**
-- Ray origin $\mathbf{o}$ (world space, 3D vector).
-- Ray direction $\mathbf{d}$ (world space, 3D vector, typically normalized).
-- Ellipsoid translation $\mathbf{t}$ (world space, 3D vector).
-- Ellipsoid rotation $R$ (3x3 rotation matrix, world space).
-- Ellipsoid scale $S$ (3D vector, diagonal elements of the scaling matrix).
-- Epsilon $\epsilon$ (scalar, default $10^{-5}$).
+- Ray origin $\mathbf{o}$ (world space, 3D vector) [S2, unofficial].
+- Ray direction $\mathbf{d}$ (world space, 3D vector, typically normalized) [G].
+- Ellipsoid translation $\mathbf{t}$ (world space, 3D vector) [S2, unofficial].
+- Ellipsoid rotation $R$ (3x3 rotation matrix, world space) [S2, unofficial].
+- Ellipsoid scale $S$ (3D vector, diagonal elements of the scaling matrix) [S2, unofficial].
+- Epsilon $\epsilon$ (scalar, default $10^{-5}$) [S2, unofficial].
 
 **Outputs:**
-- Boolean indicating intersection existence.
-- Intersection point $\mathbf{p}$ (world space, 3D vector) if intersection exists.
+- Boolean indicating intersection existence [S2, unofficial].
+- Intersection point $\mathbf{p}$ (world space, 3D vector) if intersection exists [S2, unofficial].
 
 **Data Structures:**
-- Matrices are 3x3. Vectors are 3D.
-- No complex data structures; standard floating-point arithmetic.
+- Matrices are 3x3. Vectors are 3D. Standard floating-point arithmetic is used [S2, unofficial].
 
 **Steps:**
-1. Compute the inverse transformation matrix $M_{inv}$ that maps world space to ellipsoid local space (normalized to a unit sphere).
-   $$ M_{inv} = \text{diag}\left(\frac{1}{S_x}, \frac{1}{S_y}, \frac{1}{S_z}\right) R^T $$
-   where $S_x, S_y, S_z$ are the components of $S$.
-
-2. Transform the ray origin and direction to ellipsoid local space:
-   $$ \mathbf{o}' = M_{inv} (\mathbf{o} - \mathbf{t}) $$
-   $$ \mathbf{d}' = M_{inv} \mathbf{d} $$
-
-3. Handle degenerate direction components to avoid division by zero. Let $A$ be the squared magnitude of $\mathbf{d}'$ in the context of the quadratic form, or specifically the coefficient of $t^2$. In the standard quadratic form $At^2 + Bt + C = 0$ for a unit sphere intersection:
-   $$ A = \mathbf{d}' \cdot \mathbf{d}' $$
-   If $|A| < \epsilon$, set $A = \epsilon$ [S1, unofficial].
-
-4. Compute the coefficients of the quadratic equation:
-   $$ B = 2 (\mathbf{o}' \cdot \mathbf{d}') $$
-   $$ C = \mathbf{o}' \cdot \mathbf{o}' - 1 $$
-
-5. Compute the discriminant:
-   $$ \Delta = B^2 - 4AC $$
-   If $\Delta < 0$, there is no intersection [S1, unofficial].
-
-6. Handle near-zero discriminant for numerical stability. If $|\Delta| < \epsilon$, set $\Delta = 0$ [S1, unofficial].
-
-7. Compute the roots:
-   $$ \sqrt{\Delta} = \sqrt{\Delta} $$
-   $$ t_1 = \frac{-B - \sqrt{\Delta}}{2A} $$
-   $$ t_2 = \frac{-B + \sqrt{\Delta}}{2A} $$
-
-8. Check if intersections are behind the ray origin. If $t_1 < 0$ and $t_2 < 0$, there is no intersection [S1, unofficial].
-
-9. Select the valid intersection distance $t_{intersect}$:
-   - If $t_1 \ge 0$, $t_{intersect} = t_1$.
-   - Else if $t_2 \ge 0$, $t_{intersect} = t_2$.
-   - If $|t_1 - t_2| < \epsilon$, $t_{intersect} = \min(t_1, t_2)$ [S1, unofficial].
-
-10. Compute the intersection point in transformed (local) space:
-    $$ \mathbf{p}' = \mathbf{o}' + t_{intersect} \mathbf{d}' $$
-
-11. Transform the intersection point back to world space. First, compute the forward transformation matrix $M_{fwd}$:
-    $$ M_{fwd} = R \text{diag}(S_x, S_y, S_z) $$
-    Then:
-    $$ \mathbf{p} = M_{fwd} \mathbf{p}' + \mathbf{t} $$
+1. Compute the inverse transformation matrix $M_{inv}$ that maps world space to ellipsoid local space (normalized to a unit sphere): $M_{inv} = \text{diag}(1/S_x, 1/S_y, 1/S_z) R^\top$, where $S_x, S_y, S_z$ are the components of $S$ [S2, unofficial].
+2. Transform the ray origin and direction to ellipsoid local space: $\mathbf{o}' = M_{inv} (\mathbf{o} - \mathbf{t})$, $\mathbf{d}' = M_{inv} \mathbf{d}$ [S2, unofficial].
+3. Compute the quadratic coefficients for the unit sphere intersection $At^2 + Bt + C = 0$: $A = \mathbf{d}' \cdot \mathbf{d}'$, $B = 2(\mathbf{o}' \cdot \mathbf{d}')$, $C = \mathbf{o}' \cdot \mathbf{o}' - 1$ [G]. Handle degenerate direction: if $|A| < \epsilon$, set $A = \epsilon$ [S2, unofficial].
+4. Compute the discriminant: $\Delta = B^2 - 4AC$. If $\Delta < 0$, there is no intersection [S2, unofficial].
+5. Handle near-zero discriminant for numerical stability: if $|\Delta| < \epsilon$, set $\Delta = 0$ [S2, unofficial].
+6. Compute the roots: $t_1 = \frac{-B - \sqrt{\Delta}}{2A}$, $t_2 = \frac{-B + \sqrt{\Delta}}{2A}$ [S2, unofficial].
+7. Check if intersections are behind the ray origin: if $t_1 < 0$ and $t_2 < 0$, there is no intersection [S2, unofficial].
+8. Select the valid intersection distance $t_{intersect}$: $t_{intersect} = t_1$ if $t_1 \ge 0$ else $t_2$. If $|t_1 - t_2| < \epsilon$, set $t_{intersect} = \min(t_1, t_2)$ [S2, unofficial].
+9. Compute the intersection point in transformed space: $\mathbf{p}' = \mathbf{o}' + t_{intersect} \mathbf{d}'$ [S2, unofficial].
+10. Transform the intersection point back to world space. Compute the forward transformation matrix $M_{fwd} = R \text{diag}(S_x, S_y, S_z)$, then $\mathbf{p} = M_{fwd} \mathbf{p}' + \mathbf{t}$ [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -68,107 +36,87 @@ Computes the intersection of a ray with a 3D ellipsoid defined by a rotation mat
 ```python
 def ray_ellipsoid_intersection(o, d, t, R, S, eps=1e-5):
     # Step 1: Compute inverse transformation matrix
-    # inv_transform_matrix = diag(1/S[0], 1/S[1], 1/S[2]) @ R.transpose()
-    inv_scale = [1.0/S[0], 1.0/S[1], 1.0/S[2]]
-    # R is 3x3, transpose it
-    Rt = transpose(R)
-    # Create diagonal matrix from inv_scale
-    D_inv = diag(inv_scale)
-    # M_inv = D_inv @ Rt
-    M_inv = mat_mul(D_inv, Rt)
+    inv_scale = [1.0 / S[0], 1.0 / S[1], 1.0 / S[2]]
+    Rt = [[R[0][0], R[1][0], R[2][0]],
+          [R[0][1], R[1][1], R[2][1]],
+          [R[0][2], R[1][2], R[2][2]]]
+    D_inv = [[inv_scale[i] if i == j else 0.0 for j in range(3)] for i in range(3)]
+    M_inv = [[sum(D_inv[i][k] * Rt[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
 
     # Step 2: Transform ray origin and direction
-    # o_transformed = M_inv @ (o - t)
-    o_diff = vec_sub(o, t)
-    o_prime = mat_vec_mul(M_inv, o_diff)
-    
-    # d_transformed = M_inv @ d
-    d_prime = mat_vec_mul(M_inv, d)
+    o_diff = [o[0] - t[0], o[1] - t[1], o[2] - t[2]]
+    o_prime = [sum(M_inv[i][j] * o_diff[j] for j in range(3)) for i in range(3)]
+    d_prime = [sum(M_inv[i][j] * d[j] for j in range(3)) for i in range(3)]
 
     # Step 3: Compute quadratic coefficients
-    # A = d' . d'
-    A = dot(d_prime, d_prime)
-    
-    # Handle degenerate direction
+    A = d_prime[0]*d_prime[0] + d_prime[1]*d_prime[1] + d_prime[2]*d_prime[2]
     if abs(A) < eps:
         A = eps
-
-    # B = 2 * (o' . d')
-    B = 2.0 * dot(o_prime, d_prime)
-
-    # C = o' . o' - 1
-    C = dot(o_prime, o_prime) - 1.0
+    B = 2.0 * (o_prime[0]*d_prime[0] + o_prime[1]*d_prime[1] + o_prime[2]*d_prime[2])
+    C = (o_prime[0]*o_prime[0] + o_prime[1]*o_prime[1] + o_prime[2]*o_prime[2]) - 1.0
 
     # Step 4: Compute discriminant
     discriminant = B*B - 4*A*C
-
-    # If discriminant < 0, no intersection
     if discriminant < 0:
         return False, None
 
-    # Handle near-zero discriminant
+    # Step 5: Handle near-zero discriminant
     if abs(discriminant) < eps:
         discriminant = 0.0
 
-    # Step 5: Compute roots
-    sqrt_discriminant = sqrt(discriminant)
+    # Step 6: Compute roots
+    sqrt_discriminant = discriminant ** 0.5
     t1 = (-B - sqrt_discriminant) / (2.0 * A)
     t2 = (-B + sqrt_discriminant) / (2.0 * A)
 
-    # Check if both roots are negative
+    # Step 7: Check if both roots are negative
     if t1 < 0 and t2 < 0:
         return False, None
 
-    # Select valid t
-    if t1 >= 0:
-        t_intersect = t1
-    else:
-        t_intersect = t2
-    
-    # If |t1 - t2| < eps, t_intersect = min(t1, t2)
+    # Step 8: Select valid t
+    t_intersect = t1 if t1 >= 0 else t2
     if abs(t1 - t2) < eps:
         t_intersect = min(t1, t2)
 
-    # Step 6: Compute intersection point in transformed space
-    # intersection_point_transformed = o_transformed + t_intersect * d_transformed
-    p_prime = vec_add(o_prime, vec_scale(d_prime, t_intersect))
+    # Step 9: Compute intersection point in transformed space
+    p_prime = [o_prime[0] + t_intersect * d_prime[0],
+               o_prime[1] + t_intersect * d_prime[1],
+               o_prime[2] + t_intersect * d_prime[2]]
 
-    # Step 7: Transform back to world space
-    # transform_mat = R @ diag(S[0], S[1], S[2])
-    D = diag(S)
-    M_fwd = mat_mul(R, D)
-    
-    # intersection_point = transform_mat @ intersection_point_transformed + t
-    p = vec_add(mat_vec_mul(M_fwd, p_prime), t)
+    # Step 10: Transform back to world space
+    D = [[S[i] if i == j else 0.0 for j in range(3)] for i in range(3)]
+    M_fwd = [[sum(R[i][k] * D[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
+    p = [sum(M_fwd[i][j] * p_prime[j] for j in range(3)) + t[i] for i in range(3)]
 
     return True, p
 ```
 
 **Parameters:**
-- $\epsilon$: Epsilon for numerical stability, default $10^{-5}$ [S1, unofficial].
+- $\epsilon$: Epsilon for numerical stability, default $10^{-5}$ [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Degenerate Direction:** If the ray direction in local space has a near-zero magnitude (e.g., ray is orthogonal to scaling axes in a way that collapses), $A$ becomes zero. The code handles this by clamping $A$ to $\epsilon$ [S1, unofficial].
-- **Near-Zero Discriminant:** If the ray is tangent to the ellipsoid, $\Delta \approx 0$. Clamping to 0 prevents NaNs [S1, unofficial].
-- **Behind Origin:** Intersections with $t < 0$ are ignored [S1, unofficial].
-- **Precision:** Floating-point errors in matrix multiplication can accumulate. Using double precision is recommended if available.
+- **Degenerate Direction:** If the ray direction in local space has a near-zero magnitude, $A$ becomes zero. The code handles this by clamping $A$ to $\epsilon$ [S2, unofficial].
+- **Near-Zero Discriminant:** If the ray is tangent to the ellipsoid, $\Delta \approx 0$. Clamping to 0 prevents numerical instability [G].
+- **Behind Origin:** Intersections with $t < 0$ are ignored [S2, unofficial].
+- **Precision:** Floating-point errors in matrix multiplication can accumulate. Using double precision is recommended if available [G].
 
 ## Subtopics
 
 ### [Quadratic Ray-Gaussian Intersection](7017-quadratic-ray-gaussian-intersection.md)
-The Quadratic Ray-Gaussian Intersection approximates the intersection of a ray with a 3D Gaussian distribution by computing the intersection with the ellipsoid defined by one standard deviation of that Gaussian. This method is chosen to avoid the numerical instability inherent in the exact cubic solver while providing lower depth and mask errors than the linear approximation. It serves as a middle ground between the speed of the linear method and the accuracy of the cubic method, though it is slower than the linear approach.
+The Quadratic Ray-Gaussian Intersection approximates the intersection of a ray with a 3D Gaussian distribution by computing the intersection with the ellipsoid defined by one standard deviation of that Gaussian. It serves as a numerically stable alternative to the Cubic Ray-Gaussian Intersection Solver, avoiding the NaN instability inherent in cubic solvers while providing a discriminant to verify intersection existence, which the Linear Ray-Gaussian Intersection lacks. It yields the lowest depth and mask errors among the three primary methods but is slower than the linear approach.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per ray-ellipsoid pair. Involves a constant number of matrix-vector multiplications and arithmetic operations.
-- **Memory Complexity:** $O(1)$ auxiliary space.
-- **Performance:** Fast due to closed-form solution. Suitable for real-time rendering and large-scale scenes with many primitives.
-- **Strengths:** Exact solution for ellipsoids; no iterative convergence required; robust with epsilon handling.
-- **Limitations:** Only applies to ellipsoids; not suitable for general implicit surfaces.
-- **When to Use:** When rendering scenes composed of ellipsoidal primitives (e.g., 3D Gaussian Splatting approximations).
-- **When Not to Use:** For non-ellipsoidal shapes or when higher-order approximations are required.
+- **Time Complexity:** $O(1)$ per ray-ellipsoid pair. Involves a constant number of matrix-vector multiplications and arithmetic operations [G].
+- **Memory Complexity:** $O(1)$ auxiliary space [G].
+- **Performance:** Fast due to closed-form solution. Suitable for real-time rendering and large-scale scenes with many primitives [S2, unofficial].
+- **Strengths:** Exact solution for ellipsoids; no iterative convergence required; robust with epsilon handling [S2, unofficial].
+- **Limitations:** Only applies to ellipsoids; not suitable for general implicit surfaces [G].
+- **When to Use:** When rendering scenes composed of ellipsoidal primitives (e.g., 3D Gaussian Splatting approximations) [S2, unofficial].
+- **When Not to Use:** For non-ellipsoidal shapes or when higher-order approximations are required [G].
 
 ## Background
-Originated from the need to efficiently render 3D Gaussian Splatting representations, where Gaussians are approximated as ellipsoids. The method is implemented in unofficial Taichi-based 3D Gaussian Splatting projects [S1, unofficial].
+Originated from the need to efficiently render 3D Gaussian Splatting representations, where Gaussians are approximated as ellipsoids [S1]. The method is implemented in unofficial Taichi-based 3D Gaussian Splatting projects [S2, unofficial].
 
 ## Sources
-[S1] wanmeihuali/taichi_3d_gaussian_splatting, https://github.com/wanmeihuali/taichi_3d_gaussian_splatting, fetched 2026-10-27 (unofficial)
+[S1] Learning Scene-Level Signed Directional Distance Function With Ellipsoidal Priors and Neural Residuals., https://doi.org/10.1109/tpami.2026.3688658, fetched 2026-10-26
+[S2] wanmeihuali/taichi_3d_gaussian_splatting, https://github.com/wanmeihuali/taichi_3d_gaussian_splatting, fetched 2026-10-27 (unofficial)

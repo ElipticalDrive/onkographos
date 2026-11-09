@@ -2,44 +2,72 @@
 
 
 ## Overview
-This family covers techniques for identifying specific subsets of volumetric data or rendering primitives for modification, deletion, or annotation, and for manipulating the spatial relationship between the selection and the scene. It solves the problem of precise user intent translation in 3D space, where traditional 2D screen-space interactions must be mapped to complex 3D structures. It is distinguished from [Cropping](1648-cropping.md) by its focus on discrete object or primitive-level targeting rather than global volume partitioning, and from [3D Cursor](1655-3d-cursor.md) by its broader scope including occlusion-based and state-based selection modes.
+Selection and manipulation enables users to identify, isolate, and modify specific subsets of volumetric data or rendering primitives, serving as the bridge between raw data and interactive visualization. It distinguishes itself from sibling techniques like cropping or clipping by focusing on semantic or spatial selection of data elements (e.g., splats, cells, or voxels) rather than geometric view frustums, allowing for operations such as deletion, highlighting, or deformation of selected regions.
 
 ## Shared principles
-The core mechanism involves mapping user input to a set of selection criteria $S$ within the data domain $D$. Unlike global clipping, selection operates on a subset of elements (e.g., splats, voxels, or mesh primitives). The implementation must handle the coordinate transformation between user input space (screen or hand) and world space, often requiring ray casting or spatial indexing. A key challenge is the feedback loop: the visual representation of the selection must update in real-time to confirm the user's intent, which may involve temporary highlighting or state flags before final application (e.g., deletion or duplication).
+The family operates on the principle of mapping user input to a subset of the data domain $\mathcal{D}$, resulting in a selection mask $M \subset \mathcal{D}$. This mask influences the rendering pipeline by modifying the contribution of selected elements, either by altering their visual properties (highlighting, opacity) or by enabling direct manipulation (deletion, transformation).
+
+Key implementation considerations include:
+1.  **Selection Modality:** Selection can be **direct** (immediate feedback during input, e.g., real-time splat highlighting) or **indirect** (post-computation of intersections, e.g., brushing followed by batch processing) [S1]. Direct selection is critical for immersive environments where viewpoint stability cannot be assumed [S1].
+2.  **Spatial Representation:** Selection regions are defined in either **screen space** (2D projections, e.g., circular brushes) or **world space** (3D volumes, e.g., spherical brushes) [S1]. Screen-space selection often requires approximation for 3D intersection tests, such as enlarging an ellipse by the brush radius to check if a splat center lies within it [S1].
+3.  **State Management:** Selected objects may exhibit different interaction states relative to the camera:
+    *   **Integrated:** The selection moves with the scene geometry, subject to occlusion and distance-based scaling [S2].
+    *   **Decoupled:** The selection is fixed in screen space or independent of the viewing transformation, useful for annotations or fixed orientations [S2].
+    *   **Pinned:** A hybrid where the selection maintains its screen position but rotates relative to the viewpoint, preserving its relative orientation to the viewer [S2].
+4.  **Data Indexing:** For efficient selection in large datasets, spatial indexing (e.g., Hilbert codes for AMR or structured grids) allows mapping between 1D data representations and 3D spatial regions, enabling efficient brushing and linking between 2D plots and 3D views [S4].
 
 ## Subtopics
 
 ### Direct Selection and Deletion
-Direct selection and deletion allows users to instantly highlight and remove specific rendering primitives, such as splats, during the brushing operation. This approach contrasts with indirect methods where intersections are computed only after the brush stroke is complete.
+An approach where users instantly highlight all splats that intersect with the brush during selection, contrasting with indirect approaches that compute intersections after brushing [S1]. This method provides immediate visual feedback, which is vital in virtual reality to avoid mistakes during ongoing brushing operations [S1].
 
-*   **Definition**: An approach where users instantly highlight all splats that intersect with the brush during selection, contrasting with indirect approaches that compute intersections after brushing [S1].
-*   **Brush Geometry**: Selection/deletion brushes may be either circular (screen space) or spherical (world space) [S1]. Users may choose selections based on splat centers or their border [S1].
-*   **Intersection Approximation**: In case of circular brushes and splat-border intersection tests, apply an approximation that checks whether the center of the brush circle is inside an ellipse that is enlarged by the radius of the brush [S1].
-*   **Deletion Implementation**: Sort all splats by their deletion flag, putting the deleted splats towards the end of the buffer [S1]. Unmap and release physical allocations at the buffer's end in steps of the GPU's granularity [S1].
-*   **Implementation Note**: Using radix sort is not required; developers may implement this functionality with GPU-friendly stream compaction [S1].
+*   **Brush Geometry:** Selection/deletion brushes may be circular (screen space) or spherical (world space) [S1]. Users may choose selections based on splat centers or their borders [S1].
+*   **Intersection Approximation:** For circular brushes and splat-border intersection tests, an approximation checks whether the center of the brush circle is inside an ellipse that is enlarged by the radius of the brush [S1].
+*   **Deletion Implementation:** Deleted splats are sorted to the end of the buffer using their deletion flag [S1]. Virtual memory allows unmapping and releasing physical allocations at the buffer's end in steps of the GPU's granularity [S1].
+*   **Sorting Alternative:** While radix sort is one option, GPU-friendly stream compaction can be used instead [S1].
+
+[S1]
 
 ### Selection Interaction States
-Selection interaction states define how a selected object or annotation behaves relative to the scene's viewing transformation. This is particularly relevant for annotations and illustrative elements in volume rendering.
+Defines how a selection object behaves relative to the 3D scene and camera transformations [S2].
 
-*   **Integrated**: The selection acts as fully belonging to the three-dimensional scene. This is intuitive, but has certain drawbacks. For example, when the viewpoint is rotated, the selection’s movement is dependent on its distance to the origin. It can easily move out of the viewport or can be occluded by other objects [S2].
-*   **Decoupled**: The opposite to the integrated approach is to fully decouple the selection from the scene. It can be independently manipulated and is not affected by the viewing transformation. This is, for instance, useful when it is required to depict an object at a specific orientation regardless of the viewing transformation [S2].
-*   **Pinned**: A useful hybrid between the two modes above is to allow the object to be pinned to its current position in image space. Its on-screen location remains static, but it is still affected by rotations. A rotation of the viewpoint causes the same relative rotation of the object. For example, this can be used to generate a special view which always shows the part of an object facing away from the viewer in the background object [S2].
+*   **Integrated:** The selection acts as fully belonging to the 3D scene. Its movement depends on its distance to the origin, meaning it can move out of the viewport or be occluded by other objects when the viewpoint rotates [S2].
+*   **Decoupled:** The selection is fully decoupled from the scene and is not affected by the viewing transformation. It can be independently manipulated, which is useful for depicting an object at a specific orientation regardless of the viewing angle [S2].
+*   **Pinned:** A hybrid mode where the object is pinned to its current image space position. Its on-screen location remains static, but it is affected by rotations; a rotation of the viewpoint causes the same relative rotation of the object [S2].
+
+[S2]
 
 ### Image Plane Selection
-Image plane selection techniques project 3D objects onto a 2D image plane to facilitate selection, often extending to immersive 3D environments using hand-tracking or stereoscopic displays.
+Techniques where 3D objects are projected onto a 2D image plane, and a cursor defines a perpendicular ray to select the first intersected object [S3, unofficial]. This does not directly extend to 3D displays without modification, such as defining the image plane as the viewpoint from only a single eye to create a "one-eyed cursor" for stereoscopic displays [S3, unofficial].
 
-*   **Definition**: A selection technique where 3D objects are projected onto a 2D image plane, and a cursor defines a perpendicular ray to select the first intersected object [S3, unofficial]. A selection technique where users select objects that visually lie behind a hand-attached cursor, defined by the vector joining the user's eye and hand [S3, unofficial].
-*   **Stereoscopic Extension**: For stereoscopic displays, define the image plane as the viewpoint from only a single eye to create a one-eyed cursor [S3, unofficial].
-*   **Aperture-based Variant**: Cast cone from eye through finger. Distance between finger and eye controls cone divergence angle. Use device orientation for disambiguation when multiple objects intersect [S3, unofficial].
-*   **Head Crusher**: Select objects lying between index finger and thumb [S3, unofficial].
-*   **Sticky Finger**: Select objects occluded by the tip of the index finger [S3, unofficial].
-*   **Lifting Palm**: Flatten hand and position palm underneath object to select it [S3, unofficial].
-*   **Framing Hands**: Use both hands to define a bounding box around object using thumbs and index fingers [S3, unofficial].
+*   **Ray Cursor:** A ray is emitted from the user’s hand (e.g., "laser gun"), allowing control over the start point and orientation [S3, unofficial].
+*   **Occlusion Selection:** Users select objects that visually lie behind a hand-attached cursor, defined by the vector joining the user's eye and hand [S3, unofficial].
+    *   **Aperture-based:** A cone is cast from the user's eye through their finger; the distance between finger and eye controls the cone's divergence angle. Device orientation is used for disambiguation when multiple objects intersect [S3, unofficial].
+    *   **Head Crusher:** Selects objects lying between the user's index finger and thumb [S3, unofficial].
+    *   **Sticky Finger:** Selects objects occluded by the tip of the index finger [S3, unofficial].
+    *   **Lifting Palm:** Flattens the hand and positions the palm underneath the object to select it [S3, unofficial].
+    *   **Framing Hands:** Uses both hands to define a bounding box around the object using thumbs and index fingers [S3, unofficial].
+
+[S3, unofficial]
+
+### Brushing and Linking with Hilbert Codes
+A technique connecting 1D and 3D views by using Hilbert codes as selection ranges for Regions of Interest (ROIs) [S4].
+
+*   **Selection Range:** The ROIs' first and last Hilbert codes are used as selection ranges for highlighting cells in the 3D view [S4].
+*   **Shader Implementation:** In the 3D shader, ROIs manifest as Hilbert codes rather than lists of cells in world space, requiring the transformation of the sampled cell's center to Hilbert space for testing [S4].
+*   **Cell Sizing:**
+    *   For **structured-regular volumes**, cell size is derived implicitly from the Hilbert code since cells have uniform size [S4].
+    *   For **AMR data**, the cell centroid's Hilbert code is insufficient; cells must be explicitly located to know the ROI's exact size when checking if a sample falls inside an ROI [S4].
+
+[S4]
 
 ## Background
-Selection and manipulation in volume rendering evolved from early 2D image editing and 3D modeling interfaces. The concept of "direct" vs. "indirect" selection in splat-based rendering was formalized in recent works like Splatshop [S1], addressing the need for immediate visual feedback in VR and large-scale data editing. The classification of selection states (Integrated, Decoupled, Pinned) originated from systems like VolumeShop [S2], designed to handle annotations and illustrative elements in scientific visualization. Image plane and occlusion-based selection techniques trace back to early VR interaction research, including the "one-eyed cursor" for stereoscopic displays [S3, unofficial] and hand-based occlusion techniques like "Head Crusher" and "Sticky Finger" [S3, unofficial]. These methods address the ambiguity of 3D selection by leveraging 2D projection or physical occlusion cues.
+Selection and manipulation in volume rendering evolved from early 2D image plane selection techniques [S3, unofficial]. The "one-eyed cursor" was introduced for stereoscopic displays to handle the lack of a well-defined image plane in 3D environments [S3, unofficial]. Occlusion selection techniques, such as the "Head Crusher" and "Sticky Finger," were developed to leverage natural hand gestures for object selection in immersive 3D environments [S3, unofficial].
+
+In the context of splat-based rendering, direct selection and deletion methods were developed to address the limitations of indirect approaches, particularly for large models and VR applications where immediate feedback is crucial [S1]. The integration of Hilbert space-filling curves for selection and linking between 1D plots and 3D volumes was introduced to handle the complexity of Adaptive Mesh Refinement (AMR) data efficiently on GPUs [S4].
 
 ## Sources
 [S1] Splatshop: Efficiently Editing Large Gaussian Splat Models, https://doi.org/10.1111/cgf.70214, fetched 2026-10-31
 [S2] VolumeShop: An Interactive System for Direct Volume Illustration, https://doi.org/10.1109/vis.2005.135, fetched 2026-10-26
 [S3] Interaction with volumetric displays, http://hdl.handle.net/1807/16733, fetched 2026-10-26 (unofficial)
+[S4] Visual Analysis of Large Multi-Field AMR Data on GPUs Using Interactive Volume Lines, https://doi.org/10.1109/vis54172.2023.00020, fetched 2026-10-26

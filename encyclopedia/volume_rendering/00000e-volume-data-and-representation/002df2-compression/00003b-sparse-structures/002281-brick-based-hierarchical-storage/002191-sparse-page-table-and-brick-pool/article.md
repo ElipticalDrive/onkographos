@@ -3,7 +3,7 @@
 Also called: Heterogeneous Volumes, MRMS sparse volume, Sparse Volume Textures, Sparse Volume Textures (SVT) / Heterogeneous Volumes, VDB-style sparse volume for web
 
 ## Overview
-Sparse Page Table and Brick Pool is a sparse volume representation that avoids materializing a dense 3D grid by using a two-level structure: a page table mapping logical $8^3$-texel regions to resident bricks, and a pool of apron-padded bricks [S3, unofficial]. It allows full source resolution (up to 2048 cells per axis) while bounding memory usage and enabling empty-space skipping [S3, unofficial]. It is implemented in Unreal Engine as "Heterogeneous Volumes" and "Sparse Volume Textures" (SVT) [S1, S2, unofficial], and in web-based raymarchers as a replacement for dense coarsened grids [S3, unofficial]. Unlike dense voxel grids, it significantly reduces memory footprint by storing only non-empty tiles [S1, S2, unofficial].
+Sparse Page Table and Brick Pool is a sparse volume representation that avoids materializing a dense 3D grid by using a two-level structure: a page table mapping logical $8^3$-texel regions to resident bricks, and a pool of apron-padded bricks [S3, unofficial]. It allows full source resolution (up to 2048 cells per axis) while bounding memory usage and enabling empty-space skipping [S3, unofficial]. In Unreal Engine, this page-table approach is implemented as the experimental "Heterogeneous Volumes" and "Sparse Volume Textures" (SVT) features [S1, S2, unofficial], and in web-based raymarchers as a replacement for dense coarsened grids [S3, unofficial]. Unlike dense voxel grids, it significantly reduces memory footprint by storing only non-empty tiles [S1, S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
@@ -20,12 +20,12 @@ Sparse Page Table and Brick Pool is a sparse volume representation that avoids m
     -   Capacity: Capped at `MAX_VOLUME_BRICKS` (default 8192) [S3, unofficial]. Each brick is 2 KB, totaling ~16.4 MB [S3, unofficial].
 
 **Build Phase:**
-1.  Iterate through the logical grid.
+1.  Iterate through the logical grid [S3, unofficial].
 2.  For each logical $8^3$ page:
     -   If the page is empty, set the page table entry to 0 [S3, unofficial].
     -   If the page contains data:
-        -   If the pool is not full (`current_bricks < MAX_VOLUME_BRICKS`), allocate a brick in the pool.
-        -   Copy the $8^3$ core data into the brick.
+        -   If the pool is not full (`current_bricks < MAX_VOLUME_BRICKS`), allocate a brick in the pool [S3, unofficial].
+        -   Copy the $8^3$ core data into the brick [S3, unofficial].
         -   Fill the apron from neighbors [S3, unofficial].
         -   Set the page table entry to `pool_index + 1` [S3, unofficial].
         -   Increment brick count.
@@ -43,10 +43,14 @@ Sparse Page Table and Brick Pool is a sparse volume representation that avoids m
     -   Lookup the brick in the pool at index `entry - 1` [S3, unofficial].
     -   Sample the volume trilinearly using the brick data [S3, unofficial].
 
+**Formulas:**
+-   Effective displayed volume size reduction: $V_{\text{displayed}} = V_{\text{original}} / 4^3 = V_{\text{original}} / 64$ [S1, S2, unofficial].
+-   Extinction correction: $I = \text{pow}(t, 2.75)$ to compensate for light echo inflation at source resolution [S3, unofficial].
+
 **Parameters:**
 -   `MAX_VOLUME_BRICKS`: 8192 [S3, unofficial].
 -   `MAX_RAY_STEPS`: 384 [S3, unofficial].
--   Extinction Power: `pow(t, 2.75)` to correct for light echo inflation at source resolution [S3, unofficial].
+-   Extinction Power: `pow(t, 2.75)` [S3, unofficial].
 
 **Pitfalls:**
 -   **Trilinear Filtering Boundary:** Without an apron, trilinear filtering at the edge of an $8^3$ brick would sample texels outside the brick [S3, unofficial].
@@ -59,7 +63,7 @@ Sparse Page Table and Brick Pool is a sparse volume representation that avoids m
 Sparse Brickmap Volume Rendering is a voxel rendering technique that uses a two-level data structure (coarse brick grid and fine voxel bricks) to render sparse volumes efficiently, integrating hardware depth for correct compositing with rasterized geometry. It builds on [Sparse Page Table and Brick Pool](2550-sparse-page-table-and-brick-pool.md) by replacing the generic page-table indirection with a fixed $8^3$ brick hierarchy optimized for two-level Digital Differential Analyzer (DDA) traversal. Unlike dense voxel grids, it significantly reduces memory footprint by collapsing fully-buried terrain into uniform entries and storing only mixed (surface) bricks in a compact pool.
 
 ### Memory Pool Sizing
-In related implementations, the node pool is typically small (4 MB), corresponding to $64^3$ entries. Using $16^3$ bricks, $1024^3$ indices can be referenced. The brick pool uses 430 MB, giving room for $42^3$ bricks [S4, unofficial].
+In related implementations, the node pool is typically small (4 MB), corresponding to $64^3$ entries [S4, unofficial]. Using $16^3$ bricks, $1024^3$ indices can be referenced [S4, unofficial]. The brick pool uses 430 MB, giving room for $42^3$ bricks [S4, unofficial].
 
 ### Multi-Resolution Multi-Channel Page Table (MRMCPT)
 A baseline out-of-core rendering method using a multi-resolution hierarchy managed via page tables for spatial subdivision and cache residency [S5]. It lacks the fine-grained empty-space skipping of octrees and residency octrees, resulting in higher cache usage and lower performance on sparse or multi-channel datasets [S5]. It is limited to skipping only entirely empty bricks, potentially accessing bricks containing values outside the current visible transfer function range [S5].
@@ -72,7 +76,7 @@ A baseline out-of-core rendering method using a multi-resolution hierarchy manag
 -   **Limitations:** Trade-off between rendering speed and data compression [S1, S2, unofficial]. Chunking can cause lighting artifacts [S2, unofficial]. Large imports may crash due to integer overflows if not handled [S2, unofficial].
 
 ## Background
-Sparse Page Table and Brick Pool is an experimental feature in Unreal Engine, known as Heterogeneous Volumes or Sparse Volume Textures (SVT) [S1, S2, unofficial]. It was introduced to handle large general-purpose data, as Volumetric Fog is blurry/ghostly and Volumetric Cloud is for cloud-like effects [S2, unofficial]. It is also used in web-based raymarchers to replace dense coarsened grids [S3, unofficial]. The method trades rendering speed for data compression by storing only non-empty 3D tiles [S1, unofficial].
+The page-table approach underlying this method is implemented in Unreal Engine as the experimental "Heterogeneous Volumes" and "Sparse Volume Textures" (SVT) features [S1, S2, unofficial]. It was introduced to handle large general-purpose data, as Volumetric Fog is blurry/ghostly and Volumetric Cloud is for cloud-like effects [S2, unofficial]. It is also used in web-based raymarchers to replace dense coarsened grids [S3, unofficial]. The method trades rendering speed for data compression by storing only non-empty 3D tiles [S1, unofficial].
 
 ## Sources
 [S1] Rendering Large Volume Datasets in Unreal Engine 5: A Survey, https://arxiv.org/abs/2504.07485, fetched 2026-10-27 (unofficial)

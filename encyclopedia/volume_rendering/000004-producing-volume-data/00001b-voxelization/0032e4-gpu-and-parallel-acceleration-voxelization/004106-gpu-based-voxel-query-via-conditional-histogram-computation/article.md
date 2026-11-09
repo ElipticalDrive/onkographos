@@ -1,0 +1,107 @@
+# GPU-based Voxel Query via Conditional Histogram Computation
+
+Also called: Conditional Histogram Voxel Query, Joint Conditional Histogram Computation
+
+## Overview
+This method accelerates voxel query in multivariate volumes by computing joint conditional histograms via GPU volume traversal, avoiding the high overhead of spatial hierarchy structures like octrees for data with uniformly high variance [S1, unofficial]. It differs from sibling methods that rely on spatial subdivision or linked lists by pre-computing statistical distributions of attribute pairs conditioned on a transfer function, allowing for rapid query responses without hierarchical navigation [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A multivariate volume with $N$ attributes ($Y_1, \dots, Y_N$) and an $N$-dimensional Transfer Function (TF) that maps attribute values to opacity.
+*   **Output:** A set of $N-1$ joint conditional histograms (JCHs), stored as a 2D texture array.
+
+**Data Structures:**
+*   **Joint Conditional Histogram (JCH):** A 2D histogram representing the joint distribution of two attributes $Y_a$ and $Y_b$ for voxels satisfying a boolean condition $f(\vec{Y}(V))$.
+*   **Storage Layout:** The $N-1$ histograms are stored aggregately as a 2D texture array with $N-1$ slices. Each slice corresponds to a pair of adjacent attributes $(Y_i, Y_{i+1})$ [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Evaluate Condition:** For every voxel $V$ in the volume, evaluate the $N$-dimensional TF. Let the opacity be $\text{TF}(\vec{Y}(V)).a$.
+2.  **Filter Voxels:** Identify voxels where $\text{TF}(\vec{Y}(V)).a > 0$. These are the "active" voxels contributing to the query.
+3.  **Map to Bins:** For each active voxel $V_X$ with attributes $Y_1, \dots, Y_N$, map its attribute values to bins in the conditional histogram space. Specifically, generate pairs $(Y_i, Y_{i+1})$ for $i = 1$ to $N-1$ [S1, unofficial].
+4.  **Accumulate:** Increment the count in the corresponding bin of the $i$-th slice of the JCH texture array for each pair $(Y_i, Y_{i+1})$ [S1, unofficial].
+
+**Formulas:**
+For a voxel $V_X$ at position $X$ with attributes $Y_1, \dots, Y_N$, if the transfer function opacity is positive:
+$$ \text{TF}(y_1, y_2, \dots, y_N).a > 0 $$
+where $y_i$ denotes the attribute value $Y_i(V_X)$ [S1, unofficial].
+
+The voxel contributes to the following joint conditional histograms:
+$$ jch(Y_1, Y_2), jch(Y_2, Y_3), \dots, jch(Y_{N-1}, Y_N) $$
+
+The mapping for a single voxel is defined as:
+$$ v_X \rightarrow \{(y_1, y_2), (y_2, y_3), \dots, (y_{N-1}, y_N)\} \quad (4.1) $$
+where each tuple $(y_i, y_{i+1})$ corresponds to a bin in the histogram $jch(Y_i, Y_{i+1})$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialize JCH texture array with N-1 slices, dimensions [Bins, Bins]
+# Each slice initialized to 0.0
+
+def compute_joint_conditional_histograms(volume, transfer_function, num_attributes, num_bins):
+    """
+    volume: 3D array of shape [D, H, W] where each element is a tuple of N attribute values.
+    transfer_function: Function that takes N attribute values and returns opacity.
+    num_attributes: N
+    num_bins: Number of bins per attribute axis in the histogram.
+    """
+    # Initialize output: N-1 2D textures (or a 3D texture with depth N-1)
+    jch_array = create_2d_texture_array(num_slices=num_attributes - 1, width=num_bins, height=num_bins)
+    
+    # Iterate over all voxels in the volume
+    for x in range(volume.depth):
+        for y in range(volume.height):
+            for z in range(volume.width):
+                # Get attribute values for voxel V_X
+                attrs = volume.get_attributes(x, y, z) # Returns [y1, y2, ..., yN]
+                
+                # Evaluate TF condition
+                opacity = transfer_function.evaluate(attrs)
+                
+                # If opacity > 0, accumulate into histograms
+                if opacity > 0:
+                    # Map to N-1 pairs
+                    for i in range(num_attributes - 1):
+                        val_a = attrs[i]
+                        val_b = attrs[i+1]
+                        
+                        # Quantize attribute values to bin indices
+                        bin_x = quantize(val_a, num_bins)
+                        bin_y = quantize(val_b, num_bins)
+                        
+                        # Increment count in the i-th slice of the JCH array
+                        # Using atomic add for parallel safety if implemented on GPU
+                        jch_array.atomic_add(slice_index=i, x=bin_x, y=bin_y, value=1.0)
+                        
+    return jch_array
+
+def quantize(value, num_bins):
+    """
+    Maps a continuous attribute value to a discrete bin index [0, num_bins-1].
+    Implementation depends on the specific normalization of the attribute data.
+    [G] Assumes attributes are normalized to [0, 1] or have a known min/max range.
+    """
+    # Placeholder for specific quantization logic based on data range
+    # Typically: floor((value - min) / (max - min) * num_bins)
+    # Clamped to [0, num_bins-1]
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Uniform High Variance:** Spatial hierarchy structures (like octrees) may occupy more space than the original 3D array for volumes with uniformly high variance due to little consolidation and overhead [S1, unofficial]. This method avoids that specific pitfall by using a fixed-size histogram array.
+*   **Degenerate Condition:** If the boolean function $f$ (derived from the TF) is always true, the joint conditional histogram degenerates into an unconditional joint histogram [S1, unofficial].
+*   **Precision:** Quantization of continuous attribute values into bins introduces discretization error. The choice of `num_bins` affects the resolution of the query results.
+
+## Operating characteristics
+*   **Time Complexity:** $O(V \cdot N)$, where $V$ is the number of voxels and $N$ is the number of attributes. Each voxel is processed once, and $N-1$ histogram bins are updated per voxel.
+*   **Memory Complexity:** $O(N \cdot B^2)$, where $B$ is the number of bins per attribute. The storage is a 2D texture array of size $N-1$ slices, each of size $B \times B$.
+*   **Performance:** The method is highly parallelizable on the GPU using geometry shaders with ADD blending or read-write textures with atomic operations [S1, unofficial].
+*   **Strengths:** Efficient for multivariate volumes where spatial hierarchies are ineffective due to high variance. Avoids the overhead of building and traversing octrees.
+*   **Limitations:** Requires pre-computation of histograms. The resolution is limited by the number of bins. Not suitable for dynamic volumes that change frequently, as histograms must be recomputed.
+
+## Background
+The method was proposed in the context of multivariate transfer function design and visualization [S1, unofficial]. It addresses the limitations of spatial hierarchy-based voxel queries, such as those using octrees, which can be inefficient for certain data types [S1, unofficial]. The approach leverages GPU parallelism to compute statistical summaries (histograms) that accelerate subsequent queries, such as generating parallel coordinate plots [S1, unofficial].
+
+## Sources
+[S1] MULTIVARIATE TRANSFER FUNCTION DESIGN, https://www.sci.utah.edu/~lzhou/dissertation_final_zhoul.pdf, fetched 2026-10-27 (unofficial)

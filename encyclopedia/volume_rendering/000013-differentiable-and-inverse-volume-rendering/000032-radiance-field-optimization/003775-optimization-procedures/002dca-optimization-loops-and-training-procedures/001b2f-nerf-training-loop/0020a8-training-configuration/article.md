@@ -1,215 +1,188 @@
 # Training Configuration
 
-Also called: Optimizer Settings, Training Hyperparameters, Optimization Configuration, Hyperparameter Configuration
+Also called: ExBluRF Training Configuration, Hyperparameter Configuration, Optimization Configuration, Optimizer Settings, Training Hyperparameters
 
 ## Overview
-Training Configuration defines the static and dynamic hyperparameters, optimization routines, and architectural constraints required to train differentiable volume rendering models. It solves the problem of translating theoretical radiance field formulations into stable, convergent training procedures by specifying exact network structures, sampling strategies, and loss functions [S1, S2][S5][S8, unofficial][S9][S12, unofficial]. It differs from [Training Loop Setup](1522-training-loop-setup.md) by defining *what* parameters are used (e.g., learning rates, batch sizes, loss weights) rather than *how* the loop executes (tensor layouts, optimizer state interactions) [S2][S11, unofficial]. It serves as the foundational configuration for higher-level procedures like [Training Loop](4290-training-loop.md) and [Training Loop with Adaptive Regularization & LR Decay](2408-training-loop-with-adaptive-regularization-lr-decay.md).
+Training Configuration defines the hyperparameters, optimization routines, and architectural constraints required to stabilize and accelerate the differentiable volume rendering optimization process. It addresses the sensitivity of radiance field training to initialization, sampling density, and activation function choices. Unlike general optimization loops, it specifies implementation-specific details such as learning rate schedules, loss weights, and batch sampling strategies that are critical for convergence in methods like mip-NeRF, Instant-NGP, and NeuralVDB.
 
 ## How it works
-The configuration is applied during the initialization of the training environment and updated dynamically during the optimization process.
+The configuration dictates the setup of the optimizer, the learning rate scheduler, the batch sampling strategy, and the loss function composition. It often involves a two-stage process (coarse-to-fine) or progressive LOD training.
 
 ### Inputs and Outputs
-*   **Inputs:** Scene representation type (e.g., Voxel Grid, Hash Grid, Neural VDB), dataset characteristics (e.g., Blender, LLFF, 360), hardware constraints (GPU memory, compute capability).
-*   **Outputs:** Configured optimizer instance, learning rate scheduler, loss function weights, sampling parameters, and model architecture parameters.
+- **Inputs**: Scene data (images, poses), model architecture (MLP, voxel grid, hash grid), and hyperparameter definitions (learning rates, batch sizes, iteration counts).
+- **Outputs**: Trained model parameters (weights, voxel values, grid embeddings) and optimized camera poses (if included).
 
-### Data Structures and Parameters
-The configuration consists of the following key parameter groups:
+### Data Structures
+- **Optimizer State**: Maintains moment estimates for Adam (mean $m$, variance $v$) or RMSProp.
+- **Learning Rate Scheduler**: Stores current iteration and decay parameters.
+- **Batch Sampler**: Manages ray or pixel sampling indices.
 
-1.  **Optimizer Settings:**
-    *   **Algorithm:** Adam [S1, S2][S5][S8, S12, unofficial].
-    *   **Hyperparameters:** $\beta_1 = 0.9$, $\beta_2 = 0.99$, $\epsilon = 10^{-15}$ [S2][S5][S8, unofficial].
-    *   **Learning Rates:**
-        *   Voxel/Grid parameters: $0.1$ [S2][S8, unofficial].
-        *   MLP/Network parameters: $10^{-3}$ [S2][S8, unofficial].
-        *   Embeddings: $2 \times 10^{-2}$ [S8, unofficial].
-    *   **Weight Decay:** $0.1$ for hash grid values [S5]; $10^{-9}$ multiplier (insensitive) [S3]; increased to $10$ for Blender dataset [S3].
+### Numbered Steps
+1. **Initialize Model Parameters**:
+   - For voxel-based methods (e.g., Direct Voxel Grid), initialize activated alpha values. In the coarse stage, $\alpha_{\text{init}}^{(c)} = 10^{-6}$ [S2]. In the fine stage, $\alpha_{\text{init}}^{(f)} = 10^{-2}$ because query points are concentrated on optimized coarse geometry [S2].
+   - For hash-based methods (e.g., Instant-NGP), initialize hash grid embeddings.
+2. **Initialize Optimizer**:
+   - Typically Adam with $\beta_1=0.9, \beta_2=0.99, \epsilon=10^{-15}$ [S5][S9, unofficial].
+   - Set base learning rates. For voxel grids, $lr_{\text{voxel}} = 0.1$; for shallow MLPs, $lr_{\text{mlp}} = 10^{-3}$ [S2]. For hash grids, $lr_{\text{embed}} = 2 \times 10^{-2}$ and $lr_{\text{network}} = 10^{-3}$ [S9, unofficial].
+3. **Initialize Scheduler**:
+   - Apply warm-up if specified. For example, linearly increase LR from $10^{-4}$ to $10^{-2}$ over the first 100 iterations, then decay to $10^{-3}$ [S5]. Or use cosine decay multiplier from $10^{-8}$ to 1 over the first 5k iterations [S3].
+   - Apply exponential decay. For instance, decay LR by 0.1 at 20k iterations [S2] or decay to $0.1 \times \text{init\_lr}$ at the last iteration [S9, unofficial].
+4. **Sampling Configuration**:
+   - Define batch size (e.g., 8,192 rays [S2], 256 pixels [S10], or $2^{16}$ pixels [S5]).
+   - Define sampling strategy: uniform, stratified, or adaptive. For NeuralVDB, either draw $2^{16}$ random samples per epoch or resample a subset of input voxels at fixed intervals [S11, unofficial].
+   - For coarse-to-fine, set sampling step sizes to half the voxel size: $\delta^{(c)} = 0.5 \cdot s^{(c)}$ and $\delta^{(f)} = 0.5 \cdot s^{(f)}$ [S2].
+   - Randomly shift query points on a ray by $p \cdot \delta(\cdot) \cdot d / \|d\|_2$, where $p \sim U[0, 1]$ and $d$ is the ray viewing direction [S2].
+5. **Loss Function Setup**:
+   - Combine photometric loss with regularization. Commonly $L = L_2 + \lambda_{\text{SSIM}} L_{\text{SSIM}}$ [S4].
+   - Set loss weights. For coarse stage: $w_{\text{photo}}^{(c)} = 1, w_{\text{pt rgb}}^{(c)} = 10^{-1}, w_{\text{bg}}^{(c)} = 10^{-2}$ [S2]. For fine stage: $w_{\text{photo}}^{(f)} = 1, w_{\text{pt rgb}}^{(f)} = 10^{-2}, w_{\text{bg}}^{(f)} = 10^{-3}$ [S2].
+   - Apply weight decay to hash grid values (e.g., 0.1) [S5] or use aggressive weight decay multiplier (e.g., $10^{-9}$ or 10 for Blender) [S3].
+6. **Progressive/Stage Training**:
+   - Train coarse stage for specified iterations (e.g., 10k) [S2].
+   - Transition to fine stage or add new LOD levels. For TurboSquid16, train highest LOD $L_{\text{max}}$ first, then add new trainable levels $l = L_{\text{max}} - 1, L_{\text{max}} - 2, \dots$ every 100 epochs [S1].
+   - Upsample voxel resolutions in xy-dimensions every 40k iterations [S8] or use exponential interpolation between `resolution0` and `resolution1` over `upsample_model_steps` [S9, unofficial].
 
-2.  **Sampling and Ray Configuration:**
-    *   **Batch Size:**
-        *   Points: $512$ [S1].
-        *   Rays: $8,192$ [S2, S7].
-        *   Pixels: $2^{16}$ [S5].
-        *   Contiguous Stage: $8,192$ rays [S7].
-    *   **Sampling Strategy:**
-        *   Point distribution: $2:2:1$ split of surface, near, and uniform samples [S1].
-        *   Step size: $\delta(\cdot) = 0.5 \cdot s(\cdot)$, where $s(\cdot)$ is the voxel size [S2, S3].
-        *   Random Shift: Query points shifted by $p \cdot \delta(\cdot) \cdot d / \|d\|_2$, where $p \sim U[0, 1]$ and $d$ is the ray viewing direction [S2].
-    *   **Steps per Ray:**
-        *   Default: $512$ [S8, unofficial].
-        *   With CUDA Ray: $1,024$ [S8, unofficial].
+### Formulas
+- **Randomized Point Shift**:
+  $$ p_{\text{shifted}} = p + p \cdot \delta(\cdot) \cdot \frac{d}{\|d\|_2} $$
+  where $p$ is the original query point, $\delta(\cdot)$ is the sampling step size, and $d$ is the ray direction [S2].
+- **Loss Function (General)**:
+  $$ L = L_2 + \lambda_{\text{SSIM}} L_{\text{SSIM}} $$
+  where $L_2$ is the L2-loss and $L_{\text{SSIM}}$ is the perceptual loss [S4].
+- **Attenuation Field (X-ray)**:
+  $$ I = I_0 e^{-\sum \mu_i \delta_i} $$
+  where $I$ is resultant attenuated intensity, $I_0$ is initial intensity, $\mu$ is attenuation coefficient, and $\delta$ is sampling step [S12].
 
-3.  **Loss Functions and Weights:**
-    *   **Standard:** $L = L_2 + 0.2 \cdot L_{SSIM}$ [S4].
-    *   **Charbonnier Loss:** Used for LLFF dataset instead of MSE [S9].
-    *   **Stage-Specific Weights (Coarse/Fine):**
-        *   Coarse: $w^{(c)}_{\text{photo}} = 1$, $w^{(c)}_{\text{pt rgb}} = 10^{-1}$, $w^{(c)}_{\text{bg}} = 10^{-2}$ [S2].
-        *   Fine: $w^{(f)}_{\text{photo}} = 1$, $w^{(f)}_{\text{pt rgb}} = 10^{-2}$, $w^{(f)}_{\text{bg}} = 10^{-3}$ [S2].
-    *   **Regularization Weights (VMesh):** $\lambda_{pm} = 10$, $\lambda_{mask} = 0.1$, $\lambda_{eik} = 0.1$, $\lambda_{norm} = 0.1$, $\lambda_{sp}$ linearly increased from $0.01$ to $0.1$, $\lambda_{opaque} = 0.1$ (after 50k iterations) [S7].
+### Parameters with Typical Values
+- **Optimizer**: Adam [S5], RMSProp for voxel grids [S8].
+- **Learning Rate**: $10^{-3}$ to $0.1$ depending on component [S2][S9, unofficial].
+- **Batch Size**: 8,192 rays [S2], 256 pixels [S10], $2^{16}$ pixels [S5].
+- **Iterations**: 10k-30k for standard NeRF [S2][S4], 200k for ExBluRF [S8], 2,500 epochs for NeuralVDB [S11, unofficial].
+- **Voxel Resolution**: $128^3$ to $300^3$ [S9, unofficial], $190^3$ for deformation grids [S6].
+- **Subdomain Size**: Multiple of 512 for NeuralVDB [S11, unofficial].
 
-4.  **Initialization and State:**
-    *   **Alpha Initialization:** $\alpha^{(init)}_{(c)} = 10^{-6}$ (coarse), $\alpha^{(init)}_{(f)} = 10^{-2}$ (fine) [S2].
-    *   **Checkpoint Loading:** Load model state dict, optimizer state dict, and gradient scaler state [S10, unofficial].
-
-### Numbered Steps for Configuration Application
-
-1.  **Initialize Model Parameters:** Set voxel grid resolutions (e.g., $128^3$ to $300^3$) [S8, unofficial], MLP depths (e.g., 2 hidden layers, 128 channels) [S2], and activation functions (ReLU or Sin) [S12, unofficial].
-2.  **Configure Optimizer:** Instantiate Adam with specified betas and epsilon. Assign group-specific learning rates (e.g., $0.1$ for grids, $10^{-3}$ for MLPs) [S2][S8, unofficial].
-3.  **Configure Scheduler:** Set up learning rate decay. Common strategies include:
-    *   Exponential decay to $0.1 \times$ init_lr at last iteration [S8, unofficial].
-    *   Logarithmic decay from $10^{-2}$ to $10^{-3}$ [S3].
-    *   Warm-up phase: Increase LR from $10^{-4}$ to $10^{-2}$ over first 100 iterations [S5].
-4.  **Set Sampling Parameters:** Define batch size, number of steps per ray, and sampling distribution (e.g., surface/near/uniform split) [S1, S2][S5].
-5.  **Define Loss Weights:** Assign weights for photometric, perceptual, and regularization terms based on the dataset and training stage [S2, S4, S7, S9].
-6.  **Handle Dataset-Specific Variants:** Apply specific configurations such as randomized background colors for 360/LLFF datasets [S9] or simplified MLP structures for Blender dataset [S9].
+### Edge Cases and Pitfalls
+- **Empty Subdomains**: If subdomain size is too large in sparse volumes, compute is wasted on empty regions [S11, unofficial].
+- **Halo Overlap**: If subdomain size is too small, overlapping halo regions cause redundant computation [S11, unofficial].
+- **Semi-transparent Backgrounds**: Without randomized background colors during training, models may reconstruct semi-transparent backgrounds, leading to inaccurate depth maps [S10].
+- **Gradient Clipping**: Often disabled (None) for mip-NeRF 360 [S3], but may be required for stability in other configurations.
 
 ### Pseudocode
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def configure_training(model, dataset_type, optimizer_type="adam"):
-    """
-    Configures the training hyperparameters based on the model and dataset.
-    """
+def setup_training_config(model, dataset, opt):
     # 1. Initialize Optimizer
-    if optimizer_type == "adam":
-        # Group parameters by learning rate
-        # Group 0: Voxel/Grid params (lr=0.1)
-        # Group 1: MLP/Network params (lr=1e-3)
-        params = model.get_params(lr0=0.1, lr1=1e-3)
-        optimizer = torch.optim.Adam(params, betas=(0.9, 0.99), eps=1e-15)
-    else:
-        raise ValueError("Unsupported optimizer")
-
+    # Separate learning rates for different parameter groups
+    params = model.get_params(lr0=opt.lr0, lr1=opt.lr1)
+    optimizer = torch.optim.Adam(params, betas=(0.9, 0.99), eps=1e-15)
+    
     # 2. Initialize Scheduler
-    # Example: Exponential decay to 0.1 * init_lr at last iteration
-    total_iters = 30000
-    scheduler = torch.optim.lr_scheduler.LambdaLR(
+    # Exponential decay or LambdaLR
+    scheduler = optim.lr_scheduler.LambdaLR(
         optimizer, 
-        lambda iter: 0.1 ** min(iter / total_iters, 1)
+        lambda iter: 0.1 ** min(iter / opt.iters, 1)
     )
-
-    # 3. Configure Loss Function
-    if dataset_type == "blender":
-        # Simplified config for Blender
-        loss_fn = torch.nn.MSELoss(reduction='none')
-        # No distortion regularizer
-        # Fixed white background
-        bg_color = torch.tensor([1.0, 1.0, 1.0])
-    elif dataset_type in ["360", "llff"]:
-        # Charbonnier loss for LLFF, MSE for 360 (implied by standard practice)
-        # Randomized background for training
-        def get_bg_color():
-            return torch.rand(3) # [0, 1]^3
-        bg_color = None # Dynamic
-    else:
-        loss_fn = torch.nn.MSELoss(reduction='none')
-        bg_color = torch.tensor([0.5, 0.5, 0.5])
-
-    # 4. Set Sampling Parameters
-    batch_size = 8192 # Rays
-    num_steps = 512
-    step_size_factor = 0.5 # Half of voxel size
-
-    # 5. Return Configuration Object
-    config = {
-        "optimizer": optimizer,
-        "scheduler": scheduler,
-        "loss_fn": loss_fn,
-        "batch_size": batch_size,
-        "num_steps": num_steps,
-        "step_size_factor": step_size_factor,
-        "bg_color_fn": get_bg_color if dataset_type in ["360", "llff"] else lambda: bg_color,
-        "total_iters": total_iters
-    }
-    return config
+    
+    # 3. Define Loss
+    criterion = torch.nn.MSELoss(reduction='none')
+    # Or L2 + 0.2 * LSSIM
+    
+    # 4. Setup Trainer
+    trainer = Trainer(
+        name='ngp',
+        opt=opt,
+        model=model,
+        device='cuda',
+        workspace=opt.workspace,
+        optimizer=optimizer,
+        criterion=criterion,
+        ema_decay=None,
+        fp16=opt.fp16,
+        lr_scheduler=scheduler,
+        scheduler_update_every_step=True,
+        metrics=[PSNRMeter()],
+        use_checkpoint=opt.ckpt,
+        eval_interval=50
+    )
+    
+    # 5. Calculate Upsample Resolutions (if applicable)
+    if opt.upsample_model_steps:
+        upsample_resolutions = np.round(
+            np.exp(np.linspace(
+                np.log(opt.resolution0), 
+                np.log(opt.resolution1), 
+                len(opt.upsample_model_steps) + 1
+            ))
+        ).astype(np.int32).tolist()[1:]
+        trainer.upsample_resolutions = upsample_resolutions
+        
+    return trainer
 ```
-
-### Edge Cases and Pitfalls
-*   **Precision:** Use mixed precision (AMP) for acceleration on CUDA devices, ensuring loss scaling is handled [S1][S8, unofficial].
-*   **Boundaries:** Ensure scene bounding box `bound` is set correctly (default 2.0) to invoke adaptive ray marching if needed [S8, unofficial].
-*   **Empty Subdomains:** In Neural VDB, subdomain size must be a multiple of 512; too large wastes compute, too small increases dispatch overhead [S12, unofficial].
-*   **Degenerate Input:** For sparse views, use specific initialization methods [9394-sparse-view-and-initialization-methods.md].
 
 ## Subtopics
 
 ### [Training Loop Setup](1522-training-loop-setup.md)
-Defines the execution of a single optimization iteration, managing tensor layouts and optimizer state interactions.
+The Training Loop Setup defines the execution of a single optimization iteration for a radiance field, encompassing data loading, forward rendering, loss computation, and parameter updates. It differs from [Training Ray Batching](2252-training-ray-batching.md) by managing the specific tensor layouts and optimizer state interactions for a batch of rays, whereas batching focuses on the selection and shuffling of those rays. It serves as the foundational atomic unit for higher-level procedures like [Training Loop](4290-training-loop.md) and [Training Loop with Adaptive Regularization & LR Decay](2408-training-loop-with-adaptive-regularization-lr-decay.md).
 
 ### [Training Loop with Adaptive Regularization & LR Decay](2408-training-loop-with-adaptive-regularization-lr-decay.md)
-Integrates adaptive regularization and exponential learning rate decay to stabilize convergence.
+This method specifies the iterative optimization procedure for training neural radiance fields, integrating adaptive regularization terms and exponential learning rate decay within the training loop. It combines a reconstruction loss with structural priors (orthogonality, L1 density, and total variation) while gradually reducing the optimization step size to stabilize convergence.
 
 ### [Learning Rate Scheduling](2701-learning-rate-scheduling.md)
-Dynamically adjusts step sizes using various decay strategies (exponential, log-linear, event-driven) to balance convergence and quality.
+Learning rate scheduling dynamically adjusts the step size of optimization parameters during the training of radiance fields to balance convergence speed and final reconstruction quality. It solves the problem of static learning rates causing either slow convergence or instability in non-convex differentiable rendering objectives. What sets this method apart from its siblings is the variety of decay strategies employed, ranging from simple exponential power-of-2 decay to log-linear interpolation with delay phases and event-driven spikes for densification, allowing fine-grained control over parameter groups (e.g., positions vs. features).
 
 ### [Mixed Precision Training](2766-mixed-precision-training.md)
-Accelerates optimization on CUDA devices using Automatic Mixed Precision (AMP).
+Mixed Precision Training accelerates NeRF optimization on CUDA devices by utilizing Automatic Mixed Precision (AMP) to perform computations in lower precision formats while maintaining numerical stability. It differs from standard single-precision training by automating precision casting and loss scaling within the PyTorch training loop.
 
 ### [Adam Optimisation with Adaptive Scaling](3093-adam-optimisation-with-adaptive-scaling.md)
-Uses fused Adam on CUDA with fixed-pool relocation for adaptive model capacity.
+Standard PyTorch Adam optimisation with fused Adam on CUDA. Adaptive model capacity is handled via fixed-pool relocation, keeping optimiser tensor shapes constant.
+
+### [Checkpoint Loading and Resume Training](3118-checkpoint-loading-and-resume-training.md)
+Load model and optimizer states from a checkpoint file to resume training or evaluation.
 
 ### [Training Schedule](3154-training-schedule.md)
-Defines temporal progression of hyperparameters and structural updates (warm-up, densification, refinement).
+A training schedule defines the temporal progression of hyperparameters, loss functions, and structural updates during the optimization of a radiance field or implicit surface. It solves the problem of slow convergence and instability by decoupling coarse geometric alignment from fine detail refinement. Unlike [Learning Rate Scheduling](2701-learning-rate-scheduling.md), which adjusts only the optimizer's step size, or [Regularization and Priors](6281-regularization-and-priors.md), which adds static penalty terms, a training schedule actively changes the *active set* of losses and the *structural state* of the representation (e.g., enabling densification or freezing updates) over specific iteration intervals.
+
+### [View Sampler](3864-view-sampler.md)
+An abstract base class for sampling context and target views during training or inference, defining the interface for view selection strategies.
 
 ### [Training Objective for Fine Representation](4686-training-objective-for-fine-representation.md)
-Specifies loss and optimization for the fine-stage of a two-stage pipeline, reducing regularization weights.
+This configuration defines the loss function and optimization strategy for the fine-stage of a two-stage radiance field optimization pipeline. It builds on [Training Configuration](2332-training-configuration.md) by specifying how to handle the second stage of training, typically following a coarse-stage initialization. The primary distinction from the coarse stage is the reduction of regularization weights to prioritize photometric accuracy and geometric detail over structural priors. It is distinct from [Training Loop Setup](1522-training-loop-setup.md) which handles the loop infrastructure, and [Regularization and Priors](6281-regularization-and-priors.md) which defines the specific prior terms.
 
 ### [Method-Specific Training Configurations](6267-method-specific-training-configurations.md)
-Defines hyperparameters for specific methods (e.g., Mip-NeRF, DONeRF) to address unique failure modes.
+This family defines the hyperparameters, optimization routines, and architectural constraints required to train specific neural radiance field variants. It addresses the problem of stabilizing differentiable volume rendering training, which is sensitive to initialization, sampling density, and activation function choices. It sets itself apart from general [Training Configuration](2332-training-configuration.md) by providing implementation-specific details (e.g., activation functions, learning rate schedules, and loss weights) that are critical for convergence in methods like mip-NeRF, DONeRF, and Neuralangelo.
 
 ### [Regularization and Priors](6281-regularization-and-priors.md)
-Defines specific prior terms (orthogonality, L1 density, total variation) used in optimization.
 
 ### [PixelNeRF](7471-pixelnerf.md)
-Uses CNN features from reference images instead of positional encoding.
+PixelNeRF is a radiance-field optimization method that synthesizes NeRF from one or a few reference images by leveraging additional CNN features extracted from those images, rather than relying solely on basic positional encoding. It outperforms vanilla NeRF in capturing intricate details and semantic consistency, particularly enhancing the reconstruction of internal small structures, though it offers smaller performance margins compared to hash-based methods like Instant-NGP.
 
 ### [Warm-start Encoding](8751-warm-start-encoding.md)
-Initializes network weights for each frame with converged weights from the previous frame to reduce flickering and encoding time.
+Warm-start encoding accelerates the training of neural volume representations for animated sparse volumes by initializing the network weights for each frame with the converged weights from the previous frame. It solves the problem of flickering artifacts caused by weight discontinuities in high-frequency details (e.g., thin smoke layers) when using naive cold-start training, while simultaneously reducing encoding time by a factor of 1.5–2.5 compared to independent frame training. Unlike standard cold-start methods, it leverages temporal coherency to preserve smooth transitions across frames.
 
 ### Randomized Background Colors
-*   **Definition:** During training, a random RGB background color is drawn from $[0,1]^3$ when compositing pixel color to encourage reconstruction of a fully opaque background, avoiding semi-transparent artifacts [S9].
-*   **Parameter:** Test-time background color is set to $(0.5, 0.5, 0.5)$ [S9].
-*   **Usage:** Used for the 360 dataset and the LLFF dataset. The Blender dataset uses a fixed white background [S9].
+During training, drawing a random RGB background color from $[0,1]^3$ when compositing pixel color to encourage reconstruction of a fully opaque background, avoiding semi-transparent background artifacts [S10]. Test-time background color is set to $(0.5, 0.5, 0.5)$ [S10]. Used for the 360 dataset and the LLFF dataset. The Blender dataset uses a fixed white background [S10].
 
 ### Blender Dataset Simplified Configuration
-*   **Parameter:** One round of sampling, 128 samples for proposal MLP, 32 samples for NeRF MLP. Proposal MLP: 4 layers, 256 hidden units. NeRF MLP: 8 layers, 256 (or 512) hidden units. Axis-aligned IPE, MSE loss, no distortion regularizer [S9].
-
-### Checkpoint Loading and Resume Training
-*   **Definition:** Load model and optimizer states from a checkpoint file to resume training or evaluation [S10, unofficial].
-*   **Step:** Load model state dictionary, optimizer state dictionary, gradient scaler state (if used), and extract start iteration from checkpoint [S10, unofficial].
+For Blender dataset: one round of sampling, 128 samples for proposal MLP, 32 samples for NeRF MLP, proposal MLP with 4 layers and 256 hidden units, NeRF MLP with 8 layers and 256 (or 512) hidden units, axis-aligned IPE, MSE loss, no distortion regularizer [S10].
 
 ### LLFF Training Configuration
-*   **Parameter:** Distortion regularizer is not disabled. Charbonnier loss is used instead of MSE [S9].
-*   **Number:** On LLFF dataset with 256 hidden units: mip-NeRF achieves PSNR 26.93, SSIM 0.830, LPIPS 0.177, Time 2.48 hrs, Params 0.61M. Our Model achieves PSNR 26.68, SSIM 0.847, LPIPS 0.150, Time 2.39 hrs, Params 0.84M. On LLFF dataset with 512 hidden units: mip-NeRF achieves PSNR 27.01, SSIM 0.845, LPIPS 0.148, Time 6.15 hrs, Params 2.27M. Our Model achieves PSNR 26.86, SSIM 0.858, LPIPS 0.128, Time 3.84 hrs, Params 3.23M [S9].
-*   **Comparison:** Our model does not outperform mip-NeRF in PSNR, but yields improved SSIM and LPIPS metrics and a significant speedup when the NeRF MLP is large [S9].
-
-### View Sampler
-*   **Definition:** An abstract base class for sampling context and target views during training or inference, defining the interface for view selection strategies [S11, unofficial].
-*   **Parameter:** `stage` (current training stage), `is_overfitting` (boolean flag), `cameras_are_circular` (boolean flag), `step_tracker` (optional tracker) [S11, unofficial].
-*   **Layout:** Context view indices tensor shape: `Int64[Tensor, " context_view"]`. Target view indices tensor shape: `Int64[Tensor, " target_view"]` [S11, unofficial].
+Distortion regularizer is not disabled. Charbonnier loss is used instead of MSE [S10]. On LLFF dataset with 256 hidden units: mip-NeRF achieves PSNR 26.93, SSIM 0.830, LPIPS 0.177, Time 2.48 hrs, Params 0.61M. Our Model achieves PSNR 26.68, SSIM 0.847, LPIPS 0.150, Time 2.39 hrs, Params 0.84M. On LLFF dataset with 512 hidden units: mip-NeRF achieves PSNR 27.01, SSIM 0.845, LPIPS 0.148, Time 6.15 hrs, Params 2.27M. Our Model achieves PSNR 26.86, SSIM 0.858, LPIPS 0.128, Time 3.84 hrs, Params 3.23M. Our model does not outperform mip-NeRF in PSNR, but yields improved SSIM and LPIPS metrics and a significant speedup when the NeRF MLP is large [S10].
 
 ### NeuralVDB Hyperparameter Configuration
-*   **Step:** Batch sampling strategy: Either draw $2^{16}$ random samples per epoch, or resample a subset of input voxels at fixed intervals and draw $2^{12}$ batches per epoch. Resampling subset size = resampling intervals (100 or 500) $\times$ batch size. Use resampling when fine details with thin structures are critical [S12, unofficial].
-*   **Parameter:** Subdomain size: Must be a multiple of 512. Network width: Level-1 networks use half the width of level-0 networks. Default starting point: level-0 width 128, depth 3. Use 4 layers for volumes requiring more detail capture. Optimizer: Adam. Default learning rate: 0.001. Decay: 0.975 every 100 epochs (no resampling) or 0.75 every 1,000 epochs (with resampling). Max epochs: 2,500 for non-resampled; more for resampled cases [S12, unofficial].
-*   **Comparison:** Dense grid training produces the highest noise. Block grid (dense leaf nodes without active masks) reduces noise but still shows visible fog artifacts. Sparse VDB with active voxel masks yields the best visual quality and low noise reconstruction [S12, unofficial].
+Batch sampling strategy: Either draw $2^{16}$ random samples per epoch, or resample a subset of input voxels at fixed intervals and draw $2^{12}$ batches per epoch. Resampling subset size = resampling intervals (100 or 500) × batch size. Use resampling when fine details with thin structures are critical [S11, unofficial]. Subdomain size: Must be a multiple of 512. Too large wastes compute on empty subdomains; too small increases dispatch overhead and causes dominant overlapping halo regions leading to redundant computation [S11, unofficial]. Network width: Level-1 networks use half the width of level-0 networks. Default starting point: level-0 width 128, depth 3. Use 4 layers for volumes requiring more detail capture [S11, unofficial]. Optimizer: Adam optimizer. Default learning rate: 0.001. Decay: 0.975 every 100 epochs (no resampling) or 0.75 every 1,000 epochs (with resampling). Max epochs: 2,500 for non-resampled; more for resampled cases [S11, unofficial]. Dense grid training produces the highest noise. Block grid (dense leaf nodes without active masks) reduces noise but still shows visible fog artifacts. Sparse VDB with active voxel masks yields the best visual quality and low noise reconstruction [S11, unofficial].
 
 ### Attenuation Field
-*   **Definition:** A formulation mapping 3D coordinates $X$ to attenuation coefficients $\mu$ rather than color values, based on the Beer–Lambert Law to model X-ray absorption [S13].
-*   **Step:** Map 3D coordinates to attenuation coefficients $\mu$. Model X-ray beam attenuation as it passes through diverse structures to a flat-panel detector [S13].
-*   **Formula:** $I = I_0 e^{-\sum \mu_i \delta_i}$, where $I$ is resultant attenuated intensity, $I_0$ is initial intensity, $\mu$ is attenuation coefficient, $\delta$ is sampling step [S13].
+A formulation mapping 3D coordinates X to attenuation coefficients $\mu$ rather than color values, based on the Beer–Lambert Law to model X-ray absorption [S12]. Map 3D coordinates to attenuation coefficients $\mu$. Model X-ray beam attenuation as it passes through diverse structures to a flat-panel detector [S12]. $I=I_0e^{-\sum \mu_i \delta_i}$, where $I$ is resultant attenuated intensity, $I_0$ is initial intensity, $\mu$ is attenuation coefficient, $\delta$ is sampling step [S12].
 
 ## Operating characteristics
-*   **Time Complexity:** Training iterations typically range from 10k to 30k [S2, S4][S8, unofficial]. Specific datasets may require more (e.g., 25k for MERF [S5], 80k for VMesh contiguous stage [S7]).
-*   **Memory Complexity:** Depends on the representation. Hash grids (MERF) use $2^{21}$ entries per level [S5]. Voxel grids use $M^{(c)} = 100^3$ and $M^{(f)} = 160^3$ voxels [S2]. Neural VDB uses sparse subdomains [S12, unofficial].
-*   **Measured Performance:** On LLFF dataset with 512 hidden units, Our Model achieves 3.84 hrs training time vs. mip-NeRF's 6.15 hrs [S9]. On Blender dataset, Our Model is significantly faster than mip-NeRF [S9].
-*   **Scaling:** Exponential learning rate decay and adaptive ray marching (dt_gamma) help scale to larger scenes [S2][S8, unofficial].
-*   **Strengths:** Flexible configuration allows adaptation to various datasets (Blender, LLFF, 360) and representations (Voxel, Hash, VDB).
-*   **Limitations:** Static configurations may not adapt to scene complexity dynamically without additional mechanisms like [Adaptive Ray Sampling](8870-adaptive-ray-sampling.md).
+- **Time Complexity**: Depends on batch size and iterations. Typical training ranges from 15 minutes per scene for voxel grids [S2] to 200k iterations for ExBluRF [S8].
+- **Memory Complexity**: Hash grids and voxel grids consume significant memory. Instant-NGP uses 20 levels with $2^{21}$ entries per table [S5]. NeuralVDB subdomain size affects memory overhead [S11, unofficial].
+- **Performance**: Mixed precision training accelerates optimization on CUDA devices [S2766]. Warm-start encoding reduces encoding time by 1.5–2.5x [S8751].
+- **Strengths**: Configurable hyperparameters allow balancing between speed and quality. Progressive training and adaptive sampling improve convergence.
+- **Limitations**: Sensitive to initialization and hyperparameter choices. Dense grid training can produce high noise [S11, unofficial].
 
 ## Background
-*   **Origin:** The concept of training configuration in NeRF stems from the original NeRF paper [37] and subsequent optimizations like Direct Voxel Grid Optimization [S2], MERF [S5], and Mip-NeRF 360 [S9].
-*   **History:** Early NeRF used fixed MLP architectures and simple MSE loss. Later methods introduced multi-stage training (coarse/fine) [S2], hash grids [S5], and adaptive sampling [S8, unofficial].
-*   **Usage:** Widely used in differentiable volume rendering for novel view synthesis, 3D reconstruction, and medical imaging [S13].
+Training configuration methods have evolved alongside NeRF and its variants. Early NeRF used fixed hyperparameters [S19]. Instant-NGP introduced hash grid optimization with specific learning rates and decay [S5]. mip-NeRF 360 introduced randomized backgrounds and specific loss weights for unbounded scenes [S10]. NeuralVDB adapted configurations for sparse volumes [S11, unofficial]. ExBluRF optimized for motion-blurred images with specific trajectory parameters [S8].
 
 ## Sources
 [S1] Neural Geometric Level of Detail: Real-time Rendering with Implicit 3D Shapes, https://doi.org/10.1109/cvpr46437.2021.01120, fetched 2026-10-26
@@ -219,9 +192,8 @@ Initializes network weights for each frame with converged weights from the previ
 [S5] MERF: Memory-Efficient Radiance Fields for Real-time View Synthesis in Unbounded Scenes, https://doi.org/10.1145/3592426, fetched 2026-10-26
 [S6] Neural Deformable Voxel Grid for Fast Optimization of Dynamic View Synthesis, https://doi.org/10.1007/978-3-031-26319-4_27, fetched 2026-10-26
 [S7] VMesh: Hybrid Volume-Mesh Representation for Efficient View Synthesis, https://core.ac.uk/download/560406650.pdf, fetched 2026-10-27
-[S8] NeRF-Factory/IDDR-NGP, https://github.com/NeRF-Factory/IDDR-NGP, fetched 2026-10-27 (unofficial)
-[S9] Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.00539, fetched 2026-10-26
-[S10] rigved-sanku/NeRF-Implementation-for-Efficient-3D-Scene-Reconstruction, https://github.com/rigved-sanku/NeRF-Implementation-for-Efficient-3D-Scene-Reconstruction, fetched 2026-10-27 (unofficial)
-[S11] dcharatan/pixelsplat, https://github.com/dcharatan/pixelsplat, fetched 2026-10-27 (unofficial)
-[S12] NeuralVDB: High-resolution Sparse Volume Representation using Hierarchical Neural Networks | NVIDIA, https://www.youtube.com/watch?v=IfgeduMv_ns, fetched 2026-11-04 (unofficial)
-[S13] The Adaption of Recent New Concepts in Neural Radiance Fields and Their Role for High-Fidelity Volume Reconstruction in Medical Images., https://doi.org/10.3390/s24185923, fetched 2026-10-26
+[S8] ExBluRF: Efficient Radiance Fields for Extreme Motion Blurred Images, https://arxiv.org/abs/2309.08957v3, fetched 2026-10-27
+[S9] NeRF-Factory/IDDR-NGP, https://github.com/NeRF-Factory/IDDR-NGP, fetched 2026-10-27 (unofficial)
+[S10] Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.00539, fetched 2026-10-26
+[S11] NeuralVDB: High-resolution Sparse Volume Representation using Hierarchical Neural Networks | NVIDIA, https://www.youtube.com/watch?v=IfgeduMv_ns, fetched 2026-11-04 (unofficial)
+[S12] The Adaption of Recent New Concepts in Neural Radiance Fields and Their Role for High-Fidelity Volume Reconstruction in Medical Images., https://doi.org/10.3390/s24185923, fetched 2026-10-26

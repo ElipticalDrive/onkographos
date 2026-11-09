@@ -3,136 +3,130 @@
 Also called: 4D Linear Regression Gradient Estimation, Neumann Gradient Estimation
 
 ## Overview
-The Neumann Gradient is a high-quality gradient estimation method for volume rendering that approximates the local density function using a 3D regression hyperplane fitted to 26 neighboring voxels [S1, unofficial][S2]. Unlike simple finite difference stencils, it produces nearly isotropic gradients with significantly reduced fringing artifacts and smoother appearance in regions of rapid gradient change [S1, unofficial][S2]. It is chosen when visual quality and smoothness are prioritized over computational performance, particularly for non-binary volumes where scene-space normal estimation is required [S3].
+The Neumann Gradient is a high-quality gradient estimation method for volume rendering that approximates the local density function using a 3D regression hyperplane fitted to 26 neighboring voxels [S1, unofficial][S2]. Unlike simple finite difference stencils, it minimizes error weighted by a spherically symmetric function to produce nearly isotropic gradients with significantly reduced fringing artifacts [S1, unofficial][S2]. It is chosen when visual smoothness and normal accuracy are prioritized over computational speed, particularly for non-binary volumes where scene-space estimation is required [S2, S3].
 
 ## How it works
-The method estimates the gradient $\nabla f$ at a voxel center $P=(x_0, y_0, z_0)$ by minimizing the weighted error between the actual voxel densities and a linear approximation (hyperplane) over the $3 \times 3 \times 3$ neighborhood centered at $P$.
+The method estimates the gradient $\nabla f = [A, B, C]^T$ at a voxel center $P=(x_0, y_0, z_0)$ by fitting a plane to the density values of its 26 neighbors (vertices, edge centers, and face centers of the surrounding $3 \times 3 \times 3$ cube, excluding the center) [S2, S3].
 
-**Inputs and Outputs:**
-*   **Input:** A $3 \times 3 \times 3$ grid of voxel densities $V_{ijk}$ centered at $(x_0, y_0, z_0)$, where $i,j,k \in \{-1, 0, 1\}$. The center voxel is at $(0,0,0)$.
-*   **Output:** The gradient vector $\mathbf{G} = [G_x, G_y, G_z]^T$.
+### Inputs and Outputs
+*   **Input:** A 3D volume grid $V$. For a target voxel at integer coordinates $(x, y, z)$, the method accesses the 26 neighboring voxel values $v_k$ at positions $P_k = (x_k, y_k, z_k)$, where $k \in \{1, \dots, 26\}$.
+*   **Output:** A 3D gradient vector $\nabla f = [A, B, C]^T$ at $(x, y, z)$.
 
-**Data Structures:**
-The neighborhood consists of 26 points (excluding the center). Let $k$ index these 26 neighbors, where $k \in \{0, \dots, 25\}$. For each neighbor $k$:
-*   $v_k$: The scalar density value at the neighbor.
-*   $(x_k, y_k, z_k)$: The integer offset coordinates relative to the center. These are all combinations of $\{-1, 0, 1\}^3$ excluding $(0,0,0)$.
-*   $d_k$: The Euclidean distance from the center to neighbor $k$, i.e., $d_k = \sqrt{x_k^2 + y_k^2 + z_k^2}$.
+### Data Structures
+*   **Neighbor Offsets:** The 26 offsets $\delta_k = (dx_k, dy_k, dz_k)$ correspond to all integer combinations in $\{-1, 0, 1\}^3$ excluding $(0,0,0)$.
+*   **Weights:** A scalar weight $w_k$ for each neighbor based on distance.
 
-**Formulas:**
-The gradient is derived from the coefficients of the best-fit plane $f(x,y,z) = Ax + By + Cz + D$. The components are calculated as [S2]:
+### Steps
+1.  **Calculate Distances:** For each neighbor $k$, calculate the Euclidean distance $d_k$ from the center voxel $(0,0,0)$ to the neighbor offset $(dx_k, dy_k, dz_k)$:
+    $$ d_k = \sqrt{dx_k^2 + dy_k^2 + dz_k^2} $$
+2.  **Calculate Neighbor Weights:** Compute the weight $w_k$ for each neighbor using the inverse distance:
+    $$ w_k = \frac{1}{d_k} $$
+3.  **Compute Normalization Constants:** Calculate the constants $w_A, w_B, w_C, w_D$ required for the plane equation coefficients. Note that $w_A$ and $w_C$ are constant, while $w_B$ and $w_D$ depend on the sum of squared coordinates weighted by $w_k$ [S2]:
+    $$ w_A = \frac{1}{26} $$
+    $$ w_B = \frac{1}{\sum_{k=1}^{26} w_k x_k^2} $$
+    $$ w_C = \frac{1}{26} $$
+    $$ w_D = \frac{1}{\sum_{k=1}^{26} w_k z_k^2} $$
+    *Note: The sources define $x_k$ and $z_k$ as the coordinate components of the neighbor positions relative to the center. In a standard grid, these are simply the integer offsets $dx_k$ and $dz_k$ [S2].*
+4.  **Compute Gradient Components:** Calculate the gradient components $A, B, C$ by summing the weighted density values $v_k$ of the 26 neighbors:
+    $$ A = w_A \sum_{k=1}^{26} w_k v_k x_k $$
+    $$ B = w_B \sum_{k=1}^{26} w_k v_k y_k $$
+    $$ C = w_D \sum_{k=1}^{26} w_k v_k z_k $$
+    The gradient is $\nabla f = [A, B, C]^T$ [S2].
 
-$$ G_x = A = w_A \sum_{k=0}^{26} w_k v_k x_k $$
-$$ G_y = B = w_B \sum_{k=0}^{26} w_k v_k y_k $$
-$$ G_z = C = w_C \sum_{k=0}^{26} w_k v_k z_k $$
+### Alternative Filter Mask Formulation
+An equivalent implementation uses separable 3x3x3 filter masks derived from the regression framework. The gradient components are computed by convolving the volume with specific kernels and dividing by 52 [S1, unofficial]:
 
-Where the weights $w_k$ and normalization factors are defined as [S2]:
-$$ w_k = \frac{1}{d_k} $$
-$$ w_A = \frac{1}{26} $$
-$$ w_B = \frac{1}{\sum_{k=0}^{26} w_k x_k^2} $$
-$$ w_C = \frac{1}{26} $$
-$$ w_D = \frac{1}{\sum_{k=0}^{26} w_k z_k^2} $$
+*   **X-Gradient Kernel ($\nabla_x$):**
+    $$ \nabla_x = \frac{1}{52} \begin{pmatrix} -2 & 0 & 2 \\ -3 & 0 & 3 \\ -2 & 0 & 2 \end{pmatrix} \begin{pmatrix} -3 & 0 & 3 \\ -6 & 0 & 6 \\ -3 & 0 & 3 \end{pmatrix} \begin{pmatrix} -2 & 0 & 2 \\ -3 & 0 & 3 \\ -2 & 0 & 2 \end{pmatrix} $$
+    *(Note: The source [S1, unofficial] presents this as a tensor product of three 3x3 matrices. The implementation involves applying the 1D kernels along each axis. Specifically, the kernel for X is separable into $K_x \otimes K_y \otimes K_z$ where the weights are distributed across the 26 neighbors. The explicit 3x3x3 tensor values for $\nabla_x$ in [S1, unofficial] are:)*
+    $$ \nabla_x := \frac{1}{52} \begin{pmatrix} (-2 & 0 & 2) & (-3 & 0 & 3) & (-2 & 0 & 2) \\ (-3 & 0 & 3) & (-6 & 0 & 6) & (-3 & 0 & 3) \\ (-2 & 0 & 2) & (-3 & 0 & 3) & (-2 & 0 & 2) \end{pmatrix} $$
+    *(Correction: The source [S1, unofficial] matrix for $\nabla_x$ has a typo in the provided text snippet "(-2 & 0 & 3)" in the last row, first column? No, looking at symmetry, it should be consistent. The source text says: `(-2 & 0 & 2) \\ (-3 & 0 & 3) \\ (-2 & 0 & 3)`. This is likely a typo in the source [S1, unofficial]. Standard Neumann kernels are symmetric. The Y and Z kernels in [S1, unofficial] are also presented as products of 3x3 matrices.)*
 
-*Note on Source Disagreement:* Source [S1, unofficial] provides explicit $3 \times 3 \times 3$ filter masks for $\nabla_x, \nabla_y, \nabla_z$ and a separate mask for filtered voxel values $V$, scaled by $1/52$. Source [S2] provides the general regression formulation with distance-weighted sums. The masks in [S1, unofficial] appear to be a specific separable approximation or implementation detail of the regression concept, but the regression formulation in [S2] is the general definition of the "4D linear regression" method. The implementation below follows the general regression definition from [S2] as it is mathematically complete, while noting the mask values from [S1, unofficial] as an alternative implementation path if the specific separable form is required.
+    Let's stick to the regression formula [S2] for implementation as it is less ambiguous regarding the tensor layout in [S1, unofficial]. However, [S1, unofficial] explicitly provides the filter mask for the **voxel value** $V$ which can be reused:
+    $$ V := \frac{1}{52} \left( \left( \begin{array}{ccc} 2 & 3 & 2 \\ 3 & 6 & 3 \\ 2 & 3 & 2 \end{array} \right) \left( \begin{array}{ccc} 3 & 6 & 3 \\ 6 & 0 & 6 \\ 3 & 6 & 3 \end{array} \right) \left( \begin{array}{ccc} 2 & 3 & 2 \\ 3 & 6 & 3 \\ 2 & 3 & 2 \end{array} \right) \right) $$
+    This filtered value can be used to smooth the input data before gradient estimation [S1, unofficial].
 
-**Pseudocode:**
-The following Python-like pseudocode implements the regression method from [S2]. It assumes a function `get_density(x, y, z)` that returns the voxel value, handling boundary conditions (e.g., clamping or zero-padding) as per the parent article's shared principles [G].
+### Parameters
+*   **Interpolation:** If the gradient is needed at non-voxel centers (e.g., during ray marching), bilinear-cubic scene interpolation is used to determine densities at the 26 neighboring points [S3].
+*   **Voxel Size:** The gradient vector $\nabla f$ is in units of density per voxel index. To convert to physical units, divide by the voxel spacing $h$ if isotropic, or scale components by $1/h_x, 1/h_y, 1/h_z$ respectively. The sources do not explicitly define the division by $h$ in the final Neumann formula [S2], but standard gradient definitions require it [G].
 
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def compute_neumann_gradient(get_density, x0, y0, z0):
+def neumann_gradient(volume, x, y, z):
     """
-    Computes the Neumann gradient at voxel center (x0, y0, z0).
-    Uses the 26 neighbors in a 3x3x3 cube excluding the center.
+    Computes the Neumann gradient at voxel (x, y, z).
+    volume: 3D numpy array of density values.
+    x, y, z: Integer coordinates of the center voxel.
+    Returns: Gradient vector (A, B, C).
     """
-    neighbors = []
-    
-    # Generate 26 neighbors (offsets from -1 to 1, excluding 0,0,0)
+    # Offsets for the 26 neighbors (excluding 0,0,0)
+    offsets = []
     for dx in [-1, 0, 1]:
         for dy in [-1, 0, 1]:
             for dz in [-1, 0, 1]:
                 if dx == 0 and dy == 0 and dz == 0:
                     continue
-                neighbors.append((dx, dy, dz))
+                offsets.append((dx, dy, dz))
     
-    # Precompute weights and sums for normalization factors
-    # w_k = 1 / d_k
-    # We need sum(w_k * x_k^2) for w_B
-    # w_A and w_C are constant 1/26
-    
+    sum_A = 0.0
+    sum_B = 0.0
+    sum_C = 0.0
     sum_wx2 = 0.0
-    sum_wx = 0.0 # Not used in final formula but good for debugging
-    sum_wy = 0.0
-    sum_wz = 0.0
+    sum_wz2 = 0.0
     
-    # Accumulators for gradient components
-    sum_ax = 0.0
-    sum_by = 0.0
-    sum_cz = 0.0
-    
-    for dx, dy, dz in neighbors:
-        dist = math.sqrt(dx*dx + dy*dy + dz*dz)
-        w_k = 1.0 / dist
+    for dx, dy, dz in offsets:
+        # Boundary handling: clamp indices [G]
+        vx = clamp(x + dx, 0, volume.shape[0] - 1)
+        vy = clamp(y + dy, 0, volume.shape[1] - 1)
+        vz = clamp(z + dz, 0, volume.shape[2] - 1)
         
-        # Get density value. Boundary handling is implementation-specific [G]
-        v_k = get_density(x0 + dx, y0 + dy, z0 + dz)
+        v_k = volume[vx, vy, vz]
         
-        # Accumulate for normalization of B
+        # Distance from center
+        d_k = (dx*dx + dy*dy + dz*dz)**0.5
+        w_k = 1.0 / d_k
+        
+        # Accumulate sums for normalization constants and gradient components
+        # Note: x_k, y_k, z_k in the formula refer to the relative coordinates (dx, dy, dz)
         sum_wx2 += w_k * (dx * dx)
+        sum_wz2 += w_k * (dz * dz)
         
-        # Accumulate for gradient components
-        # G_x = (1/26) * sum(w_k * v_k * x_k)
-        sum_ax += w_k * v_k * dx
+        sum_A += w_k * v_k * dx
+        sum_B += w_k * v_k * dy
+        sum_C += w_k * v_k * dz
         
-        # G_y = (1/sum(w_k * x_k^2)) * sum(w_k * v_k * y_k)
-        sum_by += w_k * v_k * dy
-        
-        # G_z = (1/26) * sum(w_k * v_k * z_k)
-        sum_cz += w_k * v_k * dz
-        
-    # Calculate normalization constants
+    # Normalization constants
     w_A = 1.0 / 26.0
     w_B = 1.0 / sum_wx2
     w_C = 1.0 / 26.0
+    w_D = 1.0 / sum_wz2
     
-    # Calculate Gradient Components
-    Gx = w_A * sum_ax
-    Gy = w_B * sum_by
-    Gz = w_C * sum_cz
+    # Gradient components
+    A = w_A * sum_A
+    B = w_B * sum_B
+    C = w_D * sum_C
     
-    return (Gx, Gy, Gz)
+    return (A, B, C)
 ```
-
-**Alternative Implementation (Separable Masks from [S1, unofficial]):**
-If the specific separable filter masks from [S1, unofficial] are used, the gradient components are computed by convolving the $3 \times 3 \times 3$ neighborhood with the following masks, scaled by $1/52$. Note that the mask for $\nabla_z$ in [S1, unofficial] contains a zero plane, which implies it might be a typo or a specific variant; however, the text states these are the recommended masks. The mask for $\nabla_y$ is given as a product of three matrices in the source, which is ambiguous in text format. The source [S1, unofficial] explicitly lists:
-$\nabla_x$:
-$$ \frac{1}{52} \begin{pmatrix} -2 & 0 & 2 \\ -3 & 0 & 3 \\ -2 & 0 & 2 \end{pmatrix} \begin{pmatrix} -3 & 0 & 3 \\ -6 & 0 & 6 \\ -3 & 0 & 3 \end{pmatrix} \begin{pmatrix} -2 & 0 & 2 \\ -3 & 0 & 3 \\ -2 & 0 & 2 \end{pmatrix} $$
-(This notation in [S1, unofficial] is likely a tensor product or separable decomposition, but the exact 3D kernel is not explicitly flattened in the text. The regression method [S2] is preferred for clarity.)
-
-**Edge Cases and Pitfalls:**
-*   **Boundary Conditions:** Voxels on the volume boundary do not have 26 neighbors. Standard clamping, zero-padding, or extrapolation must be applied [G].
-*   **Computational Cost:** The method has considerably high computational costs due to the 26-neighbor access and floating-point operations (square roots, divisions) [S1, unofficial].
-*   **Smoothing Artifacts:** The method introduces significant smoothing, which can fade small details. This is often unsuitable for real medical applications where fine detail preservation is critical [S1, unofficial].
-*   **Interpolation:** If the gradient is needed at non-voxel centers (e.g., during ray marching), bilinear-cubic scene interpolation is used to determine densities at neighboring points before applying the gradient estimation [S3].
 
 ## Subtopics
 
 ### Local 3D Regression Hyperplane Gradient Estimation
-This is the general class of methods to which Neumann Gradient belongs. It approximates the gradient vector by estimating the density function itself in a local neighborhood using a local 3D regression hyperplane [S4, unofficial]. It differs from Central Differences by estimating the density function via regression rather than simple linear differences, resulting in higher approximation quality and higher computational effort [S4, unofficial].
+This is the formal name for the Neumann Gradient method. It differs from Central Differences by estimating the density function via a local 3D regression hyperplane rather than using simple linear differences between neighboring voxels [S4, unofficial]. This results in higher approximation quality and computational effort [S4, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per voxel, but with a large constant factor due to 26 neighbor accesses and floating-point arithmetic (square roots, divisions). Significantly slower than Central Differences or Sobel operators.
-*   **Memory Complexity:** $O(1)$ auxiliary memory per voxel computation.
-*   **Performance:** Considerably high computational costs [S1, unofficial]. Not suitable for real-time rendering on standard hardware without optimization or lower-resolution precomputation [S1, unofficial].
-*   **Strengths:** Produces nearly isotropic gradients [S1, unofficial]. Reduces fringing artifacts [S1, unofficial]. Provides a much smoother appearance, especially in regions where gradient direction changes rapidly [S2]. Suitable for non-binary volumes (opacity scenes) [S3].
-*   **Limitations:** High computational cost [S1, unofficial]. Causes fading of small details due to smoothing [S1, unofficial]. Typically cannot be used in real medical applications where detail preservation is required [S1, unofficial].
-*   **When to Use:** High-quality offline rendering or precomputed gradient fields where visual smoothness is more important than performance or fine detail.
-*   **When Not to Use:** Real-time medical visualization, real-time rendering on constrained hardware, or scenes where high-frequency detail preservation is critical.
+*   **Time Complexity:** $O(1)$ per voxel, but with a high constant factor due to the 26-neighbor access and floating-point operations (square roots, divisions). It is considerably more expensive than Central Differences or Forward Differences [S1, unofficial].
+*   **Memory Complexity:** $O(1)$ auxiliary memory per voxel if computed on-the-fly. If precomputed, it requires storing a 3D vector field.
+*   **Performance:** The method is computationally intensive. [S1, unofficial] notes that using filtered density values (which can be reused from the gradient estimation intermediate steps) adds low additional cost but causes fading of small details [S1, unofficial].
+*   **Strengths:** Produces nearly isotropic gradients and significantly reduces fringing artifacts compared to central differences [S1, unofficial]. It provides a much smoother appearance, especially in regions where gradient direction changes rapidly [S2]. It is suitable for non-binary volumes [S3].
+*   **Limitations:** High computational cost makes it less suitable for real-time applications without optimization or hardware acceleration [S1, unofficial]. The smoothing effect may fade small details, which is often undesirable in medical applications where fine structures are critical [S1, unofficial].
+*   **When to use:** High-quality offline rendering or when visual smoothness is paramount and computational resources are sufficient.
+*   **When not to use:** Real-time medical visualization requiring preservation of small details, or resource-constrained environments.
 
 ## Background
-The Neumann Gradient method was proposed by Neumann et al. [S1, unofficial][S2]. It is based on a theoretical framework of linear regression, generalizing previous gradient estimation approaches [S1, unofficial]. It is also referred to as "4D linear regression gradient estimation" [S2]. The method is used in high-quality volume rendering systems to improve visual appearance by reducing voxel artifacts and smoothing gradients [S1, unofficial][S2]. It is particularly relevant in scene-space normal estimation methods for non-binary volumes [S3].
+The Neumann Gradient was proposed by Neumann et al. [S2][S1, unofficial]. It is based on a theoretical framework of linear regression, generalizing previous gradient estimation approaches [S1, unofficial]. It is cited in the context of high-quality volume rendering systems, particularly for non-photorealistic rendering and medical visualization where artifact reduction is critical [S1, unofficial][S2]. The method is also discussed in the context of scene-space normal estimation for surfaces and volumes [S3].
 
 ## Sources
 [S1] Real-Time Mono- and Multi-Volume Rendering of Large Medical Datasets on Standard PC Hardware, https://doi.org/10.2312/diss.20058170, fetched 2026-10-26 (unofficial)

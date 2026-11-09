@@ -1,6 +1,6 @@
 # Voxel Raycasting for Block Interaction
 
-Also called: voxel raycast
+Also called: Voxel Block Interaction via Raycasting, voxel raycast
 
 ## Overview
 A brute-force raycasting algorithm used to determine block intersection for player interaction, such as breaking or placing blocks in a voxel world [S1, unofficial]. It steps along a ray in fixed increments to find the first solid voxel. It differs from its parent, [Ray-Box Intersection for Interaction](2638-ray-box-intersection-for-interaction.md), which uses analytical intersection tests, by using discrete sampling; and from its child, [Voxel Block Interaction (Raycast Hit Detection)](3912-voxel-block-interaction-raycast-hit-detection.md), which performs a localized search around a known hit location rather than stepping from the origin.

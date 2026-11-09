@@ -3,7 +3,7 @@
 Also called: Pre-Integrated Diffuse Shading
 
 ## Overview
-This method computes the diffuse component of Blinn-Phong shading in pre-integrated volume rendering by decomposing the integral into four 2D look-up tables (I0 to I3) weighted by coefficients dependent on light direction and gradient angles [S1]. It avoids the prohibitive memory cost of full 4D normal-based pre-integration while reducing shading errors caused by large angles between consecutive sample gradients compared to linear interpolation [S1].
+This method computes the diffuse component of Blinn-Phong shading in pre-integrated volume rendering by decomposing the integral into four 2D look-up tables weighted by coefficients dependent on light direction and gradient angles [S1]. It avoids the prohibitive memory cost of full 4D normal-based pre-integration while reducing shading errors caused by large angles between consecutive sample gradients compared to linear interpolation [S1].
 
 ## How it works
 
@@ -18,7 +18,7 @@ This method computes the diffuse component of Blinn-Phong shading in pre-integra
     *   Pre-integrated diffuse color $\tilde{C}_d$ [S1].
 
 ### Data Structures
-*   **Lookup Tables:** Four 2D arrays indexed by quantized front and back scalar values [S1]. The exact array dimensions and binning strategy are Not given in the sources.
+*   **Lookup Tables:** Four 2D arrays indexed by quantized front and back scalar values [S1]. The exact array dimensions and binning strategy are not given in the sources [S1].
 
 ### Formulas
 The pre-integrated diffuse color is calculated as:
@@ -57,32 +57,34 @@ import math
 def precompute_luts(num_bins, scalar_min, scalar_max, classification_func, absorption_func):
     """
     Pre-compute the four 2D lookup tables I0, I1, I2, I3.
-    classification_func(s) returns color c(s) as a list/tuple of floats.
+    classification_func(s) returns color c(s) as a list/tuple of 3 floats.
     absorption_func(sf, s) returns sigma(Sf, s) as a float.
     """
-    # Initialize 2D tables with zeros
-    LUT_I0 = [[0.0] * num_bins for _ in range(num_bins)]
-    LUT_I1 = [[0.0] * num_bins for _ in range(num_bins)]
-    LUT_I2 = [[0.0] * num_bins for _ in range(num_bins)]
-    LUT_I3 = [[0.0] * num_bins for _ in range(num_bins)]
+    # Initialize 2D tables with zeros [G]
+    LUT_I0 = [[None] * num_bins for _ in range(num_bins)]
+    LUT_I1 = [[None] * num_bins for _ in range(num_bins)]
+    LUT_I2 = [[None] * num_bins for _ in range(num_bins)]
+    LUT_I3 = [[None] * num_bins for _ in range(num_bins)]
     
-    # Discretize scalar range
+    # Discretize scalar range [G]
     scalars = [scalar_min + i * (scalar_max - scalar_min) / (num_bins - 1) for i in range(num_bins)]
     
     for i, Sf in enumerate(scalars):
         for j, Sb in enumerate(scalars):
             if Sb <= Sf:
-                continue  # Degenerate case
+                continue  # Degenerate case [G]
             
-            D = 1.0  # Normalized step length for table indexing
-            d = D / (Sb - Sf)
+            # Normalized step length for table indexing [S1]
+            D_norm = 1.0
+            d = D_norm / (Sb - Sf)
             
-            integral_I0 = [0.0, 0.0, 0.0]
-            integral_I1 = [0.0, 0.0, 0.0]
-            integral_I2 = [0.0, 0.0, 0.0]
-            integral_I3 = [0.0, 0.0, 0.0]
+            # Accumulators for RGB channels [G]
+            acc_I0 = [0.0, 0.0, 0.0]
+            acc_I1 = [0.0, 0.0, 0.0]
+            acc_I2 = [0.0, 0.0, 0.0]
+            acc_I3 = [0.0, 0.0, 0.0]
             
-            num_steps = 100  # Resolution for pre-computation integration
+            num_steps = 100  # Resolution for pre-computation integration [G]
             ds0 = (Sb - Sf) / num_steps
             
             for step_idx in range(num_steps):
@@ -94,28 +96,21 @@ def precompute_luts(num_bins, scalar_min, scalar_max, classification_func, absor
                 weight = math.exp(-d * sigma)
                 
                 # I_k = d * integral(c(s0) * s^k * exp(-d*sigma) ds0)
-                # Accumulate per color channel
                 for ch in range(3):
-                    term = c_s0[ch] * (s ** 0) * weight * ds0 * d
-                    integral_I0[ch] += term
-                    
-                    term = c_s0[ch] * (s ** 1) * weight * ds0 * d
-                    integral_I1[ch] += term
-                    
-                    term = c_s0[ch] * (s ** 2) * weight * ds0 * d
-                    integral_I2[ch] += term
-                    
-                    term = c_s0[ch] * (s ** 3) * weight * ds0 * d
-                    integral_I3[ch] += term
+                    term = c_s0[ch] * weight * ds0 * d
+                    acc_I0[ch] += term * (s ** 0)
+                    acc_I1[ch] += term * (s ** 1)
+                    acc_I2[ch] += term * (s ** 2)
+                    acc_I3[ch] += term * (s ** 3)
                 
-            LUT_I0[i][j] = integral_I0
-            LUT_I1[i][j] = integral_I1
-            LUT_I2[i][j] = integral_I2
-            LUT_I3[i][j] = integral_I3
+            LUT_I0[i][j] = acc_I0
+            LUT_I1[i][j] = acc_I1
+            LUT_I2[i][j] = acc_I2
+            LUT_I3[i][j] = acc_I3
             
     return LUT_I0, LUT_I1, LUT_I2, LUT_I3
 
-def compute_diffuse_shading(LUT_I0, LUT_I1, LUT_I2, LUT_I3, Sf, Sb, Nf, Nb, L, Kd):
+def compute_diffuse_shading(LUT_I0, LUT_I1, LUT_I2, LUT_I3, Sf, Sb, Nf, Nb, L, Kd, num_bins, scalar_min, scalar_max):
     """
     Compute pre-integrated diffuse shading for a single step.
     """
@@ -124,12 +119,13 @@ def compute_diffuse_shading(LUT_I0, LUT_I1, LUT_I2, LUT_I3, Sf, Sb, Nf, Nb, L, K
         
     # 1. Compute angle alpha and factor r
     cos_alpha_raw = Nf[0]*Nb[0] + Nf[1]*Nb[1] + Nf[2]*Nb[2]
-    cos_alpha_raw = max(-1.0, min(1.0, cos_alpha_raw))
+    cos_alpha_raw = max(-1.0, min(1.0, cos_alpha_raw))  # Clamp for numerical stability [G]
     alpha = math.acos(cos_alpha_raw) / 2.0
     cos_alpha = math.cos(alpha)
     
-    if cos_alpha == 0:
-        r = -4.0  # Limit as alpha -> 90 degrees
+    # Handle division by zero when alpha approaches 90 degrees [G]
+    if abs(cos_alpha) < 1e-6:
+        r = -4.0  # Limit approximation [G]
     else:
         r = 4.0 * (cos_alpha - 1.0) / cos_alpha
         
@@ -142,7 +138,7 @@ def compute_diffuse_shading(LUT_I0, LUT_I1, LUT_I2, LUT_I3, Sf, Sb, Nf, Nb, L, K
     a2 = r * (2.0 * Nf_dot_L - Nb_dot_L)
     a3 = r * (Nb_dot_L - Nf_dot_L)
     
-    # 3. Quantize indices
+    # 3. Quantize indices [G]
     idx_Sf = int((Sf - scalar_min) / (scalar_max - scalar_min) * (num_bins - 1))
     idx_Sb = int((Sb - scalar_min) / (scalar_max - scalar_min) * (num_bins - 1))
     idx_Sf = max(0, min(num_bins - 1, idx_Sf))
@@ -163,21 +159,19 @@ def compute_diffuse_shading(LUT_I0, LUT_I1, LUT_I2, LUT_I3, Sf, Sb, Nf, Nb, L, K
 ```
 
 ### Edge Cases and Pitfalls
-*   **Negative Dot Products:** The dot product between the light direction and the normalized gradient may become negative, which is physically invalid for diffuse shading [S1]. Two solutions are common:
-    1.  **Single-sided illumination:** Apply `max(dot, 0)` to the dot products before computing coefficients [S1]. This requires modifying the integral, which is difficult to pre-integrate exactly [S1].
-    2.  **Double-sided illumination:** Mirror the gradient if the dot product is negative [S1].
-*   **Degenerate Normals:** If $\mathbf{N}_f$ and $\mathbf{N}_b$ are identical, $\alpha = 0$, $r = 0$, and the method reduces to standard linear shading [S1]. If they are orthogonal, $\alpha = \pi/4$, $r = -4$ [S1].
+*   **Negative Dot Products:** The dot product between the light direction and the normalized gradient may become negative, which is physically invalid for diffuse shading [S1]. Two solutions are common: applying `max(0, dot)` to the dot products before computing coefficients, or mirroring the gradient if the dot product is negative [S1]. Applying `max(0, dot)` makes exact pre-integration difficult, so the source distinguishes three cases but does not detail them [S1].
+*   **Degenerate Normals:** If $\mathbf{N}_f$ and $\mathbf{N}_b$ are identical, $\alpha = 0$, $r = 0$, and the method reduces to standard linear shading [S1]. If they are orthogonal, $\alpha = \pi/4$ [S1].
 *   **Precision:** The factor $r$ can become large negative values for large angles, potentially amplifying numerical errors in the coefficient calculation [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Strengths:** Not given in the sources.
-*   **Limitations:** Not given in the sources.
-*   **When to use:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources [S1].
+*   **Memory Complexity:** Not given in the sources [S1].
+*   **Strengths:** Not given in the sources [S1].
+*   **Limitations:** Not given in the sources [S1].
+*   **When to use:** Not given in the sources [S1].
 
 ## Background
-This method was proposed by Lum et al. [S1] in 2010 as an improvement over linear gradient interpolation in pre-integrated volume rendering [S1]. It addresses the visual discontinuities and errors that arise when gradients change significantly between sample points, which linear interpolation fails to capture accurately [S1]. The approach builds on the concept of pre-integration lookup tables introduced in earlier work, extending it to handle diffuse shading with a non-linear gradient model [S1].
+This method was proposed by Lum et al. [S1] in 2010 as an improvement over linear gradient interpolation in pre-integrated volume rendering [S1]. It addresses visual discontinuities and errors that arise when gradients change significantly between sample points, which linear interpolation fails to capture accurately [S1]. The approach builds on the concept of pre-integration lookup tables introduced in earlier work, extending it to handle diffuse shading with a non-linear gradient model [S1].
 
 ## Sources
 [S1] Pre-Integrated Volume Rendering with Non-Linear ..., https://dpt-info.u-strasbg.fr/~dischler/papers/Vis2010.pdf, fetched 2026-10-28

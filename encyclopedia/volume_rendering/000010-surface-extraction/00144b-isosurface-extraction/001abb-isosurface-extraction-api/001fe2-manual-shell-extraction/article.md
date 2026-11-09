@@ -3,149 +3,117 @@
 Also called: Connected Component Separation, Disjoint Mesh Isolation, Shell Extraction via Manual Traversal, findShell, Shell Extraction via Connectivity Filter, vtkPolyDataConnectivityFilter
 
 ## Overview
-Manual Shell Extraction separates a polygonal isosurface mesh into its connected components (shells) to handle disjoint surfaces or allow user selection of specific regions [S1, unofficial]. It differs from automated connectivity filters by explicitly traversing the mesh graph from a starting triangle ID to identify all connected triangles belonging to the same shell, allowing for interactive selection of disjoint parts [S1, unofficial].
+Manual Shell Extraction separates a polygonal isosurface mesh into connected components (shells) to handle disjoint surfaces or allow user selection of specific regions [S1, unofficial]. It differs from automated connectivity filters by explicitly traversing the mesh graph from a starting triangle ID to identify all connected triangles belonging to the same shell, allowing for interactive selection of disjoint parts [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: An isosurface mesh (`isosurfacePolydata`) containing triangles, and optionally a starting triangle ID for manual traversal.
-- Output: A subset of the mesh corresponding to the selected shell, or the complete mesh if no selection is required.
+- Input: An isosurface mesh (`isosurfacePolydata`) containing triangles, and optionally a starting triangle ID for manual traversal [S1, unofficial].
+- Output: A subset of the mesh corresponding to the selected shell, or the complete mesh if no selection is required [S1, unofficial].
 
 **Data Structures:**
-- `triangleIndex`: A mapping from `vtkIdType` (triangle ID) to `int`. Values are `0` (unvisited) or `1` (visited) [S1, unofficial].
+- `triangleIndex`: A mapping from `vtkIdType` (triangle ID) to `int` (0=unvisited, 1=visited) [S1, unofficial].
 - `foundMeshes`: A vector of sets, `std::vector<std::set<vtkIdType>*>`, storing the IDs of triangles belonging to each identified shell [S1, unofficial].
 - `shellTriangles`: A `vtkCellArray` used to construct the final output mesh [S1, unofficial].
 
 **Algorithm Steps:**
 1. Initialize `allVisited = false`, `numShells = 0`, and `foundMeshes` as an empty vector of triangle ID sets [S1, unofficial].
-2. If manual traversal is selected:
-    a. Initialize a queue with a starting triangle ID and an empty set for shell triangles [S1, unofficial].
-    b. While the queue is not empty:
-        i. Dequeue the current triangle ID.
-        ii. Get the point IDs of the current triangle.
-        iii. For each point in the triangle, find neighbor triangles sharing that point [S1, unofficial].
-        iv. For each neighbor, if it has not been visited (i.e., `triangleIndex` does not contain it or its value is not `1`):
-            - Mark it visited by setting `triangleIndex[neighborID] = 1`.
-            - Push the neighbor ID to the queue.
-            - Add the neighbor ID to the current shell's set in `foundMeshes` [S1, unofficial].
-    c. Repeat the traversal process for any remaining unvisited triangles to identify all disjoint shells, incrementing `numShells` for each new shell found [S1, unofficial].
-3. If `numShells > 1`, prompt the user for a `selectedShell` index [S1, unofficial].
-4. If `selectedShell == 0`, render the complete `isosurfacePolydata` [S1, unofficial].
-5. Otherwise, decrement `selectedShell` and retrieve the `shellTriangleIds` from `foundMeshes[selectedShell]` [S1, unofficial].
-6. Iterate through `shellTriangleIds` to construct `vtkTriangle` objects using vertex indices from `triangleV0Index`, `triangleV1Index`, and `triangleV2Index` [S1, unofficial].
-7. Insert the constructed triangles into `shellTriangles` (`vtkCellArray`) and assign this cell array to the output `isosurfacePolydata` [S1, unofficial].
-8. Map the resulting mesh to the renderer [S1, unofficial].
+2. If manual traversal is selected, initialize a queue with a starting triangle ID and an empty set for shell triangles [S1, unofficial].
+3. While the queue is not empty, dequeue the current triangle ID and get its point IDs [S1, unofficial].
+4. For each point in the triangle, find neighbor triangles sharing that point [S1, unofficial].
+5. For each neighbor, if it has not been visited (`triangleIndex` does not contain it or its value is not `1`), mark it visited, push it to the queue, and add it to the current shell's set in `foundMeshes` [S1, unofficial].
+6. Repeat the traversal process for any remaining unvisited triangles to identify all disjoint shells, incrementing `numShells` for each new shell found [S1, unofficial].
+7. After extraction, if `numShells > 1`, prompt the user for a `selectedShell` index [S1, unofficial].
+8. If `selectedShell == 0`, render the complete `isosurfacePolydata` [S1, unofficial]. Otherwise, decrement `selectedShell`, retrieve `shellTriangleIds` from `foundMeshes`, iterate to construct `vtkTriangle` objects using vertex indices from `triangleV0Index`, `triangleV1Index`, and `triangleV2Index`, insert them into `shellTriangles` (`vtkCellArray`), assign to `isosurfacePolydata`, and map to the renderer [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def manual_shell_extraction(isosurface_polydata, start_triangle_id=None):
-    # Data structures
-    triangle_index = {}  # Maps vtkIdType to int (0=unvisited, 1=visited)
-    found_meshes = []    # std::vector<std::set<vtkIdType>*>
+    # Data structures matching source layout
+    triangle_index = {}  # Maps triangle ID to int (0=unvisited, 1=visited)
+    found_meshes = []    # List of sets storing triangle IDs per shell
     num_shells = 0
     all_visited = False
-    
-    # Initialize triangle_index for all triangles in isosurface_polydata
-    for triangle_id in range(isosurface_polydata.get_number_of_cells()):
-        triangle_index[triangle_id] = 0
-        
-    # Helper function for manual traversal
+
+    # Initialize triangle_index for all triangles in the mesh
+    for tid in range(isosurface_polydata.num_cells):
+        triangle_index[tid] = 0
+
+    # Helper: find connected shell via BFS traversal
     def find_shell(start_id):
         queue = [start_id]
         shell_triangles = set()
         triangle_index[start_id] = 1
         shell_triangles.add(start_id)
-        
         while queue:
             current_id = queue.pop(0)
             # Get point IDs of the current triangle
             point_ids = isosurface_polydata.get_triangle_points(current_id)
-            
-            for point_id in point_ids:
-                # Find neighbor triangles sharing this point
-                neighbor_ids = isosurface_polydata.get_triangles_sharing_point(point_id)
-                for neighbor_id in neighbor_ids:
-                    if triangle_index.get(neighbor_id, 0) != 1:
-                        triangle_index[neighbor_id] = 1
-                        queue.append(neighbor_id)
-                        shell_triangles.add(neighbor_id)
+            for pid in point_ids:
+                # Find neighbor triangles sharing that point
+                neighbor_ids = isosurface_polydata.get_triangles_sharing_point(pid)
+                for nid in neighbor_ids:
+                    if triangle_index.get(nid, 0) != 1:
+                        triangle_index[nid] = 1
+                        queue.append(nid)
+                        shell_triangles.add(nid)
         return shell_triangles
 
-    # Extract all shells
+    # Extract shells
     if start_triangle_id is not None:
-        # Manual selection from a specific start
         shell_triangles = find_shell(start_triangle_id)
         found_meshes.append(shell_triangles)
         num_shells = 1
-        # Note: The source implies a loop for all shells if not manually seeded, 
-        # but here we assume the user selects one shell via start_triangle_id or 
-        # the system extracts all if numShells > 1 is checked later.
-        # Based on [S1, unofficial], if numShells > 1, user selects. If we start with one, 
-        # we might need to find others if the user wants to see all.
-        # However, the source says "Initialize... numShells=0... After extraction, if numShells > 1".
-        # This implies the extraction step finds ALL shells.
-        
-        # Re-evaluating based on [S1, unofficial]: "Initialize... numShells=0... After extraction..."
-        # This suggests a loop that finds all shells.
-        
-    # Correct interpretation of [S1, unofficial]: Find ALL shells first
-    found_meshes = []
-    num_shells = 0
-    for triangle_id in range(isosurface_polydata.get_number_of_cells()):
-        if triangle_index[triangle_id] == 0:
-            shell_triangles = find_shell(triangle_id)
-            found_meshes.append(shell_triangles)
-            num_shells += 1
-            
-    # User Selection
-    if num_shells > 1:
-        selected_shell = prompt_user_for_shell_index(num_shells)
     else:
-        selected_shell = 0 # Only one shell exists
-        
+        # Traverse all triangles to find all disjoint shells
+        for tid in range(isosurface_polydata.num_cells):
+            if triangle_index[tid] == 0:
+                shell_triangles = find_shell(tid)
+                found_meshes.append(shell_triangles)
+                num_shells += 1
+
+    # User selection
+    if num_shells > 1:
+        selected_shell = int(input(f"Select shell index (1-{num_shells}, 0 for all): "))
+    else:
+        selected_shell = 0
+
     if selected_shell == 0:
-        return isosurface_polydata # Render complete mesh
-        
+        return isosurface_polydata
+
     # Construct selected shell
-    shell_triangle_ids = found_meshes[selected_shell - 1] # Decrement index as per [S1, unofficial]
-    shell_cell_array = vtk_cell_array()
-    
-    for triangle_id in shell_triangle_ids:
-        v0_idx = isosurface_polydata.get_triangle_v0(triangle_id)
-        v1_idx = isosurface_polydata.get_triangle_v1(triangle_id)
-        v2_idx = isosurface_polydata.get_triangle_v2(triangle_id)
-        
-        # Construct vtkTriangle
-        triangle = vtk_triangle()
-        triangle.set_point_ids([v0_idx, v1_idx, v2_idx])
-        shell_cell_array.insert_next_cell(triangle.get_type(), triangle.get_point_ids())
-        
-    # Assign to output polydata
-    output_polydata = vtk_poly_data()
+    shell_triangle_ids = found_meshes[selected_shell - 1]
+    shell_cell_array = []  # vtkCellArray equivalent: list of point index tuples
+    for tid in shell_triangle_ids:
+        v0 = isosurface_polydata.triangle_v0_index[tid]
+        v1 = isosurface_polydata.triangle_v1_index[tid]
+        v2 = isosurface_polydata.triangle_v2_index[tid]
+        shell_cell_array.append((v0, v1, v2))
+
+    # Assign to output polydata and map to renderer
+    output_polydata = isosurface_polydata.copy()
     output_polydata.set_polys(shell_cell_array)
-    output_polydata.copy_points_from(isosurface_polydata) # Copy points if not already referenced
     return output_polydata
 ```
 
 **Parameters:**
-- `start_triangle_id`: Optional. If provided, extraction starts from this triangle. If not, all shells are found [S1, unofficial].
-- `selected_shell`: User-provided index (1-based) of the shell to extract [S1, unofficial].
+- `start_triangle_id`: Optional. If provided, extraction starts from this triangle [S1, unofficial].
+- `selected_shell`: User-provided 1-based index of the shell to extract [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
 - If `findShell` fails to update `triangleIndex`, the traversal loop becomes infinite [S1, unofficial].
+- The manual traversal breaks after finding one unvisited triangle per outer loop iteration, relying on `findShell` to mark all reachable triangles as visited [S1, unofficial].
 - Degenerate triangles (NULL triangles) should be filtered out during mesh construction [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Linear with respect to the number of triangles in the mesh, $O(N)$, where $N$ is the number of triangles, as each triangle is visited at most once [S1, unofficial].
-- **Memory Complexity:** Linear with respect to the number of triangles, $O(N)$, for storing `triangleIndex` and `foundMeshes` [S1, unofficial].
 - **Strengths:** Allows interactive selection of disjoint shells; avoids custom graph traversal code if using VTK's `vtkPolyDataConnectivityFilter` as an alternative [S1, unofficial].
 - **Limitations:** Requires manual user input if multiple shells exist; manual traversal implementation is prone to infinite loops if visited flags are not updated correctly [S1, unofficial].
 - **When to use:** When the isosurface contains disjoint components and the user needs to select specific regions for rendering or further processing [S1, unofficial].
 - **When not to use:** When all shells are required simultaneously or when automated processing without user interaction is needed (use `vtkPolyDataConnectivityFilter` with `SetExtractionModeToAllRegions()` instead) [S1, unofficial].
 
 ## Background
-Manual Shell Extraction is part of the isosurface extraction pipeline, often implemented using VTK's `vtkPolyDataConnectivityFilter` or custom traversal logic [S1, unofficial]. It is used in volume rendering applications where disjoint surfaces need to be handled separately, such as in medical imaging or scientific visualization [S1, unofficial]. The method is described in the context of the Marching Tetrahedra algorithm implementation [S1, unofficial].
+Manual Shell Extraction is part of the isosurface extraction pipeline, often implemented using VTK's `vtkPolyDataConnectivityFilter` or custom traversal logic [S1, unofficial]. The method is described in the context of the Marching Tetrahedra algorithm implementation [S1, unofficial].
 
 ## Sources
 [S1] andresbejarano/MarchingTetrahedra, https://github.com/andresbejarano/MarchingTetrahedra, fetched 2026-10-27 (unofficial)

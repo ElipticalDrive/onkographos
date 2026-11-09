@@ -3,163 +3,52 @@
 Also called: Multi Field Visualization DOP
 
 ## Overview
-Multi Field Visualization is a technique for previewing and debugging volumetric data within a dynamics simulation environment by combining multiple field datasets into a single visual representation [S1]. It solves the problem of verifying complex multi-component data (such as density, velocity, and temperature) during simulation setup without the computational overhead of full final rendering [S1]. Unlike final renderers that integrate light transport, this method provides an immediate, interactive visualization of field ranges, orientations, and magnitudes using guide geometry and simplified shading [S1]. It is distinct from [Stream Lines](4796-stream-lines.md) which trace particle paths, and [Domain Colouring](1833-domain-colouring.md) which maps complex scalar fields to color, by focusing on the spatial distribution and intensity of physical simulation fields [S1].
+Multi Field Visualization is a diagnostic and preview tool for visualizing multiple scalar, vector, and color fields within a simulation environment. It combines and ramps field data to provide a quick preview of rendering behavior, allowing users to inspect density, emission, and vector attributes without the computational cost of full ray-traced volume rendering [S1]. It differs from full rendering methods by operating as a geometry-based or simple volume proxy (height field or smoke) directly within the dynamics network, prioritizing speed and parameter tuning over photorealistic accuracy [S1].
 
 ## How it works
-The method operates as a node-based visualization tool that samples field data attached to simulation objects and maps it to visual attributes such as opacity, color, and geometry [S1].
+**Inputs and Outputs:**
+The node accepts an optional object stream input (First Input) to specify which simulation objects are modified. If unconnected, it can be used with an Apply Data node or as input to another data node. Other data nodes attached to subsequent inputs act as modifiers for the data created by this node [S1]. The output is an object stream (if an object stream input is provided) containing the same objects with the visualization data attached, or a data output connectable to Apply Data DOP or other data nodes [S1].
 
-### Inputs and Outputs
-*   **Inputs**:
-    *   **First Input (Optional)**: An object stream used to select specific simulation objects for modification or visualization. Objects connected here must match the `Group` parameter [S1]. If unconnected, the node applies to all relevant data or acts as a modifier for other data nodes [S1].
-    *   **All Other Inputs**: Additional data nodes attached to act as modifiers for the data created or visualized by this node [S1].
-*   **Outputs**:
-    *   **First Output**: If an object stream is provided as input, the output is an object stream containing the same objects with the visualization data attached. If no object stream is input, the output is a data output connectable to an `Apply Data DOP` or another data node [S1].
+**Data Structures and Parameters:**
+The visualization relies on several key parameters to map field values to visual attributes:
+*   **Field:** Specifies the name of the field to visualize. Scalar fields are treated as monochromatic for color fields. Vector fields are tied to RGB channels [S1].
+*   **Range:** A per-field mapping range $[R_{min}, R_{max}]$. Volume values $v$ are linearly remapped to $v' \in [0, 1]$ using:
+    $$ v' = \text{clamp}\left(\frac{v - R_{min}}{R_{max} - R_{min}}, 0, 1\right) $$
+    If not specified, the Density volume's Minimum/Maximum range is used as the default [S1].
+*   **Mode:** Controls ramp application:
+    *   *No Ramp:* Values are used unclamped and unaffected by the ramp [S1].
+    *   *Clamped Ramp:* Values are clamped to $[0, 1]$ then the ramp is applied [S1].
+    *   *Periodic Ramp:* The modulus of values with 1 is sent to the ramp ($v' \mod 1$), useful for checkerboard/striped effects [S1].
+*   **Ramp:** A lookup table. If a color ramp has one volume bound, the value looks up the color. If two or three volumes are bound, each looks up R, G, B independently [S1].
+*   **Emission Color Physical Blackbody:** Maps Emission Color Field values using the blackbody radiation spectrum. Requires **Temperature Scale** ($T_s$), **Temperature at 0 (K)** ($T_0$), and **Temperature at 1 (K)** ($T_1$). The temperature $T$ for a normalized value $v'$ is interpolated:
+    $$ T = T_0 + v' \times (T_1 - T_0) $$
+    This temperature is then mapped to color via the Planck radiation law approximation [S1].
+*   **Adaptation/Burn:** Manipulate the low and high ends of the generated intensity, respectively [S1].
+*   **Density Scale:** Fixed multiplier for the density field to control opacity [S1].
+*   **Shadow Scale:** Multiplier applied to the Density Field after density scale, used for lighting [S1].
+*   **Max Vis Res:** Default maximum volume resolution is 128 voxels per side [S1].
+*   **Visualization Mode:** 2D volumes can be visualized as a height field instead of smoke [S1].
+*   **Bounding Box/Bounding Box Hash:** Draws a bounding box and hash marks marking voxel divisions (larger marks for every 10th and 100th division) [S1].
 
-### Data Structures and Layout
-The visualization operates on field data attached to simulation objects. The data structure includes:
-*   **Field Data**: Scalar or vector fields (e.g., density, velocity, emission) stored per voxel or per particle [S1].
-*   **Object Metadata**: Each object has a unique identifier (`OBJID`), creation time (`OBJCT`), and name (`OBJNAME`) [S1].
-*   **Local Variables**: The node exposes local variables for each parameter (e.g., `density`, `color`) which evaluate to the previous value stored in the attached data [S1]. These are equivalent to `dopfield($DOPNET, $OBJID, dataName, "Options", 0, channelname)` [S1].
+**Local Variables:**
+The node defines local variables for each channel/parameter on the Data Options page, evaluating to the previous value stored in attached data. Key variables include:
+*   `channelname`: Shortcut for `dopfield($DOPNET, $OBJID, dataName, "Options", 0, channelname)`. Returns 0 or empty string if data doesn't exist [S1].
+*   `DATACT`/`DATACF`: Simulation time/frame at which current data was created [S1].
+*   `ST`/`SF`: Simulation time/frame for node evaluation. `SF = ST / TIMESTEP` [S1].
+*   `OBJID`: Unique integer identifier for the object. Best way to look up info via `dopfield`. -1 if not processed sequentially [S1].
+*   `OBJ`: Index of specific object being processed (0 to NOBJ-1). -1 if not processed sequentially [S1].
+*   `DOPNET`: Full path of the current DOP network [S1].
 
-### Parameters and Mapping
-The visualization is controlled by several parameters that define how field values are mapped to visual properties:
-
-1.  **Show Guide Geometry**: Boolean. Enables or disables the rendering of geometric primitives [S1].
-2.  **Color**: The base color used for the iso surface or smoke field [S1].
-3.  **Visualization Mode**: Determines the rendering style. If set, 2D volumes are visualized as a height field instead of a smoke volume [S1].
-4.  **Bounding Box**: Draws a box encompassing the field [S1].
-5.  **Bounding Box Hash**: Adds hash marks along axes from the origin, marking voxel divisions. Marks are larger for every tenth and hundredth division [S1].
-6.  **Minimum, Maximum**: Defines the density volume range remapped to $[0, 1]$. This acts as the default range for other volumes unless overridden per-field [S1].
-7.  **Density Scale**: A fixed multiplier for the density field to control opacity [S1].
-8.  **Shadow Scale**: A multiplier applied to the Density Field after density scaling, used for lighting calculations [S1].
-9.  **Max Vis Res**: The maximum volume resolution, defaulting to 128 voxels per side to ensure fast shading and avoid texture memory issues [S1].
-10. **Field**: The name of the field to visualize.
-    *   If a **scalar field** is specified for a color field (diffuse/emission), it is treated as monochromatic [S1].
-    *   If a **vector field** is specified, its components are tied to the Red, Green, and Blue channels respectively [S1].
-11. **Range**: Per-field mapping range. Volume values are linearly remapped from this range into $[0, 1]$ using the formula:
-    $$ v_{norm} = \text{clamp}\left(\frac{v - v_{min}}{v_{max} - v_{min}}, 0, 1\right) $$
-    where $v$ is the field value, and $v_{min}, v_{max}$ are the range bounds [S1].
-12. **Mode**: Controls ramp usage.
-    *   **No Ramp**: Values are used unclamped and unaffected by the ramp [S1].
-    *   **Clamped Ramp**: Values are clamped to $[0, 1]$ then the ramp is applied [S1].
-    *   **Periodic Ramp**: The modulus of the values with 1 is sent to the ramp ($v \mod 1$), useful for checkerboard or striped effects [S1].
-13. **Emission Color Physical Blackbody**: Maps Emission Color Field values using the blackbody radiation spectrum [S1].
-14. **Temperature Scale**: Scale applied to Emission Color Field values before mapping to color via blackbody spectrum [S1].
-15. **Temperature at 0 (K)**: Sets the Kelvin temperature corresponding to a value of $0.0$ in the Emission Color Field [S1].
-16. **Temperature at 1 (K)**: Sets the Kelvin temperature corresponding to a value of $1.0$ in the Emission Color Field [S1].
-17. **Adaptation**: Manipulates the low end of the generated intensity [S1].
-18. **Burn**: Manipulates the high end of the generated intensity [S1].
-19. **Ramp**: Volume values (after range conversion) are looked up in the ramp.
-    *   If a color ramp has one volume bound, the value looks up the color [S1].
-    *   If two or three volumes are bound, each looks up R, G, B independently [S1].
-
-### Pseudocode
-The following pseudocode illustrates the logic for computing the visual color and opacity for a given voxel or particle, based on the parameters described in [S1].
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def compute_visual_properties(field_value, field_type, params):
-    """
-    Computes visual properties for a field value.
-    
-    Args:
-        field_value: The raw value from the field (scalar or vector component).
-        field_type: 'scalar', 'vector_rgb', or 'emission'.
-        params: Dictionary of visualization parameters.
-        
-    Returns:
-        color: RGB tuple [0.0, 1.0].
-        opacity: Float [0.0, 1.0].
-    """
-    
-    # 1. Normalize field value based on Range and Mode
-    v_min = params['range'][0]
-    v_max = params['range'][1]
-    
-    # Linear remapping to [0, 1]
-    if v_max == v_min:
-        v_norm = 0.0
-    else:
-        v_norm = (field_value - v_min) / (v_max - v_min)
-        
-    mode = params['mode']
-    if mode == 'Clamped Ramp':
-        v_norm = clamp(v_norm, 0.0, 1.0)
-    elif mode == 'Periodic Ramp':
-        v_norm = v_norm % 1.0
-    # 'No Ramp' leaves v_norm as is, potentially outside [0, 1]
-    
-    # 2. Apply Ramp Lookup
-    # Assuming a ramp function that takes a value and returns a color or scalar
-    ramp_result = lookup_ramp(params['ramp'], v_norm)
-    
-    # 3. Handle Field Types
-    if field_type == 'vector_rgb':
-        # Vector components are tied to RGB channels
-        # This function is called once per component (R, G, B)
-        # The ramp lookup result is used directly as the channel intensity
-        color_channel = ramp_result
-        return color_channel
-        
-    elif field_type == 'emission':
-        # Handle Blackbody mapping if enabled
-        if params['physical_blackbody']:
-            temp_scale = params['temperature_scale']
-            temp_0 = params['temperature_at_0']
-            temp_1 = params['temperature_at_1']
-            
-            # Map normalized value to temperature range
-            temperature = temp_0 + (temp_1 - temp_0) * v_norm * temp_scale
-            
-            # Convert temperature to RGB (Planck's law approximation)
-            color = blackbody_to_rgb(temperature)
-            
-            # Apply Adaptation and Burn
-            color = apply_intensity_manipulation(color, params['adaptation'], params['burn'])
-            return color
-        else:
-            # Standard ramp lookup for emission
-            return ramp_result
-            
-    elif field_type == 'scalar':
-        # Scalar fields used for density/opacity or monochromatic color
-        opacity = ramp_result
-        # If used for color, ramp_result is interpreted as intensity for the base Color
-        base_color = params['color']
-        color = base_color * ramp_result
-        return color, opacity
-        
-    else:
-        return ramp_result, 1.0
-
-def apply_intensity_manipulation(color, adaptation, burn):
-    """
-    Manipulates the low and high ends of intensity.
-    Note: Exact formula not given in sources [S1].
-    """
-    # [G] Generic tone mapping example:
-    # color = color / (adaptation + color) * (1.0 + burn)
-    # This is a placeholder for the specific implementation details not provided.
-    return color
-```
-
-### Edge Cases and Pitfalls
-*   **Fog Density and Resolution**: Fog density is defined per unit and is independent of resolution [S1]. Consequently, small boxes may appear transparent, especially if HDR rendering is not enabled [S1]. To fix this, enable HDR rendering in the Effects tab of the Display Options dialog [S1].
-*   **Max Vis Res**: Volumes are restricted to a maximum of 128 voxels per side by default to ensure fast shading and avoid texture memory issues [S1]. This can be overridden for lower resolution previsualization or full resolution rendering [S1].
-*   **Sequential Processing**: Local variables like `OBJ`, `OBJID`, and `OBJNAME` are only valid if the node processes objects sequentially. If the node does not process sequentially (e.g., Group DOP), these values return -1 or empty strings [S1].
+**Pitfalls:**
+Fog density is per unit and independent of resolution. Small boxes become transparent, especially without HDR rendering. Enable HDR rendering in the Effects tab of the Display Options dialog to fix [S1].
 
 ## Operating characteristics
-*   **Time Complexity**: Not given in the sources. The method is designed for "quick preview" and "fast shading" [S1].
-*   **Memory Complexity**: Not given in the sources. However, it is constrained by `Max Vis Res` (default 128 voxels per side) to avoid texture memory problems [S1].
-*   **Performance**: The visualization is optimized for speed, allowing interactive preview during simulation [S1].
-*   **Strengths**: Allows for the combination and ramping of multiple fields to preview rendering behavior [S1]. Provides detailed control over field ranges, color mapping, and lighting parameters (Shadow Scale, Adaptation, Burn) [S1].
-*   **Limitations**: It is a visualization tool, not a final renderer. The results may differ from final render outputs due to simplified shading and resolution limits [S1]. Small volumes may appear transparent due to density-per-unit scaling [S1].
-*   **When to use**: Use for debugging and previewing multi-field data during simulation setup [S1].
-*   **When not to use**: Do not use for final production renders [S1].
+*   **Performance:** Restricted to a default maximum of 128 voxels per side to ensure fast shading and avoid texture memory issues [S1].
+*   **Accuracy:** Provides a preview of rendering behavior, not a final render. Density is per unit, meaning opacity depends on scene scale, not just voxel count [S1].
+*   **Usage:** Best for debugging field values, tuning transfer functions, and checking vector field directions during simulation development [S1].
 
 ## Background
-The Multi Field Visualization DOP was introduced in Houdini version 12.0 [S1]. It is part of the Dynamics Operator (DOP) network, which handles physics simulations in Houdini [S1]. The node allows artists to visualize complex data fields (such as those generated by fluid or particle simulations) directly within the simulation context, facilitating iterative adjustments to simulation parameters and visualization settings [S1].
+Multi Field Visualization is a node within the Houdini Dynamics (DOP) network, introduced in version 12.0 [S1]. It is part of the suite of dynamics nodes designed to manipulate and visualize simulation data [S1].
 
 ## Sources
 [S1] Multi Field Visualization - SideFX, https://www.sidefx.com/docs/houdini/nodes/dop/multifieldvisualization.html, fetched 2026-10-27

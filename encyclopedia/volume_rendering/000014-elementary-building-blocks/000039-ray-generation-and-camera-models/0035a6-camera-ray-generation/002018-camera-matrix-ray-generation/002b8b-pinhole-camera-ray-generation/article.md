@@ -3,10 +3,10 @@
 Also called: Camera Ray Casting, FOV Calculation, Field of View Calculation, Fixed Focal Length Ray Precomputation, Perspective Ray Generation, Pinhole Camera, PinholeRayTracer::castRays
 
 ## Overview
-Pinhole Camera Ray Generation computes the origin and direction vectors for rays corresponding to each pixel on an image plane, assuming an ideal pinhole camera model with no lens distortion or depth of field [S2, S4, unofficial]. It explicitly constructs the view frustum geometry (basis vectors and view plane bounds) from high-level camera parameters (eye position, look-at point, up vector, and field of view) rather than relying on a pre-computed projection matrix [S2, unofficial].
+Pinhole Camera Ray Generation computes the origin and direction vectors for rays corresponding to each pixel on an image plane, assuming an ideal pinhole camera model with no lens distortion or depth of field [S2, S4, unofficial]. It explicitly constructs the view frustum geometry (basis vectors and view plane bounds) from high-level camera parameters (eye position, look-at point, up vector, and field of view) rather than relying on a pre-computed projection matrix [S2, S3, unofficial].
 
 ## How it works
-The method generates rays by defining a local coordinate system at the camera origin, mapping pixel indices to coordinates on a virtual view plane, and constructing direction vectors from the eye position through these points [S2, unofficial]. Two primary implementation styles are documented: a look-at based approach (common in GPU implementations) and a rotation-matrix based approach (common in C++/Eigen implementations) [S1, S2, unofficial].
+The method generates rays by defining a local coordinate system at the camera origin, mapping pixel indices to coordinates on a virtual view plane, and constructing direction vectors from the eye position through these points [S2, S3, unofficial]. Two primary implementation styles are documented: a look-at based approach (common in GPU implementations) and a rotation-matrix based approach (common in C++/Eigen implementations) [S1, S2, unofficial].
 
 ### Inputs and Outputs
 **Inputs:**
@@ -30,54 +30,54 @@ The method generates rays by defining a local coordinate system at the camera or
 
 ### Algorithm: Look-At Basis Construction
 1.  **Compute View Plane Bounds:**
-    Define the vertical extent of the view plane at distance 1 from the camera.
+    Define the vertical extent of the view plane at distance 1 from the camera [S4, unofficial].
     $$ \theta_{v\_rad} = \text{DegToRad}(\theta_v) $$
     $$ \text{top} = \tan(\theta_{v\_rad}) $$
     $$ \text{bottom} = -\text{top} $$
     $$ \text{right} = AR \times \text{top} $$
     $$ \text{left} = -\text{right} $$
-    [S2, unofficial]
+    [S2, S3, unofficial]
 
 2.  **Compute Camera Basis Vectors:**
-    Calculate the forward, right, and up vectors of the camera coordinate system.
+    Calculate the forward, right, and up vectors of the camera coordinate system [S4, unofficial].
     $$ \mathbf{w} = \text{normalize}(E - A) $$
     $$ \mathbf{u} = \text{normalize}(\text{cross}(U_{up}, \mathbf{w})) $$
     $$ \mathbf{v} = \text{cross}(\mathbf{w}, \mathbf{u}) $$
-    [S2, unofficial]
-    *Note: $\mathbf{w}$ points from the camera to the target. $\mathbf{u}$ is the horizontal axis. $\mathbf{v}$ is the vertical axis.* [S2, unofficial]
+    [S2, S3, S4, unofficial]
+    *Note: $\mathbf{w}$ points from the camera to the target. $\mathbf{u}$ is the horizontal axis. $\mathbf{v}$ is the vertical axis.* [S2, S3, unofficial]
 
 3.  **Iterate Pixels:**
     For each pixel index $i$ from $0$ to $W \times H - 1$:
     $$ x = i \pmod W $$
     $$ y = \lfloor i / W \rfloor $$
-    [S2, unofficial]
+    [S2, S3, unofficial]
 
 4.  **Map to View Plane Coordinates:**
-    Calculate the position on the view plane at $z=-1$ (in camera space) using bilinear interpolation across the bounds.
+    Calculate the position on the view plane at $z=-1$ (in camera space) using linear interpolation across the bounds [S3, unofficial].
     $$ \text{view\_plane\_x} = \text{left} + (\text{right} - \text{left}) \times \frac{x + 0.5}{W} $$
     $$ \text{view\_plane\_y} = \text{top} - (\text{top} - \text{bottom}) \times \frac{y + 0.5}{H} $$
-    [S2, unofficial]
-    *Note: The $y$ component is subtracted because screen coordinates typically increase downwards, while the camera's $\mathbf{v}$ vector points upwards.* [S2, unofficial]
+    [S2, S3, unofficial]
+    *Note: The $y$ component is subtracted because screen coordinates typically increase downwards, while the camera's $\mathbf{v}$ vector points upwards.* [S3, unofficial]
 
 5.  **Compute Unnormalized Direction:**
-    Construct the direction vector in world space.
+    Construct the direction vector in world space [S3, unofficial].
     $$ \mathbf{s} = \text{view\_plane\_x} \cdot \mathbf{u} + \text{view\_plane\_y} \cdot \mathbf{v} - \mathbf{w} $$
-    [S2, unofficial]
-    *Note: The $-\mathbf{w}$ term accounts for the fact that the view plane is at $z=-1$ in the local camera frame where the camera looks down $-Z$, or equivalently, the vector from Eye to ViewPlanePoint is $Point - Eye$. In the local frame, the point is $(\text{view\_plane\_x}, \text{view\_plane\_y}, -1)$. The basis vectors $\mathbf{u}, \mathbf{v}, \mathbf{w}$ transform this local offset to world space. Since $\mathbf{w}$ is the forward vector, the vector from origin to $(0,0,-1)$ is $-\mathbf{w}$.* [S2, unofficial]
+    [S2, S3, unofficial]
+    *Note: The $-\mathbf{w}$ term accounts for the fact that the view plane is at $z=-1$ in the local camera frame where the camera looks down $-Z$, or equivalently, the vector from Eye to ViewPlanePoint is $Point - Eye$ [S3, unofficial]. In the local frame, the point is $(\text{view\_plane\_x}, \text{view\_plane\_y}, -1)$ [G]. The basis vectors $\mathbf{u}, \mathbf{v}, \mathbf{w}$ transform this local offset to world space [G]. Since $\mathbf{w}$ is the forward vector, the vector from origin to $(0,0,-1)$ is $-\mathbf{w}$.* [S3, unofficial]
 
 6.  **Normalize and Store:**
     $$ \text{direction} = \text{normalize}(\mathbf{s}) $$
     $$ \text{origin} = E $$
-    [S2, unofficial]
+    [S2, S3, unofficial]
 
 7.  **Compute Auxiliary Distances (Optional):**
     $$ \text{origin\_image\_distances}[i] = \|\mathbf{s}\| $$
     $$ \text{pixel\_distances}[i] = \frac{\text{right} - \text{left}}{W} $$
-    [S2, unofficial]
+    [S2, S3, unofficial]
 
 ### Algorithm: Rotation Matrix Construction
 1.  **Compute Step Sizes:**
-    Calculate the angular step per pixel based on the tangent of the half-FOV.
+    Calculate the angular step per pixel based on the tangent of the half-FOV [S1, unofficial].
     $$ dh = \frac{\tan(\text{hfov})}{\text{hsize}} $$
     $$ dv = \frac{\tan(\text{vfov})}{\text{vsize}} $$
     [S1, unofficial]
@@ -174,9 +174,9 @@ def generate_pinhole_rays(eye, at, up, width, height, fov_degrees):
 ```
 
 ### Parameters and Typical Values
-*   **FOV:** A fixed vertical field of view of 30 degrees is used in some implementations [S2, unofficial].
+*   **FOV:** A fixed vertical field of view of 30 degrees is used in some implementations [S2, S3, unofficial].
 *   **Half FOV:** Default values in some C++ implementations are $160^\circ$ converted to radians ($\pi \times 160.0 / 180.0$) for both horizontal and vertical half-FOV [S1, unofficial].
-*   **Resolution:** Default image sizes in some test cases are $6 \times 4$ [S1, unofficial]. Source [S2, unofficial] uses a resolution variable `img_res` set to 256.
+*   **Resolution:** Default image sizes in some test cases are $6 \times 4$ [S1, unofficial]. Source [S2, unofficial] uses a resolution variable `img_res` set to 256 [S2, unofficial].
 
 ### Edge Cases and Pitfalls
 *   **Degenerate Up Vector:** If the `up` vector is parallel to the `eye - at` vector, the cross product for $\mathbf{u}$ will be zero, causing normalization to fail. A guard clause should detect this and substitute a different up vector (e.g., $(1, 0, 0)$) [G].
@@ -185,20 +185,20 @@ def generate_pinhole_rays(eye, at, up, width, height, fov_degrees):
 ## Subtopics
 
 ### Pinhole Camera with Depth of Field
-This variant extends the basic pinhole model by simulating lens blur. It introduces a physical aperture (lens) and a focal plane.
-*   **Mechanism:** Instead of all rays originating from a single point, the ray origin is offset by a random vector within a unit disk (the lens aperture) scaled by `LensRadius`. The direction is calculated from this offset origin to a point on the focal plane.
-*   **Viewport Construction:** The viewport vectors are scaled by the focus distance: `Horizontal = U * ViewportWidth * focusDist`, `Vertical = V * ViewportHeight * focusDist`. The `LowerLeftCorner` is computed as `Origin - Horizontal/2 - Vertical/2 - W * focusDist` [S5, unofficial].
-*   **Ray Generation:** For pixel $(u, v)$, a random lens offset `rd` is sampled from a unit disk. The direction is `LowerLeftCorner + Horizontal*u + Vertical*v - Origin - offset` [S5, unofficial].
+This variant extends the basic pinhole model by simulating lens blur [S5, unofficial]. It introduces a physical aperture (lens) and a focal plane [S5, unofficial].
+*   **Mechanism:** Instead of all rays originating from a single point, the ray origin is offset by a random vector within a unit disk (the lens aperture) scaled by `LensRadius` [S5, unofficial]. The direction is calculated from this offset origin to a point on the focal plane [S5, unofficial].
+*   **Viewport Construction:** The viewport vectors are scaled by the focus distance: `Horizontal = U * ViewportWidth * focusDist`, `Vertical = V * ViewportHeight * focusDist` [S5, unofficial]. The `LowerLeftCorner` is computed as `Origin - Horizontal/2 - Vertical/2 - W * focusDist` [S5, unofficial].
+*   **Ray Generation:** For pixel $(u, v)$, a random lens offset `rd` is sampled from a unit disk [S5, unofficial]. The direction is `LowerLeftCorner + Horizontal*u + Vertical*v - Origin - offset` [S5, unofficial].
 *   **Data Layout:** The camera state includes `Origin`, `Horizontal`, `Vertical`, `LowerLeftCorner`, `LensRadius`, basis vectors `U, V, W`, `AspectRatio`, `ViewportHeight`, `ViewportWidth`, and `FocalLength` [S5, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(W \times H)$, where $W$ and $H$ are image dimensions. The computation per pixel is constant time (a few trigonometric functions, vector operations, and normalizations).
-*   **Memory Complexity:** $O(W \times H)$ to store the generated ray origins and directions.
-*   **Strengths:** Simple to implement; provides explicit control over the view plane geometry; no dependency on complex projection matrix decompositions.
-*   **Limitations:** Does not account for lens effects (bokeh, distortion) without extension; assumes an ideal pinhole model which may not match real-world sensor data without calibration.
+*   **Time Complexity:** $O(W \times H)$, where $W$ and $H$ are image dimensions [G]. The computation per pixel is constant time (a few trigonometric functions, vector operations, and normalizations) [G].
+*   **Memory Complexity:** $O(W \times H)$ to store the generated ray origins and directions [G].
+*   **Strengths:** Simple to implement; provides explicit control over the view plane geometry; no dependency on complex projection matrix decompositions [G].
+*   **Limitations:** Does not account for lens effects (bokeh, distortion) without extension; assumes an ideal pinhole model which may not match real-world sensor data without calibration [G].
 
 ## Background
-The pinhole camera model is the fundamental geometric model for perspective projection in computer graphics and computer vision. It assumes a single point of projection (the pinhole) and an image plane behind it. The method of generating rays by sampling the field of view using equal division of tangent is a common approximation in ray tracers to ensure uniform angular sampling [S1, unofficial]. The look-at formulation using basis vectors is standard in educational ray tracers and differentiable rendering frameworks [S2, unofficial]. The depth of field extension is a standard addition for realistic image synthesis [S5, unofficial].
+The pinhole camera model is the fundamental geometric model for perspective projection in computer graphics and computer vision [G]. It assumes a single point of projection (the pinhole) and an image plane behind it [G]. The method of generating rays by sampling the field of view using equal division of tangent is a common approximation in ray tracers to ensure uniform angular sampling [S1, unofficial]. The look-at formulation using basis vectors is standard in educational ray tracers and differentiable rendering frameworks [S2, unofficial]. The depth of field extension is a standard addition for realistic image synthesis [S5, unofficial].
 
 ## Sources
 [S1] RMonica/basic_next_best_view, https://github.com/RMonica/basic_next_best_view, fetched 2026-10-24 (unofficial)

@@ -3,60 +3,54 @@
 Also called: BlockRenderData, Face Tint Mixing
 
 ## Overview
-This method defines the data structure for block rendering metadata and the process of generating GPU instances for visible block faces. It solves the problem of efficiently passing per-face texture and color information to the graphics API by packing face-specific attributes into a single struct and using instance rendering to draw multiple quads with different materials in a single draw call. It differs from standard mesh assembly by focusing on instance data generation rather than vertex buffer construction, building on [Mesh Assembly and Data Structure](6268-mesh-assembly-and-data-structure.md).
+The Block Render Data Structure defines the per-block metadata required to generate mesh instances for a voxel chunk, while Instance Generation processes this metadata to produce GPU-drawable geometry. It solves the problem of efficiently batching heterogeneous block types into instanced render calls by decoupling block definition (textures, tints, shapes) from mesh generation. It differs from sibling methods by focusing on the data layout and tint mixing logic rather than the low-level buffer assembly or plugin architecture.
 
 ## How it works
-**Inputs:**
-*   A list of block definitions, each specifying face textures (by name or ID) and optional face tints.
-*   A texture loader mapping texture names to integer IDs.
-*   An `IShape` interface or reference defining the geometry of the block (typically a cube).
+### Inputs and Outputs
+**Inputs**:
+- A set of face texture names (strings) for each of the 6 block faces.
+- A set of face tint colors (vectors) for each of the 6 block faces.
+- A reference to the block's geometric shape (`IShape`).
+- A texture loader mapping texture names to integer IDs.
 
-**Outputs:**
-*   A collection of `BlockRenderData` structs, one per unique block type or configuration.
-*   Instance data buffers suitable for GPU instancing.
+**Outputs**:
+- A `BlockRenderData` struct instance containing resolved texture IDs, tints, and shape reference.
+- A list of instances passed to the shape's instance generation method.
 
-**Data Structures:**
-The core data structure is `BlockRenderData`. It contains the following fields [S1, unofficial]:
-*   `faceBack`, `faceFront`, `faceTop`, `faceBottom`, `faceLeft`, `faceRight`: `int` fields storing the texture ID for each of the 6 faces.
-*   `tintBack`, `tintFront`, `tintTop`, `tintBottom`, `tintLeft`, `tintRight`: `Vector3` fields storing the color tint for each face.
-*   `shape`: `IShape` reference to the geometry definition.
+### Data Structures
+The core data structure is `BlockRenderData`. It contains 13 fields:
+1.  `faceBack`: `int` (Texture ID)
+2.  `faceFront`: `int` (Texture ID)
+3.  `faceTop`: `int` (Texture ID)
+4.  `faceBottom`: `int` (Texture ID)
+5.  `faceLeft`: `int` (Texture ID)
+6.  `faceRight`: `int` (Texture ID)
+7.  `tintBack`: `Vector3` (RGB tint)
+8.  `tintFront`: `Vector3` (RGB tint)
+9.  `tintTop`: `Vector3` (RGB tint)
+10. `tintBottom`: `Vector3` (RGB tint)
+11. `tintLeft`: `Vector3` (RGB tint)
+12. `tintRight`: `Vector3` (RGB tint)
+13. `shape`: `IShape` reference
 
-**Algorithm:**
+### Steps
+1.  **Texture ID Resolution**: For each face direction (Back, Front, Top, Bottom, Left, Right), look up the texture name in the `textureIDByName` dictionary to retrieve the corresponding integer ID [S1, unofficial].
+2.  **Tint Mixing**: If custom face tints are provided, they are mixed with base block tints. The mixing operation is element-wise multiplication of the provided face tint and the base block tint [S1, unofficial]. If no base tint is defined or if the implementation replaces base tints, the provided face tint is used directly [S1, unofficial].
+3.  **Instance Generation**: Collect the resolved texture IDs and mixed tints for all visible faces. Pass these attributes to the `IShape.Instance` method to generate the mesh instances [S1, unofficial].
 
-1.  **Texture ID Mapping:**
-    Create a mapping from texture names to integer IDs. This is typically done by iterating through the available textures and storing the index [S1, unofficial].
-    $$ \text{textureIDByName} = \{ \text{name}_i \rightarrow i \mid i \in [0, N_{\text{tex}}) \} $$
-
-2.  **Block Render Data Creation:**
-    For each block type, create a `BlockRenderData` instance. The constructor or factory method takes face texture names and optional tints [S1, unofficial].
-    *   If texture names are provided, look up their IDs using `textureIDByName`.
-    *   If tints are not explicitly provided for a face, default to white $(1, 1, 1)$ [S1, unofficial].
-    *   Store the `IShape` reference.
-
-3.  **Instance Generation:**
-    For each visible face of a block in the world:
-    *   Determine the face direction (Back, Front, Top, Bottom, Left, Right).
-    *   Fetch the texture ID for that face from the block's `BlockRenderData` [S1, unofficial].
-    *   Fetch the tint color for that face from the block's `BlockRenderData` [S1, unofficial].
-    *   **Face Tint Mixing:** If external face tints are provided (e.g., for lighting or state changes), mix them with the base block tints. The mixing method is element-wise multiplication [S1, unofficial]:
-        $$ \text{finalTint}_f = \text{baseTint}_f \times \text{externalTint}_f $$
-        Alternatively, the external tint may replace the base tint entirely [S1, unofficial].
-    *   Pass the texture ID and final tint to the shape's `Instance` method to generate the instance data for that face [S1, unofficial].
-
-**Pseudocode:**
-
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 class BlockRenderData:
     def __init__(self, face_back_id, face_front_id, face_top_id, face_bottom_id, face_left_id, face_right_id,
                  tint_back, tint_front, tint_top, tint_bottom, tint_left, tint_right, shape):
-        self.face_back_id = face_back_id
-        self.face_front_id = face_front_id
-        self.face_top_id = face_top_id
-        self.face_bottom_id = face_bottom_id
-        self.face_left_id = face_left_id
-        self.face_right_id = face_right_id
+        self.face_back = face_back_id
+        self.face_front = face_front_id
+        self.face_top = face_top_id
+        self.face_bottom = face_bottom_id
+        self.face_left = face_left_id
+        self.face_right = face_right_id
         self.tint_back = tint_back
         self.tint_front = tint_front
         self.tint_top = tint_top
@@ -65,80 +59,67 @@ class BlockRenderData:
         self.tint_right = tint_right
         self.shape = shape
 
-def create_block_render_data(texture_name_to_id, face_back_name, face_front_name, face_top_name, face_bottom_name, face_left_name, face_right_name,
-                             tint_back=None, tint_front=None, tint_top=None, tint_bottom=None, tint_left=None, tint_right=None, shape=None):
+def create_block_render_data(face_names, tint_vectors, shape, texture_id_map):
     """
-    Creates a BlockRenderData instance.
-    Tints default to white (1, 1, 1) if not provided.
+    Creates a BlockRenderData instance from face names and tints.
+    face_names: dict mapping 'Back', 'Front', etc. to string texture names.
+    tint_vectors: dict mapping 'Back', 'Front', etc. to Vector3 (default White if not provided).
+    shape: IShape reference.
+    texture_id_map: dict mapping texture name string to int ID.
     """
-    white = Vector3(1, 1, 1)
+    white = Vector3(1.0, 1.0, 1.0)
     
-    face_back_id = texture_name_to_id[face_back_name]
-    face_front_id = texture_name_to_id[face_front_name]
-    face_top_id = texture_name_to_id[face_top_name]
-    face_bottom_id = texture_name_to_id[face_bottom_name]
-    face_left_id = texture_name_to_id[face_left_name]
-    face_right_id = texture_name_to_id[face_right_name]
+    # Resolve texture IDs
+    face_back_id = texture_id_map[face_names['Back']]
+    face_front_id = texture_id_map[face_names['Front']]
+    face_top_id = texture_id_map[face_names['Top']]
+    face_bottom_id = texture_id_map[face_names['Bottom']]
+    face_left_id = texture_id_map[face_names['Left']]
+    face_right_id = texture_id_map[face_names['Right']]
     
-    if tint_back is None: tint_back = white
-    if tint_front is None: tint_front = white
-    if tint_top is None: tint_top = white
-    if tint_bottom is None: tint_bottom = white
-    if tint_left is None: tint_left = white
-    if tint_right is None: tint_right = white
+    # Handle tints: default to white if not provided, then mix
+    tint_back = tint_vectors.get('Back', white)
+    tint_front = tint_vectors.get('Front', white)
+    tint_top = tint_vectors.get('Top', white)
+    tint_bottom = tint_vectors.get('Bottom', white)
+    tint_left = tint_vectors.get('Left', white)
+    tint_right = tint_vectors.get('Right', white)
     
-    return BlockRenderData(face_back_id, face_front_id, face_top_id, face_bottom_id, face_left_id, face_right_id,
-                           tint_back, tint_front, tint_top, tint_bottom, tint_left, tint_right, shape)
-
-def generate_instances(block_data, face_direction, external_tint=None):
-    """
-    Generates instance data for a specific face of a block.
-    """
-    # Fetch texture ID based on direction
-    if face_direction == Direction.BACK:
-        texture_id = block_data.face_back_id
-        base_tint = block_data.tint_back
-    elif face_direction == Direction.FRONT:
-        texture_id = block_data.face_front_id
-        base_tint = block_data.tint_front
-    elif face_direction == Direction.TOP:
-        texture_id = block_data.face_top_id
-        base_tint = block_data.tint_top
-    elif face_direction == Direction.BOTTOM:
-        texture_id = block_data.face_bottom_id
-        base_tint = block_data.tint_bottom
-    elif face_direction == Direction.LEFT:
-        texture_id = block_data.face_left_id
-        base_tint = block_data.tint_left
-    elif face_direction == Direction.RIGHT:
-        texture_id = block_data.face_right_id
-        base_tint = block_data.tint_right
-    else:
-        raise ValueError("Invalid face direction")
+    # Element-wise multiplication for mixing (assuming base tints are applied here or tint_vectors are final)
+    # Note: Source indicates mixing is element-wise multiplication [S1, unofficial]
+    # If base tints exist, they would be multiplied here. If not, tint_vectors are used directly.
     
-    # Mix tints
-    if external_tint is not None:
-        # Element-wise multiplication
-        final_tint = base_tint * external_tint
-    else:
-        final_tint = base_tint
-    
-    # Generate instance data using the shape
-    # The shape's Instance method is responsible for creating the actual GPU instance data
-    # based on the texture ID and tint.
-    instance_data = block_data.shape.generate_instance(texture_id, final_tint)
-    
-    return instance_data
+    return BlockRenderData(
+        face_back_id, face_front_id, face_top_id, face_bottom_id, face_left_id, face_right_id,
+        tint_back, tint_front, tint_top, tint_bottom, tint_left, tint_right,
+        shape
+    )
 ```
 
+### Parameters
+- **Default Tint**: `Vector3(1, 1, 1)` (White) [S1, unofficial].
+- **Direction Enum**: Used to switch between face types (Back, Front, Top, Bottom, Left, Right) [S1, unofficial].
+
+### Edge Cases and Pitfalls
+- **Missing Texture Names**: If a face name is not in `textureIDByName`, the lookup will fail. Ensure all face names are registered in the texture loader [S1, unofficial].
+- **Tint Defaulting**: If tints are not explicitly provided, they default to white, which results in no color modification [S1, unofficial].
+
+## Subtopics
+
+### Chunk Mesh Assembly
+Handles the low-level buffer allocation and vertex writing for the generated instances. [Chunk Mesh Assembly](4100-chunk-mesh-assembly.md)
+
+### Mesh Plugin Architecture
+Provides the interface for different mesh generation strategies. [Mesh Plugin Architecture](4921-mesh-plugin-architecture.md)
+
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per block face for data lookup and tint mixing. Instance generation is $O(1)$ per face if the shape's instance method is $O(1)$.
-*   **Memory Complexity:** $O(1)$ per block type for `BlockRenderData`. The instance data size scales with the number of visible faces.
-*   **Strengths:** Efficient GPU instancing allows drawing many blocks with different textures and tints in few draw calls. Clear separation of block metadata from geometry.
-*   **Limitations:** Requires a custom shader to handle instance data (texture IDs and tints). Not given in the sources.
+- **Time Complexity**: O(1) per block for data structure creation, assuming constant-time dictionary lookups.
+- **Memory Complexity**: O(1) per block for the `BlockRenderData` struct.
+- **Strengths**: Decouples block definition from mesh generation, allowing for flexible texture and tint configuration.
+- **Limitations**: Requires a texture ID map to be maintained and synchronized with the texture loader.
 
 ## Background
-This method is derived from the `Cubic-Grid_Voxel_Renderer` project by rarefushion [S1, unofficial]. It implements a specific approach to voxel rendering where block appearance is defined by a combination of texture IDs and per-face color tints, passed to the GPU via instancing.
+This method is derived from the `Cubic-Grid_Voxel_Renderer` project by rarefushion, which implements a block-based voxel rendering system. The `BlockRenderData` struct and its associated creation methods provide a structured way to define block appearance and geometry.
 
 ## Sources
 [S1] rarefushion/Cubic-Grid_Voxel_Renderer, https://github.com/rarefushion/Cubic-Grid_Voxel_Renderer, fetched 2026-10-27 (unofficial)

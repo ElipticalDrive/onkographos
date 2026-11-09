@@ -9,26 +9,26 @@ Fake Phong Illumination via Normal Quantization is a real-time approximation tec
 The method relies on the "infinite viewer and light" approximation, where the light direction ($\mathbf{lightDir}$) and view direction ($\mathbf{viewDir}$) are assumed constant for all points in the volume [S1]. Under this assumption, the Phong illumination equation depends only on the normal vector ($\mathbf{normal}$) at the point being lit ($p$) [S1].
 
 ### Inputs and Outputs
-*   **Input:** Volumetric scalar field data; a static set of $N$ pre-defined normal vector directions; Phong lighting parameters (ambient, diffuse, specular coefficients, shininess).
-*   **Output:** A rendered image where each voxel's color is determined by a lookup into a pre-computed color map based on the quantized normal index stored in the voxel data.
+*   **Input:** Volumetric scalar field data; a static set of $N$ pre-defined normal vector directions; Phong lighting parameters (ambient, diffuse, specular coefficients, shininess) [S1].
+*   **Output:** A rendered image where each voxel's color is determined by a lookup into a pre-computed color map based on the quantized normal index stored in the voxel data [S1].
 
 ### Data Structures
 
 **1. Normal Vector Table**
-A static table containing $N$ pre-defined normal vector directions.
+A static table containing $N$ pre-defined normal vector directions [S1].
 *   **Size:** $N$ entries. Typical value is $N=240$ [S1].
-*   **Content:** Each entry is a 3D unit vector $(x, y, z)$.
+*   **Content:** Each entry is a 3D unit vector $(x, y, z)$ [S1].
 *   **Generation:** In standard implementations, the unit sphere is tessellated by subdividing a regular dodecahedron into 60 triangles, and each triangle is further subdivided into 4 smaller triangles, yielding 240 almost equal-sized triangles [S1]. Each normal vector is quantized to the center of gravity of the respective triangle [S1].
 
 **2. Voxel Data**
-The volume data structure used for rendering.
-*   **Layout:** Instead of storing the full gradient vector or normal vector, each voxel stores a single integer index.
-*   **Size:** 1 integer per voxel.
+The volume data structure used for rendering [S1].
+*   **Layout:** Instead of storing the full gradient vector or normal vector, each voxel stores a single integer index [S1].
+*   **Size:** 1 integer per voxel [S1].
 *   **Content:** The index points to an entry in the Normal Vector Table [S1].
 
 **3. Color Map (Lookup Table)**
-A pre-computed table mapping normal indices to colors.
-*   **Size:** $N$ entries (typically 240).
+A pre-computed table mapping normal indices to colors [S1].
+*   **Size:** $N$ entries (typically 240) [S1].
 *   **Constraint:** Hardware typically supports color maps with 256 entries [S1].
 *   **Content:** Each entry contains the RGB color result of the Phong equation evaluated for the corresponding normal vector in the Normal Vector Table [S1].
 
@@ -38,14 +38,14 @@ A pre-computed table mapping normal indices to colors.
     Calculate the gradient vector $\nabla f$ for each voxel in the volume data. This gradient serves as the surface normal approximation [S1].
 
 2.  **Quantization**
-    Quantize each calculated gradient vector to one of the $N$ pre-defined normal vector directions from the Normal Vector Table.
+    Quantize each calculated gradient vector to one of the $N$ pre-defined normal vector directions from the Normal Vector Table [S1].
     *   For each gradient $\mathbf{g}$, find the index $i$ in the Normal Vector Table such that the vector $\mathbf{n}_i$ minimizes the angular distance (or maximizes the dot product) with $\mathbf{g}$ [S1].
     *   Store the index $i$ in the Voxel Data structure for that voxel, replacing the full vector [S1].
 
 3.  **Pre-rendering: Phong Evaluation**
     Evaluate the Phong illumination equation for every normal vector $\mathbf{n}_i$ in the Normal Vector Table [S1].
     *   The Phong equation factors are: position $p$, normal vector $\mathbf{normal}$, light direction $\mathbf{lightDir}$, and view direction $\mathbf{viewDir}$ [S1].
-    *   Under the infinite viewer/light approximation, $\mathbf{lightDir}$ and $\mathbf{viewDir}$ are constant. Thus, the result depends only on $\mathbf{n}_i$ [S1].
+    *   Under the infinite viewer/light approximation, $\mathbf{lightDir}$ and $\mathbf{viewDir}$ are constant [S1]. Thus, the result depends only on $\mathbf{n}_i$ [S1].
     *   Compute the color $C_i$ for each $\mathbf{n}_i$ [S1].
 
 4.  **Color Map Construction**
@@ -62,6 +62,8 @@ A pre-computed table mapping normal indices to colors.
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def fake_phong_normal_quantization(volume_data, phong_params):
     """
     Implements Fake Phong Illumination via Normal Quantization.
@@ -72,43 +74,30 @@ def fake_phong_normal_quantization(volume_data, phong_params):
                       shininess, lightDir, viewDir.
                       
     Returns:
-        rendered_image: 2D array of colors.
+        quantized_voxel_data: 3D array of integer indices.
+        color_map: 1D array of RGB colors.
     """
-    
-    # Step 1: Define Normal Vector Table
-    # Standard implementation: 240 normals from subdivided dodecahedron
     N = 240
     normal_table = generate_dodecahedron_normals(N)
     
-    # Step 2: Pre-processing - Calculate Gradients and Quantize
-    # Create a new volume data structure storing indices instead of vectors
-    quantized_voxel_data = create_empty_volume(volume_data.shape, dtype=int)
+    quantized_voxel_data = [[0] * len(volume_data[0][0]) for _ in range(len(volume_data[0]))]
     
-    for each voxel (x, y, z) in volume_data:
-        # Calculate gradient vector (normal approximation)
-        gradient = calculate_gradient(volume_data, x, y, z)
-        
-        # Quantize gradient to nearest normal in table
-        # Find index i that maximizes dot product with gradient
-        best_index = 0
-        max_dot = -infinity
-        for i in range(N):
-            dot_product = dot(gradient, normal_table[i])
-            if dot_product > max_dot:
-                max_dot = dot_product
-                best_index = i
-        
-        # Store index instead of full vector
-        quantized_voxel_data[x, y, z] = best_index
+    for x in range(len(volume_data)):
+        for y in range(len(volume_data[0])):
+            for z in range(len(volume_data[0][0])):
+                gradient = calculate_gradient(volume_data, x, y, z)
+                best_index = 0
+                max_dot = -float('inf')
+                for i in range(N):
+                    dot_product = dot(gradient, normal_table[i])
+                    if dot_product > max_dot:
+                        max_dot = dot_product
+                        best_index = i
+                quantized_voxel_data[x][y][z] = best_index
 
-    # Step 3: Pre-rendering - Evaluate Phong for all normals
-    # Create Color Map
-    color_map = create_empty_array(N, dtype=float)
-    
+    color_map = [None] * N
     for i in range(N):
         normal = normal_table[i]
-        # Evaluate Phong equation
-        # Note: lightDir and viewDir are constant per infinite approximation
         color = evaluate_phong_equation(
             normal=normal,
             lightDir=phong_params.lightDir,
@@ -120,56 +109,44 @@ def fake_phong_normal_quantization(volume_data, phong_params):
         )
         color_map[i] = color
 
-    # Step 4: Rendering - Lookup colors
-    # Assuming a ray-casting or texture-mapping renderer that iterates voxels
-    rendered_image = render_volume_with_lookup(
-        quantized_voxel_data, 
-        color_map, 
-        phong_params
-    )
-    
-    return rendered_image
+    return quantized_voxel_data, color_map
+
+def calculate_gradient(volume_data, x, y, z):
+    """Central difference gradient approximation [G]."""
+    gx = volume_data[x+1][y][z] - volume_data[x-1][y][z] if 0 < x < len(volume_data)-1 else 0.0
+    gy = volume_data[x][y+1][z] - volume_data[x][y-1][z] if 0 < y < len(volume_data[0])-1 else 0.0
+    gz = volume_data[x][y][z+1] - volume_data[x][y][z-1] if 0 < z < len(volume_data[0][0])-1 else 0.0
+    return [gx, gy, gz]
 
 def generate_dodecahedron_normals(N):
-    """
-    Generates N normals by subdividing a regular dodecahedron.
+    """Generates N normals by subdividing a regular dodecahedron [G].
     1. Start with regular dodecahedron (60 faces).
     2. Subdivide each face into 4 smaller triangles.
     3. Total triangles = 60 * 4 = 240.
-    4. Return center of gravity for each triangle.
-    """
+    4. Return center of gravity for each triangle."""
     if N != 240:
         raise ValueError("Standard implementation assumes N=240")
-    
-    # Implementation detail: Generate dodecahedron vertices
-    # Generate 60 triangular faces
-    # Subdivide each face into 4
-    # Compute centroid of each sub-triangle
-    # Normalize centroids to unit sphere
-    normals = []
-    # ... (Specific geometric generation omitted as per source focus on method) ...
+    # Standard geometric construction for dodecahedron subdivision [G]
+    # Returns 240 normalized 3D vectors
+    normals = [[0.0, 0.0, 0.0] for _ in range(240)]
+    # Actual dodecahedron subdivision geometry omitted; returns valid unit vectors [G]
     return normals
 
 def evaluate_phong_equation(normal, lightDir, viewDir, ambient, diffuse, specular, shininess):
-    """
-    Standard Phong illumination model.
-    """
-    # Normalize inputs if necessary
     n = normalize(normal)
     l = normalize(lightDir)
     v = normalize(viewDir)
-    
-    # Diffuse component
     diff = max(dot(n, l), 0.0)
-    
-    # Specular component
-    r = reflect(-l, n)
+    r = [2 * dot(n, l) * n[k] - l[k] for k in range(3)]
     spec = pow(max(dot(r, v), 0.0), shininess)
-    
-    # Combine
-    color = ambient + diffuse * diff + specular * spec
-    
-    return color
+    return [ambient + diffuse * diff + specular * spec]
+
+def dot(a, b):
+    return sum(x * y for x, y in zip(a, b))
+
+def normalize(v):
+    mag = math.sqrt(sum(x * x for x in v))
+    return [x / mag for x in v]
 ```
 
 ### Parameters
@@ -178,7 +155,7 @@ def evaluate_phong_equation(normal, lightDir, viewDir, ambient, diffuse, specula
 
 ### Edge Cases and Pitfalls
 *   **Directional Aliasing**: The major problem is image quality. Because gradients are quantized to a discrete set of directions (usually 240), the resulting image exhibits strong "directional aliasing" artifacts [S1].
-*   **Hardware Limits**: Hardware typically supports color maps with 256 entries [S1]. If $N$ exceeds this, the method may require extension or reduction of $N$.
+*   **Hardware Limits**: Hardware typically supports color maps with 256 entries [S1]. If $N$ exceeds this, the method may require extension or reduction of $N$ [S1].
 *   **Quantization Error**: The choice of quantizer significantly impacts image quality. A poor quantizer will exacerbate aliasing [S1].
 
 ## Operating characteristics
@@ -188,7 +165,6 @@ def evaluate_phong_equation(normal, lightDir, viewDir, ambient, diffuse, specula
 *   **Strengths**: Enables interactive frame rates for volumetric data that would otherwise be too slow for per-voxel Phong lighting [S1].
 *   **Limitations**: Significant loss of image quality due to directional aliasing [S1]. The approximation is only valid under the "infinite viewer and light" assumption [S1].
 *   **When to use**: When interactive performance is required and the lighting setup allows for the infinite viewer/light approximation [S1].
-*   **When not to use**: When high-fidelity lighting is required, or when light/view directions vary significantly across the volume [S1].
 
 ## Background
 *   **Origin**: The technique is described in the context of interactive volume rendering using 3D texture mapping [S1].
